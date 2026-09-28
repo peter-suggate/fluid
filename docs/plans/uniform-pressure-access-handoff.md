@@ -23,8 +23,8 @@ Own these files and their pressure-specific tests:
 - `lib/methods/uniform/uniform-mixed-pressure-stage.ts`
 - `lib/methods/uniform/uniform-mixed-pressure-records.wgsl.ts`
 - Related pressure operator, reconstruction, and cycle modules as necessary.
-- `tests/helpers/uniform-mixed-pressure.ts`
-- `tests/uniform-mixed-pressure-surface-cycle-dawn.test.ts`
+- `tests/helpers/uniform-mixed-pressure.ts` (deleted in 8a80095f)
+- `tests/uniform-mixed-pressure-surface-cycle-dawn.test.ts` (deleted in 8a80095f)
 
 Coordinate changes to ownership buffer methods in `uniform-mixed-ownership.ts`: pressure records/worklists live there, but the file is shared infrastructure. Keep field layout and public pressure-stage interfaces stable where possible.
 
@@ -92,6 +92,7 @@ Run from `/Users/petersuggate/code/me/fluid`. Coordinate GPU windows with the or
 Pressure correctness:
 
 ```bash
+# Deleted in 8a80095f: uniform-mixed-pressure-surface-cycle-dawn.test.ts
 WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-mixed-pressure-surface-cycle-dawn.test.ts
 ```
 
@@ -130,7 +131,7 @@ The restored original pressure path matches the frozen original solver: all-fine
 
 Restored-path mini64 pass profiling, frames 9–32, gives median all-fine wall/GPU 19.693/12.812 ms and one-tile 23.966/15.991 ms. Both arms have twenty two-cycle and four three-cycle frames. Median V-cycle cost rises 2.818 → 3.375 ms (+0.557 ms). Other increases include rowsDivide +0.393 ms, momentum +0.295 ms, surface advect +0.197 ms, redistance +0.164 ms; the penalty is not confined to pressure. Separate uninstrumented ABBA windows show ratios 1.228, 1.195, 1.282, 1.171, so the 2% target remains unmet. Durable raw captures: `docs/benchmarks/uniform-original-pressure-one-tile-{2026-09-27,profile-2026-09-27}.json`.
 
-An independent pressure-geometry experiment resolved phi once in pressure ownership and then used the resolved geometry sampler. It preserved geometry bit-for-bit across seam/island fixtures and fixed-scene front measurements, but did not demonstrate whole-frame improvement (ABBA ratios 1.257, 1.251, 1.269, 1.189). Its live integration was removed; the equivalence check remains in the vertex-transfer test.
+An independent pressure-geometry experiment resolved phi once in pressure ownership and then used the resolved geometry sampler. It preserved geometry bit-for-bit across seam/island fixtures and fixed-scene front measurements, but did not demonstrate whole-frame improvement (ABBA ratios 1.257, 1.251, 1.269, 1.189). Its live integration was removed; the equivalence check lived in the vertex-transfer test (deleted in 8a80095f; the orphaned `uniform-mixed-vertex-transfer.ts` module was removed afterwards).
 
 The complete restored-pressure dynamic front diagnostic now reaches indices 88/174 at frames 10/20, with advancing-strip volumes 8.981445/575.377191. It fails the frame-10 strip lower bound and the frame-20 front bound. These replace the earlier graph-era dynamic reference; no fine-band widening is enabled.
 

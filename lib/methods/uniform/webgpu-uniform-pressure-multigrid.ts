@@ -1269,7 +1269,7 @@ export class WebGPUUniformPressureMultigrid {
     };
     if (continuationLevel !== undefined) {
       for(let i=0;i<result.length;i++)result[i]={...result[i]!,continuationSetup:true};
-      // The mixed h/2h traversal supplies this level's phi, topology, RHS,
+      // The mixed pressure traversal supplies this level's phi, topology, RHS,
       // minimum and zero correction pressure. Continue the requested traversal
       // below 4h, then return its correction in a stable slot. No finest
       // setup, acceptance state or full-cycle backup is touched here.

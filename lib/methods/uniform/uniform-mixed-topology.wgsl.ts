@@ -5,14 +5,15 @@ import type { UniformMixedLayout } from "./uniform-mixed-layout";
 
 /** Regular tiers with at most this many tiles join the fused interface launch. */
 export const UNIFORM_MIXED_FUSED_REGULAR_TILES=64;
-/** Regular 2h/4h tiers with at most this many owners (256 groups) are
+/** Regular coarse tiers (4h; the tier-1 slot is empty, reserved) with at most this many owners (256 groups) are
  * launch-bound: they ride another launch as packed lanes (umRegularCoarseOwner)
  * instead of a width-specialized launch of their own. */
 export const UNIFORM_MIXED_PACKED_REGULAR_OWNERS=16384;
 
-/** One packed topology buffer: tile records, h/2h/4h worklists, then frozen stencil masks.
- * Ownership and tracing share this ABI. A 64-lane group visits one h tile,
- * eight 2h tiles, or 64 coarse tiles; coarse dispatch never pays 63 idle lanes.
+/** One packed topology buffer: tile records, h/tier-1/4h worklists, then frozen stencil masks.
+ * Ownership and tracing share this ABI; the tier-1 worklist is empty (reserved).
+ * A 64-lane group visits one h tile or 64 coarse tiles; coarse dispatch never
+ * pays 63 idle lanes.
  */
 export function uniformMixedTopologyWGSL(layout: UniformMixedLayout, group: number, prefix = ""): string {
   if (prefix && !/^[a-zA-Z][a-zA-Z0-9]*$/.test(prefix)) throw new Error("Invalid mixed topology namespace");
@@ -49,8 +50,8 @@ fn umAllOwner(gid:vec3u)->UMOwner {
  let cells=64u/(width*width*width);let tile=umTopology[UM_TILES+offset+local/cells];let lane=local%cells;
  return UMOwner(tile,lane,width,(umTopology[tile]&0x3fffffffu)+lane);
 }
-// Slot s of the regular 2h owners (eight per tile), then the regular 4h
-// owners: tiles whose 3x3x3 stencil has one width, listed by the ownership.
+// Slot s of the regular tier-1 owners (the empty, reserved slot; eight per
+// tile), then the regular 4h owners: tiles whose 3x3x3 stencil has one width, listed by the ownership.
 fn umRegularCoarseOwner(slot:u32)->UMOwner {
  let base=8u*UM_TILES+20u;let twos=umSupport[base];
  if(slot<8u*twos){let tile=umSupport[base+4u+slot/8u];let lane=slot%8u;return UMOwner(tile,lane,2u,(umTopology[tile]&0x3fffffffu)+lane);}
@@ -120,7 +121,7 @@ fn umFusedOwner(group:vec3u,lane:u32,regular:bool)->UMOwner {
  return UMOwner(tile,lane,width,(umTopology[tile]&0x3fffffffu)+lane);
 }
 // One workgroup per tile. Merged launches take the certificate's general h
-// list, then every seam 2h and seam 4h tile, so their serial latencies overlap
+// list, then every seam tier-1 (empty, reserved) and seam 4h tile, so their serial latencies overlap
 // instead of paying three dependent launches; otherwise the umCellWidth tier.
 // Jobs from umMergedTileJobs() on pack 64 regular coarse owners each
 // (umRegularCoarseOwner), one lane per owner as regular fine work runs.

@@ -109,7 +109,7 @@ export class UniformMixedTransportStage {
     if (!pipelines) throw new Error("Mixed transport has not been initialized");
     const pass = this.begin(encoder, entry, entry === "restrictVolume" || entry === "copyVolume" ? this.restrictGroup : this.transportGroup);
     const list = liveList[entry];
-    // The ungraded h/4h layout's 2h live lists are always empty; each empty
+    // The ungraded h/4h layout's tier-1 live lists are empty (reserved); each empty
     // indirect launch still costs ~12 us, so tier 1 is never launched.
     if (list) for (const tier of [0, 2] as const) {
       const coarse=tier===2?this.coarseRows.get(entry):undefined;

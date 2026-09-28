@@ -7,11 +7,6 @@ export function uniformMixedPressureOperatorSource(surface = false, boundary = f
   /** Caller defines umPressureRegularV(owner,axis,sign), the CM11a dual-cell V of a regular face. */
   solid = false): string { return /* wgsl */ `
 fn umPressureSum6(v:array<f32,6>)->f32{return ((v[0]+v[1])+(v[4]+v[5]))+(v[2]+v[3]);}
-fn umPressureColour(owner:UMOwner)->u32 {
- let q=umOrigin(owner)/owner.width;
- let tier=select(select(0u,2u,owner.width==2u),4u,owner.width==4u);
- return tier+((q.x+q.y+q.z)&1u);
-}
 fn umPressureFaceAreaOverVolume(owner:UMOwner,face:UMFace)->f32 {
  return f32(face.width*face.width)/(f32(owner.width*owner.width*owner.width)*UM_H[face.axis]);
 }

@@ -25,10 +25,10 @@ same fixed budget:
 
 User decision: gates are native-relative. The original absolute limits bind
 wherever native meets them; otherwise mixed must not be worse than native.
-`tests/uniform-mixed-pressure-cycle-dawn.test.ts` runs an all-fine arm through
+`tests/uniform-mixed-pressure-cycle-dawn.test.ts` (deleted in 8a80095f) runs an all-fine arm through
 the same harness for the hydrostatic field, with a stated 5% allowance for
 native's coarse-stop noise; the face-indexed random field keeps absolute limits.
-`tests/uniform-mixed-pressure-continuation-dawn.test.ts` runs mixed and all-fine
+`tests/uniform-mixed-pressure-continuation-dawn.test.ts` (deleted in 8a80095f) runs mixed and all-fine
 ownership, pins all-fine to a real native h/4 host (drift < 1e-4), then gates
 mixed against it. The surface-cycle suite now requests the fluid device limits;
 it had failed at pipeline creation, not numerically. Cycle 26/0, surface cycle
@@ -126,7 +126,7 @@ No simulation fields are allocated. The existing accounting/receipt buffers
 increase by 64 bytes in total, and frame receipts report owner counts and
 physical discarded mass in native quantized units.
 
-`tests/uniform-mixed-cleanup-dawn.test.ts` passes fine/coarse/mixed checks against
+`tests/uniform-mixed-cleanup-dawn.test.ts` (deleted in 8a80095f) passes fine/coarse/mixed checks against
 an independent box-overlap oracle, including disabled cleanup, negative dust,
 surface protection, dilute orphans, dense evidence, clusters, threshold equality
 and physical mass-counter quantization. The evolved five-frame remap fixture
@@ -229,7 +229,7 @@ native implementation. The optimizations below are not speculative additions.
 | Cached cell/face geometry through eight sharpening sweeps | `uniform-volume.wgsl.ts`: `uvCacheSharpenCells`, `uvCacheSharpenFaces`; host `encodeGeometricVolume` | Refresh budgets as V changes; reuse geometry while phi is unchanged. Preserve zero-flux skips and the existing planar scratch layout where applicable. |
 | Bounded surface work and retirement of obsolete support | `uniform-volume.wgsl.ts`: `uvPhiFarAir`, `uvNoNearbySurface`, `uvOrphanDust`; surface-volume support windows | Dust accounting and phi retirement help make work genuinely disappear. They are part of the default workload, not optional benchmark cosmetics. |
 | Specialized regular indexing, cached coefficients, shared scratch and batched passes | native shader specialization, pressure multigrid and `uniform-scratch-arena.ts` | Preserve cheap regular stencils and lifetime reuse. General topology reconstruction must not become the price of every texture tap. |
-| Adaptive accepted pressure continuation | `uniform-pressure-continuation.ts`, host adaptive pressure loop | Preserve cycle choice and coarse accuracy; the latest mixed contract removes rollback/recovery and fails closed. Native already reads current-frame receipts; eliminating every receipt is not the missing architecture. |
+| Adaptive accepted pressure continuation | `uniform-pressure-continuation.ts` (deleted in 8a80095f), host adaptive pressure loop | Preserve cycle choice and coarse accuracy; the latest mixed contract removes rollback/recovery and fails closed. Native already reads current-frame receipts; eliminating every receipt is not the missing architecture. |
 
 Historical evidence supports these mechanisms, without predicting a mixed
 speedup: the sharpening report records proposal time falling 3.47 → 1.34 ms;
@@ -463,7 +463,7 @@ Type checks have no Uniform errors but still fail in Sparse/SVO test/tool files.
 Remaining release blockers include embedded-solid/terrain/body coupling,
 strict pressure convergence, live browser interaction verification, and the
 98%/50:50 performance gates. Do not describe this as production complete.
-`tools/benchmark-uniform-mixed-production-dawn.ts` provides default-cleanup,
+`tools/benchmark-uniform-mixed-production-dawn.ts` (deleted in 8a80095f) provides default-cleanup,
 ABBA-ordered, accepted-completion timing for fine, one-air-tile and half-domain
 ownership; normal runs assert the original targets, `--diagnostic` reports
 failures without claiming acceptance. Rendering time is explicitly excluded.
@@ -565,6 +565,6 @@ Open gaps:
 
 Regression, run serially after the change: all 27 other
 `tests/uniform-mixed-*-dawn.test.ts` files and
-`tests/uniform-geometric-seam-dawn.test.ts` pass (28 files, 0 failures). Type
+`tests/uniform-geometric-seam-dawn.test.ts` (deleted in 8a80095f) pass (28 files, 0 failures). Type
 checking reports no Uniform errors. The Sparse CM12 gate was not run: nothing
 under Sparse, sparse topology or presentation changed.

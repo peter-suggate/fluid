@@ -3,9 +3,9 @@ import type {UniformMixedBuiltOwnership,UniformMixedOwnership} from "./uniform-m
 
 const BLOCK=256;
 const RECEIPT=16;
-/** Scan categories: fine, 2h, 4h tiles; coarse owners (8 per 2h tile, 1 per
- * 4h tile); seam h/2h/4h tiles; regular 2h/4h tiles. */
-const CATEGORIES=9;
+/** Scan categories: h tiles, 4h tiles (one coarse owner each), seam h and 4h
+ * tiles, regular 4h tiles. The simulation layout is ungraded h/4h. */
+const CATEGORIES=5;
 
 /** Where the fine band lives: one bit per tile from `wordOffset` words into `buffer`. */
 export interface UniformMixedBandBits {readonly buffer:GPUBuffer;readonly wordOffset:number}
@@ -13,7 +13,7 @@ export interface UniformMixedBandBits {readonly buffer:GPUBuffer;readonly wordOf
 export interface UniformMixedBuiltLevel extends UniformMixedBuiltOwnership {
  /** Tiles whose width differs from the ownership this level was built against. */
  readonly changedTiles:number;
- /** h, 2h and 4h tile counts from the receipt (2h is always zero). */
+ /** h, tier-1 and 4h tile counts from the receipt (the tier-1 slot is empty, reserved). */
  readonly tierCounts:readonly [number,number,number];
 }
 
@@ -95,7 +95,7 @@ fn key(p:vec3u)->u32{return p.x+T.x*(p.y+T.y*p.z);}
 fn inside(q:vec3i)->bool{return all(q>=vec3i(0))&&all(q<vec3i(T));}
 const WORDS:u32=${Math.ceil(n/32)}u;
 fn fineAt(t:u32)->bool{return ((((band[params.bandOffset+t/32u]&~statics[WORDS+t/32u])|statics[t/32u])>>(t%32u))&1u)!=0u;}
-fn wordWidth(word:u32)->u32{if((word&0x80000000u)!=0u){return 1u;}if((word&0x40000000u)!=0u){return 2u;}return 4u;}
+fn wordWidth(word:u32)->u32{return select(4u,1u,(word&0x80000000u)!=0u);}
 fn widthAt(t:u32)->u32{return atomicLoad(&work[FLAGS+t])&7u;}
 // Width: h for the band and static tiles, else 4h (ungraded).
 @compute @workgroup_size(64) fn widths(@builtin(global_invocation_id) gid:vec3u){
@@ -107,10 +107,8 @@ fn widthAt(t:u32)->u32{return atomicLoad(&work[FLAGS+t])&7u;}
 var<workgroup> blockTotals:array<atomic<u32>,${CATEGORIES}>;
 fn categories(w:u32,regular:bool)->array<u32,${CATEGORIES}>{
  var c:array<u32,${CATEGORIES}>;
- c[0]=select(0u,1u,w==1u);c[1]=select(0u,1u,w==2u);c[2]=select(0u,1u,w==4u);
- c[3]=select(select(0u,1u,w==4u),8u,w==2u);
- c[4]=select(0u,c[0],!regular);c[5]=select(0u,c[1],!regular);c[6]=select(0u,c[2],!regular);
- c[7]=select(0u,c[1],regular);c[8]=select(0u,c[2],regular);
+ c[0]=select(0u,1u,w==1u);c[1]=select(0u,1u,w==4u);
+ c[2]=select(0u,c[0],!regular);c[3]=select(0u,c[1],!regular);c[4]=select(0u,c[1],regular);
  return c;
 }
 // Frozen 3x3x3 stencil masks and per-block category totals.
@@ -120,14 +118,13 @@ fn categories(w:u32,regular:bool)->array<u32,${CATEGORIES}>{
  let t=group.x*${BLOCK}u+lane;
  if(t<N){
   let w=widthAt(t);let p=vec3i(coord(t));
-  var maximum=w;var minimum=w;var fine=0u;var two=0u;
+  var maximum=w;var minimum=w;var fine=0u;
   for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
    let q=p+vec3i(x,y,z);if(!inside(q)){continue;}
    let v=widthAt(key(vec3u(q)));maximum=max(maximum,v);minimum=min(minimum,v);
-   let bit=1u<<u32((x+1)+3*((y+1)+3*(z+1)));
-   if(v==1u){fine|=bit;}else if(v==2u){two|=bit;}
+   if(v==1u){fine|=1u<<u32((x+1)+3*((y+1)+3*(z+1)));}
   }}}
-  topology[2u*N+2u*t]=fine|(maximum<<27u);topology[2u*N+2u*t+1u]=two|(minimum<<27u);
+  topology[2u*N+2u*t]=fine|(maximum<<27u);topology[2u*N+2u*t+1u]=minimum<<27u;
   let regular=maximum==minimum;
   atomicStore(&work[FLAGS+t],w|select(0u,8u,regular));
   let c=categories(w,regular);
@@ -156,19 +153,21 @@ fn scanPartial(lane:u32){
   if(lane==${BLOCK-1}u){grand[k]=partial[lane];}
   workgroupBarrier();
  }
- if(lane<${CATEGORIES}u){atomicStore(&work[1u+lane],grand[lane]);}
  if(lane==0u){
-  let f=grand[0];let tt=grand[1];let c=grand[2];
-  // Counts, then the frame-plan header (update(): header[2], [8..10], [12..14]).
-  atomicStore(&work[12],f);atomicStore(&work[13],tt);atomicStore(&work[14],c);atomicStore(&work[15],8u);
-  let merged=f+grand[5]+grand[6]+(8u*grand[7]+grand[8]+63u)/64u;
+  let f=grand[0];let c=grand[1];
+  // Receipt: [1] h tiles, [3] 4h tiles, [5] seam h, [7] seam 4h; the tier-1
+  // words [2] and [6] are empty (reserved) and stay cleared.
+  atomicStore(&work[1],f);atomicStore(&work[3],c);atomicStore(&work[5],grand[2]);atomicStore(&work[7],grand[3]);
+  // Counts (tier-1 slot empty), then the frame-plan header (update(): header[2], [8..10], [12..14]).
+  atomicStore(&work[12],f);atomicStore(&work[13],0u);atomicStore(&work[14],c);atomicStore(&work[15],8u);
+  let merged=f+grand[3]+(grand[4]+63u)/64u;
   let h=4u*N;
   for(var i=0u;i<16u;i++){support[h+i]=0u;}
   support[h+2u]=f;
   support[h+8u]=min(f,X);support[h+9u]=(f+X-1u)/X;support[h+10u]=1u;
   support[h+12u]=min(merged,X);support[h+13u]=(merged+X-1u)/X;support[h+14u]=1u;
-  let seam=7u*N+16u;support[seam]=grand[4];support[seam+1u]=grand[5];support[seam+2u]=grand[6];support[seam+3u]=0u;
-  let regular=8u*N+20u;support[regular]=grand[7];support[regular+1u]=grand[8];support[regular+2u]=0u;support[regular+3u]=0u;
+  let seam=7u*N+16u;support[seam]=grand[2];support[seam+1u]=0u;support[seam+2u]=grand[3];support[seam+3u]=0u;
+  let regular=8u*N+20u;support[regular]=0u;support[regular+1u]=grand[4];support[regular+2u]=0u;support[regular+3u]=0u;
  }
 }
 // Owner numbering, worklists and the hanging slot table, in tile key order.
@@ -184,22 +183,19 @@ fn scanPartial(lane:u32){
   workgroupBarrier();
  }
  if(!valid){return;}
- let f=atomicLoad(&work[1]);let tt=atomicLoad(&work[2]);
- let seamF=atomicLoad(&work[5]);let seamT=atomicLoad(&work[6]);let seamC=atomicLoad(&work[7]);let regularT=atomicLoad(&work[8]);
+ let f=atomicLoad(&work[1]);
+ let seamF=atomicLoad(&work[5]);let seamC=atomicLoad(&work[7]);
  var slot=INF;
  if(w==1u){
   topology[t]=(rank[0]*64u)|0x80000000u;topology[N+rank[0]]=t;support[6u*N+16u+rank[0]]=t;
-  if(!regular){support[7u*N+20u+rank[4]]=t;slot=tt+rank[4];}
- }else if(w==2u){
-  topology[t]=(f*64u+rank[3])|0x40000000u;topology[N+f+rank[1]]=t;slot=rank[1];
-  if(regular){support[8u*N+24u+rank[7]]=t;}else{support[7u*N+20u+seamF+rank[5]]=t;}
+  if(!regular){support[7u*N+20u+rank[2]]=t;slot=rank[2];}
  }else{
-  topology[t]=f*64u+rank[3];topology[N+f+tt+rank[2]]=t;
-  if(regular){support[8u*N+24u+regularT+rank[8]]=t;}else{support[7u*N+20u+seamF+seamT+rank[6]]=t;slot=tt+seamF+rank[6];}
+  topology[t]=f*64u+rank[1];topology[N+f+rank[1]]=t;
+  if(regular){support[8u*N+24u+rank[4]]=t;}else{support[7u*N+20u+seamF+rank[3]]=t;slot=seamF+rank[3];}
  }
  slots[t]=slot;
  if(slot!=INF){slots[N+slot]=t;}
- if(t>=tt+seamF+seamC){slots[N+t]=INF;}
+ if(t>=seamF+seamC){slots[N+t]=INF;}
 }
 // Exact chessboard distance to a non-h tile, separable: x, then y, then z.
 @compute @workgroup_size(64) fn distance0(@builtin(global_invocation_id) gid:vec3u){
@@ -260,10 +256,10 @@ fn scanPartial(lane:u32){
   const words=new Uint32Array(this.readback.getMappedRange()).slice();this.readback.unmap();
   const n=this.tiles,level=this.level,lattice=level.current.layout.lattice;
   const r=words.subarray(0,RECEIPT),tiles=words.slice(RECEIPT,RECEIPT+n);
-  if(r[1]!+r[2]!+r[3]!!==n||r[2]!!==0||r[4]!!==r[3]!)throw new Error(`Mixed layout builder receipt is inconsistent: ${[...r]}`);
+  if(r[1]!+r[3]!!==n)throw new Error(`Mixed layout builder receipt is inconsistent: ${[...r]}`);
   const layout=uniformMixedLayoutFromTiles(lattice,tiles,this.regions);
   if(layout.cellCount!==64*r[1]!+r[3]!)throw new Error("Mixed layout builder tile words disagree with its receipt");
-  return {changedTiles:r[0]!,tierCounts:[r[1]!,r[2]!,r[3]!],layout,seamCounts:[r[5]!,r[6]!,r[7]!],hangingSlots:r[5]!+r[7]!,
+  return {changedTiles:r[0]!,tierCounts:[r[1]!,0,r[3]!],layout,seamCounts:[r[5]!,0,r[7]!],hangingSlots:r[5]!+r[7]!,
    source:{topology:level.topology,support:level.support,slots:level.slots,counts:{buffer:level.work,offset:48}}};
  }
  destroy():void{

@@ -55,6 +55,7 @@ node --import tsx tools/probe-uniform-mixed-pressure-dawn.ts \
 Run production ABBA (native, mixed, mixed, native) with stage timestamps:
 
 ```sh
+# Deleted in 8a80095f: benchmark-uniform-mixed-production-dawn.ts
 node --import tsx tools/benchmark-uniform-mixed-production-dawn.ts \
   --mode=all --diagnostic --profile
 ```
@@ -64,14 +65,14 @@ limits without asserting them. It does not redefine acceptance.
 
 ## Correctness checks
 
-- `tests/uniform-mixed-extension-dawn.test.ts`: constant and varying supported
+- `tests/uniform-mixed-extension-dawn.test.ts` (deleted in 8a80095f): constant and varying supported
   velocity, live fine/mixed/coarse/fine layouts; specialized versus general
   dispatch must agree within the existing `1e-6` tolerance.
 - `tests/uniform-pressure-local-visit-dawn.test.ts`: run minidam64 through native,
   all-fine mixed and one-air-tile mixed layouts; substitute the previous texture
   visit at pipeline compilation and compare volume, velocity, vertex phi,
   negative boundary velocity and accepted residual exactly after four frames.
-- `tests/uniform-mixed-frame-dawn.test.ts`: complete-frame mass, remapping and
+- `tests/uniform-mixed-frame-dawn.test.ts` (deleted in 8a80095f): complete-frame mass, remapping and
   withholding velocity publication after failed pressure acceptance.
 
 All Dawn runs must hold the repository GPU lease and run without a browser

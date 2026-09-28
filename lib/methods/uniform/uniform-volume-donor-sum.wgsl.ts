@@ -15,7 +15,7 @@ export const uniformDonorLimbCells = (dims: readonly number[]): number =>
  * Six planar u32 limbs encode integer multiples of 2^-149. Each contribution
  * needs at most six native integer additions, with no compare/exchange retry.
  * Binding 11 is scratch in donor passes, rigid exchange in coupling passes.
- * Native weights are at most one; graded Uniform weights are at most 64.
+ * Native weights are at most one; mixed h/4h Uniform weights are at most 64.
  * Their total is bounded by finest-domain volume (plus initial self fallback),
  * which fits 192 bits at every supported index/arena size. Decode rounds once,
  * ties to even.

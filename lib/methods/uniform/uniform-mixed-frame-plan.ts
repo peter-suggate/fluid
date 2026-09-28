@@ -183,7 +183,7 @@ var<workgroup> certifyBases:array<u32,2>;
   let count=atomicLoad(&umSupport[4u*UM_TILES+list]);let base=4u*UM_TILES+list*4u;
   atomicStore(&umSupport[base],min(count,umDispatchX));atomicStore(&umSupport[base+1u],(count+umDispatchX-1u)/umDispatchX);atomicStore(&umSupport[base+2u],1u);
  }
- // umTileJobOwner's merged launch: general-h, seam 2h and seam 4h tiles,
+ // umTileJobOwner's merged launch: general-h and seam 4h tiles (the tier-1 seam list is empty),
  // then the packed regular coarse owner jobs.
  let coarse=8u*UM_TILES+20u;
  let packed=(8u*atomicLoad(&umSupport[coarse])+atomicLoad(&umSupport[coarse+1u])+63u)/64u;

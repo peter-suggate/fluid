@@ -28,14 +28,16 @@ This is a material compromise against the original request: **the default is coa
 
 ## How it differs from 2h seams
 
-| Aspect | Graded pressure option | Default: 4h + h band |
+The Graded pressure option (h → 2h → 4h) was retired in 8a80095f; the left column below is history, kept for comparison. The 4h + h band is the only mixed pressure path.
+
+| Aspect | Graded pressure (retired, history) | Current: 4h + h band |
 | --- | --- | --- |
 | Overall pressure calculation | One coupled mixed-resolution solve | Global 4h solve followed by a local h solve |
 | Transition | h → 2h → 4h pressure cells | No 2h pressure transition cells |
 | How fine and coarse communicate | Through connections inside the coupled solve | Coarse projected face flow becomes the fine band's boundary condition |
 | Moving pressure layout | Rebuild/adopt the graded layout, including a mid-frame CPU readback | Fixed coarse grid; build the band list and rows on the GPU |
 | Fine correction's influence | Part of the coupled answer | Does not feed back into a second global coarse solve in the same frame |
-| Static solids | Supported path | Not supported; automatically uses Graded |
+| Static solids | Supported path | Supported: the band carries its own solid certificate, and a failed certificate throws (no fallback) |
 
 There is still an interface between fine and coarse work. The default removes the **2h pressure seam machinery**, not the need to make fine and coarse answers agree. Bulk transport, surface sampling, and relayout still contain mixed-grid handling.
 
@@ -58,7 +60,7 @@ The fine band's air classification also follows the coarse solve's interpretatio
 | Setting | Current default/effective behavior |
 | --- | --- |
 | Coarsening | Dynamic |
-| Pressure solve | **4h + h band**; static-solid scenes use Graded |
+| Pressure solve | **4h + h band**, including static-solid scenes (band solid certificate; a failure throws). Graded was retired in 8a80095f |
 | Coarsening band reach / hysteresis | 0 / 0 |
 | Coarse surface tolerance / fast surface travel | UI values 0.5 / 4, but both effectively zero for dynamic band pressure: surface tiles stay fine |
 | Extended h surface velocity | UI default On, but bypassed for band pressure; applies to the Graded path |
@@ -79,13 +81,13 @@ Saved scene URLs and explicit parameters can override defaults. Select the press
 
 4. **Correct motion and the 1–2% timing target still need current evidence.** The earlier handoff's 76/149 dynamic front measurements belonged to the superseded overlay experiment. They must not be presented as current-default results. This documentation update runs no GPU tests and establishes no new pass or failure. Compare front position, water in the leading strips, wall behavior, conservation, and full-frame timing on the current code.
 
-5. **Scope and cost remain limited.** Static solids fall back to Graded. The local band has capacity for at most 8,192 tiles and throws on overflow. Fixed GPU dispatches avoid a band-list readback, but still do work; fine surface tiles, bulk relayout, global volume correction, and remaining mixed-grid operations also cost time. Removing 2h pressure seams does not by itself prove the one-tile penalty is gone.
+5. **Scope and cost remain limited.** Static solids no longer fall back to Graded (retired in 8a80095f); the band's solid certificate must hold or the frame throws. The local band has capacity for at most 8,192 tiles and throws on overflow. Fixed GPU dispatches avoid a band-list readback, but still do work; fine surface tiles, bulk relayout, global volume correction, and remaining mixed-grid operations also cost time. Removing 2h pressure seams does not by itself prove the one-tile penalty is gone.
 
 6. **The UI does not yet fully describe the effective algorithm.** The overlay switch can say On while being bypassed, and two coarsening settings are overridden in band mode. The grid overlay must be interpreted by stage: bulk ownership, global pressure, and the local pressure band are different grids.
 
 ## Next handoff
 
-First validate the current defaults as they stand, keeping the original acceptance bounds. Explicitly compare **band versus graded**, with all-fine bulk, the reported small coarse corner, and dynamic coarsening. Even all-fine *bulk* still uses a global 4h pressure stage when Band is selected, so label that control accurately. Do not mix pressure modes silently or use old overlay results as its baseline.
+First validate the current defaults as they stand, keeping the original acceptance bounds. (This originally asked for a **band versus graded** comparison; Graded was retired in 8a80095f, so compare against the dense/all-fine references instead.) Compare with all-fine bulk, the reported small coarse corner, and dynamic coarsening. Even all-fine *bulk* still uses a global 4h pressure stage when Band is selected, so label that control accurately. Do not mix pressure modes silently or use old overlay results as its baseline.
 
 Inspect both global and band residuals alongside the actual front and leading-strip water. Establish a proper acceptance policy for the final local correction. Then measure full-frame cost, including dynamic classification and remap. Keep GPU runs isolated from browser simulations and other Dawn processes.
 
@@ -94,11 +96,11 @@ The next architectural decision is whether this fine-surface-band compromise is 
 Source map for the next engineer:
 
 - `lib/methods/uniform/uniform-geometric-parameters.ts` and `uniform-geometric-options.ts`: UI defaults and option mapping.
-- `lib/methods/uniform/webgpu-uniform-reference.ts`: static-solid fallback and effective dynamic surface policy.
+- `lib/methods/uniform/webgpu-uniform-reference.ts`: effective dynamic surface policy (the static-solid Graded fallback was removed in 8a80095f).
 - `lib/methods/uniform/uniform-mixed-frame.ts`: two-stage ordering, overlay bypass, eight-sweep band setup, receipts and acceptance.
 - `lib/methods/uniform/uniform-pressure-band.ts`: band membership, open-air rules, prepared rows, coarse boundary fluxes, relaxation and projection.
 - `lib/methods/uniform/uniform-mixed-surface.ts`, `uniform-mixed-phi-resolve.ts`, and `uniform-mixed-remap.ts`: surface ownership and reconstruction.
-- `tools/probe-uniform-pressure-band-dawn.ts`: explicit band/graded scene probe, including band residual and front/strip measurements. A probe is not itself an acceptance gate.
+- `tools/probe-uniform-pressure-band-dawn.ts`: band scene probe (its graded arm is history), including band residual and front/strip measurements. A probe is not itself an acceptance gate.
 - `tests/uniform-long-dam-front-dawn.test.ts` and `tools/benchmark-uniform-bulk-surface-dawn.ts`: original scene bounds and full-frame performance checks; verify their effective options before attributing results to a mode.
 
 The older [surface-overlay handoff](uniform-h-surface-overlay-handoff.md) and [pressure-access handoff](uniform-pressure-access-handoff.md) remain experiment history. Their claims about live defaults are superseded by this document.

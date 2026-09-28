@@ -5,7 +5,7 @@
  * body terms are absent because rigid bodies are rejected by the host.
  * A frame compiles this library only for a scene with cut cells; otherwise
  * stages get inert stubs and keep their solid-free code, bit-identical.
- * Coarse (2h/4h) simulation owners never reach these helpers: promotion keeps
+ * Coarse (4h) simulation owners never reach these helpers: promotion keeps
  * them one full tile away from any cut cell. Band pressure's all-4h levels
  * read the static coarse record instead (see UniformMixedSolid.coarse). */
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";

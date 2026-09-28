@@ -1194,9 +1194,9 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   // lines further into the distance than the field views, where the grid is
   // only a reference frame and a bolder one would eat the content.
   let structureView = fieldMode == 0;
-  // The represented cell. Mixed Uniform owns h, 2h or 4h cells per 4^3 tile,
+  // The represented cell. Mixed Uniform owns h or 4h cells per 4^3 tile,
   // and each layer draws the cells of the stage that computed it: pressure
-  // on the graded layout the last solve ran on (the stage grids' snapshot),
+  // on the layout the last solve ran on (the stage grids' snapshot),
   // the level set and the surface velocity on the h lattice every vertex
   // lives on, and everything transported on the live bulk ownership the
   // fields are stored in. Everywhere else the represented cell is the fine cell.
@@ -1536,8 +1536,8 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       sampleDot = 0.0;
       // The finest lattice is drawn only where the sampler reads it. Outside a
       // fine tile the tile itself is the cell, so its boundary is the grid.
-      // Mixed ownership draws its own cells instead: 4x4 in h tiles, 2x2 in
-      // the 2h collar, and none in a 4h tile, which is one cell.
+      // Mixed ownership draws its own cells instead: 4x4 in h tiles and none
+      // in a 4h tile, which is one cell.
       lineStrength = select(select(0.0, 0.4, fine), select(0.0, 0.4, latticeWidth < 4.0), mixedLattice);
       // The tile lattice is the subject, cased like the structure view's cell
       // lattice. It holds until a tile is a few pixels across rather than a

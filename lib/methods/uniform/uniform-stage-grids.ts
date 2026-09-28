@@ -1,8 +1,8 @@
-/** Which h/2h/4h tiles each stage of the last frame actually ran on, for the
+/** Which h/4h tiles each stage of the last frame actually ran on, for the
  * grid overlay. The frame appends this record to its pressure-phi
  * presentation buffer, after the pressure phi, so no consumer needs another
- * binding. Tile words use the ownership encoding (bit 31 h, bit 30 2h, else
- * 4h; low 30 bits the tile's first owner index).
+ * binding. Tile words use the ownership encoding (bit 31 h, bit 30 the empty
+ * reserved tier-1 slot, else 4h; low 30 bits the tile's first owner index).
  *
  *   h band       two-stage pressure only (header word 4 = band tile
  *                capacity, else absent): one slot+1 word per tile, then

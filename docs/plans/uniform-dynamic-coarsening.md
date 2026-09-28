@@ -4,8 +4,9 @@
 
 Replace authored enforcement regions as the source of coarseness. Ownership
 follows the simulation state: tiles near the free surface stay fine (h), and
-submerged and far-air tiles become coarse (4h), with the existing 2h grading
-collar between them. This uses the same single mixed frame, the same
+submerged and far-air tiles become coarse (4h). (History: this originally kept
+the 2h grading collar between them; the simulation layout is now ungraded h/4h,
+and the 2h collar was retired in 8a80095f.) This uses the same single mixed frame, the same
 ownership ABI and the same remap. There is no second solver and no fallback
 path. Performance acceptance: on the 128³ high-resolution dam break, complete
 frame time beats all-fine at equal simulated duration, with physically
@@ -66,7 +67,8 @@ the fine mask differs from the previous one.
 - **Authored regions:** kept only as fine constraints. A region that caps
   cell size above h can no longer coarsen a surface tile, because the
   invariant wins. Region coarsening becomes redundant once dynamic mode is on.
-- **Submerged width:** 4h, with 2h only as the collar.
+- **Submerged width:** 4h. (History: 2h originally served as the collar; the
+  layout is now ungraded h/4h and the collar was retired in 8a80095f.)
 - **Mode switch:** runtime parameter `coarsening = regions | dynamic`, default
   `regions` until the lane passes. Then dynamic becomes the default and the
   region-coarsening path is retired, per the fail-fast / retire-legacy rule.
@@ -235,7 +237,7 @@ Incorporate its changes as they land:
     `UniformMixedRemap.applyBuilt` remaps in one encoder.
   - `uniformMixedLayoutFromTiles` gives the host an honest layout: worklists
     and stencils are derived from the tile words only on first host access.
-  - Dawn test `tests/uniform-mixed-layout-builder-dawn.test.ts`: every range
+  - Dawn test `tests/uniform-mixed-layout-builder-dawn.test.ts` (deleted in 8a80095f): every range
     `update()` writes, byte-compared against the builder, on 64×48×80 and
     256×128×160 lattices (the second needs a multi-chunk block scan). Also
     checks the lazy host arrays, changed-tile counts, and a rebuild after

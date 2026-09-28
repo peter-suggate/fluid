@@ -5,7 +5,7 @@ import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformMixedSolidWGSL } from "./uniform-mixed-solid.wgsl";
 
-/** Native-texture conservative transport on graded Uniform owners. With static
+/** Native-texture conservative transport on mixed h/4h Uniform owners. With static
  * solids (group 2), unit rows carry native cut-cell capacity: edge weights by
  * min(open), open row targets and fallbacks, and sealed cells keep their V. */
 export function uniformMixedTransportWGSL(layout: UniformMixedLayout,sources=false,solid=false): string {

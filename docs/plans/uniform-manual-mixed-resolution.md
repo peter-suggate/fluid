@@ -81,8 +81,9 @@ Each pressure interface then has at most four fine subfaces per coarse face,
 and the transition ratios match the existing hierarchy's 2x restriction steps.
 The planner packs the intermediate tier into the tile word with no extra array.
 
-Spatial grading alone does not bound a long backtrace: a 4h receiver may land
-beyond its 2h collar in h donors. Do not impose a fine-cell CFL timestep to hide
+(History: the 2h collar described in this section was retired in 8a80095f; the
+simulation layout is now ungraded h/4h.) Spatial grading alone does not bound a
+long backtrace: a 4h receiver may land beyond its 2h collar in h donors. Do not impose a fine-cell CFL timestep to hide
 this. Use a finite family of implicit fragment patterns. Choose a sampling width
 that resolves all owners intersected by the departure box, capped at receiver
 width. The required ratios are 1, 2, and 4, giving 8, 27, or 125 fragments.
@@ -124,7 +125,8 @@ It retains self fallback and excess volume without receiver-budget iteration.
 Tests compare both generic intersection rows and fixed patterns, on both uniform
 endpoints and graded/ungraded seams in all axes. They exercise large departure,
 anisotropic spacing, unsampled donors, retained excess, non-negativity, mass
-conservation, the 2h collar, forced-region conflicts, and the edge-arena bound.
+conservation, the 2h collar (history: retired in 8a80095f), forced-region
+conflicts, and the edge-arena bound.
 The variable-row calculation remains solely an independent correctness oracle.
 
 The stage borrows the native r32 volume textures and the existing edge/donor
@@ -192,6 +194,7 @@ these checks do not establish pressure/surface parity or active-mixed speedup.
 Run GPU jobs exclusively, with no browser simulation or second Dawn process.
 
 ```sh
+# Deleted in 8a80095f: uniform-geometric-seam-dawn.test.ts, uniform-geometric-seam.test.ts, uniform-mixed-layout.test.ts, uniform-mixed-native-transport-dawn.test.ts, uniform-native-stages-dawn.test.ts, uniform-runtime-coarse-dawn.test.ts
 node --import tsx --test tests/uniform-coarse-controls.test.ts tests/uniform-mixed-layout.test.ts tests/uniform-geometric-seam.test.ts tests/editor-voxel-region.test.ts tests/region-query-both-hosts.test.ts
 WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test tests/uniform-geometric-seam-dawn.test.ts
 WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test tests/uniform-mixed-native-transport-dawn.test.ts
@@ -551,7 +554,7 @@ accepted-iterate recovery, and active mixed performance validation also remain.
 A new isolated pressure-sweep probe measures fenced encoding/execution after
 warmup, with fresh ABCCBA fine/mixed/coarse instances. The mixed layout enforces
 h in one eighth of the volume, uses the strong 2h collar, and keeps the rest 4h.
-Run `node --import tsx tools/benchmark-uniform-mixed-pressure-dawn.ts --size=128`.
+Run `node --import tsx tools/benchmark-uniform-mixed-pressure-dawn.ts (deleted in 8a80095f) --size=128`.
 It acquires the repository GPU lease and does not construct the quadratic CPU
 face oracle. Both endpoints use the mixed pressure kernels, so this is an
 ownership-scaling diagnostic, not a native-fine or full-frame benchmark.
@@ -587,7 +590,7 @@ forcing the surface fine. Aligned faces retain the exact native theta formula,
 including the 0.05 minimum. Exact hydrostatic assertions exclude cases where
 that existing clamp intentionally moves the effective boundary.
 
-`tests/uniform-mixed-pressure-surface.test.ts` supplies exact affine slopes:
+`tests/uniform-mixed-pressure-surface.test.ts` (deleted in 8a80095f) supplies exact affine slopes:
 this proves the geometric correction only, not reconstruction or convergence.
 Both tests pass (`/tmp/fluid-mixed-pressure-surface.log`). Next, reconstruct
 liquid-side slopes with the same surface boundary condition, use the correction
@@ -848,6 +851,7 @@ constrained-wall manufactured problem: 757 owners give maximum pressure error
 2e-4 and 2e-3. Reproduction:
 
 ```sh
+# Deleted in 8a80095f: uniform-mixed-pressure-continuation-dawn.test.ts
 WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test \
   tests/uniform-mixed-pressure-continuation-dawn.test.ts
 ```

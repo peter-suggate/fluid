@@ -13,7 +13,7 @@ import type {GPUSolverInstance} from "../lib/core/method-contract";
 
 // Phase 5 lane (docs/plans/uniform-dynamic-coarsening.md): the app's
 // Uniform Geometric method with coarsening=dynamic on the 128³ dam break.
-// The simulation layout is h/4h only (2h exists in pressure alone), ownership
+// The simulation layout is h/4h only, ownership
 // must actually follow the flow, volume must be conserved, and a relayout
 // must not compile anything or grow memory past the band's high-water mark.
 // The default keeps the moving surface at h; regular bulk and air use 4h.
@@ -50,7 +50,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   const readback=async(copy:(e:GPUCommandEncoder,b:GPUBuffer)=>void,size:number)=>{
    const b=device!.createBuffer({size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const e=device!.createCommandEncoder();copy(e,b);device!.queue.submit([e.finish()]);
    await b.mapAsync(GPUMapMode.READ);const out=b.getMappedRange().slice(0);b.unmap();b.destroy();return out;};
-  const widths=async()=>Uint8Array.from(new Uint32Array(await readback((e,b)=>e.copyBufferToBuffer(host.mixedFrame.ownership.presentation.buffer,0,b,0,T*T*T*4),T*T*T*4)),w=>(w&0x80000000)?1:(w&0x40000000)?2:4);
+  const widths=async()=>Uint8Array.from(new Uint32Array(await readback((e,b)=>e.copyBufferToBuffer(host.mixedFrame.ownership.presentation.buffer,0,b,0,T*T*T*4),T*T*T*4)),w=>(w&0x80000000)?1:4);
   const phi=async()=>{const t=host.vertexPhiField as GPUTexture,row=Math.ceil(t.width*4/256)*256;
    const raw=new Float32Array(await readback((e,b)=>e.copyTextureToBuffer({texture:t},{buffer:b,bytesPerRow:row,rowsPerImage:t.height},[t.width,t.height,t.depthOrArrayLayers]),row*t.height*t.depthOrArrayLayers));
    return (x:number,y:number,z:number)=>raw[(z*t.height+y)*(row/4)+x]!;};
@@ -62,11 +62,10 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    watching=step>2;
    const start=performance.now();assert.ok(solver.advanceTo(step/30,[]));await solver.awaitFrameCompletion?.();wall.push(performance.now()-start);
    await solver.readStats();
-   const fine=Number(info.uniformMixedFineTiles),two=Number(info.uniformMixedTransitionTiles),four=Number(info.uniformMixedCoarseTiles);
-   assert.equal(fine+two+four,32768,`step ${step}: tile counts`);
-   assert.equal(two,0,`step ${step}: 2h tiles in the simulation layout`);
+   const fine=Number(info.uniformMixedFineTiles),four=Number(info.uniformMixedCoarseTiles);
+   assert.equal(fine+four,32768,`step ${step}: tile counts`);
    relayouts=Number(info.uniformMixedDynamicRelayouts);coarsest=Math.min(coarsest,fine);finest=Math.max(finest,fine);
-   shapes.push(`${fine}/${two}/${four}`);
+   shapes.push(`${fine}/${four}`);
    assert.ok(Math.abs(Number(info.volumeDrift))<1e-4,`step ${step}: volume drift ${info.volumeDrift}`);
    const was=watching;watching=false;
    const current=await widths(),P=await phi();
@@ -88,7 +87,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   assert.ok(refinedTiles>0,"no tile refined from 4h to h");
   t.diagnostic(`${refinedTiles} refined tiles kept their 4h surface`);
   watching=false;
-  t.diagnostic(`h/2h/4h tiles per step: ${shapes.join(" ")}`);
+  t.diagnostic(`h/4h tiles per step: ${shapes.join(" ")}`);
   const median=(a:number[])=>[...a].sort((x,y)=>x-y)[a.length>>1]!;
   t.diagnostic(`${relayouts} relayouts; median wall ${median(wall).toFixed(1)} ms (steps 1-${STEPS})`);
   assert.deepEqual(errors,[]);
@@ -121,7 +120,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   solver.injectLiquidBall!({centre_m:{x:.35*c.width_m,y:.5*c.height_m,z:0},radius_m:radius});
   for(let step=4;step<=8;step++){
    assert.ok(solver.advanceTo(step/30,[]));await solver.awaitFrameCompletion?.();await solver.readStats();
-   assert.equal(Number(info.uniformMixedTransitionTiles),0,`step ${step}: 2h tiles in the simulation layout`);
+   assert.equal(Number(info.uniformMixedFineTiles)+Number(info.uniformMixedCoarseTiles),32768,`step ${step}: tile counts`);
   }
   const added=Number(info.volumeCellSum)-before,expected=4/3*Math.PI*(radius/cell)**3;
   t.diagnostic(`fine tiles ${fineBefore} -> ${info.uniformMixedFineTiles}; added ${added.toFixed(1)} of ${expected.toFixed(1)} cells`);
