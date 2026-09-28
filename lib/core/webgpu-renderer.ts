@@ -268,6 +268,23 @@ export function presentationHeldByPendingFrame(framePending: boolean, advanceSub
   return framePending && !advanceSubmitted;
 }
 
+/**
+ * Whether a pipelined solver's presentation waits for the previous one.
+ *
+ * Advances run ahead of their receipts, and admitting a presentation with
+ * every one submits them in bursts: the compositor replaces a committed
+ * canvas frame that is still waiting on the GPU with the newer commit, so the
+ * burst's first image never reaches the screen and the scene steps two frames
+ * at a time. One outstanding presentation, queued behind the advance it
+ * shows, lands each image on the GPU's own cadence; advances stay free to
+ * queue the next frame behind it. A held draw with no new state keeps the
+ * solver's own hold (a pending receipt or a failure).
+ */
+export function pipelinedPresentationHeld(presentationsInFlight: number, presentationPending: boolean,
+  submittedTime_s: number, presentedTime_s: number): boolean {
+  return presentationsInFlight > 0 || (presentationPending && submittedTime_s <= presentedTime_s);
+}
+
 /** Column-major right-handed world-to-WebGPU-clip transform for voxel raster passes. */
 export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, near = 0.01, far = 100): Float32Array {
   const basis = cameraBasis(camera), position = basis.position;
@@ -3331,8 +3348,11 @@ export class FluidLabRenderer {
       );
     }
     const advanceSubmitted = this.gpuAccountedSubmittedTime_s > accountedSubmittedTime_s;
-    if (readyGPUFluid?.presentationPending
-      || presentationHeldByPendingFrame(Boolean(readyGPUFluid?.framePending), advanceSubmitted)) {
+    if (readyGPUFluid?.deferredFramePublication && this.simulationRunning
+      ? pipelinedPresentationHeld(this.presentationsInFlight, Boolean(readyGPUFluid.presentationPending),
+        readyGPUFluid.info.submittedTime_s ?? 0, this.deferredPresentedTimes.get(readyGPUFluid) ?? 0)
+      : readyGPUFluid?.presentationPending
+        || presentationHeldByPendingFrame(Boolean(readyGPUFluid?.framePending), advanceSubmitted)) {
       return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
     // The global fine narrow band double-buffers generations. Refresh its
@@ -3923,7 +3943,9 @@ export class FluidLabRenderer {
     presentationQueueTrace?.begin();
     this.device.queue.submit([presentationCommands]);
     if (readyGPUFluid?.deferredFramePublication) {
-      this.deferredPresentedTimes.set(readyGPUFluid, readyGPUFluid.info.completedTime_s ?? 0);
+      // The image carries the newest submitted state, not the newest receipt.
+      this.deferredPresentedTimes.set(readyGPUFluid, Math.max(readyGPUFluid.info.completedTime_s ?? 0,
+        readyGPUFluid.info.submittedTime_s ?? 0));
     }
     const presentationHealth = readPresentationHealth?.();
     // Mapping can overlap completion. Always drain the receipt, even if a
