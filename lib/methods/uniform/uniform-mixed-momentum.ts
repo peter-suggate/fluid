@@ -117,9 +117,12 @@ fn umPredictionCellLive(owner:UMOwner)->bool {
 }
 fn umMomentum(owner:UMOwner,face:UMFace)->f32 {
  if(umCullAir&&!umPredictionCellLive(owner)&&!umPredictionCellLive(face.neighbor)){return 0.0;}
- if(face.anchor[face.axis]<0){return umOriginalMomentum(face);}
- let value=umAdvectedMomentum(face,momentum.hDt.w);
- if(umClosedPositive(face)){return min(value,umOriginalMomentum(face));}return value;
+ // Every closed wall carries its projected velocity; the projection's
+ // contact inequality alone releases it. A positive wall that also took an
+ // advected away-velocity (min) released where its negative mirror could
+ // not, so a D4-symmetric flow drifted off its symmetry at the walls.
+ if(face.anchor[face.axis]<0||umClosedPositive(face)){return umOriginalMomentum(face);}
+ return umAdvectedMomentum(face,momentum.hDt.w);
 }
 // A certified unit stencil has one MAC patch per face. Keep its geometry
 // constant through the characteristic sampler; generic neighbour widths would

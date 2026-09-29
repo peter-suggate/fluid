@@ -16,7 +16,7 @@ function farValueWGSL(name:string,state:string,lower:string,upper:string):string
  let base=vec3i(floor(q));let fraction=fract(q);var distances:array<f32,8>;var values:array<f32,8>;var best=UM_INF;
  for(var k=0u;k<umCounts.w;k++){
   distances[k]=UM_INF;let bit=vec3i(umCorner(k,2u));let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));if(any(weights<=vec3f(0))){continue;}
-  let p=clamp(base+bit,vec3i(0),vec3i(UM_T)-vec3i(1));let state=${state};
+  let p=clamp(base+bit,vec3i(0),ueFarTop(face.axis));let state=${state};
   if((u32(round(state.w))&(1u<<face.axis))==0u){continue;}
   let lower=${lower};let upper=${upper};if(lower==0u){continue;}
   var lo=vec3f(umSourcePoint(lower))+vec3f(0.5);var hi=vec3f(umSourcePoint(upper))+vec3f(0.5);lo[face.axis]+=0.5;hi[face.axis]+=0.5;
@@ -103,6 +103,16 @@ export class UniformMixedExtension {
 @group(1) @binding(13) var<storage,read_write> boundary:array<f32>;
 ${uniformMixedFaceAddressWGSL}
 const UM_INF=1e20;
+// A closed positive domain wall is the mirror of a negative wall plane: seeded
+// every pass, never swept or restricted, published as its physical value. The
+// negative planes have no coarse +face, so the far lookup never taps the
+// positive wall layer on its normal axis either. h.w: the top is open.
+fn umClosedWall(face:UMFace)->bool{
+ return face.sign>0&&face.anchor[face.axis]==i32(UM_D[face.axis])-1&&!(face.axis==1u&&h.w>0.5);
+}
+fn ueFarTop(axis:u32)->vec3i{
+ var top=vec3i(UM_T)-vec3i(1);if(!(axis==1u&&h.w>0.5)){top[axis]=max(top[axis]-1,0);}return top;
+}
 // One (value, distance) slot per canonical patch and component. h patches are
 // tile-major, (tile, component, 64 cells): an h tile's lanes read one 512-byte
 // run per component. Width-4 patches (anchor/4 is their tile) sit in a
@@ -174,31 +184,53 @@ fn umNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)->UMNeig
  let lowWidth=select(0u,umTileWidth(umTileAt(vec3u(max(below,vec3i(0)))/4u)),plane>0);
  let highWidth=select(0u,umTileWidth(umTileAt(min(vec3u(above),UM_D-vec3u(1))/4u)),plane<i32(UM_D[component]));
  if(select((lowWidth==width&&(highWidth==0u||highWidth>=width))||(highWidth==width&&lowWidth>width),highWidth==width,lowWidth==0u)){
-  let delta=(point-center)*h.xyz;return UMNeighbor(direct.x,direct.y,sqrt(dot(delta,delta)));
+  // The point is center ± width along step only: the spacing is exactly
+  // width*h, as on the fast path above. sqrt(dot) can land an ulp above it,
+  // and the root cutoff below sits exactly on whole-cell distances, so which
+  // path a face took (the +side tile decides) would decide its reach.
+  return UMNeighbor(direct.x,direct.y,abs(point[step]-center[step])*h[step]);
  }
  let site=umVelocitySite(point,component);
- var best=UMNeighbor(0,UM_INF,1);var nearest=UM_INF;
- // A requested plane inside a coarser cell has two incident real faces.
- // Choose geometrically; do not read an unowned fine texel.
+ // Candidate real faces; choose geometrically, never read an unowned fine
+ // texel. A requested plane inside a coarser cell has two incident faces. A
+ // wider patch's centre on finer owners sits on fine cell boundaries in both
+ // tangential axes: every tied cell's face is a candidate. Ties are resolved
+ // by value, never by order: floor() (and a strict first-wins compare) takes
+ // the +side (-side) cell of a tie, and a mirror maps it to the other side.
  let owner=umOwnerAt(min(vec3i(floor(point)),vec3i(UM_D)-vec3i(1)));
- for(var side=0u;side<select(1u,2u,site.interior);side++){
-  var face=site.face;
-  if(site.interior){
+ let u=(component+1u)%3u;let v=(component+2u)%3u;
+ var faces:array<UMFace,4>;var n=0u;
+ if(site.interior){
+  for(var side=0u;side<2u;side++){
    let sign=select(-1,1,side==1u);let first=umFace(owner,component,sign,0u);
    let local=clamp(point-vec3f(umOrigin(owner)),vec3f(0),vec3f(f32(owner.width)-1e-4));
-   let u=(component+1u)%3u;let v=(component+2u)%3u;
-   face=umFace(owner,component,sign,u32(local[u])/first.width+(owner.width/first.width)*(u32(local[v])/first.width));
+   faces[n]=umFace(owner,component,sign,u32(local[u])/first.width+(owner.width/first.width)*(u32(local[v])/first.width));n++;
   }
+ }else if(site.width<width){
+  for(var k=0u;k<4u;k++){
+   var tied=point;tied[u]+=select(-0.5,0.5,(k&1u)!=0u);tied[v]+=select(-0.5,0.5,(k&2u)!=0u);
+   let s=umVelocitySite(tied,component);if(!s.interior){faces[n]=s.face;n++;}
+  }
+ }else{faces[0]=site.face;n=1u;}
+ // Nearest faces, then the least slot distance among them, then the mean
+ // value of the faces holding it.
+ var spatials:array<f32,4>;var slots:array<vec2f,4>;var nearest=UM_INF;
+ for(var i=0u;i<n;i++){
+  spatials[i]=UM_INF;let face=faces[i];if(face.width==0u){continue;}
   let location=umFaceCenter(face);let delta=(location-center)*h.xyz;
   if(abs(location[step]-center[step])<1e-5){continue;}
-  let spatial=dot(delta,delta);
-  if(spatial<nearest){nearest=spatial;let slot=umSlotState(face.anchor,component,face.width);best=UMNeighbor(slot.x,slot.y,sqrt(spatial));}
+  spatials[i]=dot(delta,delta);slots[i]=umSlotState(face.anchor,component,face.width);nearest=min(nearest,spatials[i]);
  }
- return best;
+ if(nearest>=0.5*UM_INF){return UMNeighbor(0,UM_INF,1);}
+ var distance=UM_INF;
+ for(var i=0u;i<n;i++){if(spatials[i]<=nearest*(1.0+1e-5)){distance=min(distance,slots[i].y);}}
+ var sum=0.0;var count=0.0;
+ for(var i=0u;i<n;i++){if(spatials[i]<=nearest*(1.0+1e-5)&&abs(slots[i].y-distance)<=1e-6*max(1.0,distance)){sum+=slots[i].x;count+=1.0;}}
+ return UMNeighbor(select(0.0,sum/count,count>0.0),distance,sqrt(nearest));
 }
 fn umExtended(face:UMFace,owner:UMOwner)->vec2f{
  let old=stateIn[umSlot(face.anchor,face.axis,face.width)];
- if(old.y==0.0||(umTileSupport(owner.tile)&2u)==0u){return old;}let center=umFaceCenter(face);let width=f32(face.width);
+ if(old.y==0.0||(umTileSupport(owner.tile)&2u)==0u||umClosedWall(face)){return old;}let center=umFaceCenter(face);let width=f32(face.width);
  var low:array<UMNeighbor,3>;var high:array<UMNeighbor,3>;var minima:array<f32,3>;var spacing:array<f32,3>;
  for(var axis=0u;axis<3u;axis++){
   var delta=vec3f(0);delta[axis]=width;
@@ -302,6 +334,7 @@ fn umSourcePoint(i:u32)->vec3i{let at=i-1u;return vec3i(vec3u(at%UM_D.x,(at/UM_D
  // face here is finite, so the restriction is the empty one written below.
  let supported=(umTileSupport(umTileAt(gid))&2u)!=0u;
  for(var component=0u;component<select(0u,3u,supported);component++){
+  if(gid[component]==UM_T[component]-1u&&!(component==1u&&h.w>0.5)){continue;}
   var location=vec3f(origin)+vec3f(2);location[component]+=2.0;
   var best=UM_INF;var sum=0.0;var count=0.0;var lo=vec3i(UM_D);var hi=vec3i(-1);
   // Restrict real MAC patches, with the native vertical footprint fallback.
@@ -352,7 +385,7 @@ fn umFarValueStaged(face:UMFace)->f32{
  var distances:array<f32,8>;var values:array<f32,8>;
  for(var k=0u;k<8u;k++){
   distances[k]=UM_INF;let bit=vec3i(umCorner(k,2u));let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));if(any(weights<=vec3f(0))){continue;}
-  let p=clamp(base+bit,vec3i(0),vec3i(UM_T)-vec3i(1));
+  let p=clamp(base+bit,vec3i(0),ueFarTop(face.axis));
   distances[k]=umFarDistance(face,point,p);values[k]=farState[umFarSlot(p)][face.axis];best=min(best,distances[k]);
  }
  var sum=0.0;var count=0.0;
@@ -375,7 +408,7 @@ fn umFarValueUniform(face:UMFace,value:f32,valid:bool)->f32{
  return select(0.0,sum/count,count>0.0);
 }
 fn umPublished(face:UMFace)->f32{
- if(face.anchor[face.axis]<0){return umPhysical(face);}
+ if(face.anchor[face.axis]<0||umClosedWall(face)){return umPhysical(face);}
  ${this.regularBulk?"if(umSource(face,umOwnerAt(face.anchor))){return umPhysical(face);}":"let slot=umSlotState(face.anchor,face.axis,face.width);if(slot.y<0.5*UM_INF){return slot.x;}"}
  return umFarValue(face);
 }
@@ -415,7 +448,8 @@ fn umPublished(face:UMFace)->f32{
  for(var axis=0u;axis<3u;axis++){
   if(origin[axis]==0u){let face=umUnitExtensionFace(owner,axis,-1);boundary[umNegativeBoundaryIndex(origin,axis)]=umPhysical(face);}
   let face=umUnitExtensionFace(owner,axis,1);${this.regularBulk?"let slot=select(vec2f(0,UM_INF),vec2f(umPhysical(face),0),umSource(face,owner));":"let slot=umSlotState(face.anchor,axis,1u);"}
-  if(slot.y<0.5*UM_INF){value[axis]=slot.x;}
+  if(umClosedWall(face)){value[axis]=umPhysical(face);}
+  else if(slot.y<0.5*UM_INF){value[axis]=slot.x;}
   else if((mixed&(1u<<axis))==0u){value[axis]=umFarValueUniform(face,farState[13u][axis],farLo[39u+axis].w>=0.0);}
   else{value[axis]=umFarValueStaged(face);}
  }

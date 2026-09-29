@@ -573,8 +573,12 @@ fn ${name}(p:vec3f,initial:f32,width:u32${param})->f32{
   if(wide){phiNext=umCubicPhi(next);}else{phiNext=umSampleVertex(next);}`:"phiNext=umWindowSample(next,o);"}
   if(abs(phiNext)>=abs(phiQ)){break;}q=next;phiQ=phiNext;
  }
- let found=abs(phiQ)<0.005*w*min(h.x,min(h.y,h.z));
- if(found){value=sign(initial)*length((p-q)*h);}
+ // Acceptance is continuous in the residual: past tol it blends toward the
+ // unsearched value, reached at 2 tol. A hard cut let mirror-image searches
+ // that end an ulp either side of tol (Newton alternating across a trilinear
+ // kink) keep and replace a vertex respectively: 0.035 cells of asymmetry.
+ let miss=clamp(abs(phiQ)/(0.005*w*min(h.x,min(h.y,h.z)))-1.0,0.0,1.0);
+ if(miss<1.0){value=mix(sign(initial)*length((p-q)*h),initial,miss);}
  else if(params.flags.z!=0u&&initial>0.0&&value<band&&umNoNearbySurface(p,band)){value=band;}
  return value;
 }`).join("\n")}
