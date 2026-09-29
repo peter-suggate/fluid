@@ -3336,11 +3336,8 @@ export class FluidLabRenderer {
       );
     }
     const advanceSubmitted = this.gpuAccountedSubmittedTime_s > accountedSubmittedTime_s;
-    if (readyGPUFluid?.deferredFramePublication && this.simulationRunning
-      ? pipelinedPresentationHeld(this.presentationsInFlight, Boolean(readyGPUFluid.presentationPending),
-        readyGPUFluid.info.submittedTime_s ?? 0, this.deferredPresentedTimes.get(readyGPUFluid) ?? 0)
-      : readyGPUFluid?.presentationPending
-        || presentationHeldByPendingFrame(Boolean(readyGPUFluid?.framePending), advanceSubmitted)) {
+    if (readyGPUFluid?.presentationPending
+      || presentationHeldByPendingFrame(Boolean(readyGPUFluid?.framePending), advanceSubmitted)) {
       return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
     // The global fine narrow band double-buffers generations. Refresh its
