@@ -1,5 +1,5 @@
 import {uniformMixedPresentationVelocityWGSL} from "../methods/uniform/uniform-mixed-presentation.wgsl";
-import { uniformStageGridsWGSL } from "../methods/uniform/uniform-stage-grids";
+import { UNIFORM_STAGE_CERTIFICATE, UNIFORM_STAGE_VIEWS, uniformStageGridsWGSL } from "../methods/uniform/uniform-stage-grids";
 import { VISUAL_LAYERS, visualLayerPaintWGSL, layerOpacity, type VisualLayerState } from "./visual-layers";
 /**
  * Solver-grid cross-section rendered as an independent presentation layer.
@@ -1225,6 +1225,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   var resolutionSeam = 0.0;
   var resolutionSeamCasing = 0.0;
   var relaidOut = false;
+  var relayoutColor = vec3f(3.0, 1.35, 0.12);
   if (mixedLattice && seamLayer) {
     let tile = vec3i(cell) / 4;
     let tileStage = select(UM_STAGE_TRANSPORT, UM_STAGE_PRESSURE, pressureGrid);
@@ -1233,6 +1234,13 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     // The census may re-lay out bulk tiles between the transport that wrote
     // the fields and this draw; the fields were remapped onto the live tiles.
     relaidOut = structureView && stage != 0xffffffffu && umStageTileWidth(stage, UM_STAGE_TRANSPORT, tile) != width;
+    // A GPU relayout runs at the frame head, before transport: compare with
+    // the tiles the frame started from instead (orange refined, blue coarsened).
+    let previous = select(0u, umStagePreviousWidth(stage, tile), structureView);
+    if (previous != 0u && previous != width) {
+      relaidOut = true;
+      relayoutColor = select(sceneColor(LP_coarsened), relayoutColor, width < previous);
+    }
     let tileFraction = fract(planePoint / 4.0);
     let seamWidth = select(0.9, 1.25, structureView);
     for (var planeAxis = 0u; planeAxis < 2u; planeAxis++) {
@@ -1652,6 +1660,21 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     }
     if(fieldMode==22){scalar=f32(tileClassAt(cell,dims));}
     if(fieldMode==3||fieldMode==5||fieldMode==21||fieldMode==22){let paint=scalarLayerPaint(fieldMode,scalar);fill=sceneColor(paint.rgb);alpha=paint.a;}
+    if(fieldMode==22&&mixedLattice){
+      // Why each tile is h (the frame head's census), and which velocity
+      // sampler its h faces took (the frame plan's certificate).
+      let t=umTileAt(vec3u(clamp(cell,vec3i(0),vec3i(umDimensions())-vec3i(1)))/4u);
+      let hTile=umTileWidth(t)==1u;
+      let reason=umStageReason(stage,t);
+      if(reason!=0xffffffffu){let paint=umReasonPaint(reason,hTile);fill=sceneColor(paint.rgb);alpha=paint.a;}
+      let certificate=select(0u,umStageCertificate(stage,t),hTile);
+      if(certificate==${UNIFORM_STAGE_CERTIFICATE.coarseInReach}u||certificate==${UNIFORM_STAGE_CERTIFICATE.saturated}u){
+        var hatch=sliceScreenHatch(samplePosition,derivative,footprint);
+        if(certificate==${UNIFORM_STAGE_CERTIFICATE.saturated}u){hatch=max(hatch,sliceScreenHatch(vec2f(samplePosition.x,-samplePosition.y),derivative,footprint));}
+        hatch*=0.55;
+        fill=mix(fill,vec3f(0.02,0.04,0.05),hatch);alpha=max(alpha,hatch);
+      }
+    }
 
     // Each layer draws the lattice of the stage that computed it (see
     // mixedLattice above); on a dense lattice only the grid layer and the two
@@ -1677,7 +1700,10 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
         let tileDistance=min(min(tileFraction.x,1.0-tileFraction.x)*4.0/derivative.x,
           min(tileFraction.y,1.0-tileFraction.y)*4.0/derivative.y);
         let edge=gridLinePaint(abs(tileDistance-1.5),0.9);
-        fill=mix(fill,sceneColor(LP_surfaceBand),edge);alpha=max(alpha,edge);
+        // Under a GPU relayout every surface tile is h: one held at 4h is a
+        // surface the head census missed.
+        let missed=owner.width!=1u&&(umStageViews(stage)&${UNIFORM_STAGE_VIEWS.previous}u)!=0u;
+        fill=mix(fill,sceneColor(select(LP_surfaceBand,LP_fault,missed)),edge);alpha=max(alpha,edge);
       }
     }
     if(fieldMode==24){
@@ -1767,7 +1793,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     // A tile the census re-laid out after the transport: the fields drawn
     // there were remapped, and the next frame's transport runs on these cells.
     let relaid = select(0.0, 0.55 * sliceScreenHatch(samplePosition, derivative, footprint), relaidOut);
-    color = mix(color, seamColor, relaid);
+    color = mix(color, relayoutColor, relaid);
     alpha = max(alpha, relaid);
     color = mix(color, vec3f(0.025, 0.035, 0.045), resolutionSeamCasing);
     color = mix(color, seamColor, resolutionSeam);

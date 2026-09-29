@@ -7,7 +7,7 @@ import {
 } from "../../../components/toolstrip";
 import { Choice, ControlRow, Slider, Value } from "../../../components/ui";
 import {
-  VISUAL_LAYERS, layerOpacity, toggleVisualLayer, type VisualLayerId, type VisualLayerState,
+  MIXED_TILE_LEGEND, VISUAL_LAYERS, layerOpacity, toggleVisualLayer, type VisualLayerId, type VisualLayerState,
 } from "../../core/visual-layers";
 
 interface VisualLayerRowsProps {
@@ -78,6 +78,15 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
       <span style={{ color: "#1fc7a6" }}>● Transport</span>
       <span style={{ color: "#f29c29" }}>● Sharpen only</span>
       <span style={{ color: "#9475c2" }}>● Resident</span>
+    </span>}
+    {state.visible && !hidden.includes("tiles") && state.enabled.includes("tiles") && <span
+      aria-label="Mixed Uniform tile reasons"
+      title="Why each h tile is h (the frame head's census), and which velocity sampler it took."
+      style={{ display: "inline-flex", flexWrap: "wrap", gap: "2px 8px", fontSize: 11, maxWidth: 420 }}
+    >
+      {MIXED_TILE_LEGEND.map(entry => <span key={entry.label} title={entry.title} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <span aria-hidden style={{ width: 9, height: 9, borderRadius: 2, background: entry.color }} />{entry.label}
+      </span>)}
     </span>}
     {plane && state.visible && <>
       <Choice<"x" | "y" | "z">

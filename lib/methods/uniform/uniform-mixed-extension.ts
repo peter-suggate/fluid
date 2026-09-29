@@ -32,11 +32,12 @@ function farValueWGSL(name:string,state:string,lower:string,upper:string):string
 }
 /** (value, distance) slots per canonical patch and component: h patches
  * tile-major (tile, component, 64 cells), width-4 patches in a component-major
- * n/4 layer, then the negative domain-wall planes of each width. The address
- * is arithmetic on (anchor, axis, width); see umSlot. */
+ * n/4 layer, then the negative domain-wall planes of each width, then a
+ * two-word finite-cell mask per tile (UE_FLAGS). The address is arithmetic
+ * on (anchor, axis, width); see umSlot. */
 function extensionSlots(d:readonly number[]):number{
  const t=d.map(n=>n/4),plane=(a:readonly number[])=>a[1]!*a[2]!+a[0]!*a[2]!+a[0]!*a[1]!;
- return 3*d[0]!*d[1]!*d[2]!+3*t[0]!*t[1]!*t[2]!+plane(d)+plane(t);
+ return 3*d[0]!*d[1]!*d[2]!+3*t[0]!*t[1]!*t[2]!+plane(d)+plane(t)+2*t[0]!*t[1]!*t[2]!;
 }
 /** Regular-bulk mode restricts physical source faces directly to the 4h
  * nearest-source hierarchy, then retains supported h faces on publication.
@@ -123,6 +124,8 @@ const UE_TILES=UM_T.x*UM_T.y*UM_T.z;
 const UE_COARSE=192u*UE_TILES;
 const UE_UNIT_WALL=UE_COARSE+3u*UE_TILES;
 const UE_COARSE_WALL=UE_UNIT_WALL+UM_D.y*UM_D.z+UM_D.x*UM_D.z+UM_D.x*UM_D.y;
+// Per tile finite-cell masks (ueMaskIn), two words per tile.
+const UE_FLAGS=UE_COARSE_WALL+UM_T.y*UM_T.z+UM_T.x*UM_T.z+UM_T.x*UM_T.y;
 fn ueCoarseWallIndex(t:vec3u,axis:u32)->u32{
  if(axis==0u){return t.y+UM_T.y*t.z;}
  if(axis==1u){return UM_T.y*UM_T.z+t.x+UM_T.x*t.z;}
@@ -228,6 +231,8 @@ fn umNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)->UMNeig
  for(var i=0u;i<n;i++){if(spatials[i]<=nearest*(1.0+1e-5)&&abs(slots[i].y-distance)<=1e-6*max(1.0,distance)){sum+=slots[i].x;count+=1.0;}}
  return UMNeighbor(select(0.0,sum/count,count>0.0),distance,sqrt(nearest));
 }
+// Callers evaluate only faces ueFaceLive admits: a face none of whose
+// readable slots is finite would return old here.
 fn umExtended(face:UMFace,owner:UMOwner)->vec2f{
  let old=stateIn[umSlot(face.anchor,face.axis,face.width)];
  if(old.y==0.0||(umTileSupport(owner.tile)&2u)==0u||umClosedWall(face)){return old;}let center=umFaceCenter(face);let width=f32(face.width);
@@ -269,9 +274,133 @@ fn umUnitExtensionFace(owner:UMOwner,axis:u32,sign:i32)->UMFace{
 fn umSeedState(face:UMFace,owner:UMOwner)->vec2f{
  return select(vec2f(0.0,UM_INF),vec2f(umPhysical(face),0.0),umSource(face,owner));
 }
-// Negative domain-wall patches are never swept: every pass rewrites the seed.
-fn umSeedWall(face:UMFace,owner:UMOwner){
- stateOut[umSlot(face.anchor,face.axis,face.width)]=vec2f(umPhysical(face),select(UM_INF,0.0,umSource(face,owner)));
+// Seed and sweep outputs. The seed writes every slot and mask into BOTH
+// slot arrays. A sweep result whose distance is 0 or INF is its seed value
+// (distances only fall, a sweep root is positive, and an INF slot keeps its
+// seed value), and so is every slot a sweep skips; the array a sweep writes
+// holds that seed value already (from the seed, or from a pass that skipped
+// it too). A sweep therefore stores only distances outside {0, INF} and
+// never revisits a domain-wall patch (seed-only). Exact for any sweep count.
+fn ueSeedStore(slot:u32,value:vec2f){stateOut[slot]=value;stateIn[slot]=value;}
+fn ueSweepStore(slot:u32,value:vec2f){if(value.y<0.5*UM_INF&&value.y!=0.0){stateOut[slot]=value;}}
+// Negative domain-wall patches are never swept: the seed writes them once.
+// Returns whether its distance is finite.
+fn umSeedWall(face:UMFace,owner:UMOwner)->bool{
+ let source=umSource(face,owner);
+ ueSeedStore(umSlot(face.anchor,face.axis,face.width),vec2f(umPhysical(face),select(UM_INF,0.0,source)));
+ return source;
+}
+// Per tile, in the slot array a pass wrote: a 64-bit mask of the tile's
+// cells holding the (clamped) anchor of a finite slot, as four exact 16-bit
+// floats in two words (UE_FLAGS+2 tile). Only supported tiles' masks are
+// current (ueMaskIn gates on support). Masks only grow: a pass's mask is its
+// input mask or'ed with the anchors of the finite slots it wrote.
+fn ueBit(anchor:vec3i)->vec2u{
+ let l=vec3u(clamp(anchor,vec3i(0),vec3i(UM_D)-vec3i(1)))%4u;let b=l.x+4u*(l.y+4u*l.z);
+ return select(vec2u(1u<<(b&31u),0u),vec2u(0u,1u<<(b&31u)),b>=32u);
+}
+fn ueMaskIn(tile:u32)->vec2u{
+ if((umTileSupport(tile)&2u)==0u){return vec2u(0u);}
+ let a=stateIn[UE_FLAGS+2u*tile];let b=stateIn[UE_FLAGS+2u*tile+1u];
+ return vec2u(u32(a.x)|(u32(a.y)<<16u),u32(b.x)|(u32(b.y)<<16u));
+}
+fn ueMaskOut(tile:u32,m:vec2u,seed:bool){
+ let a=vec2f(f32(m.x&0xffffu),f32(m.x>>16u));let b=vec2f(f32(m.y&0xffffu),f32(m.y>>16u));
+ stateOut[UE_FLAGS+2u*tile]=a;stateOut[UE_FLAGS+2u*tile+1u]=b;
+ if(seed){stateIn[UE_FLAGS+2u*tile]=a;stateIn[UE_FLAGS+2u*tile+1u]=b;}
+}
+// Tile jobs stage the 3x3x3 tiles around theirs: width (0 outside the
+// lattice) and input mask. The job is live when any mask is nonzero.
+var<workgroup> ueLive:atomic<u32>;
+var<workgroup> ueNew:array<atomic<u32>,2>;
+var<workgroup> ueFast:atomic<u32>;
+var<workgroup> ueGeneral:atomic<u32>;
+var<workgroup> ueQueue:array<u32,192>;
+var<workgroup> ueWidths:array<u32,27>;
+var<workgroup> ueMasks:array<vec2u,27>;
+// xyz: the job tile; w: its index, or UM_TILES without a supported owner.
+var<workgroup> ueJob:vec4u;
+fn ueStaged(t:vec3i)->u32{let r=vec3u(t-vec3i(ueJob.xyz)+vec3i(1));return r.x+3u*(r.y+3u*r.z);}
+fn ueCellFinite(cell:vec3i)->bool{
+ let t=cell/4;let m=ueMasks[ueStaged(t)];let l=vec3u(cell-4*t);let b=l.x+4u*(l.y+4u*l.z);
+ return ((select(m.x,m.y,b>=32u)>>(b&31u))&1u)!=0u;
+}
+// Stages the neighbourhood of lane 0's owner's tile (every lane of a tile
+// job holds an owner of that tile, or none). Workgroup-uniform result.
+fn ueStage(owner:UMOwner,lane:u32,seed:bool)->bool{
+ if(lane==0u){
+  ueJob=vec4u(umTileCoord(owner.tile),select(UM_TILES,owner.tile,owner.width!=0u&&(umTileSupport(owner.tile)&2u)!=0u));
+  atomicStore(&ueLive,0u);atomicStore(&ueNew[0],0u);atomicStore(&ueNew[1],0u);atomicStore(&ueFast,0u);atomicStore(&ueGeneral,0u);
+ }
+ let job=workgroupUniformLoad(&ueJob);
+ if(job.w>=UM_TILES){return false;}
+ if(seed){return true;}
+ if(lane<27u){
+  let t=vec3i(job.xyz)+vec3i(umCorner(lane,3u))-vec3i(1);var width=0u;var mask=vec2u(0u);
+  if(all(t>=vec3i(0))&&all(t<vec3i(UM_T))){let tile=umTileAt(vec3u(t));width=umTileWidth(tile);mask=ueMaskIn(tile);}
+  ueWidths[lane]=width;ueMasks[lane]=mask;if(any(mask!=vec2u(0u))){atomicOr(&ueLive,1u);}
+ }
+ return workgroupUniformLoad(&ueLive)!=0u;
+}
+// Whether umExtended(face) can differ from its old slot: some slot it may
+// read is finite. 0: none (umExtended returns old); 1: some, every read in a
+// unit tile; 2: some, and a read may reach a 4h tile (the general path).
+// Every slot a request reads is anchored in the cells tested here:
+// - old: the face's anchor.
+// - request point P = centre +- width e_step inside the lattice, q its
+//   (clamped) anchor round(P - offset), Tq the tile of q (in the job's 3x3x3:
+//   q is within one width of the face's anchor, whose tile is the job's or,
+//   for a 4h owner's patch, whose +axis neighbour is staged).
+// - width 1, Tq unit: the unit slot at q only (lowWidth is 1: the direct
+//   case; a domain-wall patch at q[axis] = -1 is attributed to q).
+// - width 1, Tq 4h: the unit slot at q, and the site owner O (the 4h owner
+//   of Tq) patches covering q: its +axis patch in Tq's top layer at q's
+//   columns (unit patches) or at O's origin columns (a width-4 patch), and
+//   when P's plane is strictly inside O (plane % 4 != 0) its -axis patch in
+//   the layer below O at the same columns (a domain wall: layer 0 of Tq);
+//   at plane 0 the site is O's -axis domain-wall patch (layer 0 of Tq).
+// - width 4: P is a 4h-aligned patch centre; every direct, site and tied
+//   candidate lies in Tq (never interior: its plane is a multiple of four).
+fn ueFaceLive(anchor:vec3i,axis:u32,width:u32)->u32{
+ var live=ueCellFinite(clamp(anchor,vec3i(0),vec3i(UM_D)-vec3i(1)));var coarse=width!=1u;
+ var center=vec3f(anchor)+vec3f(0.5*f32(width));center[axis]=f32(anchor[axis]+1);
+ var offset=vec3f(0.5*f32(width));offset[axis]=1.0;
+ for(var n=0u;n<6u;n++){
+  var point=center;point[n/2u]+=select(-f32(width),f32(width),(n&1u)!=0u);
+  if(any(point<vec3f(0))||any(point>vec3f(UM_D))){continue;}
+  let q=clamp(vec3i(round(point-offset)),vec3i(0),vec3i(UM_D)-vec3i(1));let t=q/4;
+  if(width!=1u){live=live||any(ueMasks[ueStaged(t)]!=vec2u(0u));continue;}
+  if(ueWidths[ueStaged(t)]==1u){live=live||ueCellFinite(q);continue;}
+  coarse=true;
+  let o=4*t;var top=q;top[axis]=o[axis]+3;var corner=o;corner[axis]=o[axis]+3;
+  live=live||ueCellFinite(q)||ueCellFinite(top)||ueCellFinite(corner);
+  let plane=i32(round(point[axis]));
+  if(plane%4!=0||plane==0){
+   var below=q;below[axis]=max(o[axis]-1,0);var belowCorner=o;belowCorner[axis]=below[axis];
+   live=live||ueCellFinite(below)||ueCellFinite(belowCorner);
+  }
+ }
+ return select(0u,select(1u,2u,coarse),live);
+}
+// Queue a live item: unit-only items from the front, the rest from the back,
+// so the general sampler runs in as few SIMD groups as possible.
+fn ueEnqueue(item:u32,kind:u32){
+ if(kind==1u){ueQueue[atomicAdd(&ueFast,1u)]=item;}
+ else if(kind==2u){ueQueue[191u-atomicAdd(&ueGeneral,1u)]=item;}
+}
+fn ueQueueItem(i:u32,fast:u32)->u32{if(i<fast){return ueQueue[i];}return ueQueue[191u-(i-fast)];}
+// The anchor bit of a stored (finite, nonzero) sweep result. Lanes gather
+// their bits and or them into ueNew once.
+fn ueNote(value:vec2f,anchor:vec3i)->vec2u{
+ if(value.y<0.5*UM_INF&&value.y!=0.0){return ueBit(anchor);}return vec2u(0u);
+}
+fn ueGather(bits:vec2u){if(any(bits!=vec2u(0u))){atomicOr(&ueNew[0],bits.x);atomicOr(&ueNew[1],bits.y);}}
+// The job's output mask: its input mask or the finite slots it wrote. A
+// zero mask is already in the output array (the seed wrote it, and masks
+// only grow).
+fn ueFlush(){
+ let m=ueMasks[13]|vec2u(atomicLoad(&ueNew[0]),atomicLoad(&ueNew[1]));
+ if(any(m!=vec2u(0u))){ueMaskOut(ueJob.w,m,false);}
 }
 // The regular 4h launch takes the ownership's packed regular 4h list (one
 // lane per owner, no seam tiles to filter), including a tier small enough to
@@ -283,27 +412,92 @@ fn ueOwner(gid:vec3u)->UMOwner{
 }
 // Off the extension support seed and sweeps write nothing: every reader of
 // such a slot goes through umSlotState (or, in restrictBand, skips the tile).
-${["seed","sweep"].map(entry=>/* wgsl */`
-@compute @workgroup_size(64) fn ${entry}(@builtin(global_invocation_id) gid:vec3u){
- let owner=ueOwner(gid);if(owner.width==0u||(umTileSupport(owner.tile)&2u)==0u){return;}let origin=umOrigin(owner);
+// One entry per launch (regular h, regular 4h list, seam h, seam 4h), so a
+// split trace prices each launch.
+// The seed of one owner; returns the anchors of its finite slots.
+fn ueSeedOwner(owner:UMOwner)->vec2u{
+ let origin=umOrigin(owner);var bits=vec2u(0u);
  // A unit owner's faces are the unit patches whatever its neighbours.
  if(umRegularFine||owner.width==1u){
   for(var axis=0u;axis<3u;axis++){
-   if(origin[axis]==0u){let face=umUnitExtensionFace(owner,axis,-1);umSeedWall(face,owner);}
+   if(origin[axis]==0u){let face=umUnitExtensionFace(owner,axis,-1);if(umSeedWall(face,owner)){bits|=ueBit(face.anchor);}}
    let face=umUnitExtensionFace(owner,axis,1);
-   stateOut[umSlot(face.anchor,axis,1u)]=${entry==="seed"?"umSeedState(face,owner)":"umExtended(face,owner)"};
+   let value=umSeedState(face,owner);ueSeedStore(umSlot(face.anchor,axis,1u),value);if(value.y<0.5*UM_INF){bits|=ueBit(face.anchor);}
   }
-  return;
+  return bits;
  }
  // Every patch owns its component slot: no anchor packing across axes.
  for(var axis=0u;axis<3u;axis++){
-  if(origin[axis]==0u){umSeedWall(umFace(owner,axis,-1,0u),owner);}
+  if(origin[axis]==0u){let face=umFace(owner,axis,-1,0u);if(umSeedWall(face,owner)){bits|=ueBit(face.anchor);}}
   let first=umFace(owner,axis,1,0u);
   for(var part=0u;part<first.count;part++){
    let face=umFace(owner,axis,1,part);
-   stateOut[umSlot(face.anchor,axis,face.width)]=${entry==="seed"?"umSeedState(face,owner)":"umExtended(face,owner)"};
+   let value=umSeedState(face,owner);ueSeedStore(umSlot(face.anchor,axis,face.width),value);if(value.y<0.5*UM_INF){bits|=ueBit(face.anchor);}
   }
  }
+ return bits;
+}
+@compute @workgroup_size(64) fn seedList(@builtin(global_invocation_id) gid:vec3u){
+ let owner=ueOwner(gid);if(owner.width==0u||(umTileSupport(owner.tile)&2u)==0u){return;}
+ ueMaskOut(owner.tile,ueSeedOwner(owner),true);
+}
+// A regular 4h owner's faces are single width-4 patches: every slot they
+// read lies in its tile or a face neighbour (ueFaceLive, width 4).
+@compute @workgroup_size(64) fn sweepList(@builtin(global_invocation_id) gid:vec3u){
+ let owner=ueOwner(gid);if(owner.width==0u||(umTileSupport(owner.tile)&2u)==0u){return;}
+ let t=vec3i(umTileCoord(owner.tile));let own=ueMaskIn(owner.tile);var live=any(own!=vec2u(0u));
+ for(var n=0u;n<6u;n++){
+  if(live){break;}
+  var s=t;s[n/2u]+=select(-1,1,(n&1u)!=0u);
+  if(all(s>=vec3i(0))&&all(s<vec3i(UM_T))){live=any(ueMaskIn(umTileAt(vec3u(s)))!=vec2u(0u));}
+ }
+ if(!live){return;}
+ var bits=own;
+ for(var axis=0u;axis<3u;axis++){
+  let first=umFace(owner,axis,1,0u);
+  for(var part=0u;part<first.count;part++){
+   let face=umFace(owner,axis,1,part);let value=umExtended(face,owner);
+   ueSweepStore(umSlot(face.anchor,axis,face.width),value);if(value.y<0.5*UM_INF){bits|=ueBit(face.anchor);}
+  }
+ }
+ if(any(bits!=vec2u(0u))){ueMaskOut(owner.tile,bits,false);}
+}
+${["","Seam"].map(suffix=>/* wgsl */`
+@compute @workgroup_size(64) fn seed${suffix}(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ // Every lane of a job holds an owner of one tile (or none).
+ let owner=ueOwner(gid);
+ if(!ueStage(owner,lane,true)){return;}
+ let bits=ueSeedOwner(owner);atomicOr(&ueNew[0],bits.x);atomicOr(&ueNew[1],bits.y);
+ workgroupBarrier();
+ if(lane==0u){ueMaskOut(ueJob.w,vec2u(atomicLoad(&ueNew[0]),atomicLoad(&ueNew[1])),true);}
+}
+// Unit tile: one item per (owner, axis); a unit owner's positive patch is
+// anchored at its origin. A regular h tile has no 4h tile in its stencil
+// (every live face is fast): each lane evaluates its own live faces, with no
+// queue. Seam h tiles queue live faces, general ones last.
+@compute @workgroup_size(64) fn sweep${suffix}(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ let owner=ueOwner(gid);
+ if(!ueStage(owner,lane,false)){return;}
+ var bits=vec2u(0u);
+ if(umRegularFine){
+  for(var axis=0u;axis<3u;axis++){
+   if(ueFaceLive(vec3i(umOrigin(owner)),axis,1u)==0u){continue;}
+   let face=umUnitExtensionFace(owner,axis,1);let value=umExtended(face,owner);
+   ueSweepStore(umSlot(face.anchor,axis,1u),value);bits|=ueNote(value,face.anchor);
+  }
+ }else{
+  for(var axis=0u;axis<3u;axis++){ueEnqueue(lane+64u*axis,ueFaceLive(vec3i(umOrigin(owner)),axis,1u));}
+ }
+ workgroupBarrier();
+ let fast=atomicLoad(&ueFast);let total=fast+atomicLoad(&ueGeneral);
+ for(var i=lane;i<total;i+=64u){
+  let item=ueQueueItem(i,fast);var o=owner;o.lane=item%64u;o.index=owner.index-owner.lane+o.lane;
+  let face=umUnitExtensionFace(o,item/64u,1);let value=umExtended(face,o);
+  ueSweepStore(umSlot(face.anchor,face.axis,1u),value);bits|=ueNote(value,face.anchor);
+ }
+ ueGather(bits);
+ workgroupBarrier();
+ if(lane==0u){ueFlush();}
 }`).join("\n")}
 // Coarse seam owners: one group per tile, one lane per patch and component.
 // A 4h owner beside h tiles has sixteen patches per face; evaluating them
@@ -315,16 +509,45 @@ fn umSeamTileOwner(group:vec3u,local:vec3u)->UMOwner{
 // 4h seam tiles hold one owner with at most sixteen patches per positive
 // face. One lane per (axis, patch); each writes its own slot directly.
 fn umCoarseCell(local:vec3u)->u32{return local.x+4u*(local.y+4u*local.z);}
-${["seed","sweep"].map(entry=>/* wgsl */`
-@compute @workgroup_size(64) fn ${entry}Coarse(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let owner=umSeamTileOwner(group,vec3u(0));if(owner.width==0u){return;}
+@compute @workgroup_size(64) fn seedCoarse(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let owner=umSeamTileOwner(group,vec3u(0));
+ if(!ueStage(owner,lane,true)){return;}
+ var bits=vec2u(0u);
  if(lane<48u){
   let axis=lane/16u;let face=umFace(owner,axis,1,lane%16u);
-  if(face.width!=0u){stateOut[umSlot(face.anchor,axis,face.width)]=${entry==="seed"?"umSeedState(face,owner)":"umExtended(face,owner)"};}
+  if(face.width!=0u){let value=umSeedState(face,owner);ueSeedStore(umSlot(face.anchor,axis,face.width),value);if(value.y<0.5*UM_INF){bits=ueBit(face.anchor);}}
  }else if(lane<51u){
-  let axis=lane-48u;if(umOrigin(owner)[axis]==0u){umSeedWall(umFace(owner,axis,-1,0u),owner);}
+  let axis=lane-48u;if(umOrigin(owner)[axis]==0u){let face=umFace(owner,axis,-1,0u);if(umSeedWall(face,owner)){bits=ueBit(face.anchor);}}
  }
-}`).join("\n")}
+ atomicOr(&ueNew[0],bits.x);atomicOr(&ueNew[1],bits.y);
+ workgroupBarrier();
+ if(lane==0u){ueMaskOut(ueJob.w,vec2u(atomicLoad(&ueNew[0]),atomicLoad(&ueNew[1])),true);}
+}
+// The positive patches umFace would return, from the staged +axis neighbour
+// width (umFace: min of the owner's and the neighbour's, the owner's
+// outside the lattice): lane = 16 axis + part.
+@compute @workgroup_size(64) fn sweepCoarse(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let owner=umSeamTileOwner(group,vec3u(0));
+ if(!ueStage(owner,lane,false)){return;}
+ if(lane<48u){
+  let axis=lane/16u;let part=lane%16u;var probe=vec3i(umOrigin(owner));probe[axis]+=4;
+  var width=4u;if(probe[axis]<i32(UM_D[axis])){width=min(4u,ueWidths[ueStaged(probe/4)]);}
+  let side=4u/width;
+  if(part<side*side){
+   var anchor=probe;anchor[(axis+1u)%3u]+=i32((part%side)*width);anchor[(axis+2u)%3u]+=i32((part/side)*width);anchor[axis]-=1;
+   ueEnqueue(lane,ueFaceLive(anchor,axis,width));
+  }
+ }
+ workgroupBarrier();
+ let fast=atomicLoad(&ueFast);let total=fast+atomicLoad(&ueGeneral);var bits=vec2u(0u);
+ for(var i=lane;i<total;i+=64u){
+  let item=ueQueueItem(i,fast);let face=umFace(owner,item/16u,1,item%16u);let value=umExtended(face,owner);
+  ueSweepStore(umSlot(face.anchor,face.axis,face.width),value);bits|=ueNote(value,face.anchor);
+ }
+ ueGather(bits);
+ workgroupBarrier();
+ if(lane==0u){ueFlush();}
+}
 fn umSourceIndex(p:vec3i)->u32{return u32(p.x+i32(UM_D.x)*(p.y+i32(UM_D.y)*p.z))+1u;}
 fn umSourcePoint(i:u32)->vec3i{let at=i-1u;return vec3i(vec3u(at%UM_D.x,(at/UM_D.x)%UM_D.y,at/(UM_D.x*UM_D.y)));}
 @compute @workgroup_size(4,4,4) fn restrictBand(@builtin(global_invocation_id) gid:vec3u){
@@ -332,7 +555,9 @@ fn umSourcePoint(i:u32)->vec3i{let at=i-1u;return vec3i(vec3u(at%UM_D.x,(at/UM_D
  // Off the extension support every face keeps its seed distance, and a
  // source face needs a liquid owner, which the support dilates around: no
  // face here is finite, so the restriction is the empty one written below.
- let supported=(umTileSupport(umTileAt(gid))&2u)!=0u;
+ // Every slot read below is anchored in this tile: a supported tile whose
+ // final mask is empty restricts to the same empty state.
+ let tile=umTileAt(gid);let supported=any(ueMaskIn(tile)!=vec2u(0u));
  for(var component=0u;component<select(0u,3u,supported);component++){
   if(gid[component]==UM_T[component]-1u&&!(component==1u&&h.w>0.5)){continue;}
   var location=vec3f(origin)+vec3f(2);location[component]+=2.0;
@@ -471,7 +696,31 @@ var<workgroup> publishCoarseState:array<vec2f,192>;
  let x=publishCoarseState[lane];let y=publishCoarseState[lane+64u];let z=publishCoarseState[lane+128u];
  if(owner.width!=0u&&x.y+y.y+z.y>0.0){let anchor=vec3i(umOrigin(owner)+umCorner(lane,4u));textureStore(output,anchor,vec4f(x.x,y.x,z.x,textureLoad(physical,anchor,0).w));}
 }
-${uniformMixedFaceDispatchWGSL("publish","umPublished(face)",false,"value.w=textureLoad(physical,ownedFace.anchor,0).w;","ueOwner").replace(" let origin=umOrigin(owner);",` let origin=umOrigin(owner);
+// h seam owners publish through publishFine (the same values: umPublished
+// per unit face, with the staged far value); 4h seam tiles through publishCoarse.
+${["publishList"].map(name=>uniformMixedFaceDispatchWGSL(name,"umPublished(face)",false,"value.w=textureLoad(physical,ownedFace.anchor,0).w;","ueOwner").replace(" let origin=umOrigin(owner);",` let origin=umOrigin(owner);
+ // A regular 4h owner (one-width 3x3x3 stencil) has one width-4 patch per
+ // positive face, anchored at origin+3e_axis, and each of those texels holds
+ // only that component (no other positive face shares the anchor). Its far
+ // value (umFarValue) has one tap of positive weight: the face centre maps
+ // to the owner's own coarse cell with zero fraction on every axis, so the
+ // mean over the tied nearest taps is that cell's component when it is known
+ // (mask bit and a source bound) and zero otherwise. The same values as the
+ // general dispatch below, without the face search.
+ if(ueRegularCoarseList){
+  let cell=vec3i(origin/4u);let state=textureLoad(coarse,cell,0);let lower=textureLoad(origins,cell,0);let mask=u32(round(state.w));
+  for(var axis=0u;axis<3u;axis++){
+   if(origin[axis]==0u){let i=umNegativeBoundaryIndex(origin,axis);boundary[i]=negative[i];}
+   var anchor=vec3i(origin);anchor[axis]+=3;
+   let slot=umSlotState(anchor,axis,4u);let physicalAt=textureLoad(physical,anchor,0);var value=vec4f(0);
+   // umClosedWall: a closed positive domain wall publishes its physical value.
+   if(anchor[axis]==i32(UM_D[axis])-1&&!(axis==1u&&h.w>0.5)){value[axis]=physicalAt[axis];}
+   else if(slot.y<0.5*UM_INF){value[axis]=slot.x;}
+   else if((mask&(1u<<axis))!=0u&&lower[axis]!=0u){value[axis]=state[axis];}
+   value.w=physicalAt.w;textureStore(output,anchor,value);
+  }
+  return;
+ }
  // A unit owner's faces are the unit patches whatever its neighbours.
  if(umRegularFine||owner.width==1u){
   var value=vec4f(0);
@@ -480,8 +729,8 @@ ${uniformMixedFaceDispatchWGSL("publish","umPublished(face)",false,"value.w=text
    value[axis]=umPublished(umUnitExtensionFace(owner,axis,1));
   }
   value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);return;
- }`)}
-`,["seed","sweep","seedCoarse","sweepCoarse","publish","publishFine","publishCoarse"])});
+ }`)).join("\n")}
+`,["seed","sweep","seedList","sweepList","seedSeam","sweepSeam","seedCoarse","sweepCoarse","publishList","publishFine","publishCoarse"])});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
   this.restrictPipeline=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"restrictBand",constants:{umDispatchX:this.ownership.dispatchX}}});
@@ -489,8 +738,8 @@ ${uniformMixedFaceDispatchWGSL("publish","umPublished(face)",false,"value.w=text
    const compile=(width:number,regular:boolean,counted:number,name=entryPoint,list=false)=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:name,constants:{umDispatchX:this.ownership.dispatchX,umCellWidth:width,umRegularTiles:+regular,umInterfaceTiles:+!regular,umRegularFine:+(regular&&width===1),ueRegularCoarseList:+list,umCountedJobs:counted}}});
    const C=UNIFORM_MIXED_COUNTED;
    this.regularPipelines.set(entryPoint,await compile(1,true,C.owners,entryPoint==="publish"?"publishFine":entryPoint));
-   this.regularCoarseListPipelines.set(entryPoint,await compile(4,true,C.regularCoarse,entryPoint,true));
-   this.seamPipelines.set(entryPoint,await compileMixedTiers(w=>w===1?compile(1,false,C.owners):compile(4,false,C.tiles,`${entryPoint}Coarse`)));
+   this.regularCoarseListPipelines.set(entryPoint,await compile(4,true,C.regularCoarse,`${entryPoint}List`,true));
+   this.seamPipelines.set(entryPoint,await compileMixedTiers(w=>w===1?compile(1,false,C.owners,entryPoint==="publish"?"publishFine":`${entryPoint}Seam`):compile(4,false,C.tiles,`${entryPoint}Coarse`)));
   }));
  }
  encode(encoder:GPUCommandEncoder,groups:readonly [GPUBindGroup,GPUBindGroup],sweeps=2):void{

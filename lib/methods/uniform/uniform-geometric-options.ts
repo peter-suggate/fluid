@@ -1,4 +1,4 @@
-import { resolveUniformGeometricValues, UNIFORM_GEOMETRIC_SHARPENING_DISTANCE, UNIFORM_GEOMETRIC_SHARPENING_STRENGTH } from "./uniform-geometric-parameters";
+import { resolveUniformGeometricValues, uniformGeometricSharpeningSweeps, UNIFORM_GEOMETRIC_SHARPENING_STRENGTH } from "./uniform-geometric-parameters";
 import { uniformReferenceSolverOptions } from "./uniform-options";
 import type { WebGPUUniformReferenceOptions } from "./webgpu-uniform-reference";
 import type { MethodParamValues } from "../../core/method-contract";
@@ -11,7 +11,9 @@ export function uniformGeometricSolverOptions(overrides: MethodParamValues = {},
       retainStageDiagnosticsForQA: overrides.retainStageDiagnosticsForQA === true,
       ...uniformReferenceSolverOptions(values, scene), geometricVolume: true, pressureCycleBudget:"lagged", pressureBudgetHeadroom:0,
       sharpeningStrength: UNIFORM_GEOMETRIC_SHARPENING_STRENGTH,
-      sharpeningDistance: UNIFORM_GEOMETRIC_SHARPENING_DISTANCE,
+      sharpeningDistance: Number(values.sharpeningDistance),
+      sharpeningSweeps: uniformGeometricSharpeningSweeps(values.sharpeningSweeps),
+      surfaceVolumeRounds: Number(values.surfaceVolumeRounds),
       velocityTransport: "semi-lagrangian",
       liquidOnlyVelocityAdvection: false,
       surfaceDeficitBalancing: values.surfaceDeficitBalancing === "on",

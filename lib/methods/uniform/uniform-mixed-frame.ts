@@ -35,7 +35,7 @@ import {UNIFORM_ADVANCE_PHASE as A} from "./uniform-stages";
 import {UNIFORM_VOLUME_PHASE as V} from "./uniform-volume-stages";
 import {UniformMixedSolid,type UniformMixedSolidResources} from "./uniform-mixed-solid.wgsl";
 import {UniformMixedSolidDisplacement} from "./uniform-mixed-solid-displacement";
-import {UNIFORM_STAGE_GRID_HEADER_WORDS,uniformStageBandWords,uniformStageGridHeader,uniformStageGridWords} from "./uniform-stage-grids";
+import {UNIFORM_STAGE_GRID_HEADER_WORDS,UNIFORM_STAGE_VIEWS,uniformStageBandWords,uniformStageGridHeader,uniformStageGridWords,uniformStageViewWord} from "./uniform-stage-grids";
 
 export interface UniformMixedFrameTrace {
  instrument(encoder:GPUCommandEncoder):GPUCommandEncoder;
@@ -75,6 +75,9 @@ export interface UniformMixedFrameParameters {
  totalSurfaceVolume?:boolean;redistance?:boolean;sharpening?:boolean;surfaceDeficitBalancing?:boolean;extensionSweeps?:number;
  supportPolicy?:{fineReach:number;shellReach:number;twoLevel:boolean;shellOnly:boolean};
  dust:number;orphanDust?:number;sharpeningStrength:number;sharpeningDistance:number;pressureTolerance:number;
+ /** Sharpening sweeps (even: the last writes V; default 8) and surface-volume Newton rounds (default 2).
+  * Zero sweeps or a zero sharpening band skips sharpening; zero rounds skips the surface-volume shift. */
+ sharpeningSweeps?:number;surfaceVolumeRounds?:number;
 }
 
 /** One owner-driven frame sequence. All persistent fields and large scratch
@@ -97,7 +100,10 @@ export interface UniformMixedFrameBodies{couple?:(encoder:GPUCommandEncoder)=>vo
 export interface UniformMixedFrameRelayout{
  /** Census and build for this frame's dt, after the head's extension of the
   * state the frame starts from and before the adopt. */
- encode(encoder:GPUCommandEncoder,dt:number):void;
+ encode(encoder:GPUCommandEncoder,dt:number,views:boolean):void;
+ /** views: the census's band reasons (UNIFORM_STAGE_REASON, one word per
+  * tile), written by an encode with views on. */
+ readonly reasons:{readonly buffer:GPUBuffer;readonly offset:number};
  /** The built generation's buffers (UniformMixedLayoutBuilder.generation). */
  readonly generation:UniformMixedGenerationBuffers;
  /** The builder's relayout receipt (UNIFORM_MIXED_RELAYOUT_RECEIPT). */
@@ -106,6 +112,14 @@ export interface UniformMixedFrameRelayout{
 export interface UniformMixedFrameReceipt{cycles:number;encoded:number;residual:number;converged:boolean;dustOwners:number;dustMass_cells:number;orphanDustOwners:number;orphanDustMass_cells:number;
  /** The h band this frame re-solved: tiles, completed cycles, final residual (0 when the band is empty). */
  bandTiles:number;bandCycles:number;bandResidual:number}
+/** The mixed solve's residual target. Tolerance 0 is the fixed-budget
+ * control: no user stopping tolerance, so the solve is done at the
+ * hierarchy's absolute accuracy (as the native mgCheckCycleConvergence
+ * treats it). A literal 0 target can never be met: every frame would fail. */
+function uniformMixedPressureTarget(p:{pressureTolerance:number}):number{
+ return p.pressureTolerance>0?p.pressureTolerance:UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE;
+}
+
 export class UniformMixedFrame {
  readonly transport:UniformMixedTransportStage;
  get ownership(){return this.transport.ownership;}
@@ -126,7 +140,7 @@ export class UniformMixedFrame {
  private readonly stageBandTiles:number;
  private readonly split:{
   transfer:UniformMixedOwnershipTransfer;toPressure:GPUBindGroup;toSimulation:GPUBindGroup;
-  geometry:UniformMixedSurfaceGeometry;geometryGroup:GPUBindGroup;authority:UniformMixedPressureAuthority;authorityGroup:GPUBindGroup;
+  authority:UniformMixedPressureAuthority;authorityGroup:GPUBindGroup;
   rhsGroup:GPUBindGroup;projectionGroup:GPUBindGroup;
  };
  /** Two-stage pressure: every pressure level is all-4h and
@@ -260,12 +274,13 @@ export class UniformMixedFrame {
   this.surfaceGroups=[this.surface.bind({...surfaceFields,phi:f.phi,outputPhi:f.phiScratch}),this.surface.bind({...surfaceFields,phi:f.phiScratch,outputPhi:f.phi})];
   this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid,true);
   this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,f.volume,f.phi,{buffer:f.arena.buffer});
-  this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,true);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi);
+  // The full launch after surface volume also writes split pressure's all-4h geometry.
+  this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,true,true);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry);
   this.sharpen=new UniformMixedSharpening(device,o,solid,{list:buffer("Uniform mixed sharpening tile list",UniformMixedSharpening.workBytes(layout.tiles.length),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST)},true);
   this.sharpenGroups=[this.sharpen.bind(f.volume,f.volumeScratch,f.phi,f.target,f.centerPhi,{buffer:f.arena.buffer,offset:0,size:f.arena.edgeBytes},this.params.sharpen,this.reductions),this.sharpen.bind(f.volumeScratch,f.volume,f.phi,f.target,f.centerPhi,{buffer:f.arena.buffer,offset:0,size:f.arena.edgeBytes},this.params.sharpen,this.reductions)];
   // Retain the projected h velocity detail: restricting all momentum to 4h
   // removes the long-dam toe even when total liquid volume is conserved.
-  this.momentum=new UniformMixedMomentum(device,o,true,true);
+  this.momentum=new UniformMixedMomentum(device,o,true,true,f.sourceParams);
   this.momentumGroup=this.momentum.bind({unitVelocity:this.hanging.unitVelocity,extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeScratch,output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,...cacheFields});
   // Viscosity reads exact MAC sites from the momentum fill (the extended
   // velocity): h sites in the unit texture, 4h sites in the coarse cache.
@@ -297,12 +312,10 @@ export class UniformMixedFrame {
    // keeps the simulation layout's capacity).
    this.stageBandWord=p.layout.cellCount;this.stageGridWord=this.stageBandWord+uniformStageBandWords(n,this.stageBandTiles);
    this.presentation={pressure:{buffer:present("pressure",4*uniformMixedPressureStorage(p.layout).count)},phi:{buffer:present("pressure phi and stage grids",4*(this.stageGridWord+uniformStageGridWords(n)))}};
-   const geometry=new UniformMixedSurfaceGeometry(device,p,solid,false),authority=new UniformMixedPressureAuthority(device,p,solid,coarseSolid);
+   const authority=new UniformMixedPressureAuthority(device,p,solid,coarseSolid,true);
    this.split={transfer,rhsGroup,projectionGroup,
     toPressure:transfer.bind({volume:f.volume,velocity:f.velocityScratch,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,negative:f.negative},this.status),
     toSimulation:transfer.bind({volume:f.volume,velocity:f.velocityScratch,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,negative:f.negative},this.status),
-    // The resolved simulation phi holds every 4h corner's vertex value.
-    geometry,geometryGroup:geometry.bind(f.phi,g.target,g.centerPhi),
     authority,authorityGroup:authority.bind({centerPhi:g.centerPhi,volume:f.volumeScratch,targetFill:g.target,phi:root.phi!,phase:f.phase,correction:f.correction,scratch:root.frozen,params:this.params.authority,
      fine:coarseSolid?{centerPhi:f.centerPhi,volume:f.volume}:undefined})};
   }
@@ -324,7 +337,7 @@ export class UniformMixedFrame {
   const root=this.pressureOwnership;
   this.pressureSchedule=new UniformMixedPressureSchedule(this.device,this.schedule,this.state,this.fields.pressure.tolerance,
    {native:this.fields.pressure.diagnostics,fine:root.support,supportWord:9*root.layout.tiles.length+24,status:this.status,band:this.band.index,bandClosedWord:UniformPressureBand.closedWord});
-  await Promise.all([this.solid,this.displacement,this.transport,this.plan,this.cleanup,this.remap,this.phiResolve,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.geometry,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band]
+  await Promise.all([this.solid,this.displacement,this.transport,this.plan,this.cleanup,this.remap,this.phiResolve,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band]
    .map(stage=>stage?.initialize()));
   this.ready=true;
  }
@@ -372,9 +385,20 @@ export class UniformMixedFrame {
   floats(this.params.momentum,[...h,p.dt]);flags(this.params.momentum,[+p.openTop,0,0,UNIFORM_MIXED_MOMENTUM_LIMITS]);
   floats(this.params.forces,[...h,p.dt,p.gravity,p.density,p.viscosity,p.surfaceTension,+p.noSlip,+p.openTop,0,p.dust]);
   floats(this.params.authority,[p.dt,p.surfaceDeficitBalancing===true?0:-1,0,p.dust]);floats(this.params.sharpen,[p.sharpeningStrength,p.sharpeningDistance,p.dust,p.orphanDust??0,0,0,0,0]);
-  floats(this.params.projection,[...h,p.dt,p.density,+p.openTop,0,p.dust]);floats(this.params.acceptance,[p.dt/p.density,p.pressureTolerance,UNIFORM_PRESSURE_RELATIVE_REDUCTION,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE]);
+  floats(this.params.projection,[...h,p.dt,p.density,+p.openTop,0,p.dust]);floats(this.params.acceptance,[p.dt/p.density,uniformMixedPressureTarget(p),UNIFORM_PRESSURE_RELATIVE_REDUCTION,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE]);
   floats(this.bandParams,[...h,p.dt,p.density,+p.openTop,p.dt/p.density,Math.min(...h),0,...h.map(x=>Math.fround(1/Math.fround(Math.fround(x)*Math.fround(x))))]);
-  this.device.queue.writeBuffer(this.presentation.phi.buffer,4*this.stageGridWord,uniformStageGridHeader(this.ownership.capacity.tiles,this.stageBandTiles));
+  const views=this.layoutViews?(this.relayout?UNIFORM_STAGE_VIEWS.previous|UNIFORM_STAGE_VIEWS.reasons:0)|UNIFORM_STAGE_VIEWS.certificate:0;
+  this.device.queue.writeBuffer(this.presentation.phi.buffer,4*this.stageGridWord,uniformStageGridHeader(this.ownership.capacity.tiles,this.stageBandTiles,views));
+ }
+ /** Record the layout views (the stage grids' previous, reasons and
+  * certificate sections) for the tiles, grid and pressure layers. Off, the
+  * frame copies nothing and the census records no reasons. */
+ setLayoutViews(enabled:boolean):void{this.layoutViews=enabled;}
+ private layoutViews=false;
+ /** Copies one view section (a word per tile) into the stage grids. */
+ private recordStageView(encoder:GPUCommandEncoder,source:{readonly buffer:GPUBuffer;readonly offset:number},section:"previous"|"reasons"|"certificate"):void{
+  const n=this.ownership.capacity.tiles;
+  encoder.copyBufferToBuffer(source.buffer,source.offset,this.presentation.phi.buffer,4*(this.stageGridWord+uniformStageViewWord(n,section)),4*n);
  }
  /** Copies one stage's tile words (or the band bits) into the stage grids. */
  private recordStageGrid(encoder:GPUCommandEncoder,source:GPUBuffer,range:"transport"|"pressure"|"band"):void{
@@ -443,7 +467,8 @@ export class UniformMixedFrame {
     if(!reuse){this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2);trace?.phase(encoder,V.extension);}
    }
    }
-   this.plan.encodeCertificate(encoder,p.dt);this.cache.encode(encoder,this.cacheGroup);this.hanging.encode(encoder,this.hangingGroup);
+   this.plan.encodeCertificate(encoder,p.dt);if(this.layoutViews)this.recordStageView(encoder,this.plan.certificate,"certificate");
+   this.cache.encode(encoder,this.cacheGroup);this.hanging.encode(encoder,this.hangingGroup);
    trace?.phase(encoder,V.transportReach);
    this.surface.encode(encoder,"advect",this.surfaceGroups[0]);this.phiResolve.encode(encoder,this.phiResolveGroups.scratch);this.surface.encode(encoder,"traceCells",this.surfaceGroups[0]);
    if(p.redistance!==false){this.surface.encode(encoder,"redistance",this.surfaceGroups[1]);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}else this.copyWhole(encoder,this.fields.phiScratch,this.fields.phi);
@@ -454,12 +479,13 @@ export class UniformMixedFrame {
    trace?.phase(encoder,V.coupling);
    // Apply shifts canonical vertices only; resolved readers below and the
    // next advect read the hanging texels.
-   if(p.totalSurfaceVolume!==false){this.surfaceVolume.encode(encoder,this.surfaceVolumeGroup);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}
+   if(p.totalSurfaceVolume!==false&&(p.surfaceVolumeRounds??2)>0){this.surfaceVolume.encode(encoder,this.surfaceVolumeGroup,p.surfaceVolumeRounds??2);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}
    // Nothing after this pass writes phi: the next advance starts from it.
 
-   this.geometry.encode(encoder,this.geometryGroup);this.geometryCurrent=true;
+   // Nothing below writes phi before the split reads the pressure geometry.
+   this.geometry.encode(encoder,this.geometryGroup,{pressure:true});this.geometryCurrent=true;
    trace?.phase(encoder,V.gather);
-   if(p.sharpening!==false){this.sharpen.encodeGeometry(encoder,this.sharpenGroups[0]);this.sharpen.encodeSweeps(encoder,this.sharpenGroups,8);}
+   if(p.sharpening!==false&&(p.sharpeningSweeps??8)>0&&p.sharpeningDistance>0){this.sharpen.encodeGeometry(encoder,this.sharpenGroups[0]);this.sharpen.encodeSweeps(encoder,this.sharpenGroups,p.sharpeningSweeps??8);}
    trace?.phase(encoder,V.sharpen);
    this.momentum.encode(encoder,this.momentumGroup);
    this.forces.encode(encoder,this.forceGroup);
@@ -471,7 +497,7 @@ export class UniformMixedFrame {
    this.authority.encode(encoder,this.authorityGroup);this.band.encodePrepare(encoder);
    const split=this.split;
    split.transfer.encodeToPressure(encoder,split.toPressure);
-   split.geometry.encode(encoder,split.geometryGroup);split.authority.encode(encoder,split.authorityGroup);
+   split.authority.encode(encoder,split.authorityGroup);
    this.projection.encode(encoder,"rhs",split.rhsGroup);this.cycles.encodeSetup(encoder);
    this.cycles.encodeMeasure(encoder);this.acceptance.encode(encoder,this.acceptanceGroup,this.state,"initial");
    trace?.phase(encoder,A.pressureSetup);
@@ -509,8 +535,9 @@ export class UniformMixedFrame {
    if(bodies?.couple){bodies.couple(encoder);trace?.phase(encoder,A.rigidCoupling);}
    encoder.copyBufferToBuffer(this.state,0,readback,0,32);encoder.copyBufferToBuffer(this.reductions,0,readback,32,48);schedule.encodePlanCopy(encoder,readback,80);
    this.band.encodeReceipt(encoder,readback,88);encoder.copyBufferToBuffer(this.status,0,readback,120,4*UNIFORM_MIXED_STATUS_WORDS);
-   if(extendTail)this.encodeExtensionOf(encoder,p);
-   if(extendTail)trace?.phase(encoder,A.resolutionCensus);
+   // The next head's census and advection read this extension: it is the
+   // frame's velocity extension, priced there, not the census's.
+   if(extendTail){this.encodeExtensionOf(encoder,p);trace?.phase(encoder,V.extension);}
    trace?.submit(encoder,this.fields.negative);this.device.queue.submit([encoder.finish()]);trace?.submitted();
    this.unchecked.add(readback);
    return this.check(readback,frame,p,plan.vCycles+plan.fullCycles);
@@ -529,8 +556,8 @@ export class UniformMixedFrame {
    const failure=describeUniformMixedFrameStatus(mapped.slice(30,30+UNIFORM_MIXED_STATUS_WORDS));
    if(failure)throw new Error(`${failure}; projection withheld${typeof process!=="undefined"&&process.env.FLUID_MIXED_HOST_DIAGNOSTICS?`; params ${JSON.stringify(p)}; receipt ${[...state]}`:""}`);
    const residual=new Float32Array(state.buffer)[1]!,count=state[7]!;
-   if(state[4]!==0||state[5]===0||!Number.isFinite(residual)||residual<0||residual>p.pressureTolerance){
-    throw new Error(`Uniform mixed pressure ${state[4]!==0?"rejected a non-improving cycle":"did not converge"}: candidate ${new Float32Array(state.buffer)[0]}, accepted ${residual}, tolerance ${p.pressureTolerance}, ${count} cycles; projection withheld${typeof process!=="undefined"&&process.env.FLUID_MIXED_HOST_DIAGNOSTICS?`; params ${JSON.stringify(p)}; receipt ${[...state]}`:""}`);
+   if(state[4]!==0||state[5]===0||!Number.isFinite(residual)||residual<0||residual>uniformMixedPressureTarget(p)){
+    throw new Error(`Uniform mixed pressure ${state[4]!==0?"rejected a non-improving cycle":"did not converge"}: candidate ${new Float32Array(state.buffer)[0]}, accepted ${residual}, tolerance ${uniformMixedPressureTarget(p)}, ${count} cycles; projection withheld${typeof process!=="undefined"&&process.env.FLUID_MIXED_HOST_DIAGNOSTICS?`; params ${JSON.stringify(p)}; receipt ${[...state]}`:""}`);
    }
    if(mapped[23]!==0)throw new Error(`Uniform pressure band needs ${mapped[22]} tiles, over its capacity; projection is incomplete`);
    if(mapped[25]!==0)throw new Error(`Uniform pressure band solid certificate failed (${mapped[25]&1?"a cut tile the simulation holds at 4h has a liquid row":""}${mapped[25]===3?"; ":""}${mapped[25]&2?"a Neumann face is cut, V<1":""}); projection is incomplete`);
@@ -569,6 +596,8 @@ export class UniformMixedFrame {
  setRelayout(relayout?:UniformMixedFrameRelayout):void{
   if(this.busy)throw new Error("The mixed relayout cannot change during an advance");
   this.relayout=relayout;
+  // Only the relayout's census certifies residency: without it every page is resident.
+  if(!relayout)this.ownership.resetResidency();
   // markChanged latches a builder fatal into this frame's record.
   this.remap.bindStatus(this.status);
  }
@@ -607,20 +636,25 @@ export class UniformMixedFrame {
    this.authority.encode(encoder,this.authorityGroup,false);
    this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2);trace?.phase(encoder,V.extension);
   }
-  relayout.encode(encoder,p.dt);
+  // The tiles as the frame starts, for the grid layer's relayout marks.
+  if(this.layoutViews)this.recordStageView(encoder,{buffer:this.ownership.presentation.buffer,offset:this.ownership.presentation.offset??0},"previous");
+  relayout.encode(encoder,p.dt,this.layoutViews);
+  if(this.layoutViews)this.recordStageView(encoder,relayout.reasons,"reasons");
   this.remap.applyGpu(encoder,relayout.generation,relayout.receipt,true);
   this.encodeLayoutGeneration(encoder,relayout.receipt.buffer,relayout.receipt.offset+4*UNIFORM_MIXED_RELAYOUT_RECEIPT.generation);
   this.geometryCurrent=false;
   trace?.phase(encoder,A.resolutionCensus);
   this.phiResolve.encode(encoder,this.phiResolveGroups.phi);
+  // Only the relayout moved phi since the last geometry unless solids moved.
+  const solidsMoved=this.solidEditPending||bodies;
   if(this.solidEditPending||bodies){this.displacement!.encode(encoder,this.fields.volume,!this.solidEditPending);this.solidEditPending=false;}
   // Which cut tiles the simulation holds at h: the all-4h levels read their h texels.
   this.solid?.encodeSimulation(encoder,this.ownership.presentation);this.solidWidthsStale=false;
   if(this.solid)trace?.phase(encoder,V.solids);
   this.recordStageGrid(encoder,this.ownership.presentation.buffer,"transport");
-  this.plan.encode(encoder,p.supportPolicy);this.geometry.encode(encoder,this.geometryGroup);
+  this.plan.encode(encoder,p.supportPolicy);this.geometry.encode(encoder,this.geometryGroup,{changed:!solidsMoved});
   this.authority.encode(encoder,this.authorityGroup,false);
   trace?.phase(encoder,V.support);
  }
- destroy():void{this.solid?.destroy();this.displacement?.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.surface.destroy();this.hanging.destroy();this.remap.destroy();this.transport.destroy();this.cleanup.destroy();this.split.transfer.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
+ destroy():void{this.solid?.destroy();this.displacement?.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.transport.destroy();this.cleanup.destroy();this.split.transfer.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
 }

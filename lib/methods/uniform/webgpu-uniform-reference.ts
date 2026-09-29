@@ -79,6 +79,7 @@ import { UNIFORM_ADVANCE_PHASE } from "./uniform-stages";
 export { UNIFORM_ADVANCE_PHASE } from "./uniform-stages";
 export { UNIFORM_FLUID_PIPELINE } from "./uniform-pipeline";
 import { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS } from "./parameters";
+import { uniformGeometricSharpeningSweeps, uniformGeometricSurfaceVolumeRounds } from "./uniform-geometric-parameters";
 export { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS } from "./parameters";
 import { uniformFixedAdvanceReady, uniformFixedStep_s } from "./uniform-paper";
 import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
@@ -154,6 +155,10 @@ export interface WebGPUUniformReferenceOptions {
   sharpeningStrength?: number;
   /** Algorithm 2 maximum gradient-trace distance, in cells. */
   sharpeningDistance?: number;
+  /** Geometric only: mixed sharpening sweeps per step (even). */
+  sharpeningSweeps?: number;
+  /** Geometric only: secant Newton rounds of the total surface-volume shift. */
+  surfaceVolumeRounds?: number;
   /** Sec. 3.6 cut-cell excess redistribution. */
   solidExcessCorrection?: boolean;
   /** Two-way fluid/body exchange and rigid integration. */
@@ -615,6 +620,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private gammaDiffusionIterations: number;
   private sharpeningStrength: number;
   private sharpeningDistance: number;
+  private sharpeningSweeps: number;
+  private surfaceVolumeRounds: number;
   private solidExcessCorrection: boolean;
   private rigidCoupling: boolean;
   private readonly pressureSchedule: UniformCM11aSchedule;
@@ -759,7 +766,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.gammaDiffusionIterations = Math.round(Math.min(UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS,
       Math.max(0, options.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS)));
     this.sharpeningStrength = Math.min(this.geometricVolume ? 1 : 2, Math.max(this.geometricVolume ? 0 : 0.25, options.sharpeningStrength ?? 1));
-    this.sharpeningDistance = Math.min(3.1, Math.max(0.1, options.sharpeningDistance ?? 2.1));
+    // Geometric: zero skips the stage (the frame never sends a zero band to the GPU).
+    this.sharpeningDistance = Math.min(3.1, Math.max(this.geometricVolume ? 0 : 0.1, options.sharpeningDistance ?? 2.1));
+    this.sharpeningSweeps = uniformGeometricSharpeningSweeps(options.sharpeningSweeps);
+    this.surfaceVolumeRounds = uniformGeometricSurfaceVolumeRounds(options.surfaceVolumeRounds);
     this.solidExcessCorrection = options.solidExcessCorrection !== false;
     this.rigidCoupling = options.rigidCoupling !== false;
     this.pressureSchedule = options.pressureSchedule ?? {
@@ -1334,6 +1344,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // One concurrent compile: serial stages left a first load waiting on
     // each uncached pipeline in turn.
     await Promise.all([this.mixedFrame,this.mixedDiagnostics,this.mixedDynamic,this.mixedBuilder,this.mixedBodies].map(part=>part.initialize()));
+    this.mixedFrame.setLayoutViews(this.layoutViews);
     this.mixedAccountedBytes=this.mixedFrame.allocatedBytes;
     this.executionInfo.allocatedBytes+=this.mixedAccountedBytes+this.mixedDynamic.allocatedBytes+this.mixedBuilder.allocatedBytes+(this.mixedBodies?.allocatedBytes??0);
     this.mixedSource={vertexPhi:this.vertexPhiField,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedPressure:this.mixedFrame.presentation.pressure,mixedPressurePhi:this.mixedFrame.presentation.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support}};
@@ -1401,14 +1412,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * every surface tile stays h: no shape or speed exception. */
   private mixedRelayout():UniformMixedFrameRelayout{
     const dynamic=this.mixedDynamic!,builder=this.mixedBuilder!;
-    return {generation:builder.generation,receipt:builder.receipt,encode:(encoder,dt)=>{
+    return {generation:builder.generation,receipt:builder.receipt,reasons:dynamic.reasons,encode:(encoder,dt,views)=>{
       const staticKey=`${this.mixedSolidMaskStamp}:${JSON.stringify(this.scene.fluid.refinementRegions??[])}`;
       if(staticKey!==this.mixedBuilderStaticKey)this.refreshMixedBuilderStatics(this.mixedSolidPromotion());
       const g=this.scene.fluid.gravity_m_s2;
       dynamic.encode(encoder,{dt,steps:1,gravity:[g.x,g.y,g.z],reach:this.mixedCoarseningReach,hysteresis:this.mixedCoarseningHysteresis,
         surfaceTolerance:0,fastTravel:0,
         boundaryTravel:this.mixedCoarseningBoundaryTravel,closedWalls:this.scene.container.top==="open"?0b101111:0b111111,up:Math.sign(-g.y),
-        fullTolerance:UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE,emptyTolerance:Math.max(this.volumeDustThreshold,1e-6)},false);
+        fullTolerance:UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE,emptyTolerance:Math.max(this.volumeDustThreshold,1e-6),reasons:views},false);
       builder.encode(encoder,false);
       // Diagnostics only: a free read takes this build's receipt; mapped
       // once the frame submits (readMixedRelayout), never awaited.
@@ -1761,7 +1772,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS,
     ));
     this.sharpeningStrength = finite("sharpeningStrength", 1, this.geometricVolume ? 0 : 0.25, this.geometricVolume ? 1 : 2);
-    this.sharpeningDistance = finite("sharpeningDistance", 2.1, 0.1, 3.1);
+    this.sharpeningDistance = finite("sharpeningDistance", 2.1, this.geometricVolume ? 0 : 0.1, 3.1);
     this.solidExcessCorrection = values.solidExcessCorrection !== "off";
     this.rigidCoupling = values.rigidCoupling !== "off";
     this.fixedStep_s = uniformFixedStep_s(values.timeStep);
@@ -1779,6 +1790,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // Absent means "leave as constructed".
       if (values.volumeDustThreshold !== undefined) this.volumeDustThreshold = finite("volumeDustThreshold", 0, 0, 1);
       if (values.orphanDustThreshold !== undefined) this.orphanDustThreshold = finite("orphanDustThreshold", 0, 0, 0.05);
+      if (values.sharpeningSweeps !== undefined) this.sharpeningSweeps = uniformGeometricSharpeningSweeps(values.sharpeningSweeps);
+      if (values.surfaceVolumeRounds !== undefined) this.surfaceVolumeRounds = uniformGeometricSurfaceVolumeRounds(values.surfaceVolumeRounds);
       if (values.coarsening !== undefined && (values.coarsening === "dynamic" ? "dynamic" : "regions") !== this.mixedCoarsening) {
         this.mixedCoarsening = values.coarsening === "dynamic" ? "dynamic" : "regions";
         // Regions restores the authored layout now; dynamic relayouts from the next frame's head.
@@ -2262,6 +2275,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }).catch(() => { this.pressureCycleDemandPending = false; });
   }
 
+  /** Mixed layout views (band reasons, sampler certificate, the frame's
+   * starting tiles) are recorded only while a layer draws them. */
+  private layoutViews = false;
+  setLayoutViewsEnabled(enabled: boolean): void {
+    if (enabled === this.layoutViews) return;
+    this.layoutViews = enabled;
+    this.mixedFrame?.setLayoutViews(enabled);
+  }
+
   /**
    * The active-region header this step's finalize wrote, for the solve-window
    * view. Withdrawn while the window is off, when the dense schedule dispatches
@@ -2405,7 +2427,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         viscosity:this.scene.fluid.dynamicViscosity_Pa_s,surfaceTension:this.scene.fluid.surfaceTension_N_m,
         openTop:this.scene.container.top==="open",noSlip:this.scene.container.fluidWallMode==="no-slip",cubic:this.phiCubicAdvection,drain:this.phiDrain,
         dust:this.volumeDustThreshold,orphanDust:this.orphanDustThreshold,sharpeningStrength:this.densitySharpening?this.sharpeningStrength:0,
-        sharpeningDistance:this.sharpeningDistance,pressureTolerance:this.pressureMultigrid.residualTolerance,
+        sharpeningDistance:this.sharpeningDistance,sharpeningSweeps:this.sharpeningSweeps,surfaceVolumeRounds:this.surfaceVolumeRounds,pressureTolerance:this.pressureMultigrid.residualTolerance,
         totalSurfaceVolume:this.totalSurfaceVolume,redistance:this.geometricRedistance,sharpening:this.densitySharpening,
         surfaceDeficitBalancing:this.surfaceDeficitBalancing,extensionSweeps:this.velocityExtrapolator.frontPasses,
         supportPolicy:{fineReach:UNIFORM_TWO_LEVEL_FINE_REACH,shellReach:this.twoLevelShellReach,twoLevel:this.twoLevelEnabled,shellOnly:this.twoLevelEnabled},

@@ -140,6 +140,10 @@ override UM_PROLONG:u32=0u;
 // The mixed pressure schedule's slot gate (support 9n+24, 0 open).
 fn umSlotClosed()->bool{return umSupport[9u*UM_CELLS+24u]!=0u;}
 fn umNative(p:vec3u)->u32{return p.x+UM_N.x*(p.y+UM_N.y*p.z);}
+// The residency certificate the transfer copies into this ownership's support
+// (uniformMixedResidencyWord): a flag per page of 4^3 owners.
+const UM_PD=(UM_T+vec3u(3u))/4u;const UM_RESIDENCY=9u*UM_CELLS+28u;
+fn umAbsent(c:vec3u)->bool{let q=c/4u;return umSupport[UM_RESIDENCY+4u+q.x+UM_PD.x*(q.y+UM_PD.y*q.z)]==0u;}
 fn umKey(c:vec3u)->u32{return c.x+UM_T.x*(c.y+UM_T.y*c.z);}
 fn umStride(axis:u32)->u32{return select(select(UM_T.x*UM_T.y,UM_T.x,axis==1u),1u,axis==0u);}
 // umBoundaryIndex of the all-4h layout.
@@ -225,6 +229,16 @@ fn umProjected(p:f32,r:f32,low:f32,diagonal:f32)->f32{
 // and bakes (walls at the halo, V=1/2 on closed domain faces).
 @compute @workgroup_size(4,4,4) fn setup(@builtin(global_invocation_id) p:vec3u){
  if(any(p>=UM_N)){return;}let at=umNative(p);let cell=umCell(p);
+ // An absent page's owners and their wall slots: the rows RHS assembly writes
+ // for certified far air (V=0, air: zero RHS and pressure, the bound). RHS
+ // assembly and projection stride the resident pages only, and these arena
+ // words are shared scratch, rewritten by other stages every frame.
+ if(cell.kind!=0u&&umAbsent(cell.c)){
+  var bound=-3.402823e38;
+  if(cell.kind==2u){bound=select(0.0,-3.402823e38,umOpen(cell.axis,cell.side));}
+  ${solid ? "else if(umTopo(cell.key).x<=1e-5){bound=0.0;}" : ""}
+  mixed[UM_P+cell.slot]=0.0;mixed[UM_B0+cell.slot]=0.0;mixed[UM_M0+cell.slot]=bound;
+ }
  var distance:f32=${2 * Math.min(...h)};var topology=vec4f(0.0);
  if(cell.kind==1u){
   distance=phi[cell.key];${solid ? "topology=umTopo(cell.key);" : `topology=vec4f(1.0);

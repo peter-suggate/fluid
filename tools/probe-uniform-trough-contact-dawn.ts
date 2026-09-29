@@ -13,6 +13,7 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
 import { resolveMethodValues } from "../lib/core/method-contract";
+import { readMixedTileWords } from "../tests/helpers/uniform-mixed-native-fields";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 
 const arg=(key:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${key}=`))?.slice(key.length+3)??fallback;
@@ -73,7 +74,12 @@ try{
  for(let frame=0;frame<=frames;frame++){
   if(frame){assert.ok(solver.advanceTo(frame/30,[]));await solver.awaitFrameCompletion();}
   if(frame>3&&frame%30&&frame!==frames)continue;
-  const phi=await read(device,solver.vertexPhiTexture!),v=await read(device,solver.volumeTexture),velocity=await read(device,solver.velocityTexture),stats=await solver.readStats();
+  const phi=await read(device,solver.vertexPhiTexture!),raw=await read(device,solver.volumeTexture),velocity=await read(device,solver.velocityTexture),stats=await solver.readStats();
+  // Each cell's V from its owner: a 4h owner's V lives at its origin texel
+  // and its other texels are stale, not state.
+  const tiles=await readMixedTileWords(device,solver),v=new Float32Array(raw.length);
+  for(let i=0;i<v.length;i++){const x=i%nx,y=Math.floor(i/nx)%ny,z=Math.floor(i/(nx*ny)),width=tiles[(x>>2)+(nx>>2)*((y>>2)+(ny>>2)*(z>>2))]!&0x80000000?1:4;
+   v[i]=raw[x-x%width+nx*(y-y%width+ny*(z-z%width))]!;}
   let mass=0,maxSpeed=0,highBackMass=0,closedMass=0;
   for(let i=0;i<v.length;i++){assert.ok(Number.isFinite(v[i])&&v[i]!>=-1e-5);mass+=v[i]!;if(open[i]!<1e-5)closedMass+=v[i]!;if(v[i]!>1e-5)maxSpeed=Math.max(maxSpeed,Math.hypot(...velocity.subarray(4*i,4*i+3)));const x=i%nx,y=Math.floor(i/nx)%ny;if(x<nx*.3&&y*h>.45)highBackMass+=v[i]!;}
   const regions:Record<string,{wet:number;unsupported:number;deepest:number;unsupportedDeepest:number}>={all:{wet:0,unsupported:0,deepest:0,unsupportedDeepest:0},highBack:{wet:0,unsupported:0,deepest:0,unsupportedDeepest:0}};

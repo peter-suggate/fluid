@@ -313,6 +313,13 @@ export interface GPUSolverInstance {
    * runtime toggle, so it is read fresh every frame.
    */
   readonly tileClassSource?: GPUFluidTileClassSource;
+  /**
+   * Record the mixed Uniform layout views (why each tile is h, the velocity
+   * sampler certificate, the tiles each frame started from) that the tiles,
+   * grid and pressure layers read. Like markers, these words exist only for
+   * the view: off, the solver copies and records none of them.
+   */
+  setLayoutViewsEnabled?(enabled: boolean): void;
   /** Actual transient geometric volume page table (header, flags, slots). */
   readonly volumePageSource?: GPUFluidVolumePageSource;
   /**

@@ -1,14 +1,29 @@
 import { UNIFORM_PARAMS } from "./parameters";
 import { numberValue, type MethodParamSpec, type MethodParamValues } from "../../core/method-contract";
 
-// Sharpening runs at the paper dose (strength 1) over the 2.1h band; the orphan
-// relay and the sharpening admission band both assume that distance.
+// Sharpening runs at the paper dose (strength 1). Its band (default 2.1h) is
+// one uniform the admission test and the orphan relay both read.
 export const UNIFORM_GEOMETRIC_SHARPENING_STRENGTH = 1;
 export const UNIFORM_GEOMETRIC_SHARPENING_DISTANCE = 2.1;
+/** Sharpening sweeps ping-pong V through its scratch: the count is even, so the last sweep writes V.
+ * Zero sweeps, or a zero band, skips the stage as its Off switch does. */
+export const UNIFORM_GEOMETRIC_SHARPENING_SWEEPS = 8;
+export const UNIFORM_GEOMETRIC_SHARPENING_MAX_SWEEPS = 16;
+export const uniformGeometricSharpeningSweeps = (value: unknown): number => {
+  const n = Number(value);
+  return Number.isFinite(n) ? 2 * Math.round(Math.min(UNIFORM_GEOMETRIC_SHARPENING_MAX_SWEEPS, Math.max(0, n)) / 2) : UNIFORM_GEOMETRIC_SHARPENING_SWEEPS;
+};
+/** Secant Newton rounds of the total surface-volume shift; zero skips the stage as its Off switch does. */
+export const UNIFORM_GEOMETRIC_SURFACE_VOLUME_ROUNDS = 2;
+export const UNIFORM_GEOMETRIC_SURFACE_VOLUME_MAX_ROUNDS = 6;
+export const uniformGeometricSurfaceVolumeRounds = (value: unknown): number => {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(Math.min(UNIFORM_GEOMETRIC_SURFACE_VOLUME_MAX_ROUNDS, Math.max(0, n))) : UNIFORM_GEOMETRIC_SURFACE_VOLUME_ROUNDS;
+};
 const omitted = new Set(["gammaDiffusion", "gammaDiffusionIterations", "sharpeningMassCorrection", "solidExcessCorrection", "densityPostProcessing", "activeRegion", "pressureCycleBudget", "pressureBudgetHeadroom"]);
 // Retired controls: hardwired in the adapter. Unlike `omitted`, a saved value is
 // ignored like any other undeclared key, so old configurations still load.
-const retired = new Set(["sharpeningStrength", "sharpeningDistance", "velocityTransport", "liquidOnlyVelocityAdvection"]);
+const retired = new Set(["sharpeningStrength", "velocityTransport", "liquidOnlyVelocityAdvection"]);
 const params: MethodParamSpec[] = UNIFORM_PARAMS.filter(p => !omitted.has(p.key) && !retired.has(p.key)).map(p => {
   // Two sweeps: the front only needs to carry the band one cell per step, and the
   // hierarchy fill covers what it does not reach (docs/benchmarks/uniform-extension-front-sweeps-2026-09-19.md
@@ -17,8 +32,17 @@ const params: MethodParamSpec[] = UNIFORM_PARAMS.filter(p => !omitted.has(p.key)
   if (p.key === "densitySharpening" && p.kind === "select") return { ...p,
     label: "Volume sharpening", options: [{ value: "on", label: "On" }, { value: "off", label: "Off" }],
     hint: "Conservatively redistribute V toward the vertex level set without moving the surface." };
+  if (p.key === "sharpeningDistance" && p.kind === "number") return { ...p,
+    label: "Sharpening band", default: UNIFORM_GEOMETRIC_SHARPENING_DISTANCE, min: 0,
+    hint: "Admission band of volume sharpening, in cells of each owner's own width: an owner whose centre phi lies within it gives and takes V; outside it, dilute orphan V is relayed toward the surface. Narrower bands visit fewer tiles. Zero skips sharpening: a zero band would make every owner on or outside the surface an orphan." };
   return p;
 });
+params.push({kind:"number",key:"sharpeningSweeps",label:"Sharpening sweeps",default:UNIFORM_GEOMETRIC_SHARPENING_SWEEPS,tier:"fine",update:"runtime",
+  min:0,max:UNIFORM_GEOMETRIC_SHARPENING_MAX_SWEEPS,step:2,digits:0,unit:"sweeps",
+  hint:"Propose/limit/commit face-transfer sweeps per step, three launches each. Each sweep moves V at most one owner, so fewer sweeps sharpen less per step. Even only: the sweeps ping-pong V through a scratch field. Zero skips sharpening, its dust clearing included."});
+params.push({kind:"number",key:"surfaceVolumeRounds",label:"Surface volume rounds",default:UNIFORM_GEOMETRIC_SURFACE_VOLUME_ROUNDS,tier:"fine",update:"runtime",
+  min:0,max:UNIFORM_GEOMETRIC_SURFACE_VOLUME_MAX_ROUNDS,step:1,digits:0,unit:"rounds",
+  hint:"Secant Newton rounds of the total surface-volume shift, each a measure, reduce and solve over the band. A converged solve skips the remaining rounds' work but not their launches. Zero skips the shift, band build included, as switching it off does."});
 params.push({kind:"number",key:"volumeDustThreshold",label:"Volume dust floor",default:1e-3,tier:"fine",update:"runtime",
   min:0,max:1e-3,step:1e-7,digits:7,unit:"cell volumes",
   hint:"Discard |V| below this outside the 4h surface band, plus ULP-scale negatives. Positive deposits near the surface are preserved. The 1e-3 default removes far-air residue that keeps transport tiles active; the diagnostics report discarded mass. Zero is off and stores the untreated sum bit for bit."});
@@ -74,7 +98,7 @@ params.push({kind:"number",key:"coarseningBoundaryTravel",label:"Boundary impact
 /** Shared by the studio and scene harnesses. */
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);
 /** Controls the 2D native port does not carry: GPU mixed-ownership scheduling and presentation. */
-const gpuOnlyKeys = new Set(["orphanDustThreshold", "coarsening"]);
+const gpuOnlyKeys = new Set(["orphanDustThreshold", "coarsening", "sharpeningDistance", "sharpeningSweeps", "surfaceVolumeRounds"]);
 export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => !gpuOnlyKeys.has(p.key) && !p.key.startsWith("coarsening")));
 export const UNIFORM_GEOMETRIC_DEFAULTS: Readonly<MethodParamValues> = Object.freeze(
   Object.fromEntries(params.map(p => [p.key, p.default])),

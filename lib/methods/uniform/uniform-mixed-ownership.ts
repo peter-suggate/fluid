@@ -1,7 +1,7 @@
 import { uniformMixedHangingBytes, uniformMixedHangingSlotCapacity } from "./uniform-mixed-velocity-sampling.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import type { RefinementRegionLattice } from "../../core/refinement-regions";
-import { UNIFORM_MIXED_FUSED_REGULAR_TILES, uniformMixedOverflowWord } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_FUSED_REGULAR_TILES, uniformMixedOverflowWord, uniformMixedPageCount, uniformMixedResidencyWord, uniformMixedSupportWords } from "./uniform-mixed-topology.wgsl";
 
 type OwnershipUploadTarget="topology"|"counts"|"support";
 interface OwnershipDerivation{
@@ -43,11 +43,21 @@ function deriveOwnership(layout:UniformMixedLayout,dispatchX:number):OwnershipDe
   writes.push(["support",(7*n+16)*4,new Uint32Array([...seamCounts,0,0,...seamLists.flat()])]);
   // 8n+20: the regular 4h count, three zero words, then its list.
   writes.push(["support",(8*n+20)*4,new Uint32Array([regularCoarse.length,0,0,0,...regularCoarse])]);
+  writes.push(["support",uniformMixedResidencyWord(n)*4,allResident(layout.lattice)]);
   const slotted=[...new Set([...seamLists[0]!,...seamLists[1]!])];
   const slots=new Uint32Array(2*n).fill(0xffffffff);slotted.forEach((tile,slot)=>{slots[tile]=slot;slots[n+slot]=tile;});
   const derivation={dispatchX,writes,seamCounts,hangingSlots:slotted.length,slots};
   derivations.set(layout,derivation);
   return derivation;
+}
+
+/** The residency region with every page resident (uniformMixedResidencyWord):
+ * count, violation bits, radius, reserved, page flags, ascending page list. */
+const residentRegions=new Map<string,Uint32Array<ArrayBuffer>>();
+function allResident(lattice:UniformMixedLayout["lattice"]):Uint32Array<ArrayBuffer>{
+  const key=lattice.dimensions.join(",");let words=residentRegions.get(key);
+  if(!words){const pages=uniformMixedPageCount(lattice);words=new Uint32Array(4+2*pages);words[0]=pages;words.fill(1,4,4+pages);for(let p=0;p<pages;p++)words[4+pages+p]=p;residentRegions.set(key,words);}
+  return words;
 }
 
 /** Workgroups of a certified launch at most (grid-stride over its jobs). A
@@ -161,8 +171,10 @@ export class UniformMixedOwnership {
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM });
     // 9n+24: the mixed pressure schedule's slot gate (umSlotClosed), zero
     // except on a pressure level inside a closed slot. Builders stop at 9n+24.
-    this.support = device.createBuffer({label:"Uniform shared frame support and certified work",size:(layout.tiles.length*9+28)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-    this.speeds = device.createBuffer({label:"Uniform local speed certificate",size:layout.tiles.length*8,usage:GPUBufferUsage.STORAGE});
+    // 9n+28: the residency certificate (uniformMixedResidencyWord), all
+    // resident after update(); only the census narrows it.
+    this.support = device.createBuffer({label:"Uniform shared frame support and certified work",size:uniformMixedSupportWords(n,layout.lattice)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+    this.speeds = device.createBuffer({label:"Uniform local speed certificate",size:layout.tiles.length*8,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
     if(sampled){
       const bytes=uniformMixedHangingBytes(n);
       if(bytes>device.limits.maxStorageBufferBindingSize)throw new Error(`Uniform mixed hanging tap cache needs ${bytes} bytes; the device binds at most ${device.limits.maxStorageBufferBindingSize}`);
@@ -194,6 +206,12 @@ export class UniformMixedOwnership {
     this.mirrorCurrent=true;
   }
 
+  /** Every page resident again (between frames): a frame with no census
+   * that frame must not skip a page an earlier census certified. */
+  resetResidency():void{
+    if(this.frameHeld)throw new Error("Ownership is immutable during an active frame");
+    this.device.queue.writeBuffer(this.support,uniformMixedResidencyWord(this.capacity.tiles)*4,allResident(this.capacity.lattice));
+  }
   /** Adopt a generation built on the GPU (UniformMixedLayoutBuilder). The
    * source buffers hold exactly what update() would upload for `layout`;
    * `seamCounts` and `hangingSlots` come from the builder's receipt. Copies
@@ -209,6 +227,8 @@ export class UniformMixedOwnership {
     if(n!==this.capacity.tiles)throw new Error("A built generation must match the ownership's capacity");
     this.reserveHanging(built.hangingSlots);
     this.copyGeneration(encoder,built.source);
+    // A host-adopted generation's later frames run without a census audit.
+    this.resetResidency();
     this.seamCounts=[...built.seamCounts];
     this.currentLayout=layout;
     this.mirrorCurrent=true;

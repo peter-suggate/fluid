@@ -1,6 +1,6 @@
 # Uniform Geometric fig7-256: 3× assessment (domain-shaped work and paging)
 
-Status: assessment, 2026-09-29, HEAD 5606a3f4 plus the uncommitted working tree. No code changed.
+Status: assessment 2026-09-29 (HEAD 5606a3f4 plus the working tree); rounds 1–4 landed 2026-09-30, see Results.
 
 Target: `cm12-figure-7-256` (256³ = 16.8 M cells, T = 262,144 4³ tiles; a ball of about 1.6 % of the cells dropped into a dry, solid-free box). Goal: 3× frame time, with work proportional to the fluid. Regression indicator: `sparse-cm12-long-dam-break`.
 
@@ -98,3 +98,32 @@ Each step is measured with one fig7-256 run, then one long-dam run, using the pr
 | **S6 pooled page atlas** | Per-generation window table, one address function behind the ~235 helper sites, remap first, and a dense publish for external readers. Reuse the transaction ABI, with a parallel builder and no indirect launches. | neutral (gate: long dam within noise), 3.1 → ~0.7 GiB | per-tap risk |
 
 S1+S2 give about 1.3× on their own; that estimate comes from per-dispatch attribution and still needs a Dawn run to confirm. 3× also needs S3 and S4 to halve the h-list work (about 40 → 20 ms). S0 is the gate on whether that is achievable.
+
+## Results (2026-09-30)
+
+Rounds 1–4 each ran as parallel Opus workstreams in scratch trees. Each was measured with one probe run per scene, plus the type check and the CPU shader preflight. No suites were run.
+
+| round | fig7-256 wall / GPU trace (ms) | long dam wall / trace (ms) | main cuts |
+|---|---:|---:|---|
+| baseline | 57.5 / 56.9 | 12.3 / 10.7 | – |
+| 1 | 49.3 / 52.7 | 12.64 / 10.88 | S1: list-driven retirementEvidence, liveSeed and band classify; signed-reach + summed-volume certificate in place of the host BFS; census decide early-out; builder distance passes retired (verifyWords + sealBuild); surface-volume grow over lists; n/4 pressure and root over lists; solid record read in place |
+| 2 | 43.0 / 45.8 | 11.75 / 10.34 | Claimed launches for the semi-Lagrangian passes; momentum unit step plus escape list; baked band neighbour slots; nested per-round transport live lists; **S2 residency certificate** (16³ pages; resident list in the support words; audit is fatal bit 8) |
+| 3 | 39.9 / 42.2 | 11.54 / 10.23 | Extension per-tile finite flags and O(1) regular-4h publish (exact); residency margin 8→5 tiles (fig7 pages 2124→1689); all-4h pressure transfers, rhs, project, acceptance and authority on resident pages; colour-ordered coarse rows; advectWalls through the deferred list |
+| 4 | ≈39 est. / 44.6 contaminated | – / 10.17 | Extension per-cell masks, per-face liveness and seam work queue (exact; seam + coarse sweeps −2.6 ms); quiet owners leave the sharpening sweeps (3.27→2.25); pressure geometry fused into the fill; head fill limited to changed tiles |
+
+Round 4's combined f7 run was slowed by other GPU clients: stages it did not touch ran 15–40 % slow. Extension (6.45→4.57) and sharpening (3.27→2.25) moved as measured in their own runs.
+
+Quality: volume stays within splash noise of the previous round on both scenes. Peak maxSpeed at the splash varies run to run. No frame threw.
+
+What did not pay:
+- Staging redistanceFine's window (the dependent loads are not its bottleneck).
+- Fusing deferred momentum into the merged launch (+0.29 ms).
+- Staging the extension prolong parents (+0.43 ms).
+- A block Gauss-Seidel band smoother.
+- Packed AoS coarse rows.
+- A multi-workgroup coarseSolve needs a global barrier per colour phase, so it was not attempted.
+
+Where 3× stands:
+- The remaining ~39 ms is spread across about twelve stages of 1–4 ms each. Band solve, momentum, transport, surface volume and redistance are per-lane work, and no exact skip for them was found.
+- The next lever is the h-tile count: the band thickness, horizon and closure floor in [uniform-h-band-thickness-2026-09-29.md](uniform-h-band-thickness-2026-09-29.md). That is S4 of this plan.
+- S5 (right-sized memory) and S6 (pooled atlas) are still open.

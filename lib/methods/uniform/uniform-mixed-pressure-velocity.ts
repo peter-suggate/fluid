@@ -1,7 +1,7 @@
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import { uniformMixedDetachedMassWGSL } from "./uniform-mixed-detached-mass.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedPressureSurfaceWGSL } from "./uniform-mixed-pressure-surface.wgsl";
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
@@ -46,7 +46,13 @@ export interface UniformMixedPressureProjectionFields extends CommonFields {
  * faces, sum(V_h u_h), so the 4h divergence is the exact sum of the h ones and
  * the band's pure-Neumann components stay compatible; a closed owner is a
  * p_min=0 row. The caller builds one authoritative pressure phi. No field owns
- * another simulation; all buffers/textures are borrowed from the native host. */
+ * another simulation; all buffers/textures are borrowed from the native host.
+ * Both launches stride the owners of the resident pages (residentAll): an
+ * absent page is certified far air (V=0, phi at least 16h), whose RHS, bound
+ * and pressure the root setup (UniformMixedPressureCycles) writes and whose
+ * faces nobody reads. A resident owner reads an absent neighbour's phi and
+ * pressure (the setup's far values) and treats its volume as the zero the
+ * census audits. */
 export class UniformMixedPressureVelocity {
  readonly allocatedBytes=0;
  private readonly rhsLayout:GPUBindGroupLayout;
@@ -168,7 +174,7 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
  var q=vec3i(umOrigin(o));q[axis]-=1;return umPressureFaceV(q,axis);
 }`:""}
 @compute @workgroup_size(64) fn buildRhs(@builtin(global_invocation_id) gid:vec3u){
- let o=umAllOwner(gid);if(o.width==0u){return;}var terms:array<f32,6>;
+ let o=umResidentAllOwner(gid);if(o.width==0u){return;}var terms:array<f32,6>;
  ${this.coarse?"let topology=umSolidCoarse(o.index);":this.solid?"let topology=umOwnerTopology(o);textureStore(topologyOut,vec3i(umOrigin(o)),topology);":""}
  // Only a liquid owner keeps its divergence: air skips the face loads.
  let liquid=umPressureLiquid(o);
@@ -216,7 +222,8 @@ fn umProjectV(o:UMOwner,face:UMFace)->f32{
  return textureLoad(topology,face.anchor,0)[face.axis+1u];
 }
 fn umSolidPressure(o:UMOwner)->f32{return select(0.0,umPressure(o),umPressureLiquid(o));}`:""}
-${uniformMixedDetachedMassWGSL(o=>`umPressureLiquid(${o})`,o=>`textureLoad(volume,vec3i(umOrigin(${o})),0).x`,"params.policy.w")}
+// An absent page's volume is not transferred: it is the certified V=0.
+${uniformMixedDetachedMassWGSL(o=>`umPressureLiquid(${o})`,o=>`select(0.0,textureLoad(volume,vec3i(umOrigin(${o})),0).x,umTileResident(${o}.tile))`,"params.policy.w")}
 fn umProject(o:UMOwner,face:UMFace)->f32{
  let liquid=umPressureLiquid(o);let scale=params.hDt.w/params.policy.x;
  // Air on both sides keeps its velocity only beside detached mass. Any
@@ -252,7 +259,7 @@ fn umRelease(o:UMOwner,face:UMFace,v:f32)->bool{
  return pressure<=0.0&&-f32(face.sign)*v*params.hDt.w>1e-4*f32(o.width)*UM_H[face.axis];
 }
 // The projection's schedule slot opens only on an accepted solve.
-fn umProjectOwner(gid:vec3u)->UMOwner{if(umSlotClosed()){return UMOwner();}return umAllOwner(gid);}
+fn umProjectOwner(gid:vec3u)->UMOwner{if(umSlotClosed()){return UMOwner();}return umResidentAllOwner(gid);}
 ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,`
    var released=0u;
    for(var axis=0u;axis<3u;axis++){
@@ -278,15 +285,15 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
    value.w=f32(released);`,"umProjectOwner")}
 `;
   const compile=async(code:string,entryPoint:string,resources:GPUBindGroupLayout)=>{
-   const module=this.device.createShaderModule({code});const info=await module.getCompilationInfo();
+   const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(code,[entryPoint])});const info=await module.getCompilationInfo();
    const errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
    const layout=this.device.createPipelineLayout({bindGroupLayouts:[ownership.bindLayout,resources,...(this.solid?[this.coarse?this.solid.coarse!.bindLayout:this.solid.bindLayout]:[])]});
-   return uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:ownership.dispatchX,...s}}}));
+   return uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll,...s}}}));
   };
   this.rhsPipeline=await compile(rhsSource,"buildRhs",this.rhsLayout);this.projectPipeline=await compile(projectSource,"project",this.projectLayout);
  }
  encode(encoder:GPUCommandEncoder,entry:"rhs"|"project",group:GPUBindGroup):void{
   const pipeline=entry==="rhs"?this.rhsPipeline:this.projectPipeline;if(!pipeline)throw new Error("Mixed pressure velocity stage is not initialized");
-  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);this.ownership.dispatchAll(pass,this.solid?.select(pipeline)??pipeline);pass.end();
+  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);this.ownership.dispatchCounted(pass,this.solid?.select(pipeline)??pipeline);pass.end();
  }
 }

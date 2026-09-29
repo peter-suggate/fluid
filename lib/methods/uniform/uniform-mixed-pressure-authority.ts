@@ -1,5 +1,5 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedPageCount, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformVolumeCorrectionWGSL } from "./uniform-volume-correction.wgsl";
 import { uniformMixedDetachedMassWGSL } from "./uniform-mixed-detached-mass.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
@@ -31,7 +31,15 @@ export interface UniformMixedPressureAuthorityFields {
  * phi samples vertices buried in the solid, which are not state. The vote
  * runs first, one workgroup per cut tile (a lane per h cell), into the
  * scratch after the balance words; build reads it for the owner and for a
- * closed owner's cut neighbours. */
+ * closed owner's cut neighbours.
+ * Resident mode (the split's all-4h pressure ownership, whose support carries
+ * the simulation's residency certificate) strides the resident pages' owners
+ * only (residentAll): an absent page is certified far air (V=0, corner phi at
+ * least 16h), so its owners add nothing to the balance and no reader needs
+ * their phase or correction. Their phi is still read (neighbour faces, the
+ * native continuation lattice), and the pressure root's phi words are shared
+ * scratch, so an "absent" pass writes umAuthority(o,0) for each owner of an
+ * absent page: the same value the dense build writes there. */
 /** Owner entries: GPU-counted launches over every tier (umAllOwner). */
 const counted:readonly string[]=["build","resolve"];
 
@@ -45,7 +53,7 @@ export class UniformMixedPressureAuthority {
  private readonly chunks:number;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly coarse=false){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly coarse=false,private readonly resident=false){
   if(coarse&&(!solid?.coarse||ownership.layout.tiles.some(word=>(word&0xc0000000)!==0)))throw new Error("Coarse mixed pressure authority requires the all-4h solid record and all-4h ownership");
   // A capacity bound, read once: the unified frame reserves its simulation
   // ownership all-h (cellCount = 64 per tile) and pressure ownership is the
@@ -203,7 +211,7 @@ override umAuthorityBalance:bool=true;
 var<workgroup> sums:array<vec2f,64>;
 fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(l<stride){sums[l]+=sums[l+stride];}workgroupBarrier();}}
 @compute @workgroup_size(64) fn build(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) group:vec3u){
- let o=umAllOwner(gid);var values=vec2f(0);
+ let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);var values=vec2f(0);
  if(o.width!=0u){let origin=vec3i(umOrigin(o));let v=textureLoad(volume,origin,0).x;let distance=umAuthority(o,v);
   phi[o.index]=distance;
   textureStore(phase,origin,vec4f(select(0.0,1.0,distance<0.0||umDetachedMass(o))));
@@ -219,7 +227,7 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
  if(l==0u&&index<${this.groups}u){balance[1u+index]=sums[0];}
 }
 @compute @workgroup_size(64) fn chunks(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) l:u32){
- var value=vec2f(0);for(var i=group.x*1024u+l;i<min((umCounts.x*64u+umCounts.y+63u)/64u,(group.x+1u)*1024u);i+=64u){value+=balance[1u+i];}
+ var value=vec2f(0);for(var i=group.x*1024u+l;i<min(${this.resident?"umCounts.x+umResidentPageCount()":"(umCounts.x*64u+umCounts.y+63u)/64u"},(group.x+1u)*1024u);i+=64u){value+=balance[1u+i];}
  sums[l]=value;umReduce(l);if(l==0u){balance[${1+this.groups}u+group.x]=sums[0];}
 }
 @compute @workgroup_size(64) fn reduce(@builtin(local_invocation_index) l:u32){
@@ -227,24 +235,33 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
  sums[l]=value;umReduce(l);if(l==0u){var rate=0.0;if(params.y>=0.0&&sums[0].y>0.0){rate=min(1.0,sums[0].x/sums[0].y);}balance[0]=vec2f(rate,0);}
 }
 @compute @workgroup_size(64) fn resolve(@builtin(global_invocation_id) gid:vec3u){
- let o=umAllOwner(gid);if(o.width==0u){return;}let origin=vec3i(umOrigin(o));let v=textureLoad(volume,origin,0).x;
+ let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);if(o.width==0u){return;}let origin=vec3i(umOrigin(o));let v=textureLoad(volume,origin,0).x;
  let amount=uvVolumeCorrectionAmountAt(v,umCapacity(o),params.x)-balance[0].x*umDeficit(o,v,phi[o.index]);
  textureStore(correction,origin,vec4f(amount/max(params.x,1e-12)));
 }
+${this.resident?`// One group per page: the 4h owners of an absent page take the dense
+// build's phi (V=0 there).
+@compute @workgroup_size(64) fn absent(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) l:u32){
+ let page=group.x;if(page>=UM_PAGES||umPageResident(page)){return;}
+ let tile=umPageTile(page,l);if(tile>=UM_TILES||umTileWidth(tile)!=4u){return;}
+ let o=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);phi[o.index]=umAuthority(o,0.0);
+}`:""}
 `,counted)});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.coarse?this.solid.coarse!.bindLayout:this.solid.bindLayout]:[])]});
-  await Promise.all(["build","chunks","reduce","resolve",...(this.coarse?["cut"]:[])].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:UNIFORM_MIXED_COUNTED.all}:{}),...s}}})));}));
-  this.pipelines.set("phase",await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"build",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.all,umAuthorityBalance:0,...s}}})));
+  const mode=this.resident?UNIFORM_MIXED_COUNTED.residentAll:UNIFORM_MIXED_COUNTED.all;
+  await Promise.all(["build","chunks","reduce","resolve",...(this.coarse?["cut"]:[]),...(this.resident?["absent"]:[])].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:mode}:{}),...s}}})));}));
+  this.pipelines.set("phase",await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"build",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:mode,umAuthorityBalance:0,...s}}})));
  }
  /** balance=false writes phi and phase only: the extension's authority,
   * when this same stage (same ownership, same origin texels) rebuilds the
   * correction and its balance scratch before their readers (band rows, RHS). */
  private variant(pipeline:GPUComputePipeline):GPUComputePipeline{return this.solid?.select(pipeline)??pipeline;}
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,balance=true):void{
-  if(this.pipelines.size!==(this.coarse?6:5))throw new Error("Mixed pressure authority is not initialized");
+  if(this.pipelines.size!==5+(this.coarse?1:0)+(this.resident?1:0))throw new Error("Mixed pressure authority is not initialized");
   const pass=encoder.beginComputePass({label:balance?"Uniform mixed pressure authority and volume correction":"Uniform mixed pressure authority phase"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);
   if(this.coarse){pass.setPipeline(this.variant(this.pipelines.get("cut")!));pass.dispatchWorkgroups(Math.max(1,Math.min(1024,Math.ceil(this.ownership.capacity.tiles/64))));}
+  if(this.resident){pass.setPipeline(this.variant(this.pipelines.get("absent")!));pass.dispatchWorkgroups(uniformMixedPageCount(this.ownership.capacity.lattice));}
   if(!balance){this.ownership.dispatchAllCounted(pass,this.variant(this.pipelines.get("phase")!));pass.end();return;}
   for(const entry of ["build","chunks","reduce","resolve"]){const pipeline=this.variant(this.pipelines.get(entry)!);pass.setPipeline(pipeline);
    if(entry==="chunks")pass.dispatchWorkgroups(this.chunks);else if(entry==="reduce")pass.dispatchWorkgroups(1);else this.ownership.dispatchAllCounted(pass,pipeline);

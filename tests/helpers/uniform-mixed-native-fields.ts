@@ -20,3 +20,14 @@ export async function readMixedBuffer(device: GPUDevice, source: GPUBuffer): Pro
     await read.mapAsync(GPUMapMode.READ);const values=new Float32Array(read.getMappedRange()).slice();read.unmap();return values;
   } finally {if(read.mapState==="mapped")read.unmap();read.destroy();}
 }
+
+/** Current mixed tile words (bit 31 = h tile), read from the GPU ownership:
+ * a generation adopted on the GPU leaves no host mirror to read. */
+export async function readMixedTileWords(device: GPUDevice, solver: unknown): Promise<Uint32Array> {
+  const ownership = (solver as { mixedFrame: { ownership: { presentation: { buffer: GPUBuffer }; capacity: { tiles: number } } } }).mixedFrame.ownership;
+  const bytes = ownership.capacity.tiles * 4, read = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  try {
+    const encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(ownership.presentation.buffer, 0, read, 0, bytes); device.queue.submit([encoder.finish()]);
+    await read.mapAsync(GPUMapMode.READ); return new Uint32Array(read.getMappedRange()).slice();
+  } finally { if (read.mapState === "mapped") read.unmap(); read.destroy(); }
+}

@@ -18,8 +18,11 @@ export const UNIFORM_MIXED_PACKED_REGULAR_OWNERS=16384;
  * umFusedOwner jobs (seams, then with umFusedJobs the small regular tiers);
  * fusedQuad: fused with seam 4h tiles packed four per job
  * (uniformMixedFaceTileDispatchWGSL); hanging: one job per hanging slot;
- * fineTiles: one job per h list tile; coarseTiles: 64 4h list tiles per job. */
-export const UNIFORM_MIXED_COUNTED={owners:1,tiles:2,all:3,regularCoarse:4,fused:5,fusedQuad:6,hanging:7,fineTiles:8,coarseTiles:9} as const;
+ * fineTiles: one job per h list tile; coarseTiles: 64 4h list tiles per job;
+ * residentAll: all's h jobs, then one job per resident page (umResidentAllOwner,
+ * its 4h tiles one lane each); residentPages: one job per resident page, a
+ * lane per tile (umResidentPageTile). */
+export const UNIFORM_MIXED_COUNTED={owners:1,tiles:2,all:3,regularCoarse:4,fused:5,fusedQuad:6,hanging:7,fineTiles:8,coarseTiles:9,residentAll:10,residentPages:11} as const;
 /** umFusedRegularGate for owners/tiles/regularCoarse launches: skipFused
  * empties a tier that rides the fused launch (dispatchRegular skipFused);
  * onlyFused empties one that does not. */
@@ -29,6 +32,22 @@ export const UNIFORM_MIXED_FUSED_GATE={skipFused:1,onlyFused:2} as const;
 export const uniformMixedOverflowWord=(tiles:number)=>9*tiles+25;
 /** Overflow bits: a generation needed more hanging slots than the preallocated cache. */
 export const UNIFORM_MIXED_OVERFLOW_HANGING=1;
+/** Residency certificate (docs: fig7-256 3x plan, S2): 16³-cell pages of 4³
+ * tiles on dense storage. Support words from uniformMixedResidencyWord: the
+ * resident page count, sticky closure-violation bits (in-frame readers or
+ * them when they would read outside the closure; the next census turns them
+ * into a builder fatal), the census's closure radius in tiles (diagnostic),
+ * one reserved word, a flag per page (non-zero: resident), then the resident
+ * pages in ascending order. update() makes every page resident; the census
+ * (UniformMixedDynamicClassifier) rewrites them each frame. */
+export const uniformMixedResidencyWord=(tiles:number)=>9*tiles+28;
+export const UNIFORM_MIXED_PAGE_TILES=4;
+export function uniformMixedPageDimensions(lattice:{readonly dimensions:readonly number[]}):[number,number,number]{
+  const p=lattice.dimensions.map(d=>Math.ceil(d/4/UNIFORM_MIXED_PAGE_TILES));return [p[0]!,p[1]!,p[2]!];
+}
+export const uniformMixedPageCount=(lattice:{readonly dimensions:readonly number[]})=>uniformMixedPageDimensions(lattice).reduce((n,d)=>n*d,1);
+/** Support words an ownership of `tiles` tiles on `lattice` allocates. */
+export const uniformMixedSupportWords=(tiles:number,lattice:{readonly dimensions:readonly number[]})=>uniformMixedResidencyWord(tiles)+4+2*uniformMixedPageCount(lattice);
 
 /** One packed topology buffer: tile records, h/4h worklists, then frozen stencil masks.
  * Ownership and tracing share this ABI. Two tiers: 0 = h (width 1, 64 owners
@@ -72,6 +91,19 @@ const UM_TILES:u32=${layout.tiles.length}u;
 const UM_HANGING_SLOTS:u32=${uniformMixedHangingSlotCapacity(layout.tiles.length)}u;
 // Sticky overflow bits (uniformMixedOverflowWord); topology never writes them.
 const UM_OVERFLOW_WORD:u32=9u*UM_TILES+25u;const UM_OVERFLOW_HANGING:u32=${UNIFORM_MIXED_OVERFLOW_HANGING}u;
+// Residency (uniformMixedResidencyWord): pages of 4³ tiles, flags, list.
+const UM_PD:vec3u=(UM_T+vec3u(3u))/4u;const UM_PAGES:u32=UM_PD.x*UM_PD.y*UM_PD.z;
+const UM_RESIDENCY:u32=9u*UM_TILES+28u;
+fn umResidentPageCount()->u32{return umSupport[UM_RESIDENCY];}
+fn umPageOfTile(t:u32)->u32{let c=umTileCoord(t)/4u;return c.x+UM_PD.x*(c.y+UM_PD.y*c.z);}
+fn umPageCoord(page:u32)->vec3u{return vec3u(page%UM_PD.x,(page/UM_PD.x)%UM_PD.y,page/(UM_PD.x*UM_PD.y));}
+fn umPageResident(page:u32)->bool{return umSupport[UM_RESIDENCY+4u+page]!=0u;}
+fn umTileResident(t:u32)->bool{return umPageResident(umPageOfTile(t));}
+fn umResidentPage(job:u32)->u32{return umSupport[UM_RESIDENCY+4u+UM_PAGES+job];}
+// Tile lane of page, or UM_TILES past the lattice (a partial edge page).
+fn umPageTile(page:u32,lane:u32)->u32{let c=umPageCoord(page)*4u+umCorner(lane,4u);if(any(c>=UM_T)){return UM_TILES;}return umTileAt(c);}
+// Tile lane of resident page job (residentPages), or UM_TILES.
+fn umResidentPageTile(job:u32,lane:u32)->u32{if(job>=umResidentPageCount()){return UM_TILES;}return umPageTile(umResidentPage(job),lane);}
 fn umTileWidth(t:u32)->u32{return select(4u,1u,(umTopology[t]&0x80000000u)!=0u);}
 fn umTileSupport(t:u32)->u32{return umSupport[3u*UM_TILES+t];}
 // The mixed pressure schedule's slot gate (support 9n+24, 0 open): its gate
@@ -89,6 +121,18 @@ fn umAllOwner(gid:vec3u)->UMOwner {
  if(slot<fine){let tile=umTopology[UM_TILES+slot/64u];let lane=slot%64u;return UMOwner(tile,lane,1u,(umTopology[tile]&0x3fffffffu)+lane);}
  let local=slot-fine;if(local>=umCounts.y){return UMOwner();}
  let tile=umTopology[UM_TILES+umCounts.x+local];return UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
+}
+// umAllOwner over the residency certificate: every h owner (the h list's
+// jobs), then one job per resident page, a lane per tile, holding its 4h
+// owner. A 4h tile of an absent page is far air (V=0, corner phi at least
+// 16h), audited by the next census.
+fn umResidentAllOwner(gid:vec3u)->UMOwner {
+ let slot=gid.x+umDispatchX*64u*gid.y;let fine=umCounts.x*64u;
+ if(slot<fine){let tile=umTopology[UM_TILES+slot/64u];let lane=slot%64u;return UMOwner(tile,lane,1u,(umTopology[tile]&0x3fffffffu)+lane);}
+ let tile=umResidentPageTile((slot-fine)/64u,slot%64u);
+ if(tile>=UM_TILES){return UMOwner();}
+ if(umTileWidth(tile)!=4u){return UMOwner();}
+ return UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
 }
 // Regular 4h owner s: tiles whose 3x3x3 stencil has one width, listed by the
 // ownership (support 8n+20: count, three zero words, then the list).
@@ -209,6 +253,8 @@ fn umCountedJobCount()->u32 {
   return (tiles*(64u>>(6u*tier))+63u)/64u;
  }
  if(umCountedJobs==${UNIFORM_MIXED_COUNTED.all}u){return umCounts.x+(umCounts.y+63u)/64u;}
+ if(umCountedJobs==${UNIFORM_MIXED_COUNTED.residentAll}u){return umCounts.x+umResidentPageCount();}
+ if(umCountedJobs==${UNIFORM_MIXED_COUNTED.residentPages}u){return umResidentPageCount();}
  if(umCountedJobs==${UNIFORM_MIXED_COUNTED.regularCoarse}u){if(!umFusedGateOpen(1u)){return 0u;}return (umSupport[8u*UM_TILES+20u]+63u)/64u;}
  let fine=umSupport[header];let fours=umSupport[header+1u];
  // Slots past the cache are never visited: the builder flags UM_OVERFLOW_HANGING.

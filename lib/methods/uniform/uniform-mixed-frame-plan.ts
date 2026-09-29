@@ -1,6 +1,7 @@
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
+import {UNIFORM_STAGE_CERTIFICATE} from "./uniform-stage-grids";
 
 /** Owner entries: one lane per owner of every tier, GPU-counted. */
 const counted:readonly string[]=["seed","localSpeed"];
@@ -89,13 +90,19 @@ fn umPositiveFaceSpeeds(field:texture_3d<f32>,unit:bool,origin:vec3u)->vec3f{
 fn umPositiveFaceSpeed(field:texture_3d<f32>,unit:bool,origin:vec3u)->f32{
  let v=umPositiveFaceSpeeds(field,unit,origin);return max(v.x,max(v.y,v.z));
 }
-// One lane per owner over every tier (umAllOwner). A tile's owners are
-// contiguous slots, so lane-owner.lane is its first lane: the workgroup slot of
-// its flags. 4h tiles pack 64 to a workgroup instead of idling 63 lanes.
+// One lane per owner over every h tile and the 4h tiles of resident pages
+// (umResidentAllOwner). A tile's owners are contiguous slots, so
+// lane-owner.lane is its first lane: the workgroup slot of its flags. 4h
+// tiles pack 64 to a workgroup instead of idling 63 lanes. A 4h tile of an
+// absent page is certified far air (V=0, every corner phi at least 16h: the
+// census audits exactly this predicate), so its flags are the zero encode
+// clears to; its faces are extended faces, never a source, so the speed
+// maximum over resident owners still bounds every face the certificate's
+// characteristics read (the extension is a convex combination of sources).
 var<workgroup> seeded:array<atomic<u32>,64>;
 var<workgroup> seedSpeed:atomic<u32>;
 @compute @workgroup_size(64) fn seed(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let owner=umAllOwner(gid);let slot=lane-owner.lane;
+ let owner=umResidentAllOwner(gid);let slot=lane-owner.lane;
  atomicStore(&seeded[lane],0u);if(lane==0u){atomicStore(&seedSpeed,0u);}workgroupBarrier();
  if(owner.width!=0u){
   let width=owner.width;let unit=umTileMaximumWidth(owner.tile)==1u;let origin=umOrigin(owner);
@@ -208,6 +215,9 @@ var<workgroup> certifyBases:array<u32,2>;
   let p=vec3i(umTileCoord(tile));
   let regular=bounded&&umCoarseTilesIn(p-vec3i(minus),p+vec3i(plus))==0u;
   list=select(2u,1u,regular);local=atomicAdd(&certifyCounts[list-1u],1u);
+  // The class for the tiles layer, in the reach word's two spare bits (no
+  // reader masks them in: umReachPlus/Minus take bits 0..29).
+  speeds[UM_TILES+tile]=reach|(select(select(${UNIFORM_STAGE_CERTIFICATE.coarseInReach}u,${UNIFORM_STAGE_CERTIFICATE.saturated}u,!bounded),${UNIFORM_STAGE_CERTIFICATE.regular}u,regular)<<30u);
  }
  workgroupBarrier();
  if(lane<2u){let count=atomicLoad(&certifyCounts[lane]);if(count>0u){certifyBases[lane]=atomicAdd(&umSupport[4u*UM_TILES+lane+1u],count);}}
@@ -218,12 +228,14 @@ var<workgroup> certifyBases:array<u32,2>;
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.extendedResources]});
-    await Promise.all(["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","prefix0","prefix1","prefix2","certify"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:UNIFORM_MIXED_COUNTED.all}:{})}}}));}));
+    await Promise.all(["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","prefix0","prefix1","prefix2","certify"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:entryPoint==="seed"?UNIFORM_MIXED_COUNTED.residentAll:UNIFORM_MIXED_COUNTED.all}:{})}}}));}));
   }
   encode(encoder:GPUCommandEncoder,policy={fineReach:2,shellReach:1,twoLevel:true,shellOnly:true}):void{
     if(this.pipelines.size!==12)throw new Error("Mixed frame plan is not initialized");
     this.device.queue.writeBuffer(this.params,0,new Uint32Array([policy.fineReach,policy.shellReach,!policy.twoLevel?3:!policy.shellOnly?2:0,0]));
     encoder.clearBuffer(this.ownership.support,this.ownership.capacity.tiles*16,64);
+    // Seed flags: absent pages' tiles keep this zero (the seed skips them).
+    encoder.clearBuffer(this.ownership.support,0,this.ownership.capacity.tiles*4);
     const pass=encoder.beginComputePass({label:"Uniform shared frame plan"});
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);pass.setBindGroup(2,this.extendedGroup);
     this.dispatch(pass,["seed","dilate0","dilate1","dilate2"]);
@@ -231,6 +243,9 @@ var<workgroup> certifyBases:array<u32,2>;
   }
   /** Fine-tile certificate from the extended field. Encode after extension
    * and before any certified/merged consumer (surface, momentum). */
+  /** Each tile's certificate word after encodeCertificate (speeds[T, 2T)):
+   * signed reach and, for h tiles, the class (UNIFORM_STAGE_CERTIFICATE). */
+  get certificate():{readonly buffer:GPUBuffer;readonly offset:number}{return {buffer:this.ownership.speeds,offset:4*this.ownership.capacity.tiles};}
   encodeCertificate(encoder:GPUCommandEncoder,dt:number):void{
     // Only the certificate reads dt: support and extension are dt-free.
     this.device.queue.writeBuffer(this.params,16,new Float32Array([dt,0,0,0]));

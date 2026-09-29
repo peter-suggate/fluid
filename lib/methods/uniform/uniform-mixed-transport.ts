@@ -9,9 +9,15 @@ import { uniformMixedSolidPipeline, type UniformMixedSolid } from "./uniform-mix
 const TRANSPORT_GRID = 2048;
 const entries = ["clear", "build", "decode", "rowsFallback", "rowsDivide", "gather", "restrictVolume", "copyVolume"] as const;
 type Entry = typeof entries[number];
-/** Owner lists of the transport live set: rows are built for receivers, limbs
- * cleared and decoded for their donors; copy and restriction stay dense. */
-const liveList: Partial<Record<Entry, 1 | 2>> = { build: 1, rowsFallback: 1, rowsDivide: 1, gather: 1, clear: 2, decode: 2 };
+/** Live-set lists (uniformMixedTransportLiveWGSL): 1 rows Q0, 2 every donor,
+ * 3 rows Q1, 4 rows Q2, 5 rows R1, 6 donors D1, 7 donors D2. */
+type LiveList = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+/** The list each live launch strides, in encode order: each round's rows are
+ * those a later round reads, and each decode covers the donors its round
+ * added to; copy and restriction stay dense. */
+const liveLaunches: readonly (readonly [Entry, LiveList])[] = [["clear", 2], ["build", 1], ["rowsFallback", 3], ["decode", 2],
+  ["rowsDivide", 4], ["decode", 6], ["rowsDivide", 5], ["decode", 7], ["gather", 5]];
+const liveEntries = new Set<Entry>(liveLaunches.map(([entry]) => entry));
 /** Dense entries: GPU-counted owner launches over each tier's list. */
 const dense: readonly Entry[] = ["restrictVolume", "copyVolume"];
 
@@ -26,14 +32,15 @@ export class UniformMixedTransportStage {
   private readonly workBytes: number;
   get allocatedBytes():number{return this.workBytes+this.ownership.allocatedBytes;}
   get dispatchX(): number { return this.ownership.dispatchX; }
-  private readonly pipelines = new Map<Entry, GPUComputePipeline[]>();
+  /** Tier pipelines by entry (dense) or `${entry}:${list}` (live). */
+  private readonly pipelines = new Map<string, GPUComputePipeline[]>();
   private readonly resourcesLayout: GPUBindGroupLayout;
   private readonly restrictGroup: GPUBindGroup;
   private readonly transportGroup: GPUBindGroup;
   private readonly sampling: GPUBuffer;
   private readonly live: GPUBuffer;
   private readonly livePipelines: GPUComputePipeline[] = [];
-  private readonly coarseRows=new Map<Entry,GPUComputePipeline>();
+  private readonly coarseRows=new Map<string,GPUComputePipeline>();
   /** Workgroups of the h and 4h live-list launches, and of the coarse rows. */
   private readonly liveGrid: readonly [number, number];
   private readonly coarseRowGrid: number;
@@ -50,7 +57,7 @@ export class UniformMixedTransportStage {
       throw new Error("Native Uniform scratch cannot hold mixed transport slices");
     this.sampling = device.createBuffer({ label: "Uniform mixed departure sampling widths", size: tiles * 4,
       usage: GPUBufferUsage.STORAGE });
-    this.live = device.createBuffer({ label: "Uniform mixed transport live set", size: (UNIFORM_MIXED_TRANSPORT_LIVE_HEADER + 7 * tiles) * 4,
+    this.live = device.createBuffer({ label: "Uniform mixed transport live set", size: (UNIFORM_MIXED_TRANSPORT_LIVE_HEADER + 17 * tiles) * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.workBytes = this.sampling.size + this.live.size;
     // Live-list launches are fixed grid-stride grids: the layout's bound
@@ -87,12 +94,14 @@ export class UniformMixedTransportStage {
     // h rows compile their workgroup-summed tile variant in place of the generic tier.
     const fineRows=new Set<Entry>(["build","rowsFallback","rowsDivide"]);
     const twin = (create: (solid: Record<string, number>) => Promise<GPUComputePipeline>) => uniformMixedSolidPipeline(this.solid, create);
-    const tiers = Promise.all(entries.map(async entry => { this.pipelines.set(entry, await compileMixedTiers(umCellWidth => twin(solid =>
+    const keys: [string, Entry, number][] = [...entries.filter(entry => !liveEntries.has(entry)).map(entry => [entry, entry, 0] as [string, Entry, number]),
+      ...[...new Set(liveLaunches.map(([entry, list]) => `${entry}:${list}`))].map(key => { const [entry, list] = key.split(":"); return [key, entry as Entry, Number(list)] as [string, Entry, number]; })];
+    const tiers = Promise.all(keys.map(async ([key, entry, list]) => { this.pipelines.set(key, await compileMixedTiers(umCellWidth => twin(solid =>
       this.device.createComputePipelineAsync({ layout, compute: { module, entryPoint: umCellWidth===1&&fineRows.has(entry)?entry+"Fine":entry,
-        constants: { umCellWidth, umDispatchX: this.dispatchX, umTransportList: liveList[entry] ?? 0,
+        constants: { umCellWidth, umDispatchX: this.dispatchX, umTransportList: list,
           ...(dense.includes(entry) ? { umCountedJobs: UNIFORM_MIXED_COUNTED.owners } : {}), ...solid } } })))); }));
-    const coarseRows = this.parallelCoarseRows ? Promise.all((["rowsFallback","rowsDivide"] as const).map(async entry=>{
-      this.coarseRows.set(entry,await twin(solid=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:entry+"Coarse",constants:{umCellWidth:4,umDispatchX:this.dispatchX,umTransportList:1,...solid}}})));
+    const coarseRows = this.parallelCoarseRows ? Promise.all(liveLaunches.filter(([entry]) => entry === "rowsFallback" || entry === "rowsDivide").map(async ([entry, list])=>{
+      this.coarseRows.set(`${entry}:${list}`,await twin(solid=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:entry+"Coarse",constants:{umCellWidth:4,umDispatchX:this.dispatchX,umTransportList:list,...solid}}})));
     })) : undefined;
     const tile = (entryPoint: string, constants: Record<string, number> = {}) => twin(solid => this.device.createComputePipelineAsync({ layout,
       compute: { module, entryPoint, constants: { umCellWidth: 1, umDispatchX: this.dispatchX, ...constants, ...solid } } }));
@@ -115,17 +124,19 @@ export class UniformMixedTransportStage {
     return pass;
   }
 
-  /** shared: a pass already bound to the transport group (encodeTransport). */
-  private run(encoder: GPUCommandEncoder, entry: Entry, shared?: GPUComputePassEncoder): void {
-    const pipelines = this.pipelines.get(entry);
+  /** shared: a pass already bound to the transport group (encodeTransport);
+   * list: the live list a live entry strides. */
+  private run(encoder: GPUCommandEncoder, entry: Entry, shared?: GPUComputePassEncoder, list?: LiveList): void {
+    if (liveEntries.has(entry) !== (list !== undefined)) throw new Error(`Mixed transport ${entry} ${list ? "is dense" : "needs a live list"}`);
+    const key = list ? `${entry}:${list}` : entry;
+    const pipelines = this.pipelines.get(key);
     if (!pipelines) throw new Error("Mixed transport has not been initialized");
     const restrict = entry === "restrictVolume" || entry === "copyVolume";
     if (shared && restrict) throw new Error("Mixed transport restriction binds its own group");
     const pass = shared ?? this.begin(encoder, entry, restrict ? this.restrictGroup : this.transportGroup);
-    const list = liveList[entry];
     // One direct grid-stride launch per tier (0 = h, 1 = 4h) of the live list.
     if (list) for (const tier of [0, 1] as const) {
-      const coarse=tier===1?this.coarseRows.get(entry):undefined;
+      const coarse=tier===1?this.coarseRows.get(key):undefined;
       pass.setPipeline(this.variant(coarse??pipelines[tier]!));pass.dispatchWorkgroups(coarse?this.coarseRowGrid:this.liveGrid[tier]);
     }
     // Dense: one counted launch per tier, even when the tier is empty.
@@ -158,11 +169,7 @@ export class UniformMixedTransportStage {
     this.encodeLiveSet(encoder);
     // One pass: a dispatch is its own usage scope, and every entry here binds the transport group.
     const pass = this.begin(encoder, "transport", this.transportGroup);
-    this.run(encoder, "clear", pass); this.run(encoder, "build", pass);
-    for (let round = 0; round < 3; round++) {
-      this.run(encoder, round === 0 ? "rowsFallback" : "rowsDivide", pass); this.run(encoder, "decode", pass);
-    }
-    this.run(encoder, "gather", pass);
+    for (const [entry, list] of liveLaunches) this.run(encoder, entry, pass, list);
     pass.end();
   }
 

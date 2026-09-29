@@ -191,7 +191,7 @@ fn normalizeCoarseRow(job:u32,lane:u32,divide:bool){
 // Grid-stride over the listed coarse rows, one row per workgroup job.
 var<workgroup> tpCoarseJobs:u32;
 fn normalizeCoarseRows(group:u32,groups:u32,lane:u32,divide:bool){
- if(lane==0u){tpCoarseJobs=atomicLoad(&live[13u]);}
+ if(lane==0u){tpCoarseJobs=atomicLoad(&live[tpCountWord(umTransportList,1u)]);}
  let jobs=workgroupUniformLoad(&tpCoarseJobs);
  for(var job=group;job<jobs;job+=groups){normalizeCoarseRow(job,lane,divide);workgroupBarrier();}
 }
@@ -270,7 +270,7 @@ fn rowsFallbackFineAt(gid:vec3u){
 fn tpFineRows(group:u32,groups:u32,lane:u32,mode:u32){
  for(var i=lane;i<512u*TP_LIMBS;i+=64u){atomicStore(&tpWindow[i],0u);}
  if(lane<3u){atomicStore(&tpBoxLow[lane],0xffffffffu);atomicStore(&tpBoxHigh[lane],0u);}
- if(lane==0u){tpFineJobs=atomicLoad(&live[12u]);}
+ if(lane==0u){tpFineJobs=atomicLoad(&live[tpCountWord(umTransportList,0u)]);}
  let jobs=workgroupUniformLoad(&tpFineJobs);
  for(var job=group;job<jobs;job+=groups){
   if(mode==0u){tpFineJob0(job,lane);}else{tpFineJob2(job,lane);}
@@ -386,28 +386,35 @@ export const UNIFORM_MIXED_TRANSPORT_LIVE_HEADER=20;
  * R1), second-round sums of A(R1) (rows Q2 = B(A(R1))), first-round sums of
  * A(Q2) (rows Q1 = B(A(Q2))), and the sampled flags of Q1 (rows Q0 = B(Q1)).
  * Every row sampling a donor whose sum is read lies in the set that reads it,
- * so each of those sums is the dense sum. Rows are S, Q1 and Q0; donors are
- * the rows and their donors. Any other tile samples no V and holds none, and
- * the dense transport leaves it at zero, as skipping it does.
- * Words: [0,12) unused, [12,16) the list counts (rows then donors; h then
- * 4h), [16,20) unused; then the set bits plane,
- * the donor box low and high planes, and four tier lists. */
+ * so each of those sums is the dense sum. Each round runs only the rows
+ * whose values a later round reads: build (flags) Q0, the fallback round Q1,
+ * the first division Q2, the second division and gather R1 (nested:
+ * R1 in Q2 in Q1 in Q0, since every box holds its own tile). A round's
+ * donor sums are decoded (and cleared) over the donors its rows add to:
+ * every donor after build and fallback (build adds to A(Q0)), then
+ * D1 = A(Q2), then D2 = A(R1). Rows outside R1 sample no V and hold none, so
+ * the output there stays zero, as the dense gather writes it.
+ * Words: [0,10) the counts of lists 3..7, [12,16) the counts of lists 1, 2
+ * (h then 4h), [16,20) unused; then the set bits plane, the donor box low
+ * and high planes, and the tier lists: 1 rows Q0, 2 donors (all), 3 rows Q1,
+ * 4 rows Q2, 5 rows R1, 6 donors D1, 7 donors D2. */
 function uniformMixedTransportLiveWGSL(sources:boolean):string{
  return /* wgsl */`
 const TP_HEADER:u32=${UNIFORM_MIXED_TRANSPORT_LIVE_HEADER}u;
 override umTransportList:u32=0u;
 fn tpPlane(k:u32,t:u32)->u32{return TP_HEADER+k*UM_TILES+t;}
 fn tpList(list:u32,tier:u32)->u32{return TP_HEADER+(3u+2u*(list-1u)+tier)*UM_TILES;}
+fn tpCountWord(list:u32,tier:u32)->u32{return select(2u*(list-3u)+tier,12u+2u*(list-1u)+tier,list<=2u);}
 fn tpTier(width:u32)->u32{return select(1u,0u,width==1u);}
 // Owners of this launch's tier in its live list (rows 1, donors 2).
 fn tpLiveOwners()->u32{
- let tier=tpTier(umCellWidth);return atomicLoad(&live[12u+2u*(umTransportList-1u)+tier])*(64u/(umCellWidth*umCellWidth*umCellWidth));
+ let tier=tpTier(umCellWidth);return atomicLoad(&live[tpCountWord(umTransportList,tier)])*(64u/(umCellWidth*umCellWidth*umCellWidth));
 }
 // Owner of a listed tile (rows 1, donors 2); the full tier lists otherwise.
 fn tpOwner(gid:vec3u)->UMOwner {
  if(umTransportList==0u){return umOwner(gid);}
  let slot=gid.x+umDispatchX*64u*gid.y;let per=64u/(umCellWidth*umCellWidth*umCellWidth);let tier=tpTier(umCellWidth);
- let job=slot/per;if(job>=atomicLoad(&live[12u+2u*(umTransportList-1u)+tier])){return UMOwner();}
+ let job=slot/per;if(job>=atomicLoad(&live[tpCountWord(umTransportList,tier)])){return UMOwner();}
  let tile=atomicLoad(&live[tpList(umTransportList,tier)+job]);let lane=slot%per;
  return UMOwner(tile,lane,umCellWidth,(umTopology[tile]&0x3fffffffu)+lane);
 }
@@ -494,13 +501,33 @@ fn tpBox(tile:u32)->array<vec3i,2>{
   if((atomicLoad(&live[at])&tpInto)==0u){atomicOr(&live[at],tpInto);}
  }}}
 }
-@compute @workgroup_size(64) fn liveCompact(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
- let bits=atomicLoad(&live[tpPlane(0u,tile)]);let tier=tpTier(umTileWidth(tile));
- let rows=(bits&(TP_S|TP_Q1|TP_Q0))!=0u;let donor=rows||(bits&TP_DONOR)!=0u;
- for(var list=1u;list<=2u;list++){
-  if(select(donor,rows,list==1u)){let slot=atomicAdd(&live[12u+2u*(list-1u)+tier],1u);atomicStore(&live[tpList(list,tier)+slot],tile);}
+// Membership of each list; the nested sets also admit their subsets' bits.
+fn tpListed(bits:u32,list:u32)->bool{
+ let rows1=TP_R1|TP_S;let rows2=rows1|TP_Q2;let rows3=rows2|TP_Q1;
+ switch list {
+  case 1u:{return (bits&(rows3|TP_Q0))!=0u;}
+  case 2u:{return (bits&(rows3|TP_Q0|TP_DONOR))!=0u;}
+  case 3u:{return (bits&rows3)!=0u;}
+  case 4u:{return (bits&rows2)!=0u;}
+  case 5u:{return (bits&rows1)!=0u;}
+  case 6u:{return (bits&(rows2|TP_D2|TP_D1))!=0u;}
+  default:{return (bits&(rows1|TP_D2))!=0u;}
  }
+}
+// A workgroup's tiles reserve each list's slots with one global add.
+var<workgroup> tpCompactCount:array<atomic<u32>,14>;
+var<workgroup> tpCompactBase:array<u32,14>;
+@compute @workgroup_size(64) fn liveCompact(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=gid.x+umDispatchX*64u*gid.y;
+ if(lane<14u){atomicStore(&tpCompactCount[lane],0u);}
+ workgroupBarrier();
+ var bits=0u;var tier=0u;var local:array<u32,7>;
+ if(tile<UM_TILES){bits=atomicLoad(&live[tpPlane(0u,tile)]);tier=tpTier(umTileWidth(tile));}
+ for(var list=1u;list<=7u;list++){if(bits!=0u&&tpListed(bits,list)){local[list-1u]=atomicAdd(&tpCompactCount[2u*(list-1u)+tier],1u);}}
+ workgroupBarrier();
+ if(lane<14u){let n=atomicLoad(&tpCompactCount[lane]);if(n!=0u){tpCompactBase[lane]=atomicAdd(&live[tpCountWord(lane/2u+1u,lane%2u)],n);}}
+ workgroupBarrier();
+ for(var list=1u;list<=7u;list++){if(bits!=0u&&tpListed(bits,list)){atomicStore(&live[tpList(list,tier)+tpCompactBase[2u*(list-1u)+tier]+local[list-1u]],tile);}}
 }
 `;
 }

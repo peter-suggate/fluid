@@ -170,7 +170,10 @@ try {
     const surface = Object.fromEntries(Object.entries(regions).map(([key, a]) => [key, { count: a.length, mean_mm: a.reduce((s, v) => s + v, 0) / a.length, rms_mm: Math.sqrt(a.reduce((s, v) => s + v * v, 0) / a.length), max_mm: Math.max(...a.map(Math.abs)), range_mm: Math.max(...a) - Math.min(...a) }]));
     let maxSpeed = 0, excess = 0, sum = 0, maxCell = 0;
     for (let i = 0; i < volume.length; i++) { const v = volume[i]!; assert.ok(Number.isFinite(v)); sum += v; excess += Math.max(0, v - open[i]!); if (v > 1e-5) { const speed = Math.hypot(velocity[i * 4]!, velocity[i * 4 + 1]!, velocity[i * 4 + 2]!); if (speed > maxSpeed) { maxSpeed = speed; maxCell = i; } } }
-    const sample = { frame, surface, missing, maxSpeed, maxCell: [maxCell % nx, Math.floor(maxCell / nx) % ny, Math.floor(maxCell / nx / ny)], sum, excess, residual: stats.uniformCM11aFineResidualInfinity, acceptedResidual: stats.uniformPressureAcceptedResidual, recovery: stats.uniformPressureRecoverySweeps, full: stats.uniformCM11aFullCyclesExecuted, vcycles: stats.uniformCM11aVCyclesExecuted };
+    // The mixed path reports its accepted residual (the fine one) and has no
+    // recovery: a rejected solve is a fatal frame, which fails the run.
+    // Frame 0 has solved nothing yet.
+    const sample = { frame, surface, missing, maxSpeed, maxCell: [maxCell % nx, Math.floor(maxCell / nx) % ny, Math.floor(maxCell / nx / ny)], sum, excess, residual: stats.uniformCM11aFineResidualInfinity ?? stats.uniformPressureAcceptedResidual ?? (frame === 0 ? 0 : undefined), acceptedResidual: stats.uniformPressureAcceptedResidual, recovery: stats.uniformPressureRecoverySweeps ?? 0, full: stats.uniformCM11aFullCyclesExecuted, vcycles: stats.uniformCM11aVCyclesExecuted };
     if (arg("dump", "off") === "on" && frame === 1) {
       const cells = [];
       for (let z = sample.maxCell[2]! - 1; z <= sample.maxCell[2]! + 1; z++) for (let y = surfaceY - 2; y <= surfaceY + 2; y++) for (let x = sample.maxCell[0]! - 1; x <= sample.maxCell[0]! + 1; x++) {

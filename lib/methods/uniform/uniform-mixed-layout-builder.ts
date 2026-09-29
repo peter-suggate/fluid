@@ -11,7 +11,9 @@ const CATEGORIES=5;
 /** Where the fine band lives: one bit per tile from `wordOffset` words into
  * `buffer`. headerWords: words [0, headerWords) of `buffer` are the
  * producer's receipt header (the census's), carried into the builder receipt. */
-export interface UniformMixedBandBits {readonly buffer:GPUBuffer;readonly wordOffset:number;readonly headerWords?:number}
+export interface UniformMixedBandBits {readonly buffer:GPUBuffer;readonly wordOffset:number;readonly headerWords?:number;
+ /** The producer's residency audit word (UNIFORM_MIXED_RESIDENCY_AUDIT): non-zero raises the residency fatal. */
+ readonly auditWord?:number}
 
 /** Word offsets of the builder's compact relayout receipt
  * (UniformMixedLayoutBuilder.receipt): what a frame receipt copies instead
@@ -30,9 +32,12 @@ export const UNIFORM_MIXED_RELAYOUT_RECEIPT={census:0,changed:20,tiers:21,seams:
  * preallocated hanging tap cache (ownership.capacity.hangingSlots); slots
  * past it are left unslotted. tierSum: h + 4h tiles != tiles. tileWords: a
  * tile word, owner index or worklist entry disagrees with the receipt counts
- * (the host's cellCount check). Each build mirrors the whole word into the
+ * (the host's cellCount check). residency: the band producer's residency
+ * audit found liquid or near-surface phi in a page the last frame skipped as
+ * absent, or a reader left the resident closure (uniformMixedResidencyWord).
+ * Each build mirrors the whole word into the
  * simulation ownership's sticky overflow word (ownership.overflowOffset). */
-export const UNIFORM_MIXED_RELAYOUT_FATAL={hangingCapacity:UNIFORM_MIXED_OVERFLOW_HANGING,tierSum:2,tileWords:4} as const;
+export const UNIFORM_MIXED_RELAYOUT_FATAL={hangingCapacity:UNIFORM_MIXED_OVERFLOW_HANGING,tierSum:2,tileWords:4,residency:8} as const;
 
 export interface UniformMixedBuiltLevel extends UniformMixedBuiltOwnership {
  /** Tiles whose width differs from the ownership this level was built against. */
@@ -108,7 +113,8 @@ export class UniformMixedLayoutBuilder {
   const work=storage("Uniform layout builder work",RECEIPT+n+CATEGORIES*this.blocks);
   const params=device.createBuffer({label:"Uniform layout builder params",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   // Hanging capacity: the ownership's preallocated tap cache.
-  device.queue.writeBuffer(params,0,new Uint32Array([band.wordOffset,ownership.capacity.hangingSlots,0,0]));
+  // Residency audit word, or none.
+  device.queue.writeBuffer(params,0,new Uint32Array([band.wordOffset,ownership.capacity.hangingSlots,band.auditWord??0xffffffff,0]));
   const status=device.createBuffer({label:"Uniform layout builder relayout receipt",size:R.words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   // Standalone stages visit everything until a frame census: support[0,4n) = 3.
   device.queue.writeBuffer(support,0,new Uint32Array(4*n).fill(3));
@@ -130,7 +136,7 @@ export class UniformMixedLayoutBuilder {
 @group(0) @binding(0) var<storage,read> band:array<u32>;
 @group(0) @binding(1) var<storage,read> statics:array<u32>;
 @group(0) @binding(2) var<storage,read> current:array<u32>;
-struct Params {bandOffset:u32,hangingCapacity:u32}
+struct Params {bandOffset:u32,hangingCapacity:u32,audit:u32}
 @group(0) @binding(3) var<uniform> params:Params;
 @group(0) @binding(4) var<storage,read_write> work:array<atomic<u32>>;
 @group(0) @binding(5) var<storage,read_write> topology:array<u32>;
@@ -140,7 +146,7 @@ struct Params {bandOffset:u32,hangingCapacity:u32}
 @group(0) @binding(8) var<storage,read_write> status:array<atomic<u32>>;
 const R_CHANGED:u32=${R.changed}u;const R_TIERS:u32=${R.tiers}u;const R_SEAMS:u32=${R.seams}u;const R_COUNTS:u32=${R.counts}u;
 const R_GENERATION:u32=${R.generation}u;const R_BUILDS:u32=${R.builds}u;const R_FATAL:u32=${R.fatal}u;const R_FATAL_BUILD:u32=${R.fatalBuild}u;
-const FATAL_TIER_SUM:u32=${F.tierSum}u;const FATAL_TILE_WORDS:u32=${F.tileWords}u;const FATAL_HANGING:u32=${F.hangingCapacity}u;
+const FATAL_TIER_SUM:u32=${F.tierSum}u;const FATAL_TILE_WORDS:u32=${F.tileWords}u;const FATAL_HANGING:u32=${F.hangingCapacity}u;const FATAL_RESIDENCY:u32=${F.residency}u;
 const N:u32=${n}u;const T=vec3u(${T.map(v=>`${v}u`).join(",")});const X:u32=${x}u;
 const BLOCKS:u32=${this.blocks}u;const INF:u32=0xffffffffu;
 const FLAGS:u32=${flags}u;const TOTALS:u32=${totals}u;
@@ -229,6 +235,7 @@ fn scanPartial(lane:u32){
   atomicStore(&status[R_COUNTS],f);atomicStore(&status[R_COUNTS+1u],c);atomicStore(&status[R_COUNTS+2u],0u);atomicStore(&status[R_COUNTS+3u],8u);
   if(f+c!=N){atomicOr(&status[R_FATAL],FATAL_TIER_SUM);}
   if(grand[2]+grand[3]>params.hangingCapacity){atomicOr(&status[R_FATAL],FATAL_HANGING);}
+  if(params.audit!=0xffffffffu&&band[params.audit]!=0u){atomicOr(&status[R_FATAL],FATAL_RESIDENCY);}
  }
 }
 // Owner numbering, worklists and the hanging slot table, in tile key order.

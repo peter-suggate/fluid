@@ -1,7 +1,7 @@
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, UNIFORM_MIXED_FUSED_GATE, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
-import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL, uniformMixedFaceTileDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
+import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedPressureReconstructionWGSL } from "./uniform-mixed-pressure-reconstruction.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
@@ -178,7 +178,21 @@ ${uniformMixedFaceDispatchWGSL("forcesRegular","umForcedVelocity(owner,face)").r
 // Regular 4h owners from the ownership's regular list: one lane per owner,
 // no lanes spent rejecting seam tiles.
 fn umForcesRegularCoarseOwner(gid:vec3u)->UMOwner{return umRegularCoarseOwner(gid.x+umDispatchX*64u*gid.y);}
-${uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocity(owner,face)",false,"","umForcesRegularCoarseOwner")}
+// Certified far air (uniformMixedResidencyWord): every tile within two tiles
+// of the owner's lies in an absent page, so this owner, every neighbour and
+// every owner their pressure slopes read are far air (V=0, corner and so
+// centre phi at least 16h, audited by the next census): occupancy zero, no
+// coarse mass, no viscosity, gravity or surface-tension term. The forced
+// face is the advected one, which the culled prediction makes exactly zero
+// (neither side is live); momentum skips these owners with the same
+// predicate and never stores them. Inflow may reach any face, so it takes
+// the general evaluation.
+${uniformMixedFarAirWGSL(this.sourceParams?"umSourceinflowStrength()>0.0":"false")}
+fn umForcedVelocityFar(owner:UMOwner,face:UMFace,far:bool)->f32 {
+ if(!far){return umForcedVelocity(owner,face);}
+ return 0.0;
+}
+${uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocityFar(owner,face,far)",false,"","umForcesRegularCoarseOwner").replace(" let origin=umOrigin(owner);"," let origin=umOrigin(owner);let far=umFarAirOwner(owner);")}
 ${uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)")}
 `,["forcesRegular","forcesRegularCoarse","forces"])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));

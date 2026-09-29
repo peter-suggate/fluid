@@ -10,6 +10,7 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
+import {readMixedTileWords} from "./helpers/uniform-mixed-native-fields";
 import { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 
 async function read(device:GPUDevice,texture:GPUTexture):Promise<Float32Array>{
@@ -83,7 +84,12 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
           const volume=await read(device!,solver.volumeTexture);
           const maximumVolume=volume.reduce((maximum,value)=>Math.max(maximum,value),0);
           console.log(JSON.stringify({case:"mini32-separating-wall",frame,representedVolumeDrift:stats.representedVolumeDrift,maximumVolume}));
-          assert.ok(Math.abs(sum(volume)/stats.initialVolumeCellSum!-1)<1e-5);
+          // Owner sum: a 4h owner's V lives at its origin texel and covers
+          // 64 cells; its other texels are stale, not state.
+          const tiles=await readMixedTileWords(device!,solver),{width:nx,height:ny,depthOrArrayLayers:nz}=solver.volumeTexture;let owned=0;
+          for(let z=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){const width=tiles[(x>>2)+(nx>>2)*((y>>2)+(ny>>2)*(z>>2))]!&0x80000000?1:4;
+            if(!(x%width||y%width||z%width))owned+=volume[x+nx*(y+ny*z)]!*width**3;}
+          assert.ok(Math.abs(owned/stats.initialVolumeCellSum!-1)<1e-5,`owner volume ${owned} vs initial ${stats.initialVolumeCellSum}`);
           // V<=capacity was guaranteed only by the removed optional liquid
           // balancing experiment. The retained default can concentrate V at
           // impact; keep maximumVolume in the receipt, conservation and finite

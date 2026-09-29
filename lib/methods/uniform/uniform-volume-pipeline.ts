@@ -2,7 +2,7 @@ import type { FluidPipelineGraph, FluidPipelineStage, FluidPipelineContext, Flui
 import { UNIFORM_FLUID_PIPELINE } from "./uniform-pipeline";
 import { UNIFORM_ADVANCE_PHASE as A } from "./uniform-stages";
 import { UNIFORM_VOLUME_PHASE as P } from "./uniform-volume-stages";
-import { UNIFORM_GEOMETRIC_SHARPENING_DISTANCE, UNIFORM_GEOMETRIC_SPLASH_HINTS } from "./uniform-geometric-parameters";
+import { UNIFORM_GEOMETRIC_PARAMS, UNIFORM_GEOMETRIC_SHARPENING_DISTANCE, UNIFORM_GEOMETRIC_SPLASH_HINTS, uniformGeometricSharpeningSweeps, uniformGeometricSurfaceVolumeRounds } from "./uniform-geometric-parameters";
 
 /**
  * Uniform Geometric's pipeline: one card per seam UniformMixedFrame.advance
@@ -60,6 +60,17 @@ const base = (id: string) => {
   if (!stage) throw new Error(`Uniform pipeline has no stage ${id}`);
   return stage;
 };
+/** A Geometric numeric parameter as a stage slider, from its declaration. */
+const paramRange = (key: string, enabled?: (context: FluidPipelineContext) => boolean): FluidStageControl => {
+  const spec = UNIFORM_GEOMETRIC_PARAMS.find(candidate => candidate.key === key);
+  if (spec?.kind !== "number") throw new Error(`Uniform Geometric has no numeric ${key} parameter`);
+  return {kind:"param-range",param:key,label:spec.label,unit:spec.unit,min:spec.min ?? 0,max:spec.max ?? 1,step:spec.step ?? 1,digits:spec.digits,hint:spec.hint,enabled};
+};
+const sharpeningOn = (context: FluidPipelineContext) => context.values.densitySharpening !== "off";
+const surfaceVolumeOn = (context: FluidPipelineContext) => context.values.totalSurfaceVolume === "on";
+/** Zero sweeps or a zero band skips sharpening; zero rounds skips the shift. */
+const sharpeningRuns = (context: FluidPipelineContext) => sharpeningOn(context)
+  && uniformGeometricSharpeningSweeps(context.values.sharpeningSweeps) > 0 && Number(context.values.sharpeningDistance ?? UNIFORM_GEOMETRIC_SHARPENING_DISTANCE) > 0;
 /** A dense Uniform control, kept where the Geometric frame still reads it. */
 const baseControl = (id: string, param: string) => {
   const control = base(id).controls?.find(candidate => "param" in candidate && candidate.param === param);
@@ -134,20 +145,26 @@ const stages: FluidPipelineStage[] = [
   {
     id:"uniform-volume-gather", band:"surface", side:"right", label:"Surface volume + geometry",
     phaseLabels:[P.gather.label],
-    tip:{summary:"Optionally one bounded global normal shift of phi to match total V (four-cell band, two 17-sample refinements), then the surface-geometry cache: centre phi and corrected phi capacity. Nothing after this writes phi.",
+    tip:{summary:"Optionally one bounded global normal shift of phi to match total V (four-cell band, secant Newton rounds of two filled-volume samples each), then the surface-geometry cache: centre phi and corrected phi capacity. Nothing after this writes phi.",
       reads:"phi, V", writes:"phi (shift), geometry cache", feeds:"sharpening, pressure authority, next frame"},
     controls:[{kind:"param-choice",param:"totalSurfaceVolume",label:"Total surface volume",options:onOff,
-      hint:"One bounded global normal shift to match the surface volume to V. No regional correction or cellwise reconstruction."}],
+      hint:"One bounded global normal shift to match the surface volume to V. No regional correction or cellwise reconstruction."},
+      paramRange("surfaceVolumeRounds", surfaceVolumeOn)],
     state:()=>"on",
-    chip:context=>context.values.totalSurfaceVolume === "on" ? "total volume constrained · geometry" : "geometry only",
+    chip:context=>{
+      const rounds = uniformGeometricSurfaceVolumeRounds(context.values.surfaceVolumeRounds);
+      if (!surfaceVolumeOn(context) || rounds === 0) return "geometry only";
+      return `total volume · ${rounds} ${rounds === 1 ? "round" : "rounds"} · geometry`;
+    },
   },
   {
     id:"uniform-volume-sharpen", band:"surface", side:"left", label:"Volume sharpening",
     phaseLabels:[P.sharpen.label],
-    tip:{summary:"Eight symmetric face-transfer sweeps with aggregate donor and receiver budgets; phi is immutable across them, so only tiles with a cell in the admission band run."},
+    tip:{summary:"Symmetric face-transfer sweeps (propose, limit, commit) with aggregate donor and receiver budgets; phi is immutable across them, so only tiles with a cell in the admission band run."},
     toggle:{param:"densitySharpening",on:"on",off:"off"},
-    state:context=>context.values.densitySharpening === "off" ? "off" : "on",
-    chip:()=>`${UNIFORM_GEOMETRIC_SHARPENING_DISTANCE}h band · 8 sweeps`,
+    controls:[paramRange("sharpeningSweeps", sharpeningOn), paramRange("sharpeningDistance", sharpeningOn)],
+    state:context=>sharpeningRuns(context) ? "on" : "off",
+    chip:context=>!sharpeningOn(context) ? "off" : !sharpeningRuns(context) ? "skipped · zero sweeps or band" : `${Number(context.values.sharpeningDistance ?? UNIFORM_GEOMETRIC_SHARPENING_DISTANCE).toFixed(1)}h band · ${uniformGeometricSharpeningSweeps(context.values.sharpeningSweeps)} sweeps`,
   },
   {
     ...base("velocity-advection"), controls:undefined,
@@ -209,8 +226,8 @@ const stages: FluidPipelineStage[] = [
   {
     id:"uniform-volume-census", band:"census", side:"right", label:"Resolution census",
     phaseLabels:[A.resolutionCensus.label],
-    tip:{summary:"The frame's tail extension (the next frame reuses it when nothing changes in between), then the dynamic census: tiles the surface can reach over the census horizon (RK2 departure boxes traced frame by frame, boundary impacts, bodies) stay h and the rest coarsen to 4h. The GPU layout builder writes the next generation; the host adopts it in its own submit when the census read resolves, remapping V, velocity, phi and the extension. No frame waits on it.",
-      reads:"phi, V, velocity, body poses", writes:"extended velocity, next generation's ownership", feeds:"next frame, layout adopt", gate:"dynamic coarsening"},
+    tip:{summary:"At the frame head, the dynamic census: tiles the surface can reach over the census horizon (RK2 departure boxes traced frame by frame, boundary impacts, bodies) stay h and the rest coarsen to 4h. The GPU layout builder writes the generation this frame advects on, and the remap moves V, velocity, phi and the extension onto it in the same submit. No host round trip. The extension it reads is the previous frame's tail extension, priced under Velocity extension.",
+      reads:"phi, V, extended velocity, body poses", writes:"this frame's ownership generation, remapped fields", feeds:"this frame's transport and pressure", gate:"dynamic coarsening"},
     controls:[
       {kind:"param-choice",param:"coarsening",label:"Coarsening",
         options:[{value:"dynamic",label:"Dynamic"},{value:"regions",label:"Regions"}],

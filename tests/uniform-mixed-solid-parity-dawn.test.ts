@@ -10,7 +10,7 @@ import {getSceneDefinition} from "../lib/core/scenes";
 import type {FluidRefinementRegion,SceneDescription} from "../lib/core/model";
 import {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-uniform-reference";
 import {uniformGeometricSolverOptions} from "../lib/methods/uniform/uniform-geometric-options";
-import {readMixedTexture} from "./helpers/uniform-mixed-native-fields";
+import {readMixedTexture,readMixedTileWords} from "./helpers/uniform-mixed-native-fields";
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 const only=process.env.FLUID_SOLID_PARITY_CASE;
 
@@ -54,7 +54,7 @@ async function run(device:GPUDevice,scene:SceneDescription,frames:number,pressur
  * volumeCellSum, unquantized. */
 async function ownerMass(device:GPUDevice,solver:WebGPUUniformReferenceSolver):Promise<number>{
  const texture=solver.volumeTexture,volume=await readMixedTexture(device,texture);
- const tiles=(solver as unknown as {mixedFrame:{ownership:{layout:{tiles:Uint32Array}}}}).mixedFrame.ownership.layout.tiles;
+ const tiles=await readMixedTileWords(device,solver);
  const [nx,ny,nz]=[texture.width,texture.height,texture.depthOrArrayLayers];let sum=0;
  for(let z=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){
   const word=tiles[(x>>2)+(nx>>2)*((y>>2)+(ny>>2)*(z>>2))]!,width=word&0x80000000?1:4;

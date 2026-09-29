@@ -28,21 +28,23 @@ export const UNIFORM_PRESSURE_BAND_SCHEDULE:UniformPressureBandSchedule={cycles:
 
 /** Workgroups of the tile classification passes: a fixed grid-stride launch
  * over the simulation's h tile worklist. */
-const LIST_GROUPS=512;
+const LIST_GROUPS=4096;
 /** Every band pass strides the band's own compact slot list from a fixed
  * direct launch: one slot per group, eight slots (2h aggregates) per group,
  * or 64 slots (4h aggregates) per group, up to these group counts. Groups
  * past the live count exit at once; an indirect launch would cost Dawn a
  * validation pass per dispatch, more than those empty groups. */
-const SLOT_GROUPS=1024,MIDDLE_GROUPS=256,COARSE_GROUPS=64;
+const SLOT_GROUPS=4096,MIDDLE_GROUPS=1024,COARSE_GROUPS=256;
 /** The h half sweeps run one colour's 32 cells of a slot per 32-lane group. */
 const CELL_GROUPS=2048;
 /** The single-workgroup 4h aggregate solve: up to this many lanes (the
  * device's workgroup limit), and the aggregates whose operator rows it holds
- * in registers. A larger band keeps the rows in storage, visits them in a
- * colour-ordered list, and keeps as many corrections as the device's
- * workgroup memory holds in workgroup memory, the rest in storage: the same
- * red-black updates in the same one launch, whatever the band's size. */
+ * in registers. coarseBake stores the operator rows once per frame in colour
+ * order (red from the front, black from the back): a larger band streams
+ * them position by position (contiguous loads, no list-to-slot chain), and
+ * keeps as many corrections as the device's workgroup memory holds in
+ * workgroup memory, the rest in storage: the same red-black updates in the
+ * same one launch, whatever the band's size. */
 const COARSE_SOLVE_LANES=1024,COARSE_SOLVE_SLOTS=1024;
 /** Band rows are field-major over CAP*64 rows: rhs, diagonal, face kinds,
  * the six face coefficients, u* per face, then with static solids the CM11a
@@ -50,15 +52,18 @@ const COARSE_SOLVE_LANES=1024,COARSE_SOLVE_SLOTS=1024;
  * red-black half sweep reads 32 contiguous rows per field. */
 const ROW_FIELDS=15,SOLID_ROW_FIELDS=21;
 /** 2h aggregates: correction, residual, diagonal, six couplings. 4h
- * aggregates add their six neighbour slots (+1), their red-black colour and
- * the large coarse solve's colour-ordered slot list. */
-const MIDDLE_FIELDS=9,COARSE_FIELDS=17;
+ * aggregates: correction and residual by slot, then by colour-ordered
+ * position the diagonal and six couplings (2..8), six neighbour slots (+1)
+ * by slot (9..14), then by position the slot (15), the residual the large
+ * solve gathers per call (16) and the six neighbour slots (+1, 17..22). */
+const MIDDLE_FIELDS=9,COARSE_FIELDS=23;
 /** Index header words: count, overflow, final residual, fatal, completed
  * cycles, closed (the frame's verdict: nonzero when the pressure schedule's
  * last gate rejected the frame), converged (the convergence word), one spare,
  * then the residual after each cycle's pre-smoothing (and after the last
- * cycle) in HISTORY words. The tile list and per-tile slot+1 map follow. */
-const HEADER=24,CLOSED_WORD=5,HISTORY_WORD=8,HISTORY=16;
+ * cycle) in HISTORY words, then coarseBake's red and black 4h row counts.
+ * The tile list and per-tile slot+1 map follow. */
+const HEADER=26,CLOSED_WORD=5,HISTORY_WORD=8,HISTORY=16,RED_WORD=24,BLACK_WORD=25;
 
 export interface UniformPressureBandFields {
  /** Simulation-indexed pressure phi (the simulation authority's output),
@@ -150,7 +155,7 @@ export class UniformPressureBand {
   const buffer=(binding:number,type:GPUBufferBindingType="storage")=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type}});
   const params=buffer(0,"uniform");
   // At most six storage buffers here: topology and solids hold four.
-  const solver=[params,buffer(2),buffer(9),buffer(10),buffer(18)];
+  const solver=[params,buffer(2),buffer(9,"read-only-storage"),buffer(10),buffer(18)];
   const entries:Record<string,GPUBindGroupLayoutEntry[]>={
    open:[params,buffer(3,"read-only-storage"),buffer(5),texture(6)],
    list:[params,buffer(2),buffer(3,"read-only-storage"),buffer(5,"read-only-storage"),texture(6)],
@@ -298,15 +303,16 @@ fn bNeighbour(q:vec3i,ownerLiquid:bool)->BNeighbour{
  return BNeighbour(select(own,other,own<0.0),false);
 }
 `;
-  const rows=/* wgsl */`
-@group(1) @binding(9) var<storage,read_write> rows:array<f32>;
+  // Only init writes rows after assembly; every solver launch reads them.
+  const rowsOf=(write:boolean)=>/* wgsl */`
+@group(1) @binding(9) var<storage,${write?"read_write":"read"}> rows:array<f32>;
 fn bRhs(c:u32)->f32{return rows[c];}
 fn bDiagonal(c:u32)->f32{return rows[N+c];}
 fn bKinds(c:u32)->u32{return bitcast<u32>(rows[2u*N+c]);}
 fn bCoefficient(c:u32,f:u32)->f32{return rows[(3u+f)*N+c];}
 fn bForced(c:u32,f:u32)->f32{return rows[(9u+f)*N+c];}
 ${S?"fn bVolume(c:u32,f:u32)->f32{return rows[(15u+f)*N+c];}":""}
-`;
+`,rows=rowsOf(false);
   const solve=/* wgsl */`
 @group(1) @binding(10) var<storage,read_write> solve:array<f32>;
 // Off-diagonal sum of an h row: band neighbours and the wall halo.
@@ -332,14 +338,12 @@ fn bResidual(cell:u32,p:vec3i,kinds:u32)->f32{
  let r=bRhs(cell)+bOff(cell,p,kinds)-bDiagonal(cell)*solve[cell];
  return select(r,max(r,0.0),bInside(kinds)&&solve[cell]<=0.0);
 }
-// A slot's six face-neighbour slots (+1), loaded once per slot by lanes 0..5
-// so no tap reloads the tile map.
-var<workgroup> bNear:array<u32,6>;
-fn bLoadNear(s:u32,lane:u32){if(lane<6u){let axis=lane/2u;var c=vec3i(bTile(s));c[axis]+=bSign(lane);bNear[lane]=bSlotAt(c);}}
 // Band cell + 1 across face f of local cell l of slot s, 0 outside the band.
+// A face out of the tile reads the slot's baked neighbour (coarseBake): one
+// load shared by the lanes that need it, no tile-map lookup, no barrier.
 fn bCellNear(s:u32,l:vec3u,f:u32)->u32{
  let axis=f/2u;var m=vec3i(l);m[axis]+=bSign(f);var slot=s+1u;
- if(m[axis]<0||m[axis]>3){slot=bNear[f];m[axis]=(m[axis]+4)%4;}
+ if(m[axis]<0||m[axis]>3){slot=bNearSlot(s,f);m[axis]=(m[axis]+4)%4;}
  if(slot==0u){return 0u;}
  return (slot-1u)*64u+bRow(vec3u(m))+1u;
 }
@@ -372,10 +376,18 @@ fn bMiddleNeighbour(c:u32,f:u32)->u32{
  let l=vec3u(g%2);return (slot-1u)*8u+l.x+2u*l.y+4u*l.z+1u;
 }
 fn bCoarseNeighbour(s:u32,f:u32)->u32{let axis=f/2u;var c=vec3i(bTile(s));c[axis]+=bSign(f);return bSlotAt(c);}
-fn bMiddleOff(c:u32)->f32{
- var off=0.0;
- for(var f=0u;f<6u;f++){let n=bMiddleNeighbour(c,f);if(n!=0u){off+=coarse[bM(3u+f,c)]*coarse[bM(0u,n-1u)];}}
- return off;
+// The slot + 1 across face f of slot s, as coarseBake baked it (bCoarseNeighbour).
+fn bNearSlot(s:u32,f:u32)->u32{return bitcast<u32>(coarse[bC(9u+f,s)]);}
+// A 64-lane group's eight slots from base: their face-neighbour slots (+1),
+// loaded once, and the 2h aggregate + 1 across face f of aggregate c, the
+// i-th slot of the group.
+var<workgroup> bMiddleSlots:array<u32,48>;
+fn bMiddleLoadSlots(base:u32,n:u32,lane:u32){if(lane<48u){let s=base+lane/6u;var slot=0u;if(s<n){slot=bNearSlot(s,lane%6u);}bMiddleSlots[lane]=slot;}}
+fn bMiddleNear(i:u32,c:u32,f:u32)->u32{
+ let axis=f/2u;var m=vec3i(bMiddleLocal(c%8u));m[axis]+=bSign(f);var slot=c/8u+1u;
+ if(m[axis]<0||m[axis]>1){slot=bMiddleSlots[6u*i+f];m[axis]=(m[axis]+2)%2;}
+ if(slot==0u){return 0u;}
+ return (slot-1u)*8u+u32(m.x+2*m.y+4*m.z)+1u;
 }
 `;
   const slots=/* wgsl */`@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) groups:vec3u`;
@@ -521,9 +533,10 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
   coarse[bM(2u,c)]=diagonal+coupled;
  }
 }`,
-   coarseBake:band+/* wgsl */`
+   coarseBake:header+indexed(true)+rows+solve+aggregates+/* wgsl */`
 @compute @workgroup_size(64) fn main(${slots}){
- for(var s=group.x*64u+lane;s<bCount();s+=groups.x*64u){
+ let n=bCount();
+ for(var s=group.x*64u+lane;s<n;s+=groups.x*64u){
   var diagonal=0.0;var couple=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
   for(var a=0u;a<8u;a++){
    let c=8u*s+a;let at=bMiddleLocal(a);diagonal+=coarse[bM(2u,c)];
@@ -533,12 +546,17 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
    }
   }
   // diagonal is now the aggregate's Dirichlet part.
-  let scale=${schedule.coarseScale};var coupled=0.0;
-  for(var f=0u;f<6u;f++){coarse[bC(3u+f,s)]=scale*couple[f];coupled+=scale*couple[f];coarse[bC(9u+f,s)]=bitcast<f32>(bCoarseNeighbour(s,f));}
-  coarse[bC(2u,s)]=diagonal+coupled;let t=bTile(s);coarse[bC(15u,s)]=bitcast<f32>((t.x+t.y+t.z)&1u);
+  let scale=${schedule.coarseScale};var coupled=0.0;var near:array<u32,6>;
+  for(var f=0u;f<6u;f++){couple[f]=scale*couple[f];coupled+=couple[f];near[f]=bCoarseNeighbour(s,f);coarse[bC(9u+f,s)]=bitcast<f32>(near[f]);}
+  // A row the solve updates takes its colour's next position.
+  let d=diagonal+coupled;if(d<=0.0){continue;}
+  let t=bTile(s);var j=0u;
+  if(((t.x+t.y+t.z)&1u)==0u){j=atomicAdd(&index[${RED_WORD}u],1u);}else{j=n-1u-atomicAdd(&index[${BLACK_WORD}u],1u);}
+  coarse[bC(2u,j)]=d;coarse[bC(15u,j)]=bitcast<f32>(s);
+  for(var f=0u;f<6u;f++){coarse[bC(3u+f,j)]=couple[f];coarse[bC(17u+f,j)]=bitcast<f32>(near[f]);}
  }
 }`,
-   init:header+indexed(false)+rows+solve+/* wgsl */`
+   init:header+indexed(false)+rowsOf(true)+solve+aggregates+/* wgsl */`
 @group(1) @binding(11) var velocity:texture_3d<f32>;
 @group(1) @binding(12) var<storage,read> coarsePressure:array<f32>;
 @group(1) @binding(13) var<storage,read> coarsePhi:array<f32>;
@@ -578,7 +596,6 @@ var<workgroup> bSweepCount:u32;
  if(lane==0u){bSweepCount=bLive();}
  let n=workgroupUniformLoad(&bSweepCount);
  for(var s=group.x;s<n;s+=groups.x){
-  workgroupBarrier();bLoadNear(s,lane);workgroupBarrier();
   let y=(lane>>1u)&3u;let z=lane>>3u;let l=vec3u(2u*(lane&1u)+((y+z+bColour)&1u),y,z);
   let p=vec3i(bTile(s)*4u+l);let cell=s*64u+bColour*32u+lane;
   let kinds=bKinds(cell);let diagonal=bDiagonal(cell);
@@ -602,7 +619,7 @@ var<workgroup> bCellResidual:array<f32,64>;
  let n=workgroupUniformLoad(&bRestrictCount);
  var largest=0.0;
  for(var s=group.x;s<n;s+=groups.x){
-  workgroupBarrier();bLoadNear(s,lane);workgroupBarrier();
+  workgroupBarrier();
   let l=bLocal(lane);let cell=s*64u+bRow(l);let kinds=bKinds(cell);var r=0.0;
   if(bLiquid(kinds)&&bDiagonal(cell)>0.0){r=bResidualNear(cell,s,l,vec3i(bTile(s)*4u+l),kinds);largest=max(largest,abs(r));}
   bCellResidual[lane]=r;workgroupBarrier();
@@ -625,21 +642,12 @@ var<workgroup> bCellResidual:array<f32,64>;
 override bColour:u32=0u;
 override bProlong:bool=false;
 var<workgroup> bMiddleCount:u32;
-// The group's eight slots' face-neighbour slots (+1), loaded once.
-var<workgroup> bMiddleSlots:array<u32,48>;
-// The 2h aggregate + 1 across face f of aggregate c, the i-th slot of the group.
-fn bMiddleNear(i:u32,c:u32,f:u32)->u32{
- let axis=f/2u;var m=vec3i(bMiddleLocal(c%8u));m[axis]+=bSign(f);var slot=c/8u+1u;
- if(m[axis]<0||m[axis]>1){slot=bMiddleSlots[6u*i+f];m[axis]=(m[axis]+2)%2;}
- if(slot==0u){return 0u;}
- return (slot-1u)*8u+u32(m.x+2*m.y+4*m.z)+1u;
-}
 @compute @workgroup_size(64) fn main(${slots}){
  if(lane==0u){bMiddleCount=bLive();}
  let n=workgroupUniformLoad(&bMiddleCount);
  for(var base=group.x*8u;base<n;base+=groups.x*8u){
   workgroupBarrier();
-  if(lane<48u){let s=base+lane/6u;var slot=0u;if(s<n){slot=bCoarseNeighbour(s,lane%6u);}bMiddleSlots[lane]=slot;}
+  bMiddleLoadSlots(base,n,lane);
   workgroupBarrier();
   let c=base*8u+lane;
   if(c<n*8u){
@@ -656,48 +664,67 @@ fn bMiddleNear(i:u32,c:u32,f:u32)->u32{
  }
 }`,
    // 2h residual into the tile aggregate (zeroing its correction).
+   // A lane per 2h aggregate (eight slots per group), then lanes 0..7 sum
+   // their slot's eight in aggregate order.
    middleRestrict:band+/* wgsl */`
+var<workgroup> bMiddleCount:u32;
+var<workgroup> bMiddleResidual:array<f32,64>;
 @compute @workgroup_size(64) fn main(${slots}){
- let n=bLive();
- for(var s=group.x*64u+lane;s<n;s+=groups.x*64u){
-  var sum=0.0;
-  for(var a=0u;a<8u;a++){let c=8u*s+a;if(coarse[bM(2u,c)]>0.0){sum+=coarse[bM(1u,c)]+bMiddleOff(c)-coarse[bM(2u,c)]*coarse[bM(0u,c)];}}
-  coarse[bC(1u,s)]=sum;coarse[bC(0u,s)]=0.0;
+ if(lane==0u){bMiddleCount=bLive();}
+ let n=workgroupUniformLoad(&bMiddleCount);
+ for(var base=group.x*8u;base<n;base+=groups.x*8u){
+  workgroupBarrier();bMiddleLoadSlots(base,n,lane);workgroupBarrier();
+  let c=base*8u+lane;var r=0.0;
+  if(c<n*8u){
+   let diagonal=coarse[bM(2u,c)];
+   if(diagonal>0.0){
+    var off=0.0;
+    for(var f=0u;f<6u;f++){let m=bMiddleNear(lane/8u,c,f);if(m!=0u){off+=coarse[bM(3u+f,c)]*coarse[bM(0u,m-1u)];}}
+    r=coarse[bM(1u,c)]+off-diagonal*coarse[bM(0u,c)];
+   }
+  }
+  bMiddleResidual[lane]=r;workgroupBarrier();
+  if(lane<8u&&base+lane<n){
+   var sum=0.0;for(var a=0u;a<8u;a++){sum+=bMiddleResidual[8u*lane+a];}
+   coarse[bC(1u,base+lane)]=sum;coarse[bC(0u,base+lane)]=0.0;
+  }
  }
 }`,
    // Every red-black sweep of the 4h aggregates in one workgroup: one
    // launch instead of two per sweep, chosen on the GPU from the live count.
-   // Up to SOLVE_SLOTS aggregates sweep with their operator rows in
-   // registers; a larger band reads its rows from storage and keeps the
+   // The rows are coarseBake's colour-ordered positions: red [0,red), black
+   // [black,n); a row whose diagonal vanishes has none and keeps its zero
+   // correction. Up to SOLVE_SLOTS positions sweep with their operator rows
+   // in registers; a larger band streams its rows from storage and keeps the
    // first SHARED corrections in workgroup memory, the rest in storage.
    coarseSolve:band+/* wgsl */`
 const L:u32=${lanes}u;const HELD:u32=${held}u;const SOLVE_SLOTS:u32=L*HELD;const SHARED:u32=${shared}u;
 var<workgroup> bSolveCount:u32;
 var<workgroup> bRedCount:u32;
-var<workgroup> bRed:atomic<u32>;
-var<workgroup> bBlack:atomic<u32>;
+var<workgroup> bBlackStart:u32;
 var<workgroup> bCorrection:array<f32,SHARED>;
 fn bCorrectionAt(s:u32)->f32{if(s<SHARED){return bCorrection[s];}return coarse[bC(0u,s)];}
 @compute @workgroup_size(${lanes}) fn main(@builtin(local_invocation_index) lane:u32){
- if(lane==0u){bSolveCount=bLive();}
- let n=workgroupUniformLoad(&bSolveCount);
+ if(lane==0u){let live=bLive();let r=min(bIndex(${RED_WORD}u),live);bSolveCount=live;bRedCount=r;bBlackStart=live-min(bIndex(${BLACK_WORD}u),live-r);}
+ let n=workgroupUniformLoad(&bSolveCount);let red=workgroupUniformLoad(&bRedCount);let black=workgroupUniformLoad(&bBlackStart);
  if(n<=SOLVE_SLOTS){
-  var diagonal:array<f32,HELD>;var residual:array<f32,HELD>;var colour:array<u32,HELD>;var weight:array<f32,${6*held}>;var near:array<u32,${6*held}>;
+  var diagonal:array<f32,HELD>;var residual:array<f32,HELD>;var slot:array<u32,HELD>;var weight:array<f32,${6*held}>;var near:array<u32,${6*held}>;
   for(var k=0u;k<HELD;k++){
-   let s=lane+k*L;diagonal[k]=0.0;
-   if(s<n){
-    diagonal[k]=coarse[bC(2u,s)];residual[k]=coarse[bC(1u,s)];colour[k]=bitcast<u32>(coarse[bC(15u,s)]);bCorrection[s]=coarse[bC(0u,s)];
-    for(var f=0u;f<6u;f++){weight[6u*k+f]=coarse[bC(3u+f,s)];near[6u*k+f]=bitcast<u32>(coarse[bC(9u+f,s)]);}
+   let j=lane+k*L;diagonal[k]=0.0;
+   if(j<n){bCorrection[j]=coarse[bC(0u,j)];}
+   if(j<red||(j>=black&&j<n)){
+    let s=bitcast<u32>(coarse[bC(15u,j)]);slot[k]=s;diagonal[k]=coarse[bC(2u,j)];residual[k]=coarse[bC(1u,s)];
+    for(var f=0u;f<6u;f++){weight[6u*k+f]=coarse[bC(3u+f,j)];near[6u*k+f]=bitcast<u32>(coarse[bC(17u+f,j)]);}
    }
   }
   workgroupBarrier();
   for(var sweep=0u;sweep<${schedule.coarseSweeps}u;sweep++){
    for(var c=0u;c<2u;c++){
     for(var k=0u;k<HELD;k++){
-     let s=lane+k*L;
-     if(s>=n||colour[k]!=c||diagonal[k]<=0.0){continue;}
+     let j=lane+k*L;
+     if(diagonal[k]<=0.0||select(j>=red,j<black,c==1u)){continue;}
      var off=0.0;for(var f=0u;f<6u;f++){let m=near[6u*k+f];if(m!=0u){off+=weight[6u*k+f]*bCorrection[m-1u];}}
-     bCorrection[s]=(residual[k]+off)/diagonal[k];
+     bCorrection[slot[k]]=(residual[k]+off)/diagonal[k];
     }
     workgroupBarrier();
    }
@@ -705,28 +732,21 @@ fn bCorrectionAt(s:u32)->f32{if(s<SHARED){return bCorrection[s];}return coarse[b
   for(var k=0u;k<HELD;k++){let s=lane+k*L;if(s<n){coarse[bC(0u,s)]=bCorrection[s];}}
   return;
  }
- // Colour-ordered list of the live rows (field 16): red from the front,
- // black from the back. Order within a colour is free: its updates are
- // independent.
- for(var s=lane;s<n;s+=L){
-  if(s<SHARED){bCorrection[s]=coarse[bC(0u,s)];}
-  if(coarse[bC(2u,s)]<=0.0){continue;}
-  var at=0u;if(bitcast<u32>(coarse[bC(15u,s)])==0u){at=atomicAdd(&bRed,1u);}else{at=n-1u-atomicAdd(&bBlack,1u);}
-  coarse[bC(16u,at)]=bitcast<f32>(s);
- }
+ // Each call's residual, gathered into position order once.
+ for(var s=lane;s<min(n,SHARED);s+=L){bCorrection[s]=coarse[bC(0u,s)];}
+ for(var j=lane;j<n;j+=L){if(j<red||j>=black){coarse[bC(16u,j)]=coarse[bC(1u,bitcast<u32>(coarse[bC(15u,j)]))];}}
  workgroupBarrier();storageBarrier();
- if(lane==0u){bRedCount=atomicLoad(&bRed);bSolveCount=n-atomicLoad(&bBlack);}
- let red=workgroupUniformLoad(&bRedCount);let black=workgroupUniformLoad(&bSolveCount);
  for(var sweep=0u;sweep<${schedule.coarseSweeps}u;sweep++){
   for(var colour=0u;colour<2u;colour++){
    let first=select(0u,black,colour==1u);let last=select(red,n,colour==1u);
    for(var j=first+lane;j<last;j+=L){
-    let s=bitcast<u32>(coarse[bC(16u,j)]);
-    var off=0.0;for(var f=0u;f<6u;f++){let m=bitcast<u32>(coarse[bC(9u+f,s)]);if(m!=0u){off+=coarse[bC(3u+f,s)]*bCorrectionAt(m-1u);}}
-    let next=(coarse[bC(1u,s)]+off)/coarse[bC(2u,s)];
+    var off=0.0;for(var f=0u;f<6u;f++){let m=bitcast<u32>(coarse[bC(17u+f,j)]);if(m!=0u){off+=coarse[bC(3u+f,j)]*bCorrectionAt(m-1u);}}
+    let next=(coarse[bC(16u,j)]+off)/coarse[bC(2u,j)];let s=bitcast<u32>(coarse[bC(15u,j)]);
     if(s<SHARED){bCorrection[s]=next;}else{coarse[bC(0u,s)]=next;}
    }
-   workgroupBarrier();storageBarrier();
+   // Corrections past SHARED live in storage: only then must the phase's
+   // storage writes be visible to the next.
+   workgroupBarrier();if(n>SHARED){storageBarrier();}
   }
  }
  for(var s=lane;s<min(n,SHARED);s+=L){coarse[bC(0u,s)]=bCorrection[s];}
@@ -742,7 +762,7 @@ fn bCorrectionAt(s:u32)->f32{if(s<SHARED){return bCorrection[s];}return coarse[b
  }
 }`,
    // After bCycles encoded cycles.
-   measure:header+indexed(true)+rows+solve+/* wgsl */`
+   measure:header+indexed(true)+rows+solve+aggregates+/* wgsl */`
 override bCycles:u32=1u;
 var<workgroup> worst:atomic<u32>;
 var<workgroup> bMeasureCount:u32;
@@ -755,7 +775,6 @@ var<workgroup> bMeasureCount:u32;
  let n=workgroupUniformLoad(&bMeasureCount);
  var largest=0.0;
  for(var s=group.x;s<n;s+=groups.x){
-  workgroupBarrier();bLoadNear(s,lane);workgroupBarrier();
   let l=bLocal(lane);let p=vec3i(bTile(s)*4u+l);let cell=s*64u+bRow(l);
   let kinds=bKinds(cell);if(bLiquid(kinds)&&bDiagonal(cell)>0.0){largest=max(largest,abs(bResidualNear(cell,s,l,p,kinds))*params.policy.z);}
  }
@@ -864,6 +883,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  for(var s=group.x;s<bCount();s+=groups.x){presented[${this.fields.presentation.word}u+s*64u+lane]=solve[s*64u+bRow(bLocal(lane))];}
 }`,
   };
+  const entryOf=(name:string)=>`band${name[0]!.toUpperCase()}${name.slice(1)}`;
   const range=(n:number,from=0)=>Array.from({length:n},(_,i)=>i+from);
   // Specialised launches: red-black colours, each cycle's restriction, the
   // measure after each encodable cycle count.
@@ -872,12 +892,13 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    restrict:range(schedule.cycles).map(k=>[`@${k}`,{bCycle:k}]),measure:range(schedule.cycles,1).map(k=>[`@${k}`,{bCycles:k}]),
   };
   await Promise.all(Object.entries(sources).map(async([name,code])=>{
-   const module=this.device.createShaderModule({label:`Uniform pressure band ${name}`,code});
+   // Each launch's own entry name: per-dispatch timing attributes it.
+   const module=this.device.createShaderModule({label:`Uniform pressure band ${name}`,code:code.replace(/fn main\(/,`fn ${entryOf(name)}(`)});
    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
    if(errors.length)throw new Error(`Pressure band ${name}: ${errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n")}`);
    const pipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.simulation.bindLayout,this.layouts.get(this.layoutOf(name))!,...(this.solid?[this.solid.coarse!.bindLayout]:[])]});
    await Promise.all((variants[name]??[["",{}]]).map(async([suffix,constants])=>this.pipelines.set(name+suffix,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout:pipelineLayout,
-    compute:{module,entryPoint:"main",constants:{umDispatchX:this.simulation.dispatchX,...constants,...s}}})))));
+    compute:{module,entryPoint:entryOf(name),constants:{umDispatchX:this.simulation.dispatchX,...constants,...s}}})))));
   }));
  }
  /** Pipeline and group 1 of each launch name, resolved on first use. */
@@ -922,7 +943,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    this.sweep(pass,"sweep","cells",s.fineSweeps);
    this.dispatch(pass,`restrict@${cycle}`,"slots");
    this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps-1);
-   this.dispatch(pass,"middleRestrict","coarse");
+   this.dispatch(pass,"middleRestrict","middle");
    this.dispatch(pass,"coarseSolve",1);
    this.dispatch(pass,"middleSweepP","middle");this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps-1);
    this.dispatch(pass,"middleProlong","slots");this.sweep(pass,"sweep","cells",s.fineSweeps);

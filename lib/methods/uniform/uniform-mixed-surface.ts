@@ -3,8 +3,18 @@ import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
-import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
+import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+
+/** The surface claim buffer: the claimed launches' job counters, the six
+ * wall-plane reach words (wallReach) and two pad words, then each plane's
+ * per-tile reach words (wallReachTiles apiece). */
+const SURFACE_CLAIM_WORDS=UNIFORM_MIXED_CLAIM_WORDS+8;
+/** Tiles of the largest domain plane: the stride of the per-tile reach words. */
+const wallReachTiles=(d:readonly number[])=>{const t=d.map(n=>n/4);return Math.max(t[0]!*t[1]!,t[1]!*t[2]!,t[2]!*t[0]!);};
+const surfaceClaimWords=(d:readonly number[])=>SURFACE_CLAIM_WORDS+6*wallReachTiles(d);
+/** Workgroups of 256 lanes wallReach spends on one plane: its cells. */
+const wallReachGroups=(d:readonly number[])=>Math.ceil(Math.max(d[0]!*d[1]!,d[1]!*d[2]!,d[2]!*d[0]!)/256);
 
 export interface UniformMixedSurfaceFields {
   phi: GPUTexture;
@@ -29,8 +39,11 @@ export interface UniformMixedSurfaceFields {
  * embedded contact/air continuations; they live near fine owners only.
  * Optional phi experiments are rejected by the host. */
 export class UniformMixedSurface {
-  readonly allocatedBytes = 0;
+  readonly allocatedBytes:number;
   private readonly resources: GPUBindGroupLayout;
+  /** Job counters of the claimed certified launches (regular 0, general 1,
+   * merged 2), zeroed before each encoded stage. */
+  readonly claims: GPUBuffer;
   private readonly pipelines = new Map<string, GPUComputePipeline>();
   private readonly regularPipelines=new Map<string,GPUComputePipeline>();
   /** advect and redistance over the general h list, a lane per vertex. */
@@ -51,7 +64,10 @@ export class UniformMixedSurface {
       ...(sourceParams?[{binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
       {binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       ...(hanging?[{binding:11,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}}]:[]),
+      {binding:12,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
     ]});
+    this.allocatedBytes=4*surfaceClaimWords(ownership.capacity.lattice.dimensions);
+    this.claims=device.createBuffer({label:"Uniform mixed surface job claims",size:this.allocatedBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     this.deferredGrid=Math.min(1024,Math.ceil(ownership.capacity.lattice.dimensions.reduce((a,n)=>a*(n+1),1)/64));
   }
   /** Resolved phi (UniformMixedPhiResolve) makes every texel a vertex value. */
@@ -81,12 +97,13 @@ export class UniformMixedSurface {
       {binding:10,resource:{buffer:f.evidence.buffer,offset:deferredOffset,size:deferredBytes}},
       ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:176}}]:[]),
       ...(f.unitVelocity?[{binding:11,resource:f.unitVelocity.createView()}]:[]),
+      {binding:12,resource:{buffer:this.claims}},
     ]});
     return group;
   }
   async initialize(): Promise<void> {
     const velocitySampling=uniformMixedVelocitySamplingSource(false,true,undefined,this.hanging?(this.solid?3:2):undefined,this.hanging?"unitVelocity":undefined);
-    const module=this.device.createShaderModule({code:uniformMixedCertifiedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+    const module=this.device.createShaderModule({code:uniformMixedCertifiedEntriesWGSL(uniformMixedClaimedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var outputPhi:texture_storage_3d<r32float,write>;
 @group(1) @binding(2) var velocity:texture_3d<f32>;
@@ -99,6 +116,7 @@ struct Params {hDt:vec4f,flags:vec4u}
 @group(1) @binding(8) var<storage,read_write> evidence:array<u32>;
 // Advect vertices a released wall or solid can change: count, grid, list.
 @group(1) @binding(10) var<storage,read_write> deferred:array<atomic<u32>>;
+@group(1) @binding(12) var<storage,read_write> umClaims:array<atomic<u32>>;
 ${this.sourceParams?uniformMixedSourceWGSL(9):""}
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
@@ -288,7 +306,7 @@ fn umReleasedWalls(p:vec3f,value:f32)->f32{
   // no face on it is released or ambient. If even that cannot raise phi
   // here, none of the four probes can. The rounding margin keeps this a work
   // exclusion, never a modification of the wall continuation.
-  let reach=bitcast<f32>(evidence[UM_TILES+2u*axis+side]);
+  let reach=bitcast<f32>(atomicLoad(&umClaims[UM_WALL_REACH+2u*axis+side]));
   if(reach<=0.0||reach-inward*(p[axis]-plane)*h[axis]+1e-5*max(h.x,max(h.y,h.z))<result){continue;}
   for(var k=0u;k<4u;k++){
    var probe=p;probe[(axis+1u)%3u]+=select(-1e-4,1e-4,(k&1u)!=0u);probe[(axis+2u)%3u]+=select(-1e-4,1e-4,(k&2u)!=0u);
@@ -328,13 +346,27 @@ fn umWallPlane(p:vec3u)->u32{
 }
 // Whether umReleasedWalls can change value at p: a plane's reach clears its
 // own skip test. Accepted continuations only raise result, so testing the
-// entry value probes a superset of its planes.
+// entry value probes a superset of its planes. A plane that passes on its
+// whole-plane reach is retested on the reach of the tiles holding p's four
+// probe cells (floor(p+-1e-4) on the in-plane axes, clamped as the probes
+// are): a probe's accepted dt*away is at most its tile's reach, so a vertex
+// failing both skips keeps its value. Only vertices above released faces
+// moving off the wall defer, not every vertex any released face can reach.
 fn umReleasedMayChange(p:vec3f,value:f32)->bool{
- let h=params.hDt.xyz;
+ let h=params.hDt.xyz;let slack=1e-5*max(h.x,max(h.y,h.z));
  for(var k=0u;k<6u;k++){
   let axis=k/2u;let upper=(k&1u)==1u;let inward=select(1.0,-1.0,upper);let plane=select(0.0,f32(UM_D[axis]),upper);
-  let reach=bitcast<f32>(evidence[UM_TILES+k]);
-  if(reach>0.0&&!(reach-inward*(p[axis]-plane)*h[axis]+1e-5*max(h.x,max(h.y,h.z))<value)){return true;}
+  let depth=inward*(p[axis]-plane)*h[axis];
+  let reach=bitcast<f32>(atomicLoad(&umClaims[UM_WALL_REACH+k]));
+  if(!(reach>0.0&&!(reach-depth+slack<value))){continue;}
+  let u=(axis+1u)%3u;let v=(axis+2u)%3u;
+  let lowU=u32(clamp(i32(floor(p[u]-1e-4)),0,i32(UM_D[u])-1))/4u;let highU=u32(clamp(i32(floor(p[u]+1e-4)),0,i32(UM_D[u])-1))/4u;
+  let lowV=u32(clamp(i32(floor(p[v]-1e-4)),0,i32(UM_D[v])-1))/4u;let highV=u32(clamp(i32(floor(p[v]+1e-4)),0,i32(UM_D[v])-1))/4u;
+  let base=UM_WALL_TILE_REACH+k*UM_WALL_PLANE_TILES;
+  let local=max(max(atomicLoad(&umClaims[base+lowU+UM_T[u]*lowV]),atomicLoad(&umClaims[base+highU+UM_T[u]*lowV])),
+   max(atomicLoad(&umClaims[base+lowU+UM_T[u]*highV]),atomicLoad(&umClaims[base+highU+UM_T[u]*highV])));
+  let tileReach=bitcast<f32>(local);
+  if(tileReach>0.0&&!(tileReach-depth+slack<value)){return true;}
  }return false;
 }
 // umAdvected off the domain walls, without the wall and solid continuations.
@@ -381,31 +413,50 @@ fn umAdvectStore(vertex:vec3u,width:u32){
 }
 // Canonical vertices of the non-ambient domain walls, each on the first
 // plane through it, with its authority's width. One lane per plane vertex:
-// the six planes' vertex grids concatenated (2*axis+side order).
-@compute @workgroup_size(64) fn advectWalls(@builtin(global_invocation_id) gid:vec3u){
+// the six planes' vertex grids concatenated (2*axis+side order). With dt>0
+// umAdvectStore leaves them all to this entry, which lists them for
+// advectDeferred (its umAdvected is this vertex's value): a plane of 4h
+// tiles keeps one vertex in sixteen, so evaluating here idled most lanes of
+// every group behind the few characteristics. With dt<=0 the owner passes
+// store them (the wall continuations are then the identity).
+var<workgroup> wallListed:atomic<u32>;
+var<workgroup> wallBase:u32;
+@compute @workgroup_size(64) fn advectWalls(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){atomicStore(&wallListed,0u);}
+ workgroupBarrier();
  var i=gid.x+umDispatchX*64u*gid.y;var k=0u;
  for(;k<6u;k++){let a=k/2u;let area=(UM_D[(a+1u)%3u]+1u)*(UM_D[(a+2u)%3u]+1u);if(i<area){break;}i-=area;}
- if(k==6u){return;}
- let axis=k/2u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
- var vertex=vec3u(0);vertex[axis]=select(0u,UM_D[axis],(k&1u)==1u);vertex[u]=i%(UM_D[u]+1u);vertex[v]=i/(UM_D[u]+1u);
- if(umWallPlane(vertex)!=k){return;}
- // The authority is the widest incident owner and every tile has one width,
- // so its width is the widest incident tile: independent topology loads
- // instead of umVertexAuthority's dependent owner chain. Owner origins are
- // multiples of their width, so canonical is alignment to it.
- var width=1u;
- if(!umRegularFine){
-  let stencil=umTileStencil(umTileAt(min(vertex,UM_D-vec3u(1))/4u));width=stencil.x>>27u;
-  if(width!=(stencil.y>>27u)){
-   width=0u;
-   for(var c=0u;c<8u;c++){
-    let cell=vec3i(vertex)+vec3i(umCorner(c,2u))-vec3i(1);
-    if(all(cell>=vec3i(0))&&all(cell<vec3i(UM_D))){width=max(width,umTileWidth(umTileAt(vec3u(cell)/4u)));}
+ var word=0xffffffffu;var slot=0u;
+ if(k<6u&&params.hDt.w>0.0){
+  let axis=k/2u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
+  var vertex=vec3u(0);vertex[axis]=select(0u,UM_D[axis],(k&1u)==1u);vertex[u]=i%(UM_D[u]+1u);vertex[v]=i/(UM_D[u]+1u);
+  if(umWallPlane(vertex)==k){
+   // The authority is the widest incident owner and every tile has one width,
+   // so its width is the widest incident tile: independent topology loads
+   // instead of umVertexAuthority's dependent owner chain. Owner origins are
+   // multiples of their width, so canonical is alignment to it.
+   var width=1u;
+   if(!umRegularFine){
+    let stencil=umTileStencil(umTileAt(min(vertex,UM_D-vec3u(1))/4u));width=stencil.x>>27u;
+    if(width!=(stencil.y>>27u)){
+     width=0u;
+     for(var c=0u;c<8u;c++){
+      let cell=vec3i(vertex)+vec3i(umCorner(c,2u))-vec3i(1);
+      if(all(cell>=vec3i(0))&&all(cell<vec3i(UM_D))){width=max(width,umTileWidth(umTileAt(vec3u(cell)/4u)));}
+     }
+    }
+   }
+   if(all(vertex%width==vec3u(0))){
+    slot=atomicAdd(&wallListed,1u);
+    word=vertex.x|(vertex.y<<10u)|(vertex.z<<20u)|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);
    }
   }
  }
- if(any(vertex%width!=vec3u(0))){return;}
- textureStore(outputPhi,vec3i(vertex),vec4f(umAdvected(vec3f(vertex),width)));
+ workgroupBarrier();
+ // One list atomic per group.
+ if(lane==0u){let n=atomicLoad(&wallListed);if(n>0u){wallBase=atomicAdd(&deferred[0],n);}}
+ workgroupBarrier();
+ if(word!=0xffffffffu){atomicStore(&deferred[4u+wallBase+slot],word);}
 }
 // Six samples through one sampler call site: low then high per axis. The
 // uniform bound (umCounts.w-2 = 6) keeps Metal from cloning the general
@@ -419,29 +470,48 @@ fn umSurfaceGradient(p:vec3f,width:f32)->vec3f{
   if((k&1u)==0u){lowValue=value;}else{g[axis]=(value-lowValue)/max(high[axis]-low[axis],1e-6);}
  }return g;
 }
-// One workgroup per domain plane (2*axis+side): the largest dt*away over the
-// faces umReleasedWalls can probe on it that pass its release test, as f32
-// bits (positive floats order as u32). Every probe resolves to the owner of
-// one plane cell, so scanning every plane cell covers each probe exactly.
+// Each domain plane's (2*axis+side) largest dt*away over the faces
+// umReleasedWalls can probe on it that pass its release test, as f32 bits
+// (positive floats order as u32), in umClaims[UM_WALL_REACH+plane] (zeroed
+// with the claims). Every probe resolves to the owner of one plane cell, so
+// scanning every plane cell covers each probe exactly: a lane per plane cell
+// aligned to its tile's width (a 4h tile's sixteen plane cells all resolve
+// to its single owner), umWallReachGroups workgroups per plane. The maximum
+// does not depend on the order the lanes combine in. The same maximum per
+// plane tile (UM_WALL_TILE_REACH+plane*UM_WALL_PLANE_TILES+tu+UM_T[u]*tv)
+// bounds the probes whose owners lie in that tile.
+const UM_WALL_REACH:u32=${UNIFORM_MIXED_CLAIM_WORDS}u;
+const UM_WALL_TILE_REACH:u32=${SURFACE_CLAIM_WORDS}u;
+const UM_WALL_PLANE_TILES:u32=${wallReachTiles(this.ownership.capacity.lattice.dimensions)}u;
+override umWallReachGroups:u32=1u;
 var<workgroup> wallReachBits:atomic<u32>;
 @compute @workgroup_size(256) fn wallReach(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let axis=group.x/2u;let side=group.x%2u;let upper=side==1u;let inward=select(1.0,-1.0,upper);
+ let plane=group.x/umWallReachGroups;let chunk=group.x%umWallReachGroups;
+ let axis=plane/2u;let side=plane%2u;let upper=side==1u;let inward=select(1.0,-1.0,upper);
  let u=(axis+1u)%3u;let v=(axis+2u)%3u;let h=params.hDt.xyz;let dt=params.hDt.w;
  let ambient=axis==1u&&upper&&(params.flags.x&1u)!=0u;
  if(lane==0u){atomicStore(&wallReachBits,0u);}
  if(group.x==0u&&lane==0u){atomicStore(&deferred[0],0u);}
  workgroupBarrier();
- for(var i=lane;i<UM_D[u]*UM_D[v];i+=256u){
+ let i=chunk*256u+lane;
+ if(plane<6u&&i<UM_D[u]*UM_D[v]){
   var cell=vec3i(0);cell[axis]=select(0,i32(UM_D[axis])-1,upper);cell[u]=i32(i%UM_D[u]);cell[v]=i32(i/UM_D[u]);
-  let owner=umOwnerAt(cell);
-  let origin=umOrigin(owner);var anchor=vec3i(origin);anchor[axis]+=i32(owner.width)-1;
-  var speed=textureLoad(velocity,anchor,0)[axis];var bit=axis;
-  if(!upper){speed=negative[umNegativeBoundaryIndex(origin,axis)];bit+=3u;}
-  let released=(u32(round(textureLoad(velocity,anchor,0).w))&(1u<<bit))!=0u;
-  let away=inward*speed;
-  if((ambient||released)&&dt*away>1e-4*h[axis]*f32(owner.width)){atomicMax(&wallReachBits,bitcast<u32>(dt*away));}
+  let width=i32(umTileWidth(umTileAt(vec3u(cell)/4u)));
+  if(cell[u]%width==0&&cell[v]%width==0){
+   let owner=umOwnerAt(cell);
+   let origin=umOrigin(owner);var anchor=vec3i(origin);anchor[axis]+=i32(owner.width)-1;
+   var speed=textureLoad(velocity,anchor,0)[axis];var bit=axis;
+   if(!upper){speed=negative[umNegativeBoundaryIndex(origin,axis)];bit+=3u;}
+   let released=(u32(round(textureLoad(velocity,anchor,0).w))&(1u<<bit))!=0u;
+   let away=inward*speed;
+   if((ambient||released)&&dt*away>1e-4*h[axis]*f32(owner.width)){
+    let bits=bitcast<u32>(dt*away);atomicMax(&wallReachBits,bits);
+    atomicMax(&umClaims[UM_WALL_TILE_REACH+plane*UM_WALL_PLANE_TILES+u32(cell[u])/4u+UM_T[u]*(u32(cell[v])/4u)],bits);
+   }
+  }
  }
- workgroupBarrier();if(lane==0u){evidence[UM_TILES+group.x]=atomicLoad(&wallReachBits);}
+ workgroupBarrier();
+ if(lane==0u&&plane<6u){let bits=atomicLoad(&wallReachBits);if(bits!=0u){atomicMax(&umClaims[UM_WALL_REACH+plane],bits);}}
 }
 ${this.solid?/* wgsl */`
 var<workgroup> solidClosedFlag:atomic<u32>;
@@ -790,7 +860,7 @@ fn umTraceCell(owner:UMOwner){
 @compute @workgroup_size(64) fn traceCells(@builtin(global_invocation_id) gid:vec3u){
  let owner=umOwner(gid);if(owner.width!=0u){umTraceCell(owner);}
 }
-`,["advect","redistance","advectFine","redistanceFine","advectOwners","traceCells","retirementEvidence","retirementEvidenceCoarse",...(this.vertexCache?["vertexCache"]:[])])});
+`,["advect","redistance","advectFine","redistanceFine","advectOwners","traceCells"],"umClaims"),["retirementEvidence","retirementEvidenceCoarse",...(this.vertexCache?["vertexCache"]:[])])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[]),...(this.hanging?[this.ownership.hangingLayout]:[])]});
@@ -800,23 +870,25 @@ fn umTraceCell(owner:UMOwner){
     await Promise.all([
       this.vertexCache&&keyed(this.pipelines,"vertexCache","vertexCache",{umVertexCacheFill:1,umCountedJobs:UNIFORM_MIXED_COUNTED.hanging}),
       ...(this.solid?["solidClosed","solidClear"]:[]).map(entryPoint=>keyed(this.pipelines,entryPoint,entryPoint)),
-      keyed(this.pipelines,"wallReach","wallReach"),
+      keyed(this.pipelines,"wallReach","wallReach",{umWallReachGroups:wallReachGroups(this.ownership.capacity.lattice.dimensions)}),
       ...[0,1,2].map(axis=>keyed(this.pipelines,`evidenceDistance${axis}`,"evidenceDistance",{umEvidenceAxis:axis})),
       ...([["retirementEvidence",UNIFORM_MIXED_COUNTED.fineTiles],["retirementEvidenceCoarse",UNIFORM_MIXED_COUNTED.coarseTiles]] as const).map(([entryPoint,umCountedJobs])=>keyed(this.pipelines,entryPoint,entryPoint,{umCountedJobs})),
-      ...(["advect","redistance","traceCells"] as const).map(entry=>keyed(this.pipelines,entry,entry,{umMergedTiles:1,...(entry==="traceCells"?{}:{umMergedCoarse:1,umMergedPack:8}),umCertifiedJobs:2})),
-      ...(["advect","redistance"] as const).map(entry=>keyed(this.finePipelines,entry,`${entry}Fine`,{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1})),
+      ...(["advect","redistance","traceCells"] as const).map(entry=>keyed(this.pipelines,entry,entry,{umMergedTiles:1,...(entry==="traceCells"?{}:{umMergedCoarse:1,umMergedPack:8}),umCertifiedJobs:2,umClaimWord:2})),
+      ...(["advect","redistance"] as const).map(entry=>keyed(this.finePipelines,entry,`${entry}Fine`,{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1})),
       Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1}),compile("advectDeferred",regular)]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
-      ...([["advect","advectOwners"],["redistance","redistanceFine"],["traceCells","traceCells"]] as const).map(([entry,entryPoint])=>keyed(this.regularPipelines,entry,entryPoint,{...regular,umCertifiedJobs:1})),
+      ...([["advect","advectOwners"],["redistance","redistanceFine"],["traceCells","traceCells"]] as const).map(([entry,entryPoint])=>keyed(this.regularPipelines,entry,entryPoint,{...regular,umCertifiedJobs:1,umClaimWord:0})),
     ]);
   }
   private twin(create:(solid:Record<string,number>)=>Promise<GPUComputePipeline>):Promise<GPUComputePipeline>{return uniformMixedSolidPipeline(this.solid,create);}
   private variant(pipeline:GPUComputePipeline):GPUComputePipeline{return this.solid?.select(pipeline)??pipeline;}
   encode(encoder:GPUCommandEncoder,entry:"advect"|"redistance"|"traceCells",group:GPUBindGroup):void{
     const pipeline=this.pipelines.get(entry);if(!pipeline)throw new Error("Mixed surface stage is not initialized");
+    // Only advect reads the wall reach words (its passes and the deferred one).
+    encoder.clearBuffer(this.claims,0,entry==="advect"?undefined:4*SURFACE_CLAIM_WORDS);
     const pass=encoder.beginComputePass({label:`Uniform mixed surface ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);if(this.hanging)pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
     if(this.vertexCache&&entry!=="traceCells")this.ownership.dispatchHangingCounted(pass,this.variant(this.pipelines.get("vertexCache")!));
     if(entry==="advect"){
-      pass.setPipeline(this.variant(this.pipelines.get("wallReach")!));pass.dispatchWorkgroups(6);
+      pass.setPipeline(this.variant(this.pipelines.get("wallReach")!));pass.dispatchWorkgroups(6*wallReachGroups(this.ownership.capacity.lattice.dimensions));
       // The closed/clear evidence only exists for a scene holding solids.
       if(this.solid?.present){
         const tiles=this.ownership.capacity.tiles,x=this.ownership.dispatchX,groups=Math.ceil(tiles/64);
@@ -836,8 +908,9 @@ fn umTraceCell(owner:UMOwner){
         pass.dispatchWorkgroups(Math.min(lines,this.ownership.dispatchX),Math.ceil(lines/this.ownership.dispatchX));
       }
     }
-    // Fixed grids from capacity: the certified job counts are GPU state.
-    this.ownership.dispatchCertifiedCounted(pass,this.variant(pipeline),this.variant(this.regularPipelines.get(entry)!),entry==="traceCells"?undefined:this.variant(this.finePipelines.get(entry)!));
+    // Fixed claimed grids: the certified job counts are GPU state.
+    const grid=Math.min(UNIFORM_MIXED_CLAIMED_GRID,this.ownership.capacity.tiles);
+    for(const p of [this.regularPipelines.get(entry)!,...(entry==="traceCells"?[]:[this.finePipelines.get(entry)!]),pipeline]){pass.setPipeline(this.variant(p));pass.dispatchWorkgroups(grid);}
     if(entry==="advect"){
       const d=this.ownership.capacity.lattice.dimensions.map(n=>n+1),x=this.ownership.dispatchX;
       const groups=Math.ceil(2*(d[1]!*d[2]!+d[2]!*d[0]!+d[0]!*d[1]!)/64);
@@ -851,5 +924,5 @@ fn umTraceCell(owner:UMOwner){
       deferred.end();
     }
   }
-  destroy():void{}
+  destroy():void{this.claims.destroy();}
 }

@@ -10,7 +10,7 @@ import {getSceneDefinition} from "../lib/core/scenes";
 import {refinementRegionLattice} from "../lib/core/refinement-regions";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
 import type {GPUSolverInstance} from "../lib/core/method-contract";
-import {readMixedTexture} from "./helpers/uniform-mixed-native-fields";
+import {readMixedTexture,readMixedTileWords} from "./helpers/uniform-mixed-native-fields";
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("long dam retains its advancing surface toe at 0.333 and 0.667 seconds",{timeout:240000},async()=>{
@@ -32,8 +32,9 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    for(let step=1;step<=20;step++){
     assert.ok(solver.advanceTo(step/30,[]));await solver.awaitFrameCompletion?.();assert.equal(solver.info.simulationPipelineError,undefined);
     if(step!==10&&step!==20)continue;
-   const fields=solver as unknown as {volumeA:GPUTexture;vertexPhiField:GPUTexture;mixedFrame:{ownership:{layout:{tiles:Uint32Array}}}};
+   const fields=solver as unknown as {volumeA:GPUTexture;vertexPhiField:GPUTexture;};
    const volume=await readMixedTexture(device,fields.volumeA),phi=await readMixedTexture(device,fields.vertexPhiField);
+   const tiles=await readMixedTileWords(device,solver);
    let surfaceFront=-1,toeMass=0;
    for(let x=0;x<=d[0];x++)for(let y=1;y<=d[1];y++)if(phi[x+(d[0]+1)*(y+(d[1]+1)*(d[2]/2))]!<0)surfaceFront=Math.max(surfaceFront,x);
    // Measure actual liquid as well as its rendered level-set toe. Sample
@@ -41,7 +42,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    const toeStart=step===10?88:168;
    for(let z=0;z<d[2];z++)for(let y=0;y<d[1];y++)for(let x=toeStart;x<toeStart+8;x++){
     const tile=Math.floor(x/4)+(d[0]/4)*(Math.floor(y/4)+(d[1]/4)*Math.floor(z/4));
-    const word=fields.mixedFrame.ownership.layout.tiles[tile]!,width=word&0x80000000?1:4;
+    const word=tiles[tile]!,width=word&0x80000000?1:4;
     const p=[x,y,z].map(v=>Math.floor(v/width)*width);
     toeMass+=volume[p[0]!+d[0]*(p[1]!+d[1]*p[2]!)]!;
    }

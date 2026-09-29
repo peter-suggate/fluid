@@ -49,7 +49,7 @@ try{
   const store=usePerformanceInstrumentationStore.getState();
   store.setEnabled(false);
   const solver=await uniformVolumeMethod.createSolverAsync!(measured,scene,"balanced",values,undefined,()=>{}) as any;solvers.push(solver);
-  let reused=0,relayouts=0;const remapStats:number[][]=[];let lastChanged:Uint8Array|undefined;{const f=solver.mixedFrame;const adv=f.advance.bind(f);f.advance=(...a:any[])=>{if(f.reusableExtension!==undefined&&f.reusableExtension===JSON.stringify({...a[0],dt:0}))reused++;return adv(...a);};if(f.adoptBuiltLayout){const ad=f.adoptBuiltLayout.bind(f);f.adoptBuiltLayout=(l:any)=>{if(l.changedTiles)relayouts++;
+  const bandTiles:number[]=[],bandCycles:number[]=[],bandResidual:number[]=[];let reused=0,relayouts=0;const remapStats:number[][]=[];let lastChanged:Uint8Array|undefined;{const f=solver.mixedFrame;const adv=f.advance.bind(f);f.advance=(...a:any[])=>{if(f.reusableExtension!==undefined&&f.reusableExtension===JSON.stringify({...a[0],dt:0}))reused++;const r=adv(...a);r.then((x:any)=>{if(x&&typeof x.bandTiles==="number"){bandTiles.push(x.bandTiles);bandCycles.push(x.bandCycles);bandResidual.push(x.bandResidual);}},()=>{});return r;};if(f.adoptBuiltLayout){const ad=f.adoptBuiltLayout.bind(f);f.adoptBuiltLayout=(l:any)=>{if(l.changedTiles)relayouts++;
    // Remap worklist size (markChanged's rule), rep1 only: host-side from the two layouts.
    if(timed&&l.changedTiles){const a=f.ownership.layout.tiles as Uint32Array,b=l.layout.tiles as Uint32Array,T=f.ownership.layout.lattice.dimensions.map((d:number)=>d/4);
     const w=(x:number)=>(x&0x80000000)?1:4;const n=a.length;let changed=0,listed=0,listedSame=0;const ch=new Uint8Array(n),re=new Uint8Array(n);
@@ -59,7 +59,7 @@ try{
      if(hit){listed++;if(!ch[t])listedSame++;}}
     remapStats.push([changed,listed,listedSame,refined,flips]);}
    return ad(l);};}}
-  const quality:any[]=[];const walls:number[]=[],phases:Record<string,number[]>={},totals:number[]=[],fine:number[]=[],cycles:number[]=[];
+  const residency:number[][]=[];const quality:any[]=[];const walls:number[]=[],phases:Record<string,number[]>={},totals:number[]=[],fine:number[]=[],cycles:number[]=[];
   for(let step=1;step<=steps;step++){
    solver.applyRuntimeValues(values);
    if(timed&&step>=from)recorder=new GPUPassTimestampRecorder(real,4096,`frame ${step}`);
@@ -73,11 +73,13 @@ try{
    walls.push(wall);
    let tiles:Uint32Array|undefined;try{tiles=solver.mixedFrame?.ownership?.layout?.tiles;}catch{}
    if(tiles){let n=0;for(const w of tiles)if(w&0x80000000)n++;fine.push(n);}
+   // Residency (w-page diagnostic, rep1 only, after the wall time): resident pages, violation bits, radius.
+   if(timed){const o=solver.mixedFrame?.ownership;if(o){const n=o.capacity.tiles;const rb=real.createBuffer({size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const e=real.createCommandEncoder();e.copyBufferToBuffer(o.support,(9*n+28)*4,rb,0,16);real.queue.submit([e.finish()]);await rb.mapAsync(GPUMapMode.READ);const w=new Uint32Array(rb.getMappedRange()).slice();rb.unmap();rb.destroy();residency.push([w[0]!,w[1]!,w[2]!]);}}
    if(reading){totals.push(reading.sum_ms);const g:Record<string,number>={};for(const q of reading.passes)g[q.label]=(g[q.label]??0)+q.duration_ms;for(const [k,v] of Object.entries(g))(phases[k]??=[]).push(v);}
   }
   const med=(a:number[])=>{const s=[...a].sort((x,y)=>x-y);return s.length?+s[s.length>>1]!.toFixed(2):null;};
   const mean=(a:number[])=>a.length?+(a.reduce((x,y)=>x+y,0)/a.length).toFixed(3):null;
-  const arm={quality,reused,relayouts,...(remapStats.length?{remapChangedMean:mean(remapStats.map(r=>r[0]!)),remapListedMean:mean(remapStats.map(r=>r[1]!)),remapListedUnchangedMean:mean(remapStats.map(r=>r[2]!)),remapListedMax:Math.max(...remapStats.map(r=>r[1]!)),remapRefinedMean:mean(remapStats.map(r=>r[3]!)),remapFlipMean:mean(remapStats.map(r=>r[4]!))}:{}),wallMedian_ms:med(walls),wallMean_ms:mean(walls),fineTilesMean:mean(fine),
+  const tail=(a:number[])=>a.slice(from-1);const arm={quality,reused,relayouts,band:{tilesMean:mean(tail(bandTiles)),tilesMax:Math.max(...tail(bandTiles)),cyclesMean:mean(tail(bandCycles)),cyclesHist:tail(bandCycles).reduce((h:Record<number,number>,c)=>(h[c]=(h[c]??0)+1,h),{}),residualMedian:med(tail(bandResidual)),frames:bandTiles.length},...(residency.length?{residentPagesMean:mean(residency.map(r=>r[0]!)),residentPagesMax:Math.max(...residency.map(r=>r[0]!)),residencyRadiusMean:mean(residency.map(r=>r[2]!)),residencyViolation:residency.reduce((a,r)=>a|r[1]!,0)}:{}),...(remapStats.length?{remapChangedMean:mean(remapStats.map(r=>r[0]!)),remapListedMean:mean(remapStats.map(r=>r[1]!)),remapListedUnchangedMean:mean(remapStats.map(r=>r[2]!)),remapListedMax:Math.max(...remapStats.map(r=>r[1]!)),remapRefinedMean:mean(remapStats.map(r=>r[3]!)),remapFlipMean:mean(remapStats.map(r=>r[4]!))}:{}),wallMedian_ms:med(walls),wallMean_ms:mean(walls),fineTilesMean:mean(fine),
    ...(timed?{traceTotalMean_ms:mean(totals),traced:totals.length,phases:Object.fromEntries(Object.entries(phases).map(([k,v])=>[k,+(v.reduce((x,y)=>x+y,0)/walls.length).toFixed(3)]).sort((a,b)=>(b[1] as number)-(a[1] as number)))}:{})};
   result[`rep${rep}`]=arm;result.grids=Object.fromEntries(Object.entries(grids).map(([k,v])=>[k,{...v,callsPerFrame:v.calls/gridFrames,groupsPerFrame:v.groups/gridFrames}]));console.log(JSON.stringify({rep,...arm}));
   solver.destroy();solvers.pop();
