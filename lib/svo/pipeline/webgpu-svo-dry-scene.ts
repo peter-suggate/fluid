@@ -1722,6 +1722,10 @@ export class SparseVoxelDrySceneRenderer {
     this.splitPipelineBackdropTerrain = bundle.backdropTerrain;
     this.splitPipelineRigidBodies = bundle.rigidBodies;
     this.splitPipelineScale = scale;
+    // A bodiless kernel is live, so the next body would otherwise stall on a
+    // compile; build its body twin in the background now. A failure here is
+    // not this frame's: the real request recompiles and reports it.
+    if (!bundle.rigidBodies) void this.ensureSplitPipelines(scale, true).catch(() => undefined);
     if (this.requestedBundleFailure?.scale === scale) this.requestedBundleFailure = undefined;
     this.requestedBundleResourceFailure = undefined;
     this.ensureSplitTargets();
@@ -3273,7 +3277,13 @@ export class SparseVoxelDrySceneRenderer {
     // raster lands under the same phase id the traced primary reports.
   }
 
-  private async ensureSplitPipelines(scale: SvoConeLightingScale): Promise<void> {
+  /**
+   * `prewarmBodies` compiles the body-capable twin of the current variant
+   * without asking for it: it only lands in the cache (and activates if a body
+   * arrived meanwhile), so the first body dropped into a bodiless world swaps
+   * a pointer instead of stalling presentation on a Metal compile.
+   */
+  private async ensureSplitPipelines(scale: SvoConeLightingScale, prewarmBodies = false): Promise<void> {
     if (this.shadingPath === "inline" || !this.layout || !this.vertexModule) return;
     // The variant this call is for, captured now: lighting options can flip
     // while the compile is in flight, and a bundle must only activate if it is
@@ -3281,7 +3291,7 @@ export class SparseVoxelDrySceneRenderer {
     const globalIlluminationCapable = this.lightingOptions.globalIlluminationEnabled === true;
     const lattice = this.latticeVisibilityRequested(scale, globalIlluminationCapable);
     const backdropTerrain = this.backdropTerrainRequested();
-    const rigidBodies = this.rigidBodiesRequested();
+    const rigidBodies = prewarmBodies || this.rigidBodiesRequested();
     const variantKey = this.splitVariantKey(scale, globalIlluminationCapable, lattice, backdropTerrain, rigidBodies);
     const variantCurrent = () => scale === this.coneScale
       && globalIlluminationCapable === (this.lightingOptions.globalIlluminationEnabled === true)
