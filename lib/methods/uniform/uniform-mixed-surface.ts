@@ -620,10 +620,30 @@ fn umRebuildBand(p:vec3f,initial:f32,width:u32)->bool{
  let h=params.hDt.xyz;let band=4.0*f32(width)*max(h.x,max(h.y,h.z));
  return abs(initial)>1e-8&&abs(initial)<band${this.solid?"&&!umBuried(p)":""};
 }
+// A wide vertex past the band beside a band vertex holds a stale distance:
+// advection copies far air (or deep liquid) values toward a surface that
+// arrives under them, and the band test above never rebuilds them. One 4h
+// cell from the surface, that kink sits inside the cubic taps, the Newton
+// gradient and the volume shift's slope (long dam: 42h beside 4h, detaching
+// phi-only wall sheets). It is searched from the band value; a miss keeps
+// the band value. Unit vertices keep the native band.
+fn umStaleWide(p:vec3u,initial:f32,width:u32)->bool{
+ let h=params.hDt.xyz;let band=4.0*f32(width)*max(h.x,max(h.y,h.z));
+ if(width==1u||!(abs(initial)>=band)${this.solid?"||umBuried(vec3f(p))":""}){return false;}
+ for(var k=0u;k<6u;k++){
+  let axis=k/2u;var q=vec3i(p);q[axis]+=select(-1,1,(k&1u)!=0u)*i32(width);
+  if(q[axis]<0||q[axis]>i32(UM_D[axis])){continue;}
+  // Width-aligned taps are stored or resolved (umCubicPhi).
+  if(abs(umLoadVertex(vec3u(q)))<band){return true;}
+ }
+ return false;
+}
 ${[["umRebuildSearch","",true],["umWindowSearch",",o:vec3i",false]].map(([name,param,global])=>/* wgsl */`
 fn ${name}(p:vec3f,initial:f32,width:u32${param})->f32{
  let h=params.hDt.xyz;let w=f32(width);let band=4.0*w*max(h.x,max(h.y,h.z));
- var value=initial;
+ // umStaleWide vertices start (and on a miss stay) at the band value.
+ let start=select(initial,sign(initial)*min(abs(initial),band),width>1u);
+ var value=start;
  ${global?/* wgsl */`// phi(q) is carried across iterations: the sampler is a pure function of
  // q, so each accepted step reuses the value that justified it.
  // A trilinear zero set chords inside a curved surface by O(w^2 kappa), so
@@ -633,7 +653,7 @@ fn ${name}(p:vec3f,initial:f32,width:u32${param})->f32{
  // that width: across an h seam the cubic kept a phi-only one-cell sheet
  // running ahead of the long-dam toe.
  let cubic=!umRegularFine&&params.flags.y!=0u&&width>1u;`:""}
- var q=p;var phiQ=initial;
+ var q=p;var phiQ=start;
  for(var i=0u;i<umCounts.w;i++){
   let g=${global?"umSurfaceGradient(q,w)":"umWindowGradient(q,o)"};let norm=dot(g/h,g/h);if(norm<1e-16){break;}
   let next=clamp(q-clamp(phiQ*g/(h*h*norm),vec3f(-2.0*w),vec3f(2.0*w)),max(vec3f(0),p-vec3f(4.0*w)),min(vec3f(UM_D),p+vec3f(4.0*w)));
@@ -648,7 +668,7 @@ fn ${name}(p:vec3f,initial:f32,width:u32${param})->f32{
  // that end an ulp either side of tol (Newton alternating across a trilinear
  // kink) keep and replace a vertex respectively: 0.035 cells of asymmetry.
  let miss=clamp(abs(phiQ)/(0.005*w*min(h.x,min(h.y,h.z)))-1.0,0.0,1.0);
- if(miss<1.0){value=mix(sign(initial)*length((p-q)*h),initial,miss);}
+ if(miss<1.0){value=mix(sign(initial)*length((p-q)*h),start,miss);}
  else if(params.flags.z!=0u&&initial>0.0&&value<band&&umNoNearbySurface(p,band)){value=band;}
  return value;
 }`).join("\n")}
@@ -790,7 +810,7 @@ var<workgroup> umBandTotal:u32;
 var<workgroup> umBandList:array<u32,512>;
 fn umBandCandidate(vertex:vec3u,width:u32){
  let initial=umLoadVertex(vertex);
- if(!umRebuildBand(vec3f(vertex),initial,width)){textureStore(outputPhi,vec3i(vertex),vec4f(initial));return;}
+ if(!umRebuildBand(vec3f(vertex),initial,width)&&!umStaleWide(vertex,initial,width)){textureStore(outputPhi,vec3i(vertex),vec4f(initial));return;}
  umBandList[atomicAdd(&umBandCount,1u)]=vertex.x|(vertex.y<<10u)|(vertex.z<<20u)|(firstTrailingBit(width)<<30u);
 }
 @compute @workgroup_size(64) fn redistance(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){

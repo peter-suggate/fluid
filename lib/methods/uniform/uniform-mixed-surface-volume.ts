@@ -286,8 +286,12 @@ var<workgroup> metricBand:array<f32,125>;
    for(var a=0u;a<3u;a++){if(corner[a]==0u){openLow[a]=true;}else{openHigh[a]=true;}}}}`:""}
   // Both ends are width-aligned lattice vertices in tiles whose stencil holds
   // this owner: stored or resolved texels, so the samples are direct loads.
+  // A wide owner's wall vertex takes the one-sided slope. Dropping the wall
+  // axis (the native rule) leaves a floor vertex under a layer thinner than
+  // one owner at the 0.1 floor: it moved a tenth as far as the rest, and the
+  // global shift piled that layer's volume onto steep and tall parts.
   for(var axis=0u;axis<3u;axis++){
-   if(p[axis]==0u||p[axis]==UM_D[axis]){continue;}
+   if((p[axis]==0u||p[axis]==UM_D[axis])&&o.width==1u){continue;}
    ${this.solid?"if(o.width==1u&&!(openLow[axis]&&openHigh[axis])){continue;}":""}
    var lo=p;var hi=p;lo[axis]=p[axis]-min(p[axis],o.width);hi[axis]=min(UM_D[axis],p[axis]+o.width);
    gradient[axis]=(${this.resolved?"umLoadVertex(hi)-umLoadVertex(lo)":"umSampleVertex(vec3f(hi))-umSampleVertex(vec3f(lo))"})/(f32(hi[axis]-lo[axis])*UM_H[axis]);
