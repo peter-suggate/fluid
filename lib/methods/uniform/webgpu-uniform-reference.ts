@@ -1330,15 +1330,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.reduce((n,c)=>n+c,0),cutMapOffsetWords:this.solidCutMapOffsetWords},
       pressureGeometry,
     },this.scene.container.top==="open",this.pressureSchedule);
-    await this.mixedFrame.initialize();
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
-    await this.mixedDiagnostics.initialize();
     this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB);
-    await this.mixedDynamic.initialize();
     this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership);
-    await this.mixedBuilder.initialize();
     this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange});
-    await this.mixedBodies.initialize();
+    // One concurrent compile: serial stages left a first load waiting on
+    // each uncached pipeline in turn.
+    await Promise.all([this.mixedFrame,this.mixedDiagnostics,this.mixedDynamic,this.mixedBuilder,this.mixedBodies].map(part=>part.initialize()));
     this.mixedAccountedBytes=this.mixedFrame.allocatedBytes;
     this.executionInfo.allocatedBytes+=this.mixedAccountedBytes+this.mixedDynamic.allocatedBytes+this.mixedBuilder.allocatedBytes+(this.mixedBodies?.allocatedBytes??0);
     this.mixedSource={vertexPhi:this.vertexPhiField,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedPressure:this.mixedFrame.presentation.pressure,mixedPressurePhi:this.mixedFrame.presentation.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support}};

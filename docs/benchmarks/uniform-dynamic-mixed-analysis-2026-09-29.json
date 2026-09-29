@@ -1,0 +1,3110 @@
+{
+  "kind": "source audit and historical capture extraction; no new GPU measurements",
+  "auditUTC": "2026-09-29T02:42:38.188986+00:00",
+  "auditHead": "c82429537f492f39476699b1ddec45fd19c1b086",
+  "auditStatus": [
+    " M advance-lab/UniformLab.tsx",
+    " M components/FieldQuickBar.tsx",
+    " M lib/features/field-view/layers-ui.tsx",
+    " M lib/methods/uniform/uniform-diagnostics.ts",
+    " M lib/methods/uniform/uniform-mixed-cleanup.ts",
+    " M lib/methods/uniform/uniform-mixed-diagnostics.ts",
+    " M lib/methods/uniform/uniform-mixed-dynamic.ts",
+    " M lib/methods/uniform/uniform-mixed-extension.ts",
+    " M lib/methods/uniform/uniform-mixed-forces.ts",
+    " M lib/methods/uniform/uniform-mixed-frame-plan.ts",
+    " M lib/methods/uniform/uniform-mixed-frame.ts",
+    " M lib/methods/uniform/uniform-mixed-layout-builder.ts",
+    " M lib/methods/uniform/uniform-mixed-layout.ts",
+    " M lib/methods/uniform/uniform-mixed-momentum-cache.ts",
+    " M lib/methods/uniform/uniform-mixed-momentum.ts",
+    " M lib/methods/uniform/uniform-mixed-ownership.ts",
+    " M lib/methods/uniform/uniform-mixed-phi-resolve.ts",
+    " M lib/methods/uniform/uniform-mixed-pressure-acceptance.ts",
+    " M lib/methods/uniform/uniform-mixed-pressure-authority.ts",
+    " M lib/methods/uniform/uniform-mixed-pressure-velocity.ts",
+    " M lib/methods/uniform/uniform-mixed-remap.ts",
+    " M lib/methods/uniform/uniform-mixed-sharpening.ts",
+    " M lib/methods/uniform/uniform-mixed-solid.wgsl.ts",
+    " M lib/methods/uniform/uniform-mixed-surface-geometry.ts",
+    " M lib/methods/uniform/uniform-mixed-surface-volume.ts",
+    " M lib/methods/uniform/uniform-mixed-surface.ts",
+    " M lib/methods/uniform/uniform-mixed-topology.wgsl.ts",
+    " M lib/methods/uniform/uniform-mixed-transport.ts",
+    " M lib/methods/uniform/uniform-pressure-band.ts",
+    " M lib/methods/uniform/uniform-stages.ts",
+    " M lib/methods/uniform/webgpu-uniform-reference.ts",
+    " M tests/uniform-long-dam-front-dawn.test.ts",
+    " M tests/uniform-mixed-solid-parity-dawn.test.ts",
+    "A  tools/.band-solid-probe.ts",
+    "A  tools/.probe-f7-a1.ts",
+    " M tools/profile-uniform-geometric-dawn.ts",
+    "?? lib/methods/uniform/uniform-mixed-bodies.ts",
+    "?? lib/methods/uniform/uniform-mixed-solid-displacement.ts",
+    "?? tests/uniform-mixed-live-solid-edit-dawn.test.ts",
+    "?? tests/uniform-mixed-rigid-body-dawn.test.ts"
+  ],
+  "sourceHashes": {
+    "lib/methods/uniform/uniform-mixed-pressure-velocity.ts": "bf10a05757ee9547695d6ddf437ae46205ae6e495d2b1930fba561c2eeae8d78",
+    "lib/methods/uniform/uniform-mixed-momentum.ts": "c3db396c0dacb91ebeee986ec4678508d285f67a0c39fd005b821024ba2c064c",
+    "lib/methods/uniform/uniform-mixed-pressure-memory.ts": "376c71be4f19de38c689ac39bd21fe43247876fbff507781a5a86bcef37f6857",
+    "lib/methods/uniform/uniform-mixed-face-dispatch.wgsl.ts": "5fde02bc48ee2ac7fd8d6e465b1c23727f0a7b7913dc222deeab391b556b59fe",
+    "lib/methods/uniform/uniform-mixed-extension.ts": "6b29e3662e5a5af42b66a51b3357a223cf2d01cd915c4d61cc4bc513efd043a8",
+    "lib/methods/uniform/uniform-mixed-presentation.wgsl.ts": "caa66c22d873d202e915406bed81346e50c3f96d98c68c5612f043177d5003b8",
+    "lib/methods/uniform/uniform-mixed-phi-resolve.ts": "fc1a53dec12175bbc43fc999a66ab11156ca93e046698b3c93c117901eabc5fc",
+    "lib/methods/uniform/uniform-mixed-pressure-boundary.wgsl.ts": "30add767163f54712770c8fde9ce473a7db9627489f4132144c5be0aa0c558cb",
+    "lib/methods/uniform/uniform-mixed-pressure-schedule.ts": "01584ee9fc65d511db1261c9e45b8bdf2297eb45296412523c1788a5edd7d80d",
+    "lib/methods/uniform/uniform-mixed-surface.ts": "842fcca6b6f0a9eaa60e1324018c6ed88554d0ef0861f7be08f0dea47e4fe804",
+    "lib/methods/uniform/uniform-mixed-diagnostics.ts": "ebffeddfdc3419dcf69b6db2316874147dc72093b40a16f006b2d083b26feb3c",
+    "lib/methods/uniform/uniform-mixed-sharpening.ts": "c407510a4db03bc67a91ac9846dddf02282ed877b3bf050c447845087e1f7a6e",
+    "lib/methods/uniform/uniform-mixed-pressure-topology.wgsl.ts": "02c3f73ffb920337fa54f7a2c8ff07a3d5eb9370e883642b5ecf3f4bc5d04a14",
+    "lib/methods/uniform/uniform-mixed-dynamic.ts": "dfb7e0f4baba22ac3b13eab66681e0cc442e10ca05b18c875480452f749e7982",
+    "lib/methods/uniform/uniform-mixed-frame-plan.ts": "2c987e932ac40bb650c656dfe4444cc3bff5c703bb25cdbd1398cf6c6e2b2af3",
+    "lib/methods/uniform/uniform-mixed-source.wgsl.ts": "57fcbe1f9cf9c506e7b966f71e15fc6468496836609db08033f728fa650b39e2",
+    "lib/methods/uniform/uniform-mixed-pressure-acceptance.ts": "cc80b04a227984216a90dcfe16d8afd13657b051e5bb52b5159cc9b083b08869",
+    "lib/methods/uniform/uniform-mixed-topology.wgsl.ts": "29637b6220f854fe67d43632ea2303ba486de9ea66f25a88643199f0f0dc31a5",
+    "lib/methods/uniform/uniform-mixed-faces.wgsl.ts": "e86ad8466064db85775bf536f33278418d0df0655d2b5f790e6e1862b9246301",
+    "lib/methods/uniform/uniform-mixed-remap.ts": "e79fc4203fcda870df55fcdc4fb4573042f9f2bc258f79610211d47a385386a3",
+    "lib/methods/uniform/uniform-mixed-solid.wgsl.ts": "7f1b930ce68f64112b9f46bb812d062d795e0ae53db498a7a6b5e6be107ee121",
+    "lib/methods/uniform/uniform-mixed-momentum-cache.ts": "4686253135c3c18a37cd32dc41d40de939412306318f79afd0f4e54390f2e00e",
+    "lib/methods/uniform/uniform-mixed-layout-builder.ts": "1473b4c7f0f6e2e3ba4dfd7ca3d31a967b4927201238b3a8d8454ae6fed12b18",
+    "lib/methods/uniform/uniform-mixed-pressure-surface.wgsl.ts": "d446bfbc84535dc76d3743b710eb4d5493827b0166ac581d9d16fe15190d0257",
+    "lib/methods/uniform/uniform-mixed-surface-geometry.ts": "39b459e3386dcd23195ca49fe32d66efdf4a3e0c4d7a0ac0c779a269e2ae9464",
+    "lib/methods/uniform/uniform-mixed-pressure-authority.ts": "afa35c40aab47ca1da34900d11e396dfcd81a8b9b448527743ed425fe9cded53",
+    "lib/methods/uniform/uniform-mixed-dust-accounting.wgsl.ts": "3a7cc23377b94413ee4f0d2ab05dc5256c4ddaa63e5c550950254faf2e9ca66b",
+    "lib/methods/uniform/uniform-mixed-surface-volume.ts": "928802fcce4266bfc2d244bc096f33ec63dcd68ae4558abc9f708a5f75612853",
+    "lib/methods/uniform/uniform-mixed-pressure-reconstruction.wgsl.ts": "bee50c710368ebb5b4fe5e764e396eb0ef4c2c413b5d1728e0ea2e59e4bbac2c",
+    "lib/methods/uniform/uniform-mixed-transport.ts": "ecec0a78c51151f859b76e8376969ff599210ce53523f0a28d24602786eaa82f",
+    "lib/methods/uniform/uniform-mixed-ownership.ts": "8e231bda02c5e9ab02cce5a8e619ede50d3ef84073cd7dbcaf63a45514b2c3b9",
+    "lib/methods/uniform/uniform-mixed-transport.wgsl.ts": "05c21795413248eb6d73f4a3a27eb4dd0024d79ac6df47c08e9fc2c13048f43f",
+    "lib/methods/uniform/uniform-mixed-solid-displacement.ts": "c8ed33c546a1bea4a30831bb795437c419d38df7faac59389527f1e5909005d2",
+    "lib/methods/uniform/uniform-mixed-pressure-cycles.ts": "2b5bb43bd44bad65058bdf5479111a177d04175e29056b827e969fe52d9ee210",
+    "lib/methods/uniform/uniform-mixed-detached-mass.wgsl.ts": "0ca99dedb3a989d3f003f4c7ca17a7e5e59adcb79b704ea4517d0492b37783f0",
+    "lib/methods/uniform/uniform-mixed-cleanup.ts": "e6f10100829dc25774edeefbca20192d61da202a152b8a88422d75f5a6ec3bdc",
+    "lib/methods/uniform/uniform-mixed-vertex-sampling.wgsl.ts": "1f4a358a49c987f22fd643a05ba9fe01b2b267efea731fad340531cdb1440ee7",
+    "lib/methods/uniform/uniform-mixed-frame.ts": "724517c68526b17a59779ea64132e8d5285875e89606bdb0c61ff6fc30b9f658",
+    "lib/methods/uniform/uniform-mixed-options.ts": "f85be8cc33d0558ef687e4ba66d95dc02f0ff1393e12341f02323940ab08972a",
+    "lib/methods/uniform/uniform-mixed-bodies.ts": "f99eb63045e121cf5783d46f13819d40908214f32ab4ebd2fe5795e134c0e9e1",
+    "lib/methods/uniform/uniform-mixed-layout.ts": "3caa398d78518e5747782e3c8ae2f9a6ca66ac8cd13873e4e14d335976feb776",
+    "lib/methods/uniform/uniform-mixed-forces.ts": "7d4b24aed35fcb84532b1b4b95218bb277cccf6c363d6e0bef0ef0331e4de0c6",
+    "lib/methods/uniform/uniform-mixed-velocity-sampling.wgsl.ts": "7f795d9466e27ee2e0cd314a851f05100eda942e15c6934301c5cab8a2bc55f8",
+    "lib/methods/uniform/webgpu-uniform-reference.ts": "b8c42e16a93fb9fb392276b7366a928ce8e1e22ff962e9318f1b8538cbefd0d8",
+    "lib/core/webgpu-renderer.ts": "ac082ac46f14c2a20fb33c25d501d4c9d92b58eb343b584b8d3b90906d729cb8",
+    "lib/methods/uniform/uniform-volume-donor-sum.wgsl.ts": "a9c773d4b851fd50a5aaf2178fc5bc77c02e2db218c020e85afcd7dcb33cee9f",
+    "lib/methods/uniform/uniform-surface-volume.wgsl.ts": "4bb1c668cd22803329799ae1c175faa50d903dd192c2fd2d7bcad69f42769238"
+  },
+  "historicalCapture": {
+    "path": "/tmp/claude-501/-Users-petersuggate-code-me-fluid/329a6d87-4e2f-4416-93b2-1650f75909fc/scratchpad/tree/scratch-fig9/out/summary.json",
+    "sha256": "c403b8e94471cc8b0da7c13c5677c32c796cd7f8ce3d63fcbfb772eadeda5cd6",
+    "capturedAt": "2026-09-29T01:31:26.258Z",
+    "gitRevision": "d767fe7d238431ef360093a1cff6e6be144db394",
+    "dirty": true,
+    "scopeWarnings": [
+      "Older revision; not an acceptance baseline for current tree",
+      "Chrome GPU contention; exclusive coverage approximately 70%",
+      "Capture covers 73 analyzed advances, a subset of 200 measured advances",
+      "Pass aggregates are not kernel/register/spill evidence",
+      "Untraced wall and sampled trace are different windows; do not subtract them"
+    ],
+    "wall": {
+      "baselineMsPerAdvance": 25.884130205,
+      "tracedMsPerAdvance": 28.984107085000005,
+      "distortion": 1.1197636101908182,
+      "steps": 200
+    },
+    "gpu": {
+      "busyMsPerFrame": 33.18331054794525,
+      "wallMsPerFrame": 36.84695890410959,
+      "intervalMsPerFrame": 32.99694767123292,
+      "overlapMsPerFrame": 0.02583369863014796,
+      "exactMsPerFrame": 32.996947671232874,
+      "compositeMsPerFrame": 4.4652452207591434e-14,
+      "exactIntervalCoverage": 0.9999999999999987,
+      "occupancy": 0.9005712149624447,
+      "intervalsPerFrame": 62.26027397260274,
+      "encodersPerFrame": 61.38356164383562,
+      "passesPerFrame": 61.38356164383562,
+      "gapMsPerFrame": 3.6636483561643463,
+      "largestGapsUs": [
+        31720.580000000075,
+        7077.0800000000745,
+        3568.4599999999627,
+        831.4599999999627,
+        601,
+        478.5800000000745,
+        441.0800000000745,
+        357,
+        348.87999999988824,
+        342.37999999988824
+      ],
+      "mergedShare": 0,
+      "diagnosticBlitMsPerFrame": 0.22781698630136996,
+      "diagnosticBlitsPerFrame": 62.31506849315068
+    },
+    "counterSummary": {
+      "occupancyCounterName": "Compute Occupancy",
+      "available": true,
+      "partitionCount": 4,
+      "partitionOccupancy": [
+        0.19822117359307337,
+        0.1890734469135799,
+        0.18622562886597963,
+        0.18796593975903592
+      ],
+      "slotsPerPartition": 96,
+      "slotConfidence": 0.9560761346998536,
+      "threadsPerSlot": 32,
+      "totalSlots": 384,
+      "totalThreads": 12288,
+      "exclusiveCoverage": 0.7024311771336238,
+      "meanOccupancy": 0.1904899958295937,
+      "meanAlu": 0.2911818378123136,
+      "meanReadGBs": 12.502799286542407,
+      "meanWriteGBs": 4.0336156034933985,
+      "sourceCounterCount": 31,
+      "retainedCounterCount": 5,
+      "timestampStride": 17,
+      "retainedSampleIntervalUs": 170,
+      "frameSeries": [
+        {
+          "name": "ALU Utilization",
+          "points": [
+            {
+              "t": 217,
+              "v": 3.4509
+            },
+            {
+              "t": 302,
+              "v": 48.0238
+            },
+            {
+              "t": 6702,
+              "v": 1.2393
+            },
+            {
+              "t": 7049,
+              "v": 0.3012
+            },
+            {
+              "t": 7277,
+              "v": 61.6852
+            },
+            {
+              "t": 7660,
+              "v": 14.7149
+            },
+            {
+              "t": 7671,
+              "v": 0.091
+            },
+            {
+              "t": 8200,
+              "v": 20.1137
+            },
+            {
+              "t": 8631,
+              "v": 21.18
+            },
+            {
+              "t": 8828,
+              "v": 3.206
+            },
+            {
+              "t": 8906,
+              "v": 53.4662
+            },
+            {
+              "t": 8975,
+              "v": 23.0284
+            },
+            {
+              "t": 9325,
+              "v": 19.6089
+            },
+            {
+              "t": 9750,
+              "v": 6.3156
+            },
+            {
+              "t": 9793,
+              "v": 17.1165
+            },
+            {
+              "t": 9832,
+              "v": 16.658
+            },
+            {
+              "t": 9942,
+              "v": 21.0912
+            },
+            {
+              "t": 10020,
+              "v": 19.4873
+            },
+            {
+              "t": 10140,
+              "v": 20.8826
+            },
+            {
+              "t": 10402,
+              "v": 57.9842
+            },
+            {
+              "t": 10437,
+              "v": 33.8939
+            },
+            {
+              "t": 11556,
+              "v": 47.9407
+            },
+            {
+              "t": 11563,
+              "v": 46.9395
+            },
+            {
+              "t": 11711,
+              "v": 67.7156
+            },
+            {
+              "t": 11722,
+              "v": 40.4695
+            },
+            {
+              "t": 11876,
+              "v": 13.6467
+            },
+            {
+              "t": 11903,
+              "v": 41.275
+            },
+            {
+              "t": 11954,
+              "v": 54.8135
+            },
+            {
+              "t": 12019,
+              "v": 29.9228
+            },
+            {
+              "t": 12180,
+              "v": 7.7716
+            },
+            {
+              "t": 12378,
+              "v": 65.6897
+            },
+            {
+              "t": 12486,
+              "v": 64.8569
+            },
+            {
+              "t": 12521,
+              "v": 63.2075
+            },
+            {
+              "t": 12609,
+              "v": 64.6245
+            },
+            {
+              "t": 12875,
+              "v": 19.3303
+            },
+            {
+              "t": 12918,
+              "v": 40.8726
+            },
+            {
+              "t": 12957,
+              "v": 49.0806
+            },
+            {
+              "t": 12990,
+              "v": 49.9635
+            },
+            {
+              "t": 13177,
+              "v": 43.1085
+            },
+            {
+              "t": 13343,
+              "v": 42.9104
+            },
+            {
+              "t": 13408,
+              "v": 42.0555
+            },
+            {
+              "t": 13678,
+              "v": 37.2933
+            },
+            {
+              "t": 13690,
+              "v": 16.0917
+            },
+            {
+              "t": 13871,
+              "v": 46.0262
+            },
+            {
+              "t": 14032,
+              "v": 45.3811
+            },
+            {
+              "t": 14643,
+              "v": 70.7089
+            },
+            {
+              "t": 14731,
+              "v": 65.8767
+            },
+            {
+              "t": 15109,
+              "v": 70.6101
+            },
+            {
+              "t": 15221,
+              "v": 51.7868
+            },
+            {
+              "t": 15387,
+              "v": 22.9707
+            },
+            {
+              "t": 15999,
+              "v": 58.3367
+            },
+            {
+              "t": 16038,
+              "v": 57.5788
+            },
+            {
+              "t": 16649,
+              "v": 56.0342
+            },
+            {
+              "t": 16996,
+              "v": 33.2675
+            },
+            {
+              "t": 17046,
+              "v": 43.8051
+            },
+            {
+              "t": 17273,
+              "v": 54.7595
+            },
+            {
+              "t": 17509,
+              "v": 54.7049
+            },
+            {
+              "t": 17586,
+              "v": 50.2865
+            },
+            {
+              "t": 18281,
+              "v": 18.8699
+            },
+            {
+              "t": 20623,
+              "v": 10.2247
+            },
+            {
+              "t": 21742,
+              "v": 41.6082
+            },
+            {
+              "t": 21985,
+              "v": 1.0202
+            },
+            {
+              "t": 22710,
+              "v": 10.0222
+            },
+            {
+              "t": 23446,
+              "v": 1.2345
+            },
+            {
+              "t": 24176,
+              "v": 4.316
+            },
+            {
+              "t": 24369,
+              "v": 0.8828
+            },
+            {
+              "t": 25033,
+              "v": 24.4797
+            },
+            {
+              "t": 25066,
+              "v": 26.7054
+            },
+            {
+              "t": 25445,
+              "v": 0.7289
+            },
+            {
+              "t": 25953,
+              "v": 31.6682
+            },
+            {
+              "t": 26063,
+              "v": 3.8347
+            },
+            {
+              "t": 26259,
+              "v": 5.6196
+            },
+            {
+              "t": 26410,
+              "v": 32.0244
+            },
+            {
+              "t": 26460,
+              "v": 31.0306
+            },
+            {
+              "t": 26761,
+              "v": 8.7777
+            },
+            {
+              "t": 26950,
+              "v": 0.7365
+            },
+            {
+              "t": 26995,
+              "v": 8.9908
+            },
+            {
+              "t": 27149,
+              "v": 24.5605
+            },
+            {
+              "t": 27301,
+              "v": 26.4486
+            },
+            {
+              "t": 27381,
+              "v": 34.7007
+            },
+            {
+              "t": 27541,
+              "v": 1.3231
+            },
+            {
+              "t": 27841,
+              "v": 28.5411
+            },
+            {
+              "t": 28081,
+              "v": 48.5132
+            },
+            {
+              "t": 28114,
+              "v": 51.9522
+            },
+            {
+              "t": 28609,
+              "v": 2.6083
+            },
+            {
+              "t": 28963,
+              "v": 36.1471
+            },
+            {
+              "t": 29045,
+              "v": 33.3672
+            },
+            {
+              "t": 29310,
+              "v": 16.2833
+            },
+            {
+              "t": 29426,
+              "v": 24.342
+            },
+            {
+              "t": 29496,
+              "v": 30.5356
+            },
+            {
+              "t": 29855,
+              "v": 21.3097
+            },
+            {
+              "t": 30776,
+              "v": 46.0177
+            },
+            {
+              "t": 30847,
+              "v": 20.3607
+            },
+            {
+              "t": 31085,
+              "v": 1.6174
+            },
+            {
+              "t": 31283,
+              "v": 45.5037
+            },
+            {
+              "t": 31468,
+              "v": 67.6131
+            },
+            {
+              "t": 31663,
+              "v": 41.3077
+            },
+            {
+              "t": 31854,
+              "v": 38.4797
+            },
+            {
+              "t": 31862,
+              "v": 40.379
+            },
+            {
+              "t": 31900,
+              "v": 39.464
+            },
+            {
+              "t": 31969,
+              "v": 36.9715
+            },
+            {
+              "t": 32396,
+              "v": 29.9636
+            },
+            {
+              "t": 32903,
+              "v": 38.8461
+            },
+            {
+              "t": 33011,
+              "v": 39.5464
+            },
+            {
+              "t": 33551,
+              "v": 55.1398
+            },
+            {
+              "t": 33663,
+              "v": 33.9641
+            },
+            {
+              "t": 33779,
+              "v": 0.228
+            },
+            {
+              "t": 33856,
+              "v": 0
+            }
+          ]
+        },
+        {
+          "name": "GPU Last Level Cache Utilization",
+          "points": [
+            {
+              "t": 217,
+              "v": 1.5441
+            },
+            {
+              "t": 302,
+              "v": 8.9492
+            },
+            {
+              "t": 6702,
+              "v": 1.2936
+            },
+            {
+              "t": 7049,
+              "v": 0.0286
+            },
+            {
+              "t": 7277,
+              "v": 12.5283
+            },
+            {
+              "t": 7660,
+              "v": 8.1437
+            },
+            {
+              "t": 7671,
+              "v": 6.223
+            },
+            {
+              "t": 8200,
+              "v": 77.6507
+            },
+            {
+              "t": 8631,
+              "v": 75.7318
+            },
+            {
+              "t": 8828,
+              "v": 10.9751
+            },
+            {
+              "t": 8906,
+              "v": 20.3264
+            },
+            {
+              "t": 8975,
+              "v": 11.261
+            },
+            {
+              "t": 9325,
+              "v": 74.5044
+            },
+            {
+              "t": 9750,
+              "v": 9.3444
+            },
+            {
+              "t": 9793,
+              "v": 38.6633
+            },
+            {
+              "t": 9832,
+              "v": 66.9113
+            },
+            {
+              "t": 9942,
+              "v": 72.3329
+            },
+            {
+              "t": 10020,
+              "v": 71.9393
+            },
+            {
+              "t": 10140,
+              "v": 75.104
+            },
+            {
+              "t": 10402,
+              "v": 22.745
+            },
+            {
+              "t": 10437,
+              "v": 18.1736
+            },
+            {
+              "t": 11556,
+              "v": 5.647
+            },
+            {
+              "t": 11563,
+              "v": 5.2238
+            },
+            {
+              "t": 11711,
+              "v": 23.4581
+            },
+            {
+              "t": 11722,
+              "v": 26.731
+            },
+            {
+              "t": 11876,
+              "v": 0.9435
+            },
+            {
+              "t": 11903,
+              "v": 12.6548
+            },
+            {
+              "t": 11954,
+              "v": 29.871
+            },
+            {
+              "t": 12019,
+              "v": 2.3776
+            },
+            {
+              "t": 12180,
+              "v": 1.4741
+            },
+            {
+              "t": 12378,
+              "v": 8.8299
+            },
+            {
+              "t": 12486,
+              "v": 9.5786
+            },
+            {
+              "t": 12521,
+              "v": 10.0924
+            },
+            {
+              "t": 12609,
+              "v": 9.7985
+            },
+            {
+              "t": 12875,
+              "v": 4.6371
+            },
+            {
+              "t": 12918,
+              "v": 12.515
+            },
+            {
+              "t": 12957,
+              "v": 17.1482
+            },
+            {
+              "t": 12990,
+              "v": 16.0475
+            },
+            {
+              "t": 13177,
+              "v": 18.4399
+            },
+            {
+              "t": 13343,
+              "v": 18.4533
+            },
+            {
+              "t": 13408,
+              "v": 18.8205
+            },
+            {
+              "t": 13678,
+              "v": 22.5166
+            },
+            {
+              "t": 13690,
+              "v": 7.0329
+            },
+            {
+              "t": 13871,
+              "v": 18.3389
+            },
+            {
+              "t": 14032,
+              "v": 17.1069
+            },
+            {
+              "t": 14643,
+              "v": 3.3202
+            },
+            {
+              "t": 14731,
+              "v": 6.215
+            },
+            {
+              "t": 15109,
+              "v": 17.0116
+            },
+            {
+              "t": 15221,
+              "v": 7.1855
+            },
+            {
+              "t": 15387,
+              "v": 11.5308
+            },
+            {
+              "t": 15999,
+              "v": 45.986
+            },
+            {
+              "t": 16038,
+              "v": 48.4173
+            },
+            {
+              "t": 16649,
+              "v": 45.5748
+            },
+            {
+              "t": 16996,
+              "v": 18.6175
+            },
+            {
+              "t": 17046,
+              "v": 25.179
+            },
+            {
+              "t": 17273,
+              "v": 46.2709
+            },
+            {
+              "t": 17509,
+              "v": 47.2748
+            },
+            {
+              "t": 17586,
+              "v": 28.0769
+            },
+            {
+              "t": 18281,
+              "v": 8.5404
+            },
+            {
+              "t": 20623,
+              "v": 9.2022
+            },
+            {
+              "t": 21742,
+              "v": 21.9608
+            },
+            {
+              "t": 21985,
+              "v": 13.5848
+            },
+            {
+              "t": 22710,
+              "v": 16.7845
+            },
+            {
+              "t": 23446,
+              "v": 1.8735
+            },
+            {
+              "t": 24176,
+              "v": 3.6304
+            },
+            {
+              "t": 24369,
+              "v": 1.6179
+            },
+            {
+              "t": 25033,
+              "v": 14.8599
+            },
+            {
+              "t": 25066,
+              "v": 14.8122
+            },
+            {
+              "t": 25445,
+              "v": 3.7724
+            },
+            {
+              "t": 25953,
+              "v": 14.4886
+            },
+            {
+              "t": 26063,
+              "v": 20.8848
+            },
+            {
+              "t": 26259,
+              "v": 13.6273
+            },
+            {
+              "t": 26410,
+              "v": 19.051
+            },
+            {
+              "t": 26460,
+              "v": 18.6445
+            },
+            {
+              "t": 26761,
+              "v": 18.9307
+            },
+            {
+              "t": 26950,
+              "v": 3.7345
+            },
+            {
+              "t": 26995,
+              "v": 19.1276
+            },
+            {
+              "t": 27149,
+              "v": 13.8109
+            },
+            {
+              "t": 27301,
+              "v": 16.0636
+            },
+            {
+              "t": 27381,
+              "v": 19.3774
+            },
+            {
+              "t": 27541,
+              "v": 6.0047
+            },
+            {
+              "t": 27841,
+              "v": 16.5529
+            },
+            {
+              "t": 28081,
+              "v": 56.8115
+            },
+            {
+              "t": 28114,
+              "v": 59.2786
+            },
+            {
+              "t": 28609,
+              "v": 0.7657
+            },
+            {
+              "t": 28963,
+              "v": 24.8915
+            },
+            {
+              "t": 29045,
+              "v": 28.5316
+            },
+            {
+              "t": 29310,
+              "v": 11.1508
+            },
+            {
+              "t": 29426,
+              "v": 9.8077
+            },
+            {
+              "t": 29496,
+              "v": 9.5789
+            },
+            {
+              "t": 29855,
+              "v": 18.9002
+            },
+            {
+              "t": 30776,
+              "v": 7.7951
+            },
+            {
+              "t": 30847,
+              "v": 7.4248
+            },
+            {
+              "t": 31085,
+              "v": 0.5287
+            },
+            {
+              "t": 31283,
+              "v": 20.8911
+            },
+            {
+              "t": 31468,
+              "v": 21.4943
+            },
+            {
+              "t": 31663,
+              "v": 22.6435
+            },
+            {
+              "t": 31854,
+              "v": 23.8565
+            },
+            {
+              "t": 31862,
+              "v": 23.8271
+            },
+            {
+              "t": 31900,
+              "v": 24.0354
+            },
+            {
+              "t": 31969,
+              "v": 23.6504
+            },
+            {
+              "t": 32396,
+              "v": 20.3509
+            },
+            {
+              "t": 32903,
+              "v": 24.6225
+            },
+            {
+              "t": 33011,
+              "v": 24.4608
+            },
+            {
+              "t": 33551,
+              "v": 27.9418
+            },
+            {
+              "t": 33663,
+              "v": 6.8227
+            },
+            {
+              "t": 33779,
+              "v": 0.296
+            },
+            {
+              "t": 33856,
+              "v": 0.0201
+            }
+          ]
+        },
+        {
+          "name": "Compute Occupancy",
+          "points": [
+            {
+              "t": 217,
+              "v": 3.2043
+            },
+            {
+              "t": 302,
+              "v": 35.3049
+            },
+            {
+              "t": 6702,
+              "v": 0.5193
+            },
+            {
+              "t": 7049,
+              "v": 0.5229
+            },
+            {
+              "t": 7277,
+              "v": 50.7296
+            },
+            {
+              "t": 7660,
+              "v": 9.8899
+            },
+            {
+              "t": 7671,
+              "v": 9.5596
+            },
+            {
+              "t": 8200,
+              "v": 38.7936
+            },
+            {
+              "t": 8631,
+              "v": 37.2089
+            },
+            {
+              "t": 8828,
+              "v": 4.3273
+            },
+            {
+              "t": 8906,
+              "v": 40.7586
+            },
+            {
+              "t": 8975,
+              "v": 16.3686
+            },
+            {
+              "t": 9325,
+              "v": 33.1479
+            },
+            {
+              "t": 9750,
+              "v": 12.1338
+            },
+            {
+              "t": 9793,
+              "v": 19.2198
+            },
+            {
+              "t": 9832,
+              "v": 33.3113
+            },
+            {
+              "t": 9942,
+              "v": 33.2372
+            },
+            {
+              "t": 10020,
+              "v": 33.295
+            },
+            {
+              "t": 10140,
+              "v": 33.2418
+            },
+            {
+              "t": 10402,
+              "v": 45.8916
+            },
+            {
+              "t": 10437,
+              "v": 25.4804
+            },
+            {
+              "t": 11556,
+              "v": 22.8465
+            },
+            {
+              "t": 11563,
+              "v": 22.7568
+            },
+            {
+              "t": 11711,
+              "v": 53.5515
+            },
+            {
+              "t": 11722,
+              "v": 36.6899
+            },
+            {
+              "t": 11876,
+              "v": 7.2051
+            },
+            {
+              "t": 11903,
+              "v": 25.0156
+            },
+            {
+              "t": 11954,
+              "v": 42.0235
+            },
+            {
+              "t": 12019,
+              "v": 13.1676
+            },
+            {
+              "t": 12180,
+              "v": 3.6423
+            },
+            {
+              "t": 12378,
+              "v": 20.8212
+            },
+            {
+              "t": 12486,
+              "v": 20.8245
+            },
+            {
+              "t": 12521,
+              "v": 20.8228
+            },
+            {
+              "t": 12609,
+              "v": 20.821
+            },
+            {
+              "t": 12875,
+              "v": 6.6532
+            },
+            {
+              "t": 12918,
+              "v": 34.3195
+            },
+            {
+              "t": 12957,
+              "v": 20.8754
+            },
+            {
+              "t": 12990,
+              "v": 20.8244
+            },
+            {
+              "t": 13177,
+              "v": 20.8158
+            },
+            {
+              "t": 13343,
+              "v": 20.9303
+            },
+            {
+              "t": 13408,
+              "v": 20.8179
+            },
+            {
+              "t": 13678,
+              "v": 20.7312
+            },
+            {
+              "t": 13690,
+              "v": 12.4961
+            },
+            {
+              "t": 13871,
+              "v": 20.8151
+            },
+            {
+              "t": 14032,
+              "v": 20.8139
+            },
+            {
+              "t": 14643,
+              "v": 41.6397
+            },
+            {
+              "t": 14731,
+              "v": 41.5954
+            },
+            {
+              "t": 15109,
+              "v": 53.8989
+            },
+            {
+              "t": 15221,
+              "v": 20.8003
+            },
+            {
+              "t": 15387,
+              "v": 24.9639
+            },
+            {
+              "t": 15999,
+              "v": 47.8991
+            },
+            {
+              "t": 16038,
+              "v": 47.863
+            },
+            {
+              "t": 16649,
+              "v": 46.7515
+            },
+            {
+              "t": 16996,
+              "v": 20.4502
+            },
+            {
+              "t": 17046,
+              "v": 38.9199
+            },
+            {
+              "t": 17273,
+              "v": 44.7446
+            },
+            {
+              "t": 17509,
+              "v": 47.9781
+            },
+            {
+              "t": 17586,
+              "v": 27.0402
+            },
+            {
+              "t": 18281,
+              "v": 14.5783
+            },
+            {
+              "t": 20623,
+              "v": 9.5348
+            },
+            {
+              "t": 21742,
+              "v": 32.7414
+            },
+            {
+              "t": 21985,
+              "v": 0.7281
+            },
+            {
+              "t": 22710,
+              "v": 14.5821
+            },
+            {
+              "t": 23446,
+              "v": 1.189
+            },
+            {
+              "t": 24176,
+              "v": 4.6497
+            },
+            {
+              "t": 24369,
+              "v": 3.8045
+            },
+            {
+              "t": 25033,
+              "v": 17.1061
+            },
+            {
+              "t": 25066,
+              "v": 16.9515
+            },
+            {
+              "t": 25445,
+              "v": 1.7645
+            },
+            {
+              "t": 25953,
+              "v": 15.9787
+            },
+            {
+              "t": 26063,
+              "v": 3.3572
+            },
+            {
+              "t": 26259,
+              "v": 6.4185
+            },
+            {
+              "t": 26410,
+              "v": 20.5863
+            },
+            {
+              "t": 26460,
+              "v": 19.2907
+            },
+            {
+              "t": 26761,
+              "v": 10.1356
+            },
+            {
+              "t": 26950,
+              "v": 1.8162
+            },
+            {
+              "t": 26995,
+              "v": 9.8542
+            },
+            {
+              "t": 27149,
+              "v": 15.8895
+            },
+            {
+              "t": 27301,
+              "v": 17.9921
+            },
+            {
+              "t": 27381,
+              "v": 21.7851
+            },
+            {
+              "t": 27541,
+              "v": 3.1468
+            },
+            {
+              "t": 27841,
+              "v": 18.756
+            },
+            {
+              "t": 28081,
+              "v": 34.2746
+            },
+            {
+              "t": 28114,
+              "v": 37.5862
+            },
+            {
+              "t": 28609,
+              "v": 0.4333
+            },
+            {
+              "t": 28963,
+              "v": 27.0777
+            },
+            {
+              "t": 29045,
+              "v": 23.8347
+            },
+            {
+              "t": 29310,
+              "v": 6.2011
+            },
+            {
+              "t": 29426,
+              "v": 20.8292
+            },
+            {
+              "t": 29496,
+              "v": 20.8306
+            },
+            {
+              "t": 29855,
+              "v": 8.4238
+            },
+            {
+              "t": 30776,
+              "v": 24.9786
+            },
+            {
+              "t": 30847,
+              "v": 10.769
+            },
+            {
+              "t": 31085,
+              "v": 3.9805
+            },
+            {
+              "t": 31283,
+              "v": 30.8803
+            },
+            {
+              "t": 31468,
+              "v": 29.1302
+            },
+            {
+              "t": 31663,
+              "v": 16.6638
+            },
+            {
+              "t": 31854,
+              "v": 16.6633
+            },
+            {
+              "t": 31862,
+              "v": 16.662
+            },
+            {
+              "t": 31900,
+              "v": 16.6663
+            },
+            {
+              "t": 31969,
+              "v": 16.6647
+            },
+            {
+              "t": 32396,
+              "v": 16.6048
+            },
+            {
+              "t": 32903,
+              "v": 16.6641
+            },
+            {
+              "t": 33011,
+              "v": 16.6678
+            },
+            {
+              "t": 33551,
+              "v": 14.435
+            },
+            {
+              "t": 33663,
+              "v": 6.8258
+            },
+            {
+              "t": 33779,
+              "v": 0.7661
+            },
+            {
+              "t": 33856,
+              "v": 0
+            }
+          ]
+        }
+      ]
+    },
+    "passes": [
+      {
+        "label": "Uniform mixed global surface volume",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 3.391502876712329,
+        "meanMicroseconds": 3391.5028767123285,
+        "share": 0.10278232127722153,
+        "merged": false,
+        "exclusiveShare": 0.7661951781105236,
+        "counterSamples": 1016,
+        "partitions": [
+          0.23127201838235312,
+          0.22879998939929316,
+          0.21927281886792446,
+          0.23142127307692292
+        ],
+        "imbalance": 1.016380706951739,
+        "counters": {
+          "ALU Utilization": 45.812850344488126,
+          "GPU Last Level Cache Utilization": 12.448845775918636,
+          "Compute Occupancy": 22.644369028871363,
+          "GPU Read Bandwidth": 5.571890756233585,
+          "GPU Write Bandwidth": 1.8631866961942267
+        },
+        "residentSlots": 86.95437707086603,
+        "residentThreads": 2782.540066267713,
+        "occupancy": 0.22644369028871364,
+        "alu": 0.45812850344488126,
+        "readGBs": 5.571890756233585,
+        "writeGBs": 1.8631866961942267,
+        "shaders": []
+      },
+      {
+        "label": "Uniform pressure band solve",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 3.3002545205479454,
+        "meanMicroseconds": 3300.2545205479455,
+        "share": 0.10001696379405244,
+        "merged": false,
+        "exclusiveShare": 0.870432118602066,
+        "counterSamples": 1082,
+        "partitions": [
+          0.1418372932862191,
+          0.13242811301369878,
+          0.12791525631768957,
+          0.1269315709459459
+        ],
+        "imbalance": 1.0722662171762662,
+        "counters": {
+          "ALU Utilization": 18.74543078404192,
+          "GPU Last Level Cache Utilization": 14.7339334719655,
+          "Compute Occupancy": 13.269117552372151,
+          "GPU Read Bandwidth": 24.73288162353665,
+          "GPU Write Bandwidth": 3.134117406038203
+        },
+        "residentSlots": 50.95341140110906,
+        "residentThreads": 1630.5091648354899,
+        "occupancy": 0.1326911755237215,
+        "alu": 0.1874543078404192,
+        "readGBs": 24.73288162353665,
+        "writeGBs": 3.134117406038203,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed transport",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 3.2801336986301375,
+        "meanMicroseconds": 3280.1336986301376,
+        "share": 0.0994071855164286,
+        "merged": false,
+        "exclusiveShare": 0.6009748767340678,
+        "counterSamples": 760,
+        "partitions": [
+          0.3081823875598085,
+          0.32385607575757575,
+          0.3035261657754012,
+          0.31739624242424225
+        ],
+        "imbalance": 1.0338904689512471,
+        "counters": {
+          "ALU Utilization": 22.591084868421053,
+          "GPU Last Level Cache Utilization": 55.22265366228073,
+          "Compute Occupancy": 31.293477960526342,
+          "GPU Read Bandwidth": 20.071359594298272,
+          "GPU Write Bandwidth": 9.192084901315797
+        },
+        "residentSlots": 120.16695536842116,
+        "residentThreads": 3845.342571789477,
+        "occupancy": 0.31293477960526345,
+        "alu": 0.22591084868421052,
+        "readGBs": 20.071359594298272,
+        "writeGBs": 9.192084901315797,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed surface redistance",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 3.2343835616438357,
+        "meanMicroseconds": 3234.3835616438355,
+        "share": 0.09802068948527638,
+        "merged": false,
+        "exclusiveShare": 0.5664940070306229,
+        "counterSamples": 726,
+        "partitions": [
+          0.11552783783783782,
+          0.11617597959183672,
+          0.10291525252525253,
+          0.117706078817734
+        ],
+        "imbalance": 1.0408979393440108,
+        "counters": {
+          "ALU Utilization": 24.43153328741966,
+          "GPU Last Level Cache Utilization": 3.068717722681357,
+          "Compute Occupancy": 11.284674035812666,
+          "GPU Read Bandwidth": 1.5111334481175396,
+          "GPU Write Bandwidth": 0.5668250688705233
+        },
+        "residentSlots": 43.33314829752064,
+        "residentThreads": 1386.6607455206604,
+        "occupancy": 0.11284674035812665,
+        "alu": 0.2443153328741966,
+        "readGBs": 1.5111334481175396,
+        "writeGBs": 0.5668250688705233,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed extension",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 3.2236391780821916,
+        "meanMicroseconds": 3223.6391780821914,
+        "share": 0.09769507198669147,
+        "merged": false,
+        "exclusiveShare": 0.7643031788373579,
+        "counterSamples": 981,
+        "partitions": [
+          0.17206832661290336,
+          0.16219764705882347,
+          0.16505575675675677,
+          0.15945117490494304
+        ],
+        "imbalance": 1.0447808355191168,
+        "counters": {
+          "ALU Utilization": 34.5521224006116,
+          "GPU Last Level Cache Utilization": 14.951769835202184,
+          "Compute Occupancy": 16.48528667176351,
+          "GPU Read Bandwidth": 8.727008307849138,
+          "GPU Write Bandwidth": 3.853947383622154
+        },
+        "residentSlots": 63.30350081957188,
+        "residentThreads": 2025.7120262263002,
+        "occupancy": 0.1648528667176351,
+        "alu": 0.345521224006116,
+        "readGBs": 8.727008307849138,
+        "writeGBs": 3.853947383622154,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed geometric sharpening",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 2.9961643835616436,
+        "meanMicroseconds": 2996.1643835616437,
+        "share": 0.09080125875320677,
+        "merged": false,
+        "exclusiveShare": 0.7122703456474053,
+        "counterSamples": 751,
+        "partitions": [
+          0.36874162608695693,
+          0.372539195402299,
+          0.35751752763819106,
+          0.36625539108910865
+        ],
+        "imbalance": 1.0171345532955876,
+        "counters": {
+          "ALU Utilization": 48.08172849533954,
+          "GPU Last Level Cache Utilization": 32.3295704727031,
+          "Compute Occupancy": 36.57084340878829,
+          "GPU Read Bandwidth": 27.936528606302755,
+          "GPU Write Bandwidth": 10.551895395028854
+        },
+        "residentSlots": 140.43203868974703,
+        "residentThreads": 4493.825238071905,
+        "occupancy": 0.3657084340878829,
+        "alu": 0.4808172849533954,
+        "readGBs": 27.936528606302755,
+        "writeGBs": 10.551895395028854,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed surface advect",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 2.6030983561643835,
+        "meanMicroseconds": 2603.0983561643834,
+        "share": 0.07888906519780288,
+        "merged": false,
+        "exclusiveShare": 0.607443984823575,
+        "counterSamples": 594,
+        "partitions": [
+          0.16142479591836736,
+          0.15985732240437156,
+          0.15547835483870964,
+          0.16018158064516136
+        ],
+        "imbalance": 1.0137487073031581,
+        "counters": {
+          "ALU Utilization": 26.597466526374863,
+          "GPU Last Level Cache Utilization": 11.20921731200896,
+          "Compute Occupancy": 16.070334006734015,
+          "GPU Read Bandwidth": 4.335266975308639,
+          "GPU Write Bandwidth": 1.1540032828282827
+        },
+        "residentSlots": 61.71008258585862,
+        "residentThreads": 1974.722642747476,
+        "occupancy": 0.16070334006734016,
+        "alu": 0.26597466526374863,
+        "readGBs": 4.335266975308639,
+        "writeGBs": 1.1540032828282827,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed momentum",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 2.420744794520548,
+        "meanMicroseconds": 2420.7447945205477,
+        "share": 0.07336268853227834,
+        "merged": false,
+        "exclusiveShare": 0.5696752901306186,
+        "counterSamples": 531,
+        "partitions": [
+          0.1440829682539682,
+          0.14442451145038165,
+          0.14545769172932327,
+          0.14547581410256422
+        ],
+        "imbalance": 1.0042493902493639,
+        "counters": {
+          "ALU Utilization": 24.579066760828596,
+          "GPU Last Level Cache Utilization": 8.938240411173874,
+          "Compute Occupancy": 14.494240191462653,
+          "GPU Read Bandwidth": 3.702108490269928,
+          "GPU Write Bandwidth": 1.663304504080351
+        },
+        "residentSlots": 55.65788233521659,
+        "residentThreads": 1781.052234726931,
+        "occupancy": 0.14494240191462654,
+        "alu": 0.24579066760828597,
+        "readGBs": 3.702108490269928,
+        "writeGBs": 1.663304504080351,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure V-cycle",
+        "exactAttribution": true,
+        "callsPerFrame": 2.095890410958904,
+        "gpuMsPerFrame": 1.1380450684931505,
+        "meanMicroseconds": 542.9888235294118,
+        "share": 0.0344894042876975,
+        "merged": false,
+        "exclusiveShare": 0.857421444536824,
+        "counterSamples": 363,
+        "partitions": [
+          0.06122075531914893,
+          0.05689390625000001,
+          0.03904344897959182,
+          0.05204392452830189
+        ],
+        "imbalance": 1.170557548287773,
+        "counters": {
+          "ALU Utilization": 4.3509681129476565,
+          "GPU Last Level Cache Utilization": 7.099990748393017,
+          "Compute Occupancy": 5.410633011937559,
+          "GPU Read Bandwidth": 5.92073259871442,
+          "GPU Write Bandwidth": 1.5137561294765856
+        },
+        "residentSlots": 20.776830765840227,
+        "residentThreads": 664.8585845068873,
+        "occupancy": 0.054106330119375594,
+        "alu": 0.04350968112947656,
+        "readGBs": 5.92073259871442,
+        "writeGBs": 1.5137561294765856,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed body forces",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.7252178082191781,
+        "meanMicroseconds": 725.2178082191782,
+        "share": 0.021978330100254413,
+        "merged": false,
+        "exclusiveShare": 0.539723351888616,
+        "counterSamples": 138,
+        "partitions": [
+          0.11796499999999999,
+          0.12266300000000001,
+          0.12057084210526316,
+          0.1265510731707317
+        ],
+        "imbalance": 1.0378357367760678,
+        "counters": {
+          "ALU Utilization": 21.944725301932362,
+          "GPU Last Level Cache Utilization": 11.701909541062808,
+          "Compute Occupancy": 12.261952113526574,
+          "GPU Read Bandwidth": 9.89709939613527,
+          "GPU Write Bandwidth": 4.217064734299517
+        },
+        "residentSlots": 47.08589611594204,
+        "residentThreads": 1506.7486757101453,
+        "occupancy": 0.12261952113526574,
+        "alu": 0.2194472530193236,
+        "readGBs": 9.89709939613527,
+        "writeGBs": 4.217064734299517,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed extension far states",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.669220410958904,
+        "meanMicroseconds": 669.220410958904,
+        "share": 0.02028128230607031,
+        "merged": false,
+        "exclusiveShare": 0.8407617614361698,
+        "counterSamples": 214,
+        "partitions": [
+          0.13351505714285714,
+          0.10637814035087718,
+          0.1319851632653061,
+          0.11885174999999995
+        ],
+        "imbalance": 1.0882972470251866,
+        "counters": {
+          "ALU Utilization": 25.84181339563862,
+          "GPU Last Level Cache Utilization": 9.323368263239875,
+          "Compute Occupancy": 12.316648753894084,
+          "GPU Read Bandwidth": 8.769643730529605,
+          "GPU Write Bandwidth": 4.673543652647976
+        },
+        "residentSlots": 47.295931214953285,
+        "residentThreads": 1513.4697988785051,
+        "occupancy": 0.12316648753894084,
+        "alu": 0.2584181339563862,
+        "readGBs": 8.769643730529605,
+        "writeGBs": 4.673543652647976,
+        "shaders": []
+      },
+      {
+        "label": "Uniform dynamic ownership census classify",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.578423698630137,
+        "meanMicroseconds": 578.423698630137,
+        "share": 0.0175296122657555,
+        "merged": false,
+        "exclusiveShare": 0.6043301907191094,
+        "counterSamples": 142,
+        "partitions": [
+          0.17483144736842107,
+          0.19741666666666663,
+          0.17245087499999998,
+          0.17835663636363638
+        ],
+        "imbalance": 1.0921243662701747,
+        "counters": {
+          "ALU Utilization": 27.41479735915494,
+          "GPU Last Level Cache Utilization": 9.32807411971831,
+          "Compute Occupancy": 18.50403309859155,
+          "GPU Read Bandwidth": 8.944633978873238,
+          "GPU Write Bandwidth": 0.19489559859154898
+        },
+        "residentSlots": 71.05548709859156,
+        "residentThreads": 2273.77558715493,
+        "occupancy": 0.1850403309859155,
+        "alu": 0.2741479735915494,
+        "readGBs": 8.944633978873238,
+        "writeGBs": 0.19489559859154898,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed surface traceCells",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.4742926027397259,
+        "meanMicroseconds": 474.2926027397259,
+        "share": 0.014373832618258179,
+        "merged": false,
+        "exclusiveShare": 0.535692954121145,
+        "counterSamples": 100,
+        "partitions": [
+          0.20049599999999998,
+          0.1876603783783784,
+          0.20497527999999998,
+          0.18581393103448274
+        ],
+        "imbalance": 1.0525781661052982,
+        "counters": {
+          "ALU Utilization": 29.08402316666667,
+          "GPU Last Level Cache Utilization": 20.857730583333332,
+          "Compute Occupancy": 19.183632666666675,
+          "GPU Read Bandwidth": 15.41022341666667,
+          "GPU Write Bandwidth": 4.469299583333335
+        },
+        "residentSlots": 73.66514944000004,
+        "residentThreads": 2357.284782080001,
+        "occupancy": 0.19183632666666675,
+        "alu": 0.2908402316666667,
+        "readGBs": 15.41022341666667,
+        "writeGBs": 4.469299583333335,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed cleanup orphan",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.43434452054794526,
+        "meanMicroseconds": 434.34452054794525,
+        "share": 0.013163172693291609,
+        "merged": false,
+        "exclusiveShare": 0.7451379263036825,
+        "counterSamples": 132,
+        "partitions": [
+          0.17418187096774193,
+          0.1726314411764706,
+          0.16479627027027027,
+          0.18692554285714288
+        ],
+        "imbalance": 1.070385932472368,
+        "counters": {
+          "ALU Utilization": 35.70615391414139,
+          "GPU Last Level Cache Utilization": 3.49994419191919,
+          "Compute Occupancy": 17.73742866161615,
+          "GPU Read Bandwidth": 4.89969154040404,
+          "GPU Write Bandwidth": 1.4214581439393936
+        },
+        "residentSlots": 68.11172606060602,
+        "residentThreads": 2179.5752339393925,
+        "occupancy": 0.1773742866161615,
+        "alu": 0.35706153914141386,
+        "readGBs": 4.89969154040404,
+        "writeGBs": 1.4214581439393936,
+        "shaders": []
+      },
+      {
+        "label": "Uniform dynamic ownership census sources",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.4164638356164385,
+        "meanMicroseconds": 416.4638356164386,
+        "share": 0.01262128363404704,
+        "merged": false,
+        "exclusiveShare": 0.7257486877447632,
+        "counterSamples": 108,
+        "partitions": [
+          0.23164427999999992,
+          0.2238481470588235,
+          0.20884112903225802,
+          0.1982101666666667
+        ],
+        "imbalance": 1.0742378566474546,
+        "counters": {
+          "ALU Utilization": 36.5406824074074,
+          "GPU Last Level Cache Utilization": 23.39626689814816,
+          "Compute Occupancy": 22.434318750000003,
+          "GPU Read Bandwidth": 10.287912500000001,
+          "GPU Write Bandwidth": 0.9346877314814818
+        },
+        "residentSlots": 86.14778400000002,
+        "residentThreads": 2756.7290880000005,
+        "occupancy": 0.22434318750000004,
+        "alu": 0.36540682407407404,
+        "readGBs": 10.287912500000001,
+        "writeGBs": 0.9346877314814818,
+        "shaders": []
+      },
+      {
+        "label": "Uniform pressure band list and rows",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.37664013698630133,
+        "meanMicroseconds": 376.6401369863013,
+        "share": 0.011414393256581732,
+        "merged": false,
+        "exclusiveShare": 0.7882877918786714,
+        "counterSamples": 125,
+        "partitions": [
+          0.15922756666666665,
+          0.16966383870967747,
+          0.2032384871794872,
+          0.17561754838709678
+        ],
+        "imbalance": 1.1486497890191658,
+        "counters": {
+          "ALU Utilization": 27.859039799999998,
+          "GPU Last Level Cache Utilization": 26.4782792,
+          "Compute Occupancy": 18.251567199999997,
+          "GPU Read Bandwidth": 32.2656572,
+          "GPU Write Bandwidth": 10.2693726
+        },
+        "residentSlots": 70.08601804799999,
+        "residentThreads": 2242.7525775359995,
+        "occupancy": 0.18251567199999996,
+        "alu": 0.27859039799999996,
+        "readGBs": 32.2656572,
+        "writeGBs": 10.2693726,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed geometric fill",
+        "exactAttribution": true,
+        "callsPerFrame": 3,
+        "gpuMsPerFrame": 0.350245890410959,
+        "meanMicroseconds": 116.74863013698634,
+        "share": 0.010614493616217328,
+        "merged": false,
+        "exclusiveShare": 0.7882528712704994,
+        "counterSamples": 101,
+        "partitions": [
+          0.15522463999999997,
+          0.167914,
+          0.144704125,
+          0.1779617878787879
+        ],
+        "imbalance": 1.1022640647885915,
+        "counters": {
+          "ALU Utilization": 38.89649141914191,
+          "GPU Last Level Cache Utilization": 7.356595957095709,
+          "Compute Occupancy": 16.58790899339934,
+          "GPU Read Bandwidth": 8.811957673267328,
+          "GPU Write Bandwidth": 4.9627867986798675
+        },
+        "residentSlots": 63.697570534653465,
+        "residentThreads": 2038.322257108911,
+        "occupancy": 0.1658790899339934,
+        "alu": 0.3889649141914191,
+        "readGBs": 8.811957673267328,
+        "writeGBs": 4.9627867986798675,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed sharpening geometry",
+        "exactAttribution": true,
+        "callsPerFrame": 2,
+        "gpuMsPerFrame": 0.32274808219178097,
+        "meanMicroseconds": 161.37404109589048,
+        "share": 0.009781149620489173,
+        "merged": false,
+        "exclusiveShare": 0.7041948404561446,
+        "counterSamples": 94,
+        "partitions": [
+          0.23141379166666665,
+          0.21979183333333335,
+          0.25792909999999997,
+          0.217282
+        ],
+        "imbalance": 1.11366340023708,
+        "counters": {
+          "ALU Utilization": 41.36237579787236,
+          "GPU Last Level Cache Utilization": 10.88939335106383,
+          "Compute Occupancy": 22.946673138297882,
+          "GPU Read Bandwidth": 9.051637765957446,
+          "GPU Write Bandwidth": 5.134774202127661
+        },
+        "residentSlots": 88.11522485106387,
+        "residentThreads": 2819.687195234044,
+        "occupancy": 0.22946673138297882,
+        "alu": 0.4136237579787236,
+        "readGBs": 9.051637765957446,
+        "writeGBs": 5.134774202127661,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed phi resolve",
+        "exactAttribution": true,
+        "callsPerFrame": 4,
+        "gpuMsPerFrame": 0.2764575342465757,
+        "meanMicroseconds": 69.11438356164392,
+        "share": 0.00837827598482978,
+        "merged": false,
+        "exclusiveShare": 0.7607589166261262,
+        "counterSamples": 79,
+        "partitions": [
+          0.3227991874999999,
+          0.3508347916666667,
+          0.3493170357142857,
+          0.31093591304347823
+        ],
+        "imbalance": 1.0520675608166477,
+        "counters": {
+          "ALU Utilization": 39.291175316455686,
+          "GPU Last Level Cache Utilization": 10.716675632911397,
+          "Compute Occupancy": 34.0374325949367,
+          "GPU Read Bandwidth": 10.586214240506331,
+          "GPU Write Bandwidth": 1.1177265822784812
+        },
+        "residentSlots": 130.70374116455693,
+        "residentThreads": 4182.519717265822,
+        "occupancy": 0.340374325949367,
+        "alu": 0.39291175316455684,
+        "readGBs": 10.586214240506331,
+        "writeGBs": 1.1177265822784812,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure authority and volume correction",
+        "exactAttribution": true,
+        "callsPerFrame": 2,
+        "gpuMsPerFrame": 0.25655082191780815,
+        "meanMicroseconds": 128.27541095890405,
+        "share": 0.007774986476748326,
+        "merged": false,
+        "exclusiveShare": 0.7760106278175629,
+        "counterSamples": 87,
+        "partitions": [
+          0.1638785217391304,
+          0.17247430434782615,
+          0.1273572083333333,
+          0.1392827
+        ],
+        "imbalance": 1.1441219404651097,
+        "counters": {
+          "ALU Utilization": 20.28903908045977,
+          "GPU Last Level Cache Utilization": 7.623350574712643,
+          "Compute Occupancy": 15.383063793103446,
+          "GPU Read Bandwidth": 12.940666379310347,
+          "GPU Write Bandwidth": 8.386742528735631
+        },
+        "residentSlots": 59.070964965517234,
+        "residentThreads": 1890.2708788965515,
+        "occupancy": 0.15383063793103446,
+        "alu": 0.2028903908045977,
+        "readGBs": 12.940666379310347,
+        "writeGBs": 8.386742528735631,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed hanging fine taps",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.24447301369863006,
+        "meanMicroseconds": 244.47301369863007,
+        "share": 0.007408958432593576,
+        "merged": false,
+        "exclusiveShare": 0.7651941301754606,
+        "counterSamples": 60,
+        "partitions": [
+          0.33929466666666663,
+          0.31963953333333334,
+          0.320967,
+          0.34798876923076927
+        ],
+        "imbalance": 1.0482457953420794,
+        "counters": {
+          "ALU Utilization": 46.22157388888889,
+          "GPU Last Level Cache Utilization": 6.322092777777775,
+          "Compute Occupancy": 33.09081055555556,
+          "GPU Read Bandwidth": 6.05251722222222,
+          "GPU Write Bandwidth": 7.550879444444447
+        },
+        "residentSlots": 127.06871253333333,
+        "residentThreads": 4066.1988010666664,
+        "occupancy": 0.33090810555555555,
+        "alu": 0.4622157388888889,
+        "readGBs": 6.05251722222222,
+        "writeGBs": 7.550879444444447,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed surface advect deferred",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.22829684931506847,
+        "meanMicroseconds": 228.29684931506847,
+        "share": 0.006918726289162195,
+        "merged": false,
+        "exclusiveShare": 0.701768965784114,
+        "counterSamples": 69,
+        "partitions": [
+          0.08057128571428572,
+          0.06242205263157895,
+          0.10087889999999998,
+          0.09622068421052632
+        ],
+        "imbalance": 1.1864863195825335,
+        "counters": {
+          "ALU Utilization": 14.473233695652173,
+          "GPU Last Level Cache Utilization": 12.775502536231883,
+          "Compute Occupancy": 8.735409420289859,
+          "GPU Read Bandwidth": 9.639964855072467,
+          "GPU Write Bandwidth": 4.479213768115943
+        },
+        "residentSlots": 33.543972173913055,
+        "residentThreads": 1073.4071095652178,
+        "occupancy": 0.08735409420289858,
+        "alu": 0.14473233695652174,
+        "readGBs": 9.639964855072467,
+        "writeGBs": 4.479213768115943,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure project",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.2205465753424657,
+        "meanMicroseconds": 220.5465753424657,
+        "share": 0.006683847777070014,
+        "merged": false,
+        "exclusiveShare": 0.7663401636034775,
+        "counterSamples": 56,
+        "partitions": [
+          0.05722961538461539,
+          0.09723184210526319,
+          0.06820970588235295,
+          0.07243742857142857
+        ],
+        "imbalance": 1.3179127244634876,
+        "counters": {
+          "ALU Utilization": 18.06298705357143,
+          "GPU Last Level Cache Utilization": 6.800334821428571,
+          "Compute Occupancy": 7.135949107142857,
+          "GPU Read Bandwidth": 4.756580803571429,
+          "GPU Write Bandwidth": 3.5043526785714283
+        },
+        "residentSlots": 27.40204457142857,
+        "residentThreads": 876.8654262857142,
+        "occupancy": 0.07135949107142857,
+        "alu": 0.1806298705357143,
+        "readGBs": 4.756580803571429,
+        "writeGBs": 3.5043526785714283,
+        "shaders": []
+      },
+      {
+        "label": "Uniform shared frame plan",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.21824671232876713,
+        "meanMicroseconds": 218.24671232876713,
+        "share": 0.006614148511652697,
+        "merged": false,
+        "exclusiveShare": 0.810441369293654,
+        "counterSamples": 75,
+        "partitions": [
+          0.22095326315789474,
+          0.19592244999999997,
+          0.16432642105263157,
+          0.21173947368421053
+        ],
+        "imbalance": 1.1146004243340266,
+        "counters": {
+          "ALU Utilization": 34.08910799999999,
+          "GPU Last Level Cache Utilization": 7.391272888888887,
+          "Compute Occupancy": 19.683376444444452,
+          "GPU Read Bandwidth": 17.36124400000001,
+          "GPU Write Bandwidth": 0.36807199999999973
+        },
+        "residentSlots": 75.5841655466667,
+        "residentThreads": 2418.6932974933343,
+        "occupancy": 0.19683376444444453,
+        "alu": 0.3408910799999999,
+        "readGBs": 17.36124400000001,
+        "writeGBs": 0.36807199999999973,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed transport live set",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.19655986301369865,
+        "meanMicroseconds": 196.55986301369865,
+        "share": 0.005956910468572267,
+        "merged": false,
+        "exclusiveShare": 0.7230576345037165,
+        "counterSamples": 70,
+        "partitions": [
+          0.3414007647058823,
+          0.39021989473684215,
+          0.3416364,
+          0.2749099166666667
+        ],
+        "imbalance": 1.157779122769966,
+        "counters": {
+          "ALU Utilization": 28.580617499999992,
+          "GPU Last Level Cache Utilization": 8.822376785714285,
+          "Compute Occupancy": 32.43478678571429,
+          "GPU Read Bandwidth": 18.65441714285715,
+          "GPU Write Bandwidth": 0.6598949999999996
+        },
+        "residentSlots": 124.54958125714286,
+        "residentThreads": 3985.5866002285716,
+        "occupancy": 0.32434786785714287,
+        "alu": 0.28580617499999994,
+        "readGBs": 18.65441714285715,
+        "writeGBs": 0.6598949999999996,
+        "shaders": []
+      },
+      {
+        "label": "Uniform local speed certificate",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.15840027397260278,
+        "meanMicroseconds": 158.40027397260278,
+        "share": 0.004800452319130651,
+        "merged": false,
+        "exclusiveShare": 0.7751915123988147,
+        "counterSamples": 57,
+        "partitions": [
+          0.2224395,
+          0.32774817647058824,
+          0.29168031250000004,
+          0.25948411111111114
+        ],
+        "imbalance": 1.1903483961079317,
+        "counters": {
+          "ALU Utilization": 37.67849166666665,
+          "GPU Last Level Cache Utilization": 5.838234649122807,
+          "Compute Occupancy": 26.948373245614036,
+          "GPU Read Bandwidth": 15.158947807017542,
+          "GPU Write Bandwidth": 0.6468197368421051
+        },
+        "residentSlots": 103.48175326315791,
+        "residentThreads": 3311.416104421053,
+        "occupancy": 0.2694837324561404,
+        "alu": 0.3767849166666665,
+        "readGBs": 15.158947807017542,
+        "writeGBs": 0.6468197368421051,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure setup",
+        "exactAttribution": true,
+        "callsPerFrame": 2,
+        "gpuMsPerFrame": 0.1444023287671233,
+        "meanMicroseconds": 72.20116438356165,
+        "share": 0.004376232923295955,
+        "merged": false,
+        "exclusiveShare": 0.8237316401946627,
+        "counterSamples": 57,
+        "partitions": [
+          0.075505375,
+          0.04256513636363637,
+          0.057823454545454546,
+          0.0419723125
+        ],
+        "imbalance": 1.3862700653145115,
+        "counters": {
+          "ALU Utilization": 4.916529824561404,
+          "GPU Last Level Cache Utilization": 7.156535087719298,
+          "Compute Occupancy": 4.996650877192985,
+          "GPU Read Bandwidth": 5.342912280701753,
+          "GPU Write Bandwidth": 2.8031964912280696
+        },
+        "residentSlots": 19.18713936842106,
+        "residentThreads": 613.988459789474,
+        "occupancy": 0.049966508771929846,
+        "alu": 0.04916529824561404,
+        "readGBs": 5.342912280701753,
+        "writeGBs": 2.8031964912280696,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure authority phase",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.11699479452054792,
+        "meanMicroseconds": 116.99479452054793,
+        "share": 0.0035456247555450474,
+        "merged": false,
+        "exclusiveShare": 0.8938168423369602,
+        "counterSamples": 35,
+        "partitions": [
+          0.082273125,
+          0.065598,
+          0.11740045454545454,
+          0.13037925
+        ],
+        "imbalance": 1.3181243689016082,
+        "counters": {
+          "ALU Utilization": 16.149600952380954,
+          "GPU Last Level Cache Utilization": 4.452806666666667,
+          "Compute Occupancy": 10.804480952380953,
+          "GPU Read Bandwidth": 5.772133333333333,
+          "GPU Write Bandwidth": 6.924059047619046
+        },
+        "residentSlots": 41.48920685714286,
+        "residentThreads": 1327.6546194285716,
+        "occupancy": 0.10804480952380953,
+        "alu": 0.16149600952380955,
+        "readGBs": 5.772133333333333,
+        "writeGBs": 6.924059047619046,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed transfer to pressure",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.11112863013698629,
+        "meanMicroseconds": 111.1286301369863,
+        "share": 0.00336784575483233,
+        "merged": false,
+        "exclusiveShare": 0.7465518792859743,
+        "counterSamples": 26,
+        "partitions": [
+          0.16776671428571427,
+          0.145688875,
+          0.13902916666666668,
+          0.1763574
+        ],
+        "imbalance": 1.121791205189842,
+        "counters": {
+          "ALU Utilization": 22.556607692307693,
+          "GPU Last Level Cache Utilization": 10.492746153846154,
+          "Compute Occupancy": 15.599384615384619,
+          "GPU Read Bandwidth": 23.37383461538462,
+          "GPU Write Bandwidth": 6.741980769230769
+        },
+        "residentSlots": 59.901636923076936,
+        "residentThreads": 1916.852381538462,
+        "occupancy": 0.15599384615384618,
+        "alu": 0.22556607692307692,
+        "readGBs": 23.37383461538462,
+        "writeGBs": 6.741980769230769,
+        "shaders": []
+      },
+      {
+        "label": "Uniform pressure band projection",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.108576301369863,
+        "meanMicroseconds": 108.576301369863,
+        "share": 0.003290495304343588,
+        "merged": false,
+        "exclusiveShare": 0.8079603132447591,
+        "counterSamples": 42,
+        "partitions": [
+          0.36362591666666666,
+          0.28672559999999997,
+          0.2905540833333334,
+          0.32128209999999996
+        ],
+        "imbalance": 1.1523671690562876,
+        "counters": {
+          "ALU Utilization": 25.052962698412692,
+          "GPU Last Level Cache Utilization": 33.741072222222215,
+          "Compute Occupancy": 32.37474365079365,
+          "GPU Read Bandwidth": 52.64902222222223,
+          "GPU Write Bandwidth": 26.051937301587298
+        },
+        "residentSlots": 124.3190156190476,
+        "residentThreads": 3978.2084998095233,
+        "occupancy": 0.32374743650793647,
+        "alu": 0.2505296269841269,
+        "readGBs": 52.64902222222223,
+        "writeGBs": 26.051937301587298,
+        "shaders": []
+      },
+      {
+        "label": "Uniform dynamic ownership census prefix",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.1075317808219178,
+        "meanMicroseconds": 107.5317808219178,
+        "share": 0.0032588402385977395,
+        "merged": false,
+        "exclusiveShare": 0.7403851298502678,
+        "counterSamples": 34,
+        "partitions": [
+          0.09906575000000001,
+          0.07675046153846153,
+          0.190076,
+          0.0813375
+        ],
+        "imbalance": 1.700030164330024,
+        "counters": {
+          "ALU Utilization": 6.916121813725489,
+          "GPU Last Level Cache Utilization": 13.88880612745098,
+          "Compute Occupancy": 9.266618872549017,
+          "GPU Read Bandwidth": 16.09762426470589,
+          "GPU Write Bandwidth": 6.6092
+        },
+        "residentSlots": 35.58381647058823,
+        "residentThreads": 1138.6821270588234,
+        "occupancy": 0.09266618872549018,
+        "alu": 0.0691612181372549,
+        "readGBs": 16.09762426470589,
+        "writeGBs": 6.6092,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed transfer to simulation",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.0905858904109589,
+        "meanMicroseconds": 90.5858904109589,
+        "share": 0.0027452809063891878,
+        "merged": false,
+        "exclusiveShare": 0.8639480883199274,
+        "counterSamples": 31,
+        "partitions": [
+          0.1603645,
+          0.1789696,
+          0.1227567142857143,
+          0.12784800000000002
+        ],
+        "imbalance": 1.2134790637004802,
+        "counters": {
+          "ALU Utilization": 14.095541935483869,
+          "GPU Last Level Cache Utilization": 16.425600000000003,
+          "Compute Occupancy": 14.543296774193546,
+          "GPU Read Bandwidth": 11.176087096774193,
+          "GPU Write Bandwidth": 15.683251612903227
+        },
+        "residentSlots": 55.84625961290321,
+        "residentThreads": 1787.0803076129027,
+        "occupancy": 0.14543296774193545,
+        "alu": 0.14095541935483868,
+        "readGBs": 11.176087096774193,
+        "writeGBs": 15.683251612903227,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed layout build",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.07351328767123289,
+        "meanMicroseconds": 73.51328767123287,
+        "share": 0.0022278814514508118,
+        "merged": false,
+        "exclusiveShare": 0.814339780153462,
+        "counterSamples": 23,
+        "partitions": [
+          0.06515322222222224,
+          0.05294255555555555,
+          0.076985,
+          0.04184633333333333
+        ],
+        "imbalance": 1.2997246222935888,
+        "counters": {
+          "ALU Utilization": 8.520986956521737,
+          "GPU Last Level Cache Utilization": 3.2443869565217396,
+          "Compute Occupancy": 5.836395652173913,
+          "GPU Read Bandwidth": 3.5999130434782614,
+          "GPU Write Bandwidth": 3.1478478260869562
+        },
+        "residentSlots": 22.411759304347825,
+        "residentThreads": 717.1762977391304,
+        "occupancy": 0.058363956521739126,
+        "alu": 0.08520986956521737,
+        "readGBs": 3.5999130434782614,
+        "writeGBs": 3.1478478260869562,
+        "shaders": []
+      },
+      {
+        "label": "Uniform independent h pressure surface census",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.07303438356164385,
+        "meanMicroseconds": 73.03438356164384,
+        "share": 0.0022133678632740923,
+        "merged": false,
+        "exclusiveShare": 0.6617768699673782,
+        "counterSamples": 20,
+        "partitions": [
+          0.7080832499999999,
+          0.42813085714285715,
+          0.277583,
+          0.47882399999999997
+        ],
+        "imbalance": 1.4965134803319153,
+        "counters": {
+          "ALU Utilization": 36.01094625,
+          "GPU Last Level Cache Utilization": 13.674455,
+          "Compute Occupancy": 43.09486875,
+          "GPU Read Bandwidth": 21.3776725,
+          "GPU Write Bandwidth": 5.2788725
+        },
+        "residentSlots": 165.48429600000003,
+        "residentThreads": 5295.497472000001,
+        "occupancy": 0.43094868750000004,
+        "alu": 0.36010946250000003,
+        "readGBs": 21.3776725,
+        "writeGBs": 5.2788725,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed cleanup floor",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.058061643835616426,
+        "meanMicroseconds": 58.06164383561642,
+        "share": 0.0017596065070659603,
+        "merged": false,
+        "exclusiveShare": 0.6188863984901373,
+        "counterSamples": 11,
+        "partitions": [
+          0.15021025000000002,
+          0.19348833333333335,
+          0.19657833333333333,
+          0.30494499999999997
+        ],
+        "imbalance": 1.4431476230650668,
+        "counters": {
+          "ALU Utilization": 26.279247727272722,
+          "GPU Last Level Cache Utilization": 7.652981818181817,
+          "Compute Occupancy": 21.403720454545454,
+          "GPU Read Bandwidth": 11.80565681818182,
+          "GPU Write Bandwidth": 6.254245454545454
+        },
+        "residentSlots": 82.19028654545454,
+        "residentThreads": 2630.0891694545453,
+        "occupancy": 0.21403720454545452,
+        "alu": 0.2627924772727272,
+        "readGBs": 11.80565681818182,
+        "writeGBs": 6.254245454545454,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed remap faces",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.05454095890410959,
+        "meanMicroseconds": 54.540958904109594,
+        "share": 0.0016529092159532977,
+        "merged": false,
+        "exclusiveShare": 0.8606878329469808,
+        "counterSamples": 16,
+        "partitions": [
+          0.25247025,
+          0.20132750000000002,
+          0.1826755,
+          0.14703759999999996
+        ],
+        "imbalance": 1.288917696544981,
+        "counters": {
+          "ALU Utilization": 29.820951562500007,
+          "GPU Last Level Cache Utilization": 4.2732265625000005,
+          "Compute Occupancy": 22.09372500000001,
+          "GPU Read Bandwidth": 4.9693359375,
+          "GPU Write Bandwidth": 1.9250781250000004
+        },
+        "residentSlots": 84.83990400000003,
+        "residentThreads": 2714.876928000001,
+        "occupancy": 0.22093725000000008,
+        "alu": 0.2982095156250001,
+        "readGBs": 4.9693359375,
+        "writeGBs": 1.9250781250000004,
+        "shaders": []
+      },
+      {
+        "label": "Uniform dynamic ownership census decide",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.05029671232876712,
+        "meanMicroseconds": 50.29671232876712,
+        "share": 0.0015242837861823297,
+        "merged": false,
+        "exclusiveShare": 0.8964773426734427,
+        "counterSamples": 17,
+        "partitions": [
+          0.09383649999999999,
+          0.07503333333333333,
+          0.0781385,
+          0.06767424999999999
+        ],
+        "imbalance": 1.1927765306362945,
+        "counters": {
+          "ALU Utilization": 12.971423529411764,
+          "GPU Last Level Cache Utilization": 15.930970588235292,
+          "Compute Occupancy": 7.451299999999998,
+          "GPU Read Bandwidth": 18.944588235294116,
+          "GPU Write Bandwidth": 0.21022352941176461
+        },
+        "residentSlots": 28.61299199999999,
+        "residentThreads": 915.6157439999997,
+        "occupancy": 0.07451299999999998,
+        "alu": 0.12971423529411763,
+        "readGBs": 18.944588235294116,
+        "writeGBs": 0.21022352941176461,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed 4h sampling cache",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.04299342465753424,
+        "meanMicroseconds": 42.99342465753424,
+        "share": 0.0013029515664873558,
+        "merged": false,
+        "exclusiveShare": 0.7914972662273225,
+        "counterSamples": 14,
+        "partitions": [
+          0.083425,
+          0.0884658,
+          0.05033575,
+          0.08379783333333334
+        ],
+        "imbalance": 1.15632354567825,
+        "counters": {
+          "ALU Utilization": 12.37007142857143,
+          "GPU Last Level Cache Utilization": 15.470217857142858,
+          "Compute Occupancy": 7.077383928571428,
+          "GPU Read Bandwidth": 31.914039285714292,
+          "GPU Write Bandwidth": 0.8195803571428572
+        },
+        "residentSlots": 27.17715428571428,
+        "residentThreads": 869.668937142857,
+        "occupancy": 0.07077383928571428,
+        "alu": 0.1237007142857143,
+        "readGBs": 31.914039285714292,
+        "writeGBs": 0.8195803571428572,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure measure",
+        "exactAttribution": true,
+        "callsPerFrame": 3.095890410958904,
+        "gpuMsPerFrame": 0.03725219178082192,
+        "meanMicroseconds": 12.032787610619469,
+        "share": 0.001128958719212043,
+        "merged": false,
+        "exclusiveShare": 0.7313939420682753,
+        "counterSamples": 12,
+        "partitions": [
+          0.038967,
+          0.026278666666666662,
+          0.0152,
+          0.017700000000000004
+        ],
+        "imbalance": 1.5881292093045372,
+        "counters": {
+          "ALU Utilization": 1.3641333333333332,
+          "GPU Last Level Cache Utilization": 3.643591666666666,
+          "Compute Occupancy": 2.2555833333333335,
+          "GPU Read Bandwidth": 2.021025,
+          "GPU Write Bandwidth": 0.33984999999999993
+        },
+        "residentSlots": 8.66144,
+        "residentThreads": 277.16608,
+        "occupancy": 0.022555833333333334,
+        "alu": 0.013641333333333332,
+        "readGBs": 2.021025,
+        "writeGBs": 0.33984999999999993,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed copyVolume",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.03548780821917808,
+        "meanMicroseconds": 35.48780821917808,
+        "share": 0.0010754876048767602,
+        "merged": false,
+        "exclusiveShare": 0.7778476883827187,
+        "counterSamples": 13,
+        "partitions": [
+          0.254598,
+          0.18308599999999997,
+          0.29908239999999997,
+          0.16467299999999999
+        ],
+        "imbalance": 1.3271325837321954,
+        "counters": {
+          "ALU Utilization": 15.825730769230772,
+          "GPU Last Level Cache Utilization": 8.839515384615387,
+          "Compute Occupancy": 22.47026153846154,
+          "GPU Read Bandwidth": 13.911492307692308,
+          "GPU Write Bandwidth": 13.44186153846154
+        },
+        "residentSlots": 86.2858043076923,
+        "residentThreads": 2761.1457378461537,
+        "occupancy": 0.2247026153846154,
+        "alu": 0.15825730769230772,
+        "readGBs": 13.911492307692308,
+        "writeGBs": 13.44186153846154,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure rhs",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.03274054794520548,
+        "meanMicroseconds": 32.74054794520548,
+        "share": 0.000992229592610138,
+        "merged": false,
+        "exclusiveShare": 0.8088960109788509,
+        "counterSamples": 12,
+        "partitions": [
+          0.0642835,
+          0.0350754,
+          0.07186233333333333,
+          0.024099500000000003
+        ],
+        "imbalance": 1.4716785485480122,
+        "counters": {
+          "ALU Utilization": 7.250191666666666,
+          "GPU Last Level Cache Utilization": 4.101308333333334,
+          "Compute Occupancy": 4.731083333333333,
+          "GPU Read Bandwidth": 7.571175,
+          "GPU Write Bandwidth": 1.8344916666666666
+        },
+        "residentSlots": 18.16736,
+        "residentThreads": 581.35552,
+        "occupancy": 0.04731083333333333,
+        "alu": 0.07250191666666667,
+        "readGBs": 7.571175,
+        "writeGBs": 1.8344916666666666,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure cycle checkpoint",
+        "exactAttribution": true,
+        "callsPerFrame": 2.095890410958904,
+        "gpuMsPerFrame": 0.03187328767123288,
+        "meanMicroseconds": 15.207516339869285,
+        "share": 0.0009659465472020113,
+        "merged": false,
+        "exclusiveShare": 0.9291458042336289,
+        "counterSamples": 10,
+        "partitions": [
+          0.028956,
+          0.0239698,
+          null,
+          0.0238335
+        ],
+        "imbalance": null,
+        "counters": {
+          "ALU Utilization": 2.2491700000000003,
+          "GPU Last Level Cache Utilization": 3.1663200000000002,
+          "Compute Occupancy": 2.5438400000000003,
+          "GPU Read Bandwidth": 2.02997,
+          "GPU Write Bandwidth": 1.5398
+        },
+        "residentSlots": 9.768345600000002,
+        "residentThreads": 312.58705920000006,
+        "occupancy": 0.025438400000000003,
+        "alu": 0.022491700000000003,
+        "readGBs": 2.02997,
+        "writeGBs": 1.5398,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed remap cells",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.025291917808219173,
+        "meanMicroseconds": 25.291917808219175,
+        "share": 0.000766492648356955,
+        "merged": false,
+        "exclusiveShare": 0.900293016882423,
+        "counterSamples": 5,
+        "partitions": [
+          0.126212,
+          0.031295500000000004,
+          null,
+          0.0566865
+        ],
+        "imbalance": null,
+        "counters": {
+          "ALU Utilization": 6.082179999999999,
+          "GPU Last Level Cache Utilization": 1.6299800000000002,
+          "Compute Occupancy": 6.043519999999999,
+          "GPU Read Bandwidth": 1.82994,
+          "GPU Write Bandwidth": 0.30854
+        },
+        "residentSlots": 23.207116799999998,
+        "residentThreads": 742.6277375999999,
+        "occupancy": 0.060435199999999994,
+        "alu": 0.060821799999999995,
+        "readGBs": 1.82994,
+        "writeGBs": 0.30854,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed remap publish",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.019648493150684926,
+        "meanMicroseconds": 19.648493150684924,
+        "share": 0.0005954639606806628,
+        "merged": false,
+        "exclusiveShare": 0.9492449488964864,
+        "counterSamples": 4,
+        "partitions": [
+          0.19250500000000004,
+          0.114497,
+          0.046033
+        ],
+        "imbalance": 1.635857634512159,
+        "counters": {
+          "ALU Utilization": 7.129975,
+          "GPU Last Level Cache Utilization": 5.5612,
+          "Compute Occupancy": 13.638499999999999,
+          "GPU Read Bandwidth": 8.70315,
+          "GPU Write Bandwidth": 7.07825
+        },
+        "residentSlots": 52.37183999999999,
+        "residentThreads": 1675.8988799999997,
+        "occupancy": 0.13638499999999998,
+        "alu": 0.07129975,
+        "readGBs": 8.70315,
+        "writeGBs": 7.07825,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure initial checkpoint",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.017542328767123288,
+        "meanMicroseconds": 17.54232876712329,
+        "share": 0.0005316348936849354,
+        "merged": false,
+        "exclusiveShare": 0.9604947719411748,
+        "counterSamples": 7,
+        "partitions": [
+          0.021599500000000004,
+          0.0166565,
+          0.026649,
+          0.032366
+        ],
+        "imbalance": 1.330961951660824,
+        "counters": {
+          "ALU Utilization": 1.9083999999999999,
+          "GPU Last Level Cache Utilization": 3.399114285714286,
+          "Compute Occupancy": 2.3984714285714284,
+          "GPU Read Bandwidth": 2.185242857142857,
+          "GPU Write Bandwidth": 0.7851571428571429
+        },
+        "residentSlots": 9.210130285714285,
+        "residentThreads": 294.72416914285714,
+        "occupancy": 0.023984714285714283,
+        "alu": 0.019084,
+        "readGBs": 2.185242857142857,
+        "writeGBs": 0.7851571428571429,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed remap worklist",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.009302191780821922,
+        "meanMicroseconds": 9.302191780821921,
+        "share": 0.00028191067469345563,
+        "merged": false,
+        "exclusiveShare": 0.7548817482989544,
+        "counterSamples": 3,
+        "partitions": [
+          0.029858,
+          null,
+          0.020017999999999998,
+          0.037211
+        ],
+        "imbalance": null,
+        "counters": {
+          "ALU Utilization": 0.7116666666666666,
+          "GPU Last Level Cache Utilization": 3.2441999999999998,
+          "Compute Occupancy": 2.9029000000000003,
+          "GPU Read Bandwidth": 4.8137,
+          "GPU Write Bandwidth": 5.175366666666667
+        },
+        "residentSlots": 11.147136000000001,
+        "residentThreads": 356.70835200000005,
+        "occupancy": 0.029029000000000003,
+        "alu": 0.007116666666666665,
+        "readGBs": 4.8137,
+        "writeGBs": 5.175366666666667,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure gate 2",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.00720205479452055,
+        "meanMicroseconds": 7.202054794520549,
+        "share": 0.00021826427299514664,
+        "merged": false,
+        "exclusiveShare": 0.8740466000955981,
+        "counterSamples": 2,
+        "partitions": [
+          null,
+          null,
+          0.014364500000000002
+        ],
+        "imbalance": null,
+        "counters": {
+          "ALU Utilization": 1.77325,
+          "GPU Last Level Cache Utilization": 0.5474,
+          "Compute Occupancy": 1.4364500000000002,
+          "GPU Read Bandwidth": 0.7718999999999999,
+          "GPU Write Bandwidth": 0.058050000000000004
+        },
+        "residentSlots": 5.515968000000001,
+        "residentThreads": 176.51097600000003,
+        "occupancy": 0.014364500000000002,
+        "alu": 0.017732499999999998,
+        "readGBs": 0.7718999999999999,
+        "writeGBs": 0.058050000000000004,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure gate 1",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.007119999999999999,
+        "meanMicroseconds": 7.119999999999998,
+        "share": 0.0002157775340598333,
+        "merged": false,
+        "exclusiveShare": 0.9265622595046019,
+        "counterSamples": 3,
+        "partitions": [
+          0.020894,
+          0.030708000000000003,
+          0.019341999999999998,
+          0.023575
+        ],
+        "imbalance": 1.2995482389784065,
+        "counters": {
+          "ALU Utilization": 2.6768666666666667,
+          "GPU Last Level Cache Utilization": 0.9001,
+          "Compute Occupancy": 2.4800333333333335,
+          "GPU Read Bandwidth": 1.4989333333333335,
+          "GPU Write Bandwidth": 0.05836666666666667
+        },
+        "residentSlots": 9.523328,
+        "residentThreads": 304.746496,
+        "occupancy": 0.024800333333333334,
+        "alu": 0.026768666666666666,
+        "readGBs": 1.4989333333333335,
+        "writeGBs": 0.05836666666666667,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure gate 0",
+        "exactAttribution": true,
+        "callsPerFrame": 1,
+        "gpuMsPerFrame": 0.006092328767123288,
+        "meanMicroseconds": 6.092328767123288,
+        "share": 0.00018463310084995053,
+        "merged": false,
+        "exclusiveShare": 0.9798533974908363,
+        "counterSamples": 4,
+        "partitions": [
+          null,
+          0.007212666666666668,
+          0.031476000000000004
+        ],
+        "imbalance": null,
+        "counters": {
+          "ALU Utilization": 1.375475,
+          "GPU Last Level Cache Utilization": 0.409975,
+          "Compute Occupancy": 1.3278500000000002,
+          "GPU Read Bandwidth": 0.40345000000000003,
+          "GPU Write Bandwidth": 0.058775
+        },
+        "residentSlots": 5.098944000000001,
+        "residentThreads": 163.16620800000004,
+        "occupancy": 0.013278500000000002,
+        "alu": 0.01375475,
+        "readGBs": 0.40345000000000003,
+        "writeGBs": 0.058775,
+        "shaders": []
+      },
+      {
+        "label": "Uniform mixed pressure gate 3",
+        "exactAttribution": true,
+        "callsPerFrame": 0.0958904109589041,
+        "gpuMsPerFrame": 0.0006393150684931507,
+        "meanMicroseconds": 6.667142857142857,
+        "share": 1.9374975978475495e-05,
+        "merged": false,
+        "exclusiveShare": 1,
+        "counterSamples": 0,
+        "counters": {},
+        "shaders": []
+      }
+    ],
+    "contention": [
+      {
+        "process": "Google Chrome Helper (1271)",
+        "gpuMs": 1151.4101499999974,
+        "intervals": 26550
+      },
+      {
+        "process": "WindowServer (418)",
+        "gpuMs": 54.52140999999997,
+        "intervals": 1490
+      },
+      {
+        "process": "Spotify Helper (818)",
+        "gpuMs": 44.00428000000004,
+        "intervals": 548
+      },
+      {
+        "process": "Cursor Helper (1518)",
+        "gpuMs": 18.04498,
+        "intervals": 162
+      },
+      {
+        "process": "(unknown)",
+        "gpuMs": 2.1716300000000004,
+        "intervals": 34
+      },
+      {
+        "process": "Codex (Service) (1281)",
+        "gpuMs": 0.34142,
+        "intervals": 8
+      }
+    ],
+    "shaders": []
+  },
+  "derivedFigure9Bytes": {
+    "N": 1048576,
+    "tiles": 16384,
+    "vertices": 1081665,
+    "transportEdges": 41943040,
+    "transportDonorLimbsAndDecoded": 29360128,
+    "extensionPingPong": 51675136,
+    "surfaceVolumeScratch": 14243108,
+    "dynamicBoundCubes": 8847360,
+    "oneRGBA32CellField": 16777216,
+    "oneR32CellField": 4194304,
+    "twoR32VertexFields": 8653320
+  },
+  "memoryNote": "Logical allocation sizes, not measured traffic; scratch ranges overlap temporally and must not be added as independent resident allocations"
+}

@@ -59,7 +59,7 @@ export class UniformMixedRemap {
   const module=this.device.createShaderModule({code:uniformMixedRemapWGSL(this.ownership.layout)});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.target.bindLayout,this.resources]});
-  for(const entryPoint of ["markChanged","remapCells","remapFaces","copyCells","copyFaces"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
+  await Promise.all(["markChanged","remapCells","remapFaces","copyCells","copyFaces"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));}));
  }
  apply(layout:UniformMixedLayout):void{
   if(this.pipelines.size!==5)throw new Error("Live remap has not been initialized");
@@ -155,7 +155,7 @@ export class UniformMixedOwnershipTransfer {
   const module=this.device.createShaderModule({label:"Uniform mixed ownership transfer",code:uniformMixedOwnershipTransferWGSL(this.simulation.layout)});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.simulation.bindLayout,this.resources]});
-  for(const entryPoint of ["toPressureCoarse","toPressureFine","toSimulationCoarse","toSimulationFine"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.simulation.dispatchX}}}));
+  await Promise.all(["toPressureCoarse","toPressureFine","toSimulationCoarse","toSimulationFine"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.simulation.dispatchX}}}));}));
  }
  /** Both launches write disjoint tiles and read only the source fields. */
  private encode(e:GPUCommandEncoder,entry:"toPressure"|"toSimulation",group:GPUBindGroup):void{

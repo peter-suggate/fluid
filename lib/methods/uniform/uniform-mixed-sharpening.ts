@@ -337,8 +337,8 @@ ${["cacheGeometryPrepare","propose","limit","commit"].map(entry=>{const fn=`sh${
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
     // One merged pipeline per entry: the listed launch covers every width.
-    for(const entryPoint of ["cacheGeometryPrepare","propose","limit","commit"])this.pipelines.set(entryPoint,[await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umCellWidth:1,umDispatchX:this.ownership.dispatchX,...s}}}))]);
-    for(const entryPoint of ["classify","compact"])this.pipelines.set(entryPoint,[await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...s}}}))]);
+    await Promise.all(["cacheGeometryPrepare","propose","limit","commit"].map(async entryPoint=>{this.pipelines.set(entryPoint,[await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umCellWidth:1,umDispatchX:this.ownership.dispatchX,...s}}}))]);}));
+    await Promise.all(["classify","compact"].map(async entryPoint=>{this.pipelines.set(entryPoint,[await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...s}}}))]);}));
   }
   encodeGeometry(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
     if(this.pipelines.size!==6)throw new Error("Mixed sharpening is not initialized");

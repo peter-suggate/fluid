@@ -446,12 +446,12 @@ ${uniformMixedFaceDispatchWGSL("publish","umPublished(face)",false,"value.w=text
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
   this.restrictPipeline=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"restrictBand",constants:{umDispatchX:this.ownership.dispatchX}}});
-  for(const entryPoint of this.regularBulk?["publish"]:["seed","sweep","publish"]){
+  await Promise.all((this.regularBulk?["publish"]:["seed","sweep","publish"]).map(async entryPoint=>{
    const compile=(width:number,regular:boolean,name=entryPoint,list=false)=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:name,constants:{umDispatchX:this.ownership.dispatchX,umCellWidth:width,umRegularTiles:+regular,umInterfaceTiles:+!regular,umRegularFine:+(regular&&width===1),ueRegularCoarseList:+list}}});
    this.regularPipelines.set(entryPoint,await compileMixedTiers(w=>compile(w,true,entryPoint==="publish"&&w===1?"publishFine":entryPoint)));
    this.regularCoarseListPipelines.set(entryPoint,await compile(4,true,entryPoint,true));
    this.seamPipelines.set(entryPoint,await compileMixedTiers(w=>w===1?compile(1,false):compile(4,false,`${entryPoint}Coarse`)));
-  }
+  }));
  }
  encode(encoder:GPUCommandEncoder,groups:readonly [GPUBindGroup,GPUBindGroup],sweeps=2):void{
   if(this.seamPipelines.size!==(this.regularBulk?1:3)||!this.restrictPipeline)throw new Error("Mixed extension is not initialized");

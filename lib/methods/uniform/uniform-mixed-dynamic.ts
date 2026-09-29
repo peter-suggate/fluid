@@ -632,10 +632,9 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-  for(const entryPoint of ["classify","classifyCoarse","prefix0","prefix1","prefix2","decide","solidActive","solidPromote"])
-   this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
-  for(let level=1;level<=CUBE_LEVELS;level++)
-   this.pipelines.set(`cube${level}`,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"boundCube",constants:{umDispatchX:this.ownership.dispatchX,cubeLevel:level}}}));
+  await Promise.all(["classify","classifyCoarse","prefix0","prefix1","prefix2","decide","solidActive","solidPromote"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));}));
+  await Promise.all(Array.from({length:CUBE_LEVELS},async(_,i)=>{const level=i+1;
+   this.pipelines.set(`cube${level}`,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"boundCube",constants:{umDispatchX:this.ownership.dispatchX,cubeLevel:level}}}));}));
  }
  /** Solid-coupled tiles (uniformMixedSolidTiles().coupled), for the impact rule. */
  setSolid(coupled:Uint8Array):void{

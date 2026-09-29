@@ -777,19 +777,20 @@ fn umTraceCell(owner:UMOwner){
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[]),...(this.hanging?[this.ownership.hangingLayout]:[])]});
-    if(this.vertexCache)this.pipelines.set("vertexCache",await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"vertexCache",constants:{umVertexCacheFill:1,umDispatchX:this.ownership.dispatchX,...s}}})));
-    if(this.solid)for(const entryPoint of ["solidClosed","solidClear"])this.pipelines.set(entryPoint,await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...s}}})));
-    this.pipelines.set("wallReach",await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"wallReach",constants:{umDispatchX:this.ownership.dispatchX,...s}}})));
-    for(const axis of [0,1,2])this.pipelines.set(`evidenceDistance${axis}`,await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"evidenceDistance",constants:{umDispatchX:this.ownership.dispatchX,umEvidenceAxis:axis,...s}}})));
-    this.pipelines.set("retirementEvidence",await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"retirementEvidence",constants:{umDispatchX:this.ownership.dispatchX,...s}}})));
-    for(const entry of ["advect","redistance","traceCells"])
-      this.pipelines.set(entry,await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:entry,constants:{umMergedTiles:1,...(entry==="traceCells"?{}:{umMergedCoarse:1,umMergedPack:8}),umCertifiedJobs:2,umDispatchX:this.ownership.dispatchX,...s}}})));
-    for(const entry of ["advect","redistance"])
-      this.finePipelines.set(entry,await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:`${entry}Fine`,constants:{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umDispatchX:this.ownership.dispatchX,...s}}})));
-    this.deferredPipelines.push(await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"advectWalls",constants:{umDispatchX:this.ownership.dispatchX,...s}}})),
-      await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"advectDeferred",constants:{umMergedTiles:1,umDispatchX:this.ownership.dispatchX,...s}}})),
-      await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"advectDeferred",constants:{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umDispatchX:this.ownership.dispatchX,...s}}})));
-    for(const [entry,entryPoint] of [["advect","advectOwners"],["redistance","redistanceFine"],["traceCells","traceCells"]] as const)this.regularPipelines.set(entry,await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umCertifiedJobs:1,umDispatchX:this.ownership.dispatchX,...s}}})));
+    const compile=(entryPoint:string,constants:Record<string,number>)=>this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants,...s}}}));
+    const keyed=async<K>(into:Map<K,GPUComputePipeline>,key:K,entryPoint:string,constants:Record<string,number>={})=>{into.set(key,await compile(entryPoint,constants));};
+    const regular={umCellWidth:1,umPlannedFine:1,umRegularFine:1};
+    await Promise.all([
+      this.vertexCache&&keyed(this.pipelines,"vertexCache","vertexCache",{umVertexCacheFill:1}),
+      ...(this.solid?["solidClosed","solidClear"]:[]).map(entryPoint=>keyed(this.pipelines,entryPoint,entryPoint)),
+      keyed(this.pipelines,"wallReach","wallReach"),
+      ...[0,1,2].map(axis=>keyed(this.pipelines,`evidenceDistance${axis}`,"evidenceDistance",{umEvidenceAxis:axis})),
+      keyed(this.pipelines,"retirementEvidence","retirementEvidence"),
+      ...(["advect","redistance","traceCells"] as const).map(entry=>keyed(this.pipelines,entry,entry,{umMergedTiles:1,...(entry==="traceCells"?{}:{umMergedCoarse:1,umMergedPack:8}),umCertifiedJobs:2})),
+      ...(["advect","redistance"] as const).map(entry=>keyed(this.finePipelines,entry,`${entry}Fine`,{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1})),
+      Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1}),compile("advectDeferred",regular)]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
+      ...([["advect","advectOwners"],["redistance","redistanceFine"],["traceCells","traceCells"]] as const).map(([entry,entryPoint])=>keyed(this.regularPipelines,entry,entryPoint,{...regular,umCertifiedJobs:1})),
+    ]);
   }
   private twin(create:(solid:Record<string,number>)=>Promise<GPUComputePipeline>):Promise<GPUComputePipeline>{return uniformMixedSolidPipeline(this.solid,create);}
   private variant(pipeline:GPUComputePipeline):GPUComputePipeline{return this.solid?.select(pipeline)??pipeline;}

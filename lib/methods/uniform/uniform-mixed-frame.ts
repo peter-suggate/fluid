@@ -312,15 +312,15 @@ export class UniformMixedFrame {
   this.acceptance=new UniformMixedPressureAcceptance(device,p);
   this.acceptanceGroup=this.acceptance.bind({residual:root.residual,state:this.state,params:this.params.acceptance});
  }
+ /** Every stage compiles at once: an uncached pipeline costs the driver a
+  * full Metal compile, and awaiting stages in turn serialized ~350 of them
+  * behind one another on a scene's first load. */
  async initialize():Promise<void>{
-  await this.solid?.initialize();
-  await this.displacement?.initialize();
-  for(const stage of [this.transport,this.plan,this.cleanup,this.remap,this.phiResolve,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.geometry,this.split.authority])await stage.initialize();
   const root=this.pressureOwnership;
   this.pressureSchedule=new UniformMixedPressureSchedule(this.device,this.schedule,this.state,this.fields.pressure.tolerance,
    {native:this.fields.pressure.diagnostics,fine:root.support,supportWord:9*root.layout.tiles.length+24});
-  await this.pressureSchedule.initialize();
-  await this.surfaceBand.initialize();await this.band.initialize();
+  await Promise.all([this.solid,this.displacement,this.transport,this.plan,this.cleanup,this.remap,this.phiResolve,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.geometry,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band]
+   .map(stage=>stage?.initialize()));
   this.ready=true;
  }
  private lastParameters?:UniformMixedFrameParameters;

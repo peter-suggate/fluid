@@ -42,6 +42,7 @@ export const sceneWebGPUSmokeIds = [
   "cm12-figure-2",
   "cm12-figure-3",
   "cm12-figure-7",
+  "sparse-cm12-long-dam-break",
   "cm12-figure-8",
   "cm12-figure-12",
   "mass-conserving-figure-9-dam-break",
@@ -697,6 +698,26 @@ const suiteList = [
       acceptance: [
         { id: "cm12-figure7-grid", metric: "methods.uniform.grid", operator: "equal", expected: [128, 128, 128] },
         { id: "cm12-figure7-finite", metric: "methods.uniform.info.nonFiniteCount", operator: "equal", expected: 0 },
+      ],
+    }),
+  }, "uniform-one-step"),
+  /**
+   * The long dam is the solid-free Uniform Geometric profiling scene (its
+   * solid voxels are the domain shell only). Timing lane, as Figure 7's.
+   */
+  suite("sparse-cm12-long-dam-break", "Long dam break in a solid-free box", { definitionId: "sparse-cm12-long-dam-break" }, {
+    "uniform-one-step": lane({ id: "uniform-one-step",
+      description: "Paper 1/30 s steps on the 192x96x32 lattice",
+      target_s: 12 / 30, exactSteps: 12, maxDt_s: 1 / 30, oracleSteps: 12,
+      methods: methods(["uniform"], { uniform: { timeStep: "paper", densityPostProcessing: "off" } }),
+      timeout_ms: 900_000,
+      maximumStoredDensity: 3,
+      maximumRepresentedVolumeDrift: 0.05,
+      collect: { fieldStats: "none", performanceProfile: true, gpuCommandAudit: true },
+      diagnostics: [],
+      acceptance: [
+        { id: "long-dam-grid", metric: "methods.uniform.grid", operator: "equal", expected: [192, 96, 32] },
+        { id: "long-dam-finite", metric: "methods.uniform.info.nonFiniteCount", operator: "equal", expected: 0 },
       ],
     }),
   }, "uniform-one-step"),

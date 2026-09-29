@@ -181,7 +181,7 @@ var<workgroup> certifyBases:array<u32,2>;
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.extendedResources]});
-    for(const entryPoint of ["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","certify"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umDirectionalCertificate:+this.directionalCertificate}}}));
+    await Promise.all(["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","certify"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umDirectionalCertificate:+this.directionalCertificate}}}));}));
   }
   encode(encoder:GPUCommandEncoder,policy={fineReach:2,shellReach:1,twoLevel:true,shellOnly:true}):void{
     if(this.pipelines.size!==9)throw new Error("Mixed frame plan is not initialized");

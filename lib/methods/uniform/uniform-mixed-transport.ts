@@ -84,20 +84,21 @@ export class UniformMixedTransportStage {
     // h rows compile their workgroup-summed tile variant in place of the generic tier.
     const fineRows=new Set<Entry>(["build","rowsFallback","rowsDivide"]);
     const twin = (create: (solid: Record<string, number>) => Promise<GPUComputePipeline>) => uniformMixedSolidPipeline(this.solid, create);
-    for (const entry of entries) this.pipelines.set(entry, await compileMixedTiers(umCellWidth => twin(solid =>
+    const tiers = Promise.all(entries.map(async entry => { this.pipelines.set(entry, await compileMixedTiers(umCellWidth => twin(solid =>
       this.device.createComputePipelineAsync({ layout, compute: { module, entryPoint: umCellWidth===1&&fineRows.has(entry)?entry+"Fine":entry,
-        constants: { umCellWidth, umDispatchX: this.dispatchX, umTransportList: liveList[entry] ?? 0, ...solid } } }))));
-    if(this.parallelCoarseRows)for(const entry of ["rowsFallback","rowsDivide"] as const){
+        constants: { umCellWidth, umDispatchX: this.dispatchX, umTransportList: liveList[entry] ?? 0, ...solid } } })))); }));
+    const coarseRows = this.parallelCoarseRows ? Promise.all((["rowsFallback","rowsDivide"] as const).map(async entry=>{
       this.coarseRows.set(entry,await twin(solid=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:entry+"Coarse",constants:{umCellWidth:4,umDispatchX:this.dispatchX,umTransportList:1,...solid}}})));
-    }
+    })) : undefined;
     const tile = (entryPoint: string, constants: Record<string, number> = {}) => twin(solid => this.device.createComputePipelineAsync({ layout,
       compute: { module, entryPoint, constants: { umCellWidth: 1, umDispatchX: this.dispatchX, ...constants, ...solid } } }));
     // The dependency chain of the live set, in order: see uniformMixedTransportLiveWGSL.
     const S = 1, R1 = 2, D2 = 4, Q2 = 8, D1 = 16, Q1 = 32, Q0 = 64, DONOR = 128;
     const chain: [string, number, number][] = [["liveGather", S, R1], ["liveScatter", R1, D2], ["liveGather", D2, Q2], ["liveScatter", Q2, D1],
       ["liveGather", D1, Q1], ["liveGather", Q1, Q0], ["liveScatter", S | Q1 | Q0, DONOR]];
-    this.livePipelines.push(...await Promise.all([tile("liveSeed"), ...chain.map(([entry, tpFrom, tpInto]) => tile(entry, { tpFrom, tpInto })),
-      tile("liveCompact")]));
+    const live = Promise.all([tile("liveSeed"), ...chain.map(([entry, tpFrom, tpInto]) => tile(entry, { tpFrom, tpInto })),
+      tile("liveCompact")]).then(pipelines => { this.livePipelines.push(...pipelines); });
+    await Promise.all([tiers, coarseRows, live]);
   }
 
   /** The variant of a pipeline for the scene's current solids. */

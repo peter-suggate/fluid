@@ -254,8 +254,7 @@ fn umProjected(p:f32,r:f32,low:f32,diagonal:f32)->f32{
       restrictV: ["restrictRoot", {}], restrictInner: ["restrictRoot", { UM_RHS: w.b1, UM_MIN: w.m1 }], restrictFull: ["restrictRoot", { UM_FULL: 1 }],
       prolongAdd: ["prolongRoot", {}], prolongAssign: ["prolongRoot", { UM_PROLONG: 1 }], prolongBackup: ["prolongRoot", { UM_PROLONG: 2 }],
     };
-    for (const [entry, [entryPoint, constants]] of Object.entries(variants) as [Entry, [string, Record<string, number>]][])
-      this.pipelines.set(entry, await this.device.createComputePipelineAsync({ layout: pipelineLayout, compute: { module, entryPoint, constants } }));
+    await Promise.all((Object.entries(variants) as [Entry, [string, Record<string, number>]][]).map(async([entry, [entryPoint, constants]])=>{this.pipelines.set(entry, await this.device.createComputePipelineAsync({ layout: pipelineLayout, compute: { module, entryPoint, constants } }));}));
   }
   private dispatch(passes: UniformMixedPressurePasses, entry: Entry): void {
     const pipeline = this.pipelines.get(entry); if (!pipeline) throw new Error("Mixed pressure root is not initialized");

@@ -220,7 +220,7 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
 `});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.coarse?this.solid.coarse!.bindLayout:this.solid.bindLayout]:[])]});
-  for(const entryPoint of ["build","chunks","reduce","resolve",...(this.coarse?["cut"]:[])])this.pipelines.set(entryPoint,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...s}}})));
+  await Promise.all(["build","chunks","reduce","resolve",...(this.coarse?["cut"]:[])].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...s}}})));}));
   this.pipelines.set("phase",await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"build",constants:{umDispatchX:this.ownership.dispatchX,umAuthorityBalance:0,...s}}})));
  }
  /** balance=false writes phi and phase only: the extension's authority,

@@ -139,7 +139,7 @@ var<workgroup> cleanRows:array<vec2f,64>;
 `});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
-  for(const entry of ["floor","orphan"])this.pipelines.set(entry,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"clean",constants:{umDispatchX:this.ownership.dispatchX,umOrphan:Number(entry==="orphan"),...s}}})));
+  await Promise.all(["floor","orphan"].map(async entry=>{this.pipelines.set(entry,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"clean",constants:{umDispatchX:this.ownership.dispatchX,umOrphan:Number(entry==="orphan"),...s}}})));}));
   this.pipelines.set("summarize",await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"summarize",constants:{umDispatchX:this.ownership.dispatchX,...s}}})));
  }
  private variant(pipeline:GPUComputePipeline):GPUComputePipeline{return this.solid?.select(pipeline)??pipeline;}

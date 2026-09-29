@@ -852,14 +852,14 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    sweep:[0,1].map(c=>[`${c}`,{bColour:c}]),middleSweep:[...[0,1].map(c=>[`${c}`,{bColour:c}] as [string,Record<string,number>]),["P",{bColour:0,bProlong:1}]],coarseSweep:[0,1].map(c=>[`${c}`,{bColour:c}]),
    restrict:range(schedule.cycles).map(k=>[`@${k}`,{bCycle:k}]),measure:range(schedule.cycles,1).map(k=>[`@${k}`,{bCycles:k}]),
   };
-  for(const [name,code] of Object.entries(sources)){
+  await Promise.all(Object.entries(sources).map(async([name,code])=>{
    const module=this.device.createShaderModule({label:`Uniform pressure band ${name}`,code});
    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
    if(errors.length)throw new Error(`Pressure band ${name}: ${errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n")}`);
    const pipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.simulation.bindLayout,this.layouts.get(this.layoutOf(name))!,...(this.solid?[this.solid.coarse!.bindLayout]:[])]});
-   for(const [suffix,constants] of variants[name]??[["",{}]])this.pipelines.set(name+suffix,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout:pipelineLayout,
-    compute:{module,entryPoint:"main",constants:{umDispatchX:this.simulation.dispatchX,...constants,...s}}})));
-  }
+   await Promise.all((variants[name]??[["",{}]]).map(async([suffix,constants])=>this.pipelines.set(name+suffix,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout:pipelineLayout,
+    compute:{module,entryPoint:"main",constants:{umDispatchX:this.simulation.dispatchX,...constants,...s}}})))));
+  }));
  }
  /** Pipeline and group 1 of each launch name, resolved on first use. */
  private readonly launches=new Map<string,{pipeline:GPUComputePipeline;group:GPUBindGroup}>();

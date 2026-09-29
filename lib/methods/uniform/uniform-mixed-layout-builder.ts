@@ -217,8 +217,7 @@ fn scanPartial(lane:u32){
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.resources]});
-  for(const entryPoint of ["widths","classify","scan","scatter","distance0","distance1","distance2"])
-   this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint}}));
+  await Promise.all(["widths","classify","scan","scatter","distance0","distance1","distance2"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint}}));}));
  }
  /** Static fine tiles (fine-only regions), one byte per tile, and the
   * snapped regions the built layouts report. coarse: tiles a coarse-only
