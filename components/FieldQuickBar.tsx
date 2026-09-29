@@ -1,6 +1,6 @@
 "use client";
 import { VisualLayerRows } from "../lib/features/field-view/layers-ui";
-import { legacyVisualLayers } from "../lib/core/visual-layers";
+import { legacyVisualLayers, type VisualLayerId } from "../lib/core/visual-layers";
 
 import { getMethod } from "../lib/core/method-registry";
 import { VISUALIZATION_FIELDS, VISUALIZATION_QUICK_FIELDS } from "../lib/core/visualization-catalog";
@@ -8,6 +8,8 @@ import { FieldViewRows as SharedFieldViewRows } from "../lib/features/field-view
 import { useSession } from "../lib/core/session/session-context";
 import { DEFAULT_GRID_OVERLAY_AXIS } from "../lib/core/stores/ui-store";
 import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
+
+const UNIFORM_MIXED_HIDDEN_LAYERS: readonly VisualLayerId[] = ["pages", "window", "release"];
 
 /**
  * The studio's binding of the shared field-view row.
@@ -66,6 +68,9 @@ export function FieldViewRows() {
       gridOverlayAxis: overlayAxis === "off" || overlayAxis === "volume" ? "z" : overlayAxis,
     })}
     plane={{ axis: overlayAxis, slice: overlaySlice, setAxis: setOverlayAxis, setSlice: setOverlaySlice }}
+    // The mixed-ownership frame has no page catalogue, dispatch window or
+    // released-face record; those layers would draw nothing or stale data.
+    hidden={UNIFORM_MIXED_HIDDEN_LAYERS}
   />;
   return <SharedFieldViewRows
     // Catalog order, narrowed to this solver. The shared row splits it into the

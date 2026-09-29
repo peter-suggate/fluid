@@ -1,4 +1,5 @@
-import { UniformMixedOwnership, compileMixedTiers } from "./uniform-mixed-ownership";
+import { UniformMixedOwnership } from "./uniform-mixed-ownership";
+import { UNIFORM_MIXED_JOBS, uniformMixedCertifiedEntriesWGSL } from "./uniform-mixed-topology.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import type { UniformScratchArena } from "./uniform-scratch-arena";
 import { UNIFORM_MIXED_TRANSPORT_LIVE_HEADER, uniformMixedTransportWGSL } from "./uniform-mixed-transport.wgsl";
@@ -79,11 +80,11 @@ export class UniformMixedTransportStage {
   }
 
   async initialize(): Promise<void> {
-    const module = this.device.createShaderModule({ label: "Uniform mixed conservative transport", code: uniformMixedTransportWGSL(this.layout,!!this.sourceParams,!!this.solid) });
+    const module = this.device.createShaderModule({ label: "Uniform mixed conservative transport", code: uniformMixedCertifiedEntriesWGSL(uniformMixedTransportWGSL(this.layout,!!this.sourceParams,!!this.solid),["restrictVolume","copyVolume"]) });
     const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.topologyLayout, this.resourcesLayout, ...(this.solid?[this.solid.bindLayout]:[])] });
-    for (const entryPoint of entries) this.pipelines.set(entryPoint, await compileMixedTiers(umCellWidth =>
-      this.device.createComputePipelineAsync({ layout, compute: { module, entryPoint,
-        constants: { umCellWidth, umDispatchX: this.dispatchX, umTransportList: liveList[entryPoint] ?? 0 } } })));
+    for (const entryPoint of entries) this.pipelines.set(entryPoint, await Promise.all(([1, 4] as const).map(umCellWidth => liveList[entryPoint]
+      ? this.device.createComputePipelineAsync({ layout, compute: { module, entryPoint, constants: { umCellWidth, umDispatchX: this.dispatchX, umTransportList: liveList[entryPoint] } } })
+      : this.ownership.pipeline(layout, module, entryPoint, UNIFORM_MIXED_JOBS.tier, { umCellWidth, umTransportList: 0 }))));
     if(this.parallelCoarseRows)for(const entry of ["rowsFallback","rowsDivide"] as const){
       this.coarseRows.set(entry,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:entry+"Coarse",constants:{umCellWidth:4,umDispatchX:this.dispatchX,umTransportList:1}}}));
     }
@@ -131,7 +132,7 @@ export class UniformMixedTransportStage {
   private encodeLiveSet(encoder: GPUCommandEncoder): void {
     const seed = this.livePipelines[0];
     if (!seed) throw new Error("Mixed transport has not been initialized");
-    const tiles = this.layout.tiles.length, groups = Math.ceil(tiles / 64);
+    const tiles = this.ownership.tileCount, groups = Math.ceil(tiles / 64);
     encoder.clearBuffer(this.live, 0, UNIFORM_MIXED_TRANSPORT_LIVE_HEADER * 4);
     const pass = this.begin(encoder, "transport live set", this.transportGroup);
     pass.setPipeline(seed!); pass.dispatchWorkgroups(Math.min(tiles, this.dispatchX), Math.ceil(tiles / this.dispatchX));

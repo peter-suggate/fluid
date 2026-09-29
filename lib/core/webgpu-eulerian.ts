@@ -451,6 +451,11 @@ export interface GPUEulerianInfo {
   uniformCM11aFullCyclesExecuted?: number;
   uniformCM11aVCyclesExecuted?: number;
   uniformPressureAcceptedResidual?: number;
+  /** Geometric's h pressure band, from the frame receipt: tiles re-solved,
+   * local V-cycles completed, final band residual. */
+  uniformPressureBandTiles?: number;
+  uniformPressureBandCycles?: number;
+  uniformPressureBandResidual?: number;
   uniformPressureInitialResidual?: number;
   uniformPressureRejectedCycles?: number;
   uniformPressureRecoverySweeps?: number;

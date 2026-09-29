@@ -22,7 +22,16 @@ export function uniformDiagnosticRows(
       unit: info ? `${info.ny} cells in Y · dense` : undefined,
       tone: "good",
     },
-    {
+    // Uniform Geometric runs only the mixed-ownership frame: it has no
+    // active-region box and no dense pressure maximum; its ownership is the
+    // work measure.
+    ...(info?.uniformMixedOwners !== undefined ? [{
+      id: "mixed-ownership",
+      label: "Mixed ownership",
+      value: `${info.uniformMixedFineTiles?.toLocaleString() ?? "—"} h · ${info.uniformMixedCoarseTiles?.toLocaleString() ?? "—"} 4h tiles`,
+      unit: `${info.uniformMixedOwners.toLocaleString()} owners · generation ${info.uniformMixedGeneration ?? 0} · ${info.uniformMixedDynamicRelayouts ?? 0} relayouts`,
+      tone: "good",
+    } satisfies DiagnosticRow] : [{
       id: "active-dispatch",
       label: "Uniform active dispatch",
       value: info?.uniformActiveRegionFraction !== undefined
@@ -34,19 +43,19 @@ export function uniformDiagnosticRows(
       tone: info?.uniformActiveRegionFraction !== undefined
         ? info.uniformActiveRegionFraction < 0.75 ? "good" : "warn"
         : "neutral",
-    },
+    } satisfies DiagnosticRow]),
     {
       id: "pressure-lattice",
       label: "Uniform pressure lattice",
       value: info ? (info.nx * info.storedNy * info.nz).toLocaleString() : "—",
       unit: info ? `cells · ${(info.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined,
     },
-    {
+    ...(info?.uniformMixedOwners !== undefined ? [] : [{
       id: "pressure-maximum",
       label: "GPU pressure maximum",
       value: info?.maxPressure_Pa !== undefined ? info.maxPressure_Pa.toExponential(2) : "—",
       unit: `Pa at ${formatGridLocation(info?.maxPressureLocation)}`,
-    },
+    } satisfies DiagnosticRow]),
     {
       id: "global-correction",
       label: "Global correction",

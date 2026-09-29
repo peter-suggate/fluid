@@ -1,6 +1,6 @@
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_JOBS, uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
@@ -50,12 +50,12 @@ export class UniformMixedSurface {
       {binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       ...(hanging?[{binding:11,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}}]:[]),
     ]});
-    this.deferredGrid=Math.min(1024,Math.ceil(ownership.layout.lattice.dimensions.reduce((a,n)=>a*(n+1),1)/64));
+    this.deferredGrid=Math.min(1024,Math.ceil(ownership.capacity.lattice.dimensions.reduce((a,n)=>a*(n+1),1)/64));
   }
   /** Resolved phi (UniformMixedPhiResolve) makes every texel a vertex value. */
   private get vertexCache():boolean{return this.hanging&&!this.resolved;}
   bind(f: UniformMixedSurfaceFields): GPUBindGroup {
-    const d=this.ownership.layout.lattice.dimensions;
+    const d=this.ownership.capacity.lattice.dimensions;
     for(const [i,t] of [f.phi,f.outputPhi,f.velocity,f.coarseVelocity,f.volume,f.departures].entries()){
       const size=d.map(n=>i<2?n+1:i===3?n/4+2:n);
       if(t.format!==([2,3,5].includes(i)?"rgba32float":"r32float") || [t.width,t.height,t.depthOrArrayLayers].some((n,a)=>n!==size[a]))
@@ -65,7 +65,7 @@ export class UniformMixedSurface {
     if(this.hanging!==(f.unitVelocity!==undefined))throw new Error("Mixed surface hanging taps require their unit velocity texture");
     // Per-tile retirement evidence, the six wallReach plane words, then the
     // solid closed/clear tile words.
-    const evidenceBytes=this.ownership.layout.tiles.length*(this.solid?12:4)+32;
+    const evidenceBytes=this.ownership.capacity.tileCount*(this.solid?12:4)+32;
     // The deferred advect list follows, a separate binding: count, three
     // unused words, then at most one word per lattice vertex.
     const deferredOffset=Math.ceil(((f.evidence.offset??0)+evidenceBytes)/256)*256,deferredBytes=16+4*d.reduce((a,n)=>a*(n+1),1);
@@ -277,7 +277,7 @@ fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
  if(!contact${this.solid?"||umOpenAt(interior)<=1e-5":""}){return value;}let continued=umSampleVertex(umTrace(interior));
  return select(value,min(value,continued),continued<0.0);
 }
-fn umReleasedWalls(p:vec3f,value:f32)->f32{
+fn umReleasedWalls(p:vec3f,value:f32,width:u32)->f32{
  var result=value;let h=params.hDt.xyz;let dt=params.hDt.w;
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let upper=side==1u;let inward=select(1.0,-1.0,upper);let plane=select(0.0,f32(UM_D[axis]),upper);
@@ -300,8 +300,11 @@ fn umReleasedWalls(p:vec3f,value:f32)->f32{
    // A wide owner's release is its centre pressure, and liquid it cannot
    // resolve above it (V under an air centre) lowers that pressure. It
    // separates the wall only within half its width of the surface; deeper,
-   // a lift would snap a submerged wall column to air.
-   let resolved=ambient||owner.width==1u||value>-0.5*f32(owner.width)*min(h.x,min(h.y,h.z));
+   // a lift would snap a submerged wall column to air. The width is the
+   // vertex's authority (its widest incident owner), not the probed one: a
+   // wall vertex an h owner shares with a 4h owner is that 4h owner's
+   // corner, and a deep lift through the h side snaps the 4h owner too.
+   let resolved=ambient||width==1u||value>-0.5*f32(width)*min(h.x,min(h.y,h.z));
    if((ambient||released)&&resolved&&dt*away>1e-4*h[axis]*f32(owner.width)){result=max(result,dt*away-inward*(p[axis]-plane)*h[axis]);}
   }
  }}return result;
@@ -313,7 +316,7 @@ fn umAdvected(p:vec3f,width:u32)->f32{
  if(params.flags.y!=0u&&abs(value)<2.0*h){value=umCubicPhi(q);}
  ${this.solid?/* wgsl */`value=umWallContact(p,value,width);
  if(!clear){value=umEmbeddedContact(p,value);}if(walk.hit){value=umEmbeddedAir(p,end,value);}
- value=umReleasedWalls(p,value);`:"value=umReleasedWalls(p,umWallContact(p,value,width));"}
+ value=umReleasedWalls(p,value,width);`:"value=umReleasedWalls(p,umWallContact(p,value,width),width);"}
  if(params.flags.z!=0u){value=umDrain(q,value,width);}return ${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
 }
 // The first non-ambient domain plane through p (2*axis+side), or 6: the only
@@ -630,43 +633,39 @@ fn umTraceCell(owner:UMOwner){
 @compute @workgroup_size(64) fn traceCells(@builtin(global_invocation_id) gid:vec3u){
  let owner=umOwner(gid);if(owner.width!=0u){umTraceCell(owner);}
 }
-`,["advect","redistance","advectOwners","redistanceOwners","traceCells"])});
+`,["advect","redistance","advectOwners","redistanceOwners","traceCells",...(this.vertexCache?["vertexCache"]:[])])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[]),...(this.hanging?[this.ownership.hangingLayout]:[])]});
-    if(this.vertexCache)this.pipelines.set("vertexCache",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"vertexCache",constants:{umVertexCacheFill:1,umDispatchX:this.ownership.dispatchX}}}));
+    if(this.vertexCache)this.pipelines.set("vertexCache",await this.ownership.pipeline(layout,module,"vertexCache",UNIFORM_MIXED_JOBS.fused,{umVertexCacheFill:1}));
     if(this.solid)for(const entryPoint of ["solidClosed","solidClear"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
     this.pipelines.set("wallReach",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"wallReach",constants:{umDispatchX:this.ownership.dispatchX}}}));
     for(const axis of [0,1,2])this.pipelines.set(`evidenceDistance${axis}`,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"evidenceDistance",constants:{umDispatchX:this.ownership.dispatchX,umEvidenceAxis:axis}}}));
     this.pipelines.set("retirementEvidence",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"retirementEvidence",constants:{umDispatchX:this.ownership.dispatchX}}}));
     for(const entry of ["advect","redistance","traceCells"])
-      this.pipelines.set(entry,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:entry,constants:{umMergedTiles:1,umCertifiedJobs:2,umDispatchX:this.ownership.dispatchX}}}));
+      this.pipelines.set(entry,await this.ownership.pipeline(layout,module,entry,UNIFORM_MIXED_JOBS.merged,{umMergedTiles:1}));
     this.deferredPipelines.push(await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"advectWalls",constants:{umDispatchX:this.ownership.dispatchX}}}),
       await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"advectDeferred",constants:{umMergedTiles:1,umDispatchX:this.ownership.dispatchX}}}),
       await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"advectDeferred",constants:{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umDispatchX:this.ownership.dispatchX}}}));
-    for(const entryPoint of ["advect","redistance","traceCells"])this.regularPipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:entryPoint==="traceCells"?entryPoint:`${entryPoint}Owners`,constants:{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umCertifiedJobs:1,umDispatchX:this.ownership.dispatchX}}}));
+    for(const entryPoint of ["advect","redistance","traceCells"])this.regularPipelines.set(entryPoint,await this.ownership.pipeline(layout,module,entryPoint==="traceCells"?entryPoint:`${entryPoint}Owners`,UNIFORM_MIXED_JOBS.planned,{umCellWidth:1,umPlannedFine:1,umRegularFine:1}));
   }
   encode(encoder:GPUCommandEncoder,entry:"advect"|"redistance"|"traceCells",group:GPUBindGroup):void{
     const pipeline=this.pipelines.get(entry);if(!pipeline)throw new Error("Mixed surface stage is not initialized");
     const pass=encoder.beginComputePass({label:`Uniform mixed surface ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);if(this.hanging)pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
-    const slots=this.ownership.hangingSlots;
-    if(this.vertexCache&&entry!=="traceCells"&&slots){
-      pass.setPipeline(this.pipelines.get("vertexCache")!);
-      pass.dispatchWorkgroups(Math.min(slots,this.ownership.dispatchX),Math.ceil(slots/this.ownership.dispatchX));
-    }
+    if(this.vertexCache&&entry!=="traceCells")this.ownership.dispatchFused(pass,this.pipelines.get("vertexCache")!);
     if(entry==="advect"){
       pass.setPipeline(this.pipelines.get("wallReach")!);pass.dispatchWorkgroups(6);
       if(this.solid){
-        const tiles=this.ownership.layout.tiles.length,x=this.ownership.dispatchX,groups=Math.ceil(tiles/64);
+        const tiles=this.ownership.capacity.tileCount,x=this.ownership.dispatchX,groups=Math.ceil(tiles/64);
         pass.setPipeline(this.pipelines.get("solidClosed")!);pass.dispatchWorkgroups(Math.min(tiles,x),Math.ceil(tiles/x));
         pass.setPipeline(this.pipelines.get("solidClear")!);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
       }
     }
     if(entry==="redistance"){
-      const groups=this.ownership.layout.tiles.length;
+      const groups=this.ownership.capacity.tileCount;
       pass.setPipeline(this.pipelines.get("retirementEvidence")!);
       pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));
-      const t=this.ownership.layout.lattice.dimensions.map(n=>n/4);
+      const t=this.ownership.capacity.lattice.dimensions.map(n=>n/4);
       for(const axis of [0,1,2]){
         const lines=t[(axis+1)%3]!*t[(axis+2)%3]!;
         pass.setPipeline(this.pipelines.get(`evidenceDistance${axis}`)!);
@@ -675,7 +674,7 @@ fn umTraceCell(owner:UMOwner){
     }
     this.ownership.dispatchCertified(pass,pipeline,this.regularPipelines.get(entry)!);
     if(entry==="advect"){
-      const d=this.ownership.layout.lattice.dimensions.map(n=>n+1),x=this.ownership.dispatchX;
+      const d=this.ownership.capacity.lattice.dimensions.map(n=>n+1),x=this.ownership.dispatchX;
       const groups=Math.ceil(2*(d[1]!*d[2]!+d[2]!*d[0]!+d[0]!*d[1]!)/64);
       pass.setPipeline(this.deferredPipelines[0]!);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
     }

@@ -7,12 +7,13 @@ import {
 } from "../../../components/toolstrip";
 import { Choice, ControlRow, Slider, Value } from "../../../components/ui";
 import {
-  VISUAL_LAYERS, layerOpacity, toggleVisualLayer, type VisualLayerState,
+  VISUAL_LAYERS, layerOpacity, toggleVisualLayer, type VisualLayerId, type VisualLayerState,
 } from "../../core/visual-layers";
 
 interface VisualLayerRowsProps {
   readonly state: VisualLayerState;
-  readonly hidePages?: boolean;
+  /** Layers this solver publishes no source for. */
+  readonly hidden?: readonly VisualLayerId[];
   readonly onChange: (state: VisualLayerState) => void;
   readonly plane?: {
     axis: string;
@@ -23,7 +24,7 @@ interface VisualLayerRowsProps {
 }
 
 /** The same multi-select instrument in the 2D lab and 3D studio. */
-export function VisualLayerRows({ state, onChange, plane, hidePages }: VisualLayerRowsProps) {
+export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualLayerRowsProps) {
   const [open, setOpen] = useState(false);
   const { claim } = useToolstripSection("visual-layers", () => setOpen(false));
   const menu = <ToolstripMenuButton
@@ -32,7 +33,7 @@ export function VisualLayerRows({ state, onChange, plane, hidePages }: VisualLay
     open={open}
     onOpen={value => { claim(value); setOpen(value); }}
   >
-    {VISUAL_LAYERS.filter(layer => !hidePages || layer.id !== "pages").map(layer => {
+    {VISUAL_LAYERS.filter(layer => !hidden.includes(layer.id)).map(layer => {
       const selected = state.enabled.includes(layer.id);
       return <div key={layer.id} role="none" className="visual-layer-option">
         <ToolstripMenuItem
@@ -69,7 +70,7 @@ export function VisualLayerRows({ state, onChange, plane, hidePages }: VisualLay
     onClick={() => onChange({ ...state, visible: !state.visible })}
     after={<>{menu}<span className="toolstrip-name">{state.enabled.length} {state.enabled.length === 1 ? "layer" : "layers"}</span></>}
   >
-    {state.visible && !hidePages && state.enabled.includes("pages") && <span
+    {state.visible && !hidden.includes("pages") && state.enabled.includes("pages") && <span
       aria-label="Domain page states"
       title="Last-step volume work. Resident pages may also support pressure and the interface. Absent pages are hidden."
       style={{ display: "inline-flex", gap: 8, fontSize: 11 }}

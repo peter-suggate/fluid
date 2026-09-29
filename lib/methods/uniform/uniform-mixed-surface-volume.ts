@@ -1,5 +1,5 @@
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
-import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
+import {UNIFORM_MIXED_JOBS,type UniformMixedJobKind,uniformMixedCertifiedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 import {uniformSurfaceFillWGSL} from "./uniform-surface-volume.wgsl";
 import {uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
@@ -39,10 +39,10 @@ export class UniformMixedSurfaceVolume {
   * Every owner corner is then a stored or resolved texel; resolveScale
   * completes the corner scales the same way after metric. */
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly resolved=false){
-  this.cells=ownership.layout.lattice.dimensions.reduce((n,d)=>n*d,1);
-  this.vertices=ownership.layout.lattice.dimensions.reduce((n,d)=>n*(d+1),1);
+  this.cells=ownership.capacity.lattice.dimensions.reduce((n,d)=>n*d,1);
+  this.vertices=ownership.capacity.lattice.dimensions.reduce((n,d)=>n*(d+1),1);
   this.groups=Math.ceil(this.cells/64);this.chunks=Math.ceil(this.groups/64);
-  this.tiles=ownership.layout.tiles.length;
+  this.tiles=ownership.capacity.tileCount;
   this.scratchBytes=4*(this.cells*2+this.vertices+20*(this.groups+this.chunks)+8+3*this.tiles);
   const texture=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}});
   const scratch={binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}};
@@ -51,7 +51,7 @@ export class UniformMixedSurfaceVolume {
   this.inPlaceResources=device.createBindGroupLayout({entries:[{binding:2,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write",format:"r32float",viewDimension:"3d"}},scratch]});
  }
  bind(phi:GPUTexture,volume:GPUTexture,output:GPUTexture,scratch:GPUBufferBinding):GPUBindGroup{
-  const d=this.ownership.layout.lattice.dimensions;
+  const d=this.ownership.capacity.lattice.dimensions;
   for(const [i,t] of [phi,volume,output].entries())if(t.format!=="r32float"||[t.width,t.height,t.depthOrArrayLayers].some((n,a)=>n!==d[a]!+(i===1?0:1)))throw new Error("Mixed surface constraint requires native vertex and cell fields");
   if((scratch.size??scratch.buffer.size-(scratch.offset??0))<this.scratchBytes)throw new Error("Mixed surface constraint needs sufficient scratch");
   const work={...scratch,size:this.scratchBytes};
@@ -66,7 +66,7 @@ export class UniformMixedSurfaceVolume {
   const N=this.cells,V=this.vertices,P=2*N+V,R=P+20*this.groups,S=R+20*this.chunks,T=this.tiles;
   const topology=uniformMixedTopologyWGSL(this.ownership.layout,0);
   const shared=(sampling:string)=>/* wgsl */`
-const UM_H=vec3f(${this.ownership.layout.lattice.cellSize_m.join(",")});
+const UM_H=vec3f(${this.ownership.capacity.lattice.cellSize_m.join(",")});
 ${sampling}
 fn umVertexIndex(p:vec3u)->u32{let d=UM_D+vec3u(1);return p.x+d.x*(p.y+d.y*p.z);}
 // Band tiles, visited tiles, measured tiles.
@@ -88,7 +88,7 @@ fn svAuthority(o:UMOwner,k:u32)->bool{
 fn svUnitAuthorityTile(p:vec3u)->u32{return umTileAt(vec3u(clamp(vec3i(p)-vec3i(1),vec3i(0),vec3i(UM_D)-vec3i(1)))/4u);}
 fn svMeasured(t:u32)->bool{return scratch[SV_MEASURE+t]!=0.0;}`;
   const sourceScale=uniformMixedVertexSamplingSource("",false).replace(/\bum(Vertex\w*|SampleVertex|LoadVertex)\b/g,name=>name.replace("um","umScale"));
-  const module=this.device.createShaderModule({code:topology+/* wgsl */`
+  const module=this.device.createShaderModule({code:uniformMixedCertifiedEntriesWGSL(topology+/* wgsl */`
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var volume:texture_3d<f32>;
 @group(1) @binding(3) var<storage,read_write> scratch:array<f32>;
@@ -134,6 +134,7 @@ fn svCorner(o:UMOwner,k:u32)->f32{
 // vertices once; every lane then reads its eight corners from them.
 var<workgroup> seedCorners:array<f32,125>;
 @compute @workgroup_size(64) fn seed(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) group:vec3u){
+ if(l==0u){atomicStore(&measureLive,0u);atomicStore(&measureBand,0u);}
  let job=group.x+umDispatchX*group.y;
  let staged=job<umCounts.x&&umTileMaximumWidth(umTopology[UM_TILES+job])==1u;
  if(staged){let base=umTileCoord(umTopology[UM_TILES+job])*4u;for(var i=l;i<125u;i+=64u){seedCorners[i]=umLoadVertex(base+umCorner(i,5u));}}
@@ -319,7 +320,7 @@ fn umMeasureCorners(o:UMOwner)->array<f32,16>{
  storePartial(l,group);
 }
 @compute @workgroup_size(64) fn reduce(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) l:u32){
- let i=group.x*64u+l;let count=(umLiveCells()+63u)/64u;
+ let i=group.x*64u+l;let count=(umLiveCells()+63u)/64u;if(group.x*64u>=count){return;}
  for(var k=0u;k<5u;k++){sums[l*5u+k]=vec4f(0);if(i<count){sums[l*5u+k]=loadSum(${P}u+20u*i,k);}}sumGroup(l);
  if(l==0u){for(var k=0u;k<5u;k++){storeSum(${R}u+20u*group.x,k,sums[k]);}}
 }
@@ -335,10 +336,10 @@ fn umMeasureCorners(o:UMOwner)->array<f32,16>{
   }scratch[${S}u]=clamp(shift,-umShiftLimit(),umShiftLimit());scratch[${S+1}u]=radius/8.0;
  }
 }
-`});
+`,["seed","dilate","metric","measure",...(this.resolved?["resolveScale"]:[])])});
   // Apply: in place on the band's authoritative vertices (every other scale
   // is zero), or every authoritative vertex into a separate output.
-  const applyModule=(inPlace:boolean)=>this.device.createShaderModule({code:topology+/* wgsl */`
+  const applyModule=(inPlace:boolean)=>this.device.createShaderModule({code:uniformMixedCertifiedEntriesWGSL(topology+/* wgsl */`
 ${inPlace?`@group(1) @binding(2) var phi:texture_storage_3d<r32float,read_write>;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p)).x;}`:`@group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(2) var output:texture_storage_3d<r32float,write>;
@@ -352,18 +353,19 @@ ${shared(uniformMixedVertexSamplingSource("",false))}
   var value=umLoadVertex(p);if(visited){value-=scratch[${S}u]*scratch[${2*N}u+umVertexIndex(p)];}
   textureStore(${inPlace?"phi":"output"},vec3i(p),vec4f(value));
  }
-}`});
+}`,["apply"])});
   const modules=[module,applyModule(true),applyModule(false)];
   for(const m of modules){const errors=(await m.getCompilationInfo()).messages.filter(e=>e.type==="error");if(errors.length)throw new Error(errors.map(e=>`${e.lineNum}: ${e.message}`).join("\n"));}
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
   const constants={umDispatchX:this.ownership.dispatchX};
-  const create=(key:string,entryPoint:string,extra:Record<string,number>={})=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{...constants,...extra}}}).then(p=>{this.pipelines.set(key,p);});
+  const certified:Record<string,UniformMixedJobKind>={seed:UNIFORM_MIXED_JOBS.all,dilate:UNIFORM_MIXED_JOBS.all,metric:UNIFORM_MIXED_JOBS.all,measure:UNIFORM_MIXED_JOBS.all,resolveScale:UNIFORM_MIXED_JOBS.fused};
+  const create=(key:string,entryPoint:string,extra:Record<string,number>={})=>(certified[entryPoint]?this.ownership.pipeline(layout,module,entryPoint,certified[entryPoint]!,extra):this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{...constants,...extra}}})).then(p=>{this.pipelines.set(key,p);});
   await Promise.all([
    ...["begin","clearBand","seed","metric","measure","reduce","solve",...(this.resolved?["resolveScale"]:[])].map(entry=>create(entry,entry)),
    create("dilate0","dilate",{parity:0}),create("dilate1","dilate",{parity:1}),
    create("grow","grow"),create("growMeasure","grow",{svMeasureReach:1}),
    ...([["applyInPlace",1,this.inPlaceResources],["applyCopy",2,this.copyResources]] as const).map(([key,m,resources])=>
-    this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,resources]}),compute:{module:modules[m]!,entryPoint:"apply",constants}}).then(p=>{this.pipelines.set(key,p);})),
+    this.ownership.pipeline(this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,resources]}),modules[m]!,"apply",UNIFORM_MIXED_JOBS.all).then(p=>{this.pipelines.set(key,p);})),
   ]);
  }
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
@@ -372,7 +374,7 @@ ${shared(uniformMixedVertexSamplingSource("",false))}
   const pass=encoder.beginComputePass({label:"Uniform mixed global surface volume"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
   const run=(entry:string)=>{const pipeline=this.pipelines.get(entry)!;pass.setPipeline(pipeline);
    if(entry==="begin"||entry==="solve")pass.dispatchWorkgroups(1);
-   else if(entry==="reduce")pass.dispatchWorkgroups(Math.ceil(this.ownership.layout.cellCount/4096));
+   else if(entry==="reduce")pass.dispatchWorkgroups(this.chunks);
    else if(entry==="resolveScale")this.ownership.dispatchFused(pass,pipeline);
    else if(entry==="grow"||entry==="growMeasure"||entry==="clearBand"){const groups=Math.ceil(this.tiles/64);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));}
    else this.ownership.dispatchAll(pass,pipeline);};

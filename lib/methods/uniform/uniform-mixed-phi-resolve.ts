@@ -1,5 +1,5 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_JOBS, uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
 
 /** Writes umVertexValue into every unstored texel of the tiles with a mixed
@@ -25,14 +25,14 @@ export class UniformMixedPhiResolve {
   }
 
   bind(field: GPUTexture): GPUBindGroup {
-    const size = this.ownership.layout.lattice.dimensions.map(n => n + 1);
+    const size = this.ownership.capacity.lattice.dimensions.map(n => n + 1);
     if (field.format !== "r32float" || [field.width, field.height, field.depthOrArrayLayers].some((n, a) => n !== size[a]))
       throw new Error("Mixed phi resolve requires a native vertex phi field");
     return this.device.createBindGroup({ layout: this.resources, entries: [{ binding: 0, resource: field.createView() }] });
   }
 
   async initialize(): Promise<void> {
-    const module = this.device.createShaderModule({ code: uniformMixedTopologyWGSL(this.ownership.layout, 0) + /* wgsl */ `
+    const module = this.device.createShaderModule({ code: uniformMixedCertifiedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.layout, 0) + /* wgsl */ `
 @group(1) @binding(0) var field:texture_storage_3d<r32float,read_write>;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(field,vec3i(p)).x;}
 ${uniformMixedVertexSamplingWGSL}
@@ -68,18 +68,15 @@ var<workgroup> umResolveWords:array<u32,8>;var<workgroup> umResolveLattice:array
  }
  let value=umVertexSum8(values);
  if(bitcast<u32>(value)!=bitcast<u32>(umLoadVertex(p))){textureStore(field,vec3i(p),vec4f(value));}
-}` });
+}`, ["resolve"]) });
     const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
-    this.pipeline = await this.device.createComputePipelineAsync({
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources] }),
-      compute: { module, entryPoint: "resolve", constants: { umDispatchX: this.ownership.dispatchX } },
-    });
+    this.pipeline = await this.ownership.pipeline(this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources] }),
+      module, "resolve", UNIFORM_MIXED_JOBS.fused);
   }
 
   encode(encoder: GPUCommandEncoder, group: GPUBindGroup): void {
     if (!this.pipeline) throw new Error("Mixed phi resolve is not initialized");
-    if (!this.ownership.fusedJobs()) return;
     const pass = encoder.beginComputePass({ label: "Uniform mixed phi resolve" });
     pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group);
     this.ownership.dispatchFused(pass, this.pipeline);

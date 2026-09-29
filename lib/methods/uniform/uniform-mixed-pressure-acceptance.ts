@@ -1,5 +1,5 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_JOBS, uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryLoop, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
 
 export interface UniformMixedPressureAcceptanceFields {
@@ -39,7 +39,7 @@ export class UniformMixedPressureAcceptance {
  }
  async initialize():Promise<void>{
   const l=this.ownership.layout;
-  const module=this.device.createShaderModule({code:uniformMixedTopologyWGSL(l,0)+/* wgsl */`
+  const module=this.device.createShaderModule({code:uniformMixedCertifiedEntriesWGSL(uniformMixedTopologyWGSL(l,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> residual:array<f32>;
 @group(1) @binding(1) var<storage,read_write> state:array<atomic<u32>>;
 @group(1) @binding(2) var<uniform> params:vec4f;
@@ -74,10 +74,11 @@ fn umCheck(initial:bool){
 @compute @workgroup_size(1) fn initial(){umCheck(true);}
 @compute @workgroup_size(1) fn cycle(){if(umSlotClosed()){return;}umCheck(false);}
 
-`});
+`,["reduce"])});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-  for(const entryPoint of ["resetInitial","resetCycle","reduce","initial","cycle"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
+  for(const entryPoint of ["resetInitial","resetCycle","initial","cycle"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
+  this.pipelines.set("reduce",await this.ownership.pipeline(layout,module,"reduce",UNIFORM_MIXED_JOBS.all));
  }
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,state:GPUBuffer,kind:"initial"|"cycle"):void{
   if(this.pipelines.size!==5)throw new Error("Mixed pressure acceptance is not initialized");

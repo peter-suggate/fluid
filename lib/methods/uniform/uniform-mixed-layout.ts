@@ -24,6 +24,16 @@ export interface UniformMixedLayout {
   readonly regions: readonly { id: string; min: Triple; max: Triple }[];
 }
 
+/** What the host always knows of a live ownership: its lattice and tile
+ * capacity. After a GPU-built generation is adopted the host has no layout
+ * (no tile words, lists or owner count); every launch is sized by this. */
+export interface UniformMixedCapacity {
+  readonly lattice: RefinementRegionLattice;
+  readonly tileDimensions: Triple;
+  readonly tileCount: number;
+  readonly metadataBytes: number;
+}
+
 /** Manual Uniform ownership: h/4h, ungraded. Tiles outside regions take the
  * background width (h unless a coarse background is requested). */
 export function createUniformMixedLayout(
@@ -62,10 +72,11 @@ export function createUniformMixedLayout(
         throw new Error(`Invalid region bounds: ${r.id}`);
       }
     }
-    const mask = (lo <= 1 && hi >= 1 ? 1 : 0) | (lo <= 4 && hi >= 4 ? 2 : 0);
-    if (!mask) throw new Error(`Region ${r.id} allows neither 1 nor 4 cell size`);
+    // Other methods' 8-32 cell regions are valid scene data: on this h/4h
+    // lattice they mean the coarsest tier.
+    const mask = (lo <= 1 && hi >= 1 ? 1 : 0) | (lo <= 4 && hi >= 4 ? 2 : 0) || 2;
     const bounds = refinementRegionCellBounds(r, lattice);
-    if (bounds.min.some((v, a) => v >= bounds.max[a]!)) throw new Error(`Region ${r.id} does not overlap the lattice`);
+    if (bounds.min.some((v, a) => v >= bounds.max[a]!)) continue;
     // World-to-cell arithmetic can land a few ULPs past an exact tile edge.
     const tileCoordinate=(v:number)=>{const q=v/4,n=Math.round(q);return Math.abs(q-n)<=8*Number.EPSILON*Math.max(1,Math.abs(q))?n:q;};
     const min = bounds.min.map(v => Math.floor(tileCoordinate(v))) as unknown as Triple;
@@ -73,8 +84,9 @@ export function createUniformMixedLayout(
     for (let z = min[2]; z < max[2]; z++) for (let y = min[1]; y < max[1]; y++) for (let x = min[0]; x < max[0]; x++) {
       const key = x + dimensions[0] * (y + dimensions[1] * z);
       if (forcedFine?.[key]) continue;
-      allowed[key] = allowed[key]! & mask;
-      if (!allowed[key]) throw new Error(`Conflicting snapped region constraints at tile ${x},${y},${z} while applying ${r.id}`);
+      // Overlapping Fine and Coarse boxes: fine wins, as it does for solids.
+      // Coarse is a cost hint; refusing here threw mid-advance in the app.
+      allowed[key] = allowed[key]! & mask || 1;
     }
     snapped.push({ id: r.id, min, max });
   }

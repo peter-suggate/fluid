@@ -1,5 +1,5 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_JOBS, uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedFaceAddressWGSL, uniformMixedFaceTileDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformVelocityDepartureWGSL } from "./uniform-velocity-departure.wgsl";
@@ -48,7 +48,7 @@ export class UniformMixedMomentum {
     if(this.cullAir&&!fields.centerPhi)throw new Error("Prediction culling requires current center phi");
     if(this.hanging!==(fields.unitVelocity!==undefined))throw new Error("Mixed momentum hanging taps require their unit velocity texture");
     const textures = [fields.extended, fields.physical, fields.phase, fields.volume];
-    const d = this.ownership.layout.lattice.dimensions;
+    const d = this.ownership.capacity.lattice.dimensions;
     for (const [i, texture] of [...textures, fields.output].entries()) {
       if ([texture.width, texture.height, texture.depthOrArrayLayers].some((n, a) => n !== d[a])
         || texture.format !== (i === 2 || i === 3 ? "r32float" : "rgba32float")) throw new Error("Mixed momentum requires native-sized canonical fields");
@@ -150,9 +150,8 @@ ${uniformMixedFaceTileDispatchWGSL("momentumStep", "umMomentum(owner,face)")}
     const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
     const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources, ...(this.hanging ? [this.ownership.hangingLayout] : [])] });
-    this.pipeline = await this.device.createComputePipelineAsync({ layout,
-      compute: { module, entryPoint: "momentumStep", constants: { umMergedTiles:1, umCertifiedJobs:3, umDispatchX: this.ownership.dispatchX, umCullAir:+this.cullAir } } });
-    this.regularPipeline=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"momentumRegularStep",constants:{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umCertifiedJobs:1,umDispatchX:this.ownership.dispatchX,umCullAir:+this.cullAir}}});
+    this.pipeline = await this.ownership.pipeline(layout, module, "momentumStep", UNIFORM_MIXED_JOBS.mergedQuad, { umMergedTiles:1, umCullAir:+this.cullAir });
+    this.regularPipeline=await this.ownership.pipeline(layout,module,"momentumRegularStep",UNIFORM_MIXED_JOBS.planned,{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umCullAir:+this.cullAir});
   }
   encode(encoder: GPUCommandEncoder, group: GPUBindGroup): void {
     if (!this.pipeline) throw new Error("Mixed momentum is not initialized");

@@ -624,7 +624,7 @@ function UniformRun({ session }: { session: PaneSession }) {
       <div className={css.layout}>
         <section className={css.viewport} aria-label="Uniform simulation">
           <div className={css.tools}>
-            <DockedToolstrip ariaLabel="Visual layers"><VisualLayerRows hidePages state={layers} onChange={layers => store.setState({ layers })} /></DockedToolstrip>
+            <DockedToolstrip ariaLabel="Visual layers"><VisualLayerRows hidden={["pages"]} state={layers} onChange={layers => store.setState({ layers })} /></DockedToolstrip>
             <button onClick={() => setCamera(fit)}>Fit</button>
           </div>
           <canvas

@@ -1,6 +1,8 @@
 /** Production Uniform Geometric stage timestamps, without rendering or xctrace.
  * node --import tsx tools/profile-uniform-geometric-dawn.ts
  * Options: --scene=cm12-figure-7-256 --frames=60 --out=/tmp/profile.json
+ * The scene's rigid bodies are passed as the roster each advance (the app's
+ * contract); --no-bodies advances without them.
  * --allocation-audit --max-gpu-bytes=3000000000
  * --reapply-values reproduces the renderer reapplying tuning each frame.
  * --values='{"phiCubicAdvection":"off"}'
@@ -20,6 +22,7 @@ import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harn
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
+import { initializeRigidBodies } from "../lib/core/rigid-body";
 import { auditUniformGPUAllocations } from "./uniform-gpu-allocation-audit";
 const arg = (key: string, fallback: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3) ?? fallback;
 const sceneId = arg("scene", "cm12-figure-7-256");
@@ -57,6 +60,7 @@ try {
   usePerformanceInstrumentationStore.getState().setMode("timeline");
   await GPUStageTimestampRecorder.prepare(device);
   const scene = sceneDocument(getSceneDefinition(sceneId));
+  const roster = process.argv.includes("--no-bodies") ? [] : initializeRigidBodies(scene.rigidBodies);
   const values = resolveMethodValues(uniformVolumeMethod, "balanced", JSON.parse(arg("values", "{}")));
   const start = performance.now();
   const unsubscribe = process.argv.includes("--compile-progress")
@@ -79,7 +83,7 @@ try {
     if(traceGapMs<100)(solver as unknown as {lastPhysicsTraceAt_ms:number}).lastPhysicsTraceAt_ms=-Infinity;
     const begin = performance.now();
     if(process.argv.includes("--reapply-values"))solver.applyRuntimeValues(values);
-    assert.ok(solver.advanceTo(frame/30));
+    assert.ok(solver.advanceTo(frame/30, roster));
     await solver.awaitFrameCompletion();
     await device.queue.onSubmittedWorkDone();
     const wall_ms = performance.now()-begin;
