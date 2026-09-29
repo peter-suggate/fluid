@@ -20,6 +20,13 @@ export const FLYOUT_EDGE_MARGIN_PX = 10;
  */
 export const FLYOUT_TRANSPORT_KEEPOUT_PX = 90;
 
+/**
+ * The band along the top edge the scene header, mode toggle and frame meter sit
+ * in. A panel clamped against the shell's own top edge ran over the EDIT toggle
+ * — the one control that leaves the mode the panel belongs to.
+ */
+export const FLYOUT_TOP_KEEPOUT_PX = 50;
+
 export type FlyoutPlacement = { left: number; top: number; maxHeight: number };
 
 export type FlyoutGeometry = {
@@ -50,9 +57,9 @@ const clamp = (value: number, low: number, high: number) =>
  * whenever it was merely tight would jitter back and forth across the anchor as
  * the camera moved, which reads worse than one sitting slightly off its mark.
  * Vertically there is no flip to make, only a clamp: these panels are taller
- * than they are wide and the anchor is already inside them. The bottom of that
- * clamp is the transport's band rather than the shell's edge — see
- * `FLYOUT_TRANSPORT_KEEPOUT_PX`.
+ * than they are wide and the anchor is already inside them. The clamp's ends
+ * are the header's band and the transport's band rather than the shell's edges
+ * — see `FLYOUT_TOP_KEEPOUT_PX` and `FLYOUT_TRANSPORT_KEEPOUT_PX`.
  */
 export function resolveFlyoutPlacement({
   leftFraction, topFraction, gap, originY, offsetY,
@@ -67,10 +74,10 @@ export function resolveFlyoutPlacement({
   const left = fitsRight || !fitsLeft ? anchorX + gap : anchorX - gap - panelWidth;
   return {
     left: clamp(left, margin, containerWidth - margin - panelWidth),
-    top: clamp(anchorY - originY * panelHeight + offsetY, margin, floor - panelHeight),
+    top: clamp(anchorY - originY * panelHeight + offsetY, FLYOUT_TOP_KEEPOUT_PX, floor - panelHeight),
     // Container-derived rather than content-derived, so applying it cannot
     // resize the panel into a different answer on the next measurement.
-    maxHeight: Math.max(0, floor - margin),
+    maxHeight: Math.max(0, floor - FLYOUT_TOP_KEEPOUT_PX),
   };
 }
 

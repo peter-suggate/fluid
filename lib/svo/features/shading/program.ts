@@ -3674,8 +3674,8 @@ fn dryLatticeAppend(slot:u32){
   if(index<arrayLength(&dryLatticeControl)-${latticeContract.headerWords}u){atomicStore(&dryLatticeControl[${latticeContract.headerWords}u+index],slot|(${latticeContract.allLanes}u<<${latticeContract.laneShift}u));}
   else{atomicAdd(&dryLatticeControl[${latticeContract.overflowWord}],1u);}
 }
-// One scan of both buckets finds the key or the oldest slot no key of this
-// frame holds. Whoever moves a use word into this frame owns that slot for
+// One scan of both buckets finds the key, or else the oldest slot no key of
+// this frame holds in whichever bucket holds fewer of them. Whoever moves a use word into this frame owns that slot for
 // the frame: a hit whose stamp is stale, or a claimed victim, is appended to
 // the miss list exactly once, and no later request this frame can evict it.
 // A use word already in this frame with this key's tag bits means another
@@ -3688,20 +3688,28 @@ fn dryLatticeRequest(key:vec4u,frame:u32,stamp:u32)->u32{
   let buckets=arrayLength(&dryLatticeBuckets)/${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWords}u;
   let first=svoLatticeBucket(hash,buckets,0u);let second=svoLatticeBucket(hash,buckets,1u);
   for(var attempt=0u;attempt<${SVO_LATTICE_VISIBILITY_CONTRACT.claimAttempts}u;attempt+=1u){
-    var victim=0xffffffffu;var victimUse=0u;var victimAge=0u;var contended=false;
+    var victims=vec2u(0xffffffffu);var victimUses=vec2u(0u);var victimAges=vec2u(0u);var held=vec2u(0u);var contended=false;
     for(var way=0u;way<${2 * SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u;way+=1u){
-      let slot=select(second,first,way<${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u)*${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u+(way&7u);let word=dryLatticeTagWord(slot);
+      let choice=way>>3u;let slot=select(second,first,choice==0u)*${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u+(way&7u);let word=dryLatticeTagWord(slot);
       let stamped=atomicLoad(&dryLatticeBuckets[word+8u]);let useFrame=stamped>>8u;
+      if(useFrame==frame){held[choice]+=1u;}
       if(atomicLoad(&dryLatticeBuckets[word])==tag&&all(dryLatticeRecords[2u*slot]==key)){
         if(useFrame==frame){if((stamped&127u)==tagBits){return slot;}continue;}
         let claim=atomicCompareExchangeWeak(&dryLatticeBuckets[word+8u],stamped,current);
         if(claim.exchanged){if(dryLatticeRecords[2u*slot+1u].z!=stamp){dryLatticeRecords[2u*slot+1u].z=0u;dryLatticeAppend(slot);}return slot;}
         contended=true;break;
       }
-      // Empty slots are the oldest; ties keep the first bucket.
-      if(useFrame!=frame){let age=select((frame-useFrame)&0xffffffu,0x1000000u,stamped==0u);if(age>victimAge){victim=slot;victimUse=stamped;victimAge=age;}}
+      // Empty slots are the oldest in their bucket.
+      if(useFrame!=frame){let age=select((frame-useFrame)&0xffffffu,0x1000000u,stamped==0u);if(age>victimAges[choice]){victims[choice]=slot;victimUses[choice]=stamped;victimAges[choice]=age;}}
     }
     if(contended){continue;}
+    // The bucket holding fewer of this frame's keys takes the new one (ties
+    // keep the first), and its oldest slot is the victim. Taking the oldest
+    // slot of either bucket instead places keys without regard to load, and a
+    // cold store's empty slots all tie, filling every first bucket before its
+    // second: that turned away ~20 requests a frame at the design load, where
+    // the less-loaded choice holds to ~1.75 keys per texel.
+    let pick=select(0u,1u,held.y<held.x);let victim=victims[pick];let victimUse=victimUses[pick];
     if(victim==0xffffffffu){break;}
     let word=dryLatticeTagWord(victim);
     let claim=atomicCompareExchangeWeak(&dryLatticeBuckets[word+8u],victimUse,current|128u);

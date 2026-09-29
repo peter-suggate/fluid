@@ -68,9 +68,11 @@ export const SVO_LATTICE_VISIBILITY_CONTRACT = Object.freeze({
   /** Words per bucket: eight tags, then eight use words. */
   bucketWords: 16,
   /**
-   * Store slots per reduced prepass texel. One frame's distinct keys are
-   * bounded by the texel count, so 2.5x leaves room for the keys a moving
-   * camera is about to revisit without any bucket pair filling with current keys.
+   * Store slots per reduced prepass texel. One frame's cells are about the
+   * texel count, but a surface broken into many small planes or features
+   * requests four corners per fragment, so keys can exceed it. With the key
+   * pass placing each key in the less-loaded bucket of its pair, 2.5x holds up
+   * to about 1.75 keys per texel before any pair fills with current keys.
    */
   slotsPerTexel: 2.5,
   /** Scan-claim rounds a contended request may take before it counts as overflow. */

@@ -248,31 +248,38 @@ const PIXEL_TRACE_POINTER_SETTLE_MS = 100;
  */
 const PRESENTED_DRAFT_SUBJECTS: ReadonlySet<SceneDraftSubject> = new Set<SceneDraftSubject>(["terrain", "scenery", "lighting"]);
 
+/** Where a box's panel docks when none of its top corners is in front of the camera. */
+const TOP_RIGHT_DOCK = Object.freeze({ leftFraction: 1, topFraction: 0 });
+
 /**
- * Where a panel about a box hangs: its rightmost visible top corner.
+ * Where a panel about a box hangs: its rightmost top corner in front of the camera.
  *
  * Every anchored flyout in this viewport asks the same question of a different
  * box — the container for the field picker and its quick strip, the selected
  * entity's outline for the canopy, rim and stone dials — and the answer has to
  * be the same one, because the panels are read as the same kind of thing. The
- * `& 2` is the top face of `boxCorners`' bit encoding, and an invisible corner
- * is dropped rather than clamped: a panel hung off a point behind the camera
- * would sit somewhere the box is not.
+ * `& 2` is the top face of `boxCorners`' bit encoding.
  *
- * Undefined when the box has no visible top corner at all, which is the caller's
- * cue to draw nothing.
+ * A corner off the frame still counts, and the flyout's own clamp slides the
+ * panel to the edge nearest it. Keeping only on-screen corners made the panel
+ * jump to whichever corner happened to remain in frame — across the water, to
+ * the far side of the box — as soon as the true top-right left the picture.
+ * A corner behind the camera has no direction on screen and is dropped; with no
+ * top corner in front at all, the panel docks at the frame's top-right, so an
+ * edit session never loses its controls to the camera.
  */
 function rightmostTopCorner(
   corners: readonly Vec3[] | undefined,
   camera: CameraState,
   viewport: { readonly width: number; readonly height: number },
-): ReturnType<typeof projectToViewport> | undefined {
+): Pick<ReturnType<typeof projectToViewport>, "leftFraction" | "topFraction"> | undefined {
+  if (!corners) return undefined;
   return corners
-    ?.filter((_unused, index) => (index & 2) !== 0)
+    .filter((_unused, index) => (index & 2) !== 0)
     .map((corner) => projectToViewport(corner, camera, viewport.width, viewport.height))
-    .filter((projection) => projection.visible)
-    .reduce<ReturnType<typeof projectToViewport> | undefined>((best, projection) =>
-      best === undefined || projection.leftFraction > best.leftFraction ? projection : best, undefined);
+    .filter((projection) => projection.depth_m > 0 && Number.isFinite(projection.leftFraction) && Number.isFinite(projection.topFraction))
+    .reduce<Pick<ReturnType<typeof projectToViewport>, "leftFraction" | "topFraction">>((best, projection) =>
+      best === TOP_RIGHT_DOCK || projection.leftFraction > best.leftFraction ? projection : best, TOP_RIGHT_DOCK);
 }
 
 export interface WebGPUViewportProps {

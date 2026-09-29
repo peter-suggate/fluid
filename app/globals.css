@@ -1682,9 +1682,18 @@ button.card[data-active] { border-color: var(--accent); }
    three tokens the pane already states, one level up, so the floor lands at the
    size the rows are instead of each control fighting it back down. */
 .toolstrip { color-scheme: dark; --control-height: 20px; --control-inline-padding: 6px; --control-font-size: var(--size-2); }
-/* The column has no background, so its own box and the gaps between the rows
-   would be an invisible ribbon swallowing clicks on the box edge behind it.
-   Only the controls take the pointer. */
+/* The column stands on a semi-opaque frosted card. Bare rows relied on the
+   image being the dark clear the strip's scheme assumes, and a light scene —
+   the porcelain garden is near-white — swallowed their light ink whole. The
+   card is lighter than a pane's material so the scene still reads through it,
+   and since it is now visibly a surface it takes the pointer: a click on it
+   lands on the panel, not on whatever the panel covers. Docked, the sidebar is
+   already the surface. The card is a layer under the rows rather than the
+   column's own background: a backdrop filter on the column would make it the
+   backdrop root of the panes hanging past its edge, and they would lose their
+   own frost over the scene. */
+.toolstrip:not(.is-docked) { padding: 4px; pointer-events: auto; }
+.toolstrip:not(.is-docked)::before { content: ""; position: absolute; inset: 0; z-index: -1; border: 1px solid var(--line); border-radius: var(--radius-s); background: color-mix(in srgb, var(--overlay) 72%, transparent); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); pointer-events: none; }
 .toolstrip-key, .toolstrip-pane { pointer-events: auto; }
 /* Left-aligned rather than centred, so a row that grows a control widens to the
    right instead of sliding the whole column sideways under the pointer. The row
