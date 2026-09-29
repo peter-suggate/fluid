@@ -46,7 +46,7 @@ export function uniformReferenceSolverOptions(
       values.densityPostProcessing,
       scene?.sceneId,
     ),
-    timeStep: values.timeStep === "scene" ? "scene" : "paper",
+    timeStep: values.timeStep === "scene" || values.timeStep === "sixtieth" ? values.timeStep : "paper",
     velocityTransport: values.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian",
     liquidOnlyVelocityAdvection: values.liquidOnlyVelocityAdvection === "on",

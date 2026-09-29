@@ -115,9 +115,10 @@ export const ALGORITHM_PARAMS: MethodParamSpec[] = [
     tier: "coarse",
     options: [
       { value: "paper", label: "Paper · 1/30 s large steps" },
+      { value: "sixtieth", label: "Fixed · 1/60 s" },
       { value: "scene", label: "Scene · authored maxDt" },
     ],
-    hint: "Chentanez-Müller run dt=1/30 s (CFL 8-25) in every example; Sec. 3.5 sharpening only balances transport diffusion at that per-step dose. Scene-step mode exists for matched-dt comparison lanes and dilutes the interface at small dt.",
+    hint: "Chentanez-Müller run dt=1/30 s (CFL 8-25) in every example; Sec. 3.5 sharpening only balances transport diffusion at that per-step dose. The app defaults Uniform Geometric to 1/60 s so every 60 Hz frame presents a new step; verification lanes keep the paper step. Scene-step mode exists for matched-dt comparison lanes and dilutes the interface at small dt.",
   },
   {
     ...runtimeUpdate,

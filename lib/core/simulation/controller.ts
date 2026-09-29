@@ -623,7 +623,7 @@ class SimulationController {
     sceneStore.patchNumerics(numerics);
     this.clock.clampPendingTime(numerics.fixedDt_s);
     this.session(paneId).runtime.getState().setNotice(releasedPaperStep
-      ? `Paper 1/30 s step released · shared rigid + fluid step ${(numerics.fixedDt_s * 1000).toFixed(2)} ms`
+      ? `Fixed method step released · shared rigid + fluid step ${(numerics.fixedDt_s * 1000).toFixed(2)} ms`
       : `Shared rigid + fluid step · ${(numerics.fixedDt_s * 1000).toFixed(2)} ms`);
   }
 

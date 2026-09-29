@@ -267,6 +267,20 @@ export function presentationHeldByPendingFrame(framePending: boolean, advanceSub
 }
 
 /**
+ * Whether a running simulation has no new state for this draw to present.
+ *
+ * Presentations follow the solver one-to-one: a step that owes a whole paper
+ * step (1/30 s) advances on every other display refresh, and re-presenting the
+ * same state in between doubled the FPS meter without a new image of the water.
+ * Before the first advance (compilation, a reset clock) nothing is held, so the
+ * scene still draws while the solver comes up; a paused scene is never held.
+ */
+export function presentationHeldForSimulationState(simulationRunning: boolean,
+  submittedTime_s: number, presentedTime_s: number | undefined): boolean {
+  return simulationRunning && submittedTime_s > 0 && submittedTime_s === presentedTime_s;
+}
+
+/**
  * Whether a pipelined solver's presentation waits for the previous one.
  *
  * Advances run ahead of their receipts, and admitting a presentation with
@@ -1000,6 +1014,8 @@ export class FluidLabRenderer {
   private scalarFallbackTexture?: GPUTexture;
   private gpuFluid?: GPUSolverInstance;
   private readonly deferredPresentedTimes = new WeakMap<GPUSolverInstance, number>();
+  /** Newest submitted solver time each solver's last presentation carried. */
+  private readonly presentedStateTimes = new WeakMap<GPUSolverInstance, number>();
   private topologyFreezeSolver?: GPUSolverInstance;
   private topologyFrozen = false;
   /** Renderer-owned sparse source for fluid methods that do not publish one. */
@@ -3337,7 +3353,9 @@ export class FluidLabRenderer {
     }
     const advanceSubmitted = this.gpuAccountedSubmittedTime_s > accountedSubmittedTime_s;
     if (readyGPUFluid?.presentationPending
-      || presentationHeldByPendingFrame(Boolean(readyGPUFluid?.framePending), advanceSubmitted)) {
+      || presentationHeldByPendingFrame(Boolean(readyGPUFluid?.framePending), advanceSubmitted)
+      || (readyGPUFluid && presentationHeldForSimulationState(this.simulationRunning,
+        readyGPUFluid.info.submittedTime_s ?? 0, this.presentedStateTimes.get(readyGPUFluid)))) {
       return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
     // The global fine narrow band double-buffers generations. Refresh its
@@ -3926,6 +3944,7 @@ export class FluidLabRenderer {
     const presentationCommands = encoder.finish();
     presentationQueueTrace?.begin();
     this.device.queue.submit([presentationCommands]);
+    if (readyGPUFluid) this.presentedStateTimes.set(readyGPUFluid, readyGPUFluid.info.submittedTime_s ?? 0);
     if (readyGPUFluid?.deferredFramePublication) {
       // The image carries the newest submitted state, not the newest receipt.
       this.deferredPresentedTimes.set(readyGPUFluid, Math.max(readyGPUFluid.info.completedTime_s ?? 0,

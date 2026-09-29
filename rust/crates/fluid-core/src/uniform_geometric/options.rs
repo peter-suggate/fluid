@@ -76,7 +76,7 @@ impl UniformGeometricOptions {
                 "Invalid uniform parameter rigidCoupling".into(),
             ));
         }
-        if !["paper", "scene"].contains(&self.time_step.as_str()) {
+        if !["paper", "sixtieth", "scene"].contains(&self.time_step.as_str()) {
             return Err(ValidationError("Invalid uniform parameter timeStep".into()));
         }
         if !self.pressure_residual_tolerance.is_finite()

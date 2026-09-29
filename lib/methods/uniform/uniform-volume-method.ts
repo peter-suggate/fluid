@@ -26,6 +26,9 @@ export const uniformVolumeMethod: SimulationMethod = {
   detail: "One coupled simulation uses fine cells outside manual coarse regions, with direct h/4h interfaces and conservative live remapping.",
   resource: { ...uniformMethod.resource!, id: "fluid.uniform-volume", label: "Uniform Geometric fluid" },
   params,
+  // One 1/60 s advance per 60 Hz frame: presentations follow the solver
+  // one-to-one, and the paper's 1/30 s step capped them at 30 FPS.
+  appDefaults: { timeStep: "sixtieth" },
   normalizeValues: resolveUniformGeometricValues,
   composition: resolveComposition(),
   resolveComposition,

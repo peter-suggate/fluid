@@ -80,7 +80,7 @@ export { UNIFORM_ADVANCE_PHASE } from "./uniform-stages";
 export { UNIFORM_FLUID_PIPELINE } from "./uniform-pipeline";
 import { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS } from "./parameters";
 export { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS } from "./parameters";
-import { UNIFORM_PAPER_DT_S, uniformPaperAdvanceReady } from "./uniform-paper";
+import { uniformFixedAdvanceReady, uniformFixedStep_s } from "./uniform-paper";
 import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
 import { SOLID_OCCUPANCY_MASK_HEADER_WORDS, SolidOccupancyMask } from "../../core/solid-occupancy-mask";
 import { solidWorldForScene } from "../../core/solid-world";
@@ -180,7 +180,7 @@ export interface WebGPUUniformReferenceOptions {
    * outruns Sec. 3.5 sharpening and the interface dilutes below the 0.5
    * isovalue, leaving dynamically inert mass hanging in mid-air.
    */
-  timeStep?: "paper" | "scene";
+  timeStep?: "paper" | "sixtieth" | "scene";
   deferPipelineCompilation?: boolean;
 }
 
@@ -684,7 +684,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** No lattice cell (halo excluded) set in the static solid voxel mask; see uvSolidFree. */
   private solidVoxelsEmpty = true;
   private readonly prescribedSolidMotion = new UniformPrescribedSolidMotion();
-  private paperTimeStep: boolean;
+  /** The pinned advance of a fixed-step mode; undefined runs the scene's maxDt. */
+  private fixedStep_s: number | undefined;
   private velocityTransport: GPUVelocityTransport;
   private liquidOnlyVelocityAdvection: boolean;
   private disposed = false;
@@ -772,7 +773,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.pressureBudgetHeadroom = Number.isFinite(options.pressureBudgetHeadroom)
       ? Math.round(Math.min(4, Math.max(0, options.pressureBudgetHeadroom!)))
       : this.geometricVolume ? 0 : UNIFORM_CM11A_DEFAULT_BUDGET_HEADROOM;
-    this.paperTimeStep = options.timeStep !== "scene";
+    this.fixedStep_s = uniformFixedStep_s(options.timeStep);
     this.velocityTransport = options.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian";
     this.liquidOnlyVelocityAdvection = options.liquidOnlyVelocityAdvection === true;
@@ -1763,7 +1764,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.sharpeningDistance = finite("sharpeningDistance", 2.1, 0.1, 3.1);
     this.solidExcessCorrection = values.solidExcessCorrection !== "off";
     this.rigidCoupling = values.rigidCoupling !== "off";
-    this.paperTimeStep = values.timeStep !== "scene";
+    this.fixedStep_s = uniformFixedStep_s(values.timeStep);
     if(values.velocityTransport === "maccormack" && this.velocityC.width===1 && this.executionInfo.nx>1)
       throw new Error("Changing velocity transport requires rebuilding the Uniform Geometric solver");
     this.velocityTransport = values.velocityTransport === "maccormack"
@@ -2334,9 +2335,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // method than the Dawn/paper lane and overwhelming sharpening with many
     // extra resamples. Accumulate target time until one complete paper step
     // is available; never encode a fractional paper step.
-    if (this.paperTimeStep && !uniformPaperAdvanceReady(time_s, this.lastTime)) return false;
-    const advance = planGPUAdvance(time_s, this.lastTime,
-      this.paperTimeStep ? UNIFORM_PAPER_DT_S : this.scene.numerics.maxDt_s);
+    if (this.fixedStep_s !== undefined && !uniformFixedAdvanceReady(time_s, this.lastTime, this.fixedStep_s)) return false;
+    const advance = planGPUAdvance(time_s, this.lastTime, this.fixedStep_s ?? this.scene.numerics.maxDt_s);
     if (!advance) return false;
     if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
     const pipelines = this.pipelines;

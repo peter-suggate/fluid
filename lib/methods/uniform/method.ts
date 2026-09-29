@@ -4,7 +4,7 @@ import {
   UNIFORM_FLUID_PIPELINE,
   WebGPUUniformReferenceSolver,
 } from "./webgpu-uniform-reference";
-import { UNIFORM_PAPER_DT_S } from "./uniform-paper";
+import { uniformFixedStep_s } from "./uniform-paper";
 import { uniformDiagnosticRows } from "./uniform-diagnostics";
 import {
   type MethodParamValues,
@@ -64,11 +64,11 @@ export const uniformMethod: SimulationMethod = {
   // The dense lattice's own counters: cells rather than resolved rows, a
   // pressure in Pa, and the rolling work box no adaptive method has.
   diagnosticRows: uniformDiagnosticRows,
-  // The paper profile is a numerical contract, not a substep ceiling: every
-  // CM12 Sec. 4 example is one 1/30 s advance. `timeStep: "scene"` is the
-  // opt-out that hands the clock back to the scene author.
-  effectiveStep_s: (_scene, values) =>
-    values.timeStep !== "scene" ? UNIFORM_PAPER_DT_S : undefined,
+  // A fixed step is a numerical contract, not a substep ceiling: every CM12
+  // Sec. 4 example is one 1/30 s advance, and the app runs 1/60 s so one
+  // advance fills one 60 Hz frame. `timeStep: "scene"` is the opt-out that
+  // hands the clock back to the scene author.
+  effectiveStep_s: (_scene, values) => uniformFixedStep_s(values.timeStep),
   pressureMapping: "CM11a uses 3 Full-Cycles, 4 V-Cycles, and six pre/post PRBGS sweeps (two above the paper's shallow-grid schedule for deep-hierarchy convergence).",
   presetFor: () => ({}),
   harness: async () => (await import("./harness")).uniformHarnessPlugin,

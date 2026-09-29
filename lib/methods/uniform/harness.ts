@@ -50,8 +50,8 @@ function applyUniformEnvironmentOverrides(
   }
   const timeStep = env.FLUID_UNIFORM_TIME_STEP;
   if (timeStep !== undefined) {
-    if (!["paper", "scene"].includes(timeStep)) {
-      throw new Error("FLUID_UNIFORM_TIME_STEP must be paper or scene");
+    if (!["paper", "sixtieth", "scene"].includes(timeStep)) {
+      throw new Error("FLUID_UNIFORM_TIME_STEP must be paper, sixtieth or scene");
     }
     values.timeStep = timeStep;
   }

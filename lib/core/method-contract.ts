@@ -529,6 +529,13 @@ export interface SimulationMethod {
    */
   presetFor(quality: GPUQuality): MethodParamValues;
   /**
+   * Values the interactive app starts from, above the quality preset and below
+   * user overrides. Verification lanes and probes resolve the declared
+   * defaults, so an app-only choice (a step the display can show every
+   * frame) never moves a lane.
+   */
+  readonly appDefaults?: Readonly<MethodParamValues>;
+  /**
    * Resolve method-owned invariants after defaults, the quality preset, and
    * sparse user overrides have been merged. This is the right seam for a
    * compound scientific choice whose dependent controls must survive URL
