@@ -36,7 +36,8 @@ import {
   useToolstripSection,
 } from "./toolstrip";
 import { useSession } from "../lib/core/session/session-context";
-import { NumberInput } from "./ui";
+import { sceneScaleOption, sceneScaleSummary } from "../lib/core/scene-scale";
+import { NumberInput, Stepper } from "./ui";
 
 /**
  * The tank's three extents, laid along one line beside its mark.
@@ -60,6 +61,21 @@ function TankRow() {
   const session = useSession();
   const scene = session.scene((state) => state.scene);
   const fields = tankExtentFields(scene);
+  // The lattice beside the extents: the numbers say how big the tank is, the
+  // pair after them how finely it is cut. A press is the detail scale — half
+  // or twice the cell size at the same extents — and an end closes when that
+  // step would cross the device limit or the lattice floor, saying why.
+  const summary = sceneScaleSummary(scene);
+  const step = (factor: 0.5 | 2) => {
+    const option = sceneScaleOption(summary, "detail", factor);
+    return {
+      available: option.available,
+      hint: option.available
+        ? `${factor === 2 ? "Double" : "Halve"} the resolution · ${option.dimensions.join("×")} cells (now ${summary.dimensions.join("×")})`
+        : `Unavailable — ${option.blocked}`,
+    };
+  };
+  const down = step(0.5), up = step(2);
   const commit = (field: EditorField, value: number) => {
     if (value === field.value) return;
     simulation.beginEdit(`Set tank ${field.label}`, session.id);
@@ -68,7 +84,7 @@ function TankRow() {
   return <ToolstripRow
     icon={<Cuboid width={14} height={14} strokeWidth={1.7} aria-hidden />}
     name="Tank"
-    hint="The container the solve runs in. Width, height and depth; the floor does not move."
+    hint={`The container the solve runs in. Width, height and depth, then ÷2 / ×2 to halve or double its resolution (${summary.dimensions.join("×")} cells); the floor does not move.`}
     testId="scene-tank-row"
     // `after` rather than the row's open state: these are here always, and a row
     // that counted them as open state would be a row whose mark has no name
@@ -90,6 +106,16 @@ function TankRow() {
           onChange={(value) => commit(field, value)}
         />)}
         <span>{fields[0]?.unit}</span>
+        <Stepper
+          value={1} factor={2}
+          min={down.available ? 0.5 : 1} max={up.available ? 2 : 1}
+          onChange={(factor) => simulation.scaleScene("detail", factor as 0.5 | 2, session.id)}
+          ariaLabel="Tank resolution"
+          readout={null}
+          decreaseLabel="÷2" increaseLabel="×2"
+          decreaseHint={down.hint} increaseHint={up.hint}
+          decreaseTestId="scene-tank-resolution-down" increaseTestId="scene-tank-resolution-up"
+        />
       </div>
     </>}
   />;
@@ -148,28 +174,17 @@ function SolverRow() {
 }
 
 /**
- * The scene document's own verbs, from the one declaration both surfaces share.
- *
- * A verb the catalog ranks high stands up as a row of its own — adding water
- * to a dry document is the gate everything else waits behind. The low-ranked
- * file operations fold behind the document row's one chevron: they were five
- * rows of column for verbs reached once a session, and the catalog's own
- * priority is what says so, not this component.
+ * The scene document's high-ranked verbs, from the one declaration both
+ * surfaces share: adding water to a dry document is the gate everything else
+ * waits behind, so it stands up as a row of its own. The low-ranked file
+ * operations had a "Scene file" row here that was never used; they stay
+ * on the ring (`sceneDocumentActions`).
  */
 function SceneDocumentRows() {
   const session = useSession();
   const scene = session.scene((state) => state.scene);
-  const [picking, setPicking] = useState(false);
-  const { claim } = useToolstripSection("scene-file", () => setPicking(false));
-  const pick = (open: boolean) => {
-    claim(open);
-    setPicking(open);
-  };
-  const verbs = sceneDocumentVerbs(scene);
-  const high = verbs.filter((verb) => verb.priority === "high");
-  const low = verbs.filter((verb) => verb.priority === "low");
   return <>
-    {high.map((verb) => <ToolstripRow
+    {sceneDocumentVerbs(scene).filter((verb) => verb.priority === "high").map((verb) => <ToolstripRow
       key={verb.id}
       icon={<EditorActionGlyph name={verb.icon} />}
       name={verb.label}
@@ -177,31 +192,6 @@ function SceneDocumentRows() {
       testId={`${verb.id}-row`}
       onClick={() => performEditorAction(verb.effect, session)}
     />)}
-    {low.length > 0 && <ToolstripRow
-      icon={<EditorActionGlyph name="scene" />}
-      name="Scene file"
-      hint={`This document is “${scene.sceneId}”. Open another, start fresh, save it, or move it as JSON.`}
-      testId="scene-file-row"
-      after={<ToolstripMenuButton
-        label="Scene file"
-        hint="Open, save, start fresh, export or import this document."
-        open={picking}
-        testId="scene-file-pick"
-        onOpen={pick}
-      >
-        {low.map((verb) => <ToolstripMenuItem
-          key={verb.id}
-          icon={<EditorActionGlyph name={verb.icon} size={13} />}
-          label={verb.label}
-          title={verb.hint}
-          testId={`${verb.id}-item`}
-          onClick={() => {
-            pick(false);
-            performEditorAction(verb.effect, session);
-          }}
-        />)}
-      </ToolstripMenuButton>}
-    />}
   </>;
 }
 

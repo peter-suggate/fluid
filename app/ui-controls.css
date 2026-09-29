@@ -237,7 +237,7 @@ select.ui-select:disabled { opacity: .45; cursor: not-allowed; }
    column. */
 .toolstrip .toolstrip-row > .ui-number { --ui-number-width: 66px; }
 .toolstrip :is(.toolstrip-row, .toolstrip-dimensions) > .ui-number > input[type="number"] { background: var(--well); }
-.toolstrip .toolstrip-dimensions > .ui-number { --ui-number-width: 52px; gap: 3px; }
+.toolstrip .toolstrip-dimensions > .ui-number { --ui-number-width: 46px; gap: 2px; }
 /* A toggle standing on the bare strip wears the key's material, like the
    strip's chips: transparent until hovered, washed only when on. */
 .toolstrip .toolstrip-row > .ui-toggle { border-color: transparent; }

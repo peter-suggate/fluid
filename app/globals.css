@@ -1844,7 +1844,12 @@ button.card[data-active] { border-color: var(--accent); }
    this is a shape read across rather than a quantity read down: at the 74px
    default the three of them plus their mark were wider than anything else the
    column carries. */
-.toolstrip-dimensions { display: flex; align-items: center; gap: 5px; pointer-events: auto; }
+.toolstrip-dimensions { display: flex; align-items: center; gap: 3px; pointer-events: auto; }
+/* The resolution pair closes the extents line: buttons only, the cell counts
+   are in their tooltips. */
+.toolstrip-dimensions > .ui-stepper { margin-left: 3px; }
+.toolstrip-dimensions > .ui-stepper > .ui-value { display: none; }
+.toolstrip-dimensions > .ui-stepper > button { width: auto; padding: 0 4px; font: var(--text-micro); }
 .toolstrip-dimensions > span { color: var(--dim); font: var(--text-micro); }
 /* What a mark is currently set to, beside it. The row's `value` is the tag
    row's answer column and is pinned to a 158px key; a glyph row has no such

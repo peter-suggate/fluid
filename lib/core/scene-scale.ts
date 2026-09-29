@@ -90,7 +90,21 @@ export function sceneAtFinestCellSize(
   if (finestCellSize_m === scene.voxelDomain.finestCellSize_m) return cloneScene(scene);
   const water = initialFluidLayout(scene);
   const next = cloneScene(scene);
+  // Voxel patches address cells, so they do not follow the lattice on their
+  // own: the old shell left as it was walls off one corner of the new tank.
+  // Split the shell from the authored edits while the old lattice still
+  // identifies it, recompile the shell, and carry each edit onto the cells
+  // covering the same metres (outward, when the new cells are coarser).
+  const cells = scene.voxelDomain.finestCellSize_m / finestCellSize_m;
+  const low = (index: number) => Math.floor(index * cells + 1e-9);
+  const high = (index: number) => Math.ceil(index * cells - 1e-9);
+  const authoredEdits = solidVoxelEditsForScene(next).map((patch) => {
+    const [x0, y0, z0] = patch.minimum, [x1, y1, z1] = patch.maximumExclusive;
+    return { ...patch, minimum: [low(x0), low(y0), low(z0)] as const,
+      maximumExclusive: [high(x1), high(y1), high(z1)] as const };
+  });
   next.voxelDomain.finestCellSize_m = finestCellSize_m;
+  next.solidVoxels = [...solidVoxelShellForScene(next), ...authoredEdits];
   applyInitialFluidLayout(next, water);
   return repairSceneForContainer(next);
 }
