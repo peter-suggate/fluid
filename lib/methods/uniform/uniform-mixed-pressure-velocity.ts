@@ -1,12 +1,12 @@
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import { uniformMixedDetachedMassWGSL } from "./uniform-mixed-detached-mass.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { UNIFORM_MIXED_JOBS, uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedPressureSurfaceWGSL } from "./uniform-mixed-pressure-surface.wgsl";
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
 import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryLoop, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
-import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
 interface CommonFields {
  velocity:GPUTexture;
@@ -70,27 +70,27 @@ export class UniformMixedPressureVelocity {
   return {buffer:view.buffer,offset,size};
  }
  private common(f:CommonFields):GPUBindGroupEntry[]{
-  const d=this.ownership.capacity.lattice.dimensions;
+  const d=this.ownership.layout.lattice.dimensions;
   if(f.velocity.format!=="rgba32float"||[f.velocity.width,f.velocity.height,f.velocity.depthOrArrayLayers].some((v,a)=>v!==d[a]))throw new Error("Mixed pressure requires native MAC extent");
   return [{binding:0,resource:f.velocity.createView()},{binding:1,resource:this.scalar(f.negative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
    {binding:2,resource:this.scalar(f.phi,this.ownership.layout.cellCount)},{binding:3,resource:{buffer:f.params,size:32}}];
  }
  private topology(t:GPUTexture|undefined):GPUTexture|undefined{
   if(!!t!==(!!this.solid&&!this.coarse))throw new Error("Mixed solid topology binding does not match stage mode");
-  if(t&&(t.format!=="rgba32float"||[t.width,t.height,t.depthOrArrayLayers].some((v,a)=>v!==this.ownership.capacity.lattice.dimensions[a])))throw new Error("Mixed solid topology requires the native lattice extent");
+  if(t&&(t.format!=="rgba32float"||[t.width,t.height,t.depthOrArrayLayers].some((v,a)=>v!==this.ownership.layout.lattice.dimensions[a])))throw new Error("Mixed solid topology requires the native lattice extent");
   return t;
  }
  bindRhs(f:UniformMixedPressureRhsFields):GPUBindGroup{
   const count=uniformMixedPressureStorage(this.ownership.layout).count,topology=this.topology(f.topology);
   if(!!f.fine!==this.coarse)throw new Error("Coarse mixed pressure RHS needs the simulation-ownership forced field, and only it");
-  const d=this.ownership.capacity.lattice.dimensions;
+  const d=this.ownership.layout.lattice.dimensions;
   return this.device.createBindGroup({layout:this.rhsLayout,entries:[...this.common(f),{binding:4,resource:f.correction.createView()},
    ...[f.rhs,f.minimum,f.pressure].map((v,i)=>({binding:5+i,resource:this.scalar(v,count)})),...(topology?[{binding:8,resource:topology.createView()}]:[]),
    ...(f.fine?[{binding:8,resource:f.fine.velocity.createView()},{binding:9,resource:{buffer:f.fine.negative,size:4*(d[0]*d[1]+d[0]*d[2]+d[1]*d[2])}}]:[])]});
  }
  bindProjection(f:UniformMixedPressureProjectionFields):GPUBindGroup{
   if(f.velocity===f.output||f.negative.buffer===f.outputNegative.buffer)throw new Error("Mixed projection requires disjoint velocity output");
-  const d=this.ownership.capacity.lattice.dimensions;
+  const d=this.ownership.layout.lattice.dimensions;
   return this.device.createBindGroup({layout:this.projectLayout,entries:[...this.common(f),
    {binding:4,resource:this.scalar(f.pressure,uniformMixedPressureStorage(this.ownership.layout).count)},
    {binding:6,resource:f.centerPhi.createView()},{binding:7,resource:f.volume.createView()},{binding:8,resource:f.output.createView()},
@@ -99,7 +99,7 @@ export class UniformMixedPressureVelocity {
    ...(this.topology(f.topology)?[{binding:11,resource:f.topology!.createView()}]:[])]});
  }
  async initialize():Promise<void>{
-  const ownership=this.ownership,h=ownership.capacity.lattice.cellSize_m;
+  const ownership=this.ownership,h=ownership.layout.lattice.cellSize_m;
   const common=uniformMixedTopologyWGSL(ownership.layout,0)+/* wgsl */`
 const UM_H=vec3f(${h.join(",")});
 @group(1) @binding(0) var velocity:texture_3d<f32>;
@@ -278,14 +278,15 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
    value.w=f32(released);`,"umProjectOwner")}
 `;
   const compile=async(code:string,entryPoint:string,resources:GPUBindGroupLayout)=>{
-   const module=this.device.createShaderModule({code:uniformMixedCertifiedEntriesWGSL(code,[entryPoint])});const info=await module.getCompilationInfo();
+   const module=this.device.createShaderModule({code});const info=await module.getCompilationInfo();
    const errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-   return ownership.pipeline(this.device.createPipelineLayout({bindGroupLayouts:[ownership.bindLayout,resources,...(this.solid?[this.coarse?this.solid.coarse!.bindLayout:this.solid.bindLayout]:[])]}),module,entryPoint,UNIFORM_MIXED_JOBS.all);
+   const layout=this.device.createPipelineLayout({bindGroupLayouts:[ownership.bindLayout,resources,...(this.solid?[this.coarse?this.solid.coarse!.bindLayout:this.solid.bindLayout]:[])]});
+   return uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:ownership.dispatchX,...s}}}));
   };
   this.rhsPipeline=await compile(rhsSource,"buildRhs",this.rhsLayout);this.projectPipeline=await compile(projectSource,"project",this.projectLayout);
  }
  encode(encoder:GPUCommandEncoder,entry:"rhs"|"project",group:GPUBindGroup):void{
   const pipeline=entry==="rhs"?this.rhsPipeline:this.projectPipeline;if(!pipeline)throw new Error("Mixed pressure velocity stage is not initialized");
-  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);this.ownership.dispatchAll(pass,pipeline);pass.end();
+  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);this.ownership.dispatchAll(pass,this.solid?.select(pipeline)??pipeline);pass.end();
  }
 }

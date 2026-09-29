@@ -2,7 +2,7 @@ import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedFaceAddressWGSL} from "./uniform-mixed-face-dispatch.wgsl";
 import {UNIFORM_MIXED_THETA_MIN} from "./uniform-mixed-pressure-surface.wgsl";
-import {uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
+import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
 
 /** The band's local multigrid: V-cycles h -> 2h (2^3 aggregates per tile) ->
  * 4h (one aggregate per tile), red-black Gauss-Seidel at every level. */
@@ -50,8 +50,9 @@ const ROW_FIELDS=15,SOLID_ROW_FIELDS=21;
  * aggregates add their six neighbour slots (+1) and their red-black colour. */
 const MIDDLE_FIELDS=9,COARSE_FIELDS=16;
 /** Index header words: count, overflow, final residual, fatal, completed
- * cycles, three spare, then the residual after each cycle's pre-smoothing
- * (and after the last cycle) in HISTORY words. The tile list and per-tile slot+1 map follow. */
+ * cycles, one spare, converged (the convergence word), one spare, then the
+ * residual after each cycle's pre-smoothing (and after the last cycle) in
+ * HISTORY words. The tile list and per-tile slot+1 map follow. */
 const HEADER=24,HISTORY_WORD=8,HISTORY=16;
 
 export interface UniformPressureBandFields {
@@ -68,7 +69,8 @@ export interface UniformPressureBandFields {
  velocity:GPUTexture;negative:GPUBuffer;copy:GPUTexture;
  /** Accepted 4h pressure, indexed by the all-4h pressure ownership. */
  coarsePressure:GPUBufferBinding;
- /** h.xyz, dt; density, openTop, dt/density, min h; 1/h^2 per axis (f32):
+ /** h.xyz, dt; density, openTop, dt/density, min h; the residual target
+  * (1/s, the h-equivalent pressure tolerance), then 1/h^2 per axis (f32):
   * a face whose coefficient is exactly that is flagged, and its sweeps skip
   * the coefficient load. */
  params:GPUBuffer;
@@ -178,9 +180,9 @@ export class UniformPressureBand {
  async initialize():Promise<void>{
   const layout=this.simulation.layout,S=!!this.solid,schedule=this.schedule;
   const header=uniformMixedTopologyWGSL(layout,0)+uniformMixedFaceAddressWGSL+uniformMixedSolidWGSL(S?2:undefined,this.solid?.coarse?.count)+/* wgsl */`
-struct BandParams {hDt:vec4f,policy:vec4f,unit:vec4f}
+struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f}
 const CAP:u32=${this.capacity}u;const N:u32=CAP*64u;const M:u32=CAP*8u;
-const LIST:u32=${HEADER}u;const SLOTS:u32=${HEADER}u+CAP;const HISTORY:u32=${HISTORY_WORD}u;const CYCLE:u32=4u;
+const LIST:u32=${HEADER}u;const SLOTS:u32=${HEADER}u+CAP;const HISTORY:u32=${HISTORY_WORD}u;const CYCLE:u32=4u;const DONE:u32=6u;
 const K_GHOST:u32=0u;const K_BAND:u32=1u;const K_WALL:u32=2u;const K_OPEN:u32=3u;const K_NEUMANN:u32=4u;const K_CLOSED:u32=5u;
 fn bLocal(lane:u32)->vec3u{return vec3u(lane%4u,(lane/4u)%4u,lane/16u);}
 // A slot's row of local cell l: colour-major, then the half sweep's lane order.
@@ -207,6 +209,14 @@ fn bHalo(p:vec3i,axis:u32,sign:i32)->u32{
 @group(1) @binding(2) var<storage,read_write> index:array<${atomic?"atomic<u32>":"u32"}>;
 fn bIndex(i:u32)->u32{return ${atomic?"atomicLoad(&index[i])":"index[i]"};}
 fn bCount()->u32{return min(bIndex(0u),CAP);}
+// Convergence: a cycle's restriction measured a residual at or below the
+// target. Each history word is 0 (cleared with the header) until its cycle's
+// restriction has run, and final once it has.
+fn bMet(r:u32)->bool{return r!=0u&&bitcast<f32>(r)<=params.solve.x;}
+fn bConvergedBefore(k:u32)->bool{for(var j=0u;j<min(k,${HISTORY-1}u);j++){if(bMet(bIndex(HISTORY+j))){return true;}}return false;}
+fn bConverged()->bool{return bConvergedBefore(${schedule.cycles}u);}
+// Converged launches stride zero slots: the same fixed launches, no work.
+fn bLive()->u32{return select(bCount(),0u,bConverged());}
 fn bTile(s:u32)->vec3u{return umTileCoord(bIndex(LIST+s));}
 // Slot + 1 of the band tile at tile coordinate c, 0 outside the band.
 fn bSlotAt(c:vec3i)->u32{if(any(c<vec3i(0))||any(c>=vec3i(UM_T))){return 0u;}return bIndex(SLOTS+umTileAt(vec3u(c)));}
@@ -259,15 +269,20 @@ fn bOpen(q:vec3i)->bool{
 fn bPhiH(q:vec3i)->f32{let own=phi[umOwnerAt(q).index];return select(own,-0.5*params.policy.w,own>=0.0&&!bOpen(q)${S?"&&umCellOpen(q)>1e-5":""});}
 // Face classification of row assembly. An h neighbour's band phi decides;
 // inside a coarse owner, a coarse liquid owner is Neumann (its flux is the
-// transferred 4h face), and a coarse air owner is Neumann too where the h
-// cell is itself liquid (the 4h solve owns its flux), else air at the h
-// cell's own centre phi.
+// transferred 4h face). A coarse air owner is Neumann too where the h cell
+// is itself liquid and the band cell's own 4h owner is liquid: the 4h solve
+// projected that face (ghost fluid) and owns its flux. Between two 4h air
+// owners the 4h solve projected nothing -- both hold p=0 and the face was
+// zeroed -- so the band sees air there (Dirichlet) at the air owner's
+// centre phi. A calm 4h surface tile's rim owners (air centre, liquid below
+// it) otherwise closed the band's lid: the liquid under them stopped.
 struct BNeighbour {phi:f32,neumann:bool}
-fn bNeighbour(q:vec3i)->BNeighbour{
+fn bNeighbour(q:vec3i,ownerLiquid:bool)->BNeighbour{
  let n=umOwnerAt(q);let other=phi[n.index];
- if(n.width==1u){return BNeighbour(bPhiH(q),false);}
+ if(n.width==1u){let b=bPhiH(q);return BNeighbour(b,b<0.0);}
  if(other<0.0){return BNeighbour(other,true);}
- let own=bCentrePhi(q);return BNeighbour(own,own<0.0);
+ let own=bCentrePhi(q);if(own<0.0&&ownerLiquid){return BNeighbour(own,true);}
+ return BNeighbour(select(own,other,own<0.0),false);
 }
 `;
   const rows=/* wgsl */`
@@ -320,7 +335,7 @@ fn bOffNear(cell:u32,s:u32,l:vec3u,p:vec3i,kinds:u32)->f32{
  var off=0.0;
  for(var f=0u;f<6u;f++){
   let axis=f/2u;let sign=bSign(f);let kind=bFaceKind(kinds,f);
-  if(kind==K_BAND){var w=params.unit[axis];if(!bUnit(kinds,f)){w=bCoefficient(cell,f);}off+=w*solve[bCellNear(s,l,f)-1u];}
+  if(kind==K_BAND){var w=params.solve[1u+axis];if(!bUnit(kinds,f)){w=bCoefficient(cell,f);}off+=w*solve[bCellNear(s,l,f)-1u];}
   else if(kind==K_WALL){off+=bCoefficient(cell,f)*solve[bHalo(p,axis,sign)];}
  }
  return off;
@@ -432,7 +447,7 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
 @compute @workgroup_size(64) fn main(${slots}){
  for(var s=group.x;s<bCount();s+=groups.x){
   let p=vec3i(bTile(s)*4u+bLocal(lane));let cell=s*64u+bRow(bLocal(lane));
-  let own=bPhiH(p);let liquid=own<0.0;
+  let own=bPhiH(p);let liquid=own<0.0;let ownerLiquid=!bOwnerAir(umTileAt(vec3u(p)/4u));
   var kinds=select(0u,0x80000000u,liquid)${S?"|select(0u,0x40000000u,umCellInsideSolid(p))":""};var diagonal=0.0;var divergence=0.0;
   ${S?`// Native divergenceAtWithCapacity: V u + (V_i - V) u_s, u_s the moving wall's.
   let bodies=liquid&&umBodyCount()>0u;let capacity=select(0.0,umCellOpen(p),bodies);`:""}
@@ -444,9 +459,9 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
     if(axis==1u&&sign>0&&params.policy.y>0.5){kind=K_OPEN;coefficient=1.0/(h*h*bTheta(own,0.5*params.policy.w));}
     else{kind=K_WALL;coefficient=0.5/(h*h);fraction=0.5;}
    }else{
-    let n=bNeighbour(q);
+    let n=bNeighbour(q,ownerLiquid);
     if(bCellAt(q)!=0u){kind=K_BAND;coefficient=1.0/(h*h*bPairTheta(own,n.phi));}
-    else if(n.neumann||n.phi<0.0){kind=K_NEUMANN;}
+    else if(n.neumann){kind=K_NEUMANN;}
     else{coefficient=1.0/(h*h*bPairTheta(own,n.phi));}
    }
    ${S?`// CM11a: V scales the coefficient and the flux; the Neumann edge is uncut.
@@ -454,7 +469,7 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
    else if(volume<=1e-6){kind=K_CLOSED;coefficient=0.0;fraction=0.0;}
    else{if(kind==K_WALL){coefficient=volume/(h*h);}else{coefficient*=volume;}fraction=volume;}
    rows[(15u+f)*N+cell]=volume;`:""}
-   kinds|=(kind<<(3u*f))|select(0u,1u<<(18u+f),kind==K_BAND&&coefficient==params.unit[axis]);rows[(9u+f)*N+cell]=forced;rows[(3u+f)*N+cell]=coefficient;
+   kinds|=(kind<<(3u*f))|select(0u,1u<<(18u+f),kind==K_BAND&&coefficient==params.solve[1u+axis]);rows[(9u+f)*N+cell]=forced;rows[(3u+f)*N+cell]=coefficient;
    if(kind!=K_NEUMANN){diagonal+=coefficient;divergence+=f32(sign)*fraction*forced/h;}
    ${S?"if(bodies&&kind!=K_NEUMANN&&kind!=K_WALL&&kind!=K_OPEN){divergence+=f32(sign)*(capacity-fraction)*umSolidFaceVelocity(low,axis)/h;}":""}
   }
@@ -547,7 +562,7 @@ var<workgroup> bSweepCount:u32;
 // A 32-lane group relaxes one slot's 32 cells of this colour: tile origins are
 // even, so the colour is the local parity.
 @compute @workgroup_size(32) fn main(${slots}){
- if(lane==0u){bSweepCount=bCount();}
+ if(lane==0u){bSweepCount=bLive();}
  let n=workgroupUniformLoad(&bSweepCount);
  for(var s=group.x;s<n;s+=groups.x){
   workgroupBarrier();bLoadNear(s,lane);workgroupBarrier();
@@ -570,7 +585,7 @@ var<workgroup> bRestrictCount:u32;
 var<workgroup> bCellResidual:array<f32,64>;
 // A lane per h cell; lanes 0..7 then sum their 2h aggregate's eight cells.
 @compute @workgroup_size(64) fn main(${slots}){
- if(lane==0u){atomicStore(&worst,0u);bRestrictCount=bCount();}
+ if(lane==0u){atomicStore(&worst,0u);bRestrictCount=select(bCount(),0u,bConvergedBefore(bCycle));}
  let n=workgroupUniformLoad(&bRestrictCount);
  var largest=0.0;
  for(var s=group.x;s<n;s+=groups.x){
@@ -607,7 +622,7 @@ fn bMiddleNear(i:u32,c:u32,f:u32)->u32{
  return (slot-1u)*8u+u32(m.x+2*m.y+4*m.z)+1u;
 }
 @compute @workgroup_size(64) fn main(${slots}){
- if(lane==0u){bMiddleCount=bCount();}
+ if(lane==0u){bMiddleCount=bLive();}
  let n=workgroupUniformLoad(&bMiddleCount);
  for(var base=group.x*8u;base<n;base+=groups.x*8u){
   workgroupBarrier();
@@ -630,7 +645,7 @@ fn bMiddleNear(i:u32,c:u32,f:u32)->u32{
    // 2h residual into the tile aggregate (zeroing its correction).
    middleRestrict:band+/* wgsl */`
 @compute @workgroup_size(64) fn main(${slots}){
- let n=bCount();
+ let n=bLive();
  for(var s=group.x*64u+lane;s<n;s+=groups.x*64u){
   var sum=0.0;
   for(var a=0u;a<8u;a++){let c=8u*s+a;if(coarse[bM(2u,c)]>0.0){sum+=coarse[bM(1u,c)]+bMiddleOff(c)-coarse[bM(2u,c)]*coarse[bM(0u,c)];}}
@@ -646,7 +661,7 @@ const SOLVE_SLOTS:u32=${COARSE_SOLVE_SLOTS}u;
 var<workgroup> bSolveCount:u32;
 var<workgroup> bCorrection:array<f32,SOLVE_SLOTS>;
 @compute @workgroup_size(${COARSE_SOLVE_LANES}) fn main(@builtin(local_invocation_index) lane:u32){
- if(lane==0u){bSolveCount=bCount();}
+ if(lane==0u){bSolveCount=bLive();}
  let n=workgroupUniformLoad(&bSolveCount);
  if(n<=SOLVE_SLOTS){
   var diagonal:array<f32,4>;var residual:array<f32,4>;var colour:array<u32,4>;var weight:array<f32,24>;var near:array<u32,24>;
@@ -689,7 +704,7 @@ var<workgroup> bCorrection:array<f32,SOLVE_SLOTS>;
    coarseSweep:band+/* wgsl */`
 override bColour:u32=0u;
 @compute @workgroup_size(64) fn main(${slots}){
- let n=bCount();
+ let n=bLive();
  for(var s=group.x*64u+lane;s<n;s+=groups.x*64u){
   if(bitcast<u32>(coarse[bC(15u,s)])!=bColour){continue;}
   let diagonal=coarse[bC(2u,s)];if(diagonal<=0.0){continue;}
@@ -699,7 +714,7 @@ override bColour:u32=0u;
 }`,
    middleProlong:band+/* wgsl */`
 @compute @workgroup_size(64) fn main(${slots}){
- let n=bCount();
+ let n=bLive();
  for(var s=group.x;s<n;s+=groups.x){
   let l=bLocal(lane);let p=vec3i(bTile(s)*4u+l);let cell=s*64u+bRow(l);let kinds=bKinds(cell);
   if(!bLiquid(kinds)||bDiagonal(cell)<=0.0){continue;}
@@ -707,14 +722,17 @@ override bColour:u32=0u;
   solve[cell]=next;bFollowHalo(cell,p,kinds,next);
  }
 }`,
+   // After bCycles encoded cycles.
    measure:header+indexed(true)+rows+solve+/* wgsl */`
-const bCycles:u32=${schedule.cycles}u;
+override bCycles:u32=1u;
 var<workgroup> worst:atomic<u32>;
 var<workgroup> bMeasureCount:u32;
 // The largest band row residual, in divergence units (1/s), over liquid rows,
-// into the history word after the last cycle.
+// into history word bCycles. A converged solve keeps its restriction's
+// residual (nothing moved since): the receipt takes that cycle and sets the
+// convergence word.
 @compute @workgroup_size(64) fn main(${slots}){
- if(lane==0u){atomicStore(&worst,0u);bMeasureCount=bCount();}
+ if(lane==0u){atomicStore(&worst,0u);bMeasureCount=select(bCount(),0u,bConvergedBefore(bCycles));}
  let n=workgroupUniformLoad(&bMeasureCount);
  var largest=0.0;
  for(var s=group.x;s<n;s+=groups.x){
@@ -725,7 +743,11 @@ var<workgroup> bMeasureCount:u32;
  atomicMax(&worst,bitcast<u32>(largest));
  workgroupBarrier();
  if(lane==0u){let r=atomicLoad(&worst);atomicMax(&index[2],r);atomicMax(&index[HISTORY+bCycles],r);}
- if(group.x==0u&&lane==0u){atomicStore(&index[CYCLE],bCycles);}
+ if(group.x==0u&&lane==0u){
+  var cycle=bCycles;for(var j=bCycles;j>0u;j--){if(bMet(bIndex(HISTORY+j-1u))){cycle=j-1u;}}
+  atomicStore(&index[CYCLE],cycle);
+  if(cycle<bCycles){atomicStore(&index[DONE],1u);atomicMax(&index[2],bIndex(HISTORY+cycle));}
+ }
 }`,
    project:band+/* wgsl */`
 @group(1) @binding(15) var field:texture_3d<f32>;
@@ -823,18 +845,20 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  for(var s=group.x;s<bCount();s+=groups.x){presented[${this.fields.presentation.word}u+s*64u+lane]=solve[s*64u+bRow(bLocal(lane))];}
 }`,
   };
-  // Specialised launches: red-black colours and each cycle's restriction.
+  const range=(n:number,from=0)=>Array.from({length:n},(_,i)=>i+from);
+  // Specialised launches: red-black colours, each cycle's restriction, the
+  // measure after each encodable cycle count.
   const variants:Record<string,[string,Record<string,number>][]>={
    sweep:[0,1].map(c=>[`${c}`,{bColour:c}]),middleSweep:[...[0,1].map(c=>[`${c}`,{bColour:c}] as [string,Record<string,number>]),["P",{bColour:0,bProlong:1}]],coarseSweep:[0,1].map(c=>[`${c}`,{bColour:c}]),
-   restrict:Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{bCycle:k}]),
+   restrict:range(schedule.cycles).map(k=>[`@${k}`,{bCycle:k}]),measure:range(schedule.cycles,1).map(k=>[`@${k}`,{bCycles:k}]),
   };
   for(const [name,code] of Object.entries(sources)){
    const module=this.device.createShaderModule({label:`Uniform pressure band ${name}`,code});
    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
    if(errors.length)throw new Error(`Pressure band ${name}: ${errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n")}`);
    const pipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.simulation.bindLayout,this.layouts.get(this.layoutOf(name))!,...(this.solid?[this.solid.coarse!.bindLayout]:[])]});
-   for(const [suffix,constants] of variants[name]??[["",{}]])this.pipelines.set(name+suffix,await this.device.createComputePipelineAsync({layout:pipelineLayout,
-    compute:{module,entryPoint:"main",constants:{umDispatchX:this.simulation.dispatchX,...constants}}}));
+   for(const [suffix,constants] of variants[name]??[["",{}]])this.pipelines.set(name+suffix,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout:pipelineLayout,
+    compute:{module,entryPoint:"main",constants:{umDispatchX:this.simulation.dispatchX,...constants,...s}}})));
   }
  }
  /** Pipeline and group 1 of each launch name, resolved on first use. */
@@ -853,7 +877,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   // Groups 0 and 2 are the same for every band launch: bind them once per
   // pass, and group 1 only when the launch's layout changes.
   if(this.boundPass!==pass){this.boundPass=pass;this.boundGroup=undefined;pass.setBindGroup(0,this.simulation.bindGroup);if(this.solid)pass.setBindGroup(2,this.solid.coarse!.bindGroup);}
-  pass.setPipeline(bound.pipeline);if(this.boundGroup!==bound.group){this.boundGroup=bound.group;pass.setBindGroup(1,bound.group);}
+  pass.setPipeline(this.solid?.select(bound.pipeline)??bound.pipeline);if(this.boundGroup!==bound.group){this.boundGroup=bound.group;pass.setBindGroup(1,bound.group);}
   const c=this.capacity;
   pass.dispatchWorkgroups(typeof launch==="number"?launch:launch==="cells"?Math.min(c,CELL_GROUPS):launch==="slots"?Math.min(c,SLOT_GROUPS):launch==="middle"?Math.min(Math.ceil(c/8),MIDDLE_GROUPS):Math.min(Math.ceil(c/64),COARSE_GROUPS));
  }
@@ -885,7 +909,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    this.dispatch(pass,"middleSweepP","middle");this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps-1);
    this.dispatch(pass,"middleProlong","slots");this.sweep(pass,"sweep","cells",s.fineSweeps);
   }
-  this.dispatch(pass,"measure","slots");
+  this.dispatch(pass,`measure@${s.cycles}`,"slots");
   pass.end();
   const project=encoder.beginComputePass({label:"Uniform pressure band projection"});this.dispatch(project,"copy","slots");this.dispatch(project,"project","slots");this.dispatch(project,"present","slots");project.end();
  }

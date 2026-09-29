@@ -69,15 +69,6 @@ const baseControl = (id: string, param: string) => {
 
 const stages: FluidPipelineStage[] = [
   {
-    id:"uniform-volume-adopt", band:"head", side:"left", label:"Layout adopt",
-    phaseLabels:[A.resolutionRelayout.label],
-    tip:{summary:"Adopt the h/4h generation the previous frame's census built on the GPU: remap V, velocity, phi and the negative wall faces onto the new ownership, then resolve hanging phi. Every adopt remaps, since the host cannot tell an unchanged generation; the frame then rebuilds geometry and phase.",
-      reads:"census-built ownership, V, velocity, phi", writes:"remapped V, velocity, phi", gate:"dynamic coarsening"},
-    state:context=>dynamic(context) ? "on" : "off",
-    chip:context=>context.info?.uniformMixedGeneration === undefined ? "remap on the adopted generation"
-      : `generation ${context.info.uniformMixedGeneration} · ${context.info.uniformMixedDynamicRelayouts ?? 0} relayouts`,
-  },
-  {
     id:"uniform-volume-solids", band:"head", side:"right", label:"Solids",
     phaseLabels:[P.solids.label],
     tip:{summary:"Moving bodies rebuild their cut-cell record, and liquid in cells a body or a live voxel edit entered is displaced to open neighbours. The 4h coarse solid record is built once for static solids (again after an edit, every frame bodies exist), and the simulation's cut-tile widths when stale. A static scene closes this seam near zero.",
@@ -218,8 +209,8 @@ const stages: FluidPipelineStage[] = [
   {
     id:"uniform-volume-census", band:"census", side:"right", label:"Resolution census",
     phaseLabels:[A.resolutionCensus.label],
-    tip:{summary:"Far-field extension states, then the dynamic census: tiles the surface can reach in the next step (RK2 departure boxes, boundary impacts, bodies) stay h and the rest coarsen to 4h. The GPU layout builder writes the generation the next frame adopts; no CPU wait.",
-      reads:"phi, V, velocity, body poses", writes:"next generation's ownership", feeds:"layout adopt", gate:"dynamic coarsening"},
+    tip:{summary:"The frame's tail extension (the next frame reuses it when nothing changes in between), then the dynamic census: tiles the surface can reach over the census horizon (RK2 departure boxes traced frame by frame, boundary impacts, bodies) stay h and the rest coarsen to 4h. The GPU layout builder writes the next generation; the host adopts it in its own submit when the census read resolves, remapping V, velocity, phi and the extension. No frame waits on it.",
+      reads:"phi, V, velocity, body poses", writes:"extended velocity, next generation's ownership", feeds:"next frame, layout adopt", gate:"dynamic coarsening"},
     controls:[
       {kind:"param-choice",param:"coarsening",label:"Coarsening",
         options:[{value:"dynamic",label:"Dynamic"},{value:"regions",label:"Regions"}],

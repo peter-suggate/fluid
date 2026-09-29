@@ -1,10 +1,10 @@
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { UNIFORM_MIXED_JOBS, uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL, type UniformMixedJobKind } from "./uniform-mixed-topology.wgsl";
+import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL, uniformMixedFaceTileDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedPressureReconstructionWGSL } from "./uniform-mixed-pressure-reconstruction.wgsl";
-import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
 export interface UniformMixedForceFields {
   advected: GPUTexture;
@@ -48,7 +48,7 @@ export class UniformMixedForces {
   }
   bind(f: UniformMixedForceFields): GPUBindGroup {
     if(this.cachedGeometry&&!f.centerPhi)throw new Error("Mixed forces require current center phi for cached geometry");
-    const d=this.ownership.capacity.lattice.dimensions,coarse=f.coarseVelocity,unit=f.unitVelocity;
+    const d=this.ownership.layout.lattice.dimensions,coarse=f.coarseVelocity,unit=f.unitVelocity;
     if(coarse.format!=="rgba32float"||[coarse.width,coarse.height,coarse.depthOrArrayLayers].some((n,a)=>n!==d[a]!/4+2))throw new Error("Mixed force viscosity requires the 4h velocity cache");
     if(unit.format!=="rgba32float"||[unit.width,unit.height,unit.depthOrArrayLayers].some((n,a)=>n!==d[a]))throw new Error("Mixed force viscosity requires resolved h velocity taps");
     for(const [i,t] of [f.advected,f.phi,f.volume,f.output].entries()){
@@ -68,8 +68,8 @@ export class UniformMixedForces {
     ]});
   }
   async initialize():Promise<void>{
-    const h=this.ownership.capacity.lattice.cellSize_m;
-    const module=this.device.createShaderModule({code:uniformMixedCertifiedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
+    const h=this.ownership.layout.lattice.cellSize_m;
+    const module=this.device.createShaderModule({code:uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
 @group(1) @binding(1) var advected:texture_3d<f32>;
 @group(1) @binding(2) var phi:texture_3d<f32>;
 @group(1) @binding(3) var volume:texture_3d<f32>;
@@ -180,20 +180,21 @@ ${uniformMixedFaceDispatchWGSL("forcesRegular","umForcedVelocity(owner,face)").r
 fn umForcesRegularCoarseOwner(gid:vec3u)->UMOwner{return umRegularCoarseOwner(gid.x+umDispatchX*64u*gid.y);}
 ${uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocity(owner,face)",false,"","umForcesRegularCoarseOwner")}
 ${uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)")}
-`,["forcesRegular","forcesRegularCoarse","forces"])});
+`});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
-    const J=UNIFORM_MIXED_JOBS,compile=(entryPoint:string,kind:UniformMixedJobKind,constants:Record<string,number>)=>this.ownership.pipeline(layout,module,entryPoint,kind,{umCachedGeometry:+this.cachedGeometry,...constants});
+    const compile=(entryPoint:string,constants:Record<string,number>)=>uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{
+      umDispatchX:this.ownership.dispatchX,umCachedGeometry:+this.cachedGeometry,...constants,...s}}}));
     // Seam tiles of every tier and the small regular tiers share one launch,
     // so their serial per-tile latencies overlap; seam 4h tiles pack four
     // per group (dispatchFused quad).
     [this.pipeline,this.regularPipelines[0],this.regularCoarsePipeline]=await Promise.all([
-      compile("forces",J.fusedRegularQuad,{umMergedTiles:1,umFusedJobs:1}),
-      compile("forcesRegular",J.regularUnfused,{umCellWidth:1,umRegularTiles:1,umRegularFine:1}),
-      compile("forcesRegularCoarse",J.regularCoarse,{umCellWidth:4})]);
+      compile("forces",{umMergedTiles:1,umFusedJobs:1}),
+      compile("forcesRegular",{umCellWidth:1,umRegularTiles:1,umRegularFine:1}),
+      compile("forcesRegularCoarse",{umCellWidth:4})]);
   }
   encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
     if(!this.pipeline)throw new Error("Mixed forces are not initialized");
-    const pass=encoder.beginComputePass({label:"Uniform mixed body forces"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);this.ownership.dispatchRegular(pass,this.regularPipelines,true,[0]);this.ownership.dispatchRegularCoarse(pass,this.regularCoarsePipeline!);this.ownership.dispatchFused(pass,this.pipeline,true,true);pass.end();
+    const pass=encoder.beginComputePass({label:"Uniform mixed body forces"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);const variant=(p:GPUComputePipeline)=>this.solid?.select(p)??p;this.ownership.dispatchRegular(pass,this.regularPipelines.map(variant),true,[0]);this.ownership.dispatchRegularCoarse(pass,variant(this.regularCoarsePipeline!));this.ownership.dispatchFused(pass,variant(this.pipeline),true,true);pass.end();
   }
 }

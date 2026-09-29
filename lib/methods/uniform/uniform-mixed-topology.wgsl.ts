@@ -3,31 +3,6 @@ import { uniformMixedVelocitySamplingWGSL } from "./uniform-mixed-velocity-sampl
 import { uniformMixedFacesWGSL } from "./uniform-mixed-faces.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 
-/** Job kinds of certified launches (umCertifiedJobs, umCertifiedJobCount).
- * Every count is read on the GPU, so no launch size depends on the host
- * knowing the live layout. */
-export const UNIFORM_MIXED_JOBS={
- /** The frame plan's umPlannedFine certificate list, one tile per job. */
- planned:1,
- /** Merged tile jobs, then 64 packed regular 4h owners per job; mergedQuad
-  * packs seam 4h tiles four per job (uniformMixedFaceTileDispatchWGSL). */
- merged:2,mergedQuad:3,
- /** Every owner, 64 per job (umAllOwner). */
- all:4,
- /** 64 owners per job of the umCellWidth tier (umOwner). */
- tier:5,
- /** The tier's jobs when it has regular tiles; unfused: and it does not ride
-  * the fused launch; fused: only when it rides it. */
- regular:6,regularUnfused:7,regularFused:8,
- /** umRegularCoarseOwner's list, 64 per job, unless 4h rides the fused launch. */
- regularCoarse:9,
- /** The tier's seam list: 64 owners per job, or one tile per job. */
- seamLanes:10,seamTiles:11,
- /** umFusedOwner: every seam tile (also the hanging slots); then the small
-  * regular tiers; quad packs seam 4h tiles four per job. */
- fused:12,fusedRegular:13,fusedRegularQuad:14,
-} as const;
-export type UniformMixedJobKind=typeof UNIFORM_MIXED_JOBS[keyof typeof UNIFORM_MIXED_JOBS];
 /** Regular tiers with at most this many tiles join the fused interface launch. */
 export const UNIFORM_MIXED_FUSED_REGULAR_TILES=64;
 /** A regular 4h tier with at most this many owners (256 groups) is
@@ -56,8 +31,13 @@ override umRegularTiles:bool=false;
 override umMergedTiles:bool=false;
 // With umMergedTiles, take the fused jobs (every seam tile, then small regular tiers) instead.
 override umFusedJobs:bool=false;
-// Certified launches (uniformMixedCertifiedEntriesWGSL): the job kind,
-// UNIFORM_MIXED_JOBS; 0 none.
+// With umMergedTiles, leave out the general h list: its tiles run a launch of
+// their own, and umMergedPack seam 4h tiles share each tile job.
+override umMergedCoarse:bool=false;
+override umMergedPack:u32=1u;
+// Certified launches (uniformMixedCertifiedEntriesWGSL): 0 none, 1 the
+// umPlannedFine certificate list, 2 the merged tile jobs, 3 the merged jobs
+// with seam 4h tiles packed four per job (uniformMixedFaceTileDispatchWGSL).
 override umCertifiedJobs:u32=0u;
 const UM_D=vec3u(${layout.lattice.dimensions.map(n => `${n}u`).join(',')});const UM_T=UM_D/4u;
 const UM_TILES:u32=${layout.tiles.length}u;
@@ -151,11 +131,12 @@ fn umFusedOwner(group:vec3u,lane:u32,regular:bool)->UMOwner {
 // Jobs from umMergedTileJobs() on pack 64 regular coarse owners each
 // (umRegularCoarseOwner), one lane per owner as regular fine work runs.
 fn umMergedTileJobs()->u32 {
+ if(umMergedCoarse){return (umSupport[7u*UM_TILES+17u]+umMergedPack-1u)/umMergedPack;}
  return umSupport[4u*UM_TILES+2u]+umSupport[7u*UM_TILES+17u];
 }
 fn umMergedTileJob(index:u32)->UMOwner {
  if(umFusedJobs){return umFusedOwner(vec3u(index,0u,0u),0u,true);}
- var job=index;var tile=0u;var width=1u;let general=umSupport[4u*UM_TILES+2u];
+ var job=index;var tile=0u;var width=1u;let general=select(umSupport[4u*UM_TILES+2u],0u,umMergedCoarse);
  // No nested umSupport index: the frame plan rewrites these reads as atomics.
  let header=7u*UM_TILES+16u;let fine=umSupport[header];
  if(job<general){tile=umSupport[6u*UM_TILES+16u+job];}
@@ -167,36 +148,14 @@ fn umTileJobOwner(group:vec3u)->UMOwner {
  if(umMergedTiles){return umMergedTileJob(job);}
  let cells=64u/(umCellWidth*umCellWidth*umCellWidth);return umOwner(vec3u(job*cells,0u,0u));
 }
-// Jobs of this certified launch (UNIFORM_MIXED_JOBS), from GPU counts only:
-// certificate list tiles, merged tile jobs (general h, seam 4h, then 64 packed
-// regular 4h owners per job), or 64-owner groups and tile jobs of the live
-// tier, seam and fused lists. umCellWidth names the tier of tier kinds.
+// Jobs of this certified launch, from the frame plan's lists: tiles of the
+// certificate list, or general h and seam 4h tile jobs then 64 packed regular
+// 4h owners per job.
 fn umCertifiedJobCount()->u32 {
- let header=7u*UM_TILES+16u;let seam0=umSupport[header];let seam1=umSupport[header+1u];
- let tier=select(1u,0u,umCellWidth==1u);let count=umCounts[tier];
- let seam=select(seam1,seam0,tier==0u);let groups=select((count+63u)/64u,count,tier==0u);
- switch umCertifiedJobs {
-  case 1u:{return umSupport[4u*UM_TILES+umPlannedFine];}
-  case 2u,3u:{
-   let merged=umMergedTileJobs()+(umSupport[8u*UM_TILES+20u]+63u)/64u;
-   return select(merged-seam1+(seam1+3u)/4u,merged,umCertifiedJobs==2u);
-  }
-  case 4u:{return umCounts.x+(umCounts.y+63u)/64u;}
-  case 5u:{return groups;}
-  case 6u:{return select(0u,groups,count>seam);}
-  case 7u:{return select(0u,groups,count>seam&&!umFusedRegularTier(tier));}
-  case 8u:{return select(0u,groups,umFusedRegularTier(tier));}
-  case 9u:{return select(0u,(umSupport[8u*UM_TILES+20u]+63u)/64u,!umFusedRegularTier(1u));}
-  case 10u:{return select((seam1+63u)/64u,seam0,tier==0u);}
-  case 11u:{return seam;}
-  case 12u:{return seam0+seam1;}
-  case 13u,14u:{
-   var jobs=seam0+seam1;
-   for(var t=0u;t<2u;t++){if(umFusedRegularTier(t)){jobs+=umCounts[t];}}
-   return select(jobs,jobs-seam1+(seam1+3u)/4u,umCertifiedJobs==14u);
-  }
-  default:{return 0u;}
- }
+ if(umCertifiedJobs==1u){return umSupport[4u*UM_TILES+umPlannedFine];}
+ let merged=umMergedTileJobs()+(umSupport[8u*UM_TILES+20u]+63u)/64u;
+ if(umCertifiedJobs==2u){return merged;}
+ let fours=umSupport[7u*UM_TILES+17u];return merged-fours+(fours+3u)/4u;
 }
 fn umOrigin(o:UMOwner)->vec3u{return umTileCoord(o.tile)*4u+umCorner(o.lane,4u/o.width)*o.width;}
 ${uniformMixedFacesWGSL}
@@ -227,7 +186,6 @@ export function uniformMixedCertifiedEntriesWGSL(source: string, entries: readon
       args.push(builtin === "global_invocation_id" ? `vec3u(umJob*${size}u+umLane,0u,0u)`
         : builtin === "workgroup_id" ? "vec3u(umJob,0u,0u)"
         : builtin === "local_invocation_index" ? "umLane"
-        : builtin === "local_invocation_id" && /^\d+$/.test(match[1]!) ? "vec3u(umLane,0u,0u)"
         : (() => { throw new Error(`Certified entry ${entry} reads ${builtin}`); })());
       return `${name}:${type}`;
     });

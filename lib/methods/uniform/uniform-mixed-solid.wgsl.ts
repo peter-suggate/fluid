@@ -26,6 +26,10 @@ export interface UniformMixedSolidResources {
  /** Tiles the host promotes as solid-coupled (uniformMixedSolidTiles().coupled):
   * the h pressure band's reserve on top of its surface capacity. */
  coupledTiles:number;
+ /** Word offset in `scratch` of the tile cut map, one word per 4^3 tile,
+  * right after the voxel mask (umSolidTileClear derives the same offset).
+  * The host initialises it to all cut; the record build writes it. */
+ cutMapOffsetWords:number;
 }
 
 /** The static all-4h solid record of band pressure (one vec4 per 4h owner,
@@ -61,12 +65,15 @@ export class UniformMixedSolid {
  /** The next build must visit every tile (first build, voxel edit). */
  private full=true;
  private simulation?:{pipeline:GPUComputePipeline;layout:GPUBindGroupLayout;group?:GPUBindGroup;topology?:GPUBuffer};
+ private cutMap?:{pipeline:GPUComputePipeline;group:GPUBindGroup};
+ private readonly scratch:GPUBuffer;private readonly cutMapOffsetWords:number;
  private built=false;
  constructor(private readonly device:GPUDevice,resources:UniformMixedSolidResources,private readonly coarseLayout?:UniformMixedLayout){
   if(resources.params.size<272||resources.terrain.format!=="r32float")throw new Error("Mixed solids require the native parameter block and terrain heightfield");
   if(resources.bodies.size<12*128)throw new Error("Mixed solids require the rigid-body state buffer");
   if(!Number.isSafeInteger(resources.coupledTiles)||resources.coupledTiles<0)throw new Error("Mixed solids require the host's coupled tile count");
   this.coupledTiles=resources.coupledTiles;
+  this.scratch=resources.scratch;this.cutMapOffsetWords=resources.cutMapOffsetWords;
   this.bodySource=resources.bodies;
   this.bodies=device.createBuffer({label:"Uniform mixed solid body mirror",size:12*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   const bodies=this.bodies;
@@ -91,6 +98,24 @@ export class UniformMixedSolid {
    this.coarse={bindLayout,record,count,bindGroup:device.createBindGroup({layout:bindLayout,entries:[...resourcesOf(),{binding:3,resource:{buffer:record}}]})};
   }
  }
+ /** Whether the scene holds any in-domain solid: a voxel, terrain or a
+  * rigid body. The host sets it at construction, after every live edit and
+  * when bodies are placed; stages then dispatch select()'s variant. */
+ present=true;
+ private readonly twins=new WeakMap<GPUComputePipeline,GPUComputePipeline>();
+ /** A pipeline compiled against the gated library, and its solid-free twin
+  * (umSolidsPresent=false: every helper is its stub). Both are built up
+  * front, so the first voxel edit switches variant without a compile. */
+ async compile(create:(constants:Record<string,number>)=>Promise<GPUComputePipeline>):Promise<GPUComputePipeline>{
+  const [full,free]=await Promise.all([create({}),create({umSolidsPresent:0})]);
+  this.twins.set(full,free);return full;
+ }
+ /** The variant of a compile()d pipeline for the scene's current solids. */
+ select(pipeline:GPUComputePipeline):GPUComputePipeline{
+  if(this.present)return pipeline;
+  const twin=this.twins.get(pipeline);if(!twin)throw new Error(`Pipeline ${pipeline.label} was not compiled with a solid-free twin`);
+  return twin;
+ }
  get allocatedBytes():number{return (this.coarse?.record.size??0)+this.bodies.size+(this.builtBodies?.size??0);}
  /** Mirror the rigid state into the library: at a frame's head, and after
   * the rigid integration for the census that follows it. */
@@ -100,7 +125,7 @@ export class UniformMixedSolid {
   const d=layout.lattice.dimensions,dispatchX=this.device.limits.maxComputeWorkgroupsPerDimension;
   const module=this.device.createShaderModule({label:"Uniform mixed all-4h solid record",code:/* wgsl */`
 const UM_D=vec3u(${d.map(n=>`${n}u`).join(",")});const UM_T=UM_D/4u;const UM_TILES:u32=${layout.tiles.length}u;const UM_SOLID_COUNT:u32=${coarse.count}u;
-${uniformMixedSolidWGSL(0)}
+${uniformMixedSolidWGSL(0,undefined,false)}
 @group(1) @binding(0) var<storage,read_write> record:array<vec4f>;
 override umDispatchX:u32=65535u;
 @group(1) @binding(1) var<uniform> umBuiltBodies:array<UMRigidBody,12>;
@@ -174,6 +199,20 @@ override umDispatchX:u32=65535u;
 }`});
   const flagErrors=(await flagModule.getCompilationInfo()).messages.filter(m=>m.type==="error");if(flagErrors.length)throw new Error(flagErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const flagLayout=this.device.createBindGroupLayout({label:"Uniform mixed solid simulation widths",entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
+  const cutModule=this.device.createShaderModule({label:"Uniform mixed solid tile cut map",code:/* wgsl */`
+const UM_TILES:u32=${layout.tiles.length}u;const UM_SOLID_COUNT:u32=${coarse.count}u;
+override umDispatchX:u32=65535u;
+@group(0) @binding(0) var<storage,read> record:array<vec4f>;
+@group(0) @binding(1) var<storage,read_write> cutMap:array<u32>;
+@compute @workgroup_size(64) fn pack(@builtin(global_invocation_id) g:vec3u){
+ let t=g.x+umDispatchX*64u*g.y;if(t>=UM_TILES){return;}
+ cutMap[t]=select(0u,1u,record[UM_SOLID_COUNT+t].x>0.5);
+}`});
+  const cutErrors=(await cutModule.getCompilationInfo()).messages.filter(m=>m.type==="error");if(cutErrors.length)throw new Error(cutErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+  const cutLayout=this.device.createBindGroupLayout({label:"Uniform mixed solid tile cut map",entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
+  if(this.cutMapOffsetWords%64||this.scratch.size<4*(this.cutMapOffsetWords+layout.tiles.length))throw new Error("The solid scratch has no room for the tile cut map");
+  this.cutMap={pipeline:await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[cutLayout]}),compute:{module:cutModule,entryPoint:"pack",constants:{umDispatchX:dispatchX}}}),
+   group:this.device.createBindGroup({layout:cutLayout,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:{buffer:this.scratch,offset:4*this.cutMapOffsetWords,size:4*layout.tiles.length}}]})};
   this.simulation={layout:flagLayout,pipeline:await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[flagLayout]}),compute:{module:flagModule,entryPoint:"widths",constants:{umDispatchX:dispatchX}}})};
  }
  /** Builds the all-4h record from the solids the native host has published
@@ -185,7 +224,9 @@ override umDispatchX:u32=65535u;
   if(!this.builder)throw new Error("The coarse solid record is not initialized");
   const tiles=layout.tiles.length,x=Math.min(tiles,this.device.limits.maxComputeWorkgroupsPerDimension);
   const pass=encoder.beginComputePass({label:"Uniform mixed all-4h solid record"});
-  pass.setPipeline(this.full?this.builder.pipeline:this.builder.bodies);pass.setBindGroup(0,this.bindGroup);pass.setBindGroup(1,this.builder.group);pass.dispatchWorkgroups(x,Math.ceil(tiles/x));pass.end();
+  pass.setPipeline(this.full?this.builder.pipeline:this.builder.bodies);pass.setBindGroup(0,this.bindGroup);pass.setBindGroup(1,this.builder.group);pass.dispatchWorkgroups(x,Math.ceil(tiles/x));
+  const groups=Math.ceil(tiles/64),gx=Math.min(groups,this.device.limits.maxComputeWorkgroupsPerDimension);
+  pass.setPipeline(this.cutMap!.pipeline);pass.setBindGroup(0,this.cutMap!.group);pass.dispatchWorkgroups(gx,Math.ceil(groups/gx));pass.end();
   encoder.copyBufferToBuffer(this.bodies,0,this.builtBodies!,0,12*128);this.full=false;
   this.built=true;
  }
@@ -206,11 +247,19 @@ override umDispatchX:u32=65535u;
  destroy():void{this.coarse?.record.destroy();this.bodies.destroy();this.builtBodies?.destroy();}
 }
 
+/** A stage pipeline built with the library: twinned when solids are bound. */
+export function uniformMixedSolidPipeline(solid:UniformMixedSolid|undefined,create:(constants:Record<string,number>)=>Promise<GPUComputePipeline>):Promise<GPUComputePipeline>{
+ return solid?solid.compile(create):create({});
+}
+
 /** Requires UM_D. `group` undefined emits inert stubs with the same ABI.
  * `coarse` (the record's owner/halo count) binds the all-4h record: the
  * group is then UniformMixedSolid.coarse.bindLayout, and umSolidCoarse(i),
- * umSolidCut(tile) (cut and simulated at h) and umSolidStaticCut(tile) read it. */
-export function uniformMixedSolidWGSL(group?:number,coarse?:number):string{
+ * umSolidCut(tile) (cut and simulated at h) and umSolidStaticCut(tile) read it.
+ * `gated` (every stage but the record builder, which writes the gate) answers
+ * the helpers from the tile cut map where no solid is near: one word instead
+ * of the voxel, terrain and body samples. */
+export function uniformMixedSolidWGSL(group?:number,coarse?:number,gated=true):string{
  if(group===undefined)return /* wgsl */ `
 fn umSolidEnabled()->bool{return false;}
 fn umSolidValid(p:vec3i)->bool{return all(p>=vec3i(0))&&all(p<vec3i(UM_D));}
@@ -237,7 +286,10 @@ struct UMRigidBody {
  angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f,
 }
 @group(${group}) @binding(4) var<uniform> umSolidBodies:array<UMRigidBody,12>;
-fn umSolidEnabled()->bool{return true;}
+// The solid-free twin (UniformMixedSolid.compile): false folds every helper
+// to its stub, so a frame with no solid runs the code of one built without them.
+${gated?"override umSolidsPresent:bool=true;":"const umSolidsPresent:bool=true;"}
+fn umSolidEnabled()->bool{return umSolidsPresent;}
 ${coarse===undefined?"":`@group(${group}) @binding(3) var<storage,read> umSolidRecord:array<vec4f>;
 fn umSolidCoarse(i:u32)->vec4f{return umSolidRecord[i];}
 fn umSolidStaticCut(t:u32)->bool{return umSolidRecord[${coarse}u+t].x>0.5;}
@@ -257,11 +309,25 @@ fn umCellInsideTerrain(p:vec3i)->bool{if(!umSolidHasTerrain()){return false;}ret
 fn umCellTerrainFraction(p:vec3i)->f32{if(!umSolidHasTerrain()){return 0.0;}return clamp(umSolidTerrainHeight(p.x,p.z)-f32(p.y),0.0,1.0);}
 fn umSolidWorldCell(id:vec3i)->vec3f{let h=umSolidParams.cellGravity.xyz;
  return vec3f(-0.5*umSolidParams.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*umSolidParams.container.z+(f32(id.z)+0.5)*h.z);}
+// The tile cut map (UniformMixedSolid, after the voxel mask in the scratch):
+// one word per 4^3 tile, zero when no h cell of the tile or its one-cell
+// ring has open < 1 -- every cell and face sample a helper takes for a cell
+// of the tile. Bodies move after the map is built, so a cell near a body
+// always takes the full path.
+fn umSolidTileClear(p:vec3i)->bool{
+ ${gated?`let d=vec3u(UM_D);let t=d/4u;let c=vec3u(clamp(p,vec3i(0),vec3i(d)-vec3i(1)))/4u;
+ let base=(u32(round(umSolidParams.dropExtent.z))+4u+((d.x+2u)*(d.y+2u)*(d.z+2u)+31u)/32u+63u)/64u*64u;
+ if(umSolidScratch[base+c.x+t.x*(c.y+t.y*c.z)]!=0u){return false;}
+ if(umSolidParams.boundary.z<0.5){return true;}
+ let world=umSolidWorldCell(p);let h=umSolidParams.cellGravity.xyz;
+ for(var i=0u;i<umBodyCount();i++){if(umBodyNear(i,world,3.0*max(h.x,max(h.y,h.z)))){return false;}}
+ return true;`:"return false;"}
+}
 // Rigid bodies: the native RigidBody helpers over the shape table. Every
 // body query first rejects on the body's bounding sphere (state dimensions.w,
 // boundingRadius), so cells away from every body pay one distance per body.
 ${sceneShapeWgsl()}
-fn umBodyCount()->u32{return min(u32(max(round(umSolidParams.boundary.z),0.0)),12u);}
+fn umBodyCount()->u32{if(!umSolidsPresent){return 0u;}return min(u32(max(round(umSolidParams.boundary.z),0.0)),12u);}
 fn umQuatRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.0*(q.x*uv+uuv);}
 fn umBodyLocal(i:u32,world:vec3f)->vec3f{let b=umSolidBodies[i];return umQuatRotate(vec4f(b.orientation.x,-b.orientation.yzw),world-b.positionShape.xyz);}
 fn umBodyNear(i:u32,world:vec3f,margin:f32)->bool{let b=umSolidBodies[i];return distance(world,b.positionShape.xyz)<=b.dimensions.w+margin;}
@@ -292,11 +358,16 @@ fn umCellBodyFraction(p:vec3i)->f32{
 }
 // cellOpenFraction.
 fn umCellOpen(p:vec3i)->f32{
- if(!umSolidValid(p)||umSolidVoxel(p)){return 0.0;}
+ if(!umSolidsPresent){return select(0.0,1.0,umSolidValid(p));}
+ if(!umSolidValid(p)){return 0.0;}
+ if(umSolidTileClear(p)){return 1.0;}
+ if(umSolidVoxel(p)){return 0.0;}
  return clamp((1.0-umCellBodyFraction(p))*(1.0-umCellTerrainFraction(p)),0.0,1.0);
 }
 // cellInsideSolid: voxel, terrain or a body at the centre -- the CM11a p_min=0 rows.
 fn umCellInsideSolid(p:vec3i)->bool{
+ if(!umSolidsPresent){return false;}
+ if(umSolidValid(p)&&umSolidTileClear(p)){return false;}
  if(umSolidVoxel(p)){return true;}
  if(!umSolidValid(p)){return false;}
  return umCellInsideTerrain(p)||umBodyAt(umSolidWorldCell(p))>=0;
@@ -319,7 +390,10 @@ fn umSolidTerrainAtWorld(world:vec3f)->bool{
 fn umSolidAtWorld(world:vec3f)->bool{return umSolidVoxelAtWorld(world)||umSolidTerrainAtWorld(world)||umBodyAt(world)>=0;}
 // insideAnyTraceSolid for a lattice-coordinate point: voxels and bodies
 // (terrain is not a trace solid natively).
-fn umSolidAtWorldCell(p:vec3f)->bool{let world=umSolidTraceWorld(p);return umSolidVoxelAtWorld(world)||umBodyAt(world)>=0;}
+fn umSolidAtWorldCell(p:vec3f)->bool{
+ if(!umSolidsPresent){return false;}
+ let cell=vec3i(floor(p));if(umSolidValid(cell)&&umSolidTileClear(cell)){return false;}
+ let world=umSolidTraceWorld(p);return umSolidVoxelAtWorld(world)||umBodyAt(world)>=0;}
 // pressureFaceData(id,axis)[axis]: the moving-wall velocity u_s of a MAC
 // face. Its dual-cell samples classify ownership; each covering body's
 // rigid velocity is evaluated at the face centre (static voxels and terrain
@@ -327,6 +401,7 @@ fn umSolidAtWorldCell(p:vec3f)->bool{let world=umSolidTraceWorld(p);return umSol
 // velocity within one cell (extrapolatedRigidVelocityAtFace), else zero.
 // Domain faces and voxel-adjacent faces are static walls: zero.
 fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{
+ if(!umSolidsPresent){return 0.0;}
  if(umBodyCount()==0u){return 0.0;}
  var neighbor=id;neighbor[axis]+=1;
  if(!umSolidValid(id)||!umSolidValid(neighbor)||umSolidVoxel(id)||umSolidVoxel(neighbor)){return 0.0;}
@@ -351,7 +426,9 @@ fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{
 }
 // faceOpenFraction: the Sec. 3.6 transverse face aperture.
 fn umFaceOpen(id:vec3i,axis:u32)->f32{
+ if(!umSolidsPresent){return 1.0;}
  var neighbor=id;neighbor[axis]+=1;
+ if(umSolidValid(id)&&umSolidValid(neighbor)&&umSolidTileClear(id)){return 1.0;}
  if(umSolidVoxel(id)||umSolidVoxel(neighbor)){return 0.0;}
  if(!umSolidValid(id)||!umSolidValid(neighbor)){return 1.0;}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;
@@ -367,6 +444,7 @@ fn umFaceOpen(id:vec3i,axis:u32)->f32{
 // pressureFaceData(id,axis).w, geometric and static: the CM11a dual-cell V
 // (except a depth symmetry plane, below).
 fn umPressureFaceV(id:vec3i,axis:u32)->f32{
+ if(!umSolidsPresent){return 1.0;}
  var neighbor=id;neighbor[axis]+=1;
  if(umSolidValid(id)!=umSolidValid(neighbor)){
   // A depth symmetry plane is a closed wall here, as for solid-free mixed
@@ -375,6 +453,7 @@ fn umPressureFaceV(id:vec3i,axis:u32)->f32{
   let open=umCellOpen(select(neighbor,id,umSolidValid(id)));
   return select(0.5*open,0.5*(1.0+open),ambient);
  }
+ if(umSolidValid(id)&&umSolidTileClear(id)){return 1.0;}
  if(umSolidVoxel(id)||umSolidVoxel(neighbor)){return 0.5*(umCellOpen(id)+umCellOpen(neighbor));}
  if(!umSolidValid(id)||!umSolidValid(neighbor)){return 0.0;}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;var solid=0.0;

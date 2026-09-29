@@ -54,12 +54,8 @@ async function run(device:GPUDevice,scene:SceneDescription,frames:number,pressur
  * volumeCellSum, unquantized. */
 async function ownerMass(device:GPUDevice,solver:WebGPUUniformReferenceSolver):Promise<number>{
  const texture=solver.volumeTexture,volume=await readMixedTexture(device,texture);
- // Tile words from the GPU: a dynamic layout has no host copy.
+ const tiles=(solver as unknown as {mixedFrame:{ownership:{layout:{tiles:Uint32Array}}}}).mixedFrame.ownership.layout.tiles;
  const [nx,ny,nz]=[texture.width,texture.height,texture.depthOrArrayLayers];let sum=0;
- const words=(solver as unknown as {mixedFrame:{ownership:{presentation:{buffer:GPUBuffer}}}}).mixedFrame.ownership.presentation.buffer;
- const bytes=4*(nx>>2)*(ny>>2)*(nz>>2),staging=device.createBuffer({size:bytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
- const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(words,0,staging,0,bytes);device.queue.submit([encoder.finish()]);
- await staging.mapAsync(GPUMapMode.READ);const tiles=new Uint32Array(staging.getMappedRange().slice(0));staging.destroy();
  for(let z=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){
   const word=tiles[(x>>2)+(nx>>2)*((y>>2)+(ny>>2)*(z>>2))]!,width=word&0x80000000?1:4;
   if(x%width===0&&y%width===0&&z%width===0)sum+=volume[x+nx*(y+ny*z)]!*width**3;

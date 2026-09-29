@@ -1,5 +1,5 @@
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
-import {UNIFORM_MIXED_JOBS,uniformMixedCertifiedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
+import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 
 /** Start-of-frame support census, independent of simulation ownership. The
@@ -26,9 +26,9 @@ export class UniformMixedFramePlan {
     this.extendedGroup=device.createBindGroup({layout:this.extendedResources,entries:[{binding:0,resource:extended.createView()},{binding:1,resource:{buffer:extendedNegative}},{binding:2,resource:{buffer:ownership.speeds}}]});
   }
   async initialize():Promise<void>{
-    const h=this.ownership.capacity.lattice.cellSize_m;
+    const h=this.ownership.layout.lattice.cellSize_m;
     const topology=uniformMixedTopologyWGSL(this.ownership.layout,0).replace('umSupport:array<u32>','umSupport:array<atomic<u32>>').replace(/umSupport\[([^\]]+)\]/g,'atomicLoad(&umSupport[$1])');
-    const module=this.device.createShaderModule({code:uniformMixedCertifiedEntriesWGSL(topology+/* wgsl */`
+    const module=this.device.createShaderModule({code:topology+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var phi:texture_3d<f32>;
 struct PlanPolicy {settings:vec4u,step:vec4f}
@@ -177,16 +177,16 @@ var<workgroup> certifyBases:array<u32,2>;
  workgroupBarrier();
  if(fine){atomicStore(&umSupport[(4u+list)*UM_TILES+16u+certifyBases[list-1u]+local],tile);}
 }
-`,["seed", "localSpeed"])});
+`});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.extendedResources]});
-    for(const entryPoint of ["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","certify"])this.pipelines.set(entryPoint,await (entryPoint==="seed"||entryPoint==="localSpeed"?this.ownership.pipeline(layout,module,entryPoint,UNIFORM_MIXED_JOBS.all,{umDirectionalCertificate:+this.directionalCertificate}):this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umDirectionalCertificate:+this.directionalCertificate}}})));
+    for(const entryPoint of ["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","certify"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umDirectionalCertificate:+this.directionalCertificate}}}));
   }
   encode(encoder:GPUCommandEncoder,policy={fineReach:2,shellReach:1,twoLevel:true,shellOnly:true}):void{
     if(this.pipelines.size!==9)throw new Error("Mixed frame plan is not initialized");
     this.device.queue.writeBuffer(this.params,0,new Uint32Array([policy.fineReach,policy.shellReach,!policy.twoLevel?3:!policy.shellOnly?2:0,0]));
-    encoder.clearBuffer(this.ownership.support,this.ownership.capacity.tileCount*16,64);
+    encoder.clearBuffer(this.ownership.support,this.ownership.layout.tiles.length*16,64);
     const pass=encoder.beginComputePass({label:"Uniform shared frame plan"});
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);pass.setBindGroup(2,this.extendedGroup);
     this.dispatch(pass,["seed","dilate0","dilate1","dilate2"]);
@@ -206,7 +206,7 @@ var<workgroup> certifyBases:array<u32,2>;
   private dispatch(pass:GPUComputePassEncoder,entries:readonly string[]):void{
     for(const entry of entries){
       if(entry==="seed"||entry==="localSpeed"){this.ownership.dispatchAll(pass,this.pipelines.get(entry)!);continue;}
-      const groups=Math.ceil(this.ownership.capacity.tileCount/64);
+      const groups=Math.ceil(this.ownership.layout.tiles.length/64);
       pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));
     }
   }

@@ -24,16 +24,6 @@ export interface UniformMixedLayout {
   readonly regions: readonly { id: string; min: Triple; max: Triple }[];
 }
 
-/** What the host always knows of a live ownership: its lattice and tile
- * capacity. After a GPU-built generation is adopted the host has no layout
- * (no tile words, lists or owner count); every launch is sized by this. */
-export interface UniformMixedCapacity {
-  readonly lattice: RefinementRegionLattice;
-  readonly tileDimensions: Triple;
-  readonly tileCount: number;
-  readonly metadataBytes: number;
-}
-
 /** Manual Uniform ownership: h/4h, ungraded. Tiles outside regions take the
  * background width (h unless a coarse background is requested). */
 export function createUniformMixedLayout(
