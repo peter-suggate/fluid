@@ -75,7 +75,7 @@ import {
   unpackFineLevelSetPackedFlags,
   unpackFineLevelSetPackedPhi,
 } from "../lib/core/fine-levelset-packed-sample";
-import { getScenePreset } from "../lib/core/scenes";
+import { getSceneDefinition, getScenePreset } from "../lib/core/scenes";
 import type { WebGPUFineLevelSetBrickSource } from "../lib/core/levelset-consumer-abi";
 import { unpackAdaptivePhiReceipt } from "../lib/methods/losasso/webgpu-octree-losasso-adaptive-phi";
 import { adaptiveMassControlLayout, unpackAdaptiveMassReceipt } from
@@ -890,10 +890,12 @@ try {
         z: -0.5 * scene.container.depth_m + alignedMaxZ * h },
     }];
   }
-  const solverQuality = scenePreset.methodProfile?.quality ?? "balanced";
+  // The scene's lane profile, which the product no longer applies on open.
+  const laneProfile = getSceneDefinition(sceneId).methodProfile;
+  const solverQuality = laneProfile?.quality ?? "balanced";
   const solverValues = {
     ...losassoMethod.presetFor(solverQuality),
-    ...scenePreset.methodProfile?.overrides,
+    ...laneProfile?.overrides,
     secondaryParticles: "off",
     // Bisection handles only: the browser never sets these, and the untouched
     // probe is the shipped preset.

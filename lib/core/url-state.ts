@@ -467,21 +467,14 @@ function migrateLegacyOctreeMethodQuery(query: URLSearchParams): void {
  * one. Reading the halves separately is what keeps a solver swap in pane B
  * from costing a scene rebuild in pane A.
  */
-function methodQueryState(query: URLSearchParams, preset: ScenePreset): SerializableMethodState {
-  // Profiles preserve comparison settings for their named method, but method
-  // selection itself has one product-wide default. A bare scene URL must not
-  // silently switch back to an adaptive solver merely because the card stores
-  // its legacy comparison tuple; an explicit `method=` remains authoritative.
-  const profile = preset.methodProfile;
+function methodQueryState(query: URLSearchParams): SerializableMethodState {
+  // Every scene opens on the method defaults: a scene's lane profile is not a
+  // product setting, so only explicit `method=`/`quality=`/`param.*` keys differ.
   const methodId = exactMethod(query.get("method"))?.id ?? defaultMethodId();
   const qualityCandidate = query.get("quality") as GPUQuality | null;
   const quality = qualityCandidate && qualities.includes(qualityCandidate)
     ? qualityCandidate : "balanced";
-  const overrides: Record<string, MethodParamValues> = profile
-    ? { [profile.methodId]: { ...profile.overrides } } : {};
-
-  // Explicit `param.*` keys are deliberate tuning and win per key, so an A/B
-  // link can still vary one parameter of a profiled scene.
+  const overrides: Record<string, MethodParamValues> = {};
   for (const method of registeredSimulationMethods()) {
     const values: MethodParamValues = {};
     for (const spec of method.params) {
@@ -501,7 +494,7 @@ function methodQueryState(query: URLSearchParams, preset: ScenePreset): Serializ
 export function parseMethodQueryState(search: string): SerializableMethodState {
   const query = new URLSearchParams(search);
   migrateLegacyOctreeMethodQuery(query);
-  return methodQueryState(query, exactPreset(query.get("scene")) ?? getScenePreset(defaultScenePresetId));
+  return methodQueryState(query);
 }
 
 /**
@@ -521,7 +514,7 @@ export function parseQueryState(search: string): QueryState {
   const query = new URLSearchParams(search);
   migrateLegacyOctreeMethodQuery(query);
   const preset = exactPreset(query.get("scene")) ?? getScenePreset(defaultScenePresetId);
-  const { methodId, quality, overrides } = methodQueryState(query, preset);
+  const { methodId, quality, overrides } = methodQueryState(query);
 
   /**
    * The lattice comes back through the factory, not as a patched number.
@@ -779,13 +772,8 @@ export function serializeQueryState(
 
   query.set("scene", sceneState.presetId);
   runtimeFeatureQuery.write(query, runtimeState);
-  const preset = getScenePreset(sceneState.presetId);
-  const profile = preset.methodProfile;
   const baselineMethodId = defaultMethodId();
   const baselineQuality = "balanced";
-  // A catalog scene's authored runtime contract is implied by its identity.
-  // Writing it beside the scene made every clean card navigation look like a
-  // hand-tuned override and allowed the URL to drift if that contract changed.
   if (methodState.methodId !== baselineMethodId) query.set("method", methodState.methodId);
   if (methodState.quality !== baselineQuality) query.set("quality", methodState.quality);
   // The studio is the absence of the layer, not a second value: a link to a
@@ -818,10 +806,9 @@ export function serializeQueryState(
 
   for (const method of registeredSimulationMethods()) {
     const values = methodState.overrides[method.id] ?? {};
-    const baselineValues = method.id === profile?.methodId ? profile.overrides : {};
     for (const spec of method.params) {
       const value = values[spec.key];
-      if (value !== undefined && value !== baselineValues[spec.key]) {
+      if (value !== undefined) {
         query.set(`param.${method.id}.${spec.key}`, String(value));
       }
     }

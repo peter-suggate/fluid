@@ -330,12 +330,8 @@ export function sceneOverrideClearPlan(
       const [, methodId, ...rest] = key.split(".");
       const paramKey = rest.join(".");
       if (!registeredSimulationMethods().some((method) => method.id === methodId)) { reload.push(key); continue; }
-      // Restoring means the profile's value where the scene authors one, and
-      // only otherwise the quality chain: a profiled scene's baseline is its
-      // profile, which is what the URL diffed against in the first place.
-      const authored = preset.methodProfile?.methodId === methodId
-        ? preset.methodProfile.overrides[paramKey] : undefined;
-      methodParams.push({ methodId, key: paramKey, value: authored });
+      // Restoring means the quality chain: no scene carries a solver baseline.
+      methodParams.push({ methodId, key: paramKey, value: undefined });
       continue;
     }
     if (key.startsWith("camera.")) { ui.camera = cameraForPreset(preset); continue; }

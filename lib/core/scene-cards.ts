@@ -69,7 +69,7 @@ export function savedSceneCard(entry: SceneLibraryEntry): SceneCard {
       scene: loadSceneFromLibrary(entry),
       presetId: entry.presetId,
       camera: origin ? sceneDefinitionCamera(origin) : undefined,
-      methodProfile: entry.methodProfile ?? origin?.methodProfile,
+      methodProfile: entry.methodProfile,
     }),
   };
 }

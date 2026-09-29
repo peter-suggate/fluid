@@ -65,8 +65,6 @@ export interface ScenePreset {
   description: string;
   create(): SceneDescription;
   camera?: Partial<CameraState>;
-  /** Exact solver profile required for a numerical comparison/validation preset. */
-  methodProfile?: MethodProfile;
   /** Art-directed background that is part of this preset's presentation. */
   background: EnvironmentId;
   /** Whether the authored dry world is presented behind the raster water. */
@@ -3002,7 +3000,6 @@ export const scenePresets: ReadonlyArray<ScenePreset> = SCENE_CATALOG.map((defin
       return resolved ??= presentationModeForScene(definition, sceneDocument(definition));
     },
     camera: definition.camera,
-    methodProfile: definition.methodProfile,
     create: () => sceneDocument(definition),
   };
 });

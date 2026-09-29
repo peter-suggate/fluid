@@ -68,8 +68,8 @@ try {
     const currentSceneId = repeat === 0 ? sceneId : nextSceneId;
     const preset = getScenePreset(currentSceneId);
     const scene = preset.create();
-    const values = resolveMethodValues(method, "balanced",
-      preset.methodProfile?.methodId === methodId ? preset.methodProfile.overrides ?? {} : {});
+    // Opening a scene uses the method defaults, as the product does.
+    const values = resolveMethodValues(method, "balanced", {});
     const run: Record<string, unknown> = { repeat, sceneId: currentSceneId, values, progress: [] };
     runs.push(run);
     const moduleStart = modules.length, pipelineStart = pipelines.length, censusStart = readInitializationCensus().length;

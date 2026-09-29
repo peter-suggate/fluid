@@ -145,7 +145,13 @@ export interface SceneDefinition {
   /** Omit the generated container shell when the scene authors its own voxel vessel. */
   readonly containerShell?: "generated" | "authored";
   readonly camera?: Partial<CameraState>;
-  /** Exact solver profile a numerical comparison requires. */
+  /**
+   * Solver profile a numerical lane or probe runs this scene under.
+   *
+   * Lane metadata only: the product never applies it. Opening a scene uses the
+   * method defaults, and only a profile the reader saved with a library entry
+   * overrides them.
+   */
   readonly methodProfile?: MethodProfile;
   /** The document body, without environment or scenery. */
   readonly build: () => SceneDescription;
@@ -485,7 +491,6 @@ export function sceneCardForDefinition(definition: SceneDefinition): SceneCard {
       scene: sceneDocument(definition),
       presetId: definition.id,
       camera: sceneDefinitionCamera(definition),
-      methodProfile: definition.methodProfile,
     }),
   };
 }

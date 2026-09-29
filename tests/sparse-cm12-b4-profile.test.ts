@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { resolveMethodValues } from "../lib/core/method-contract";
-import { scenePresets, SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE, BOUNDED_POOL_TRANSFER_METHOD_PROFILE, SPARSE_CM12_SYMMETRIC_EXPANSION_METHOD_PROFILE } from "../lib/core/scenes";
+import { SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE, BOUNDED_POOL_TRANSFER_METHOD_PROFILE, SPARSE_CM12_SYMMETRIC_EXPANSION_METHOD_PROFILE } from "../lib/core/scenes";
 import { adaptiveMassMethod, adaptiveMassSolverOptions } from
   "../lib/methods/adaptive-volume/method";
 import { createSparseCM12FrameControl } from
@@ -30,27 +30,6 @@ test("Sparse CM12 exposes and normalizes the matched B4/P4 production profile", 
     presentationPageResolution:
       adaptiveMassSolverOptions(values).presentationPageResolution,
   }, { brickFineResolution: 4, presentationPageResolution: 4 });
-});
-
-test("Sparse CM12 defaults production scenes to matched B4/P4", () => {
-  const values = resolveMethodValues(adaptiveMassMethod, "balanced", {});
-  assert.equal(values.brickFineResolution, "4");
-  assert.equal(values.presentationPageResolution, "4");
-  assert.deepEqual({
-    brickFineResolution: adaptiveMassSolverOptions({}).brickFineResolution,
-    presentationPageResolution: adaptiveMassSolverOptions({}).presentationPageResolution,
-  }, { brickFineResolution: 4, presentationPageResolution: 4 });
-
-  const productionScenes = scenePresets.filter(
-    ({ methodProfile }) => methodProfile?.methodId === "adaptive-volume",
-  );
-  assert.ok(productionScenes.length > 0);
-  for (const scene of productionScenes) {
-    const sceneValues = resolveMethodValues(adaptiveMassMethod,
-      scene.methodProfile!.quality, scene.methodProfile!.overrides);
-    assert.equal(sceneValues.brickFineResolution, "4", scene.id);
-    assert.equal(sceneValues.presentationPageResolution, "4", scene.id);
-  }
 });
 
 test("B4 production selects surface distance while explicit comparison policies remain available", () => {
