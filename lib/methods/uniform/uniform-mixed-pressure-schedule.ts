@@ -1,4 +1,5 @@
 import type { UniformCM11aSchedule } from "./pressure-policy";
+import { UNIFORM_MIXED_FAILURE as FAIL, uniformMixedFrameStatusWGSL } from "./uniform-mixed-frame-status";
 
 /** Frames a skipped V phase stays skipped before V-cycles are probed again. */
 const UNIFORM_MIXED_SCHEDULE_V_PROBE=8;
@@ -15,9 +16,15 @@ export interface UniformMixedPressurePlan {readonly vCycles:number;readonly full
  * Full-Cycles, a stall tightens coarse accuracy 1 -> 0.1 -> 0) and writes the
  * slot gate word every kernel of a slot reads first: the native hierarchy's
  * (mgSkipCycle) and the pressure root's (umSlotClosed). A closed slot's
- * launches return at once. Running out of slots unconverged withholds the
- * projection and is fatal on the host; the projection gate reopens the
- * native hierarchy, and an accepted solve leaves every word open.
+ * launches return at once. A latched frame status (uniform-mixed-frame-status)
+ * closes every slot, this frame's and every later one's.
+ * The projection gate is the frame's verdict: it accepts only a converged,
+ * never-rejected solve whose h band fits and passed its solid certificate.
+ * Otherwise it latches the first cause in the frame status. It writes the
+ * projection's gate, the band's closed word (UniformPressureBand.closedWord:
+ * the band solve, projection and presentation stride no slots) and, on
+ * acceptance, the status's last accepted frame. It reopens the native
+ * hierarchy, and an accepted solve leaves every word open.
  * The last gate plans the next frame from the cycles this one ran, plus one
  * spare: a stalled V phase is dropped (re-probed every
  * UNIFORM_MIXED_SCHEDULE_V_PROBE frames), and the coarse accuracy a stall
@@ -42,7 +49,10 @@ export class UniformMixedPressureSchedule {
   private readonly state:GPUBuffer,private readonly tolerance:GPUBuffer,
   /** The slot gate words: the native hierarchy's state (mgSkipCycle word
    * 17) and the pressure root's support (umSlotClosed word 9n+24). */
-  private readonly words:{readonly native:GPUBuffer;readonly fine:GPUBuffer;readonly supportWord:number}){
+  private readonly words:{readonly native:GPUBuffer;readonly fine:GPUBuffer;readonly supportWord:number;
+   /** The frame status record and the band's index header (count, overflow,
+    * certificate, closed word). */
+   readonly status:GPUBuffer;readonly band:GPUBuffer;readonly bandClosedWord:number}){
   this.maximum={vCycles:schedule.vCycles,fullCycles:schedule.fullCycles};
   this.control=device.createBuffer({label:"Uniform mixed pressure schedule",size:128,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   device.queue.writeBuffer(this.control,36,new Float32Array([1]));
@@ -55,7 +65,8 @@ export class UniformMixedPressureSchedule {
 @group(0) @binding(2) var<storage,read_write> tolerance:array<f32,4>;
 @group(0) @binding(3) var<storage,read_write> native:array<u32>;
 @group(0) @binding(4) var<storage,read_write> fine:array<u32>;
-const VMAX=${VMAX}u;const FMAX=${FMAX}u;const SUPPORT_GATE=${this.words.supportWord}u;
+@group(0) @binding(6) var<storage,read_write> band:array<u32,8>;
+${uniformMixedFrameStatusWGSL(0,5,"read_write")}const VMAX=${VMAX}u;const FMAX=${FMAX}u;const SUPPORT_GATE=${this.words.supportWord}u;const BAND_CLOSED=${this.words.bandClosedWord}u;
 fn umF(word:u32)->f32{return bitcast<f32>(control[word]);}
 // The next frame's slot list and coarse accuracy, after an accepted solve:
 // the cycles of each kind this frame ran, one spare where the solve ended.
@@ -86,8 +97,21 @@ fn umPlan(){
    control[1]=next;control[3]=state[1];control[4]+=1u;control[select(17u,16u,step-1u<V)]+=1u;
    if(stalled){control[7]=1u;control[2]=bitcast<u32>(select(0.0,0.1,umF(2)==1.0));}
   }
-  var open=state[5]==0u&&state[4]==0u&&control[1]==step;
-  if(step==SLOTS){open=state[5]!=0u&&state[4]==0u;if(open){umPlan();}state[7]=control[4];}
+  var open=!umFrameFailed()&&state[5]==0u&&state[4]==0u&&control[1]==step;
+  if(step==SLOTS){
+   // The verdict: each of this frame's failures latches (the first cause
+   // wins; a frame after a latched one ran nothing and adds none), then the
+   // projection, the band and the plan open only on a healthy record.
+   if(!umFrameFailed()){
+    if(state[4]!=0u){umLatchFailure(select(${FAIL.pressureRejected}u,${FAIL.pressureNonfinite}u,state[0]>=0x7f800000u),state[0],state[1]);}
+    else if(state[5]==0u){umLatchFailure(${FAIL.pressureUnconverged}u,state[1],control[4]);}
+    if(band[1]!=0u){umLatchFailure(${FAIL.bandCapacity}u,band[0],0u);}
+    if(band[3]!=0u){umLatchFailure(${FAIL.bandSolidCertificate}u,band[3],0u);}
+   }
+   open=!umFrameFailed();
+   if(open){umPlan();atomicStore(&umStatus[6],atomicLoad(&umStatus[7]));}
+   band[BAND_CLOSED]=u32(!open);state[7]=control[4];
+  }
   control[5]=u32(open);
   // setCoarseAccuracy's words, for the native 4h continuation.
   let a=umF(2);tolerance[2]=0.1*a;tolerance[3]=tolerance[0]*0.1*a;
@@ -100,8 +124,8 @@ fn umPlan(){
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   this.pipeline=await this.device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
   const w=this.words;
-  this.group=this.device.createBindGroup({layout:this.pipeline.getBindGroupLayout(0),entries:[this.control,this.state,this.tolerance,w.native,w.fine]
-   .map((buffer,binding)=>({binding,resource:{buffer,size:binding===1?32:binding===2?16:binding===3?112:undefined}}))});
+  this.group=this.device.createBindGroup({layout:this.pipeline.getBindGroupLayout(0),entries:[this.control,this.state,this.tolerance,w.native,w.fine,w.status,w.band]
+   .map((buffer,binding)=>({binding,resource:{buffer,size:binding===1?32:binding===2?16:binding===3?112:binding===5?64:binding===6?32:undefined}}))});
  }
  /** Starts a frame's slot list for `plan`. The step counter restarts here. */
  begin(plan:UniformMixedPressurePlan):void{

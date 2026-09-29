@@ -10,6 +10,7 @@ import {getSceneDefinition} from "../lib/core/scenes";
 import {refinementRegionLattice} from "../lib/core/refinement-regions";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
 import type {GPUSolverInstance} from "../lib/core/method-contract";
+import {UNIFORM_ADVANCE_PHASE} from "../lib/methods/uniform/uniform-stages";
 
 // Phase 5 lane (docs/plans/uniform-dynamic-coarsening.md): the app's
 // Uniform Geometric method with coarsening=dynamic on the 128³ dam break.
@@ -51,15 +52,28 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    const b=device!.createBuffer({size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const e=device!.createCommandEncoder();copy(e,b);device!.queue.submit([e.finish()]);
    await b.mapAsync(GPUMapMode.READ);const out=b.getMappedRange().slice(0);b.unmap();b.destroy();return out;};
   const widths=async()=>Uint8Array.from(new Uint32Array(await readback((e,b)=>e.copyBufferToBuffer(host.mixedFrame.ownership.presentation.buffer,0,b,0,T*T*T*4),T*T*T*4)),w=>(w&0x80000000)?1:4);
-  const phi=async()=>{const t=host.vertexPhiField as GPUTexture,row=Math.ceil(t.width*4/256)*256;
-   const raw=new Float32Array(await readback((e,b)=>e.copyTextureToBuffer({texture:t},{buffer:b,bytesPerRow:row,rowsPerImage:t.height},[t.width,t.height,t.depthOrArrayLayers]),row*t.height*t.depthOrArrayLayers));
-   return (x:number,y:number,z:number)=>raw[(z*t.height+y)*(row/4)+x]!;};
+  // Horizon one adopts and remaps at the frame head, and the same frame then
+  // transports phi at h. The refine invariant is checked where it holds:
+  // right after the remap (the head's census phase), before any transport.
+  const vt=host.vertexPhiField as GPUTexture,vrow=Math.ceil(vt.width*4/256)*256;
+  const headPhi=device.createBuffer({size:vrow*vt.height*vt.depthOrArrayLayers,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  const headOwners=device.createBuffer({size:T*T*T*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  let headCaptured=false;
+  host.mixedFrameTrace=()=>({instrument:(e:GPUCommandEncoder)=>e,submit(){},submitted(){},abort(){},
+   phase(e:GPUCommandEncoder,phase:unknown){
+    if(headCaptured||phase!==UNIFORM_ADVANCE_PHASE.resolutionCensus)return;headCaptured=true;
+    e.copyTextureToBuffer({texture:vt},{buffer:headPhi,bytesPerRow:vrow,rowsPerImage:vt.height},[vt.width,vt.height,vt.depthOrArrayLayers]);
+    e.copyBufferToBuffer(host.mixedFrame.ownership.presentation.buffer,0,headOwners,0,T*T*T*4);}});
+  const headWidths=async()=>Uint8Array.from(new Uint32Array(await readback((e,b)=>e.copyBufferToBuffer(headOwners,0,b,0,T*T*T*4),T*T*T*4)),w=>(w&0x80000000)?1:4);
+  const headPhiAt=async()=>{const raw=new Float32Array(await readback((e,b)=>e.copyBufferToBuffer(headPhi,0,b,0,headPhi.size),headPhi.size));
+   return (x:number,y:number,z:number)=>raw[(z*vt.height+y)*(vrow/4)+x]!;};
   let previous:Uint8Array|undefined,refinedTiles=0;
   let relayouts=0,coarsest=Infinity,finest=0;const wall:number[]=[],shapes:string[]=[];
   for(let step=1;step<=STEPS;step++){
    // Watch from the third frame: the first frames grow the band, the tap
    // cache and the pressure records to their working sizes.
    watching=step>2;
+   headCaptured=false;
    const start=performance.now();assert.ok(solver.advanceTo(step/30,[]));await solver.awaitFrameCompletion?.();wall.push(performance.now()-start);
    await solver.readStats();
    const fine=Number(info.uniformMixedFineTiles),four=Number(info.uniformMixedCoarseTiles);
@@ -68,15 +82,16 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    shapes.push(`${fine}/${four}`);
    assert.ok(Math.abs(Number(info.volumeDrift))<1e-4,`step ${step}: volume drift ${info.volumeDrift}`);
    const was=watching;watching=false;
-   const current=await widths(),P=await phi();
+   assert.ok(headCaptured,`step ${step}: no frame head census phase`);
+   const current=await widths(),head=await headWidths(),P=await headPhiAt();
    for(let t=0;previous&&t<T*T*T;t++){
-    if(previous[t]!==4||current[t]!==1)continue;refinedTiles++;
+    if(previous[t]!==4||head[t]!==1)continue;refinedTiles++;
     const o=[t%T,(t>>5)%T,t>>10].map(c=>4*c) as [number,number,number];
     for(let z=0;z<=4;z++)for(let y=0;y<=4;y++)for(let x=0;x<=4;x++){
      const p=[o[0]+x,o[1]+y,o[2]+z] as [number,number,number];
      // Vertices shared with a 4h tile are derived there, not stored.
      let derived=false;
-     for(let k=0;k<8;k++){const q=p.map((c,a)=>Math.floor((c-((k>>a)&1))/4));if(q.every(c=>c>=0&&c<T)&&current[q[0]!+T*(q[1]!+T*q[2]!)]===4)derived=true;}
+     for(let k=0;k<8;k++){const q=p.map((c,a)=>Math.floor((c-((k>>a)&1))/4));if(q.every(c=>c>=0&&c<T)&&head[q[0]!+T*(q[1]!+T*q[2]!)]===4)derived=true;}
      if(derived||p.some(c=>c>N))continue;
      let want=0;for(let k=0;k<8;k++){let w=1;const c=[0,1,2].map(a=>{const f=(p[a]!-o[a]!)/4,bit=(k>>a)&1;w*=bit?f:1-f;return o[a]!+4*bit;});want+=w*P(c[0]!,c[1]!,c[2]!);}
      assert.ok(Math.abs(P(...p)-want)<=1e-4*h,`step ${step}: refined tile ${t} vertex ${p} phi ${P(...p)/h} h, its 4h surface gives ${want/h} h`);

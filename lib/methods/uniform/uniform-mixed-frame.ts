@@ -5,14 +5,14 @@ import {UniformMixedCleanup} from "./uniform-mixed-cleanup";
 import {UniformMixedFramePlan} from "./uniform-mixed-frame-plan";
 import {UniformMixedOwnershipTransfer,UniformMixedRemap} from "./uniform-mixed-remap";
 import {UniformMixedPhiResolve} from "./uniform-mixed-phi-resolve";
-import {mixedCellWidth,uniformMixedAllCoarseLayout} from "./uniform-mixed-layout";
+import {uniformMixedAllCoarseLayout} from "./uniform-mixed-layout";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
-import type {UniformMixedBuiltLevel} from "./uniform-mixed-layout-builder";
+import {UNIFORM_MIXED_RELAYOUT_RECEIPT} from "./uniform-mixed-layout-builder";
 import type {UniformScratchArena} from "./uniform-scratch-arena";
 import type {WebGPUUniformPressureMultigrid} from "./webgpu-uniform-pressure-multigrid";
 import type {WebGPUUniformVelocityExtrapolator} from "./webgpu-uniform-velocity-extrapolation";
 import {UniformMixedTransportStage} from "./uniform-mixed-transport";
-import {UniformMixedOwnership} from "./uniform-mixed-ownership";
+import {UniformMixedOwnership,type UniformMixedGenerationBuffers} from "./uniform-mixed-ownership";
 import {UniformMixedExtension} from "./uniform-mixed-extension";
 import {UniformMixedHangingTaps, UniformMixedMomentumCache} from "./uniform-mixed-momentum-cache";
 import {UniformMixedSurface} from "./uniform-mixed-surface";
@@ -27,6 +27,7 @@ import {UniformMixedPressureVelocity} from "./uniform-mixed-pressure-velocity";
 import {UniformMixedPressureCycles,type UniformMixedPressureCycleLevel} from "./uniform-mixed-pressure-cycles";
 import {UniformMixedPressureAcceptance} from "./uniform-mixed-pressure-acceptance";
 import {UniformMixedPressureSchedule,type UniformMixedPressurePlan} from "./uniform-mixed-pressure-schedule";
+import {UNIFORM_MIXED_STATUS,UNIFORM_MIXED_STATUS_WORDS,describeUniformMixedFrameStatus} from "./uniform-mixed-frame-status";
 import {planUniformMixedPressureMemory} from "./uniform-mixed-pressure-memory";
 import {DEFAULT_UNIFORM_CM11A_SCHEDULE,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_RELATIVE_REDUCTION,type UniformCM11aSchedule} from "./pressure-policy";
 import type {GPUTimestampPhase} from "../../core/performance-trace";
@@ -62,9 +63,10 @@ export interface UniformMixedFrameFields {
  /** Two-stage pressure: an all-4h solve, then the h surface band
   * (UniformPressureBand). With solids, the all-4h levels read the static
   * coarse solid record and every liquid solid-coupled tile joins the band.
-  * Unless the simulation is itself all-4h, the solve runs split: in the
-  * all-4h ownership with its own surface target and centre phi here, the
-  * simulation's own staying intact for the renderer. */
+  * The solve always runs split, an all-4h simulation too (its transfer is the
+  * identity and its band empty): in the all-4h ownership with its own surface
+  * target and centre phi here, the simulation's own staying intact for the
+  * renderer. */
  pressureGeometry:{target:GPUTexture;centerPhi:GPUTexture};
 }
 export interface UniformMixedFrameParameters {
@@ -90,8 +92,19 @@ export const UNIFORM_MIXED_RECEIPT_RING=2;
  * on, encodes the fluid-to-body exchange and the body integration after the
  * projection, before the census. */
 export interface UniformMixedFrameBodies{couple?:(encoder:GPUCommandEncoder)=>void}
+/** Dynamic coarsening at horizon one (UniformMixedFrame.setRelayout): the
+ * census and layout builder the frame head encodes, with no readback. */
+export interface UniformMixedFrameRelayout{
+ /** Census and build for this frame's dt, after the head's extension of the
+  * state the frame starts from and before the adopt. */
+ encode(encoder:GPUCommandEncoder,dt:number):void;
+ /** The built generation's buffers (UniformMixedLayoutBuilder.generation). */
+ readonly generation:UniformMixedGenerationBuffers;
+ /** The builder's relayout receipt (UNIFORM_MIXED_RELAYOUT_RECEIPT). */
+ readonly receipt:{readonly buffer:GPUBuffer;readonly offset:number;readonly words:number};
+}
 export interface UniformMixedFrameReceipt{cycles:number;encoded:number;residual:number;converged:boolean;dustOwners:number;dustMass_cells:number;orphanDustOwners:number;orphanDustMass_cells:number;
- /** The h band this frame re-solved: tiles, completed cycles, final residual (0 when pressure matched bulk). */
+ /** The h band this frame re-solved: tiles, completed cycles, final residual (0 when the band is empty). */
  bandTiles:number;bandCycles:number;bandResidual:number}
 export class UniformMixedFrame {
  readonly transport:UniformMixedTransportStage;
@@ -116,9 +129,6 @@ export class UniformMixedFrame {
   geometry:UniformMixedSurfaceGeometry;geometryGroup:GPUBindGroup;authority:UniformMixedPressureAuthority;authorityGroup:GPUBindGroup;
   rhsGroup:GPUBindGroup;projectionGroup:GPUBindGroup;
  };
- /** The simulation layout is all-4h: pressure and simulation layouts are
-  * identical, so pressure binds the simulation fields directly. */
- private pressureMatchesSimulation=false;
  /** Two-stage pressure: every pressure level is all-4h and
   * UniformPressureBand re-solves the h surface band after it. */
  private readonly band:UniformPressureBand;
@@ -168,11 +178,15 @@ export class UniformMixedFrame {
  private readonly momentumGroup:GPUBindGroup;
  private readonly forceGroup:GPUBindGroup;
  private readonly authorityGroup:GPUBindGroup;
- private readonly rhsGroup:GPUBindGroup;
- private readonly projectionGroup:GPUBindGroup;
  private readonly acceptanceGroup:GPUBindGroup;
  private readonly params:Record<"extension"|"surface"|"momentum"|"forces"|"authority"|"sharpen"|"projection"|"acceptance",GPUBuffer>;
  private readonly state:GPUBuffer;
+ /** The sticky GPU failure record (uniform-mixed-frame-status): the pressure
+  * schedule's last gate is the frame's verdict and latches it; a latched
+  * record closes every later pressure slot, the band and the transfer back
+  * to simulation. Stages that detect their own failures bind it read_write
+  * (umLatchFailure). Never cleared: a failed frame fails the sequence. */
+ readonly status:GPUBuffer;
  /** Receipt ring: a frame's receipt maps while later frames encode. */
  private readonly readbacks:readonly GPUBuffer[];
  /** Ring slots whose frame's receipt has not been checked yet. */
@@ -183,7 +197,7 @@ export class UniformMixedFrame {
   * which receipts have mapped depends on wall-clock timing, so a newest-wins
   * plan made free-running and awaited runs diverge. The receipt ring makes
   * frame N reuse that frame's buffer, so its receipt is always checked. */
- private readonly lagged=new Map<number,{plan:UniformMixedPressurePlan;bandTiles:number}>();
+ private readonly lagged=new Map<number,UniformMixedPressurePlan>();
  private readonly reductions:GPUBuffer;
  private pressureSchedule!:UniformMixedPressureSchedule;
  /** The slot list of the first UNIFORM_MIXED_RECEIPT_RING frames: conservative. */
@@ -193,7 +207,7 @@ export class UniformMixedFrame {
  private ready=false;
  private busy=false;
  private failed=false;
- get allocatedBytes():number{return (this.displacement?.allocatedBytes??0)+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+this.transport.allocatedBytes+this.remap.allocatedBytes+(this.split?.transfer.allocatedBytes??0)+this.levels.filter(l=>l.ownership!==this.ownership).reduce((n,l)=>n+l.ownership.allocatedBytes,0)+this.owned.reduce((n,r)=>n+("size" in r?r.size:r.width*r.height*r.depthOrArrayLayers*16),0);}
+ get allocatedBytes():number{return (this.displacement?.allocatedBytes??0)+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+this.transport.allocatedBytes+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.levels.filter(l=>l.ownership!==this.ownership).reduce((n,l)=>n+l.ownership.allocatedBytes,0)+this.owned.reduce((n,r)=>n+("size" in r?r.size:r.width*r.height*r.depthOrArrayLayers*16),0);}
  constructor(private readonly device:GPUDevice,layout:UniformMixedLayout,private readonly fields:UniformMixedFrameFields,openTop:boolean,private readonly schedule:UniformCM11aSchedule=DEFAULT_UNIFORM_CM11A_SCHEDULE){
   if(layout.cellCount!==layout.tiles.length*64)throw new Error("Unified frame must reserve its capacity with fine ownership");
   const f=fields;
@@ -201,8 +215,9 @@ export class UniformMixedFrame {
   const uniform=(name:string,size:number)=>buffer(`Uniform ${name} parameters`,size,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
   this.params={extension:uniform("extension",16),surface:uniform("surface",32),momentum:uniform("momentum",32),forces:uniform("forces",48),authority:uniform("authority",16),sharpen:uniform("sharpen",32),projection:uniform("projection",32),acceptance:uniform("acceptance",16)};
   this.state=buffer("Uniform pressure acceptance",32,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
+  this.status=buffer("Uniform mixed frame status",4*UNIFORM_MIXED_STATUS_WORDS,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.initialPlan={vCycles:schedule.vCycles,fullCycles:schedule.fullCycles};
-  this.readbacks=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},(_,i)=>buffer(`Uniform pressure receipt and mass accounting ${i}`,120,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ));
+  this.readbacks=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},(_,i)=>buffer(`Uniform pressure receipt and mass accounting ${i}`,120+4*UNIFORM_MIXED_STATUS_WORDS,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ));
   this.reductions=buffer("Uniform dust accounting",48,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC);
   const caches=Array.from({length:1},(_,i)=>{const t=device.createTexture({label:`Uniform 4h sampling cache ${i}`,size:layout.lattice.dimensions.map(n=>n/4+2),dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});this.owned.push(t);return t;});
   const coarseLayout=uniformMixedAllCoarseLayout(layout);
@@ -224,13 +239,8 @@ export class UniformMixedFrame {
   // Pressure's all-4h root keeps the mixed rows; the native hierarchy
   // solves its correction from its n/4 level.
   // With solids, the root's topology is the static all-4h solid record,
-  // copied each advance into the conditioning buffer directly after the
-  // all-4h phi (the root reads it as its phi binding's tail).
-  if(solid?.coarse){
-   const r=memory.root.phi,base=4*Math.ceil(layout.tiles.length*4/256)*64,bytes=16*solid.coarse.count;
-   if(base+bytes>r.size)throw new Error("Band solid topology does not fit behind the all-4h phi");
-   this.solidTopology={buffer:f.conditioning,offset:r.offset+base,size:bytes};
-  }
+  // read in place: rebuilt only when the solids change, never copied.
+  if(solid?.coarse)this.solidTopology={buffer:solid.coarse.record,size:16*solid.coarse.count};
   {const r=memory.root;
    this.levels=[{ownership:new UniformMixedOwnership(device,coarseLayout,false),pressure:view(r.pressure),rhs:[view(r.rhs[0]),view(r.rhs[1])],minimum:[view(r.minimum[0]),view(r.minimum[1])],phi:view(r.phi,true),frozen:view(r.frozen),residual:view(r.residual),
     topology:f.solid?{buffer:this.solidTopology!}:undefined}];}
@@ -272,11 +282,6 @@ export class UniformMixedFrame {
    return [this.projection.bindRhs({...common,correction:f.correction,rhs:root.rhs[0],minimum:root.minimum![0]!,pressure:root.pressure,fine}),
     this.projection.bindProjection({...common,pressure:root.pressure,centerPhi,volume,output:output.velocity,outputNegative:{buffer:output.negative}})] as const;
   };
-  // Unsplit (an all-4h simulation) the forced field IS the input, and a
-  // writable buffer cannot be bound twice. Its cut-face taps never run there:
-  // no tile is simulated at h (umSolidCut), so bind the idle output pair.
-  [this.rhsGroup,this.projectionGroup]=bindProjection({velocity:f.velocityScratch,negative:f.negativeScratch},{velocity:f.velocity,negative:f.negative},f.centerPhi,f.volume,
-   coarseSolid?{velocity:f.velocity,negative:f.negative}:undefined);
   const g=f.pressureGeometry;
   {
    // Split: the forced field reaches pressure ownership in velocity/negative
@@ -294,15 +299,15 @@ export class UniformMixedFrame {
    this.presentation={pressure:{buffer:present("pressure",4*uniformMixedPressureStorage(p.layout).count)},phi:{buffer:present("pressure phi and stage grids",4*(this.stageGridWord+uniformStageGridWords(n)))}};
    const geometry=new UniformMixedSurfaceGeometry(device,p,solid,false),authority=new UniformMixedPressureAuthority(device,p,solid,coarseSolid);
    this.split={transfer,rhsGroup,projectionGroup,
-    toPressure:transfer.bind({volume:f.volume,velocity:f.velocityScratch,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,negative:f.negative}),
-    toSimulation:transfer.bind({volume:f.volume,velocity:f.velocityScratch,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,negative:f.negative}),
+    toPressure:transfer.bind({volume:f.volume,velocity:f.velocityScratch,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,negative:f.negative},this.status),
+    toSimulation:transfer.bind({volume:f.volume,velocity:f.velocityScratch,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,negative:f.negative},this.status),
     // The resolved simulation phi holds every 4h corner's vertex value.
     geometry,geometryGroup:geometry.bind(f.phi,g.target,g.centerPhi),
     authority,authorityGroup:authority.bind({centerPhi:g.centerPhi,volume:f.volumeScratch,targetFill:g.target,phi:root.phi!,phase:f.phase,correction:f.correction,scratch:root.frozen,params:this.params.authority,
      fine:coarseSolid?{centerPhi:f.centerPhi,volume:f.volume}:undefined})};
   }
   this.bandParams=uniform("pressure band",48);
-  this.surfaceBand=new UniformPressureSurfaceBand(device,layout,f.phi);
+  this.surfaceBand=new UniformPressureSurfaceBand(device,o,f.phi);
   this.band=new UniformPressureBand(device,o,p,{phi:root.phi!,correction:f.correction,vertexPhi:f.phi,
    forced:{velocity:f.velocityScratch,negative:f.negativeScratch},velocity:f.velocity,negative:f.negative,copy:f.velocityScratch,
    coarsePressure:root.pressure,params:this.bandParams,presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+layout.tiles.length}},undefined,solid);
@@ -318,7 +323,7 @@ export class UniformMixedFrame {
  async initialize():Promise<void>{
   const root=this.pressureOwnership;
   this.pressureSchedule=new UniformMixedPressureSchedule(this.device,this.schedule,this.state,this.fields.pressure.tolerance,
-   {native:this.fields.pressure.diagnostics,fine:root.support,supportWord:9*root.layout.tiles.length+24});
+   {native:this.fields.pressure.diagnostics,fine:root.support,supportWord:9*root.layout.tiles.length+24,status:this.status,band:this.band.index,bandClosedWord:UniformPressureBand.closedWord});
   await Promise.all([this.solid,this.displacement,this.transport,this.plan,this.cleanup,this.remap,this.phiResolve,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.geometry,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band]
    .map(stage=>stage?.initialize()));
   this.ready=true;
@@ -329,10 +334,7 @@ export class UniformMixedFrame {
   * advance runs with identical parameters. */
  private reusableExtension?:string;
  /** Any state, parameter or ownership change between frames. */
- invalidateExtension():void{this.reusableExtension=undefined;this.extensionRemapped=false;this.geometryCurrent=false;}
- /** The reusable extension was remapped across a relayout: its plan, phase
-  * and geometry belong to the old ownership and are rebuilt. */
- private extensionRemapped=false;
+ invalidateExtension():void{this.reusableExtension=undefined;this.geometryCurrent=false;}
  /** A live voxel edit rewrote the host's solid mask: rebuild the all-4h
   * record and the cut widths, and displace liquid out of newly solid h
   * cells at the next frame's head. The host has already promoted every
@@ -354,16 +356,16 @@ export class UniformMixedFrame {
  }
  private encodeExtensionOf(encoder:GPUCommandEncoder,p:UniformMixedFrameParameters):void{
   this.plan.encode(encoder,p.supportPolicy);
-  // Split: the last pressure setup left phase in pressure ownership. Phase
-  // only: the advance's authority rewrites phi, correction and balance
-  // before their readers (band rows, RHS).
-  if(!this.pressureMatchesSimulation)this.authority.encode(encoder,this.authorityGroup,false);
+  // The last pressure setup left phase in pressure ownership. Phase only:
+  // the advance's authority rewrites phi, correction and balance before
+  // their readers (band rows, RHS).
+  this.authority.encode(encoder,this.authorityGroup,false);
   this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2);
   this.reusableExtension=extensionKey(p);
  }
  private write(p:UniformMixedFrameParameters):void{
   this.lastParameters=p;
-  const h=this.ownership.layout.lattice.cellSize_m;
+  const h=this.ownership.capacity.lattice.cellSize_m;
   const floats=(b:GPUBuffer,v:number[])=>this.device.queue.writeBuffer(b,0,new Float32Array(v));
   const flags=(b:GPUBuffer,v:number[])=>this.device.queue.writeBuffer(b,16,new Uint32Array(v));
   floats(this.params.extension,[...h,0]);floats(this.params.surface,[...h,p.dt]);flags(this.params.surface,[+p.openTop,+p.cubic,+p.drain,4]);
@@ -372,32 +374,30 @@ export class UniformMixedFrame {
   floats(this.params.authority,[p.dt,p.surfaceDeficitBalancing===true?0:-1,0,p.dust]);floats(this.params.sharpen,[p.sharpeningStrength,p.sharpeningDistance,p.dust,p.orphanDust??0,0,0,0,0]);
   floats(this.params.projection,[...h,p.dt,p.density,+p.openTop,0,p.dust]);floats(this.params.acceptance,[p.dt/p.density,p.pressureTolerance,UNIFORM_PRESSURE_RELATIVE_REDUCTION,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE]);
   floats(this.bandParams,[...h,p.dt,p.density,+p.openTop,p.dt/p.density,Math.min(...h),0,...h.map(x=>Math.fround(1/Math.fround(Math.fround(x)*Math.fround(x))))]);
-  this.device.queue.writeBuffer(this.presentation.phi.buffer,4*this.stageGridWord,uniformStageGridHeader(this.ownership.layout.tiles.length,this.stageBandTiles));
+  this.device.queue.writeBuffer(this.presentation.phi.buffer,4*this.stageGridWord,uniformStageGridHeader(this.ownership.capacity.tiles,this.stageBandTiles));
  }
  /** Copies one stage's tile words (or the band bits) into the stage grids. */
  private recordStageGrid(encoder:GPUCommandEncoder,source:GPUBuffer,range:"transport"|"pressure"|"band"):void{
-  const n=this.ownership.layout.tiles.length,words=range==="band"?Math.ceil(n/32):n;
+  const n=this.ownership.capacity.tiles,words=range==="band"?Math.ceil(n/32):n;
   const at=this.stageGridWord+UNIFORM_STAGE_GRID_HEADER_WORDS+(range==="transport"?0:range==="pressure"?n:2*n);
   encoder.copyBufferToBuffer(source,0,this.presentation.phi.buffer,4*at,4*words);
  }
  /** Discarded mass uses native sixty-fourths-of-threshold counters, weighted
   * by owner volume. It is a quantized lower bound; counts name owners, not
   * fine cells. Counters are reset once per frame, before transport cleanup. */
- /** census: the dynamic classifier and layout builder, encoded after this
-  * frame's extension into its last submission, so their readback shares the
-  * frame's final map instead of costing the host a second round trip.
-  * extendTail: extend this frame's final velocity for the next advance
-  * even without a census (a frame encoded while an earlier census is still
-  * mapping: the relayout that census adopts remaps it).
+ /** extendTail: extend this frame's final velocity for the next frame
+  * head's census (and reuse it there when the key still matches).
   * Encodes and submits synchronously; the promise is the frame's receipt,
   * checked when its map resolves while later frames encode. A failed receipt
   * rejects naming its frame and fails the frame for every later advance. */
- advance(p:UniformMixedFrameParameters,trace?:UniformMixedFrameTrace,census?:(encoder:GPUCommandEncoder)=>(()=>void),extendTail=census!==undefined,bodies?:UniformMixedFrameBodies):Promise<UniformMixedFrameReceipt>{
+ advance(p:UniformMixedFrameParameters,trace?:UniformMixedFrameTrace,extendTail=false,bodies?:UniformMixedFrameBodies):Promise<UniformMixedFrameReceipt>{
   if(bodies&&!this.solid)throw new Error("This mixed frame was built without solids; rigid bodies need the solid library");
   if(!this.ready||this.busy||this.failed)throw new Error("Unified frame is not ready for an advance");
   const readback=this.readbacks.find(b=>!this.unchecked.has(b));
   if(!readback)throw new Error(`Uniform mixed frame has ${this.readbacks.length} unchecked receipts; the host must check one before encoding frame ${this.frameIndex+1}`);
   this.busy=true;const frame=++this.frameIndex;
+  // The frame a failure latched in this advance is recorded as.
+  this.device.queue.writeBuffer(this.status,4*UNIFORM_MIXED_STATUS.currentFrame,new Uint32Array([frame]));
   const releases:(()=>void)[]=[];
   try{
    for(const ownership of new Set([this.ownership,...this.levels.map(l=>l.ownership)]))releases.push(ownership.acquireFrame());
@@ -410,15 +410,19 @@ export class UniformMixedFrame {
    // exist), with the tile cut map every solid helper gates on, before the
    // displacement and the band's tile list read them.
    this.solid?.encodeCoarse(encoder);
-   // A live solid edit, or the cells bodies entered, lands on the live
-   // (host-promoted) ownership.
-   if(this.solidEditPending||bodies){this.displacement!.encode(encoder,this.fields.volume,!this.solidEditPending);this.solidEditPending=false;}
+   // A host layout: a live solid edit, or the cells bodies entered, lands on
+   // the live (host-promoted) ownership. A GPU relayout displaces after its
+   // adopt, on the generation that promoted them (encodeRelayoutHead).
+   const relayout=this.relayout;
+   if(!relayout&&(this.solidEditPending||bodies)){this.displacement!.encode(encoder,this.fields.volume,!this.solidEditPending);this.solidEditPending=false;}
    // Submit the frame in segments as it encodes: the GPU starts each one
    // while the host encodes the next, instead of idling through the whole
    // frame's encode. Queue writes made while a later segment encodes land
    // after the earlier segments, which never read them.
    const flush=()=>{trace?.submit(encoder,this.fields.negative);this.device.queue.submit([encoder.finish()]);encoder=makeEncoder();};
    encoder.clearBuffer(this.reductions);
+   if(relayout)this.encodeRelayoutHead(encoder,p,relayout,bodies!==undefined,trace);
+   else{
    // Which cut tiles the simulation holds at h: the all-4h levels read their h texels.
    if(this.solidWidthsStale){this.solid?.encodeSimulation(encoder,this.ownership.presentation);this.solidWidthsStale=false;}
    if(this.solid)trace?.phase(encoder,V.solids);
@@ -428,8 +432,8 @@ export class UniformMixedFrame {
    // live layout's, and velocityScratch holds the extension.
    // The h phi field survives bulk relayout unchanged.
 
-   const reuse=this.reusableExtension===extensionKey(p),remapped=reuse&&this.extensionRemapped;this.reusableExtension=undefined;this.extensionRemapped=false;
-   if(!reuse||remapped){
+   const reuse=this.reusableExtension===extensionKey(p);this.reusableExtension=undefined;
+   if(!reuse){
     this.plan.encode(encoder,p.supportPolicy);if(!this.geometryCurrent)this.geometry.encode(encoder,this.geometryGroup);
     // Phase only: the authority below (split: the simulation authority
     // before the band rows, then the pressure authority) rewrites phi, every
@@ -437,6 +441,7 @@ export class UniformMixedFrame {
     this.authority.encode(encoder,this.authorityGroup,false);
     trace?.phase(encoder,V.support);
     if(!reuse){this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2);trace?.phase(encoder,V.extension);}
+   }
    }
    this.plan.encodeCertificate(encoder,p.dt);this.cache.encode(encoder,this.cacheGroup);this.hanging.encode(encoder,this.hangingGroup);
    trace?.phase(encoder,V.transportReach);
@@ -463,14 +468,11 @@ export class UniformMixedFrame {
    // need this frame's simulation authority and u*, both rewritten in
    // pressure ownership by the split below.
    this.surfaceBand.encode(encoder);this.recordStageGrid(encoder,this.surfaceBand.band.buffer,"band");
-   if(!this.pressureMatchesSimulation){this.authority.encode(encoder,this.authorityGroup);this.band.encodePrepare(encoder);}
-   const split=this.pressureMatchesSimulation?undefined:this.split;
-   if(split){
-    split.transfer.encodeToPressure(encoder,split.toPressure);
-    split.geometry.encode(encoder,split.geometryGroup);split.authority.encode(encoder,split.authorityGroup);
-   }else this.authority.encode(encoder,this.authorityGroup);
-   if(this.solidTopology)encoder.copyBufferToBuffer(this.solid!.coarse!.record,0,this.solidTopology.buffer,this.solidTopology.offset!,this.solidTopology.size!);
-   this.projection.encode(encoder,"rhs",split?.rhsGroup??this.rhsGroup);this.cycles.encodeSetup(encoder);
+   this.authority.encode(encoder,this.authorityGroup);this.band.encodePrepare(encoder);
+   const split=this.split;
+   split.transfer.encodeToPressure(encoder,split.toPressure);
+   split.geometry.encode(encoder,split.geometryGroup);split.authority.encode(encoder,split.authorityGroup);
+   this.projection.encode(encoder,"rhs",split.rhsGroup);this.cycles.encodeSetup(encoder);
    this.cycles.encodeMeasure(encoder);this.acceptance.encode(encoder,this.acceptanceGroup,this.state,"initial");
    trace?.phase(encoder,A.pressureSetup);
    // The conservative schedule is encoded whole; GPU gates run only the
@@ -478,7 +480,7 @@ export class UniformMixedFrame {
    const plannedBy=frame-UNIFORM_MIXED_RECEIPT_RING,lagged=this.lagged.get(plannedBy);
    if(plannedBy>0&&!lagged)throw new Error(`Uniform mixed frame ${frame} encoded before frame ${plannedBy}'s receipt was checked`);
    this.lagged.delete(plannedBy);
-   const schedule=this.pressureSchedule,plan=lagged?.plan??this.initialPlan,vCycles=plan.vCycles;
+   const schedule=this.pressureSchedule,plan=lagged??this.initialPlan,vCycles=plan.vCycles;
    schedule.begin(plan);
    for(let slot=0;slot<schedule.slots;slot++){
     const gated=schedule.gate(encoder,slot);
@@ -488,36 +490,28 @@ export class UniformMixedFrame {
    }
    // Projection reads the accepted iterate; the all-4h root has no seam,
    // so no reconstruction slope. Its gate enables it only on acceptance.
-   this.projection.encode(schedule.gate(encoder,schedule.slots),"project",split?.projectionGroup??this.projectionGroup);
+   this.projection.encode(schedule.gate(encoder,schedule.slots),"project",split.projectionGroup);
    schedule.end();
    trace?.phase(encoder,A.pressureProjection);
-   if(split){
-    split.transfer.encodeToSimulation(encoder,split.toSimulation);
-    this.band.encodeSolve(encoder,lagged?.bandTiles??0);
-   }
+   split.transfer.encodeToSimulation(encoder,split.toSimulation);
+   this.band.encodeSolve(encoder);
    const root=this.levels[0]!;
    // Present the live all-4h words only: level 0 keeps the simulation
    // layout's capacity, but its owners and boundary slots are all-4h.
    for(const [from,to,words] of [[root.pressure,this.presentation.pressure,this.pressureWords],[root.phi!,this.presentation.phi,this.pressureOwnership.layout.cellCount]] as const)encoder.copyBufferToBuffer(from.buffer,from.offset??0,to.buffer,0,4*words);
    this.recordStageGrid(encoder,this.pressureOwnership.presentation.buffer,"pressure");
-   {
-    // The h band re-solved this frame, or none when pressure matched bulk.
-    const n=this.ownership.layout.tiles.length,at=4*this.stageBandWord;
-    // The live band pressures were presented by the band's own slot launch.
-    if(split)encoder.copyBufferToBuffer(this.band.index,this.band.slotMapOffset,this.presentation.phi.buffer,at,4*n);
-    else encoder.clearBuffer(this.presentation.phi.buffer,at,4*n);
-   }
+   // The h band re-solved this frame (empty on an all-4h simulation); the
+   // live band pressures were presented by the band's own slot launch.
+   encoder.copyBufferToBuffer(this.band.index,this.band.slotMapOffset,this.presentation.phi.buffer,4*this.stageBandWord,4*this.ownership.capacity.tiles);
    trace?.phase(encoder,V.band);
    // Native coupleRigid and the rigid integration read the projected field;
    // the census below promotes around the integrated poses.
    if(bodies?.couple){bodies.couple(encoder);trace?.phase(encoder,A.rigidCoupling);}
    encoder.copyBufferToBuffer(this.state,0,readback,0,32);encoder.copyBufferToBuffer(this.reductions,0,readback,32,48);schedule.encodePlanCopy(encoder,readback,80);
-   if(split)this.band.encodeReceipt(encoder,readback,88);else encoder.clearBuffer(readback,88,32);
+   this.band.encodeReceipt(encoder,readback,88);encoder.copyBufferToBuffer(this.status,0,readback,120,4*UNIFORM_MIXED_STATUS_WORDS);
    if(extendTail)this.encodeExtensionOf(encoder,p);
-   const submitted=census?.(encoder);
-   if(extendTail||census)trace?.phase(encoder,A.resolutionCensus);
-   // The census maps alongside the receipt: one wait for both.
-   trace?.submit(encoder,this.fields.negative);this.device.queue.submit([encoder.finish()]);trace?.submitted();submitted?.();
+   if(extendTail)trace?.phase(encoder,A.resolutionCensus);
+   trace?.submit(encoder,this.fields.negative);this.device.queue.submit([encoder.finish()]);trace?.submitted();
    this.unchecked.add(readback);
    return this.check(readback,frame,p,plan.vCycles+plan.fullCycles);
   }catch(error){trace?.abort();this.failed=true;throw error;}finally{for(const release of releases)release();this.busy=false;}
@@ -527,10 +521,13 @@ export class UniformMixedFrame {
   let mapped:Uint32Array;
   try{
    await readback.mapAsync(GPUMapMode.READ);
-   mapped=new Uint32Array(readback.getMappedRange(),0,30).slice();readback.unmap();
+   mapped=new Uint32Array(readback.getMappedRange(),0,30+UNIFORM_MIXED_STATUS_WORDS).slice();readback.unmap();
   }catch(error){this.failed=true;throw error;}finally{this.unchecked.delete(readback);}
   try{
    const state=mapped.slice(0,8),accounting=mapped.slice(8,20);
+   // The GPU's own verdict first: it names the first failing frame.
+   const failure=describeUniformMixedFrameStatus(mapped.slice(30,30+UNIFORM_MIXED_STATUS_WORDS));
+   if(failure)throw new Error(`${failure}; projection withheld${typeof process!=="undefined"&&process.env.FLUID_MIXED_HOST_DIAGNOSTICS?`; params ${JSON.stringify(p)}; receipt ${[...state]}`:""}`);
    const residual=new Float32Array(state.buffer)[1]!,count=state[7]!;
    if(state[4]!==0||state[5]===0||!Number.isFinite(residual)||residual<0||residual>p.pressureTolerance){
     throw new Error(`Uniform mixed pressure ${state[4]!==0?"rejected a non-improving cycle":"did not converge"}: candidate ${new Float32Array(state.buffer)[0]}, accepted ${residual}, tolerance ${p.pressureTolerance}, ${count} cycles; projection withheld${typeof process!=="undefined"&&process.env.FLUID_MIXED_HOST_DIAGNOSTICS?`; params ${JSON.stringify(p)}; receipt ${[...state]}`:""}`);
@@ -540,37 +537,90 @@ export class UniformMixedFrame {
    this.bandTiles=mapped[22]!;this.bandResidual=new Float32Array(mapped.buffer)[24]!;
    // Only an accepted solve plans; a failed one threw above. Frame
    // frame+UNIFORM_MIXED_RECEIPT_RING encodes it, whenever this resolves.
-   this.lagged.set(frame,{plan:{vCycles:mapped[20]!,fullCycles:mapped[21]!},bandTiles:mapped[22]!});
-   const cells=this.ownership.layout.lattice.dimensions.reduce((n,d)=>n*d,1);
+   this.lagged.set(frame,{vCycles:mapped[20]!,fullCycles:mapped[21]!});
+   const cells=this.ownership.capacity.lattice.dimensions.reduce((n,d)=>n*d,1);
    const orphanDustMass_cells=uniformMixedDustMass(accounting,10,p.orphanDust??0,cells);
    return {cycles:count,encoded,residual,converged:true,
     dustOwners:accounting[5]!+accounting[10]!,dustMass_cells:uniformMixedDustMass(accounting,5,p.dust,cells)+orphanDustMass_cells,
     orphanDustOwners:accounting[10]!,orphanDustMass_cells,bandTiles:mapped[22]!,bandCycles:mapped[26]!,bandResidual:this.bandResidual};
   }catch(error){this.failed=true;throw new Error(`Uniform mixed frame ${frame}: ${error instanceof Error?error.message:String(error)}`,{cause:error});}
  }
+ /** The layout generation hook: copy the GPU's current generation word (one
+  * u32 at `offset` of `source`) into the status record, so a failure latched
+  * after it names that generation. Encode it wherever a generation is adopted. */
+ encodeLayoutGeneration(encoder:GPUCommandEncoder,source:GPUBuffer,offset:number):void{
+  encoder.copyBufferToBuffer(source,offset,this.status,4*UNIFORM_MIXED_STATUS.currentGeneration,4);
+ }
  private copyWhole(encoder:GPUCommandEncoder,from:GPUTexture,to:GPUTexture):void{
   encoder.copyTextureToTexture({texture:from},{texture:to},[from.width,from.height,from.depthOrArrayLayers]);
  }
- /** Takes the ungraded h/4h simulation layout; pressure stays all-4h. */
+ /** Takes the ungraded h/4h simulation layout; pressure stays all-4h. The
+  * host (CPU) layout path: authored regions, and the initial layout. */
  updateLayout(layout:UniformMixedLayout):void{
   if(!this.ready||this.busy||this.failed)throw new Error("Ownership edits require a completed frame");
+  if(this.relayout)throw new Error("A GPU relayout owns the mixed layout: detach it (setRelayout()) before a host relayout");
   this.reusableExtension=undefined;this.geometryCurrent=false;this.solidWidthsStale=true;
   this.remap.apply(layout);
   {const e=this.device.createCommandEncoder({label:"Uniform resolve remapped phi"});this.phiResolve.encode(e,this.phiResolveGroups.phi);this.device.queue.submit([e.finish()]);}
-  // Every pressure level is the fixed all-4h layout.
-  this.pressureMatchesSimulation=layout.tiles.every(word=>mixedCellWidth(word)===4);
  }
- /** Adopt a GPU-built simulation generation (UniformMixedLayoutBuilder).
-  * Pressure levels never change. One submit. */
- adoptBuiltLayout(fine:UniformMixedBuiltLevel):void{
-  if(!this.ready||this.busy||this.failed)throw new Error("Ownership edits require a completed frame");
-  if(!fine.changedTiles)return;
-  // A census extension survives the relayout remapped, like velocity.
-  const keep=this.reusableExtension!==undefined;this.extensionRemapped=keep;this.geometryCurrent=false;this.solidWidthsStale=true;
-  const encoder=this.device.createCommandEncoder({label:"Uniform adopt built ownership"});
-  this.remap.applyBuilt(encoder,fine,keep);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);
-  this.pressureMatchesSimulation=fine.layout.tiles.every(word=>mixedCellWidth(word)===4);
-  this.device.queue.submit([encoder.finish()]);
+ /** Dynamic coarsening's GPU relayout, run at the head of every advance
+  * (encodeRelayoutHead); undefined returns the layout to updateLayout. */
+ private relayout?:UniformMixedFrameRelayout;
+ setRelayout(relayout?:UniformMixedFrameRelayout):void{
+  if(this.busy)throw new Error("The mixed relayout cannot change during an advance");
+  this.relayout=relayout;
+  // markChanged latches a builder fatal into this frame's record.
+  this.remap.bindStatus(this.status);
+ }
+ /** The dynamic frame head, horizon one: the census classifies the state
+  * this frame starts from, for this frame's dt, and the frame advects on the
+  * generation it builds. Order, all in the frame's first encoder, with no
+  * host round trip:
+  *  1. the extension of that state (velocityScratch) on the ownership it
+  *     lives in: the last frame's tail extension (encodeExtensionOf) when no
+  *     state or parameter changed since (reusableExtension; bodies, solid
+  *     edits and host edits invalidate it), otherwise encoded here;
+  *  2. census and builder (relayout.encode): band bits, then the generation;
+  *  3. adopt (UniformMixedRemap.applyGpu): the builder's buffers into the
+  *     target, remap volume, velocity, phi and the extension, adopt into the
+  *     live ownership, publish; an unchanged generation lists no tile;
+  *  4. phi resolve, displacement (solid edits, bodies' new cells) and the
+  *     cut widths on the adopted generation;
+  *  5. plan, gather and phase on it: they belong to the ownership, not the
+  *     field, so they are rebuilt every frame (the host no longer knows
+  *     whether the generation changed).
+  * The certificate, momentum cache and hanging taps that follow read the
+  * remapped extension. The classifier and the trace sample the same field:
+  * the census bounds each tile's departures over all its owners' faces of
+  * that extension on both sides of the relayout (it joins the trace's
+  * sampled flow with zero), and the remap writes each changed face as a
+  * convex combination of old faces of owners in the same tile (remapFace
+  * averages remapSample, which interpolates two old faces); an unlisted
+  * tile's faces are the identity. So the remapped extension stays inside
+  * the census bounds the generation was built for, and no second extension
+  * runs before advection. */
+ private encodeRelayoutHead(encoder:GPUCommandEncoder,p:UniformMixedFrameParameters,relayout:UniformMixedFrameRelayout,bodies:boolean,trace?:UniformMixedFrameTrace):void{
+  const reuse=this.reusableExtension===extensionKey(p);this.reusableExtension=undefined;
+  if(!reuse){
+   if(this.solidWidthsStale)this.solid?.encodeSimulation(encoder,this.ownership.presentation);
+   this.plan.encode(encoder,p.supportPolicy);if(!this.geometryCurrent)this.geometry.encode(encoder,this.geometryGroup);
+   this.authority.encode(encoder,this.authorityGroup,false);
+   this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2);trace?.phase(encoder,V.extension);
+  }
+  relayout.encode(encoder,p.dt);
+  this.remap.applyGpu(encoder,relayout.generation,relayout.receipt,true);
+  this.encodeLayoutGeneration(encoder,relayout.receipt.buffer,relayout.receipt.offset+4*UNIFORM_MIXED_RELAYOUT_RECEIPT.generation);
+  this.geometryCurrent=false;
+  trace?.phase(encoder,A.resolutionCensus);
+  this.phiResolve.encode(encoder,this.phiResolveGroups.phi);
+  if(this.solidEditPending||bodies){this.displacement!.encode(encoder,this.fields.volume,!this.solidEditPending);this.solidEditPending=false;}
+  // Which cut tiles the simulation holds at h: the all-4h levels read their h texels.
+  this.solid?.encodeSimulation(encoder,this.ownership.presentation);this.solidWidthsStale=false;
+  if(this.solid)trace?.phase(encoder,V.solids);
+  this.recordStageGrid(encoder,this.ownership.presentation.buffer,"transport");
+  this.plan.encode(encoder,p.supportPolicy);this.geometry.encode(encoder,this.geometryGroup);
+  this.authority.encode(encoder,this.authorityGroup,false);
+  trace?.phase(encoder,V.support);
  }
  destroy():void{this.solid?.destroy();this.displacement?.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.surface.destroy();this.hanging.destroy();this.remap.destroy();this.transport.destroy();this.cleanup.destroy();this.split.transfer.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
 }

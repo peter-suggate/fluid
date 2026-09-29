@@ -48,7 +48,7 @@ export class UniformMixedMomentum {
     if(this.cullAir&&!fields.centerPhi)throw new Error("Prediction culling requires current center phi");
     if(this.hanging!==(fields.unitVelocity!==undefined))throw new Error("Mixed momentum hanging taps require their unit velocity texture");
     const textures = [fields.extended, fields.physical, fields.phase, fields.volume];
-    const d = this.ownership.layout.lattice.dimensions;
+    const d = this.ownership.capacity.lattice.dimensions;
     for (const [i, texture] of [...textures, fields.output].entries()) {
       if ([texture.width, texture.height, texture.depthOrArrayLayers].some((n, a) => n !== d[a])
         || texture.format !== (i === 2 || i === 3 ? "r32float" : "rgba32float")) throw new Error("Mixed momentum requires native-sized canonical fields");
@@ -69,7 +69,7 @@ export class UniformMixedMomentum {
     ] });
   }
   async initialize(): Promise<void> {
-    const module = this.device.createShaderModule({ code: uniformMixedCertifiedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.layout, 0) + /* wgsl */ `
+    const module = this.device.createShaderModule({ code: uniformMixedCertifiedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
 @group(1) @binding(0) var extended:texture_3d<f32>;
 @group(1) @binding(1) var physical:texture_3d<f32>;
 @group(1) @binding(2) var phase:texture_3d<f32>;
@@ -157,6 +157,6 @@ ${uniformMixedFaceTileDispatchWGSL("momentumStep", "umMomentum(owner,face)")}
   encode(encoder: GPUCommandEncoder, group: GPUBindGroup): void {
     if (!this.pipeline) throw new Error("Mixed momentum is not initialized");
     const pass = encoder.beginComputePass({ label: "Uniform mixed momentum" });
-    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group); if (this.hanging) pass.setBindGroup(2, this.ownership.hangingGroup); this.ownership.dispatchCertified(pass, this.pipeline,this.regularPipeline!); pass.end();
+    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group); if (this.hanging) pass.setBindGroup(2, this.ownership.hangingGroup); this.ownership.dispatchCertifiedCounted(pass, this.pipeline,this.regularPipeline!); pass.end();
   }
 }

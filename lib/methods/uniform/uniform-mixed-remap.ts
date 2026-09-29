@@ -1,12 +1,16 @@
-import {UniformMixedOwnership,type UniformMixedBuiltOwnership} from "./uniform-mixed-ownership";
+import {UniformMixedOwnership,type UniformMixedGenerationBuffers} from "./uniform-mixed-ownership";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
-import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
+import {UNIFORM_MIXED_OVERFLOW_HANGING,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 import {uniformMixedFaceAddressWGSL} from "./uniform-mixed-face-dispatch.wgsl";
+import {UNIFORM_MIXED_FAILURE,UNIFORM_MIXED_STATUS_WORDS,uniformMixedFrameStatusWGSL} from "./uniform-mixed-frame-status";
 import {uniformVolumeTargetWGSL} from "./uniform-volume.wgsl";
 import {geometricPlaneBoxWGSL} from "../../core/geometric-plane-box.wgsl";
+import {UNIFORM_MIXED_RELAYOUT_RECEIPT} from "./uniform-mixed-layout-builder";
 
 interface Fields{volume:GPUTexture;velocity:GPUTexture;phi:GPUTexture;negative:GPUBuffer}
+/** Workgroups of each remap launch (see applyGpu). */
+const REMAP_GRID=4096;
 /** Conservative edit-boundary remap, followed by canonical copy back into the
  * persistent fields. The temporary ownership and fields are reused for every
  * edit. No fine-grid expansion or field downloads are involved. Only tiles
@@ -22,15 +26,22 @@ export class UniformMixedRemap {
   * through its own fields, before the velocity remap reuses the scratch. */
  private extensionGroups?:readonly [GPUBindGroup,GPUBindGroup];
  private readonly pipelines=new Map<string,GPUComputePipeline>();
- /** [three unused words, count, tiles...]: the dilated changed-tile worklist. */
+ /** [builder fatal bits, their build, unused, count, tiles...]: the dilated
+  * changed-tile worklist. The first two words are zero for a host layout. */
  private readonly worklist:GPUBuffer;
- /** Workgroups of each remap launch: a fixed grid strides over the listed
-  * tiles, bounded by the layout's tiles and capped where the GPU saturates. */
- private readonly grid:number;
+ /** Group 3: the frame status record (uniform-mixed-frame-status), bound
+  * read_write. markChanged latches a builder fatal into it and lists nothing
+  * once any failure is latched. A private zero record until bindStatus. */
+ private readonly statusLayout:GPUBindGroupLayout;
+ private readonly idleStatus:GPUBuffer;
+ private statusGroup:GPUBindGroup;
+ /** Tiles in the lattice: the worklist's capacity. */
+ private readonly tiles:number;
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,input:Fields,scratch:Fields){
   this.target=new UniformMixedOwnership(device,ownership.layout,false);
-  this.worklist=device.createBuffer({label:"Uniform mixed remap worklist",size:(4+ownership.layout.tiles.length)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-  this.grid=Math.min(1024,ownership.layout.tiles.length);
+  this.worklist=device.createBuffer({label:"Uniform mixed remap worklist",size:(4+ownership.capacity.tiles)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  this.tiles=ownership.capacity.tiles;
+  if(this.tiles>0x08000000)throw new Error("Remap worklist entries pack a tile index below 2^27");
   this.resources=device.createBindGroupLayout({entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -45,7 +56,13 @@ export class UniformMixedRemap {
   ]});
   this.groups=[bind(input,scratch),bind(scratch,input)];
   this.bind=bind;this.scratchFields=scratch;
+  this.statusLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
+  this.idleStatus=device.createBuffer({label:"Uniform mixed remap idle status",size:UNIFORM_MIXED_STATUS_WORDS*4,usage:GPUBufferUsage.STORAGE});
+  this.statusGroup=this.bindStatusGroup(this.idleStatus);
  }
+ private bindStatusGroup(status:GPUBuffer):GPUBindGroup{return this.device.createBindGroup({layout:this.statusLayout,entries:[{binding:0,resource:{buffer:status,size:UNIFORM_MIXED_STATUS_WORDS*4}}]});}
+ /** The frame's status record (UniformMixedFrame.status). */
+ bindStatus(status:GPUBuffer):void{this.statusGroup=this.bindStatusGroup(status);}
  private readonly bind:(a:Fields,b:Fields)=>GPUBindGroup;
  private readonly scratchFields:Fields;
  /** Extension fields: the scratch velocity and negative walls are remapped
@@ -58,7 +75,7 @@ export class UniformMixedRemap {
  async initialize():Promise<void>{
   const module=this.device.createShaderModule({code:uniformMixedRemapWGSL(this.ownership.layout)});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.target.bindLayout,this.resources]});
+  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.target.bindLayout,this.resources,this.statusLayout]});
   await Promise.all(["markChanged","remapCells","remapFaces","copyCells","copyFaces"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));}));
  }
  apply(layout:UniformMixedLayout):void{
@@ -70,38 +87,56 @@ export class UniformMixedRemap {
   };
   encode(false);this.ownership.update(layout);encode(true);
  }
- /** The same remap for a GPU-built generation, in one encoder: adopt into
-  * the target, remap, adopt into the live ownership, publish. With
-  * extension, the scratch velocity (the census extension) is remapped too. */
- applyBuilt(encoder:GPUCommandEncoder,built:UniformMixedBuiltOwnership,extension=false):void{
+ /** The same remap for a GPU-built generation with no host object, in one
+  * encoder at the head of the frame that runs on it: adopt the builder's
+  * buffers into the target, remap, adopt them into the live ownership,
+  * publish. Encoded every frame; an unchanged generation lists no tile.
+  * receipt: the builder's relayout receipt (UNIFORM_MIXED_RELAYOUT_RECEIPT);
+  * its fatal word and build are copied into the worklist header, and a set
+  * fatal bit latches frame failure 6 (hanging capacity) or 7 (tier sum or
+  * tile words: invalid support) and lists nothing. A frame already failed
+  * lists nothing either. The buffer copies are not gated: a failed frame
+  * adopts the built words unremapped, and the host throws on its record.
+  * With extension, the scratch velocity (the census extension) is remapped
+  * too. The host does not know the changed count, so every launch is the
+  * fixed REMAP_GRID striding the GPU list. */
+ applyGpu(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers,receipt:{readonly buffer:GPUBuffer;readonly offset:number},extension=false):void{
   if(this.pipelines.size!==5)throw new Error("Live remap has not been initialized");
   if(extension&&!this.extensionGroups)throw new Error("Remap has no extension fields");
-  this.target.adopt(encoder,built);this.encodePass(encoder,false,extension);
-  this.ownership.adopt(encoder,built);this.encodePass(encoder,true,extension);
+  this.target.adoptGpu(encoder,source);
+  this.encodePass(encoder,false,extension,Math.min(REMAP_GRID,this.tiles),{buffer:receipt.buffer,offset:receipt.offset+RECEIPT_FATAL*4});
+  this.ownership.adoptGpu(encoder,source);this.encodePass(encoder,true,extension);
  }
- private encodePass(e:GPUCommandEncoder,copy:boolean,extension=false):void{
+ /** fatal: the builder's fatal word and its build, copied into the worklist
+  * header (words 0-1); a host layout leaves them zero. */
+ private encodePass(e:GPUCommandEncoder,copy:boolean,extension=false,grid=Math.min(REMAP_GRID,this.tiles),fatal?:{buffer:GPUBuffer;offset:number}):void{
+  const x=this.ownership.dispatchX,dispatch=(pass:GPUComputePassEncoder)=>pass.dispatchWorkgroups(Math.min(grid,x),Math.ceil(grid/x));
   // The list compares the live (old) and target widths, so it is built
   // before the live ownership adopts the target and reused by the publish.
   const begin=(label:string)=>{
-   const pass=e.beginComputePass({label});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.target.bindGroup);pass.setBindGroup(2,this.groups[copy?1:0]);return pass;
+   const pass=e.beginComputePass({label});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.target.bindGroup);pass.setBindGroup(2,this.groups[copy?1:0]);pass.setBindGroup(3,this.statusGroup);return pass;
   };
   if(!copy){
    e.clearBuffer(this.worklist,0,16);
-   const list=begin("Uniform mixed remap worklist"),groups=Math.ceil(this.target.layout.tiles.length/64);
+   if(fatal)e.copyBufferToBuffer(fatal.buffer,fatal.offset,this.worklist,0,8);
+   const list=begin("Uniform mixed remap worklist"),groups=Math.ceil(this.tiles/64);
    list.setPipeline(this.pipelines.get("markChanged")!);list.dispatchWorkgroups(Math.min(groups,this.target.dispatchX),Math.ceil(groups/this.target.dispatchX));
    list.end();
   }
   // The extension leaves the scratch velocity before the velocity remap
   // writes it, and returns after the velocity publish read it.
-  const faces=(label:string,group:GPUBindGroup,name:string)=>{const pass=begin(label);pass.setBindGroup(2,group);pass.setPipeline(this.pipelines.get(name)!);pass.dispatchWorkgroups(this.grid);pass.end();};
+  const faces=(label:string,group:GPUBindGroup,name:string)=>{const pass=begin(label);pass.setBindGroup(2,group);pass.setPipeline(this.pipelines.get(name)!);dispatch(pass);pass.end();};
   if(extension&&!copy)faces("Uniform mixed remap extension",this.extensionGroups![0],"remapFaces");
   const pass=begin(copy?"Uniform mixed remap publish":"Uniform mixed remap");
-  for(const name of copy?["copyCells","copyFaces"]:["remapCells","remapFaces"]){pass.setPipeline(this.pipelines.get(name)!);pass.dispatchWorkgroups(this.grid);}
+  for(const name of copy?["copyCells","copyFaces"]:["remapCells","remapFaces"]){pass.setPipeline(this.pipelines.get(name)!);dispatch(pass);}
   pass.end();
   if(extension&&copy)faces("Uniform mixed remap extension publish",this.extensionGroups![1],"copyFaces");
  }
- destroy():void{this.target.destroy();this.worklist.destroy();}
+ destroy():void{this.target.destroy();this.worklist.destroy();this.idleStatus.destroy();}
 }
+/** The receipt's fatal word; fatalBuild follows it. */
+const RECEIPT_FATAL=UNIFORM_MIXED_RELAYOUT_RECEIPT.fatal;
+if(UNIFORM_MIXED_RELAYOUT_RECEIPT.fatalBuild!==RECEIPT_FATAL+1)throw new Error("Remap copies the receipt's fatal word and build as one pair");
 
 /** Frame-internal transfer between the h/4h simulation ownership and the
  * all-4h pressure ownership of one lattice (the band pressure's split).
@@ -141,14 +176,19 @@ export class UniformMixedOwnershipTransfer {
    {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
    ...[3,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:(binding===4?"rgba32float":"r32float") as GPUTextureFormat,viewDimension:"3d" as const}})),
    {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+   {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
   ]});
  }
  /** Fields read in the source ownership and written in the target's. The
-  * volume pair is read and written by the transfer to pressure only. */
- bind(input:{volume:GPUTexture;velocity:GPUTexture;negative:GPUBuffer},output:{volume:GPUTexture;velocity:GPUTexture;negative:GPUBuffer}):GPUBindGroup{
+  * volume pair is read and written by the transfer to pressure only. status
+  * is the frame status record (uniform-mixed-frame-status): once a failure
+  * is latched the transfer to simulation writes nothing, so a rejected
+  * frame's unprojected field never reaches simulation ownership. */
+ bind(input:{volume:GPUTexture;velocity:GPUTexture;negative:GPUBuffer},output:{volume:GPUTexture;velocity:GPUTexture;negative:GPUBuffer},status:GPUBuffer):GPUBindGroup{
   return this.device.createBindGroup({layout:this.resources,entries:[
    {binding:0,resource:input.volume.createView()},{binding:1,resource:input.velocity.createView()},{binding:2,resource:{buffer:input.negative}},
    {binding:3,resource:output.volume.createView()},{binding:4,resource:output.velocity.createView()},{binding:5,resource:{buffer:output.negative}},
+   {binding:6,resource:{buffer:status,size:64}},
   ]});
  }
  async initialize():Promise<void>{
@@ -183,6 +223,7 @@ function uniformMixedOwnershipTransferWGSL(layout:UniformMixedLayout):string{
 @group(1) @binding(3) var outputVolume:texture_storage_3d<r32float,write>;
 @group(1) @binding(4) var output:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(5) var<storage,read_write> boundary:array<f32>;
+${uniformMixedFrameStatusWGSL(1,6,"read")}
 fn tBits(texel:vec4f)->u32{return u32(round(texel.w));}
 // The simulation tile at tile coordinate c across the tile's positive face
 // on axis a is h: that 4h face holds sixteen simulation patches.
@@ -313,10 +354,13 @@ fn tFineToSimulation(tile:u32,lane:u32){
  }
  packed.w=f32(bits);textureStore(output,cell,packed);
 }
+// A latched frame failure (the verdict withheld the projection) transfers nothing back.
 @compute @workgroup_size(64) fn toSimulationCoarse(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(umFrameFailed()){return;}
  for(var j=gid.x;j<umCounts.y;j+=64u*groups.x){tCoarseToSimulation(tCoarseTile(j));}
 }
 @compute @workgroup_size(64) fn toSimulationFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(umFrameFailed()){return;}
  for(var job=group.x;job<umCounts.x;job+=groups.x){tFineToSimulation(tFineTile(job),lane);}
 }
 `;
@@ -338,6 +382,8 @@ function uniformMixedRemapWGSL(layout:UniformMixedLayout):string{
 @group(2) @binding(6) var outputPhi:texture_storage_3d<r32float,write>;
 @group(2) @binding(7) var<storage,read_write> boundary:array<f32>;
 @group(2) @binding(8) var<storage,read_write> worklist:array<atomic<u32>>;
+${uniformMixedFrameStatusWGSL(3,0,"read_write")}
+const REMAP_FATAL_HANGING:u32=${UNIFORM_MIXED_OVERFLOW_HANGING}u;
 // A tile is visited when any tile of its 3x3x3 neighbourhood changed width.
 // A tile that is h in both keeps its cells and face patches (seam patches are
 // anchored in its cells), but when a neighbour refines it may inherit
@@ -345,14 +391,37 @@ function uniformMixedRemapWGSL(layout:UniformMixedLayout):string{
 // umVertexAuthority) that the old layout derived from the coarse corners and
 // never stored: it must write that vertex, or the stale texel becomes the
 // surface. A coarsening neighbour takes its shared vertices over instead.
+// A GPU-built generation with a fatal receipt bit (header word 0, its build
+// in word 1) latches the frame failure once and lists nothing; so does a
+// frame that already failed: its fields stay as they were.
 @compute @workgroup_size(64) fn markChanged(@builtin(global_invocation_id) gid:vec3u){
  let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
+ let fatal=atomicLoad(&worklist[0]);
+ if(fatal!=0u){
+  if(tile==0u){umLatchFailure(select(${UNIFORM_MIXED_FAILURE.layoutCapacity}u,${UNIFORM_MIXED_FAILURE.invalidSupport}u,(fatal&~REMAP_FATAL_HANGING)!=0u),fatal,atomicLoad(&worklist[1]));}
+  return;
+ }
+ if(umFrameFailed()){return;}
  let fine=umTileWidth(tile)==1u&&oldumTileWidth(tile)==1u;
  let p=vec3i(umTileCoord(tile));
  for(var z=max(p.z-1,0);z<=min(p.z+1,i32(UM_T.z)-1);z++){for(var y=max(p.y-1,0);y<=min(p.y+1,i32(UM_T.y)-1);y++){for(var x=max(p.x-1,0);x<=min(p.x+1,i32(UM_T.x)-1);x++){
   let q=umTileAt(vec3u(vec3i(x,y,z)));
-  if(select(umTileWidth(q)!=oldumTileWidth(q),umTileWidth(q)<oldumTileWidth(q),fine)){atomicStore(&worklist[4u+atomicAdd(&worklist[3],1u)],tile);return;}
+  if(select(umTileWidth(q)!=oldumTileWidth(q),umTileWidth(q)<oldumTileWidth(q),fine)){atomicStore(&worklist[4u+atomicAdd(&worklist[3],1u)],tile|listedFlags(tile));return;}
  }}}
+}
+// A listed entry is the tile and its width change, taken here while both
+// generations are bound: the publish runs after the live ownership adopted
+// the target, when the two widths agree. Bit 31: its width changed; bit 30:
+// it refined; bits 27..29: the +x/+y/+z neighbour's width changed.
+const LISTED_TILE:u32=0x07ffffffu;
+fn listedFlags(tile:u32)->u32{
+ var flags=select(0u,1u<<31u,umTileWidth(tile)!=oldumTileWidth(tile))|select(0u,1u<<30u,umTileWidth(tile)<oldumTileWidth(tile));
+ let c=umTileCoord(tile);
+ for(var a=0u;a<3u;a++){
+  var q=c;q[a]+=1u;
+  if(q[a]<UM_T[a]){let t=umTileAt(q);if(umTileWidth(t)!=oldumTileWidth(t)){flags|=1u<<(27u+a);}}
+ }
+ return flags;
 }
 // One workgroup job per listed tile; a fixed grid strides over the list. Lanes are the tile's cells (and, for faces,
 // cell and axis), so a coarse owner's footprint loops run side by side
@@ -435,13 +504,18 @@ fn tileVertex(q:vec3u)->f32{return tileVertices[q.x+5u*(q.y+5u*q.z)];}
 // when it holds more (up to full), so no fraction leaves [0,1]. Re-coarsening
 // averages the cells back to the donor's volume, and its phi corners were
 // never altered, so coarse -> fine -> coarse is the identity.
+// A listed tile whose own width did not change (a neighbour's did) keeps its
+// owners, so its cells are the identity: neither remapped nor published.
+// Only a refining tile stages its closure (the split fill reads it); every
+// other tile samples just the vertices it holds authority over, once each.
 fn remapTileCells(group:vec3u,lane:u32,remap:bool){
- let tile=listed(group,lane);if(tile==UM_UNLISTED){return;}
+ let entry=listed(group,lane);if(entry==UM_UNLISTED){return;}
+ let tile=entry&LISTED_TILE;let same=(entry&(1u<<31u))==0u;let refine=(entry&(1u<<30u))!=0u;
  let base=umTileCoord(tile)*4u;let cell=base+umCorner(lane,4u);
  let o=umOwnerAt(vec3i(cell));
  var split=false;var donor:oldUMOwner;
- if(remap){
-  for(var v=lane;v<125u;v+=64u){tileVertices[v]=oldumSampleVertex(vec3f(base+umCorner(v,5u)));}
+ if(remap&&refine){for(var v=lane;v<125u;v+=64u){tileVertices[v]=oldumSampleVertex(vec3f(base+umCorner(v,5u)));}}
+ if(remap&&!same){
   donor=oldumOwnerAt(vec3i(cell));
   tileVolume[lane]=textureLoad(volume,vec3i(oldumOrigin(donor)),0).x;
   split=o.width<donor.width;
@@ -468,7 +542,7 @@ fn remapTileCells(group:vec3u,lane:u32,remap:bool){
   else if(held>fill&&held<=f32(n)&&room>=0.5){tileVolume[lane]=1.0-(1.0-f)*(f32(n)-held)/room;}
  }
  workgroupBarrier();
- if(all(cell==umOrigin(o))){
+ if(!same&&all(cell==umOrigin(o))){
   var value=0.0;
   if(remap){
    let local=umCorner(lane,4u);
@@ -482,16 +556,17 @@ fn remapTileCells(group:vec3u,lane:u32,remap:bool){
  for(var v=lane;v<125u;v+=64u){
   let p=base+umCorner(v,5u);let a=umVertexAuthority(p);
   if(a.width!=0u&&a.tile==tile&&umVertexIsCanonical(p,a)){
-   var value=0.0;if(remap){value=tileVertices[v];}else{value=textureLoad(phi,vec3i(p),0).x;}
+   var value=0.0;
+   if(!remap){value=textureLoad(phi,vec3i(p),0).x;}else if(refine){value=tileVertices[v];}else{value=oldumSampleVertex(vec3f(p));}
    textureStore(outputPhi,vec3i(p),vec4f(value));
   }
  }
 }
 @compute @workgroup_size(64) fn remapCells(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- let jobs=listedJobCount(lane);for(var job=group.x;job<jobs;job+=groups.x){remapTileCells(vec3u(job,0u,0u),lane,true);workgroupBarrier();}
+ let jobs=listedJobCount(lane);for(var job=group.x+groups.x*group.y;job<jobs;job+=groups.x*groups.y){remapTileCells(vec3u(job,0u,0u),lane,true);workgroupBarrier();}
 }
 @compute @workgroup_size(64) fn copyCells(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- let jobs=listedJobCount(lane);for(var job=group.x;job<jobs;job+=groups.x){remapTileCells(vec3u(job,0u,0u),lane,false);workgroupBarrier();}
+ let jobs=listedJobCount(lane);for(var job=group.x+groups.x*group.y;job<jobs;job+=groups.x*groups.y){remapTileCells(vec3u(job,0u,0u),lane,false);workgroupBarrier();}
 }
 var<workgroup> tileFaces:array<vec2f,192>;
 var<workgroup> tileSamples:array<f32,192>;
@@ -501,22 +576,33 @@ var<workgroup> tileSamples:array<f32,192>;
 // A positive patch's footprint cells are the tile cells on its plane: each
 // such lane samples its own cell, and the anchor lane sums them in
 // remapFace's order. A coarse patch no longer walks its footprint serially.
+// A listed tile whose own width did not change keeps its owners and every
+// face but those on its positive tile planes toward a neighbour that changed
+// width (anchored here: a 4h owner's plane anchors and seam patches, an h
+// cell's plane faces). Only texels holding such a face are remapped, all
+// three components; its negative domain walls are the identity.
+fn remapFaceTexel(entry:u32,local:vec3u)->bool{
+ if((entry&(1u<<31u))!=0u){return true;}
+ for(var a=0u;a<3u;a++){if(local[a]==3u&&(entry&(1u<<(27u+a)))!=0u){return true;}}
+ return false;
+}
 fn remapTileFaces(group:vec3u,lane:u32,remap:bool){
- let tile=listed(group,lane);if(tile==UM_UNLISTED){return;}
- let cellLane=lane%64u;let axis=lane/64u;
+ let entry=listed(group,lane);if(entry==UM_UNLISTED){return;}
+ let tile=entry&LISTED_TILE;let cellLane=lane%64u;let axis=lane/64u;
  let anchor=vec3i(umTileCoord(tile)*4u+umCorner(cellLane,4u));
+ let texel=remapFaceTexel(entry,umCorner(cellLane,4u));
  let owner=umOwnerAt(anchor);let origin=umOrigin(owner);
- if(origin[axis]==0u&&all(vec3u(anchor)==origin)){
+ if((entry&(1u<<31u))!=0u&&origin[axis]==0u&&all(vec3u(anchor)==origin)){
   let face=umFace(owner,axis,-1,0u);
   var value=0.0;if(remap){value=remapFace(face);}else{value=copyFace(face);}
   boundary[umNegativeBoundaryIndex(origin,axis)]=value;
  }
  let face=umPositiveFaceAtAnchor(owner,axis,anchor);
  let plane=i32(origin[axis]+owner.width)-1;
- if(remap&&anchor[axis]==plane){tileSamples[lane]=remapSample(vec3u(anchor),plane,axis);}
+ if(texel&&remap&&anchor[axis]==plane){tileSamples[lane]=remapSample(vec3u(anchor),plane,axis);}
  workgroupBarrier();
  var bits=0u;var value=0.0;
- if(face.width!=0u){
+ if(texel&&face.width!=0u){
   bits=1u;
   if(remap){
    let u=(axis+1u)%3u;let v=(axis+2u)%3u;let local=umCorner(cellLane,4u);
@@ -527,10 +613,10 @@ fn remapTileFaces(group:vec3u,lane:u32,remap:bool){
    if(remapReleased(face)){bits|=2u<<axis;}
   }else{value=copyFace(face);}
  }
- if(remap&&origin[axis]==0u&&remapReleased(umFace(owner,axis,-1,0u))){bits|=2u<<(axis+3u);}
+ if(texel&&remap&&origin[axis]==0u&&remapReleased(umFace(owner,axis,-1,0u))){bits|=2u<<(axis+3u);}
  tileFaces[lane]=vec2f(value,f32(bits));
  workgroupBarrier();
- if(axis!=0u){return;}
+ if(axis!=0u||!texel){return;}
  var packed=vec4f(0);var written=false;var released=0u;
  for(var a=0u;a<3u;a++){
   let entry=tileFaces[cellLane+64u*a];let flags=u32(entry.y);
@@ -542,10 +628,10 @@ fn remapTileFaces(group:vec3u,lane:u32,remap:bool){
  textureStore(output,anchor,packed);
 }
 @compute @workgroup_size(192) fn remapFaces(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- let jobs=listedJobCount(lane);for(var job=group.x;job<jobs;job+=groups.x){remapTileFaces(vec3u(job,0u,0u),lane,true);workgroupBarrier();}
+ let jobs=listedJobCount(lane);for(var job=group.x+groups.x*group.y;job<jobs;job+=groups.x*groups.y){remapTileFaces(vec3u(job,0u,0u),lane,true);workgroupBarrier();}
 }
 @compute @workgroup_size(192) fn copyFaces(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- let jobs=listedJobCount(lane);for(var job=group.x;job<jobs;job+=groups.x){remapTileFaces(vec3u(job,0u,0u),lane,false);workgroupBarrier();}
+ let jobs=listedJobCount(lane);for(var job=group.x+groups.x*group.y;job<jobs;job+=groups.x*groups.y){remapTileFaces(vec3u(job,0u,0u),lane,false);workgroupBarrier();}
 }
 
 `;

@@ -85,7 +85,7 @@ About 0.9 GiB is dead allocations: transportA, frontReceipts, CM11a L0 pressure 
 
 ## Plan
 
-Each step is measured with one fig7-256 run, then one long-dam run, using the probe above plus type check and CPU shader preflight. Test suites run once at the end.
+Each step is measured with one fig7-256 run, then one long-dam run, using the probe above plus type check and CPU shader preflight. No full Dawn runs or regression suites: only targeted tests (Peter, 2026-09-29).
 
 | step | what | fig7-256 expected | long dam |
 |---|---|---|---|

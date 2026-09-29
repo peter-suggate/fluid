@@ -413,3 +413,74 @@ a browser simulation. After solver implementation, preserve the full gate:
 This review changes only this plan. No shaders, numerical settings, timing
 ceilings or tests were changed, and no GPU measurements or clean-repo gate
 were run for it.
+
+## Step 1 result: band by reason (measured 29 September)
+
+Probe: `tools/probe-uniform-band-reasons-dawn.ts` (production census plus
+probe-owned classifiers with other policies on the same state; variant A
+reproduces the production band exactly). Rerun:
+`WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_GPU_COMPILATION_CONCURRENCY=1 node --import tsx tools/probe-uniform-band-reasons-dawn.ts --scene=minimal-power-dam-break-64 --capture=5,15,30,60,120`.
+
+Sets are nested, so the terms are disjoint: X crossings ⊂ Z closure (dt 0)
+⊂ C horizon 1 ⊂ D horizon 3 without gravity ⊂ A production.
+
+| Share of production band | 64³ (steps 5–120) | 128³ (steps 5–30) |
+| --- | --- | --- |
+| Crossing tiles X | 23–32% | 14–24% |
+| Closure Z−X (neighbour touches a crossing owner's face/edge/corner) | 19–28% | 10–16% |
+| One-step travel C−Z | 9–19% | 20–22% |
+| Multi-frame horizon D−C | 20–36% | 32–50% |
+| Gravity shift A−D | 3–11% | 4–13% |
+
+- Horizon 3 → 1 removes 31–39% of the band at 64³ and 40–54% at 128³. The
+  band then sits at 2.1–2.6× X (64³) and 2.5–3.3× X (128³).
+- **Correction to the analysis above:** the gravity shift applies only to
+  older traced frames, so at horizon 1 it is exactly zero. Lever 2 is
+  subsumed by lever 1.
+- The closure floor (dt = 0) is 1.6–1.9× X and does not depend on dt. It
+  protects shared vertices that would otherwise be rebuilt from 4h corners;
+  removing it needs independent h vertex authority (step 3), not a
+  classifier tweak. "Surface-only costs one or two tiles" understated it.
+- The zero-join is up to 26% at horizon 3 (128³, step 5) but 2–13% at
+  horizon 1: a minor lever after horizon 1. Drift margin is 1–3%.
+- The band-to-crossing ratio grows with resolution (A/X 3.1–4.3× at 64³,
+  4.2–7.2× at 128³), consistent with the travel-slab scaling argument.
+- Open: one-frame travel peaks at 45 (64³) and 84 (128³) cells at step 15,
+  about 16 m/s, on wet crossing tiles near a wall corner, against a
+  crossing-tile P90 of about 2.5 m/s. It inflates neighbouring bounds.
+- Open: the 128³ run died at frame 34, "Uniform mixed pressure did not
+  converge: candidate 5.84, tolerance 5, 4 cycles" (the N−2 lagged-plan cap);
+  no control run yet.
+
+## Decisions (Peter, 29 September)
+
+1. Rigid-body tiles are liquid-conditional: the GPU body sweep ORs into the
+   coupled mask; no unconditional host join.
+2. Inflow nozzles get a GPU h mark into the join bitset.
+3. Pressure keeps the frame N−2 schedule for now; the full 4V+3F envelope
+   is measured later with a one-line A/B.
+
+## Horizon one landed (29 September, uncommitted)
+
+The census, builder, remap and adoption now run at the frame head on the GPU,
+with no readback (WP1, WP2a–e, WP3, P1–P3, WP5). Dynamic coarsening,
+`uniform-dynamic-coarsening-dawn`, h tiles per step over 30 steps, same
+settings in both arms:
+
+| Scene | ec753b45 (horizon 3) mean | Horizon 1 mean | Change |
+| --- | --- | --- | --- |
+| minimal-power-dam-break-64 | 2353 | 1559 | −34% |
+| high-resolution-dam-break (128³) | 12020 | 5721 | −52% |
+
+This matches the Step 1 prediction (−31–39% at 64³, −40–54% at 128³). The
+remaining floor is the closure (step 3). Frame time has not been measured.
+
+- The 128³ lane's refine check now reads phi at the head's census phase,
+  right after the remap. Read after the frame, a tile refined at the head has
+  already had one h transport step (0.01 h off its 4h interpolant). 27794
+  refined tiles match exactly; no relayout allocates or compiles.
+- `uniform-pond-rest-dawn` fails at ec753b45 too. Its `pressureResidualTolerance: 0`
+  control arm can never set the converged word, so the frame always fails.
+  Pre-existing; not from this program.
+- `tools/probe-uniform-band-reasons-dawn.ts` reads the host layout, which a GPU
+  adoption no longer mirrors; it needs a GPU tile-word readback before reuse.

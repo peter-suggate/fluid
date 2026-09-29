@@ -1,7 +1,7 @@
 import {uniformMixedDustAccountingWGSL} from "./uniform-mixed-dust-accounting.wgsl";
 import {uniformMixedFaceAddressWGSL} from "./uniform-mixed-face-dispatch.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformSharpenBudgetWGSL } from "./uniform-sharpen-budget.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
@@ -42,10 +42,10 @@ export class UniformMixedSharpening {
   /** work: a STORAGE|COPY_DST buffer of workBytes(tiles). resolved: phi's
    * hanging texels hold umVertexValue (UniformMixedPhiResolve). */
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid|undefined,private readonly work:{list:GPUBuffer},private readonly resolved=false){
-    if(work.list.size<UniformMixedSharpening.workBytes(ownership.layout.tiles.length))throw new Error("Mixed sharpening work list is too small");
-    // Each merged launch is a fixed grid-stride grid: the layout's job bound
+    const tiles=ownership.capacity.tiles;
+    if(work.list.size<UniformMixedSharpening.workBytes(tiles))throw new Error("Mixed sharpening work list is too small");
+    // Each merged launch is a fixed grid-stride grid: the capacity's job bound
     // (every tile listed), capped where the GPU is saturated.
-    const tiles=ownership.layout.tiles.length;
     this.grid=Math.max(1,Math.min(SHARPEN_GRID,Math.ceil(64*tiles/192)+tiles));
     this.resources=device.createBindGroupLayout({entries:[
       ...[0,1,2,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
@@ -57,11 +57,12 @@ export class UniformMixedSharpening {
     ]});
   }
   bind(input:GPUTexture,output:GPUTexture,phi:GPUTexture,targetFill:GPUTexture,centerPhi:GPUTexture,scratch:GPUBufferBinding,params:GPUBuffer,reductions:GPUBuffer):GPUBindGroup{
-    const d=this.ownership.layout.lattice.dimensions,n=d[0]*d[1]*d[2];
+    const d=this.ownership.capacity.lattice.dimensions,n=d[0]*d[1]*d[2];
     for(const [i,t] of [input,targetFill,centerPhi,phi,output].entries())
       if(t.format!=="r32float"||[t.width,t.height,t.depthOrArrayLayers].some((v,a)=>v!==d[a]!+(i===3?1:0)))throw new Error("Mixed sharpening requires native cell and vertex fields");
     if(input===output||output===targetFill||output===centerPhi)throw new Error("Mixed sharpening output must be disjoint");
-    if((scratch.size??scratch.buffer.size-(scratch.offset??0))<n*16+this.ownership.layout.cellCount*24)throw new Error("Mixed sharpening scratch is too small");
+    // Budgets and the face cache index live owners, at most n of them.
+    if((scratch.size??scratch.buffer.size-(scratch.offset??0))<n*40)throw new Error("Mixed sharpening scratch is too small");
     return this.device.createBindGroup({layout:this.resources,entries:[
       ...[input,targetFill,centerPhi,phi].map((t,binding)=>({binding,resource:t.createView()})),
       {binding:4,resource:output.createView()},{binding:5,resource:scratch},{binding:6,resource:{buffer:params,size:32}},
@@ -70,8 +71,9 @@ export class UniformMixedSharpening {
     ]});
   }
   async initialize():Promise<void>{
-    const h=this.ownership.layout.lattice.cellSize_m,tiles=this.ownership.layout.tiles.length,n=tiles*64;
-    const module=this.device.createShaderModule({code:uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
+    const h=this.ownership.capacity.lattice.cellSize_m,tiles=this.ownership.capacity.tiles,n=tiles*64;
+    // classify: a GPU-counted fixed grid over every live owner (all).
+    const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var targetFill:texture_3d<f32>;
 @group(1) @binding(2) var centerPhi:texture_3d<f32>;
@@ -81,7 +83,7 @@ export class UniformMixedSharpening {
 struct UMSharpenParams {tuning:vec4f,policy:vec4f}
 @group(1) @binding(6) var<uniform> sharpen:UMSharpenParams;
 @group(1) @binding(7) var<storage,read_write> reductions:array<atomic<u32>>;
-${uniformMixedDustAccountingWGSL(this.ownership.layout.lattice.dimensions.reduce((n,d)=>n*d,1))}
+${uniformMixedDustAccountingWGSL(this.ownership.capacity.lattice.dimensions.reduce((n,d)=>n*d,1))}
 const UM_MIN_H:f32=${Math.min(...h)};const UM_MAX_H:f32=${Math.max(...h)};
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 ${uniformMixedVertexSamplingSource("",this.resolved)}
@@ -333,20 +335,20 @@ ${["cacheGeometryPrepare","propose","limit","commit"].map(entry=>{const fn=`sh${
   // The next job's seam stages its terms in the same workgroup array.
   workgroupBarrier();
  }
-}`;}).join("")}`});
+}`;}).join("")}`,["classify"])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
     // One merged pipeline per entry: the listed launch covers every width.
     await Promise.all(["cacheGeometryPrepare","propose","limit","commit"].map(async entryPoint=>{this.pipelines.set(entryPoint,[await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umCellWidth:1,umDispatchX:this.ownership.dispatchX,...s}}}))]);}));
-    await Promise.all(["classify","compact"].map(async entryPoint=>{this.pipelines.set(entryPoint,[await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...s}}}))]);}));
+    await Promise.all(["classify","compact"].map(async entryPoint=>{this.pipelines.set(entryPoint,[await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(entryPoint==="classify"?{umCountedJobs:UNIFORM_MIXED_COUNTED.all}:{}),...s}}}))]);}));
   }
   encodeGeometry(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
     if(this.pipelines.size!==6)throw new Error("Mixed sharpening is not initialized");
     const begin=()=>{const pass=encoder.beginComputePass({label:"Uniform mixed sharpening geometry"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);return pass;};
     {
-      const tiles=this.ownership.layout.tiles.length,groups=Math.ceil(tiles/64),dx=this.ownership.dispatchX;
+      const tiles=this.ownership.capacity.tiles,groups=Math.ceil(tiles/64),dx=this.ownership.dispatchX;
       encoder.clearBuffer(this.work.list,0,4*(8+tiles));
-      const list=begin();this.ownership.dispatchAll(list,this.variant(this.pipelines.get("classify")![0]!));
+      const list=begin();this.ownership.dispatchAllCounted(list,this.variant(this.pipelines.get("classify")![0]!));
       list.setPipeline(this.variant(this.pipelines.get("compact")![0]!));list.dispatchWorkgroups(Math.min(groups,dx),Math.ceil(groups/dx));list.end();
     }
     const pass=begin();this.dispatchEntry(pass,"cacheGeometryPrepare");pass.end();

@@ -122,6 +122,14 @@ const CYCLE_TILE_ENTRIES: ReadonlySet<EntryPoint> = new Set<EntryPoint>([
   "mgSaveAcceptedTiles", "mgRestoreRejectedTiles", "mgMeasureFineResidualTiles",
 ]);
 
+/**
+ * The list entries a mixed continuation adds to its caller's entry set: its
+ * first level's per-cycle operators run from that level's cycle list.
+ */
+const CONTINUATION_TILE_ENTRIES: ReadonlySet<string> = new Set<string>([
+  "mgBuildCycleTiles", "mgResidualTiles", "mgProlongateAddTiles", "mgProlongateAssignTiles", "mgCopyPressureTiles",
+]);
+
 const SAMPLED_BINDINGS: readonly number[] = [1, 3, 5, 7, 9, 11, 14];
 const WRITABLE_BINDINGS: readonly number[] = [2, 4, 6, 8, 10, 12, 15, 16];
 const entryBindingsWhere = (keep: readonly number[]): Readonly<Record<EntryPoint, readonly number[]>> =>
@@ -257,7 +265,7 @@ export class WebGPUUniformPressureMultigrid {
   private get cycleTiling(): boolean { return this.tileSmoothing && this.cycleTileBuffers.length > 0; }
   private cycleEntry(entry: EntryPoint): boolean { return CYCLE_TILE_ENTRIES.has(entry); }
   /** Whether the finest cycle list carries wall-halo entries (Jacobi sweeps only). */
-  private get haloEntries(): boolean { return WALL_HALO && this.cycleTiling && this.simultaneousSmoothing; }
+  private get haloEntries(): boolean { return WALL_HALO && this.cycleTiling && this.simultaneousSmoothing && !this.continuationOnly; }
 
   private tileEntry(entry: EntryPoint): boolean {
     return entry === "mgBuildSmoothTiles" || entry === "mgBuildSmoothTilesSeeded"
@@ -272,6 +280,10 @@ export class WebGPUUniformPressureMultigrid {
    */
   private tileGrid(level: number, list: "liquid" | "cycle"): number {
     const tiles = this.tileCounts[level]!, [tx, ty, tz] = this.levels[level]!.dimensions.map(n => Math.ceil(n / 4)) as [number, number, number];
+    // A mixed continuation's cycle list has no halo entries (it lists every
+    // bounded tile whole, wall halo included, as its dense cycle would visit
+    // them); its launches are sized to the list's bound.
+    if (list === "cycle" && this.continuationOnly) return Math.max(1, tiles);
     const halo = list === "cycle" && WALL_HALO ? Math.ceil(2 * (tx * ty + ty * tz + tx * tz) / 4) : 0;
     return Math.max(1, Math.min(MG_TILE_GRID, tiles + halo));
   }
@@ -636,7 +648,8 @@ export class WebGPUUniformPressureMultigrid {
       && (entryPoint !== "mgMeasureFineResidualTiles" || MEASURE_TILES)
       && (entryPoint !== "mgBuildSmoothTilesSeeded" || (SEED_FUSE && this.cycleTiling))
       && (entryPoint !== "mgSmoothTilesJacobiCycle" || this.haloEntries)
-      && (!input.entryPoints || input.entryPoints.includes(entryPoint))).map(async (entryPoint) => [entryPoint,
+      && (!input.entryPoints || input.entryPoints.includes(entryPoint)
+        || (this.cycleTiling && CONTINUATION_TILE_ENTRIES.has(entryPoint)))).map(async (entryPoint) => [entryPoint,
       await compiler.compileComputePipeline({ label: `Uniform CM11a - ${entryPoint}`,
         layout: this.device.createPipelineLayout({ label: `Uniform CM11a layout - ${entryPoint}`,
           bindGroupLayouts: [this.tileEntry(entryPoint) ? this.smoothTileInputLayout! : entryPoint === "mgPublishCycleDispatch" ? emptyUniformLayout : input.uniformBindGroupLayout, this.groupLayouts[entryPoint]] }),
@@ -708,6 +721,7 @@ export class WebGPUUniformPressureMultigrid {
       for (;;) {const next=steps.next();if(next.done)return next.value;}
     });
     const root=this.levels[level]!;
+    const listed=this.cycleListed(level,level);
     const field=(texture:GPUTexture)=>{
       const metadata=this.scratchFields?.scratchMetadata(texture)??0;
       const dimensions=this.logicalDimensions.get(texture)!;
@@ -721,6 +735,13 @@ export class WebGPUUniformPressureMultigrid {
       setCoarseAccuracy:(scale:number)=>this.setCoarseAccuracy(scale),
       pressure:field(root.pressure[0]),rhs:field(root.rhs[0]),minimum:field(root.minimum[0]),
       phi:field(root.phi[0]),topology:field(root.volume[0]),
+      /** With a cycle list: the far-field seeds the caller writes every solve
+       * (both pressure parities and the residual scratch at zero, the RHS at
+       * zero, the bound at the root's), and the list itself -- its count at
+       * word 0 and tile indices of the (dims+3)/4 lattice from word 4, built
+       * by the setup from the seeded bound and the baked liquid. */
+      cycle:listed?{pressure:field(root.pressure[1]),residual:field(root.residual[0]),
+        list:this.cycleTileBuffers[level]!,tiles:this.tileCounts[level]!}:undefined,
       /** Clear only continuation work lists. The outer mixed solve owns
        * diagnostics/acceptance; the native coarse solve retains its counters. */
       /** `shared` batches every dispatch into its open pass (a dispatch is
@@ -739,6 +760,10 @@ export class WebGPUUniformPressureMultigrid {
         const commands=()=>shared?.commands??encoder;
         for(let i=level;initializeTopology&&i<this.levels.length;i++){
           if(this.smoothTileBuffers[i])commands().clearBuffer(this.smoothTileBuffers[i]!,0,4);
+        }
+        if(initializeTopology&&listed){
+          const cycle=this.cycleTileBuffers[level]!;commands().clearBuffer(cycle,0,4);
+          if(WALL_HALO)commands().clearBuffer(cycle,16+4*this.tileCounts[level]!,4);
         }
         // A shared pass keeps its pipeline and groups between dispatches:
         // rebind only what changes (each call is host encode and submit work).
@@ -1001,6 +1026,17 @@ export class WebGPUUniformPressureMultigrid {
    * boundary list -- so a prewarm can spend a millisecond or two a frame here
    * and have the instance ready before the window needs it.
    */
+  /**
+   * Whether a level's per-cycle operators run from its cycle list: the finest
+   * of a native solve, or the first level of a mixed continuation, whose
+   * caller seeds that level's far field (pressure, RHS, residual scratch and
+   * bound) every solve and builds the list from those seeds.
+   */
+  private cycleListed(level: number, continuationLevel?: number): boolean {
+    return this.cycleTiling && level === (continuationLevel ?? 0)
+      && (continuationLevel === undefined || this.continuationOnly)
+      && this.levels[level]!.dimensions.reduce((n, d) => n * d, 1) > FUSED_VISIT_MAX_CELLS;
+  }
   private *buildPlanSteps(continuationLevel?: number, continuationKind: "v" | "full" = "v"): Generator<void, PlannedDispatch[], void> {
     const firstLevel = continuationLevel ?? 0;
     const result: PlannedDispatch[] = [];
@@ -1131,8 +1167,9 @@ export class WebGPUUniformPressureMultigrid {
       // would only add 8x8 indirect launches that return immediately -- and
       // every one of them is a commit, whose dense form is what keeps the
       // accepted-pressure field defined everywhere for a dense restore.
-      continuationLevel === undefined && this.cycleTiling && !recovering && level === 0
-        && this.levels[level]!.dimensions.reduce((n, d) => n * d, 1) > FUSED_VISIT_MAX_CELLS ? "cycle" : undefined;
+      // A mixed continuation lists its first level instead: the mixed root
+      // seeds that level's far field every solve (see cycleListed).
+      this.cycleListed(level, continuationLevel) && !recovering ? "cycle" : undefined;
     /** A per-cycle operator, from the work list wherever the level has one. */
     const emitOperator = (entryPoint: EntryPoint, sourceIndex: number, destinationIndex = sourceIndex,
       overrides: Partial<GroupResources> = {}, control: readonly [number, number, number, number] = [0, 0, 0, 0]) => {
@@ -1299,7 +1336,7 @@ export class WebGPUUniformPressureMultigrid {
           vCycle(level, correctionRhs.get(level)!);
         }
       } else vCycle(firstLevel, originalRhs);
-      if (p[firstLevel] !== 0) emit("mgCopyPressure", firstLevel, firstLevel,
+      if (p[firstLevel] !== 0) emitOperator("mgCopyPressure", firstLevel, firstLevel,
         { pressureOut: this.levels[firstLevel]!.pressure[0] });
       return result;
     }

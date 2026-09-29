@@ -20,7 +20,7 @@ export interface UniformMixedPressureCycleLevel {
   /** The bound, then a Full-Cycle's shifted bound. */
   minimum: readonly [GPUBufferBinding, GPUBufferBinding];
   phi: GPUBufferBinding;
-  /** Static solids: the all-4h (open, V+) record, directly after phi. */
+  /** Static solids: the all-4h (open, V+) record. */
   topology?: UniformMixedPressureTopology;
 }
 
@@ -60,15 +60,18 @@ export class UniformMixedPressureCycles {
   private readonly group: GPUBindGroup;
   private readonly pipelines = new Map<Entry, GPUComputePipeline>();
   private readonly workgroups: [number, number, number];
-  private readonly words: Record<"p" | "b0" | "b1" | "m0" | "m1" | "backup" | "residual" | "np" | "nb" | "nmin" | "nphi" | "nv", number>;
-  private readonly topologyBase?: number;
+  /** The continuation's cycle list: the per-cycle kernels walk its tiles. */
+  private readonly listed?: { groups: [number, number]; list: GPUBuffer };
+  private readonly words: Record<"p" | "b0" | "b1" | "m0" | "m1" | "backup" | "residual" | "np" | "nb" | "nmin" | "nphi" | "nv" | "np1" | "nres", number>;
+  private readonly solid: boolean;
   constructor(private readonly device: GPUDevice, readonly level: UniformMixedPressureCycleLevel, backup: GPUBufferBinding,
     private readonly native: Continuation, private readonly uniformGroup: GPUBindGroup, private readonly openTop: boolean) {
     const layout = level.ownership.layout, t = layout.lattice.dimensions.map(n => n / 4);
     if (layout.tiles.some(word => mixedCellWidth(word) !== 4) || layout.tiles.length !== t[0]! * t[1]! * t[2]!)
       throw new Error("Mixed pressure root requires the uniform all-4h layout");
     const count = uniformMixedPressureStorage(layout).count;
-    const nativeFields = [native.pressure, native.rhs, native.minimum, native.phi, native.topology];
+    const nativeFields = [native.pressure, native.rhs, native.minimum, native.phi, native.topology,
+      ...(native.cycle ? [native.cycle.pressure, native.cycle.residual] : [])];
     const arena = nativeFields[0]!.buffer?.buffer;
     if (!arena || nativeFields.some(f => f.buffer?.buffer !== arena)) throw new Error("Mixed pressure root requires the shared native scratch arena");
     if (nativeFields.some(f => f.dimensions.some((n, a) => n !== t[a]! + 2))) throw new Error("Mixed and native pressure extents differ");
@@ -84,24 +87,33 @@ export class UniformMixedPressureCycles {
     if (mixedRange.offset < nativeRange.offset + nativeRange.size && nativeRange.offset < mixedRange.offset + mixedRange.size)
       throw new Error("Mixed pressure root and native continuation fields overlap");
     const [p, b0, b1, m0, m1, backupWord, residual] = mixed.map(f => ((f.offset ?? 0) - mixedRange.offset) / 4) as number[];
-    const [np, nb, nmin, nphi, nv] = nativeFields.map(f => ((f.buffer!.offset ?? 0) - nativeRange.offset) / 4) as number[];
-    this.words = { p: p!, b0: b0!, b1: b1!, m0: m0!, m1: m1!, backup: backupWord!, residual: residual!, np: np!, nb: nb!, nmin: nmin!, nphi: nphi!, nv: nv! };
-    // The static solid record rides the phi binding from this f32 index.
-    let phi: GPUBufferBinding = { buffer: level.phi.buffer, offset: level.phi.offset ?? 0, size: 4 * layout.tiles.length };
-    if (level.topology) {
-      const base = this.topologyBase = Math.ceil(layout.tiles.length * 4 / 256) * 64, topology = level.topology.buffer;
-      if (topology.buffer !== level.phi.buffer || (topology.offset ?? 0) !== (level.phi.offset ?? 0) + 4 * base || (topology.size ?? 0) < 16 * count)
-        throw new Error("Mixed pressure root topology must directly follow its phi range");
-      phi = { ...phi, size: 4 * base + 16 * count };
-    }
-    this.resources = device.createBindGroupLayout({ entries: [0, 1, 2].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } })) });
-    this.group = device.createBindGroup({ layout: this.resources, entries: [
-      { binding: 0, resource: { buffer: arena, ...mixedRange } }, { binding: 1, resource: { buffer: arena, ...nativeRange } }, { binding: 2, resource: phi }] });
+    const [np, nb, nmin, nphi, nv, np1, nres] = nativeFields.map(f => ((f.buffer!.offset ?? 0) - nativeRange.offset) / 4) as number[];
+    this.words = { p: p!, b0: b0!, b1: b1!, m0: m0!, m1: m1!, backup: backupWord!, residual: residual!, np: np!, nb: nb!, nmin: nmin!, nphi: nphi!, nv: nv!,
+      np1: np1 ?? 0, nres: nres ?? 0 };
+    const phi: GPUBufferBinding = { buffer: level.phi.buffer, offset: level.phi.offset ?? 0, size: 4 * layout.tiles.length };
+    // The static solid record, read in place from its own binding.
+    const topology = level.topology?.buffer;
+    if (topology && (topology.size ?? topology.buffer.size - (topology.offset ?? 0)) < 16 * count)
+      throw new Error("Mixed pressure root topology is smaller than its owners");
+    this.solid = !!topology;
     this.workgroups = t.map(n => Math.ceil((n + 2) / 4)) as [number, number, number];
+    if (native.cycle) {
+      const tiles = this.workgroups.reduce((n, d) => n * d, 1);
+      if (native.cycle.tiles !== tiles) throw new Error("Mixed pressure cycle list does not cover the native continuation lattice");
+      // One workgroup per listed tile, launched at the list's bound.
+      const x = Math.min(tiles, device.limits.maxComputeWorkgroupsPerDimension);
+      this.listed = { groups: [x, Math.ceil(tiles / x)], list: native.cycle.list };
+    }
+    this.resources = device.createBindGroupLayout({ entries: [0, 1, 2, ...(this.listed ? [3] : []), ...(topology ? [4] : [])].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE,
+      buffer: { type: binding >= 3 ? "read-only-storage" as const : "storage" as const } })) });
+    this.group = device.createBindGroup({ layout: this.resources, entries: [
+      { binding: 0, resource: { buffer: arena, ...mixedRange } }, { binding: 1, resource: { buffer: arena, ...nativeRange } }, { binding: 2, resource: phi },
+      ...(this.listed ? [{ binding: 3, resource: { buffer: this.listed.list } }] : []),
+      ...(topology ? [{ binding: 4, resource: topology }] : [])] });
   }
   async initialize(): Promise<void> {
     const layout = this.level.ownership.layout, h = layout.lattice.cellSize_m, t = layout.lattice.dimensions.map(n => n / 4), w = this.words;
-    const solid = this.topologyBase !== undefined, open = this.openTop;
+    const solid = this.solid, open = this.openTop, listed = this.listed !== undefined;
     const code = /* wgsl */ `
 @group(0) @binding(2) var<storage,read_write> umSupport:array<u32>;
 @group(1) @binding(0) var<storage,read_write> mixed:array<f32>;
@@ -112,6 +124,15 @@ const UM_H=vec3f(${h.map(n => n.toFixed(8)).join(",")});const UM_MIN_H=min(UM_H.
 const UM_THETA_MIN:f32=${UNIFORM_MIXED_THETA_MIN};const UM_OPEN_TOP=${open};
 const UM_P=${w.p}u;const UM_B0=${w.b0}u;const UM_B1=${w.b1}u;const UM_M0=${w.m0}u;const UM_M1=${w.m1}u;const UM_BACKUP=${w.backup}u;const UM_RES=${w.residual}u;
 const MG_P=${w.np}u;const MG_B=${w.nb}u;const MG_MIN=${w.nmin}u;const MG_PHI=${w.nphi}u;const MG_V=${w.nv}u;
+${listed ? `const MG_P1=${w.np1}u;const MG_RES=${w.nres}u;
+@group(1) @binding(3) var<storage,read> umList:array<u32>;
+// The native cell a listed workgroup's lane owns (one 4^3 tile of the
+// continuation lattice per workgroup), or UM_N past the list's live count.
+fn umListed(g:vec3u,n:vec3u,lane:u32)->vec3u{
+ let at=g.x+n.x*g.y;if(at>=umList[0]){return UM_N;}
+ let d=(UM_N+vec3u(3u))/4u;let tile=umList[4u+at];
+ return 4u*vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y))+vec3u(lane%4u,(lane/4u)%4u,lane/16u);
+}` : ""}
 // restrict: the row's RHS and bound, and whether it opens a Full-Cycle.
 override UM_RHS:u32=UM_B0;override UM_MIN:u32=UM_M0;override UM_FULL:bool=false;
 // prolong: 0 add, 1 assign, 2 add then restore the Full-Cycle backup.
@@ -143,7 +164,8 @@ fn umCell(p:vec3u)->UMCell{
 }
 fn umP(i:u32)->f32{return mixed[UM_P+i];}
 fn umLiquid(k:u32)->bool{return phi[k]<0.0;}
-${solid ? `fn umTopo(i:u32)->vec4f{let b=${this.topologyBase}u+4u*i;return vec4f(phi[b],phi[b+1u],phi[b+2u],phi[b+3u]);}` : ""}
+${solid ? `@group(1) @binding(4) var<storage,read> umRecord:array<vec4f>;
+fn umTopo(i:u32)->vec4f{return umRecord[i];}` : ""}
 fn umSum6(v:array<f32,6>)->f32{return ((v[0]+v[1])+(v[4]+v[5]))+(v[2]+v[3]);}
 // umPressureSurfaceTheta / umPressureTheta of two 4h owners.
 fn umSurfaceTheta(liquidPhi:f32,airPhi:f32,spacing:f32)->f32{
@@ -187,7 +209,8 @@ fn umRow(c:vec3u,k:u32)->vec2f{
 // A slot row couples to its owner alone; the open lid has no slot row.
 fn umSlotCoefficient(cell:UMCell)->f32{return select(umWall(cell.key,cell.slot,cell.axis,cell.side),0.0,umOpen(cell.axis,cell.side));}
 fn umResidual(cell:UMCell,rhs:u32)->f32{
- if(cell.kind==1u){return select(0.0,mixed[rhs+cell.key]-umRow(cell.c,cell.key).y,umLiquid(cell.key));}
+ // Branch, not select: an air row must not assemble its stencil.
+ if(cell.kind==1u){if(!umLiquid(cell.key)){return 0.0;}return mixed[rhs+cell.key]-umRow(cell.c,cell.key).y;}
  return mixed[rhs+cell.slot]-umSlotCoefficient(cell)*(umP(cell.slot)-umP(cell.key));
 }
 fn umNonfinite(v:f32)->bool{return (bitcast<u32>(v)&0x7f800000u)==0x7f800000u;}
@@ -211,12 +234,21 @@ fn umProjected(p:f32,r:f32,low:f32,diagonal:f32)->f32{
   if(UM_OPEN_TOP&&p.y==UM_N.y-1u){topology.x=1.0;}
  }
  native[MG_PHI+at]=distance;for(var component=0u;component<4u;component++){native[MG_V+4u*at+component]=topology[component];}
+${listed ? `// The far-field seeds of the listed cycle kernels: every value a dense
+ // cycle leaves at a row outside the list that anything listed reads. Air
+ // rows restrict a zero residual (air slots carry a zero RHS), take a zero
+ // correction, and keep the bound restrictRoot would give them at p = 0
+ // (-FLT_MAX absorbs any finite p where it is read); their measured residual
+ // is zero. The seeded bound is also what the native list builder reads to
+ // list every interior-bounded tile.
+ var lower=0.0;if(cell.kind!=0u){lower=mixed[UM_M0+cell.slot];mixed[UM_RES+cell.slot]=0.0;}
+ native[MG_P+at]=0.0;native[MG_P1+at]=0.0;native[MG_RES+at]=0.0;native[MG_B+at]=0.0;native[MG_MIN+at]=lower;` : ""}
 }
 // The correction problem: its RHS is the mixed residual, its bound the row's
 // bound less the pressure, its initial value zero. A Full-Cycle also keeps
 // the pressure, the shifted bound and the residual for its closing V-cycle.
-@compute @workgroup_size(4,4,4) fn restrictRoot(@builtin(global_invocation_id) p:vec3u){
- if(umSlotClosed()||any(p>=UM_N)){return;}let at=umNative(p);let cell=umCell(p);
+fn restrictAt(p:vec3u){
+ let at=umNative(p);let cell=umCell(p);
  var b=0.0;var lower=0.0;
  if(cell.kind!=0u){
   let s=cell.slot;let own=umP(s);b=umResidual(cell,UM_RHS);lower=mixed[UM_MIN+s]-own;
@@ -224,16 +256,16 @@ fn umProjected(p:f32,r:f32,low:f32,diagonal:f32)->f32{
  }
  native[MG_P+at]=0.0;native[MG_B+at]=b;native[MG_MIN+at]=lower;
 }
-@compute @workgroup_size(4,4,4) fn prolongRoot(@builtin(global_invocation_id) p:vec3u){
- if(umSlotClosed()||any(p>=UM_N)){return;}let cell=umCell(p);if(cell.kind==0u){return;}
+fn prolongAt(p:vec3u){
+ let cell=umCell(p);if(cell.kind==0u){return;}
  let s=cell.slot;let e=native[MG_P+umNative(p)];
  if(UM_PROLONG==1u){mixed[UM_P+s]=e;}
  else if(UM_PROLONG==2u){mixed[UM_P+s]=(mixed[UM_P+s]+e)+mixed[UM_BACKUP+s];}
  else{mixed[UM_P+s]+=e;}
 }
 // The acceptance norm's rows, owners and wall slots.
-@compute @workgroup_size(4,4,4) fn measure(@builtin(global_invocation_id) p:vec3u){
- if(umSlotClosed()||any(p>=UM_N)){return;}let cell=umCell(p);let s=cell.slot;
+fn measureAt(p:vec3u){
+ let cell=umCell(p);let s=cell.slot;
  if(cell.kind==2u){
   let coefficient=umSlotCoefficient(cell);let q=umP(s);
   mixed[UM_RES+s]=umProjected(q,mixed[UM_B0+s]-coefficient*(q-umP(cell.key)),mixed[UM_M0+s],coefficient);return;
@@ -244,6 +276,13 @@ fn umProjected(p:f32,r:f32,low:f32,diagonal:f32)->f32{
  let row=umRow(cell.c,s);
  mixed[UM_RES+s]=umProjected(q,mixed[UM_B0+s]-row.y,mixed[UM_M0+s],row.x);
 }
+${["restrict", "prolong", "measure"].map(name => listed ? `
+@compute @workgroup_size(64) fn ${name === "measure" ? name : `${name}Root`}(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) n:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(umSlotClosed()){return;}let p=umListed(g,n,lane);if(any(p>=UM_N)){return;}${name}At(p);
+}` : `
+@compute @workgroup_size(4,4,4) fn ${name === "measure" ? name : `${name}Root`}(@builtin(global_invocation_id) p:vec3u){
+ if(umSlotClosed()||any(p>=UM_N)){return;}${name}At(p);
+}`).join("")}
 `;
     const module = this.device.createShaderModule({ label: "Uniform mixed pressure root", code });
     const info = await module.getCompilationInfo(), errors = info.messages.filter(m => m.type === "error");
@@ -260,7 +299,9 @@ fn umProjected(p:f32,r:f32,low:f32,diagonal:f32)->f32{
     const pipeline = this.pipelines.get(entry); if (!pipeline) throw new Error("Mixed pressure root is not initialized");
     const pass = passes.pass;
     pass.setPipeline(pipeline); pass.setBindGroup(0, this.level.ownership.bindGroup); pass.setBindGroup(1, this.group);
-    pass.dispatchWorkgroups(...this.workgroups);
+    // Setup stays dense: it writes the native geometry and the far-field seeds.
+    if (this.listed && entry !== "setup") pass.dispatchWorkgroups(...this.listed.groups);
+    else pass.dispatchWorkgroups(...this.workgroups);
   }
   /** One batch shares a pass with the native continuation; only the
    * native setup's tile-list clears end it. */

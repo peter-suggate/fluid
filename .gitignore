@@ -22,3 +22,7 @@ artifacts/*
 .openai/deploy/
 rust/target/
 docs/research/
+
+# Raw benchmark output (JSON, images, patches) stays local; the .md write-ups are kept.
+docs/benchmarks/*
+!docs/benchmarks/*.md

@@ -1,5 +1,5 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformVolumeCorrectionWGSL } from "./uniform-volume-correction.wgsl";
 import { uniformMixedDetachedMassWGSL } from "./uniform-mixed-detached-mass.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
@@ -32,18 +32,30 @@ export interface UniformMixedPressureAuthorityFields {
  * runs first, one workgroup per cut tile (a lane per h cell), into the
  * scratch after the balance words; build reads it for the owner and for a
  * closed owner's cut neighbours. */
+/** Owner entries: GPU-counted launches over every tier (umAllOwner). */
+const counted:readonly string[]=["build","resolve"];
+
 export class UniformMixedPressureAuthority {
  readonly allocatedBytes=0;
  readonly scratchBytes:number;
+ /** Owners this ownership can hold: the construction cellCount. */
+ private readonly owners:number;
+ /** Balance partials (one per counted job) and their chunk sums. */
  private readonly groups:number;
  private readonly chunks:number;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly coarse=false){
   if(coarse&&(!solid?.coarse||ownership.layout.tiles.some(word=>(word&0xc0000000)!==0)))throw new Error("Coarse mixed pressure authority requires the all-4h solid record and all-4h ownership");
-  this.groups=Math.ceil(ownership.layout.cellCount/64);this.chunks=Math.ceil(this.groups/1024);
+  // A capacity bound, read once: the unified frame reserves its simulation
+  // ownership all-h (cellCount = 64 per tile) and pressure ownership is the
+  // fixed all-4h hierarchy, so no later generation has more owners. build's
+  // counted jobs (umCounts.x + ceil(umCounts.y/64), which chunks reads back
+  // from the GPU) therefore never exceed groups.
+  this.owners=ownership.layout.cellCount;
+  this.groups=Math.ceil(this.owners/64);this.chunks=Math.ceil(this.groups/1024);
   // Coarse: one vec2f cut-vote slot per owner after the balance words.
-  this.scratchBytes=8*(1+this.groups+this.chunks+(coarse?ownership.layout.cellCount:0));
+  this.scratchBytes=8*(1+this.groups+this.chunks+(coarse?this.owners:0));
   this.resources=device.createBindGroupLayout({entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    ...[3,6].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
@@ -54,21 +66,23 @@ export class UniformMixedPressureAuthority {
  }
  bind(f:UniformMixedPressureAuthorityFields):GPUBindGroup{
   if((f.scratch.size??f.scratch.buffer.size-(f.scratch.offset??0))<this.scratchBytes)throw new Error("Mixed pressure authority scratch is too small");
-  const d=this.ownership.layout.lattice.dimensions;
+  const d=this.ownership.capacity.lattice.dimensions;
   for(const t of [f.centerPhi,f.volume,f.targetFill,f.phase,f.correction])if(t.format!=="r32float"||[t.width,t.height,t.depthOrArrayLayers].some((v,a)=>v!==d[a]))throw new Error("Mixed pressure authority requires native scalar fields");
   if([f.centerPhi,f.volume,f.targetFill].some(t=>t===f.phase||t===f.correction)||f.phase===f.correction)throw new Error("Mixed pressure authority outputs must be disjoint");
   if(!!f.fine!==this.coarse)throw new Error("Coarse mixed pressure authority needs the h simulation centre phi and volume, and only it");
   if(f.fine)for(const t of [f.fine.centerPhi,f.fine.volume])if(t.format!=="r32float"||[t.width,t.height,t.depthOrArrayLayers].some((v,a)=>v!==d[a])||t===f.phase||t===f.correction)throw new Error("Coarse mixed pressure authority h fields must be native scalar inputs");
   return this.device.createBindGroup({layout:this.resources,entries:[
    ...[f.centerPhi,f.volume,f.targetFill].map((t,binding)=>({binding,resource:t.createView()})),
-   {binding:3,resource:{...f.phi,size:4*this.ownership.layout.cellCount}},
+   {binding:3,resource:{...f.phi,size:4*this.owners}},
    {binding:4,resource:f.phase.createView()},{binding:5,resource:f.correction.createView()},
    {binding:6,resource:{...f.scratch,size:this.scratchBytes}},{binding:7,resource:{buffer:f.params,size:16}},
    ...(f.fine?[f.fine.centerPhi,f.fine.volume].map((t,i)=>({binding:8+i,resource:t.createView()})):[]),
   ]});
  }
  async initialize():Promise<void>{
-  const module=this.device.createShaderModule({code:uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
+  // build (and its phase variant) and resolve stride the GPU-counted owners
+  // of every tier (umAllOwner); build writes one balance partial per job.
+  const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var centerPhi:texture_3d<f32>;
 @group(1) @binding(1) var volume:texture_3d<f32>;
 @group(1) @binding(2) var targetFill:texture_3d<f32>;
@@ -79,7 +93,7 @@ export class UniformMixedPressureAuthority {
 @group(1) @binding(7) var<uniform> params:vec4f;
 ${uniformVolumeCorrectionWGSL}
 ${uniformMixedSolidWGSL(this.solid?2:undefined,this.coarse?this.solid!.coarse!.count:undefined)}
-const UM_HMIN=${Math.min(...this.ownership.layout.lattice.cellSize_m)};
+const UM_HMIN=${Math.min(...this.ownership.capacity.lattice.cellSize_m)};
 // pressureSurfacePhi for one fine cell (solid scenes only): centre phi.
 fn umSurfacePhiCell(p:vec3i)->f32{return textureLoad(centerPhi,p,0).x;}
 // pressurePhi: a closed cell continues its open liquid neighbours.
@@ -217,11 +231,11 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
  let amount=uvVolumeCorrectionAmountAt(v,umCapacity(o),params.x)-balance[0].x*umDeficit(o,v,phi[o.index]);
  textureStore(correction,origin,vec4f(amount/max(params.x,1e-12)));
 }
-`});
+`,counted)});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.coarse?this.solid.coarse!.bindLayout:this.solid.bindLayout]:[])]});
-  await Promise.all(["build","chunks","reduce","resolve",...(this.coarse?["cut"]:[])].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...s}}})));}));
-  this.pipelines.set("phase",await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"build",constants:{umDispatchX:this.ownership.dispatchX,umAuthorityBalance:0,...s}}})));
+  await Promise.all(["build","chunks","reduce","resolve",...(this.coarse?["cut"]:[])].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:UNIFORM_MIXED_COUNTED.all}:{}),...s}}})));}));
+  this.pipelines.set("phase",await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"build",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.all,umAuthorityBalance:0,...s}}})));
  }
  /** balance=false writes phi and phase only: the extension's authority,
   * when this same stage (same ownership, same origin texels) rebuilds the
@@ -230,10 +244,10 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,balance=true):void{
   if(this.pipelines.size!==(this.coarse?6:5))throw new Error("Mixed pressure authority is not initialized");
   const pass=encoder.beginComputePass({label:balance?"Uniform mixed pressure authority and volume correction":"Uniform mixed pressure authority phase"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);
-  if(this.coarse){pass.setPipeline(this.variant(this.pipelines.get("cut")!));pass.dispatchWorkgroups(Math.max(1,Math.min(1024,Math.ceil(this.ownership.layout.tiles.length/64))));}
-  if(!balance){this.ownership.dispatchAll(pass,this.variant(this.pipelines.get("phase")!));pass.end();return;}
+  if(this.coarse){pass.setPipeline(this.variant(this.pipelines.get("cut")!));pass.dispatchWorkgroups(Math.max(1,Math.min(1024,Math.ceil(this.ownership.capacity.tiles/64))));}
+  if(!balance){this.ownership.dispatchAllCounted(pass,this.variant(this.pipelines.get("phase")!));pass.end();return;}
   for(const entry of ["build","chunks","reduce","resolve"]){const pipeline=this.variant(this.pipelines.get(entry)!);pass.setPipeline(pipeline);
-   if(entry==="chunks")pass.dispatchWorkgroups(this.chunks);else if(entry==="reduce")pass.dispatchWorkgroups(1);else this.ownership.dispatchAll(pass,pipeline);
+   if(entry==="chunks")pass.dispatchWorkgroups(this.chunks);else if(entry==="reduce")pass.dispatchWorkgroups(1);else this.ownership.dispatchAllCounted(pass,pipeline);
   }
   pass.end();
  }

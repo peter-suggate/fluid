@@ -1,6 +1,6 @@
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_COUNTED, uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
@@ -52,12 +52,12 @@ export class UniformMixedSurface {
       {binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       ...(hanging?[{binding:11,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}}]:[]),
     ]});
-    this.deferredGrid=Math.min(1024,Math.ceil(ownership.layout.lattice.dimensions.reduce((a,n)=>a*(n+1),1)/64));
+    this.deferredGrid=Math.min(1024,Math.ceil(ownership.capacity.lattice.dimensions.reduce((a,n)=>a*(n+1),1)/64));
   }
   /** Resolved phi (UniformMixedPhiResolve) makes every texel a vertex value. */
   private get vertexCache():boolean{return this.hanging&&!this.resolved;}
   bind(f: UniformMixedSurfaceFields): GPUBindGroup {
-    const d=this.ownership.layout.lattice.dimensions;
+    const d=this.ownership.capacity.lattice.dimensions;
     for(const [i,t] of [f.phi,f.outputPhi,f.velocity,f.coarseVelocity,f.volume,f.departures].entries()){
       const size=d.map(n=>i<2?n+1:i===3?n/4+2:n);
       if(t.format!==([2,3,5].includes(i)?"rgba32float":"r32float") || [t.width,t.height,t.depthOrArrayLayers].some((n,a)=>n!==size[a]))
@@ -67,7 +67,7 @@ export class UniformMixedSurface {
     if(this.hanging!==(f.unitVelocity!==undefined))throw new Error("Mixed surface hanging taps require their unit velocity texture");
     // Per-tile retirement evidence, the six wallReach plane words, then the
     // solid closed/clear tile words.
-    const evidenceBytes=this.ownership.layout.tiles.length*(this.solid?12:4)+32;
+    const evidenceBytes=this.ownership.capacity.tiles*(this.solid?12:4)+32;
     // The deferred advect list follows, a separate binding: count, three
     // unused words, then at most one word per lattice vertex.
     const deferredOffset=Math.ceil(((f.evidence.offset??0)+evidenceBytes)/256)*256,deferredBytes=16+4*d.reduce((a,n)=>a*(n+1),1);
@@ -86,7 +86,7 @@ export class UniformMixedSurface {
   }
   async initialize(): Promise<void> {
     const velocitySampling=uniformMixedVelocitySamplingSource(false,true,undefined,this.hanging?(this.solid?3:2):undefined,this.hanging?"unitVelocity":undefined);
-    const module=this.device.createShaderModule({code:uniformMixedCertifiedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
+    const module=this.device.createShaderModule({code:uniformMixedCertifiedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var outputPhi:texture_storage_3d<r32float,write>;
 @group(1) @binding(2) var velocity:texture_3d<f32>;
@@ -460,20 +460,32 @@ var<workgroup> solidClosedFlag:atomic<u32>;
  }
  evidence[UM_SOLID_WORDS+UM_TILES+tile]=clear;
 }`:""}
-// One workgroup per tile, a lane per candidate vertex of its 5^3 closure.
+// Each tile's evidence: every stored vertex of its 5^3 closure is positive.
+// retirementEvidence: one workgroup per h tile, a lane per closure vertex;
+// retirementEvidenceCoarse: one lane per 4h tile, whose closure stores only
+// its 8 corners (local%4==0). Together they cover the h/4h partition once.
+fn umEvidenceVertex(tile:u32,local:vec3u)->bool{
+ // Every vertex of a unit-stencil tile is stored.
+ let vertex=umTileCoord(tile)*4u+local;
+ let value=select(umVertexValue(vertex),umLoadVertex(vertex),umTileMaximumWidth(tile)==1u);
+ return value>0.0;
+}
 var<workgroup> evidencePositive:atomic<u32>;
 @compute @workgroup_size(128) fn retirementEvidence(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=group.x+umDispatchX*group.y;if(tile>=UM_TILES){return;}
+ let job=group.x+umDispatchX*group.y;if(job>=umCounts.x){return;}
+ let tile=umTopology[UM_TILES+job];
  if(params.flags.z==0u){if(lane==0u){evidence[tile]=UM_EVIDENCE_FAR;}return;}
  if(lane==0u){atomicStore(&evidencePositive,1u);}workgroupBarrier();
- let local=umCorner(lane,5u);let width=umTileWidth(tile);
- if(lane<125u&&all(local%width==vec3u(0))){
-  // Every vertex of a unit-stencil tile is stored.
-  let vertex=umTileCoord(tile)*4u+local;
-  let value=select(umVertexValue(vertex),umLoadVertex(vertex),umTileMaximumWidth(tile)==1u);
-  if(!(value>0.0)){atomicStore(&evidencePositive,0u);}
- }
+ if(lane<125u&&!umEvidenceVertex(tile,umCorner(lane,5u))){atomicStore(&evidencePositive,0u);}
  workgroupBarrier();if(lane==0u){evidence[tile]=select(0u,UM_EVIDENCE_FAR,atomicLoad(&evidencePositive)!=0u);}
+}
+@compute @workgroup_size(64) fn retirementEvidenceCoarse(@builtin(global_invocation_id) gid:vec3u){
+ let job=gid.x+umDispatchX*64u*gid.y;if(job>=umCounts.y){return;}
+ let tile=umTopology[UM_TILES+umCounts.x+job];
+ if(params.flags.z==0u){evidence[tile]=UM_EVIDENCE_FAR;return;}
+ var positive=true;
+ for(var k=0u;k<8u;k++){positive=positive&&umEvidenceVertex(tile,umCorner(k,2u)*4u);}
+ evidence[tile]=select(0u,UM_EVIDENCE_FAR,positive);
 }
 // evidenceDistance turns the positive flags into the Chebyshev distance in
 // tiles to the nearest tile that may hold a zero (0: this one), capped at
@@ -759,6 +771,7 @@ fn umBandCandidate(vertex:vec3u,width:u32){
  }
 }
 ${this.vertexCache?/* wgsl */`
+// A GPU-counted launch over the hanging slots in use (UNIFORM_MIXED_COUNTED.hanging).
 @compute @workgroup_size(125) fn vertexCache(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let slot=group.x+umDispatchX*group.y;if(slot>=UM_TILES){return;}
  let tile=umHanging[UM_TILES+slot];if(tile==UM_NO_SLOT){return;}
@@ -773,7 +786,7 @@ fn umTraceCell(owner:UMOwner){
 @compute @workgroup_size(64) fn traceCells(@builtin(global_invocation_id) gid:vec3u){
  let owner=umOwner(gid);if(owner.width!=0u){umTraceCell(owner);}
 }
-`,["advect","redistance","advectFine","redistanceFine","advectOwners","traceCells"])});
+`,["advect","redistance","advectFine","redistanceFine","advectOwners","traceCells","retirementEvidence","retirementEvidenceCoarse",...(this.vertexCache?["vertexCache"]:[])])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[]),...(this.hanging?[this.ownership.hangingLayout]:[])]});
@@ -781,11 +794,11 @@ fn umTraceCell(owner:UMOwner){
     const keyed=async<K>(into:Map<K,GPUComputePipeline>,key:K,entryPoint:string,constants:Record<string,number>={})=>{into.set(key,await compile(entryPoint,constants));};
     const regular={umCellWidth:1,umPlannedFine:1,umRegularFine:1};
     await Promise.all([
-      this.vertexCache&&keyed(this.pipelines,"vertexCache","vertexCache",{umVertexCacheFill:1}),
+      this.vertexCache&&keyed(this.pipelines,"vertexCache","vertexCache",{umVertexCacheFill:1,umCountedJobs:UNIFORM_MIXED_COUNTED.hanging}),
       ...(this.solid?["solidClosed","solidClear"]:[]).map(entryPoint=>keyed(this.pipelines,entryPoint,entryPoint)),
       keyed(this.pipelines,"wallReach","wallReach"),
       ...[0,1,2].map(axis=>keyed(this.pipelines,`evidenceDistance${axis}`,"evidenceDistance",{umEvidenceAxis:axis})),
-      keyed(this.pipelines,"retirementEvidence","retirementEvidence"),
+      ...([["retirementEvidence",UNIFORM_MIXED_COUNTED.fineTiles],["retirementEvidenceCoarse",UNIFORM_MIXED_COUNTED.coarseTiles]] as const).map(([entryPoint,umCountedJobs])=>keyed(this.pipelines,entryPoint,entryPoint,{umCountedJobs})),
       ...(["advect","redistance","traceCells"] as const).map(entry=>keyed(this.pipelines,entry,entry,{umMergedTiles:1,...(entry==="traceCells"?{}:{umMergedCoarse:1,umMergedPack:8}),umCertifiedJobs:2})),
       ...(["advect","redistance"] as const).map(entry=>keyed(this.finePipelines,entry,`${entry}Fine`,{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1})),
       Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1}),compile("advectDeferred",regular)]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
@@ -797,34 +810,32 @@ fn umTraceCell(owner:UMOwner){
   encode(encoder:GPUCommandEncoder,entry:"advect"|"redistance"|"traceCells",group:GPUBindGroup):void{
     const pipeline=this.pipelines.get(entry);if(!pipeline)throw new Error("Mixed surface stage is not initialized");
     const pass=encoder.beginComputePass({label:`Uniform mixed surface ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);if(this.hanging)pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
-    const slots=this.ownership.hangingSlots;
-    if(this.vertexCache&&entry!=="traceCells"&&slots){
-      pass.setPipeline(this.variant(this.pipelines.get("vertexCache")!));
-      pass.dispatchWorkgroups(Math.min(slots,this.ownership.dispatchX),Math.ceil(slots/this.ownership.dispatchX));
-    }
+    if(this.vertexCache&&entry!=="traceCells")this.ownership.dispatchHangingCounted(pass,this.variant(this.pipelines.get("vertexCache")!));
     if(entry==="advect"){
       pass.setPipeline(this.variant(this.pipelines.get("wallReach")!));pass.dispatchWorkgroups(6);
       // The closed/clear evidence only exists for a scene holding solids.
       if(this.solid?.present){
-        const tiles=this.ownership.layout.tiles.length,x=this.ownership.dispatchX,groups=Math.ceil(tiles/64);
+        const tiles=this.ownership.capacity.tiles,x=this.ownership.dispatchX,groups=Math.ceil(tiles/64);
         pass.setPipeline(this.variant(this.pipelines.get("solidClosed")!));pass.dispatchWorkgroups(Math.min(tiles,x),Math.ceil(tiles/x));
         pass.setPipeline(this.variant(this.pipelines.get("solidClear")!));pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
       }
     }
     if(entry==="redistance"){
-      const groups=this.ownership.layout.tiles.length;
-      pass.setPipeline(this.variant(this.pipelines.get("retirementEvidence")!));
-      pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));
-      const t=this.ownership.layout.lattice.dimensions.map(n=>n/4);
+      // Evidence covers the h/4h partition: a job per h tile, 64 4h tiles per job.
+      const tiles=this.ownership.capacity.tiles;
+      this.ownership.dispatchCounted(pass,this.variant(this.pipelines.get("retirementEvidence")!),tiles);
+      this.ownership.dispatchCounted(pass,this.variant(this.pipelines.get("retirementEvidenceCoarse")!),Math.ceil(tiles/64));
+      const t=this.ownership.capacity.lattice.dimensions.map(n=>n/4);
       for(const axis of [0,1,2]){
         const lines=t[(axis+1)%3]!*t[(axis+2)%3]!;
         pass.setPipeline(this.variant(this.pipelines.get(`evidenceDistance${axis}`)!));
         pass.dispatchWorkgroups(Math.min(lines,this.ownership.dispatchX),Math.ceil(lines/this.ownership.dispatchX));
       }
     }
-    this.ownership.dispatchCertified(pass,this.variant(pipeline),this.variant(this.regularPipelines.get(entry)!),entry==="traceCells"?undefined:this.variant(this.finePipelines.get(entry)!));
+    // Fixed grids from capacity: the certified job counts are GPU state.
+    this.ownership.dispatchCertifiedCounted(pass,this.variant(pipeline),this.variant(this.regularPipelines.get(entry)!),entry==="traceCells"?undefined:this.variant(this.finePipelines.get(entry)!));
     if(entry==="advect"){
-      const d=this.ownership.layout.lattice.dimensions.map(n=>n+1),x=this.ownership.dispatchX;
+      const d=this.ownership.capacity.lattice.dimensions.map(n=>n+1),x=this.ownership.dispatchX;
       const groups=Math.ceil(2*(d[1]!*d[2]!+d[2]!*d[0]!+d[0]!*d[1]!)/64);
       pass.setPipeline(this.variant(this.deferredPipelines[0]!));pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
     }

@@ -1,6 +1,6 @@
 import {CM12_TRANSPORT_FIXED_SCALE} from "../../core/cm12-numerics";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
-import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
+import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
 
 /** Live solid voxel edits on canonical owners: the geometric native
@@ -27,7 +27,8 @@ export class UniformMixedSolidDisplacement {
   ]});
  }
  async initialize():Promise<void>{
-  const module=this.device.createShaderModule({label:"Uniform mixed solid displacement",code:uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
+  // scatter and resolve stride the GPU-counted owners of every tier (umAllOwner).
+  const module=this.device.createShaderModule({label:"Uniform mixed solid displacement",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var volume:texture_storage_3d<r32float,read_write>;
 @group(1) @binding(1) var<storage,read_write> deposits:array<atomic<i32>>;
 ${uniformMixedSolidWGSL(2)}
@@ -73,24 +74,24 @@ fn umDisplaceNearBody(c:vec3i)->bool{
  let c=vec3i(umOrigin(o));
  textureStore(volume,c,vec4f(textureLoad(volume,c).x+f32(units)/(UM_FIXED*f32(o.width*o.width*o.width))));
 }
-`});
+`,["scatter","resolve"])});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.bindLayout]});
-  const compile=(entryPoint:string,constants:Record<string,number>={})=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants}}});
+  const compile=(entryPoint:string,constants:Record<string,number>={})=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.all,...constants}}});
   for(const entry of ["scatter","resolve"])this.pipelines.set(entry,await compile(entry));
   this.pipelines.set("scatterBodies",await compile("scatter",{umNearBodies:1}));
  }
  /** bodiesOnly: no voxel edit is pending, so only cells near a body scatter. */
  encode(encoder:GPUCommandEncoder,volume:GPUTexture,bodiesOnly=false):void{
   if(this.pipelines.size!==3)throw new Error("Mixed solid displacement is not initialized");
-  const deposits=this.deposits??=this.device.createBuffer({label:"Uniform mixed solid displacement deposits",size:4*this.ownership.layout.tiles.length*64,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+  const deposits=this.deposits??=this.device.createBuffer({label:"Uniform mixed solid displacement deposits",size:4*this.ownership.capacity.tiles*64,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
   if(this.group?.volume!==volume)this.group={volume,group:this.device.createBindGroup({layout:this.resources,entries:[{binding:0,resource:volume.createView()},{binding:1,resource:{buffer:deposits}}]})};
   const group=this.group.group;
   encoder.clearBuffer(deposits);
   for(const entry of ["scatter","resolve"]){
    const pass=encoder.beginComputePass({label:`Uniform mixed solid displacement ${entry}`});
    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);pass.setBindGroup(2,this.solid.bindGroup);
-   this.ownership.dispatchAll(pass,this.pipelines.get(entry==="scatter"&&bodiesOnly?"scatterBodies":entry)!);pass.end();
+   this.ownership.dispatchAllCounted(pass,this.pipelines.get(entry==="scatter"&&bodiesOnly?"scatterBodies":entry)!);pass.end();
   }
  }
  destroy():void{this.deposits?.destroy();this.deposits=undefined;this.group=undefined;}

@@ -417,39 +417,57 @@ const TP_D1:u32=16u;const TP_Q1:u32=32u;const TP_Q0:u32=64u;const TP_DONOR:u32=1
 var<workgroup> tpSeeded:atomic<u32>;
 var<workgroup> tpLow:array<atomic<u32>,3>;
 var<workgroup> tpHigh:array<atomic<u32>,3>;
-// One workgroup per tile, a lane per owner: seed tiles holding V (or a source)
-// and record the tiles this tile's rows can sample. A row's donors with
-// nonzero weight are grain cells overlapping its box [lower, lower+width),
-// and a grain divides 4, so they lie in tiles floor(lower/4) through
-// floor((ceil(upper)-1)/4) at every grain. The fallback self edge adds the
-// tile itself. Stored as offsets from the tile, biased by 512 in 10 bits.
+// Seed tiles holding V (or a source) and record the tiles this tile's rows
+// can sample. A row's donors with nonzero weight are grain cells overlapping
+// its box [lower, lower+width), and a grain divides 4, so they lie in tiles
+// floor(lower/4) through floor((ceil(upper)-1)/4) at every grain. The
+// fallback self edge adds the tile itself (the 512 start). Stored as offsets
+// from the tile, biased by 512 in 10 bits.
+fn tpOwnerReach(tile:u32,origin:vec3u,width:u32)->array<vec3u,2>{
+ let coord=vec3i(umTileCoord(tile));
+ let lower=textureLoad(departure,vec3i(origin),0).xyz-vec3f(0.5*f32(width));let upper=lower+f32(width);
+ // A non-finite departure reaches the whole lattice.
+ let finite=all(abs(lower)<vec3f(1.0e8));
+ let first=select(vec3i(0),clamp(vec3i(floor(lower/4.0)),vec3i(0),vec3i(UM_T)-1),finite);
+ let last=select(vec3i(UM_T)-1,clamp((vec3i(ceil(upper))-1)/4,vec3i(0),vec3i(UM_T)-1),finite);
+ return array<vec3u,2>(vec3u(first-coord+512),vec3u(last-coord+512));
+}
+fn tpSourced(q:vec3i)->bool{
+ ${sources?`if(umSourceParams.drop.w>0.0||umSourceinflowStrength()>0.0){
+  return umSourcedropSource(q)>0.0||umSourceinflowSweptPlugSource(q,umSourceParams.dimsDt.w)>0.0;
+ }`:""}
+ return false;
+}
+fn tpStoreSeed(tile:u32,seeded:u32,low:vec3u,high:vec3u){
+ atomicStore(&live[tpPlane(0u,tile)],seeded);
+ atomicStore(&live[tpPlane(1u,tile)],low.x|(low.y<<10u)|(low.z<<20u));
+ atomicStore(&live[tpPlane(2u,tile)],high.x|(high.y<<10u)|(high.z<<20u));
+}
+// liveSeed: one workgroup per h tile, a lane per owner; liveSeedCoarse: one
+// lane per 4h tile (its single owner, then its 64 cells for sources).
+// Together they cover the h/4h partition once.
 @compute @workgroup_size(64) fn liveSeed(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=wid.x+umDispatchX*wid.y;if(tile>=UM_TILES){return;}
+ let job=wid.x+umDispatchX*wid.y;if(job>=umCounts.x){return;}
+ let tile=umTopology[UM_TILES+job];
  if(lane<3u){atomicStore(&tpLow[lane],512u);atomicStore(&tpHigh[lane],512u);}
  if(lane==0u){atomicStore(&tpSeeded,0u);}workgroupBarrier();
- let width=umTileWidth(tile);let side=4u/width;let coord=vec3i(umTileCoord(tile));
- if(lane<side*side*side){
-  let origin=umTileCoord(tile)*4u+umCorner(lane,side)*width;
-  let lower=textureLoad(departure,vec3i(origin),0).xyz-vec3f(0.5*f32(width));let upper=lower+f32(width);
-  // A non-finite departure reaches the whole lattice.
-  let finite=all(abs(lower)<vec3f(1.0e8));
-  let first=select(vec3i(0),clamp(vec3i(floor(lower/4.0)),vec3i(0),vec3i(UM_T)-1),finite);
-  let last=select(vec3i(UM_T)-1,clamp((vec3i(ceil(upper))-1)/4,vec3i(0),vec3i(UM_T)-1),finite);
-  for(var axis=0u;axis<3u;axis++){
-   atomicMin(&tpLow[axis],u32(first[axis]-coord[axis]+512));atomicMax(&tpHigh[axis],u32(last[axis]-coord[axis]+512));
-  }
-  if(textureLoad(volume,vec3i(origin),0).x!=0.0){atomicOr(&tpSeeded,TP_S);}
- }
- ${sources?`if(umSourceParams.drop.w>0.0||umSourceinflowStrength()>0.0){
-  let q=vec3i(umTileCoord(tile)*4u+umCorner(lane,4u));
-  if(umSourcedropSource(q)>0.0||umSourceinflowSweptPlugSource(q,umSourceParams.dimsDt.w)>0.0){atomicOr(&tpSeeded,TP_S);}
- }`:""}
+ let origin=umTileCoord(tile)*4u+umCorner(lane,4u);
+ let reach=tpOwnerReach(tile,origin,1u);
+ for(var axis=0u;axis<3u;axis++){atomicMin(&tpLow[axis],reach[0][axis]);atomicMax(&tpHigh[axis],reach[1][axis]);}
+ if(textureLoad(volume,vec3i(origin),0).x!=0.0||tpSourced(vec3i(origin))){atomicOr(&tpSeeded,TP_S);}
  workgroupBarrier();
  if(lane==0u){
-  atomicStore(&live[tpPlane(0u,tile)],atomicLoad(&tpSeeded));
-  atomicStore(&live[tpPlane(1u,tile)],atomicLoad(&tpLow[0])|(atomicLoad(&tpLow[1])<<10u)|(atomicLoad(&tpLow[2])<<20u));
-  atomicStore(&live[tpPlane(2u,tile)],atomicLoad(&tpHigh[0])|(atomicLoad(&tpHigh[1])<<10u)|(atomicLoad(&tpHigh[2])<<20u));
+  tpStoreSeed(tile,atomicLoad(&tpSeeded),vec3u(atomicLoad(&tpLow[0]),atomicLoad(&tpLow[1]),atomicLoad(&tpLow[2])),
+   vec3u(atomicLoad(&tpHigh[0]),atomicLoad(&tpHigh[1]),atomicLoad(&tpHigh[2])));
  }
+}
+@compute @workgroup_size(64) fn liveSeedCoarse(@builtin(global_invocation_id) gid:vec3u){
+ let job=gid.x+umDispatchX*64u*gid.y;if(job>=umCounts.y){return;}
+ let tile=umTopology[UM_TILES+umCounts.x+job];let origin=umTileCoord(tile)*4u;
+ let reach=tpOwnerReach(tile,origin,4u);
+ var seeded=textureLoad(volume,vec3i(origin),0).x!=0.0;
+ for(var k=0u;k<64u&&!seeded;k++){seeded=tpSourced(vec3i(origin+umCorner(k,4u)));}
+ tpStoreSeed(tile,select(0u,TP_S,seeded),min(reach[0],vec3u(512u)),max(reach[1],vec3u(512u)));
 }
 override tpFrom:u32=0u;
 override tpInto:u32=0u;

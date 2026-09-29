@@ -49,7 +49,16 @@ try{
   const store=usePerformanceInstrumentationStore.getState();
   store.setEnabled(false);
   const solver=await uniformVolumeMethod.createSolverAsync!(measured,scene,"balanced",values,undefined,()=>{}) as any;solvers.push(solver);
-  let reused=0,relayouts=0;{const f=solver.mixedFrame;const adv=f.advance.bind(f);f.advance=(...a:any[])=>{if(f.reusableExtension!==undefined&&f.reusableExtension===JSON.stringify({...a[0],dt:0}))reused++;return adv(...a);};const ad=f.adoptBuiltLayout.bind(f);f.adoptBuiltLayout=(l:any)=>{if(l.changedTiles)relayouts++;return ad(l);};}
+  let reused=0,relayouts=0;const remapStats:number[][]=[];let lastChanged:Uint8Array|undefined;{const f=solver.mixedFrame;const adv=f.advance.bind(f);f.advance=(...a:any[])=>{if(f.reusableExtension!==undefined&&f.reusableExtension===JSON.stringify({...a[0],dt:0}))reused++;return adv(...a);};if(f.adoptBuiltLayout){const ad=f.adoptBuiltLayout.bind(f);f.adoptBuiltLayout=(l:any)=>{if(l.changedTiles)relayouts++;
+   // Remap worklist size (markChanged's rule), rep1 only: host-side from the two layouts.
+   if(timed&&l.changedTiles){const a=f.ownership.layout.tiles as Uint32Array,b=l.layout.tiles as Uint32Array,T=f.ownership.layout.lattice.dimensions.map((d:number)=>d/4);
+    const w=(x:number)=>(x&0x80000000)?1:4;const n=a.length;let changed=0,listed=0,listedSame=0;const ch=new Uint8Array(n),re=new Uint8Array(n);
+    let refined=0,flips=0;for(let t=0;t<n;t++){const o=w(a[t]!),m=w(b[t]!);if(o!==m){ch[t]=1;changed++;if(lastChanged?.[t])flips++;}if(m<o){re[t]=1;refined++;}}lastChanged=ch;
+    for(let t=0;t<n;t++){const x=t%T[0],y=Math.floor(t/T[0])%T[1],z=Math.floor(t/(T[0]*T[1]));const fine=w(a[t]!)===1&&w(b[t]!)===1;let hit=false;
+     for(let dz=-1;dz<=1&&!hit;dz++)for(let dy=-1;dy<=1&&!hit;dy++)for(let dx=-1;dx<=1&&!hit;dx++){const X=x+dx,Y=y+dy,Z=z+dz;if(X<0||Y<0||Z<0||X>=T[0]||Y>=T[1]||Z>=T[2])continue;const q=X+T[0]*(Y+T[1]*Z);if(fine?re[q]:ch[q])hit=true;}
+     if(hit){listed++;if(!ch[t])listedSame++;}}
+    remapStats.push([changed,listed,listedSame,refined,flips]);}
+   return ad(l);};}}
   const quality:any[]=[];const walls:number[]=[],phases:Record<string,number[]>={},totals:number[]=[],fine:number[]=[],cycles:number[]=[];
   for(let step=1;step<=steps;step++){
    solver.applyRuntimeValues(values);
@@ -62,13 +71,13 @@ try{
    if(step%10===0){const i=await solver.readStats();quality.push({step,volumeCellSum:i.volumeCellSum,representedVolumeDrift:i.representedVolumeDrift,volumeDrift:i.volumeDrift,maxSpeed_m_s:i.maxSpeed_m_s});}
    if(step<from){for(const k in grids)delete grids[k];continue;}gridFrames++;
    walls.push(wall);
-   const tiles=solver.mixedFrame?.ownership?.layout?.tiles as Uint32Array|undefined;
+   let tiles:Uint32Array|undefined;try{tiles=solver.mixedFrame?.ownership?.layout?.tiles;}catch{}
    if(tiles){let n=0;for(const w of tiles)if(w&0x80000000)n++;fine.push(n);}
    if(reading){totals.push(reading.sum_ms);const g:Record<string,number>={};for(const q of reading.passes)g[q.label]=(g[q.label]??0)+q.duration_ms;for(const [k,v] of Object.entries(g))(phases[k]??=[]).push(v);}
   }
   const med=(a:number[])=>{const s=[...a].sort((x,y)=>x-y);return s.length?+s[s.length>>1]!.toFixed(2):null;};
   const mean=(a:number[])=>a.length?+(a.reduce((x,y)=>x+y,0)/a.length).toFixed(3):null;
-  const arm={quality,reused,relayouts,wallMedian_ms:med(walls),wallMean_ms:mean(walls),fineTilesMean:mean(fine),
+  const arm={quality,reused,relayouts,...(remapStats.length?{remapChangedMean:mean(remapStats.map(r=>r[0]!)),remapListedMean:mean(remapStats.map(r=>r[1]!)),remapListedUnchangedMean:mean(remapStats.map(r=>r[2]!)),remapListedMax:Math.max(...remapStats.map(r=>r[1]!)),remapRefinedMean:mean(remapStats.map(r=>r[3]!)),remapFlipMean:mean(remapStats.map(r=>r[4]!))}:{}),wallMedian_ms:med(walls),wallMean_ms:mean(walls),fineTilesMean:mean(fine),
    ...(timed?{traceTotalMean_ms:mean(totals),traced:totals.length,phases:Object.fromEntries(Object.entries(phases).map(([k,v])=>[k,+(v.reduce((x,y)=>x+y,0)/walls.length).toFixed(3)]).sort((a,b)=>(b[1] as number)-(a[1] as number)))}:{})};
   result[`rep${rep}`]=arm;result.grids=Object.fromEntries(Object.entries(grids).map(([k,v])=>[k,{...v,callsPerFrame:v.calls/gridFrames,groupsPerFrame:v.groups/gridFrames}]));console.log(JSON.stringify({rep,...arm}));
   solver.destroy();solvers.pop();

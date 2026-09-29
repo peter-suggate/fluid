@@ -100,7 +100,7 @@ export class UniformMixedPressureVelocity {
  }
  async initialize():Promise<void>{
   const ownership=this.ownership,h=ownership.layout.lattice.cellSize_m;
-  const common=uniformMixedTopologyWGSL(ownership.layout,0)+/* wgsl */`
+  const common=uniformMixedTopologyWGSL(ownership.capacity,0)+/* wgsl */`
 const UM_H=vec3f(${h.join(",")});
 @group(1) @binding(0) var velocity:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read_write> negative:array<f32>;

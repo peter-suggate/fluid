@@ -217,13 +217,18 @@ function mixedStencils(dimensions: Triple, widths: Uint8Array): Uint32Array<Arra
  * Only the tile words are stored; worklists and stencils are derived from
  * them on first host access, so an adopted generation costs no per-tile host
  * work unless a host consumer actually reads those arrays. */
+/** counts: [h, 4h] tile counts a GPU receipt already holds (no host scan);
+ * building the tile lists fails fast if the words disagree with them. */
 export function uniformMixedLayoutFromTiles(lattice: RefinementRegionLattice, tiles: Uint32Array<ArrayBuffer>,
-  regions: UniformMixedLayout["regions"]): UniformMixedLayout {
+  regions: UniformMixedLayout["regions"], counts?: readonly [number, number]): UniformMixedLayout {
   const dimensions = lattice.dimensions.map(n => n / 4) as unknown as Triple;
   const count = dimensions[0] * dimensions[1] * dimensions[2];
   if (tiles.length !== count) throw new Error("Mixed tile words do not match the lattice");
   let fine = 0, coarse = 0;
-  for (const word of tiles) { if (mixedCellWidth(word) === 1) fine++; else coarse++; }
+  if (counts) {
+    [fine, coarse] = counts;
+    if (fine + coarse !== count) throw new Error(`Mixed tile counts ${counts} do not cover the lattice`);
+  } else for (const word of tiles) { if (mixedCellWidth(word) === 1) fine++; else coarse++; }
   let lists: { fine: Uint32Array<ArrayBuffer>; coarse: Uint32Array<ArrayBuffer> } | undefined;
   let stencils: Uint32Array<ArrayBuffer> | undefined;
   const list = () => {
@@ -231,7 +236,8 @@ export function uniformMixedLayoutFromTiles(lattice: RefinementRegionLattice, ti
       lists = { fine: new Uint32Array(fine), coarse: new Uint32Array(coarse) };
       let f = 0, c = 0;
       for (let key = 0; key < count; key++) {
-        if (mixedCellWidth(tiles[key]!) === 1) lists.fine[f++] = key; else lists.coarse[c++] = key;
+        if (mixedCellWidth(tiles[key]!) === 1) { if (f === fine) throw new Error("Mixed tile words hold more h tiles than their count"); lists.fine[f++] = key; }
+        else { if (c === coarse) throw new Error("Mixed tile words hold more 4h tiles than their count"); lists.coarse[c++] = key; }
       }
     }
     return lists;

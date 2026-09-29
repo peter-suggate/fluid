@@ -1,5 +1,5 @@
 /** ownership.hangingGroup: T tile→slot words (UM_NO_SLOT when absent), T
- * slot→tile words, then per slot the native negative boundary plane taps
+ * slot→tile words, then UM_HANGING_SLOTS records of the native negative boundary plane taps
  * (3 × 16; used only by tiles on that plane), in tile-local order. A slotted
  * tile's in-domain fine taps live in the unit velocity texture. Every seam
  * tile has a slot.
@@ -10,6 +10,16 @@
  * sampled phi before each vertex pass. */
 export const UNIFORM_MIXED_HANGING_TAPS = 48;
 export const UNIFORM_MIXED_HANGING_RECORD = UNIFORM_MIXED_HANGING_TAPS + 125;
+/** Preallocated slots (UM_HANGING_SLOTS): the cache never grows, so a GPU
+ * adoption needs no host resize. One slot per tile, the most seam tiles a
+ * generation can have: 2.9/22.7/181 MB at 64³/128³/256³. Half the tiles was
+ * not enough: fig-9's dam-and-ball splash passed 8192 of 16384 at frame 110.
+ * Launches are unaffected (dispatchCounted caps the grid at COUNTED_GRID and
+ * the jobs are the GPU-counted seams). UNIFORM_MIXED_OVERFLOW_HANGING stays
+ * as the fatal guard. */
+export const uniformMixedHangingSlotCapacity = (tiles: number) => tiles;
+/** Bytes of a tap cache for `tiles`: both slot maps, then every record. */
+export const uniformMixedHangingBytes = (tiles: number) => (2 * tiles + UNIFORM_MIXED_HANGING_RECORD * uniformMixedHangingSlotCapacity(tiles)) * 4;
 export const uniformMixedHangingTapWGSL = (group: number) => /* wgsl */ `
 @group(${group}) @binding(0) var<storage,read_write> umHanging:array<u32>;
 const UM_NO_SLOT=0xffffffffu;

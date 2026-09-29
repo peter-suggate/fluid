@@ -1,5 +1,5 @@
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
-import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
+import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
 
 export interface UniformMixedBodyFields {
@@ -49,7 +49,8 @@ export class UniformMixedBodies {
   this.params=device.createBuffer({label:"Uniform mixed rigid body tiles horizon",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
  }
  async initialize():Promise<void>{
-  const module=this.device.createShaderModule({label:"Uniform mixed rigid bodies",code:uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
+  // couple strides the GPU-counted owners of every tier (umAllOwner); markTiles covers the lattice.
+  const module=this.device.createShaderModule({label:"Uniform mixed rigid bodies",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var bodyPhi:texture_3d<f32>;
 @group(1) @binding(1) var bodyVelocity:texture_3d<f32>;
 @group(1) @binding(2) var<storage,read_write> rigidExchange:array<atomic<i32>>;
@@ -103,11 +104,11 @@ fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
   if(distance(clamp(centre,low,high),centre)<=reach){atomicOr(&bodyTiles[tile/32u],1u<<(tile%32u));return;}
  }
 }
-`});
+`,["couple"])});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const couple=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.coupleLayout,this.solid.bindLayout]});
   const tiles=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.tilesLayout,this.solid.bindLayout]});
-  this.couplePipeline=await this.device.createComputePipelineAsync({layout:couple,compute:{module,entryPoint:"couple",constants:{umDispatchX:this.ownership.dispatchX}}});
+  this.couplePipeline=await this.device.createComputePipelineAsync({layout:couple,compute:{module,entryPoint:"couple",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.all}}});
   this.tilesPipeline=await this.device.createComputePipelineAsync({layout:tiles,compute:{module,entryPoint:"markTiles",constants:{umDispatchX:this.ownership.dispatchX}}});
  }
  /** Clears the exchange, then couples every body-covered h owner. */
@@ -118,7 +119,7 @@ fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
    {binding:0,resource:this.fields.phi.createView()},{binding:1,resource:this.fields.velocity.createView()},{binding:2,resource:{buffer:this.fields.exchange}}]});
   const pass=encoder.beginComputePass({label:"Uniform mixed rigid coupling"});
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.coupleGroup);pass.setBindGroup(2,this.solid.bindGroup);
-  this.ownership.dispatchAll(pass,this.couplePipeline);pass.end();
+  this.ownership.dispatchAllCounted(pass,this.couplePipeline);pass.end();
  }
  /** Ors the tiles bodies may touch within `horizon` seconds into `tiles`. */
  encodeTiles(encoder:GPUCommandEncoder,tiles:GPUBuffer,horizon:number):void{
@@ -126,7 +127,7 @@ fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
   if(!Number.isFinite(horizon)||horizon<0)throw new Error(`Mixed rigid body tile horizon must be finite and non-negative: ${horizon}`);
   this.device.queue.writeBuffer(this.params,0,new Float32Array([horizon,0,0,0]));
   if(this.tilesGroup?.tiles!==tiles)this.tilesGroup={tiles,group:this.device.createBindGroup({layout:this.tilesLayout,entries:[{binding:3,resource:{buffer:tiles}},{binding:4,resource:{buffer:this.params}}]})};
-  const groups=Math.ceil(this.ownership.layout.tiles.length/64),x=this.ownership.dispatchX;
+  const groups=Math.ceil(this.ownership.capacity.tiles/64),x=this.ownership.dispatchX;
   const pass=encoder.beginComputePass({label:"Uniform mixed rigid body tiles"});
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.tilesGroup.group);pass.setBindGroup(2,this.solid.bindGroup);
   pass.setPipeline(this.tilesPipeline);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));pass.end();

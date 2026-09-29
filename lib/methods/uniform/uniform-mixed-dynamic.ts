@@ -2,6 +2,7 @@ import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import type {UniformMixedBandBits} from "./uniform-mixed-layout-builder";
 import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
+import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 
 /** Largest reach/hysteresis, in tiles, and the boundary rules' tile scan. */
 export const UNIFORM_MIXED_DYNAMIC_DISTANCE_CAP=16;
@@ -31,6 +32,13 @@ const CUBE_LEVELS=5;
 /** A box query reads at most this many cubes before it takes coarser ones
  * (which may overhang the box on its short axes: looser, never tighter). */
 const BOX_CUBES=64;
+/** Workgroups of the h-tile classify launch at most: a fixed grid that
+ * strides over the live h list (umCounts.x), so no host tile count sizes it.
+ * The ownership's counted-launch grid (COUNTED_GRID): enough to fill the
+ * GPU, and an h tile's classify costs about the same as any other's. */
+const CENSUS_TILE_GRID=4096;
+/** Bytes of the scene uniform prefix the source mark reads (UMSourceParams). */
+const SOURCE_PARAMS_BYTES=176;
 
 export interface UniformMixedDynamicPolicy {
  /** The time the census plans for: every frame until its layout's successor
@@ -131,40 +139,66 @@ export class UniformMixedDynamicClassifier {
  private readonly group:GPUBindGroup;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
  private readonly words:number;
+ /** First wet word (wetIndex(0)): wet then active bits, cleared per census. */
+ private readonly wetOffset:number;
  /** setSolid marked a coupled tile: the promotion passes run. */
  private solid=false;
  private encoded=false;
- /** The band decided by the last encode, for the GPU layout builder. */
- get bandBits():UniformMixedBandBits{return {buffer:this.work,wordOffset:HEADER};}
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,extended:GPUTexture){
-  const tiles=ownership.layout.tiles.length;
+ /** Tiles forced into the band by the next census: GPU producer words
+  * [0, words) (joinTarget), then host words [words, 2·words) (join). decide
+  * ors both into the band; the census clears them once it has decided. */
+ private readonly joinTiles:GPUBuffer;
+ /** Host joins accumulated since the last encode, uploaded by it. */
+ private hostJoin?:Uint32Array<ArrayBuffer>;
+ /** Join words may be non-zero: every census clears them after decide. */
+ private joinLive=false;
+ /** Zero source uniform when the host binds none: no source, no mark. */
+ private readonly noSource?:GPUBuffer;
+ /** The band decided by the last encode, for the GPU layout builder. Words
+  * [0, HEADER) of the buffer are the census header its receipt carries. */
+ get bandBits():UniformMixedBandBits{return {buffer:this.work,wordOffset:HEADER,headerWords:HEADER};}
+ /** source: the host's scene uniform (UMSourceParams prefix ABI, as the
+  * mixed frame's sourceParams). decide marks every tile this frame's drop or
+  * inflow plug can fill (uvSourcePhi, frame dt dimsDt.w) as band, so the
+  * source lands on h owners. Its values are the ones bound when the census
+  * runs: encode the census after the frame's params upload. Without it
+  * nothing is marked. */
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,extended:GPUTexture,source?:GPUBuffer){
+  const tiles=ownership.capacity.tiles;
   this.words=Math.ceil(tiles/32);
-  const t=ownership.layout.lattice.dimensions.map(n=>n/4);
-  const workBytes=(HEADER+this.words+6*tiles+(t[0]!+1)*(t[1]!+1)*(t[2]!+1)+2*tiles+2*this.words)*4,readBytes=(HEADER+this.words)*4;
+  const t=ownership.capacity.lattice.dimensions.map(n=>n/4);
+  this.wetOffset=HEADER+this.words+6*tiles+(t[0]!+1)*(t[1]!+1)*(t[2]!+1)+2*tiles;
+  const workBytes=(this.wetOffset+2*this.words)*4,readBytes=(HEADER+this.words)*4;
   this.work=device.createBuffer({label:"Uniform dynamic ownership census",size:workBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.readback=device.createBuffer({label:"Uniform dynamic ownership readback",size:readBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   this.params=device.createBuffer({label:"Uniform dynamic ownership policy",size:64,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   this.solidTiles=device.createBuffer({label:"Uniform dynamic ownership solid tiles",size:this.words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
   this.staticSolidTiles=device.createBuffer({label:"Uniform dynamic ownership static solid tiles",size:this.words*4,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  this.joinTiles=device.createBuffer({label:"Uniform dynamic ownership join tiles",size:2*this.words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  if(source&&source.size<SOURCE_PARAMS_BYTES)throw new Error(`Dynamic ownership source params hold ${source.size} bytes, expected at least ${SOURCE_PARAMS_BYTES}`);
+  if(!source)this.noSource=device.createBuffer({label:"Uniform dynamic ownership no source",size:SOURCE_PARAMS_BYTES,usage:GPUBufferUsage.UNIFORM});
   const boundsBytes=6*CUBE_LEVELS*tiles*4;
   this.bounds=device.createBuffer({label:"Uniform dynamic ownership bound cubes",size:boundsBytes,usage:GPUBufferUsage.STORAGE});
-  this.allocatedBytes=workBytes+boundsBytes+readBytes+64+this.words*8;
+  this.allocatedBytes=workBytes+boundsBytes+readBytes+64+this.words*16+(this.noSource?SOURCE_PARAMS_BYTES:0);
   this.resources=device.createBindGroupLayout({entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
    {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
    {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+   {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+   {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
   ]});
   this.group=device.createBindGroup({layout:this.resources,entries:[
    {binding:0,resource:volume.createView()},{binding:1,resource:phi.createView()},
    {binding:2,resource:extended.createView()},{binding:3,resource:{buffer:this.work}},{binding:4,resource:{buffer:this.params}},
-   {binding:5,resource:{buffer:this.solidTiles}},{binding:6,resource:{buffer:this.bounds}},
+   {binding:5,resource:{buffer:this.solidTiles}},{binding:6,resource:{buffer:this.bounds}},{binding:7,resource:{buffer:this.joinTiles}},
+   {binding:8,resource:{buffer:source??this.noSource!,size:SOURCE_PARAMS_BYTES}},
   ]});
  }
  async initialize():Promise<void>{
-  const h=this.ownership.layout.lattice.cellSize_m,cap=UNIFORM_MIXED_DYNAMIC_DISTANCE_CAP;
-  const module=this.device.createShaderModule({label:"Uniform dynamic ownership census",code:uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
+  const h=this.ownership.capacity.lattice.cellSize_m,cap=UNIFORM_MIXED_DYNAMIC_DISTANCE_CAP;
+  const module=this.device.createShaderModule({label:"Uniform dynamic ownership census",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var phi:texture_3d<f32>;
 @group(1) @binding(2) var velocity:texture_3d<f32>;
@@ -176,6 +210,9 @@ struct DynamicPolicy {step:vec4f,reach:vec4u,surface:vec4f,flow:vec4f}
 @group(1) @binding(4) var<uniform> policy:DynamicPolicy;
 @group(1) @binding(5) var<storage,read> solidTiles:array<u32>;
 @group(1) @binding(6) var<storage,read_write> bounds:array<u32>;
+// Joined tiles: GPU producer words, then host words (joinTarget, join).
+@group(1) @binding(7) var<storage,read> joinTiles:array<u32>;
+${uniformMixedSourceWGSL(8)}
 // The census tail follows the frame's last phi resolve: hanging texels hold
 // umVertexValue, so vertex reads are direct loads.
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
@@ -194,6 +231,8 @@ fn cubeIndex(j:u32,k:u32,s:vec3i)->u32{return ((j-1u)*6u+k)*UM_TILES+umTileAt(ve
 // Inclusive prefix sum of interface flags over tiles, with a zero border plane.
 const PX:u32=UM_T.x+1u;const PY:u32=UM_T.y+1u;const PZ:u32=UM_T.z+1u;
 fn prefixIndex(p:vec3u)->u32{return ${HEADER}u+WORDS+6u*UM_TILES+p.x+PX*(p.y+PY*p.z);}
+// The zero border planes are implicit: never cleared, written or loaded.
+fn prefixLoad(p:vec3u)->u32{if(any(p==vec3u(0u))){return 0u;}return atomicLoad(&census[prefixIndex(p)]);}
 // Per required tile: cells between each face and the nearest crossing owner,
 // one nibble per face (-x,-y,-z,+x,+y,+z), and its own travel in whole h
 // cells per step in the top byte; all ones for a tile that is not required.
@@ -219,6 +258,18 @@ var<workgroup> tileHigh:array<atomic<u32>,3>;
 var<workgroup> tileGap:array<atomic<u32>,6>;
 var<workgroup> tileReach:array<atomic<u32>,6>;
 var<workgroup> tileError:atomic<u32>;
+// Largest travel of the workgroup's tiles (census[18]), flushed once per group.
+var<workgroup> groupReach:atomic<u32>;
+// census[8..11] (deficit and air extremes) gathered per workgroup: nearly
+// every coarse owner is air, and one global atomicMax each on one word
+// serialised the container sweep. Non-negative: ordered as bits, and a zero
+// is max's identity, so only non-zero extremes are flushed.
+var<workgroup> groupExtreme:array<atomic<u32>,4>;
+fn resetGroupCensus(){atomicStore(&groupReach,0u);for(var k=0u;k<4u;k++){atomicStore(&groupExtreme[k],0u);}}
+fn flushGroupCensus(){
+ atomicMax(&census[18],atomicLoad(&groupReach));
+ for(var k=0u;k<4u;k++){let e=atomicLoad(&groupExtreme[k]);if(e!=0u){atomicMax(&census[8u+k],e);}}
+}
 const UM_H:f32=${Math.min(...h)};
 const MAX_H:f32=${Math.max(...h)};
 // Surface error of the tile at 4h, in h (non-negative, ordered as bits).
@@ -304,7 +355,8 @@ fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
  let v=textureLoad(volume,vec3i(origin),0).x;
  var inside=0u;var deep=0u;
  for(var k=0u;k<8u;k++){
-  let value=umVertexValue(origin+umCorner(k,2u)*width);
+  // A 4h owner's corners are 4-aligned: always stored texels.
+  let corner=origin+umCorner(k,2u)*width;var value=0.0;if(width==4u){value=umLoadVertex(corner);}else{value=umVertexValue(corner);}
   if(value<0.0){inside++;}
   if(value< -2.0*MAX_H*f32(width)){deep++;}
  }
@@ -325,8 +377,8 @@ fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
  }
  // Largest interior deficit and largest air volume, per fine/coarse width.
  let coarse=select(0u,1u,width!=1u);
- if(deep==8u){atomicMax(&census[8u+coarse],bitcast<u32>(max(1.0-v,0.0)));}
- if(inside==0u){atomicMax(&census[10u+coarse],bitcast<u32>(max(v,0.0)));}
+ if(deep==8u){atomicMax(&groupExtreme[coarse],bitcast<u32>(max(1.0-v,0.0)));}
+ if(inside==0u){atomicMax(&groupExtreme[2u+coarse],bitcast<u32>(max(v,0.0)));}
  let local=umCorner(lane,side)*width;
  if(inside!=0u&&inside!=8u){
   for(var a=0u;a<3u;a++){(*c).gap[a]=min((*c).gap[a],local[a]);(*c).gap[3u+a]=min((*c).gap[3u+a],4u-width-local[a]);}
@@ -359,7 +411,8 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
   if(c.low[a]!=0xffffffffu){reach=max(reach,abs(orderValue(c.low[a])*scale[a]));}
   if(c.high[a]!=0u){reach=max(reach,abs(orderValue(c.high[a])*scale[a]));}
  }
- atomicMax(&census[18],bitcast<u32>(reach));
+ // Non-negative: ordered as bits. One global atomic per workgroup (callers).
+ atomicMax(&groupReach,bitcast<u32>(reach));
  // Hysteresis: a 4h tile returns to h only below half the travel.
  let fast=policy.surface.x>0.0&&speed>=policy.surface.x*select(0.5,1.0,width==1u);
  let shaped=crossing&&!fast&&!(policy.step.y>0.0&&bitcast<f32>(c.error)<=policy.step.y);
@@ -383,11 +436,12 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
  // A 4h surface the lattice cannot resolve: refined by this census.
  if(required&&width!=1u){let slot=atomicAdd(&census[1],1u);if(slot<3u){atomicStore(&census[13u+slot],tile);}}
 }
-// h tiles: one workgroup per tile, one lane per owner.
-@compute @workgroup_size(64) fn classify(@builtin(workgroup_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let job=gid.x+umDispatchX*gid.y;if(job>=umCounts.x){return;}
+// h tiles: one workgroup per tile, one lane per owner. A fixed grid strides
+// over the live h list; umCounts is uniform, so the loop keeps its barriers.
+@compute @workgroup_size(64) fn classify(@builtin(workgroup_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var job=gid.x;job<umCounts.x;job+=groups.x){
  let tile=umTopology[UM_TILES+job];
- if(lane==0u){atomicStore(&mixedTile,0u);for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}atomicStore(&tileError,0u);}workgroupBarrier();
+ if(lane==0u){resetGroupCensus();atomicStore(&mixedTile,0u);for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}atomicStore(&tileError,0u);}workgroupBarrier();
  let width=umTileWidth(tile);let side=4u/width;
  if(lane<side*side*side){
   var c=umEmptyClass();umClassifyOwner(tile,width,lane,&c);
@@ -404,16 +458,24 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
   for(var k=0u;k<6u;k++){c.gap[k]=atomicLoad(&tileGap[k]);c.reach[k]=atomicLoad(&tileReach[k]);}
   c.flags=atomicLoad(&mixedTile);c.error=atomicLoad(&tileError);
   umFinishTile(tile,width,c);
+  flushGroupCensus();
+ }
  }
 }
 // Single-owner (4h) tiles: one lane per tile. A workgroup per tile left 63
 // of its 64 lanes idle over most of the domain.
-@compute @workgroup_size(64) fn classifyCoarse(@builtin(global_invocation_id) gid:vec3u){
- let index=gid.x+umDispatchX*64u*gid.y;if(index>=umCounts.y){return;}
- let tile=umTopology[UM_TILES+umCounts.x+index];
- var c=umEmptyClass();umClassifyOwner(tile,4u,0u,&c);
- if((c.flags&2u)!=0u&&policy.step.y>0.0){var error=0.0;for(var l=0u;l<8u;l++){error=max(error,umResolutionError(tile,l,4u));}c.error=bitcast<u32>(error);}
- umFinishTile(tile,4u,c);
+@compute @workgroup_size(64) fn classifyCoarse(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){resetGroupCensus();}
+ workgroupBarrier();
+ let index=gid.x+umDispatchX*64u*gid.y;
+ if(index<umCounts.y){
+  let tile=umTopology[UM_TILES+umCounts.x+index];
+  var c=umEmptyClass();umClassifyOwner(tile,4u,0u,&c);
+  if((c.flags&2u)!=0u&&policy.step.y>0.0){var error=0.0;for(var l=0u;l<8u;l++){error=max(error,umResolutionError(tile,l,4u));}c.error=bitcast<u32>(error);}
+  umFinishTile(tile,4u,c);
+ }
+ workgroupBarrier();
+ if(lane==0u){flushGroupCensus();}
 }
 // Separable inclusive prefix sum: one lane per line of the (T+1)³ table.
 ${[0,1,2].map(axis=>{const [a,b]=[0,1,2].filter(k=>k!==axis);return /* wgsl */`
@@ -421,6 +483,8 @@ ${[0,1,2].map(axis=>{const [a,b]=[0,1,2].filter(k=>k!==axis);return /* wgsl */`
  let line=gid.x+umDispatchX*64u*gid.y;let extent=vec3u(PX,PY,PZ);
  if(line>=extent[${a}]*extent[${b}]){return;}
  var p=vec3u(0u);p[${a}]=line%extent[${a}];p[${b}]=line/extent[${a}];var sum=0u;
+ // A line on a border plane is all zeros (prefixLoad).
+ if(p[${a}]==0u||p[${b}]==0u){return;}
  for(var i=1u;i<extent[${axis}];i++){p[${axis}]=i;sum+=atomicLoad(&census[prefixIndex(p)]);atomicStore(&census[prefixIndex(p)],sum);}
 }`;}).join("\n")}
 // Cube levels 1..topCube() are built: no box query needs a larger side.
@@ -428,10 +492,24 @@ override cubeLevel:u32=1u;
 // The largest box side, in tiles, a departure query can take: the tile, the
 // sampling reach and drift margin on each side, the travel of the fastest
 // tile over the horizon (census[18]) and gravity's.
-fn topCube()->u32{
+// Largest distance, in cells, any departure box edge travels over the
+// horizon: the fastest tile's (census[18]) plus gravity's, per axis.
+fn departureTravel()->f32{
  let steps=max(1.0,policy.surface.z);
  let gravity=0.5*steps*(steps-1.0)*length(policy.flow.xyz)*policy.step.x/(steps*UM_H);
- let travel=min(bitcast<f32>(atomicLoad(&census[18]))+gravity+SAMPLE_REACH+policy.flow.w,1.0e6);
+ return min(bitcast<f32>(atomicLoad(&census[18]))+gravity,1.0e6);
+}
+// Tiles from p within which decide's closed, margined departure box of any
+// tile p lies (either width's margin): no interface tile there, no h.
+fn departureReachTiles()->i32{
+ let margin=policy.flow.w+4.0*f32(policy.reach.x+policy.reach.y);
+ return i32(ceil((departureTravel()+margin+1e-3)/4.0))+2;
+}
+// Tiles from p within which every cube or tile its trace's velocity queries
+// read starts (the unmargined boxes, grown by SAMPLE_REACH).
+fn sampleReachTiles()->i32{return i32(ceil((departureTravel()+SAMPLE_REACH+1e-3)/4.0))+2;}
+fn topCube()->u32{
+ let travel=min(departureTravel()+SAMPLE_REACH+policy.flow.w,1.0e6);
  let side=2u+u32(ceil((4.0+2.0*travel)/4.0));
  return clamp(firstLeadingBit(side),1u,CUBE_LEVELS);
 }
@@ -442,6 +520,12 @@ fn identityKeys()->array<u32,6>{return array<u32,6>(0xffffffffu,0xffffffffu,0xff
  let index=gid.x+umDispatchX*64u*gid.y;if(index>=UM_TILES){return;}
  if(cubeLevel>topCube()){return;}
  let s=vec3i(umTileCoord(index));
+ // Only decide's queries read cubes, only for tiles within departureReach of
+ // an interface tile, and only at starts within sampleReach of the querying
+ // tile. A cube at s reads level cubeLevel-1 at s + [0, half]: the radius
+ // grows by half per level down, so every cube a built one reads is built.
+ let radius=departureReachTiles()+sampleReachTiles()+i32((1u<<CUBE_LEVELS)-(1u<<cubeLevel));
+ if(interfaceTilesIn(s-vec3i(radius),s+vec3i(radius))==0u){return;}
  let half=i32(1u<<(cubeLevel-1u));var keys=identityKeys();
  for(var o=0u;o<8u;o++){
   let q=s+half*vec3i(vec3u(o&1u,(o>>1u)&1u,o>>2u));
@@ -501,8 +585,8 @@ fn sampledFlow(lo:vec3f,hi:vec3f,shift:vec3f,top:u32)->Flow{
 fn interfaceTilesIn(low:vec3i,high:vec3i)->u32 {
  let a=vec3u(clamp(low,vec3i(0),vec3i(UM_T)));let b=vec3u(clamp(high+vec3i(1),vec3i(0),vec3i(UM_T)));
  if(any(b<=a)){return 0u;}
- let s=atomicLoad(&census[prefixIndex(b)])-atomicLoad(&census[prefixIndex(vec3u(a.x,b.y,b.z))])-atomicLoad(&census[prefixIndex(vec3u(b.x,a.y,b.z))])-atomicLoad(&census[prefixIndex(vec3u(b.x,b.y,a.z))]);
- return s+atomicLoad(&census[prefixIndex(vec3u(a.x,a.y,b.z))])+atomicLoad(&census[prefixIndex(vec3u(a.x,b.y,a.z))])+atomicLoad(&census[prefixIndex(vec3u(b.x,a.y,a.z))])-atomicLoad(&census[prefixIndex(a)]);
+ let s=prefixLoad(b)-prefixLoad(vec3u(a.x,b.y,b.z))-prefixLoad(vec3u(b.x,a.y,b.z))-prefixLoad(vec3u(b.x,b.y,a.z));
+ return s+prefixLoad(vec3u(a.x,a.y,b.z))+prefixLoad(vec3u(a.x,b.y,a.z))+prefixLoad(vec3u(b.x,a.y,a.z))-prefixLoad(a);
 }
 // Predicted surface tile: the departure box of t's points, traced back over
 // the horizon's frames, meets an interface owner (see decide).
@@ -560,12 +644,25 @@ fn departureMeetsSurface(p:vec3i,lo:vec3f,hi:vec3f)->bool{
  }}
  return false;
 }
+// A joined tile (joinTarget, join) is band whatever the trace finds; so is
+// a tile this frame's drop or inflow plug can fill: the source phi (a lower
+// bound on the distance to its ball or plug) at the tile centre within half
+// the tile diagonal, plus two cells for the aperture edge and the donor
+// layer upstream of the nozzle face. Liquid-conditional solid promotion then
+// treats either as band.
+fn umJoined(t:u32)->bool{return (((joinTiles[t/32u]|joinTiles[WORDS+t/32u])>>(t%32u))&1u)!=0u;}
+fn umSourceTile(p:vec3i)->bool{
+ if(umSourceParams.drop.w<=0.0&&umSourceinflowStrength()<=0.0){return false;}
+ let centre=4.0*vec3f(p)+vec3f(2.0);
+ return umSourceuvSourcePhi(centre,3.0e38)<=0.5*length(4.0*H)+2.0*MAX_H;
+}
 @compute @workgroup_size(64) fn decide(@builtin(global_invocation_id) gid:vec3u){
  let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
  let p=vec3i(umTileCoord(tile));let scale=policy.step.x/H;
+ let joined=umJoined(tile)||umSourceTile(p);
  if(policy.surface.x>0.0){
   let width=umTileWidth(tile);
-  let fine=forwardFine(p,i32(policy.reach.x)+select(0,i32(policy.reach.y),width==1u));
+  let fine=joined||forwardFine(p,i32(policy.reach.x)+select(0,i32(policy.reach.y),width==1u));
   if(!fine){if(width==1u){atomicAdd(&census[5],1u);}return;}
   atomicAdd(&census[2],1u);if(width!=1u){atomicAdd(&census[4],1u);}
   atomicOr(&census[${HEADER}u+tile/32u],1u<<(tile%32u));
@@ -574,7 +671,11 @@ fn departureMeetsSurface(p:vec3i,lo:vec3f,hi:vec3f)->bool{
  // A current interface tile stays fine: phi does not only move with the
  // flow (residual sheets left behind a falling surface persist in place).
  let width=umTileWidth(tile);
- var fine=interfaceTilesIn(p,p)!=0u;
+ // No interface tile within the farthest any departure box can reach: the
+ // trace below cannot meet one (an O(1) prefix query).
+ let far=departureReachTiles();
+ if(!joined&&interfaceTilesIn(p-vec3i(far),p+vec3i(far))==0u){if(width==1u){atomicAdd(&census[5],1u);}return;}
+ var fine=joined||interfaceTilesIn(p,p)!=0u;
  if(!fine){
   // Trace the tile's points back one frame at a time, newest frame first, as
   // RK2 does (x - dt·u(x - dt/2·u(x)), clamped to the domain): each stage
@@ -638,7 +739,7 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
  }
  /** Solid-coupled tiles (uniformMixedSolidTiles().coupled), for the impact rule. */
  setSolid(coupled:Uint8Array):void{
-  const tiles=this.ownership.layout.tiles.length;
+  const tiles=this.ownership.capacity.tiles;
   if(coupled.length!==tiles)throw new Error(`Dynamic ownership solid mask has ${coupled.length} tiles, expected ${tiles}`);
   const bits=new Uint32Array(this.words);
   for(let t=0;t<tiles;t++)if(coupled[t])bits[t>>5]!|=1<<(t&31);
@@ -650,9 +751,24 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
   * state), and the liquid-conditional promotion passes run. undefined
   * restores the static mask. */
  setBodies(mark?:(encoder:GPUCommandEncoder,tiles:GPUBuffer)=>void):void{this.bodies=mark;}
+ /** Host join: `tiles` (one byte per tile) are band in the next census,
+  * ored with any earlier join it has not consumed. Uploaded by encode. */
+ join(tiles:Uint8Array):void{
+  const n=this.ownership.capacity.tiles;
+  if(tiles.length!==n)throw new Error(`Dynamic ownership join has ${tiles.length} tiles, expected ${n}`);
+  const bits=this.hostJoin??=new Uint32Array(this.words);
+  for(let t=0;t<n;t++)if(tiles[t])bits[t>>5]!|=1<<(t&31);
+ }
+ /** The GPU join words: a producer ors one bit per tile (atomicOr) in work
+  * submitted before the next census, or encoded before it in its encoder;
+  * that census consumes and clears them. */
+ joinTarget():UniformMixedBandBits{this.joinLive=true;return {buffer:this.joinTiles,wordOffset:0};}
  /** Encode after a completed frame, while its ownership and the local speed
-  * velocity (the one the next frame advects with) are still in place. */
- encode(encoder:GPUCommandEncoder,policy:UniformMixedDynamicPolicy):void{
+  * velocity (the one the next frame advects with) are still in place. Every
+  * launch is a fixed grid bounded on the GPU (umCounts): no host tile count.
+  * readback: copy the header and band bits for read() (tools, tests and the
+  * host relayout path); without it the census reads nothing back. */
+ encode(encoder:GPUCommandEncoder,policy:UniformMixedDynamicPolicy,readback=true):void{
   if(this.pipelines.size!==8+CUBE_LEVELS)throw new Error("Dynamic ownership census is not initialized");
   for(const [name,value] of Object.entries({dt:policy.dt,fullTolerance:policy.fullTolerance,emptyTolerance:policy.emptyTolerance}))
    if(!Number.isFinite(value)||value<0)throw new Error(`Dynamic ownership ${name} must be finite and non-negative: ${value}`);
@@ -669,40 +785,50 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
   if(policy.gravity.length!==3||!policy.gravity.every(Number.isFinite))throw new Error(`Dynamic ownership gravity must be three finite components: ${policy.gravity}`);
   const frame=policy.dt/policy.steps;
   this.device.queue.writeBuffer(this.params,32,new Float32Array([policy.fastTravel,policy.boundaryTravel,policy.steps,0,...policy.gravity.map(g=>g*frame),UNIFORM_MIXED_DYNAMIC_SURFACE_DRIFT]));
-  // Cube levels up to the one decide can reach are written in full before
-  // decide reads them; the census is cleared whole.
-  encoder.clearBuffer(this.work);
+  // Cube levels are written wherever decide can read them before it does,
+  // and classify writes every tile's keys, gap, travel and prefix entry;
+  // only the counters, band bits and wet/active bits accumulate.
+  encoder.clearBuffer(this.work,0,(HEADER+this.words)*4);
+  encoder.clearBuffer(this.work,this.wetOffset*4,2*this.words*4);
   if(this.bodies||this.bodyBits){
    encoder.copyBufferToBuffer(this.staticSolidTiles,0,this.solidTiles,0,this.words*4);
    this.bodies?.(encoder,this.solidTiles);this.bodyBits=!!this.bodies;
   }
-  const tiles=this.ownership.layout.tiles.length,x=this.ownership.dispatchX,t=this.ownership.layout.lattice.dimensions.map(n=>n/4+1);
+  // Host joins upload now, ordered after every earlier submission (and
+  // after the census that consumed the last ones); GPU producers or theirs.
+  if(this.hostJoin){this.device.queue.writeBuffer(this.joinTiles,this.words*4,this.hostJoin);this.hostJoin=undefined;this.joinLive=true;}
+  const tiles=this.ownership.capacity.tiles,x=this.ownership.dispatchX,t=this.ownership.capacity.lattice.dimensions.map(n=>n/4+1);
   for(const [label,entries] of [["classify",["classify","classifyCoarse"]],["prefix",["prefix0","prefix1","prefix2",...Array.from({length:CUBE_LEVELS},(_,j)=>`cube${j+1}`)]],["decide",this.solid||this.bodies?["decide","solidActive","solidPromote"]:["decide"]]] as const){
    const pass=encoder.beginComputePass({label:`Uniform dynamic ownership census ${label}`});
    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
    for(const entry of entries){
+    // Fixed grids: classify strides over the h list; classifyCoarse has a
+    // lane per tile, bounded by the 4h count; the rest are lattice-sized.
     const lines=entry.startsWith("prefix")?[0,1,2].filter(k=>k!==Number(entry.at(-1))).reduce((n,k)=>n*t[k]!,1):tiles;
-    const l=this.ownership.layout,groups=entry==="classify"?l.fineTiles.length:entry==="classifyCoarse"?Math.ceil(l.coarseTiles.length/64):entry.startsWith("cube")?Math.ceil(tiles/64):Math.ceil(lines/64);
-    if(!groups)continue;
-    pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
+    pass.setPipeline(this.pipelines.get(entry)!);
+    if(entry==="classify")pass.dispatchWorkgroups(Math.min(CENSUS_TILE_GRID,tiles));
+    else{const groups=Math.ceil(lines/64);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));}
    }
    pass.end();
   }
-  encoder.copyBufferToBuffer(this.work,0,this.readback,0,(HEADER+this.words)*4);
-  this.encoded=true;
+  // The band now holds the joins: clear them for the next producers.
+  if(this.joinLive)encoder.clearBuffer(this.joinTiles);
+  if(readback){encoder.copyBufferToBuffer(this.work,0,this.readback,0,(HEADER+this.words)*4);this.encoded=true;}
  }
- /** Map the census encoded by the last submitted encode(). */
+ /** Map the census encoded by the last submitted encode(readback). An
+  * opt-in diagnostic: nothing on the advance path may wait for it. */
  async read():Promise<UniformMixedDynamicCensus>{
-  if(!this.encoded)throw new Error("Dynamic ownership census was not encoded");
+  if(!this.encoded)throw new Error("Dynamic ownership census was not encoded with a readback");
   this.encoded=false;
   await this.readback.mapAsync(GPUMapMode.READ);
   const words=new Uint32Array(this.readback.getMappedRange()).slice();this.readback.unmap();
   const f=new Float32Array(words.buffer);
-  const tiles=this.ownership.layout.tiles.length,fine=new Uint8Array(tiles);
-  for(let t=0;t<tiles;t++)fine[t]=(words[HEADER+(t>>5)]!>>>(t&31))&1;
-  return {fine,interfaceTiles:words[0]!,requiredTiles:words[12]!,unresolvedCoarse:words[1]!,unresolvedTiles:Array.from(words.subarray(13,13+Math.min(3,words[1]!))),boundaryTiles:words[16]!,fineTiles:words[2]!,refined:words[4]!,coarsened:words[5]!,solidTiles:words[19]!,
+  const tiles=this.ownership.capacity.tiles;let fine:Uint8Array|undefined;
+  // Expanded from the band bits on first use (the adopt path needs none).
+  const expand=()=>{const bytes=new Uint8Array(tiles);for(let t=0;t<tiles;t++)bytes[t]=(words[HEADER+(t>>5)]!>>>(t&31))&1;return bytes;};
+  return {get fine(){return fine??=expand();},interfaceTiles:words[0]!,requiredTiles:words[12]!,unresolvedCoarse:words[1]!,unresolvedTiles:Array.from(words.subarray(13,13+Math.min(3,words[1]!))),boundaryTiles:words[16]!,fineTiles:words[2]!,refined:words[4]!,coarsened:words[5]!,solidTiles:words[19]!,
   coarsePartialVolume:words[6]!,coarsePhiCrossing:words[7]!,coarseDryLiquidPhi:words[3]!,
   interiorDeficit:[f[8]!,f[9]!],airVolume:[f[10]!,f[11]!]};
  }
- destroy():void{this.solidTiles.destroy();this.staticSolidTiles.destroy();this.work.destroy();this.bounds.destroy();this.readback.destroy();this.params.destroy();}
+ destroy():void{this.solidTiles.destroy();this.staticSolidTiles.destroy();this.joinTiles.destroy();this.noSource?.destroy();this.work.destroy();this.bounds.destroy();this.readback.destroy();this.params.destroy();}
 }

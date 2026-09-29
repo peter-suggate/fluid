@@ -1,5 +1,5 @@
 import { uniformMidpointTraceWGSL } from "./uniform-midpoint-trace.wgsl";
-import { uniformMixedVelocitySamplingWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
+import { uniformMixedHangingSlotCapacity, uniformMixedVelocitySamplingWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedFacesWGSL } from "./uniform-mixed-faces.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 
@@ -9,6 +9,26 @@ export const UNIFORM_MIXED_FUSED_REGULAR_TILES=64;
  * launch-bound: they ride another launch as packed lanes (umRegularCoarseOwner)
  * instead of a width-specialized launch of their own. */
 export const UNIFORM_MIXED_PACKED_REGULAR_OWNERS=16384;
+/** umCountedJobs: GPU-counted launches (uniformMixedCertifiedEntriesWGSL
+ * entries striding a fixed grid, ownership.dispatch*Counted). Each count
+ * mirrors the entry's owner lookup, so no host membership sizes the launch.
+ * owners: umOwner slots, 64 per job (tier, planned, interface or regular
+ * list); tiles: umTileJobOwner, one tile per job; all: umAllOwner slots, 64
+ * per job; regularCoarse: umRegularCoarseOwner slots, 64 per job; fused:
+ * umFusedOwner jobs (seams, then with umFusedJobs the small regular tiers);
+ * fusedQuad: fused with seam 4h tiles packed four per job
+ * (uniformMixedFaceTileDispatchWGSL); hanging: one job per hanging slot;
+ * fineTiles: one job per h list tile; coarseTiles: 64 4h list tiles per job. */
+export const UNIFORM_MIXED_COUNTED={owners:1,tiles:2,all:3,regularCoarse:4,fused:5,fusedQuad:6,hanging:7,fineTiles:8,coarseTiles:9} as const;
+/** umFusedRegularGate for owners/tiles/regularCoarse launches: skipFused
+ * empties a tier that rides the fused launch (dispatchRegular skipFused);
+ * onlyFused empties one that does not. */
+export const UNIFORM_MIXED_FUSED_GATE={skipFused:1,onlyFused:2} as const;
+/** Support word 9n+25: sticky ownership overflow bits, never cleared by an
+ * adoption. Any nonzero value is fatal; the host reads it non-blockingly. */
+export const uniformMixedOverflowWord=(tiles:number)=>9*tiles+25;
+/** Overflow bits: a generation needed more hanging slots than the preallocated cache. */
+export const UNIFORM_MIXED_OVERFLOW_HANGING=1;
 
 /** One packed topology buffer: tile records, h/4h worklists, then frozen stencil masks.
  * Ownership and tracing share this ABI. Two tiers: 0 = h (width 1, 64 owners
@@ -16,7 +36,11 @@ export const UNIFORM_MIXED_PACKED_REGULAR_OWNERS=16384;
  * tiles, 0, 8). A 64-lane group visits one h tile or 64 coarse tiles; coarse dispatch never
  * pays 63 idle lanes.
  */
-export function uniformMixedTopologyWGSL(layout: UniformMixedLayout, group: number, prefix = ""): string {
+/** The lattice and tile count a topology shader is specialized for: an
+ * ownership's fixed capacity (or a layout, whose tiles are the same lattice). */
+export type UniformMixedTopologyShape = { readonly lattice: UniformMixedLayout["lattice"]; readonly tiles: number | { readonly length: number } };
+export function uniformMixedTopologyWGSL(shape: UniformMixedTopologyShape, group: number, prefix = ""): string {
+  const layout = { lattice: shape.lattice, tiles: { length: typeof shape.tiles === "number" ? shape.tiles : shape.tiles.length } };
   if (prefix && !/^[a-zA-Z][a-zA-Z0-9]*$/.test(prefix)) throw new Error("Invalid mixed topology namespace");
   const source = /* wgsl */ `
 @group(${group}) @binding(0) var<storage,read> umTopology:array<u32>;
@@ -39,8 +63,15 @@ override umMergedPack:u32=1u;
 // umPlannedFine certificate list, 2 the merged tile jobs, 3 the merged jobs
 // with seam 4h tiles packed four per job (uniformMixedFaceTileDispatchWGSL).
 override umCertifiedJobs:u32=0u;
+// GPU-counted launches (UNIFORM_MIXED_COUNTED); 0 leaves umCertifiedJobs in charge.
+override umCountedJobs:u32=0u;
+override umFusedRegularGate:u32=0u;
 const UM_D=vec3u(${layout.lattice.dimensions.map(n => `${n}u`).join(',')});const UM_T=UM_D/4u;
 const UM_TILES:u32=${layout.tiles.length}u;
+// Preallocated hanging tap cache slots (uniformMixedHangingSlotCapacity).
+const UM_HANGING_SLOTS:u32=${uniformMixedHangingSlotCapacity(layout.tiles.length)}u;
+// Sticky overflow bits (uniformMixedOverflowWord); topology never writes them.
+const UM_OVERFLOW_WORD:u32=9u*UM_TILES+25u;const UM_OVERFLOW_HANGING:u32=${UNIFORM_MIXED_OVERFLOW_HANGING}u;
 fn umTileWidth(t:u32)->u32{return select(4u,1u,(umTopology[t]&0x80000000u)!=0u);}
 fn umTileSupport(t:u32)->u32{return umSupport[3u*UM_TILES+t];}
 // The mixed pressure schedule's slot gate (support 9n+24, 0 open): its gate
@@ -157,6 +188,40 @@ fn umCertifiedJobCount()->u32 {
  if(umCertifiedJobs==2u){return merged;}
  let fours=umSupport[7u*UM_TILES+17u];return merged-fours+(fours+3u)/4u;
 }
+fn umFusedGateOpen(tier:u32)->bool{return umFusedRegularGate==0u||(umFusedRegularGate==${UNIFORM_MIXED_FUSED_GATE.onlyFused}u)==umFusedRegularTier(tier);}
+// umOwner's list length for tier: interface, planned certificate or tier tiles.
+fn umTierListCount(tier:u32)->u32 {
+ if(umInterfaceTiles){return umSupport[7u*UM_TILES+16u+tier];}
+ if(tier==0u&&umPlannedFine!=0u){return umSupport[4u*UM_TILES+umPlannedFine];}
+ return umCounts[tier];
+}
+// Jobs of a counted launch (UNIFORM_MIXED_COUNTED), from GPU counts only.
+fn umCountedJobCount()->u32 {
+ let tier=select(0u,1u,umCellWidth==4u);let header=7u*UM_TILES+16u;
+ // The whole h list (a job per tile) or 4h list (64 tiles per job).
+ if(umCountedJobs==${UNIFORM_MIXED_COUNTED.fineTiles}u){return umCounts.x;}
+ if(umCountedJobs==${UNIFORM_MIXED_COUNTED.coarseTiles}u){return (umCounts.y+63u)/64u;}
+ if(umCountedJobs==${UNIFORM_MIXED_COUNTED.owners}u||umCountedJobs==${UNIFORM_MIXED_COUNTED.tiles}u){
+  // A regular launch with no regular tile is empty (dispatchRegular skips it).
+  if(!umFusedGateOpen(tier)||(umRegularTiles&&umCounts[tier]<=umSupport[header+tier])){return 0u;}
+  let tiles=umTierListCount(tier);
+  if(umCountedJobs==${UNIFORM_MIXED_COUNTED.tiles}u){return tiles;}
+  return (tiles*(64u>>(6u*tier))+63u)/64u;
+ }
+ if(umCountedJobs==${UNIFORM_MIXED_COUNTED.all}u){return umCounts.x+(umCounts.y+63u)/64u;}
+ if(umCountedJobs==${UNIFORM_MIXED_COUNTED.regularCoarse}u){if(!umFusedGateOpen(1u)){return 0u;}return (umSupport[8u*UM_TILES+20u]+63u)/64u;}
+ let fine=umSupport[header];let fours=umSupport[header+1u];
+ // Slots past the cache are never visited: the builder flags UM_OVERFLOW_HANGING.
+ if(umCountedJobs==${UNIFORM_MIXED_COUNTED.hanging}u){return min(fine+fours,UM_HANGING_SLOTS);}
+ var jobs=fine+fours;
+ if(umFusedJobs){for(var t=0u;t<2u;t++){if(umFusedRegularTier(t)){jobs+=umCounts[t];}}}
+ if(umCountedJobs==${UNIFORM_MIXED_COUNTED.fusedQuad}u){jobs-=fours-(fours+3u)/4u;}
+ return jobs;
+}
+fn umLaunchJobCount()->u32 {
+ if(umCountedJobs!=0u){return umCountedJobCount();}
+ return umCertifiedJobCount();
+}
 fn umOrigin(o:UMOwner)->vec3u{return umTileCoord(o.tile)*4u+umCorner(o.lane,4u/o.width)*o.width;}
 ${uniformMixedFacesWGSL}
 `;
@@ -166,11 +231,13 @@ ${uniformMixedFacesWGSL}
 }
 
 /** Rewrites each named compute entry of `source` into a fixed grid-stride
- * launch over its certified jobs (umCertifiedJobCount): the entry's body runs
- * once per job as if it were workgroup (job,0,0) of a one-row launch, so
- * every owner lookup keeps its meaning. Compile the entries with
- * umCertifiedJobs set; launch any grid (ownership.dispatchCertified). The
- * job count is workgroup-uniform, so bodies may keep their barriers. */
+ * launch over its jobs (umLaunchJobCount): the entry's body runs once per job
+ * as if it were workgroup (job,0,0) of a one-row launch, so every owner lookup
+ * keeps its meaning. Compile the entries with umCertifiedJobs
+ * (ownership.dispatchCertified) or umCountedJobs (UNIFORM_MIXED_COUNTED,
+ * ownership.dispatch*Counted) set; any grid is correct. Owner-slot modes
+ * assume 64-lane entries. The job count is workgroup-uniform, so bodies may
+ * keep their barriers. */
 export function uniformMixedCertifiedEntriesWGSL(source: string, entries: readonly string[]): string {
   let out = source;
   for (const entry of entries) {
@@ -193,7 +260,7 @@ export function uniformMixedCertifiedEntriesWGSL(source: string, entries: readon
     out = out.slice(0, match.index) + `fn ${entry}Job(${params.join(",")}){` + out.slice(match.index + match[0].length) + /* wgsl */ `
 var<workgroup> ${entry}Jobs:u32;
 @compute @workgroup_size(${size}) fn ${entry}(@builtin(workgroup_id) umGroup:vec3u,@builtin(num_workgroups) umGroups:vec3u,@builtin(local_invocation_index) umLane:u32){
- if(umLane==0u){${entry}Jobs=umCertifiedJobCount();}
+ if(umLane==0u){${entry}Jobs=umLaunchJobCount();}
  let jobs=workgroupUniformLoad(&${entry}Jobs);
  for(var umJob=umGroup.x;umJob<jobs;umJob+=umGroups.x){${entry}Job(${args.join(",")});workgroupBarrier();}
 }
@@ -201,12 +268,14 @@ var<workgroup> ${entry}Jobs:u32;
   }
   return out;
 }
+/** The same rewrite, named for GPU-counted launches (umCountedJobs). */
+export const uniformMixedCountedEntriesWGSL=uniformMixedCertifiedEntriesWGSL;
 
 /** Appended after native storage specialization, for certified boxes
  * without interior solids. Canonical mixed MAC input is bound as transportIn without a halo.
  * RK2 is shared with native; interior-solid collision walking is unnecessary.
  */
-export function uniformMixedNativeTraceWGSL(layout: UniformMixedLayout): string {
+export function uniformMixedNativeTraceWGSL(layout: UniformMixedTopologyShape): string {
   return uniformMixedTopologyWGSL(layout, 1) + /* wgsl */ `
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32 {
  if(anchor[axis]<0){return boundaryVelocityIn[boundaryFaceIndex(max(anchor,vec3i(0)),axis)];}

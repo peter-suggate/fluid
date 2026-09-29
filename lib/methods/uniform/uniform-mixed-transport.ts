@@ -1,4 +1,5 @@
 import { UniformMixedOwnership, compileMixedTiers } from "./uniform-mixed-ownership";
+import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL } from "./uniform-mixed-topology.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import type { UniformScratchArena } from "./uniform-scratch-arena";
 import { UNIFORM_MIXED_TRANSPORT_LIVE_HEADER, uniformMixedTransportWGSL } from "./uniform-mixed-transport.wgsl";
@@ -11,6 +12,8 @@ type Entry = typeof entries[number];
 /** Owner lists of the transport live set: rows are built for receivers, limbs
  * cleared and decoded for their donors; copy and restriction stay dense. */
 const liveList: Partial<Record<Entry, 1 | 2>> = { build: 1, rowsFallback: 1, rowsDivide: 1, gather: 1, clear: 2, decode: 2 };
+/** Dense entries: GPU-counted owner launches over each tier's list. */
+const dense: readonly Entry[] = ["restrictVolume", "copyVolume"];
 
 /** Conservative volume stage, not a separate simulation. Persistent volume and
  * trace fields and the large transient arena belong to the native Uniform host.
@@ -36,19 +39,17 @@ export class UniformMixedTransportStage {
   private readonly coarseRowGrid: number;
   private readonly cells: number;
 
-  get layout(): UniformMixedLayout { return this.ownership.layout; }
-
   constructor(private readonly device: GPUDevice, layout: UniformMixedLayout,
     arena: UniformScratchArena, fineVolume: GPUTexture,
     restrictedVolume: GPUTexture, departures: GPUTexture,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly parallelCoarseRows=false) {
-    this.cells = layout.tiles.length * 64;
+    this.ownership = new UniformMixedOwnership(device, layout);
+    const tiles = this.ownership.capacity.tiles;
+    this.cells = tiles * 64;
     // Fine indexing keeps the borrowed slice ABI stable across ownership changes.
     if (arena.edgeBytes < this.cells * 40 || arena.donorOffset + this.cells * 16 > arena.byteLength)
       throw new Error("Native Uniform scratch cannot hold mixed transport slices");
-    this.ownership = new UniformMixedOwnership(device, layout);
-    this.sampling = device.createBuffer({ label: "Uniform mixed departure sampling widths", size: layout.tiles.byteLength,
+    this.sampling = device.createBuffer({ label: "Uniform mixed departure sampling widths", size: tiles * 4,
       usage: GPUBufferUsage.STORAGE });
-    const tiles = layout.tiles.length;
     this.live = device.createBuffer({ label: "Uniform mixed transport live set", size: (UNIFORM_MIXED_TRANSPORT_LIVE_HEADER + 7 * tiles) * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.workBytes = this.sampling.size + this.live.size;
@@ -79,14 +80,17 @@ export class UniformMixedTransportStage {
   }
 
   async initialize(): Promise<void> {
-    const module = this.device.createShaderModule({ label: "Uniform mixed conservative transport", code: uniformMixedTransportWGSL(this.layout,!!this.sourceParams,!!this.solid) });
+    // The generator reads the lattice and tile count only (fixed by capacity).
+    const module = this.device.createShaderModule({ label: "Uniform mixed conservative transport",
+      code: uniformMixedCountedEntriesWGSL(uniformMixedTransportWGSL(this.ownership.layout,!!this.sourceParams,!!this.solid), [...dense, "liveSeed", "liveSeedCoarse"]) });
     const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.topologyLayout, this.resourcesLayout, ...(this.solid?[this.solid.bindLayout]:[])] });
     // h rows compile their workgroup-summed tile variant in place of the generic tier.
     const fineRows=new Set<Entry>(["build","rowsFallback","rowsDivide"]);
     const twin = (create: (solid: Record<string, number>) => Promise<GPUComputePipeline>) => uniformMixedSolidPipeline(this.solid, create);
     const tiers = Promise.all(entries.map(async entry => { this.pipelines.set(entry, await compileMixedTiers(umCellWidth => twin(solid =>
       this.device.createComputePipelineAsync({ layout, compute: { module, entryPoint: umCellWidth===1&&fineRows.has(entry)?entry+"Fine":entry,
-        constants: { umCellWidth, umDispatchX: this.dispatchX, umTransportList: liveList[entry] ?? 0, ...solid } } })))); }));
+        constants: { umCellWidth, umDispatchX: this.dispatchX, umTransportList: liveList[entry] ?? 0,
+          ...(dense.includes(entry) ? { umCountedJobs: UNIFORM_MIXED_COUNTED.owners } : {}), ...solid } } })))); }));
     const coarseRows = this.parallelCoarseRows ? Promise.all((["rowsFallback","rowsDivide"] as const).map(async entry=>{
       this.coarseRows.set(entry,await twin(solid=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:entry+"Coarse",constants:{umCellWidth:4,umDispatchX:this.dispatchX,umTransportList:1,...solid}}})));
     })) : undefined;
@@ -96,18 +100,13 @@ export class UniformMixedTransportStage {
     const S = 1, R1 = 2, D2 = 4, Q2 = 8, D1 = 16, Q1 = 32, Q0 = 64, DONOR = 128;
     const chain: [string, number, number][] = [["liveGather", S, R1], ["liveScatter", R1, D2], ["liveGather", D2, Q2], ["liveScatter", Q2, D1],
       ["liveGather", D1, Q1], ["liveGather", Q1, Q0], ["liveScatter", S | Q1 | Q0, DONOR]];
-    const live = Promise.all([tile("liveSeed"), ...chain.map(([entry, tpFrom, tpInto]) => tile(entry, { tpFrom, tpInto })),
+    const live = Promise.all([tile("liveSeed", { umCountedJobs: UNIFORM_MIXED_COUNTED.fineTiles }), tile("liveSeedCoarse", { umCountedJobs: UNIFORM_MIXED_COUNTED.coarseTiles }), ...chain.map(([entry, tpFrom, tpInto]) => tile(entry, { tpFrom, tpInto })),
       tile("liveCompact")]).then(pipelines => { this.livePipelines.push(...pipelines); });
     await Promise.all([tiers, coarseRows, live]);
   }
 
   /** The variant of a pipeline for the scene's current solids. */
   private variant(pipeline: GPUComputePipeline): GPUComputePipeline { return this.solid?.select(pipeline) ?? pipeline; }
-
-  /** Reused by the native trace pipeline so every stage visits the same owners. */
-  dispatch(pass: GPUComputePassEncoder, pipelines: readonly GPUComputePipeline[]): void {
-    this.ownership.dispatch(pass, pipelines);
-  }
 
   private begin(encoder: GPUCommandEncoder, label: string, group: GPUBindGroup): GPUComputePassEncoder {
     const pass = encoder.beginComputePass({ label: `Uniform mixed ${label}` });
@@ -129,20 +128,24 @@ export class UniformMixedTransportStage {
       const coarse=tier===1?this.coarseRows.get(entry):undefined;
       pass.setPipeline(this.variant(coarse??pipelines[tier]!));pass.dispatchWorkgroups(coarse?this.coarseRowGrid:this.liveGrid[tier]);
     }
-    else this.dispatch(pass, pipelines.map(p => this.variant(p)));
+    // Dense: one counted launch per tier, even when the tier is empty.
+    else this.ownership.dispatchTiersCounted(pass, pipelines.map(p => this.variant(p)));
     if (!shared) pass.end();
   }
 
   /** Rows and donors whose restricted transport equals the dense one, from
    * this frame's departures and volume (per-tile reach dependency chain). */
   private encodeLiveSet(encoder: GPUCommandEncoder): void {
-    const seed = this.livePipelines[0];
-    if (!seed) throw new Error("Mixed transport has not been initialized");
-    const tiles = this.layout.tiles.length, groups = Math.ceil(tiles / 64);
+    const [seed, seedCoarse] = this.livePipelines;
+    if (!seed || !seedCoarse) throw new Error("Mixed transport has not been initialized");
+    // Every tile of the lattice (UM_TILES): no membership sizes these.
+    const tiles = this.ownership.capacity.tiles, groups = Math.ceil(tiles / 64);
     encoder.clearBuffer(this.live, 0, UNIFORM_MIXED_TRANSPORT_LIVE_HEADER * 4);
     const pass = this.begin(encoder, "transport live set", this.transportGroup);
-    pass.setPipeline(this.variant(seed)); pass.dispatchWorkgroups(Math.min(tiles, this.dispatchX), Math.ceil(tiles / this.dispatchX));
-    for (const pipeline of this.livePipelines.slice(1)) { pass.setPipeline(this.variant(pipeline)); pass.dispatchWorkgroups(Math.min(groups, this.dispatchX), Math.ceil(groups / this.dispatchX)); }
+    // Seeds cover the h/4h partition: a workgroup per h tile, a lane per 4h tile.
+    this.ownership.dispatchCounted(pass, this.variant(seed), tiles);
+    this.ownership.dispatchCounted(pass, this.variant(seedCoarse), groups);
+    for (const pipeline of this.livePipelines.slice(2)) { pass.setPipeline(this.variant(pipeline)); pass.dispatchWorkgroups(Math.min(groups, this.dispatchX), Math.ceil(groups / this.dispatchX)); }
     pass.end();
   }
 

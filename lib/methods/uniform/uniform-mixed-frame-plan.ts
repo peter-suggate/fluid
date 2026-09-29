@@ -1,6 +1,9 @@
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
-import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
+import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
+
+/** Owner entries: one lane per owner of every tier, GPU-counted. */
+const counted:readonly string[]=["seed","localSpeed"];
 
 /** Start-of-frame support census, independent of simulation ownership. The
  * native fine sampling reach is two tiles; extension gets one additional tile.
@@ -17,7 +20,8 @@ export class UniformMixedFramePlan {
   private readonly pipelines=new Map<string,GPUComputePipeline>();
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,velocity:GPUTexture,negative:GPUBuffer,
     /** The extended field every characteristic samples, valid at encodeCertificate. */
-    extended:GPUTexture,extendedNegative:GPUBuffer,private readonly directionalCertificate=false){
+    extended:GPUTexture,extendedNegative:GPUBuffer,directionalCertificate=false){
+    if(!directionalCertificate)throw new Error("The mixed frame plan certifies signed per-axis reach only");
     this.params=device.createBuffer({label:"Uniform shared support policy",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     this.resources=device.createBindGroupLayout({entries:[...[0,1,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
     this.group=device.createBindGroup({layout:this.resources,entries:[...[volume,phi].map((t,binding)=>({binding,resource:t.createView()})),{binding:2,resource:{buffer:this.params}},{binding:3,resource:velocity.createView()},{binding:4,resource:{buffer:negative}}]});
@@ -26,9 +30,12 @@ export class UniformMixedFramePlan {
     this.extendedGroup=device.createBindGroup({layout:this.extendedResources,entries:[{binding:0,resource:extended.createView()},{binding:1,resource:{buffer:extendedNegative}},{binding:2,resource:{buffer:ownership.speeds}}]});
   }
   async initialize():Promise<void>{
-    const h=this.ownership.layout.lattice.cellSize_m;
-    const topology=uniformMixedTopologyWGSL(this.ownership.layout,0).replace('umSupport:array<u32>','umSupport:array<atomic<u32>>').replace(/umSupport\[([^\]]+)\]/g,'atomicLoad(&umSupport[$1])');
-    const module=this.device.createShaderModule({code:topology+/* wgsl */`
+    const h=this.ownership.capacity.lattice.cellSize_m;
+    // The generator reads the lattice and tile count only (fixed by capacity).
+    const topology=uniformMixedTopologyWGSL(this.ownership.capacity,0).replace('umSupport:array<u32>','umSupport:array<atomic<u32>>').replace(/umSupport\[([^\]]+)\]/g,'atomicLoad(&umSupport[$1])');
+    // seed and localSpeed stride the GPU-counted owners of every tier
+    // (umAllOwner); the per-tile passes cover the lattice.
+    const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(topology+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var phi:texture_3d<f32>;
 struct PlanPolicy {settings:vec4u,step:vec4f}
@@ -38,7 +45,6 @@ struct PlanPolicy {settings:vec4u,step:vec4f}
 @group(2) @binding(0) var extended:texture_3d<f32>;
 @group(2) @binding(1) var<storage,read> extendedNegative:array<f32>;
 @group(2) @binding(2) var<storage,read_write> speeds:array<u32>;
-override umDirectionalCertificate:bool=false;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 fn umNegativeIndex(origin:vec3u,axis:u32)->u32{
  if(axis==0u){return origin.y+UM_D.y*origin.z;}
@@ -51,8 +57,22 @@ fn umCertificateRadius(speed:f32)->u32{
  let travel=speed*policy.step.x/${Math.min(...h)};
  return u32(min(ceil(travel*1.00001/4.0)+2.0,1e8));
 }
-fn umPackRadius(r:vec3u)->u32{return r.x|(r.y<<10u)|(r.z<<20u);}
-fn umUnpackRadius(r:u32)->vec3u{return vec3u(r&1023u,(r>>10u)&1023u,r>>20u);}
+// Signed per-axis reach, in tiles. A departure moves by -v*dt and every
+// velocity a sampler reads is a convex combination of extended faces inside
+// the global-reach box (or a zero-weight tap), so along +a it travels at most
+// max(0,-dt*min v_a) cells and along -a at most max(0,dt*max v_a). The +2
+// margin of umCertificateRadius covers the start offset, taps, wall
+// continuation and the Newton window on every side, as the Chebyshev radius
+// did. Five bits each: +x,+y,+z at bits 0,5,10 and -x,-y,-z at 15,20,25;
+// UM_REACH_SATURATED (unbounded or non-finite) never certifies.
+const UM_REACH_SATURATED:u32=31u;
+fn umReach(travel:f32)->u32{
+ let tiles=ceil(travel*1.00001/4.0)+2.0;
+ return select(UM_REACH_SATURATED,u32(tiles),tiles<f32(UM_REACH_SATURATED));
+}
+fn umPackReach(plus:vec3u,minus:vec3u)->u32{return plus.x|(plus.y<<5u)|(plus.z<<10u)|(minus.x<<15u)|(minus.y<<20u)|(minus.z<<25u);}
+fn umReachPlus(w:u32)->vec3u{return vec3u(w&31u,(w>>5u)&31u,(w>>10u)&31u);}
+fn umReachMinus(w:u32)->vec3u{return vec3u((w>>15u)&31u,(w>>20u)&31u,(w>>25u)&31u);}
 // Every plan follows a phi resolve of its layout (frame start, census tail).
 ${uniformMixedVertexSamplingSource("",true)}
 // An owner's positive-face speeds. In a tile whose stencil is all unit width
@@ -106,29 +126,38 @@ ${[0,1,2].map(axis=>/* wgsl */`
  }
  atomicStore(&umSupport[${axis+1}u*UM_TILES+tile],flags|policy.settings.z);
 }`).join("\n")}
-// Largest extended canonical face speed owned by each tile.
-// Owner lanes as in seed.
-var<workgroup> tileSpeed:array<atomic<u32>,192>;
+// Each tile's signed reach (umPackReach) from the extended canonical faces it
+// owns, zero included. Owner lanes as in seed.
+fn umSignedFaceExtent(unit:bool,origin:vec3u,axis:u32)->vec2f{
+ var lo=0.0;var hi=0.0;
+ if(unit){let v=textureLoad(extended,vec3i(origin),0)[axis];lo=min(lo,v);hi=max(hi,v);}
+ else{
+  let owner=umOwnerAt(vec3i(origin));let first=umFace(owner,axis,1,0u);
+  for(var part=0u;part<first.count;part++){let v=textureLoad(extended,umFace(owner,axis,1,part).anchor,0)[axis];lo=min(lo,v);hi=max(hi,v);}
+ }
+ if(origin[axis]==0u){let v=extendedNegative[umNegativeIndex(origin,axis)];lo=min(lo,v);hi=max(hi,v);}
+ return vec2f(lo,hi);
+}
+var<workgroup> tileReach:array<atomic<u32>,384>;
 @compute @workgroup_size(64) fn localSpeed(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  let owner=umAllOwner(gid);let slot=lane-owner.lane;
- atomicStore(&tileSpeed[lane],0u);
- if(umDirectionalCertificate){atomicStore(&tileSpeed[64u+lane],0u);atomicStore(&tileSpeed[128u+lane],0u);}workgroupBarrier();
+ for(var k=0u;k<6u;k++){atomicStore(&tileReach[64u*k+lane],0u);}
+ workgroupBarrier();
  if(owner.width!=0u){
-  let origin=umOrigin(owner);
-  var v=umPositiveFaceSpeeds(extended,umTileMaximumWidth(owner.tile)==1u,origin);
-  for(var axis=0u;axis<3u;axis++){if(origin[axis]==0u){v[axis]=max(v[axis],abs(extendedNegative[umNegativeIndex(origin,axis)]));}}
-  if(umDirectionalCertificate){
-   for(var axis=0u;axis<3u;axis++){atomicMax(&tileSpeed[64u*axis+slot],select(0x7f7fffffu,bitcast<u32>(v[axis]),v[axis]<=3.402823e38));}
-  }else{
-   let speed=max(v.x,max(v.y,v.z));
-   atomicMax(&tileSpeed[slot],select(0x7f7fffffu,bitcast<u32>(speed),speed<=3.402823e38));
+  let origin=umOrigin(owner);let unit=umTileMaximumWidth(owner.tile)==1u;let scale=policy.step.x/${Math.min(...h)};
+  for(var axis=0u;axis<3u;axis++){
+   let e=umSignedFaceExtent(unit,origin,axis);
+   // NaN fails both comparisons: it saturates.
+   let finite=abs(e.x)<=3.402823e38&&abs(e.y)<=3.402823e38;
+   atomicMax(&tileReach[64u*axis+slot],select(UM_REACH_SATURATED,umReach(-e.x*scale),finite));
+   atomicMax(&tileReach[64u*(3u+axis)+slot],select(UM_REACH_SATURATED,umReach(e.y*scale),finite));
   }
  }
- workgroupBarrier();if(owner.width!=0u&&owner.lane==0u){
-  if(umDirectionalCertificate){
-   var radius=vec3u(0);for(var axis=0u;axis<3u;axis++){radius[axis]=min(1023u,umCertificateRadius(bitcast<f32>(atomicLoad(&tileSpeed[64u*axis+slot]))));}
-   speeds[owner.tile]=umPackRadius(radius);
-  }else{speeds[owner.tile]=atomicLoad(&tileSpeed[slot]);}
+ workgroupBarrier();
+ if(owner.width!=0u&&owner.lane==0u){
+  var plus=vec3u(0);var minus=vec3u(0);
+  for(var axis=0u;axis<3u;axis++){plus[axis]=atomicLoad(&tileReach[64u*axis+slot]);minus[axis]=atomicLoad(&tileReach[64u*(3u+axis)+slot]);}
+  speeds[owner.tile]=umPackReach(plus,minus);
  }
 }
 // Separable box maximum over the global reach: a characteristic from tile t
@@ -138,38 +167,46 @@ ${[0,1,2].map(axis=>/* wgsl */`
  let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
  let base=${axis===1?"UM_TILES":"0u"};let into=${axis===1?"0u":"UM_TILES"};
  let reach=i32(umCertificateRadius(bitcast<f32>(atomicLoad(&umSupport[4u*UM_TILES]))));
- let p=vec3i(umTileCoord(tile));var speed=0u;var radius=vec3u(0);
+ let p=vec3i(umTileCoord(tile));var plus=vec3u(0);var minus=vec3u(0);
  for(var q=max(p.${"xyz"[axis]}-reach,0);q<=min(p.${"xyz"[axis]}+reach,i32(UM_T.${"xyz"[axis]})-1);q++){
   var r=p;r.${"xyz"[axis]}=q;let value=speeds[base+umTileAt(vec3u(r))];
-  if(umDirectionalCertificate){radius=max(radius,umUnpackRadius(value));}else{speed=max(speed,value);}
+  plus=max(plus,umReachPlus(value));minus=max(minus,umReachMinus(value));
  }
- speeds[into+tile]=select(speed,umPackRadius(radius),umDirectionalCertificate);
+ speeds[into+tile]=umPackReach(plus,minus);
 }`).join("\n")}
+// Summed-volume table of the 4h tiles in speeds[0,T), which is dead after
+// spread2: inclusive prefix counts along x, then y, then z, in place, one lane
+// per tile line.
+${[0,1,2].map(axis=>/* wgsl */`
+@compute @workgroup_size(64) fn prefix${axis}(@builtin(global_invocation_id) gid:vec3u){
+ let line=gid.x+umDispatchX*64u*gid.y;if(line>=UM_T.${"xyz"[(axis+1)%3]}*UM_T.${"xyz"[(axis+2)%3]}){return;}
+ var p=vec3u(0);p.${"xyz"[(axis+1)%3]}=line%UM_T.${"xyz"[(axis+1)%3]};p.${"xyz"[(axis+2)%3]}=line/UM_T.${"xyz"[(axis+1)%3]};var sum=0u;
+ for(var i=0u;i<UM_T.${"xyz"[axis]};i++){p.${"xyz"[axis]}=i;let t=umTileAt(p);sum+=${axis===0?"select(0u,1u,umTileWidth(t)!=1u)":"speeds[t]"};speeds[t]=sum;}
+}`).join("\n")}
+fn umPrefix(p:vec3i)->u32{if(any(p<vec3i(0))){return 0u;}return speeds[umTileAt(vec3u(p))];}
+// 4h tiles in the inclusive tile box [low,high] clipped to the lattice (which
+// holds the tile itself). Wrapping u32 arithmetic is exact: the count fits.
+fn umCoarseTilesIn(low:vec3i,high:vec3i)->u32{
+ let a=max(low,vec3i(0))-vec3i(1);let b=min(high,vec3i(UM_T)-vec3i(1));
+ return umPrefix(b)-umPrefix(vec3i(a.x,b.y,b.z))-umPrefix(vec3i(b.x,a.y,b.z))-umPrefix(vec3i(b.x,b.y,a.z))
+  +umPrefix(vec3i(a.x,a.y,b.z))+umPrefix(vec3i(a.x,b.y,a.z))+umPrefix(vec3i(b.x,a.y,a.z))-umPrefix(a);
+}
 // Appends aggregate per workgroup: one global atomic per list, not per tile.
 var<workgroup> certifyCounts:array<atomic<u32>,2>;
 var<workgroup> certifyBases:array<u32,2>;
 @compute @workgroup_size(64) fn certify(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  let tile=gid.x+umDispatchX*64u*gid.y;let fine=tile<UM_TILES&&umTileWidth(min(tile,UM_TILES-1u))==1u;
  if(lane<2u){atomicStore(&certifyCounts[lane],0u);}workgroupBarrier();
- // Convex extension/interpolation cannot exceed the extended speeds in the
- // global-reach box around this tile (localSpeed + spread).
+ // Every characteristic from this tile stays in its signed reach box: the
+ // spread reach bounds the extended velocities of the global-reach box around
+ // it (localSpeed + spread). With no 4h tile in the box every tap is a unit
+ // face and the regular sampler is the general one.
  var list=1u;var local=0u;
  if(fine){
-  let stored=speeds[UM_TILES+tile];
-  let radii=umUnpackRadius(stored);
-  let radius=select(umCertificateRadius(bitcast<f32>(stored)),max(radii.x,max(radii.y,radii.z)),umDirectionalCertificate);
-  let distance=atomicLoad(&umSupport[4u*UM_TILES+16u+tile]);
-  var regular=distance>radius;
-  // Few coarse tiles: certify the rectangular component-wise trace bound
-  // directly against their coordinates. Large mixed layouts keep the cheap
-  // distance certificate. Both are conservative and change dispatch only.
-  if(umDirectionalCertificate&&!regular&&umCounts.y<=64u){
-   regular=true;let p=vec3i(umTileCoord(tile));
-   for(var k=0u;k<umCounts.y;k++){
-    let q=vec3i(umTileCoord(umTopology[UM_TILES+umCounts.x+k]));
-    if(all(vec3u(abs(q-p))<=radii)){regular=false;break;}
-   }
-  }
+  let reach=speeds[UM_TILES+tile];let plus=umReachPlus(reach);let minus=umReachMinus(reach);
+  let bounded=all(plus<vec3u(UM_REACH_SATURATED))&&all(minus<vec3u(UM_REACH_SATURATED));
+  let p=vec3i(umTileCoord(tile));
+  let regular=bounded&&umCoarseTilesIn(p-vec3i(minus),p+vec3i(plus))==0u;
   list=select(2u,1u,regular);local=atomicAdd(&certifyCounts[list-1u],1u);
  }
  workgroupBarrier();
@@ -177,16 +214,16 @@ var<workgroup> certifyBases:array<u32,2>;
  workgroupBarrier();
  if(fine){atomicStore(&umSupport[(4u+list)*UM_TILES+16u+certifyBases[list-1u]+local],tile);}
 }
-`});
+`,counted)});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.extendedResources]});
-    await Promise.all(["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","certify"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umDirectionalCertificate:+this.directionalCertificate}}}));}));
+    await Promise.all(["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","prefix0","prefix1","prefix2","certify"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:UNIFORM_MIXED_COUNTED.all}:{})}}}));}));
   }
   encode(encoder:GPUCommandEncoder,policy={fineReach:2,shellReach:1,twoLevel:true,shellOnly:true}):void{
-    if(this.pipelines.size!==9)throw new Error("Mixed frame plan is not initialized");
+    if(this.pipelines.size!==12)throw new Error("Mixed frame plan is not initialized");
     this.device.queue.writeBuffer(this.params,0,new Uint32Array([policy.fineReach,policy.shellReach,!policy.twoLevel?3:!policy.shellOnly?2:0,0]));
-    encoder.clearBuffer(this.ownership.support,this.ownership.layout.tiles.length*16,64);
+    encoder.clearBuffer(this.ownership.support,this.ownership.capacity.tiles*16,64);
     const pass=encoder.beginComputePass({label:"Uniform shared frame plan"});
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);pass.setBindGroup(2,this.extendedGroup);
     this.dispatch(pass,["seed","dilate0","dilate1","dilate2"]);
@@ -200,13 +237,14 @@ var<workgroup> certifyBases:array<u32,2>;
     const pass=encoder.beginComputePass({label:"Uniform local speed certificate"});
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);pass.setBindGroup(2,this.extendedGroup);
     // Certified consumers read the list counts themselves (umCertifiedJobCount).
-    this.dispatch(pass,["localSpeed","spread0","spread1","spread2","certify"]);
+    this.dispatch(pass,["localSpeed","spread0","spread1","spread2","prefix0","prefix1","prefix2","certify"]);
     pass.end();
   }
   private dispatch(pass:GPUComputePassEncoder,entries:readonly string[]):void{
     for(const entry of entries){
-      if(entry==="seed"||entry==="localSpeed"){this.ownership.dispatchAll(pass,this.pipelines.get(entry)!);continue;}
-      const groups=Math.ceil(this.ownership.layout.tiles.length/64);
+      if(counted.includes(entry)){this.ownership.dispatchAllCounted(pass,this.pipelines.get(entry)!);continue;}
+      const t=this.ownership.capacity.tileDimensions,line=/^prefix(\d)$/.exec(entry);
+      const groups=Math.ceil((line?t[(+line[1]!+1)%3]!*t[(+line[1]!+2)%3]!:this.ownership.capacity.tiles)/64);
       pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));
     }
   }

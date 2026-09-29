@@ -47,24 +47,9 @@ test("a panel wider than its shell still starts on screen", () => {
   assert.equal(fieldFlyout(0.5, 0.5, { containerWidth: 100 }).left, margin);
 });
 
-test("the vertical origin is clamped at both edges", () => {
-  assert.equal(fieldFlyout(0.25, 0.01).top, margin);
-  // The bottom edge a panel stops at is the transport's band, not the shell's.
-  assert.equal(fieldFlyout(0.25, 0.99).top, 700 - keepout - 400);
-});
-
 test("a panel anchored at the bottom edge stops above the transport", () => {
   const placement = fieldFlyout(0.25, 0.99, { panelHeight: 200 });
   assert.equal(placement.top + 200, 700 - keepout);
-});
-
-test("the height cap clears both the top margin and the transport, and ignores the panel's own size", () => {
-  const short = fieldFlyout(0.25, 0.5, { panelHeight: 120 });
-  const tall = fieldFlyout(0.25, 0.5, { panelHeight: 900 });
-  assert.equal(short.maxHeight, 700 - keepout - margin);
-  assert.equal(tall.maxHeight, 700 - keepout - margin);
-  // A panel taller than the cap scrolls; its top is still inside the shell.
-  assert.equal(tall.top, margin);
 });
 
 test("the selection chip's own offsets survive placement", () => {

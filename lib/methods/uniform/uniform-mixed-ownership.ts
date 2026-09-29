@@ -1,6 +1,7 @@
-import { UNIFORM_MIXED_HANGING_RECORD } from "./uniform-mixed-velocity-sampling.wgsl";
+import { uniformMixedHangingBytes, uniformMixedHangingSlotCapacity } from "./uniform-mixed-velocity-sampling.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
-import { UNIFORM_MIXED_FUSED_REGULAR_TILES } from "./uniform-mixed-topology.wgsl";
+import type { RefinementRegionLattice } from "../../core/refinement-regions";
+import { UNIFORM_MIXED_FUSED_REGULAR_TILES, uniformMixedOverflowWord } from "./uniform-mixed-topology.wgsl";
 
 type OwnershipUploadTarget="topology"|"counts"|"support";
 interface OwnershipDerivation{
@@ -27,19 +28,7 @@ function deriveOwnership(layout:UniformMixedLayout,dispatchX:number):OwnershipDe
   writes.push(["counts",0,new Uint32Array([layout.fineTiles.length,layout.coarseTiles.length,0,8])]);
   // Standalone stages conservatively visit everything until a frame census.
   writes.push(["support",0,new Uint32Array(layout.tiles.length*4).fill(3)]);
-  // Chessboard distance to a non-fine tile, fixed for this ownership
-  // generation. A frame can certify an entire characteristic's footprint
-  // with one distance test instead of rediscovering ownership at every tap.
-  const n=layout.tiles.length,[dx,dy,dz]=layout.tileDimensions,distance=new Uint32Array(n).fill(0xffffffff),queue=new Uint32Array(n);
-  let tail=0;
-  for(let t=0;t<n;t++)if((layout.tiles[t]!&0x80000000)===0){distance[t]=0;queue[tail++]=t;}
-  for(let at=0;at<tail;at++){
-    const t=queue[at]!,px=t%dx,py=Math.floor(t/dx)%dy,pz=Math.floor(t/(dx*dy)),next=distance[t]!+1;
-    for(let z=Math.max(0,pz-1);z<=Math.min(dz-1,pz+1);z++)for(let y=Math.max(0,py-1);y<=Math.min(dy-1,py+1);y++)for(let x=Math.max(0,px-1);x<=Math.min(dx-1,px+1);x++){
-      const key=x+dx*(y+dy*z);
-      if(distance[key]!>next){distance[key]=next;queue[tail++]=key;}
-    }
-  }
+  const n=layout.tiles.length;
   // 4n: the certificate header (speed, regular and general h counts; every
   // h tile is general until the frame plan certifies).
   const header=new Uint32Array(16);header[2]=layout.fineTiles.length;
@@ -48,7 +37,6 @@ function deriveOwnership(layout:UniformMixedLayout,dispatchX:number):OwnershipDe
   // Regular 4h tiles run one lane per owner, 64 owners per merged job.
   const regularCoarse=[...layout.coarseTiles].filter(regular);
   writes.push(["support",n*16,header]);
-  writes.push(["support",(4*n+16)*4,distance]);
   writes.push(["support",(6*n+16)*4,Uint32Array.from(layout.fineTiles)]);
   const seamCounts=seamLists.map(list=>list.length);
   // 7n+16: seam h and seam 4h counts, two zero words, then both seam lists.
@@ -68,6 +56,9 @@ function deriveOwnership(layout:UniformMixedLayout,dispatchX:number):OwnershipDe
  * hardware's balancing (f7 advect, momentum, traceCells 13.6 -> 12.2 ms at
  * 1024). The WebGPU per-dimension limit. */
 const CERTIFIED_GRID=65535;
+/** Workgroups of a counted launch at most (grid-stride over a GPU count):
+ * enough to fill the GPU, few enough that an idle launch stays cheap. */
+const COUNTED_GRID=4096;
 
 /** Ownership tiers: 0 = h (width 1), 1 = 4h (width 4). */
 export type UniformMixedTier=0|1;
@@ -81,14 +72,29 @@ export async function compileMixedTiers(compile:(width:1|4)=>Promise<GPUComputeP
   return Promise.all([compile(1),compile(4)]);
 }
 
+/** What an ownership generation cannot change: fixed for the ownership's
+ * lifetime, so a GPU adoption never needs the host. */
+export interface UniformMixedCapacity{
+  readonly lattice:RefinementRegionLattice;
+  readonly tileDimensions:readonly [number,number,number];
+  /** Tiles of the lattice (UM_TILES). */
+  readonly tiles:number;
+  readonly metadataBytes:number;
+  /** Preallocated hanging tap cache slots (UM_HANGING_SLOTS). */
+  readonly hangingSlots:number;
+}
+
 /** One GPU-built ownership generation (UniformMixedLayoutBuilder), in the
  * exact buffer layout update() uploads. */
 export interface UniformMixedBuiltOwnership{
   readonly layout:UniformMixedLayout;
   readonly seamCounts:readonly number[];
   readonly hangingSlots:number;
-  readonly source:{readonly topology:GPUBuffer;readonly support:GPUBuffer;readonly slots:GPUBuffer;readonly counts:{readonly buffer:GPUBuffer;readonly offset:number}};
+  readonly source:UniformMixedGenerationBuffers;
 }
+/** The GPU buffers of one built generation (UniformMixedLayoutBuilder.
+ * generation): topology, support, hanging slot table and the 16-byte counts. */
+export interface UniformMixedGenerationBuffers{readonly topology:GPUBuffer;readonly support:GPUBuffer;readonly slots:GPUBuffer;readonly counts:{readonly buffer:GPUBuffer;readonly offset:number}}
 
 /** Shared owner/worklist ABI for transport, face operations and pressure.
  * Two fixed-size buffers support live region edits without pipeline rebuilds.
@@ -97,7 +103,7 @@ export class UniformMixedOwnership {
   readonly bindLayout: GPUBindGroupLayout;
   readonly bindGroup: GPUBindGroup;
   /** Hanging fine-tap cache group, bound only by its producer and samplers.
-   * Rebuilt when a live edit outgrows it, so consumers read it at encode. */
+   * Preallocated at capacity: stable for the ownership's lifetime. */
   readonly hangingLayout: GPUBindGroupLayout;
   private hangingGroupCurrent!: GPUBindGroup;
   get hangingGroup(): GPUBindGroup {
@@ -115,20 +121,32 @@ export class UniformMixedOwnership {
   /** Per-tile extended speed and its box maximum (frame plan certificate). */
   readonly speeds: GPUBuffer;
   /** Per-frame velocity tap cache (uniformMixedHangingTapWGSL): every seam
-   * tile owns a slot. */
+   * tile owns a slot, up to capacity.hangingSlots. */
   private hanging?:GPUBuffer;
-  /** Slots in the hanging tap cache, filled one workgroup each. */
+  /** Host mirror: slots in use, filled one workgroup each. */
   hangingSlots=0;
   private seamCounts=[0,0];
+  readonly capacity:UniformMixedCapacity;
+  /** Byte offset in `support` of the sticky overflow word
+   * (uniformMixedOverflowWord): nonzero is fatal. Copy it out for a
+   * non-blocking diagnostic read; nothing on the host clears it. */
+  readonly overflowOffset:number;
 
   private frameHeld=false;
   private currentLayout: UniformMixedLayout;
-  get layout(): UniformMixedLayout { return this.currentLayout; }
+  /** Host mirror of the current membership (tiles, lists, stencils). The one
+   * path to it: a GPU adoption will make this throw. Use `capacity` for
+   * anything a generation cannot change. */
+  get membership(): UniformMixedLayout { return this.hostMirror(); }
+  get layout(): UniformMixedLayout { return this.membership; }
 
   /** sampled: velocity samplers run on this ownership, so it keeps the
    * hanging tap cache. Pressure levels and remap targets never sample. */
   constructor(private readonly device: GPUDevice, layout: UniformMixedLayout, private readonly sampled = true) {
     this.currentLayout = layout;
+    const n=layout.tiles.length;
+    this.capacity={lattice:layout.lattice,tileDimensions:layout.tileDimensions,tiles:n,metadataBytes:layout.metadataBytes,hangingSlots:uniformMixedHangingSlotCapacity(n)};
+    this.overflowOffset=uniformMixedOverflowWord(n)*4;
     this.dispatchX = device.limits.maxComputeWorkgroupsPerDimension;
     this.bindLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -145,6 +163,12 @@ export class UniformMixedOwnership {
     // except on a pressure level inside a closed slot. Builders stop at 9n+24.
     this.support = device.createBuffer({label:"Uniform shared frame support and certified work",size:(layout.tiles.length*9+28)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     this.speeds = device.createBuffer({label:"Uniform local speed certificate",size:layout.tiles.length*8,usage:GPUBufferUsage.STORAGE});
+    if(sampled){
+      const bytes=uniformMixedHangingBytes(n);
+      if(bytes>device.limits.maxStorageBufferBindingSize)throw new Error(`Uniform mixed hanging tap cache needs ${bytes} bytes; the device binds at most ${device.limits.maxStorageBufferBindingSize}`);
+      this.hanging=device.createBuffer({label:"Uniform mixed velocity tap cache",size:bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+      this.hangingGroupCurrent=device.createBindGroup({layout:this.hangingLayout,entries:[{binding:0,resource:{buffer:this.hanging}}]});
+    }
     this.update(layout);
     this.bindGroup = device.createBindGroup({ layout: this.bindLayout, entries: [
       { binding: 0, resource: { buffer: this.topology } }, { binding: 1, resource: { buffer: this.counts } },
@@ -164,9 +188,10 @@ export class UniformMixedOwnership {
     const derived=deriveOwnership(layout,this.dispatchX);
     for(const [target,offset,data] of derived.writes)this.device.queue.writeBuffer(this[target],offset,data);
     this.seamCounts=derived.seamCounts;
-    this.hangingSlots=derived.hangingSlots;
-    if(this.sampled){this.reserveHanging(layout.tiles.length,derived.hangingSlots);this.device.queue.writeBuffer(this.hanging!,0,derived.slots);}
+    this.reserveHanging(derived.hangingSlots);
+    if(this.sampled)this.device.queue.writeBuffer(this.hanging!,0,derived.slots);
     this.currentLayout=layout;
+    this.mirrorCurrent=true;
   }
 
   /** Adopt a generation built on the GPU (UniformMixedLayoutBuilder). The
@@ -181,25 +206,46 @@ export class UniformMixedOwnership {
       || layout.lattice.cellSize_m.some((d,a)=>d!==prior.cellSize_m[a])
       || (["x","y","z"] as const).some(a=>layout.lattice.origin_m[a]!==prior.origin_m[a]))
       throw new Error("Live ownership edits cannot change the simulation lattice");
-    const s=built.source;
+    if(n!==this.capacity.tiles)throw new Error("A built generation must match the ownership's capacity");
+    this.reserveHanging(built.hangingSlots);
+    this.copyGeneration(encoder,built.source);
+    this.seamCounts=[...built.seamCounts];
+    this.currentLayout=layout;
+    this.mirrorCurrent=true;
+  }
+  /** Adopt a GPU-built generation with no host object: buffers only, encoded
+   * at the head of the frame that runs on it (so no frame hold is checked:
+   * the copies are ordered inside that frame's encoder, ahead of every pass
+   * that reads the ownership). The host mirror (membership, seamCounts,
+   * hangingSlots) is left behind: only capacity and GPU-counted launches
+   * stay valid. A hanging overflow is latched by the builder, not here. */
+  adoptGpu(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers):void{
+    this.copyGeneration(encoder,source);
+    this.mirrorCurrent=false;
+  }
+  /** False once a GPU generation was adopted without a host mirror. */
+  mirrorCurrent=true;
+  /** The host-sized launches below size grids from the host mirror: after a
+   * GPU adoption they would launch the old generation's work, so they fail
+   * instead. Use the GPU-counted launches. */
+  private hostMirror():UniformMixedLayout{
+    if(!this.mirrorCurrent)throw new Error("A GPU-adopted ownership has no host mirror: use a GPU-counted launch");
+    return this.currentLayout;
+  }
+  private copyGeneration(encoder:GPUCommandEncoder,s:UniformMixedGenerationBuffers):void{
+    const n=this.capacity.tiles;
     encoder.copyBufferToBuffer(s.topology,0,this.topology,0,this.topology.size);
     encoder.copyBufferToBuffer(s.counts.buffer,s.counts.offset,this.counts,0,16);
     encoder.copyBufferToBuffer(s.support,0,this.support,0,(5*n+16)*4);
     encoder.copyBufferToBuffer(s.support,(6*n+16)*4,this.support,(6*n+16)*4,(3*n+8)*4);
-    this.seamCounts=[...built.seamCounts];
-    this.hangingSlots=built.hangingSlots;
-    if(this.sampled){this.reserveHanging(n,built.hangingSlots);encoder.copyBufferToBuffer(s.slots,0,this.hanging!,0,2*n*4);}
-    this.currentLayout=layout;
+    if(this.sampled)encoder.copyBufferToBuffer(s.slots,0,this.hanging!,0,2*n*4);
   }
 
-  private reserveHanging(n:number,slotted:number):void{
+  /** Host check where the host still knows the count; a GPU-built
+   * generation raises UNIFORM_MIXED_OVERFLOW_HANGING instead. */
+  private reserveHanging(slotted:number):void{
+    if(this.sampled&&slotted>this.capacity.hangingSlots)throw new Error(`Uniform mixed ownership needs ${slotted} hanging tap slots; the cache holds ${this.capacity.hangingSlots}`);
     this.hangingSlots=slotted;
-    const hangingBytes=(2*n+UNIFORM_MIXED_HANGING_RECORD*slotted)*4;
-    if(!this.hanging||this.hanging.size<hangingBytes){
-      this.hanging?.destroy();
-      this.hanging=this.device.createBuffer({label:"Uniform mixed velocity tap cache",size:Math.max(hangingBytes,(2*n+UNIFORM_MIXED_HANGING_RECORD*Math.ceil(slotted*1.5))*4),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-      this.hangingGroupCurrent=this.device.createBindGroup({layout:this.hangingLayout,entries:[{binding:0,resource:{buffer:this.hanging}}]});
-    }
   }
 
   /** Hold ownership and its stencil/support storage through every asynchronous
@@ -223,7 +269,7 @@ export class UniformMixedOwnership {
    * bounded by this layout's tiles. general: umCertifiedJobs 1 over the
    * general h list (umPlannedFine 2), with merged compiled umMergedCoarse. */
   dispatchCertified(pass:GPUComputePassEncoder,merged:GPUComputePipeline,regular:GPUComputePipeline,general?:GPUComputePipeline):void{
-    const layout=this.currentLayout;
+    const layout=this.hostMirror();
     pass.setPipeline(regular);pass.dispatchWorkgroups(Math.min(CERTIFIED_GRID,layout.fineTiles.length));
     if(general){pass.setPipeline(general);pass.dispatchWorkgroups(Math.min(CERTIFIED_GRID,layout.fineTiles.length));}
     pass.setPipeline(merged);pass.dispatchWorkgroups(Math.max(1,Math.min(CERTIFIED_GRID,layout.tiles.length)));
@@ -231,6 +277,7 @@ export class UniformMixedOwnership {
 
   /** Frozen interface work is shared by pressure and face stages. */
   dispatchSeams(pass:GPUComputePassEncoder,pipelines:readonly GPUComputePipeline[],tileGroups:boolean|readonly boolean[]=false):void{
+    this.hostMirror();
     for(const tier of TIERS){
       const groups=Math.ceil(this.seamCounts[tier]!/((typeof tileGroups==="boolean"?tileGroups:tileGroups[tier])?1:64/tierOwners(tier)));
       if(!groups)continue;
@@ -247,7 +294,7 @@ export class UniformMixedOwnership {
    * group, unless the tier is fused. */
   dispatchRegularCoarse(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void{
     if(this.fusedRegularTier(1))return;
-    const groups=Math.ceil((this.layout.coarseTiles.length-this.seamCounts[1]!)/64);
+    const groups=Math.ceil((this.hostMirror().coarseTiles.length-this.seamCounts[1]!)/64);
     if(!groups)return;
     pass.setPipeline(pipeline);pass.dispatchWorkgroups(Math.min(groups,this.dispatchX),Math.ceil(groups/this.dispatchX));
   }
@@ -264,19 +311,6 @@ export class UniformMixedOwnership {
     if(regular)for(const tier of TIERS)if(this.fusedRegularTier(tier))groups+=counts[tier];
     return groups;
   }
-  /** Rows of the fused job set (seams and small regular tiers): 64/w^3 per job. */
-  fusedRows():number{
-    const counts=this.tierCounts();
-    let rows=0;
-    for(const tier of TIERS)rows+=(this.seamCounts[tier]!+(this.fusedRegularTier(tier)?counts[tier]:0))*tierOwners(tier);
-    return rows;
-  }
-  /** One lane per fused row (umFusedRow). */
-  dispatchFusedRows(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void{
-    const groups=Math.ceil(this.fusedRows()/64);
-    if(!groups)return;
-    pass.setPipeline(pipeline);pass.dispatchWorkgroups(Math.min(groups,this.dispatchX),Math.ceil(groups/this.dispatchX));
-  }
   /** quad: a uniformMixedFaceTileDispatchWGSL fused pipeline, which packs
    * the seam 4h tiles four per job. */
   dispatchFused(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,regular=false,quad=false):void{
@@ -288,14 +322,14 @@ export class UniformMixedOwnership {
   /** Face kernels with large shared samplers can compile once for all widths.
    * The same tier worklists are packed into a single owner launch. */
   dispatchAll(pass: GPUComputePassEncoder, pipeline: GPUComputePipeline): void {
-    const groups = Math.ceil(this.layout.cellCount / 64);
+    const groups = Math.ceil(this.hostMirror().cellCount / 64);
     if (!groups) return;
     pass.setPipeline(pipeline);
     pass.dispatchWorkgroups(Math.min(groups, this.dispatchX), Math.ceil(groups / this.dispatchX));
   }
 
   /** h and 4h tile counts of the current generation, indexed by tier. */
-  private tierCounts():readonly [number,number]{return [this.layout.fineTiles.length,this.layout.coarseTiles.length];}
+  private tierCounts():readonly [number,number]{const layout=this.hostMirror();return [layout.fineTiles.length,layout.coarseTiles.length];}
 
   /** Pressure colours visit one tier; do not launch idle work for the others. */
   dispatchTier(pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, tier: UniformMixedTier): void {
@@ -305,6 +339,42 @@ export class UniformMixedOwnership {
     pass.setPipeline(pipeline);
     pass.dispatchWorkgroups(Math.min(groups, this.dispatchX), Math.ceil(groups / this.dispatchX));
   }
+
+  // GPU-counted launches: fixed grids from capacity alone, each striding the
+  // jobs its pipeline counts on the GPU (uniformMixedCountedEntriesWGSL
+  // entries with umCountedJobs = UNIFORM_MIXED_COUNTED.*). No membership is
+  // read, so these stay valid after a GPU adoption; a count of zero still
+  // pays the launch. The grid only prices the launch: any size is correct.
+
+  /** umCertifiedJobs entries (as dispatchCertified), bounded by capacity. */
+  dispatchCertifiedCounted(pass:GPUComputePassEncoder,merged:GPUComputePipeline,regular:GPUComputePipeline,general?:GPUComputePipeline):void{
+    const groups=Math.min(CERTIFIED_GRID,this.capacity.tiles);
+    pass.setPipeline(regular);pass.dispatchWorkgroups(groups);
+    if(general){pass.setPipeline(general);pass.dispatchWorkgroups(groups);}
+    pass.setPipeline(merged);pass.dispatchWorkgroups(groups);
+  }
+  /** One counted launch whose jobs never exceed `jobs`. */
+  dispatchCounted(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,jobs:number=this.capacity.tiles):void{
+    pass.setPipeline(pipeline);pass.dispatchWorkgroups(Math.max(1,Math.min(COUNTED_GRID,jobs)));
+  }
+  /** owners (tileJobs false) or tiles (true) launches of a tier's list: tier,
+   * planned, interface (dispatchSeams) or regular (dispatchRegular; the
+   * fused gate is compiled in, umFusedRegularGate). */
+  dispatchTierCounted(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,tier:UniformMixedTier,tileJobs=false):void{
+    this.dispatchCounted(pass,pipeline,tileJobs?this.capacity.tiles:Math.ceil(this.capacity.tiles*tierOwners(tier)/64));
+  }
+  /** dispatchTierCounted for each tier with pipelines[tier]. */
+  dispatchTiersCounted(pass:GPUComputePassEncoder,pipelines:readonly GPUComputePipeline[],tileJobs:boolean|readonly boolean[]=false,tiers:readonly UniformMixedTier[]=TIERS):void{
+    for(const tier of tiers)this.dispatchTierCounted(pass,pipelines[tier]!,tier,typeof tileJobs==="boolean"?tileJobs:tileJobs[tier]!);
+  }
+  /** regularCoarse: umRegularCoarseOwner, 64 owners per job. */
+  dispatchRegularCoarseCounted(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void{this.dispatchCounted(pass,pipeline,Math.ceil(this.capacity.tiles/64));}
+  /** all: umAllOwner, 64 owners per job (dispatchAll). */
+  dispatchAllCounted(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void{this.dispatchCounted(pass,pipeline);}
+  /** fused or fusedQuad: one job per fused tile (dispatchFused). */
+  dispatchFusedCounted(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void{this.dispatchCounted(pass,pipeline);}
+  /** hanging: one job per hanging tap slot, at most capacity.hangingSlots. */
+  dispatchHangingCounted(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void{this.dispatchCounted(pass,pipeline,this.capacity.hangingSlots);}
 
   destroy(): void { this.topology.destroy(); this.counts.destroy(); this.support.destroy();this.speeds.destroy();this.hanging?.destroy(); }
 }

@@ -1,5 +1,5 @@
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
-import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
+import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 
 /** On-demand native diagnostic receipts over canonical owners. All storage is
@@ -20,8 +20,9 @@ export class UniformMixedDiagnostics {
   ]});
  }
  async initialize():Promise<void>{
-  const h=this.ownership.layout.lattice.cellSize_m;
-  const module=this.device.createShaderModule({code:uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
+  const h=this.ownership.capacity.lattice.cellSize_m;
+  // One lane per GPU-counted owner of every tier (umAllOwner), a partial per job.
+  const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var velocity:texture_3d<f32>;
 @group(1) @binding(2) var phi:texture_3d<f32>;
@@ -52,14 +53,14 @@ var<workgroup> lanes:array<vec4u,64>;
   if(lane<stride){let a=lanes[lane];let b=lanes[lane+stride];lanes[lane]=vec4u(a.x+b.x,max(a.y,b.y),max(a.z,b.z),a.w+b.w);}workgroupBarrier();
  }
  if(lane==0u){let r=lanes[0];atomicAdd(&totals[0],r.x);atomicMax(&totals[1],r.y);atomicMax(&totals[2],r.z);atomicAdd(&totals[3],r.w);}
-}`});
+}`,["diagnostics"])});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>m.message).join("\n"));
-  this.pipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]}),compute:{module,entryPoint:"diagnostics",constants:{umDispatchX:this.ownership.dispatchX}}});
+  this.pipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]}),compute:{module,entryPoint:"diagnostics",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.all}}});
  }
  encode(encoder:GPUCommandEncoder):void{
   if(!this.pipeline)throw new Error("Mixed diagnostics are not initialized");
   encoder.clearBuffer(this.reductions,0,24);
   const pass=encoder.beginComputePass({label:"Uniform canonical diagnostics"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
-  this.ownership.dispatchAll(pass,this.pipeline);pass.end();
+  this.ownership.dispatchAllCounted(pass,this.pipeline);pass.end();
  }
 }

@@ -1,6 +1,6 @@
 import { compileMixedTiers, type UniformMixedOwnership } from "./uniform-mixed-ownership";
 import type { WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
-import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL,uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 
@@ -47,14 +47,18 @@ export class UniformMixedExtension {
  readonly scratchBytes:number;
  private readonly slotBytes:number;
  private readonly resources:GPUBindGroupLayout;
- private readonly regularPipelines=new Map<string,GPUComputePipeline[]>();
- /** Seam tiers: h per owner, 4h one tile group per seam tile (…Coarse entries). */
+ /** GPU-counted launches (UNIFORM_MIXED_COUNTED), each of a fixed grid: no
+  * launch size, variant or skip reads the host membership. Regular h owners. */
+ private readonly regularPipelines=new Map<string,GPUComputePipeline>();
+ /** Seam tiers: h per owner, 4h one tile job per seam tile (…Coarse entries). */
  private readonly seamPipelines=new Map<string,GPUComputePipeline[]>();
+ /** Every regular 4h owner, 64 per job, fused tier or not: the per-owner code
+  * is the tier launch's (only the owner lookup differs), so one launch serves. */
  private readonly regularCoarseListPipelines=new Map<string,GPUComputePipeline>();
  private restrictPipeline?:GPUComputePipeline;
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy,private readonly regularBulk=false,private readonly directRestriction=false){
-  if(ownership.layout.lattice.dimensions.some(n=>n%4!==0))throw new Error("Mixed extension requires a 4-aligned lattice");
-  this.slotBytes=Math.ceil(8*extensionSlots(ownership.layout.lattice.dimensions)/256)*256;
+  if(ownership.capacity.lattice.dimensions.some(n=>n%4!==0))throw new Error("Mixed extension requires a 4-aligned lattice");
+  this.slotBytes=Math.ceil(8*extensionSlots(ownership.capacity.lattice.dimensions)/256)*256;
   this.scratchBytes=2*this.slotBytes;
   this.resources=device.createBindGroupLayout({entries:[
    ...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
@@ -68,7 +72,7 @@ export class UniformMixedExtension {
   ]});
  }
  bind(f:Fields):readonly [GPUBindGroup,GPUBindGroup]{
-  const d=this.ownership.layout.lattice.dimensions;
+  const d=this.ownership.capacity.lattice.dimensions;
   for(const [i,t] of [f.physical,f.phase,f.output].entries())if(t.format!==(i===1?"r32float":"rgba32float")||[t.width,t.height,t.depthOrArrayLayers].some((n,a)=>n!==d[a]))throw new Error("Mixed extension requires native canonical fields");
   if(f.physical===f.output||f.negative===f.outputNegative)throw new Error("Mixed extension outputs must be disjoint");
   if((f.scratch.size??f.scratch.buffer.size-(f.scratch.offset??0))<this.scratchBytes)throw new Error("Mixed extension scratch is too small");
@@ -84,7 +88,7 @@ export class UniformMixedExtension {
   ]})) as unknown as readonly [GPUBindGroup,GPUBindGroup];
  }
  async initialize():Promise<void>{
-  const module=this.device.createShaderModule({code:uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
+  const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> stateIn:array<vec2f>;
 @group(1) @binding(1) var<storage,read_write> stateOut:array<vec2f>;
 @group(1) @binding(4) var physical:texture_3d<f32>;
@@ -237,8 +241,9 @@ fn umSeedState(face:UMFace,owner:UMOwner)->vec2f{
 fn umSeedWall(face:UMFace,owner:UMOwner){
  stateOut[umSlot(face.anchor,face.axis,face.width)]=vec2f(umPhysical(face),select(UM_INF,0.0,umSource(face,owner)));
 }
-// Regular 4h launches take the ownership's packed regular 4h list (one lane
-// per owner, no seam tiles to filter) unless that tier rides the fused launch.
+// The regular 4h launch takes the ownership's packed regular 4h list (one
+// lane per owner, no seam tiles to filter), including a tier small enough to
+// be fused elsewhere: the owners are the tier list's regular 4h owners.
 override ueRegularCoarseList:bool=false;
 fn ueOwner(gid:vec3u)->UMOwner{
  if(ueRegularCoarseList){return umRegularCoarseOwner(gid.x+umDispatchX*64u*gid.y);}
@@ -442,15 +447,16 @@ ${uniformMixedFaceDispatchWGSL("publish","umPublished(face)",false,"value.w=text
   }
   value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);return;
  }`)}
-`});
+`,["seed","sweep","seedCoarse","sweepCoarse","publish","publishFine","publishCoarse"])});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
   this.restrictPipeline=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"restrictBand",constants:{umDispatchX:this.ownership.dispatchX}}});
   await Promise.all((this.regularBulk?["publish"]:["seed","sweep","publish"]).map(async entryPoint=>{
-   const compile=(width:number,regular:boolean,name=entryPoint,list=false)=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:name,constants:{umDispatchX:this.ownership.dispatchX,umCellWidth:width,umRegularTiles:+regular,umInterfaceTiles:+!regular,umRegularFine:+(regular&&width===1),ueRegularCoarseList:+list}}});
-   this.regularPipelines.set(entryPoint,await compileMixedTiers(w=>compile(w,true,entryPoint==="publish"&&w===1?"publishFine":entryPoint)));
-   this.regularCoarseListPipelines.set(entryPoint,await compile(4,true,entryPoint,true));
-   this.seamPipelines.set(entryPoint,await compileMixedTiers(w=>w===1?compile(1,false):compile(4,false,`${entryPoint}Coarse`)));
+   const compile=(width:number,regular:boolean,counted:number,name=entryPoint,list=false)=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:name,constants:{umDispatchX:this.ownership.dispatchX,umCellWidth:width,umRegularTiles:+regular,umInterfaceTiles:+!regular,umRegularFine:+(regular&&width===1),ueRegularCoarseList:+list,umCountedJobs:counted}}});
+   const C=UNIFORM_MIXED_COUNTED;
+   this.regularPipelines.set(entryPoint,await compile(1,true,C.owners,entryPoint==="publish"?"publishFine":entryPoint));
+   this.regularCoarseListPipelines.set(entryPoint,await compile(4,true,C.regularCoarse,entryPoint,true));
+   this.seamPipelines.set(entryPoint,await compileMixedTiers(w=>w===1?compile(1,false,C.owners):compile(4,false,C.tiles,`${entryPoint}Coarse`)));
   }));
  }
  encode(encoder:GPUCommandEncoder,groups:readonly [GPUBindGroup,GPUBindGroup],sweeps=2):void{
@@ -460,11 +466,13 @@ ${uniformMixedFaceDispatchWGSL("publish","umPublished(face)",false,"value.w=text
   const run=(entry:string,group:GPUBindGroup)=>{
    if(!open){open=encoder.beginComputePass({label:"Uniform mixed extension"});open.setBindGroup(0,this.ownership.bindGroup);}
    const pass=open;pass.setBindGroup(1,group);
-   if(entry==="restrictBand"){pass.setPipeline(this.restrictPipeline!);pass.dispatchWorkgroups(...this.ownership.layout.tileDimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);}
+   if(entry==="restrictBand"){pass.setPipeline(this.restrictPipeline!);pass.dispatchWorkgroups(...this.ownership.capacity.tileDimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);}
    else {
-    const o=this.ownership,regular=this.regularPipelines.get(entry)!;o.dispatchRegular(pass,regular,false,[0]);
-    if(o.fusedRegularTier(1))o.dispatchTier(pass,regular[1]!,1);else o.dispatchRegularCoarse(pass,this.regularCoarseListPipelines.get(entry)!);
-    o.dispatchSeams(pass,this.seamPipelines.get(entry)!,[false,true]);
+    // Four counted launches, each empty (not skipped) when its GPU count is zero.
+    const o=this.ownership;
+    o.dispatchTierCounted(pass,this.regularPipelines.get(entry)!,0);
+    o.dispatchRegularCoarseCounted(pass,this.regularCoarseListPipelines.get(entry)!);
+    o.dispatchTiersCounted(pass,this.seamPipelines.get(entry)!,[false,true]);
    }
   };
   const end=()=>{open?.end();open=undefined;};
