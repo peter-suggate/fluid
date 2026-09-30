@@ -115,8 +115,6 @@ export class UniformPressureBand {
  readonly index:GPUBuffer;
  private readonly rows:GPUBuffer;
  private readonly coarse:GPUBuffer;
- /** Two words per tile: which of an h tile's air cells are open air. */
- private readonly open:GPUBuffer;
  private readonly solve:GPUBuffer;
  /** Band tiles one frame can hold: every tile the simulation can hold at h.
   * More is a fatal receipt, never a fallback. */
@@ -149,18 +147,16 @@ export class UniformPressureBand {
   this.rows=device.createBuffer({label:"Uniform pressure band rows",size:4*this.rowFields*rows,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
   this.coarse=device.createBuffer({label:"Uniform pressure band aggregates",size:4*(8*MIDDLE_FIELDS+COARSE_FIELDS)*this.capacity,usage:GPUBufferUsage.STORAGE});
   this.solve=device.createBuffer({label:"Uniform pressure band iterate",size:(rows+halo)*4,usage:storage});
-  this.open=device.createBuffer({label:"Uniform pressure band open air",size:tiles*8,usage:storage});
-  this.allocatedBytes=this.index.size+this.rows.size+this.coarse.size+this.solve.size+this.open.size;
+  this.allocatedBytes=this.index.size+this.rows.size+this.coarse.size+this.solve.size;
   const texture=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}});
   const buffer=(binding:number,type:GPUBufferBindingType="storage")=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type}});
   const params=buffer(0,"uniform");
   // At most six storage buffers here: topology and solids hold four.
   const solver=[params,buffer(2),buffer(9,"read-only-storage"),buffer(10),buffer(18)];
   const entries:Record<string,GPUBindGroupLayoutEntry[]>={
-   open:[params,buffer(3,"read-only-storage"),buffer(5),texture(6)],
-   list:[params,buffer(2),buffer(3,"read-only-storage"),buffer(5,"read-only-storage"),texture(6)],
+   list:[params,buffer(2),buffer(3,"read-only-storage"),texture(6)],
    copy:[params,buffer(2),texture(22),{binding:23,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}}],
-   prep:[params,buffer(2),buffer(3,"read-only-storage"),texture(4),buffer(5,"read-only-storage"),texture(6),texture(7),buffer(8,"read-only-storage"),buffer(9)],
+   prep:[params,buffer(2),buffer(3,"read-only-storage"),texture(4),texture(6),texture(7),buffer(8,"read-only-storage"),buffer(9)],
    init:[params,buffer(2),buffer(9),buffer(10),texture(11),buffer(12,"read-only-storage"),buffer(13,"read-only-storage"),buffer(14,"read-only-storage")],
    solver,
    project:[...solver,texture(15),{binding:16,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},buffer(17)],
@@ -174,10 +170,9 @@ export class UniformPressureBand {
   const coarse=pressure.layout.cellCount;
   const P={0:{buffer:f.params,size:48}},solverResources={...P,2:{buffer:this.index},9:{buffer:this.rows},10:{buffer:this.solve},18:{buffer:this.coarse}};
   const resources:Record<string,Record<number,GPUBindingResource>>={
-   open:{...P,3:scalars(f.phi,cells),5:{buffer:this.open},6:f.vertexPhi.createView()},
-   list:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),5:{buffer:this.open},6:f.vertexPhi.createView()},
+   list:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),6:f.vertexPhi.createView()},
    copy:{...P,2:{buffer:this.index},22:f.velocity.createView(),23:f.copy.createView()},
-   prep:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),4:f.correction.createView(),5:{buffer:this.open},6:f.vertexPhi.createView(),7:f.forced.velocity.createView(),8:{buffer:f.forced.negative,size:4*faces},9:{buffer:this.rows}},
+   prep:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),4:f.correction.createView(),6:f.vertexPhi.createView(),7:f.forced.velocity.createView(),8:{buffer:f.forced.negative,size:4*faces},9:{buffer:this.rows}},
    init:{...P,2:{buffer:this.index},9:{buffer:this.rows},10:{buffer:this.solve},11:f.velocity.createView(),12:scalars(f.coarsePressure,coarse),13:scalars(f.phi,coarse),14:pressure.presentation},
    solver:solverResources,
    project:{...solverResources,15:f.copy.createView(),16:f.velocity.createView(),17:{buffer:f.negative,size:4*faces}},
@@ -252,13 +247,10 @@ fn bTheta(liquidPhi:f32,airPhi:f32)->f32{
 }
 fn bPairTheta(a:f32,b:f32)->f32{if((a<0.0)==(b<0.0)){return 1.0;}if(a<0.0){return bTheta(a,b);}return bTheta(b,a);}
 `;
-  // The band's free surface is the 4h surface refined within one 4h owner:
-  // h air is Dirichlet where its 4h pressure owner (the tile) is air, or
-  // where it reaches such air without leaving its own owner. Other h air --
-  // pockets and wall slivers the 4h solve counted as liquid -- stays liquid
-  // here too: the 4h fluxes on the band's Neumann edge were solved with it
-  // liquid, and a p=0 pocket inside them floats the whole tile's pressure
-  // level to zero (walls release, liquid peels off them).
+  // The h solve uses the simulation's actual interface. The 4h solve supplies
+  // boundary flux and an initial pressure, not a veto on h air: relabelling
+  // a sub-cell pocket as liquid removes its free surface from pressure while
+  // advection and rendering keep it, allowing a false cavity to persist.
   const owner=/* wgsl */`
 @group(1) @binding(3) var<storage,read> phi:array<f32>;
 @group(1) @binding(6) var vertexPhi:texture_3d<f32>;
@@ -275,16 +267,8 @@ fn bOwnerAir(t:u32)->bool{
 fn bHTile(j:u32)->u32{return umTopology[UM_TILES+j];}
 `;
   const surface=owner+/* wgsl */`
-@group(1) @binding(5) var<storage,read> openAir:array<u32>;
-// Open air: Dirichlet at h. Only meaningful for air cells of h tiles.
-fn bOpen(q:vec3i)->bool{
- let t=umTileAt(vec3u(q)/4u);let l=vec3u(q)%4u;let bit=l.x+4u*(l.y+4u*l.z);
- return (openAir[2u*t+bit/32u]&(1u<<(bit%32u)))!=0u;
-}
-// An h cell's band pressure phi: its own, or a liquid marker for closed air.
-// With solids only an open cell can be a pocket: closed cells keep the
-// authority's continuation (liquid beside open liquid, else air).
-fn bPhiH(q:vec3i)->f32{let own=phi[umOwnerAt(q).index];return select(own,-0.5*params.policy.w,own>=0.0&&!bOpen(q)${S?"&&umCellOpen(q)>1e-5":""});}
+// Preserve the simulation authority, including its solid continuation.
+fn bPhiH(q:vec3i)->f32{return phi[umOwnerAt(q).index];}
 // Face classification of row assembly. An h neighbour's band phi decides;
 // inside a coarse owner, a coarse liquid owner is Neumann (its flux is the
 // transferred 4h face). A coarse air owner is Neumann too where the h cell
@@ -393,47 +377,6 @@ fn bMiddleNear(i:u32,c:u32,f:u32)->u32{
   const slots=/* wgsl */`@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) groups:vec3u`;
   const band=header+indexed(false)+rows+solve+aggregates;
   const sources:Record<string,string>={
-   open:header+owner+/* wgsl */`
-@group(1) @binding(0) var<uniform> params:BandParams;
-@group(1) @binding(5) var<storage,read_write> openAir:array<u32>;
-var<workgroup> state:array<u32,64>;
-var<workgroup> changed:u32;
-// Open air per h tile: seeded across the tile's faces from air in 4h-air
-// owners (or the open top), then filled through the tile's own air cells.
-@compute @workgroup_size(64) fn main(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var j=group.x;j<umCounts.x;j+=${LIST_GROUPS}u){
-  let t=bHTile(j);
-  let p=vec3i(umTileCoord(t)*4u+bLocal(lane));let l=vec3i(bLocal(lane));
-  let ownerAir=bOwnerAir(t);
-  let air=phi[umOwnerAt(p).index]>=0.0;var open=air&&ownerAir;
-  if(air&&!ownerAir){
-   for(var f=0u;f<6u;f++){
-    let axis=f/2u;var q=p;q[axis]+=bSign(f);
-    if(q[axis]<0||q[axis]>=i32(UM_D[axis])){if(axis==1u&&f==3u&&params.policy.y>0.5){open=true;}continue;}
-    let tq=umTileAt(vec3u(q)/4u);if(tq==t||!bOwnerAir(tq)){continue;}
-    let n=umOwnerAt(q);
-    if(select(phi[n.index]>=0.0&&bCentrePhi(q)>=0.0,phi[n.index]>=0.0,n.width==1u)){open=true;}
-   }
-  }
-  state[lane]=select(select(0u,1u,air),2u,open);
-  if(lane==0u){changed=1u;}
-  workgroupBarrier();
-  // 0 liquid, 1 closed air, 2 open air; closed air next to open air opens.
-  for(var round=0u;round<64u&&workgroupUniformLoad(&changed)!=0u;round++){
-   if(lane==0u){changed=0u;}
-   workgroupBarrier();
-   if(state[lane]==1u){
-    for(var f=0u;f<6u;f++){
-     let axis=f/2u;var m=l;m[axis]+=bSign(f);if(m[axis]<0||m[axis]>3){continue;}
-     if(state[u32(m.x+4*(m.y+4*m.z))]==2u){state[lane]=2u;changed=1u;break;}
-    }
-   }
-   workgroupBarrier();
-  }
-  if(lane<2u){var word=0u;for(var b=0u;b<32u;b++){if(state[32u*lane+b]==2u){word|=1u<<b;}}openAir[2u*t+lane]=word;}
-  workgroupBarrier();
- }
-}`,
    list:header+surface+/* wgsl */`
 @group(1) @binding(0) var<uniform> params:BandParams;
 @group(1) @binding(2) var<storage,read_write> index:array<atomic<u32>>;
@@ -906,7 +849,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  /** The pass the band's static groups were last bound in, and its group 1. */
  private boundPass?:GPUComputePassEncoder;
  private boundGroup?:GPUBindGroup;
- private layoutOf(name:string):string{const base=name.replace(/([01P]|@\d+)$/,"");return ["open","list","copy","prep","init","project","present"].includes(base)?base:"solver";}
+ private layoutOf(name:string):string{const base=name.replace(/([01P]|@\d+)$/,"");return ["list","copy","prep","init","project","present"].includes(base)?base:"solver";}
  /** launch: a fixed group count, or a slot-list stride (one 32-lane group
   * per slot colour, one group per slot, per 8 slots, per 64 slots) capped by
   * the capacity. */
@@ -930,7 +873,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  encodePrepare(encoder:GPUCommandEncoder):void{
   encoder.clearBuffer(this.index,0,4*HEADER);encoder.clearBuffer(this.index,this.slotMapOffset);
   const pass=encoder.beginComputePass({label:"Uniform pressure band list and rows"});
-  this.dispatch(pass,"open",LIST_GROUPS);this.dispatch(pass,"list",LIST_GROUPS);
+  this.dispatch(pass,"list",LIST_GROUPS);
   this.dispatch(pass,"prep","slots");this.dispatch(pass,"middleBake","middle");this.dispatch(pass,"coarseBake","coarse");pass.end();
  }
  /** After the 4h projection reaches simulation ownership: start from the 4h
@@ -958,5 +901,5 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  static readonly historyWord=HISTORY_WORD;
  /** The header word the frame's verdict closes the band with. */
  static readonly closedWord=CLOSED_WORD;
- destroy():void{for(const b of [this.index,this.rows,this.coarse,this.open,this.solve])b.destroy();}
+ destroy():void{for(const b of [this.index,this.rows,this.coarse,this.solve])b.destroy();}
 }
