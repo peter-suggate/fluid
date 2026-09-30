@@ -23,6 +23,6 @@ artifacts/*
 rust/target/
 docs/research/
 
-# Raw benchmark output (JSON, images, patches) stays local; the .md write-ups are kept.
-docs/benchmarks/*
-!docs/benchmarks/*.md
+# Benchmark output and write-ups stay local. Files committed before this rule
+# stay tracked until removed with git rm --cached.
+docs/benchmarks/

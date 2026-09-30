@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { buildVesselOutlineGeometry } from "../lib/core/vessel-outline";
 import { DecorationOverlay } from "../lib/core/webgpu-decoration-overlay";
@@ -9,7 +10,10 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
 
 test("Dawn draws the canonical tank voxel-volume wireframe", {
   skip: !dawnModule && "set WEBGPU_NODE_MODULE for vessel-outline parity",
-}, async () => {
+}, async t => {
+  await acquireWebGPUExclusiveLock("dawn-test", t.name);
+  let leasedDevice: GPUDevice | undefined;
+  t.after(async () => { leasedDevice?.destroy(); await releaseWebGPUExclusiveLock(); });
   const dawn = await import(pathToFileURL(dawnModule!).href) as {
     create(options: string[]): GPU;
     globals: Record<string, unknown>;
@@ -18,7 +22,7 @@ test("Dawn draws the canonical tank voxel-volume wireframe", {
   const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
   const adapter = await gpu.requestAdapter();
   assert.ok(adapter, "Dawn did not expose the requested adapter");
-  const device = await adapter.requestDevice();
+  const device = leasedDevice = await adapter.requestDevice();
   const overlay = new DecorationOverlay(device, "rgba8unorm");
   const width = 96, height = 96, bytesPerRow = 512;
   let target: GPUTexture | undefined;

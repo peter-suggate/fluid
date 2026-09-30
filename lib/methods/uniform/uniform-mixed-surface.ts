@@ -24,7 +24,7 @@ export interface UniformMixedSurfaceFields {
   volume: GPUTexture;
   negative: GPUBuffer;
   departures: GPUTexture;
-  /** h.xyz, dt; flags (bit 0 openTop), cubic, drain, loop bound (=4). */
+  /** h.xyz, dt; flags (bit 0 openTop, bit 1 preserve), cubic, drain, loop bound (=4). */
   params: GPUBuffer;
   /** One temporary surface-evidence word per tile, six wall words (plus two
    * pad), then with solids two words per tile (closed, clear); dead before transport. */
@@ -246,7 +246,11 @@ fn umCubicPhi(q:vec3f)->f32{
  // owner's tile (4h taps are 4-aligned, stored everywhere), so it is stored
  // or resolved. The 64 direct loads then unroll with a constant bound.
  let regularFine=${this.resolved?"true":"umRegularFine||umTileMaximumWidth(owner.tile)==1u"};
- ${this.solid?"let tapsClear=(umRegularFine||owner.width==1u)&&umSolidClear(base);":""}
+ // Every clamped lattice vertex has an incident in-domain cell. With no
+ // embedded solids it cannot be buried, at any owner width. Fold that case
+ // before the 64 taps: the fine-tile clearance certificate alone excludes
+ // coarse owners and leaves their per-tap domain tests in the solid-free twin.
+ ${this.solid?"let tapsClear=!umSolidEnabled()||((umRegularFine||owner.width==1u)&&umSolidClear(base));":""}
  var value=0.0;var low=1e30;var high=-1e30;
  let taps=${this.resolved?"4u":"params.flags.w"};
  for(var z=0u;z<taps;z++){var plane=0.0;
@@ -283,7 +287,8 @@ fn umDrain(q:vec3f,value:f32,width:u32)->f32{
    if(all(p<high)&&all(p+vec3i(step)>low)&&textureLoad(volume,p,0).x>0.05){return value;}
   }}}
  }}}
- return min(value+0.5*h,0.5*h);
+ // The retreat is 0.5h per 1/30 s of simulated time, whatever the step.
+ return min(value+15.0*params.hDt.w*h,0.5*h);
 }
 fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
  if(params.hDt.w<=0.0){return value;}var interior=p;var contact=false;
@@ -616,7 +621,22 @@ fn umNoNearbySurface(p:vec3f,band:f32)->bool{
  }}}return true;
 }
 // Whether a rebuild searches from p: a band vertex off zero, not buried.
+// Preserve (CM11b sec. 3.4: "do not modify phi values of grid points next to
+// the surface in order to avoid moving it"): an h vertex with a face
+// neighbour of opposite sign keeps its advected value. Redistancing
+// projects onto the trilinear zero set, which lies inside a convex body, so
+// rebuilding these vertices shrinks every drop and sheet rim a little on
+// every step, at rest or in flight; the thin-liquid ladders lose r = 2 drops
+// to half their volume in 15 steps. Wide vertices keep the native rule.
+fn umPreserved(p:vec3f,initial:f32,width:u32)->bool{
+ if((params.flags.x&2u)==0u||width!=1u){return false;}
+ for(var k=0u;k<6u;k++){let axis=k/2u;var q=vec3i(p);q[axis]+=select(-1,1,(k&1u)!=0u);
+  if(q[axis]<0||q[axis]>i32(UM_D[axis])){continue;}
+  if(umLoadVertex(vec3u(q))*initial<0.0){return true;}}
+ return false;
+}
 fn umRebuildBand(p:vec3f,initial:f32,width:u32)->bool{
+ if(umPreserved(p,initial,width)){return false;}
  let h=params.hDt.xyz;let band=4.0*f32(width)*max(h.x,max(h.y,h.z));
  return abs(initial)>1e-8&&abs(initial)<band${this.solid?"&&!umBuried(p)":""};
 }
@@ -662,6 +682,8 @@ fn ${name}(p:vec3f,initial:f32,width:u32${param})->f32{
   if(wide){let nextOwner=umOwnerAt(min(vec3i(floor(next)),vec3i(UM_D)-vec3i(1)));wide=nextOwner.width==width&&umTileMinimumWidth(nextOwner.tile)==width;}
   if(wide){phiNext=umCubicPhi(next);}else{phiNext=umSampleVertex(next);}`:"phiNext=umWindowSample(next,o);"}
   if(abs(phiNext)>=abs(phiQ)){break;}q=next;phiQ=phiNext;
+  // A tenth of the acceptance tolerance below: one more step moves q by less.
+  if(abs(phiQ)<=0.0005*w*min(h.x,min(h.y,h.z))){break;}
  }
  // Acceptance is continuous in the residual: past tol it blends toward the
  // unsearched value, reached at 2 tol. A hard cut let mirror-image searches

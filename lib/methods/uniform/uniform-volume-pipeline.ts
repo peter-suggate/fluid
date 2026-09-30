@@ -118,10 +118,12 @@ const stages: FluidPipelineStage[] = [
     controls:[
       {kind:"param-choice",param:"phiCubicAdvection",label:"Cubic advection",options:onOff,hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiCubicAdvection},
       {kind:"param-choice",param:"phiDrain",label:"Drain ghost phi",options:onOff,hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiDrain},
+      {kind:"param-choice",param:"phiPreserveSurface",label:"Preserve surface vertices",options:onOff,hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiPreserveSurface},
     ],
     state:()=>"on",
     chip:context=>[context.values.phiCubicAdvection === "on" ? "cubic" : "trilinear",
-      context.values.phiDrain === "on" ? "drained" : "", context.values.redistance === "off" ? "" : "redistanced"].filter(Boolean).join(" · "),
+      context.values.phiDrain === "on" ? "drained" : "", context.values.redistance === "off" ? ""
+        : context.values.phiPreserveSurface === "on" ? "redistanced, surface kept" : "redistanced"].filter(Boolean).join(" · "),
   },
   {
     id:"uniform-volume-coupling", band:"surface", side:"left", label:"Conservative volume transport",

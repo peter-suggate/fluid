@@ -136,9 +136,12 @@ export interface WebGPUUniformReferenceOptions {
    *  - phiCubicAdvection: clamped Catmull-Rom instead of trilinear for the
    *    advected phi of band vertices.
    *  - phiDrain: raise phi-liquid vertices with no V anywhere around them.
+   *  - phiPreserveSurface (off by default): redistancing keeps h vertices
+   *    beside the surface at their advected value (CM11b sec. 3.4).
    */
   phiCubicAdvection?: boolean;
   phiDrain?: boolean;
+  phiPreserveSurface?: boolean;
   /** GPU-resident sparse work boxes; false retains the original dense control. */
   activeRegion?: boolean;
   /** Velocity transport used by Algorithm 1 step 3. */
@@ -440,6 +443,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Splash-survival controls; see the option docs. */
   private phiCubicAdvection: boolean;
   private phiDrain: boolean;
+  private phiPreserveSurface: boolean;
   /** Coarse cells whose E1 tables fit the conditioning plane; 0 disables E1. */
   private twoLevelTileCount: number;
   private readonly vertexPhiField?: GPUTexture;
@@ -748,6 +752,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.totalSurfaceVolume = this.geometricVolume && options.totalSurfaceVolume !== false;
     this.phiCubicAdvection = options.phiCubicAdvection !== false;
     this.phiDrain = options.phiDrain !== false;
+    this.phiPreserveSurface = options.phiPreserveSurface === true;
     // Uniform Geometric calls this the SOLVE WINDOW. It needs a positive dust
     // floor for the same reason E3's live set does: the window's diagnostics
     // reduction sums V over the box, which equals the domain sum only while
@@ -1804,6 +1809,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if (values.totalSurfaceVolume !== undefined) this.totalSurfaceVolume = values.totalSurfaceVolume === "on";
       if (values.phiCubicAdvection !== undefined) this.phiCubicAdvection = values.phiCubicAdvection === "on";
       if (values.phiDrain !== undefined) this.phiDrain = values.phiDrain === "on";
+      if (values.phiPreserveSurface !== undefined) this.phiPreserveSurface = values.phiPreserveSurface === "on";
       this.geometricRedistance = values.redistance !== "off";
       this.solidExcessCorrection = false;
       this.densityPostProcessing = false;
@@ -2425,7 +2431,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       try{
         receipt=frame.advance({dt,gravity:this.scene.fluid.gravity_m_s2.y,density:this.scene.fluid.density_kg_m3,
         viscosity:this.scene.fluid.dynamicViscosity_Pa_s,surfaceTension:this.scene.fluid.surfaceTension_N_m,
-        openTop:this.scene.container.top==="open",noSlip:this.scene.container.fluidWallMode==="no-slip",cubic:this.phiCubicAdvection,drain:this.phiDrain,
+        openTop:this.scene.container.top==="open",noSlip:this.scene.container.fluidWallMode==="no-slip",cubic:this.phiCubicAdvection,drain:this.phiDrain,preserve:this.phiPreserveSurface,
         dust:this.volumeDustThreshold,orphanDust:this.orphanDustThreshold,sharpeningStrength:this.densitySharpening?this.sharpeningStrength:0,
         sharpeningDistance:this.sharpeningDistance,sharpeningSweeps:this.sharpeningSweeps,surfaceVolumeRounds:this.surfaceVolumeRounds,pressureTolerance:this.pressureMultigrid.residualTolerance,
         totalSurfaceVolume:this.totalSurfaceVolume,redistance:this.geometricRedistance,sharpening:this.densitySharpening,

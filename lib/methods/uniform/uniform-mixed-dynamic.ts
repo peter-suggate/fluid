@@ -214,7 +214,8 @@ export class UniformMixedDynamicClassifier {
   // After wet and active: band reasons (a word per tile), then near bits
   // and the audit word (cleared per census), then a packed near-tile box
   // per page.
-  const workBytes=(this.nearOffset+this.words+1+this.pages)*4,readBytes=(HEADER+this.words)*4;
+  // Append two crossing-cell words per tile; existing diagnostic offsets stay stable.
+  const workBytes=(this.nearOffset+this.words+1+this.pages+2*tiles)*4,readBytes=(HEADER+this.words)*4;
   this.work=device.createBuffer({label:"Uniform dynamic ownership census",size:workBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.readback=device.createBuffer({label:"Uniform dynamic ownership readback",size:readBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   this.params=device.createBuffer({label:"Uniform dynamic ownership policy",size:64,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -302,14 +303,18 @@ fn recordReason(tile:u32,reason:u32){if(recordReasons()){atomicStore(&census[rea
 fn nearIndex(w:u32)->u32{return reasonIndex(UM_TILES)+w;}
 fn auditIndex()->u32{return nearIndex(WORDS);}
 fn pageBoxIndex(page:u32)->u32{return auditIndex()+1u+page;}
+// Exact union of crossing owners, in unit cells (x + 4*y + 16*z).
+// A crossing 4h owner covers all 64 cells: do not invent sub-cell detail.
+fn crossingIndex(t:u32,k:u32)->u32{return pageBoxIndex(UM_PAGES)+2u*t+k;}
 fn orderKey(x:f32)->u32{let b=bitcast<u32>(x);return select(b|0x80000000u,~b,(b&0x80000000u)!=0u);}
 fn orderValue(k:u32)->f32{return bitcast<f32>(select(~k,k&0x7fffffffu,(k&0x80000000u)!=0u));}
 // One tile's classification: ordered velocity keys, nibble distances from
 // each face to the nearest crossing owner (gap) and surface owner (reach),
 // flags (bit 0 surface owner, bit 1 phi sign change) and 4h surface error.
-struct TileClass{low:array<u32,3>,high:array<u32,3>,gap:array<u32,6>,reach:array<u32,6>,flags:u32,error:u32}
-fn umEmptyClass()->TileClass{return TileClass(array<u32,3>(0xffffffffu,0xffffffffu,0xffffffffu),array<u32,3>(0u,0u,0u),array<u32,6>(15u,15u,15u,15u,15u,15u),array<u32,6>(15u,15u,15u,15u,15u,15u),0u,0u);}
+struct TileClass{low:array<u32,3>,high:array<u32,3>,gap:array<u32,6>,reach:array<u32,6>,flags:u32,error:u32,crossing:vec2u}
+fn umEmptyClass()->TileClass{return TileClass(array<u32,3>(0xffffffffu,0xffffffffu,0xffffffffu),array<u32,3>(0u,0u,0u),array<u32,6>(15u,15u,15u,15u,15u,15u),array<u32,6>(15u,15u,15u,15u,15u,15u),0u,0u,vec2u(0u));}
 var<workgroup> mixedTile:atomic<u32>;
+var<workgroup> tileCrossing:array<atomic<u32>,2>;
 var<workgroup> tileLow:array<atomic<u32>,3>;
 var<workgroup> tileHigh:array<atomic<u32>,3>;
 var<workgroup> tileGap:array<atomic<u32>,6>;
@@ -441,6 +446,8 @@ fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
  if(inside==0u){atomicMax(&groupExtreme[2u+coarse],bitcast<u32>(max(v,0.0)));}
  let local=umCorner(lane,side)*width;
  if(inside!=0u&&inside!=8u){
+  if(width==4u){(*c).crossing=vec2u(0xffffffffu);}
+  else{(*c).crossing[lane/32u]|=1u<<(lane%32u);}
   for(var a=0u;a<3u;a++){(*c).gap[a]=min((*c).gap[a],local[a]);(*c).gap[3u+a]=min((*c).gap[3u+a],4u-width-local[a]);}
  }
  let interior=inside==8u&&v>=1.0-policy.step.z;
@@ -481,6 +488,7 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
  // dust threshold and is discarded (128³ dam: 9 cells in three steps).
  let bounded=!shaped&&crossing&&umBoundaryRequired(umTileCoord(tile),width,c);
  let required=shaped||bounded;
+ for(var k=0u;k<2u;k++){atomicStore(&census[crossingIndex(tile,k)],select(0u,c.crossing[k],required));}
  atomicStore(&census[prefixIndex(umTileCoord(tile)+vec3u(1u))],select(0u,1u,required));
  if(required){atomicAdd(&census[12],1u);}
  if(bounded){atomicAdd(&census[16],1u);atomicMax(&census[17],u32(ceil(speed)));}
@@ -505,13 +513,14 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
 @compute @workgroup_size(64) fn classify(@builtin(workgroup_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  for(var job=gid.x;job<umCounts.x;job+=groups.x){
  let tile=umTopology[UM_TILES+job];
- if(lane==0u){resetGroupCensus();atomicStore(&mixedTile,0u);for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}atomicStore(&tileError,0u);}workgroupBarrier();
+ if(lane==0u){resetGroupCensus();atomicStore(&mixedTile,0u);for(var k=0u;k<2u;k++){atomicStore(&tileCrossing[k],0u);}for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}atomicStore(&tileError,0u);}workgroupBarrier();
  let width=umTileWidth(tile);let side=4u/width;
  if(lane<side*side*side){
   var c=umEmptyClass();umClassifyOwner(tile,width,lane,&c);
   for(var a=0u;a<3u;a++){atomicMin(&tileLow[a],c.low[a]);atomicMax(&tileHigh[a],c.high[a]);}
   for(var k=0u;k<6u;k++){atomicMin(&tileGap[k],c.gap[k]);atomicMin(&tileReach[k],c.reach[k]);}
   atomicOr(&mixedTile,c.flags);
+  for(var k=0u;k<2u;k++){if(c.crossing[k]!=0u){atomicOr(&tileCrossing[k],c.crossing[k]);}}
  }
  workgroupBarrier();
  if((atomicLoad(&mixedTile)&2u)!=0u&&policy.step.y>0.0){atomicMax(&tileError,bitcast<u32>(umResolutionError(tile,lane,width)));}
@@ -521,6 +530,7 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
   for(var a=0u;a<3u;a++){c.low[a]=atomicLoad(&tileLow[a]);c.high[a]=atomicLoad(&tileHigh[a]);}
   for(var k=0u;k<6u;k++){c.gap[k]=atomicLoad(&tileGap[k]);c.reach[k]=atomicLoad(&tileReach[k]);}
   c.flags=atomicLoad(&mixedTile);c.error=atomicLoad(&tileError);
+  c.crossing=vec2u(atomicLoad(&tileCrossing[0]),atomicLoad(&tileCrossing[1]));
   umFinishTile(tile,width,c);
   flushGroupCensus();
  }
@@ -680,12 +690,27 @@ fn forwardFine(p:vec3i,margin:i32)->bool{
  }}}
  return false;
 }
-// Whether the cell box [lo, hi] (closed) holds a current interface owner. A
-// crossing tile q counts only if its nearest crossing owner lies within the
-// depth the box reaches into q on every axis: a still surface keeps just the
-// tiles whose vertices it touches, not a 26-tile shell. Tiles inside the box
-// on every axis reach it outright; only the shell is tested owner-wise.
-fn departureMeetsSurface(p:vec3i,lo:vec3f,hi:vec3f)->bool{
+// Intersect the closed box with the actual crossing cells, not their six
+// independent extrema (which can come from different owners). Closed bounds
+// retain shared faces, edges and corners, including the existing drift margin.
+fn crossingCellsMeet(q:vec3i,lo:vec3f,hi:vec3f)->bool{
+ let origin=4.0*vec3f(q);
+ let a=max(vec3i(floor(lo-origin-vec3f(1e-3))),vec3i(0));
+ let b=min(vec3i(floor(hi-origin+vec3f(1e-3))),vec3i(3));
+ if(any(b<a)){return false;}
+ let tile=umTileAt(vec3u(q));
+ let mask=vec2u(atomicLoad(&census[crossingIndex(tile,0u)]),atomicLoad(&census[crossingIndex(tile,1u)]));
+ if(all(mask==vec2u(0u))){return false;}
+ let row=((1u<<u32(b.x-a.x+1))-1u)<<u32(a.x);
+ for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){
+  let lane=4u*u32(y)+16u*u32(z);
+  if((mask[lane/32u]&(row<<(lane%32u)))!=0u){return true;}
+ }}
+ return false;
+}
+// Whole tiles inside the box use the prefix sum; only its shell needs the
+// crossing-cell mask. This preserves the cheap rejection of distant tiles.
+fn departureMeetsSurface(lo:vec3f,hi:vec3f)->bool{
  let first=vec3i(floor((lo-1e-3)/4.0));let last=vec3i(floor((hi+1e-3)/4.0));
  if(interfaceTilesIn(first,last)==0u){return false;}
  let inner=vec3i(ceil((lo-1e-3)/4.0));let innerLast=last-vec3i(1);
@@ -696,14 +721,7 @@ fn departureMeetsSurface(p:vec3i,lo:vec3f,hi:vec3f)->bool{
   let core=y>=inner.y&&y<=innerLast.y&&z>=inner.z&&z<=innerLast.z;
   for(var x=a.x;x<=b.x;x++){
    if(core&&x>=inner.x&&x<=innerLast.x){x=innerLast.x;continue;}
-   let q=vec3i(x,y,z);let gap=atomicLoad(&census[gapIndex(umTileAt(vec3u(q)))]);
-   if(gap==0xffffffffu){continue;}
-   var reaches=true;
-   for(var axis=0u;axis<3u;axis++){
-    if(q[axis]<p[axis]){reaches=reaches&&f32((gap>>(4u*(3u+axis)))&15u)<=4.0*f32(q[axis])+4.0-lo[axis]+1e-3;}
-    if(q[axis]>p[axis]){reaches=reaches&&f32((gap>>(4u*axis))&15u)<=hi[axis]-4.0*f32(q[axis])+1e-3;}
-   }
-   if(reaches){return true;}
+   if(crossingCellsMeet(vec3i(x,y,z),lo,hi)){return true;}
   }
  }}
  return false;
@@ -761,11 +779,11 @@ fn umSourceTile(p:vec3i)->bool{
    let mid=sampledFlow(clamp(lo-0.5*start.high*s,vec3f(0),D),clamp(hi-0.5*start.low*s,vec3f(0),D),shift,top);
    lo=clamp(lo-mid.high*s,vec3f(0),D);hi=clamp(hi-mid.low*s,vec3f(0),D);
   }
-  fine=departureMeetsSurface(p,lo-vec3f(margin),hi+vec3f(margin));
+  fine=departureMeetsSurface(lo-vec3f(margin),hi+vec3f(margin));
   // Views only: closure is the part a still surface (dt = 0) already needs.
   if(fine&&recordReasons()){
    let box=4.0*vec3f(p);
-   reason=select(${REASON.travel}u,${REASON.closure}u,departureMeetsSurface(p,box-vec3f(margin),box+vec3f(4.0+margin)));
+   reason=select(${REASON.travel}u,${REASON.closure}u,departureMeetsSurface(box-vec3f(margin),box+vec3f(4.0+margin)));
   }
  }
  if(!fine){if(width==1u){atomicAdd(&census[5],1u);}recordReason(tile,${REASON.traced}u);return;}

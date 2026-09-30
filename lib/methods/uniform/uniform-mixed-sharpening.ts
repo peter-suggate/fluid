@@ -187,9 +187,10 @@ fn shJobs()->vec2u{
  let regular=(owners+191u)/192u;return vec2u(regular,regular+atomicLoad(&work[SH_COUNTS+2u]));
 }
 var<workgroup> shJobCount:vec2u;
-// Sweep jobs: 192 active regular owners per job, then the seam tiles.
+// Sweep jobs: 192 active regular owners or two coarse seam owners. Each
+// seam owner needs 6 * 16 patch lanes; geometry still uses one whole tile.
 fn shSweepJobs()->vec2u{
- let regular=(atomicLoad(&work[SH_ACTIVE_COUNT])+191u)/192u;return vec2u(regular,regular+atomicLoad(&work[SH_COUNTS+2u]));
+ let regular=(atomicLoad(&work[SH_ACTIVE_COUNT])+191u)/192u;return vec2u(regular,regular+(atomicLoad(&work[SH_COUNTS+2u])+1u)/2u);
 }
 fn shActiveOwner(job:u32,lane:u32)->UMOwner{
  let slot=job*192u+lane;if(slot>=atomicLoad(&work[SH_ACTIVE_COUNT])){return UMOwner();}
@@ -205,10 +206,9 @@ fn shMergedOwner(job:u32,lane:u32)->UMOwner{
  }
  return UMOwner();
 }
-// Coarse seam tiles, one 192-lane group each. Face-parallel entries give a
-// lane to each (anchor, component) of the tile; owner reductions give each
-// of the tile's (4/w)^3 owners 3w^3 lanes, one per (face side, patch), and
-// sum the staged terms in one lane in the per-owner kernels' order.
+// Geometry visits all 192 (anchor, component) lanes of a tile. Sweeps pack
+// two coarse seam owners into the same group, with 96 lanes per owner.
+// Each owner reduces its six sides in the original serial patch order.
 fn shSeamTile(job:u32)->u32{
  if(job>=atomicLoad(&work[SH_COUNTS+2u])){return UM_TILES;}
  return atomicLoad(&work[shListStart(2u)+job]);
@@ -221,9 +221,8 @@ fn shSeamOwner(tile:u32,local:vec3u)->UMOwner{
 struct SHSeamLane {owner:UMOwner,first:bool,side:u32,part:u32}
 fn shSeamLane(tile:u32,lane:u32)->SHSeamLane{
  if(tile>=UM_TILES){return SHSeamLane(UMOwner(),false,0u,0u);}
- let width=umTileWidth(tile);let per=3u*width*width*width;let side=4u/width;let o=lane/per;let r=lane%per;
- if(o>=side*side*side){return SHSeamLane(UMOwner(),false,0u,0u);}
- let owner=shSeamOwner(tile,umCorner(o,side)*width);return SHSeamLane(owner,r==0u,r/(width*width),r%(width*width));
+ let r=lane%96u;let owner=shSeamOwner(tile,vec3u(0));
+ return SHSeamLane(owner,r==0u,r/16u,r%16u);
 }
 var<workgroup> shSeamTerms:array<vec2f,192>;
 fn shCacheGeometrySeam(tile:u32,lane:u32){
@@ -241,9 +240,11 @@ fn shBudgets(o:UMOwner,value:f32,distance:f32,desired:f32)->vec2f{
  return uvSharpenBudgets(value,desired,distance,UM_MIN_H*f32(o.width),clamp(sharpen.tuning.x,0.0,1.0),sharpen.tuning.y,sharpen.policy.x>0.5,sharpen.policy.y,umSharpenOpen(o))*umMassScale(o);
 }
 fn shProposeSeam(tile:u32,lane:u32){
- let cell=lane%64u;let axis=lane/64u;let local=umCorner(cell,4u);let o=shSeamOwner(tile,local);if(o.width==0u){return;}
- let face=umPositiveFaceAtAnchor(o,axis,vec3i(umTileCoord(tile)*4u+local));
- if(face.width!=0u&&face.neighbor.width!=0u&&shListed(face.neighbor)){scratch[umRawAt(face)]=umProposal(o,face.neighbor,face);}
+ let r=lane%96u;if(r>=48u){return;}
+ let o=shSeamOwner(tile,vec3u(0));if(o.width==0u){return;}
+ let axis=r/16u;let part=r%16u;let first=umFace(o,axis,1,0u);
+ if(part>=first.count){return;}let face=umFace(o,axis,1,part);
+ if(face.neighbor.width!=0u&&shListed(face.neighbor)){scratch[umRawAt(face)]=umProposal(o,face.neighbor,face);}
 }
 fn shPrepareSeam(tile:u32,lane:u32){
  if(tile>=UM_TILES){return;}let width=umTileWidth(tile);let side=4u/width;if(lane>=side*side*side){return;}
@@ -394,7 +395,7 @@ ${["propose","limit","commit"].map(entry=>{const fn=`sh${entry[0]!.toUpperCase()
  if(lane==0u){shJobCount=shSweepJobs();}
  let jobs=workgroupUniformLoad(&shJobCount);
  for(var job=group.x;job<jobs.y;job+=groups.x){
-  var tile=UM_TILES;if(job>=jobs.x){tile=shSeamTile(job-jobs.x);}
+  var tile=UM_TILES;if(job>=jobs.x){tile=shSeamTile(2u*(job-jobs.x)+lane/96u);}
   ${fn}Seam(tile,lane);
   if(job<jobs.x){${fn}(shActiveOwner(job,lane));}
   // The next job's seam stages its terms in the same workgroup array.

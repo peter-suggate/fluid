@@ -1,6 +1,7 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
+import { uniformMixedChangedTilesWGSL } from "./uniform-mixed-layout-builder";
 
 /** Writes umVertexValue into every unstored texel of the tiles with a mixed
  * stencil, in place. Readers compiled with the resolved vertex sampler then
@@ -14,16 +15,26 @@ import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.
  * 4h lattice values around the tile are staged once per group and each texel
  * is umVertexFrom4 over workgroup memory (same weights and D4 summation).
  * A GPU-counted launch (UNIFORM_MIXED_COUNTED.fused): the seam count sizes
- * nothing on the host, so a pass without seam tiles still pays one launch. */
+ * nothing on the host, so a pass without seam tiles still pays one launch.
+ * Changed (after a GPU adoption, on a field resolved for the ownership it
+ * replaced): a hanging texel's value and whether it hangs depend only on the
+ * tile words of its tile's 3x3x3 neighbourhood and on 4h lattice vertices,
+ * which are stored under every layout; so only the seam tiles of the adopted
+ * generation's dilated changed list can need a write, and the listed launch
+ * resolves exactly those. */
 export class UniformMixedPhiResolve {
   readonly allocatedBytes = 0;
   private pipeline?: GPUComputePipeline;
+  private listed?: GPUComputePipeline;
   private readonly resources: GPUBindGroupLayout;
+  private readonly listResources: GPUBindGroupLayout;
+  private listGroup?: { readonly changes: GPUBuffer; readonly group: GPUBindGroup };
 
   constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership) {
     this.resources = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "read-write", format: "r32float", viewDimension: "3d" } },
     ] });
+    this.listResources = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }] });
   }
 
   bind(field: GPUTexture): GPUBindGroup {
@@ -34,7 +45,15 @@ export class UniformMixedPhiResolve {
   }
 
   async initialize(): Promise<void> {
-    const module = this.device.createShaderModule({ code: uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
+    const header = /* wgsl */ `
+ let header=7u*UM_TILES+16u;let valid=job<umSupport[header]+umSupport[header+1u];
+ let tile=select(0u,umSupport[header+4u+select(0u,job,valid)],valid);let base=vec3i(umTileCoord(tile));`;
+    // A listed tile is resolved only if it is a seam tile of the adopted layout.
+    const listed = /* wgsl */ `
+ let listed=job<umDilatedCount();let candidate=select(0u,umDilatedTile(select(0u,job,listed)),listed);
+ let valid=listed&&umTileMaximumWidth(candidate)!=umTileMinimumWidth(candidate);
+ let tile=select(0u,candidate,valid);let base=vec3i(umTileCoord(tile));`;
+    const source = (entry: string, job: string, extra = "") => uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity, 0) + extra + /* wgsl */ `
 @group(1) @binding(0) var field:texture_storage_3d<r32float,read_write>;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(field,vec3i(p)).x;}
 ${uniformMixedVertexSamplingWGSL}
@@ -44,12 +63,11 @@ var<workgroup> umResolveWords:array<u32,8>;var<workgroup> umResolveLattice:array
 // axes where local is 0. Only 4h tiles own hanging vertices; a missing tile stages as a unit word. Lattice slot m holds the 4h
 // vertex (T+m-1)*4, read only for existing owners; aligned vertices are never
 // written here, so staging them races no store.
-@compute @workgroup_size(125) fn resolve(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+@compute @workgroup_size(125) fn ${entry}(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  // umSupport is read_write storage, so the job test is not uniform to Tint:
  // every lane reaches the barrier and a spare job leaves after it.
- let header=7u*UM_TILES+16u;let job=group.x+umDispatchX*group.y;
- let valid=job<umSupport[header]+umSupport[header+1u];
- let tile=select(0u,umSupport[header+4u+select(0u,job,valid)],valid);let base=vec3i(umTileCoord(tile));
+ let job=group.x+umDispatchX*group.y;
+${job}
  if(valid&&lane<8u){let t=base+vec3i(umCorner(lane,2u))-vec3i(1);umResolveWords[lane]=select(0x80000000u,umTopology[umTileAt(vec3u(max(t,vec3i(0))))],all(t>=vec3i(0)));}
  else if(valid&&lane>=8u&&lane<35u){let v=(base+vec3i(umCorner(lane-8u,3u))-vec3i(1))*4;if(all(v>=vec3i(0))){umResolveLattice[lane-8u]=umLoadVertex(vec3u(v));}}
  workgroupBarrier();
@@ -70,20 +88,35 @@ var<workgroup> umResolveWords:array<u32,8>;var<workgroup> umResolveLattice:array
  }
  let value=umVertexSum8(values);
  if(bitcast<u32>(value)!=bitcast<u32>(umLoadVertex(p))){textureStore(field,vec3i(p),vec4f(value));}
-}`, ["resolve"]) });
-    const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
+}`, [entry], entry === "resolve" ? undefined : "umDilatedCount()");
+    const module = this.device.createShaderModule({ code: source("resolve", header) });
+    const listModule = this.device.createShaderModule({ code: source("resolveListed", listed, uniformMixedChangedTilesWGSL(this.ownership.capacity.tiles, 2, 0)) });
+    const errors = [...(await module.getCompilationInfo()).messages, ...(await listModule.getCompilationInfo()).messages].filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
-    this.pipeline = await this.device.createComputePipelineAsync({
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources] }),
-      compute: { module, entryPoint: "resolve", constants: { umDispatchX: this.ownership.dispatchX, umCountedJobs: UNIFORM_MIXED_COUNTED.fused } },
-    });
+    [this.pipeline, this.listed] = await Promise.all([
+      this.device.createComputePipelineAsync({
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources] }),
+        compute: { module, entryPoint: "resolve", constants: { umDispatchX: this.ownership.dispatchX, umCountedJobs: UNIFORM_MIXED_COUNTED.fused } },
+      }),
+      this.device.createComputePipelineAsync({
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources, this.listResources] }),
+        compute: { module: listModule, entryPoint: "resolveListed", constants: { umDispatchX: this.ownership.dispatchX } },
+      }),
+    ]);
   }
 
-  encode(encoder: GPUCommandEncoder, group: GPUBindGroup): void {
-    if (!this.pipeline) throw new Error("Mixed phi resolve is not initialized");
+  /** changes: the changed tiles (UniformMixedGenerationBuffers.changes) of
+   * the generation the ownership just adopted, when the field was resolved
+   * for the ownership it replaced (see the class comment). */
+  encode(encoder: GPUCommandEncoder, group: GPUBindGroup, changes?: GPUBuffer): void {
+    if (!this.pipeline || !this.listed) throw new Error("Mixed phi resolve is not initialized");
     const pass = encoder.beginComputePass({ label: "Uniform mixed phi resolve" });
     pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group);
-    this.ownership.dispatchFusedCounted(pass, this.pipeline);
+    if (changes) {
+      if (this.listGroup?.changes !== changes) this.listGroup = { changes, group: this.device.createBindGroup({ layout: this.listResources, entries: [{ binding: 0, resource: { buffer: changes } }] }) };
+      pass.setBindGroup(2, this.listGroup.group);
+      this.ownership.dispatchCounted(pass, this.listed);
+    } else this.ownership.dispatchFusedCounted(pass, this.pipeline);
     pass.end();
   }
 }

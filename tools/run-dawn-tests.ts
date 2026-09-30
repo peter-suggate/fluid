@@ -41,7 +41,9 @@ async function waitForLease(): Promise<void> {
       console.log(`waiting for WebGPU lease (${owner})`);
       announced = true;
     }
-    await new Promise(resolve => setTimeout(resolve, 5_000));
+    // Notice the gap between consecutive profiling jobs before another run
+    // takes the lease. Acquisition in the fixture still arbitrates races.
+    await new Promise(resolve => setTimeout(resolve, 250));
   }
 }
 

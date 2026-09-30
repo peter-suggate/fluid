@@ -4,6 +4,7 @@ import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-samplin
 import { uniformVolumeTargetWGSL } from "./uniform-volume.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { uniformMixedChangedTilesWGSL } from "./uniform-mixed-layout-builder";
 
 /** Workgroups of the changed-tile geometry launch at most (grid-stride). */
 const CHANGED_GRID=4096;
@@ -20,7 +21,7 @@ const CHANGED_GRID=4096;
  * rule once more on its tile corners. The values equal a separate launch over
  * the all-4h ownership.
  *
- * Changed tiles ({changed:true}): an owner's values are a function of its
+ * Changed tiles ({changed}): an owner's values are a function of its
  * corner texels (stored or resolved) and, for h owners, the static solid's
  * open fraction. Between two encodes without a phi or solid write other than
  * a relayout's remap and phi resolve, a texel changes only where the width of
@@ -28,26 +29,33 @@ const CHANGED_GRID=4096;
  * not store; tile corners are always stored, so a hanging vertex's resolved
  * value moves only when its incident widths do), and an owner's corners are
  * incident only to tiles in its tile's 3x3x3 neighbourhood. The changed launch
- * compares each tile's width with the width the last encode saw (every encode
- * records it), marks the 3x3x3 neighbourhood of every changed tile, and
- * evaluates only the marked tiles' owners: every other owner keeps the value
- * it already holds, which is the one the full launch would write. The caller
- * guarantees the precondition (no body, solid edit or host phi write since the
- * last encode). A never-recorded tile (width word 0) always counts as changed. */
+ * takes the GPU-built generation the ownership adopted since the last encode
+ * (UniformMixedGenerationBuffers.changes): its dilated list is exactly the
+ * 3x3x3 neighbourhoods of the tiles whose width that adoption changed, and
+ * only those tiles' owners are evaluated: every other owner keeps the value
+ * it already holds, which is the one the full launch would write. The
+ * ownership's revision proves that one adoption, and nothing else, came
+ * between the two encodes; the caller guarantees the rest of the
+ * precondition (no body, solid edit or host phi write since the last encode). */
 export class UniformMixedSurfaceGeometry {
   readonly allocatedBytes:number;
   private pipeline?:GPUComputePipeline;
   private pressurePipeline?:GPUComputePipeline;
   private readonly changedPipelines:GPUComputePipeline[]=[];
   private readonly resources:GPUBindGroupLayout;
-  /** [h count, 4h count, 2 unused, the width each tile had at the last
-   * encode, mark flags, the marked h tiles, the marked 4h tiles]. */
+  /** [h count, 4h count, 2 unused, the marked h tiles, the marked 4h tiles]. */
   private readonly changes:GPUBuffer;
+  /** The changed launch's group: a generation's changed tiles. */
+  private readonly listResources:GPUBindGroupLayout;
+  private listGroup?:{readonly changes:GPUBuffer;readonly group:GPUBindGroup};
+  /** ownership.revision at the last encode. */
+  private encodedRevision?:number;
   /** resolved: phi's hanging texels hold umVertexValue (UniformMixedPhiResolve).
    * pressure: bind() also takes the all-4h pressure target and centre phi. */
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly resolved=false,private readonly pressure=false){
     const tiles=ownership.capacity.tiles;
-    this.changes=device.createBuffer({label:"Uniform mixed geometry changed tiles",size:4*(4+4*tiles),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+    this.changes=device.createBuffer({label:"Uniform mixed geometry changed tiles",size:4*(4+2*tiles),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+    this.listResources=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
     this.allocatedBytes=this.changes.size;
     this.resources=device.createBindGroupLayout({entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
@@ -78,7 +86,7 @@ ${this.pressure?`@group(1) @binding(3) var pressureTarget:texture_storage_3d<r32
 @group(1) @binding(4) var pressureCenterPhi:texture_storage_3d<r32float,write>;`:""}
 @group(1) @binding(5) var<storage,read_write> changes:array<atomic<u32>>;
 override geometryPressure:bool=false;
-const GC_WIDTH:u32=4u;const GC_FLAG:u32=${4+tiles}u;const GC_FINE:u32=${4+2*tiles}u;const GC_COARSE:u32=${4+3*tiles}u;
+const GC_FINE:u32=4u;const GC_COARSE:u32=${4+tiles}u;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 ${uniformMixedVertexSamplingSource("",this.resolved)}
 ${geometricPlaneBoxWGSL}
@@ -115,8 +123,6 @@ fn gcOwner(owner:UMOwner){
  // Native uvTarget scales by the open fraction; coarse owners are uncut.
  textureStore(targetFill,vec3i(origin),vec4f(value.x*select(1.0,umCellOpen(vec3i(origin)),owner.width==1u)));
  textureStore(centerPhi,vec3i(origin),vec4f(value.y));
- // The width this encode saw, for the next changed launch.
- if(owner.lane==0u){atomicStore(&changes[GC_WIDTH+owner.tile],owner.width);}
  ${this.pressure?`if(geometryPressure&&owner.lane==0u){
   var coarse=value;
   if(owner.width!=4u){
@@ -131,19 +137,12 @@ fn gcOwner(owner:UMOwner){
 @compute @workgroup_size(64) fn geometry(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(gid);if(owner.width==0u){return;}gcOwner(owner);
 }
-// Changed tiles: a width that differs from the recorded one marks the tile's
-// 3x3x3 neighbourhood; the width is recorded again by the evaluation.
-@compute @workgroup_size(64) fn markChanged(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
- if(atomicLoad(&changes[GC_WIDTH+tile])==umTileWidth(tile)){return;}
- let p=vec3i(umTileCoord(tile));
- for(var z=max(p.z-1,0);z<=min(p.z+1,i32(UM_T.z)-1);z++){for(var y=max(p.y-1,0);y<=min(p.y+1,i32(UM_T.y)-1);y++){for(var x=max(p.x-1,0);x<=min(p.x+1,i32(UM_T.x)-1);x++){
-  atomicStore(&changes[GC_FLAG+umTileAt(vec3u(vec3i(x,y,z)))],1u);
- }}}
-}
+// Changed tiles: the adopted generation's dilated list (each tile once),
+// split by width. One lane per entry over a grid of the list's bound.
+${uniformMixedChangedTilesWGSL(tiles,this.solid?3:2,0)}
 @compute @workgroup_size(64) fn compactChanged(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES||atomicLoad(&changes[GC_FLAG+tile])==0u){return;}
- atomicStore(&changes[GC_FLAG+tile],0u);
+ let i=gid.x+umDispatchX*64u*gid.y;if(i>=umDilatedCount()){return;}
+ let tile=umDilatedTile(i);
  if(umTileWidth(tile)==1u){atomicStore(&changes[GC_FINE+atomicAdd(&changes[0],1u)],tile);}
  else{atomicStore(&changes[GC_COARSE+atomicAdd(&changes[1],1u)],tile);}
 }
@@ -161,25 +160,34 @@ var<workgroup> gcJobs:vec2u;
  }
 }`,["geometry"])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
-    const create=(entryPoint:string,constants:Record<string,number>={})=>uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants,...s}}}));
+    const groups=[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])];
+    const layout=this.device.createPipelineLayout({bindGroupLayouts:groups}),listed=this.device.createPipelineLayout({bindGroupLayouts:[...groups,this.listResources]});
+    const create=(entryPoint:string,constants:Record<string,number>={},pipelineLayout=layout)=>uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants,...s}}}));
     const all={umCountedJobs:UNIFORM_MIXED_COUNTED.all};
     [this.pipeline,this.pressurePipeline]=await Promise.all([create("geometry",all),this.pressure?create("geometry",{...all,geometryPressure:1}):undefined]);
-    this.changedPipelines.push(...await Promise.all(["markChanged","compactChanged","geometryChanged"].map(entry=>create(entry))));
+    this.changedPipelines.push(...await Promise.all([create("compactChanged",{},listed),create("geometryChanged")]));
   }
   /** pressure: also write the all-4h pressure geometry (a full launch).
-   * changed: evaluate only the tiles whose neighbourhood changed width since
-   * the last encode (see the class comment for the caller's precondition). */
-  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,options:{pressure?:boolean;changed?:boolean}={}):void{
+   * changed: the changed tiles (UniformMixedGenerationBuffers.changes) of the
+   * generation the ownership adopted since the last encode: evaluate only
+   * their neighbourhoods (see the class comment for the caller's precondition). */
+  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,options:{pressure?:boolean;changed?:GPUBuffer}={}):void{
     if(!this.pipeline)throw new Error("Mixed surface geometry is not initialized");
     if(options.pressure&&options.changed)throw new Error("Mixed geometry writes pressure outputs only in a full launch");
     if(options.pressure&&!this.pressurePipeline)throw new Error("Mixed geometry was built without pressure outputs");
+    const revision=this.ownership.revision;
+    if(options.changed&&this.encodedRevision!==revision-1)throw new Error(`Mixed geometry's changed launch needs exactly one adoption since its last encode (revision ${this.encodedRevision} -> ${revision})`);
+    this.encodedRevision=revision;
     const variant=(p:GPUComputePipeline)=>this.solid?.select(p)??p;
-    if(options.changed)encoder.clearBuffer(this.changes,0,16);
+    if(options.changed){
+      encoder.clearBuffer(this.changes,0,16);
+      if(this.listGroup?.changes!==options.changed)this.listGroup={changes:options.changed,group:this.device.createBindGroup({layout:this.listResources,entries:[{binding:0,resource:{buffer:options.changed}}]})};
+    }
     const pass=encoder.beginComputePass({label:"Uniform mixed geometric fill"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
     if(options.changed){
-      const [mark,compact,changed]=this.changedPipelines,tiles=this.ownership.capacity.tiles,groups=Math.ceil(tiles/64),x=this.ownership.dispatchX;
-      for(const p of [mark!,compact!]){pass.setPipeline(variant(p));pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));}
+      const [compact,changed]=this.changedPipelines,tiles=this.ownership.capacity.tiles,groups=Math.ceil(tiles/64),x=this.ownership.dispatchX;
+      pass.setBindGroup(this.solid?3:2,this.listGroup!.group);
+      pass.setPipeline(variant(compact!));pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
       pass.setPipeline(variant(changed!));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
     }
     else this.ownership.dispatchAllCounted(pass,variant(options.pressure?this.pressurePipeline!:this.pipeline));

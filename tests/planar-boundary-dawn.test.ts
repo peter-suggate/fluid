@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import {
   packPlanarBoundaryPatches,
   planarBoundaryWGSL,
@@ -14,7 +15,10 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
 
 test("Dawn compiles the production path and executes the planar-boundary ABI", {
   skip: !dawnModule && "set WEBGPU_NODE_MODULE for Dawn planar-boundary parity",
-}, async () => {
+}, async t => {
+  await acquireWebGPUExclusiveLock("dawn-test", t.name);
+  let leasedDevice: GPUDevice | undefined;
+  t.after(async () => { leasedDevice?.destroy(); await releaseWebGPUExclusiveLock(); });
   const dawn = await import(pathToFileURL(dawnModule!).href) as {
     create(options: string[]): GPU;
     globals: Record<string, unknown>;
@@ -23,7 +27,7 @@ test("Dawn compiles the production path and executes the planar-boundary ABI", {
   const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
   const adapter = await gpu.requestAdapter();
   assert.ok(adapter, "Dawn did not expose the requested adapter");
-  const device = await adapter.requestDevice();
+  const device = leasedDevice = await adapter.requestDevice();
   try {
     const boundary: PlanarBoundaryPatch = {
       center_m: [0, 0, 0],

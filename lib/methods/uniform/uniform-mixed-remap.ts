@@ -6,7 +6,7 @@ import {uniformMixedFaceAddressWGSL} from "./uniform-mixed-face-dispatch.wgsl";
 import {UNIFORM_MIXED_FAILURE,UNIFORM_MIXED_STATUS_WORDS,uniformMixedFrameStatusWGSL} from "./uniform-mixed-frame-status";
 import {uniformVolumeTargetWGSL} from "./uniform-volume.wgsl";
 import {geometricPlaneBoxWGSL} from "../../core/geometric-plane-box.wgsl";
-import {UNIFORM_MIXED_RELAYOUT_RECEIPT} from "./uniform-mixed-layout-builder";
+import {UNIFORM_MIXED_RELAYOUT_RECEIPT,uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 
 interface Fields{volume:GPUTexture;velocity:GPUTexture;phi:GPUTexture;negative:GPUBuffer}
 /** Workgroups of each remap launch (see applyGpu). */
@@ -41,6 +41,10 @@ export class UniformMixedRemap {
  private statusGroup:GPUBindGroup;
  /** Tiles in the lattice: the worklist's capacity. */
  private readonly tiles:number;
+ /** markListed's group 2: the worklist and a generation's changed tiles
+  * (UniformMixedGenerationBuffers.changes), bound per changes buffer. */
+ private readonly listResources:GPUBindGroupLayout;
+ private listGroup?:{readonly changes:GPUBuffer;readonly group:GPUBindGroup};
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,input:Fields,scratch:Fields){
   this.target=new UniformMixedOwnership(device,ownership.layout,false);
   this.worklist=device.createBuffer({label:"Uniform mixed remap worklist",size:(4+ownership.capacity.tiles)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
@@ -59,6 +63,9 @@ export class UniformMixedRemap {
    {binding:8,resource:{buffer:this.worklist}},
   ]});
   this.groups=[bind(input,scratch),bind(scratch,input)];
+  this.listResources=device.createBindGroupLayout({entries:[
+   {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+  ]});
   this.cellsResources=device.createBindGroupLayout({entries:[
    ...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write" as const,format:"r32float" as const,viewDimension:"3d" as const}})),
    {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
@@ -84,16 +91,16 @@ export class UniformMixedRemap {
    this.bind(remapped,{volume:input.volume,velocity:s.velocity,phi:input.phi,negative:s.negative})];
  }
  async initialize():Promise<void>{
-  const compile=async(part:"faces"|"cells",resources:GPUBindGroupLayout,entryPoints:readonly string[])=>{
+  const compile=async(part:"faces"|"cells",resources:GPUBindGroupLayout,entryPoints:readonly string[],name=(entry:string)=>entry)=>{
    const module=this.device.createShaderModule({code:uniformMixedRemapWGSL(this.ownership.layout,part)});
    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.target.bindLayout,resources,...(part==="faces"?[this.statusLayout]:[])]});
-   await Promise.all(entryPoints.map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));}));
+   await Promise.all(entryPoints.map(async entryPoint=>{this.pipelines.set(name(entryPoint),await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));}));
   };
-  await Promise.all([compile("faces",this.resources,["markChanged","remapFaces","copyFaces"]),compile("cells",this.cellsResources,["remapCells"])]);
+  await Promise.all([compile("faces",this.resources,["markChanged","remapFaces","copyFaces"]),compile("faces",this.listResources,["markListed"]),compile("cells",this.cellsResources,["remapCells"])]);
  }
  apply(layout:UniformMixedLayout):void{
-  if(this.pipelines.size!==4)throw new Error("Live remap has not been initialized");
+  if(this.pipelines.size!==5)throw new Error("Live remap has not been initialized");
   this.target.update(layout);
   const encode=(copy:boolean)=>{
    const e=this.device.createCommandEncoder({label:copy?"Uniform publish remapped owners":"Uniform remap changed ownership"});
@@ -113,40 +120,47 @@ export class UniformMixedRemap {
   * adopts the built words unremapped, and the host throws on its record.
   * With extension, the scratch velocity (the census extension) is remapped
   * too. The host does not know the changed count, so every launch is the
-  * fixed REMAP_GRID striding the GPU list. */
+  * fixed REMAP_GRID striding the GPU list. The worklist is built from the
+  * generation's dilated changed tiles (markListed), not a lattice scan. */
  applyGpu(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers,receipt:{readonly buffer:GPUBuffer;readonly offset:number},extension=false):void{
-  if(this.pipelines.size!==4)throw new Error("Live remap has not been initialized");
+  if(this.pipelines.size!==5)throw new Error("Live remap has not been initialized");
   if(extension&&!this.extensionGroups)throw new Error("Remap has no extension fields");
+  if(this.listGroup?.changes!==source.changes)this.listGroup={changes:source.changes,group:this.device.createBindGroup({layout:this.listResources,entries:[
+   {binding:8,resource:{buffer:this.worklist}},{binding:9,resource:{buffer:source.changes}}]})};
   this.target.adoptGpu(encoder,source);
-  this.encodePass(encoder,false,extension,Math.min(REMAP_GRID,this.tiles),{buffer:receipt.buffer,offset:receipt.offset+RECEIPT_FATAL*4});
+  this.encodePass(encoder,false,extension,Math.min(REMAP_GRID,this.tiles),{buffer:receipt.buffer,offset:receipt.offset+RECEIPT_FATAL*4},this.listGroup.group);
   this.ownership.adoptGpu(encoder,source);this.encodePass(encoder,true,extension);
  }
  /** fatal: the builder's fatal word and its build, copied into the worklist
-  * header (words 0-1); a host layout leaves them zero. */
- private encodePass(e:GPUCommandEncoder,copy:boolean,extension=false,grid=Math.min(REMAP_GRID,this.tiles),fatal?:{buffer:GPUBuffer;offset:number}):void{
+  * header (words 0-1); a host layout leaves them zero. listed: markListed's
+  * group (a GPU-built generation's changed tiles); without it the worklist
+  * scans the lattice (markChanged). Each call is one compute pass: every
+  * launch reads what the one before it wrote. */
+ private encodePass(e:GPUCommandEncoder,copy:boolean,extension=false,grid=Math.min(REMAP_GRID,this.tiles),fatal?:{buffer:GPUBuffer;offset:number},listed?:GPUBindGroup):void{
   const x=this.ownership.dispatchX,dispatch=(pass:GPUComputePassEncoder)=>pass.dispatchWorkgroups(Math.min(grid,x),Math.ceil(grid/x));
-  // The list compares the live (old) and target widths, so it is built
-  // before the live ownership adopts the target and reused by the publish.
-  const begin=(label:string)=>{
-   const pass=e.beginComputePass({label});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.target.bindGroup);pass.setBindGroup(2,this.groups[copy?1:0]);pass.setBindGroup(3,this.statusGroup);return pass;
-  };
   if(!copy){
    e.clearBuffer(this.worklist,0,16);
    if(fatal)e.copyBufferToBuffer(fatal.buffer,fatal.offset,this.worklist,0,8);
-   const list=begin("Uniform mixed remap worklist"),groups=Math.ceil(this.tiles/64);
-   list.setPipeline(this.pipelines.get("markChanged")!);list.dispatchWorkgroups(Math.min(groups,this.target.dispatchX),Math.ceil(groups/this.target.dispatchX));
-   list.end();
+  }
+  const pass=e.beginComputePass({label:copy?"Uniform mixed remap publish":"Uniform mixed remap"});
+  pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.target.bindGroup);pass.setBindGroup(3,this.statusGroup);
+  const faces=(group:GPUBindGroup,name:string)=>{pass.setBindGroup(2,group);pass.setPipeline(this.pipelines.get(name)!);dispatch(pass);};
+  // The list compares the live (old) and target widths, so it is built
+  // before the live ownership adopts the target and reused by the publish.
+  // Either launch is one lane per tile, the list's bound.
+  if(!copy){
+   const groups=Math.ceil(this.tiles/64);
+   pass.setBindGroup(2,listed??this.groups[0]);pass.setPipeline(this.pipelines.get(listed?"markListed":"markChanged")!);
+   pass.dispatchWorkgroups(Math.min(groups,this.target.dispatchX),Math.ceil(groups/this.target.dispatchX));
   }
   // The extension leaves the scratch velocity before the velocity remap
   // writes it, and returns after the velocity publish read it.
-  const faces=(label:string,group:GPUBindGroup,name:string)=>{const pass=begin(label);pass.setBindGroup(2,group);pass.setPipeline(this.pipelines.get(name)!);dispatch(pass);pass.end();};
-  if(extension&&!copy)faces("Uniform mixed remap extension",this.extensionGroups![0],"remapFaces");
+  if(extension&&!copy)faces(this.extensionGroups![0],"remapFaces");
   // Cells run in place before the faces, which read neither volume nor phi.
-  const pass=begin(copy?"Uniform mixed remap publish":"Uniform mixed remap");
-  if(!copy){pass.setBindGroup(2,this.cellsGroup);pass.setPipeline(this.pipelines.get("remapCells")!);dispatch(pass);pass.setBindGroup(2,this.groups[0]);}
-  pass.setPipeline(this.pipelines.get(copy?"copyFaces":"remapFaces")!);dispatch(pass);
+  if(!copy)faces(this.cellsGroup,"remapCells");
+  faces(this.groups[copy?1:0],copy?"copyFaces":"remapFaces");
+  if(extension&&copy)faces(this.extensionGroups![1],"copyFaces");
   pass.end();
-  if(extension&&copy)faces("Uniform mixed remap extension publish",this.extensionGroups![1],"copyFaces");
  }
  destroy():void{this.target.destroy();this.worklist.destroy();this.idleStatus.destroy();}
 }
@@ -411,6 +425,7 @@ function uniformMixedRemapWGSL(layout:UniformMixedLayout,part:"faces"|"cells"):s
 @group(2) @binding(5) var output:texture_storage_3d<rgba32float,write>;
 @group(2) @binding(7) var<storage,read_write> boundary:array<f32>;
 @group(2) @binding(8) var<storage,read_write> worklist:array<atomic<u32>>;
+${uniformMixedChangedTilesWGSL(layout.tiles.length,2,9)}
 ${uniformMixedFrameStatusWGSL(3,0,"read_write")}
 const REMAP_FATAL_HANGING:u32=${UNIFORM_MIXED_OVERFLOW_HANGING}u;
 // A tile is visited when any tile of its 3x3x3 neighbourhood changed width.
@@ -423,14 +438,29 @@ const REMAP_FATAL_HANGING:u32=${UNIFORM_MIXED_OVERFLOW_HANGING}u;
 // A GPU-built generation with a fatal receipt bit (header word 0, its build
 // in word 1) latches the frame failure once and lists nothing; so does a
 // frame that already failed: its fields stay as they were.
-@compute @workgroup_size(64) fn markChanged(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
+fn markBlocked(first:bool)->bool{
  let fatal=atomicLoad(&worklist[0]);
  if(fatal!=0u){
-  if(tile==0u){umLatchFailure(select(${UNIFORM_MIXED_FAILURE.layoutCapacity}u,${UNIFORM_MIXED_FAILURE.invalidSupport}u,(fatal&~REMAP_FATAL_HANGING)!=0u),fatal,atomicLoad(&worklist[1]));}
-  return;
+  if(first){umLatchFailure(select(${UNIFORM_MIXED_FAILURE.layoutCapacity}u,${UNIFORM_MIXED_FAILURE.invalidSupport}u,(fatal&~REMAP_FATAL_HANGING)!=0u),fatal,atomicLoad(&worklist[1]));}
+  return true;
  }
- if(umFrameFailed()){return;}
+ return umFrameFailed();
+}
+@compute @workgroup_size(64) fn markChanged(@builtin(global_invocation_id) gid:vec3u){
+ let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
+ if(markBlocked(tile==0u)){return;}
+ markTile(tile);
+}
+// The same list from a GPU-built generation's dilated changed tiles
+// (uniformMixedChangedTilesWGSL): a tile markTile lists has a width change in
+// its 3x3x3 neighbourhood, so it is in that list, and every entry runs the
+// same test. Lane 0 of the first group latches a fatal build.
+@compute @workgroup_size(64) fn markListed(@builtin(global_invocation_id) gid:vec3u){
+ let i=gid.x+umDispatchX*64u*gid.y;
+ if(markBlocked(i==0u)||i>=umDilatedCount()){return;}
+ markTile(umDilatedTile(i));
+}
+fn markTile(tile:u32){
  let fine=umTileWidth(tile)==1u&&oldumTileWidth(tile)==1u;
  let p=vec3i(umTileCoord(tile));
  for(var z=max(p.z-1,0);z<=min(p.z+1,i32(UM_T.z)-1);z++){for(var y=max(p.y-1,0);y<=min(p.y+1,i32(UM_T.y)-1);y++){for(var x=max(p.x-1,0);x<=min(p.x+1,i32(UM_T.x)-1);x++){
@@ -526,8 +556,12 @@ fn remapFaceTexel(entry:u32,local:vec3u)->bool{
  for(var a=0u;a<3u;a++){if(local[a]==3u&&(entry&(1u<<(27u+a)))!=0u){return true;}}
  return false;
 }
+// An entry with no width change of its own or of a +x/+y/+z neighbour
+// writes no texel and no wall (remapFaceTexel is false in every lane): its
+// job leaves at once (entry is workgroup-uniform).
+const LISTED_FACES:u32=0x80000000u|(7u<<27u);
 fn remapTileFaces(group:vec3u,lane:u32,remap:bool){
- let entry=listed(group,lane);if(entry==UM_UNLISTED){return;}
+ let entry=listed(group,lane);if(entry==UM_UNLISTED||(entry&LISTED_FACES)==0u){return;}
  let tile=entry&LISTED_TILE;let cellLane=lane%64u;let axis=lane/64u;
  let anchor=vec3i(umTileCoord(tile)*4u+umCorner(cellLane,4u));
  let texel=remapFaceTexel(entry,umCorner(cellLane,4u));
@@ -637,9 +671,13 @@ fn tileVertex(q:vec3u)->f32{return tileVertices[q.x+5u*(q.y+5u*q.z)];}
 // A listed tile whose own width did not change (a neighbour's did) keeps its
 // owners, so its cells are the identity; it may still take authority over a
 // shared vertex the old layout derived from a coarse neighbour's corners.
+// A listed 4h tile whose width did not change writes nothing: its cells are
+// the identity, and its only canonical vertices are its eight tile corners,
+// stored by every layout. Its job leaves at once (workgroup-uniform).
 fn remapTileCells(group:vec3u,lane:u32){
  let entry=listed(group,lane);if(entry==UM_UNLISTED){return;}
  let tile=entry&LISTED_TILE;let same=(entry&(1u<<31u))==0u;let refine=(entry&(1u<<30u))!=0u;
+ if(same&&umTileWidth(tile)==4u){return;}
  let base=umTileCoord(tile)*4u;let cell=base+umCorner(lane,4u);
  let o=umOwnerAt(vec3i(cell));
  var split=false;var donor:oldUMOwner;

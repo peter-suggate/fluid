@@ -16,6 +16,7 @@
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 import {sceneShapeWgsl} from "../../core/scene-shape";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
+import {uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 
 export interface UniformMixedSolidResources {
  params:GPUBuffer;scratch:GPUBuffer;terrain:GPUTexture;
@@ -64,7 +65,8 @@ export class UniformMixedSolid {
  private builtBodies?:GPUBuffer;
  /** The next build must visit every tile (first build, voxel edit). */
  private full=true;
- private simulation?:{pipeline:GPUComputePipeline;layout:GPUBindGroupLayout;group?:GPUBindGroup;topology?:GPUBuffer};
+ private simulation?:{pipeline:GPUComputePipeline;layout:GPUBindGroupLayout;group?:GPUBindGroup;topology?:GPUBuffer;
+  listed:GPUComputePipeline;listLayout:GPUBindGroupLayout;list?:{readonly topology:GPUBuffer;readonly changes:GPUBuffer;readonly group:GPUBindGroup}};
  private cutMap?:{pipeline:GPUComputePipeline;group:GPUBindGroup};
  private readonly scratch:GPUBuffer;private readonly cutMapOffsetWords:number;
  private built=false;
@@ -197,8 +199,20 @@ override umDispatchX:u32=65535u;
  let t=g.x+umDispatchX*64u*g.y;if(t>=UM_TILES){return;}
  record[UM_SOLID_COUNT+t].y=select(0.0,1.0,(topology[t]&0x80000000u)!=0u);
 }`});
-  const flagErrors=(await flagModule.getCompilationInfo()).messages.filter(m=>m.type==="error");if(flagErrors.length)throw new Error(flagErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+  // The adopted generation's changed tiles only: every other tile kept its width.
+  const listModule=this.device.createShaderModule({label:"Uniform mixed solid changed widths",code:/* wgsl */`
+const UM_TILES:u32=${layout.tiles.length}u;const UM_SOLID_COUNT:u32=${coarse.count}u;
+override umDispatchX:u32=65535u;
+@group(0) @binding(0) var<storage,read_write> record:array<vec4f>;
+@group(0) @binding(1) var<storage,read> topology:array<u32>;
+${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
+@compute @workgroup_size(64) fn widthsListed(@builtin(global_invocation_id) g:vec3u){
+ let i=g.x+umDispatchX*64u*g.y;if(i>=umChangedCount()){return;}
+ let t=umChangedTile(i);record[UM_SOLID_COUNT+t].y=select(0.0,1.0,(topology[t]&0x80000000u)!=0u);
+}`});
+  const flagErrors=[...(await flagModule.getCompilationInfo()).messages,...(await listModule.getCompilationInfo()).messages].filter(m=>m.type==="error");if(flagErrors.length)throw new Error(flagErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const flagLayout=this.device.createBindGroupLayout({label:"Uniform mixed solid simulation widths",entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
+  const listLayout=this.device.createBindGroupLayout({label:"Uniform mixed solid changed widths",entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
   const cutModule=this.device.createShaderModule({label:"Uniform mixed solid tile cut map",code:/* wgsl */`
 const UM_TILES:u32=${layout.tiles.length}u;const UM_SOLID_COUNT:u32=${coarse.count}u;
 override umDispatchX:u32=65535u;
@@ -213,7 +227,10 @@ override umDispatchX:u32=65535u;
   if(this.cutMapOffsetWords%64||this.scratch.size<4*(this.cutMapOffsetWords+layout.tiles.length))throw new Error("The solid scratch has no room for the tile cut map");
   this.cutMap={pipeline:await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[cutLayout]}),compute:{module:cutModule,entryPoint:"pack",constants:{umDispatchX:dispatchX}}}),
    group:this.device.createBindGroup({layout:cutLayout,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:{buffer:this.scratch,offset:4*this.cutMapOffsetWords,size:4*layout.tiles.length}}]})};
-  this.simulation={layout:flagLayout,pipeline:await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[flagLayout]}),compute:{module:flagModule,entryPoint:"widths",constants:{umDispatchX:dispatchX}}})};
+  const [widths,listed]=await Promise.all([
+   this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[flagLayout]}),compute:{module:flagModule,entryPoint:"widths",constants:{umDispatchX:dispatchX}}}),
+   this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[listLayout]}),compute:{module:listModule,entryPoint:"widthsListed",constants:{umDispatchX:dispatchX}}})]);
+  this.simulation={layout:flagLayout,pipeline:widths,listLayout,listed};
  }
  /** Builds the all-4h record from the solids the native host has published
   * (its parameter block, voxel mask and body mirror): once, in full again
@@ -235,14 +252,23 @@ override umDispatchX:u32=65535u;
  invalidate(bodiesOnly=false):void{this.built=false;if(!bodiesOnly)this.full=true;}
  /** Records which tiles the simulation holds at h (the record's y), from
   * its tile words. Encode after encodeCoarse and after every relayout,
-  * before the all-4h levels read umSolidCut. */
- encodeSimulation(encoder:GPUCommandEncoder,topology:GPUBufferBinding):void{
+  * before the all-4h levels read umSolidCut. changes: the changed tiles
+  * (UniformMixedGenerationBuffers.changes) of the generation just adopted,
+  * when y still records the ownership it replaced (no record build since the
+  * last encode): only those tiles' y can differ, so only they are written. */
+ encodeSimulation(encoder:GPUCommandEncoder,topology:GPUBufferBinding,changes?:GPUBuffer):void{
   const layout=this.coarseLayout,coarse=this.coarse,s=this.simulation;if(!layout||!coarse)return;
   if(!s)throw new Error("The coarse solid record is not initialized");
-  if(s.topology!==topology.buffer){s.topology=topology.buffer;s.group=this.device.createBindGroup({layout:s.layout,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:topology}]});}
   const groups=Math.ceil(layout.tiles.length/64),x=Math.min(groups,this.device.limits.maxComputeWorkgroupsPerDimension);
   const pass=encoder.beginComputePass({label:"Uniform mixed solid simulation widths"});
-  pass.setPipeline(s.pipeline);pass.setBindGroup(0,s.group!);pass.dispatchWorkgroups(x,Math.ceil(groups/x));pass.end();
+  if(changes){
+   if(s.list?.topology!==topology.buffer||s.list.changes!==changes)s.list={topology:topology.buffer,changes,group:this.device.createBindGroup({layout:s.listLayout,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:topology},{binding:2,resource:{buffer:changes}}]})};
+   pass.setPipeline(s.listed);pass.setBindGroup(0,s.list.group);
+  }else{
+   if(s.topology!==topology.buffer){s.topology=topology.buffer;s.group=this.device.createBindGroup({layout:s.layout,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:topology}]});}
+   pass.setPipeline(s.pipeline);pass.setBindGroup(0,s.group!);
+  }
+  pass.dispatchWorkgroups(x,Math.ceil(groups/x));pass.end();
  }
  destroy():void{this.coarse?.record.destroy();this.bodies.destroy();this.builtBodies?.destroy();}
 }

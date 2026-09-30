@@ -64,7 +64,7 @@ test("production editor plugins, worker acceptance and controller history preser
       accept: (next, current) => renderer.acceptLiveSolidEdit(next, current),
     });
     const session = simulation.session();
-    session.method.getState().setMethodId("adaptive-volume");
+    session.method.getState().setMethodId("uniform-volume");
     session.scene.getState().setScene(initial, "production-native");
     session.history.getState().clear(); session.ui.setState({ voxelStrokePending: false });
     let advanceDuringAcceptance = false;

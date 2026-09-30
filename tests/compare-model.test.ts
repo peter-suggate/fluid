@@ -68,7 +68,7 @@ function panes() {
 /** A registered method that is not the one a fresh pane opens on. */
 function otherMethodId(session: PaneSession): string {
   const current = session.method.getState().methodId;
-  const other = current === "uniform" ? "losasso" : "uniform";
+  const other = current === "uniform" ? "uniform-volume" : "uniform";
   return other;
 }
 
@@ -459,7 +459,7 @@ test("a starter scene is not URL-representable, in either pane", () => {
 test("the diff round-trips through the address as b.* keys", () => {
   const state: CompareState = {
     active: true,
-    diff: { method: "uniform", gridMode: COMPARE_ABSENT },
+    diff: { method: "uniform-volume", gridMode: COMPARE_ABSENT },
     links: { ...INITIAL_COMPARE_STATE.links, view: true, cut: false, instrument: true, look: false },
     focusedPane: "b",
   };

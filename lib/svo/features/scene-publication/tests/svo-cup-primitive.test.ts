@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../../../../harness/webgpu-smoke-isolation";
 
 import { cupDistance_m, cupWallThickness_m } from "../../../../core/scene-shape";
 import type { Vec3 } from "../../../../core/model";
@@ -147,14 +148,17 @@ test("the live voxelizer knows a cup's wall is its finest feature", () => {
 
 test("the WGSL cup agrees with the TypeScript cup on a device", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for cup ABI parity on a device",
-}, async () => {
+}, async t => {
+  await acquireWebGPUExclusiveLock("dawn-test", t.name);
+  let leasedDevice: GPUDevice | undefined;
+  t.after(async () => { leasedDevice?.destroy(); await releaseWebGPUExclusiveLock(); });
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
     create(options: string[]): GPU; globals: Record<string, unknown>;
   };
   Object.assign(globalThis, dawn.globals);
   const gpu = dawn.create(["backend=metal"]);
   const adapter = await gpu.requestAdapter(); assert.ok(adapter);
-  const device = await adapter.requestDevice();
+  const device = leasedDevice = await adapter.requestDevice();
 
   const points = samplePoints();
   const record = packSvoPrimitiveRecords([CUP]);

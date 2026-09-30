@@ -8,6 +8,31 @@ const RECEIPT=16;
  * tiles, regular 4h tiles. The simulation layout is ungraded h/4h. */
 const CATEGORIES=5;
 
+/** Word layout of a GPU-built generation's changed tiles in the builder's
+ * work buffer (UniformMixedGenerationBuffers.changes) for `tiles` tiles.
+ * changed: tiles whose width differs from the ownership the generation was
+ * built against (count word, then the list); dilated: every tile within
+ * Chebyshev tile distance one of a changed tile, each once (the union of
+ * their 3x3x3 neighbourhoods). Both lists are unordered and bounded by the
+ * tile count; the counts are complete once the builder's encode has run. */
+export function uniformMixedChangedTilesWords(tiles:number){
+ const changedList=RECEIPT+tiles+CATEGORIES*Math.ceil(tiles/BLOCK);
+ return {changedCount:0,dilatedCount:5,changedList,dilatedList:changedList+tiles,words:changedList+2*tiles} as const;
+}
+/** Read-only access to the changed-tile lists (uniformMixedChangedTilesWords)
+ * at @group(group) @binding(binding): umChangedCount/umChangedTile and
+ * umDilatedCount/umDilatedTile. */
+export function uniformMixedChangedTilesWGSL(tiles:number,group:number,binding:number):string{
+ const w=uniformMixedChangedTilesWords(tiles);
+ return /* wgsl */`
+@group(${group}) @binding(${binding}) var<storage,read> umChanges:array<u32>;
+fn umChangedCount()->u32{return umChanges[${w.changedCount}u];}
+fn umChangedTile(i:u32)->u32{return umChanges[${w.changedList}u+i];}
+fn umDilatedCount()->u32{return umChanges[${w.dilatedCount}u];}
+fn umDilatedTile(i:u32)->u32{return umChanges[${w.dilatedList}u+i];}
+`;
+}
+
 /** Where the fine band lives: one bit per tile from `wordOffset` words into
  * `buffer`. headerWords: words [0, headerWords) of `buffer` are the
  * producer's receipt header (the census's), carried into the builder receipt. */
@@ -86,7 +111,7 @@ export class UniformMixedLayoutBuilder {
  get receipt():{readonly buffer:GPUBuffer;readonly offset:number;readonly words:number}{return {buffer:this.level.status,offset:0,words:UNIFORM_MIXED_RELAYOUT_RECEIPT.words};}
  /** The built generation's buffers, complete once encode has run: what
   * UniformMixedOwnership.adoptGpu copies, with no host mirror. */
- get generation():UniformMixedGenerationBuffers{const l=this.level;return {topology:l.topology,support:l.support,slots:l.slots,counts:{buffer:l.work,offset:48}};}
+ get generation():UniformMixedGenerationBuffers{const l=this.level;return {topology:l.topology,support:l.support,slots:l.slots,counts:{buffer:l.work,offset:48},changes:l.work};}
  /** ownership: the simulation ownership the built generation replaces. */
  constructor(private readonly device:GPUDevice,band:UniformMixedBandBits,ownership:UniformMixedOwnership){
   const n=ownership.capacity.tiles;
@@ -110,7 +135,7 @@ export class UniformMixedLayoutBuilder {
   const topology=storage("Uniform layout builder topology",4*n);
   const support=storage("Uniform layout builder support",9*n+24);
   const slots=storage("Uniform layout builder slots",2*n);
-  const work=storage("Uniform layout builder work",RECEIPT+n+CATEGORIES*this.blocks);
+  const work=storage("Uniform layout builder work",uniformMixedChangedTilesWords(n).words);
   const params=device.createBuffer({label:"Uniform layout builder params",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   // Hanging capacity: the ownership's preallocated tap cache.
   // Residency audit word, or none.
@@ -130,7 +155,7 @@ export class UniformMixedLayoutBuilder {
  async initialize():Promise<void>{
   const lattice=this.level.current.capacity.lattice,n=this.tiles,x=this.level.current.dispatchX;
   const T=lattice.dimensions.map(d=>d/4);
-  const flags=RECEIPT,totals=RECEIPT+n;
+  const flags=RECEIPT,totals=RECEIPT+n,lists=uniformMixedChangedTilesWords(n);
   const R=UNIFORM_MIXED_RELAYOUT_RECEIPT,F=UNIFORM_MIXED_RELAYOUT_FATAL;
   const module=this.device.createShaderModule({label:"Uniform mixed layout builder",code:/* wgsl */`
 @group(0) @binding(0) var<storage,read> band:array<u32>;
@@ -150,6 +175,7 @@ const FATAL_TIER_SUM:u32=${F.tierSum}u;const FATAL_TILE_WORDS:u32=${F.tileWords}
 const N:u32=${n}u;const T=vec3u(${T.map(v=>`${v}u`).join(",")});const X:u32=${x}u;
 const BLOCKS:u32=${this.blocks}u;const INF:u32=0xffffffffu;
 const FLAGS:u32=${flags}u;const TOTALS:u32=${totals}u;
+const CHANGED:u32=${lists.changedList}u;const DILATED:u32=${lists.dilatedList}u;const DILATED_COUNT:u32=${lists.dilatedCount}u;
 fn coord(t:u32)->vec3u{return vec3u(t%T.x,(t/T.x)%T.y,t/(T.x*T.y));}
 fn key(p:vec3u)->u32{return p.x+T.x*(p.y+T.y*p.z);}
 fn inside(q:vec3i)->bool{return all(q>=vec3i(0))&&all(q<vec3i(T));}
@@ -162,7 +188,19 @@ fn widthAt(t:u32)->u32{return atomicLoad(&work[FLAGS+t])&7u;}
  let t=gid.x;if(t>=N){return;}
  let w=select(4u,1u,fineAt(t));
  atomicStore(&work[FLAGS+t],w);
- if(w!=wordWidth(current[t])){atomicAdd(&work[0],1u);}
+ if(w!=wordWidth(current[t])){atomicStore(&work[CHANGED+atomicAdd(&work[0],1u)],t);}
+}
+// The dilated list: each changed tile's 3x3x3 neighbourhood, deduplicated by
+// flag bit 16 (classify rewrote the flags; widths clears them next build;
+// every later reader masks the width and regular bits).
+@compute @workgroup_size(64) fn dilate(@builtin(global_invocation_id) gid:vec3u){
+ let i=gid.x;if(i>=atomicLoad(&work[0])){return;}
+ let p=vec3i(coord(atomicLoad(&work[CHANGED+i])));
+ for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
+  let q=p+vec3i(x,y,z);if(!inside(q)){continue;}
+  let s=key(vec3u(q));
+  if((atomicOr(&work[FLAGS+s],16u)&16u)==0u){atomicStore(&work[DILATED+atomicAdd(&work[DILATED_COUNT],1u)],s);}
+ }}}
 }
 var<workgroup> blockTotals:array<atomic<u32>,${CATEGORIES}>;
 fn categories(w:u32,regular:bool)->array<u32,${CATEGORIES}>{
@@ -216,7 +254,7 @@ fn scanPartial(lane:u32){
  if(lane==0u){
   let f=grand[0];let c=grand[1];
   // Receipt: [0] changed tiles, [1] h tiles, [2] 4h tiles, [3] seam h,
-  // [4] seam 4h; [5,12) stay cleared.
+  // [4] seam 4h, [5] dilated tiles (dilate); [6,12) stay cleared.
   atomicStore(&work[1],f);atomicStore(&work[2],c);atomicStore(&work[3],grand[2]);atomicStore(&work[4],grand[3]);
   // umCounts (h, 4h, 0, loop bound), then the frame-plan header (update(): header[2], [8..10], [12..14]).
   atomicStore(&work[12],f);atomicStore(&work[13],c);atomicStore(&work[14],0u);atomicStore(&work[15],8u);
@@ -288,7 +326,7 @@ fn scanPartial(lane:u32){
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.resources]});
-  await Promise.all(["widths","classify","scan","scatter","verifyWords","sealBuild"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint}}));}));
+  await Promise.all(["widths","classify","dilate","scan","scatter","verifyWords","sealBuild"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint}}));}));
  }
  /** Static fine tiles (fine-only regions), one byte per tile, and the
   * snapped regions the built layouts report. coarse: tiles a coarse-only
@@ -316,14 +354,14 @@ fn scanPartial(lane:u32){
   * tile words for read() (the host mirror); without it nothing is read
   * back, and the receipt (receipt) is the GPU's to consume. */
  encode(encoder:GPUCommandEncoder,readback=true):void{
-  if(this.pipelines.size!==6)throw new Error("Mixed layout builder is not initialized");
+  if(this.pipelines.size!==7)throw new Error("Mixed layout builder is not initialized");
   if(!this.staticReady)throw new Error("Mixed layout builder has no static fine mask");
   const n=this.tiles,groups64=Math.ceil(n/64);
   const level=this.level;
   encoder.clearBuffer(level.work,0,RECEIPT*4);
   if(this.header)encoder.copyBufferToBuffer(this.header.buffer,0,level.status,UNIFORM_MIXED_RELAYOUT_RECEIPT.census*4,this.header.words*4);
   const pass=encoder.beginComputePass({label:"Uniform mixed layout build"});pass.setBindGroup(0,level.group);
-  for(const [entry,groups] of [["widths",groups64],["classify",this.blocks],["scan",1],["scatter",this.blocks],["verifyWords",groups64],["sealBuild",1]] as const){
+  for(const [entry,groups] of [["widths",groups64],["classify",this.blocks],["dilate",groups64],["scan",1],["scatter",this.blocks],["verifyWords",groups64],["sealBuild",1]] as const){
    pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(groups);
   }
   pass.end();

@@ -103,8 +103,10 @@ export interface UniformMixedBuiltOwnership{
   readonly source:UniformMixedGenerationBuffers;
 }
 /** The GPU buffers of one built generation (UniformMixedLayoutBuilder.
- * generation): topology, support, hanging slot table and the 16-byte counts. */
-export interface UniformMixedGenerationBuffers{readonly topology:GPUBuffer;readonly support:GPUBuffer;readonly slots:GPUBuffer;readonly counts:{readonly buffer:GPUBuffer;readonly offset:number}}
+ * generation): topology, support, hanging slot table and the 16-byte counts.
+ * changes: the tiles whose width the build changed and their dilation
+ * (uniformMixedChangedTilesWords), what the relayout head's stages visit. */
+export interface UniformMixedGenerationBuffers{readonly topology:GPUBuffer;readonly support:GPUBuffer;readonly slots:GPUBuffer;readonly counts:{readonly buffer:GPUBuffer;readonly offset:number};readonly changes:GPUBuffer}
 
 /** Shared owner/worklist ABI for transport, face operations and pressure.
  * Two fixed-size buffers support live region edits without pipeline rebuilds.
@@ -204,7 +206,12 @@ export class UniformMixedOwnership {
     if(this.sampled)this.device.queue.writeBuffer(this.hanging!,0,derived.slots);
     this.currentLayout=layout;
     this.mirrorCurrent=true;
+    this.revision++;
   }
+  /** Bumped by every generation this ownership takes (update, adopt,
+   * adoptGpu): a stage that patches what changed since its last encode
+   * checks that exactly one adoption intervened. */
+  revision=0;
 
   /** Every page resident again (between frames): a frame with no census
    * that frame must not skip a page an earlier census certified. */
@@ -227,6 +234,7 @@ export class UniformMixedOwnership {
     if(n!==this.capacity.tiles)throw new Error("A built generation must match the ownership's capacity");
     this.reserveHanging(built.hangingSlots);
     this.copyGeneration(encoder,built.source);
+    this.revision++;
     // A host-adopted generation's later frames run without a census audit.
     this.resetResidency();
     this.seamCounts=[...built.seamCounts];
@@ -238,9 +246,16 @@ export class UniformMixedOwnership {
    * the copies are ordered inside that frame's encoder, ahead of every pass
    * that reads the ownership). The host mirror (membership, seamCounts,
    * hangingSlots) is left behind: only capacity and GPU-counted launches
-   * stay valid. A hanging overflow is latched by the builder, not here. */
+   * stay valid. A hanging overflow is latched by the builder, not here.
+   * Support words [0, 5n+16) are not copied: the support planes [0, 4n)
+   * (the builder's constant 3), the certificate header [4n, 4n+16) and the
+   * unused list-0 slot [4n+16, 5n+16). No stage reads them on a remap
+   * target, and the frame that adopts rebuilds the header and planes
+   * (UniformMixedFramePlan.encode clears [0, n) and the header, seeds, and
+   * dilates [n, 4n) over every tile) before any reader. */
   adoptGpu(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers):void{
-    this.copyGeneration(encoder,source);
+    this.copyGeneration(encoder,source,false);
+    this.revision++;
     this.mirrorCurrent=false;
   }
   /** False once a GPU generation was adopted without a host mirror. */
@@ -252,11 +267,12 @@ export class UniformMixedOwnership {
     if(!this.mirrorCurrent)throw new Error("A GPU-adopted ownership has no host mirror: use a GPU-counted launch");
     return this.currentLayout;
   }
-  private copyGeneration(encoder:GPUCommandEncoder,s:UniformMixedGenerationBuffers):void{
+  /** planned: also the frame plan's words [0, 5n+16) (see adoptGpu). */
+  private copyGeneration(encoder:GPUCommandEncoder,s:UniformMixedGenerationBuffers,planned=true):void{
     const n=this.capacity.tiles;
     encoder.copyBufferToBuffer(s.topology,0,this.topology,0,this.topology.size);
     encoder.copyBufferToBuffer(s.counts.buffer,s.counts.offset,this.counts,0,16);
-    encoder.copyBufferToBuffer(s.support,0,this.support,0,(5*n+16)*4);
+    if(planned)encoder.copyBufferToBuffer(s.support,0,this.support,0,(5*n+16)*4);
     encoder.copyBufferToBuffer(s.support,(6*n+16)*4,this.support,(6*n+16)*4,(3*n+8)*4);
     if(this.sampled)encoder.copyBufferToBuffer(s.slots,0,this.hanging!,0,2*n*4);
   }

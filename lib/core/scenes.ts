@@ -2,6 +2,7 @@ import { cloneScene, defaultCamera, defaultScene, type CameraState, type SceneDe
 import { applyHeroGardenNodeOverrides } from "./hero-garden-overrides";
 import { createMassConservingFigure9DamBreak, createPaperScenario } from "./paper-scenarios";
 import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12MethodProfile, cm12Scene, createCm12Figure7_256 } from "./cm12-paper-scenes";
+import { createThinDropletLadderScene, createThinSheetLadderScene, createThinWallFilmScene } from "./thin-liquid-scenes";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
 import {
   createHeroGardenHoseScene,
@@ -2481,6 +2482,21 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: createCm12Figure7_256,
     camera: cm12Camera(createCm12Figure7_256()),
   }),
+  // Thin-liquid ladders (lib/core/thin-liquid-scenes.ts): splash-sized bodies
+  // in free fall, one size per bin, for Uniform Geometric's thin-feature loss.
+  ...([
+    ["thin-droplet-ladder", "Thin liquid · droplet ladder", "Six drops of radius 1 to 4 cells fall together into a 6-cell pool. Until impact each should keep its shape and fall as y0 − gt²/2; lost level set before impact is numerical.", createThinDropletLadderScene],
+    ["thin-sheet-ladder", "Thin liquid · falling sheets", "Horizontal sheets 0.5 to 3 cells thick fall face-down into a 6-cell pool, resampled across vertex planes every step like a Figure 9 crown sheet. Exact: rigid free fall until impact.", createThinSheetLadderScene],
+    ["thin-wall-films", "Thin liquid · wall films", "Vertical films 0.5 to 3 cells thick slide down the free-slip −x wall beside free-standing twins. Both should fall unchanged; any difference between the twins is the wall treatment's.", createThinWallFilmScene],
+  ] as const).map(([id, name, blurb, build]) => defineScene({
+    id, name, blurb,
+    audience: "validation",
+    shelf: "Thin liquid",
+    environment: "stage",
+    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: {} },
+    build,
+    camera: cm12Camera(build()),
+  })),
   defineScene({
     id: "deep-water-ab",
     name: "Deep-water A/B",

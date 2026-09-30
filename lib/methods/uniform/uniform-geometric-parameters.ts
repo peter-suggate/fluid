@@ -70,6 +70,14 @@ export const UNIFORM_GEOMETRIC_SPLASH_HINTS = Object.freeze({
     "Scope and cost: a 64-cell read, only for band vertices below h/2. Off also stops that retirement, which keeps far-air tiles fine after a splash.",
     "Off: ghost phi stays until the total-volume shift or a merge absorbs it.",
   ].join("\n\n"),
+  phiPreserveSurface: [
+    "Stops redistancing from moving the surface, so drops and thin sheets keep their level set instead of shrinking a little every step. Experimental: off by default.",
+    "Why: after advection, redistancing rebuilds every band vertex as the distance to the trilinear zero set. For a convex body -- a drop, a sheet rim -- that zero set lies inside the true surface, so each rebuild moves the surface inward, at rest and in flight. Large pools do not notice; a drop of radius 2 cells loses about half its phi volume in half a second of free fall while its V is untouched, and the difference becomes invisible water.",
+    "How: CM11b sec. 3.4 -- do not modify phi next to the surface. An h vertex with a face neighbour of the opposite sign keeps its advected value; every other band vertex is redistanced as before. 4h vertices keep the native rule.",
+    "Measured (thin-liquid ladders, free fall at 0.5 s, phi volume as a share of V): drop r = 2 cells 46% → 91%, r = 3 73% → 97%; sheets 3-4 cells thick about 80% → 90%; free and wall films 2-4 cells thick 93% → 97%. One-cell sheets and r = 1 drops are below what the vertex lattice can hold and are not rescued.",
+    "Watch for: surface noise on large calm pools, which the skipped rebuild no longer smooths. It removes work (no Newton search on those vertices).",
+    "Off: every band vertex is redistanced.",
+  ].join("\n\n"),
 });
 params.push(
   {kind:"select",key:"phiCubicAdvection",label:"Cubic phi advection",default:"on",tier:"fine",update:"runtime",
@@ -78,6 +86,9 @@ params.push(
   {kind:"select",key:"phiDrain",label:"Drain ghost phi",default:"on",tier:"fine",update:"runtime",
     options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
     hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiDrain},
+  {kind:"select",key:"phiPreserveSurface",label:"Preserve surface vertices",default:"off",tier:"fine",update:"runtime",
+    options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+    hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiPreserveSurface},
 );
 
 params.push({kind:"select",key:"totalSurfaceVolume",label:"Total surface volume",default:"on",tier:"coarse",update:"runtime",
@@ -98,7 +109,7 @@ params.push({kind:"number",key:"coarseningBoundaryTravel",label:"Boundary impact
 /** Shared by the studio and scene harnesses. */
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);
 /** Controls the 2D native port does not carry: GPU mixed-ownership scheduling and presentation. */
-const gpuOnlyKeys = new Set(["orphanDustThreshold", "coarsening", "sharpeningDistance", "sharpeningSweeps", "surfaceVolumeRounds"]);
+const gpuOnlyKeys = new Set(["orphanDustThreshold", "coarsening", "sharpeningDistance", "sharpeningSweeps", "surfaceVolumeRounds", "phiPreserveSurface"]);
 export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => !gpuOnlyKeys.has(p.key) && !p.key.startsWith("coarsening")));
 export const UNIFORM_GEOMETRIC_DEFAULTS: Readonly<MethodParamValues> = Object.freeze(
   Object.fromEntries(params.map(p => [p.key, p.default])),

@@ -4,6 +4,10 @@ import { UNIFORM_MIXED_FAILURE as FAIL, uniformMixedFrameStatusWGSL } from "./un
 /** Frames a skipped V phase stays skipped before V-cycles are probed again. */
 const UNIFORM_MIXED_SCHEDULE_V_PROBE=8;
 
+/** Accepted frames whose largest cycle count the plan covers (at most 4:
+ * control word 11 packs the previous three). */
+const UNIFORM_MIXED_SCHEDULE_NEED_WINDOW=4;
+
 /** One frame's encoded slot list: V-cycles, then Full-Cycles. */
 export interface UniformMixedPressurePlan {readonly vCycles:number;readonly fullCycles:number}
 
@@ -26,15 +30,21 @@ export interface UniformMixedPressurePlan {readonly vCycles:number;readonly full
  * acceptance, the status's last accepted frame. It reopens the native
  * hierarchy, and an accepted solve leaves every word open.
  * The last gate plans the next frame from the cycles this one ran, plus one
- * spare: a stalled V phase is dropped (re-probed every
+ * spare, and never below the largest count of the last
+ * UNIFORM_MIXED_SCHEDULE_NEED_WINDOW accepted frames plus the spare: a
+ * stalled V phase is dropped (re-probed every
  * UNIFORM_MIXED_SCHEDULE_V_PROBE frames), and the coarse accuracy a stall
  * forced is kept, relaxing one step after a stall-free solve.
  *
  * Control words: 0 gate step, 1 next slot, 2 coarse accuracy, 3 previous
  * residual, 4 cycles run, 5 current slot enabled, 6 V phase stalled, 7 any
- * stall, 9 planned accuracy, 10 V skip streak, 12-13 this frame's V/Full
+ * stall, 9 planned accuracy, 10 V skip streak, 11 the previous three accepted
+ * frames' cycles (8 bits each), 12-13 this frame's V/Full
  * slots (host), 14-15 the next frame's (planner), 16-17 V/Full cycles run.
- * Words 9-10 and 14-15 persist. The gate writes the cycle count into
+ * Diagnostics (read by FLUID_MIXED_PRESSURE_TRACE only): 8 initial residual,
+ * 18-24 each run slot's candidate residual, 25 each open slot's coarse
+ * accuracy (2 bits: 0 is 1, 1 is 0.1, 2 is 0).
+ * Words 9-11 and 14-15 persist. The gate writes the cycle count into
  * acceptance word 7. */
 export class UniformMixedPressureSchedule {
  /** The schedule's cap per kind; plans never exceed it. */
@@ -79,6 +89,17 @@ fn umPlan(){
  if(control[6]!=0u){v=0u;f=min(FMAX,fRan+1u);}
  else if(V==0u){streak=control[10]+1u;if(streak>=${UNIFORM_MIXED_SCHEDULE_V_PROBE}u){v=1u;streak=0u;}}
  if(v+f==0u){v=min(VMAX,1u);f=select(0u,1u,v==0u);}
+ // Never fewer slots than the last UNIFORM_MIXED_SCHEDULE_NEED_WINDOW
+ // accepted frames' largest cycle count plus the spare: the plan is lagged
+ // two frames, and after an impact a frame's need swings between one and
+ // three cycles from frame to frame (dam 128^3 at 1/60).
+ let ran=vRan+fRan;let seen=control[11];
+ var need=ran;for(var k=0u;k<${UNIFORM_MIXED_SCHEDULE_NEED_WINDOW-1}u;k++){need=max(need,(seen>>(8u*k))&0xffu);}
+ control[11]=((seen<<8u)|ran)&${`0x${(2**(8*(UNIFORM_MIXED_SCHEDULE_NEED_WINDOW-1))-1).toString(16)}u`};
+ var add=select(0u,need+1u-(v+f),need+1u>v+f);
+ if(f==0u){let dv=min(add,VMAX-v);v+=dv;add-=dv;}
+ let df=min(add,FMAX-f);f+=df;add-=df;
+ if(control[6]==0u){v=min(VMAX,v+add);}
  control[14]=v;control[15]=f;control[10]=streak;
  let a=umF(2);
  control[9]=bitcast<u32>(select(select(select(0.1,1.0,a!=0.0),a,a==1.0),a,control[7]!=0u));
@@ -88,13 +109,14 @@ fn umPlan(){
   let V=control[12];let F=control[13];let SLOTS=V+F;
   if(step==0u){
    control[1]=0u;control[2]=control[9];control[3]=state[2];control[4]=0u;control[6]=0u;control[7]=0u;control[16]=0u;control[17]=0u;
+   control[8]=state[2];control[25]=0u;for(var i=18u;i<25u;i++){control[i]=0u;}
   }else if(control[5]!=0u){
    // The slot just gated ran; its checkpoint wrote the accepted residual.
    let residual=bitcast<f32>(state[1]);
    let stalled=(state[1]&0x7f800000u)==0x7f800000u||residual>umF(3)*0.5;
    var next=step;
    if(stalled&&next<V&&F>0u){next=V;control[6]=1u;}
-   control[1]=next;control[3]=state[1];control[4]+=1u;control[select(17u,16u,step-1u<V)]+=1u;
+   control[1]=next;control[3]=state[1];control[4]+=1u;control[select(17u,16u,step-1u<V)]+=1u;control[17u+step]=state[0];
    if(stalled){control[7]=1u;control[2]=bitcast<u32>(select(0.0,0.1,umF(2)==1.0));}
   }
   var open=!umFrameFailed()&&state[5]==0u&&state[4]==0u&&control[1]==step;
@@ -115,6 +137,7 @@ fn umPlan(){
   control[5]=u32(open);
   // setCoarseAccuracy's words, for the native 4h continuation.
   let a=umF(2);tolerance[2]=0.1*a;tolerance[3]=tolerance[0]*0.1*a;
+  if(open&&step<SLOTS){control[25]|=select(select(2u,1u,a!=0.0),0u,a==1.0)<<(2u*step);}
   // The slot gate words (0 open). The projection launches on the root
   // alone, so its gate reopens the native hierarchy.
   let closed=u32(!open);let cycle=step<SLOTS;
@@ -140,6 +163,8 @@ fn umPlan(){
  encodePlanCopy(encoder:GPUCommandEncoder,destination:GPUBuffer,offset:number):void{
   encoder.copyBufferToBuffer(this.control,56,destination,offset,8);
  }
+ /** Diagnostics: copy the 32 control words (FLUID_MIXED_PRESSURE_TRACE). */
+ encodeTraceCopy(encoder:GPUCommandEncoder,destination:GPUBuffer,offset:number):void{encoder.copyBufferToBuffer(this.control,0,destination,offset,128);}
  /** Encode gate `slot` (the projection is slot `slots`). The slot's kernels
   * that follow read its gate word themselves; clears and copies encoded
   * inside a slot run whether or not it is open (only per-cycle scratch). */
