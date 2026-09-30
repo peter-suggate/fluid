@@ -20,7 +20,7 @@ const RECEIPT_FRAMES = 3;
 const PRESENTATION_FRAMES = 2;
 
 /**
- * A split-submission solver, as `WebGPUAdaptiveMassSolver` behaves.
+ * A split-submission solver, exercising the shared receipt contract.
  *
  * One advance per call and never more: the paper step is pinned, so a target
  * clock that owes three steps still buys one. The state of that advance is
@@ -142,7 +142,7 @@ test("holding the presentation for the advance it just made shows every second s
     "and publishes the host clock in two-step jumps");
 });
 
-// Unlike the sparse solver above, adaptive pressure has not submitted its
+// Unlike the immediate-publication fixture above, Uniform pressure has not submitted its
 // publication on return from advanceTo. A completed step must be shown before
 // another advance can make its fields mutable again.
 test("deferred pressure publication presents every completed step without starvation", () => {
@@ -171,7 +171,7 @@ function deferredPresentationFixture() {
   let draws = 0;
   const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
     gpuFluid: solver, gpuFluidGeneration: 1, deferredPresentedTimes: new WeakMap(),
-    draw: () => ({ context: "test", methodId: "uniform-geometric", presentationSubmitted: ++draws > 1 }),
+    draw: () => ({ context: "test", methodId: "uniform-volume", presentationSubmitted: ++draws > 1 }),
   }) as FluidLabRenderer;
   return {
     renderer, solver, draws: () => draws,

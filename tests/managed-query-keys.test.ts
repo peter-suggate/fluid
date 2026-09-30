@@ -86,7 +86,7 @@ function maximalKeys(): readonly string[] {
     view: "library",
     compare: {
       active: true,
-      diff: { method: "uniform", gridMode: "phi", "scene.container.width_m": "2" },
+      diff: { method: "uniform-volume", gridMode: "phi", "scene.container.width_m": "2" },
       links: { view: true, cut: false, instrument: true, look: false, topology: true, regions: true },
       focusedPane: "a",
     },

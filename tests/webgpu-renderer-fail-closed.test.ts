@@ -14,7 +14,7 @@ test("a runtime failure is terminal, preserves its first cause, and cannot resta
   renderer.resetSimulationTimeline();
   await assert.rejects(renderer.initialize(), /Invalid bind group in pressure solve/);
   const metrics = renderer.draw(1 / 30, defaultScene, defaultCamera, [], undefined,
-    { methodId: "uniform", quality: "balanced", values: {} });
+    { methodId: "uniform-volume", quality: "balanced", values: {} });
   assert.equal(metrics.presentationSubmitted, false);
   assert.deepEqual(statuses.map(({ state, label }) => ({ state, label })), [
     { state: "unavailable", label: "Invalid bind group in pressure solve" },

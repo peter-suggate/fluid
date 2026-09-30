@@ -1,30 +1,36 @@
 import "../lib/methods";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createMethodStore } from "../lib/core/stores/method-store";
+import { createMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
 
-test("invalid surface selection leaves the entire method store unchanged", () => {
+test("a forbidden pressure override leaves the entire method store unchanged", () => {
   const store = createMethodStore();
   const before = store.getState();
-  assert.throws(() => before.setParam("power-liquids", "globalFineLevelSetFactor", "2"), /supported variant/);
+  assert.throws(() => before.setParam("uniform-volume", "pressureCycleBudget", 1), /fixes "pressureCycleBudget"/);
   assert.equal(store.getState(), before);
   assert.throws(() => before.setMethodId("nonexistent"), /Unknown simulation method/);
   assert.equal(store.getState(), before);
 });
-test("inactive method settings survive switching while only supported configurations commit", () => {
+test("unsupported coarsening values resolve to the declared Uniform default", () => {
   const store = createMethodStore();
-  store.getState().setParam("power-liquids", "globalFineLevelSetFactor", "8");
-  store.getState().setMethodId("power-liquids");
-  store.getState().setMethodId("adaptive-volume");
-  assert.equal(store.getState().overrides["power-liquids"]?.globalFineLevelSetFactor, "8");
+  const defaults = resolvedMethodValues(store.getState());
+  store.getState().setParam("uniform-volume", "coarsening", "octree");
+  assert.equal(resolvedMethodValues(store.getState()).coarsening, defaults.coarsening);
+});
+test("method settings survive reselecting the maintained method", () => {
+  const store = createMethodStore();
+  store.getState().setParam("uniform-volume", "coarsening", "regions");
+  store.getState().setMethodId("uniform-volume");
+  store.getState().setMethodId("uniform-volume");
+  assert.equal(store.getState().overrides["uniform-volume"]?.coarsening, "regions");
 });
 
-test("controller rejects incompatible variants before announcing GPU work", async () => {
+test("controller rejects forbidden overrides before announcing GPU work", async () => {
   const { simulation } = await import("../lib/core/simulation/controller");
   const { defaultSession } = await import("../lib/core/session/session");
   const methodBefore = defaultSession.method.getState();
   const statusBefore = defaultSession.diagnostics.getState().gpuStatus;
-  assert.throws(() => simulation.setMethodParam("power-liquids", "globalFineLevelSetFactor", "2"), /supported variant/);
+  assert.throws(() => simulation.setMethodParam("uniform-volume", "pressureCycleBudget", 1), /fixes "pressureCycleBudget"/);
   assert.equal(defaultSession.method.getState(), methodBefore);
   assert.equal(defaultSession.diagnostics.getState().gpuStatus, statusBefore);
 });
@@ -36,14 +42,14 @@ test("restoring an explicit default removes the override without resetting the a
   const savedRuntime = session.runtime.getState();
   const savedDiagnostics = session.diagnostics.getState();
   try {
-    session.method.setState({ methodId: "adaptive-volume", overrides: { "adaptive-volume": { pressureJournal: "off" } } });
+    session.method.setState({ methodId: "uniform-volume", overrides: { "uniform-volume": { phiCubicAdvection: "off" } } });
     session.runtime.setState({ simulationTime: 2, topologyFrozen: true });
-    simulation.resetMethodParam("adaptive-volume", "pressureJournal");
-    assert.equal(session.method.getState().overrides["adaptive-volume"]?.pressureJournal, undefined);
+    simulation.resetMethodParam("uniform-volume", "phiCubicAdvection");
+    assert.equal(session.method.getState().overrides["uniform-volume"]?.phiCubicAdvection, undefined);
     assert.equal(session.runtime.getState().simulationTime, 2);
     assert.equal(session.runtime.getState().topologyFrozen, true);
     assert.equal(session.diagnostics.getState().gpuStatus, savedDiagnostics.gpuStatus);
-    simulation.setMethodParam("adaptive-volume", "pressureJournal", "off");
+    simulation.setMethodParam("uniform-volume", "phiCubicAdvection", "off");
     assert.equal(session.runtime.getState().simulationTime, 2);
   } finally {
     session.method.setState(savedMethod, true);

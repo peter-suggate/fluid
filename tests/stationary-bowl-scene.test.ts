@@ -7,7 +7,6 @@ import { parseScene, serializeScene, validateScene } from "../lib/core/model";
 import { initialHeightFieldFractionAtCell } from "../lib/core/initial-height-field";
 import { initialLiquidFractionAtCell } from "../lib/core/initial-fluid";
 import { parseQueryState } from "../lib/core/url-state";
-import { initializeSparseBrickAtlasFromScene } from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 
 const dims = [48, 32, 40] as const;
 
@@ -22,18 +21,4 @@ test("bowl source agrees with the original diagnostic volume quadrature", () => 
     assert.ok(Math.abs(initialHeightFieldFractionAtCell(scene,x!,y,z!,dims)! - expected) < 1e-12);
     assert.ok(Math.abs(initialLiquidFractionAtCell(scene,x!,y,z!,dims,false) - expected) < 1e-12);
   }
-});
-
-test("ordinary coarse atlas initialization retains the complete curved bowl volume", () => {
-  const scene = sceneDocument(getSceneDefinition("stationary-bowl"));
-  const atlas = initializeSparseBrickAtlasFromScene(scene, { finestDimensions: dims,
-    brickFineResolution: 8, maximumMacroSpanBricks: 1, coarseFirstCurvatureTolerance: .25 });
-  let actual = 0;
-  for (const brick of atlas.bricks) {
-    assert.equal(brick.resolution, 2, "scene enforces width 4");
-    actual += brick.density.reduce((sum,rho) => sum+rho,0) * 4**3;
-  }
-  // Exact area moment of the original midpoint quadrature, integrated in y.
-  const expected = 48*40*(17.3+.003*((48**2/12-1/768)+.7*(40**2/12-1/768)));
-  assert.ok(Math.abs(actual-expected)<1e-7, `seed volume ${actual} != ${expected}`);
 });

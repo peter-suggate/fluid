@@ -29,8 +29,10 @@ test("fluid plugins own their executable declarations and previews propose no so
     assert.deepEqual(result.patches, []);
     assert.equal(JSON.stringify(base), before);
     assert.ok(plugin.ui.controls.some(c => c.presentation === "primary"));
-    assert.equal(plugin.unavailable({ scene: base, methodId: "adaptive-volume" }), undefined);
-    assert.ok(plugin.unavailable({ scene: { ...base, systems: { fluid: false } }, methodId: "adaptive-volume" }));
+    const unavailable = plugin.unavailable({ scene: base, methodId: "uniform-volume" });
+    if (plugin.id === "fluid-ball") assert.equal(unavailable, undefined);
+    else assert.ok(unavailable, `${plugin.id} requires unsupported shape editing`);
+    assert.ok(plugin.unavailable({ scene: { ...base, systems: { fluid: false } }, methodId: "uniform-volume" }));
     assert.ok(plugin.unavailable({ scene: base, methodId: "other" }));
     const remove = plugin.begin({ scene: base, ray: ray(), values: { ...values, remove: 1 } })!.update(ray())!;
     assert.equal(remove.action!.edit.operation, "remove");

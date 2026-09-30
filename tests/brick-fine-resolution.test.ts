@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BRICK_FINE_CELLS } from "../lib/core/sparse-brick-geometry";
-import { BRICK_FINE_RESOLUTION, DEFAULT_BRICK_FINE_RESOLUTION } from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { ADVANCE_BRICK_FINE } from "../lib/physics-wasm/advance-view";
 
 /**
@@ -15,8 +14,6 @@ import { ADVANCE_BRICK_FINE } from "../lib/physics-wasm/advance-view";
  * this test is what makes a second copy fail rather than drift.
  */
 test("every zone's brick is the one core owns", () => {
-  assert.equal(DEFAULT_BRICK_FINE_RESOLUTION, BRICK_FINE_CELLS);
-  assert.equal(BRICK_FINE_RESOLUTION, BRICK_FINE_CELLS);
   assert.equal(ADVANCE_BRICK_FINE, BRICK_FINE_CELLS);
 });
 

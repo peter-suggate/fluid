@@ -38,14 +38,14 @@ test("the scene wedge carries the document verbs, and add-water only while dry",
 });
 
 test("every registered sculpt tool has a wedge, disabled with its own reason when it cannot run", () => {
-  // The default scene runs water, and no method is supplied — so the solid
-  // tools are unavailable and must say why, not disappear.
-  const actions = sceneActionsAt(cloneScene(defaultScene), POINT, undefined, { methodId: "uniform" });
+  // Every tool stays visible; its Uniform Geometric capability determines
+  // whether the wedge runs or explains why it is unavailable.
+  const actions = sceneActionsAt(cloneScene(defaultScene), POINT, undefined, { methodId: "uniform-volume" });
   const children = actions.flatMap((action) => action.children ?? []);
   for (const tool of voxelTools.tools) {
     const child = children.find((candidate) => candidate.id === `voxel-tool-${tool.id}`);
     assert.ok(child, `no wedge for ${tool.id}`);
-    const reason = tool.unavailable({ scene: cloneScene(defaultScene), methodId: "uniform" });
+    const reason = tool.unavailable({ scene: cloneScene(defaultScene), methodId: "uniform-volume" });
     assert.equal(child.enabled, !reason, `${tool.id} enabled state disagrees with its own predicate`);
     if (reason) assert.equal(child.hint, reason, `${tool.id} must teach the way in`);
     assert.equal(child.effect?.kind, "voxel-tool");
@@ -55,7 +55,7 @@ test("every registered sculpt tool has a wedge, disabled with its own reason whe
 
 test("the LOOK ring keeps the document verbs but withholds everything that edits", () => {
   const actions = sceneActionsAt(cloneScene(defaultScene), POINT, undefined,
-    { placement: false, methodId: "adaptive-volume" });
+    { placement: false, methodId: "uniform-volume" });
   assert.ok(actions.find((action) => action.id === "scene"), "LOOK still reaches the document");
   const ids = actions.map((action) => action.id);
   assert.ok(!ids.some((id) => id.startsWith("sculpt-")), "LOOK must not offer sculpt tools");
@@ -97,8 +97,8 @@ test("no studio ring wedge carries a host effect", () => {
   })()];
   const rings: readonly (readonly EditorAction[])[] = scenes.flatMap((scene) => [
     sceneActionsAt(scene, POINT),
-    sceneActionsAt(scene, POINT, undefined, { methodId: "uniform" }),
-    sceneActionsAt(scene, POINT, undefined, { placement: false, methodId: "adaptive-volume" }),
+    sceneActionsAt(scene, POINT, undefined, { methodId: "uniform-volume" }),
+    sceneActionsAt(scene, POINT, undefined, { placement: false, methodId: "uniform-volume" }),
     sceneDocumentActions(scene),
   ]);
   const walk = (actions: readonly EditorAction[]): void => {

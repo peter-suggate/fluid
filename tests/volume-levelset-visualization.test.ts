@@ -5,9 +5,9 @@ import { gridOverlayVisualizations, VOLUME_LEVELSET_OVERLAY_MODE_CODE } from "..
 import { fractionBandPaint } from "../lib/core/fluid-fraction-view";
 import { pickFieldOverlay } from "../lib/core/field-overlay-pick";
 import { parseQueryState, serializeQueryState } from "../lib/core/url-state";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
+import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
 
-test("volume and level-set slice is catalogued for Sparse Geometric with mode code 21", () => {
+test("volume and level-set slice is catalogued for Uniform Geometric with mode code 21", () => {
   const field = gridOverlayVisualizations.find(
     definition => definition.kind === "field" && definition.mode === "volume-levelset",
   );
@@ -18,7 +18,7 @@ test("volume and level-set slice is catalogued for Sparse Geometric with mode co
   assert.equal(field.sliceOnly, true);
   assert.equal(field.icon, "surface");
   assert.equal(VOLUME_LEVELSET_OVERLAY_MODE_CODE, 21);
-  assert.ok(adaptiveMassMethod.supportedFieldModes?.includes("volume-levelset"));
+  assert.ok(uniformVolumeMethod.supportedFieldModes?.includes("volume-levelset"));
 
   /* The legend is read beside the picture, so its V/K swatch has to be the
    * colour the shader actually fills a full cell with — not a hand-kept copy

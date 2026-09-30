@@ -7,9 +7,9 @@ import { sharePaneStep } from "../lib/core/simulation/shared-pane-step";
 
 function setup() {
   const a = createPaneSession("a"), b = createPaneSession("b");
-  a.method.getState().setParam("adaptive-volume", "timeStep", "scene");
+  a.method.getState().setParam("uniform-volume", "timeStep", "scene");
   a.scene.getState().patchNumerics({ fixedDt_s: 1 / 60, maxDt_s: 1 / 60 });
-  b.method.getState().setMethodId("uniform");
+  b.method.getState().setMethodId("uniform-volume");
   const shared = sharePaneStep([a, b]);
   const check = (dt: number) => {
     for (const pane of [a, b]) {
@@ -27,8 +27,8 @@ test("shared edits reach both panes and survive scene and solver changes", () =>
     shared.setStepSize(0.012);
     check(0.012);
     b.scene.getState().patchNumerics({ fixedDt_s: 1 / 30, maxDt_s: 1 / 30 });
-    b.method.getState().resetParams("uniform");
-    a.method.getState().setMethodId("uniform");
+    b.method.getState().resetParams("uniform-volume");
+    a.method.getState().setMethodId("uniform-volume");
     check(0.012);
   } finally { shared.stop(); }
   b.scene.getState().patchNumerics({ fixedDt_s: 0.025 });

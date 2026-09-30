@@ -15,8 +15,8 @@ import {
 import { sampleSolidWorld, solidWorldForScene,
   SOLID_WORLD_TERRAIN_MATERIAL_ID } from "../lib/core/solid-world";
 import { terrainHeightAt } from "../lib/core/terrain";
-import { initializeSparseBrickAtlasFromScene } from
-  "../lib/methods/adaptive-volume/sparse-brick-atlas";
+import "../lib/methods";
+import { defaultMethodId } from "../lib/core/method-registry";
 import {
   buildSvoPrimitiveCandidates,
   packSvoPrimitiveCandidateArena,
@@ -72,7 +72,7 @@ test("Tall Cells hillside scene preserves the published Flood footprint and pape
 
   const definition = findSceneDefinition(scene.sceneId);
   assert.equal(definition?.audience, "study");
-  assert.equal(definition?.methodProfile?.methodId, "adaptive-volume");
+  assert.equal(defaultMethodId(), "uniform-volume");
   assert.equal(definition?.presentationMode, "full-scene");
 });
 
@@ -161,7 +161,7 @@ test("height samples author a flat shelf, an easing steep drop, channel banks, a
     < HEIGHT_M, "the released block must have air above it");
 });
 
-test("the scene requires a unified sparse voxel solid and starts fluid-local", () => {
+test("the scene authors its boundary and terrain in SolidWorld", () => {
   const scene = createTallCellsHillsideDamBreakScene();
   const solids = solidWorldForScene(scene);
   assert.equal(sampleSolidWorld(solids, [-1, NY - 1, Math.floor(NZ / 2)]).solidFraction,
@@ -175,19 +175,6 @@ test("the scene requires a unified sparse voxel solid and starts fluid-local", (
   assert.equal(sampleSolidWorld(solids, [NX - 1, NY - 1, Math.floor(NZ / 2)]).solidFraction,
     0, "SolidWorld claims terrain voxels rather than the logical world volume");
 
-  const atlas = initializeSparseBrickAtlasFromScene(scene, {
-    finestDimensions: TALL_CELLS_FLOOD_GRID,
-    brickFineResolution: 8,
-    surfaceFineRings: 1,
-  });
-  const wet = atlas.bricks.filter((brick) =>
-    brick.density.some((density) => density > 0));
-  assert.equal(wet.length, 3 * 2 * 6,
-    "generation zero must contain the aligned 3 x 2 x 6 reservoir tiles");
-  assert.ok(atlas.bricks.length <= 3 * wet.length,
-    "only the bounded transport/velocity air stencil may accompany the reservoir");
-  assert.ok(Math.max(...atlas.bricks.map((brick) => brick.coordinate[0])) <= 4,
-    "remote downhill terrain must not become generation-zero fluid topology");
 });
 
 test("a sun-lit hillside publishes no fixture primitive at all", () => {

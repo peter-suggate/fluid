@@ -29,8 +29,9 @@ test("hero-garden-hose-x10 starts with fluid and offers solid editing", () => {
   assert.equal(planSceneRuntime(scene).waterPresentation, true);
   assert.equal(createHeroGardenHoseStressScene().systems?.fluid, false);
   for (const plugin of voxelTools.tools) {
-    const unavailable = plugin.unavailable({ scene, methodId: "adaptive-volume" });
-    assert.equal(unavailable, undefined, plugin.id);
+    const unavailable = plugin.unavailable({ scene, methodId: "uniform-volume" });
+    if (plugin.id === "fluid-cube" || plugin.id === "fluid-torus") assert.ok(unavailable, plugin.id);
+    else assert.equal(unavailable, undefined, plugin.id);
   }
 });
 test("terrain targeting edits its authoritative surface and preserves untouched pages and terrain recipe", () => {
