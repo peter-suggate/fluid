@@ -79,12 +79,22 @@ export interface BackdropDetail {
   anchor_m: number;
   /** Half-width of the outermost stored ring's square. */
   outerHalf_m: number;
+  /**
+   * Rings, innermost first, stored one octree level finer than the walk's
+   * ladder (`cellSize0_m 2^l / 2`). The ring squares, the walk and the column
+   * anchor are unchanged, so refinement is local to those rings: the far rings,
+   * whose cells are already about a pixel from any hero camera, keep theirs.
+   */
+  refinedRings: number;
   footprint_m: readonly [number, number, number, number];
   seed: number;
 }
 
-export function backdropDetailFromPlan(field: BackdropField, plan: BackdropTilePlan, rings: number): BackdropDetail {
+export function backdropDetailFromPlan(field: BackdropField, plan: BackdropTilePlan, rings: number, refinedRings = 0): BackdropDetail {
   if (!Number.isInteger(rings) || rings < 1) throw new RangeError("Backdrop detail needs at least one ring");
+  if (!Number.isInteger(refinedRings) || refinedRings < 0 || refinedRings > rings) {
+    throw new RangeError(`Backdrop refined rings must be an integer from 0 to ${rings}`);
+  }
   return {
     rings,
     centre: plan.centre,
@@ -92,6 +102,7 @@ export function backdropDetailFromPlan(field: BackdropField, plan: BackdropTileP
     cellSize0_m: plan.cellSize0_m,
     anchor_m: plan.anchor_m,
     outerHalf_m: plan.halfWidth0_m * 2 ** (rings - 1),
+    refinedRings,
     footprint_m: field.seam.footprint_m as unknown as readonly [number, number, number, number],
     seed: field.description.seed >>> 0,
   };
@@ -117,9 +128,13 @@ function footprintDistance(detail: BackdropDetail, x: number, z: number): number
   return Math.hypot(Math.max(minX - x, 0, x - maxX), Math.max(minZ - z, 0, z - maxZ));
 }
 
-function ringCellAt(detail: BackdropDetail, x: number, z: number): number {
-  const m = Math.max(Math.abs(x - detail.centre[0]), Math.abs(z - detail.centre[1]));
-  return detail.cellSize0_m * 2 ** backdropDetailRing(detail, m);
+/** Ring `ring`'s stored cell: the walk ladder's `cellSize0_m 2^ring`, halved on a refined ring. */
+export function backdropDetailRingCell(detail: BackdropDetail, ring: number): number {
+  return detail.cellSize0_m * 2 ** ring / (ring < detail.refinedRings ? 2 : 1);
+}
+
+function ringAt(detail: BackdropDetail, x: number, z: number): number {
+  return backdropDetailRing(detail, Math.max(Math.abs(x - detail.centre[0]), Math.abs(z - detail.centre[1])));
 }
 
 /** The column top holding (x, z) at `cell`: the walk's rule. */
@@ -171,9 +186,9 @@ export function backdropScatterItem(
   if (!(accept < entry.density * fade + slack)) return undefined;
   if (m + reach >= detail.outerHalf_m + slack * detail.outerHalf_m) return undefined;
   if (footprintDistance(detail, x, z) <= reach - slack) return undefined;
-  const cell = ringCellAt(detail, x, z);
-  // Ring cells are exact powers of two of cell 0, so 0.75 separates rings robustly.
-  if (cell < 0.75 * detail.cellSize0_m * 2 ** entry.minimumRing) return undefined;
+  const ring = ringAt(detail, x, z);
+  if (ring < entry.minimumRing) return undefined;
+  const cell = backdropDetailRingCell(detail, ring);
   if (radius < BACKDROP_SCATTER_MINIMUM_CELLS * cell * (1 - slack)) return undefined;
   const seat = backdropDetailColumnTop(field, detail, cell, x, z);
   return { classIndex, shape: entry.shape, x, z, radius, seat, top: seat + SCATTER_RISE[entry.shape] * radius, reach };
@@ -222,7 +237,7 @@ export interface BackdropDetailClassifierOptions {
   worldOrigin_m: readonly [number, number, number];
   /** Node edge per level, as the builder tabulates it. */
   nodeEdge_m: readonly (readonly number[])[];
-  /** Level whose voxel is the scene cell h0: ring l's leaves sit at `solverLevel - l`. */
+  /** Level whose voxel is the scene cell h0: ring l's leaves sit at `solverLevel - l`, one deeper on a refined ring. */
   solverLevel: number;
 }
 
@@ -244,6 +259,9 @@ export function createBackdropDetailClassifier(options: BackdropDetailClassifier
     throw new RangeError(`Backdrop detail ring 0 needs ${8 * detail.cellSize0_m} m bricks at the solver level; the tree has ${edge0} m`);
   }
   if (solverLevel - (detail.rings - 1) < 0) throw new RangeError("Backdrop detail rings reach above the octree root");
+  if (detail.refinedRings > 0 && nodeEdge_m[solverLevel + 1] === undefined) {
+    throw new RangeError("Refined backdrop rings need a level below the scene cell; the tree has none");
+  }
   const spans = new Map<string, readonly [number, number]>();
   const columnSpan = (minX: number, maxX: number, minZ: number, maxZ: number, cell: number): readonly [number, number] => {
     let lowest = Number.POSITIVE_INFINITY, highest = Number.NEGATIVE_INFINITY;
@@ -272,7 +290,7 @@ export function createBackdropDetailClassifier(options: BackdropDetailClassifier
     if (minX >= fMinX && maxX <= fMaxX && minZ >= fMinZ && maxZ <= fMaxZ) return BACKDROP_DETAIL_EMPTY;
     const m = Math.max(Math.max(minX - cx, 0, cx - maxX), Math.max(minZ - cz, 0, cz - maxZ)) + 1e-7 * e;
     const ring = backdropDetailRing(detail, m);
-    const target = solverLevel - ring;
+    const target = solverLevel - ring + (ring < detail.refinedRings ? 1 : 0);
     if (level < target) {
       const pad = e / 8;
       const [low, high] = backdropHeightBounds(field, minX - pad, minZ - pad, maxX + pad, maxZ + pad);
@@ -321,12 +339,13 @@ export function backdropDetailVoxelizerWGSL(table: Uint32Array, detail: Backdrop
     return text.includes(".") || text.includes("e") ? text : `${text}.0`;
   };
   const classes = BACKDROP_SCATTER_CLASSES.map((entry, index) => /* wgsl */ `
-  if(!solid){solid=backdropScatterInside(p,${index + 1}u,${f(entry.grid_m)},${f(entry.density)},${f(entry.radius_m[0])},${f(entry.radius_m[1])},${entry.shape}u,${f(0.75 * 2 ** entry.minimumRing)});}`).join("");
+  if(!solid){solid=backdropScatterInside(p,${index + 1}u,${f(entry.grid_m)},${f(entry.density)},${f(entry.radius_m[0])},${f(entry.radius_m[1])},${entry.shape}u,${entry.minimumRing}u);}`).join("");
   return /* wgsl */ `
 const BACKDROP_DETAIL_TABLE=array<u32,${header.length}>(${header.map((word) => `${word}u`).join(",")});
 ${backdropTerrainWGSL({ load: (index) => `BACKDROP_DETAIL_TABLE[min(${index},${last}u)]`, tableBase: "0u" })}
 const BACKDROP_DETAIL_OUTER:f32=${f(detail.outerHalf_m)};
 const BACKDROP_DETAIL_RINGS:u32=${detail.rings}u;
+const BACKDROP_DETAIL_REFINED_RINGS:u32=${detail.refinedRings}u;
 const BACKDROP_DETAIL_SEED:u32=${detail.seed >>> 0}u;
 fn backdropDetailHash(a:u32,b:u32,c:u32,d:u32,e:u32)->u32{
   var h=0x9e3779b9u^(a*0x85ebca6bu);
@@ -337,18 +356,21 @@ fn backdropDetailHash(a:u32,b:u32,c:u32,d:u32,e:u32)->u32{
   h=(h^(h>>16u))*0x85ebca6bu;h=(h^(h>>13u))*0xc2b2ae35u;return h^(h>>16u);
 }
 fn backdropDetailRandom(salt:u32,q:vec2i,n:u32)->f32{return f32(backdropDetailHash(BACKDROP_DETAIL_SEED,salt,bitcast<u32>(q.x),bitcast<u32>(q.y),n))/4294967296.0;}
-fn backdropDetailCell(p:vec2f)->f32{
+fn backdropDetailRingAt(p:vec2f)->u32{
   let q=p-backdropTerrainCentre();let m=max(abs(q.x),abs(q.y));
   let half0=backdropTableFloat(${BACKDROP_TERRAIN_TABLE.shapeWord + 2}u);
-  return backdropTableFloat(${BACKDROP_TERRAIN_TABLE.shapeWord + 3}u)*exp2(f32(select(0u,min(u32(max(ceil(log2(m/half0)),0.0)),BACKDROP_DETAIL_RINGS-1u),m>half0)));
+  return select(0u,min(u32(max(ceil(log2(m/half0)),0.0)),BACKDROP_DETAIL_RINGS-1u),m>half0);
 }
+// A ring's stored cell: the walk ladder's, halved on a refined ring.
+fn backdropDetailRingCell(ring:u32)->f32{return backdropTableFloat(${BACKDROP_TERRAIN_TABLE.shapeWord + 3}u)*exp2(f32(ring))*select(1.0,0.5,ring<BACKDROP_DETAIL_REFINED_RINGS);}
+fn backdropDetailCell(p:vec2f)->f32{return backdropDetailRingCell(backdropDetailRingAt(p));}
 fn backdropDetailTop(p:vec2f,cell:f32)->f32{
   let centre=backdropTerrainCentre();let anchor=backdropTableFloat(${BACKDROP_TERRAIN_TABLE.latticeWord}u);
   let column=centre+(floor((p-centre)/cell)+vec2f(0.5))*cell;
   return anchor+floor((backdropTerrainSurfaceAt(column).height-anchor)/cell+0.5)*cell;
 }
 // Whether the voxel centre p lies in this class's item for its grid cell.
-fn backdropScatterInside(p:vec3f,salt:u32,grid:f32,density:f32,rMin:f32,rMax:f32,shape:u32,minimumCells:f32)->bool{
+fn backdropScatterInside(p:vec3f,salt:u32,grid:f32,density:f32,rMin:f32,rMax:f32,shape:u32,minimumRing:u32)->bool{
   let q=vec2i(floor(p.xz/grid));
   let u1=backdropDetailRandom(salt,q,1u);
   let radius=rMin+(rMax-rMin)*u1*u1;
@@ -361,8 +383,9 @@ fn backdropScatterInside(p:vec3f,salt:u32,grid:f32,density:f32,rMin:f32,rMax:f32
   if(!(backdropDetailRandom(salt,q,0u)<density*fade)){return false;}
   if(m+reach>=BACKDROP_DETAIL_OUTER){return false;}
   if(backdropFootprintDistance(item)<=reach){return false;}
-  let cell=backdropDetailCell(item);
-  if(cell<minimumCells*backdropTableFloat(${BACKDROP_TERRAIN_TABLE.shapeWord + 3}u)){return false;}
+  let ring=backdropDetailRingAt(item);
+  if(ring<minimumRing){return false;}
+  let cell=backdropDetailRingCell(ring);
   if(radius<${f(BACKDROP_SCATTER_MINIMUM_CELLS)}*cell){return false;}
   let seat=backdropDetailTop(item,cell);
   let angle=6.2831853*backdropDetailRandom(salt,q,4u);

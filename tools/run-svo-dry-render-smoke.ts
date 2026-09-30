@@ -322,6 +322,8 @@ const height = Math.max(1, Math.round(Number(process.env.FLUID_SVO_DRY_SMOKE_HEI
 // scene is. Capacity is derived from the plan rather than budgeted, so the cost
 // of a level is arena memory and build time, not a refused publication.
 const environmentRefinementDepth = Number(process.env.FLUID_SVO_DRY_SMOKE_REFINEMENT ?? 0);
+// Backdrop detail rings, innermost first, refined one level (needs the depth above).
+const backdropRefinedRings = Number(process.env.FLUID_SVO_DRY_SMOKE_BACKDROP_RINGS ?? 0);
 const timedFrames = Number(process.env.FLUID_SVO_DRY_SMOKE_FRAMES ?? 6);
 const warmups = Number(process.env.FLUID_SVO_DRY_SMOKE_WARMUPS ?? 3);
 const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_SMOKE_CONE_SCALE ?? baseTuning.coneLightingScale);
@@ -575,9 +577,12 @@ const buildSmokeScene = (): SceneDescription => {
       buildAt: lattice => createHeroGardenHoseStressScene({ recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER, ...lattice }),
     })
     : preset.create();
-  return scenePresetId === "hero-garden-hose"
+  // The factories leave `environment` to the definition, and a backdrop is
+  // refused without the garden's seam; carry it over as `sceneDocument` does.
+  return { ...(scenePresetId === "hero-garden-hose"
     ? createHeroGardenHoseSceneWithSet(latticeOptions)
-    : createHeroGardenHoseStressScene({ recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER, ...latticeOptions });
+    : createHeroGardenHoseStressScene({ recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER, ...latticeOptions })),
+  environment: getSceneDefinition(scenePresetId).environment };
 };
 const wideSpan_m = Number(process.env.FLUID_SVO_WIDE_SPAN_M ?? 0);
 const scene = wideSpan_m > 0 ? withSvoWideSpanProxies(buildSmokeScene(), wideSpan_m) : buildSmokeScene();
@@ -622,7 +627,8 @@ log(`Scene ${scenePresetId}${recordMultiplier === undefined ? "" : ` at record m
 if (environmentRefinementDepth > 0) {
   log(`Environment refinement depth ${environmentRefinementDepth}`
     + ` — scenery cells ${(scene.voxelDomain.finestCellSize_m * 1000) / 2 ** environmentRefinementDepth} mm`
-    + ` under a ${scene.voxelDomain.finestCellSize_m * 1000} mm solver lattice`);
+    + ` under a ${scene.voxelDomain.finestCellSize_m * 1000} mm solver lattice`
+    + `, backdrop rings refined ${backdropRefinedRings}`);
 }
 // Diffuse feedback is on by default now that the radiance floor makes it cheap.
 // `FLUID_SVO_DRY_SMOKE_RADIANCE_FEEDBACK=0` holds it off so the floor's own cost
@@ -632,7 +638,7 @@ const radianceFeedback = process.env.FLUID_SVO_DRY_SMOKE_RADIANCE_FEEDBACK === u
   : process.env.FLUID_SVO_DRY_SMOKE_RADIANCE_FEEDBACK !== "0";
 const solver = await WebGPULiveSvoScene.create(device, scene, "balanced",
   ({ label, completed, total }) => log(`  [world] ${label} (${completed}/${total})`),
-  undefined, { environmentRefinementDepth, radianceFeedback });
+  undefined, { environmentRefinementDepth, backdropRefinedRings, radianceFeedback });
 // Production encodes staged live-scene maintenance before any presentation
 // consumer in the frame; constructing arenas alone leaves completeGeneration at 0.
 const publication = device.createCommandEncoder({ label: "Smoke initial live scene publication" });

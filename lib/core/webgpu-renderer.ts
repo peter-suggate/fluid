@@ -537,7 +537,7 @@ export interface SimulationRunConfig {
 const RENDER_SOURCE_VALUE_KEYS: ReadonlySet<string> = new Set([
   "svoMeshContours", "svoMeshDualContouring", "svoMeshDualMarchingCubes",
   "svoEnvironmentRefinementDepth", "svoEnvironmentBrickRefinementLevels",
-  "svoEnvironmentPlanarRefinementExemption",
+  "svoEnvironmentPlanarRefinementExemption", "svoBackdropRefinedRings",
 ]);
 
 export function structuralMethodValues(config: SimulationRunConfig): MethodParamValues {
@@ -2089,7 +2089,7 @@ export class FluidLabRenderer {
   private solverKey(scene:SceneDescription,config:SimulationRunConfig,presentationMode:ScenePresentationMode){
     return `${gpuSceneSolverKey(scene,config)}:presentation-${presentationMode}`
       + (presentationMode === "full-scene" ? `:scenery-${sceneryConstructionKey(scene)}:contours-${config.values.svoMeshContours === true}${config.values.svoMeshDualContouring === true ? ":dual-contouring" : ""}${config.values.svoMeshDualMarchingCubes === true ? ":dual-marching-cubes" : ""}`
-        + `:refinement-${String(config.values.svoEnvironmentRefinementDepth ?? 0)}/${String(config.values.svoEnvironmentBrickRefinementLevels ?? "")}/${config.values.svoEnvironmentPlanarRefinementExemption === true}` : "");
+        + `:refinement-${String(config.values.svoEnvironmentRefinementDepth ?? 0)}/${String(config.values.svoEnvironmentBrickRefinementLevels ?? "")}/${config.values.svoEnvironmentPlanarRefinementExemption === true}/backdrop-${String(config.values.svoBackdropRefinedRings ?? 0)}` : "");
   }
   private attachedSolverDocumentKey = "";
   /** Presentation policy used to construct the attached solver/sidecar pair. */
@@ -2501,6 +2501,7 @@ export class FluidLabRenderer {
           surfaceDualMarchingCubes: config.values.svoMeshDualMarchingCubes === true,
           environmentRefinementDepth: typeof depth === "number" ? depth : undefined,
           environmentPlanarRefinementExemption: config.values.svoEnvironmentPlanarRefinementExemption === true,
+          backdropRefinedRings: typeof config.values.svoBackdropRefinedRings === "number" ? config.values.svoBackdropRefinedRings : undefined,
         });
       } else {
         solver=await (method.createSolverAsync
@@ -2518,6 +2519,7 @@ export class FluidLabRenderer {
           surfaceDualMarchingCubes:config.values.svoMeshDualMarchingCubes===true,
           environmentRefinementDepth:typeof depth==="number"?depth:undefined,
           environmentPlanarRefinementExemption:config.values.svoEnvironmentPlanarRefinementExemption===true,
+          backdropRefinedRings:typeof config.values.svoBackdropRefinedRings==="number"?config.values.svoBackdropRefinedRings:undefined,
         });
         return {solver,sidecar};
       } catch(error) {
@@ -3220,6 +3222,7 @@ export class FluidLabRenderer {
         // toggling the exemption changes which nodes are leaves, and only a
         // rebuilt world can answer that.
         svoEnvironmentPlanarRefinementExemption: activeSvoTuning.environmentPlanarRefinementExemption,
+        svoBackdropRefinedRings: environmentRefinementDepth > 0 ? activeSvoTuning.backdropRefinedRings : 0,
       },
     } : config;
     const gpuSceneSourceRequired = sceneRuntime.fluidSolver || sparsePresentationRequired;
@@ -3396,6 +3399,11 @@ export class FluidLabRenderer {
     // selected sources together without increasing the storage-binding budget.
     if (config.methodId !== "uniform-volume") this.gridOverlayPipeline?.setViewRecords(gridOverlay?.mode === "fine-tiles" ? this.gpuFluid?.tileClassSource
       : gridOverlay?.mode === "solve-window" ? this.gpuFluid?.solveWindowSource : undefined);
+    // Layout views are the tiles, grid and pressure layers' records: the view
+    // arms them, as it does the markers, so an unwatched frame records none.
+    const uniformLayers = config.methodId === "uniform-volume" ? gridOverlay?.layers : undefined;
+    this.gpuFluid?.setLayoutViewsEnabled?.(Boolean(gridOverlay?.axis !== "off" && uniformLayers?.visible
+      && uniformLayers.enabled.some(id => id === "tiles" || id === "grid" || id === "pressure")));
     this.gridOverlayPipeline?.setLayers(config.methodId === "uniform-volume" ? gridOverlay?.layers : undefined, this.gpuFluid?.tileClassSource, this.gpuFluid?.solveWindowSource, this.gpuFluid?.gridPressureOrigin, this.gpuFluid?.gridVelocityBoundary, this.gpuFluid?.volumePageSource);
     if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {const activeSparsePresentation=this.sparseWorldPresentation(this.gpuFluid);const compactSurface=Boolean(activeSparsePresentation?.fineLevelSet||this.gpuFluid.globalFineLevelSetSource||this.gpuFluid.coarseLevelSetSource);this.gridOverlayPipeline?.setVolume(compactSurface?this.scalarFallbackTexture:this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture, this.gpuFluid.volumeTexture);this.gridOverlayPipeline?.setSparseSource(activeSparsePresentation?.adaptiveGrid??this.gpuFluid.sparseAdaptiveGridSource);}
     // A newly attached sparse source may still be compiling its water

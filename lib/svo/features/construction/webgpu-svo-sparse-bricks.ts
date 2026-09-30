@@ -192,6 +192,14 @@ export interface OctreeSparseBrickWorldOptions {
    */
   environmentRefinementDepth?: number;
   /**
+   * How many of the backdrop's stored detail rings, innermost first, take one
+   * level of `environmentRefinementDepth` (`BackdropDetail.refinedRings`).
+   * Clamped to the scene's `backdrop.detailRings`, and zero unless the tree
+   * has a level below the scene cell. The walk and the outer rings keep their
+   * cells, so the cost is paid only where a refined voxel is still pixels wide.
+   */
+  backdropRefinedRings?: number;
+  /**
    * The scene's authored solids, exactly, for brick selection only.
    *
    * A primitive claims its whole AABB, and an AABB over-claims: the corners a
@@ -1451,6 +1459,8 @@ export class OctreeSparseBrickWorld {
      * it snaps to the final origin below.
      */
     const backdropDetailRings = backdropField ? scene.backdrop?.detailRings ?? 0 : 0;
+    const backdropRefinedRings = refinementDepth > 0
+      ? Math.min(backdropDetailRings, Math.max(0, Math.trunc(options.backdropRefinedRings ?? 0))) : 0;
     const backdropCell_m = sceneCellSizes_m(scene)[0];
     const backdropDetailLattice_m = backdropDetailRings > 0
       ? backdropDetailCentreLattice(backdropCell_m, backdropDetailRings, brickSize) : undefined;
@@ -1786,7 +1796,7 @@ export class OctreeSparseBrickWorld {
       firstLevel: backdropDetailRings, centreLattice_m: backdropDetailLattice_m,
     }) : undefined;
     const backdropDetail = backdropField && backdropTilePlan && backdropDetailRings > 0
-      ? backdropDetailFromPlan(backdropField, backdropTilePlan, backdropDetailRings) : undefined;
+      ? backdropDetailFromPlan(backdropField, backdropTilePlan, backdropDetailRings, backdropRefinedRings) : undefined;
     const backdropDetailClassifier = backdropField && backdropDetail ? createBackdropDetailClassifier({
       field: backdropField, detail: backdropDetail, worldOrigin_m: worldOrigin, nodeEdge_m,
       // The level whose voxel is the scene cell: the solver's, a refinement

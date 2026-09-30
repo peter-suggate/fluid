@@ -248,6 +248,8 @@ if (requestedRefinementDepth !== undefined
   throw new RangeError("FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT must be an integer in"
     + ` 0..${SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM}, got ${process.env.FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT}`);
 }
+// Backdrop detail rings, innermost first, refined one level (needs a refinement depth).
+const backdropRefinedRings = Number(process.env.FLUID_SVO_DRY_FRAME_BACKDROP_RINGS ?? 0);
 const radianceFeedbackFrames = radianceFeedbackEnabled
   ? Number(process.env.FLUID_SVO_DRY_FRAME_FEEDBACK_FRAMES ?? LIVE_SVO_RADIANCE_FEEDBACK.settleFrameCount)
   : 1;
@@ -932,9 +934,13 @@ if (process.env.FLUID_SVO_DRY_FRAME_SURFACE_STYLE === "smooth") scene.surfaceSty
  * A factory that answered a depth request with a coarser set has said so in
  * `voxelDomain.detailCellSize_m`, and the tree may spend only what it authored.
  */
+// A wet scene's world here is the renderer-only sidecar, which refines below
+// the solver lattice as the app's does for Uniform (`svoRenderRefinementPermitted`);
+// the document-derived depth is zero there by construction, so take the request.
 const environmentRefinementDepth = requestedRefinementDepth === undefined
   ? 0
-  : svoEnvironmentTreeRefinementDepth(scene.voxelDomain, { fluid: scene.systems?.fluid === true });
+  : scene.systems?.fluid !== false ? requestedRefinementDepth
+    : svoEnvironmentTreeRefinementDepth(scene.voxelDomain, { fluid: false });
 const presetCamera = sceneModule ? sceneModule.camera : preset.camera;
 const camera: CameraState = { ...defaultCamera, ...presetCamera, target_m: { ...(presetCamera?.target_m ?? defaultCamera.target_m) } };
 let activeCamera: CameraState = camera;
@@ -953,6 +959,7 @@ const solver = await WebGPULiveSvoScene.create(
     surfaceDualContouring: process.env.FLUID_SVO_DRY_FRAME_MESHER === "dual-contouring",
     surfaceDualMarchingCubes: process.env.FLUID_SVO_DRY_FRAME_MESHER === "dual-marching-cubes",
     environmentRefinementDepth,
+    backdropRefinedRings,
     radianceFeedback: radianceFeedbackEnabled,
     derivedTraversalStructures,
   },
@@ -964,7 +971,7 @@ const solver = await WebGPULiveSvoScene.create(
 if (requestedRefinementDepth !== undefined) {
   log(`Environment refinement depth ${environmentRefinementDepth}`
     + ` — set drawn at ${(scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m) * 1000} mm`
-    + ` under a ${scene.voxelDomain.finestCellSize_m * 1000} mm lattice`);
+    + ` under a ${scene.voxelDomain.finestCellSize_m * 1000} mm lattice, backdrop rings refined ${backdropRefinedRings}`);
   if (process.env.FLUID_SVO_DRY_FRAME_ALLOW_RESOLUTION_FALLBACK !== "1") assert.equal(solver.builtRefinementDepth, environmentRefinementDepth,
     `requested refinement depth ${environmentRefinementDepth} degraded to ${solver.builtRefinementDepth}`
     + " during allocation; the capture would be labelled with a rung it did not draw");

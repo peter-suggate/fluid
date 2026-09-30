@@ -44,6 +44,19 @@ export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM = -3;
 export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT = 0;
 
 /**
+ * Backdrop detail rings (`scene.backdrop.detailRings`), innermost first, that
+ * take one level of `environmentRefinementDepth`.
+ *
+ * A reach rather than a depth because the rings double in cell outward and are
+ * sized in metres: one level is four times a ring's bricks wherever it is
+ * spent, and past the second ring (3.6 m on the hero garden) a refined voxel
+ * is already about a pixel from a hero camera. Four is the hero garden's ring
+ * count; a scene with fewer clamps. Zero while the set itself is unrefined,
+ * because the level lives in the same tree.
+ */
+export const SVO_BACKDROP_REFINED_RINGS_MAXIMUM = 4;
+
+/**
  * The voxel a set is actually drawn into, given the lattice and the depth.
  *
  * `webgpu-octree-sparse-bricks.ts` resolves this at construction —
@@ -216,6 +229,8 @@ export interface SvoRenderTuning {
   readonly environmentBrickRefinementLevels: number;
   /** Renderer-owned levels below the immutable simulation/SolidWorld lattice. */
   readonly environmentRefinementDepth: number;
+  /** Backdrop rings refined one level; see `SVO_BACKDROP_REFINED_RINGS_MAXIMUM`. */
+  readonly backdropRefinedRings: number;
   /**
    * Whether the environment refinement rule may stop at a node its surface
    * crosses flatly, instead of spending every level the depth above allows.
@@ -352,6 +367,7 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   resolutionScale: 0.72,
   environmentBrickRefinementLevels: 1,
   environmentRefinementDepth: SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT,
+  backdropRefinedRings: 0,
   // Off: the levels it declines to spend are the low-curvature ones, and a
   // coarse leaf there is a flat axis-aligned facet on exactly the smooth
   // surfaces — a mound cap, a pond basin — where one is most visible.
@@ -579,6 +595,11 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
       value.environmentRefinementDepth ?? DEFAULT_SVO_RENDER_TUNING.environmentRefinementDepth,
       0,
       SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
+    ),
+    backdropRefinedRings: integer(
+      value.backdropRefinedRings ?? DEFAULT_SVO_RENDER_TUNING.backdropRefinedRings,
+      0,
+      SVO_BACKDROP_REFINED_RINGS_MAXIMUM,
     ),
     environmentPlanarRefinementExemption: Boolean(value.environmentPlanarRefinementExemption),
     coneLightingScale,

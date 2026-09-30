@@ -50,6 +50,8 @@ export interface LiveSvoSceneOptions {
    * does not own. See `OctreeSparseBrickWorld`'s option of the same name.
    */
   environmentRefinementDepth?: number;
+  /** Backdrop detail rings refined one level; see `OctreeSparseBrickWorldOptions`. */
+  backdropRefinedRings?: number;
   /**
    * Whether the surface refinement rule may halt on a flat node. See
    * `OctreeSparseBrickWorldOptions`' option of the same name; off by default,
@@ -199,6 +201,7 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
       surfaceDualContouring: options.surfaceDualContouring,
       surfaceDualMarchingCubes: options.surfaceDualMarchingCubes,
       environmentRefinementDepth: options.environmentRefinementDepth,
+      backdropRefinedRings: options.backdropRefinedRings,
       environmentPlanarRefinementExemption: options.environmentPlanarRefinementExemption,
       radianceFeedback: options.radianceFeedback,
       derivedTraversalStructures: options.derivedTraversalStructures,
