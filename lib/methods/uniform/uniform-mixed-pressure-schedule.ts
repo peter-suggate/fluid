@@ -11,6 +11,17 @@ const UNIFORM_MIXED_SCHEDULE_NEED_WINDOW=4;
 /** One frame's encoded slot list: V-cycles, then Full-Cycles. */
 export interface UniformMixedPressurePlan {readonly vCycles:number;readonly fullCycles:number}
 
+/** Add capacity without reviving a V phase the planner dropped after a stall.
+ * Positive surface coarsening needs another spare across abrupt impacts;
+ * the ordinary GPU plan already includes its own one-cycle headroom. */
+export function uniformMixedPressureReserve(plan:UniformMixedPressurePlan,maximum:UniformMixedPressurePlan,spare:number):UniformMixedPressurePlan{
+ let {vCycles,fullCycles}=plan,remaining=Math.max(0,Math.floor(spare));
+ if(fullCycles===0){const add=Math.min(remaining,maximum.vCycles-vCycles);vCycles+=add;remaining-=add;}
+ const add=Math.min(remaining,maximum.fullCycles-fullCycles);fullCycles+=add;remaining-=add;
+ if(vCycles>0)vCycles=Math.min(maximum.vCycles,vCycles+remaining);
+ return {vCycles,fullCycles};
+}
+
 /** GPU-resident CM11a schedule for the mixed pressure solve. The host encodes
  * the slot list the previous frame's planner chose (the conservative
  * schedule on the first frame): its V slots, its Full slots, then the

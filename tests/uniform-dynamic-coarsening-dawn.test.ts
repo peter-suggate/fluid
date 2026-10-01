@@ -17,7 +17,7 @@ import {UNIFORM_ADVANCE_PHASE} from "../lib/methods/uniform/uniform-stages";
 // The simulation layout is h/4h only, ownership
 // must actually follow the flow, volume must be conserved, and a relayout
 // must not compile anything or grow memory past the band's high-water mark.
-// The default keeps the moving surface at h; regular bulk and air use 4h.
+// Surface detail stays at h; smooth surface, regular bulk and air can use 4h.
 const STEPS=Number(process.env.UNIFORM_DYNAMIC_LANE_STEPS??30);
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("dynamic coarsening follows the 128³ dam break on h/4h ownership without drift or recompilation",{timeout:1200000},async t=>{

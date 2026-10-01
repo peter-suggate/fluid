@@ -26,7 +26,7 @@ import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgs
 import {UniformMixedPressureVelocity} from "./uniform-mixed-pressure-velocity";
 import {UniformMixedPressureCycles,type UniformMixedPressureCycleLevel} from "./uniform-mixed-pressure-cycles";
 import {UniformMixedPressureAcceptance} from "./uniform-mixed-pressure-acceptance";
-import {UniformMixedPressureSchedule,type UniformMixedPressurePlan} from "./uniform-mixed-pressure-schedule";
+import {UniformMixedPressureSchedule,uniformMixedPressureReserve,type UniformMixedPressurePlan} from "./uniform-mixed-pressure-schedule";
 import {UNIFORM_MIXED_STATUS,UNIFORM_MIXED_STATUS_WORDS,describeUniformMixedFrameStatus} from "./uniform-mixed-frame-status";
 import {planUniformMixedPressureMemory} from "./uniform-mixed-pressure-memory";
 import {DEFAULT_UNIFORM_CM11A_SCHEDULE,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_RELATIVE_REDUCTION,type UniformCM11aSchedule} from "./pressure-policy";
@@ -74,6 +74,12 @@ export interface UniformMixedFrameParameters {
  openTop:boolean;noSlip:boolean;cubic:boolean;drain:boolean;
  /** Redistance keeps h vertices beside the surface (umPreserved). */
  preserve?:boolean;
+ /** Smooth surface coarsening: rebuild coarse interface distance after material travel. */
+ coarseSurfaceTravel?:boolean;
+ /** Encode the existing maximum slot envelope; convergence still stops execution. */
+ fullPressureEnvelope?:boolean;
+ /** Extra slots beyond the lagged planner's existing spare; bounded by the configured maximum. */
+ pressureReserve?:number;
  totalSurfaceVolume?:boolean;redistance?:boolean;sharpening?:boolean;surfaceDeficitBalancing?:boolean;extensionSweeps?:number;
  supportPolicy?:{fineReach:number;shellReach:number;twoLevel:boolean;shellOnly:boolean};
  dust:number;orphanDust?:number;sharpeningStrength:number;sharpeningDistance:number;pressureTolerance:number;
@@ -267,7 +273,7 @@ export class UniformMixedFrame {
     topology:f.solid?{buffer:this.solidTopology!}:undefined}];}
   const root=this.levels[0]!,p=root.ownership;
   // The h near-surface extension carries the advancing level-set toe.
-  // A regular-only hierarchy fails uniform-long-dam-front-dawn.test.ts.
+  // A regular-only hierarchy previously lost long-dam toe motion.
   this.extension=new UniformMixedExtension(device,o,f.extension,false,true);
   this.extensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negative,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:{buffer:f.arena.buffer},params:this.params.extension});
   this.cache=new UniformMixedMomentumCache(device,o);
@@ -291,7 +297,7 @@ export class UniformMixedFrame {
   this.momentumGroup=this.momentum.bind({unitVelocity:this.hanging.unitVelocity,extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeScratch,output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,...cacheFields});
   // Viscosity reads exact MAC sites from the momentum fill (the extended
   // velocity): h sites in the unit texture, 4h sites in the coarse cache.
-  this.forces=new UniformMixedForces(device,o,true,f.sourceParams,solid);this.forceGroup=this.forces.bind({unitVelocity:this.hanging.unitVelocity,advected:f.departure,phi:f.phi,volume:f.volume,centerPhi:f.centerPhi,coarseVelocity:caches[0]!,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.forces});
+  this.forces=new UniformMixedForces(device,o,true,f.sourceParams,solid,true);this.forceGroup=this.forces.bind({unitVelocity:this.hanging.unitVelocity,advected:f.departure,phi:f.phi,volume:f.volume,centerPhi:f.centerPhi,coarseVelocity:caches[0]!,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.forces,curvature:f.phase,normals:{buffer:f.arena.buffer,offset:0,size:16*layout.lattice.dimensions.reduce((n,d)=>n*d,1)}});
   this.authority=new UniformMixedPressureAuthority(device,o,solid);this.authorityGroup=this.authority.bind({centerPhi:f.centerPhi,volume:f.volume,targetFill:f.target,phi:root.phi!,phase:f.phase,correction:f.correction,scratch:root.frozen,params:this.params.authority});
   // Pressure couples the all-4h owners through the static coarse record.
   const coarseSolid=!!solid;
@@ -388,7 +394,7 @@ export class UniformMixedFrame {
   const h=this.ownership.capacity.lattice.cellSize_m;
   const floats=(b:GPUBuffer,v:number[])=>this.device.queue.writeBuffer(b,0,new Float32Array(v));
   const flags=(b:GPUBuffer,v:number[])=>this.device.queue.writeBuffer(b,16,new Uint32Array(v));
-  floats(this.params.extension,[...h,+p.openTop]);floats(this.params.surface,[...h,p.dt]);flags(this.params.surface,[+p.openTop|(p.preserve?2:0),+p.cubic,+p.drain,4]);
+  floats(this.params.extension,[...h,+p.openTop]);floats(this.params.surface,[...h,p.dt]);flags(this.params.surface,[+p.openTop|(p.preserve?2:0)|(p.coarseSurfaceTravel?4:0),+p.cubic,+p.drain,4]);
   floats(this.params.momentum,[...h,p.dt]);flags(this.params.momentum,[+p.openTop,0,0,UNIFORM_MIXED_MOMENTUM_LIMITS]);
   floats(this.params.forces,[...h,p.dt,p.gravity,p.density,p.viscosity,p.surfaceTension,+p.noSlip,+p.openTop,0,p.dust]);
   floats(this.params.authority,[p.dt,p.surfaceDeficitBalancing===true?0:-1,0,p.dust]);floats(this.params.sharpen,[p.sharpeningStrength,p.sharpeningDistance,p.dust,p.orphanDust??0,0,0,0,0]);
@@ -433,7 +439,9 @@ export class UniformMixedFrame {
   try{
    for(const ownership of new Set([this.ownership,...this.levels.map(l=>l.ownership)]))releases.push(ownership.acquireFrame());
    const makeEncoder=()=>{const raw=this.device.createCommandEncoder({label:"Uniform owner-driven frame"});return trace?.instrument(raw)??raw;};
+   const resetSurfaceTravel=this.lastParameters!==undefined&&!!this.lastParameters.coarseSurfaceTravel!==!!p.coarseSurfaceTravel;
    this.write(p);let encoder=makeEncoder();
+   if(resetSurfaceTravel)this.surface.resetTravel(encoder);
    // Bodies moved at the last frame's tail: their cut cells are new, and the
    // census extension no longer matches the solid record or V.
    if(bodies){this.solid!.encodeBodies(encoder);this.solid!.invalidate(true);this.solidWidthsStale=true;this.invalidateExtension();}
@@ -496,7 +504,7 @@ export class UniformMixedFrame {
    if(p.sharpening!==false&&(p.sharpeningSweeps??8)>0&&p.sharpeningDistance>0){this.sharpen.encodeGeometry(encoder,this.sharpenGroups[0]);this.sharpen.encodeSweeps(encoder,this.sharpenGroups,p.sharpeningSweeps??8);}
    trace?.phase(encoder,V.sharpen);
    this.momentum.encode(encoder,this.momentumGroup);
-   this.forces.encode(encoder,this.forceGroup);
+   this.forces.encode(encoder,this.forceGroup,p.surfaceTension>0,p.coarseSurfaceTravel===true);
    trace?.phase(encoder,A.advectionCorrection);flush();
    // Pressure stays all-4h; no layout build and no CPU wait. The band rows
    // need this frame's simulation authority and u*, both rewritten in
@@ -514,7 +522,7 @@ export class UniformMixedFrame {
    const plannedBy=frame-UNIFORM_MIXED_RECEIPT_RING,lagged=this.lagged.get(plannedBy);
    if(plannedBy>0&&!lagged)throw new Error(`Uniform mixed frame ${frame} encoded before frame ${plannedBy}'s receipt was checked`);
    this.lagged.delete(plannedBy);
-   const schedule=this.pressureSchedule,plan=lagged??this.initialPlan,vCycles=plan.vCycles;
+   const schedule=this.pressureSchedule,plan=p.fullPressureEnvelope||!lagged?this.initialPlan:uniformMixedPressureReserve(lagged,this.initialPlan,p.pressureReserve??0),vCycles=plan.vCycles;
    schedule.begin(plan);
    for(let slot=0;slot<schedule.slots;slot++){
     const gated=schedule.gate(encoder,slot);

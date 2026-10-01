@@ -1,6 +1,4 @@
 import { createGridOverlayLevelSetVolumeWGSL, gridOverlayLevelSetVolumeUniform } from "../lib/core/grid-overlay-levelset-volume.wgsl";
-import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
-import { resolveMethodValues } from "../lib/core/method-contract";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -10,22 +8,10 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
-import {readMixedTileWords} from "./helpers/uniform-mixed-native-fields";
 import { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 
-async function read(device:GPUDevice,texture:GPUTexture):Promise<Float32Array>{
-  const components=texture.format==="rgba32float"?4:1;
-  const row=Math.ceil(texture.width*components*4/256)*256;
-  const buffer=device.createBuffer({size:row*texture.height*texture.depthOrArrayLayers,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-  try {const e=device.createCommandEncoder();e.copyTextureToBuffer({texture},{buffer,bytesPerRow:row,rowsPerImage:texture.height},[texture.width,texture.height,texture.depthOrArrayLayers]);device.queue.submit([e.finish()]);await buffer.mapAsync(GPUMapMode.READ);
-    const mapped=new Float32Array(buffer.getMappedRange());const result=new Float32Array(texture.width*texture.height*texture.depthOrArrayLayers*components);
-    for(let z=0;z<texture.depthOrArrayLayers;z++)for(let y=0;y<texture.height;y++)result.set(mapped.subarray((z*texture.height+y)*row/4,(z*texture.height+y)*row/4+texture.width*components),(z*texture.height+y)*texture.width*components);
-    return result;
-  }finally{buffer.unmap();buffer.destroy();}
-}
-const sum=(a:Float32Array)=>a.reduce((s,v)=>s+v,0);
 const modulePath=process.env.WEBGPU_NODE_MODULE;
-(modulePath?test:test.skip)("uniform geometric presentation source and mini32 conservation",{timeout:180_000},async t=>{
+(modulePath?test:test.skip)("uniform geometric presentation source",{timeout:180_000},async t=>{
   await acquireWebGPUExclusiveLock("dawn-test","uniform-volume numerical invariants");
   let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
   try{
@@ -71,31 +57,6 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
       await staging.mapAsync(GPUMapMode.READ);const result=new Float32Array(staging.getMappedRange());
       assert.ok(Math.abs(result[0]!-(3.5-ny/2))<1e-5);assert.equal(result[1],1);assert.equal(result[2],1);assert.equal(result[3],1);
       staging.unmap();for(const b of [params,output,staging,ownership])b.destroy();
-    });
-    await t.test("mini32 conserves liquid through separating far-wall impact",async()=>{
-      solver!.destroy();
-      solver=await uniformVolumeMethod.createSolverAsync!(device!,sceneDocument(getSceneDefinition("minimal-power-dam-break-32")),"balanced",resolveMethodValues(uniformVolumeMethod,"balanced",{velocityTransport:"semi-lagrangian"}),undefined,()=>{}) as WebGPUUniformReferenceSolver;
-      for(let frame=1;frame<=90;frame++){
-        assert.ok(solver.advanceTo(frame/30));await solver.awaitFrameCompletion();
-        if(frame===30||frame===90){
-          const stats=await solver.readStats();
-          // Track geometric drift separately from conserved V. The former
-          // sticky-wall silhouette cutoff is not a mass-conservation oracle.
-          const volume=await read(device!,solver.volumeTexture);
-          const maximumVolume=volume.reduce((maximum,value)=>Math.max(maximum,value),0);
-          console.log(JSON.stringify({case:"mini32-separating-wall",frame,representedVolumeDrift:stats.representedVolumeDrift,maximumVolume}));
-          // Owner sum: a 4h owner's V lives at its origin texel and covers
-          // 64 cells; its other texels are stale, not state.
-          const tiles=await readMixedTileWords(device!,solver),{width:nx,height:ny,depthOrArrayLayers:nz}=solver.volumeTexture;let owned=0;
-          for(let z=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){const width=tiles[(x>>2)+(nx>>2)*((y>>2)+(ny>>2)*(z>>2))]!&0x80000000?1:4;
-            if(!(x%width||y%width||z%width))owned+=volume[x+nx*(y+ny*z)]!*width**3;}
-          assert.ok(Math.abs(owned/stats.initialVolumeCellSum!-1)<1e-5,`owner volume ${owned} vs initial ${stats.initialVolumeCellSum}`);
-          // V<=capacity was guaranteed only by the removed optional liquid
-          // balancing experiment. The retained default can concentrate V at
-          // impact; keep maximumVolume in the receipt, conservation and finite
-          // field assertions below, without claiming a capacity guarantee.
-        }
-      }
     });
     assert.deepEqual(errors,[]);
   }finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}

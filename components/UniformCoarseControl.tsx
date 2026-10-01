@@ -1,6 +1,7 @@
 "use client";
 
 import { useSession } from "../lib/core/session/session-context";
+import { resolvedMethodValues } from "../lib/core/stores/method-store";
 import { Field, FieldList, FieldNote } from "./ui";
 
 /** Resolution is an accepted frame property, never a preparation/activation switch. */
@@ -10,6 +11,8 @@ export function UniformCoarseControl() {
   const scene = session.scene(state => state.scene);
   const info = session.diagnostics(state => state.gpuInfo);
   if (method.methodId !== "uniform-volume") return null;
+  const values = resolvedMethodValues(method);
+  const dynamic = values.coarsening === "dynamic";
   const regions = scene.fluid.refinementRegions?.length ?? 0;
   const ready = info?.uniformMixedGeneration !== undefined;
   const coarse = info?.uniformMixedCoarseTiles ?? 0;
@@ -22,6 +25,7 @@ export function UniformCoarseControl() {
       : "Resolution status appears when the simulation is ready."}</FieldNote>
     <FieldNote>{regions
       ? "Move, resize or remove regions to change resolution. Edits take effect after the current simulation step."
+      : dynamic ? "Dynamic coarsening chooses fine and coarse tiles as the water moves."
       : "No regions: fine cells throughout. Use the Region tool to draw a coarse area."}</FieldNote>
   </FieldList>;
 }

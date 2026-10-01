@@ -2,6 +2,12 @@
  * --scene=cm12-figure-7-256 --case=adaptive|coarse|mixed|fine --frames=40
  * --coarsening=dynamic|regions --out=/tmp/stage-scaling.json
  * --sharpening-baseline restores the previous boundary sweep scheduler for A/B.
+ * --surface-tolerance=0.125 probes smooth surface coarsening (h error units).
+ * --quality-every=12 captures canonical quality and diagnostic slices after timing.
+ * --pressure-reserve=1 adds one slot to the lagged plan instead of the full envelope.
+ * --warmup=1200 times late settling in throughput mode.
+ * --coarse-extension skips mixed front sweeps and seeds the 4h hierarchy directly.
+ * These experiments do not alter production policy or acceptance thresholds.
  * Run serially under the WebGPU lease. Adds timestamp boundaries around
  * existing encodes, never simulation passes. Mixed pins x<0 at 4h and x>=0
  * at h. All cases use the same scene, timestep and numerical parameters.
@@ -11,7 +17,7 @@ import {writeFileSync, mkdirSync, readFileSync, readdirSync} from "node:fs";
 import {createHash} from "node:crypto";
 import {dirname, resolve} from "node:path";
 import {pathToFileURL} from "node:url";
-import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
+import {managedGPUDevice,gpuCompilationManagerFor} from "../lib/core/gpu-compilation-manager";
 import {GPUStageTimestampRecorder} from "../lib/core/performance-trace";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {sceneDocument} from "../lib/core/scene-definition";
@@ -22,8 +28,14 @@ import {usePerformanceInstrumentationStore} from "../lib/core/stores/performance
 import {createProcessRetainedDawnGPU, type NodeDawnProvider} from "../lib/harness/node-dawn-provider";
 import {acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
+import {uniformGeometricCoarseSurfaceTolerance} from "../lib/methods/uniform/uniform-geometric-parameters";
+import {UniformMixedExtension} from "../lib/methods/uniform/uniform-mixed-extension";
 import type {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-uniform-reference";
 import type {UniformMixedFrameTrace} from "../lib/methods/uniform/uniform-mixed-frame";
+import {readMixedTexture,readMixedTileWords} from "../tests/helpers/uniform-mixed-native-fields";
+import {uniformQualityCensus} from "./uniform-quality-census";
+
+import {redistanceEveryStepReference} from "./uniform-redistance-reference";
 
 const fingerprint=()=>{
  const files=[...readdirSync("lib/methods/uniform",{recursive:true}).map(String).filter(p=>p.endsWith(".ts")).map(p=>`lib/methods/uniform/${p}`),"lib/core/scenes.ts","lib/core/cm12-paper-scenes.ts"].sort();
@@ -33,12 +45,24 @@ const sourceFingerprint=fingerprint();
 const arg=(key:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${key}=`))?.slice(key.length+3)??fallback;
 const kind=arg("case","adaptive"), sceneId=arg("scene","cm12-figure-7-256"), frames=Number(arg("frames","40")), dt=1/Number(arg("hz","60"));
 const sharpeningBaseline=process.argv.includes("--sharpening-baseline");
+const coarseExtension=process.argv.includes("--coarse-extension");
+const valueOverrides=JSON.parse(arg("values","{}"));
+const surfaceTolerance=uniformGeometricCoarseSurfaceTolerance(Number(arg("surface-tolerance",String(valueOverrides.coarseningSurfaceTolerance??0.5)))), qualityEvery=Number(arg("quality-every","0"));
+const pressureReserve=process.argv.some(a=>a.startsWith("--pressure-reserve="))?Number(arg("pressure-reserve","0")):undefined;
+assert.ok(pressureReserve===undefined||(Number.isInteger(pressureReserve)&&pressureReserve>=0&&pressureReserve<=7));
+assert.ok(pressureReserve===undefined||!process.argv.includes("--full-pressure-envelope"),"Choose a reserve or the full envelope");
+assert.ok(Number.isInteger(qualityEvery)&&qualityEvery>=0);
+const rebuildEveryStep=process.argv.includes("--rebuild-every-step"),inlineCurvature=process.argv.includes("--inline-curvature");
+const warmup=Number(arg("warmup","8"));
+assert.ok(Number.isInteger(warmup)&&warmup>=0);
 const throughput=process.argv.includes("--throughput"), out=resolve(arg("out",`/tmp/${kind}.json`));
+assert.ok(!throughput||qualityEvery===0,"Quality readbacks must not enter throughput measurements");
 assert.ok(["adaptive","coarse","mixed","fine"].includes(kind));
 assert.ok(Number.isInteger(frames)&&frames>8&&dt>0&&Number.isFinite(dt));
 const stats=(values:number[])=>{const s=values.toSorted((a,b)=>a-b);return {n:s.length,mean:s.reduce((a,b)=>a+b,0)/s.length,median:s[Math.floor(s.length/2)]!,p10:s[Math.floor(s.length*.1)]!,p90:s[Math.min(s.length-1,Math.floor(s.length*.9))]!};};
 const rows:{frame:number;wall_ms:number;trace:NonNullable<WebGPUUniformReferenceSolver["info"]["physicsTrace"]>;work:Record<string,unknown>}[]=[];
-let context:Record<string,unknown>={kind,sceneId,frames,dt_s:dt,throughput,sharpeningBaseline,sourceFingerprint};
+const qualitySnapshots:unknown[]=[];
+let context:Record<string,unknown>={kind,sceneId,frames,dt_s:dt,throughput,rebuildEveryStep,inlineCurvature,warmup,sharpeningBaseline,coarseExtension,sourceFingerprint,surfaceTolerance,pressureReserve,qualitySnapshots};
 const save=(value:unknown)=>{mkdirSync(dirname(out),{recursive:true});writeFileSync(out,JSON.stringify(value,null,2)+"\n");};
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 const leaseDeadline=Date.now()+300_000;let waiting=false;
@@ -62,6 +86,9 @@ try {
   Object.defineProperty(raw,"createShaderModule",{configurable:true,writable:true,value:(descriptor:GPUShaderModuleDescriptor)=>create({...descriptor,code:descriptor.code.includes("fn shSweepJobs(")?sharpeningReference(descriptor.code):descriptor.code})});
  }
  device=managedGPUDevice(raw,{requireWorkerRealm:false});
+ if(rebuildEveryStep){const compiler=gpuCompilationManagerFor(device),create=compiler.createShaderModule.bind(compiler);
+  compiler.createShaderModule=d=>create({...d,code:redistanceEveryStepReference(d.code)});
+ }
  const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
  const scene=sceneDocument(getSceneDefinition(sceneId));
  const roster=initializeRigidBodies(scene.rigidBodies);
@@ -71,7 +98,16 @@ try {
  const region=(id:string,width:number,minX:number,maxX:number)=>({id,rule:"minimum-cell-size" as const,minimumCellSize_cells:width,maximumCellSize_cells:width,min_m:{...bounds.min_m,x:minX},max_m:{...bounds.max_m,x:maxX}});
  if(kind!=="adaptive")scene.fluid.refinementRegions=kind==="mixed"?[region("coarse-half",4,-halfX,0),region("fine-half",1,0,halfX)]:[region("whole-domain",kind==="coarse"?4:1,-halfX,halfX)];
  const coarsening=arg("coarsening","dynamic");assert.ok(["regions","dynamic"].includes(coarsening));
- const values=resolveMethodValues(uniformVolumeMethod,"balanced",{...JSON.parse(arg("values","{}")),timeStep:"scene",coarsening});
+ const values=resolveMethodValues(uniformVolumeMethod,"balanced",{...valueOverrides,timeStep:"scene",coarsening,
+  ...(process.argv.some(a=>a.startsWith("--surface-tolerance="))?{coarseningSurfaceTolerance:surfaceTolerance}:{})});
+ if(coarseExtension){
+  const initialize=UniformMixedExtension.prototype.initialize;
+  UniformMixedExtension.prototype.initialize=function(){
+   // Probe-only selection of the existing coarse-source mode, before shader compilation.
+   (this as unknown as {regularBulk:boolean}).regularBulk=true;
+   return initialize.call(this);
+  };
+ }
  usePerformanceInstrumentationStore.getState().setEnabled(false);
  const start=performance.now();
  solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",values,undefined,()=>{}) as WebGPUUniformReferenceSolver;
@@ -98,9 +134,17 @@ try {
   finally{if(read.mapState==="mapped")read.unmap();read.destroy();}
  }
  return finalWork;};
+ if(inlineCurvature){
+  const force=target.mixedFrame.forces,encode=force.encode.bind(force);
+  force.encode=(e:GPUCommandEncoder,g:GPUBindGroup,capillarity:boolean)=>encode(e,g,capillarity,false);
+ }
+ if(pressureReserve!==undefined){
+  const frame=target.mixedFrame,advance=frame.advance.bind(frame);
+  frame.advance=(p:Record<string,unknown>,...args:unknown[])=>advance({...p,fullPressureEnvelope:false,pressureReserve},...args);
+ }
  if(process.argv.includes("--full-pressure-envelope")){
-  const frame=target.mixedFrame,get=frame.lagged.get.bind(frame.lagged);
-  frame.lagged.get=(key:number)=>get(key)?frame.initialPlan:undefined;
+  const frame=target.mixedFrame,advance=frame.advance.bind(frame);
+  frame.advance=(p:Record<string,unknown>,...args:unknown[])=>advance({...p,fullPressureEnvelope:true},...args);
   context.fullPressureEnvelope=true;
  }
  if(!throughput){
@@ -135,7 +179,7 @@ try {
  let elapsed_ms=0,lastSample=-1,dustMass=0;
  if(throughput){
   const advance=async(first:number,count:number)=>{for(let i=first;i<first+count;i+=2){for(let j=i;j<Math.min(i+2,first+count);j++)assert.ok(solver!.advanceTo(j*dt,roster));await solver!.awaitFrameCompletion();}await device!.queue.onSubmittedWorkDone();};
-  await advance(1,8);const start=performance.now();await advance(9,frames);elapsed_ms=performance.now()-start;
+  await advance(1,warmup);const start=performance.now();await advance(warmup+1,frames);elapsed_ms=performance.now()-start;
  }else for(let frame=1;frame<=frames;frame++){
   target.lastPhysicsTraceAt_ms=-Infinity;
   const start=performance.now();assert.ok(solver.advanceTo(frame*dt,roster));await solver.awaitFrameCompletion();await device.queue.onSubmittedWorkDone();const wall_ms=performance.now()-start;
@@ -149,6 +193,14 @@ try {
   const work=Object.fromEntries(Object.entries(info).filter(([key])=>/^(allocatedBytes|lastDt|encodedSteps|uniformMixed|uniformPressure|uniformVolumeDust|maxSpeed|volumeCellSum|volumeDrift)/.test(key)));
   if(process.argv.includes("--work-census"))work.stageLists=await readWork();
   rows.push({frame,wall_ms,trace:info.physicsTrace,work});
+  if(qualityEvery>0&&(frame===1||frame%qualityEvery===0||frame===frames)){
+   const fields=target.mixedFrame.fields;
+   const volume=await readMixedTexture(device,fields.volume),phi=await readMixedTexture(device,fields.phi);
+   const tiles=await readMixedTileWords(device,solver);
+   const quality=uniformQualityCensus([lattice.nx,lattice.ny,lattice.nz],tiles,volume,phi);
+   assert.equal(quality.nonfinite,0,"Canonical state must stay finite");
+   qualitySnapshots.push({frame,time_s:frame*dt,...quality});
+  }
   if(frame%10===0){console.log(JSON.stringify({kind,frame,wall_ms,gpu_ms:info.physicsTrace.total_ms}));save({...context,rows});}
  }
  const final={...await solver.readStats()};assert.equal(final.simulationPipelineError,undefined);assert.deepEqual(errors,[]);
@@ -156,7 +208,7 @@ try {
  const finalWork=await readWork();
  const selected=rows.filter(r=>r.frame>8),labels=[...new Set(selected.flatMap(r=>r.trace.phases.map(p=>p.label)))];
  const summary=throughput?{msPerStep:elapsed_ms/frames,elapsed_ms}: {wall_ms:stats(selected.map(r=>r.wall_ms)),gpu_ms:stats(selected.map(r=>r.trace.total_ms)),stages:labels.map(label=>({label,...stats(selected.map(r=>r.trace.phases.filter(p=>p.label===label).reduce((s,p)=>s+p.duration_ms,0)))})).sort((a,b)=>b.mean-a.mean)};
- const report={capturedAt:new Date().toISOString(),sourceFingerprint,sourceFingerprintAfter:fingerprint(),kind,sceneId,adapter:adapterInfo,backend:"Dawn/Metal",method:uniformVolumeMethod.id,dt_s:dt,frames,discardFrames:8,throughput,sharpeningBaseline,scope:"Simulation only; rendering excluded. Throughput uses two frames in flight without timestamps or per-frame stats. Trace mode fences each frame; GPU stage seams exclude CPU waits. First eight frames excluded.",scene,values,lattice,setup_ms,initial,final,finalWork,dustMass,summary,rows,validationErrors:errors};
- save({...report,fullPressureEnvelope:process.argv.includes("--full-pressure-envelope")});console.log(JSON.stringify({out,summary}));
-}catch(error){save({...context,rows,failure:error instanceof Error?error.message:String(error),final:solver?.info});throw error;
+ const report={capturedAt:new Date().toISOString(),sourceFingerprint,sourceFingerprintAfter:fingerprint(),kind,sceneId,adapter:adapterInfo,backend:"Dawn/Metal",method:uniformVolumeMethod.id,dt_s:dt,frames,discardFrames:throughput?warmup:8,throughput,rebuildEveryStep,inlineCurvature,warmup,sharpeningBaseline,scope:"Simulation only; rendering excluded. Throughput uses two frames in flight without timestamps or per-frame stats. Trace mode fences each frame; GPU stage seams exclude CPU waits. Warmup frames are reported in discardFrames.",scene,values,lattice,setup_ms,initial,final,finalWork,dustMass,summary,rows,validationErrors:errors};
+ save({...report,surfaceTolerance,pressureReserve:pressureReserve??(coarsening==="dynamic"&&surfaceTolerance>0?1:0),coarseExtension,qualitySnapshots,fullPressureEnvelope:process.argv.includes("--full-pressure-envelope")});console.log(JSON.stringify({out,summary}));
+}catch(error){save({...context,sourceFingerprintAfter:fingerprint(),rows,failure:error instanceof Error?error.message:String(error),final:solver?.info});throw error;
 }finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}

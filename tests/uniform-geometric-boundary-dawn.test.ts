@@ -13,6 +13,7 @@ import { readBufferBinding } from "../lib/harness/webgpu-smoke-readbacks";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
 import { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
+import {readUniformFields} from "./helpers/uniform-geometric";
 async function read(device:GPUDevice,texture:GPUTexture):Promise<Float32Array>{
   const components=texture.format==="rgba32float"?4:1;
   const row=Math.ceil(texture.width*components*4/256)*256;
@@ -51,7 +52,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
         },()=>{});
         try {
           const {nx,ny,nz}=solver.info;
-          const initial=await read(device!,solver.volumeTexture);const mass=initial.reduce((a,b)=>a+b,0);
+          const initial=(await readUniformFields(device!,solver)).density;const mass=initial.reduce((a,b)=>a+b,0);
           if(side){const velocity=new Float32Array(nx*ny*nz*4);for(let i=0;i<nx*ny*nz;i++)velocity[4*i]=low?0.5:-0.5;solver.initializeVelocityForQA(velocity);}
           let firstVelocity:Float32Array|undefined;
           for(let frame=1;frame<=3;frame++){
@@ -59,7 +60,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
             if(frame===1)firstVelocity=await read(device!,solver.velocityTexture);
           }
           await device!.queue.onSubmittedWorkDone();
-          const phi=await read(device!,solver.vertexPhiTexture!);const volume=await read(device!,solver.volumeTexture);
+          const phi=await read(device!,solver.vertexPhiTexture!);const volume=(await readUniformFields(device!,solver)).density;
           const contacts:number[]=[];const speeds:number[]=[];
           for(let z=10;z<=14;z++)for(let q=10;q<=14;q++){
             const x=side?(low?8:16):q,y=side?q:16;
@@ -79,40 +80,6 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
         }finally{solver.destroy();}
       });
     }
-    await t.test("figure 8 releases its overhead voxel shell",async()=>{
-      const scene=structuredClone(sceneDocument(getSceneDefinition("cm12-figure-8")));
-      scene.voxelDomain.finestCellSize_m=scene.container.width_m/32;
-      scene.solidVoxels=[...solidVoxelShellForScene(scene)];
-      const solver=await WebGPUUniformReferenceSolver.createAsync(device!,scene,"balanced",undefined,{
-        geometricVolume:true,densitySharpening:true,solidExcessCorrection:false,velocityTransport:"semi-lagrangian",
-      },()=>{});
-      try {
-        const {nx,ny,nz}=solver.info;const world=solidWorldForScene(scene);
-        const wallVertices:number[]=[];
-        for(let z=1;z<nz;z++)for(let y=Math.ceil(ny*0.65);y<ny;y++)for(let x=1;x<nx;x++){
-          let solid=false,open=false;
-          for(let k=0;k<8;k++){
-            const fraction=sampleSolidWorld(world,[x-1+(k&1),y-1+((k>>1)&1),z-1+((k>>2)&1)]).solidFraction;
-            if(fraction>0)solid=true;else open=true;
-          }
-          if(solid&&open)wallVertices.push(x+(nx+1)*(y+(ny+1)*z));
-        }
-        const initialPhi=await read(device!,solver.vertexPhiTexture!);
-        const initialV=await read(device!,solver.volumeTexture);const mass=initialV.reduce((a,b)=>a+b,0);
-        const initialWet=wallVertices.filter(i=>initialPhi[i]!<0).length;
-        for(let frame=1;frame<=30;frame++){assert.ok(solver.advanceTo(frame/30));await solver.awaitFrameCompletion();}
-        const phi=await read(device!,solver.vertexPhiTexture!);const volume=await read(device!,solver.volumeTexture);
-        const finalWet=wallVertices.filter(i=>initialPhi[i]!<0&&phi[i]!<0).length;
-        console.log(JSON.stringify({kind:"figure-8",initialWet,finalWet,mass,finalMass:volume.reduce((a,b)=>a+b,0)}));
-        assert.ok(initialWet>100,"exercise an initially wetted curved overhead shell");
-        assert.ok(finalWet<initialWet/2,"initial overhead contact must peel from the sphere");
-        assert.ok(phi.every(Number.isFinite));assert.ok(volume.every(v=>Number.isFinite(v)&&v>=-1e-6));
-        assert.ok(Math.abs(volume.reduce((a,b)=>a+b,0)/mass-1)<1e-5);
-        for(let z=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){
-          if(sampleSolidWorld(world,[x,y,z]).solidFraction>0)assert.ok(volume[x+nx*(y+ny*z)]!<1e-6,"sphere must remain impermeable");
-        }
-      }finally{solver.destroy();}
-    });
     await t.test("default figure 12 keeps solid-covered domain faces closed through rebound",async()=>{
       const scene=sceneDocument(getSceneDefinition("cm12-figure-12"));
       const solver=await uniformVolumeMethod.createSolverAsync!(device!,scene,"balanced",

@@ -99,9 +99,14 @@ params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit 
   options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
   hint:"Preserve overfill expansion and balance it globally with contraction in underfilled pressure-liquid cells, weighted by the existing surface-fill estimate. Reduces persistent sloshing; capped to the available deficit per step."});
 
+export const UNIFORM_GEOMETRIC_COARSE_SURFACE_TOLERANCE = 0;
+export function uniformGeometricCoarseSurfaceTolerance(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : UNIFORM_GEOMETRIC_COARSE_SURFACE_TOLERANCE;
+}
 params.push({kind:"select",key:"coarsening",label:"Coarsening",default:"dynamic",tier:"coarse",update:"runtime",
   options:[{value:"regions",label:"Regions"},{value:"dynamic",label:"Dynamic"}],
-  hint:"Regions: authored refinement regions choose coarse tiles. Dynamic: after every frame, only the tiles the surface can occupy during the next step (the RK2 departure boxes of their points hold the current surface) are fine; everything else coarsens to 4h. Authored regions can then only force fine. See docs/plans/uniform-dynamic-coarsening.md."});
+  hint:"Regions: authored refinement regions choose coarse tiles. Dynamic: bulk and air can use 4h cells; liquid surface tiles stay fine. Authored regions can force fine cells."});
 params.push({kind:"number",key:"coarseningBoundaryTravel",label:"Boundary impact travel",default:1,tier:"coarse",update:"runtime",
   min:0,max:64,step:0.5,digits:1,unit:"cells/step",
   hint:"Surface liquid a wall or solid redirects is fine whatever its speed: liquid moving at least this many fine cells per step toward a closed wall or solid it reaches within one 4h cell (impact), or up a closed side wall faster than along it (lift). At 4h such a sheet is thinner than an owner can pressurise, so it piles up instead of climbing. Free fast fronts are unaffected. 0 disables."});

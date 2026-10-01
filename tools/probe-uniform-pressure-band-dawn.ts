@@ -41,7 +41,7 @@ try{
    for(let x=0;x<=d[0];x++)for(let y=1;y<=d[1];y++)if(phi[x+(d[0]+1)*(y+(d[1]+1)*(d[2]/2))]!<0)surfaceFront=Math.max(surfaceFront,x);
   }
   if(step===10||step===20){
-   // uniform-long-dam-front-dawn.test.ts's toe mass: bounds 10-40 (frame 10), 200-800 (frame 20).
+   // Historical long-dam toe mass: bounds 10-40 (frame 10), 200-800 (frame 20).
    const volume=await readMixedTexture(device,fields.volumeA),layout=(solver as unknown as {mixedFrame:{ownership:{layout:{tiles:Uint32Array}}}}).mixedFrame.ownership.layout;
    const start=step===10?88:168;toeMass=0;
    for(let z=0;z<d[2];z++)for(let y=0;y<d[1];y++)for(let x=start;x<start+8;x++){

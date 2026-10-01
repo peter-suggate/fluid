@@ -22,6 +22,8 @@ export function uniformGeometricSolverOptions(overrides: MethodParamValues = {},
       orphanDustThreshold: Number(values.orphanDustThreshold),
       mixedCoarsening: values.coarsening === "regions" ? "regions" : "dynamic",
       mixedCoarseningBoundaryTravel: Number(values.coarseningBoundaryTravel),
+      // Disabled in production, including configurations saved while the experiment was enabled.
+      mixedCoarseningSurfaceTolerance: 0,
       phiCubicAdvection: values.phiCubicAdvection === "on",
       phiDrain: values.phiDrain === "on",
       phiPreserveSurface: values.phiPreserveSurface === "on",

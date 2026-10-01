@@ -21,21 +21,31 @@ export interface UniformMixedForceFields {
   /** h.xyz,dt; gravity,density,dynamic viscosity,surface tension;
    * noSlip,openTop,unused,dust threshold. All f32. */
   params: GPUBuffer;
+  /** Scratch dead until the following pressure authority writes phase. */
+  curvature?: GPUTexture;
+  /** Dead transport/sharpening arena, one vec4 per possible owner. */
+  normals?: GPUBufferBinding;
 }
 
 /** Apply native force terms once, after SL or MacCormack resampling. The
  * certified domain has no interior solids. Capillarity uses the same seam
  * reconstruction as pressure; viscosity uses physical local MAC spacing on
  * the frame's extended-velocity snapshot (umLaplacian).
+ * The optional cache evaluates each normal and curvature once per owner,
+ * instead of rebuilding their nested stencils at every incident face. Both
+ * buffers are borrowed; the caller can skip these passes when tension is zero.
  * Static solids touch unit owners only: capillarity skips faces with a
  * closed cell and curvature is one-sided at closed cells, as natively. */
 export class UniformMixedForces {
   readonly allocatedBytes = 0;
   private pipeline?: GPUComputePipeline;
+  private normalPipeline?: GPUComputePipeline;
+  private curvaturePipeline?: GPUComputePipeline;
+  private inlinePipelines?:GPUComputePipeline[];
   private regularFinePipeline?: GPUComputePipeline;
   private readonly resources: GPUBindGroupLayout;
   private regularCoarsePipeline?: GPUComputePipeline;
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid) {
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly cachedCurvature=false) {
     this.resources = device.createBindGroupLayout({ entries: [
       ...[1,2,3,10,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -43,13 +53,18 @@ export class UniformMixedForces {
       {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:8,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
+      ...(cachedCurvature?[{binding:12,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write" as const,format:"r32float" as const,viewDimension:"3d" as const}},{binding:13,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}]:[]),
       ...(sourceParams?[{binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
     ] });
   }
   bind(f: UniformMixedForceFields): GPUBindGroup {
     if(this.cachedGeometry&&!f.centerPhi)throw new Error("Mixed forces require current center phi for cached geometry");
+    if(this.cachedCurvature!==!!f.curvature||this.cachedCurvature!==!!f.normals)throw new Error("Mixed force curvature scratch must match the pipeline");
     const d=this.ownership.capacity.lattice.dimensions,coarse=f.coarseVelocity,unit=f.unitVelocity;
     if(coarse.format!=="rgba32float"||[coarse.width,coarse.height,coarse.depthOrArrayLayers].some((n,a)=>n!==d[a]!/4+2))throw new Error("Mixed force viscosity requires the 4h velocity cache");
+    if(f.curvature&&(f.curvature.format!=="r32float"||[f.curvature.width,f.curvature.height,f.curvature.depthOrArrayLayers].some((n,a)=>n!==d[a])||[f.phi,f.volume,f.centerPhi].includes(f.curvature)))throw new Error("Mixed force curvature requires disjoint native scalar scratch");
+    const normalBytes=16*d[0]*d[1]*d[2];
+    if(f.normals&&(f.normals.size??f.normals.buffer.size-(f.normals.offset??0))<normalBytes)throw new Error("Mixed force normal scratch is too small");
     if(unit.format!=="rgba32float"||[unit.width,unit.height,unit.depthOrArrayLayers].some((n,a)=>n!==d[a]))throw new Error("Mixed force viscosity requires resolved h velocity taps");
     for(const [i,t] of [f.advected,f.phi,f.volume,f.output].entries()){
       if([t.width,t.height,t.depthOrArrayLayers].some((n,a)=>n!==d[a]!+(i===1?1:0)) || t.format!==(i===1||i===2?"r32float":"rgba32float"))
@@ -64,6 +79,7 @@ export class UniformMixedForces {
       {binding:6,resource:{buffer:f.outputNegative}},{binding:7,resource:{buffer:f.params,size:48}},
       {binding:8,resource:(f.centerPhi??f.volume).createView()},
       {binding:10,resource:coarse.createView()},{binding:11,resource:unit.createView()},
+      ...(f.curvature?[{binding:12,resource:f.curvature.createView()},{binding:13,resource:{...f.normals!,size:normalBytes}}]:[]),
       ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:176}}]:[]),
     ]});
   }
@@ -80,6 +96,8 @@ struct UMForceParams {hDt:vec4f,physical:vec4f,controls:vec4f}
 @group(1) @binding(7) var<uniform> force:UMForceParams;
 @group(1) @binding(8) var centerPhi:texture_3d<f32>;
 override umCachedGeometry:bool=false;
+override umForceCached:bool=false;
+${this.cachedCurvature?"@group(1) @binding(12) var curvature:texture_storage_3d<r32float,read_write>; @group(1) @binding(13) var<storage,read_write> normals:array<vec4f>;":""}
 const UM_H=vec3f(${h.map(n=>`${n}`).join(",")});
 ${this.sourceParams?uniformMixedSourceWGSL(9):""}
 ${uniformMixedFaceAddressWGSL}
@@ -97,7 +115,7 @@ fn umOccupancy(owner:UMOwner)->f32 {
 // A coarse owner holding more than a twentieth of an h cell: its faces fall
 // (detached mass keeps them through projection; see uniform-mixed-detached-mass).
 fn umCoarseMass(owner:UMOwner)->bool{return owner.width>1u&&textureLoad(volume,vec3i(umOrigin(owner)),0).x*f32(owner.width*owner.width*owner.width)>max(force.controls.w,0.05);}
-fn umNormal(owner:UMOwner)->vec3f {
+fn umNormalRaw(owner:UMOwner)->vec3f {
  let origin=umOrigin(owner);var gradient=vec3f(0);
  for(var k=0u;k<8u;k++){
   let corner=umCorner(k,2u);
@@ -105,6 +123,11 @@ fn umNormal(owner:UMOwner)->vec3f {
  }
  return gradient/max(length(gradient),1e-6);
 }
+fn umNormal(owner:UMOwner)->vec3f{${this.cachedCurvature?"if(umForceCached){return normals[owner.index].xyz;}":""}return umNormalRaw(owner);}
+${this.cachedCurvature?`@compute @workgroup_size(64) fn cacheNormals(@builtin(global_invocation_id) gid:vec3u){
+ let owner=umAllOwner(gid);if(owner.width==0u){return;}
+ normals[owner.index]=vec4f(umNormalRaw(owner),0);
+}`:""}
 fn umCurvature(owner:UMOwner)->f32 {
  let center=umNormal(owner);var divergence=vec3f(0);
  for(var axis=0u;axis<3u;axis++){
@@ -121,6 +144,14 @@ fn umCurvature(owner:UMOwner)->f32 {
  }
  return -((divergence.x+divergence.z)+divergence.y);
 }
+// Geometry is unchanged between this owner pass and the face pass. A seam
+// owner can supply many faces: compute its curvature once, using exactly
+// the same stencil and reduction order as the inline evaluation.
+${this.cachedCurvature?`@compute @workgroup_size(64) fn cacheCurvature(@builtin(global_invocation_id) gid:vec3u){
+ let owner=umAllOwner(gid);if(owner.width==0u){return;}
+ textureStore(curvature,vec3i(umOrigin(owner)),vec4f(umCurvature(owner)));
+}`:""}
+fn umForceCurvature(owner:UMOwner)->f32{${this.cachedCurvature?"if(umForceCached){return textureLoad(curvature,vec3i(umOrigin(owner))).x;}":""}return umCurvature(owner);}
 fn umPressure(owner:UMOwner)->f32{return umOccupancy(owner);}
 fn umPressureSlope(owner:UMOwner)->vec3f{return umReconstructPressureSlope(owner);}
 ${uniformMixedPressureReconstructionWGSL}
@@ -156,7 +187,7 @@ fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32 {
  if(face.axis==1u&&(occupancy>1e-5||neighborOccupancy>1e-5||umCoarseMass(owner)||umCoarseMass(face.neighbor))){value+=dt*force.physical.x;}
  if(force.physical.w>0.0&&face.neighbor.width!=0u&&!umUnitClosed(owner)&&!umUnitClosed(face.neighbor)){
   let gradient=umReconstructedPressureGradient(owner,face);
-  if(gradient!=0.0){value+=dt*(force.physical.w/force.physical.y)*0.5*(umCurvature(owner)+umCurvature(face.neighbor))*gradient;}
+  if(gradient!=0.0){value+=dt*(force.physical.w/force.physical.y)*0.5*(umForceCurvature(owner)+umForceCurvature(face.neighbor))*gradient;}
  }
  ${this.sourceParams?`if(umSourceinflowStrength()>0.0){
   var sum=0.0;let u=(face.axis+1u)%3u;let v=(face.axis+2u)%3u;
@@ -194,23 +225,38 @@ fn umForcedVelocityFar(owner:UMOwner,face:UMFace,far:bool)->f32 {
 }
 ${uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocityFar(owner,face,far)",false,"","umForcesRegularCoarseOwner").replace(" let origin=umOrigin(owner);"," let origin=umOrigin(owner);let far=umFarAirOwner(owner);")}
 ${uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)")}
-`,["forcesRegular","forcesRegularCoarse","forces"])});
+`,["forcesRegular","forcesRegularCoarse","forces",...(this.cachedCurvature?["cacheNormals","cacheCurvature"]:[])])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
     const compile=(entryPoint:string,constants:Record<string,number>)=>uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{
-      umDispatchX:this.ownership.dispatchX,umCachedGeometry:+this.cachedGeometry,...constants,...s}}}));
+      umDispatchX:this.ownership.dispatchX,umCachedGeometry:+this.cachedGeometry,umForceCached:+this.cachedCurvature,...constants,...s}}}));
     // Seam tiles of every tier and the small regular tiers share one launch,
     // so their serial per-tile latencies overlap; seam 4h tiles pack four
     // per job (fusedQuad). Every launch is GPU-counted: a regular tier that
     // rides the fused launch counts zero jobs in its own (skipFused gate).
+    if(this.cachedCurvature)[this.normalPipeline,this.curvaturePipeline]=await Promise.all(["cacheNormals","cacheCurvature"].map(entry=>compile(entry,{umCountedJobs:UNIFORM_MIXED_COUNTED.all})));
     const skipFused=UNIFORM_MIXED_FUSED_GATE.skipFused;
     [this.pipeline,this.regularFinePipeline,this.regularCoarsePipeline]=await Promise.all([
       compile("forces",{umMergedTiles:1,umFusedJobs:1,umCountedJobs:UNIFORM_MIXED_COUNTED.fusedQuad}),
       compile("forcesRegular",{umCellWidth:1,umRegularTiles:1,umRegularFine:1,umCountedJobs:UNIFORM_MIXED_COUNTED.owners,umFusedRegularGate:skipFused}),
       compile("forcesRegularCoarse",{umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused})]);
+    if(this.cachedCurvature)this.inlinePipelines=await Promise.all([
+      compile("forces",{umForceCached:0,umMergedTiles:1,umFusedJobs:1,umCountedJobs:UNIFORM_MIXED_COUNTED.fusedQuad}),
+      compile("forcesRegular",{umForceCached:0,umCellWidth:1,umRegularTiles:1,umRegularFine:1,umCountedJobs:UNIFORM_MIXED_COUNTED.owners,umFusedRegularGate:skipFused}),
+      compile("forcesRegularCoarse",{umForceCached:0,umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused})]);
   }
-  encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
+  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,capillarity=true,useCache=this.cachedCurvature):void{
     if(!this.pipeline)throw new Error("Mixed forces are not initialized");
-    const pass=encoder.beginComputePass({label:"Uniform mixed body forces"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);const variant=(p:GPUComputePipeline)=>this.solid?.select(p)??p;this.ownership.dispatchTierCounted(pass,variant(this.regularFinePipeline!),0);this.ownership.dispatchRegularCoarseCounted(pass,variant(this.regularCoarsePipeline!));this.ownership.dispatchFusedCounted(pass,variant(this.pipeline));pass.end();
+    const pass=encoder.beginComputePass({label:"Uniform mixed body forces"});
+    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
+    const variant=(p:GPUComputePipeline)=>this.solid?.select(p)??p;
+    if(useCache&&capillarity&&this.curvaturePipeline){
+      this.ownership.dispatchAllCounted(pass,variant(this.normalPipeline!));
+      this.ownership.dispatchAllCounted(pass,variant(this.curvaturePipeline));
+    }
+    const [general,fine,coarse]=!useCache&&this.inlinePipelines?this.inlinePipelines:[this.pipeline,this.regularFinePipeline!,this.regularCoarsePipeline!];
+    this.ownership.dispatchTierCounted(pass,variant(fine!),0);
+    this.ownership.dispatchRegularCoarseCounted(pass,variant(coarse!));
+    this.ownership.dispatchFusedCounted(pass,variant(general!));pass.end();
   }
 }

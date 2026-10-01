@@ -13,6 +13,7 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import type { WebGPUUniformPressureMultigrid } from "../lib/methods/uniform/webgpu-uniform-pressure-multigrid";
 import type { UniformTexturePages } from "../lib/methods/uniform/uniform-texture-pages";
+import {readUniformFields} from "../tests/helpers/uniform-geometric";
 
 const arg = (key: string, fallback: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3) ?? fallback;
 const arm = arg("arm", "baseline");
@@ -154,13 +155,21 @@ try {
       console.log(JSON.stringify({arm,pressureDiagnostic}));
     }
     if (frame > 3 && frame % 10 && frame !== frames) continue;
-    const phi = await read(device, solver.vertexPhiTexture!), velocity = await read(device, solver.velocityTexture), volume = await read(device, solver.volumeTexture);
+    // Coarse owners carry averages; their fine backing texels and hanging
+    // vertices are not independent state. Measure the represented fields.
+    const fields=await readUniformFields(device,solver),volume=fields.density;
+    const velocity=await read(device,solver.velocityTexture);
+    const velocityAt=(i:number)=>{
+      const x=i%nx,y=Math.floor(i/nx)%ny,z=Math.floor(i/nx/ny),w=fields.widthAt(x,y,z);
+      const owner=x-x%w+nx*(y-y%w+ny*(z-z%w));
+      return velocity.subarray(4*owner,4*owner+3);
+    };
     const regions = { all: [] as number[], interior: [] as number[] };
     let missing = 0;
     for (const c of columns) {
       let height: number | undefined;
       for (let y = Math.max(0, surfaceY - 3); y < Math.min(ny, surfaceY + 4); y++) {
-        const a = phi[c.x + (nx + 1) * (y + (ny + 1) * c.z)]!, b = phi[c.x + (nx + 1) * (y + 1 + (ny + 1) * c.z)]!;
+        const a = fields.vertex(c.x,y,c.z), b = fields.vertex(c.x,y+1,c.z);
         if (a <= 0 && b > 0) height = y - a / (b - a);
       }
       if (height === undefined) { missing++; continue; }
@@ -169,7 +178,7 @@ try {
     }
     const surface = Object.fromEntries(Object.entries(regions).map(([key, a]) => [key, { count: a.length, mean_mm: a.reduce((s, v) => s + v, 0) / a.length, rms_mm: Math.sqrt(a.reduce((s, v) => s + v * v, 0) / a.length), max_mm: Math.max(...a.map(Math.abs)), range_mm: Math.max(...a) - Math.min(...a) }]));
     let maxSpeed = 0, excess = 0, sum = 0, maxCell = 0;
-    for (let i = 0; i < volume.length; i++) { const v = volume[i]!; assert.ok(Number.isFinite(v)); sum += v; excess += Math.max(0, v - open[i]!); if (v > 1e-5) { const speed = Math.hypot(velocity[i * 4]!, velocity[i * 4 + 1]!, velocity[i * 4 + 2]!); if (speed > maxSpeed) { maxSpeed = speed; maxCell = i; } } }
+    for (let i = 0; i < volume.length; i++) { const v = volume[i]!; assert.ok(Number.isFinite(v)); sum += v; excess += Math.max(0, v - open[i]!); if (v > 1e-5) { const speed = Math.hypot(...velocityAt(i)); if (speed > maxSpeed) { maxSpeed = speed; maxCell = i; } } }
     // The mixed path reports its accepted residual (the fine one) and has no
     // recovery: a rejected solve is a fatal frame, which fails the run.
     // Frame 0 has solved nothing yet.
@@ -178,7 +187,7 @@ try {
       const cells = [];
       for (let z = sample.maxCell[2]! - 1; z <= sample.maxCell[2]! + 1; z++) for (let y = surfaceY - 2; y <= surfaceY + 2; y++) for (let x = sample.maxCell[0]! - 1; x <= sample.maxCell[0]! + 1; x++) {
         const i = x + nx * (y + ny * z);
-        cells.push({ p: [x,y,z], open: open[i], volume: volume[i], velocity: [...velocity.subarray(4*i,4*i+4)], phi: Array.from({length:8}, (_, k) => phi[x+(k&1)+(nx+1)*(y+((k>>1)&1)+(ny+1)*(z+((k>>2)&1)))]) });
+        cells.push({ p: [x,y,z], open: open[i], volume: volume[i], velocity: [...velocityAt(i)], phi: Array.from({length:8}, (_, k) => fields.vertex(x+(k&1),y+((k>>1)&1),z+((k>>2)&1))) });
       }
       writeFileSync(`artifacts/pond-rest/${arm}-cells.json`, JSON.stringify(cells,null,2));
     }

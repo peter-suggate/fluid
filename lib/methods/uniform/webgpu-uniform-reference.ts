@@ -79,7 +79,7 @@ import { UNIFORM_ADVANCE_PHASE } from "./uniform-stages";
 export { UNIFORM_ADVANCE_PHASE } from "./uniform-stages";
 export { UNIFORM_FLUID_PIPELINE } from "./uniform-pipeline";
 import { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS } from "./parameters";
-import { uniformGeometricSharpeningSweeps, uniformGeometricSurfaceVolumeRounds } from "./uniform-geometric-parameters";
+import { uniformGeometricSharpeningSweeps, uniformGeometricSurfaceVolumeRounds, uniformGeometricCoarseSurfaceTolerance } from "./uniform-geometric-parameters";
 export { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS } from "./parameters";
 import { uniformFixedAdvanceReady, uniformFixedStep_s } from "./uniform-paper";
 import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
@@ -130,6 +130,8 @@ export interface WebGPUUniformReferenceOptions {
   mixedCoarseningHysteresis?: number;
   /** Travel in h per step from which boundary-redirected surface liquid is h (UniformMixedDynamicPolicy.boundaryTravel). */
   mixedCoarseningBoundaryTravel?: number;
+  /** Smooth surface simplification error in finest-cell units; zero keeps the surface h. */
+  mixedCoarseningSurfaceTolerance?: number;
   /**
    * Geometric only: the splash-survival controls
    * (docs/uniform-geometric-splash-dissipation-plan.md), both on by default.
@@ -435,6 +437,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedCoarseningReach: number;
   private mixedCoarseningHysteresis: number;
   private mixedCoarseningBoundaryTravel: number;
+  private mixedCoarseningSurfaceTolerance: number;
   /** Split pressure's own surface target and centre phi (UniformMixedFrameFields.pressureGeometry). */
   private mixedPressureGeometry?: { target: GPUTexture; centerPhi: GPUTexture };
   private totalSurfaceVolume: boolean;
@@ -838,6 +841,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedCoarseningReach = Number.isFinite(options.mixedCoarseningReach) ? Math.round(Math.min(8, Math.max(0, options.mixedCoarseningReach!))) : 0;
     this.mixedCoarseningHysteresis = Number.isFinite(options.mixedCoarseningHysteresis) ? Math.round(Math.min(4, Math.max(0, options.mixedCoarseningHysteresis!))) : 0;
     this.mixedCoarseningBoundaryTravel = Number.isFinite(options.mixedCoarseningBoundaryTravel) ? Math.min(64, Math.max(0, options.mixedCoarseningBoundaryTravel!)) : UNIFORM_MIXED_DYNAMIC_BOUNDARY_TRAVEL;
+    this.mixedCoarseningSurfaceTolerance = uniformGeometricCoarseSurfaceTolerance(options.mixedCoarseningSurfaceTolerance);
     const allocation = planUniformHostAllocation(nx, ny, nz, "maccormack");
     this.executionNegativeBoundaryVelocityBytes = allocation.boundaryVelocityBytes;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
@@ -1411,10 +1415,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.updateMixedRegions();
   }
   /** Horizon one: the frame head classifies the state the frame starts from
-   * for this frame's dt and advects on the generation it builds. Band
-   * pressure re-solves only h simulation tiles; a 4h surface tile has no h
-   * pressure at all (its rim liquid under an air 4h centre stops moving), so
-   * every surface tile stays h: no shape or speed exception. */
+   * for this frame's dt and advects on the generation it builds. Smooth
+   * surface tiles may use 4h; detail and impact protection retain h. This
+   * also selects surface pressure resolution, so broad motion and sheets
+   * are assessed by properties rather than an identical fine trajectory. */
   private mixedRelayout():UniformMixedFrameRelayout{
     const dynamic=this.mixedDynamic!,builder=this.mixedBuilder!;
     return {generation:builder.generation,receipt:builder.receipt,reasons:dynamic.reasons,encode:(encoder,dt,views)=>{
@@ -1422,7 +1426,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(staticKey!==this.mixedBuilderStaticKey)this.refreshMixedBuilderStatics(this.mixedSolidPromotion());
       const g=this.scene.fluid.gravity_m_s2;
       dynamic.encode(encoder,{dt,steps:1,gravity:[g.x,g.y,g.z],reach:this.mixedCoarseningReach,hysteresis:this.mixedCoarseningHysteresis,
-        surfaceTolerance:0,fastTravel:0,
+        surfaceTolerance:this.mixedCoarseningSurfaceTolerance,fastTravel:0,
         boundaryTravel:this.mixedCoarseningBoundaryTravel,closedWalls:this.scene.container.top==="open"?0b101111:0b111111,up:Math.sign(-g.y),
         fullTolerance:UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE,emptyTolerance:Math.max(this.volumeDustThreshold,1e-6),reasons:views},false);
       builder.encode(encoder,false);
@@ -2436,6 +2440,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         sharpeningDistance:this.sharpeningDistance,sharpeningSweeps:this.sharpeningSweeps,surfaceVolumeRounds:this.surfaceVolumeRounds,pressureTolerance:this.pressureMultigrid.residualTolerance,
         totalSurfaceVolume:this.totalSurfaceVolume,redistance:this.geometricRedistance,sharpening:this.densitySharpening,
         surfaceDeficitBalancing:this.surfaceDeficitBalancing,extensionSweeps:this.velocityExtrapolator.frontPasses,
+        // Smooth 4h surfaces can abruptly increase pressure demand at impact.
+        // One additional reserve covers long-dam frame 79's third cycle
+        // without encoding the full seven-slot envelope every frame.
+        pressureReserve:this.mixedCoarsening==="dynamic"&&this.mixedCoarseningSurfaceTolerance>0?1:0,
+        coarseSurfaceTravel:this.mixedCoarsening==="dynamic"&&this.mixedCoarseningSurfaceTolerance>0,
         supportPolicy:{fineReach:UNIFORM_TWO_LEVEL_FINE_REACH,shellReach:this.twoLevelShellReach,twoLevel:this.twoLevelEnabled,shellOnly:this.twoLevelEnabled},
       },this.mixedFrameTrace(),this.mixedGpuLayout,frameBodies);
       }catch(error){this.mixedRelayoutRead=undefined;this.failMixedFrame(error);return true;}

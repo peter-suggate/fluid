@@ -6,9 +6,9 @@ import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sam
 import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
-/** The surface claim buffer: the claimed launches' job counters, the six
- * wall-plane reach words (wallReach) and two pad words, then each plane's
- * per-tile reach words (wallReachTiles apiece). */
+/** Scratch prefix of the surface claim buffer: job counters, six wall-plane
+ * reach words and two pad words, then per-tile wall reach. Persistent coarse
+ * vertex travel follows this prefix and must survive its per-frame clear. */
 const SURFACE_CLAIM_WORDS=UNIFORM_MIXED_CLAIM_WORDS+8;
 /** Tiles of the largest domain plane: the stride of the per-tile reach words. */
 const wallReachTiles=(d:readonly number[])=>{const t=d.map(n=>n/4);return Math.max(t[0]!*t[1]!,t[1]!*t[2]!,t[2]!*t[0]!);};
@@ -24,7 +24,7 @@ export interface UniformMixedSurfaceFields {
   volume: GPUTexture;
   negative: GPUBuffer;
   departures: GPUTexture;
-  /** h.xyz, dt; flags (bit 0 openTop, bit 1 preserve), cubic, drain, loop bound (=4). */
+  /** h.xyz, dt; flags (bit 0 openTop, bit 1 preserve, bit 2 coarse travel cadence), cubic, drain, loop bound (=4). */
   params: GPUBuffer;
   /** One temporary surface-evidence word per tile, six wall words (plus two
    * pad), then with solids two words per tile (closed, clear); dead before transport. */
@@ -41,8 +41,8 @@ export interface UniformMixedSurfaceFields {
 export class UniformMixedSurface {
   readonly allocatedBytes:number;
   private readonly resources: GPUBindGroupLayout;
-  /** Job counters of the claimed certified launches (regular 0, general 1,
-   * merged 2), zeroed before each encoded stage. */
+  /** Job counters and wall reach, followed by accumulated characteristic
+   * travel at 4h vertices. Only the scratch prefix is cleared per frame. */
   readonly claims: GPUBuffer;
   private readonly pipelines = new Map<string, GPUComputePipeline>();
   private readonly regularPipelines=new Map<string,GPUComputePipeline>();
@@ -66,7 +66,7 @@ export class UniformMixedSurface {
       ...(hanging?[{binding:11,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}}]:[]),
       {binding:12,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
     ]});
-    this.allocatedBytes=4*surfaceClaimWords(ownership.capacity.lattice.dimensions);
+    this.allocatedBytes=4*(surfaceClaimWords(ownership.capacity.lattice.dimensions)+ownership.capacity.lattice.dimensions.reduce((n,d)=>n*(d/4+1),1));
     this.claims=device.createBuffer({label:"Uniform mixed surface job claims",size:this.allocatedBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     this.deferredGrid=Math.min(1024,Math.ceil(ownership.capacity.lattice.dimensions.reduce((a,n)=>a*(n+1),1)/64));
   }
@@ -331,9 +331,22 @@ fn umReleasedWalls(p:vec3f,value:f32)->f32{
   }
  }}return result;
 }
+const UM_TRAVEL_BASE:u32=${surfaceClaimWords(this.ownership.capacity.lattice.dimensions)}u;
+// A coarse rebuild has a spatial interpolation error even at u=0. Applying
+// it every small timestep makes that error a persistent artificial motion.
+// Accumulate characteristic travel in owner-cell units in the existing
+// advection kernels; rebuild after a cell traversal, retaining the remainder.
+// Fine vertices reset their 4h-aligned slots, so a later coarsening starts
+// from the fine path's freshly maintained distance field.
+fn umTravelIndex(p:vec3u)->u32{let q=p/4u;let d=UM_D/4u+vec3u(1);return UM_TRAVEL_BASE+q.x+d.x*(q.y+d.y*q.z);}
+fn umRecordTravel(p:vec3f,q:vec3f,width:u32){
+ if((params.flags.x&4u)==0u){return;}
+ if(width>1u){let i=umTravelIndex(vec3u(p));atomicStore(&umClaims[i],bitcast<u32>(bitcast<f32>(atomicLoad(&umClaims[i]))+length(p-q)/f32(width)));}
+ else if(all(vec3u(p)%4u==vec3u(0))){atomicStore(&umClaims[umTravelIndex(vec3u(p))],0u);}
+}
 fn umAdvected(p:vec3f,width:u32)->f32{
  ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){return umLoadVertex(vec3u(p));}
- let end=umSurfaceTrace(p);let walk=umWalk(p,end);let q=walk.q;`:"let q=umTrace(p);"}var value=umSampleVertex(q);
+ let end=umSurfaceTrace(p);let walk=umWalk(p,end);let q=walk.q;`:"let q=umTrace(p);"}var value=umSampleVertex(q);umRecordTravel(p,q,width);
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  if(params.flags.y!=0u&&abs(value)<2.0*h){value=umCubicPhi(q);}
  ${this.solid?/* wgsl */`value=umWallContact(p,value,width);
@@ -399,6 +412,7 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   if(params.flags.y!=0u&&abs(value)<2.0*h){value=umCubicPhi(q);}
   defer=defer||umReleasedMayChange(p,value);
   if(params.flags.z!=0u){value=umDrain(q,value,width);}value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
+  if(!defer){umRecordTravel(p,q,width);}
  }
  if(!defer){textureStore(outputPhi,vec3i(vertex),vec4f(value));return;}
  // Each canonical vertex is stored once: the list holds at most every vertex.
@@ -636,6 +650,13 @@ fn umPreserved(p:vec3f,initial:f32,width:u32)->bool{
  return false;
 }
 fn umRebuildBand(p:vec3f,initial:f32,width:u32)->bool{
+ if((params.flags.x&4u)!=0u&&width>1u&&bitcast<f32>(atomicLoad(&umClaims[umTravelIndex(vec3u(p))]))<1.0){
+  // The existing evidence distance is in tile units. Every tile incident
+  // to p lies within one tile of clamp(p-1)'s tile. Keep far-air rebuilding
+  // and retirement unconditional: residency relies on those certificates.
+  let tile=umTileAt(vec3u(clamp(vec3i(p)-vec3i(1),vec3i(0),vec3i(UM_D)-1))/4u);
+  if(params.flags.z==0u||evidence[tile]<=1u){return false;}
+ }
  if(umPreserved(p,initial,width)){return false;}
  let h=params.hDt.xyz;let band=4.0*f32(width)*max(h.x,max(h.y,h.z));
  return abs(initial)>1e-8&&abs(initial)<band${this.solid?"&&!umBuried(p)":""};
@@ -864,6 +885,7 @@ fn umBandCandidate(vertex:vec3u,width:u32){
  for(var i=lane;i<total;i+=64u){
   let word=umBandList[i];let vertex=vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);let width=1u<<(word>>30u);
   textureStore(outputPhi,vec3i(vertex),vec4f(umRebuildSearch(vec3f(vertex),umLoadVertex(vertex),width)));
+  if((params.flags.x&4u)!=0u&&width>1u){let i=umTravelIndex(vertex);atomicStore(&umClaims[i],bitcast<u32>(fract(bitcast<f32>(atomicLoad(&umClaims[i])))));}
  }
 }
 @compute @workgroup_size(64) fn advectOwners(@builtin(global_invocation_id) gid:vec3u){
@@ -923,10 +945,14 @@ fn umTraceCell(owner:UMOwner){
   }
   private twin(create:(solid:Record<string,number>)=>Promise<GPUComputePipeline>):Promise<GPUComputePipeline>{return uniformMixedSolidPipeline(this.solid,create);}
   private variant(pipeline:GPUComputePipeline):GPUComputePipeline{return this.solid?.select(pipeline)??pipeline;}
+  resetTravel(encoder:GPUCommandEncoder):void{
+    encoder.clearBuffer(this.claims,4*surfaceClaimWords(this.ownership.capacity.lattice.dimensions));
+  }
   encode(encoder:GPUCommandEncoder,entry:"advect"|"redistance"|"traceCells",group:GPUBindGroup):void{
     const pipeline=this.pipelines.get(entry);if(!pipeline)throw new Error("Mixed surface stage is not initialized");
-    // Only advect reads the wall reach words (its passes and the deferred one).
-    encoder.clearBuffer(this.claims,0,entry==="advect"?undefined:4*SURFACE_CLAIM_WORDS);
+    // Only advect reads wall reach. Travel beyond the scratch prefix is
+    // persistent, including across the intervening redistance/trace stages.
+    encoder.clearBuffer(this.claims,0,entry==="advect"?4*surfaceClaimWords(this.ownership.capacity.lattice.dimensions):4*SURFACE_CLAIM_WORDS);
     const pass=encoder.beginComputePass({label:`Uniform mixed surface ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);if(this.hanging)pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
     if(this.vertexCache&&entry!=="traceCells")this.ownership.dispatchHangingCounted(pass,this.variant(this.pipelines.get("vertexCache")!));
     if(entry==="advect"){
