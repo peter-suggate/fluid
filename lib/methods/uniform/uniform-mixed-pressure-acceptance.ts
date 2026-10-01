@@ -65,8 +65,9 @@ fn umCheck(initial:bool){
  atomicStore(&state[3],select(1u,0u,good));
  if(!good){atomicStore(&state[4],1u);atomicStore(&state[5],0u);atomicAdd(&state[6],1u);return;}
  atomicStore(&state[1],candidate);
- // state[2] is the initial (p=0, so RHS) norm: the absolute tolerance and a
- // relative reduction of it must both hold, so p=0 is never the answer.
+ // state[2] is the initial norm (the RHS for the band's p=0 start; the
+ // warm-started root's carried residual): the absolute tolerance and a
+ // relative reduction of it must both hold, so the start is never the answer.
  let bound=min(params.y,max(params.z*bitcast<f32>(atomicLoad(&state[2])),params.w));
  atomicStore(&state[5],select(0u,1u,params.y>0.0&&bitcast<f32>(candidate)<=bound));
 }

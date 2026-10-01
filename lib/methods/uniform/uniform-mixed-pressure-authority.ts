@@ -206,6 +206,14 @@ fn umDeficit(o:UMOwner,v:f32,distance:f32)->f32{
  if(cap<=1e-5||v>cap||distance>=0.0){return 0.0;}
  return max(0.0,textureLoad(targetFill,vec3i(umOrigin(o)),0).x${this.coarse?"*cap":""}-v);
 }
+// Air-side V above the geometric fill. Diverging transport leaves bulk
+// liquid V in a skin above phi; it is counted only in the deficit budget, so
+// the contraction that refills diluted liquid draws that skin back down.
+fn umStranded(o:UMOwner,v:f32,distance:f32)->f32{
+ let cap=umCapacity(o);
+ if(cap<=1e-5||distance<0.0||umDetachedMass(o)){return 0.0;}
+ return uvVolumeCorrectionFractionAt(params.x)*max(0.0,min(v,cap)-textureLoad(targetFill,vec3i(umOrigin(o)),0).x${this.coarse?"*cap":""});
+}
 // false: the phase-only build (phi and phase; no balance reduction).
 override umAuthorityBalance:bool=true;
 var<workgroup> sums:array<vec2f,64>;
@@ -220,6 +228,7 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
   values=vec2f(uvVolumeCorrectionAmountAt(v,cap,params.x),umDeficit(o,v,distance))*f32(o.width*o.width*o.width);
   // Native balance counts open liquid rows only.
   if(umSolidEnabled()&&(cap<=1e-5||distance>=0.0)){values=vec2f(0);}
+  values.x+=umStranded(o,v,distance)*f32(o.width*o.width*o.width);
   }
  }
  if(!umAuthorityBalance){return;}

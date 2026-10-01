@@ -317,7 +317,7 @@ export class UniformMixedFrame {
    // reaches pressure ownership in its (free) scratch field.
    const [rhsGroup,projectionGroup]=bindProjection({velocity:f.velocity,negative:f.negative},{velocity:f.velocityScratch,negative:f.negativeScratch},g.centerPhi,f.volumeScratch,fine);
    const transfer=new UniformMixedOwnershipTransfer(device,o,p);
-   const present=(label:string,bytes:number)=>buffer(`Uniform presented ${label}`,bytes,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST);
+   const present=(label:string,bytes:number)=>buffer(`Uniform presented ${label}`,bytes,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
    // The band's capacity never exceeds the tile count (its all-tile
    // diagnostic included), so the record holds any band this frame builds.
    const n=layout.tiles.length;this.stageBandTiles=n;
@@ -514,6 +514,13 @@ export class UniformMixedFrame {
    const split=this.split;
    split.transfer.encodeToPressure(encoder,split.toPressure);
    split.authority.encode(encoder,split.authorityGroup);
+   // Warm start: the root iterate begins at the last frame's presented
+   // pressure (fixed all-4h owners; buildRhs zeroes air). From p=0 every
+   // frame stopped at the same accepted residual, and a resting pool kept
+   // that one smooth divergence: it expanded each step, conservative
+   // transport diluted its V into a layer above phi, and the floor's lost
+   // volume later surfaced as a growing cavity.
+   {const to=this.levels[0]!.pressure;encoder.copyBufferToBuffer(this.presentation.pressure.buffer,0,to.buffer,to.offset??0,4*this.pressureWords);}
    this.projection.encode(encoder,"rhs",split.rhsGroup);this.cycles.encodeSetup(encoder);
    this.cycles.encodeMeasure(encoder);this.acceptance.encode(encoder,this.acceptanceGroup,this.state,"initial");
    trace?.phase(encoder,A.pressureSetup);

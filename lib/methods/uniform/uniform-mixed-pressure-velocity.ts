@@ -119,6 +119,14 @@ fn umPressurePhi(o:UMOwner)->f32{return phi[o.index];}
 ${uniformMixedPressureSurfaceWGSL}
 ${uniformMixedSolidWGSL(this.solid?2:undefined,this.coarse?this.solid!.coarse!.count:undefined)}
 fn umOpenTop(face:UMFace)->bool{return params.policy.y>0.5&&face.axis==1u&&face.sign>0;}
+// An owner more than its width below the surface: its domain walls hold (no
+// p=0 halo bound, no release). Only air can fill a separation gap, and air
+// reaches a wall only where the surface meets it. Deeper, a p=0 halo is
+// vacuum: the coarse-first pool's collapsing crater released the floor under
+// it, the release turned deep floor vertices to air, and the phi-only sheet
+// kept its tiles at h. The band keeps its clamped halo (holding it there
+// breaks the dam's monotone acceptance at the far-wall impact).
+fn umWallHeld(o:UMOwner)->bool{return umPressurePhi(o)< -f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z));}
 fn umFaceVelocity(face:UMFace)->f32 {
  if(face.anchor[face.axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
  return textureLoad(velocity,face.anchor,0)[face.axis];
@@ -192,10 +200,12 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
  if(liquid){let divergence=(terms[0]+terms[1])+(terms[4]+terms[5])+(terms[2]+terms[3]);
   value=-params.policy.x*(divergence-textureLoad(correction,vec3i(umOrigin(o)),0).x)/params.hDt.w;}
  rhs[o.index]=value;
- minimum[o.index]=${this.coarse?"select(-3.402823e38,0.0,topology.x<=1e-5)":this.solid?"select(-3.402823e38,0.0,o.width==1u&&umCellInsideSolid(vec3i(umOrigin(o))))":"-3.402823e38"};pressures[o.index]=0.0;
+ minimum[o.index]=${this.coarse?"select(-3.402823e38,0.0,topology.x<=1e-5)":this.solid?"select(-3.402823e38,0.0,o.width==1u&&umCellInsideSolid(vec3i(umOrigin(o))))":"-3.402823e38"};
+ // The coarse root warm-starts from the caller's last pressure; air holds 0.
+ pressures[o.index]=${this.coarse?"select(0.0,max(pressures[o.index],minimum[o.index]),liquid)":"0.0"};
  ${uniformMixedPressureBoundaryLoop(`let face=umFace(o,axis,sign,0u);let open=umOpenTop(face);
   let b=f32(sign)*params.policy.x*${this.coarse?"select(0.5*umFaceVelocity(face),umCutFlux(o,axis,sign)/16.0,umCoarseCut(o,axis,sign))":this.solid?"select(umLowFaceV(o,topology,axis),topology[axis+1u],sign>0)*umFaceVelocity(face)":"0.5*umFaceVelocity(face)"}/(f32(o.width)*UM_H[axis]*params.hDt.w);
-  rhs[halo]=select(0.0,b,liquid&&!open);minimum[halo]=select(0.0,-3.402823e38,open);pressures[halo]=0.0;`)}
+  rhs[halo]=select(0.0,b,liquid&&!open);minimum[halo]=select(0.0,-3.402823e38,open||umWallHeld(o));pressures[halo]=${this.coarse?"select(0.0,max(pressures[halo],minimum[halo]),liquid&&!open)":"0.0"};`)}
 }
 `;
   const projectSource=common+/* wgsl */`
@@ -253,7 +263,7 @@ fn umProjectWithSource(o:UMOwner,face:UMFace)->f32{
  return value;
 }
 fn umRelease(o:UMOwner,face:UMFace,v:f32)->bool{
- if(face.neighbor.width!=0u||umOpenTop(face)){return false;}
+ if(face.neighbor.width!=0u||umOpenTop(face)||umWallHeld(o)){return false;}
  ${this.coarse?"if(umSolidCoarse(o.index).x<=1e-5||umProjectV(o,face)<=1e-6){return false;}":this.solid?"if(o.width==1u&&(umCellOpen(vec3i(umOrigin(o)))<=1e-5||umProjectV(o,face)<=1e-6)){return false;}":""}
  let pressure=select(0.0,pressures[umBoundaryIndex(o,face.axis,face.sign)],umPressureLiquid(o));
  return pressure<=0.0&&-f32(face.sign)*v*params.hDt.w>1e-4*f32(o.width)*UM_H[face.axis];
