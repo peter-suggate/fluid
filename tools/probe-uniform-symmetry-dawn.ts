@@ -57,7 +57,7 @@ try{
  after(frame.extension,'encode',e=>{snap(e,'extension',"mac",f.velocityScratch);snap(e,'coarseIn','coarse' as Kind,frame.extension.hierarchy.input);snap(e,'coarseOut','coarse' as Kind,frame.extension.hierarchy.output);});
  after(frame.surface,'encode',(e,kind)=>{if(kind==='advect')snap(e,'phiAdvect','vertex',f.phiScratch);if(kind==='redistance')snap(e,'phiRedistance','vertex',f.phi);});
  after(frame.phiResolve,'encode',(e,group)=>{if(group===frame.phiResolveGroups.scratch)snap(e,'phiScratchResolved','vertex',f.phiScratch);else snap(e,'phiResolved','vertex',f.phi);});
- after(frame.transport,'encodeTransport',e=>snap(e,'transport','cell',f.volume));
+ after(frame.transport,'encodeTransport',e=>snap(e,'transport','cell',f.volumeScratch));
  after(frame.cleanup,'encode',e=>snap(e,'cleanup','cell',f.volume));
  after(frame.surfaceVolume,'encode',e=>snap(e,'surfaceVolumePhi','vertex',f.phi));
  after(frame.geometry,'encode',e=>{snap(e,'centerPhi','cell',f.centerPhi);snap(e,'target','cell',f.target);});

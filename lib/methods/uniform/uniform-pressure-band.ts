@@ -38,14 +38,20 @@ const SLOT_GROUPS=4096,MIDDLE_GROUPS=1024,COARSE_GROUPS=256;
 /** The h half sweeps run one colour's 32 cells of a slot per 32-lane group. */
 const CELL_GROUPS=2048;
 /** The single-workgroup 4h aggregate solve: up to this many lanes (the
- * device's workgroup limit), and the aggregates whose operator rows it holds
- * in registers. coarseBake stores the operator rows once per frame in colour
- * order (red from the front, black from the back): a larger band streams
- * them position by position (contiguous loads, no list-to-slot chain), and
- * keeps as many corrections as the device's workgroup memory holds in
- * workgroup memory, the rest in storage: the same red-black updates in the
- * same one launch, whatever the band's size. */
-const COARSE_SOLVE_LANES=1024,COARSE_SOLVE_SLOTS=1024;
+ * device's workgroup limit), and the aggregates it solves from registers
+ * (fig-9's band holds 3582; a device with less workgroup memory holds
+ * fewer). coarseBake stores the operator rows once per frame
+ * in colour order (red from the front, black from the back). The register
+ * path holds each lane's positions' diagonal, residual, slot and u16-packed
+ * neighbour slots, and its first position's couplings (all of them at up to
+ * one position per lane); the other couplings stream by position. A larger
+ * band streams its rows position by position (contiguous loads, no
+ * list-to-slot chain), and keeps as many corrections as the device's
+ * workgroup memory holds in workgroup memory, the rest in storage: the same
+ * red-black updates in the same one launch, whatever the band's size. A
+ * colour's rows couple only to the other colour's, so neither path's order
+ * changes a value. */
+const COARSE_SOLVE_LANES=1024,COARSE_SOLVE_SLOTS=4096;
 /** Band rows are field-major over CAP*64 rows: rhs, diagonal, face kinds,
  * the six face coefficients, u* per face, then with static solids the CM11a
  * V per face. A slot's 64 rows (and iterate values) are colour-major: each
@@ -116,9 +122,17 @@ export class UniformPressureBand {
  private readonly rows:GPUBuffer;
  private readonly coarse:GPUBuffer;
  private readonly solve:GPUBuffer;
- /** Band tiles one frame can hold: every tile the simulation can hold at h.
-  * More is a fatal receipt, never a fallback. */
+ /** Band tiles one frame can hold (capacityOf). More is a fatal receipt
+  * (the sticky bandCapacity failure), never a fallback. */
  readonly capacity:number;
+ /** The band capacity of a lattice of `tiles` 4^3 tiles: half of them, never
+  * fewer than 4096 (a whole 64^3 lattice). The band is the h tiles holding a
+  * liquid row, so it is bounded by the liquid's tiles, not by the lattice:
+  * measured peaks are 22% (fig-9, 3582 of 16384), 27% (128^3 dam, dynamic,
+  * 9k of 32768), 38% (the same, all-h, 12.6k) and 5% (fig7-256, 12.9k h
+  * tiles of 262144). Only an all-h layout over a container more than half
+  * full of liquid can reach it, and that run fails loudly. */
+ static capacityOf(tiles:number):number{return Math.min(tiles,Math.max(4096,Math.ceil(tiles/2)));}
  private readonly layouts=new Map<string,GPUBindGroupLayout>();
  private readonly groups=new Map<string,GPUBindGroup>();
  private readonly pipelines=new Map<string,GPUComputePipeline>();
@@ -136,8 +150,7 @@ export class UniformPressureBand {
   if(solid&&!solid.coarse)throw new Error("The solid pressure band needs the all-4h solid record");
   if(schedule.cycles<1||schedule.cycles>=HISTORY)throw new Error(`Pressure band cycles must be 1..${HISTORY-1}`);
   if(schedule.middleSweeps<1)throw new Error("The pressure band's 2h level needs a sweep: its first red half sweep carries the restriction and the prolongation");
-  // The simulation ownership reserves every tile at h (its capacity is fine).
-  this.capacity=tiles;
+  this.capacity=UniformPressureBand.capacityOf(tiles);
   this.rowFields=solid?SOLID_ROW_FIELDS:ROW_FIELDS;
   const rows=this.capacity*64,halo=2*(d[0]!*d[1]!+d[0]!*d[2]!+d[1]!*d[2]!);
   const limit=device.limits.maxStorageBufferBindingSize;
@@ -186,9 +199,10 @@ export class UniformPressureBand {
   const layout=this.simulation.layout,S=!!this.solid,schedule=this.schedule;
   // The coarse solve's workgroup-memory corrections: all the device holds
   // beside its four scalars (Tint pads each to 16 bytes), never fewer than
-  // the register path's.
-  const limits=this.device.limits,lanes=Math.min(COARSE_SOLVE_LANES,limits.maxComputeInvocationsPerWorkgroup,limits.maxComputeWorkgroupSizeX),held=Math.ceil(COARSE_SOLVE_SLOTS/lanes);
-  const shared=Math.min(this.capacity,4*Math.floor((limits.maxComputeWorkgroupStorageSize-128)/16));
+  // the register path's, whose positions per lane that memory bounds.
+  const limits=this.device.limits,lanes=Math.min(COARSE_SOLVE_LANES,limits.maxComputeInvocationsPerWorkgroup,limits.maxComputeWorkgroupSizeX);
+  const memory=4*Math.floor((limits.maxComputeWorkgroupStorageSize-128)/16),held=Math.max(1,Math.floor(Math.min(COARSE_SOLVE_SLOTS,memory)/lanes));
+  const shared=Math.min(this.capacity,memory);
   if(shared<Math.min(this.capacity,held*lanes))throw new Error(`Pressure band coarse solve needs ${4*held*lanes} bytes of workgroup memory`);
   const header=uniformMixedTopologyWGSL(layout,0)+uniformMixedFaceAddressWGSL+uniformMixedSolidWGSL(S?2:undefined,this.solid?.coarse?.count)+/* wgsl */`
 struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f}
@@ -637,9 +651,10 @@ var<workgroup> bMiddleResidual:array<f32,64>;
    // launch instead of two per sweep, chosen on the GPU from the live count.
    // The rows are coarseBake's colour-ordered positions: red [0,red), black
    // [black,n); a row whose diagonal vanishes has none and keeps its zero
-   // correction. Up to SOLVE_SLOTS positions sweep with their operator rows
-   // in registers; a larger band streams its rows from storage and keeps the
-   // first SHARED corrections in workgroup memory, the rest in storage.
+   // correction. Up to SOLVE_SLOTS positions sweep from registers (slots
+   // below 2^16: n bounds them); a larger band streams its rows from storage
+   // and keeps the first SHARED corrections in workgroup memory, the rest in
+   // storage.
    coarseSolve:band+/* wgsl */`
 const L:u32=${lanes}u;const HELD:u32=${held}u;const SOLVE_SLOTS:u32=L*HELD;const SHARED:u32=${shared}u;
 var<workgroup> bSolveCount:u32;
@@ -651,13 +666,14 @@ fn bCorrectionAt(s:u32)->f32{if(s<SHARED){return bCorrection[s];}return coarse[b
  if(lane==0u){let live=bLive();let r=min(bIndex(${RED_WORD}u),live);bSolveCount=live;bRedCount=r;bBlackStart=live-min(bIndex(${BLACK_WORD}u),live-r);}
  let n=workgroupUniformLoad(&bSolveCount);let red=workgroupUniformLoad(&bRedCount);let black=workgroupUniformLoad(&bBlackStart);
  if(n<=SOLVE_SLOTS){
-  var diagonal:array<f32,HELD>;var residual:array<f32,HELD>;var slot:array<u32,HELD>;var weight:array<f32,${6*held}>;var near:array<u32,${6*held}>;
+  var diagonal:array<f32,HELD>;var residual:array<f32,HELD>;var slot:array<u32,HELD>;var near:array<u32,${3*held}>;var weight:array<f32,6>;
   for(var k=0u;k<HELD;k++){
    let j=lane+k*L;diagonal[k]=0.0;
    if(j<n){bCorrection[j]=coarse[bC(0u,j)];}
    if(j<red||(j>=black&&j<n)){
     let s=bitcast<u32>(coarse[bC(15u,j)]);slot[k]=s;diagonal[k]=coarse[bC(2u,j)];residual[k]=coarse[bC(1u,s)];
-    for(var f=0u;f<6u;f++){weight[6u*k+f]=coarse[bC(3u+f,j)];near[6u*k+f]=bitcast<u32>(coarse[bC(17u+f,j)]);}
+    for(var f=0u;f<3u;f++){near[3u*k+f]=bitcast<u32>(coarse[bC(17u+2u*f,j)])|(bitcast<u32>(coarse[bC(18u+2u*f,j)])<<16u);}
+    if(k==0u){for(var f=0u;f<6u;f++){weight[f]=coarse[bC(3u+f,j)];}}
    }
   }
   workgroupBarrier();
@@ -666,7 +682,7 @@ fn bCorrectionAt(s:u32)->f32{if(s<SHARED){return bCorrection[s];}return coarse[b
     for(var k=0u;k<HELD;k++){
      let j=lane+k*L;
      if(diagonal[k]<=0.0||select(j>=red,j<black,c==1u)){continue;}
-     var off=0.0;for(var f=0u;f<6u;f++){let m=near[6u*k+f];if(m!=0u){off+=weight[6u*k+f]*bCorrection[m-1u];}}
+     var off=0.0;for(var f=0u;f<6u;f++){let m=(near[3u*k+f/2u]>>(16u*(f&1u)))&0xffffu;if(m!=0u){var w=weight[f];if(k!=0u){w=coarse[bC(3u+f,j)];}off+=w*bCorrection[m-1u];}}
      bCorrection[slot[k]]=(residual[k]+off)/diagonal[k];
     }
     workgroupBarrier();

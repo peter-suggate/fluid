@@ -1,7 +1,7 @@
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import { uniformMixedDetachedMassWGSL } from "./uniform-mixed-detached-mass.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedPageCount, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedPressureSurfaceWGSL } from "./uniform-mixed-pressure-surface.wgsl";
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
@@ -29,8 +29,6 @@ export interface UniformMixedPressureRhsFields extends CommonFields {
 }
 export interface UniformMixedPressureProjectionFields extends CommonFields {
  pressure:GPUBufferBinding;
- /** Geometric centre phi. Unread since airborne momentum was removed; drop with the frame binding. */
- centerPhi:GPUTexture;
  volume:GPUTexture;
  output:GPUTexture;
  outputNegative:GPUBufferBinding;
@@ -67,7 +65,7 @@ export class UniformMixedPressureVelocity {
   const uniform={binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}};
   const topology=coarse?[texture(8),storage(9)]:solid?[{binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"rgba32float" as const,viewDimension:"3d" as const}}]:[];
   this.rhsLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,texture(4),storage(5),storage(6),storage(7),...topology]});
-  this.projectLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,storage(4),texture(6),texture(7),
+  this.projectLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,storage(4),texture(7),
    {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),...(solid&&!coarse?[texture(11)]:[])]});
  }
  private scalar(view:GPUBufferBinding,count:number):GPUBufferBinding{
@@ -99,7 +97,7 @@ export class UniformMixedPressureVelocity {
   const d=this.ownership.layout.lattice.dimensions;
   return this.device.createBindGroup({layout:this.projectLayout,entries:[...this.common(f),
    {binding:4,resource:this.scalar(f.pressure,uniformMixedPressureStorage(this.ownership.layout).count)},
-   {binding:6,resource:f.centerPhi.createView()},{binding:7,resource:f.volume.createView()},{binding:8,resource:f.output.createView()},
+   {binding:7,resource:f.volume.createView()},{binding:8,resource:f.output.createView()},
    {binding:9,resource:this.scalar(f.outputNegative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
    ...(this.sourceParams?[{binding:10,resource:{buffer:this.sourceParams,size:176}}]:[]),
    ...(this.topology(f.topology)?[{binding:11,resource:f.topology!.createView()}]:[])]});
@@ -210,7 +208,6 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
 `;
   const projectSource=common+/* wgsl */`
 @group(1) @binding(4) var<storage,read_write> pressures:array<f32>;
-@group(1) @binding(6) var centerPhi:texture_3d<f32>;
 @group(1) @binding(7) var volume:texture_3d<f32>;
 @group(1) @binding(8) var output:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(9) var<storage,read_write> boundary:array<f32>;
@@ -304,6 +301,7 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
  }
  encode(encoder:GPUCommandEncoder,entry:"rhs"|"project",group:GPUBindGroup):void{
   const pipeline=entry==="rhs"?this.rhsPipeline:this.projectPipeline;if(!pipeline)throw new Error("Mixed pressure velocity stage is not initialized");
-  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);this.ownership.dispatchCounted(pass,this.solid?.select(pipeline)??pipeline);pass.end();
+  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);// The all-4h ownership's residentAll jobs are its resident pages.
+  this.ownership.dispatchCounted(pass,this.solid?.select(pipeline)??pipeline,uniformMixedPageCount(this.ownership.capacity.lattice));pass.end();
  }
 }

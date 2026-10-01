@@ -4,7 +4,8 @@ import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopo
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
-/** Native post-transport floors on canonical owners. The immutable input is
+/** Native post-transport orphan census on canonical owners (the regular
+ * floor is pointwise: transport's gather applies it). The immutable input is
  * retained for the entire orphan census; one discarded neighbour must not
  * make the next neighbour eligible. All fields and accounting are borrowed.
  * With static solids a partly open unit owner is exempt from the orphan
@@ -62,17 +63,11 @@ fn umDiscard(o:UMOwner,value:f32,threshold:f32,word:u32)->f32{
  umAccountDust(value,o.width*o.width*o.width,threshold,word);
  return 0.0;
 }
-override umOrphan:bool=false;
 fn umClean(o:UMOwner)->f32{
  let value=umVolume(o);let floor=tuning[0].z;let orphan=tuning[0].w;
  let origin=vec3i(umOrigin(o));let w=i32(o.width);
  let band=${4*Math.max(...h)}*f32(o.width);
- if(!umOrphan&&value!=0.0&&abs(value)<floor){
-  if(!(value>0.0&&umSampleVertex(vec3f(origin)+vec3f(0.5*f32(o.width)))<band)){
-   return umDiscard(o,value,floor,5u);
-  }
- }
- if(!umOrphan||!(floor>0.0&&orphan>floor&&value>0.0&&value<orphan)){return value;}
+ if(!(floor>0.0&&orphan>floor&&value>0.0&&value<orphan)){return value;}
  if(o.width==1u&&umCellOpen(origin)<0.99999){return value;}
  var mass=0.0;
  if(o.width==4u){
@@ -141,18 +136,16 @@ var<workgroup> cleanRows:array<vec2f,64>;
 `,["summarize","clean"])});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
-  await Promise.all(["floor","orphan"].map(async entry=>{this.pipelines.set(entry,await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"clean",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.all,umOrphan:Number(entry==="orphan"),...s}}})));}));
+  this.pipelines.set("clean",await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"clean",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.all,...s}}})));
   this.pipelines.set("summarize",await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"summarize",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.fused,...s}}})));
  }
  private variant(pipeline:GPUComputePipeline):GPUComputePipeline{return this.solid?.select(pipeline)??pipeline;}
- encode(encoder:GPUCommandEncoder,groups:readonly [GPUBindGroup,GPUBindGroup]):void{
-  for(const [i,entry] of ["floor","orphan"].entries()){
-   const pipeline=this.pipelines.get(entry);if(!pipeline)throw new Error("Mixed cleanup is not initialized");
-   const pass=encoder.beginComputePass({label:`Uniform mixed cleanup ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,groups[i]!);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
-   // Seams list fine tiles first; jobs past them only pass the barrier.
-   if(entry==="orphan")this.ownership.dispatchFusedCounted(pass,this.variant(this.pipelines.get("summarize")!));
-   this.ownership.dispatchAllCounted(pass,this.variant(pipeline));pass.end();
-  }
+ encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
+  const clean=this.pipelines.get("clean"),summarize=this.pipelines.get("summarize");if(!clean||!summarize)throw new Error("Mixed cleanup is not initialized");
+  const pass=encoder.beginComputePass({label:"Uniform mixed cleanup orphan"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
+  // Seams list fine tiles first; jobs past them only pass the barrier.
+  this.ownership.dispatchFusedCounted(pass,this.variant(summarize));
+  this.ownership.dispatchAllCounted(pass,this.variant(clean));pass.end();
  }
  destroy():void{this.summary.destroy();}
 }

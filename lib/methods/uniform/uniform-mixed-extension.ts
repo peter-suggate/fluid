@@ -57,8 +57,9 @@ export class UniformMixedExtension {
   * is the tier launch's (only the owner lookup differs), so one launch serves. */
  private readonly regularCoarseListPipelines=new Map<string,GPUComputePipeline>();
  private restrictPipeline?:GPUComputePipeline;
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy,private readonly regularBulk=false,private readonly directRestriction=false){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy,private readonly regularBulk=false,directRestriction=false){
   if(ownership.capacity.lattice.dimensions.some(n=>n%4!==0))throw new Error("Mixed extension requires a 4-aligned lattice");
+  if(!directRestriction)throw new Error("Mixed extension restricts the face-plane anchors directly");
   this.slotBytes=Math.ceil(8*extensionSlots(ownership.capacity.lattice.dimensions)/256)*256;
   this.scratchBytes=2*this.slotBytes;
   this.resources=device.createBindGroupLayout({entries:[
@@ -550,42 +551,56 @@ fn umCoarseCell(local:vec3u)->u32{return local.x+4u*(local.y+4u*local.z);}
 }
 fn umSourceIndex(p:vec3i)->u32{return u32(p.x+i32(UM_D.x)*(p.y+i32(UM_D.y)*p.z))+1u;}
 fn umSourcePoint(i:u32)->vec3i{let at=i-1u;return vec3i(vec3u(at%UM_D.x,(at/UM_D.x)%UM_D.y,at/(UM_D.x*UM_D.y)));}
-@compute @workgroup_size(4,4,4) fn restrictBand(@builtin(global_invocation_id) gid:vec3u){
- if(any(gid>=UM_T)){return;}let origin=vec3i(gid)*4;var values=vec4f(0);var lower=vec4u(0);var upper=vec4u(0);var mask=0u;
+// One lane per (tile, component) of a 4x4x4 tile block: component-major lane
+// order, so a SIMD group restricts one component.
+var<workgroup> rbValues:array<f32,192>;
+var<workgroup> rbLower:array<u32,192>;
+var<workgroup> rbUpper:array<u32,192>;
+@compute @workgroup_size(64,3) fn restrictBand(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_id) id:vec3u){
+ let gid=4u*group+vec3u(id.x%4u,(id.x/4u)%4u,id.x/16u);let component=id.y;let at=id.x+64u*component;
+ let inside=all(gid<UM_T);let origin=vec3i(gid)*4;let tile=umTileAt(min(gid,UM_T-vec3u(1)));
  // Off the extension support every face keeps its seed distance, and a
  // source face needs a liquid owner, which the support dilates around: no
  // face here is finite, so the restriction is the empty one written below.
  // Every slot read below is anchored in this tile: a supported tile whose
  // final mask is empty restricts to the same empty state.
- let tile=umTileAt(gid);let supported=any(ueMaskIn(tile)!=vec2u(0u));
- for(var component=0u;component<select(0u,3u,supported);component++){
-  if(gid[component]==UM_T[component]-1u&&!(component==1u&&h.w>0.5)){continue;}
+ let supported=inside&&any(ueMaskIn(tile)!=vec2u(0u));
+ rbValues[at]=0.0;rbLower[at]=0u;rbUpper[at]=0u;
+ if(supported&&!(gid[component]==UM_T[component]-1u&&!(component==1u&&h.w>0.5))){
   var location=vec3f(origin)+vec3f(2);location[component]+=2.0;
   var best=UM_INF;var sum=0.0;var count=0.0;var lo=vec3i(UM_D);var hi=vec3i(-1);
+  ${this.regularBulk?"let coarse=false;let patchWidth=1u;":`// A 4h tile's one owner has a single positive patch (width 4: only the
+  // first plane anchor resolves to it) or sixteen unit patches at the plane
+  // anchors; the fallback footprint holds no other patch. An h owner always
+  // has one unit patch at its positive anchor, even beside a coarse
+  // neighbour. No per-anchor owner or neighbour lookup is needed.
+  let coarse=umTileWidth(tile)!=1u;var patchWidth=1u;if(coarse){patchWidth=umFace(umOwnerAt(origin),component,1,0u).width;}`}
   // Restrict real MAC patches, with the native vertical footprint fallback.
-  for(var fallback=0u;fallback<select(1u,2u,component==1u);fallback++){
+  for(var fallback=0u;fallback<select(1u,2u,component==1u&&!coarse);fallback++){
    if(count>0.0){break;}
-   ${this.directRestriction?`// Preserve z/y/x order among the 16 face-plane anchors.
-   for(var k=0u;k<select(16u,64u,fallback!=0u);k++){
+   // Preserve z/y/x order among the 16 face-plane anchors.
+   for(var k=0u;k<select(select(16u,64u,fallback!=0u),1u,patchWidth==4u);k++){
     var local=umCorner(k,4u);
     if(fallback==0u){local=vec3u(k%4u,k/4u,3u);if(component==0u){local=vec3u(3u,k%4u,k/4u);}else if(component==1u){local=vec3u(k%4u,3u,k/4u);}}
-    let p=origin+vec3i(local);`:`for(var z=0u;z<4u;z++){for(var y=0u;y<4u;y++){for(var x=0u;x<4u;x++){
-    let p=origin+vec3i(vec3u(x,y,z));if(fallback==0u&&p[component]!=origin[component]+3){continue;}`}
-    ${this.directRestriction&&!this.regularBulk?`// An h owner always has one unit patch at its positive anchor,
-    // even beside a coarse neighbour. No neighbour lookup is needed here.
-    var face=UMFace();if(umTileWidth(umTileAt(gid))==1u){face=UMFace(UMOwner(),p,1u,1u,component,1);}
-    else{face=umPositiveFaceAtAnchor(umOwnerAt(p),component,p);}`:`let o=umOwnerAt(p);let face=umPositiveFaceAtAnchor(o,component,p);`}if(face.width==0u){continue;}
+    let p=origin+vec3i(local);
+    ${this.regularBulk?"let o=umOwnerAt(p);let face=umPositiveFaceAtAnchor(o,component,p);if(face.width==0u){continue;}":"let face=UMFace(UMOwner(),p,patchWidth,select(1u,16u,coarse&&patchWidth==1u),component,1);"}
     ${this.regularBulk?"if(!umSource(face,o)){continue;}":"let slot=stateIn[umSlot(face.anchor,component,face.width)];if(slot.y>=0.5*UM_INF){continue;}"}
     let delta=(umFaceCenter(face)-location)*h.xyz;let distance=dot(delta,delta);let epsilon=1e-6*max(1.0,distance);
     if(distance<best-epsilon){best=distance;sum=0.0;count=0.0;lo=vec3i(UM_D);hi=vec3i(-1);}
     if(abs(distance-best)<=epsilon){sum+=${this.regularBulk?"umPhysical(face)":"slot.x"};count+=1.0;
      // The whole tangential patch contributes its original support bounds.
      var end=face.anchor+vec3i(i32(face.width)-1);end[component]=face.anchor[component];lo=min(lo,face.anchor);hi=max(hi,end);}
-   ${this.directRestriction?"}":"}}}"}
+   }
   }
-  if(count>0.0){values[component]=sum/count;mask|=1u<<component;lower[component]=umSourceIndex(lo);upper[component]=umSourceIndex(hi);}
+  if(count>0.0){rbValues[at]=sum/count;rbLower[at]=umSourceIndex(lo);rbUpper[at]=umSourceIndex(hi);}
  }
- values.w=f32(mask);textureStore(coarseOut,vec3i(gid),values);textureStore(originsOut,vec3i(gid),lower);textureStore(originsOut,vec3i(gid)+vec3i(0,0,i32(UM_T.z)),upper);
+ workgroupBarrier();
+ if(component==0u&&inside){
+  var values=vec4f(0);var lower=vec4u(0);var upper=vec4u(0);var mask=0u;
+  // A restricted component's lower source index is at least 1.
+  for(var c=0u;c<3u;c++){values[c]=rbValues[id.x+64u*c];lower[c]=rbLower[id.x+64u*c];upper[c]=rbUpper[id.x+64u*c];if(lower[c]!=0u){mask|=1u<<c;}}
+  values.w=f32(mask);textureStore(coarseOut,vec3i(gid),values);textureStore(originsOut,vec3i(gid),lower);textureStore(originsOut,vec3i(gid)+vec3i(0,0,i32(UM_T.z)),upper);
+ }
 }
 ${farValueWGSL("umFarValue","textureLoad(coarse,p,0)","textureLoad(origins,p,0)[face.axis]","textureLoad(origins,p+vec3i(0,0,i32(UM_T.z)),0)[face.axis]")}
 // A regular fine publish workgroup is one tile; every far tap of its faces is

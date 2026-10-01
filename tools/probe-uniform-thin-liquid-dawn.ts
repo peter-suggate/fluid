@@ -113,7 +113,7 @@ try{
  };
  wrap(frame.surface,'encode',(e,kind)=>{if(kind==='advect'){snap(e,'phi.start','vertex',f.phi);snap(e,'V.start','cell',f.volume);}},
   (e,kind)=>{if(kind==='advect')snap(e,'phi.advect','vertex',f.phiScratch);if(kind==='redistance')snap(e,'phi.redistance','vertex',f.phi);});
- wrap(frame.transport,'encodeTransport',()=>{},e=>snap(e,'V.transport','cell',f.volume));
+ wrap(frame.transport,'encodeTransport',()=>{},e=>snap(e,'V.transport','cell',f.volumeScratch));
  wrap(frame.cleanup,'encode',()=>{},e=>snap(e,'V.cleanup','cell',f.volume));
  wrap(frame.surfaceVolume,'encode',()=>{},e=>snap(e,'phi.shift','vertex',f.phi));
  wrap(frame.sharpen,'encodeSweeps',()=>{},e=>snap(e,'V.sharpen','cell',f.volume));

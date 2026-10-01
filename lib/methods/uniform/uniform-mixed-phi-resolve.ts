@@ -68,14 +68,17 @@ var<workgroup> umResolveWords:array<u32,8>;var<workgroup> umResolveLattice:array
  // every lane reaches the barrier and a spare job leaves after it.
  let job=group.x+umDispatchX*group.y;
 ${job}
- if(valid&&lane<8u){let t=base+vec3i(umCorner(lane,2u))-vec3i(1);umResolveWords[lane]=select(0x80000000u,umTopology[umTileAt(vec3u(max(t,vec3i(0))))],all(t>=vec3i(0)));}
- else if(valid&&lane>=8u&&lane<35u){let v=(base+vec3i(umCorner(lane-8u,3u))-vec3i(1))*4;if(all(v>=vec3i(0))){umResolveLattice[lane-8u]=umLoadVertex(vec3u(v));}}
+ // c=0 (word 0) would serve only local 0 on every axis, a 4-aligned texel
+ // this pass never writes: words 1..7 are staged and scanned, and lattice
+ // slot 0 (reached only from c=0) is not staged.
+ if(valid&&lane>=1u&&lane<8u){let t=base+vec3i(umCorner(lane,2u))-vec3i(1);umResolveWords[lane]=select(0x80000000u,umTopology[umTileAt(vec3u(max(t,vec3i(0))))],all(t>=vec3i(0)));}
+ else if(valid&&lane>=9u&&lane<35u){let v=(base+vec3i(umCorner(lane-8u,3u))-vec3i(1))*4;if(all(v>=vec3i(0))){umResolveLattice[lane-8u]=umLoadVertex(vec3u(v));}}
  workgroupBarrier();
  if(!valid){return;}
  let local=umCorner(lane,5u);let p=vec3u(base)*4u+local;
  if(any((local==vec3u(4u))&(p!=UM_D))||all(p%4u==vec3u(0))){return;}
  var best=0xffffffffu;var at=vec3u(0);
- for(var k=0u;k<8u;k++){
+ for(var k=1u;k<8u;k++){
   let c=umCorner(k,2u);let word=umResolveWords[k];
   if(any((c==vec3u(0))&(local!=vec3u(0)))||(word&0xc0000000u)!=0u){continue;}
   if((word&0x3fffffffu)<best){best=word&0x3fffffffu;at=c;}

@@ -9,7 +9,7 @@
  * layout generation, 3-4 cause detail, 5 every cause seen (bit per cause,
  * atomicOr), 6 last accepted frame, 7 the current frame (the host writes it
  * before each advance), 8 the current layout generation (written on the GPU
- * by whoever adopts a layout: UniformMixedFrame.encodeLayoutGeneration),
+ * by whoever adopts a layout: the remap's markListed, from the receipt),
  * 9-15 reserved. */
 export const UNIFORM_MIXED_STATUS_WORDS=16;
 export const UNIFORM_MIXED_STATUS={cause:0,frame:1,generation:2,detail:3,causes:5,accepted:6,currentFrame:7,currentGeneration:8} as const;

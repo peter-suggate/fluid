@@ -1,5 +1,5 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { UNIFORM_MIXED_HANGING_TAPS, uniformMixedHangingTapWGSL, uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 
@@ -89,7 +89,7 @@ export class UniformMixedHangingTaps {
    * a coarse tile beside a unit tile is a seam tile), so its unit
    * interpolant is eight direct loads, as all-fine Uniform samples. */
   readonly unitVelocity:GPUTexture;
-  private pipelines:GPUComputePipeline[]=[];
+  private pipeline?:GPUComputePipeline;
   private readonly resources:GPUBindGroupLayout;
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership){
     this.resources=device.createBindGroupLayout({entries:[
@@ -112,10 +112,11 @@ export class UniformMixedHangingTaps {
     ]});
   }
   async initialize():Promise<void>{
-    // One phase per slot: its fine taps (the ungraded h/4h layout has no 2h
-    // taps to memoize first), then each unit tile's stored faces.
-    // Both entries are GPU-counted launches: hanging over the slots in use
-    // (UNIFORM_MIXED_COUNTED.hanging), unitFaces over the h tiles (tiles).
+    // One GPU-counted launch: each h tile's stored faces, four tiles per job,
+    // then one job per seam 4h slot filling its fine taps (the ungraded h/4h
+    // layout has no 2h taps to memoize first). A seam h tile's slot is never
+    // filled: umVelocityTap1 returns an h tile's stored face before it looks
+    // for a slot, so only 4h slots are read.
     const code=uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var extended:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read> negative:array<f32>;
@@ -144,33 +145,34 @@ fn umHangingFill(slot:u32,tile:u32,lane:u32){
   umHanging[umHangingPlaneAddress(slot,local,axis)]=bitcast<u32>(umVelocityTap1(index,axis));
  }
 }
-@compute @workgroup_size(256) fn hanging(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let slot=group.x+umDispatchX*group.y;var tile=UM_NO_SLOT;if(slot<UM_TILES){tile=umHanging[UM_TILES+slot];}
- if(tile!=UM_NO_SLOT){umHangingFill(slot,tile,lane);}
- workgroupBarrier();
- if(tile!=UM_NO_SLOT&&lane<64u){textureStore(unitVelocity,vec3i(umTileCoord(tile)*4u+umCorner(lane,4u)),vec4f(unitTaps[lane],unitTaps[lane+64u],unitTaps[lane+128u],0.0));}
-}
-// Each unit tile's stored faces (a slotted unit tile's fine taps are the same).
-@compute @workgroup_size(64) fn unitFaces(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let owner=umTileJobOwner(group);if(owner.width==0u){return;}
- let cell=vec3i(umTileCoord(owner.tile)*4u+umCorner(lane,4u));
- textureStore(unitVelocity,cell,textureLoad(extended,cell,0));
-}`,["hanging","unitFaces"]);
+// Seam 4h slots follow the seam h slots (the builder's and update()'s order);
+// slots past the cache are never visited (the builder flags UM_OVERFLOW_HANGING).
+fn umUnitJobs()->u32{return (umCounts.x+3u)/4u;}
+fn umCoarseSlots()->vec2u{let header=7u*UM_TILES+16u;let fine=umSupport[header];return vec2u(min(fine,UM_HANGING_SLOTS),min(fine+umSupport[header+1u],UM_HANGING_SLOTS));}
+@compute @workgroup_size(256) fn unitVelocityTaps(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let units=umUnitJobs();
+ if(group.x<units){
+  let k=4u*group.x+lane/64u;
+  if(k<umCounts.x){let cell=vec3i(umTileCoord(umTopology[UM_TILES+k])*4u+umCorner(lane%64u,4u));textureStore(unitVelocity,cell,textureLoad(extended,cell,0));}
+ }else{
+  let slot=umCoarseSlots().x+group.x-units;let tile=umHanging[UM_TILES+slot];
+  if(tile!=UM_NO_SLOT){umHangingFill(slot,tile,lane);}
+  workgroupBarrier();
+  if(tile!=UM_NO_SLOT&&lane<64u){textureStore(unitVelocity,vec3i(umTileCoord(tile)*4u+umCorner(lane,4u)),vec4f(unitTaps[lane],unitTaps[lane+64u],unitTaps[lane+128u],0.0));}
+ }
+}`,["unitVelocityTaps"],"umUnitJobs()+umCoarseSlots().y-umCoarseSlots().x");
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.ownership.hangingLayout]});
     const module=this.device.createShaderModule({code});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    const counted:readonly [string,Record<string,number>][]=[["hanging",{umCountedJobs:UNIFORM_MIXED_COUNTED.hanging}],["unitFaces",{umCountedJobs:UNIFORM_MIXED_COUNTED.tiles,umCellWidth:1}]];
-    this.pipelines=await Promise.all(counted.map(([entryPoint,constants])=>
-      this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants}}})));
+    this.pipeline=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"unitVelocityTaps",constants:{umDispatchX:this.ownership.dispatchX}}});
   }
   encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
-    if(this.pipelines.length!==2)throw new Error("Mixed hanging taps are not initialized");
-    // Fixed grids from capacity; the GPU counts the slots in use and the h
-    // tiles (unitFaces: forces viscosity reads every unit tile's texels, so
-    // they are refreshed even without a slotted tile). Both always launch.
+    if(!this.pipeline)throw new Error("Mixed hanging taps are not initialized");
+    // A fixed grid from capacity; the GPU counts the h tiles (forces
+    // viscosity reads every unit tile's texels, so they are refreshed even
+    // without a slot) and the seam 4h slots. At most one job per tile.
     const pass=encoder.beginComputePass({label:"Uniform mixed hanging fine taps"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);pass.setBindGroup(2,this.ownership.hangingGroup);
-    this.ownership.dispatchHangingCounted(pass,this.pipelines[0]!);
-    this.ownership.dispatchTierCounted(pass,this.pipelines[1]!,0,true);
+    this.ownership.dispatchCounted(pass,this.pipeline);
     pass.end();
   }
   destroy():void{this.unitVelocity.destroy();}

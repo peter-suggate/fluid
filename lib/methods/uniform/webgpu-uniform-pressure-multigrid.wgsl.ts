@@ -36,7 +36,8 @@ export { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE } from "./pressure-policy";
  * respell it. A value-identical rewrite is enough for Metal to reassociate and
  * for the native-vs-paged layout oracle to stop matching.
  */
-const MG_RESIDUAL_BODY = `  let residual=select(0.0,textureLoad(mgRhsIn,id,0).x-mgApply(id),mgBakedLiquid(id));
+const mgResidualAt = (p: string) => `select(0.0,textureLoad(mgRhsIn,${p},0).x-mgApply(${p}),mgBakedLiquid(${p}))`;
+const MG_RESIDUAL_BODY = `  let residual=${mgResidualAt("id")};
   textureStore(mgResidualOut,id,vec4f(residual));`;
 const MG_PROLONGATE_ADD_BODY = `  textureStore(mgPressureOut,id,vec4f(textureLoad(mgResidualIn,id,0).x+mgTrilinearPressure(id)));`;
 const MG_PROLONGATE_ASSIGN_BODY = `  textureStore(mgPressureOut,id,vec4f(mgTrilinearPressure(id)));`;
@@ -160,11 +161,11 @@ ${seeds}  if(mgBakedLiquid(vec3i(gid))){atomicStore(&mgTileLive,1u);}
  * row within one tile (itself included) is a WALL tile. Its halo cells still
  * carry work every cycle: prolongation writes them from coarse cells that are
  * not zero far from liquid (measured on fig7-256: up to 3.4e3 at impact), the
- * first sweep projects them onto p_min = 0, and mgDownsampleSubtract turns
+ * first sweep projects them onto p_min = 0, and mgTransition turns
  * them into the coarse halo's bound. Its remaining cells are inert: they are
  * air (no liquid row, so no stencil reads them and their residual is the zero
  * the setup seeds) and unconstrained (p_min is -FLT_MAX, which absorbs any
- * finite p in mgDownsampleSubtract and in mgShiftMinimum), exactly like the
+ * finite p in mgTransition and in mgShiftMinimum), exactly like the
  * air tiles the list already leaves out. So a wall tile is listed as one
  * entry per halo face it touches -- 16 cells, four entries per workgroup,
  * after the tiles -- instead of as a whole tile. A cell on a halo edge or
@@ -302,7 +303,7 @@ fn mgSmoothColourInPlace(@builtin(global_invocation_id) gid:vec3u){
 // of the cycle-dispatch buffer used by mgPublishCycleDispatch.
 var<workgroup> mgTileLive:atomic<u32>;
 // A cell whose p_min is finite is a CONSTRAINED row: solid, terrain or the
-// non-simulation halo. mgDownsampleSubtract takes max(p_min - p) over the
+// non-simulation halo. mgTransition takes max(p_min - p) over the
 // eight children, so a constrained child turns ITS pressure into a coarse
 // bound -- and the first sweep of every visit is what projects such a row
 // back up to p_min after prolongation pushed it under. Leaving them unlisted
@@ -313,7 +314,6 @@ ${mgBuildSmoothTilesEntry("mgBuildSmoothTiles","")}
 ${mgBuildSmoothTilesEntry("mgBuildSmoothTilesSeeded",`  if(mgValid(vec3i(gid),mg.levelDims.xyz)){
     textureStore(mgMinimumOut,vec3i(gid),vec4f(-3.402823e38));
     textureStore(mgResidualOut,vec3i(gid),vec4f(0.0));
-    textureStore(mgRhsOut,vec3i(gid),vec4f(0.0));
   }
 `)}
 // The per-cycle work list: liquid tiles dilated by one tile, plus every
@@ -973,20 +973,26 @@ fn mgBakeCoefficients(@builtin(global_invocation_id) gid:vec3u){
 textureStore(mgCoefficientsOut,id,vec4f(coefficients,select(0.0,1.0,mgLiquid(id))));`}
 }
 
-// CM11a Eq. 19-20. mgMinimumIn and mgPressureIn are the fine p_min and
-// current p; mgMinimumOut is the next-coarser constraint field.
+// One V-cycle descent, fine level to coarse, in one pass over the coarse
+// lattice: each child's residual (the mgResidual body) restricted straight
+// into the coarse RHS (cell-centred trilinear: the average of the eight
+// children; air rows carry a zero residual), the coarse correction cleared,
+// and CM11a Eq. 19-20's coarse bound downsampled from the fine p_min less the
+// fine p (mgMinimumIn, mgPressureIn; mgMinimumOut). The fine residual never
+// reaches a texture, so no list or far-field seed is needed for it.
 @compute @workgroup_size(4,4,4)
-fn mgDownsampleSubtract(@builtin(global_invocation_id) gid:vec3u){
+fn mgTransition(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}var lower=-3.402823e38;
-  for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let q=mgFineChild(id,o);${wallHalo ? `
+  let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}var terms:array<f32,8>;var lower=-3.402823e38;
+  for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let q=mgFineChild(id,o);
+    terms[corner]=${mgResidualAt("q")};${wallHalo ? `
     // Cycle lists leave unconstrained air rows unwritten, so their p is
     // whatever that texel last held. That is sound only while p_min = -FLT_MAX
     // absorbs it; fail the solve loudly the moment one does not.
     let minimum=textureLoad(mgMinimumIn,q,0).x;let bound=minimum-mgP(q);
     if(minimum<=-3.0e38&&bound>-3.0e38){atomicMax(&mgState.convergence[10],0x7f800000u);}
     lower=max(lower,bound);}` : `lower=max(lower,textureLoad(mgMinimumIn,q,0).x-mgP(q));}`}
-  textureStore(mgMinimumOut,id,vec4f(lower));
+  textureStore(mgRhsOut,id,vec4f(mgD4Sum8(terms)/8.0));textureStore(mgPressureOut,id,vec4f(0.0));textureStore(mgMinimumOut,id,vec4f(lower));
 }
 
 @compute @workgroup_size(4,4,4)

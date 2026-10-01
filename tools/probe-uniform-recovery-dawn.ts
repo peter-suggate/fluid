@@ -76,7 +76,7 @@ try{
   const original=object[key].bind(object);object[key]=(...args:any[])=>{before(args[0]);const result=original(...args);after(args[0]);return result;};
  };
  wrap(stage,'encodeTransport',()=>{},e=>{
-  snapshot(e,'transportIn',f.volumeScratch);snapshot(e,'transportOut',f.volume);
+  snapshot(e,'transportIn',f.volume);snapshot(e,'transportOut',f.volumeScratch);
   const pass=e.beginComputePass({label:'Recovery probe excess'});pass.setPipeline(excessPipeline);pass.setBindGroup(0,excessGroup);
   pass.dispatchWorkgroups(Math.ceil(size[0]/4),Math.ceil(size[1]/4),Math.ceil(size[2]/4));pass.end();
   // The same rows, donor sums and live lists the V gather just read.

@@ -1,5 +1,5 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedPageCount, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryLoop, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
 
 export interface UniformMixedPressureAcceptanceFields {
@@ -10,8 +10,30 @@ export interface UniformMixedPressureAcceptanceFields {
   * the initial residual, absolute floor of the relative bound (1/s). */
  params:GPUBuffer;
 }
-/** GPU-only convergence gate. A nonfinite or worsening iterate latches a
- * terminal failure. This stage cannot mutate pressure or launch repair work.
+/** The checkpoint verdict on the reduced candidate (state[0]), run by the
+ * pressure schedule's next gate (one lane, `params` the acceptance uniform):
+ * a nonfinite or worsening candidate latches a terminal failure. The initial
+ * verdict records the initial norm. */
+export const uniformMixedPressureVerdictWGSL=(params:string)=>/* wgsl */`
+fn umCheck(initial:bool){
+ let candidate=state[0];
+ let finite=candidate<0x7f800000u;
+ let good=finite&&(initial||candidate<=state[1]);
+ if(initial){state[2]=candidate;}
+ if(state[4]!=0u){return;}
+ state[3]=select(1u,0u,good);
+ if(!good){state[4]=1u;state[5]=0u;state[6]+=1u;return;}
+ state[1]=candidate;
+ // state[2] is the initial norm (the RHS for the band's p=0 start; the
+ // warm-started root's carried residual): the absolute tolerance and a
+ // relative reduction of it must both hold, so the start is never the answer.
+ let bound=min(${params}.y,max(${params}.z*bitcast<f32>(state[2]),${params}.w));
+ state[5]=select(0u,1u,${params}.y>0.0&&bitcast<f32>(candidate)<=bound);
+}`;
+/** GPU-only convergence measure: the reduction of a checkpoint's candidate
+ * norm, whose verdict (uniformMixedPressureVerdictWGSL) the schedule's next
+ * gate runs, and which that gate clears before each open slot. This stage
+ * cannot mutate pressure or launch repair work.
  * Root residuals include the projected wall constraints.
  *
  * The norm is h-equivalent: an owner's divergence times its width. A face
@@ -19,7 +41,8 @@ export interface UniformMixedPressureAcceptanceFields {
  * lets a width-w owner keep w times the velocity error of an h cell (an
  * all-4h solve accepted a resting pool's uncancelled gravity for 3 frames).
  * The reduction strides the resident pages' owners (residentAll): an absent
- * page is certified far air whose residual the root setup zeroes. */
+ * page is certified far air whose residual the root setup zeroes. The all-4h
+ * ownership has no h jobs, so its launch is sized to its pages. */
 export class UniformMixedPressureAcceptance {
  readonly allocatedBytes=0;
  private readonly resources:GPUBindGroupLayout;
@@ -56,38 +79,20 @@ var<workgroup> maxima:array<u32,64>;
  // state[0] >= 0u: a zero group maximum (all-air groups) is a no-op max.
  if(lane==0u&&maxima[0]!=0u){atomicMax(&state[0],maxima[0]);}
 }
-fn umCheck(initial:bool){
- let candidate=atomicLoad(&state[0]);
- let finite=candidate<0x7f800000u;
- let good=finite&&(initial||candidate<=atomicLoad(&state[1]));
- if(initial){atomicStore(&state[2],candidate);}
- if(atomicLoad(&state[4])!=0u){return;}
- atomicStore(&state[3],select(1u,0u,good));
- if(!good){atomicStore(&state[4],1u);atomicStore(&state[5],0u);atomicAdd(&state[6],1u);return;}
- atomicStore(&state[1],candidate);
- // state[2] is the initial norm (the RHS for the band's p=0 start; the
- // warm-started root's carried residual): the absolute tolerance and a
- // relative reduction of it must both hold, so the start is never the answer.
- let bound=min(params.y,max(params.z*bitcast<f32>(atomicLoad(&state[2])),params.w));
- atomicStore(&state[5],select(0u,1u,params.y>0.0&&bitcast<f32>(candidate)<=bound));
-}
-// clearBuffer of the candidate (a cycle) or the whole receipt (initial), in the pass.
+// clearBuffer of the whole receipt before the initial reduction, in the pass.
 @compute @workgroup_size(1) fn resetInitial(){for(var i=0u;i<8u;i++){atomicStore(&state[i],0u);}}
-@compute @workgroup_size(1) fn resetCycle(){if(umSlotClosed()){return;}atomicStore(&state[0],0u);}
-@compute @workgroup_size(1) fn initial(){umCheck(true);}
-@compute @workgroup_size(1) fn cycle(){if(umSlotClosed()){return;}umCheck(false);}
 
 `,["reduce"])});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-  await Promise.all(["resetInitial","resetCycle","reduce","initial","cycle"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll}}}));}));
+  await Promise.all(["resetInitial","reduce"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll}}}));}));
  }
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,state:GPUBuffer,kind:"initial"|"cycle"):void{
-  if(this.pipelines.size!==5)throw new Error("Mixed pressure acceptance is not initialized");
+  if(this.pipelines.size!==2)throw new Error("Mixed pressure acceptance is not initialized");
   if(this.states.get(group)!==state)throw new Error("Mixed pressure acceptance group does not bind this state");
   const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${kind} checkpoint`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
-  for(const entry of [kind==="initial"?"resetInitial":"resetCycle","reduce",kind]){const pipeline=this.pipelines.get(entry)!;pass.setPipeline(pipeline);
-   if(entry==="reduce")this.ownership.dispatchCounted(pass,pipeline);else pass.dispatchWorkgroups(1);
+  for(const entry of kind==="initial"?["resetInitial","reduce"]:["reduce"]){const pipeline=this.pipelines.get(entry)!;pass.setPipeline(pipeline);
+   if(entry==="reduce")this.ownership.dispatchCounted(pass,pipeline,uniformMixedPageCount(this.ownership.capacity.lattice));else pass.dispatchWorkgroups(1);
   }
   pass.end();
  }

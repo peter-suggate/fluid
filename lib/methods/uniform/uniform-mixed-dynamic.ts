@@ -1,7 +1,6 @@
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import type {UniformMixedBandBits} from "./uniform-mixed-layout-builder";
 import {uniformMixedPageCount,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
-import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import {UNIFORM_STAGE_REASON as REASON} from "./uniform-stage-grids";
 
@@ -155,7 +154,8 @@ export interface UniformMixedDynamicCensus {
 export class UniformMixedDynamicClassifier {
  readonly allocatedBytes:number;
  private readonly work:GPUBuffer;
- /** Cube table levels 1..CUBE_LEVELS, component-major over start tiles. */
+ /** Cube table levels 1..CUBE_LEVELS, component-major over start tiles,
+  * then the (T+1)³ interface prefix table. */
  private readonly bounds:GPUBuffer;
  private readonly readback:GPUBuffer;
  private readonly params:GPUBuffer;
@@ -208,7 +208,7 @@ export class UniformMixedDynamicClassifier {
   const tiles=ownership.capacity.tiles;
   this.words=Math.ceil(tiles/32);
   const t=ownership.capacity.lattice.dimensions.map(n=>n/4);
-  this.wetOffset=HEADER+this.words+6*tiles+(t[0]!+1)*(t[1]!+1)*(t[2]!+1)+2*tiles;
+  this.wetOffset=HEADER+this.words+8*tiles;
   this.nearOffset=this.wetOffset+2*this.words+tiles;
   this.pages=uniformMixedPageCount(ownership.capacity.lattice);
   // After wet and active: band reasons (a word per tile), then near bits
@@ -224,7 +224,7 @@ export class UniformMixedDynamicClassifier {
   this.joinTiles=device.createBuffer({label:"Uniform dynamic ownership join tiles",size:2*this.words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   if(source&&source.size<SOURCE_PARAMS_BYTES)throw new Error(`Dynamic ownership source params hold ${source.size} bytes, expected at least ${SOURCE_PARAMS_BYTES}`);
   if(!source)this.noSource=device.createBuffer({label:"Uniform dynamic ownership no source",size:SOURCE_PARAMS_BYTES,usage:GPUBufferUsage.UNIFORM});
-  const boundsBytes=6*CUBE_LEVELS*tiles*4;
+  const boundsBytes=(6*CUBE_LEVELS*tiles+(t[0]!+1)*(t[1]!+1)*(t[2]!+1))*4;
   this.bounds=device.createBuffer({label:"Uniform dynamic ownership bound cubes",size:boundsBytes,usage:GPUBufferUsage.STORAGE});
   this.allocatedBytes=workBytes+boundsBytes+readBytes+64+this.words*16+(this.noSource?SOURCE_PARAMS_BYTES:0);
   this.resources=device.createBindGroupLayout({entries:[
@@ -260,10 +260,10 @@ struct DynamicPolicy {step:vec4f,reach:vec4u,surface:vec4f,flow:vec4f}
 // Joined tiles: GPU producer words, then host words (joinTarget, join).
 @group(1) @binding(7) var<storage,read> joinTiles:array<u32>;
 ${uniformMixedSourceWGSL(8)}
-// The census tail follows the frame's last phi resolve: hanging texels hold
-// umVertexValue, so vertex reads are direct loads.
+// The census tail follows the frame's last phi resolve: every texel of a
+// mixed-stencil tile holds umVertexValue, and the census reads only vertices
+// of an h tile's closure or 4-aligned ones, so umVertexValue is this load.
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
-${uniformMixedVertexSamplingSource("",true)}
 const CAP:u32=${cap}u;
 // Largest travel, in h per step, boundary tiles dilate by (a 4-tile radius).
 const BOUNDARY_TRAVEL_CAP:u32=16u;
@@ -275,15 +275,17 @@ fn boundIndex(t:u32,k:u32)->u32{return ${HEADER}u+WORDS+6u*t+k;}
 // the cube [s, s+2^j)³ clipped to the domain.
 const CUBE_LEVELS:u32=${CUBE_LEVELS}u;
 fn cubeIndex(j:u32,k:u32,s:vec3i)->u32{return ((j-1u)*6u+k)*UM_TILES+umTileAt(vec3u(s));}
-// Inclusive prefix sum of interface flags over tiles, with a zero border plane.
+// Inclusive prefix sum of interface flags over tiles, with a zero border
+// plane, after the cube table. Each pass writes disjoint entries and reads
+// only earlier passes': plain words, not census atomics.
 const PX:u32=UM_T.x+1u;const PY:u32=UM_T.y+1u;const PZ:u32=UM_T.z+1u;
-fn prefixIndex(p:vec3u)->u32{return ${HEADER}u+WORDS+6u*UM_TILES+p.x+PX*(p.y+PY*p.z);}
+fn prefixIndex(p:vec3u)->u32{return 6u*CUBE_LEVELS*UM_TILES+p.x+PX*(p.y+PY*p.z);}
 // The zero border planes are implicit: never cleared, written or loaded.
-fn prefixLoad(p:vec3u)->u32{if(any(p==vec3u(0u))){return 0u;}return atomicLoad(&census[prefixIndex(p)]);}
+fn prefixLoad(p:vec3u)->u32{if(any(p==vec3u(0u))){return 0u;}return bounds[prefixIndex(p)];}
 // Per required tile: cells between each face and the nearest crossing owner,
 // one nibble per face (-x,-y,-z,+x,+y,+z), and its own travel in whole h
 // cells per step in the top byte; all ones for a tile that is not required.
-fn gapIndex(t:u32)->u32{return prefixIndex(vec3u(0u))+PX*PY*PZ+t;}
+fn gapIndex(t:u32)->u32{return ${HEADER}u+WORDS+6u*UM_TILES+t;}
 // Per boundary tile: travel in h per step along each direction (-x,-y,-z,
 // +x,+y,+z), five bits each; all ones for any other tile. Its dilation
 // follows the flow, not a sphere: a climbing sheet refines the tiles above.
@@ -339,12 +341,12 @@ fn umResolutionError(tile:u32,lane:u32,width:u32)->f32{
  let origin=umTileCoord(tile)*4u;var worst=0.0;
  if(width==1u){
   var corners:array<f32,8>;
-  for(var k=0u;k<8u;k++){corners[k]=umVertexValue(origin+umCorner(k,2u)*4u);}
+  for(var k=0u;k<8u;k++){corners[k]=umLoadVertex(origin+umCorner(k,2u)*4u);}
   for(var i=lane;i<125u;i+=64u){
    let v=umCorner(i,5u);let t=vec3f(v)*0.25;
    let x0=mix(vec4f(corners[0],corners[2],corners[4],corners[6]),vec4f(corners[1],corners[3],corners[5],corners[7]),t.x);
    let y0=mix(vec2f(x0.x,x0.z),vec2f(x0.y,x0.w),t.y);
-   let interpolated=mix(y0.x,y0.y,t.z);let value=umVertexValue(origin+v);
+   let interpolated=mix(y0.x,y0.y,t.z);let value=umLoadVertex(origin+v);
    if(min(abs(value),abs(interpolated))<2.0*UM_H){worst=max(worst,abs(value-interpolated)/UM_H);}
   }
   return worst;
@@ -353,12 +355,12 @@ fn umResolutionError(tile:u32,lane:u32,width:u32)->f32{
  if(lane>=8u){return 0.0;}
  // Quadratic interpolation error at the midpoint is |second difference|/8;
  // halved so one tolerance gives refine-at-2x hysteresis.
- let c=origin+umCorner(lane,2u)*4u;let centre=umVertexValue(c);
+ let c=origin+umCorner(lane,2u)*4u;let centre=umLoadVertex(c);
  if(abs(centre)>=8.0*UM_H){return 0.0;}
  for(var a=0u;a<3u;a++){
   if(c[a]<4u||c[a]+4u>UM_D[a]){continue;}
   var lo=c;lo[a]-=4u;var hi=c;hi[a]+=4u;
-  worst=max(worst,abs(umVertexValue(hi)-2.0*centre+umVertexValue(lo))/(16.0*UM_H));
+  worst=max(worst,abs(umLoadVertex(hi)-2.0*centre+umLoadVertex(lo))/(16.0*UM_H));
  }
  return worst;
 }
@@ -413,12 +415,10 @@ fn umBoundaryRequired(p:vec3u,width:u32,c:TileClass)->bool{
 fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
  let side=4u/width;
  let origin=umTileCoord(tile)*4u+umCorner(lane,side)*width;
- let owner=umOwnerAt(vec3i(origin));
  let v=textureLoad(volume,vec3i(origin),0).x;
  var inside=0u;var deep=0u;
  for(var k=0u;k<8u;k++){
-  // A 4h owner's corners are 4-aligned: always stored texels.
-  let corner=origin+umCorner(k,2u)*width;var value=0.0;if(width==4u){value=umLoadVertex(corner);}else{value=umVertexValue(corner);}
+  let value=umLoadVertex(origin+umCorner(k,2u)*width);
   if(value<0.0){inside++;}
   if(value< -2.0*MAX_H*f32(width)){deep++;}
   // Flag 8: the frame plan seed would mark this owner (residency near).
@@ -426,13 +426,18 @@ fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
  }
  if(v!=0.0){(*c).flags|=8u;}
  // Signed bounds of the extended face velocities the next trace samples.
+ // An h owner's faces are single patches anchored at its origin (+) and one
+ // cell below it (-), whatever the neighbour (umFace).
+ var owner=UMOwner();if(width!=1u){owner=umOwnerAt(vec3i(origin));}
  for(var axis=0u;axis<3u;axis++){
   var low=3.0e38;var high=-3.0e38;
   for(var sign=-1;sign<=1;sign+=2){
-   let first=umFace(owner,axis,sign,0u);
-   for(var part=0u;part<first.count;part++){
-    let face=umFace(owner,axis,sign,part);if(face.anchor[axis]<0){continue;}
-    let u=textureLoad(velocity,face.anchor,0)[axis];
+   var count=1u;var anchor=vec3i(origin);if(sign<0){anchor[axis]-=1;}
+   if(width!=1u){count=umFace(owner,axis,sign,0u).count;}
+   for(var part=0u;part<count;part++){
+    if(width!=1u){anchor=umFace(owner,axis,sign,part).anchor;}
+    if(anchor[axis]<0){continue;}
+    let u=textureLoad(velocity,anchor,0)[axis];
     // A non-finite speed bounds nothing: saturate both ends.
     let finite=abs(u)<=3.0e38;
     low=min(low,select(-3.0e38,u,finite));high=max(high,select(3.0e38,u,finite));
@@ -489,7 +494,7 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
  let bounded=!shaped&&crossing&&umBoundaryRequired(umTileCoord(tile),width,c);
  let required=shaped||bounded;
  for(var k=0u;k<2u;k++){atomicStore(&census[crossingIndex(tile,k)],select(0u,c.crossing[k],required));}
- atomicStore(&census[prefixIndex(umTileCoord(tile)+vec3u(1u))],select(0u,1u,required));
+ bounds[prefixIndex(umTileCoord(tile)+vec3u(1u))]=select(0u,1u,required);
  if(required){atomicAdd(&census[12],1u);}
  if(bounded){atomicAdd(&census[16],1u);atomicMax(&census[17],u32(ceil(speed)));}
  var gap=0xffffffffu;
@@ -514,8 +519,9 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
  for(var job=gid.x;job<umCounts.x;job+=groups.x){
  let tile=umTopology[UM_TILES+job];
  if(lane==0u){resetGroupCensus();atomicStore(&mixedTile,0u);for(var k=0u;k<2u;k++){atomicStore(&tileCrossing[k],0u);}for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}atomicStore(&tileError,0u);}workgroupBarrier();
- let width=umTileWidth(tile);let side=4u/width;
- if(lane<side*side*side){
+ // The h list holds h tiles only: one lane per owner.
+ const width=1u;
+ {
   var c=umEmptyClass();umClassifyOwner(tile,width,lane,&c);
   for(var a=0u;a<3u;a++){atomicMin(&tileLow[a],c.low[a]);atomicMax(&tileHigh[a],c.high[a]);}
   for(var k=0u;k<6u;k++){atomicMin(&tileGap[k],c.gap[k]);atomicMin(&tileReach[k],c.reach[k]);}
@@ -559,7 +565,7 @@ ${[0,1,2].map(axis=>{const [a,b]=[0,1,2].filter(k=>k!==axis);return /* wgsl */`
  var p=vec3u(0u);p[${a}]=line%extent[${a}];p[${b}]=line/extent[${a}];var sum=0u;
  // A line on a border plane is all zeros (prefixLoad).
  if(p[${a}]==0u||p[${b}]==0u){return;}
- for(var i=1u;i<extent[${axis}];i++){p[${axis}]=i;sum+=atomicLoad(&census[prefixIndex(p)]);atomicStore(&census[prefixIndex(p)],sum);}
+ for(var i=1u;i<extent[${axis}];i++){p[${axis}]=i;let i=prefixIndex(p);sum+=bounds[i];bounds[i]=sum;}
 }`;}).join("\n")}
 // Cube levels 1..topCube() are built: no box query needs a larger side.
 override cubeLevel:u32=1u;
@@ -947,20 +953,20 @@ var<workgroup> compactCounts:array<u32,256>;
   // after the census that consumed the last ones); GPU producers or theirs.
   if(this.hostJoin){this.device.queue.writeBuffer(this.joinTiles,this.words*4,this.hostJoin);this.hostJoin=undefined;this.joinLive=true;}
   const tiles=this.ownership.capacity.tiles,x=this.ownership.dispatchX,t=this.ownership.capacity.lattice.dimensions.map(n=>n/4+1);
-  for(const [label,entries] of [["classify",["classify","classifyCoarse"]],["prefix",["prefix0","prefix1","prefix2",...Array.from({length:CUBE_LEVELS},(_,j)=>`cube${j+1}`)]],["decide",[...(this.solid||this.bodies?["decide","solidActive","solidPromote"]:["decide"]),"pageSeed","pageMark","pageCompact"]]] as const){
-   const pass=encoder.beginComputePass({label:`Uniform dynamic ownership census ${label}`});
-   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
-   for(const entry of entries){
-    // Fixed grids: classify strides over the h list; classifyCoarse has a
-    // lane per tile, bounded by the 4h count; the rest are lattice-sized.
-    const lines=entry.startsWith("prefix")?[0,1,2].filter(k=>k!==Number(entry.at(-1))).reduce((n,k)=>n*t[k]!,1):entry.startsWith("page")?this.pages:tiles;
-    pass.setPipeline(this.pipelines.get(entry)!);
-    if(entry==="classify")pass.dispatchWorkgroups(Math.min(CENSUS_TILE_GRID,tiles));
-    else if(entry==="pageCompact")pass.dispatchWorkgroups(1);
-    else{const groups=Math.ceil(lines/64);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));}
-   }
-   pass.end();
+  // One pass: every dispatch is its own usage scope, so each reads what
+  // the earlier ones wrote.
+  const pass=encoder.beginComputePass({label:"Uniform dynamic ownership census"});
+  pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
+  for(const entry of ["classify","classifyCoarse","prefix0","prefix1","prefix2",...Array.from({length:CUBE_LEVELS},(_,j)=>`cube${j+1}`),...(this.solid||this.bodies?["decide","solidActive","solidPromote"]:["decide"]),"pageSeed","pageMark","pageCompact"]){
+   // Fixed grids: classify strides over the h list; classifyCoarse has a
+   // lane per tile, bounded by the 4h count; the rest are lattice-sized.
+   const lines=entry.startsWith("prefix")?[0,1,2].filter(k=>k!==Number(entry.at(-1))).reduce((n,k)=>n*t[k]!,1):entry.startsWith("page")?this.pages:tiles;
+   pass.setPipeline(this.pipelines.get(entry)!);
+   if(entry==="classify")pass.dispatchWorkgroups(Math.min(CENSUS_TILE_GRID,tiles));
+   else if(entry==="pageCompact")pass.dispatchWorkgroups(1);
+   else{const groups=Math.ceil(lines/64);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));}
   }
+  pass.end();
   // The band now holds the joins: clear them for the next producers.
   if(this.joinLive)encoder.clearBuffer(this.joinTiles);
   if(readback){encoder.copyBufferToBuffer(this.work,0,this.readback,0,(HEADER+this.words)*4);this.encoded=true;}

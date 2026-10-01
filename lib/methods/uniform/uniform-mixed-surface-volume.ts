@@ -31,7 +31,7 @@ import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,type UniformMixedSolid} 
  * sets the sticky closure bit (a fatal at the next census).
  *
  * bind(phi,volume,phi,scratch) corrects phi in place, touching only band
- * vertices; a separate output receives every authoritative vertex. */
+ * vertices. */
 export class UniformMixedSurfaceVolume {
  readonly allocatedBytes=0;
  readonly scratchBytes:number;
@@ -43,9 +43,8 @@ export class UniformMixedSurfaceVolume {
  /** Residency pages: the bound of the page launches. */
  private readonly pages:number;
  private readonly resources:GPUBindGroupLayout;
- private readonly copyResources:GPUBindGroupLayout;
- private readonly inPlaceResources:GPUBindGroupLayout;
- private readonly applyGroups=new WeakMap<GPUBindGroup,{group:GPUBindGroup;inPlace:boolean}>();
+ private readonly applyResources:GPUBindGroupLayout;
+ private readonly applyGroups=new WeakMap<GPUBindGroup,GPUBindGroup>();
  private readonly pipelines=new Map<string,GPUComputePipeline>();
  /** resolved: the caller runs UniformMixedPhiResolve on phi before encode.
   * Every owner corner is then a stored or resolved texel; resolveScale
@@ -60,19 +59,16 @@ export class UniformMixedSurfaceVolume {
   const texture=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}});
   const scratch={binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}};
   this.resources=device.createBindGroupLayout({entries:[texture(0),texture(1),scratch]});
-  this.copyResources=device.createBindGroupLayout({entries:[texture(0),{binding:2,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},scratch]});
-  this.inPlaceResources=device.createBindGroupLayout({entries:[{binding:2,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write",format:"r32float",viewDimension:"3d"}},scratch]});
+  this.applyResources=device.createBindGroupLayout({entries:[{binding:2,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write",format:"r32float",viewDimension:"3d"}},scratch]});
  }
  bind(phi:GPUTexture,volume:GPUTexture,output:GPUTexture,scratch:GPUBufferBinding):GPUBindGroup{
   const d=this.ownership.capacity.lattice.dimensions;
   for(const [i,t] of [phi,volume,output].entries())if(t.format!=="r32float"||[t.width,t.height,t.depthOrArrayLayers].some((n,a)=>n!==d[a]!+(i===1?0:1)))throw new Error("Mixed surface constraint requires native vertex and cell fields");
+  if(output!==phi)throw new Error("Mixed surface constraint corrects phi in place");
   if((scratch.size??scratch.buffer.size-(scratch.offset??0))<this.scratchBytes)throw new Error("Mixed surface constraint needs sufficient scratch");
   const work={...scratch,size:this.scratchBytes};
   const group=this.device.createBindGroup({layout:this.resources,entries:[{binding:0,resource:phi.createView()},{binding:1,resource:volume.createView()},{binding:3,resource:work}]});
-  const inPlace=phi===output;
-  this.applyGroups.set(group,{inPlace,group:inPlace
-   ?this.device.createBindGroup({layout:this.inPlaceResources,entries:[{binding:2,resource:phi.createView()},{binding:3,resource:work}]})
-   :this.device.createBindGroup({layout:this.copyResources,entries:[{binding:0,resource:phi.createView()},{binding:2,resource:output.createView()},{binding:3,resource:work}]})});
+  this.applyGroups.set(group,this.device.createBindGroup({layout:this.applyResources,entries:[{binding:2,resource:phi.createView()},{binding:3,resource:work}]}));
   return group;
  }
  async initialize():Promise<void>{
@@ -137,9 +133,12 @@ fn storePartial(l:u32,group:vec3u){
  sumGroup(l);
  if(l==0u){storeSum(at,sums[0]);}
 }
-// Newton state: shift, the bracket's low and high, converged, secant step.
-@compute @workgroup_size(1) fn begin(){let limit=umShiftLimit();scratch[${S}u]=0.0;scratch[${S+1}u]=-limit;scratch[${S+2}u]=limit;scratch[${S+3}u]=0.0;scratch[${S+4}u]=limit/64.0;}
-@compute @workgroup_size(64) fn clearBand(@builtin(global_invocation_id) gid:vec3u){let t=gid.x+umDispatchX*64u*gid.y;if(t<UM_TILES){scratch[SV_BAND+t]=0.0;scratch[SV_VISIT+t]=0.0;scratch[SV_MEASURE+t]=0.0;}}
+// Clears the tile flags; tile 0's thread also starts the Newton state:
+// shift, the bracket's low and high, converged, secant step.
+@compute @workgroup_size(64) fn clearBand(@builtin(global_invocation_id) gid:vec3u){
+ let t=gid.x+umDispatchX*64u*gid.y;if(t<UM_TILES){scratch[SV_BAND+t]=0.0;scratch[SV_VISIT+t]=0.0;scratch[SV_MEASURE+t]=0.0;}
+ if(t==0u){let limit=umShiftLimit();scratch[${S}u]=0.0;scratch[${S+1}u]=-limit;scratch[${S+2}u]=limit;scratch[${S+3}u]=0.0;scratch[${S+4}u]=limit/64.0;}
+}
 // One owner's corner (general owners reconstruct hanging corners).
 fn svCorner(o:UMOwner,k:u32)->f32{
  let vertex=umOrigin(o)+umCorner(k,2u)*o.width;
@@ -191,7 +190,12 @@ var<workgroup> seedCorners:array<f32,125>;
  if(l<4u){scratch[at+l]=select(select(0.0,total.y,l==2u),total.x,l<2u);}
 }
 // Visited: tiles within one tile of band. Every corner scale of an owner
-// outside them is zero.
+// outside them is zero. Dilate tests the same rule inline; grow writes the
+// final visit flags once the band is complete.
+fn svNearBand(t:u32,k:u32)->bool{
+ let q=vec3i(umTileCoord(t))+vec3i(umCorner(k,3u))-vec3i(1);
+ return all(q>=vec3i(0))&&all(q<vec3i(UM_T))&&scratch[SV_BAND+umTileAt(vec3u(q))]!=0.0;
+}
 @compute @workgroup_size(64) fn grow(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let t=umResidentPageTile(group.x,lane);if(t>=UM_TILES){return;}
  let centre=vec3i(umTileCoord(t));var visit=0.0;
@@ -226,8 +230,22 @@ var<workgroup> seedCorners:array<f32,125>;
   if(!inside){umSupport[UM_RESIDENCY+1u]=1u;}
  }
 }
-@compute @workgroup_size(64) fn dilate(@builtin(global_invocation_id) gid:vec3u){
- let o=umResidentAllOwner(gid);if(o.width==0u||!svVisited(o)){return;}let input=parity*${N}u;let out=(parity^1u)*${N}u;var band=scratch[input+o.index];
+// A step dilates the owners of visited tiles (grow's rule on the band flags
+// as this step reads them). Band flags another workgroup sets during the
+// step only add tiles whose neighbourhood is zero in the input parity: their
+// owners write the zero the output parity already holds (seed, monotone band).
+// An h tile's lanes test its 27 neighbour tiles together, a 4h lane its own.
+var<workgroup> svVisit:atomic<u32>;
+@compute @workgroup_size(64) fn dilate(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) group:vec3u){
+ let fine=group.x<umCounts.x;
+ if(l==0u){atomicStore(&svVisit,0u);}
+ workgroupBarrier();
+ let o=umResidentAllOwner(gid);
+ if(fine&&l<27u&&umTileResident(o.tile)&&svNearBand(o.tile,l)){atomicOr(&svVisit,1u);}
+ var visited=workgroupUniformLoad(&svVisit)!=0u;
+ if(o.width==0u){return;}
+ if(!fine){for(var k=0u;k<27u&&!visited;k++){visited=svNearBand(o.tile,k);}}
+ if(!visited){return;}let input=parity*${N}u;let out=(parity^1u)*${N}u;var band=scratch[input+o.index];
  if(o.width==1u){
   // A unit owner's every face is one unit patch onto the adjacent owner.
   // Inside its own tile that owner is lane +-1, +-4 or +-16 (umOwnerAt's
@@ -409,56 +427,52 @@ var<workgroup> svReduceJobs:u32;
 }
 `,["seed","dilate","metric","measure","grow","measureGrow",...(this.resolved?["resolveScale"]:[])])});
   // Apply: in place on the band's authoritative vertices (every other scale
-  // is zero), or every authoritative vertex into a separate output.
-  const applyModule=(inPlace:boolean)=>this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(topology+/* wgsl */`
-${inPlace?`@group(1) @binding(2) var phi:texture_storage_3d<r32float,read_write>;
-fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p)).x;}`:`@group(1) @binding(0) var phi:texture_3d<f32>;
-@group(1) @binding(2) var output:texture_storage_3d<r32float,write>;
-fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}`}
+  // is zero).
+  const applyModule=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(topology+/* wgsl */`
+@group(1) @binding(2) var phi:texture_storage_3d<r32float,read_write>;
+fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p)).x;}
 @group(1) @binding(3) var<storage,read_write> scratch:array<f32>;
 ${shared(uniformMixedVertexSamplingSource("",false))}
 @compute @workgroup_size(64) fn apply(@builtin(global_invocation_id) gid:vec3u){
- let o=${inPlace?"umResidentAllOwner":"umAllOwner"}(gid);if(o.width==0u${inPlace?"||!svVisited(o)":""}){return;}let visited=svVisited(o);
+ let o=umResidentAllOwner(gid);if(o.width==0u||!svVisited(o)){return;}
  for(var k=0u;k<umCounts.w;k++){if(!svAuthority(o,k)){continue;}let p=umOrigin(o)+umCorner(k,2u)*o.width;
-  // Unvisited owners' scales are zero and were not rewritten this frame. In
-  // place, a zero shift or scale leaves the texel as it is.
-  let shift=select(0.0,scratch[${S}u]*scratch[${2*N}u+umVertexIndex(p)],visited);
-  ${inPlace?"if(shift!=0.0){textureStore(phi,vec3i(p),vec4f(umLoadVertex(p)-shift));}":"textureStore(output,vec3i(p),vec4f(umLoadVertex(p)-shift));"}
+  // Unvisited owners' scales are zero and were not rewritten this frame; a
+  // zero shift or scale leaves the texel as it is.
+  let shift=scratch[${S}u]*scratch[${2*N}u+umVertexIndex(p)];
+  if(shift!=0.0){textureStore(phi,vec3i(p),vec4f(umLoadVertex(p)-shift));}
  }
 }`,["apply"])});
-  const modules=[module,applyModule(true),applyModule(false)];
+  const modules=[module,applyModule];
   for(const m of modules){const errors=(await m.getCompilationInfo()).messages.filter(e=>e.type==="error");if(errors.length)throw new Error(errors.map(e=>`${e.lineNum}: ${e.message}`).join("\n"));}
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
   const constants={umDispatchX:this.ownership.dispatchX};
-  const all={umCountedJobs:UNIFORM_MIXED_COUNTED.all};
   const resident={umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll},pages={umCountedJobs:UNIFORM_MIXED_COUNTED.residentPages};
   const create=(key:string,entryPoint:string,extra:Record<string,number>={})=>uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{...constants,...extra,...s}}})).then(p=>{this.pipelines.set(key,p);});
   await Promise.all([
-   ...["begin","clearBand","reduce","solve"].map(entry=>create(entry,entry)),
+   ...["clearBand","reduce","solve"].map(entry=>create(entry,entry)),
    ...["seed","metric","measure"].map(entry=>create(entry,entry,resident)),
    ...(this.resolved?[create("resolveScale","resolveScale",{umCountedJobs:UNIFORM_MIXED_COUNTED.fused})]:[]),
    create("dilate0","dilate",{parity:0,...resident}),create("dilate1","dilate",{parity:1,...resident}),
    create("grow","grow",pages),create("measureGrow","measureGrow",pages),
-   ...([["applyInPlace",1,this.inPlaceResources],["applyCopy",2,this.copyResources]] as const).map(([key,m,resources])=>
-    this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,resources]}),compute:{module:modules[m]!,entryPoint:"apply",constants:{...constants,...(m===1?resident:all)}}}).then(p=>{this.pipelines.set(key,p);})),
+   this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.applyResources]}),compute:{module:applyModule,entryPoint:"apply",constants:{...constants,...resident}}}).then(p=>{this.pipelines.set("apply",p);}),
   ]);
  }
  /** rounds: secant Newton rounds (measure, reduce, solve); a converged solve skips the rest's work. */
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,rounds=2):void{
   if(!Number.isInteger(rounds)||rounds<1)throw new Error(`Mixed surface constraint needs a positive whole round count, not ${rounds}`);
-  if(this.pipelines.size!==(this.resolved?14:13))throw new Error("Mixed surface constraint is not initialized");
+  if(this.pipelines.size!==(this.resolved?12:11))throw new Error("Mixed surface constraint is not initialized");
   const apply=this.applyGroups.get(group);if(!apply)throw new Error("Mixed surface constraint group was not bound by this stage");
   const pass=encoder.beginComputePass({label:"Uniform mixed global surface volume"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
   // The apply modules hold no solid library: only the constraint's own pipelines have twins.
-  const run=(entry:string)=>{const own=this.pipelines.get(entry)!;const pipeline=entry.startsWith("apply")?own:this.solid?.select(own)??own;pass.setPipeline(pipeline);
-   if(entry==="begin"||entry==="solve")pass.dispatchWorkgroups(1);
+  const run=(entry:string)=>{const own=this.pipelines.get(entry)!;const pipeline=entry==="apply"?own:this.solid?.select(own)??own;pass.setPipeline(pipeline);
+   if(entry==="solve")pass.dispatchWorkgroups(1);
    else if(entry==="reduce")this.ownership.dispatchCounted(pass,pipeline,this.chunks);
    else if(entry==="resolveScale")this.ownership.dispatchFusedCounted(pass,pipeline);
    else if(entry==="grow"||entry==="measureGrow")this.ownership.dispatchCounted(pass,pipeline,this.pages);
    else if(entry==="clearBand"){const groups=Math.ceil(this.tiles/64);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));}
    else this.ownership.dispatchAllCounted(pass,pipeline);};
-  run("begin");run("clearBand");run("seed");for(let i=0;i<4;i++){run("grow");run(`dilate${i%2}`);}run("grow");run("measureGrow");run("metric");if(this.resolved)run("resolveScale");
+  run("clearBand");run("seed");for(let i=0;i<4;i++)run(`dilate${i%2}`);run("grow");run("measureGrow");run("metric");if(this.resolved)run("resolveScale");
   for(let i=0;i<rounds;i++){run("measure");run("reduce");run("solve");}
-  pass.setBindGroup(1,apply.group);run(apply.inPlace?"applyInPlace":"applyCopy");pass.end();
+  pass.setBindGroup(1,apply);run("apply");pass.end();
  }
 }

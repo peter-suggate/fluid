@@ -13,7 +13,8 @@
  *                transport, momentum and extension ran on
  *   pressure     one tile word per tile: all-4h pressure level 0 the solve
  *                ran on (the presented pressure is indexed by these)
- *   band         one bit per tile: the h surface census that seeded pressure
+ *   band         one bit per tile: the h surface census (views bit 8; the
+ *                census runs only while a layer reads it)
  *   previous     one tile word per tile: the bulk ownership the frame started
  *                from, before its head relayout (views bit 1)
  *   reasons      one word per tile: why the head census banded it
@@ -33,7 +34,7 @@ export const UNIFORM_STAGE_GRID_HEADER_WORDS = 8;
  * (UNIFORM_STAGE_VIEWS). The view sections are recorded only while a layer
  * that reads them is on (UniformMixedFrame.setLayoutViews); unset, readers
  * ignore their words. */
-export const UNIFORM_STAGE_VIEWS = { previous: 1, reasons: 2, certificate: 4 } as const;
+export const UNIFORM_STAGE_VIEWS = { previous: 1, reasons: 2, certificate: 4, band: 8 } as const;
 /** Why the head census made a tile band (h), first rule that fired. Non-band
  * tiles: skipped (no interface within any departure's reach: the O(1)
  * prefix early-out) or traced (the departure trace ran and missed). */
@@ -143,6 +144,6 @@ fn umStageCertificate(base:u32,tile:u32)->u32{
  return umStageViewWord(base,2u,tile)>>30u;
 }
 fn umStageBand(base:u32,tile:u32)->bool{
- return base!=0xffffffffu&&(${buffer}[base+${UNIFORM_STAGE_GRID_HEADER_WORDS}u+2u*umTileCount()+tile/32u]&(1u<<(tile%32u)))!=0u;
+ return (umStageViews(base)&${UNIFORM_STAGE_VIEWS.band}u)!=0u&&(${buffer}[base+${UNIFORM_STAGE_GRID_HEADER_WORDS}u+2u*umTileCount()+tile/32u]&(1u<<(tile%32u)))!=0u;
 }
 `; }

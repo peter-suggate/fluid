@@ -27,10 +27,8 @@ export const UNIFORM_MIXED_COUNTED={owners:1,tiles:2,all:3,regularCoarse:4,fused
  * empties a tier that rides the fused launch (dispatchRegular skipFused);
  * onlyFused empties one that does not. */
 export const UNIFORM_MIXED_FUSED_GATE={skipFused:1,onlyFused:2} as const;
-/** Support word 9n+25: sticky ownership overflow bits, never cleared by an
- * adoption. Any nonzero value is fatal; the host reads it non-blockingly. */
-export const uniformMixedOverflowWord=(tiles:number)=>9*tiles+25;
-/** Overflow bits: a generation needed more hanging slots than the preallocated cache. */
+/** Relayout fatal bit (UNIFORM_MIXED_RELAYOUT_FATAL.hangingCapacity): a
+ * generation needed more hanging slots than the preallocated cache. */
 export const UNIFORM_MIXED_OVERFLOW_HANGING=1;
 /** Residency certificate (docs: fig7-256 3x plan, S2): 16³-cell pages of 4³
  * tiles on dense storage. Support words from uniformMixedResidencyWord: the
@@ -89,8 +87,7 @@ const UM_D=vec3u(${layout.lattice.dimensions.map(n => `${n}u`).join(',')});const
 const UM_TILES:u32=${layout.tiles.length}u;
 // Preallocated hanging tap cache slots (uniformMixedHangingSlotCapacity).
 const UM_HANGING_SLOTS:u32=${uniformMixedHangingSlotCapacity(layout.tiles.length)}u;
-// Sticky overflow bits (uniformMixedOverflowWord); topology never writes them.
-const UM_OVERFLOW_WORD:u32=9u*UM_TILES+25u;const UM_OVERFLOW_HANGING:u32=${UNIFORM_MIXED_OVERFLOW_HANGING}u;
+const UM_OVERFLOW_HANGING:u32=${UNIFORM_MIXED_OVERFLOW_HANGING}u;
 // Residency (uniformMixedResidencyWord): pages of 4³ tiles, flags, list.
 const UM_PD:vec3u=(UM_T+vec3u(3u))/4u;const UM_PAGES:u32=UM_PD.x*UM_PD.y*UM_PD.z;
 const UM_RESIDENCY:u32=9u*UM_TILES+28u;

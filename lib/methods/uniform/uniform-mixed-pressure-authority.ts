@@ -281,14 +281,19 @@ ${this.resident?`// One group per page: the 4h owners of an absent page take the
   * when this same stage (same ownership, same origin texels) rebuilds the
   * correction and its balance scratch before their readers (band rows, RHS). */
  private variant(pipeline:GPUComputePipeline):GPUComputePipeline{return this.solid?.select(pipeline)??pipeline;}
+ /** The owner launches: resident mode's all-4h ownership has no h jobs, so
+  * its jobs are its resident pages (any grid is correct; this prices it). */
+ private dispatchOwners(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void{
+  if(this.resident)this.ownership.dispatchCounted(pass,pipeline,uniformMixedPageCount(this.ownership.capacity.lattice));else this.ownership.dispatchAllCounted(pass,pipeline);
+ }
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,balance=true):void{
   if(this.pipelines.size!==5+(this.coarse?1:0)+(this.resident?1:0))throw new Error("Mixed pressure authority is not initialized");
   const pass=encoder.beginComputePass({label:balance?"Uniform mixed pressure authority and volume correction":"Uniform mixed pressure authority phase"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);
   if(this.coarse){pass.setPipeline(this.variant(this.pipelines.get("cut")!));pass.dispatchWorkgroups(Math.max(1,Math.min(1024,Math.ceil(this.ownership.capacity.tiles/64))));}
   if(this.resident){pass.setPipeline(this.variant(this.pipelines.get("absent")!));pass.dispatchWorkgroups(uniformMixedPageCount(this.ownership.capacity.lattice));}
-  if(!balance){this.ownership.dispatchAllCounted(pass,this.variant(this.pipelines.get("phase")!));pass.end();return;}
+  if(!balance){this.dispatchOwners(pass,this.variant(this.pipelines.get("phase")!));pass.end();return;}
   for(const entry of ["build","chunks","reduce","resolve"]){const pipeline=this.variant(this.pipelines.get(entry)!);pass.setPipeline(pipeline);
-   if(entry==="chunks")pass.dispatchWorkgroups(this.chunks);else if(entry==="reduce")pass.dispatchWorkgroups(1);else this.ownership.dispatchAllCounted(pass,pipeline);
+   if(entry==="chunks")pass.dispatchWorkgroups(this.chunks);else if(entry==="reduce")pass.dispatchWorkgroups(1);else this.dispatchOwners(pass,pipeline);
   }
   pass.end();
  }

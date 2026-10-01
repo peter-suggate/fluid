@@ -144,6 +144,10 @@ export class WebGPUUniformVelocityExtrapolator {
     private readonly pageDomain?: UniformPageDomain,
     private readonly pageDomainDispatch?: GPUBuffer,
     baselineForQA = false,
+    /** Only the mixed continuation (prepareMixedContinuation) ever runs: the
+     * legacy FIM front, its receipts and shell list, and the finest hierarchy
+     * level (the mixed root is level 1) are never allocated or compiled. */
+    private readonly mixedOnly = false,
   ) {
     // Page and window schedules keep their existing coordinate adapters.
     const nativeFullGrid = !activeDispatch && !pageDomainDispatch && !pageDomain
@@ -157,7 +161,7 @@ export class WebGPUUniformVelocityExtrapolator {
     // distances and convergence bits before each subsequent FIM sweep.
     this.frontReceipts = device.createBuffer({
       label: "Uniform front convergence receipts",
-      size: this.cacheConvergence ? dims.reduce((n, d) => n * d, 16) : 16,
+      size: this.cacheConvergence && !mixedOnly ? dims.reduce((n, d) => n * d, 16) : 16,
       usage: GPUBufferUsage.STORAGE,
     });
     this.reuseConvergenceDistance = !baselineForQA && uniformAbOn("frontreuse") && nativeFullGrid;
@@ -166,7 +170,7 @@ export class WebGPUUniformVelocityExtrapolator {
     this.shellHierarchy = !baselineForQA && uniformAbOn("shellhierarchy") && nativeFullGrid;
     this.shellTiles = device.createBuffer({
       label: "Uniform extension shell list",
-      size: this.compactShell ? 16 + 4 * dims.reduce((n, d) => n * Math.ceil(d / 4), 1) : 16,
+      size: this.compactShell && !mixedOnly ? 16 + 4 * dims.reduce((n, d) => n * Math.ceil(d / 4), 1) : 16,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
     this.shellDispatch = device.createBuffer({
@@ -335,16 +339,18 @@ export class WebGPUUniformVelocityExtrapolator {
         Math.ceil(levelDims[1] / 2),
         Math.ceil(levelDims[2] / 2),
       ];
+      // Mixed-only: level 0 (n/2) is bound by legacy groups but never dispatched.
+      const size: Dims3 = mixedOnly && !this.hierarchyLevels.length ? [1, 1, 1] : levelDims;
       const levelTexture = (direction: "down" | "up") => (fieldPages ?? device).createTexture({
         label: `Uniform Sec. 3.3 hierarchy ${direction} ${levelDims.join("x")}`,
-        size: levelDims,
+        size,
         dimension: "3d",
         format: "rgba32float",
         usage,
       });
       const origins = () => sourceAwareHierarchy ? (fieldPages ?? device).createTexture({
         label: `Uniform nearest-source origins ${levelDims.join("x")}`,
-        size: [levelDims[0],levelDims[1],2*levelDims[2]], dimension: "3d", format: "rgba32uint", usage,
+        size: [size[0],size[1],2*size[2]], dimension: "3d", format: "rgba32uint", usage,
       }) : undefined;
       this.hierarchyLevels.push({ dims: levelDims, down: levelTexture("down"), up: levelTexture("up"),
         originsDown: origins(), originsUp: origins() });
@@ -442,7 +448,7 @@ export class WebGPUUniformVelocityExtrapolator {
    * or reconstructs the finest lattice. */
   prepareMixedContinuation() {
     const root=this.hierarchyLevels[1],mixed=this.mixedPipelines,tail=this.mixedTail;
-    if(!this.pipelines || !mixed || !tail || !root?.originsDown || !root.originsUp
+    if(!mixed || !tail || !root?.originsDown || !root.originsUp
       || root.dims.some((n,a)=>n*4!==this.dims[a])
       || [root.down,root.up].some(t=>t.width!==root.dims[0]||t.height!==root.dims[1]||t.depthOrArrayLayers!==root.dims[2]))
       throw new Error("Mixed extension requires the resident 4h nearest-source hierarchy");
@@ -465,7 +471,7 @@ export class WebGPUUniformVelocityExtrapolator {
     const [nx, ny, nz] = this.dims;
     const baseBytes = (nx + 2) * (ny + 2) * (nz + 2) * 6 * 16 + 40;
     const hierarchyBytes = this.hierarchyLevels.reduce(
-      (sum, level) => sum + level.dims[0] * level.dims[1] * level.dims[2] * (this.sourceAwareHierarchy ? 6 : 2) * 16,
+      (sum, level, index) => sum + (this.mixedOnly && !index ? 0 : level.dims[0] * level.dims[1] * level.dims[2] * (this.sourceAwareHierarchy ? 6 : 2) * 16),
       0,
     );
     return baseBytes + hierarchyBytes + 32 + this.shellTiles.size + this.shellDispatch.size + this.frontReceipts.size;
@@ -510,7 +516,7 @@ export class WebGPUUniformVelocityExtrapolator {
   }
 
   async initialize(signal?: AbortSignal): Promise<void> {
-    if (this.pipelines) return;
+    if (this.pipelines || this.mixedPipelines) return;
     const compiler = gpuCompilationManagerFor(this.device);
     const shaderModule = compiler.createShaderModule({
       label: "Uniform Sec. 3.3 extrapolation kernels",
@@ -528,6 +534,13 @@ export class WebGPUUniformVelocityExtrapolator {
         ROOT_NX: this.dims[0], ROOT_NY: this.dims[1], ROOT_NZ: this.dims[2],
       } },
     }, { priority: "critical", signal });
+    if (this.mixedOnly) {
+      // The FIM state needs no clear: the mixed continuation never reads it,
+      // and every mixed stage seeds its own arena range.
+      if (!this.mixedTail) throw new Error("A mixed-only extrapolator requires the native mixed continuation");
+      await this.compileMixed(compile);
+      return;
+    }
     const [buildShell, publishShell, clear, seed, update, initialUpdate, evaluate, classify, prepare, resolve, restrict, prolong, pack, coarseTable, prolongPack] = await Promise.all([
       compile("Uniform extension build shell list", "buildShellList"),
       compile("Uniform extension publish shell list", "publishShellList"),
@@ -546,14 +559,7 @@ export class WebGPUUniformVelocityExtrapolator {
       compile("Uniform nearest hierarchy and transport shell", "prolongAndPack"),
     ]);
     this.pipelines = { buildShell, publishShell, clear, seed, update, initialUpdate, evaluate, classify, prepare, resolve, restrict, prolong, pack, coarseTable, prolongPack };
-    if (this.mixedTail) {
-      const [mixedRestrict, mixedProlong, mixedTail] = await Promise.all([
-        compile("Uniform mixed extension hierarchy restrict", "mixedRestrictKnownVelocity"),
-        compile("Uniform mixed extension hierarchy prolong", "mixedProlongUnknownVelocity"),
-        compile("Uniform mixed extension hierarchy tail", "mixedHierarchyTail"),
-      ]);
-      this.mixedPipelines = { restrict: mixedRestrict, prolong: mixedProlong, tail: mixedTail };
-    }
+    if (this.mixedTail) await this.compileMixed(compile);
     const encoder = this.device.createCommandEncoder({ label: "Uniform Sec. 3.3 initialize sparse state" });
     for (const [label, group] of [["A", this.seedCurrentGroup], ["B", this.updateABGroup],
       ["resolved", this.resolveGroup]] as const) {
@@ -563,6 +569,15 @@ export class WebGPUUniformVelocityExtrapolator {
       pass.end();
     }
     this.device.queue.submit([encoder.finish()]);
+  }
+
+  private async compileMixed(compile: (label: string, entryPoint: string) => Promise<GPUComputePipeline>): Promise<void> {
+    const [restrict, prolong, tail] = await Promise.all([
+      compile("Uniform mixed extension hierarchy restrict", "mixedRestrictKnownVelocity"),
+      compile("Uniform mixed extension hierarchy prolong", "mixedProlongUnknownVelocity"),
+      compile("Uniform mixed extension hierarchy tail", "mixedHierarchyTail"),
+    ]);
+    this.mixedPipelines = { restrict, prolong, tail };
   }
 
   /**
@@ -591,7 +606,7 @@ export class WebGPUUniformVelocityExtrapolator {
     tiledExtension = false,
   ): void {
     const pipelines = this.pipelines;
-    if (!pipelines) throw new Error("Uniform Sec. 3.3 extrapolation pipelines are not initialized");
+    if (!pipelines) throw new Error(this.mixedOnly ? "A mixed-only extrapolator encodes only the mixed continuation" : "Uniform Sec. 3.3 extrapolation pipelines are not initialized");
     const compact = this.compactShell && tiledExtension;
     this.shellListEncoded = compact;
     if (compact) {

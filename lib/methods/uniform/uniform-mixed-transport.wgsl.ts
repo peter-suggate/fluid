@@ -1,16 +1,16 @@
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
-import { volumeNormalizeRowsWGSL, volumeNormalizeDonorsWGSL } from "./uniform-volume-normalization.wgsl";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformMixedSolidWGSL } from "./uniform-mixed-solid.wgsl";
+import { uniformMixedDustAccountingWGSL } from "./uniform-mixed-dust-accounting.wgsl";
+import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 
 /** Native-texture conservative transport on mixed h/4h Uniform owners. With static
  * solids (group 2), unit rows carry native cut-cell capacity: edge weights by
  * min(open), open row targets and fallbacks, and sealed cells keep their V. */
-export function uniformMixedTransportWGSL(layout: UniformMixedLayout,sources=false,solid=false): string {
+export function uniformMixedTransportWGSL(layout: UniformMixedLayout,sources=false,solid=false,resolved=false): string {
   const [nx, ny, nz] = layout.lattice.dimensions;
   if (Math.max(nx, ny, nz) > 1020) throw new Error("Mixed transport packs row bases in 10 bits per axis: at most 1020 cells");
-  const expressions = { count: "r.count", weight: "bitcast<f32>(edges[r.address+(1u+k)*r.stride])", storeWeight: (v: string) => `edges[r.address+(1u+k)*r.stride]=bitcast<u32>(tpQuantize(${v}));`, donor: "donorOf(r,k).index", target: "umRowCapacity(r)" };
   // Donor sums hold every row weight of a round, at most one lattice cell per
   // cell: 2^range bits above the binary point, the rest below.
   const cells = nx * ny * nz, fraction = 64 - (Math.ceil(Math.log2(cells)) + 1);
@@ -28,6 +28,23 @@ ${uniformMixedTopologyWGSL(layout, 0)}
 @group(1) @binding(6) var departure:texture_3d<f32>;
 ${sources?uniformMixedSourceWGSL(7):""}
 @group(1) @binding(8) var<storage,read_write> live:array<atomic<u32>>;
+// The regular dust floor, UniformMixedCleanup's tuning ABI: strength,
+// distance, regular floor, orphan floor; accounting words 5/6.
+@group(1) @binding(9) var phi:texture_3d<f32>;
+@group(1) @binding(10) var<uniform> tuning:array<vec4f,2>;
+@group(1) @binding(11) var<storage,read_write> reductions:array<atomic<u32>>;
+${uniformMixedDustAccountingWGSL(nx*ny*nz)}
+fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
+${uniformMixedVertexSamplingSource("",resolved)}
+// A nonzero V below the floor is discarded unless it is positive with the
+// surface inside the owner's band (the cleanup floor, pointwise per owner).
+fn tpFloor(origin:vec3u,width:u32,value:f32)->f32{
+ let floor=tuning[0].z;
+ if(value!=0.0&&abs(value)<floor&&!(value>0.0&&umSampleVertex(vec3f(origin)+vec3f(0.5*f32(width)))<${4*Math.max(...layout.lattice.cellSize_m)}*f32(width))){
+  umAccountDust(value,width*width*width,floor,5u);return 0.0;
+ }
+ return value;
+}
 const D=vec3u(${nx},${ny},${nz});const T=D/4u;
 // Donor sums: exact 64-bit fixed point, multiples of 2^-TP_F, in two planar
 // words (low, then high) per owner index. Every stored weight is first rounded
@@ -102,7 +119,6 @@ fn donorWord(r:Row,base:vec3u,k:u32,word:u32)->Donor {
  return donorAt(base+corner(k,r.side)*r.grain);
 }
 fn donorFrom(r:Row,base:vec3u,k:u32)->Donor {return donorWord(r,base,k,edges[r.address+(1u+k)*r.stride]);}
-fn donorOf(r:Row,k:u32)->Donor {return donorFrom(r,rowBase(r),k);}
 fn buildAt(gid:vec3u){
  var r=rowAt(gid);if(r.width==0u){return;}
  let origin=umTileCoord(r.tile)*4u+corner(r.lane,4u/r.width)*r.width;
@@ -131,38 +147,8 @@ fn buildAt(gid:vec3u){
 }
 fn clearDonor(index:u32){atomicStore(&rigidExchange[index],0);atomicStore(&rigidExchange[TP_PLANE+index],0);atomicStore(&rigidExchange[TP_FLAGS+index],0);}
 fn tpSampled(index:u32)->bool{return atomicLoad(&rigidExchange[TP_FLAGS+index])!=0;}
-fn clearAt(gid:vec3u){
- let o=tpOwner(gid);if(o.width==0u){return;}clearDonor(o.index);
- if(o.lane==0u){atomicStore(&sampling[o.tile],0u);}
-}
 fn decodeAt(gid:vec3u){
  let o=tpOwner(gid);if(o.width==0u){return;}sums[o.index]=tpTake(o.index);
-}
-// The native fused schedule: fallback joins round zero; donor division joins
-// the next row reader. Only the final gather consumes the last decoded sums.
-fn normalizeRow(r:Row,divide:bool){
- if(r.count==9u){
-  // A two-cell-per-axis row (every unit row, and coarse rows sampled at
-  // their own width): the same three passes on register copies of its nine
-  // weights and donors, instead of re-reading edges and re-resolving owners.
-  var weights:array<f32,9>;var donors:array<u32,9>;var capacities:array<f32,9>;let base=rowBase(r);
-  for(var k=0u;k<9u;k++){weights[k]=bitcast<f32>(edges[r.address+(1u+k)*r.stride]);let d=donorFrom(r,base,k);donors[k]=d.index;capacities[k]=d.capacity;}
-  if(divide){for(var k=0u;k<9u;k++){weights[k]=weights[k]*capacities[k]/max(sums[donors[k]],1e-20);}}
-  else if(!tpSampled(r.index)){weights[8]=${solid?"select(f32(r.width*r.width*r.width),max(umRowCapacity(r),1e-6),r.width==1u)":"f32(r.width*r.width*r.width)"};}
-  var sum=0.0;for(var k=0u;k<9u;k++){sum+=weights[k];}
-  let scale=umRowCapacity(r)/max(sum,1e-20);
-  for(var k=0u;k<9u;k++){let weight=tpQuantize(weights[k]*scale);edges[r.address+(1u+k)*r.stride]=bitcast<u32>(weight);uvAddDonor(donors[k],weight);}
-  return;
- }
- if(divide){${volumeNormalizeDonorsWGSL(expressions, "sums[donor]", "donorOf(r,k).capacity")}}
- else if(!tpSampled(r.index)){edges[r.address+r.count*r.stride]=bitcast<u32>(${solid?"select(f32(r.width*r.width*r.width),max(umRowCapacity(r),1e-6),r.width==1u)":"f32(r.width*r.width*r.width)"});}
- ${volumeNormalizeRowsWGSL(expressions)}
-}
-fn rowsFallbackAt(gid:vec3u){
- let r=rowAt(gid);if(r.width==0u){return;}normalizeRow(r,false);
-}
-fn rowsDivideAt(gid:vec3u){
- let r=rowAt(gid);if(r.width==0u){return;}normalizeRow(r,true);
 }
 // One coarse row per workgroup: distribute up to 125 donor overlaps,
 // retaining the scalar row's summation order and exact integer donor sums.
@@ -282,7 +268,7 @@ fn tpFineRows(group:u32,groups:u32,lane:u32,mode:u32){
 fn gatherAt(gid:vec3u){
  let r=rowAt(gid);if(r.width==0u){return;}var value=0.0;
  ${solid?`// A sealed cell's V is an unplaceable reservoir; preserve it.
- if(r.width==1u&&umRowCapacity(r)<=0.0){let p=vec3i(umRowOrigin(r));textureStore(output,p,vec4f(textureLoad(volume,p,0).x));return;}`:""}
+ if(r.width==1u&&umRowCapacity(r)<=0.0){let p=umRowOrigin(r);textureStore(output,vec3i(p),vec4f(tpFloor(p,1u,textureLoad(volume,vec3i(p),0).x)));return;}`:""}
  let base=rowBase(r);
  for(var k=0u;k<r.count;k++){let word=edges[r.address+(1u+k)*r.stride];let d=donorWord(r,base,k,word);
   let weight=bitcast<f32>(word)*d.capacity/max(sums[d.index],1e-20);
@@ -297,44 +283,17 @@ fn gatherAt(gid:vec3u){
   }}}
   fill+=added/f32(r.width*r.width*r.width);
  }`:""}
- textureStore(output,vec3i(origin),vec4f(fill));
+ textureStore(output,vec3i(origin),vec4f(tpFloor(origin,r.width,fill)));
+}
+// Rows outside R1 keep V (the seeds stored it); R1 rows return to volume.
+fn copyVolumeAt(gid:vec3u){
+ let o=tpOwner(gid);if(o.width!=0u){let p=vec3i(umOrigin(o));textureStore(output,p,vec4f(textureLoad(volume,p,0).x));}
 }
 // Live-list entries: a fixed grid-stride grid over the listed owners (a
-// lane per owner, tiers in separate launches); dense (list 0) otherwise.
-@compute @workgroup_size(64) fn build(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- if(umTransportList==0u){buildAt(gid);return;}
- let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){buildAt(vec3u(slot,0u,0u));}
-}
-@compute @workgroup_size(64) fn clear(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- if(umTransportList==0u){clearAt(gid);return;}
- let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){clearAt(vec3u(slot,0u,0u));}
-}
-@compute @workgroup_size(64) fn decode(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- if(umTransportList==0u){decodeAt(gid);return;}
- let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){decodeAt(vec3u(slot,0u,0u));}
-}
-@compute @workgroup_size(64) fn rowsFallback(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- if(umTransportList==0u){rowsFallbackAt(gid);return;}
- let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){rowsFallbackAt(vec3u(slot,0u,0u));}
-}
-@compute @workgroup_size(64) fn rowsDivide(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- if(umTransportList==0u){rowsDivideAt(gid);return;}
- let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){rowsDivideAt(vec3u(slot,0u,0u));}
-}
-@compute @workgroup_size(64) fn gather(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- if(umTransportList==0u){gatherAt(gid);return;}
- let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){gatherAt(vec3u(slot,0u,0u));}
-}
-@compute @workgroup_size(64) fn copyVolume(@builtin(global_invocation_id) gid:vec3u){
- let o=umOwner(gid);if(o.width!=0u){let p=vec3i(umOrigin(o));textureStore(output,p,vec4f(textureLoad(volume,p,0).x));}
-}
-@compute @workgroup_size(64) fn restrictVolume(@builtin(global_invocation_id) gid:vec3u){
- let o=umOwner(gid);if(o.width==0u){return;}let origin=umOrigin(o);var value=0.0;
- for(var z=0u;z<o.width;z++){for(var y=0u;y<o.width;y++){for(var x=0u;x<o.width;x++){
-  value+=textureLoad(volume,vec3i(origin+vec3u(x,y,z)),0).x;
- }}}
- textureStore(output,vec3i(origin),vec4f(value/f32(o.width*o.width*o.width)));
-}
+// lane per owner, tiers in separate launches).
+${["build","decode","gather","copyVolume"].map(entry=>`@compute @workgroup_size(64) fn ${entry}(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){${entry}At(vec3u(slot,0u,0u));}
+}`).join("\n")}
 `;
 }
 
@@ -397,26 +356,26 @@ export const UNIFORM_MIXED_TRANSPORT_LIVE_HEADER=20;
  * Words: [0,10) the counts of lists 3..7, [12,16) the counts of lists 1, 2
  * (h then 4h), [16,20) unused; then the set bits plane, the donor box low
  * and high planes, and the tier lists: 1 rows Q0, 2 donors (all), 3 rows Q1,
- * 4 rows Q2, 5 rows R1, 6 donors D1, 7 donors D2. */
+ * 4 rows Q2, 5 rows R1, 6 donors D1, 7 donors D2. A list entry is two words:
+ * the tile and its owner base (topology word), so owners resolve in one hop. */
 function uniformMixedTransportLiveWGSL(sources:boolean):string{
  return /* wgsl */`
 const TP_HEADER:u32=${UNIFORM_MIXED_TRANSPORT_LIVE_HEADER}u;
 override umTransportList:u32=0u;
 fn tpPlane(k:u32,t:u32)->u32{return TP_HEADER+k*UM_TILES+t;}
-fn tpList(list:u32,tier:u32)->u32{return TP_HEADER+(3u+2u*(list-1u)+tier)*UM_TILES;}
+fn tpList(list:u32,tier:u32)->u32{return TP_HEADER+(3u+4u*(list-1u)+2u*tier)*UM_TILES;}
 fn tpCountWord(list:u32,tier:u32)->u32{return select(2u*(list-3u)+tier,12u+2u*(list-1u)+tier,list<=2u);}
 fn tpTier(width:u32)->u32{return select(1u,0u,width==1u);}
 // Owners of this launch's tier in its live list (rows 1, donors 2).
 fn tpLiveOwners()->u32{
  let tier=tpTier(umCellWidth);return atomicLoad(&live[tpCountWord(umTransportList,tier)])*(64u/(umCellWidth*umCellWidth*umCellWidth));
 }
-// Owner of a listed tile (rows 1, donors 2); the full tier lists otherwise.
+// Owner of a listed tile.
 fn tpOwner(gid:vec3u)->UMOwner {
- if(umTransportList==0u){return umOwner(gid);}
  let slot=gid.x+umDispatchX*64u*gid.y;let per=64u/(umCellWidth*umCellWidth*umCellWidth);let tier=tpTier(umCellWidth);
  let job=slot/per;if(job>=atomicLoad(&live[tpCountWord(umTransportList,tier)])){return UMOwner();}
- let tile=atomicLoad(&live[tpList(umTransportList,tier)+job]);let lane=slot%per;
- return UMOwner(tile,lane,umCellWidth,(umTopology[tile]&0x3fffffffu)+lane);
+ let at=tpList(umTransportList,tier)+2u*job;let lane=slot%per;
+ return UMOwner(atomicLoad(&live[at]),lane,umCellWidth,atomicLoad(&live[at+1u])+lane);
 }
 // Set bits in plane 0.
 const TP_S:u32=1u;const TP_R1:u32=2u;const TP_D2:u32=4u;const TP_Q2:u32=8u;
@@ -439,11 +398,10 @@ fn tpOwnerReach(tile:u32,origin:vec3u,width:u32)->array<vec3u,2>{
  let last=select(vec3i(UM_T)-1,clamp((vec3i(ceil(upper))-1)/4,vec3i(0),vec3i(UM_T)-1),finite);
  return array<vec3u,2>(vec3u(first-coord+512),vec3u(last-coord+512));
 }
+fn tpSourcesActive()->bool{return ${sources?"umSourceParams.drop.w>0.0||umSourceinflowStrength()>0.0":"false"};}
+// Callers test tpSourcesActive first.
 fn tpSourced(q:vec3i)->bool{
- ${sources?`if(umSourceParams.drop.w>0.0||umSourceinflowStrength()>0.0){
-  return umSourcedropSource(q)>0.0||umSourceinflowSweptPlugSource(q,umSourceParams.dimsDt.w)>0.0;
- }`:""}
- return false;
+ ${sources?"return umSourcedropSource(q)>0.0||umSourceinflowSweptPlugSource(q,umSourceParams.dimsDt.w)>0.0;":"return false;"}
 }
 fn tpStoreSeed(tile:u32,seeded:u32,low:vec3u,high:vec3u){
  atomicStore(&live[tpPlane(0u,tile)],seeded);
@@ -452,16 +410,20 @@ fn tpStoreSeed(tile:u32,seeded:u32,low:vec3u,high:vec3u){
 }
 // liveSeed: one workgroup per h tile, a lane per owner; liveSeedCoarse: one
 // lane per 4h tile (its single owner, then its 64 cells for sources).
-// Together they cover the h/4h partition once.
+// Together they cover the h/4h partition once. They also clear every
+// owner's donor sums and flags and every 4h tile's sampling widths, a
+// superset of the donors (list 2) the rounds add to, and store every
+// owner's V in output: gather overwrites the R1 rows there.
 @compute @workgroup_size(64) fn liveSeed(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
  let job=wid.x+umDispatchX*wid.y;if(job>=umCounts.x){return;}
- let tile=umTopology[UM_TILES+job];
+ let tile=umTopology[UM_TILES+job];clearDonor((umTopology[tile]&0x3fffffffu)+lane);
  if(lane<3u){atomicStore(&tpLow[lane],512u);atomicStore(&tpHigh[lane],512u);}
  if(lane==0u){atomicStore(&tpSeeded,0u);}workgroupBarrier();
  let origin=umTileCoord(tile)*4u+umCorner(lane,4u);
  let reach=tpOwnerReach(tile,origin,1u);
  for(var axis=0u;axis<3u;axis++){atomicMin(&tpLow[axis],reach[0][axis]);atomicMax(&tpHigh[axis],reach[1][axis]);}
- if(textureLoad(volume,vec3i(origin),0).x!=0.0||tpSourced(vec3i(origin))){atomicOr(&tpSeeded,TP_S);}
+ let v=textureLoad(volume,vec3i(origin),0).x;textureStore(output,vec3i(origin),vec4f(v));
+ if(v!=0.0||(tpSourcesActive()&&tpSourced(vec3i(origin)))){atomicOr(&tpSeeded,TP_S);}
  workgroupBarrier();
  if(lane==0u){
   tpStoreSeed(tile,atomicLoad(&tpSeeded),vec3u(atomicLoad(&tpLow[0]),atomicLoad(&tpLow[1]),atomicLoad(&tpLow[2])),
@@ -471,9 +433,10 @@ fn tpStoreSeed(tile:u32,seeded:u32,low:vec3u,high:vec3u){
 @compute @workgroup_size(64) fn liveSeedCoarse(@builtin(global_invocation_id) gid:vec3u){
  let job=gid.x+umDispatchX*64u*gid.y;if(job>=umCounts.y){return;}
  let tile=umTopology[UM_TILES+umCounts.x+job];let origin=umTileCoord(tile)*4u;
+ clearDonor(umTopology[tile]&0x3fffffffu);atomicStore(&sampling[tile],0u);
  let reach=tpOwnerReach(tile,origin,4u);
- var seeded=textureLoad(volume,vec3i(origin),0).x!=0.0;
- for(var k=0u;k<64u&&!seeded;k++){seeded=tpSourced(vec3i(origin+umCorner(k,4u)));}
+ let v=textureLoad(volume,vec3i(origin),0).x;textureStore(output,vec3i(origin),vec4f(v));var seeded=v!=0.0;
+ if(!seeded&&tpSourcesActive()){for(var k=0u;k<64u&&!seeded;k++){seeded=tpSourced(vec3i(origin+umCorner(k,4u)));}}
  tpStoreSeed(tile,select(0u,TP_S,seeded),min(reach[0],vec3u(512u)),max(reach[1],vec3u(512u)));
 }
 override tpFrom:u32=0u;
@@ -521,13 +484,13 @@ var<workgroup> tpCompactBase:array<u32,14>;
  let tile=gid.x+umDispatchX*64u*gid.y;
  if(lane<14u){atomicStore(&tpCompactCount[lane],0u);}
  workgroupBarrier();
- var bits=0u;var tier=0u;var local:array<u32,7>;
- if(tile<UM_TILES){bits=atomicLoad(&live[tpPlane(0u,tile)]);tier=tpTier(umTileWidth(tile));}
+ var bits=0u;var tier=0u;var word=0u;var local:array<u32,7>;
+ if(tile<UM_TILES){bits=atomicLoad(&live[tpPlane(0u,tile)]);word=umTopology[tile];tier=select(1u,0u,(word&0x80000000u)!=0u);}
  for(var list=1u;list<=7u;list++){if(bits!=0u&&tpListed(bits,list)){local[list-1u]=atomicAdd(&tpCompactCount[2u*(list-1u)+tier],1u);}}
  workgroupBarrier();
  if(lane<14u){let n=atomicLoad(&tpCompactCount[lane]);if(n!=0u){tpCompactBase[lane]=atomicAdd(&live[tpCountWord(lane/2u+1u,lane%2u)],n);}}
  workgroupBarrier();
- for(var list=1u;list<=7u;list++){if(bits!=0u&&tpListed(bits,list)){atomicStore(&live[tpList(list,tier)+tpCompactBase[2u*(list-1u)+tier]+local[list-1u]],tile);}}
+ for(var list=1u;list<=7u;list++){if(bits!=0u&&tpListed(bits,list)){let at=tpList(list,tier)+2u*(tpCompactBase[2u*(list-1u)+tier]+local[list-1u]);atomicStore(&live[at],tile);atomicStore(&live[at+1u],word&0x3fffffffu);}}
 }
 `;
 }

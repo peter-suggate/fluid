@@ -1,7 +1,7 @@
 import { uniformMixedHangingBytes, uniformMixedHangingSlotCapacity } from "./uniform-mixed-velocity-sampling.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import type { RefinementRegionLattice } from "../../core/refinement-regions";
-import { UNIFORM_MIXED_FUSED_REGULAR_TILES, uniformMixedOverflowWord, uniformMixedPageCount, uniformMixedResidencyWord, uniformMixedSupportWords } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_FUSED_REGULAR_TILES, uniformMixedPageCount, uniformMixedResidencyWord, uniformMixedSupportWords } from "./uniform-mixed-topology.wgsl";
 
 type OwnershipUploadTarget="topology"|"counts"|"support";
 interface OwnershipDerivation{
@@ -94,14 +94,6 @@ export interface UniformMixedCapacity{
   readonly hangingSlots:number;
 }
 
-/** One GPU-built ownership generation (UniformMixedLayoutBuilder), in the
- * exact buffer layout update() uploads. */
-export interface UniformMixedBuiltOwnership{
-  readonly layout:UniformMixedLayout;
-  readonly seamCounts:readonly number[];
-  readonly hangingSlots:number;
-  readonly source:UniformMixedGenerationBuffers;
-}
 /** The GPU buffers of one built generation (UniformMixedLayoutBuilder.
  * generation): topology, support, hanging slot table and the 16-byte counts.
  * changes: the tiles whose width the build changed and their dilation
@@ -122,7 +114,7 @@ export class UniformMixedOwnership {
     if(!this.sampled)throw new Error("This ownership samples no velocity: it has no hanging tap cache");
     return this.hangingGroupCurrent;
   }
-  get allocatedBytes(): number { return this.topology.size + this.counts.size + this.support.size+this.speeds.size+(this.hanging?.size??0); }
+  get allocatedBytes(): number { return this.topology.size + this.counts.size + this.support.size+(this.speedsBuffer?.size??0)+(this.hanging?.size??0); }
   readonly dispatchX: number;
   private readonly topology: GPUBuffer;
   /** Stable read-only view for consumers of the accepted ownership generation. */
@@ -130,8 +122,13 @@ export class UniformMixedOwnership {
   private readonly counts: GPUBuffer;
   /** Per tile seed and three separable support planes, rebuilt at frame entry. */
   readonly support: GPUBuffer;
-  /** Per-tile extended speed and its box maximum (frame plan certificate). */
-  readonly speeds: GPUBuffer;
+  /** Per-tile extended speed and its box maximum (frame plan certificate):
+   * only an ownership velocity runs on (sampled) has a frame plan. */
+  private readonly speedsBuffer?: GPUBuffer;
+  get speeds(): GPUBuffer {
+    if(!this.speedsBuffer)throw new Error("This ownership samples no velocity: it has no speed certificate");
+    return this.speedsBuffer;
+  }
   /** Per-frame velocity tap cache (uniformMixedHangingTapWGSL): every seam
    * tile owns a slot, up to capacity.hangingSlots. */
   private hanging?:GPUBuffer;
@@ -139,10 +136,6 @@ export class UniformMixedOwnership {
   hangingSlots=0;
   private seamCounts=[0,0];
   readonly capacity:UniformMixedCapacity;
-  /** Byte offset in `support` of the sticky overflow word
-   * (uniformMixedOverflowWord): nonzero is fatal. Copy it out for a
-   * non-blocking diagnostic read; nothing on the host clears it. */
-  readonly overflowOffset:number;
 
   private frameHeld=false;
   private currentLayout: UniformMixedLayout;
@@ -158,7 +151,6 @@ export class UniformMixedOwnership {
     this.currentLayout = layout;
     const n=layout.tiles.length;
     this.capacity={lattice:layout.lattice,tileDimensions:layout.tileDimensions,tiles:n,metadataBytes:layout.metadataBytes,hangingSlots:uniformMixedHangingSlotCapacity(n)};
-    this.overflowOffset=uniformMixedOverflowWord(n)*4;
     this.dispatchX = device.limits.maxComputeWorkgroupsPerDimension;
     this.bindLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -176,8 +168,8 @@ export class UniformMixedOwnership {
     // 9n+28: the residency certificate (uniformMixedResidencyWord), all
     // resident after update(); only the census narrows it.
     this.support = device.createBuffer({label:"Uniform shared frame support and certified work",size:uniformMixedSupportWords(n,layout.lattice)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-    this.speeds = device.createBuffer({label:"Uniform local speed certificate",size:layout.tiles.length*8,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
     if(sampled){
+      this.speedsBuffer=device.createBuffer({label:"Uniform local speed certificate",size:n*8,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
       const bytes=uniformMixedHangingBytes(n);
       if(bytes>device.limits.maxStorageBufferBindingSize)throw new Error(`Uniform mixed hanging tap cache needs ${bytes} bytes; the device binds at most ${device.limits.maxStorageBufferBindingSize}`);
       this.hanging=device.createBuffer({label:"Uniform mixed velocity tap cache",size:bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
@@ -219,28 +211,6 @@ export class UniformMixedOwnership {
     if(this.frameHeld)throw new Error("Ownership is immutable during an active frame");
     this.device.queue.writeBuffer(this.support,uniformMixedResidencyWord(this.capacity.tiles)*4,allResident(this.capacity.lattice));
   }
-  /** Adopt a generation built on the GPU (UniformMixedLayoutBuilder). The
-   * source buffers hold exactly what update() would upload for `layout`;
-   * `seamCounts` and `hangingSlots` come from the builder's receipt. Copies
-   * are encoded, so they order with the caller's remap passes. Regions the
-   * frame plan rebuilds every frame (support 5n+16..6n+16) are not copied. */
-  adopt(encoder:GPUCommandEncoder,built:UniformMixedBuiltOwnership):void{
-    if(this.frameHeld)throw new Error("Ownership is immutable during an active frame");
-    const layout=built.layout,prior=this.currentLayout.lattice,n=layout.tiles.length;
-    if(layout.metadataBytes!==this.topology.size || layout.lattice.dimensions.some((d,a)=>d!==prior.dimensions[a])
-      || layout.lattice.cellSize_m.some((d,a)=>d!==prior.cellSize_m[a])
-      || (["x","y","z"] as const).some(a=>layout.lattice.origin_m[a]!==prior.origin_m[a]))
-      throw new Error("Live ownership edits cannot change the simulation lattice");
-    if(n!==this.capacity.tiles)throw new Error("A built generation must match the ownership's capacity");
-    this.reserveHanging(built.hangingSlots);
-    this.copyGeneration(encoder,built.source);
-    this.revision++;
-    // A host-adopted generation's later frames run without a census audit.
-    this.resetResidency();
-    this.seamCounts=[...built.seamCounts];
-    this.currentLayout=layout;
-    this.mirrorCurrent=true;
-  }
   /** Adopt a GPU-built generation with no host object: buffers only, encoded
    * at the head of the frame that runs on it (so no frame hold is checked:
    * the copies are ordered inside that frame's encoder, ahead of every pass
@@ -254,7 +224,7 @@ export class UniformMixedOwnership {
    * (UniformMixedFramePlan.encode clears [0, n) and the header, seeds, and
    * dilates [n, 4n) over every tile) before any reader. */
   adoptGpu(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers):void{
-    this.copyGeneration(encoder,source,false);
+    this.copyGeneration(encoder,source);
     this.revision++;
     this.mirrorCurrent=false;
   }
@@ -267,12 +237,10 @@ export class UniformMixedOwnership {
     if(!this.mirrorCurrent)throw new Error("A GPU-adopted ownership has no host mirror: use a GPU-counted launch");
     return this.currentLayout;
   }
-  /** planned: also the frame plan's words [0, 5n+16) (see adoptGpu). */
-  private copyGeneration(encoder:GPUCommandEncoder,s:UniformMixedGenerationBuffers,planned=true):void{
+  private copyGeneration(encoder:GPUCommandEncoder,s:UniformMixedGenerationBuffers):void{
     const n=this.capacity.tiles;
     encoder.copyBufferToBuffer(s.topology,0,this.topology,0,this.topology.size);
     encoder.copyBufferToBuffer(s.counts.buffer,s.counts.offset,this.counts,0,16);
-    if(planned)encoder.copyBufferToBuffer(s.support,0,this.support,0,(5*n+16)*4);
     encoder.copyBufferToBuffer(s.support,(6*n+16)*4,this.support,(6*n+16)*4,(3*n+8)*4);
     if(this.sampled)encoder.copyBufferToBuffer(s.slots,0,this.hanging!,0,2*n*4);
   }
@@ -412,5 +380,5 @@ export class UniformMixedOwnership {
   /** hanging: one job per hanging tap slot, at most capacity.hangingSlots. */
   dispatchHangingCounted(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void{this.dispatchCounted(pass,pipeline,this.capacity.hangingSlots);}
 
-  destroy(): void { this.topology.destroy(); this.counts.destroy(); this.support.destroy();this.speeds.destroy();this.hanging?.destroy(); }
+  destroy(): void { this.topology.destroy(); this.counts.destroy(); this.support.destroy();this.speedsBuffer?.destroy();this.hanging?.destroy(); }
 }

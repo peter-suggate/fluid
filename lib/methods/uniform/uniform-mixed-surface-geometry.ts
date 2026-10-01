@@ -118,7 +118,11 @@ fn gcEvaluate(owner:UMOwner,vertices:array<f32,8>)->vec2f{
 fn gcOwner(owner:UMOwner){
  let origin=umOrigin(owner);
  var vertices:array<f32,8>;
- for(var j=0u;j<8u;j++){vertices[j]=umVertexValue(origin+vec3u(uvCorner(j))*owner.width);}
+ // Resolved: an owner's corners are width-aligned vertices of its tile
+ // closure. Their tile's stencil holds the owner, so it is unit or mixed (a
+ // unit owner) or the corner is 4-aligned (a 4h owner): umVertexValue is this
+ // load, without its one or two stencil loads per corner.
+ for(var j=0u;j<8u;j++){vertices[j]=${this.resolved?"umLoadVertex":"umVertexValue"}(origin+vec3u(uvCorner(j))*owner.width);}
  let value=gcEvaluate(owner,vertices);
  // Native uvTarget scales by the open fraction; coarse owners are uncut.
  textureStore(targetFill,vec3i(origin),vec4f(value.x*select(1.0,umCellOpen(vec3i(origin)),owner.width==1u)));

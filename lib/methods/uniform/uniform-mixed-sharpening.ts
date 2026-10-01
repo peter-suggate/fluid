@@ -51,6 +51,10 @@ export class UniformMixedSharpening {
    * owners (tile*64+lane, at most 64 per tile). */
   static workBytes(tiles:number):number{return 4*(8+3*tiles+64*tiles);}
   private readonly resources:GPUBindGroupLayout;
+  /** resources with the work list read-only: the sweeps never write it. */
+  private readonly sweepResources:GPUBindGroupLayout;
+  /** bind()'s group -> its twin on sweepResources (the same resources). */
+  private readonly sweepGroups=new WeakMap<GPUBindGroup,GPUBindGroup>();
   private readonly pipelines=new Map<string,GPUComputePipeline[]>();
   /** work: a STORAGE|COPY_DST buffer of workBytes(tiles). resolved: phi's
    * hanging texels hold umVertexValue (UniformMixedPhiResolve). */
@@ -60,14 +64,15 @@ export class UniformMixedSharpening {
     // Each merged launch is a fixed grid-stride grid: the capacity's job bound
     // (every tile listed), capped where the GPU is saturated.
     this.grid=Math.max(1,Math.min(SHARPEN_GRID,Math.ceil(64*tiles/192)+tiles));
-    this.resources=device.createBindGroupLayout({entries:[
+    const resources=(work:GPUBufferBindingType)=>device.createBindGroupLayout({entries:[
       ...[0,1,2,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:4,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
       {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
       {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
-      {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:work}},
     ]});
+    this.resources=resources("storage");this.sweepResources=resources("read-only-storage");
   }
   bind(input:GPUTexture,output:GPUTexture,phi:GPUTexture,targetFill:GPUTexture,centerPhi:GPUTexture,scratch:GPUBufferBinding,params:GPUBuffer,reductions:GPUBuffer):GPUBindGroup{
     const d=this.ownership.capacity.lattice.dimensions,n=d[0]*d[1]*d[2];
@@ -76,17 +81,20 @@ export class UniformMixedSharpening {
     if(input===output||output===targetFill||output===centerPhi)throw new Error("Mixed sharpening output must be disjoint");
     // Budgets and the face cache index live owners, at most n of them.
     if((scratch.size??scratch.buffer.size-(scratch.offset??0))<n*40)throw new Error("Mixed sharpening scratch is too small");
-    return this.device.createBindGroup({layout:this.resources,entries:[
+    const group=(layout:GPUBindGroupLayout)=>this.device.createBindGroup({layout,entries:[
       ...[input,targetFill,centerPhi,phi].map((t,binding)=>({binding,resource:t.createView()})),
       {binding:4,resource:output.createView()},{binding:5,resource:scratch},{binding:6,resource:{buffer:params,size:32}},
       {binding:7,resource:{buffer:reductions}},
       {binding:8,resource:{buffer:this.work.list}},
     ]});
+    const geometry=group(this.resources);this.sweepGroups.set(geometry,group(this.sweepResources));return geometry;
   }
   async initialize():Promise<void>{
     const h=this.ownership.capacity.lattice.cellSize_m,tiles=this.ownership.capacity.tiles,n=tiles*64;
     // classify: a GPU-counted fixed grid over every live owner (all).
-    const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+    // The sweeps (propose, limit, commit) never write the work list: their
+    // module binds it read-only, so list and flag reads are plain loads.
+    const source=(sweep:boolean)=>uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var targetFill:texture_3d<f32>;
 @group(1) @binding(2) var centerPhi:texture_3d<f32>;
@@ -109,7 +117,7 @@ fn umSharpenFaceOpenAB(a:UMOwner,b:UMOwner,f:UMFace)->bool{
  return umSharpenOpen(a)&&umSharpenOpen(b)&&umFaceOpen(f.anchor,f.axis)>0.99999;
 }
 fn umSharpenFaceOpen(a:UMOwner,f:UMFace)->bool{return umSharpenFaceOpenAB(a,f.neighbor,f);}
-@group(1) @binding(8) var<storage,read_write> work:array<atomic<u32>>;
+${sweep?"@group(1) @binding(8) var<storage,read> work:array<u32>;\nfn shWord(i:u32)->u32{return work[i];}":"@group(1) @binding(8) var<storage,read_write> work:array<atomic<u32>>;\nfn shWord(i:u32)->u32{return atomicLoad(&work[i]);}"}
 // Lists 0 (h) and 1 (regular 4h) are tiers; tier t owners have width 4^t.
 const SH_COUNTS:u32=3u;const SH_FLAGS:u32=8u;const SH_LIST:u32=${8+tiles}u;
 const SH_ACTIVE_COUNT:u32=6u;const SH_ACTIVE:u32=${8+3*tiles}u;
@@ -117,7 +125,7 @@ fn shTier(width:u32)->u32{return select(1u,0u,width==1u);}
 // List 2: coarse seam tiles. Their owners meet finer patches, so one lane
 // per owner would walk up to sixteen patches per face serially.
 fn shListStart(tier:u32)->u32{if(tier==2u){return SH_LIST+UM_TILES;}return SH_LIST+select(0u,umCounts.x,tier>0u);}
-fn shListed(o:UMOwner)->bool{return o.width==0u||atomicLoad(&work[SH_FLAGS+o.tile])!=0u;}
+fn shListed(o:UMOwner)->bool{return o.width==0u||shWord(SH_FLAGS+o.tile)!=0u;}
 // Listed tiers hold h owners and uniform-stencil 4h owners: one patch per
 // face. A constant part count lets the six face chains issue together; a
 // data-dependent loop serialized them (cold misses at coarse owners).
@@ -166,7 +174,7 @@ if(o.width==0u){return;}
 // An absent page's 4h owners are far air (V=0, corner and so centre phi at
 // least 16h > the band's 2x4h reach): never admitted, never dust, and an
 // orphan there holds zero budgets (V=0 gives nothing and is not receptive).
-@compute @workgroup_size(64) fn classify(@builtin(global_invocation_id) id:vec3u){
+${sweep?"":/* wgsl */`@compute @workgroup_size(64) fn classify(@builtin(global_invocation_id) id:vec3u){
  let o=umResidentAllOwner(id);if(o.width==0u){return;}
  let phi=textureLoad(centerPhi,vec3i(umOrigin(o)),0).x;let h=UM_MIN_H*f32(o.width);let band=sharpen.tuning.y;let open=umSharpenOpen(o);
  let admitted=open&&select((abs(phi)<band*h),(phi<band*h),(sharpen.policy.x>0.5));
@@ -175,33 +183,33 @@ if(o.width==0u){return;}
  if(admitted||orphan||dust){atomicStore(&work[SH_FLAGS+o.tile],1u);}
 }
 @compute @workgroup_size(64) fn compact(@builtin(global_invocation_id) id:vec3u){
- let tile=id.x+umDispatchX*64u*id.y;if(tile>=UM_TILES||atomicLoad(&work[SH_FLAGS+tile])==0u){return;}
+ let tile=id.x+umDispatchX*64u*id.y;if(tile>=UM_TILES||shWord(SH_FLAGS+tile)==0u){return;}
  let width=umTileWidth(tile);let tier=select(shTier(width),2u,width!=1u&&umTileMaximumWidth(tile)!=umTileMinimumWidth(tile));
  let slot=atomicAdd(&work[SH_COUNTS+tier],1u);atomicStore(&work[shListStart(tier)+slot],tile);
-}
+}`}
 // One merged launch per sweep entry: 192 regular owners per job (the tier
 // lists in order), then one job per coarse seam tile. Serial tier launches
 // paid each tier's latency in every entry of every sweep. (regular, all).
 fn shJobs()->vec2u{
- var owners=0u;for(var tier=0u;tier<2u;tier++){owners+=atomicLoad(&work[SH_COUNTS+tier])*(64u>>(6u*tier));}
- let regular=(owners+191u)/192u;return vec2u(regular,regular+atomicLoad(&work[SH_COUNTS+2u]));
+ var owners=0u;for(var tier=0u;tier<2u;tier++){owners+=shWord(SH_COUNTS+tier)*(64u>>(6u*tier));}
+ let regular=(owners+191u)/192u;return vec2u(regular,regular+shWord(SH_COUNTS+2u));
 }
 var<workgroup> shJobCount:vec2u;
 // Sweep jobs: 192 active regular owners or two coarse seam owners. Each
 // seam owner needs 6 * 16 patch lanes; geometry still uses one whole tile.
 fn shSweepJobs()->vec2u{
- let regular=(atomicLoad(&work[SH_ACTIVE_COUNT])+191u)/192u;return vec2u(regular,regular+(atomicLoad(&work[SH_COUNTS+2u])+1u)/2u);
+ let regular=(shWord(SH_ACTIVE_COUNT)+191u)/192u;return vec2u(regular,regular+(shWord(SH_COUNTS+2u)+1u)/2u);
 }
 fn shActiveOwner(job:u32,lane:u32)->UMOwner{
- let slot=job*192u+lane;if(slot>=atomicLoad(&work[SH_ACTIVE_COUNT])){return UMOwner();}
- let word=atomicLoad(&work[SH_ACTIVE+slot]);let tile=word/64u;let l=word%64u;
+ let slot=job*192u+lane;if(slot>=shWord(SH_ACTIVE_COUNT)){return UMOwner();}
+ let word=shWord(SH_ACTIVE+slot);let tile=word/64u;let l=word%64u;
  return UMOwner(tile,l,umTileWidth(tile),(umTopology[tile]&0x3fffffffu)+l);
 }
 fn shMergedOwner(job:u32,lane:u32)->UMOwner{
  var slot=job*192u+lane;
  for(var tier=0u;tier<2u;tier++){
-  let per=64u>>(6u*tier);let count=atomicLoad(&work[SH_COUNTS+tier])*per;
-  if(slot<count){let tile=atomicLoad(&work[shListStart(tier)+slot/per]);let l=slot%per;return UMOwner(tile,l,1u<<(2u*tier),(umTopology[tile]&0x3fffffffu)+l);}
+  let per=64u>>(6u*tier);let count=shWord(SH_COUNTS+tier)*per;
+  if(slot<count){let tile=shWord(shListStart(tier)+slot/per);let l=slot%per;return UMOwner(tile,l,1u<<(2u*tier),(umTopology[tile]&0x3fffffffu)+l);}
   slot-=count;
  }
  return UMOwner();
@@ -210,8 +218,8 @@ fn shMergedOwner(job:u32,lane:u32)->UMOwner{
 // two coarse seam owners into the same group, with 96 lanes per owner.
 // Each owner reduces its six sides in the original serial patch order.
 fn shSeamTile(job:u32)->u32{
- if(job>=atomicLoad(&work[SH_COUNTS+2u])){return UM_TILES;}
- return atomicLoad(&work[shListStart(2u)+job]);
+ if(job>=shWord(SH_COUNTS+2u)){return UM_TILES;}
+ return shWord(shListStart(2u)+job);
 }
 fn shSeamOwner(tile:u32,local:vec3u)->UMOwner{
  if(tile>=UM_TILES){return UMOwner();}
@@ -366,7 +374,7 @@ if(o.width==0u){return;}let at=umBudgetAt(o);var terms:array<f32,6>;
 }
 // The geometry launch also prepares the first sweep's budgets, over every
 // listed owner, and lists the active regular owners (one global add per job).
-var<workgroup> shActiveLocal:atomic<u32>;
+${sweep?"":/* wgsl */`var<workgroup> shActiveLocal:atomic<u32>;
 var<workgroup> shActiveBase:u32;
 @compute @workgroup_size(192) fn cacheGeometryPrepare(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(lane==0u){shJobCount=shJobs();}
@@ -389,8 +397,8 @@ var<workgroup> shActiveBase:u32;
   // The next job's seam stages its terms in the same workgroup array.
   workgroupBarrier();
  }
-}
-${["propose","limit","commit"].map(entry=>{const fn=`sh${entry[0]!.toUpperCase()}${entry.slice(1)}`;return /* wgsl */`
+}`}
+${(sweep?["propose","limit","commit"]:[]).map(entry=>{const fn=`sh${entry[0]!.toUpperCase()}${entry.slice(1)}`;return /* wgsl */`
 @compute @workgroup_size(192) fn ${entry}(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(lane==0u){shJobCount=shSweepJobs();}
  let jobs=workgroupUniformLoad(&shJobCount);
@@ -401,11 +409,13 @@ ${["propose","limit","commit"].map(entry=>{const fn=`sh${entry[0]!.toUpperCase()
   // The next job's seam stages its terms in the same workgroup array.
   workgroupBarrier();
  }
-}`;}).join("")}`,["classify"])});
-    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
+}`;}).join("")}`,sweep?[]:["classify"]);
+    const module=this.device.createShaderModule({code:source(false)}),sweepModule=this.device.createShaderModule({code:source(true)});
+    const errors=[...(await module.getCompilationInfo()).messages,...(await sweepModule.getCompilationInfo()).messages].filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+    const solid=this.solid?[this.solid.bindLayout]:[];
+    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...solid]}),sweepLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.sweepResources,...solid]});
     // One merged pipeline per entry: the listed launch covers every width.
-    await Promise.all(["cacheGeometryPrepare","propose","limit","commit"].map(async entryPoint=>{this.pipelines.set(entryPoint,[await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umCellWidth:1,umDispatchX:this.ownership.dispatchX,...s}}}))]);}));
+    await Promise.all(["cacheGeometryPrepare","propose","limit","commit"].map(async entryPoint=>{const sweep=entryPoint!=="cacheGeometryPrepare";this.pipelines.set(entryPoint,[await this.twin(s=>this.device.createComputePipelineAsync({layout:sweep?sweepLayout:layout,compute:{module:sweep?sweepModule:module,entryPoint,constants:{umCellWidth:1,umDispatchX:this.ownership.dispatchX,...s}}}))]);}));
     await Promise.all(["classify","compact"].map(async entryPoint=>{this.pipelines.set(entryPoint,[await this.twin(s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(entryPoint==="classify"?{umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll}:{}),...s}}}))]);}));
   }
   encodeGeometry(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
@@ -426,7 +436,8 @@ ${["propose","limit","commit"].map(entry=>{const fn=`sh${entry[0]!.toUpperCase()
     // An odd count would leave the result in groups[0]'s output, the scratch.
     if(!Number.isInteger(sweeps)||sweeps<2||sweeps%2!==0)throw new Error(`Mixed sharpening needs an even sweep count, not ${sweeps}`);
     const pass=encoder.beginComputePass({label:"Uniform mixed geometric sharpening"});pass.setBindGroup(0,this.ownership.bindGroup);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
-    for(let sweep=0;sweep<sweeps;sweep++){pass.setBindGroup(1,groups[sweep%2]!);for(const entry of ["propose","limit","commit"])this.dispatchEntry(pass,entry);}
+    const sweepGroups=groups.map(g=>{const twin=this.sweepGroups.get(g);if(!twin)throw new Error("Mixed sharpening sweeps need groups from bind()");return twin;});
+    for(let sweep=0;sweep<sweeps;sweep++){pass.setBindGroup(1,sweepGroups[sweep%2]!);for(const entry of ["propose","limit","commit"])this.dispatchEntry(pass,entry);}
     pass.end();
   }
   /** The merged launch: regular owners, then coarse seam tiles. */

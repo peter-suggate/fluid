@@ -4,7 +4,6 @@
 import { uniformAbOn } from "./uniform-ab-switch";
 import { planUniformCM11aHierarchy } from "./pressure-plan";
 import { rewritePressureTextureCalls } from "./uniform-pressure-pages";
-import { uniformDonorSliceWords } from "./uniform-volume-donor-sum.wgsl";
 
 /** Allocation-free layout; different resolutions can share backing when their
  * stages are serialized. No field in this layout is persistent simulation state. */
@@ -12,7 +11,6 @@ export class UniformScratchLayout {
   readonly byteLength: number;
   readonly donorOffset: number;
   readonly edgeBytes: number;
-  readonly donorBytes: number;
   readonly sharpenBaseWords: number;
   readonly conditioningBytes: number;
   private readonly offsets = new Map<string, number>();
@@ -54,15 +52,18 @@ export class UniformScratchLayout {
         this.offsets.set(`Uniform CM11a L${index+1} ${name}`,pressureWords);pressureWords+=cells*count;
       }
     });
-    // The mixed extension binds its four FIM ranges rounded up to 256 words.
-    const extensionEnd=Math.ceil(words*4/256)*256;
+    // The legacy FIM fields keep offsets only so they allocate as 1^3
+    // placeholders: the mixed frame dispatches none of them, so they set no
+    // part of the arena's extent.
     this.offsets.set("Uniform Sec. 3.3 resolved FIM distances",2*words);
     this.offsets.set("Total surface volume corrected phi",0);
     if(retainDiagnostics)this.offsets.delete("Uniform Sec. 3.3 resolved FIM distances");
     this.edgeBytes=edgeBytes;
     this.donorOffset=Math.ceil(edgeBytes/256)*256;
-    this.donorBytes=uniformDonorSliceWords(dims)*4;
-    this.byteLength=Math.max(extensionEnd*4,pressureWords*4,this.donorOffset+this.donorBytes);
+    // Past the edges: mixed transport's rigid exchange (12 B) and sums (4 B)
+    // per cell. Every other stage view lies below max(edges, pressure) and
+    // checks its own extent when it binds.
+    this.byteLength=Math.max(pressureWords*4,this.donorOffset+dims.reduce((n,d)=>n*d,1)*16);
     if (!Number.isSafeInteger(this.byteLength))
       throw new RangeError("Uniform scratch layout exceeds safe integer addressing");
   }

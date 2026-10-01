@@ -74,7 +74,7 @@ try{
  wrap(frame.momentum,'encode',e=>{snapshot(e,'volume',f.volume);snapshot(e,'centerPhi',f.centerPhi);snapshot(e,'target',f.target);},e=>snapshot(e,'advected',f.departure));
  wrap(frame.forces,'encode',()=>{},e=>snapshot(e,'forced',f.velocityScratch));
  wrap(frame.band,'encodeSolve',e=>snapshot(e,'bulk',f.velocity),e=>snapshot(e,'projected',f.velocity));
- wrap(frame.transport,'encodeTransport',()=>{},e=>snapshot(e,'transportVolume',f.volume));
+ wrap(frame.transport,'encodeTransport',()=>{},e=>snapshot(e,'transportVolume',f.volumeScratch));
  wrap(frame.band,'encodePrepare',e=>snapshot(e,'correction',f.correction),()=>{});
  const rows:any[]=[];
  for(let step=1;step<=frames;step++){

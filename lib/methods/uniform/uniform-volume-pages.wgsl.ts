@@ -14,7 +14,6 @@ export function uniformVolumeWorkLayout(base: number, pages: number, tiles: numb
 /** balancesupport: without a work list the restricted balance entries compile
  * to no-ops and the host never encodes them. */
 const UV_NO_WORK_LIST = " fn uvWorkListTile(n:u32)->u32{return 0xffffffffu;} fn uvBalanceWindowBase()->u32{return 0u;}";
-export const UNIFORM_VOLUME_PAGE_ENTRIES = ["uvMarkTransportPages", "uvMarkSharpenPages", "uvCompactPages", "uvDonorDispatch"] as const;
 export function uniformVolumePagesWGSL(options?: UniformVolumePageShaderOptions): string {
   // Native records in brick order (uvBrickOrder): the 32 lanes of a 4x4x2
   // receiver block then address 32 consecutive records instead of eight

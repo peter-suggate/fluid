@@ -1,4 +1,5 @@
-/** One storage-backed, strided coarse pressure solver for every grid size. */
+/** One strided coarse pressure solver for every grid size: its rows in
+ * workgroup memory up to MG_COARSE_LOCAL_ROWS cells, in storage beyond. */
 import { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE } from "./pressure-policy";
 
 /** Seven scalar fields plus aligned vec4 topology: 48 bytes per haloed cell. */
@@ -18,48 +19,15 @@ struct UniformPressureState {
 @group(1) @binding(13) var<storage,read_write> mgState: UniformPressureState;
 `;
 
-// Scratch shares the convergence binding; no extra storage-buffer slot is needed.
-export const uniformCoarseSolverWGSL = /* wgsl */ `
-// Specialised per solver; the reference CM11a path retains red/black updates.
-const MG_SIMULTANEOUS:bool=false;
-var<workgroup> mgCoarseResidualBits:atomic<u32>;
-var<workgroup> mgCoarseMaxBBits:atomic<u32>;
-var<workgroup> mgCoarseMaxDiagPBits:atomic<u32>;
-var<workgroup> mgCoarseMaxPBits:atomic<u32>;
-var<workgroup> mgCoarseMaxGapBits:atomic<u32>;
-var<workgroup> mgCoarseActiveRows:atomic<u32>;
-var<workgroup> mgCoarseFreeRows:atomic<u32>;
-var<workgroup> mgCoarseWorstLane:atomic<u32>;
-
-
-var<workgroup> mgCoarseConvergedFlag:u32;
-var<workgroup> mgCoarseTarget:f32;
-
-
-fn mgTwoSum(a:f32,b:f32)->vec2f{
-  let s=a+b;let bb=s-a;return vec2f(s,(a-(s-bb))+(b-bb));
-}
-fn mgDSAdd(a:vec2f,b:vec2f)->vec2f{
-  let s=mgTwoSum(a.x,b.x);let t=mgTwoSum(a.y,b.y);let u=mgTwoSum(s.y,t.x);let v=mgTwoSum(s.x,u.x);
-  return vec2f(v.x,v.y+u.y+t.y);
-}
-fn mgDSScale(a:vec2f,b:f32)->vec2f{
-  let product=a.x*b;let error=fma(a.x,b,-product)+a.y*b;let sum=mgTwoSum(product,error);return sum;
-}
-fn mgDSDivide(a:vec2f,b:f32)->vec2f{
-  let q=a.x/b;let remainder=mgDSAdd(a,-mgDSScale(vec2f(q,0.0),b));let correction=(remainder.x+remainder.y)/b;
-  return mgTwoSum(q,correction);
-}
-fn mgD4Sum6DS(value:array<vec2f,6>)->vec2f{
-  return mgDSAdd(mgDSAdd(mgDSAdd(value[0],value[1]),mgDSAdd(value[4],value[5])),mgDSAdd(value[2],value[3]));
-}
+/** Rows kept in workgroup memory (48 bytes each); larger levels stream. */
+const MG_COARSE_LOCAL_ROWS = 256;
+/** The row accessors and the solve, spelled once over `mgState.rows`. */
+const COARSE_ROW_HELPERS = /* wgsl */ `
 fn mgCoarsePressure(index:u32)->vec2f{return vec2f(mgState.rows[index].p,mgState.rows[index].low);}
 fn mgCoarseIterationPressure(index:u32)->vec2f{
   if(MG_SIMULTANEOUS){return vec2f(mgState.rows[index].residual,bitcast<f32>(mgState.rows[index].padding));}
   return mgCoarsePressure(index);
 }
-
-fn mgCoarseIndex(p:vec3i)->u32{let d=vec3i(mg.levelDims.xyz);return u32(p.x+d.x*(p.y+d.y*p.z));}
 fn mgCoarseCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
   let ci=mgCoarseIndex(id);let h=mg.spacing[axis];
   let d=vec3i(mg.levelDims.xyz);
@@ -76,17 +44,8 @@ fn mgCoarseCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
   if(qPhi>=0.0){let phi=mgState.rows[ci].phi;theta=mgSurfaceTheta(phi,qPhi);}
   return vf/(h*h*theta);
 }
-
-// A single workgroup owns the whole solve. Each colour completes across all
-// rows before the other colour can read it, including rows in later batches.
-// storageBarrier publishes cell state; workgroupBarrier publishes the reductions.
-// There is never more than one workgroup, so these barriers cover every row.
-@compute @workgroup_size(256)
-fn mgSolveCoarsest(@builtin(local_invocation_index) localLane:u32){
-  if(localLane==0u){mgCycleStopped=select(0u,1u,mgSkipCycle());}
-  if(workgroupUniformLoad(&mgCycleStopped)!=0u){return;}
-  let d=mg.levelDims.xyz;let count=d.x*d.y*d.z;
-  for(var lane=localLane;lane<count;lane+=256u){
+`;
+const COARSE_SOLVE_BODY = /* wgsl */ `  for(var lane=localLane;lane<count;lane+=256u){
   
   let id=vec3i(i32(lane%d.x),i32((lane/d.x)%d.y),i32(lane/(d.x*d.y)));
   mgState.rows[lane].p=mgP(id);mgState.rows[lane].low=0.0;mgState.rows[lane].rhs=textureLoad(mgRhsIn,id,0).x;
@@ -191,5 +150,68 @@ fn mgSolveCoarsest(@builtin(local_invocation_index) localLane:u32){
       let worstLane=atomicLoad(&mgCoarseWorstLane);let worstId=vec3i(i32(worstLane%d.x),i32((worstLane/d.x)%d.y),i32(worstLane/(d.x*d.y)));
       let halo=!mgInterior(worstId,d);let packed=worstLane|(mgState.rows[worstLane].state<<30u)|(select(0u,1u,halo)<<31u);
       atomicStore(&mgState.convergence[12],atomicLoad(&mgCoarseActiveRows));atomicStore(&mgState.convergence[13],atomicLoad(&mgCoarseFreeRows));atomicStore(&mgState.convergence[14],packed);}}}
+`;
+const coarseRows = (rows: string, suffix: string, barrier: string): string => {
+  const text = (source: string) => source.replaceAll("mgState.rows", rows)
+    .replace(/\b(mgCoarsePressure|mgCoarseIterationPressure|mgCoarseCoefficient)\(/g, `$1${suffix}(`)
+    .replaceAll("storageBarrier();workgroupBarrier();", barrier);
+  return text(COARSE_ROW_HELPERS) + `
+fn mgCoarseSolve${suffix}(localLane:u32){
+  let d=mg.levelDims.xyz;let count=d.x*d.y*d.z;
+` + text(COARSE_SOLVE_BODY) + "}\n";
+};
+
+// Scratch shares the convergence binding; no extra storage-buffer slot is needed.
+export const uniformCoarseSolverWGSL = /* wgsl */ `
+// Specialised per solver; the reference CM11a path retains red/black updates.
+const MG_SIMULTANEOUS:bool=false;
+var<workgroup> mgCoarseResidualBits:atomic<u32>;
+var<workgroup> mgCoarseMaxBBits:atomic<u32>;
+var<workgroup> mgCoarseMaxDiagPBits:atomic<u32>;
+var<workgroup> mgCoarseMaxPBits:atomic<u32>;
+var<workgroup> mgCoarseMaxGapBits:atomic<u32>;
+var<workgroup> mgCoarseActiveRows:atomic<u32>;
+var<workgroup> mgCoarseFreeRows:atomic<u32>;
+var<workgroup> mgCoarseWorstLane:atomic<u32>;
+
+
+var<workgroup> mgCoarseConvergedFlag:u32;
+var<workgroup> mgCoarseTarget:f32;
+
+
+fn mgTwoSum(a:f32,b:f32)->vec2f{
+  let s=a+b;let bb=s-a;return vec2f(s,(a-(s-bb))+(b-bb));
+}
+fn mgDSAdd(a:vec2f,b:vec2f)->vec2f{
+  let s=mgTwoSum(a.x,b.x);let t=mgTwoSum(a.y,b.y);let u=mgTwoSum(s.y,t.x);let v=mgTwoSum(s.x,u.x);
+  return vec2f(v.x,v.y+u.y+t.y);
+}
+fn mgDSScale(a:vec2f,b:f32)->vec2f{
+  let product=a.x*b;let error=fma(a.x,b,-product)+a.y*b;let sum=mgTwoSum(product,error);return sum;
+}
+fn mgDSDivide(a:vec2f,b:f32)->vec2f{
+  let q=a.x/b;let remainder=mgDSAdd(a,-mgDSScale(vec2f(q,0.0),b));let correction=(remainder.x+remainder.y)/b;
+  return mgTwoSum(q,correction);
+}
+fn mgD4Sum6DS(value:array<vec2f,6>)->vec2f{
+  return mgDSAdd(mgDSAdd(mgDSAdd(value[0],value[1]),mgDSAdd(value[4],value[5])),mgDSAdd(value[2],value[3]));
+}
+fn mgCoarseIndex(p:vec3i)->u32{let d=vec3i(mg.levelDims.xyz);return u32(p.x+d.x*(p.y+d.y*p.z));}
+var<workgroup> mgCoarseRows:array<UniformCoarseRow,${MG_COARSE_LOCAL_ROWS}>;
+${coarseRows("mgState.rows", "", "storageBarrier();workgroupBarrier();")}
+${coarseRows("mgCoarseRows", "Local", "workgroupBarrier();")}
+// A single workgroup owns the whole solve. Each colour completes across all
+// rows before the other colour can read it, including rows in later batches.
+// storageBarrier publishes cell state; workgroupBarrier publishes the reductions.
+// There is never more than one workgroup, so these barriers cover every row.
+// A coarsest level of at most MG_COARSE_LOCAL_ROWS cells (fig-9's 144, any
+// lockstep hierarchy's) keeps its rows in workgroup memory instead: the same
+// arithmetic in the same order, with workgroup barriers alone.
+@compute @workgroup_size(256)
+fn mgSolveCoarsest(@builtin(local_invocation_index) localLane:u32){
+  if(localLane==0u){mgCycleStopped=select(0u,1u,mgSkipCycle());}
+  if(workgroupUniformLoad(&mgCycleStopped)!=0u){return;}
+  let d=mg.levelDims.xyz;
+  if(d.x*d.y*d.z<=${MG_COARSE_LOCAL_ROWS}u){mgCoarseSolveLocal(localLane);}else{mgCoarseSolve(localLane);}
 }
 `;

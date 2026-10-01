@@ -7,37 +7,6 @@ import { volumeNormalizeRowsWGSL, volumeNormalizeDonorsWGSL } from "./uniform-vo
 import { uniformVolumeDonorSumWGSL } from "./uniform-volume-donor-sum.wgsl";
 import { uniformAbOn } from "./uniform-ab-switch";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
-/** Dense vertex phi and fixed receiver stencils; all positions are lattice units. */
-export const UNIFORM_VOLUME_ENTRIES = [
-  "uvAdvectPhi", "uvRedistancePhi", "uvBuildEdges",
-  "uvFinishDonorSums", "uvFallback", "uvNormalizeRows", "uvNormalizeDonors", "uvGather",
-  "uvRowsFallback", "uvRowsDivide",
-  "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen", "uvPublish",
-  "uvCacheSharpenCells", "uvCacheSharpenFaces",
-  "uvBalanceMeasure", "uvBalanceMeasureBox", "uvBalanceMeasureList", "uvBalanceReduce", "uvBalanceReduceChunks", "uvTwoLevelSeedCooperative", "uvTwoLevelSeedWindowed", "uvSolidTiles",
-  "uvAgreementResidual", "uvCorrectionCapacity", "uvCorrectionTargets",
-  "uvCullOrphanDust",
-  "uvClearDonorSums", "uvFinishAndClearDonorSums",
-  "uvClearSampled", "uvBuildEdgesSampled",
-] as const;
-/** The four Sec. 3.5 sweeps that exist in a dense and a 4h work-map variant. */
-export const UNIFORM_VOLUME_SHARPEN_ENTRIES = [
-  "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen",
-] as const;
-export const UNIFORM_VOLUME_TILE_CLASSIFY_ENTRY = "uvClassifySharpenTiles";
-/** E1/E2: seed the 4h classes at the head of the step, then dilate them. */
-export const UNIFORM_VOLUME_TWO_LEVEL_ENTRIES = [
-  "uvTwoLevelSeed", "uvTwoLevelDilateX", "uvTwoLevelDilateY", "uvTwoLevelDilateZ",
-] as const;
-/**
- * E7: the four passes that decide TRANSPORT from the post-extension field, run
- * between the extension and the first transport pass. Resident only while the
- * experiment is compiled in; never encoded while its host gate is off.
- */
-export const UNIFORM_VOLUME_TRANSPORT_REACH_ENTRIES = [
-  "uvTransportReachMeasure", "uvTransportReachX", "uvTransportReachY", "uvTransportReachZ",
-] as const;
-export const UNIFORM_VOLUME_TRANSPORT_REACH_COMPILED = uniformAbOn("tilereach");
 /** Words the E1 tables occupy above the N-word donor-sum region, per coarse cell. */
 export const UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE = 6;
 /**
@@ -47,14 +16,6 @@ export const UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE = 6;
  * what the transport predicate's required reach is derived from.
  */
 export const UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS = 3;
-export const UNIFORM_VOLUME_TWO_LEVEL_SHELL_COUNT_WORD = 0;
-export const UNIFORM_VOLUME_TWO_LEVEL_TRANSPORT_COUNT_WORD = 1;
-export const UNIFORM_VOLUME_TWO_LEVEL_DISPLACEMENT_WORD = 2;
-/** Pipeline-overridable constant selecting the tiled sharpening variant. */
-export const UNIFORM_VOLUME_TILE_WORK_OVERRIDE = "UV_SHARPEN_TILE_WORK";
-/** The first seven words remain reserved for work counters and layout stability. */
-export const UNIFORM_VOLUME_SHARPEN_TILE_COUNT_WORD = 7;
-export const UNIFORM_VOLUME_SHARPEN_TILE_MAP_WORD = 8;
 export const UNIFORM_VOLUME_EDGE_BYTES = uniformVolumeStencilBytes(1);
 const donorTiles = uniformAbOn("donortiles");
 const donorFuse = uniformAbOn("donorfuse");

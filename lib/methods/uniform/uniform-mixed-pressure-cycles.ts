@@ -62,7 +62,7 @@ export class UniformMixedPressureCycles {
   private readonly workgroups: [number, number, number];
   /** The continuation's cycle list: the per-cycle kernels walk its tiles. */
   private readonly listed?: { groups: [number, number]; list: GPUBuffer };
-  private readonly words: Record<"p" | "b0" | "b1" | "m0" | "m1" | "backup" | "residual" | "np" | "nb" | "nmin" | "nphi" | "nv" | "np1" | "nres", number>;
+  private readonly words: Record<"p" | "b0" | "b1" | "m0" | "m1" | "backup" | "residual" | "np" | "nb" | "nmin" | "nphi" | "nv" | "ncv" | "ncf" | "np1", number>;
   private readonly solid: boolean;
   constructor(private readonly device: GPUDevice, readonly level: UniformMixedPressureCycleLevel, backup: GPUBufferBinding,
     private readonly native: Continuation, private readonly uniformGroup: GPUBindGroup, private readonly openTop: boolean) {
@@ -70,8 +70,8 @@ export class UniformMixedPressureCycles {
     if (layout.tiles.some(word => mixedCellWidth(word) !== 4) || layout.tiles.length !== t[0]! * t[1]! * t[2]!)
       throw new Error("Mixed pressure root requires the uniform all-4h layout");
     const count = uniformMixedPressureStorage(layout).count;
-    const nativeFields = [native.pressure, native.rhs, native.minimum, native.phi, native.topology,
-      ...(native.cycle ? [native.cycle.pressure, native.cycle.residual] : [])];
+    const nativeFields = [native.pressure, native.rhs, native.minimum, native.phi, native.topology, native.result.v, native.result.full,
+      ...(native.cycle ? [native.cycle.pressure] : [])];
     const arena = nativeFields[0]!.buffer?.buffer;
     if (!arena || nativeFields.some(f => f.buffer?.buffer !== arena)) throw new Error("Mixed pressure root requires the shared native scratch arena");
     if (nativeFields.some(f => f.dimensions.some((n, a) => n !== t[a]! + 2))) throw new Error("Mixed and native pressure extents differ");
@@ -87,9 +87,9 @@ export class UniformMixedPressureCycles {
     if (mixedRange.offset < nativeRange.offset + nativeRange.size && nativeRange.offset < mixedRange.offset + mixedRange.size)
       throw new Error("Mixed pressure root and native continuation fields overlap");
     const [p, b0, b1, m0, m1, backupWord, residual] = mixed.map(f => ((f.offset ?? 0) - mixedRange.offset) / 4) as number[];
-    const [np, nb, nmin, nphi, nv, np1, nres] = nativeFields.map(f => ((f.buffer!.offset ?? 0) - nativeRange.offset) / 4) as number[];
+    const [np, nb, nmin, nphi, nv, ncv, ncf, np1] = nativeFields.map(f => ((f.buffer!.offset ?? 0) - nativeRange.offset) / 4) as number[];
     this.words = { p: p!, b0: b0!, b1: b1!, m0: m0!, m1: m1!, backup: backupWord!, residual: residual!, np: np!, nb: nb!, nmin: nmin!, nphi: nphi!, nv: nv!,
-      np1: np1 ?? 0, nres: nres ?? 0 };
+      ncv: ncv!, ncf: ncf!, np1: np1 ?? 0 };
     const phi: GPUBufferBinding = { buffer: level.phi.buffer, offset: level.phi.offset ?? 0, size: 4 * layout.tiles.length };
     // The static solid record, read in place from its own binding.
     const topology = level.topology?.buffer;
@@ -124,7 +124,7 @@ const UM_H=vec3f(${h.map(n => n.toFixed(8)).join(",")});const UM_MIN_H=min(UM_H.
 const UM_THETA_MIN:f32=${UNIFORM_MIXED_THETA_MIN};const UM_OPEN_TOP=${open};
 const UM_P=${w.p}u;const UM_B0=${w.b0}u;const UM_B1=${w.b1}u;const UM_M0=${w.m0}u;const UM_M1=${w.m1}u;const UM_BACKUP=${w.backup}u;const UM_RES=${w.residual}u;
 const MG_P=${w.np}u;const MG_B=${w.nb}u;const MG_MIN=${w.nmin}u;const MG_PHI=${w.nphi}u;const MG_V=${w.nv}u;
-${listed ? `const MG_P1=${w.np1}u;const MG_RES=${w.nres}u;
+${listed ? `const MG_P1=${w.np1}u;
 @group(1) @binding(3) var<storage,read> umList:array<u32>;
 // The native cell a listed workgroup's lane owns (one 4^3 tile of the
 // continuation lattice per workgroup), or UM_N past the list's live count.
@@ -135,8 +135,9 @@ fn umListed(g:vec3u,n:vec3u,lane:u32)->vec3u{
 }` : ""}
 // restrict: the row's RHS and bound, and whether it opens a Full-Cycle.
 override UM_RHS:u32=UM_B0;override UM_MIN:u32=UM_M0;override UM_FULL:bool=false;
-// prolong: 0 add, 1 assign, 2 add then restore the Full-Cycle backup.
-override UM_PROLONG:u32=0u;
+// prolong: 0 add, 1 assign, 2 add then restore the Full-Cycle backup; the
+// correction is read where the native traversal left it (its end parity).
+override UM_PROLONG:u32=0u;override UM_CORRECTION:u32=MG_P;
 // The mixed pressure schedule's slot gate (support 9n+24, 0 open).
 fn umSlotClosed()->bool{return umSupport[9u*UM_CELLS+24u]!=0u;}
 fn umNative(p:vec3u)->u32{return p.x+UM_N.x*(p.y+UM_N.y*p.z);}
@@ -256,7 +257,7 @@ ${listed ? `// The far-field seeds of the listed cycle kernels: every value a de
  // is zero. The seeded bound is also what the native list builder reads to
  // list every interior-bounded tile.
  var lower=0.0;if(cell.kind!=0u){lower=mixed[UM_M0+cell.slot];mixed[UM_RES+cell.slot]=0.0;}
- native[MG_P+at]=0.0;native[MG_P1+at]=0.0;native[MG_RES+at]=0.0;native[MG_B+at]=0.0;native[MG_MIN+at]=lower;` : ""}
+ native[MG_P+at]=0.0;native[MG_P1+at]=0.0;native[MG_B+at]=0.0;native[MG_MIN+at]=lower;` : ""}
 }
 // The correction problem: its RHS is the mixed residual, its bound the row's
 // bound less the pressure, its initial value zero. A Full-Cycle also keeps
@@ -272,7 +273,7 @@ fn restrictAt(p:vec3u){
 }
 fn prolongAt(p:vec3u){
  let cell=umCell(p);if(cell.kind==0u){return;}
- let s=cell.slot;let e=native[MG_P+umNative(p)];
+ let s=cell.slot;let e=native[UM_CORRECTION+umNative(p)];
  if(UM_PROLONG==1u){mixed[UM_P+s]=e;}
  else if(UM_PROLONG==2u){mixed[UM_P+s]=(mixed[UM_P+s]+e)+mixed[UM_BACKUP+s];}
  else{mixed[UM_P+s]+=e;}
@@ -305,7 +306,8 @@ ${["restrict", "prolong", "measure"].map(name => listed ? `
     const variants: Record<Entry, [string, Record<string, number>]> = {
       setup: ["setup", {}], measure: ["measure", {}],
       restrictV: ["restrictRoot", {}], restrictInner: ["restrictRoot", { UM_RHS: w.b1, UM_MIN: w.m1 }], restrictFull: ["restrictRoot", { UM_FULL: 1 }],
-      prolongAdd: ["prolongRoot", {}], prolongAssign: ["prolongRoot", { UM_PROLONG: 1 }], prolongBackup: ["prolongRoot", { UM_PROLONG: 2 }],
+      prolongAdd: ["prolongRoot", { UM_CORRECTION: w.ncv }], prolongAssign: ["prolongRoot", { UM_PROLONG: 1, UM_CORRECTION: w.ncf }],
+      prolongBackup: ["prolongRoot", { UM_PROLONG: 2, UM_CORRECTION: w.ncv }],
     };
     await Promise.all((Object.entries(variants) as [Entry, [string, Record<string, number>]][]).map(async([entry, [entryPoint, constants]])=>{this.pipelines.set(entry, await this.device.createComputePipelineAsync({ layout: pipelineLayout, compute: { module, entryPoint, constants } }));}));
   }

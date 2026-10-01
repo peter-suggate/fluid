@@ -7,7 +7,7 @@ import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, UN
 import type { FluidRefinementRegion } from "../../core/model";
 import { refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
-import { uniformBrickCells, uniformDonorLimbCells } from "./uniform-volume-donor-sum.wgsl";
+import { uniformBrickCells } from "./uniform-volume-donor-sum.wgsl";
 import { uniformPageHasRectangularCoverage } from "./uniform-page-execution";
 import { UniformTexturePages } from "./uniform-texture-pages";
 import {initialUniformPageDomain,type UniformPageDomain} from "./uniform-page-domain";
@@ -466,7 +466,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly nativeRootExecution: boolean = false;
   private readonly volumePageEdge: 0 | 32;
   private readonly volumePageConfig?: UniformVolumePageShaderOptions;
-  private readonly volumeDonorSums?: GPUBuffer;
   /** The geometric t=0 surface publication; see encodeInitialPresentationSurface. */
   private initialPublishPipeline?: GPUComputePipeline;
   private readonly shaderSource: string;
@@ -484,8 +483,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Velocity after advection/forces and before the pressure projection. */
   get preProjectionVelocityTexture(): GPUTexture { return this.present(this.velocityB); }
   /** Padded float32 velocity extension retained for opt-in comparison diagnostics. */
-  private readonly executionExtrapolatedVelocityTexture: GPUTexture;
-  get extrapolatedVelocityTexture(): GPUTexture { return this.executionExtrapolatedVelocityTexture; }
+  private readonly executionExtrapolatedVelocityTexture?: GPUTexture;
+  /** Undefined on Geometric: the mixed extension publishes no padded field. */
+  get extrapolatedVelocityTexture(): GPUTexture | undefined { return this.executionExtrapolatedVelocityTexture; }
   /** FIM xyz distances plus the 3-bit active mask in w, for Dawn conformance diagnostics. */
   get extrapolationActiveStateTexture(): GPUTexture {
     this.enableStageDiagnosticsForQA();
@@ -597,7 +597,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly rigidGroup: GPUBindGroup;
   private readonly reductionGroup: GPUBindGroup;
   private readonly densityTraceGroup: GPUBindGroup;
-  private readonly volumeDonorGroup: GPUBindGroup;
   private readonly densityScatterGroup: GPUBindGroup;
   private readonly densityGatherGroup: GPUBindGroup;
   private readonly gammaDiffusionGroups: readonly [GPUBindGroup, GPUBindGroup];
@@ -857,11 +856,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       && !(typeof process !== "undefined" && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1");
     this.velocityC = lazyMac ? texture3d("Uniform reference unused velocity C", "rgba32float", [1,1,1]) : velocity("Uniform reference velocity C");
     this.velocityD = velocity("Uniform reference velocity D");
-    const boundaryVelocity = (label: string) => device.createBuffer({ label, size: allocation.boundaryVelocityBytes,
+    const boundaryVelocity = (label: string, size = allocation.boundaryVelocityBytes) => device.createBuffer({ label, size,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.boundaryVelocityA = boundaryVelocity("Uniform reference negative boundary velocity A");
     this.boundaryVelocityB = boundaryVelocity("Uniform reference negative boundary velocity B");
-    this.boundaryVelocityC = boundaryVelocity("Uniform reference negative boundary velocity C");
+    // Read only by legacy (non-mixed) groups: Geometric binds a placeholder.
+    this.boundaryVelocityC = boundaryVelocity("Uniform reference negative boundary velocity C", this.geometricVolume ? 16 : allocation.boundaryVelocityBytes);
     this.boundaryVelocityD = boundaryVelocity("Uniform reference negative boundary velocity D");
     if (typeof process !== "undefined" && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1") {
       this.symmetryStageAuditNegativeBoundaryVelocity = device.createBuffer({
@@ -889,9 +889,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         throw new Error(`Uniform Geometric receiver stencils require ${edgeBytes} bytes, exceeding the device limit`);
       this.executionDenseLevelSetVolumeSource = { vertexPhi: this.present(this.vertexPhiField), openFraction: this.present(this.gammaB),
         cellSize_m: [scene.container.width_m/nx, scene.container.height_m/ny, scene.container.depth_m/nz] };
-      // Smaller than the edge buffer checked above: six 32-bit limbs/cell.
-      this.volumeDonorSums = this.scratchArena?.buffer ?? device.createBuffer({ label: "Uniform Geometric exact donor sums", size: uniformDonorLimbCells([nx,ny,nz])*24,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       this.volumeEdges = this.scratchArena?.buffer ?? device.createBuffer({ label: "Uniform Geometric nine-donor stencils", size: edgeBytes,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     }
@@ -900,7 +897,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.terrainTexture = device.createTexture({ label: "Uniform reference terrain", size: [nx, nz], format: "r32float", usage });
     const transportUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
-    this.transportA = (this.fieldPages ?? device).createTexture({ label: "Uniform reference transport A", size: allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
+    // The mixed frame reads neither padded transport field: Geometric binds placeholders.
+    this.transportA = (this.fieldPages ?? device).createTexture({ label: "Uniform reference transport A", size: this.geometricVolume ? [1,1,1] : allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
     this.transportB = (this.fieldPages ?? device).createTexture({ label: "Uniform reference transport B", size: lazyMac ? [1,1,1] : allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
     if (typeof process !== "undefined" && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1") {
       this.symmetryStageAuditFields = Object.freeze({
@@ -992,7 +990,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.velocityA, this.velocityC, this.transportA, this.transportB,
       this.activeRegion, this.conditioningScratch,
       this.activeRegionEnabled ? this.activeDispatch : undefined,
-      options.sourceAwareExtension ?? this.geometricVolume, options.fuseExtensionPack, this.fieldPages, this.nativeRootExecution ? undefined : this.pageDomain, undefined, options.extensionWorkForQA === "baseline",
+      options.sourceAwareExtension ?? this.geometricVolume, options.fuseExtensionPack, this.fieldPages, this.nativeRootExecution ? undefined : this.pageDomain, undefined, options.extensionWorkForQA === "baseline", this.geometricVolume,
     );
     // Without a ceil(n/4) hierarchy level there is no 4h field to sample.
     if (!this.velocityExtrapolator.coarseVelocityTableAvailable) this.twoLevelTileCount = 0;
@@ -1093,7 +1091,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       reversed = velocityIn, transport = this.transportA, surface = volumeIn,
       gammaRead = this.gammaA, gammaWrite = this.gammaB,
       boundaryRead = this.boundaryVelocityA, boundaryWrite = this.boundaryVelocityB,
-      velocityPhase = volumeIn, reversePhi = false, pressureOnly = false, donorSums = false) => this.createPageAwareGroup({
+      velocityPhase = volumeIn, reversePhi = false, pressureOnly = false) => this.createPageAwareGroup({
         layout: pressureOnly ? this.pressureInputLayout : this.mainLayout, entries: ([
           ...(this.geometricVolume ? [
             { binding: 31, resource: view((reversePhi ? this.vertexPhiScratch! : this.vertexPhiField!)) },
@@ -1105,7 +1103,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           { binding: 4, resource: view(volumeIn) }, { binding: 5, resource: view(volumeOut) },
           { binding: 6, resource: { buffer: this.params } }, { binding: 7, resource: view(heightIn) },
           { binding: 8, resource: view(heightOut) }, { binding: 9, resource: { buffer: this.reductions } },
-          { binding: 10, resource: { buffer: this.rigidSystem.stateBuffer } }, { binding: 11, resource: { buffer: donorSums ? this.volumeDonorSums! : this.rigidExchange, ...(donorSums && this.scratchArena ? {offset:this.scratchArena.donorOffset,size:this.scratchArena.donorBytes}: {}) } },
+          { binding: 10, resource: { buffer: this.rigidSystem.stateBuffer } }, { binding: 11, resource: { buffer: this.rigidExchange } },
           { binding: 12, resource: view(predicted) }, { binding: 13, resource: view(reversed) },
           { binding: 14, resource: view(transport) }, { binding: 15, resource: sampler },
           { binding: 16, resource: view(velocityPhase) },
@@ -1117,7 +1115,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           { binding: 29, resource: { buffer: this.activeRegion } },
           { binding: 30, resource: { buffer: this.activeScratch } },
         ] as GPUBindGroupEntry[]).filter(e => !pressureOnly || (e.binding !== 32 && e.binding !== 33 && (!this.scratchArena || e.binding !== 28))),
-      },donorSums?this.scratchArena?.edgeBytes:undefined);
+      });
     // Pressure setup and projection never read the reverse-advection slot, so
     // under Geometric it carries this advance's V_face authority instead.
     const sharedFaceOpen = this.geometricVolume ? this.velocityD : this.velocityB;
@@ -1158,10 +1156,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Paper Sec. 3.4 step 7 scatters the deficit from pre-advection gamma^n.
     this.densityScatterGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA,
       this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaA, this.gammaB);
-    // Donor passes do not exchange rigid impulses. Reuse that binding slot
-    // to stay within the adapter's ten-storage-buffer stage limit.
-    this.volumeDonorGroup = this.geometricVolume ? group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA,
-      this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB, this.volumeA, false, false, true) : this.densityTraceGroup;
     this.densityGatherGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA,
       this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaB, this.gammaA);
     this.gammaDiffusionGroups = [
@@ -1204,7 +1198,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       regularLayers: ny, maximumNeighborDelta: 0, gridKind: "uniform",
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
       pressureIterations: 0, pressureSolver: `CM11a ${pagedPressure ? "paged (QA)" : this.pageDomain ? "native-page" : "dense"} LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post ${this.geometricVolume ? "projected Jacobi; V-first adaptive" : "PRBGS"})`,
-      allocatedBytes: allocation.allocatedBytes - (this.geometricVolume ? count*8-8 : 0) - (this.scratchArena ? allocation.conditioningBytes-this.scratchArena.conditioningBytes : 0) - (lazyMac ? nx*ny*nz*16+(nx+2)*(ny+2)*(nz+2)*16-32 : 0) + 8 + pageBytes + this.surfaceDeficitBalanceBytes + this.pressureMultigrid.allocatedBytes
+      allocatedBytes: allocation.allocatedBytes - (this.geometricVolume ? count*8-8 : 0) - (this.scratchArena ? allocation.conditioningBytes-this.scratchArena.conditioningBytes : 0) - (lazyMac ? nx*ny*nz*16+(nx+2)*(ny+2)*(nz+2)*16-32 : 0) - (this.geometricVolume ? (nx+2)*(ny+2)*(nz+2)*16-16+allocation.boundaryVelocityBytes-16 : 0) + 8 + pageBytes + this.surfaceDeficitBalanceBytes + this.pressureMultigrid.allocatedBytes
         + (this.geometricVolume ? 8 * (nx+1)*(ny+1)*(nz+1) + (this.scratchArena ? 0 : count*24 + (this.volumeEdges?.size ?? 0)) + 12 : 0)
         + activeRegionBytes * 3 + (this.pageDomain ? this.pageDomain.words.byteLength : 0) + activeSummaryBytes + packedSolidVoxels.byteLength
         + hostAuxiliaryBytes + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
@@ -1221,7 +1215,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.executionVolumeTexture = this.present(this.volumeA);
     this.executionColumnBaseTexture = this.heightA;
     this.executionVelocityTexture = this.present(this.velocityA);
-    this.executionExtrapolatedVelocityTexture = this.present(this.transportA);
+    if (!this.geometricVolume) this.executionExtrapolatedVelocityTexture = this.present(this.transportA);
     if(!this.scratchArena){
       this.present(this.velocityB);
       this.present(this.velocityExtrapolator.activeStateTexture);
@@ -1425,11 +1419,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const staticKey=`${this.mixedSolidMaskStamp}:${JSON.stringify(this.scene.fluid.refinementRegions??[])}`;
       if(staticKey!==this.mixedBuilderStaticKey)this.refreshMixedBuilderStatics(this.mixedSolidPromotion());
       const g=this.scene.fluid.gravity_m_s2;
+      // The build's counters clear in the census's blit run.
+      builder.encodeClear(encoder);
       dynamic.encode(encoder,{dt,steps:1,gravity:[g.x,g.y,g.z],reach:this.mixedCoarseningReach,hysteresis:this.mixedCoarseningHysteresis,
         surfaceTolerance:this.mixedCoarseningSurfaceTolerance,fastTravel:0,
         boundaryTravel:this.mixedCoarseningBoundaryTravel,closedWalls:this.scene.container.top==="open"?0b101111:0b111111,up:Math.sign(-g.y),
         fullTolerance:UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE,emptyTolerance:Math.max(this.volumeDustThreshold,1e-6),reasons:views},false);
-      builder.encode(encoder,false);
+      builder.encode(encoder);
+    },adopted:encoder=>{
       // Diagnostics only: a free read takes this build's receipt; mapped
       // once the frame submits (readMixedRelayout), never awaited.
       const read=this.mixedRelayoutReads.pop();
@@ -1532,7 +1529,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private refreshMixedBuilderStatics(solid:ReturnType<WebGPUUniformReferenceSolver["mixedSolidPromotion"]>):void{
     const regions=this.scene.fluid.refinementRegions??[];
     const staticLayout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions,4);
-    this.mixedBuilder!.setStatic(Uint8Array.from(staticLayout.tiles,word=>mixedCellWidth(word)===1?1:0),staticLayout.regions,this.mixedCoarseOnlyTiles(regions,solid.forced));
+    this.mixedBuilder!.setStatic(Uint8Array.from(staticLayout.tiles,word=>mixedCellWidth(word)===1?1:0),this.mixedCoarseOnlyTiles(regions,solid.forced));
     this.mixedDynamic!.setSolid(solid.coupled);
     this.mixedBuilderStaticKey=`${this.mixedSolidMaskStamp}:${JSON.stringify(regions)}`;
   }
@@ -1856,7 +1853,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const zeroBoundaryVelocity = new Float32Array(this.executionNegativeBoundaryVelocityBytes / 4);
     this.device.queue.writeBuffer(this.boundaryVelocityA, 0, zeroBoundaryVelocity);
     this.device.queue.writeBuffer(this.boundaryVelocityB, 0, zeroBoundaryVelocity);
-    this.device.queue.writeBuffer(this.boundaryVelocityC, 0, zeroBoundaryVelocity);
+    this.device.queue.writeBuffer(this.boundaryVelocityC, 0, zeroBoundaryVelocity, 0, this.boundaryVelocityC.size / 4);
     this.device.queue.writeBuffer(this.boundaryVelocityD, 0, zeroBoundaryVelocity);
     this.referenceVolumeCells = initial;
     const terrainCells = Float32Array.from(terrain, (height) => height / cellHeight);
@@ -2308,8 +2305,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     return this.twoLevelVelocity && this.twoLevelTileCount > 0;
   }
 
-  private createPageAwareGroup(descriptor: GPUBindGroupDescriptor, scratchBytes?: number): GPUBindGroup {
-    const group = this.fieldPages ? this.fieldPages.createBindGroup(descriptor,true,scratchBytes) : this.device.createBindGroup(descriptor);
+  private createPageAwareGroup(descriptor: GPUBindGroupDescriptor): GPUBindGroup {
+    const group = this.fieldPages ? this.fieldPages.createBindGroup(descriptor) : this.device.createBindGroup(descriptor);
     this.groupDescriptors.set(group,descriptor);
     return group;
   }
@@ -2979,7 +2976,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     ])) texture.destroy();
     this.vertexPhiField?.destroy(); this.vertexPhiScratch?.destroy();
     if(this.scratchArena)this.scratchArena.destroy();
-    else { this.volumeEdges?.destroy(); this.volumeDonorSums?.destroy(); }
+    else this.volumeEdges?.destroy();
     this.boundaryVelocityA.destroy(); this.boundaryVelocityB.destroy();
     this.boundaryVelocityC.destroy(); this.boundaryVelocityD.destroy();
     this.symmetryStageAuditNegativeBoundaryVelocity?.destroy();
