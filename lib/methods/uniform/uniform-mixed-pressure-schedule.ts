@@ -11,6 +11,13 @@ const UNIFORM_MIXED_SCHEDULE_NEED_WINDOW=4;
 /** One frame's encoded slot list: V-cycles, then Full-Cycles. */
 export interface UniformMixedPressurePlan {readonly vCycles:number;readonly fullCycles:number}
 
+/** Fewest slots a frame encodes, the host reserve included. The warm-started
+ * root converges a quiet frame in one cycle, so a window of quiet frames
+ * planned two; the dam 128^3's first far-wall impact then needed three (its
+ * second-cycle residual sat at 2.5-5.4 against 5 across equivalent
+ * trajectories) and failed. */
+export const UNIFORM_MIXED_SCHEDULE_FLOOR=3;
+
 /** Add capacity without reviving a V phase the planner dropped after a stall.
  * Positive surface coarsening needs another spare across abrupt impacts;
  * the ordinary GPU plan already includes its own one-cycle headroom. */

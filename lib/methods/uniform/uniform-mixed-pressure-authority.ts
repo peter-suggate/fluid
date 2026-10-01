@@ -62,8 +62,9 @@ export class UniformMixedPressureAuthority {
   // from the GPU) therefore never exceed groups.
   this.owners=ownership.layout.cellCount;
   this.groups=Math.ceil(this.owners/64);this.chunks=Math.ceil(this.groups/1024);
-  // Coarse: one vec2f cut-vote slot per owner after the balance words.
-  this.scratchBytes=8*(1+this.groups+this.chunks+(coarse?this.owners:0));
+  // Two vec2f words per partial; coarse: one vec2f cut-vote slot per owner
+  // after the balance words.
+  this.scratchBytes=8*(1+2*(this.groups+this.chunks)+(coarse?this.owners:0));
   this.resources=device.createBindGroupLayout({entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    ...[3,6].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
@@ -145,7 +146,7 @@ fn umOpenVote(values:array<f32,8>,opens:array<f32,8>)->f32{
  let sum=select(umSum8(values),umSum8(open)*8.0/max(openCount,1.0),openCount>0.0);
  return select(sum/8.0,umSum8(positive)/max(positiveCount,1.0),positiveCount>0.0&&umSum8(negativeFlags)>0.0);
 }
-const UM_CUT_BASE=${1+this.groups+this.chunks}u;
+const UM_CUT_BASE=${1+2*(this.groups+this.chunks)}u;
 var<workgroup> cutCount:atomic<u32>;
 var<workgroup> cutListed:u32;
 var<workgroup> cutTiles:array<u32,64>;
@@ -206,46 +207,60 @@ fn umDeficit(o:UMOwner,v:f32,distance:f32)->f32{
  if(cap<=1e-5||v>cap||distance>=0.0){return 0.0;}
  return max(0.0,textureLoad(targetFill,vec3i(umOrigin(o)),0).x${this.coarse?"*cap":""}-v);
 }
-// Air-side V above the geometric fill. Diverging transport leaves bulk
-// liquid V in a skin above phi; it is counted only in the deficit budget, so
-// the contraction that refills diluted liquid draws that skin back down.
+// Diverging transport dilutes bulk liquid and leaves its V in a skin of air
+// owners above phi. That stranded V (uncut air owners) is a second budget,
+// spent only on deep bulk deficits (uncut, more than a 4h width below the
+// surface), so the contraction refilling the diluted liquid draws the skin
+// back down. It relaxes with a 0.25 s half-life, not the excess's 1/30 s:
+// a resting pool's skin persists for seconds, while a moving body's V lags
+// its phi for a few frames. Spent at the excess rate, or on cut and shallow
+// owners, the lag contracted transient flow (cm12-figure-9's falling ball
+// stretched and its dam front frayed). Cut owners keep the excess-only rate.
+fn umFill(o:UMOwner)->f32{return textureLoad(targetFill,vec3i(umOrigin(o)),0).x${this.coarse?"*umCapacity(o)":""};}
 fn umStranded(o:UMOwner,v:f32,distance:f32)->f32{
  let cap=umCapacity(o);
- if(cap<=1e-5||distance<0.0||umDetachedMass(o)){return 0.0;}
- return uvVolumeCorrectionFractionAt(params.x)*max(0.0,min(v,cap)-textureLoad(targetFill,vec3i(umOrigin(o)),0).x${this.coarse?"*cap":""});
+ if(cap<=1e-5||distance<0.0||umDetachedMass(o)||umFill(o)>0.0){return 0.0;}
+ return uvVolumeCorrectionFractionAt(params.x/7.5)*min(v,cap);
 }
+fn umBulkDeficit(o:UMOwner,v:f32,distance:f32)->f32{return select(0.0,umDeficit(o,v,distance),umFill(o)>=umCapacity(o)&&distance< -4.0*UM_HMIN);}
 // false: the phase-only build (phi and phase; no balance reduction).
 override umAuthorityBalance:bool=true;
-var<workgroup> sums:array<vec2f,64>;
+var<workgroup> sums:array<vec4f,64>;
 fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(l<stride){sums[l]+=sums[l+stride];}workgroupBarrier();}}
 @compute @workgroup_size(64) fn build(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) group:vec3u){
- let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);var values=vec2f(0);
+ let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);var values=vec4f(0);
  if(o.width!=0u){let origin=vec3i(umOrigin(o));let v=textureLoad(volume,origin,0).x;let distance=umAuthority(o,v);
   phi[o.index]=distance;
   textureStore(phase,origin,vec4f(select(0.0,1.0,distance<0.0||umDetachedMass(o))));
   if(umAuthorityBalance){
   let cap=umCapacity(o);
-  values=vec2f(uvVolumeCorrectionAmountAt(v,cap,params.x),umDeficit(o,v,distance))*f32(o.width*o.width*o.width);
+  values=vec4f(uvVolumeCorrectionAmountAt(v,cap,params.x),umDeficit(o,v,distance),umStranded(o,v,distance),umBulkDeficit(o,v,distance))*f32(o.width*o.width*o.width);
   // Native balance counts open liquid rows only.
-  if(umSolidEnabled()&&(cap<=1e-5||distance>=0.0)){values=vec2f(0);}
-  values.x+=umStranded(o,v,distance)*f32(o.width*o.width*o.width);
+  if(umSolidEnabled()&&(cap<=1e-5||distance>=0.0)){values=vec4f(0,0,values.z,0);}
   }
  }
  if(!umAuthorityBalance){return;}
  sums[l]=values;umReduce(l);let index=group.x+umDispatchX*group.y;
- if(l==0u&&index<${this.groups}u){balance[1u+index]=sums[0];}
+ if(l==0u&&index<${this.groups}u){balance[1u+2u*index]=sums[0].xy;balance[2u+2u*index]=sums[0].zw;}
 }
 @compute @workgroup_size(64) fn chunks(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) l:u32){
- var value=vec2f(0);for(var i=group.x*1024u+l;i<min(${this.resident?"umCounts.x+umResidentPageCount()":"(umCounts.x*64u+umCounts.y+63u)/64u"},(group.x+1u)*1024u);i+=64u){value+=balance[1u+i];}
- sums[l]=value;umReduce(l);if(l==0u){balance[${1+this.groups}u+group.x]=sums[0];}
+ var value=vec4f(0);for(var i=group.x*1024u+l;i<min(${this.resident?"umCounts.x+umResidentPageCount()":"(umCounts.x*64u+umCounts.y+63u)/64u"},(group.x+1u)*1024u);i+=64u){value+=vec4f(balance[1u+2u*i],balance[2u+2u*i]);}
+ sums[l]=value;umReduce(l);if(l==0u){balance[${1+2*this.groups}u+2u*group.x]=sums[0].xy;balance[${2+2*this.groups}u+2u*group.x]=sums[0].zw;}
 }
 @compute @workgroup_size(64) fn reduce(@builtin(local_invocation_index) l:u32){
- var value=vec2f(0);for(var i=l;i<${this.chunks}u;i+=64u){value+=balance[${1+this.groups}u+i];}
- sums[l]=value;umReduce(l);if(l==0u){var rate=0.0;if(params.y>=0.0&&sums[0].y>0.0){rate=min(1.0,sums[0].x/sums[0].y);}balance[0]=vec2f(rate,0);}
+ var value=vec4f(0);for(var i=l;i<${this.chunks}u;i+=64u){value+=vec4f(balance[${1+2*this.groups}u+2u*i],balance[${2+2*this.groups}u+2u*i]);}
+ sums[l]=value;umReduce(l);if(l==0u){
+  // rate: every deficit, from excess. bulk: what remains of uncut deficits,
+  // from stranded V.
+  var rate=0.0;var bulk=0.0;let s=sums[0];
+  if(params.y>=0.0&&s.y>0.0){rate=min(1.0,s.x/s.y);}
+  if(params.y>=0.0&&s.w>0.0){bulk=min(1.0-rate,s.z/s.w);}
+  balance[0]=vec2f(rate,bulk);}
 }
 @compute @workgroup_size(64) fn resolve(@builtin(global_invocation_id) gid:vec3u){
  let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);if(o.width==0u){return;}let origin=vec3i(umOrigin(o));let v=textureLoad(volume,origin,0).x;
- let amount=uvVolumeCorrectionAmountAt(v,umCapacity(o),params.x)-balance[0].x*umDeficit(o,v,phi[o.index]);
+ let distance=phi[o.index];
+ let amount=uvVolumeCorrectionAmountAt(v,umCapacity(o),params.x)-balance[0].x*umDeficit(o,v,distance)-balance[0].y*umBulkDeficit(o,v,distance);
  textureStore(correction,origin,vec4f(amount/max(params.x,1e-12)));
 }
 ${this.resident?`// One group per page: the 4h owners of an absent page take the dense

@@ -26,7 +26,7 @@ import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgs
 import {UniformMixedPressureVelocity} from "./uniform-mixed-pressure-velocity";
 import {UniformMixedPressureCycles,type UniformMixedPressureCycleLevel} from "./uniform-mixed-pressure-cycles";
 import {UniformMixedPressureAcceptance} from "./uniform-mixed-pressure-acceptance";
-import {UniformMixedPressureSchedule,uniformMixedPressureReserve,type UniformMixedPressurePlan} from "./uniform-mixed-pressure-schedule";
+import {UNIFORM_MIXED_SCHEDULE_FLOOR,UniformMixedPressureSchedule,uniformMixedPressureReserve,type UniformMixedPressurePlan} from "./uniform-mixed-pressure-schedule";
 import {UNIFORM_MIXED_STATUS,UNIFORM_MIXED_STATUS_WORDS,describeUniformMixedFrameStatus} from "./uniform-mixed-frame-status";
 import {planUniformMixedPressureMemory} from "./uniform-mixed-pressure-memory";
 import {DEFAULT_UNIFORM_CM11A_SCHEDULE,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_RELATIVE_REDUCTION,type UniformCM11aSchedule} from "./pressure-policy";
@@ -529,7 +529,7 @@ export class UniformMixedFrame {
    const plannedBy=frame-UNIFORM_MIXED_RECEIPT_RING,lagged=this.lagged.get(plannedBy);
    if(plannedBy>0&&!lagged)throw new Error(`Uniform mixed frame ${frame} encoded before frame ${plannedBy}'s receipt was checked`);
    this.lagged.delete(plannedBy);
-   const schedule=this.pressureSchedule,plan=p.fullPressureEnvelope||!lagged?this.initialPlan:uniformMixedPressureReserve(lagged,this.initialPlan,p.pressureReserve??0),vCycles=plan.vCycles;
+   const schedule=this.pressureSchedule,plan=p.fullPressureEnvelope||!lagged?this.initialPlan:uniformMixedPressureReserve(lagged,this.initialPlan,Math.max(p.pressureReserve??0,UNIFORM_MIXED_SCHEDULE_FLOOR-lagged.vCycles-lagged.fullCycles)),vCycles=plan.vCycles;
    schedule.begin(plan);
    for(let slot=0;slot<schedule.slots;slot++){
     const gated=schedule.gate(encoder,slot);
