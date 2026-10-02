@@ -325,14 +325,20 @@ export function svoSurfaceMeshWGSL(group: number, flatNormalsFlag: number, culli
 struct SurfaceQuad { origin:vec3u, identity:u32, extent:vec3u, face:u32 }
 // Bit 31 selects a triangle: origin is the cell base and extent contains
 // three packed 10-bit-per-axis local vertices. Vertex 3 repeats vertex 2.
+// A dual triangle (bit 30) carries two more bits per axis for each vertex in
+// face bits 11-28, which a dual cell spanning leaves of two sizes needs.
 ${contours ? svoCellContourWGSL : ""}
 fn meshContoursEnabled()->bool{return ${contours ? "dry.meshFilterNormals.w>0.5&&dry.meshFilterNormals.w<2.0" : "false"};}
 // Inflation is baked into each triangle record so the old front stays valid
 // while replacement geometry is built with a new setting.
 fn meshInflationCode()->u32{return ${contours ? "u32(round(clamp(dry.meshFilterNormals.w-1.0,0.0,0.5)*100.0))" : "0u"};}
 fn meshRecordInflation(quad:SurfaceQuad)->f32{return f32((quad.face>>11u)&63u)/100.0;}
-${contours ? `fn meshTrianglePoint(quad:SurfaceQuad,word:u32)->vec3f{
-  if(meshDualTriangle(quad)){return vec3f(f32(word&1023u),f32((word>>10u)&1023u),f32((word>>20u)&1023u))/512.0;}
+${contours ? `fn meshTrianglePoint(quad:SurfaceQuad,index:u32)->vec3f{
+  let word=quad.extent[index];
+  if((quad.face&0x40000000u)!=0u){
+    let high=(quad.face>>(11u+6u*index))&63u;
+    return vec3f(f32((word&1023u)|((high&3u)<<10u)),f32(((word>>10u)&1023u)|(((high>>2u)&3u)<<10u)),f32(((word>>20u)&1023u)|(((high>>4u)&3u)<<10u)))/512.0;
+  }
   let inflation=meshRecordInflation(quad);
   return vec3f(0.5)+(contourUnpackPoint(word)-vec3f(0.5))*(1.0+2.0*inflation);
 }` : ""}
@@ -340,6 +346,8 @@ fn meshDmcEnabled()->bool{return dry.meshFilterNormals.w>=3.0;}
 // Shared dual-grid policy (uniform resolution, expanded dirty masks and normals).
 fn meshDcEnabled()->bool{return dry.meshFilterNormals.w>=2.0;}
 fn meshDualTriangle(quad:SurfaceQuad)->bool{return (quad.face&0x40000000u)!=0u;}
+// A dual triangle's origin words carry its three vertex normals above bit 16.
+fn meshQuadOrigin(quad:SurfaceQuad)->vec3u{return select(quad.origin,quad.origin&vec3u(0xffffu),meshDualTriangle(quad));}
 fn meshTriangle(quad:SurfaceQuad)->bool{return (quad.face&0x80000000u)!=0u;}
 fn meshQuadExtent(quad:SurfaceQuad)->vec3u{
   if(meshTriangle(quad)){return vec3u((1u<<(dry.mapping.maximumDepth-meshQuadDepth(quad.face)))*select(1u,2u,meshDualTriangle(quad)));}
@@ -618,7 +626,10 @@ fn meshAppend(origin:vec3u,extent:vec3u,packedFace:u32,identity:u32){
 }
 ${contours ? svoContourMeshWGSL : ""}
 ${svoVoxelMeshWGSL(W.errorFlags, contours)}
-${contours ? svoDualContouringMeshWGSL + svoDualMarchingCubesMeshWGSL : ""}
+${contours ? `// A dual cell graded past what a triangle record holds is an extraction fault.
+fn meshDmcUnsupported(){atomicOr(&meshState[${W.errorFlags}],2u);}
+fn meshDmcPackNormal(normal:vec3f)->u32{return svoGBufferPackNormalOct8(normal);}
+${svoDualContouringMeshWGSL}${svoDualMarchingCubesMeshWGSL}` : ""}
 fn meshExtractJob(leafIndex:u32,local:u32){
   ${contours ? `if(meshDcEnabled()){
     let leaf=svoLeafLoad(leafIndex).topology;let node=svoNodeLoad(leaf.x);
@@ -661,9 +672,8 @@ fn surfaceMeshPrepare(){
   for(var level=0u;level<8u;level+=1u){atomicStore(&meshState[${W.lodBricks}u+level],0u);}
   atomicStore(&meshState[${W.drawVertexCount}],4u);
   meshClearDispatch(${W.extractDispatch}u);meshClearDispatch(${W.allocateDispatch}u);meshClearDispatch(${W.markDispatch}u);
-  // Smooth reconstruction has a view-dependent face fallback and cannot be
-  // represented by these cached boundary quads. Withhold raster geometry for this unsupported representation.
-  if((dry.materialPublication.w&${flatNormalsFlag}u)==0u){atomicStore(&meshState[${W.withheld}],2u);atomicStore(&meshState[${W.drawInstanceCount}],0u);return;}
+  // Smooth raster surfaces use the dual-grid attachment. Publication and
+  // attachment checks below keep extraction on the matching geometry generation.
   let attachment=atomicLoad(&meshState[${W.hostSurfaceVertices}]);
   let dualReady=!meshDcEnabled()||((attachment&0x7fffffffu)!=0u&&((attachment&0x80000000u)!=0u)==meshDmcEnabled());
   let valid=dryPublicationWord(0u)!=0u&&(dryPublicationWord(1u)&REQUIRED_FIELDS)==REQUIRED_FIELDS&&dualReady;
@@ -1036,8 +1046,8 @@ fn surfaceMeshSelect(@builtin(global_invocation_id) id:vec3u){
 fn meshQuadBrickBase(quad:SurfaceQuad)->vec3u{
   let axis=meshQuadFace(quad.face)/2u;
   let size=dry.mapping.brickSize*(1u<<(dry.mapping.maximumDepth-meshQuadDepth(quad.face)));
-  var base=(quad.origin/size)*size;
-  if(!meshTriangle(quad)&&(meshQuadFace(quad.face)&1u)!=0u&&quad.origin[axis]%size==0u){base[axis]-=size;}
+  let origin=meshQuadOrigin(quad);var base=(origin/size)*size;
+  if(!meshTriangle(quad)&&(meshQuadFace(quad.face)&1u)!=0u&&origin[axis]%size==0u){base[axis]-=size;}
   return base;
 }
 fn meshQuadLeaf(quad:SurfaceQuad)->u32{
@@ -1080,13 +1090,20 @@ fn meshQuadVisible(index:u32)->bool{
   let quad=meshArenaLoad(meshFront(),index);
   if(meshQuadDead(quad)){return false;}
   if(!meshQuadSelected(quad)){return false;}
-  if(meshMaskActive()&&meshBoxesContain(quad.origin,quad.origin+meshQuadExtent(quad))){return false;}
+  // A dual triangle's vertices may lie up to four cells from its origin, so
+  // its bounds are its own vertices rather than the record's nominal extent.
+  var boundsLow=vec3f(0.0);var boundsHigh=vec3f(meshQuadExtent(quad));
+  ${contours ? `if(meshDualTriangle(quad)){
+    let a=meshTrianglePoint(quad,0u);let b=meshTrianglePoint(quad,1u);let c=meshTrianglePoint(quad,2u);
+    boundsLow=min(a,min(b,c))*boundsHigh;boundsHigh=max(a,max(b,c))*boundsHigh;
+  }` : ""}
+  if(meshMaskActive()&&meshBoxesContain(meshQuadOrigin(quad)+vec3u(floor(boundsLow)),meshQuadOrigin(quad)+vec3u(ceil(boundsHigh)))){return false;}
   let face=meshQuadFace(quad.face);let axis=face/2u;
-  let origin=dry.mapping.worldOrigin+vec3f(quad.origin)*dry.mapping.cellSize;
+  let origin=dry.mapping.worldOrigin+vec3f(meshQuadOrigin(quad))*dry.mapping.cellSize;
   let camera=dryRasterPrimaryCamera();
   var facing=(camera[0][axis]-origin[axis])*select(-1.0,1.0,(face&1u)!=0u);
   ${contours ? `if(meshTriangle(quad)){
-    let a=meshTrianglePoint(quad,quad.extent.x);let b=meshTrianglePoint(quad,quad.extent.y);let c=meshTrianglePoint(quad,quad.extent.z);
+    let a=meshTrianglePoint(quad,0u);let b=meshTrianglePoint(quad,1u);let c=meshTrianglePoint(quad,2u);
     let n=cross((b-a)*dry.mapping.cellSize,(c-a)*dry.mapping.cellSize);
     let point=origin+a*vec3f(meshQuadExtent(quad))*dry.mapping.cellSize;
     facing=dot(camera[0]-point,n)/max(length(n),1e-20);
@@ -1094,8 +1111,8 @@ fn meshQuadVisible(index:u32)->bool{
   // Retain the coplanar tolerance band to avoid rounding-dependent holes.
   let epsilon=max(1e-5,abs(origin[axis])*1e-6);
   if(facing < -epsilon){return false;}
-  let baseHalf=vec3f(meshQuadExtent(quad))*dry.mapping.cellSize*0.5;
-  let center=origin+baseHalf-camera[0];
+  let baseHalf=(boundsHigh-boundsLow)*dry.mapping.cellSize*0.5;
+  let center=origin+boundsLow*dry.mapping.cellSize+baseHalf-camera[0];
   let halfExtent=baseHalf*select(1.0,1.0+2.0*meshRecordInflation(quad),meshTriangle(quad));
   let z=dot(center,camera[1]);
   if(z+dot(halfExtent,abs(camera[1])) < DRY_REVERSED_Z_NEAR_M-epsilon){return false;}
@@ -1140,24 +1157,26 @@ struct MeshVertexOut {
   let corners=array<vec2u,4>(vec2u(1u,0u),vec2u(1u,1u),vec2u(0u,0u),vec2u(0u,1u));
   // Swapping the two in-plane coordinates reverses winding on negative
   // faces while preserving the 00–11 diagonal and the covered rectangle.
-  let corner=select(corners[vertex],corners[vertex].yx,(face&1u)==0u);var lattice=quad.origin;lattice[u]+=corner.x*quad.extent[u];lattice[v]+=corner.y*quad.extent[v];
+  let corner=select(corners[vertex],corners[vertex].yx,(face&1u)==0u);var lattice=meshQuadOrigin(quad);lattice[u]+=corner.x*quad.extent[u];lattice[v]+=corner.y*quad.extent[v];
   var world=dry.mapping.worldOrigin+vec3f(lattice)*dry.mapping.cellSize;
   ${contours ? `if(meshTriangle(quad)){
-    let p=meshTrianglePoint(quad,quad.extent[min(vertex,2u)]);
-    world=dry.mapping.worldOrigin+(vec3f(quad.origin)+p*vec3f(meshQuadExtent(quad)))*dry.mapping.cellSize;
+    let p=meshTrianglePoint(quad,min(vertex,2u));
+    world=dry.mapping.worldOrigin+(vec3f(meshQuadOrigin(quad))+p*vec3f(meshQuadExtent(quad)))*dry.mapping.cellSize;
   }` : ""}
   let camera=dryRasterPrimaryCamera();let relative=world-camera[0];let z=dot(relative,camera[1]);
   var position=vec4f(dot(relative,camera[2])/(cameraTanHalfFov()*uniforms.viewport.x/max(uniforms.viewport.y,1.0)),dot(relative,camera[3])/cameraTanHalfFov(),DRY_REVERSED_Z_NEAR_M,z);
   ${culling ? "" : "// Without the cull pass, an unselected or freed quad collapses to a zero-area strip.\n  if(meshQuadDead(quad)||!meshQuadSelectedRead(quad)){position=vec4f(0.0,0.0,0.0,1.0);}"}
   var normal=vec3f(0.0);normal[axis]=select(-1.0,1.0,(face&1u)!=0u);
   ${contours ? `if(meshTriangle(quad)){
-    let a=meshTrianglePoint(quad,quad.extent.x);let b=meshTrianglePoint(quad,quad.extent.y);let c=meshTrianglePoint(quad,quad.extent.z);
+    let a=meshTrianglePoint(quad,0u);let b=meshTrianglePoint(quad,1u);let c=meshTrianglePoint(quad,2u);
     normal=normalize(cross((b-a)*dry.mapping.cellSize,(c-a)*dry.mapping.cellSize));
   }` : ""}
   let geometricNormal=normal;
   ${contours ? `if(meshDualTriangle(quad)&&(quad.face&0x20000000u)==0u){
-    let region=meshRegionAt((world-dry.mapping.worldOrigin)/dry.mapping.cellSize);
-    if(sceneIdentityHasNormal(region.identity)){normal=sceneIdentityNormal(region.identity);}
+    // The mesher stored each vertex's fitted normal; a vertex whose solid
+    // leaf published none keeps the triangle's own.
+    let word=quad.origin[min(vertex,2u)]>>16u;
+    if(word!=SCENE_IDENTITY_NO_NORMAL){normal=svoGBufferUnpackNormalOct8(word);}
   }` : ""}
   let brickLattice=dry.mapping.brickSize*(1u<<(dry.mapping.maximumDepth-meshQuadDepth(quad.face)));
   return MeshVertexOut(position,world,quad.identity,normal,meshQuadLevel(quad.face),f32((quad.face>>11u)&255u)/255.0,

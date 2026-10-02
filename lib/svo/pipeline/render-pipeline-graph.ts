@@ -195,6 +195,7 @@ const coneRateLabel = (scale: number) =>
 
 /** The configurations the renderer serves from the face lattice rather than the screen fan-out. */
 const latticeVisibilityServes = (context: RenderPipelineContext) => context.latticeVisibilityEnabled !== false
+  && !context.smoothSurfaceEnabled
   && context.tuning.coneLightingScale !== 1 && !context.globalIlluminationEnabled
   && context.tuning.coneRadianceReconstruction === "full-res-relight";
 
@@ -348,7 +349,7 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     taps: ["mesh-lod"],
     toggleable: true,
     tip: {
-      summary: "Selects a cached detail level for each voxel brick and shades baked voxel normals. Higher thresholds allow coarser cells on screen. Off restores exact voxel faces and face normals. Its work runs inside mesh culling and drawing; the shared timing belongs to Primary rasterization.",
+      summary: "Selects a cached detail level for each voxel brick. Higher thresholds allow coarser cells on screen. Off restores native mesh detail. Smooth surface uses a uniform dual grid and disables voxel coarsening. Its work runs inside mesh culling and drawing; the shared timing belongs to Primary rasterization.",
       reads: "cached voxel mesh levels · camera · baked normals",
       feeds: "primary rasterization",
       gate: "rasterized primary with Smooth surface off",
@@ -357,8 +358,8 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
       : !context.tuning.surfaceMeshFilteringEnabled ? "off"
       : context.disabledStages.has("primary-traversal") || !context.surfaceMeshActive ? "armed" : "on",
     chip: (context) => !context.surfaceMeshSelected ? "rasterized primary only"
-      : context.smoothSurfaceEnabled ? "requires Smooth surface off"
-      : !context.tuning.surfaceMeshFilteringEnabled ? "exact voxel faces"
+      : context.smoothSurfaceEnabled ? "smooth mesh · native resolution"
+      : !context.tuning.surfaceMeshFilteringEnabled ? "native mesh · face normals"
       : `${context.tuning.surfaceMeshMaxCoarsening === 0 ? "native" : `${context.tuning.surfaceMeshLodPixels} px`} · ${context.tuning.surfaceMeshNormalSmoothing && context.tuning.surfaceMeshNormalStrength > 0 ? "smoothed normals" : "face normals"}`,
   },
   {
@@ -379,7 +380,7 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     },
     state: (context) => (context.disabledStages.has("primary-traversal") ? "off" : "on"),
     chip: (context) => (context.disabledStages.has("primary-traversal")
-      ? "withheld · clears only" : context.surfaceMeshActive ? "cached voxel triangles" : "megakernel · canonical-parametric"),
+      ? "withheld · clears only" : context.surfaceMeshActive ? (context.smoothSurfaceEnabled ? "cached smooth triangles" : "cached voxel triangles") : "megakernel · canonical-parametric"),
   },
   {
     id: "scene-primitive",
@@ -721,14 +722,14 @@ export function renderPipelineNodeForContext(
     stages: node.stages.filter((stage) => meshStages.has(stage)),
     tip: {
       ...node.tip,
-      summary: "Primary rasterization fills the surface buffer using cached voxel faces. Its timing is the sum of mesh update, mesh culling, and one pass that draws the exact planes and then the mesh. Mesh update includes revision checks on cached frames and, on a changed publication, re-extraction of the bricks that publication rewrote into the cached mesh in place. While that runs the cached mesh stays drawn and only the pixels whose rays cross the edited bricks are traced; before the first build, exact traversal shows the whole current voxel scene. Off clears the surface buffer to sky.",
+      summary: "Primary rasterization fills the surface buffer using cached triangles: dual marching cubes for smooth surfaces, or the selected voxel mesher otherwise. Its timing is the sum of mesh update, mesh culling, and one pass that draws the exact planes and then the mesh. Mesh update includes revision checks on cached frames and, on a changed publication, re-extraction of the bricks that publication rewrote into the cached mesh in place. While that runs the cached mesh stays drawn and only the pixels whose rays cross the edited bricks are traced; before the first build, exact traversal shows the whole current voxel scene. Off clears the surface buffer to sky.",
     },
     chip: (current) => current.disabledStages.has("primary-traversal") ? "withheld · clears only"
       : current.surfaceMeshStatus?.state === "pending" && current.surfaceMeshStatus.drawn ? "mesh updating · edited bricks traced"
       : current.surfaceMeshStatus?.state === "pending" ? "mesh preparation · current SVO visible"
       : current.surfaceMeshStatus?.fallbackReason === "budget" ? "Current SVO · mesh budget exceeded"
       : current.surfaceMeshStatus?.state === "blocked" ? "Current SVO traversal"
-      : current.surfaceMeshActive ? "cached voxel triangles" : "mesh pending · current SVO visible",
+      : current.surfaceMeshActive ? (current.smoothSurfaceEnabled ? "cached smooth triangles" : "cached voxel triangles") : "mesh pending · current SVO visible",
   };
 }
 

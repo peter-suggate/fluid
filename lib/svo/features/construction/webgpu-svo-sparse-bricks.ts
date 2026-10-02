@@ -145,6 +145,7 @@ import { PassBroker } from "../../../core/webgpu-pass-broker";
 import { backdropSeamForScene, compileBackdropField } from "../backdrop/backdrop-field";
 import { BACKDROP_CONTENT_CEILING_HEADER_WORDS, BACKDROP_CONTENT_CEILING_TILE_CELLS, BACKDROP_CONTENT_CEILING_TILES, BACKDROP_TERRAIN_HEADER_WORDS, BACKDROP_TERRAIN_TABLE, createBackdropContentCeiling, packBackdropTerrainTable, packContentCeilingTable, planBackdropTiles, raiseBackdropContentCeiling, type BackdropContentCeiling } from "../backdrop/backdrop-terrain-tiles";
 import {
+  BACKDROP_DETAIL_DUAL_APRON_BRICKS,
   backdropDetailCentreLattice,
   backdropDetailFromPlan,
   backdropDetailVoxelizerWGSL,
@@ -1468,7 +1469,9 @@ export class OctreeSparseBrickWorld {
       backdropDetailFromPlan(backdropField, planBackdropTiles(backdropField, {
         origin_m: [-0.5 * scene.container.width_m, 0, -0.5 * scene.container.depth_m],
         cellSize_m: backdropCell_m, firstLevel: backdropDetailRings,
-      }), backdropDetailRings), backdropDetailLattice_m) : undefined;
+      // A dual-grid plan also claims an apron brick past the outer square.
+      }), backdropDetailRings), backdropDetailLattice_m! * (options.surfaceDualMarchingCubes
+        ? 1 + BACKDROP_DETAIL_DUAL_APRON_BRICKS : 1)) : undefined;
     const authoredWorldBounds = scene.voxelDomain.bounds_m;
     // This tree is a sparse presentation consumer, not the fluid solver's
     // address space. Fluid residency claims wet pages as they appear; static
@@ -1548,7 +1551,11 @@ export class OctreeSparseBrickWorld {
       nodeEdge_m.push(refinedBrickEdge.map((value) => value * scale));
     }
     let renderTerrain: import("../scene-publication/svo-render-solid-field").SvoRenderTerrainField | undefined;
-    if (refinementDepth > 0 || (dryWorld && (options.surfaceContours === true || options.surfaceDualContouring === true || options.surfaceDualMarchingCubes === true))) {
+    // A function-fitted surface needs the continuous terrain whatever the
+    // depth: fitted from the solver's voxel SDF instead, a renderer-only
+    // sidecar at depth 0 draws the terraces and their sentinel gaps.
+    if (refinementDepth > 0 || (dryWorld && (options.surfaceContours === true || options.surfaceDualContouring === true || options.surfaceDualMarchingCubes === true))
+      || (rendererOnly && options.surfaceDualMarchingCubes === true)) {
       if (options.buildRenderTerrainGpu) yield options.buildRenderTerrainGpu(renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID)
         .then(field => { renderTerrain = field; });
       renderTerrain ??= yield* buildSvoRenderTerrainFieldSteps(scene, renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID);
@@ -1802,10 +1809,12 @@ export class OctreeSparseBrickWorld {
       // The level whose voxel is the scene cell: the solver's, a refinement
       // depth above the finest.
       solverLevel: maximumDepth - refinementDepth,
+      dualGrid: options.surfaceDualMarchingCubes === true,
     }) : undefined;
     const backdropDetailNodes = new Set<string>();
     if (backdropField && backdropDetail) {
-      const box = backdropDetailWorldBounds(backdropField, backdropDetail);
+      const box = backdropDetailWorldBounds(backdropField, backdropDetail, options.surfaceDualMarchingCubes
+        ? BACKDROP_DETAIL_DUAL_APRON_BRICKS * backdropDetailLattice_m! : 0);
       this.backdropDetailBounds = { minimum: [box.min.x, box.min.y, box.min.z], maximum: [box.max.x, box.max.y, box.max.z] };
     }
     reportStage("Plan the adaptive octree");
@@ -2158,7 +2167,7 @@ export class OctreeSparseBrickWorld {
       },
       renderTerrain,
       backdropDetail: backdropDetail && backdropTerrainTable
-        ? backdropDetailVoxelizerWGSL(backdropTerrainTable, backdropDetail) : undefined,
+        ? backdropDetailVoxelizerWGSL(backdropTerrainTable, backdropDetail, options.surfaceDualMarchingCubes === true) : undefined,
       // The coarse record index and the per-frame budget. Both are what turn
       // maintenance from "cheap because the scene is small" into something that
       // survives ten times the records: binning stops reading every record, and

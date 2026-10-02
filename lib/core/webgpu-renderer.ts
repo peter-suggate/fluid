@@ -106,7 +106,7 @@ import {
   type SvoRenderDiagnostics,
 } from "../svo/features/diagnostics/svo-render-diagnostics";
 import { SparseVoxelRenderStageOverlay } from "../svo/features/diagnostics/webgpu-svo-stage-overlay";
-import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoRenderTuningKey, type SvoRenderTuning } from "../svo/pipeline/svo-render-tuning";
+import { DEFAULT_SVO_RENDER_TUNING, resolveSvoSurfaceTuning, svoRenderTuningKey, type SvoRenderTuning } from "../svo/pipeline/svo-render-tuning";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../svo/features/lighting-visibility/svo-screen-space-termination";
 import { isGPUInitializationAbort } from "./gpu-initialization";
 import {
@@ -3158,7 +3158,10 @@ export class FluidLabRenderer {
       )
       : undefined;
     if (!this.device || this.disposed || this.simulationFault || this.runtimeFailure || this.deviceLost || !this.context || !this.uniformBuffer || !this.bodyBuffer || !this.waterPipeline) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
-    const activeSvoTuning = normalizeSvoRenderTuning(svoTuning);
+    const smoothRaster = !sceneUsesFlatVoxelNormals(scene)
+      && !svoRenderStageUsesPrimaryWorkMap(svoDiagnostics.stageView)
+      && resolveSvoPrimaryTraversal(svoLightingOptions.primaryTraversal ?? DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal) === "mesh";
+    const activeSvoTuning = resolveSvoSurfaceTuning(svoTuning, smoothRaster);
     this.resize(activeSvoTuning.resolutionScale);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
     const requestedSvoDiagnostics = normalizeSvoRenderDiagnostics(svoDiagnostics);

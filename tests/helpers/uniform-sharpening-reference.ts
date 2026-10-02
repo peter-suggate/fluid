@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 // reference independent of the production lane packing.
 const referenceFunctions = /* wgsl */ `
 fn shSweepJobs()->vec2u{
- let regular=(atomicLoad(&work[SH_ACTIVE_COUNT])+191u)/192u;return vec2u(regular,regular+atomicLoad(&work[SH_COUNTS+2u]));
+ let regular=(shWord(SH_ACTIVE_COUNT)+191u)/192u;return vec2u(regular,regular+shWord(SH_COUNTS+2u));
 }
 fn shSeamLane(tile:u32,lane:u32)->SHSeamLane{
  if(tile>=UM_TILES){return SHSeamLane(UMOwner(),false,0u,0u);}
@@ -18,6 +18,9 @@ fn shProposeSeam(tile:u32,lane:u32){
  if(face.width!=0u&&face.neighbor.width!=0u&&shListed(face.neighbor)){scratch[umRawAt(face)]=umProposal(o,face.neighbor,face);}
 }`;
 export function sharpeningReference(code:string):string {
+ // Geometry and sweeps now compile separately. Geometry already visits one
+ // seam tile per group; only the read-only sweep module needs the reference.
+ if(!code.includes("@compute @workgroup_size(192) fn propose("))return code;
  for(const fn of referenceFunctions.trim().split(/\n(?=fn )/)){
   const name=/^fn (\w+)/.exec(fn)![1]!;
   const pattern=new RegExp(`fn ${name}\\([^]*?\\n}`);

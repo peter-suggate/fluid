@@ -28,7 +28,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   Object.defineProperty(raw,"createShaderModule",{configurable:true,writable:true,value:(descriptor:GPUShaderModuleDescriptor)=>{
    let code=descriptor.code;
    if(reference&&code.includes("fn umCubicPhi(")){
-    const before=code;code=code.replace("!umSolidEnabled()||((umRegularFine||owner.width==1u)&&umSolidClear(base))","(umRegularFine||owner.width==1u)&&umSolidClear(base)");
+    const before=code;code=code.replace("!umSolidEnabled()||((umRegularFine||cell.width==1u)&&umSolidClear(base))","(umRegularFine||cell.width==1u)&&umSolidClear(base)");
     assert.notEqual(code,before,"reference must restore the old tap checks");replaced++;
    }
    return create({...descriptor,code});
@@ -95,7 +95,11 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
       write(outputPhi,new Float32Array(count).fill(123));const encoder=d.createCommandEncoder();surfaces[i]!.encode(encoder,stage,groups[i]!);d.queue.submit([encoder.finish()]);results.push(await readMixedTexture(d,outputPhi));
      }
      assert.ok(results[1]!.some(v=>v!==123),"stage must actually write vertices");
-     const first=results[1]!.findIndex((v,i)=>v!==results[0]![i]);
+     // Solid-free twin: production folds tapsClear to a constant, the
+     // reference keeps the per-tap branch, and Metal contracts the two tap
+     // reductions differently. Same arithmetic, so compare to rounding there.
+     const tolerance=present?0:1e-6;
+     const first=results[1]!.findIndex((v,i)=>!(Math.abs(v-results[0]![i]!)<=tolerance));
      assert.equal(first,-1,`${present?"solid":"clear"} ${layoutName} ${shape} ${stage}: first difference ${first}: ${results[1]![first]} vs ${results[0]![first]}`);
     }
    }

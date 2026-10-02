@@ -3,7 +3,7 @@ import type { FeatureDefinition } from "../../../framework/composition";
 
 export const SVO_PRIMARY_VISIBILITY_OPTIONS = [
   { value: "traced", label: "Ray traced", hint: "Trace the accepted voxel scene for each camera pixel." },
-  { value: "mesh", label: "Rasterized", hint: "Draw cached exposed voxel faces. Disable Smooth surface to use mesh rasterization; geometry is withheld while it is enabled. Lighting is unchanged." },
+  { value: "mesh", label: "Rasterized", hint: "Draw cached surface triangles. Smooth surface reconstructs watertight geometry from the procedural field using dual marching cubes." },
 ] as const;
 
 export const SVO_PRIMARY_VISIBILITY_FEATURE = {

@@ -239,7 +239,19 @@ export interface BackdropDetailClassifierOptions {
   nodeEdge_m: readonly (readonly number[])[];
   /** Level whose voxel is the scene cell h0: ring l's leaves sit at `solverLevel - l`, one deeper on a refined ring. */
   solverLevel: number;
+  /**
+   * Plan for a function-fitted dual grid (`backdropDetailField`) rather than
+   * for the voxel columns. A dual cell is drawn only when all eight leaves
+   * round its vertex are resident, so every brick the continuous ground comes
+   * within a cell of is claimed (a coarser neighbour's cell, beside the next
+   * ring), and one apron brick past the outer square carries the surface out
+   * to where the analytic far ground takes over.
+   */
+  dualGrid?: boolean;
 }
+
+/** Bricks of the outermost ring a dual-grid plan claims past the outer square. */
+export const BACKDROP_DETAIL_DUAL_APRON_BRICKS = 1;
 
 export interface BackdropDetailCensus {
   leaves: number;
@@ -250,8 +262,10 @@ export interface BackdropDetailCensus {
 /** The planner's supplemental classifier, plus a running census of what it admitted. */
 export function createBackdropDetailClassifier(options: BackdropDetailClassifierOptions) {
   const { field, detail, worldOrigin_m, nodeEdge_m, solverLevel } = options;
+  const dualGrid = options.dualGrid === true;
   const [cx, cz] = detail.centre;
-  const W = detail.outerHalf_m;
+  const W = detail.outerHalf_m + (dualGrid
+    ? BACKDROP_DETAIL_DUAL_APRON_BRICKS * 8 * backdropDetailRingCell(detail, detail.rings - 1) : 0);
   const [fMinX, fMinZ, fMaxX, fMaxZ] = detail.footprint_m;
   const census: BackdropDetailCensus = { leaves: 0, leavesPerRing: Array(detail.rings).fill(0), classified: 0 };
   const edge0 = nodeEdge_m[solverLevel]![0]!;
@@ -308,6 +322,19 @@ export function createBackdropDetailClassifier(options: BackdropDetailClassifier
     if (!span) { span = columnSpan(minX, maxX, minZ, maxZ, cell); spans.set(spanKey, span); }
     const [lowest, highest] = span;
     if (!(lowest <= highest)) return BACKDROP_DETAIL_EMPTY;
+    if (dualGrid) {
+      // The continuous ground lies within a cell of the column tops bounding
+      // it (half a cell of rounding, half of slope across a column), and its
+      // dual cells reach one more; beside a coarser ring that cell is the
+      // neighbour's.
+      const outward = Math.max(Math.max(minX - cx, cx - maxX), Math.max(minZ - cz, cz - maxZ)) + e + cell;
+      const reach = 2 * Math.max(cell, backdropDetailRingCell(detail, backdropDetailRing(detail, outward)));
+      if (highest + reach > minY && lowest - reach < maxY) {
+        census.leaves += 1; census.leavesPerRing[ring]! += 1;
+        return BACKDROP_DETAIL_LEAF;
+      }
+      return BACKDROP_DETAIL_EMPTY;
+    }
     // Tops sit on the cell lattice, as do the brick's faces: a brick holds a
     // solid voxel when some top is above its floor, and one a ray can reach
     // when some top (a margin column's included) is at or below its ceiling —
@@ -328,10 +355,13 @@ export function createBackdropDetailClassifier(options: BackdropDetailClassifier
 /**
  * WGSL defining `sampleBackdropDetail(world, cellExtent) -> SolidWorldSample`
  * (the struct is the voxelizer's): ground and scatter at a voxel centre, full
- * or empty. The table header rides along as a constant array, so the field
- * evaluator is the renderer's own `backdropTerrainSurfaceAt`.
+ * or empty; and `backdropDetailField(world, overlap) -> f32`, the same content
+ * as a continuous signed field for the dual-grid fit. The table header rides
+ * along as a constant array, so the field evaluator is the renderer's own
+ * `backdropTerrainSurfaceAt`. `continuous` makes the sample itself the
+ * field's coverage instead of the voxel columns'.
  */
-export function backdropDetailVoxelizerWGSL(table: Uint32Array, detail: BackdropDetail): string {
+export function backdropDetailVoxelizerWGSL(table: Uint32Array, detail: BackdropDetail, continuous = false): string {
   const header = Array.from(table.subarray(0, BACKDROP_TERRAIN_TABLE.tilesWord));
   const last = header.length - 1;
   const f = (value: number) => {
@@ -340,6 +370,8 @@ export function backdropDetailVoxelizerWGSL(table: Uint32Array, detail: Backdrop
   };
   const classes = BACKDROP_SCATTER_CLASSES.map((entry, index) => /* wgsl */ `
   if(!solid){solid=backdropScatterInside(p,${index + 1}u,${f(entry.grid_m)},${f(entry.density)},${f(entry.radius_m[0])},${f(entry.radius_m[1])},${entry.shape}u,${entry.minimumRing}u);}`).join("");
+  const fields = BACKDROP_SCATTER_CLASSES.map((entry, index) => /* wgsl */ `
+  value=min(value,backdropScatterField(p,${index + 1}u,${f(entry.grid_m)},${f(entry.density)},${f(entry.radius_m[0])},${f(entry.radius_m[1])},${entry.shape}u,${entry.minimumRing}u));`).join("");
   return /* wgsl */ `
 const BACKDROP_DETAIL_TABLE=array<u32,${header.length}>(${header.map((word) => `${word}u`).join(",")});
 ${backdropTerrainWGSL({ load: (index) => `BACKDROP_DETAIL_TABLE[min(${index},${last}u)]`, tableBase: "0u" })}
@@ -405,8 +437,74 @@ fn backdropScatterInside(p:vec3f,salt:u32,grid:f32,density:f32,rMin:f32,rMax:f32
   let b=vec3f(offset.x-0.6*radius*second.x,p.y-(seat+0.4*radius),offset.y-0.6*radius*second.y);
   return dot(a,a)<lobe*lobe||dot(b,b)<lobe*lobe;
 }
+// One class's item for p's grid cell as a signed field, negative inside, or
+// 1e20: backdropScatterInside's placement, seated on the continuous ground.
+fn backdropScatterField(p:vec3f,salt:u32,grid:f32,density:f32,rMin:f32,rMax:f32,shape:u32,minimumRing:u32)->f32{
+  let q=vec2i(floor(p.xz/grid));
+  let u1=backdropDetailRandom(salt,q,1u);
+  let radius=rMin+(rMax-rMin)*u1*u1;
+  let reach=${f(SCATTER_REACH[0])}*radius;
+  let item=(vec2f(q)+(vec2f(reach)+(grid-2.0*reach)*vec2f(backdropDetailRandom(salt,q,2u),backdropDetailRandom(salt,q,3u)))/grid)*grid;
+  let offset=p.xz-item;
+  // Past a radius beyond its reach the item is farther than the ground beside it.
+  if(max(abs(offset.x),abs(offset.y))>reach+radius){return 1e20;}
+  let rel=item-backdropTerrainCentre();let m=max(abs(rel.x),abs(rel.y));
+  let fade=1.0-smoothstep(${f(FADE_BEGIN)}*BACKDROP_DETAIL_OUTER,${f(FADE_END)}*BACKDROP_DETAIL_OUTER,m);
+  if(!(backdropDetailRandom(salt,q,0u)<density*fade)){return 1e20;}
+  if(m+reach>=BACKDROP_DETAIL_OUTER){return 1e20;}
+  if(backdropFootprintDistance(item)<=reach){return 1e20;}
+  let ring=backdropDetailRingAt(item);
+  if(ring<minimumRing){return 1e20;}
+  if(radius<${f(BACKDROP_SCATTER_MINIMUM_CELLS)}*backdropDetailRingCell(ring)){return 1e20;}
+  let seat=backdropTerrainSurfaceAt(item).height;
+  let angle=6.2831853*backdropDetailRandom(salt,q,4u);
+  let axis=vec2f(cos(angle),sin(angle));
+  if(shape==0u){
+    let squash=backdropDetailRandom(salt,q,5u);
+    let r=vec3f(radius,radius*(0.45+0.25*squash),radius*(0.7+0.6*squash));
+    let e=vec3f(dot(offset,axis),p.y-(seat+0.2*r.y),dot(offset,vec2f(-axis.y,axis.x)));
+    // First-order ellipsoid distance.
+    let k0=length(e/r);let k1=length(e/(r*r));
+    if(k1<1e-6){return -min(r.x,min(r.y,r.z));}
+    return k0*(k0-1.0)/k1;
+  }
+  let lobe=0.65*radius;
+  let second=vec2f(cos(angle+2.3),sin(angle+2.3));
+  let core=vec3f(offset.x,p.y-(seat+0.55*radius),offset.y);
+  let a=vec3f(offset.x-0.6*radius*axis.x,p.y-(seat+0.4*radius),offset.y-0.6*radius*axis.y);
+  let b=vec3f(offset.x-0.6*radius*second.x,p.y-(seat+0.4*radius),offset.y-0.6*radius*second.y);
+  return min(length(core)-radius,min(length(a)-lobe,length(b)-lobe));
+}
+// The backdrop as a continuous signed field for function-fitted surfaces: the
+// analytic ground h, not its voxel columns, unioned with the scatter. It is
+// defined outside the set's footprint, plus \`overlap\` inside it so the
+// union with the set's own slab has no zero-measure sheet at the seam, and
+// runs on past the stored rings: where it is fitted is the planner's choice.
+fn backdropDetailField(world:vec3f,overlap:f32)->f32{
+  let low=backdropFootprintMinimum();let high=backdropFootprintMaximum();
+  let half=0.5*(high-low);let q=abs(world.xz-0.5*(low+high))-half;
+  let outside=length(max(q,vec2f(0.0)))+min(max(q.x,q.y),0.0)+overlap;
+  // The clip is the intersection with the outside half-space, so the field is
+  // max(solid, -outside) wherever it can be fitted: an early return any closer
+  // touches zero on the clip plane above the ground, which a fit reads as a
+  // wall. Past a few cells inside, only the sign is consumed.
+  if(outside<-16.0*overlap){return -outside;}
+  let surface=backdropTerrainSurfaceAt(world.xz);
+  var value=(world.y-surface.height)/sqrt(1.0+dot(surface.gradient,surface.gradient));
+  let p=world;${fields}
+  return max(value,-outside);
+}
 fn sampleBackdropDetail(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
-  let empty=SolidWorldSample(0.0,1e20,0u,vec3f(0.0));
+  let empty=SolidWorldSample(0.0,1e20,0u,vec3f(0.0));${continuous ? `
+  // A dual-grid tree stores the fitted field's own occupancy, so what the
+  // voxels shadow and occlude is the surface that is drawn.
+  let field=backdropDetailField(world,0.25*min(cellExtent.x,cellExtent.z));
+  let fraction=clamp(0.5-field/max(cellExtent.y,1e-8),0.0,1.0);
+  if(fraction<=0.0){return empty;}
+  return SolidWorldSample(fraction,field,backdropTerrainMaterial(),vec3f(0.0,1.0,0.0));
+}
+fn sampleBackdropDetailColumns(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
+  let empty=SolidWorldSample(0.0,1e20,0u,vec3f(0.0));` : ""}
   let rel=world.xz-backdropTerrainCentre();
   if(max(abs(rel.x),abs(rel.y))>=BACKDROP_DETAIL_OUTER||backdropInsideFootprint(world.xz)){return empty;}
   let cell=backdropDetailCell(world.xz);

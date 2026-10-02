@@ -42,10 +42,10 @@ export function renderPrimaryTraversalControls({ resolvedPrimary, partitioned, d
   ];
   return { settings: 2, readouts: facts.length, node: <>
     <FieldList>
-      <SelectField label="Meshing method" value={tuning.surfaceMeshing}
+      <SelectField label="Meshing method" value={smoothSurfaceEnabled ? "dual-marching-cubes" : tuning.surfaceMeshing} disabled={smoothSurfaceEnabled}
         options={SVO_MESHING_PLUGINS.map((plugin) => ({ value: plugin.id, label: plugin.label }))}
-        disabled={smoothSurfaceEnabled} onChange={(value) => updateTuning("surfaceMeshing", value as typeof tuning.surfaceMeshing)}
-        hint="The dual-grid methods construct geometry on GPU using a uniform grid. Sub-grid features may need finer resolution." />
+        onChange={(value) => updateTuning("surfaceMeshing", value as typeof tuning.surfaceMeshing)}
+        hint="Smooth surface selects dual marching cubes on a uniform grid to preserve shared edges and smooth silhouettes. Turn it off to choose another mesher. Sub-grid features may need finer resolution." />
       <RangeField label="Contour inflation" unit="cells" value={tuning.surfaceMeshContourInflation}
         min={0} max={0.5} step={0.01} digits={2} editable
         disabled={smoothSurfaceEnabled || !tuning.surfaceMeshContours}
@@ -53,9 +53,7 @@ export function renderPrimaryTraversalControls({ resolvedPrimary, partitioned, d
         modified={modified("surfaceMeshContourInflation")} onReset={resetTuning("surfaceMeshContourInflation")}
         hint="Expand each contoured voxel on every side before slicing with its original plane. Overlapping patches can cover indents. 0.10 adds 10% of a cell on each side; raster geometry only." />
     </FieldList>
-    <WorkProgress progress={smoothSurfaceEnabled
-      ? { label: "Smooth surface unavailable", state: "waiting", detail: "Geometry is withheld. Voxel mesh rendering resumes when smooth reconstruction is disabled." }
-      : surfaceMeshProgress(mesh)} />
+    <WorkProgress progress={surfaceMeshProgress(mesh)} />
     <Facts items={facts} />
   </> };
 }
@@ -76,7 +74,7 @@ export function renderFilteredDetailControls({ resolvedPrimary, smoothSurfaceEna
       onChange={(value) => updateTuning("surfaceMeshMaxCoarsening", Number(value))} />
     <SwitchField label="Normal smoothing" checked={tuning.surfaceMeshNormalSmoothing} disabled={disabled}
       onChange={(value) => updateTuning("surfaceMeshNormalSmoothing", value)}
-      hint="Use baked shading normals. Choose Native geometry above to smooth lighting without coarsening voxels." />
+      hint="Blend baked normals in voxel-flat mode. Smooth surface already uses the full baked normals, independently of detail filtering." />
     <RangeField label="Smoothing strength" unit="%" value={tuning.surfaceMeshNormalStrength * 100}
       min={0} max={100} step={5} disabled={normalsDisabled}
       onChange={(value) => updateTuning("surfaceMeshNormalStrength", value / 100)}

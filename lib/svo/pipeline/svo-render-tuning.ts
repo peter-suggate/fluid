@@ -668,3 +668,16 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
 export function svoRenderTuningKey(value: SvoRenderTuning): string {
   return Object.values(value).join(":");
 }
+
+/** Resolve the geometry required by the scene without overwriting the saved mesher.
+ * Dual marching cubes shares edge vertices across bricks and uses a uniform
+ * grid, so smooth silhouettes cannot use independent voxel LOD coarsening.
+ */
+export function resolveSvoSurfaceTuning(value: SvoRenderTuning, smoothRaster: boolean): SvoRenderTuning {
+  return normalizeSvoRenderTuning(smoothRaster ? {
+    ...value,
+    surfaceMeshing: "dual-marching-cubes",
+    surfaceMeshFilteringEnabled: false,
+    surfaceMeshMaxCoarsening: 0,
+  } : value);
+}

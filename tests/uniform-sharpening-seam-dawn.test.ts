@@ -23,7 +23,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   const raw=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
   const create=raw.createShaderModule.bind(raw);let reference=false,replaced=0;
   Object.defineProperty(raw,"createShaderModule",{configurable:true,writable:true,value:(descriptor:GPUShaderModuleDescriptor)=>{
-   let code=descriptor.code;if(reference&&code.includes("fn shSweepJobs(")){code=sharpeningReference(code);replaced++;}
+   let code=descriptor.code;if(reference&&code.includes("fn shSweepJobs(")){const next=sharpeningReference(code);if(next!==code)replaced++;code=next;}
    return create({...descriptor,code});
   }});
   device=managedGPUDevice(raw,{requireWorkerRealm:false});const d=device;

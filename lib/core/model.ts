@@ -65,7 +65,7 @@ export interface SceneDescription {
   };
   /** Visible environment is part of the unified scene representation, not merely a backdrop. */
   environment?: EnvironmentId;
-  /** How occupied SVO cells reconstruct their visible surface. Omitted defaults to voxel-flat. */
+  /** Surface style: continuous dual-grid raster meshes, tangent reconstruction when traced. Omitted defaults to voxel-flat. */
   surfaceStyle?: "smooth" | "voxel-flat";
   /** Optional image-free lighting grade consumed by the SVO renderer. */
   lighting?: {
@@ -429,8 +429,8 @@ export function cloneScene(scene: SceneDescription): SceneDescription {
  * The renderer-wide SVO surface policy.
  *
  * Voxel faces are the default for every scene, including documents authored
- * before `surfaceStyle` existed. `smooth` opts into sub-voxel surface
- * reconstruction using the cell's coverage and baked normal.
+ * before `surfaceStyle` existed. `smooth` reconstructs a continuous raster mesh
+ * or a traced tangent surface from the cell's coverage and baked normal.
  */
 export function sceneUsesFlatVoxelNormals(
   scene: Pick<SceneDescription, "surfaceStyle">,

@@ -24,7 +24,7 @@ export const SVO_LIGHTING_VISIBILITY_FEATURE = {
     { id: "shadows", label: "Shadows", kind: "toggle", setting: "svoShadowsEnabled", update: "live" },
     { id: "ambient-occlusion", label: "AO", kind: "toggle", setting: "svoAmbientOcclusionEnabled", update: "live" },
     { id: "lattice", label: "Lattice visibility", kind: "toggle", setting: "svoLatticeVisibilityEnabled", update: "live",
-      hint: "On samples the shadow and AO cones on the half-voxel lattice of each lit face, once per point, and interpolates between points. Off samples them per half-resolution screen texel. Serves reduced-rate cones with full-resolution relight and GI off." },
+      hint: "On samples the shadow and AO cones on the half-voxel lattice of each lit face, once per point, and interpolates between points. Off samples them per reduced-resolution screen texel. Serves reduced-rate cones with full-resolution relight, GI off and Smooth surface off. Smooth surfaces use screen-space lighting." },
   ],
   placements: [
     { slot: "frame.lighting", control: "mode", presentation: "expanded" },

@@ -3906,7 +3906,7 @@ export class SparseVoxelDrySceneRenderer {
     return !this.rigidBodyCountPublished || this.rigidBodyCount > 0;
   }
 
-  /** A published scene gained or lost its backdrop, or the frame its bodies: activate or compile the matching split variant. */
+  /** Scene surface style, backdrop or rigid bodies changed: activate or compile the matching split variant. */
   private requestSpecializedSplitVariant(): void {
     if (!this.layout || !this.vertexModule) return;
     const scale = this.coneScale;
@@ -3932,10 +3932,15 @@ export class SparseVoxelDrySceneRenderer {
   /**
    * The lattice variant this configuration wants. Every other configuration
    * compiles and encodes the screen path unchanged: GI and the reduced
-   * reconstructions read prepass planes the lattice never writes.
+   * reconstructions read prepass planes the lattice never writes. Smooth
+   * styles can still produce tangent-plane receivers through traversal and
+   * background producers, even when the main mesh keeps planar geometry.
+   * Keep their lighting on the screen path until all producers can certify
+   * the bounded set of face keys the lattice store is sized to hold.
    */
   private latticeVisibilityRequested(scale: SvoConeLightingScale, globalIlluminationCapable: boolean): boolean {
     return this.latticeCapable && scale !== 1 && !globalIlluminationCapable
+      && this.scene?.flatVoxelNormals === true
       && this.lightingOptions.latticeVisibilityEnabled !== false
       && (this.lightingOptions.coneTracingMode ?? "cones") === "cones"
       && this.renderTuning.coneRadianceReconstruction === "full-res-relight";
@@ -4360,6 +4365,10 @@ export class SparseVoxelDrySceneRenderer {
     }
     if (this.requestedBundleResourceFailure) {
       return { state: "failed", detail: this.requestedBundleResourceFailure };
+    }
+    if (this.shadingPath === "split"
+      && this.splitPipelineLattice !== this.latticeVisibilityRequested(this.coneScale, this.lightingOptions.globalIlluminationEnabled === true)) {
+      return { state: "compiling", detail: "Compiling SVO lighting visibility for the requested surface style and lighting options" };
     }
     // Sticky until the store is reallocated: a lattice frame that turned keys
     // away is not the configuration that was asked for.
@@ -4901,9 +4910,13 @@ export class SparseVoxelDrySceneRenderer {
     this.invalidateVoxelLightCache();
     this.primitiveDirtyBounds = [];
     const backdropTerrainBefore = this.backdropTerrainRequested();
+    const latticeBefore = this.latticeVisibilityRequested(this.coneScale, this.lightingOptions.globalIlluminationEnabled === true);
     this.scene = scene;
     this.primitiveCount = primitiveArena.primitiveCount;
-    if (this.shadingPath === "split" && backdropTerrainBefore !== this.backdropTerrainRequested()) this.requestSpecializedSplitVariant();
+    if (this.shadingPath === "split" && (backdropTerrainBefore !== this.backdropTerrainRequested()
+      || latticeBefore !== this.latticeVisibilityRequested(this.coneScale, this.lightingOptions.globalIlluminationEnabled === true))) {
+      this.requestSpecializedSplitVariant();
+    }
     this.writeScenePrimitiveOverflowPublication();
     this.primitiveCandidateArena = primitiveArena;
     this.ensureVoxelLightCache(source, scene);

@@ -275,7 +275,7 @@ export function RenderPipelineOverlay() {
     rasterPrimaryActive: resolvedPrimary !== "traced",
     surfaceMeshSelected: resolvedPrimary === "mesh",
     smoothSurfaceEnabled,
-    surfaceMeshActive: resolvedPrimary === "mesh" && !smoothSurfaceEnabled && effectiveRendererStatus.surfaceMesh?.state === "ready",
+    surfaceMeshActive: resolvedPrimary === "mesh" && effectiveRendererStatus.surfaceMesh?.state === "ready",
     surfaceMeshStatus: effectiveRendererStatus.surfaceMesh,
   };
 
@@ -481,14 +481,16 @@ export function RenderPipelineOverlay() {
       <SvoFeatureSlot slot="frame.options" />
       <SwitchField label="Smooth surface" checked={smoothSurfaceEnabled}
         onChange={(enabled) => patchScene({ surfaceStyle: enabled ? "smooth" : "voxel-flat" })}
-        hint="Reconstruct a sub-voxel tangent surface from each cell's coverage and baked normal, changing both surface depth and orientation. Off draws the entered axis-aligned voxel face." />
+        hint={resolvedPrimary === "mesh"
+          ? "Reconstruct a continuous triangle surface from the procedural field using dual marching cubes, with smooth silhouettes and shared vertices across brick boundaries."
+          : "Reconstruct a sub-voxel tangent surface from each cell's coverage and baked normal, changing both surface depth and orientation. Off draws the entered axis-aligned voxel face."} />
     </FieldList>
 
-    {svoPrimaryTraversal === "mesh" && smoothSurfaceEnabled && <p className="render-inline-status">
-      Rasterized visibility uses voxel faces. Turn off Smooth surface to use the mesh; geometry is withheld while Smooth surface is enabled.
+    {resolvedPrimary === "mesh" && smoothSurfaceEnabled && <p className="render-inline-status">
+      Smooth surface uses dual marching cubes at native resolution for a watertight mesh.
     </p>}
 
-    {svoPrimaryTraversal === "mesh" && !smoothSurfaceEnabled && effectiveRendererStatus.surfaceMesh?.state === "blocked"
+    {resolvedPrimary === "mesh" && effectiveRendererStatus.surfaceMesh?.state === "blocked"
       && <p className="render-inline-status">{effectiveRendererStatus.surfaceMesh.detail}</p>}
 
     {effectiveRendererStatus.failureReason && <p className="render-inline-warning">SVO unavailable: {effectiveRendererStatus.detail

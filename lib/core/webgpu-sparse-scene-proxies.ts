@@ -2081,7 +2081,10 @@ fn dcField(world:vec3f,dirty:u32,count:u32)->f32{
     let at=RT_PATCH_BASE+i*8u;let lo=vec3f(rtFloat(at),rtFloat(at+1u),rtFloat(at+2u));let hi=vec3f(rtFloat(at+4u),rtFloat(at+5u),rtFloat(at+6u));
     let d=boxDistance(world-.5*(lo+hi),.5*(hi-lo));
     if(atomicLoad(&maintenance[at+3u])==0u){value=max(value,-d);}else{value=min(value,d);}
-  }` : solidWorldLayout ? `let solid=sampleSolidWorld(world,params.cell.xyz);if(solid.fraction>0.){value=-max(abs(solid.distance),1e-6);}` : ""}
+  }` : solidWorldLayout ? `let solid=${backdropDetail ? "sampleSolidWorldBase" : "sampleSolidWorld"}(world,params.cell.xyz);if(solid.fraction>0.){value=-max(abs(solid.distance),1e-6);}` : ""}
+  ${backdropDetail ? `// The backdrop is fitted from its continuous ground and scatter, never
+  // from the voxel occupancy those became.
+  value=min(value,backdropDetailField(world,.25*min(params.cell.x,params.cell.z)));` : ""}
   for(var i=0u;i<count;i+=1u){let p=primitives[${dualMarchingCubes ? "dmcCandidateIndex(dirty,i)" : "atomicLoad(&maintenance[candidateOffset()+dirty*candidatesPerBrick()+i])"}];value=min(value,primitiveDistance(p,world));}
   return value;
 }
@@ -2477,6 +2480,8 @@ ${dual && dualMarchingCubes ? `
   let point=(world-.5*cellExtent+fitted.point*cellExtent-params.worldOrigin.xyz)/params.cell.xyz;
   atomicStore(&maintenance[dcAt],bitcast<u32>(point.x));atomicStore(&maintenance[dcAt+1u],bitcast<u32>(point.y));atomicStore(&maintenance[dcAt+2u],bitcast<u32>(point.z));
   atomicStore(&maintenance[dcAt+3u],bitcast<u32>(fitted.value));
+  ${backdropDetail ? `// A fitted interior no sample claimed is the backdrop's ground.
+  if(fitted.value<0.&&primitiveFraction<=0.){bestMaterial=backdropTerrainMaterial();}` : ""}
   if(fitted.value<0.){primitiveFraction=max(primitiveFraction,1.0/255.0);}
   if(primitiveFraction>0.){bestNormal=fitted.normal;}
 ` : dual ? `  let fitted=dcFit(world-.5*cellExtent,cellExtent,dirtyIndex,candidateCount);

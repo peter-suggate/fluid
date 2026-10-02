@@ -62,7 +62,7 @@ import { SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../lib/core/webgpu-sparse-
       fn sceneIdentityNormal(i:u32)->vec3f{return vec3f(0.0,1.0,0.0);}
       fn drySceneContourOfVoxel(v:u32)->u32{return select(0u,128u,(voxels[v]&0x80000000u)!=0u);}
       fn svoGBufferPackNormalOct8(n:vec3f)->u32{return 0u;}
-      ${kernels.replaceAll("dry.meshFilterNormals.w", "bitcast<f32>(publication[6u])")}
+      ${kernels.replaceAll("dry.meshFilterNormals.w", "bitcast<f32>(publication[6u])").replaceAll("dry.materialPublication.w", "publication[7u]")}
     ` });
     const sceneLayout = device.createBindGroupLayout({ entries: [1, 2, 3, 4].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" as const } })) });
     const meshLayout = device.createBindGroupLayout({ entries: [
@@ -76,6 +76,7 @@ import { SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../lib/core/webgpu-sparse-
 
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const publication = device.createBuffer({ size: 32, usage: storage });
+    device.queue.writeBuffer(publication, 28, new Uint32Array([1]));
     const nodes = device.createBuffer({ size: 6 * 16, usage: storage });
     const leaves = device.createBuffer({ size: 2 * 16, usage: storage });
     const voxels = device.createBuffer({ size: 16 * 4, usage: storage });
@@ -174,6 +175,19 @@ import { SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../lib/core/webgpu-sparse-
     result = await frame();
     assert.equal(result.words[W.frontCursor], 12, "an unchanged publication extracts nothing");
     assert.equal(result.words[W.builds], 1);
+
+    // The shading flag alone must not withhold a valid mesh. The host selects
+    // and publishes dual-grid geometry separately; mode/publication changes
+    // (covered below) drive extraction, not this shading flag.
+    const flatQuads = result.arena(0, 12).quads.slice();
+    for (const style of [0, 1, 0, 1]) {
+      device.queue.writeBuffer(publication, 28, new Uint32Array([style]));
+      result = await frame();
+      assert.equal(result.words[W.withheld], 0);
+      assert.equal(result.receipt.status.state, "ready");
+      assert.equal(result.words[W.builds], 1, "the shading flag alone must not trigger extraction");
+      assert.deepEqual(result.arena(0, 12).quads, flatQuads, "the shading flag retains published geometry");
+    }
 
     // Brick 1 gains a solid voxel touching brick 0's across their shared
     // face. The dirty list names brick 1 alone; brick 0 is re-extracted as

@@ -1203,6 +1203,19 @@ fn dryBackdropTerrainHit(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit{
   let normal=select(select(vec3f(0.0,0.0,side.z),vec3f(0.0,1.0,0.0),trace.face==1u),vec3f(side.x,0.0,0.0),trace.face==0u);
   return DryHit(trace.t,normal,backdropTerrainMaterial(),DRY_OWNER_NONE,
     SVO_FEATURE_SMOOTH,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));
+}
+// Whether surfaces are drawn as the function-fitted dual mesh. The ground past
+// the stored rings is then its continuous height field, not voxel columns, so
+// the mesh's last triangles and the far ground are one surface.
+fn dryBackdropSmooth()->bool{return dry.meshFilterNormals.w>=2.5;}
+// The continuous ground in [tMin, tMax], published like a mesh fragment: the
+// analytic normal, and the receiver tag the fitted mesh carries.
+fn dryBackdropSmoothTerrainHit(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit{
+  let trace=backdropTerrainSmoothTrace(ro,rd,tMin,tMax);
+  if(trace.t<0.0){return missHit();}
+  let gradient=backdropTerrainSurfaceAt(ro.xz+rd.xz*trace.t).gradient;
+  return DryHit(trace.t,normalize(vec3f(-gradient.x,1.0,-gradient.y)),backdropTerrainMaterial(),DRY_OWNER_NONE,
+    SVO_FEATURE_SMOOTH,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u,0u,1u));
 }` : "";
   const sceneIdentityWGSL = /* wgsl */ `${leafPayloadMode === "dense" ? "" : sparseBrickBandedLeafCodecWGSL({
     occupancyBase: "dry.payloadLanes.x", recordMaskBase: "dry.payloadLanes.y",
@@ -2341,8 +2354,10 @@ fn dryPrepassReceiverCompatible(identity:u32,metadata:u32,hit:DryHit)->bool{
   let materialMatches=(identity&0xffffu)==(hit.materialId&0xffffu);
   let ownerMatches=(identity>>16u)==(hit.ownerId&0xffffu);
   // Visibility from the other side of a crease is not a compatible receiver,
-  // even when material and smoothed shading normal happen to agree.
-  if(dryReconstructedReceiver(hit)&&dot(svoGBufferUnpackNormalOct8(identity>>16u),dryGeometricNormal(hit))<.9){return false;}
+  // even when material and smoothed shading normal happen to agree. A curved
+  // mesh turns its triangle normals well inside one prepass texel, so only a
+  // turn of a crease's size (60 degrees) separates receivers.
+  if(dryReconstructedReceiver(hit)&&dot(svoGBufferUnpackNormalOct8(identity>>16u),dryGeometricNormal(hit))<.5){return false;}
   // Static authored surfaces with the same complete shading classification may
   // share a nearby receiver across object seams. Motion keeps exact ownership:
   // its current-frame rigid blocker correction and GI neighbourhood are owned.
@@ -2388,7 +2403,12 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f,hit:DryHit){
     if(geometry.x<=0.0){linearSafe=0u;continue;}
     let bilinear=select(1.0-fraction.x,fraction.x,i==1u)*select(1.0-fraction.y,fraction.y,j==1u);
     let depthWeight=exp(-24.0*abs(geometry.x-depth)/max(depth,1e-3));
-    let normalWeight=pow(max(dot(normal,dryPrepassDecodeNormal(geometry.yz)),0.0),8.0);
+    // Voxel faces are either parallel or a right angle apart, which the eighth
+    // power separates. A reconstructed surface's normals vary continuously, so
+    // its guide falls off across the half-space instead of rejecting every tap
+    // of a curved patch into the exact tier.
+    let normalDot=dot(normal,dryPrepassDecodeNormal(geometry.yz));
+    let normalWeight=select(pow(max(normalDot,0.0),8.0),pow(.5+.5*normalDot,4.0),dryReconstructedReceiver(hit));
     let identityMatches=dryPrepassReceiverCompatible(textureLoad(dryPrepassIdentityTexture,texel,0).x,u32(round(geometry.w)),hit);
     if(!identityMatches){if(bilinear>1e-6){linearSafe=0u;}continue;}
     if(bilinear>1e-6&&(depthWeight<0.25||normalWeight<0.25)){linearSafe=0u;}
@@ -4922,7 +4942,7 @@ fn traceStatic(ro:vec3f,rd:vec3f)->DryHit{return traceStaticFrom(ro,rd,0.0);}
 // only the ground, bounded by tMax (the exact planes). Every set leaf is drawn
 // by the mesh quads the depth test lays over this pass.
 fn dryBackdropTrace(ro:vec3f,rd:vec3f,tMax:f32)->DryHit{
-  ${backdropHooks ? "return dryBackdropTerrainHit(ro,rd,0.0,tMax);" : "return missHit();"}
+  ${backdropHooks ? "if(dryBackdropSmooth()){return dryBackdropSmoothTerrainHit(ro,rd,0.0,tMax);}\n  return dryBackdropTerrainHit(ro,rd,0.0,tMax);" : "return missHit();"}
 }
 
 fn dryVisibilityStep(status:u32,nodeVisits:u32,leafVisits:u32,workItems:u32,t:f32)->SvoVisibilityStep {
@@ -5161,6 +5181,9 @@ fn dryBackdropOccludes(position:vec3f,geometricNormal:vec3f,towardLight:vec3f,fi
   let range=length(position-uniforms.cameraPosition.xyz);
   let origin=position+geometricNormal*(1e-3+2e-4*range);
   let tMax=select(3.0e38,finiteDistance_m,finiteDistance_m>0.0);
+  // A smooth receiver is shadowed by the smooth ground: the column tops stand
+  // up to half a cell above it and would shadow the surface they stand for.
+  if(dryBackdropSmooth()){return backdropTerrainSmoothTrace(origin,towardLight,0.0,tMax).t>=0.0;}
   return backdropTerrainTrace(origin,towardLight,0.0,tMax).t>=0.0;
 }
 ` : ""}fn dryLightVisibilitySolid(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLight:vec3f,finiteDistance_m:f32)->vec3f {

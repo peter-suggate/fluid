@@ -54,6 +54,7 @@
 import {
   BACKDROP_WAVE_STRIDE,
   backdropFieldHeight,
+  backdropTaylorHeightBounds,
   type BackdropField,
 } from "./backdrop-field";
 
@@ -88,11 +89,11 @@ export const BACKDROP_TERRAIN_TABLE = Object.freeze({
   /** vertical lattice anchor (column tops sit on anchor + k h); stored detail ring count (u32: the leading levels the walk leaves empty); clipmap centre c0 x, z. */
   latticeWord: 16,
   wavesWord: 20,
-  /** Content ceiling (see `BackdropContentCeiling`): section word index (0 = none), cells per axis, reserved. */
+  /** Content ceiling (see `BackdropContentCeiling`): section word index (0 = none), cells per axis; then the continuous ground's excess over a level's highest column top, in that level's cells (f32 bits). */
   ceilingWord: 125,
   /** One word per level: the highest column top over the level's whole square. */
   levelMaximumWord: 128,
-  /** Tile records, four words each: lowest top, highest top, overlaps the footprint (1/0), reserved. Empty tiles have lowest > highest. */
+  /** Tile records, four words each: lowest top, highest top, overlaps the footprint (1/0), the continuous ground's interval (two 16-bit fractions of [lowest - 2 cells, highest + 2 cells]). Empty tiles have lowest > highest. */
   tilesWord: 128 + BACKDROP_TILE_MAXIMUM_LEVELS,
   tileWords: 4,
 });
@@ -137,6 +138,14 @@ export interface BackdropTilePlan {
   levels: number;
   /** `levels * BACKDROP_TILES_PER_LEVEL` records of `[low, high, overlapsFootprint]`; empty tiles are `[+inf, -inf, 0]`. */
   tiles: Float64Array;
+  /**
+   * Per tile, `[low, high]` of the continuous ground over the tile's square:
+   * the smooth walk's band. Column tops round to a whole cell, so the interval
+   * above is up to a cell wider on each side than the ground it stands for.
+   */
+  smoothBounds: Float64Array;
+  /** The most the continuous ground stands above a level's highest column top, in that level's cells. */
+  smoothExcessCells: number;
   /** Highest column top over each level's whole square (finer levels included). */
   levelMaximum: Float64Array;
   /** Highest column top anywhere the terrain is traced. */
@@ -193,8 +202,9 @@ export function planBackdropTiles(field: BackdropField, lattice: BackdropTerrain
   }
   const N = BACKDROP_TILES_PER_AXIS, n = columnsPerTile;
   const tiles = new Float64Array(levels * BACKDROP_TILES_PER_LEVEL * 3);
+  const smoothBounds = new Float64Array(levels * BACKDROP_TILES_PER_LEVEL * 2);
   const levelMaximum = new Float64Array(levels);
-  let running = Number.NEGATIVE_INFINITY;
+  let running = Number.NEGATIVE_INFINITY, smoothRunning = Number.NEGATIVE_INFINITY, smoothExcessCells = 0;
   for (let level = 0; level < levels; level += 1) {
     const cell = h0 * 2 ** level;
     for (let j = 0; j < N; j += 1) for (let i = 0; i < N; i += 1) {
@@ -216,12 +226,21 @@ export function planBackdropTiles(field: BackdropField, lattice: BackdropTerrain
       if (!(low <= high)) continue;
       if (!Number.isFinite(low) || !Number.isFinite(high)) throw new RangeError(`Backdrop tile ${level}/${i},${j} has invalid bounds`);
       tiles[base] = low; tiles[base + 1] = high;
+      const minX = centre[0] + (i - quarter) * n * cell, minZ = centre[1] + (j - quarter) * n * cell;
+      const [groundLow, groundHigh] = backdropTaylorHeightBounds(field, minX, minZ, minX + n * cell, minZ + n * cell, n);
+      // Packed as 16-bit fractions of the column interval widened by two cells.
+      if (groundLow < low - 2 * cell || groundHigh > high + 2 * cell) {
+        throw new RangeError(`Backdrop tile ${level}/${i},${j} ground leaves its column interval by more than two cells`);
+      }
+      smoothBounds[base / 3 * 2] = groundLow; smoothBounds[base / 3 * 2 + 1] = groundHigh;
+      smoothRunning = Math.max(smoothRunning, groundHigh);
       running = Math.max(running, high);
     }
     levelMaximum[level] = running;
+    if (Number.isFinite(running)) smoothExcessCells = Math.max(smoothExcessCells, (smoothRunning - running) / cell);
   }
   if (!Number.isFinite(running)) throw new RangeError("Backdrop terrain has no columns outside the footprint");
-  return { centre, halfWidth0_m, cellSize0_m: h0, anchor_m, columnsPerTile, levels, tiles, levelMaximum, highest_m: running };
+  return { centre, halfWidth0_m, cellSize0_m: h0, anchor_m, columnsPerTile, levels, tiles, smoothBounds, smoothExcessCells, levelMaximum, highest_m: running };
 }
 
 /** Content-ceiling columns per axis over the world's xz square. */
@@ -355,11 +374,19 @@ export function packBackdropTerrainTable(field: BackdropField, materialId: numbe
     const base = T.tilesWord + tile * T.tileWords;
     if (low > high) { floats.set([3e38, -3e38, overlaps, 0], base); continue; }
     floats.set([down(low), up(high), overlaps, 0], base);
+    // The continuous ground's interval, as fractions of [low - 2c, high + 2c]
+    // rounded outward (decoded from the f32 pair above, as the walk does).
+    const cell = plan.cellSize0_m * 2 ** Math.floor(tile / BACKDROP_TILES_PER_LEVEL);
+    const from = Math.fround(floats[base]! - 2 * cell), span = Math.fround(floats[base + 1]! + 2 * cell) - from;
+    const lowQ = Math.max(0, Math.floor((plan.smoothBounds[tile * 2]! - from) / span * 65535 - 1e-3) - 1);
+    const highQ = Math.min(65535, Math.ceil((plan.smoothBounds[tile * 2 + 1]! - from) / span * 65535 + 1e-3) + 1);
+    words[base + 3] = (lowQ | (highQ << 16)) >>> 0;
   }
   if (ceilingWords) {
     words.set(ceilingWords, terrainWords);
     words.set([terrainWords, ceiling!.cells, 0], T.ceilingWord);
   }
+  floats[T.ceilingWord + 2] = up(plan.smoothExcessCells);
   if (!floats.every(Number.isFinite)) throw new RangeError("Backdrop terrain table is not finite");
   return words;
 }
@@ -793,6 +820,104 @@ fn backdropTerrainTrace(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->BackdropTerrainTra
       let band=backdropTerrainBand(ro,rd,t,min(tileExit,tEnd),groundLow,groundHigh,backdropTableFloat(record+2u)==0.0);
       if(band.y>=band.x){
         let hit=backdropTerrainColumns(ro,rd,band.x,band.y,level,tile,groundLow,groundHigh,&trace);
+        if(trace.exhausted!=0u){trace.t=hit;return trace;}
+        if(hit>=0.0){trace.t=hit;return trace;}
+      }
+    }
+    t=max(tileExit,probe);
+  }
+  return trace;
+}
+// How far the continuous ground can stand above a level's highest column top.
+fn backdropTerrainSmoothMargin(level:u32)->f32{
+  return backdropTableFloat(${T.shapeWord + 3}u)*exp2(f32(level))*backdropTableFloat(${T.ceilingWord + 2}u);
+}
+// Height of a ray point above the continuous ground; the footprint is air.
+fn backdropTerrainClearance(ro:vec3f,rd:vec3f,t:f32)->f32{
+  let p=ro+rd*t;
+  if(backdropInsideFootprint(p.xz)){return 3.0e38;}
+  return p.y-backdropTerrainSurfaceAt(p.xz).height;
+}
+// Where the ray first passes under the continuous ground over [a, b] inside
+// one tile, or -1. The column DDA paces it: one field evaluation where the ray
+// leaves each column, and where the clearance changes sign, a bracketed secant
+// root. A level's columns are about a pixel wide from where they are seen, so
+// ground that rises and falls again inside one chord is below what is drawn.
+fn backdropTerrainSmoothColumns(ro:vec3f,rd:vec3f,a:f32,b:f32,level:u32,tile:vec2u,trace:ptr<function,BackdropTerrainTrace>)->f32{
+  let centre=backdropTerrainCentre();
+  let cell=backdropTableFloat(${T.shapeWord + 3}u)*exp2(f32(level));
+  let perTile=i32(round(backdropTableFloat(${T.shapeWord + 2}u)/(backdropTableFloat(${T.shapeWord + 3}u)*${N / 2}.0)));
+  let first=(vec2i(tile)-vec2i(${N / 2}))*perTile;
+  let probe=a+1e-5*(1.0+a);
+  let index=clamp(vec2i(floor((ro.xz+rd.xz*probe-centre)/cell)),first,first+vec2i(perTile-1));
+  let lo=centre+vec2f(index)*cell;
+  let positive=rd.xz>vec2f(0.0);let still=rd.xz==vec2f(0.0);
+  var exit=select(select(lo,lo+vec2f(cell),positive)-ro.xz,vec2f(0.0),still)/select(rd.xz,vec2f(1.0),still);
+  exit=select(exit,vec2f(3.0e38),still);
+  let stepT=select(vec2f(cell)/abs(rd.xz),vec2f(0.0),still);
+  var s=a;var above=backdropTerrainClearance(ro,rd,s);
+  if(above<=0.0){return s;}
+  while(backdropTerrainWork<${BACKDROP_TERRAIN_TRACE_BUDGET}u){
+    backdropTerrainWork+=1u;(*trace).steps+=1u;
+    let e=min(min(exit.x,exit.y),b);
+    let next=backdropTerrainClearance(ro,rd,e);
+    if(next<=0.0){
+      var t0=s;var t1=e;var f0=above;var f1=next;
+      for(var i=0u;i<1u;i+=1u){
+        let m=t0+(t1-t0)*f0/(f0-f1);let fm=backdropTerrainClearance(ro,rd,m);
+        if(fm>0.0){t0=m;f0=fm;}else{t1=m;f1=fm;}
+      }
+      (*trace).face=1u;
+      return t0+(t1-t0)*f0/(f0-f1);
+    }
+    if(e>=b){return -1.0;}
+    s=e;above=next;
+    if(exit.x<=exit.y){exit.x+=stepT.x;}else{exit.y+=stepT.y;}
+  }
+  (*trace).exhausted=1u;
+  return s;
+}
+// The continuous ground h the ray meets in [tMin, tMax], or t = -1: the same
+// tiled walk, for surfaces drawn smooth. A tile's interval bounds its column
+// tops and its fourth word packs the interval of h itself; a level's maximum
+// is widened by the looser backdropTerrainSmoothMargin.
+fn backdropTerrainSmoothTrace(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->BackdropTerrainTrace{
+  var trace=BackdropTerrainTrace(-1.0,1u,0u,0u,0u);
+  let levels=backdropTerrainLevels();if(levels==0u){return trace;}
+  let highest=backdropTableFloat(${T.countsWord + 3}u)+backdropTerrainSmoothMargin(levels-1u);
+  if(rd.y>=0.0&&ro.y>highest){return trace;}
+  let centre=backdropTerrainCentre();
+  let half0=backdropTableFloat(${T.shapeWord + 2}u);
+  let outerHalf=half0*exp2(f32(levels-1u));
+  let outer=backdropRectangleInterval(ro,rd,centre-vec2f(outerHalf),centre+vec2f(outerHalf));
+  var t=max(max(tMin,0.0),outer.x);let tEnd=min(tMax,outer.y);
+  backdropTerrainWork=0u;
+  loop{
+    if(!(t<tEnd)){break;}
+    if(backdropTerrainWork>=${BACKDROP_TERRAIN_TRACE_BUDGET}u){trace.exhausted=1u;break;}
+    let y=ro.y+rd.y*t;
+    if(rd.y>=0.0&&y>highest){break;}
+    let probe=t+1e-5*(1.0+t);
+    let q=ro.xz+rd.xz*probe-centre;
+    let level=backdropTerrainLevelAt(q,half0,levels);
+    let half=half0*exp2(f32(level));let edge=half*${2 / N};
+    backdropTerrainWork+=1u;trace.tiles+=1u;
+    // The level's whole square, finer levels included, lies under its maximum:
+    // a ray above it at both ends of its chord meets nothing in there.
+    let square=backdropRectangleInterval(ro,rd,centre-vec2f(half),centre+vec2f(half));
+    if(min(y,ro.y+rd.y*min(square.y,tEnd))>backdropTableFloat(${T.levelMaximumWord}u+level)+backdropTerrainSmoothMargin(level)){t=max(square.y,probe);continue;}
+    let tile=vec2u(clamp(floor((q+vec2f(half))/edge),vec2f(0.0),vec2f(${N - 1}.0)));
+    let low=centre-vec2f(half)+vec2f(tile)*edge;
+    let exits=select(select(vec2f(3.0e38),(low-ro.xz)/rd.xz,rd.xz<vec2f(0.0)),(low+vec2f(edge)-ro.xz)/rd.xz,rd.xz>vec2f(0.0));
+    let tileExit=min(exits.x,exits.y);
+    let record=${T.tilesWord}u+((level*${N}u+tile.y)*${N}u+tile.x)*${T.tileWords}u;
+    let groundLow=backdropTableFloat(record);let groundHigh=backdropTableFloat(record+1u);
+    if(groundLow<=groundHigh){
+      let cell=backdropTableFloat(${T.shapeWord + 3}u)*exp2(f32(level));
+      let packed=backdropTableWord(record+3u);let bottom=groundLow-2.0*cell;let span=groundHigh+2.0*cell-bottom;
+      let band=backdropTerrainBand(ro,rd,t,min(tileExit,tEnd),bottom+span*f32(packed&0xffffu)/65535.0,bottom+span*f32(packed>>16u)/65535.0,backdropTableFloat(record+2u)==0.0);
+      if(band.y>=band.x){
+        let hit=backdropTerrainSmoothColumns(ro,rd,band.x,band.y,level,tile,&trace);
         if(trace.exhausted!=0u){trace.t=hit;return trace;}
         if(hit>=0.0){trace.t=hit;return trace;}
       }
