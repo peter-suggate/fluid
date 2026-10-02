@@ -87,14 +87,36 @@ test("foliage fields contain both leaf mass and resolved gaps instead of solid p
     for (let x = -4; x <= 4; x++)
       for (let y = -3; y <= 3; y++)
         for (let z = -4; z <= 4; z++) {
-          // Interior probes, away from the guaranteed empty envelope boundary.
-          const point = { x: c.x + x * .003, y: c.y + y * .003, z: c.z + z * .003 };
+          // Probe the same fraction of each spray after changes to its size.
+          // Absolute millimetre probes only tested the guaranteed seated core.
+          const r = descriptor.lobeRadii_m;
+          const point = { x: c.x + x * r.x * .18, y: c.y + y * r.y * .24, z: c.z + z * r.z * .18 };
           occupied += Number(sampleSvoPrimitive(descriptor, point).signedDistance_m < 0);
           total++;
         }
   }
   const fill = occupied / total;
-  assert.ok(fill > .15 && fill < .7, `interior fill ${fill}: mass and gaps must coexist`);
+  // Thin laminae occupy little volume; their projected coverage, rather
+  // than a solid tuft's volume fraction, supplies the crown. Keep both genuine
+  // leaves and substantial air in the envelope.
+  assert.ok(fill > .01 && fill < .15, `leaf fill ${fill}: laminae and gaps must coexist`);
+});
+test("leaf sprays retain projected coverage while admitting light between leaves", () => {
+  const pads = (planOakV2(spec).node.children[1] as { children: readonly SceneryRecursiveShapeNode[] }).children;
+  let hits = 0, rays = 0;
+  for (const pad of pads.slice(0, 8)) {
+    const shape = { ...oakFoliageDescriptor(pad), orientation: undefined };
+    const c = shape.center_m, r = shape.lobeRadii_m;
+    for (let y = -6; y <= 6; y++) for (let x = -6; x <= 6; x++) {
+      let hit = false;
+      for (let z = -32; z <= 32 && !hit; z++) {
+        hit = sampleSvoPrimitive(shape, { x: c.x + x * r.x / 8, y: c.y + y * r.y / 8, z: c.z + z * r.z / 32 }).signedDistance_m < 0;
+      }
+      hits += Number(hit); rays++;
+    }
+  }
+  const coverage = hits / rays;
+  assert.ok(coverage > .15 && coverage < .8, `projected coverage ${coverage}`);
 });
 test("emitted sweeps cover every fork and retain a resolvable wood core at depth 3", () => {
   const plan = planOakV2(spec);
@@ -176,4 +198,15 @@ test("renaming an oak changes identity without reshaping it", () => {
     assert.deepEqual(aw[i].place, bw[i].place);
     assert.deepEqual(aw[i].points, bw[i].points);
   }
+});
+
+// A branching control must not quietly strip the crown of its leaf area.
+test("binary twig generations preserve the total foliage envelope volume", () => {
+  const volumes = [0, 1, 2, 3].map(twigDepth => {
+    const pads = (planOakV2({ ...spec, twigDepth }).node.children[1] as {
+      children: readonly SceneryRecursiveShapeNode[];
+    }).children;
+    return pads.reduce((sum, pad) => sum + pad.form.radii_m.reduce((a, b) => a * b, 1) * pad.form.flatten, 0);
+  });
+  for (const volume of volumes) assert.ok(volume / volumes[0] > .85 && volume / volumes[0] < 1.15);
 });

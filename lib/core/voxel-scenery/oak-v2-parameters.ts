@@ -29,12 +29,12 @@ export const OAK_V2_CONTROLS = {
   twigDecay: control("Twigs", "Length retention", .62, .45, .8, .01, "Each generation retains this fraction of its parent's length."),
   forkAngle: control("Twigs", "Fork angle", Math.atan2(.68, .72) * 180 / Math.PI, 25, 65, 1, "Angle of each child away from the parent direction.", "°"),
   upwardBias: control("Twigs", "Upward growth", .16, 0, .4, .02, "Upward bias added to each new twig direction."),
-  leafScale: control("Foliage", "Leaf spray size", 1, .45, 1.5, .05, "Size of the small foliage fields attached to terminal twigs.", "×"),
+  leafScale: control("Foliage", "Leaf spray size", 1.25, .45, 1.5, .05, "Size of the small foliage fields attached to terminal twigs.", "×"),
   leafFlatten: control("Foliage", "Leaf spray height", .85, .4, 1, .05, "Flatten each spray vertically without changing its attachment."),
   leafThreshold: control("Foliage", "Leaf openness", .5, .35, .65, .01, "Higher values remove leaf mass and reveal more gaps."),
   clumpScale: control("Foliage", "Clump spacing", 1, .5, 1.8, .05, "Spacing of the broad noise features within each spray.", "×"),
-  detailWeight: control("Foliage", "Fine breakup", .7, .35, .8, .01, "Weight of fine detail relative to broader leaf clusters."),
-  interiorBias: control("Foliage", "Interior fill", .04, 0, .12, .01, "Add leaf density inside each spray."),
+  detailWeight: control("Foliage", "Fine breakup", .68, .35, .8, .01, "Weight of fine detail relative to broader leaf clusters."),
+  interiorBias: control("Foliage", "Interior fill", .06, 0, .12, .01, "Add leaf density inside each spray."),
   showFoliage: control("Foliage", "Leaves", 1, 0, 1, 1, "Hide leaves to inspect the connected branch skeleton."),
 } as const;
 export type OakV2Parameter = keyof typeof OAK_V2_CONTROLS;

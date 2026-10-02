@@ -1,18 +1,7 @@
 /**
- * The hero bonsai's crown, as the scene actually publishes it: a handful of
- * cloud pads, each an `SvoFieldProgram` tape with two scales of packed cellular
- * relief on it.
- *
- * Drawn by `tools/shape-lab.ts canopy`, on the CPU, at no voxel size at all, so
- * the form can be judged before any of it reaches a scene.
- *
- * **This module holds no numbers.** It used to carry its own copy of the tape
- * and its own ladder, and the copy drifted: the lab kept a 48 mm head shell
- * while the scene shipped 13.5, so the lab was drawing a canopy the renderer had
- * never been asked for and every comparison between them was meaningless. The
- * pads and the tape both come from `lib/voxel-scenery/bonsai-canopy-field.ts`
- * now, which is the module the scene reads, so a change to the form is visible
- * here by construction and the two cannot disagree again.
+ * Legacy box-leaf field-program experiment for `tools/shape-lab.ts canopy`.
+ * Kept for comparison; production bonsai now publishes the shared leaf density
+ * field in bonsai.ts. Use tools/preview/foliage.ts for production captures.
  */
 import {
   bonsaiCanopyField,

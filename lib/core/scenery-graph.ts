@@ -432,17 +432,17 @@ export interface SceneryGroupNode extends SceneryNodeBase {
   readonly oak?: OakV2Recipe;
 }
 
-/** The two-scale density field an active foliage pad publishes. */
+/** The clustered leaf density field an active foliage pad publishes. */
 export interface FoliageDensityForm {
   /** Low-frequency cluster spacing, in metres. */
   readonly clusterPeriod_m: number;
-  /** Distance between fine foliage noise features inside this pad, in metres. */
+  /** Spacing of the oriented leaf laminae inside this pad, in metres. */
   readonly dotSpacing_m: number;
   /** Density iso-value: raising it removes foliage. */
   readonly threshold: number;
   /** Contribution of the contrast-shaped cluster octave, in [0, 1]. */
   readonly clusterWeight: number;
-  /** Contribution of the fine detail octave, in [0, 1]. */
+  /** Contribution of the fine leaf laminae, in [0, 1]. */
   readonly detailWeight: number;
   /** Density added throughout the interior, in [0, 1]. */
   readonly interiorBias: number;

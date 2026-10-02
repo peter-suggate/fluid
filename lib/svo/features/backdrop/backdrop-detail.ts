@@ -12,11 +12,11 @@
  * flush by construction. Unlike the walk, it is octree content: it casts and
  * receives voxel shadows, AO and cone GI like the set.
  *
- * On the ground stands seeded, set-style scatter: gravel, stones and lobed
- * shrub puffs on jittered grids. Every item lies inside its own grid cell, so
- * a voxel reads one hash per class. Items smaller than 0.6 of their ring's
- * cell are dropped and density fades over the outer half of the detail
- * square, so detail thins and coarsens outward rather than stopping at an
+ * On the ground stands seeded scatter: gravel, stones and open broadleaf
+ * shrubs on jittered grids. Every item lies inside its own grid cell, so a
+ * voxel checks one candidate per class. Rocks smaller than 0.6 cells and
+ * shrubs smaller than four cells in radius are dropped. Density fades over
+ * the outer half of the detail square, so detail thins and coarsens outward rather than stopping at an
  * edge. The scatter is evaluated in the voxelizer only: it is never an
  * authored primitive, so the solver, the scenery graph and the primitive arena
  * never see it.
@@ -32,6 +32,7 @@
  *
  * No DOM or GPU imports.
  */
+import { BACKDROP_SHRUB_REACH, BACKDROP_SHRUB_RISE, backdropShrubWGSL } from "./backdrop-shrub";
 import {
   backdropFieldHeight,
   backdropHash,
@@ -46,23 +47,26 @@ import {
 
 /**
  * Scatter classes. `shape` 0 is a rotated, half-seated ellipsoid; 1 a
- * three-lobe puff. `minimumRing` keeps a class out of the inner rings: a bush
+ * legacy three-lobe puff; 2 an open woody shrub with 15 leaf packets.
+ * `minimumRing` keeps a class out of the inner rings: a bush
  * voxelized at the set's own cell is most of ring 0's bricks (its surface
  * area in 50 mm bricks), and beside the pond the set brings its own planting.
  */
 export const BACKDROP_SCATTER_CLASSES = Object.freeze([
   { name: "gravel", grid_m: 0.1, density: 0.5, radius_m: [0.01, 0.028], shape: 0, minimumRing: 0 },
   { name: "stones", grid_m: 0.3, density: 0.6, radius_m: [0.03, 0.11], shape: 0, minimumRing: 0 },
-  { name: "shrubs", grid_m: 0.8, density: 0.45, radius_m: [0.1, 0.25], shape: 1, minimumRing: 0 },
-  { name: "bushes", grid_m: 2.4, density: 0.5, radius_m: [0.22, 0.45], shape: 1, minimumRing: 1 },
+  { name: "shrubs", grid_m: 0.8, density: 0.45, radius_m: [0.1, 0.25], shape: 2, minimumRing: 0 },
+  { name: "bushes", grid_m: 2.4, density: 0.5, radius_m: [0.22, 0.45], shape: 2, minimumRing: 1 },
 ] as const);
 
 /** Horizontal reach of an item in its radius: the ellipsoid's 1.3 R, the puff's lobes. */
-const SCATTER_REACH = [1.3, 1.3] as const;
+const SCATTER_REACH = [1.3, 1.3, BACKDROP_SHRUB_REACH] as const;
 /** Height of an item's top above its seat, in its radius. */
-const SCATTER_RISE = [0.85, 1.6] as const;
+const SCATTER_RISE = [0.85, 1.6, BACKDROP_SHRUB_RISE] as const;
 /** Items below this fraction of their ring's cell are dropped. */
 export const BACKDROP_SCATTER_MINIMUM_CELLS = 0.6;
+/** A shrub needs several samples across its shoots to preserve an open silhouette. */
+export const BACKDROP_SHRUB_MINIMUM_CELLS = 4;
 /** Density fades from this fraction of the detail half-width to `FADE_END`. */
 const FADE_BEGIN = 0.45;
 const FADE_END = 0.95;
@@ -151,7 +155,7 @@ function smoothstep(edge0: number, edge1: number, value: number): number {
 
 export interface BackdropScatterItem {
   classIndex: number;
-  shape: 0 | 1;
+  shape: 0 | 1 | 2;
   x: number;
   z: number;
   radius: number;
@@ -189,7 +193,8 @@ export function backdropScatterItem(
   const ring = ringAt(detail, x, z);
   if (ring < entry.minimumRing) return undefined;
   const cell = backdropDetailRingCell(detail, ring);
-  if (radius < BACKDROP_SCATTER_MINIMUM_CELLS * cell * (1 - slack)) return undefined;
+  const minimumCells = entry.shape === 2 ? BACKDROP_SHRUB_MINIMUM_CELLS : BACKDROP_SCATTER_MINIMUM_CELLS;
+  if (radius < minimumCells * cell * (1 - slack)) return undefined;
   const seat = backdropDetailColumnTop(field, detail, cell, x, z);
   return { classIndex, shape: entry.shape, x, z, radius, seat, top: seat + SCATTER_RISE[entry.shape] * radius, reach };
 }
@@ -375,6 +380,7 @@ export function backdropDetailVoxelizerWGSL(table: Uint32Array, detail: Backdrop
   return /* wgsl */ `
 const BACKDROP_DETAIL_TABLE=array<u32,${header.length}>(${header.map((word) => `${word}u`).join(",")});
 ${backdropTerrainWGSL({ load: (index) => `BACKDROP_DETAIL_TABLE[min(${index},${last}u)]`, tableBase: "0u" })}
+${backdropShrubWGSL}
 const BACKDROP_DETAIL_OUTER:f32=${f(detail.outerHalf_m)};
 const BACKDROP_DETAIL_RINGS:u32=${detail.rings}u;
 const BACKDROP_DETAIL_REFINED_RINGS:u32=${detail.refinedRings}u;
@@ -406,7 +412,7 @@ fn backdropScatterInside(p:vec3f,salt:u32,grid:f32,density:f32,rMin:f32,rMax:f32
   let q=vec2i(floor(p.xz/grid));
   let u1=backdropDetailRandom(salt,q,1u);
   let radius=rMin+(rMax-rMin)*u1*u1;
-  let reach=${f(SCATTER_REACH[0])}*radius;
+  let reach=select(${f(SCATTER_REACH[0])},${f(BACKDROP_SHRUB_REACH)},shape==2u)*radius;
   let item=(vec2f(q)+(vec2f(reach)+(grid-2.0*reach)*vec2f(backdropDetailRandom(salt,q,2u),backdropDetailRandom(salt,q,3u)))/grid)*grid;
   let offset=p.xz-item;
   if(max(abs(offset.x),abs(offset.y))>reach){return false;}
@@ -418,7 +424,7 @@ fn backdropScatterInside(p:vec3f,salt:u32,grid:f32,density:f32,rMin:f32,rMax:f32
   let ring=backdropDetailRingAt(item);
   if(ring<minimumRing){return false;}
   let cell=backdropDetailRingCell(ring);
-  if(radius<${f(BACKDROP_SCATTER_MINIMUM_CELLS)}*cell){return false;}
+  if(radius<select(${f(BACKDROP_SCATTER_MINIMUM_CELLS)},${f(BACKDROP_SHRUB_MINIMUM_CELLS)},shape==2u)*cell){return false;}
   let seat=backdropDetailTop(item,cell);
   let angle=6.2831853*backdropDetailRandom(salt,q,4u);
   let axis=vec2f(cos(angle),sin(angle));
@@ -428,6 +434,11 @@ fn backdropScatterInside(p:vec3f,salt:u32,grid:f32,density:f32,rMin:f32,rMax:f32
     let ry=radius*(0.45+0.25*squash);let rz=radius*(0.7+0.6*squash);
     let d=vec3f(local.x/radius,(p.y-(seat+0.2*ry))/ry,local.y/rz);
     return dot(d,d)<1.0;
+  }
+  if(shape==2u){
+    let stature=0.82+0.18*backdropDetailRandom(salt,q,5u);
+    let local=vec3f(dot(offset,axis),(p.y-seat)/stature,dot(offset,vec2f(-axis.y,axis.x)))/radius;
+    return backdropShrubDistance(local)<0.0;
   }
   let core=vec3f(offset.x,p.y-(seat+0.55*radius),offset.y);
   if(dot(core,core)<radius*radius){return true;}
@@ -443,7 +454,7 @@ fn backdropScatterField(p:vec3f,salt:u32,grid:f32,density:f32,rMin:f32,rMax:f32,
   let q=vec2i(floor(p.xz/grid));
   let u1=backdropDetailRandom(salt,q,1u);
   let radius=rMin+(rMax-rMin)*u1*u1;
-  let reach=${f(SCATTER_REACH[0])}*radius;
+  let reach=select(${f(SCATTER_REACH[0])},${f(BACKDROP_SHRUB_REACH)},shape==2u)*radius;
   let item=(vec2f(q)+(vec2f(reach)+(grid-2.0*reach)*vec2f(backdropDetailRandom(salt,q,2u),backdropDetailRandom(salt,q,3u)))/grid)*grid;
   let offset=p.xz-item;
   // Past a radius beyond its reach the item is farther than the ground beside it.
@@ -455,7 +466,7 @@ fn backdropScatterField(p:vec3f,salt:u32,grid:f32,density:f32,rMin:f32,rMax:f32,
   if(backdropFootprintDistance(item)<=reach){return 1e20;}
   let ring=backdropDetailRingAt(item);
   if(ring<minimumRing){return 1e20;}
-  if(radius<${f(BACKDROP_SCATTER_MINIMUM_CELLS)}*backdropDetailRingCell(ring)){return 1e20;}
+  if(radius<select(${f(BACKDROP_SCATTER_MINIMUM_CELLS)},${f(BACKDROP_SHRUB_MINIMUM_CELLS)},shape==2u)*backdropDetailRingCell(ring)){return 1e20;}
   let seat=backdropTerrainSurfaceAt(item).height;
   let angle=6.2831853*backdropDetailRandom(salt,q,4u);
   let axis=vec2f(cos(angle),sin(angle));
@@ -467,6 +478,11 @@ fn backdropScatterField(p:vec3f,salt:u32,grid:f32,density:f32,rMin:f32,rMax:f32,
     let k0=length(e/r);let k1=length(e/(r*r));
     if(k1<1e-6){return -min(r.x,min(r.y,r.z));}
     return k0*(k0-1.0)/k1;
+  }
+  if(shape==2u){
+    let stature=0.82+0.18*backdropDetailRandom(salt,q,5u);
+    let local=vec3f(dot(offset,axis),(p.y-seat)/stature,dot(offset,vec2f(-axis.y,axis.x)))/radius;
+    return radius*stature*backdropShrubDistance(local);
   }
   let lobe=0.65*radius;
   let second=vec2f(cos(angle+2.3),sin(angle+2.3));

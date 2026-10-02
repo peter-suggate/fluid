@@ -68,6 +68,7 @@ export function packSvoClusterArena(
       floats[base + block.anisotropyWord] = packing.clusterWeight;
       floats[base + block.lobeSpanWord] = packing.detailWeight;
       floats[base + block.lobeSpanSpreadWord] = packing.interiorBias;
+      floats[base + block.displacementWord] = packing.filterWidth_m ?? 0;
       return;
     }
     if (packing.field === "seeded-lobes") {

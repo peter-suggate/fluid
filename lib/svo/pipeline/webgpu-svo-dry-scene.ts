@@ -378,6 +378,7 @@ export function packSvoDrySceneClusters(
       floats[base + CLUSTER_BLOCK_ANISOTROPY_WORD] = packing.clusterWeight;
       floats[base + CLUSTER_BLOCK_LOBE_SPAN_WORD] = packing.detailWeight;
       floats[base + CLUSTER_BLOCK_LOBE_SPAN_SPREAD_WORD] = packing.interiorBias;
+      floats[base + CLUSTER_BLOCK_DISPLACEMENT_WORD] = packing.filterWidth_m ?? 0;
       return;
     }
     if (packing.field === "seeded-lobes") {
@@ -481,6 +482,7 @@ export function svoDrySceneClusterResolver(packed: Uint32Array | undefined): Svo
         field: "noise-foliage", seed, smoothRadius_m, detailPeriod_m, clusterPeriod_m,
         threshold: floats[offset + CLUSTER_BLOCK_JITTER_WORD], clusterWeight, detailWeight,
         interiorBias: floats[offset + CLUSTER_BLOCK_LOBE_SPAN_SPREAD_WORD],
+        filterWidth_m: floats[offset + CLUSTER_BLOCK_DISPLACEMENT_WORD],
       };
     }
     if (entry.name === "seeded-lobes") {

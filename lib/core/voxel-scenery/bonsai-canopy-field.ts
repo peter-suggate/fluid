@@ -1,3 +1,5 @@
+/** Legacy box-leaf field-program experiment, retained for the CLI shape lab.
+ * Production bonsai foliage uses the shared leaf density field in bonsai.ts. */
 /**
  * What one cloud pad of the hero bonsai's crown is made of.
  *

@@ -1,4 +1,5 @@
 import type { Vec3 } from "../model";
+import { alongAxis } from "./builder";
 import type { SceneryGroupNode, SceneryMaterial, SceneryRecursiveShapeNode, SceneryTaperedSweepClusterNode } from "../scenery-graph";
 import { sampleSvoPrimitive, type SvoSmoothUnionClusterPrimitive } from "../../svo/contracts/svo-primitive-abi";
 import { oakParameters, OAK_V2_CONTROLS, type OakV2Parameters } from "./oak-v2-parameters";
@@ -46,7 +47,7 @@ export function oakFoliageDescriptor(node: SceneryRecursiveShapeNode): SvoSmooth
   const [x, y, z] = node.form.radii_m;
   return {
     kind: "smooth-union-cluster", primitiveId: 0, materialId: 1, clusterReference: 0,
-    center_m: node.place!.position!, lobeRadii_m: v(x, y * node.form.flatten, z),
+    center_m: node.place!.position!, orientation: node.place?.orientation, lobeRadii_m: v(x, y * node.form.flatten, z),
     packing: { field: "noise-foliage", seed: node.seed, smoothRadius_m: 0,
       clusterPeriod_m: d.clusterPeriod_m, detailPeriod_m: d.dotSpacing_m,
       threshold: d.threshold, clusterWeight: d.clusterWeight, detailWeight: d.detailWeight, interiorBias: d.interiorBias },
@@ -59,9 +60,10 @@ export function oakFoliageDescriptor(node: SceneryRecursiveShapeNode): SvoSmooth
  * Every fork starts exactly at its parent's endpoint; round-cone sweeps share
  * endpoint spheres. Refinement changes sampling, never this topology.
  *
- * The output is ordinary editable document geometry, with no runtime generator
- * or hidden LOD. Macro gaps come from separate boughs; the density field only
- * supplies shoot-scale breakup, never a single canopy-sized envelope.
+ * The output is editable document geometry. Refinement never regrows branches
+ * or moves spray sites: publication passes the sampling footprint to each leaf
+ * field, which groups unresolved leaves inside that same bounded spray. Macro
+ * gaps still come from separate boughs, never a canopy-sized envelope.
  */
 export function planOakV2(spec: OakV2Spec): OakV2Plan {
   const parameters = oakParameters(Object.fromEntries(Object.entries(spec).filter(([key, value]) => key in OAK_V2_CONTROLS && value !== undefined)));
@@ -177,14 +179,26 @@ export function planOakV2(spec: OakV2Spec): OakV2Plan {
             return;
           }
           if (!q.showFoliage) return;
-          const size = q.leafScale * 0.62 ** twigDepth * (0.90 + 0.20 * random(spec.seed, 500 + bough * 12 + sites[0].index)) * s;
+          // Split leaf volume between terminal shoots, not length: the old
+          // .62^depth lost 89% of the canopy after three binary forks.
+          // Independent terminal variation breaks the equal-sized pom-poms.
+          const size = q.leafScale / Math.cbrt(shootsPerSite)
+            * (0.82 + 0.36 * random(spec.seed, twigSalt ^ 0x51ed2701)) * s;
+          // A light-seeking spray tilts with its shoot but stays mostly face-up.
+          const norm = Math.hypot(direction.x, direction.y, direction.z);
+          const tilt = alongAxis(v(.45 * direction.x / norm,
+            1 + .25 * direction.y / norm, .45 * direction.z / norm));
+          const heading = random(spec.seed, twigSalt ^ 0x77a3e15d) * Math.PI;
+          const sh = Math.sin(heading), ch = Math.cos(heading);
+          const orientation = { x: tilt.x * ch - tilt.z * sh, y: tilt.y * ch + tilt.w * sh,
+            z: tilt.z * ch + tilt.x * sh, w: tilt.w * ch - tilt.y * sh };
           let node: SceneryRecursiveShapeNode = {
             kind: "recursive-shape", family: "foliage-pad", id: `${spec.key}/foliage/bough-${bough}/shoot-${sites[0].index}/${twigPath}`,
             tags: ["tree", "foliage", "oak-v2"], seed: hash(spec.seed + bough * 97 + sites[0].index + twigSalt),
-            place: { units: "metres", position: tip },
+            place: { units: "metres", position: tip, orientation },
             form: { radii_m: [0.105 * size, 0.073 * size, 0.090 * size], flatten: q.leafFlatten,
               edgeLobes: 6, lobeDepth: 0.6, topBias: 0.4, undersideCut: 0.65, blockJitter: 0.5,
-              density: { clusterPeriod_m: 0.060 * size * q.clumpScale, dotSpacing_m: 0.018 * size,
+              density: { clusterPeriod_m: 0.060 * size * q.clumpScale, dotSpacing_m: 0.045 * size,
                 threshold: q.leafThreshold, clusterWeight: 1 - q.detailWeight, detailWeight: q.detailWeight, interiorBias: q.interiorBias } },
             split: { pattern: "cap", childCount: 3, childScale: 0.62, spread: 0.8, overlap: 0.2, verticalBias: 0.15, flattening: 0, jitter: 0.4 },
             material: spec.foliage,

@@ -52,6 +52,8 @@ import { terrainHeightAt } from "./terrain";
 
 /** A node's resolved place in the world, and the units its children speak in. */
 interface SceneryFrame {
+  /** World-space sampling footprint; not affected by object scale. */
+  readonly detailCellSize_m: number;
   /** World position of this frame's local origin. */
   readonly origin_m: Vec3;
   /** Metres per authored unit for lengths declared in this frame. */
@@ -133,6 +135,7 @@ function childFrame(
     origin_m = { x: origin_m.x, y: datum + offset.y, z: origin_m.z };
   }
   return {
+    detailCellSize_m: context.detailCellSize_m,
     origin_m,
     unit_m,
     scale,
@@ -219,6 +222,7 @@ function clusterPacking(node: SceneryClusterNode, frame: SceneryFrame, envelope_
     ? {
       ...shared,
       field: "noise-foliage",
+      filterWidth_m: frame.detailCellSize_m,
       clusterPeriod_m: metres(frame, node.clusterPeriod),
       detailPeriod_m: metres(frame, node.detailPeriod),
       threshold: node.threshold,
@@ -544,6 +548,7 @@ export function expandSceneryGraph(
   if (!shellNode) throw new Error("A scenery graph needs exactly one shell node");
   const shell = emitShell(builder, shellNode, context, graph);
   const root: SceneryFrame = {
+    detailCellSize_m: context.detailCellSize_m,
     origin_m: V(0, 0, 0), unit_m: context.s, scale: 1, units: "scene-scale", group: "scenery",
   };
   const visit = (nodes: readonly SceneryNode[], parent: SceneryFrame): void => {

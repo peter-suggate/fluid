@@ -5,7 +5,6 @@ import {
   SVO_CLUSTER_LOBE_MAXIMUM_COUNT,
   SVO_CLUSTER_LOBE_MINIMUM_COUNT,
 } from "../../svo/features/construction/svo-cluster-limits";
-import { bonsaiCanopyField, bonsaiCanopyPadProgram } from "./bonsai-canopy-field";
 import { bonsaiCanopyPads } from "./bonsai-canopy-pads";
 import { alongAxis, V } from "./builder";
 import { sweptTubeNodes, type SweptTubeStation } from "./swept-tube";
@@ -359,7 +358,9 @@ export interface BonsaiForm {
    */
   readonly floretGrain: number;
   /**
-   * How the crown is spelled: as explicit florets, or as one aggregate per lobe.
+   * How the crown is spelled. The default `field` uses seven bounded leaf
+   * density clusters shared with the oak; low-resolution publication aggregates
+   * unresolved leaves into broader packets. The other modes remain available.
    *
    * `florets` is the construction every field above describes — lobe cores,
    * nodules and cast florets, three scales of explicit primitive, and very
@@ -2096,33 +2097,9 @@ export function planBonsai(spec: BonsaiSpec): BonsaiPlan {
   // `BonsaiForm.canopy` for why both exist and what each costs.
   let floretCapArea = 0;
   if (spec.canopy === "field") {
-    /**
-     * The crown as **cloud pads**: one tape per pad, seven of them.
-     *
-     * Six ops each against the aggregate's hundred and fifty `seeded-lobes`
-     * records, and it is not a saving so much as a different object: a tape
-     * carries two scales of *packed* cellular relief where a cluster record
-     * carries one scale of separated lobes, so this is the first construction
-     * here that is actually self-similar. See `bonsai-canopy-field.ts` for why
-     * the nested `scatter` the header proposes cannot do it.
-     *
-     * **It was one record, and one record was the fault.** A displacement can
-     * roughen a mass; it cannot turn one mass into six. The single-ellipsoid
-     * version rendered as a smooth flat disc on a stem at every relief setting
-     * tried, because the silhouette was the ellipsoid's and there was only ever
-     * one ellipsoid — where the plate's canopy is five to seven distinct masses
-     * with sky between them. The scale at which the object stops being connected
-     * is geometry; everything below it is relief. See `bonsai-canopy-pads.ts`.
-     *
-     * There is no bed. The bed existed because a finite set of round heads never
-     * paves a plane — 15.4 % of the plate stayed open to a vertical ray — and a
-     * displaced solid has no such holes: each pad's core *is* closed and the
-     * relief only roughens it. Sky *between* pads is wanted and is not a hole.
-     */
-    // The leaf the set will be voxelized into, so the ladder can stop where the
-    // lattice does. At refinement depth 3 — what production runs — this is
-    // 0.78 mm and the tape carries a rung the 6.25 mm leaf cannot draw.
-    const field = bonsaiCanopyField(spec.leafSize_m ?? BONSAI_DEFAULT_LEAF_SIZE_M);
+    // Broad, overlapping sprays carry the silhouette at coarse sampling.
+    // The same bounded density field as the oak supplies irregular clusters
+    // and fine laminae; no square leaves or repeated lattice orientations.
     const pads = bonsaiCanopyPads({
       crownRadius_m: spec.crownRadius_m,
       crownThickness_m: crownThickness,
@@ -2131,22 +2108,19 @@ export function planBonsai(spec: BonsaiSpec): BonsaiPlan {
       seed: seed >>> 0,
     });
     for (const [index, pad] of pads.entries()) {
+      const shortest = Math.min(pad.radius_m.x, pad.radius_m.y, pad.radius_m.z);
       nodes.push({
-        kind: "field-program",
-        id: `${key}/pad-${index}`,
-        tags: partTags("crown"),
-        // A tape is authored in metres and must resolve at a unit scale; the
-        // record is centred on its pad and takes no orientation, exactly as the
-        // heads it replaces did.
-        place: { units: "metres", position: pad.center_m },
-        program: bonsaiCanopyPadProgram(pad.radius_m, field, (seed + 7919 * index) >>> 0),
-        // A shade per pad, off the same seed the pad is placed with. The set is
-        // one flat plaster closure with the key raised, so a canopy of identical
-        // masses loses its separation the moment two pads meet edge-on; this is
-        // the little help the form gets.
-        material: canopy(spec.canopyValue - .03 + .05 * hash01(seed + 131 * index)),
+        kind: "cluster", field: "noise-foliage", id: `${key}/pad-${index}`,
+        tags: [...partTags("crown"), "foliage"], seed: (seed + 7919 * index) >>> 0,
+        lobe: pad.radius_m, smoothRadius: 0,
+        clusterPeriod: shortest * .8, detailPeriod: shortest * .27,
+        threshold: .46, clusterWeight: .34, detailWeight: .66, interiorBias: .08,
+        place: { units: "metres", position: pad.center_m,
+          orientation: alongAxis(V(.35 * hashSigned(seed + index * 37), 1, .35 * hashSigned(seed + index * 37 + 1))) },
+        material: { ...canopy(spec.canopyValue - .03 + .05 * hash01(seed + 131 * index)), surface: "foliage" },
       });
-      coverCrown(pad.center_m, pad.radius_m);
+      // The tilted spray stays inside this sphere at any orientation.
+      coverCrown(pad.center_m, Math.max(pad.radius_m.x, pad.radius_m.y, pad.radius_m.z));
     }
     floretCapArea = pads.reduce((area, pad) => area + ellipsoidSurfaceArea(pad.radius_m), 0);
   } else if (spec.canopy === "aggregate") {

@@ -4,7 +4,7 @@ import { DEFAULT_FINEST_CELL_SIZE_M } from "../../lib/core/model";
 import { getSceneDefinition } from "../../lib/core/scenes";
 import { sceneDocumentAtLattice } from "../../lib/core/scene-definition";
 import { heroGardenCloudTree } from "../../lib/core/hero-garden-tree";
-import type { SceneryNode } from "../../lib/core/scenery-graph";
+import { isSceneryShellNode, type SceneryNode } from "../../lib/core/scenery-graph";
 import { heroPreviewCamera } from "./hero-still";
 export const createScene = () => {
   const depth = Number(process.env.FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT ?? 3);
@@ -13,7 +13,7 @@ export const createScene = () => {
   }).scene;
   const tree: SceneryNode = process.env.OAK_TREE_JSON
     ? JSON.parse(readFileSync(process.env.OAK_TREE_JSON, "utf8")) : heroGardenCloudTree();
-  return { ...scene, scenery: { ...scene.scenery!, nodes: scene.scenery!.nodes.map(node => node.id === "tree" ? tree : node) } };
+  return { ...scene, scenery: { ...scene.scenery!, nodes: scene.scenery!.nodes.filter(node => !process.env.OAK_TREE_ONLY || node.id === "tree" || isSceneryShellNode(node)).map(node => node.id === "tree" ? tree : node) } };
 };
 export const camera = {
   ...heroPreviewCamera(),
