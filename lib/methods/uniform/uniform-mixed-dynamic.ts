@@ -291,7 +291,7 @@ fn gapIndex(t:u32)->u32{return ${HEADER}u+WORDS+6u*UM_TILES+t;}
 // follows the flow, not a sphere: a climbing sheet refines the tiles above.
 fn travelIndex(t:u32)->u32{return gapIndex(UM_TILES)+t;}
 // One bit per tile: liquid, a non-air owner (wet); then solid-coupled tiles
-// within one tile of liquid or of the decided band (active).
+// that are wet or in the decided band (active).
 fn wetIndex(w:u32)->u32{return travelIndex(UM_TILES)+w;}
 fn activeIndex(w:u32)->u32{return wetIndex(WORDS)+w;}
 fn reasonIndex(t:u32)->u32{return activeIndex(WORDS)+t;}
@@ -800,20 +800,16 @@ fn umSourceTile(p:vec3i)->bool{
 // Liquid-conditional solid promotion. Fine-owner solid terms need a cut
 // tile, and each neighbour of it, at h wherever liquid can meet it; a dry cut
 // tile far from liquid runs 4h without them. Liquid reaches a coupled tile
-// only from a wet tile or a band tile (the surface this census predicts over
-// its horizon) within one tile of it: that tile is active, and it and its
-// 26 neighbours join the band. The band certificate fails a liquid row in
-// a cut tile the simulation holds at 4h.
+// this frame only if it is wet or band: the band is already the surface this
+// census predicts over its horizon, closed and margined, so no further
+// dilation is needed. That tile is active, and it and its 26 neighbours join
+// the band. The band certificate fails a liquid row in a cut tile the
+// simulation holds at 4h.
 fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%32u)))!=0u;}
 @compute @workgroup_size(64) fn solidActive(@builtin(global_invocation_id) gid:vec3u){
  let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
  if(((solidTiles[tile/32u]>>(tile%32u))&1u)==0u){return;}
- let p=vec3i(umTileCoord(tile));
- let a=max(p-vec3i(1),vec3i(0));let b=min(p+vec3i(1),vec3i(UM_T)-vec3i(1));
- for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
-  let q=umTileAt(vec3u(vec3i(x,y,z)));
-  if(umBit(wetIndex(0u),q)||umBit(${HEADER}u,q)){atomicOr(&census[activeIndex(tile/32u)],1u<<(tile%32u));return;}
- }}}
+ if(umBit(wetIndex(0u),tile)||umBit(${HEADER}u,tile)){atomicOr(&census[activeIndex(tile/32u)],1u<<(tile%32u));}
 }
 @compute @workgroup_size(64) fn solidPromote(@builtin(global_invocation_id) gid:vec3u){
  let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}

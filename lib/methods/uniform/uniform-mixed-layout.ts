@@ -136,8 +136,8 @@ export function uniformMixedSolidTiles(dimensions: Triple, mask: Uint32Array, ma
 }
 
 /** Liquid-conditional solid promotion (the census's solidActive and
- * solidPromote on the CPU): a coupled tile within one tile of a `liquid` tile
- * is active, and it and its 26 neighbours are promoted. Dynamic coarsening
+ * solidPromote on the CPU): a coupled `liquid` tile is active, and it and
+ * its 26 neighbours are promoted. Dynamic coarsening
  * holds dry solids at 4h, so only these tiles of `forced` must be h. */
 export function uniformMixedLiquidSolidPromotion(tileDimensions: Triple, coupled: Uint8Array, liquid: Uint8Array): Uint8Array {
   const [tx, ty, tz] = tileDimensions, n = tx * ty * tz;
@@ -150,7 +150,7 @@ export function uniformMixedLiquidSolidPromotion(tileDimensions: Triple, coupled
   const active = new Uint8Array(n), promoted = new Uint8Array(n);
   for (let z = 0; z < tz; z++) for (let y = 0; y < ty; y++) for (let x = 0; x < tx; x++) {
     const t = x + tx * (y + ty * z);
-    if (coupled[t] && near(liquid, x, y, z)) active[t] = 1;
+    if (coupled[t] && liquid[t]) active[t] = 1;
   }
   for (let z = 0; z < tz; z++) for (let y = 0; y < ty; y++) for (let x = 0; x < tx; x++) if (near(active, x, y, z)) promoted[x + tx * (y + ty * z)] = 1;
   return promoted;

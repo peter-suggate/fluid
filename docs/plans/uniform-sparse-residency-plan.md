@@ -248,7 +248,7 @@ Every phase is layout-general, measured on one target scene, and gated by the Un
 - **Measure:** builder `tierCounts` at t=0 and through a hose fill; per-phase GPU ms (physicsTrace) on the hose; mass drift; the solid-parity and trough Dawn lanes.
 - **Risk:** promotion must land before liquid touches a solid. It relies on the reach bound, which is already what dynamic coarsening trusts. Refinement near solids must rebuild the stencils exactly (the remap-follows-phi rule).
 - **Landed 2026-09-28.** Rule, computed on the GPU in the census after `decide`:
-  - A coupled tile is *active* when a wet tile (any non-air owner) or a band tile lies within one tile of it. `solidActive` computes this.
+  - A coupled tile is *active* when it is wet (any non-air owner) or in the band. `solidActive` computes this. (Until 2026-10-02 it was active when a wet or band tile lay within one tile of it. The band is already margined, so that extra ring stacked to three tiles of dry h around the hose-x10 pond. Removing it took mean h tiles 2,862 → 1,663 and ms/step 27.11 → 25.30, with the hose on, 150 pipelined steps, ABAB in one process; mass matched to 0.4 of 18,622 cells.)
   - Every active tile and its 26 neighbours join the band bits. `solidPromote` does this.
   - The builder's static mask now holds only fine-only regions. The CPU path (`updateMixedRegions` in dynamic mode, and `promoteMixedDrop` through `uniformMixedLiquidSolidPromotion`) mirrors the rule.
   - A dry cut tile may therefore run 4h, and its h texels go stale. The solid record's per-tile `y` flag ("simulated at h") is rewritten by a widths pass after every relayout, and `umSolidCut` means cut ∧ h. The all-4h cut vote and cut-face flux treat a 4h cut tile as uncut.
