@@ -74,6 +74,8 @@ export const RENDER_FRAME_STAGES = Object.freeze([
   "seam-closure",
   // LIGHTING VISIBILITY — what can see which light.
   "voxel-light-cache",
+  "raster-sun-shadows",
+  "screen-contact-ao",
   "lattice-visibility-keys",
   "lattice-visibility-cones",
   "compact-cone-lighting",
@@ -262,6 +264,14 @@ export const RENDER_FRAME_STAGE_PLUGINS = Object.freeze({
     owner: "svo",
     node: "cone-visibility",
     phase: { id: "svo-cone-lighting", label: "SVO lattice cone visibility" },
+  },
+  "raster-sun-shadows": {
+    owner: "svo", node: "cone-visibility",
+    phase: { id: "svo-cone-lighting", label: "Cached raster sun shadows" },
+  },
+  "screen-contact-ao": {
+    owner: "svo", node: "cone-visibility",
+    phase: { id: "svo-cone-lighting", label: "Screen-space shadow filtering and AO" },
   },
   "compact-cone-lighting": {
     owner: "svo",

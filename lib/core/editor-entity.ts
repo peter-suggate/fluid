@@ -9,6 +9,7 @@ import { quaternionInverseRotate, quaternionRotate } from "./rigid-body";
 import type { CameraState, Quaternion, SceneDescription, Vec3 } from "./model";
 import type { EditorAction, EditorActionTarget } from "./editor-action";
 import type { SceneDraftSubject } from "./stores/scene-draft-store";
+import type { TerrainAuthoringRayHit } from "./terrain";
 import { CAMERA_TAN_HALF_FOV, cameraTanHalfFov, projectToViewport } from "./webgpu-camera";
 
 /**
@@ -613,6 +614,8 @@ export function boxFaceCorners(
  */
 export interface EditorEntityContext {
   readonly scene: SceneDescription;
+  /** Shared only within one catalog ray query; both the rim and ground need this hit. */
+  readonly terrainRayQuery?: { readonly ray: EditorRay; readonly read: () => TerrainAuthoringRayHit | undefined };
   /**
    * The running solver's id, for capabilities gated on the method — the voxel
    * sculpt tools declare their own availability against it. Optional for the

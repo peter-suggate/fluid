@@ -434,20 +434,21 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     id: "cone-visibility",
     band: "lighting",
     side: "right",
-    label: "Cone prepass + visibility",
+    label: "Lighting visibility",
     switchedBy: "svoConeTracingMode",
     taps: ["cone-ambient-visibility", "cone-light-visibility", "cone-geometry"],
     toggleable: true,
     tip: {
-      summary: "Cone-traced soft shadows, AO and GI, marched at the prepass rate against the node-mip opacity pyramid. Turning this off does not remove shadows — it hands them to EXACT rays, which are sharper and cost more per pixel. OFF removes visibility work entirely.",
+      summary: "Cone-traced soft shadows, AO and GI, marched at the prepass rate against the node-mip opacity pyramid. Turning this off does not remove shadows — it hands them to EXACT rays, which are sharper and cost more per pixel. RASTER + AO selects preview sun shadow maps and local screen-space AO. OFF removes visibility work entirely.",
       reads: "primary G-buffer · node-mip opacity pyramid",
       writes: "conePrepassVisibility · 8 packed light slots",
       feeds: "world GI cache → deferred lighting",
       gate: "cone hierarchy of at most twelve levels; past that derived lighting withdraws and the status line reads EXACT FALLBACK",
     },
-    state: (context) => (context.coneTracingMode === "cones" ? "on" : context.coneTracingMode === "exact" ? "armed" : "off"),
+    state: (context) => (context.coneTracingMode === "cones" || context.coneTracingMode === "raster-ao" ? "on" : context.coneTracingMode === "exact" ? "armed" : "off"),
     chip: (context) => context.coneTracingMode === "cones"
       ? `cones · ${coneRateLabel(context.tuning.coneLightingScale)} · ${latticeVisibilityServes(context) ? "face lattice" : "8 slots"}`
+      : context.coneTracingMode === "raster-ao" ? "preview · raster sun + horizon AO"
       : context.coneTracingMode === "exact" ? "exact rays · no cone stage" : "no visibility work",
   },
   {

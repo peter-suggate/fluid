@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { simulation } from "../lib/core/simulation/controller";
 import { useSession } from "../lib/core/session/session-context";
 import { useDisplayScene } from "../lib/core/stores/scene-draft-store";
@@ -53,17 +54,22 @@ export function SceneScaleOverlay() {
   // The display scene, so the litres and the extents count up as a shape drag
   // is happening rather than jumping when it lands.
   const scene = useDisplayScene(session.scene, session.sceneDraft);
-  const summary = sceneScaleSummary(scene);
   // Two questions, and they stopped having the same answer once a scene could
   // hold several bodies: the readout reports all the water in the document,
   // while the buttons scale the reservoir — which a seed-authored scene like the
   // twin dams simply does not have, so they disable rather than reshape a body
   // that is not there. Each body's own handles still resize it in the scene.
-  const body = fluidBodyBox(scene);
-  const water_m3 = fluidWaterVolume_m3(scene);
+  // Scale availability constructs four candidate scenes. Camera/status updates
+  // must neither repeat that work nor run it for an invisible overlay.
+  const measurements = useMemo(() => shapeMode ? {
+    summary: sceneScaleSummary(scene),
+    body: fluidBodyBox(scene),
+    water_m3: fluidWaterVolume_m3(scene),
+  } : undefined, [scene, shapeMode]);
+  if (!measurements) return null;
+  const { summary, body, water_m3 } = measurements;
   const fluidEnabled = scene.systems?.fluid !== false;
   const [nx, ny, nz] = summary.dimensions;
-  if (!shapeMode) return null;
 
   // Each row is a stepper on the scale *relative to now*: 1 is the scene as it
   // stands, one press is ÷2 or ×2, and an end is closed exactly when that step

@@ -125,16 +125,18 @@ export interface SvoLatticeVisibilitySizing {
 }
 
 /**
- * Sized from the reduced prepass texel count, which bounds one frame's
- * distinct keys. The record array is the largest binding; where the device's
- * ceiling cannot hold the full multiple the store shrinks, but never below
- * one frame's bound: that configuration throws rather than overflowing live.
+ * The reduced prepass is an initial estimate, not a key-count bound: separate
+ * voxel faces can request four distinct corners per full-resolution pixel.
+ * After overflow, minimumSlots grows the store without changing sampling.
+ * The record binding and packed slot field bound all allocations.
  */
-export function svoLatticeVisibilitySizing(prepassTexels: number, bindingLimitBytes: number): SvoLatticeVisibilitySizing {
+export function svoLatticeVisibilitySizing(prepassTexels: number, bindingLimitBytes: number, minimumSlots = 0): SvoLatticeVisibilitySizing {
   const contract = SVO_LATTICE_VISIBILITY_CONTRACT;
   const texels = boundedInteger(prepassTexels, 0x4000_0000, "Lattice visibility prepass texels");
   if (texels === 0) throw new RangeError("Lattice visibility needs a non-empty prepass");
-  const buckets = Math.min(Math.ceil(contract.slotsPerTexel * texels / contract.bucketWays),
+  const minimum = boundedInteger(minimumSlots, contract.maximumSlots * 2, "Lattice visibility minimum slots");
+  const buckets = Math.min(Math.ceil(Math.max(contract.slotsPerTexel * texels, minimum) / contract.bucketWays),
+    contract.maximumSlots / contract.bucketWays,
     Math.floor((bindingLimitBytes - contract.recordHeaderBytes) / (contract.bucketWays * contract.recordBytes)));
   const slots = buckets * contract.bucketWays;
   if (slots < texels) throw new RangeError("Lattice visibility store cannot hold one frame's keys within the storage-binding limit");

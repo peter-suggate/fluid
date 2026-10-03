@@ -882,6 +882,7 @@ export function createProductionSparseVoxelDrySceneRenderer(
   primaryWorkMap = false,
   sunlightCacheEnabled = false,
   waterShadowsEnabled = false,
+  rasterAo = false,
 ): SparseVoxelDrySceneRenderer {
   if ((primaryTraversal === "raster" || primaryTraversal === "mesh")
     && device.limits.maxColorAttachmentBytesPerSample < FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE) {
@@ -889,6 +890,7 @@ export function createProductionSparseVoxelDrySceneRenderer(
       `Requested SVO raster primary needs maxColorAttachmentBytesPerSample >= ${FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE}; device exposes ${device.limits.maxColorAttachmentBytesPerSample}`,
     );
   }
+  if (rasterAo && primaryTraversal !== "mesh") throw new RangeError("Raster + AO preview requires Mesh primary visibility");
   const traversal = primaryTraversal === "raster" || primaryTraversal === "mesh"
     ? "raster-primary" as const : "canonical-parametric" as const;
   const rasterArms = traversal === "raster-primary";
@@ -902,8 +904,8 @@ export function createProductionSparseVoxelDrySceneRenderer(
     "split",
     rasterArms && primaryTraversal !== "mesh" ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
     rasterArms,
-    true,
-    { primaryWorkMap, surfaceMesh: primaryTraversal === "mesh", voxelLightCache: sunlightCacheEnabled, specializedDeferredLighting: true,
+    !rasterAo,
+    { primaryWorkMap, surfaceMesh: primaryTraversal === "mesh", voxelLightCache: sunlightCacheEnabled && !rasterAo, rasterAo, specializedDeferredLighting: true,
       waterShadows: waterShadowsEnabled },
   );
 }
@@ -997,6 +999,7 @@ export class FluidLabRenderer {
   private requestedPrimaryWorkMap = false;
   private requestedSunlightCache = false;
   private requestedWaterShadows = false;
+  private requestedRasterAo = false;
   private presentationTexture?: GPUTexture;
   private presentationTextureKey = "";
   private activeRenderScale = 1;
@@ -1196,22 +1199,24 @@ export class FluidLabRenderer {
     primaryWorkMap = false,
     sunlightCacheEnabled = false,
     waterShadowsEnabled = false,
+    rasterAo = false,
   ): void {
     // A primary-work view describes ray traversal, so it cannot silently show
     // an all-zero plane from the proxy-raster primary. The view is an explicit
     // request for the traced diagnostic arm regardless of the normal adaptive
     // traversal choice.
-    const resolved = primaryWorkMap ? "traced" : resolveSvoPrimaryTraversal(requested, scale);
+    const resolved = primaryWorkMap ? "traced" : rasterAo ? "mesh" : resolveSvoPrimaryTraversal(requested, scale);
     // Let the in-flight factory publish the request it captured. Keeping its
     // key unchanged makes the next frame retire it if a control changed while
     // compilation was pending, rather than accepting the old bundle as new.
     if (this.optionalPipelineTasks.has("svo-dry-scene")) return;
     if (resolved === this.requestedPrimaryTraversal && primaryWorkMap === this.requestedPrimaryWorkMap
-      && sunlightCacheEnabled === this.requestedSunlightCache && waterShadowsEnabled === this.requestedWaterShadows) return;
+      && sunlightCacheEnabled === this.requestedSunlightCache && waterShadowsEnabled === this.requestedWaterShadows && rasterAo === this.requestedRasterAo) return;
     this.requestedPrimaryTraversal = resolved;
     this.requestedPrimaryWorkMap = primaryWorkMap;
     this.requestedSunlightCache = sunlightCacheEnabled;
     this.requestedWaterShadows = waterShadowsEnabled;
+    this.requestedRasterAo = rasterAo;
     this.failedOptionalPipelines.delete("svo-dry-scene");
     this.optionalPipelineFailures.delete("svo-dry-scene");
     const retired = this.svoDryScenePipeline;
@@ -1410,7 +1415,7 @@ export class FluidLabRenderer {
       // emits more proxies than the target has pixels.
       (device) => createProductionSparseVoxelDrySceneRenderer(
         device, this.uniformBuffer!, this.bodyBuffer!, this.requestedPrimaryTraversal,
-        this.requestedPrimaryWorkMap, this.requestedSunlightCache, this.requestedWaterShadows,
+        this.requestedPrimaryWorkMap, this.requestedSunlightCache, this.requestedWaterShadows, this.requestedRasterAo,
       ),
       (pipeline) => pipeline.initialize((label, completed, total) => this.reportSvoPipelineProgress(label, completed, total)),
       (pipeline) => {
@@ -3260,7 +3265,7 @@ export class FluidLabRenderer {
         leafBricks: this.svoDrySceneSource?.structural?.capacities.leaves,
         targetPixels: this.presentationTexture.width * this.presentationTexture.height,
         environmentRefinementDepth,
-      }, primaryWorkMapRequested, activeSvoTuning.sunlightCacheEnabled, activeSvoTuning.waterShadowsEnabled);
+      }, primaryWorkMapRequested, activeSvoTuning.sunlightCacheEnabled, activeSvoTuning.waterShadowsEnabled, svoLightingOptions.coneTracingMode === "raster-ao" && !primaryWorkMapRequested);
     }
     this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
       gridOverlay, this.simulationRunning,
@@ -3537,7 +3542,9 @@ export class FluidLabRenderer {
     // Reduced-rate cone lighting is the production default: quarter-axis-rate
     // prepass + full-resolution relight, with 0.5 retained by the quality tier.
     if (sparsePresentationRequired) {
-      this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions, coneLightingScale: activeSvoTuning.coneLightingScale });
+      this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions,
+        ...(primaryWorkMapRequested && svoLightingOptions.coneTracingMode === "raster-ao" ? { coneTracingMode: "exact" as const } : {}),
+        coneLightingScale: activeSvoTuning.coneLightingScale });
       this.svoDryScenePipeline?.setRenderTuning(activeSvoTuning, readyGPUFluid === undefined);
     }
     // Its own channel, taken every frame: a withheld stage is an encode-time

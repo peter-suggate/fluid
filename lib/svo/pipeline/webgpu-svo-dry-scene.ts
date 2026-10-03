@@ -1,3 +1,4 @@
+import { SvoRasterAo, type RasterAoPipelines } from "../features/lighting-visibility/svo-raster-ao";
 import { canUseOpaqueConeLighting } from "../features/shading/deferred-specialization";
 import type { SceneDescription } from "../../core/model";
 import {
@@ -960,6 +961,7 @@ const rasterPrimaryTargets: GPUColorTargetState[] = [
 export const SVO_SCENE_PRIMITIVE_COMPUTE_MINIMUM_PIXELS = 1 << 20;
 
 interface SvoDrySplitPipelineBundle {
+  readonly rasterAo?: RasterAoPipelines;
   readonly visibility: GPURenderPipeline;
   readonly rasterRigidVisibility?: GPURenderPipeline;
   /** Optional one-pixel primary coverage closure before the sky/surface partition. */
@@ -1108,11 +1110,12 @@ export class SparseVoxelDrySceneRenderer {
   private latticeGenerationWritten = 0;
   /** Source-side inputs compared at encode: identity, revision, node-mip publication. */
   private latticeSourceInputs?: readonly unknown[];
-  /** Non-blocking copy of the sticky overflow word; a nonzero value is fatal. */
+  /** Non-blocking copy of the sticky overflow word; grows the store on demand. */
   private latticeOverflowStaging?: GPUBuffer;
   private latticeOverflowCopied = false;
   private latticeOverflowFrame = 0;
   private latticeOverflowReading = false;
+  private latticeMinimumSlots = 0;
   private latticeStoreFailure?: string;
   /** Whether the active split bundle compiled the lattice lookup; encode follows it. */
   private splitPipelineLattice = false;
@@ -1387,6 +1390,8 @@ export class SparseVoxelDrySceneRenderer {
   /** Resource/source epoch. Later compatible frames do not invalidate a copy already ordered on the queue. */
   private pickingFrameToken = 1;
   private paramsWords?: Uint32Array<ArrayBuffer>;
+  private rasterAo?: SvoRasterAo;
+  private rasterAoPipelines?: RasterAoPipelines;
   private source?: SparseVoxelSceneRenderSource;
   private scene?: SparseVoxelDrySceneData;
   private primitiveDirtyBounds: readonly SvoDrySceneDirtyBounds[] = [];
@@ -1429,6 +1434,12 @@ export class SparseVoxelDrySceneRenderer {
       && !((traversalMode === "canonical" && shadingPath === "inline")
         || (traversalMode === "raster-primary" && shadingPath === "split"))) {
       throw new RangeError("Screen-space termination requires canonical inline or raster-primary split traversal");
+    }
+    if (experiments.rasterAo) {
+      if (!experiments.surfaceMesh || shadingPath !== "split" || experiments.voxelLightCache !== false) {
+        throw new RangeError("Raster + AO preview requires mesh split shading and no voxel light cache");
+      }
+      this.rasterAo = new SvoRasterAo(device);
     }
     this.rasterPrimary = traversalMode === "raster-primary";
     if (experiments.surfaceMesh && (!this.rasterPrimary || shadingPath !== "split" || screenSpaceTerminationPixels !== 0)) {
@@ -1689,6 +1700,7 @@ export class SparseVoxelDrySceneRenderer {
    * pixels even though both entries share one source module.
    */
   private activateSplitPipelineBundle(scale: SvoConeLightingScale, bundle: SvoDrySplitPipelineBundle): void {
+    this.rasterAoPipelines = bundle.rasterAo;
     this.splitVisibilityPipeline = bundle.visibility;
     this.splitRasterRigidVisibilityPipeline = bundle.rasterRigidVisibility;
     this.primarySeamClosurePipeline = bundle.primarySeamClosure;
@@ -3474,7 +3486,7 @@ export class SparseVoxelDrySceneRenderer {
           : Promise.resolve(undefined),
       ]);
       const middleLayouts = scale === 1 ? [] : [this.conePrepassLayout!];
-      const cacheConsumerLayouts = voxelLightCacheEnabled ? [this.voxelLightConsumerLayout!] : [];
+      const cacheConsumerLayouts = this.rasterAo ? [this.rasterAo.consumerLayout] : voxelLightCacheEnabled ? [this.voxelLightConsumerLayout!] : [];
       const visibilityLayout = this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitVisibilityLayout] });
       const [visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
         worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate] = await Promise.all([
@@ -3856,7 +3868,8 @@ export class SparseVoxelDrySceneRenderer {
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, this.latticeKeyLayout!, this.splitLightingLayout!] }),
         compute: { module, entryPoint: "dryLatticeKeysMain" },
       }) : undefined;
-      const bundle = { optimizedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
+      const rasterAo = await this.rasterAo?.compile(module, layout, this.surfaceMeshDrawLayout!, this.splitLightingLayout!);
+      const bundle = { rasterAo, optimizedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
         worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate,
         brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickLodResolve, brickExactResolve,
         brickCoverageOverflow, scenePrimitiveRaster,
@@ -4139,7 +4152,7 @@ export class SparseVoxelDrySceneRenderer {
 
   /**
    * Allocates the persistent store while a lattice bundle is active, sized
-   * from the reduced prepass texel count that bounds one frame's keys. A new
+   * from the reduced prepass estimate and observed overflow. A new
    * store starts cold: zeroed buckets are empty and zeroed records unstamped.
    * It survives everything but a prepass resize or leaving the lattice bundle.
    * The per-pixel corners are frame-transient and follow the target size alone.
@@ -4149,7 +4162,7 @@ export class SparseVoxelDrySceneRenderer {
       || !this.coneFanoutFrameBuffer || !this.latticeKeyLayout || !this.latticeWorkerLayout) return;
     const contract = SVO_LATTICE_VISIBILITY_CONTRACT;
     const { buckets, slots } = svoLatticeVisibilitySizing(this.conePrepassWidth * this.conePrepassHeight,
-      Math.min(this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize));
+      Math.min(this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize), this.latticeMinimumSlots);
     const bucketBytes = 4 * contract.bucketWords * buckets;
     const cornerBytes = contract.cornerBytes * this.targetWidth * this.targetHeight;
     if (cornerBytes > Math.min(this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize)) {
@@ -4234,6 +4247,7 @@ export class SparseVoxelDrySceneRenderer {
 
   /** Frees the store and points the lighting group back at the placeholder. */
   private releaseLatticeTargets(): void {
+    this.latticeMinimumSlots = 0;
     if (!this.latticeBuckets) return;
     this.releaseLatticeBuffers();
     this.rebuildSplitLightingBindGroups();
@@ -4290,8 +4304,9 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   /**
-   * Keys a full bucket pair turned away were served by the exact edge tier;
-   * the store is sized so that never happens, so any overflow is a fault. The
+   * Keys a full bucket pair turned away were served by the exact edge tier.
+   * Fine voxel faces can exceed the prepass-based estimate, so grow on demand;
+   * only exhaustion of the device/slot budget is a fatal capacity fault. The
    * word is copied without blocking and mapped half a period later, as the
    * coverage audit is, so the map never lands while the copy's command buffer
    * is still being encoded.
@@ -4314,10 +4329,32 @@ export class SparseVoxelDrySceneRenderer {
       const overflow = new Uint32Array(staging.getMappedRange())[0];
       staging.unmap();
       this.latticeOverflowReading = false;
+      if (staging !== this.latticeOverflowStaging) return;
       if (overflow === 0 || this.latticeStoreFailure) return;
+      const contract = SVO_LATTICE_VISIBILITY_CONTRACT;
+      const slots = (this.latticeRecords!.size - contract.recordHeaderBytes) / contract.recordBytes;
+      const grown = svoLatticeVisibilitySizing(this.conePrepassWidth * this.conePrepassHeight,
+        Math.min(this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize), slots * 2);
+      if (grown.slots > slots) {
+        this.latticeMinimumSlots = grown.slots;
+        try {
+          this.ensureLatticeTargets();
+        } catch (error) {
+          // Reallocation may already have retired staging, so this failure
+          // must not be mistaken for a cancelled readback of an old store.
+          this.latticeStoreFailure = `Lattice visibility allocation failed: ${error instanceof Error ? error.message : String(error)}`;
+          console.error(this.latticeStoreFailure);
+        }
+        return;
+      }
       this.latticeStoreFailure = `Lattice visibility store overflowed: ${overflow} requests turned away by a bucket pair full of current-frame keys or by exhausted claims`;
       console.error(this.latticeStoreFailure);
-    }).catch(() => { this.latticeOverflowReading = false; });
+    }).catch(error => {
+      this.latticeOverflowReading = false;
+      if (staging !== this.latticeOverflowStaging) return;
+      this.latticeStoreFailure = `Lattice visibility recovery failed: ${error instanceof Error ? error.message : String(error)}`;
+      console.error(this.latticeStoreFailure);
+    });
   }
 
   /** Active per-axis cone-lighting rate; 1 keeps the historical inline path. */
@@ -4335,10 +4372,18 @@ export class SparseVoxelDrySceneRenderer {
         && nodeMip.plan.complete && radiance.plan.complete);
   }
 
+  /** GPU-side cache receipt: two draw commands followed by the consumed mesh/light generations. */
+  copyRasterLightingDiagnostics(encoder: GPUCommandEncoder, target: GPUBuffer): boolean {
+    if (!this.rasterAo) return false;
+    encoder.copyBufferToBuffer(this.rasterAo.cache, 0, target, 0, 64);
+    return true;
+  }
+
   get lightingVisibilityStatus(): SvoLightingVisibilityStatus {
     const requested = this.lightingOptions.coneTracingMode ?? "cones";
     if (requested === "off") return { state: "off" };
     if (requested === "exact") return { state: "exact" };
+    if (requested === "raster-ao") return { state: "raster-ao", detail: "Preview: cached sun shadows + local screen-space AO. Broad/offscreen AO is absent; additional lights use exact shadows." };
     if (this.derivedLightingReady()) return { state: "cones" };
     return {
       state: "exact",
@@ -4372,8 +4417,8 @@ export class SparseVoxelDrySceneRenderer {
       && this.splitPipelineLattice !== this.latticeVisibilityRequested(this.coneScale, this.lightingOptions.globalIlluminationEnabled === true)) {
       return { state: "compiling", detail: "Compiling SVO lighting visibility for the requested surface style and lighting options" };
     }
-    // Sticky until the store is reallocated: a lattice frame that turned keys
-    // away is not the configuration that was asked for.
+    // Sticky until reallocation: exhausted capacity or failed recovery cannot
+    // provide the requested lattice configuration.
     if (this.latticeStoreFailure && this.splitPipelineLattice) {
       return { state: "failed", detail: this.latticeStoreFailure };
     }
@@ -5095,13 +5140,14 @@ export class SparseVoxelDrySceneRenderer {
 
   setLightingOptions(options: SparseVoxelDrySceneLightingOptions): void {
     const { coneTracingMode } = resolveSvoPipelineComposition({ coneTracingMode: options.coneTracingMode });
+    if (coneTracingMode === "raster-ao" && !this.rasterAo) throw new Error("Raster + AO must be selected when constructing the production renderer");
     // Leaving `cones` collapses to the full-resolution inline/split path: with
     // the effective scale forced to 1, encode() never runs the reduced
     // prepass, compact cone visibility, sample fan-out, or world-GI cache
     // passes, and writeParams withholds every cone-dependent flag.
     const coneLightingScale = coneTracingMode === "cones" ? (options.coneLightingScale ?? 1) : 1;
     const silhouetteRefinementEnabled = options.silhouetteRefinementEnabled === true;
-    const globalIlluminationEnabled = options.globalIlluminationEnabled === true;
+    const globalIlluminationEnabled = coneTracingMode !== "raster-ao" && options.globalIlluminationEnabled === true;
     // Opt-in, unlike every other lighting flag here: the cache is off unless
     // this frame asked for it by name.
     const worldGiCacheEnabled = options.worldGiCacheEnabled === true;
@@ -5267,6 +5313,10 @@ export class SparseVoxelDrySceneRenderer {
 
   private writeParams(source: SparseVoxelSceneRenderSource, scene: SparseVoxelDrySceneData): void {
     const structural = source.structural!;
+    this.rasterAo?.update(structural.domain.worldOrigin_m,
+      structural.domain.dimensionsCells.map((cells, axis) => cells * structural.domain.cellSize_m[axis]),
+      structural.domain.cellSize_m, `${source.revision}/${scene.renderRevision}/${scene.lightRevision}/${Array.from(scene.lightRecords ?? []).join(",")}`,
+      scene.lightRecords ? Array.from(new Float32Array(scene.lightRecords.buffer, scene.lightRecords.byteOffset, scene.lightRecords.length).subarray(4, 7)) : [0, 1, 0]);
     const materialCount = scene.materialRecords.byteLength / SVO_MATERIAL_RECORD_STRIDE_BYTES;
     const buffer = new ArrayBuffer(SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes), floats = new Float32Array(buffer), words = new Uint32Array(buffer);
     floats.set(structural.domain.worldOrigin_m, 0); words[3] = structural.domain.brickSize;
@@ -5635,6 +5685,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   ensureSize(width: number, height: number): void {
+    this.rasterAo?.ensureSize(width, height);
     if (this.gBufferTargets.ensureSize(width, height)) { this.pickingFrameToken += 1; this.lastPickingTarget = undefined; }
     this.targetWidth = width;
     this.targetHeight = height;
@@ -6291,6 +6342,7 @@ export class SparseVoxelDrySceneRenderer {
           seam.setBindGroup(0, this.bindGroup);
           if (usePrepass) seam.setBindGroup(1, this.conePrepassBindGroup!);
           seam.setBindGroup(splitGroup, this.splitLightingBindGroup!);
+          if (this.rasterAo) seam.setBindGroup(2, this.rasterAo.consumer!);
           if (voxelLightBindingsRequired) seam.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
           seam.draw(3);
           seam.end();
@@ -6329,6 +6381,12 @@ export class SparseVoxelDrySceneRenderer {
         // closed next, which priced a bounded per-frame drain as part of the
         // cone stage and left the cache node with nothing to report.
         tracePhase?.("voxel-light-cache");
+      }
+
+      if (this.rasterAo && this.rasterAoPipelines) {
+        this.rasterAo.encode(encoder, this.rasterAoPipelines, this.bindGroup, this.surfaceMeshDrawGroup!,
+          this.splitLightingBindGroup!, this.surfaceMeshState!, this.lightingOptions.ambientOcclusionEnabled, this.lightingOptions.shadowsEnabled,
+          () => tracePhase?.("raster-sun-shadows"), () => tracePhase?.("screen-contact-ao"));
       }
 
       // Encode follows the ACTIVE bundle, never the requested option: its
@@ -6496,6 +6554,7 @@ export class SparseVoxelDrySceneRenderer {
         lighting.setBindGroup(0, this.bindGroup);
         if (usePrepass) lighting.setBindGroup(1, this.conePrepassBindGroup!);
         lighting.setBindGroup(splitGroup, this.splitLightingBindGroup!);
+        if (this.rasterAo) lighting.setBindGroup(2, this.rasterAo.consumer!);
         if (voxelLightBindingsRequired) lighting.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
       }
       // Withheld, the miss pixels keep the clear: they go black rather than
@@ -6708,6 +6767,7 @@ export class SparseVoxelDrySceneRenderer {
     this.splitPipelineCompiles.clear();
     this.conePipelineBundles.clear();
     this.conePipelineCompiles.clear();
+    this.rasterAo?.destroy();
     this.sceneArenaBuffer.destroy();
     this.paramsBuffer.destroy();
     this.surfaceMeshDisposed = true;

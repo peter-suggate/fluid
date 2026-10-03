@@ -544,7 +544,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   setSilhouetteRefinementEnabled: (silhouetteRefinementEnabled) => set({ silhouetteRefinementEnabled }),
   setSvoConeTracingMode: (svoConeTracingMode) => set(state => {
     resolveSvoPipelineComposition({ primaryTraversal: state.svoPrimaryTraversal, coneTracingMode: svoConeTracingMode, coneRadianceReconstruction: state.svoRenderTuning.coneRadianceReconstruction });
-    return { svoConeTracingMode };
+    return { svoConeTracingMode, ...(svoConeTracingMode === "raster-ao" ? { svoPrimaryTraversal: "mesh" as const, svoStageView: "off" as const } : {}) };
   }),
   setSvoGlobalIlluminationEnabled: (svoGlobalIlluminationEnabled) => set({ svoGlobalIlluminationEnabled }),
   setSvoWorldGiCacheEnabled: (svoWorldGiCacheEnabled) => set({ svoWorldGiCacheEnabled }),

@@ -371,7 +371,7 @@ const terrainProbe: EditorProbeDefinition = {
     const scene = context.scene;
     if (!sceneHasTerrain(scene)) return undefined;
     const c = scene.container;
-    const hit = intersectAuthoredTerrain(
+    const hit = context.terrainRayQuery?.ray === ray ? context.terrainRayQuery.read() : intersectAuthoredTerrain(
       scene.terrain, ray.origin, ray.direction, Math.max(c.width_m, c.height_m, c.depth_m));
     if (!hit || !(hit.t_m > 0)) return undefined;
     const feature = terrainFeatureAt(scene.terrain, hit.position_m.x, hit.position_m.z);
@@ -501,10 +501,22 @@ export function targetAtRay(
   ray: EditorRay,
   exclude?: EditorSelection,
 ): EditorTarget {
+  // The rim entity and ground probe intersect the same procedural surface.
+  // Cache hits AND misses for this invocation, never across document edits.
+  let terrainRead = false;
+  let terrainHit: ReturnType<typeof intersectAuthoredTerrain>;
+  const queryContext: EditorEntityContext = { ...context, terrainRayQuery: { ray, read: () => {
+    if (!terrainRead) {
+      terrainRead = true;
+      const { scene } = context, c = scene.container;
+      terrainHit = intersectAuthoredTerrain(scene.terrain, ray.origin, ray.direction, Math.max(c.width_m, c.height_m, c.depth_m));
+    }
+    return terrainHit;
+  } } };
   let nearest: EditorTarget | undefined;
   let fallback: EditorTarget | undefined;
   for (const definition of EDITOR_PROBES) {
-    const target = definition.probe(context, ray, exclude);
+    const target = definition.probe(queryContext, ray, exclude);
     if (!target) continue;
     if (definition.fallback) { fallback ??= target; continue; }
     if (!nearest || target.distance_m < nearest.distance_m) nearest = target;

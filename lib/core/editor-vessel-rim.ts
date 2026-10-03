@@ -80,7 +80,7 @@ export const vesselRimEntity: EditorEntityDefinition = {
     const terrain = context.scene.terrain;
     if (!terrain) return undefined;
     const c = context.scene.container;
-    const hit = intersectAuthoredTerrain(
+    const hit = context.terrainRayQuery?.ray === ray ? context.terrainRayQuery.read() : intersectAuthoredTerrain(
       terrain, ray.origin, ray.direction, Math.max(c.width_m, c.height_m, c.depth_m));
     if (!hit || !(hit.t_m > 0)) return undefined;
     const name = vesselRimAt(context.scene, hit.position_m.x, hit.position_m.z);

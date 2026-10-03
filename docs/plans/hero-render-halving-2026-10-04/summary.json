@@ -1,0 +1,274 @@
+[
+  {
+    "view": "hero",
+    "arm": "baseline",
+    "gpuMedians_ms": [
+      7.274496,
+      7.143424
+    ],
+    "wallMedians_ms": [
+      7.958165999999437,
+      7.805666000000201
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0,
+    "linearRgbRMSE": 0,
+    "displayRgbMAE_255": 0,
+    "pixelsOver8_255_percent": 0
+  },
+  {
+    "view": "hero",
+    "arm": "no-ao",
+    "gpuMedians_ms": [
+      5.963776,
+      5.963776
+    ],
+    "wallMedians_ms": [
+      6.810959000000366,
+      6.631583000000319
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0.021963210123172705,
+    "linearRgbRMSE": 0.034959504466482993,
+    "displayRgbMAE_255": 4.049427083333334,
+    "pixelsOver8_255_percent": 12.905842391304347
+  },
+  {
+    "view": "hero",
+    "arm": "no-shadows",
+    "gpuMedians_ms": [
+      4.58752,
+      4.58752
+    ],
+    "wallMedians_ms": [
+      5.412999999999556,
+      5.218417000000045
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0.0926515705032625,
+    "linearRgbRMSE": 0.19458017363838784,
+    "displayRgbMAE_255": 10.961375905797102,
+    "pixelsOver8_255_percent": 25.52296195652174
+  },
+  {
+    "view": "hero",
+    "arm": "no-visibility",
+    "gpuMedians_ms": [
+      3.342336,
+      2.490368
+    ],
+    "wallMedians_ms": [
+      4.33862500000032,
+      3.0270410000011907
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0.11461542014453723,
+    "linearRgbRMSE": 0.20937084310340023,
+    "displayRgbMAE_255": 14.204369338768116,
+    "pixelsOver8_255_percent": 34.69911684782609
+  },
+  {
+    "view": "hero",
+    "arm": "visibility-off",
+    "gpuMedians_ms": [
+      3.735552,
+      3.407872
+    ],
+    "wallMedians_ms": [
+      4.31145800000013,
+      3.8604580000010174
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0.11461541818190311,
+    "linearRgbRMSE": 0.20937084122819546,
+    "displayRgbMAE_255": 14.204369338768116,
+    "pixelsOver8_255_percent": 34.69911684782609
+  },
+  {
+    "view": "hero",
+    "arm": "quarter",
+    "gpuMedians_ms": [
+      5.373952,
+      5.373952
+    ],
+    "wallMedians_ms": [
+      6.166833000001134,
+      6.095583000000261
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0.004003363851187886,
+    "linearRgbRMSE": 0.015650162518275928,
+    "displayRgbMAE_255": 0.6734601449275363,
+    "pixelsOver8_255_percent": 1.508695652173913
+  },
+  {
+    "view": "hero",
+    "arm": "eighth",
+    "gpuMedians_ms": [
+      5.177344,
+      5.24288
+    ],
+    "wallMedians_ms": [
+      5.8801669999993464,
+      5.978457999999591
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0.008203943877980329,
+    "linearRgbRMSE": 0.026379195356369862,
+    "displayRgbMAE_255": 1.3501963315217391,
+    "pixelsOver8_255_percent": 3.916032608695652
+  },
+  {
+    "view": "hero",
+    "arm": "quarter-bilateral",
+    "gpuMedians_ms": [
+      5.24288,
+      5.177344
+    ],
+    "wallMedians_ms": [
+      6.01629199999843,
+      6.022958999999901
+    ],
+    "depthMismatch": 1286307,
+    "linearRgbMAE": 0.021077138772909194,
+    "linearRgbRMSE": 0.04019046169645808,
+    "displayRgbMAE_255": 3.459058197463768,
+    "pixelsOver8_255_percent": 13.102853260869566
+  },
+  {
+    "view": "low",
+    "arm": "baseline",
+    "gpuMedians_ms": [
+      8.454144,
+      8.51968
+    ],
+    "wallMedians_ms": [
+      9.134292000000642,
+      9.224417000001267
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0,
+    "linearRgbRMSE": 0,
+    "displayRgbMAE_255": 0,
+    "pixelsOver8_255_percent": 0
+  },
+  {
+    "view": "low",
+    "arm": "no-ao",
+    "gpuMedians_ms": [
+      7.274496,
+      7.20896
+    ],
+    "wallMedians_ms": [
+      8.29962500000147,
+      8.114290999998047
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0.020981455370999765,
+    "linearRgbRMSE": 0.03743367194173736,
+    "displayRgbMAE_255": 4.121870471014493,
+    "pixelsOver8_255_percent": 13.857404891304348
+  },
+  {
+    "view": "low",
+    "arm": "no-shadows",
+    "gpuMedians_ms": [
+      5.89824,
+      5.832704
+    ],
+    "wallMedians_ms": [
+      6.542874999999185,
+      6.580333999998402
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0.06131014663240184,
+    "linearRgbRMSE": 0.1598657576322674,
+    "displayRgbMAE_255": 7.025744112318841,
+    "pixelsOver8_255_percent": 16.50672554347826
+  },
+  {
+    "view": "low",
+    "arm": "no-visibility",
+    "gpuMedians_ms": [
+      3.735552,
+      3.735552
+    ],
+    "wallMedians_ms": [
+      4.629750000000058,
+      4.384334000002127
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0.08229206566879715,
+    "linearRgbRMSE": 0.17425549459926692,
+    "displayRgbMAE_255": 10.568700860507246,
+    "pixelsOver8_255_percent": 27.559103260869566
+  },
+  {
+    "view": "low",
+    "arm": "visibility-off",
+    "gpuMedians_ms": [
+      4.58752,
+      4.58752
+    ],
+    "wallMedians_ms": [
+      5.284041999999317,
+      5.265957999999955
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0.08229206517122793,
+    "linearRgbRMSE": 0.1742554935374817,
+    "displayRgbMAE_255": 10.568700407608695,
+    "pixelsOver8_255_percent": 27.559103260869566
+  },
+  {
+    "view": "low",
+    "arm": "quarter",
+    "gpuMedians_ms": [
+      7.012352,
+      7.012352
+    ],
+    "wallMedians_ms": [
+      7.798999999999069,
+      7.913042000000132
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0.00587282725693523,
+    "linearRgbRMSE": 0.022133768117836506,
+    "displayRgbMAE_255": 0.9168353713768116,
+    "pixelsOver8_255_percent": 2.374796195652174
+  },
+  {
+    "view": "low",
+    "arm": "eighth",
+    "gpuMedians_ms": [
+      7.20896,
+      7.012352
+    ],
+    "wallMedians_ms": [
+      7.766417000002548,
+      7.761583999999857
+    ],
+    "depthMismatch": 0,
+    "linearRgbMAE": 0.011672112841537033,
+    "linearRgbRMSE": 0.03599393722950008,
+    "displayRgbMAE_255": 1.7870751811594203,
+    "pixelsOver8_255_percent": 5.7668478260869565
+  },
+  {
+    "view": "low",
+    "arm": "quarter-bilateral",
+    "gpuMedians_ms": [
+      7.602176,
+      7.602176
+    ],
+    "wallMedians_ms": [
+      8.412334000000556,
+      8.377582999997685
+    ],
+    "depthMismatch": 1221438,
+    "linearRgbMAE": 0.02310671589685523,
+    "linearRgbRMSE": 0.04813748370674457,
+    "displayRgbMAE_255": 3.6762090126811593,
+    "pixelsOver8_255_percent": 15.102445652173913
+  }
+]

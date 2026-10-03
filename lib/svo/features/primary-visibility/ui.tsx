@@ -108,8 +108,9 @@ export function PrimaryTraversalRow() {
 export function SvoPrimaryVisibilityControlRow() {
   const session = useSession();
   const value = session.ui((state) => state.svoPrimaryTraversal);
+  const rasterAo = session.ui((state) => state.svoConeTracingMode === "raster-ao");
   const onChange = session.ui((state) => state.setSvoPrimaryTraversal);
   return <ChoiceField label={SVO_PRIMARY_VISIBILITY_FEATURE.controls[0].label}
-    value={value === "raster" ? "mesh" : value} onChange={onChange}
-    options={SVO_PRIMARY_VISIBILITY_OPTIONS} />;
+    value={rasterAo || value === "raster" ? "mesh" : value} onChange={onChange}
+    options={SVO_PRIMARY_VISIBILITY_OPTIONS} disabled={rasterAo} hint={rasterAo ? "Raster + AO preview uses the published Mesh surface." : undefined} />;
 }

@@ -6,9 +6,30 @@ import { cloneScene, defaultScene, type SceneDescription } from "../lib/core/mod
 import { sceneCellSizes_m } from "../lib/core/scene-lattice";
 import type { EditorEntityContext, EditorRay } from "../lib/core/editor-entity";
 import type { EditorAction } from "../lib/core/editor-action";
+import { getScenePreset } from "../lib/core/scenes";
 
 /** A pixel a click could plausibly have landed on. */
 const AIM = { normalizedX: 0.25, normalizedY: 0.75 } as const;
+
+test("shared terrain picking preserves independent probe results across camera rays and edits", () => {
+  const scene = getScenePreset("hero-garden-hose-x10").create();
+  const ctx = context(scene);
+  for (const x of [-1.2, -.6, 0, .6, 1.2]) for (const z of [-.6, 0, .6]) {
+    const ray = rayFrom({ x: 2, y: 2, z: 2 }, { x, y: .2, z });
+    const reference = () => {
+      const targets = EDITOR_PROBES.map(p => ({ p, target: p.probe(ctx, ray) }));
+      const hits = targets.filter(t => !t.p.fallback && t.target).map(t => t.target!);
+      return hits.sort((a, b) => a.distance_m - b.distance_m)[0]
+        ?? targets.find(t => t.p.fallback)!.target;
+    };
+    assert.deepEqual(targetAtRay(ctx, ray), reference());
+    // Even a reused caller context/ray must see an edited document immediately.
+    const height = scene.terrain!.baseHeight_m;
+    scene.terrain!.baseHeight_m = height + .01;
+    assert.deepEqual(targetAtRay(ctx, ray), reference());
+    scene.terrain!.baseHeight_m = height;
+  }
+});
 
 function context(scene: SceneDescription): EditorEntityContext {
   // `pickingAvailable: true` stands in for a fenced presentation, which is what

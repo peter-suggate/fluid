@@ -228,6 +228,19 @@ export function reduceGPUResourceEvidence(
       usable: false,
     } };
   }
+  // Visible mesh counts change throughout a camera drag, but readiness usually
+  // does not. Preserve the snapshot so those diagnostic updates do not rerender
+  // every viewport control subscribed to readiness.
+  const sameLane = (left: ResourceLaneReadiness, right: ResourceLaneReadiness) =>
+    left === right || (left.state === right.state && left.label === right.label
+      && left.usable === right.usable && left.activity === right.activity);
+  if ((["platform", "fluid", "svo", "optional"] as const).every((lane) => sameLane(next[lane], snapshot[lane]))
+    && next.activeLane === snapshot.activeLane
+    && Object.keys(next.plugins).length === Object.keys(snapshot.plugins).length
+    && Object.entries(next.plugins).every(([id, value]) => {
+      const previous = snapshot.plugins[id];
+      return previous && previous.plugin === value.plugin && sameLane(value, previous);
+    })) return snapshot;
   return next;
 }
 

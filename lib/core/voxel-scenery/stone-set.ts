@@ -289,11 +289,11 @@ const STONE_FORM_PERIOD_M = 0.055;
  * lottery exists rather than in spite of it: the number has to be low enough
  * that the unluckiest phase still shows. What it costs is an inset of 2.6 to
  * 11.7 mm, so a cap draws up to 9 % narrower than its authored envelope, and up
- * to 9 % of a stone's interior in voids. Neither is free and both were checked:
- * the inset is inside the clearance the boulder placements already carry to the
- * container wall, and the voids are sealed — a 64 x 64 plan-column sweep of all
- * three caps finds **no hole through any of them** at 0.66 or above, which is
- * the failure that would actually show.
+ * to 9 % of a stone's interior in voids. The inset is inside the clearance the
+ * boulder placements already carry to the container wall. A plan-column sweep
+ * missed lateral openings: smooth depth-0 meshes expose tunnels through the
+ * single-octave caps. `cappedBoulderNodes` now unions an inset solid core with
+ * the weathered cap, retaining dents in its outer layer at every detail level.
  */
 const STONE_FORM_LOBE_SHARE = 0.69;
 /** Smooth-minimum radius, as a fraction of the sphere. Rounds the concavities without filling them. */
@@ -1099,6 +1099,8 @@ export function cappedBoulderNodes(spec: CappedBoulderSpec): SceneryNode[] {
   // {@link CappedBoulderForm}, and see the arithmetic there for what the old
   // hard-coded 0.42 did to the stem.
   const capCenterY = seat + stemHeight + spec.capSeatShare * capSemiHeight;
+  const capRadii = V(capRadius_m, capSemiHeight, capRadius_m * spec.capDepthShare * (0.96 + 0.10 * hash01(seed + 11)));
+  const capMaterial = value(spec.value - 0.01 + 0.04 * hash01(seed + 12));
   const shoulderAzimuth = 2 * Math.PI * hash01(seed + 13);
 
   const children: SceneryNode[] = [
@@ -1146,11 +1148,25 @@ export function cappedBoulderNodes(spec: CappedBoulderSpec): SceneryNode[] {
     stoneMass({
       id: `${key}/cap`, group, tags: [...BOULDER_TAGS, "cap"], leafSize_m: spec.leafSize_m,
       place: { position: V(0, capCenterY, 0) },
-      radius: V(capRadius_m, capSemiHeight, capRadius_m * spec.capDepthShare * (0.96 + 0.10 * hash01(seed + 11))),
+      radius: capRadii,
       seed: seed + 12,
-      material: value(spec.value - 0.01 + 0.04 * hash01(seed + 12)),
+      material: capMaterial,
     }),
   ];
+
+  // The weathering lattice is porous, especially with the single octave at
+  // depth 0. A cap must have a solid interior independently of how many detail
+  // octaves its leaf can resolve. Leave the outer 15% for the authored dents;
+  // the inset core closes tunnels without filling the whole envelope.
+  if (stoneCarriesFormBand(capRadii, spec.leafSize_m)) {
+    children.push({
+      kind: "ellipsoid", id: `${key}/cap-core`, group,
+      tags: [...BOULDER_TAGS, "cap-core"],
+      place: { position: V(0, capCenterY, 0) },
+      radius: V(capRadii.x * 0.85, capRadii.y * 0.85, capRadii.z * 0.85),
+      material: capMaterial,
+    });
+  }
 
   if (spec.shoulderShare > 0) {
     // Fused rather than placed — it sits well inside the cap's own surface and

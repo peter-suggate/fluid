@@ -7,12 +7,14 @@ import type { RenderStageSwitchId } from "./render-stage-switches";
  * How lighting visibility (shadows, AO, GI) is resolved.
  * - `cones`: hierarchical cone marches plus every stage that feeds them — the
  *   reduced-rate cone prepass, sample fan-out, and persistent world-GI cache.
+ * - `raster-ao`: opt-in mesh sun shadow maps and screen-space horizon AO.
+ *   Full-resolution materials and depth; GI and broad offscreen AO are absent.
  * - `exact`: no cone stage runs; shadows and AO use the bounded exact SVO
  *   visibility traversals (sharp reference shadows, costlier per pixel).
  * - `off`: no visibility work at all — direct lighting is unshadowed, AO and
  *   GI are absent. Strictly removes work relative to either other mode.
  */
-export type SvoConeTracingMode = "cones" | "exact" | "off";
+export type SvoConeTracingMode = "cones" | "exact" | "raster-ao" | "off";
 
 /**
  * How *primary* visibility is resolved, as distinct from the lighting visibility
@@ -151,7 +153,7 @@ export type SvoSilhouetteRefinementStatus = Readonly<{
 
 /** Effective lighting-visibility path, including a visible exact fallback. */
 export type SvoLightingVisibilityStatus = Readonly<{
-  state: "cones" | "exact" | "off";
+  state: "cones" | "exact" | "raster-ao" | "off";
   /** True only when cones were requested but their complete hierarchy is unavailable. */
   fallback?: boolean;
   detail?: string;

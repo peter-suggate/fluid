@@ -1,3 +1,4 @@
+import { rasterAoConsumerWGSL, rasterAoProducerWGSL } from "../lighting-visibility/svo-raster-ao";
 /** Fused SVO shading program and its packing ABI. The pipeline host owns
  * scheduling and resources; feature extraction must not add GPU dispatches. */
 import { backdropTerrainWGSL } from "../backdrop/backdrop-terrain-tiles";
@@ -640,6 +641,8 @@ export type SvoDryShadingPath = "inline" | "split";
  * the renderer default.
  */
 export interface SvoDryOptimizationExperiments {
+  /** Opt-in cached raster sun shadows and horizon AO; requires mesh split shading. */
+  readonly rasterAo?: boolean;
   /** Compile a guarded opaque cone-only closure alongside the generic closure. */
   readonly specializedDeferredLighting?: boolean;
   /** Internal shader variant for any light set; selected only with a matching publication and ready cone hierarchy. */
@@ -3607,9 +3610,11 @@ ${reduced ? `@fragment fn dryReconstructedLightingMain(input:VertexOut)->@locati
   let ndc=input.uv*2.0-1.0;let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(dryPrepassRadiance.rgb,vec3f(0.0))*vignette,dryPrepassRadiance.a);
 }
 ` : ""}@fragment fn dryLightingMain(input:VertexOut)->@location(0) vec4f{
+  ${experiments.rasterAo ? "rasterPixel=input.position.xy;" : ""}
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;
   let coordinate=vec2i(input.position.xy);var geometry=drySplitGeometryAt(coordinate);var opaqueIdentity=drySplitIdentityAt(coordinate);if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.silhouetteRefinement}u)!=0u){let seam=dryPrimarySeamSample(coordinate);if(seam.valid!=0u){geometry=seam.geometry;opaqueIdentity=vec4u(seam.identity,0u,0u);}}var opaque=missHit();
   let opaqueMaterial=opaqueIdentity.x;if(geometry.w<DRY_MISS){let metadata=opaqueIdentity.y;opaque=DryHit(geometry.w,geometry.xyz,opaqueMaterial,dryOpaqueOwner(metadata),(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u,metadata,0u));}
+  ${experiments.rasterAo ? "rasterResolvedVisibility=vec2f(1);if(geometry.w<DRY_MISS&&(dry.materialPublication.w&3u)!=0u){rasterResolvedVisibility=rasterVisibilityAt(ro+rd*geometry.w,normalize(geometry.xyz));}" : ""}
   ${lightingResolveCallWGSL}${reduced ? `if(dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u&&dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u&&dryPrepassRadianceState==1u){${experiments.singlePassReconstruction !== false ? "let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(dryPrepassRadiance.rgb,vec3f(0.0))*vignette,dryPrepassRadiance.a);" : "discard;"}}` : ""}let color=shadeDrySurface(opaque,ro,rd);let depth=drySurfaceOcclusionDepth_m;
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS));
 }
@@ -3632,8 +3637,8 @@ ${reduced ? `@fragment fn dryReconstructedLightingMain(input:VertexOut)->@locati
   const [latticeTileWidth, latticeTileHeight] = SVO_LATTICE_VISIBILITY_CONTRACT.keyWorkgroupSize;
   const latticeRow = latticeTileWidth + 1;
   const latticeDataType = experiments.halfPrecisionLighting ? "vec4h" : "vec4f";
-  // Never denser than the reduced prepass pitch it replaces, so the prepass
-  // texel count bounds the distinct keys of a frame.
+  // Never denser on one plane than the reduced prepass pitch it replaces.
+  // Distinct voxel faces can still exceed the prepass-based store estimate.
   const latticeSpacingPixels = Math.max(SVO_LATTICE_VISIBILITY_CONTRACT.minimumSpacingPixels, 1 / coneLightingScale);
   // The four records are independent loads; a corner the key pass could not
   // place, or whose march is not current, drops out.
@@ -3702,7 +3707,7 @@ fn dryLatticeAppend(slot:u32){
 // pixel got there first. Races between distinct keys at worst insert a key
 // twice, which the store ages out; a pair full of this frame's keys, or a
 // request that keeps losing its claims, counts as overflow, which the host
-// reports as fatal.
+// uses to grow the store (fatal only at its capacity limit).
 fn dryLatticeRequest(key:vec4u,frame:u32,stamp:u32)->u32{
   let hash=svoLatticeHash(key);let tag=svoLatticeTag(hash);let tagBits=(tag>>1u)&127u;let current=(frame<<8u)|tagBits;
   let buckets=arrayLength(&dryLatticeBuckets)/${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWords}u;
@@ -5186,7 +5191,7 @@ fn dryBackdropOccludes(position:vec3f,geometricNormal:vec3f,towardLight:vec3f,fi
   if(dryBackdropSmooth()){return backdropTerrainSmoothTrace(origin,towardLight,0.0,tMax).t>=0.0;}
   return backdropTerrainTrace(origin,towardLight,0.0,tMax).t>=0.0;
 }
-` : ""}fn dryLightVisibilitySolid(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLight:vec3f,finiteDistance_m:f32)->vec3f {
+` : ""}fn ${experiments.rasterAo ? "dryReferenceLightVisibilitySolid" : "dryLightVisibilitySolid"}(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLight:vec3f,finiteDistance_m:f32)->vec3f {
   if(dot(geometricNormal,towardLight)<=0.0){return vec3f(0.0);}
   if((dry.materialPublication.w&2u)==0u){return vec3f(1.0);}
   if((dryDerivedPageFailure&${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u)!=0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.directVisibilityPage}u;return vec3f(0.0);}
@@ -5204,7 +5209,7 @@ fn dryBackdropOccludes(position:vec3f,geometricNormal:vec3f,towardLight:vec3f,fi
   // Reduced shading retains its full-rate analytic rigid-body correction in
   // prepassShadowShortcutWGSL. Cone mode has no undeclared exact escape: an
   // unavailable requested page publishes a typed fail-closed diagnostic.
-  if(${fastDeferred ? "true" : `(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u`}){
+  if(${experiments.rasterAo ? "false" : fastDeferred ? "true" : `(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u`}){
     if(!dryNodeMipReady()){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.directVisibilityPage}u;return vec3f(0.0);}${prepassShadowShortcutWGSL}
     // The cone origin escapes the receiver's own trilinear coverage support
     // along the geometric normal: the 0.02-cell hard-ray bias alone leaves the
@@ -5264,10 +5269,10 @@ fn dryContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32,owner
   return solid*mix(vec3f(1.0),transmittance/f32(${SVO_DRY_CONTACT_FLUID_SAMPLES}),dry.tuningRays0.w);` : ""}
 }
 
-fn dryContactVisibilitySolid(position:vec3f,geometricNormal:vec3f,featureId:u32,ownerId:u32)->vec3f {
+fn ${experiments.rasterAo ? "dryReferenceContactVisibilitySolid" : "dryContactVisibilitySolid"}(position:vec3f,geometricNormal:vec3f,featureId:u32,ownerId:u32)->vec3f {
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion}u)==0u){return vec3f(1.0);}
   if((dryDerivedPageFailure&${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u)!=0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.ambientOcclusionPage}u;return vec3f(0.0);}
-  if(${fastDeferred ? "true" : `(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u`}){
+  if(${experiments.rasterAo ? "false" : fastDeferred ? "true" : `(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u`}){
     if(!dryNodeMipReady()){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.ambientOcclusionPage}u;return vec3f(0.0);}${prepassContactShortcutWGSL}
     let radius=dryContactVisibilityRadius();if(radius<=0.0){return vec3f(1.0);}var visibility=0.0;let cellScale=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let origin=position+normalize(geometricNormal)*cellScale*.2;let coneSampleCount=max(dry.tuningCounts1.z,dry.tuningCounts1.y);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=coneSampleCount){break;}let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let cone=dryConeVisibility(origin,rotated,dry.tuningRays1.x,radius,vec3f(0.0),false);if(cone.valid==0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.ambientOcclusionPage}u;return vec3f(0.0);}let rigidBlocker=nearestBodyIgnoring(origin,rotated,ownerId);visibility+=select(cone.transmittance,0.0,rigidBlocker.t<radius);}let raw=clamp(visibility/f32(coneSampleCount),0.0,1.0);return vec3f(mix(1.0,raw,dry.tuningRays0.w));
@@ -5516,6 +5521,20 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
   }
   return dryFragmentOut(svoGBufferMiss(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED)),0.0);
 }
+${experiments.rasterAo ? rasterAoConsumerWGSL + `
+fn dryLightVisibilitySolid(position:vec3f,normal:vec3f,owner:u32,towardLight:vec3f,distance:f32)->vec3f{
+  if(dot(normal,towardLight)<=0.0){return vec3f(0);}
+  if((dry.materialPublication.w&2u)==0u){return vec3f(1);}
+  // Finite emitters and additional suns retain reference shadows; the cached
+  // sun path never dispatches a cone or searches reduced screen receivers.
+  if(distance>0.0||dryLighting.lights[0].identity.x!=SVO_LIGHT_DIRECTIONAL||dot(towardLight,rasterSunDirection())<.99999){return dryReferenceLightVisibilitySolid(position,normal,owner,towardLight,distance);}
+  let ray=dryBiasedVisibilityRayUnit(position,normal,towardLight,directionalLightSceneExitDistance(position,towardLight),dry.mapping.cellSize,dry.tuningRays0.x);
+  let blocker=nearestBodyIgnoring(ray.origin_m,towardLight,owner);
+  let visibility=select(rasterResolvedVisibility.y,0.0,blocker.t<ray.tMax_m);
+  return vec3f(mix(1.0,visibility,dry.tuningRays0.y));
+}
+fn dryContactVisibilitySolid(position:vec3f,normal:vec3f,feature:u32,owner:u32)->vec3f{return rasterContactVisibility();}
+` + rasterAoProducerWGSL(backdropHooks) : ""}
 ${splitEntryWGSL}${rasterPrimaryEntryWGSL}${rasterPrimary && experiments.surfaceMesh ? svoSurfaceMeshWGSL(splitGroup, SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals, experiments.surfaceMeshCulling !== false, true) : ""}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${latticeVisibilityWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(
     traversalMode === "raster-primary" ? "raster" : "traced",
     {

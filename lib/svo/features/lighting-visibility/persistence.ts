@@ -5,7 +5,7 @@ export interface LightingQueryState { svoShadowsEnabled: boolean; svoAmbientOccl
 export const lightingQuery = queryRecord<LightingQueryState>({
   svoShadowsEnabled: booleanQuery("svoShadows", DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled),
   svoAmbientOcclusionEnabled: booleanQuery("svoAO", DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled),
-  svoConeTracingMode: choiceQuery("svoCones", DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode, ["cones", "exact", "off"]),
+  svoConeTracingMode: choiceQuery("svoCones", DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode, ["cones", "exact", "raster-ao", "off"]),
   svoLatticeVisibilityEnabled: booleanQuery("svoLattice", DEFAULT_SVO_LIGHTING_OPTIONS.latticeVisibilityEnabled),
 });
 export const lightingTuningQuery = queryRecord<Pick<SvoRenderTuning, "waterShadowsEnabled">>({

@@ -348,7 +348,8 @@ function selectableNodes(scene: SceneDescription): readonly SceneryNode[] {
  */
 interface SceneryPickTarget {
   readonly nodeId: string;
-  readonly descriptor: SvoFinitePrimitiveDescriptor;
+  readonly primitive: EnvironmentProxyPrimitive;
+  descriptor?: SvoFinitePrimitiveDescriptor;
   /** Bounds the descriptor exactly, so a ray that misses it cannot hit the shape. */
   readonly aabb_m: EnvironmentProxyPrimitive["aabb_m"];
 }
@@ -390,8 +391,9 @@ function pickTargets(scene: SceneDescription) {
     // Shell faces are the room, not an object in it: picking them would put
     // a gizmo on the floor every time a click missed everything else.
     if (primitive.tags.includes("shell")) return;
-    const descriptor = svoDescriptorForEnvironmentProxy(primitive);
-    targets.push({ nodeId, descriptor, aabb_m: primitive.aabb_m });
+    // A first camera drag must not compile descriptors for the entire garden.
+    // Keep the authored bounds cheap; materialize only shapes this ray reaches.
+    targets.push({ nodeId, primitive, aabb_m: primitive.aabb_m });
   });
   pickTargetCache.set(catalog, targets);
   return targets;
@@ -459,6 +461,7 @@ export const sceneryEntity: EditorEntityDefinition = {
     for (const target of pickTargets(context.scene)) {
       if (pickExcluded(exclude, "scenery", scenerySelectionId(target.nodeId))) continue;
       if (!raySpansAabb(target.aabb_m, ray)) continue;
+      target.descriptor ??= svoDescriptorForEnvironmentProxy(target.primitive);
       const hit = intersectSvoPrimitive(target.descriptor, { origin_m: ray.origin, direction: ray.direction });
       if (hit && (!nearest || hit.t_m < nearest.distance_m)) nearest = { nodeId: target.nodeId, distance_m: hit.t_m };
     }
