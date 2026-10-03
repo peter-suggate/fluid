@@ -82,12 +82,51 @@ fn rasterVisibilityAt(position:vec3f,normal:vec3f)->vec2f{
     let w=bilinear*exp(-abs(v.y-depth)/max(tolerance,1e-4))*pow(max(dot(normal,rasterOctDecode(v.zw)),0.0),8.0);
     total+=vec2f(v.x,textureLoad(rasterShadowVisibility,c,0).x)*w;weight+=w;
   }}
-  // Disocclusions with no compatible receiver are unoccluded, never retraced.
-  return select(vec2f(1.0),total/max(weight,1e-6),weight>1e-4);
+  if(weight>1e-4){return total/weight;}
+  // A subpixel voxel face may be absent from all four reduced samples. Fully
+  // lit is not a valid reconstruction there: it punches white pinholes into
+  // both shadows and AO. Evaluate only those receivers at their actual pixel.
+  var contact=1.0;var shadow=1.0;
+  if((dry.materialPublication.w&1u)!=0u){contact=rasterHorizonVisibility(rasterPixel,position,normal);}
+  if((dry.materialPublication.w&2u)!=0u){shadow=rasterSunVisibility(position,normal);}
+  return vec2f(contact,shadow);
 }
 fn rasterContactVisibility()->vec3f{
   if((dry.materialPublication.w&1u)==0u){return vec3f(1);}
   return vec3f(mix(1.0,rasterResolvedVisibility.x,dry.tuningRays0.w));
+}
+`;
+
+/** Local estimator shared with the GPU reconstruction regression fixture. */
+export const rasterHorizonWGSL = /* wgsl */ `
+fn rasterWorldAt(pixel:vec2f,depth:f32)->vec3f{
+  let camera=dryRasterPrimaryCamera();let ndc=pixel/uniforms.viewport.xy*vec2f(2,-2)+vec2f(-1,1);
+  return camera[0]+normalize(camera[1]+camera[2]*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+camera[3]*ndc.y*cameraTanHalfFov())*depth;
+}
+// Stable local contact AO, shared by the reduced pass and uncovered receivers.
+// Integrate the maximum obscured elevation per azimuth. Squaring each horizon
+// erased moderate contact angles; apply contrast to visibility after averaging.
+fn rasterHorizonVisibility(pixel:vec2f,position:vec3f,normal:vec3f)->f32{
+  let fullDims=vec2i(textureDimensions(drySplitGeometryRead));
+  let radius=dryContactVisibilityRadius();
+  let viewDepth=dot(position-uniforms.cameraPosition.xyz,normalize(uniforms.cameraTarget.xyz-uniforms.cameraPosition.xyz));
+  let projected=clamp(radius*uniforms.viewport.y/(2.0*max(viewDepth,.001)*cameraTanHalfFov()),2.0,160.0);
+  var occlusion=0.0;
+  // Six azimuths, six quadratic distance samples. A small tangent bias prevents
+  // the receiver plane and fitted-normal noise from darkening themselves.
+  for(var direction=0u;direction<6u;direction++){
+    let angle=(f32(direction)+.5)*6.28318530718/6.0;let axis=vec2f(cos(angle),sin(angle));var horizon=0.0;
+    for(var step=1u;step<=6u;step++){
+      let fraction=f32(step)/6.0;let tap=vec2i(round(pixel-.5+axis*max(1.0,projected*fraction*fraction)));
+      if(any(tap<vec2i(0))||any(tap>=fullDims)){continue;}
+      let sample=drySplitGeometryAt(tap);if(!(sample.w<DRY_MISS)){continue;}
+      let delta=rasterWorldAt(vec2f(tap)+.5,sample.w)-position;let distance=length(delta);
+      if(distance<1e-5||distance>=radius){continue;}
+      let cosine=max(dot(normal,delta/distance)-.08,0.0);
+      horizon=max(horizon,cosine*(1.0-distance*distance/(radius*radius)));
+    }occlusion+=horizon;
+  }
+  return pow(clamp(1.0-occlusion/6.0,0.0,1.0),2.0);
 }
 `;
 
@@ -118,40 +157,19 @@ export function rasterAoProducerWGSL(backdrop: boolean): string {
   if(hit.t>=0.0){return clamp(hit.t/rasterLighting.depthCell.x,0.0,1.0);}` : ""}
   return 1.0;
 }
-fn rasterWorldAt(pixel:vec2f,depth:f32)->vec3f{
-  let camera=dryRasterPrimaryCamera();let ndc=pixel/uniforms.viewport.xy*vec2f(2,-2)+vec2f(-1,1);
-  return camera[0]+normalize(camera[1]+camera[2]*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+camera[3]*ndc.y*cameraTanHalfFov())*depth;
-}
-// Stable horizon-based local AO. No history or temporal trailing; hidden blockers
-// are intentionally outside this estimator's scope. Radius matches the old AO control.
+${rasterHorizonWGSL}
 @compute @workgroup_size(8,8) fn rasterContactMain(@builtin(global_invocation_id) id:vec3u){
   let dims=textureDimensions(rasterContactOutput);if(any(id.xy>=dims)){return;}
   let fullDims=vec2i(textureDimensions(drySplitGeometryRead));
   let coord=min(vec2i(id.xy)*2+vec2i(1),fullDims-1);let g=drySplitGeometryAt(coord);let pixel=vec2f(coord)+.5;
   if(!(g.w<DRY_MISS)||dot(g.xyz,g.xyz)<.1){textureStore(rasterContactOutput,vec2i(id.xy),vec4f(1,65504,0,0));textureStore(rasterShadowOutput,vec2i(id.xy),vec4f(1));return;}
-  let normal=normalize(g.xyz);let position=rasterWorldAt(pixel,g.w);let radius=dryContactVisibilityRadius();
-  let viewDepth=dot(position-uniforms.cameraPosition.xyz,normalize(uniforms.cameraTarget.xyz-uniforms.cameraPosition.xyz));
-  let projected=clamp(radius*uniforms.viewport.y/(2.0*max(viewDepth,.001)*cameraTanHalfFov()),2.0,160.0);
-  var occlusion=0.0;
-  // Six azimuths, six quadratic distance samples. A small tangent bias prevents
-  // the receiver plane and fitted-normal noise from darkening themselves.
-  if((dry.materialPublication.w&1u)!=0u){
-  for(var direction=0u;direction<6u;direction++){
-    let angle=(f32(direction)+.5)*6.28318530718/6.0;let axis=vec2f(cos(angle),sin(angle));var horizon=0.0;
-    for(var step=1u;step<=6u;step++){
-      let fraction=f32(step)/6.0;let tap=vec2i(round(pixel+axis*max(1.0,projected*fraction*fraction)));
-      if(any(tap<vec2i(0))||any(tap>=fullDims)){continue;}
-      let sample=drySplitGeometryAt(tap);if(!(sample.w<DRY_MISS)){continue;}
-      let delta=rasterWorldAt(vec2f(tap)+.5,sample.w)-position;let distance=length(delta);
-      if(distance<1e-5||distance>=radius){continue;}
-      let cosine=max(dot(normal,delta/distance)-.08,0.0);
-      horizon=max(horizon,cosine*cosine*(1.0-distance*distance/(radius*radius)));
-    }occlusion+=horizon;
-  }}
+  let normal=normalize(g.xyz);let position=rasterWorldAt(pixel,g.w);
+  var contact=1.0;
+  if((dry.materialPublication.w&1u)!=0u){contact=rasterHorizonVisibility(pixel,position,normal);}
   var shadow=1.0;
   if((dry.materialPublication.w&2u)!=0u){shadow=rasterSunVisibility(position,normal);}
   textureStore(rasterShadowOutput,vec2i(id.xy),vec4f(shadow));
-  textureStore(rasterContactOutput,vec2i(id.xy),vec4f(clamp(1.0-occlusion/6.0,0.0,1.0),min(g.w,65504.0),rasterOctEncode(normal)));
+  textureStore(rasterContactOutput,vec2i(id.xy),vec4f(contact,min(g.w,65504.0),rasterOctEncode(normal)));
 }
 `;
 }

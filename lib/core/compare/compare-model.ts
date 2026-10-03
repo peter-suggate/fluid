@@ -35,8 +35,8 @@ import {
  * Three events, three rules:
  *
  *  - **A changed.** Every key the diff does not claim is pushed onto B. With an
- *    empty diff that makes editing A an edit to both panes, which is what makes
- *    the mode worth opening: set the experiment up once, then fork one key.
+ *    empty diff that makes config edits to A apply to both panes. Unlinked
+ *    rendering, topology and regions preserve B's current value instead.
  *  - **B changed.** Each key B moved is either *linked* — a padlocked View, Cut,
  *    Instrument or Look key, which is pushed back onto A so both panes move and
  *    the diff stays clean — or it is not, and it is recorded as an override.
@@ -334,9 +334,11 @@ export function startCompareSync(
       const searchA = paneSearch(a, layerA);
       const searchB = paneSearch(b, layerB);
       const diff = { ...state.diff };
-      for (const key of ["freezeTopology", "regions"]) {
+      const keys = new Set([...searchA.keys(), ...searchB.keys(), ...Object.keys(diff)]);
+      for (const key of keys) {
         const group = compareGroupForKey(key);
-        if (group === "config" || state.links[group]) continue;
+        if (group !== "look" && group !== "topology" && group !== "regions") continue;
+        if (state.links[group]) continue;
         if (valueOf(searchA, key) !== valueOf(searchB, key)) diff[key] = valueOf(searchB, key);
         else delete diff[key];
       }

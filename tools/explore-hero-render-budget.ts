@@ -1,4 +1,4 @@
-/** Smooth x10 render-budget exploration. Run through run-webgpu-exclusive.ts.
+/** Smooth/voxel-face x10 render-budget exploration. Run through run-webgpu-exclusive.ts.
  * Full-frame GPU spans; no pass withholding, solver, or water optical composite.
  * FLUID_EXPLORE_OUT, FLUID_EXPLORE_CYCLES, FLUID_EXPLORE_ARMS, FLUID_EXPLORE_VIEWS select evidence. */
 /** Full depth-3 rendering probe with allocation limits and a fence after every batch. */
@@ -20,7 +20,10 @@ const depth=Number(process.env.FLUID_PROBE_DEPTH??0), id=process.env.FLUID_PROBE
 const preset=getScenePreset(id),base=preset.create();
 const scene=sceneDocumentAtLattice(getSceneDefinition(id),{cellSize_m:base.voxelDomain.finestCellSize_m,
  detailCellSize_m:svoSceneryDetailCellSize_m(base.voxelDomain.finestCellSize_m,{environmentRefinementDepth:depth,fluid:false})}).scene;
-scene.surfaceStyle="smooth";
+const surfaceStyle=process.env.FLUID_EXPLORE_SURFACE_STYLE??"smooth";
+assert.ok(surfaceStyle==="smooth"||surfaceStyle==="voxel-flat", "Expected smooth or voxel-flat surface style");
+scene.surfaceStyle=surfaceStyle;
+const smooth=surfaceStyle==="smooth";
 const {device:raw,adapterInfo,validationErrors}=await createDawnRenderDevice();
 let allocated=0;const allocations:{label:string;size:number}[]=[];
 const renderPipelineLabels:string[]=[];
@@ -36,7 +39,7 @@ const device=new Proxy(raw,{get(target,key){
  const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
 }});
 const started=performance.now();
-const world=await WebGPULiveSvoScene.create(device,scene,'balanced',p=>console.log(JSON.stringify({phase:p.label,elapsed_ms:performance.now()-started})),undefined,{environmentRefinementDepth:depth,radianceFeedback:false,surfaceDualMarchingCubes:true,cpuBrickSelection:process.env.FLUID_PROBE_CPU_SELECTION==="1"});
+const world=await WebGPULiveSvoScene.create(device,scene,'balanced',p=>console.log(JSON.stringify({phase:p.label,elapsed_ms:performance.now()-started})),undefined,{environmentRefinementDepth:depth,radianceFeedback:false,surfaceDualMarchingCubes:smooth,cpuBrickSelection:process.env.FLUID_PROBE_CPU_SELECTION==="1"});
 const preparation_ms=performance.now()-started;
 assert.equal(world.builtRefinementDepth,depth,'No silent refinement downgrade');
 assert.ok(allocations.filter(a=>/Sparse brick source (geometry|velocity|material owners)/.test(a.label)).every(a=>a.size<=16));
@@ -68,7 +71,7 @@ const rasterAo=process.env.FLUID_EXPLORE_RASTER_AO==='1';
 const renderer=createProductionSparseVoxelDrySceneRenderer(device,uniforms,body,'mesh',false,false,false,rasterAo);
 const productionLighting=true;
 renderer.setLightingOptions(productionLighting ? {...DEFAULT_SVO_LIGHTING_OPTIONS,coneLightingScale:0.5,coneTracingMode:rasterAo?'raster-ao':'cones'} : {globalIlluminationEnabled:false,coneTracingMode:'off',shadowsEnabled:false,ambientOcclusionEnabled:false});
-await renderer.initialize((label,completed,total)=>console.log(JSON.stringify({phase:'pipeline',label,completed,total,elapsed_ms:performance.now()-started})));renderer.setRigidBodyCount(bodies.count);renderer.setRenderTuning(resolveSvoSurfaceTuning(DEFAULT_SVO_RENDER_TUNING,true));
+await renderer.initialize((label,completed,total)=>console.log(JSON.stringify({phase:'pipeline',label,completed,total,elapsed_ms:performance.now()-started})));renderer.setRigidBodyCount(bodies.count);renderer.setRenderTuning(resolveSvoSurfaceTuning(DEFAULT_SVO_RENDER_TUNING,smooth));
 renderer.setSource(source);renderer.publishScene(drySceneData);renderer.ensureSize(width,height);
 if(productionLighting)await renderer.ensureConeLightingPrepass();
 const target=device.createTexture({size:[width,height],format:'rgba16float',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC});
@@ -122,7 +125,7 @@ const renderWidth=1600,renderHeight=920,cycles=Number(process.env.FLUID_EXPLORE_
 assert.ok(Number.isInteger(cycles)&&cycles>=3&&cycles<=120);
 const output=device.createTexture({size:[renderWidth,renderHeight],format:'rgba16float',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC});
 renderer.ensureSize(renderWidth,renderHeight);
-const tuning=resolveSvoSurfaceTuning(DEFAULT_SVO_RENDER_TUNING,true);
+const tuning=resolveSvoSurfaceTuning(DEFAULT_SVO_RENDER_TUNING,smooth);
 const arms=[
  {name:rasterAo?'raster-ao':'baseline',scale:0.5,ao:true,shadows:true},
  {name:'no-ao',scale:0.5,ao:false,shadows:true},

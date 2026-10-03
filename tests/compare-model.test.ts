@@ -24,11 +24,12 @@ import {
   type CompareState,
 } from "../lib/core/compare/compare-query";
 import { getMethod } from "../lib/core/method-registry";
+import { uiFeatureQuery } from "../lib/features/persistence";
 import type { SceneDescription } from "../lib/core/model";
 import { createBodyDescription } from "../lib/core/rigid-body";
 import { createPaneSession, type PaneSession } from "../lib/core/session/session";
 import { getScenePreset } from "../lib/core/scenes";
-import { createSceneQueryLayerCache, parseQueryState, serializeQueryState } from "../lib/core/url-state";
+import { createSceneQueryLayerCache, parseQueryState, parseUIQueryState, serializeQueryState } from "../lib/core/url-state";
 
 /**
  * The compare record as a plain object rather than the page's shell store, so
@@ -115,6 +116,84 @@ test("editing A with an empty diff edits both panes", () => {
   a.method.getState().setParam(methodId, spec.key, spec.value);
   assert.equal(b.method.getState().overrides[methodId]?.[spec.key], spec.value);
   assert.equal(search(b), search(a));
+  sync.stop();
+});
+
+test("all feature render URL parameters belong to the Render link", () => {
+  for (const key of [...uiFeatureQuery.keys, "quality", "layers", "scene.surfaceStyle"]) {
+    assert.equal(compareGroupForKey(key), "look", key);
+  }
+  assert.equal(parseCompareQuery("b=1").links.look, false);
+  assert.equal(parseCompareQuery("b=1&b.link=").links.look, true);
+});
+
+for (const [key, value] of Object.entries({
+  svoCones: "raster-ao", svoAO: "0", svoShadows: "0", svoWaterShadows: "1",
+  svoMeshNormalStrength: "0.4", svoMeshFilter: "1", svoMesher: "dual-contouring",
+  svoReconstruction: "nearest", fluidSurface: "wireframe",
+})) {
+  test(`unlinked ${key} stays local from either pane and survives URL restore`, () => {
+    const { a, b } = panes();
+    const store = fakeStore();
+    const sync = startCompareSync(a, b, store);
+    const baseline = new URLSearchParams(search(b)).get(key);
+    const edit = (pane: PaneSession) => pane.ui.setState(parseUIQueryState(
+      `${search(pane)}&${key}=${value}`, pane.scene.getState().presetId));
+    edit(a);
+    assert.equal(new URLSearchParams(search(a)).get(key), value);
+    assert.equal(new URLSearchParams(search(b)).get(key), baseline);
+    assert.equal(store.getState().diff[key], baseline ?? COMPARE_ABSENT);
+    const url = serializeQueryState("", a.scene.getState(), a.method.getState(), a.ui.getState(),
+      { compare: store.getState() });
+    const restored = panes();
+    const parsed = parseQueryState(url);
+    restored.a.scene.getState().setScene(parsed.scene, parsed.presetId);
+    restored.a.ui.setState(parsed.ui);
+    const restoredSync = startCompareSync(restored.a, restored.b, fakeStore(parseCompareQuery(url)));
+    assert.equal(new URLSearchParams(search(restored.a)).get(key), value);
+    assert.equal(new URLSearchParams(search(restored.b)).get(key), baseline);
+    restoredSync.stop();
+    // Returning to equal values must not re-link subsequent edits.
+    edit(b);
+    assert.equal(store.getState().diff[key], undefined);
+    a.ui.setState(parseUIQueryState("", a.scene.getState().presetId));
+    assert.equal(new URLSearchParams(search(b)).get(key), value);
+    // Explicitly re-linking adopts A and makes edits from B affect both.
+    store.setState({ ...store.getState(), links: { ...store.getState().links, look: true } });
+    assert.equal(new URLSearchParams(search(b)).get(key), baseline);
+    edit(b);
+    assert.equal(new URLSearchParams(search(a)).get(key), value);
+    assert.deepEqual(store.getState().diff, {});
+    sync.stop();
+  });
+}
+
+test("render URL overrides on B survive linked camera edits", () => {
+  const { a, b } = panes();
+  const store = fakeStore(parseCompareQuery("b.svoCones=raster-ao&b.svoMeshNormalStrength=0.4"));
+  const sync = startCompareSync(a, b, store);
+  assert.equal(a.ui.getState().svoConeTracingMode, "cones");
+  assert.equal(b.ui.getState().svoConeTracingMode, "raster-ao");
+  a.ui.getState().setCamera(camera => ({ ...camera, azimuth_rad: camera.azimuth_rad + 0.3 }));
+  assert.equal(a.ui.getState().camera.azimuth_rad, b.ui.getState().camera.azimuth_rad);
+  assert.equal(b.ui.getState().svoConeTracingMode, "raster-ao");
+  assert.equal(b.ui.getState().svoRenderTuning.surfaceMeshNormalStrength, 0.4);
+  assert.equal(a.ui.getState().svoRenderTuning.surfaceMeshNormalStrength, 1);
+  sync.stop();
+});
+
+test("surface style and quality edits on A preserve B's rendering", () => {
+  const { a, b } = panes();
+  const store = fakeStore();
+  const sync = startCompareSync(a, b, store);
+  const scene = a.scene.getState();
+  const styleB = b.scene.getState().scene.surfaceStyle;
+  scene.setScene({ ...scene.scene, surfaceStyle: "smooth" }, scene.presetId);
+  a.method.getState().setQuality("ultra");
+  assert.equal(b.scene.getState().scene.surfaceStyle, styleB);
+  assert.equal(b.method.getState().quality, "balanced");
+  assert.equal(a.scene.getState().scene.surfaceStyle, "smooth");
+  assert.equal(a.method.getState().quality, "ultra");
   sync.stop();
 });
 

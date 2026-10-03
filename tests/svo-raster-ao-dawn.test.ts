@@ -9,15 +9,16 @@ import { defaultCamera } from "../lib/core/model";
 import { DEFAULT_SVO_LIGHTING_OPTIONS } from "../lib/svo/pipeline/svo-render-options";
 import { DEFAULT_SVO_RENDER_TUNING, resolveSvoSurfaceTuning } from "../lib/svo/pipeline/svo-render-tuning";
 
-(process.env.WEBGPU_NODE_MODULE ? test : test.skip)("raster AO production preview caches the sun, invalidates light changes, and preserves water-sort depth", async () => {
+for (const surfaceStyle of ["smooth", "voxel-flat"] as const) (process.env.WEBGPU_NODE_MODULE ? test : test.skip)(`raster AO ${surfaceStyle} caches the sun, invalidates light changes, and preserves water-sort depth`, async () => {
   await acquireWebGPUExclusiveLock("dawn-test", "tests/svo-raster-ao-dawn.test.ts");
   let device: GPUDevice | undefined;
   try {
     const setup = await createDawnRenderDevice(); device = setup.device;
     const preset = getScenePreset("hero-garden-hose-x10"), scene = preset.create();
-    scene.surfaceStyle = "smooth";
+    scene.surfaceStyle = surfaceStyle;
+    const smooth = surfaceStyle === "smooth";
     const world = await WebGPULiveSvoScene.create(device, scene, "balanced", () => {}, undefined,
-      { environmentRefinementDepth: 0, radianceFeedback: false, surfaceDualMarchingCubes: true });
+      { environmentRefinementDepth: 0, radianceFeedback: false, surfaceDualMarchingCubes: smooth });
     const submit = async (encoder: GPUCommandEncoder) => { device!.queue.submit([encoder.finish()]); await device!.queue.onSubmittedWorkDone(); assert.deepEqual(setup.validationErrors, []); };
     for (let i = 0; i < 1000; i++) { const e = device.createCommandEncoder(); const active = world.encodeSceneMaintenance(e); await submit(e); if (!active) break; assert.ok(i < 999); }
     const source = world.sparseVoxelSceneSource!;
@@ -32,7 +33,7 @@ import { DEFAULT_SVO_RENDER_TUNING, resolveSvoSurfaceTuning } from "../lib/svo/p
     const options = { ...DEFAULT_SVO_LIGHTING_OPTIONS, coneTracingMode: "raster-ao" as const };
     renderer.setLightingOptions(options);
     await renderer.initialize(); renderer.setRigidBodyCount(bodies.count);
-    renderer.setRenderTuning(resolveSvoSurfaceTuning(DEFAULT_SVO_RENDER_TUNING, true));
+    renderer.setRenderTuning(resolveSvoSurfaceTuning(DEFAULT_SVO_RENDER_TUNING, smooth));
     renderer.setSource(source); renderer.publishScene(drySceneData); renderer.ensureSize(width, height);
     const target = device.createTexture({ size: [width, height], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     const read = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });

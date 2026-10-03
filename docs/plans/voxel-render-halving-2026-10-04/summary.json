@@ -1,0 +1,298 @@
+{
+  "date": "2026-10-04",
+  "scene": "hero-garden-hose-x10",
+  "surfaceStyle": "voxel-flat",
+  "width": 1600,
+  "height": 920,
+  "baseCommit": "f71b668e",
+  "isolation": "Exported SVO commit snapshot; unrelated uncommitted Uniform changes excluded. One GPU process at a time under repository lease; browser GPU paused.",
+  "scope": "Opaque scenery renderer GPU span. Excludes running fluid solver, water extraction/optics, final composite, and app presentation. Not a complete wet-frame speedup claim.",
+  "method": "12 warmups; 12 stationary or 24 moving timestamp samples plus separate uninstrumented submit/fence samples; two repetitions per camera. Frames retain full-resolution primary geometry and material shading. Both arms use published voxel-face mesh, AO and shadows, GI off.",
+  "results": [
+    {
+      "depth": 0,
+      "moving": false,
+      "view": "hero",
+      "cones_ms": [
+        4.9152,
+        4.9152
+      ],
+      "rasterAo_ms": [
+        3.2768,
+        3.735552
+      ],
+      "speedup": 1.4018691588785046,
+      "reductionPercent": 28.666666666666664,
+      "depthMismatches": 0,
+      "maxDepthDifference": 0,
+      "linearRgbMAE": 0.04231019791485607
+    },
+    {
+      "depth": 0,
+      "moving": false,
+      "view": "low",
+      "cones_ms": [
+        5.963776,
+        5.963776
+      ],
+      "rasterAo_ms": [
+        3.866624,
+        3.801088
+      ],
+      "speedup": 1.5555555555555556,
+      "reductionPercent": 35.71428571428572,
+      "depthMismatches": 0,
+      "maxDepthDifference": 0,
+      "linearRgbMAE": 0.03085136171354764
+    },
+    {
+      "depth": 1,
+      "moving": false,
+      "view": "hero",
+      "cones_ms": [
+        5.439488,
+        5.373952
+      ],
+      "rasterAo_ms": [
+        3.080192,
+        3.473408
+      ],
+      "speedup": 1.6500000000000001,
+      "reductionPercent": 39.393939393939405,
+      "depthMismatches": 0,
+      "maxDepthDifference": 0,
+      "linearRgbMAE": 0.043557460318440974
+    },
+    {
+      "depth": 1,
+      "moving": false,
+      "view": "low",
+      "cones_ms": [
+        6.488064,
+        6.5536
+      ],
+      "rasterAo_ms": [
+        3.866624,
+        3.93216
+      ],
+      "speedup": 1.6722689075630255,
+      "reductionPercent": 40.20100502512564,
+      "depthMismatches": 0,
+      "maxDepthDifference": 0,
+      "linearRgbMAE": 0.03080597404466159
+    },
+    {
+      "depth": 1,
+      "moving": true,
+      "view": "hero",
+      "cones_ms": [
+        6.094848,
+        5.832704
+      ],
+      "rasterAo_ms": [
+        3.866624,
+        3.997696
+      ],
+      "speedup": 1.5166666666666666,
+      "reductionPercent": 34.065934065934066,
+      "depthMismatches": 0,
+      "maxDepthDifference": 0,
+      "linearRgbMAE": 0.03802774830140929
+    },
+    {
+      "depth": 1,
+      "moving": true,
+      "view": "low",
+      "cones_ms": [
+        7.012352,
+        6.815744
+      ],
+      "rasterAo_ms": [
+        3.93216,
+        4.194304
+      ],
+      "speedup": 1.7016129032258063,
+      "reductionPercent": 41.23222748815165,
+      "depthMismatches": 0,
+      "maxDepthDifference": 0,
+      "linearRgbMAE": 0.03257383305784585
+    }
+  ],
+  "imageComparisons": {
+    "depth0": [
+      {
+        "view": "hero",
+        "arm": "baseline",
+        "gpuMedians_ms": [
+          4.9152,
+          4.9152
+        ],
+        "wallMedians_ms": [
+          5.640125000001717,
+          5.598792000000685
+        ],
+        "depthMismatch": 0,
+        "linearRgbMAE": 0,
+        "linearRgbRMSE": 0,
+        "displayRgbMAE_255": 0,
+        "pixelsOver8_255_percent": 0
+      },
+      {
+        "view": "hero",
+        "arm": "raster-ao",
+        "gpuMedians_ms": [
+          3.2768,
+          3.735552
+        ],
+        "wallMedians_ms": [
+          4.123999999999796,
+          4.464750000001004
+        ],
+        "depthMismatch": 0,
+        "linearRgbMAE": 0.04231019791485607,
+        "linearRgbRMSE": 0.09333411374249008,
+        "displayRgbMAE_255": 7.178473731884058,
+        "pixelsOver8_255_percent": 29.383627717391306
+      },
+      {
+        "view": "low",
+        "arm": "baseline",
+        "gpuMedians_ms": [
+          5.963776,
+          5.963776
+        ],
+        "wallMedians_ms": [
+          6.573917000001529,
+          6.4242080000003625
+        ],
+        "depthMismatch": 0,
+        "linearRgbMAE": 0,
+        "linearRgbRMSE": 0,
+        "displayRgbMAE_255": 0,
+        "pixelsOver8_255_percent": 0
+      },
+      {
+        "view": "low",
+        "arm": "raster-ao",
+        "gpuMedians_ms": [
+          3.866624,
+          3.801088
+        ],
+        "wallMedians_ms": [
+          4.591707999999926,
+          4.332666000000245
+        ],
+        "depthMismatch": 0,
+        "linearRgbMAE": 0.03085136171354764,
+        "linearRgbRMSE": 0.06975641530829801,
+        "displayRgbMAE_255": 5.274299365942029,
+        "pixelsOver8_255_percent": 23.649388586956523
+      }
+    ],
+    "depth1": [
+      {
+        "view": "hero",
+        "arm": "baseline",
+        "gpuMedians_ms": [
+          5.439488,
+          5.373952
+        ],
+        "wallMedians_ms": [
+          6.1212500000001455,
+          6.162625000000844
+        ],
+        "depthMismatch": 0,
+        "linearRgbMAE": 0,
+        "linearRgbRMSE": 0,
+        "displayRgbMAE_255": 0,
+        "pixelsOver8_255_percent": 0
+      },
+      {
+        "view": "hero",
+        "arm": "raster-ao",
+        "gpuMedians_ms": [
+          3.080192,
+          3.473408
+        ],
+        "wallMedians_ms": [
+          3.7584170000000086,
+          4.010417000000416
+        ],
+        "depthMismatch": 0,
+        "linearRgbMAE": 0.043557460318440974,
+        "linearRgbRMSE": 0.09507654084752391,
+        "displayRgbMAE_255": 7.064792346014492,
+        "pixelsOver8_255_percent": 26.36141304347826
+      },
+      {
+        "view": "low",
+        "arm": "baseline",
+        "gpuMedians_ms": [
+          6.488064,
+          6.5536
+        ],
+        "wallMedians_ms": [
+          7.341875000000073,
+          7.3226250000006985
+        ],
+        "depthMismatch": 0,
+        "linearRgbMAE": 0,
+        "linearRgbRMSE": 0,
+        "displayRgbMAE_255": 0,
+        "pixelsOver8_255_percent": 0
+      },
+      {
+        "view": "low",
+        "arm": "raster-ao",
+        "gpuMedians_ms": [
+          3.866624,
+          3.93216
+        ],
+        "wallMedians_ms": [
+          4.640374999999949,
+          4.389957999999751
+        ],
+        "depthMismatch": 0,
+        "linearRgbMAE": 0.03080597404466159,
+        "linearRgbRMSE": 0.07327116571602457,
+        "displayRgbMAE_255": 4.922427083333333,
+        "pixelsOver8_255_percent": 20.028328804347826
+      }
+    ]
+  },
+  "conclusions": [
+    "Existing opt-in RASTER + AO already supports voxel faces; no additional production switch is required.",
+    "At depth 1, RASTER + AO reduces stationary GPU spans about 39-40% and moving spans about 34-41%. The 50% reduction target is not achieved.",
+    "All six A/B captures retain identical depth alpha at every pixel; silhouettes and water-sort depth are unchanged.",
+    "Appearance is changed: cast shadows are more defined, and broad/offscreen occlusion is absent. About 20-26% of stationary depth-1 pixels differ by more than 8/255 in at least one display channel. These measure appearance differences, not ground-truth error.",
+    "Voxel CONES already reuse world-space lighting records. Their per-pixel lattice key/lookup work remains a significant cost, unlike the smooth screen-lighting path.",
+    "The cached-shadow preview still spends on primary geometry, half-resolution horizon AO/shadow filtering, and full-resolution deferred shading. Turning visibility off entirely still costs about 2.6-2.7 ms at depth 0.",
+    "An isolated single-sun shader prototype removed the secondary-light exact-shadow branch. Gains were small/inconsistent and did not reach the target; discarded without changing production."
+  ],
+  "nextArchitecturalExperiment": {
+    "approach": "Persistent per-surface lighting storage directly addressed from voxel mesh faces; cached AO and sun visibility, retaining full-resolution material/specular evaluation.",
+    "reason": "Avoid per-frame screen-wide hash requests and repeated AO evaluation while keeping offscreen occlusion available.",
+    "requirements": [
+      "Sample large greedy quads with a surface atlas; one value per merged face loses local shadows.",
+      "Invalidate on mesh, light, AO tuning and occluder changes; never reuse stale visibility during edits.",
+      "Budget construction and memory, including high refinement, and validate steady movement, disocclusion and cold/update frames.",
+      "Compare image quality and complete wet-frame GPU cost before claiming 2x."
+    ],
+    "status": "Design hypothesis only. No implementation or 2x result claimed."
+  },
+  "rawEvidence": "artifacts/voxel-render-halving-2026-10-04",
+  "reproduce": {
+    "surfaceStyle": "FLUID_EXPLORE_SURFACE_STYLE=voxel-flat",
+    "depth": "FLUID_PROBE_DEPTH=0 or 1",
+    "preview": "FLUID_EXPLORE_RASTER_AO=1",
+    "motion": "FLUID_EXPLORE_MOVING=1",
+    "arm": "FLUID_EXPLORE_ARMS=baseline or raster-ao",
+    "tool": "tools/explore-hero-render-budget.ts through tools/run-webgpu-exclusive.ts"
+  },
+  "validation": {
+    "typeCheck": "Passed on isolated SVO snapshot with updated harness and test.",
+    "gpuBenchmarks": "All seven runs completed without GPU validation errors. Both styles use production renderer factory; A/B depth matches exactly.",
+    "targetedDawn": "Passed with explicit TAP reporter: 2 tests, 2 passed, 0 failed, 0 skipped. Smooth and voxel-flat verify camera cache reuse, sun invalidation, independent AO/shadow contributions, and preserved depth.",
+    "fullRepositoryGate": "Not rerun; unrelated Uniform work remains outside this investigation."
+  }
+}

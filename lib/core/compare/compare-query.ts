@@ -1,4 +1,5 @@
 import type { PaneId } from "../session/session";
+import { uiFeatureQuery } from "../../features/persistence";
 
 /**
  * The `b.*` half of the address: pane B, as a diff over pane A.
@@ -13,7 +14,7 @@ import type { PaneId } from "../session/session";
  * is a second document — see `docs/ab-compare-handoff.md`.
  */
 
-/** Independent pane links. Viewing controls start linked; topology and regions start separated. */
+/** Cameras and instruments start linked; rendering, topology and regions start separated. */
 export type CompareLinkGroup = "view" | "cut" | "instrument" | "look" | "topology" | "regions";
 
 /**
@@ -31,7 +32,7 @@ export const COMPARE_GROUP_LABELS: Readonly<Record<CompareLinkGroup, string>> = 
   view: "View",
   cut: "Cut",
   instrument: "Instrument",
-  look: "Look",
+  look: "Render",
 };
 
 export const COMPARE_GROUP_HINTS: Readonly<Record<CompareLinkGroup, string>> = {
@@ -40,7 +41,7 @@ export const COMPARE_GROUP_HINTS: Readonly<Record<CompareLinkGroup, string>> = {
   view: "One camera fed to both draws — orbit either pane and both move",
   cut: "The same slice of the same axis in both panes",
   instrument: "An instrument raised on one pane is raised on both, each reading its own session",
-  look: "Render settings identical, so a pixel difference is a physics difference",
+  look: "Link rendering settings in both panes, or unlink to compare lighting, meshes and quality",
 };
 
 /** Compare mode with an empty diff still has to survive a reload: `?b=1`. */
@@ -74,7 +75,7 @@ export const COMPARE_ALL_LINKED: CompareLinks = Object.freeze({
 });
 
 export const COMPARE_DEFAULT_LINKS: CompareLinks = Object.freeze({
-  ...COMPARE_ALL_LINKED, topology: false, regions: false,
+  ...COMPARE_ALL_LINKED, look: false, topology: false, regions: false,
 });
 
 export interface CompareState {
@@ -106,11 +107,11 @@ const CUT_KEYS: Readonly<Record<string, true>> = {
   grid: true, gridSlice: true, gridMode: true, lensPhase: true,
 };
 
-const LOOK_KEYS: Readonly<Record<string, true>> = {
-  svoStage: true, svoShadows: true, svoAO: true, svoPrimarySeamClosure: true,
-  svoCones: true, svoLattice: true, svoPrimary: true, svoFlatExempt: true, svoLodPixels: true,
-  quality: true,
-};
+// Use the rendering codecs' complete vocabulary so new URL-backed controls
+// automatically participate, including tuning controls without a dedicated UI.
+const LOOK_KEYS: ReadonlySet<string> = new Set([
+  ...uiFeatureQuery.keys, "quality", "layers", "scene.surfaceStyle",
+]);
 
 /** Which padlock, if any, governs a managed key. */
 export function compareGroupForKey(key: string): CompareGroup {
@@ -119,7 +120,7 @@ export function compareGroupForKey(key: string): CompareGroup {
   if (key.startsWith("camera.")) return "view";
   if (Object.hasOwn(CUT_KEYS, key)) return "cut";
   if (key === "overlay") return "instrument";
-  if (Object.hasOwn(LOOK_KEYS, key)) return "look";
+  if (LOOK_KEYS.has(key)) return "look";
   return "config";
 }
 
