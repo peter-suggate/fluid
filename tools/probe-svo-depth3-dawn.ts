@@ -61,12 +61,12 @@ const uniforms=device.createBuffer({size:416,usage:GPUBufferUsage.UNIFORM|GPUBuf
 const body=device.createBuffer({size:768,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
 device.queue.writeBuffer(uniforms,0,packSvoDryViewUniforms({scene,camera:{...defaultCamera,...preset.camera},environmentId:scene.environment??'default',info:world.info,bodyCount:bodies.count,width,height}));
 device.queue.writeBuffer(body,0,bodies.data);
-const renderer=createProductionSparseVoxelDrySceneRenderer(device,uniforms,body,'mesh');
 const productionLighting=process.env.FLUID_PROBE_LIGHTING==='1';
+const renderer=createProductionSparseVoxelDrySceneRenderer(device,uniforms,body,'mesh',false,false,false,productionLighting);
 renderer.setLightingOptions(productionLighting ? DEFAULT_SVO_LIGHTING_OPTIONS : {globalIlluminationEnabled:false,coneTracingMode:'off',shadowsEnabled:false,ambientOcclusionEnabled:false});
 await renderer.initialize((label,completed,total)=>console.log(JSON.stringify({phase:'pipeline',label,completed,total,elapsed_ms:performance.now()-started})));renderer.setRigidBodyCount(bodies.count);renderer.setRenderTuning({...DEFAULT_SVO_RENDER_TUNING,coneLightingScale:productionLighting ? DEFAULT_SVO_RENDER_TUNING.coneLightingScale : 1});
 renderer.setSource(source);renderer.publishScene(drySceneData);renderer.ensureSize(width,height);
-if(productionLighting)await renderer.ensureConeLightingPrepass();
+// Raster + AO has no cone prepass to prepare.
 const target=device.createTexture({size:[width,height],format:'rgba16float',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC});
 global.gc?.();
 let receipt:number[]=[];let frames=0;

@@ -86,16 +86,17 @@ const uniforms=device.createBuffer({size:416,usage:GPUBufferUsage.UNIFORM|GPUBuf
 const body=device.createBuffer({size:768,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
 device.queue.writeBuffer(uniforms,0,packSvoDryViewUniforms({scene,camera:{...defaultCamera,...preset.camera},environmentId:scene.environment??'default',info:world.info,bodyCount:bodies.count,width,height}));
 device.queue.writeBuffer(body,0,bodies.data);
+const productionLighting=process.env.FLUID_PROBE_LIGHTING==='1';
+const rasterAo=productionLighting && process.env.FLUID_SHADING_REFERENCE!=='1' && process.env.FLUID_SHADING_DISABLE_CACHE!=='1';
 const renderer=process.env.FLUID_SHADING_REFERENCE==='1'
  ? new SparseVoxelDrySceneRenderer(device,uniforms,body,'rgba16float','raster-primary','off','split',0,true,true,{surfaceMesh:true})
  : process.env.FLUID_SHADING_DISABLE_CACHE==='1'
  ? new SparseVoxelDrySceneRenderer(device,uniforms,body,'rgba16float','raster-primary','off','split',0,true,true,{surfaceMesh:true,voxelLightCache:false})
- : createProductionSparseVoxelDrySceneRenderer(device,uniforms,body,'mesh');
-const productionLighting=process.env.FLUID_PROBE_LIGHTING==='1';
-renderer.setLightingOptions(productionLighting ? DEFAULT_SVO_LIGHTING_OPTIONS : {globalIlluminationEnabled:false,coneTracingMode:'off',shadowsEnabled:false,ambientOcclusionEnabled:false});
+ : createProductionSparseVoxelDrySceneRenderer(device,uniforms,body,'mesh',false,false,false,rasterAo);
+renderer.setLightingOptions(productionLighting ? {...DEFAULT_SVO_LIGHTING_OPTIONS,coneTracingMode:rasterAo ? 'raster-ao' : 'cones'} : {globalIlluminationEnabled:false,coneTracingMode:'off',shadowsEnabled:false,ambientOcclusionEnabled:false});
 await renderer.initialize((label,completed,total)=>console.log(JSON.stringify({phase:'pipeline',label,completed,total,elapsed_ms:performance.now()-started})));renderer.setRigidBodyCount(bodies.count);renderer.setRenderTuning({...DEFAULT_SVO_RENDER_TUNING,coneLightingScale:productionLighting ? DEFAULT_SVO_RENDER_TUNING.coneLightingScale : 1});
 renderer.setSource(source);renderer.publishScene(drySceneData);renderer.ensureSize(width,height);
-if(productionLighting)await renderer.ensureConeLightingPrepass();
+if(productionLighting && !rasterAo)await renderer.ensureConeLightingPrepass();
 const target=device.createTexture({size:[width,height],format:'rgba16float',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC});
 global.gc?.();
 let receipt:number[]=[];let frames=0;

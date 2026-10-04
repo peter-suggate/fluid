@@ -1,0 +1,74 @@
+{
+  "change": "Bound trilinear support to the receiver hemisphere; fade dense blockers back to contact AO. Eight opacity lookups retained.",
+  "strength": 1,
+  "scope": "1600x920 smooth, depth 1 opaque scenery only; regions selected from capture, not object masks.",
+  "regionalComparison": {
+    "outer-wall": {
+      "rectangle_xywh": [
+        680,
+        610,
+        230,
+        25
+      ],
+      "oldAddedDarkening": 0.2703645384784126,
+      "newAddedDarkening": 0.008328427164812191
+    },
+    "canopy": {
+      "rectangle_xywh": [
+        900,
+        0,
+        350,
+        220
+      ],
+      "oldAddedDarkening": 0.07341457306185006,
+      "newAddedDarkening": 0.11077031458238651
+    },
+    "inner-wall": {
+      "rectangle_xywh": [
+        700,
+        340,
+        230,
+        45
+      ],
+      "oldAddedDarkening": 0.10588040925062658,
+      "newAddedDarkening": 0.000539343872452136
+    }
+  },
+  "rawResults": "/tmp/fluid-pond-ao-explore/results.json",
+  "validation": {
+    "types": "pass",
+    "unitPassed": 879,
+    "targetedDawnPassed": 3,
+    "wallOrientationsAndOffsets": 60
+  },
+  "timings": [
+    {
+      "repetition": 0,
+      "gpuMedian_ms": 5.505024,
+      "wallMedian_ms": 6.271584000000075,
+      "arm": "raster-ao"
+    },
+    {
+      "repetition": 0,
+      "gpuMedian_ms": 5.89824,
+      "wallMedian_ms": 6.607540999999401,
+      "arm": "coarse-ao"
+    },
+    {
+      "repetition": 1,
+      "gpuMedian_ms": 4.718592,
+      "wallMedian_ms": 5.2679169999992155,
+      "arm": "coarse-ao"
+    },
+    {
+      "repetition": 1,
+      "gpuMedian_ms": 4.25984,
+      "wallMedian_ms": 4.698958000000857,
+      "arm": "raster-ao"
+    }
+  ],
+  "pairedAddedGpu_ms": [
+    0.3932160000000007,
+    0.4587520000000005
+  ]
+}

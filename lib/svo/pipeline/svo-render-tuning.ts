@@ -311,6 +311,8 @@ export interface SvoRenderTuning {
   readonly shadowStrength: number;
   readonly aoRadiusScale: number;
   readonly aoStrength: number;
+  /** Sparse world-opacity AO for the raster backend; zero keeps contact AO only. */
+  readonly rasterCoarseAoStrength: number;
   readonly aoConeAperture: number;
   readonly shadowConeAperture: number;
   /** Artistic exposure applied only to gathered diffuse radiance. */
@@ -432,6 +434,7 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   shadowStrength: 1,
   aoRadiusScale: 1,
   aoStrength: 1,
+  rasterCoarseAoStrength: 0.6,
   aoConeAperture: 0.62,
   shadowConeAperture: 0.065,
   // Off by default.
@@ -649,6 +652,7 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     shadowStrength: bounded(value.shadowStrength, 0, 1),
     aoRadiusScale: bounded(value.aoRadiusScale, 0.1, 3),
     aoStrength: bounded(value.aoStrength, 0, 1),
+    rasterCoarseAoStrength: bounded(value.rasterCoarseAoStrength ?? DEFAULT_SVO_RENDER_TUNING.rasterCoarseAoStrength, 0, 1),
     aoConeAperture: bounded(value.aoConeAperture, 0.1, 1.4),
     shadowConeAperture: bounded(value.shadowConeAperture, 0.01, 0.25),
     giBounceStrength: bounded(value.giBounceStrength ?? DEFAULT_SVO_RENDER_TUNING.giBounceStrength, 0, 4),

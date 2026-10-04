@@ -169,7 +169,7 @@ export type SvoLightingOptions = Readonly<{
    * disabled.
    */
   silhouetteRefinementEnabled?: boolean;
-  /** Omitted means `cones`. */
+  /** Omitted means `raster-ao`. */
   coneTracingMode?: SvoConeTracingMode;
   /**
    * Whether gathered indirect radiance is computed at all. Omitted means no.
@@ -224,7 +224,7 @@ export const DEFAULT_SVO_LIGHTING_OPTIONS = Object.freeze({
   shadowsEnabled: true,
   ambientOcclusionEnabled: true,
   silhouetteRefinementEnabled: false,
-  coneTracingMode: "cones",
+  coneTracingMode: "raster-ao",
   globalIlluminationEnabled: false,
   worldGiCacheEnabled: false,
   latticeVisibilityEnabled: true,

@@ -13,7 +13,7 @@ export function renderConeVisibilityControls({ svoConeTracingMode, tuning, updat
   return {
     // Source, shadows, AO, lattice, water shadows and rate on the rail; ten calibrations, two
     // sample counts, and the arm- and plane-specific budgets in the drawer.
-    settings: 7 + 12 + (exactBudgets ? 4 : 0) + (lightSlot ? 1 : 0),
+    settings: 7 + 12 + (rasterAo ? 1 : 0) + (exactBudgets ? 4 : 0) + (lightSlot ? 1 : 0),
     notice: (lightingVisibilityStatus.fallback || lightingVisibilityStatus.detail)
       && <p data-testid="lighting-visibility-status" aria-live="polite" className="render-inline-warning">
         Lighting visibility: {lightingVisibilityStatus.state.toUpperCase()}
@@ -29,6 +29,9 @@ export function renderConeVisibilityControls({ svoConeTracingMode, tuning, updat
       <SwitchField label="Water shadows" checked={tuning.waterShadowsEnabled}
         onChange={(value) => updateTuning("waterShadowsEnabled", value)}
         hint="Water attenuates the light and contact shadow it stands in. Off compiles the water march out of the lighting shader; solid shadows are unaffected. Switching rebuilds the renderer." />
+      {rasterAo && <RangeField label="Coarse voxel AO" unit="%" value={tuning.rasterCoarseAoStrength * 100} min={0} max={100} step={5} digits={0}
+        onChange={(value) => updateTuning("rasterCoarseAoStrength", value / 100)} modified={modified("rasterCoarseAoStrength")} onReset={resetTuning("rasterCoarseAoStrength")}
+        hint="Experimental: eight coarse world-opacity samples add broad occlusion from hidden geometry. Zero keeps screen-space contact AO only." />}
       <ChoiceField label="Cone prepass rate" value={String(tuning.coneLightingScale)} disabled={svoConeTracingMode !== "cones"}
         onChange={(value) => updateTuning("coneLightingScale", Number(value) as SvoRenderTuning["coneLightingScale"])}
         options={[{ value: "1", label: "FULL" }, { value: "0.5", label: "2×2" }, { value: "0.25", label: "4×4" }, { value: "0.125", label: "8×8" }]} />

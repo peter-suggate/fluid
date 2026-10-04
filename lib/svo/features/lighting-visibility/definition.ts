@@ -3,7 +3,7 @@ import type { FeatureDefinition } from "../../../framework/composition";
 
 export const SVO_LIGHTING_VISIBILITY_OPTIONS = [
   { value: "cones", label: "CONES", hint: "Cone-traced soft shadows, AO and GI, fed by the reduced-rate prepass and world-GI cache." },
-  { value: "raster-ao", label: "RASTER + AO", hint: "Preview: cached sun shadow maps and screen-space contact AO. Selects Mesh primary visibility. GI and broad offscreen AO are absent." },
+  { value: "raster-ao", label: "RASTER + AO", hint: "Cached sun shadow maps and screen-space contact AO. Selects Mesh primary visibility. GI is absent; optional Coarse voxel AO adds approximate offscreen occlusion." },
   { value: "exact", label: "EXACT", hint: "No cone stage runs; shadows and AO use bounded exact SVO visibility rays. Sharp reference shadows, costlier per pixel." },
   { value: "off", label: "OFF", hint: "No visibility work at all: unshadowed direct lighting, no AO, no GI." },
 ] as const;
@@ -16,8 +16,8 @@ export const SVO_LIGHTING_VISIBILITY_FEATURE = {
     { port: SVO_GBUFFER_PORT, provider: "svo.primary-visibility" },
   ],
   variants: [
-    { id: "cones", point: "svo.lighting-visibility", default: true, update: "live", requires: ["svo.scene-publication", "svo.radiance"], provides: ["svo.lighting-visibility"] },
-    { id: "raster-ao", point: "svo.lighting-visibility", update: "live", requires: ["svo.scene-publication"], provides: ["svo.lighting-visibility"] },
+    { id: "cones", point: "svo.lighting-visibility", update: "live", requires: ["svo.scene-publication", "svo.radiance"], provides: ["svo.lighting-visibility"] },
+    { id: "raster-ao", point: "svo.lighting-visibility", default: true, update: "live", requires: ["svo.scene-publication"], provides: ["svo.lighting-visibility"] },
     { id: "exact", point: "svo.lighting-visibility", update: "live", requires: ["svo.scene-publication"], provides: ["svo.lighting-visibility"] },
     { id: "off", point: "svo.lighting-visibility", update: "live", provides: ["svo.lighting-visibility"] },
   ],

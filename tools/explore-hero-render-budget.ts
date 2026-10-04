@@ -128,6 +128,8 @@ renderer.ensureSize(renderWidth,renderHeight);
 const tuning=resolveSvoSurfaceTuning(DEFAULT_SVO_RENDER_TUNING,smooth);
 const arms=[
  {name:rasterAo?'raster-ao':'baseline',scale:0.5,ao:true,shadows:true},
+ {name:'coarse-ao',scale:0.5,ao:true,shadows:true,coarse:1},
+ {name:'coarse-ao-no-shadows',scale:0.5,ao:true,shadows:false,coarse:1},
  {name:'no-ao',scale:0.5,ao:false,shadows:true},
  {name:'no-shadows',scale:0.5,ao:true,shadows:false},
  {name:'no-visibility',scale:0.5,ao:false,shadows:false},
@@ -138,7 +140,7 @@ const arms=[
 ] as const;
 const selectedArms=arms.filter(a=>!process.env.FLUID_EXPLORE_ARMS||process.env.FLUID_EXPLORE_ARMS.split(',').includes(a.name));
 assert.ok(selectedArms.length);
-const baseCamera={...defaultCamera,...preset.camera};
+const baseCamera={...defaultCamera,...preset.camera,...(process.env.FLUID_EXPLORE_CAMERA_JSON ? JSON.parse(process.env.FLUID_EXPLORE_CAMERA_JSON) : {})};
 const views=[{name:'hero',camera:baseCamera},{name:'low',camera:{...baseCamera,elevation_rad:0.2,distance_m:baseCamera.distance_m*1.3}}];
 const selectedViews=views.filter(v=>!process.env.FLUID_EXPLORE_VIEWS||process.env.FLUID_EXPLORE_VIEWS.split(',').includes(v.name));
 const moving=process.env.FLUID_EXPLORE_MOVING==='1';
@@ -169,7 +171,7 @@ for(const view of selectedViews){
  device.queue.writeBuffer(uniforms,0,packSvoDryViewUniforms({scene,camera:view.camera,environmentId:scene.environment??'default',info:world.info,bodyCount:bodies.count,width:renderWidth,height:renderHeight}));
  for(let repetition=0;repetition<2;repetition++)for(const arm of repetition===0?selectedArms:[...selectedArms].reverse()){
   motionFrame=0;
-  renderer.setRenderTuning({...tuning,coneRadianceReconstruction:'bilateral' in arm?'joint-bilateral':'full-res-relight'});
+  renderer.setRenderTuning({...tuning,rasterCoarseAoStrength:'coarse' in arm?arm.coarse:0,coneRadianceReconstruction:'bilateral' in arm?'joint-bilateral':'full-res-relight'});
   renderer.setLightingOptions({...DEFAULT_SVO_LIGHTING_OPTIONS,coneLightingScale:arm.scale,ambientOcclusionEnabled:arm.ao,shadowsEnabled:arm.shadows,coneTracingMode:'off' in arm?'off':rasterAo?'raster-ao':'cones'});
   await renderer.ensureConeLightingPrepass();
   for(let i=0;i<12;i++)await frame(false);

@@ -3,7 +3,7 @@ import { SVO_SCENE_PUBLICATION_PORT } from "../contracts/ports";
 import { composeFeatures, type FeatureDefinition } from "../../framework/composition";
 import { SVO_PRIMARY_VISIBILITY_FEATURE } from "../features/primary-visibility/definition";
 import { SVO_LIGHTING_VISIBILITY_FEATURE } from "../features/lighting-visibility/definition";
-import type { SvoConeTracingMode, SvoPrimaryTraversalMode } from "./svo-render-options";
+import { DEFAULT_SVO_LIGHTING_OPTIONS, type SvoConeTracingMode, type SvoPrimaryTraversalMode } from "./svo-render-options";
 
 /** Static installed providers. Availability of a particular publication remains
  * a runtime readiness condition, not a reason to silently select another path. */
@@ -27,7 +27,7 @@ const resolved = new Map<string, { composition: ReturnType<typeof composeFeature
 
 export function resolveSvoPipelineComposition(selection: SvoPipelineSelection = {}) {
   const primaryTraversal = selection.primaryTraversal ?? "mesh";
-  const coneTracingMode = selection.coneTracingMode ?? "cones";
+  const coneTracingMode = selection.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode;
   const coneRadianceReconstruction = selection.coneRadianceReconstruction ?? "full-res-relight";
   const key = `${primaryTraversal}/${coneTracingMode}/${coneRadianceReconstruction}`;
   const cached = resolved.get(key);

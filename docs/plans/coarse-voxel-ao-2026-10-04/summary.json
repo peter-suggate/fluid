@@ -1,0 +1,93 @@
+{
+  "date": "2026-10-04",
+  "scene": "hero-garden-hose-x10",
+  "surfaceStyle": "smooth",
+  "resolution": [
+    1600,
+    920
+  ],
+  "refinementDepth": 1,
+  "requestedDepth2Failure": "The harness 1 GiB per-buffer cap rejected a 1,084,438,892-byte maintenance allocation; depth-2 results were rejected rather than silently downgraded. Browser review retains user depth 2.",
+  "scope": "Opaque scenery renderer only; excludes running fluid, water optics and final app presentation.",
+  "samples": "12 warmups, 12 timestamped samples and 12 separate uninstrumented fence samples per arm, two reversed-order repetitions.",
+  "camera": {
+    "azimuth_rad": 5.866812499999951,
+    "elevation_rad": 0.545875,
+    "distance_m": 3.1000098154924074,
+    "target_m": {
+      "x": 0.12107604951327766,
+      "y": 0.09655729208271091,
+      "z": -0.33765807878675735
+    },
+    "tanHalfFov": 0.24
+  },
+  "coarseAoStrength": 1,
+  "implementation": "Four hemisphere directions, two coarse opacity lookups each; mean occupancy converted to transmittance. Min with screen-space contact visibility, default strength zero.",
+  "results": [
+    {
+      "arm": "raster-ao",
+      "repetition": 0,
+      "gpuMedian_ms": 5.505024,
+      "wallMedian_ms": 6.2853329999998095
+    },
+    {
+      "arm": "coarse-ao",
+      "repetition": 0,
+      "gpuMedian_ms": 5.832704,
+      "wallMedian_ms": 6.445332999999664
+    },
+    {
+      "arm": "coarse-ao-no-shadows",
+      "repetition": 0,
+      "gpuMedian_ms": 5.111808,
+      "wallMedian_ms": 5.794165999999677
+    },
+    {
+      "arm": "no-shadows",
+      "repetition": 0,
+      "gpuMedian_ms": 4.9152,
+      "wallMedian_ms": 4.329125000000204
+    },
+    {
+      "arm": "no-shadows",
+      "repetition": 1,
+      "gpuMedian_ms": 3.93216,
+      "wallMedian_ms": 4.3260840000002645
+    },
+    {
+      "arm": "coarse-ao-no-shadows",
+      "repetition": 1,
+      "gpuMedian_ms": 4.25984,
+      "wallMedian_ms": 4.623250000000553
+    },
+    {
+      "arm": "coarse-ao",
+      "repetition": 1,
+      "gpuMedian_ms": 4.653056,
+      "wallMedian_ms": 5.312459000000672
+    },
+    {
+      "arm": "raster-ao",
+      "repetition": 1,
+      "gpuMedian_ms": 4.325376,
+      "wallMedian_ms": 4.939167000000452
+    }
+  ],
+  "pairedAddedGpu_ms": [
+    0.32767999999999997,
+    0.32767999999999997
+  ],
+  "depthSamplesUnchanged": 1472000,
+  "visualFinding": "Broad occlusion improves separation; at full strength pond walls are visibly darker too. Browser review starts at 0.6.",
+  "validation": {
+    "types": "pass",
+    "unitPassed": 879,
+    "targetedDawnPassed": 3
+  },
+  "productionDefaults": {
+    "surface": "smooth",
+    "lighting": "raster-ao",
+    "coarseAoStrength": 0.6,
+    "note": "Promoted after pond-wall fix; initial prototype timings above precede that fix. See pond-wall-fix.json for revised results."
+  }
+}

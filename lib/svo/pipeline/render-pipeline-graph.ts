@@ -448,7 +448,7 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     state: (context) => (context.coneTracingMode === "cones" || context.coneTracingMode === "raster-ao" ? "on" : context.coneTracingMode === "exact" ? "armed" : "off"),
     chip: (context) => context.coneTracingMode === "cones"
       ? `cones · ${coneRateLabel(context.tuning.coneLightingScale)} · ${latticeVisibilityServes(context) ? "face lattice" : "8 slots"}`
-      : context.coneTracingMode === "raster-ao" ? "preview · raster sun + horizon AO"
+      : context.coneTracingMode === "raster-ao" ? "raster sun + horizon AO"
       : context.coneTracingMode === "exact" ? "exact rays · no cone stage" : "no visibility work",
   },
   {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
+import { releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
+import { acquireSvoTestLease } from "./helpers/svo-gpu-lease";
 import { createDawnRenderDevice, buildSvoDrySceneAssembly, packSvoDryRigidBodies, packSvoDryViewUniforms } from "../tools/svo-dry-frame-harness";
 import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 import { createProductionSparseVoxelDrySceneRenderer } from "../lib/core/webgpu-renderer";
@@ -10,13 +11,14 @@ import { DEFAULT_SVO_LIGHTING_OPTIONS } from "../lib/svo/pipeline/svo-render-opt
 import { DEFAULT_SVO_RENDER_TUNING, resolveSvoSurfaceTuning } from "../lib/svo/pipeline/svo-render-tuning";
 
 for (const surfaceStyle of ["smooth", "voxel-flat"] as const) (process.env.WEBGPU_NODE_MODULE ? test : test.skip)(`raster AO ${surfaceStyle} caches the sun, invalidates light changes, and preserves water-sort depth`, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "tests/svo-raster-ao-dawn.test.ts");
+  await acquireSvoTestLease("tests/svo-raster-ao-dawn.test.ts");
   let device: GPUDevice | undefined;
   try {
     const setup = await createDawnRenderDevice(); device = setup.device;
     const preset = getScenePreset("hero-garden-hose-x10"), scene = preset.create();
     scene.surfaceStyle = surfaceStyle;
     const smooth = surfaceStyle === "smooth";
+    const baselineTuning = resolveSvoSurfaceTuning({ ...DEFAULT_SVO_RENDER_TUNING, rasterCoarseAoStrength: 0 }, smooth);
     const world = await WebGPULiveSvoScene.create(device, scene, "balanced", () => {}, undefined,
       { environmentRefinementDepth: 0, radianceFeedback: false, surfaceDualMarchingCubes: smooth });
     const submit = async (encoder: GPUCommandEncoder) => { device!.queue.submit([encoder.finish()]); await device!.queue.onSubmittedWorkDone(); assert.deepEqual(setup.validationErrors, []); };
@@ -33,7 +35,7 @@ for (const surfaceStyle of ["smooth", "voxel-flat"] as const) (process.env.WEBGP
     const options = { ...DEFAULT_SVO_LIGHTING_OPTIONS, coneTracingMode: "raster-ao" as const };
     renderer.setLightingOptions(options);
     await renderer.initialize(); renderer.setRigidBodyCount(bodies.count);
-    renderer.setRenderTuning(resolveSvoSurfaceTuning(DEFAULT_SVO_RENDER_TUNING, smooth));
+    renderer.setRenderTuning(baselineTuning);
     renderer.setSource(source); renderer.publishScene(drySceneData); renderer.ensureSize(width, height);
     const target = device.createTexture({ size: [width, height], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     const read = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -48,6 +50,19 @@ for (const surfaceStyle of ["smooth", "voxel-flat"] as const) (process.env.WEBGP
     await frame(); const cached = await frame(); assert.equal(cached[1], 0); assert.equal(cached[5], 0, "unchanged mesh must not rerasterize shadows");
     camera.azimuth_rad += .01; writeCamera(); assert.equal((await frame())[1], 0, "camera motion must reuse world-space shadow maps");
     const lit = await capture();
+    renderer.setRenderTuning({ ...baselineTuning, rasterCoarseAoStrength: 1 });
+    const coarse = await capture();
+    let coarseChanges = 0;
+    for (let i = 0; i < lit.length; i += 4) {
+      assert.equal(coarse[i + 3], lit[i + 3], "coarse opacity AO preserves geometry depth");
+      assert.ok(coarse[i]! <= lit[i]!, "coarse AO can only reduce ambient light");
+      if (coarse[i]! < lit[i]!) coarseChanges++;
+    }
+    assert.ok(coarseChanges > 100, `coarse world opacity must contribute: ${coarseChanges} pixels`);
+    assert.equal((await frame())[1], 0, "AO strength must not invalidate cached sun maps");
+    renderer.setRenderTuning(baselineTuning);
+    assert.deepEqual(await capture(), lit, "zero coarse strength restores the baseline exactly");
+
     renderer.setLightingOptions({ ...options, ambientOcclusionEnabled: false });
     const noAo = await capture();
     renderer.setLightingOptions({ ...options, shadowsEnabled: false });
@@ -66,6 +81,9 @@ for (const surfaceStyle of ["smooth", "voxel-flat"] as const) (process.env.WEBGP
     const unoccluded = await capture(); let changed = 0;
     for (let i = 0; i < lit.length; i += 4) { assert.equal(lit[i + 3], unoccluded[i + 3], "visibility must preserve exported depth for water"); if (lit[i] !== unoccluded[i]) changed++; }
     assert.ok(changed > width * height * .05, "AO and shadows must contribute to visible pixels");
+    renderer.setRenderTuning({ ...baselineTuning, rasterCoarseAoStrength: 1 });
+    assert.deepEqual(await capture(), unoccluded, "AO disabled also disables coarse opacity sampling");
+    renderer.setRenderTuning(baselineTuning);
     renderer.setLightingOptions(options);
     const words = drySceneData.lightRecords!.slice(); const floats = new Float32Array(words.buffer); floats[4] += .2;
     renderer.publishScene({ ...drySceneData, renderRevision: drySceneData.renderRevision + 1, lightRecords: words });

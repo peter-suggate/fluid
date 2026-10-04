@@ -128,7 +128,7 @@ test("all feature render URL parameters belong to the Render link", () => {
 });
 
 for (const [key, value] of Object.entries({
-  svoCones: "raster-ao", svoAO: "0", svoShadows: "0", svoWaterShadows: "1",
+  svoCoarseAO: "0.3", svoCones: "cones", svoAO: "0", svoShadows: "0", svoWaterShadows: "1",
   svoMeshNormalStrength: "0.4", svoMeshFilter: "1", svoMesher: "dual-contouring",
   svoReconstruction: "nearest", fluidSurface: "wireframe",
 })) {
@@ -170,13 +170,13 @@ for (const [key, value] of Object.entries({
 
 test("render URL overrides on B survive linked camera edits", () => {
   const { a, b } = panes();
-  const store = fakeStore(parseCompareQuery("b.svoCones=raster-ao&b.svoMeshNormalStrength=0.4"));
+  const store = fakeStore(parseCompareQuery("b.svoCones=cones&b.svoMeshNormalStrength=0.4"));
   const sync = startCompareSync(a, b, store);
-  assert.equal(a.ui.getState().svoConeTracingMode, "cones");
-  assert.equal(b.ui.getState().svoConeTracingMode, "raster-ao");
+  assert.equal(a.ui.getState().svoConeTracingMode, "raster-ao");
+  assert.equal(b.ui.getState().svoConeTracingMode, "cones");
   a.ui.getState().setCamera(camera => ({ ...camera, azimuth_rad: camera.azimuth_rad + 0.3 }));
   assert.equal(a.ui.getState().camera.azimuth_rad, b.ui.getState().camera.azimuth_rad);
-  assert.equal(b.ui.getState().svoConeTracingMode, "raster-ao");
+  assert.equal(b.ui.getState().svoConeTracingMode, "cones");
   assert.equal(b.ui.getState().svoRenderTuning.surfaceMeshNormalStrength, 0.4);
   assert.equal(a.ui.getState().svoRenderTuning.surfaceMeshNormalStrength, 1);
   sync.stop();

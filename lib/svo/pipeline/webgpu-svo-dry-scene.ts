@@ -1426,6 +1426,11 @@ export class SparseVoxelDrySceneRenderer {
     private readonly coneFanout = false,
     private readonly experiments: SvoDryOptimizationExperiments = {},
   ) {
+    // The low-level renderer may be constructed for traced/reference studies.
+    // Its initial visibility must match the resources compiled for that arm;
+    // production selects the Raster + AO arm before applying app defaults.
+    this.lightingOptions = { ...DEFAULT_SVO_LIGHTING_OPTIONS,
+      coneTracingMode: experiments.rasterAo ? "raster-ao" : "cones" };
     if (targetFormat !== SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat) {
       throw new Error(`Sparse voxel dry scene location 0 must use ${SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat}`);
     }
@@ -1437,7 +1442,7 @@ export class SparseVoxelDrySceneRenderer {
     }
     if (experiments.rasterAo) {
       if (!experiments.surfaceMesh || shadingPath !== "split" || experiments.voxelLightCache !== false) {
-        throw new RangeError("Raster + AO preview requires mesh split shading and no voxel light cache");
+        throw new RangeError("Raster + AO requires mesh split shading and no voxel light cache");
       }
       this.rasterAo = new SvoRasterAo(device);
     }
@@ -3957,7 +3962,7 @@ export class SparseVoxelDrySceneRenderer {
     return this.latticeCapable && scale !== 1 && !globalIlluminationCapable
       && this.scene?.flatVoxelNormals === true
       && this.lightingOptions.latticeVisibilityEnabled !== false
-      && (this.lightingOptions.coneTracingMode ?? "cones") === "cones"
+      && (this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode) === "cones"
       && this.renderTuning.coneRadianceReconstruction === "full-res-relight";
   }
 
@@ -4380,10 +4385,12 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   get lightingVisibilityStatus(): SvoLightingVisibilityStatus {
-    const requested = this.lightingOptions.coneTracingMode ?? "cones";
+    const requested = this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode;
     if (requested === "off") return { state: "off" };
     if (requested === "exact") return { state: "exact" };
-    if (requested === "raster-ao") return { state: "raster-ao", detail: "Preview: cached sun shadows + local screen-space AO. Broad/offscreen AO is absent; additional lights use exact shadows." };
+    if (requested === "raster-ao") return { state: "raster-ao", detail: this.renderTuning.rasterCoarseAoStrength > 0
+      ? "Cached sun shadows + contact AO + experimental coarse voxel AO. Additional lights use exact shadows."
+      : "Cached sun shadows + local screen-space AO. Broad/offscreen AO is absent; additional lights use exact shadows." };
     if (this.derivedLightingReady()) return { state: "cones" };
     return {
       state: "exact",
@@ -4799,7 +4806,7 @@ export class SparseVoxelDrySceneRenderer {
     // composes current-frame fluid optical depth after every solid exit,
     // including a cache hit, so attaching water must not disable reuse.
     const active = this.voxelLightUserEnabled && this.voxelLightPageCount > 0
-      && (this.lightingOptions.coneTracingMode ?? "cones") === "cones"
+      && (this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode) === "cones"
       && this.lightingOptions.shadowsEnabled;
     const exclusive = active && this.renderTuning.maximumShadedLights === 1
       && !this.lightingOptions.ambientOcclusionEnabled
@@ -5153,7 +5160,7 @@ export class SparseVoxelDrySceneRenderer {
     const worldGiCacheEnabled = options.worldGiCacheEnabled === true;
     // Opt-out: the lattice is the product default wherever it is capable.
     const latticeVisibilityEnabled = options.latticeVisibilityEnabled !== false;
-    const previousConeTracingMode = this.lightingOptions.coneTracingMode ?? "cones";
+    const previousConeTracingMode = this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode;
     const previousGlobalIllumination = this.lightingOptions.globalIlluminationEnabled === true;
     const previousWorldGiCache = this.lightingOptions.worldGiCacheEnabled === true;
     const previousLatticeVisibility = this.lightingOptions.latticeVisibilityEnabled !== false;
@@ -5313,6 +5320,7 @@ export class SparseVoxelDrySceneRenderer {
 
   private writeParams(source: SparseVoxelSceneRenderSource, scene: SparseVoxelDrySceneData): void {
     const structural = source.structural!;
+    this.rasterAo?.setCoarseAoStrength(this.renderTuning.rasterCoarseAoStrength);
     this.rasterAo?.update(structural.domain.worldOrigin_m,
       structural.domain.dimensionsCells.map((cells, axis) => cells * structural.domain.cellSize_m[axis]),
       structural.domain.cellSize_m, `${source.revision}/${scene.renderRevision}/${scene.lightRevision}/${Array.from(scene.lightRecords ?? []).join(",")}`,
@@ -5331,7 +5339,7 @@ export class SparseVoxelDrySceneRenderer {
       structural.planarBoundaries.strideBytes,
       0,
     ], SVO_DRY_SCENE_PARAMS_LAYOUT.planarBoundaryWordOffset);
-    const coneTracingMode = this.lightingOptions.coneTracingMode ?? "cones";
+    const coneTracingMode = this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode;
     // `off` strictly removes lighting-visibility work: with shadows and AO
     // held false no exact-ray flag is written either, and every visibility
     // entry point returns its unoccluded constant. `exact` keeps the bounded
@@ -6573,7 +6581,7 @@ export class SparseVoxelDrySceneRenderer {
         }
         lighting.setPipeline(this.splitOptimizedLightingPipeline && usePrepass
           && canUseOpaqueConeLighting(this.scene, {
-            coneMode: this.lightingOptions.coneTracingMode ?? "cones",
+            coneMode: this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode,
             hierarchyReady: this.derivedLightingReady(),
             globalIllumination: this.lightingOptions.globalIlluminationEnabled === true,
             reconstruction: this.renderTuning.coneRadianceReconstruction,

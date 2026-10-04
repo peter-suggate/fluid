@@ -428,14 +428,14 @@ export function cloneScene(scene: SceneDescription): SceneDescription {
 /**
  * The renderer-wide SVO surface policy.
  *
- * Voxel faces are the default for every scene, including documents authored
- * before `surfaceStyle` existed. `smooth` reconstructs a continuous raster mesh
+ * Smooth surfaces are the default, including documents authored before
+ * `surfaceStyle` existed. `smooth` reconstructs a continuous raster mesh
  * or a traced tangent surface from the cell's coverage and baked normal.
  */
 export function sceneUsesFlatVoxelNormals(
   scene: Pick<SceneDescription, "surfaceStyle">,
 ): boolean {
-  return scene.surfaceStyle !== "smooth";
+  return scene.surfaceStyle === "voxel-flat";
 }
 
 export function canonicalScene(scene: SceneDescription): string {
