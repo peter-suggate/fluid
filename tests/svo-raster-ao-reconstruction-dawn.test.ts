@@ -96,7 +96,7 @@ ${rasterCoarseAoWGSL}
     for (let i = 0; i < data.length; i += 4) data.set([.3, 2, 1, 0], i);
     device.queue.writeTexture({ texture: contact }, data, { bytesPerRow: 64 * 16 }, [64, 64]);
     device.queue.writeTexture({ texture: visibility }, new Float32Array(64 * 64).fill(.2), { bytesPerRow: 64 * 4 }, [64, 64]);
-    const params = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const params = device.createBuffer({ size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const values = new Float32Array(16); values.set([0, 0, 0, 4], 4); values.set([8, .01, 0, 0], 8); values.set([0, 0, 1, 1], 12);
     device.queue.writeBuffer(params, 0, values);
     const groups = [

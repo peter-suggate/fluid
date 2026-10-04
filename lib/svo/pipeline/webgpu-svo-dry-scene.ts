@@ -1,5 +1,5 @@
 import { SvoRasterAo, type RasterAoPipelines } from "../features/lighting-visibility/svo-raster-ao";
-import { canUseOpaqueConeLighting } from "../features/shading/deferred-specialization";
+import { canUseOpaqueConeLighting, canUseOpaqueRasterLighting } from "../features/shading/deferred-specialization";
 import type { SceneDescription } from "../../core/model";
 import {
 PLANAR_BOUNDARY_PATCH_BYTES
@@ -1375,6 +1375,7 @@ export class SparseVoxelDrySceneRenderer {
   private readonly tetrahedralRadianceBlackFallbackView: GPUTextureView;
   private readonly tetrahedralRadiancePageValidityFallback: GPUTexture;
   private readonly tetrahedralRadiancePageValidityFallbackView: GPUTextureView;
+  private boundRadiance?: SparseVoxelSceneRenderSource["tetrahedralRadiance"];
   private tetrahedralRadianceBlackPages?: GPUTexture;
   private tetrahedralRadianceBlackPagesView?: GPUTextureView;
   private readonly fluidCoverageFallback: GPUTexture;
@@ -1982,10 +1983,16 @@ export class SparseVoxelDrySceneRenderer {
    * decision here is idempotent against stale receipts because the GPU only
    * resumes when it sees the binding it asked for.
    */
+  private surfaceMeshShadowReceipt = "";
+
   private applySurfaceMeshReceipt(words: Uint32Array, arenaBytes: readonly [number, number]): void {
     const receipt = interpretSurfaceMeshState(words, { arenaBytes, maximumBytes: this.surfaceMeshMaximumBytes });
     const previous = this.surfaceMeshStatus;
     this.surfaceMeshStatus = receipt.status;
+    const shadowWords = SVO_SURFACE_MESH_STATE;
+    this.surfaceMeshShadowReceipt = [shadowWords.topologyRevision, shadowWords.geometryRevision,
+      shadowWords.frontCursor, shadowWords.front, shadowWords.builds,
+      shadowWords.consumedMaintenanceRevision, shadowWords.usable].map(index => words[index]).join(":");
     if (previous?.state === "ready" && receipt.status.state === "pending") this.surfaceMeshBuildPresentations = 0;
     const retireLater = (...buffers: (GPUBuffer | undefined)[]) => {
       const retire = () => { for (const buffer of buffers) buffer?.destroy(); };
@@ -3852,13 +3859,13 @@ export class SparseVoxelDrySceneRenderer {
       // shares the generic bundle; unsupported live publications switch back in
       // the same draw, with no asynchronous capability transition.
       let optimizedLighting: GPURenderPipeline | undefined;
-      if (scale !== 1 && !globalIlluminationCapable && this.experiments.specializedDeferredLighting) {
-        const optimizedModule = await checkedModule(this.device, "Opaque cone deferred lighting",
+      if ((scale !== 1 || this.experiments.rasterAo) && !globalIlluminationCapable && this.experiments.specializedDeferredLighting) {
+        const optimizedModule = await checkedModule(this.device, "Specialized opaque deferred lighting",
           createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split",
             this.screenSpaceTerminationPixels, false, false,
-            this.coneFanout, { ...shaderExperiments, opaqueConeLighting: true }));
+            this.coneFanout, { ...shaderExperiments, opaqueConeLighting: !this.experiments.rasterAo, opaqueRasterLighting: this.experiments.rasterAo }));
         optimizedLighting = await this.device.createRenderPipelineAsync({
-          label: "Opaque cone deferred lighting",
+          label: "Specialized opaque deferred lighting",
           layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout!, ...cacheConsumerLayouts] }),
           vertex: { module: vertexModule, entryPoint: "vertexMain" },
           fragment: { module: optimizedModule, entryPoint: "dryLightingMain", targets: [{ format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat }] },
@@ -4389,8 +4396,8 @@ export class SparseVoxelDrySceneRenderer {
     if (requested === "off") return { state: "off" };
     if (requested === "exact") return { state: "exact" };
     if (requested === "raster-ao") return { state: "raster-ao", detail: this.renderTuning.rasterCoarseAoStrength > 0
-      ? "Cached sun shadows + contact AO + experimental coarse voxel AO. Additional lights use exact shadows."
-      : "Cached sun shadows + local screen-space AO. Broad/offscreen AO is absent; additional lights use exact shadows." };
+      ? "Cached sun/spot shadows + contact AO + experimental coarse voxel AO. Unsupported lights use exact shadows."
+      : "Cached sun/spot shadows + local screen-space AO. Broad/offscreen AO is absent; unsupported lights use exact shadows." };
     if (this.derivedLightingReady()) return { state: "cones" };
     return {
       state: "exact",
@@ -4904,6 +4911,10 @@ export class SparseVoxelDrySceneRenderer {
   /** Attach only the mutable SVO acceleration source. Scene content publishes independently. */
   setSource(source: SparseVoxelSceneRenderSource | undefined): void {
     if (source === this.source) {
+      if (this.boundRadiance !== source?.tetrahedralRadiance) {
+        this.updateTetrahedralRadianceBlackPages(source?.tetrahedralRadiance);
+        this.rebuild();
+      }
       // A warm world-scale re-seed retains the sparse buffers but republishes
       // their metre mapping on the same source object. Refresh the uniforms
       // rather than treating object identity as proof that nothing changed.
@@ -5022,6 +5033,7 @@ export class SparseVoxelDrySceneRenderer {
   private updateTetrahedralRadianceBlackPages(
     radiance: SparseVoxelSceneRenderSource["tetrahedralRadiance"],
   ): void {
+    this.boundRadiance = radiance;
     this.tetrahedralRadianceBlackPages?.destroy();
     this.tetrahedralRadianceBlackPages = undefined;
     this.tetrahedralRadianceBlackPagesView = undefined;
@@ -5324,7 +5336,7 @@ export class SparseVoxelDrySceneRenderer {
     this.rasterAo?.update(structural.domain.worldOrigin_m,
       structural.domain.dimensionsCells.map((cells, axis) => cells * structural.domain.cellSize_m[axis]),
       structural.domain.cellSize_m, `${source.revision}/${scene.renderRevision}/${scene.lightRevision}/${Array.from(scene.lightRecords ?? []).join(",")}`,
-      scene.lightRecords ? Array.from(new Float32Array(scene.lightRecords.buffer, scene.lightRecords.byteOffset, scene.lightRecords.length).subarray(4, 7)) : [0, 1, 0]);
+      scene.lightRecords ? Array.from(new Float32Array(scene.lightRecords.buffer, scene.lightRecords.byteOffset, scene.lightRecords.length).subarray(4, 7)) : [0, 1, 0], scene.lightRecords);
     const materialCount = scene.materialRecords.byteLength / SVO_MATERIAL_RECORD_STRIDE_BYTES;
     const buffer = new ArrayBuffer(SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes), floats = new Float32Array(buffer), words = new Uint32Array(buffer);
     floats.set(structural.domain.worldOrigin_m, 0); words[3] = structural.domain.brickSize;
@@ -6108,6 +6120,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, tracePhase?: RenderFrameSeam<"svo">, bandPartitioner?: FrameBandPartitioner): DrySceneReplacementResult | false {
+    if (this.boundRadiance !== this.source?.tetrahedralRadiance) this.setSource(this.source);
     if ((!this.pipeline && !this.surfaceMeshPipelines) || !this.bindGroup) return false;
     // The coverage volume allocates lazily and only reports itself once a fill
     // has been encoded, so its validity flips mid-session. Refresh the frame
@@ -6394,7 +6407,9 @@ export class SparseVoxelDrySceneRenderer {
       if (this.rasterAo && this.rasterAoPipelines) {
         this.rasterAo.encode(encoder, this.rasterAoPipelines, this.bindGroup, this.surfaceMeshDrawGroup!,
           this.splitLightingBindGroup!, this.surfaceMeshState!, this.lightingOptions.ambientOcclusionEnabled, this.lightingOptions.shadowsEnabled,
-          () => tracePhase?.("raster-sun-shadows"), () => tracePhase?.("screen-contact-ao"));
+          () => tracePhase?.("raster-sun-shadows"), () => tracePhase?.("screen-contact-ao"),
+          this.experiments.rasterShadowPassReuse && this.surfaceMeshStatus?.state === "ready"
+            ? `${this.source?.revision}:${this.scene?.renderRevision}:${this.surfaceMeshShadowReceipt}` : undefined);
       }
 
       // Encode follows the ACTIVE bundle, never the requested option: its
@@ -6579,13 +6594,15 @@ export class SparseVoxelDrySceneRenderer {
           lighting.setPipeline(this.splitReconstructedLightingPipeline!);
           lighting.draw(3);
         }
-        lighting.setPipeline(this.splitOptimizedLightingPipeline && usePrepass
-          && canUseOpaqueConeLighting(this.scene, {
+        lighting.setPipeline(this.splitOptimizedLightingPipeline && (canUseOpaqueRasterLighting(this.scene, {
+            coneMode: this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode,
+            globalIllumination: this.lightingOptions.globalIlluminationEnabled === true,
+          }) || usePrepass && canUseOpaqueConeLighting(this.scene, {
             coneMode: this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode,
             hierarchyReady: this.derivedLightingReady(),
             globalIllumination: this.lightingOptions.globalIlluminationEnabled === true,
             reconstruction: this.renderTuning.coneRadianceReconstruction,
-          }) ? this.splitOptimizedLightingPipeline : this.splitLightingPipeline!);
+          })) ? this.splitOptimizedLightingPipeline : this.splitLightingPipeline!);
         lighting.draw(3);
       }
       lighting.end();

@@ -460,6 +460,8 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
   stageLivePrimitiveUpdates(updates: readonly SparseScenePrimitiveUpdate[]): boolean {
     return this.world.stageLivePrimitiveUpdates(updates);
   }
+  setRadianceEnabled(enabled: boolean): void { this.world.setRadianceEnabled(enabled); }
+
   encodeSceneMaintenance(encoder: GPUCommandEncoder, seam?: RenderFrameSeam<"world">): boolean {
     return this.world.encodeSceneMaintenance(encoder, false, seam);
   }

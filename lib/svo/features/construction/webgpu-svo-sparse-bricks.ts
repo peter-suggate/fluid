@@ -1264,6 +1264,7 @@ export class OctreeSparseBrickWorld {
   private liveDerivedFeedbackPhase = 0;
   private liveDerivedFeedbackFramesRemaining = 0;
   private liveDerivedInitial = true;
+  private radianceEnabled = true;
   /** The scene's one word about what its surfaces are made of; see the ABI. */
   private surfaceModel!: SvoTerrainSurfaceModel;
   private solidWorld!: SolidWorld;
@@ -3201,6 +3202,12 @@ export class OctreeSparseBrickWorld {
     // its first publication; stopping immediately freezes phase 0 and exposes
     // its quarter-leaf pattern, while running forever makes a complex hero
     // scene visibly breathe and spends GPU time after convergence.
+    if (!encoded && !deferDerived && this.liveDerivedInitial && this.liveDerivedAddressPlanValid
+      && this.liveDerivedPlanner && this.liveDerivedBuilder) {
+      seam?.("world-proxy-voxelize");
+      this.encodeLiveDerivedMaintenance(encoder, seam);
+      return true;
+    }
     if (!encoded) {
       // The settled path, and the one the render panel spends most of its life
       // reporting: nothing was voxelized this frame. Both remaining seams still
@@ -3227,6 +3234,15 @@ export class OctreeSparseBrickWorld {
     return true;
   }
 
+  /** Withdraw radiance immediately; restoring it requires a complete ordered rebuild. */
+  setRadianceEnabled(enabled: boolean): void {
+    if (enabled === this.radianceEnabled) return;
+    this.radianceEnabled = enabled;
+    this.sceneSource.tetrahedralRadiance = undefined;
+    this.liveDerivedFeedbackFramesRemaining = 0;
+    if (enabled) this.liveDerivedInitial = true;
+  }
+
   private encodeLiveDerivedMaintenance(
     encoder: GPUCommandEncoder,
     seam?: RenderFrameSeam<"world">,
@@ -3239,15 +3255,15 @@ export class OctreeSparseBrickWorld {
     const initializeEmpty = this.liveDerivedInitial;
     if (initializeEmpty) this.liveDerivedPlanner.encodeInitial(encoder);
     else this.liveDerivedPlanner.encode(encoder);
-    this.liveDerivedBuilder.encode(encoder, initializeEmpty);
-    this.liveDerivedFeedbackFramesRemaining = this.liveDerivedBuilder.radianceFeedbackEnabled
+    this.liveDerivedBuilder.encode(encoder, initializeEmpty, this.radianceEnabled);
+    this.liveDerivedFeedbackFramesRemaining = this.radianceEnabled && this.liveDerivedBuilder.radianceFeedbackEnabled
       ? LIVE_SVO_RADIANCE_FEEDBACK.settleFrameCount : 0;
     seam?.("world-derived-lighting");
     this.encodeLiveRadianceFeedback(encoder);
     seam?.("world-radiance-feedback");
     this.liveDerivedInitial = false;
     const nodeMip = this.nodeMipPyramid?.visibleGeneration();
-    const radiance = this.tetrahedralRadiance?.visibleGeneration();
+    const radiance = this.radianceEnabled ? this.tetrahedralRadiance?.visibleGeneration() : undefined;
     this.sceneSource.nodeMipPyramid = nodeMip && {
       ...nodeMip,
       worldOrigin_m: this.sceneWorldOrigin,
@@ -3257,7 +3273,7 @@ export class OctreeSparseBrickWorld {
   }
 
   private encodeLiveRadianceFeedback(encoder: GPUCommandEncoder): boolean {
-    if (this.liveDerivedFeedbackFramesRemaining <= 0 || !this.liveDerivedAddressPlanValid
+    if (!this.radianceEnabled || this.liveDerivedFeedbackFramesRemaining <= 0 || !this.liveDerivedAddressPlanValid
       || !this.liveDerivedPlanner || !this.liveDerivedBuilder?.radianceFeedbackEnabled) {
       return false;
     }

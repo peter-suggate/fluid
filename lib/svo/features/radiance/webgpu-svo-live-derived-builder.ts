@@ -749,6 +749,7 @@ export function liveSvoDerivedBuildWGSLFor(
   bandedReconstructionCellSize_m?: readonly [number, number, number],
   /** How the world stores scene identity. Decides which identity decode compiles. */
   leafPayloadMode: SparseBrickLeafPayloadMode = "dense",
+  includeRadiance = true,
 ): string {
   const lane = derivedLaneAccess(profile, sceneGeometryFormat, leafPayloadMode);
   const solidDistance = derivedSolidDistanceWGSL(lane, bandedReconstructionCellSize_m);
@@ -902,12 +903,12 @@ fn buildPages(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) 
   let radianceDestination=radianceScratchOrigin(recordIndex)+physical;
   let level=worklist[2];let floorLevel=radianceFloorLevel();
   if(level==0u){
-    if(all(physical==vec3u(0u))){scratchValidity[recordIndex]=worklist[1];}let page=vec3u(worklist[record+1u],worklist[record+2u],worklist[record+3u]);let octant=(local.x/4u)|((local.y/4u)<<1u)|((local.z/4u)<<2u);let leaf=worklist[record+${LIVE_SVO_DERIVED_WORKLIST.sourceLeafWord}u+octant];if(leaf>=control[1]){textureStore(opacityScratch,destination,vec4f(0.));if(floorLevel==0u){writeRadiance(radianceDestination,vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.));}return;}let sampleLocal=leafLocal(page*INTERIOR+local,leaf);
+    if(all(physical==vec3u(0u))){scratchValidity[recordIndex]=worklist[1];}let page=vec3u(worklist[record+1u],worklist[record+2u],worklist[record+3u]);let octant=(local.x/4u)|((local.y/4u)<<1u)|((local.z/4u)<<2u);let leaf=worklist[record+${LIVE_SVO_DERIVED_WORKLIST.sourceLeafWord}u+octant];if(leaf>=control[1]){textureStore(opacityScratch,destination,vec4f(0.));if(${includeRadiance}&&floorLevel==0u){writeRadiance(radianceDestination,vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.));}return;}let sampleLocal=leafLocal(page*INTERIOR+local,leaf);
     let voxel=leafVoxel(leaf,sampleLocal);let dynamicIdentity=${lane.dynamicIdentity};let sceneIdentity=sceneIdentityAt(voxel);
     let dynamicSolid=${lane.dynamicCoverage};let sceneSolid=${lane.sceneCoverage};
     ${opacity.fluid ? `let fluid=${lane.fluidFraction};` : ""}let solid=1.-(1.-dynamicSolid)*(1.-sceneSolid);
     textureStore(opacityScratch,destination,${opacity.storeBase});
-    if(floorLevel!=0u){return;}
+    if(!${includeRadiance}||floorLevel!=0u){return;}
     let material=select(dynamicIdentity&0xffffu,sceneIdentity&0xffffu,sceneSolid>=dynamicSolid&&sceneSolid>0.);var emitted=vec3f(0.);
     if(material<arrayLength(&emission)){emitted=max(emission[material].rgb,vec3f(0.));}
     let normal=safeNormal(leaf,sampleLocal);let covered=solid;
@@ -919,16 +920,16 @@ fn buildPages(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) 
   // One layout at every level: the coordinate every parent now needs to resolve
   // a leaf-tagged child is where the radiance floor always kept it.
   let childBase=${LIVE_SVO_DERIVED_WORKLIST.childSlotWord}u;
-  if(all(physical==vec3u(0u))){scratchValidity[recordIndex]=select(0u,worklist[1],referencedChildrenReady(record,childBase,level>floorLevel));}
+  if(all(physical==vec3u(0u))){scratchValidity[recordIndex]=select(0u,worklist[1],referencedChildrenReady(record,childBase,${includeRadiance}&&level>floorLevel));}
   var mean=vec2f(0.);var maximum=vec2f(0.);var r0=vec3f(0.);var r1=vec3f(0.);var r2=vec3f(0.);var r3=vec3f(0.);
   for(var child=0u;child<8u;child+=1u){let value=childSample(record,childBase,local,child);mean+=value.xz/8.;maximum=max(maximum,value.yw);}
-  if(level>floorLevel){
+  if(${includeRadiance}&&level>floorLevel){
     for(var child=0u;child<8u;child+=1u){
       r0+=childRadiance(record,local,child,0u)/8.;r1+=childRadiance(record,local,child,1u)/8.;
       r2+=childRadiance(record,local,child,2u)/8.;r3+=childRadiance(record,local,child,3u)/8.;}
   }
   textureStore(opacityScratch,destination,${opacity.storeParent});
-  if(level<floorLevel){return;}
+  if(!${includeRadiance}||level<floorLevel){return;}
   if(radianceBase){
     let page=vec3u(worklist[record+1u],worklist[record+2u],worklist[record+3u]);
     let scale=1u<<level;
@@ -1153,12 +1154,13 @@ struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOf
   textureStore(radianceValidity,svoDerivedPageValidityTexel(textureDimensions(radianceValidity),slot),vec4u(generation));
 }`;
 
-interface LevelBindings { worklist: LiveSvoDerivedGpuWorklist; invalidate: GPUBindGroup; build: GPUBindGroup; feedback?: GPUBindGroup; opacityCopy: GPUBindGroup; radianceCopy: readonly GPUBindGroup[] }
+interface LevelBindings { worklist: LiveSvoDerivedGpuWorklist; invalidate: GPUBindGroup; build: GPUBindGroup; opacityBuild: GPUBindGroup; feedback?: GPUBindGroup; opacityCopy: GPUBindGroup; radianceCopy: readonly GPUBindGroup[] }
 
 interface LiveSvoDerivedBuilderPipelineState {
   emptyInitializationPipeline: GPUComputePipeline;
   emptyInitializationBindGroup: GPUBindGroup;
   buildPipeline: GPUComputePipeline;
+  opacityBuildPipeline: GPUComputePipeline;
   feedbackPipeline?: GPUComputePipeline;
   invalidatePipeline: GPUComputePipeline;
   opacityCopyPipeline: GPUComputePipeline;
@@ -1389,6 +1391,12 @@ export class WebGpuLiveSvoDerivedBuilder {
       Promise.all([0, 1, 2, 3].map((lobe) => device.createComputePipelineAsync({ label: `${label} radiance copy ${lobe} pipeline`,
         layout: "auto", compute: { module: copyModule, entryPoint: `copyRadiance${lobe}` } }))),
     ]);
+    const opacityBuildPipeline = await device.createComputePipelineAsync({
+      label: `${label} opacity-only pipeline`, layout: "auto",
+      compute: { module: device.createShaderModule({ code: liveSvoDerivedBuildWGSLFor(
+        profile, this.radianceFormat, this.opacityFormat, sceneGeometry, bandedCellSize,
+        options.tree.leafPayloadMode, false) }), entryPoint: "buildPages" },
+    });
     if (this.destroyed) throw new Error("Live SVO derived builder was destroyed during pipeline initialization");
     const emptyInitializationBindGroup = device.createBindGroup({
       layout: emptyInitializationPipeline.getBindGroupLayout(0), entries: [
@@ -1409,6 +1417,16 @@ export class WebGpuLiveSvoDerivedBuilder {
         { binding: 7, resource: { buffer: this.params } },
       ] }),
       build: device.createBindGroup({ layout: buildPipeline.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } }, { binding: 1, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } },
+        { binding: 2, resource: { buffer: options.tree.payload } }, { binding: 3, resource: { buffer: worklist.buffer, offset: worklist.bindingOffsetBytes ?? 0, size: worklist.bindingSizeBytes } },
+        { binding: 4, resource: { buffer: options.materialEmission } }, { binding: 5, resource: options.nodeMips.texture.createView({ dimension: "3d" }) },
+        { binding: 6, resource: this.opacityScratch.createView({ dimension: "3d" }) },
+        ...targetRadianceViews.map((resource, index) => ({ binding: 7 + index, resource })),
+        { binding: 11, resource: radianceScratchView }, { binding: 12, resource: { buffer: this.params } },
+        { binding: 13, resource: options.nodeMips.pageValidity.view }, { binding: 14, resource: options.radiance.pageValidity.view },
+        { binding: 15, resource: { buffer: this.scratchValidity } },
+      ] }),
+      opacityBuild: device.createBindGroup({ layout: opacityBuildPipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } }, { binding: 1, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } },
         { binding: 2, resource: { buffer: options.tree.payload } }, { binding: 3, resource: { buffer: worklist.buffer, offset: worklist.bindingOffsetBytes ?? 0, size: worklist.bindingSizeBytes } },
         { binding: 4, resource: { buffer: options.materialEmission } }, { binding: 5, resource: options.nodeMips.texture.createView({ dimension: "3d" }) },
@@ -1445,11 +1463,11 @@ export class WebGpuLiveSvoDerivedBuilder {
         { binding: 7, resource: { buffer: this.params } }, { binding: 8, resource: { buffer: this.scratchValidity } },
       ] })),
     }));
-    return { emptyInitializationPipeline, emptyInitializationBindGroup, buildPipeline, feedbackPipeline, invalidatePipeline,
+    return { emptyInitializationPipeline, emptyInitializationBindGroup, buildPipeline, opacityBuildPipeline, feedbackPipeline, invalidatePipeline,
       opacityCopyPipeline, radianceCopyPipelines, levels };
   }
 
-  encode(encoder: GPUCommandEncoder, initializeEmpty = false): void {
+  encode(encoder: GPUCommandEncoder, initializeEmpty = false, includeRadiance = true): void {
     if (this.destroyed) return;
     const state = this.pipelineState;
     if (!state) throw new Error("Live SVO derived builder pipelines are not initialized");
@@ -1469,10 +1487,10 @@ export class WebGpuLiveSvoDerivedBuilder {
     for (const level of state.levels) {
       const indirect = level.worklist.indirectOffsetBytes ?? (level.worklist.bindingOffsetBytes ?? 0) + LIVE_SVO_DERIVED_WORKLIST.dispatchIndirectOffsetBytes;
       const build = encoder.beginComputePass({ label: "Build live SVO derived pages" });
-      build.setPipeline(state.buildPipeline); build.setBindGroup(0, level.build); build.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); build.end();
+      build.setPipeline(includeRadiance ? state.buildPipeline : state.opacityBuildPipeline); build.setBindGroup(0, includeRadiance ? level.build : level.opacityBuild); build.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); build.end();
       const opacity = encoder.beginComputePass({ label: "Publish live SVO opacity pages" });
       opacity.setPipeline(state.opacityCopyPipeline); opacity.setBindGroup(0, level.opacityCopy); opacity.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); opacity.end();
-      state.radianceCopyPipelines.forEach((pipeline, lobe) => {
+      if (includeRadiance) state.radianceCopyPipelines.forEach((pipeline, lobe) => {
         const radiance = encoder.beginComputePass({ label: `Publish live SVO radiance lobe ${lobe}` });
         radiance.setPipeline(pipeline); radiance.setBindGroup(0, level.radianceCopy[lobe]);
         radiance.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); radiance.end();

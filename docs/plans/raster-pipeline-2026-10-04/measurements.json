@@ -1,0 +1,4753 @@
+{
+  "stationary": {
+    "results": [
+      {
+        "arm": "pipeline-baseline",
+        "gpuBatchMedians_ms": [
+          4.718592,
+          4.718592,
+          4.718592,
+          4.718592
+        ],
+        "gpuMedian_ms": 4.718592,
+        "wallBatchMedians_ms": [
+          5.377791999999317,
+          5.190583999999944,
+          5.295292000002519,
+          5.3446249999979045
+        ],
+        "wallMedian_ms": 5.319958500000212,
+        "gpuReduction_percent": 0.0
+      },
+      {
+        "arm": "pipeline-shader",
+        "gpuBatchMedians_ms": [
+          4.063232,
+          4.063232,
+          4.063232,
+          4.063232
+        ],
+        "gpuMedian_ms": 4.063232,
+        "wallBatchMedians_ms": [
+          4.502667000000656,
+          4.659958000000188,
+          4.589332999999897,
+          4.743582999995851
+        ],
+        "wallMedian_ms": 4.624645500000042,
+        "gpuReduction_percent": 13.888888888888884
+      },
+      {
+        "arm": "pipeline-shadow",
+        "gpuBatchMedians_ms": [
+          4.653056,
+          4.653056,
+          4.653056,
+          4.653056
+        ],
+        "gpuMedian_ms": 4.653056,
+        "wallBatchMedians_ms": [
+          5.210166000000754,
+          5.158957999999984,
+          5.239375000001019,
+          5.290583000001789
+        ],
+        "wallMedian_ms": 5.224770500000886,
+        "gpuReduction_percent": 1.388888888888884
+      },
+      {
+        "arm": "pipeline-opacity",
+        "gpuBatchMedians_ms": [
+          4.718592,
+          4.718592,
+          4.718592,
+          4.718592
+        ],
+        "gpuMedian_ms": 4.718592,
+        "wallBatchMedians_ms": [
+          5.194250000000466,
+          5.220083000000159,
+          5.122209000001021,
+          5.535209000001487
+        ],
+        "wallMedian_ms": 5.207166500000312,
+        "gpuReduction_percent": 0.0
+      },
+      {
+        "arm": "pipeline-production",
+        "gpuBatchMedians_ms": [
+          4.063232,
+          4.063232,
+          4.063232,
+          4.063232
+        ],
+        "gpuMedian_ms": 4.063232,
+        "wallBatchMedians_ms": [
+          4.627124999999069,
+          4.667582999998558,
+          4.554291999997076,
+          4.737167000002955
+        ],
+        "wallMedian_ms": 4.647353999998813,
+        "gpuReduction_percent": 13.888888888888884
+      },
+      {
+        "arm": "pipeline-combined",
+        "gpuBatchMedians_ms": [
+          3.997696,
+          3.997696,
+          3.997696,
+          3.997696
+        ],
+        "gpuMedian_ms": 3.997696,
+        "wallBatchMedians_ms": [
+          4.4131669999987935,
+          4.5413750000006985,
+          4.5729580000006536,
+          4.729666999999608
+        ],
+        "wallMedian_ms": 4.557166500000676,
+        "gpuReduction_percent": 15.277777777777779
+      }
+    ],
+    "images": {
+      "pipeline-baseline": {
+        "changedPixels": 0,
+        "changedChannels": 0,
+        "maxAbsoluteChannelDifference": 0,
+        "depthDifferences": 0
+      },
+      "pipeline-shader": {
+        "changedPixels": 4,
+        "changedChannels": 4,
+        "maxAbsoluteChannelDifference": 0.0001220703125,
+        "depthDifferences": 0
+      },
+      "pipeline-shadow": {
+        "changedPixels": 0,
+        "changedChannels": 0,
+        "maxAbsoluteChannelDifference": 0,
+        "depthDifferences": 0
+      },
+      "pipeline-opacity": {
+        "changedPixels": 0,
+        "changedChannels": 0,
+        "maxAbsoluteChannelDifference": 0,
+        "depthDifferences": 0
+      },
+      "pipeline-production": {
+        "changedPixels": 4,
+        "changedChannels": 4,
+        "maxAbsoluteChannelDifference": 0.0001220703125,
+        "depthDifferences": 0
+      },
+      "pipeline-combined": {
+        "changedPixels": 4,
+        "changedChannels": 4,
+        "maxAbsoluteChannelDifference": 0.0001220703125,
+        "depthDifferences": 0
+      }
+    },
+    "provenance": {
+      "adapterInfo": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "depth": 1,
+      "rasterAo": true,
+      "optimizationTrials": {
+        "specialized": true,
+        "shadowReuse": false,
+        "opacityOnly": false
+      },
+      "scene": "hero-garden-hose-x10",
+      "surfaceStyle": "smooth",
+      "width": 1600,
+      "height": 920,
+      "tuning": {
+        "resolutionScale": 1,
+        "environmentBrickRefinementLevels": 1,
+        "environmentRefinementDepth": 0,
+        "backdropRefinedRings": 0,
+        "environmentPlanarRefinementExemption": false,
+        "coneLightingScale": 0.5,
+        "sunlightCacheEnabled": false,
+        "waterShadowsEnabled": false,
+        "coneRadianceReconstruction": "full-res-relight",
+        "lodMode": "screen-space",
+        "lodScreenSpacePixels": 0,
+        "lodFixedLevel": 21,
+        "surfaceMeshLodPixels": 1,
+        "surfaceMeshFilteringEnabled": false,
+        "surfaceMeshNormalSmoothing": true,
+        "surfaceMeshNormalStrength": 1,
+        "surfaceMeshMaxCoarsening": 0,
+        "surfaceMeshLodHysteresis": 0.15,
+        "surfaceMeshNormalAgreement": 0.5,
+        "surfaceMeshing": "dual-marching-cubes",
+        "surfaceMeshContours": false,
+        "surfaceMeshContourInflation": 0,
+        "surfaceMeshPreserveCloseNormals": true,
+        "primaryLeafVisits": 128,
+        "coneStepBudget": 48,
+        "maximumShadedLights": 8,
+        "stableAreaLightSamples": 2,
+        "movingAreaLightSamples": 2,
+        "stableAoSamples": 4,
+        "movingAoSamples": 4,
+        "visibilityNodeVisits": 128,
+        "visibilityLeafVisits": 32,
+        "visibilityWorkItems": 1024,
+        "visibilityIntersections": 4,
+        "shadowBiasCells": 0.02,
+        "shadowStrength": 1,
+        "aoRadiusScale": 1,
+        "aoStrength": 1,
+        "rasterCoarseAoStrength": 0.6,
+        "aoConeAperture": 0.62,
+        "shadowConeAperture": 0.065,
+        "giBounceStrength": 0,
+        "giOcclusionStrength": 0.65,
+        "giEnvironmentStrength": 0.85,
+        "giDirectStrength": 1,
+        "giConeAperture": 1.05,
+        "giConeCount": 4,
+        "coneNormalEscapeCells": 0.5,
+        "coneEmitterClearanceCells": 3,
+        "nearFieldBandPixels": 0,
+        "nearFieldBandHysteresis": 0.8,
+        "nearFieldBandBudget": 256
+      },
+      "provenance": {
+        "lib/svo/features/shading/program.ts": "1abfde5c6cbe140347ccdefcedc9a73daf879a19a5d622e000de87fdcbbe3c24",
+        "lib/svo/features/lighting-visibility/svo-raster-ao.ts": "b16aa874eaff4e5979a2080c84c9dcb8d5bcc27b8ef861370fbf9de931997aa2",
+        "lib/svo/features/lighting-visibility/webgpu-svo-cone-fanout.ts": "d571deaa91f0254dd132a9d1e373004807768fd166008fd6a7d28597833b11e6",
+        "lib/svo/pipeline/webgpu-svo-dry-scene.ts": "35bbbbb88ef8e1db65eea41872cd92a5ea776c460cee72a1e7a849fce4f5a667",
+        "lib/svo/pipeline/svo-render-tuning.ts": "db1bb51ca959b8fdeb64a5f3ebd8c89bbe71482b4d49f9bc06e820012b587a3a",
+        "lib/core/webgpu-renderer.ts": "85e8c1dcbff0f207462894e90cbb721a300bbd6981d261c6693bfd0d999a6c12",
+        "tools/explore-hero-render-budget.ts": "b9445047e4d7192cc29eb95a6dd9b01c275e8bc2f482c9e0f736c24510a283c2"
+      },
+      "mesh": [
+        4,
+        240702,
+        0,
+        0,
+        1308367,
+        0,
+        0,
+        1,
+        20444,
+        1,
+        1,
+        0,
+        1,
+        1,
+        23217,
+        0
+      ]
+    }
+  },
+  "moving": {
+    "results": [
+      {
+        "arm": "pipeline-baseline",
+        "gpuBatchMedians_ms": [
+          4.784128,
+          4.718592,
+          4.718592,
+          4.784128
+        ],
+        "gpuMedian_ms": 4.75136,
+        "wallBatchMedians_ms": [
+          5.318125000001601,
+          5.299624999999651,
+          5.184333999997762,
+          5.081124999996973
+        ],
+        "wallMedian_ms": 5.241979499998706,
+        "gpuReduction_percent": 0.0
+      },
+      {
+        "arm": "pipeline-production",
+        "gpuBatchMedians_ms": [
+          4.128768,
+          4.128768,
+          4.128768,
+          4.128768
+        ],
+        "gpuMedian_ms": 4.128768,
+        "wallBatchMedians_ms": [
+          4.505667000001267,
+          4.48462500000096,
+          4.466666000000259,
+          4.610499999998865
+        ],
+        "wallMedian_ms": 4.495146000001114,
+        "gpuReduction_percent": 13.103448275862073
+      },
+      {
+        "arm": "pipeline-combined",
+        "gpuBatchMedians_ms": [
+          4.063232,
+          4.063232,
+          4.063232,
+          4.063232
+        ],
+        "gpuMedian_ms": 4.063232,
+        "wallBatchMedians_ms": [
+          4.469707999996899,
+          4.519209000001865,
+          4.433791999999812,
+          4.478624999999738
+        ],
+        "wallMedian_ms": 4.474166499998319,
+        "gpuReduction_percent": 14.482758620689651
+      }
+    ],
+    "images": {
+      "pipeline-baseline": {
+        "changedPixels": 0,
+        "changedChannels": 0,
+        "maxAbsoluteChannelDifference": 0,
+        "depthDifferences": 0
+      },
+      "pipeline-production": {
+        "changedPixels": 3,
+        "changedChannels": 3,
+        "maxAbsoluteChannelDifference": 0.00048828125,
+        "depthDifferences": 0
+      },
+      "pipeline-combined": {
+        "changedPixels": 3,
+        "changedChannels": 3,
+        "maxAbsoluteChannelDifference": 0.00048828125,
+        "depthDifferences": 0
+      }
+    },
+    "provenance": {
+      "adapterInfo": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "depth": 1,
+      "rasterAo": true,
+      "optimizationTrials": {
+        "specialized": true,
+        "shadowReuse": false,
+        "opacityOnly": false
+      },
+      "scene": "hero-garden-hose-x10",
+      "surfaceStyle": "smooth",
+      "width": 1600,
+      "height": 920,
+      "tuning": {
+        "resolutionScale": 1,
+        "environmentBrickRefinementLevels": 1,
+        "environmentRefinementDepth": 0,
+        "backdropRefinedRings": 0,
+        "environmentPlanarRefinementExemption": false,
+        "coneLightingScale": 0.5,
+        "sunlightCacheEnabled": false,
+        "waterShadowsEnabled": false,
+        "coneRadianceReconstruction": "full-res-relight",
+        "lodMode": "screen-space",
+        "lodScreenSpacePixels": 0,
+        "lodFixedLevel": 21,
+        "surfaceMeshLodPixels": 1,
+        "surfaceMeshFilteringEnabled": false,
+        "surfaceMeshNormalSmoothing": true,
+        "surfaceMeshNormalStrength": 1,
+        "surfaceMeshMaxCoarsening": 0,
+        "surfaceMeshLodHysteresis": 0.15,
+        "surfaceMeshNormalAgreement": 0.5,
+        "surfaceMeshing": "dual-marching-cubes",
+        "surfaceMeshContours": false,
+        "surfaceMeshContourInflation": 0,
+        "surfaceMeshPreserveCloseNormals": true,
+        "primaryLeafVisits": 128,
+        "coneStepBudget": 48,
+        "maximumShadedLights": 8,
+        "stableAreaLightSamples": 2,
+        "movingAreaLightSamples": 2,
+        "stableAoSamples": 4,
+        "movingAoSamples": 4,
+        "visibilityNodeVisits": 128,
+        "visibilityLeafVisits": 32,
+        "visibilityWorkItems": 1024,
+        "visibilityIntersections": 4,
+        "shadowBiasCells": 0.02,
+        "shadowStrength": 1,
+        "aoRadiusScale": 1,
+        "aoStrength": 1,
+        "rasterCoarseAoStrength": 0.6,
+        "aoConeAperture": 0.62,
+        "shadowConeAperture": 0.065,
+        "giBounceStrength": 0,
+        "giOcclusionStrength": 0.65,
+        "giEnvironmentStrength": 0.85,
+        "giDirectStrength": 1,
+        "giConeAperture": 1.05,
+        "giConeCount": 4,
+        "coneNormalEscapeCells": 0.5,
+        "coneEmitterClearanceCells": 3,
+        "nearFieldBandPixels": 0,
+        "nearFieldBandHysteresis": 0.8,
+        "nearFieldBandBudget": 256
+      },
+      "provenance": {
+        "lib/svo/features/shading/program.ts": "1abfde5c6cbe140347ccdefcedc9a73daf879a19a5d622e000de87fdcbbe3c24",
+        "lib/svo/features/lighting-visibility/svo-raster-ao.ts": "b16aa874eaff4e5979a2080c84c9dcb8d5bcc27b8ef861370fbf9de931997aa2",
+        "lib/svo/features/lighting-visibility/webgpu-svo-cone-fanout.ts": "d571deaa91f0254dd132a9d1e373004807768fd166008fd6a7d28597833b11e6",
+        "lib/svo/pipeline/webgpu-svo-dry-scene.ts": "35bbbbb88ef8e1db65eea41872cd92a5ea776c460cee72a1e7a849fce4f5a667",
+        "lib/svo/pipeline/svo-render-tuning.ts": "db1bb51ca959b8fdeb64a5f3ebd8c89bbe71482b4d49f9bc06e820012b587a3a",
+        "lib/core/webgpu-renderer.ts": "85e8c1dcbff0f207462894e90cbb721a300bbd6981d261c6693bfd0d999a6c12",
+        "tools/explore-hero-render-budget.ts": "b9445047e4d7192cc29eb95a6dd9b01c275e8bc2f482c9e0f736c24510a283c2"
+      },
+      "mesh": [
+        4,
+        240702,
+        0,
+        0,
+        1308367,
+        0,
+        0,
+        1,
+        20444,
+        1,
+        1,
+        0,
+        1,
+        1,
+        23217,
+        0
+      ]
+    }
+  },
+  "derivedRebuild": {
+    "rawTrials": [
+      {
+        "repetition": 0,
+        "radiance": true,
+        "wall_ms": 25.508208000001105,
+        "reading": {
+          "passes": [
+            {
+              "label": "Populate live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0.458752,
+              "duration_ms": 0.458752,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Finalize live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Certify live SVO address pages as empty",
+              "kind": "compute",
+              "begin_ms": 3.670016,
+              "end_ms": 3.670016,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.24288,
+              "end_ms": 5.24288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.24288,
+              "end_ms": 5.24288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.308416,
+              "end_ms": 5.308416,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.373952,
+              "end_ms": 5.373952,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.373952,
+              "end_ms": 5.373952,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.439488,
+              "end_ms": 5.439488,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.505024,
+              "end_ms": 5.505024,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.505024,
+              "end_ms": 5.505024,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.57056,
+              "end_ms": 5.57056,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.57056,
+              "end_ms": 5.57056,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.57056,
+              "end_ms": 5.636096,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 11.075584,
+              "end_ms": 12.255232,
+              "duration_ms": 1.179648,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 13.238272,
+              "duration_ms": 0.98304,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 13.238272,
+              "end_ms": 13.369344,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 13.369344,
+              "end_ms": 13.43488,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 13.43488,
+              "end_ms": 13.500416,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 13.500416,
+              "end_ms": 13.631488,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 13.631488,
+              "end_ms": 14.942208,
+              "duration_ms": 1.31072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 14.942208,
+              "end_ms": 15.138816,
+              "duration_ms": 0.196608,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 15.138816,
+              "end_ms": 15.204352,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 15.204352,
+              "end_ms": 15.204352,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 15.269888,
+              "end_ms": 15.269888,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 15.269888,
+              "end_ms": 15.335424,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 15.335424,
+              "end_ms": 16.252928,
+              "duration_ms": 0.917504,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 16.252928,
+              "end_ms": 16.384,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 16.384,
+              "end_ms": 16.449536,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 16.449536,
+              "end_ms": 16.449536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 16.449536,
+              "end_ms": 16.515072,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 16.515072,
+              "end_ms": 16.515072,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 16.515072,
+              "end_ms": 18.219008,
+              "duration_ms": 1.703936,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 18.284544,
+              "end_ms": 18.35008,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 18.415616,
+              "end_ms": 18.481152,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 18.481152,
+              "end_ms": 18.612224,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 18.612224,
+              "end_ms": 18.743296,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 18.743296,
+              "end_ms": 18.874368,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 18.874368,
+              "end_ms": 20.054016,
+              "duration_ms": 1.179648,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 20.119552,
+              "end_ms": 20.185088,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 20.250624,
+              "end_ms": 20.381696,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 20.381696,
+              "end_ms": 20.512768,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 20.512768,
+              "end_ms": 20.64384,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 20.64384,
+              "end_ms": 20.774912,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 20.774912,
+              "end_ms": 21.102592,
+              "duration_ms": 0.32768,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 21.168128,
+              "end_ms": 21.168128,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 21.168128,
+              "end_ms": 21.233664,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 21.233664,
+              "end_ms": 21.233664,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 21.233664,
+              "end_ms": 21.2992,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 21.2992,
+              "end_ms": 21.2992,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 21.364736,
+              "end_ms": 21.430272,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 21.430272,
+              "end_ms": 21.495808,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 21.495808,
+              "end_ms": 21.495808,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 21.495808,
+              "end_ms": 21.495808,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 21.495808,
+              "end_ms": 21.561344,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 21.561344,
+              "end_ms": 21.561344,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 21.561344,
+              "end_ms": 21.561344,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 21.62688,
+              "end_ms": 21.62688,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 21.62688,
+              "end_ms": 21.62688,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 21.62688,
+              "end_ms": 21.692416,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 21.692416,
+              "end_ms": 21.692416,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 21.692416,
+              "end_ms": 21.692416,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 21.692416,
+              "end_ms": 21.757952,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 21.757952,
+              "end_ms": 21.757952,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 21.823488,
+              "end_ms": 21.823488,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 21.823488,
+              "end_ms": 21.823488,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 21.823488,
+              "end_ms": 21.823488,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 21.823488,
+              "end_ms": 21.889024,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 21.889024,
+              "end_ms": 21.889024,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 21.95456,
+              "end_ms": 21.95456,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 21.95456,
+              "end_ms": 21.95456,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 21.95456,
+              "end_ms": 21.95456,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 21.95456,
+              "end_ms": 22.020096,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 22.020096,
+              "end_ms": 22.020096,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 22.020096,
+              "end_ms": 22.085632,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 22.085632,
+              "end_ms": 22.085632,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 22.085632,
+              "end_ms": 22.085632,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 22.085632,
+              "end_ms": 22.151168,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 22.151168,
+              "end_ms": 22.151168,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 22.151168,
+              "end_ms": 22.151168,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            }
+          ],
+          "span_ms": 22.151168,
+          "sum_ms": 10.944511999999996,
+          "trustedSum_ms": 10.944511999999996,
+          "overlap": 0.49408284023668625,
+          "sampledPassCount": 80,
+          "untrustedPassCount": 0
+        }
+      },
+      {
+        "repetition": 0,
+        "radiance": false,
+        "wall_ms": 7.802958000000217,
+        "reading": {
+          "passes": [
+            {
+              "label": "Populate live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0.458752,
+              "duration_ms": 0.458752,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Finalize live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0.458752,
+              "end_ms": 0.458752,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Certify live SVO address pages as empty",
+              "kind": "compute",
+              "begin_ms": 0.065536,
+              "end_ms": 0.065536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 1.6384,
+              "duration_ms": 0.917504,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 1.703936,
+              "end_ms": 2.228224,
+              "duration_ms": 0.524288,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 2.29376,
+              "end_ms": 3.473408,
+              "duration_ms": 1.179648,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 3.538944,
+              "end_ms": 3.735552,
+              "duration_ms": 0.196608,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 3.735552,
+              "end_ms": 4.58752,
+              "duration_ms": 0.851968,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 4.653056,
+              "end_ms": 4.718592,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 4.784128,
+              "end_ms": 5.505024,
+              "duration_ms": 0.720896,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 5.505024,
+              "end_ms": 5.636096,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.636096,
+              "end_ms": 6.422528,
+              "duration_ms": 0.786432,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.488064,
+              "end_ms": 6.619136,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.619136,
+              "end_ms": 6.684672,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.750208,
+              "end_ms": 6.750208,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.815744,
+              "end_ms": 6.815744,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.815744,
+              "end_ms": 6.88128,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.88128,
+              "end_ms": 6.88128,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.88128,
+              "end_ms": 6.946816,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.946816,
+              "end_ms": 6.946816,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.946816,
+              "end_ms": 7.012352,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 7.012352,
+              "end_ms": 7.012352,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.012352,
+              "end_ms": 7.077888,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 7.077888,
+              "end_ms": 7.077888,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.077888,
+              "end_ms": 7.143424,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            }
+          ],
+          "span_ms": 7.143424,
+          "sum_ms": 6.356991999999998,
+          "trustedSum_ms": 6.356991999999998,
+          "overlap": 0.8899082568807336,
+          "sampledPassCount": 36,
+          "untrustedPassCount": 0
+        }
+      },
+      {
+        "repetition": 1,
+        "radiance": false,
+        "wall_ms": 7.7086250000011205,
+        "reading": {
+          "passes": [
+            {
+              "label": "Populate live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0.458752,
+              "duration_ms": 0.458752,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Finalize live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Certify live SVO address pages as empty",
+              "kind": "compute",
+              "begin_ms": 0.065536,
+              "end_ms": 0.131072,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.589824,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 1.703936,
+              "duration_ms": 0.98304,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 1.703936,
+              "end_ms": 2.228224,
+              "duration_ms": 0.524288,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 2.29376,
+              "end_ms": 3.538944,
+              "duration_ms": 1.245184,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 3.538944,
+              "end_ms": 3.735552,
+              "duration_ms": 0.196608,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 3.801088,
+              "end_ms": 4.58752,
+              "duration_ms": 0.786432,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 4.653056,
+              "end_ms": 4.784128,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 4.784128,
+              "end_ms": 5.505024,
+              "duration_ms": 0.720896,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 5.57056,
+              "end_ms": 5.636096,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.701632,
+              "end_ms": 6.422528,
+              "duration_ms": 0.720896,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.488064,
+              "end_ms": 6.619136,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.684672,
+              "end_ms": 6.750208,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.750208,
+              "end_ms": 6.815744,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.815744,
+              "end_ms": 6.815744,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.88128,
+              "end_ms": 6.88128,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.88128,
+              "end_ms": 6.88128,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.946816,
+              "end_ms": 6.946816,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.946816,
+              "end_ms": 6.946816,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.012352,
+              "end_ms": 7.012352,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 7.012352,
+              "end_ms": 7.012352,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.077888,
+              "end_ms": 7.077888,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 7.077888,
+              "end_ms": 7.077888,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.143424,
+              "end_ms": 7.143424,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            }
+          ],
+          "span_ms": 7.143424,
+          "sum_ms": 6.225919999999999,
+          "trustedSum_ms": 6.225919999999999,
+          "overlap": 0.8715596330275227,
+          "sampledPassCount": 36,
+          "untrustedPassCount": 0
+        }
+      },
+      {
+        "repetition": 1,
+        "radiance": true,
+        "wall_ms": 13.397874999998749,
+        "reading": {
+          "passes": [
+            {
+              "label": "Populate live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0.524288,
+              "duration_ms": 0.524288,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Finalize live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Certify live SVO address pages as empty",
+              "kind": "compute",
+              "begin_ms": 0.065536,
+              "end_ms": 0.065536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.589824,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.786432,
+              "end_ms": 1.900544,
+              "duration_ms": 1.114112,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 1.96608,
+              "end_ms": 2.490368,
+              "duration_ms": 0.524288,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 2.490368,
+              "end_ms": 2.62144,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 2.62144,
+              "end_ms": 2.686976,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 2.752512,
+              "end_ms": 2.818048,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 2.883584,
+              "end_ms": 2.94912,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 3.014656,
+              "end_ms": 4.325376,
+              "duration_ms": 1.31072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 4.325376,
+              "end_ms": 4.521984,
+              "duration_ms": 0.196608,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 4.58752,
+              "end_ms": 4.58752,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 4.653056,
+              "end_ms": 4.653056,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 4.718592,
+              "end_ms": 4.718592,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 4.784128,
+              "end_ms": 4.849664,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 4.849664,
+              "end_ms": 6.029312,
+              "duration_ms": 1.179648,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.094848,
+              "end_ms": 6.22592,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 6.291456,
+              "end_ms": 6.291456,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 6.291456,
+              "end_ms": 6.356992,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 6.356992,
+              "end_ms": 6.356992,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 6.356992,
+              "end_ms": 6.422528,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.422528,
+              "end_ms": 8.126464,
+              "duration_ms": 1.703936,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 8.192,
+              "end_ms": 8.257536,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 8.323072,
+              "end_ms": 8.388608,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 8.454144,
+              "end_ms": 8.585216,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 8.585216,
+              "end_ms": 8.716288,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 8.716288,
+              "end_ms": 8.84736,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 8.84736,
+              "end_ms": 10.092544,
+              "duration_ms": 1.245184,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 10.092544,
+              "end_ms": 10.223616,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 10.747904,
+              "end_ms": 10.878976,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 10.878976,
+              "end_ms": 10.944512,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 11.010048,
+              "end_ms": 11.075584,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 11.075584,
+              "end_ms": 11.206656,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 11.206656,
+              "end_ms": 11.534336,
+              "duration_ms": 0.32768,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 11.534336,
+              "end_ms": 11.599872,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 11.599872,
+              "end_ms": 11.599872,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 11.599872,
+              "end_ms": 11.665408,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 11.665408,
+              "end_ms": 11.665408,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 11.665408,
+              "end_ms": 11.730944,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 11.730944,
+              "end_ms": 11.79648,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 11.79648,
+              "end_ms": 11.79648,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 11.79648,
+              "end_ms": 11.862016,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 11.862016,
+              "end_ms": 11.862016,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 11.862016,
+              "end_ms": 11.862016,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 11.862016,
+              "end_ms": 11.927552,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 11.927552,
+              "end_ms": 11.927552,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 11.927552,
+              "end_ms": 11.927552,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 11.993088,
+              "end_ms": 11.993088,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 11.993088,
+              "end_ms": 11.993088,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 11.993088,
+              "end_ms": 11.993088,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 11.993088,
+              "end_ms": 11.993088,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 12.058624,
+              "end_ms": 12.058624,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 12.058624,
+              "end_ms": 12.058624,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 12.12416,
+              "end_ms": 12.12416,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 12.12416,
+              "end_ms": 12.12416,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 12.12416,
+              "end_ms": 12.12416,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 12.12416,
+              "end_ms": 12.12416,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 12.189696,
+              "end_ms": 12.189696,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 12.189696,
+              "end_ms": 12.189696,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 12.189696,
+              "end_ms": 12.255232,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 12.255232,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 12.255232,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 12.255232,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 12.320768,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 12.320768,
+              "end_ms": 12.320768,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 12.320768,
+              "end_ms": 12.386304,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 12.386304,
+              "end_ms": 12.386304,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 12.386304,
+              "end_ms": 12.386304,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 12.386304,
+              "end_ms": 12.386304,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            }
+          ],
+          "span_ms": 12.386304,
+          "sum_ms": 10.485759999999996,
+          "trustedSum_ms": 10.485759999999996,
+          "overlap": 0.8465608465608462,
+          "sampledPassCount": 80,
+          "untrustedPassCount": 0
+        }
+      },
+      {
+        "repetition": 2,
+        "radiance": true,
+        "wall_ms": 13.300332999999227,
+        "reading": {
+          "passes": [
+            {
+              "label": "Populate live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0.458752,
+              "duration_ms": 0.458752,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Finalize live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Certify live SVO address pages as empty",
+              "kind": "compute",
+              "begin_ms": 0.065536,
+              "end_ms": 0.065536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.65536,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 1.900544,
+              "duration_ms": 1.179648,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 1.900544,
+              "end_ms": 2.490368,
+              "duration_ms": 0.589824,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 2.490368,
+              "end_ms": 2.555904,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 2.62144,
+              "end_ms": 2.686976,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 2.752512,
+              "end_ms": 2.818048,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 2.818048,
+              "end_ms": 2.94912,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 2.94912,
+              "end_ms": 4.25984,
+              "duration_ms": 1.31072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 4.325376,
+              "end_ms": 4.521984,
+              "duration_ms": 0.196608,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 4.58752,
+              "end_ms": 4.58752,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 4.653056,
+              "end_ms": 4.653056,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 4.718592,
+              "end_ms": 4.718592,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 4.784128,
+              "end_ms": 4.849664,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 4.849664,
+              "end_ms": 5.767168,
+              "duration_ms": 0.917504,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 5.767168,
+              "end_ms": 5.89824,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 5.963776,
+              "end_ms": 5.963776,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 5.963776,
+              "end_ms": 6.029312,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 6.029312,
+              "end_ms": 6.029312,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 6.094848,
+              "end_ms": 6.094848,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.094848,
+              "end_ms": 8.126464,
+              "duration_ms": 2.031616,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 8.192,
+              "end_ms": 8.323072,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 8.323072,
+              "end_ms": 8.454144,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 8.454144,
+              "end_ms": 8.585216,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 8.585216,
+              "end_ms": 8.716288,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 8.716288,
+              "end_ms": 8.84736,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 8.912896,
+              "end_ms": 10.092544,
+              "duration_ms": 1.179648,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 10.15808,
+              "end_ms": 10.223616,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 10.747904,
+              "end_ms": 10.878976,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 10.878976,
+              "end_ms": 11.010048,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 11.010048,
+              "end_ms": 11.14112,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 11.14112,
+              "end_ms": 11.206656,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 11.272192,
+              "end_ms": 11.534336,
+              "duration_ms": 0.262144,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 11.599872,
+              "end_ms": 11.599872,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 11.599872,
+              "end_ms": 11.599872,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 11.665408,
+              "end_ms": 11.665408,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 11.665408,
+              "end_ms": 11.665408,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 11.665408,
+              "end_ms": 11.730944,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 11.730944,
+              "end_ms": 11.79648,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 11.79648,
+              "end_ms": 11.79648,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 11.79648,
+              "end_ms": 11.862016,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 11.862016,
+              "end_ms": 11.862016,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 11.862016,
+              "end_ms": 11.862016,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 11.862016,
+              "end_ms": 11.927552,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 11.927552,
+              "end_ms": 11.927552,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 11.927552,
+              "end_ms": 11.927552,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 11.993088,
+              "end_ms": 11.993088,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 11.993088,
+              "end_ms": 11.993088,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 11.993088,
+              "end_ms": 11.993088,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 11.993088,
+              "end_ms": 11.993088,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 12.058624,
+              "end_ms": 12.058624,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 12.058624,
+              "end_ms": 12.058624,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 12.058624,
+              "end_ms": 12.12416,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 12.12416,
+              "end_ms": 12.12416,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 12.12416,
+              "end_ms": 12.12416,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 12.12416,
+              "end_ms": 12.12416,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 12.12416,
+              "end_ms": 12.189696,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 12.189696,
+              "end_ms": 12.189696,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 12.189696,
+              "end_ms": 12.189696,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 12.255232,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 12.255232,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 12.255232,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 12.320768,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 12.320768,
+              "end_ms": 12.320768,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 12.320768,
+              "end_ms": 12.320768,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 12.320768,
+              "end_ms": 12.386304,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 12.386304,
+              "end_ms": 12.386304,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 12.386304,
+              "end_ms": 12.386304,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            }
+          ],
+          "span_ms": 12.386304,
+          "sum_ms": 10.485759999999994,
+          "trustedSum_ms": 10.485759999999994,
+          "overlap": 0.846560846560846,
+          "sampledPassCount": 80,
+          "untrustedPassCount": 0
+        }
+      },
+      {
+        "repetition": 2,
+        "radiance": false,
+        "wall_ms": 7.731500000001688,
+        "reading": {
+          "passes": [
+            {
+              "label": "Populate live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0.458752,
+              "duration_ms": 0.458752,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Finalize live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0.458752,
+              "end_ms": 0.458752,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Certify live SVO address pages as empty",
+              "kind": "compute",
+              "begin_ms": 0.065536,
+              "end_ms": 0.065536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.458752,
+              "end_ms": 0.524288,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.65536,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 1.6384,
+              "duration_ms": 0.98304,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 1.703936,
+              "end_ms": 2.228224,
+              "duration_ms": 0.524288,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 2.29376,
+              "end_ms": 3.538944,
+              "duration_ms": 1.245184,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 3.538944,
+              "end_ms": 3.735552,
+              "duration_ms": 0.196608,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 3.735552,
+              "end_ms": 4.58752,
+              "duration_ms": 0.851968,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 4.653056,
+              "end_ms": 4.784128,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 4.784128,
+              "end_ms": 5.505024,
+              "duration_ms": 0.720896,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 5.505024,
+              "end_ms": 5.636096,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.701632,
+              "end_ms": 6.422528,
+              "duration_ms": 0.720896,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.488064,
+              "end_ms": 6.619136,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.619136,
+              "end_ms": 6.750208,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.750208,
+              "end_ms": 6.815744,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.815744,
+              "end_ms": 6.815744,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.815744,
+              "end_ms": 6.88128,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.88128,
+              "end_ms": 6.88128,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.88128,
+              "end_ms": 6.946816,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.946816,
+              "end_ms": 6.946816,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.946816,
+              "end_ms": 7.012352,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 7.012352,
+              "end_ms": 7.012352,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.012352,
+              "end_ms": 7.012352,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 7.077888,
+              "end_ms": 7.077888,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.077888,
+              "end_ms": 7.077888,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            }
+          ],
+          "span_ms": 7.077888,
+          "sum_ms": 6.6191359999999975,
+          "trustedSum_ms": 6.6191359999999975,
+          "overlap": 0.9351851851851849,
+          "sampledPassCount": 36,
+          "untrustedPassCount": 0
+        }
+      },
+      {
+        "repetition": 3,
+        "radiance": false,
+        "wall_ms": 8.15241700000115,
+        "reading": {
+          "passes": [
+            {
+              "label": "Populate live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0.524288,
+              "duration_ms": 0.524288,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Finalize live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Certify live SVO address pages as empty",
+              "kind": "compute",
+              "begin_ms": 0.131072,
+              "end_ms": 0.131072,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.786432,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.786432,
+              "end_ms": 1.703936,
+              "duration_ms": 0.917504,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 1.769472,
+              "end_ms": 2.686976,
+              "duration_ms": 0.917504,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 2.686976,
+              "end_ms": 3.93216,
+              "duration_ms": 1.245184,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 3.997696,
+              "end_ms": 4.128768,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 4.194304,
+              "end_ms": 5.046272,
+              "duration_ms": 0.851968,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 5.111808,
+              "end_ms": 5.177344,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 5.24288,
+              "end_ms": 5.963776,
+              "duration_ms": 0.720896,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 5.963776,
+              "end_ms": 6.094848,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.094848,
+              "end_ms": 6.88128,
+              "duration_ms": 0.786432,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 6.946816,
+              "end_ms": 7.012352,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 7.077888,
+              "end_ms": 7.143424,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.20896,
+              "end_ms": 7.20896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 7.274496,
+              "end_ms": 7.274496,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.274496,
+              "end_ms": 7.340032,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 7.340032,
+              "end_ms": 7.340032,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.340032,
+              "end_ms": 7.405568,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 7.405568,
+              "end_ms": 7.405568,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.405568,
+              "end_ms": 7.405568,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 7.471104,
+              "end_ms": 7.471104,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.471104,
+              "end_ms": 7.471104,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 7.53664,
+              "end_ms": 7.53664,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.53664,
+              "end_ms": 7.53664,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            }
+          ],
+          "span_ms": 7.53664,
+          "sum_ms": 6.619135999999999,
+          "trustedSum_ms": 6.619135999999999,
+          "overlap": 0.8782608695652173,
+          "sampledPassCount": 36,
+          "untrustedPassCount": 0
+        }
+      },
+      {
+        "repetition": 3,
+        "radiance": true,
+        "wall_ms": 13.459749999999985,
+        "reading": {
+          "passes": [
+            {
+              "label": "Populate live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0.458752,
+              "duration_ms": 0.458752,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Finalize live SVO derived worklists",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Certify live SVO address pages as empty",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0.065536,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.589824,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.65536,
+              "end_ms": 0.65536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Invalidate live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 0.720896,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 0.720896,
+              "end_ms": 1.900544,
+              "duration_ms": 1.179648,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 1.96608,
+              "end_ms": 2.490368,
+              "duration_ms": 0.524288,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 2.555904,
+              "end_ms": 2.62144,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 2.686976,
+              "end_ms": 2.752512,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 2.818048,
+              "end_ms": 2.883584,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 2.883584,
+              "end_ms": 3.014656,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 3.080192,
+              "end_ms": 4.390912,
+              "duration_ms": 1.31072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 4.390912,
+              "end_ms": 4.58752,
+              "duration_ms": 0.196608,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 4.653056,
+              "end_ms": 4.653056,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 4.718592,
+              "end_ms": 4.718592,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 4.784128,
+              "end_ms": 4.784128,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 4.849664,
+              "end_ms": 4.849664,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 4.9152,
+              "end_ms": 5.767168,
+              "duration_ms": 0.851968,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 5.832704,
+              "end_ms": 5.963776,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 6.029312,
+              "end_ms": 6.029312,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 6.029312,
+              "end_ms": 6.029312,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 6.094848,
+              "end_ms": 6.094848,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 6.094848,
+              "end_ms": 6.160384,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 6.160384,
+              "end_ms": 7.86432,
+              "duration_ms": 1.703936,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 7.929856,
+              "end_ms": 7.995392,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 8.060928,
+              "end_ms": 8.126464,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 8.192,
+              "end_ms": 8.257536,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 8.323072,
+              "end_ms": 8.388608,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 8.454144,
+              "end_ms": 8.585216,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 8.585216,
+              "end_ms": 10.15808,
+              "duration_ms": 1.572864,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 10.223616,
+              "end_ms": 10.289152,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 10.81344,
+              "end_ms": 10.878976,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 10.944512,
+              "end_ms": 11.010048,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 11.010048,
+              "end_ms": 11.14112,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 11.14112,
+              "end_ms": 11.272192,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 11.272192,
+              "end_ms": 11.599872,
+              "duration_ms": 0.32768,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 11.599872,
+              "end_ms": 11.665408,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 11.665408,
+              "end_ms": 11.665408,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 11.665408,
+              "end_ms": 11.730944,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 11.730944,
+              "end_ms": 11.730944,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 11.730944,
+              "end_ms": 11.79648,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 11.79648,
+              "end_ms": 11.862016,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 11.862016,
+              "end_ms": 11.862016,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 11.862016,
+              "end_ms": 11.862016,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 11.862016,
+              "end_ms": 11.927552,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 11.927552,
+              "end_ms": 11.927552,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 11.927552,
+              "end_ms": 11.927552,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 11.927552,
+              "end_ms": 11.993088,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 11.993088,
+              "end_ms": 11.993088,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 11.993088,
+              "end_ms": 11.993088,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 11.993088,
+              "end_ms": 12.058624,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 12.058624,
+              "end_ms": 12.058624,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 12.058624,
+              "end_ms": 12.058624,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 12.058624,
+              "end_ms": 12.12416,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 12.12416,
+              "end_ms": 12.12416,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 12.12416,
+              "end_ms": 12.12416,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 12.12416,
+              "end_ms": 12.189696,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 12.189696,
+              "end_ms": 12.189696,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 12.189696,
+              "end_ms": 12.189696,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 12.189696,
+              "end_ms": 12.255232,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 12.255232,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 12.255232,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 12.255232,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 12.255232,
+              "end_ms": 12.320768,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 12.320768,
+              "end_ms": 12.320768,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Build live SVO derived pages",
+              "kind": "compute",
+              "begin_ms": 12.320768,
+              "end_ms": 12.320768,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO opacity pages",
+              "kind": "compute",
+              "begin_ms": 12.386304,
+              "end_ms": 12.386304,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 0",
+              "kind": "compute",
+              "begin_ms": 12.386304,
+              "end_ms": 12.386304,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 1",
+              "kind": "compute",
+              "begin_ms": 12.386304,
+              "end_ms": 12.386304,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 2",
+              "kind": "compute",
+              "begin_ms": 12.386304,
+              "end_ms": 12.386304,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Publish live SVO radiance lobe 3",
+              "kind": "compute",
+              "begin_ms": 12.45184,
+              "end_ms": 12.45184,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            }
+          ],
+          "span_ms": 12.45184,
+          "sum_ms": 10.354687999999996,
+          "trustedSum_ms": 10.354687999999996,
+          "overlap": 0.8315789473684206,
+          "sampledPassCount": 80,
+          "untrustedPassCount": 0
+        }
+      }
+    ],
+    "warmupExcluded": "repetition 0 for both arms",
+    "radianceOn_ms": 12.386304,
+    "opacityOnly_ms": 7.143424,
+    "reduction_percent": 42.32804232804233
+  },
+  "method": {
+    "resolution": [
+      1600,
+      920
+    ],
+    "surface": "smooth",
+    "scene": "hero-garden-hose-x10",
+    "refinementDepth": 1,
+    "samplesPerBatch": 36,
+    "batchesPerArm": 4,
+    "warmupFramesPerBatch": 48,
+    "order": "forward/reverse alternating",
+    "median": "median of four batch medians",
+    "excluded": [
+      "fluid solver",
+      "water optical composite"
+    ],
+    "supersedes": "Initial separate-process run and first paired run did not explicitly await the exact scene shader variant. Use these verified paired results."
+  }
+}

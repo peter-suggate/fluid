@@ -1,3 +1,4 @@
+import { RASTER_MAX_SPOT_LIGHTS, rasterSpotLights } from "./raster-spot-lights";
 import { SVO_SURFACE_MESH_STATE as M } from "../primary-visibility/svo-surface-mesh";
 
 /** Preview backend. Fixed world-space coverage is deliberately independent of the camera. */
@@ -9,7 +10,8 @@ export interface RasterAoPipelines {
 }
 
 const paramsWGSL = /* wgsl */ `
-struct RasterLightingParams { control:vec4u, farCenterExtent:vec4f, depthCell:vec4f, sun:vec4f }
+struct RasterSpot { positionNear:vec4f, directionTan:vec4f, rangeRadiusIndex:vec4f }
+struct RasterLightingParams { control:vec4u, farCenterExtent:vec4f, depthCell:vec4f, sun:vec4f, spots:array<RasterSpot,${RASTER_MAX_SPOT_LIGHTS}> }
 @group(2) @binding(0) var<uniform> rasterLighting:RasterLightingParams;
 `;
 
@@ -32,6 +34,53 @@ fn rasterMapExtent(layer:u32)->f32{return select(max(length(uniforms.container.x
 fn rasterShadowPosition(world:vec3f,layer:u32)->vec3f{
   let basis=rasterSunBasis();let delta=world-rasterMapCenter(layer);let extent=rasterMapExtent(layer);
   return vec3f(dot(delta,basis[0])/extent,dot(delta,basis[1])/extent,.5-dot(delta,basis[2])/rasterLighting.depthCell.x);
+}
+fn rasterSpotBasis(spot:RasterSpot)->mat3x3f{
+  let forward=spot.directionTan.xyz;let helper=select(vec3f(0,1,0),vec3f(1,0,0),abs(forward.y)>.95);
+  let right=normalize(cross(forward,helper));return mat3x3f(right,cross(right,forward),forward);
+}
+fn rasterSpotClip(world:vec3f,spot:RasterSpot)->vec4f{
+  let basis=rasterSpotBasis(spot);let delta=world-spot.positionNear.xyz;
+  let z=dot(delta,basis[2]);let near=spot.positionNear.w;let far=spot.rangeRadiusIndex.x;
+  return vec4f(dot(delta,basis[0])/spot.directionTan.w,dot(delta,basis[1])/spot.directionTan.w,far*(z-near)/(far-near),z);
+}
+fn rasterSpotDistance(depth:f32,spot:RasterSpot)->f32{
+  let near=spot.positionNear.w;let far=spot.rangeRadiusIndex.x;
+  return near*far/max(far-depth*(far-near),1e-6);
+}
+fn rasterSpotSlot(lightIndex:u32)->i32{
+  for(var slot=0u;slot<rasterLighting.control.z;slot++){
+    if(u32(rasterLighting.spots[slot].rangeRadiusIndex.z)==lightIndex){return i32(slot);}
+  }return -1;
+}
+fn rasterSpotVisibility(position:vec3f,normal:vec3f,slot:u32)->f32{
+  let spot=rasterLighting.spots[slot];let basis=rasterSpotBasis(spot);
+  let distance=dot(position-spot.positionNear.xyz,basis[2]);
+  let texel=2.0*max(distance,spot.positionNear.w)*spot.directionTan.w/f32(${SVO_RASTER_SHADOW_SIZE});
+  let biased=position+normal*(texel*1.5+rasterLighting.depthCell.y*(.18+dry.tuningRays0.x));
+  let clip=rasterSpotClip(biased,spot);if(clip.w<=spot.positionNear.w){return 1.0;}
+  let p=clip.xyz/clip.w;let uv=p.xy*vec2f(.5,-.5)+.5;
+  if(any(uv<vec2f(0))||any(uv>vec2f(1))||p.z>=1.0){return 1.0;}
+  let offsets=array<vec2f,12>(vec2f(0,0),vec2f(-.32,.23),vec2f(.25,-.39),vec2f(-.43,-.32),vec2f(.60,.15),vec2f(-.09,.67),vec2f(-.69,.12),vec2f(.09,-.76),vec2f(.55,.63),vec2f(-.57,.62),vec2f(-.64,-.64),vec2f(.79,-.48));
+  let radius=spot.rangeRadiusIndex.y;
+  // Perspective depth is nonlinear. Recover axial blocker distance before
+  // estimating the finite emitter's contact-hardening penumbra in world units.
+  let search=clamp(radius/max(texel,1e-6)*(clip.w-spot.positionNear.w)/spot.positionNear.w,2.0,96.0);
+  var blocker=0.0;var count=0.0;
+  for(var i=0u;i<12u;i++){
+    let c=clamp(vec2i(uv*f32(${SVO_RASTER_SHADOW_SIZE})+offsets[i]*search),vec2i(0),vec2i(${SVO_RASTER_SHADOW_SIZE - 1}));
+    let d=rasterSpotDistance(textureLoad(rasterSunDepth,c,i32(slot+2u),0),spot);
+    if(d<clip.w-texel*.3){blocker+=d;count+=1.0;}
+  }
+  if(count==0.0){return 1.0;}
+  let blockerDistance=blocker/count;
+  let penumbra=clamp(radius*(clip.w-blockerDistance)/max(blockerDistance*texel,1e-6),1.0,96.0);
+  let receiver=clip.w-texel*.3;
+  let depth=spot.rangeRadiusIndex.x*(receiver-spot.positionNear.w)/((spot.rangeRadiusIndex.x-spot.positionNear.w)*receiver);
+  var visibility=0.0;
+  for(var i=0u;i<12u;i++){
+    visibility+=textureSampleCompareLevel(rasterSunDepth,rasterSunSampler,uv+offsets[i]*penumbra/f32(${SVO_RASTER_SHADOW_SIZE}),i32(slot+2u),depth);
+  }return visibility/12.0;
 }
 fn rasterPcf(position:vec3f,normal:vec3f,layer:u32)->f32{
   let texel=2.0*rasterMapExtent(layer)/f32(${SVO_RASTER_SHADOW_SIZE});
@@ -185,10 +234,12 @@ export function rasterAoProducerWGSL(backdrop: boolean): string {
   let corner=select(corners[vertex],corners[vertex].yx,(face&1u)==0u);var lattice=meshQuadOrigin(quad);lattice[u]+=corner.x*quad.extent[u];lattice[v]+=corner.y*quad.extent[v];
   var world=dry.mapping.worldOrigin+vec3f(lattice)*dry.mapping.cellSize;
   if(meshTriangle(quad)){world=dry.mapping.worldOrigin+(vec3f(meshQuadOrigin(quad))+meshTrianglePoint(quad,min(vertex,2u))*vec3f(meshQuadExtent(quad)))*dry.mapping.cellSize;}
-  let p=rasterShadowPosition(world,rasterLighting.control.y);
+  let layer=rasterLighting.control.y;
+  var clip=vec4f(rasterShadowPosition(world,min(layer,1u)),1);
+  if(layer>=2u){clip=rasterSpotClip(world,rasterLighting.spots[layer-2u]);}
   // Level zero is the complete geometric surface; other levels duplicate it.
   if(meshQuadDead(quad)||meshQuadLevel(quad.face)!=0u){return vec4f(0,0,0,1);}
-  return vec4f(p,1);
+  return clip;
 }
 @vertex fn rasterShadowClearVertex(@builtin(vertex_index) vertex:u32)->@builtin(position) vec4f{
   let p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));return vec4f(p[vertex],1,1);
@@ -196,6 +247,13 @@ export function rasterAoProducerWGSL(backdrop: boolean): string {
 @fragment fn rasterShadowTerrain(@builtin(position) pixel:vec4f)->@builtin(frag_depth) f32{
   ${backdrop ? `if(backdropTerrainLevels()==0u){return 1.0;}
   let layer=rasterLighting.control.y;let uv=pixel.xy/f32(${SVO_RASTER_SHADOW_SIZE})*vec2f(2,-2)+vec2f(-1,1);
+  if(layer>=2u){
+    let spot=rasterLighting.spots[layer-2u];let basis=rasterSpotBasis(spot);
+    let ray=normalize(basis[2]+(basis[0]*uv.x+basis[1]*uv.y)*spot.directionTan.w);
+    let cosine=dot(ray,basis[2]);
+    let hit=backdropTerrainSmoothTrace(spot.positionNear.xyz,ray,spot.positionNear.w/cosine,spot.rangeRadiusIndex.x/cosine);
+    if(hit.t>=0.0){let clip=rasterSpotClip(spot.positionNear.xyz+ray*hit.t,spot);return clamp(clip.z/clip.w,0.0,1.0);}return 1.0;
+  }
   let basis=rasterSunBasis();let origin=rasterMapCenter(layer)+(basis[0]*uv.x+basis[1]*uv.y)*rasterMapExtent(layer)+basis[2]*rasterLighting.depthCell.x*.5;
   let hit=backdropTerrainSmoothTrace(origin,-basis[2],0.0,rasterLighting.depthCell.x);
   if(hit.t>=0.0){return clamp(hit.t/rasterLighting.depthCell.x,0.0,1.0);}` : ""}
@@ -239,7 +297,7 @@ export class SvoRasterAo {
   readonly shadowLayout: GPUBindGroupLayout;
   readonly aoLayout: GPUBindGroupLayout;
   readonly params: GPUBuffer;
-  readonly shadow: GPUTexture;
+  shadow: GPUTexture;
   readonly cache: GPUBuffer;
   readonly sampler: GPUSampler;
   private cachePipeline?: GPUComputePipeline;
@@ -254,11 +312,13 @@ export class SvoRasterAo {
   consumer?: GPUBindGroup;
   private key = "";
   private generation = 0;
+  private renderedSettledKey?: string;
   private coarseAoStrength = 0;
+  private shadowLayerCount = 2;
 
   constructor(private readonly device: GPUDevice) {
-    this.params=device.createBuffer({label:"Raster lighting parameters",size:512,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-    this.cache=device.createBuffer({label:"Raster shadow cache generations and indirect draws",size:64,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_SRC});
+    this.params=device.createBuffer({label:"Raster lighting parameters",size:(2+RASTER_MAX_SPOT_LIGHTS)*256,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    this.cache=device.createBuffer({label:"Raster shadow cache generations and indirect draws",size:64,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     const uniform:GPUBindGroupLayoutEntry={binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT|GPUShaderStage.COMPUTE,buffer:{type:"uniform"}};
     this.consumerLayout=device.createBindGroupLayout({label:"Raster lighting consumer",entries:[uniform,
       {binding:1,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"depth",viewDimension:"2d-array"}},
@@ -273,7 +333,7 @@ export class SvoRasterAo {
       {binding:6,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float"}}]});
     this.shadow=device.createTexture({label:"Cached world-space sun shadows",size:[SVO_RASTER_SHADOW_SIZE,SVO_RASTER_SHADOW_SIZE,2],format:"depth32float",usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
     this.shadowViews=[0,1].map(baseArrayLayer=>this.shadow.createView({dimension:"2d",baseArrayLayer,arrayLayerCount:1}));
-    this.shadowGroups=[0,1].map(layer=>device.createBindGroup({layout:this.shadowLayout,entries:[{binding:0,resource:{buffer:this.params,offset:layer*256,size:64}}]}));
+    this.shadowGroups=Array.from({length:2+RASTER_MAX_SPOT_LIGHTS},(_,i)=>i).map(layer=>device.createBindGroup({layout:this.shadowLayout,entries:[{binding:0,resource:{buffer:this.params,offset:layer*256,size:256}}]}));
     this.sampler=device.createSampler({compare:"less-equal",magFilter:"linear",minFilter:"linear"});
   }
   async compile(module:GPUShaderModule,scene:GPUBindGroupLayout,mesh:GPUBindGroupLayout,split:GPUBindGroupLayout):Promise<RasterAoPipelines>{
@@ -281,45 +341,64 @@ export class SvoRasterAo {
     this.cachePipeline = await this.cacheCompile;
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[scene,mesh,this.shadowLayout]});
     const [shadow,terrain,ao]=await Promise.all([
-      this.device.createRenderPipelineAsync({label:"Raster sun shadow casters",layout,vertex:{module,entryPoint:"rasterShadowVertex"},primitive:{topology:"triangle-strip",cullMode:"none"},depthStencil:{format:"depth32float",depthWriteEnabled:true,depthCompare:"less"}}),
-      this.device.createRenderPipelineAsync({label:"Raster sun terrain and clear",layout,vertex:{module,entryPoint:"rasterShadowClearVertex"},fragment:{module,entryPoint:"rasterShadowTerrain",targets:[]},primitive:{topology:"triangle-list"},depthStencil:{format:"depth32float",depthWriteEnabled:true,depthCompare:"always"}}),
+      this.device.createRenderPipelineAsync({label:"Raster shadow casters",layout,vertex:{module,entryPoint:"rasterShadowVertex"},primitive:{topology:"triangle-strip",cullMode:"none"},depthStencil:{format:"depth32float",depthWriteEnabled:true,depthCompare:"less"}}),
+      this.device.createRenderPipelineAsync({label:"Raster shadow terrain and clear",layout,vertex:{module,entryPoint:"rasterShadowClearVertex"},fragment:{module,entryPoint:"rasterShadowTerrain",targets:[]},primitive:{topology:"triangle-list"},depthStencil:{format:"depth32float",depthWriteEnabled:true,depthCompare:"always"}}),
       this.device.createComputePipelineAsync({label:"Horizon contact AO",layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,split,this.aoLayout]}),compute:{module,entryPoint:"rasterContactMain"}}),
     ]);return {shadow,terrain,ao};
   }
-  update(origin:readonly number[],extent:readonly number[],cellSize:readonly number[],publicationKey:string,direction:readonly number[]):void{
-    const key=[...origin,...extent,...cellSize,...direction,publicationKey].join(",");if(key===this.key)return;
+  update(origin:readonly number[],extent:readonly number[],cellSize:readonly number[],publicationKey:string,direction:readonly number[],lights?:Uint32Array):void{
+    const key=[...origin,...extent,...cellSize,...direction,publicationKey,...(lights??[])].join(",");if(key===this.key)return;
     this.key=key;this.generation++;
     const radius=Math.max(.1,Math.hypot(...extent)*.5);
-    for(let layer=0;layer<2;layer++){
-      const buffer=new ArrayBuffer(64),f=new Float32Array(buffer),u=new Uint32Array(buffer);
-      u.set([this.generation,layer,0,0]);f.set(origin.map((v,i)=>v+extent[i]*.5),4);f[7]=radius*1.02;
+    const spots=rasterSpotLights(lights);this.shadowLayerCount=2+spots.length;
+    if(this.shadow.depthOrArrayLayers!==this.shadowLayerCount){
+      this.shadow.destroy();
+      this.shadow=this.device.createTexture({label:"Cached sun and spot shadows",size:[SVO_RASTER_SHADOW_SIZE,SVO_RASTER_SHADOW_SIZE,this.shadowLayerCount],format:"depth32float",usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+      this.shadowViews=Array.from({length:this.shadowLayerCount},(_,baseArrayLayer)=>this.shadow.createView({dimension:"2d",baseArrayLayer,arrayLayerCount:1}));
+      this.consumer=undefined;
+      if(this.ao)this.ensureSize(this.ao.width*2,this.ao.height*2);
+    }
+    for(let layer=0;layer<this.shadowLayerCount;layer++){
+      const buffer=new ArrayBuffer(256),f=new Float32Array(buffer),u=new Uint32Array(buffer);
+      u.set([this.generation,layer,spots.length,0]);f.set(origin.map((v,i)=>v+extent[i]*.5),4);f[7]=radius*1.02;
       f[8]=radius*4;f[9]=Math.max(...cellSize);f.set(direction,12);f[15]=this.coarseAoStrength;
+      for(let slot=0;slot<spots.length;slot++){
+        const spot=spots[slot]!,offset=16+slot*12;
+        f.set([...spot.position,spot.near,...spot.direction,spot.tanHalfAngle,spot.far,spot.radius,spot.index,0],offset);
+      }
       this.device.queue.writeBuffer(this.params,layer*256,buffer);
     }
   }
   setCoarseAoStrength(strength:number):void{
     if(strength===this.coarseAoStrength)return;
     this.coarseAoStrength=strength;
-    for(let layer=0;layer<2;layer++)this.device.queue.writeBuffer(this.params,layer*256+60,new Float32Array([strength]));
+    for(let layer=0;layer<this.shadowLayerCount;layer++)this.device.queue.writeBuffer(this.params,layer*256+60,new Float32Array([strength]));
   }
   ensureSize(width:number,height:number):void{
     width=Math.ceil(width/2);height=Math.ceil(height/2);
-    if(this.ao?.width===width&&this.ao.height===height)return;
+    if(this.consumer&&this.ao?.width===width&&this.ao.height===height)return;
     this.ao?.destroy();this.ao=this.device.createTexture({label:"Half-resolution sun visibility and horizon AO",size:[width,height],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
     this.shadowVisibility?.destroy();this.shadowVisibility=this.device.createTexture({label:"Half-resolution sun visibility",size:[width,height],format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
-    const uniform={buffer:this.params,offset:0,size:64};const view=this.ao.createView();const shadowView=this.shadowVisibility.createView();
+    const uniform={buffer:this.params,offset:0,size:256};const view=this.ao.createView();const shadowView=this.shadowVisibility.createView();
     this.aoGroup=this.device.createBindGroup({layout:this.aoLayout,entries:[{binding:0,resource:uniform},{binding:1,resource:this.shadow.createView({dimension:"2d-array"})},{binding:2,resource:this.sampler},{binding:4,resource:view},{binding:6,resource:shadowView}]});
     this.consumer=this.device.createBindGroup({layout:this.consumerLayout,entries:[{binding:0,resource:uniform},{binding:1,resource:this.shadow.createView({dimension:"2d-array"})},{binding:2,resource:this.sampler},{binding:3,resource:view},{binding:5,resource:shadowView}]});
   }
-  encode(encoder:GPUCommandEncoder,pipelines:RasterAoPipelines,scene:GPUBindGroup,mesh:GPUBindGroup,split:GPUBindGroup,state:GPUBuffer,aoEnabled:boolean,shadowsEnabled:boolean,shadowComplete?:()=>void,aoComplete?:()=>void):void{
-    if(state!==this.meshState){this.meshState=state;this.cacheGroup=this.device.createBindGroup({layout:this.cachePipeline!.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:state}},{binding:1,resource:{buffer:this.params,offset:0,size:64}},{binding:2,resource:{buffer:this.cache}}]});}
-    if(shadowsEnabled){
+  encode(encoder:GPUCommandEncoder,pipelines:RasterAoPipelines,scene:GPUBindGroup,mesh:GPUBindGroup,split:GPUBindGroup,state:GPUBuffer,aoEnabled:boolean,shadowsEnabled:boolean,shadowComplete?:()=>void,aoComplete?:()=>void,settledMeshKey?:string):void{
+    if(state!==this.meshState){this.renderedSettledKey=undefined;this.meshState=state;this.cacheGroup=this.device.createBindGroup({layout:this.cachePipeline!.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:state}},{binding:1,resource:{buffer:this.params,offset:0,size:64}},{binding:2,resource:{buffer:this.cache}}]});}
+    const settledKey=settledMeshKey===undefined?undefined:`${this.generation}:${settledMeshKey}`;
+    const reuse=settledKey!==undefined&&settledKey===this.renderedSettledKey;
+    if(!shadowsEnabled)this.renderedSettledKey=undefined;
+    if(shadowsEnabled&&!reuse){
     const invalidation=encoder.beginComputePass({label:"Raster shadow cache check"});invalidation.setPipeline(this.cachePipeline!);invalidation.setBindGroup(0,this.cacheGroup!);invalidation.dispatchWorkgroups(1);invalidation.end();
-    for(let layer=0;layer<2;layer++){
-      const pass=encoder.beginRenderPass({label:`Cached sun shadow ${layer}`,colorAttachments:[],depthStencilAttachment:{view:this.shadowViews[layer],depthLoadOp:"load",depthStoreOp:"store"}});
+    for(let layer=0;layer<this.shadowLayerCount;layer++){
+      const pass=encoder.beginRenderPass({label:layer<2?`Cached sun shadow ${layer}`:`Cached spot shadow ${layer-2}`,colorAttachments:[],depthStencilAttachment:{view:this.shadowViews[layer],depthLoadOp:"load",depthStoreOp:"store"}});
       pass.setBindGroup(0,scene);pass.setBindGroup(1,mesh);pass.setBindGroup(2,this.shadowGroups[layer]);pass.setPipeline(pipelines.terrain);pass.drawIndirect(this.cache,0);pass.setPipeline(pipelines.shadow);pass.drawIndirect(this.cache,16);pass.end();
     }
+    this.renderedSettledKey=settledKey;
     shadowComplete?.();
+    }else if(shadowsEnabled){
+      encoder.clearBuffer(this.cache,0,32);
+      shadowComplete?.();
     }
     if(aoEnabled||shadowsEnabled){const ao=encoder.beginComputePass({label:"Half-resolution sun visibility and horizon AO"});ao.setPipeline(pipelines.ao);ao.setBindGroup(0,scene);ao.setBindGroup(1,split);ao.setBindGroup(2,this.aoGroup!);ao.dispatchWorkgroups(Math.ceil(this.ao!.width/8),Math.ceil(this.ao!.height/8));ao.end();aoComplete?.();}
   }

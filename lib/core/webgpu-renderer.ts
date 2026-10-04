@@ -883,6 +883,7 @@ export function createProductionSparseVoxelDrySceneRenderer(
   sunlightCacheEnabled = false,
   waterShadowsEnabled = false,
   rasterAo = false,
+  optimizationTrials: { specializedDeferredLighting?: boolean; rasterShadowPassReuse?: boolean } = {},
 ): SparseVoxelDrySceneRenderer {
   if ((primaryTraversal === "raster" || primaryTraversal === "mesh")
     && device.limits.maxColorAttachmentBytesPerSample < FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE) {
@@ -906,7 +907,7 @@ export function createProductionSparseVoxelDrySceneRenderer(
     rasterArms,
     !rasterAo,
     { primaryWorkMap, surfaceMesh: primaryTraversal === "mesh", voxelLightCache: sunlightCacheEnabled && !rasterAo, rasterAo, specializedDeferredLighting: true,
-      waterShadows: waterShadowsEnabled },
+      waterShadows: waterShadowsEnabled, ...optimizationTrials },
   );
 }
 
@@ -3606,6 +3607,14 @@ export class FluidLabRenderer {
       // the radiance feedback window are four different schedules, and one seam
       // over all of them could report none of them. Two producers can run, and
       // the second one's seams merge into the first's entries.
+      // Raster AO consumes opacity only. Keep radiance storage for a mode switch,
+      // but withdraw its publication and omit its maintenance until it is needed.
+      for (const producer of new Set([fluidSource, sparseSceneProducer])) {
+        if (producer instanceof WebGPULiveSvoScene) {
+          producer.setRadianceEnabled(svoLightingOptions.coneTracingMode !== "raster-ao"
+            || svoLightingOptions.globalIlluminationEnabled === true);
+        }
+      }
       fluidSource?.encodeSceneMaintenance?.(encoder, closeStage);
       if (sparseSceneProducer !== fluidSource) sparseSceneProducer?.encodeSceneMaintenance?.(encoder, closeStage);
     }

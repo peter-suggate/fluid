@@ -1,0 +1,281 @@
+{
+  "scope": "Dry renderer only: no fluid simulation or water optical composite. Scene floor is raster background; no visible voxel mesh. Camera uses URL angles/target and harness default distance. Two forward/reverse batches of 12 GPU samples and 12 wall samples, after 12 warmup frames per arm. Repository GPU lease held.",
+  "provenance": {
+    "adapterInfo": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "device": "apple-m1-max",
+      "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+    },
+    "depth": 0,
+    "rasterAo": true,
+    "optimizationTrials": {
+      "specialized": true,
+      "shadowReuse": false,
+      "opacityOnly": true
+    },
+    "scene": "sparse-cm12-ladder-long-dam",
+    "surfaceStyle": "smooth",
+    "width": 1600,
+    "height": 920,
+    "tuning": {
+      "resolutionScale": 1,
+      "environmentBrickRefinementLevels": 1,
+      "environmentRefinementDepth": 0,
+      "backdropRefinedRings": 0,
+      "environmentPlanarRefinementExemption": false,
+      "coneLightingScale": 0.5,
+      "sunlightCacheEnabled": false,
+      "waterShadowsEnabled": false,
+      "coneRadianceReconstruction": "full-res-relight",
+      "lodMode": "screen-space",
+      "lodScreenSpacePixels": 0,
+      "lodFixedLevel": 21,
+      "surfaceMeshLodPixels": 1,
+      "surfaceMeshFilteringEnabled": false,
+      "surfaceMeshNormalSmoothing": true,
+      "surfaceMeshNormalStrength": 1,
+      "surfaceMeshMaxCoarsening": 0,
+      "surfaceMeshLodHysteresis": 0.15,
+      "surfaceMeshNormalAgreement": 0.5,
+      "surfaceMeshing": "dual-marching-cubes",
+      "surfaceMeshContours": false,
+      "surfaceMeshContourInflation": 0,
+      "surfaceMeshPreserveCloseNormals": true,
+      "primaryLeafVisits": 128,
+      "coneStepBudget": 48,
+      "maximumShadedLights": 8,
+      "stableAreaLightSamples": 2,
+      "movingAreaLightSamples": 2,
+      "stableAoSamples": 4,
+      "movingAoSamples": 4,
+      "visibilityNodeVisits": 128,
+      "visibilityLeafVisits": 32,
+      "visibilityWorkItems": 1024,
+      "visibilityIntersections": 4,
+      "shadowBiasCells": 0.02,
+      "shadowStrength": 1,
+      "aoRadiusScale": 1,
+      "aoStrength": 1,
+      "rasterCoarseAoStrength": 0.6,
+      "aoConeAperture": 0.62,
+      "shadowConeAperture": 0.065,
+      "giBounceStrength": 0,
+      "giOcclusionStrength": 0.65,
+      "giEnvironmentStrength": 0.85,
+      "giDirectStrength": 1,
+      "giConeAperture": 1.05,
+      "giConeCount": 4,
+      "coneNormalEscapeCells": 0.5,
+      "coneEmitterClearanceCells": 3,
+      "nearFieldBandPixels": 0,
+      "nearFieldBandHysteresis": 0.8,
+      "nearFieldBandBudget": 256
+    },
+    "provenance": {
+      "lib/svo/features/shading/program.ts": "1abfde5c6cbe140347ccdefcedc9a73daf879a19a5d622e000de87fdcbbe3c24",
+      "lib/svo/features/lighting-visibility/svo-raster-ao.ts": "b16aa874eaff4e5979a2080c84c9dcb8d5bcc27b8ef861370fbf9de931997aa2",
+      "lib/svo/features/lighting-visibility/webgpu-svo-cone-fanout.ts": "d571deaa91f0254dd132a9d1e373004807768fd166008fd6a7d28597833b11e6",
+      "lib/svo/pipeline/webgpu-svo-dry-scene.ts": "35bbbbb88ef8e1db65eea41872cd92a5ea776c460cee72a1e7a849fce4f5a667",
+      "lib/svo/pipeline/svo-render-tuning.ts": "db1bb51ca959b8fdeb64a5f3ebd8c89bbe71482b4d49f9bc06e820012b587a3a",
+      "lib/core/webgpu-renderer.ts": "c8d2bcf35e87d41560e902409ef3af88225717c5cca20c8c2c47b41ce3f5e95e",
+      "tools/explore-hero-render-budget.ts": "f85b78591101b2958e29aa81a733d2a3f9543a62da1db9502e467dba90f6086a"
+    },
+    "mesh": [
+      4,
+      0,
+      0,
+      0,
+      45900,
+      0,
+      0,
+      1,
+      718,
+      1,
+      1,
+      0,
+      1,
+      1,
+      27244,
+      0
+    ]
+  },
+  "batches": [
+    {
+      "arm": {
+        "name": "production-raster",
+        "scale": 0.5,
+        "ao": true,
+        "shadows": true,
+        "coarse": 0.6
+      },
+      "camera": {
+        "azimuth_rad": 0.3109375,
+        "elevation_rad": 0.4440625,
+        "distance_m": 1.9,
+        "target_m": {
+          "x": 0.7896895256050928,
+          "y": 0.40495050078121875,
+          "z": -0.3041002864376481
+        }
+      },
+      "repetition": 0,
+      "gpuMedian_ms": 64.55296,
+      "wallMedian_ms": 64.33470800000214
+    },
+    {
+      "arm": {
+        "name": "production-no-shadows",
+        "scale": 0.5,
+        "ao": true,
+        "shadows": false,
+        "coarse": 0.6
+      },
+      "camera": {
+        "azimuth_rad": 0.3109375,
+        "elevation_rad": 0.4440625,
+        "distance_m": 1.9,
+        "target_m": {
+          "x": 0.7896895256050928,
+          "y": 0.40495050078121875,
+          "z": -0.3041002864376481
+        }
+      },
+      "repetition": 0,
+      "gpuMedian_ms": 1.769472,
+      "wallMedian_ms": 2.255250000001979
+    },
+    {
+      "arm": {
+        "name": "production-no-ao",
+        "scale": 0.5,
+        "ao": false,
+        "shadows": true,
+        "coarse": 0.6
+      },
+      "camera": {
+        "azimuth_rad": 0.3109375,
+        "elevation_rad": 0.4440625,
+        "distance_m": 1.9,
+        "target_m": {
+          "x": 0.7896895256050928,
+          "y": 0.40495050078121875,
+          "z": -0.3041002864376481
+        }
+      },
+      "repetition": 0,
+      "gpuMedian_ms": 63.176704,
+      "wallMedian_ms": 63.4766660000023
+    },
+    {
+      "arm": {
+        "name": "visibility-off",
+        "scale": 0.5,
+        "ao": false,
+        "shadows": false,
+        "off": true
+      },
+      "camera": {
+        "azimuth_rad": 0.3109375,
+        "elevation_rad": 0.4440625,
+        "distance_m": 1.9,
+        "target_m": {
+          "x": 0.7896895256050928,
+          "y": 0.40495050078121875,
+          "z": -0.3041002864376481
+        }
+      },
+      "repetition": 0,
+      "gpuMedian_ms": 1.31072,
+      "wallMedian_ms": 1.5061669999995502
+    },
+    {
+      "arm": {
+        "name": "visibility-off",
+        "scale": 0.5,
+        "ao": false,
+        "shadows": false,
+        "off": true
+      },
+      "camera": {
+        "azimuth_rad": 0.3109375,
+        "elevation_rad": 0.4440625,
+        "distance_m": 1.9,
+        "target_m": {
+          "x": 0.7896895256050928,
+          "y": 0.40495050078121875,
+          "z": -0.3041002864376481
+        }
+      },
+      "repetition": 1,
+      "gpuMedian_ms": 1.31072,
+      "wallMedian_ms": 1.8282500000022992
+    },
+    {
+      "arm": {
+        "name": "production-no-ao",
+        "scale": 0.5,
+        "ao": false,
+        "shadows": true,
+        "coarse": 0.6
+      },
+      "camera": {
+        "azimuth_rad": 0.3109375,
+        "elevation_rad": 0.4440625,
+        "distance_m": 1.9,
+        "target_m": {
+          "x": 0.7896895256050928,
+          "y": 0.40495050078121875,
+          "z": -0.3041002864376481
+        }
+      },
+      "repetition": 1,
+      "gpuMedian_ms": 62.390272,
+      "wallMedian_ms": 63.167750000000524
+    },
+    {
+      "arm": {
+        "name": "production-no-shadows",
+        "scale": 0.5,
+        "ao": true,
+        "shadows": false,
+        "coarse": 0.6
+      },
+      "camera": {
+        "azimuth_rad": 0.3109375,
+        "elevation_rad": 0.4440625,
+        "distance_m": 1.9,
+        "target_m": {
+          "x": 0.7896895256050928,
+          "y": 0.40495050078121875,
+          "z": -0.3041002864376481
+        }
+      },
+      "repetition": 1,
+      "gpuMedian_ms": 1.769472,
+      "wallMedian_ms": 2.144416999999521
+    },
+    {
+      "arm": {
+        "name": "production-raster",
+        "scale": 0.5,
+        "ao": true,
+        "shadows": true,
+        "coarse": 0.6
+      },
+      "camera": {
+        "azimuth_rad": 0.3109375,
+        "elevation_rad": 0.4440625,
+        "distance_m": 1.9,
+        "target_m": {
+          "x": 0.7896895256050928,
+          "y": 0.40495050078121875,
+          "z": -0.3041002864376481
+        }
+      },
+      "repetition": 1,
+      "gpuMedian_ms": 62.91456,
+      "wallMedian_ms": 74.66424999999435
+    }
+  ]
+}
