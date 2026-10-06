@@ -46,9 +46,8 @@ export function uniformMixedPressureSpareFull(plan:UniformMixedPressurePlan,maxi
  * first runs the verdict of the checkpoint before it (the initial one, or
  * the previous slot's when that slot ran), then applies its decision (the rules of
  * nextUniformPressureCorrection: a stalled V phase jumps to the encoded
- * Full-Cycles, a stall tightens coarse accuracy 1 -> 0.1 -> 0) and writes the
- * slot gate word every kernel of a slot reads first: the native hierarchy's
- * (mgSkipCycle) and the pressure root's (umSlotClosed), clearing the
+ * Full-Cycles) and writes the slot gate word every kernel of a slot reads
+ * first (the pressure root's, umSlotClosed), clearing the
  * candidate an open slot's checkpoint reduces into. A closed slot's
  * launches return at once. A latched frame status (uniform-mixed-frame-status)
  * closes every slot, this frame's and every later one's.
@@ -57,24 +56,22 @@ export function uniformMixedPressureSpareFull(plan:UniformMixedPressurePlan,maxi
  * Otherwise it latches the first cause in the frame status. It writes the
  * projection's gate, the band's closed word (UniformPressureBand.closedWord:
  * the band solve, projection and presentation stride no slots) and, on
- * acceptance, the status's last accepted frame. It reopens the native
- * hierarchy, and an accepted solve leaves every word open.
+ * acceptance, the status's last accepted frame. An accepted solve leaves
+ * every word open.
  * The last gate plans the next frame from the cycles this one ran, plus one
  * spare, and never below the largest count of the last
  * UNIFORM_MIXED_SCHEDULE_NEED_WINDOW accepted frames plus the spare: a
  * stalled V phase is dropped (re-probed every
- * UNIFORM_MIXED_SCHEDULE_V_PROBE frames), and the coarse accuracy a stall
- * forced is kept, relaxing one step after a stall-free solve.
+ * UNIFORM_MIXED_SCHEDULE_V_PROBE frames).
  *
- * Control words: 0 gate step, 1 next slot, 2 coarse accuracy, 3 previous
- * residual, 4 cycles run, 5 current slot enabled, 6 V phase stalled, 7 any
- * stall, 9 planned accuracy, 10 V skip streak, 11 the previous three accepted
+ * Control words: 0 gate step, 1 next slot, 3 previous
+ * residual, 4 cycles run, 5 current slot enabled, 6 V phase stalled,
+ * 10 V skip streak, 11 the previous three accepted
  * frames' cycles (8 bits each), 12-13 this frame's V/Full
  * slots (host), 14-15 the next frame's (planner), 16-17 V/Full cycles run.
- * Diagnostics (read by FLUID_MIXED_PRESSURE_TRACE only): 8 initial residual,
- * 18-24 each run slot's candidate residual, 25 each open slot's coarse
- * accuracy (2 bits: 0 is 1, 1 is 0.1, 2 is 0).
- * Words 9-11 and 14-15 persist. The gate writes the cycle count into
+ * Diagnostics (read by FLUID_MIXED_PRESSURE_TRACE only): 7 any stall,
+ * 8 initial residual, 18-24 each run slot's candidate residual.
+ * Words 10-11 and 14-15 persist. The gate writes the cycle count into
  * acceptance word 7. */
 export class UniformMixedPressureSchedule {
  /** The schedule's cap per kind; plans never exceed it. */
@@ -86,10 +83,10 @@ export class UniformMixedPressureSchedule {
  private group?:GPUBindGroup;
  private gates=0;
  constructor(private readonly device:GPUDevice,private readonly schedule:UniformCM11aSchedule,
-  private readonly state:GPUBuffer,private readonly tolerance:GPUBuffer,
-  /** The slot gate words: the native hierarchy's state (mgSkipCycle word
-   * 17) and the pressure root's support (umSlotClosed word 9n+24). */
-  private readonly words:{readonly native:GPUBuffer;readonly fine:GPUBuffer;readonly supportWord:number;
+  private readonly state:GPUBuffer,
+  /** The slot gate word: the pressure root's support (umSlotClosed word
+   * 9n+24). */
+  private readonly words:{readonly fine:GPUBuffer;readonly supportWord:number;
    /** The frame status record and the band's index header (count, overflow,
     * closed word). */
    readonly status:GPUBuffer;readonly band:GPUBuffer;readonly bandClosedWord:number;
@@ -97,22 +94,19 @@ export class UniformMixedPressureSchedule {
    readonly acceptance:GPUBuffer}){
   this.maximum={vCycles:schedule.vCycles,fullCycles:schedule.fullCycles};
   this.control=device.createBuffer({label:"Uniform mixed pressure schedule",size:128,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-  device.queue.writeBuffer(this.control,36,new Float32Array([1]));
  }
  async initialize():Promise<void>{
   const {vCycles:VMAX,fullCycles:FMAX}=this.maximum;
   const module=this.device.createShaderModule({label:"Uniform mixed pressure schedule gate",code:/* wgsl */`
 @group(0) @binding(0) var<storage,read_write> control:array<u32,32>;
 @group(0) @binding(1) var<storage,read_write> state:array<u32,8>;
-@group(0) @binding(2) var<storage,read_write> tolerance:array<f32,4>;
-@group(0) @binding(3) var<storage,read_write> native:array<u32>;
 @group(0) @binding(4) var<storage,read_write> fine:array<u32>;
 @group(0) @binding(6) var<storage,read_write> band:array<u32,8>;
 @group(0) @binding(7) var<uniform> acceptance:vec4f;
 ${uniformMixedPressureVerdictWGSL("acceptance")}
 ${uniformMixedFrameStatusWGSL(0,5,"read_write")}const VMAX=${VMAX}u;const FMAX=${FMAX}u;const SUPPORT_GATE=${this.words.supportWord}u;const BAND_CLOSED=${this.words.bandClosedWord}u;
 fn umF(word:u32)->f32{return bitcast<f32>(control[word]);}
-// The next frame's slot list and coarse accuracy, after an accepted solve:
+// The next frame's slot list, after an accepted solve:
 // the cycles of each kind this frame ran, one spare where the solve ended.
 fn umPlan(){
  let V=control[12];let vRan=control[16];let fRan=control[17];
@@ -135,8 +129,6 @@ fn umPlan(){
  let df=min(add,FMAX-f);f+=df;add-=df;
  if(control[6]==0u){v=min(VMAX,v+add);}
  control[14]=v;control[15]=f;control[10]=streak;
- let a=umF(2);
- control[9]=bitcast<u32>(select(select(select(0.1,1.0,a!=0.0),a,a==1.0),a,control[7]!=0u));
 }
 @compute @workgroup_size(1) fn main(){
   let step=control[0];control[0]=step+1u;
@@ -144,8 +136,8 @@ fn umPlan(){
   if(step==0u){umCheck(true);}else if(control[5]!=0u){umCheck(false);}
   let V=control[12];let F=control[13];let SLOTS=V+F;
   if(step==0u){
-   control[1]=0u;control[2]=control[9];control[3]=state[2];control[4]=0u;control[6]=0u;control[7]=0u;control[16]=0u;control[17]=0u;
-   control[8]=state[2];control[25]=0u;for(var i=18u;i<25u;i++){control[i]=0u;}
+   control[1]=0u;control[3]=state[2];control[4]=0u;control[6]=0u;control[7]=0u;control[16]=0u;control[17]=0u;
+   control[8]=state[2];for(var i=18u;i<25u;i++){control[i]=0u;}
   }else if(control[5]!=0u){
    // The slot just gated ran; its checkpoint wrote the accepted residual.
    let residual=bitcast<f32>(state[1]);
@@ -153,7 +145,7 @@ fn umPlan(){
    var next=step;
    if(stalled&&next<V&&F>0u){next=V;control[6]=1u;}
    control[1]=next;control[3]=state[1];control[4]+=1u;control[select(17u,16u,step-1u<V)]+=1u;control[17u+step]=state[0];
-   if(stalled){control[7]=1u;control[2]=bitcast<u32>(select(0.0,0.1,umF(2)==1.0));}
+   if(stalled){control[7]=1u;}
   }
   var open=!umFrameFailed()&&state[5]==0u&&state[4]==0u&&control[1]==step;
   if(step==SLOTS){
@@ -172,20 +164,15 @@ fn umPlan(){
   control[5]=u32(open);
   // An open slot's checkpoint reduces into a clear candidate.
   if(open&&step<SLOTS){state[0]=0u;}
-  // setCoarseAccuracy's words, for the native 4h continuation.
-  let a=umF(2);tolerance[2]=0.1*a;tolerance[3]=tolerance[0]*0.1*a;
-  if(open&&step<SLOTS){control[25]|=select(select(2u,1u,a!=0.0),0u,a==1.0)<<(2u*step);}
-  // The slot gate words (0 open). The projection launches on the root
-  // alone, so its gate reopens the native hierarchy.
-  let closed=u32(!open);let cycle=step<SLOTS;
-  native[17]=select(0u,closed,cycle);fine[SUPPORT_GATE]=closed;
+  // The slot gate word (0 open).
+  fine[SUPPORT_GATE]=u32(!open);
 }
 `});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   this.pipeline=await this.device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
   const w=this.words;
-  this.group=this.device.createBindGroup({layout:this.pipeline.getBindGroupLayout(0),entries:[this.control,this.state,this.tolerance,w.native,w.fine,w.status,w.band,w.acceptance]
-   .map((buffer,binding)=>({binding,resource:{buffer,size:binding===1?32:binding===2?16:binding===3?112:binding===5?64:binding===6?32:binding===7?16:undefined}}))});
+  const entries:readonly (readonly [number,GPUBuffer,number?])[]=[[0,this.control],[1,this.state,32],[4,w.fine],[5,w.status,64],[6,w.band,32],[7,w.acceptance,16]];
+  this.group=this.device.createBindGroup({layout:this.pipeline.getBindGroupLayout(0),entries:entries.map(([binding,buffer,size])=>({binding,resource:{buffer,size}}))});
  }
  /** Starts a frame's slot list for `plan`. The step counter restarts here. */
  begin(plan:UniformMixedPressurePlan):void{

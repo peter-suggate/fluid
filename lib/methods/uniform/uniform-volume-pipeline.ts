@@ -184,7 +184,7 @@ const stages: FluidPipelineStage[] = [
   },
   {
     ...base("pressure-cycles"),
-    tip:{summary:"The all-4h root solve: CM11a cycles whose correction the native n/4 hierarchy solves; residuals, measure and bounds use the mixed rows. The host encodes the slot list the lagged plan chose (V-cycles, then Full-Cycles). A GPU gate before each slot closes it once converged, jumps a stalled V phase to Full-Cycles, and tightens coarse accuracy on a stall. A closed slot's launches still pay their floor. Running out of slots unconverged withholds the projection and stops the frame.",
+    tip:{summary:"The all-4h root solve: CM11a cycles whose correction the native n/4 hierarchy solves; residuals, measure and bounds use the mixed rows. The host encodes the slot list the lagged plan chose (V-cycles, then Full-Cycles). A GPU gate before each slot closes it once converged, and jumps a stalled V phase to Full-Cycles. A closed slot's launches still pay their floor. Running out of slots unconverged withholds the projection and stops the frame.",
       reads:"all-4h RHS", writes:"all-4h pressure, acceptance state", feeds:"pressure projection"},
     controls:[...(base("pressure-cycles").controls ?? []).filter(control=>control.kind!=="readout"&&!("param" in control&&["pressureCycleBudget","pressureBudgetHeadroom"].includes(control.param)))
       .map(control => control.kind === "param-range" && control.param === "pressureSweeps"

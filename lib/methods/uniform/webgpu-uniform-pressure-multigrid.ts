@@ -366,7 +366,6 @@ export class WebGPUUniformPressureMultigrid {
   /** First plan index of the always-encoded finish section. */
   private finishStart = 0;
   private finalStart = 0;
-  private coarseAccuracyScale = 1;
   private activeResidualTolerance = 0;
   private coarsestCaptureBuffers?: CoarsestCaptureBuffers;
   private windowLevelGroups?: readonly (readonly [number, number, number])[];
@@ -576,13 +575,7 @@ export class WebGPUUniformPressureMultigrid {
     const tolerance = Number.isFinite(value) ? Math.max(0, value) : 0;
     this.activeResidualTolerance = tolerance;
     this.device.queue.writeBuffer(this.toleranceBuffer, 0, new Float32Array([tolerance, this.adaptiveSolve && tolerance > 0 ? 1 : 0,
-      0.1 * this.coarseAccuracyScale, tolerance * 0.1 * this.coarseAccuracyScale]));
-  }
-
-  /** Tighten the inner solve after poor outer progress; zero selects strict accuracy. */
-  setCoarseAccuracy(scale: number): void {
-    this.coarseAccuracyScale = Math.max(0, Math.min(1, scale));
-    this.setResidualTolerance(this.activeResidualTolerance);
+      0.1, tolerance * 0.1]));
   }
 
   /**
@@ -651,9 +644,6 @@ export class WebGPUUniformPressureMultigrid {
       code: input.shaderSource });
     this.shaderModule = shaderModule;
     const emptyUniformLayout = this.device.createBindGroupLayout({entries: []});
-    // A mixed continuation reads the mixed schedule's slot gate (mgSkipCycle).
-    const slotGated = (stage: GPUProgrammableStage): GPUProgrammableStage => this.continuationOnly
-      ? { ...stage, constants: { ...stage.constants, MG_SLOT_GATED: 1 } } : stage;
     const entries = await Promise.all(ENTRY_POINTS.filter((entryPoint) =>
       (!/InPlace$|Quiet$/.test(entryPoint) || this.inPlaceCapable) && (!this.tileEntry(entryPoint) || this.tileSmoothing)
       && (!this.cycleEntry(entryPoint) || this.cycleTiling)
@@ -665,7 +655,7 @@ export class WebGPUUniformPressureMultigrid {
       await compiler.compileComputePipeline({ label: `Uniform CM11a - ${entryPoint}`,
         layout: this.device.createPipelineLayout({ label: `Uniform CM11a layout - ${entryPoint}`,
           bindGroupLayouts: [this.tileEntry(entryPoint) ? this.smoothTileInputLayout! : entryPoint === "mgPublishCycleDispatch" ? emptyUniformLayout : input.uniformBindGroupLayout, this.groupLayouts[entryPoint]] }),
-        compute: slotGated({ module: shaderModule, entryPoint,
+        compute: { module: shaderModule, entryPoint,
           ...(entryPoint === "mgBakeCoefficients" ? {constants:{MG_MASK_FIRST:Number(this.maskFirst && uniformAbOn("maskfirst"))}} : {}),
           ...(entryPoint === "mgBuildSmoothTiles" ? {constants:{MG_CYCLE_TILES:Number(this.cycleTiling)}} : {}),
           ...(entryPoint === "mgBuildCycleTiles" && WALL_HALO ? {constants:{MG_HALO_ENTRIES:Number(this.haloEntries)}} : {}),
@@ -673,7 +663,7 @@ export class WebGPUUniformPressureMultigrid {
           ...(entryPoint === "mgBuildFinestRhs" ? {constants:{MG_REUSE_FINEST_AUTHORITY:Number(this.reuseFinestAuthority && uniformAbOn("pressureauthority"))}} : {}),
           ...(/^(mgSmoothVisitInPlace|mgSmoothVisitLocalInPlace)$/.test(entryPoint) ? { constants: { MG_VISIT_LANES: this.visitLanes } } : {}),
           ...(entryPoint === "mgSmoothRowInPlace" || /Quiet$/.test(entryPoint)
-            ? { constants: { MG_ROW_SEGMENT: ROW_SEGMENT } } : {}) }) },
+            ? { constants: { MG_ROW_SEGMENT: ROW_SEGMENT } } : {}) } },
         { priority: "visible", signal: input.signal })] as const));
     this.pipelines = Object.freeze(Object.fromEntries(entries) as Record<EntryPoint, GPUComputePipeline>);
     this.plan = Object.freeze(this.buildPlan());
@@ -745,7 +735,6 @@ export class WebGPUUniformPressureMultigrid {
       return {texture,buffer,dimensions};
     };
     return {
-      setCoarseAccuracy:(scale:number)=>this.setCoarseAccuracy(scale),
       pressure:field(root.pressure[0]),rhs:field(root.rhs[0]),minimum:field(root.minimum[0]),
       phi:field(root.phi[0]),topology:field(root.volume[0]),
       /** Every level from the entry one down, for a caller that runs the
@@ -762,12 +751,6 @@ export class WebGPUUniformPressureMultigrid {
        * by the setup from the seeded bound and the baked liquid. */
       cycle:listed?{pressure:field(root.pressure[1]),
         list:this.cycleTileBuffers[level]!,tiles:this.tileCounts[level]!}:undefined,
-      /** Written by the mixed solve's GPU schedule gate: words 2-3 are the
-       * coarse accuracy setCoarseAccuracy would write. */
-      tolerance:this.toleranceBuffer,
-      /** The native convergence status; word 17 is the mixed schedule's slot
-       * gate (mgSkipCycle), written by its gate kernel. */
-      diagnostics:this.diagnostics,
       /** The per-solve setup: the topology pyramid, the baked coefficients
        * and the entry level's lists (it clears those lists alone: the outer
        * mixed solve owns diagnostics and acceptance). `shared` batches every

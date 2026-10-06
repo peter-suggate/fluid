@@ -320,7 +320,7 @@ export class UniformMixedFrame {
   this.state=buffer("Uniform pressure acceptance",32,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.status=buffer("Uniform mixed frame status",4*UNIFORM_MIXED_STATUS_WORDS,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.initialPlan={vCycles:schedule.vCycles,fullCycles:schedule.fullCycles};
-  this.readbacks=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},(_,i)=>buffer(`Uniform pressure receipt and mass accounting ${i}`,TRACE_RECEIPT+(PRESSURE_TRACE?336:0),GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ));
+  this.readbacks=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},(_,i)=>buffer(`Uniform pressure receipt and mass accounting ${i}`,TRACE_RECEIPT+(PRESSURE_TRACE?224:0),GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ));
   this.reductions=buffer("Uniform dust accounting",48,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC);
   const caches=Array.from({length:1},(_,i)=>{const t=device.createTexture({label:`Uniform 4h sampling cache ${i}`,size:layout.lattice.dimensions.map(n=>n/4+2),dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});this.owned.push(t);return t;});
   const coarseLayout=uniformMixedAllCoarseLayout(layout);
@@ -538,8 +538,8 @@ export class UniformMixedFrame {
   * behind one another on a scene's first load. */
  async initialize():Promise<void>{
   const root=this.pressureOwnership;
-  this.pressureSchedule=new UniformMixedPressureSchedule(this.device,this.schedule,this.state,this.fields.pressure.tolerance,
-   {native:this.fields.pressure.diagnostics,fine:root.support,supportWord:9*root.layout.tiles.length+24,status:this.status,band:this.band.index,bandClosedWord:UniformPressureBand.closedWord,acceptance:this.params.acceptance});
+  this.pressureSchedule=new UniformMixedPressureSchedule(this.device,this.schedule,this.state,
+   {fine:root.support,supportWord:9*root.layout.tiles.length+24,status:this.status,band:this.band.index,bandClosedWord:UniformPressureBand.closedWord,acceptance:this.params.acceptance});
   // Displacement runs on a live voxel edit or a body: built when that state is first prepared.
   const needs=this.fields.needs??this.solid?.needs??new UniformPipelineNeeds();
   await Promise.all([this.solid,{initialize:()=>needs.declare(["displace"],async()=>{await this.displacement?.initialize();})},this.transport,this.plan,this.cleanup,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band]
@@ -829,7 +829,7 @@ export class UniformMixedFrame {
    this.ownership.encodeWorkReceipt(encoder,readback,WORK_RECEIPT);
    this.sharpen.encodeWorkReceipt(encoder,readback,SHARPEN_WORK_RECEIPT);
    this.remap.encodeWorkReceipt(encoder,readback,REMAP_WORK_RECEIPT);this.cycles.encodeWorkReceipt(encoder,readback,ROOT_WORK_RECEIPT);
-   if(PRESSURE_TRACE){const at=TRACE_RECEIPT;schedule.encodeTraceCopy(encoder,readback,at);encoder.copyBufferToBuffer(this.fields.pressure.diagnostics,0,readback,at+128,112);encoder.copyBufferToBuffer(this.band.index,0,readback,at+240,96);}
+   if(PRESSURE_TRACE){const at=TRACE_RECEIPT;schedule.encodeTraceCopy(encoder,readback,at);encoder.copyBufferToBuffer(this.band.index,0,readback,at+128,96);}
    // The next head's census and advection read this extension: it is the
    // frame's velocity extension, priced there, not the census's.
    // Phase is this frame's simulation authority's unless rigid bodies moved since.
@@ -839,20 +839,18 @@ export class UniformMixedFrame {
    return this.check(readback,frame,p,plan.vCycles+plan.fullCycles,kick>0);
   }catch(error){trace?.abort();this.failed=true;throw error;}finally{for(const release of releases)release();this.busy=false;}
  }
- private traceCoarse=[0,0];
  private tracePressure(frame:number,w:Uint32Array):void{
-  const f=new Float32Array(w.buffer,w.byteOffset,w.length),c=f.subarray(0,32),native=w.subarray(32,60),band=w.subarray(60,84),bf=f.subarray(60,84);
-  const slots=w[12]!+w[13]!,ran=w[16]!+w[17]!,accuracy=(i:number)=>["1","0.1","0"][(w[25]!>>(2*i))&3]??"?";
-  const iterations=native[26]!-this.traceCoarse[0]!,solves=native[27]!-this.traceCoarse[1]!;this.traceCoarse=[native[26]!,native[27]!];
-  console.log(`PTRACE ${JSON.stringify({frame,plan:[w[12],w[13]],ran:[w[16],w[17]],initial:c[8],slots:Array.from({length:ran},(_,i)=>[c[18+i],accuracy(i)]),stalled:w[7],vStalled:w[6],planned:c[9],next:[w[14],w[15]],
-   coarse:{solves,iterations},band:{tiles:band[0],cycles:band[4],final:bf[2],history:Array.from(bf.subarray(8,8+6))},slotsEncoded:slots})}`);
+  const f=new Float32Array(w.buffer,w.byteOffset,w.length),c=f.subarray(0,32),band=w.subarray(32,56),bf=f.subarray(32,56);
+  const slots=w[12]!+w[13]!,ran=w[16]!+w[17]!;
+  console.log(`PTRACE ${JSON.stringify({frame,plan:[w[12],w[13]],ran:[w[16],w[17]],initial:c[8],slots:Array.from({length:ran},(_,i)=>c[18+i]),stalled:w[7],vStalled:w[6],next:[w[14],w[15]],
+   band:{tiles:band[0],cycles:band[4],final:bf[2],history:Array.from(bf.subarray(8,8+6))},slotsEncoded:slots})}`);
  }
  /** Frame `frame`'s receipt: fail fast on a rejected or unconverged solve. */
  private async check(readback:GPUBuffer,frame:number,p:UniformMixedFrameParameters,encoded:number,kick=false):Promise<UniformMixedFrameReceipt>{
   let mapped:Uint32Array;
   try{
    await readback.mapAsync(GPUMapMode.READ);
-   mapped=new Uint32Array(readback.getMappedRange(),0,TRACE_RECEIPT/4+(PRESSURE_TRACE?84:0)).slice();readback.unmap();
+   mapped=new Uint32Array(readback.getMappedRange(),0,TRACE_RECEIPT/4+(PRESSURE_TRACE?56:0)).slice();readback.unmap();
    if(PRESSURE_TRACE)this.tracePressure(frame,mapped.slice(TRACE_RECEIPT/4));
   }catch(error){this.failed=true;throw error;}finally{this.unchecked.delete(readback);}
   try{

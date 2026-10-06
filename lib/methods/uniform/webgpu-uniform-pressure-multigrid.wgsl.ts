@@ -201,20 +201,21 @@ fn mgBuildCycleTiles(@builtin(global_invocation_id) gid:vec3u){
   }
   let slot=atomicAdd(&mgCycleTiles[0],1u);
   atomicStore(&mgCycleTiles[4u+slot],at);
-}
+}`;
+
+/**
+ * Shared by cycle kernels even when the optional in-place smoother is absent.
+ * The finest cell a halo entry's lane owns, or -1: entry slot 4 * group + lane
+ * / 16 past the tiles, 4 x 4 cells on the entry's face. Plain selects, no
+ * dynamic component indexing: this runs inside the Jacobi sweep.
+ */
+const MG_HALO_HELPERS = /* wgsl */ `
 // Grid-stride jobs of the cycle list: every tile, then the halo entries four
 // to a job (n = tiles of the lattice the list covers).
 fn mgHaloJobs(dims:vec3u,tiles:u32)->u32{
   let d=(dims+vec3u(3))/4u;let n=d.x*d.y*d.z;
   return tiles+(atomicLoad(&mgCycleDispatch[4u+n])+3u)/4u;
-}`;
-
-/**
- * The finest cell a halo entry's lane owns, or -1: entry slot 4 * group + lane
- * / 16 past the tiles, 4 x 4 cells on the entry's face. Plain selects, no
- * dynamic component indexing: this runs inside the Jacobi sweep.
- */
-const MG_HALO_CELL = /* wgsl */ `
+}
 fn mgHaloCell(group:u32,lane:u32,dims:vec3u)->vec3i{
   let d=(dims+vec3u(3u))/4u;let n=d.x*d.y*d.z;
   let k=4u*group+lane/16u;
@@ -521,14 +522,7 @@ ${uniformPressureStateWGSL}
 
 @group(1) @binding(17) var<uniform> mgTolerance:vec4f;
 var<workgroup> mgCycleStopped:u32;
-// The mixed pressure schedule's slot gate (0 open): a closed slot's launches
-// return at once. Only a mixed continuation build (MG_SLOT_GATED) reads it;
-// there word 17 (completed Full-Cycles, counted by mgCheckCycleConvergence,
-// which that build never compiles) is the mixed schedule gate's alone.
-override MG_SLOT_GATED:bool=false;
-const MG_SLOT_GATE:u32=17u;
 fn mgSkipCycle()->bool{
-  if(MG_SLOT_GATED&&atomicLoad(&mgState.convergence[MG_SLOT_GATE])!=0u){return true;}
   if(mg.levelDims.w==0u){return false;}
   if(atomicLoad(&mgState.convergence[16])!=0u){return true;}
   let recovery=atomicLoad(&mgState.convergence[22])!=0u;
@@ -539,7 +533,7 @@ fn mgSkipCycle()->bool{
 // converged solve launches zero workgroups for all subsequent cycle kernels.
 // Save/restore and final diagnostics remain unconditional.
 @group(1) @binding(18) var<storage,read_write> mgCycleDispatch:array<atomic<u32>>;
-${wallHalo ? MG_HALO_CELL : ""}
+${wallHalo ? MG_HALO_HELPERS : ""}
 @compute @workgroup_size(1)
 fn mgPublishCycleDispatch(){
   let records=mg.control.z;

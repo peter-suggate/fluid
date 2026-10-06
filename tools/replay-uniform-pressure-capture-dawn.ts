@@ -32,7 +32,7 @@ try {
  // Deliberate diagnostic access to the production frame and its native continuation.
  const host=solver as any,frame=host.mixedFrame;assert.ok(frame);
  frame.updateLayout(uniformMixedLayoutFromTiles(capture.lattice,new Uint32Array(capture.simulationTiles),[]));
- host.writeParams(capture.parameters.dt,0,0);frame.write(capture.parameters);frame.fields.pressure.setCoarseAccuracy(1);
+ host.writeParams(capture.parameters.dt,0,0);frame.write(capture.parameters);
  const clear=device.createCommandEncoder();
  for(let i=0;i<frame.levels.length;i++){
   const level=frame.levels[i],saved=capture.levels[i];

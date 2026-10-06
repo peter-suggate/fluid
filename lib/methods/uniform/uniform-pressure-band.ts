@@ -36,8 +36,9 @@ export interface UniformPressureBandSchedule {
 }
 export const UNIFORM_PRESSURE_BAND_SCHEDULE:UniformPressureBandSchedule={cycles:4,fineSweeps:3,middleSweeps:2,coarseSweeps:16,coarseScale:0.6,fusedSlots:8};
 
-/** Workgroups of the tile classification passes: a fixed grid-stride launch
- * over the simulation's h tile worklist. */
+/** Workgroups of the tile classification pass at most: a grid-stride launch
+ * over the simulation's h tile worklist, as wide as the ownership's buffered
+ * h-tile evidence. */
 const LIST_GROUPS=4096;
 /** Every band pass strides the band's own compact slot list from a buffered
  * direct launch: one slot per group, eight slots (2h aggregates) per group,
@@ -65,6 +66,20 @@ const FUSED_BLOCK=8;
  * colour's rows couple only to the other colour's, so neither path's order
  * changes a value. */
 const COARSE_SOLVE_LANES=1024,COARSE_SOLVE_SLOTS=4096;
+/** Narrow forms of that solve, by lanes: a band of at most as many slots
+ * (the buffered estimate) launches the narrowest that holds it, a position
+ * to a lane. Every barrier of the one workgroup costs its lanes, whether or
+ * not they hold a row, and the solve is `2 coarseSweeps` of them. Each
+ * form is complete for any band (a larger one streams its rows). */
+const COARSE_SMALL_LANES=[64,256];
+/** A band of more slots than this (the buffered estimate) runs the 4h
+ * level as a launch per half sweep across workgroups instead (coarseSweep):
+ * the same red-black updates. One workgroup streams a large band's rows
+ * through at most 1024 threads, 72 microseconds a thousand rows a solve
+ * (pool 128^3 all-fine, 17 thousand rows: 1.2 ms of each solve's launch);
+ * the `2 coarseSweeps` launches are 5 to 12 microseconds each on the GPU and
+ * 7 on the host, so they only win well past the register path's reach. */
+const COARSE_WIDE_SLOTS=8192;
 /** Band rows are field-major over CAP*64 rows: rhs, diagonal, face kinds,
  * the six face coefficients, u* per face, with static solids the CM11a V
  * per face, then the row's start pressure (the iterate is the correction to
@@ -501,6 +516,8 @@ var<workgroup> bSweepCount:u32;
   if(bHalves>1u){storageBarrier();}
  }
 }`;
+  const coarseForms:[string,number,number,number][]=[["coarseSolve",lanes,held,shared],
+   ...COARSE_SMALL_LANES.filter(n=>n<lanes).map(n=>[`coarseSolve${n}`,n,1,n] as [string,number,number,number])];
   const sources:Record<string,string>={
    list:header+surface+/* wgsl */`
 @group(1) @binding(0) var<uniform> params:BandParams;
@@ -508,8 +525,8 @@ var<workgroup> bSweepCount:u32;
 var<workgroup> member:atomic<u32>;
 // Every h simulation tile with a liquid pressure row is a band tile: its
 // h velocity is divergence-free only after the h solve.
-@compute @workgroup_size(64) fn main(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var j=group.x;j<umCounts.x;j+=${LIST_GROUPS}u){
+@compute @workgroup_size(64) fn main(${slots}){
+ for(var j=group.x;j<umCounts.x;j+=groups.x){
   let t=bHTile(j);
   if(lane==0u){atomicStore(&member,0u);}
   workgroupBarrier();
@@ -856,7 +873,7 @@ var<workgroup> bMiddleResidual:array<f32,64>;
    // below 2^16: n bounds them); a larger band streams its rows from storage
    // and keeps the first SHARED corrections in workgroup memory, the rest in
    // storage.
-   coarseSolve:band+/* wgsl */`
+   ...Object.fromEntries(coarseForms.map(([name,lanes,held,shared])=>[name,band+/* wgsl */`
 const L:u32=${lanes}u;const HELD:u32=${held}u;const SOLVE_SLOTS:u32=L*HELD;const SHARED:u32=${shared}u;
 var<workgroup> bSolveCount:u32;
 var<workgroup> bRedCount:u32;
@@ -912,6 +929,20 @@ fn bCorrectionAt(s:u32)->f32{if(s<SHARED){return bCorrection[s];}return coarse[b
   }
  }
  for(var s=lane;s<min(n,SHARED);s+=L){coarse[bC(0u,s)]=bCorrection[s];}
+}`])),
+   // The same solve for a large band, a launch per half sweep: colour
+   // bColour's rows (coarseBake's positions), a row to a thread, each
+   // against the other colour's corrections as the launch before left them.
+   coarseSweep:band+/* wgsl */`
+override bColour:u32=0u;
+@compute @workgroup_size(64) fn main(${slots}){
+ let live=bLive();let red=min(bIndex(${RED_WORD}u),live);let black=live-min(bIndex(${BLACK_WORD}u),live-red);
+ let first=select(0u,black,bColour==1u);let last=select(red,live,bColour==1u);
+ for(var j=first+group.x*64u+lane;j<last;j+=groups.x*64u){
+  var off=0.0;for(var f=0u;f<6u;f++){let m=bitcast<u32>(coarse[bC(17u+f,j)]);if(m!=0u){off+=coarse[bC(3u+f,j)]*coarse[bC(0u,m-1u)];}}
+  let s=bitcast<u32>(coarse[bC(15u,j)]);
+  coarse[bC(0u,s)]=(coarse[bC(1u,s)]+off)/coarse[bC(2u,j)];
+ }
 }`,
    middleProlong:band+/* wgsl */`
 @compute @workgroup_size(64) fn main(${slots}){
@@ -1055,6 +1086,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    // F: a cycle's h half sweeps before or after the correction, in one launch. SF: the two settling ones.
    sweepWide:[["F",{bColour:0,bHalves:2*schedule.fineSweeps}],["SF",{bColour:0,bSettle:1,bHalves:2}]],
    // D: the descent's half sweeps after the restriction, black first. U: the ascent's, the prolonging red first.
+   coarseSweep:[0,1].map(c=>[`${c}`,{bColour:c}] as [string,Record<string,number>]),
    middleSweep:[...[0,1].map(c=>[`${c}`,{bColour:c}] as [string,Record<string,number>]),["P",{bColour:0,bProlong:1}],["D",{bColour:1,bHalves:2*schedule.middleSweeps-1}],["U",{bColour:0,bProlong:1,bHalves:2*schedule.middleSweeps}]],
    restrict:range(schedule.cycles).map(k=>[`@${k}`,{bCycle:k}]),measure:range(schedule.cycles,1).map(k=>[`@${k}`,{bCycles:k}]),
   };
@@ -1075,17 +1107,21 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  private boundPass?:GPUComputePassEncoder;
  private boundGroup?:UniformDetailGroup;
  private layoutOf(name:string):string{const base=name.replace(/([01PDUF]|@\d+)$/,"");if(base==="rebase")return "init";return ["list","copy","prep","init","project","present"].includes(base)?base:"solver";}
- /** launch: a fixed group count, or a slot-list stride (one 32-lane group
+ /** launch: a fixed group count, the simulation's h tiles (one group per
+  * tile of its buffered evidence), or a slot-list stride (one 32-lane group
   * per slot colour, one group per slot, per 8 slots, per 64 slots) capped by
   * the buffered workload estimate and the saturation cap. */
- private dispatch(pass:GPUComputePassEncoder,name:string,launch:number|"cells"|"slots"|"middle"|"coarse"):void{
+ private dispatch(pass:GPUComputePassEncoder,name:string,launch:number|"tiles"|"cells"|"slots"|"middle"|"coarse"):void{
   let bound=this.launches.get(name);
   if(!bound){const pipeline=this.pipelines.get(name);if(!pipeline)throw new Error("Pressure band is not initialized");
    bound={pipeline,group:this.groups.get(this.layoutOf(name))!};this.launches.set(name,bound);}
   // Groups 0 and 2 are the same for every band launch: bind them once per
   // pass, and group 1 only when the launch's layout changes.
   if(this.boundPass!==pass){this.boundPass=pass;this.boundGroup=undefined;pass.setBindGroup(0,this.simulation.bindGroup);if(this.solid)pass.setBindGroup(2,this.solid.coarse!.bindGroup);}
-  pass.setPipeline(uniformDetailPick(this.solid?.select(bound.pipeline)??bound.pipeline));if(this.boundGroup!==bound.group){this.boundGroup=bound.group;pass.setBindGroup(1,bound.group.group);}
+  const pipeline=this.solid?.select(bound.pipeline)??bound.pipeline;
+  if(this.boundGroup!==bound.group){this.boundGroup=bound.group;pass.setBindGroup(1,bound.group.group);}
+  if(launch==="tiles"){this.simulation.dispatchBuffered(pass,pipeline,"fine",LIST_GROUPS);return;}
+  pass.setPipeline(uniformDetailPick(pipeline));
   const c=this.workSlots;
   pass.dispatchWorkgroups(typeof launch==="number"?launch:launch==="cells"?Math.min(c,CELL_GROUPS):launch==="slots"?Math.min(c,SLOT_GROUPS):launch==="middle"?Math.min(Math.ceil(c/8),MIDDLE_GROUPS):Math.min(Math.ceil(c/64),COARSE_GROUPS));
  }
@@ -1103,7 +1139,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   encoder.clearBuffer(this.index,0,4*HEADER);encoder.clearBuffer(this.index,this.slotMapOffset);
   if(this.empty)return;
   const pass=encoder.beginComputePass({label:"Uniform pressure band list and rows"});
-  this.dispatch(pass,"list",LIST_GROUPS);
+  this.dispatch(pass,"list","tiles");
   this.dispatch(pass,"prep","slots");this.dispatch(pass,"middleBake","middle");this.dispatch(pass,"coarseBake","coarse");pass.end();
  }
  /** After the 4h projection reaches simulation ownership: start from the 4h
@@ -1117,6 +1153,10 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   // then runs a level's consecutive half sweeps in one launch.
   const fused=this.workSlots<=s.fusedSlots;
   const fine=()=>{if(fused)this.dispatch(pass,"sweepWideF",1);else this.sweep(pass,"sweep","cells",s.fineSweeps);};
+  // The 4h level: the narrowest one-workgroup form that holds the band, or
+  // a large band's launches.
+  const wide=this.workSlots>COARSE_WIDE_SLOTS;
+  const narrow=COARSE_SMALL_LANES.find(n=>this.workSlots<=n&&this.pipelines.has(`coarseSolve${n}`)),coarse=narrow?`coarseSolve${narrow}`:"coarseSolve";
   this.dispatch(pass,"init","slots");this.dispatch(pass,"rebase","slots");
   // Shut rows exist only beside a solid.
   if(this.solid?.present){if(fused)this.dispatch(pass,"sweepWideSF",1);else{this.dispatch(pass,"sweepS0","cells");this.dispatch(pass,"sweepS1","cells");}}
@@ -1125,7 +1165,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    this.dispatch(pass,`restrict@${cycle}`,"slots");
    if(fused)this.dispatch(pass,"middleSweepD",1);else{this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps-1);}
    this.dispatch(pass,"middleRestrict","middle");
-   this.dispatch(pass,"coarseSolve",1);
+   if(wide)this.sweep(pass,"coarseSweep","coarse",s.coarseSweeps);else this.dispatch(pass,coarse,1);
    if(fused)this.dispatch(pass,"middleSweepU",1);else{this.dispatch(pass,"middleSweepP","middle");this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps-1);}
    this.dispatch(pass,"middleProlong","slots");fine();
   }
