@@ -28,7 +28,7 @@ function deriveOwnership(layout:UniformMixedLayout,dispatchX:number):OwnershipDe
   if(cached&&cached.dispatchX===dispatchX)return cached;
   const writes:[OwnershipUploadTarget,number,Uint32Array<ArrayBuffer>][]=[];
   const words=new Uint32Array(layout.metadataBytes/4);let offset=0;
-  for(const part of [layout.tiles,layout.fineTiles,layout.coarseTiles,layout.stencils]){words.set(part,offset);offset+=part.length;}
+  for(const part of [layout.tiles,layout.fineTiles,layout.coarseTiles,layout.stencils,layout.blendMasks]){words.set(part,offset);offset+=part.length;}
   writes.push(["topology",0,words]);
   // A uniform loop bound prevents explosive Metal sampler unrolling.
   // umCounts: h tiles, 4h tiles, an unused word, the loop bound.

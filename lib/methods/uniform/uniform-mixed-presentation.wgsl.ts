@@ -1,4 +1,5 @@
 import {uniformMixedFacesWGSL} from "./uniform-mixed-faces.wgsl";
+import {uniformCompiledTopologyWGSL} from "./uniform-compiled-topology";
 import {uniformMixedVelocitySamplingWGSL} from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformDetailRuntimeWGSL } from "../../core/uniform-detail-abi";
@@ -45,6 +46,7 @@ fn umTileWidth(t:u32)->u32{return select(4u,1u,(umTopology[t]&0x80000000u)!=0u);
 fn umTileStencil(t:u32)->vec2u{return vec2u(umTopology[2u*umTileCount()+2u*t],umTopology[2u*umTileCount()+2u*t+1u]);}
 fn umTileMaximumWidth(t:u32)->u32{return umTileStencil(t).x>>27u;}
 fn umTileMinimumWidth(t:u32)->u32{return umTileStencil(t).y>>27u;}
+${uniformCompiledTopologyWGSL.replace(/\bUM_TILES\b/g,"umTileCount()").replace(/\bUM_T\b/g,"umTileDimensions()")}
 fn umTileAt(p:vec3u)->u32{let d=umTileDimensions();return p.x+d.x*(p.y+d.y*p.z);}
 fn umTileCoord(t:u32)->vec3u{let d=umTileDimensions();return vec3u(t%d.x,(t/d.x)%d.y,t/(d.x*d.y));}
 fn umCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}
@@ -76,7 +78,7 @@ fn umLoadVertex(p:vec3u)->f32{
  * and includes uniformMixedPresentationWGSL (for umPresentationLoopBound). */
 export function uniformMixedPresentationVelocityWGSL():string{
  const faces=uniformMixedFacesWGSL.slice(0,uniformMixedFacesWGSL.indexOf("fn umOwnerAt("))
-  +uniformMixedFacesWGSL.slice(uniformMixedFacesWGSL.indexOf("fn umFace("));
+  +uniformMixedFacesWGSL.slice(uniformMixedFacesWGSL.indexOf("fn umFaceFirst("));
  const sampling=(faces+uniformMixedVelocitySamplingWGSL).replace(/\bUM_D\b/g,"umDimensions()")
   .replace(/\bUM_T\b/g,"umTileDimensions()");
  return uniformMixedPresentationLoops(sampling);

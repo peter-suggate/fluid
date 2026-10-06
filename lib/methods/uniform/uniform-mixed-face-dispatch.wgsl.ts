@@ -13,7 +13,7 @@ fn umPositiveFaceAtAnchor(owner:UMOwner,axis:u32,anchor:vec3i)->UMFace {
  if(local[axis]!=i32(owner.width)-1){return UMFace();}
  let first=umFace(owner,axis,1,0u);let u=(axis+1u)%3u;let v=(axis+2u)%3u;
  if(local[u]%i32(first.width)!=0||local[v]%i32(first.width)!=0){return UMFace();}
- return umFace(owner,axis,1,u32(local[u])/first.width+(owner.width/first.width)*(u32(local[v])/first.width));
+ return umFacePatch(first,u32(local[u])/first.width+(owner.width/first.width)*(u32(local[v])/first.width));
 }
 `;
 
@@ -32,7 +32,7 @@ export function uniformMixedFaceDispatchWGSL(entry: string, evaluate: string, al
  for(var axis=0u;axis<select(3u,1u,owner.width==1u);axis++){
   let first=umFace(owner,axis,1,0u);
   for(var part=0u;part<first.count;part++){
-   let ownedFace=umFace(owner,axis,1,part);var earlier=false;
+   let ownedFace=umFacePatch(first,part);var earlier=false;
    for(var other=0u;other<axis;other++){earlier=earlier||umPositiveFaceAtAnchor(owner,other,ownedFace.anchor).width!=0u;}
    if(earlier){continue;}
    var value=vec4f(0);

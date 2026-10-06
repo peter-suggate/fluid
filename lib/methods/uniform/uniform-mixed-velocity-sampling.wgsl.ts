@@ -6,15 +6,13 @@ import { UNIFORM_DETAIL_H_LOAD } from "../../core/uniform-detail-abi";
  * tile has a slot.
  * Written once per frame, after extension and the 4h cache, by
  * UniformMixedHangingTaps; a tap without a slot is evaluated in place.
- * The last 125 words of a slot hold the surface stage's vertex values
- * (umVertexValue at tile-local vertices 0..4 per axis), refilled from the
- * sampled phi before each vertex pass. */
+ * Phi is resolved in its own field; no unused vertex payload is reserved. */
 export const UNIFORM_MIXED_HANGING_TAPS = 48;
-export const UNIFORM_MIXED_HANGING_RECORD = UNIFORM_MIXED_HANGING_TAPS + 125;
+export const UNIFORM_MIXED_HANGING_RECORD = UNIFORM_MIXED_HANGING_TAPS;
 /** Preallocated slots (umHangingSlots()): the most seam tiles a generation
  * within the h-tile capacity `fineTiles` can have. A seam tile has a
  * mixed-width 3³ stencil, so it is an h tile or one of the 26 tiles around
- * one: at most 27 per h tile, and never more than every tile (2.9/22.7/181
+ * one: at most 27 per h tile, and never more than every tile (0.8/6.6/52.4
  * MB at 64³/128³/256³ with every tile h; half the tiles was not enough
  * there: fig-9's dam-and-ball splash passed 8192 of 16384 at frame 110).
  * A proof bound, not a budget: a GPU adoption within the h-tile capacity
@@ -33,9 +31,7 @@ fn umHangingPlaneAddress(slot:u32,local:vec3u,axis:u32)->u32 {
  let u=local[(axis+1u)%3u];let v=local[(axis+2u)%3u];
  return 2u*UM_TILES+slot*${UNIFORM_MIXED_HANGING_RECORD}u+axis*16u+u+4u*v;
 }
-fn umHangingVertexAddress(slot:u32,local:vec3u)->u32 {
- return 2u*UM_TILES+slot*${UNIFORM_MIXED_HANGING_RECORD}u+${UNIFORM_MIXED_HANGING_TAPS}u+local.x+5u*local.y+25u*local.z;
-}
+
 `;
 
 /** MAC sampling from canonical mixed face values. The caller supplies
@@ -66,7 +62,7 @@ fn umVelocitySite(p:vec3f,axis:u32)->UMVelocitySite {
  let sign=select(1,-1,plane==origin[axis]);let first=umFace(owner,axis,sign,0u);
  let u=(axis+1u)%3u;let v=(axis+2u)%3u;let side=owner.width/first.width;
  let part=u32(q[u]-origin[u])/first.width+side*(u32(q[v]-origin[v])/first.width);
- let face=umFace(owner,axis,sign,part);return UMVelocitySite(face,face.width,false);
+ let face=umFacePatch(first,part);return UMVelocitySite(face,face.width,false);
 }
 fn umVelocitySum8(v:array<${type},8>)->${type}{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
 // The unit interpolant when every tap is a stored unit face (the sample's
@@ -193,11 +189,10 @@ fn umVelocitySamplingWeights(p:vec3f)->f32 {
  if(umRegularFine){return 1.0;}
  let width=umTileWidth(umTileAt(vec3u(tile)));
  if(width==1u){return 1.0;}
- let stencil=umTileStencil(umTileAt(vec3u(tile)));
  var fine=0.0;
- // Enumerate only unit incident tiles, from the immutable frame geometry.
- // Mask off the maximum-width bits before scanning the 27 spatial bits.
- var remaining=stencil.x&0x07ffffffu;
+ // The builder removes boxes dominated by a matching fine face/edge.
+ // This is the same minimum box distance, including clipped domain walls.
+ var remaining=umVelocityBlendMask(umTileAt(vec3u(tile)));
  while(remaining!=0u){
   let bit=firstTrailingBit(remaining);remaining&=remaining-1u;
   let t=tile+vec3i(i32(bit%3u),i32((bit/3u)%3u),i32(bit/9u))-vec3i(1);

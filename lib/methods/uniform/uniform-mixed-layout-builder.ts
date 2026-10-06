@@ -1,3 +1,4 @@
+import { uniformCompileStencilWGSL } from "./uniform-compiled-topology";
 import {UNIFORM_MIXED_OVERFLOW_FINE,UNIFORM_MIXED_OVERFLOW_HANGING} from "./uniform-mixed-topology.wgsl";
 import type {UniformMixedGenerationBuffers,UniformMixedOwnership} from "./uniform-mixed-ownership";
 
@@ -133,7 +134,7 @@ export class UniformMixedLayoutBuilder {
    ...[4,5,6,7,8].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
   ]});
   let bytes=this.statics.size;
-  const topology=storage("Uniform layout builder topology",4*n);
+  const topology=storage("Uniform layout builder topology",5*n);
   const support=storage("Uniform layout builder support",9*n+24);
   const slots=storage("Uniform layout builder slots",2*n);
   const work=device.createBuffer({label:"Uniform layout builder work",size:uniformMixedChangedTilesWords(n).words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
@@ -228,20 +229,23 @@ fn categories(w:u32,regular:bool)->array<u32,${CATEGORIES}>{
  c[2]=select(0u,c[0],!regular);c[3]=select(0u,c[1],!regular);c[4]=select(0u,c[1],regular);
  return c;
 }
-// Frozen 3x3x3 stencil masks and per-block category totals.
+${uniformCompileStencilWGSL}
+// Frozen 3x3x3 stencil masks, compiled recipes and per-block category totals.
 @compute @workgroup_size(${BLOCK}) fn classify(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  if(lane<${CATEGORIES}u){atomicStore(&blockTotals[lane],0u);}
  workgroupBarrier();
  let t=group.x*${BLOCK}u+lane;
  if(t<N){
   let w=topology[t];let p=vec3i(coord(t));
-  var maximum=w;var minimum=w;var fine=0u;
+  var maximum=w;var minimum=w;var fine=0u;var valid=0u;
   for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
    let q=p+vec3i(x,y,z);if(!inside(q)){continue;}
+   valid|=1u<<u32((x+1)+3*((y+1)+3*(z+1)));
    let v=topology[key(vec3u(q))];maximum=max(maximum,v);minimum=min(minimum,v);
    if(v==1u){fine|=1u<<u32((x+1)+3*((y+1)+3*(z+1)));}
   }}}
-  topology[2u*N+2u*t]=fine|(maximum<<27u);topology[2u*N+2u*t+1u]=minimum<<27u;
+  topology[2u*N+2u*t]=fine|(maximum<<27u);topology[2u*N+2u*t+1u]=(minimum<<27u)|umCompileStencil(fine,valid);
+  topology[4u*N+t]=umCompileBlendMask(fine);
   let regular=maximum==minimum;
   atomicStore(&work[FLAGS+t],w|select(0u,8u,regular));
   let c=categories(w,regular);

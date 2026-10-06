@@ -1,3 +1,4 @@
+import { uniformCompiledVertexResolveWGSL } from "./uniform-compiled-topology";
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_CANONICAL_LOAD} from "../../core/uniform-detail-abi";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
@@ -98,6 +99,7 @@ fn svUnit(o:UMOwner)->bool{return umTileMaximumWidth(o.tile)==1u;}
 // (uniform or unit stencil) or, when resolved, completed in place (mixed).
 fn svDirect(o:UMOwner)->bool{return ${this.resolved}||svUnit(o);}
 fn svAuthority(o:UMOwner,k:u32)->bool{
+ if(o.width==4u){return (umCoarseCornerMask(o.tile)&(1u<<k))!=0u;}
  let corner=umCorner(k,2u);
  if(svUnit(o)){return all((corner!=vec3u(0))|(umOrigin(o)==vec3u(0)));}
  return umVertexAuthority(umOrigin(o)+corner*o.width).index==o.index;
@@ -153,7 +155,9 @@ fn umShiftLimit()->f32{return min(UM_H.x,min(UM_H.y,UM_H.z))*f32(select(4u,1u,um
 var<workgroup> sums:array<vec4f,64>;
 var<workgroup> measureLive:atomic<u32>;
 var<workgroup> measureBand:atomic<u32>;
-var<workgroup> seedSums:array<vec2f,64>;
+// Seed's corner values die at the measureBand uniform barrier. Reuse the
+// same 512 bytes for its 64 two-float reduction rows after that barrier.
+var<workgroup> seedScratch:array<f32,128>;
 fn sumGroup(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(l<stride){sums[l]+=sums[l+stride];}workgroupBarrier();}}
 fn storeSum(at:u32,value:vec4f){for(var c=0u;c<4u;c++){scratch[at+c]=value[c];}}
 fn loadSum(at:u32)->vec4f{return vec4f(scratch[at],scratch[at+1u],scratch[at+2u],scratch[at+3u]);}
@@ -181,13 +185,12 @@ fn svCorner(o:UMOwner,k:u32)->f32{
 }
 // A seed workgroup that is one unit-stencil fine tile stages its 5^3 stored
 // vertices once; every lane then reads its eight corners from them.
-var<workgroup> seedCorners:array<f32,125>;
 @compute @workgroup_size(64) fn seed(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) group:vec3u){
  let job=group.x+umDispatchX*group.y;
  let staged=job<umCounts.x&&umTileMaximumWidth(umTopology[UM_TILES+job])==1u;
  // A workgroup runs several jobs (counted launch): clear the flags per job.
  if(l==0u){atomicStore(&measureLive,0u);atomicStore(&measureBand,0u);}
- if(staged){let base=umTileCoord(umTopology[UM_TILES+job])*4u;for(var i=l;i<125u;i+=64u){seedCorners[i]=umLoadVertex(base+umCorner(i,5u));}}
+ if(staged){let base=umTileCoord(umTopology[UM_TILES+job])*4u;for(var i=l;i<125u;i+=64u){seedScratch[i]=umLoadVertex(base+umCorner(i,5u));}}
  workgroupBarrier();
  let o=umResidentAllOwner(gid);var inside=false;var seeded=false;
  if(o.width!=0u){
@@ -195,7 +198,7 @@ var<workgroup> seedCorners:array<f32,125>;
    var low=1e30;var high=-1e30;
    if(staged){
     let local=umCorner(o.lane,4u);
-    for(var k=0u;k<8u;k++){let c=local+umCorner(k,2u);let v=seedCorners[c.x+5u*(c.y+5u*c.z)];low=min(low,v);high=max(high,v);}
+    for(var k=0u;k<8u;k++){let c=local+umCorner(k,2u);let v=seedScratch[c.x+5u*(c.y+5u*c.z)];low=min(low,v);high=max(high,v);}
    }else{
    if(svDirect(o)){for(var k=0u;k<8u;k++){let v=umLoadVertexW(umOrigin(o)+umCorner(k,2u)*o.width,o.width);low=min(low,v);high=max(high,v);}}
    else{for(var k=0u;k<umCounts.w;k++){let v=svCorner(o,k);low=min(low,v);high=max(high,v);}}
@@ -214,12 +217,12 @@ var<workgroup> seedCorners:array<f32,125>;
  if(o.width!=0u){
   let mass=f32(o.width*o.width*o.width)*umCapacity(o);row=vec2f(select(0.0,mass,inside),svVolume(o)*f32(o.width*o.width*o.width));
  }
- seedSums[l]=row;
+ seedScratch[2u*l]=row.x;seedScratch[2u*l+1u]=row.y;
  if(any(row!=vec2f(0))){atomicOr(&measureLive,1u);}
  let at=${P}u+4u*(group.x+umDispatchX*group.y);
  if(workgroupUniformLoad(&measureLive)==0u){if(l<4u){scratch[at+l]=0.0;}return;}
- for(var stride=32u;stride>0u;stride/=2u){if(l<stride){seedSums[l]+=seedSums[l+stride];}workgroupBarrier();}
- let total=seedSums[0];
+ for(var stride=32u;stride>0u;stride/=2u){if(l<stride){seedScratch[2u*l]+=seedScratch[2u*(l+stride)];seedScratch[2u*l+1u]+=seedScratch[2u*(l+stride)+1u];}workgroupBarrier();}
+ let total=vec2f(seedScratch[0],seedScratch[1]);
  // The partial: (s, s, volume, 0).
  if(l<4u){scratch[at+l]=select(select(0.0,total.y,l==2u),total.x,l<2u);}
 }
@@ -358,33 +361,18 @@ var<workgroup> metricBand:array<f32,125>;
  }
 }
 ${this.resolved?`// Completes the unstored scale texels of mixed-stencil tiles after metric,
-// as UniformMixedPhiResolve does for phi (one group per seam tile, incident
-// tile words and 4h lattice staged): reconstruction reads only stored scales
+// as UniformMixedPhiResolve does for phi (one group per seam tile, compiled
+// authority and staged 4h lattice): reconstruction reads only stored scales
 // and this writes only unstored ones.
-var<workgroup> svResolveWords:array<u32,8>;var<workgroup> svResolveLattice:array<f32,27>;
+var<workgroup> svResolveLattice:array<f32,27>;
 @compute @workgroup_size(125) fn resolveScale(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let header=7u*UM_TILES+16u;let job=group.x+umDispatchX*group.y;
  let valid=job<umSupport[header]+umSupport[header+1u];
  let tile=select(0u,umSupport[header+4u+select(0u,job,valid)],valid);let base=vec3i(umTileCoord(tile));
- if(valid&&lane<8u){let t=base+vec3i(umCorner(lane,2u))-vec3i(1);svResolveWords[lane]=select(0x80000000u,umTopology[umTileAt(vec3u(max(t,vec3i(0))))],all(t>=vec3i(0)));}
- else if(valid&&lane>=8u&&lane<35u){let v=(base+vec3i(umCorner(lane-8u,3u))-vec3i(1))*4;if(all(v>=vec3i(0))){svResolveLattice[lane-8u]=umScaleLoadVertex(vec3u(v));}}
+ if(valid&&lane>=9u&&lane<35u){let v=(base+vec3i(umCorner(lane-8u,3u))-vec3i(1))*4;if(all(v>=vec3i(0))){svResolveLattice[lane-8u]=umScaleLoadVertex(vec3u(v));}}
  workgroupBarrier();
  if(!valid){return;}
- let local=umCorner(lane,5u);let p=vec3u(base)*4u+local;
- if(any((local==vec3u(4u))&(p!=UM_D))||all(p%4u==vec3u(0))){return;}
- var best=0xffffffffu;var at=vec3u(0);
- for(var k=0u;k<8u;k++){
-  let c=umCorner(k,2u);let word=svResolveWords[k];
-  if(any((c==vec3u(0))&(local!=vec3u(0)))||(word&0xc0000000u)!=0u){continue;}
-  if((word&0x3fffffffu)<best){best=word&0x3fffffffu;at=c;}
- }
- if(best==0xffffffffu){return;}
- let t=vec3f(local+(vec3u(1)-at)*4u)/4.0;var values:array<f32,8>;
- for(var k=0u;k<8u;k++){
-  let corner=umCorner(k,2u);let weight=umScaleVertexWeight(t,corner);let m=at+corner;
-  if(weight>0.0){values[k]=weight*svResolveLattice[m.x+3u*(m.y+3u*m.z)];}
- }
- let value=umScaleVertexSum8(values);let at2=umVertexIndex(p);
+${uniformCompiledVertexResolveWGSL("svResolveLattice","umScaleVertexWeight","umScaleVertexSum8")}let at2=umVertexIndex(p);
  if(bitcast<u32>(value)!=bitcast<u32>(scratch[at2])){scratch[at2]=value;}
 }
 `:""}// Corner values (raw, then scale) of a general owner; runtime-bounded so

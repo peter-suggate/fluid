@@ -64,17 +64,14 @@ export const uniformMixedVertexSamplingSource = (cacheLookup = "", resolved = fa
 fn umVertexSum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
 fn umVertexAuthority(p:vec3u)->UMOwner {
  if(umRegularFine){return umOwnerAt(clamp(vec3i(p)-vec3i(1),vec3i(0),vec3i(UM_D)-vec3i(1)));}
- let tile=umTileAt(min(p,UM_D-vec3u(1))/4u);let stencil=umTileStencil(tile);
- if((stencil.x>>27u)==(stencil.y>>27u)){
-  // Equal-width incident owners are ordered by tile, then by local lane.
-  return umOwnerAt(clamp(vec3i(p)-vec3i(1),vec3i(0),vec3i(UM_D)-vec3i(1)));
+ let cell=min(p,UM_D-vec3u(1));let tile=umTileAt(cell/4u);let local=p-(cell/4u)*4u;
+ let incident=umCoarseIncident(tile,local);
+ if(incident!=0u){
+  let at=vec3i(cell/4u)+vec3i(umCorner(firstTrailingBit(incident),2u))-vec3i(1);
+  return umOwnerAt(at*4);
  }
- var best=UMOwner();
- for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){
-  let candidate=umOwnerAt(vec3i(p)+vec3i(umCorner(k,2u))-vec3i(1));
-  if(candidate.width>best.width || (candidate.width==best.width && candidate.width!=0u && candidate.index<best.index)){best=candidate;}
- }
- return best;
+ // No coarse incident tile: the first fine owner is the lower incident cell.
+ return umOwnerAt(clamp(vec3i(p)-vec3i(1),vec3i(0),vec3i(UM_D)-vec3i(1)));
 }
 fn umVertexIsCanonical(p:vec3u,owner:UMOwner)->bool {
  return all((p-umOrigin(owner))%owner.width==vec3u(0));

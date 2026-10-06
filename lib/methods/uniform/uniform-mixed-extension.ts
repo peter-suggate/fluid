@@ -1,3 +1,4 @@
+import { uniformCompiledExtensionNeighborWGSL } from "./uniform-compiled-extension.wgsl";
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import type { WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
@@ -388,7 +389,10 @@ fn ueMaskOut(tile:u32,m:vec2u,seed:bool,open:bool){
 // slot (bit 7 + k).
 var<workgroup> ueLive:atomic<u32>;
 var<workgroup> ueNew:array<atomic<u32>,2>;
-var<workgroup> ueWidths:array<u32,${27*UE_PACK_TILES}>;
+// Width is already encoded in ueWords. Outside entries are zero: callers
+// either ask only whether they are fine, or have checked the domain bounds.
+// Avoid a duplicate 27-word width array for each packed job.
+fn ueStagedWidth(index:u32)->u32{return select(4u,1u,(ueWords[index]&0x80000000u)!=0u);}
 var<workgroup> ueMasks:array<vec2u,${27*UE_PACK_TILES}>;
 fn ueStaged(t:vec3i)->u32{let r=vec3u(t-ueJobTile()+vec3i(1));return ueJobBase()+r.x+3u*(r.y+3u*r.z);}
 fn ueCellFinite(cell:vec3i)->bool{
@@ -429,12 +433,12 @@ fn ueCellLive(local:vec3u,edge:u32,flags:u32)->bool{
  let m=ueMasks[13];
  var d=m|((m&vec2u(0x77777777u))<<vec2u(1u))|((m&vec2u(0xeeeeeeeeu))>>vec2u(1u))|((m&vec2u(0x0fff0fffu))<<vec2u(4u))|((m&vec2u(0xfff0fff0u))>>vec2u(4u))
   |vec2u((m.x<<16u)|(m.x>>16u)|(m.y<<16u),(m.y<<16u)|(m.x>>16u)|(m.y>>16u));
- if(ueWidths[12]==1u){d|=(ueMasks[12]&vec2u(0x88888888u))>>vec2u(3u);}
- if(ueWidths[14]==1u){d|=(ueMasks[14]&vec2u(0x11111111u))<<vec2u(3u);}
- if(ueWidths[10]==1u){d|=(ueMasks[10]&vec2u(0xf000f000u))>>vec2u(12u);}
- if(ueWidths[16]==1u){d|=(ueMasks[16]&vec2u(0x000f000fu))<<vec2u(12u);}
- if(ueWidths[4]==1u){d.x|=ueMasks[4].y>>16u;}
- if(ueWidths[22]==1u){d.y|=(ueMasks[22].x&0xffffu)<<16u;}
+ if(ueStagedWidth(12)==1u){d|=(ueMasks[12]&vec2u(0x88888888u))>>vec2u(3u);}
+ if(ueStagedWidth(14)==1u){d|=(ueMasks[14]&vec2u(0x11111111u))<<vec2u(3u);}
+ if(ueStagedWidth(10)==1u){d|=(ueMasks[10]&vec2u(0xf000f000u))>>vec2u(12u);}
+ if(ueStagedWidth(16)==1u){d|=(ueMasks[16]&vec2u(0x000f000fu))<<vec2u(12u);}
+ if(ueStagedWidth(4)==1u){d.x|=ueMasks[4].y>>16u;}
+ if(ueStagedWidth(22)==1u){d.y|=(ueMasks[22].x&0xffffu)<<16u;}
  let b=local.x+4u*(local.y+4u*local.z);
  return ((select(d.x,d.y,b>=32u)>>(b&31u))&1u)!=0u;
 }
@@ -449,7 +453,7 @@ fn ueStage(owner:UMOwner,lane:u32,seed:bool,fine:bool)->bool{
   var index=UM_TILES;
   if(owner.width!=0u&&(umTileSupport(owner.tile)&2u)!=0u&&(seed||ueOpen(owner.tile))){index=owner.tile;}
   ueJob=vec4u(umTileCoord(owner.tile),index);
-  atomicStore(&ueLive,0u);atomicStore(&ueNew[0],0u);atomicStore(&ueNew[1],0u);atomicStore(&ueRequests,0u);
+  atomicStore(&ueLive,0u);atomicStore(&ueNew[0],0u);atomicStore(&ueNew[1],0u);
  }
  let job=workgroupUniformLoad(&ueJob);
  if(ueMixedJobs){uePick=vec4u(job.xyz,0u);}
@@ -458,7 +462,7 @@ fn ueStage(owner:UMOwner,lane:u32,seed:bool,fine:bool)->bool{
  if(lane<27u){
   let t=vec3i(job.xyz)+vec3i(umCorner(lane,3u))-vec3i(1);var width=0u;var mask=vec2u(0u);var word=0u;
   if(all(t>=vec3i(0))&&all(t<vec3i(UM_T))){let tile=umTileAt(vec3u(t));word=umTopology[tile];width=select(4u,1u,(word&0x80000000u)!=0u);mask=ueMaskIn(tile);}
-  ueWidths[lane]=width;ueWords[lane]=word;ueMasks[lane]=mask;
+  ueWords[lane]=word;ueMasks[lane]=mask;
   let offset=vec3i(umCorner(lane,3u))-vec3i(1);let far=abs(offset.x)+abs(offset.y)+abs(offset.z);
   let filled=any(mask!=vec2u(0u));var live=0u;
   if(!fine||far==0){live=select(0u,1u,filled);}
@@ -507,7 +511,7 @@ fn ueRequestLive(point:vec3f,axis:u32,width:u32)->bool{
  var offset=vec3f(0.5*f32(width));offset[axis]=1.0;
  let q=clamp(vec3i(round(point-offset)),vec3i(0),vec3i(UM_D)-vec3i(1));let t=q/4;
  if(width!=1u){return any(ueMasks[ueStaged(t)]!=vec2u(0u));}
- if(ueWidths[ueStaged(t)]==1u){return ueCellFinite(q);}
+ if(ueStagedWidth(ueStaged(t))==1u){return ueCellFinite(q);}
  let o=4*t;var top=q;top[axis]=o[axis]+3;var corner=o;corner[axis]=o[axis]+3;
  var live=ueCellFinite(q)||ueCellFinite(top)||ueCellFinite(corner);
  let plane=i32(round(point[axis]));
@@ -530,42 +534,15 @@ fn ueFlush(){
  let m=ueMasks[13]|vec2u(atomicLoad(&ueNew[0]),atomicLoad(&ueNew[1]));
  if(any(m!=vec2u(0u))){ueMaskOut(ueJob.w,m,false,true);}
 }
-// Seam tiles. A patch's six neighbours are requests. umNeighbor answers one
-// with the patch-width slot below the request's plane whenever a tile at that
-// plane has the patch's width (ueRequestDirect): one load. Only a request
-// whose plane lies between tiles of another width (or between one and a
-// domain wall) searches candidate faces. A seam tile job therefore plans
-// its patches in parallel, queues the searching requests of all of them,
-// serves the queue one request per lane, and then combines each patch: the
-// searches of a patch run side by side instead of in series behind its
-// direct loads, and the work is the seam's requests, not six searches a face.
-// An h tile's request can search only where it leaves the tile into a 4h
-// face neighbour (need: ueEdge of the patch's cell against ueStage's 4h
-// directions, less the low request of its own axis, whose plane the job's
-// tile bounds): every other request has a unit tile at its plane, and no
-// widths are looked up for it.
-// A searching request none of whose readable slots is finite (ueRequestLive)
-// answers INF as its search would (a neighbour at INF contributes neither
-// its value nor its spacing): it is not queued.
-// Requests are queued by patch, in request order (2 step + side).
-// UE_REQUESTS bounds a job's queue. An h tile's patches are its 192 unit
-// faces; a request searches only where it leaves the tile (in-tile requests
-// have the tile itself, width 1, at their plane): sideways out of one of
-// four tile faces (16 a face, per component: 192), or up past the tile's top
-// layer (16 a component: 48). A 4h tile has per component one width-4 patch
-// (6 requests) or sixteen unit patches under an h tile, whose requests
-// search downward (16) or sideways out of the tile (16): at most 96, and a
-// pack of them UE_PACK times that.
-const UE_REQUESTS=${Math.max(240,96*UE_PACK_TILES)}u;
-var<workgroup> ueRequests:atomic<u32>;
-var<workgroup> ueRequestQueue:array<u32,UE_REQUESTS>;
-var<workgroup> ueServed:array<UMNeighbor,UE_REQUESTS>;
+// Seam requests use compiled lattice recipes in the requesting lane. Their
+// geometry is now cheap enough to avoid the shared request/answer queue,
+// its per-face atomic reservation and two barriers (3844 bytes at pack 2).
 // A positive patch by its anchor (no neighbour lookup: no caller reads it).
 fn uePatch(anchor:vec3i,axis:u32,width:u32)->UMFace{return UMFace(UMOwner(),anchor,width,1u,axis,1);}
 // The width of a tile inside the lattice: staged around the job's tile.
 fn ueWidthAt(t:vec3i)->u32{
  let r=vec3u(t-ueJobTile()+vec3i(1));
- if(all(r<=vec3u(2u))){return ueWidths[ueJobBase()+r.x+3u*(r.y+3u*r.z)];}
+ if(all(r<=vec3u(2u))){return ueStagedWidth(ueJobBase()+r.x+3u*(r.y+3u*r.z));}
  return umTileWidth(umTileAt(vec3u(t)));
 }
 // umExtended's request n = 2 step + side of a patch centred at center.
@@ -594,11 +571,9 @@ fn ueDirect(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)->UMNeighb
  let state=umSlotState(vec3i(round(point-offset)),component,width);
  return UMNeighbor(state.x,state.y,abs(point[step]-center[step])*h[step]);
 }
-// Plans a patch that umExtended would not return unchanged at once: queues
-// its searching requests and returns 1 | their mask << 1 | the mask of the
-// searching requests that answer INF << 7 | queue base << 13. need: the
-// requests that may search.
-fn uePlan(face:UMFace,item:u32,need:u32)->u32{
+// Mark non-direct requests and requests whose candidate slots are all INF.
+// This retains the staged liveness pruning before evaluating the recipe.
+fn uePlan(face:UMFace,need:u32)->u32{
  let center=umFaceCenter(face);var search=0u;var dead=0u;
  for(var n=0u;n<6u;n++){
   if((need&(1u<<n))==0u){continue;}
@@ -606,24 +581,16 @@ fn uePlan(face:UMFace,item:u32,need:u32)->u32{
   if(ueOutside(point)||ueRequestDirect(point,face.axis,face.width)){continue;}
   if(ueRequestLive(point,face.axis,face.width)){search|=1u<<n;}else{dead|=1u<<n;}
  }
- var base=0u;
- if(search!=0u){
-  base=atomicAdd(&ueRequests,countOneBits(search));var at=base;
-  for(var n=0u;n<6u;n++){if((search&(1u<<n))!=0u){ueRequestQueue[at]=8u*item+n;at++;}}
- }
- return 1u|(search<<1u)|(dead<<7u)|(base<<13u);
+ return 1u|(search<<1u)|(dead<<7u);
 }
-fn ueServe(face:UMFace,n:u32,at:u32){
- let center=umFaceCenter(face);
- ueServed[at]=umNeighbor(ueRequestPoint(center,face.width,n),center,face.axis,n/2u,face.width);
-}
+${uniformCompiledExtensionNeighborWGSL}
 // umExtended(face) for a planned patch (old: its slot, not a source, not a
-// closed wall, on the support), its searches served.
+// closed wall, on the support), evaluating only its live search recipes.
 fn uePlanned(face:UMFace,old:vec2f,plan:u32)->vec2f{
- let center=umFaceCenter(face);var low:array<UMNeighbor,3>;var high:array<UMNeighbor,3>;var at=plan>>13u;
+ let center=umFaceCenter(face);var low:array<UMNeighbor,3>;var high:array<UMNeighbor,3>;
  for(var n=0u;n<6u;n++){
   let point=ueRequestPoint(center,face.width,n);var answer=UMNeighbor(0,UM_INF,1);
-  if((plan&(2u<<n))!=0u){answer=ueServed[at];at++;}
+  if((plan&(2u<<n))!=0u){answer=ueCompiledNeighbor(point,center,face.axis,n/2u,face.width);}
   else if((plan&(128u<<n))==0u&&!ueOutside(point)){answer=ueDirect(point,center,face.axis,n/2u,face.width);}
   if((n&1u)==0u){low[n/2u]=answer;}else{high[n/2u]=answer;}
  }
@@ -747,31 +714,18 @@ fn ueSeedFine(owner:UMOwner,lane:u32){
  workgroupBarrier();
  if(lane==0u){ueFlush();}
 }
-// A seam h tile: each lane plans the three unit patches of its owner
-// (anchored at its origin), serves queued requests, then combines its own.
+// A seam h tile: each lane evaluates its three unit patches. No values
+// remain live across a queue barrier; each patch is planned and consumed.
 fn ueSweepSeamFine(owner:UMOwner,lane:u32){
  if(!ueStage(owner,lane,false,true)){return;}
- let origin=vec3i(umOrigin(owner));var plans:array<u32,3>;var olds:array<vec2f,3>;
+ let origin=vec3i(umOrigin(owner));var bits=vec2u(0u);
  let flags=atomicLoad(&ueLive);let local=umCorner(owner.lane,4u);let edge=ueEdge(local);let live=ueCellLive(local,edge,flags);
  for(var axis=0u;axis<3u;axis++){
-  plans[axis]=0u;olds[axis]=vec2f(0);
   if(!live){continue;}
   let face=uePatch(origin,axis,1u);let old=stateIn[ueOwnSlot(owner,axis)];
-  // A source and a closed wall keep their seed: nothing to store.
   if(old.y==0.0||umClosedWall(face)){continue;}
-  olds[axis]=old;plans[axis]=uePlan(face,lane+64u*axis,edge&(flags>>1u)&~(1u<<(2u*axis)));
- }
- workgroupBarrier();
- let requests=atomicLoad(&ueRequests);let tile=vec3i(umTileCoord(owner.tile))*4;
- for(var i=lane;i<requests;i+=64u){
-  let request=ueRequestQueue[i];let item=request/8u;
-  ueServe(uePatch(tile+vec3i(umCorner(item%64u,4u)),item/64u,1u),request%8u,i);
- }
- workgroupBarrier();
- var bits=vec2u(0u);
- for(var axis=0u;axis<3u;axis++){
-  if(plans[axis]==0u){continue;}
-  let value=uePlanned(uePatch(origin,axis,1u),olds[axis],plans[axis]);
+  let plan=uePlan(face,edge&(flags>>1u)&~(1u<<(2u*axis)));
+  let value=uePlanned(face,old,plan);
   ueSweepStore(ueOwnSlot(owner,axis),value);bits|=ueNote(value,origin);
  }
  ueGather(bits);
@@ -803,7 +757,7 @@ fn ueSeedCoarse(owner:UMOwner,lane:u32){
 // Width 0: no such part.
 fn ueCoarsePatch(origin:vec3i,item:u32)->UMFace{
  let axis=item/16u;let part=item%16u;var probe=origin;probe[axis]+=4;
- var width=4u;if(probe[axis]<i32(UM_D[axis])){width=min(4u,ueWidths[ueStaged(probe/4)]);}
+ var width=4u;if(probe[axis]<i32(UM_D[axis])){width=min(4u,ueStagedWidth(ueStaged(probe/4)));}
  let side=4u/width;if(part>=side*side){return UMFace();}
  var anchor=probe;anchor[(axis+1u)%3u]+=i32((part%side)*width);anchor[(axis+2u)%3u]+=i32((part/side)*width);anchor[axis]-=1;
  return uePatch(anchor,axis,width);
@@ -814,10 +768,8 @@ fn ueCoarsePatch(origin:vec3i,item:u32)->UMFace{
 // them. Slot s holds one tile: its header (uePackJobs, as ueJob), its staged
 // 3x3x3 at 27 s, its live bit (some staged mask nonzero) and its new anchor
 // bits. The pack's patches are numbered in (slot, component, part) order
-// over the live slots, a lane each: lane l plans patch l (and l + 64 where
-// the pack holds more, so a launch's lane chain stays one patch long
-// wherever a tile's did), the lanes serve the pack's queued requests one
-// each, then combine their own; each slot's mask is flushed by one lane.
+// over the live slots, a lane each: lane l evaluates patch l (and l + 64
+// where the pack holds more). Each slot's mask is flushed by one lane.
 // A patch's item is 48 slot + 16 axis + part (ueCoarsePatch's item of its
 // slot).
 const UE_PACK_ROUNDS=${Math.ceil(48*UE_PACK_TILES/64)}u;
@@ -830,7 +782,7 @@ var<workgroup> uePackNew:array<atomic<u32>,${2*UE_PACK_TILES}>;
 // without a live job.
 fn uePackParts(slot:u32,axis:u32)->u32{
  if(uePackJobs[slot].w>=UM_TILES||atomicLoad(&uePackLive[slot])==0u){return 0u;}
- return select(1u,16u,ueWidths[27u*slot+13u+select(select(9u,3u,axis==1u),1u,axis==0u)]==1u);
+ return select(1u,16u,ueStagedWidth(27u*slot+13u+select(select(9u,3u,axis==1u),1u,axis==0u))==1u);
 }
 fn uePackItem(at:u32)->u32{
  var base=0u;
@@ -842,7 +794,6 @@ fn uePackItem(at:u32)->u32{
  return UE_PACK_NONE;
 }
 fn ueSweepCoarsePack(first:u32,count:u32,lane:u32){
- if(lane==0u){atomicStore(&ueRequests,0u);}
  if(lane<UE_PACK){
   var job=vec4u(0u,0u,0u,UM_TILES);
   if(first+lane<count){
@@ -853,41 +804,23 @@ fn ueSweepCoarsePack(first:u32,count:u32,lane:u32){
  }
  workgroupBarrier();
  for(var i=lane;i<27u*UE_PACK;i+=64u){
-  let slot=i/27u;let job=uePackJobs[slot];var width=0u;var mask=vec2u(0u);var word=0u;
+  let slot=i/27u;let job=uePackJobs[slot];var mask=vec2u(0u);var word=0u;
   if(job.w<UM_TILES){
    let t=vec3i(job.xyz)+vec3i(umCorner(i%27u,3u))-vec3i(1);
-   if(all(t>=vec3i(0))&&all(t<vec3i(UM_T))){let tile=umTileAt(vec3u(t));word=umTopology[tile];width=select(4u,1u,(word&0x80000000u)!=0u);mask=ueMaskIn(tile);}
+   if(all(t>=vec3i(0))&&all(t<vec3i(UM_T))){let tile=umTileAt(vec3u(t));word=umTopology[tile];mask=ueMaskIn(tile);}
    if(any(mask!=vec2u(0u))){atomicOr(&uePackLive[slot],1u);}
   }
-  ueWidths[i]=width;ueWords[i]=word;ueMasks[i]=mask;
+  ueWords[i]=word;ueMasks[i]=mask;
  }
  workgroupBarrier();
- var items:array<u32,UE_PACK_ROUNDS>;var plans:array<u32,UE_PACK_ROUNDS>;var olds:array<vec2f,UE_PACK_ROUNDS>;
  for(var round=0u;round<UE_PACK_ROUNDS;round++){
-  let item=uePackItem(64u*round+lane);items[round]=item;plans[round]=0u;olds[round]=vec2f(0);
-  if(item==UE_PACK_NONE){continue;}
-  let slot=item/48u;let job=uePackJobs[slot];
-  uePick=vec4u(job.xyz,27u*slot);
+  let item=uePackItem(64u*round+lane);if(item==UE_PACK_NONE){continue;}
+  let slot=item/48u;let job=uePackJobs[slot];uePick=vec4u(job.xyz,27u*slot);
   let face=ueCoarsePatch(vec3i(job.xyz)*4,item%48u);
   if(face.width==0u||!ueFaceLive(face.anchor,face.axis,face.width)){continue;}
   let old=stateIn[umSlot(face.anchor,face.axis,face.width)];
-  // A source and a closed wall keep their seed: nothing to store.
-  if(old.y!=0.0&&!umClosedWall(face)){olds[round]=old;plans[round]=uePlan(face,item,63u);}
- }
- workgroupBarrier();
- let requests=atomicLoad(&ueRequests);
- for(var i=lane;i<requests;i+=64u){
-  let request=ueRequestQueue[i];let item=request/8u;let job=uePackJobs[item/48u];
-  uePick=vec4u(job.xyz,27u*(item/48u));
-  ueServe(ueCoarsePatch(vec3i(job.xyz)*4,item%48u),request%8u,i);
- }
- workgroupBarrier();
- for(var round=0u;round<UE_PACK_ROUNDS;round++){
-  if(plans[round]==0u){continue;}
-  let item=items[round];let slot=item/48u;let job=uePackJobs[slot];
-  uePick=vec4u(job.xyz,27u*slot);
-  let face=ueCoarsePatch(vec3i(job.xyz)*4,item%48u);
-  let value=uePlanned(face,olds[round],plans[round]);
+  if(old.y==0.0||umClosedWall(face)){continue;}
+  let value=uePlanned(face,old,uePlan(face,63u));
   ueSweepStore(umSlot(face.anchor,face.axis,face.width),value);let bits=ueNote(value,face.anchor);
   if(any(bits!=vec2u(0u))){atomicOr(&uePackNew[2u*slot],bits.x);atomicOr(&uePackNew[2u*slot+1u],bits.y);}
  }

@@ -1,3 +1,4 @@
+import { uniformPreparedSurfaceSamplingWGSL } from "./uniform-prepared-surface.wgsl";
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
@@ -133,7 +134,8 @@ struct Params {hDt:vec4f,flags:vec4u}
 @group(1) @binding(7) var departures:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(8) var<storage,read_write> evidence:array<u32>;
 // Advect vertices a released wall or solid can change: count, grid, list.
-@group(1) @binding(10) var<storage,read_write> deferred:array<atomic<u32>>;
+@group(1) @binding(10) var<storage,read_write> deferred:UMDeferred;
+struct UMDeferred { header:array<atomic<u32>,4>, data:array<u32> }
 @group(1) @binding(12) var<storage,read_write> umClaims:array<atomic<u32>>;
 ${this.sourceParams?uniformMixedSourceWGSL(9):""}
 ${uniformMixedFaceAddressWGSL}
@@ -486,16 +488,16 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  }
  if(!defer){textureStore(outputPhi,vec3i(vertex),vec4f(value));return;}
  // Each canonical vertex is stored once: the list holds at most every vertex.
- let i=atomicAdd(&deferred[0],1u);
- atomicStore(&deferred[4u+i],vertex.x|(vertex.y<<10u)|(vertex.z<<20u)|(select(firstTrailingBit(width),3u,umRegularFine)<<30u));
+ let i=atomicAdd(&deferred.header[0],1u);
+ deferred.data[i]=vertex.x|(vertex.y<<10u)|(vertex.z<<20u)|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);
 }
 // The deferred vertices of the dispatch compiled with the same umRegularFine.
 // A fixed grid (deferredGrid workgroups) strides over the list.
 @compute @workgroup_size(64) fn advectDeferred(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  umStagePlaneReach(lane);
- let count=atomicLoad(&deferred[0]);
+ let count=atomicLoad(&deferred.header[0]);
  for(var i=gid.x;i<count;i+=64u*groups.x){
-  let word=atomicLoad(&deferred[4u+i]);let code=word>>30u;
+  let word=deferred.data[i];let code=word>>30u;
   if((code==3u)!=umRegularFine){continue;}
   let vertex=vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);
   textureStore(outputPhi,vec3i(vertex),vec4f(umAdvected(vec3f(vertex),select(1u<<code,1u,code==3u))));
@@ -521,21 +523,8 @@ var<workgroup> wallBase:u32;
   let axis=k/2u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
   var vertex=vec3u(0);vertex[axis]=select(0u,UM_D[axis],(k&1u)==1u);vertex[u]=i%(UM_D[u]+1u);vertex[v]=i/(UM_D[u]+1u);
   if(umWallPlane(vertex)==k){
-   // The authority is the widest incident owner and every tile has one width,
-   // so its width is the widest incident tile: independent topology loads
-   // instead of umVertexAuthority's dependent owner chain. Owner origins are
-   // multiples of their width, so canonical is alignment to it.
    var width=1u;
-   if(!umRegularFine){
-    let stencil=umTileStencil(umTileAt(min(vertex,UM_D-vec3u(1))/4u));width=stencil.x>>27u;
-    if(width!=(stencil.y>>27u)){
-     width=0u;
-     for(var c=0u;c<8u;c++){
-      let cell=vec3i(vertex)+vec3i(umCorner(c,2u))-vec3i(1);
-      if(all(cell>=vec3i(0))&&all(cell<vec3i(UM_D))){width=max(width,umTileWidth(umTileAt(vec3u(cell)/4u)));}
-     }
-    }
-   }
+   if(!umRegularFine){let cell=min(vertex,UM_D-vec3u(1));width=select(1u,4u,umCoarseIncident(umTileAt(cell/4u),vertex-(cell/4u)*4u)!=0u);}
    if(all(vertex%width==vec3u(0))){
     slot=atomicAdd(&wallListed,1u);
     word=vertex.x|(vertex.y<<10u)|(vertex.z<<20u)|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);
@@ -544,9 +533,9 @@ var<workgroup> wallBase:u32;
  }
  workgroupBarrier();
  // One list atomic per group.
- if(lane==0u){let n=atomicLoad(&wallListed);if(n>0u){wallBase=atomicAdd(&deferred[0],n);}}
+ if(lane==0u){let n=atomicLoad(&wallListed);if(n>0u){wallBase=atomicAdd(&deferred.header[0],n);}}
  workgroupBarrier();
- if(word!=0xffffffffu){atomicStore(&deferred[4u+wallBase+slot],word);}
+ if(word!=0xffffffffu){deferred.data[wallBase+slot]=word;}
 }
 // Six samples through one sampler call site: low then high per axis. The
 // resolved sampler is eight loads, so its six samples unroll.
@@ -592,7 +581,7 @@ var<workgroup> wallReachBits:atomic<u32>;
  let u=(axis+1u)%3u;let v=(axis+2u)%3u;let h=params.hDt.xyz;let dt=params.hDt.w;
  let ambient=axis==1u&&upper&&(params.flags.x&1u)!=0u;
  if(lane==0u){atomicStore(&wallReachBits,0u);}
- if(group.x==0u&&lane==0u){atomicStore(&deferred[0],0u);}
+ if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);}
  workgroupBarrier();
  let i=chunk*256u+lane;
  if(plane<6u&&i<UM_D[u]*UM_D[v]){
@@ -810,7 +799,7 @@ fn umStaleWide(p:vec3u,initial:f32,width:u32)->bool{
  }
  return false;
 }
-${[["umRebuildSearch","",true],["umWindowSearch",",o:vec3i",false]].map(([name,param,global])=>/* wgsl */`
+${[["umRebuildSearch","",true],["umPreparedSearch","",false]].map(([name,param,global])=>/* wgsl */`
 fn ${name}(p:vec3f,initial:f32,width:u32${param})->f32{
  let h=params.hDt.xyz;let w=f32(width);let band=4.0*w*max(h.x,max(h.y,h.z));
  // umStaleWide vertices start (and on a miss stay) at the band value.
@@ -827,13 +816,13 @@ fn ${name}(p:vec3f,initial:f32,width:u32${param})->f32{
  let cubic=!umRegularFine&&params.flags.y!=0u&&width>1u;`:""}
  var q=p;var phiQ=start;
  for(var i=0u;i<umCounts.w;i++){
-  let g=${global?"umSurfaceGradient(q,w)":"umWindowGradient(q,o)"};let norm=dot(g/h,g/h);if(norm<1e-16){break;}
+  let g=${global?"umSurfaceGradient(q,w)":"umPreparedGradient(q)"};let norm=dot(g/h,g/h);if(norm<1e-16){break;}
   let next=clamp(q-clamp(phiQ*g/(h*h*norm),vec3f(-2.0*w),vec3f(2.0*w)),max(vec3f(0),p-vec3f(4.0*w)),min(vec3f(UM_D),p+vec3f(4.0*w)));
   var phiNext=0.0;
   ${global?/* wgsl */`// The cell's width is next's owner width (its tile's).
   let cell=umVertexCell(next);var wide=cubic&&cell.width==width;
   if(wide){wide=umTileMinimumWidth(umTileAt(cell.origin/4u))==width;}
-  if(wide){phiNext=umCubicPhi(next,cell);}else{phiNext=cell.value;}`:"phiNext=umWindowSample(next,o);"}
+  if(wide){phiNext=umCubicPhi(next,cell);}else{phiNext=cell.value;}`:"phiNext=umPreparedSample(next);"}
   if(abs(phiNext)>=abs(phiQ)){break;}q=next;phiQ=phiNext;
   // A tenth of the acceptance tolerance below: one more step moves q by less.
   if(abs(phiQ)<=0.0005*w*min(h.x,min(h.y,h.z))){break;}
@@ -858,11 +847,7 @@ fn ${name}(p:vec3f,initial:f32,width:u32${param})->f32{
 // h owners the lowest index is clamp(p-1)'s, in this tile. wide: the 4h
 // tiles among tile+{0,1}^3, the only tiles incident to its vertices.
 const UM_NO_VERTEX=vec3u(0xffffffffu);
-fn umFineWide(tile:vec3u)->u32{
- var wide=0u;
- for(var k=1u;k<8u;k++){let n=tile+umCorner(k,2u);if(all(n<UM_T)&&umTileWidth(umTileAt(n))!=1u){wide|=1u<<k;}}
- return wide;
-}
+
 fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32)->vec3u{
  var local=umCorner(lane,4u)+vec3u(1);
  if(round>0u){let j=lane+64u*(round-1u);if(j>=125u){return UM_NO_VERTEX;}local=umCorner(j,5u);if(all(local!=vec3u(0))){return UM_NO_VERTEX;}}
@@ -875,84 +860,49 @@ fn umFineRounds(tile:vec3u)->u32{return select(1u,3u,any(tile==vec3u(0)));}
 @compute @workgroup_size(64) fn advectFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  umStagePlaneReach(lane);
  let owner=umTileJobOwner(group);if(owner.width==0u){return;}
- let tile=umTileCoord(owner.tile);let wide=umFineWide(tile);
+ let tile=umTileCoord(owner.tile);let wide=umFineWideMask(umTileAt(tile));
  for(var round=0u;round<umFineRounds(tile);round++){
   let vertex=umFineVertex(tile,lane,round,wide);
   if(vertex.x!=UM_NO_VERTEX.x){umAdvectStore(vertex,1u);}
  }
 }
-// A unit vertex's Newton search stays in p+-4 and its samples in p+-4.25,
-// so every sample of a tile's vertices interpolates lattice vertices
-// tile*4-4..tile*4+9. The group stages that window once as h lattice values
-// (a 4h cell's by its own trilinear interpolant, which trilinear over its h
-// sub-cells reproduces) and searches in workgroup memory.
-const UM_WINDOW:u32=14u;
-var<workgroup> umWindow:array<f32,${14**3}>;
-var<workgroup> umFineJob:u32;
-var<workgroup> umFineSearch:atomic<u32>;
-var<workgroup> umFineSearches:u32;
-// The tile widths of the window's 4^3 tiles (tile-1..tile+2, first = tile-1),
-// staged once per searching job: each staged vertex's cell lies in one of
-// them, so staging reads its width here instead of a topology load per entry.
-var<workgroup> umWindowWidths:array<u32,64>;
-fn umResolvedVertex(v:vec3u,first:vec3i)->f32{
- if(umRegularFine){return umLoadVertex(v);}
- let cell=min(v,UM_D-vec3u(1));let d=vec3u(vec3i(cell/4u)-first);let width=umWindowWidths[d.x+4u*(d.y+4u*d.z)];
- if(width==1u){return umLoadVertex(v);}
- let origin=(cell/width)*width;let t=vec3f(v-origin)/f32(width);var values:array<f32,8>;
- for(var k=0u;k<8u;k++){
-  let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));
-  values[k]=umLoadVertex(origin+corner*width)*w.x*w.y*w.z;
+// Every fine Newton search reads the same prepared phi epoch. Prepare fine
+// values and interpolated coarse samples once, instead of materializing an
+// overlapping 14-cubed window in each searching workgroup. The dead deferred
+// list owns this storage until all fine readers finish; coarse redistance
+// may then reuse it as a list. Eight producer corners are the only shared
+// field storage. Data words have a unique writer and need no atomics.
+var<workgroup> umPrepareCorners:array<f32,8>;
+fn umPreparedIndex(p:vec3u)->u32{return p.x+(UM_D.x+1u)*(p.y+(UM_D.y+1u)*p.z);}
+@compute @workgroup_size(64) fn prepareSurface(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=group.x+umDispatchX*group.y;
+ if(tile>=UM_TILES){return;}
+ let fine=umTileWidth(tile)==1u;if(!fine&&(umTileStencil(tile).y&1u)==0u){return;}
+ let origin=umTileCoord(tile)*4u;
+ if(!fine&&lane<8u){umPrepareCorners[lane]=umLoadCorner(origin+umCorner(lane,2u)*4u);}
+ workgroupBarrier();
+ for(var i=lane;i<125u;i+=64u){
+  let local=umCorner(i,5u);let p=origin+local;
+  // The positive cell owns a shared vertex, except at the upper wall.
+  if(any((local==vec3u(4))&(p!=UM_D))){continue;}
+  if(fine){deferred.data[umPreparedIndex(p)]=bitcast<u32>(umLoadVertex(p));continue;}
+  let t=vec3f(local)/4.0;var values:array<f32,8>;
+  for(var k=0u;k<8u;k++){
+   let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));
+   values[k]=umPrepareCorners[k]*w.x*w.y*w.z;
+  }
+  deferred.data[umPreparedIndex(p)]=bitcast<u32>(umVertexSum8(values));
  }
- return umVertexSum8(values);
 }
-fn umWindowSample(p:vec3f,o:vec3i)->f32{
- let q=clamp(p,vec3f(0),vec3f(UM_D));let base=min(vec3u(floor(q)),UM_D-vec3u(1));let t=q-vec3f(base);
- let d=vec3u(vec3i(base)-o);let first=d.x+UM_WINDOW*(d.y+UM_WINDOW*d.z);var values:array<f32,8>;
- for(var k=0u;k<8u;k++){
-  let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));
-  values[k]=umWindow[first+corner.x+UM_WINDOW*(corner.y+UM_WINDOW*corner.z)]*w.x*w.y*w.z;
- }
- return umVertexSum8(values);
-}
-fn umWindowGradient(p:vec3f,o:vec3i)->vec3f{
- var g=vec3f(0);
- for(var axis=0u;axis<3u;axis++){
-  var delta=vec3f(0);delta[axis]=0.25;
-  let low=clamp(p-delta,vec3f(0),vec3f(UM_D));let high=clamp(p+delta,vec3f(0),vec3f(UM_D));
-  g[axis]=(umWindowSample(high,o)-umWindowSample(low,o))/max(high[axis]-low[axis],1e-6);
- }return g;
-}
+${uniformPreparedSurfaceSamplingWGSL}
 @compute @workgroup_size(64) fn redistanceFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- if(lane==0u){let owner=umTileJobOwner(group);umFineJob=select(UM_TILES,owner.tile,owner.width!=0u);atomicStore(&umFineSearch,0u);}
- let job=workgroupUniformLoad(&umFineJob);if(job==UM_TILES){return;}
- let tile=umTileCoord(job);let wide=umFineWide(tile);let rounds=umFineRounds(tile);
- // Off-band vertices keep their value; the window is staged only for a
- // tile with a search.
- var search=0u;
- for(var round=0u;round<rounds;round++){
-  let vertex=umFineVertex(tile,lane,round,wide);
-  if(vertex.x!=UM_NO_VERTEX.x){
-   let initial=umLoadVertex(vertex);
-   if(umRebuildBand(vec3f(vertex),initial,1u)){search|=1u<<round;}else{textureStore(outputPhi,vec3i(vertex),vec4f(initial));}
-  }
- }
- if(search!=0u){atomicStore(&umFineSearch,1u);}
- workgroupBarrier();
- if(lane==0u){umFineSearches=atomicLoad(&umFineSearch);}
- if(workgroupUniformLoad(&umFineSearches)==0u){return;}
- let o=vec3i(tile*4u)-vec3i(4);let first=vec3i(tile)-vec3i(1);
- if(!umRegularFine){let t=first+vec3i(umCorner(lane,4u));if(all(t>=vec3i(0))&&all(t<vec3i(UM_T))){umWindowWidths[lane]=umTileWidth(umTileAt(vec3u(t)));}workgroupBarrier();}
- for(var i=lane;i<UM_WINDOW*UM_WINDOW*UM_WINDOW;i+=64u){
-  let v=o+vec3i(umCorner(i,UM_WINDOW));
-  if(all(v>=vec3i(0))&&all(v<=vec3i(UM_D))){umWindow[i]=umResolvedVertex(vec3u(v),first);}
- }
- workgroupBarrier();
- for(var round=0u;round<rounds;round++){
-  if((search&(1u<<round))!=0u){
-   let vertex=umFineVertex(tile,lane,round,wide);
-   textureStore(outputPhi,vec3i(vertex),vec4f(umWindowSearch(vec3f(vertex),umLoadVertex(vertex),1u,o)));
-  }
+ let owner=umTileJobOwner(group);if(owner.width==0u){return;}
+ let tile=umTileCoord(owner.tile);let wide=umFineWideMask(owner.tile);
+ for(var round=0u;round<umFineRounds(tile);round++){
+  let vertex=umFineVertex(tile,lane,round,wide);if(vertex.x==UM_NO_VERTEX.x){continue;}
+  let initial=umLoadVertex(vertex);var value=initial;
+  if(umRebuildBand(vec3f(vertex),initial,1u)){value=umPreparedSearch(vec3f(vertex),initial,1u);}
+  textureStore(outputPhi,vec3i(vertex),vec4f(value));
  }
 }
 
@@ -971,8 +921,7 @@ fn umWindowGradient(p:vec3f,o:vec3i)->vec3f{
   if(slot>=umMergedPack||index>=umSupport[header+1u]){return;}
   let tile=umSupport[header+4u+umSupport[header]+index];let tileOwner=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
   tileVertex=umTileCoord(tile)*4u+umCorner(lane%8u,2u)*4u;
-  let authority=umVertexAuthority(tileVertex);
-  if(authority.tile!=tileOwner.tile||!umVertexIsCanonical(tileVertex,authority)){return;}
+  if((umCoarseCornerMask(tile)&(1u<<(lane%8u)))==0u){return;}
   owner=tileOwner;
  }else{
   owner=umRegularCoarseOwner((job-tiles)*64u+lane);if(owner.width==0u){return;}
@@ -1019,8 +968,7 @@ fn umBandCandidate(vertex:vec3u,width:u32){
   if(slot<umMergedPack&&index<umSupport[header+1u]){
    let tile=umSupport[header+4u+umSupport[header]+index];
    let vertex=umTileCoord(tile)*4u+umCorner(lane%8u,2u)*4u;
-   let authority=umVertexAuthority(vertex);
-   if(authority.tile==tile&&umVertexIsCanonical(vertex,authority)){umBandCandidate(vertex,4u);}
+   if((umCoarseCornerMask(tile)&(1u<<(lane%8u)))!=0u){umBandCandidate(vertex,4u);}
   }
  }else{
   let owner=umRegularCoarseOwner((job-tiles)*64u+lane);
@@ -1037,14 +985,14 @@ fn umBandCandidate(vertex:vec3u,width:u32){
  // One list atomic per group.
  if(lane==0u){let n=atomicLoad(&umBandCount);umBandTotal=n;if(n>0u){umBandBase=atomicAdd(&umClaims[UM_BAND_COUNT],n);}}
  let total=workgroupUniformLoad(&umBandTotal);
- for(var i=lane;i<total;i+=64u){atomicStore(&deferred[4u+umBandBase+i],umBandList[i]);}
+ for(var i=lane;i<total;i+=64u){deferred.data[umBandBase+i]=umBandList[i];}
 }
 // The listed band vertices, a lane each: a fixed grid strides over the list,
 // so every lane of a searching group but the last holds a search.
 @compute @workgroup_size(64) fn redistanceBand(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  let count=atomicLoad(&umClaims[UM_BAND_COUNT]);
  for(var i=gid.x;i<count;i+=64u*groups.x){
-  let word=atomicLoad(&deferred[4u+i]);let vertex=vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);let width=1u<<(word>>30u);
+  let word=deferred.data[i];let vertex=vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);let width=1u<<(word>>30u);
   let initial=umLoadVertexW(vertex,width);let found=umRebuildSearch(vec3f(vertex),initial,width);
   if((params.flags.x&4u)!=0u&&width>1u){
    // A held vertex (umBandCandidate stored its value) publishes the difference.
@@ -1154,6 +1102,7 @@ var<workgroup> traceMergedClaim:u32;
       ...([["retirementEvidence",UNIFORM_MIXED_COUNTED.fineTiles],["retirementEvidenceCoarse",UNIFORM_MIXED_COUNTED.coarseTiles]] as const).map(([entryPoint,umCountedJobs])=>keyed(this.pipelines,entryPoint,entryPoint,{umCountedJobs})),
       ...(["advect","redistance"] as const).map(entry=>keyed(this.pipelines,entry,entry,{umMergedTiles:1,umMergedCoarse:1,umMergedPack:8,umCertifiedJobs:2,umClaimWord:2})),
       keyed(this.pipelines,"redistanceBand","redistanceBand"),
+      keyed(this.pipelines,"prepareSurface","prepareSurface"),
       keyed(this.pipelines,"traceCells","traceCellsMerged",{umClaimWord:2}),
       ...(["advect","redistance"] as const).map(entry=>keyed(this.finePipelines,entry,`${entry}Fine`,{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1})),
       Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1}),compile("advectDeferred",regular)]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
@@ -1193,6 +1142,11 @@ var<workgroup> traceMergedClaim:u32;
         pass.setPipeline(this.variant(this.pipelines.get(`evidenceDistance${axis}`)!));
         pass.dispatchWorkgroups(Math.min(lines,this.ownership.dispatchX),Math.ceil(lines/this.ownership.dispatchX));
       }
+    }
+    if(entry==="redistance"&&!this.ownership.coarseOnly){
+      const tiles=this.ownership.capacity.tiles,x=this.ownership.dispatchX;
+      pass.setPipeline(this.variant(this.pipelines.get("prepareSurface")!));
+      pass.dispatchWorkgroups(Math.min(tiles,x),Math.ceil(tiles/x));
     }
     // Buffered direct grids; the claim loops consume the full current lists.
     const grid=Math.min(UNIFORM_MIXED_CLAIMED_GRID,this.ownership.capacity.tiles);

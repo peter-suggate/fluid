@@ -90,7 +90,7 @@ fn umPositiveFaceSpeeds(unit:bool,origin:vec3u)->vec3f{
   let first=umFace(owner,axis,1,0u);
   // A 4h owner's single patch is anchored at its tile's +face anchor: the base block.
   if(first.width==4u){speed[axis]=abs(${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,first.anchor,0)[axis]);continue;}
-  for(var part=0u;part<first.count;part++){let f=umFace(owner,axis,1,part);speed[axis]=max(speed[axis],abs(textureLoad(velocity,f.anchor,0)[axis]));}
+  for(var part=0u;part<first.count;part++){let f=umFacePatch(first,part);speed[axis]=max(speed[axis],abs(textureLoad(velocity,f.anchor,0)[axis]));}
  }
  return speed;
 }
@@ -156,7 +156,7 @@ fn umSignedFaceExtent(unit:bool,origin:vec3u,axis:u32)->vec2f{
  else{
   let owner=umOwnerAt(vec3i(origin));let first=umFace(owner,axis,1,0u);
   if(first.width==4u){let v=${UNIFORM_DETAIL_4H_LOAD}textureLoad(extended,first.anchor,0)[axis];lo=min(lo,v);hi=max(hi,v);}
-  else{for(var part=0u;part<first.count;part++){let v=textureLoad(extended,umFace(owner,axis,1,part).anchor,0)[axis];lo=min(lo,v);hi=max(hi,v);}}
+  else{for(var part=0u;part<first.count;part++){let v=textureLoad(extended,umFacePatch(first,part).anchor,0)[axis];lo=min(lo,v);hi=max(hi,v);}}
  }
  if(origin[axis]==0u){let v=extendedNegative[umNegativeIndex(origin,axis)];lo=min(lo,v);hi=max(hi,v);}
  return vec2f(lo,hi);

@@ -1,4 +1,5 @@
 import { uniformBufferedWork } from "./uniform-buffered-work";
+import { uniformSeamSideOrders } from "./uniform-compiled-topology";
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {uniformMixedDustAccountingWGSL} from "./uniform-mixed-dust-accounting.wgsl";
@@ -85,9 +86,10 @@ export class UniformMixedSharpening {
    * tier-partitioned list of regular tiles with the seam tiles (4h tiles
    * with an h face neighbour) filling it from its end, two regions of sweep
    * packs (two classes each, from either end), then the active regular
+   * six prepared neighbor indices per tile, then the active regular
    * owners (tile*64+lane): at most the ownership's owner capacity, every
    * tile h when none is given. */
-  static workBytes(tiles:number,owners=64*tiles):number{return 4*(12+4*tiles+owners);}
+  static workBytes(tiles:number,owners=64*tiles):number{return 4*(12+10*tiles+owners);}
   /** Between frames, after the ownership's owner capacity changed: a new
    * list of workBytes at it. Each encode rebuilds the list, so nothing is
    * copied; groups from bind() name the old one and must be bound again. */
@@ -184,7 +186,7 @@ fn umSharpenFaceOpen(a:UMOwner,f:UMFace)->bool{return umSharpenFaceOpenAB(a,f.ne
 ${sweep?"@group(1) @binding(8) var<storage,read> work:array<u32>;\nfn shWord(i:u32)->u32{return work[i];}":"@group(1) @binding(8) var<storage,read_write> work:array<atomic<u32>>;\nfn shWord(i:u32)->u32{return atomicLoad(&work[i]);}"}
 // Lists 0 (h) and 1 (regular 4h) are tiers; tier t owners have width 4^t.
 const SH_COUNTS:u32=3u;const SH_FLAGS:u32=12u;const SH_LIST:u32=${12+tiles}u;
-const SH_ACTIVE_COUNT:u32=6u;const SH_ACTIVE:u32=${12+4*tiles}u;
+const SH_ACTIVE_COUNT:u32=6u;const SH_LINKS:u32=${12+4*tiles}u;const SH_ACTIVE:u32=${12+10*tiles}u;
 fn shTier(width:u32)->u32{return select(1u,0u,width==1u);}
 // Seam tiles: 4h tiles with an h tile across a face. Their owners meet
 // sixteen unit patches there, so one lane per owner would walk them
@@ -237,31 +239,54 @@ fn shFaceAt(a:UMOwner,b:UMOwner,f:UMFace)->u32{
  return 3u*a.index+f.axis;
 }
 // The raw flux across patch f from its lower owner a to its upper owner b,
-// then its two admission bits.
+// then its two admission bits and the immutable open-face bit.
 fn umRawAt(a:UMOwner,b:UMOwner,f:UMFace)->u32{return 6u*shLive()+shFaceAt(a,b,f);}
 fn umCacheAt(a:UMOwner,b:UMOwner,f:UMFace)->u32{return 9u*shLive()+48u*umCounts.x+shFaceAt(a,b,f);}
 // The raw flux of owner o's face f, on either side.
 fn umRawOf(o:UMOwner,f:UMFace)->u32{if(f.sign<0){return umRawAt(f.neighbor,o,f);}return umRawAt(o,f.neighbor,f);}
+// Regular fine interiors use lane strides. Only crossing a tile boundary
+// reads a prepared link; classification/listed checks were done once.
+fn shFaceFirst(o:UMOwner,axis:u32,sign:i32)->UMFace{
+ let stride=vec3u(1u,4u,16u);let local=umCorner(o.lane,4u);
+ var anchor=vec3i(umOrigin(o));anchor[axis]+=select(-1,i32(o.width)-1,sign>0);
+ if(o.width==1u&&((sign>0&&local[axis]<3u)||(sign<0&&local[axis]>0u))){
+  let delta=sign*i32(stride[axis]);
+  return UMFace(UMOwner(o.tile,u32(i32(o.lane)+delta),1u,u32(i32(o.index)+delta)),anchor,1u,1u,axis,sign);
+ }
+ let side=2u*axis+select(0u,1u,sign<0);let link=shWord(SH_LINKS+6u*o.tile+side);
+ if(link==0u){return UMFace();}
+ let width=select(4u,1u,(link&0x80000000u)!=0u);var lane=0u;var offset=0u;
+ if(width==1u){
+  let u=(axis+1u)%3u;let v=(axis+2u)%3u;
+  offset=local[u]*stride[u]+local[v]*stride[v];lane=offset+select(0u,3u*stride[axis],sign<0);
+ }
+ let tiles=vec3u(1u,UM_T.x,UM_T.x*UM_T.y);let tile=u32(i32(o.tile)+sign*i32(tiles[axis]));
+ let neighbor=UMOwner(tile,lane,width,(link&0x7fffffffu)-1u+offset);
+ let faceWidth=min(o.width,width);let parts=o.width/faceWidth;
+ return UMFace(neighbor,anchor,faceWidth,parts*parts,axis,sign);
+}
 fn umFaceFlags(a:UMOwner,f:UMFace)->u32 {
  if(f.neighbor.width==0u||!umSharpenFaceOpen(a,f)){return 0u;}
  let phiA=shPhi(a);let phiB=shPhi(f.neighbor);
  if(sharpen.policy.x==0.0&&sharpen.policy.y<1.5
   &&abs(phiA)>=sharpen.tuning.y*UM_MIN_H*f32(a.width)
-  &&abs(phiB)>=sharpen.tuning.y*UM_MIN_H*f32(f.neighbor.width)){return 0u;}
+  &&abs(phiB)>=sharpen.tuning.y*UM_MIN_H*f32(f.neighbor.width)){return 4u;}
  let middle=umSampleVertex(umFaceCenter(f));let epsilon=1e-6;
  let inwardA=phiA>=0.0&&phiB<phiA-epsilon&&middle<=phiA+epsilon&&middle>=phiB-epsilon;
  let inwardB=phiB>=0.0&&phiA<phiB-epsilon&&middle<=phiB+epsilon&&middle>=phiA-epsilon;
  let relayA=phiA>0.0&&shFill(a)<=1e-6;
  let relayB=phiB>0.0&&shFill(f.neighbor)<=1e-6;
- return select(0u,1u,(middle<=epsilon&&!relayB)||inwardA)|select(0u,2u,(middle<=epsilon&&!relayA)||inwardB);
+ return 4u|select(0u,1u,(middle<=epsilon&&!relayB)||inwardA)|select(0u,2u,(middle<=epsilon&&!relayA)||inwardB);
 }
-// Geometry is immutable through all eight volume sweeps: two admission bits
-// per positive patch, in the patch's word. A listed regular owner has one
+// Geometry is immutable through all eight volume sweeps: admission and
+// open-face bits per positive patch, in the existing word. Reusing the open
+// bit avoids repeating owner-solid and face-aperture checks in every sweep.
+// A listed regular owner has one
 // patch per positive face (shParts).
 fn shCacheGeometry(o:UMOwner){
 if(o.width==0u){return;}
  for(var axis=0u;axis<3u;axis++){
-  let f=umFace(o,axis,1,0u);
+  let f=shFaceFirst(o,axis,1);
   if(f.width!=0u){scratch[umCacheAt(o,f.neighbor,f)]=bitcast<f32>(umFaceFlags(o,f));}
  }
 }
@@ -280,14 +305,19 @@ ${sweep?"":/* wgsl */`@compute @workgroup_size(64) fn classify(@builtin(global_i
 }
 @compute @workgroup_size(64) fn compact(@builtin(global_invocation_id) id:vec3u){
  let tile=id.x+umDispatchX*64u*id.y;if(tile>=UM_TILES||shWord(SH_FLAGS+tile)==0u){return;}
+ // One packed cross-tile link per side: low 31 bits are the first
+ // neighbor index plus one, high bit marks h. Zero means unlisted/boundary.
+ // The same six words serve regular tiles and coarse seam tiles.
+ let tileOwner=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
+ for(var side=0u;side<6u;side++){
+  let face=umFaceFirst(tileOwner,side/2u,select(1,-1,(side&1u)!=0u));
+  var link=0u;
+  if(face.neighbor.width!=0u&&shListed(face.neighbor)){link=(face.neighbor.index+1u)|select(0u,0x80000000u,face.neighbor.width==1u);}
+  atomicStore(&work[SH_LINKS+6u*tile+side],link);
+ }
  let width=umTileWidth(tile);
  if(width!=1u&&umTileMaximumWidth(tile)!=umTileMinimumWidth(tile)){
-  // The h face neighbours of a 4h tile with a mixed stencil.
-  let c=vec3i(umTileCoord(tile));var sides=0u;
-  for(var side=0u;side<6u;side++){
-   var p=c;p[side/2u]+=select(1,-1,side%2u==1u);
-   if(all(p>=vec3i(0))&&all(p<vec3i(UM_T))&&umTileWidth(umTileAt(vec3u(p)))==1u){sides|=1u<<side;}
-  }
+  let sides=umFineFaceSides(tile);
   if(sides!=0u){
    atomicStore(&work[SH_FLAGS+tile],1u|(sides<<1u));
    let slot=atomicAdd(&work[SH_SEAMS],1u);atomicStore(&work[SH_LIST+UM_TILES-1u-slot],tile);return;
@@ -350,6 +380,7 @@ fn shSeamOwner(tile:u32,local:vec3u)->UMOwner{
 }
 // sides: the owner's h sides. base: its block's first lane.
 struct SHSeamLane {owner:UMOwner,first:bool,side:u32,part:u32,sides:u32,base:u32}
+const SH_SIDE_ORDER:array<u32,64> = array<u32,64>(${uniformSeamSideOrders.map(n=>`${n}u`).join(",")});
 // A pack word's lane: one patch of the owner. Its block holds the h sides
 // in order, sixteen lanes each, then a lane for each other side. A lane past
 // them has no owner; the block's first lane also reduces. The word names the
@@ -359,10 +390,9 @@ fn shSeamLane(word:u32,lane:u32)->SHSeamLane{
  if(sides==0u){return SHSeamLane(UMOwner(),false,0u,0u,0u,0u);}
  let q=lane%(192u/shPackOwners(word>>30u));let fine=countOneBits(sides);
  // The (q/16)-th h side, or the (q-16*fine)-th other side.
- let onFine=q<16u*fine;let wanted=select(q-16u*fine,q/16u,onFine);let bit=select(0u,1u,onFine);
- var side=6u;var seen=0u;
- for(var s=0u;s<6u;s++){if(((sides>>s)&1u)==bit){if(seen==wanted){side=s;}seen++;}}
- if(side==6u){return SHSeamLane(UMOwner(),false,0u,0u,0u,0u);}
+ let onFine=q<16u*fine;let ordinal=select(q-15u*fine,q/16u,onFine);
+ if(ordinal>=6u){return SHSeamLane(UMOwner(),false,0u,0u,0u,0u);}
+ let side=(SH_SIDE_ORDER[sides]>>(3u*ordinal))&7u;
  let tile=word&0xffffffu;
  return SHSeamLane(UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu),q==0u,side,select(0u,q%16u,onFine),sides,lane-q);
 }
@@ -372,16 +402,25 @@ fn shSeamTermAt(sides:u32,side:u32)->u32{
  if(((sides>>side)&1u)!=0u){return 16u*countOneBits(sides&below);}
  return 16u*countOneBits(sides)+countOneBits(~sides&below);
 }
-// umFace's patch part of seam owner o's side, sized by the tile's side
-// bits: one neighbour lookup, and none for a lane past the side's patches.
+// umFace's patch part of seam owner o's side. The geometry pass compiled
+// its neighbor index and listed status; every sweep derives local lanes
+// directly without an ownership lookup or a second tile-flag read.
 fn shSeamPatch(o:UMOwner,sides:u32,side:u32,part:u32)->UMFace{
  let parts=shSideParts(sides,side);if(part>=parts){return UMFace();}
  let axis=side/2u;let low=side%2u==1u;var probe=vec3i(umOrigin(o));
  probe[axis]+=select(4,-1,low);probe[(axis+1u)%3u]+=i32(part%4u);probe[(axis+2u)%3u]+=i32(part/4u);
  var anchor=probe;anchor[axis]-=select(1,0,low);
- return UMFace(umOwnerAt(probe),anchor,select(4u,1u,parts==16u),parts,axis,select(1,-1,low));
+ let width=select(4u,1u,parts==16u);let link=shWord(SH_LINKS+6u*o.tile+side);var neighbor=UMOwner();
+ if(link!=0u){
+  let q=vec3u(probe);let local=(q%4u)/width;let n=4u/width;let stride=vec3u(1u,4u,16u);
+  let offset=select(0u,(part%4u)*stride[(axis+1u)%3u]+(part/4u)*stride[(axis+2u)%3u],parts==16u);
+  neighbor=UMOwner(umTileAt(q/4u),local.x+n*(local.y+n*local.z),width,(link&0x7fffffffu)-1u+offset);
+ }
+ return UMFace(neighbor,anchor,width,parts,axis,select(1,-1,low));
 }
-var<workgroup> shSeamTerms:array<vec2f,192>;
+// An absent patch contributes zero. Keep only its full-precision value,
+// not a second float presence flag. Serial side/patch summation is unchanged.
+var<workgroup> shSeamTerms:array<f32,192>;
 // Each (anchor, component) lane holds the patch anchored there, if any. An
 // owner that stays in the sweeps caches the patch's admission word; a quiet
 // one writes the zero proposal its sweeps would (shPrepareActive).
@@ -393,7 +432,7 @@ fn shCacheGeometrySeam(tile:u32,lane:u32,stays:bool){
  let o=shSeamOwner(tile,vec3u(0));let face=shSeamPatch(o,shSides(tile),2u*axis,part);
  if(face.neighbor.width==0u){return;}
  if(stays){scratch[umCacheAt(o,face.neighbor,face)]=bitcast<f32>(umFaceFlags(o,face));}
- else if(shListed(face.neighbor)){scratch[umRawAt(o,face.neighbor,face)]=0.0;}
+ else{scratch[umRawAt(o,face.neighbor,face)]=0.0;}
 }
 // Budgets from an owner's volume; distance and desired are fixed per frame.
 fn shBudgets(o:UMOwner,value:f32,distance:f32,desired:f32)->vec2f{
@@ -404,38 +443,38 @@ fn shBudgets(o:UMOwner,value:f32,distance:f32,desired:f32)->vec2f{
 fn shProposeSeam(tile:u32,lane:u32){
  let l=shSeamLane(tile,lane);if(l.owner.width==0u||(l.side&1u)!=0u){return;}
  let o=l.owner;let face=shSeamPatch(o,l.sides,l.side,l.part);
- if(face.neighbor.width!=0u&&shListed(face.neighbor)){scratch[umRawAt(o,face.neighbor,face)]=umProposal(o,face.neighbor,face);}
+ if(face.neighbor.width!=0u){scratch[umRawAt(o,face.neighbor,face)]=umProposal(o,face.neighbor,face);}
 }
 // The owner's side patch part, when limit/commit would visit it.
 fn shSeamFace(o:UMOwner,sides:u32,side:u32,part:u32)->UMFace{
  let face=shSeamPatch(o,sides,side,part);
- if(face.width==0u||face.neighbor.width==0u||!shListed(face.neighbor)){return UMFace();}return face;
+ if(face.width==0u||face.neighbor.width==0u){return UMFace();}return face;
 }
 fn shLimitSeam(tile:u32,lane:u32){
- let l=shSeamLane(tile,lane);var term=vec2f(0);
- if(l.owner.width!=0u){let face=shSeamFace(l.owner,l.sides,l.side,l.part);if(face.width!=0u){term=vec2f(f32(face.sign)*scratch[umRawOf(l.owner,face)],1);}}
+ let l=shSeamLane(tile,lane);var term=0.0;
+ if(l.owner.width!=0u){let face=shSeamFace(l.owner,l.sides,l.side,l.part);if(face.width!=0u){term=f32(face.sign)*scratch[umRawOf(l.owner,face)];}}
  shSeamTerms[lane]=term;workgroupBarrier();
  if(!l.first){return;}
  let o=l.owner;let at=umBudgetAt(o);
  if(scratch[at]==0.0&&scratch[at+1u]==0.0){scratch[at+4u]=1.0;scratch[at+5u]=1.0;return;}
  let sides=l.sides;var outgoing=0.0;var incoming=0.0;
- for(var side=0u;side<6u;side++){let head=l.base+shSeamTermAt(sides,side);for(var part=0u;part<shSideParts(sides,side);part++){let t=shSeamTerms[head+part];if(t.y>0.0){outgoing+=max(t.x,0.0);incoming+=max(-t.x,0.0);}}}
+ for(var side=0u;side<6u;side++){let head=l.base+shSeamTermAt(sides,side);for(var part=0u;part<shSideParts(sides,side);part++){let t=shSeamTerms[head+part];outgoing+=max(t,0.0);incoming+=max(-t,0.0);}}
  scratch[at+4u]=min(1.0,scratch[at]/max(outgoing,1e-20));scratch[at+5u]=min(1.0,scratch[at+1u]/max(incoming,1e-20));
 }
 fn shCommitSeam(tile:u32,lane:u32){
- let l=shSeamLane(tile,lane);var term=vec2f(0);
+ let l=shSeamLane(tile,lane);var term=0.0;
  if(l.owner.width!=0u){
   let o=l.owner;let at=umBudgetAt(o);let face=shSeamFace(o,l.sides,l.side,l.part);
   if(face.width!=0u&&(scratch[at]!=0.0||scratch[at+1u]!=0.0)){
    let other=umBudgetAt(face.neighbor);let raw=f32(face.sign)*scratch[umRawOf(o,face)];
-   let factor=select(min(scratch[at+5u],scratch[other+4u]),min(scratch[at+4u],scratch[other+5u]),raw>=0.0);term=vec2f(raw*factor,1);
+   let factor=select(min(scratch[at+5u],scratch[other+4u]),min(scratch[at+4u],scratch[other+5u]),raw>=0.0);term=raw*factor;
   }
  }
  shSeamTerms[lane]=term;workgroupBarrier();
  if(!l.first){return;}
  let o=l.owner;let at=umBudgetAt(o);var terms:array<f32,6>;
  let sides=l.sides;
- for(var side=0u;side<6u;side++){var sum=0.0;let head=l.base+shSeamTermAt(sides,side);for(var part=0u;part<shSideParts(sides,side);part++){let t=shSeamTerms[head+part];if(t.y>0.0){sum-=t.x;}}terms[side]=sum;}
+ for(var side=0u;side<6u;side++){var sum=0.0;let head=l.base+shSeamTermAt(sides,side);for(var part=0u;part<shSideParts(sides,side);part++){sum-=shSeamTerms[head+part];}terms[side]=sum;}
  let delta=((terms[0]+terms[1])+(terms[4]+terms[5]))+(terms[2]+terms[3]);shFinish(o,umV(o)+delta/umMassScale(o));
 }
 // Store the committed volume (after dust) and prepare the next sweep's
@@ -467,15 +506,15 @@ fn shPrepareOwner(o:UMOwner)->bool{
 fn shPrepareActive(o:UMOwner)->bool{
  if(o.width==0u){return false;}
  if(shPrepareOwner(o)){return true;}
- for(var axis=0u;axis<3u;axis++){let first=umFace(o,axis,1,0u);if(first.neighbor.width==0u){continue;}
-  for(var part=0u;part<shParts(first);part++){let face=umFace(o,axis,1,part);if(shListed(face.neighbor)){scratch[umRawAt(o,face.neighbor,face)]=0.0;}}
+ for(var axis=0u;axis<3u;axis++){let first=shFaceFirst(o,axis,1);if(first.neighbor.width==0u){continue;}
+  for(var part=0u;part<shParts(first);part++){let face=umFacePatch(first,part);scratch[umRawAt(o,face.neighbor,face)]=0.0;}
  }
  return false;
 }
 // The proposal from lower owner a to upper owner b across patch f (f's
 // anchor, axis and width; both incident owners derive the same ones).
 fn umProposal(a:UMOwner,b:UMOwner,f:UMFace)->f32 {
- let i=umBudgetAt(a);let j=umBudgetAt(b); if(!umSharpenFaceOpenAB(a,b,f)){return 0.0;}
+ let i=umBudgetAt(a);let j=umBudgetAt(b);
  let phiA=scratch[i+2u];let phiB=scratch[j+2u];let dose=clamp(sharpen.tuning.x,0.0,1.0);
  let area=f32(f.width*f.width);let shareA=area/f32(a.width*a.width);let shareB=area/f32(b.width*b.width);
  let giveA=scratch[i]*shareA;let giveB=scratch[j]*shareB;let takeA=scratch[i+1u]*shareA;let takeB=scratch[j+1u]*shareB;
@@ -483,11 +522,15 @@ fn umProposal(a:UMOwner,b:UMOwner,f:UMFace)->f32 {
  // orphan branch: a negative sliver's give is negative there, and min()
  // with a quiet neighbour's zero take would propose it.
  if((giveA==0.0||takeB==0.0)&&(giveB==0.0||takeA==0.0)){return 0.0;}
+ // Quiet owners have no cached geometry. Only read after the zero-budget
+ // rejection; every face capable of moving mass has a prepared lower owner.
+ let flags=bitcast<u32>(scratch[umCacheAt(a,b,f)]);
+ if((flags&4u)==0u){return 0.0;}
  if(sharpen.policy.y>1.5){
   let orphanA=phiA>=sharpen.tuning.y*UM_MIN_H*f32(a.width);let orphanB=phiB>=sharpen.tuning.y*UM_MIN_H*f32(b.width);
   if(orphanA||orphanB){let va=umV(a);let vb=umV(b);return select(0.0,min(giveA,takeB),orphanA&&vb>va)-select(0.0,min(giveB,takeA),orphanB&&va>vb);}
  }
- let flags=bitcast<u32>(scratch[umCacheAt(a,b,f)]);let epsilon=1e-6;
+ let epsilon=1e-6;
  var capA=giveA;var capB=giveB;
  if(sharpen.policy.x>0.5){
   if(!(phiA<0.0&&phiB<phiA-epsilon)){capA=min(capA,dose*max(umV(a)-scratch[i+3u],0.0)*umMassScale(a)*shareA);}
@@ -497,8 +540,8 @@ fn umProposal(a:UMOwner,b:UMOwner,f:UMFace)->f32 {
 }
 fn shPropose(o:UMOwner){
 if(o.width==0u){return;}
- for(var axis=0u;axis<3u;axis++){let first=umFace(o,axis,1,0u);if(first.neighbor.width==0u){continue;}
-  for(var part=0u;part<shParts(first);part++){let face=umFace(o,axis,1,part);if(shListed(face.neighbor)){scratch[umRawAt(o,face.neighbor,face)]=umProposal(o,face.neighbor,face);}}
+ for(var axis=0u;axis<3u;axis++){let first=shFaceFirst(o,axis,1);if(first.neighbor.width==0u){continue;}
+  for(var part=0u;part<shParts(first);part++){let face=umFacePatch(first,part);scratch[umRawAt(o,face.neighbor,face)]=umProposal(o,face.neighbor,face);}
  }
 }
 fn shLimit(o:UMOwner){
@@ -506,8 +549,8 @@ if(o.width==0u){return;}var outgoing=0.0;var incoming=0.0;
  let at=umBudgetAt(o);
  if(scratch[at]==0.0&&scratch[at+1u]==0.0){scratch[at+4u]=1.0;scratch[at+5u]=1.0;return;}
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
-  let sign=select(1,-1,side==1u);let first=umFace(o,axis,sign,0u);if(first.neighbor.width==0u){continue;}
-  for(var part=0u;part<shParts(first);part++){let face=umFace(o,axis,sign,part);if(!shListed(face.neighbor)){continue;}let value=f32(sign)*scratch[umRawOf(o,face)];outgoing+=max(value,0.0);incoming+=max(-value,0.0);}
+  let sign=select(1,-1,side==1u);let first=shFaceFirst(o,axis,sign);if(first.neighbor.width==0u){continue;}
+  for(var part=0u;part<shParts(first);part++){let face=umFacePatch(first,part);let value=f32(sign)*scratch[umRawOf(o,face)];outgoing+=max(value,0.0);incoming+=max(-value,0.0);}
  }}
  scratch[at+4u]=min(1.0,scratch[at]/max(outgoing,1e-20));scratch[at+5u]=min(1.0,scratch[at+1u]/max(incoming,1e-20));
 }
@@ -515,9 +558,9 @@ fn shCommit(o:UMOwner){
 if(o.width==0u){return;}let at=umBudgetAt(o);var terms:array<f32,6>;
  if(scratch[at]!=0.0||scratch[at+1u]!=0.0){
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
-  let sign=select(1,-1,side==1u);let first=umFace(o,axis,sign,0u);var sum=0.0;
+  let sign=select(1,-1,side==1u);let first=shFaceFirst(o,axis,sign);var sum=0.0;
   if(first.neighbor.width!=0u){for(var part=0u;part<shParts(first);part++){
-   let face=umFace(o,axis,sign,part);if(!shListed(face.neighbor)){continue;}let other=umBudgetAt(face.neighbor);let raw=f32(sign)*scratch[umRawOf(o,face)];
+   let face=umFacePatch(first,part);let other=umBudgetAt(face.neighbor);let raw=f32(sign)*scratch[umRawOf(o,face)];
    let factor=select(min(scratch[at+5u],scratch[other+4u]),min(scratch[at+4u],scratch[other+5u]),raw>=0.0);sum-=raw*factor;
   }}terms[2u*axis+side]=sum;
  }}}

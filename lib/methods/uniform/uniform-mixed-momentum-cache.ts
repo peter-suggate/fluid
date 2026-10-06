@@ -1,5 +1,6 @@
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailStorage, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
+import { uniformCompiledVelocityTapWGSL } from "./uniform-compiled-velocity-taps.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
@@ -137,21 +138,20 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  return textureLoad(extended,anchor,0)[axis];
 }
 fn umLoadCoarseFace(index:vec3i,axis:u32)->f32{return textureLoad(coarse,index+vec3i(1),0)[axis];}
-${uniformMixedHangingTapWGSL(2)+uniformMixedVelocitySamplingSource(false,true)}
+${uniformMixedHangingTapWGSL(2)+uniformCompiledVelocityTapWGSL}
 // Tile-local lanes: 0..191 fine taps (stored to unitVelocity below),
 // 192..239 fine negative boundary plane taps (for tiles on that plane).
 var<workgroup> unitTaps:array<f32,192>;
 fn umHangingFill(slot:u32,tile:u32,lane:u32){
  if(lane<192u){
   let cell=lane%64u;let axis=lane/64u;let local=vec3u(cell%4u,(cell/4u)%4u,cell/16u);
-  let value=umVelocityTap1(vec3i(umTileCoord(tile)*4u+local),axis);
+  let value=umCompiledVelocityTap(tile,local,axis,false);
   unitTaps[lane]=value;
  }else if(lane<${192+UNIFORM_MIXED_HANGING_TAPS}u){
   let offset=lane-192u;let axis=offset/16u;let cell=offset%16u;
   if(umTileCoord(tile)[axis]!=0u){return;}
   var local=vec3u(0);local[(axis+1u)%3u]=cell%4u;local[(axis+2u)%3u]=cell/4u;
-  var index=vec3i(umTileCoord(tile)*4u+local);index[axis]=-1;
-  umHanging[umHangingPlaneAddress(slot,local,axis)]=bitcast<u32>(umVelocityTap1(index,axis));
+  umHanging[umHangingPlaneAddress(slot,local,axis)]=bitcast<u32>(umCompiledVelocityTap(tile,local,axis,true));
  }
 }
 // Seam 4h slots follow the seam h slots (the builder's and update()'s order);

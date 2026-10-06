@@ -1,3 +1,4 @@
+import { uniformCompiledTopologyWGSL } from "./uniform-compiled-topology";
 import { uniformMidpointTraceWGSL } from "./uniform-midpoint-trace.wgsl";
 import { uniformMixedVelocitySamplingWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedFacesWGSL } from "./uniform-mixed-faces.wgsl";
@@ -122,6 +123,7 @@ fn umTileMirrored(t:u32)->bool{return (umTopology[2u*UM_TILES+2u*t+1u]&1u)!=0u;}
 fn umTileAt(p:vec3u)->u32{return p.x+UM_T.x*(p.y+UM_T.y*p.z);}
 fn umTileCoord(t:u32)->vec3u{return vec3u(t%UM_T.x,(t/UM_T.x)%UM_T.y,t/(UM_T.x*UM_T.y));}
 fn umCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}
+${uniformCompiledTopologyWGSL}
 struct UMOwner {tile:u32,lane:u32,width:u32,index:u32}
 fn umAllOwner(gid:vec3u)->UMOwner {
  let slot=gid.x+umDispatchX*64u*gid.y;let fine=umCounts.x*64u;

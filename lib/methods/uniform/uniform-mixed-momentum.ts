@@ -1,3 +1,4 @@
+import { uniformCachedMomentumSamplingWGSL } from "./uniform-cached-momentum.wgsl";
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
@@ -26,64 +27,13 @@ export interface UniformMixedMomentumFields {
   params: GPUBuffer;
 }
 
-/** The general h list's momentum without the general sampler: its value is
- * umMomentum's wherever every characteristic sample reads unit taps only.
- * General umSampleVelocity at a fine-stencil point is umSampleVelocityFine;
- * at any other point of a unit tile with the support bit its weights are
- * (1,0), and its unit interpolant reads the hanging-tap unit texture (all
- * taps in range when p[axis]>=1). Its local width is 1 at such a point.
- * A lane whose characteristic samples anywhere else escapes: the cell is
- * listed for momentumDeferred, which evaluates its three faces with the
- * general sampler. Classification is per sample, from the frame's topology
- * and support words, so it follows every relayout. */
-const uniformMixedMomentumUnitWGSL = /* wgsl */ `
-var<private> umUnitEscaped:bool;
-fn umUnitInterpolant(p:vec3f,axis:u32)->f32 {
- var offset=vec3f(0.5);offset[axis]=1.0;var lower=vec3f(0.0);lower[axis]=-1.0;
- let q=clamp(p-offset,lower,vec3f(UM_D)-vec3f(1.0));
- let base=vec3i(floor(q));let fraction=fract(q);var terms:array<f32,8>;
- for(var k=0u;k<8u;k++){
-  let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
-  let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));
-  let weight=weights.x*weights.y*weights.z;
-  terms[k]=select(0.0,weight*textureLoad(unitVelocity,base+bit,0)[axis],weight>0.0);
- }
- return umVelocitySum8(terms);
-}
-// 0 fine stencil, 1 unit tile, 2 general sampler (escape).
-fn umUnitSampleKind(p:vec3f,axis:u32)->u32 {
- if(umFineStencilSample(p)){return 0u;}
- let q=clamp(p,vec3f(0),vec3f(UM_D));
- let tile=umTileAt(vec3u(clamp(vec3i(floor(q/4.0)),vec3i(0),vec3i(UM_T)-1)));
- let unit=(umTileSupport(tile)&1u)!=0u&&umTileWidth(tile)==1u;
- let low=select(p[min(axis,2u)]<1.0,any(p<vec3f(1.0)),axis>=3u);
- return select(2u,1u,unit&&!low);
-}
-fn umUnitSampleComponent(p:vec3f,axis:u32)->f32 {
- let kind=umUnitSampleKind(p,axis);
- if(kind==0u){return umSampleVelocityFine(p,axis);}
- if(kind==2u){umUnitEscaped=true;return 0.0;}
- return umUnitInterpolant(p,axis);
-}
-fn umUnitSample(p:vec3f)->vec3f {
- let kind=umUnitSampleKind(p,3u);
- if(kind==0u){return vec3f(umSampleVelocityFine(p,0u),umSampleVelocityFine(p,1u),umSampleVelocityFine(p,2u));}
- if(kind==2u){umUnitEscaped=true;return vec3f(0);}
- return vec3f(umUnitInterpolant(p,0u),umUnitInterpolant(p,1u),umUnitInterpolant(p,2u));
-}
-fn umUnitDeparture(position:vec3f,dt:f32,h:vec3f)->vec3f {
-  var point=position;var remaining=abs(dt);let direction=select(-1.0,1.0,dt>=0.0);
-  for(var step=0;step<32;step+=1){
-    if(remaining<=1e-7){break;}
-    let first=umUnitSample(point);if(umUnitEscaped){break;}
-    let rate=max(abs(first.x)/h.x,max(abs(first.y)/h.y,abs(first.z)/h.z))/(1.0);
-    let stepSeconds=min(remaining,1.5/max(rate,1e-6));let signedStep=direction*stepSeconds;
-    let midpoint=umClampMomentum(point-0.5*first*signedStep/h);
-    let second=umUnitSample(midpoint);if(umUnitEscaped){break;}
-    point=umClampMomentum(point-second*signedStep/h);remaining-=stepSeconds;
-  }
-  return point;
-}
+/** Momentum on general h tiles reads prepared h and 4h velocity fields.
+ * Classification and blend weight are shared by the three components. The
+ * characteristic retains its actual local owner width even when a sample
+ * crosses into a coarse tile. Only fine samples touching negative boundary
+ * planes escape to the general sampler; seam blends no longer discard and
+ * repeat a partially evaluated characteristic. */
+const uniformMixedMomentumUnitWGSL = uniformCachedMomentumSamplingWGSL + /* wgsl */ `
 // umMomentum through the unit sampler (umUnitEscaped when it cannot).
 fn umUnitMomentum(owner:UMOwner,face:UMFace)->f32 {
  if(umCullAir&&!umPredictionCellLive(owner)&&!umPredictionCellLive(face.neighbor)){return 0.0;}

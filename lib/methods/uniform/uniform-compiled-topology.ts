@@ -7,7 +7,29 @@
  * Builders supply a clipped 27-bit valid mask so domain walls need no fake
  * neighbors. Both builders use the same masks and bit assignments below. */
 export const UNIFORM_COMPILED_TOPOLOGY = { incident: 1, positive: 8, corners: 16 } as const;
+/** Six ordered 3-bit side IDs: fine sides first, then coarse/boundary sides.
+ * A seam lane selects its ordinal directly instead of scanning six sides
+ * again in every proposal, limiter and commit sweep. */
+export const uniformSeamSideOrders = Array.from({ length: 64 }, (_, sides) => {
+  const order = [0, 1, 2, 3, 4, 5].filter(s => sides & (1 << s))
+    .concat([0, 1, 2, 3, 4, 5].filter(s => !(sides & (1 << s))));
+  return order.reduce((word, side, ordinal) => word | (side << (3 * ordinal)), 0);
+});
 const corner = (k: number) => [k & 1, (k >> 1) & 1, k >> 2];
+const stencilCoord = (k: number) => [k % 3 - 1, Math.floor(k / 3) % 3 - 1, Math.floor(k / 9) - 1];
+// Within the center tile, a neighbor's box distance is the maximum of its
+// nonzero-axis distances. A matching strict subset of axes always dominates
+// it. Keep the minimal fine neighbors under that partial order.
+const blendDominators = Array.from({ length: 27 }, (_, i) => {
+  const a = stencilCoord(i); let mask = 0;
+  for (let j = 0; j < 27; j++) if (j !== i && stencilCoord(j).every((v, axis) => v === 0 || v === a[axis])) mask |= 1 << j;
+  return mask;
+});
+export function compileUniformBlendMask(fine: number): number {
+  let result = fine & 0x07ffffff;
+  for (let i = 0; i < 27; i++) if (fine & blendDominators[i]!) result &= ~(1 << i);
+  return result;
+}
 const spatial = (x: number, y: number, z: number) => 1 << (x + 1 + 3 * (y + 1 + 3 * (z + 1)));
 const negative = Array.from({ length: 8 }, (_, k) => { const c = corner(k); return spatial(c[0]! - 1, c[1]! - 1, c[2]! - 1); });
 const positive = Array.from({ length: 8 }, (_, k) => { const c = corner(k); return spatial(c[0]!, c[1]!, c[2]!); });
@@ -23,6 +45,15 @@ export const uniformVertexIncidentMasks = Array.from({ length: 8 }, (_, required
   return mask;
 });
 
+/** One 2³ octant of a 3³ fine stencil. Eight such masks cover the
+ * redistance window's 4³ tiles, using centers T+octant and clipping walls. */
+export function uniformStencilOctant(fine: number, octant: number): number {
+  const c = corner(octant), shifted = fine >>> (c[0]! + 3 * c[1]! + 9 * c[2]!);
+  let mask = 0;
+  for (let k = 0; k < 8; k++) if (shifted & negative[k]!) mask |= 1 << k;
+  return mask;
+}
+
 export function compileUniformStencil(fine: number, valid: number): number {
   const coarse = valid & ~fine; let recipe = 0;
   for (let k = 0; k < 8; k++) {
@@ -36,6 +67,12 @@ export function compileUniformStencil(fine: number, valid: number): number {
 /** Same finite compiler as compileUniformStencil, run by GPU classification
  * before owner numbering. No extra dispatch or metadata allocation. */
 export const uniformCompileStencilWGSL = /* wgsl */ `
+fn umCompileBlendMask(fine:u32)->u32{
+ if((fine&8192u)!=0u){return 8192u;}
+ var result=fine&0x07ffffffu;
+ ${blendDominators.map((mask,i)=>mask?`if((fine&${mask}u)!=0u){result&=~${1<<i}u;}`:"").join("\n ")}
+ return result;
+}
 fn umCompileStencil(fine:u32,valid:u32)->u32{
  let coarse=valid&~fine;var recipe=0u;
  ${negative.map((mask, k) => `recipe|=select(0u,${1 << (UNIFORM_COMPILED_TOPOLOGY.incident + k)}u,(coarse&${mask}u)!=0u);`).join("\n ")}
@@ -50,13 +87,21 @@ fn umCompileStencil(fine:u32,valid:u32)->u32{
  * generation's compact index. Its eligibility is the local coordinate's
  * nonzero axes. firstTrailingBit preserves the old minimum-owner ordering. */
 export const uniformCompiledTopologyWGSL = /* wgsl */ `
-const UM_VERTEX_INCIDENT:array<u32,8>=array<u32,8>(${uniformVertexIncidentMasks.map(n => `${n}u`).join(",")});
+const UM_VERTEX_INCIDENT:array<u32,8> = array<u32,8>(${uniformVertexIncidentMasks.map(n => `${n}u`).join(",")});
 fn umVertexRecipe(t:u32)->u32{return umTopology[2u*UM_TILES+2u*t+1u];}
+fn umVelocityBlendMask(t:u32)->u32{return umTopology[4u*UM_TILES+t];}
 fn umFineWideMask(t:u32)->u32{return (umVertexRecipe(t)>>${UNIFORM_COMPILED_TOPOLOGY.positive}u)&254u;}
 fn umCoarseCornerMask(t:u32)->u32{return (umVertexRecipe(t)>>${UNIFORM_COMPILED_TOPOLOGY.corners}u)&255u;}
 fn umCoarseIncident(t:u32,local:vec3u)->u32{
  let required=u32(local.x!=0u)|(u32(local.y!=0u)<<1u)|(u32(local.z!=0u)<<2u);
  return ((umVertexRecipe(t)>>${UNIFORM_COMPILED_TOPOLOGY.incident}u)&255u)&UM_VERTEX_INCIDENT[required];
+}
+// Window tile offsets -1..+2 are eight 2³ octants. Their widths already
+// exist in eight neighboring 3³ stencils: no per-tile word reads or atomics.
+fn umWindowFineOctant(tile:vec3u,octant:u32)->u32{
+ let c=umCorner(octant,2u);let center=tile+c;if(any(center>=UM_T)){return 0u;}
+ let m=umTileStencil(umTileAt(center)).x>>(c.x+3u*c.y+9u*c.z);
+ return ${negative.map((mask,k)=>`(((m>>${Math.log2(mask)}u)&1u)<<${k}u)`).join("|")};
 }
 // Six face-neighbor h bits, +x,-x,+y,-y,+z,-z. The original 27-bit
 // stencil already compiled them, including clipped domain boundaries.

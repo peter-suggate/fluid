@@ -1,3 +1,4 @@
+import { uniformCompiledVertexResolveWGSL } from "./uniform-compiled-topology";
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_DETAIL_GUARD_LOAD } from "../../core/uniform-detail-abi";
@@ -13,8 +14,8 @@ import { uniformMixedChangedTilesWGSL } from "./uniform-mixed-layout-builder";
  * write a resolved reader follows: canonical writers leave hanging texels stale.
  * One workgroup per seam tile (the ownership's mixed-stencil lists, support
  * 7n+16): on the ungraded h/4h layout a hanging texel's authority is the
- * lowest-index incident 4h tile, so the eight incident tile words and the 27
- * 4h lattice values around the tile are staged once per group and each texel
+ * lowest-index incident 4h tile, so the compiled incident mask selects its authority and the 27
+ * 4h lattice values around the tile are staged once per group; each texel
  * is umVertexFrom4 over workgroup memory (same weights and D4 summation).
  * A GPU-counted launch (UNIFORM_MIXED_COUNTED.fused): the seam count sizes
  * nothing on the host, so a pass without seam tiles still pays one launch.
@@ -59,10 +60,11 @@ export class UniformMixedPhiResolve {
 @group(1) @binding(0) var field:texture_storage_3d<r32float,read_write>;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(field,vec3i(p)).x;}
 ${uniformMixedVertexSamplingWGSL}
-var<workgroup> umResolveWords:array<u32,8>;var<workgroup> umResolveLattice:array<f32,27>;
+var<workgroup> umResolveLattice:array<f32,27>;
 // One lane per tile-local vertex; local 4 belongs to this tile only on the
 // upper domain face. Incident tile T+c-1 (c in {0,1}^3) may take c=0 only on
-// axes where local is 0. Only 4h tiles own hanging vertices; a missing tile stages as a unit word. Lattice slot m holds the 4h
+// axes where local is 0. Only 4h tiles own hanging vertices. The compiled
+// recipe clips missing tiles. Lattice slot m holds the 4h
 // vertex (T+m-1)*4, read only for existing owners; aligned vertices are never
 // written here, so staging them races no store.
 @compute @workgroup_size(125) fn ${entry}(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -70,28 +72,12 @@ var<workgroup> umResolveWords:array<u32,8>;var<workgroup> umResolveLattice:array
  // every lane reaches the barrier and a spare job leaves after it.
  let job=group.x+umDispatchX*group.y;
 ${job}
- // c=0 (word 0) would serve only local 0 on every axis, a 4-aligned texel
- // this pass never writes: words 1..7 are staged and scanned, and lattice
- // slot 0 (reached only from c=0) is not staged.
- if(valid&&lane>=1u&&lane<8u){let t=base+vec3i(umCorner(lane,2u))-vec3i(1);umResolveWords[lane]=select(0x80000000u,umTopology[umTileAt(vec3u(max(t,vec3i(0))))],all(t>=vec3i(0)));}
- else if(valid&&lane>=9u&&lane<35u){let v=(base+vec3i(umCorner(lane-8u,3u))-vec3i(1))*4;if(all(v>=vec3i(0))){umResolveLattice[lane-8u]=umLoadVertex(vec3u(v));}}
+ // Incident c=0 serves only the aligned local-zero vertex, never written
+ // here, so its lattice slot 0 is not needed.
+ if(valid&&lane>=9u&&lane<35u){let v=(base+vec3i(umCorner(lane-8u,3u))-vec3i(1))*4;if(all(v>=vec3i(0))){umResolveLattice[lane-8u]=umLoadVertex(vec3u(v));}}
  workgroupBarrier();
  if(!valid){return;}
- let local=umCorner(lane,5u);let p=vec3u(base)*4u+local;
- if(any((local==vec3u(4u))&(p!=UM_D))||all(p%4u==vec3u(0))){return;}
- var best=0xffffffffu;var at=vec3u(0);
- for(var k=1u;k<8u;k++){
-  let c=umCorner(k,2u);let word=umResolveWords[k];
-  if(any((c==vec3u(0))&(local!=vec3u(0)))||(word&0xc0000000u)!=0u){continue;}
-  if((word&0x3fffffffu)<best){best=word&0x3fffffffu;at=c;}
- }
- if(best==0xffffffffu){return;}
- let t=vec3f(local+(vec3u(1)-at)*4u)/4.0;var values:array<f32,8>;
- for(var k=0u;k<8u;k++){
-  let corner=umCorner(k,2u);let weight=umVertexWeight(t,corner);let m=at+corner;
-  if(weight>0.0){values[k]=weight*umResolveLattice[m.x+3u*(m.y+3u*m.z)];}
- }
- let value=umVertexSum8(values);
+${uniformCompiledVertexResolveWGSL("umResolveLattice","umVertexWeight","umVertexSum8")}
  if(bitcast<u32>(value)!=bitcast<u32>(${UNIFORM_DETAIL_GUARD_LOAD}textureLoad(field,vec3i(p)).x)){textureStore(field,vec3i(p),vec4f(value));}
 }`, [entry], entry === "resolve" ? undefined : "umDilatedCount()");
     const module = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve", code: source("resolve", header) });

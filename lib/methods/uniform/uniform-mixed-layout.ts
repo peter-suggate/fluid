@@ -1,3 +1,4 @@
+import { compileUniformStencil, compileUniformBlendMask } from "./uniform-compiled-topology";
 import type { FluidRefinementRegion } from "../../core/model";
 import { refinementRegionCellBounds, type RefinementRegionLattice } from "../../core/refinement-regions";
 
@@ -16,8 +17,10 @@ export interface UniformMixedLayout {
   readonly fineTiles: Uint32Array<ArrayBuffer>;
   readonly coarseTiles: Uint32Array<ArrayBuffer>;
   /** Per tile: the 27-bit h neighbourhood mask with the maximum width in its
-   * high bits, then a word holding only the minimum width in its high bits. */
+   * high bits, then minimum width, detail-ring and compiled vertex recipes. */
   readonly stencils: Uint32Array<ArrayBuffer>;
+  /** Minimal fine-neighbor boxes for the exact velocity blending distance. */
+  readonly blendMasks: Uint32Array<ArrayBuffer>;
   readonly cellCount: number;
   readonly metadataBytes: number;
   /** Effective bounds in tile coordinates, upper bound exclusive. */
@@ -199,8 +202,9 @@ function packUniformMixedLayout(lattice: RefinementRegionLattice, widths: Uint8A
     if (isFine) fineBase += 64; else coarseBase += 1;
   }
   const stencils = mixedStencils(dimensions, widths);
-  return { lattice, tileDimensions: dimensions, tiles, stencils, fineTiles: Uint32Array.from(fine),
-    coarseTiles: Uint32Array.from(coarse), cellCount, metadataBytes: count * 16, regions };
+  const blendMasks=Uint32Array.from({length:count},(_,i)=>compileUniformBlendMask(stencils[2*i]!));
+  return { lattice, tileDimensions: dimensions, tiles, stencils, blendMasks, fineTiles: Uint32Array.from(fine),
+    coarseTiles: Uint32Array.from(coarse), cellCount, metadataBytes: count * 20, regions };
 }
 
 /** Second stencil word, bit 0: the tile is in the detail ring, an h tile
@@ -214,16 +218,17 @@ function mixedStencils(dimensions: Triple, widths: Uint8Array): Uint32Array<Arra
   const count = widths.length, stencils = new Uint32Array(count * 2);
   for (let key = 0; key < count; key++) {
     const tx = key % dimensions[0], ty = Math.floor(key / dimensions[0]) % dimensions[1], tz = Math.floor(key / (dimensions[0] * dimensions[1]));
-    let maximum = widths[key]!, minimum = widths[key]!;
+    let maximum = widths[key]!, minimum = widths[key]!, valid = 0;
     for (let z = -1; z <= 1; z++) for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) {
       const qx = tx + x, qy = ty + y, qz = tz + z;
       if (qx < 0 || qy < 0 || qz < 0 || qx >= dimensions[0] || qy >= dimensions[1] || qz >= dimensions[2]) continue;
+      valid |= 1 << ((x + 1) + 3 * ((y + 1) + 3 * (z + 1)));
       const width = widths[qx + dimensions[0] * (qy + dimensions[1] * qz)]!;
       maximum = Math.max(maximum, width);minimum = Math.min(minimum, width);
       if (width === 1) stencils[2 * key]! |= 1 << ((x + 1) + 3 * ((y + 1) + 3 * (z + 1)));
     }
     stencils[2 * key]! |= maximum << 27;
-    stencils[2 * key + 1]! |= minimum << 27;
+    stencils[2 * key + 1]! = (minimum << 27) | compileUniformStencil(stencils[2 * key]!, valid);
   }
   // The detail ring (UNIFORM_MIXED_DETAIL_RING): bit 0 of the second word,
   // an h tile within three tiles. A tile two tiles out sees the 27-bit h
@@ -259,6 +264,7 @@ export function uniformMixedLayoutFromTiles(lattice: RefinementRegionLattice, ti
   } else for (const word of tiles) { if (mixedCellWidth(word) === 1) fine++; else coarse++; }
   let lists: { fine: Uint32Array<ArrayBuffer>; coarse: Uint32Array<ArrayBuffer> } | undefined;
   let stencils: Uint32Array<ArrayBuffer> | undefined;
+  let blendMasks: Uint32Array<ArrayBuffer> | undefined;
   const list = () => {
     if (!lists) {
       lists = { fine: new Uint32Array(fine), coarse: new Uint32Array(coarse) };
@@ -271,10 +277,11 @@ export function uniformMixedLayoutFromTiles(lattice: RefinementRegionLattice, ti
     return lists;
   };
   return {
-    lattice, tileDimensions: dimensions, tiles, regions, metadataBytes: count * 16,
+    lattice, tileDimensions: dimensions, tiles, regions, metadataBytes: count * 20,
     cellCount: fine * 64 + coarse,
     get fineTiles() { return list().fine; },
     get coarseTiles() { return list().coarse; },
     get stencils() { return stencils ??= mixedStencils(dimensions, Uint8Array.from(tiles, mixedCellWidth)); },
+    get blendMasks() { return blendMasks ??= Uint32Array.from({length:count},(_,i)=>compileUniformBlendMask((stencils ??= mixedStencils(dimensions, Uint8Array.from(tiles, mixedCellWidth)))[2*i]!)); },
   };
 }
