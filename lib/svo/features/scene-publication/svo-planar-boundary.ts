@@ -10,6 +10,7 @@ import {
   createSolidWorld,
   planarBoundaryForSolidWorldVoxelPatch,
   solidWorldVoxelPatchBounds_m,
+  terrainSolidWorldWithPatches,
   type SolidWorld,
   type SolidWorldVoxelPatch,
 } from "../../../core/solid-world";
@@ -65,14 +66,22 @@ export function svoPlanarResidualEnvironmentPrimitives(
 /**
  * Rebuild the render-only SolidWorld after removing every fill owned by the
  * exact planar catalogue. Fluid keeps its canonical SolidWorld separately.
+ *
+ * `terrainScene` is the document whenever it has terrain: the ground is baked
+ * into pages, not carried as a patch, so the surviving fills have to be laid
+ * back over it rather than over nothing.
  */
 export function svoPlanarResidualSolidWorld(
   world: SolidWorld,
   catalog: SvoSolidWorldPlanarBoundaryCatalog | undefined,
+  terrainScene?: SceneDescription,
 ): SolidWorld {
   if (!catalog || catalog.residualExcludedPatchIndices.size === 0) return world;
-  return createSolidWorld(world.patches.filter((_, patchIndex) =>
-    !catalog.residualExcludedPatchIndices.has(patchIndex)));
+  const patches = world.patches.filter((_, patchIndex) =>
+    !catalog.residualExcludedPatchIndices.has(patchIndex));
+  return terrainScene?.terrain
+    ? terrainSolidWorldWithPatches(terrainScene, patches)
+    : createSolidWorld(patches);
 }
 
 /** Bounds of visible solid geometry, retaining analytic owners as well as voxels. */

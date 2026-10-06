@@ -1,5 +1,5 @@
 import { assertDualGridAttachmentFits } from "../meshing/dual-grid-capacity";
-import { terrainFieldStamp } from "../../../core/live-terrain-overlay";
+import { terrainFieldStamp, terrainOverlayPatches } from "../../../core/live-terrain-overlay";
 import type { RigidBodyDescription, SceneDescription } from "../../../core/model";
 import type { RenderFrameSeam } from "../../../core/render-frame-stages";
 import { svoSceneLighting } from "../lighting-visibility/svo-dry-scene-lighting";
@@ -1269,6 +1269,7 @@ export class OctreeSparseBrickWorld {
   private surfaceModel!: SvoTerrainSurfaceModel;
   private solidWorld!: SolidWorld;
   private renderSolidWorld!: SolidWorld;
+  private renderResidualMemo?: { readonly world: SolidWorld; readonly residual: SolidWorld };
   private solidWorldStamp = "";
   private terrainFieldStamp = "";
   /** Catalog expansion input, retained exactly for subsequent live publications. */
@@ -1561,6 +1562,33 @@ export class OctreeSparseBrickWorld {
         .then(field => { renderTerrain = field; });
       renderTerrain ??= yield* buildSvoRenderTerrainFieldSteps(scene, renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID);
     }
+    const planarCatalog = buildSvoPlanarBoundaryCatalog(environmentPrimitives, (primitive) => ({
+        materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
+        ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
+      }));
+    // Never promote editable voxel patches into immutable planar terminals.
+    // Static environment surfaces retain their compact planar representation.
+    const solidPlanarCatalog = buildSvoSolidWorldPlanarBoundaryCatalog(scene,
+      initialSolidWorld.patches, planarCatalog.sources.length,
+      { promoteEditablePatches: false });
+    const planarSources = [...planarCatalog.sources];
+    const residualSolidWorld = svoPlanarResidualSolidWorld(initialSolidWorld,
+      solidPlanarCatalog, scene);
+    this.renderSolidWorld = residualSolidWorld;
+    this.renderResidualMemo = { world: initialSolidWorld, residual: residualSolidWorld };
+    // The refined terrain field carries its own ordered copy of the document's
+    // voxel edits. It has to be the residual's list, as every live republish
+    // already is (`setSolidWorld`), or a terrain scene draws the tank shell
+    // that the page image has just left out.
+    if (renderTerrain && residualSolidWorld !== initialSolidWorld) {
+      renderTerrain = {
+        ...renderTerrain,
+        patches: terrainOverlayPatches(residualSolidWorld, {
+          origin_m: [-0.5 * scene.container.width_m, 0, -0.5 * scene.container.depth_m],
+          cellSize_m: sceneCellSizes_m(scene),
+        }),
+      };
+    }
     const terrainRefinement = renderTerrain
       ? createSvoRenderTerrainRefinement({
         field: renderTerrain,
@@ -1580,19 +1608,6 @@ export class OctreeSparseBrickWorld {
         maximumDepth,
       })
       : undefined;
-    const planarCatalog = buildSvoPlanarBoundaryCatalog(environmentPrimitives, (primitive) => ({
-        materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
-        ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
-      }));
-    // Never promote editable voxel patches into immutable planar terminals.
-    // Static environment surfaces retain their compact planar representation.
-    const solidPlanarCatalog = scene.terrain ? undefined : buildSvoSolidWorldPlanarBoundaryCatalog(scene,
-      initialSolidWorld.patches, planarCatalog.sources.length,
-      { promoteEditablePatches: false });
-    const planarSources = [...planarCatalog.sources];
-    const residualSolidWorld = svoPlanarResidualSolidWorld(initialSolidWorld,
-      solidPlanarCatalog);
-    this.renderSolidWorld = residualSolidWorld;
     // Shell exclusion is independent of planar promotion: canonical tank walls
     // stay physical-only, while editable fills remain mutable voxel geometry.
     const planarLeafOptions = {
@@ -1605,8 +1620,11 @@ export class OctreeSparseBrickWorld {
             primitive.aabb_m.max.z] as const,
           planarSourceIndex: planarCatalog.patchIndexByOwner.get(primitive.ownerIndex),
         })),
+        // Terrain lives in pages, so its blockers are the pages of what is
+        // drawn: the residual, which no longer holds the physics-only shell.
         ...(scene.terrain
-          ? solidWorldBounds.map((bounds) => ({
+          ? (residualSolidWorld === initialSolidWorld ? solidWorldBounds
+            : solidWorldPageBounds(scene, residualSolidWorld)).map((bounds) => ({
             minimum: bounds.minimum,
             maximum: bounds.maximum,
           }))
@@ -2694,13 +2712,32 @@ export class OctreeSparseBrickWorld {
    * before the next presentation frame coalesce into one publication whose
    * dirty coverage includes every superseded old/new bound.
    */
+  /**
+   * The render copy of one published solid snapshot: canonical shell left out.
+   *
+   * Kept per snapshot because an edit asks twice — once to be validated, once
+   * to be staged — and on a terrain scene the answer is a terrain bake.
+   */
+  private renderResidualFor(scene: SceneDescription, world: SolidWorld): SolidWorld {
+    if (this.renderResidualMemo?.world === world) return this.renderResidualMemo.residual;
+    // Never promote editable voxel patches into immutable planar terminals;
+    // the catalogue is consulted here for the shell it excludes and no more.
+    const residual = svoPlanarResidualSolidWorld(world,
+      buildSvoSolidWorldPlanarBoundaryCatalog(scene, world.patches, 0,
+        { promoteEditablePatches: false }), scene);
+    this.renderResidualMemo = { world, residual };
+    return residual;
+  }
+
   validateLiveSolidEdit(scene: SceneDescription): void {
     if (this.destroyed) throw new Error("Sparse scene has been destroyed");
     if (terrainFieldStamp(scene) !== this.terrainFieldStamp) {
       throw new Error("Changing terrain heights or its lattice requires rebuilding the scene; voxel overlays remain live.");
     }
     const world = solidWorldForScene(scene);
-    this.proxyVoxelizer.validateSolidWorld(world);
+    // Capacity is the display's, so it is asked of what the display is sent:
+    // the residual, not the physical world with its shell still on.
+    this.proxyVoxelizer.validateSolidWorld(this.renderResidualFor(scene, world));
     const changes = solidWorldChangeBounds(scene, this.solidWorld, world);
     const bounds = scene.terrain ? changes.dirtyBounds : changes.addedBounds;
     for (const bound of bounds) {
@@ -2737,11 +2774,8 @@ export class OctreeSparseBrickWorld {
       ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
     }));
     const residualAuthored = svoPlanarResidualEnvironmentPrimitives(authored, planarCatalog);
-    const solidPlanarCatalog = !solidWorldChanged || scene.terrain ? undefined : buildSvoSolidWorldPlanarBoundaryCatalog(scene,
-      nextSolidWorld.patches, planarCatalog.sources.length,
-      { promoteEditablePatches: false });
     const nextResidualSolidWorld = solidWorldChanged
-      ? svoPlanarResidualSolidWorld(nextSolidWorld, solidPlanarCatalog)
+      ? this.renderResidualFor(scene, nextSolidWorld)
       : this.renderSolidWorld;
     // A cut reveals the rest of that shell slab; Undo hides the whole slab
     // again. Invalidate the presentation delta, not just the edited cells.

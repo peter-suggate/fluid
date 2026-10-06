@@ -487,6 +487,22 @@ export function solidWorldForScene(scene: SceneDescription): SolidWorld {
 }
 
 /**
+ * The scene's terrain under a different ordered patch list than its document's.
+ *
+ * Terrain is baked into pages rather than carried as a patch, so a consumer
+ * that wants a subset of `scene.solidVoxels` — presentation, which leaves the
+ * canonical tank shell out — cannot filter `world.patches` and rebuild: that
+ * loses the ground. This is the same composition `solidWorldForScene` performs,
+ * over the list it is handed.
+ */
+export function terrainSolidWorldWithPatches(
+  scene: SceneDescription,
+  patches: readonly SolidWorldVoxelPatch[],
+): SolidWorld {
+  return applySolidWorldPatches(terrainSolidWorldForScene(scene), patches, false);
+}
+
+/**
  * Static scenery surfaces explicitly authored as fluid colliders.
  *
  * Scenery is normally presentation-only and must not silently become physics.

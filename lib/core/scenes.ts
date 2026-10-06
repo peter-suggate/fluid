@@ -14,7 +14,7 @@ import {
   createHeroGardenHoseStressScene,
   HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
 } from "./hero-garden-stress-scene";
-import { studioStageCamera } from "./studio-stage-scene";
+import { studioStageCamera, studioStageSceneryGraph } from "./studio-stage-scene";
 import { createAnalyticMotionScene, createRerungFreeFallScene, createStandingWaveScene } from "./analytic-motion-scenes";
 import { createGeometricUniformTranslationScene } from "./geometric-translation-scene";
 import { createGentleMovingBlobScene } from "./gentle-moving-blob-scene";
@@ -1157,41 +1157,41 @@ export const TALL_CELLS_FLOOD_RESERVOIR_M = Object.freeze({
 });
 
 /**
- * The Flood benchmark is the terrain, not a room around the terrain.
+ * The Flood benchmark's set: its own ground, standing on the house stage floor.
  *
- * Giving the scene its own shell also prevents `finishSceneDocument` from
- * attaching the Stage environment's scaled studio set. On this 12.8 m domain
- * that set grows the sparse presentation world far beyond the simulation
- * footprint and makes opening the scene allocate hundreds of megabytes of
- * unrelated dry-world lighting data before the first frame.
+ * The scene authors its graph rather than letting `finishSceneDocument` attach
+ * the Stage environment's, because that set is a floor *and a practical*, and a
+ * hillside wants the first without the second. The lamp was once the only thing
+ * lighting a 12.8 m landscape: everything outside its beam was the stage rig's
+ * near-black fill, the beam's own centre blew the ground out, and the cone sat
+ * in frame as a stair-stepped white blob. A landscape is lit by the sky, so the
+ * light is a sun — `scene.lighting` in `createTallCellsHillsideDamBreakScene`
+ * raises the directional (which is also the water's only key, via
+ * `resolveWaterKeyLight`) and gives the environment a daylight hemisphere.
+ *
+ * The floor is the house set's own node, solved for this container by
+ * `studioStageSceneryGraph`, so the hillside stands on what every other stage
+ * scene stands on. It used to be left out on cost: at the solver's 50 mm cell a
+ * plate spanning the paper domain dominated sparse-scene startup. The
+ * environment ladder draws that plate at the rung its own thickness allows, and
+ * the CM12 figures carry the same floor round the same 12.8 m footprint.
  */
-const TALL_CELLS_FLOOD_SCENERY: SceneryGraph = Object.freeze({
-  palettes: Object.freeze({}),
-  nodes: Object.freeze([
-    // Ground, and nothing else. The ordinary stage graph cannot be attached
-    // here: its floor spans the complete 12.8 m paper domain and used to
-    // dominate sparse-scene startup.
-    //
-    // It used to keep the stage's practical — one emissive cone hung at
-    // y = 8.5 — on the argument that a set needs a fixture. On a hillside it
-    // needed the opposite. The lamp was the only thing lighting a 12.8 m
-    // landscape, so everything outside its beam was the stage rig's near-black
-    // fill, the beam's own centre blew the ground out, and the cone itself sat
-    // in frame as a stair-stepped white blob. A landscape is lit by the sky,
-    // not by a lamp, so the light is a sun now: `scene.lighting` in
-    // `createTallCellsHillsideDamBreakScene` raises the directional (which is
-    // also the water's only key, via `resolveWaterKeyLight`) and gives the
-    // environment a real daylight hemisphere. There is no fixture to publish
-    // and nothing in frame that is not terrain or water.
-    Object.freeze({
-      kind: "terrain-shell" as const,
-      id: "shell",
-      // Not porcelain: a 0.90-albedo ground clips the moment it is lit like
-      // outdoors, and this is a hillside rather than a studio prop.
-      materialModel: "garden-terrain" as const,
-    }),
-  ]),
-});
+function tallCellsFloodScenery(scene: SceneDescription): SceneryGraph {
+  const stage = studioStageSceneryGraph(scene);
+  return {
+    palettes: { stage: stage.palettes.stage },
+    nodes: [
+      {
+        kind: "terrain-shell",
+        id: "shell",
+        // Not porcelain: a 0.90-albedo ground clips the moment it is lit like
+        // outdoors, and this is a hillside rather than a studio prop.
+        materialModel: "garden-terrain",
+      },
+      ...stage.nodes.filter((node) => node.id === "stage/floor"),
+    ],
+  };
+}
 
 /**
  * Authoring samples for one voxel solid: a flat launch shelf, a steep central
@@ -1278,12 +1278,12 @@ export function createTallCellsHillsideDamBreakScene(): SceneDescription {
   scene.voxelDomain = { finestCellSize_m: cell_m, brickSize_cells: 8 };
   scene.nominalResolution = { length_m: cell_m };
   scene.terrain = createTallCellsFloodTerrain();
-  scene.scenery = TALL_CELLS_FLOOD_SCENERY;
+  scene.scenery = tallCellsFloodScenery(scene);
   // Daylight, over the stage's base rig.
   //
-  // `environment: "stage"` is kept for what it does *not* cost — no studio set,
-  // no 12.8 m floor — but its rig is a dark room under one practical, and this
-  // scene has no practical and no room. Left alone it rendered as a black frame
+  // `environment: "stage"` is kept for its floor and its absence of a room, but
+  // its rig is a dark room under one practical, and this scene has no practical
+  // and no room. Left alone it rendered as a black frame
   // with a clipped white hillside in it. Every field below is therefore a
   // deliberate override of `STUDIO_STAGE_DRY_SCENE_LIGHTING`; `svoSceneLighting`
   // merges per field, so the stage's tone curve is all that survives.
@@ -1334,10 +1334,11 @@ export function createTallCellsHillsideDamBreakScene(): SceneDescription {
   delete scene.fluid.inflow;
   scene.fluid.dynamicViscosity_Pa_s = 0;
   scene.fluid.surfaceTension_N_m = 0;
-  // `vessel: "none"` hides the rendered glass/outline; it does not make the
-  // Flood benchmark an unbounded fluid domain. Keep the open-top box shell in
-  // SolidWorld so its fixed side/end walls use the same editable voxel
-  // authority as every ordinary tank (including clear patches cut into it).
+  // `vessel: "none"` hides the outline; it does not make the Flood benchmark
+  // an unbounded fluid domain. Keep the box shell in SolidWorld so its fixed
+  // side/end walls use the same editable voxel authority as every ordinary
+  // tank (including clear patches cut into it). Like theirs it is physics
+  // only: presentation leaves the uncut shell out of the render field.
   scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   // Preserve the clear-water look used by the small tank scenes. Optical
   // coefficients are rates per metre; applying their tank-scale defaults to a

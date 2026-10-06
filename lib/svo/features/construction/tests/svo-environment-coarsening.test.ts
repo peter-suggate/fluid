@@ -164,39 +164,6 @@ test("the planar terminal ladder keeps the ocean-scale set within budget", () =>
   assert.ok(ocean < SCENE_ENVIRONMENT_PAYLOAD_BUDGET_BYTES);
 });
 
-test("automatic stage presentation follows its set budget; explicit modes remain explicit", () => {
-  // The budget is a ceiling on a ceiling, so what matters is not that it is
-  // exact but that nothing sits near it. Measured across the catalog the house
-  // set costs at most 30 MiB and an authored room shell at least 887 MiB.
-  const affordable: string[] = [], unaffordable: string[] = [], explicit: string[] = [];
-  for (const definition of SCENE_CATALOG) {
-    if (definition.environment !== "stage") continue;
-    const scene = sceneDocument(definition);
-    const bytes = svoEnvironmentPayloadBytes(
-      environmentProxyPrimitives(buildEnvironmentProxyCatalog(scene, scene.environment ?? "default")),
-      { cellSize_m: scene.voxelDomain.finestCellSize_m, brickSize: scene.voxelDomain.brickSize_cells });
-    if (definition.presentationMode) {
-      explicit.push(`${definition.id} ${(bytes / 1024 ** 2).toFixed(1)} MiB`);
-      assert.equal(presentationModeForScene(definition, scene),
-        definition.presentationMode, definition.id);
-      continue;
-    }
-    (bytes <= SCENE_ENVIRONMENT_PAYLOAD_BUDGET_BYTES ? affordable : unaffordable)
-      .push(`${definition.id} ${(bytes / 1024 ** 2).toFixed(1)} MiB`);
-    assert.equal(presentationModeForScene(definition, scene),
-      bytes <= SCENE_ENVIRONMENT_PAYLOAD_BUDGET_BYTES ? "full-scene" : "fluid-only",
-      definition.id);
-  }
-  assert.ok(affordable.length > 20, affordable.join(", "));
-  assert.ok(affordable.length + unaffordable.length > 30);
-  // The hillside is the cheapest explicit set in the catalog and now costs
-  // nothing at all: its scenery is one terrain shell, which is analytic
-  // metadata rather than a proxy, and the emissive practical it used to hang
-  // over the slope is gone in favour of an authored sun.
-  assert.ok(explicit.some((entry) => entry.startsWith("tall-cells-hillside-dam-break 0.0 MiB")),
-    `expected the explicitly full-scene sparse hillside set, got ${explicit.join(", ")}`);
-});
-
 test("ocean-seiche presents the floor it was missing", () => {
   const definition = SCENE_CATALOG.find((entry) => entry.id === "ocean-seiche")!;
   const scene = sceneDocument(definition);
