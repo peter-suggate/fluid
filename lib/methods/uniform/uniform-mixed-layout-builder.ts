@@ -244,7 +244,9 @@ ${uniformCompileStencilWGSL}
    let v=topology[key(vec3u(q))];maximum=max(maximum,v);minimum=min(minimum,v);
    if(v==1u){fine|=1u<<u32((x+1)+3*((y+1)+3*(z+1)));}
   }}}
-  topology[2u*N+2u*t]=fine|(maximum<<27u);topology[2u*N+2u*t+1u]=(minimum<<27u)|umCompileStencil(fine,valid);
+  var farPositive=0u;
+  for(var axis=0u;axis<3u;axis++){var q=p;q[axis]+=2;if(inside(q)&&topology[key(vec3u(q))]==1u){farPositive|=1u<<axis;}}
+  topology[2u*N+2u*t]=fine|(maximum<<27u);topology[2u*N+2u*t+1u]=(minimum<<27u)|(farPositive<<24u)|umCompileStencil(fine,valid);
   topology[4u*N+t]=umCompileBlendMask(fine);
   let regular=maximum==minimum;
   atomicStore(&work[FLAGS+t],w|select(0u,8u,regular));

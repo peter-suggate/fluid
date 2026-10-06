@@ -4,6 +4,7 @@
  * 1..8: coarse incident tiles T+c-1, c in {0,1}³.
  * 9..15: coarse tiles T+c, c=1..7 (surface h vertex ownership).
  * 16..23: canonical corners owned by this coarse tile.
+ * 24..26: fine tiles at T+2e_axis, for positive-face extension requests.
  * Builders supply a clipped 27-bit valid mask so domain walls need no fake
  * neighbors. Both builders use the same masks and bit assignments below. */
 export const UNIFORM_COMPILED_TOPOLOGY = { incident: 1, positive: 8, corners: 16 } as const;

@@ -228,7 +228,10 @@ function mixedStencils(dimensions: Triple, widths: Uint8Array): Uint32Array<Arra
       if (width === 1) stencils[2 * key]! |= 1 << ((x + 1) + 3 * ((y + 1) + 3 * (z + 1)));
     }
     stencils[2 * key]! |= maximum << 27;
-    stencils[2 * key + 1]! = (minimum << 27) | compileUniformStencil(stencils[2 * key]!, valid);
+    let farPositive = 0;
+    const position = [tx, ty, tz], stride = [1, dimensions[0], dimensions[0] * dimensions[1]];
+    for (let axis = 0; axis < 3; axis++) if (position[axis]! + 2 < dimensions[axis]! && widths[key + 2 * stride[axis]!] === 1) farPositive |= 1 << axis;
+    stencils[2 * key + 1]! = (minimum << 27) | (farPositive << 24) | compileUniformStencil(stencils[2 * key]!, valid);
   }
   // The detail ring (UNIFORM_MIXED_DETAIL_RING): bit 0 of the second word,
   // an h tile within three tiles. A tile two tiles out sees the 27-bit h

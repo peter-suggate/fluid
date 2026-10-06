@@ -169,6 +169,8 @@ var<workgroup> ueWords:array<u32,${27*UE_PACK_TILES}>;
 // (a sweep's: without an open one).
 var<workgroup> ueJob:vec4u;
 var<private> uePick:vec4u;
+var<private> ueRecipe:vec2u;
+var<workgroup> ueJobRecipe:vec2u;
 fn ueJobTile()->vec3i{if(ueMixedJobs){return vec3i(uePick.xyz);}return vec3i(ueJob.xyz);}
 fn ueJobBase()->u32{if(ueMixedJobs){return uePick.w;}return 0u;}
 fn ueTileWord(t:vec3u)->u32{
@@ -453,10 +455,11 @@ fn ueStage(owner:UMOwner,lane:u32,seed:bool,fine:bool)->bool{
   var index=UM_TILES;
   if(owner.width!=0u&&(umTileSupport(owner.tile)&2u)!=0u&&(seed||ueOpen(owner.tile))){index=owner.tile;}
   ueJob=vec4u(umTileCoord(owner.tile),index);
+  if(!seed&&ueMixedJobs&&index<UM_TILES){ueJobRecipe=umTileStencil(index);}
   atomicStore(&ueLive,0u);atomicStore(&ueNew[0],0u);atomicStore(&ueNew[1],0u);
  }
  let job=workgroupUniformLoad(&ueJob);
- if(ueMixedJobs){uePick=vec4u(job.xyz,0u);}
+ if(ueMixedJobs){uePick=vec4u(job.xyz,0u);ueRecipe=ueJobRecipe;}
  if(job.w>=UM_TILES){return false;}
  if(seed){return true;}
  if(lane<27u){
@@ -509,12 +512,15 @@ fn ueFaceLive(anchor:vec3i,axis:u32,width:u32)->bool{
 // read is finite.
 fn ueRequestLive(point:vec3f,axis:u32,width:u32)->bool{
  var offset=vec3f(0.5*f32(width));offset[axis]=1.0;
- let q=clamp(vec3i(round(point-offset)),vec3i(0),vec3i(UM_D)-vec3i(1));let t=q/4;
+ return ueRequestAnchorLive(vec3i(round(point-offset)),axis,width);
+}
+fn ueRequestAnchorLive(anchor:vec3i,axis:u32,width:u32)->bool{
+ let q=clamp(anchor,vec3i(0),vec3i(UM_D)-vec3i(1));let t=q/4;
  if(width!=1u){return any(ueMasks[ueStaged(t)]!=vec2u(0u));}
  if(ueStagedWidth(ueStaged(t))==1u){return ueCellFinite(q);}
  let o=4*t;var top=q;top[axis]=o[axis]+3;var corner=o;corner[axis]=o[axis]+3;
  var live=ueCellFinite(q)||ueCellFinite(top)||ueCellFinite(corner);
- let plane=i32(round(point[axis]));
+ let plane=anchor[axis]+1;
  if(plane%4!=0||plane==0){
   var below=q;below[axis]=max(o[axis]-1,0);var belowCorner=o;belowCorner[axis]=below[axis];
   live=live||ueCellFinite(below)||ueCellFinite(belowCorner);
@@ -539,12 +545,6 @@ fn ueFlush(){
 // its per-face atomic reservation and two barriers (3844 bytes at pack 2).
 // A positive patch by its anchor (no neighbour lookup: no caller reads it).
 fn uePatch(anchor:vec3i,axis:u32,width:u32)->UMFace{return UMFace(UMOwner(),anchor,width,1u,axis,1);}
-// The width of a tile inside the lattice: staged around the job's tile.
-fn ueWidthAt(t:vec3i)->u32{
- let r=vec3u(t-ueJobTile()+vec3i(1));
- if(all(r<=vec3u(2u))){return ueStagedWidth(ueJobBase()+r.x+3u*(r.y+3u*r.z));}
- return umTileWidth(umTileAt(vec3u(t)));
-}
 // umExtended's request n = 2 step + side of a patch centred at center.
 fn ueRequestPoint(center:vec3f,width:u32,n:u32)->vec3f{
  var delta=vec3f(0);delta[n/2u]=f32(width);
@@ -552,46 +552,28 @@ fn ueRequestPoint(center:vec3f,width:u32,n:u32)->vec3f{
  return center+delta;
 }
 fn ueOutside(point:vec3f)->bool{return any(point<vec3f(0))||any(point>vec3f(UM_D));}
-// Whether umNeighbor returns the width slot below the plane of a request
-// inside the lattice, from the widths at that plane (0 past a domain wall):
-// its direct case. Its two earlier returns (width 1 only: the plane inside a
-// unit tile, or a tile with an all-unit stencil) have a unit tile at the
-// plane, so they are direct here too and return that same unit slot.
-fn ueRequestDirect(point:vec3f,component:u32,width:u32)->bool{
- var below=vec3i(floor(point));let plane=i32(round(point[component]));below[component]=plane-1;
- var above=below;above[component]=plane;
- var lowWidth=0u;if(plane>0){lowWidth=ueWidthAt(below/4);}
- var highWidth=0u;if(plane<i32(UM_D[component])){highWidth=ueWidthAt(above/4);}
- return select((lowWidth==width&&(highWidth==0u||highWidth>=width))||(highWidth==width&&lowWidth>width),highWidth==width,lowWidth==0u);
-}
-// The direct answer: umNeighbor's slot below the plane and exact spacing
-// (the point is center +- width along step only).
-fn ueDirect(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)->UMNeighbor{
- var offset=vec3f(0.5*f32(width));offset[component]=1.0;
- let state=umSlotState(vec3i(round(point-offset)),component,width);
- return UMNeighbor(state.x,state.y,abs(point[step]-center[step])*h[step]);
-}
-// Mark non-direct requests and requests whose candidate slots are all INF.
-// This retains the staged liveness pruning before evaluating the recipe.
-fn uePlan(face:UMFace,need:u32)->u32{
- let center=umFaceCenter(face);var search=0u;var dead=0u;
- for(var n=0u;n<6u;n++){
-  if((need&(1u<<n))==0u){continue;}
-  let point=ueRequestPoint(center,face.width,n);
-  if(ueOutside(point)||ueRequestDirect(point,face.axis,face.width)){continue;}
-  if(ueRequestLive(point,face.axis,face.width)){search|=1u<<n;}else{dead|=1u<<n;}
- }
- return 1u|(search<<1u)|(dead<<7u);
-}
 ${uniformCompiledExtensionNeighborWGSL}
-// umExtended(face) for a planned patch (old: its slot, not a source, not a
-// closed wall, on the support), evaluating only its live search recipes.
-fn uePlanned(face:UMFace,old:vec2f,plan:u32)->vec2f{
- let center=umFaceCenter(face);var low:array<UMNeighbor,3>;var high:array<UMNeighbor,3>;
+// Immutable request geometry comes from the layout recipe; liveness still
+// comes from this sweep's staged masks. Classify and consume in one loop,
+// retaining the old per-axis combination and candidate reduction order.
+fn ueExtend(face:UMFace,old:vec2f,need:u32)->vec2f{
+ let center=umFaceCenter(face);let origin=4*ueJobTile();
+ var low:array<UMNeighbor,3>;var high:array<UMNeighbor,3>;
  for(var n=0u;n<6u;n++){
-  let point=ueRequestPoint(center,face.width,n);var answer=UMNeighbor(0,UM_INF,1);
-  if((plan&(2u<<n))!=0u){answer=ueCompiledNeighbor(point,center,face.axis,n/2u,face.width);}
-  else if((plan&(128u<<n))==0u&&!ueOutside(point)){answer=ueDirect(point,center,face.axis,n/2u,face.width);}
+  var anchor=face.anchor;anchor[n/2u]+=select(-i32(face.width),i32(face.width),(n&1u)!=0u);
+  var answer=UMNeighbor(0,UM_INF,1);
+  if(ueRequestInside(anchor,face.axis)){
+   let search=(need&(1u<<n))!=0u&&!ueTopologyDirectAt(ueRecipe,anchor-origin,face.axis,face.width);
+   if(search){
+    if(ueRequestAnchorLive(anchor,face.axis,face.width)){
+     var point=vec3f(anchor)+vec3f(0.5*f32(face.width));point[face.axis]=f32(anchor[face.axis]+1);
+     answer=ueCompiledNeighbor(point,center,face.axis,n/2u,face.width);
+    }
+   }else{
+    let state=umSlotState(anchor,face.axis,face.width);
+    answer=UMNeighbor(state.x,state.y,f32(face.width)*h[n/2u]);
+   }
+  }
   if((n&1u)==0u){low[n/2u]=answer;}else{high[n/2u]=answer;}
  }
  return ueCombine(old,f32(face.width),low,high);
@@ -724,8 +706,7 @@ fn ueSweepSeamFine(owner:UMOwner,lane:u32){
   if(!live){continue;}
   let face=uePatch(origin,axis,1u);let old=stateIn[ueOwnSlot(owner,axis)];
   if(old.y==0.0||umClosedWall(face)){continue;}
-  let plan=uePlan(face,edge&(flags>>1u)&~(1u<<(2u*axis)));
-  let value=uePlanned(face,old,plan);
+  let value=ueExtend(face,old,edge&(flags>>1u)&~(1u<<(2u*axis)));
   ueSweepStore(ueOwnSlot(owner,axis),value);bits|=ueNote(value,origin);
  }
  ueGather(bits);
@@ -775,6 +756,7 @@ fn ueCoarsePatch(origin:vec3i,item:u32)->UMFace{
 const UE_PACK_ROUNDS=${Math.ceil(48*UE_PACK_TILES/64)}u;
 const UE_PACK_NONE=0xffffffffu;
 var<workgroup> uePackJobs:array<vec4u,UE_PACK>;
+var<workgroup> uePackRecipes:array<vec2u,UE_PACK>;
 var<workgroup> uePackLive:array<atomic<u32>,UE_PACK>;
 var<workgroup> uePackNew:array<atomic<u32>,${2*UE_PACK_TILES}>;
 // The patches of a slot's component: sixteen under an h tile (the staged
@@ -800,6 +782,7 @@ fn ueSweepCoarsePack(first:u32,count:u32,lane:u32){
    let owner=ueSeamCoarseJob(first+lane);
    if(owner.width!=0u&&ueOpen(owner.tile)){job=vec4u(umTileCoord(owner.tile),owner.tile);}
   }
+  if(job.w<UM_TILES){uePackRecipes[lane]=umTileStencil(job.w);}
   uePackJobs[lane]=job;atomicStore(&uePackLive[lane],0u);atomicStore(&uePackNew[2u*lane],0u);atomicStore(&uePackNew[2u*lane+1u],0u);
  }
  workgroupBarrier();
@@ -815,12 +798,12 @@ fn ueSweepCoarsePack(first:u32,count:u32,lane:u32){
  workgroupBarrier();
  for(var round=0u;round<UE_PACK_ROUNDS;round++){
   let item=uePackItem(64u*round+lane);if(item==UE_PACK_NONE){continue;}
-  let slot=item/48u;let job=uePackJobs[slot];uePick=vec4u(job.xyz,27u*slot);
+  let slot=item/48u;let job=uePackJobs[slot];uePick=vec4u(job.xyz,27u*slot);ueRecipe=uePackRecipes[slot];
   let face=ueCoarsePatch(vec3i(job.xyz)*4,item%48u);
   if(face.width==0u||!ueFaceLive(face.anchor,face.axis,face.width)){continue;}
   let old=stateIn[umSlot(face.anchor,face.axis,face.width)];
   if(old.y==0.0||umClosedWall(face)){continue;}
-  let value=uePlanned(face,old,uePlan(face,63u));
+  let value=ueExtend(face,old,63u);
   ueSweepStore(umSlot(face.anchor,face.axis,face.width),value);let bits=ueNote(value,face.anchor);
   if(any(bits!=vec2u(0u))){atomicOr(&uePackNew[2u*slot],bits.x);atomicOr(&uePackNew[2u*slot+1u],bits.y);}
  }

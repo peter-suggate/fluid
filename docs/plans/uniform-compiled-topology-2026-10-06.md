@@ -458,3 +458,99 @@ six-neighbor graph for every fine face. Absolute compact indices must refresh
 on adoption; relative recipes can survive unchanged neighborhood topology.
 Keep the shared full-precision surface field, avoid repeating the unsuccessful
 flat-list experiment, and leave pressure and rendering outside this work.
+
+
+## Phase 2: shared boundary request geometry
+
+The next phase implements the boundary-recipe hypothesis without a per-face
+allocation. The existing first stencil word supplies the 27 fine-neighbor
+bits. Three previously unused bits (24–26) in the second word encode whether
+the tile two positions along each positive axis is fine. CPU layout creation
+and GPU classification compile exactly the same representation. The metadata
+stays at 20 bytes per tile; there is no new buffer or preparation dispatch.
+
+A positive canonical patch's extension requests lie in that 3-cubed stencil,
+except the upper incident tile of a width-4 request along the positive normal.
+The three added bits cover exactly those exceptions. A unit request is direct
+when either incident tile is fine. A width-4 request is direct when neither
+in-domain incident tile is fine. Clipped stencil bits represent the domain
+exterior without synthetic owners. The GPU parity test enumerates canonical
+faces, requests, and domain cases against the frozen width-lookup reference.
+
+Each seam job reads its two-word recipe once; requesting lanes retain it
+while processing their patches. Both sweeps use the layout's same immutable
+recipe. Compact owner indices are absent, so renumbering does not make a
+relative recipe stale. Adoption still refreshes recipes whenever widths
+change. The declarations add 24 bytes of workgroup state for the mixed seam
+launch, with no change to allocated storage or scratch buffers.
+
+Planning and evaluation are now one request loop. That loop computes one
+integer anchor and shares it among the domain test, geometry classification,
+finite-mask test and direct slot load. A searching request reconstructs its
+MAC point once for the existing compiled-neighbor evaluator. Current-sweep
+finite masks and value/distance slots are never cached in the layout. The
+candidate selection, tie handling, spacing and axis reduction order remain
+unchanged.
+
+The strengthened GPU test adopts 256 changing 3-cubed layouts, compares all
+CPU/GPU topology words, checks direct/search and domain decisions, compares
+reconstructed request points bit-for-bit, and verifies both direct and search
+value/distance/spacing against the old traversal with anisotropic cell sizes.
+Symmetry and nearest-extension integration checks pass as well.
+
+Measurement uses the previous retained implementation at `aa09a695`, with the
+same six unrelated pressure edits copied into its isolated control checkout.
+The first ABBA sequence tested fused planning with floating request points.
+The final sequence brackets two shared-integer-anchor runs with controls B
+and C. All runs use Figure 9, Dynamic, app defaults, 120 frames at 60 Hz, and
+report frames 91–120 separately. Final numbers and gate status follow below.
+
+
+| Final ABBA mean | Previous implementation | Phase 2 | Reduction |
+| --- | ---: | ---: | ---: |
+| Whole-run simulation wall time | 19.423 ms | 19.064 ms | 1.85% |
+| Whole-run GPU time | 17.133 ms | 17.022 ms | 0.65% |
+| Splash simulation wall time | 27.855 ms | 26.656 ms | 4.30% |
+| Splash GPU time | 24.994 ms | 24.675 ms | 1.28% |
+| Splash extension | 3.259 ms | 3.146 ms | 3.49% |
+| Splash census/layout/remap | 1.510 ms | 1.456 ms | 3.55% |
+
+The wall-time result is noisy: control B's splash mean was 28.847 ms versus
+26.862 ms for control C; candidates were 26.682 and 26.630 ms. The additional
+earlier control A was 26.775 ms. Do not present the 4.30% wall mean as a robust
+frame-time guarantee. Extension was much more consistent across controls
+(3.255–3.262 ms), and both final candidates measured 3.146 ms. The layout
+stage includes more than the three new bit computations; its observed change
+must not be attributed to those computations as an isolated improvement.
+The retained change reduces repeated topology work and has a small measured
+GPU benefit. The original 25% frame-time objective is still unmet.
+
+Every recorded per-frame quality value, ownership count and allocation size
+matches the control. The final source hashes match both selected candidate
+runs. The earlier two-loop recipe probe and fused floating-point version are
+also preserved in [boundary-phase2.json](uniform-compiled-topology-2026-10-06/boundary-phase2.json),
+with per-frame evidence in
+[boundary-phase2-frames.jsonl](uniform-compiled-topology-2026-10-06/boundary-phase2-frames.jsonl).
+
+
+Phase 2 validation is complete: types pass, unit tests report 890 passed and
+80 skipped, and the production build passes. The full serial Dawn run passes
+56 of 59 files, including the expanded compiled-extension comparison and all
+extension, dynamic-layout, force-cache, geometric-boundary and live-edit
+integration files. The same three baseline files still fail: raster AO
+spotlight specialization, coarse-solid-rest (two drift assertions and one
+pressure-convergence assertion, plus its existing TODO), and pressure-local-visit's
+reference coarse-visit assertion. All five failing assertions were independently
+reproduced on `fe587ebb` with the same six pressure edits and without the
+topology changes; the final run reproduces their messages and numerical values.
+No thresholds were relaxed. The repository therefore does not pass its full
+clean-repo gate.
+
+The selected implementation is active in the normal Uniform Geometric
+production path, including the UI's Dynamic mode, without a feature flag.
+All 111 Uniform source hashes match both selected benchmark runs. Measurements
+cover simulation advance and its GPU fence, excluding statistics readbacks and
+rendering; they are not rendered frame-rate measurements. No remote deployment
+is claimed. This phase keeps the existing full-precision surface cache and
+compaction behavior, and changes only the shared boundary request geometry and
+its consumers.

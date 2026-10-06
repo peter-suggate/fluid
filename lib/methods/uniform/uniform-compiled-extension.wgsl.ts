@@ -3,6 +3,32 @@
  * from width and plane alignment, then retain the original geometric tie,
  * distance tie and ordered value reduction. No owner/face discovery. */
 export const uniformCompiledExtensionNeighborWGSL = /* wgsl */ `
+// Canonical positive patches have integer anchors: a normal -1 names the
+// zero domain plane; transverse anchors always name in-domain patch centers.
+fn ueRequestInside(anchor:vec3i,component:u32)->bool{
+ var lower=vec3i(0);lower[component]=-1;
+ return all(anchor>=lower)&&all(anchor<vec3i(UM_D));
+}
+// The caller supplies a positive patch and an in-domain request. Its two
+// incident tiles fit the owner's 3-cubed stencil, except the high tile of a
+// width-4 request along its positive normal. The three far-positive bits
+// complete that geometry. No owner indices, slot values or sweep masks.
+fn ueTopologyDirectAt(recipe:vec2u,requestAnchor:vec3i,component:u32,width:u32)->bool{
+ let low=requestAnchor+vec3i(4);
+ var high=low;high[component]+=1;
+ let a=vec3u(low)/4u;let b=vec3u(high)/4u;
+ let lowFine=(recipe.x>>(a.x+3u*(a.y+3u*a.z)))&1u;
+ var highFine=(recipe.x>>(b.x+3u*(b.y+3u*b.z)))&1u;
+ if(b[component]==3u){highFine=(recipe.y>>(24u+component))&1u;}
+ let fine=(lowFine|highFine)!=0u;
+ return select(!fine,fine,width==1u);
+}
+
+// Reference/test entry for a patch and one of its six requests.
+fn ueTopologyDirect(recipe:vec2u,localAnchor:vec3i,component:u32,width:u32,n:u32)->bool{
+ var request=localAnchor;request[n/2u]+=select(-i32(width),i32(width),(n&1u)!=0u);
+ return ueTopologyDirectAt(recipe,request,component,width);
+}
 fn ueCompiledNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)->UMNeighbor{
  let u=(component+1u)%3u;let v=(component+2u)%3u;
  let plane=i32(round(point[component]));
