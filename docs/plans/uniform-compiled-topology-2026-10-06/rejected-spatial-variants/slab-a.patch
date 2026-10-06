@@ -1,0 +1,35 @@
+--- a/lib/methods/uniform/uniform-mixed-surface.ts
++++ b/lib/methods/uniform/uniform-mixed-surface.ts
+@@ -1,4 +1,4 @@
+-import { uniformPreparedSurfaceSamplingWGSL } from "./uniform-prepared-surface.wgsl";
++import { uniformPreparedSurfaceIndexWGSL, uniformPreparedSurfaceSamplingWGSL } from "./uniform-prepared-surface.wgsl";
+ import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+ import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
+ import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
+@@ -873,7 +873,7 @@
+ // may then reuse it as a list. Eight producer corners are the only shared
+ // field storage. Data words have a unique writer and need no atomics.
+ var<workgroup> umPrepareCorners:array<f32,8>;
+-fn umPreparedIndex(p:vec3u)->u32{return p.x+(UM_D.x+1u)*(p.y+(UM_D.y+1u)*p.z);}
++${uniformPreparedSurfaceIndexWGSL}
+ @compute @workgroup_size(64) fn prepareSurface(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+  let tile=group.x+umDispatchX*group.y;
+  if(tile>=UM_TILES){return;}
+--- a/lib/methods/uniform/uniform-prepared-surface.wgsl.ts
++++ b/lib/methods/uniform/uniform-prepared-surface.wgsl.ts
+@@ -1,5 +1,15 @@
+ /** Trilinear samples and centered gradients of the once-prepared phi field.
+  * Keep the original weighted-product and D4 reduction order. */
++export const uniformPreparedSurfaceIndexWGSL = /* wgsl */ `
++// Keep x rows contiguous, group their y/z coordinates into 4-by-4 slabs.
++// Upper y/z closures follow without padding; the x closure stays in its row.
++fn umPreparedIndex(p:vec3u)->u32{
++ let row=(p.y&3u)+4u*((p.y&0xfffffffcu)+(p.z&3u))+UM_D.y*(p.z&0xfffffffcu);
++ let yPlane=UM_D.y*UM_D.z+p.z;
++ let zPlane=(UM_D.y+1u)*UM_D.z+p.y;
++ return p.x+(UM_D.x+1u)*select(select(row,yPlane,p.y==UM_D.y),zPlane,p.z==UM_D.z);
++}
++`;
+ export const uniformPreparedSurfaceSamplingWGSL = /* wgsl */ `
+ fn umPreparedSample(p:vec3f)->f32{
+  let q=clamp(p,vec3f(0),vec3f(UM_D));let base=min(vec3u(floor(q)),UM_D-vec3u(1));let t=q-vec3f(base);

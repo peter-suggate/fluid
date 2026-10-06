@@ -1,0 +1,25 @@
+--- a/lib/methods/uniform/uniform-prepared-surface.wgsl.ts
++++ b/lib/methods/uniform/uniform-prepared-surface.wgsl.ts
+@@ -1,6 +1,22 @@
+ /** Trilinear samples and centered gradients of the once-prepared phi field.
+  * Keep the original weighted-product and D4 reduction order. */
+ export const uniformPreparedSurfaceSamplingWGSL = /* wgsl */ `
++fn umPreparedInitialGradient(p:vec3u)->vec3f{
++ let center=bitcast<f32>(deferred.data[umPreparedIndex(p)]);var gradient=vec3f(0);
++ let closure=select(0u,1u,p.x==UM_D.x)|select(0u,2u,p.y==UM_D.y)|select(0u,4u,p.z==UM_D.z);
++ for(var axis=0u;axis<3u;axis++){
++  var a:array<f32,8>;var b:array<f32,8>;
++  let bit=1u<<axis;let transverse=closure&~bit;
++  var low=p;var high=p;low[axis]=max(p[axis],1u)-1u;high[axis]=min(p[axis]+1u,UM_D[axis]);
++  if(p[axis]==0u){a[transverse]=center;}
++  else{a[transverse]=bitcast<f32>(deferred.data[umPreparedIndex(low)])*0.25;a[transverse|bit]=center*0.75;}
++  if(p[axis]==UM_D[axis]){b[transverse|bit]=center;}
++  else{b[transverse]=center*0.75;b[transverse|bit]=bitcast<f32>(deferred.data[umPreparedIndex(high)])*0.25;}
++  let distance=select(0.5,0.25,p[axis]==0u||p[axis]==UM_D[axis]);
++  gradient[axis]=(umVertexSum8(b)-umVertexSum8(a))/distance;
++ }
++ return gradient;
++}
+ fn umPreparedSample(p:vec3f)->f32{
+  let q=clamp(p,vec3f(0),vec3f(UM_D));let base=min(vec3u(floor(q)),UM_D-vec3u(1));let t=q-vec3f(base);
+  var values:array<f32,8>;

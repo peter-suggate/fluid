@@ -1,0 +1,910 @@
+{
+  "status": "Retained split extension measured and validated; repository gate still has three previously reproduced failing Dawn files",
+  "date": "2026-10-07",
+  "baselineCommit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+  "baselineUniformHashes": {
+    "composition.ts": "a779a784edc4aa9847cf2dd28e225b3391c0f9b7ce2bcd55d5c10fc19c0f71c3",
+    "harness.ts": "57ed6d40ec0803cc52390a98deeb6d762ea9edc763c7827a033382fe219ea030",
+    "method.ts": "8c349ed3788b239446e6b50044e7afddff77bdcc4b0ca3b7637ceb6bc26a0576",
+    "parameters.ts": "002df699608b498a09432fb3f69050103401ba1a85a310fcd0b0516aea05725d",
+    "pressure-plan.ts": "5e29787e33200e01152c3512b97adc10cf1a4333be3040cfac175f25b73f8c59",
+    "pressure-policy.ts": "446785f3456e937c98524e33458791da570d6cd8aa7c8252f9f87e5e7242a68f",
+    "uniform-ab-switch.ts": "393be27a8041a1e731c346867dc57e9f74e2fc6471b9724da3b6e56615be976b",
+    "uniform-buffered-work.ts": "ddc4e8be72bc22b6178d29fd747fdbd0e77da87344654d82fc1ef219cc392ffa",
+    "uniform-cached-momentum.wgsl.ts": "3ca2c081fa3b1dc33ee894d7c39c5bb4c5193dfa5985e746adf29e5655d0f38f",
+    "uniform-coarse-solver.wgsl.ts": "8b0c1e56bc67816a9da4474e7ff717c952a83913aad84e246fd7843f5b00747e",
+    "uniform-coarse-vertex-phi.ts": "fc2ff8202f67cb5e6d601e28dba19c60d243083d71a3eeea47a318018c9708de",
+    "uniform-compiled-extension.wgsl.ts": "a276cdb730812335309a316000c21f4938636fd4775d8527a2ffa3ad2deb0810",
+    "uniform-compiled-topology.ts": "de474feb07e526d4d4cbb8bd022de741602aa742a698fc33e376956d43a82b60",
+    "uniform-compiled-velocity-taps.wgsl.ts": "3eb8ca19c3816a4d1870dc4ffce473d79d3d80a71742f63a43cc1219e51d99a1",
+    "uniform-detail-fields.ts": "583a7094502be892de84569540c0ca777d1013699902fdf2c12224944eed9d3c",
+    "uniform-detail-planner.ts": "e3ccbfbe41c5dcabfa30262ccd33300061008154c3f9e761702d50b9149aa136",
+    "uniform-detail-policy.ts": "f2e08eca0dc3f5d410f9c3a269f886871c9eab3435f1a48f65b713fe30f78da3",
+    "uniform-detail-pool.ts": "fe28aecd13ea6bc59f5196d5ee168cf7fa667b49e2404e5be30290388c709cb7",
+    "uniform-detail-requests.ts": "4a4c6b4e5e421bbf7b2650b5ef1f1e80c82f51622af8faca1ac4895b2f6d41f5",
+    "uniform-diagnostics.ts": "9cb6b3d52e651d91cbd6ceb8b803692f3252f59af1c194737deb705391814313",
+    "uniform-field-loop-bounds.ts": "efab7c84fda83f303fa7df7380f08eb681dfd1e538bd223f9f3ffa6eee63eaee",
+    "uniform-geometric-options.ts": "9e5920df7ae812aed01ca6ef62d8c2d5ec504421acf02844e10c8d91159c7917",
+    "uniform-geometric-parameters.ts": "03b277f68547bd2f9b137e0fddc6cff94fedca118f9bc0e5fb6949f599748d59",
+    "uniform-host-allocation.ts": "29bf564f26cc2c5a24301d03f1af79087bfa1a3200b161732ba5fefd343f3611",
+    "uniform-midpoint-trace.wgsl.ts": "edb43d279e5cf196ea5c143a4c075a9b041eb34502e5728c7e34371747528a2e",
+    "uniform-mixed-bodies.ts": "b9d583a239a8cfd55c8e6a09cf04392bca16855305a44503dfc0860dba4e2e0d",
+    "uniform-mixed-cleanup.ts": "9695a8f1f6d73f5579ae23f3f96f2d7a1daea87fe4c76c98740e137420392e9d",
+    "uniform-mixed-detached-mass.wgsl.ts": "544d36a6356bf3c726ef16530be7c0d552a4a309366e5bf439356f40c00222ea",
+    "uniform-mixed-diagnostics.ts": "a85fbd61d95d730935fafebd7dc07c558e5176821c6480718d32b9c516642b52",
+    "uniform-mixed-dust-accounting.wgsl.ts": "3a7cc23377b94413ee4f0d2ab05dc5256c4ddaa63e5c550950254faf2e9ca66b",
+    "uniform-mixed-dynamic.ts": "d152194acad62cc4b49140bec08450e72a612deb1d8b88d8a92a5dd7e05c36dc",
+    "uniform-mixed-extension.ts": "b0d801bd0fc7e01334f04703804f8e2610dcb5fb186e0f1df105e163c02aa4b6",
+    "uniform-mixed-face-dispatch.wgsl.ts": "00a5673274d38226eedf184aa309d06d0a642ea56ff7797a823bca75142fd016",
+    "uniform-mixed-faces.wgsl.ts": "2d22ef2869ba1831f9d692a145d9750945d1b8a94c898e5402c2f2efb2f309f6",
+    "uniform-mixed-forces.ts": "c8c42e8b10e57e7e76ae9dc12bef341d3d61738f16793fdde435c3811f7d6558",
+    "uniform-mixed-frame-plan.ts": "8c79e532e471aada602882b0bb1acc78922dc4b16610497111ad1e454fc2f567",
+    "uniform-mixed-frame-status.ts": "26741fe4d480d4543201f2689790f9a095e12e1be3360a6eb3dae6dfb0ad38dc",
+    "uniform-mixed-frame.ts": "b4800d32cd6a30c313625bde4e531ece212edbf70df9c91c1de8e45e220e822d",
+    "uniform-mixed-layout-builder.ts": "9b7f4d5f909dbc7bec0e79ffea3fb6af2defe970ae5311f7d6845ca5dac9503f",
+    "uniform-mixed-layout.ts": "a78b8a059b63099d3a0edcf7c38c890171bbeb0f28ffaba5a6045282c70c29fe",
+    "uniform-mixed-momentum-cache.ts": "a01261b8889a546c92ecd5bafffe48c3116cbf8039814dd3804b2df196408f3d",
+    "uniform-mixed-momentum.ts": "4c06c01469bcf863feca6d55f7d33b20d65b02701aab0b5c3620be355ff3ea23",
+    "uniform-mixed-options.ts": "f85be8cc33d0558ef687e4ba66d95dc02f0ff1393e12341f02323940ab08972a",
+    "uniform-mixed-ownership.ts": "91ef6a8bd3382d9ab8a360067b9d4e6951979c32920bdc656c11d07b58e441b5",
+    "uniform-mixed-phi-resolve.ts": "444bb4e0550960d13deb66ff0af01960a876ea69c6ff90f86b92e4468ac9101b",
+    "uniform-mixed-presentation.wgsl.ts": "bed9d8b39844c81da7a9b57191a11842eb1603fb68e5eb1244d08346a71b8bc5",
+    "uniform-mixed-pressure-acceptance.ts": "03a29975399a7f23b8780f335fee6d88ee6b53f774df841abf722ae8ccb0e4fa",
+    "uniform-mixed-pressure-authority.ts": "8131c7c89a333d9e6d4532cb514ddddff752f9ae136932f2c4dbcea4710e6c96",
+    "uniform-mixed-pressure-boundary.wgsl.ts": "d7e6e905271c29109a4385feee3f6ae944f72fe66d9568c25905cd4a8c0d57d3",
+    "uniform-mixed-pressure-cycles.ts": "1c1da7731242dc3a69080666126089ae09df64288f6e85e46d23738a971c6676",
+    "uniform-mixed-pressure-memory.ts": "26736a14dec70dd9d1ffc93acdfe7ceeff43ce4269c4d96b90b8730736565e74",
+    "uniform-mixed-pressure-reconstruction.wgsl.ts": "4f85a0bf33671234b552b63c5872ae85e6ac67666c609f43641fdb7ae517b5a0",
+    "uniform-mixed-pressure-schedule.ts": "753b18d2254650e6ace5fe183e55eee1be48aa0f81d7b80e83d3bbb069a062bb",
+    "uniform-mixed-pressure-surface.wgsl.ts": "9f87fbb40c880b204d80d5b94b2424728ef5674233ba7e1297906fc8bd312401",
+    "uniform-mixed-pressure-topology.wgsl.ts": "02c3f73ffb920337fa54f7a2c8ff07a3d5eb9370e883642b5ecf3f4bc5d04a14",
+    "uniform-mixed-pressure-velocity.ts": "b2bdeb8700d40b0aeefd15d8749fdeaddd4fcb00749d702ef19721164d94f934",
+    "uniform-mixed-remap.ts": "244b9ef95dd5ad52ac7f19b678133020bd8cfca9eba3d718d24da958e83e6273",
+    "uniform-mixed-sharpening.ts": "a69536327fae081daf5b13f4a55f54953c5b672e37cbbcb9077a595df8e96589",
+    "uniform-mixed-solid-displacement.ts": "3cdd7bc3883cca639f28d72153e3091dee16d58557bde47f40f4482b44bcd26d",
+    "uniform-mixed-solid.wgsl.ts": "46be52ad007666cd48ba72f6b97e0f8e316e19f61c4056a1ad6e19cb7c48add2",
+    "uniform-mixed-source.wgsl.ts": "57fcbe1f9cf9c506e7b966f71e15fc6468496836609db08033f728fa650b39e2",
+    "uniform-mixed-surface-geometry.ts": "c05c0fff8c8ba9d277b8c51c20ad3c01a25bf033320d2f4834479180682b5e9b",
+    "uniform-mixed-surface-volume.ts": "6013029494b92673e6a231c58b142adf25881b9a8afe5267dd3b190e7e6452c0",
+    "uniform-mixed-surface.ts": "f25d98731103616c30bd9ea8e81535e1ea57e6a2fa1ce5ff4c4b9a1151aaeb37",
+    "uniform-mixed-topology.wgsl.ts": "178661178b1c5df29d0d3f9d36feaa93fd62d8ff85e437503d28326c5044702c",
+    "uniform-mixed-transport.ts": "a32b5d08b0808ba5d5a8729ccc78f6d1de888a3b16d4b9de7afdd35621ac3a12",
+    "uniform-mixed-transport.wgsl.ts": "19e394c1b84ffb345d46e2210bce08fe5b9f2c98f0bcd9ccd31eddbec15b1642",
+    "uniform-mixed-velocity-sampling.wgsl.ts": "fa99eec7bb02c8e284c2f7d98ccbce43812474b65940d91bf27b0413a0ba08e5",
+    "uniform-mixed-vertex-sampling.wgsl.ts": "16b2932e58c73c62cad7b64f756940568bdc646f61839c8e39a778b9762b4447",
+    "uniform-options.ts": "2c1b1b3c2ab034a7a0dfea3579a81354f0c2e0812fb57100250fbfb6bb5f51da",
+    "uniform-page-domain.ts": "a7c99e3e71213f157948f381897299af548dad8a5ccd3f7e2bf3b3207bd3b9de",
+    "uniform-page-execution.ts": "42e8f05e10dddc6a05fa2992919c77589eaec40f68d8ce5e97b9d132e909f64c",
+    "uniform-page-generation.ts": "ce3ca9dae67a252fd232945b3914af6d733d64d2ac6135977b4f56d98e1a11dc",
+    "uniform-page-layout.ts": "e08062c90dcd97fabc541e088bff02eae28391e1129b50a325fd26cdec5d8951",
+    "uniform-page-redistance.ts": "663c8d9cf4e45d8976f180d02aeb8812b60c1481610eea4e9bbc48a155a412eb",
+    "uniform-page-stencil.wgsl.ts": "266053f2bb3bf7d9f2a7fb0184311a208ea134f4043830c263747664673dbcb2",
+    "uniform-page-support.ts": "65b793622d86a76ba8b6f492b399be1aad7552f0bfe46cf6184ecfc2efbc65b6",
+    "uniform-paper.ts": "b3dcb543c8fe6544ba9bc22999d74bb2f666cbecac59dd4b7c3023a7e981d14c",
+    "uniform-phi-band.ts": "d2ffaa0d361b2c476bc50c694cb8ff4ce68057bae7227985cb10a764af5e2c74",
+    "uniform-pipeline-needs.ts": "93a9d70f655e1cf6703be65a16a27122d6d1db6b1724e3c2d3dfdd2c166b2a99",
+    "uniform-pipeline.ts": "7039502d3a8dec3cdc064b86ffc393ebfe78dba40c8aec2efd4d1283568d8adb",
+    "uniform-prepared-surface.wgsl.ts": "44e095b4fe2e434bc6d5820e6d073cd1fef05ae416864210173d815e04af31b8",
+    "uniform-prescribed-solid-motion.ts": "63379cfe241e6690222f8871acbd1d212d0927f496ab451357b6f77c0cea7436",
+    "uniform-pressure-band.ts": "e8253e632c1bde8b2df7f278d972e9dc0a88950e2afa95260f78b11fe412cbeb",
+    "uniform-pressure-pages.ts": "4bcdd7cb3ae5c29a9353b9e2a6a77dac0e61e7bd32a068b52bbaa3be04256243",
+    "uniform-pressure-surface-band.ts": "a7b6b344d7d8acab1dbcf8dd6be077ab34ce0c0bff578307f2f94d4cacc8dcd4",
+    "uniform-scratch-arena.ts": "808c40a8272c9514e5cb688ea4f41eab427782f4d58c4eed3f750ef80f38e5cb",
+    "uniform-sharpen-budget.wgsl.ts": "0a3431f787f718d5c54d703726f1ff26f4757cab301bbaa5cbe42a2acccdd015",
+    "uniform-source.wgsl.ts": "40bff888ffefd957f012adf0205663f452f0aa9b13c98f95164796ca259ca8ea",
+    "uniform-stage-grids.ts": "4015bf2c979fc27c2362088d2a873264badf0694119e58c135f7d8634af4436f",
+    "uniform-stages.ts": "71c9df9b3128d55caeec8d1abea944f36cd44c35e4d195c5404777ffa6cf947b",
+    "uniform-surface-volume.wgsl.ts": "164417fdee2580c7218e2e0ca79ffb2ef584e50a3827ae6c99382f56310367df",
+    "uniform-texture-pages.ts": "1014941185e77d2a25dc4fb1dbcdd4aeebec1f132023fd757692dbaeb7a8df19",
+    "uniform-velocity-departure.wgsl.ts": "c7205777c7eadfa8886c53c74d4ac21fe591eb3e632645f1ec28ba5ca1d4b216",
+    "uniform-velocity-pages.ts": "ba355df5268417916b9cd9c6f82422fb2053214bb30d518d8bf979fe488eb6ed",
+    "uniform-volume-correction.wgsl.ts": "77d4e230d1fb773c8b85b3fbe623a0a72a6e3bb2fdcb56b5c1abd28c300ba73c",
+    "uniform-volume-donor-sum.wgsl.ts": "a9c773d4b851fd50a5aaf2178fc5bc77c02e2db218c020e85afcd7dcb33cee9f",
+    "uniform-volume-initial.ts": "157f3ba0c34ee035c11dedf5e359fc7b9e32cebc8b5777067407cd7cc48919fe",
+    "uniform-volume-method.ts": "5be56a59d0ff95b93e56c69487ed6133ff2c7028d8a0f71de911dfccd498d1a7",
+    "uniform-volume-normalization.wgsl.ts": "d71e1e496743d9e92537b5f3f7ba00b629cd6b53aa53805124bbb367e3bbabd9",
+    "uniform-volume-pages.wgsl.ts": "415159bffa25c4aa175e2dcd146d4322df66d9bb9b79fa38083bf17187fc8359",
+    "uniform-volume-pipeline.ts": "183a71360de1e181346c83c91fb76f0a593f30e85ebfc7ef72529d8166a896e5",
+    "uniform-volume-stages.ts": "d3b752aabdeeb9fd861b8fb40864550a23ee0c08f17fe1b8b4aa2f6ce2ddf65e",
+    "uniform-volume-stencil.ts": "c83ccbfce1c21bee9bc5a0c83024d18676a5fc9f04aad013abcc4ade26daaa4d",
+    "uniform-volume.wgsl.ts": "a7748d78f50b3c54841237d0affb03d970fca75b7124492fa1c19092c9b8ff88",
+    "webgpu-uniform-pressure-multigrid.ts": "900b50ca9e283913e119240904938ae978e62cbf376986f7356afcaea02c1494",
+    "webgpu-uniform-pressure-multigrid.wgsl.ts": "3142d3f65d660677fd5264188543b4bca3984f5ab86dd454ba86cf9a7213679e",
+    "webgpu-uniform-reference.ts": "fd441567bd26569855f12546cdc3dd9e76ac64060d2e0477cfacd3a3f1978156",
+    "webgpu-uniform-reference.wgsl.ts": "51128701a4c935c836a640f91a23a27f7af0eccfbca3a81377b53aab67c19af8",
+    "webgpu-uniform-velocity-extrapolation.ts": "0aaf27059680b4ea16cc8c274e648faaf5ab98561a9a0d483b5d3758d5b02c51",
+    "webgpu-uniform-velocity-extrapolation.wgsl.ts": "2a10c1874892b5ffc8aabdaba5c2e481808c11132e64915fdfdef606c1c5905b"
+  },
+  "sourceEncoding": "Each run inherits baselineUniformHashes, overridden by changedUniformHashes.",
+  "sceneId": "cm12-figure-9",
+  "lattice": {
+    "nx": 128,
+    "ny": 128,
+    "nz": 64,
+    "cellSize_m": 0.05
+  },
+  "adapter": {
+    "vendor": "apple",
+    "architecture": "metal-3",
+    "device": "apple-m1-max",
+    "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+  },
+  "values": {
+    "densitySharpening": "on",
+    "rigidCoupling": "on",
+    "timeStep": "sixtieth",
+    "pressureResidualTolerance": 5,
+    "extensionFrontSweeps": 2,
+    "sharpeningDistance": 2.1,
+    "pressureFullCycles": 3,
+    "pressureVCycles": 4,
+    "pressureSweeps": 6,
+    "sharpeningSweeps": 8,
+    "surfaceVolumeRounds": 2,
+    "volumeDustThreshold": 0.001,
+    "orphanDustThreshold": 0.01,
+    "phiCubicAdvection": "on",
+    "phiDrain": "on",
+    "phiPreserveSurface": "off",
+    "totalSurfaceVolume": "on",
+    "surfaceDeficitBalancing": "on",
+    "detailPolicy": "dynamic",
+    "detailNearFocus": "off",
+    "detailActivity": "on",
+    "detailBudgetPercent": 100,
+    "detailFocusRadiusPercent": 20,
+    "detailSensitivity": 0.5,
+    "detailSurface": "off",
+    "detailSurfaceDistance": 0,
+    "detailShape": "on",
+    "detailShapeTolerance": 0.5,
+    "detailShapeMetric": "value",
+    "detailThin": "on",
+    "detailThinThickness": 4,
+    "detailStrain": "off",
+    "detailStrainThreshold": 0.1,
+    "detailRotation": "off",
+    "detailRotationThreshold": 0.1,
+    "detailImpact": "on",
+    "detailImpactTravel": 1,
+    "detailApproach": "on",
+    "detailApproachSteps": 2,
+    "detailBulk": "off",
+    "detailMarginTiles": 0,
+    "detailHoldSteps": 8,
+    "detailSolidContact": "on"
+  },
+  "frameHz": 60,
+  "frames": 120,
+  "scope": "Instrumented, queue-fenced simulation. Rendering, configured trace-cadence gaps, stats and work-count readbacks excluded from wall timings. First four frames excluded from summaries. GPU stages are seam intervals, not isolated kernel durations.",
+  "runs": [
+    {
+      "arm": "control-a",
+      "capturedAt": "2026-10-06T20:38:29.919Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {},
+      "windows": {
+        "all": {
+          "wall_ms": 19.496542741379354,
+          "gpu_ms": 17.257436689655165,
+          "surface_ms": 2.360425931034483,
+          "extension_ms": 1.9446113103448275
+        },
+        "lateSplash": {
+          "wall_ms": 27.06187770000006,
+          "gpu_ms": 24.991061333333334,
+          "surface_ms": 3.670016000000001,
+          "extension_ms": 3.2374784
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    },
+    {
+      "arm": "local-a",
+      "capturedAt": "2026-10-06T20:42:29.734Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {
+        "uniform-mixed-frame-plan.ts": "cc8cc70b2ae0fb90b321c60f43303e90dd918107ca30d85e3625ae7ff72d8cd9",
+        "uniform-mixed-surface.ts": "6b5bea91737a0223075603cbf96a3b3c759ba8dfd7425577c2f2521ea49f414d"
+      },
+      "windows": {
+        "all": {
+          "wall_ms": 20.258660543103446,
+          "gpu_ms": 17.686810482758624,
+          "surface_ms": 2.6920606896551726,
+          "extension_ms": 1.92879227586207
+        },
+        "lateSplash": {
+          "wall_ms": 29.862623599999946,
+          "gpu_ms": 25.650790399999998,
+          "surface_ms": 4.2729472,
+          "extension_ms": 3.169757866666667
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    },
+    {
+      "arm": "block-a",
+      "capturedAt": "2026-10-06T20:44:33.272Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {
+        "uniform-mixed-frame-plan.ts": "cc8cc70b2ae0fb90b321c60f43303e90dd918107ca30d85e3625ae7ff72d8cd9",
+        "uniform-mixed-surface.ts": "f5c07dcb18551aad3f0a1dadebd7c046648d49808140d4505c07213d8fd63247"
+      },
+      "windows": {
+        "all": {
+          "wall_ms": 20.082393646551736,
+          "gpu_ms": 17.597545931034485,
+          "surface_ms": 2.67906648275862,
+          "extension_ms": 1.9395266206896553
+        },
+        "lateSplash": {
+          "wall_ms": 29.639247133333356,
+          "gpu_ms": 25.67263573333333,
+          "surface_ms": 4.2532863999999995,
+          "extension_ms": 3.2134485333333336
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    },
+    {
+      "arm": "brick-a",
+      "capturedAt": "2026-10-06T20:46:27.046Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {
+        "uniform-mixed-surface.ts": "81b558c12a353b19b33f07979ef93e1fb5061f5f227ace83e31178460e9c012e",
+        "uniform-prepared-surface.wgsl.ts": "2893c6ad07896b7ed013ceceb3e0174eb0586e27e74d48aa0b4279fb58189783"
+      },
+      "windows": {
+        "all": {
+          "wall_ms": 20.002545293103413,
+          "gpu_ms": 17.361955310344825,
+          "surface_ms": 2.555904000000001,
+          "extension_ms": 1.9383966896551728
+        },
+        "lateSplash": {
+          "wall_ms": 27.66590419999996,
+          "gpu_ms": 25.368985599999995,
+          "surface_ms": 4.028279466666666,
+          "extension_ms": 3.220002133333333
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": false
+    },
+    {
+      "arm": "brick-b",
+      "capturedAt": "2026-10-06T20:47:57.444Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {
+        "uniform-mixed-surface.ts": "81b558c12a353b19b33f07979ef93e1fb5061f5f227ace83e31178460e9c012e",
+        "uniform-prepared-surface.wgsl.ts": "1f11fee0f41e8625d43254307e3e39f637ee00debaaea025b697fdbed34840d9"
+      },
+      "windows": {
+        "all": {
+          "wall_ms": 19.938184948275875,
+          "gpu_ms": 17.520145655172417,
+          "surface_ms": 2.5745478620689655,
+          "extension_ms": 1.918057931034484
+        },
+        "lateSplash": {
+          "wall_ms": 27.615301433333418,
+          "gpu_ms": 25.493503999999994,
+          "surface_ms": 4.111291733333333,
+          "extension_ms": 3.1741269333333335
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    },
+    {
+      "arm": "slab-a",
+      "capturedAt": "2026-10-06T20:49:38.897Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {
+        "uniform-mixed-surface.ts": "81b558c12a353b19b33f07979ef93e1fb5061f5f227ace83e31178460e9c012e",
+        "uniform-prepared-surface.wgsl.ts": "148d7d871eb8fcf38b061e43f44ddc2ebf2ded3b3f9d5818d75b22f2d646ecb0"
+      },
+      "windows": {
+        "all": {
+          "wall_ms": 19.72703088793105,
+          "gpu_ms": 17.33596689655172,
+          "surface_ms": 2.4350013793103455,
+          "extension_ms": 1.9214477241379317
+        },
+        "lateSplash": {
+          "wall_ms": 27.43149303333327,
+          "gpu_ms": 25.2051456,
+          "surface_ms": 3.7945344000000008,
+          "extension_ms": 3.1741269333333335
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    },
+    {
+      "arm": "control-b",
+      "capturedAt": "2026-10-06T20:50:01.854Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {},
+      "windows": {
+        "all": {
+          "wall_ms": 19.88943286206894,
+          "gpu_ms": 17.326927448275864,
+          "surface_ms": 2.3824595862068967,
+          "extension_ms": 1.9299222068965516
+        },
+        "lateSplash": {
+          "wall_ms": 28.886850033333303,
+          "gpu_ms": 24.984507733333338,
+          "surface_ms": 3.6700159999999995,
+          "extension_ms": 3.178496
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    },
+    {
+      "arm": "split-a",
+      "capturedAt": "2026-10-06T20:54:04.026Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {
+        "uniform-mixed-extension.ts": "97bbe41869ccab63d2eb6df1971b8f260636abae55adfda81c7682d315f13135"
+      },
+      "windows": {
+        "all": {
+          "wall_ms": 19.279548517241405,
+          "gpu_ms": 17.29698427586206,
+          "surface_ms": 2.38810924137931,
+          "extension_ms": 1.9858537931034477
+        },
+        "lateSplash": {
+          "wall_ms": 27.06136386666673,
+          "gpu_ms": 24.936448000000006,
+          "surface_ms": 3.694045866666667,
+          "extension_ms": 3.1020373333333335
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    },
+    {
+      "arm": "split-b",
+      "capturedAt": "2026-10-06T20:54:44.636Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {
+        "uniform-mixed-extension.ts": "99e963cab3bd5870ffd1d74462485cb2096ae2a24962950dbd85fa9f95b3290d"
+      },
+      "windows": {
+        "all": {
+          "wall_ms": 19.531009370689702,
+          "gpu_ms": 17.26817103448276,
+          "surface_ms": 2.3909340689655174,
+          "extension_ms": 1.8994140689655177
+        },
+        "lateSplash": {
+          "wall_ms": 26.925323566666734,
+          "gpu_ms": 24.776977066666653,
+          "surface_ms": 3.7005994666666666,
+          "extension_ms": 2.9818880000000005
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    },
+    {
+      "arm": "split-c",
+      "capturedAt": "2026-10-06T20:55:48.249Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {
+        "uniform-mixed-extension.ts": "7e3cc09d1d4234dd8d4b397c0827efe1e7b1daa38a26712a81e105fee4e44e67"
+      },
+      "windows": {
+        "all": {
+          "wall_ms": 19.83924137068969,
+          "gpu_ms": 17.252916965517244,
+          "surface_ms": 2.393193931034482,
+          "extension_ms": 1.8768154482758628
+        },
+        "lateSplash": {
+          "wall_ms": 28.895788833333366,
+          "gpu_ms": 24.77042346666667,
+          "surface_ms": 3.680938666666667,
+          "extension_ms": 2.9556736000000003
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    },
+    {
+      "arm": "final-control-a",
+      "capturedAt": "2026-10-06T20:57:47.052Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {},
+      "windows": {
+        "all": {
+          "wall_ms": 19.789740224137937,
+          "gpu_ms": 17.265346206896552,
+          "surface_ms": 2.3694653793103444,
+          "extension_ms": 1.9197528275862068
+        },
+        "lateSplash": {
+          "wall_ms": 29.19433603333349,
+          "gpu_ms": 25.056597333333333,
+          "surface_ms": 3.6634624000000007,
+          "extension_ms": 3.1850495999999997
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    },
+    {
+      "arm": "final-candidate-a",
+      "capturedAt": "2026-10-06T20:58:49.459Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {
+        "uniform-mixed-extension.ts": "8f08ce0777da5ad1b719a19f140d717cd8cfd73a53e065b6beb629d2965df85b"
+      },
+      "windows": {
+        "all": {
+          "wall_ms": 19.400733508620707,
+          "gpu_ms": 17.264781241379307,
+          "surface_ms": 2.3954537931034476,
+          "extension_ms": 1.8773804137931047
+        },
+        "lateSplash": {
+          "wall_ms": 26.97152779999997,
+          "gpu_ms": 24.849066666666662,
+          "surface_ms": 3.720260266666666,
+          "extension_ms": 2.9775189333333345
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    },
+    {
+      "arm": "final-candidate-b",
+      "capturedAt": "2026-10-06T20:59:08.728Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {
+        "uniform-mixed-extension.ts": "8f08ce0777da5ad1b719a19f140d717cd8cfd73a53e065b6beb629d2965df85b"
+      },
+      "windows": {
+        "all": {
+          "wall_ms": 19.267257922413773,
+          "gpu_ms": 17.241052689655177,
+          "surface_ms": 2.3999735172413805,
+          "extension_ms": 1.884724965517241
+        },
+        "lateSplash": {
+          "wall_ms": 26.900779099999877,
+          "gpu_ms": 24.842513066666665,
+          "surface_ms": 3.691861333333333,
+          "extension_ms": 2.9797034666666664
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    },
+    {
+      "arm": "final-control-b",
+      "capturedAt": "2026-10-06T20:59:58.801Z",
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "changedUniformHashes": {},
+      "windows": {
+        "all": {
+          "wall_ms": 20.150987818965515,
+          "gpu_ms": 17.43314096551725,
+          "surface_ms": 2.4027983448275867,
+          "extension_ms": 1.9389616551724138
+        },
+        "lateSplash": {
+          "wall_ms": 28.81054306666665,
+          "gpu_ms": 25.165823999999997,
+          "surface_ms": 3.7115221333333333,
+          "extension_ms": 3.211264000000001
+        }
+      },
+      "validationErrors": [],
+      "qualityMatchesControl": true
+    }
+  ],
+  "finalSequence": [
+    "final-control-a",
+    "final-candidate-a",
+    "final-candidate-b",
+    "final-control-b"
+  ],
+  "comparison": {
+    "all": {
+      "control": {
+        "wall_ms": 19.970364021551724,
+        "gpu_ms": 17.349243586206903,
+        "extension_ms": 1.9293572413793103,
+        "surface_ms": 2.3861318620689653
+      },
+      "candidate": {
+        "wall_ms": 19.33399571551724,
+        "gpu_ms": 17.252916965517244,
+        "extension_ms": 1.881052689655173,
+        "surface_ms": 2.397713655172414
+      },
+      "reductionPercent": {
+        "wall_ms": 3.1865633763496937,
+        "gpu_ms": 0.5552208671866343,
+        "extension_ms": 2.5036603221083142,
+        "surface_ms": -0.4853794246478138
+      }
+    },
+    "lateSplash": {
+      "control": {
+        "wall_ms": 29.00243955000007,
+        "gpu_ms": 25.111210666666665,
+        "extension_ms": 3.1981568000000005,
+        "surface_ms": 3.687492266666667
+      },
+      "candidate": {
+        "wall_ms": 26.93615344999992,
+        "gpu_ms": 24.845789866666664,
+        "extension_ms": 2.9786112000000005,
+        "surface_ms": 3.7060607999999995
+      },
+      "reductionPercent": {
+        "wall_ms": 7.124525150506322,
+        "gpu_ms": 1.0569812962157532,
+        "extension_ms": 6.86475409836066,
+        "surface_ms": -0.5035545023696297
+      }
+    }
+  },
+  "selectedQualityOwnershipAllocationsMatch": true,
+  "storage": {
+    "addedProductionBufferBytes": 0,
+    "fineSeamDeclaredWorkgroupBytesRemoved": 324,
+    "extraDispatchesPerTwoSweepAdvance": 2
+  },
+  "surfaceDemand": {
+    "source": {
+      "commit": "11ea9c04b6638e3427182538c9b925fe837a8820",
+      "uniformFiles": {
+        "composition.ts": "a779a784edc4aa9847cf2dd28e225b3391c0f9b7ce2bcd55d5c10fc19c0f71c3",
+        "harness.ts": "57ed6d40ec0803cc52390a98deeb6d762ea9edc763c7827a033382fe219ea030",
+        "method.ts": "8c349ed3788b239446e6b50044e7afddff77bdcc4b0ca3b7637ceb6bc26a0576",
+        "parameters.ts": "002df699608b498a09432fb3f69050103401ba1a85a310fcd0b0516aea05725d",
+        "pressure-plan.ts": "5e29787e33200e01152c3512b97adc10cf1a4333be3040cfac175f25b73f8c59",
+        "pressure-policy.ts": "446785f3456e937c98524e33458791da570d6cd8aa7c8252f9f87e5e7242a68f",
+        "uniform-ab-switch.ts": "393be27a8041a1e731c346867dc57e9f74e2fc6471b9724da3b6e56615be976b",
+        "uniform-buffered-work.ts": "ddc4e8be72bc22b6178d29fd747fdbd0e77da87344654d82fc1ef219cc392ffa",
+        "uniform-cached-momentum.wgsl.ts": "3ca2c081fa3b1dc33ee894d7c39c5bb4c5193dfa5985e746adf29e5655d0f38f",
+        "uniform-coarse-solver.wgsl.ts": "8b0c1e56bc67816a9da4474e7ff717c952a83913aad84e246fd7843f5b00747e",
+        "uniform-coarse-vertex-phi.ts": "fc2ff8202f67cb5e6d601e28dba19c60d243083d71a3eeea47a318018c9708de",
+        "uniform-compiled-extension.wgsl.ts": "a276cdb730812335309a316000c21f4938636fd4775d8527a2ffa3ad2deb0810",
+        "uniform-compiled-topology.ts": "de474feb07e526d4d4cbb8bd022de741602aa742a698fc33e376956d43a82b60",
+        "uniform-compiled-velocity-taps.wgsl.ts": "3eb8ca19c3816a4d1870dc4ffce473d79d3d80a71742f63a43cc1219e51d99a1",
+        "uniform-detail-fields.ts": "583a7094502be892de84569540c0ca777d1013699902fdf2c12224944eed9d3c",
+        "uniform-detail-planner.ts": "e3ccbfbe41c5dcabfa30262ccd33300061008154c3f9e761702d50b9149aa136",
+        "uniform-detail-policy.ts": "f2e08eca0dc3f5d410f9c3a269f886871c9eab3435f1a48f65b713fe30f78da3",
+        "uniform-detail-pool.ts": "fe28aecd13ea6bc59f5196d5ee168cf7fa667b49e2404e5be30290388c709cb7",
+        "uniform-detail-requests.ts": "4a4c6b4e5e421bbf7b2650b5ef1f1e80c82f51622af8faca1ac4895b2f6d41f5",
+        "uniform-diagnostics.ts": "9cb6b3d52e651d91cbd6ceb8b803692f3252f59af1c194737deb705391814313",
+        "uniform-field-loop-bounds.ts": "efab7c84fda83f303fa7df7380f08eb681dfd1e538bd223f9f3ffa6eee63eaee",
+        "uniform-geometric-options.ts": "9e5920df7ae812aed01ca6ef62d8c2d5ec504421acf02844e10c8d91159c7917",
+        "uniform-geometric-parameters.ts": "03b277f68547bd2f9b137e0fddc6cff94fedca118f9bc0e5fb6949f599748d59",
+        "uniform-host-allocation.ts": "29bf564f26cc2c5a24301d03f1af79087bfa1a3200b161732ba5fefd343f3611",
+        "uniform-midpoint-trace.wgsl.ts": "edb43d279e5cf196ea5c143a4c075a9b041eb34502e5728c7e34371747528a2e",
+        "uniform-mixed-bodies.ts": "b9d583a239a8cfd55c8e6a09cf04392bca16855305a44503dfc0860dba4e2e0d",
+        "uniform-mixed-cleanup.ts": "9695a8f1f6d73f5579ae23f3f96f2d7a1daea87fe4c76c98740e137420392e9d",
+        "uniform-mixed-detached-mass.wgsl.ts": "544d36a6356bf3c726ef16530be7c0d552a4a309366e5bf439356f40c00222ea",
+        "uniform-mixed-diagnostics.ts": "a85fbd61d95d730935fafebd7dc07c558e5176821c6480718d32b9c516642b52",
+        "uniform-mixed-dust-accounting.wgsl.ts": "3a7cc23377b94413ee4f0d2ab05dc5256c4ddaa63e5c550950254faf2e9ca66b",
+        "uniform-mixed-dynamic.ts": "d152194acad62cc4b49140bec08450e72a612deb1d8b88d8a92a5dd7e05c36dc",
+        "uniform-mixed-extension.ts": "b0d801bd0fc7e01334f04703804f8e2610dcb5fb186e0f1df105e163c02aa4b6",
+        "uniform-mixed-face-dispatch.wgsl.ts": "00a5673274d38226eedf184aa309d06d0a642ea56ff7797a823bca75142fd016",
+        "uniform-mixed-faces.wgsl.ts": "2d22ef2869ba1831f9d692a145d9750945d1b8a94c898e5402c2f2efb2f309f6",
+        "uniform-mixed-forces.ts": "c8c42e8b10e57e7e76ae9dc12bef341d3d61738f16793fdde435c3811f7d6558",
+        "uniform-mixed-frame-plan.ts": "8c79e532e471aada602882b0bb1acc78922dc4b16610497111ad1e454fc2f567",
+        "uniform-mixed-frame-status.ts": "26741fe4d480d4543201f2689790f9a095e12e1be3360a6eb3dae6dfb0ad38dc",
+        "uniform-mixed-frame.ts": "b4800d32cd6a30c313625bde4e531ece212edbf70df9c91c1de8e45e220e822d",
+        "uniform-mixed-layout-builder.ts": "9b7f4d5f909dbc7bec0e79ffea3fb6af2defe970ae5311f7d6845ca5dac9503f",
+        "uniform-mixed-layout.ts": "a78b8a059b63099d3a0edcf7c38c890171bbeb0f28ffaba5a6045282c70c29fe",
+        "uniform-mixed-momentum-cache.ts": "a01261b8889a546c92ecd5bafffe48c3116cbf8039814dd3804b2df196408f3d",
+        "uniform-mixed-momentum.ts": "4c06c01469bcf863feca6d55f7d33b20d65b02701aab0b5c3620be355ff3ea23",
+        "uniform-mixed-options.ts": "f85be8cc33d0558ef687e4ba66d95dc02f0ff1393e12341f02323940ab08972a",
+        "uniform-mixed-ownership.ts": "91ef6a8bd3382d9ab8a360067b9d4e6951979c32920bdc656c11d07b58e441b5",
+        "uniform-mixed-phi-resolve.ts": "444bb4e0550960d13deb66ff0af01960a876ea69c6ff90f86b92e4468ac9101b",
+        "uniform-mixed-presentation.wgsl.ts": "bed9d8b39844c81da7a9b57191a11842eb1603fb68e5eb1244d08346a71b8bc5",
+        "uniform-mixed-pressure-acceptance.ts": "03a29975399a7f23b8780f335fee6d88ee6b53f774df841abf722ae8ccb0e4fa",
+        "uniform-mixed-pressure-authority.ts": "8131c7c89a333d9e6d4532cb514ddddff752f9ae136932f2c4dbcea4710e6c96",
+        "uniform-mixed-pressure-boundary.wgsl.ts": "d7e6e905271c29109a4385feee3f6ae944f72fe66d9568c25905cd4a8c0d57d3",
+        "uniform-mixed-pressure-cycles.ts": "1c1da7731242dc3a69080666126089ae09df64288f6e85e46d23738a971c6676",
+        "uniform-mixed-pressure-memory.ts": "26736a14dec70dd9d1ffc93acdfe7ceeff43ce4269c4d96b90b8730736565e74",
+        "uniform-mixed-pressure-reconstruction.wgsl.ts": "4f85a0bf33671234b552b63c5872ae85e6ac67666c609f43641fdb7ae517b5a0",
+        "uniform-mixed-pressure-schedule.ts": "753b18d2254650e6ace5fe183e55eee1be48aa0f81d7b80e83d3bbb069a062bb",
+        "uniform-mixed-pressure-surface.wgsl.ts": "9f87fbb40c880b204d80d5b94b2424728ef5674233ba7e1297906fc8bd312401",
+        "uniform-mixed-pressure-topology.wgsl.ts": "02c3f73ffb920337fa54f7a2c8ff07a3d5eb9370e883642b5ecf3f4bc5d04a14",
+        "uniform-mixed-pressure-velocity.ts": "b2bdeb8700d40b0aeefd15d8749fdeaddd4fcb00749d702ef19721164d94f934",
+        "uniform-mixed-remap.ts": "244b9ef95dd5ad52ac7f19b678133020bd8cfca9eba3d718d24da958e83e6273",
+        "uniform-mixed-sharpening.ts": "a69536327fae081daf5b13f4a55f54953c5b672e37cbbcb9077a595df8e96589",
+        "uniform-mixed-solid-displacement.ts": "3cdd7bc3883cca639f28d72153e3091dee16d58557bde47f40f4482b44bcd26d",
+        "uniform-mixed-solid.wgsl.ts": "46be52ad007666cd48ba72f6b97e0f8e316e19f61c4056a1ad6e19cb7c48add2",
+        "uniform-mixed-source.wgsl.ts": "57fcbe1f9cf9c506e7b966f71e15fc6468496836609db08033f728fa650b39e2",
+        "uniform-mixed-surface-geometry.ts": "c05c0fff8c8ba9d277b8c51c20ad3c01a25bf033320d2f4834479180682b5e9b",
+        "uniform-mixed-surface-volume.ts": "6013029494b92673e6a231c58b142adf25881b9a8afe5267dd3b190e7e6452c0",
+        "uniform-mixed-surface.ts": "f25d98731103616c30bd9ea8e81535e1ea57e6a2fa1ce5ff4c4b9a1151aaeb37",
+        "uniform-mixed-topology.wgsl.ts": "178661178b1c5df29d0d3f9d36feaa93fd62d8ff85e437503d28326c5044702c",
+        "uniform-mixed-transport.ts": "a32b5d08b0808ba5d5a8729ccc78f6d1de888a3b16d4b9de7afdd35621ac3a12",
+        "uniform-mixed-transport.wgsl.ts": "19e394c1b84ffb345d46e2210bce08fe5b9f2c98f0bcd9ccd31eddbec15b1642",
+        "uniform-mixed-velocity-sampling.wgsl.ts": "fa99eec7bb02c8e284c2f7d98ccbce43812474b65940d91bf27b0413a0ba08e5",
+        "uniform-mixed-vertex-sampling.wgsl.ts": "16b2932e58c73c62cad7b64f756940568bdc646f61839c8e39a778b9762b4447",
+        "uniform-options.ts": "2c1b1b3c2ab034a7a0dfea3579a81354f0c2e0812fb57100250fbfb6bb5f51da",
+        "uniform-page-domain.ts": "a7c99e3e71213f157948f381897299af548dad8a5ccd3f7e2bf3b3207bd3b9de",
+        "uniform-page-execution.ts": "42e8f05e10dddc6a05fa2992919c77589eaec40f68d8ce5e97b9d132e909f64c",
+        "uniform-page-generation.ts": "ce3ca9dae67a252fd232945b3914af6d733d64d2ac6135977b4f56d98e1a11dc",
+        "uniform-page-layout.ts": "e08062c90dcd97fabc541e088bff02eae28391e1129b50a325fd26cdec5d8951",
+        "uniform-page-redistance.ts": "663c8d9cf4e45d8976f180d02aeb8812b60c1481610eea4e9bbc48a155a412eb",
+        "uniform-page-stencil.wgsl.ts": "266053f2bb3bf7d9f2a7fb0184311a208ea134f4043830c263747664673dbcb2",
+        "uniform-page-support.ts": "65b793622d86a76ba8b6f492b399be1aad7552f0bfe46cf6184ecfc2efbc65b6",
+        "uniform-paper.ts": "b3dcb543c8fe6544ba9bc22999d74bb2f666cbecac59dd4b7c3023a7e981d14c",
+        "uniform-phi-band.ts": "d2ffaa0d361b2c476bc50c694cb8ff4ce68057bae7227985cb10a764af5e2c74",
+        "uniform-pipeline-needs.ts": "93a9d70f655e1cf6703be65a16a27122d6d1db6b1724e3c2d3dfdd2c166b2a99",
+        "uniform-pipeline.ts": "7039502d3a8dec3cdc064b86ffc393ebfe78dba40c8aec2efd4d1283568d8adb",
+        "uniform-prepared-surface.wgsl.ts": "44e095b4fe2e434bc6d5820e6d073cd1fef05ae416864210173d815e04af31b8",
+        "uniform-prescribed-solid-motion.ts": "63379cfe241e6690222f8871acbd1d212d0927f496ab451357b6f77c0cea7436",
+        "uniform-pressure-band.ts": "e8253e632c1bde8b2df7f278d972e9dc0a88950e2afa95260f78b11fe412cbeb",
+        "uniform-pressure-pages.ts": "4bcdd7cb3ae5c29a9353b9e2a6a77dac0e61e7bd32a068b52bbaa3be04256243",
+        "uniform-pressure-surface-band.ts": "a7b6b344d7d8acab1dbcf8dd6be077ab34ce0c0bff578307f2f94d4cacc8dcd4",
+        "uniform-scratch-arena.ts": "808c40a8272c9514e5cb688ea4f41eab427782f4d58c4eed3f750ef80f38e5cb",
+        "uniform-sharpen-budget.wgsl.ts": "0a3431f787f718d5c54d703726f1ff26f4757cab301bbaa5cbe42a2acccdd015",
+        "uniform-source.wgsl.ts": "40bff888ffefd957f012adf0205663f452f0aa9b13c98f95164796ca259ca8ea",
+        "uniform-stage-grids.ts": "4015bf2c979fc27c2362088d2a873264badf0694119e58c135f7d8634af4436f",
+        "uniform-stages.ts": "71c9df9b3128d55caeec8d1abea944f36cd44c35e4d195c5404777ffa6cf947b",
+        "uniform-surface-volume.wgsl.ts": "164417fdee2580c7218e2e0ca79ffb2ef584e50a3827ae6c99382f56310367df",
+        "uniform-texture-pages.ts": "1014941185e77d2a25dc4fb1dbcdd4aeebec1f132023fd757692dbaeb7a8df19",
+        "uniform-velocity-departure.wgsl.ts": "c7205777c7eadfa8886c53c74d4ac21fe591eb3e632645f1ec28ba5ca1d4b216",
+        "uniform-velocity-pages.ts": "ba355df5268417916b9cd9c6f82422fb2053214bb30d518d8bf979fe488eb6ed",
+        "uniform-volume-correction.wgsl.ts": "77d4e230d1fb773c8b85b3fbe623a0a72a6e3bb2fdcb56b5c1abd28c300ba73c",
+        "uniform-volume-donor-sum.wgsl.ts": "a9c773d4b851fd50a5aaf2178fc5bc77c02e2db218c020e85afcd7dcb33cee9f",
+        "uniform-volume-initial.ts": "157f3ba0c34ee035c11dedf5e359fc7b9e32cebc8b5777067407cd7cc48919fe",
+        "uniform-volume-method.ts": "5be56a59d0ff95b93e56c69487ed6133ff2c7028d8a0f71de911dfccd498d1a7",
+        "uniform-volume-normalization.wgsl.ts": "d71e1e496743d9e92537b5f3f7ba00b629cd6b53aa53805124bbb367e3bbabd9",
+        "uniform-volume-pages.wgsl.ts": "415159bffa25c4aa175e2dcd146d4322df66d9bb9b79fa38083bf17187fc8359",
+        "uniform-volume-pipeline.ts": "183a71360de1e181346c83c91fb76f0a593f30e85ebfc7ef72529d8166a896e5",
+        "uniform-volume-stages.ts": "d3b752aabdeeb9fd861b8fb40864550a23ee0c08f17fe1b8b4aa2f6ce2ddf65e",
+        "uniform-volume-stencil.ts": "c83ccbfce1c21bee9bc5a0c83024d18676a5fc9f04aad013abcc4ade26daaa4d",
+        "uniform-volume.wgsl.ts": "a7748d78f50b3c54841237d0affb03d970fca75b7124492fa1c19092c9b8ff88",
+        "webgpu-uniform-pressure-multigrid.ts": "900b50ca9e283913e119240904938ae978e62cbf376986f7356afcaea02c1494",
+        "webgpu-uniform-pressure-multigrid.wgsl.ts": "3142d3f65d660677fd5264188543b4bca3984f5ab86dd454ba86cf9a7213679e",
+        "webgpu-uniform-reference.ts": "fd441567bd26569855f12546cdc3dd9e76ac64060d2e0477cfacd3a3f1978156",
+        "webgpu-uniform-reference.wgsl.ts": "51128701a4c935c836a640f91a23a27f7af0eccfbca3a81377b53aab67c19af8",
+        "webgpu-uniform-velocity-extrapolation.ts": "0aaf27059680b4ea16cc8c274e648faaf5ab98561a9a0d483b5d3758d5b02c51",
+        "webgpu-uniform-velocity-extrapolation.wgsl.ts": "2a10c1874892b5ffc8aabdaba5c2e481808c11132e64915fdfdef606c1c5905b"
+      }
+    },
+    "instrumentationHash": "92a0c1511275269a0f20064a7f1a6d646722def98e106b4145e2446c2fa037d1",
+    "qualityMatchesControl": true,
+    "scope": "Logical 32-lane work model; no hardware occupancy or timing claim. Compact models retain spatial blocks and sampling specialization.",
+    "lateSplashMeans": {
+      "owned": 409773.43333333335,
+      "admitted": 238714.9,
+      "iterations": 776441.7666666667
+    },
+    "models": {
+      "current": {
+        "meanGroups": 13995.666666666666,
+        "meanActiveGroups": 10250.366666666667,
+        "meanLaneIterations": 1760773.3333333333,
+        "usefulIterationFraction": 0.4409663367611201,
+        "aggregateActiveLaneHistogram": [
+          112359,
+          6927,
+          5859,
+          4780,
+          5869,
+          3989,
+          4795,
+          3616,
+          6331,
+          3690,
+          3791,
+          3643,
+          5713,
+          3578,
+          4042,
+          4197,
+          20566,
+          3840,
+          4751,
+          3684,
+          4880,
+          3732,
+          4612,
+          4073,
+          13201,
+          3998,
+          4768,
+          4500,
+          7715,
+          5306,
+          7943,
+          8790,
+          130332
+        ]
+      },
+      "1": {
+        "meanGroups": 9283.8,
+        "meanActiveGroups": 9283.8,
+        "meanLaneIterations": 1616460.8,
+        "usefulIterationFraction": 0.48033442361650014,
+        "aggregateActiveLaneHistogram": [
+          0,
+          3885,
+          3290,
+          3117,
+          3952,
+          2700,
+          2798,
+          2601,
+          3212,
+          2699,
+          2665,
+          2814,
+          4005,
+          2839,
+          2911,
+          3539,
+          15852,
+          2811,
+          2581,
+          2655,
+          3221,
+          2624,
+          2647,
+          2711,
+          3651,
+          2984,
+          3114,
+          3257,
+          5827,
+          3397,
+          3912,
+          5434,
+          164809
+        ]
+      },
+      "2": {
+        "meanGroups": 7906.8,
+        "meanActiveGroups": 7906.8,
+        "meanLaneIterations": 1461036.8,
+        "usefulIterationFraction": 0.5314320396766643,
+        "aggregateActiveLaneHistogram": [
+          0,
+          951,
+          937,
+          908,
+          956,
+          810,
+          844,
+          806,
+          892,
+          887,
+          852,
+          791,
+          900,
+          819,
+          800,
+          827,
+          981,
+          853,
+          809,
+          770,
+          862,
+          815,
+          818,
+          806,
+          931,
+          822,
+          813,
+          847,
+          831,
+          827,
+          820,
+          912,
+          210707
+        ]
+      },
+      "4": {
+        "meanGroups": 7544.4,
+        "meanActiveGroups": 7544.4,
+        "meanLaneIterations": 1445267.2,
+        "usefulIterationFraction": 0.5372306011418972,
+        "aggregateActiveLaneHistogram": [
+          0,
+          168,
+          168,
+          168,
+          186,
+          178,
+          149,
+          165,
+          173,
+          157,
+          137,
+          150,
+          155,
+          139,
+          194,
+          178,
+          172,
+          156,
+          160,
+          156,
+          165,
+          161,
+          143,
+          159,
+          172,
+          160,
+          155,
+          160,
+          189,
+          145,
+          151,
+          167,
+          221296
+        ]
+      }
+    }
+  },
+  "withdrawnNumericalVariants": {
+    "branchedBricks": "31804 of 32768 synthetic gradient comparisons differed; tiny differences in full-run quality.",
+    "sparseInitialGradient": "2130 of 2744 integer-gradient comparisons differed. Never benchmarked or enabled in production.",
+    "weightedInitialGradient": "1252 of 2744 integer-gradient comparisons differed. Never benchmarked or enabled in production."
+  },
+  "validation": {
+    "splitDawn": {
+      "passed": true,
+      "layouts": 66,
+      "sweepsPerLayout": 3,
+      "bitExactStateComparisons": 198,
+      "coverage": [
+        "all fine",
+        "all coarse",
+        "isolated fine/coarse corner",
+        "random mixed layouts",
+        "anisotropic spacing",
+        "partial and empty support",
+        "nonzero negative boundary values",
+        "open and closed upper wall",
+        "varying dispatch widths"
+      ]
+    },
+    "types": "passed",
+    "unit": {
+      "passed": 892,
+      "skipped": 82,
+      "failed": 0
+    },
+    "build": "passed",
+    "fullDawn": {
+      "passedFiles": 58,
+      "totalFiles": 61,
+      "failedFiles": [
+        "tests/svo-raster-ao-dawn.test.ts",
+        "tests/uniform-coarse-solid-rest-dawn.test.ts",
+        "tests/uniform-pressure-local-visit-dawn.test.ts"
+      ],
+      "exitCode": 1,
+      "baselineReproduced": true,
+      "baselineReproductionContext": "Earlier reproduction on fe587ebb plus then-current pressure edits; current failures match those records.",
+      "notes": "Five failing assertions across three files; the existing coarse-rest-seam-open TODO is not an additional failure. No tests or thresholds weakened. Repository clean gate does not pass."
+    },
+    "testSourceHashes": {
+      "tests/uniform-split-extension-dawn.test.ts": "913dbdf9eebb0575f85dbff8d0a325462d1a5f2da005ddba9fa720e53babd7a0",
+      "tests/uniform-surface-work-audit.test.ts": "0c86f32814ecc10fcbd5e6337b83496ff2f8142fd0d96858ba266c0fd487db67"
+    }
+  },
+  "archivedPrototypePatches": "rejected-spatial-variants/README.md"
+}

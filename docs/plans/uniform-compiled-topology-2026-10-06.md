@@ -2,6 +2,12 @@
 
 6 October 2026. Design analysis for the current dynamic h/4h Uniform Geometric implementation, including the working tree changes. The original analysis used source inspection only. The user subsequently authorized GPU measurement and set a target of 25% lower frame time on `cm12-figure-9` in Dynamic mode. The implementation and measurement record below distinguishes completed changes, rejected experiments, and that still-unmet target.
 
+This is a chronological research record. The latest retained implementation and
+validation are in **Phase 3: search locality and specialized extension launches**
+below; earlier pending-work statements and representation tables describe their
+respective checkpoints. In particular, stencil bits 24–26 are now the Phase 2
+far-positive flags, not spare bits.
+
 ## Decision
 
 Compile ownership-dependent vertex and face relationships when building a layout, and reuse them across simulation stages. Keep regular interiors arithmetic. Refresh values when their source fields change, while preserving the compiled geometric recipes. Begin with a shared topology contract used by both CPU and GPU builders, surface vertex traversal, phi resolution, surface-volume correction and seam faces. Prepare one shared surface sampling field per phi epoch and read it directly during fine redistance, eliminating per-workgroup windows.
@@ -554,3 +560,151 @@ rendering; they are not rendered frame-rate measurements. No remote deployment
 is claimed. This phase keeps the existing full-precision surface cache and
 compaction behavior, and changes only the shared boundary request geometry and
 its consumers.
+
+
+## Phase 3: search locality and specialized extension launches
+
+7 October 2026. Outstanding pressure work was checkpointed as `11ea9c04`
+before this phase. All controls use that checkpoint, including those pressure
+changes. The final production change is the extension launch split described
+below. Surface scheduling, sampling arithmetic and storage remain unchanged
+from the checkpoint after the unsuccessful candidates were withdrawn.
+
+### Measured surface demand
+
+The extended `--surface-work-audit` records a per-vertex Newton iteration count
+and sampling specialization, and reconstructs the original tile/round/lane
+mapping, including negative domain closure. Aggregate counters independently
+check every recorded owner, admission and iteration. This distribution mode
+requires one redistance epoch per sample: multiple visits cannot be represented
+by one per-vertex record and fail the consistency assertions. A GPU buffer clear
+resets diagnostic storage; a large host write encountered a native Dawn upload
+abort during development. No production buffer or shader changes are needed
+for this diagnostic. Its timings are deliberately excluded from comparisons.
+
+During splash frames 91–120, means were 409,773 owned fine vertices, 238,715
+admitted searches and 776,442 iterations. Of logical 32-lane groups containing
+owned vertices, 26.8% contain no searches. Taking each group's longest search
+as its loop duration, useful iterations are 44.1% of available lane-iterations.
+This is a software work model, **not measured hardware occupancy**.
+
+| Logical packing model | Mean lane-iterations | Useful fraction |
+| --- | ---: | ---: |
+| Current tile/round mapping | 1,760,773 | 44.1% |
+| Compact within one tile | 1,616,461 | 48.0% |
+| Compact within 2×2×2 tiles | 1,461,037 | 53.1% |
+| Compact within 4×4×4 tiles | 1,445,267 | 53.7% |
+
+Spatial models retain separate regular/general sampling classes. They account
+for observed loop lengths but exclude queue construction, barriers, address
+arithmetic, register pressure and cache behavior. The 17% modeled reduction
+for two-tile-wide blocks is consequently a hypothesis, not a predicted speedup.
+
+### Implemented candidates and withdrawals
+
+Two unmodified controls both measured 3.670 ms for the splash surface stage.
+All rows below except the explicitly invalid branched layout matched the
+control's recorded quality at every frame.
+
+| Surface candidate | Splash surface GPU time | Outcome |
+| --- | ---: | --- |
+| Local search queue within 2×2×2 tiles; existing tile jobs elect leaders | 4.273 ms | Slower; withdrawn |
+| Same queue; block jobs published during existing field preparation | 4.253 ms | Slower; withdrawn |
+| Prepared field in 4×4×4 bricks, branched boundary indexing | 4.028 ms | Numerical parity failed; invalid comparison; withdrawn |
+| Same bricks with branchless boundary indexing | 4.111 ms | Exact gradient parity restored, but slower; withdrawn |
+| Contiguous x rows grouped into 4×4 y/z slabs | 3.795 ms | Exact parity, but slower; withdrawn |
+
+The local queue held at most 729 packed coordinates (2,916 declared workgroup
+bytes) and retained the original search and admission predicate. Publishing
+block jobs used the existing preparation dispatch and 16,392 additional global
+bytes at Figure 9's dimensions. Removing redundant tile launches barely changed
+the regression, so launch duplication alone did not explain the cost. The
+local queue's construction, synchronization, execution shape and storage costs
+must be evaluated together; these runs do not isolate register pressure or
+cache misses as the cause.
+
+Both blocked field layouts fit the existing allocation exactly, including
+upper-domain closure, and changed only addressing. The branched version failed
+31,804 of 32,768 synthetic gradient comparisons by small floating-point amounts
+and changed recorded quality from frame 6. Branchless indexing restored exact
+gradient parity and full-run quality, but neither layout improved performance.
+These results do not prove the existing field is cache-optimal; they reject
+these particular layouts and indexing costs.
+
+A final surface prototype reused the seven axial values sufficient for the
+first Newton gradient at an integer vertex. A sparse arithmetic form failed
+2,130 of 2,744 integer-gradient comparisons; retaining the weighted-product
+loop reduced this to 1,252, still unacceptable. Neither version was enabled in
+the production search or benchmarked. Original tests and thresholds remain
+intact; the extra experimental tests were removed with their rejected code.
+
+### Retained extension launch specialization
+
+The old sweep entry point handled fine seam tiles, regular coarse tiles and
+packed coarse seams. A three-way split preserved quality but increased
+whole-run extension time despite a small splash benefit. The retained version
+uses two launches: fine seams, then all coarse work. Regular coarse owners
+still share a launch with coarse seams, avoiding a third dispatch.
+
+The fine pipeline compiles with `ueMixedJobs=false`, has no packed-job base to
+resolve, and reserves one staged neighborhood. Its word and finite-mask arrays
+shrink from 648 to 324 declared workgroup bytes. Coarse jobs retain the two-tile
+pack and their original recipes. These are combined changes: the measured gain
+cannot be attributed solely to the 324-byte reduction or called a measured
+occupancy improvement. Compiled geometry is still shared across sweeps; masks
+and values still come from each sweep. There is no new global
+buffer, scratch growth, admission change or altered reduction order. Two sweeps
+add two dispatches per advance. A coarse-only capacity keeps its existing
+regular-list path.
+
+A differential GPU test compares every word of both extension slot arrays
+after each of three sweeps over 66 changing layouts, including all-fine and
+all-coarse cases, anisotropic spacing, empty support, open/closed upper walls
+and different grid widths. The merged entry-point specialization remains as
+the test reference; production compiles the fine/coarse specializations. All
+198 state comparisons pass bit-for-bit.
+
+The final comparison is control/candidate/candidate/control, with matching
+Uniform source hashes for every file except the intended extension change.
+Each run uses the production factory, Figure 9, Dynamic, app defaults, 60 Hz
+and 120 frames. Whole-run means exclude frames 1–4.
+
+| Final interleaved mean | Control | Retained split | Reduction |
+| --- | ---: | ---: | ---: |
+| Whole-run simulation wall | 19.970 ms | 19.334 ms | 3.19% |
+| Whole-run GPU | 17.349 ms | 17.253 ms | 0.56% |
+| Whole-run extension | 1.929 ms | 1.881 ms | 2.50% |
+| Splash simulation wall | 29.002 ms | 26.936 ms | 7.12% |
+| Splash GPU | 25.111 ms | 24.846 ms | 1.06% |
+| Splash extension | 3.198 ms | 2.979 ms | 6.86% |
+
+The extension result is consistent across the final arms: controls 3.185 and
+3.211 ms; candidates 2.978 and 2.980 ms. Wall timing varies substantially across
+the broader session (an earlier control's splash mean was 27.062 ms), so the
+7.12% wall mean is not a reliable standalone frame-time guarantee. Measurements
+exclude rendering and statistics readbacks. The 25% whole-run frame-time target
+remains unmet.
+
+All final per-frame quality metrics, mixed ownership counts and allocation
+sizes match. The selected source is enabled in the normal UI/production
+Dynamic path, without a user setting. No remote deployment is claimed.
+
+[spatial-phase3.json](uniform-compiled-topology-2026-10-06/spatial-phase3.json)
+records source hashes, controls, development variants, aggregate demand and
+validation. Per-frame timing/quality evidence is in
+[spatial-phase3-frames.jsonl](uniform-compiled-topology-2026-10-06/spatial-phase3-frames.jsonl);
+per-frame demand distributions are in
+[spatial-demand-frames.jsonl](uniform-compiled-topology-2026-10-06/spatial-demand-frames.jsonl).
+[Archived prototype patches](uniform-compiled-topology-2026-10-06/rejected-spatial-variants/README.md)
+preserve the withdrawn implementations against the checkpoint; measured source
+patches were verified against the captured hashes.
+
+Types, unit tests (892 passed, 82 skipped) and the production build pass.
+The full serial Dawn gate finishes at **58/61 files passed**. The three failing
+files reproduce the earlier baseline failures: `svo-raster-ao` (channel 4630,
+14238 versus 14240), `uniform-coarse-solid-rest` (seam-floor/toggle-floor drift
+and mixed pressure convergence), and `uniform-pressure-local-visit` (fine
+reference must execute coarse visits). Those failures were previously reproduced
+on `fe587ebb` plus the then-current pressure edits; this run matches those
+records. The existing coarse-rest-seam-open TODO is not an additional failure.
+No tests or thresholds were weakened. The repository clean gate remains unmet.

@@ -1,0 +1,65 @@
+--- a/lib/methods/uniform/uniform-mixed-surface.ts
++++ b/lib/methods/uniform/uniform-mixed-surface.ts
+@@ -895,13 +895,45 @@
+  }
+ }
+ ${uniformPreparedSurfaceSamplingWGSL}
++// A 2-cubed tile block has at most 9-cubed canonical vertices, including
++// negative domain closure. Queue only admitted searches, retaining locality
++// and the certificate's regular/general sampler specialization.
++var<workgroup> umSearchBlockMask:u32;
++var<workgroup> umSearchBlockTile:u32;
++var<workgroup> umSearchBlockCount:atomic<u32>;
++var<workgroup> umSearchBlockQueue:array<u32,729>;
++fn umSearchBlockMember(tile:u32)->bool{
++ return umTileWidth(tile)==1u&&((umTileSupport(tile)&4u)!=0u)==umRegularFine;
++}
+ @compute @workgroup_size(64) fn redistanceFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+- let owner=umTileJobOwner(group);if(owner.width==0u){return;}
+- let tile=umTileCoord(owner.tile);let wide=umFineWideMask(owner.tile);
+- for(var round=0u;round<umFineRounds(tile);round++){
+-  let vertex=umFineVertex(tile,lane,round,wide);if(vertex.x==UM_NO_VERTEX.x){continue;}
+-  let initial=umLoadVertex(vertex);var value=initial;
+-  if(umRebuildBand(vec3f(vertex),initial,1u)){value=umPreparedSearch(vec3f(vertex),initial,1u);}
++ if(lane==0u){let owner=umTileJobOwner(group);umSearchBlockTile=select(owner.tile,UM_TILES,owner.width==0u);}
++ let ownTile=workgroupUniformLoad(&umSearchBlockTile);if(ownTile==UM_TILES){return;}
++ let block=(umTileCoord(ownTile)/2u)*2u;
++ if(lane==0u){
++  var mask=0u;var first=UM_TILES;
++  for(var k=0u;k<8u;k++){
++   let t=block+umCorner(k,2u);if(any(t>=UM_T)){continue;}let tile=umTileAt(t);
++   if(umSearchBlockMember(tile)){mask|=1u<<k;first=min(first,tile);}
++  }
++  umSearchBlockMask=select(0u,mask,ownTile==first);atomicStore(&umSearchBlockCount,0u);
++ }
++ let mask=workgroupUniformLoad(&umSearchBlockMask);if(mask==0u){return;}
++ for(var k=0u;k<8u;k++){
++  if((mask&(1u<<k))==0u){continue;}
++  let tile=block+umCorner(k,2u);let wide=umFineWideMask(umTileAt(tile));
++  for(var round=0u;round<umFineRounds(tile);round++){
++   let vertex=umFineVertex(tile,lane,round,wide);if(vertex.x==UM_NO_VERTEX.x){continue;}
++   let initial=umLoadVertex(vertex);
++   if(umRebuildBand(vec3f(vertex),initial,1u)){
++    let at=atomicAdd(&umSearchBlockCount,1u);let q=vertex-4u*block;
++    umSearchBlockQueue[at]=q.x|(q.y<<4u)|(q.z<<8u);
++   }else{textureStore(outputPhi,vec3i(vertex),vec4f(initial));}
++  }
++ }
++ workgroupBarrier();let count=atomicLoad(&umSearchBlockCount);
++ for(var at=lane;at<count;at+=64u){
++  let q=umSearchBlockQueue[at];let vertex=4u*block+vec3u(q&15u,(q>>4u)&15u,q>>8u);
++  let initial=umLoadVertex(vertex);let value=umPreparedSearch(vec3f(vertex),initial,1u);
+   textureStore(outputPhi,vec3i(vertex),vec4f(value));
+  }
+ }
+--- a/lib/methods/uniform/uniform-mixed-frame-plan.ts
++++ b/lib/methods/uniform/uniform-mixed-frame-plan.ts
+@@ -231,6 +231,8 @@
+   let p=vec3i(umTileCoord(tile));
+   let regular=bounded&&umCoarseTilesIn(p-vec3i(minus),p+vec3i(plus))==0u;
+   list=select(2u,1u,regular);local=atomicAdd(&certifyCounts[list-1u],1u);
++  // Surface block jobs reuse the certificate class, without another directory.
++  atomicStore(&umSupport[3u*UM_TILES+tile],(atomicLoad(&umSupport[3u*UM_TILES+tile])&3u)|select(0u,4u,regular));
+   // The class for the tiles layer, in the reach word's two spare bits (no
+   // reader masks them in: umReachPlus/Minus take bits 0..29).
+   speeds[UM_TILES+tile]=reach|(select(select(${UNIFORM_STAGE_CERTIFICATE.coarseInReach}u,${UNIFORM_STAGE_CERTIFICATE.saturated}u,!bounded),${UNIFORM_STAGE_CERTIFICATE.regular}u,regular)<<30u);

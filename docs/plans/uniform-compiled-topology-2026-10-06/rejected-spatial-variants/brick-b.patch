@@ -1,0 +1,39 @@
+--- a/lib/methods/uniform/uniform-mixed-surface.ts
++++ b/lib/methods/uniform/uniform-mixed-surface.ts
+@@ -1,4 +1,4 @@
+-import { uniformPreparedSurfaceSamplingWGSL } from "./uniform-prepared-surface.wgsl";
++import { uniformPreparedSurfaceIndexWGSL, uniformPreparedSurfaceSamplingWGSL } from "./uniform-prepared-surface.wgsl";
+ import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+ import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
+ import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
+@@ -873,7 +873,7 @@
+ // may then reuse it as a list. Eight producer corners are the only shared
+ // field storage. Data words have a unique writer and need no atomics.
+ var<workgroup> umPrepareCorners:array<f32,8>;
+-fn umPreparedIndex(p:vec3u)->u32{return p.x+(UM_D.x+1u)*(p.y+(UM_D.y+1u)*p.z);}
++${uniformPreparedSurfaceIndexWGSL}
+ @compute @workgroup_size(64) fn prepareSurface(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+  let tile=group.x+umDispatchX*group.y;
+  if(tile>=UM_TILES){return;}
+--- a/lib/methods/uniform/uniform-prepared-surface.wgsl.ts
++++ b/lib/methods/uniform/uniform-prepared-surface.wgsl.ts
+@@ -1,5 +1,19 @@
+ /** Trilinear samples and centered gradients of the once-prepared phi field.
+  * Keep the original weighted-product and D4 reduction order. */
++export const uniformPreparedSurfaceIndexWGSL = /* wgsl */ `
++// The interior uses compact 4-cubed bricks. The upper x, y and z closures
++// follow without padding, preserving exactly (D.x+1)(D.y+1)(D.z+1) words.
++fn umPreparedIndex(p:vec3u)->u32{
++ let tile=p/4u;let local=p&vec3u(3u);let tiles=UM_D/4u;
++ let inner=64u*(tile.x+tiles.x*(tile.y+tiles.y*tile.z))+local.x+4u*(local.y+4u*local.z);
++ let interior=UM_D.x*UM_D.y*UM_D.z;
++ let yz=UM_D.y*UM_D.z;
++ let xPlane=interior+p.y+UM_D.y*p.z;
++ let yPlane=interior+yz+p.x+(UM_D.x+1u)*p.z;
++ let zPlane=interior+yz+(UM_D.x+1u)*UM_D.z+p.x+(UM_D.x+1u)*p.y;
++ return select(select(select(inner,xPlane,p.x==UM_D.x),yPlane,p.y==UM_D.y),zPlane,p.z==UM_D.z);
++}
++`;
+ export const uniformPreparedSurfaceSamplingWGSL = /* wgsl */ `
+ fn umPreparedSample(p:vec3f)->f32{
+  let q=clamp(p,vec3f(0),vec3f(UM_D));let base=min(vec3u(floor(q)),UM_D-vec3u(1));let t=q-vec3f(base);

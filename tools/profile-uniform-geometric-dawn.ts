@@ -58,6 +58,7 @@ const stats = (values: number[]) => {
 const sourceDirectory=resolve("lib/methods/uniform");
 const sourceFiles=Object.fromEntries(readdirSync(sourceDirectory).filter(p=>p.endsWith(".ts")).sort().map(p=>[p,createHash("sha256").update(readFileSync(resolve(sourceDirectory,p))).digest("hex")]));
 const source={commit:execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim(),uniformFiles:sourceFiles};
+const surfaceAuditSourceHash=surfaceWorkAudit?createHash("sha256").update(readFileSync(resolve("tools/uniform-surface-work-audit.ts"))).digest("hex"):undefined;
 const rows: { frame: number; time_s: number; wall_ms: number; trace: NonNullable<WebGPUUniformReferenceSolver["info"]["physicsTrace"]>; cpuTrace: unknown; quality: Record<string,unknown>; work: Record<string,unknown> }[] = [];
 await acquireWebGPUExclusiveLock("dawn-probe", `Uniform Geometric stage profile: ${sceneId}`);
 let device: GPUDevice | undefined, solver: WebGPUUniformReferenceSolver | undefined;
@@ -153,7 +154,7 @@ try {
   const windows = surfaceWorkAudit ? {} : Object.fromEntries(Object.entries({all:rows.filter(r=>r.frame>4),freeFall:rows.filter(r=>r.frame>4&&r.frame<=24),impactAndSpread:rows.filter(r=>r.frame>=25),lateSplash:rows.filter(r=>r.frame>=91&&r.frame<=120)}).filter(([,rs])=>rs.length>0).map(([name,rs])=>[name,summarize(rs)]));
   const report={source,kernelReport,surfaceWorkAudit,abOff:process.env.FLUID_UNIFORM_AB_OFF ?? "",capturedAt:new Date().toISOString(),sceneId,method:uniformVolumeMethod.id,backend:"Dawn/Metal",adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},frameHz,appDefaults,traceGapMs,reapplyValues:process.argv.includes("--reapply-values"),scope:surfaceWorkAudit?"Diagnostic surface work counters. Instrumented timings are invalid for performance comparison.":"Instrumented, queue-fenced simulation. Rendering, configured trace-cadence gaps, stats and work-count readbacks excluded from wall timings. First four frames excluded from summaries. GPU stages are seam intervals, not isolated kernel durations.",lattice,setup_ms,values,scene,windows,rows,validationErrors:errors};
   const allocationSnapshot=allocationAudit?.snapshot();
-  writeFileSync(out,JSON.stringify({...report,allocationAudit:allocationSnapshot},null,2)+"\n");
+  writeFileSync(out,JSON.stringify({...report,surfaceAuditSourceHash,allocationAudit:allocationSnapshot},null,2)+"\n");
   if(maxGPUBytes>0)assert.ok(allocationSnapshot!.peakBytes<=maxGPUBytes,
     `Peak live GPU resources ${allocationSnapshot!.peakBytes} exceed budget ${maxGPUBytes}`);
   console.log(JSON.stringify({out,windows},null,2));

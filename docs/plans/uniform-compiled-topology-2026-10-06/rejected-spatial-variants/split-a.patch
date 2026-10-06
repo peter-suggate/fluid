@@ -1,0 +1,54 @@
+--- a/lib/methods/uniform/uniform-mixed-extension.ts
++++ b/lib/methods/uniform/uniform-mixed-extension.ts
+@@ -65,6 +65,7 @@
+   * per UE_PACK_TILES of them); a sweep's first holds the regular 4h owners,
+   * 64 a job, unless no h tile can exist. */
+  private readonly seamPipelines=new Map<string,GPUComputePipeline>();
++ private fineSeamSweep?:GPUComputePipeline;
+  private restrictPipeline?:GPUComputePipeline;
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy,private readonly regularBulk=false,directRestriction=false){
+   if(ownership.capacity.lattice.dimensions.some(n=>n%4!==0))throw new Error("Mixed extension requires a 4-aligned lattice");
+@@ -827,9 +828,20 @@
+   workgroupBarrier();
+  }
+ }
++override ueSweepKind:u32=0u;
+ @compute @workgroup_size(64) fn sweepSeams(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+  if(lane==0u){ueLaunch=ueLaunchCounts();}
+  let counts=workgroupUniformLoad(&ueLaunch);let fine=counts.z+counts.x;
++ if(ueSweepKind==1u){
++  ueStagedJob=true;
++  for(var job=group.x;job<counts.x;job+=groups.x){ueSweepSeamFine(ueSeamFineJob(job,lane),lane);workgroupBarrier();}
++  return;
++ }
++ if(ueSweepKind==2u){
++  ueStagedJob=true;
++  for(var job=group.x;job<(counts.y+UE_PACK-1u)/UE_PACK;job+=groups.x){ueSweepCoarsePack(UE_PACK*job,counts.y,lane);workgroupBarrier();}
++  return;
++ }
+  for(var job=group.x;job<fine+(counts.y+UE_PACK-1u)/UE_PACK;job+=groups.x){
+   ueStagedJob=job>=counts.z;
+   if(job<counts.z){ueSweepPack(umRegularCoarseOwner(64u*job+lane));}
+@@ -1057,7 +1069,8 @@
+    this.regularPipelines.set(entryPoint,await compile(1,C.owners,entryPoint==="publish"?"publishFine":entryPoint));
+    this.listPipelines.set(entryPoint,await compile(4,C.regularCoarse,`${entryPoint}List`,true));
+    // The seam launch reads no launch constant; a sweep's tile jobs stage their tiles.
+-   this.seamPipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:`${entryPoint}Seams`,constants:entryPoint==="sweep"?{ueStagedTiles:1,ueMixedJobs:1}:{}}}));
++   this.seamPipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:`${entryPoint}Seams`,constants:entryPoint==="sweep"?{ueStagedTiles:1,ueMixedJobs:1,ueSweepKind:2}:{}}}));
++   if(entryPoint==="sweep")this.fineSeamSweep=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"sweepSeams",constants:{ueStagedTiles:1,ueMixedJobs:1,ueSweepKind:1}}});
+   }));
+  }
+  encode(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2):void{
+@@ -1076,7 +1089,11 @@
+     // A sweep touches no field, so its regular 4h owners ride the seam
+     // launch; with no h tile possible there is no seam job and the list
+     // kernel runs alone.
+-    if(entry==="sweep"&&!o.coarseOnly){o.dispatchCounted(pass,this.seamPipelines.get(entry)!,Math.min(tiles+packs,27*o.capacity.fineTiles+packs),"seams");return;}
++    if(entry==="sweep"&&!o.coarseOnly){
++     o.dispatchRegularCoarseCounted(pass,this.listPipelines.get(entry)!);
++     o.dispatchCounted(pass,this.fineSeamSweep!,o.capacity.fineTiles,"seamFine");
++     o.dispatchBuffered(pass,this.seamPipelines.get(entry)!,"seamCoarse",Math.ceil(tiles/UE_PACK_TILES),UE_PACK_TILES);return;
++    }
+     // A regular 4h owner (a 3x3x3 stencil of 4h tiles) seeds from and
+     // publishes at tile origins and +face anchors only: the base blocks.
+     // Its sweep touches no field.
