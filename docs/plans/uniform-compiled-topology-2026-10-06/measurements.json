@@ -7308,5 +7308,6 @@
       }
     ]
   },
-  "retainedCandidate": "candidate-k"
+  "retainedCandidate": "candidate-k",
+  "retainedImplementationCommit": "6c7f1712"
 }
