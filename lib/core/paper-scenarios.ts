@@ -45,6 +45,8 @@ export function createMassConservingFigure9DamBreak(
   scene.fluid.gravity_m_s2 = { x: 0, y: -10, z: 0 };
   scene.fluid.surfaceTension_N_m = 0;
   scene.rigidBodies = [];
+  // The source scene's container shell is not this container's.
+  scene.solidVoxels = [];
   return scene;
 }
 

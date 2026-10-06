@@ -1,6 +1,7 @@
 import {uniformMixedFacesWGSL} from "./uniform-mixed-faces.wgsl";
 import {uniformMixedVelocitySamplingWGSL} from "./uniform-mixed-velocity-sampling.wgsl";
-import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
+import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
+import { uniformDetailRuntimeWGSL } from "../../core/uniform-detail-abi";
 
 /** Every eight-tap loop in a presentation copy of the samplers runs to an
  * opaque bound. With literal bounds Metal unrolls the nested reconstruction
@@ -11,16 +12,30 @@ function uniformMixedPresentationLoops(source:string):string{
 }
 
 /** Read-only consumer of the same packed ownership and canonical vertices as
- * simulation. Dimensions come from the consumer's existing texture/uniform.
- * A one-word dummy disables mixed sampling for other methods. */
-export function uniformMixedPresentationWGSL(binding:number,phi:string,dimensions:string,existingTopology?:string):string{
+ * simulation. Vertex phi is two textures: `coarsePhi`, the 4h vertex base
+ * ((t+1)^3, texel g = phi at vertex 4g, never folded: its extent is the
+ * lattice under every placement), and `phi`, the detail field, loaded through
+ * the detail table's accessors (udr*). A tile corner read on behalf of a 4h
+ * owner loads from the base, and every vertex read on behalf of an h tile
+ * (its corners included: an h tile stores all of its vertices) from the
+ * detail field. Which one a load site reads is decided by the site, not per
+ * vertex: the all-h path is the same eight direct loads it was before the
+ * base existed, and with no h tile nothing is loaded from the detail binding
+ * (it may be any 1^3 texture). The same code runs at every occupancy.
+ * Every consumer entry point that samples calls udrInit() first.
+ * A one-word dummy disables mixed sampling for other methods.
+ * vertexCache: the sampler's cacheLookup (WGSL run in umVertexValue once a
+ * vertex is known to need reconstruction, p in scope; it may return that
+ * function's own value). Empty, the text is unchanged. */
+export function uniformMixedPresentationWGSL(binding:number,phi:string,coarsePhi:string,existingTopology?:string,vertexCache=""):string{
  const topology=/* wgsl */`
 @group(0) @binding(${binding}) var<storage,read> umTopology:array<u32>;
 const umRegularFine=false;
-fn umDimensions()->vec3u{return ${dimensions};}
+fn umPresentationEnabled()->bool{return arrayLength(&umTopology)>1u;}
+${uniformDetailRuntimeWGSL("umTopology","umPresentationEnabled()")}
+fn umDimensions()->vec3u{return 4u*(textureDimensions(${coarsePhi})-vec3u(1u));}
 fn umTileDimensions()->vec3u{return umDimensions()/4u;}
 fn umTileCount()->u32{let d=umTileDimensions();return d.x*d.y*d.z;}
-fn umPresentationEnabled()->bool{return arrayLength(&umTopology)>1u;}
 // The samplers' eight-tap loop bound, opaque to the compiler. A literal 8u
 // lets Metal unroll every nested reconstruction at every call site; the
 // grid overlay, which samples from many sites, then never finishes compiling.
@@ -41,9 +56,18 @@ fn umOwnerAt(p:vec3i)->UMOwner{
  return UMOwner(tile,lane,width,(umTopology[tile]&0x3fffffffu)+lane);
 }
 fn umOrigin(o:UMOwner)->vec3u{return umTileCoord(o.tile)*4u+umCorner(o.lane,4u/o.width)*o.width;}
-fn umLoadVertex(p:vec3u)->f32{return textureLoad(${phi},vec3i(p),0).x;}
+// A tile corner, from the 4h base.
+fn umLoadCoarseVertex(p:vec3u)->f32{return textureLoad(${coarsePhi},vec3i(p>>vec3u(2u)),0).x;}
+// A vertex of an h tile, from the detail field.
+fn umLoadFineVertex(p:vec3u)->f32{return udrStoredVertex(${phi},p);}
+// A canonical vertex whose site does not know which it is.
+fn umLoadVertex(p:vec3u)->f32{
+ if(all((p&vec3u(3u))==vec3u(0u))){return umLoadCoarseVertex(p);}
+ return umLoadFineVertex(p);
+}
 `;
- const source=topology+uniformMixedPresentationLoops(uniformMixedVertexSamplingWGSL).replace(/\bUM_D\b/g,"umDimensions()").replace(/\bUM_T\b/g,"umTileDimensions()");
+ const sampling=uniformMixedVertexSamplingSource(vertexCache,false,{fine:"umLoadFineVertex",coarse:"umLoadCoarseVertex"});
+ const source=topology+uniformMixedPresentationLoops(sampling).replace(/\bUM_D\b/g,"umDimensions()").replace(/\bUM_T\b/g,"umTileDimensions()");
  return existingTopology?source.replace(/@group\(0\) @binding\(\d+\) var<storage,read> umTopology:array<u32>;/,"").replace(/\bumTopology\b/g,existingTopology):source;
 }
 

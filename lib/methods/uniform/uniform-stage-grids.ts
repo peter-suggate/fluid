@@ -22,6 +22,8 @@
  *   certificate  one word per tile: the frame plan's signed reach (umPackReach,
  *                bits 0..29) and the h sampler certificate class in bits
  *                30..31 (UNIFORM_STAGE_CERTIFICATE; views bit 4)
+ *   importance   two words per tile: the head census's detail importance
+ *                (UNIFORM_STAGE_IMPORTANCE; views bit 16)
  *
  * The header and tile words end the buffer, so readers find them from its
  * length alone; the h band sits in front of the header. Every range is
@@ -34,7 +36,7 @@ export const UNIFORM_STAGE_GRID_HEADER_WORDS = 8;
  * (UNIFORM_STAGE_VIEWS). The view sections are recorded only while a layer
  * that reads them is on (UniformMixedFrame.setLayoutViews); unset, readers
  * ignore their words. */
-export const UNIFORM_STAGE_VIEWS = { previous: 1, reasons: 2, certificate: 4, band: 8 } as const;
+export const UNIFORM_STAGE_VIEWS = { previous: 1, reasons: 2, certificate: 4, band: 8, importance: 16 } as const;
 /** Why the head census made a tile band (h), first rule that fired. Non-band
  * tiles: skipped (no interface within any departure's reach: the O(1)
  * prefix early-out) or traced (the departure trace ran and missed). */
@@ -52,10 +54,48 @@ export const UNIFORM_STAGE_REASON = {
   source: 6,
   /** Liquid-conditional solid or rigid-body promotion. */
   solid: 7,
+  /** A tile without a surface that an importance criterion (or its hold) requires at h. */
+  bulk: 8,
+} as const;
+/** The head census's detail importance criteria, in score and bit order.
+ *   shape     the surface error 4h corners would make, over its tolerance
+ *   thin      liquid or air thinner across the surface than a thickness
+ *   strain    dt·‖sym ∇u‖ over its threshold
+ *   rotation  dt·‖curl u‖ over its threshold
+ *   impact    surface travel into or up a closed wall or solid, over its threshold
+ *   approach  steps of horizon over the steps until the surface meets a wall,
+ *             a solid or another surface
+ * Every score is its measure over its threshold: 1 triggers. */
+export const UNIFORM_DETAIL_CRITERIA = ["shape", "thin", "strain", "rotation", "impact", "approach"] as const;
+export type UniformDetailCriterion = typeof UNIFORM_DETAIL_CRITERIA[number];
+/** The importance view: two words per tile.
+ *   word 0  scores of shape, thin, strain, rotation, a byte each
+ *   word 1  scores of impact, approach (bytes 0, 1), then the flags below
+ * A score byte is min(255, floor(score × scoreOne)): scoreOne is score 1.
+ * Scores are computed only where they can matter: a tile without liquid
+ * reads 0, and so, unless a layer is recording, do a criterion that is off
+ * and a tile shape already requires. Bits 30..31 of word 1 stay clear. */
+export const UNIFORM_STAGE_IMPORTANCE = {
+  scoreOne: 64,
+  /** Bits 16..21: the criterion triggered (UNIFORM_DETAIL_CRITERIA order). */
+  triggeredShift: 16,
+  /** Bits 22..24: the highest-scoring criterion + 1, or 0 when none scored. */
+  winnerShift: 22,
+  /** The census requires the tile at h for importance (triggered and kept, or held). */
+  required: 1 << 25,
+  /** Required only by the hold: no criterion triggers now. */
+  held: 1 << 26,
+  /** Triggered, but dropped by the budget. */
+  dropped: 1 << 27,
+  /** A phi sign change is in the tile. */
+  crossing: 1 << 28,
+  /** The tile holds liquid. */
+  wet: 1 << 29,
 } as const;
 /** Sampler certificate classes (certificate word bits 30..31); 0 is a 4h tile. */
 export const UNIFORM_STAGE_CERTIFICATE = { regular: 1, coarseInReach: 2, saturated: 3 } as const;
-const VIEW_SECTIONS = 3;
+/** Tile-sized view sections: previous, reasons, certificate, then importance's two. */
+const VIEW_SECTIONS = 5;
 
 /** Words of the h band section in front of the header. */
 export function uniformStageBandWords(tiles: number, bandTiles: number): number {
@@ -68,8 +108,8 @@ export function uniformStageGridWords(tiles: number): number {
 }
 
 /** Word offset from the header of a view section (after the band bits). */
-export function uniformStageViewWord(tiles: number, section: "previous" | "reasons" | "certificate"): number {
-  return UNIFORM_STAGE_GRID_HEADER_WORDS + 2 * tiles + Math.ceil(tiles / 32) + ["previous", "reasons", "certificate"].indexOf(section) * tiles;
+export function uniformStageViewWord(tiles: number, section: "previous" | "reasons" | "certificate" | "importance"): number {
+  return UNIFORM_STAGE_GRID_HEADER_WORDS + 2 * tiles + Math.ceil(tiles / 32) + ["previous", "reasons", "certificate", "importance"].indexOf(section) * tiles;
 }
 
 export function uniformStageGridHeader(tiles: number, bandTiles: number, views = 0): Uint32Array<ArrayBuffer> {
@@ -143,6 +183,21 @@ fn umStageCertificate(base:u32,tile:u32)->u32{
  if((umStageViews(base)&${UNIFORM_STAGE_VIEWS.certificate}u)==0u){return 0xffffffffu;}
  return umStageViewWord(base,2u,tile)>>30u;
 }
+// The head census's detail importance (UNIFORM_STAGE_IMPORTANCE): its two
+// words, both 0xffffffff when not recorded.
+fn umStageImportance(base:u32,tile:u32)->vec2u{
+ if((umStageViews(base)&${UNIFORM_STAGE_VIEWS.importance}u)==0u){return vec2u(0xffffffffu);}
+ // Two words per tile, side by side as the census holds them.
+ return vec2u(umStageViewWord(base,3u,2u*tile),umStageViewWord(base,3u,2u*tile+1u));
+}
+// Score over threshold of a criterion (UNIFORM_DETAIL_CRITERIA index): 1 triggers, saturating near 4.
+fn umImportanceScore(words:vec2u,criterion:u32)->f32{
+ let byte=select((words.x>>(8u*criterion))&255u,(words.y>>(8u*(criterion-4u)))&255u,criterion>=4u);
+ return f32(byte)/${UNIFORM_STAGE_IMPORTANCE.scoreOne}.0;
+}
+fn umImportanceTriggered(words:vec2u,criterion:u32)->bool{return ((words.y>>(${UNIFORM_STAGE_IMPORTANCE.triggeredShift}u+criterion))&1u)!=0u;}
+// The highest-scoring criterion, or 0xffffffff when none scored.
+fn umImportanceWinner(words:vec2u)->u32{let w=(words.y>>${UNIFORM_STAGE_IMPORTANCE.winnerShift}u)&7u;return select(w-1u,0xffffffffu,w==0u);}
 fn umStageBand(base:u32,tile:u32)->bool{
  return (umStageViews(base)&${UNIFORM_STAGE_VIEWS.band}u)!=0u&&(${buffer}[base+${UNIFORM_STAGE_GRID_HEADER_WORDS}u+2u*umTileCount()+tile/32u]&(1u<<(tile%32u)))!=0u;
 }

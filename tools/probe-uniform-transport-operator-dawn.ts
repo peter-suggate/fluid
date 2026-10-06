@@ -23,6 +23,7 @@ import {resolveMethodValues} from '../lib/core/method-contract';
 import {uniformVolumeMethod} from '../lib/methods/uniform/uniform-volume-method';
 import type {WebGPUUniformReferenceSolver} from '../lib/methods/uniform/webgpu-uniform-reference';
 import {mixedCellWidth,type UniformMixedLayout} from '../lib/methods/uniform/uniform-mixed-layout';
+import {UniformMixedTransportStage} from '../lib/methods/uniform/uniform-mixed-transport';
 import {UNIFORM_MIXED_TRANSPORT_LIVE_HEADER} from '../lib/methods/uniform/uniform-mixed-transport.wgsl';
 import {readMixedTexture} from '../tests/helpers/uniform-mixed-native-fields';
 const arg=(k:string,d:string)=>process.argv.find(a=>a.startsWith(`--${k}=`))?.slice(k.length+3)??d;
@@ -69,13 +70,14 @@ try{
  const boundGroup=device.createBindGroup({layout:boundPipeline.getBindGroupLayout(0),entries:[{binding:0,resource:incoming.createView()},{binding:1,resource:bounded.createView()}]});
  // Full support: every tile a row and a donor, in its tier's lists.
  const fullLive=device.createBuffer({label:'Operator full-support live set',size:stage.live.size,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});owned.push(fullLive);
- const cells=stage.cells as number,arena=f.arena;
+ // The frame's stage scratch at the ownership's h-tile capacity: edge rows by owner rank, donor sums, decoded sums.
+ const scratch=frame.stageScratch as GPUBuffer,capacity=stage.ownership.capacity,ranges=UniformMixedTransportStage.scratchRanges(capacity.tiles,capacity.fineTiles);
  const sink=stage.recovery?device.createBuffer({label:'Operator evidence sink',size:stage.recovery.size,usage:GPUBufferUsage.STORAGE}):undefined;if(sink)owned.push(sink);
  const group=(input:GPUTexture,output:GPUTexture,dep:GPUTexture=f.departure)=>device!.createBindGroup({layout:stage.resourcesLayout,entries:[
   {binding:0,resource:{buffer:stage.sampling}},
-  {binding:1,resource:{buffer:arena.buffer,offset:0,size:cells*40}},
-  {binding:2,resource:{buffer:arena.buffer,offset:arena.donorOffset,size:cells*12}},
-  {binding:3,resource:{buffer:arena.buffer,offset:arena.donorOffset+cells*12,size:cells*4}},
+  {binding:1,resource:{buffer:scratch,...ranges.edges}},
+  {binding:2,resource:{buffer:scratch,...ranges.donors}},
+  {binding:3,resource:{buffer:scratch,...ranges.sums}},
   {binding:4,resource:input.createView()},{binding:5,resource:output.createView()},
   {binding:6,resource:dep.createView()},
   ...(stage.sourceParams?[{binding:7,resource:{buffer:stage.sourceParams,size:176}}]:[]),

@@ -39,7 +39,7 @@ try{
  if(process.env.PROBE_DT)scene.numerics.fixedDt_s=scene.numerics.maxDt_s=Number(eval(process.env.PROBE_DT));
  const d=refinementRegionLattice(scene).dimensions;
  solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",
-  {coarsening:dynamic?"dynamic":"regions",surfaceDeficitBalancing:"off",...JSON.parse(process.env.PROBE_OVERRIDES??"{}")},undefined,()=>{});
+  {detailPolicy:dynamic?"dynamic":"full",surfaceDeficitBalancing:"off",...JSON.parse(process.env.PROBE_OVERRIDES??"{}")},undefined,()=>{});
  const fields=solver as unknown as {volumeA:GPUTexture;vertexPhiField:GPUTexture;mixedFrame:{bandTiles?:number;bandResidual?:number;ownership:{layout:{tiles:Uint32Array}}}};
  if(process.env.PROBE_PRESSURE_TOLERANCE)(solver as unknown as {applyRuntimeValues(v:Record<string,number>):void}).applyRuntimeValues({pressureResidualTolerance:Number(process.env.PROBE_PRESSURE_TOLERANCE)});
  const rows=[];

@@ -20,7 +20,7 @@ import { FieldViewRows, methodHasQuickFields } from "./FieldQuickBar";
 import { FieldControlRows, methodSetupTabs } from "./FluidFieldFlyout";
 import { FeatureSlot } from "../lib/features/ui/FeatureSlot";
 import { MakeRows } from "./MakeRows";
-import { SculptRows } from "./SculptRows";
+import { UniformDetailRow } from "./UniformCoarseControl";
 import { OakTreeEditor } from "./OakTreeEditor";
 import { StoneDialRows } from "./StoneLookFlyout";
 import { CanopyDialRows } from "./TreeCanopyFlyout";
@@ -211,7 +211,8 @@ function entityHasOptions(entity: EditorEntity): boolean {
  * contextual means the column appears with its subject, not that it hides from
  * it. Selecting the tank still *grows* this column rather than swapping it for
  * a panel, and while a sculpt tool is armed the viewport withholds it entirely —
- * the tool's own card is the context then.
+ * the stroke owns the picture then, and the tools themselves stand on the rail
+ * at the viewport's left edge (`VoxelToolRail`), not here.
  */
 export function ContainerToolstrip({
   leftFraction,
@@ -257,6 +258,8 @@ const ContainerToolstripRows = memo(function ContainerToolstripRows({ entity }: 
         what is moving the water, how its surface is drawn, and whether gravity
         is on. The slots order their own placements by declared priority. */}
     {hasSolver && <SolverRow />}
+    {/* The solver's own detail switches, directly under its name. */}
+    {hasSolver && <UniformDetailRow />}
     {hasSolver && <FeatureSlot slot="scene.surface" />}
     {hasSolver && <FeatureSlot slot="scene.physics" />}
     {hasSolver && <><FeatureSlot slot="scene.adaptivity" /><FeatureSlot slot="scene.simulation" /></>}
@@ -265,7 +268,6 @@ const ContainerToolstripRows = memo(function ContainerToolstripRows({ entity }: 
         Drawn rather than inferred because both halves are glyph rows. */}
     <ToolstripRule />
     <MakeRows fluid={hasSolver} />
-    <SculptRows />
     {/* The low-priority tail: the container's extents and the document's file
         operations — reached rarely, so they stand below the verbs and fold
         their lists behind chevrons rather than spending column on them. */}

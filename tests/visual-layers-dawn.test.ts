@@ -59,7 +59,9 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
       await readback.mapAsync(GPUMapMode.READ); const pixels = new Uint8Array(readback.getMappedRange()).slice(); readback.unmap(); return pixels;
     }
     assert.ok((await draw(visualLayers([]))).every(n => n === 0));
-    for (const layer of VISUAL_LAYERS) { const pixels = await draw(visualLayers([layer.id])); assert.ok(pixels.some(n => n !== 0), `${layer.id} must draw`); }
+    // Importance is drawn from the mixed frame's stage record alone, and this lattice publishes none.
+    for (const layer of VISUAL_LAYERS) { if (layer.id === "importance") continue; const pixels = await draw(visualLayers([layer.id])); assert.ok(pixels.some(n => n !== 0), `${layer.id} must draw`); }
+    assert.ok((await draw(visualLayers(["importance"]))).every(n => n === 0), "importance must not invent scores without a recorded stage view");
     assert.ok((await draw(visualLayers(["pages"]), true, [0, 0, 0], false)).every(n => n === 0), "absent page records must not invent residency");
     const idle = await draw(visualLayers(["pages"]));
     const transport = await draw(visualLayers(["pages"]), true, [0,0,0], true, "transport");

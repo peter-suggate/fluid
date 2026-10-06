@@ -95,7 +95,7 @@ try {
   if(process.argv.includes("--full-pressure-envelope")){
     const frame=(solver as any).mixedFrame,get=frame.lagged.get.bind(frame.lagged);
     // Keep the receipt admission check: only replace a plan that exists.
-    frame.lagged.get=(key:number)=>get(key)?frame.initialPlan:undefined;
+    frame.lagged.get=(key:number)=>{const evidence=get(key);return evidence?{...evidence,...frame.initialPlan}:undefined;};
   }
   if(process.argv.includes("--split-stages")){
     const target=solver as any;
@@ -150,6 +150,8 @@ try {
     usePerformanceInstrumentationStore.getState().setMode("timeline");
   }
   if(arg("after-values", "")!=="")solver.applyRuntimeValues({...values,...JSON.parse(arg("after-values", "{}"))});
+  // Late values or scenes wait for pipelines no earlier state needed.
+  await solver.pipelinesPrepared();
   UNIFORM_PRESSURE_BAND_SCHEDULE.cycles=afterBandCycles;
   const finalQuality=async()=>{
     const frame=(solver as any).mixedFrame,ownership=frame.ownership,n=ownership.capacity.tiles;

@@ -31,6 +31,9 @@ export class SolidOccupancyMask {
     this.words.set([SOLID_OCCUPANCY_MASK_MAGIC, ...this.size]);
   }
 
+  /** The mask was made from this world: an update to it changes no bit. */
+  describes(world: SolidWorld): boolean { return this.world === world; }
+
   /** Make the mask describe `next`; undefined when no bit changed. */
   update(next: SolidWorld): SolidOccupancyMaskDirtyRange | undefined {
     const previous = this.world;
@@ -76,7 +79,8 @@ export class SolidOccupancyMask {
         }
         const index = row + x, word = SOLID_OCCUPANCY_MASK_HEADER_WORDS + (index >>> 5), bit = 1 << (index & 31);
         const before = words[word]!;
-        const after = solid ? before | bit : before & ~bit;
+        // Unsigned: a word holding bit 31 must compare equal to its stored value.
+        const after = (solid ? before | bit : before & ~bit) >>> 0;
         if (after === before) continue;
         words[word] = after;
         if (word < dirty.low) dirty.low = word;

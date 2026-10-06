@@ -8,6 +8,7 @@
 
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import type { GPUInitializationTask } from "./gpu-initialization";
+import { uniformDetailBaseOf, uniformDetailRuntimeWGSL } from "./uniform-detail-abi";
 
 const secondaryParticlePipelineCache = new WeakMap<GPUDevice, Map<string, GPUComputePipeline[]>>();
 
@@ -21,6 +22,9 @@ export interface SecondaryParticleSamplingSource {
   surfaceTexture: GPUTexture;
   velocityTexture: GPUTexture;
   columnBaseTexture: GPUTexture;
+  /** Uniform Geometric's mixed topology: its detail table addresses packed
+   * surface and velocity fields (uniform-detail-abi.ts). Absent: raw fields. */
+  mixedOwnership?: GPUBufferBinding;
   fieldLayout: SecondaryParticleFieldLayout;
   surfaceEncoding: SecondaryParticleSurfaceEncoding;
 }
@@ -91,6 +95,11 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(4) var<storage, read_write> particleState: ParticleState;
 @group(0) @binding(5) var<uniform> params: Params;
+@group(0) @binding(6) var<storage, read> fieldTopology: array<u32>;
+// The base blocks of the two fields (uniform-detail-abi.ts).
+@group(0) @binding(7) var surfaceBase: texture_3d<f32>;
+@group(0) @binding(8) var velocityBase: texture_3d<f32>;
+${uniformDetailRuntimeWGSL("fieldTopology", "arrayLength(&fieldTopology)>1u")}
 
 fn dims() -> vec3i { return vec3i(params.gridAndDt.xyz); }
 fn dt() -> f32 { return params.gridAndDt.w; }
@@ -129,7 +138,7 @@ fn packedY(cell: vec3i) -> vec2i {
 
 fn surfaceRaw(cell: vec3i) -> f32 {
   let q = clamp(cell, vec3i(0), dims() - vec3i(1));
-  if (!restrictedLayout()) { return textureLoad(surfaceField, q, 0).x; }
+  if (!restrictedLayout()) { return udrLoadCell(surfaceField, surfaceBase, q).x; }
   let mapped = packedY(q);
   if (mapped.x < 0) {
     let t = bitcast<f32>(mapped.y);
@@ -147,7 +156,7 @@ fn phiCell(cell: vec3i) -> f32 {
 
 fn velocityRaw(cell: vec3i) -> vec3f {
   let q = clamp(cell, vec3i(0), dims() - vec3i(1));
-  if (!restrictedLayout()) { return textureLoad(velocityField, q, 0).xyz; }
+  if (!restrictedLayout()) { return udrLoadFace(velocityField, velocityBase, q).xyz; }
   let mapped = packedY(q);
   if (mapped.x < 0) {
     let t = bitcast<f32>(mapped.y);
@@ -231,6 +240,7 @@ fn capillaryTime(radius: f32) -> f32 {
 
 @compute @workgroup_size(64)
 fn updateParticles(@builtin(global_invocation_id) gid: vec3u) {
+  udrInit();
   let index = gid.x;
   if (index >= capacity()) { return; }
   var particle = particles[index];
@@ -258,6 +268,7 @@ fn updateParticles(@builtin(global_invocation_id) gid: vec3u) {
 
 @compute @workgroup_size(4, 4, 4)
 fn spawnParticles(@builtin(global_invocation_id) gid: vec3u) {
+  udrInit();
   let cell = vec3i(gid);
   if (!validCell(cell)) { return; }
   let phi = phiCell(cell);
@@ -572,7 +583,13 @@ export class WebGPUSecondaryParticleSystem {
   private readonly particles: GPUBuffer;
   private readonly state: GPUBuffer;
   private readonly params: GPUBuffer;
-  private readonly bindGroup: GPUBindGroup;
+  /** One word bound in place of a mixed topology: the field loads stay raw. */
+  private readonly rawTopology: GPUBuffer;
+  private bindGroup!: GPUBindGroup;
+  /** The source resources the group binds: a solver's detail storage swaps
+   * a field's texture with its h-tile capacity (base block or h texture). */
+  private bound?: readonly [GPUTexture, GPUTexture, GPUTexture, GPUBuffer | undefined];
+  private readonly bindLayout: GPUBindGroupLayout;
   private shaderModule!: GPUShaderModule;
   private readonly pipelineLayout: GPUPipelineLayout;
   private updatePipeline?: GPUComputePipeline;
@@ -605,18 +622,33 @@ export class WebGPUSecondaryParticleSystem {
       { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
       { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 7, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+      { binding: 8, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
     ] });
     this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-    this.bindGroup = device.createBindGroup({ layout, entries: [
+    this.rawTopology = device.createBuffer({ label: "Secondary particle raw-field topology", size: 4, usage: GPUBufferUsage.STORAGE });
+    this.bindLayout = layout;
+    this.bind(source);
+    this.writeParameters(1 / 60, source);
+  }
+
+  private bind(source: SecondaryParticleSamplingSource) {
+    const next = [source.surfaceTexture, source.velocityTexture, source.columnBaseTexture, source.mixedOwnership?.buffer] as const;
+    if (this.bound && next.every((resource, index) => resource === this.bound![index])) return;
+    this.bound = next;
+    this.bindGroup = this.device.createBindGroup({ layout: this.bindLayout, entries: [
       { binding: 0, resource: source.surfaceTexture.createView({ dimension: "3d" }) },
       { binding: 1, resource: source.velocityTexture.createView({ dimension: "3d" }) },
       { binding: 2, resource: source.columnBaseTexture.createView() },
       { binding: 3, resource: { buffer: this.particles } },
       { binding: 4, resource: { buffer: this.state } },
-      { binding: 5, resource: { buffer: this.params } }
+      { binding: 5, resource: { buffer: this.params } },
+      { binding: 6, resource: source.mixedOwnership ?? { buffer: this.rawTopology } },
+      { binding: 7, resource: uniformDetailBaseOf(source.surfaceTexture).createView({ dimension: "3d" }) },
+      { binding: 8, resource: uniformDetailBaseOf(source.velocityTexture).createView({ dimension: "3d" }) }
     ] });
-    this.writeParameters(1 / 60, source);
   }
 
   private descriptor(entryPoint: "updateParticles" | "spawnParticles"): GPUComputePipelineDescriptor {
@@ -682,6 +714,7 @@ export class WebGPUSecondaryParticleSystem {
 
   prepareStep(dt: number, source: SecondaryParticleSamplingSource) {
     this.step += 1;
+    this.bind(source);
     this.writeParameters(dt, source);
   }
 
@@ -703,6 +736,7 @@ export class WebGPUSecondaryParticleSystem {
     this.particles.destroy();
     this.state.destroy();
     this.params.destroy();
+    this.rawTopology.destroy();
   }
 }
 

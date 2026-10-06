@@ -381,6 +381,7 @@ export function ToolstripMoreRow({
  */
 export function ToolstripMenuButton({
   label,
+  caption,
   hint,
   open,
   testId,
@@ -389,6 +390,12 @@ export function ToolstripMenuButton({
 }: {
   /** Names the trigger and the list; on the tip, and on both aria labels. */
   label: string;
+  /**
+   * A word on the trigger, before its chevron. For a list that is not the
+   * alternatives to the mark beside it — a row's own cluster of settings —
+   * where a bare chevron would read as belonging to the glyph.
+   */
+  caption?: string;
   hint?: string;
   open: boolean;
   testId?: string;
@@ -416,13 +423,14 @@ export function ToolstripMenuButton({
   return <span className="toolstrip-anchor">
     <button
       type="button"
-      className={`toolstrip-key is-chevron${open ? " active" : ""}`}
+      className={`toolstrip-key is-chevron${caption === undefined ? "" : " is-captioned"}${open ? " active" : ""}`}
       aria-label={label}
       aria-haspopup="menu"
       aria-expanded={open}
       data-testid={testId}
       onClick={() => onOpen(!open)}
     >
+      {caption !== undefined && <span className="toolstrip-caption">{caption}</span>}
       <ChevronDown width={12} height={12} strokeWidth={2} aria-hidden />
       <span className="toolstrip-tip">
         <strong>{label}</strong>

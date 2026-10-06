@@ -438,9 +438,9 @@ export function MethodSetupTab() {
   const method = getMethod(methodId);
   const values = resolvedMethodValues(methodState);
   const selects = method.params.filter((spec): spec is SelectParamSpec =>
-    spec.tier === "coarse" && spec.kind === "select"
+    spec.tier === "coarse" && spec.kind === "select" && !spec.dedicated
       && spec.key !== "prepareCoarseSimulation" && spec.key !== "coarseSimulation");
-  const dials = method.params.filter((spec) => spec.tier === "coarse" && spec.kind !== "select");
+  const dials = method.params.filter((spec) => spec.tier === "coarse" && spec.kind !== "select" && !spec.dedicated);
   return <div className="fluid-field-settings" role="group" aria-label="Solver setup">
     <FieldList>
       {method.showQualityControl !== false && <Field label="Quality" hint={method.pressureMapping}>
@@ -473,7 +473,7 @@ export function MethodAdvancedTab() {
   const session = useSession();
   const methodState = session.method();
   const methodId = methodState.methodId;
-  const fine = getMethod(methodId).params.filter((spec) => spec.tier === "fine");
+  const fine = getMethod(methodId).params.filter((spec) => spec.tier === "fine" && !spec.dedicated);
   return <div className="fluid-field-settings" role="group" aria-label="Advanced solver parameters">
     <FieldList>
       {fine.map((spec) => <MethodParamControl key={spec.key} spec={spec} methodId={methodId} />)}

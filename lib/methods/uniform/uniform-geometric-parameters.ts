@@ -1,5 +1,6 @@
 import { UNIFORM_PARAMS } from "./parameters";
 import { numberValue, type MethodParamSpec, type MethodParamValues } from "../../core/method-contract";
+import { UNIFORM_DETAIL_CONTROL_DEFAULTS, UNIFORM_DETAIL_PARAM_KEYS, UNIFORM_DETAIL_RANGES } from "./uniform-detail-policy";
 
 // Sharpening runs at the paper dose (strength 1). Its band (default 2.1h) is
 // one uniform the admission test and the orphan relay both read.
@@ -99,22 +100,67 @@ params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit 
   options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
   hint:"Preserve overfill expansion and balance it globally with contraction in underfilled pressure-liquid cells, weighted by the existing surface-fill estimate. Reduces persistent sloshing; capped to the available deficit per step."});
 
-export const UNIFORM_GEOMETRIC_COARSE_SURFACE_TOLERANCE = 0;
-export function uniformGeometricCoarseSurfaceTolerance(value: unknown): number {
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : UNIFORM_GEOMETRIC_COARSE_SURFACE_TOLERANCE;
-}
-params.push({kind:"select",key:"coarsening",label:"Coarsening",default:"dynamic",tier:"coarse",update:"runtime",
-  options:[{value:"regions",label:"Regions"},{value:"dynamic",label:"Dynamic"}],
-  hint:"Regions: authored refinement regions choose coarse tiles. Dynamic: bulk and air can use 4h cells; liquid surface tiles stay fine. Authored regions can force fine cells."});
-params.push({kind:"number",key:"coarseningBoundaryTravel",label:"Boundary impact travel",default:1,tier:"coarse",update:"runtime",
-  min:0,max:64,step:0.5,digits:1,unit:"cells/step",
-  hint:"Surface liquid a wall or solid redirects is fine whatever its speed: liquid moving at least this many fine cells per step toward a closed wall or solid it reaches within one 4h cell (impact), or up a closed side wall faster than along it (lift). At 4h such a sheet is thinner than an owner can pressurise, so it piles up instead of climbing. Free fast fronts are unaffected. 0 disables."});
+// Simulation detail (docs/plans/uniform-4h-first-implementation-handoff-2026-10-03.md):
+// runtime-only, so a policy change or a moved focus never rebuilds or reseeds.
+// The Simulation detail control (components/UniformCoarseControl.tsx) owns them.
+// The retired `coarsening` control (regions|dynamic) is ignored like any
+// undeclared key; persistence migrates it (migrateUniformDetailOverrides).
+params.push(
+  {kind:"select",key:"detailPolicy",label:"Simulation detail",default:UNIFORM_DETAIL_CONTROL_DEFAULTS.detailPolicy,tier:"coarse",update:"runtime",dedicated:true,
+    options:[{value:"requested",label:"Requested"},{value:"dynamic",label:"Dynamic"},{value:"full",label:"Full"}],
+    hint:"Requested: a 4h base everywhere, with h only in Fine regions you draw. Dynamic: Fine regions plus automatic detail at active water (this build: the surface-driven census), and near the focus when that is switched on. Full: h detail across the whole domain through the same planner."},
+  {kind:"select",key:"detailNearFocus",label:"Detail near focus",default:UNIFORM_DETAIL_CONTROL_DEFAULTS.detailNearFocus,tier:"coarse",update:"runtime",dedicated:true,
+    options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+    hint:"Dynamic only: hold h detail around the orbit target (not the camera eye), with or without liquid there. Off by default."},
+  {kind:"select",key:"detailActivity",label:"Detail for activity",default:UNIFORM_DETAIL_CONTROL_DEFAULTS.detailActivity,tier:"coarse",update:"runtime",dedicated:true,
+    options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+    hint:"Reserved for host-side activity requests; Dynamic's importance criteria below decide h on the GPU whatever this says."},
+  {kind:"number",key:"detailBudgetPercent",label:"Automatic detail budget",default:UNIFORM_DETAIL_CONTROL_DEFAULTS.detailBudgetPercent,tier:"coarse",update:"runtime",dedicated:true,
+    min:0,max:100,step:1,digits:0,unit:"%",
+    hint:"Most of the domain Dynamic's criteria may hold at h, closure and travel included. Over it, the lowest-scoring tiles are dropped first (from the frame after). Fine regions, solid contact and Full are never clipped. 100 clips nothing."},
+  {kind:"number",key:"detailFocusRadiusPercent",label:"Focus radius",default:UNIFORM_DETAIL_CONTROL_DEFAULTS.detailFocusRadiusPercent,tier:"coarse",update:"runtime",dedicated:true,
+    min:1,max:100,step:1,digits:0,unit:"% of extent",
+    hint:"Half-width of the focus request, as a share of the domain's longest physical extent."},
+  {kind:"number",key:"detailSensitivity",label:"Detail sensitivity",default:UNIFORM_DETAIL_CONTROL_DEFAULTS.detailSensitivity,tier:"coarse",update:"runtime",dedicated:true,
+    min:0,max:1,step:0.05,digits:2,unit:"",
+    hint:"One dial over every importance threshold, scaled by 2^(2 − 4 × sensitivity): 0.5 leaves them as set, 1 asks for h four times sooner, 0 four times later."},
+);
+// Dynamic's importance criteria (UNIFORM_DETAIL_CRITERIA): each scores a tile
+// as its measure over its threshold, and a score of 1 requires the tile at h.
+// The declared defaults are the census the lanes were written against; the
+// app's are UNIFORM_DETAIL_APP_IMPORTANCE.
+const detailToggle=(key:keyof typeof UNIFORM_DETAIL_CONTROL_DEFAULTS,label:string,hint:string):MethodParamSpec=>({kind:"select",key,label,default:UNIFORM_DETAIL_CONTROL_DEFAULTS[key] as string,tier:"coarse",update:"runtime",dedicated:true,
+  options:[{value:"on",label:"On"},{value:"off",label:"Off"}],hint});
+const detailNumber=(key:keyof typeof UNIFORM_DETAIL_RANGES,label:string,unit:string,hint:string):MethodParamSpec=>{const [min,max,step,digits]=UNIFORM_DETAIL_RANGES[key];
+  return {kind:"number",key,label,default:UNIFORM_DETAIL_CONTROL_DEFAULTS[key],tier:"coarse",update:"runtime",dedicated:true,min,max,step,digits,unit,hint};};
+params.push(
+  detailToggle("detailSurface","Surface","Only tiles within the Surface distance of a surface-crossing tile are eligible for automatic detail. Filters the existing selection, including its margin and hold; never adds fine tiles. Explicit requests and required solid contact remain."),
+  detailNumber("detailSurfaceDistance","Surface distance","tiles","Allowed distance from a surface-crossing tile. 0: crossing tiles only; 1–3: that many neighbouring tile layers, including diagonals. Filters existing refinement; does not request it."),
+  detailToggle("detailShape","Detail for surface shape","A surface tile is h where 4h corners cannot carry its shape."),
+  detailNumber("detailShapeTolerance","Shape tolerance","h","Surface error a tile may take at 4h: an h tile coarsens when trilinear phi from its 4h corners stays within it; a 4h tile refines when its second difference predicts twice that. 0 keeps every surface tile at h."),
+  {kind:"select",key:"detailShapeMetric",label:"Shape metric",default:UNIFORM_DETAIL_CONTROL_DEFAULTS.detailShapeMetric,tier:"coarse",update:"runtime",dedicated:true,
+    options:[{value:"value",label:"Value error"},{value:"displacement",label:"Surface displacement"}],
+    hint:"What the shape tolerance bounds on an h tile. Value error: the largest gap between phi and the trilinear phi of its 4h corners within 2h of the surface. Surface displacement: how far the surface itself moves when the tile is carried by its 4h corners; it asks for about half the tiles at the same tolerance."},
+  detailToggle("detailThin","Detail for thin features","A surface tile is h where the liquid, or the air gap, across it is thin: sheets, films, jets, necks and closing gaps that a 4h owner cannot pressurise."),
+  detailNumber("detailThinThickness","Thin thickness","h","Liquid or air thinner than this across the surface is h. Measured as twice the deepest phi on either side within a tile of the surface."),
+  detailToggle("detailStrain","Detail for deformation","A tile is h where the flow stretches or shears fast: dt·‖sym ∇u‖ across its neighbours."),
+  detailNumber("detailStrainThreshold","Deformation threshold","/step","Deformation per step (dt·‖sym ∇u‖) at which a tile is h. 0.1: a tile-sized blob changes shape by a tenth in a step."),
+  detailToggle("detailRotation","Detail for rotation","A tile is h where the flow turns fast: dt·‖curl u‖ across its neighbours. Vortices and rolling fronts that 4h smears."),
+  detailNumber("detailRotationThreshold","Rotation threshold","rad/step","Rotation per step (dt·‖curl u‖) at which a tile is h."),
+  detailToggle("detailImpact","Detail for wall impact","Surface liquid a wall or solid redirects is h: moving into a closed wall or solid it reaches within one 4h cell (impact), or up a closed side wall faster than along it (lift)."),
+  detailNumber("detailImpactTravel","Impact travel","cells/step","Travel toward (or up) the wall at which the impact rule fires. At 4h such a sheet is thinner than an owner can pressurise, so it piles up instead of climbing. Free fast fronts are unaffected."),
+  detailToggle("detailApproach","Detail for approaching contact","A surface tile is h before it meets a wall, a solid or another surface: the gap ahead of it closes within the horizon."),
+  detailNumber("detailApproachSteps","Approach horizon","steps","A surface that closes its gap within this many steps is h. Refining a fast front early has held the long-dam toe short of the wall: watch the toe."),
+  detailToggle("detailBulk","Detail in bulk liquid","Deformation and rotation also judge liquid tiles with no surface in them. Off: only surface tiles."),
+  detailNumber("detailMarginTiles","Detail margin","tiles","Tiles of h kept around every tile a criterion requires, on top of the surface's travel over the step."),
+  detailNumber("detailHoldSteps","Detail hold","steps","Steps a tile stays h after its last trigger, and for as long as a score stays above 0.7. 0 follows the criteria step by step."),
+  detailToggle("detailSolidContact","Detail at solids","Static solids hold the tiles they cut, and those tiles' neighbours, at h. Off (Requested only): a solid asks for no detail and its tiles run as cut 4h owners; Fine regions still apply. Dynamic and Full keep solid contact at h, and rigid bodies are always h."),
+);
 
 /** Shared by the studio and scene harnesses. */
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);
 /** Controls the 2D native port does not carry: GPU mixed-ownership scheduling and presentation. */
-const gpuOnlyKeys = new Set(["orphanDustThreshold", "coarsening", "sharpeningDistance", "sharpeningSweeps", "surfaceVolumeRounds", "phiPreserveSurface"]);
+const gpuOnlyKeys = new Set<string>(["orphanDustThreshold", "sharpeningDistance", "sharpeningSweeps", "surfaceVolumeRounds", "phiPreserveSurface", ...UNIFORM_DETAIL_PARAM_KEYS]);
 export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => !gpuOnlyKeys.has(p.key) && !p.key.startsWith("coarsening")));
 export const UNIFORM_GEOMETRIC_DEFAULTS: Readonly<MethodParamValues> = Object.freeze(
   Object.fromEntries(params.map(p => [p.key, p.default])),

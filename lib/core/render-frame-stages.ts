@@ -316,7 +316,7 @@ export const RENDER_FRAME_STAGE_PLUGINS = Object.freeze({
   "dry-scene-unavailable": {
     owner: "water",
     node: "deferred-lighting",
-    phase: { id: "dry-scene", label: "SVO dry-scene unavailable · fail closed" },
+    phase: { id: "dry-scene", label: "SVO dry-scene not attached · studio ground" },
   },
   "water-front-interface": {
     owner: "water",

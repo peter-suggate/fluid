@@ -3,11 +3,12 @@
  * The caller supplies physical spacing UM_H, umPressure(owner), and
  * umPressureSlope(owner). Slopes are frozen before a pressure-core solve;
  * they must not be read while being overwritten by the same dispatch.
+ * sample is the value a neighbour lends the owner's slope (default its pressure).
  * This adds no topology tables and does not change geometric divergence.
  */
-export function uniformMixedPressureReconstructionSource(surface = false): string { return /* wgsl */ `
+export function uniformMixedPressureReconstructionSource(surface = false, sample = surface ? "umPressureGhostSlopeSample(owner,neighbor)" : "umPressure(neighbor)"): string { return /* wgsl */ `
 // The pressure a finer or equal neighbour contributes to the owner's slope.
-fn umReconstructSample(owner:UMOwner,neighbor:UMOwner)->f32 {return ${surface ? "umPressureGhostSlopeSample(owner,neighbor)" : "umPressure(neighbor)"};}
+fn umReconstructSample(owner:UMOwner,neighbor:UMOwner)->f32 {return ${sample};}
 // A slope is needed beside a finer neighbour${surface ? " or an unequal air neighbour" : ""}.
 fn umReconstructNeeds(owner:UMOwner,neighbor:UMOwner)->bool {
  return (neighbor.width!=0u&&neighbor.width<owner.width)${surface ? "||(neighbor.width!=0u&&neighbor.width!=owner.width&&!umPressureLiquid(neighbor))" : ""};
@@ -42,7 +43,7 @@ ${surface ? " if(!umPressureLiquid(owner)){return vec3f(0.0);}" : " if(owner.wid
     for(var part=0u;part<first.count;part++){
      let neighbor=umFace(owner,normal,sign,part).neighbor;
      let delta=(f32(umOrigin(neighbor)[axis])+0.5*f32(neighbor.width)-center[axis])*UM_H[axis];
-     numerator+=delta*(${surface ? "umPressureGhostSlopeSample(owner,neighbor)" : "umPressure(neighbor)"}-p);span+=delta*delta;
+     numerator+=delta*(umReconstructSample(owner,neighbor)-p);span+=delta*delta;
     }
    }}
   }

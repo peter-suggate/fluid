@@ -1,4 +1,6 @@
+import { uniformDetailBindLayout, uniformDetailModule, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
+import {UNIFORM_DETAIL_CANONICAL_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 
@@ -7,27 +9,27 @@ import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.
 export class UniformMixedDiagnostics {
  private pipeline?:GPUComputePipeline;
  private readonly resources:GPUBindGroupLayout;
- private readonly group:GPUBindGroup;
+ private readonly group:UniformDetailGroup;
  constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,
   volume:GPUTexture,velocity:GPUTexture,phi:GPUTexture,private readonly reductions:GPUBuffer){
-  this.resources=device.createBindGroupLayout({entries:[
+  this.resources=uniformDetailBindLayout(device,{entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
   ]});
-  this.group=device.createBindGroup({layout:this.resources,entries:[
-   ...[volume,velocity,phi].map((t,binding)=>({binding,resource:t.createView()})),
+  this.group=uniformDetailGroup(device,{layout:this.resources,entries:[
+   ...[volume,velocity,phi].map((t,binding)=>({binding,resource:t})),
    {binding:3,resource:{buffer:reductions,offset:0,size:24}},
   ]});
  }
  async initialize():Promise<void>{
   const h=this.ownership.capacity.lattice.cellSize_m;
   // One lane per GPU-counted owner of every tier (umAllOwner), a partial per job.
-  const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+  const module=uniformDetailModule(this.device,{label:"Uniform mixed diagnostics",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var velocity:texture_3d<f32>;
 @group(1) @binding(2) var phi:texture_3d<f32>;
 @group(1) @binding(3) var<storage,read_write> totals:array<atomic<u32>>;
-fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
+fn umLoadVertex(p:vec3u)->f32{return ${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(phi,vec3i(p),0).x;}
 ${uniformMixedVertexSamplingSource("",false)}
 var<workgroup> lanes:array<vec4u,64>;
 @compute @workgroup_size(64) fn diagnostics(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -41,12 +43,12 @@ var<workgroup> lanes:array<vec4u,64>;
    let first=umFace(owner,axis,1,0u);
    for(var part=0u;part<first.count;part++){
     let face=umFace(owner,axis,1,part);
-    positive[axis]+=textureLoad(velocity,face.anchor,0)[axis]*f32(face.width*face.width)/f32(owner.width*owner.width);
+    positive[axis]+=${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(velocity,face.anchor,0)[axis]*f32(face.width*face.width)/f32(owner.width*owner.width);
    }
   }
   let represented=clamp(0.5-center/(4.0*w*${h[1]}),0.0,1.0);
   receipt=vec4u(u32(represented*weight*2048.0+0.5),select(0u,q.x+owner.width,center<0.0),
-   bitcast<u32>(length(positive)),u32(max(0.0,textureLoad(volume,vec3i(q),0).x)*weight*2048.0+0.5));
+   bitcast<u32>(length(positive)),u32(max(0.0,${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(volume,vec3i(q),0).x)*weight*2048.0+0.5));
  }
  lanes[lane]=receipt;workgroupBarrier();
  for(var stride=32u;stride>0u;stride/=2u){
@@ -60,7 +62,7 @@ var<workgroup> lanes:array<vec4u,64>;
  encode(encoder:GPUCommandEncoder):void{
   if(!this.pipeline)throw new Error("Mixed diagnostics are not initialized");
   encoder.clearBuffer(this.reductions,0,24);
-  const pass=encoder.beginComputePass({label:"Uniform canonical diagnostics"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
+  const pass=encoder.beginComputePass({label:"Uniform canonical diagnostics"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);
   this.ownership.dispatchAllCounted(pass,this.pipeline);pass.end();
  }
 }

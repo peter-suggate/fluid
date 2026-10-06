@@ -54,7 +54,9 @@ try{
     const point=(offset:number)=>Object.fromEntries(axes.map((a,i)=>[a,lattice.origin_m[a]+percent[i+offset]!/100*lattice.dimensions[i]!*lattice.cellSize_m[i]!])) as {x:number;y:number;z:number};
     scene.fluid.refinementRegions=[{id:kind,rule:"minimum-cell-size",minimumCellSize_cells:4,maximumCellSize_cells:4,min_m:point(0),max_m:point(3)}];
    }
-   solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{coarsening:arm==="candidate"&&kind==="dynamic"?"dynamic":"regions"},undefined,()=>{});
+   solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{detailPolicy:arm==="candidate"?kind==="dynamic"?"dynamic":"requested":"full"},undefined,()=>{});
+   // FOLLOW-UP: the h background with 4h boxes is retired (Requested is 4h outside Fine
+   // boxes); the box arms need a Fine complement to measure what they did.
    if(arm==="candidate"&&kind==="one-tile")assert.equal(solver.info.uniformMixedCoarseTiles,1);
    const initial=await solver.readStats();const initialMass=initial.volumeCellSum;
    assert.ok(initialMass!==undefined&&Number.isFinite(initialMass)&&initialMass>0,"Initial liquid mass is required");

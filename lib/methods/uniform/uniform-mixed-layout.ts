@@ -84,6 +84,16 @@ export function createUniformMixedLayout(
   return packUniformMixedLayout(lattice, widths, snapped);
 }
 
+/** Ownership from per-tile widths decided elsewhere (the detail planner's
+ * admitted h tiles plus solid promotion), with the snapped authored boxes
+ * as metadata. Precedence is the caller's, not region list order. */
+export function createUniformMixedLayoutFromWidths(lattice: RefinementRegionLattice, widths: Uint8Array,
+  regions: UniformMixedLayout["regions"]): UniformMixedLayout {
+  if (lattice.dimensions.some(n => !Number.isSafeInteger(n) || n < 4 || n % 4 !== 0)) throw new Error("Mixed layout requires dimensions divisible by four");
+  if (widths.length !== lattice.dimensions.reduce((n, d) => n * d / 4, 1)) throw new Error("Mixed tile widths do not match the lattice");
+  return packUniformMixedLayout(lattice, widths, regions);
+}
+
 /** Solid promotion. A cut cell has open fraction below one: a voxel of the
  * interior lattice or a terrain column cell below its height. Every tile with
  * a cell within one cell (26-neighbourhood) of a cut cell is solid-coupled;
@@ -193,6 +203,11 @@ function packUniformMixedLayout(lattice: RefinementRegionLattice, widths: Uint8A
     coarseTiles: Uint32Array.from(coarse), cellCount, metadataBytes: count * 16, regions };
 }
 
+/** Second stencil word, bit 0: the tile is in the detail ring, an h tile
+ * within three tiles of it (itself included). The h store of a detail field
+ * holds the canonical texels of ring tiles only (UniformDetailDomain); a 4h
+ * tile outside the ring lives in its base block alone. */
+export const UNIFORM_MIXED_DETAIL_RING = 1;
 /** Freeze geometric stencil decisions with ownership. Physics stages reuse
  * these masks for arbitrary sample locations, including long departures. */
 function mixedStencils(dimensions: Triple, widths: Uint8Array): Uint32Array<ArrayBuffer> {
@@ -209,6 +224,19 @@ function mixedStencils(dimensions: Triple, widths: Uint8Array): Uint32Array<Arra
     }
     stencils[2 * key]! |= maximum << 27;
     stencils[2 * key + 1]! |= minimum << 27;
+  }
+  // The detail ring (UNIFORM_MIXED_DETAIL_RING): bit 0 of the second word,
+  // an h tile within three tiles. A tile two tiles out sees the 27-bit h
+  // masks of its radius-three neighbourhood (the GPU builder's `mirror`).
+  for (let key = 0; key < count; key++) {
+    const tx = key % dimensions[0], ty = Math.floor(key / dimensions[0]) % dimensions[1], tz = Math.floor(key / (dimensions[0] * dimensions[1]));
+    let near = false;
+    for (let z = -2; z <= 2 && !near; z += 2) for (let y = -2; y <= 2 && !near; y += 2) for (let x = -2; x <= 2 && !near; x += 2) {
+      const qx = tx + x, qy = ty + y, qz = tz + z;
+      if (qx < 0 || qy < 0 || qz < 0 || qx >= dimensions[0] || qy >= dimensions[1] || qz >= dimensions[2]) continue;
+      near = (stencils[2 * (qx + dimensions[0] * (qy + dimensions[1] * qz))]! & 0x7ffffff) !== 0;
+    }
+    if (near) stencils[2 * key + 1]! |= UNIFORM_MIXED_DETAIL_RING;
   }
   return stencils;
 }

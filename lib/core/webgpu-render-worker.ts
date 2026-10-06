@@ -118,6 +118,7 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       (journal) => post({ type: "pressure-journal", journal }),
       (receipt, layers) => post({ type: "stage-lens", receipt, layers }),
     );
+    renderer.enableSolverPipelineWarmup();
     post({ type: "attached" });
     return;
   }

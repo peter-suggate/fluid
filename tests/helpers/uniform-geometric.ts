@@ -65,14 +65,15 @@ export async function readUniformFields(device:GPUDevice,solver:WebGPUUniformRef
 }
 
 /** Read the actual GPU solid mask through Uniform's solid sampler. Disable its
- * optional tile cache here so paused edits can be checked before the next step. */
-export async function readUniformSolidFractions(device:GPUDevice,solver:WebGPUUniformReferenceSolver){
+ * optional tile cache here so paused edits can be checked before the next step.
+ * open: the open fraction itself (umCellOpen), not its complement. */
+export async function readUniformSolidFractions(device:GPUDevice,solver:WebGPUUniformReferenceSolver,open=false){
  const {nx,ny,nz}=solver.info;
  const solid=(solver as unknown as {mixedFrame:{solid:UniformMixedSolid}}).mixedFrame.solid;
  const module=device.createShaderModule({code:`const UM_D=vec3u(${nx}u,${ny}u,${nz}u);
 ${uniformMixedSolidWGSL(0,undefined,false)}
 @group(1) @binding(0) var<storage,read_write> result:array<f32>;
-@compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) gid:vec3u){let i=gid.x;if(i>=arrayLength(&result)){return;}let p=vec3i(i%UM_D.x,(i/UM_D.x)%UM_D.y,i/(UM_D.x*UM_D.y));result[i]=1.0-umCellOpen(p);}`});
+@compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) gid:vec3u){let i=gid.x;if(i>=arrayLength(&result)){return;}let p=vec3i(vec3u(i%UM_D.x,(i/UM_D.x)%UM_D.y,i/(UM_D.x*UM_D.y)));result[i]=${open?"umCellOpen(p)":"1.0-umCellOpen(p)"};}`});
  const resultLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
  const pipeline=await device.createComputePipelineAsync({layout:device.createPipelineLayout({bindGroupLayouts:[solid.bindLayout,resultLayout]}),compute:{module,entryPoint:"probe"}});
  const output=device.createBuffer({size:4*nx*ny*nz,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});

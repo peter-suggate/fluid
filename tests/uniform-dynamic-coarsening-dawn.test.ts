@@ -11,9 +11,10 @@ import {refinementRegionLattice} from "../lib/core/refinement-regions";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
 import type {GPUSolverInstance} from "../lib/core/method-contract";
 import {UNIFORM_ADVANCE_PHASE} from "../lib/methods/uniform/uniform-stages";
+import {uniformDetailField} from "../lib/methods/uniform/uniform-detail-fields";
 
 // Phase 5 lane (docs/plans/uniform-dynamic-coarsening.md): the app's
-// Uniform Geometric method with coarsening=dynamic on the 128³ dam break.
+// Uniform Geometric method with detailPolicy=dynamic on the 128³ dam break.
 // The simulation layout is h/4h only, ownership
 // must actually follow the flow, volume must be conserved, and a relayout
 // must not compile anything or grow memory past the band's high-water mark.
@@ -41,7 +42,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
   const scene=structuredClone(sceneDocument(getSceneDefinition("high-resolution-dam-break")));scene.fluid.refinementRegions=[];
   assert.deepEqual(refinementRegionLattice(scene).dimensions,[128,128,128]);
-  solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{pressureResidualTolerance:5,coarsening:"dynamic"},undefined,()=>{});
+  solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{pressureResidualTolerance:5,detailPolicy:"dynamic"},undefined,()=>{});
   const info=solver.info as unknown as Record<string,unknown>;
   // A refined tile must carry exactly the surface its 4h corners described:
   // every stored vertex of its closure is their trilinear interpolant.
@@ -55,18 +56,18 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   // Horizon one adopts and remaps at the frame head, and the same frame then
   // transports phi at h. The refine invariant is checked where it holds:
   // right after the remap (the head's census phase), before any transport.
-  const vt=host.vertexPhiField as GPUTexture,vrow=Math.ceil(vt.width*4/256)*256;
-  const headPhi=device.createBuffer({size:vrow*vt.height*vt.depthOrArrayLayers,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  // Logical vertex phi: the detail storage places the field (base block + patch atlas).
+  const vt=host.vertexPhiField as GPUTexture,detail=uniformDetailField(vt)!.storage;
+  let headPhi:(()=>Promise<Float32Array>)|undefined;
   const headOwners=device.createBuffer({size:T*T*T*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   let headCaptured=false;
   host.mixedFrameTrace=()=>({instrument:(e:GPUCommandEncoder)=>e,submit(){},submitted(){},abort(){},
    phase(e:GPUCommandEncoder,phase:unknown){
     if(headCaptured||phase!==UNIFORM_ADVANCE_PHASE.resolutionCensus)return;headCaptured=true;
-    e.copyTextureToBuffer({texture:vt},{buffer:headPhi,bytesPerRow:vrow,rowsPerImage:vt.height},[vt.width,vt.height,vt.depthOrArrayLayers]);
+    headPhi=detail.capture(e,vt);
     e.copyBufferToBuffer(host.mixedFrame.ownership.presentation.buffer,0,headOwners,0,T*T*T*4);}});
   const headWidths=async()=>Uint8Array.from(new Uint32Array(await readback((e,b)=>e.copyBufferToBuffer(headOwners,0,b,0,T*T*T*4),T*T*T*4)),w=>(w&0x80000000)?1:4);
-  const headPhiAt=async()=>{const raw=new Float32Array(await readback((e,b)=>e.copyBufferToBuffer(headPhi,0,b,0,headPhi.size),headPhi.size));
-   return (x:number,y:number,z:number)=>raw[(z*vt.height+y)*(vrow/4)+x]!;};
+  const headPhiAt=async()=>{const raw=await headPhi!();return (x:number,y:number,z:number)=>raw[(z*(N+1)+y)*(N+1)+x]!;};
   let previous:Uint8Array|undefined,refinedTiles=0;
   let relayouts=0,coarsest=Infinity,finest=0;const wall:number[]=[],shapes:string[]=[];
   for(let step=1;step<=STEPS;step++){
@@ -127,7 +128,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
   const scene=structuredClone(sceneDocument(getSceneDefinition("high-resolution-dam-break")));scene.fluid.refinementRegions=[];
-  solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{pressureResidualTolerance:5,coarsening:"dynamic"},undefined,()=>{});
+  solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{pressureResidualTolerance:5,detailPolicy:"dynamic"},undefined,()=>{});
   const info=solver.info as unknown as Record<string,unknown>;
   for(let step=1;step<=3;step++){assert.ok(solver.advanceTo(step/30,[]));await solver.awaitFrameCompletion?.();}
   const before=Number((await solver.readStats()).volumeCellSum),fineBefore=Number(info.uniformMixedFineTiles);

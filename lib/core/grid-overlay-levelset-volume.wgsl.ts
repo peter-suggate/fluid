@@ -53,11 +53,17 @@ struct GridOverlayLevelSetVolumeParams {
 }
 @group(0) @binding(20) var<uniform> sliceLsvP:GridOverlayLevelSetVolumeParams;
 
-${dense ? `@group(0) @binding(21) var sliceDensePhi:texture_3d<f32>;
+${dense ? `// 21: the nodal phi of a dense source; under the mixed presentation the
+// detail field (any texture while the solver holds no h-tile capacity).
+// 25: the mixed presentation's 4h vertex base (any texture otherwise).
+@group(0) @binding(21) var sliceDensePhi:texture_3d<f32>;
 @group(0) @binding(22) var sliceDenseOpen:texture_3d<f32>;
-${uniformMixedPresentationWGSL(17,"sliceDensePhi","textureDimensions(sliceDensePhi)-vec3u(1)","sparseTopologyArena")}
+@group(0) @binding(25) var sliceCoarsePhi:texture_3d<f32>;
+${uniformMixedPresentationWGSL(17,"sliceDensePhi","sliceCoarsePhi","sparseTopologyArena")}
 fn sliceDenseLevelSetPhi(position:vec3f)->vec2f{
-  let dims=vec3i(textureDimensions(sliceDensePhi))-vec3i(1);
+  // The mixed lattice is the base's; a raw nodal field's is its texture's.
+  var dims=vec3i(textureDimensions(sliceDensePhi))-vec3i(1);
+  if(umPresentationEnabled()){dims=vec3i(umDimensions());}
   if(any(position<vec3f(0))||any(position>vec3f(dims))){return vec2f(0);}
   if(umPresentationEnabled()){let phi=umSampleVertex(position);return vec2f(phi/max(bitcast<f32>(sliceLsvP.reserved.x),1e-12),select(0.0,1.0,sliceLsvFinite(phi)));}
   let base=min(vec3i(floor(position)),dims-vec3i(1));let t=position-vec3f(base);var phi=0.0;
@@ -166,10 +172,12 @@ fn sliceLevelSetPhi(positionFine:vec3f)->vec2f{
 
 fn sliceVolumeFill(cell:vec3i)->vec2f{
   ${dense ? `if(sliceLsvP.global.x==2u){
-    if(any(cell<vec3i(0))||any(cell>=vec3i(textureDimensions(densityField)))){return vec2f(0);}
-    var address=cell;var capacity=textureLoad(sliceDenseOpen,cell,0).x;
-    if(umPresentationEnabled()){address=vec3i(umOrigin(umOwnerAt(cell)));capacity=1.0;}
-    let volume=textureLoad(densityField,address,0).x;
+    if(any(cell<vec3i(0))||any(cell>=vec3i(udrCellDims(densityField)))){return vec2f(0);}
+    // A mixed owner's V is over its own capacity; the fields may be packed.
+    var address=cell;var capacity=1.0;
+    if(umPresentationEnabled()){address=vec3i(umOrigin(umOwnerAt(cell)));}
+    else{capacity=textureLoad(sliceDenseOpen,cell,0).x;}
+    let volume=udrLoadCell(densityField,densityBase,address).x;
     let valid=capacity>0.0&&sliceLsvFinite(volume)&&volume>=-1e-6;
     return vec2f(max(volume,0.0)/max(capacity,1e-20),select(0.0,1.0,valid));
   }` : ""}

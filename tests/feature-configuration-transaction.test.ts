@@ -1,7 +1,7 @@
 import "../lib/methods";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
+import { createMethodStore } from "../lib/core/stores/method-store";
 
 test("a forbidden pressure override leaves the entire method store unchanged", () => {
   const store = createMethodStore();
@@ -11,18 +11,12 @@ test("a forbidden pressure override leaves the entire method store unchanged", (
   assert.throws(() => before.setMethodId("nonexistent"), /Unknown simulation method/);
   assert.equal(store.getState(), before);
 });
-test("unsupported coarsening values resolve to the declared Uniform default", () => {
-  const store = createMethodStore();
-  const defaults = resolvedMethodValues(store.getState());
-  store.getState().setParam("uniform-volume", "coarsening", "octree");
-  assert.equal(resolvedMethodValues(store.getState()).coarsening, defaults.coarsening);
-});
 test("method settings survive reselecting the maintained method", () => {
   const store = createMethodStore();
-  store.getState().setParam("uniform-volume", "coarsening", "regions");
+  store.getState().setParam("uniform-volume", "detailPolicy", "full");
   store.getState().setMethodId("uniform-volume");
   store.getState().setMethodId("uniform-volume");
-  assert.equal(store.getState().overrides["uniform-volume"]?.coarsening, "regions");
+  assert.equal(store.getState().overrides["uniform-volume"]?.detailPolicy, "full");
 });
 
 test("controller rejects forbidden overrides before announcing GPU work", async () => {

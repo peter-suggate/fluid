@@ -1,10 +1,13 @@
+import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import {UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, UNIFORM_MIXED_FUSED_GATE, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
-import { uniformMixedPressureReconstructionWGSL } from "./uniform-mixed-pressure-reconstruction.wgsl";
+import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import type { UniformPipelineNeed } from "./uniform-pipeline-needs";
 
 export interface UniformMixedForceFields {
   advected: GPUTexture;
@@ -46,7 +49,7 @@ export class UniformMixedForces {
   private readonly resources: GPUBindGroupLayout;
   private regularCoarsePipeline?: GPUComputePipeline;
   constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly cachedCurvature=false) {
-    this.resources = device.createBindGroupLayout({ entries: [
+    this.resources = uniformDetailBindLayout(device,{ entries: [
       ...[1,2,3,10,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:5,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},
@@ -57,35 +60,37 @@ export class UniformMixedForces {
       ...(sourceParams?[{binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
     ] });
   }
-  bind(f: UniformMixedForceFields): GPUBindGroup {
+  /** The curvature pass's normal scratch: a vec4f per owner the capacity holds. */
+  static normalBytes(owners:number):number{return 16*owners;}
+  bind(f: UniformMixedForceFields): UniformDetailGroup {
     if(this.cachedGeometry&&!f.centerPhi)throw new Error("Mixed forces require current center phi for cached geometry");
     if(this.cachedCurvature!==!!f.curvature||this.cachedCurvature!==!!f.normals)throw new Error("Mixed force curvature scratch must match the pipeline");
     const d=this.ownership.capacity.lattice.dimensions,coarse=f.coarseVelocity,unit=f.unitVelocity;
-    if(coarse.format!=="rgba32float"||[coarse.width,coarse.height,coarse.depthOrArrayLayers].some((n,a)=>n!==d[a]!/4+2))throw new Error("Mixed force viscosity requires the 4h velocity cache");
-    if(f.curvature&&(f.curvature.format!=="r32float"||[f.curvature.width,f.curvature.height,f.curvature.depthOrArrayLayers].some((n,a)=>n!==d[a])||[f.phi,f.volume,f.centerPhi].includes(f.curvature)))throw new Error("Mixed force curvature requires disjoint native scalar scratch");
-    const normalBytes=16*d[0]*d[1]*d[2];
+    if(coarse.format!=="rgba32float"||uniformDetailExtent(coarse).some((n,a)=>n!==d[a]!/4+2))throw new Error("Mixed force viscosity requires the 4h velocity cache");
+    if(f.curvature&&(f.curvature.format!=="r32float"||uniformDetailExtent(f.curvature).some((n,a)=>n!==d[a])||[f.phi,f.volume,f.centerPhi].includes(f.curvature)))throw new Error("Mixed force curvature requires disjoint native scalar scratch");
+    const normalBytes=UniformMixedForces.normalBytes(this.ownership.capacity.owners);
     if(f.normals&&(f.normals.size??f.normals.buffer.size-(f.normals.offset??0))<normalBytes)throw new Error("Mixed force normal scratch is too small");
-    if(unit.format!=="rgba32float"||[unit.width,unit.height,unit.depthOrArrayLayers].some((n,a)=>n!==d[a]))throw new Error("Mixed force viscosity requires resolved h velocity taps");
+    if(unit.format!=="rgba32float"||uniformDetailExtent(unit).some((n,a)=>n!==d[a]))throw new Error("Mixed force viscosity requires resolved h velocity taps");
     for(const [i,t] of [f.advected,f.phi,f.volume,f.output].entries()){
-      if([t.width,t.height,t.depthOrArrayLayers].some((n,a)=>n!==d[a]!+(i===1?1:0)) || t.format!==(i===1||i===2?"r32float":"rgba32float"))
+      if(uniformDetailExtent(t).some((n,a)=>n!==d[a]!+(i===1?1:0)) || t.format!==(i===1||i===2?"r32float":"rgba32float"))
         throw new Error("Mixed forces require native cell and vertex fields");
     }
     if(f.output===f.advected||f.output===unit||f.negative===f.outputNegative)throw new Error("Mixed force output must be disjoint");
     const bytes=4*(d[0]*d[1]+d[0]*d[2]+d[1]*d[2]);
     if(f.negative.size<bytes||f.outputNegative.size<bytes)throw new Error("Mixed forces require negative boundary planes");
-    return this.device.createBindGroup({layout:this.resources,entries:[
-      ...[f.advected,f.phi,f.volume].map((t,i)=>({binding:i+1,resource:t.createView()})),
-      {binding:4,resource:{buffer:f.negative}},{binding:5,resource:f.output.createView()},
+    return uniformDetailGroup(this.device,{layout:this.resources,entries:[
+      ...[f.advected,f.phi,f.volume].map((t,i)=>({binding:i+1,resource:t})),
+      {binding:4,resource:{buffer:f.negative}},{binding:5,resource:f.output},
       {binding:6,resource:{buffer:f.outputNegative}},{binding:7,resource:{buffer:f.params,size:48}},
-      {binding:8,resource:(f.centerPhi??f.volume).createView()},
-      {binding:10,resource:coarse.createView()},{binding:11,resource:unit.createView()},
-      ...(f.curvature?[{binding:12,resource:f.curvature.createView()},{binding:13,resource:{...f.normals!,size:normalBytes}}]:[]),
+      {binding:8,resource:f.centerPhi??f.volume},
+      {binding:10,resource:coarse},{binding:11,resource:unit},
+      ...(f.curvature?[{binding:12,resource:f.curvature},{binding:13,resource:{...f.normals!,size:normalBytes}}]:[]),
       ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:176}}]:[]),
     ]});
   }
   async initialize():Promise<void>{
     const h=this.ownership.capacity.lattice.cellSize_m;
-    const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+    const module=uniformDetailModule(this.device,{label:"Uniform mixed forces",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(1) var advected:texture_3d<f32>;
 @group(1) @binding(2) var phi:texture_3d<f32>;
 @group(1) @binding(3) var volume:texture_3d<f32>;
@@ -103,18 +108,25 @@ ${this.sourceParams?uniformMixedSourceWGSL(9):""}
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 ${uniformMixedVertexSamplingSource("",false)}
-${uniformMixedSolidWGSL(this.solid?2:undefined)}
-fn umUnitClosed(owner:UMOwner)->bool{return umSolidEnabled()&&owner.width==1u&&umCellOpen(vec3i(umOrigin(owner)))<=1e-5;}
+${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
+// An owner with no capacity at its own width (an h cell's open fraction, a 4h
+// owner's tile's): its centre phi is not state, so it has no occupancy step
+// to weigh a capillary force with and no normal to lend a curvature.
+fn umOwnerClosed(owner:UMOwner)->bool{
+ if(!umSolidEnabled()){return false;}
+ if(owner.width==1u){return umCellOpen(vec3i(umOrigin(owner)))<=1e-5;}
+ return umTileOpen(owner.tile)<=1e-5;
+}
 @group(1) @binding(10) var coarseVelocity:texture_3d<f32>;
 @group(1) @binding(11) var unitVelocity:texture_3d<f32>;
-fn umCellPhi(owner:UMOwner)->f32{if(umCachedGeometry){return textureLoad(centerPhi,vec3i(umOrigin(owner)),0).x;}return umSampleVertex(vec3f(umOrigin(owner))+vec3f(0.5*f32(owner.width)));}
+fn umCellPhi(owner:UMOwner)->f32{if(umCachedGeometry){if(owner.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(centerPhi,vec3i(umOrigin(owner)),0).x;}return textureLoad(centerPhi,vec3i(umOrigin(owner)),0).x;}return umSampleVertex(vec3f(umOrigin(owner))+vec3f(0.5*f32(owner.width)));}
 fn umOccupancy(owner:UMOwner)->f32 {
  if(owner.width==0u){return 0.0;}
  return clamp(0.5-umCellPhi(owner)/(4.0*force.hDt.y*f32(owner.width)),0.0,1.0);
 }
 // A coarse owner holding more than a twentieth of an h cell: its faces fall
 // (detached mass keeps them through projection; see uniform-mixed-detached-mass).
-fn umCoarseMass(owner:UMOwner)->bool{return owner.width>1u&&textureLoad(volume,vec3i(umOrigin(owner)),0).x*f32(owner.width*owner.width*owner.width)>max(force.controls.w,0.05);}
+fn umCoarseMass(owner:UMOwner)->bool{return owner.width>1u&&${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(volume,vec3i(umOrigin(owner)),0).x*f32(owner.width*owner.width*owner.width)>max(force.controls.w,0.05);}
 fn umNormalRaw(owner:UMOwner)->vec3f {
  let origin=umOrigin(owner);var gradient=vec3f(0);
  for(var k=0u;k<8u;k++){
@@ -134,7 +146,7 @@ fn umCurvature(owner:UMOwner)->f32 {
   var delta=0.0;var span=0.0;
   for(var side=0u;side<2u;side++){
    let sign=select(-1,1,side==1u);let first=umFace(owner,axis,sign,0u);
-   if(first.neighbor.width==0u||umUnitClosed(first.neighbor)){continue;}
+   if(first.neighbor.width==0u||umOwnerClosed(first.neighbor)){continue;}
    var average=0.0;
    for(var part=0u;part<first.count;part++){average+=umNormal(umFace(owner,axis,sign,part).neighbor)[axis];}
    delta+=f32(sign)*(average/f32(first.count)-center[axis]);
@@ -154,7 +166,9 @@ ${this.cachedCurvature?`@compute @workgroup_size(64) fn cacheCurvature(@builtin(
 fn umForceCurvature(owner:UMOwner)->f32{${this.cachedCurvature?"if(umForceCached){return textureLoad(curvature,vec3i(umOrigin(owner))).x;}":""}return umCurvature(owner);}
 fn umPressure(owner:UMOwner)->f32{return umOccupancy(owner);}
 fn umPressureSlope(owner:UMOwner)->vec3f{return umReconstructPressureSlope(owner);}
-${uniformMixedPressureReconstructionWGSL}
+// A closed neighbour has no occupancy: it lends the slope the owner's own.
+fn umForceSample(owner:UMOwner,neighbor:UMOwner)->f32{if(umOwnerClosed(neighbor)){return umPressure(owner);}return umPressure(neighbor);}
+${uniformMixedPressureReconstructionSource(false,"umForceSample(owner,neighbor)")}
 // Viscosity reads the frame's extended-velocity snapshot at exact MAC sites
 // of the face's own width (the ungraded layout has widths 1 and 4 only): an
 // h site is one UniformMixedHangingTaps.unitVelocity texel, a 4h site one
@@ -181,11 +195,11 @@ fn umLaplacian(face:UMFace)->f32 {
 }
 fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32 {
  if(face.anchor[face.axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
- var value=textureLoad(advected,face.anchor,0)[face.axis];let dt=force.hDt.w;
+ var value=0.0;if(face.width==4u){value=${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(advected,face.anchor,0)[face.axis];}else{value=textureLoad(advected,face.anchor,0)[face.axis];}let dt=force.hDt.w;
  let occupancy=umOccupancy(owner);let neighborOccupancy=umOccupancy(face.neighbor);
  if(occupancy>0.0&&force.physical.z>0.0){value+=dt*(force.physical.z/force.physical.y)*umLaplacian(face);}
  if(face.axis==1u&&(occupancy>1e-5||neighborOccupancy>1e-5||umCoarseMass(owner)||umCoarseMass(face.neighbor))){value+=dt*force.physical.x;}
- if(force.physical.w>0.0&&face.neighbor.width!=0u&&!umUnitClosed(owner)&&!umUnitClosed(face.neighbor)){
+ if(force.physical.w>0.0&&face.neighbor.width!=0u&&!umOwnerClosed(owner)&&!umOwnerClosed(face.neighbor)){
   let gradient=umReconstructedPressureGradient(owner,face);
   if(gradient!=0.0){value+=dt*(force.physical.w/force.physical.y)*0.5*(umForceCurvature(owner)+umForceCurvature(face.neighbor))*gradient;}
  }
@@ -227,36 +241,46 @@ ${uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocityFar(owner,
 ${uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)")}
 `,["forcesRegular","forcesRegularCoarse","forces",...(this.cachedCurvature?["cacheNormals","cacheCurvature"]:[])])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
-    const compile=(entryPoint:string,constants:Record<string,number>)=>uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{
-      umDispatchX:this.ownership.dispatchX,umCachedGeometry:+this.cachedGeometry,umForceCached:+this.cachedCurvature,...constants,...s}}}));
+    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
+    // Compile by need: the cached set while a 4h surface may exist (encode's
+    // useCache), its caches under capillarity, the inline set otherwise.
+    const cachedNeeds:UniformPipelineNeed[]=this.cachedCurvature?["forceCache"]:[];
+    const compile=(entryPoint:string,constants:Record<string,number>,needs:readonly UniformPipelineNeed[]=cachedNeeds)=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{
+      umDispatchX:this.ownership.dispatchX,umCachedGeometry:+this.cachedGeometry,umForceCached:+this.cachedCurvature,...constants,...s}}}),{needs,entry:entryPoint});
     // Seam tiles of every tier and the small regular tiers share one launch,
     // so their serial per-tile latencies overlap; seam 4h tiles pack four
     // per job (fusedQuad). Every launch is GPU-counted: a regular tier that
     // rides the fused launch counts zero jobs in its own (skipFused gate).
-    if(this.cachedCurvature)[this.normalPipeline,this.curvaturePipeline]=await Promise.all(["cacheNormals","cacheCurvature"].map(entry=>compile(entry,{umCountedJobs:UNIFORM_MIXED_COUNTED.all})));
+    if(this.cachedCurvature)[this.normalPipeline,this.curvaturePipeline]=await Promise.all(["cacheNormals","cacheCurvature"].map(entry=>compile(entry,{umCountedJobs:UNIFORM_MIXED_COUNTED.all},["forceCache","capillary"])));
     const skipFused=UNIFORM_MIXED_FUSED_GATE.skipFused;
     [this.pipeline,this.regularFinePipeline,this.regularCoarsePipeline]=await Promise.all([
       compile("forces",{umMergedTiles:1,umFusedJobs:1,umCountedJobs:UNIFORM_MIXED_COUNTED.fusedQuad}),
       compile("forcesRegular",{umCellWidth:1,umRegularTiles:1,umRegularFine:1,umCountedJobs:UNIFORM_MIXED_COUNTED.owners,umFusedRegularGate:skipFused}),
       compile("forcesRegularCoarse",{umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused})]);
     if(this.cachedCurvature)this.inlinePipelines=await Promise.all([
-      compile("forces",{umForceCached:0,umMergedTiles:1,umFusedJobs:1,umCountedJobs:UNIFORM_MIXED_COUNTED.fusedQuad}),
-      compile("forcesRegular",{umForceCached:0,umCellWidth:1,umRegularTiles:1,umRegularFine:1,umCountedJobs:UNIFORM_MIXED_COUNTED.owners,umFusedRegularGate:skipFused}),
-      compile("forcesRegularCoarse",{umForceCached:0,umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused})]);
+      compile("forces",{umForceCached:0,umMergedTiles:1,umFusedJobs:1,umCountedJobs:UNIFORM_MIXED_COUNTED.fusedQuad},["forceInline"]),
+      compile("forcesRegular",{umForceCached:0,umCellWidth:1,umRegularTiles:1,umRegularFine:1,umCountedJobs:UNIFORM_MIXED_COUNTED.owners,umFusedRegularGate:skipFused},["forceInline"]),
+      compile("forcesRegularCoarse",{umForceCached:0,umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused},["forceInline"])]);
   }
-  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,capillarity=true,useCache=this.cachedCurvature):void{
+  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,capillarity=true,useCache=this.cachedCurvature):void{
     if(!this.pipeline)throw new Error("Mixed forces are not initialized");
     const pass=encoder.beginComputePass({label:"Uniform mixed body forces"});
-    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
-    const variant=(p:GPUComputePipeline)=>this.solid?.select(p)??p;
+    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
+    const variant=(p:GPUComputePipeline)=>uniformDetailPick(this.solid?.select(p)??p);
     if(useCache&&capillarity&&this.curvaturePipeline){
       this.ownership.dispatchAllCounted(pass,variant(this.normalPipeline!));
       this.ownership.dispatchAllCounted(pass,variant(this.curvaturePipeline));
     }
     const [general,fine,coarse]=!useCache&&this.inlinePipelines?this.inlinePipelines:[this.pipeline,this.regularFinePipeline!,this.regularCoarsePipeline!];
     this.ownership.dispatchTierCounted(pass,variant(fine!),0);
+    // A regular 4h owner (a 3x3x3 stencil of 4h tiles) with the cached
+    // curvature reads its own and its face neighbours' origins, anchors and
+    // corners, and stores its anchors: the base blocks. The inline curvature
+    // reads the neighbours' neighbours, which may be h.
+    const based=coarse===this.regularCoarsePipeline&&this.cachedCurvature;
+    if(based)pass.setBindGroup(1,group.base);
     this.ownership.dispatchRegularCoarseCounted(pass,variant(coarse!));
+    if(based)pass.setBindGroup(1,group.group);
     this.ownership.dispatchFusedCounted(pass,variant(general!));pass.end();
   }
 }

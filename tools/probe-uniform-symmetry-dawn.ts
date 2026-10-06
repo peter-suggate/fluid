@@ -3,7 +3,7 @@
  * so the first stage that breaks the tank's symmetry is named.
  * Coarse (4h) owners store one texel per owner (scalars) or per face patch
  * (velocity); fields are expanded to per-h-texel owner values before comparing.
- * node --import tsx tools/probe-uniform-symmetry-dawn.ts --frames=30 [--values='{"coarsening":"regions"}']
+ * node --import tsx tools/probe-uniform-symmetry-dawn.ts --frames=30 [--values='{"detailPolicy":"full"}']
  */
 import assert from 'node:assert/strict';
 import {resolve} from 'node:path';

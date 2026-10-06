@@ -209,12 +209,10 @@ select.ui-select:disabled { opacity: .45; cursor: not-allowed; }
 .scene-scale-row > .ui-stepper { display: grid; grid-template-columns: 22px minmax(0,1fr) 22px; gap: 3px; }
 .scene-scale-row > .ui-stepper > button { width: auto; font: var(--text-tag); }
 
-/* The sculpt card's controls. Its blanket `button` rule is for the card's
-   verbs; a switch is a knob, not a boxed button. A primary control fills its
-   half of the card. */
-.voxel-context-card { --control-height: 26px; --control-inline-padding: 5px; --control-font-size: 12px; }
-.voxel-context .ui-switch { min-height: 0; padding: 0; border: 0; background: transparent; }
-.voxel-context-primary .ui-number { width: 100%; --ui-number-width: 100%; }
+/* The armed sculpt tool's line. A stepper's readout is a voxel count of one to
+   three digits, not a physical quantity, so it gives up the wide value column. */
+.tool-options .ui-stepper > .ui-value { min-width: 22px; color: var(--ink); }
+.tool-options .ui-toggle { gap: 6px; }
 
 /* The theme picker is a pill of round glyphs rather than a row of chips. */
 .ui-choice.theme-switch { flex-wrap: nowrap; gap: 2px; }

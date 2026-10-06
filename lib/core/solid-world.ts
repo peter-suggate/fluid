@@ -462,6 +462,13 @@ const sceneSolidWorldCache = new WeakMap<SceneDescription, {
   readonly stamp: string;
   readonly world: SolidWorld;
 }>();
+/** The world last built, by content stamp. An edit that leaves the solids
+ * alone (a refinement region, a fluid parameter) arrives as a new scene
+ * object, always so across the worker hand-off, and takes the world its stamp
+ * names: no terrain rebake, no patch replay, and a consumer that folds a later
+ * world in by page identity (SolidOccupancyMask) sees the same world. Weak, so
+ * the memo never outlives the world's own holders. */
+let latestSolidWorld: { readonly stamp: string; readonly world: WeakRef<SolidWorld> } | undefined;
 
 export function solidWorldForScene(scene: SceneDescription): SolidWorld {
   const stamp = solidWorldContentStamp(scene);
@@ -472,9 +479,10 @@ export function solidWorldForScene(scene: SceneDescription): SolidWorld {
   // terrain-sized page image or expands the columns into voxel-box descriptors.
   // The returned snapshot is canonical for this scene content stamp: fluid
   // initialization and its renderer sidecar must not rebake the same terrain.
-  const world = applySolidWorldPatches(terrainSolidWorldForScene(scene),
-    scene.solidVoxels, false);
+  const world = (latestSolidWorld?.stamp === stamp ? latestSolidWorld.world.deref() : undefined)
+    ?? applySolidWorldPatches(terrainSolidWorldForScene(scene), scene.solidVoxels, false);
   sceneSolidWorldCache.set(scene, { stamp, world });
+  latestSolidWorld = { stamp, world: new WeakRef(world) };
   return world;
 }
 

@@ -9,7 +9,7 @@ import { uniformCoarseSolverWGSL, uniformPressureStateWGSL } from "./uniform-coa
  */
 import { UNIFORM_CM11A_RECOVERY_SWEEPS, UNIFORM_CM11A_RECOVERY_REDUCTION, UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE } from "./pressure-policy";
 import { uniformAbOn } from "./uniform-ab-switch";
-import { UNIFORM_MIXED_THETA_MIN } from "./uniform-mixed-pressure-surface.wgsl";
+import { uniformMixedPressureLiquidWGSL, uniformMixedSurfaceThetaWGSL } from "./uniform-mixed-pressure-surface.wgsl";
 
 /**
  * Baked coefficient w: bit 0 is this cell's liquid flag, bits 1..6 those of its
@@ -645,7 +645,13 @@ fn mgFineChild(coarse:vec3i,o:vec3i)->vec3i{
 fn mgTopology(p:vec3i)->vec4f{return textureLoad(mgVolumeIn,mgClamp(p,mg.levelDims.xyz),0);}
 fn mgPhi(p:vec3i)->f32{return textureLoad(mgPhiIn,mgClamp(p,mg.levelDims.xyz),0).x;}
 fn mgP(p:vec3i)->f32{return textureLoad(mgPressureIn,mgClamp(p,mg.levelDims.xyz),0).x;}
-fn mgLiquid(p:vec3i)->bool{return mgValid(p,mg.levelDims.xyz)&&mgPhi(p)<0.0;}
+// The mixed continuation classifies as the mixed rows do (umPressureLiquid at
+// this level's spacing); the native method at phi<0.
+fn mgLiquidPhi(phi:f32)->bool{
+  if(MG_MIXED_SURFACE_THETA){return ${uniformMixedPressureLiquidWGSL("phi", "min(mg.spacing.x,min(mg.spacing.y,mg.spacing.z))")};}
+  return phi<0.0;
+}
+fn mgLiquid(p:vec3i)->bool{return mgValid(p,mg.levelDims.xyz)&&mgLiquidPhi(mgPhi(p));}
 fn mgInterior(p:vec3i,d:vec3u)->bool{return all(p>=vec3i(1))&&all(p<vec3i(d)-vec3i(1));}
 fn mgOpenTopHalo(p:vec3i,d:vec3u)->bool{
   return params.boundary.w>0.5&&p.y==i32(d.y)-1&&p.x>0&&p.x<i32(d.x)-1&&p.z>0&&p.z<i32(d.z)-1;
@@ -662,16 +668,12 @@ fn mgFaceV(id:vec3i,neighbor:vec3i,axis:u32)->f32{
 }
 // Ghost-fluid theta at a liquid/air face. The native method uses CM12's
 // clamped rule. As the mixed Geometric frame's 4h continuation the hierarchy
-// must solve the mixed operator's own surface rows (depth floor and clamp at
-// UNIFORM_MIXED_THETA_MIN of the centre spacing): with CM12's 0.05 clamp the
-// native correction diverges on the long dam at frame 3 (46.9 -> 311).
+// must solve the mixed operator's own surface rows (umPressureTheta's margin
+// and signed crossing): with CM12's 0.05 clamp the native correction diverges
+// on the long dam at frame 3 (46.9 -> 311).
 const MG_MIXED_SURFACE_THETA:bool=false;
 fn mgSurfaceTheta(liquidPhi:f32,airPhi:f32)->f32{
-  if(MG_MIXED_SURFACE_THETA){
-    let spacing=min(mg.spacing.x,min(mg.spacing.y,mg.spacing.z));
-    let depth=max(abs(liquidPhi),${UNIFORM_MIXED_THETA_MIN}*spacing);
-    return clamp(depth/(depth+abs(airPhi)),${UNIFORM_MIXED_THETA_MIN},1.0);
-  }
+  if(MG_MIXED_SURFACE_THETA){return ${uniformMixedSurfaceThetaWGSL("liquidPhi", "airPhi")};}
   return cm12GhostFluidTheta(liquidPhi,airPhi,1e-9);
 }
 fn mgTheta(liquidCell:vec3i,airCell:vec3i)->f32{
@@ -793,6 +795,26 @@ fn mgBuildFinestRhs(@builtin(global_invocation_id) gid:vec3u){
   textureStore(mgMinimumOut,id,vec4f(minimum));
 }
 
+// The plain open-vote average of coarse cell c's children is not air: it is
+// liquid, or c has no open child, or c lies outside the level.
+fn mgAverageSubmerged(c:vec3i)->bool{
+  if(!mgValid(c,mg.coarseDims.xyz)){return true;}
+  var terms:array<f32,8>;var count=0.0;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let q=mgFineChild(c,vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u)));
+    let open=mgTopology(q).x>1e-5;terms[corner]=select(0.0,mgPhi(q),open);count+=select(0.0,1.0,open);
+  }
+  return count==0.0||mgLiquidPhi(mgD4Sum8(terms)/count);
+}
+// Averaging would erase the air coarse cell c holds: none of the 26 coarse
+// cells around it comes out air either. At a free surface one always does.
+fn mgAirVanishes(c:vec3i)->bool{
+  for(var k=0u;k<27u;k+=1u){
+    if(k!=13u&&!mgAverageSubmerged(c+vec3i(vec3u(k%3u,(k/3u)%3u,k/9u))-vec3i(1))){return false;}
+  }
+  return true;
+}
+
 @compute @workgroup_size(4,4,4)
 fn mgDownsampleTopology(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
@@ -820,7 +842,19 @@ fn mgDownsampleTopology(@builtin(global_invocation_id) gid:vec3u){
   // CM11a Eq. 15-16 and C=2 sign-aware phi rule. control.x is the
   // destination level and control.y is M-C.
   let mixed=positiveCount>0.0&&negativeCount>0.0;
-  let usePositive=mixed&&mg.control.x>=mg.control.y;
+  var usePositive=mixed&&mg.control.x>=mg.control.y;
+  // control.z (the first coarsening of a mixed continuation's root, else 0):
+  // air enclosed in liquid survives the coarsening. Averaged away, a p=0 row
+  // inside pressurised liquid is liquid on every level but the root, the
+  // coarse corrections carry no sink where it sits, and the root's smoother
+  // alone removes what they add (the all-4h Figure 9's second impact: cycles
+  // contracting by 0.6 to 0.8 against the usual 0.1, and the three-cycle
+  // budget spent above the tolerance). Sign-aware for every mixed cell
+  // instead, the whole surface is coarse air and the usual cycle leaves 2.6
+  // times the residual (the 64-cube dam under Dynamic). One level is enough:
+  // with a second kept too, no run stalled either and the cycles were no
+  // better.
+  if(mixed&&!usePositive&&mg.control.z!=0u&&mg.control.x>=mg.control.z&&mgLiquidPhi(phiSum/8.0)&&mgAirVanishes(id)){usePositive=true;}
   let coarsePhi=select(phiSum/8.0,positiveSum/max(positiveCount,1.0),usePositive);
   // The positive face components are overlapping dual-cell volumes. A dual
   // cell centred on a grid-aligned closed wall is half exterior at every
@@ -1037,6 +1071,7 @@ fn mgSmoothTilesJacobi(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroup
   let jobs=atomicLoad(&mgCycleDispatch[0]);
   for(var at=group.x;at<jobs;at+=groups.x){mgSmoothTilesJacobiAt(at,lane);}
 }
+
 ${wallHalo ? `
 // The first sweep of a visit, from the cycle list with its wall-halo entries.
 fn mgSmoothTilesJacobiCycleAt(at:u32,tiles:u32,lane:u32){

@@ -30,6 +30,15 @@ export function uniformMixedPressureReserve(plan:UniformMixedPressurePlan,maximu
  return {vCycles,fullCycles};
 }
 
+/** A V-only plan gives its last V slot to a Full-Cycle, so the stall jump
+ * has somewhere to go; the slot count does not change. The dam 128^3
+ * all-fine frame fails without it (V cycles at 0.5-0.7 of the cycle before
+ * against a plan of three, 3 of 8 perturbed runs by frame 34), and no lagged
+ * receipt separates those frames from their neighbours. */
+export function uniformMixedPressureSpareFull(plan:UniformMixedPressurePlan,maximum:UniformMixedPressurePlan):UniformMixedPressurePlan{
+ return plan.fullCycles===0&&plan.vCycles>1&&maximum.fullCycles>0?{vCycles:plan.vCycles-1,fullCycles:1}:plan;
+}
+
 /** GPU-resident CM11a schedule for the mixed pressure solve. The host encodes
  * the slot list the previous frame's planner chose (the conservative
  * schedule on the first frame): its V slots, its Full slots, then the
@@ -44,7 +53,7 @@ export function uniformMixedPressureReserve(plan:UniformMixedPressurePlan,maximu
  * launches return at once. A latched frame status (uniform-mixed-frame-status)
  * closes every slot, this frame's and every later one's.
  * The projection gate is the frame's verdict: it accepts only a converged,
- * never-rejected solve whose h band fits and passed its solid certificate.
+ * never-rejected solve whose h band fits.
  * Otherwise it latches the first cause in the frame status. It writes the
  * projection's gate, the band's closed word (UniformPressureBand.closedWord:
  * the band solve, projection and presentation stride no slots) and, on
@@ -82,7 +91,7 @@ export class UniformMixedPressureSchedule {
    * 17) and the pressure root's support (umSlotClosed word 9n+24). */
   private readonly words:{readonly native:GPUBuffer;readonly fine:GPUBuffer;readonly supportWord:number;
    /** The frame status record and the band's index header (count, overflow,
-    * certificate, closed word). */
+    * closed word). */
    readonly status:GPUBuffer;readonly band:GPUBuffer;readonly bandClosedWord:number;
    /** The acceptance uniform (UniformMixedPressureAcceptanceFields.params). */
    readonly acceptance:GPUBuffer}){
@@ -155,7 +164,6 @@ fn umPlan(){
     if(state[4]!=0u){umLatchFailure(select(${FAIL.pressureRejected}u,${FAIL.pressureNonfinite}u,state[0]>=0x7f800000u),state[0],state[1]);}
     else if(state[5]==0u){umLatchFailure(${FAIL.pressureUnconverged}u,state[1],control[4]);}
     if(band[1]!=0u){umLatchFailure(${FAIL.bandCapacity}u,band[0],0u);}
-    if(band[3]!=0u){umLatchFailure(${FAIL.bandSolidCertificate}u,band[3],0u);}
    }
    open=!umFrameFailed();
    if(open){umPlan();atomicStore(&umStatus[6],atomicLoad(&umStatus[7]));}

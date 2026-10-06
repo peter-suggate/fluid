@@ -62,11 +62,13 @@ try{
   min_m:Object.fromEntries(axes.map((a,i)=>[a,l.origin_m[a]+(regionPercent.length?regionPercent[i]!/100:i===0?2/3:0)*l.dimensions[i]!*l.cellSize_m[i]!])) as {x:number;y:number;z:number},
   max_m:Object.fromEntries(axes.map((a,i)=>[a,l.origin_m[a]+(regionPercent.length?regionPercent[i+3]!/100:i===0?1:.5)*l.dimensions[i]!*l.cellSize_m[i]!])) as {x:number;y:number;z:number}};
  scene.fluid.refinementRegions=arm==="mixed"?[region]:[];
- const values={pressureResidualTolerance:tolerance,coarsening:arm==="dynamic"?"dynamic":"regions"};
+ // Retired layout: an h background with a 4h box. Requested is 4h outside Fine boxes, so the
+ // mixed/live arms now run all-4h (plus solid contact) and the box is redundant.
+ const values={pressureResidualTolerance:tolerance,detailPolicy:arm==="dynamic"?"dynamic":arm==="mixed"||arm==="live"?"requested":"full"};
  solver=await uniformVolumeMethod.createSolverAsync!(measured,scene,"balanced",values,undefined,()=>{});
  console.log(JSON.stringify({arm,sceneId,tolerance,dimensions:l.dimensions,region:scene.fluid.refinementRegions,bytes:solver.info.allocatedBytes}));
  for(let step=1;step<=steps;step++){
-  if(arm==="live"&&step===4){scene.fluid.refinementRegions=[region];solver.applySceneUniforms?.(scene);await solver.awaitFrameCompletion?.();}
+  if(arm==="live"&&step===4){scene.fluid.refinementRegions=[region];solver.applySceneUniforms?.(scene);await solver.pipelinesPrepared?.();await solver.awaitFrameCompletion?.();}
   recorder=stageTiming?undefined:new GPUPassTimestampRecorder(device,4096,`Water box ${step}`);
   const start=performance.now();assert.ok(solver.advanceTo(step/30,[]));let failure:unknown;try{await solver.awaitFrameCompletion?.();}catch(error){failure=String(error);}const wall_ms=performance.now()-start;
   const captured=recorder;recorder=undefined;let reading;

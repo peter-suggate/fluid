@@ -7,6 +7,7 @@ import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
+import { uniformDetailBaseOf } from "../lib/core/uniform-detail-abi";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 
@@ -32,13 +33,14 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
       const d=device!; const source=solver!.denseLevelSetVolumeSource!;
       const shaderModule=d.createShaderModule({code:`
 @group(0) @binding(9) var densityField:texture_3d<f32>;
+@group(0) @binding(26) var densityBase:texture_3d<f32>;
 @group(0) @binding(17) var<storage,read> sparseTopologyArena:array<u32>;
 var<private> sparseState:array<f32,1>;
 fn sparseOwner(p:vec3i)->vec2u{return vec2u(0xffffffffu);}
 fn sparseDensityOffset()->u32{return 0u;}
 ${createGridOverlayLevelSetVolumeWGSL(true)}
 @group(0) @binding(23) var<storage,read_write> result:array<vec4f>;
-@compute @workgroup_size(1) fn probe(){result[0]=vec4f(sliceLevelSetPhi(vec3f(3.25,3.5,3.75)),sliceVolumeFill(vec3i(3)));}
+@compute @workgroup_size(1) fn probe(){udrInit();result[0]=vec4f(sliceLevelSetPhi(vec3f(3.25,3.5,3.75)),sliceVolumeFill(vec3i(3)));}
 `});
       assert.deepEqual((await shaderModule.getCompilationInfo()).messages.filter(m=>m.type==="error"),[]);
       const pipeline=await d.createComputePipelineAsync({layout:"auto",compute:{module:shaderModule,entryPoint:"probe"}});
@@ -48,9 +50,10 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
       const staging=d.createBuffer({size:16,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
       const ownership=d.createBuffer({size:4,usage:GPUBufferUsage.STORAGE});
       const group=d.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[
-        {binding:9,resource:solver!.volumeTexture.createView()},
-        {binding:17,resource:{buffer:ownership}},
-        {binding:20,resource:{buffer:params}}, {binding:21,resource:source.vertexPhi.createView()},
+        {binding:9,resource:solver!.volumeTexture.createView()},{binding:26,resource:uniformDetailBaseOf(solver!.volumeTexture).createView()},
+        // The fields are read as the overlay reads them: through the mixed ownership and its detail table.
+        {binding:17,resource:source.mixedOwnership??{buffer:ownership}},
+        {binding:20,resource:{buffer:params}}, {binding:21,resource:source.vertexPhi.createView()},{binding:25,resource:(source.coarseVertexPhi??source.vertexPhi).createView()},
         {binding:22,resource:source.openFraction.createView()}, {binding:23,resource:{buffer:output}},
       ]});
       const e=d.createCommandEncoder();const pass=e.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1);pass.end();e.copyBufferToBuffer(output,0,staging,0,16);d.queue.submit([e.finish()]);

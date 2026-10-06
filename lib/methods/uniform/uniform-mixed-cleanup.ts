@@ -1,3 +1,5 @@
+import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {uniformMixedDustAccountingWGSL} from "./uniform-mixed-dust-accounting.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
@@ -8,8 +10,8 @@ import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSoli
  * floor is pointwise: transport's gather applies it). The immutable input is
  * retained for the entire orphan census; one discarded neighbour must not
  * make the next neighbour eligible. All fields and accounting are borrowed.
- * With static solids a partly open unit owner is exempt from the orphan
- * census, the native uvOpen < 0.99999 rule. resolved: phi's hanging texels
+ * With static solids a partly open owner (a unit cell, or a 4h owner of a cut
+ * tile) is exempt from the orphan census, the native uvOpen < 0.99999 rule. resolved: phi's hanging texels
  * hold umVertexValue (UniformMixedPhiResolve), so footprint scans load them.
  * The orphan pass first summarizes every fine seam tile (minimum footprint
  * phi, maximum V): a 4h candidate's fine neighbours are exactly such tiles,
@@ -23,7 +25,7 @@ export class UniformMixedCleanup {
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly resolved=false){
   this.summary=device.createBuffer({label:"Uniform mixed cleanup fine seam tile summary",size:8*ownership.capacity.tiles,usage:GPUBufferUsage.STORAGE});
   this.allocatedBytes=this.summary.size;
-  this.resources=device.createBindGroupLayout({entries:[
+  this.resources=uniformDetailBindLayout(device,{entries:[
    ...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    {binding:2,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
@@ -31,13 +33,13 @@ export class UniformMixedCleanup {
    {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
   ]});
  }
- bind(input:GPUTexture,output:GPUTexture,phi:GPUTexture,params:GPUBuffer,reductions:GPUBuffer):GPUBindGroup{
+ bind(input:GPUTexture,output:GPUTexture,phi:GPUTexture,params:GPUBuffer,reductions:GPUBuffer):UniformDetailGroup{
   const d=this.ownership.capacity.lattice.dimensions;
-  for(const [i,t] of [input,output,phi].entries())if(t.format!=="r32float"||[t.width,t.height,t.depthOrArrayLayers].some((v,a)=>v!==d[a]!+(i===2?1:0)))throw new Error("Mixed cleanup requires native volume and vertex fields");
+  for(const [i,t] of [input,output,phi].entries())if(t.format!=="r32float"||uniformDetailExtent(t).some((v,a)=>v!==d[a]!+(i===2?1:0)))throw new Error("Mixed cleanup requires native volume and vertex fields");
   if(input===output)throw new Error("Mixed cleanup requires an immutable input");
   if(reductions.size<48)throw new Error("Mixed cleanup requires twelve accounting words");
-  return this.device.createBindGroup({layout:this.resources,entries:[
-   {binding:0,resource:input.createView()},{binding:1,resource:phi.createView()},{binding:2,resource:output.createView()},
+  return uniformDetailGroup(this.device,{layout:this.resources,entries:[
+   {binding:0,resource:input},{binding:1,resource:phi},{binding:2,resource:output},
    {binding:3,resource:{buffer:params,size:32}},{binding:4,resource:{buffer:reductions,size:48}},{binding:5,resource:{buffer:this.summary}},
   ]});
  }
@@ -45,7 +47,7 @@ export class UniformMixedCleanup {
   const h=this.ownership.capacity.lattice.cellSize_m;
   // GPU-counted fixed grids: summarize strides the seam tiles (fused), clean
   // every live owner (all).
-  const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+  const module=uniformDetailModule(this.device,{label:"Uniform mixed cleanup",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var phi:texture_3d<f32>;
 @group(1) @binding(2) var output:texture_storage_3d<r32float,write>;
@@ -56,9 +58,12 @@ export class UniformMixedCleanup {
 @group(1) @binding(5) var<storage,read_write> cleanSummary:array<f32>;
 ${uniformMixedDustAccountingWGSL(this.ownership.capacity.lattice.dimensions.reduce((n,d)=>n*d,1))}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
-${uniformMixedVertexSamplingSource("",this.resolved)}
-${uniformMixedSolidWGSL(this.solid?2:undefined)}
-fn umVolume(o:UMOwner)->f32{return textureLoad(volume,vec3i(umOrigin(o)),0).x;}
+// A tile corner, and below a 4h owner's own texel (its tile origin): the
+// base blocks (UNIFORM_DETAIL_4H_LOAD).
+fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
+${uniformMixedVertexSamplingSource("",this.resolved,undefined,"umLoadCorner")}
+${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
+fn umVolume(o:UMOwner)->f32{let p=vec3i(umOrigin(o));if(o.width==4u){return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,p,0).x;}return textureLoad(volume,p,0).x;}
 fn umDiscard(o:UMOwner,value:f32,threshold:f32,word:u32)->f32{
  umAccountDust(value,o.width*o.width*o.width,threshold,word);
  return 0.0;
@@ -69,6 +74,7 @@ fn umClean(o:UMOwner)->f32{
  let band=${4*Math.max(...h)}*f32(o.width);
  if(!(floor>0.0&&orphan>floor&&value>0.0&&value<orphan)){return value;}
  if(o.width==1u&&umCellOpen(origin)<0.99999){return value;}
+ if(o.width==4u&&umTileOpen(o.tile)<0.99999){return value;}
  var mass=0.0;
  if(o.width==4u){
   // A 4h footprint is exactly the 27 closed tile cubes around the owner's
@@ -135,14 +141,14 @@ var<workgroup> cleanRows:array<vec2f,64>;
 }
 `,["summarize","clean"])});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
-  this.pipelines.set("clean",await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"clean",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.all,...s}}})));
-  this.pipelines.set("summarize",await uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"summarize",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.fused,...s}}})));
+  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
+  this.pipelines.set("clean",await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"clean",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.all,...s}}})));
+  this.pipelines.set("summarize",await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"summarize",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.fused,...s}}})));
  }
- private variant(pipeline:GPUComputePipeline):GPUComputePipeline{return this.solid?.select(pipeline)??pipeline;}
- encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
+ private variant(pipeline:GPUComputePipeline):GPUComputePipeline{return uniformDetailPick(this.solid?.select(pipeline)??pipeline);}
+ encode(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
   const clean=this.pipelines.get("clean"),summarize=this.pipelines.get("summarize");if(!clean||!summarize)throw new Error("Mixed cleanup is not initialized");
-  const pass=encoder.beginComputePass({label:"Uniform mixed cleanup orphan"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
+  const pass=encoder.beginComputePass({label:"Uniform mixed cleanup orphan"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
   // Seams list fine tiles first; jobs past them only pass the barrier.
   this.ownership.dispatchFusedCounted(pass,this.variant(summarize));
   this.ownership.dispatchAllCounted(pass,this.variant(clean));pass.end();

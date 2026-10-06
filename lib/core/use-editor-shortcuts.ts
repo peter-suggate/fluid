@@ -9,6 +9,7 @@ import { editorGestureForShortcut } from "./editor-gesture-catalog";
 import { stepFluidCellTraceHit } from "./fluid-cell-trace";
 import { editorEntityContext, findEntity } from "./editor-entity-catalog";
 import { sceneInstrumentForShortcut } from "./scene-instruments";
+import { voxelRailToolForKey } from "./editor-voxel-tool-actions";
 import type { PaneSession } from "./session/session";
 import { useSession } from "./session/session-context";
 import { simulation } from "./simulation/controller";
@@ -119,6 +120,10 @@ export function useEditorShortcuts(focused?: PaneSession): void {
         }
         if (ui.sceneOverlay) { ui.setSceneOverlay(null); return; }
         if (ui.axisConstraint) { ui.setAxisConstraint(undefined); return; }
+        // An armed sculpt tool is a mode inside EDIT like any other, so Escape
+        // puts it away before it reaches the mode itself. A stroke in flight
+        // never gets this far: the gesture host takes that Escape for the stroke.
+        if (ui.voxelToolId && ui.viewportMode === "interact") { ui.setVoxelTool(undefined); return; }
         // INTERACT is the outermost of all of them, so it is the last thing
         // Escape reaches: with nothing armed and nothing selected there is
         // nothing left inside the mode to leave, and the next Escape is the mode.
@@ -207,6 +212,17 @@ export function useEditorShortcuts(focused?: PaneSession): void {
       if (ui.fluidCellTraceEnabled && event.key.toLowerCase() === "i") {
         event.preventDefault();
         ui.jumpFluidCellTraceToInterface();
+        return;
+      }
+      // The sculpt rail, by place: the third mark is `3`. Only in EDIT, where
+      // the rail is on screen to be counted — LOOK keeps the digits for the
+      // camera framings below, and `0` is never a place, so the one key that
+      // rescues a lost camera works in both. The armed tool's own digit puts it
+      // away, on the same bargain as every other key here.
+      const railTool = ui.viewportMode === "interact" && !event.shiftKey ? voxelRailToolForKey(event.key) : undefined;
+      if (railTool) {
+        event.preventDefault();
+        ui.setVoxelTool(ui.voxelToolId === railTool ? undefined : railTool);
         return;
       }
       // Camera framing. These replaced a permanent four-button toolbar; `0` in

@@ -1,3 +1,4 @@
+import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
@@ -6,9 +7,11 @@ import { uniformMixedDustAccountingWGSL } from "./uniform-mixed-dust-accounting.
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 
 /** Native-texture conservative transport on mixed h/4h Uniform owners. With static
- * solids (group 2), unit rows carry native cut-cell capacity: edge weights by
- * min(open), open row targets and fallbacks, and sealed cells keep their V. */
-export function uniformMixedTransportWGSL(layout: UniformMixedLayout,sources=false,solid=false,resolved=false): string {
+ * solids (group 2), rows carry cut-cell capacity: a unit row its h cell's open
+ * fraction, a 4h row its tile's (`record`, the all-4h record's count; without
+ * it every 4h row is uncut). Edge weights by the open part of each overlap,
+ * open row and donor targets and fallbacks, and sealed rows keep their V. */
+export function uniformMixedTransportWGSL(layout: UniformMixedLayout,sources=false,solid=false,resolved=false,record?:number): string {
   const [nx, ny, nz] = layout.lattice.dimensions;
   if (Math.max(nx, ny, nz) > 1020) throw new Error("Mixed transport packs row bases in 10 bits per axis: at most 1020 cells");
   // Donor sums hold every row weight of a round, at most one lattice cell per
@@ -35,7 +38,9 @@ ${sources?uniformMixedSourceWGSL(7):""}
 @group(1) @binding(11) var<storage,read_write> reductions:array<atomic<u32>>;
 ${uniformMixedDustAccountingWGSL(nx*ny*nz)}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
-${uniformMixedVertexSamplingSource("",resolved)}
+// A tile corner: the base block (UNIFORM_DETAIL_4H_LOAD).
+fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
+${uniformMixedVertexSamplingSource("",resolved,undefined,"umLoadCorner")}
 // A nonzero V below the floor is discarded unless it is positive with the
 // surface inside the owner's band (the cleanup floor, pointwise per owner).
 fn tpFloor(origin:vec3u,width:u32,value:f32)->f32{
@@ -50,10 +55,12 @@ const D=vec3u(${nx},${ny},${nz});const T=D/4u;
 // words (low, then high) per owner index. Every stored weight is first rounded
 // up onto that grid (tpQuantize; only weights below 2^(23-TP_F) move), so a
 // sum is exactly its weights in any order, and gather divides by that sum.
-const TP_F:i32=${fraction};const TP_PLANE:u32=${cells}u;
 // Sampled flags, a third plane: a row's own cell is sampled when some row
-// has a positive raw weight on it (the fallback test).
-const TP_FLAGS:u32=${2*cells}u;
+// has a positive raw weight on it (the fallback test). A plane is one word
+// per owner the capacity holds: the decoded sums' length.
+const TP_F:i32=${fraction};
+fn tpSumHigh(i:u32)->u32{return arrayLength(&sums)+i;}
+fn tpFlag(i:u32)->u32{return 2u*arrayLength(&sums)+i;}
 fn tpFixed(value:f32)->vec2u{
  let bits=bitcast<u32>(value);if(bits==0u){return vec2u(0u);}
  let exponent=bits>>23u;let mantissa=select(bits&0x7fffffu,(bits&0x7fffffu)|0x800000u,exponent!=0u);
@@ -68,15 +75,22 @@ fn tpDelta(a:vec2u,b:vec2u)->vec2u{return vec2u(a.x-b.x,a.y-b.y-select(0u,1u,a.x
 fn tpAdd(i:u32,x:vec2u){
  var high=x.y;
  if(x.x!=0u){let old=bitcast<u32>(atomicAdd(&rigidExchange[i],bitcast<i32>(x.x)));high+=select(0u,1u,old>0xffffffffu-x.x);}
- if(high!=0u){atomicAdd(&rigidExchange[TP_PLANE+i],bitcast<i32>(high));}
+ if(high!=0u){atomicAdd(&rigidExchange[tpSumHigh(i)],bitcast<i32>(high));}
 }
 fn uvAddDonor(donor:u32,value:f32){tpAdd(donor,tpFixed(value));}
+// A weight's part of its donor's capacity. The donor's only sampler takes it
+// whole, exactly: a row at rest keeps V bit for bit at any open fraction (a
+// quotient rounds once the weight is not a power of two).
+fn tpShare(weight:f32,capacity:f32,sum:f32)->f32{
+ if(weight==sum&&weight!=0.0){return capacity;}
+ return weight*capacity/max(sum,1e-20);
+}
 // Reads and clears a sum.
 fn tpTake(i:u32)->f32{
- let low=bitcast<u32>(atomicExchange(&rigidExchange[i],0));let high=bitcast<u32>(atomicExchange(&rigidExchange[TP_PLANE+i],0));
+ let low=bitcast<u32>(atomicExchange(&rigidExchange[i],0));let high=bitcast<u32>(atomicExchange(&rigidExchange[tpSumHigh(i)],0));
  return ldexp(f32(high)*4294967296.0+f32(low),-TP_F);
 }
-${uniformMixedSolidWGSL(solid?2:undefined)}
+${uniformMixedSolidWGSL(solid?2:undefined,solid?record:undefined)}
 ${uniformMixedTransportLiveWGSL(sources)}
 struct Row {tile:u32,lane:u32,width:u32,index:u32,address:u32,stride:u32,grain:u32,side:u32,count:u32}
 fn rowAt(gid:vec3u)->Row {
@@ -84,17 +98,41 @@ fn rowAt(gid:vec3u)->Row {
  let t=o.tile;let lane=o.lane;let w=o.width;
  var grain=1u;
  if(w>1u){grain=((atomicLoad(&sampling[t])>>(2u*lane))&3u)+1u;}
- let side=w/grain+1u;let maxSide=w+1u;
- // Unit rows store their words planar across the tile (word k of every lane
- // adjacent); coarse rows keep theirs contiguous.
- let unit=w==1u;
- return Row(t,lane,w,(umTopology[t]&0x3fffffffu)+lane,t*640u+select(lane*(maxSide*maxSide*maxSide+2u),lane,unit),select(1u,64u,unit),grain,side,side*side*side+1u);
+ let side=w/grain+1u;
+ // Rows by owner rank, h tiles first. An h tile's 64 unit rows store their
+ // ten words planar across the tile (word k of every lane adjacent): 640
+ // words from 10 * its first owner. A 4h row keeps its base, 125 donors and
+ // self edge contiguous: 128 words a 4h owner, after every h tile's.
+ let unit=w==1u;let first=o.index-lane;let fine=64u*umCounts.x;
+ return Row(t,lane,w,o.index,select(10u*fine+128u*(first-fine),10u*first+lane,unit),select(1u,64u,unit),grain,side,side*side*side+1u);
 }
 fn corner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}
 fn umRowOrigin(r:Row)->vec3u{return umTileCoord(r.tile)*4u+corner(r.lane,4u/r.width)*r.width;}
-// uvOpen(id) for a unit row; coarse rows are uncut (promotion certificate).
-fn umRowCapacity(r:Row)->f32{if(r.width==1u){return umCellOpen(vec3i(umRowOrigin(r)));}return f32(r.width*r.width*r.width);}
+// A 4h tile's open fraction as a row or donor holds it: sealed at <=1e-5.
+fn tpTileOpen(t:u32)->f32{let open=umTileOpen(t);return select(0.0,open,open>1e-5);}
+// The row's open fraction: uvOpen(id) for a unit row, the tile's mean for a 4h row.
+fn umRowOpen(r:Row)->f32{if(r.width==1u){return umCellOpen(vec3i(umRowOrigin(r)));}return tpTileOpen(r.tile);}
+// The open part of a box's overlap with a 4h tile: the overlap whole, none of
+// a sealed tile, and a cut tile's by its h cells (the open overlap with a
+// staircase is not a function of the tile's open fraction).
+fn tpOpenOverlap(tile:vec3i,lower:vec3f,upper:vec3f,whole:f32)->f32{
+ let open=umTileOpen(umTileAt(vec3u(tile)));
+ if(open>=1.0||whole==0.0){return whole;}
+ if(open<=1e-5){return 0.0;}
+ let first=max(4*tile,vec3i(floor(lower)));let last=min(4*tile+3,vec3i(ceil(upper))-1);var sum=0.0;
+ for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){
+  let c=vec3i(x,y,z);let lengths=max(vec3f(0),min(upper,vec3f(c)+1.0)-max(lower,vec3f(c)));
+  sum+=lengths.x*lengths.y*lengths.z*umCellOpen(c);
+ }}}
+ return sum;
+}
+// The open volume the row is normalized to, in h cells.
+fn umRowCapacity(r:Row)->f32{return f32(r.width*r.width*r.width)*umRowOpen(r);}
 struct Donor {index:u32,capacity:f32,origin:vec3u}
+// The volume a donor's samplers divide between them, in h cells: a 4h
+// donor's less its tile's solid, the capacity its own row is normalized to
+// (gather still shares V by the cell volume: V is a fraction of the cell).
+fn tpDonorOpen(d:Donor)->f32{${solid?"if(d.capacity!=1.0){return d.capacity*tpTileOpen(umTileAt(d.origin/4u));}":""}return d.capacity;}
 // The row's first donor cell in grain units, packed 10 bits per axis with a
 // bias of 4: a partially intersecting 4h box sampled at h can start at -4.
 // Fully out-of-domain rows have no positive donor weights; clamp their unused
@@ -122,7 +160,9 @@ fn donorFrom(r:Row,base:vec3u,k:u32)->Donor {return donorWord(r,base,k,edges[r.a
 fn buildAt(gid:vec3u){
  var r=rowAt(gid);if(r.width==0u){return;}
  let origin=umTileCoord(r.tile)*4u+corner(r.lane,4u/r.width)*r.width;
- let lower=textureLoad(departure,vec3i(origin),0).xyz-vec3f(0.5*f32(r.width));
+ // A 4h row's origin is its tile's: the base block.
+ var departed=vec3f(0);if(r.width==4u){departed=${UNIFORM_DETAIL_4H_LOAD}textureLoad(departure,vec3i(origin),0).xyz;}else{departed=textureLoad(departure,vec3i(origin),0).xyz;}
+ let lower=departed-vec3f(0.5*f32(r.width));
  let upper=lower+f32(r.width);var grain=r.width;
  let lo=max(vec3i(0),vec3i(floor(lower/4.0)));let hi=min(vec3i(T)-1,vec3i(ceil(upper/4.0))-1);
  // A width <=4 box touches at most two 4h tiles per axis, regardless of travel.
@@ -138,46 +178,48 @@ fn buildAt(gid:vec3u){
   if(all(q>=vec3i(0))&&all(q<dims)){
    let a=vec3f(q)*f32(grain);let lengths=max(vec3f(0),min(upper,a+f32(grain))-max(lower,a));
    weight=lengths.x*lengths.y*lengths.z;
-   ${solid?"if(grain==1u){weight*=min(select(1.0,umCellOpen(vec3i(origin)),r.width==1u),umCellOpen(q));}":""}
+   ${solid?"// The open part of the overlap: an h cell's at grain 1 (min(open) with a unit\n   // row's own), a 4h tile's at grain 4.\n   if(grain==1u){weight*=min(select(1.0,umCellOpen(vec3i(origin)),r.width==1u),umCellOpen(q));}else{weight=tpOpenOverlap(q,lower,upper,weight);}":""}
   }
   edges[r.address+(1u+k)*r.stride]=bitcast<u32>(weight);
-  if(bitcast<u32>(weight)!=0u){atomicStore(&rigidExchange[TP_FLAGS+donorAt(vec3u(q)*grain).index],1);}
+  if(bitcast<u32>(weight)!=0u){atomicStore(&rigidExchange[tpFlag(donorAt(vec3u(q)*grain).index)],1);}
  }
  edges[r.address+r.count*r.stride]=0u;
 }
-fn clearDonor(index:u32){atomicStore(&rigidExchange[index],0);atomicStore(&rigidExchange[TP_PLANE+index],0);atomicStore(&rigidExchange[TP_FLAGS+index],0);}
-fn tpSampled(index:u32)->bool{return atomicLoad(&rigidExchange[TP_FLAGS+index])!=0;}
+fn clearDonor(index:u32){atomicStore(&rigidExchange[index],0);atomicStore(&rigidExchange[tpSumHigh(index)],0);atomicStore(&rigidExchange[tpFlag(index)],0);}
+fn tpSampled(index:u32)->bool{return atomicLoad(&rigidExchange[tpFlag(index)])!=0;}
 fn decodeAt(gid:vec3u){
  let o=tpOwner(gid);if(o.width==0u){return;}sums[o.index]=tpTake(o.index);
 }
-// One coarse row per workgroup: distribute up to 125 donor overlaps,
-// retaining the scalar row's summation order and exact integer donor sums.
-var<workgroup> coarseWeights:array<f32,126>;
-var<workgroup> coarseDonors:array<u32,126>;
-var<workgroup> coarseScale:f32;
+// Four coarse rows per workgroup, sixteen lanes per row. The same dynamic
+// donor loop covers regular 4h rows and 126-edge refinement-seam rows.
+// Shared weights preserve the original float32 rounding boundary and each
+// row's ascending summation order; donor accumulation remains exact.
+var<workgroup> coarseWeights:array<f32,504>;
+var<workgroup> coarseDonors:array<u32,504>;
+var<workgroup> coarseScale:array<f32,4>;
 fn normalizeCoarseRow(job:u32,lane:u32,divide:bool){
- let r=rowAt(vec3u(job,0u,0u));let base=rowBase(r);
- for(var k=lane;k<126u;k+=64u){if(r.width!=0u&&k<r.count){
+ let row=lane/16u;let local=lane%16u;let offset=row*126u;
+ let r=rowAt(vec3u(4u*job+row,0u,0u));let base=rowBase(r);
+ for(var k=local;k<126u;k+=16u){if(r.width!=0u&&k<r.count){
   let donor=donorFrom(r,base,k);var weight=bitcast<f32>(edges[r.address+(1u+k)*r.stride]);
-  if(divide){weight=weight*donor.capacity/max(sums[donor.index],1e-20);}
-  else if(k==r.count-1u&&!tpSampled(r.index)){weight=f32(r.width*r.width*r.width);}
-  coarseWeights[k]=weight;coarseDonors[k]=donor.index;
+  if(divide){weight=tpShare(weight,tpDonorOpen(donor),sums[donor.index]);}
+  else if(k==r.count-1u&&!tpSampled(r.index)){weight=${solid?"max(umRowCapacity(r),1e-6)":"f32(r.width*r.width*r.width)"};}
+  coarseWeights[offset+k]=weight;coarseDonors[offset+k]=donor.index;
  }}
  workgroupBarrier();
- if(lane==0u&&r.width!=0u){
-  var sum=0.0;for(var k=0u;k<r.count;k++){sum+=coarseWeights[k];}
-  coarseScale=umRowCapacity(r)/max(sum,1e-20);
+ if(local==0u&&r.width!=0u){
+  var sum=0.0;for(var k=0u;k<r.count;k++){sum+=coarseWeights[offset+k];}
+  coarseScale[row]=umRowCapacity(r)/max(sum,1e-20);
  }
  workgroupBarrier();
- for(var k=lane;k<126u;k+=64u){if(r.width!=0u&&k<r.count){
-  let weight=tpQuantize(coarseWeights[k]*coarseScale);
-  edges[r.address+(1u+k)*r.stride]=bitcast<u32>(weight);uvAddDonor(coarseDonors[k],weight);
+ for(var k=local;k<126u;k+=16u){if(r.width!=0u&&k<r.count){
+  let weight=tpQuantize(coarseWeights[offset+k]*coarseScale[row]);
+  edges[r.address+(1u+k)*r.stride]=bitcast<u32>(weight);uvAddDonor(coarseDonors[offset+k],weight);
  }}
 }
-// Grid-stride over the listed coarse rows, one row per workgroup job.
 var<workgroup> tpCoarseJobs:u32;
 fn normalizeCoarseRows(group:u32,groups:u32,lane:u32,divide:bool){
- if(lane==0u){tpCoarseJobs=atomicLoad(&live[tpCountWord(umTransportList,1u)]);}
+ if(lane==0u){tpCoarseJobs=(atomicLoad(&live[tpCountWord(umTransportList,1u)])+3u)/4u;}
  let jobs=workgroupUniformLoad(&tpCoarseJobs);
  for(var job=group;job<jobs;job+=groups){normalizeCoarseRow(job,lane,divide);workgroupBarrier();}
 }
@@ -214,7 +256,7 @@ fn tpContribute(d:Donor,weight:f32,fits:bool,boxLow:vec3u,extent:vec3u,mode:u32)
   let word=64u*(t.x+extent.x*(t.y+extent.y*t.z))+cell.x+4u*(cell.y+4u*cell.z);
   let x=tpFixed(weight);for(var i=0u;i<TP_LIMBS;i++){let v=tpLimb(x,i);if(v!=0u){atomicAdd(&tpWindow[512u*i+word],v);}}
  }
- else{if(mode==0u){atomicStore(&rigidExchange[TP_FLAGS+d.index],1);}tpAdd(d.index,tpFixed(weight));}
+ else{if(mode==0u){atomicStore(&rigidExchange[tpFlag(d.index)],1);}tpAdd(d.index,tpFixed(weight));}
 }
 // Each lane commits one cell of every box tile; a 4h tile's owner is cell 0.
 fn tpCommit(lane:u32,fits:bool,boxLow:vec3u,extent:vec3u,mode:u32){
@@ -225,7 +267,7 @@ fn tpCommit(lane:u32,fits:bool,boxLow:vec3u,extent:vec3u,mode:u32){
   if(any(x!=vec2u(0u))){
    let tile=umTileAt(boxLow+vec3u(slot%extent.x,(slot/extent.x)%extent.y,slot/(extent.x*extent.y)));
    let index=(umTopology[tile]&0x3fffffffu)+lane;
-   if(mode==0u){atomicStore(&rigidExchange[TP_FLAGS+index],1);}tpAdd(index,x);
+   if(mode==0u){atomicStore(&rigidExchange[tpFlag(index)],1);}tpAdd(index,x);
   }
  }}
  if(lane<3u){atomicStore(&tpBoxLow[lane],0xffffffffu);atomicStore(&tpBoxHigh[lane],0u);}
@@ -267,19 +309,21 @@ fn tpFineRows(group:u32,groups:u32,lane:u32,mode:u32){
 @compute @workgroup_size(64) fn rowsDivideFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){tpFineRows(group.x,groups.x,lane,2u);}
 fn gatherAt(gid:vec3u){
  let r=rowAt(gid);if(r.width==0u){return;}var value=0.0;
- ${solid?`// A sealed cell's V is an unplaceable reservoir; preserve it.
- if(r.width==1u&&umRowCapacity(r)<=0.0){let p=umRowOrigin(r);textureStore(output,vec3i(p),vec4f(tpFloor(p,1u,textureLoad(volume,vec3i(p),0).x)));return;}`:""}
+ ${solid?`// A sealed row's V is an unplaceable reservoir; preserve it.
+ if(umRowCapacity(r)<=0.0){let p=umRowOrigin(r);textureStore(output,vec3i(p),vec4f(tpFloor(p,r.width,textureLoad(volume,vec3i(p),0).x)));return;}`:""}
  let base=rowBase(r);
  for(var k=0u;k<r.count;k++){let word=edges[r.address+(1u+k)*r.stride];let d=donorWord(r,base,k,word);
-  let weight=bitcast<f32>(word)*d.capacity/max(sums[d.index],1e-20);
-  value+=weight*textureLoad(volume,vec3i(d.origin),0).x;}
+  // A 4h donor (capacity 64) is read at its tile origin: the base block.
+  var donated=0.0;if(d.capacity!=1.0){donated=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(d.origin),0).x;}else{donated=textureLoad(volume,vec3i(d.origin),0).x;}
+  value+=tpShare(bitcast<f32>(word),d.capacity,sums[d.index])*donated;}
  let origin=umTileCoord(r.tile)*4u+corner(r.lane,4u/r.width)*r.width;
  var fill=value/f32(r.width*r.width*r.width);
  ${sources?`if(umSourceParams.drop.w>0.0||umSourceinflowStrength()>0.0){
   var added=0.0;
   for(var z=0u;z<r.width;z++){for(var y=0u;y<r.width;y++){for(var x=0u;x<r.width;x++){
-   let q=vec3i(origin+vec3u(x,y,z));${solid?`let open=select(1.0,umCellOpen(q),r.width==1u);
-   added+=min(umSourcedropSource(q),max(0.0,open-fill))+select(0.0,umSourceinflowSweptPlugSource(q,umSourceParams.dimsDt.w),open>0.0);`:`added+=min(umSourcedropSource(q),max(0.0,1.0-fill))+umSourceinflowSweptPlugSource(q,umSourceParams.dimsDt.w);`}
+   let q=vec3i(origin+vec3u(x,y,z));${solid?`// The drop fills the h cell's share of the row's room: open-fill for a unit row.
+   let open=umCellOpen(q);var room=max(0.0,open-fill);if(r.width!=1u){room=open*max(0.0,1.0-fill*f32(r.width*r.width*r.width)/umRowCapacity(r));}
+   added+=min(umSourcedropSource(q),room)+select(0.0,umSourceinflowSweptPlugSource(q,umSourceParams.dimsDt.w),open>0.0);`:`added+=min(umSourcedropSource(q),max(0.0,1.0-fill))+umSourceinflowSweptPlugSource(q,umSourceParams.dimsDt.w);`}
   }}}
   fill+=added/f32(r.width*r.width*r.width);
  }`:""}
@@ -287,7 +331,7 @@ fn gatherAt(gid:vec3u){
 }
 // Rows outside R1 keep V (the seeds stored it); R1 rows return to volume.
 fn copyVolumeAt(gid:vec3u){
- let o=tpOwner(gid);if(o.width!=0u){let p=vec3i(umOrigin(o));textureStore(output,p,vec4f(textureLoad(volume,p,0).x));}
+ let o=tpOwner(gid);if(o.width!=0u){let p=vec3i(umOrigin(o));var v=0.0;if(umCellWidth==4u){v=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,p,0).x;}else{v=textureLoad(volume,p,0).x;}textureStore(output,p,vec4f(v));}
 }
 // Live-list entries: a fixed grid-stride grid over the listed owners (a
 // lane per owner, tiers in separate launches).
@@ -311,7 +355,7 @@ function tpFineJobWGSL(mode: 0 | 2, solid: boolean): string {
  ${each((k) => `let q${k}=base+vec3i(${k & 1},${(k >> 1) & 1},${k >> 2});var w${k}=tpOverlap(q${k},lower,upper,open);var d${k}=Donor();if(w${k}!=0.0){d${k}=donorAt(vec3u(q${k}));}`)}
  ${word(8)}=0u;` : `let base=rowBase(r);
  ${each((k) => `let e${k}=${word(k)};let d${k}=donorWord(r,base,${k}u,e${k});var w${k}=bitcast<f32>(e${k});`)}
- ${each((k) => `w${k}=w${k}*d${k}.capacity/max(sums[d${k}.index],1e-20);`)}`}
+ ${each((k) => `w${k}=tpShare(w${k},tpDonorOpen(d${k}),sums[d${k}.index]);`)}`}
  let scale=umRowCapacity(r)/max(${ks.map((k) => `w${k}`).join("+")},1e-20);
  ${each((k) => `w${k}=tpQuantize(w${k}*scale);${word(k)}=bitcast<u32>(w${k});`)}`;
   return /* wgsl */ `
@@ -391,7 +435,9 @@ var<workgroup> tpHigh:array<atomic<u32>,3>;
 // from the tile, biased by 512 in 10 bits.
 fn tpOwnerReach(tile:u32,origin:vec3u,width:u32)->array<vec3u,2>{
  let coord=vec3i(umTileCoord(tile));
- let lower=textureLoad(departure,vec3i(origin),0).xyz-vec3f(0.5*f32(width));let upper=lower+f32(width);
+ // A 4h owner's origin is its tile's: the base block (width is a constant at both callers).
+ var departed=vec3f(0);if(width==4u){departed=${UNIFORM_DETAIL_4H_LOAD}textureLoad(departure,vec3i(origin),0).xyz;}else{departed=textureLoad(departure,vec3i(origin),0).xyz;}
+ let lower=departed-vec3f(0.5*f32(width));let upper=lower+f32(width);
  // A non-finite departure reaches the whole lattice.
  let finite=all(abs(lower)<vec3f(1.0e8));
  let first=select(vec3i(0),clamp(vec3i(floor(lower/4.0)),vec3i(0),vec3i(UM_T)-1),finite);
@@ -435,7 +481,7 @@ fn tpStoreSeed(tile:u32,seeded:u32,low:vec3u,high:vec3u){
  let tile=umTopology[UM_TILES+umCounts.x+job];let origin=umTileCoord(tile)*4u;
  clearDonor(umTopology[tile]&0x3fffffffu);atomicStore(&sampling[tile],0u);
  let reach=tpOwnerReach(tile,origin,4u);
- let v=textureLoad(volume,vec3i(origin),0).x;textureStore(output,vec3i(origin),vec4f(v));var seeded=v!=0.0;
+ let v=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(origin),0).x;textureStore(output,vec3i(origin),vec4f(v));var seeded=v!=0.0;
  if(!seeded&&tpSourcesActive()){for(var k=0u;k<64u&&!seeded;k++){seeded=tpSourced(vec3i(origin+umCorner(k,4u)));}}
  tpStoreSeed(tile,select(0u,TP_S,seeded),min(reach[0],vec3u(512u)),max(reach[1],vec3u(512u)));
 }

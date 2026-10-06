@@ -1,4 +1,6 @@
+import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
+import { UNIFORM_DETAIL_GUARD_LOAD } from "../../core/uniform-detail-abi";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedChangedTilesWGSL } from "./uniform-mixed-layout-builder";
@@ -28,20 +30,20 @@ export class UniformMixedPhiResolve {
   private listed?: GPUComputePipeline;
   private readonly resources: GPUBindGroupLayout;
   private readonly listResources: GPUBindGroupLayout;
-  private listGroup?: { readonly changes: GPUBuffer; readonly group: GPUBindGroup };
+  private listGroup?: { readonly changes: GPUBuffer; readonly group: UniformDetailGroup };
 
   constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership) {
-    this.resources = device.createBindGroupLayout({ entries: [
+    this.resources = uniformDetailBindLayout(device,{ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "read-write", format: "r32float", viewDimension: "3d" } },
     ] });
-    this.listResources = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }] });
+    this.listResources = uniformDetailBindLayout(device,{ entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }] });
   }
 
-  bind(field: GPUTexture): GPUBindGroup {
+  bind(field: GPUTexture): UniformDetailGroup {
     const size = this.ownership.capacity.lattice.dimensions.map(n => n + 1);
-    if (field.format !== "r32float" || [field.width, field.height, field.depthOrArrayLayers].some((n, a) => n !== size[a]))
+    if (field.format !== "r32float" || uniformDetailExtent(field).some((n, a) => n !== size[a]))
       throw new Error("Mixed phi resolve requires a native vertex phi field");
-    return this.device.createBindGroup({ layout: this.resources, entries: [{ binding: 0, resource: field.createView() }] });
+    return uniformDetailGroup(this.device,{ layout: this.resources, entries: [{ binding: 0, resource: field }] });
   }
 
   async initialize(): Promise<void> {
@@ -90,18 +92,18 @@ ${job}
   if(weight>0.0){values[k]=weight*umResolveLattice[m.x+3u*(m.y+3u*m.z)];}
  }
  let value=umVertexSum8(values);
- if(bitcast<u32>(value)!=bitcast<u32>(umLoadVertex(p))){textureStore(field,vec3i(p),vec4f(value));}
+ if(bitcast<u32>(value)!=bitcast<u32>(${UNIFORM_DETAIL_GUARD_LOAD}textureLoad(field,vec3i(p)).x)){textureStore(field,vec3i(p),vec4f(value));}
 }`, [entry], entry === "resolve" ? undefined : "umDilatedCount()");
-    const module = this.device.createShaderModule({ code: source("resolve", header) });
-    const listModule = this.device.createShaderModule({ code: source("resolveListed", listed, uniformMixedChangedTilesWGSL(this.ownership.capacity.tiles, 2, 0)) });
+    const module = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve", code: source("resolve", header) });
+    const listModule = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve (listed)", code: source("resolveListed", listed, uniformMixedChangedTilesWGSL(this.ownership.capacity.tiles, 2, 0)) });
     const errors = [...(await module.getCompilationInfo()).messages, ...(await listModule.getCompilationInfo()).messages].filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
     [this.pipeline, this.listed] = await Promise.all([
-      this.device.createComputePipelineAsync({
+      uniformDetailPipeline(this.device,this.ownership,{
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources] }),
         compute: { module, entryPoint: "resolve", constants: { umDispatchX: this.ownership.dispatchX, umCountedJobs: UNIFORM_MIXED_COUNTED.fused } },
       }),
-      this.device.createComputePipelineAsync({
+      uniformDetailPipeline(this.device,this.ownership,{
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources, this.listResources] }),
         compute: { module: listModule, entryPoint: "resolveListed", constants: { umDispatchX: this.ownership.dispatchX } },
       }),
@@ -111,13 +113,13 @@ ${job}
   /** changes: the changed tiles (UniformMixedGenerationBuffers.changes) of
    * the generation the ownership just adopted, when the field was resolved
    * for the ownership it replaced (see the class comment). */
-  encode(encoder: GPUCommandEncoder, group: GPUBindGroup, changes?: GPUBuffer): void {
+  encode(encoder: GPUCommandEncoder, group: UniformDetailGroup, changes?: GPUBuffer): void {
     if (!this.pipeline || !this.listed) throw new Error("Mixed phi resolve is not initialized");
     const pass = encoder.beginComputePass({ label: "Uniform mixed phi resolve" });
-    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group);
+    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1,group.group);
     if (changes) {
-      if (this.listGroup?.changes !== changes) this.listGroup = { changes, group: this.device.createBindGroup({ layout: this.listResources, entries: [{ binding: 0, resource: { buffer: changes } }] }) };
-      pass.setBindGroup(2, this.listGroup.group);
+      if (this.listGroup?.changes !== changes) this.listGroup = { changes, group: uniformDetailGroup(this.device,{ layout: this.listResources, entries: [{ binding: 0, resource: { buffer: changes } }] }) };
+      pass.setBindGroup(2, this.listGroup.group.group);
       this.ownership.dispatchCounted(pass, this.listed);
     } else this.ownership.dispatchFusedCounted(pass, this.pipeline);
     pass.end();

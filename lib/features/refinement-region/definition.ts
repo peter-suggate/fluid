@@ -89,6 +89,8 @@ export interface RegionSpace<Doc, Patch = Doc> {
    * `cellSizes`.
    */
   readonly heldTiers?: readonly RegionTier[];
+  /** What the draw wedge says while a box can still be drawn; absent, the tiers name it. */
+  readonly drawHint?: string;
   /**
    * The rung a box drawn here carries while nobody has chosen one.
    *

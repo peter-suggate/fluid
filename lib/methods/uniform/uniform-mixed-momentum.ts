@@ -1,3 +1,5 @@
+import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
@@ -118,25 +120,66 @@ var<workgroup> umUnitEscapes:array<atomic<u32>,2>;
  }
 }
 // The escaped cells: every positive face of each with the general sampler.
-// A fixed grid claims entries from umClaims[umClaimWord].
+// A fixed grid claims entries from umClaims[umClaimWord]. A listed tile holds
+// about a quarter of its cells (the layer against a 4h face), so a round
+// takes as many whole entries as fit its 64 cells (lane 0: a few loads an
+// entry) and each lane finds its own cell among them: the entry by the
+// running cell counts, the cell as that entry's n-th listed bit. An entry
+// that does not fit waits with the workgroup that claimed it for its next
+// round. Values and stores are per (cell, axis); the packing only moves their
+// lanes. Cells stay whole: tracing the escaped faces alone and recomputing
+// the others with the unit sampler measured slower (see the storage design).
 var<workgroup> umDeferredCount:u32;
-var<workgroup> umDeferredClaim:u32;
+var<workgroup> umDeferredFill:u32;
+// tile, mask.xy, cells of this and the earlier entries of the round.
+var<workgroup> umDeferredEntries:array<vec4u,8>;
 var<workgroup> umDeferredComponents:array<f32,192>;
+// The n-th set bit of a 64-cell mask (n below its population).
+fn umDeferredListedCell(mask:vec2u,n:u32)->u32 {
+ let low=countOneBits(mask.x);let high=n>=low;
+ let word=select(mask.x,mask.y,high);var rank=select(n,n-low,high);var bit=0u;
+ for(var width=16u;width>0u;width>>=1u){
+  let below=countOneBits((word>>bit)&((1u<<width)-1u));
+  if(rank>=below){rank-=below;bit+=width;}
+ }
+ return select(0u,32u,high)+bit;
+}
 @compute @workgroup_size(192) fn momentumDeferred(@builtin(local_invocation_index) lane:u32){
- let cell=lane%64u;let axis=lane/64u;
+ let slot=lane%64u;let axis=lane/64u;
  if(lane==0u){umDeferredCount=atomicLoad(&umDeferred[0]);}
  let count=workgroupUniformLoad(&umDeferredCount);
+ var pending=vec4u(0);
  loop{
-  if(lane==0u){umDeferredClaim=atomicAdd(&umClaims[umClaimWord],1u);}
-  let entry=workgroupUniformLoad(&umDeferredClaim);if(entry>=count){break;}
-  let tile=atomicLoad(&umDeferred[4u+3u*entry]);
-  let listed=((atomicLoad(&umDeferred[5u+3u*entry+cell/32u])>>(cell%32u))&1u)!=0u;
-  let owner=UMOwner(tile,cell,1u,(umTopology[tile]&0x3fffffffu)+cell);
-  var value=0.0;
-  if(listed){value=umMomentum(owner,umFace(owner,axis,1,0u));}
+  if(lane==0u){
+   var fill=0u;var held=0u;
+   loop{
+    if(held>=8u){break;}
+    if(pending.w==0u){
+     let entry=atomicAdd(&umClaims[umClaimWord],1u);if(entry>=count){break;}
+     pending=vec4u(atomicLoad(&umDeferred[4u+3u*entry]),atomicLoad(&umDeferred[5u+3u*entry]),atomicLoad(&umDeferred[6u+3u*entry]),0u);
+     pending.w=countOneBits(pending.y)+countOneBits(pending.z);
+     continue;
+    }
+    if(fill+pending.w>64u){break;}
+    fill+=pending.w;umDeferredEntries[held]=vec4u(pending.xyz,fill);held++;pending.w=0u;
+   }
+   umDeferredFill=fill;
+  }
+  let fill=workgroupUniformLoad(&umDeferredFill);if(fill==0u){break;}
+  let listed=slot<fill;
+  var owner=UMOwner();var value=0.0;
+  if(listed){
+   // Entries past the round's last keep an earlier round's counts; a listed
+   // slot is below the last count and stops before them.
+   var held=0u;var before=0u;
+   for(var i=0u;i<7u;i++){let end=umDeferredEntries[i].w;if(slot<end){break;}before=end;held=i+1u;}
+   let entry=umDeferredEntries[held];let cell=umDeferredListedCell(entry.yz,slot-before);
+   owner=UMOwner(entry.x,cell,1u,(umTopology[entry.x]&0x3fffffffu)+cell);
+   value=umMomentum(owner,umFace(owner,axis,1,0u));
+  }
   umDeferredComponents[lane]=value;workgroupBarrier();
   if(lane<64u&&listed){
-   textureStore(output,vec3i(umOrigin(owner)),vec4f(umDeferredComponents[cell],umDeferredComponents[cell+64u],umDeferredComponents[cell+128u],0));
+   textureStore(output,vec3i(umOrigin(owner)),vec4f(umDeferredComponents[slot],umDeferredComponents[slot+64u],umDeferredComponents[slot+128u],0));
   }
   workgroupBarrier();
  }
@@ -165,7 +208,7 @@ export class UniformMixedMomentum {
     // Far-air regular 4h owners (uniformMixedFarAirWGSL) are culled to zero,
     // so the merged launch skips them; forces supplies that zero itself.
     if(sourceParams&&!cullAir)throw new Error("Mixed momentum far-air skipping requires prediction culling");
-    this.resources = device.createBindGroupLayout({ entries: [
+    this.resources = uniformDetailBindLayout(device,{ entries: [
       ...[0, 1, 2, 3].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE,
         texture: { sampleType: "unfilterable-float" as const, viewDimension: "3d" as const } })),
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -182,34 +225,34 @@ export class UniformMixedMomentum {
     this.deferred=device.createBuffer({label:"Uniform mixed momentum deferred tiles",size:deferredBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     this.allocatedBytes=4*UNIFORM_MIXED_CLAIM_WORDS+deferredBytes;
   }
-  bind(fields: UniformMixedMomentumFields): GPUBindGroup {
+  bind(fields: UniformMixedMomentumFields): UniformDetailGroup {
     if(this.cullAir&&!fields.centerPhi)throw new Error("Prediction culling requires current center phi");
     if(this.hanging!==(fields.unitVelocity!==undefined))throw new Error("Mixed momentum hanging taps require their unit velocity texture");
     const textures = [fields.extended, fields.physical, fields.phase, fields.volume];
     const d = this.ownership.capacity.lattice.dimensions;
     for (const [i, texture] of [...textures, fields.output].entries()) {
-      if ([texture.width, texture.height, texture.depthOrArrayLayers].some((n, a) => n !== d[a])
+      if (uniformDetailExtent(texture).some((n, a) => n !== d[a])
         || texture.format !== (i === 2 || i === 3 ? "r32float" : "rgba32float")) throw new Error("Mixed momentum requires native-sized canonical fields");
     }
     for(const t of [fields.coarseExtended])
-      if(t.format!=="rgba32float"||[t.width,t.height,t.depthOrArrayLayers].some((n,a)=>n!==d[a]!/4+2))throw new Error("Mixed momentum requires a current 4h sampling cache");
+      if(t.format!=="rgba32float"||uniformDetailExtent(t).some((n,a)=>n!==d[a]!/4+2))throw new Error("Mixed momentum requires a current 4h sampling cache");
     if (textures.includes(fields.output) || fields.negative === fields.outputNegative) throw new Error("Mixed momentum output must be disjoint from its inputs");
     for (const buffer of [fields.negative, fields.outputNegative])
       if (buffer.size < 4 * (d[0] * d[1] + d[0] * d[2] + d[1] * d[2])) throw new Error("Mixed momentum requires complete negative boundary planes");
-    return this.device.createBindGroup({ layout: this.resources, entries: [
-      ...textures.map((texture, binding) => ({ binding, resource: texture.createView() })),
+    return uniformDetailGroup(this.device,{ layout: this.resources, entries: [
+      ...textures.map((texture, binding) => ({ binding, resource: texture })),
       { binding: 6, resource: { buffer: fields.negative } },
-      { binding: 9, resource: fields.output.createView() }, { binding: 10, resource: { buffer: fields.outputNegative } },
+      { binding: 9, resource: fields.output }, { binding: 10, resource: { buffer: fields.outputNegative } },
       { binding: 11, resource: { buffer: fields.params, size: 32 } },
-      {binding:15,resource:(fields.centerPhi??fields.volume).createView()},
-      {binding:12,resource:fields.coarseExtended.createView()},
-      ...(fields.unitVelocity?[{binding:16,resource:fields.unitVelocity.createView()}]:[]),
+      {binding:15,resource:fields.centerPhi??fields.volume},
+      {binding:12,resource:fields.coarseExtended},
+      ...(fields.unitVelocity?[{binding:16,resource:fields.unitVelocity}]:[]),
       {binding:13,resource:{buffer:this.claims}},{binding:14,resource:{buffer:this.deferred}},
       ...(this.sourceParams?[{binding:17,resource:{buffer:this.sourceParams,size:176}}]:[]),
     ] });
   }
   async initialize(): Promise<void> {
-    const module = this.device.createShaderModule({ code: uniformMixedClaimedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
+    const module = uniformDetailModule(this.device,{ label: "Uniform mixed momentum", code: uniformMixedClaimedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
 @group(1) @binding(0) var extended:texture_3d<f32>;
 @group(1) @binding(1) var physical:texture_3d<f32>;
 @group(1) @binding(2) var phase:texture_3d<f32>;
@@ -243,6 +286,9 @@ ${uniformVelocityDepartureWGSL("umSampleVelocity", "umClampMomentum", "select(f3
 }
 fn umOriginalMomentum(face:UMFace)->f32 {
  if(face.anchor[face.axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
+ // A 4h-wide patch's anchor is canonical: the base block where the h store
+ // keeps only the ring (UNIFORM_DETAIL_RING_4H_LOAD).
+ if(face.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(physical,face.anchor,0)[face.axis];}
  return textureLoad(physical,face.anchor,0)[face.axis];
 }
 fn umClosedPositive(face:UMFace)->bool {
@@ -256,6 +302,8 @@ fn umAdvectedMomentum(face:UMFace,dt:f32)->f32 {
 fn umPredictionCellLive(owner:UMOwner)->bool {
  if(owner.width==0u){return false;}
  let at=vec3i(umOrigin(owner));
+ // A 4h owner's own texel is its tile origin: the base blocks.
+ if(!umRegularFine&&owner.width==4u){return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,at,0).x>0.0||${UNIFORM_DETAIL_4H_LOAD}textureLoad(centerPhi,at,0).x<0.0;}
  return textureLoad(volume,at,0).x>0.0||textureLoad(centerPhi,at,0).x<0.0;
 }
 fn umMomentum(owner:UMOwner,face:UMFace)->f32 {
@@ -297,7 +345,7 @@ ${this.hanging?uniformMixedMomentumUnitWGSL:""}
     const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
     const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources, ...(this.hanging ? [this.ownership.hangingLayout] : [])] });
-    const compile=(entryPoint:string,constants:Record<string,number>)=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCullAir:+this.cullAir,...constants}}});
+    const compile=(entryPoint:string,constants:Record<string,number>)=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCullAir:+this.cullAir,...constants}}});
     // The general h list has launches of its own (as the surface stages):
     // with the hanging tap cache, the unit kernel and its deferred cells;
     // merged jobs hold seam and regular 4h only.
@@ -310,15 +358,20 @@ ${this.hanging?uniformMixedMomentumUnitWGSL:""}
     ]);
   }
   destroy():void{this.claims.destroy();this.deferred.destroy();}
-  encode(encoder: GPUCommandEncoder, group: GPUBindGroup): void {
+  encode(encoder: GPUCommandEncoder, group: UniformDetailGroup): void {
     if (!this.pipeline) throw new Error("Mixed momentum is not initialized");
     encoder.clearBuffer(this.claims);encoder.clearBuffer(this.deferred,0,16);
     const pass = encoder.beginComputePass({ label: "Uniform mixed momentum" });
-    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group); if (this.hanging) pass.setBindGroup(2, this.ownership.hangingGroup);
-    // Claimed fixed grids: the certified job counts are GPU state.
+    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1,group.group); if (this.hanging) pass.setBindGroup(2, this.ownership.hangingGroup);
+    // Buffered direct grids: GPU claims consume the complete current queues.
     const grid=Math.min(UNIFORM_MIXED_CLAIMED_GRID,this.ownership.capacity.tiles);
-    // The deferred cells follow the unit launch that lists them.
-    for(const pipeline of [this.regularPipeline!,this.generalPipeline!,...(this.deferredPipeline?[this.deferredPipeline]:[]),this.pipeline]){pass.setPipeline(pipeline);pass.dispatchWorkgroups(grid);}
+    for(const pipeline of [this.regularPipeline!,this.generalPipeline!])this.ownership.dispatchBuffered(pass,pipeline,"fine",grid);
+    // The deferred cells follow the unit launch that lists them. Their tiles
+    // are seam h tiles (a faster characteristic can list others; the claims
+    // consume the whole list at any grid) and a round packs several, so the
+    // grid follows the seam h count (down to its reserve where no tile is 4h).
+    if(this.deferredPipeline)this.ownership.dispatchBuffered(pass,this.deferredPipeline,"seamFine",grid,2);
+    this.ownership.dispatchBuffered(pass,this.pipeline,"coarseMerged",grid);
     pass.end();
   }
 }

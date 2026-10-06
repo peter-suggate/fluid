@@ -5,19 +5,22 @@ import { terrainColumnHeights } from "../../core/terrain";
 import { sampleSolidWorld, solidWorldForScene } from "../../core/solid-world";
 import type { SceneDescription } from "../../core/model";
 
-/** Construction-only analytic samples, in metres, on shared lattice vertices. */
-export function uniformVolumeInitialPhi(scene: SceneDescription, dimensions: readonly [number, number, number], sliceZ?: number): Float32Array {
+/** Construction-only analytic samples, in metres, on shared lattice vertices.
+ * coarseSolids: static solids run on cut 4h owners (uniformDetailCoarseSolids),
+ * so a 4-aligned vertex is buried by its tiles' capacity, not its h cells'. */
+export function uniformVolumeInitialPhi(scene: SceneDescription, dimensions: readonly [number, number, number], sliceZ?: number, coarseSolids = false): Float32Array {
   const [nx, ny, nz] = dimensions;
   const c = scene.container;
   const phi = new Float32Array((nx+1)*(ny+1)*(sliceZ === undefined ? nz+1 : 1));
-  const buried = buriedVertices(scene, dimensions, sliceZ);
+  const buried = buriedVertices(scene, dimensions, sliceZ, coarseSolids);
   for (let outputZ=0; outputZ<(sliceZ === undefined ? nz+1 : 1); outputZ++) for (let y=0; y<=ny; y++) for (let x=0; x<=nx; x++) {
     const z = sliceZ ?? outputZ;
     const point = { x: (x/nx-0.5)*c.width_m, y: y/ny*c.height_m, z: (z/nz-0.5)*c.depth_m };
     const empty = Math.max(c.width_m,c.height_m,c.depth_m);
-    // phi inside a solid is not state (uvBuried in uniform-volume.wgsl.ts): a
-    // vertex with no open incident cell is air by construction, whatever
-    // seeded body the analytic samples would put there.
+    // phi inside a solid is not state (uvBuried in uniform-volume.wgsl.ts,
+    // umVertexBuried on the mixed lattice): a vertex with no open incident
+    // owner is air by construction, whatever seeded body the analytic samples
+    // would put there.
     if (buried[x+(nx+1)*(y+(ny+1)*outputZ)]) { phi[x+(nx+1)*(y+(ny+1)*outputZ)] = empty; continue; }
     const height = scene.fluid.initialHeightField;
     let base = height ? point.y-initialHeightFieldHeight(height, point.x, point.z)
@@ -36,8 +39,12 @@ export function uniformVolumeInitialPhi(scene: SceneDescription, dimensions: rea
  * Vertices whose every in-range incident cell is closed by the solid world,
  * under the occupancy mask's rule (any solid fraction closes the cell). A
  * z slice reads the one cell layer the slice plane lies in.
+ * coarseSolids: a 4-aligned vertex is a corner of 4h owners, which read their
+ * plane at it wherever they have any open cell. It is buried only when every
+ * in-range incident tile is closed throughout (umVertexBuried); an h tile
+ * beside it (a Fine region, a body) never reads the value its own rule hides.
  */
-function buriedVertices(scene: SceneDescription, dimensions: readonly [number, number, number], sliceZ?: number): Uint8Array {
+function buriedVertices(scene: SceneDescription, dimensions: readonly [number, number, number], sliceZ?: number, coarseSolids = false): Uint8Array {
   const [nx, ny, nz] = dimensions;
   const layers = sliceZ === undefined ? nz+1 : 1;
   const buried = new Uint8Array((nx+1)*(ny+1)*layers);
@@ -54,6 +61,18 @@ function buriedVertices(scene: SceneDescription, dimensions: readonly [number, n
       if (!closed[cx+nx*(cy+ny*z)]) { allClosed = false; }
     }
     buried[x+(nx+1)*(y+(ny+1)*outputZ)] = any && allClosed ? 1 : 0;
+  }
+  if (coarseSolids) {
+    if (sliceZ !== undefined || nx%4 || ny%4 || nz%4) throw new Error("Cut 4h solid owners need the whole 4h-tiled lattice");
+    const tx = nx/4, ty = ny/4, tz = nz/4, open = new Uint8Array(tx*ty*tz);
+    for (let z=0; z<nz; z++) for (let y=0; y<ny; y++) for (let x=0; x<nx; x++)
+      if (!closed[x+nx*(y+ny*z)]) open[(x>>2)+tx*((y>>2)+ty*(z>>2))] = 1;
+    for (let z=0; z<=tz; z++) for (let y=0; y<=ty; y++) for (let x=0; x<=tx; x++) {
+      let any = false;
+      for (const cz of [z-1, z]) for (const cy of [y-1, y]) for (const cx of [x-1, x])
+        if (cx>=0 && cy>=0 && cz>=0 && cx<tx && cy<ty && cz<tz && open[cx+tx*(cy+ty*cz)]) any = true;
+      if (any) buried[4*x+(nx+1)*(4*y+(ny+1)*4*z)] = 0;
+    }
   }
   return buried;
 }

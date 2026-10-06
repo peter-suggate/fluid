@@ -10,7 +10,7 @@ import {getSceneDefinition} from "../lib/core/scenes";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
 import {UniformMixedForces,type UniformMixedForceFields} from "../lib/methods/uniform/uniform-mixed-forces";
 import type {GPUSolverInstance} from "../lib/core/method-contract";
-import {readMixedTexture,readMixedTileWords} from "./helpers/uniform-mixed-native-fields";
+import {mixedPhysical,readMixedTexture,readMixedTileWords} from "./helpers/uniform-mixed-native-fields";
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("cached curvature preserves forces on the same evolving mixed/solid state",{timeout:240000},async()=>{
@@ -29,26 +29,30 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   scene.numerics.fixedDt_s=scene.numerics.maxDt_s=1/60;
   solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{timeStep:"scene"},undefined,()=>{});
   UniformMixedForces.prototype.bind=bind;
+  // Pipelines compile by need; this lane dispatches both force sets.
+  await (solver as any).warmPipelines(0);
   assert.ok(fields?.curvature,"Production borrows curvature scratch");
   const frame=(solver as any).mixedFrame;
   const reference=new UniformMixedForces(device,frame.ownership,true,frame.fields.sourceParams,frame.solid);
   await reference.initialize();
   const referenceGroup=reference.bind({...fields,curvature:undefined,normals:undefined});
-  for(let i=0;i<3;i++)copies.push(device.createTexture({size:[fields.output.width,fields.output.height,fields.output.depthOrArrayLayers],dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.COPY_SRC|GPUTextureUsage.COPY_DST}));
+  // Raw copies of the output field as stored (identical layouts compare texel for texel).
+  const stored=()=>mixedPhysical(fields!.output);
+  for(let i=0;i<3;i++)copies.push(device.createTexture({size:[stored().width,stored().height,stored().depthOrArrayLayers],dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.COPY_SRC|GPUTextureUsage.COPY_DST}));
   let sample=false,samples=0,seams=false;
   const encode=frame.forces.encode.bind(frame.forces);
-  frame.forces.encode=(encoder:GPUCommandEncoder,group:GPUBindGroup,capillarity:boolean)=>{
-   encode(encoder,group,capillarity);
-   if(!sample)return;
-   const size:[number,number,number]=[fields!.output.width,fields!.output.height,fields!.output.depthOrArrayLayers];
-   encoder.copyTextureToTexture({texture:fields!.output},{texture:copies[0]!},size);
+  frame.forces.encode=(encoder:GPUCommandEncoder,group:GPUBindGroup,capillarity:boolean,useCache?:boolean)=>{
+   if(!sample){encode(encoder,group,capillarity,useCache);return;}
+   encode(encoder,group,capillarity,true);
+   const output=stored(),size:[number,number,number]=[output.width,output.height,output.depthOrArrayLayers];
+   encoder.copyTextureToTexture({texture:output},{texture:copies[0]!},size);
    // Disabled cache specialization must preserve the original inline path.
    encode(encoder,group,capillarity,false);
-   encoder.copyTextureToTexture({texture:fields!.output},{texture:copies[2]!},size);
+   encoder.copyTextureToTexture({texture:output},{texture:copies[2]!},size);
    // Inline stencil, identical frozen inputs. Reuse the same output so stale
    // noncanonical texels also match; projection later consumes this output.
    reference.encode(encoder,referenceGroup);
-   encoder.copyTextureToTexture({texture:fields!.output},{texture:copies[1]!},size);
+   encoder.copyTextureToTexture({texture:output},{texture:copies[1]!},size);
   };
   for(let step=1;step<=180;step++){
    sample=step===1||step%30===0;

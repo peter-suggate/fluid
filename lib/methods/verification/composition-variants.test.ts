@@ -18,12 +18,6 @@ test("Uniform Geometric algorithm choices compose pairwise with their declared l
  }
 });
 
-test("Uniform Geometric rejects unsupported algorithm choices",()=>{
- assert.throws(()=>resolve({coarsening:"octree"}),/supported variant/);
- assert.equal(uniformVolumeMethod.id,"uniform-volume");
- assert.ok(!params.some(p=>["selectorMode","maximumLeafSize","globalFineLevelSetFactor"].includes(p.key)));
-});
-
 test("Uniform Geometric rejects boolean overrides for select parameters",()=>{
  for(const p of params){if(p.kind!=="select")continue;
   for(const value of [true,false])assert.throws(()=>selected({[p.key]:value},p.key),/supported variant/);

@@ -1,4 +1,6 @@
+import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
+import {UNIFORM_DETAIL_CANONICAL_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import { uniformMixedDetachedMassWGSL } from "./uniform-mixed-detached-mass.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedPageCount, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
@@ -64,8 +66,8 @@ export class UniformMixedPressureVelocity {
   const storage=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}});
   const uniform={binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}};
   const topology=coarse?[texture(8),storage(9)]:solid?[{binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"rgba32float" as const,viewDimension:"3d" as const}}]:[];
-  this.rhsLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,texture(4),storage(5),storage(6),storage(7),...topology]});
-  this.projectLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,storage(4),texture(7),
+  this.rhsLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,texture(4),storage(5),storage(6),storage(7),...topology]});
+  this.projectLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,storage(4),texture(7),
    {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),...(solid&&!coarse?[texture(11)]:[])]});
  }
  private scalar(view:GPUBufferBinding,count:number):GPUBufferBinding{
@@ -75,32 +77,32 @@ export class UniformMixedPressureVelocity {
  }
  private common(f:CommonFields):GPUBindGroupEntry[]{
   const d=this.ownership.layout.lattice.dimensions;
-  if(f.velocity.format!=="rgba32float"||[f.velocity.width,f.velocity.height,f.velocity.depthOrArrayLayers].some((v,a)=>v!==d[a]))throw new Error("Mixed pressure requires native MAC extent");
-  return [{binding:0,resource:f.velocity.createView()},{binding:1,resource:this.scalar(f.negative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
+  if(f.velocity.format!=="rgba32float"||uniformDetailExtent(f.velocity).some((v,a)=>v!==d[a]))throw new Error("Mixed pressure requires native MAC extent");
+  return [{binding:0,resource:f.velocity},{binding:1,resource:this.scalar(f.negative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
    {binding:2,resource:this.scalar(f.phi,this.ownership.layout.cellCount)},{binding:3,resource:{buffer:f.params,size:32}}];
  }
  private topology(t:GPUTexture|undefined):GPUTexture|undefined{
   if(!!t!==(!!this.solid&&!this.coarse))throw new Error("Mixed solid topology binding does not match stage mode");
-  if(t&&(t.format!=="rgba32float"||[t.width,t.height,t.depthOrArrayLayers].some((v,a)=>v!==this.ownership.layout.lattice.dimensions[a])))throw new Error("Mixed solid topology requires the native lattice extent");
+  if(t&&(t.format!=="rgba32float"||uniformDetailExtent(t).some((v,a)=>v!==this.ownership.layout.lattice.dimensions[a])))throw new Error("Mixed solid topology requires the native lattice extent");
   return t;
  }
- bindRhs(f:UniformMixedPressureRhsFields):GPUBindGroup{
+ bindRhs(f:UniformMixedPressureRhsFields):UniformDetailGroup{
   const count=uniformMixedPressureStorage(this.ownership.layout).count,topology=this.topology(f.topology);
   if(!!f.fine!==this.coarse)throw new Error("Coarse mixed pressure RHS needs the simulation-ownership forced field, and only it");
   const d=this.ownership.layout.lattice.dimensions;
-  return this.device.createBindGroup({layout:this.rhsLayout,entries:[...this.common(f),{binding:4,resource:f.correction.createView()},
-   ...[f.rhs,f.minimum,f.pressure].map((v,i)=>({binding:5+i,resource:this.scalar(v,count)})),...(topology?[{binding:8,resource:topology.createView()}]:[]),
-   ...(f.fine?[{binding:8,resource:f.fine.velocity.createView()},{binding:9,resource:{buffer:f.fine.negative,size:4*(d[0]*d[1]+d[0]*d[2]+d[1]*d[2])}}]:[])]});
+  return uniformDetailGroup(this.device,{layout:this.rhsLayout,entries:[...this.common(f),{binding:4,resource:f.correction},
+   ...[f.rhs,f.minimum,f.pressure].map((v,i)=>({binding:5+i,resource:this.scalar(v,count)})),...(topology?[{binding:8,resource:topology}]:[]),
+   ...(f.fine?[{binding:8,resource:f.fine.velocity},{binding:9,resource:{buffer:f.fine.negative,size:4*(d[0]*d[1]+d[0]*d[2]+d[1]*d[2])}}]:[])]});
  }
- bindProjection(f:UniformMixedPressureProjectionFields):GPUBindGroup{
+ bindProjection(f:UniformMixedPressureProjectionFields):UniformDetailGroup{
   if(f.velocity===f.output||f.negative.buffer===f.outputNegative.buffer)throw new Error("Mixed projection requires disjoint velocity output");
   const d=this.ownership.layout.lattice.dimensions;
-  return this.device.createBindGroup({layout:this.projectLayout,entries:[...this.common(f),
+  return uniformDetailGroup(this.device,{layout:this.projectLayout,entries:[...this.common(f),
    {binding:4,resource:this.scalar(f.pressure,uniformMixedPressureStorage(this.ownership.layout).count)},
-   {binding:7,resource:f.volume.createView()},{binding:8,resource:f.output.createView()},
+   {binding:7,resource:f.volume},{binding:8,resource:f.output},
    {binding:9,resource:this.scalar(f.outputNegative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
    ...(this.sourceParams?[{binding:10,resource:{buffer:this.sourceParams,size:176}}]:[]),
-   ...(this.topology(f.topology)?[{binding:11,resource:f.topology!.createView()}]:[])]});
+   ...(this.topology(f.topology)?[{binding:11,resource:f.topology!}]:[])]});
  }
  async initialize():Promise<void>{
   const ownership=this.ownership,h=ownership.layout.lattice.cellSize_m;
@@ -127,6 +129,8 @@ fn umOpenTop(face:UMFace)->bool{return params.policy.y>0.5&&face.axis==1u&&face.
 fn umWallHeld(o:UMOwner)->bool{return umPressurePhi(o)< -f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z));}
 fn umFaceVelocity(face:UMFace)->f32 {
  if(face.anchor[face.axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
+ // A 4h-wide patch's anchor is canonical: the base block.
+ if(face.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(velocity,face.anchor,0)[face.axis];}
  return textureLoad(velocity,face.anchor,0)[face.axis];
 }
 `;
@@ -159,11 +163,19 @@ fn umCutFlux(o:UMOwner,axis:u32,sign:i32)->f32{
  }}
  return sum;
 }
-// A 4h face's flux: exact on cut faces, the record-free fraction otherwise
-// (an uncut face's record V is exactly 1, or 1/2 at a wall).
-fn umCoarseFlux(o:UMOwner,face:UMFace,fraction:f32)->f32{
+// The record V of a 4h face, the operator's own weight (W1): its low owner's
+// V+, or the wall halo's (1/2 of the wall's open part; the ambient lid's 1).
+fn umRecordV(o:UMOwner,face:UMFace)->f32{
+ if(face.neighbor.width==0u){return umSolidCoarse(umBoundaryIndex(o,face.axis,face.sign)).x;}
+ var low=o;if(face.sign<0){low=face.neighbor;}
+ return umSolidCoarse(low.index)[face.axis+1u];
+}
+// A 4h face's flux. Either tile simulated at h and cut: the sum of its 16 h
+// faces'. Else the 4h face velocity through the record V: an uncut face's is
+// exactly 1 (1/2 at a wall), a cut 4h owner's the open part of its face.
+fn umCoarseFlux(o:UMOwner,face:UMFace)->f32{
  if(umCoarseCut(o,face.axis,face.sign)){return umCutFlux(o,face.axis,face.sign);}
- return fraction*umFaceVelocity(face)*f32(face.width*face.width);
+ return umRecordV(o,face)*umFaceVelocity(face)*f32(face.width*face.width);
 }`:this.solid?`@group(1) @binding(8) var topologyOut:texture_storage_3d<rgba32float,write>;
 // mgBuildFinestTopology on fine owners. Coarse owners never touch a solid
 // (promotion certificate): open 1, interior V 1, walls 1/2, ambient lid 1.
@@ -190,19 +202,20 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
    let face=umFace(o,axis,sign,part);var fraction=1.0;
    if(face.neighbor.width==0u&&!umOpenTop(face)){fraction=0.5;}
    ${this.solid&&!this.coarse?"if(o.width==1u){fraction=select(umLowFaceV(o,topology,axis),topology[axis+1u],sign>0);}":""}
-   ${this.coarse?"flux+=umCoarseFlux(o,face,fraction);":"flux+=fraction*umFaceVelocity(face)*f32(face.width*face.width);"}
+   ${this.coarse?"flux+=umCoarseFlux(o,face);":"flux+=fraction*umFaceVelocity(face)*f32(face.width*face.width);"}
   }
   terms[2u*axis+side]=f32(sign)*flux/(f32(o.width*o.width*o.width)*UM_H[axis]);
  }}}
  var value=0.0;
  if(liquid){let divergence=(terms[0]+terms[1])+(terms[4]+terms[5])+(terms[2]+terms[3]);
-  value=-params.policy.x*(divergence-textureLoad(correction,vec3i(umOrigin(o)),0).x)/params.hDt.w;}
+  value=-params.policy.x*(divergence-${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(correction,vec3i(umOrigin(o)),0).x)/params.hDt.w;}
  rhs[o.index]=value;
  minimum[o.index]=${this.coarse?"select(-3.402823e38,0.0,topology.x<=1e-5)":this.solid?"select(-3.402823e38,0.0,o.width==1u&&umCellInsideSolid(vec3i(umOrigin(o))))":"-3.402823e38"};
  // The coarse root warm-starts from the caller's last pressure; air holds 0.
  pressures[o.index]=${this.coarse?"select(0.0,max(pressures[o.index],minimum[o.index]),liquid)":"0.0"};
  ${uniformMixedPressureBoundaryLoop(`let face=umFace(o,axis,sign,0u);let open=umOpenTop(face);
-  let b=f32(sign)*params.policy.x*${this.coarse?"select(0.5*umFaceVelocity(face),umCutFlux(o,axis,sign)/16.0,umCoarseCut(o,axis,sign))":this.solid?"select(umLowFaceV(o,topology,axis),topology[axis+1u],sign>0)*umFaceVelocity(face)":"0.5*umFaceVelocity(face)"}/(f32(o.width)*UM_H[axis]*params.hDt.w);
+  ${this.coarse?"// Only a cut owner's wall face loads its sixteen h faces (select would load them at every wall).\n  var wall=0.0;if(umCoarseCut(o,axis,sign)){wall=umCutFlux(o,axis,sign)/16.0;}else{wall=umSolidCoarse(halo).x*umFaceVelocity(face);}":""}
+  let b=f32(sign)*params.policy.x*${this.coarse?"wall":this.solid?"select(umLowFaceV(o,topology,axis),topology[axis+1u],sign>0)*umFaceVelocity(face)":"0.5*umFaceVelocity(face)"}/(f32(o.width)*UM_H[axis]*params.hDt.w);
   rhs[halo]=select(0.0,b,liquid&&!open);minimum[halo]=select(0.0,-3.402823e38,open||umWallHeld(o));pressures[halo]=${this.coarse?"select(0.0,max(pressures[halo],minimum[halo]),liquid&&!open)":"0.0"};`)}
 }
 `;
@@ -230,7 +243,7 @@ fn umProjectV(o:UMOwner,face:UMFace)->f32{
 }
 fn umSolidPressure(o:UMOwner)->f32{return select(0.0,umPressure(o),umPressureLiquid(o));}`:""}
 // An absent page's volume is not transferred: it is the certified V=0.
-${uniformMixedDetachedMassWGSL(o=>`umPressureLiquid(${o})`,o=>`select(0.0,textureLoad(volume,vec3i(umOrigin(${o})),0).x,umTileResident(${o}.tile))`,"params.policy.w")}
+${uniformMixedDetachedMassWGSL(o=>`umPressureLiquid(${o})`,o=>`select(0.0,${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(volume,vec3i(umOrigin(${o})),0).x,umTileResident(${o}.tile))`,"params.policy.w")}
 fn umProject(o:UMOwner,face:UMFace)->f32{
  let liquid=umPressureLiquid(o);let scale=params.hDt.w/params.policy.x;
  // Air on both sides keeps its velocity only beside detached mass. Any
@@ -242,7 +255,7 @@ fn umProject(o:UMOwner,face:UMFace)->f32{
  if(face.neighbor.width==0u){
   if(!liquid){return v;}
   var other=pressures[umBoundaryIndex(o,face.axis,face.sign)];var theta=1.0;
-  if(umOpenTop(face)){other=0.0;theta=umPressureSurfaceTheta(umPressurePhi(o),0.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)),f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)));}
+  if(umOpenTop(face)){other=0.0;theta=umPressureSurfaceTheta(umPressurePhi(o),0.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)));}
   return v-scale*f32(face.sign)*(other-umPressure(o))/(f32(o.width)*UM_H[face.axis]*theta);
  }
  if(!liquid&&!umPressureLiquid(face.neighbor)){return v;}
@@ -292,16 +305,16 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
    value.w=f32(released);`,"umProjectOwner")}
 `;
   const compile=async(code:string,entryPoint:string,resources:GPUBindGroupLayout)=>{
-   const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(code,[entryPoint])});const info=await module.getCompilationInfo();
+   const module=uniformDetailModule(this.device,{label:`Uniform mixed pressure ${entryPoint}`,code:uniformMixedCountedEntriesWGSL(code,[entryPoint])});const info=await module.getCompilationInfo();
    const errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
    const layout=this.device.createPipelineLayout({bindGroupLayouts:[ownership.bindLayout,resources,...(this.solid?[this.coarse?this.solid.coarse!.bindLayout:this.solid.bindLayout]:[])]});
-   return uniformMixedSolidPipeline(this.solid,s=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll,...s}}}));
+   return uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll,...s}}}));
   };
   this.rhsPipeline=await compile(rhsSource,"buildRhs",this.rhsLayout);this.projectPipeline=await compile(projectSource,"project",this.projectLayout);
  }
- encode(encoder:GPUCommandEncoder,entry:"rhs"|"project",group:GPUBindGroup):void{
+ encode(encoder:GPUCommandEncoder,entry:"rhs"|"project",group:UniformDetailGroup):void{
   const pipeline=entry==="rhs"?this.rhsPipeline:this.projectPipeline;if(!pipeline)throw new Error("Mixed pressure velocity stage is not initialized");
-  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);// The all-4h ownership's residentAll jobs are its resident pages.
+  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);// The all-4h ownership's residentAll jobs are its resident pages.
   this.ownership.dispatchCounted(pass,this.solid?.select(pipeline)??pipeline,uniformMixedPageCount(this.ownership.capacity.lattice));pass.end();
  }
 }

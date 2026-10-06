@@ -1,5 +1,6 @@
+import { UNIFORM_DETAIL_H_LOAD } from "../../core/uniform-detail-abi";
 /** ownership.hangingGroup: T tile→slot words (UM_NO_SLOT when absent), T
- * slot→tile words, then UM_HANGING_SLOTS records of the native negative boundary plane taps
+ * slot→tile words, then umHangingSlots() records of the native negative boundary plane taps
  * (3 × 16; used only by tiles on that plane), in tile-local order. A slotted
  * tile's in-domain fine taps live in the unit velocity texture. Every seam
  * tile has a slot.
@@ -10,19 +11,24 @@
  * sampled phi before each vertex pass. */
 export const UNIFORM_MIXED_HANGING_TAPS = 48;
 export const UNIFORM_MIXED_HANGING_RECORD = UNIFORM_MIXED_HANGING_TAPS + 125;
-/** Preallocated slots (UM_HANGING_SLOTS): the cache never grows, so a GPU
- * adoption needs no host resize. One slot per tile, the most seam tiles a
- * generation can have: 2.9/22.7/181 MB at 64³/128³/256³. Half the tiles was
- * not enough: fig-9's dam-and-ball splash passed 8192 of 16384 at frame 110.
- * Launches are unaffected (dispatchCounted caps the grid at COUNTED_GRID and
- * the jobs are the GPU-counted seams). UNIFORM_MIXED_OVERFLOW_HANGING stays
- * as the fatal guard. */
-export const uniformMixedHangingSlotCapacity = (tiles: number) => tiles;
+/** Preallocated slots (umHangingSlots()): the most seam tiles a generation
+ * within the h-tile capacity `fineTiles` can have. A seam tile has a
+ * mixed-width 3³ stencil, so it is an h tile or one of the 26 tiles around
+ * one: at most 27 per h tile, and never more than every tile (2.9/22.7/181
+ * MB at 64³/128³/256³ with every tile h; half the tiles was not enough
+ * there: fig-9's dam-and-ball splash passed 8192 of 16384 at frame 110).
+ * A proof bound, not a budget: a GPU adoption within the h-tile capacity
+ * needs no host resize. Launches are unaffected (dispatchCounted caps the
+ * grid at COUNTED_GRID and the jobs are the GPU-counted seams).
+ * UNIFORM_MIXED_OVERFLOW_HANGING stays as the fatal guard. */
+export const uniformMixedHangingSlotCapacity = (tiles: number, fineTiles = tiles) => Math.min(tiles, 27 * fineTiles);
 /** Bytes of a tap cache for `tiles`: both slot maps, then every record. */
-export const uniformMixedHangingBytes = (tiles: number) => (2 * tiles + UNIFORM_MIXED_HANGING_RECORD * uniformMixedHangingSlotCapacity(tiles)) * 4;
+export const uniformMixedHangingBytes = (tiles: number, fineTiles = tiles) => (2 * tiles + UNIFORM_MIXED_HANGING_RECORD * uniformMixedHangingSlotCapacity(tiles, fineTiles)) * 4;
 export const uniformMixedHangingTapWGSL = (group: number) => /* wgsl */ `
 @group(${group}) @binding(0) var<storage,read_write> umHanging:array<u32>;
 const UM_NO_SLOT=0xffffffffu;
+// Slots the bound cache holds (the host's allocation, never baked).
+fn umHangingSlots()->u32{return (arrayLength(&umHanging)-2u*UM_TILES)/${UNIFORM_MIXED_HANGING_RECORD}u;}
 fn umHangingPlaneAddress(slot:u32,local:vec3u,axis:u32)->u32 {
  let u=local[(axis+1u)%3u];let v=local[(axis+2u)%3u];
  return 2u*UM_TILES+slot*${UNIFORM_MIXED_HANGING_RECORD}u+axis*16u+u+4u*v;
@@ -82,11 +88,12 @@ fn umSampleVelocityFine(p:vec3f,axis:u32)->${type} {
  let base=vec3i(floor(q));let fraction=fract(q);var terms:array<${type},8>;
  ${regularTexture&&!payload?`// Interior samples need no per-tap boundary branch or transverse clamp: a
  // tap beyond the clamped upper edge has exactly zero interpolation weight.
+ // Every tap is a stored face of an h tile (UNIFORM_DETAIL_H_LOAD).
  if(base[axis]>=0){
   for(var k=0u;k<8u;k++){
    let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
    let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));
-   terms[k]=weights.x*weights.y*weights.z*textureLoad(${regularTexture},base+bit,0)[axis];
+   terms[k]=weights.x*weights.y*weights.z*${UNIFORM_DETAIL_H_LOAD}textureLoad(${regularTexture},base+bit,0)[axis];
   }
   return umVelocitySum8(terms);
  }`:""}
@@ -139,11 +146,12 @@ fn umSampleVelocity${width}(p:vec3f,axis:u32)->${type} {
  ${width===1&&regularTexture&&!payload?`// A certified unit stencil uses native scalar loads. Interior samples need
  // no owner resolution, per-tap boundary branch or transverse clamp. A tap
  // beyond the clamped upper edge has exactly zero interpolation weight.
+ // Certified: every tap is a stored face of an h tile (UNIFORM_DETAIL_H_LOAD).
  if(umRegularFine&&base[axis]>=0){
   for(var k=0u;k<8u;k++){
    let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
    let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));
-   terms[k]=weights.x*weights.y*weights.z*textureLoad(${regularTexture},base+bit,0)[axis];
+   terms[k]=weights.x*weights.y*weights.z*${UNIFORM_DETAIL_H_LOAD}textureLoad(${regularTexture},base+bit,0)[axis];
   }
   return umVelocitySum8(terms);
  }`:""}

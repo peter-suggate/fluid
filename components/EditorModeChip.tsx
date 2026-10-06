@@ -1,6 +1,8 @@
 "use client";
 
 import { getEditorGesture } from "../lib/core/editor-gesture-catalog";
+import { voxelToolLegend } from "../lib/core/editor-voxel-tool-actions";
+import { voxelTools } from "../lib/core/voxel-editor/registry";
 import { useSession } from "../lib/core/session/session-context";
 
 /**
@@ -11,7 +13,9 @@ import { useSession } from "../lib/core/session/session-context";
  * interesting answer while a mode is armed — the rest of the time it lists nine
  * things you are not doing. The ring answers "what can I do to *this*" at the
  * pointer, and the only state left to report is the one mode that is currently
- * on, so that is all this draws.
+ * on, so that is all this draws. (The sculpt tools are the one palette that
+ * earned a column back — `VoxelToolRail`, EDIT only — and while one of them is
+ * armed this chip is its key legend.)
  *
  * Carrying outranks the armed gesture because it is the more surprising state: the
  * pointer is holding an object, every camera gesture is suspended, and the
@@ -34,7 +38,32 @@ export function EditorModeChip() {
   const carriedName = session.scene((state) =>
     state.scene.rigidBodies.find((body) => body.id === carry?.bodyId)?.name);
   const gesture = armedGesture ? getEditorGesture(armedGesture) : undefined;
-  if (!carry && !gesture) return null;
+  // An armed sculpt tool is the same kind of state as an armed gesture — the
+  // next drag is not the camera's — so it is reported in the same place. The
+  // rail says *which* tool; this says what the hand can do with it, which is
+  // everything the tool's card used to spend a panel on.
+  const viewportMode = session.ui((state) => state.viewportMode);
+  const voxelToolId = session.ui((state) => state.voxelToolId);
+  const setVoxelTool = session.ui((state) => state.setVoxelTool);
+  const tool = viewportMode === "interact" ? voxelTools.get(voxelToolId) : undefined;
+  if (!carry && !gesture && !tool) return null;
+  if (!carry && !gesture && tool) {
+    return (
+      <div className="editor-mode-chip" data-voxel-tool={tool.id}>
+        <button
+          type="button"
+          className="mode-chip armed tool"
+          data-testid={`editor-mode-tool-${tool.id}`}
+          title={`${tool.ui.hint} ${voxelToolLegend(tool.id)}`}
+          onClick={() => setVoxelTool(undefined)}
+        >
+          <strong>{tool.ui.label}</strong>
+          <span>{voxelToolLegend(tool.id)}</span>
+          <em>esc</em>
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="editor-mode-chip" data-armed-gesture={armedGesture} data-carrying={Boolean(carry)}>

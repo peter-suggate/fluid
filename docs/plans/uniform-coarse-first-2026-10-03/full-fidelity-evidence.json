@@ -1,0 +1,4670 @@
+{
+  "ownerQuality": {
+    "fig9-native-a": {
+      "mass": 335367.7592098559,
+      "excess": 4362.82154405117,
+      "negative": 0,
+      "mixedMass": 196710.93766580423,
+      "massInPhiAir": 25630.655582003063,
+      "maxVolume": 18.31180191040039,
+      "nonfinite": 0,
+      "owners": 401440,
+      "fineTiles": 6112,
+      "centroid_cells": [
+        81.23529858413292,
+        35.214081771894556,
+        32.03766941807657
+      ],
+      "massFront_cells": {
+        "p95": 125.07854399993188,
+        "p99": 127.43211290058386,
+        "p999": 127.94321129005839
+      }
+    },
+    "fig9-affine-a": {
+      "mass": 335414.58363595884,
+      "excess": 4587.507626533508,
+      "negative": 0,
+      "mixedMass": 196987.07600943078,
+      "massInPhiAir": 24487.450442439134,
+      "maxVolume": 29.535646438598633,
+      "nonfinite": 0,
+      "owners": 390100,
+      "fineTiles": 5932,
+      "centroid_cells": [
+        81.3738749027151,
+        35.426381498240985,
+        32.20656387187917
+      ],
+      "massFront_cells": {
+        "p95": 125.11285126367731,
+        "p99": 127.451137821438,
+        "p999": 127.9451137821438
+      }
+    },
+    "fig9-table-a": {
+      "mass": 335414.58363595884,
+      "excess": 4587.507626533508,
+      "negative": 0,
+      "mixedMass": 196987.07600943078,
+      "massInPhiAir": 24487.450442439134,
+      "maxVolume": 29.535646438598633,
+      "nonfinite": 0,
+      "owners": 390100,
+      "fineTiles": 5932,
+      "centroid_cells": [
+        81.3738749027151,
+        35.426381498240985,
+        32.20656387187917
+      ],
+      "massFront_cells": {
+        "p95": 125.11285126367731,
+        "p99": 127.451137821438,
+        "p999": 127.9451137821438
+      }
+    },
+    "fig9-dense-a": {
+      "mass": 335367.7592098559,
+      "excess": 4362.82154405117,
+      "negative": 0,
+      "mixedMass": 196710.93766580423,
+      "massInPhiAir": 25630.655582003063,
+      "maxVolume": 18.31180191040039,
+      "nonfinite": 0,
+      "owners": 401440,
+      "fineTiles": 6112,
+      "centroid_cells": [
+        81.23529858413292,
+        35.214081771894556,
+        32.03766941807657
+      ],
+      "massFront_cells": {
+        "p95": 125.07854399993188,
+        "p99": 127.43211290058386,
+        "p999": 127.94321129005839
+      }
+    }
+  },
+  "numericalDiagnostics": [
+    {
+      "capture": "mini64-native-repeat",
+      "baseline": "mini64-native-smoke",
+      "frames": [
+        {
+          "frame": 1,
+          "massDelta_cells": 0.0,
+          "centroidDelta_h": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "projectionMaxDifference": 0.0,
+          "phiSliceMaxDifference_m": 0.0,
+          "fieldHashes": {
+            "volume": "eed665462d29a01f645c47b9f978327dad4520afe86bc8b45b43951b87075b15",
+            "velocity": "3c5f13492af6f38f2397386def7c113acc7d5859ee1b2a1f0707229f07a39f84",
+            "phi": "d0a46bb512379b8021b444ee5ec8df8add127eb86ad719e4298687a97cf41eed",
+            "tiles": "fab7e3387d27f07ce8587c32ca2f1a3b257e7856ce5a34391069998b7f40b723"
+          },
+          "exactNativeFields": {
+            "volume": true,
+            "velocity": true,
+            "phi": true,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 2,
+          "massDelta_cells": 0.0,
+          "centroidDelta_h": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "projectionMaxDifference": 0.0,
+          "phiSliceMaxDifference_m": 0.0,
+          "fieldHashes": {
+            "volume": "1100a31f37d54766d33153bd054ef15d567528d01c75b8854f0ae832502b2db0",
+            "velocity": "96cabaf18b685cda9583a0bc42e7b76d0068342e21f987c982771bb9e7ddff4a",
+            "phi": "d91b72c7b4f215b6eb5e91bdf72ea20ea1b0b3f6b06fd1a0c10a1a162ddd48aa",
+            "tiles": "fab7e3387d27f07ce8587c32ca2f1a3b257e7856ce5a34391069998b7f40b723"
+          },
+          "exactNativeFields": {
+            "volume": true,
+            "velocity": true,
+            "phi": true,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 3,
+          "massDelta_cells": 0.0,
+          "centroidDelta_h": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "projectionMaxDifference": 0.0,
+          "phiSliceMaxDifference_m": 0.0,
+          "fieldHashes": {
+            "volume": "48ed250358d356ab63ce6194e8bcd2c18891d99f9a4e8fb3e4e3678f7f65e39f",
+            "velocity": "5a122a6d4afa384df5c2caaaf7474f93b1f8a40204bf9ceec23ee61cabe9326f",
+            "phi": "2b6b59a86d4f7c653046382be035b0faf764ab59d36b8dc50ff1b4277e5cf657",
+            "tiles": "fab7e3387d27f07ce8587c32ca2f1a3b257e7856ce5a34391069998b7f40b723"
+          },
+          "exactNativeFields": {
+            "volume": true,
+            "velocity": true,
+            "phi": true,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 4,
+          "massDelta_cells": 0.0,
+          "centroidDelta_h": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "projectionMaxDifference": 0.0,
+          "phiSliceMaxDifference_m": 0.0,
+          "fieldHashes": {
+            "volume": "e3a354a6ad6dadb3b920d569a66007c75b4e64f08a35ff67b3cae1cc0a16f143",
+            "velocity": "3eeda9e88928e6cd196b515db2a658f191073448b46e71cdd8e0be849d697083",
+            "phi": "d3b9d0486a4306487bfdc5a2589e344a886be675faccdad65ec22b8e99733f5c",
+            "tiles": "cb53a961fa3fa957770f8e8a517a8e60d492ad1422bfc62fdcdfe0ed529abfd3"
+          },
+          "exactNativeFields": {
+            "volume": true,
+            "velocity": true,
+            "phi": true,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 5,
+          "massDelta_cells": 0.0,
+          "centroidDelta_h": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "projectionMaxDifference": 0.0,
+          "phiSliceMaxDifference_m": 0.0,
+          "fieldHashes": {
+            "volume": "f9f41d5a6364f71119447bdcfeb921bdd59aedad38da85c1694de864620f5fea",
+            "velocity": "913f07e934be7729a4ff9efa620db63cb8168dc8cd405298d9e0332839560cbf",
+            "phi": "00203bb117dc8027cb20b8ae89cdcced51e273a9b8e19f40bfa4ffc2870d4a84",
+            "tiles": "b15ce22a11bc91368f00afea966750c7aa422f867d5d6643214872bf18142603"
+          },
+          "exactNativeFields": {
+            "volume": true,
+            "velocity": true,
+            "phi": true,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 6,
+          "massDelta_cells": 0.0,
+          "centroidDelta_h": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "projectionMaxDifference": 0.0,
+          "phiSliceMaxDifference_m": 0.0,
+          "fieldHashes": {
+            "volume": "57f56a9d183621ae14f6ff6791fe18c598c49c743891677f320fe6f5a0fa4779",
+            "velocity": "86eab84caaabf2a2572c8cf311980d38c4bcb576ebabf854e928359559fe0fc4",
+            "phi": "2ba746f01dd4bdcc044ebfbe2b3f1b811eabcb08ac78db71677f95f14236064d",
+            "tiles": "39ce689662c45838a4f1df6a4bf578da91c5e1fab5afa7d56a529dedcc7aaf80"
+          },
+          "exactNativeFields": {
+            "volume": true,
+            "velocity": true,
+            "phi": true,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 7,
+          "massDelta_cells": 0.0,
+          "centroidDelta_h": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "projectionMaxDifference": 0.0,
+          "phiSliceMaxDifference_m": 0.0,
+          "fieldHashes": {
+            "volume": "4fe2c3b15b1cb9550dad49d7c38dc2d53470505545fa15310a8a77f2990891f0",
+            "velocity": "599389cde6f356616249d50c9f1824ee871397e4225adbba09f7a57881ed8c4a",
+            "phi": "0810acf58e1cc88035feb642aa4ec2d34aa25459633a67cd13646739e37d1478",
+            "tiles": "928d460fb74541059db9d2ee1a6277b9a5abceed3a6c454e8c3d0ad93cfe2d5a"
+          },
+          "exactNativeFields": {
+            "volume": true,
+            "velocity": true,
+            "phi": true,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 8,
+          "massDelta_cells": 0.0,
+          "centroidDelta_h": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "projectionMaxDifference": 0.0,
+          "phiSliceMaxDifference_m": 0.0,
+          "fieldHashes": {
+            "volume": "3ee12bb7a96bbaa730cbaa894031ee2d22c9c3afc9d949e99557d1020bde00b9",
+            "velocity": "d9bc092a46500c122bf252f313884a19f6193c2da332ac56f451c8a079558c6a",
+            "phi": "a10c6e4e53e8ca6992d623700d11e01cd0fd5250307d9404b71ecd24613c4ce6",
+            "tiles": "8eaf55dfbd46c935b5ad60e06c238290f9ee276abafe244c33b72de1cdf39977"
+          },
+          "exactNativeFields": {
+            "volume": true,
+            "velocity": true,
+            "phi": true,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 9,
+          "massDelta_cells": 0.0,
+          "centroidDelta_h": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "projectionMaxDifference": 0.0,
+          "phiSliceMaxDifference_m": 0.0,
+          "fieldHashes": {
+            "volume": "1fedff352a37d37dd16cf1eba045b03be5450dbb88a55648b6d62fce819278af",
+            "velocity": "1370db692f240247df09d44d550d7c498edbd4ce70cb165bfbd6be7fc39bb0d2",
+            "phi": "09dc60973db27ec6d62254d664b99335b53ad97323d56e53fdcab9a716441e12",
+            "tiles": "702ec2e0a45f96b820015c883b0c75b7d72c39536f9ce4525060c06df62e42a7"
+          },
+          "exactNativeFields": {
+            "volume": true,
+            "velocity": true,
+            "phi": true,
+            "tiles": true
+          }
+        }
+      ]
+    },
+    {
+      "capture": "smoke-affine",
+      "baseline": "mini64-native-smoke",
+      "frames": [
+        {
+          "frame": 1,
+          "massDelta_cells": 0.0,
+          "centroidDelta_h": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "projectionMaxDifference": 0.0,
+          "phiSliceMaxDifference_m": 5.21540641784668e-08,
+          "fieldHashes": {
+            "volume": "eed665462d29a01f645c47b9f978327dad4520afe86bc8b45b43951b87075b15",
+            "velocity": "04b85e08dbd33f676ee5f0631907e2d911ed65e9927e62ff3543d49d84b019ef",
+            "phi": "3e61fd9daa026eca78d317d386b1f957be2052d17a1fbcd99e1ed2c9e1658c67",
+            "tiles": "fab7e3387d27f07ce8587c32ca2f1a3b257e7856ce5a34391069998b7f40b723"
+          },
+          "exactNativeFields": {
+            "volume": true,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 9,
+          "massDelta_cells": 0.00017113403009716421,
+          "centroidDelta_h": [
+            2.7580031623841705e-05,
+            -0.00015214060304913346,
+            0.00028739991020287903
+          ],
+          "projectionMaxDifference": 0.013519053847334789,
+          "phiSliceMaxDifference_m": 0.0003939662128686905,
+          "fieldHashes": {
+            "volume": "b72cce93fd8e3c8e7c5e726b3470fd419c609458c8f9887aa0b28e4118830dae",
+            "velocity": "33c1219002818729195088e137afb661f4e9b2a6345345790f1e71af14490be1",
+            "phi": "c7c325929c226676252e5c9f2af62448fc31fc1c62ff54c1d3efc17866cf8755",
+            "tiles": "702ec2e0a45f96b820015c883b0c75b7d72c39536f9ce4525060c06df62e42a7"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        }
+      ]
+    },
+    {
+      "capture": "mini64-table-smoke",
+      "baseline": "mini64-native-smoke",
+      "frames": [
+        {
+          "frame": 1,
+          "massDelta_cells": 0.0,
+          "centroidDelta_h": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "projectionMaxDifference": 0.0,
+          "phiSliceMaxDifference_m": 5.21540641784668e-08,
+          "fieldHashes": {
+            "volume": "eed665462d29a01f645c47b9f978327dad4520afe86bc8b45b43951b87075b15",
+            "velocity": "04b85e08dbd33f676ee5f0631907e2d911ed65e9927e62ff3543d49d84b019ef",
+            "phi": "3e61fd9daa026eca78d317d386b1f957be2052d17a1fbcd99e1ed2c9e1658c67",
+            "tiles": "fab7e3387d27f07ce8587c32ca2f1a3b257e7856ce5a34391069998b7f40b723"
+          },
+          "exactNativeFields": {
+            "volume": true,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 2,
+          "massDelta_cells": 9.279756341129541e-07,
+          "centroidDelta_h": [
+            1.3300009982231131e-09,
+            2.094989071110831e-09,
+            2.1007728889799182e-09
+          ],
+          "projectionMaxDifference": 5.832407623529434e-08,
+          "phiSliceMaxDifference_m": 8.638016879558563e-08,
+          "fieldHashes": {
+            "volume": "026000a7c6370f3075b67d227139facfa4109af22106d6afdbb02a3e38ea500b",
+            "velocity": "e8481a17d1d1b9e840068237511085481907de379c97dd15f59152eedc57bd8d",
+            "phi": "f2ce03fbdc3d7e1e09edb770b4a67e334ac1a2b609f4c574253fb4f715295f18",
+            "tiles": "fab7e3387d27f07ce8587c32ca2f1a3b257e7856ce5a34391069998b7f40b723"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 3,
+          "massDelta_cells": -3.0913797672837973e-06,
+          "centroidDelta_h": [
+            2.1485710988145e-09,
+            -2.0966137270761465e-08,
+            -3.154738140409563e-05
+          ],
+          "projectionMaxDifference": 8.346978574991226e-08,
+          "phiSliceMaxDifference_m": 3.670109435915947e-06,
+          "fieldHashes": {
+            "volume": "fba59a3e5241c7a39d613580143ab54457841334ad40e9f1b552a956ccdc416a",
+            "velocity": "772104d13696f9240086f81cce451cb05c753833db47edb677ceb0283be0119f",
+            "phi": "35a26c37aac81ef23e94186e74401dc853a57facd31dc0254d0bf26eb46788e6",
+            "tiles": "fab7e3387d27f07ce8587c32ca2f1a3b257e7856ce5a34391069998b7f40b723"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 4,
+          "massDelta_cells": 3.257906064391136e-05,
+          "centroidDelta_h": [
+            -7.931895140700362e-10,
+            -1.8861527451008442e-08,
+            -2.2449440731264758e-05
+          ],
+          "projectionMaxDifference": 4.243571311235428e-06,
+          "phiSliceMaxDifference_m": 2.0507723093032837e-06,
+          "fieldHashes": {
+            "volume": "90582c49efaf141bd9bed6ad9b2c12597f9bbe25798ab57b99daedcce7d01bbb",
+            "velocity": "65fef6670849fbecc75db3d67aa041d584d0ffc0a31bf24c1a44a021cb919dd1",
+            "phi": "357bec9af02579a51f73c4806afc5ee6504c3a178464b314da117f2d839c7281",
+            "tiles": "cb53a961fa3fa957770f8e8a517a8e60d492ad1422bfc62fdcdfe0ed529abfd3"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 5,
+          "massDelta_cells": -0.00014483201084658504,
+          "centroidDelta_h": [
+            -1.1522217882031782e-06,
+            -1.4748938070852091e-08,
+            -2.0170468694402643e-05
+          ],
+          "projectionMaxDifference": 0.0005316071565175662,
+          "phiSliceMaxDifference_m": 6.547779776155949e-07,
+          "fieldHashes": {
+            "volume": "30546773fed161db84ac8174b3335a9b79316feac7fbd1211cc0b96c3e27ef6e",
+            "velocity": "7c7e9e59598c759bd45a38b9ee5df5f26a22aaaac03efe2535877984992bc071",
+            "phi": "558ba9a2f5154a241cc24d4a03670d251a2ea9aca0c48f4eefe31fccb90c6152",
+            "tiles": "b15ce22a11bc91368f00afea966750c7aa422f867d5d6643214872bf18142603"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 6,
+          "massDelta_cells": -8.825601253192872e-05,
+          "centroidDelta_h": [
+            1.861252840740235e-08,
+            3.04447612364811e-06,
+            -2.179168924953956e-05
+          ],
+          "projectionMaxDifference": 0.0005400925896134473,
+          "phiSliceMaxDifference_m": 2.159504219889641e-06,
+          "fieldHashes": {
+            "volume": "4ba1d999922b7ff2ebdf5c3f1773dadcaf41ea82fc5f71d7007bf461dcf7bff9",
+            "velocity": "6b31d7d2b20376acc452521ecf061a7cdc7da21d56ce8587394ca9405e652f3c",
+            "phi": "6a4c658a27f8c7a973c8789407d77c45e8f6148dcb57a303b024b4eabfa4a7a2",
+            "tiles": "39ce689662c45838a4f1df6a4bf578da91c5e1fab5afa7d56a529dedcc7aaf80"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 7,
+          "massDelta_cells": -0.00037715684447903186,
+          "centroidDelta_h": [
+            1.5694972432811483e-08,
+            3.266598753270955e-06,
+            -9.72096189855165e-06
+          ],
+          "projectionMaxDifference": 0.0002974247745227898,
+          "phiSliceMaxDifference_m": 2.7120113372802734e-06,
+          "fieldHashes": {
+            "volume": "fa2cb71a189315cea09a53ab6dcf150e4b11451a37daf2446d2182fbca431ab7",
+            "velocity": "ce2c024bc56921e17b185ebe446fbdac715472be3d5194b5b4113a465b9c2b42",
+            "phi": "d309235d1149d96b33523b93d236ecaf8e6e283c94997855f9c69b0d45398a59",
+            "tiles": "928d460fb74541059db9d2ee1a6277b9a5abceed3a6c454e8c3d0ad93cfe2d5a"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 8,
+          "massDelta_cells": -0.00016059944755397737,
+          "centroidDelta_h": [
+            1.67626739688842e-05,
+            -7.77843438370951e-05,
+            0.0001133385386253849
+          ],
+          "projectionMaxDifference": 0.01808153533471568,
+          "phiSliceMaxDifference_m": 8.67210328578949e-05,
+          "fieldHashes": {
+            "volume": "5f45ba2944d48c29cb047bd8d159ccce629a0a9b92f009f2586fb7e4bcbd1778",
+            "velocity": "ad22c2539bd02012d0dd34e4b1ea3a0c754b5d91c145b3571de4df02b643dc20",
+            "phi": "8d96aeed57f2b62acdf54041c80e5a603c0a326f83835b38b4bf0184bfb17153",
+            "tiles": "8eaf55dfbd46c935b5ad60e06c238290f9ee276abafe244c33b72de1cdf39977"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 9,
+          "massDelta_cells": 0.00017113403009716421,
+          "centroidDelta_h": [
+            2.7580031623841705e-05,
+            -0.00015214060304913346,
+            0.00028739991020287903
+          ],
+          "projectionMaxDifference": 0.013519053847334789,
+          "phiSliceMaxDifference_m": 0.0003939662128686905,
+          "fieldHashes": {
+            "volume": "b72cce93fd8e3c8e7c5e726b3470fd419c609458c8f9887aa0b28e4118830dae",
+            "velocity": "33c1219002818729195088e137afb661f4e9b2a6345345790f1e71af14490be1",
+            "phi": "c7c325929c226676252e5c9f2af62448fc31fc1c62ff54c1d3efc17866cf8755",
+            "tiles": "702ec2e0a45f96b820015c883b0c75b7d72c39536f9ce4525060c06df62e42a7"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        }
+      ]
+    },
+    {
+      "capture": "mini64-identity-smoke",
+      "baseline": "mini64-native-smoke",
+      "frames": [
+        {
+          "frame": 1,
+          "massDelta_cells": 0.0,
+          "centroidDelta_h": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "projectionMaxDifference": 0.0,
+          "phiSliceMaxDifference_m": 5.21540641784668e-08,
+          "fieldHashes": {
+            "volume": "eed665462d29a01f645c47b9f978327dad4520afe86bc8b45b43951b87075b15",
+            "velocity": "04b85e08dbd33f676ee5f0631907e2d911ed65e9927e62ff3543d49d84b019ef",
+            "phi": "3e61fd9daa026eca78d317d386b1f957be2052d17a1fbcd99e1ed2c9e1658c67",
+            "tiles": "fab7e3387d27f07ce8587c32ca2f1a3b257e7856ce5a34391069998b7f40b723"
+          },
+          "exactNativeFields": {
+            "volume": true,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 2,
+          "massDelta_cells": 9.279756341129541e-07,
+          "centroidDelta_h": [
+            1.3300009982231131e-09,
+            2.094989071110831e-09,
+            2.1007728889799182e-09
+          ],
+          "projectionMaxDifference": 5.832407623529434e-08,
+          "phiSliceMaxDifference_m": 8.638016879558563e-08,
+          "fieldHashes": {
+            "volume": "026000a7c6370f3075b67d227139facfa4109af22106d6afdbb02a3e38ea500b",
+            "velocity": "e8481a17d1d1b9e840068237511085481907de379c97dd15f59152eedc57bd8d",
+            "phi": "f2ce03fbdc3d7e1e09edb770b4a67e334ac1a2b609f4c574253fb4f715295f18",
+            "tiles": "fab7e3387d27f07ce8587c32ca2f1a3b257e7856ce5a34391069998b7f40b723"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 3,
+          "massDelta_cells": -3.0913797672837973e-06,
+          "centroidDelta_h": [
+            2.1485710988145e-09,
+            -2.0966137270761465e-08,
+            -3.154738140409563e-05
+          ],
+          "projectionMaxDifference": 8.346978574991226e-08,
+          "phiSliceMaxDifference_m": 3.670109435915947e-06,
+          "fieldHashes": {
+            "volume": "fba59a3e5241c7a39d613580143ab54457841334ad40e9f1b552a956ccdc416a",
+            "velocity": "772104d13696f9240086f81cce451cb05c753833db47edb677ceb0283be0119f",
+            "phi": "35a26c37aac81ef23e94186e74401dc853a57facd31dc0254d0bf26eb46788e6",
+            "tiles": "fab7e3387d27f07ce8587c32ca2f1a3b257e7856ce5a34391069998b7f40b723"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 4,
+          "massDelta_cells": 3.257906064391136e-05,
+          "centroidDelta_h": [
+            -7.931895140700362e-10,
+            -1.8861527451008442e-08,
+            -2.2449440731264758e-05
+          ],
+          "projectionMaxDifference": 4.243571311235428e-06,
+          "phiSliceMaxDifference_m": 2.0507723093032837e-06,
+          "fieldHashes": {
+            "volume": "90582c49efaf141bd9bed6ad9b2c12597f9bbe25798ab57b99daedcce7d01bbb",
+            "velocity": "65fef6670849fbecc75db3d67aa041d584d0ffc0a31bf24c1a44a021cb919dd1",
+            "phi": "357bec9af02579a51f73c4806afc5ee6504c3a178464b314da117f2d839c7281",
+            "tiles": "cb53a961fa3fa957770f8e8a517a8e60d492ad1422bfc62fdcdfe0ed529abfd3"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 5,
+          "massDelta_cells": -0.00014483201084658504,
+          "centroidDelta_h": [
+            -1.1522217882031782e-06,
+            -1.4748938070852091e-08,
+            -2.0170468694402643e-05
+          ],
+          "projectionMaxDifference": 0.0005316071565175662,
+          "phiSliceMaxDifference_m": 6.547779776155949e-07,
+          "fieldHashes": {
+            "volume": "30546773fed161db84ac8174b3335a9b79316feac7fbd1211cc0b96c3e27ef6e",
+            "velocity": "7c7e9e59598c759bd45a38b9ee5df5f26a22aaaac03efe2535877984992bc071",
+            "phi": "558ba9a2f5154a241cc24d4a03670d251a2ea9aca0c48f4eefe31fccb90c6152",
+            "tiles": "b15ce22a11bc91368f00afea966750c7aa422f867d5d6643214872bf18142603"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 6,
+          "massDelta_cells": -8.825601253192872e-05,
+          "centroidDelta_h": [
+            1.861252840740235e-08,
+            3.04447612364811e-06,
+            -2.179168924953956e-05
+          ],
+          "projectionMaxDifference": 0.0005400925896134473,
+          "phiSliceMaxDifference_m": 2.159504219889641e-06,
+          "fieldHashes": {
+            "volume": "4ba1d999922b7ff2ebdf5c3f1773dadcaf41ea82fc5f71d7007bf461dcf7bff9",
+            "velocity": "6b31d7d2b20376acc452521ecf061a7cdc7da21d56ce8587394ca9405e652f3c",
+            "phi": "6a4c658a27f8c7a973c8789407d77c45e8f6148dcb57a303b024b4eabfa4a7a2",
+            "tiles": "39ce689662c45838a4f1df6a4bf578da91c5e1fab5afa7d56a529dedcc7aaf80"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 7,
+          "massDelta_cells": -0.00037715684447903186,
+          "centroidDelta_h": [
+            1.5694972432811483e-08,
+            3.266598753270955e-06,
+            -9.72096189855165e-06
+          ],
+          "projectionMaxDifference": 0.0002974247745227898,
+          "phiSliceMaxDifference_m": 2.7120113372802734e-06,
+          "fieldHashes": {
+            "volume": "fa2cb71a189315cea09a53ab6dcf150e4b11451a37daf2446d2182fbca431ab7",
+            "velocity": "ce2c024bc56921e17b185ebe446fbdac715472be3d5194b5b4113a465b9c2b42",
+            "phi": "d309235d1149d96b33523b93d236ecaf8e6e283c94997855f9c69b0d45398a59",
+            "tiles": "928d460fb74541059db9d2ee1a6277b9a5abceed3a6c454e8c3d0ad93cfe2d5a"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 8,
+          "massDelta_cells": -0.00016059944755397737,
+          "centroidDelta_h": [
+            1.67626739688842e-05,
+            -7.77843438370951e-05,
+            0.0001133385386253849
+          ],
+          "projectionMaxDifference": 0.01808153533471568,
+          "phiSliceMaxDifference_m": 8.67210328578949e-05,
+          "fieldHashes": {
+            "volume": "5f45ba2944d48c29cb047bd8d159ccce629a0a9b92f009f2586fb7e4bcbd1778",
+            "velocity": "ad22c2539bd02012d0dd34e4b1ea3a0c754b5d91c145b3571de4df02b643dc20",
+            "phi": "8d96aeed57f2b62acdf54041c80e5a603c0a326f83835b38b4bf0184bfb17153",
+            "tiles": "8eaf55dfbd46c935b5ad60e06c238290f9ee276abafe244c33b72de1cdf39977"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        },
+        {
+          "frame": 9,
+          "massDelta_cells": 0.00017113403009716421,
+          "centroidDelta_h": [
+            2.7580031623841705e-05,
+            -0.00015214060304913346,
+            0.00028739991020287903
+          ],
+          "projectionMaxDifference": 0.013519053847334789,
+          "phiSliceMaxDifference_m": 0.0003939662128686905,
+          "fieldHashes": {
+            "volume": "b72cce93fd8e3c8e7c5e726b3470fd419c609458c8f9887aa0b28e4118830dae",
+            "velocity": "33c1219002818729195088e137afb661f4e9b2a6345345790f1e71af14490be1",
+            "phi": "c7c325929c226676252e5c9f2af62448fc31fc1c62ff54c1d3efc17866cf8755",
+            "tiles": "702ec2e0a45f96b820015c883b0c75b7d72c39536f9ce4525060c06df62e42a7"
+          },
+          "exactNativeFields": {
+            "volume": false,
+            "velocity": false,
+            "phi": false,
+            "tiles": true
+          }
+        }
+      ]
+    }
+  ],
+  "frozenSummary": [
+    {
+      "mode": "native",
+      "runs": 2,
+      "samplesPerRun": [
+        32,
+        32
+      ],
+      "runMeans_ms": [
+        12.295149843750002,
+        12.048311656249998
+      ],
+      "mean_ms": 12.17173075,
+      "overheadPercent": 0.0,
+      "exactNativeOutput": true,
+      "exactNativeAcceptedWork": true
+    },
+    {
+      "mode": "dense",
+      "runs": 1,
+      "samplesPerRun": [
+        32
+      ],
+      "runMeans_ms": [
+        12.007773968749998
+      ],
+      "mean_ms": 12.007773968749998,
+      "overheadPercent": -1.3470293142164858,
+      "exactNativeOutput": true,
+      "exactNativeAcceptedWork": true
+    },
+    {
+      "mode": "affine",
+      "runs": 1,
+      "samplesPerRun": [
+        32
+      ],
+      "runMeans_ms": [
+        13.491893218749995
+      ],
+      "mean_ms": 13.491893218749995,
+      "overheadPercent": 10.846135983988937,
+      "exactNativeOutput": true,
+      "exactNativeAcceptedWork": true
+    },
+    {
+      "mode": "table",
+      "runs": 1,
+      "samplesPerRun": [
+        32
+      ],
+      "runMeans_ms": [
+        13.834050156250003
+      ],
+      "mean_ms": 13.834050156250003,
+      "overheadPercent": 13.65721474121504,
+      "exactNativeOutput": true,
+      "exactNativeAcceptedWork": true
+    }
+  ],
+  "frozen": [
+    {
+      "capture": "frozen-mini64-affine-a",
+      "sceneId": "minimal-power-dam-break-64",
+      "mode": "affine",
+      "edge": 32,
+      "samples": 32,
+      "fine": true,
+      "identity": false,
+      "sourceBefore": "7b7bd7e9c08749d1a9eb7aeadad214d79af6dd45dcd48e20440df9723c1dd87f",
+      "sourceAfter": "7b7bd7e9c08749d1a9eb7aeadad214d79af6dd45dcd48e20440df9723c1dd87f",
+      "scope": "One accepted first frame replayed from a complete GPU checkpoint. GPU timestamps include parameter-copy replay commands; restore and CPU solver planning are excluded. No trajectory, sparse allocation or renderer claim.",
+      "setup_ms": 251395.7285,
+      "dimensions": [
+        64,
+        64,
+        64
+      ],
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "inputHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+        "phi": "93c55b017856dfac43a4a9a792cf6a06556b245fd37267e3b967e8f1ba4c6c56",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "outputHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "80342cd424b78c3458890ce8c2fd7338045748845530f89fd160a0da8edb9a1d",
+        "phi": "3aebc0bcf787dcd359ff961609acd2254fe4927889e80fc76c843930142b2250",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "replayedHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "80342cd424b78c3458890ce8c2fd7338045748845530f89fd160a0da8edb9a1d",
+        "phi": "3aebc0bcf787dcd359ff961609acd2254fe4927889e80fc76c843930142b2250",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "summary": {
+        "mean": 13.491893218749995,
+        "median": 13.394921,
+        "p90": 13.720623
+      },
+      "gpu_ms": [
+        13.720623,
+        13.537545,
+        13.69354,
+        13.644793,
+        13.663499,
+        13.300547,
+        13.671501,
+        13.710999,
+        13.191464,
+        13.394921,
+        13.295089,
+        13.251632,
+        13.261755,
+        13.286172,
+        13.31713,
+        13.257547,
+        13.339588,
+        13.228965,
+        13.265089,
+        13.275507,
+        13.257048,
+        13.320006,
+        13.340339,
+        13.705125,
+        13.707958,
+        13.761915,
+        13.922038,
+        14.193908,
+        13.618209,
+        13.677792,
+        13.235798,
+        13.692541
+      ],
+      "validationErrors": [],
+      "checkpoint": {
+        "buffers": 217,
+        "textures": 123,
+        "checkpointBytes": 78709576,
+        "submissions": 3,
+        "writes": 26,
+        "commandBuffers": 29
+      },
+      "failure": null,
+      "invalidMeasurement": null,
+      "acceptedWork": {
+        "encodedSteps": 1,
+        "uniformPressureCycleBudget": "adaptive",
+        "uniformMixedGeneration": 1,
+        "uniformMixedFineTiles": 4096,
+        "uniformMixedCoarseTiles": 0,
+        "uniformMixedOwners": 262144,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 0,
+        "uniformMixedDynamicChangedTiles": 0,
+        "uniformMixedDynamicInterfaceTiles": 366,
+        "uniformMixedDynamicBandTiles": 681,
+        "uniformMixedDynamicRefined": 0,
+        "uniformMixedDynamicCoarsened": 3415,
+        "uniformMixedDynamicRequiredTiles": 366,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 0,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0,
+          0
+        ],
+        "uniformMixedDynamicAirVolume": [
+          0,
+          0
+        ],
+        "uniformPressureAcceptedResidual": 0.9849374294281006,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 7,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 2288,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 8.656658172607422
+      },
+      "exactNativeOutput": true,
+      "exactNativeAcceptedWork": true
+    },
+    {
+      "capture": "frozen-mini64-dense-a",
+      "sceneId": "minimal-power-dam-break-64",
+      "mode": "dense",
+      "edge": 32,
+      "samples": 32,
+      "fine": true,
+      "identity": false,
+      "sourceBefore": "7b7bd7e9c08749d1a9eb7aeadad214d79af6dd45dcd48e20440df9723c1dd87f",
+      "sourceAfter": "7b7bd7e9c08749d1a9eb7aeadad214d79af6dd45dcd48e20440df9723c1dd87f",
+      "scope": "One accepted first frame replayed from a complete GPU checkpoint. GPU timestamps include parameter-copy replay commands; restore and CPU solver planning are excluded. No trajectory, sparse allocation or renderer claim.",
+      "setup_ms": 81411.506333,
+      "dimensions": [
+        64,
+        64,
+        64
+      ],
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "inputHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+        "phi": "93c55b017856dfac43a4a9a792cf6a06556b245fd37267e3b967e8f1ba4c6c56",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "outputHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "80342cd424b78c3458890ce8c2fd7338045748845530f89fd160a0da8edb9a1d",
+        "phi": "3aebc0bcf787dcd359ff961609acd2254fe4927889e80fc76c843930142b2250",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "replayedHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "80342cd424b78c3458890ce8c2fd7338045748845530f89fd160a0da8edb9a1d",
+        "phi": "3aebc0bcf787dcd359ff961609acd2254fe4927889e80fc76c843930142b2250",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "summary": {
+        "mean": 12.007773968749998,
+        "median": 11.922526,
+        "p90": 12.294333
+      },
+      "gpu_ms": [
+        12.294333,
+        11.867888,
+        11.846306,
+        11.890179,
+        11.869638,
+        11.860763,
+        12.709529,
+        12.219439,
+        12.295354,
+        12.256313,
+        12.140815,
+        11.927485,
+        12.224397,
+        12.226813,
+        12.357728,
+        11.800862,
+        11.924568,
+        11.885359,
+        11.944192,
+        11.904319,
+        11.934943,
+        11.854194,
+        11.878819,
+        11.922526,
+        11.888486,
+        11.882485,
+        11.934943,
+        11.911776,
+        11.883777,
+        11.947109,
+        11.910444,
+        11.852985
+      ],
+      "validationErrors": [],
+      "checkpoint": {
+        "buffers": 217,
+        "textures": 123,
+        "checkpointBytes": 78709576,
+        "submissions": 3,
+        "writes": 26,
+        "commandBuffers": 29
+      },
+      "failure": null,
+      "invalidMeasurement": null,
+      "acceptedWork": {
+        "encodedSteps": 1,
+        "uniformPressureCycleBudget": "adaptive",
+        "uniformMixedGeneration": 1,
+        "uniformMixedFineTiles": 4096,
+        "uniformMixedCoarseTiles": 0,
+        "uniformMixedOwners": 262144,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 0,
+        "uniformMixedDynamicChangedTiles": 0,
+        "uniformMixedDynamicInterfaceTiles": 366,
+        "uniformMixedDynamicBandTiles": 681,
+        "uniformMixedDynamicRefined": 0,
+        "uniformMixedDynamicCoarsened": 3415,
+        "uniformMixedDynamicRequiredTiles": 366,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 0,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0,
+          0
+        ],
+        "uniformMixedDynamicAirVolume": [
+          0,
+          0
+        ],
+        "uniformPressureAcceptedResidual": 0.9849374294281006,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 7,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 2288,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 8.656658172607422
+      },
+      "exactNativeOutput": true,
+      "exactNativeAcceptedWork": true
+    },
+    {
+      "capture": "frozen-mini64-native-a",
+      "sceneId": "minimal-power-dam-break-64",
+      "mode": "native",
+      "edge": 32,
+      "samples": 32,
+      "fine": true,
+      "identity": false,
+      "sourceBefore": "7b7bd7e9c08749d1a9eb7aeadad214d79af6dd45dcd48e20440df9723c1dd87f",
+      "sourceAfter": "7b7bd7e9c08749d1a9eb7aeadad214d79af6dd45dcd48e20440df9723c1dd87f",
+      "scope": "One accepted first frame replayed from a complete GPU checkpoint. GPU timestamps include parameter-copy replay commands; restore and CPU solver planning are excluded. No trajectory, sparse allocation or renderer claim.",
+      "setup_ms": 77965.157167,
+      "dimensions": [
+        64,
+        64,
+        64
+      ],
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "inputHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+        "phi": "93c55b017856dfac43a4a9a792cf6a06556b245fd37267e3b967e8f1ba4c6c56",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "outputHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "80342cd424b78c3458890ce8c2fd7338045748845530f89fd160a0da8edb9a1d",
+        "phi": "3aebc0bcf787dcd359ff961609acd2254fe4927889e80fc76c843930142b2250",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "replayedHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "80342cd424b78c3458890ce8c2fd7338045748845530f89fd160a0da8edb9a1d",
+        "phi": "3aebc0bcf787dcd359ff961609acd2254fe4927889e80fc76c843930142b2250",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "summary": {
+        "mean": 12.295149843750002,
+        "median": 12.284103,
+        "p90": 12.664348
+      },
+      "gpu_ms": [
+        11.941678,
+        13.002644,
+        11.855763,
+        13.26218,
+        12.246293,
+        12.242397,
+        12.359811,
+        12.664348,
+        12.341354,
+        12.20598,
+        12.385603,
+        12.990511,
+        12.285604,
+        12.217938,
+        12.203022,
+        12.288812,
+        12.257855,
+        12.452726,
+        11.850319,
+        12.287187,
+        12.27723,
+        11.832612,
+        12.282771,
+        12.358894,
+        12.346352,
+        12.413769,
+        11.936818,
+        11.895986,
+        12.342228,
+        12.284103,
+        12.009775,
+        12.122232
+      ],
+      "validationErrors": [],
+      "checkpoint": {
+        "buffers": 217,
+        "textures": 123,
+        "checkpointBytes": 78709576,
+        "submissions": 3,
+        "writes": 26,
+        "commandBuffers": 29
+      },
+      "failure": null,
+      "invalidMeasurement": null,
+      "acceptedWork": {
+        "encodedSteps": 1,
+        "uniformPressureCycleBudget": "adaptive",
+        "uniformMixedGeneration": 1,
+        "uniformMixedFineTiles": 4096,
+        "uniformMixedCoarseTiles": 0,
+        "uniformMixedOwners": 262144,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 0,
+        "uniformMixedDynamicChangedTiles": 0,
+        "uniformMixedDynamicInterfaceTiles": 366,
+        "uniformMixedDynamicBandTiles": 681,
+        "uniformMixedDynamicRefined": 0,
+        "uniformMixedDynamicCoarsened": 3415,
+        "uniformMixedDynamicRequiredTiles": 366,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 0,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0,
+          0
+        ],
+        "uniformMixedDynamicAirVolume": [
+          0,
+          0
+        ],
+        "uniformPressureAcceptedResidual": 0.9849374294281006,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 7,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 2288,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 8.656658172607422
+      },
+      "exactNativeOutput": true,
+      "exactNativeAcceptedWork": true
+    },
+    {
+      "capture": "frozen-mini64-native-b",
+      "sceneId": "minimal-power-dam-break-64",
+      "mode": "native",
+      "edge": 32,
+      "samples": 32,
+      "fine": true,
+      "identity": false,
+      "sourceBefore": "7b7bd7e9c08749d1a9eb7aeadad214d79af6dd45dcd48e20440df9723c1dd87f",
+      "sourceAfter": "7b7bd7e9c08749d1a9eb7aeadad214d79af6dd45dcd48e20440df9723c1dd87f",
+      "scope": "One accepted first frame replayed from a complete GPU checkpoint. GPU timestamps include parameter-copy replay commands; restore and CPU solver planning are excluded. No trajectory, sparse allocation or renderer claim.",
+      "setup_ms": 2237.570334,
+      "dimensions": [
+        64,
+        64,
+        64
+      ],
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "inputHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+        "phi": "93c55b017856dfac43a4a9a792cf6a06556b245fd37267e3b967e8f1ba4c6c56",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "outputHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "80342cd424b78c3458890ce8c2fd7338045748845530f89fd160a0da8edb9a1d",
+        "phi": "3aebc0bcf787dcd359ff961609acd2254fe4927889e80fc76c843930142b2250",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "replayedHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "80342cd424b78c3458890ce8c2fd7338045748845530f89fd160a0da8edb9a1d",
+        "phi": "3aebc0bcf787dcd359ff961609acd2254fe4927889e80fc76c843930142b2250",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "summary": {
+        "mean": 12.048311656249998,
+        "median": 11.942068,
+        "p90": 12.326957
+      },
+      "gpu_ms": [
+        11.858263,
+        12.335291,
+        11.798848,
+        11.902596,
+        12.326957,
+        12.29025,
+        12.258646,
+        12.016359,
+        12.930678,
+        12.281187,
+        12.256105,
+        12.302354,
+        11.782695,
+        12.275438,
+        12.347227,
+        12.28552,
+        11.94286,
+        11.855694,
+        11.804529,
+        11.950775,
+        11.904319,
+        11.942068,
+        11.895944,
+        11.896778,
+        11.907652,
+        11.815903,
+        11.817404,
+        11.940026,
+        11.852611,
+        11.870985,
+        11.909777,
+        11.990234
+      ],
+      "validationErrors": [],
+      "checkpoint": {
+        "buffers": 217,
+        "textures": 123,
+        "checkpointBytes": 78709576,
+        "submissions": 3,
+        "writes": 26,
+        "commandBuffers": 29
+      },
+      "failure": null,
+      "invalidMeasurement": null,
+      "acceptedWork": {
+        "encodedSteps": 1,
+        "uniformPressureCycleBudget": "adaptive",
+        "uniformMixedGeneration": 1,
+        "uniformMixedFineTiles": 4096,
+        "uniformMixedCoarseTiles": 0,
+        "uniformMixedOwners": 262144,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 0,
+        "uniformMixedDynamicChangedTiles": 0,
+        "uniformMixedDynamicInterfaceTiles": 366,
+        "uniformMixedDynamicBandTiles": 681,
+        "uniformMixedDynamicRefined": 0,
+        "uniformMixedDynamicCoarsened": 3415,
+        "uniformMixedDynamicRequiredTiles": 366,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 0,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0,
+          0
+        ],
+        "uniformMixedDynamicAirVolume": [
+          0,
+          0
+        ],
+        "uniformPressureAcceptedResidual": 0.9849374294281006,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 7,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 2288,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 8.656658172607422
+      },
+      "exactNativeOutput": true,
+      "exactNativeAcceptedWork": true
+    },
+    {
+      "capture": "frozen-mini64-native-unanchored-marker",
+      "sceneId": "minimal-power-dam-break-64",
+      "mode": "native",
+      "edge": 32,
+      "samples": 24,
+      "fine": true,
+      "identity": false,
+      "sourceBefore": "0771802cb29cc1dae7fff1a0933f676e29c6993e401f1da371ec2d77b8d37719",
+      "sourceAfter": "0771802cb29cc1dae7fff1a0933f676e29c6993e401f1da371ec2d77b8d37719",
+      "scope": "One accepted first frame replayed from a complete GPU checkpoint. GPU timestamps include parameter-copy replay commands; restore and CPU solver planning are excluded. No trajectory, sparse allocation or renderer claim.",
+      "setup_ms": 85018.222625,
+      "dimensions": [
+        64,
+        64,
+        64
+      ],
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "inputHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+        "phi": "93c55b017856dfac43a4a9a792cf6a06556b245fd37267e3b967e8f1ba4c6c56",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "outputHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "80342cd424b78c3458890ce8c2fd7338045748845530f89fd160a0da8edb9a1d",
+        "phi": "3aebc0bcf787dcd359ff961609acd2254fe4927889e80fc76c843930142b2250",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "replayedHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "80342cd424b78c3458890ce8c2fd7338045748845530f89fd160a0da8edb9a1d",
+        "phi": "3aebc0bcf787dcd359ff961609acd2254fe4927889e80fc76c843930142b2250",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "summary": {
+        "mean": 0.6090791666666667,
+        "median": 0.584241,
+        "p90": 0.639366
+      },
+      "gpu_ms": [
+        0.556733,
+        0.627856,
+        0.565233,
+        0.536068,
+        0.482944,
+        0.593324,
+        0.566449,
+        0.531117,
+        0.988776,
+        0.595324,
+        0.533867,
+        0.584241,
+        0.558574,
+        0.639366,
+        0.610365,
+        0.566408,
+        0.608574,
+        0.558574,
+        0.524242,
+        0.601657,
+        0.620075,
+        0.61899,
+        0.561075,
+        0.988068
+      ],
+      "validationErrors": [],
+      "checkpoint": {
+        "buffers": 217,
+        "textures": 123,
+        "checkpointBytes": 78709576,
+        "submissions": 3,
+        "writes": 26,
+        "commandBuffers": 29
+      },
+      "failure": null,
+      "invalidMeasurement": "Independent closing marker can execute ahead of the frame on Metal. Superseded by completion-frontier instrumentation.",
+      "acceptedWork": {
+        "encodedSteps": 1,
+        "uniformPressureCycleBudget": "adaptive",
+        "uniformMixedGeneration": 1,
+        "uniformMixedFineTiles": 4096,
+        "uniformMixedCoarseTiles": 0,
+        "uniformMixedOwners": 262144,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 0,
+        "uniformMixedDynamicChangedTiles": 0,
+        "uniformMixedDynamicInterfaceTiles": 366,
+        "uniformMixedDynamicBandTiles": 681,
+        "uniformMixedDynamicRefined": 0,
+        "uniformMixedDynamicCoarsened": 3415,
+        "uniformMixedDynamicRequiredTiles": 366,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 0,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0,
+          0
+        ],
+        "uniformMixedDynamicAirVolume": [
+          0,
+          0
+        ],
+        "uniformPressureAcceptedResidual": 0.9849374294281006,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 7,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 2288,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 8.656658172607422
+      }
+    },
+    {
+      "capture": "frozen-mini64-table-a",
+      "sceneId": "minimal-power-dam-break-64",
+      "mode": "table",
+      "edge": 32,
+      "samples": 32,
+      "fine": true,
+      "identity": false,
+      "sourceBefore": "7b7bd7e9c08749d1a9eb7aeadad214d79af6dd45dcd48e20440df9723c1dd87f",
+      "sourceAfter": "7b7bd7e9c08749d1a9eb7aeadad214d79af6dd45dcd48e20440df9723c1dd87f",
+      "scope": "One accepted first frame replayed from a complete GPU checkpoint. GPU timestamps include parameter-copy replay commands; restore and CPU solver planning are excluded. No trajectory, sparse allocation or renderer claim.",
+      "setup_ms": 248165.783458,
+      "dimensions": [
+        64,
+        64,
+        64
+      ],
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "inputHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+        "phi": "93c55b017856dfac43a4a9a792cf6a06556b245fd37267e3b967e8f1ba4c6c56",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "outputHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "80342cd424b78c3458890ce8c2fd7338045748845530f89fd160a0da8edb9a1d",
+        "phi": "3aebc0bcf787dcd359ff961609acd2254fe4927889e80fc76c843930142b2250",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "replayedHashes": {
+        "volume": "a86053e63ed9dfc7898c58ca52cbc5c39010d1f0f58849f5e4c4e0fc87b261e2",
+        "velocity": "80342cd424b78c3458890ce8c2fd7338045748845530f89fd160a0da8edb9a1d",
+        "phi": "3aebc0bcf787dcd359ff961609acd2254fe4927889e80fc76c843930142b2250",
+        "tiles": "5c8f48d6515a78afca82314852250fef0d609687e5d6e0add09db1a52c71a21d"
+      },
+      "summary": {
+        "mean": 13.834050156250003,
+        "median": 13.700458,
+        "p90": 14.137492
+      },
+      "gpu_ms": [
+        13.867827,
+        14.123236,
+        14.081863,
+        13.691499,
+        14.161534,
+        13.676125,
+        13.658458,
+        13.700458,
+        13.72179,
+        13.669084,
+        13.595292,
+        13.698791,
+        13.741499,
+        13.686957,
+        13.692917,
+        13.724666,
+        13.635583,
+        13.679166,
+        14.144826,
+        14.144201,
+        13.697041,
+        14.086993,
+        14.121702,
+        13.653042,
+        14.116701,
+        14.078285,
+        14.137492,
+        14.097326,
+        13.630334,
+        13.667542,
+        13.658208,
+        13.649167
+      ],
+      "validationErrors": [],
+      "checkpoint": {
+        "buffers": 217,
+        "textures": 123,
+        "checkpointBytes": 78709576,
+        "submissions": 3,
+        "writes": 26,
+        "commandBuffers": 29
+      },
+      "failure": null,
+      "invalidMeasurement": null,
+      "acceptedWork": {
+        "encodedSteps": 1,
+        "uniformPressureCycleBudget": "adaptive",
+        "uniformMixedGeneration": 1,
+        "uniformMixedFineTiles": 4096,
+        "uniformMixedCoarseTiles": 0,
+        "uniformMixedOwners": 262144,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 0,
+        "uniformMixedDynamicChangedTiles": 0,
+        "uniformMixedDynamicInterfaceTiles": 366,
+        "uniformMixedDynamicBandTiles": 681,
+        "uniformMixedDynamicRefined": 0,
+        "uniformMixedDynamicCoarsened": 3415,
+        "uniformMixedDynamicRequiredTiles": 366,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 0,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0,
+          0
+        ],
+        "uniformMixedDynamicAirVolume": [
+          0,
+          0
+        ],
+        "uniformPressureAcceptedResidual": 0.9849374294281006,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 7,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 2288,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 8.656658172607422
+      },
+      "exactNativeOutput": true,
+      "exactNativeAcceptedWork": true
+    }
+  ],
+  "scope": "Full-occupancy, static mirror page placement. Same numerical operators and automatic masks. No sparse allocation, residency transitions or renderer benchmark. Dense mode specializes to original native shader source.",
+  "summary": [
+    {
+      "family": "fig9",
+      "mode": "native",
+      "n": 2,
+      "msPerStep": [
+        21.893339233333368,
+        22.00361840000005
+      ],
+      "mean": 21.948478816666707,
+      "overheadPercent": 0.0,
+      "allFinalHashesExact": true
+    },
+    {
+      "family": "fig9",
+      "mode": "dense",
+      "n": 1,
+      "msPerStep": [
+        21.94910833333333
+      ],
+      "mean": 21.94910833333333,
+      "overheadPercent": 0.0028681562484589307,
+      "allFinalHashesExact": true
+    },
+    {
+      "family": "fig9",
+      "mode": "affine",
+      "n": 2,
+      "msPerStep": [
+        26.232973608333364,
+        25.97108611666675
+      ],
+      "mean": 26.102029862500057,
+      "overheadPercent": 18.92409528937069,
+      "allFinalHashesExact": false
+    },
+    {
+      "family": "fig9",
+      "mode": "table",
+      "n": 2,
+      "msPerStep": [
+        27.651540283333453,
+        27.323741666666667
+      ],
+      "mean": 27.487640975000062,
+      "overheadPercent": 25.237111895550402,
+      "allFinalHashesExact": false
+    }
+  ],
+  "captures": [
+    {
+      "capture": "fig9-affine-a",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "affine",
+      "atlasEdge": 32,
+      "atlasCounts": {
+        "modules": 38,
+        "fields": 170,
+        "uploads": 8,
+        "uploadBytes": 33819144,
+        "bindGroups": 0
+      },
+      "atlasMetadataBytes": 0,
+      "sceneId": "cm12-figure-9",
+      "kind": "adaptive",
+      "frames": 120,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": 8,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": true,
+      "lattice": {
+        "nx": 128,
+        "ny": 128,
+        "nz": 64,
+        "cellSize_m": 0.05
+      },
+      "setup_ms": 243968.450208,
+      "fieldHashes": {
+        "volume": "ac48d0d0253e1b742c05ac40cc3e944684e1fb4706035f341d4bfad0a336209c",
+        "velocity": "a53c29ffc2f9cf5a2502af6cd18e8afe95140af128dfb5077849b103aef0736d",
+        "phi": "06d1f9f35ffb4ce70c497728479a9dac745becb2b61af506aedbdbc08f1895bc",
+        "tiles": "1e969c5ad17e7d3991f5438b6aa4e82a5c45e0b96dde181826a7b507754307d5"
+      },
+      "failure": null,
+      "validationErrors": [],
+      "summary": {
+        "msPerStep": 26.232973608333364,
+        "elapsed_ms": 3147.956833000004
+      },
+      "allocationBytes": 259705648,
+      "finalWork": {
+        "encodedSteps": 128,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 335413.34521484375,
+        "volumeDrift": -0.0014547540209830546,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 11.475064277648926,
+        "uniformMixedGeneration": 128,
+        "uniformMixedFineTiles": 5932,
+        "uniformMixedCoarseTiles": 10452,
+        "uniformMixedOwners": 390100,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 127,
+        "uniformMixedDynamicChangedTiles": 586,
+        "uniformMixedDynamicInterfaceTiles": 4022,
+        "uniformMixedDynamicBandTiles": 5932,
+        "uniformMixedDynamicRefined": 354,
+        "uniformMixedDynamicCoarsened": 232,
+        "uniformMixedDynamicRequiredTiles": 4022,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 7,
+        "uniformMixedDynamicCoarsePartialVolume": 1254,
+        "uniformMixedDynamicCoarsePhiCrossing": 7,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0.6799294948577881,
+          0.3987540602684021
+        ],
+        "uniformMixedDynamicAirVolume": [
+          13.034509658813477,
+          1
+        ],
+        "uniformPressureAcceptedResidual": 0.07226816564798355,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 3,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 3351,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 0.10221897810697556
+      },
+      "baseline": "fig9-native-a",
+      "exactFinalHashes": false,
+      "fieldDifferences": {
+        "volume": {
+          "values": 1048576,
+          "differentValues": 732524,
+          "maxAbsolute": 28.694767117500305,
+          "relativeL2": 0.41400495448625446
+        },
+        "velocity": {
+          "values": 4194304,
+          "differentValues": 2024257,
+          "maxAbsolute": 33.0,
+          "relativeL2": 0.738120177476123
+        },
+        "phi": {
+          "values": 1081665,
+          "differentValues": 1063067,
+          "maxAbsolute": 1.660911113023758,
+          "relativeL2": 0.3196872050232442
+        },
+        "tiles": {
+          "values": 16384,
+          "differentValues": 16384,
+          "maxAbsolute": 2147484402.0,
+          "relativeL2": 0.5940923884025818
+        }
+      }
+    },
+    {
+      "capture": "fig9-affine-b",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "affine",
+      "atlasEdge": 32,
+      "atlasCounts": {
+        "modules": 38,
+        "fields": 170,
+        "uploads": 8,
+        "uploadBytes": 33819144,
+        "bindGroups": 0
+      },
+      "atlasMetadataBytes": 0,
+      "sceneId": "cm12-figure-9",
+      "kind": "adaptive",
+      "frames": 120,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": 8,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": true,
+      "lattice": {
+        "nx": 128,
+        "ny": 128,
+        "nz": 64,
+        "cellSize_m": 0.05
+      },
+      "setup_ms": 155703.75799999997,
+      "fieldHashes": {
+        "volume": "ac48d0d0253e1b742c05ac40cc3e944684e1fb4706035f341d4bfad0a336209c",
+        "velocity": "a53c29ffc2f9cf5a2502af6cd18e8afe95140af128dfb5077849b103aef0736d",
+        "phi": "06d1f9f35ffb4ce70c497728479a9dac745becb2b61af506aedbdbc08f1895bc",
+        "tiles": "1e969c5ad17e7d3991f5438b6aa4e82a5c45e0b96dde181826a7b507754307d5"
+      },
+      "failure": null,
+      "validationErrors": [],
+      "summary": {
+        "msPerStep": 25.97108611666675,
+        "elapsed_ms": 3116.53033400001
+      },
+      "allocationBytes": 259705648,
+      "finalWork": {
+        "encodedSteps": 128,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 335413.34521484375,
+        "volumeDrift": -0.0014547540209830546,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 11.475064277648926,
+        "uniformMixedGeneration": 128,
+        "uniformMixedFineTiles": 5932,
+        "uniformMixedCoarseTiles": 10452,
+        "uniformMixedOwners": 390100,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 127,
+        "uniformMixedDynamicChangedTiles": 586,
+        "uniformMixedDynamicInterfaceTiles": 4022,
+        "uniformMixedDynamicBandTiles": 5932,
+        "uniformMixedDynamicRefined": 354,
+        "uniformMixedDynamicCoarsened": 232,
+        "uniformMixedDynamicRequiredTiles": 4022,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 7,
+        "uniformMixedDynamicCoarsePartialVolume": 1254,
+        "uniformMixedDynamicCoarsePhiCrossing": 7,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0.6799294948577881,
+          0.3987540602684021
+        ],
+        "uniformMixedDynamicAirVolume": [
+          13.034509658813477,
+          1
+        ],
+        "uniformPressureAcceptedResidual": 0.07226816564798355,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 3,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 3351,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 0.10221897810697556
+      },
+      "baseline": "fig9-native-a",
+      "exactFinalHashes": false,
+      "fieldDifferences": {
+        "volume": {
+          "values": 1048576,
+          "differentValues": 732524,
+          "maxAbsolute": 28.694767117500305,
+          "relativeL2": 0.41400495448625446
+        },
+        "velocity": {
+          "values": 4194304,
+          "differentValues": 2024257,
+          "maxAbsolute": 33.0,
+          "relativeL2": 0.738120177476123
+        },
+        "phi": {
+          "values": 1081665,
+          "differentValues": 1063067,
+          "maxAbsolute": 1.660911113023758,
+          "relativeL2": 0.3196872050232442
+        },
+        "tiles": {
+          "values": 16384,
+          "differentValues": 16384,
+          "maxAbsolute": 2147484402.0,
+          "relativeL2": 0.5940923884025818
+        }
+      }
+    },
+    {
+      "capture": "fig9-dense-a",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "dense",
+      "atlasEdge": 32,
+      "atlasCounts": {
+        "modules": 0,
+        "fields": 0,
+        "uploads": 0,
+        "uploadBytes": 0,
+        "bindGroups": 0
+      },
+      "atlasMetadataBytes": 0,
+      "sceneId": "cm12-figure-9",
+      "kind": "adaptive",
+      "frames": 120,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": 8,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": true,
+      "lattice": {
+        "nx": 128,
+        "ny": 128,
+        "nz": 64,
+        "cellSize_m": 0.05
+      },
+      "setup_ms": 3154.345667,
+      "fieldHashes": {
+        "volume": "16038333b825a25c5f1533cc5d89929cc295e5884c38f2981aba5253cabd222d",
+        "velocity": "82ed649b0bbe0e1148850e3370ee12304d4696ab9a77ab1ac7fb6cad954edde3",
+        "phi": "8a4d624093ce662b74b41ce4e61bc64a743f3c340fed631725e964c4032849a1",
+        "tiles": "125c46d5e128f3c80f97931c3b0a2d8de3b166adefbcf84ba14168b1e6ff0b73"
+      },
+      "failure": null,
+      "validationErrors": [],
+      "summary": {
+        "msPerStep": 21.94910833333333,
+        "elapsed_ms": 2633.8929999999996
+      },
+      "allocationBytes": 259705648,
+      "finalWork": {
+        "encodedSteps": 128,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 335366.337890625,
+        "volumeDrift": -0.0015946975885079576,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 15.98098087310791,
+        "uniformMixedGeneration": 128,
+        "uniformMixedFineTiles": 6112,
+        "uniformMixedCoarseTiles": 10272,
+        "uniformMixedOwners": 401440,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 127,
+        "uniformMixedDynamicChangedTiles": 600,
+        "uniformMixedDynamicInterfaceTiles": 4158,
+        "uniformMixedDynamicBandTiles": 6112,
+        "uniformMixedDynamicRefined": 269,
+        "uniformMixedDynamicCoarsened": 331,
+        "uniformMixedDynamicRequiredTiles": 4158,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 1389,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0.7810826301574707,
+          0.5557715892791748
+        ],
+        "uniformMixedDynamicAirVolume": [
+          7.667729377746582,
+          2.3636326789855957
+        ],
+        "uniformPressureAcceptedResidual": 0.06867289543151855,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 3,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 3372,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 0.04616563394665718
+      },
+      "baseline": "fig9-native-a",
+      "exactFinalHashes": true,
+      "fieldDifferences": {
+        "volume": {
+          "values": 1048576,
+          "differentValues": 0,
+          "maxAbsolute": 0.0,
+          "relativeL2": 0.0
+        },
+        "velocity": {
+          "values": 4194304,
+          "differentValues": 0,
+          "maxAbsolute": 0.0,
+          "relativeL2": 0.0
+        },
+        "phi": {
+          "values": 1081665,
+          "differentValues": 0,
+          "maxAbsolute": 0.0,
+          "relativeL2": 0.0
+        },
+        "tiles": {
+          "values": 16384,
+          "differentValues": 0,
+          "maxAbsolute": 0.0,
+          "relativeL2": 0.0
+        }
+      }
+    },
+    {
+      "capture": "fig9-native-a",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "native",
+      "atlasEdge": 32,
+      "atlasCounts": null,
+      "atlasMetadataBytes": 0,
+      "sceneId": "cm12-figure-9",
+      "kind": "adaptive",
+      "frames": 120,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": 8,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": true,
+      "lattice": {
+        "nx": 128,
+        "ny": 128,
+        "nz": 64,
+        "cellSize_m": 0.05
+      },
+      "setup_ms": 94000.367042,
+      "fieldHashes": {
+        "volume": "16038333b825a25c5f1533cc5d89929cc295e5884c38f2981aba5253cabd222d",
+        "velocity": "82ed649b0bbe0e1148850e3370ee12304d4696ab9a77ab1ac7fb6cad954edde3",
+        "phi": "8a4d624093ce662b74b41ce4e61bc64a743f3c340fed631725e964c4032849a1",
+        "tiles": "125c46d5e128f3c80f97931c3b0a2d8de3b166adefbcf84ba14168b1e6ff0b73"
+      },
+      "failure": null,
+      "validationErrors": [],
+      "summary": {
+        "msPerStep": 21.893339233333368,
+        "elapsed_ms": 2627.200708000004
+      },
+      "allocationBytes": 259705648,
+      "finalWork": {
+        "encodedSteps": 128,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 335366.337890625,
+        "volumeDrift": -0.0015946975885079576,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 15.98098087310791,
+        "uniformMixedGeneration": 128,
+        "uniformMixedFineTiles": 6112,
+        "uniformMixedCoarseTiles": 10272,
+        "uniformMixedOwners": 401440,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 127,
+        "uniformMixedDynamicChangedTiles": 600,
+        "uniformMixedDynamicInterfaceTiles": 4158,
+        "uniformMixedDynamicBandTiles": 6112,
+        "uniformMixedDynamicRefined": 269,
+        "uniformMixedDynamicCoarsened": 331,
+        "uniformMixedDynamicRequiredTiles": 4158,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 1389,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0.7810826301574707,
+          0.5557715892791748
+        ],
+        "uniformMixedDynamicAirVolume": [
+          7.667729377746582,
+          2.3636326789855957
+        ],
+        "uniformPressureAcceptedResidual": 0.06867289543151855,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 3,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 3372,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 0.04616563394665718
+      },
+      "baseline": "fig9-native-a",
+      "exactFinalHashes": true,
+      "fieldDifferences": {
+        "volume": {
+          "values": 1048576,
+          "differentValues": 0,
+          "maxAbsolute": 0.0,
+          "relativeL2": 0.0
+        },
+        "velocity": {
+          "values": 4194304,
+          "differentValues": 0,
+          "maxAbsolute": 0.0,
+          "relativeL2": 0.0
+        },
+        "phi": {
+          "values": 1081665,
+          "differentValues": 0,
+          "maxAbsolute": 0.0,
+          "relativeL2": 0.0
+        },
+        "tiles": {
+          "values": 16384,
+          "differentValues": 0,
+          "maxAbsolute": 0.0,
+          "relativeL2": 0.0
+        }
+      }
+    },
+    {
+      "capture": "fig9-native-b",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "native",
+      "atlasEdge": 32,
+      "atlasCounts": null,
+      "atlasMetadataBytes": 0,
+      "sceneId": "cm12-figure-9",
+      "kind": "adaptive",
+      "frames": 120,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": 8,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": true,
+      "lattice": {
+        "nx": 128,
+        "ny": 128,
+        "nz": 64,
+        "cellSize_m": 0.05
+      },
+      "setup_ms": 92748.912,
+      "fieldHashes": {
+        "volume": "16038333b825a25c5f1533cc5d89929cc295e5884c38f2981aba5253cabd222d",
+        "velocity": "82ed649b0bbe0e1148850e3370ee12304d4696ab9a77ab1ac7fb6cad954edde3",
+        "phi": "8a4d624093ce662b74b41ce4e61bc64a743f3c340fed631725e964c4032849a1",
+        "tiles": "125c46d5e128f3c80f97931c3b0a2d8de3b166adefbcf84ba14168b1e6ff0b73"
+      },
+      "failure": null,
+      "validationErrors": [],
+      "summary": {
+        "msPerStep": 22.00361840000005,
+        "elapsed_ms": 2640.434208000006
+      },
+      "allocationBytes": 259705648,
+      "finalWork": {
+        "encodedSteps": 128,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 335366.337890625,
+        "volumeDrift": -0.0015946975885079576,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 15.98098087310791,
+        "uniformMixedGeneration": 128,
+        "uniformMixedFineTiles": 6112,
+        "uniformMixedCoarseTiles": 10272,
+        "uniformMixedOwners": 401440,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 127,
+        "uniformMixedDynamicChangedTiles": 600,
+        "uniformMixedDynamicInterfaceTiles": 4158,
+        "uniformMixedDynamicBandTiles": 6112,
+        "uniformMixedDynamicRefined": 269,
+        "uniformMixedDynamicCoarsened": 331,
+        "uniformMixedDynamicRequiredTiles": 4158,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 1389,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0.7810826301574707,
+          0.5557715892791748
+        ],
+        "uniformMixedDynamicAirVolume": [
+          7.667729377746582,
+          2.3636326789855957
+        ],
+        "uniformPressureAcceptedResidual": 0.06867289543151855,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 3,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 3372,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 0.04616563394665718
+      },
+      "baseline": "fig9-native-a",
+      "exactFinalHashes": true,
+      "fieldDifferences": {
+        "volume": {
+          "values": 1048576,
+          "differentValues": 0,
+          "maxAbsolute": 0.0,
+          "relativeL2": 0.0
+        },
+        "velocity": {
+          "values": 4194304,
+          "differentValues": 0,
+          "maxAbsolute": 0.0,
+          "relativeL2": 0.0
+        },
+        "phi": {
+          "values": 1081665,
+          "differentValues": 0,
+          "maxAbsolute": 0.0,
+          "relativeL2": 0.0
+        },
+        "tiles": {
+          "values": 16384,
+          "differentValues": 0,
+          "maxAbsolute": 0.0,
+          "relativeL2": 0.0
+        }
+      }
+    },
+    {
+      "capture": "fig9-table-a",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "table",
+      "atlasEdge": 32,
+      "atlasCounts": {
+        "modules": 38,
+        "fields": 170,
+        "uploads": 8,
+        "uploadBytes": 33819144,
+        "bindGroups": 206
+      },
+      "atlasMetadataBytes": 512,
+      "sceneId": "cm12-figure-9",
+      "kind": "adaptive",
+      "frames": 120,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": 8,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": true,
+      "lattice": {
+        "nx": 128,
+        "ny": 128,
+        "nz": 64,
+        "cellSize_m": 0.05
+      },
+      "setup_ms": 249124.9575,
+      "fieldHashes": {
+        "volume": "ac48d0d0253e1b742c05ac40cc3e944684e1fb4706035f341d4bfad0a336209c",
+        "velocity": "a53c29ffc2f9cf5a2502af6cd18e8afe95140af128dfb5077849b103aef0736d",
+        "phi": "06d1f9f35ffb4ce70c497728479a9dac745becb2b61af506aedbdbc08f1895bc",
+        "tiles": "1e969c5ad17e7d3991f5438b6aa4e82a5c45e0b96dde181826a7b507754307d5"
+      },
+      "failure": null,
+      "validationErrors": [],
+      "summary": {
+        "msPerStep": 27.651540283333453,
+        "elapsed_ms": 3318.1848340000142
+      },
+      "allocationBytes": 259705648,
+      "finalWork": {
+        "encodedSteps": 128,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 335413.34521484375,
+        "volumeDrift": -0.0014547540209830546,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 11.475064277648926,
+        "uniformMixedGeneration": 128,
+        "uniformMixedFineTiles": 5932,
+        "uniformMixedCoarseTiles": 10452,
+        "uniformMixedOwners": 390100,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 127,
+        "uniformMixedDynamicChangedTiles": 586,
+        "uniformMixedDynamicInterfaceTiles": 4022,
+        "uniformMixedDynamicBandTiles": 5932,
+        "uniformMixedDynamicRefined": 354,
+        "uniformMixedDynamicCoarsened": 232,
+        "uniformMixedDynamicRequiredTiles": 4022,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 7,
+        "uniformMixedDynamicCoarsePartialVolume": 1254,
+        "uniformMixedDynamicCoarsePhiCrossing": 7,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0.6799294948577881,
+          0.3987540602684021
+        ],
+        "uniformMixedDynamicAirVolume": [
+          13.034509658813477,
+          1
+        ],
+        "uniformPressureAcceptedResidual": 0.07226816564798355,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 3,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 3351,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 0.10221897810697556
+      },
+      "baseline": "fig9-native-a",
+      "exactFinalHashes": false,
+      "fieldDifferences": {
+        "volume": {
+          "values": 1048576,
+          "differentValues": 732524,
+          "maxAbsolute": 28.694767117500305,
+          "relativeL2": 0.41400495448625446
+        },
+        "velocity": {
+          "values": 4194304,
+          "differentValues": 2024257,
+          "maxAbsolute": 33.0,
+          "relativeL2": 0.738120177476123
+        },
+        "phi": {
+          "values": 1081665,
+          "differentValues": 1063067,
+          "maxAbsolute": 1.660911113023758,
+          "relativeL2": 0.3196872050232442
+        },
+        "tiles": {
+          "values": 16384,
+          "differentValues": 16384,
+          "maxAbsolute": 2147484402.0,
+          "relativeL2": 0.5940923884025818
+        }
+      }
+    },
+    {
+      "capture": "fig9-table-b",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "table",
+      "atlasEdge": 32,
+      "atlasCounts": {
+        "modules": 38,
+        "fields": 170,
+        "uploads": 8,
+        "uploadBytes": 33819144,
+        "bindGroups": 206
+      },
+      "atlasMetadataBytes": 512,
+      "sceneId": "cm12-figure-9",
+      "kind": "adaptive",
+      "frames": 120,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": 8,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": true,
+      "lattice": {
+        "nx": 128,
+        "ny": 128,
+        "nz": 64,
+        "cellSize_m": 0.05
+      },
+      "setup_ms": 3151.046292,
+      "fieldHashes": {
+        "volume": "ac48d0d0253e1b742c05ac40cc3e944684e1fb4706035f341d4bfad0a336209c",
+        "velocity": "a53c29ffc2f9cf5a2502af6cd18e8afe95140af128dfb5077849b103aef0736d",
+        "phi": "06d1f9f35ffb4ce70c497728479a9dac745becb2b61af506aedbdbc08f1895bc",
+        "tiles": "1e969c5ad17e7d3991f5438b6aa4e82a5c45e0b96dde181826a7b507754307d5"
+      },
+      "failure": null,
+      "validationErrors": [],
+      "summary": {
+        "msPerStep": 27.323741666666667,
+        "elapsed_ms": 3278.849
+      },
+      "allocationBytes": 259705648,
+      "finalWork": {
+        "encodedSteps": 128,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 335413.34521484375,
+        "volumeDrift": -0.0014547540209830546,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 11.475064277648926,
+        "uniformMixedGeneration": 128,
+        "uniformMixedFineTiles": 5932,
+        "uniformMixedCoarseTiles": 10452,
+        "uniformMixedOwners": 390100,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 127,
+        "uniformMixedDynamicChangedTiles": 586,
+        "uniformMixedDynamicInterfaceTiles": 4022,
+        "uniformMixedDynamicBandTiles": 5932,
+        "uniformMixedDynamicRefined": 354,
+        "uniformMixedDynamicCoarsened": 232,
+        "uniformMixedDynamicRequiredTiles": 4022,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 7,
+        "uniformMixedDynamicCoarsePartialVolume": 1254,
+        "uniformMixedDynamicCoarsePhiCrossing": 7,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0.6799294948577881,
+          0.3987540602684021
+        ],
+        "uniformMixedDynamicAirVolume": [
+          13.034509658813477,
+          1
+        ],
+        "uniformPressureAcceptedResidual": 0.07226816564798355,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 3,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 3351,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 0.10221897810697556
+      },
+      "baseline": "fig9-native-a",
+      "exactFinalHashes": false,
+      "fieldDifferences": {
+        "volume": {
+          "values": 1048576,
+          "differentValues": 732524,
+          "maxAbsolute": 28.694767117500305,
+          "relativeL2": 0.41400495448625446
+        },
+        "velocity": {
+          "values": 4194304,
+          "differentValues": 2024257,
+          "maxAbsolute": 33.0,
+          "relativeL2": 0.738120177476123
+        },
+        "phi": {
+          "values": 1081665,
+          "differentValues": 1063067,
+          "maxAbsolute": 1.660911113023758,
+          "relativeL2": 0.3196872050232442
+        },
+        "tiles": {
+          "values": 16384,
+          "differentValues": 16384,
+          "maxAbsolute": 2147484402.0,
+          "relativeL2": 0.5940923884025818
+        }
+      }
+    },
+    {
+      "capture": "mini64-fine-native-a",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": null,
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "native",
+      "atlasEdge": 32,
+      "atlasCounts": null,
+      "atlasMetadataBytes": null,
+      "sceneId": "minimal-power-dam-break-64",
+      "kind": "fine",
+      "frames": 120,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": null,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "regions",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": true,
+      "lattice": {
+        "nx": 64,
+        "ny": 64,
+        "nz": 64,
+        "cellSize_m": 0.0125
+      },
+      "setup_ms": 2129.774999999994,
+      "fieldHashes": null,
+      "failure": "Uniform mixed frame 3: GPU failure record: pressure rejected a non-improving cycle (candidate 19044.76953125, accepted 16.2364559173584) at frame 3, layout generation 0; last accepted frame 2; projection withheld",
+      "validationErrors": null,
+      "summary": null,
+      "allocationBytes": 78582828,
+      "finalWork": {
+        "encodedSteps": 4,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 94207.8125,
+        "volumeDrift": -1.990276846596371e-06,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 0,
+        "uniformMixedGeneration": 1,
+        "uniformMixedFineTiles": 4096,
+        "uniformMixedCoarseTiles": 0,
+        "uniformMixedOwners": 262144,
+        "uniformMixedLayoutBuild_ms": 6.023958000005223,
+        "uniformMixedLayoutApply_ms": 1.477707999991253,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 4096,
+        "uniformPressureAcceptedResidual": 2.936957359313965,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 7,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 2688,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 19.064393997192383
+      }
+    },
+    {
+      "capture": "mini64-finedynamic-smoke",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": null,
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "native",
+      "atlasEdge": 32,
+      "atlasCounts": null,
+      "atlasMetadataBytes": null,
+      "sceneId": "minimal-power-dam-break-64",
+      "kind": "fine",
+      "frames": 9,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": null,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": false,
+      "lattice": {
+        "nx": 64,
+        "ny": 64,
+        "nz": 64,
+        "cellSize_m": 0.0125
+      },
+      "setup_ms": 2066.127041,
+      "fieldHashes": null,
+      "failure": "Uniform mixed frame 3: GPU failure record: pressure rejected a non-improving cycle (candidate 19044.76953125, accepted 16.2364559173584) at frame 3, layout generation 0; last accepted frame 2; projection withheld",
+      "validationErrors": null,
+      "summary": null,
+      "allocationBytes": 78582828,
+      "finalWork": {
+        "encodedSteps": 3,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 94208.07373046875,
+        "volumeDrift": 7.826348886065501e-07,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 0.9465031623840332,
+        "uniformMixedGeneration": 1,
+        "uniformMixedFineTiles": 4096,
+        "uniformMixedCoarseTiles": 0,
+        "uniformMixedOwners": 262144,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 0,
+        "uniformMixedDynamicChangedTiles": 0,
+        "uniformMixedDynamicInterfaceTiles": 422,
+        "uniformMixedDynamicBandTiles": 824,
+        "uniformMixedDynamicRefined": 0,
+        "uniformMixedDynamicCoarsened": 3272,
+        "uniformMixedDynamicRequiredTiles": 422,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 0,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          1,
+          0
+        ],
+        "uniformMixedDynamicAirVolume": [
+          0,
+          0
+        ],
+        "uniformPressureAcceptedResidual": 2.936957359313965,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 7,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 2688,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 19.064393997192383
+      }
+    },
+    {
+      "capture": "mini64-identity-smoke",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "table",
+      "atlasEdge": 32,
+      "atlasCounts": {
+        "modules": 38,
+        "fields": 170,
+        "uploads": 8,
+        "uploadBytes": 8488456,
+        "bindGroups": 186
+      },
+      "atlasMetadataBytes": 128,
+      "sceneId": "minimal-power-dam-break-64",
+      "kind": "adaptive",
+      "frames": 9,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": 8,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": false,
+      "lattice": {
+        "nx": 64,
+        "ny": 64,
+        "nz": 64,
+        "cellSize_m": 0.0125
+      },
+      "setup_ms": 155445.03999999998,
+      "fieldHashes": {
+        "volume": "b72cce93fd8e3c8e7c5e726b3470fd419c609458c8f9887aa0b28e4118830dae",
+        "velocity": "33c1219002818729195088e137afb661f4e9b2a6345345790f1e71af14490be1",
+        "phi": "c7c325929c226676252e5c9f2af62448fc31fc1c62ff54c1d3efc17866cf8755",
+        "tiles": "702ec2e0a45f96b820015c883b0c75b7d72c39536f9ce4525060c06df62e42a7"
+      },
+      "failure": null,
+      "validationErrors": [],
+      "summary": {
+        "wall_ms": {
+          "n": 1,
+          "mean": 24.59487500000978,
+          "median": 24.59487500000978,
+          "p10": 24.59487500000978,
+          "p90": 24.59487500000978
+        },
+        "gpu_ms": {
+          "n": 1,
+          "mean": 22.085632,
+          "median": 22.085632,
+          "p10": 22.085632,
+          "p90": 22.085632
+        },
+        "stages": [
+          {
+            "label": "Surface redistance",
+            "n": 1,
+            "mean": 3.145728,
+            "median": 3.145728,
+            "p10": 3.145728,
+            "p90": 3.145728
+          },
+          {
+            "label": "Fine pressure solve",
+            "n": 1,
+            "mean": 2.1626879999999997,
+            "median": 2.1626879999999997,
+            "p10": 2.1626879999999997,
+            "p90": 2.1626879999999997
+          },
+          {
+            "label": "Momentum transport",
+            "n": 1,
+            "mean": 2.0316160000000005,
+            "median": 2.0316160000000005,
+            "p10": 2.0316160000000005,
+            "p90": 2.0316160000000005
+          },
+          {
+            "label": "CM11a V-Cycles",
+            "n": 1,
+            "mean": 2.031616,
+            "median": 2.031616,
+            "p10": 2.031616,
+            "p90": 2.031616
+          },
+          {
+            "label": "Sharpening sweeps",
+            "n": 1,
+            "mean": 1.769472,
+            "median": 1.769472,
+            "p10": 1.769472,
+            "p90": 1.769472
+          },
+          {
+            "label": "Velocity extension / hierarchy",
+            "n": 1,
+            "mean": 1.4417920000000004,
+            "median": 1.4417920000000004,
+            "p10": 1.4417920000000004,
+            "p90": 1.4417920000000004
+          },
+          {
+            "label": "Volume transport",
+            "n": 1,
+            "mean": 1.441792,
+            "median": 1.441792,
+            "p10": 1.441792,
+            "p90": 1.441792
+          },
+          {
+            "label": "Global surface volume correction",
+            "n": 1,
+            "mean": 1.3107199999999999,
+            "median": 1.3107199999999999,
+            "p10": 1.3107199999999999,
+            "p90": 1.3107199999999999
+          },
+          {
+            "label": "Surface advect",
+            "n": 1,
+            "mean": 0.9830399999999999,
+            "median": 0.9830399999999999,
+            "p10": 0.9830399999999999,
+            "p90": 0.9830399999999999
+          },
+          {
+            "label": "Ownership remap and adoption",
+            "n": 1,
+            "mean": 0.7864320000000001,
+            "median": 0.7864320000000001,
+            "p10": 0.7864320000000001,
+            "p90": 0.7864320000000001
+          },
+          {
+            "label": "CM11a topology + RHS pyramid",
+            "n": 1,
+            "mean": 0.65536,
+            "median": 0.65536,
+            "p10": 0.65536,
+            "p90": 0.65536
+          },
+          {
+            "label": "Forces",
+            "n": 1,
+            "mean": 0.6553599999999999,
+            "median": 0.6553599999999999,
+            "p10": 0.6553599999999999,
+            "p90": 0.6553599999999999
+          },
+          {
+            "label": "Resolution classifier",
+            "n": 1,
+            "mean": 0.458752,
+            "median": 0.458752,
+            "p10": 0.458752,
+            "p90": 0.458752
+          },
+          {
+            "label": "Sharpening geometry",
+            "n": 1,
+            "mean": 0.3932159999999998,
+            "median": 0.3932159999999998,
+            "p10": 0.3932159999999998,
+            "p90": 0.3932159999999998
+          },
+          {
+            "label": "Simulation pressure phase",
+            "n": 1,
+            "mean": 0.32767999999999964,
+            "median": 0.32767999999999964,
+            "p10": 0.32767999999999964,
+            "p90": 0.32767999999999964
+          },
+          {
+            "label": "Resolve hanging phi",
+            "n": 1,
+            "mean": 0.3276799999999995,
+            "median": 0.3276799999999995,
+            "p10": 0.3276799999999995,
+            "p90": 0.3276799999999995
+          },
+          {
+            "label": "Support classification",
+            "n": 1,
+            "mean": 0.2621440000000006,
+            "median": 0.2621440000000006,
+            "p10": 0.2621440000000006,
+            "p90": 0.2621440000000006
+          },
+          {
+            "label": "Surface traceCells",
+            "n": 1,
+            "mean": 0.26214400000000015,
+            "median": 0.26214400000000015,
+            "p10": 0.26214400000000015,
+            "p90": 0.26214400000000015
+          },
+          {
+            "label": "Fine pressure preparation",
+            "n": 1,
+            "mean": 0.26214400000000004,
+            "median": 0.26214400000000004,
+            "p10": 0.26214400000000004,
+            "p90": 0.26214400000000004
+          },
+          {
+            "label": "Pressure projection",
+            "n": 1,
+            "mean": 0.2621439999999997,
+            "median": 0.2621439999999997,
+            "p10": 0.2621439999999997,
+            "p90": 0.2621439999999997
+          },
+          {
+            "label": "Transport reach certificate",
+            "n": 1,
+            "mean": 0.19660800000000012,
+            "median": 0.19660800000000012,
+            "p10": 0.19660800000000012,
+            "p90": 0.19660800000000012
+          },
+          {
+            "label": "Transfer to coarse pressure",
+            "n": 1,
+            "mean": 0.196608,
+            "median": 0.196608,
+            "p10": 0.196608,
+            "p90": 0.196608
+          },
+          {
+            "label": "Velocity cache",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Hanging velocity",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Volume cleanup",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Transfer to simulation",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Surface geometry",
+            "n": 1,
+            "mean": 0.13107199999999986,
+            "median": 0.13107199999999986,
+            "p10": 0.13107199999999986,
+            "p90": 0.13107199999999986
+          },
+          {
+            "label": "Ownership builder",
+            "n": 1,
+            "mean": 0.06553599999999998,
+            "median": 0.06553599999999998,
+            "p10": 0.06553599999999998,
+            "p90": 0.06553599999999998
+          }
+        ]
+      },
+      "allocationBytes": 78582828,
+      "finalWork": {
+        "encodedSteps": 9,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 94208.015625,
+        "volumeDrift": 1.6585639049599384e-07,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 2.5978591442108154,
+        "uniformMixedGeneration": 8,
+        "uniformMixedFineTiles": 902,
+        "uniformMixedCoarseTiles": 3194,
+        "uniformMixedOwners": 60922,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 7,
+        "uniformMixedDynamicChangedTiles": 167,
+        "uniformMixedDynamicInterfaceTiles": 459,
+        "uniformMixedDynamicBandTiles": 902,
+        "uniformMixedDynamicRefined": 139,
+        "uniformMixedDynamicCoarsened": 28,
+        "uniformMixedDynamicRequiredTiles": 459,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 0,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0.12401682138442993,
+          0.12912321090698242
+        ],
+        "uniformMixedDynamicAirVolume": [
+          1,
+          4.435768914845539e-06
+        ],
+        "uniformPressureAcceptedResidual": 0.08428504317998886,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 3,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 543,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 0.06989772617816925
+      }
+    },
+    {
+      "capture": "mini64-native-repeat",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "native",
+      "atlasEdge": 32,
+      "atlasCounts": null,
+      "atlasMetadataBytes": 0,
+      "sceneId": "minimal-power-dam-break-64",
+      "kind": "adaptive",
+      "frames": 9,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": 8,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": false,
+      "lattice": {
+        "nx": 64,
+        "ny": 64,
+        "nz": 64,
+        "cellSize_m": 0.0125
+      },
+      "setup_ms": 82411.48675000001,
+      "fieldHashes": {
+        "volume": "1fedff352a37d37dd16cf1eba045b03be5450dbb88a55648b6d62fce819278af",
+        "velocity": "1370db692f240247df09d44d550d7c498edbd4ce70cb165bfbd6be7fc39bb0d2",
+        "phi": "09dc60973db27ec6d62254d664b99335b53ad97323d56e53fdcab9a716441e12",
+        "tiles": "702ec2e0a45f96b820015c883b0c75b7d72c39536f9ce4525060c06df62e42a7"
+      },
+      "failure": null,
+      "validationErrors": [],
+      "summary": {
+        "wall_ms": {
+          "n": 1,
+          "mean": 18.7058749999851,
+          "median": 18.7058749999851,
+          "p10": 18.7058749999851,
+          "p90": 18.7058749999851
+        },
+        "gpu_ms": {
+          "n": 1,
+          "mean": 16.580607999999998,
+          "median": 16.580607999999998,
+          "p10": 16.580607999999998,
+          "p90": 16.580607999999998
+        },
+        "stages": [
+          {
+            "label": "Surface redistance",
+            "n": 1,
+            "mean": 2.228224,
+            "median": 2.228224,
+            "p10": 2.228224,
+            "p90": 2.228224
+          },
+          {
+            "label": "Fine pressure solve",
+            "n": 1,
+            "mean": 1.6384000000000003,
+            "median": 1.6384000000000003,
+            "p10": 1.6384000000000003,
+            "p90": 1.6384000000000003
+          },
+          {
+            "label": "Sharpening sweeps",
+            "n": 1,
+            "mean": 1.6383999999999999,
+            "median": 1.6383999999999999,
+            "p10": 1.6383999999999999,
+            "p90": 1.6383999999999999
+          },
+          {
+            "label": "CM11a V-Cycles",
+            "n": 1,
+            "mean": 1.3762560000000001,
+            "median": 1.3762560000000001,
+            "p10": 1.3762560000000001,
+            "p90": 1.3762560000000001
+          },
+          {
+            "label": "Volume transport",
+            "n": 1,
+            "mean": 1.376256,
+            "median": 1.376256,
+            "p10": 1.376256,
+            "p90": 1.376256
+          },
+          {
+            "label": "Global surface volume correction",
+            "n": 1,
+            "mean": 1.179648,
+            "median": 1.179648,
+            "p10": 1.179648,
+            "p90": 1.179648
+          },
+          {
+            "label": "Momentum transport",
+            "n": 1,
+            "mean": 1.0485759999999997,
+            "median": 1.0485759999999997,
+            "p10": 1.0485759999999997,
+            "p90": 1.0485759999999997
+          },
+          {
+            "label": "Velocity extension / hierarchy",
+            "n": 1,
+            "mean": 1.0485759999999997,
+            "median": 1.0485759999999997,
+            "p10": 1.0485759999999997,
+            "p90": 1.0485759999999997
+          },
+          {
+            "label": "Ownership remap and adoption",
+            "n": 1,
+            "mean": 0.720896,
+            "median": 0.720896,
+            "p10": 0.720896,
+            "p90": 0.720896
+          },
+          {
+            "label": "Surface advect",
+            "n": 1,
+            "mean": 0.45875200000000005,
+            "median": 0.45875200000000005,
+            "p10": 0.45875200000000005,
+            "p90": 0.45875200000000005
+          },
+          {
+            "label": "CM11a topology + RHS pyramid",
+            "n": 1,
+            "mean": 0.45875200000000005,
+            "median": 0.45875200000000005,
+            "p10": 0.45875200000000005,
+            "p90": 0.45875200000000005
+          },
+          {
+            "label": "Forces",
+            "n": 1,
+            "mean": 0.3932160000000007,
+            "median": 0.3932160000000007,
+            "p10": 0.3932160000000007,
+            "p90": 0.3932160000000007
+          },
+          {
+            "label": "Resolution classifier",
+            "n": 1,
+            "mean": 0.32768,
+            "median": 0.32768,
+            "p10": 0.32768,
+            "p90": 0.32768
+          },
+          {
+            "label": "Sharpening geometry",
+            "n": 1,
+            "mean": 0.32767999999999997,
+            "median": 0.32767999999999997,
+            "p10": 0.32767999999999997,
+            "p90": 0.32767999999999997
+          },
+          {
+            "label": "Simulation pressure phase",
+            "n": 1,
+            "mean": 0.32767999999999986,
+            "median": 0.32767999999999986,
+            "p10": 0.32767999999999986,
+            "p90": 0.32767999999999986
+          },
+          {
+            "label": "Pressure projection",
+            "n": 1,
+            "mean": 0.26214400000000015,
+            "median": 0.26214400000000015,
+            "p10": 0.26214400000000015,
+            "p90": 0.26214400000000015
+          },
+          {
+            "label": "Resolve hanging phi",
+            "n": 1,
+            "mean": 0.2621439999999995,
+            "median": 0.2621439999999995,
+            "p10": 0.2621439999999995,
+            "p90": 0.2621439999999995
+          },
+          {
+            "label": "Fine pressure preparation",
+            "n": 1,
+            "mean": 0.196608,
+            "median": 0.196608,
+            "p10": 0.196608,
+            "p90": 0.196608
+          },
+          {
+            "label": "Support classification",
+            "n": 1,
+            "mean": 0.19660799999999967,
+            "median": 0.19660799999999967,
+            "p10": 0.19660799999999967,
+            "p90": 0.19660799999999967
+          },
+          {
+            "label": "Surface geometry",
+            "n": 1,
+            "mean": 0.1310720000000003,
+            "median": 0.1310720000000003,
+            "p10": 0.1310720000000003,
+            "p90": 0.1310720000000003
+          },
+          {
+            "label": "Hanging velocity",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Surface traceCells",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Volume cleanup",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Ownership builder",
+            "n": 1,
+            "mean": 0.13107199999999997,
+            "median": 0.13107199999999997,
+            "p10": 0.13107199999999997,
+            "p90": 0.13107199999999997
+          },
+          {
+            "label": "Transfer to coarse pressure",
+            "n": 1,
+            "mean": 0.13107199999999997,
+            "median": 0.13107199999999997,
+            "p10": 0.13107199999999997,
+            "p90": 0.13107199999999997
+          },
+          {
+            "label": "Transport reach certificate",
+            "n": 1,
+            "mean": 0.13107199999999986,
+            "median": 0.13107199999999986,
+            "p10": 0.13107199999999986,
+            "p90": 0.13107199999999986
+          },
+          {
+            "label": "Solid record + liquid displacement",
+            "n": 1,
+            "mean": 0.06553600000000004,
+            "median": 0.06553600000000004,
+            "p10": 0.06553600000000004,
+            "p90": 0.06553600000000004
+          },
+          {
+            "label": "Velocity cache",
+            "n": 1,
+            "mean": 0.06553600000000004,
+            "median": 0.06553600000000004,
+            "p10": 0.06553600000000004,
+            "p90": 0.06553600000000004
+          },
+          {
+            "label": "Transfer to simulation",
+            "n": 1,
+            "mean": 0.06553599999999982,
+            "median": 0.06553599999999982,
+            "p10": 0.06553599999999982,
+            "p90": 0.06553599999999982
+          }
+        ]
+      },
+      "allocationBytes": 78582828,
+      "finalWork": {
+        "encodedSteps": 9,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 94207.96484375,
+        "volumeDrift": -3.731769187770973e-07,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 2.5978477001190186,
+        "uniformMixedGeneration": 8,
+        "uniformMixedFineTiles": 902,
+        "uniformMixedCoarseTiles": 3194,
+        "uniformMixedOwners": 60922,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 7,
+        "uniformMixedDynamicChangedTiles": 167,
+        "uniformMixedDynamicInterfaceTiles": 459,
+        "uniformMixedDynamicBandTiles": 902,
+        "uniformMixedDynamicRefined": 139,
+        "uniformMixedDynamicCoarsened": 28,
+        "uniformMixedDynamicRequiredTiles": 459,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 0,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0.12399190664291382,
+          0.12914687395095825
+        ],
+        "uniformMixedDynamicAirVolume": [
+          1,
+          4.427998192113591e-06
+        ],
+        "uniformPressureAcceptedResidual": 0.08405754715204239,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 3,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 543,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 0.0698518231511116
+      }
+    },
+    {
+      "capture": "mini64-native-smoke",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "native",
+      "atlasEdge": 32,
+      "atlasCounts": null,
+      "atlasMetadataBytes": 0,
+      "sceneId": "minimal-power-dam-break-64",
+      "kind": "adaptive",
+      "frames": 9,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": 8,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": false,
+      "lattice": {
+        "nx": 64,
+        "ny": 64,
+        "nz": 64,
+        "cellSize_m": 0.0125
+      },
+      "setup_ms": 98786.281042,
+      "fieldHashes": {
+        "volume": "1fedff352a37d37dd16cf1eba045b03be5450dbb88a55648b6d62fce819278af",
+        "velocity": "1370db692f240247df09d44d550d7c498edbd4ce70cb165bfbd6be7fc39bb0d2",
+        "phi": "09dc60973db27ec6d62254d664b99335b53ad97323d56e53fdcab9a716441e12",
+        "tiles": "702ec2e0a45f96b820015c883b0c75b7d72c39536f9ce4525060c06df62e42a7"
+      },
+      "failure": null,
+      "validationErrors": [],
+      "summary": {
+        "wall_ms": {
+          "n": 1,
+          "mean": 18.109166999987792,
+          "median": 18.109166999987792,
+          "p10": 18.109166999987792,
+          "p90": 18.109166999987792
+        },
+        "gpu_ms": {
+          "n": 1,
+          "mean": 15.990784,
+          "median": 15.990784,
+          "p10": 15.990784,
+          "p90": 15.990784
+        },
+        "stages": [
+          {
+            "label": "Fine pressure solve",
+            "n": 1,
+            "mean": 2.097152,
+            "median": 2.097152,
+            "p10": 2.097152,
+            "p90": 2.097152
+          },
+          {
+            "label": "CM11a V-Cycles",
+            "n": 1,
+            "mean": 1.769472,
+            "median": 1.769472,
+            "p10": 1.769472,
+            "p90": 1.769472
+          },
+          {
+            "label": "Surface redistance",
+            "n": 1,
+            "mean": 1.3762560000000001,
+            "median": 1.3762560000000001,
+            "p10": 1.3762560000000001,
+            "p90": 1.3762560000000001
+          },
+          {
+            "label": "Velocity extension / hierarchy",
+            "n": 1,
+            "mean": 1.3762559999999997,
+            "median": 1.3762559999999997,
+            "p10": 1.3762559999999997,
+            "p90": 1.3762559999999997
+          },
+          {
+            "label": "Sharpening sweeps",
+            "n": 1,
+            "mean": 1.1796479999999998,
+            "median": 1.1796479999999998,
+            "p10": 1.1796479999999998,
+            "p90": 1.1796479999999998
+          },
+          {
+            "label": "Momentum transport",
+            "n": 1,
+            "mean": 1.1796479999999998,
+            "median": 1.1796479999999998,
+            "p10": 1.1796479999999998,
+            "p90": 1.1796479999999998
+          },
+          {
+            "label": "Volume transport",
+            "n": 1,
+            "mean": 1.048576,
+            "median": 1.048576,
+            "p10": 1.048576,
+            "p90": 1.048576
+          },
+          {
+            "label": "Global surface volume correction",
+            "n": 1,
+            "mean": 0.9830400000000001,
+            "median": 0.9830400000000001,
+            "p10": 0.9830400000000001,
+            "p90": 0.9830400000000001
+          },
+          {
+            "label": "CM11a topology + RHS pyramid",
+            "n": 1,
+            "mean": 0.6553599999999999,
+            "median": 0.6553599999999999,
+            "p10": 0.6553599999999999,
+            "p90": 0.6553599999999999
+          },
+          {
+            "label": "Ownership remap and adoption",
+            "n": 1,
+            "mean": 0.5898239999999999,
+            "median": 0.5898239999999999,
+            "p10": 0.5898239999999999,
+            "p90": 0.5898239999999999
+          },
+          {
+            "label": "Forces",
+            "n": 1,
+            "mean": 0.5242880000000003,
+            "median": 0.5242880000000003,
+            "p10": 0.5242880000000003,
+            "p90": 0.5242880000000003
+          },
+          {
+            "label": "Surface advect",
+            "n": 1,
+            "mean": 0.5242880000000001,
+            "median": 0.5242880000000001,
+            "p10": 0.5242880000000001,
+            "p90": 0.5242880000000001
+          },
+          {
+            "label": "Simulation pressure phase",
+            "n": 1,
+            "mean": 0.2621440000000007,
+            "median": 0.2621440000000007,
+            "p10": 0.2621440000000007,
+            "p90": 0.2621440000000007
+          },
+          {
+            "label": "Resolution classifier",
+            "n": 1,
+            "mean": 0.26214400000000043,
+            "median": 0.26214400000000043,
+            "p10": 0.26214400000000043,
+            "p90": 0.26214400000000043
+          },
+          {
+            "label": "Sharpening geometry",
+            "n": 1,
+            "mean": 0.26214400000000015,
+            "median": 0.26214400000000015,
+            "p10": 0.26214400000000015,
+            "p90": 0.26214400000000015
+          },
+          {
+            "label": "Pressure projection",
+            "n": 1,
+            "mean": 0.26214400000000015,
+            "median": 0.26214400000000015,
+            "p10": 0.26214400000000015,
+            "p90": 0.26214400000000015
+          },
+          {
+            "label": "Fine pressure preparation",
+            "n": 1,
+            "mean": 0.26214400000000004,
+            "median": 0.26214400000000004,
+            "p10": 0.26214400000000004,
+            "p90": 0.26214400000000004
+          },
+          {
+            "label": "Support classification",
+            "n": 1,
+            "mean": 0.19660799999999956,
+            "median": 0.19660799999999956,
+            "p10": 0.19660799999999956,
+            "p90": 0.19660799999999956
+          },
+          {
+            "label": "Transport reach certificate",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Hanging velocity",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Surface traceCells",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Volume cleanup",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Transfer to simulation",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Surface geometry",
+            "n": 1,
+            "mean": 0.13107199999999986,
+            "median": 0.13107199999999986,
+            "p10": 0.13107199999999986,
+            "p90": 0.13107199999999986
+          },
+          {
+            "label": "Resolve hanging phi",
+            "n": 1,
+            "mean": 0.13107199999999963,
+            "median": 0.13107199999999963,
+            "p10": 0.13107199999999963,
+            "p90": 0.13107199999999963
+          },
+          {
+            "label": "Ownership builder",
+            "n": 1,
+            "mean": 0.06553600000000004,
+            "median": 0.06553600000000004,
+            "p10": 0.06553600000000004,
+            "p90": 0.06553600000000004
+          },
+          {
+            "label": "Solid record + liquid displacement",
+            "n": 1,
+            "mean": 0.06553600000000004,
+            "median": 0.06553600000000004,
+            "p10": 0.06553600000000004,
+            "p90": 0.06553600000000004
+          },
+          {
+            "label": "Transfer to coarse pressure",
+            "n": 1,
+            "mean": 0.06553599999999998,
+            "median": 0.06553599999999998,
+            "p10": 0.06553599999999998,
+            "p90": 0.06553599999999998
+          },
+          {
+            "label": "Velocity cache",
+            "n": 1,
+            "mean": 0.06553599999999982,
+            "median": 0.06553599999999982,
+            "p10": 0.06553599999999982,
+            "p90": 0.06553599999999982
+          }
+        ]
+      },
+      "allocationBytes": 78582828,
+      "finalWork": {
+        "encodedSteps": 9,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 94207.96484375,
+        "volumeDrift": -3.731769187770973e-07,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 2.5978477001190186,
+        "uniformMixedGeneration": 8,
+        "uniformMixedFineTiles": 902,
+        "uniformMixedCoarseTiles": 3194,
+        "uniformMixedOwners": 60922,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 7,
+        "uniformMixedDynamicChangedTiles": 167,
+        "uniformMixedDynamicInterfaceTiles": 459,
+        "uniformMixedDynamicBandTiles": 902,
+        "uniformMixedDynamicRefined": 139,
+        "uniformMixedDynamicCoarsened": 28,
+        "uniformMixedDynamicRequiredTiles": 459,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 0,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0.12399190664291382,
+          0.12914687395095825
+        ],
+        "uniformMixedDynamicAirVolume": [
+          1,
+          4.427998192113591e-06
+        ],
+        "uniformPressureAcceptedResidual": 0.08405754715204239,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 3,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 543,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 0.0698518231511116
+      }
+    },
+    {
+      "capture": "mini64-table-smoke",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "experimentFingerprintAfter": "b863bc79612ac98eff4fbde9ebd4b81dc793c78c0ddfb0ef3ef3c17a90e52425",
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "table",
+      "atlasEdge": 32,
+      "atlasCounts": {
+        "modules": 38,
+        "fields": 170,
+        "uploads": 8,
+        "uploadBytes": 8488456,
+        "bindGroups": 186
+      },
+      "atlasMetadataBytes": 128,
+      "sceneId": "minimal-power-dam-break-64",
+      "kind": "adaptive",
+      "frames": 9,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": 8,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": false,
+      "lattice": {
+        "nx": 64,
+        "ny": 64,
+        "nz": 64,
+        "cellSize_m": 0.0125
+      },
+      "setup_ms": 235797.425625,
+      "fieldHashes": {
+        "volume": "b72cce93fd8e3c8e7c5e726b3470fd419c609458c8f9887aa0b28e4118830dae",
+        "velocity": "33c1219002818729195088e137afb661f4e9b2a6345345790f1e71af14490be1",
+        "phi": "c7c325929c226676252e5c9f2af62448fc31fc1c62ff54c1d3efc17866cf8755",
+        "tiles": "702ec2e0a45f96b820015c883b0c75b7d72c39536f9ce4525060c06df62e42a7"
+      },
+      "failure": null,
+      "validationErrors": [],
+      "summary": {
+        "wall_ms": {
+          "n": 1,
+          "mean": 18.188374999997905,
+          "median": 18.188374999997905,
+          "p10": 18.188374999997905,
+          "p90": 18.188374999997905
+        },
+        "gpu_ms": {
+          "n": 1,
+          "mean": 16.121856,
+          "median": 16.121856,
+          "p10": 16.121856,
+          "p90": 16.121856
+        },
+        "stages": [
+          {
+            "label": "Surface redistance",
+            "n": 1,
+            "mean": 3.014656,
+            "median": 3.014656,
+            "p10": 3.014656,
+            "p90": 3.014656
+          },
+          {
+            "label": "Fine pressure solve",
+            "n": 1,
+            "mean": 1.441792,
+            "median": 1.441792,
+            "p10": 1.441792,
+            "p90": 1.441792
+          },
+          {
+            "label": "Momentum transport",
+            "n": 1,
+            "mean": 1.3762560000000001,
+            "median": 1.3762560000000001,
+            "p10": 1.3762560000000001,
+            "p90": 1.3762560000000001
+          },
+          {
+            "label": "CM11a V-Cycles",
+            "n": 1,
+            "mean": 1.3107199999999999,
+            "median": 1.3107199999999999,
+            "p10": 1.3107199999999999,
+            "p90": 1.3107199999999999
+          },
+          {
+            "label": "Volume transport",
+            "n": 1,
+            "mean": 1.179648,
+            "median": 1.179648,
+            "p10": 1.179648,
+            "p90": 1.179648
+          },
+          {
+            "label": "Velocity extension / hierarchy",
+            "n": 1,
+            "mean": 1.114112,
+            "median": 1.114112,
+            "p10": 1.114112,
+            "p90": 1.114112
+          },
+          {
+            "label": "Sharpening sweeps",
+            "n": 1,
+            "mean": 1.0485760000000002,
+            "median": 1.0485760000000002,
+            "p10": 1.0485760000000002,
+            "p90": 1.0485760000000002
+          },
+          {
+            "label": "Surface advect",
+            "n": 1,
+            "mean": 0.9830400000000001,
+            "median": 0.9830400000000001,
+            "p10": 0.9830400000000001,
+            "p90": 0.9830400000000001
+          },
+          {
+            "label": "Global surface volume correction",
+            "n": 1,
+            "mean": 0.9830399999999999,
+            "median": 0.9830399999999999,
+            "p10": 0.9830399999999999,
+            "p90": 0.9830399999999999
+          },
+          {
+            "label": "Ownership remap and adoption",
+            "n": 1,
+            "mean": 0.458752,
+            "median": 0.458752,
+            "p10": 0.458752,
+            "p90": 0.458752
+          },
+          {
+            "label": "CM11a topology + RHS pyramid",
+            "n": 1,
+            "mean": 0.458752,
+            "median": 0.458752,
+            "p10": 0.458752,
+            "p90": 0.458752
+          },
+          {
+            "label": "Forces",
+            "n": 1,
+            "mean": 0.3932159999999998,
+            "median": 0.3932159999999998,
+            "p10": 0.3932159999999998,
+            "p90": 0.3932159999999998
+          },
+          {
+            "label": "Support classification",
+            "n": 1,
+            "mean": 0.26214400000000015,
+            "median": 0.26214400000000015,
+            "p10": 0.26214400000000015,
+            "p90": 0.26214400000000015
+          },
+          {
+            "label": "Sharpening geometry",
+            "n": 1,
+            "mean": 0.26214400000000015,
+            "median": 0.26214400000000015,
+            "p10": 0.26214400000000015,
+            "p90": 0.26214400000000015
+          },
+          {
+            "label": "Resolution classifier",
+            "n": 1,
+            "mean": 0.262144,
+            "median": 0.262144,
+            "p10": 0.262144,
+            "p90": 0.262144
+          },
+          {
+            "label": "Surface traceCells",
+            "n": 1,
+            "mean": 0.19660800000000034,
+            "median": 0.19660800000000034,
+            "p10": 0.19660800000000034,
+            "p90": 0.19660800000000034
+          },
+          {
+            "label": "Transport reach certificate",
+            "n": 1,
+            "mean": 0.19660800000000012,
+            "median": 0.19660800000000012,
+            "p10": 0.19660800000000012,
+            "p90": 0.19660800000000012
+          },
+          {
+            "label": "Pressure projection",
+            "n": 1,
+            "mean": 0.1966079999999999,
+            "median": 0.1966079999999999,
+            "p10": 0.1966079999999999,
+            "p90": 0.1966079999999999
+          },
+          {
+            "label": "Resolve hanging phi",
+            "n": 1,
+            "mean": 0.19660799999999956,
+            "median": 0.19660799999999956,
+            "p10": 0.19660799999999956,
+            "p90": 0.19660799999999956
+          },
+          {
+            "label": "Fine pressure preparation",
+            "n": 1,
+            "mean": 0.13107200000000002,
+            "median": 0.13107200000000002,
+            "p10": 0.13107200000000002,
+            "p90": 0.13107200000000002
+          },
+          {
+            "label": "Transfer to coarse pressure",
+            "n": 1,
+            "mean": 0.13107200000000002,
+            "median": 0.13107200000000002,
+            "p10": 0.13107200000000002,
+            "p90": 0.13107200000000002
+          },
+          {
+            "label": "Simulation pressure phase",
+            "n": 1,
+            "mean": 0.1310719999999999,
+            "median": 0.1310719999999999,
+            "p10": 0.1310719999999999,
+            "p90": 0.1310719999999999
+          },
+          {
+            "label": "Transfer to simulation",
+            "n": 1,
+            "mean": 0.06553600000000026,
+            "median": 0.06553600000000026,
+            "p10": 0.06553600000000026,
+            "p90": 0.06553600000000026
+          },
+          {
+            "label": "Ownership builder",
+            "n": 1,
+            "mean": 0.06553600000000004,
+            "median": 0.06553600000000004,
+            "p10": 0.06553600000000004,
+            "p90": 0.06553600000000004
+          },
+          {
+            "label": "Velocity cache",
+            "n": 1,
+            "mean": 0.06553600000000004,
+            "median": 0.06553600000000004,
+            "p10": 0.06553600000000004,
+            "p90": 0.06553600000000004
+          },
+          {
+            "label": "Volume cleanup",
+            "n": 1,
+            "mean": 0.06553600000000004,
+            "median": 0.06553600000000004,
+            "p10": 0.06553600000000004,
+            "p90": 0.06553600000000004
+          },
+          {
+            "label": "Hanging velocity",
+            "n": 1,
+            "mean": 0.06553599999999982,
+            "median": 0.06553599999999982,
+            "p10": 0.06553599999999982,
+            "p90": 0.06553599999999982
+          },
+          {
+            "label": "Surface geometry",
+            "n": 1,
+            "mean": 0.06553599999999982,
+            "median": 0.06553599999999982,
+            "p10": 0.06553599999999982,
+            "p90": 0.06553599999999982
+          }
+        ]
+      },
+      "allocationBytes": 78582828,
+      "finalWork": {
+        "encodedSteps": 9,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 94208.015625,
+        "volumeDrift": 1.6585639049599384e-07,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 2.5978591442108154,
+        "uniformMixedGeneration": 8,
+        "uniformMixedFineTiles": 902,
+        "uniformMixedCoarseTiles": 3194,
+        "uniformMixedOwners": 60922,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 7,
+        "uniformMixedDynamicChangedTiles": 167,
+        "uniformMixedDynamicInterfaceTiles": 459,
+        "uniformMixedDynamicBandTiles": 902,
+        "uniformMixedDynamicRefined": 139,
+        "uniformMixedDynamicCoarsened": 28,
+        "uniformMixedDynamicRequiredTiles": 459,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 0,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0.12401682138442993,
+          0.12912321090698242
+        ],
+        "uniformMixedDynamicAirVolume": [
+          1,
+          4.435768914845539e-06
+        ],
+        "uniformPressureAcceptedResidual": 0.08428504317998886,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 3,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 543,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 0.06989772617816925
+      }
+    },
+    {
+      "capture": "smoke-affine",
+      "sourceFingerprint": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "sourceFingerprintAfter": "02476d2e883eda3bc66021e9ad1ae4216859a3cfa2bb78f53b5ff995049a5342",
+      "experimentFingerprintBefore": null,
+      "experimentFingerprintAfter": null,
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "apple-m1-max",
+        "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+      },
+      "atlasMode": "affine",
+      "atlasEdge": 32,
+      "atlasCounts": {
+        "modules": 38,
+        "fields": 170,
+        "uploads": 8,
+        "uploadBytes": 8488456,
+        "bindGroups": 0
+      },
+      "atlasMetadataBytes": 0,
+      "sceneId": "minimal-power-dam-break-64",
+      "kind": "adaptive",
+      "frames": 9,
+      "dt_s": 0.016666666666666666,
+      "warmup": 8,
+      "discardFrames": 8,
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "timeStep": "scene",
+        "pressureResidualTolerance": 5,
+        "extensionFrontSweeps": 2,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "sharpeningSweeps": 8,
+        "surfaceVolumeRounds": 2,
+        "volumeDustThreshold": 0.001,
+        "orphanDustThreshold": 0.01,
+        "phiCubicAdvection": "on",
+        "phiDrain": "on",
+        "phiPreserveSurface": "off",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on",
+        "coarsening": "dynamic",
+        "coarseningBoundaryTravel": 1
+      },
+      "throughput": false,
+      "lattice": {
+        "nx": 64,
+        "ny": 64,
+        "nz": 64,
+        "cellSize_m": 0.0125
+      },
+      "setup_ms": 237795.0005,
+      "fieldHashes": {
+        "volume": "b72cce93fd8e3c8e7c5e726b3470fd419c609458c8f9887aa0b28e4118830dae",
+        "velocity": "33c1219002818729195088e137afb661f4e9b2a6345345790f1e71af14490be1",
+        "phi": "c7c325929c226676252e5c9f2af62448fc31fc1c62ff54c1d3efc17866cf8755",
+        "tiles": "702ec2e0a45f96b820015c883b0c75b7d72c39536f9ce4525060c06df62e42a7"
+      },
+      "failure": null,
+      "validationErrors": [],
+      "summary": {
+        "wall_ms": {
+          "n": 1,
+          "mean": 15.617333000001963,
+          "median": 15.617333000001963,
+          "p10": 15.617333000001963,
+          "p90": 15.617333000001963
+        },
+        "gpu_ms": {
+          "n": 1,
+          "mean": 13.76256,
+          "median": 13.76256,
+          "p10": 13.76256,
+          "p90": 13.76256
+        },
+        "stages": [
+          {
+            "label": "Surface redistance",
+            "n": 1,
+            "mean": 1.769472,
+            "median": 1.769472,
+            "p10": 1.769472,
+            "p90": 1.769472
+          },
+          {
+            "label": "Fine pressure solve",
+            "n": 1,
+            "mean": 1.3762560000000001,
+            "median": 1.3762560000000001,
+            "p10": 1.3762560000000001,
+            "p90": 1.3762560000000001
+          },
+          {
+            "label": "CM11a V-Cycles",
+            "n": 1,
+            "mean": 1.376256,
+            "median": 1.376256,
+            "p10": 1.376256,
+            "p90": 1.376256
+          },
+          {
+            "label": "Momentum transport",
+            "n": 1,
+            "mean": 1.3107199999999999,
+            "median": 1.3107199999999999,
+            "p10": 1.3107199999999999,
+            "p90": 1.3107199999999999
+          },
+          {
+            "label": "Velocity extension / hierarchy",
+            "n": 1,
+            "mean": 1.1141120000000004,
+            "median": 1.1141120000000004,
+            "p10": 1.1141120000000004,
+            "p90": 1.1141120000000004
+          },
+          {
+            "label": "Sharpening sweeps",
+            "n": 1,
+            "mean": 1.0485760000000002,
+            "median": 1.0485760000000002,
+            "p10": 1.0485760000000002,
+            "p90": 1.0485760000000002
+          },
+          {
+            "label": "Volume transport",
+            "n": 1,
+            "mean": 0.917504,
+            "median": 0.917504,
+            "p10": 0.917504,
+            "p90": 0.917504
+          },
+          {
+            "label": "Global surface volume correction",
+            "n": 1,
+            "mean": 0.7208959999999999,
+            "median": 0.7208959999999999,
+            "p10": 0.7208959999999999,
+            "p90": 0.7208959999999999
+          },
+          {
+            "label": "Surface advect",
+            "n": 1,
+            "mean": 0.6553599999999999,
+            "median": 0.6553599999999999,
+            "p10": 0.6553599999999999,
+            "p90": 0.6553599999999999
+          },
+          {
+            "label": "Ownership remap and adoption",
+            "n": 1,
+            "mean": 0.458752,
+            "median": 0.458752,
+            "p10": 0.458752,
+            "p90": 0.458752
+          },
+          {
+            "label": "CM11a topology + RHS pyramid",
+            "n": 1,
+            "mean": 0.458752,
+            "median": 0.458752,
+            "p10": 0.458752,
+            "p90": 0.458752
+          },
+          {
+            "label": "Forces",
+            "n": 1,
+            "mean": 0.32767999999999997,
+            "median": 0.32767999999999997,
+            "p10": 0.32767999999999997,
+            "p90": 0.32767999999999997
+          },
+          {
+            "label": "Resolution classifier",
+            "n": 1,
+            "mean": 0.262144,
+            "median": 0.262144,
+            "p10": 0.262144,
+            "p90": 0.262144
+          },
+          {
+            "label": "Sharpening geometry",
+            "n": 1,
+            "mean": 0.26214399999999993,
+            "median": 0.26214399999999993,
+            "p10": 0.26214399999999993,
+            "p90": 0.26214399999999993
+          },
+          {
+            "label": "Support classification",
+            "n": 1,
+            "mean": 0.2621439999999996,
+            "median": 0.2621439999999996,
+            "p10": 0.2621439999999996,
+            "p90": 0.2621439999999996
+          },
+          {
+            "label": "Resolve hanging phi",
+            "n": 1,
+            "mean": 0.1966079999999999,
+            "median": 0.1966079999999999,
+            "p10": 0.1966079999999999,
+            "p90": 0.1966079999999999
+          },
+          {
+            "label": "Pressure projection",
+            "n": 1,
+            "mean": 0.1966079999999999,
+            "median": 0.1966079999999999,
+            "p10": 0.1966079999999999,
+            "p90": 0.1966079999999999
+          },
+          {
+            "label": "Hanging velocity",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Surface traceCells",
+            "n": 1,
+            "mean": 0.13107200000000008,
+            "median": 0.13107200000000008,
+            "p10": 0.13107200000000008,
+            "p90": 0.13107200000000008
+          },
+          {
+            "label": "Simulation pressure phase",
+            "n": 1,
+            "mean": 0.13107200000000002,
+            "median": 0.13107200000000002,
+            "p10": 0.13107200000000002,
+            "p90": 0.13107200000000002
+          },
+          {
+            "label": "Fine pressure preparation",
+            "n": 1,
+            "mean": 0.13107200000000002,
+            "median": 0.13107200000000002,
+            "p10": 0.13107200000000002,
+            "p90": 0.13107200000000002
+          },
+          {
+            "label": "Transport reach certificate",
+            "n": 1,
+            "mean": 0.13107199999999997,
+            "median": 0.13107199999999997,
+            "p10": 0.13107199999999997,
+            "p90": 0.13107199999999997
+          },
+          {
+            "label": "Transfer to simulation",
+            "n": 1,
+            "mean": 0.06553600000000026,
+            "median": 0.06553600000000026,
+            "p10": 0.06553600000000026,
+            "p90": 0.06553600000000026
+          },
+          {
+            "label": "Ownership builder",
+            "n": 1,
+            "mean": 0.06553600000000004,
+            "median": 0.06553600000000004,
+            "p10": 0.06553600000000004,
+            "p90": 0.06553600000000004
+          },
+          {
+            "label": "Velocity cache",
+            "n": 1,
+            "mean": 0.06553600000000004,
+            "median": 0.06553600000000004,
+            "p10": 0.06553600000000004,
+            "p90": 0.06553600000000004
+          },
+          {
+            "label": "Volume cleanup",
+            "n": 1,
+            "mean": 0.06553600000000004,
+            "median": 0.06553600000000004,
+            "p10": 0.06553600000000004,
+            "p90": 0.06553600000000004
+          },
+          {
+            "label": "Surface geometry",
+            "n": 1,
+            "mean": 0.06553600000000004,
+            "median": 0.06553600000000004,
+            "p10": 0.06553600000000004,
+            "p90": 0.06553600000000004
+          },
+          {
+            "label": "Transfer to coarse pressure",
+            "n": 1,
+            "mean": 0.06553599999999998,
+            "median": 0.06553599999999998,
+            "p10": 0.06553599999999998,
+            "p90": 0.06553599999999998
+          }
+        ]
+      },
+      "allocationBytes": 78582828,
+      "finalWork": {
+        "encodedSteps": 9,
+        "volumeControl": true,
+        "uniformPressureCycleBudget": "adaptive",
+        "volumeCellSum": 94208.015625,
+        "volumeDrift": 1.6585639049599384e-07,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 2.5978591442108154,
+        "uniformMixedGeneration": 8,
+        "uniformMixedFineTiles": 902,
+        "uniformMixedCoarseTiles": 3194,
+        "uniformMixedOwners": 60922,
+        "uniformMixedLayoutBuild_ms": 0,
+        "uniformMixedLayoutApply_ms": 0,
+        "uniformMixedRegularTiles": 0,
+        "uniformMixedGeneralTiles": 0,
+        "uniformMixedDynamicRelayouts": 7,
+        "uniformMixedDynamicChangedTiles": 167,
+        "uniformMixedDynamicInterfaceTiles": 459,
+        "uniformMixedDynamicBandTiles": 902,
+        "uniformMixedDynamicRefined": 139,
+        "uniformMixedDynamicCoarsened": 28,
+        "uniformMixedDynamicRequiredTiles": 459,
+        "uniformMixedDynamicBoundaryTiles": 0,
+        "uniformMixedDynamicSolidTiles": 0,
+        "uniformMixedDynamicUnresolvedCoarse": 0,
+        "uniformMixedDynamicCoarsePartialVolume": 0,
+        "uniformMixedDynamicCoarsePhiCrossing": 0,
+        "uniformMixedDynamicCoarseDryLiquidPhi": 0,
+        "uniformMixedDynamicInteriorDeficit": [
+          0.12401682138442993,
+          0.12912321090698242
+        ],
+        "uniformMixedDynamicAirVolume": [
+          1,
+          4.435768914845539e-06
+        ],
+        "uniformPressureAcceptedResidual": 0.08428504317998886,
+        "uniformPressureCyclesExecuted": 1,
+        "uniformPressureCyclesConverged": true,
+        "uniformPressureCyclesEncoded": 3,
+        "uniformPressureCyclesConfigured": 7,
+        "uniformPressureBandTiles": 543,
+        "uniformPressureBandCycles": 4,
+        "uniformPressureBandResidual": 0.06989772617816925
+      }
+    }
+  ]
+}

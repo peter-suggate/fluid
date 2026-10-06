@@ -1,3 +1,5 @@
+import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailStorage, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
@@ -17,24 +19,24 @@ export class UniformMixedMomentumCache {
   private pipeline?:GPUComputePipeline;
   private readonly resources:GPUBindGroupLayout;
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership){
-    this.resources=device.createBindGroupLayout({entries:[
+    this.resources=uniformDetailBindLayout(device,{entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},
     ]});
   }
-  bind(f:UniformMixedMomentumCacheFields):GPUBindGroup{
+  bind(f:UniformMixedMomentumCacheFields):UniformDetailGroup{
     const d=this.ownership.capacity.lattice.dimensions;
     for(const [i,t] of [f.extended,f.coarseExtended].entries())
-      if([t.width,t.height,t.depthOrArrayLayers].some((n,a)=>n!==(i===0?d[a]:d[a]!/4+2))||t.format!=="rgba32float")throw new Error("Mixed momentum cache requires native inputs and 4h halo outputs");
-    return this.device.createBindGroup({layout:this.resources,entries:[
-      {binding:0,resource:f.extended.createView()},
+      if(uniformDetailExtent(t).some((n,a)=>n!==(i===0?d[a]:d[a]!/4+2))||t.format!=="rgba32float")throw new Error("Mixed momentum cache requires native inputs and 4h halo outputs");
+    return uniformDetailGroup(this.device,{layout:this.resources,entries:[
+      {binding:0,resource:f.extended},
       {binding:1,resource:{buffer:f.negative}},
-      {binding:2,resource:f.coarseExtended.createView()},
+      {binding:2,resource:f.coarseExtended},
     ]});
   }
   async initialize():Promise<void>{
-    const module=this.device.createShaderModule({code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+    const module=uniformDetailModule(this.device,{label:"Uniform mixed momentum cache",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var extended:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read> negative:array<f32>;
 @group(1) @binding(2) var coarseExtended:texture_storage_3d<rgba32float,write>;
@@ -53,6 +55,8 @@ fn umCacheExtended(anchor:vec3i,axis:u32)->f32 {
   var owner=umOwnerAt(anchor);var sign=1;
   if(owner.width==0u){var next=anchor;next[axis]+=1;owner=umOwnerAt(next);sign=-1;}
   let width=umFace(owner,axis,sign,0u).width;let side=4u/width;var value=0.0;
+  // A whole 4h face is its tile's +face anchor: the base block.
+  if(width==4u&&anchor[axis]>=0){e[axis]=${UNIFORM_DETAIL_4H_LOAD}textureLoad(extended,anchor,0)[axis];continue;}
   for(var y=0u;y<side;y++){for(var x=0u;x<side;x++){
    var q=anchor;q[u]+=i32(x*width);q[v]+=i32(y*width);value+=umCacheExtended(q,axis);
   }}e[axis]=value/f32(side*side);
@@ -60,11 +64,11 @@ fn umCacheExtended(anchor:vec3i,axis:u32)->f32 {
  textureStore(coarseExtended,vec3i(gid),e);
 }`});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    this.pipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]}),compute:{module,entryPoint:"cache"}});
+    this.pipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]}),compute:{module,entryPoint:"cache"}});
   }
-  encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
+  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
     if(!this.pipeline)throw new Error("Mixed momentum cache is not initialized");
-    const pass=encoder.beginComputePass({label:"Uniform mixed 4h sampling cache"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
+    const pass=encoder.beginComputePass({label:"Uniform mixed 4h sampling cache"});pass.setPipeline(uniformDetailPick(this.pipeline));pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);
     pass.dispatchWorkgroups(...this.ownership.capacity.lattice.dimensions.map(n=>Math.ceil((n/4+2)/4)) as [number,number,number]);pass.end();
   }
 }
@@ -91,24 +95,29 @@ export class UniformMixedHangingTaps {
   readonly unitVelocity:GPUTexture;
   private pipeline?:GPUComputePipeline;
   private readonly resources:GPUBindGroupLayout;
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership){
-    this.resources=device.createBindGroupLayout({entries:[
+  /** detail: the solver's detail storage. The taps are read atlas-only (no
+   * tile outside resident patches is ever a hanging tap), but the texture is
+   * face-class: the remap borrows it as the census extension's face scratch. */
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,detail?:UniformDetailStorage){
+    this.resources=uniformDetailBindLayout(device,{entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:3,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},
     ]});
     const [x,y,z]=ownership.capacity.lattice.dimensions;
-    this.unitVelocity=device.createTexture({label:"Uniform mixed unit velocity taps",size:[x!,y!,z!],dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING});
-    this.allocatedBytes=16*x!*y!*z!;
+    const label="Uniform mixed unit velocity taps";
+    this.unitVelocity=detail?detail.createField(label,"atlas","rgba32float"):device.createTexture({label,size:[x!,y!,z!],dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING});
+    // A detail field's bytes are its storage's.
+    const t=this.unitVelocity;this.allocatedBytes=detail?0:16*t.width*t.height*t.depthOrArrayLayers;
   }
-  bind(f:UniformMixedHangingTapFields):GPUBindGroup{
+  bind(f:UniformMixedHangingTapFields):UniformDetailGroup{
     const d=this.ownership.capacity.lattice.dimensions;
     for(const [i,t] of [f.extended,f.coarse].entries())
-      if([t.width,t.height,t.depthOrArrayLayers].some((n,a)=>n!==(i===0?d[a]:d[a]!/4+2))||t.format!=="rgba32float")throw new Error("Hanging taps require native velocity and the 4h sampling cache");
-    return this.device.createBindGroup({layout:this.resources,entries:[
-      {binding:0,resource:f.extended.createView()},{binding:1,resource:{buffer:f.negative}},{binding:2,resource:f.coarse.createView()},
-      {binding:3,resource:this.unitVelocity.createView()},
+      if(uniformDetailExtent(t).some((n,a)=>n!==(i===0?d[a]:d[a]!/4+2))||t.format!=="rgba32float")throw new Error("Hanging taps require native velocity and the 4h sampling cache");
+    return uniformDetailGroup(this.device,{layout:this.resources,entries:[
+      {binding:0,resource:f.extended},{binding:1,resource:{buffer:f.negative}},{binding:2,resource:f.coarse},
+      {binding:3,resource:this.unitVelocity},
     ]});
   }
   async initialize():Promise<void>{
@@ -148,7 +157,7 @@ fn umHangingFill(slot:u32,tile:u32,lane:u32){
 // Seam 4h slots follow the seam h slots (the builder's and update()'s order);
 // slots past the cache are never visited (the builder flags UM_OVERFLOW_HANGING).
 fn umUnitJobs()->u32{return (umCounts.x+3u)/4u;}
-fn umCoarseSlots()->vec2u{let header=7u*UM_TILES+16u;let fine=umSupport[header];return vec2u(min(fine,UM_HANGING_SLOTS),min(fine+umSupport[header+1u],UM_HANGING_SLOTS));}
+fn umCoarseSlots()->vec2u{let header=7u*UM_TILES+16u;let fine=umSupport[header];let most=umHangingSlots();return vec2u(min(fine,most),min(fine+umSupport[header+1u],most));}
 @compute @workgroup_size(256) fn unitVelocityTaps(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let units=umUnitJobs();
  if(group.x<units){
@@ -162,17 +171,17 @@ fn umCoarseSlots()->vec2u{let header=7u*UM_TILES+16u;let fine=umSupport[header];
  }
 }`,["unitVelocityTaps"],"umUnitJobs()+umCoarseSlots().y-umCoarseSlots().x");
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.ownership.hangingLayout]});
-    const module=this.device.createShaderModule({code});
+    const module=uniformDetailModule(this.device,{label:"Uniform mixed hanging taps",code});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    this.pipeline=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"unitVelocityTaps",constants:{umDispatchX:this.ownership.dispatchX}}});
+    this.pipeline=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"unitVelocityTaps",constants:{umDispatchX:this.ownership.dispatchX}}});
   }
-  encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
+  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
     if(!this.pipeline)throw new Error("Mixed hanging taps are not initialized");
     // A fixed grid from capacity; the GPU counts the h tiles (forces
     // viscosity reads every unit tile's texels, so they are refreshed even
     // without a slot) and the seam 4h slots. At most one job per tile.
-    const pass=encoder.beginComputePass({label:"Uniform mixed hanging fine taps"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);pass.setBindGroup(2,this.ownership.hangingGroup);
-    this.ownership.dispatchCounted(pass,this.pipeline);
+    const pass=encoder.beginComputePass({label:"Uniform mixed hanging fine taps"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,this.ownership.hangingGroup);
+    this.ownership.dispatchCounted(pass,this.pipeline,this.ownership.capacity.tiles,"fineAndSeams");
     pass.end();
   }
   destroy():void{this.unitVelocity.destroy();}

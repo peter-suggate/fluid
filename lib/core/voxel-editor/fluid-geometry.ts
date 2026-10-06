@@ -5,10 +5,10 @@ import type { LiveFluidEdit } from "../live-fluid-edit";
 import { sceneCellSizes_m } from "../scene-lattice";
 import type { ToolContext, ToolControl, ToolGesture, ToolUpdate, ToolValues } from "./plugin";
 
-export const fluidSizeControl: ToolControl = { id: "size", presentation: "primary", label: "Diameter · voxels", min: 2, max: 24, step: 1, initial: 6 };
-export const fluidHeightControl: ToolControl = { id: "height", presentation: "primary", label: "Height above floor · voxels", min: 0, max: 128, step: 1, initial: 2 };
-export const fluidRemoveControl: ToolControl = { id: "remove", kind: "toggle", presentation: "primary", label: "Remove water", min: 0, max: 1, step: 1, initial: 0 };
-export const fluidTubeControl: ToolControl = { id: "thickness", presentation: "primary", label: "Tube thickness · voxels", min: 1, max: 10, step: 1, initial: 2 };
+export const fluidSizeControl: ToolControl = { id: "size", label: "Diameter · voxels", short: "Ø", adjust: "primary", min: 2, max: 24, step: 1, initial: 6 };
+export const fluidHeightControl: ToolControl = { id: "height", label: "Height above floor · voxels", short: "H", adjust: "secondary", min: 0, max: 128, step: 1, initial: 2 };
+export const fluidRemoveControl: ToolControl = { id: "remove", kind: "toggle", label: "Remove water", short: "Remove", shortcut: "x", min: 0, max: 1, step: 1, initial: 0 };
+export const fluidTubeControl: ToolControl = { id: "thickness", label: "Tube thickness · voxels", short: "T", min: 1, max: 10, step: 1, initial: 2 };
 
 /** Start above the initial pool when there is room, while keeping the entire drop in the tank. */
 export function fluidToolDefaults(scene: SceneDescription, values: ToolValues, shape: LiveFluidEdit["shape"]): ToolValues {
@@ -94,11 +94,15 @@ export function beginFluidShapeGesture(context: ToolContext, shape: LiveFluidEdi
     const snap = (value: number) => Math.round(value / voxel) * voxel;
     return { x: snap(ray.origin.x + t * ray.direction.x), y: centerY, z: snap(ray.origin.z + t * ray.direction.z) };
   };
-  if (!project(context.ray)) return undefined;
-  return { update(ray): ToolUpdate | undefined {
+  const first = project(context.ray);
+  if (!first) return undefined;
+  // A press beside the tank has no water to meet: it is the room, and the room is the camera's.
+  const inside = Math.abs(first.x) <= scene.container.width_m / 2 && Math.abs(first.z) <= scene.container.depth_m / 2;
+  return { surface: inside, update(ray): ToolUpdate | undefined {
     const center = project(ray);
     if (!center) return undefined;
-    const edit: LiveFluidEdit = { operation: values.remove === 1 ? "remove" : "add", shape,
+    // The opposite modifier means here what it means on a solid: take away instead of add.
+    const edit: LiveFluidEdit = { operation: (values.remove === 1) !== (context.invert === true) ? "remove" : "add", shape,
       center_m: center, radius_m: radius, ...(shape === "torus" ? { tubeRadius_m: tube } : {}) };
     const bounds = fluidShapeBounds(edit);
     const epsilon = voxel * 1e-6;

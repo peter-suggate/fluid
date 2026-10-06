@@ -1,53 +1,62 @@
-/** Shared f32 scratch backing. Extension, conservative transport and pressure
- * execute in that order; none of their temporary fields survives its stage.
- * Persistent/published textures remain ordinary textures. */
+/** Shared f32 backing of the pressure solve: the mixed pressure root, then
+ * the native CM11a levels the mixed continuation solves on. Both are fixed
+ * by the lattice. Persistent/published textures remain ordinary textures.
+ *
+ * The scratch the non-pressure stages overlap follows the h-tile capacity
+ * and is the mixed frame's own buffer (UniformMixedFrame.stageBytesAt). */
 import { uniformAbOn } from "./uniform-ab-switch";
 import { planUniformCM11aHierarchy } from "./pressure-plan";
 import { rewritePressureTextureCalls } from "./uniform-pressure-pages";
 
+/** The native level the mixed continuation starts from (n/4): the levels
+ * above it are never dispatched. */
+export const UNIFORM_MIXED_CONTINUATION_LEVEL = 2;
 /** Allocation-free layout; different resolutions can share backing when their
  * stages are serialized. No field in this layout is persistent simulation state. */
 export class UniformScratchLayout {
   readonly byteLength: number;
-  readonly donorOffset: number;
+  /** The mixed pressure root's range (planUniformMixedPressureMemory). */
+  readonly rootOffset: number;
+  readonly rootBytes: number;
   readonly edgeBytes: number;
   readonly sharpenBaseWords: number;
   readonly conditioningBytes: number;
   private readonly offsets = new Map<string, number>();
-  constructor(readonly dims: readonly [number,number,number], edgeBytes: number, retainDiagnostics=false) {
+  constructor(readonly dims: readonly [number,number,number], edgeBytes: number, retainDiagnostics=false, rootBytes=0) {
     if (!dims.every(d => Number.isSafeInteger(d) && d > 0))
       throw new RangeError("Uniform scratch dimensions must be positive safe integers");
     if (!Number.isSafeInteger(edgeBytes) || edgeBytes < 0 || edgeBytes % 4 !== 0)
       throw new RangeError("Uniform scratch edge bytes must be a nonnegative multiple of four");
     const tiles=dims.reduce((n,d)=>n*Math.ceil(d/4),1);
     this.sharpenBaseWords=Math.ceil((6*tiles+3)/4)*4;
-    // Solid displacement scatters one deposit per cell before tile classes
-    // are seeded. Reserve that full range even for scenes initially without
-    // bodies: live insertion can activate it on any advance. The later tile
-    // stages reuse this prefix; balance/page records must remain beyond it.
-    const solidDepositBytes=dims.reduce((n,d)=>n*d,1)*4;
-    this.conditioningBytes=Math.max(solidDepositBytes,Math.ceil((this.sharpenBaseWords+8+tiles)/4)*16);
+    // The tile stages' prefix; balance/page records remain beyond it. No
+    // per-cell plane: Geometric advances only through the mixed frame, whose
+    // pressure phi and solid deposits are its own owner-capacity buffers.
+    this.conditioningBytes=Math.ceil((this.sharpenBaseWords+8+tiles)/4)*16;
     const words = dims.reduce((n,d) => n*(d+2),1)*4;
     ["FIM values A","FIM values B","FIM distances A","FIM distances B"].forEach((name,i) =>
       this.offsets.set(`Uniform Sec. 3.3 ${name}`,i*words));
     // Resolve reads and writes only its own cell. With buffer storage the
     // canonical resolved values can safely overwrite the A input in place.
     this.offsets.set("Uniform Sec. 3.3 resolved FIM values",0);
-    const fineCells=Math.ceil(dims.reduce((n,d)=>n*(d+2),1)/4)*4;
-    // Finest V is dead after coefficient baking. The four solver scalars
-    // below are first written by cycles, after that bake. Raw/continued phi
-    // are also dead at this level, so they become backup/accepted pressure.
-    const finest:Record<string,number>={"V A":0,"pressure B":0,"rhs B":fineCells,
-      "residual A":2*fineCells,"p-min B":3*fineCells,"phi A":4*fineCells,
-      "phi B":5*fineCells,"rhs A":6*fineCells,"p-min A":7*fineCells,"coefficients":8*fineCells};
-    for(const [name,offset] of Object.entries(finest))this.offsets.set(`Uniform CM11a L0 ${name}`,offset);
-    this.offsets.set("Uniform CM11a Full-Cycle p_tmp",4*fineCells);
-    this.offsets.set("Uniform CM11a accepted pressure",5*fineCells);
-    let pressureWords=12*fineCells;
+    if (!Number.isSafeInteger(rootBytes) || rootBytes < 0)
+      throw new RangeError("Uniform scratch root bytes must be a nonnegative safe integer");
+    // The dense receiver-stencil bytes of the lattice: reported, not allocated.
+    this.edgeBytes=edgeBytes;
+    this.rootOffset=0;this.rootBytes=Math.ceil(rootBytes/256)*256;
+    // The mixed continuation never dispatches the two finest native levels:
+    // their fields keep an offset only so they allocate as 1^3 placeholders
+    // (UniformTexturePages.createTexture), and occupy no extent.
+    for(const name of ["V A","pressure B","rhs B","residual A","p-min B","phi A","phi B","rhs A","p-min A","coefficients"])
+      this.offsets.set(`Uniform CM11a L0 ${name}`,0);
+    this.offsets.set("Uniform CM11a Full-Cycle p_tmp",0);
+    this.offsets.set("Uniform CM11a accepted pressure",0);
+    let pressureWords=(this.rootOffset+this.rootBytes)/4;
     planUniformCM11aHierarchy(dims).levelDimensions.slice(1).forEach((d,index)=>{
-      const cells=d.reduce((n,x)=>n*(x+2),1);
+      const cells=d.reduce((n,x)=>n*(x+2),1),live=index+1>=UNIFORM_MIXED_CONTINUATION_LEVEL;
       for(const [name,count] of Object.entries({"pressure A":1,"pressure B":1,"rhs A":1,"rhs B":1,
         "phi A":1,"phi B":1,"V A":4,"residual A":1,"p-min A":1,"p-min B":1,"coefficients":4})){
+        if(!live){this.offsets.set(`Uniform CM11a L${index+1} ${name}`,0);continue;}
         pressureWords=Math.ceil(pressureWords/4)*4;
         this.offsets.set(`Uniform CM11a L${index+1} ${name}`,pressureWords);pressureWords+=cells*count;
       }
@@ -58,12 +67,7 @@ export class UniformScratchLayout {
     this.offsets.set("Uniform Sec. 3.3 resolved FIM distances",2*words);
     this.offsets.set("Total surface volume corrected phi",0);
     if(retainDiagnostics)this.offsets.delete("Uniform Sec. 3.3 resolved FIM distances");
-    this.edgeBytes=edgeBytes;
-    this.donorOffset=Math.ceil(edgeBytes/256)*256;
-    // Past the edges: mixed transport's rigid exchange (12 B) and sums (4 B)
-    // per cell. Every other stage view lies below max(edges, pressure) and
-    // checks its own extent when it binds.
-    this.byteLength=Math.max(pressureWords*4,this.donorOffset+dims.reduce((n,d)=>n*d,1)*16);
+    this.byteLength=pressureWords*4;
     if (!Number.isSafeInteger(this.byteLength))
       throw new RangeError("Uniform scratch layout exceeds safe integer addressing");
   }
@@ -77,13 +81,13 @@ export class UniformScratchArena extends UniformScratchLayout {
   readonly buffer: GPUBuffer;
   private readonly ownsBuffer: boolean;
   constructor(device: GPUDevice, dims: readonly [number,number,number], edgeBytes: number,
-    retainDiagnostics=false, backing?: GPUBuffer) {
-    super(dims, edgeBytes, retainDiagnostics);
+    retainDiagnostics=false, backing?: GPUBuffer, rootBytes=0) {
+    super(dims, edgeBytes, retainDiagnostics, rootBytes);
     const usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST;
     if (backing && (backing.size < this.byteLength || (backing.usage & usage) !== usage))
       throw new RangeError("Shared uniform scratch backing has insufficient capacity or usage");
     this.ownsBuffer=backing===undefined;
-    this.buffer=backing ?? device.createBuffer({label:"Uniform shared stage scratch",size:this.byteLength,usage});
+    this.buffer=backing ?? device.createBuffer({label:"Uniform shared pressure scratch",size:this.byteLength,usage});
   }
   destroy():void{if(this.ownsBuffer)this.buffer.destroy();}
 }

@@ -5,6 +5,7 @@ import { parameterVariantFeature, parameterVariantSelections } from "../../core/
 import { uniformMethod } from "./method";
 import { WebGPUUniformReferenceSolver } from "./webgpu-uniform-reference";
 import type { SimulationMethod, MethodParamValues } from "../../core/method-contract";
+import { migrateUniformDetailOverrides, UNIFORM_DETAIL_APP_DEFAULT_POLICY, UNIFORM_DETAIL_APP_IMPORTANCE } from "./uniform-detail-policy";
 
 const point = "simulation.uniform-volume.algorithms";
 const choices = params.filter(p => p.kind === "select");
@@ -22,14 +23,18 @@ export const uniformVolumeMethod: SimulationMethod = {
   shortLabel: "Uniform Geometric",
   badge: "UNIFORM GEOMETRIC",
   supportedFieldModes: [...uniformMethod.supportedFieldModes!.filter(mode=>mode!=="solve-window"), "volume-levelset", "fine-tiles"],
-  description: "Vertex level set and conservative liquid volume with live resolution regions.",
-  detail: "One coupled simulation uses fine cells outside manual coarse regions, with direct h/4h interfaces and conservative live remapping.",
+  description: "Vertex level set and conservative liquid volume with live simulation detail.",
+  detail: "One coupled simulation on a 4h base: Requested detail runs h inside drawn Fine regions and at solid contact, Dynamic follows the surface, Full runs h everywhere; direct h/4h interfaces and conservative live remapping.",
   resource: { ...uniformMethod.resource!, id: "fluid.uniform-volume", label: "Uniform Geometric fluid" },
   params,
   // One 1/60 s advance per 60 Hz frame: presentations follow the solver
   // one-to-one, and the paper's 1/30 s step capped them at 30 FPS.
-  appDefaults: { timeStep: "sixtieth" },
+  // The app opens on Requested detail (4h base, Fine regions in h); lanes
+  // and tools resolve the declared default (Dynamic, the GPU census, every
+  // surface tile at h). Dynamic in the app allows a smooth surface at 4h.
+  appDefaults: { timeStep: "sixtieth", detailPolicy: UNIFORM_DETAIL_APP_DEFAULT_POLICY, ...UNIFORM_DETAIL_APP_IMPORTANCE },
   normalizeValues: resolveUniformGeometricValues,
+  migrateOverrides: migrateUniformDetailOverrides,
   composition: resolveComposition(),
   resolveComposition,
   // The uniform solver has no sparse world; the scene is drawn from the

@@ -1,0 +1,2834 @@
+{
+  "paired-batched-transport": {
+    "sceneId": "high-resolution-dam-break",
+    "policy": "requested",
+    "reference": "transport",
+    "blocks": 12,
+    "steps": 30,
+    "warmup": 16,
+    "dt_s": 0.016666666666666666,
+    "scope": "Paired simulation-only wall throughput on one device, two frames in flight; matched blocks alternate order. No timestamps, rendering or field reads inside timing.",
+    "adapter": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+    },
+    "values": {
+      "densitySharpening": "on",
+      "rigidCoupling": "on",
+      "timeStep": "scene",
+      "pressureResidualTolerance": 5,
+      "extensionFrontSweeps": 2,
+      "sharpeningDistance": 2.1,
+      "pressureFullCycles": 3,
+      "pressureVCycles": 4,
+      "pressureSweeps": 6,
+      "sharpeningSweeps": 8,
+      "surfaceVolumeRounds": 2,
+      "volumeDustThreshold": 0.001,
+      "orphanDustThreshold": 0.01,
+      "phiCubicAdvection": "on",
+      "phiDrain": "on",
+      "phiPreserveSurface": "off",
+      "totalSurfaceVolume": "on",
+      "surfaceDeficitBalancing": "on",
+      "detailPolicy": "requested",
+      "detailNearFocus": "off",
+      "detailActivity": "on",
+      "detailBudgetPercent": 100,
+      "detailFocusRadiusPercent": 20,
+      "detailSensitivity": 0.5,
+      "detailShape": "on",
+      "detailShapeTolerance": 0,
+      "detailThin": "off",
+      "detailThinThickness": 4,
+      "detailStrain": "off",
+      "detailStrainThreshold": 0.1,
+      "detailRotation": "off",
+      "detailRotationThreshold": 0.1,
+      "detailImpact": "on",
+      "detailImpactTravel": 1,
+      "detailApproach": "off",
+      "detailApproachSteps": 2,
+      "detailBulk": "off",
+      "detailMarginTiles": 0,
+      "detailHoldSteps": 0
+    },
+    "summary": {
+      "referenceMs": 7.51078796111057,
+      "candidateMs": 7.2737004666665195,
+      "reductionPercent": 3.1566261179472033,
+      "pairedReductionPercent": [
+        3.8995314264036574,
+        20.088869871032944,
+        2.908971480073741,
+        3.279576595487821,
+        3.650592245423756,
+        3.6035538971944225,
+        3.737394346014733,
+        4.647035124718569,
+        3.0165740399422103,
+        -25.410795272592644,
+        3.4341415963611177,
+        2.8474893663147482
+      ],
+      "medianPairedReductionPercent": 3.5188477467777703,
+      "candidateFasterBlocks": 11
+    },
+    "rows": [
+      {
+        "block": 0,
+        "first": 17,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          8.039284700000037,
+          7.7257902666654745
+        ]
+      },
+      {
+        "block": 1,
+        "first": 47,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          10.300963899999624,
+          8.23161666666662
+        ]
+      },
+      {
+        "block": 2,
+        "first": 77,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          7.727577766667431,
+          7.502784733334556
+        ]
+      },
+      {
+        "block": 3,
+        "first": 107,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          7.618404166666248,
+          7.368552766666593
+        ]
+      },
+      {
+        "block": 4,
+        "first": 137,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          7.367069466666241,
+          7.098127800001142
+        ]
+      },
+      {
+        "block": 5,
+        "first": 167,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          7.080009733332554,
+          6.824877766665304
+        ]
+      },
+      {
+        "block": 6,
+        "first": 197,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          6.97593053333306,
+          6.715212499998355
+        ]
+      },
+      {
+        "block": 7,
+        "first": 227,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          7.055454166666217,
+          6.727584733332818
+        ]
+      },
+      {
+        "block": 8,
+        "first": 257,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          7.076781933331707,
+          6.863305566667502
+        ]
+      },
+      {
+        "block": 9,
+        "first": 287,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          6.987215266665832,
+          8.762722233333625
+        ]
+      },
+      {
+        "block": 10,
+        "first": 317,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          7.0076541666659375,
+          6.767001399999329
+        ]
+      },
+      {
+        "block": 11,
+        "first": 347,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          6.893109733331949,
+          6.696829166666915
+        ]
+      }
+    ],
+    "fieldsExact": true,
+    "fieldHashes": [
+      {
+        "volume": "37ab195a74a223409cfeec97b6443715292b256c4bff2a8fd227dcb0eddfdd48",
+        "velocity": "e123ec6dbebcc4e8792cc4c087ae9a4f82fcc7e22df642fcf4c31997447c4601",
+        "phi": "3d2acdcdef219d2ec762ceb2029a4f5667a98bb3cafd721ddbe91a629d24ca7d"
+      },
+      {
+        "volume": "37ab195a74a223409cfeec97b6443715292b256c4bff2a8fd227dcb0eddfdd48",
+        "velocity": "e123ec6dbebcc4e8792cc4c087ae9a4f82fcc7e22df642fcf4c31997447c4601",
+        "phi": "3d2acdcdef219d2ec762ceb2029a4f5667a98bb3cafd721ddbe91a629d24ca7d"
+      }
+    ],
+    "launchBudgets": [
+      {
+        "ownership": {
+          "fine": 1,
+          "coarse": 32768,
+          "all": 640,
+          "regularCoarse": 640,
+          "fused": 1,
+          "hanging": 1,
+          "merged": 640,
+          "coarseMerged": 640,
+          "sharpen": 214,
+          "fineAndSeams": 1,
+          "seamFine": 1,
+          "seamCoarse": 1
+        },
+        "bandSlots": 1,
+        "sharpenGroups": 33
+      },
+      {
+        "ownership": {
+          "fine": 1,
+          "coarse": 32768,
+          "all": 640,
+          "regularCoarse": 640,
+          "fused": 1,
+          "hanging": 1,
+          "merged": 640,
+          "coarseMerged": 640,
+          "sharpen": 214,
+          "fineAndSeams": 1,
+          "seamFine": 1,
+          "seamCoarse": 1
+        },
+        "bandSlots": 1,
+        "sharpenGroups": 33
+      }
+    ],
+    "sourceBefore": "34f87c1652dd1b26fffc8e1212161d41b70c180c91b23c54cb41bf21ea576b65",
+    "sourceAfter": "34f87c1652dd1b26fffc8e1212161d41b70c180c91b23c54cb41bf21ea576b65",
+    "validationErrors": [],
+    "sourceStable": true
+  },
+  "paired-batched-dynamic32": {
+    "sceneId": "minimal-power-dam-break-32",
+    "policy": "dynamic",
+    "reference": "transport",
+    "blocks": 8,
+    "steps": 30,
+    "warmup": 16,
+    "dt_s": 0.016666666666666666,
+    "scope": "Paired simulation-only wall throughput on one device, two frames in flight; matched blocks alternate order. No timestamps, rendering or field reads inside timing.",
+    "adapter": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+    },
+    "values": {
+      "densitySharpening": "on",
+      "rigidCoupling": "on",
+      "timeStep": "scene",
+      "pressureResidualTolerance": 5,
+      "extensionFrontSweeps": 2,
+      "sharpeningDistance": 2.1,
+      "pressureFullCycles": 3,
+      "pressureVCycles": 4,
+      "pressureSweeps": 6,
+      "sharpeningSweeps": 8,
+      "surfaceVolumeRounds": 2,
+      "volumeDustThreshold": 0.001,
+      "orphanDustThreshold": 0.01,
+      "phiCubicAdvection": "on",
+      "phiDrain": "on",
+      "phiPreserveSurface": "off",
+      "totalSurfaceVolume": "on",
+      "surfaceDeficitBalancing": "on",
+      "detailPolicy": "dynamic",
+      "detailNearFocus": "off",
+      "detailActivity": "on",
+      "detailBudgetPercent": 100,
+      "detailFocusRadiusPercent": 20,
+      "detailSensitivity": 0.5,
+      "detailShape": "on",
+      "detailShapeTolerance": 0,
+      "detailThin": "off",
+      "detailThinThickness": 4,
+      "detailStrain": "off",
+      "detailStrainThreshold": 0.1,
+      "detailRotation": "off",
+      "detailRotationThreshold": 0.1,
+      "detailImpact": "on",
+      "detailImpactTravel": 1,
+      "detailApproach": "off",
+      "detailApproachSteps": 2,
+      "detailBulk": "off",
+      "detailMarginTiles": 0,
+      "detailHoldSteps": 0
+    },
+    "summary": {
+      "referenceMs": 6.862155037499997,
+      "candidateMs": 7.009071708333339,
+      "reductionPercent": -2.140969856123598,
+      "pairedReductionPercent": [
+        1.0870495963184457,
+        0.6806842527398937,
+        0.6624167392283553,
+        1.0909291876422422,
+        0.6335994847191939,
+        -24.615609217265266,
+        1.3949503334426017,
+        1.38651928201049
+      ],
+      "medianPairedReductionPercent": 0.8838669245291697,
+      "candidateFasterBlocks": 7
+    },
+    "rows": [
+      {
+        "block": 0,
+        "first": 17,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          7.039313899999979,
+          6.962793066666442
+        ]
+      },
+      {
+        "block": 1,
+        "first": 47,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          7.275159733333324,
+          7.22563886666685
+        ]
+      },
+      {
+        "block": 2,
+        "first": 77,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          7.191887499999818,
+          7.144247233333347
+        ]
+      },
+      {
+        "block": 3,
+        "first": 107,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          7.132170833333415,
+          7.054363900000074
+        ]
+      },
+      {
+        "block": 4,
+        "first": 137,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          6.675920833333415,
+          6.633622233333154
+        ]
+      },
+      {
+        "block": 5,
+        "first": 167,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          6.696293066666597,
+          8.344626400000076
+        ]
+      },
+      {
+        "block": 6,
+        "first": 197,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          6.389909700000135,
+          6.300773633333302
+        ]
+      },
+      {
+        "block": 7,
+        "first": 227,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          6.496584733333293,
+          6.406508333333477
+        ]
+      }
+    ],
+    "fieldsExact": true,
+    "fieldHashes": [
+      {
+        "volume": "c1f4dc6593512bb538d761e8abd211fa71cce41f4e433ab77c26e96d7bc7abee",
+        "velocity": "6db89817abed24df707cedf332586a17fdce51eac567878e6949011e3a40154b",
+        "phi": "537b249fd4ba83d8931fc8414c92d69d54946cd35e409f90bd70327a2121ddde"
+      },
+      {
+        "volume": "c1f4dc6593512bb538d761e8abd211fa71cce41f4e433ab77c26e96d7bc7abee",
+        "velocity": "6db89817abed24df707cedf332586a17fdce51eac567878e6949011e3a40154b",
+        "phi": "537b249fd4ba83d8931fc8414c92d69d54946cd35e409f90bd70327a2121ddde"
+      }
+    ],
+    "launchBudgets": [
+      {
+        "ownership": {
+          "fine": 165,
+          "coarse": 475,
+          "all": 175,
+          "regularCoarse": 5,
+          "fused": 368,
+          "hanging": 368,
+          "merged": 373,
+          "coarseMerged": 208,
+          "sharpen": 260,
+          "fineAndSeams": 368,
+          "seamFine": 165,
+          "seamCoarse": 203
+        },
+        "bandSlots": 125,
+        "sharpenGroups": 122
+      },
+      {
+        "ownership": {
+          "fine": 165,
+          "coarse": 475,
+          "all": 175,
+          "regularCoarse": 5,
+          "fused": 368,
+          "hanging": 368,
+          "merged": 373,
+          "coarseMerged": 208,
+          "sharpen": 260,
+          "fineAndSeams": 368,
+          "seamFine": 165,
+          "seamCoarse": 203
+        },
+        "bandSlots": 125,
+        "sharpenGroups": 122
+      }
+    ],
+    "sourceBefore": "34f87c1652dd1b26fffc8e1212161d41b70c180c91b23c54cb41bf21ea576b65",
+    "sourceAfter": "34f87c1652dd1b26fffc8e1212161d41b70c180c91b23c54cb41bf21ea576b65",
+    "validationErrors": [],
+    "sourceStable": true
+  },
+  "paired-sharpen-evidence": {
+    "sceneId": "high-resolution-dam-break",
+    "policy": "requested",
+    "reference": "sharpen",
+    "blocks": 12,
+    "steps": 30,
+    "warmup": 16,
+    "dt_s": 0.016666666666666666,
+    "scope": "Paired simulation-only wall throughput on one device, two frames in flight; matched blocks alternate order. No timestamps, rendering or field reads inside timing.",
+    "adapter": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+    },
+    "values": {
+      "densitySharpening": "on",
+      "rigidCoupling": "on",
+      "timeStep": "scene",
+      "pressureResidualTolerance": 5,
+      "extensionFrontSweeps": 2,
+      "sharpeningDistance": 2.1,
+      "pressureFullCycles": 3,
+      "pressureVCycles": 4,
+      "pressureSweeps": 6,
+      "sharpeningSweeps": 8,
+      "surfaceVolumeRounds": 2,
+      "volumeDustThreshold": 0.001,
+      "orphanDustThreshold": 0.01,
+      "phiCubicAdvection": "on",
+      "phiDrain": "on",
+      "phiPreserveSurface": "off",
+      "totalSurfaceVolume": "on",
+      "surfaceDeficitBalancing": "on",
+      "detailPolicy": "requested",
+      "detailNearFocus": "off",
+      "detailActivity": "on",
+      "detailBudgetPercent": 100,
+      "detailFocusRadiusPercent": 20,
+      "detailSensitivity": 0.5,
+      "detailShape": "on",
+      "detailShapeTolerance": 0,
+      "detailThin": "off",
+      "detailThinThickness": 4,
+      "detailStrain": "off",
+      "detailStrainThreshold": 0.1,
+      "detailRotation": "off",
+      "detailRotationThreshold": 0.1,
+      "detailImpact": "on",
+      "detailImpactTravel": 1,
+      "detailApproach": "off",
+      "detailApproachSteps": 2,
+      "detailBulk": "off",
+      "detailMarginTiles": 0,
+      "detailHoldSteps": 0
+    },
+    "summary": {
+      "referenceMs": 7.57725775277779,
+      "candidateMs": 7.408301155555495,
+      "reductionPercent": 2.2297855336959604,
+      "pairedReductionPercent": [
+        -0.22022566773767238,
+        0.15796242951723327,
+        0.8679964762344006,
+        0.3041252041187992,
+        0.37539746539292373,
+        1.166164524947455,
+        1.1585567750261094,
+        1.1962067561936962,
+        18.993490129499047,
+        0.6670688361547827,
+        0.11816331750805764,
+        -0.8829781305035755
+      ],
+      "medianPairedReductionPercent": 0.5212331507738532,
+      "candidateFasterBlocks": 10
+    },
+    "rows": [
+      {
+        "block": 0,
+        "first": 17,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          8.192354166666338,
+          8.210395833333314
+        ]
+      },
+      {
+        "block": 1,
+        "first": 47,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          8.530530566666858,
+          8.51705553333304
+        ]
+      },
+      {
+        "block": 2,
+        "first": 77,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          7.841975000000093,
+          7.77390693333291
+        ]
+      },
+      {
+        "block": 3,
+        "first": 107,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          7.622956933333383,
+          7.599773599999995
+        ]
+      },
+      {
+        "block": 4,
+        "first": 137,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          7.429902766666783,
+          7.402011099999557
+        ]
+      },
+      {
+        "block": 5,
+        "first": 167,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          7.195356933333581,
+          7.111447233333698
+        ]
+      },
+      {
+        "block": 6,
+        "first": 197,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          7.1055847333331865,
+          7.023262499999934
+        ]
+      },
+      {
+        "block": 7,
+        "first": 227,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          7.135054166666426,
+          7.049704166666682
+        ]
+      },
+      {
+        "block": 8,
+        "first": 257,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          8.7769180666665,
+          7.10987499999998
+        ]
+      },
+      {
+        "block": 9,
+        "first": 287,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          7.097173600000193,
+          7.049830566666787
+        ]
+      },
+      {
+        "block": 10,
+        "first": 317,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          7.046490266666903,
+          7.038163899999927
+        ]
+      },
+      {
+        "block": 11,
+        "first": 347,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          6.952795833333221,
+          7.014187500000117
+        ]
+      }
+    ],
+    "fieldsExact": true,
+    "fieldHashes": [
+      {
+        "volume": "37ab195a74a223409cfeec97b6443715292b256c4bff2a8fd227dcb0eddfdd48",
+        "velocity": "e123ec6dbebcc4e8792cc4c087ae9a4f82fcc7e22df642fcf4c31997447c4601",
+        "phi": "3d2acdcdef219d2ec762ceb2029a4f5667a98bb3cafd721ddbe91a629d24ca7d"
+      },
+      {
+        "volume": "37ab195a74a223409cfeec97b6443715292b256c4bff2a8fd227dcb0eddfdd48",
+        "velocity": "e123ec6dbebcc4e8792cc4c087ae9a4f82fcc7e22df642fcf4c31997447c4601",
+        "phi": "3d2acdcdef219d2ec762ceb2029a4f5667a98bb3cafd721ddbe91a629d24ca7d"
+      }
+    ],
+    "launchBudgets": [
+      {
+        "ownership": {
+          "fine": 1,
+          "coarse": 32768,
+          "all": 640,
+          "regularCoarse": 640,
+          "fused": 1,
+          "hanging": 1,
+          "merged": 640,
+          "coarseMerged": 640,
+          "sharpen": 214,
+          "fineAndSeams": 1,
+          "seamFine": 1,
+          "seamCoarse": 1
+        },
+        "bandSlots": 1,
+        "sharpenGroups": 1024
+      },
+      {
+        "ownership": {
+          "fine": 1,
+          "coarse": 32768,
+          "all": 640,
+          "regularCoarse": 640,
+          "fused": 1,
+          "hanging": 1,
+          "merged": 640,
+          "coarseMerged": 640,
+          "sharpen": 214,
+          "fineAndSeams": 1,
+          "seamFine": 1,
+          "seamCoarse": 1
+        },
+        "bandSlots": 1,
+        "sharpenGroups": 33
+      }
+    ],
+    "sourceBefore": "0433ba1944b49c9a1fbbe421fff5e782950695017c9cac0cca69cbaa37b68e1b",
+    "sourceAfter": "0433ba1944b49c9a1fbbe421fff5e782950695017c9cac0cca69cbaa37b68e1b",
+    "validationErrors": [],
+    "sourceStable": true
+  },
+  "paired-sharpen-full32": {
+    "sceneId": "minimal-power-dam-break-32",
+    "policy": "full",
+    "reference": "sharpen",
+    "blocks": 8,
+    "steps": 30,
+    "warmup": 16,
+    "dt_s": 0.016666666666666666,
+    "scope": "Paired simulation-only wall throughput on one device, two frames in flight; matched blocks alternate order. No timestamps, rendering or field reads inside timing.",
+    "adapter": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+    },
+    "values": {
+      "densitySharpening": "on",
+      "rigidCoupling": "on",
+      "timeStep": "scene",
+      "pressureResidualTolerance": 5,
+      "extensionFrontSweeps": 2,
+      "sharpeningDistance": 2.1,
+      "pressureFullCycles": 3,
+      "pressureVCycles": 4,
+      "pressureSweeps": 6,
+      "sharpeningSweeps": 8,
+      "surfaceVolumeRounds": 2,
+      "volumeDustThreshold": 0.001,
+      "orphanDustThreshold": 0.01,
+      "phiCubicAdvection": "on",
+      "phiDrain": "on",
+      "phiPreserveSurface": "off",
+      "totalSurfaceVolume": "on",
+      "surfaceDeficitBalancing": "on",
+      "detailPolicy": "full",
+      "detailNearFocus": "off",
+      "detailActivity": "on",
+      "detailBudgetPercent": 100,
+      "detailFocusRadiusPercent": 20,
+      "detailSensitivity": 0.5,
+      "detailShape": "on",
+      "detailShapeTolerance": 0,
+      "detailThin": "off",
+      "detailThinThickness": 4,
+      "detailStrain": "off",
+      "detailStrainThreshold": 0.1,
+      "detailRotation": "off",
+      "detailRotationThreshold": 0.1,
+      "detailImpact": "on",
+      "detailImpactTravel": 1,
+      "detailApproach": "off",
+      "detailApproachSteps": 2,
+      "detailBulk": "off",
+      "detailMarginTiles": 0,
+      "detailHoldSteps": 0
+    },
+    "summary": {
+      "referenceMs": 4.567647054166689,
+      "candidateMs": 4.4027937583331855,
+      "reductionPercent": 3.6091513612708126,
+      "pairedReductionPercent": [
+        -5.803295835805189,
+        1.7513549256975014,
+        5.579200258734607,
+        1.6172955719208848,
+        -7.948368872821088,
+        -0.24846830025095912,
+        2.6878221331447016,
+        24.749298677066513
+      ],
+      "medianPairedReductionPercent": 1.684325248809193,
+      "candidateFasterBlocks": 5
+    },
+    "rows": [
+      {
+        "block": 0,
+        "first": 17,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          4.3228791666673105,
+          4.5737486333334045
+        ]
+      },
+      {
+        "block": 1,
+        "first": 47,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          4.657426400000501,
+          4.575858333333357
+        ]
+      },
+      {
+        "block": 2,
+        "first": 77,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          4.466938899999756,
+          4.217719433333453
+        ]
+      },
+      {
+        "block": 3,
+        "first": 107,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          4.302449999999953,
+          4.232866666665844
+        ]
+      },
+      {
+        "block": 4,
+        "first": 137,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          4.215697233333291,
+          4.550776399999934
+        ]
+      },
+      {
+        "block": 5,
+        "first": 167,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          4.522709733333128,
+          4.5339472333328255
+        ]
+      },
+      {
+        "block": 6,
+        "first": 197,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          4.407791666666162,
+          4.289318066666601
+        ]
+      },
+      {
+        "block": 7,
+        "first": 227,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          5.645283333333404,
+          4.248115300000063
+        ]
+      }
+    ],
+    "fieldsExact": true,
+    "fieldHashes": [
+      {
+        "volume": "113999b02bab2245132e2448a4001456641953a3344b6ca2ed24101e69b85e76",
+        "velocity": "211ff58c5150928a5bf650b3eac4a9755f8661f3402819acadb7a0df5234f008",
+        "phi": "ba46e229de647c9d225a526b5f759c4d67a4b03c2e5c3cb1d0d0415ecb8e2c48"
+      },
+      {
+        "volume": "113999b02bab2245132e2448a4001456641953a3344b6ca2ed24101e69b85e76",
+        "velocity": "211ff58c5150928a5bf650b3eac4a9755f8661f3402819acadb7a0df5234f008",
+        "phi": "ba46e229de647c9d225a526b5f759c4d67a4b03c2e5c3cb1d0d0415ecb8e2c48"
+      }
+    ],
+    "launchBudgets": [
+      {
+        "ownership": {
+          "fine": 512,
+          "coarse": 1,
+          "all": 512,
+          "regularCoarse": 1,
+          "fused": 1,
+          "hanging": 1,
+          "merged": 512,
+          "coarseMerged": 1,
+          "sharpen": 214,
+          "fineAndSeams": 512,
+          "seamFine": 1,
+          "seamCoarse": 1
+        },
+        "bandSlots": 512,
+        "sharpenGroups": 683
+      },
+      {
+        "ownership": {
+          "fine": 512,
+          "coarse": 1,
+          "all": 512,
+          "regularCoarse": 1,
+          "fused": 1,
+          "hanging": 1,
+          "merged": 512,
+          "coarseMerged": 1,
+          "sharpen": 214,
+          "fineAndSeams": 512,
+          "seamFine": 1,
+          "seamCoarse": 1
+        },
+        "bandSlots": 512,
+        "sharpenGroups": 1
+      }
+    ],
+    "sourceBefore": "34f87c1652dd1b26fffc8e1212161d41b70c180c91b23c54cb41bf21ea576b65",
+    "sourceAfter": "34f87c1652dd1b26fffc8e1212161d41b70c180c91b23c54cb41bf21ea576b65",
+    "validationErrors": [],
+    "sourceStable": true
+  },
+  "ownerClosureCensus": {
+    "scope": "Frozen source-free V and departure fields; exact owner graph versus current tile-box closure. Work counts only; no speedup claim.",
+    "owners": 9206,
+    "fineOwners": 8832,
+    "counts": {
+      "Q0": {
+        "tileClosureOwners": 9206,
+        "ownerClosureOwners": 8952,
+        "avoidableOwners": 254,
+        "avoidableFraction": 0.02759070171627198
+      },
+      "Q1": {
+        "tileClosureOwners": 9206,
+        "ownerClosureOwners": 8952,
+        "avoidableOwners": 254,
+        "avoidableFraction": 0.02759070171627198
+      },
+      "Q2": {
+        "tileClosureOwners": 9206,
+        "ownerClosureOwners": 8952,
+        "avoidableOwners": 254,
+        "avoidableFraction": 0.02759070171627198
+      },
+      "R1": {
+        "tileClosureOwners": 9197,
+        "ownerClosureOwners": 8937,
+        "avoidableOwners": 260,
+        "avoidableFraction": 0.02827008807219744
+      },
+      "donors": {
+        "tileClosureOwners": 9206,
+        "ownerClosureOwners": 8952,
+        "avoidableOwners": 254,
+        "avoidableFraction": 0.02759070171627198
+      },
+      "D1": {
+        "tileClosureOwners": 9206,
+        "ownerClosureOwners": 8952,
+        "avoidableOwners": 254,
+        "avoidableFraction": 0.02759070171627198
+      },
+      "D2": {
+        "tileClosureOwners": 9206,
+        "ownerClosureOwners": 8952,
+        "avoidableOwners": 254,
+        "avoidableFraction": 0.02759070171627198
+      }
+    }
+  },
+  "paired-batched-dynamic32-repeat": {
+    "sceneId": "minimal-power-dam-break-32",
+    "policy": "dynamic",
+    "reference": "transport",
+    "blocks": 8,
+    "steps": 30,
+    "warmup": 16,
+    "dt_s": 0.016666666666666666,
+    "scope": "Paired simulation-only wall throughput on one device, two frames in flight; matched blocks alternate order. No timestamps, rendering or field reads inside timing.",
+    "adapter": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+    },
+    "values": {
+      "densitySharpening": "on",
+      "rigidCoupling": "on",
+      "timeStep": "scene",
+      "pressureResidualTolerance": 5,
+      "extensionFrontSweeps": 2,
+      "sharpeningDistance": 2.1,
+      "pressureFullCycles": 3,
+      "pressureVCycles": 4,
+      "pressureSweeps": 6,
+      "sharpeningSweeps": 8,
+      "surfaceVolumeRounds": 2,
+      "volumeDustThreshold": 0.001,
+      "orphanDustThreshold": 0.01,
+      "phiCubicAdvection": "on",
+      "phiDrain": "on",
+      "phiPreserveSurface": "off",
+      "totalSurfaceVolume": "on",
+      "surfaceDeficitBalancing": "on",
+      "detailPolicy": "dynamic",
+      "detailNearFocus": "off",
+      "detailActivity": "on",
+      "detailBudgetPercent": 100,
+      "detailFocusRadiusPercent": 20,
+      "detailSensitivity": 0.5,
+      "detailShape": "on",
+      "detailShapeTolerance": 0,
+      "detailThin": "off",
+      "detailThinThickness": 4,
+      "detailStrain": "off",
+      "detailStrainThreshold": 0.1,
+      "detailRotation": "off",
+      "detailRotationThreshold": 0.1,
+      "detailImpact": "on",
+      "detailImpactTravel": 1,
+      "detailApproach": "off",
+      "detailApproachSteps": 2,
+      "detailBulk": "off",
+      "detailMarginTiles": 0,
+      "detailHoldSteps": 0
+    },
+    "summary": {
+      "referenceMs": 7.077057129166981,
+      "candidateMs": 6.954887145833346,
+      "reductionPercent": 1.7262822823646662,
+      "pairedReductionPercent": [
+        1.1048399830228983,
+        -15.015905112077267,
+        0.7307218127625692,
+        1.2948565450152993,
+        0.5874918214990754,
+        -0.5512424991403586,
+        0.2551195019209751,
+        22.283501418526253
+      ],
+      "medianPairedReductionPercent": 0.6591068171308223,
+      "candidateFasterBlocks": 6
+    },
+    "rows": [
+      {
+        "block": 0,
+        "first": 17,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          7.022890299997138,
+          6.9452985999989325
+        ]
+      },
+      {
+        "block": 1,
+        "first": 47,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          7.280520833334109,
+          8.373756933332576
+        ]
+      },
+      {
+        "block": 2,
+        "first": 77,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          7.210719466667312,
+          7.158029166667257
+        ]
+      },
+      {
+        "block": 3,
+        "first": 107,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          7.1506222333332214,
+          7.058031933335587
+        ]
+      },
+      {
+        "block": 4,
+        "first": 137,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          6.694419433335619,
+          6.655090266667927
+        ]
+      },
+      {
+        "block": 5,
+        "first": 167,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          6.695226400000198,
+          6.732133333330664
+        ]
+      },
+      {
+        "block": 6,
+        "first": 197,
+        "order": [
+          0,
+          1
+        ],
+        "msPerStep": [
+          6.353780566668138,
+          6.337570833333302
+        ]
+      },
+      {
+        "block": 7,
+        "first": 227,
+        "order": [
+          1,
+          0
+        ],
+        "msPerStep": [
+          8.208277800000117,
+          6.379186100000515
+        ]
+      }
+    ],
+    "fieldsExact": true,
+    "fieldHashes": [
+      {
+        "volume": "c1f4dc6593512bb538d761e8abd211fa71cce41f4e433ab77c26e96d7bc7abee",
+        "velocity": "6db89817abed24df707cedf332586a17fdce51eac567878e6949011e3a40154b",
+        "phi": "537b249fd4ba83d8931fc8414c92d69d54946cd35e409f90bd70327a2121ddde"
+      },
+      {
+        "volume": "c1f4dc6593512bb538d761e8abd211fa71cce41f4e433ab77c26e96d7bc7abee",
+        "velocity": "6db89817abed24df707cedf332586a17fdce51eac567878e6949011e3a40154b",
+        "phi": "537b249fd4ba83d8931fc8414c92d69d54946cd35e409f90bd70327a2121ddde"
+      }
+    ],
+    "launchBudgets": [
+      {
+        "ownership": {
+          "fine": 165,
+          "coarse": 475,
+          "all": 175,
+          "regularCoarse": 5,
+          "fused": 368,
+          "hanging": 368,
+          "merged": 373,
+          "coarseMerged": 208,
+          "sharpen": 260,
+          "fineAndSeams": 368,
+          "seamFine": 165,
+          "seamCoarse": 203
+        },
+        "bandSlots": 125,
+        "sharpenGroups": 122
+      },
+      {
+        "ownership": {
+          "fine": 165,
+          "coarse": 475,
+          "all": 175,
+          "regularCoarse": 5,
+          "fused": 368,
+          "hanging": 368,
+          "merged": 373,
+          "coarseMerged": 208,
+          "sharpen": 260,
+          "fineAndSeams": 368,
+          "seamFine": 165,
+          "seamCoarse": 203
+        },
+        "bandSlots": 125,
+        "sharpenGroups": 122
+      }
+    ],
+    "sourceBefore": "34f87c1652dd1b26fffc8e1212161d41b70c180c91b23c54cb41bf21ea576b65",
+    "sourceAfter": "34f87c1652dd1b26fffc8e1212161d41b70c180c91b23c54cb41bf21ea576b65",
+    "validationErrors": [],
+    "sourceStable": true
+  },
+  "validation": {
+    "completedAt": "2026-10-03T09:26:51.760441+00:00",
+    "types": "passed",
+    "unit": {
+      "passed": 863,
+      "skipped": 54,
+      "failed": 0
+    },
+    "dawn": {
+      "filesPassed": 50,
+      "filesFailed": 0,
+      "files": [
+        {
+          "path": "lib/svo/features/scene-publication/tests/svo-cup-primitive.test.ts",
+          "seconds": 0.6,
+          "passed": 7,
+          "skipped": 0
+        },
+        {
+          "path": "tests/backdrop-shrub.test.ts",
+          "seconds": 1.4,
+          "passed": 3,
+          "skipped": 0
+        },
+        {
+          "path": "tests/falling-water-torus-dawn.test.ts",
+          "seconds": 46.1,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/foliage-density.test.ts",
+          "seconds": 2.1,
+          "passed": 5,
+          "skipped": 0
+        },
+        {
+          "path": "tests/fraction-readout-dawn.test.ts",
+          "seconds": 0.5,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/live-fluid-shapes-dawn.test.ts",
+          "seconds": 18.2,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/scene-shape-parity.test.ts",
+          "seconds": 0.4,
+          "passed": 8,
+          "skipped": 0
+        },
+        {
+          "path": "tests/svo-cell-contour-analytic-dawn.test.ts",
+          "seconds": 1.3,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/svo-cell-contour-dawn.test.ts",
+          "seconds": 2.8,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/svo-dual-contouring-dawn.test.ts",
+          "seconds": 3.4,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/svo-dual-marching-cubes-dawn.test.ts",
+          "seconds": 35.7,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/svo-filter-controls-dawn.test.ts",
+          "seconds": 1.8,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/svo-reconstructed-receiver-dawn.test.ts",
+          "seconds": 1.0,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/svo-surface-mesh-detail.test.ts",
+          "seconds": 0.9,
+          "passed": 4,
+          "skipped": 0
+        },
+        {
+          "path": "tests/svo-surface-mesh-scheduler-dawn.test.ts",
+          "seconds": 1.8,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/svo-tank-shell-publication-dawn.test.ts",
+          "seconds": 2.4,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/svo-terrain-contour-dawn.test.ts",
+          "seconds": 2.6,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-atlas-address-dawn.test.ts",
+          "seconds": 2.3,
+          "passed": 2,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-coarse-redistance-dawn.test.ts",
+          "seconds": 8.9,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-coarse-surface-dawn.test.ts",
+          "seconds": 65.9,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-cubic-surface-dawn.test.ts",
+          "seconds": 49.5,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-curvature-dawn.test.ts",
+          "seconds": 0.6,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-detail-policy-dawn.test.ts",
+          "seconds": 3.0,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-dynamic-band-mask-dawn.test.ts",
+          "seconds": 1.0,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-dynamic-coarsening-dawn.test.ts",
+          "seconds": 53.7,
+          "passed": 2,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-extension-symmetry-dawn.test.ts",
+          "seconds": 5.1,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-force-cache-dawn.test.ts",
+          "seconds": 113.6,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-geometric-boundary-dawn.test.ts",
+          "seconds": 255.1,
+          "passed": 6,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-mixed-live-solid-edit-dawn.test.ts",
+          "seconds": 73.0,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-mixed-rigid-body-dawn.test.ts",
+          "seconds": 3.1,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-mixed-solid-parity-dawn.test.ts",
+          "seconds": 2.9,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-nearest-extension-dawn.test.ts",
+          "seconds": 7.2,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-page-generation-dawn.test.ts",
+          "seconds": 0.7,
+          "passed": 2,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-page-redistance-dawn.test.ts",
+          "seconds": 0.5,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-page-support-dawn.test.ts",
+          "seconds": 0.8,
+          "passed": 10,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-pond-rest-dawn.test.ts",
+          "seconds": 109.7,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-pressure-local-visit-dawn.test.ts",
+          "seconds": 43.0,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-pressure-phase-dawn.test.ts",
+          "seconds": 1.2,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-sharpening-seam-dawn.test.ts",
+          "seconds": 6.7,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-transport-pruning-dawn.test.ts",
+          "seconds": 4.0,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/uniform-volume-dawn.test.ts",
+          "seconds": 100.4,
+          "passed": 2,
+          "skipped": 0
+        },
+        {
+          "path": "tests/vessel-outline-dawn.test.ts",
+          "seconds": 0.6,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/visual-layers-dawn.test.ts",
+          "seconds": 12.0,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/voxel-editor-live-boundary-dawn.test.ts",
+          "seconds": 2.5,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/voxel-editor-new-room-dawn.test.ts",
+          "seconds": 1.2,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/voxel-editor-production-dawn.test.ts",
+          "seconds": 21.9,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/voxel-editor-retained-frontier-dawn.test.ts",
+          "seconds": 101.8,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/water-surface-parallel-scan-dawn.test.ts",
+          "seconds": 0.9,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/water-wall-contact-alignment-dawn.test.ts",
+          "seconds": 0.5,
+          "passed": 1,
+          "skipped": 0
+        },
+        {
+          "path": "tests/water-wireframe-depth-dawn.test.ts",
+          "seconds": 0.6,
+          "passed": 1,
+          "skipped": 0
+        }
+      ]
+    },
+    "lateSharedEditRecheck": {
+      "file": "lib/methods/uniform/uniform-detail-fields.ts",
+      "types": "passed",
+      "unit": "863 passed, 54 skipped, 0 failed",
+      "transportDawn": "passed",
+      "checkedAt": "2026-10-03T09:29:14.020742+00:00"
+    }
+  },
+  "sharpeningFollowup": {
+    "paired-sharpen-fusion-coarse128": {
+      "sceneId": "high-resolution-dam-break",
+      "policy": "requested",
+      "reference": "sharpen-fusion",
+      "blocks": 8,
+      "steps": 30,
+      "warmup": 16,
+      "dt_s": 0.016666666666666666,
+      "sourceBefore": "402ee9fd15debba626058877fd878f5eab58298ec0f25414223147412cc86064",
+      "sourceAfter": "402ee9fd15debba626058877fd878f5eab58298ec0f25414223147412cc86064",
+      "summary": {
+        "referenceMs": 7.5197944333333,
+        "candidateMs": 7.271156599999933,
+        "reductionPercent": 3.3064445516119423,
+        "pairedReductionPercent": [
+          -0.5153147107322287,
+          1.0278838884717811,
+          0.691628447716186,
+          -1.0747604138555023,
+          21.528504537232784,
+          0.7984242208155745,
+          -0.4317333910478949,
+          0.16628950942756404
+        ],
+        "medianPairedReductionPercent": 0.42895897857187504,
+        "candidateFasterBlocks": 5
+      },
+      "fieldHashes": [
+        {
+          "volume": "ed8f84b7ab5c2a853279285f8f2a370abb61d77d2b0918e0ffa7a6b703d89b2e",
+          "velocity": "4f481f4c8466e93d2c39e16cbc78bd04bbca295792c9ccebc816d6c7174192b8",
+          "phi": "7a73ae179ad231d5bd6c79546a6e95a6a7a4637901873294001a5b82fd92a5b8"
+        },
+        {
+          "volume": "ed8f84b7ab5c2a853279285f8f2a370abb61d77d2b0918e0ffa7a6b703d89b2e",
+          "velocity": "4f481f4c8466e93d2c39e16cbc78bd04bbca295792c9ccebc816d6c7174192b8",
+          "phi": "7a73ae179ad231d5bd6c79546a6e95a6a7a4637901873294001a5b82fd92a5b8"
+        }
+      ],
+      "fieldsExact": true,
+      "rows": [
+        {
+          "block": 0,
+          "first": 17,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            7.74634720000031,
+            7.786265266666305
+          ]
+        },
+        {
+          "block": 1,
+          "first": 47,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            8.18374859999943,
+            8.099629166667
+          ]
+        },
+        {
+          "block": 2,
+          "first": 77,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            7.438965266666491,
+            7.387515266666499
+          ]
+        },
+        {
+          "block": 3,
+          "first": 107,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            7.340783333333093,
+            7.419679166666659
+          ]
+        },
+        {
+          "block": 4,
+          "first": 137,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            8.9887222,
+            7.053584733333749
+          ]
+        },
+        {
+          "block": 5,
+          "first": 167,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.895348599999367,
+            6.840294466667304
+          ]
+        },
+        {
+          "block": 6,
+          "first": 197,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.755712500000178,
+            6.784879166665875
+          ]
+        },
+        {
+          "block": 7,
+          "first": 227,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.808727766667531,
+            6.7974055666660815
+          ]
+        }
+      ],
+      "launchBudgets": [
+        {
+          "ownership": {
+            "fine": 1,
+            "coarse": 32768,
+            "all": 640,
+            "regularCoarse": 640,
+            "fused": 1,
+            "hanging": 1,
+            "merged": 640,
+            "coarseMerged": 640,
+            "sharpen": 214,
+            "fineAndSeams": 1,
+            "seamFine": 1,
+            "seamCoarse": 1
+          },
+          "bandSlots": 1,
+          "sharpenGroups": 37
+        },
+        {
+          "ownership": {
+            "fine": 1,
+            "coarse": 32768,
+            "all": 640,
+            "regularCoarse": 640,
+            "fused": 1,
+            "hanging": 1,
+            "merged": 640,
+            "coarseMerged": 640,
+            "sharpen": 214,
+            "fineAndSeams": 1,
+            "seamFine": 1,
+            "seamCoarse": 1
+          },
+          "bandSlots": 1,
+          "sharpenGroups": 37
+        }
+      ],
+      "sourceStable": true
+    },
+    "paired-sharpen-jobs-coarse128": {
+      "sceneId": "high-resolution-dam-break",
+      "policy": "requested",
+      "reference": "sharpen-jobs",
+      "blocks": 12,
+      "steps": 30,
+      "warmup": 16,
+      "dt_s": 0.016666666666666666,
+      "sourceBefore": "402ee9fd15debba626058877fd878f5eab58298ec0f25414223147412cc86064",
+      "sourceAfter": "402ee9fd15debba626058877fd878f5eab58298ec0f25414223147412cc86064",
+      "summary": {
+        "referenceMs": 7.273431827777799,
+        "candidateMs": 7.1267153999999815,
+        "reductionPercent": 2.0171554673475534,
+        "pairedReductionPercent": [
+          0.6448778937831579,
+          0.8269907777525454,
+          -0.5139729614488164,
+          0.3871460188096587,
+          0.40789490016405194,
+          0.4033373460994971,
+          17.52804450951183,
+          1.5184434663621849,
+          0.5132490325952643,
+          -1.2360585051242268,
+          0.8504369379285337,
+          0.6040370325829936
+        ],
+        "medianPairedReductionPercent": 0.558643032589129,
+        "candidateFasterBlocks": 10
+      },
+      "fieldHashes": [
+        {
+          "volume": "37ab195a74a223409cfeec97b6443715292b256c4bff2a8fd227dcb0eddfdd48",
+          "velocity": "e123ec6dbebcc4e8792cc4c087ae9a4f82fcc7e22df642fcf4c31997447c4601",
+          "phi": "3d2acdcdef219d2ec762ceb2029a4f5667a98bb3cafd721ddbe91a629d24ca7d"
+        },
+        {
+          "volume": "37ab195a74a223409cfeec97b6443715292b256c4bff2a8fd227dcb0eddfdd48",
+          "velocity": "e123ec6dbebcc4e8792cc4c087ae9a4f82fcc7e22df642fcf4c31997447c4601",
+          "phi": "3d2acdcdef219d2ec762ceb2029a4f5667a98bb3cafd721ddbe91a629d24ca7d"
+        }
+      ],
+      "fieldsExact": true,
+      "rows": [
+        {
+          "block": 0,
+          "first": 17,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            7.789154166666898,
+            7.738923633333373
+          ]
+        },
+        {
+          "block": 1,
+          "first": 47,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            8.177237500000047,
+            8.109612500000123
+          ]
+        },
+        {
+          "block": 2,
+          "first": 77,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            7.484991666666611,
+            7.523462499999975
+          ]
+        },
+        {
+          "block": 3,
+          "first": 107,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            7.474208333333324,
+            7.4452722333332835
+          ]
+        },
+        {
+          "block": 4,
+          "first": 137,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            7.245534733333383,
+            7.2159805666665005
+          ]
+        },
+        {
+          "block": 5,
+          "first": 167,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.903856933333251,
+            6.876011099999839
+          ]
+        },
+        {
+          "block": 6,
+          "first": 197,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            8.222212500000023,
+            6.781019433333373
+          ]
+        },
+        {
+          "block": 7,
+          "first": 227,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.838963866666745,
+            6.735118066666473
+          ]
+        },
+        {
+          "block": 8,
+          "first": 257,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.90941389999983,
+            6.873951400000078
+          ]
+        },
+        {
+          "block": 9,
+          "first": 287,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.77006250000001,
+            6.853744433333486
+          ]
+        },
+        {
+          "block": 10,
+          "first": 317,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.785723600000105,
+            6.72801529999997
+          ]
+        },
+        {
+          "block": 11,
+          "first": 347,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.67982223333335,
+            6.639473633333304
+          ]
+        }
+      ],
+      "launchBudgets": [
+        {
+          "ownership": {
+            "fine": 1,
+            "coarse": 32768,
+            "all": 640,
+            "regularCoarse": 640,
+            "fused": 1,
+            "hanging": 1,
+            "merged": 640,
+            "coarseMerged": 640,
+            "sharpen": 214,
+            "fineAndSeams": 1,
+            "seamFine": 1,
+            "seamCoarse": 1
+          },
+          "bandSlots": 1,
+          "sharpenGroups": 33
+        },
+        {
+          "ownership": {
+            "fine": 1,
+            "coarse": 32768,
+            "all": 640,
+            "regularCoarse": 640,
+            "fused": 1,
+            "hanging": 1,
+            "merged": 640,
+            "coarseMerged": 640,
+            "sharpen": 214,
+            "fineAndSeams": 1,
+            "seamFine": 1,
+            "seamCoarse": 1
+          },
+          "bandSlots": 1,
+          "sharpenGroups": 33
+        }
+      ],
+      "sourceStable": true
+    },
+    "paired-sharpen-jobs-dynamic32": {
+      "sceneId": "minimal-power-dam-break-32",
+      "policy": "dynamic",
+      "reference": "sharpen-jobs",
+      "blocks": 12,
+      "steps": 30,
+      "warmup": 16,
+      "dt_s": 0.016666666666666666,
+      "sourceBefore": "8ee39d1b6575b5b1067edd6bf1c51c99883a5dd72e885bc782570b88d8efc44e",
+      "sourceAfter": "8ee39d1b6575b5b1067edd6bf1c51c99883a5dd72e885bc782570b88d8efc44e",
+      "summary": {
+        "referenceMs": 6.669900008333368,
+        "candidateMs": 6.968050691666657,
+        "reductionPercent": -4.47009224967061,
+        "pairedReductionPercent": [
+          0.12216332231546057,
+          -0.9337747496369175,
+          -0.9669308004405686,
+          -22.29164983030072,
+          -0.44491662423955525,
+          -1.613866700602995,
+          -0.9840869716650102,
+          0.6991763297903186,
+          -0.5053760055050205,
+          -1.5159108811740873,
+          -23.63761140166387,
+          -1.0497566928591162
+        ],
+        "medianPairedReductionPercent": -0.9755088860527894,
+        "candidateFasterBlocks": 2
+      },
+      "fieldHashes": [
+        {
+          "volume": "8946fd25bdbad741c706494d4f04036cee2e5e8f8a544c252822a530643ff596",
+          "velocity": "f9bf2c75afdfb2644382dd139e0065a8a92c5a4c69f6801b007dbd782c0d8462",
+          "phi": "6296878c1a4009eef48bfb030008cb5cce50c8bdb85fc1919aba184b4cffd9c9"
+        },
+        {
+          "volume": "8946fd25bdbad741c706494d4f04036cee2e5e8f8a544c252822a530643ff596",
+          "velocity": "f9bf2c75afdfb2644382dd139e0065a8a92c5a4c69f6801b007dbd782c0d8462",
+          "phi": "6296878c1a4009eef48bfb030008cb5cce50c8bdb85fc1919aba184b4cffd9c9"
+        }
+      ],
+      "fieldsExact": true,
+      "rows": [
+        {
+          "block": 0,
+          "first": 17,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.949958333333295,
+            6.941468033333755
+          ]
+        },
+        {
+          "block": 1,
+          "first": 47,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            7.216226399999869,
+            7.2836096999997
+          ]
+        },
+        {
+          "block": 2,
+          "first": 77,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            7.148763899999904,
+            7.217887499999779
+          ]
+        },
+        {
+          "block": 3,
+          "first": 107,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            7.049058333333233,
+            8.620409733333508
+          ]
+        },
+        {
+          "block": 4,
+          "first": 137,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.634823633333144,
+            6.664343066666818
+          ]
+        },
+        {
+          "block": 5,
+          "first": 167,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.631072233333543,
+            6.738088900000245
+          ]
+        },
+        {
+          "block": 6,
+          "first": 197,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.331306933333205,
+            6.39361250000026
+          ]
+        },
+        {
+          "block": 7,
+          "first": 227,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.526531966667002,
+            6.480899999999868
+          ]
+        },
+        {
+          "block": 8,
+          "first": 257,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.456413899999946,
+            6.489043066666636
+          ]
+        },
+        {
+          "block": 9,
+          "first": 287,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.298648633333505,
+            6.39413053333313
+          ]
+        },
+        {
+          "block": 10,
+          "first": 317,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.4760139000000585,
+            8.00678889999981
+          ]
+        },
+        {
+          "block": 11,
+          "first": 347,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.319981933333717,
+            6.386326366666375
+          ]
+        }
+      ],
+      "launchBudgets": [
+        {
+          "ownership": {
+            "fine": 150,
+            "coarse": 490,
+            "all": 160,
+            "regularCoarse": 7,
+            "fused": 317,
+            "hanging": 317,
+            "merged": 323,
+            "coarseMerged": 173,
+            "sharpen": 220,
+            "fineAndSeams": 317,
+            "seamFine": 150,
+            "seamCoarse": 167
+          },
+          "bandSlots": 80,
+          "sharpenGroups": 112
+        },
+        {
+          "ownership": {
+            "fine": 150,
+            "coarse": 490,
+            "all": 160,
+            "regularCoarse": 7,
+            "fused": 317,
+            "hanging": 317,
+            "merged": 323,
+            "coarseMerged": 173,
+            "sharpen": 220,
+            "fineAndSeams": 317,
+            "seamFine": 150,
+            "seamCoarse": 167
+          },
+          "bandSlots": 80,
+          "sharpenGroups": 112
+        }
+      ],
+      "sourceStable": true
+    },
+    "paired-sharpen-jobs-full32": {
+      "sceneId": "minimal-power-dam-break-32",
+      "policy": "full",
+      "reference": "sharpen-jobs",
+      "blocks": 12,
+      "steps": 30,
+      "warmup": 16,
+      "dt_s": 0.016666666666666666,
+      "sourceBefore": "8ee39d1b6575b5b1067edd6bf1c51c99883a5dd72e885bc782570b88d8efc44e",
+      "sourceAfter": "8ee39d1b6575b5b1067edd6bf1c51c99883a5dd72e885bc782570b88d8efc44e",
+      "summary": {
+        "referenceMs": 4.399418977777734,
+        "candidateMs": 4.226745022222228,
+        "reductionPercent": 3.9249263693163505,
+        "pairedReductionPercent": [
+          0.2924487942872478,
+          0.1423818765878937,
+          -0.3706289521468564,
+          29.089293630770474,
+          -1.7120008449434732,
+          -0.5529185804391101,
+          0.2741274916353009,
+          2.137645220880946,
+          6.343861962936903,
+          2.372312729096848,
+          -0.426866990204422,
+          -0.48729141366097295
+        ],
+        "medianPairedReductionPercent": 0.2082546841115973,
+        "candidateFasterBlocks": 7
+      },
+      "fieldHashes": [
+        {
+          "volume": "44ae9d58b4d44e1f727d8de8da8c066a4856aee52ca69669c522274eb0dd56af",
+          "velocity": "f001075c4a26ec3b3327dcc145df581085a519fc3dc99ffc1dfec019748a73d4",
+          "phi": "62b495eaa9a052976900e9d8e59dc06859ccc5865f963ac483f4faaa20011930"
+        },
+        {
+          "volume": "44ae9d58b4d44e1f727d8de8da8c066a4856aee52ca69669c522274eb0dd56af",
+          "velocity": "f001075c4a26ec3b3327dcc145df581085a519fc3dc99ffc1dfec019748a73d4",
+          "phi": "62b495eaa9a052976900e9d8e59dc06859ccc5865f963ac483f4faaa20011930"
+        }
+      ],
+      "fieldsExact": true,
+      "rows": [
+        {
+          "block": 0,
+          "first": 17,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            4.217262499999924,
+            4.204929166666746
+          ]
+        },
+        {
+          "block": 1,
+          "first": 47,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            4.2423236333333385,
+            4.236283333333267
+          ]
+        },
+        {
+          "block": 2,
+          "first": 77,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            4.177583333333314,
+            4.193066666666709
+          ]
+        },
+        {
+          "block": 3,
+          "first": 107,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            5.871786099999978,
+            4.163725000000219
+          ]
+        },
+        {
+          "block": 4,
+          "first": 137,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            4.181754166666603,
+            4.253345833333394
+          ]
+        },
+        {
+          "block": 5,
+          "first": 167,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            4.187373599999895,
+            4.210526366666697
+          ]
+        },
+        {
+          "block": 6,
+          "first": 197,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            4.193608333333153,
+            4.182112499999978
+          ]
+        },
+        {
+          "block": 7,
+          "first": 227,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            4.271315266666594,
+            4.180009699999937
+          ]
+        },
+        {
+          "block": 8,
+          "first": 257,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            4.571369433333166,
+            4.2813680666666185
+          ]
+        },
+        {
+          "block": 9,
+          "first": 287,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            4.3093208333334285,
+            4.207090266666637
+          ]
+        },
+        {
+          "block": 10,
+          "first": 317,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            4.31080416666664,
+            4.329205566666497
+          ]
+        },
+        {
+          "block": 11,
+          "first": 347,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            4.258526366666774,
+            4.27927780000003
+          ]
+        }
+      ],
+      "launchBudgets": [
+        {
+          "ownership": {
+            "fine": 512,
+            "coarse": 1,
+            "all": 512,
+            "regularCoarse": 1,
+            "fused": 1,
+            "hanging": 1,
+            "merged": 512,
+            "coarseMerged": 1,
+            "sharpen": 214,
+            "fineAndSeams": 512,
+            "seamFine": 1,
+            "seamCoarse": 1
+          },
+          "bandSlots": 512,
+          "sharpenGroups": 1
+        },
+        {
+          "ownership": {
+            "fine": 512,
+            "coarse": 1,
+            "all": 512,
+            "regularCoarse": 1,
+            "fused": 1,
+            "hanging": 1,
+            "merged": 512,
+            "coarseMerged": 1,
+            "sharpen": 214,
+            "fineAndSeams": 512,
+            "seamFine": 1,
+            "seamCoarse": 1
+          },
+          "bandSlots": 512,
+          "sharpenGroups": 1
+        }
+      ],
+      "sourceStable": true
+    },
+    "paired-sharpen-jobs-dynamic32-repeat": {
+      "sceneId": "minimal-power-dam-break-32",
+      "policy": "dynamic",
+      "reference": "sharpen-jobs",
+      "blocks": 16,
+      "steps": 60,
+      "warmup": 16,
+      "dt_s": 0.016666666666666666,
+      "sourceBefore": "8ee39d1b6575b5b1067edd6bf1c51c99883a5dd72e885bc782570b88d8efc44e",
+      "sourceAfter": "8ee39d1b6575b5b1067edd6bf1c51c99883a5dd72e885bc782570b88d8efc44e",
+      "summary": {
+        "referenceMs": 6.537855166666699,
+        "candidateMs": 6.480290063541694,
+        "reductionPercent": 0.880489115428873,
+        "pairedReductionPercent": [
+          -0.2944320482946905,
+          9.215406085276234,
+          0.2944228127495174,
+          -0.16596428893236315,
+          -11.537721896649678,
+          0.09419589469717993,
+          0.5439180829945878,
+          0.7965697466549515,
+          9.427564992118164,
+          0.09865204440797637,
+          0.7578745079416138,
+          10.545823531329079,
+          0.2728245696148601,
+          -0.007696297094983429,
+          0.010222574951956886,
+          -9.743271174726264
+        ],
+        "medianPairedReductionPercent": 0.18573830701141825,
+        "candidateFasterBlocks": 11
+      },
+      "fieldHashes": [
+        {
+          "volume": "8ccd5f4bdbca3f531262919504754b863fc20536eeb32959d72725687e47399c",
+          "velocity": "9b326277ca08e972033a1f960605791f722f67eef6b0619d09874e2b2b1abe5a",
+          "phi": "5f42ba57f6725aa6c5fffdc4e00d1ae07e16b9a4bb7b496d9c384b030ac40ab4"
+        },
+        {
+          "volume": "8ccd5f4bdbca3f531262919504754b863fc20536eeb32959d72725687e47399c",
+          "velocity": "9b326277ca08e972033a1f960605791f722f67eef6b0619d09874e2b2b1abe5a",
+          "phi": "5f42ba57f6725aa6c5fffdc4e00d1ae07e16b9a4bb7b496d9c384b030ac40ab4"
+        }
+      ],
+      "fieldsExact": true,
+      "rows": [
+        {
+          "block": 0,
+          "first": 17,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            7.072469450000062,
+            7.093293066666714
+          ]
+        },
+        {
+          "block": 1,
+          "first": 77,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            7.795256949999991,
+            7.076892366666773
+          ]
+        },
+        {
+          "block": 2,
+          "first": 137,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.622663900000044,
+            6.603165266666717
+          ]
+        },
+        {
+          "block": 3,
+          "first": 197,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.32540695000013,
+            6.335904866666776
+          ]
+        },
+        {
+          "block": 4,
+          "first": 257,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.337527083333407,
+            7.068733333333269
+          ]
+        },
+        {
+          "block": 5,
+          "first": 317,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.358645833333382,
+            6.352656250000049
+          ]
+        },
+        {
+          "block": 6,
+          "first": 377,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.384745133333248,
+            6.3500173499999315
+          ]
+        },
+        {
+          "block": 7,
+          "first": 437,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.387283333333229,
+            6.336404166666762
+          ]
+        },
+        {
+          "block": 8,
+          "first": 497,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.9996423666666185,
+            6.339746533333285
+          ]
+        },
+        {
+          "block": 9,
+          "first": 557,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.3030117999999975,
+            6.296793750000021
+          ]
+        },
+        {
+          "block": 10,
+          "first": 617,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.244529866666805,
+            6.197204166666537
+          ]
+        },
+        {
+          "block": 11,
+          "first": 677,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.963393750000008,
+            6.229046533333409
+          ]
+        },
+        {
+          "block": 12,
+          "first": 737,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.174089583333504,
+            6.157245150000138
+          ]
+        },
+        {
+          "block": 13,
+          "first": 797,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.180894450000051,
+            6.181370150000051
+          ]
+        },
+        {
+          "block": 14,
+          "first": 857,
+          "order": [
+            0,
+            1
+          ],
+          "msPerStep": [
+            6.18842776666667,
+            6.187795149999874
+          ]
+        },
+        {
+          "block": 15,
+          "first": 917,
+          "order": [
+            1,
+            0
+          ],
+          "msPerStep": [
+            6.26769445000003,
+            6.878372916666801
+          ]
+        }
+      ],
+      "launchBudgets": [
+        {
+          "ownership": {
+            "fine": 160,
+            "coarse": 480,
+            "all": 170,
+            "regularCoarse": 5,
+            "fused": 320,
+            "hanging": 320,
+            "merged": 325,
+            "coarseMerged": 165,
+            "sharpen": 217,
+            "fineAndSeams": 320,
+            "seamFine": 160,
+            "seamCoarse": 160
+          },
+          "bandSlots": 80,
+          "sharpenGroups": 109
+        },
+        {
+          "ownership": {
+            "fine": 160,
+            "coarse": 480,
+            "all": 170,
+            "regularCoarse": 5,
+            "fused": 320,
+            "hanging": 320,
+            "merged": 325,
+            "coarseMerged": 165,
+            "sharpen": 217,
+            "fineAndSeams": 320,
+            "seamFine": 160,
+            "seamCoarse": 160
+          },
+          "bandSlots": 80,
+          "sharpenGroups": 109
+        }
+      ],
+      "sourceStable": true
+    },
+    "decision": {
+      "retained": "GPU job partition avoids empty seam staging for regular sharpening owners; arithmetic, dispatch and sweep counts unchanged.",
+      "performance": "Small coarse benefit. Dynamic and full h are near-neutral/noisy; do not claim a broad performance breakthrough.",
+      "rejected": "Proposal/limit fusion fails orphan/negative-dust stage parity despite exact coarse trajectory fields. Needs persistent producer membership; not in production."
+    },
+    "validation": {
+      "types": "passed",
+      "unit": {
+        "tests": 917,
+        "pass": 863,
+        "skipped": 54,
+        "fail": 0
+      },
+      "dawnFiles": 50,
+      "dawnPassed": 50,
+      "dawnResults": [
+        "pass     0.5 s  lib/svo/features/scene-publication/tests/svo-cup-primitive.test.ts  (7 pass, 0 skipped)",
+        "pass     1.2 s  tests/backdrop-shrub.test.ts  (3 pass, 0 skipped)",
+        "pass    40.4 s  tests/falling-water-torus-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     2.1 s  tests/foliage-density.test.ts  (5 pass, 0 skipped)",
+        "pass     0.5 s  tests/fraction-readout-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass    24.2 s  tests/live-fluid-shapes-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     0.4 s  tests/scene-shape-parity.test.ts  (8 pass, 0 skipped)",
+        "pass     1.3 s  tests/svo-cell-contour-analytic-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     2.7 s  tests/svo-cell-contour-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     3.4 s  tests/svo-dual-contouring-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass    35.9 s  tests/svo-dual-marching-cubes-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     1.7 s  tests/svo-filter-controls-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     1.0 s  tests/svo-reconstructed-receiver-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     1.0 s  tests/svo-surface-mesh-detail.test.ts  (4 pass, 0 skipped)",
+        "pass     1.7 s  tests/svo-surface-mesh-scheduler-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     2.4 s  tests/svo-tank-shell-publication-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     2.6 s  tests/svo-terrain-contour-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     2.4 s  tests/uniform-atlas-address-dawn.test.ts  (2 pass, 0 skipped)",
+        "pass     8.8 s  tests/uniform-coarse-redistance-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass   101.8 s  tests/uniform-coarse-surface-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass    49.0 s  tests/uniform-cubic-surface-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     0.6 s  tests/uniform-curvature-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass    98.5 s  tests/uniform-detail-policy-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     1.1 s  tests/uniform-dynamic-band-mask-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass   104.7 s  tests/uniform-dynamic-coarsening-dawn.test.ts  (2 pass, 0 skipped)",
+        "pass     5.7 s  tests/uniform-extension-symmetry-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass   112.9 s  tests/uniform-force-cache-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass   298.0 s  tests/uniform-geometric-boundary-dawn.test.ts  (6 pass, 0 skipped)",
+        "pass    97.0 s  tests/uniform-mixed-live-solid-edit-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     3.1 s  tests/uniform-mixed-rigid-body-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     2.9 s  tests/uniform-mixed-solid-parity-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     8.9 s  tests/uniform-nearest-extension-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     0.8 s  tests/uniform-page-generation-dawn.test.ts  (2 pass, 0 skipped)",
+        "pass     0.6 s  tests/uniform-page-redistance-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     1.0 s  tests/uniform-page-support-dawn.test.ts  (10 pass, 0 skipped)",
+        "pass    77.1 s  tests/uniform-pond-rest-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass    30.2 s  tests/uniform-pressure-local-visit-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     1.1 s  tests/uniform-pressure-phase-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     7.5 s  tests/uniform-sharpening-seam-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     2.9 s  tests/uniform-transport-pruning-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass    90.2 s  tests/uniform-volume-dawn.test.ts  (2 pass, 0 skipped)",
+        "pass     0.6 s  tests/vessel-outline-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass    12.3 s  tests/visual-layers-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     1.8 s  tests/voxel-editor-live-boundary-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     1.3 s  tests/voxel-editor-new-room-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass    26.5 s  tests/voxel-editor-production-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass    99.5 s  tests/voxel-editor-retained-frontier-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     1.0 s  tests/water-surface-parallel-scan-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     0.5 s  tests/water-wall-contact-alignment-dawn.test.ts  (1 pass, 0 skipped)",
+        "pass     0.6 s  tests/water-wireframe-depth-dawn.test.ts  (1 pass, 0 skipped)"
+      ],
+      "stageParity": "Both sweep outputs and dust exact after each pair across six layouts, three policies, solids on/off and one-group budget.",
+      "logs": {
+        "types": "artifacts/uniform-coarse-performance-2026-10-03/types-sharpen-jobs-final.log",
+        "unit": "artifacts/uniform-coarse-performance-2026-10-03/unit-sharpen-jobs.log",
+        "dawn": "artifacts/uniform-coarse-performance-2026-10-03/dawn-sharpen-jobs.log",
+        "stageParity": "artifacts/uniform-coarse-performance-2026-10-03/sharpen-jobs-parity.log"
+      }
+    }
+  }
+}

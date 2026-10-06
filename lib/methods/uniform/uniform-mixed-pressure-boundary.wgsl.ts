@@ -27,7 +27,7 @@ fn umBoundaryCoefficient(o:UMOwner,axis:u32,sign:i32)->f32 {
  let distance=f32(o.width)*UM_H[axis];var fraction=0.5;var theta=1.0;
  if(umBoundaryOpen(axis,sign)){
   fraction=1.0;
-  ${surface ? "theta=umPressureSurfaceTheta(umPressurePhi(o),0.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)),f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)));" : ""}
+  ${surface ? "theta=umPressureSurfaceTheta(umPressurePhi(o),0.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)));" : ""}
  }
  ${solid ? "fraction=umPressureWallV(o,axis,sign);if(fraction<=1e-6){return 0.0;}" : ""}
  return fraction/(distance*distance*theta);

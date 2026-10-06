@@ -273,9 +273,34 @@ export interface OctreeTechniqueDebugSource {
   readonly generation: number;
 }
 
-/** Stable dense authority for the combined V/K fill and independent phi contour. */
+/** Stable dense authority for the combined V/K fill and independent phi contour.
+ *
+ * With `mixedOwnership` the fields, and the solver's other h fields
+ * (`volumeTexture`, `surfaceFieldTexture`, `velocityTexture`), may be packed:
+ * a 4h base block plus an atlas of resident h patches, so neither a texture's
+ * extent nor its texel coordinates are the lattice. The ownership buffer ends
+ * with the detail table that maps a logical texel (uniform-detail-abi.ts). A
+ * consumer then
+ *   - binds `mixedOwnership`, includes `uniformDetailRuntimeWGSL` (directly or
+ *     through `uniformMixedPresentationWGSL`) and calls `udrInit()` first in
+ *     every entry point that reads a field;
+ *   - binds, beside a cell or face field, its base block
+ *     (`uniformDetailBaseOf(texture)`: the 4h values at every capacity; the
+ *     field's texture then holds the texels of h tiles only);
+ *   - loads through the accessor of the field's class: `udrLoadCell` (volume,
+ *     surface field, open fraction), `udrLoadFace` (velocity),
+ *     `udrStoredVertex` (vertex phi of an h tile), or the mixed samplers
+ *     built on them, and never samples a field with a sampler;
+ *   - takes the lattice from `udrCellDims`/`udrVertexDims`/`umDimensions()` or
+ *     its own uniform, never from `textureDimensions`;
+ *   - rebinds (the base block with it) when a field's GPUTexture changes:
+ *     the storage reallocates a field's texture when its h store appears,
+ *     grows or goes.
+ * Without `mixedOwnership` (and under identity storage) the accessors are the
+ * raw loads. */
 export interface DenseLevelSetVolumeConsumerSource {
-  /** Optional canonical h/4h ownership; no materialized fine expansion. */
+  /** Optional canonical h/4h ownership; no materialized fine expansion. Its
+   * tail is the detail table of the packed fields. */
   readonly mixedOwnership?: GPUBufferBinding;
   /** Accepted pressure and its liquid authority, indexed by the pressure
    * owners the solve ran on. The phi binding ends with the frame's stage
@@ -283,9 +308,25 @@ export interface DenseLevelSetVolumeConsumerSource {
   readonly mixedPressure?: GPUBufferBinding;
   readonly mixedPressurePhi?: GPUBufferBinding;
   readonly mixedSupport?: GPUBufferBinding;
-  /** Shared vertices; dimensions are cell dimensions plus one on every axis. */
+  /** Shared vertices; logical dimensions are cell dimensions plus one on
+   * every axis (vertex class when packed). */
   readonly vertexPhi: GPUTexture;
-  /** Final open cell fraction K/|cell|, including static and moving solids. */
+  /** The 4h vertex base: a (t+1)^3 r32float whose texel g is phi at lattice
+   * vertex 4g (t = lattice / 4 per axis), current for every tile corner at
+   * each published revision and never folded into an atlas, so its extent is
+   * the lattice under every placement. Present with `mixedOwnership`: a
+   * consumer loads a 4h owner's corners from it and an h tile's vertices
+   * (its corners included) from the detail field
+   * (`uniformMixedPresentationWGSL`). */
+  readonly coarseVertexPhi?: GPUTexture;
+  /** The h vertex field (`vertexPhi`) while the solver holds capacity for h
+   * tiles; absent at zero capacity, when no tile is at h: the same consumer
+   * shader then loads nothing from its detail binding, which may be any
+   * texture. The source object
+   * changes identity when this appears or goes: rebind. */
+  readonly detailVertexPhi?: GPUTexture;
+  /** Final open cell fraction K/|cell|, including static and moving solids
+   * (cell class when packed). */
   readonly openFraction: GPUTexture;
   readonly cellSize_m: readonly [number, number, number];
 }

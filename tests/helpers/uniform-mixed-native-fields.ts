@@ -1,5 +1,12 @@
+import { uniformDetailExtent, uniformDetailField } from "../../lib/methods/uniform/uniform-detail-fields";
+/** A solver field's lattice extent; its texture may be a packed atlas. */
+export const mixedExtent = (texture: GPUTexture): [number, number, number] => uniformDetailExtent(texture);
+/** The texture holding a solver field's texels now, for raw whole-texture copies. */
+export const mixedPhysical = (texture: GPUTexture): GPUTexture => uniformDetailField(texture)?.storage.physical(texture) ?? texture;
 /** Tightly packed texture readback for transport-stage comparisons. */
 export async function readMixedTexture(device: GPUDevice, texture: GPUTexture): Promise<Float32Array> {
+  const field = uniformDetailField(texture);
+  if (field) return field.storage.read(texture);
   const components = texture.format === "rgba32float" ? 4 : 1;
   const row = texture.width * components * 4, pitch = Math.ceil(row / 256) * 256;
   const staging = device.createBuffer({ size: pitch * texture.height * texture.depthOrArrayLayers, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });

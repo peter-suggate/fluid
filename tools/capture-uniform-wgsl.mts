@@ -4,17 +4,23 @@
 // dispatched, and parses every module with naga. Run it before any Dawn run
 // after a WGSL edit: a parse error costs nothing here.
 // Usage: node --import tsx tools/capture-uniform-wgsl.mts [scene] [outDir] [default|fine]
-//   default = dynamic coarsening; fine = all-h simulation (regions). Pressure is always band.
+//   default = dynamic coarsening; fine = all-h simulation (detailPolicy full). Pressure is always band.
 //   env FRAMES=n (frames to encode; the mock's zero readbacks stop after frame 1's encode,
 //   reported as "did not converge ... 0 cycles" — expected).
+//   env DETAIL=<spec> (QA detail storage: identity, packed, compact:<slots>, compact:all, each [:edge]).
 // Naga quirks that Dawn accepts: "already in scope", "read-write storage textures prior to MSL 1.2".
 import {mkdirSync,writeFileSync,readdirSync,readFileSync} from "node:fs";
 import {spawnSync} from "node:child_process";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
+import {setUniformDetailStorageForQA,uniformDetailOptionsFromSpec} from "../lib/methods/uniform/uniform-detail-fields";
 
-const [sceneId="sparse-cm12-long-dam-break",out="wgsl",arm="default"]=process.argv.slice(2);
+// The dump defaults to the system temp directory: a relative default left a wgsl/ folder in the repository.
+const [sceneId="sparse-cm12-long-dam-break",out=join(tmpdir(),"fluid-uniform-wgsl"),arm="default"]=process.argv.slice(2);
+if(process.env.DETAIL)setUniformDetailStorageForQA(uniformDetailOptionsFromSpec(process.env.DETAIL));
 mkdirSync(out,{recursive:true});
 const flags=(names:string[])=>Object.fromEntries(names.map((n,i)=>[n,1<<i]));
 Object.assign(globalThis,{
@@ -49,7 +55,7 @@ const scene=structuredClone(sceneDocument(getSceneDefinition(sceneId)));scene.fl
 if(arm!=="default"&&arm!=="fine")throw new Error(`Unknown arm ${arm}`);
 const dynamic=arm==="default";
 const t0=performance.now();
-const solver:any=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{coarsening:dynamic?"dynamic":"regions",surfaceDeficitBalancing:"off"},undefined,()=>{});
+const solver:any=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{detailPolicy:dynamic?"dynamic":"full",surfaceDeficitBalancing:"off"},undefined,()=>{});
 console.log(JSON.stringify({modules,pipelines:pipes.length,ms:performance.now()-t0}));
 const by=new Map<string,{n:number,bytes:number,label:string}>();for(const [id,label,bytes] of pipes){const k=String(id);const e=by.get(k)??{n:0,bytes,label};e.n++;by.set(k,e);}
 const rows=[...by].map(([id,e])=>({id,...e,cost:e.n*e.bytes})).sort((a,b)=>b.cost-a.cost);let tot=0;for(const r of rows)tot+=r.cost;

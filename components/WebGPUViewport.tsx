@@ -124,6 +124,7 @@ import { SceneInstrumentTags } from "./PipelineOverlay";
 import { ViewportModeToggle } from "./ViewportModeToggle";
 import { applySceneDraft, displaySceneSnapshot, useDisplayScene, type SceneDraftSubject } from "../lib/core/stores/scene-draft-store";
 import { resolvedMethodValues } from "../lib/core/stores/method-store";
+import { createDetailFocusCoalescer } from "../lib/core/solver-detail";
 import { drawnBodies, mergeDrawnPoses } from "../lib/core/stores/diagnostics-store";
 import { samePublishedBodyPoses, type GPURigidBodyPose } from "../lib/core/webgpu-rigid-body";
 import type { UIStoreHook } from "../lib/core/stores/ui-store";
@@ -1207,6 +1208,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       onEffectiveRendererStatus: (effectiveRendererStatus) => session.diagnostics.getState().set({ effectiveRendererStatus }),
     });
     let safeSimulationEpoch: number | undefined;
+    // This pane's orbit target as a transient detail focus: a new revision
+    // only when it moves, never written to the document or the address.
+    const detailFocus = createDetailFocusCoalescer();
     let runStateSyncRevision = 0;
     const syncRunState = (runState: RunState) => {
       const revision = ++runStateSyncRevision;
@@ -1363,6 +1367,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
               // pins the window to one advance, and a depth captured at mount
               // would leave this pane two deep inside the barrier.
               inFlightDepth: simulation.inFlightDepth(),
+              detailFocus: detailFocus(ui.camera.target_m),
             },
             { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode, lensPhase: ui.gridOverlayLensPhase, layers: ui.visualLayers },
             scenePreset.background,
@@ -1709,6 +1714,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // While carrying, the ring would be a second thing competing for the click
     // that puts the object down.
     if (carryRef.current) return;
+    // The same button abandons a sculpt stroke in flight, and that press was an
+    // answer to the stroke rather than a question about what is under it.
+    if (voxelGesture.swallowsContextMenu(event.timeStamp)) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const ray = viewportRayForPointer(session.ui.getState().camera, event.clientX, event.clientY, rect);
     const context = editorEntityContext(session);
@@ -2398,7 +2406,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   });
 
   const pointerDown = async (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (voxelGesture.down(event)) {
+    // An armed sculpt tool answers first: it takes the press, or hands it to
+    // the camera — Shift, the middle button, a held Space, or a press on the
+    // empty room — or, with nothing armed, has no opinion at all.
+    const voxelClaim = voxelGesture.down(event);
+    if (voxelClaim === true) {
       setHoverTarget(null); publishHoverHighlight(null);
       return;
     }
@@ -2427,6 +2439,17 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY,
         downX: event.clientX, downY: event.clientY,
         action: event.shiftKey || event.button === 1 ? "pan" : "orbit" };
+      return;
+    }
+    // The armed tool gave this press to the camera, so for its length EDIT
+    // navigates exactly as LOOK does: no pick, no handle, no implicit sweep.
+    // `claimed`, because a release that never travelled must not be read as a
+    // click on the room either.
+    if (voxelClaim === "camera") {
+      setHoverTarget(null); publishHoverHighlight(null);
+      pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY,
+        downX: event.clientX, downY: event.clientY,
+        action: event.shiftKey || event.button === 1 ? "pan" : "orbit", claimed: true };
       return;
     }
     // Arm before any of the early returns below claim the press: the release, not
@@ -2980,11 +3003,12 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       aria-disabled={!pickingInteractive}
       data-pixel-trace={pixelTraceEnabled && !armedGesture && !pixelTracePinned ? "live" : undefined}
       data-shape-grab={handleHover ? "true" : undefined}
+      data-voxel-aim={voxelGesture.aim}
       onPointerDown={pointerDown}
       onPointerMove={pointerMove}
       onPointerUp={pointerUp}
       onPointerCancel={pointerUp}
-      onPointerLeave={() => { setHoverTarget(null); publishHoverHighlight(null); setHandleHover(null); setCursorDrop(null); }}
+      onPointerLeave={() => { voxelGesture.leave(); setHoverTarget(null); publishHoverHighlight(null); setHandleHover(null); setCursorDrop(null); }}
       onWheel={(event) => {
         // The wheel is the carry's one extra degree of freedom: a single pointer
         // cannot say "further away", and reaching across the tank is most of

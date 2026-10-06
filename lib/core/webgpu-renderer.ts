@@ -2,6 +2,7 @@ import { legacyVisualLayers, type VisualLayerState } from "./visual-layers";
 import { authoredFluidGeometryKey } from "./authored-fluid-edit";
 import { publishOpaqueSurfaceCapability } from "../svo/features/shading/deferred-specialization";
 import { validateLiveFluidEdit, type LiveFluidEdit, type LiveFluidEditResult } from "./live-fluid-edit";
+import type { SolverDetailFocus } from "./solver-detail";
 import type { FluidSurfaceRenderMode } from "../features/surface-display/definition";
 import type { SparseVoxelDrySceneData } from "../svo/contracts/scene-publication";
 import { SimulationFailureError } from "./simulation-failure";
@@ -531,6 +532,13 @@ export interface SimulationRunConfig {
    * leaving lockstep changes throughput and never rebuilds a solver.
    */
   inFlightDepth?: number;
+  /**
+   * This pane's transient detail focus (the orbit target), coalesced to a
+   * revision by the host. Never persisted and, like `inFlightDepth`, absent
+   * from every construction key: the solver consumes it at a frame boundary
+   * (GPUSolverInstance.applyDetailInput).
+   */
+  detailFocus?: SolverDetailFocus;
 }
 
 /** Run values that shape only the SVO presentation source, never the solver. */
@@ -1018,6 +1026,9 @@ export class FluidLabRenderer {
   private scalarFallbackTexture?: GPUTexture;
   private gpuFluid?: GPUSolverInstance;
   private readonly deferredPresentedTimes = new WeakMap<GPUSolverInstance, number>();
+  /** The app worker's choice (enableSolverPipelineWarmup): harness hosts compile only what their states need. */
+  private solverPipelineWarmup = false;
+  private readonly warmedSolvers = new WeakSet<GPUSolverInstance>();
   /** Newest submitted solver time each solver's last presentation carried. */
   private readonly presentedStateTimes = new WeakMap<GPUSolverInstance, number>();
   private topologyFreezeSolver?: GPUSolverInstance;
@@ -2072,7 +2083,7 @@ export class FluidLabRenderer {
     const columnBases = columnSource ?? this.columnBaseTexture;
     if (!this.device || this.disposed || this.runtimeFailure || this.deviceLost || !texture || !columnBases || !gridCells || !velocity || !pressureSamples || !divergence || !pressure || !density) return;
     this.attachedSurfaceTexture = texture;
-    this.waterPipeline?.setVolume(texture, columnBases, this.gpuFluid?.denseLevelSetVolumeSource?.vertexPhi, this.gpuFluid?.denseLevelSetVolumeSource?.mixedOwnership);
+    this.waterPipeline?.setVolume(texture, columnBases, this.gpuFluid?.denseLevelSetVolumeSource);
     this.waterPipeline?.setFluidDomain(this.gpuFluid?.fluidDomain);
     const sparsePresentation = this.sparseWorldPresentation(this.gpuFluid);
     const globalFineLevelSet = sparsePresentation?.fineLevelSet
@@ -2549,7 +2560,10 @@ export class FluidLabRenderer {
       }
       if(requiresFencedInitialRasterPresentation(config.methodId)&&!this.sparseAuthorityReady(solver)){solver.destroy();sidecar?.destroy();throw new Error(`${method.label} solver returned before fenced sparse t=0 authority`);}
       report({phase:"attach",taskId:"solver.attach",label:"Attach warmed solver",completed:reportedCompleted,total:reportedTotal+1});
+      // This renderer presents while a change waits for pipelines.
+      solver.acceptPipelineWaits?.();
       solver.applyRuntimeValues?.(config.values);
+      if (config.detailFocus) solver.applyDetailInput?.({ focus: config.detailFocus });
       this.attachedSolverDocumentKey = gpuSceneSolverKey(scene, config);
       this.gpuFluid=solver;this.svoSceneSidecar=sidecar;this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.attachedPresentationMode=presentationMode;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.globalFineWaterAttached=false;
       const sparseWorldState=this.refreshSparseWorldState(solver);
@@ -2619,6 +2633,8 @@ export class FluidLabRenderer {
   private pendingLiveSolidEdit = false;
 
   /** Complete the GPU wet-overlap proof and publish within the same continuation. */
+  /** After each solver's first presentation, build its remaining pipelines in the background. */
+  enableSolverPipelineWarmup(): void { this.solverPipelineWarmup = true; }
   async acceptLiveSolidEdit(scene: SceneDescription, stillCurrent: () => boolean = () => true): Promise<void> {
     if (this.pendingLiveSolidEdit) throw new Error("A solid edit is still being accepted.");
     this.validateLiveSolidEdit(scene);
@@ -2928,6 +2944,7 @@ export class FluidLabRenderer {
     }
     const previousResolution = this.gpuFluid.info.uniformSimulationCellScale;
     this.gpuFluid.applyRuntimeValues?.(config.values);
+    if (config.detailFocus) this.gpuFluid.applyDetailInput?.({ focus: config.detailFocus });
     if (this.gpuFluid.info.uniformSimulationCellScale !== previousResolution) {
       // A paused resolution transfer consumes no physics step, so the usual
       // advance receipt will not publish its new grid to the controls.
@@ -3403,16 +3420,20 @@ export class FluidLabRenderer {
         readyGPUFluid.volumeTexture,
       );
     }
+    // The solver's level-set source changes identity when it re-creates a
+    // field or its h-tile capacity reaches or leaves zero: both consumers rebind.
+    this.waterPipeline?.setDenseLevelSetVolumeSource(this.gpuFluid?.denseLevelSetVolumeSource);
     this.gridOverlayPipeline?.setDenseLevelSetVolumeSource(this.gpuFluid?.denseLevelSetVolumeSource);
     // Legacy modes bind one source directly; composed Uniform layers pack the
     // selected sources together without increasing the storage-binding budget.
     if (config.methodId !== "uniform-volume") this.gridOverlayPipeline?.setViewRecords(gridOverlay?.mode === "fine-tiles" ? this.gpuFluid?.tileClassSource
       : gridOverlay?.mode === "solve-window" ? this.gpuFluid?.solveWindowSource : undefined);
-    // Layout views are the tiles, grid and pressure layers' records: the view
-    // arms them, as it does the markers, so an unwatched frame records none.
+    // Layout views are the tiles, importance, grid and pressure layers'
+    // records: the view arms them, as it does the markers, so an unwatched
+    // frame records none.
     const uniformLayers = config.methodId === "uniform-volume" ? gridOverlay?.layers : undefined;
     this.gpuFluid?.setLayoutViewsEnabled?.(Boolean(gridOverlay?.axis !== "off" && uniformLayers?.visible
-      && uniformLayers.enabled.some(id => id === "tiles" || id === "grid" || id === "pressure")));
+      && uniformLayers.enabled.some(id => id === "tiles" || id === "importance" || id === "grid" || id === "pressure")));
     this.gridOverlayPipeline?.setLayers(config.methodId === "uniform-volume" ? gridOverlay?.layers : undefined, this.gpuFluid?.tileClassSource, this.gpuFluid?.solveWindowSource, this.gpuFluid?.gridPressureOrigin, this.gpuFluid?.gridVelocityBoundary, this.gpuFluid?.volumePageSource);
     if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {const activeSparsePresentation=this.sparseWorldPresentation(this.gpuFluid);const compactSurface=Boolean(activeSparsePresentation?.fineLevelSet||this.gpuFluid.globalFineLevelSetSource||this.gpuFluid.coarseLevelSetSource);this.gridOverlayPipeline?.setVolume(compactSurface?this.scalarFallbackTexture:this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture, this.gpuFluid.volumeTexture);this.gridOverlayPipeline?.setSparseSource(activeSparsePresentation?.adaptiveGrid??this.gpuFluid.sparseAdaptiveGridSource);}
     // A newly attached sparse source may still be compiling its water
@@ -3972,6 +3993,11 @@ export class FluidLabRenderer {
     presentationQueueTrace?.begin();
     this.device.queue.submit([presentationCommands]);
     if (readyGPUFluid) this.presentedStateTimes.set(readyGPUFluid, readyGPUFluid.info.submittedTime_s ?? 0);
+    // The app's first image is on its way: build the pipelines no state has needed yet.
+    if (this.solverPipelineWarmup && readyGPUFluid && !this.warmedSolvers.has(readyGPUFluid)) {
+      this.warmedSolvers.add(readyGPUFluid);
+      void readyGPUFluid.warmPipelines?.();
+    }
     if (readyGPUFluid?.deferredFramePublication) {
       // The image carries the newest submitted state, not the newest receipt.
       this.deferredPresentedTimes.set(readyGPUFluid, Math.max(readyGPUFluid.info.completedTime_s ?? 0,

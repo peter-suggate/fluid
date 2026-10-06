@@ -26,9 +26,9 @@ export function regionDrawWedge<Doc, Patch>(
     icon: "region",
     tone: "region",
     hint: remaining > 0
-      ? space.heldTiers
+      ? space.drawHint ?? (space.heldTiers
         ? `Drag a box over the water to hold it ${space.heldTiers.map((tier) => tier.label.toLowerCase()).join(" or ")}`
-        : "Drag a box over the water to cap how finely it is solved there"
+        : "Drag a box over the water to cap how finely it is solved there")
       : `All ${space.capacity} refinement boxes are in use — delete one to draw another`,
     enabled: remaining > 0,
     effect: { kind: "arm", gesture: "region-draw" },

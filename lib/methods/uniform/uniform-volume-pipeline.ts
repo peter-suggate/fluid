@@ -53,7 +53,7 @@ const supportControls: FluidStageControl[] = [
       return map?`${map.shell} / ${map.total} (${map.percent}%)${reach?` · +${reach}`:""}`:"—";}},
 ];
 const onOff=[{value:"on",label:"On"},{value:"off",label:"Off"}];
-const dynamic = (context: FluidPipelineContext) => context.values.coarsening !== "regions";
+const dynamic = (context: FluidPipelineContext) => context.values.detailPolicy === "dynamic";
 const bodies = (count: number) => `${count} ${count === 1 ? "body" : "bodies"}`;
 const base = (id: string) => {
   const stage = UNIFORM_FLUID_PIPELINE.stages.find(candidate => candidate.id === id);
@@ -229,12 +229,12 @@ const stages: FluidPipelineStage[] = [
     id:"uniform-volume-census", band:"census", side:"right", label:"Resolution census",
     phaseLabels:[A.resolutionCensus.label],
     tip:{summary:"At the frame head, the dynamic census: tiles the surface can reach over the census horizon (RK2 departure boxes traced frame by frame, boundary impacts, bodies) stay h and the rest coarsen to 4h. The GPU layout builder writes the generation this frame advects on, and the remap moves V, velocity, phi and the extension onto it in the same submit. No host round trip. The extension it reads is the previous frame's tail extension, priced under Velocity extension.",
-      reads:"phi, V, extended velocity, body poses", writes:"this frame's ownership generation, remapped fields", feeds:"this frame's transport and pressure", gate:"dynamic coarsening"},
+      reads:"phi, V, extended velocity, body poses", writes:"this frame's ownership generation, remapped fields", feeds:"this frame's transport and pressure", gate:"Dynamic simulation detail"},
     controls:[
-      {kind:"param-choice",param:"coarsening",label:"Coarsening",
-        options:[{value:"dynamic",label:"Dynamic"},{value:"regions",label:"Regions"}],
-        hint:"Dynamic: after every frame, only tiles the surface can occupy during the next step are fine. Regions: authored refinement regions choose coarse tiles, and this stage and layout adopt encode nothing."},
-      {kind:"param-range",param:"coarseningBoundaryTravel",label:"Boundary impact travel",unit:"cells/step",
+      {kind:"param-choice",param:"detailPolicy",label:"Simulation detail",
+        options:[{value:"requested",label:"Requested"},{value:"dynamic",label:"Dynamic"},{value:"full",label:"Full"}],
+        hint:"Dynamic: at every frame head, tiles the surface can occupy during the next step are h, plus Fine regions and the focus. Requested: 4h except Fine regions and solid contact; Full: all h. Both build the layout on the host, and this stage and layout adopt encode nothing."},
+      {kind:"param-range",param:"detailImpactTravel",label:"Impact travel",unit:"cells/step",
         min:0,max:64,step:0.5,digits:1,enabled:dynamic,
         hint:"Surface liquid moving at least this many fine cells per step toward a wall or solid it reaches within one 4h cell stays fine."},
     ],

@@ -25,7 +25,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   const texture=(n:number,format:GPUTextureFormat)=>{const t=d.createTexture({size:[n,n,n],dimension:"3d",format,usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_DST});textures.push(t);return t;};
   const buffer=(size:number,uniform=false)=>{const b=d.createBuffer({size,usage:(uniform?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});buffers.push(b);return b;};
   const vertexPhi=texture(N+1,"r32float"),correction=texture(N,"r32float"),velocity=texture(N,"rgba32float"),copy=texture(N,"rgba32float");
-  const phi=buffer(4*cells),negative=buffer(4*3*N*N),coarsePressure=buffer(4*T**3),params=buffer(48,true),presentation=buffer(4*cells);
+  const phi=buffer(4*cells),negative=buffer(4*3*N*N),coarsePressure=buffer(4*T**3),params=buffer(64,true),presentation=buffer(4*cells);
   d.queue.writeBuffer(params,0,new Float32Array([1,1,1,1/60,1000,1,1/60000,1,5,1,1,1]));
   const band=new UniformPressureBand(d,simulation,pressure,{phi:{buffer:phi},vertexPhi,correction,forced:{velocity,negative},velocity,negative,copy,coarsePressure:{buffer:coarsePressure},params,presentation:{buffer:presentation,word:0}});
   try{

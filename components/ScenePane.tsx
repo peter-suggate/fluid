@@ -1,6 +1,6 @@
 "use client";
 
-import { WorkProgress } from "./WorkProgress";
+import { ActivityIndicator, type ActivityEntry } from "./ActivityIndicator";
 import { resourceWorkProgress } from "../lib/core/work-progress";
 import { requestManualGPUStart } from "../lib/core/gpu-startup";
 import type { ResourceActivity, ResourcePluginDefinition } from "../lib/core/resource-readiness";
@@ -14,7 +14,7 @@ import { PipelineOverlay } from "./PipelineOverlay";
 import { RadialMenu } from "./RadialMenu";
 import { SceneScaleOverlay } from "./SceneScaleOverlay";
 import { SceneSelector } from "./SceneSelector";
-import { VoxelToolShelf } from "./VoxelToolShelf";
+import { VoxelToolRail } from "./VoxelToolRail";
 import { WebGPUViewport } from "./WebGPUViewport";
 
 /**
@@ -29,34 +29,40 @@ import { WebGPUViewport } from "./WebGPUViewport";
  * being authored and one recorder.
  */
 
-function GPUInitializationPanel({ activity, plugin }: {
-  activity: ResourceActivity;
-  plugin: ResourcePluginDefinition;
-}) {
-  const heading = activity.lane === "platform" ? "Starting WebGPU"
+/** What a bring-up is called, by the lane that is doing it. */
+function bringupTitle(activity: ResourceActivity): string {
+  return activity.lane === "platform" ? "Starting WebGPU"
     : activity.lane === "fluid" && activity.operation ? "Applying simulation settings"
     : activity.lane === "fluid" ? "Preparing fluid"
     : activity.lane === "svo" ? "Preparing sparse presentation" : "Preparing tool";
-  return <div className="gpu-build-card gpu-initializing" role="region" aria-label={heading}>
-    <div className="gpu-build-heading"><i aria-hidden="true" /><strong>{heading}</strong></div>
-    {activity.operation && <p className="gpu-build-operation">{activity.operation}</p>}
-    {/* The label is not restated here — WorkProgress leads with it. */}
-    <WorkProgress progress={resourceWorkProgress(activity, plugin)} />
-    <small>{activity.retainingPrevious
-      ? "The attached generation remains usable. "
-      : plugin.blocks === "viewport"
-        ? "The rest of the studio remains available. "
-        : "The editor and camera remain available. "}{plugin.blocks === "viewport"
-          ? "Scene interaction unlocks when a complete SVO frame is fenced."
-          : plugin.blocks === "transport"
-            ? "Simulation transport unlocks when authoritative fluid is fenced."
-            : "This work does not block product interaction."}</small>
-  </div>;
 }
 
-/** Work that blocks nothing is reported, but it never takes the tray's width. */
-function ResourceActivityPill({ activity, plugin }: { activity: ResourceActivity; plugin: ResourcePluginDefinition }) {
-  return <WorkProgress compact progress={resourceWorkProgress(activity, plugin)} />;
+/**
+ * One line of the activity mark, from a plugin's in-flight work.
+ *
+ * The fraction is counted work through *all* of the plugin's declared phases:
+ * whole phases behind this one, plus this phase's own count. Phases are taken
+ * as equal steps — the plugin declares their order, not their weight — which is
+ * what stops the ring emptying each time a phase turns over.
+ */
+function activityEntry(activity: ResourceActivity, plugin: ResourcePluginDefinition, blocking: boolean): ActivityEntry {
+  const progress = resourceWorkProgress(activity, plugin);
+  const counted = activity.total > 0 && Number.isFinite(activity.completed);
+  const within = counted ? Math.max(0, Math.min(1, activity.completed / activity.total)) : undefined;
+  const phases = plugin.progressPhases ?? [];
+  const phaseIndex = phases.findIndex((phase) => phase.id === activity.phase);
+  const fraction = within === undefined ? undefined
+    : phaseIndex >= 0 ? (phaseIndex + within) / phases.length : within;
+  return {
+    id: activity.id,
+    // A blocking bring-up is headed by its lane, so its line says what it is
+    // doing right now; everything else is named by its own label.
+    label: blocking && activity.operation ? activity.operation : progress.label,
+    state: "active",
+    count: counted ? `${Math.min(activity.completed, activity.total).toLocaleString()} / ${activity.total.toLocaleString()}` : undefined,
+    fraction,
+    startedAt_ms: activity.startedAt_ms,
+  };
 }
 
 export interface ScenePaneProps {
@@ -95,6 +101,31 @@ export function ScenePane({ paneId, tagged = false, focused = false, onFocus }: 
     && (gateWork.state !== "active" || (trayCards.length === 0 && transportInline.length === 0))
     ? gateWork : undefined;
 
+  // One mark for all of it. A bring-up that has taken the scene heads the mark
+  // with its lane and says, once, what it is holding up; work that blocks less
+  // is a line under it, or — alone — the headline itself.
+  const lead = trayCards[0];
+  const pluginOf = (activity: ResourceActivity) => resourceReadiness.plugins[activity.pluginId].plugin;
+  const activityEntries: ActivityEntry[] = [
+    ...trayCards.map((activity) => activityEntry(activity, pluginOf(activity), true)),
+    ...trayPills.map((activity) => activityEntry(activity, pluginOf(activity), false)),
+    ...(transportWork && transportWork.state !== "complete" ? [{
+      id: "transport-gate",
+      label: transportWork.label,
+      state: transportWork.state,
+      count: transportWork.total !== undefined && transportWork.completed !== undefined
+        ? `${transportWork.completed.toLocaleString()} / ${transportWork.total.toLocaleString()} ${transportWork.unit ?? ""}`.trim()
+        : undefined,
+      // Running work is its own explanation; a fault or a wait has to say why.
+      detail: transportWork.state === "active" ? undefined : transportWork.detail,
+    }] : []),
+  ];
+  const activityTitle = lead ? bringupTitle(lead) : undefined;
+  const activityNote = lead?.retainingPrevious ? "The current scene stays in use until this is ready."
+    : lead ? "The scene unlocks at its first complete frame."
+    : transportInline.length > 0 ? "Playback unlocks when the fluid is ready."
+    : undefined;
+
   return (
     <section
       className="viewport-shell"
@@ -109,7 +140,7 @@ export function ScenePane({ paneId, tagged = false, focused = false, onFocus }: 
     >
       <WebGPUViewport paneId={paneId} />
       <EditorModeChip />
-      <VoxelToolShelf />
+      <VoxelToolRail />
       <RadialMenu />
       <SceneScaleOverlay />
       <PipelineOverlay />
@@ -131,18 +162,7 @@ export function ScenePane({ paneId, tagged = false, focused = false, onFocus }: 
         onClick={() => setSelectorOpen(!selectorOpen)}
       >{paneId.toUpperCase()}</button>}
       {selectorOpen && <SceneSelector />}
-      {!stopped && (trayCards.length > 0 || trayPills.length > 0 || transportWork) && <div className="resource-activity-tray" aria-label="Resource tasks">
-        {trayCards.map((activity) => <GPUInitializationPanel
-          key={activity.id}
-          activity={activity}
-          plugin={resourceReadiness.plugins[activity.pluginId].plugin}
-        />)}
-        {(trayPills.length > 0 || transportWork) && <div className="resource-activity-pills">
-          {/* Faults keep their explanation; running work is a compact pill. */}
-          {transportWork && <WorkProgress compact={transportWork.state !== "error"} progress={transportWork} />}
-          {trayPills.map((activity) => <ResourceActivityPill key={activity.id} activity={activity} plugin={resourceReadiness.plugins[activity.pluginId].plugin} />)}
-        </div>}
-      </div>}
+      {!stopped && <ActivityIndicator title={activityTitle} entries={activityEntries} note={activityNote} />}
       {gpuStatus.state === "manual" && <div className="gpu-fallback gpu-manual-start" role="status">
         <strong>WebGPU startup paused</strong>
         <p>{safeBringup

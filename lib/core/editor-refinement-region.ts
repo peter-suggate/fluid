@@ -261,9 +261,10 @@ export const studioRegionSpace: RegionSpace<SceneDescription, Partial<SceneDescr
  */
 const uniformRegionSpace: RegionSpace<SceneDescription, Partial<SceneDescription>> = {
   ...studioRegionSpace, cellSizes: [1, 4], defaultCellSize_cells: 1, brick_cells: 4, allowAutomaticCeiling: false,
+  drawHint: "Drag a box over the water where it needs finer simulation",
   heldTiers: [
-    { cells: 1, label: "Fine", hint: "Covered tiles are solved at the finest cell (1³)." },
-    { cells: 4, label: "Coarse", hint: "Covered tiles are one 4³ cell each; tiles touching solids stay fine and tiles beside fine ones grade to 2³." },
+    { cells: 1, label: "Fine", hint: "Covered tiles run at the finest cell (h) under every detail policy; the solver never clips a Fine box." },
+    { cells: 4, label: "Coarse", hint: "Covered tiles stay one 4h cell each under Dynamic detail (solid contact stays h); Requested is already 4h outside Fine boxes." },
   ],
 };
 export function studioRegionSpaceForMethod(methodId?: string) {

@@ -15,6 +15,7 @@ import { isSparseCM12DirtyOverlayMode } from "./sparse-cm12-dirty-visualizations
 import { isPressureJournalOverlayMode } from "../features/pressure-inspection/gpu/overlay";
 import { cameraForPreset, defaultScenePresetId, findSceneDefinition, getScenePreset, scenePresets, type ScenePreset } from "./scenes";
 import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "./scene-definition";
+import { solidVoxelsOnMovedLattice } from "./scene-lattice";
 import { resolveSession, type PaneSession } from "./session/session";
 import { replaceLocationSearch, startHostQueryStateSync } from "./query-state-sync";
 import {
@@ -81,6 +82,8 @@ export type QueryState = RuntimeFeatureState & {
   methodId: string;
   quality: GPUQuality;
   overrides: Record<string, MethodParamValues>;
+  /** A retired parameter the link carried, said once on hydration (SimulationMethod.migrateOverrides). */
+  methodNotice?: string;
   presetId: string;
   scene: SceneDescription;
   view?: ShellView;
@@ -108,7 +111,7 @@ export type UIQueryState = FeatureUIQueryState & {
 
 };
 
-export type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides">;
+export type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides" | "methodNotice">;
 export type SerializableSceneState = Pick<QueryState, "presetId" | "scene">;
 /**
  * The page-level half of the address: which shell layer is in front, and pane
@@ -202,6 +205,8 @@ export const sceneQueryPathValue = getAtPath;
 export function withSceneQueryPathValue(scene: SceneDescription, path: string, value: unknown): SceneDescription {
   const next = cloneScene(scene);
   setAtPath(next, path, value);
+  // The container and lattice paths move the cells the shell is compiled on.
+  next.solidVoxels = solidVoxelsOnMovedLattice(scene, next);
   return next;
 }
 
@@ -475,19 +480,33 @@ function methodQueryState(query: URLSearchParams): SerializableMethodState {
   const quality = qualityCandidate && qualities.includes(qualityCandidate)
     ? qualityCandidate : "balanced";
   const overrides: Record<string, MethodParamValues> = {};
+  let methodNotice: string | undefined;
   for (const method of registeredSimulationMethods()) {
-    const values: MethodParamValues = {};
+    let values: MethodParamValues = {};
     for (const spec of method.params) {
       const raw = query.get(`param.${method.id}.${spec.key}`);
       if (raw === null) continue;
       const value = parseMethodValue(method.id, spec.key, raw);
       if (value !== undefined) values[spec.key] = value;
     }
+    if (method.migrateOverrides) {
+      // Undeclared keys reach the method's migration as raw strings; serialize drops them.
+      const prefix = `param.${method.id}.`, retired: MethodParamValues = {};
+      for (const [key, raw] of query.entries()) {
+        const name = key.startsWith(prefix) ? key.slice(prefix.length) : undefined;
+        if (name && !method.params.some(spec => spec.key === name)) retired[name] = raw;
+      }
+      if (Object.keys(retired).length) {
+        const migrated = method.migrateOverrides({ ...retired, ...values });
+        values = Object.fromEntries(Object.entries(migrated.overrides).filter(([key]) => method.params.some(spec => spec.key === key)));
+        if (method.id === methodId && migrated.notice) methodNotice = migrated.notice;
+      }
+    }
     if (Object.keys(values).length > 0) {
       overrides[method.id] = { ...overrides[method.id], ...values };
     }
   }
-  return { methodId, quality, overrides };
+  return { methodId, quality, overrides, ...(methodNotice ? { methodNotice } : {}) };
 }
 
 /** The solver layer of an external query string. See `methodQueryState`. */
@@ -514,7 +533,7 @@ export function parseQueryState(search: string): QueryState {
   const query = new URLSearchParams(search);
   migrateLegacyOctreeMethodQuery(query);
   const preset = exactPreset(query.get("scene")) ?? getScenePreset(defaultScenePresetId);
-  const { methodId, quality, overrides } = methodQueryState(query);
+  const { methodId, quality, overrides, methodNotice } = methodQueryState(query);
 
   /**
    * The lattice comes back through the factory, not as a patched number.
@@ -578,6 +597,11 @@ export function parseQueryState(search: string): QueryState {
     }
     catch { /* Malformed external values are ignored and canonicalized away. */ }
   }
+  // `solidVoxels` is not a query path, so the preset's shell is still the one
+  // compiled for the preset's tank. A link that resized the container, closed
+  // its top or changed its shape has to recompile it, or the old walls come
+  // back as opaque voxels standing inside the tank the link describes.
+  patched.solidVoxels = solidVoxelsOnMovedLattice(baseScene, patched);
   // Links written before painted water moved to `seeds` carry the seed array on
   // its old `scene.*` path. Read here rather than from `sceneQueryPaths`, which
   // no longer lists it, so those links keep their water; the compact key below
@@ -627,6 +651,7 @@ export function parseQueryState(search: string): QueryState {
     methodId,
     quality,
     overrides,
+    ...(methodNotice ? { methodNotice } : {}),
     presetId: preset.id,
     scene: validateScene(scene).length === 0 ? scene : baseScene,
     view: shellViewFromQuery(search),
@@ -837,6 +862,7 @@ export function applyQueryStateToSession(session: PaneSession, search: string): 
   session.scene.getState().setScene(state.scene, state.presetId);
   session.ui.setState(state.ui);
   session.runtime.setState(pickRuntimeFeatures(state));
+  if (state.methodNotice) session.runtime.getState().setNotice(state.methodNotice, "info");
 }
 
 /**
@@ -942,6 +968,7 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void, opti
       session.ui.setState(state.ui);
       onHydrated(state.presetId);
       session.runtime.setState(pickRuntimeFeatures(state));
+      if (state.methodNotice) session.runtime.getState().setNotice(state.methodNotice, "info");
     },
     sources: [
       (onChange) => session.method.subscribe(onChange),

@@ -17,6 +17,8 @@ import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgs
 import {sceneShapeWgsl} from "../../core/scene-shape";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
 import {uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
+import {UniformPipelineNeeds,unprepared,type UniformPipelineNeed} from "./uniform-pipeline-needs";
+import {uniformDetailPick} from "./uniform-detail-fields";
 
 export interface UniformMixedSolidResources {
  params:GPUBuffer;scratch:GPUBuffer;terrain:GPUTexture;
@@ -31,6 +33,10 @@ export interface UniformMixedSolidResources {
   * right after the voxel mask (umSolidTileClear derives the same offset).
   * The host initialises it to all cut; the record build writes it. */
  cutMapOffsetWords:number;
+ /** Whether the host has written `params` at least once. Required with the
+  * all-4h record, which is built from that block: from a zero block every
+  * tile reads uncut for the life of the frame. */
+ paramsWritten?:()=>boolean;
 }
 
 /** The static all-4h solid record of band pressure (one vec4 per 4h owner,
@@ -41,13 +47,15 @@ export interface UniformMixedSolidResources {
  * level-0 topology of band pressure. Then one vec4 per tile whose x is 1 when
  * the tile is cut: an h cell of it or of its one-cell ring has open < 1 (the
  * host's coupled tiles), and whose y is 1 when the simulation holds it at h
- * (encodeSimulation, per relayout). Promotion is liquid-conditional: a dry
- * cut tile may be 4h, and its h texels are then stale, so the all-4h levels
- * treat it as uncut (umSolidCut); the band certificate fails any such tile
- * holding a liquid row. */
+ * (encodeSimulation, per relayout).
+ * Promotion is liquid-conditional: a dry cut tile may be 4h, and its h texels
+ * are then stale, so the all-4h levels treat it as uncut (umSolidCut). */
 export interface UniformMixedSolidCoarse {
  readonly bindLayout:GPUBindGroupLayout;readonly bindGroup:GPUBindGroup;readonly record:GPUBuffer;
- /** Owners plus halo slots: the level-0 topology record's vec4 count. */
+ /** Owners plus halo slots: the level-0 topology record's vec4 count. A
+  * tile's (cut, h) flags follow at count + t, then three vec4 per tile at
+  * count + tiles + 3t: its open h cells (16 bits a component, cell x+4y+16z)
+  * and its 48 +face patch codes (24 bits a component, four a patch). */
  readonly count:number;
 }
 
@@ -59,23 +67,26 @@ export class UniformMixedSolid {
  private readonly bodies:GPUBuffer;
  /** The all-4h record for band pressure (constructed with its all-4h layout). */
  readonly coarse?:UniformMixedSolidCoarse;
- private builder?:{pipeline:GPUComputePipeline;bodies:GPUComputePipeline;group:GPUBindGroup};
+ private builder?:{pipeline:GPUComputePipeline;bodies?:GPUComputePipeline;group:GPUBindGroup};
  /** The body mirror the record was last built with: a bodies-only rebuild
   * revisits the tiles near it or the current mirror. */
  private builtBodies?:GPUBuffer;
  /** The next build must visit every tile (first build, voxel edit). */
  private full=true;
  private simulation?:{pipeline:GPUComputePipeline;layout:GPUBindGroupLayout;group?:GPUBindGroup;topology?:GPUBuffer;
-  listed:GPUComputePipeline;listLayout:GPUBindGroupLayout;list?:{readonly topology:GPUBuffer;readonly changes:GPUBuffer;readonly group:GPUBindGroup}};
+  listed?:GPUComputePipeline;listLayout:GPUBindGroupLayout;list?:{readonly topology:GPUBuffer;readonly changes:GPUBuffer;readonly group:GPUBindGroup}};
  private cutMap?:{pipeline:GPUComputePipeline;group:GPUBindGroup};
  private readonly scratch:GPUBuffer;private readonly cutMapOffsetWords:number;
  private built=false;
+ private readonly paramsWritten?:()=>boolean;
  constructor(private readonly device:GPUDevice,resources:UniformMixedSolidResources,private readonly coarseLayout?:UniformMixedLayout){
   if(resources.params.size<272||resources.terrain.format!=="r32float")throw new Error("Mixed solids require the native parameter block and terrain heightfield");
   if(resources.bodies.size<12*128)throw new Error("Mixed solids require the rigid-body state buffer");
   if(!Number.isSafeInteger(resources.coupledTiles)||resources.coupledTiles<0)throw new Error("Mixed solids require the host's coupled tile count");
   this.coupledTiles=resources.coupledTiles;
   this.scratch=resources.scratch;this.cutMapOffsetWords=resources.cutMapOffsetWords;
+  if(coarseLayout&&!resources.paramsWritten)throw new Error("The coarse solid record requires the host's parameter-block write receipt");
+  this.paramsWritten=resources.paramsWritten;
   this.bodySource=resources.bodies;
   this.bodies=device.createBuffer({label:"Uniform mixed solid body mirror",size:12*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   const bodies=this.bodies;
@@ -94,29 +105,46 @@ export class UniformMixedSolid {
   if(coarseLayout){
    if(coarseLayout.tiles.some(word=>(word&0xc0000000)!==0)||coarseLayout.cellCount!==coarseLayout.tiles.length)throw new Error("The coarse solid record requires the all-4h layout");
    const count=uniformMixedPressureStorage(coarseLayout).count,tiles=coarseLayout.tiles.length;
-   const record=device.createBuffer({label:"Uniform mixed all-4h solid record",size:16*(count+tiles),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+   const record=device.createBuffer({label:"Uniform mixed all-4h solid record",size:16*(count+4*tiles),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
    const bindLayout=device.createBindGroupLayout({label:"Uniform mixed static solids with the all-4h record",entries:[...entries,
     {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
    this.coarse={bindLayout,record,count,bindGroup:device.createBindGroup({layout:bindLayout,entries:[...resourcesOf(),{binding:3,resource:{buffer:record}}]})};
   }
  }
+ /** The library's group for a stage that reads tile records where the frame
+  * has them (umTileOpen, umTileMask): the record group, else the plain one,
+  * whose tile helpers answer uncut. */
+ get tileLayout():GPUBindGroupLayout{return this.coarse?.bindLayout??this.bindLayout;}
+ get tileGroup():GPUBindGroup{return this.coarse?.bindGroup??this.bindGroup;}
  /** Whether the scene holds any in-domain solid: a voxel, terrain or a
   * rigid body. The host sets it at construction, after every live edit and
   * when bodies are placed; stages then dispatch select()'s variant. */
  present=true;
- private readonly twins=new WeakMap<GPUComputePipeline,GPUComputePipeline>();
+ /** Which pipelines the scene's state can dispatch (the frame's registry;
+  * the default holds every need: all variants are built up front). */
+ needs=new UniformPipelineNeeds();
+ private readonly twins=new WeakMap<object,{full?:GPUComputePipeline;free?:GPUComputePipeline;entry:string}>();
  /** A pipeline compiled against the gated library, and its solid-free twin
-  * (umSolidsPresent=false: every helper is its stub). Both are built up
-  * front, so the first voxel edit switches variant without a compile. */
- async compile(create:(constants:Record<string,number>)=>Promise<GPUComputePipeline>):Promise<GPUComputePipeline>{
-  const [full,free]=await Promise.all([create({}),create({umSolidsPresent:0})]);
-  this.twins.set(full,free);return full;
+  * (umSolidsPresent=false: every helper is its stub). Each variant is built
+  * when its state is first held (needs): the first voxel edit in a
+  * solid-free scene waits for the gated ones, without a rebuild. The handle
+  * is a key for select(), never a pipeline to bind. solidsOnly: a pass
+  * dispatched only under solids has no twin. */
+ async compile(create:(constants:Record<string,number>)=>Promise<GPUComputePipeline>,options:{needs?:readonly UniformPipelineNeed[];solidsOnly?:boolean;entry?:string}={}):Promise<GPUComputePipeline>{
+  const twin:{full?:GPUComputePipeline;free?:GPUComputePipeline;entry:string}={entry:options.entry??"pipeline"},also=options.needs??[];
+  await Promise.all([this.needs.declare([...also,"solids"],async()=>{twin.full=await create({});}),
+   options.solidsOnly?undefined:this.needs.declare([...also,"solidFree"],async()=>{twin.free=await create({umSolidsPresent:0});})]);
+  const key=Object.freeze({label:`twin key: ${twin.entry}`}) as unknown as GPUComputePipeline;
+  this.twins.set(key,twin);return key;
  }
- /** The variant of a compile()d pipeline for the scene's current solids. */
+ /** The variant of a compile()d pipeline for the scene's current solids.
+  * Fatal when it was not built: the host gates the state on prepare(). */
  select(pipeline:GPUComputePipeline):GPUComputePipeline{
-  if(this.present)return pipeline;
-  const twin=this.twins.get(pipeline);if(!twin)throw new Error(`Pipeline ${pipeline.label} was not compiled with a solid-free twin`);
-  return twin;
+  const twin=this.twins.get(pipeline);if(!twin)throw new Error(`Pipeline ${pipeline.label} was not compiled as a solid twin`);
+  const variant=this.present?twin.full:twin.free;
+  if(!variant)throw new Error(`Uniform pipelines: the ${this.present?"solid":"solid-free"} variant of ${twin.full?.label||twin.free?.label||twin.entry} was dispatched before it was prepared`);
+  // The variant is the h store's form of it where its module loads fields.
+  return uniformDetailPick(variant);
  }
  get allocatedBytes():number{return (this.coarse?.record.size??0)+this.bodies.size+(this.builtBodies?.size??0);}
  /** Mirror the rigid state into the library: at a frame's head, and after
@@ -147,6 +175,12 @@ fn umBodyTileDirty(tc:vec3u)->bool{
 var<workgroup> sums:array<vec4f,64>;
 var<workgroup> lows:array<vec4f,64>;
 var<workgroup> cut:atomic<u32>;
+// What depends on the solid alone and a per-frame kernel would recompute:
+// the tile's open h cells (umCellOpen > 1e-5), and each +face patch's V where
+// it is a whole number of eighths (the eight-sample V always is): code
+// 8V + 1 of patch 16 axis + u + 4 v, 0 for any other V.
+var<workgroup> openCells:array<atomic<u32>,2>;
+var<workgroup> patchCodes:array<atomic<u32>,8>;
 // umBoundaryIndex of the all-4h layout (cells = tiles, width 4).
 fn umSolidHalo(t:vec3u,axis:u32,side:u32)->u32{
  let d=UM_T;
@@ -159,13 +193,19 @@ fn umSolidHalo(t:vec3u,axis:u32,side:u32)->u32{
  let tc=vec3u(t%UM_T.x,(t/UM_T.x)%UM_T.y,t/(UM_T.x*UM_T.y));
  if(umBodyTiles&&!umBodyTileDirty(tc)){return;}
  let l=vec3u(lane%4u,(lane/4u)%4u,lane/16u);let c=vec3i(tc*4u+l);
- if(lane==0u){atomicStore(&cut,0u);}
+ if(lane==0u){atomicStore(&cut,0u);for(var i=0u;i<2u;i++){atomicStore(&openCells[i],0u);}for(var i=0u;i<8u;i++){atomicStore(&patchCodes[i],0u);}}
  var own=vec4f(umCellOpen(c),0.0,0.0,0.0);var low=vec4f(0.0);
  for(var axis=0u;axis<3u;axis++){
   if(l[axis]==3u){own[axis+1u]=umPressureFaceV(c,axis);}
   if(l[axis]==0u){var q=c;q[axis]-=1;low[axis+1u]=umPressureFaceV(q,axis);}
  }
  workgroupBarrier();
+ if(own.x>1e-5){atomicOr(&openCells[lane>>5u],1u<<(lane&31u));}
+ for(var axis=0u;axis<3u;axis++){
+  let eighths=8.0*own[axis+1u];if(l[axis]!=3u||eighths!=floor(eighths)||eighths<0.0||eighths>8.0){continue;}
+  let slot=16u*axis+l[(axis+1u)%3u]+4u*l[(axis+2u)%3u];
+  atomicOr(&patchCodes[slot/6u],(u32(eighths)+1u)<<(4u*(slot%6u)));
+ }
  for(var i=lane;i<216u;i+=64u){
   let q=vec3i(tc*4u)-vec3i(1)+vec3i(vec3u(i%6u,(i/6u)%6u,i/36u));
   if(umSolidValid(q)&&umCellOpen(q)<1.0){atomicStore(&cut,1u);}
@@ -177,6 +217,9 @@ fn umSolidHalo(t:vec3u,axis:u32,side:u32)->u32{
   let s=sums[0];let lo=lows[0];
   record[t]=vec4f(s.x/64.0,s.y/16.0,s.z/16.0,s.w/16.0);
   record[UM_SOLID_COUNT+t]=vec4f(select(0.0,1.0,atomicLoad(&cut)!=0u),0.0,0.0,0.0);
+  let cells=vec2u(atomicLoad(&openCells[0]),atomicLoad(&openCells[1]));
+  record[UM_SOLID_COUNT+UM_TILES+3u*t]=vec4f(vec4u(cells.x&0xffffu,cells.x>>16u,cells.y&0xffffu,cells.y>>16u));
+  for(var w=0u;w<2u;w++){record[UM_SOLID_COUNT+UM_TILES+3u*t+1u+w]=vec4f(vec4u(atomicLoad(&patchCodes[4u*w]),atomicLoad(&patchCodes[4u*w+1u]),atomicLoad(&patchCodes[4u*w+2u]),atomicLoad(&patchCodes[4u*w+3u])));}
   for(var axis=0u;axis<3u;axis++){
    if(tc[axis]==0u){record[umSolidHalo(tc,axis,0u)]=vec4f(lo[axis+1u]/16.0,0.0,0.0,0.0);}
    if(tc[axis]==UM_T[axis]-1u){record[umSolidHalo(tc,axis,1u)]=vec4f(s[axis+1u]/16.0,0.0,0.0,0.0);}
@@ -186,9 +229,12 @@ fn umSolidHalo(t:vec3u,axis:u32,side:u32)->u32{
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const output=this.device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}}]});
   const builderLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.bindLayout,output]});
-  const [pipeline,bodies]=await Promise.all([0,1].map(umBodyTiles=>this.device.createComputePipelineAsync({layout:builderLayout,compute:{module,entryPoint:"build",constants:{umDispatchX:dispatchX,umBodyTiles}}})));
+  // The bodies-only rebuild is dispatched once a body has moved (needs).
+  const build=(umBodyTiles:number)=>this.device.createComputePipelineAsync({layout:builderLayout,compute:{module,entryPoint:"build",constants:{umDispatchX:dispatchX,umBodyTiles}}});
+  const late:{bodies?:GPUComputePipeline}={};
+  const [pipeline]=await Promise.all([build(0),this.needs.declare(["bodies"],async()=>{late.bodies=await build(1);if(this.builder)this.builder.bodies=late.bodies;})]);
   const built=this.builtBodies=this.device.createBuffer({label:"Uniform mixed solid record body mirror",size:12*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-  this.builder={pipeline:pipeline!,bodies:bodies!,group:this.device.createBindGroup({layout:output,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:{buffer:built}}]})};
+  this.builder={bodies:late.bodies,pipeline:pipeline!,group:this.device.createBindGroup({layout:output,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:{buffer:built}}]})};
   const flagModule=this.device.createShaderModule({label:"Uniform mixed solid simulation widths",code:/* wgsl */`
 const UM_TILES:u32=${layout.tiles.length}u;const UM_SOLID_COUNT:u32=${coarse.count}u;
 override umDispatchX:u32=65535u;
@@ -227,10 +273,12 @@ override umDispatchX:u32=65535u;
   if(this.cutMapOffsetWords%64||this.scratch.size<4*(this.cutMapOffsetWords+layout.tiles.length))throw new Error("The solid scratch has no room for the tile cut map");
   this.cutMap={pipeline:await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[cutLayout]}),compute:{module:cutModule,entryPoint:"pack",constants:{umDispatchX:dispatchX}}}),
    group:this.device.createBindGroup({layout:cutLayout,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:{buffer:this.scratch,offset:4*this.cutMapOffsetWords,size:4*layout.tiles.length}}]})};
-  const [widths,listed]=await Promise.all([
-   this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[flagLayout]}),compute:{module:flagModule,entryPoint:"widths",constants:{umDispatchX:dispatchX}}}),
-   this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[listLayout]}),compute:{module:listModule,entryPoint:"widthsListed",constants:{umDispatchX:dispatchX}}})]);
-  this.simulation={layout:flagLayout,pipeline:widths,listLayout,listed};
+  // The listed rewrite follows a GPU relayout's changed tiles (Dynamic).
+  const simulation:NonNullable<UniformMixedSolid["simulation"]>={layout:flagLayout,listLayout,pipeline:undefined as unknown as GPUComputePipeline};
+  await Promise.all([
+   this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[flagLayout]}),compute:{module:flagModule,entryPoint:"widths",constants:{umDispatchX:dispatchX}}}).then(p=>{simulation.pipeline=p;}),
+   this.needs.declare(["dynamic"],async()=>{simulation.listed=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[listLayout]}),compute:{module:listModule,entryPoint:"widthsListed",constants:{umDispatchX:dispatchX}}});})]);
+  this.simulation=simulation;
  }
  /** Builds the all-4h record from the solids the native host has published
   * (its parameter block, voxel mask and body mirror): once, in full again
@@ -239,14 +287,18 @@ override umDispatchX:u32=65535u;
  encodeCoarse(encoder:GPUCommandEncoder):void{
   const layout=this.coarseLayout;if(!layout||this.built)return;
   if(!this.builder)throw new Error("The coarse solid record is not initialized");
+  if(!this.paramsWritten!())throw new Error("The coarse solid record was encoded before the host's first write of the native parameter block: built from a zero block it holds every tile uncut");
   const tiles=layout.tiles.length,x=Math.min(tiles,this.device.limits.maxComputeWorkgroupsPerDimension);
   const pass=encoder.beginComputePass({label:"Uniform mixed all-4h solid record"});
-  pass.setPipeline(this.full?this.builder.pipeline:this.builder.bodies);pass.setBindGroup(0,this.bindGroup);pass.setBindGroup(1,this.builder.group);pass.dispatchWorkgroups(x,Math.ceil(tiles/x));
+  pass.setPipeline(this.full?this.builder.pipeline:unprepared(this.builder.bodies,"the bodies-only solid record rebuild"));pass.setBindGroup(0,this.bindGroup);pass.setBindGroup(1,this.builder.group);pass.dispatchWorkgroups(x,Math.ceil(tiles/x));
   const groups=Math.ceil(tiles/64),gx=Math.min(groups,this.device.limits.maxComputeWorkgroupsPerDimension);
   pass.setPipeline(this.cutMap!.pipeline);pass.setBindGroup(0,this.cutMap!.group);pass.dispatchWorkgroups(gx,Math.ceil(groups/gx));pass.end();
   encoder.copyBufferToBuffer(this.bodies,0,this.builtBodies!,0,12*128);this.full=false;
   this.built=true;
  }
+ /** The record does not describe the published solids yet (never built, or
+  * invalidated): a reader ahead of the next frame's head builds it first. */
+ get recordStale():boolean{return !!this.coarseLayout&&!this.built;}
  /** A live voxel edit changed the mask (every tile), or only bodies moved
   * (the tiles near them): rebuild the all-4h record. */
  invalidate(bodiesOnly=false):void{this.built=false;if(!bodiesOnly)this.full=true;}
@@ -263,7 +315,7 @@ override umDispatchX:u32=65535u;
   const pass=encoder.beginComputePass({label:"Uniform mixed solid simulation widths"});
   if(changes){
    if(s.list?.topology!==topology.buffer||s.list.changes!==changes)s.list={topology:topology.buffer,changes,group:this.device.createBindGroup({layout:s.listLayout,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:topology},{binding:2,resource:{buffer:changes}}]})};
-   pass.setPipeline(s.listed);pass.setBindGroup(0,s.list.group);
+   pass.setPipeline(unprepared(s.listed,"the listed solid widths"));pass.setBindGroup(0,s.list.group);
   }else{
    if(s.topology!==topology.buffer){s.topology=topology.buffer;s.group=this.device.createBindGroup({layout:s.layout,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:topology}]});}
    pass.setPipeline(s.pipeline);pass.setBindGroup(0,s.group!);
@@ -274,14 +326,33 @@ override umDispatchX:u32=65535u;
 }
 
 /** A stage pipeline built with the library: twinned when solids are bound. */
-export function uniformMixedSolidPipeline(solid:UniformMixedSolid|undefined,create:(constants:Record<string,number>)=>Promise<GPUComputePipeline>):Promise<GPUComputePipeline>{
- return solid?solid.compile(create):create({});
+export function uniformMixedSolidPipeline(solid:UniformMixedSolid|undefined,create:(constants:Record<string,number>)=>Promise<GPUComputePipeline>,options?:{needs?:readonly UniformPipelineNeed[];solidsOnly?:boolean;entry?:string}):Promise<GPUComputePipeline>{
+ return solid?solid.compile(create,options):create({});
 }
+
+/** Requires the topology and the library (with the record, or every 4h owner
+ * answers uncut). A vertex is buried when no incident owner has capacity at
+ * its own width: an h cell its open fraction, a 4h owner its tile's mean. phi
+ * there is not state. The corners of a cut 4h owner are state even where
+ * every h cell around them is closed: its plane is read at them. */
+export const uniformMixedVertexBuriedWGSL=/* wgsl */`
+fn umVertexBuried(p:vec3i)->bool{
+ let base=p-vec3i(1);
+ for(var k=0u;k<8u;k++){
+  let cell=base+vec3i(umCorner(k,2u));if(!umSolidValid(cell)){continue;}
+  let t=umTileAt(vec3u(cell)/4u);var open=0.0;
+  if(umTileWidth(t)==4u){open=umTileOpen(t);}else{open=umCellOpen(cell);}
+  if(open>1e-5){return false;}
+ }
+ return true;
+}`;
 
 /** Requires UM_D. `group` undefined emits inert stubs with the same ABI.
  * `coarse` (the record's owner/halo count) binds the all-4h record: the
  * group is then UniformMixedSolid.coarse.bindLayout, and umSolidCoarse(i),
- * umSolidCut(tile) (cut and simulated at h) and umSolidStaticCut(tile) read it.
+ * umSolidCut(tile) (cut and simulated at h), umSolidStaticCut(tile),
+ * umTileOpen(tile) and umTileSupported(tile) read it; without it the tile
+ * helpers answer uncut (a frame built without the record promotes every cut tile).
  * `gated` (every stage but the record builder, which writes the gate) answers
  * the helpers from the tile cut map where no solid is near: one word instead
  * of the voxel, terrain and body samples. */
@@ -297,6 +368,8 @@ fn umPressureFaceV(id:vec3i,axis:u32)->f32{return 1.0;}
 fn umSolidAtWorldCell(p:vec3f)->bool{return false;}
 fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{return 0.0;}
 fn umBodyCount()->u32{return 0u;}
+fn umTileOpen(t:u32)->f32{return 1.0;}
+fn umTileSupported(t:u32)->bool{return false;}
 `;
  return /* wgsl */ `
 struct UMSolidParams {
@@ -316,11 +389,36 @@ struct UMRigidBody {
 // to its stub, so a frame with no solid runs the code of one built without them.
 ${gated?"override umSolidsPresent:bool=true;":"const umSolidsPresent:bool=true;"}
 fn umSolidEnabled()->bool{return umSolidsPresent;}
-${coarse===undefined?"":`@group(${group}) @binding(3) var<storage,read> umSolidRecord:array<vec4f>;
+${coarse===undefined?`fn umTileOpen(t:u32)->f32{return 1.0;}
+fn umTileSupported(t:u32)->bool{return false;}`:`@group(${group}) @binding(3) var<storage,read> umSolidRecord:array<vec4f>;
+// A tile's open fraction (the mean of its 64 h cells' umCellOpen): what a
+// 4h owner of the tile holds.
+fn umTileOpen(t:u32)->f32{if(!umSolidsPresent){return 1.0;}return umSolidRecord[t].x;}
 fn umSolidCoarse(i:u32)->vec4f{return umSolidRecord[i];}
+// A cut tile standing on solid: its -y face (the tile below's V+, or the
+// container floor) is not whole. V a 4h owner holds there rests on it.
+fn umTileSupported(t:u32)->bool{
+ if(!umSolidsPresent||umSolidRecord[t].x>=0.99999){return false;}
+ let across=UM_D.x/4u;if((t/across)%(UM_D.y/4u)==0u){return true;}
+ return umSolidRecord[t-across].z<0.99999;
+}
 fn umSolidStaticCut(t:u32)->bool{return umSolidRecord[${coarse}u+t].x>0.5;}
 // A cut tile whose h texels are live: the simulation holds it at h.
-fn umSolidCut(t:u32)->bool{let r=umSolidRecord[${coarse}u+t];return r.x>0.5&&r.y>0.5;}`}
+fn umSolidCut(t:u32)->bool{let r=umSolidRecord[${coarse}u+t];return r.x>0.5&&r.y>0.5;}
+// The simulation holds this tile at h (cut or not).
+fn umSolidFineTile(t:u32)->bool{return umSolidRecord[${coarse}u+t].y>0.5;}
+// The record's three solid-only words of tile t.
+fn umSolidTileWord(t:u32,word:u32)->vec4u{return vec4u(umSolidRecord[${coarse}u+(UM_D.x/4u)*(UM_D.y/4u)*(UM_D.z/4u)+3u*t+word]);}
+// The tile's open h cells (umCellOpen > 1e-5): bit x+4y+16z.
+fn umSolidOpenCells(t:u32)->vec2u{let r=umSolidTileWord(t,0u);return vec2u(r.x|(r.y<<16u),r.z|(r.w<<16u));}
+// umPressureFaceV of a +axis patch of tile t (id a cell on that plane): the
+// record's where it is a whole number of eighths, else the full evaluation.
+fn umPatchFaceV(t:u32,id:vec3i,axis:u32)->f32{
+ let l=vec3u(id)&vec3u(3u);let slot=16u*axis+l[(axis+1u)%3u]+4u*l[(axis+2u)%3u];
+ let code=(umSolidTileWord(t,1u+slot/24u)[(slot/6u)%4u]>>(4u*(slot%6u)))&15u;
+ if(code==0u){return umPressureFaceV(id,axis);}
+ return 0.125*f32(code-1u);
+}`}
 fn umSolidValid(p:vec3i)->bool{return all(p>=vec3i(0))&&all(p<vec3i(UM_D));}
 // staticSolidVoxelOccupied: lattice plus a one-cell halo (the box shell).
 fn umSolidVoxel(p:vec3i)->bool{

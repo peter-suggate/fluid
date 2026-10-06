@@ -1,3 +1,4 @@
+import { uniformDetailModule, uniformDetailPipeline, uniformDetailPick } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedPageCount, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryLoop, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
@@ -64,7 +65,7 @@ export class UniformMixedPressureAcceptance {
  }
  async initialize():Promise<void>{
   const l=this.ownership.layout;
-  const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(l,0)+/* wgsl */`
+  const module=uniformDetailModule(this.device,{label:"Uniform mixed pressure acceptance",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(l,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> residual:array<f32>;
 @group(1) @binding(1) var<storage,read_write> state:array<atomic<u32>>;
 @group(1) @binding(2) var<uniform> params:vec4f;
@@ -85,13 +86,13 @@ var<workgroup> maxima:array<u32,64>;
 `,["reduce"])});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-  await Promise.all(["resetInitial","reduce"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll}}}));}));
+  await Promise.all(["resetInitial","reduce"].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll}}}));}));
  }
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,state:GPUBuffer,kind:"initial"|"cycle"):void{
   if(this.pipelines.size!==2)throw new Error("Mixed pressure acceptance is not initialized");
   if(this.states.get(group)!==state)throw new Error("Mixed pressure acceptance group does not bind this state");
   const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${kind} checkpoint`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
-  for(const entry of kind==="initial"?["resetInitial","reduce"]:["reduce"]){const pipeline=this.pipelines.get(entry)!;pass.setPipeline(pipeline);
+  for(const entry of kind==="initial"?["resetInitial","reduce"]:["reduce"]){const pipeline=uniformDetailPick(this.pipelines.get(entry)!);pass.setPipeline(pipeline);
    if(entry==="reduce")this.ownership.dispatchCounted(pass,pipeline,uniformMixedPageCount(this.ownership.capacity.lattice));else pass.dispatchWorkgroups(1);
   }
   pass.end();

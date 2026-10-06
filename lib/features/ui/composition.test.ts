@@ -13,14 +13,6 @@ test("UI installation follows active method and fluid capability", () => {
   assert.ok(dry.placements.some(p => p.slot === "scene.visibility"));
 });
 
-test("UI composition resolves the active variants rather than their defaults", () => {
-  const resolved = composeFeatureUI("uniform-volume", true, {
-    "svo.primary-visibility": "traced",
-    "svo.lighting-visibility": "cones",
-  }, { coarsening: "regions" });
-  assert.equal(resolved.variants.find(v => v.point === "simulation.uniform-volume.algorithms.coarsening")?.id, "regions");
-});
-
 test("the maintained method supplies its complete active composition to the UI", () => {
   for (const method of registeredSimulationMethods().filter(method => method.id === "uniform-volume")) {
     const resolved = composeFeatureUI(method.id, true);

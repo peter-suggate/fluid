@@ -11,7 +11,7 @@ import type {Quaternion,RigidBodyDescription,SceneDescription,Vec3} from "../lib
 import {initializeRigidBodies} from "../lib/core/rigid-body";
 import {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-uniform-reference";
 import {uniformGeometricSolverOptions} from "../lib/methods/uniform/uniform-geometric-options";
-import {readMixedTexture} from "./helpers/uniform-mixed-native-fields";
+import {mixedExtent,readMixedTexture} from "./helpers/uniform-mixed-native-fields";
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 
 /** Rigid bodies on the mixed frame (dynamic coarsening): a static crate
@@ -36,7 +36,7 @@ const rotate=(q:Quaternion,v:Vec3):Vec3=>{
 
 async function ownerFields(device:GPUDevice,solver:WebGPUUniformReferenceSolver,s:SceneDescription,poses:readonly {position_m:Vec3;orientation:Quaternion}[]){
  const texture=solver.volumeTexture,volume=await readMixedTexture(device,texture);
- const [nx,ny,nz]=[texture.width,texture.height,texture.depthOrArrayLayers];
+ const [nx,ny,nz]=mixedExtent(texture);
  const words=(solver as unknown as {mixedFrame:{ownership:{presentation:{buffer:GPUBuffer}}}}).mixedFrame.ownership.presentation.buffer;
  const bytes=4*(nx>>2)*(ny>>2)*(nz>>2),staging=device.createBuffer({size:bytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
  const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(words,0,staging,0,bytes);device.queue.submit([encoder.finish()]);
@@ -57,7 +57,7 @@ async function ownerFields(device:GPUDevice,solver:WebGPUUniformReferenceSolver,
   const world={x:-.5*s.container.width_m+(x+.5)*h,y:(y+.5)*h,z:-.5*s.container.depth_m+(z+.5)*h};
   deep.forEach((d,i)=>{if(d(world)){inside[i]=Math.max(inside[i]!,v);insideCells[i]!++;if(width!==1)insideCoarse[i]!++;}});
  }
- return {mass,inside,insideCells,insideCoarse};
+ return {mass,inside,insideCells,insideCoarse,tiles,tileExtent:[nx>>2,ny>>2,nz>>2] as const};
 }
 
 (modulePath?test:test.skip)("rigid bodies couple on the mixed frame",{timeout:1800000},async()=>{
@@ -69,7 +69,7 @@ async function ownerFields(device:GPUDevice,solver:WebGPUUniformReferenceSolver,
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
   const failures:string[]=[];
   const s=scene(),roster=initializeRigidBodies(s.rigidBodies);
-  const solver=await WebGPUUniformReferenceSolver.createAsync(device,s,"balanced",undefined,uniformGeometricSolverOptions({coarsening:"dynamic"},s),()=>{});
+  const solver=await WebGPUUniformReferenceSolver.createAsync(device,s,"balanced",undefined,uniformGeometricSolverOptions({detailPolicy:"dynamic"},s),()=>{});
   try{
    const residuals:number[]=[],heights:number[]=[];let start:number|undefined;
    const poses=async()=>{const read=await solver.readRigidBodyPoses();assert.ok(read&&read.length===2,"two body poses");return read;};
@@ -91,6 +91,123 @@ async function ownerFields(device:GPUDevice,solver:WebGPUUniformReferenceSolver,
    if(![p1.x,p1.y,p1.z].every(Number.isFinite))failures.push(`falling crate pose is not finite ${JSON.stringify(p1)}`);
    if(!(p1.y<s.rigidBodies[1]!.position_m.y-.05))failures.push(`falling crate did not fall (${p1.y})`);
    if(!(p1.y>.5*edge-.02&&Math.abs(p1.x)<.4&&Math.abs(p1.z)<.4))failures.push(`falling crate left the tank (${JSON.stringify(p1)})`);
+  }finally{solver.destroy();}
+  assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
+ }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+});
+
+/** A first body in a body-free scene: setup built no body pipelines, the
+ * body waits for them (advancing meanwhile is refused), and once they are
+ * prepared it is coupled: it falls, stays in the tank, displaces its liquid. */
+(modulePath?test:test.skip)("a first rigid body waits for its pipelines, then couples",{timeout:1800000},async()=>{
+ await acquireWebGPUExclusiveLock("dawn-test","Uniform mixed first rigid body");let device:GPUDevice|undefined;
+ try{
+  const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
+  const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
+  device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
+  const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
+  const failures:string[]=[];
+  const s=scene(),late=[s.rigidBodies[1]!];s.rigidBodies=[];
+  const solver=await WebGPUUniformReferenceSolver.createAsync(device,s,"balanced",undefined,uniformGeometricSolverOptions({detailPolicy:"dynamic"},s),()=>{});
+  try{
+   assert.ok(solver.deferredPipelines>0,"a body-free setup defers the body pipelines");
+   let frame=0;
+   const step=async(roster:ReturnType<typeof initializeRigidBodies>)=>{frame++;assert.ok(solver.advanceTo(frame/30,roster),`advance ${frame}`);await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);};
+   for(let i=0;i<6;i++)await step([]);
+   assert.equal(solver.info.uniformDetail?.preparing,undefined);
+   const roster=initializeRigidBodies(late);
+   assert.throws(()=>solver.advanceTo((frame+1)/30,roster),/await pipelinesPrepared/,"advancing while the body waits is refused");
+   const waited=solver.info.uniformDetail?.preparing??"";
+   for(const need of ["solids","bodies","displace"])assert.ok(waited.includes(need),`the body waits for ${need} (${waited})`);
+   await solver.pipelinesPrepared();
+   assert.equal(solver.info.uniformDetail?.preparing,undefined,"the wait is over");
+   const residuals:number[]=[],heights:number[]=[];let start:number|undefined;
+   const poses=async()=>{const read=await solver.readRigidBodyPoses();assert.ok(read&&read.length===1,"one body pose");return read;};
+   for(let i=0;i<39;i++){
+    await step(roster);
+    const stats=await solver.readStats();residuals.push(stats.uniformPressureAcceptedResidual!);
+    if(i===0)start=(await ownerFields(device,solver,s,await poses())).mass;
+    heights.push((await poses())[0]!.position_m.y);
+   }
+   const end=await poses(),fields=await ownerFields(device,solver,s,end);
+   console.log(JSON.stringify({waited,start,fields,pose:end[0],heights:heights.filter((_,i)=>i%5===4).map(y=>+y.toFixed(4)),residuals:residuals.filter((_,i)=>i%5===4)}));
+   if(!(Math.abs(fields.mass-start!)<=1e-3*start!))failures.push(`owner mass ${fields.mass} vs ${start}`);
+   if(!(fields.inside[0]!<=1e-4))failures.push(`${fields.inside[0]} of liquid inside the body (${fields.insideCells[0]} deep cells)`);
+   if(!residuals.every(Number.isFinite))failures.push(`non-finite residuals ${residuals}`);
+   const p=end[0]!.position_m;
+   if(![p.x,p.y,p.z].every(Number.isFinite))failures.push(`body pose is not finite ${JSON.stringify(p)}`);
+   if(!(p.y<late[0]!.position_m.y-.05))failures.push(`the body did not fall (${p.y})`);
+   if(!(p.y>.5*edge-.02&&Math.abs(p.x)<.4&&Math.abs(p.z)<.4))failures.push(`the body left the tank (${JSON.stringify(p)})`);
+  }finally{solver.destroy();}
+  assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
+ }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+});
+
+/** Requested detail with no request: zero detail, base blocks only. A free
+ * body added live waits for its pipelines and the census ones, then carries
+ * its h tiles with it (the GPU layout from requests only): it couples, every
+ * h tile lies within the body's reach, the rest of the domain stays 4h, and
+ * once the body is gone the frame is back at zero detail. */
+(modulePath?test:test.skip)("a free rigid body under Requested carries its h tiles",{timeout:1800000},async()=>{
+ await acquireWebGPUExclusiveLock("dawn-test","Uniform mixed free rigid body under Requested");let device:GPUDevice|undefined;
+ try{
+  const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
+  const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
+  device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
+  const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
+  const failures:string[]=[];
+  const s=scene(),late=[s.rigidBodies[1]!];s.rigidBodies=[];
+  const solver=await WebGPUUniformReferenceSolver.createAsync(device,s,"balanced",undefined,uniformGeometricSolverOptions({detailPolicy:"requested"},s),()=>{});
+  try{
+   const capacity=()=>(solver as unknown as {mixedFrame:{ownership:{capacity:{fineTiles:number;tiles:number}}}}).mixedFrame.ownership.capacity;
+   const fineOf=(tiles:Uint32Array)=>tiles.reduce((n,w)=>n+(w>>>31),0);
+   let frame=0;
+   const step=async(roster:ReturnType<typeof initializeRigidBodies>)=>{frame++;assert.ok(solver.advanceTo(frame/30,roster),`advance ${frame}`);await solver.awaitFrameCompletion();
+    assert.equal(solver.info.simulationPipelineError,undefined);assert.equal(solver.info.uniformDetail?.rejected,undefined,"no request is refused");};
+   for(let i=0;i<6;i++)await step([]);
+   const zero=await ownerFields(device,solver,s,[]);
+   assert.equal(capacity().fineTiles,0,"zero detail holds no h tile");assert.equal(fineOf(zero.tiles),0,"zero detail has no h tile");
+   const roster=initializeRigidBodies(late);
+   assert.throws(()=>solver.advanceTo((frame+1)/30,roster),/await pipelinesPrepared/,"advancing while the body waits is refused");
+   const waited=solver.info.uniformDetail?.preparing??"";
+   for(const need of ["solids","bodies","displace","dynamic"])assert.ok(waited.includes(need),`the body waits for ${need} (${waited})`);
+   await solver.pipelinesPrepared();
+   const residuals:number[]=[],heights:number[]=[],fine:number[]=[];let start:number|undefined,stray=0,previous=late[0]!.position_m;
+   const poses=async()=>{const read=await solver.readRigidBodyPoses();assert.ok(read&&read.length===1,"one body pose");return read;};
+   const [tx,ty,tz]=zero.tileExtent,tile=s.container.width_m/tx,radius=.5*edge*Math.sqrt(3);
+   for(let i=0;i<39;i++){
+    await step(roster);
+    const stats=await solver.readStats();residuals.push(stats.uniformPressureAcceptedResidual!);
+    const pose=await poses(),p=pose[0]!.position_m,fields=await ownerFields(device,solver,s,pose);
+    if(i===0)start=fields.mass;
+    heights.push(p.y);fine.push(fineOf(fields.tiles));
+    // The census marks tiles within the bounding radius, the frame's travel
+    // and a cell of the body, then their neighbours; the pose read here is a
+    // frame newer than the one it marked from.
+    const travel=Math.hypot(p.x-previous.x,p.y-previous.y,p.z-previous.z),reach=radius+2*travel+s.voxelDomain.finestCellSize_m+Math.sqrt(3)*tile;previous=p;
+    fields.tiles.forEach((word,t)=>{
+     if(!(word>>>31))return;
+     const low=[-.5*s.container.width_m+(t%tx)*tile,Math.floor(t/tx)%ty*tile,-.5*s.container.depth_m+Math.floor(t/(tx*ty))*tile],centre=[p.x,p.y,p.z];
+     if(Math.hypot(...centre.map((c,a)=>c-Math.min(Math.max(c,low[a]!),low[a]!+tile)))>reach)stray++;
+    });
+   }
+   const end=await poses(),fields=await ownerFields(device,solver,s,end),held=capacity().fineTiles;
+   for(let i=0;i<4;i++)await step([]);
+   const after=await ownerFields(device,solver,s,[]);
+   console.log(JSON.stringify({waited,start,fields:{mass:fields.mass,inside:fields.inside,insideCells:fields.insideCells,insideCoarse:fields.insideCoarse},pose:end[0],fine,held,stray,tiles:tz*ty*tx,
+    after:{mass:after.mass,fine:fineOf(after.tiles),capacity:capacity().fineTiles},heights:heights.filter((_,i)=>i%5===4).map(y=>+y.toFixed(4)),residuals:residuals.filter((_,i)=>i%5===4)}));
+   if(!(Math.abs(fields.mass-start!)<=1e-3*start!))failures.push(`owner mass ${fields.mass} vs ${start}`);
+   if(!(fields.inside[0]!<=1e-4))failures.push(`${fields.inside[0]} of liquid inside the body (${fields.insideCells[0]} deep cells)`);
+   if(!residuals.every(Number.isFinite))failures.push(`non-finite residuals ${residuals}`);
+   const p=end[0]!.position_m;
+   if(![p.x,p.y,p.z].every(Number.isFinite))failures.push(`body pose is not finite ${JSON.stringify(p)}`);
+   if(!(p.y<late[0]!.position_m.y-.05))failures.push(`the body did not fall (${p.y})`);
+   if(!(p.y>.5*edge-.02&&Math.abs(p.x)<.4&&Math.abs(p.z)<.4))failures.push(`the body left the tank (${JSON.stringify(p)})`);
+   if(!(fine.at(-1)!>0))failures.push(`the wet body has no h tile (${fine})`);
+   if(!(Math.max(...fine)<tx*ty*tz))failures.push(`the body refined the whole domain (${fine})`);
+   if(stray)failures.push(`${stray} h tiles beyond the body's reach`);
+   if(fineOf(after.tiles)||capacity().fineTiles)failures.push(`the body left ${fineOf(after.tiles)} h tiles and capacity ${capacity().fineTiles}`);
+   if(!(Math.abs(after.mass-fields.mass)<=1e-4*fields.mass))failures.push(`owner mass ${after.mass} after the body vs ${fields.mass} with it`);
   }finally{solver.destroy();}
   assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
  }finally{device?.destroy();await releaseWebGPUExclusiveLock();}

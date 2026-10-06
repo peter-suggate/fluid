@@ -86,7 +86,7 @@ function WaterRow() {
   const ballFallsBack = chosen?.id === "fluid-ball" && chosen.unavailable !== undefined;
   const arm = () => {
     // The gesture ball is the one shape with a route in every method; the
-    // others arm their tool even when it cannot run — its card says why.
+    // others arm their tool even when it cannot run — its line on the rail says why.
     if (!chosen || ballFallsBack) return toggle();
     performEditorAction({ kind: "voxel-tool", toolId: chosen.id }, session);
   };

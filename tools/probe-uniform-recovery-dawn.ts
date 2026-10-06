@@ -20,6 +20,7 @@ import {resolveMethodValues} from '../lib/core/method-contract';
 import {uniformVolumeMethod} from '../lib/methods/uniform/uniform-volume-method';
 import type {WebGPUUniformReferenceSolver} from '../lib/methods/uniform/webgpu-uniform-reference';
 import {mixedCellWidth,type UniformMixedLayout} from '../lib/methods/uniform/uniform-mixed-layout';
+import {UniformMixedTransportStage} from '../lib/methods/uniform/uniform-mixed-transport';
 import {readMixedBuffer,readMixedTexture} from '../tests/helpers/uniform-mixed-native-fields';
 const arg=(k:string,d:string)=>process.argv.find(a=>a.startsWith(`--${k}=`))?.slice(k.length+3)??d;
 const frames=Number(arg('frames','600')),every=Number(arg('every','3')),out=arg('out','/tmp/recovery.json');
@@ -54,12 +55,13 @@ try{
 @compute @workgroup_size(4,4,4) fn main(@builtin(global_invocation_id) g:vec3u){if(any(g>=textureDimensions(v))){return;}textureStore(e,vec3i(g),vec4f(max(textureLoad(v,vec3i(g),0).x-1.0,0.0)));}`});
  const excessPipeline=await device.createComputePipelineAsync({layout:'auto',compute:{module:excessModule,entryPoint:'main'}});
  const excessGroup=device.createBindGroup({layout:excessPipeline.getBindGroupLayout(0),entries:[{binding:0,resource:f.volumeScratch.createView()},{binding:1,resource:excessIn.createView()}]});
- const cells=stage.cells as number,arena=f.arena;
+ // The frame's stage scratch at the ownership's h-tile capacity: edge rows by owner rank, donor sums, decoded sums.
+ const scratch=frame.stageScratch as GPUBuffer,capacity=stage.ownership.capacity,ranges=UniformMixedTransportStage.scratchRanges(capacity.tiles,capacity.fineTiles);
  const gatherGroup=device.createBindGroup({layout:stage.resourcesLayout,entries:[
   {binding:0,resource:{buffer:stage.sampling}},
-  {binding:1,resource:{buffer:arena.buffer,offset:0,size:cells*40}},
-  {binding:2,resource:{buffer:arena.buffer,offset:arena.donorOffset,size:cells*12}},
-  {binding:3,resource:{buffer:arena.buffer,offset:arena.donorOffset+cells*12,size:cells*4}},
+  {binding:1,resource:{buffer:scratch,...ranges.edges}},
+  {binding:2,resource:{buffer:scratch,...ranges.donors}},
+  {binding:3,resource:{buffer:scratch,...ranges.sums}},
   {binding:4,resource:excessIn.createView()},{binding:5,resource:inherited.createView()},
   {binding:6,resource:f.departure.createView()},
   ...(stage.sourceParams?[{binding:7,resource:{buffer:stage.sourceParams,size:176}}]:[]),

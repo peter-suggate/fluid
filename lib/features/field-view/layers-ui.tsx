@@ -5,10 +5,15 @@ import { Eye } from "lucide-react";
 import {
   ToolstripRow, ToolstripMenuButton, ToolstripMenuItem, useToolstripSection,
 } from "../../../components/toolstrip";
-import { Choice, ControlRow, Slider, Value } from "../../../components/ui";
+import { Choice, ControlRow, Select, Slider, Value } from "../../../components/ui";
 import {
-  MIXED_TILE_LEGEND, VISUAL_LAYERS, layerOpacity, toggleVisualLayer, type VisualLayerId, type VisualLayerState,
+  IMPORTANCE_VIEW_OPTIONS, MIXED_TILE_LEGEND, VISUAL_LAYERS, importanceLegend, importanceView, layerOpacity,
+  setImportanceView, toggleVisualLayer, type ImportanceView, type VisualLayerId, type VisualLayerState,
 } from "../../core/visual-layers";
+
+const PAGE_LEGEND = [
+  { color: "#1fc7a6", label: "Transport" }, { color: "#f29c29", label: "Sharpen only" }, { color: "#9475c2", label: "Resident" },
+] as const;
 
 interface VisualLayerRowsProps {
   readonly state: VisualLayerState;
@@ -57,11 +62,28 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
           />
           <Value value={`${Math.round(layerOpacity(state, layer.id) * 100)}%`} />
         </ControlRow>}
+        {selected && layer.id === "importance" && <Select<ImportanceView>
+          ariaLabel="Detail importance criterion"
+          hint="What the importance layer shows: every tile's highest-scoring criterion, or one criterion's score as a heat map."
+          value={importanceView(state)}
+          options={IMPORTANCE_VIEW_OPTIONS}
+          onChange={view => onChange(setImportanceView(state, view))}
+          testId="visual-layer-importance-view"
+        />}
       </div>;
     })}
   </ToolstripMenuButton>;
 
-  return <ToolstripRow
+  // A layer's key stands under the row, wrapped to the column's width: beside
+  // the plane controls it made the row as wide as the picture.
+  const shown = (id: VisualLayerId) => state.visible && !hidden.includes(id) && state.enabled.includes(id);
+  const legend = (label: string, title: string, entries: ReadonlyArray<{ color: string; label: string; title?: string; wide?: boolean }>) =>
+    <div className="toolstrip-legend" aria-label={label} title={title}>
+      {entries.map(entry => <span key={entry.label} title={entry.title}>
+        <i aria-hidden className={entry.wide ? "is-wide" : undefined} style={{ background: entry.color }} />{entry.label}
+      </span>)}
+    </div>;
+  return <><ToolstripRow
     icon={<Eye size={14} />}
     name="Visual layers"
     hint="Hide or restore the selected layers."
@@ -70,24 +92,6 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
     onClick={() => onChange({ ...state, visible: !state.visible })}
     after={<>{menu}<span className="toolstrip-name">{state.enabled.length} {state.enabled.length === 1 ? "layer" : "layers"}</span></>}
   >
-    {state.visible && !hidden.includes("pages") && state.enabled.includes("pages") && <span
-      aria-label="Domain page states"
-      title="Last-step volume work. Resident pages may also support pressure and the interface. Absent pages are hidden."
-      style={{ display: "inline-flex", gap: 8, fontSize: 11 }}
-    >
-      <span style={{ color: "#1fc7a6" }}>● Transport</span>
-      <span style={{ color: "#f29c29" }}>● Sharpen only</span>
-      <span style={{ color: "#9475c2" }}>● Resident</span>
-    </span>}
-    {state.visible && !hidden.includes("tiles") && state.enabled.includes("tiles") && <span
-      aria-label="Mixed Uniform tile reasons"
-      title="Why each h tile is h (the frame head's census), and which velocity sampler it took."
-      style={{ display: "inline-flex", flexWrap: "wrap", gap: "2px 8px", fontSize: 11, maxWidth: 420 }}
-    >
-      {MIXED_TILE_LEGEND.map(entry => <span key={entry.label} title={entry.title} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-        <span aria-hidden style={{ width: 9, height: 9, borderRadius: 2, background: entry.color }} />{entry.label}
-      </span>)}
-    </span>}
     {plane && state.visible && <>
       <Choice<"x" | "y" | "z">
         ariaLabel="Field view plane"
@@ -105,5 +109,9 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
       />
       <Value value={`${Math.round(plane.slice * 100)}%`} />
     </>}
-  </ToolstripRow>;
+  </ToolstripRow>
+  {shown("pages") && legend("Domain page states", "Last-step volume work. Resident pages may also support pressure and the interface. Absent pages are hidden.", PAGE_LEGEND)}
+  {shown("tiles") && legend("Mixed Uniform tile reasons", "Why each h tile is h (the frame head's census), and which velocity sampler it took.", MIXED_TILE_LEGEND)}
+  {shown("importance") && legend("Mixed Uniform detail importance", "The frame head census's detail importance. Every score is its measure over its threshold: 1 triggers.", importanceLegend(importanceView(state)))}
+  </>;
 }

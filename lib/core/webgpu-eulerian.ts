@@ -3,6 +3,7 @@ import type { PerformanceTrace } from "./performance-trace";
 import type { TallCellLayout } from "./tall-cell-grid";
 import type { GPUQuality } from "./gpu-quality";
 import type { SparseWorldDevice, SparseWorldFault, SparseWorldStatus } from "../sparse-world";
+import type { SolverDetailDiagnostics } from "./solver-detail";
 export type GPUGridMethod = "octree";
 export type GPUVelocityTransport = "semi-lagrangian" | "maccormack";
 
@@ -13,8 +14,17 @@ export interface GPUFieldLocation {
 }
 
 export interface GPUEulerianInfo {
+  /** Uniform Geometric: the accepted detail plan (policy, requested/admitted, support, residency). */
+  uniformDetail?: SolverDetailDiagnostics;
   uniformMixedGeneration?: number;
   uniformMixedFineTiles?: number;
+  /** h tiles the owner-indexed storage holds, and the builder's admission under it (a staged return). */
+  uniformMixedFineCapacity?: number;
+  uniformMixedAdmission?: number;
+  /** Builds deferred over the admission capacity, the h tiles they left waiting (summed per build), and capacity changes. */
+  uniformMixedDeferredBuilds?: number;
+  uniformMixedDeferredTiles?: number;
+  uniformMixedCapacityChanges?: number;
   /** Completed dynamic ownership changes, including their field remap. */
   uniformMixedDynamicRelayouts?: number;
   uniformMixedRegularTiles?: number;

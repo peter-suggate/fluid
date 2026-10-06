@@ -1,3 +1,5 @@
+import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
+import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
@@ -15,20 +17,20 @@ export class UniformMixedFramePlan {
   readonly allocatedBytes=32;
   private readonly params:GPUBuffer;
   private readonly resources:GPUBindGroupLayout;
-  private readonly group:GPUBindGroup;
+  private readonly group:UniformDetailGroup;
   private readonly extendedResources:GPUBindGroupLayout;
-  private readonly extendedGroup:GPUBindGroup;
+  private readonly extendedGroup:UniformDetailGroup;
   private readonly pipelines=new Map<string,GPUComputePipeline>();
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,velocity:GPUTexture,negative:GPUBuffer,
     /** The extended field every characteristic samples, valid at encodeCertificate. */
     extended:GPUTexture,extendedNegative:GPUBuffer,directionalCertificate=false){
     if(!directionalCertificate)throw new Error("The mixed frame plan certifies signed per-axis reach only");
     this.params=device.createBuffer({label:"Uniform shared support policy",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-    this.resources=device.createBindGroupLayout({entries:[...[0,1,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
-    this.group=device.createBindGroup({layout:this.resources,entries:[...[volume,phi].map((t,binding)=>({binding,resource:t.createView()})),{binding:2,resource:{buffer:this.params}},{binding:3,resource:velocity.createView()},{binding:4,resource:{buffer:negative}}]});
-    this.extendedResources=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
+    this.resources=uniformDetailBindLayout(device,{entries:[...[0,1,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
+    this.group=uniformDetailGroup(device,{layout:this.resources,entries:[...[volume,phi].map((t,binding)=>({binding,resource:t})),{binding:2,resource:{buffer:this.params}},{binding:3,resource:velocity},{binding:4,resource:{buffer:negative}}]});
+    this.extendedResources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
-    this.extendedGroup=device.createBindGroup({layout:this.extendedResources,entries:[{binding:0,resource:extended.createView()},{binding:1,resource:{buffer:extendedNegative}},{binding:2,resource:{buffer:ownership.speeds}}]});
+    this.extendedGroup=uniformDetailGroup(device,{layout:this.extendedResources,entries:[{binding:0,resource:extended},{binding:1,resource:{buffer:extendedNegative}},{binding:2,resource:{buffer:ownership.speeds}}]});
   }
   async initialize():Promise<void>{
     const h=this.ownership.capacity.lattice.cellSize_m;
@@ -36,7 +38,7 @@ export class UniformMixedFramePlan {
     const topology=uniformMixedTopologyWGSL(this.ownership.capacity,0).replace('umSupport:array<u32>','umSupport:array<atomic<u32>>').replace(/umSupport\[([^\]]+)\]/g,'atomicLoad(&umSupport[$1])');
     // seed and localSpeed stride the GPU-counted owners of every tier
     // (umAllOwner); the per-tile passes cover the lattice.
-    const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(topology+/* wgsl */`
+    const module=uniformDetailModule(this.device,{label:"Uniform mixed frame plan",code:uniformMixedCountedEntriesWGSL(topology+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var phi:texture_3d<f32>;
 struct PlanPolicy {settings:vec4u,step:vec4f}
@@ -47,6 +49,8 @@ struct PlanPolicy {settings:vec4u,step:vec4f}
 @group(2) @binding(1) var<storage,read> extendedNegative:array<f32>;
 @group(2) @binding(2) var<storage,read_write> speeds:array<u32>;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
+// A tile corner: the base block (UNIFORM_DETAIL_4H_LOAD).
+fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
 fn umNegativeIndex(origin:vec3u,axis:u32)->u32{
  if(axis==0u){return origin.y+UM_D.y*origin.z;}
  if(axis==1u){return UM_D.y*UM_D.z+origin.x+UM_D.x*origin.z;}
@@ -76,19 +80,22 @@ fn umReachPlus(w:u32)->vec3u{return vec3u(w&31u,(w>>5u)&31u,(w>>10u)&31u);}
 fn umReachMinus(w:u32)->vec3u{return vec3u((w>>15u)&31u,(w>>20u)&31u,(w>>25u)&31u);}
 // Every plan follows a phi resolve of its layout (frame start, census tail).
 ${uniformMixedVertexSamplingSource("",true)}
-// An owner's positive-face speeds. In a tile whose stencil is all unit width
+// An owner's positive-face speeds (of velocity: a texture parameter would
+// bypass the detail accessors). In a tile whose stencil is all unit width
 // every positive face is the owner's own unit patch, anchored at its origin.
-fn umPositiveFaceSpeeds(field:texture_3d<f32>,unit:bool,origin:vec3u)->vec3f{
- if(unit){return abs(textureLoad(field,vec3i(origin),0).xyz);}
+fn umPositiveFaceSpeeds(unit:bool,origin:vec3u)->vec3f{
+ if(unit){return abs(textureLoad(velocity,vec3i(origin),0).xyz);}
  let owner=umOwnerAt(vec3i(origin));var speed=vec3f(0);
  for(var axis=0u;axis<3u;axis++){
   let first=umFace(owner,axis,1,0u);
-  for(var part=0u;part<first.count;part++){let f=umFace(owner,axis,1,part);speed[axis]=max(speed[axis],abs(textureLoad(field,f.anchor,0)[axis]));}
+  // A 4h owner's single patch is anchored at its tile's +face anchor: the base block.
+  if(first.width==4u){speed[axis]=abs(${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,first.anchor,0)[axis]);continue;}
+  for(var part=0u;part<first.count;part++){let f=umFace(owner,axis,1,part);speed[axis]=max(speed[axis],abs(textureLoad(velocity,f.anchor,0)[axis]));}
  }
  return speed;
 }
-fn umPositiveFaceSpeed(field:texture_3d<f32>,unit:bool,origin:vec3u)->f32{
- let v=umPositiveFaceSpeeds(field,unit,origin);return max(v.x,max(v.y,v.z));
+fn umPositiveFaceSpeed(unit:bool,origin:vec3u)->f32{
+ let v=umPositiveFaceSpeeds(unit,origin);return max(v.x,max(v.y,v.z));
 }
 // One lane per owner over every h tile and the 4h tiles of resident pages
 // (umResidentAllOwner). A tile's owners are contiguous slots, so
@@ -106,14 +113,22 @@ var<workgroup> seedSpeed:atomic<u32>;
  atomicStore(&seeded[lane],0u);if(lane==0u){atomicStore(&seedSpeed,0u);}workgroupBarrier();
  if(owner.width!=0u){
   let width=owner.width;let unit=umTileMaximumWidth(owner.tile)==1u;let origin=umOrigin(owner);
-  var speed=umPositiveFaceSpeed(velocity,unit,origin);
+  var speed=umPositiveFaceSpeed(unit,origin);
   for(var axis=0u;axis<3u;axis++){if(origin[axis]==0u){speed=max(speed,abs(negative[umNegativeIndex(origin,axis)]));}}
   atomicMax(&seedSpeed,bitcast<u32>(speed));
-  var occupied=textureLoad(volume,vec3i(origin),0).x!=0.0;
-  for(var k=0u;k<8u;k++){
-   // Every vertex of a unit-stencil tile is stored.
-   let vertex=origin+umCorner(k,2u)*width;
-   occupied=occupied||select(umVertexValue(vertex),umLoadVertex(vertex),unit)<${4*Math.max(...h)}*f32(width);
+  // A 4h owner's origin and corners are its tile's (umVertexValue of a
+  // tile corner is its load): the base blocks.
+  var occupied=false;
+  if(width==4u){
+   occupied=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(origin),0).x!=0.0;
+   for(var k=0u;k<8u;k++){occupied=occupied||umLoadCorner(origin+umCorner(k,2u)*4u)<${16*Math.max(...h)};}
+  }else{
+   occupied=textureLoad(volume,vec3i(origin),0).x!=0.0;
+   for(var k=0u;k<8u;k++){
+    // Every vertex of a unit-stencil tile is stored.
+    let vertex=origin+umCorner(k,2u)*width;
+    occupied=occupied||select(umVertexValue(vertex),umLoadVertex(vertex),unit)<${4*Math.max(...h)}*f32(width);
+   }
   }
   if(occupied){atomicOr(&seeded[slot],3u);}
  }
@@ -140,7 +155,8 @@ fn umSignedFaceExtent(unit:bool,origin:vec3u,axis:u32)->vec2f{
  if(unit){let v=textureLoad(extended,vec3i(origin),0)[axis];lo=min(lo,v);hi=max(hi,v);}
  else{
   let owner=umOwnerAt(vec3i(origin));let first=umFace(owner,axis,1,0u);
-  for(var part=0u;part<first.count;part++){let v=textureLoad(extended,umFace(owner,axis,1,part).anchor,0)[axis];lo=min(lo,v);hi=max(hi,v);}
+  if(first.width==4u){let v=${UNIFORM_DETAIL_4H_LOAD}textureLoad(extended,first.anchor,0)[axis];lo=min(lo,v);hi=max(hi,v);}
+  else{for(var part=0u;part<first.count;part++){let v=textureLoad(extended,umFace(owner,axis,1,part).anchor,0)[axis];lo=min(lo,v);hi=max(hi,v);}}
  }
  if(origin[axis]==0u){let v=extendedNegative[umNegativeIndex(origin,axis)];lo=min(lo,v);hi=max(hi,v);}
  return vec2f(lo,hi);
@@ -228,7 +244,7 @@ var<workgroup> certifyBases:array<u32,2>;
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.extendedResources]});
-    await Promise.all(["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","prefix0","prefix1","prefix2","certify"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:entryPoint==="seed"?UNIFORM_MIXED_COUNTED.residentAll:UNIFORM_MIXED_COUNTED.all}:{})}}}));}));
+    await Promise.all(["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","prefix0","prefix1","prefix2","certify"].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:entryPoint==="seed"?UNIFORM_MIXED_COUNTED.residentAll:UNIFORM_MIXED_COUNTED.all}:{})}}}));}));
   }
   encode(encoder:GPUCommandEncoder,policy={fineReach:2,shellReach:1,twoLevel:true,shellOnly:true}):void{
     if(this.pipelines.size!==12)throw new Error("Mixed frame plan is not initialized");
@@ -237,7 +253,7 @@ var<workgroup> certifyBases:array<u32,2>;
     // Seed flags: absent pages' tiles keep this zero (the seed skips them).
     encoder.clearBuffer(this.ownership.support,0,this.ownership.capacity.tiles*4);
     const pass=encoder.beginComputePass({label:"Uniform shared frame plan"});
-    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);pass.setBindGroup(2,this.extendedGroup);
+    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);pass.setBindGroup(2,this.extendedGroup.group);
     this.dispatch(pass,["seed","dilate0","dilate1","dilate2"]);
     pass.end();
   }
@@ -250,7 +266,7 @@ var<workgroup> certifyBases:array<u32,2>;
     // Only the certificate reads dt: support and extension are dt-free.
     this.device.queue.writeBuffer(this.params,16,new Float32Array([dt,0,0,0]));
     const pass=encoder.beginComputePass({label:"Uniform local speed certificate"});
-    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);pass.setBindGroup(2,this.extendedGroup);
+    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);pass.setBindGroup(2,this.extendedGroup.group);
     // Certified consumers read the list counts themselves (umCertifiedJobCount).
     this.dispatch(pass,["localSpeed","spread0","spread1","spread2","prefix0","prefix1","prefix2","certify"]);
     pass.end();
@@ -260,7 +276,7 @@ var<workgroup> certifyBases:array<u32,2>;
       if(counted.includes(entry)){this.ownership.dispatchAllCounted(pass,this.pipelines.get(entry)!);continue;}
       const t=this.ownership.capacity.tileDimensions,line=/^prefix(\d)$/.exec(entry);
       const groups=Math.ceil((line?t[(+line[1]!+1)%3]!*t[(+line[1]!+2)%3]!:this.ownership.capacity.tiles)/64);
-      pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));
+      pass.setPipeline(uniformDetailPick(this.pipelines.get(entry)!));pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));
     }
   }
   destroy():void{this.params.destroy();}

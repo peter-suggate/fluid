@@ -456,7 +456,12 @@ export const createUIStore = () => create<UIStore>((set) => ({
   // Arming drops the axis lock: it is only ever drawn while handles are on
   // screen, and a constraint still armed on the way into the next gesture would
   // be a hidden state that silently ate two thirds of the next drag.
-  setArmedGesture: (armedGesture) => set({ armedGesture, axisConstraint: undefined }),
+  // And it puts a sculpt tool away, as arming one puts the gesture away
+  // (`setVoxelTool`): the next drag has exactly one meaning, and the tool is
+  // asked first, so one left armed would silently swallow the stroke just armed.
+  setArmedGesture: (armedGesture) => set(armedGesture
+    ? { armedGesture, axisConstraint: undefined, voxelToolId: undefined }
+    : { armedGesture, axisConstraint: undefined }),
   setAxisConstraint: (axisConstraint) => set({ axisConstraint }),
   // One call, because the box and the selection that names it must land in the
   // same update: a render between the two would draw a selection whose entity

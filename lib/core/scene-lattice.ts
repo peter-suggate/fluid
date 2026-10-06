@@ -54,3 +54,24 @@ export function solidVoxelEditsForScene(
     return false;
   });
 }
+
+/**
+ * Carry the derived shell across a lattice change written straight onto the
+ * document's fields.
+ *
+ * The shell addresses cells, so it does not follow `container` or
+ * `voxelDomain` on its own: left as it was, the old walls stand inside the new
+ * tank as ordinary opaque voxels, and the presentation that hides the
+ * canonical shell no longer recognises them. `before` is the document while
+ * its lattice still identifies that shell.
+ */
+export function solidVoxelsOnMovedLattice(
+  before: SceneDescription,
+  after: SceneDescription,
+): SolidWorldVoxelPatch[] {
+  const authoredEdits = solidVoxelEditsForScene(before);
+  // A garden or an authored-shell document carries no compiled shell to move.
+  if (before.solidVoxels.length - authoredEdits.length
+    !== solidVoxelShellForScene(before).length) return after.solidVoxels;
+  return [...solidVoxelShellForScene(after), ...authoredEdits];
+}

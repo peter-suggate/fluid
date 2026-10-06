@@ -1,5 +1,6 @@
 import { resolveUniformGeometricValues, uniformGeometricSharpeningSweeps, UNIFORM_GEOMETRIC_SHARPENING_STRENGTH } from "./uniform-geometric-parameters";
 import { uniformReferenceSolverOptions } from "./uniform-options";
+import { uniformDetailSettings } from "./uniform-detail-policy";
 import type { WebGPUUniformReferenceOptions } from "./webgpu-uniform-reference";
 import type { MethodParamValues } from "../../core/method-contract";
 import type { SceneDescription } from "../../core/model";
@@ -20,10 +21,9 @@ export function uniformGeometricSolverOptions(overrides: MethodParamValues = {},
       totalSurfaceVolume: values.totalSurfaceVolume === "on",
       volumeDustThreshold: Number(values.volumeDustThreshold),
       orphanDustThreshold: Number(values.orphanDustThreshold),
-      mixedCoarsening: values.coarsening === "regions" ? "regions" : "dynamic",
-      mixedCoarseningBoundaryTravel: Number(values.coarseningBoundaryTravel),
-      // Disabled in production, including configurations saved while the experiment was enabled.
-      mixedCoarseningSurfaceTolerance: 0,
+      // Interim mapping onto the existing solver (uniformDetailMixedCoarsening):
+      // Requested and Full use the CPU region layout, Dynamic the GPU census.
+      detail: uniformDetailSettings(values),
       phiCubicAdvection: values.phiCubicAdvection === "on",
       phiDrain: values.phiDrain === "on",
       phiPreserveSurface: values.phiPreserveSurface === "on",

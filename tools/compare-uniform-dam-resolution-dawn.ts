@@ -1,5 +1,5 @@
 /** Compare the 128³ dam held at 4h with the physical 32³ mini dam.
- * --case=high-regions|mini-regions|high-dynamic|mini-fine-dynamic
+ * --case=high-regions|mini-regions|high-dynamic|mini-fine-dynamic|fine-64
  * --frames=120 --hz=60 --throughput --out=/tmp/comparison.json
  * Without --throughput, records hardware stage timestamps, with finer seams.
  * --field-census reads canonical fields after timing. --full-pressure-envelope
@@ -7,7 +7,8 @@
  * The production solver, tuning and pressure acceptance are unchanged.
  */
 import assert from "node:assert/strict";
-import {writeFileSync, mkdirSync} from "node:fs";
+import {createHash} from "node:crypto";
+import {writeFileSync, mkdirSync, readFileSync, readdirSync} from "node:fs";
 import {dirname, resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
@@ -23,18 +24,31 @@ import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method"
 import type {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-uniform-reference";
 import type {UniformMixedFrameTrace} from "../lib/methods/uniform/uniform-mixed-frame";
 import {readMixedTexture} from "../tests/helpers/uniform-mixed-native-fields";
+import {UniformMixedOwnership} from "../lib/methods/uniform/uniform-mixed-ownership";
 
 const arg=(key:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${key}=`))?.slice(key.length+3)??fallback;
 const kind=arg("case","high-regions"), frames=Number(arg("frames","120")), dt=1/Number(arg("hz","60"));
 const throughput=process.argv.includes("--throughput"), out=resolve(arg("out",`/tmp/${kind}.json`));
-assert.ok(["high-regions","mini-regions","high-dynamic","mini-fine-dynamic"].includes(kind));
+const bandGrid=arg("band-grid","buffered");assert.ok(["buffered","fixed"].includes(bandGrid));
+const workGrid=arg("work-grid","buffered");assert.ok(["buffered","fixed"].includes(workGrid));
+// QA only: absent evidence restores the old capacity-sized ownership grids.
+if(workGrid==="fixed")UniformMixedOwnership.prototype.observeWork=()=>{};
+assert.ok(["high-regions","mini-regions","high-dynamic","mini-fine-dynamic","fine-64"].includes(kind));
+const expectedOwners=kind==="fine-64"?64**3:32**3;
+assert.ok(kind!=="fine-64"||!process.argv.includes("--field-census"),"The matched physical census is a 32³ comparison");
 assert.ok(Number.isInteger(frames)&&frames>8&&dt>0&&Number.isFinite(dt));
 const stats=(values:number[])=>{const s=values.toSorted((a,b)=>a-b);return {n:s.length,mean:s.reduce((a,b)=>a+b,0)/s.length,median:s[Math.floor(s.length/2)]!,p10:s[Math.floor(s.length*.1)]!,p90:s[Math.min(s.length-1,Math.floor(s.length*.9))]!};};
 const rows:{frame:number;wall_ms:number;trace:NonNullable<WebGPUUniformReferenceSolver["info"]["physicsTrace"]>;work:Record<string,unknown>}[]=[];
+const sourceFiles=readdirSync("lib/methods/uniform").filter(p=>p.endsWith(".ts")).sort();
+const fingerprint=()=>createHash("sha256").update(sourceFiles.map(p=>`${p}:${createHash("sha256").update(readFileSync(`lib/methods/uniform/${p}`)).digest("hex")}`).join("\n")).digest("hex");
+const sourceFingerprint=fingerprint();
 let context:Record<string,unknown>={kind,frames,dt_s:dt,throughput};
 const save=(value:unknown)=>{mkdirSync(dirname(out),{recursive:true});writeFileSync(out,JSON.stringify(value,null,2)+"\n");};
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
-await acquireWebGPUExclusiveLock("dawn-benchmark",`Uniform dam resolution comparison: ${kind}`);
+let waiting=false;
+for(;;){try{await acquireWebGPUExclusiveLock("dawn-benchmark",`Uniform dam resolution comparison: ${kind}`);break;}
+ catch(error){if(!(error instanceof Error)||!error.message.includes("Refusing concurrent GPU execution"))throw error;
+  if(!waiting){console.log("Waiting for WebGPU lease");waiting=true;}await new Promise(r=>setTimeout(r,250));}}
 try {
  const dawn=await import(pathToFileURL(resolve(process.env.WEBGPU_NODE_MODULE??"node_modules/webgpu/index.js")).href) as NodeDawnProvider;
  Object.assign(globalThis,dawn.globals);
@@ -42,34 +56,45 @@ try {
  const adapterInfo={vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description};
  device=managedGPUDevice(await adapter.requestDevice({requiredFeatures:throughput?[]:["timestamp-query"],requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
  const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
- const scene=sceneDocument(getSceneDefinition(kind.startsWith("high")?"high-resolution-dam-break":"minimal-power-dam-break-32"));
+ const scene=sceneDocument(getSceneDefinition(kind.startsWith("high")?"high-resolution-dam-break":kind==="fine-64"?"minimal-power-dam-break-64":"minimal-power-dam-break-32"));
  scene.numerics.fixedDt_s=scene.numerics.maxDt_s=dt;
  if(kind.startsWith("high"))scene.fluid.refinementRegions=[{id:"whole-domain-4h",rule:"minimum-cell-size",minimumCellSize_cells:4,maximumCellSize_cells:4,min_m:{x:-.4,y:0,z:-.4},max_m:{x:.4,y:.8,z:.4}}];
  if(kind==="mini-fine-dynamic")scene.fluid.refinementRegions=[{id:"whole-domain-h",rule:"minimum-cell-size",minimumCellSize_cells:1,maximumCellSize_cells:1,min_m:{x:-.4,y:0,z:-.4},max_m:{x:.4,y:.8,z:.4}}];
- const values=resolveMethodValues(uniformVolumeMethod,"balanced",{...JSON.parse(arg("values","{}")),timeStep:"scene",coarsening:kind.endsWith("dynamic")?"dynamic":"regions"});
+ const values=resolveMethodValues(uniformVolumeMethod,"balanced",{...JSON.parse(arg("values","{}")),timeStep:"scene",detailPolicy:kind.endsWith("dynamic")?"dynamic":kind.startsWith("high")?"requested":"full"});
  usePerformanceInstrumentationStore.getState().setEnabled(false);
  const start=performance.now();
  solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",values,undefined,()=>{}) as WebGPUUniformReferenceSolver;
  await device.queue.onSubmittedWorkDone();
  const setup_ms=performance.now()-start,initial={...await solver.readStats()};
- assert.equal(initial.uniformMixedOwners,32**3,"Both comparison arms must have 32³ physical owners");
+ assert.equal(initial.uniformMixedOwners,expectedOwners,"Comparison ownership must match the selected case");
  const lattice={nx:initial.nx,ny:initial.ny,nz:initial.nz,cellSize_m:initial.cellSize_m};
  context={...context,scene,values,lattice,setup_ms,initial,adapter:adapterInfo};
  console.log(JSON.stringify({kind,setup_ms,lattice,owners:initial.uniformMixedOwners,bytes:initial.allocatedBytes}));
  // QA seams only: split the existing trace without adding simulation passes.
  const target=solver as unknown as {mixedFrameTrace:()=>UniformMixedFrameTrace|undefined;mixedFrame:Record<string,any>;lastPhysicsTraceAt_ms:number};
+ // QA comparison only: restore the previous capacity-sized direct grid.
+ // Same kernels, storage, physics and acceptance; never selected by the app.
+ if(bandGrid==="fixed"){
+  target.mixedFrame.band.workSlots=target.mixedFrame.band.capacity;
+  target.mixedFrame.band.observeWork=()=>{};
+ }
  if(process.argv.includes("--full-pressure-envelope")){
   const frame=target.mixedFrame,get=frame.lagged.get.bind(frame.lagged);
-  frame.lagged.get=(key:number)=>get(key)?frame.initialPlan:undefined;
+  frame.lagged.get=(key:number)=>{const evidence=get(key);return evidence?{...evidence,...frame.initialPlan}:undefined;};
   context.fullPressureEnvelope=true;
  }
  if(!throughput){
   await GPUStageTimestampRecorder.prepare(device);usePerformanceInstrumentationStore.getState().setMode("timeline");
   let active:UniformMixedFrameTrace|undefined;const original=target.mixedFrameTrace.bind(target);
   target.mixedFrameTrace=()=>{active=original();return active;};
-  for(const [name,label] of [["phiResolve","Resolve hanging phi"],["surfaceVolume","Global surface volume correction"],["geometry","Surface geometry"],["momentum","Momentum transport"],["forces","Forces"]]){
-   const object=target.mixedFrame[name!],encode=object.encode;
-   object.encode=function(...args:any[]){const r=encode.apply(this,args);active?.phase(args[0],{id:"other",label:label!});return r;};
+  for(const [name,method,label] of [
+   ["phiResolve","encode","Resolve hanging phi"],["surfaceVolume","encode","Global surface volume correction"],
+   ["geometry","encode","Surface geometry"],["momentum","encode","Momentum transport"],["forces","encode","Forces"],
+   ["transport","encodeLiveSet","Transport dependency lists"],["transport","encodeTransport","Transport row normalization + gather"],
+   ["cleanup","encode","Volume cleanup"],["sharpen","encodeGeometry","Sharpening geometry"],["sharpen","encodeSweeps","Sharpening sweeps"],
+  ]){
+   const object=target.mixedFrame[name!],encode=object[method!];
+   object[method!]=function(...args:any[]){const r=encode.apply(this,args);active?.phase(args[0],{id:"other",label:label!});return r;};
   }
   const surface=target.mixedFrame.surface,encode=surface.encode;
   surface.encode=function(...args:any[]){const r=encode.apply(this,args);active?.phase(args[0],{id:"other",label:`Surface ${args[1]}`});return r;};
@@ -86,14 +111,25 @@ try {
   assert.ok(info.physicsTrace&&info.physicsTrace.sampleId!==lastSample,`No fresh trace: frame ${frame}`);
   assert.equal(info.physicsTrace.measurementSource,"gpu-hardware-timestamp");lastSample=info.physicsTrace.sampleId;
   assert.ok(Math.abs(info.lastDt_s!-dt)<1e-9);assert.equal(info.simulationPipelineError,undefined);
-  assert.equal(info.uniformMixedOwners,32**3,"Enforcement regions must retain the same owner count");
+  assert.equal(info.uniformMixedOwners,expectedOwners,"Enforcement regions must retain the same owner count");
   dustMass+=info.uniformVolumeDustMass_cells??0;
   const work=Object.fromEntries(Object.entries(info).filter(([key])=>/^(allocatedBytes|lastDt|encodedSteps|uniformMixed|uniformPressure|uniformVolumeDust|maxSpeed|volumeCellSum|volumeDrift)/.test(key)));
   rows.push({frame,wall_ms,trace:info.physicsTrace,work});
   if(frame%30===0){console.log(JSON.stringify({kind,frame,wall_ms,gpu_ms:info.physicsTrace.total_ms}));save({...context,rows});}
  }
+ const workCounts:Record<string,number[]>={};
+ for(const [name,buffer,words] of [["transport",target.mixedFrame.transport.live,20],["sharpening",target.mixedFrame.sharpen.work.list,8]] as [string,GPUBuffer,number][]){
+  const read=device.createBuffer({size:4*words,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  try{const e=device.createCommandEncoder();e.copyBufferToBuffer(buffer,0,read,0,4*words);device.queue.submit([e.finish()]);await read.mapAsync(GPUMapMode.READ);workCounts[name]=[...new Uint32Array(read.getMappedRange())];}
+  finally{if(read.mapState==="mapped")read.unmap();read.destroy();}
+ }
  const final={...await solver.readStats()};assert.equal(final.simulationPipelineError,undefined);assert.deepEqual(errors,[]);
- assert.equal(final.uniformMixedOwners,32**3,"Enforcement regions must retain the same owner count");
+ const fieldHashes:Record<string,string>={};
+ if(process.argv.includes("--field-hashes"))for(const name of ["volume","velocity","phi"]){
+  const data=await readMixedTexture(device,target.mixedFrame.fields[name]);
+  fieldHashes[name]=createHash("sha256").update(new Uint8Array(data.buffer,data.byteOffset,data.byteLength)).digest("hex");
+ }
+ assert.equal(final.uniformMixedOwners,expectedOwners,"Enforcement regions must retain the same owner count");
  let fieldCensus:Record<string,unknown>|undefined;
  if(process.argv.includes("--field-census")){
   // Compare canonical samples on the common physical 32³ lattice. Hanging
@@ -110,6 +146,6 @@ try {
  const selected=rows.filter(r=>r.frame>8),labels=[...new Set(selected.flatMap(r=>r.trace.phases.map(p=>p.label)))];
  const summary=throughput?{msPerStep:elapsed_ms/frames,elapsed_ms}: {wall_ms:stats(selected.map(r=>r.wall_ms)),gpu_ms:stats(selected.map(r=>r.trace.total_ms)),stages:labels.map(label=>({label,...stats(selected.map(r=>r.trace.phases.filter(p=>p.label===label).reduce((s,p)=>s+p.duration_ms,0)))})).sort((a,b)=>b.mean-a.mean)};
  const report={capturedAt:new Date().toISOString(),kind,adapter:adapterInfo,backend:"Dawn/Metal",method:uniformVolumeMethod.id,dt_s:dt,frames,discardFrames:8,throughput,scope:"Simulation only; rendering excluded. Throughput uses two frames in flight without timestamps or per-frame stats. Trace mode fences each frame; GPU stage seams exclude CPU waits. First eight frames excluded.",scene,values,lattice,setup_ms,initial,final,dustMass,summary,rows,validationErrors:errors};
- save({...report,fieldCensus,fullPressureEnvelope:process.argv.includes("--full-pressure-envelope")});console.log(JSON.stringify({out,summary,fieldCensus}));
+ save({...report,workCounts,sourceFingerprint,sourceFingerprintAfter:fingerprint(),bandGrid,workGrid,fieldHashes,fieldCensus,fullPressureEnvelope:process.argv.includes("--full-pressure-envelope")});console.log(JSON.stringify({out,summary,fieldCensus,fieldHashes}));
 }catch(error){save({...context,rows,failure:error instanceof Error?error.message:String(error),final:solver?.info});throw error;
 }finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}

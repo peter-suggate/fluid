@@ -1,6 +1,6 @@
 import {uniformMixedPresentationVelocityWGSL} from "../methods/uniform/uniform-mixed-presentation.wgsl";
-import { UNIFORM_STAGE_CERTIFICATE, UNIFORM_STAGE_VIEWS, uniformStageGridsWGSL } from "../methods/uniform/uniform-stage-grids";
-import { VISUAL_LAYERS, visualLayerPaintWGSL, layerOpacity, type VisualLayerState } from "./visual-layers";
+import { UNIFORM_DETAIL_CRITERIA, UNIFORM_STAGE_CERTIFICATE, UNIFORM_STAGE_IMPORTANCE, UNIFORM_STAGE_VIEWS, uniformStageGridsWGSL } from "../methods/uniform/uniform-stage-grids";
+import { VISUAL_LAYERS, visualLayerPaintWGSL, importanceViewCode, layerOpacity, type VisualLayerState } from "./visual-layers";
 /**
  * Solver-grid cross-section rendered as an independent presentation layer.
  *
@@ -15,6 +15,7 @@ import { fractionViewShaderConstants } from "./fluid-fraction-view";
 import { fractionReadoutShaderLibrary } from "./fraction-readout.wgsl";
 import type { SparseAdaptiveGridConsumerSource, DenseLevelSetVolumeConsumerSource } from "./levelset-consumer-abi";
 import { createGridOverlayLevelSetVolumeWGSL, gridOverlayLevelSetVolumeUniform } from "./grid-overlay-levelset-volume.wgsl";
+import { uniformDetailBaseOf } from "./uniform-detail-abi";
 import { methodViewShaderConstants } from "./grid-overlay-visualizations";
 import {
   SOLVE_WINDOW_BOX_WORD, SOLVE_WINDOW_HOST_GROUPS_WORD, SOLVE_WINDOW_RECORD_WORDS, SOLVE_WINDOW_SEED_WORD,
@@ -31,11 +32,13 @@ const LAYER_OPACITY_VEC4S = Math.ceil(VISUAL_LAYERS.length / 4);
 /** Float offsets in the layer uniform after the opacities. */
 const LAYER_PRESSURE_ORIGIN = 4 + 4 * LAYER_OPACITY_VEC4S;
 const LAYER_PAGE_ACTIVITY = LAYER_PRESSURE_ORIGIN + 4;
-const LAYER_UNIFORM_FLOATS = LAYER_PAGE_ACTIVITY + 4;
+/** x: the importance layer's view, 0 = all criteria, else 1 + the criterion id. */
+const LAYER_IMPORTANCE = LAYER_PAGE_ACTIVITY + 4;
+const LAYER_UNIFORM_FLOATS = LAYER_IMPORTANCE + 4;
 
 export const gridOverlayViewRecordsWGSL = /* wgsl */ `
 ${visualLayerPaintWGSL}
-struct LayerUniforms { control:vec4f, opacity:array<vec4f,${LAYER_OPACITY_VEC4S}>, pressureOrigin:vec4f, pageActivity:vec4f, }
+struct LayerUniforms { control:vec4f, opacity:array<vec4f,${LAYER_OPACITY_VEC4S}>, pressureOrigin:vec4f, pageActivity:vec4f, importance:vec4f, }
 @group(0) @binding(24) var<uniform> layers:LayerUniforms;
 fn pageActivityAt(cell:vec3i,base:u32)->bool {
   if(base==0u || arrayLength(&viewRecords)<base+8u){return false;}
@@ -127,6 +130,10 @@ ${cameraApertureShaderLibrary("u")}
 // render-only wall-film/blur reconstruction; the density view deliberately
 // does not, because the question it answers is what the method holds.
 @group(0) @binding(9) var densityField: texture_3d<f32>;
+// The base blocks of densityField and velocityField (uniform-detail-abi.ts):
+// a 4h tile's value is read there, an h tile's in the field's h store.
+@group(0) @binding(26) var densityBase: texture_3d<f32>;
+@group(0) @binding(27) var velocityBase: texture_3d<f32>;
 struct SparseParams {
   counts:vec4u, dimensions:vec4u, topologyOffsets:vec4u, topologyOffsets2:vec4u,
   stateOffsets0:vec4u, stateOffsets1:vec4u, stateOffsets2:vec4u,
@@ -855,7 +862,7 @@ fn levelSetSample(cell: vec3i) -> f32 {
 
 fn densitySample(cell: vec3i) -> f32 {
   if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
-    let o=umOwnerAt(clamp(cell,vec3i(0),vec3i(umDimensions())-1));return textureLoad(densityField,vec3i(umOrigin(o)),0).x;
+    let o=umOwnerAt(clamp(cell,vec3i(0),vec3i(umDimensions())-1));return udrLoadCell(densityField,densityBase,vec3i(umOrigin(o))).x;
   }
   let dims = vec3i(u.gridInfo.xyz);
   if(sparseGridEnabled()){return sparseDensityAt(cell);}
@@ -912,7 +919,7 @@ fn isOpticalCube(cell: vec3i, dims: vec3i) -> bool {
 // cell = top endpoint dof, the rest = bottom dof) so the displayed field is
 // the one the projection actually controls.
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
- if(anchor[axis]>=0){return textureLoad(velocityField,anchor,0)[axis];}
+ if(anchor[axis]>=0){return udrLoadFace(velocityField,velocityBase,anchor)[axis];}
  if(layers.control.z<=0.0){return 0.0;}
  let q=vec3u(max(anchor,vec3i(0)));let dims=umDimensions();var index=q.y+dims.y*q.z;
  if(axis==1u){index=dims.y*dims.z+q.x+dims.x*q.z;}
@@ -1273,6 +1280,10 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   }
   var cellVelocity = vec3f(0.0);
   if (fieldMode == 1 || fieldMode == 2 || fieldMode == 26) { cellVelocity = velocitySample(cell); }
+  var cellFill = vec2f(0.0);
+  if (fieldMode == 21) { cellFill = sliceVolumeFill(cell); }
+  var cellDensity = 0.0;
+  if (fieldMode == 10 || (fieldMode == 21 && layers.control.x > 0.5)) { cellDensity = densitySample(cell); }
   let lineFade = select(smoothstep(2.5, 6.0, pixelsPerLatticeCell),
     smoothstep(1.8, 4.2, pixelsPerLatticeCell), structureView);
   // Half-width of a grid line in pixels, clamped so a line never takes more
@@ -1497,7 +1508,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     } else if (fieldMode == 21) {
       // The volume field fills complete represented cells; phi is a separate
       // contour so disagreement remains visible, as in the 2-D advance lab.
-      let volume = sliceVolumeFill(cell);
+      let volume = cellFill;
       let fraction = clamp(volume.x, 0.0, 1.0);
       let ground = sceneColor(FRACTION_EMPTY_DISPLAY);
       let water = sceneColor(FRACTION_LIQUID_DISPLAY);
@@ -1592,7 +1603,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       // excess Sec. 3.7 charges the divergence with removing. Sub-half mass is
       // therefore visible as its own phase rather than reading as air, which is
       // the whole point: it is carried by transport and ignored by pressure.
-      let rho = densitySample(cell);
+      let rho = cellDensity;
       // The sub-half phase is logarithmic because that is the shape of the
       // quantity. Transported residue lives across the decades between
       // DENSITY_FLOOR and about 1e-2, and a linear ramp over [0, 1/2] buries
@@ -1656,23 +1667,78 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     if(fieldMode==21){
       // Liquid volume over open capacity where the method publishes capacity,
       // else over the cell volume.
-      let fill=sliceVolumeFill(cell);scalar=select(densitySample(cell),fill.x,fill.y>0.0);
+      scalar=select(cellDensity,cellFill.x,cellFill.y>0.0);
     }
     if(fieldMode==22){scalar=f32(tileClassAt(cell,dims));}
     if(fieldMode==3||fieldMode==5||fieldMode==21||fieldMode==22){let paint=scalarLayerPaint(fieldMode,scalar);fill=sceneColor(paint.rgb);alpha=paint.a;}
-    if(fieldMode==22&&mixedLattice){
-      // Why each tile is h (the frame head's census), and which velocity
-      // sampler its h faces took (the frame plan's certificate).
+    // The importance layer has no dense-lattice form: it draws only what the
+    // mixed frame's census recorded.
+    if(fieldMode==28){fill=vec3f(0.0);alpha=0.0;}
+    var importanceRecorded=false;
+    if((fieldMode==22||fieldMode==28)&&mixedLattice){
       let t=umTileAt(vec3u(clamp(cell,vec3i(0),vec3i(umDimensions())-vec3i(1)))/4u);
-      let hTile=umTileWidth(t)==1u;
-      let reason=umStageReason(stage,t);
-      if(reason!=0xffffffffu){let paint=umReasonPaint(reason,hTile);fill=sceneColor(paint.rgb);alpha=paint.a;}
-      let certificate=select(0u,umStageCertificate(stage,t),hTile);
-      if(certificate==${UNIFORM_STAGE_CERTIFICATE.coarseInReach}u||certificate==${UNIFORM_STAGE_CERTIFICATE.saturated}u){
+      // The tile's screen hatch (0 none, 1 hatched, 2 cross-hatched) and inset
+      // outline. Both layers mark through the one hatch site below: Metal
+      // compiles every inlined copy.
+      var hatchClass=0u;
+      var hatchColor=vec3f(0.02,0.04,0.05);
+      var outlined=false;
+      if(fieldMode==22){
+        // Why each tile is h (the frame head's census), and which velocity
+        // sampler its h faces took (the frame plan's certificate).
+        let hTile=umTileWidth(t)==1u;
+        let reason=umStageReason(stage,t);
+        if(reason!=0xffffffffu){let paint=umReasonPaint(reason,hTile);fill=sceneColor(paint.rgb);alpha=paint.a;}
+        let certificate=select(0u,umStageCertificate(stage,t),hTile);
+        hatchClass=select(select(0u,1u,certificate==${UNIFORM_STAGE_CERTIFICATE.coarseInReach}u),2u,certificate==${UNIFORM_STAGE_CERTIFICATE.saturated}u);
+      }else{
+        // How much each tile holding liquid matters to the frame head's
+        // census, h or 4h: every criterion's score is its measure over its
+        // threshold. All criteria draw the tile's winner; one criterion draws
+        // its own score as a heat map.
+        let words=umStageImportance(stage,t);
+        if(any(words!=vec2u(0xffffffffu))){
+          importanceRecorded=true;
+          let pick=min(u32(layers.importance.x+0.5),${UNIFORM_DETAIL_CRITERIA.length}u);
+          let winners=pick==0u;
+          let winner=umImportanceWinner(words);
+          // A tile no criterion scored has no winner: it paints nothing, in
+          // the neutral colour its marks then keep.
+          let scored=!winners||winner!=0xffffffffu;
+          let criterion=select(0u,select(pick-1u,winner,winners),scored);
+          let paint=umImportancePaint(select(0xffffffffu,criterion,scored),select(0.0,umImportanceScore(words,criterion),scored),!winners);
+          fill=sceneColor(paint.rgb);alpha=paint.a;
+          // All: tiles the census requires at h, hatched where only the hold
+          // keeps them and cross-hatched where the budget dropped a triggered
+          // tile. One criterion: the tiles it triggers in, so the contour of
+          // score 1 reads without decoding the ramp.
+          outlined=select(umImportanceTriggered(words,criterion),(words.y&${UNIFORM_STAGE_IMPORTANCE.required}u)!=0u,winners);
+          let dropped=(words.y&${UNIFORM_STAGE_IMPORTANCE.dropped}u)!=0u;
+          hatchClass=select(0u,select(select(0u,1u,(words.y&${UNIFORM_STAGE_IMPORTANCE.held}u)!=0u),2u,dropped),winners);
+          hatchColor=sceneColor(select(LP_importanceHeld,LP_importanceDropped,dropped));
+        }
+      }
+      if(hatchClass!=0u){
         var hatch=sliceScreenHatch(samplePosition,derivative,footprint);
-        if(certificate==${UNIFORM_STAGE_CERTIFICATE.saturated}u){hatch=max(hatch,sliceScreenHatch(vec2f(samplePosition.x,-samplePosition.y),derivative,footprint));}
+        if(hatchClass==2u){hatch=max(hatch,sliceScreenHatch(vec2f(samplePosition.x,-samplePosition.y),derivative,footprint));}
         hatch*=0.55;
-        fill=mix(fill,vec3f(0.02,0.04,0.05),hatch);alpha=max(alpha,hatch);
+        // An importance fill can be faint or absent, and its stripes must not
+        // take its tint: they composite over it. The tiles layer's fill is
+        // never faint under a hatch, and keeps its plain mix.
+        fill=mix(fill,hatchColor,select(hatch/max(hatch+alpha*(1.0-hatch),1e-6),hatch,fieldMode==22));alpha=max(alpha,hatch);
+      }
+      if(outlined){
+        // A light core inside a dark casing, inset from the tile's own
+        // lattice line, so it holds over a hot fill and over bare water; it
+        // fades once a tile is too few pixels across to carry it.
+        let tileFraction=fract(planePoint/4.0);
+        let tileDistance=min(min(tileFraction.x,1.0-tileFraction.x)*4.0/derivative.x,
+          min(tileFraction.y,1.0-tileFraction.y)*4.0/derivative.y);
+        let carried=smoothstep(8.0,14.0,4.0*pixelsPerCell);
+        let casing=0.6*carried*gridLinePaint(abs(tileDistance-1.5),1.4);
+        let core=carried*gridLinePaint(abs(tileDistance-1.5),0.7);
+        fill=mix(mix(fill,vec3f(0.02,0.04,0.05),casing),sceneColor(LP_importanceOutline),core);
+        alpha=max(alpha,max(casing,core));
       }
     }
 
@@ -1680,7 +1746,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     // mixedLattice above); on a dense lattice only the grid layer and the two
     // layout layers, whose subject is the lattice, draw it.
     let cellLines=max(firstGridLine,secondGridLine);
-    line=select(0.0,cellLines,fieldMode==0||(fieldMode==22&&mixedLattice)
+    line=select(0.0,cellLines,fieldMode==0||(fieldMode==22&&mixedLattice)||importanceRecorded
       ||(mixedLattice&&(fieldMode==3||fieldMode==5||fieldMode==21||fieldMode==26)));
     lineStrength=select(1.0,0.4,fieldMode!=0);
     if(fieldMode==0){fill=vec3f(0.55,0.72,0.8);alpha=0.0;}
@@ -1721,18 +1787,18 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     }
     if(fieldMode==3){lineStrength=min(lineStrength,0.3);}
     if(fieldMode==25){
-      var bits=u32(round(textureLoad(velocityField,cell,0).w));
+      var bits=0u;
       var width=1.0;var f=fract(samplePosition);
       if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
-       let owner=umOwnerAt(cell);let origin=umOrigin(owner);bits=0u;width=f32(owner.width);
+       let owner=umOwnerAt(cell);let origin=umOrigin(owner);width=f32(owner.width);
        f=fract(samplePosition/width);
        for(var axis=0u;axis<3u;axis++){
         let first=umFace(owner,axis,1,0u);let local=vec3u(cell)-origin;
         let u=(axis+1u)%3u;let v=(axis+2u)%3u;
         let ownedFace=umFace(owner,axis,1,local[u]/first.width+(owner.width/first.width)*(local[v]/first.width));
-        bits|=u32(round(textureLoad(velocityField,ownedFace.anchor,0).w))&((1u<<axis)|(1u<<(axis+3u)));
+        bits|=u32(round(udrLoadFace(velocityField,velocityBase,ownedFace.anchor).w))&((1u<<axis)|(1u<<(axis+3u)));
        }
-      }
+      }else{bits=u32(round(textureLoad(velocityField,cell,0).w));}
       var face=0.0;
       if((bits & (1u<<u32(firstPlaneAxis)))!=0u){face=max(face,gridLinePaint((1.0-f.x)*width/derivative.x,1.2));}
       if((bits & (1u<<u32(secondPlaneAxis)))!=0u){face=max(face,gridLinePaint((1.0-f.y)*width/derivative.y,1.2));}
@@ -1899,6 +1965,7 @@ fn volumeComposite(accumulated:vec4f,color:vec3f,alpha:f32)->vec4f {
 }
 
 @fragment fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
+  udrInit();
   recordComposition=layers.control.x>0.5;
   recordWindowPresent=layers.control.y>0.5;
   recordTilesPresent=layers.pressureOrigin.w>0.5;
@@ -2044,6 +2111,12 @@ export class GridOverlayPipeline {
   private density?: GPUTexture;
   private sparseSource?: SparseAdaptiveGridConsumerSource;
   private denseLevelSetVolumeSource?: DenseLevelSetVolumeConsumerSource;
+  /** The dense source's fields as bound: packed storage reallocates them
+   * when it grows, possibly under the same source object. */
+  private denseVertexPhi?: GPUTexture;
+  private denseCoarsePhi?: GPUTexture;
+  private denseOpenFraction?: GPUTexture;
+  private denseOwnership?: GPUBuffer;
   private viewRecords?: GPUFluidViewRecords;
   private readonly sparseDummyParams: GPUBuffer;
   private readonly sparseOverlayParams: GPUBuffer;
@@ -2123,8 +2196,15 @@ export class GridOverlayPipeline {
   }
 
   setDenseLevelSetVolumeSource(source: DenseLevelSetVolumeConsumerSource | undefined) {
-    if (source === this.denseLevelSetVolumeSource) return;
+    // Under the mixed presentation (ownership and the 4h base) binding 21 is
+    // the detail field, which the solver names only while it holds h-tile
+    // capacity; any other nodal source binds its vertex field raw.
+    const mixed = Boolean(source?.mixedOwnership && source.coarseVertexPhi);
+    const phi = mixed ? source!.detailVertexPhi : source?.vertexPhi, coarse = mixed ? source!.coarseVertexPhi : undefined;
+    if (source === this.denseLevelSetVolumeSource && phi === this.denseVertexPhi && coarse === this.denseCoarsePhi
+      && source?.openFraction === this.denseOpenFraction && source?.mixedOwnership?.buffer === this.denseOwnership) return;
     this.denseLevelSetVolumeSource = source;
+    this.denseVertexPhi = phi; this.denseCoarsePhi = coarse; this.denseOpenFraction = source?.openFraction; this.denseOwnership = source?.mixedOwnership?.buffer;
     this.device.queue.writeBuffer(this.sparseLevelSetVolumeParams, 0,
       gridOverlayLevelSetVolumeUniform(this.sparseSource?.levelSetVolume, source));
     this.rebuildBindGroup();
@@ -2152,6 +2232,7 @@ export class GridOverlayPipeline {
       pages = state.visible && state.enabled.includes("pages") ? pages : undefined;
       values[0] = 1; values[1] = window ? 1 : 0;
       VISUAL_LAYERS.forEach((layer, i) => { values[4 + i] = state.visible && state.enabled.includes(layer.id) ? layerOpacity(state, layer.id) : 0; });
+      values[LAYER_IMPORTANCE] = importanceViewCode(state);
       const tileBytes = tiles ? (tiles.records.size ?? tiles.records.buffer.size - (tiles.records.offset ?? 0)) : 0;
       const boundaryOffset = 1024 + tileBytes;
       const boundaryBytes = boundary ? (boundary.size ?? boundary.buffer.size - (boundary.offset ?? 0)) : 0;
@@ -2251,10 +2332,13 @@ export class GridOverlayPipeline {
         { binding: 18, resource: { buffer: this.sparseOverlayParams } },
         { binding: 19, resource: framePlanResource },
         { binding: 20, resource: { buffer: this.sparseLevelSetVolumeParams } },
-        { binding: 21, resource: (this.denseLevelSetVolumeSource?.vertexPhi ?? this.volume).createView({dimension:"3d"}) },
+        { binding: 21, resource: (this.denseVertexPhi ?? this.volume).createView({dimension:"3d"}) },
         { binding: 22, resource: (this.denseLevelSetVolumeSource?.openFraction ?? this.density).createView({dimension:"3d"}) },
         { binding: 23, resource: this.viewRecords?.records ?? { buffer: this.sparseDummyStorage } },
         { binding: 24, resource: { buffer: this.layerUniform } },
+        { binding: 25, resource: (this.denseCoarsePhi ?? this.volume).createView({dimension:"3d"}) },
+        { binding: 26, resource: uniformDetailBaseOf(this.density).createView({ dimension: "3d" }) },
+        { binding: 27, resource: uniformDetailBaseOf(this.velocity).createView({ dimension: "3d" }) },
       ]
     });
   }

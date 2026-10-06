@@ -9,9 +9,17 @@ export type ToolValues = Readonly<Record<string, number>>;
 export interface ToolControl extends ControlMetadata {
   readonly id: string;
   readonly kind?: "number" | "toggle";
-  /** Contextual hosts keep primary controls visible and disclose advanced ones. */
-  readonly presentation?: "primary" | "advanced";
   readonly label: string;
+  /** One or two characters for a host with no room for the label: "W", "D". */
+  readonly short?: string;
+  /**
+   * The number the brackets and the modified wheel step while this tool is
+   * armed: `"primary"` on the bare pair, `"secondary"` with Shift. A tool
+   * declaring only one of them answers both, so the keys are never dead.
+   */
+  readonly adjust?: "primary" | "secondary";
+  /** Single unmodified key that flips this toggle while the tool is armed. */
+  readonly shortcut?: string;
   readonly min: number;
   readonly max: number;
   readonly step: number;
@@ -35,6 +43,12 @@ export interface ToolUpdate {
   readonly caption: string;
 }
 export interface ToolGesture {
+  /**
+   * False when the press met nothing and the gesture stands on the ground plane
+   * instead. An interactive host hands such a press to the camera — the room
+   * orbits, the scene edits — while a scripted one may still build from it.
+   */
+  readonly surface?: boolean;
   update(ray: EditorRay): ToolUpdate | undefined;
   /**
    * Asked once, when the pointer is released. True means the gesture has a
@@ -45,8 +59,9 @@ export interface ToolGesture {
 }
 /**
  * A capability owner's declaration and behavior, composed in a static catalog
- * like resource plugins and framework features. The voxel shelf is this domain's
- * UI slot; group/order declare insertion, icon/controls declare representation.
+ * like resource plugins and framework features. The tool rail is this domain's
+ * UI slot; group/order declare insertion, icon/controls declare representation
+ * and the keys that drive them.
  * Hosts own interaction and publication lifecycle, and never dispatch on tool id.
  */
 export interface VoxelToolPlugin {
@@ -95,13 +110,23 @@ export function createVoxelToolRegistry(plugins: readonly VoxelToolPlugin[]) {
       throw new Error(`Invalid voxel tool definition: ${plugin.id}`);
     }
     const controls = new Set<string>();
+    const keys = new Set<string>();
+    const adjusts = new Set<string>();
     for (const control of plugin.ui.controls) {
+      // A key or a bracket pair names one control; a second claimant would be silently unreachable.
+      if ((control.shortcut !== undefined && (control.kind !== "toggle" || !/^[a-z]$/.test(control.shortcut) || keys.has(control.shortcut)))
+        || (control.adjust !== undefined && (control.kind === "toggle" || adjusts.has(control.adjust)
+          || (control.adjust !== "primary" && control.adjust !== "secondary")))
+        || (control.short !== undefined && !control.short.trim())) {
+        throw new Error(`Invalid control ${plugin.id}.${control.id}`);
+      }
+      if (control.shortcut) keys.add(control.shortcut);
+      if (control.adjust) adjusts.add(control.adjust);
       if (!control.id.trim() || controls.has(control.id) || !control.label.trim()
         || ![control.min, control.max, control.step, control.initial].every(Number.isFinite)
         || !(control.step > 0) || control.min > control.max
         || control.initial < control.min || control.initial > control.max
         || (control.kind !== undefined && control.kind !== "number" && control.kind !== "toggle")
-        || (control.presentation !== undefined && control.presentation !== "primary" && control.presentation !== "advanced")
         || (control.kind === "toggle" && (control.min !== 0 || control.max !== 1 || control.step !== 1
           || (control.initial !== 0 && control.initial !== 1)))) {
         throw new Error(`Invalid control ${plugin.id}.${control.id}`);
@@ -111,4 +136,10 @@ export function createVoxelToolRegistry(plugins: readonly VoxelToolPlugin[]) {
   }
   const ordered = Object.freeze([...plugins].sort((a, b) => a.ui.order - b.ui.order));
   return Object.freeze({ tools: ordered, get: (id: string | undefined) => ordered.find((tool) => tool.id === id) });
+}
+
+/** The control the brackets step: the bare pair's, or Shift's — whichever the tool declares when it has only one. */
+export function adjustableControl(plugin: VoxelToolPlugin, secondary: boolean): ToolControl | undefined {
+  const find = (adjust: ToolControl["adjust"]) => plugin.ui.controls.find((control) => control.adjust === adjust);
+  return secondary ? find("secondary") ?? find("primary") : find("primary") ?? find("secondary");
 }

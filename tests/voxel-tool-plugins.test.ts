@@ -37,12 +37,6 @@ test("every registered tool owns its UI controls, icon and executable gesture", 
   assert.throws(() => createVoxelToolRegistry([voxelTools.tools[0]!, voxelTools.tools[0]!]));
   const extension = { ...voxelTools.tools[0]!, id: "third-party-brush" };
   assert.equal(createVoxelToolRegistry([extension]).get(extension.id), extension);
-  const externalControl = { ...extension.ui.controls[0]!, presentation: undefined };
-  assert.doesNotThrow(() => createVoxelToolRegistry([{ ...extension,
-    ui: { ...extension.ui, controls: [externalControl] } }]));
-  assert.throws(() => createVoxelToolRegistry([{ ...extension,
-    ui: { ...extension.ui, controls: [{ ...externalControl,
-      presentation: "hidden" as "advanced" }] } }]), /Invalid control/);
 });
 
 test("fast strokes cover negative coordinates continuously and mirroring is involutive", () => {
@@ -201,18 +195,6 @@ test("all eight tools extrude outward or cut inward on every signed face and per
     const unedited = [...anchor] as [number, number, number];
     unedited[axis] -= sign * 3;
     assert.equal(sampleSolidWorld(world, unedited).solidFraction, 1, plugin.id);
-  }
-});
-
-test("empty-space construction planes support negative heights and parallel or backward rays are ignored", () => {
-  const scene = empty();
-  for (const plugin of solidTools) {
-    const input = ray(scene, -5, -5);
-    const gesture = plugin.begin({ scene, ray: input, values: toolValues(plugin, { plane: -3 }) })!;
-    const result = gesture.update(input)!;
-    assert.equal(Math.min(...result.patches.map((p) => p.minimum[1])), -3, plugin.id);
-    assert.equal(gesture.update({ ...input, direction: { x: 1, y: 0, z: 0 } }), undefined);
-    assert.equal(gesture.update({ ...input, direction: { x: 0, y: 1, z: 0 } }), undefined);
   }
 });
 

@@ -2317,7 +2317,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // under hose inflow; zero would unnecessarily force every cycle. Keep the
     // surface h: 4h partial surface owners disturb hydrostatic balance in this
     // shallow pond, even with the full pressure solve (resting-lane oracle).
-    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: { pressureResidualTolerance: 1e-3, coarseningSurfaceTolerance: 0 } },
+    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: { pressureResidualTolerance: 1e-3, detailShapeTolerance: 0 } },
     // The catalog presents the filled pond; dry render measurements use the
     // same stress factory with its default water-off setting.
     audience: "validation",

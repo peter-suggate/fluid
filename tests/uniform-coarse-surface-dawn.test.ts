@@ -24,7 +24,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
   const scene=sceneDocument(getSceneDefinition("sparse-cm12-ladder-long-dam"));
   scene.numerics.fixedDt_s=scene.numerics.maxDt_s=1/60;
-  solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions({timeStep:"scene"},scene),mixedCoarseningSurfaceTolerance:0.5},()=>{});
+  solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,uniformGeometricSolverOptions({timeStep:"scene",detailShapeTolerance:0.5},scene),()=>{});
   const fields=(solver as any).mixedFrame.fields;
   const census=async()=>uniformQualityCensus([192,96,32],await readMixedTileWords(device!,solver),
    await readMixedTexture(device!,fields.volume),await readMixedTexture(device!,fields.phi));

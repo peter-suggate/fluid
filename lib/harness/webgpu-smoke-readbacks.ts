@@ -1,4 +1,5 @@
 import type { GPUSolverInstance } from "../core/method-contract";
+import { uniformDetailField } from "../methods/uniform/uniform-detail-fields";
 import { octreeDebugSources } from "../methods/octree-shared/octree-debug-sources";
 import { damBreakFractions } from "../core/initial-fluid";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../core/rigid-body";
@@ -73,7 +74,23 @@ function exactWordFingerprint(values: ArrayLike<number>, integer = false): Reado
     hashA: a.toString(16).padStart(8, "0"), hashB: b.toString(16).padStart(8, "0") });
 }
 
+/** A Uniform Geometric h field is packed (base block + patch atlas): its
+ * logical texels come from its detail storage, cropped to the request. */
+async function readDetailField3D(texture: GPUTexture, width: number, height: number, depth: number, components: number) {
+  const field = uniformDetailField(texture);
+  if (!field) return undefined;
+  const [lx, ly, lz] = field.logical, values = await field.storage.read(texture);
+  if (width > lx || height > ly || depth > lz) throw new Error(`${texture.label}: readback ${width}x${height}x${depth} exceeds the field's ${lx}x${ly}x${lz}`);
+  if (width === lx && height === ly && depth === lz) return values;
+  const output = new Float32Array(width * height * depth * components);
+  for (let z = 0; z < depth; z += 1) for (let y = 0; y < height; y += 1)
+    output.set(values.subarray(components * lx * (y + ly * z), components * (lx * (y + ly * z) + width)), components * width * (y + height * z));
+  return output;
+}
+
 export async function readFloatTexture3D(device: GPUDevice, texture: GPUTexture, width: number, height: number, depth: number) {
+  const detail = await readDetailField3D(texture, width, height, depth, 1);
+  if (detail) return detail;
   const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
   const buffer = device.createBuffer({ size: bytesPerRow * height * depth, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
@@ -959,8 +976,10 @@ export async function smokeRenderHybridPresentation(
       terrain: scene.terrain,
       container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
     });
+    // As the renderer binds it: packed h fields are read through the mixed ownership.
     pipeline.setVolume(solver.surfaceFieldTexture ?? solver.volumeTexture,
-      solver.columnBaseTexture ?? columnFallback);
+      solver.columnBaseTexture ?? columnFallback,
+      solver.denseLevelSetVolumeSource);
     pipeline.setGlobalFineLevelSet(globalFineLevelSet);
     pipeline.setCoarseLevelSet(solver.coarseLevelSetSource);
     pipeline.ensureSize(width, height);
@@ -1344,6 +1363,8 @@ export function gravitationalPotentialEnergyProxy(
 }
 
 export async function readRgbaTexture3D(device: GPUDevice, texture: GPUTexture, width: number, height: number, depth: number) {
+  const detail = await readDetailField3D(texture, width, height, depth, 4);
+  if (detail) return detail;
   const bytesPerRow = Math.ceil(width * 16 / 256) * 256;
   const buffer = device.createBuffer({ size: bytesPerRow * height * depth, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();

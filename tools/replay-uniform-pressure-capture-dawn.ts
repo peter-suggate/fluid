@@ -28,7 +28,7 @@ try {
  device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
  const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
  const scene=structuredClone(sceneDocument(getSceneDefinition(capture.sceneId)));scene.fluid.refinementRegions=[];
- solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{pressureResidualTolerance:capture.parameters.pressureTolerance,coarsening:"regions"},undefined,()=>{});
+ solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{pressureResidualTolerance:capture.parameters.pressureTolerance,detailPolicy:"full"},undefined,()=>{});
  // Deliberate diagnostic access to the production frame and its native continuation.
  const host=solver as any,frame=host.mixedFrame;assert.ok(frame);
  frame.updateLayout(uniformMixedLayoutFromTiles(capture.lattice,new Uint32Array(capture.simulationTiles),[]));

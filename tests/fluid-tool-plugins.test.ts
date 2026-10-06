@@ -28,7 +28,6 @@ test("fluid plugins own their executable declarations and previews propose no so
     assert.equal(result.action.edit.operation, "add");
     assert.deepEqual(result.patches, []);
     assert.equal(JSON.stringify(base), before);
-    assert.ok(plugin.ui.controls.some(c => c.presentation === "primary"));
     const unavailable = plugin.unavailable({ scene: base, methodId: "uniform-volume" });
     if (plugin.id === "fluid-ball") assert.equal(unavailable, undefined);
     else assert.ok(unavailable, `${plugin.id} requires unsupported shape editing`);

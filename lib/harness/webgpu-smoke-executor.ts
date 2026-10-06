@@ -212,6 +212,8 @@ class Mini32UIPresentationCadence {
     cadence.pipeline.setVolume(
       solver.surfaceFieldTexture ?? solver.volumeTexture,
       solver.columnBaseTexture ?? cadence.columnFallback,
+      // As the renderer binds it: packed h fields are read through the mixed ownership.
+      solver.denseLevelSetVolumeSource,
     );
     cadence.pipeline.ensureSize(640, 360);
 
@@ -344,6 +346,7 @@ class Mini32UIPresentationCadence {
       ? createGlobalFineLevelSetConsumerSource(this.solver.globalFineLevelSetSource)
       : undefined);
     this.pipeline.setCoarseLevelSet(this.solver.coarseLevelSetSource);
+    this.pipeline.setDenseLevelSetVolumeSource(this.solver.denseLevelSetVolumeSource);
     const encoder = this.device.createCommandEncoder({
       label: forceSurfaceDiagnostics
         ? "Mini32 UI-parity t=0 presentation"

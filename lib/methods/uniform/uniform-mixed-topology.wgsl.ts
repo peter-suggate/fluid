@@ -1,5 +1,5 @@
 import { uniformMidpointTraceWGSL } from "./uniform-midpoint-trace.wgsl";
-import { uniformMixedHangingSlotCapacity, uniformMixedVelocitySamplingWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
+import { uniformMixedVelocitySamplingWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedFacesWGSL } from "./uniform-mixed-faces.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 
@@ -30,6 +30,9 @@ export const UNIFORM_MIXED_FUSED_GATE={skipFused:1,onlyFused:2} as const;
 /** Relayout fatal bit (UNIFORM_MIXED_RELAYOUT_FATAL.hangingCapacity): a
  * generation needed more hanging slots than the preallocated cache. */
 export const UNIFORM_MIXED_OVERFLOW_HANGING=1;
+/** The layout builder's sticky fatal bit for a generation with more h tiles
+ * than the owner-indexed buffers hold (UniformMixedCapacity.fineTiles). */
+export const UNIFORM_MIXED_OVERFLOW_FINE=16;
 /** Residency certificate (docs: fig7-256 3x plan, S2): 16³-cell pages of 4³
  * tiles on dense storage. Support words from uniformMixedResidencyWord: the
  * resident page count, sticky closure-violation bits (in-frame readers or
@@ -44,8 +47,11 @@ export function uniformMixedPageDimensions(lattice:{readonly dimensions:readonly
   const p=lattice.dimensions.map(d=>Math.ceil(d/4/UNIFORM_MIXED_PAGE_TILES));return [p[0]!,p[1]!,p[2]!];
 }
 export const uniformMixedPageCount=(lattice:{readonly dimensions:readonly number[]})=>uniformMixedPageDimensions(lattice).reduce((n,d)=>n*d,1);
+/** Sticky detail-storage violation bits (uniform-detail-fields.ts): set by
+ * a store a non-resident tile cannot hold; the frame receipt makes it fatal. */
+export const uniformMixedDetailViolationWord=(tiles:number,lattice:{readonly dimensions:readonly number[]})=>uniformMixedResidencyWord(tiles)+4+2*uniformMixedPageCount(lattice);
 /** Support words an ownership of `tiles` tiles on `lattice` allocates. */
-export const uniformMixedSupportWords=(tiles:number,lattice:{readonly dimensions:readonly number[]})=>uniformMixedResidencyWord(tiles)+4+2*uniformMixedPageCount(lattice);
+export const uniformMixedSupportWords=(tiles:number,lattice:{readonly dimensions:readonly number[]})=>uniformMixedDetailViolationWord(tiles,lattice)+4;
 
 /** One packed topology buffer: tile records, h/4h worklists, then frozen stencil masks.
  * Ownership and tracing share this ABI. Two tiers: 0 = h (width 1, 64 owners
@@ -85,12 +91,14 @@ override umCountedJobs:u32=0u;
 override umFusedRegularGate:u32=0u;
 const UM_D=vec3u(${layout.lattice.dimensions.map(n => `${n}u`).join(',')});const UM_T=UM_D/4u;
 const UM_TILES:u32=${layout.tiles.length}u;
-// Preallocated hanging tap cache slots (uniformMixedHangingSlotCapacity).
-const UM_HANGING_SLOTS:u32=${uniformMixedHangingSlotCapacity(layout.tiles.length)}u;
 const UM_OVERFLOW_HANGING:u32=${UNIFORM_MIXED_OVERFLOW_HANGING}u;
 // Residency (uniformMixedResidencyWord): pages of 4³ tiles, flags, list.
 const UM_PD:vec3u=(UM_T+vec3u(3u))/4u;const UM_PAGES:u32=UM_PD.x*UM_PD.y*UM_PD.z;
 const UM_RESIDENCY:u32=9u*UM_TILES+28u;
+// Detail storage (uniform-detail-fields.ts): its table follows the 4 words
+// per tile in umTopology; its violation bits follow the residency region.
+const UM_DETAIL:u32=4u*UM_TILES;
+const UM_DETAIL_VIOLATION:u32=UM_RESIDENCY+4u+2u*UM_PAGES;
 fn umResidentPageCount()->u32{return umSupport[UM_RESIDENCY];}
 fn umPageOfTile(t:u32)->u32{let c=umTileCoord(t)/4u;return c.x+UM_PD.x*(c.y+UM_PD.y*c.z);}
 fn umPageCoord(page:u32)->vec3u{return vec3u(page%UM_PD.x,(page/UM_PD.x)%UM_PD.y,page/(UM_PD.x*UM_PD.y));}
@@ -109,6 +117,8 @@ fn umSlotClosed()->bool{return umSupport[9u*UM_TILES+24u]!=0u;}
 fn umTileStencil(t:u32)->vec2u{return vec2u(umTopology[2u*UM_TILES+2u*t],umTopology[2u*UM_TILES+2u*t+1u]);}
 fn umTileMaximumWidth(t:u32)->u32{return umTileStencil(t).x>>27u;}
 fn umTileMinimumWidth(t:u32)->u32{return umTileStencil(t).y>>27u;}
+// The detail ring (UNIFORM_MIXED_DETAIL_RING): an h tile within three tiles.
+fn umTileMirrored(t:u32)->bool{return (umTopology[2u*UM_TILES+2u*t+1u]&1u)!=0u;}
 fn umTileAt(p:vec3u)->u32{return p.x+UM_T.x*(p.y+UM_T.y*p.z);}
 fn umTileCoord(t:u32)->vec3u{return vec3u(t%UM_T.x,(t/UM_T.x)%UM_T.y,t/(UM_T.x*UM_T.y));}
 fn umCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}
@@ -254,8 +264,9 @@ fn umCountedJobCount()->u32 {
  if(umCountedJobs==${UNIFORM_MIXED_COUNTED.residentPages}u){return umResidentPageCount();}
  if(umCountedJobs==${UNIFORM_MIXED_COUNTED.regularCoarse}u){if(!umFusedGateOpen(1u)){return 0u;}return (umSupport[8u*UM_TILES+20u]+63u)/64u;}
  let fine=umSupport[header];let fours=umSupport[header+1u];
- // Slots past the cache are never visited: the builder flags UM_OVERFLOW_HANGING.
- if(umCountedJobs==${UNIFORM_MIXED_COUNTED.hanging}u){return min(fine+fours,UM_HANGING_SLOTS);}
+ // The cache's own modules bound their slots by umHangingSlots(); the
+ // builder leaves slots past it unslotted and flags UM_OVERFLOW_HANGING.
+ if(umCountedJobs==${UNIFORM_MIXED_COUNTED.hanging}u){return fine+fours;}
  var jobs=fine+fours;
  if(umFusedJobs){for(var t=0u;t<2u;t++){if(umFusedRegularTier(t)){jobs+=umCounts[t];}}}
  if(umCountedJobs==${UNIFORM_MIXED_COUNTED.fusedQuad}u){jobs-=fours-(fours+3u)/4u;}

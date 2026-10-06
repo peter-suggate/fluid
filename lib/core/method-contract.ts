@@ -4,6 +4,7 @@ import type { FeatureComposition } from "../framework/composition";
 import type { RenderFrameSeam } from "./render-frame-stages";
 import type { FluidPipelineGraph } from "./fluid-pipeline";
 import type { SceneDescription } from "./model";
+import type { SolverDetailInput } from "./solver-detail";
 import type { GPUQuality } from "./gpu-quality";
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
 import type { RigidBodyState } from "./rigid-body";
@@ -68,6 +69,8 @@ interface ParamBase extends ControlMetadata {
   /** Runtime parameters can be applied to a live solver. All others are
    * structural and start a transactional solver rebuild. */
   update?: "runtime" | "solver";
+  /** Rendered by a method-owned control; generic parameter lists skip it. */
+  dedicated?: boolean;
 }
 
 export interface NumberParamSpec extends ParamBase {
@@ -463,6 +466,20 @@ export interface GPUSolverInstance {
   reseed?(scene: SceneDescription): Promise<boolean>;
   /** Apply configuration explicitly classified as runtime-safe by the method. */
   applyRuntimeValues?(values: MethodParamValues): void;
+  /**
+   * Compile by need. A solver builds the pipelines its accepted state can
+   * dispatch; a change that needs others (a first voxel, body, policy) waits
+   * for them and reports the wait in its diagnostics. A presenting host
+   * accepts that the accepted state keeps advancing meanwhile; any other
+   * caller awaits `pipelinesPrepared` before it advances again (advanceTo
+   * throws while a change waits). `warmPipelines` builds the remaining
+   * pipelines in the background, once the first frame has presented.
+   */
+  acceptPipelineWaits?(): void;
+  pipelinesPrepared?(): Promise<void>;
+  warmPipelines?(): Promise<void>;
+  /** Transient per-pane detail input (focus); latest revision wins at the next accepted frame. Never persisted. */
+  applyDetailInput?(input: SolverDetailInput): void;
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean;
   /** Host-only timing snapshot; never fences or maps simulation buffers. */
   readPerformanceTraceSnapshot?(): Pick<GPUEulerianInfo,
@@ -542,6 +559,12 @@ export interface SimulationMethod {
    * frame) never moves a lane.
    */
   readonly appDefaults?: Readonly<MethodParamValues>;
+  /**
+   * Rewrite saved overrides that name a retired control, before they are
+   * filtered to the declared keys. Returns the overrides and, when a retired
+   * value changed what the configuration opens as, a notice to show once.
+   */
+  migrateOverrides?(overrides: MethodParamValues): { overrides: MethodParamValues; notice?: string };
   /**
    * Resolve method-owned invariants after defaults, the quality preset, and
    * sparse user overrides have been merged. This is the right seam for a

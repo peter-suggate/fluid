@@ -112,6 +112,9 @@
   --well: light-dark(rgba(38, 48, 45, .04), rgba(0, 0, 0, .2));
   --hover: light-dark(rgba(38, 48, 45, .05), rgba(255, 236, 205, .05));
   --overlay: light-dark(rgba(255, 253, 248, .9), rgba(22, 18, 13, .86));
+  /* The plate chrome stands on over a live image: thinner than `--overlay`,
+     because a chip is a mark on the scene and not a page laid over it. */
+  --chrome: color-mix(in srgb, var(--overlay) 72%, transparent);
   --scrim: light-dark(rgba(66, 56, 38, .36), rgba(10, 7, 4, .76));
   /* The ring's own plate. Opaquer than `--overlay` on purpose: a wedge is read
      *over* whatever panel the pointer opened it on, and at the overlay's alpha
@@ -237,9 +240,21 @@
 /* The switcher, in full. */
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"] { color-scheme: dark; }
-/* The studio reads the same tokens as the front door, so it follows the theme
-   too. `color` is restated because the inherited value was already resolved. */
-.lab-shell { color: var(--ink); }
+/* The studio reads the same tokens as the front door, and does *not* follow the
+   theme: everything in a scene is chrome over a live image, and that image is
+   the renderer's own dark clear whichever way the page is set. A studio that
+   followed the page put cream chips and a paper progress card over a dark
+   scene, next to a rail and a toolstrip that had each already opted out. So the
+   scope is stated once, here, and every `light-dark()` token below this element
+   resolves its dark half — the theme switch is the front door's, and a scene
+   has one look. `color` is restated because the inherited value was already
+   resolved.
+
+   `--chrome` (declared with the palette) is that look's surface: the rail's
+   card. A chip, a bar or a pill over the image is this plate with a hairline,
+   the chip frost and the card lift; a pane someone reads — a flyout, an alert,
+   an instrument — keeps the denser `--overlay` under its text. */
+.lab-shell { color-scheme: dark; color: var(--ink); }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; overflow: hidden; }
@@ -688,6 +703,12 @@ button.card[data-active] { border-color: var(--accent); }
    the one part of the mode that is under the reader's eye the whole time. */
 .gpu-canvas[data-viewport-mode="interact"] { cursor: default; }
 .gpu-canvas[data-viewport-mode="interact"]:active { cursor: default; }
+/* An armed sculpt tool says what the press under the pointer would do before
+   it is made: a crosshair where it would stroke, the camera's hand where the
+   press is the room's — or while Space is lending the pointer to the camera. */
+.gpu-canvas[data-voxel-aim="tool"], .gpu-canvas[data-voxel-aim="tool"]:active { cursor: crosshair; }
+.gpu-canvas[data-voxel-aim="camera"] { cursor: grab; }
+.gpu-canvas[data-voxel-aim="camera"]:active { cursor: grabbing; }
 .gpu-canvas[data-pixel-trace="live"] { cursor: crosshair; }
 .gpu-canvas[data-pixel-trace="live"]:active { cursor: grabbing; }
 /* The top-right corner: what the frame costs, and the way into the readings
@@ -709,7 +730,10 @@ button.card[data-active] { border-color: var(--accent); }
 .viewport-mode-toggle { height: 26px; padding: 0 8px 0 7px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--line-strong); background: var(--overlay); color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); pointer-events: auto; backdrop-filter: var(--frost); cursor: pointer; transition: color .18s ease, border-color .18s ease, background .18s ease; }
 .viewport-mode-toggle svg { flex: none; opacity: .85; }
 .viewport-mode-toggle strong { font: inherit; }
-.viewport-mode-toggle em { padding: 1px 4px; border: 1px solid currentColor; border-radius: var(--radius-s); font: var(--text-micro); font-style: normal; letter-spacing: var(--track-wide); opacity: 0; transition: opacity .18s ease; }
+/* The key is on the mark at rest, as each digit is on the rail. It used to be
+   invisible until the pointer entered the viewport while still holding its
+   width, which drew a chip with a blank third. */
+.viewport-mode-toggle em { padding: 1px 4px; border: 1px solid currentColor; border-radius: 4px; font: 600 9px/1.2 var(--mono); font-style: normal; letter-spacing: 0; opacity: .5; transition: opacity .18s ease; }
 .viewport-shell:hover .viewport-mode-toggle em, .viewport-mode-toggle:focus-visible em { opacity: 1; }
 /* `var(--text)` — no such token. It resolved to the guaranteed-invalid value,
    so `color` fell back to the inherited ink and this happened to look right;
@@ -817,31 +841,9 @@ button.card[data-active] { border-color: var(--accent); }
 @keyframes viewport-failure-pulse { 0%,100% { transform: scale(.9); opacity: .72; } 50% { transform: scale(1.14); opacity: 1; } }
 .gpu-fallback { position: absolute; left: 50%; top: 50%; width: min(390px, 80%); transform: translate(-50%,-50%); padding: 28px; text-align: center; border: 1px solid var(--amber-line); background: var(--overlay); }
 .gpu-fallback strong { color: var(--amber); }
-.gpu-initializing { border-color: var(--line-strong); }
-.gpu-initializing strong { color: var(--accent); }
-.gpu-build-card { padding: 16px; border: 1px solid var(--line-strong); border-left: 2px solid var(--accent); background: var(--overlay); box-shadow: var(--shadow-lift); backdrop-filter: var(--frost); pointer-events: none; }
-.resource-activity-tray { position: absolute; top: 60px; right: 17px; z-index: 8; width: min(350px, calc(100% - 34px)); display: grid; gap: 8px; pointer-events: none; }
-.gpu-build-heading { display: flex; align-items: center; gap: 9px; }
-.gpu-build-heading i { width: 8px; height: 8px; flex: 0 0 auto; border: 1px solid var(--accent-line); border-top-color: var(--accent); border-radius: 50%; animation: gpu-build-spin .8s linear infinite; }
-.gpu-build-heading strong { font: var(--text-label); }
-.gpu-build-card > p { margin: 9px 0; }
-.gpu-build-operation { color: var(--ink); font: var(--text-readout); }
-.gpu-stage-explanation { color: var(--muted) !important; font: var(--text-note); }
-.gpu-task-wait { padding-top: 8px; border-top: 1px solid var(--line); color: var(--amber) !important; font: var(--text-note); }
-.gpu-build-card small { display: block; margin-top: 10px; color: var(--dim); font: var(--text-note); }
-@keyframes gpu-build-spin { to { transform: rotate(360deg); } }
 .gpu-fallback p { color: var(--ink); }
 .gpu-fallback small { color: var(--muted); }
-.gpu-initializing progress { width: 100%; height: 7px; border: 0; border-radius: 999px; overflow: hidden; background: var(--hover); accent-color: var(--accent); }
-.gpu-initializing progress::-webkit-progress-bar { background: var(--hover); }
-.gpu-initializing progress::-webkit-progress-value { background: linear-gradient(90deg, var(--accent), var(--accent)); transition: width .18s ease; }
 .gpu-progress-summary { display: flex; justify-content: space-between; margin-top: 6px; color: var(--muted); font: var(--text-tag); }
-.gpu-initializing details { margin: 16px 0 14px; padding: 10px 12px; text-align: left; border: 1px solid var(--line); background: var(--hover); }
-.gpu-initializing summary { cursor: pointer; color: var(--ink); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
-.gpu-initializing dl { display: grid; gap: 7px; margin: 10px 0 0; }
-.gpu-initializing dl div { display: grid; grid-template-columns: 92px 1fr; gap: 10px; }
-.gpu-initializing dt { color: var(--muted); font: var(--text-tag); text-transform: uppercase; }
-.gpu-initializing dd { margin: 0; color: var(--ink); font: var(--text-readout); overflow-wrap: anywhere; }
 
 .metric-card { min-height: 74px; padding: 10px; border: 1px solid var(--line); background: var(--well); display: flex; flex-direction: column; justify-content: space-between; }
 .metric-card > span { color: var(--muted); font-size: var(--size-2); }
@@ -1026,18 +1028,24 @@ button.card[data-active] { border-color: var(--accent); }
   opacity: 1; transition: opacity .35s ease;
   backdrop-filter: var(--frost);
 }
-.transport-cluster[data-idle="true"] { opacity: .16; }
+/* Receded, not gone: at .16 the clock — the one readout of where the run is —
+   could not be read without moving the pointer to wake it. */
+.transport-cluster[data-idle="true"] { opacity: .5; }
 .transport-cluster:hover, .transport-cluster:focus-within { opacity: 1; transition-duration: .12s; }
 @media (prefers-reduced-motion: reduce) { .transport-cluster { transition: none; } }
 /* Nothing to wake it with, so it never sleeps. */
 @media (hover: none) { .transport-cluster[data-idle="true"] { opacity: 1; } }
 .transport-cluster button { min-width: 48px; height: 27px; padding: 0 9px; border: 1px solid var(--line); background: transparent; color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); cursor: pointer; }
-.transport-cluster button:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
+.transport-cluster button:hover:not(:disabled) { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }
+/* The verbs are the rail's marks: no box at rest, a hairline and a wash under
+   the pointer. Only the direct children — the step's own nudge buttons keep
+   the stepper's look. */
+.transport-cluster > button { border-color: transparent; }
 .transport-cluster button:disabled { opacity: .45; cursor: wait; }
 /* The one control this cluster exists for, so it is not the smallest thing in
    it: the same box as STEP and RESET, with the glyph two steps up from their
    tag type because a triangle at 11px was still a speck. */
-.transport-cluster .transport-main { width: 48px; padding: 0; border-color: var(--accent-line); color: var(--accent); font-size: var(--size-5); }
+.transport-cluster .transport-main { width: 48px; padding: 0; border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); font-size: var(--size-5); }
 /* An explicit width, because the label cycles ● REC / ■ STOP / WAIT and those
    are different lengths: the widest sets the box, and the box never moves. */
 .transport-cluster .record-button { width: 62px; padding: 0; color: var(--red); }
@@ -1312,7 +1320,7 @@ button.card[data-active] { border-color: var(--accent); }
 /* Both panes dock their bring-up tray to the right, which in pane A is the
    seam — under the diff strip, and beside pane B's own copy of the same card.
    Sent to the pair's outer edges instead, where the pane tags already are. */
-.lab-shell[data-compare="true"] .viewport-shell[data-pane="a"] .resource-activity-tray { right: auto; left: 17px; }
+.lab-shell[data-compare="true"] .viewport-shell[data-pane="a"] .activity { top: 66px; right: auto; left: 16px; }
 /* Pinned and stale are the two states worth spending the edge on, so they keep
    their coloured border against the hairline everything else gets. */
 .pixel-trace-hud[data-pinned="true"] { border-color: var(--amber-line); }
@@ -1466,6 +1474,8 @@ button.card[data-active] { border-color: var(--accent); }
    other than select, so both take the accent outright rather than a tint. */
 .mode-chip.armed { border-color: var(--accent); background: var(--accent); color: var(--on-accent); cursor: pointer; }
 .mode-chip.armed span { color: var(--on-accent); }
+/* A sculpt tool's line names five keys, and one clipped line would name two. */
+.mode-chip.armed.tool span { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; }
 .mode-chip.carrying { border-color: var(--accent); background: var(--accent-wash); color: var(--accent); }
 .mode-chip.carrying span { color: var(--muted); }
 
@@ -1723,6 +1733,11 @@ button.card[data-active] { border-color: var(--accent); }
    two unrelated buttons; at 2px it reads as one control with a menu. */
 .toolstrip-key.is-chevron { width: 16px; min-width: 0; max-width: none; height: 24px; margin-left: -4px; justify-content: center; padding: 0; }
 .toolstrip-key.is-chevron > svg { flex: none; }
+/* A chevron that carries a word: a chip the size of the row's other chips,
+   standing among them rather than pulled back against the glyph. */
+.toolstrip-key.is-chevron.is-captioned { width: auto; height: auto; min-height: min(var(--control-height), 22px); margin-left: 0; gap: 3px; padding: 0 4px 0 7px; border-color: var(--ui-hair); color: var(--micro); }
+.toolstrip-key.is-chevron.is-captioned.active { border-color: var(--accent-line); color: var(--accent-strong); }
+.toolstrip-caption { font: 500 var(--size-2)/1.3 var(--sans); white-space: nowrap; }
 /* The chevron's own frame, so what it opens hangs off *it* rather than off the
    column. The strip's pane is measured out past the whole column's right edge —
    right for a card of settings, wrong for a list of alternatives to the mark
@@ -1752,6 +1767,11 @@ button.card[data-active] { border-color: var(--accent); }
 .toolstrip-menu button span { flex: 1; overflow: hidden; font: var(--text-label); text-overflow: ellipsis; white-space: nowrap; }
 .toolstrip-menu button small { flex: none; color: var(--dim); font: var(--text-micro); }
 .toolstrip-menu hr { height: 1px; margin: 3px 5px; border: 0; background: var(--line); }
+/* A menu row carrying a dial: beside the item it belongs to (a criterion and
+   its threshold), or beside a plain name (a dial with nothing to switch). */
+.toolstrip-menu .toolstrip-menu-option { display: flex; align-items: center; gap: 6px; min-height: 21px; padding-right: 4px; }
+.toolstrip-menu .toolstrip-menu-option > button { flex: 1; min-width: 0; }
+.toolstrip-menu .toolstrip-menu-option > span:first-child { flex: 1; padding: 0 6px 0 7px; color: var(--muted); font: var(--text-label); white-space: nowrap; }
 /* Out of flow, so it has to out-paint the rows under it — which are `relative`
    themselves and would otherwise draw straight through the list. */
 .toolstrip-row:has(.toolstrip-menu) { z-index: 6; }
@@ -1855,6 +1875,13 @@ button.card[data-active] { border-color: var(--accent); }
    row's answer column and is pinned to a 158px key; a glyph row has no such
    column, so its answer simply follows the chevron. */
 .toolstrip-name { color: var(--ink); font: var(--text-micro); white-space: nowrap; }
+/* A layer's colour key, on lines of its own under the row that shows it and
+   no wider than the rows around it. Indented to the row's controls. */
+.toolstrip-legend { display: flex; flex-wrap: wrap; gap: 2px 9px; max-width: 300px; padding: 0 6px 3px 46px; color: var(--muted); font: var(--text-micro); pointer-events: auto; }
+.toolstrip-legend > span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.toolstrip-legend i { flex: none; width: 9px; height: 9px; border-radius: 2px; }
+.toolstrip-legend i.is-wide { width: 36px; }
+.toolstrip.is-docked .toolstrip-legend { max-width: none; padding-left: 6px; }
 
 /* The card the strip refuses to be, granted to the one row currently asking for
    it — a dozen field rows, a solve's curve, a method's construction settings.
@@ -2080,17 +2107,29 @@ button.card[data-active] { border-color: var(--accent); }
 .lab-shell button, .lab-shell input, .lab-shell select, .lab-shell .metric-card { border-radius: var(--radius-s); }
 
 .gpu-badge, .health-chip, .fps-meter, .fps-instruments button, .camera-toolbar, .scene-overlay,
-.transport-cluster, .resource-activity-pill, .scene-scale-overlay,
+.transport-cluster, .scene-scale-overlay,
 .entity-hover-chip, .editor-hover-chip, .shape-readout, .shape-axis-lock,
 .editor-fill-handle, .toolstrip-pane, .toolstrip-tip,
-.gpu-build-card, .svo-cost-legend, .gpu-fallback,
+.svo-cost-legend, .gpu-fallback,
 .recording-modal, .viewport-failure-alert {
   border-color: var(--line-strong);
   border-radius: var(--pane-radius, var(--radius-s));
   box-shadow: var(--shadow-card);
 }
-.gpu-build-card, .svo-cost-legend, .gpu-fallback,
+.svo-cost-legend, .gpu-fallback,
 .recording-modal, .viewport-failure-alert { --pane-radius: var(--radius-m); }
+/* The chips, the bar and the tags: one plate, the rail's. Stated after the
+   rules that draw each of them and at their own specificity, so every lit
+   state — armed, pressed, alert, hovered — still outranks it. */
+.gpu-badge, .health-chip, .fps-meter, .fps-instruments button, .viewport-mode-toggle,
+.scene-overlay, .transport-cluster, .transport-notice, .scene-scale-overlay,
+.mode-chip, .editor-hover-chip, .pane-tag {
+  border-color: var(--line);
+  border-radius: var(--radius-s);
+  background: var(--chrome);
+  box-shadow: var(--shadow-card);
+  backdrop-filter: var(--frost-chip);
+}
 
 /* One usable form scale across the studio. Component rules may set width,
    colour, or layout, but not collapse an interactive field below this size. */
@@ -2243,19 +2282,42 @@ button.card[data-active] { border-color: var(--accent); }
 button:hover .iso-water-top { fill-opacity: .44; }
 button:hover .iso-water-side { fill-opacity: .26; }
 
-/* Resource activity presentation (lib/resource-readiness.ts). A card is the
-   loudest mark the shell can put over a live viewport, so only work that took
-   scene interaction keeps one; everything else — transport-blocking work
-   included — gets a pill up here, because the transport cluster never grows
-   status chrome. Both marks inherit the tray's pointer transparency — nothing
-   here may take input. */
-/* One column, every entry the tray's full width: a stagger of self-sized boxes
-   read as debris, not as a stack of work. */
-.resource-activity-pills { display: grid; gap: 5px; }
-.resource-activity-pill { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 8px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: var(--frost); }
-.resource-activity-pill i { flex: none; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: status-pulse 1.6s ease-in-out infinite; }
-.resource-activity-pill strong { overflow: hidden; color: var(--muted); font: var(--text-tag); text-overflow: ellipsis; white-space: nowrap; }
-.resource-activity-pill small { flex: none; color: var(--dim); font: var(--text-note); font-variant-numeric: tabular-nums; }
+/* ---- the activity mark ---------------------------------------------------
+   Everything the pane is waiting on, as one plate under the frame rate: a ring
+   for the whole of the progress, a line per piece of work, and at most one
+   sentence about what is held up. It replaced a card with its own meter and a
+   pill per further task with its own — so however much is running there is one
+   indicator, and it is the studio's plate rather than a dialog's.
+
+   It takes no input: it hangs over the scene's own corner, and nothing in it
+   is a control. */
+.activity { position: absolute; z-index: 8; top: 49px; right: 16px; width: max-content; min-width: 200px; max-width: min(330px, calc(100% - 32px)); display: grid; gap: 5px; padding: 7px 11px 8px 9px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--chrome); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); pointer-events: none; animation: activity-in .2s ease both; }
+.activity[data-tone="attention"] { border-color: var(--amber-line); }
+.activity-head { display: flex; align-items: center; gap: 8px; min-height: 16px; }
+.activity-head strong { flex: 1; min-width: 0; overflow: hidden; color: var(--ink); font: var(--text-tag); letter-spacing: var(--track-wide); text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.activity-meta { flex: none; color: var(--dim); font: var(--text-micro); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The one indicator. Counted work fills it; uncounted work turns it. */
+.activity-ring { flex: none; overflow: visible; }
+.activity-ring circle { fill: none; stroke-width: 2; }
+.activity-ring-track { stroke: var(--line-strong); }
+.activity-ring-value { stroke: var(--accent); stroke-linecap: round; transition: stroke-dasharray .3s ease; }
+.activity-ring[data-indeterminate] { animation: activity-spin .9s linear infinite; }
+.activity-flag { flex: none; width: 8px; height: 8px; margin: 0 4px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 3px var(--amber-wash); }
+/* Indented to the headline's text, so the ring reads as heading all of it. */
+.activity-rows { margin: 0; padding: 0 0 0 24px; list-style: none; display: grid; gap: 2px; }
+.activity-rows li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; column-gap: 12px; color: var(--muted); font: var(--text-note); }
+.activity-rows li > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-rows li:not([data-state="active"]) > span:first-child { color: var(--amber); }
+.activity-rows li > p { grid-column: 1 / -1; margin: 1px 0 2px; color: var(--dim); font: var(--text-note); overflow-wrap: anywhere; }
+.activity-note { margin: 0; padding-left: 24px; color: var(--dim); font: var(--text-note); overflow-wrap: anywhere; }
+@keyframes activity-in { from { opacity: 0; transform: translateY(-3px); } }
+@keyframes activity-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .activity { animation: none; }
+  .activity-ring-value { transition: none; }
+  /* Still, but still plainly "working": the arc stays, the turning does not. */
+  .activity-ring[data-indeterminate] { animation: none; }
+}
 
 /* What an armed tool is proposing to put down: its silhouette on the glass,
    dashed like every other outline that is a proposal rather than a published
@@ -2468,13 +2530,9 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .card-confirm-actions .card-confirm-yes { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
 .card-confirm-actions .card-confirm-yes:hover { background: var(--red); color: var(--on-accent); }
 
-/* Producer-owned progress, shared by startup cards and frame-stage controls. */
-.work-progress { padding: 10px; margin: 8px 0; border: 1px solid var(--line); background: color-mix(in srgb, var(--accent) 4%, transparent); border-radius: 6px; }
-/* Inside a bring-up card the progress is the card's own body, not a box within
-   the box: the card already owns the border, background and padding. */
-.gpu-build-card .work-progress { margin: 7px 0 0; padding: 0; border: 0; background: transparent; }
-/* Floating in the tray, entries carry the overlay chrome themselves. */
-.resource-activity-pills .work-progress { margin: 0; border-color: var(--line-strong); background: var(--overlay); backdrop-filter: var(--frost); box-shadow: var(--shadow-card); }
+/* Producer-owned progress, in a panel beside the stage that owns it. Work the
+   pane is waiting on is not drawn with this: see `.activity`. */
+.work-progress { padding: 10px; margin: 8px 0; border: 1px solid var(--line); background: color-mix(in srgb, var(--accent) 4%, transparent); border-radius: var(--radius-s); }
 .work-progress[data-compact] { padding: 4px 9px 5px; }
 .work-progress[data-compact] .work-progress-heading strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .work-progress[data-compact] .work-progress-heading > span { flex: none; font-variant-numeric: tabular-nums; }
@@ -2487,7 +2545,7 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .work-progress progress { display: block; width: 100%; height: 7px; margin: 0; accent-color: var(--accent); }
 .work-progress p { margin: 7px 0 0; color: var(--muted); font: var(--text-note); line-height: 1.45; text-transform: none; letter-spacing: normal; }
 .work-progress-phases { display: flex; flex-wrap: wrap; list-style: none; margin: 8px 0 0; padding: 0; gap: 4px; }
-.work-progress-phases li { padding: 3px 6px; border-radius: 3px; color: var(--dim); font: var(--text-tag); }
+.work-progress-phases li { padding: 3px 6px; border-radius: 5px; color: var(--dim); font: var(--text-tag); }
 .work-progress-phases li[aria-current="step"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 0 -2px var(--accent); }
 .work-progress[data-state="waiting"], .work-progress[data-state="error"] { border-left: 2px solid var(--warning, #a86620); }
 .work-progress[data-state="complete"] { border-left: 2px solid var(--accent); }
@@ -2513,27 +2571,64 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .simulation-stop-panel details { margin-top: 8px; }
 .simulation-stop-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
 
-/* Voxel plugins supply content; the host reveals only the current context. */
-.voxel-context { position: absolute; top: 64px; left: 14px; z-index: 25; width: min(220px, calc(100% - 28px)); color: var(--ink); font-size: 12px; }
-.voxel-context button, .voxel-context input { font: inherit; color: inherit; border: 1px solid var(--line, #7775); border-radius: 5px; background: var(--overlay, #20252d); padding: 5px 7px; }
-.voxel-context button { cursor: pointer; min-height: 28px; }
-.voxel-context button:disabled { opacity: .45; cursor: default; }
-.voxel-context button:focus-visible, .voxel-context input:focus-visible, .voxel-context summary:focus-visible { outline: 2px solid var(--accent, #55aaff); outline-offset: 2px; }
-.voxel-context-card { margin-top: 6px; padding: 9px; border: 1px solid var(--line, #7775); border-radius: 8px; background: var(--overlay, #20252d); box-shadow: 0 4px 18px #0002; max-height: calc(100dvh - 190px); overflow-y: auto; }
-.voxel-context-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.voxel-context-heading strong { font-size: 13px; }
-.voxel-context-heading button { border-color: transparent; min-height: 24px; padding: 2px 5px; }
-.voxel-context p { font-size: 11px; line-height: 1.4; margin: 5px 0; color: var(--muted, #aab1bd); }
-.voxel-context-primary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 6px 0; }
-.voxel-context-control { display: flex; align-items: center; justify-content: space-between; gap: 5px; margin: 5px 0; }
-.voxel-context-primary .voxel-context-control { flex-direction: column; align-items: stretch; margin: 0; gap: 3px; }
-.voxel-context-control input { min-width: 0; width: 58px; box-sizing: border-box; padding: 3px 5px; }
-.voxel-context-primary input { width: 100%; }
-.voxel-context-more summary { cursor: pointer; width: max-content; color: var(--muted); padding: 3px 0; }
-.voxel-context-more[open] { margin-top: 5px; border-top: 1px solid var(--line, #7775); }
-.voxel-context-badges { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
-.voxel-context-badges span { border-radius: 3px; padding: 2px 4px; background: #5588aa22; font-size: 10px; }
-.voxel-context .voxel-context-pending { border-radius: 5px; padding: 6px 8px; background: var(--overlay, #20252d); }
+/* ---- sculpt tool rail ----------------------------------------------------
+   The solid tools, one mark each, down the left edge of EDIT. Centred on the
+   edge rather than hung from a corner: the scene chip owns the top-left and
+   the armed-mode chip the bottom-left, and a column between them is clear of
+   both at any height. Centred with auto margins, not a transform — the armed
+   tool's line hangs past the rail's edge with its own frost, and it should
+   stay a child of an untransformed box.
+
+   Its card is `--chrome`, the plate every chip in the studio now stands on. */
+.tool-rail { position: absolute; z-index: 12; left: 12px; top: 0; bottom: 0; height: fit-content; margin-block: auto; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px; color-scheme: dark; --control-height: 20px; --control-inline-padding: 6px; --control-font-size: var(--size-2); }
+/* The card is a layer under the marks, as on the toolstrip: a backdrop filter
+   on the rail itself would make it the backdrop root of the line and the tips
+   hanging past its edge, and they would lose their own frost over the scene. */
+.tool-rail::before { content: ""; position: absolute; inset: 0; z-index: -1; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--chrome); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); pointer-events: none; }
+.tool-rail-slot { position: relative; display: flex; }
+.tool-rail-key { position: relative; width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; transition: color .12s ease, border-color .12s ease, background .12s ease; }
+.tool-rail-key:hover { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }
+/* The armed tool is the one loud thing on the rail. The pointer at its head is
+   lit while nothing is armed, which is most of the time — so it is lit quietly. */
+.tool-rail-key[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+.tool-rail-slot:first-child .tool-rail-key[aria-pressed="true"] { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.tool-rail-key[data-unavailable="true"]:not([aria-pressed="true"]) { opacity: .45; }
+/* The digit of its place, in the mark's own corner: the rail is its own key legend. */
+.tool-rail-key > kbd { position: absolute; right: 2px; bottom: 1px; color: currentColor; font: 600 8px/1 var(--mono); opacity: .5; pointer-events: none; }
+.tool-rail-rule { width: 18px; height: 1px; margin: 3px 0; background: var(--line); }
+.tool-rail-tip { position: absolute; left: calc(100% + 9px); top: 50%; z-index: 3; transform: translateY(-50%); display: grid; gap: 2px; width: max-content; max-width: 230px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); text-align: left; visibility: hidden; opacity: 0; pointer-events: none; }
+.tool-rail-key:hover + .tool-rail-tip, .tool-rail-key:focus-visible + .tool-rail-tip { visibility: visible; opacity: 1; }
+.tool-rail-tip strong { display: flex; align-items: center; gap: 7px; color: var(--ink); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
+.tool-rail-tip small { color: var(--muted); font: var(--text-micro); }
+.tool-rail-tip kbd, .tool-options kbd { padding: 1px 4px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--dim); font: 600 9px/1.2 var(--mono); letter-spacing: 0; text-transform: none; }
+/* The armed tool's numbers and switches: one line, beside its mark, and the
+   only thing arming a tool opens. Each control here is also a key, so the line
+   is a readout first and a set of buttons second. */
+.tool-options { position: absolute; left: calc(100% + 9px); top: 50%; z-index: 4; transform: translateY(-50%); display: grid; gap: 3px; width: max-content; max-width: min(560px, calc(100vw - 90px)); padding: 4px 8px 4px 10px; border: 1px solid var(--accent-line); border-radius: var(--radius-s); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); }
+.tool-options-line { display: flex; align-items: center; gap: 10px; min-height: 22px; }
+.tool-options-line > strong { color: var(--accent-strong); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; white-space: nowrap; }
+.tool-option { display: flex; align-items: center; gap: 5px; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); white-space: nowrap; }
+.tool-options-note { max-width: 340px; margin: 0 0 2px; color: var(--muted); font: var(--text-micro); }
+.tool-options-note.is-blocked { color: var(--amber); }
+.tool-rail-pending { position: absolute; left: 0; top: calc(100% + 6px); width: max-content; margin: 0; padding: 2px 8px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--overlay); color: var(--dim); font: var(--text-micro); backdrop-filter: var(--frost-chip); }
+/* A short viewport keeps every tool in reach by shrinking the marks, not by
+   scrolling them: a scrolling rail would clip the line that hangs beside it. */
+@media (max-height: 560px) { .tool-rail-key { width: 26px; height: 24px; } .tool-rail-rule { margin: 1px 0; } }
+/* Compare mode. Pane A's tag is centred on this same edge, and it is that
+   pane's scene switch, so the rail must not sit on it: the tag steps aside to
+   the rail's flank, and where the browser can anchor it, up onto the rail's
+   head — clear of the line an armed tool opens to the right. Pane B's tag is
+   on its far edge and never meets the rail. A pane is half the window there,
+   so the line is held to it and wraps rather than running under the seam. */
+.viewport-shell:has(> .tool-rail) > .pane-tag[data-pane="a"] { left: 60px; }
+@supports (anchor-name: --tool-rail) {
+  .viewport-shell { anchor-scope: --tool-rail; }
+  .tool-rail { anchor-name: --tool-rail; }
+  .viewport-shell:has(> .tool-rail) > .pane-tag[data-pane="a"] { position-anchor: --tool-rail; left: anchor(center); top: auto; bottom: calc(anchor(top) + 6px); transform: translateX(-50%); }
+}
+.lab-shell[data-compare="true"] .tool-options { max-width: calc(50vw - 90px); }
+.tool-options-line { flex-wrap: wrap; row-gap: 3px; }
+
 /* Shared compact rows remain available to contextual object editors. */
 .voxel-tool-buttons { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; }
 .voxel-tool-buttons button { display: inline-flex; align-items: center; gap: 5px; }

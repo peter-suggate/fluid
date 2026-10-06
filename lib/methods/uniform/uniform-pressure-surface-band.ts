@@ -1,3 +1,4 @@
+import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type {UniformMixedBandBits} from './uniform-mixed-layout-builder';
 import type {UniformMixedOwnership} from './uniform-mixed-ownership';
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from './uniform-mixed-topology.wgsl';
@@ -13,18 +14,18 @@ export class UniformPressureSurfaceBand {
  readonly band:UniformMixedBandBits;
  readonly allocatedBytes:number;
  private readonly resources:GPUBindGroupLayout;
- private readonly group:GPUBindGroup;
+ private readonly group:UniformDetailGroup;
  private readonly pipelines:GPUComputePipeline[]=[];
  constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,phi:GPUTexture){
   const layout=ownership.layout,d=layout.lattice.dimensions;
-  if(phi.format!=='r32float'||[phi.width,phi.height,phi.depthOrArrayLayers].some((n,a)=>n!==d[a]!+1))throw new Error('Pressure surface band requires the full h vertex field');
+  if(phi.format!=='r32float'||uniformDetailExtent(phi).some((n,a)=>n!==d[a]!+1))throw new Error('Pressure surface band requires the full h vertex field');
   const buffer=device.createBuffer({label:'Uniform independent pressure surface band',size:Math.ceil(layout.tiles.length/32)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.band={buffer,wordOffset:0};this.allocatedBytes=buffer.size;
-  this.resources=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:'unfilterable-float',viewDimension:'3d'}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
-  this.group=device.createBindGroup({layout:this.resources,entries:[{binding:0,resource:phi.createView()},{binding:1,resource:{buffer}}]});
+  this.resources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:'unfilterable-float',viewDimension:'3d'}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
+  this.group=uniformDetailGroup(device,{layout:this.resources,entries:[{binding:0,resource:phi},{binding:1,resource:{buffer}}]});
  }
  async initialize():Promise<void>{
-  const module=this.device.createShaderModule({code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+  const module=uniformDetailModule(this.device,{label:"Uniform pressure surface band",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read_write> band:array<atomic<u32>>;
 // Zero belongs to the surface. Nonfinite data must never silently remove
@@ -54,16 +55,15 @@ var<workgroup> signs:array<u32,64>;
 }`,['classify','classifyCoarse'])});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==='error');if(errors.length)throw new Error(errors.map(e=>e.message).join('\n'));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-  for(const [entryPoint,umCountedJobs] of [['classify',UNIFORM_MIXED_COUNTED.fineTiles],['classifyCoarse',UNIFORM_MIXED_COUNTED.coarseTiles]] as const)this.pipelines.push(await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs}}}));
+  for(const [entryPoint,umCountedJobs] of [['classify',UNIFORM_MIXED_COUNTED.fineTiles],['classifyCoarse',UNIFORM_MIXED_COUNTED.coarseTiles]] as const)this.pipelines.push(await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs}}}));
  }
  encode(encoder:GPUCommandEncoder):void{
   if(this.pipelines.length!==2)throw new Error('Pressure surface band is not initialized');
   encoder.clearBuffer(this.band.buffer);
   const pass=encoder.beginComputePass({label:'Uniform independent h pressure surface census'});
-  pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
+  pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);
   // A job per h tile, then 64 4h tiles per job: the counts are GPU state.
-  const tiles=this.ownership.capacity.tiles;
-  this.ownership.dispatchCounted(pass,this.pipelines[0]!,tiles);this.ownership.dispatchCounted(pass,this.pipelines[1]!,Math.ceil(tiles/64));
+  this.ownership.dispatchTierCounted(pass,this.pipelines[0]!,0);this.ownership.dispatchTierCounted(pass,this.pipelines[1]!,1);
   pass.end();
  }
  destroy():void{this.band.buffer.destroy();}

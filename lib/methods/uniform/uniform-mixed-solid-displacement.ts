@@ -1,3 +1,4 @@
+import { uniformDetailBindLayout, uniformDetailModule, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {CM12_TRANSPORT_FIXED_SCALE} from "../../core/cm12-numerics";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
@@ -18,17 +19,17 @@ export class UniformMixedSolidDisplacement {
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
  private deposits?:GPUBuffer;
- private group?:{volume:GPUTexture;group:GPUBindGroup};
+ private group?:{volume:GPUTexture;group:UniformDetailGroup};
  get allocatedBytes():number{return this.deposits?.size??0;}
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid){
-  this.resources=device.createBindGroupLayout({label:"Uniform mixed solid displacement",entries:[
+  this.resources=uniformDetailBindLayout(device,{label:"Uniform mixed solid displacement",entries:[
    {binding:0,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write",format:"r32float",viewDimension:"3d"}},
    {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
   ]});
  }
  async initialize():Promise<void>{
   // scatter and resolve stride the GPU-counted owners of every tier (umAllOwner).
-  const module=this.device.createShaderModule({label:"Uniform mixed solid displacement",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+  const module=uniformDetailModule(this.device,{label:"Uniform mixed solid displacement",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var volume:texture_storage_3d<r32float,read_write>;
 @group(1) @binding(1) var<storage,read_write> deposits:array<atomic<i32>>;
 ${uniformMixedSolidWGSL(2)}
@@ -84,13 +85,16 @@ fn umDisplaceNearBody(c:vec3i)->bool{
  /** bodiesOnly: no voxel edit is pending, so only cells near a body scatter. */
  encode(encoder:GPUCommandEncoder,volume:GPUTexture,bodiesOnly=false):void{
   if(this.pipelines.size!==3)throw new Error("Mixed solid displacement is not initialized");
-  const deposits=this.deposits??=this.device.createBuffer({label:"Uniform mixed solid displacement deposits",size:4*this.ownership.capacity.tiles*64,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-  if(this.group?.volume!==volume)this.group={volume,group:this.device.createBindGroup({layout:this.resources,entries:[{binding:0,resource:volume.createView()},{binding:1,resource:{buffer:deposits}}]})};
+  // One word per owner the capacity holds; cleared below, so a new capacity is a new buffer.
+  const bytes=4*this.ownership.capacity.owners;
+  if(this.deposits&&this.deposits.size!==bytes){this.deposits.destroy();this.deposits=undefined;this.group=undefined;}
+  const deposits=this.deposits??=this.device.createBuffer({label:"Uniform mixed solid displacement deposits",size:bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+  if(this.group?.volume!==volume)this.group={volume,group:uniformDetailGroup(this.device,{layout:this.resources,entries:[{binding:0,resource:volume},{binding:1,resource:{buffer:deposits}}]})};
   const group=this.group.group;
   encoder.clearBuffer(deposits);
   for(const entry of ["scatter","resolve"]){
    const pass=encoder.beginComputePass({label:`Uniform mixed solid displacement ${entry}`});
-   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);pass.setBindGroup(2,this.solid.bindGroup);
+   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,this.solid.bindGroup);
    this.ownership.dispatchAllCounted(pass,this.pipelines.get(entry==="scatter"&&bodiesOnly?"scatterBodies":entry)!);pass.end();
   }
  }

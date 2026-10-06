@@ -25,7 +25,7 @@ try{
  const percent=[91.6667,0,75,100,8.3333,100],axes=["x","y","z"] as const;
  const point=(offset:number)=>Object.fromEntries(axes.map((a,i)=>[a,lattice.origin_m[a]+percent[offset+i]!/100*d[i]!*lattice.cellSize_m[i]!])) as {x:number;y:number;z:number};
  scene.fluid.refinementRegions=arm==="coarse"?[{id:"far-corner",rule:"minimum-cell-size",minimumCellSize_cells:4,maximumCellSize_cells:4,min_m:point(0),max_m:point(3)}]:[];
- solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{coarsening:arm==="dynamic"?"dynamic":"regions"},undefined,()=>{});
+ solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{detailPolicy:arm==="dynamic"?"dynamic":arm==="coarse"?"requested":"full"},undefined,()=>{});
  // PROBE_PRESSURE_TOLERANCE: the mixed solver's acceptance tolerance (1/s).
  if(process.env.PROBE_PRESSURE_TOLERANCE)(solver as unknown as {applyRuntimeValues(v:Record<string,number>):void}).applyRuntimeValues({pressureResidualTolerance:Number(process.env.PROBE_PRESSURE_TOLERANCE)});
  const rows=[];

@@ -2,6 +2,7 @@ import {UNIFORM_FIELD_LOOP_BOUNDS,UNIFORM_FIELD_LOOP_METADATA,uniformFieldRuntim
 import {uniformPressurePageExtent,uniformPressurePageAddressWGSL,rewritePressureTextureCalls} from "./uniform-pressure-pages";
 import {gpuCompilationManagerFor} from "../../core/gpu-compilation-manager";
 import {UniformScratchArena,uniformScratchAccessWGSL,uniformVolumeScratchShader} from "./uniform-scratch-arena";
+import {uniformDetailField} from "./uniform-detail-fields";
 
 type Dims=readonly [number,number,number];
 type Field={dims:Dims;paged:boolean;scratchOffset?:number;components?:number};
@@ -39,13 +40,23 @@ export class UniformTexturePages {
    usage:descriptor.usage|(scratchOffset===undefined?0:GPUTextureUsage.TEXTURE_BINDING)});
   this.fields.set(texture,{dims,paged,scratchOffset,components:descriptor.format.startsWith('rgba')?4:1});return texture;
  }
+ /** Register a native texture made elsewhere (a detail-storage field) by its
+  * logical dims: rewritten textureDimensions report these, not its size. */
+ adopt(texture:GPUTexture,dims:Dims):GPUTexture{
+  if(this.pagedStorage)throw new Error("Detail storage fields need native page storage");
+  this.fields.set(texture,{dims,paged:false,components:texture.format.startsWith('rgba')?4:1});return texture;
+ }
  createTextureLike(reference:GPUTexture,descriptor:GPUTextureDescriptor):GPUTexture{
   const field=this.fields.get(reference);
   if(!field)throw new Error("Texture template must be registered");
   return this.createTexture(descriptor,!field.paged);
  }
- view(texture:GPUTexture):GPUTextureView{
-  const view=texture.createView();this.views.set(view,this.fields.get(texture)??{dims:[texture.width,texture.height,texture.depthOrArrayLayers],paged:false});return view;
+ /** A packed detail field binds its 1³ stand-in: the dense kernels of these
+  * groups never run on one (its texels are the mixed stages'). `physical`:
+  * its texels, for a kernel compiled through uniformDetailDenseShader. */
+ view(texture:GPUTexture,physical=false):GPUTextureView{
+  const storage=uniformDetailField(texture)?.storage;
+  const view=(storage?(physical?storage.physical(texture):storage.stub(texture)):texture).createView();this.views.set(view,this.fields.get(texture)??{dims:[texture.width,texture.height,texture.depthOrArrayLayers],paged:false});return view;
  }
  layout(entries:readonly GPUBindGroupLayoutEntry[],scratch=true):GPUBindGroupLayoutEntry[]{
   return [...entries,{binding:BINDING,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
@@ -135,8 +146,13 @@ export class UniformTexturePages {
    const pass=encoder.beginComputePass({label:'Uniform scratch field copy'});pass.setPipeline(pipeline);pass.setBindGroup(0,group);
    pass.dispatchWorkgroups(...dims.map(n=>Math.ceil(n/4)) as [number,number,number]);pass.end();return;
   }
-  if(source.width!==destination.width||source.height!==destination.height||source.depthOrArrayLayers!==destination.depthOrArrayLayers)throw new Error('Incompatible uniform page copies');
-  encoder.copyTextureToTexture({texture:source},{texture:destination},[source.width,source.height,source.depthOrArrayLayers]);
+  // Detail fields of one class share a physical layout: the whole texture copies.
+  const storage=uniformDetailField(source)?.storage;
+  // Two fields of one storage: their bases copy with them.
+  if(storage&&storage===uniformDetailField(destination)?.storage){storage.copy(encoder,source,destination);return;}
+  const s=storage?.physical(source)??source,d=uniformDetailField(destination)?.storage.physical(destination)??destination;
+  if(s.width!==d.width||s.height!==d.height||s.depthOrArrayLayers!==d.depthOrArrayLayers)throw new Error('Incompatible uniform page copies');
+  encoder.copyTextureToTexture({texture:s},{texture:d},[s.width,s.height,s.depthOrArrayLayers]);
  }
  /** Opt-in snapshots are captured at their owning stage. Normal simulation
   * need not retain intermediate fields after use. */
@@ -197,7 +213,9 @@ export class UniformTexturePages {
   let bytes=this.uniforms.reduce((sum,b)=>sum+b.size,0);
   for(const [texture,field] of this.fields){
    const components=texture.format.startsWith('rgba')?4:1;
-   bytes+=(texture.width*texture.height*texture.depthOrArrayLayers-field.dims[0]*field.dims[1]*field.dims[2])*components*4;
+   // A detail field's bytes are its storage's (UniformDetailStorage.allocatedBytes): none here.
+   const texels=uniformDetailField(texture)?0:texture.width*texture.height*texture.depthOrArrayLayers;
+   bytes+=(texels-field.dims[0]*field.dims[1]*field.dims[2])*components*4;
   }
   for(const {texture} of this.publications.values())bytes+=texture.width*texture.height*texture.depthOrArrayLayers*(texture.format.startsWith('rgba')?4:1)*4;
   for(const texture of this.snapshots.values())bytes+=texture.width*texture.height*texture.depthOrArrayLayers*(texture.format.startsWith('rgba')?4:1)*4;

@@ -5,11 +5,10 @@ import { sceneCellSizes_m } from "../scene-lattice";
 import type { SolidWorldCoordinate as Cell, SolidWorldVoxelPatch as Patch } from "../solid-world";
 import type { ToolContext, ToolControl, ToolGesture, ToolUpdate } from "./plugin";
 
-export const sizeControl: ToolControl = { id: "size", presentation: "primary", label: "Width · voxels", min: 1, max: 64, step: 1, initial: 1 };
-export const depthControl: ToolControl = { id: "depth", presentation: "primary", label: "Depth · voxels", min: 1, max: 128, step: 1, initial: 1 };
-export const planeControl: ToolControl = { id: "plane", presentation: "advanced", label: "Empty-space height · voxels", min: -64, max: 128, step: 1, initial: 0 };
-export const shellControl: ToolControl = { id: "shell", kind: "toggle", presentation: "advanced", label: "Edit tank walls", min: 0, max: 1, step: 1, initial: 0 };
-export const mirrorControl: ToolControl = { id: "mirror", kind: "toggle", presentation: "advanced", label: "Mirror X", min: 0, max: 1, step: 1, initial: 0 };
+export const sizeControl: ToolControl = { id: "size", label: "Width · voxels", short: "W", adjust: "primary", min: 1, max: 64, step: 1, initial: 1 };
+export const depthControl: ToolControl = { id: "depth", label: "Depth · voxels", short: "D", adjust: "secondary", min: 1, max: 128, step: 1, initial: 1 };
+export const shellControl: ToolControl = { id: "shell", kind: "toggle", label: "Edit tank walls", short: "Walls", shortcut: "w", min: 0, max: 1, step: 1, initial: 0 };
+export const mirrorControl: ToolControl = { id: "mirror", kind: "toggle", label: "Mirror X", short: "Mirror", shortcut: "m", min: 0, max: 1, step: 1, initial: 0 };
 /**
  * Limits are checked before accepting an update, never silently truncated.
  * A box is one patch applied a page at a time, so its voxel count is cheap; the
@@ -72,8 +71,8 @@ export function beginShapeGesture(context: ToolContext, authored: Patch["operati
   });
   const axis = hit?.faceAxis ?? 1;
   const sign = hit?.faceSign ?? 1;
-  const plane = hit ? origin[axis]! + (hit.coordinate[axis] + (sign > 0 ? 1 : 0)) * cell[axis]!
-    : (values.plane ?? 0) * cell[1];
+  // With nothing under the press the stroke stands on the ground plane.
+  const plane = hit ? origin[axis]! + (hit.coordinate[axis] + (sign > 0 ? 1 : 0)) * cell[axis]! : 0;
   const project = (input: EditorRay): Cell | undefined => {
     const o = [input.origin.x, input.origin.y, input.origin.z];
     const d = [input.direction.x, input.direction.y, input.direction.z];
@@ -81,7 +80,7 @@ export function beginShapeGesture(context: ToolContext, authored: Patch["operati
     const t = (plane - o[axis]!) / d[axis]!;
     if (!(t > 0)) return undefined;
     const q = o.map((v, a) => Math.floor((v + t * d[a]! - origin[a]!) / cell[a]!));
-    q[axis] = hit ? hit.coordinate[axis] + (operation === "fill" ? sign : 0) : values.plane ?? 0;
+    q[axis] = hit ? hit.coordinate[axis] + (operation === "fill" ? sign : 0) : 0;
     return q.every((v) => Number.isSafeInteger(v) && Math.abs(v) < 1_000_000) ? q as unknown as Cell : undefined;
   };
   const start = project(ray);
@@ -101,7 +100,7 @@ export function beginShapeGesture(context: ToolContext, authored: Patch["operati
     }
     return shapePatches(min as unknown as Cell, max as unknown as Cell, operation, shape, axis);
   };
-  return { update(input): ToolUpdate | undefined {
+  return { surface: hit !== undefined, update(input): ToolUpdate | undefined {
     const end = project(input);
     if (!end) return undefined;
     let patches: Patch[];
@@ -164,8 +163,8 @@ export function beginPushPullGesture(context: ToolContext): ToolGesture | undefi
   });
   const axis = hit?.faceAxis ?? 1;
   const sign = hit?.faceSign ?? 1;
-  // The layer of cells the face belongs to; empty space stands on the construction plane.
-  const surface = hit ? hit.coordinate[axis] : (values.plane ?? 0) - 1;
+  // The layer of cells the face belongs to; empty space stands on the ground plane.
+  const surface = hit ? hit.coordinate[axis] : -1;
   const plane = origin[axis]! + (surface + (sign > 0 ? 1 : 0)) * cell[axis]!;
   const project = (input: EditorRay): number[] | undefined => {
     const o = [input.origin.x, input.origin.y, input.origin.z];
@@ -195,6 +194,7 @@ export function beginPushPullGesture(context: ToolContext): ToolGesture | undefi
     return Math.max(-limit, Math.min(limit, Math.round(along_m / cell[axis]!)));
   };
   return {
+    surface: hit !== undefined,
     advance() {
       if (extruding) return false;
       extruding = true;

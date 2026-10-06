@@ -1,4 +1,4 @@
-import { uniformPressureScratchShader } from "./uniform-scratch-arena";
+import { UNIFORM_MIXED_CONTINUATION_LEVEL as MIXED_CONTINUATION_LEVEL, uniformPressureScratchShader } from "./uniform-scratch-arena";
 import type { UniformTexturePages } from "./uniform-texture-pages";
 import {uniformPressurePageExtent,uniformPressurePageWorkgroups,uniformPressurePagedShader,uniformPressurePageAddressWGSL} from "./uniform-pressure-pages";
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
@@ -127,13 +127,8 @@ const CYCLE_TILE_ENTRIES: ReadonlySet<EntryPoint> = new Set<EntryPoint>([
  * first level's per-cycle operators run from that level's cycle list.
  */
 /** The mixed continuation's entry level: the native n/4 lattice. */
-const MIXED_CONTINUATION_LEVEL = 2;
 
-const CONTINUATION_TILE_ENTRIES: ReadonlySet<string> = new Set<string>([
-  "mgBuildCycleTiles", "mgProlongateAddTiles", "mgProlongateAssignTiles",
-]);
-/** The plan's own fused operators, whatever entries the caller lists. */
-const PLAN_ENTRIES: ReadonlySet<string> = new Set<string>(["mgTransition"]);
+const CONTINUATION_TILE_ENTRIES: ReadonlySet<string> = new Set<string>(["mgBuildCycleTiles"]);
 
 const SAMPLED_BINDINGS: readonly number[] = [1, 3, 5, 7, 9, 11, 14];
 const WRITABLE_BINDINGS: readonly number[] = [2, 4, 6, 8, 10, 12, 15, 16];
@@ -168,7 +163,6 @@ export interface UniformPressureMultigridLevel {
 export type UniformCM11aPlanStage = "setup" | "full-cycle" | "v-cycle" | "finish";
 
 interface PlannedDispatch {
-  readonly continuationSetup?: boolean;
   readonly pipeline: GPUComputePipeline;
   readonly group: GPUBindGroup;
   readonly entryPoint: EntryPoint;
@@ -666,7 +660,7 @@ export class WebGPUUniformPressureMultigrid {
       && (entryPoint !== "mgMeasureFineResidualTiles" || MEASURE_TILES)
       && (entryPoint !== "mgBuildSmoothTilesSeeded" || (SEED_FUSE && this.cycleTiling))
       && (entryPoint !== "mgSmoothTilesJacobiCycle" || this.haloEntries)
-      && (!input.entryPoints || input.entryPoints.includes(entryPoint) || PLAN_ENTRIES.has(entryPoint)
+      && (!input.entryPoints || input.entryPoints.includes(entryPoint)
         || (this.cycleTiling && CONTINUATION_TILE_ENTRIES.has(entryPoint)))).map(async (entryPoint) => [entryPoint,
       await compiler.compileComputePipeline({ label: `Uniform CM11a - ${entryPoint}`,
         layout: this.device.createPipelineLayout({ label: `Uniform CM11a layout - ${entryPoint}`,
@@ -734,12 +728,11 @@ export class WebGPUUniformPressureMultigrid {
       || this.pagedStorage || this.windowLattice
       || this.levels[level]!.dimensions.some((d,a)=>d-2!==this.finestSize[a]!/4))
       throw new Error("Mixed continuation requires the full-domain native 4h hierarchy");
-    // Each traversal leaves its correction in the parity it ends on.
-    const parity={v:0,full:0};
-    const plans = (["v", "full"] as const).map(kind => {
-      const steps=this.buildPlanSteps(level,kind,end=>{parity[kind]=end;});
+    // The setup alone: the caller runs the traversal itself (see levels).
+    const setup = (() => {
+      const steps=this.buildPlanSteps(level);
       for (;;) {const next=steps.next();if(next.done)return next.value;}
-    });
+    })();
     const root=this.levels[level]!;
     const listed=this.cycleListed(level,level);
     const field=(texture:GPUTexture)=>{
@@ -755,8 +748,13 @@ export class WebGPUUniformPressureMultigrid {
       setCoarseAccuracy:(scale:number)=>this.setCoarseAccuracy(scale),
       pressure:field(root.pressure[0]),rhs:field(root.rhs[0]),minimum:field(root.minimum[0]),
       phi:field(root.phi[0]),topology:field(root.volume[0]),
-      /** The pressure slot each traversal leaves its correction in. */
-      result:{v:field(root.pressure[parity.v]!),full:field(root.pressure[parity.full]!)},
+      /** Every level from the entry one down, for a caller that runs the
+       * traversal itself: both parities of the pressure, the V-cycle and
+       * Full-Cycle RHS and bound, and the baked coefficients (+x, +y, +z,
+       * then the liquid mask of the row and its six neighbours). */
+      levels:this.levels.slice(level).map(l=>({dimensions:l.dimensions,
+        pressure:[field(l.pressure[0]),field(l.pressure[1])] as const,rhs:[field(l.rhs[0]),field(l.rhs[1])] as const,
+        minimum:[field(l.minimum[0]),field(l.minimum[1])] as const,coefficients:field(l.coefficients)})),
       /** With a cycle list: the far-field seeds the caller writes every solve
        * (both pressure parities at zero, the RHS at zero, the bound at the
        * root's), and the list itself -- its count at
@@ -764,34 +762,31 @@ export class WebGPUUniformPressureMultigrid {
        * by the setup from the seeded bound and the baked liquid. */
       cycle:listed?{pressure:field(root.pressure[1]),
         list:this.cycleTileBuffers[level]!,tiles:this.tileCounts[level]!}:undefined,
-      /** Clear only continuation work lists. The outer mixed solve owns
-       * diagnostics/acceptance; the native coarse solve retains its counters. */
-      /** `shared` batches every dispatch into its open pass (a dispatch is
-       * its own usage scope), ending it only for the tile-list copies. */
       /** Written by the mixed solve's GPU schedule gate: words 2-3 are the
        * coarse accuracy setCoarseAccuracy would write. */
       tolerance:this.toleranceBuffer,
       /** The native convergence status; word 17 is the mixed schedule's slot
        * gate (mgSkipCycle), written by its gate kernel. */
       diagnostics:this.diagnostics,
-      /** initializeTopology "setup" encodes only the per-solve setup, so every
-       * later call (false) is pure cycle work a schedule gate can disable. */
-      encode:(encoder:GPUCommandEncoder,uniformGroup:GPUBindGroup,kind:"v"|"full"="v",initializeTopology:boolean|"setup"=true,
+      /** The per-solve setup: the topology pyramid, the baked coefficients
+       * and the entry level's lists (it clears those lists alone: the outer
+       * mixed solve owns diagnostics and acceptance). `shared` batches every
+       * dispatch into its open pass, ending it only for the list clears. */
+      encodeSetup:(encoder:GPUCommandEncoder,uniformGroup:GPUBindGroup,
         shared?:{readonly pass:GPUComputePassEncoder;readonly commands:GPUCommandEncoder})=>{
         this.assertLive();
         const commands=()=>shared?.commands??encoder;
-        for(let i=level;initializeTopology&&i<this.levels.length;i++){
+        for(let i=level;i<this.levels.length;i++){
           if(this.smoothTileBuffers[i])commands().clearBuffer(this.smoothTileBuffers[i]!,0,4);
         }
-        if(initializeTopology&&listed){
+        if(listed){
           const cycle=this.cycleTileBuffers[level]!;commands().clearBuffer(cycle,0,4);
           if(WALL_HALO)commands().clearBuffer(cycle,16+4*this.tileCounts[level]!,4);
         }
         // A shared pass keeps its pipeline and groups between dispatches:
         // rebind only what changes (each call is host encode and submit work).
         let bound:{pass?:GPUComputePassEncoder;pipeline?:GPUComputePipeline;group0?:GPUBindGroup;group1?:GPUBindGroup}={};
-        for(const dispatch of plans[kind === "full" ? 1 : 0]!){
-          if(dispatch.continuationSetup?!initializeTopology:initializeTopology==="setup")continue;
+        for(const dispatch of setup){
           const pass=shared?.pass??encoder.beginComputePass({label:`Uniform mixed continuation ${dispatch.entryPoint}`});
           if(bound.pass!==pass)bound={pass};
           const group0=this.tileEntry(dispatch.entryPoint)?this.smoothTileInputGroup!:uniformGroup;
@@ -1059,7 +1054,7 @@ export class WebGPUUniformPressureMultigrid {
       && (continuationLevel === undefined || this.continuationOnly)
       && this.levels[level]!.dimensions.reduce((n, d) => n * d, 1) > FUSED_VISIT_MAX_CELLS;
   }
-  private *buildPlanSteps(continuationLevel?: number, continuationKind: "v" | "full" = "v", continuationParity?: (parity: number) => void): Generator<void, PlannedDispatch[], void> {
+  private *buildPlanSteps(continuationLevel?: number): Generator<void, PlannedDispatch[], void> {
     const firstLevel = continuationLevel ?? 0;
     const result: PlannedDispatch[] = [];
     // The schedule group each emit lands in; reassigned as the plan walks its
@@ -1210,10 +1205,16 @@ export class WebGPUUniformPressureMultigrid {
     // CM11a Algorithm 1 builds the complete raw phi/V pyramid first. Phi
     // continuation is a separate per-level operation and must never feed the
     // next coarsening step.
+    // A mixed continuation's finest level is its root, and the sign-aware
+    // levels (control.y) are counted from level 0: every coarsening of the
+    // root averages. Its first coarsening (control.z, that level's paper
+    // number) keeps the air that averaging would erase (mgAirVanishes).
+    const keepAir: readonly [number, number, number, number] = continuationLevel === undefined ? [0, 0, 0, 0]
+      : [0, 0, this.levels.length - continuationLevel - 1, 0];
     for (let level = firstLevel; level + 1 < this.levels.length; level += 1) {
       emit("mgDownsampleTopology", level, level + 1, {
         phiIn: this.levels[level]!.phi[0], phiOut: this.levels[level + 1]!.phi[0],
-        volumeOut: this.levels[level + 1]!.volume[0] });
+        volumeOut: this.levels[level + 1]!.volume[0] }, keepAir);
     }
     for (let level = firstLevel; level < this.levels.length; level += 1) {
       emitSetup("mgExtrapolatePhiOneCell", level,
@@ -1222,7 +1223,8 @@ export class WebGPUUniformPressureMultigrid {
       emitSetup("mgBakeCoefficients", level, {
         phiIn: this.levels[level]!.phi[1], coefficientsOut: this.levels[level]!.coefficients,
       });
-      if(this.tileSmoothing && this.levels[level]!.dimensions.reduce((n,d)=>n*d,1)>FUSED_VISIT_MAX_CELLS){
+      if(this.tileSmoothing && this.levels[level]!.dimensions.reduce((n,d)=>n*d,1)>FUSED_VISIT_MAX_CELLS
+        && (continuationLevel===undefined || level===firstLevel)){
         // The finest level's far-field seeds (below) ride on its classifier.
         const seeded=SEED_FUSE&&level===0&&cycleList(0)!==undefined;
         emit(seeded?"mgBuildSmoothTilesSeeded":"mgBuildSmoothTiles",level,level,seeded?{
@@ -1329,34 +1331,10 @@ export class WebGPUUniformPressureMultigrid {
       emitOperator("mgProlongateAdd", level + 1, level, { residualIn: this.levels[level]!.pressure[p[level]] }); flipPressure(level);
       smooth(level, rhs, this.schedule.postSweeps);
     };
-    if (continuationLevel !== undefined) {
-      for(let i=0;i<result.length;i++)result[i]={...result[i]!,continuationSetup:true};
-      // The mixed pressure traversal supplies this level's phi, topology, RHS,
-      // minimum and zero correction pressure. Continue the requested traversal
-      // below 4h, leaving its correction in the parity it ends on. No finest
-      // setup, acceptance state or full-cycle backup is touched here.
-      if (continuationKind === "full") {
-        // Continue the descending Full-Cycle, whose RHS and bounds are already
-        // corrections. Starting a V-cycle here truncates Algorithm 3 at 4h.
-        const correctionRhs = new Map<number, GPUTexture>([[firstLevel, originalRhs]]);
-        for (let level = firstLevel; level + 1 < this.levels.length; level++) {
-          const nextRhs = this.levels[level + 1]!.rhs[1];
-          emit("mgRestrictResidual", level, level + 1,
-            { residualIn: correctionRhs.get(level)!, rhsOut: nextRhs });
-          correctionRhs.set(level + 1, nextRhs);
-          emit("mgDownsampleMinimum", level, level + 1); flipMinimum(level + 1);
-        }
-        const coarse = this.levels.length - 1;
-        emit("mgClearPressure", coarse); flipPressure(coarse);
-        coarseSolve(correctionRhs.get(coarse)!);
-        for (let level = coarse - 1; level >= firstLevel; level--) {
-          emitOperator("mgProlongateAssign", level + 1, level); flipPressure(level);
-          vCycle(level, correctionRhs.get(level)!);
-        }
-      } else vCycle(firstLevel, originalRhs);
-      continuationParity?.(p[firstLevel]!);
-      return result;
-    }
+    // A mixed continuation is this setup alone: its caller supplies the entry
+    // level's phi, topology, RHS, bound and zero correction and traverses
+    // the levels itself.
+    if (continuationLevel !== undefined) return result;
     const fullCycle = () => {
       // Algorithm 3 requires p_tmp to survive every nested V-cycle. Both
       // finest residual[0] and rhs[1] are selected as residual scratch by
