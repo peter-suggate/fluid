@@ -23,6 +23,9 @@ export const uniformVolumeMethod: SimulationMethod = {
   shortLabel: "Uniform Geometric",
   badge: "UNIFORM GEOMETRIC",
   supportedFieldModes: [...uniformMethod.supportedFieldModes!.filter(mode=>mode!=="solve-window"), "volume-levelset", "fine-tiles"],
+  // The mixed-ownership frame has no page catalogue, dispatch window or
+  // released-face record, and the geometric method has no particles.
+  capabilities: { ...uniformMethod.capabilities, visualLayers: { hidden: ["pages", "window", "release", "particles"] } },
   description: "Vertex level set and conservative liquid volume with live simulation detail.",
   detail: "One coupled simulation on a 4h base: Requested detail runs h inside drawn Fine regions and at solid contact, Dynamic follows the surface, Full runs h everywhere; direct h/4h interfaces and conservative live remapping.",
   resource: { ...uniformMethod.resource!, id: "fluid.uniform-volume", label: "Uniform Geometric fluid" },

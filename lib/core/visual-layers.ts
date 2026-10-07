@@ -12,6 +12,9 @@ export const VISUAL_LAYERS = [
   { id: "pages", requires: ["pages"], label: "Domain pages", color: "#b39bea", opacity: 0.65, mode: 27, description: "Page states from the last step: teal = transport active; amber = sharpening only; faint purple = resident without volume work. Absent pages are hidden. Residency can include pressure/interface support; authored pages currently remain allocated." },
   { id: "window", requires: ["window"], label: "Working window", color: "#5fb4e6", opacity: 0.8, mode: 23, description: "Actual dispatched window, seed box, launch slack and clipping. Dense scheduling uses the whole domain." },
   { id: "surface", requires: ["phi"], label: "Liquid surface · φ = 0", color: "#ef9f35", opacity: 0.9, mode: 24, description: "Reconstructed liquid and its zero level-set interface. Mixed Uniform colours the interface by the velocity that advected it: teal where all three components were h velocity (h bulk, or retained and extended projected h velocity), amber where the 4h bulk sampler moved it, blended where only some components were h." },
+  // The one layer that is not a slice: mode -1 keeps it out of the plane pass,
+  // and the particle overlay draws it over the whole liquid instead.
+  { id: "particles", requires: ["particles"], label: "Particles", color: "#8f8cdb", opacity: 1, mode: -1, description: "The method's own particles as shaded spheres through the whole liquid, coloured by speed (full scale at 2 m/s). Narrow-band FLIP draws its velocity samples: the 4h surface band only, none in the Eulerian interior." },
   { id: "grid", requires: ["dimensions"], label: "Grid", color: "#a8c7d8", opacity: 0.7, mode: 0, description: "Represented cell boundaries, independently of field fills. Mixed Uniform draws its live h and 4h bulk owners with orange resolution seams, and hatches the tiles this frame's head relayout changed: orange refined to h, blue coarsened to 4h (a host relayout after the last transport hatches orange)." },
   { id: "velocity", requires: ["velocity"], label: "Velocity", color: "#dce9ee", opacity: 0.9, mode: 26, description: "Cell velocity magnitude and in-plane direction; full scale at 1 m/s. Mixed Uniform draws one arrow per h or 4h bulk owner, the grid momentum is advected on." },
   { id: "release", requires: ["releasedFaces"], label: "Released faces", color: "#f5be52", opacity: 1, mode: 25, description: "Solid faces released by the pressure projection." },
@@ -45,6 +48,11 @@ export function importanceViewCode(state: VisualLayerState): number {
   const view = importanceView(state);
   return view === "all" ? 0 : 1 + UNIFORM_DETAIL_CRITERIA.indexOf(view);
 }
+/** Whether a layer is sampled on the slice plane, as every layer but the particle spheres is. */
+export const isSliceLayer = (id: VisualLayerId): boolean => VISUAL_LAYERS.find(l => l.id === id)!.mode >= 0;
+/** The plane pass has something to draw. */
+export const sliceLayersShown = (state: VisualLayerState): boolean => state.visible && state.enabled.some(isSliceLayer);
+export const particleLayerShown = (state: VisualLayerState): boolean => state.visible && state.enabled.includes("particles");
 export function toggleVisualLayer(state: VisualLayerState, id: VisualLayerId): VisualLayerState {
   return { ...state, visible: true, enabled: VISUAL_LAYERS.filter(l => l.id === id ? !state.enabled.includes(id) : state.enabled.includes(l.id)).map(l => l.id) };
 }
@@ -95,6 +103,8 @@ export const LAYER_PALETTE = {
   importanceShape: [72, 204, 92], importanceThin: [28, 206, 214], importanceStrain: [246, 214, 48],
   importanceRotation: [206, 98, 240], importanceImpact: [238, 66, 74], importanceApproach: [98, 112, 255],
   importanceHot: [255, 244, 214], importanceOutline: [250, 248, 240], importanceHeld: [198, 202, 210], importanceDropped: [18, 22, 28],
+  // Particle spheres by speed: at rest, half scale, full scale.
+  particleSlow: [143, 140, 219], particleMid: [226, 222, 246], particleFast: [244, 158, 52],
 } as const;
 
 /** The tiles layer's key on mixed Uniform: why each h tile is h (first rule
@@ -153,6 +163,12 @@ export function importanceLegend(view: ImportanceView): ReadonlyArray<{ color: s
 }
 export const LAYER_PRESSURE_SCALE = 10_000;
 export const LAYER_SPEED_SCALE = 1;
+/** Speed in m/s at which a particle sphere reaches the fast end of its ramp. */
+export const LAYER_PARTICLE_SPEED_SCALE = 2;
+/** The particle layer's key. The swatch is the overlay's WGSL ramp. */
+export const PARTICLE_LEGEND = [
+  { color: `linear-gradient(90deg,${rgb(LAYER_PALETTE.particleSlow)},${rgb(LAYER_PALETTE.particleMid)},${rgb(LAYER_PALETTE.particleFast)})`, label: `Speed 0 · ${LAYER_PARTICLE_SPEED_SCALE / 2} · ${LAYER_PARTICLE_SPEED_SCALE} m/s`, title: "Each sphere is one particle, coloured by its own speed.", wide: true },
+] as const;
 export function scalarLayerPaint(id: VisualLayerId, value: number): { color: readonly number[]; alpha: number } {
   const p = LAYER_PALETTE;
   const mix = (a: readonly number[], b: readonly number[], t: number) => a.map((v, i) => v + (b[i]! - v) * Math.max(0, Math.min(1, t)));

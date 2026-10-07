@@ -7,9 +7,12 @@ import { OctreePowerCoarseDynamicsLane } from "./power/octree-power-lane";
 import { spgridRowCapacityForBindingLimit } from "./power/webgpu-octree-spgrid-vcycle";
 import { structuredVelocityRowCapacityForBindingLimit } from "./power/webgpu-octree-structured-velocity-gpu";
 import { powerLiquidsMethod } from "./power/method";
+import { uniformNarrowBandMethod } from "./uniform/uniform-narrow-band-method";
 import { uniformVolumeMethod } from "./uniform/uniform-volume-method";
 import { uniformMethod } from "./uniform/method";
 import { uniformMacMethod } from "./uniform/mac/method";
+import { sphMethod } from "./sph/method";
+import { apicMethod } from "./particle/method";
 import { adaptiveMassMethod } from "./adaptive-mass/method";
 import { adaptiveMassMethod as adaptiveVolumeMethod } from "./adaptive-volume/method";
 import type { SimulationMethod } from "../core/method-contract";
@@ -28,7 +31,10 @@ const simulationMethods: ReadonlyArray<SimulationMethod> = [
   powerLiquidsMethod,
   uniformMethod,
   uniformVolumeMethod,
+  uniformNarrowBandMethod,
   uniformMacMethod,
+  apicMethod,
+  sphMethod,
   adaptiveMassMethod,
   adaptiveVolumeMethod,
 ];
@@ -65,7 +71,7 @@ installSimulationMethods({
   // substitutes the default for a non-interactive id: a `method=power-liquids`
   // link would have hydrated as the default method and simulated something
   // else.
-  interactive: [losassoMethod, powerLiquidsMethod, uniformMethod, uniformVolumeMethod, uniformMacMethod, adaptiveMassMethod, adaptiveVolumeMethod],
+  interactive: [losassoMethod, powerLiquidsMethod, uniformMethod, uniformVolumeMethod, uniformNarrowBandMethod, uniformMacMethod, apicMethod, sphMethod, adaptiveMassMethod, adaptiveVolumeMethod],
   // Uniform Geometric is the application default for every scene. A scene profile
   // seeds settings for an explicitly selected comparison method; opening the
   // scene does not switch to that method.

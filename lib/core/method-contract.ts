@@ -17,6 +17,8 @@ import type { GPUPressureJournalSource } from "../features/pressure-inspection/g
 import type { PressureJournal, PressureJournalDescriptor } from "../features/pressure-inspection/journal";
 import type { AnyStageLens, StageLensSource } from "./stage-lens";
 import type { GPUFluidTracerSource } from "./webgpu-tracer-overlay";
+import type { GPUFluidParticleSource } from "./webgpu-particle-overlay";
+import type { VisualLayerId } from "./visual-layers";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import type {
   DenseLevelSetVolumeConsumerSource,
@@ -289,6 +291,12 @@ export interface GPUSolverInstance {
   readonly velocityTexture?: GPUTexture;
   /** Optional one-way escaped spray droplets rendered above the liquid surface. */
   readonly secondaryParticles?: GPUSecondaryParticleSource;
+  /**
+   * The particles a particle method simulates with, for the particle layer.
+   * Like the face velocities below it needs no enable: the records exist
+   * because the step needs them, so drawing them adds no simulation work.
+   */
+  readonly particleSource?: GPUFluidParticleSource;
   /** Optional presentation-only fluid markers, for the seed-spectrum view. */
   readonly tracerSource?: GPUFluidTracerSource;
   /**
@@ -633,6 +641,12 @@ export interface SimulationMethod {
      * `rigidAllocationKey` then keeps that first body in the solver key.
      */
     adoptsRigidRosterShape?: boolean;
+    /**
+     * Field views are composed visual layers, any number at once, rather than
+     * one overlay mode at a time. `hidden` names the catalog layers this
+     * method publishes no source for.
+     */
+    visualLayers?: { readonly hidden: readonly VisualLayerId[] };
   };
   /**
    * The SIM panel's advance diagram, loaded on demand.

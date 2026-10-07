@@ -34,3 +34,13 @@ test("shared edits reach both panes and survive scene and solver changes", () =>
   b.scene.getState().patchNumerics({ fixedDt_s: 0.025 });
   assert.equal(b.scene.getState().scene.numerics.fixedDt_s, 0.025);
 });
+
+test("APIC follows editable shared timesteps in a comparison without a hidden method pin", () => {
+  const { a, b, shared, check } = setup();
+  try {
+    b.method.getState().setMethodId("particle-apic");
+    for (const dt of [0.004, 1 / 60, 0.033, 0.05]) { shared.setStepSize(dt); check(dt); }
+    a.method.getState().setMethodId("particle-apic");
+    shared.setStepSize(0.008); check(0.008);
+  } finally { shared.stop(); }
+});

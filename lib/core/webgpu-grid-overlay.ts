@@ -2231,7 +2231,8 @@ export class GridOverlayPipeline {
       boundary = state.visible && state.enabled.includes("velocity") ? boundary : undefined;
       pages = state.visible && state.enabled.includes("pages") ? pages : undefined;
       values[0] = 1; values[1] = window ? 1 : 0;
-      VISUAL_LAYERS.forEach((layer, i) => { values[4 + i] = state.visible && state.enabled.includes(layer.id) ? layerOpacity(state, layer.id) : 0; });
+      // A layer without a slice mode (the particle spheres) is another pass's: zero here skips its plane pass.
+      VISUAL_LAYERS.forEach((layer, i) => { values[4 + i] = layer.mode >= 0 && state.visible && state.enabled.includes(layer.id) ? layerOpacity(state, layer.id) : 0; });
       values[LAYER_IMPORTANCE] = importanceViewCode(state);
       const tileBytes = tiles ? (tiles.records.size ?? tiles.records.buffer.size - (tiles.records.offset ?? 0)) : 0;
       const boundaryOffset = 1024 + tileBytes;

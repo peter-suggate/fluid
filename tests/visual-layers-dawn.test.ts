@@ -60,7 +60,9 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     }
     assert.ok((await draw(visualLayers([]))).every(n => n === 0));
     // Importance is drawn from the mixed frame's stage record alone, and this lattice publishes none.
-    for (const layer of VISUAL_LAYERS) { if (layer.id === "importance") continue; const pixels = await draw(visualLayers([layer.id])); assert.ok(pixels.some(n => n !== 0), `${layer.id} must draw`); }
+    // Particles are spheres drawn by their own pass (particle-overlay-dawn), never on the plane.
+    assert.ok((await draw(visualLayers(["particles"]))).every(n => n === 0), "the plane pass must not draw the particle layer");
+    for (const layer of VISUAL_LAYERS) { if (layer.id === "importance" || layer.mode < 0) continue; const pixels = await draw(visualLayers([layer.id])); assert.ok(pixels.some(n => n !== 0), `${layer.id} must draw`); }
     assert.ok((await draw(visualLayers(["importance"]))).every(n => n === 0), "importance must not invent scores without a recorded stage view");
     assert.ok((await draw(visualLayers(["pages"]), true, [0, 0, 0], false)).every(n => n === 0), "absent page records must not invent residency");
     const idle = await draw(visualLayers(["pages"]));

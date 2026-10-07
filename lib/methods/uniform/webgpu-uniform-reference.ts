@@ -99,6 +99,8 @@ import { UniformDetailStorage, uniformDetailDenseShader, uniformDetailField, uni
 export { UNIFORM_PAPER_DT_S } from "./uniform-paper";
 
 export interface WebGPUUniformReferenceOptions {
+  /** Experimental particle velocity transport in the surface band. */
+  narrowBandFlip?: boolean;
   /** Independent dense vertex level set and conservative cell volume, advanced
    * only by the mixed-ownership frame. */
   geometricVolume?: boolean;
@@ -445,6 +447,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly executionInfo: GPUEulerianInfo;
   get info(): GPUEulerianInfo { this.refreshMixedAllocation();return this.executionInfo; }
   get simulationCellScale(): 1 { return 1; }
+  private readonly narrowBandFlip: boolean;
+  get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
+  get narrowBandFlipInfo(){const stage=this.mixedFrame?.narrowBandFlip;return stage?{particles:stage.count,capacity:stage.capacity,bandWidth:4,flipRatio:0.95}:undefined;}
   private readonly geometricVolume: boolean;
   private geometricRedistance: boolean;
   /** Sec. 3.4/3.5 rounding-residue floor in cell volumes; 0 is off. */
@@ -807,6 +812,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     _onRigidLoads?: (loads: GPURigidLoad[]) => void,
     options: WebGPUUniformReferenceOptions = {},
   ) {
+    this.narrowBandFlip = options.narrowBandFlip === true;
     this.geometricVolume = options.geometricVolume === true;
     this.geometricRedistance = options.geometricRedistance !== false;
     this.volumeDustThreshold = Number.isFinite(options.volumeDustThreshold)
@@ -1433,7 +1439,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // pipelines then start in the direct form (UniformDetailStorage.prefer).
     detail.prefer(this.detail.policy!=="requested"||bodies>0);
     this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:fixed??(gpuLayout?tiles:0),liquidBand:gpuLayout,fixed:fixed!==undefined},{
-      arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
+      narrowBandFlip:this.narrowBandFlip,arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
       phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,
@@ -3216,7 +3222,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.mixedFramesInFlight++;
       const handled=receipt.then(receipt=>{
         if(this.disposed)return;
-        Object.assign(this.executionInfo,{simulatedTime_s:advance.nextTime_s,completedTime_s:advance.nextTime_s,
+        Object.assign(this.executionInfo,{...(this.narrowBandFlip?{narrowBandFlipParticles:this.mixedFrame?.narrowBandFlip?.count}:{}),simulatedTime_s:advance.nextTime_s,completedTime_s:advance.nextTime_s,
           uniformPressureAcceptedResidual:receipt.residual,uniformPressureCyclesExecuted:receipt.cycles,uniformPressureCyclesConverged:true,
           uniformPressureCyclesEncoded:receipt.encoded,uniformPressureCyclesConfigured:this.pressureSchedule.fullCycles+this.pressureSchedule.vCycles,
           uniformVolumeDustCells:receipt.dustOwners,uniformVolumeDustMass_cells:receipt.dustMass_cells,

@@ -344,6 +344,9 @@ export interface GPUEulerianInfo {
    * the unit from a grid kind two methods share. */
   maxPressure_Pa?: number;
   pressureResidual?: number;
+  /** Initial fresh infinity norm and effective per-step target, in s^-1. */
+  pressureInitialResidual?: number;
+  pressureResidualTarget?: number;
   /** Fresh b-Ap relative L2 residual; authoritative for Sparse CM12 convergence. */
   pressureRelativeResidual?: number;
   /** Recursively updated CG residual, retained only to diagnose f32 drift. */

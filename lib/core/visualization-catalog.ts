@@ -22,6 +22,7 @@ import { octreeFieldVisualizations } from "./octree-technique-debug";
 import { pressureJournalOverlayVisualizations } from "../features/pressure-inspection/gpu/overlay";
 import { svoPixelTraceVisualizations } from "../svo/features/diagnostics/svo-pixel-trace";
 import { tracerOverlayVisualizations } from "./webgpu-tracer-overlay";
+import { particleOverlayVisualizations } from "./webgpu-particle-overlay";
 import {
   decorationVisualizations,
   fieldVisualizations,
@@ -45,6 +46,7 @@ export const VISUALIZATION_CATALOG: readonly Visualization[] = Object.freeze([
   // the octree-only publications.
   ...gridOverlayVisualizations,
   ...tracerOverlayVisualizations,
+  ...particleOverlayVisualizations,
   ...faceVelocityOverlayVisualizations,
   // Last of the overlay draws: a captured solve is drawn over the live scene,
   // and it is the one view that answers a question about a frame that has

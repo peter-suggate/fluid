@@ -129,8 +129,8 @@ function draw(
   for (const layer of VISUAL_LAYERS) {
     if (!layers.visible || !layers.enabled.includes(layer.id)) continue;
     const lens = layer.id;
-    // Pages and the mixed frame's detail importance have no 2D record here.
-    if (lens === "pages" || lens === "importance") continue;
+    // Pages, the mixed frame's detail importance and particles have no 2D record here.
+    if (lens === "pages" || lens === "importance" || lens === "particles") continue;
     if (lens === "grid" || lens === "window") {
       g.save(); g.globalAlpha = layerOpacity(layers, lens);
       g.strokeStyle = layer.color; g.lineWidth = (lens === "window" ? 2 : 1) / Math.max(sx, sy);
@@ -625,7 +625,7 @@ function UniformRun({ session }: { session: PaneSession }) {
       <div className={css.layout}>
         <section className={css.viewport} aria-label="Uniform simulation">
           <div className={css.tools}>
-            <DockedToolstrip ariaLabel="Visual layers"><VisualLayerRows hidden={["pages", "importance"]} state={layers} onChange={layers => store.setState({ layers })} /></DockedToolstrip>
+            <DockedToolstrip ariaLabel="Visual layers"><VisualLayerRows hidden={["pages", "importance", "particles"]} state={layers} onChange={layers => store.setState({ layers })} /></DockedToolstrip>
             <button onClick={() => setCamera(fit)}>Fit</button>
           </div>
           <canvas

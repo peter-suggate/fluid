@@ -1,4 +1,4 @@
-import { legacyVisualLayers, type VisualLayerState } from "./visual-layers";
+import { layerOpacity, legacyVisualLayers, particleLayerShown, sliceLayersShown, type VisualLayerState } from "./visual-layers";
 import { authoredFluidGeometryKey } from "./authored-fluid-edit";
 import { publishOpaqueSurfaceCapability } from "../svo/features/shading/deferred-specialization";
 import { validateLiveFluidEdit, type LiveFluidEdit, type LiveFluidEditResult } from "./live-fluid-edit";
@@ -57,6 +57,7 @@ import {
 } from "./stage-lens";
 import { StageLensOverlay, type StageLensLayerReport } from "./webgpu-stage-lens-overlay";
 import { TracerOverlay } from "./webgpu-tracer-overlay";
+import { ParticleOverlay } from "./webgpu-particle-overlay";
 import { VISUALIZATION_CATALOG } from "./visualization-catalog";
 import { FINE_TILES_OVERLAY_MODE_CODE, SOLVE_WINDOW_OVERLAY_MODE_CODE, VOLUME_LEVELSET_OVERLAY_MODE_CODE } from "./grid-overlay-visualizations";
 import {
@@ -336,7 +337,7 @@ export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, n
  * normalized by the last reported liquid maximum. Both sample live solver
  * textures in the overlay shader — no readback is involved.
  */
-export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation" | "density" | "volume-levelset" | "fine-tiles" | "solve-window" | "tracers" | "face-velocity"
+export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation" | "density" | "volume-levelset" | "fine-tiles" | "solve-window" | "tracers" | "face-velocity" | "particles"
   | PressureJournalOverlayMode | OctreeTechniqueOverlayMode | SparseCM12DirtyOverlayMode
   | StageLensOverlayMode;
 
@@ -359,6 +360,7 @@ export type OptionalRendererPipeline =
   | "decoration-overlay"
   | "fluid-cell-trace"
   | "tracer-overlay"
+  | "particle-overlay"
   | "face-velocity-overlay"
   | "pressure-journal-overlay"
   | "stage-lens"
@@ -470,6 +472,11 @@ export function svoPixelTraceProbeDue(
   return now_ms - lastEncodedAt_ms >= SVO_PIXEL_TRACE_LIVE_PROBE_INTERVAL_MS;
 }
 
+/** The layers a frame composes: none while a stage lens has the view. */
+function composedVisualLayers(gridOverlay: GridOverlayConfig): VisualLayerState | undefined {
+  return gridOverlay.layers && !isStageLensOverlayMode(gridOverlay.mode ?? "") ? gridOverlay.layers : undefined;
+}
+
 /**
  * Pipeline compilation requested by the current presentation. The sparse
  * dry-scene renderer owns the finished view alongside the authoritative water
@@ -488,9 +495,14 @@ export function optionalRendererPipelineRequests(
   const requested: OptionalRendererPipeline[] = [];
   if (gridOverlay && gridOverlay.axis !== "off") {
     const technique = Boolean(gridOverlay.mode && isOctreeTechniqueOverlayMode(gridOverlay.mode));
+    // Particle spheres are their own instanced draw: a view of their own, or
+    // one composed layer among the plane's.
+    const layers = composedVisualLayers(gridOverlay);
+    if (gridOverlay.mode === "particles" || (layers && particleLayerShown(layers))) requested.push("particle-overlay");
+    if (gridOverlay.mode === "particles") { /* no plane pass */ }
     // Markers are their own instanced draw over the finished frame, so they
     // compile neither the generic slice raymarch nor the technique programs.
-    if (gridOverlay.mode === "tracers") requested.push("tracer-overlay");
+    else if (gridOverlay.mode === "tracers") requested.push("tracer-overlay");
     else if (gridOverlay.mode === "face-velocity") requested.push("face-velocity-overlay");
     else if (isPressureJournalOverlayMode(gridOverlay.mode)) {
       requested.push("pressure-journal-overlay");
@@ -498,7 +510,8 @@ export function optionalRendererPipelineRequests(
     else if (gridOverlay.mode && isStageLensOverlayMode(gridOverlay.mode)) {
       requested.push("stage-lens");
     }
-    else if (!technique) requested.push("grid-overlay");
+    // Composed layers with nothing on the plane compile no slice raymarch.
+    else if (!technique) { if (!layers || sliceLayersShown(layers)) requested.push("grid-overlay"); }
     else requested.push("technique-overlay", "technique-audit-overlay");
   }
   if (sparsePresentationRequired) requested.push("svo-dry-scene");
@@ -957,6 +970,7 @@ export class FluidLabRenderer {
   private techniqueAuditOverlayPipeline?: OverlayPipeline;
   private decorationOverlayPipeline?: DecorationOverlay;
   private tracerOverlayPipeline?: TracerOverlay;
+  private particleOverlayPipeline?: ParticleOverlay;
   private faceVelocityOverlayPipeline?: FaceVelocityOverlay;
   private pressureJournalOverlayPipeline?: PressureJournalOverlay;
   private stageLensOverlayPipeline?: StageLensOverlay;
@@ -1455,6 +1469,16 @@ export class FluidLabRenderer {
         this.tracerOverlayPipeline = pipeline;
         pipeline.setSource(this.gpuFluid?.sparseWorldUI?.overlays.tracers
           ?? this.gpuFluid?.tracerSource);
+      },
+      (pipeline) => pipeline.destroy(),
+    );
+    if (wants.has("particle-overlay")) this.ensureOptionalPipeline(
+      "particle-overlay", this.particleOverlayPipeline,
+      (device) => new ParticleOverlay(device, this.format!),
+      (pipeline) => pipeline.initialize(),
+      (pipeline) => {
+        this.particleOverlayPipeline = pipeline;
+        pipeline.setSource(this.gpuFluid?.particleSource);
       },
       (pipeline) => pipeline.destroy(),
     );
@@ -3165,12 +3189,16 @@ export class FluidLabRenderer {
   }
 
   draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, presentationMode: ScenePresentationMode = "full-scene", fluidSurfaceRenderMode: FluidSurfaceRenderMode = "shaded", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig, fluidCellTrace?: FluidCellTraceConfig): RendererFrameMetrics {
-    if (config.methodId === "uniform-volume" && gridOverlay && !isStageLensOverlayMode(gridOverlay.mode ?? "")) {
+    // A method declares that its field views compose as layers; every other
+    // method draws one overlay mode, and a layer selection left behind by a
+    // composing method means nothing to it.
+    const composesLayers = Boolean(getMethod(config.methodId).capabilities?.visualLayers);
+    if (composesLayers && gridOverlay && !isStageLensOverlayMode(gridOverlay.mode ?? "")) {
       const layers = gridOverlay.layers ?? { ...legacyVisualLayers(gridOverlay.mode ?? "structure"), visible: gridOverlay.axis !== "off" };
       const visible = layers.visible && layers.enabled.length > 0;
       const axis = gridOverlay.axis === "off" || gridOverlay.axis === "volume" ? "z" : gridOverlay.axis;
       gridOverlay = { ...gridOverlay, layers, mode: "structure", axis: visible ? axis : "off" };
-    }
+    } else if (!composesLayers && gridOverlay?.layers) gridOverlay = { ...gridOverlay, layers: undefined };
 
     const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
     const cpuTrace = measurementInstrumentationEnabled
@@ -3426,15 +3454,15 @@ export class FluidLabRenderer {
     this.gridOverlayPipeline?.setDenseLevelSetVolumeSource(this.gpuFluid?.denseLevelSetVolumeSource);
     // Legacy modes bind one source directly; composed Uniform layers pack the
     // selected sources together without increasing the storage-binding budget.
-    if (config.methodId !== "uniform-volume") this.gridOverlayPipeline?.setViewRecords(gridOverlay?.mode === "fine-tiles" ? this.gpuFluid?.tileClassSource
+    if (!composesLayers) this.gridOverlayPipeline?.setViewRecords(gridOverlay?.mode === "fine-tiles" ? this.gpuFluid?.tileClassSource
       : gridOverlay?.mode === "solve-window" ? this.gpuFluid?.solveWindowSource : undefined);
     // Layout views are the tiles, importance, grid and pressure layers'
     // records: the view arms them, as it does the markers, so an unwatched
     // frame records none.
-    const uniformLayers = config.methodId === "uniform-volume" ? gridOverlay?.layers : undefined;
+    const uniformLayers = composesLayers ? gridOverlay?.layers : undefined;
     this.gpuFluid?.setLayoutViewsEnabled?.(Boolean(gridOverlay?.axis !== "off" && uniformLayers?.visible
       && uniformLayers.enabled.some(id => id === "tiles" || id === "importance" || id === "grid" || id === "pressure")));
-    this.gridOverlayPipeline?.setLayers(config.methodId === "uniform-volume" ? gridOverlay?.layers : undefined, this.gpuFluid?.tileClassSource, this.gpuFluid?.solveWindowSource, this.gpuFluid?.gridPressureOrigin, this.gpuFluid?.gridVelocityBoundary, this.gpuFluid?.volumePageSource);
+    this.gridOverlayPipeline?.setLayers(uniformLayers, this.gpuFluid?.tileClassSource, this.gpuFluid?.solveWindowSource, this.gpuFluid?.gridPressureOrigin, this.gpuFluid?.gridVelocityBoundary, this.gpuFluid?.volumePageSource);
     if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {const activeSparsePresentation=this.sparseWorldPresentation(this.gpuFluid);const compactSurface=Boolean(activeSparsePresentation?.fineLevelSet||this.gpuFluid.globalFineLevelSetSource||this.gpuFluid.coarseLevelSetSource);this.gridOverlayPipeline?.setVolume(compactSurface?this.scalarFallbackTexture:this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture, this.gpuFluid.volumeTexture);this.gridOverlayPipeline?.setSparseSource(activeSparsePresentation?.adaptiveGrid??this.gpuFluid.sparseAdaptiveGridSource);}
     // A newly attached sparse source may still be compiling its water
     // classifier/scan/emitter. Wait before creating an encoder or claiming
@@ -3475,6 +3503,12 @@ export class FluidLabRenderer {
     else this.gpuFluid?.setTracersEnabled?.(tracersVisible);
     if (tracersVisible) this.tracerOverlayPipeline?.setSource(
       sparseUI?.overlays.tracers ?? this.gpuFluid?.tracerSource);
+    // Particle spheres likewise read what the step already keeps. The source
+    // is re-read every frame: a solver may alternate two particle buffers.
+    const composedLayers = gridOverlay ? composedVisualLayers(gridOverlay) : undefined;
+    const particlesVisible = gridOverlay?.axis !== "off" && (composedLayers
+      ? particleLayerShown(composedLayers) : gridOverlay?.mode === "particles");
+    if (particlesVisible) this.particleOverlayPipeline?.setSource(this.gpuFluid?.particleSource);
     // Face arrows need no counterpart to setTracersEnabled: they read numbers
     // the solve already produced, so an unwatched frame is charged nothing.
     // The source is re-read every frame because its bank swaps with parity.
@@ -3843,9 +3877,30 @@ export class FluidLabRenderer {
     }
     if (gridOverlay && gridOverlay.axis !== "off" && !inspectionWithheld) {
       const overlayView=this.presentationTexture.createView();
+      // Spheres first, so the plane's layers read over them.
+      if(particlesVisible){
+        this.particleOverlayPipeline?.encode(encoder,overlayView,this.pixelTraceSceneDepthView(),{
+          camera: {
+            position_m: [basis.position.x, basis.position.y, basis.position.z],
+            forward: [basis.forward.x, basis.forward.y, basis.forward.z],
+            right: [basis.right.x, basis.right.y, basis.right.z],
+            up: [basis.up.x, basis.up.y, basis.up.z],
+            tanHalfFov: cameraTanHalfFov(camera),
+            aspect: viewportAspect(this.presentationTexture.width, this.presentationTexture.height),
+          },
+          viewportWidth: this.presentationTexture.width,
+          viewportHeight: this.presentationTexture.height,
+          container_m: [scene.container.width_m, scene.container.height_m, scene.container.depth_m],
+          depthNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M,
+          // A composed layer carries its own opacity; as a planeless view of
+          // its own, the slice control is the opacity, as it is for markers.
+          opacity: composedLayers ? layerOpacity(composedLayers, "particles") : gridOverlay.position,
+        });
+      }
       // Generic texture fields and compact paper publications each own both
       // their slice and ray-integrated volume presentation.
-      if(tracersVisible){
+      if(gridOverlay.mode==="particles"){/* no plane pass */}
+      else if(tracersVisible){
         this.tracerOverlayPipeline?.encode(encoder,overlayView,this.pixelTraceSceneDepthView(),{
           camera: {
             position_m: [basis.position.x, basis.position.y, basis.position.z],
@@ -3931,7 +3986,8 @@ export class FluidLabRenderer {
           phase: gridOverlay.lensPhase ?? 0,
         });
       }
-      else if(!techniqueModeCode)this.gridOverlayPipeline?.encode(encoder,overlayView);
+      // Composed layers with nothing on the plane draw no plane.
+      else if(!techniqueModeCode){if(!composedLayers||sliceLayersShown(composedLayers))this.gridOverlayPipeline?.encode(encoder,overlayView);}
       else{
         this.techniqueOverlayPipeline?.encode(encoder,overlayView,techniqueModeCode);
         this.techniqueAuditOverlayPipeline?.encode(encoder,overlayView,techniqueModeCode);
@@ -4116,6 +4172,7 @@ export class FluidLabRenderer {
     try { this.waterPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.gridOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.tracerOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
+    try { this.particleOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.faceVelocityOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.pressureJournalOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.stageLensOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }

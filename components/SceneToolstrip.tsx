@@ -9,6 +9,7 @@ import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
 import { sceneDocumentVerbs } from "../lib/core/editor-scene-document";
 import { getMethod, interactiveSimulationMethods } from "../lib/core/method-registry";
+import { resolvedMethodValues } from "../lib/core/stores/method-store";
 import { simulation } from "../lib/core/simulation/controller";
 import { sceneStoneNode } from "../lib/core/stone-look-controls";
 import { isEditableOak } from "../lib/core/oak-tree-controls";
@@ -135,13 +136,30 @@ function TankRow() {
  */
 function SolverRow() {
   const session = useSession();
-  const methodId = session.method((state) => state.methodId);
+  const methodState = session.method();
+  const methodId = methodState.methodId;
   const method = getMethod(methodId);
+  const values = resolvedMethodValues(methodState);
+  const stiffness = methodId === "particle-sph"
+    ? method.params.find((spec) => spec.key === "soundSpeed") : undefined;
+  const transfer = methodId === "particle-apic"
+    ? method.params.find((spec) => spec.key === "transferMode") : undefined;
+  const flipRatio = methodId === "particle-apic"
+    ? method.params.find((spec) => spec.key === "flipRatio") : undefined;
+  const transferMode = values.transferMode === "pic" ? "pic" : values.transferMode === "flip" ? "flip" : "apic";
+  const transferLabel = transferMode === "flip" ? "PIC/FLIP" : transferMode.toUpperCase();
   const [picking, setPicking] = useState(false);
-  const { claim } = useToolstripSection("solver", () => setPicking(false));
+  const [pickingTransfer, setPickingTransfer] = useState(false);
+  const { claim } = useToolstripSection("solver", () => { setPicking(false); setPickingTransfer(false); });
   const pick = (open: boolean) => {
     claim(open);
+    if (open) setPickingTransfer(false);
     setPicking(open);
+  };
+  const pickTransfer = (open: boolean) => {
+    claim(open);
+    if (open) setPicking(false);
+    setPickingTransfer(open);
   };
   return <ToolstripRow
     icon={<Sigma width={14} height={14} strokeWidth={1.7} aria-hidden />}
@@ -169,6 +187,51 @@ function SolverRow() {
         />)}
       </ToolstripMenuButton>
       <span className="toolstrip-name">{method.shortLabel}</span>
+      {transfer?.kind === "select" && <ToolstripMenuButton
+        label="Particle transfer"
+        caption={`Transfer: ${transferLabel}`}
+        hint="Choose APIC, PIC or PIC/FLIP. Changes apply to the next frame and keep the running simulation."
+        open={pickingTransfer}
+        testId="scene-particle-transfer"
+        onOpen={pickTransfer}
+      >
+        {transfer.options.map(option => <ToolstripMenuItem
+          key={option.value}
+          label={option.label}
+          active={option.value === transferMode}
+          testId={`scene-particle-transfer-${option.value}`}
+          onClick={() => {
+            simulation.setMethodParam(methodId, transfer.key, option.value, session.id);
+            pickTransfer(false);
+          }}
+        />)}
+      </ToolstripMenuButton>}
+      {transfer?.kind === "select" && transferMode === "flip" && flipRatio?.kind === "number" && <span data-testid="scene-particle-flip-blend">
+        <NumberInput
+          tag="FLIP"
+          value={Number(values[flipRatio.key])}
+          scale={100}
+          min={flipRatio.min}
+          max={flipRatio.max}
+          step={1}
+          digits={0}
+          unit="%"
+          ariaLabel="FLIP blend (%)"
+          hint={flipRatio.hint}
+          onChange={value => simulation.setMethodParam(methodId, flipRatio.key, value, session.id)}
+        />
+      </span>}
+      {stiffness?.kind === "number" && <NumberInput
+        tag="stiffness"
+        value={Number(values[stiffness.key])}
+        min={stiffness.min}
+        max={stiffness.max}
+        step={stiffness.step}
+        unit={stiffness.unit}
+        ariaLabel="SPH stiffness (sound speed)"
+        hint={stiffness.hint}
+        onChange={(value) => simulation.setMethodParam(methodId, stiffness.key, value, session.id)}
+      />}
     </>}
   />;
 }

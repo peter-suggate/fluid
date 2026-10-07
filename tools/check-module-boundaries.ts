@@ -4,7 +4,7 @@
  * Rules (docs/method-decoupling-handoff.md §2.1):
  *   1. lib/core imports nothing outside lib/core.
  *   2. lib/methods/<m> imports lib/core, itself, and (losasso/power only)
- *      lib/methods/octree-shared. Never another method.
+ *      lib/methods/octree-shared; Uniform/APIC may use mac-shared. Never another method.
  *   3. lib/methods/octree-shared imports only lib/core and itself.
  *   4. Nothing imports lib/harness except tools/ and tests/.
  *   5. components/, app/, worker/ import lib/core only.
@@ -33,6 +33,9 @@ type Zone =
   | "feature"
   | "composition"
   | "core"
+  | "method-sph"
+  | "method-particle"
+  | "mac-shared"
   | "method-uniform"
   | "method-losasso"
   | "method-power"
@@ -54,6 +57,9 @@ function zoneOf(relPath: string): Zone {
   if (relPath.startsWith("lib/features/ui/")) return "composition";
   if (relPath.startsWith("lib/features/")) return "feature";
   if (relPath.startsWith("lib/core/")) return "core";
+  if (relPath.startsWith("lib/methods/sph/")) return "method-sph";
+  if (relPath.startsWith("lib/methods/particle/")) return "method-particle";
+  if (relPath.startsWith("lib/methods/mac-shared/")) return "mac-shared";
   if (relPath.startsWith("lib/methods/uniform/")) return "method-uniform";
   if (relPath.startsWith("lib/methods/losasso/")) return "method-losasso";
   if (relPath.startsWith("lib/methods/power/")) return "method-power";
@@ -74,11 +80,14 @@ function zoneOf(relPath: string): Zone {
 const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
   framework: new Set<Zone>(["framework"]),
   feature: new Set<Zone>(["framework", "core", "feature", "ui"]),
-  composition: new Set<Zone>(["framework", "core", "feature", "composition", "ui", "svo", "method-uniform", "method-losasso", "method-power", "method-adaptive-mass", "method-adaptive-volume"]),
+  composition: new Set<Zone>(["framework", "core", "feature", "composition", "ui", "svo", "method-sph", "method-particle", "method-uniform", "method-losasso", "method-power", "method-adaptive-mass", "method-adaptive-volume"]),
   // Core composes the SVO layer: the production renderer draws through it.
   // The reverse direction is what carries the meaning — see "svo" below.
   core: new Set<Zone>(["core", "svo", "sparse-world", "framework", "feature"]),
-  "method-uniform": new Set<Zone>(["core", "method-uniform"]),
+  "method-uniform": new Set<Zone>(["core", "method-uniform", "mac-shared"]),
+  "method-sph": new Set<Zone>(["core", "method-sph"]),
+  "method-particle": new Set<Zone>(["core", "method-particle", "mac-shared"]),
+  "mac-shared": new Set<Zone>(["core", "mac-shared"]),
   "method-losasso": new Set<Zone>(["core", "octree-shared", "method-losasso"]),
   "method-power": new Set<Zone>(["core", "octree-shared", "method-power"]),
   "method-adaptive-mass": new Set<Zone>([
@@ -99,6 +108,9 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "harness",
     "svo",
     "method-uniform",
+    "method-sph",
+    "method-particle",
+    "mac-shared",
     "method-losasso",
     "method-power",
     "method-adaptive-mass",
@@ -131,6 +143,9 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "lib-other",
     "svo",
     "method-uniform",
+    "method-sph",
+    "method-particle",
+    "mac-shared",
     "method-losasso",
     "method-power",
     "method-adaptive-mass",
@@ -151,6 +166,9 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "harness",
     "svo",
     "method-uniform",
+    "method-sph",
+    "method-particle",
+    "mac-shared",
     "method-losasso",
     "method-power",
     "method-adaptive-mass",

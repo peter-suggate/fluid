@@ -343,7 +343,7 @@ export function FieldControlRows({ lenses: override }: {
     { value: "off" as const, label: "HIDE" },
   ];
 
-  if (methodId === "uniform-volume") return <FieldViewRows />;
+  if (getMethod(methodId).capabilities?.visualLayers) return <FieldViewRows />;
 
   return <>
     {/* Always shown rather than opened, because this is the control a reader

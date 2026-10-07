@@ -1,3 +1,4 @@
+import { UniformNarrowBandFlip } from "./uniform-narrow-band-flip";
 import {UNIFORM_MIXED_OVERFLOW_FINE,uniformMixedDetailViolationWord} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedHangingBytes} from "./uniform-mixed-velocity-sampling.wgsl";
 import {UNIFORM_DETAIL_POLICY} from "./uniform-detail-policy";
@@ -52,6 +53,7 @@ export interface UniformMixedFrameTrace {
 }
 
 export interface UniformMixedFrameFields {
+ narrowBandFlip?:boolean;
  arena:UniformScratchArena;
  volume:GPUTexture;volumeScratch:GPUTexture;
  velocity:GPUTexture;velocityScratch:GPUTexture;departure:GPUTexture;
@@ -119,7 +121,8 @@ const SHARPEN_WORK_RECEIPT=WORK_RECEIPT+4*UNIFORM_WORK_RECEIPT_WORDS;
 const REMAP_WORK_RECEIPT=SHARPEN_WORK_RECEIPT+8;
 // The root cycle list's count: the width of the root's listed launches.
 const ROOT_WORK_RECEIPT=REMAP_WORK_RECEIPT+4;
-const TRACE_RECEIPT=ROOT_WORK_RECEIPT+4;
+const FLIP_RECEIPT=ROOT_WORK_RECEIPT+4;
+const TRACE_RECEIPT=FLIP_RECEIPT+16;
 const extensionKey=(p:UniformMixedFrameParameters)=>JSON.stringify({...p,dt:0});
 /** Frames whose receipts may be unchecked at once: the host's frames-ahead cap. */
 export const UNIFORM_MIXED_RECEIPT_RING=2;
@@ -307,7 +310,8 @@ export class UniformMixedFrame {
  private readonly byteBudget?:number;
  private busy=false;
  private failed=false;
- get allocatedBytes():number{return this.coarsePhi.allocatedBytes+(this.displacement?.allocatedBytes??0)+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+this.transport.allocatedBytes+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.levels.filter(l=>l.ownership!==this.ownership).reduce((n,l)=>n+l.ownership.allocatedBytes,0)+this.owned.reduce((n,r)=>n+("size" in r?r.size:r.width*r.height*r.depthOrArrayLayers*16),0);}
+ readonly narrowBandFlip?:UniformNarrowBandFlip;
+ get allocatedBytes():number{return (this.narrowBandFlip?.allocatedBytes??0)+this.coarsePhi.allocatedBytes+(this.displacement?.allocatedBytes??0)+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+this.transport.allocatedBytes+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.levels.filter(l=>l.ownership!==this.ownership).reduce((n,l)=>n+l.ownership.allocatedBytes,0)+this.owned.reduce((n,r)=>n+("size" in r?r.size:r.width*r.height*r.depthOrArrayLayers*16),0);}
  /** layout: the generation the t=0 fields are in (all h; the first
   * updateLayout remaps from it). capacity: the h tiles the owner-indexed
   * buffers hold until a layout reserves its own, independent of that seed. */
@@ -329,6 +333,7 @@ export class UniformMixedFrame {
   this.coarseCache=caches[0]!;
   this.transport=new UniformMixedTransportStage(device,layout,f.volume,f.volumeScratch,f.departure,{phi:f.phi,params:this.params.sharpen,reductions:this.reductions,resolved:true},f.sourceParams,solid,capacity.fineTiles);
   const o=this.ownership;
+  this.narrowBandFlip=f.narrowBandFlip?new UniformNarrowBandFlip(device,o,solid):undefined;
   this.displacement=solid?new UniformMixedSolidDisplacement(device,o,solid):undefined;
   this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocity,f.negative,f.velocityScratch,f.negativeScratch,true);
   this.cleanup=new UniformMixedCleanup(device,o,solid,true);
@@ -442,6 +447,7 @@ export class UniformMixedFrame {
  }
  /** Every group over the stage scratch or the sharpening list (reserveFine binds them again). */
  private bindStage():void{
+  this.narrowBandFlip?.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity});
   const f=this.fields,stage:GPUBufferBinding={buffer:this.stageScratch};
   this.transport.bindScratch(this.stageScratch);
   this.extensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negative,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:stage,params:this.params.extension});
@@ -542,7 +548,7 @@ export class UniformMixedFrame {
    {fine:root.support,supportWord:9*root.layout.tiles.length+24,status:this.status,band:this.band.index,bandClosedWord:UniformPressureBand.closedWord,acceptance:this.params.acceptance});
   // Displacement runs on a live voxel edit or a body: built when that state is first prepared.
   const needs=this.fields.needs??this.solid?.needs??new UniformPipelineNeeds();
-  await Promise.all([this.solid,{initialize:()=>needs.declare(["displace"],async()=>{await this.displacement?.initialize();})},this.transport,this.plan,this.cleanup,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band]
+  await Promise.all([this.solid,{initialize:()=>needs.declare(["displace"],async()=>{await this.displacement?.initialize();})},this.transport,this.plan,this.cleanup,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band,this.narrowBandFlip]
    .map(stage=>stage?.initialize()).concat(this.fields.detail?.prepare(this.ownership,needs)));
   this.ready=true;
  }
@@ -737,6 +743,7 @@ export class UniformMixedFrame {
    this.plan.encodeCertificate(encoder,p.dt);if(this.layoutViews)this.recordStageView(encoder,this.plan.certificate,"certificate");
    this.cache.encode(encoder,this.cacheGroup);this.hanging.encode(encoder,this.hangingGroup);
    trace?.phase(encoder,V.transportReach);
+   this.narrowBandFlip?.move(encoder,p.dt,p.openTop);
    this.surface.encode(encoder,"advect",this.surfaceGroups[0]);this.phiResolve.encode(encoder,this.phiResolveGroups.scratch);this.surface.encode(encoder,"traceCells",this.surfaceGroups[0]);
    if(p.redistance!==false){this.surface.encode(encoder,"redistance",this.surfaceGroups[1]);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}else this.copyWhole(encoder,this.fields.phiScratch,this.fields.phi);
    trace?.phase(encoder,V.phi);flush();
@@ -762,6 +769,11 @@ export class UniformMixedFrame {
    // A kick forces the stored field where it stands.
    if(kick){this.copyWhole(encoder,this.fields.velocity,this.fields.departure);encoder.copyBufferToBuffer(this.fields.negative,0,this.fields.negativeDeparture,0,this.fields.negative.size);}
    else this.momentum.encode(encoder,this.momentumGroup);
+   if(!kick&&this.narrowBandFlip){
+    this.narrowBandFlip.transfer(encoder);
+    this.copyWhole(encoder,this.fields.velocityScratch,this.fields.departure);
+    this.narrowBandFlip.snapshot(encoder);
+   }
    this.forces.encode(encoder,this.forceGroup,p.surfaceTension>0,p.coarseSurfaceTravel===true);
    trace?.phase(encoder,A.advectionCorrection);flush();
    // Pressure stays all-4h; no layout build and no CPU wait. The band rows
@@ -808,6 +820,7 @@ export class UniformMixedFrame {
    trace?.phase(encoder,A.pressureProjection);
    split.transfer.encodeToSimulation(encoder,split.toSimulation);
    this.band.encodeSolve(encoder);
+   if(!kick)this.narrowBandFlip?.update(encoder);
    const root=this.levels[0]!;
    // Present the live all-4h words only: level 0 keeps the simulation
    // layout's capacity, but its owners and boundary slots are all-4h.
@@ -829,6 +842,7 @@ export class UniformMixedFrame {
    this.ownership.encodeWorkReceipt(encoder,readback,WORK_RECEIPT);
    this.sharpen.encodeWorkReceipt(encoder,readback,SHARPEN_WORK_RECEIPT);
    this.remap.encodeWorkReceipt(encoder,readback,REMAP_WORK_RECEIPT);this.cycles.encodeWorkReceipt(encoder,readback,ROOT_WORK_RECEIPT);
+   if(this.narrowBandFlip)encoder.copyBufferToBuffer(this.narrowBandFlip.state,0,readback,FLIP_RECEIPT,16);
    if(PRESSURE_TRACE){const at=TRACE_RECEIPT;schedule.encodeTraceCopy(encoder,readback,at);encoder.copyBufferToBuffer(this.band.index,0,readback,at+128,96);}
    // The next head's census and advection read this extension: it is the
    // frame's velocity extension, priced there, not the census's.
@@ -854,6 +868,7 @@ export class UniformMixedFrame {
    if(PRESSURE_TRACE)this.tracePressure(frame,mapped.slice(TRACE_RECEIPT/4));
   }catch(error){this.failed=true;throw error;}finally{this.unchecked.delete(readback);}
   try{
+   this.narrowBandFlip?.noteReceipt(mapped.subarray(FLIP_RECEIPT/4,FLIP_RECEIPT/4+4));
    const state=mapped.slice(0,8),accounting=mapped.slice(8,20);
    // The GPU's own verdict first: it names the first failing frame.
    const failure=describeUniformMixedFrameStatus(mapped.slice(30,30+UNIFORM_MIXED_STATUS_WORDS));
@@ -1040,5 +1055,5 @@ export class UniformMixedFrame {
   if(this.coarsePhi.adopted)return;
   const e=this.device.createCommandEncoder({label:"Uniform publish 4h vertex phi base"});this.coarsePhi.encode(e);this.device.queue.submit([e.finish()]);
  }
- destroy():void{this.coarsePhi.destroy();this.solid?.destroy();this.displacement?.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.transport.destroy();this.cleanup.destroy();this.split.transfer.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
+ destroy():void{this.narrowBandFlip?.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.displacement?.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.transport.destroy();this.cleanup.destroy();this.split.transfer.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
 }

@@ -1164,6 +1164,9 @@ export class SparseVoxelDrySceneRenderer {
   private surfaceMeshReadbackCopied = false;
   /** Arena sizes bound when the pending receipt's copy was encoded: what its counters were measured against. */
   private surfaceMeshReceiptArenaBytes: [number, number] = [0, 0];
+  /** A reset invalidates copied and mapping receipts from the old builder. */
+  private surfaceMeshEpoch = 0;
+  private surfaceMeshReceiptEpoch = 0;
   /** Consecutive presentations the current build has spent pending; paces the brick ramp. */
   private surfaceMeshBuildPresentations = 0;
   surfaceMeshStatus?: SvoSurfaceMeshStatus;
@@ -1172,7 +1175,7 @@ export class SparseVoxelDrySceneRenderer {
   /** The two quad arenas; the GPU state says which one is drawn. */
   private surfaceMeshArenas: [GPUBuffer | undefined, GPUBuffer | undefined] = [undefined, undefined];
   /** Bound in an arena slot that holds no arena, so the shader always has two. */
-  private surfaceMeshEmptyArena?: GPUBuffer;
+  private surfaceMeshEmptyArenas: [GPUBuffer | undefined, GPUBuffer | undefined] = [undefined, undefined];
   private surfaceMeshVisible?: GPUBuffer;
   /** Dirty boxes, per-leaf quad ranges and the brick worklist; sized by the source's leaf capacity. */
   private surfaceMeshWork?: GPUBuffer;
@@ -1871,7 +1874,8 @@ export class SparseVoxelDrySceneRenderer {
     if (!Number.isSafeInteger(requestedBytes) || requestedBytes < 32) throw new RangeError("Surface mesh budget must be an integer of at least 32 bytes");
     this.surfaceMeshMaximumBytes = Math.floor(Math.min(requestedBytes, this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize) / 32) * 32;
     this.surfaceMeshArenas = [this.createSurfaceMeshArena(Math.min(SVO_SURFACE_MESH_BYTES, this.surfaceMeshMaximumBytes)), undefined];
-    this.surfaceMeshEmptyArena = this.device.createBuffer({ label: "Absent voxel quad arena", size: 2 * SVO_SURFACE_MESH_QUAD_BYTES, usage: GPUBufferUsage.STORAGE });
+    // Writable bindings must never alias, even while both slots are absent.
+    this.surfaceMeshEmptyArenas = [0, 1].map(slot => this.device.createBuffer({ label: `Absent voxel quad arena ${slot}`, size: 2 * SVO_SURFACE_MESH_QUAD_BYTES, usage: GPUBufferUsage.STORAGE })) as [GPUBuffer, GPUBuffer];
     this.surfaceMeshEmptyMaintenance = this.device.createBuffer({ label: "Absent voxel maintenance list", size: 256, usage: GPUBufferUsage.STORAGE });
     this.surfaceMeshVisible = this.createSurfaceMeshVisible(this.surfaceMeshArenas[0]!.size);
     this.surfaceMeshComputeLayout = this.device.createBindGroupLayout({ entries: [
@@ -1903,7 +1907,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   private surfaceMeshArenaBytes(slot: 0 | 1): number {
-    return this.surfaceMeshArenas[slot]?.size ?? this.surfaceMeshEmptyArena!.size;
+    return this.surfaceMeshArenas[slot]?.size ?? this.surfaceMeshEmptyArenas[slot]!.size;
   }
 
   /**
@@ -1934,6 +1938,7 @@ export class SparseVoxelDrySceneRenderer {
   /** Zero the GPU builder state to a first build, keeping the arenas bound as they are. */
   private resetSurfaceMeshState(): void {
     if (!this.surfaceMeshState) return;
+    this.surfaceMeshEpoch += 1;
     this.device.queue.writeBuffer(this.surfaceMeshState, 0, new Uint32Array(SVO_SURFACE_MESH_STATE_BYTES / 4));
     this.device.queue.writeBuffer(this.surfaceMeshState, SVO_SURFACE_MESH_STATE.front * 4, new Uint32Array([this.surfaceMeshHostFront]));
     // A zeroed state has consumed no back arena; the generation it is told
@@ -1959,7 +1964,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   private bindSurfaceMeshBuffers(): void {
-    const arena = (slot: 0 | 1) => this.surfaceMeshArenas[slot] ?? this.surfaceMeshEmptyArena!;
+    const arena = (slot: 0 | 1) => this.surfaceMeshArenas[slot] ?? this.surfaceMeshEmptyArenas[slot]!;
     this.surfaceMeshComputeGroup = this.device.createBindGroup({ layout: this.surfaceMeshComputeLayout!, entries: [
       { binding: 30, resource: { buffer: this.surfaceMeshState! } },
       { binding: 32, resource: { buffer: arena(0) } },
@@ -1985,7 +1990,10 @@ export class SparseVoxelDrySceneRenderer {
    */
   private surfaceMeshShadowReceipt = "";
 
-  private applySurfaceMeshReceipt(words: Uint32Array, arenaBytes: readonly [number, number]): void {
+  private applySurfaceMeshReceipt(words: Uint32Array, arenaBytes: readonly [number, number], epoch: number): void {
+    // A map can complete after a structural reset. Its front belongs to the
+    // retired builder and must not retire arenas or change the new status.
+    if (epoch !== this.surfaceMeshEpoch) return;
     const receipt = interpretSurfaceMeshState(words, { arenaBytes, maximumBytes: this.surfaceMeshMaximumBytes });
     const previous = this.surfaceMeshStatus;
     this.surfaceMeshStatus = receipt.status;
@@ -2064,10 +2072,11 @@ export class SparseVoxelDrySceneRenderer {
       this.surfaceMeshReadbackCopied = false; this.surfaceMeshReadbackPending = true;
       const staging = this.surfaceMeshReadback!;
       const arenaBytes = this.surfaceMeshReceiptArenaBytes;
+      const epoch = this.surfaceMeshReceiptEpoch;
       void staging.mapAsync(GPUMapMode.READ).then(() => {
         const words = new Uint32Array(staging.getMappedRange().slice(0)); staging.unmap();
         if (this.surfaceMeshDisposed) return;
-        this.applySurfaceMeshReceipt(words, arenaBytes);
+        this.applySurfaceMeshReceipt(words, arenaBytes, epoch);
       }).catch(() => { /* Destruction or device loss cancels the diagnostic. */ })
         .finally(() => { this.surfaceMeshReadbackPending = false; });
     }
@@ -2139,6 +2148,7 @@ export class SparseVoxelDrySceneRenderer {
     if (!this.surfaceMeshReadbackPending && !this.surfaceMeshReadbackCopied) {
       encoder.copyBufferToBuffer(state, 0, this.surfaceMeshReadback!, 0, SVO_SURFACE_MESH_STATE_BYTES);
       this.surfaceMeshReceiptArenaBytes = [this.surfaceMeshArenaBytes(0), this.surfaceMeshArenaBytes(1)];
+      this.surfaceMeshReceiptEpoch = this.surfaceMeshEpoch;
       this.surfaceMeshReadbackCopied = true;
     }
     tracePhase?.("surface-mesh-draw");
@@ -6801,7 +6811,8 @@ export class SparseVoxelDrySceneRenderer {
     this.surfaceMeshState?.destroy();
     this.surfaceMeshArenas[0]?.destroy();
     this.surfaceMeshArenas[1]?.destroy();
-    this.surfaceMeshEmptyArena?.destroy();
+    this.surfaceMeshEmptyArenas[0]?.destroy();
+    this.surfaceMeshEmptyArenas[1]?.destroy();
     this.surfaceMeshEmptyMaintenance?.destroy();
     this.surfaceMeshWork?.destroy();
     this.surfaceMeshVisible?.destroy();
