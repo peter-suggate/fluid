@@ -1295,6 +1295,18 @@ const suiteList = [
     }),
   suite("minimal-power-dam-break-32", "32-cubed coarse-only analytic mini dam",
     { definitionId: "minimal-power-dam-break-32" }, {
+      "uniform-ab": lane({ id: "uniform-ab", description: "Matched full-grid Geometric / MAC baseline smoke comparison",
+        target_s: 0.008, exactSteps: 2, maxDt_s: 0.004, oracleSteps: 2,
+        methods: methods(["uniform-volume", "uniform-mac"], {
+          "uniform-volume": { timeStep: "scene", detailPolicy: "full" },
+          "uniform-mac": { maxStep: 0.004 },
+        }),
+        collect: { fieldStats: "final", spatialField: true, raster: "initial-final" },
+        acceptance: [
+          { id: "expected-grid", metric: "methods.*.grid", operator: "equal", expected: [32, 32, 32] },
+          { id: "nonempty-liquid-field", metric: "methods.*.matchedSummary.cellSum", operator: "at-least", expected: 1 },
+        ],
+        timeout_ms: 240_000 }),
       default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1,
         methods: methods(["losasso"], { losasso: COARSE_ONLY_POWER_DAM_METHOD_PROFILE.overrides }),
         timeout_ms: 240_000,

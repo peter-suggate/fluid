@@ -8,6 +8,7 @@ import { decodeAdaptiveVelocityGPUFailureDiagnostics }
 import { powerLiquidsMethod } from "../methods/power/method";
 import { uniformMethod } from "../methods/uniform/method";
 import { uniformVolumeMethod } from "../methods/uniform/uniform-volume-method";
+import { uniformMacMethod } from "../methods/uniform/mac/method";
 import { initializeRigidBodies } from "../core/rigid-body";
 import type { SceneDescription } from "../core/model";
 import { sceneAtFinestCellSize } from "../core/scene-scale";
@@ -508,7 +509,7 @@ fn sentinel() { output[0] = 0x4f435452u; }
 // but makes `FLUID_METHOD=uniform-volume` runnable. Scene lanes select by
 // authored id, so a lane that never names it is unaffected.
 const availableMethods = [losassoMethod, powerLiquidsMethod, uniformMethod, uniformVolumeMethod,
-  adaptiveMassMethod];
+  uniformMacMethod, adaptiveMassMethod];
 const methodFilter = process.env.FLUID_METHOD?.split(",").map((value) => value.trim()).filter(Boolean);
 const methods = availableMethods.filter((method) => !methodFilter || methodFilter.includes(method.id));
 /**

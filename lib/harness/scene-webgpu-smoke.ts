@@ -19,7 +19,7 @@ import type { DeclarativeDiagnosticRule } from "./scene-diagnostics";
  * naming an id that no longer exists is a type error here, which is what makes
  * the executor's method resolution total.
  */
-export type WebGPUSmokeMethodId = "losasso" | "power-liquids" | "uniform";
+export type WebGPUSmokeMethodId = "losasso" | "power-liquids" | "uniform" | "uniform-volume" | "uniform-mac";
 
 export interface SceneWebGPUSmokeMethod {
   readonly id: WebGPUSmokeMethodId;
