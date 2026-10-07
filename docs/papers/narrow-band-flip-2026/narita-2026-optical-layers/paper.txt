@@ -1,0 +1,670 @@
+   DOI: 10.1111/cgf.70357
+   EUROGRAPHICS 2026 / B. Masia and J. Thies                                                                                       COMPUTER GRAPHICS forum
+   (Guest Editors)                                                                                                                             Volume 45 (2026), Number 2
+
+
+
+
+                                               Adaptive Optical Layers:
+                                    Efficient Tall Cell Grids for Liquid Simulation
+
+                                                                          Fumiya Narita1,2          and Takashi Kanai1
+                                                              1 The University of Tokyo, Japan          2 GAME FREAK Inc., Japan
+
+
+
+
+   Figure 1: Lucy in the Rain: Water is poured onto the surface from multiple sources, while many small spherical droplets, resembling rainfall,
+   fall into the liquid. The right shows the liquid surface color-coded by optical layer thickness: blue indicates thin layers, and colors near red
+   represent thicker layers. Thicker layers appear in regions with strong liquid motion, such as where water is poured or droplets strike the
+   surface. The left shows the corresponding transparent rendering.
+
+             Abstract
+             Tall cell grids have been proposed as an efficient approach to accelerate large-scale liquid simulation. In this framework,
+             regions near the liquid surface are discretized with regular grids, while regions farther away are represented by elongated
+             rectangular cells. The regular grid region close to the surface is referred to as the optical layer. In previous work, the thickness
+             of this optical layer was uniformly fixed across the entire liquid domain. In this paper, we propose a novel tall cell grid structure
+             in which the thickness of the optical layer is dynamically adjusted according to the motion of the liquid. This adaptive strategy
+             reduces the number of grid cells required in the projection step without compromising visual quality, thereby accelerating the
+             overall simulation. Furthermore, we introduce a two-way coupling scheme between rigid bodies and liquids in regions where
+             the optical layer remains thin. Our algorithm is simple and can be easily integrated into existing tall cell grid frameworks.
+             CCS Concepts
+             • Computing methodologies → Physical simulation;
+
+
+
+
+                                                                                                                                                         CGF 45-2 | e70357
+© 2026 The Authors. Computer Graphics Forum published by Eurographics - The European Asso-
+ciation for Computer Graphics and John Wiley & Sons Ltd.
+This is an open access article under the terms of the Creative Commons Attribution License, which
+permits use, distribution and reproduction in any medium, provided the original work is properly
+cited.
+                                                                                                                                    https://www.eg.org               https://diglib.eg.org
+2 of 10                    Fumiya Narita & Takashi Kanai / Adaptive Optical Layers: Efficient Tall Cell Grids for Liquid Simulation
+
+1. Introduction                                                               2.1. Eulerian Liquid Simulation and FLIP
+
+Eulerian liquid simulation is a central technique in computer graph-          Eulerian fluid simulation was first introduced to computer graph-
+ics. However, as the number of grid cells increases, the computa-             ics by Foster and Metaxas [FM96]. Subsequently, Stam pro-
+tional cost grows rapidly, with pressure projection being the pri-            posed Stable Fluids [Sta99], enabling stable simulations through
+mary bottleneck [LZF10]. To address this issue, various efficient             Semi-Lagrangian advection. Foster and Fedkiw [FF01] then ex-
+grid structures have been proposed. A common example is the oc-               tended this approach to handle liquid simulation, and later, second-
+tree grid [LGF04; SABS14; AGL*17; AB20], but other structures                 order boundary conditions for both free surfaces [ENGF03] and
+such as tetrahedral grids [KFCO06; CFL*07; ATW13] and tall cell               solids [NMG09] were also incorporated. A well-known drawback
+grids [IGLF06; CM11; NOKA25] have also been explored.                         of Eulerian methods is numerical dissipation. To address this is-
+                                                                              sue, Zhu and Bridson introduced the Fluid Implicit Particle (FLIP)
+   Tall cell grids combine the traditional two-dimensional height-            method [ZB05], a hybrid approach combining particles with grids.
+field approach with three-dimensional Eulerian liquid simulation.             More recently, FLIP has been extended in several directions: the
+Similar to the height-field method, the bulk of the liquid is rep-            Narrow Band FLIP (NBFLIP) method [FAW*16] restricts parti-
+resented by elongated rectangular cells in which pressure is as-              cles to a band near the liquid surface, while the Extended Nar-
+sumed to vary linearly. To overcome the limitations of height-field           row Band FLIP (EXNBFLIP) [SWT*18] further concentrates par-
+approaches—such as their inability to capture effects like entrain-           ticles in surface regions of particular importance. Following Narita
+ment or splashes—the liquid surface is instead resolved using a full          et al. [NOKA25], we employ EXNBFLIP as our base simulator,
+three-dimensional Euler equation solver.                                      though more general schemes such as FLIP or the Affine Particle-
+                                                                              in-Cell (APIC) method [JSS*15] could also be used.
+   In other words, tall cell grids discretize space with regular cubic
+grids near the liquid surface, while elongated rectangular cells are
+used farther away from the surface. The region close to the liquid            2.2. Spatially Adaptive Methods
+surface is referred to as the optical layer (or optical depth in some
+references). By reducing the number of grid cells along the vertical          Eulerian liquid simulation suffers from rapidly increasing computa-
+direction, this approach decreases the total number of pressure un-           tional cost as the number of grid cells grows. To address this prob-
+knowns, thereby accelerating the pressure solve. The thickness of             lem, a variety of grid structures have been proposed. Losasso et
+the optical layer and the accuracy of the simulation are in a trade-          al. [LGF04] proposed octree-based liquid simulation, later refined
+off relationship: increasing the layer thickness yields results closer        by improvements such as better treatments of T-junctions [LFO06]
+to those of a uniform grid (Figure 2). In previous work [IGLF06;              and memory-efficient structures like the sparse paged grid (SP-
+CM11; NOKA25], the optical layer thickness was set uniformly to               Grid) [SABS14; AGL*17]. More recently, Ando et al. [AB20] pro-
+one quarter of the liquid height across the entire domain.                    posed a practical method based on a variational pressure solver that
+                                                                              is both efficient and easy to implement. Alternatively, tetrahedral-
+   In this paper, we extend this idea by proposing a tall cell grid in        grid-based fluid simulation methods have also been explored.
+which the optical layer thickness is varied dynamically according             Klingner et al. [KFCO06] proposed a method for smoke simulation,
+to the motion of the liquid. By assigning thicker optical layers in re-       which was later extended to liquids by Chentanez et al. [CFL*07].
+gions with more dynamic liquid motion, our method achieves faster             Ando et al. [ATW13] proposed a novel discretization combined
+projection steps without loss of visual quality, resulting in an over-        with a variational pressure solver. In addition, a variety of other
+all speedup of the simulation. The proposed algorithm is simple               grid structures have been proposed; stretched cells [ZLC*13], tall
+and can be easily integrated into existing tall cell grid frameworks.         cell grids [IGLF06; CM11; NOKA25], AST grids [XCW*20], and
+Altogether, our contributions are listed as follows:                          other techniques that couple 2D and 3D representations [CMK15;
+                                                                              ZY10]. A more comprehensive discussion of spatially adaptive grid
+• A tall cell grid in which the optical layer thickness is dynami-            structures is beyond the scope of this paper, and we refer the reader
+  cally adapted per region according to liquid motion.                        to the survey by Manteaux et al. [MWN*17] for further details.
+• A two-way coupling scheme for rigid body interactions with tall
+  cell grids in regions of thin optical layers.
+                                                                              2.3. Tall Cell Grids
+Through several test cases, we show that our method achieves faster
+                                                                              Only a limited number of studies have focused on tall cell grids.
+projection steps while maintaining visual quality compared with
+                                                                              The concept was first introduced by Irving et al. [IGLF06], where
+prior work [IGLF06]. The proposed approach takes full advantage
+                                                                              the optical layer thickness was kept uniform across the liquid re-
+of the tall cell grid structure.
+                                                                              gion. They also discussed the visual impact of varying the optical
+                                                                              layer thickness, showing through simple experiments that setting it
+                                                                              to one quarter of the domain height yields results close to those of a
+2. Related Work                                                               full-resolution simulation. Subsequently, Chentanez et al. [CM11]
+                                                                              simplified tall cell grids and implemented them on the GPU, en-
+Our work builds upon inviscid Eulerian liquid simulation methods.             abling stable real-time simulation. Since the coefficient matrix of
+For an in-depth overview of this field, we refer the reader to the            their pressure solver was not symmetric positive definite, they could
+textbook by Bridson [Bri15]. Below we summarize the studies most              not employ the Incomplete Cholesky Conjugate Gradient (ICCG)
+closely related to our research.                                              method and instead relied on a multigrid solver. Their approach
+                                                                                                                                                    © 2026 The Authors.
+                                                                                            Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+                           Fumiya Narita & Takashi Kanai / Adaptive Optical Layers: Efficient Tall Cell Grids for Liquid Simulation                          3 of 10
+
+
+
+
+Figure 2: Water Drop: From top to bottom: results with a uniform grid, a tall cell grid, our method, and a tall cell grid with uniformly
+reduced optical layer thickness. Our method achieves results comparable to the tall cell grid while using only about one fifth of the grid
+cells. In contrast, reducing the optical layer uniformly to one fifth fails to capture dynamic liquid behavior, resulting in poor representation
+of features such as crowns and Worthington columns.
+
+
+also assumed a fixed optical layer thickness. More recently, Narita                   represented as a spatially smooth field through a two-stage proce-
+et al. [NOKA25], inspired by Batty and colleagues [BBB07], refor-                     dure. An overview of this procedure is illustrated in Figure 3.
+mulated tall cell grids using a variational approach. This ensured
+that the resulting system matrix was symmetric positive definite                      3.1.1. Estimating the Shape of Adaptive Optical Layer
+while simplifying implementation. They further extended tall cell                     In the first stage, we obtain an initial estimate of the adaptive opti-
+grids with horizontal adaptivity and introduced two-way coupling                      cal layer by applying a dilation operation with distances that vary
+between rigid bodies and liquids within the optical layer region.                     spatially from the liquid surface. This stage corresponds to steps (a)
+Nevertheless, their method also assumed on a fixed o p tical layer                    through (e) in Figure 3.
+thickness. In contrast, our approach introduces a grid structure in
+                                                                                         First, we evaluate a cost function for each grid cell to character-
+which the optical layer thickness varies spatially according to the
+                                                                                      ize liquid motion (Figure 3 (a)). Several formulations of this func-
+liquid surface. Moreover, whereas Narita et al. [NOKA25] consid-
+                                                                                      tion can be considered. For example, velocity gradients and surface
+ered two-way coupling only within the optical layer, we extend this
+                                                                                      curvature have often been used to guide adaptive grids [ATW13;
+to handle cases where rigid bodies intersect tall cells as well.
+                                                                                      AB20]. However, surface curvature is prone to producing extreme
+                                                                                      values and is therefore not suitable for our purpose. Instead, we de-
+3. Our Method                                                                         sign the error measure by drawing inspiration from the height-field
+As in many previous studies, our proposed method assumes a rect-                      origins of tall cell grids, as shown in Figure 4.
+angular box domain with a resolution of (Nx , Ny , Nz ). In our for-                       For each column, we construct a single tall cell spanning from
+mulation, (i, j, k) denote the x−, y−, and z−axes respectively, with                  the ground to the liquid surface. (This is distinct from the tall cells
+j representing the vertical direction. Quantities such as X(i, k) are                 later used in the projection step.) For each grid face, we compute
+defined per column and therefore independent o f j.                                   the velocity difference before and after conversion into this tall
+                                                                                      cell. Let the accumulated error at grid position (i, j, k) be denoted
+                                                                                      as e(i, j, k). e(i, j, k) = ∑ f v f ,after − v f ,before , where v f ,after and
+3.1. Adaptive Optical Layer
+                                                                                      v f ,before represent the velocities on face f after and before the con-
+In this section, we describe our approach for constructing the adap-                  version, respectively. The accumulated value represents how much
+tive optical layer as a function of liquid motion. To guarantee sta-                  the local velocity field deviates from the assumptions of the tall cell
+bility of the simulation, the optical layer with adaptive thickness is                representation.
+
+
+
+© 2026 The Authors.
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+4 of 10                                                           Fumiya Narita & Takashi Kanai / Adaptive Optical Layers: Efficient Tall Cell Grids for Liquid Simulation
+
+
+
+                                                                                                                                                                                                                              5   5   5   5
+                                                                                                                                                                                                                                          5
+                                                                                                                                                                                                                                          5
+                                                                                                                                                                                                                                              4
+                                                                                                                                                                                                                                              4
+                                                                                                                                                                                                                                              4   1
+                                                                                ෍
+                                                                                                                                                                                                                                                  1   1   2   1   1   1   1   1   1   1   1
+
+
+
+
+                                      (a)                                                                       (b)                                                                (c)                                                                    (d)
+
+
+
+          5   5   5   5                                                             5   5   5   5                                                      5   5   5   5                                                          5   5   5   5
+          4   4   4   5                                                             4   4   4   5                                                      4   4   4   5                                                          4   4   4   5
+          3   3   4   5                                                             3   3   4   5                                                      3   3   4   5                                                          3   3   4   5
+          2   2   3   4   4                                                         2   2   3   4   4                                                  2   2   3   4   4                                                      2   2   3   4   4
+          1   1   2   3   4                                                         1   1   2   3   4                                                  1   1   2   3   4                                                      1   1   2   3   4
+              1   2   3   4   1                                                         1   2   3   4   1                                                  1   2   3   4   1                                                      1   2   3   4   1
+                  1   2   3   2   1   2   1   1   1   1   1   1   1   1                     1   2   3   2   1   2   1   1   1   1   1   1   1   1              1   2   3   2   1    1   1   1   1   1   1   1   1   1                 1   2   3   2   1   1   1   1   1   1   1   1   1   1
+                      1   2   1       1                                                         1   2   1       1                                                  1   2   1        2                                                     1   2   1       2
+                          1                                                                         1                                                                  1                                                                      1
+
+
+
+
+                                      (e)                                                                       (f)                                                                (g)                                                                    (h)
+
+Figure 3: Overview of our method for constructing the spatially adaptive optical layer. In (a)–(c), red indicates the magnitude of the error,
+while in (d)–(f), purple marks the grid cells included in the optical layer.
+
+
+    Next, for each column, we perform a vertical scan to sum the                                                                                                                                                                                                                          high
+error values and map the accumulated error from the ground to
+the liquid surface (Figure 3 (b)). Let the accumulated error at col-                                                                                                       convert
+                                              jsurface
+umn (i, k) be denoted as E(i, k). E(i, k) = ∑ j=  jground e(i, j, k), where                                                                                                                                                                                                                         error
+ jground and jsurface denote the grid indices of the ground and the
+fluid surface cell in contact with the ground, respectively. This pro-
+cedure is carried out for all columns (Figure 3 (c)).                                                                                                                                                                                                                                         low
+                                                                                                                                                     (a)                                                (b)             (c)                                   (d)
+  Several choices are possible for defining the dilation distance
+d(i, k). From our experiments, we adopt the following formulation:                                                                                                                              ⊖
+                                                           
+       d(i, k) = f E(i, k) = clamp α E(i, k) ∆x, dmin , dmax , (1)
+                                                                                                                                                    Figure 4: Computation of the error value. (a) Grid cells from the
+where α is a parameter controlling the effect by the dilation dis-                                                                                  ground to the liquid surface. (b) These cells are converted into a
+tance, ∆x is the grid width, and dmin and dmax are the minimum and                                                                                  single tall cell. The horizontal velocity is obtained by least-squares
+maximum dilation distances. Empirically, we set α = 0.5, dmin =                                                                                     linear fitting, and the vertical velocity is computed as the aver-
+max(4, Ny /64), and dmax = Ny /8, where Ny denotes the number of                                                                                    age [IGLF06]. (c) The tall cell velocity is linearly interpolated back
+vertical grid cells (Figure 3 (d)). Note that if d(i, k) = dmax at all liq-                                                                         to each grid position. (d) The error value is defined as the sum of
+uid surface grid points, the result coincides with the conventional                                                                                 the absolute differences between the original grid velocities in (a)
+tall cell method.                                                                                                                                   and the interpolated velocities in (c).
+   Finally, we apply dilation from the liquid surface using the spa-
+tially varying distances d(i, k), which produces an initial estimate
+of the adaptive optical layer (Figure 3 (e)). For simplicity, we use                                                                                h(i, k) (in grid cells) from the ground to the boundary of the opti-
+the Manhattan distance for the dilation operation.                                                                                                  cal layer and store these values in a two-dimensional array on the
+                                                                                                                                                    xz-plane (Figure 3 (f)). The values are converted to floating-point
+                                                                                                                                                    type, and a smoothing filter is applied under the constraint that tall
+3.1.2. Smoothing the Optical Layer
+                                                                                                                                                    cells must not exceed their pre-smoothed height. This step is imple-
+If the optical layer from the previous stage is used directly, the                                                                                  mented with a conditional moving filter, after which the smoothed
+tall cell grid height may change abruptly. Such discontinuities can                                                                                 values are then cast back to integers.
+cause numerical instabilities or even lead to simulation failure. To
+                                                                                                                                                      For the smoothing step, our method is not tied to a specific filter;
+prevent this, the second stage smooths the optical layer so that tall
+                                                                                                                                                    any reasonable 2D smoothing operator can be used. In our imple-
+cell height varies gradually. This corresponds to steps (f) through
+                                                                                                                                                    mentation, we use a constrained 2D moving-average filter (9×9
+(h) in Figure 3.
+                                                                                                                                                    window, 5 iterations) that ensures the smoothed height does not ex-
+  First, for each column, we scan vertically to measure the distance                                                                                ceed the original values.
+                                                                                                                                                                                                                                           © 2026 The Authors.
+                                                                                                                                                                                   Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+                           Fumiya Narita & Takashi Kanai / Adaptive Optical Layers: Efficient Tall Cell Grids for Liquid Simulation                                5 of 10
+
+   Let hbefore (i, k) and hafter (i, k) denote the height values of                                                                                         ctop
+
+h(i, k) before and after smoothing, respectively. If hbefore (i, k) −
+                                                                                                                                                       𝑠             ×1−𝑠
+hafter (i, k) > 0, we include the grid cells between these two heights
+                                                                                                                                                                   (𝑖0 , 𝑗0 , 𝑘0 )
+in the optical layer; these correspond to the purple grid cells without
+a dilation count in Figure 3 (g). This operation effectively smooths
+                                                                                                                                                      1−𝑠
+the tall cell height. Based on the resulting optical layer, the final tall                                                                                              ×𝑠
+
+cell grid is then constructed (Figure 3 (h)).
+                                                                                                                                                        cbottom
+3.1.3. Handling Regions Above the Liquid Surface
+The previous stage determines the adaptive optical layer for liquid                   Figure 5: A two-way coupling scheme for cases where rigid bodies
+regions in contact with the ground. However, liquid may also ap-                      intersect a tall cell. Left: a rigid body intersecting a tall cell. Cen-
+pear above the main surface due to falling drops or splashes. We                      ter: a virtual uniform grid embedded within the tall cell. Right: val-
+handle these regions using the following procedure:                                   ues computed on the virtual grid cells intersecting the rigid body
+1. For each column, scan vertically to detect the liquid surface in                   (shown in green) are distributed to the top and bottom pressure
+   contact with the ground. The dilation distance of this surface is                  samples of the tall cell.
+   denoted d(i, k).
+2. For liquid surfaces within a distance Doffset of this surface, we
+   assign the same value d(i, k). As a result, airborne liquid that                   linear and angular velocity of the rigid body. [Ms ] is the 6 × 6 mass
+   is about to collide with a ground-contacting liquid surface is                     matrix associated with a rigid body in contact with the fluid. [Jtrans ]
+   assigned the same dilation count as that surface.                                  and [Jrot ] satisfy the following relations:
+3. For surfaces farther than Doffset , we assign a constant value dair .                                                                  ZZ
+   As a result, airborne liquid portions separated from the main                                             −[Jtrans ]{p} = f trans =          pn dS,                      (4)
+   surface are assigned a constant dilation count.                                                                                          s
+                                                                                                                         ZZ
+4. Perform the dilation operation to obtain the final adaptive optical                            −[Jrot ]{p} = τrot =         (xx − X com ) × pnndS,                       (5)
+   layer.                                                                                                                  s
+
+   Empirically, we set Doffset = max(4, Ny /32) and dair = Ny /16,                    where f trans and τ rot are the net force and torque acting on the rigid
+where Ny is the number of vertical grid cells. Since splashes and                     body. Here, X com denotes the center of mass of the rigid body, and
+liquid jets can deform, we deliberately choose a relatively large                     n is the surface normal.
+value for dair .                                                                        Following Batty et al. [BBB07], we transform (4) and (5) into
+                                                                                      volume integrals, yielding
+3.2. Projection and Two-Way Coupled Rigid Bodies                                                                                         
+                                                                                               [J]1 = ∆x2 A′ i+ 1 , j,k − A′ i− 1 , j,k ,
+                                                                                                  i, j,k
+                                                                                                                                                        (6)
+                                                                                                                   2               2
+In the previous section, we constructed the grid structure necessary                                                                     
+                                                                                               [J]2 = ∆x2 A′ i, j+ 1 ,k − A′ i, j− 1 ,k ,
+                                                                                                  i, j,k
+for pressure projection. Here, we present the pressure projection                                                                                       (7)
+                                                                                                                     2                2
+step along with the two-way coupling scheme.                                                                                             
+                                                                                               [J]3 = ∆x2 A′ i, j,k+ 1 − A′ i, j,k− 1 ,
+                                                                                                  i, j,k
+                                                                                                                                                        (8)
+                                                                                                                       2                2
+3.2.1. Preliminaries                                                                                                                                
+                                                                                               [J]4 = −∆x2 (z − Z) A′ i, j+ 1 ,k − A′ i, j− 1 ,k
+                                                                                                  i, j,k
+Following Narita et al. [NOKA25], we adopt a variational pressure                                                       
+                                                                                                                                 2              2
+                                                                                                                                                     
+solver:                                                                                                  + ∆x2 (y −Y ) A′ i, j,k+ 1 − A′ i, j,k− 1 ,    (9)
+                                                                                                                                    2              2
+              −[∇]T [V ][A][F][∇]{p} = −[∇]T [V ][A]{u ∗ },                    (2)
+                                                                                                                                                    
+                                                                                               [J]5 = −∆x2 (x − X) A′ i, j,k+ 1 − A′ i, j,k− 1
+                                                                                                  i, j,k
+                             T                                                                                                       2             2
+where [∇] and −[∇] denote the discretized gradient and diver-                                                                                       
+gence operators, respectively. [F] and [A] are diagonal matrices rep-                                    + ∆x2 (z − Z) A′ i+ 1 , j,k − A′ i− 1 , j,k , (10)
+                                                                                                                              2               2
+resenting the fluid area-volume fraction near free surfaces and the                                                                                 
+                                                                                               [J]6 = −∆x2 (y −Y ) A′ i+ 1 , j,k − A′ i− 1 , j,k
+                                                                                                  i, j,k
+flux-area fraction near solids. Finally, {p}, {u ∗ } and [V ] denote                                                           2              2
+the vectorized pressure, the velocity after advection, and a diagonal
+                                                                                                                                                    
+                                                                                                         + ∆x2 (x − X) A′ i, j+ 1 ,k − A′ i, j− 1 ,k , (11)
+matrix encoding face–cell volumes, respectively. For details on the                                                                 2             2
+
+construction of these vectors and matrices in the presence of tall                                                 ′
+                                                                                      where ∆x is grid width, A = 1 − A and [X,Y, Z] = X com . (x, y, z)
+cells, we refer the reader to Narita et al. [NOKA25].                                                                       i, j,k
+                                                                                      is the center of cell (i, j, k). [J]n denotes the entry of [J] at the
+   To incorporate two-way coupled rigid bodies, (2) can be ex-                        n-th row and the (i, j, k)-th column corresponding to cell (i, j, k).
+tended as follows [BBB07]:                                                            A′i+ 1 , j,k is the area fraction subtracted from 1 − A for the two adja-
+                                                                                        2
+
+           ∆t [∇]T [V ][A][F][∇] + [J]T [Ms ]−1 [J] {p}                               cent cells, namely (i, j, k) and its right neighbor.
+                                                           (3)
+                                                                                         Let n and m denote the numbers of optical-layer liquid
+                       = [∇]T [V ][A]{u ∗ } − [J]T {w ∗ },
+                                                                                      cells and tall-cell liquid columns, respectively. The total num-
+                 T
+   where [J] = [Jtrans  T T
+                       Jrot ] , and w ∗ is a 6 × 1 vector containing the              ber of pressure samples is n + 2m. Thus, {p} ∈ R(n+2m)×1 is
+
+
+
+© 2026 The Authors.
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+6 of 10                             Fumiya Narita & Takashi Kanai / Adaptive Optical Layers: Efficient Tall Cell Grids for Liquid Simulation
+
+
+
+
+Figure 6: Pouring Water: Water is poured onto the liquid surface from an elevated outlet. Left: our method with optical layer thickness
+visualized as a colormap. Center and right: our method with semi-transparent rendering.
+
+
+                                                                                               Algorithm 1 Our Simulation Loop
+                                                                                                1: Save current grid and variables
+                                                                                                2: Constructing the adaptive optical layer {§3.1}
+                                                                                                3: Advect velocity and level set
+                                                                                                4: Advance rigid body
+                                                                                                5: Convert cells into tall cells
+                                                                                                6: Solve pressure {§3.2}
+                                                                                                7: Map pressure onto cubical cells
+                                                                                                8: Update velocity and rigid body
+
+
+
+                                                                                               exact intersection location within the tall cell. This weighted distri-
+Figure 7: Results for a case where an object intersects a tall cell.
+                                                                                               bution also naturally reflects the fact that tall cells contain two pres-
+Top: in the conventional method [NOKA25], the object loses buoy-
+                                                                                               sure samples, and thus the mapping between grid cells and pressure
+ancy when it intersects a tall cell. Bottom: with our method, buoy-
+                                                                                               unknowns is not strictly one-to-one.
+ancy is computed correctly, allowing the object to float on the liquid
+surface.
+                                                                                               3.3. Simulation Loop
+{p} = [ po1 , . . . , pon , pt1 ,top , pt1 ,bottom , . . . , ptm ,top , ptm ,bottom ]T , and
+                                                                                                  Algorithm 1 outlines the main simulation loop used in our
+[J] ∈ R6×(n+2m) is constructed analogously.
+                                                                                               method. Except for the construction of the optical layer, the
+                                                                                               loop is almost identical to that of the conventional tall cell
+3.2.2. Two-Way Coupled Rigid Bodies with Tall Cells                                            method [NOKA25]. When direct intersections between objects and
+A key difficulty arises in regions where the optical layer is thin,                            tall cells are considered, the projection step requires slight modifi-
+since rigid bodies may intersect tall cells. In the method of Narita                           cation. The modified parts are highlighted in red.
+et al. [NOKA25], it is assumed that the optical layer is sufficiently
+thick, and only cases where rigid bodies intersect the grid cells
+                                                                                               4. Results
+within the optical layer are considered. In contrast, we extend their
+method to handle situations where rigid bodies intersect tall cells                            We evaluate our method on four test cases and compare it with the
+directly (Figure 7). When rigid bodies intersect tall cells, the prob-                         conventional tall cell grid using an optical layer of uniform thick-
+lem is more complex than in uniform grids. A tall cell spans mul-                              ness. As in Narita et al. [NOKA25], we employ a variational pres-
+tiple cells in the vertical direction, requiring careful tracking of the                       sure solver and perform the computations with the ICCG method.
+intersection location. Moreover, each tall cell contains two pres-                             In all examples, the relative residual is set to 10−4 . Following
+sure points, so the correspondence between grid cells and pressure                             Koike et al. [KMA20], we set the time step using a CFL num-
+samples is no longer one-to-one.                                                               ber of 2. In addition, we adopt the extended narrow-band FLIP
+                                                                                               (EXNBFLIP) method to improve the fidelity of liquid representa-
+   We consider the case where an object intersects a tall cell (Fig-
+                                                                                               tion.
+ure 5). First, we introduce a virtual uniform grid underlying the tall
+cell. For the virtual uniform grid cell (i0 , j0 , k0 ) intersecting the ob-                      The distribution of optical layer thickness in our method is vi-
+ject, we compute [J]i0 , j0 ,k0 . We then define a parameter s (0 ≤ s ≤ 1)                     sualized as a colormap on the liquid surface. Regions in blue cor-
+that represents the relative position of (i0 , j0 , k0 ) within the tall cell.                 respond to thin optical layers, while colors closer to red represent
+Finally, we distribute the contribution by adding (1 − s) [J]i0 , j0 ,k0 to                    thicker layers. The colormap is defined so that a thickness of 0 maps
+the column corresponding to ctop and s [J]i0 , j0 ,k0 to the column cor-                       to blue and a thickness of Ny /8 maps to red. Thus, if the entire liq-
+responding to cbottom . The parameter s enables us to capture the                              uid surface appears red, the result coincides with the conventional
+                                                                                                                                                                    © 2026 The Authors.
+                                                                                                            Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+                           Fumiya Narita & Takashi Kanai / Adaptive Optical Layers: Efficient Tall Cell Grids for Liquid Simulation                7 of 10
+
+
+
+
+Figure 8: Animals Drop: Liquids shaped like various characters are continuously dropped onto the water surface. Top: conventional tall cell
+method. Middle: our method. Bottom: our method with optical layer thickness visualized as a colormap.
+
+
+tall cell method using a uniform optical layer thickness. Note that                   4.2. Breaking Dam
+the colormap shows the optical layer thickness before smoothing.
+                                                                                      Figure 9 shows a dam-break simulation with several static pillars.
+   Table 1 reports the computation times of the major operations                      As illustrated in the bottom row, regions near sharp edges of the
+per time step. Our method accelerates the pressure solve by about                     initial shape and areas with significant surface motion are assigned
+2.5× to 3× while maintaining visual quality, leading to an over-                      thicker optical layers. Our method successfully reproduces results
+all speedup of approximately 1.5× to 2× for the entire simulation.                    comparable to the conventional approach even when the liquid un-
+Table 2 provides further details of the projection step, showing that                 dergoes large-scale motion. This simulation was performed on a
+our method substantially reduces the number of grid cells by adap-                    Ryzen 9 9950X processor.
+tively varying the optical layer thickness.
+   Figure 11 shows the temporal evolution of the cell counts for                      4.3. Pouring Water
+each scene, comparing the proposed and conventional methods.                          Figure 6 shows a case where water is discharged from an elevated
+The cell count is largely dominated by the optical layer, and the                     outlet. Upon impact with the liquid surface, the discharged water
+proposed method effectively reduces the number of optical layer                       generates large splashes. An armadillo model floats on the liquid
+cells. Figure 12 shows the temporal evolution of the kinetic energy                   surface through two-way coupling. Here, the densities are set to
+for each scene. Despite reducing the number of optical layer cells,                   ρwater = 1.0 [kg m−3 ] for water and ρobject = 0.3 [kg m−3 ] for the
+the proposed method exhibits a similar kinetic energy evolution to                    object. These results demonstrate that our method can treat liquid
+the conventional method.                                                              regions above the surface not only in simple ballistic motion but
+                                                                                      also in more complex scenarios. Moreover, the simulation remains
+4.1. Animals Drop                                                                     stable even when the surface experiences relatively strong impacts.
+                                                                                      This simulation was performed on a Ryzen 9 7950X processor.
+Figure 8 presents a scenario in which liquids shaped like various
+characters are continuously dropped onto a water surface. The bot-
+                                                                                      4.4. Lucy in the Rain
+tom row visualizes the distribution of optical layer thickness in our
+method. We observe that thicker optical layers are assigned in re-                    Figure 1 presents a complex scene combining several elements.
+gions where the liquid impacts the surface or exhibits large mo-                      Water is poured onto the surface from multiple sources, while many
+tion. Even in cases with complex surface geometry and splashing,                      small spherical droplets, mimicking rainfall, fall into the liquid.
+our method produces results nearly identical to those of the con-                     As shown on the right, thicker optical layers are assigned in re-
+ventional approach. This simulation was performed on a Ryzen 9                        gions where the liquid is poured or where droplets strike the sur-
+5950X processor.                                                                      face. Our method remains effective even when the liquid surface
+
+
+
+© 2026 The Authors.
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+8 of 10                    Fumiya Narita & Takashi Kanai / Adaptive Optical Layers: Efficient Tall Cell Grids for Liquid Simulation
+
+
+
+
+Figure 9: Breaking Dam: Dam-break simulation with several static pillars. Top: conventional tall cell method. Middle: our method. Bottom:
+our method with optical layer thickness visualized as a colormap.
+
+
+exhibits small-scale ripples. Such scenarios are generally difficult
+to reproduce with adaptive grids that refine solely based on surface
+information [AB20]. This simulation was performed on a Ryzen 9
+7950X processor.
+
+
+5. Discussion and Limitations
+   Numerical Damping. Our method produces results of compa-                   Figure 10: A test case in which an object is fully inside the tall-cell
+rable quality to those of the conventional tall cell approach in              region.
+many scenarios. However, certain settings reveal noticeable damp-
+ing of kinetic energy, a phenomenon commonly observed in pre-
+vious spatially adaptive methods. For example, even in a simple               sensitive to these values and remains stable across a wide range of
+water-drop scene (Figure 2), the kinetic energy gradually decreases           settings. Importantly, the same parameter set was used for all scenes
+over time. A promising direction for future work is to develop im-            in the paper, and no scene-specific tuning was required. In our exist-
+proved strategies for constructing the adaptive optical layer based           ing experiments, we observed that varying these parameters within
+on liquid motion. It may also be beneficial to adaptively reinject            reasonable ranges does not materially affect the simulation behav-
+energy to compensate for this damping effect [LAF11].                         ior, further confirming the robustness of the method. In practical
+                                                                              use, the main adjustable parameter is α: a larger α makes the result
+   Performance. Although our method significantly accelerates the
+                                                                              closer to that of the full tall-cell computation, while a smaller alpha
+projection step compared to the conventional tall cell approach, it
+                                                                              prioritizes faster performance.
+does not substantially reduce the overall simulation time. This is
+because, unlike adaptive grid methods [NOKA25], our approach                     Two-Way Coupled Rigid Bodies. We acknowledge that tall-cell
+has little effect on the computational cost of other operations, such         methods in general are not designed to accurately capture fully
+as advection, outside the projection step. Since our method does not          immersed rigid bodies whose dominant interactions occur far be-
+conflict with adaptive grids, it can be naturally combined with such          low the liquid surface. Therefore, we will explicitly state this as a
+frameworks. We therefore leave the design of a hybrid approach                scope limitation, while clarifying that the method remains robust
+that integrates our method with adaptive grids as a direction for             and does not exhibit numerical failure. In our experiments, such
+future work.                                                                  situations only lead to slightly reduced accuracy in buoyancy or
+                                                                              rising speed, but the motion remains stable and visually plausible
+  Heuristic Parameters. As noted, the method involves several
+                                                                              (see Figure 10).
+heuristic parameters; however, the proposed approach is highly in-
+                                                                                                                                                    © 2026 The Authors.
+                                                                                            Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+                                                 Fumiya Narita & Takashi Kanai / Adaptive Optical Layers: Efficient Tall Cell Grids for Liquid Simulation                                                                                                                                      9 of 10
+
+  Table 1: Timing breakdown of the four test cases. Numbers indicate the average time per step (in seconds) for each computational stage.
+
+  Scene                              Resol.           Method               Optical layer construction                           Advection              Tall cells construction                Projection            Extrapolation                     EXNBFLIP operation                        Total
+  Fig. 8                             2563              Tall                            -                                         2.123                          1.049                          15.576                   0.623                               2.48                               22.439
+                                                       Ours                          1.077                                       2.004                          1.246                           5.112                   0.542                              2.166                               12.656
+  Fig. 9                      512 × 256 × 128          Tall                            -                                         1.396                          0.583                          12.672                   0.373                              1.261                               16.652
+                                                       Ours                          0.548                                       1.441                          0.775                           4.402                   0.390                              1.300                                9.241
+  Fig. 6                      320 × 256 × 320          Tall                            -                                         2.738                          1.179                          20.985                   0.757                              1.825                               30.082
+                                                       Ours                          1.140                                       2.745                          1.402                           7.725                   0.699                              1.835                               18.111
+  Fig. 1                           512 × 2562          Tall                            -                                         3.464                          1.519                          24.309                   1.003                              3.070                               34.545
+                                                       Ours                          1.622                                       3.592                          1.937                           9.248                   1.067                              3.263                               21.988
+
+
+Table 2: Breakdown of projection steps. All numbers are reported as averages per step. “Assemble matrix” includes all processes involved
+in matrix assembly, such as gradient evaluation, divergence computation, and multiplications (including operations for two-way coupling
+with rigid bodies, if applicable). “Residual” denotes the absolute residuals in PCG, measured using the ∥L∥∞ norm.
+  Scene                                Resol.                 Method                    Total cells                      Assemble matrix (seconds)                                   Solve Poisson’s equation (seconds)                                         Residual               Iterations
+  Fig. 8                               2563                    Tall                      2306K                                    2.232                                                           12.047                                                       1.3 × 10−5                 264
+                                                               Ours                       841K                                    0.594                                                            3.392                                                       1.5 × 10−5                 225
+  Fig. 9                       512 × 256 × 128                 Tall                      2306K                                    0.988                                                           10.942                                                       1.0 × 10−5                 343
+                                                               Ours                       884K                                    0.370                                                            3.340                                                       1.1 × 10−5                 227
+  Fig. 6                       320 × 256 × 320                 Tall                      3590K                                    2.899                                                           14.351                                                       2.7 × 10−4                 200
+                                                               Ours                      1057K                                    0.668                                                            5.130                                                       2.7 × 10−4                 199
+  Fig. 1                             512 × 2562                Tall                      5739K                                    2.598                                                           19.803                                                       1.0 × 10−4                 232
+                                                               Ours                      1941K                                    0.983                                                            6.471                                                       1.0 × 10−4                 213
+
+                                    ·106                                                                        ·106                                                               ·107                                                            ·107
+                                                                                                                                                                              1                                                               1
+                                                     Optical Cell (Ours)                                                       Optical Cell (Ours)                                                Optical Cell (Ours)                                                  Optical Cell (Ours)
+                                                                                                                                                                                                                                             0.8
+
+
+
+                                                                                                                                                                                                                         Number of Cells
+                               4                                                                          4                                                                  0.8                                                                                        Tall Cell (Ours)
+
+
+
+
+            Number of Cells                                                             Number of Cells                                                    Number of Cells
+                                                      Tall Cell (Ours)                                                          Tall Cell (Ours)                                                   Tall Cell (Ours)
+                                                     Optical Cell (Prev)                                                       Optical Cell (Prev)                                                Optical Cell (Prev)                                                  Optical Cell (Prev)
+                                                      Tall Cell (Prev)                                                          Tall Cell (Prev)                                                   Tall Cell (Prev)                          0.6                        Tall Cell (Prev)
+                                                                                                                                                                             0.6
+                               2                                                                          2                                                                  0.4                                                             0.4
+
+                                                                                                                                                                             0.2                                                             0.2
+
+                               0                                                                          0                                                                   0                                                               0
+                                           200      400        600                                                     200     400          600                                       200   400      600      800                                     200       400     600      800 1,000
+                                                   Step                                                                      Step                                                             Step                                                                Step
+
+                              (a) Animals drop (Fig. 8).                                                  (b) Breaking dam (Fig. 9).                                         (c) Pouring water (Fig. 6).                                     (d) Lucy in the rain (Fig. 1).
+
+Figure 11: Temporal evolution of cell counts for each scene, comparing the proposed and conventional methods. The blue and green curves
+overlap, as the number of tall cells is almost identical in both methods.
+
+                               4                                                                           2                                                                 40                                                               10
+                                                                Ours                                                                        Ours                                                             Ours                                                                  Ours
+                                                               Tall Cell                                                                   Tall Cell                                                        Tall Cell                          8                                  Tall Cell
+
+
+
+
+           Kinetic Energy                                                        Kinetic Energy                                                            Kinetic Energy                                                   Kinetic Energy
+                               3                                                                          1.5                                                                30
+                                                                                                                                                                                                                                               6
+                               2                                                                           1                                                                 20
+                                                                                                                                                                                                                                               4
+                               1                                                                          0.5                                                                10
+                                                                                                                                                                                                                                               2
+                               0                                                                           0                                                                  0                                                                0
+                                           200      400        600                                                     200      400          600                                      200   400      600      800                                         20    40       60       80          100
+                                                   Step                                                                       Step                                                            Step                                                                   Step
+
+                              (a) Animals drop (Fig. 8).                                                  (b) Breaking dam (Fig. 9).                                         (c) Pouring water (Fig. 6).                                     (d) Lucy in the rain (Fig. 1).
+
+                               Figure 12: Temporal evolution of the kinetic energy for each scene, comparing the proposed and conventional methods.
+
+
+
+6. Conclusions                                                                                                                                                           time. The method is simple to implement and can be readily inte-
+                                                                                                                                                                         grated into existing tall cell grid frameworks. It also fully exploits
+We have presented a method that dynamically adjusts the optical                                                                                                          the advantages of the tall cell grid structure. We expect this work to
+layer thickness at each location on the liquid surface according                                                                                                         stimulate further research and development on tall cell grid meth-
+to the liquid motion. This approach accelerates the projection step                                                                                                      ods.
+while preserving visual quality and reduces the overall simulation
+
+
+
+© 2026 The Authors.
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+10 of 10                    Fumiya Narita & Takashi Kanai / Adaptive Optical Layers: Efficient Tall Cell Grids for Liquid Simulation
+
+Acknowledgements                                                               [KFCO06] K LINGNER, B RYAN M., F ELDMAN, B RYAN E., C HENTANEZ,
+                                                                                 N UTTAPONG, and O’B RIEN, JAMES F. “Fluid Animation with Dynamic
+We would like to thank the anonymous reviewers for their valuable                Meshes”. ACM Trans. Graph. 25.3 (July 2006), 820–825. DOI: 10 .
+comments and constructive suggestions. This work is supported in                 1145/1141911.1141961 2.
+part by JSPS KAKENHI (25K15401).                                               [KMA20] KOIKE, TATSUYA, M ORISHIMA, S HIGEO, and A NDO, RY-
+                                                                                 OICHI . “Asynchronous Eulerian Liquid Simulation”. Computer Graph-
+                                                                                 ics Forum 39.2 (2020), 1–8. DOI: https://doi.org/10.1111/
+References                                                                       cgf.13907 6.
+[AB20] A NDO, RYOICHI and BATTY, C HRISTOPHER. “A Practical Oc-                [LAF11] L ENTINE, M ICHAEL, A ANJANEYA, M RIDUL, and F EDKIW,
+  tree Liquid Simulator with Adaptive Surface Resolution”. ACM Trans.            RONALD. “Mass and Momentum Conservation for Fluid Simulation”.
+  Graph. 39.4 (July 2020). DOI: 10.1145/3386569.3392460 2, 3,                    Proc. ACM SIGGRAPH/Eurographics Symposium on Computer Anima-
+  8.                                                                             tion. New York, NY, USA: ACM, 2011, 91–100. DOI: 10 . 1145 /
+                                                                                 2019406.2019419 8.
+[AGL*17] A ANJANEYA, M RIDUL, G AO, M ING, L IU, H AIXIANG, et al.
+  “Power Diagrams and Sparse Paged Grids for High Resolution Adap-             [LFO06] L OSASSO, F RANK, F EDKIW, RONALD, and O SHER, S TANLEY.
+  tive Liquids”. ACM Trans. Graph. 36.4 (July 2017). DOI: 10.1145/               “Spatially Adaptive Techniques for Level Set Methods and Incompress-
+  3072959.3073625 2.                                                             ible Flow”. Computers & Fluids 35.10 (2006), 995–1010. DOI: https:
+                                                                                 //doi.org/10.1016/j.compfluid.2005.01.006 2.
+[ATW13] A NDO, RYOICHI, T HÜREY, N ILS, and W OJTAN, C HRIS.
+  “Highly Adaptive Liquid Simulations on Tetrahedral Meshes”. ACM              [LGF04] L OSASSO, F RANK, G IBOU, F RÉDÉRIC, and F EDKIW, RON.
+  Trans. Graph. 32.4 (July 2013). DOI: 10 . 1145 / 2461912 .                     “Simulating Water and Smoke with an Octree Data Structure”. ACM
+  2461982 2, 3.                                                                  Trans. Graph. 23.3 (Aug. 2004), 457–462. DOI: 10.1145/1015706.
+                                                                                 1015745 2.
+[BBB07] BATTY, C HRISTOPHER, B ERTAILS, F LORENCE, and B RIDSON,
+  ROBERT. “A Fast Variational Framework for Accurate Solid-Fluid Cou-          [LZF10] L ENTINE, M ICHAEL, Z HENG, W EN, and F EDKIW, RONALD.
+  pling”. ACM Trans. Graph. 26.3 (July 2007), 100–es. DOI: 10.1145/              “A novel algorithm for incompressible flow using only a coarse grid
+  1276377.1276502 3, 5.                                                          projection”. ACM Trans. Graph. 29.4 (July 2010). DOI: 10 . 1145 /
+                                                                                 1778765.1778851 2.
+[Bri15] B RIDSON, ROBERT. Fluid Simulation for Computer Graphics. 2nd
+  ed. A. K. Peters/CRC Press, 2015 2.                                          [MWN*17] M ANTEAUX, P.-L., W OJTAN, C., NARAIN, R., et al. “Adap-
+                                                                                 tive Physically Based Models in Computer Graphics”. Computer Graph-
+[CFL*07] C HENTANEZ, N UTTAPONG, F ELDMAN, B RYAN E., L ABELLE,
+                                                                                 ics Forum 36.6 (2017), 312–337. DOI: https : / / doi . org / 10 .
+  F RANÇOIS, et al. “Liquid Simulation on Lattice-Based Tetrahedral
+                                                                                 1111/cgf.12941 2.
+  Meshes”. Proc. ACM SIGGRAPH/Eurographics Symposium on Com-
+  puter Animation. Goslar, DEU: Eurographics Association, 2007, 219–           [NMG09] N G, Y EN T ING, M IN, C HOHONG, and G IBOU, F RÉDÉRIC. “An
+  228 2.                                                                         Efficient Fluid-Solid Coupling Algorithm for Single-Phase Flows”. J.
+                                                                                 Comput. Phys. 228.23 (Dec. 2009), 8807–8829. DOI: 10 . 1016 / j .
+[CM11] C HENTANEZ, N UTTAPONG and M ÜLLER, M ATTHIAS. “Real-
+                                                                                 jcp.2009.08.032 2.
+  Time Eulerian Water Simulation Using a Restricted Tall Cell Grid”.
+  ACM Trans. Graph. 30.4 (July 2011). DOI: 10 . 1145 / 2010324 .               [NOKA25] NARITA, F UMIYA, O CHIAI, N IMIKO, K ANAI, TAKASHI, and
+  1964977 2.                                                                     A NDO, RYOICHI. “Quadtree Tall Cells for Eulerian Liquid Simulation”.
+                                                                                 SIGGRAPH Conference Papers ’25. SIGGRAPH ’25. New York, NY,
+[CMK15] C HENTANEZ, N UTTAPONG, M ÜLLER, M ATTHIAS, and K IM,
+                                                                                 USA: ACM, Aug. 2025. DOI: 10.1145/3721238.3730652 2, 3, 5,
+  TAE -YONG. “Coupling 3D eulerian, heightfield and particle methods
+                                                                                 6, 8.
+  for interactive simulation of large scale liquid phenomena”. Proceed-
+  ings of the ACM SIGGRAPH/Eurographics Symposium on Computer                  [SABS14] S ETALURI, R AJSEKHAR, A ANJANEYA, M RIDUL, BAUER,
+  Animation. SCA ’14. Copenhagen, Denmark: Eurographics Association,             S EAN, and S IFAKIS, E FTYCHIOS. “SPGrid: A Sparse Paged Grid Struc-
+  2015, 1–10 2.                                                                  ture Applied to Adaptive Smoke Simulation”. ACM Trans. Graph. 33.6
+                                                                                 (Nov. 2014). DOI: 10.1145/2661229.2661269 2.
+[ENGF03] E NRIGHT, D OUG, N GUYEN, D UC, G IBOU, F REDERIC, and
+  F EDKIW, RON. “Using the Particle Level Set Method and a Second              [Sta99] S TAM, J OS. “Stable Fluids”. Proc. SIGGRAPH ’99. New York,
+  Order Accurate Pressure Boundary Condition for Free Surface Flows”.             NY, USA: ACM Press/Addison-Wesley Publishing Co., 1999, 121–128.
+  Proc. Fluids Engineering Division Summer Meeting. ASME, 2003, 337–              DOI: 10.1145/311535.311548 2.
+  342. DOI: 10.1115/FEDSM2003-45144 2.                                         [SWT*18] S ATO, TAKAHIRO, W OJTAN, C HRIS, T HUEREY, N ILS, et
+[FAW*16] F ERSTL, F LORIAN, A NDO, RYOICHI, W OJTAN, C HRIS, et al.              al. “Extended Narrow Band FLIP for Liquid Simulations”. Computer
+   “Narrow Band FLIP for Liquid Simulations”. Computer Graphics Forum            Graphics Forum 37.2 (2018), 169–177. DOI: 10 . 1111 / cgf .
+   35.2 (2016), 225–232. DOI: 10.1111/cgf.12825 2.                               13351 2.
+[FF01] F OSTER, N ICK and F EDKIW, RONALD. “Practical Animation of             [XCW*20] X IAO, Y UWEI, C HAN, S ZEYU, WANG, S IQI, et al. “An adap-
+  Liquids”. Proc. SIGGRAPH ’01. New York, NY, USA: ACM, 2001, 23–                tive staggered-tilted grid for incompressible flow simulation”. ACM
+  30. DOI: 10.1145/383259.383261 2.                                              Trans. Graph. 39.6 (Nov. 2020). DOI: 10 . 1145 / 3414685 .
+                                                                                 3417837 2.
+[FM96] F OSTER, N ICK and M ETAXAS, D IMITRI. “Realistic Animation
+  of Liquids”. Proc. Graphics Interface ’96. CAN: Canadian Information         [ZB05] Z HU, YONGNING and B RIDSON, ROBERT. “Animating Sand As a
+  Processing Society, 1996, 204–212 2.                                           Fluid”. ACM Trans. Graph. 24.3 (July 2005), 965–972. DOI: 10.1145/
+                                                                                 1073204.1073298 2.
+[IGLF06] I RVING, G EOFFREY, G UENDELMAN, E RAN, L OSASSO,
+   F RANK, and F EDKIW, RONALD. “Efficient Simulation of Large                 [ZLC*13] Z HU, B O, L U, W ENLONG, C ONG, M ATTHEW, et al. “A New
+   Bodies of Water by Coupling Two and Three Dimensional Tech-                   Grid Structure for Domain Extension”. ACM Trans. Graph. 32.4 (July
+   niques”. ACM Trans. Graph. 25.3 (July 2006), 805–811. DOI:                    2013). DOI: 10.1145/2461912.2461999 2.
+   10.1145/1141911.1141959 2, 4.                                               [ZY10] Z HU, B O and YANG, X UBO. “Animating Sand as a Surface Flow”.
+[JSS*15] J IANG, C HENFANFU, S CHROEDER, C RAIG, S ELLE, A NDREW,                Eurographics 2010 - Short Papers. Ed. by L ENSCH, H. P. A. and
+   et al. “The Affine Particle-in-Cell Method”. ACM Trans. Graph. 34.4           S EIPEL, S. The Eurographics Association, 2010. DOI: 10 . 2312 /
+   (July 2015). DOI: 10.1145/2766996 2.                                          egsh.20101035 2.
+
+
+                                                                                                                                                    © 2026 The Authors.
+                                                                                            Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+

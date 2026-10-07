@@ -1,0 +1,1473 @@
+                                         Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps
+                                         JUNWEI ZHOU, University of Michigan, USA
+                                         DUOWEN CHEN, Georgia Institute of Technology, USA
+                                         MOLIN DENG, Georgia Institute of Technology, USA
+                                         YITONG DENG, Stanford University, USA
+                                         YUCHEN SUN, Georgia Institute of Technology, USA
+                                         SINAN WANG, University of Hong Kong, China
+                                         SHIYING XIONG, Zhejiang University, China
+                                         BO ZHU, Georgia Institute of Technology, USA
+
+
+
+
+arXiv:2405.09672v1 [cs.GR] 15 May 2024
+                                         Fig. 1. Our novel particle flow map (PFM) methods can preserve vorticity by the state-of-the-art standard and excel in memory usage and computation time
+                                         among methods that can give similar quality. Four simulation snapshots are shown using our PFM method including a delta wing plane at an angle-of-attack
+                                         (left), a flat wing plane (middle left), a rotating propeller (middle right) and a flapping hummingbird (right).
+
+                                         We propose a novel Particle Flow Map (PFM) method to enable accurate                        CCS Concepts: • Computing methodologies → Modeling and simula-
+                                         long-range advection for incompressible fluid simulation. The foundation                    tion.
+                                         of our method is the observation that a particle trajectory generated in a
+                                         forward simulation naturally embodies a perfect flow map. Centered on this                  Additional Key Words and Phrases: Fluid Simulation, Eulerian-Lagrangian
+                                         concept, we have developed an Eulerian-Lagrangian framework comprising                      Method, Particle Flow Map
+                                         four essential components: Lagrangian particles for a natural and precise
+                                         representation of bidirectional flow maps; a dual-scale map representation                  ACM Reference Format:
+                                         to accommodate the mapping of various flow quantities; a particle-to-grid                   Junwei Zhou, Duowen Chen, Molin Deng, Yitong Deng, Yuchen Sun, Sinan
+                                         interpolation scheme for accurate quantity transfer from particles to grid                  Wang, Shiying Xiong, and Bo Zhu. 2024. Eulerian-Lagrangian Fluid Simula-
+                                         nodes; and a hybrid impulse-based solver to enforce incompressibility on the                tion on Particle Flow Maps. ACM Trans. Graph. 43, 4, Article 76 (July 2024),
+                                         grid. The efficacy of PFM has been demonstrated through various simulation                  20 pages. https://doi.org/10.1145/3658180
+                                         scenarios, highlighting the evolution of complex vortical structures and
+                                                                                                                                     1   INTRODUCTION
+                                         the details of turbulent flows. Notably, compared to NFM, PFM reduces
+                                         computing time by up to 49 times and memory consumption by up to 41%,
+                                         while enhancing vorticity preservation as evidenced in various tests like                   Preserving vortical flow details during fluid simulations has gar-
+                                         leapfrog, vortex tube, and turbulent flow.                                                  nered extensive attention in the fields of computer graphics and
+                                                                                                                                     computational physics. Over recent years, researchers have devel-
+                                         Authors’ addresses: Junwei Zhou, zhoujw@umich.edu, University of Michigan, USA;             oped various strategies to address this challenge, notably through
+                                         Duowen Chen, dchen322@gatech.edu, Georgia Institute of Technology, USA; Molin               advancements on three fronts: the development of conservative nu-
+                                         Deng, mdeng47@gatech.edu, Georgia Institute of Technology, USA; Yitong Deng,
+                                         yitongd@stanford.edu, Stanford University, USA; Yuchen Sun, yuchen.sun.eecs@gmail.          merical schemes, such as the Affine Particle-in-Cell (APIC) method
+                                         com, Georgia Institute of Technology, USA; Sinan Wang, wsn1226@connect.hku.hk,              [Jiang et al. 2015]; vorticity-adapted geometric representations, for
+                                         University of Hong Kong, China; Shiying Xiong, shiying.xiong@zju.edu.cn, Zhejiang
+                                         University, China; Bo Zhu, bo.zhu@gatech.edu, Georgia Institute of Technology, USA,
+                                                                                                                                     instance, the covector fluids (CF) approach [Nabizadeh et al. 2022];
+                                         (Junwei Zhou’s work was done during a remote intern with Georgia Institute of               and the creation of accurate, long-range flow maps, exemplified by
+                                         Technology).                                                                                the bidirectional mapping (BiMocq) method [Qu et al. 2019].
+                                                                                                                                        A common foundational idea underpinning these three categories
+                                         Permission to make digital or hard copies of part or all of this work for personal or       of works, which motivates the further design of structural preserv-
+                                         classroom use is granted without fee provided that copies are not made or distributed
+                                         for profit or commercial advantage and that copies bear this notice and the full citation   ing numerical schemes, is the development of a long-range, bidirec-
+                                         on the first page. Copyrights for third-party components of this work must be honored.      tional flow map capable of accurately transporting vorticity-related
+                                         For all other uses, contact the owner/author(s).                                            physical quantities between time frames. The recent work on the
+                                         © 2024 Copyright held by the owner/author(s).
+                                         0730-0301/2024/7-ART76                                                                      Neural Flow Maps method (NFM) [Deng et al. 2023] further exempli-
+                                         https://doi.org/10.1145/3658180                                                             fies this methodological philosophy (i.e., geometric representation
+
+                                                                                                                                               ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+76:2   •   Junwei Zhou, Duowen Chen, Molin Deng, Yitong Deng, Yuchen Sun, Sinan Wang, Shiying Xiong, and Bo Zhu
+
+
++ conservative numerical scheme + bidirectional mapping) by con-                      we avoid the backtrack substeps and the training process of the
+structing accurate flow maps that transport fluid impulses across a                   neural buffer. This efficiency enables PFM to operate around 10-20
+long-range spatiotemporal domain. This method, requiring the on-                      times faster on average and up to 49 times faster than NFM while
+line training of a neural network to compress the 4D spatiotemporal                   delivering comparable or superior simulation outcomes. Moreover,
+velocity field, facilitates a time-reversed marching scheme capable                   by eliminating the neural buffer, PFM achieves a memory savings
+of achieving state-of-the-art vorticity preservation.                                 of 29%-41% over NFM. We validated our approach in multiple ex-
+   Along this line of research, we explore low-cost algorithms to                     amples, including leapfrogging vortices, vortex-tube reconnections,
+enable long-range, bidirectional flow maps. The key problem we                        and solid-driven vortices. In each case, PFM consistently exhibits
+aim to address lies in finding the most fitting discrete representation               comparable or superior vortex preservation, energy conservation,
+for flow map geometries in the spatiotemporal domain. In particular,                  and visual intricacy to those achieved by NFM, all while demanding
+while Deng et al. [2023] champions a neural representation that can                   significantly less computational and memory costs than NFM.
+be integrated to recover flow maps at Eulerian grid points, we believe                   The key contributions of our work can be summarized as follows:
+that Lagrangian particles make for the most natural representation                        (1) We introduced a particle representation for long-range, bi-
+that promises to generate accurate flow maps with a drastically                               directional flow maps.
+reduced cost. To see this, one can consider that the initial and final                    (2) We proposed a two-scale flow-map scheme, defined on a
+positions of a forward-simulated particle, trivially known during                             single particle trajectory, for mapping flow quantities with
+the simulation process, form a near-perfect sample of the actual                              different reinitialization requirements.
+bidirectional flow maps created by the fluid flow. In other words,                        (3) We developed a particle-to-grid interpolation scheme to trans-
+accurate flow maps are obtained for free in Lagrangian simulations.                           fer flow maps from particles to grid nodes.
+   However, although particles trivially offer accurate flow map                          (4) We presented a comprehensive Eulerian-Lagrangian solver
+samples, the fact that the final positions of these sampled Lagrangian                        based on the impulse fluid model, achieving state-of-the-art
+paths are not aligned with the grid nodes leads to a core issue.                              vorticity preservation capabilities while maintaining both
+To counter this issue, “virtual particle” approaches, including the                           low memory cost and high computational speed.
+ones employed by NFM [Deng et al. 2023], have been proposed,
+which trace virtual particles backward in time so that the samples                    2    RELATED WORK
+will have their final positions aligned with grid points. Although
+                                                                                         Advection Schemes. The dissipation error inherent in the Stable
+virtual (backward) and real (forward) particles offer equally accurate
+                                                                                      Fluid framework [Stam 1999] not only leads to unrealistic behavior
+samples of the flow map, the only difference being whether or not
+                                                                                      in viscous fluid surfaces but also causes significant vorticity dis-
+the endpoints align with the grid nodes, the amounts of computation
+                                                                                      sipation, especially when vortices are the primary focus. Various
+that go into both are night-and-day different. While real particles
+                                                                                      approaches have been adopted to address this issue. High-order
+are given as byproducts of the simulation, requiring no additional
+                                                                                      interpolation schemes were proposed by Losasso et al. [2006] and
+memory or computation, virtual particles require both a long history
+                                                                                      Nave et al. [2010], while Kim et al. [2006] and Selle et al. [2008] intro-
+buffer and 𝑂 (𝑛) number of substeps, where 𝑛 is the length of the
+                                                                                      duced error compensation methods. The accuracy of backtracking
+flow map, since solutions from past timesteps cannot be reused.
+                                                                                      was enhanced by Cho et al. [2018]; Jameson et al. [1981], offering
+   Our work takes a different path from the "virtual particle" ap-
+                                                                                      improvements over single-step semi-Lagrangian tracing. Mullen
+proach. Instead of devoting excessive computational resources only
+                                                                                      et al. [2009] developed an unconditionally stable time integration
+to recover fluid impulse at grid points, we make use of the free
+                                                                                      scheme to combat numerical dissipation. Specifically focusing on
+samples of forward-simulated particles, compute accurate impulse
+                                                                                      vorticity, Fedkiw et al. [2001] and Zhang et al. [2015] suggested grid-
+at their non-grid end locations, and transfer these values onto grid
+                                                                                      based approaches to conserve vorticity. Subsequently, the advection-
+points. The two perspectives, "virtual particle" versus real particle,
+                                                                                      reflection method [Narain et al. 2019; Zehnder et al. 2018] was
+are symmetric in construction: virtual particles combine accurate
+                                                                                      introduced as a simple yet effective modification to the original
+flow maps with a lossy grid-to-particle interpolation process since
+                                                                                      advection-projection scheme, resulting in significant advancements.
+their initial positions are not grid-aligned; real particles combine
+                                                                                      More recently, an advection scheme based on the Kelvin circulation
+accurate flow maps with a lossy particle-to-grid process since their
+                                                                                      theorem [Nabizadeh et al. 2022] has shown state-of-the-art results.
+end positions are not grid-aligned. Hence, from the accuracy stand-
+                                                                                      The following methods can also be viewed as advecting a material
+point, both methods are equivalent, whereas our proposed approach
+                                                                                      element, which includes point elements [Chern et al. 2016; Xiong
+is more desirable by a large margin from the efficiency standpoint.
+                                                                                      et al. 2022; Yang et al. 2021], line elements [Xiong et al. 2021], and
+Moreover, inspired by the conservative transfer approaches sug-
+                                                                                      surface elements [Feng et al. 2022], rather than focusing solely on
+gested by APIC [Jiang et al. 2015] and Taylor-PIC [Nakamura et al.
+                                                                                      the components of the velocity field.
+2023], we propose a novel adaptive flow-map scheme to refine the
+accuracy of the particle-to-grid process by employing flow maps to                       Flow Map Methods. The concept of a flow map, initially known as
+transport not only fluid quantities but also their gradients.                         the method of characteristic mapping (MCM), was first introduced
+   On this foundation, we introduce Particle Flow Maps (PFM), a                       by Wiggert and Wylie [1976]. This method diminishes numerical
+simulation method that achieves accurate flow maps on particles                       dissipation with a long-range mapping to track fluid quantities,
+with substantially reduced computational demands compared to                          thereby reducing the frequency of interpolations required. This idea
+NFM. By adopting particles as direct representatives of flow maps,                    was later adapted for the graphics community by Tessendorf and
+
+ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+                                                                                          Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps       •   76:3
+
+
+Pelfrey [2011]. Subsequent research [Hachisuka 2005; Sato et al.                     Table 1. Summary of important notations used in the paper.
+2018, 2017; Tessendorf 2015] in this area utilized virtual particles to
+track the flow map yet faced substantial computational demands in             Notation         Type       Definition
+terms of memory and time. A bidirectional flow map approach was                  𝑿            vector      material point position at initial state
+developed by Qu et al. [2019], drawing inspiration from BFECC [Kim               𝒙            vector      material point position at terminated state
+et al. 2006], to enhance the mapping’s accuracy. Building on this,               𝑡             scalar     time
+Nabizadeh et al. [2022] combined the impulse fluid model [Cortez
+                                                                                 𝝓            vector      forward map
+1996] with the flow map concept. In NFM [Deng et al. 2023], the
+authors introduced the concept of a perfect flow map and employed                𝝍            vector      backward map
+a neural network to efficiently compress the storage of velocity                 F            matrix      forward map Jacobian
+fields required for reconstructing the flow map with high precision.             T            matrix      backward map Jacobian
+These methods extensively use virtual particles to trace the flow                ∇T           matrix      backward map Hessian
+map and employ various techniques to minimize the costs and                      𝒖            vector      velocity
+errors associated with this approach. A community focusing on                    𝒎            vector      impulse
+flow data visualization studies particle trajectory as a visualization
+                                                                                 ∇𝒎           vector      impulse gradients
+tool instead. One prominent example is the Lagrangian coherent
+                                                                                 𝑤             scalar     interpolation weights
+structures (LCS) [Haller and Yuan 2000; MacMillan and Richter 2021;
+Sun et al. 2016] and, specifically, finite time Lyapunov exponent                ∇𝑤           vector      interpolation weights gradients
+(FTLE) [Leung 2011, 2013]. Recently, Kommalapati [2021] applied                  𝑛            integer     reinitialization steps
+Deep Learning techniques to achieve super-resolution visualization
+of LCS. However, none of these data structures have been leveraged
+to facilitate simulation. Moreover, utilizing features of Lagrangian
+elements to help shrink storage and speed up running time has
+                                                                          and Liu 2003], and fluid-structure interactions [Cortez 1996; Sum-
+proved its effectiveness in 3D Gaussian Splatting [Kerbl et al. 2023]
+                                                                          mers 2000]. More recent research by Saye [2016, 2017] has utilized
+by reducing the training time of NeRF[Mildenhall et al. 2021].
+                                                                          gauge freedom to address interfacial discontinuities in density and
+   Eulerian-Lagrangian Methods. To leverage the rapid convergence         viscosity in free surface flows and fluid-structure coupling. The
+rate of grid-based Poisson solvers, such as MGPCG [McAdams et al.         concept of gauge freedom was revisited in the field of computer
+2010], a hybrid Eulerian-Lagrangian representation is needed. Such        graphics by Feng et al. [2022], Yang et al. [2021], and Nabizadeh
+a choice is commonly made in the graphics community due to the            et al. [2022]. However, these methods encountered limitations due
+significant viscosity reduction it offers with Lagrangian representa-     to the advection schemes’ constraints. NFM [Deng et al. 2023] ad-
+tion. Since the seminal work of PIC [Harlow 1962] and FLIP [Brack-        dresses this issue by introducing a state-of-the-art neural hybrid
+bill and Ruppel 1986] was introduced to graphics community [Zhu           advection scheme using flow maps. Despite its advancements, NFM
+and Bridson 2005], hybrid Eulerian-Lagrangian representations are         is constrained by the requirements for neural buffer storage and
+widely used in fluid simulation [Ando and Tsuruno 2011; Deng et al.       extended training time.
+2022; Gao et al. 2009; Hong et al. 2008; Raveendran et al. 2011; Zhu
+et al. 2010]. MPM, which can be seen as a generalization of PIC/FLIP,     3     PHYSICAL MODEL
+has been utilized to simulate a variety of continuum behaviors in-
+                                                                             Naming convention. We adopt the following notation conventions:
+cluding snow [Stomakhin et al. 2013], phase changes [Stomakhin
+                                                                          lowercase letters for scalars (e.g., 𝑡, 𝑛, 𝑤), bold letters for vectors (e.g.,
+et al. 2014], foam [Ram et al. 2015; Yue et al. 2015], magnetized flow
+                                                                          𝑿, 𝒙, 𝝓, 𝝍), and calligraphic font for matrices (e.g., F , T ). Subscripts
+[Sun et al. 2021], fluid-structure interactions [Fang et al. 2020; Fei
+                                                                          are used in two contexts: in a continuous setting, subscripts (typi-
+et al. 2018, 2017; Han et al. 2019; Yan et al. 2018], and sediment
+                                                                          cally 𝑎, 𝑏, 𝑐) denote specific time instants; for example, T𝑏 represents
+flow [Gao et al. 2018; Tampubolon et al. 2017]. Further research
+                                                                          the backward map Jacobian at time instant 𝑏. In a discrete setting,
+has enhanced the accuracy of transferring between Lagrangian and
+                                                                          subscripts (typically 𝑖, 𝑗, 𝑘, 𝑝) indicate primitive indices, such as 𝒙𝑝
+Eulerian representations, focusing on momentum conservation [Fu
+                                                                          signifying the position of the 𝑝-th particle. The notation [:, :] is used
+et al. 2017; Jiang et al. 2015], handling discontinuous velocities [Hu
+                                                                          to specify a time period over which a map holds, for instance, T[𝑎,𝑐 ]
+et al. 2018], energy dissipation [Fei et al. 2021] and maintaining
+                                                                          denotes the backward map Jacobian from time 𝑐 to time 𝑎. However,
+volume conservation [Qu et al. 2022].
+                                                                          mathematically, if 𝑎 < 𝑐, the backward map Jacobian from time 𝑐 to
+   Impulse Fluid and Gauge Methods. Flow maps are particularly            time 𝑎 should be denoted as T[𝑐,𝑎] . For simplicity, in this paper, we
+relevant when considering the concept of the impulse variable. This       adopt a convention where time in subscripts progresses from smaller
+term was first introduced in [Buttke 1992] and offers an alternative      to larger values, thus T[𝑎,𝑐 ] is used to denote the backward map Ja-
+formulation of the incompressible Navier-Stokes Equation through          cobian from time 𝑐 to time 𝑎. Similarly, the backward map from time
+the use of a gauge variable and gauge transformation [Buttke 1993;        𝑐 to time 𝑎 is represented as 𝝍 [𝑎,𝑐 ] . In addition, when we refer to the
+Oseledets 1989; Roberts 1972]. Various aspects of gauge freedom           time period [0, 𝑡], we will simplify it as 𝑡. For instance, T[0,𝑡 ] = T𝑡 .
+have been explored, including its application to surface turbulence       We have summarized these important notations in Table 1. We refer
+[Buttke 1993; Buttke and Chorin 1993], numerical stability [Weinan        to Table 2 for variables specific to discrete settings.
+
+                                                                                        ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+76:4   •    Junwei Zhou, Duowen Chen, Molin Deng, Yitong Deng, Yuchen Sun, Sinan Wang, Shiying Xiong, and Bo Zhu
+
+
+3.1        Mathematical Foundation                                                     3.2    Impulse Fluid on Flow Maps
+   Flow Map Preliminaries. We define a velocity field 𝒖 (𝒙, 𝑡) in the                  The Euler equations can be written in the form of the impulse as
+fluid domain Ω which specifies the velocity at a given location 𝒙                      follows
+and time 𝑡. Consider a material point 𝑿 ∈ Ω at time 𝑡 = 0, We define                                          
+                                                                                                                𝐷𝒎
+                                                                                                                     = − (∇𝒖)𝑇 𝒎,
+the forward flow map 𝝓 (:, 𝑡) : Ω → Ω as
+                                                                                                              
+                                                                                                               𝐷𝑡
+                                                                                                              
+                                                                                                              
+                                                                                                                 ∇2𝜑 = ∇ · 𝒎,                          (8)
+                                                                                                              
+                            𝜕𝝓 (𝑿, 𝑡)                                                                         
+                                                                                                              
+                                                                                                               𝒖 = 𝒎 − ∇𝜑,
+                                       = 𝒖 [𝝓 (𝑿, 𝑡), 𝑡],
+                          
+                          
+                          
+                                                                                                             
+                           𝜕𝑡
+                          
+                            𝝓 (𝑿, 0) = 𝑿,                                     (1)      Here, 𝜑 serves as a gauge variable employed to depict the gradient
+                                                                                       field distinction between the impulse 𝒎 and the divergence-free
+                          
+                          
+                          
+                           𝝓 (𝑿, 𝑡) = 𝒙,
+                                                                                      velocity field 𝒖.
+which traces the trajectory of the point, moving from its initial                         As shown in Cortez [1996]; Deng et al. [2023]; Nabizadeh et al.
+position 𝑿 at time 0 to its location at time 𝑡, represented by 𝒙. Its                  [2022], the evolution of impulse 𝒎 can be written as a flow map
+inverse mapping 𝝍 (:, 𝑡) : Ω → Ω is defined as                                         from time 0 to time 𝑡 as:
+                                                                                                             𝒎(𝒙, 𝑡) = T𝑡 𝑇 (𝒙) 𝒎(𝝍 (𝒙), 0),              (9)
+                                        𝝍 (𝒙, 0) = 𝒙,
+                                    
+                                                                              (2)      Similarly, we describe the evolution of the impulse gradient, ∇𝒎,
+                                        𝝍 (𝒙, 𝑡) = 𝑿 .
+                                                                                       using the flow map as follows:
+which maps 𝒙 at 𝑡 to 𝑿 at 0.                                                                 ∇𝒎(𝒙, 𝑡) = T𝑡 𝑇 ∇𝝍 𝒎(𝝍 (𝒙), 0) T𝑡 + ∇T𝑡 𝑇 𝒎(𝝍 (𝒙), 0),      (10)
+  In order to characterize infinitesimal changes in the flow map
+and its inverse mapping, we compute their Jacobian matrices as:                        where ∇𝝍 denotes the gradient with respect to the variable 𝝍. For
+                                                                                       a mathematical proof for Equations 9 and 10, we direct readers to
+                                          𝜕𝝓 (𝒙, 𝑡)                                    the Appendix C.
+                              F (𝝓, 𝑡) =
+                             
+                                                   ,
+                                                                                         Consequently, by utilizing the backward map Jacobian T𝑡 and
+                             
+                                            𝜕𝒙                               (3)
+                                         𝜕𝝍 (𝒙, 𝑡)                                    the backward map Hessian ∇T𝑡 , we can obtain the impulse 𝒎(𝒙, 𝑡)
+                              T (𝒙, 𝑡) =
+                                                   .
+                                           𝜕𝒙                                         and its gradients ∇𝒎(𝒙, 𝑡) at time 𝑡. This is achieved by evolving
+                                                                                       both the initial impulse 𝒎(𝝍 (𝒙), 0) and the initial impulse gradients
+As proven in Appendix B, the evolution of F and T satisfies the                        ∇𝝍 𝒎(𝝍 (𝒙), 0) from time 0 to 𝑡.
+following equations:
+
+                                  𝐷F
+                                                                                       4 PARTICLE FLOW MAP
+                                
+                                 𝐷𝑡 = ∇𝒖F ,                                           4.1 Particle Trajectory is a Perfect Flow Map
+                                
+                                
+                                
+                                                                              (4)
+                                 𝐷T                                                   Particles inherently em-
+                                
+                                    = −T ∇𝒖.
+                                 𝐷𝑡                                                   body flow maps. As                    =𝒂
+                                                                                       depicted in Figure 2,
+   We further define the backward map Hessian as:                                                                            =𝒄
+                                                                                       consider a particle that
+                                                𝜕T                                     flows according to a
+                                        ∇T =       .                          (5)      spatiotemporal veloc-
+                                                𝜕𝒙
+                                                                                       ity field 𝒖 (𝒙, 𝑡). Its
+   Perfect Flow Map. A perfect flow map [Deng et al. 2023] refers to                   trajectory, originating
+a bidirectional map satisfying the following two remarks:                              from time 𝑎 and culmi-
+                                                                                       nating at time 𝑐, char-              Fig. 2. Particle is a flow map.
+Remark 1. After undergoing a backward map, denoted as 𝝍𝑡 ≡ 𝝍 (:
+                                                                                       acterizes both the for-
+, 𝑡), followed by a forward map 𝝓𝑡 ≡ 𝝓 (:, 𝑡), a point is anticipated to
+                                                                                       ward map 𝝓 [𝑎,𝑐 ] and
+return to its original position. This principle holds true when the
+                                                                                       the backward map 𝝍 [𝑎,𝑐 ] . Quantities like F and T , which are de-
+sequence is reversed. In essence,
+                                                                                       termined through path integrals along a particle’s trajectory (as
+                               
+                                   𝑿 = 𝝍𝑡 ◦ 𝝓𝑡 (𝑿 ),                                   exemplified by the path integrals of Equation 4 for obtaining F
+                                   𝒙 = 𝝓𝑡 ◦ 𝝍𝑡 (𝒙).
+                                                                              (6)      and T ), can be calculated by conducting integrals while tracking a
+                                                                                       moving particle on the trajectory.
+Remark 2. A coordinate frame that undergoes deformation speci-                             Next, we demonstrate that a particle flow map constitutes a per-
+fied initially by a forward map Jacobian F𝑡 (𝑿 ) ≡ F (𝑿, 𝑡) and then                   fect flow map. To establish this, we will show that a particle flow
+by its backward map Jacobian T𝑡 (𝒙) ≡ T (𝒙, 𝑡) should remain un-                       map adheres to Remarks 1 and 2.
+changed. The same principle holds when the order of application is                         First, consider a particle 𝑝 that moves according to a flow map
+reversed. In matrix notation,                                                          𝝓 (𝑿, 𝑡), starting from point 𝑿 at time 0 and ending at point 𝒙 at time
+                                                                                       𝑡. If we reverse this process, allowing the particle to move from 𝒙 at
+                            𝑰 = F𝑡 (𝑿 )T𝑡 (𝒙),
+                          
+                                                                                       time 𝑡 using the backward flow map 𝝍 (𝒙, 𝑡), the particle will follow
+                                                                  (7)
+                            𝑰 = T𝑡 (𝒙)F𝑡 (𝑿 ).                                         precisely the same trajectory in reverse order. This alignment of
+
+ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+                                                                                                                                                              Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps            •   76:5
+
+
+                            (a)                                   ×10 6        (c)                            ×10 3        (e)
+                                                            3.5
+                                                                                                                  Ours                           We further conducted an experiment to demonstrate that the
+                                                                                                                  Ours without impulse grad
+                                                            3.0                                                   NFM                         forward evolution of T on particles yields the same results as the
+                                                            2.5                                           9
+                                                                                                                                              backward evolution. We establish a steady velocity field, as depicted
+                                                            2.0
+                                                    error                                                                                     in Figure 3(a) and (b). Particles are placed and move within this
+                                                            1.5
+                                                            1.0                                           8                                   velocity field, and both backward and forward evolution of T are
+                                                            0.5
+                                                                                                                                              conducted on each particle. As illustrated in Figure 3(d), these two
+                                                            0.0
+                                                                  0       50   100    150   200                                               evolutions of T are nearly identical, with discrepancies on the order
+                                                                               step               error   7
+                                                              8 ×10
+                            (b)                                       5        (d)                                                            of 10 −5 within 200 steps, which aligns with the theoretical proof
+   0.04
+                                                              7
+                                                              6
+                                                                                                                                              that these two methods of evolution are equivalent, shown in Ap-
+   0.06                                                       5                                           6                                   pendix D.
+                                                              4
+                                                      error
+   0.08                                                       3
+                                                              2
+                                                                                                          5
+   0.10                                                       1                                                                               4.3     Enabling Adaptivity on a Particle Flow Map
+                                                              0
+          0.0   0.2   0.4         0.6   0.8   1.0                 0       50   100    150   200               0   2000 4000 6000 8000 10000
+                            x                                                  step                                        step               In real simulation scenarios, it is often necessary to use flow maps of
+                                                                                                                                              varying lengths to transport different flow quantities as mentioned
+Fig. 3. (a) Velocity field streamlines of a single vortex. (b) Angular velocity                                                               in [Sato et al. 2018]. For example, a long-range flow map can be
+along 𝑦 = 0.2 of the velocity field in (a). (c) Deviation of F T relative to the                                                              used to transport the fluid impulse, while a short-range flow map
+identity matrix. (d) Discrepancy between the forward-evolved T and the                                                                        may be necessary for its gradients. Generally, a quantity that is
+backward-evolved T. In both (c) and (d), the errors correspond to the average                                                                 more sensitive to distortions in the background flow field, such as
+of the individual errors across all particles, where the error on each particle                                                               a high-order tensor, benefits from a shorter map. Experimenting
+is quantified by the Frobenius norm of the disparities between the respective
+                                                                                                                                              with the length scales of these flow maps can optimize their trans-
+matrices of each particle. (e) Disparity between the analytical velocity field
+                                                                                                                                              port effectiveness in the simulation. These needs necessitate the
+and the velocity field reconstructed using our method. It demonstrates that
+incorporating impulse gradients in particle-to-grid process plays a crucial                                                                   design of an adaptivity mechanism within our particle flow map
+role in reducing errors.                                                                                                                      representation.
+
+
+                                                                                                                                              4.3.1 Adaptive Flow
+the start and end points ensures that a particle flow map inherently                                                                          Map with Temporal                                        =𝒂
+satisfies Remark 1.                                                                                                                           Samples. Fortunately, the
+                                                                                                                                                                                                       =𝒄
+   Next, we show a particle flow map also satisfies Remark 2. We                                                                              adaptivity required can
+carried out a numerical experiment to illustrate this: As shown                                                                               be effectively achieved
+in Figure 3(a) and (b), we compute F T on particles moving in a                                                                               through a simple idea
+                                                         −𝑟 2 /0.022 )/𝑟 and                                                                  by leveraging the La-
+steady velocity field " #defined as 𝜔 (𝑟 ) = −0.01(1 − 𝑒
+                       −𝑦                                                                                                                     grangian nature of
+𝑢 (𝑥, 𝑦, 𝑟 ) = 𝜔 (𝑟 )     where 𝑥 and 𝑦 are point locations and 𝑟 is the                                                                      particle trajectories. As
+                       𝑥                                                                                                                      illustrated in Figure 6,
+distance from point to rotation center at (0.5, 0.5). As in Figure 3(c),                                                                                                                    Fig. 6. Adaptive flow map from time
+we observed that F T closely approximates the identity, with errors
+                                                                                                                                              we can construct an                           𝑎 to time 𝑐 with temporal samples
+                                                                                                                                              adaptive particle flow                        [𝑏𝑛 , ..., 𝑏 2 , 𝑏 1 ]. Impulse is stored on each
+on the order of 10 −6 within 200 steps. These findings confirm that                                                                           map by storing sam-                           time sample and backward map Jacobian is
+flow maps on particles are in alignment with Remark 2.                                                                                        ples at different time                        stored between adjacent time samples.
+                                                                                                                                              instants [𝑎, 𝑏𝑛 , ..., 𝑏 2, 𝑏 1, 𝑐],
+4.2         Forward Evolution of T                                                                                                            where 𝑎 < 𝑏𝑛 < ... < 𝑏 2 < 𝑏 1 < 𝑐, along the particle’s trajectory
+In NFM [Deng et al. 2023], the trajectories of the forward and back-                                                                          from start time 𝑎 to end time 𝑐. We capture snapshots of quantities
+ward maps do not coincide. Consequently, at each step, it’s essential                                                                         at each time sample (e.g., 𝒎𝑏𝑛 , ..., 𝒎𝑏 2 , 𝒎𝑏 1 ), and store the back-
+to backtrack the path of a "virtual particle" and correspondingly                                                                             ward map Jacobian between each pair of adjacent time samples
+backward evolve T along this path. Practically, this procedure em-                                                                            (e.g., T[𝑏𝑖 ,𝑏𝑖 −1 ] is stored between samples 𝑏𝑖 and 𝑏𝑖 −1 ). With these
+ploys the upper part of Equation 4, but with the time dimension                                                                               time-axis samples created for each particle flow map, we can flexi-
+inverted. The requirement to backward evolve T from the current                                                                               bly construct flow maps of different lengths by selecting different
+step back to the initial step necessitates the usage of a neural buffer                                                                       sample points along the trajectory as the start point, while all flow
+for recording the velocity field at each timestep, imposing significant                                                                       maps converge at the same endpoint, which is the same endpoint as
+computational and storage costs.                                                                                                              the particle’s trajectory. The backward Jacobians from the endpoint
+   Given that both the forward and backward maps in the particle                                                                              to a chosen sample point can be computed by concatenating all Jaco-
+flow map align with the same particle trajectory, there’s no necessity                                                                        bians along the trajectory. For instance, for a flow map starting from
+to backward evolve T as is done in NFM. Instead, we opt for a direct                                                                          the sample 𝑏𝑖 , the backward Jacobian T[𝑏𝑖 ,𝑐 ] can be calculated as
+forward evolution of T , as demonstrated in the bottom part of                                                                                T[𝑏𝑖 ,𝑏𝑖 −1 ] T[𝑏𝑖 −1 ,𝑏𝑖 −2 ] ...T[𝑏 1 ,𝑐 ] . The default flow map [𝑎, 𝑐] is a special
+Equation 4.                                                                                                                                   case with zero sample points on the trajectory.
+
+                                                                                                                                                           ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+76:6   •    Junwei Zhou, Duowen Chen, Molin Deng, Yitong Deng, Yuchen Sun, Sinan Wang, Shiying Xiong, and Bo Zhu
+
+
+
+
+Fig. 4. These images depict the vortices created by a fish’s tail as it swims        Fig. 5. These images shows vortex formation process initiated by a propeller
+through water. The fish’s periodic tail movements generate cyclical vortices,        as it rotates under wind influence. These visuals provide a clear view of the
+and the nesting of these vortex tubes creates a layered and complex structure.       intricate, spiral-shaped patterns formed by the interconnected vortex tubes.
+
+
+4.3.2 A Single-Sample Case: Long-Short Flow Map. We have im-                           this particle redistribution, as well as a comparison among different
+plemented a single-sample strategy based on the aforementioned                         redistribution strategies, is presented in Section 7.2.
+description to enable a long-short flow map mechanism. Between                            For the short-range map, a reinitialization is performed every
+𝑎 and 𝑐, we position one time stamp 𝑏 which is closer to 𝑐 to con-                     𝑛𝑆 steps, resetting time 𝑏 to time 𝑐. Given that T[𝑎,𝑐 ] is indirectly
+struct a short map near the endpoint. This arrangement naturally                       updated via T[𝑎,𝑏 ] with the evolved T[𝑏,𝑐 ] , it becomes essential to
+produces two flow maps, [𝑎, 𝑐] and [𝑏, 𝑐], where [𝑎, 𝑐] serves as                      recalibrate T[𝑎,𝑏 ] to align with the latest T[𝑎,𝑐 ] upon each reinitial-
+the long flow map and [𝑏, 𝑐] as the short flow map. We store two                       ization of the short-range map, that is
+backward Jacobians: T[𝑎,𝑏 ] and T[𝑏,𝑐 ] . The short backward Jacobian
+                                                                                                                   T[𝑎,𝑏 ] ← T[𝑎,𝑏 ] T[𝑏,𝑐 ] .               (13)
+T[𝑏,𝑐 ] is stored between 𝑏 and 𝑐, and the long backward Jacobian
+T[𝑎,𝑐 ] can be easily computed as shown in the following equation                       Additionally, T[𝑏,𝑐 ] is reset to the identity:
+
+                              T[𝑎,𝑐 ] = T[𝑎,𝑏 ] T[𝑏,𝑐 ] .                     (11)                                       T[𝑏,𝑐 ] ← 𝑰 .                       (14)
+                                                                                        Moreover, particle redistribution is not performed when short-range
+                                                                                       flow map is reinitialized.
+   This long-short flow map mechanism was designed to transport
+                                                                                          In most instances, 𝑛𝐿 is selected as an integer multiple of 𝑛𝑆 ,
+both the impulse and its gradient. The long flow map is used for
+                                                                                       ensuring that each reinitialization of the long-range flow map coin-
+the long-range transport of the impulse, while the short flow map
+                                                                                       cides with a reinitialization of the short-range flow map. However,
+addresses the gradient, which is sensitive to flow distortion. We will
+                                                                                       there are situations where 𝑛𝐿 is not an integer multiple of 𝑛𝑆 . In
+specify details in Section 5.2.
+                                                                                       such cases, to prevent the misalignment in the progression of the
+   At each step, we update the short-range flow map by marching
+                                                                                       two maps, the short-range map is still reinitialized at the reinitial-
+T[𝑏,𝑐 ] by one step in parallel with the particle’s advection, using
+                                                                                       ization points of the long-range map, even if it hasn’t reached its
+our custom 4𝑡ℎ order of Runge-Kutta (RK4) integration scheme,                          𝑛𝑆 interval. An exploration of how these reinitialization intervals
+as detailed in Alg. 3. Subsequently, the long-range flow map is                        influence the process is detailed in Section 7.2.
+updated according to Equation 11, with the updated T[𝑏,𝑐 ] and T[𝑎,𝑏 ]
+which has been reinitialized at time 𝑏. We will demonstrate the                        5    EULERIAN-LAGRANGIAN FRAMEWORK
+reinitialization of the flow map in Section 4.4.
+                                                                                       Equipped with the design of our particle flow map, we aim to develop
+                                                                                       a hybrid Eulerian-Lagrangian framework for simulating incompress-
+4.4        Particle Flow Map Reinitialization
+                                                                                       ible flow. Specifically, we plan to solve the impulse-based fluid model
+Owing to the distortion that occurs in the T when the flow map’s                       as governed by Equation 8, utilizing the impulse flow map outlined
+range becomes excessively elongated, we reinitialize the flow map                      in Equation 9. The overarching goal is to leverage particles for the
+at regular intervals. Specifically, for the long-range map, a reinitial-               accurate transport of fluid impulse and use the background grid to
+ization is conducted every 𝑛𝐿 steps, during which time 𝑎 is reset to                   solve the Poisson equation and enforce incompressibility.
+time 𝑐, and T[𝑎,𝑏 ] is set to identity:                                                   To construct this hybrid fluid solver, we must address three key
+                                    T[𝑎,𝑏 ] ← 𝑰 .                             (12)     issues: (1) The discretization of different physical quantities on
+                                                                                       particles and grids, (2) The construction of accurate flow maps
+  In addition, to prevent the clustering of particles over time, we will               for the transport of impulse, and (3) The transfer of fluid impulse
+uniformly redistribute particles throughout the entire simulation                      from particles to the grid for the incompressibility solution. We will
+domain at regular intervals of 𝑛𝐿 steps. Insights into the impact of                   elaborate our numerical solutions w.r.t. these aspects as follows.
+
+ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+                                                                                                  Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps      •   76:7
+
+
+
+
+Fig. 7. Simulation of oblique vortex rings. The transformation of a set of         Fig. 8. Evolution of a trefoil knot. Initially, the knot moves rightward while
+oblique vortex rings involves a process where the two vortices initially connect   rotating. This motion causes collisions and reconnections nearby, breaking
+on the left side, experience several changes in their structure, and ultimately    the knot into two distinct, unlinked rings. This pattern aligns well with the
+transform into three separate vortex rings.                                        results seen in the referenced experiments [Kleckner and Irvine 2013].
+
+
+       Table 2. Summary of quantities stored on particles and grid.                  5.2   Impulse Transport
+                                                                                     5.2.1 Impulse Mapping. Building upon the particle flow map up-
+ Notation       Location     Definition                                              dated at each timestep, we first advance the fluid impulse on each
+      𝒙𝑝         particle    position of the 𝑝-th particle                           particle. This process is straightforwardly executed by computing
+      T[𝑎,𝑏 ]    particle    backward map Jacobian from time 𝑏 to 𝑎                  the impulse values at time 𝑐, using the backward Jacobian of the
+      T[𝑏,𝑐 ]    particle    backward map Jacobian from time 𝑐 to 𝑏                  long-range flow map T[𝑎,𝑐 ] . Specifically, this can be expressed as:
+      𝒎𝑎         particle    impulse on particles at time 𝑎                                                               𝑇
+                                                                                                                   𝒎𝑐 ← T[𝑎,𝑐 ] 𝒎𝑎 .                                  (15)
+      𝒎𝑏         particle    impulse on particles at time 𝑏
+      ∇𝒎𝑏        particle    impulse gradients on particles at time 𝑏                Here, T[𝑎,𝑐 ] is calculated on-the-fly by multiplying T[𝑎,𝑏 ] and T[𝑏,𝑐 ] .
+      𝒖𝑖        grid faces   velocity of the 𝑖-th cell                               5.2.2 Impulse Gradient Mapping. Next, we evolve the impulse gra-
+      𝑤𝑖        grid faces   weights sum of the 𝑖-th cell                            dient using our particle flow map. We map ∇𝒎𝑏 from time 𝑏 to
+                                                                                     time 𝑐 utilizing T[𝑏,𝑐 ] , as depicted by
+                                                                                                                      𝑇
+                                                                                                              ∇𝒎𝑐 ← T[𝑏,𝑐 ] ∇𝒎𝑏 T[𝑏,𝑐 ]                               (16)
+                                                                                     This equation employs the first term from the right-hand side of
+                                                                                     Equation 10, while the second term is omitted due to the overhead
+                                                                                     and difficulty of accurately calculating it. Additionally, excluding
+5.1    Discretization                                                                the term does not reduce the desired simulation qualities. This issue
+We utilize particles to transport the fluid impulse and employ the                   is further discussed in Section 9.
+grid for computing the divergence-free velocity field. For each par-
+ticle 𝑝, we store its current position 𝒙𝑝 . We utilize the long-short                5.2.3 Impulse Particle-to-Grid Transfer. After calculating 𝒎𝑐 and
+flow map mechanism introduced in Section 4.3.2 to enable the im-                     ∇𝒎𝑐 , we execute a particle-to-grid transfer using values on particles
+plementation of dual-layer flow maps on each particle. In particular,                to compute the impulse field 𝒎𝑖 on the grid as:
+                                                                                                      ∑︁                                ∑︁
+we maintain two backward Jacobians, T[𝑎,𝑏 ] and T[𝑏,𝑐 ] , we store                             𝒎𝑖 ←
+                                                                                                                 𝑝        𝑝
+                                                                                                         𝑤𝑖𝑝 (𝒎𝑐 + ∇𝒎𝑐 (𝒙𝑖 − 𝒙𝑝 )) /        𝑤𝑖𝑝 ,      (17)
+snapshots of the impulse values, 𝒎𝑎 and 𝒎𝑏 , which are sampled at                                         𝑝                                        𝑝
+times 𝑎 (start point of the long-range map) and 𝑏 (start point of the
+                                                                                     where the superscript of 𝒎𝑐 and ∇𝒎𝑐 means they are stored on
+short-range map) respectively. We also store the impulse gradient
+                                                                                     particle 𝑝. The impulse field 𝒎𝑖 will be projected by solving Poisson
+∇𝒎𝑏 for time 𝑏. On the grid side, we discretize the velocity field 𝒖 on
+                                                                                     equation, ultimately yielding the velocity field 𝒖𝑖 on grid.
+a MAC grid, with its velocity components stored on grid faces. We
+also store a scalar field 𝑤𝑖 on grid faces to specify particle-to-grid                  Validation Experiment. We execute an experiment to validate the
+interpolation weights summation of cell 𝑖. Table 2 outlines all the                  efficacy of our proposed approach. Initially, we set up a velocity
+attributes stored on particles and the background grid. It is worth                  field as illustrated in Figure 3(a) and (b). Subsequently, particles are
+noting that a few other particle quantities, such as velocity 𝒖𝑝 , end-              placed within this velocity field, and both initial velocity and velocity
+point impulse 𝒎𝑐 , and endpoint backward Jacobian 𝑇[𝑎,𝑐 ] , can be                   gradients are interpolated from the grid to the particles to establish
+calculated dynamically during the simulation. As a result, these                     the initial impulse and impulse gradients. The particles are then
+quantities do not require dedicated storage as particle attributes.                  advected within the field, and both impulse and impulse gradients
+
+                                                                                               ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+76:8   •    Junwei Zhou, Duowen Chen, Molin Deng, Yitong Deng, Yuchen Sun, Sinan Wang, Shiying Xiong, and Bo Zhu
+
+
+
+
+Fig. 9. The interaction and merging of four vortices, each positioned at right       Fig. 10. Simulation of eight vortices collision. In a cubic simulation space, eight
+angles to the adjacent ones, lead to their eventual collision and reconnection.      rings forming an octahedron at a 35.26° angle to the z-axis collide and reform
+This process results in the formation of two bigger vortices, each resembling        into six rings. These rings move orthogonally to the cube’s walls, splitting into
+a four-pointed star. These enlarged vortices then move towards the left and          vortex tubes that collide and recombine. Eventually, they form six rings again
+right boundaries and subsequently divide into four separate vortex tubes.            moving towards the center and finally split into eight separate parts.
+
+
+are evolved through the utilization of the two maps as previously                      Algorithm 1 Particle Flow Map Simulation
+described. The evolved values are then applied in a particle-to-grid                   Initialize: 𝒖𝑖 to initial velocity; T[𝑎,𝑏 ] , T[𝑏,𝑐 ] to 𝑰
+process to compute the velocity field at each step. Figure 3(e) de-
+                                                                                         1: for 𝑘 in total steps do
+picts the discrepancy between the analytical velocity field and the
+                                                                                         2:     𝑗 ← 𝑘 (mod 𝑛𝐿 );
+velocity field generated by our method. We also assess the out-
+                                                                                         3:    𝑙 ← 𝑘 (mod 𝑛𝑆 );
+comes when only impulse is transferred to the grid. It is evident
+                                                                                         4:     if 𝑗 = 0 then
+that incorporating impulse gradients in the particle-to-grid process
+                                                                                         5:          Uniformly distribute particles;
+significantly reduces the error. In addition, we conduct this exper-
+                                                                                         6:          Reinitialize 𝒎𝑎 ;                                ⊲ eq. (18)
+iment using NFM, and the results of our method show a smaller
+                                                                                         7:          Reinitialize T[𝑎,𝑏 ]                             ⊲ eq. (12)
+discrepancy from the analytical velocity field compared to NFM,
+                                                                                         8:     end if
+further demonstrating the efficacy of our approach.
+                                                                                         9:     if 𝑙 = 0 then
+                                                                                        10:          Reinitialize ∇𝒎𝑏 ;                               ⊲ eq. (19)
+5.3        Impulse Reinitialization                                                     11:          Reinitialize T[𝑎,𝑏 ] and T[𝑏,𝑐 ] ;           ⊲ eq. (13, 14)
+Every 𝑛𝐿 steps and 𝑛𝑆 steps, reinitialization is undertaken for long-                   12:     end if
+range and short-range flow maps, respectively, as described in Sec-                     13:     Compute Δ𝑡 with 𝒖𝑖 and the CFL number;
+tion 4.4. During the reinitialization of the long-range map, since                      14:     Estimate midpoint velocity 𝒖𝑖mid ;                     ⊲ Alg. 2
+                                                  𝑝
+time 𝑎 is reset to time 𝑐, particles 𝑝’s impulse 𝒎𝑎 is recalibrated by                  15:     March 𝒙𝑝 , T[𝑏,𝑐 ] with 𝒖𝑖mid and Δ𝑡;                  ⊲ Alg. 3
+interpolating the velocity field at time 𝑐:                                             16:     Compute T[𝑎,𝑐 ] with T[𝑎,𝑏 ] and T[𝑏,𝑐 ] ;            ⊲ eq. (11)
+                             𝑝
+                                   ∑︁                                                   17:     Compute 𝒎𝑐 with 𝒎𝑎 and T[𝑎,𝑐 ] ;                      ⊲ eq. (15)
+                           𝒎𝑎 ←        𝑤𝑖𝑝 𝒖𝑖 .                    (18)                 18:     Compute ∇𝒎𝑐 with ∇𝒎𝑏 and T[𝑏,𝑐 ] ;                    ⊲ eq. (16)
+                                           𝑖
+                                                                                        19:     Compute 𝒎𝑖 by transfering 𝒎𝑐 , ∇𝒎𝑐 to grid;           ⊲ eq. (17)
+ Similarly, when the short-range flow map is reinitialized with time                    20:     𝒖𝑖 ← Poisson(𝒎𝑖 );
+                                                     𝑝
+𝑏 reset to time 𝑐, particles 𝑝’s impulse gradient ∇𝒎𝑏 is recalibrated                   21: end for
+via interpolation from the velocity field at time 𝑐:
+                             𝑝
+                                   ∑︁
+                         ∇𝒎𝑏 ←        ∇𝑤𝑖𝑝 𝒖𝑖 .                   (19)
+                                           𝑖
+                                                                                           according to Equation 18. And backward map Jacobian T[𝑎,𝑏 ] is
+6      TIME INTEGRATION                                                                    reset to identity, outlined in Equation 12.
+                                                                                       (2) Reinitialize Short-range Map. Every 𝑛𝑆 step, each particle’s im-
+In this section, we delineate the time integration scheme of our                           pulse gradients ∇𝒎𝑏 are reinitialized through interpolation from
+method, and the pseudocode of our method is outlined in Alg 1.                             the grid’s velocity field 𝒖𝑖 , as depicted in Equation 19. In addi-
+(1) Reinitialize Long-range Map. Every 𝑛𝐿 step, we will uniformly                          tion, each particle’s backward map Jacobian T[𝑎,𝑏 ] and T[𝑏,𝑐 ]
+    redistribute particles throughout the entire simulation domain.                        are also reset by Equations 13 and 14.
+    Then, we reinitialize each particle’s initial long-range map im-                   (3) CFL Condition. We compute Δ𝑡 with velocity field 𝒖𝑖 and the
+    pulse 𝒎𝑎 by interpolating the velocity field 𝒖𝑖 on grid faces,                         CFL number.
+
+ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+                                                                                           Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps      •   76:9
+
+
+ (4) Midpoint Method. Similar to NFM [Deng et al. 2023], we em-               Table 3. Simulation world time (frames × timestep) of 2D leapfrogging
+     ploy the second-order, midpoint method as outlined in Alg. 2             vortices from the initial state to the end state. The observation reveals that
+                                                                              APIC, impulse-modified APIC, CF, and CF+BiMocq are unable to maintain
+     to substantially diminish the truncation error associated with
+                                                                              the vortices over an extended period. On the other hand, the NFM exhibits
+     temporal integration.                                                    improved performance, yet it remains less effective compared to the PFM.
+ (5) Advect Particles and Evolve T[𝑏,𝑐 ] . We march 𝒙𝑝 , T[𝑏,𝑐 ] with
+     Alg. 3, using 𝒖𝑖mid and Δ𝑡.
+                                                                                              Method                                      Time (sec)
+ (6) Compute T[𝑎,𝑐 ] . We employ T[𝑎,𝑏 ] and T[𝑏,𝑐 ] to calculate T[𝑎,𝑐 ] ,
+                                                                                               APIC                                           7.9
+     according to Equation 11.
+ (7) Compute 𝒎𝑐 . We evolve 𝒎𝑎 from time 𝑎 to time 𝑐 using long-                             IM APIC                                          92.0
+     range map to calculate 𝒎𝑐 , according to Equation 15.                                       CF                                           50.1
+ (8) Compute ∇𝒎𝑐 . We evolve ∇𝒎𝑏 from time 𝑏 to time 𝑐 using                                CF+BiMocq                                         45.0
+     short-range map to calculate impulse gradients ∇𝒎𝑐 , according                            NFM                                           234.0
+     to Equation 16.                                                                            Ours                                         408.5
+ (9) Particle-to-grid. We transfer impulse 𝒎𝑐 and impulse gradients                        Ours+Hessian                                      317.5
+     ∇𝒎𝑐 from particles to grid faces, resulting in impulse field 𝒎𝑖
+     on grid, according to Equation 17.
+(10) Poisson Solving. We obtain velocity field 𝒖𝑖 on the grid from
+     impulse field 𝒎𝑖 by solving Poisson equation.                            vortices then move rightward and eventually return to their starting
+                                                                              positions after colliding with the boundary. In an energy-conserving
+ 7     VALIDATION
+                                                                              scenario, this cycle could continue indefinitely. However, in prac-
+                                                                              tical simulations, the vortices either merge into a single negative
+ The goal of this section is to validate the effectiveness of our pro-        and a single positive vortex, or the two pairs become asymmetric
+ posed method. We will first introduce a variation of PFM, which will         along the 𝑦-axis. Both outcomes indicate numerical diffusion in
+ be used for comparison. Then, we will compare PFM with five meth-            the simulation. We timed the duration from the initial configura-
+ ods to validate its effectiveness. Next, we will conduct an ablation         tion to one of these end states, and the performance of various
+ study to validate some steps of our method.                                  methods is summarized in Table 3. The results reveal that the APIC
+                                                                              method maintains the vortices for only a brief period before they
+ 7.1    Comparison to Other Approaches                                        dissipate, whereas impulse-modified APIC, CF, and CF+BiMocq per-
+ In this section, we assess the effectiveness of our method against           form slightly better than APIC. The NFM method outperforms them
+ established benchmarks, including methods of CF [Nabizadeh et al.            but is still surpassed by PFM. This is consistent with the energy
+ 2022], CF+BiMocq [Nabizadeh et al. 2022; Qu et al. 2019], NFM [Deng          variation results presented in Figure 12, where PFM excels in energy
+ et al. 2023], APIC [Jiang et al. 2015], and an impulse-modified APIC         preservation over the other methods.
+ (IM APIC) as we specified below. Our primary focus lies in compar-               Interestingly, although impulse-modified APIC also utilizes evolved
+ ing our method with these techniques regarding vortex preservation           impulse and impulse gradients on particles to reconstruct the ve-
+ capabilities, energy conservation, visual intricacy, and the computa-        locity field, its effectiveness in maintaining vorticity is significantly
+ tional time and memory costs involved in the simulations.                    inferior to that of PFM. This indicates that merely using impulse
+                                                                              and impulse gradients is insufficient. For optimal vorticity retention,
+    Impulse-modified APIC. To showcase that the particle flow map
+                                                                              it is crucial to evolve these elements on particles using a flow map
+ mechanism plays an essential role, we implemented an impulse-
+                                                                              with adequate range, thereby enhancing numerical accuracy.
+ modified APIC solver to conduct ablation tests. By configuring both
+ 𝑛𝐿 and 𝑛𝑆 to 1, effectively causing the long-range map and short-              3D Analysis: Leapfrogging Vortices. As illustrated in Figure 13, we
+ range map to be reinitialized at every step, PFM transitions into a          experiment with 3D leapfrogging vortex rings. Analogous to the
+ methodology closely resembling APIC [Jiang et al. 2015], with the            2D scenario, two rings in this experiment will perpetually leapfrog
+ primary distinction being the substitution of impulse for velocity.          around each other in a conservative setting. In our findings, APIC,
+ We refer to this variation as impulse-modified APIC. In this approach,       impulse-modified APIC, CF and CF+BiMocq manage to keep the
+ particles at each step interpolate the grid’s velocity field to acquire      two rings separate only up to the 3rd leap. And both NFM and PFM
+ impulse and impulse gradients. Then, the backward map Jacobian T             successfully sustain to the 5th leap.
+ is calculated similarly to the approach in PFM. These elements are
+ utilized to evolve the impulse and impulse gradients by a single step           3D Analysis: Four Vortices Collision. As depicted in Figure 9, we
+ during the particle advection process. Subsequently, the evolved val-        execute an experiment involving the collision of four vortices, dur-
+ ues are conveyed to the grid via a particle-to-grid process mirroring        ing which the vortices merge and subsequently divide into two
+ PFM’s. An evaluative comparison between impulse-modified APIC                star-shaped vortices that drift in opposite directions until they en-
+ and PFM is detailed in the following experiments.                            counter the boundary. We compare the simulation results of PFM to
+                                                                              the other methods, as shown in Figure 14. The results reveal that all
+    2D Analysis: Leapfrogging Vortices. We establish the classic 2D           six methods can generate the twin star-shaped vortices. However,
+ leapfrogging vortex rings experiment. Initially, two negative and            post-collision, APIC, impulse-modified APIC, and CF struggle to
+ two positive vortices are placed on the left side of the domain. These       maintain vorticity, leading to dissipative, slower-moving vortices. In
+
+                                                                                        ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+76:10            • Junwei Zhou, Duowen Chen, Molin Deng, Yitong Deng, Yuchen Sun, Sinan Wang, Shiying Xiong, and Bo Zhu
+
+
+     APIC                                                Impulse APIC                                      CF                           CF+BiMocq                NFM                       Ours
+
+
+
+
+Fig. 11. We show the comparison of collision between eight vortices. The figures on the first row display the results at 𝑡 = 10𝑠, and the figures on the second
+row display the results at 𝑡 = 55𝑠. From this experiment, we show our method is the only one capable of recovering the six vortex tubes after the vortices
+collide with the walls and reflect. This manifests the ability of our method to preserve vorticity and the correctness of our treatment with solid boundaries.
+
+
+                ×10 3      Energy over time, 2D leapfrog
+                                                                              2.2
+                                                                                    ×10 4    Energy over time, 3D Four Vortices           APIC                                 Impulse APIC
+          1.0
+                                                                              2.0
+          0.9                                                                 1.8
+
+          0.8                                                                 1.6
+ energy                 APIC                                         energy   1.4           APIC
+          0.7           IM APIC                                                             IM APIC
+                        CF                                                    1.2           CF
+          0.6           CF+BiMocq                                             1.0           CF+BiMocq
+                        NFM                                                                 NFM
+                        Ours                                                  0.8           Ours
+          0.5           Ours+Hessian                                                        Ours+Hessian                                 CF                                     CF+BiMocq
+                 0      100   200      300   400   500   600   700                   0         100         200       300   400    500
+                                         frame                                                               frame
+
+
+Fig. 12. Time-varying energy of 2D leapfrogging vortices (left) and 3D four
+vortices collision (right).
+
+                                                                                                                                          NFM                                  Ours
+
+contrast, CF+BiMocq, NFM, and PFM effectively preserve vorticity.
+This observation is consistent with the time-varying energy analysis
+presented in Figure 12, where APIC, impulse-modified APIC, and
+CF exhibit rapid energy loss, whereas CF+BiMocq, NFM and PFM
+demonstrate superior energy conservation, with PFM outperform-
+                                                                                                                                         Fig. 13. Comparison of 3D leapfrog vorticies. Our method is able to maintain
+ing CF+BiMocq and NFM in this regard.
+                                                                                                                                         the separation of vortex rings for a range of time comparable with NFM, but
+                                                                                                                                         other methods merge quickly. The initial frame for all methods is located at
+   3D Analysis: Eight Vortices Collision. As illustrated in Figure 10,                                                                   the bottom-left corner of the APIC subfigure.
+we undertake an experiment involving the collision of eight vortices.
+The amalgamation of these vortices forms six star-shaped vortices,
+which proceed along the positive and negative axes of three orthog-                                                                         Time and Memory Cost Analysis. As depicted in Table 4, PFM
+onal dimensions. Upon impact with the cube-shaped boundary, the                                                                          significantly outperforms NFM in terms of execution speed, deliv-
+vortices disperse into several vortex tubes, tracing the boundary                                                                        ering results comparable to or surpassing those achieved by NFM.
+surface before eventually merging to reconstruct six distinct vor-                                                                       Specifically, PFM is 49.1, 10.9, 12.0, and 24.6 times faster than NFM
+tices. As shown in Figure 11, APIC, impulse-modified APIC, and CF                                                                        in scenarios involving 2D leapfrogging vortices, 3D leapfrogging
+exhibit excessive dissipation, failing not only to preserve the vortical                                                                 vortices, 3D four vortices collision, and 3D eight vortices collision,
+structures but also to regenerate the six vortices. While CF+BiMocq                                                                      respectively. This considerable increase in speed primarily stems
+and NFM manages to maintain the tubular formations, it falls short                                                                       from eliminating both the backtrack substeps and the neural buffer
+in preserving the overall symmetry of the system. In contrast, PFM                                                                       training process present in NFM. Moreover, by obviating the need
+preserves the entire system’s symmetry and effectively reconstructs                                                                      for a neural buffer, PFM also realizes substantial memory savings,
+the six-vortex formation.                                                                                                                registering reductions of 29.5%, 38.4%, 38.4%, and 41.7% in memory
+
+ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+                                                                                             Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps      •   76:11
+
+
+  APIC                     Impulse APIC               CF                       CF+BiMocq                  NFM                           Ours
+
+
+
+
+ Fig. 14. We show a time instance for the vorticity of four vortices colliding at a right angle. Our method maintains a comparable performance with NFM.
+
+
+
+
+Fig. 15. Simulation of two opposing vortex rings, apart on the 𝑥-axis. When they collide, they form a single ring that rapidly elongates in the 𝑦𝑧-plane and
+contracts along the 𝑥-axis, leading to fragmentation into a circle of smaller secondary vortices.
+
+
+
+
+ Fig. 16. Smoke for 3D leapfrogging vortices. As shown in Section 7.2, our usage for ∇𝜌𝑠 with the correct advection equation provides the clearest result.
+
+
+Table 4. Average simulation time and maximum GPU memory cost of our              to APIC and impulse-modified APIC, PFM maintains a similar exe-
+2D and 3D simulation examples.                                                   cution time and memory footprint, yet it significantly enhances the
+                                                                                 simulation outcomes for these examples, as previously mentioned.
+      Name               Method         Time (sec / step)   GPU Mem. (GB)
+  2D Leapfrog            APIC                 0.24                1.21           7.2    Ablation Study
+  2D Leapfrog           IM APIC               0.25                1.41              Redistribute Particles. We conduct a 2D leapfrogging vortices anal-
+  2D Leapfrog             NFM                 23.11               2.00           ysis using three different particle redistribution strategies: uniform
+  2D Leapfrog             Ours                0.47                1.41           particle redistribution, random particle redistribution, and no parti-
+  3D Leapfrog            APIC                 4.92                3.51           cle redistribution. These approaches are examined under conditions
+  3D Leapfrog           IM APIC               4.69                7.91           where (𝑛𝐿 , 𝑛𝑆 ) assumes values of (20, 5), (20, 8), (20, 9), (20, 10),
+  3D Leapfrog             NFM                 52.05              13.33           and (20, 15). The simulation world time from the initial state to the
+  3D Leapfrog             Ours                4.75                8.21           end state of the leapfrogging vortices, utilizing the three mentioned
+  3D Four Vort            APIC                4.60                3.51
+                                                                                 strategies, is illustrated in Figure 17. The results indicate that both
+                                                                                 the no redistribution and random redistribution methods fall short
+  3D Four Vort          IM APIC               4.26                7.91
+                                                                                 of achieving satisfactory results, with random redistribution slightly
+  3D Four Vort            NFM                 50.71              13.34
+                                                                                 outperforming the former. However, it is the uniform particle redis-
+  3D Four Vort            Ours                4.20                8.21           tribution that delivers the most efficient performance, an approach
+  3D Eight Vort           APIC                2.04                2.31           that is notably employed by PFM.
+  3D Eight Vort         IM APIC               1.82                4.41
+  3D Eight Vort           NFM                 47.98               7.91              Reinitialization Steps. We examine the impact of reinitialization
+  3D Eight Vort           Ours                1.95                4.61           intervals 𝑛𝐿 and 𝑛𝑆 by conducting both 2D and 3D leapfrogging
+                                                                                 vortices experiments. Specifically, for the 2D scenario, we set 𝑛𝑆 to
+                                                                                 values of 1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, and 20 when 𝑛𝐿 is fixed at 20,
+                                                                                 and we alter 𝑛𝐿 to 8, 10, 15, 18, 20, 25, 30, 35, and 40 when 𝑛𝑆 is fixed
+                                                                                 at 8. For 3D scenario, we set 𝑛𝑆 to values of 1, 2, 3, 4, 5, 6 and 7 when
+usage compared to NFM for these respective scenarios. Compared                   𝑛𝐿 is fixed at 20, and we alter 𝑛𝐿 to 5, 8, 12, 15, 18, 20, 22 and 25
+
+                                                                                           ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+76:12       • Junwei Zhou, Duowen Chen, Molin Deng, Yitong Deng, Yuchen Sun, Sinan Wang, Shiying Xiong, and Bo Zhu
+
+
+                                                                                                                                           nL = 20                                                                                    nS = 8
+                                          nL = 20                                                    400
+                                                                                                                            5
+                                                                                                                                     7
+                                                                                                                                         8 9
+                                                                                                                                                                                               425                                       25     30
+                                                                                                                                               10 11                                           400
+            400                                                                                      350
+                                                                                                                       4         6
+                                                                                                                                                                                               375
+                                                                                                                                                                                                                                 20
+
+                  5                   8   9
+                                                                                                                                                       12
+                                                                                                                                                                  15
+
+                                                                                         Time(sec)                                                                                 Time(sec)
+            350                                10                                                    300
+                                                                                                            1                                                                                  350
+                                                                                                                                                                                                      8
+                                                                                                                                                                                               325                          18
+                                                                              15                                                                                                               300        10           15
+            300                                                                                      250
+                                                                                                                                                                                               275
+                                                                                                                                                                                                                                                      35
+                                                                                                                                                                             20                                                                            40
+
+
+
+
+Time(sec)
+            250                                        no redistribution                             200
+                                                                                                                2.5        5.0       7.5       10.0 12.5 15.0 17.5 20.0
+                                                                                                                                                                                               250
+                                                                                                                                                                                                          10           15        20      25     30   35    40
+                                                       random redistribution                                                                    nS                                                                                      nL
+            200                                        our redistribution
+                                                                                         Fig. 19. 2D leapfrogging vortices’ simulation world time results of various
+            150                                                                          reinitialization steps. The left side corresponds to a fixed 𝑛𝐿 = 20 and
+                                               10                             15
+            100   5                   8   9                                              varying 𝑛𝑆 , and the right side corresponds to a fixed 𝑛𝑆 = 8 and varying
+                                                                                         𝑛𝐿 .
+             50 5                             10                              15
+                                      8   9
+                        6             8       10           12           14                                 ×10 4                           nL = 20                                                   ×10 4                            nS = 1
+                                              nS                                                     2.9                                                                                       2.9
+                                                                                                     2.8                                                                                       2.8
+                                                                                                     2.7                                                                                       2.7           5
+Fig. 17. 2D leapfrogging vortices’ simulation world time results of different             energy                   1
+                                                                                                                   2
+                                                                                                                                                                                    energy                   8
+                                                                                                                                                                                                             12
+                                                                                                     2.6                                                                                       2.6
+                                                                                                                   3                                                                                         15
+particle redistribution strategies. The green line shows the results of the                          2.5           4                                                                                         18
+                                                                                                                   5                                                                           2.5           20
+uniform redistribution strategy adopted in PFM, while the orange line and                                          6                                                                                         22
+                                                                                                     2.4           7                                                                           2.4           25
+blue line show the results of random redistribution and no redistribution,
+                                                                                                            0          50            100        150         200        250   300                      0           50        100        150     200   250   300
+respectively. The results show that uniform redistribution performs much                                                                       frame                                                                                  frame
+better than the other two strategies.
+                                                                                         Fig. 20. 3D leapfrogging vortices’ time-varying energy results of various
+  (a)                           (b)                        (c)                           reinitialization steps. The left side corresponds to a fixed 𝑛𝐿 = 20 and
+                                                                                         varying 𝑛𝑆 , and the right side corresponds to a fixed 𝑛𝑆 = 1 and varying
+                                                                                         𝑛𝐿 .
+
+
+                                                                                         the grid. We show in Figure 18 that not transferring ∇𝜌𝑠 to the grid
+Fig. 18. In this comparison, we show three leapfrog simulations of smoke                 or not evolving ∇𝜌𝑠 will cause smoothing behavior in smoke simu-
+but with different treatments for ∇𝜌𝑠 . (a) show the simulation without                  lation. The first subfigure shows the smoke advected without ∇𝜌𝑠 ,
+using ∇𝜌𝑠 ; (b) shows the simulation if we just store ∇𝜌𝑠 at every reinitial-
+                                                                                         and the smoke gets blurred quickly. The middle subfigure shows
+ization step without evolving it during simulation; (c) shows our current
+implementation, which is using the evolution of ∇𝜌𝑠 .
+                                                                                         that if we keep ∇𝜌𝑠 for reinitialization without evolving it, smoke
+                                                                                         also gets blurred (but slightly better). Only by evolving ∇𝜌𝑠 and
+                                                                                         transferring both 𝜌𝑠 and ∇𝜌𝑠 can we obtain the optimal result.
+when 𝑛𝑆 is fixed at 1. The outcomes are depicted in Figure 19 and 20
+for 2D and 3D experiments, respectively. The results reveal that for                     8             EXAMPLES
+a constant 𝑛𝐿 , a smaller 𝑛𝑆 typically yields better results. However,                   In this section, we present various intricate simulation examples to
+as 𝑛𝑆 approaches the value of 𝑛𝐿 , the efficiency of PFM diminishes                      demonstrate the efficacy of our PFM simulator. A comprehensive list
+rapidly. This confirms the importance of using both short-range                          of these examples and their respective configurations is available
+and long-range maps in PFM instead of two flow maps of identical                         in Table 5. It is assumed that the shortest edge of the simulation
+lengths. Conversely, when 𝑛𝑆 is held constant, both excessively                          domain is of unit length. We refer readers to our supplemented video
+large and small values of 𝑛𝐿 lead to suboptimal performance.                             for detailed simulation results. All simulations were performed on
+                                                                                         workstations equipped with an AMD Ryzen Threadripper 5990X
+   Evolution of Smoke Density Gradients. In our method, we employ a
+                                                                                         and an NVIDIA RTX 3080/A6000.
+particle-to-grid strategy that not only facilitates the transport of vec-
+tor quantities such as impulse, transferring both the quantity itself                    8.1                Vortical Flow
+and its evolved gradients to the grid, but also extends this methodol-
+                                                                                           Taylor Vortex. We adapt the setting from [McKenzie 2007] where
+ogy to the transport of scalar quantities, like smoke density 𝜌𝑠 . This
+                                                                                         the simulation domain is [−𝜋, 𝜋] and two Taylor vortices separated
+section highlights the importance of accurately evolving ∇𝜌𝑠 with
+                                                                                         by 0.8. We show the separation process in Figure 22.
+the flow map and effectively transferring it from the particles to the
+grid, especially in smoke advection. In our approach, we store both                         Leapfrogging Vortices (2D). Table 3 shows our 2D leapfrog experi-
+the smoke density 𝜌𝑠 and its gradients ∇𝜌𝑠 on particles, with the                        ment where we position four point vortices with equal magnitudes
+gradients evolving using the flow map. Subsequently, we employ                           of 0.005 at 𝑥 = 0.0625 and 𝑦 values of 0.26, 0.38, 0.62, and 0.74, with
+a strategy akin to that used for impulse to transfer these values to                     the upper two negative and the lower two positive. These vortices
+
+ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+                                                                                            Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps       •   76:13
+
+
+
+
+                                                                                 Fig. 22. (a) shows taylor vortex splitting and (b) shows Karman Vortex Street
+                                                                                 at 𝑡 = 60𝑠 with no viscosity.
+
+
+                                                                                    Eight Vortices Collision. Figure 10, based on Matsuzawa et al.
+                                                                                 [2022], shows an experiment with eight vortices forming a reg-
+                                                                                 ular octahedron, each angled at 35.26° relative to the 𝑧-axis. These
+                                                                                 rings, with major radius of 0.08 and minor radius of 0.024, collide
+                                                                                 and reconnect into six rings within a cubic boundary. Figure 11
+                                                                                 shows our method uniquely recreating this dynamic.
+
+                                                                                 8.2    Solid Boundaries
+                                                                                 We employ a triangle mesh for solid-driven flow applications, ei-
+                                                                                 ther static or animated by a preset skeleton. The forward difference
+                                                                                 between two consecutive timesteps determines the velocity at each
+                                                                                 mesh vertex. We adopt an interpolation method, as described in
+                                                                                 [Robinson-Mosher et al. 2008], to transfer velocity from mesh ver-
+Fig. 21. These images depict a bird in the act of flapping its wings, a behav-
+                                                                                 tices to a grid. The weight of this transfer is based on the intersection
+ior that generates visually stunning and complex vortices. These vortices
+                                                                                 area between the grid cell and the triangle patch. This velocity is
+interact with each other, forming intricate shapes.
+                                                                                 then used as a solid boundary condition to drive the fluid simulation.
+                                                                                    Karman Vortex Street. In Figure 22, we place a cylinder at [0.2,
+are modeled using a mollified Biot-Savart kernel with a support of
+                                                                                 0.5] with the radius of 0.05. Due to lack of viscosity, incoming flow
+0.02. In the experiment, our method accurately maintains vortex
+                                                                                 creates more turbulent vortices, as shown in [Nabizadeh et al. 2022].
+structure for 408.5 seconds.
+                                                                                    Lifting Airplane. In Figures 23 and 24, we showcase planes with
+    Leapfrogging Vortices (3D). In Figure 16, the initial setup involves
+                                                                                 different lifting angles facing incoming flow from the front boundary.
+two vortex rings aligned parallelly, positioned at 𝑥 = 0.16 and 0.29125.
+                                                                                 Both delta wing and flat wing configurations are depicted. The tra-
+These rings have a major radius of 0.21 and a minor radius (the mol-
+                                                                                 jectories observed in our smoke visualization model closely mimic
+lification support of the vortices) of 0.0168. Our approach maintains
+                                                                                 real-world airplane condensation trails.
+separation of the vortex rings beyond the 5th leap.
+                                                                                    Flapping Bird, Swimming Fish, and Rotating Propeller. Figure 21,
+  Oblique Vortex Collision. In Figure 7, we detail an experiment with
+                                                                                 4 and 5 illustrate our method coupling with the skeleton driven
+two perpendicular vortex rings, offset by 0.3 units along the 𝑥-axis,
+                                                                                 meshes. Skeletons are built in Blender in each example and set with
+each having a major radius of 0.13 and a minor radius of 0.02.
+                                                                                 periodic movements such as continuous rotations. Bezier interpola-
+  Headon Vortex Collision. Figure 15 shows an experiment with two                tions between keyframes are performed to ensure smoothness.
+opposing vortex rings, separated by 0.3 units on the 𝑥-axis, each
+with a major radius of 0.065 and a minor radius of 0.016. When                   9     DISCUSSION AND CONCLUSION
+these rings collide, they form a single ring that elongates in the               In this paper, we present a particle flow map method (PFM) that
+𝑦𝑧-plane and contracts along the 𝑥-axis, leading to destabilization              achieves state-of-the-art advection fidelity and simulation accuracy
+and fragmentation into secondary vortices [Lim and Nickels 1992].                in terms of energy conservation, vorticity preservation, and visual
+                                                                                 complexity, through its novel bridging of impulse fluid mechan-
+   Trefoil Knot. Figure 8 replicates the trefoil knot, using an initial-
+                                                                                 ics, long-range flow map, and hybrid Eulerian-Lagrangian simula-
+ization file from Nabizadeh et al. [2022], based on Kleckner and
+                                                                                 tion. Compared to the accurate but expensive NFM method, our
+Irvine [2013]. Our simulation result matches the experiments.
+                                                                                 PFM method drastically reduces the computational cost without
+  Four Vortices Collision. Figure 9 depicts an experiment based on               sacrificing the physical fidelity, as it leverages the mathematical
+Matsuzawa et al. [2022] where four vortex rings, arranged in a                   and numerical insight that a set of forward-evolving equations can
+square pattern, collide in the 𝑦𝑧-plane. These rings, each with a                be derived and naturally solved on particles to replace the costly
+major radius of 0.15 and a minor radius of 0.024 merge into two                  backtracing procedure. To realize this idea to its full potential, we
+four-pointed star-shaped vortices until colliding with the boundaries.           carefully devise a two-scale flow map representation along with
+We compare our result with previous methods in Figure 14.                        a novel particle-to-grid transfer scheme to devise a hybrid solver
+
+                                                                                           ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+76:14    • Junwei Zhou, Duowen Chen, Molin Deng, Yitong Deng, Yuchen Sun, Sinan Wang, Shiying Xiong, and Bo Zhu
+
+
+
+
+Fig. 23. These images show the formation of spiral-shaped vortices on the             Fig. 24. The pictures depicts a delta wing with a sweep angle exposed to airflow
+outer sides of a flat-wing aircraft under the influence of airflow coming at          at a angle of attack, and the "vortex lift" phenomenon becomes observable. This
+an angle with the plane. This phenomenon is identical to the contrails we             observation is consistent with the physical experiments reported in [Délery
+observe in the sky.                                                                   2001].
+
+Table 5. The catalog of all our 2D and 3D simulation examples. 𝑛𝐿 and 𝑛𝑆 are the reinitialization steps of long-range and short-range maps, respectively, and
+#Particles is the particle count per cell at reinitialization step.
+
+
+          Name                 Figure/Table               Resolution            CFL                       𝑛𝐿                     𝑛𝑆                  #Particles
+        2D Leapfrog               Table 3                 1024 × 256            1.0                       20                      8                      16
+   2D Taylor Vortex            Figure 22 (a)               128 × 128            1.0                       20                      8                      16
+  2D Karman Vortex             Figure 22 (b)               512 × 256            0.5                       20                      8                      16
+        3D Leapfrog              Figure 16             256 × 128 × 128          0.5                       20                      1                      8
+        3D Oblique                Figure 7             128 × 128 × 128          0.5                       12                      4                      8
+        3D Headon                Figure 15             128 × 256 × 256          0.5                       12                      4                      8
+        3D Trefoil                Figure 8             128 × 128 × 128          0.5                       12                      1                      8
+   3D Four Vortices               Figure 9             128 × 128 × 256          0.5                       12                      4                      8
+  3D Eight Vortices              Figure 10             128 × 128 × 128          0.5                       12                      4                      8
+         Flat Wing               Figure 23             384 × 128 × 128          0.5                       12                      4                      8
+        Delta Wing               Figure 24             384 × 128 × 128          0.5                       12                      4                      8
+     Flapping Bird               Figure 21             128 × 128 × 128          0.5                       12                      4                      8
+    Swimming Fish                 Figure 4             256 × 128 × 128          0.5                       12                      4                      8
+  Rotating Propeller              Figure 5             256 × 128 × 128          0.5                       12                      4                      8
+
+
+
+whose accuracy and versatility are thoroughly verified through a                        linear interpolation scheme and compensates for the interpolation
+set of challenging numerical experiments, including leapfrogging                        error with BFECC [Kim et al. 2006]. PFM, on the other hand, devises
+vortices, vortex tube reconnections, and turbulent flows.                               an advanced particle-to-grid transfer scheme that largely reduces
+                                                                                        the error. Thus, for accuracy, both methods offer comparable levels
+   Connection to NFM. The goal for both PFM and NFM is to accu-                         of performance, which are validated in our experiments. However,
+rately compute impulse 𝒎 on the grid, but they present two different                    from the efficiency standpoint, PFM is by far more desirable due to
+numerical perspectives: NFM traces “virtual particles” whose final                      the elimination of the costly backtracing process, as it can be up to
+positions coincide with the grid points, but their initial positions                    49× faster and 41% more compact than NFM.
+are inside grid cells. Hence, a grid-to-particle interpolation scheme
+is required at the initial time. PFM maintains forward simulating                         Connection to Hybrid Eulerian-Lagrangian Methods. Our PFM
+particles whose final positions are inside cells, but their initial values              method presents itself as a new type of hybrid Eulerian-Lagrangian
+are known from (re)initialization. Hence, a particle-to-grid transfer                   method, which is in line with PIC [Harlow 1962], APIC [Jiang et al.
+scheme is required at the final time. As a result, both perspectives                    2015], and similar methods, but one with significantly improved
+require exactly one potentially lossy communication between parti-                      ability to preserve the vortical structure, which is enabled by its
+cles and grids for each simulation step. To this end, NFM uses a naive                  innovative exploitation of the particles’ roles not only as samples of
+
+ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+                                                                                              Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps      •   76:15
+
+
+                                                                                   aggregating backward map Jacobian T[𝑏,𝑐   𝑘    of its neighboring par-
+                                                                                                                               ]
+                                                                                   ticles, weighted by ∇𝑤 𝑝𝑘 , where 𝑘 is the index of the neighboring
+                                                                                                                     𝑝
+                                                                                   particle. We then included (∇T[𝑏,𝑐 ] )𝑇 𝒎𝑏 to the right-hand side of
+                                                                                   Equation 16 to align it with Equation 10. Then, we conduct valida-
+                                                                                   tion experiments with the same setup as detailed in Section 7.1 and
+                                                                                   show the results in Table 3 and Figure 25 for 2D and 3D leapfrogging
+                                                                                   vortices, four vortices collision, and eight vortices collision. Addi-
+                                                                                   tionally, the time-varying energy for the 2D leapfrogging vortices
+                                                                                   and four vortices collision is depicted in Figure 12. From 2D/3D
+                                                                                   leapfrog experiments, we observed no significant improvement in
+                                                                                   preserving vortical structures compared to our proposed scheme.
+                                                                                   Similarly, the formula incorporating the Hessian term does not
+                                                                                   preserve symmetry structures as effectively in four/eight vortices
+                                                                                   collision experiments as our scheme does. We conjecture that this
+                                                                                   discrepancy in ability is due to potential inaccuracies in the back-
+                                                                                   ward map Hessian when directly calculated from particles, which
+                                                                                   leads to errors in mapping impulse gradients through flow maps.
+                                                                                   Furthermore, from a theoretical perspective, we observe that our
+                                                                                   method corresponds to a specific case of transferring T from parti-
+                                                                                   cles to the grid. We demonstrate that using only the first term on
+                                                                                   the right-hand side of Equation 10 is equivalent to this transfer in a
+                                                                                   PIC [Harlow 1962] manner, as detailed in Appendix F. Conversely,
+                                                                                   including the Hessian term modifies the transfer method from PIC
+                                                                                   to an APIC [Jiang et al. 2015] manner. Consequently, inspired by
+                                                                                   APIC’s enhancements over PIC, we anticipate uncovering additional
+                                                                                   numerical benefits by incorporating the Hessian term towards a
+Fig. 25. Simulation results of our method (left column) and our method
+                                                                                   higher-order PFM in our future exploration.
+incorporating the Hessian term (right column). The figures on the first and
+second rows show the results of 3D leapfrogging vortices and four vortices
+collision, respectively. The bottom two rows depict the results of eight vortice
+collisions at 𝑡 = 10𝑠 and 𝑡 = 55𝑠, respectively.
+                                                                                      Uniform Particle Redistribution. Uniform particle redistribution
+                                                                                   (or otherwise terms as remeshing or regridding) has been a widely
+physical fields but as samples of high-quality and adaptive-range                  used practice to address the particle distortion problem in the Vortex-
+flow maps. With this new perspective, we devise novel mathemati-                   In-Cell (VIC) literature [Koumoutsakos et al. 2008]. As consolidated
+cal formulations to endow particles with the crucial ability to evolve             in Figure 17, a uniform sampling strategy is necessary to reduce
+backward map Jacobian T in a forward-simulating manner, which                      the interpolation error for the impulse grid-to-particle transfer. We
+allows our hybrid framework to be readily bridged with the highly                  conjure the reason to be the fact that we are transferring T from
+effective impulse-based fluid paradigm. Not only is combining La-                  particles to the grid, as shown in the previous discussion, and when
+grangian particles with a flow map physically inspired and compu-                  reinitialization happens, uniform redistributing particles gives a
+tationally efficient, but it also naturally empowers the development               more structured reconstruction of its current space.
+of our length-adaptive mechanism, which is shown to be key to
+successful simulation, as verified in our ablation tests. Inspired by
+the conservative transfer schemes proposed by APIC [Jiang et al.
+2015] and Taylor-PIC [Nakamura et al. 2023], our method conser-                       Limitations & Future Works. Our method is currently subject to
+vatively transfers 𝒎 by leveraging its evolved gradients ∇𝒎, and                   a few limitations. First, it currently considers Euler’s equation for
+our scheme can be seen as a generalization of APIC as it allows ∇𝒎                 inviscid fluid flows, and the incorporation of viscosity and diverse
+to be accurately evolved using adaptive-length flow maps rather                    external forces remains an open problem for our flow map-based
+than single-step ones. In our comparison tests with APIC, we show-                 framework. Secondly, handling interfacial phenomena still proves
+case that such an improved accuracy for ∇𝒎 contributes to the                      challenging for our impulse-based formulation as it introduces addi-
+simulation accuracy.                                                               tional terms in the Poisson equation which brings about considerable
+                                                                                   numerical instability. Solving these technical challenges will allow
+   Further Ablation Tests on Hessian. We excluded the Hessian term                 free-surface liquids to be simulated which unlocks a new range
+in Equation 10 in our proposed numerical implementation in Sec-                    of vortical phenomena like toroidal bubbles. Finally, we currently
+tion 5.2. In this section, we provide further ablation tests to eval-              employ kinematic coupling for handling solid-fluid interactions, and
+uate the efficacy of Hessian in enhancing numerical accuracy. We                   the development of dynamic two-way coupling schemes in the PFM
+                                         𝑝
+calculated backward map Hessian ∇T[𝑏,𝑐 ] for each particle 𝑝 by                    framework would be an exciting future challenge.
+
+                                                                                            ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+76:16   • Junwei Zhou, Duowen Chen, Molin Deng, Yitong Deng, Yuchen Sun, Sinan Wang, Shiying Xiong, and Bo Zhu
+
+
+ACKNOWLEDGEMENTS                                                                           Xuchen Han, Theodore F Gast, Qi Guo, Stephanie Wang, Chenfanfu Jiang, and Joseph
+                                                                                              Teran. 2019. A hybrid material point method for frictional contact with diverse
+We express our gratitude to the anonymous reviewers for their                                 materials. Proceedings of the ACM on Computer Graphics and Interactive Techniques
+insightful feedback. We especially appreciate Zhiqi Li for his in-                            2, 2 (2019), 1–24.
+                                                                                           Francis H Harlow. 1962. The particle-in-cell method for numerical solution of problems
+sights on the connection between the Hessian term and the transfer                            in fluid dynamics. Technical Report. Los Alamos National Lab.(LANL), Los Alamos,
+of the backward map Jacobian. We also thank Jinyuan Liu and                                   NM (United States).
+Taiyuan Zhang for their insightful discussion. Georgia Tech authors                        Woosuck Hong, Donald H House, and John Keyser. 2008. Adaptive particles for incom-
+                                                                                              pressible fluid simulation. The Visual Computer 24 (2008), 535–543.
+acknowledge NSF IIS #2313075, ECCS #2318814, CAREER #2420319,                              Yuanming Hu, Yu Fang, Ziheng Ge, Ziyin Qu, Yixin Zhu, Andre Pradhana, and Chen-
+IIS #2106733, OISE #2153560, and CNS #1919647 for funding support.                            fanfu Jiang. 2018. A moving least squares material point method with displacement
+We credit the Houdini education license for video animations.                                 discontinuity and two-way rigid body coupling. ACM Transactions on Graphics
+                                                                                              (TOG) 37, 4 (2018), 1–14.
+                                                                                           Yuanming Hu, Tzu-Mao Li, Luke Anderson, Jonathan Ragan-Kelley, and Frédo Durand.
+REFERENCES                                                                                    2019. Taichi: a language for high-performance computation on spatially sparse data
+                                                                                              structures. ACM Transactions on Graphics (TOG) 38, 6 (2019), 1–16.
+Ryoichi Ando and Reiji Tsuruno. 2011. A particle-based method for preserving fluid         Antony Jameson, Wolfgang Schmidt, and Eli Turkel. 1981. Numerical solution of the
+   sheets. In Proceedings of the 2011 ACM SIGGRAPH/Eurographics symposium on                  Euler equations by finite volume methods using Runge Kutta time stepping schemes.
+   computer animation. 7–16.                                                                  In 14th fluid and plasma dynamics conference. 1259.
+Jeremiah U Brackbill and Hans M Ruppel. 1986. FLIP: A method for adaptively zoned,         Chenfanfu Jiang, Craig Schroeder, Andrew Selle, Joseph Teran, and Alexey Stomakhin.
+   particle-in-cell calculations of fluid flows in two dimensions. Journal of Computa-        2015. The affine particle-in-cell method. ACM Transactions on Graphics (TOG) 34, 4
+   tional physics 65, 2 (1986), 314–343.                                                      (2015), 1–10.
+TF Buttke. 1992. Lagrangian numerical methods which preserve the Hamiltonian               Chenfanfu Jiang, Craig Schroeder, Joseph Teran, Alexey Stomakhin, and Andrew Selle.
+   structure of incompressible fluid flow. (1992).                                            2016. The material point method for simulating continuum materials. In Acm
+Tomas F Buttke. 1993. Velicity methods: Lagrangian numerical methods which preserve           siggraph 2016 courses. 1–52.
+   the Hamiltonian structure of incompressible fluid flow. In Vortex flows and related     Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023.
+   numerical methods. Springer, 39–57.                                                        3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Transactions
+Thomas F Buttke and Alexandre J Chorin. 1993. Turbulence calculations in magnetiza-           on Graphics 42, 4 (2023).
+   tion variables. Applied numerical mathematics 12, 1-3 (1993), 47–54.                    ByungMoon Kim, Yingjie Liu, Ignacio Llamas, and Jarek Rossignac. 2006. Advec-
+A. Chern, F. Knöppel, U. Pinkall, P. Schröder, and S. Weißmann. 2016. Schrödinger’s           tions with significantly reduced dissipation and diffusion. IEEE transactions on
+   smoke. ACM Trans. Graph. 35 (2016), 77.                                                    visualization and computer graphics 13, 1 (2006), 135–144.
+Chung-Ki Cho, Byungjoon Lee, and Seongjai Kim. 2018. Dual-Mesh Characteristics for         Dustin Kleckner and William TM Irvine. 2013. Creation and dynamics of knotted
+   Particle-Mesh Methods for the Simulation of Convection-Dominated Flows. SIAM               vortices. Nature physics 9, 4 (2013), 253–258.
+   Journal on Scientific Computing 40, 3 (2018), A1763–A1783.                              Sahil Kommalapati. 2021. Machine Learning for Coherent Structure Identification and
+Ricardo Cortez. 1996. An impulse-based approximation of fluid motion due to boundary          Super Resolution in Turbulent flows. University of Washington.
+   forces. J. Comput. Phys. 123, 2 (1996), 341–353.                                        Petros D Koumoutsakos, Georges-Henri Cottet, and Diego Rossinelli. 2008. Flow
+Jean M Délery. 2001. Robert Legendre and Henri Werlé: toward the elucidation of               simulations using particles-Bridging Computer Graphics and CFD. In SIGGRAPH
+   three-dimensional separation. Annual review of fluid mechanics 33, 1 (2001), 129–154.      2008-35th International Conference on Computer Graphics and Interactive Techniques.
+Yitong Deng, Mengdi Wang, Xiangxin Kong, Shiying Xiong, Zangyueyang Xian, and                 ACM, 1–73.
+   Bo Zhu. 2022. A moving eulerian-lagrangian particle method for thin film and foam       Shingyu Leung. 2011. An Eulerian approach for computing the finite time Lyapunov
+   simulation. ACM Transactions on Graphics (TOG) 41, 4 (2022), 1–17.                         exponent. Journal of computational physics 230, 9 (2011), 3500–3524.
+Yitong Deng, Hong-Xing Yu, Diyang Zhang, Jiajun Wu, and Bo Zhu. 2023. Fluid                Shingyu Leung. 2013. The backward phase flow method for the Eulerian finite time
+   Simulation on Neural Flow Maps. ACM Transactions on Graphics (TOG) 42, 6 (2023),           Lyapunov exponent computations. Chaos: An Interdisciplinary Journal of Nonlinear
+   1–21.                                                                                      Science 23, 4 (2013).
+Yu Fang, Ziyin Qu, Minchen Li, Xinxin Zhang, Yixin Zhu, Mridul Aanjaneya, and              TT Lim and TB Nickels. 1992. Instability and reconnection in the head-on collision of
+   Chenfanfu Jiang. 2020. IQ-MPM: an interface quadrature material point method for           two vortex rings. Nature 357, 6375 (1992), 225–227.
+   non-sticky strongly two-way coupled nonlinear solids and fluids. ACM Transactions       Frank Losasso, Ronald Fedkiw, and Stanley Osher. 2006. Spatially adaptive techniques
+   on Graphics (TOG) 39, 4 (2020), 51–1.                                                      for level set methods and incompressible flow. Computers & Fluids 35, 10 (2006),
+Ronald Fedkiw, Jos Stam, and Henrik Wann Jensen. 2001. Visual simulation of smoke.            995–1010.
+   In Proceedings of the 28th annual conference on Computer graphics and interactive       Theodore MacMillan and David H Richter. 2021. The most robust representations of
+   techniques. 15–22.                                                                         flow trajectories are Lagrangian coherent structures. Journal of Fluid Mechanics 927
+Yun Fei, Christopher Batty, Eitan Grinspun, and Changxi Zheng. 2018. A multi-scale            (2021), A26.
+   model for simulating liquid-fabric interactions. ACM Transactions on Graphics (TOG)     Takumi Matsuzawa, Noah P. Mitchell, Stéphane Perrard, and William T.M. Irvine.
+   37, 4 (2018), 1–16.                                                                        2022. Video: Turbulence through sustained vortex ring collisions. 75th Annual
+Yun Fei, Qi Guo, Rundong Wu, Li Huang, and Ming Gao. 2021. Revisiting integration             Meeting of the APS Division of Fluid Dynamics - Gallery of Fluid Motion (2022).
+   in the material point method: a scheme for easier separation and less dissipation.         https://api.semanticscholar.org/CorpusID:252974545
+   ACM Transactions on Graphics (TOG) 40, 4 (2021), 1–16.                                  Aleka McAdams, Eftychios Sifakis, and Joseph Teran. 2010. A Parallel Multigrid Poisson
+Yun Fei, Henrique Teles Maia, Christopher Batty, Changxi Zheng, and Eitan Grinspun.           Solver for Fluids Simulation on Large Grids.. In Symposium on Computer Animation,
+   2017. A multi-scale model for simulating liquid-hair interactions. ACM Transactions        Vol. 65. 74.
+   on Graphics (TOG) 36, 4 (2017), 1–17.                                                   Alexander George McKenzie. 2007. HOLA: a high-order Lie advection of discrete dif-
+Fan Feng, Jinyuan Liu, Shiying Xiong, Shuqi Yang, Yaorui Zhang, and Bo Zhu. 2022.             ferential forms with applications in Fluid Dynamics. Ph. D. Dissertation. California
+   Impulse fluid simulation. IEEE Transactions on Visualization and Computer Graphics         Institute of Technology.
+   (2022).                                                                                 Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ra-
+Chuyuan Fu, Qi Guo, Theodore Gast, Chenfanfu Jiang, and Joseph Teran. 2017. A                 mamoorthi, and Ren Ng. 2021. Nerf: Representing scenes as neural radiance fields
+   polynomial particle-in-cell method. ACM Transactions on Graphics (TOG) 36, 6               for view synthesis. Commun. ACM 65, 1 (2021), 99–106.
+   (2017), 1–12.                                                                           Patrick Mullen, Keenan Crane, Dmitry Pavlov, Yiying Tong, and Mathieu Desbrun. 2009.
+Ming Gao, Andre Pradhana, Xuchen Han, Qi Guo, Grant Kot, Eftychios Sifakis, and               Energy-preserving integrators for fluid animation. ACM Transactions on Graphics
+   Chenfanfu Jiang. 2018. Animating fluid sediment mixture in particle-laden flows.           (TOG) 28, 3 (2009), 1–8.
+   ACM Transactions on Graphics (TOG) 37, 4 (2018), 1–11.                                  Mohammad Sina Nabizadeh, Stephanie Wang, Ravi Ramamoorthi, and Albert Chern.
+Yue Gao, Chen-Feng Li, Shi-Min Hu, and Brian A Barsky. 2009. Simulating gaseous               2022. Covector fluids. ACM Transactions on Graphics (TOG) 41, 4 (2022), 1–16.
+   fluids with low and high speeds. In Computer Graphics Forum, Vol. 28. Wiley Online      Keita Nakamura, Satoshi Matsumura, and Takaaki Mizutani. 2023. Taylor particle-in-
+   Library, 1845–1852.                                                                        cell transfer and kernel correction for material point method. Computer Methods in
+Toshiya Hachisuka. 2005. Combined Lagrangian-Eulerian approach for accurate advec-            Applied Mechanics and Engineering 403 (2023), 115720.
+   tion. In ACM SIGGRAPH 2005 Posters. 114–es.                                             Rahul Narain, Jonas Zehnder, and Bernhard Thomaszewski. 2019. A second-order
+George Haller and Guocheng Yuan. 2000. Lagrangian coherent structures and mixing              advection-reflection solver. Proceedings of the ACM on Computer Graphics and
+   in two-dimensional turbulence. Physica D: Nonlinear Phenomena 147, 3-4 (2000),             Interactive Techniques 2, 2 (2019), 1–14.
+   352–370.
+
+
+ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+                                                                                                         Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps        •   76:17
+
+
+Jean-Christophe Nave, Rodolfo Ruben Rosales, and Benjamin Seibold. 2010. A gradient-           Transactions on Graphics (TOG) 34, 5 (2015), 1–20.
+    augmented level set method with an optimally local, coherent advection scheme. J.       Jonas Zehnder, Rahul Narain, and Bernhard Thomaszewski. 2018. An advection-
+    Comput. Phys. 229, 10 (2010), 3802–3827.                                                   reflection solver for detail-preserving fluid simulation. ACM Transactions on Graphics
+Valery Iustinovich Oseledets. 1989. On a new way of writing the Navier-Stokes equation.        (TOG) 37, 4 (2018), 1–8.
+    The Hamiltonian formalism. Russ. Math. Surveys 44 (1989), 210–211.                      Xinxin Zhang, Robert Bridson, and Chen Greif. 2015. Restoring the missing vorticity
+Ziyin Qu, Minchen Li, Fernando De Goes, and Chenfanfu Jiang. 2022. The power                   in advection-projection fluid solvers. ACM Transactions on Graphics (TOG) 34, 4
+    particle-in-cell method. ACM Transactions on Graphics 41, 4 (2022).                        (2015), 1–8.
+Ziyin Qu, Xinxin Zhang, Ming Gao, Chenfanfu Jiang, and Baoquan Chen. 2019. Efficient        Bo Zhu, Xubo Yang, and Ye Fan. 2010. Creating and preserving vortical details in sph
+    and conservative fluids using bidirectional mapping. ACM Transactions on Graphics          fluid. In Computer Graphics Forum, Vol. 29. Wiley Online Library, 2207–2214.
+   (TOG) 38, 4 (2019), 1–12.                                                                Yongning Zhu and Robert Bridson. 2005. Animating sand as a fluid. ACM Transactions
+Daniel Ram, Theodore Gast, Chenfanfu Jiang, Craig Schroeder, Alexey Stomakhin,                 on Graphics (TOG) 24, 3 (2005), 965–972.
+    Joseph Teran, and Pirouz Kavehpour. 2015. A material point method for viscoelastic
+    fluids, foams and sponges. In Proceedings of the 14th ACM SIGGRAPH/Eurographics
+    Symposium on Computer Animation. 157–163.
+Karthik Raveendran, Chris Wojtan, and Greg Turk. 2011. Hybrid smoothed particle
+    hydrodynamics. In Proceedings of the 2011 ACM SIGGRAPH/Eurographics symposium
+    on computer animation. 33–42.
+PH Roberts. 1972. A Hamiltonian theory for weakly interacting vortices. Mathematika
+    19, 2 (1972), 169–179.
+Avi Robinson-Mosher, Tamar Shinar, Jon Gretarsson, Jonathan Su, and Ronald Fedkiw.
+    2008. Two-way coupling of fluids to rigid and deformable solids and shells. ACM
+    Transactions on Graphics (TOG) 27, 3 (2008), 1–9.
+Takahiro Sato, Christopher Batty, Takeo Igarashi, and Ryoichi Ando. 2018. Spatially
+    adaptive long-term semi-Lagrangian method for accurate velocity advection. Com-
+    putational Visual Media 4, 3 (2018), 6.
+Takahiro Sato, Takeo Igarashi, Christopher Batty, and Ryoichi Ando. 2017. A long-term
+    semi-lagrangian method for accurate velocity advection. In SIGGRAPH Asia 2017
+    Technical Briefs. 1–4.
+Robert Saye. 2016. Interfacial gauge methods for incompressible fluid dynamics. Science
+    advances 2, 6 (2016), e1501869.
+Robert Saye. 2017. Implicit mesh discontinuous Galerkin methods and interfacial gauge
+    methods for high-order accurate interface dynamics, with applications to surface
+    tension dynamics, rigid body fluid–structure interaction, and free surface flow: Part
+    I. J. Comput. Phys. 344 (2017), 647–682.
+Andrew Selle, Ronald Fedkiw, Byungmoon Kim, Yingjie Liu, and Jarek Rossignac. 2008.
+   An unconditionally stable MacCormack method. Journal of Scientific Computing 35
+    (2008), 350–371.
+Jos Stam. 1999. Stable fluids. In Proceedings of the 26th annual conference on Computer
+    graphics and interactive techniques. 121–128.
+Alexey Stomakhin, Craig Schroeder, Lawrence Chai, Joseph Teran, and Andrew Selle.
+    2013. A material point method for snow simulation. ACM Transactions on Graphics
+   (TOG) 32, 4 (2013), 1–10.
+Alexey Stomakhin, Craig Schroeder, Chenfanfu Jiang, Lawrence Chai, Joseph Teran,
+    and Andrew Selle. 2014. Augmented MPM for phase-change and varied materials.
+    ACM Transactions on Graphics (TOG) 33, 4 (2014), 1–11.
+DM Summers. 2000. A representation of bounded viscous flow based on Hodge decom-
+    position of wall impulse. J. Comput. Phys. 158, 1 (2000), 28–50.
+PN Sun, A Colagrossi, S Marrone, and AM Zhang. 2016. Detection of Lagrangian
+    coherent structures in the SPH framework. Computer Methods in Applied Mechanics
+    and Engineering 305 (2016), 849–868.
+Yuchen Sun, Xingyu Ni, Bo Zhu, Bin Wang, and Baoquan Chen. 2021. A material point
+    method for nonlinearly magnetized materials. ACM Transactions on Graphics (TOG)
+    40, 6 (2021), 1–13.
+Andre Pradhana Tampubolon, Theodore Gast, Gergely Klár, Chuyuan Fu, Joseph Teran,
+    Chenfanfu Jiang, and Ken Museth. 2017. Multi-species simulation of porous sand
+    and water mixtures. ACM Transactions on Graphics (TOG) 36, 4 (2017), 1–11.
+Jerry Tessendorf. 2015. Advection Solver Performance with Long Time Steps, and
+    Strategies for Fast and Accurate Numerical Implementation. (2015).
+Jerry Tessendorf and Brandon Pelfrey. 2011. The characteristic map for fast and efficient
+    vfx fluid simulations. In Computer Graphics International Workshop on VFX, Computer
+    Animation, and Stereo Movies. Ottawa, Canada.
+E Weinan and Jian-Guo Liu. 2003. Gauge method for viscous incompressible flows.
+    Communications in Mathematical Sciences 1, 2 (2003), 317–332.
+DC Wiggert and EB Wylie. 1976. Numerical predictions of two-dimensional transient
+    groundwater flow by the method of characteristics. Water Resources Research 12, 5
+    (1976), 971–977.
+S. Xiong, R. Tao, Y. Zhang, F. Feng, and B. Zhu. 2021. Incompressible flow simulation
+    on vortex segment clouds. ACM Trans. Graph. 40, 4 (2021).
+S. Xiong, Z. Wang, M. Wang, and B. Zhu. 2022. A Clebsch method for free-surface
+    vortical flow simulation. ACM Trans. Graph. 41, 4 (2022).
+Xiao Yan, C-F Li, X-S Chen, and S-M Hu. 2018. MPM simulation of interacting fluids
+    and solids. In Computer Graphics Forum, Vol. 37. Wiley Online Library, 183–193.
+Shuqi Yang, Shiying Xiong, Yaorui Zhang, Fan Feng, Jinyuan Liu, and Bo Zhu. 2021.
+    Clebsch gauge fluid. ACM Transactions on Graphics (TOG) 40, 4 (2021), 1–11.
+Yonghao Yue, Breannan Smith, Christopher Batty, Changxi Zheng, and Eitan Grinspun.
+    2015. Continuum foam: A material point method for shear-dependent flows. ACM
+
+
+
+                                                                                                        ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+76:18    • Junwei Zhou, Duowen Chen, Molin Deng, Yitong Deng, Yuchen Sun, Sinan Wang, Shiying Xiong, and Bo Zhu
+
+
+A       CODE                                                                              Proof. Let us posit
+Our code is available at https://github.com/zjw49246/particle-flow-                                                                       𝜕𝜓𝑖 (𝝓, 𝑡)
+maps. We implement our methods with Taichi Programming Lan-                                             𝒈(𝒙, 𝑡) ≡ 𝒎(𝝓, 𝑡) − 𝑚𝑖 (𝒙, 0)                .              (28)
+                                                                                                                                             𝜕𝝓
+guage [Hu et al. 2019].
+                                                                                      Clearly, 𝒈(𝒙, 0) = 0. Furthermore,
+B       EVOLUTION OF THE JACOBIAN MATRIX OF THE                                          𝜕𝒈(𝒙, 𝑡)
+        FLOW MAP                                                                            𝜕𝑡
+                                                                                         𝜕𝒎(𝝓, 𝑡) 𝜕𝒎(𝝓, 𝑡) 𝜕𝜙𝑖
+    Theorem B.1. Assuming                                                              =            +
+                                                                                            𝜕𝑡            𝜕𝜙𝑖      𝜕𝑡
+                                        𝜕𝝓 (𝒙, 𝑡)
+                                                                                                        𝜕 𝜓𝑖 (𝝓, 𝑡) 𝜕 2𝜓𝑖 (𝝓, 𝑡) 𝜕𝜙 𝑗 (𝒙, 𝑡)
+                                                                                                       2                                         
+                            F (𝝓, 𝑡) =
+                           
+                           
+                                                                                         − 𝑚𝑖 (𝒙, 0)                  +
+                           
+                                          𝜕𝒙                                 (20)                         𝜕𝝓𝜕𝑡           𝜕𝝓𝜕𝜙 𝑗           𝜕𝑡
+                            𝜕𝝓 (𝒙, 𝑡)
+                           
+                                      = 𝒖 [𝝓 (𝒙, 𝑡), 𝑡]                                   𝜕𝑢𝑖 (𝝓, 𝑡)
+                            𝜕𝑡                                                        =−              𝑚𝑖 (𝝓, 𝑡)                                                     (29)
+                                                                                               𝜕𝝓
+then                                                                                                                                      2                     
+                                                                                                         𝜕       𝜕𝜓𝑖 (𝝓, 𝑡)                 𝜕 𝜓𝑖 (𝝓, 𝑡)
+           𝜕F𝑖 𝑗 (𝒙, 𝑡)             𝜕F𝑖 𝑗 (𝒙, 𝑡) 𝜕𝑢𝑖 (𝒙, 𝑡)                              − 𝑚𝑖 (𝒙, 0)          −             𝑢 𝑗 (𝝓, 𝑡) +                𝑢 𝑗 (𝝓, 𝑡)
+                        + 𝑢𝑘 (𝒙, 𝑡)             =           F𝑘 𝑗 (𝒙, 𝑡).      (21)                      𝜕𝝓         𝜕𝝓 𝑗                       𝜕𝝓𝜕𝜙 𝑗
+                𝜕𝑡                     𝜕𝑥𝑘         𝜕𝒙𝑘
+                                                                                           𝜕𝑢 𝑗 (𝝓, 𝑡)                           𝜕𝑢 𝑗 (𝝓, 𝑡) 𝜕𝜓𝑖 (𝝓, 𝑡)
+                                                                                       =−              𝑚 𝑗 (𝝓, 𝑡) + 𝑚𝑖 (𝒙, 0)
+  Proof. It can be deduced from the chain rule of differentiation                              𝜕𝝓                                    𝜕𝝓        𝜕𝝓 𝑗
+and the second equation in Equation 20 that:                                                         𝜕𝑢𝑖 (𝝓, 𝑡)
+                                                                                       = − 𝑔𝑖 (𝒙, 𝑡)            .
+              𝐷 F𝑖 𝑗 (𝝓, 𝑡) 𝜕F𝑖 𝑗 (𝝓, 𝑡) 𝜕F𝑖 𝑗 (𝝓, 𝑡) 𝜕𝜙𝑘 (𝒙, 𝑡)                                        𝜕𝝓
+                           =              +
+                  𝐷𝑡              𝜕𝑡            𝜕𝜙𝑘          𝜕𝑡                       Thus, 𝒈 satisfies
+                                                                              (22)
+                             𝜕F𝑖 𝑗 (𝝓, 𝑡)             𝜕F𝑖 𝑗 (𝝓, 𝑡)                                          𝜕𝒈(𝒙, 𝑡)              𝜕𝑢𝑖 (𝝓, 𝑡)
+                           =              + 𝑢𝑘 (𝝓, 𝑡)              .                                       
+                                                                                                           
+                                                                                                                     = −𝑔𝑖 (𝒙, 𝑡)            ,
+                                  𝜕𝑡                     𝜕𝜙𝑘                                                   𝜕𝑡                     𝜕𝝓                            (30)
+                                                                                                           𝒈(𝒙, 0) = 0
+                                                                                                           
+    From the expression in Equation 20, we also obtain:                                                    
+        𝐷 F𝑖 𝑗 (𝝓, 𝑡) 𝜕𝜙𝑖 (𝒙, 𝑡) 𝜕𝑢𝑖 (𝝓, 𝑡)                                           The unique solution to this equation is 𝒈(𝒙, 𝑡) ≡ 0.                            □
+                     =            =
+            𝐷𝑡          𝜕𝑡 𝜕𝑥 𝑗        𝜕𝑥 𝑗                                               Theorem C.2.
+                                                                              (23)
+                       𝜕𝑢𝑖 (𝝓, 𝑡) 𝜕𝜙𝑘 (𝒙, 𝑡) 𝜕𝑢𝑖 (𝝓, 𝑡)                                        𝜕𝑚 𝑗 (𝒙, 𝑡)
+                     =                      =           F𝑘 𝑗 (𝝓, 𝑡).
+                         𝜕𝝓𝑘        𝜕𝑥 𝑗       𝜕𝝓𝑘                                               𝜕𝑥𝑘
+                                                                                                                                                                    (31)
+    Combining Equations 22 and 23 gives 21.                                     □                 𝜕𝑚𝑖 (𝝍, 0) 𝜕𝜓𝑙 (𝒙, 𝑡) 𝜕𝜓𝑖 (𝒙, 𝑡)             𝜕 2𝜓𝑖 (𝒙, 𝑡)
+                                                                                              =                                    + 𝑚𝑖 (𝝍, 0)              .
+                                                                                                    𝜕𝜓𝑙        𝜕𝑥𝑘        𝜕𝑥 𝑗                   𝜕𝑥 𝑗 𝜕𝑥𝑘
+    Theorem B.2. Assuming
+                                                                                         Taking the derivative of Equation 27 with respect to 𝑥𝑘 directly
+                                   𝜕𝝍 (𝒙, 𝑡)                                         yields Equation 31. We remark that, due to Equation 3, Equations 31
+                        T (𝒙, 𝑡) =
+                       
+                       
+                       
+                                     𝜕𝒙                                              and 10 are equivalent.
+                                                                              (24)
+                         𝜕𝝍 (𝒙, 𝑡)     𝜕𝝍 (𝒙, 𝑡)
+                                   =−            𝑢𝑖 (𝒙, 𝑡)
+                       
+                                                                                      D     EQUIVALENCE OF FORWARD EVOLUTION AND
+                       
+                       
+                        𝜕𝑡              𝜕𝑥𝑖
+                                                                                            BACKWARD EVOLUTION OF T
+                       
+then
+                                                                                      Consider a virtual particle that moves from 𝒙 0 to 𝒙𝑛 in 𝑛 timesteps.
+        𝜕T𝑖 𝑗 (𝒙, 𝑡)             𝜕T𝑖 𝑗 (𝒙, 𝑡)              𝜕𝑢 (𝒙, 𝑡)
+                     + 𝑢𝑘 (𝒙, 𝑡)              = −T𝑖𝑘 (𝒙, 𝑡) 𝑘        .        (25)    In timestep 𝑖, the particle occupies a position 𝒙𝑖 , moves with velocity
+             𝜕𝑡                     𝜕𝑥𝑘                      𝜕𝑥 𝑗                     𝒖𝑖 and is associated with the backward map Jacobian, denoted as T𝑖 .
+    Proof. It can be deduced from Equation 24 that:                                   Initially, T0 is initialized as the identity matrix.
+                                                                                          At timestep 𝑛, to get the impulse at 𝒙𝑛 , T𝑛 has to be calculated.
+      𝜕T𝑖 𝑗 (𝒙, 𝑡) 𝜕 2𝜓𝑖 (𝒙, 𝑡)
+                                                                
+                                       𝜕 𝜕𝜓𝑖 (𝒙, 𝑡)                                   In the process described by Deng et al. [2023], which utilizes an
+                  =             =−                     𝑢𝑘 (𝒙, 𝑡)
+           𝜕𝑡         𝜕𝑡 𝜕𝑥 𝑗         𝜕𝑥 𝑗     𝜕𝑥𝑘                                    Eulerian grid and a neural velocity buffer, the calculation of T
+                                                                              (26)    involves backtracing the virtual particle’s trajectory from 𝒙𝑛 to
+                               𝜕T𝑖 𝑗 (𝒙, 𝑡)             𝜕𝑢 (𝒙, 𝑡)
+                  = −𝑢𝑘 (𝒙, 𝑡)              − T𝑖𝑘 (𝒙, 𝑡) 𝑘         .                  𝒙 0 . This process progresses in reverse chronological order, there-
+                                  𝜕𝑥𝑘                      𝜕𝑥 𝑗
+                                                                                      fore we refer to it as "backward evolution of T ". Conversely, in our
+                                                                                □     method, we adopt a "forward evolution of T ," where Lagrangian par-
+                                                                                      ticles progress from 𝒙 0 to 𝒙𝑛 , and T is updated sequentially at each
+C       EVOLUTION OF IMPULSE AND ITS GRADIENTS                                        timestep. During backward evolution, the update of T in timestep 𝑖
+    Theorem C.1.                                                                      involves left-multiplying the existing result with (I − ∇𝒖𝑖 Δ𝑡), pro-
+                                                 𝜕𝜓𝑖 (𝒙, 𝑡)                           ceeding from step 𝑛 to 1. In forward evolution, however, the update
+                         𝒎(𝒙, 𝑡) = 𝑚𝑖 (𝝍, 0)                .                 (27)    of T in timestep 𝑖 entails right-multiplying the existing result with
+                                                    𝜕𝒙
+
+ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+                                                                                               Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps                               •       76:19
+
+
+(I − ∇𝒖𝑖 Δ𝑡), progressing from step 1 to 𝑛. Despite these differing               equations:
+approaches, both backward and forward evolution start from the
+identity matrix and ultimately converge to the same result:
+                                                                                         ∑︁            𝑝              𝑝
+                                                                                                                                                 ∑︁
+                         T𝑛 = Π𝑛𝑖=1 (I − ∇𝒖𝑖 Δ𝑡) .                         (32)   𝒎𝑖 =        𝑤𝑖𝑝 (𝒎𝑐 + ∇𝒎𝑐 (𝒙𝑖 − 𝒙𝑝 )) /                                𝑤𝑖𝑝
+                                                                                          𝑝                                                          𝑝
+                                                                                         ∑︁            𝑝             𝑝                   𝑝   𝑝
+                                                                                                                                                                            ∑︁
+E   ADDITIONAL PSEUDOCODE                                                            =        𝑤𝑖𝑝 (𝒎𝑐 + (T[𝑏,𝑐 ] )𝑇 ∇𝒎𝑏 T[𝑏,𝑐 ] (𝒙𝑖 − 𝒙𝑝 )) /                                     𝑤𝑖𝑝
+                                                                                          𝑝                                                                                  𝑝
+In this section, we provide additional pseudocodes to supplement                         ∑︁            𝑝             𝑝                   𝑝
+                                                                                                                                                                             ∑︁
+Section 5.                                                                           =        𝑤𝑖𝑝 (𝒎𝑐 + (T[𝑏,𝑐 ] )𝑇 ∇𝒎𝑏 (𝝍 (𝒙𝑖 ) − 𝝍 (𝒙𝑝 ))) /                                       𝑤𝑖𝑝
+   Algorithm 2 outlines the second-order, midpoint method, and                            𝑝                                                                                      𝑝
+                                                                                         ∑︁            𝑝             𝑝               𝑝                         𝑝
+                                                                                                                                                                                        ∑︁
+Algorithm 3 details the procedure for our custom RK4 integration                     =        𝑤𝑖𝑝 (𝒎𝑐 + (T[𝑏,𝑐 ] )𝑇 (𝒎𝑏 [𝝍 (𝒙𝑖 )] − 𝒎𝑏 [𝝍 (𝒙𝑝 )])) /                                            𝑤𝑖𝑝
+scheme.                                                                                   𝑝                                                                                             𝑝
+                                                                                         ∑︁            𝑝                 𝑝           𝑝
+                                                                                     =        𝑤𝑖𝑝 (𝒎𝑐 + ((T[𝑏,𝑐 ] )𝑇 𝒎𝑏 [𝝍 (𝒙𝑖 )]
+                                                                                          𝑝
+Algorithm 2 Midpoint Method                                                                                           𝑝             𝑝
+                                                                                                                                                               ∑︁
+                                                                                                              − (T[𝑏,𝑐 ] )𝑇 𝒎𝑏 [𝝍 (𝒙𝑝 )])) /
+                                                                                                                                     𝑤𝑖𝑝
+Input: 𝒖                                                                                                                          𝑝
+Output: 𝒖 mid
+                                                                                       ∑︁        𝑝       𝑝         𝑝              𝑝
+                                                                                                                                         ∑︁
+                                                                                     =     𝑤𝑖𝑝 (𝒎𝑐 + ((T[𝑏,𝑐 ] )𝑇 𝒎𝑏 [𝝍 (𝒙𝑖 )] − 𝒎𝑐 )) /    𝑤𝑖𝑝
+ 1: Reset 𝝍, T to identity;                                                             𝑝                                                 𝑝
+ 2: March 𝝍, T with 𝒖 and −0.5Δ𝑡 using Alg. 2 in Deng et al. [2023];                    ∑︁         𝑝
+                                                                                                           ∑︁          𝑝
+                                                                                     = ( 𝑤𝑖𝑝 (T[𝑏,𝑐 ] )𝑇 /      𝑤𝑖𝑝 )𝒎𝑏 [𝝍 (𝒙𝑖 )]
+ 3: 𝒎 mid ← T 𝑇 𝒖 (𝝍);
+                                                                                         𝑝                  𝑝
+ 4: 𝒖 mid ← Poisson(𝒎 mid );                                                                                                                         (33)
+                                                                                  where the third and fourth equality marks rely on the assumption
+                                                                                  that 𝒙𝑝 is very close to 𝒙𝑖 . This formulation implies interpolating
+                                                                                  T from particles to the grid in a PIC manner. Subsequently, this
+                                                                                  interpolated T is utilized to evolve the impulse at 𝝍 (𝒙𝑖 ) from time
+                                                                                  𝑏 to time 𝑐. Here, 𝝍 (𝒙𝑖 ) represents the backtracked location at time
+Algorithm 3 Interleaved RK4 for 𝒙, T                                              𝑏 for the particle currently at 𝒙𝑖 .
+                                                                                     If we incorporate the Hessian term, we have the following equa-
+Input: 𝒖, 𝒙, T , Δ𝑡
+                                                                                  tions:
+Output: 𝒙 next , Tnext
+  1: (𝒖 1 , ∇𝒖| 1 ) ← Interpolate(𝒖, 𝒙);
+     𝜕T
+  2: 𝜕𝑡 | 1 ← (∇𝒖| 1 )𝑇 T ;
+  3: 𝒙 1 ← 𝒙 + 0.5 · Δ𝑡 · 𝒖 1 ;
+                                                                                         ∑︁           𝑝               𝑝
+                                                                                                                                                 ∑︁
+                                                                                  𝒎𝑖 =        𝑤𝑖𝑝 (𝒎𝑐 + ∇𝒎𝑐 (𝒙𝑖 − 𝒙𝑝 )) /                                𝑤𝑖𝑝
+                             𝜕T
+  4: T1 ← T − 0.5 · Δ𝑡 · 𝜕𝑡 | 1 ;                                                         𝑝                                                          𝑝
+  5: (𝒖 2 , ∇𝒖| 2 ) ← Interpolate(𝒖, 𝒙 1 );
+                                                                                         ∑︁           𝑝               𝑝                          𝑝
+     𝜕T                                                                              =        𝑤𝑖𝑝 (𝒎𝑐 + ((T[𝑏,𝑐 ] )𝑇 ∇𝒎𝑏 T[𝑏,𝑐 ]
+  6: 𝜕𝑡 | 2 ← (∇𝒖| 2 )𝑇 T1 ;                                                              𝑝
+  7: 𝒙 2 ← 𝒙 + 0.5 · Δ𝑡 · 𝒖 2 ;                                                                                           𝑝
+                                                                                                                                                                   ∑︁
+                             𝜕T
+  8: T2 ← T − 0.5 · Δ𝑡 · 𝜕𝑡 | 2 ;                                                                          + (∇T[𝑏,𝑐 ] )𝑇 𝒎𝑏 )(𝒙𝑖 − 𝒙𝑝 )) /                             𝑤𝑖𝑝
+                                                                                                                                                                    𝑝
+  9: (𝒖 3 , ∇𝒖| 3 ) ← Interpolate(𝒖, 𝒙 2 );                                              ∑︁                                                                              ∑︁
+     𝜕T
+ 10: 𝜕𝑡 | 3 ← (∇𝒖| 3 )𝑇 T2 ;                                                         =
+                                                                                                      𝑝              𝑝
+                                                                                              𝑤𝑖𝑝 (𝒎𝑐 + (T[𝑏,𝑐 ] )𝑇 ∇𝒎𝑏 T[𝑏,𝑐 ] (𝒙𝑖 − 𝒙𝑝 )) /
+                                                                                                                                             𝑝
+                                                                                                                                                                                  𝑤𝑖𝑝
+ 11: 𝒙 3 ← 𝒙 + Δ𝑡 · 𝒖 3 ;                                                                 𝑝                                                                                  𝑝
+                       𝜕T
+ 12: T3 ← T − Δ𝑡 · 𝜕𝑡 | 3 ;
+                                                                                                                ∑︁                   𝑝
+                                                                                                                                                                             ∑︁
+                                                                                                           +          𝑤𝑖𝑝 (∇T[𝑏,𝑐 ] )𝑇 𝒎𝑏 (𝒙𝑖 − 𝒙𝑝 )) /                              𝑤𝑖𝑝
+ 13: (𝒖 4 , ∇𝒖| 4 ) ← Interpolate(𝒖, 𝒙 3 );                                                                      𝑝                                                               𝑝
+     𝜕T
+ 14: 𝜕𝑡 | 4 ← (∇𝒖| 4 )𝑇 T3 ;                                                              ∑︁                              ∑︁
+                                                                                                          𝑝                                  𝑝
+                                                                                     =(        𝑤𝑖𝑝 (T[𝑏,𝑐 ] )𝑇 /                  𝑤𝑖𝑝 )𝒎𝑏 [𝝍 (𝒙𝑖 )]
+ 15: 𝒙 next ← 𝒙 + Δ𝑡 · 6 · (𝒖 1 + 2 · 𝒖 2 + 2 · 𝒖 3 + 𝒖 4 );
+                          1
+                                                                                          𝑝                                   𝑝
+                                𝜕T         𝜕T           𝜕T     𝜕T
+ 16: Tnext ← T − Δ𝑡 · 6 · ( 𝜕𝑡 | 1 + 2 · 𝜕𝑡 | 2 + 2 · 𝜕𝑡 | 3 + 𝜕𝑡 | 4 );
+                           1                                                                                     ∑︁                                                     ∑︁
+                                                                                                                                         𝑝                                                  𝑝
+                                                                                                           +(             𝑤𝑖𝑝 (∇T[𝑏,𝑐 ] )𝑇 (𝒙𝑖 − 𝒙𝑝 ) /                          𝑤𝑖𝑝 )𝒎𝑏 [𝝍 (𝒙𝑖 )]
+                                                                                                                  𝑝                                                      𝑝
+                                                                                          ∑︁               𝑝                         𝑝
+                                                                                                                                                                        ∑︁              𝑝
+                                                                                     =(        𝑤𝑖𝑝 ((T[𝑏,𝑐 ] )𝑇 + (∇T[𝑏,𝑐 ] )𝑇 (𝒙𝑖 − 𝒙𝑝 )) /                                 𝑤𝑖𝑝 )𝒎𝑏 [𝝍 (𝒙𝑖 )]
+                                                                                          𝑝                                                                             𝑝
+                                                                                                                                                    (34)
+F   BACKWARD MAP HESSIAN                                                          where the fourth equality mark relies on the assumption that 𝒙𝑝 is
+Excluding the Hessian term from Equation 10 is equivalent to sub-                 very close to 𝒙𝑖 . This formula implies that incorporating the Hessian
+stituting Equation 16 into Equation 17. This leads to the following               term is equivalent to shifting the interpolation of T to APIC manner.
+
+                                                                                              ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+76:20   • Junwei Zhou, Duowen Chen, Molin Deng, Yitong Deng, Yuchen Sun, Sinan Wang, Shiying Xiong, and Bo Zhu
+
+
+G       INTERPOLATION DETAILS
+When interpolating values between 𝑥𝑘 and 𝑥𝑙 , we apply the MPM
+[Jiang et al. 2016] interpolation scheme using the quadratic kernel:
+                  
+                   3 − |𝑥 − 𝑥 | 2
+                          𝑘    𝑙       0 ≤ |𝑥𝑘 − 𝑥𝑙 | < 21 ,
+                  4
+                  
+                  
+                    1  3
+           𝑤𝑘𝑙 = 2 ( 2 − |𝑥𝑘 − 𝑥𝑙 |) 2 1                 3
+                                      2 ≤ |𝑥𝑘 − 𝑥𝑙 | < 2 ,     (35)
+                  
+                  0                   3 ≤ |𝑥 − 𝑥 |.
+                                      2     𝑘     𝑙
+
+
+
+
+ACM Trans. Graph., Vol. 43, No. 4, Article 76. Publication date: July 2024.
+

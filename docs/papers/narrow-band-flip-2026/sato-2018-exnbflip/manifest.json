@@ -1,0 +1,85 @@
+{
+  "id": "sato-2018-exnbflip",
+  "title": "Extended Narrow Band FLIP for Liquid Simulations",
+  "year": 2018,
+  "url": "https://pub.ista.ac.at/group_wojtan/projects/2018_Sato_XNBFLIP/XNBFLIP.pdf",
+  "project": "https://takahirosato.bitbucket.io/publications/exnbflip/",
+  "accessed": "2026-10-07",
+  "sha256": "1871bd72f9f608fafed897bcfaa0c750ae7deafa6f7ca0d841c64de12e35889c",
+  "pages": 9,
+  "dpi": 144,
+  "embedded_files": 4,
+  "page_map": [
+    {
+      "page": 1,
+      "render": "page-1.png",
+      "figure_mentions": [
+        "Figure 1:"
+      ]
+    },
+    {
+      "page": 2,
+      "render": "page-2.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 3,
+      "render": "page-3.png",
+      "figure_mentions": [
+        "Figure 2:"
+      ]
+    },
+    {
+      "page": 4,
+      "render": "page-4.png",
+      "figure_mentions": [
+        "Figure 3:"
+      ]
+    },
+    {
+      "page": 5,
+      "render": "page-5.png",
+      "figure_mentions": [
+        "Figure 4:"
+      ]
+    },
+    {
+      "page": 6,
+      "render": "page-6.png",
+      "figure_mentions": [
+        "Figure 5:",
+        "Figure 4."
+      ]
+    },
+    {
+      "page": 7,
+      "render": "page-7.png",
+      "figure_mentions": [
+        "Figure 3",
+        "Figure 1",
+        "Figure 6",
+        "Figure 7",
+        "Figure 8",
+        "Figure 2.",
+        "Figure 2"
+      ]
+    },
+    {
+      "page": 8,
+      "render": "page-8.png",
+      "figure_mentions": [
+        "Figure 3",
+        "Figure 2",
+        "Figure 1",
+        "Figure 6:",
+        "Figure 7:",
+        "Figure 8:"
+      ]
+    },
+    {
+      "page": 9,
+      "render": "page-9.png",
+      "figure_mentions": []
+    }
+  ]
+}

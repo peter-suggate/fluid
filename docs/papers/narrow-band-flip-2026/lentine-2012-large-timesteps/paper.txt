@@ -1,0 +1,598 @@
+Eurographics/ ACM SIGGRAPH Symposium on Computer Animation (2012)
+P. Kry and J. Lee (Editors)
+
+
+
+
+    Simulating Free Surface Flow with Very Large Time Steps
+
+                      Michael Lentine†          Matthew Cong†          Saket Patkar†            Ronald Fedkiw†
+                     Stanford University      Stanford University   Stanford University       Stanford University
+                   Industrial Light + Magic                                                 Industrial Light + Magic
+
+
+
+        Abstract
+
+        We provide a novel simulation method for incompressible free surface flows that allows for large time steps on the
+        order of 10-40 times bigger than the typical explicit time step restriction would allow. Although semi-Lagrangian
+        advection allows for this from the standpoint of stability, large time steps typically produce significant visual
+        errors. This was addressed in previous work for smoke simulation using a mass and momentum conserving version
+        of semi-Lagrangian advection, and while its extension to water for momentum conservation for small time steps
+        was addressed, pronounced issues remain when taking large time steps. The main difference between smoke and
+        water is that smoke has a globally defined velocity field whereas water needs to move in a manner uninfluenced
+        by the surrounding air flow, and this poses real issues in determining an appropriate extrapolated velocity field.
+        We alleviate problems with the extrapolated velocity field by not using it when it is incorrect, which we determine
+        via conservative advection of a color function which adds forwardly advected semi-Lagrangian rays to maintain
+        conservation when mass is lost. We note that one might also use a more traditional volume-of-fluid method which
+        is more explicitly focused on the geometry of the interface but can be less visually appealing – it is also unclear
+        how to extend volume-of-fluid methods to have larger time steps. Finally, we prefer the visual smoothness of a
+        particle level set method coupled to a traditional backward tracing semi-Lagrangian advection where possible,
+        only using our forward traced color function solution in areas of the flow where the particle level set method fails
+        due to the extremely large time steps.
+
+
+
+1. Introduction                                                      smoke simulations, there remain a number of issues for wa-
+                                                                     ter simulation. For example, because water is treated as a
+Physically based simulation of water has been one of the
+                                                                     free surface, velocities must be extrapolated across the in-
+most interesting and challenging problems in computer
+                                                                     terface which can create artifacts at large time steps. Fig-
+graphics because of the amount of small scale details that
+                                                                     ure 2 demonstrates one such case where a ball with constant
+can be achieved. Earlier work includes [FM97,Sta99,FF01].
+                                                                     downward velocity is falling onto a pool of water. With cur-
+With the increased availability of low cost memory, multi-
+                                                                     rent methods, the bottom of the ball depicted in yellow fails
+core machines and software suitable for MPI and threading,
+                                                                     to advect correctly due to inaccurate extrapolated veloci-
+grid sizes can be increased achieving even greater detail by
+                                                                     ties – which could only be accurate if multi-valued. Parti-
+reducing the numerical viscosity that damps out the solution
+                                                                     cle based methods, see e.g. [DC96,MCG03,ZB05,LTKF08]
+on coarser grids. Unfortunately, the computational cost does
+                                                                     and the references therein, also suffer from accuracy is-
+not scale linearly in the number of grid cells as the time step
+                                                                     sues and visual artifacts that result from the poor sampling
+size must decrease either due to stability restrictions in ex-
+                                                                     of particles (too sparse or too dense) at these large time
+plicit schemes or accuracy restrictions for implicit schemes.
+                                                                     steps. There are also additional difficulties in creating sur-
+The traditional semi-Lagrangian advection of [Sta99] is un-
+                                                                     faces from particle data [YT10, BGB11], and we instead fo-
+conditionally stable, and thus, does allow for much larger
+                                                                     cus our efforts on grid based methods – although address-
+time steps. However, the visual artifacts that are produced
+                                                                     ing very large time steps for particle based methods would
+with this method at large time steps make this approach un-
+                                                                     also be interesting and useful. Note that front tracking meth-
+desirable. Although this has been addressed in [LAF11] for
+                                                                     ods [BBB10, WTGT10] also rely on an interface representa-
+                                                                     tion via particles and thus would suffer from the same sam-
+† e-mail: {mlentine|mdcong|patkar|fedkiw}@cs.stanford.edu            pling problems as particle based methods but would have
+
+c The Eurographics Association 2012.
+                                 Lentine et al. / Simulating Free Surface Flow with Very Large Time Steps
+
+
+
+
+Figure 1: Water pouring into a box at a resolution of 5123 . This example ran with a CFL number ranging from 10-60 and
+demonstrates the large amount of small scale details that can be achieved by using our method.
+additional difficulties with self intersection of the surface ex-       [MMS04, MUM∗ 06]). However, their improvements did not
+acerbated by large time steps.                                          completely eliminate such visual artifacts which would be
+   Since [LAF11] increased the visual accuracy of their sim-            exacerbated with very large time steps, especially when di-
+ulations by conserving both the mass of the smoke and the               mensional splitting is used. Another possible approach in-
+momentum of the fluid, our main idea will be to enforce                 volves enforcing volume preservation globally as demon-
+a conservation property for the volume of the liquid. In                strated in [KLL∗ 07]. However, this would isotropically ex-
+fact, volume conservation is a well-established idea that re-           pand the blue region in Figure 2 as opposed to adding the
+searchers have explored for some time. They started by ad-              yellow region to reconstruct the circle. Therefore, we do not
+vecting a Heaviside or color function, adding various tech-             take a VOF type or global volume control approach to the
+niques to recompress the interface representation aiming to             problem but instead use a color function type method that
+keep it sharp in spite of the numerical smearing. One early             relies on semi-Lagrangian advection and sharpening (see
+approach was to treat advection by looking at the volume                Figure 3). [MMTD07] also proposed an approach to color
+swept by faces (fluxes) and reconstructing the interface using          function advection using a conservative flux based approach
+a simple line interface calculation (SLIC) and later a piece-           which is known to suffer from overshoots and undershoots –
+wise linear interface calculation (PLIC) resulting in modern            the thing VOF methods were created to address. [MMTD07]
+day volume-of-fluid (VOF) schemes (see e.g. [PP04] and the              cited [FM07] as a method for taking larger time steps; how-
+references therein). In order to avoid overlapping of the flux          ever, this dimension by dimension approach suffers from the
+swept volumes, these methods must be applied one dimen-                 same limitations discussed in Figure 3.
+sion at a time using dimensional splitting and the time step               Simply utilizing a color function type approach would
+must be restricted to be one half of that allowed by a standard         suffer from all the same problems that originally led to the
+explicit scheme. Various visual artifacts result from this di-          improved VOF methods or coupled level set VOF methods,
+mensional splitting, and the interface reconstruction ends up           and we would prefer to use a more visually pleasing particle
+being discontinuous across cell boundaries. [SP00, Sus03]               level set method such as that proposed in [EMF02,EFFM02]
+worked to ameliorate these issues by coupling VOF meth-                 (or even a variant such as Marker Level Set [MMS09]).
+ods to level set methods where a locally constructed and                Therefore, we start with the work of [EMF02, EFFM02] ad-
+advected level set function is used to compute surface nor-             dressing various issues with large time steps, noting that
+mals alleviating some of the flotsam and jetsam (see also               without conservation the issue in Figure 2 seems implausible
+
+                                                                                                            c The Eurographics Association 2012.
+                                       Lentine et al. / Simulating Free Surface Flow with Very Large Time Steps
+
+
+
+
+                                                                              Figure 3: Assuming a velocity field directed diagonally
+                                                                              downward and to the left as depicted by the orange arrow,
+                                                                              the correct volume information for the green cell would be
+                                                                              obtained from the brown shaded cell. Any method which
+(a) Extrapolated velocities using (b) Result after taking a large             looks only in orthogonal directions would be limited to as-
+closest point extrapolation       time step                                   certain information only from the grey shaded cells depicted
+                                                                              in the picture. One could imagine an alternating dimension
+Figure 2: Figure 2a shows the analytic solution for the                       by dimension exhaustive approach that scans all 25 cells in
+canonical closest point extrapolation scheme used in free                     the neighborhood in order to eventually find the informa-
+surface flow simulation where the velocity field in the “air”                 tion in the brown cell, but the semi-Lagrangian method is
+is determined by the closest point in the water surface. This                 far more efficient.
+results in a velocity discontinuity along the curved equidis-
+tant boundary between the green and grey shaded regions.                      scaled by ρ, and p is the fluid pressure. We solve these equa-
+Everything above this curve has a downward velocity ob-                       tions by first calculating an intermediate velocity field u? via
+tained from gravity acceleration of the falling drop whereas                                    u? − un
+everything below this curve has a stationary velocity of 0 ob-                                          + (un · ∇)un = f.               (3)
+                                                                                                   ∆t
+tained from the stationary liquid at the bottom of the figure.
+                                                                              This equation is typically solved using the standard back-
+For advection, the analytic solution using backwards cast
+                                                                              ward semi-Lagrangian advection scheme [Sta99] which re-
+semi-Lagrangian rays gives the result shown in Figure 2b in
+                                                                              quires an accurate approximation of the velocities in the re-
+blue (not yellow) where everything above the curve moves
+                                                                              gion traversed by the fluid during a given time step. In the
+downward and everything below the curve stays stationary.
+                                                                              region not occupied by the liquid, one needs to obtain ve-
+The actual analytic solution is shown by the union of the blue
+                                                                              locities for use in semi-Lagrangian advection, and this is
+and yellow regions in the figure and we address the loss of
+                                                                              typically done using any closest-point velocity extrapolation
+mass depicted by the yellow region by instead forward ad-
+                                                                              scheme within a band near the surface.
+vecting all of that material. One could forward advect the
+entire drop but that leads to significantly lower accuracy in                    We then subsequently apply the pressure forces via
+the blue region where backwards advection works well.
+                                                                                                    un+1 − u?    1
+                                                                                                              = − ∇p,                     (4)
+to address (see Section 3.1). Thus, we hybridize this method                                           ∆t        ρ
+with a color function type approach in order to achieve an                    where the pressure is calculated by solving the Poisson equa-
+approximation of the yellow region in Figure 2, and subse-                    tion
+quently outline the details for two way coupling of the meth-                                          1
+ods. Our color function approach has many benefits over                                            ∇ · ∇ p̂ = ∇ · u? ,                  (5)
+                                                                                                       ρ
+any dimension by dimension or flux based approach because
+of the use of the semi-Lagrangian advection from [LGF11]                      where p̂ = p∆t. We also use the pressure modifications of
+which is especially useful for large time steps (again as                     [GFCK02] to achieve second-order accuracy at the surface.
+shown in Figure 3). The resulting method enables the simu-                    3. Taking Large Time Steps
+lation of free surface flow with time steps over an order of
+                                                                              Generally speaking, there are two main steps in the simula-
+magnitude larger than implied by the CFL condition.
+                                                                              tion. The first step is to advect all quantities forward includ-
+2. Free Surface Flows                                                         ing the fluid velocities, level set, and particles after which
+                                                                              the second step is the projection. Both of these steps require
+Our fluid solver is based on the particle level set method
+                                                                              modifications for large time steps.
+[EMF02] and proceeds by solving the inviscid incompress-
+ible Navier-Stokes equations, which are given by                              3.1. Problems With Extrapolation
+                                     1                                        The standard semi-Lagrangian advection requires looking
+                      ut + u · ∇u = − ∇p + f,                       (1)       back along characteristic rays. However, for free surface
+                                     ρ
+                                                                              flows, the air region is not modeled and therefore does not
+                               ∇ · u = 0,                           (2)
+                                                                              have accurate velocities which need to be approximated. One
+where u is the velocity of the fluid, ρ is the density of the                 method of obtaining these velocities is to add an air flow
+fluid, f is the sum of any external forces (such as gravity)                  such as in [HK05, LSSF06]. The problem with this is that
+
+c The Eurographics Association 2012.
+                                Lentine et al. / Simulating Free Surface Flow with Very Large Time Steps
+
+
+
+
+Figure 4: Sphere of water dropped onto a stationary flat surface of water at a resolution of 2563 . This example ran with a CFL
+number ranging from 10-40. The early part of the simulation when the water first starts to fall was simulated with a smaller
+CFL number. The later parts of the simulation were ran with a higher CFL number.
+for many graphics simulations, we expect the air to have               or over the large extrapolation bands required when taking
+very little influence on large bodies of water. For example,           large time steps to remove the discontinuity shown in Fig-
+a falling water drop will deform in a surrounding airflow,             ure 2, it will produce a velocity field that deforms the drop
+and although this can be ameliorated by surface tension, this          long before it hits the water surface. Thus, this method, while
+adds an additional cost and complexity to the simulation.              applicable for improving merging at small time steps, does
+                                                                       not alleviate the issues with large time steps.
+   Instead, as mentioned above, we fill the air region with
+a pseudo-velocity obtained via the canonical closest point             3.2. Advection
+extrapolation scheme which allows the water to move ef-                As discussed in the previous section, closest-point extrapo-
+fectively unimpaired by the surrounding air. Typically one             lation methods are unable to approximate a velocity field far
+extrapolates about three grid cells; however, the extrapola-           away from the interface that is usable with large time steps.
+tion bandwidth must increase as the size of the time step              Thus, we only extrapolate within the standard three grid cell
+increases. Previous approaches [CM11, LAF11] address the               band. Then, we advect the velocity using the conservative
+large time step problem by either performing a global ex-              method of [LAF11] who show that this method works for
+trapolation or by conserving momentum through advection;               globally defined velocity fields and large time steps, as well
+however, as seen in Figure 2, even with the analytic solu-             as small time steps with free surfaces, but do not show that
+tion to the global problem, this method will fail. Other ap-           it works for large time steps with free surfaces. However,
+proaches such as [Cho09] which uses a multi-valued veloc-              the method can be used to advect velocities (albeit not a sur-
+ity field in order to handle collisions such as those shown in         face) in that case as well without any modifications. Basi-
+Figure 2, will fail in other cases such as when two spheres            cally, when cells within the three grid cell band look back to
+collide with each other. In this case, the algorithm would ei-         advect velocity forward, any velocities that are missed that
+ther cause the spheres to incorrectly pass through each other          would have been updated from a larger band are updated in
+without a collision or overlay the spheres with each other re-         the second step of forward advection which is required in
+sulting in a violation of volume conservation. The only way            order to conserve the momentum.
+to properly handle the collision is to construct an extrapola-
+tion field that has knowledge of incompressibility.                       Second order Runge-Kutta particle advection can fail at
+                                                                       large time steps without an accurate fluid or extrapolated ve-
+   This was addressed by [Sus03, REN∗ 04] who used diver-              locity. We advect the particles with forward Euler if a veloc-
+gence free extrapolation to alleviate the issue by ensuring            ity sampled within an RK2 step is outside the extrapolated
+that the extrapolated velocity is discretely mass conserving.          velocity band allowing us to maintain the higher-order accu-
+However, we observed that their proposed solution deforms              racy of the RK2 method in the presence of accurate veloci-
+a falling spherical drop well before merging takes place. This         ties while improving the robustness of the method when such
+is because divergence free extrapolation solves a second pro-          velocities are absent. Level set advection also has problems
+jection in the narrow band around the outside of the drop              at large time steps. While the particle level set method main-
+with a free surface boundary condition applied on the outside          tains the shape of the air-water interface at small time steps,
+of this narrow band. If this boundary condition is enforced            it does not typically preserve the amount of volume within
+by setting the cells to p = 0 without considering the interface        the liquid region. At small time steps, these changes in vol-
+geometry, the drop deforms. This deformation of the drop               ume are small and are unnoticeable in the animation. How-
+can be resolved by using the second order cut cell method              ever, when the particle level set is evolved with a large time
+from [GFCK02] on the outer edge of the band (which we                  step, this volume loss becomes more apparent and detracts
+point out for the first time in the paper). While this works to        significantly from the visual plausibility of the simulation.
+improve merging for the small extrapolation bands required             Furthermore, applying a conservative advection scheme to
+when taking small time steps, when it is applied globally              the level set itself is insufficient to resolve this volume loss
+
+                                                                                                           c The Eurographics Association 2012.
+                                       Lentine et al. / Simulating Free Surface Flow with Very Large Time Steps
+
+
+
+
+Figure 5: Dam break water example at a resolution of 2563 . This example ran with a CFL number ranging from 10-40. The
+early part of the simulation when the water first starts to fall under the influence of gravity was simulated with a smaller CFL
+number. The later parts of the simulation were ran with a higher CFL number.
+because the conservation of signed distance values does not                   later improved on this by allowing for a normal in any di-
+imply conservation of any physical quantity such as volume.                   rection. Then, advection was carried out by intersecting the
+We resolve this by advecting a color function using the con-                  material in a cell with the volume swept out by a cell face
+servative method of [LAF11] in conjunction with the particle                  along its normal during a time step. As mentioned in Sec-
+level set surface as discussed in Section 4.                                  tion 1, in order to be conservative, these methods have a
+                                                                              CFL restriction of 0.5 and produce a number of visual ar-
+3.3. Projection
+                                                                              tifacts. [SP00] attempted to improve the VOF method by
+We solve the projection step only in liquid regions while en-                 constructing a level set from the interface which is used to
+forcing a free surface boundary condition. As a result, small                 compute the tangent plane normals. The surface reconstruc-
+regions of “air” (not in a liquid region) can create large di-                tions of this CLSVOF method are typically not as smooth
+vergences. While this is acceptable with small time steps due                 as those from the particle level set method as can seen by
+to the restrictions on the motion of the fluid, this results in               the examples of [MMS04, MUM∗ 06], and the resulting vi-
+a large amount of volume loss when taking large time steps.                   sual artifacts will be highly exacerbated at large time steps.
+One method of solving this problem is to explicitly fill the                  While previous methods have achieved limited success for
+“air” region and enforce a target divergence [LTKF08] such                    CFL numbers slightly larger than 1 [FM07, CM11], the ar-
+that the cell is exactly filled in a given time step. However,                tifacts will be highly exacerbated for CFL numbers in the
+this method requires the algorithm to detect whether or not                   range of 10-40 as we take in our examples.
+the cell will be filled or overfilled for a given velocity field
+                                                                                 Our method using the color function V is conceptually
+and time step. While simple algorithms, such as thresholding
+                                                                              similar to the VOF method. If V = 1 or V = 0, the region con-
+based on the size of the “air” region and the CFL number can
+                                                                              tains either all liquid or all “air” respectively. If 0 < V < 1,
+be used as an approximate detection scheme, it is difficult to
+                                                                              the region contains both liquid and air. First, to compute the
+obtain a set of parameters that are suitable for a general fluid
+                                                                              initial data, we compute the color function from a piece-
+flow. We use a threshold that causes the algorithm to only fill
+                                                                              wise linear rasterization of the level set. Note that when φ
+small “air” pockets. For larger regions, we instead enforce
+                                                                              is changed for fluid sources, the color function also needs
+volume conservation using our conservative color function
+                                                                              to be modified to maintain consistency. Then we advect the
+treatment. This can sometimes lead to cells with V > 1, and
+                                                                              color function forward in time as per
+this is treated along with other advection errors as described
+in Section 4.                                                                                          Vt + u · ∇V = 0                    (6)
+4. Color Function
+                                                                              using the conservative method of [LGF11]. Note that we do
+In addition to the level set function, we also evolve a color                 not use any of the diffusion methods used when advecting
+function V which represents the fraction of liquid contained                  smoke density [LAF11]. Our experiments show that diffu-
+within a region (usually a single cell in the case of a uniform               sion is detrimental in the case of color function advection,
+grid). Although the color function can be advected using any                  since diffusion is based on the heat equation which tends to
+method, volume is conserved only if the method is conser-                     move the interface faster in regions of higher curvature than
+vative. However, numerical smearing, even in a conservative                   lower curvature. This problem is alleviated for momentum
+method, will cause inaccuracies in V ’s spatial distribution.                 advection because diffusion is not applied across the inter-
+One of the main approaches for increasing accuracy are the                    face, which is well determined before the momentum advec-
+VOF type methods. Early on, SLIC approximated the inter-                      tion step. The conservative advection method can also result
+face in each cell using a plane defined by a normal along                     in excess volume accumulating where fluid collides with a
+one of the Cartesian directions, placing it in a location that                rigid body due to the clamping of semi-Lagrangian rays to
+accurately represented the fraction of volume in a cell. PLIC                 the surface of the object. This can result in an undesirable
+
+c The Eurographics Association 2012.
+                                 Lentine et al. / Simulating Free Surface Flow with Very Large Time Steps
+
+
+
+
+            (a)                        (b)                          (c)                        (d)                           (e)
+Figure 6: Correcting Numerical Dissipation in the Color Function: Figure 6a shows the color function after advection. Due
+to numerical dissipation, there are regions inside the level set (φ ≤ 0) with a color function value V = 1 (blue), V < 1 (cyan),
+and V > 1 (magenta) along with regions outside the level set (φ > 0) with a color function value V = 0 (black) and V > 0
+(green). Figures 6b, 6c, and 6d demonstrate the results after applying our first, second, and third compression step respectively.
+We then apply a volume-conserving diffusion algorithm which corrects for errors in compression (usually located in regions of
+high curvature) to obtain a more accurate color function surface representation shown in Figure 6e.
+viscous fluid appearance which we avoid by reflecting the                 a different advection scheme that can result in negative val-
+semi-Lagrangian rays off the surface, and scaling them by a               ues is used. The compression is done in a Gauss-Seidel fash-
+damping coefficient.                                                      ion using a single iteration (multiple iterations could be used
+                                                                          but are not needed since its done at every time step), and thus
+   After the color function has been conservatively advected              the order in which the cells are visited matters. One might
+forward in time, it will still smear out due to numerical dis-            want to use a method such as Gauss-Jacobi to reduce bias
+sipation. We apply a compression procedure diagrammed in                  but this will require more iterations, and we have found that
+Figure 6 to the color function after it has been advected for-            Gauss-Seidel is satisfactory for our purposes. This is par-
+ward in time. First, we compute the .5 isocontour of the color            tially because we couple it with particle level set method for
+function. Then, we aim to set all cells within the .5 isocon-             accuracy whenever possible (see Section 5).
+tour to have V = 1 and all cells outside the .5 isocontour to             5. Coupling
+have V = 0. There are two primary discrepancies that need to
+                                                                          First, we advect both φ and V forward in time using
+be addressed. The first problem is that V values outside the
+                                                                          semi-Lagrangian advection for φ and conservative semi-
+isocontour can be more than 0 due to numerical smearing.
+                                                                          Lagrangian advection for V . We then correct the values of
+The second problem is that V values inside the isocontour
+                                                                          φ using the particles as in the particle level set method, and
+are not necessarily 1 (can be either more than or less than 1).
+                                                                          subsequently reinitialize φ. However, we stress that the sec-
+Although interior cells with V > 1 can result from errors in
+                                                                          ond particle correction of the reinitialized level set is not yet
+advection, this can also occur from the collapse of air pock-
+                                                                          applied, and the color function is not yet compressed. At this
+ets as discussed in Section 3.3. To correct for these errors,
+                                                                          point, we construct a distance function from the color func-
+we compute differences between the target (0 or 1) and cur-
+                                                                          tion in almost the same way that [SP00] construct it at the
+rent color function value and then move this difference in the
+                                                                          beginning of the time step. That is, we first use a VOF con-
+direction of the gradient of V to the interface. For V > 0 out-
+                                                                          struction of the color function, computing a normal from the
+side the interface, we move in the direction of the gradient
+                                                                          gradient of V and the placement of the tangent plane in the
+of V until we are at a location 2∆x interior to the V = .5 iso-
+                                                                          cell from the value of V itself, and then initialize values of
+contour. Then, we distribute the difference in color function
+                                                                          the signed distance function φV based on the tangent plane in
+value to the neighboring cells around this location (exclud-
+                                                                          that cell. Nearby cells are initialized with values from the fast
+ing cells lying within rigid bodies) in weighted proportions
+                                                                          marching method. Unlike [SP00], we compute the normals
+until V = 1 in each cell. If all of the difference cannot be dis-
+                                                                          directly from the gradient of V as opposed to an advected
+tributed at these neighboring cells without overflowing the
+                                                                          φ. This is because an advected φ function would be highly
+cells, the remainder of the difference is placed in a location
+                                                                          inaccurate due to the issue of velocity extrapolation.
+obtained by marching outwards along the gradient of V . For
+the cells on the interior of the V = .5 isocontour with V > 1                While the color function does not represent the interface
+the difference in color function value V − 1 is distributed to            as accurately as the particle level set method, it is often
+the surface in the same way starting from a distance of 2∆x               the only reasonably accurate interface representation avail-
+inside the surface. In the third case, where V < 1 for interior           able when taking large time steps demonstrated by the yel-
+cells, we fill V for each cell to 1 using color function val-             low region of Figure 2. Thus, our aim is to use the par-
+ues from the surface by distributing a negative value V − 1               ticle level set method wherever possible in order to gain
+starting 2∆x outside the interface and marching inwards in                visually pleasing surfaces and only to use the color func-
+a similar manner in the opposite direction as the first two               tion to represent the surface where the level set representa-
+cases. Both our advection scheme and compression scheme                   tion has lost large amounts of mass such as shown in Fig-
+guarantee that values of V < 0 cannot occur; however, the                 ure 8. Generally speaking if the interfaces agree we use
+compression method can be modified to account for these if                the particle level set representation of the interface. We say
+
+                                                                                                              c The Eurographics Association 2012.
+                                       Lentine et al. / Simulating Free Surface Flow with Very Large Time Steps
+
+
+
+
+Figure 7: Water pouring into a box over a rigid sphere at a resolution of 2563 . This example ran with a CFL number ranging
+from 10-40. The earlier section of the simulation from when the source is first activated until the water first hits bottom of
+the container and the later section after the source was turned off and the water starts to calm were simulated with a smaller
+CFL number. The more active parts of the simulation which occur between the water from the source hitting the bottom of the
+container and the source turning off were ran with a higher CFL number.
+that the two interfaces agree if they do not differ by more                   tured by the level set alone. Finally, the reinitialized φB is
+than .5∆x in distance. At every cell (i, j, k) in the compu-                  corrected via particles in the usual fashion of the particle
+tational domain, we compute a blending parameter αi, j,k =                    level set method.
+|φi, j,k − φVi, j,k |/∆x − .5 and clamp it in the range [0, 1]. Sub-             In summary, we advect the level set function φ, correct it
+sequently, we compute the blended level set function φB via                   with particles and reinitialize it, advect the color function V ,
+φBi, j,k = (1 − αi, j,k )φi, j,k + αi, j,k φVi, j,k . Note that the minimum   contour it with a VOF method and produce a signed distance
+pre-clamped value of αi, j,k is −.5 and thus when the inter-                  function representation φV , blend φ and φV to obtain φB ,
+face values agree to within half a grid cell, we use the level                reinitialize the result, delete particles where the color func-
+set version. For αi, j,k ≥ 1, we use the color function rep-                  tion representation is being used, reseed particles around the
+resentation, and otherwise we interpolate between them. In                    new interface generated by the color function, and correct
+order to avoid visual kinks in φB , α is smoothed locally on                  the combined level set using the particles. We denote the fi-
+the grid using a Gaussian filter before linearly interpolating                nal result once again as φ.
+φ and φV to obtain φB .
+                                                                                 At this point, we have the desired level set reconstruction
+   Next, φB is initialized to a signed distance function. In or-              but a smeared out color function. We use the compression
+der to prevent spurious particle corrections to the blended                   method listed in Section 4 to compress the color function us-
+level set representation, a particle is deleted if α > 0 at the               ing the more accurate normals of φ instead of the less accu-
+closest surface cell. This signifies that the closest interface               rate gradients of the color function. Moreover, we can accel-
+in the cell has changed from the using the φ obtained from                    erate the process of finding the zero isocontour and nearby
+PLS and is instead using the color function to help define the                locations using the fact that φ is a signed distance function.
+interface, thus rendering the particle correction incorrect in                We stress that this compression does not use isocontours or
+that cell. Particles are then only reseeded in the areas with                 geometric information from V in any way but instead strives
+α > 0 in order to preserve sharp features that cannot be cap-                 to compress V into the newly generated φ.
+                                                                                 While this compression method works well, we have no-
+                                                                              ticed that in regions of high and low curvatures compression
+                                                                              tends to produce errors near the interface such as V > 0 color
+                                                                              function values accumulating on the peaks of the waves. (see
+                                                                              Figure 6). Therefore, we propose a diffusion based algo-
+                                                                              rithm, similar to the ones found in [FL04, LAF11] to im-
+                                                                              prove the color function’s surface representation. We take
+                                                                              the union of the surfaces given by φV and φ and use com-
+         (a) PLS method                        (b) Our method                 pression outside this region and diffusion inside. We diffuse
+Figure 8: Figure 8a shows the result we get after taking                      the error e = V −V φ , where V φ is the color function obtained
+a large time step using the PLS method. Because closest-                      from a piecewise linear rasterization of φ, in the color func-
+point extrapolation discussed in 3.1 is unable to provide a                   tion relative to the level set close to the surface. We have also
+good approximation of the velocities in the air region, back-                 experimented with solving the Poisson equation with the ap-
+ward semi-Lagrangian advection fails to accurately advect                     propriate target divergences to generate a velocity field in-
+the level set causing the ball to become clipped at the bottom.               side the union which works as well but is much more expen-
+Figure 8b shows the same frame using our method where we                      sive than using this sweeping method. After the compression
+are able to reconstruct and subsequently maintain the shape                   and diffusion steps, the color function yields an improved
+of the ball even when taking a very large time step.
+c The Eurographics Association 2012.
+                                 Lentine et al. / Simulating Free Surface Flow with Very Large Time Steps
+
+
+
+
+Figure 9: Water pouring into a box from two opposite-facing sources at a resolution of 5123 . This example ran with a CFL
+number ranging from 10-60. The earlier section of the simulation when the sources are first activated until the water from the
+sources collides was simulated with a smaller CFL number. The remainder of the simulation was ran with a higher CFL number.
+Note that we increase the amount of absorption during rendering in order to make the fine scale details more apparent.
+surface representation (as shown in Figure 6) and in order to           CFL number of 1 means that advection does not move in-
+improve the visual appearance of the final surface, we repeat           formation farther than 1 grid cell in any time step. Then, we
+the blending process using the current V and φ.                         then ran both the standard PLS method and our method at a
+6. Results                                                              high CFL number of 40 at resolutions of 643 , 1283 and 2563 .
+                                                                        For resolutions of 643 and 1283 , this equates to running at
+We demonstrated our method on a number of 3D examples                   the frame rate (meaning one time step per frame) since the
+as seen in Figures 1, 4, 5, 7, 9, and 11. We first ran a baseline       maximum CFL number was approximately 5 for 643 reso-
+simulation for each example using the standard PLS method               lution simulations and approximately 20 for 1283 resolution
+at a CFL number of 1 at resolutions of 643 and 1283 . How-              simulations. We also ran our method at a resolution of 5123
+ever, these simulations were too slow to run in a practical             in order to demonstrate the large resolution simulations that
+amount of time at the higher resolutions such as 2563 . A               can be obtained by our method at high CFL numbers. For
+                                                                        this simulation, we primarily ran with a CFL number of 60.
+                                                                        Figure 10 shows a comparison between our method and the
+                                                                        particle level set method using similar amounts of computa-
+                                                                        tion. Figure 12 shows a comparison of the volume between
+                                                                        the traditional PLS algorithm and our method at a resolu-
+                                                                        tion of 1283 . Note the large amount of volume lost without
+                                                                        using our method. Compared to the standard particle level
+                                                                        set method, the additional steps in our method cause it to
+                                                                        execute about twice as slowly for a given time step. How-
+                                                                        ever, since our time step is allowed to be 40 times larger, our
+                                                                        method approximately achieves a 20 times increase in per-
+                                                                        formance on frames where the CFL number is close to 40
+                                                                        or greater. For frames in specific simulations where the CFL
+Figure 10: Comparisons between our method and the par-                  numbers are smaller than 40 (e.g. stationary sphere before
+ticle level set method using similar amounts of computation.            it begins falling into water under the influence of gravity),
+The left figure shows the correct answer obtained by run-               we achieve smaller increases in performance. We empha-
+ning the particle level set algorithm at a resolution of 2563           size that this is due to the maximum time step size being
+at CFL 1. The middle figure shows the results of running our            restricted by the user-specified frame rate for the simulation.
+algorithm at a resolution of 2563 at CFL 16. This requires a            Similarly, for the 2563 resolutions, we ran both the standard
+similar amount of computation to running the particle level             PLS method and our method. Our larger examples were ran
+set method at a resolution of 1283 at CFL 1 which gives the             with a fully parallelized MPI implementation which scales
+results shown in the right figure. Our algorithm has the same           well at relatively low CFL numbers but when running this
+degree of numerical viscosity as the 2563 particle level set            large of a simulation, our CFL number becomes limited be-
+simulation but requires the same amount of computation as               cause our current MPI implementation divides the compu-
+the 1283 since the resolution is doubled in each dimension
+and the CFL condition becomes twice as strict.
+                                                                                                            c The Eurographics Association 2012.
+                                       Lentine et al. / Simulating Free Surface Flow with Very Large Time Steps
+
+
+
+
+Figure 11: Water pouring into a box from two opposite-facing sources at a resolution of 2563 . This example ran with a CFL
+number ranging from 10-40. The earlier section of the simulation when the sources are first activated until the water first hits
+the bottom of the container was simulated with a smaller CFL number. The more active parts of the simulation which occur
+after the water from the sources hits the bottom of the container were ran with a higher CFL number.
+tational domain into a number of smaller domains and we                       of the simulation). However, a number of methods includ-
+have not generated the code to cross more than one proces-                    ing [LZF10, MST10] improve the scalability when the res-
+sor boundary (although this can be done). The limitations on                  olution changes. These methods can be used in conjunction
+the CFL number of simulations due to the size of the MPI                      with our method to create even faster simulations.
+domains bring up the important issue that with a CFL num-
+ber equal to the size of one of these subdomains, a ghost cell                7. Conclusion
+implementation requires 27 times more data for ghost cells                    We have presented a novel method method for accurately
+than the actual simulation (i.e. each grid being replicated in                simulating free surface flow even when taking time steps that
+all Cartesian directions and partially replicated in the diago-               are more than an order of magnitude larger than implied by
+nal directions) which can quickly deplete memory resources.                   the CFL condition. We accomplish this by conservatively ad-
+In the standard ghost cell implementation, it might be advan-                 vecting a color function representing the fraction of volume
+tageous for MPI code (although unnecessary for threaded                       contained in each cell along with the particle level set and
+code) to change the boundary process to have each grid re-                    using the color function to compute an accurate representa-
+quest data from the neighboring grids that contain the needed                 tion of the surface where the particle level set representation
+grid cells, sending that request out to other processors which                fails to suffice. This allows our method to maintain volume
+send the information back. Even so, if every grid cell in                     and subsequently achieve visually accurate results. More-
+the domain is requesting data from another processor, this                    over, we have presented a general framework for combining
+is equivalent to copying entire grids from one processor to                   an interface tracking method with a volume tracking method.
+another at every time step, and thus while doubling the CFL                   Investigating the use of other interface tracking methods and
+number does halve the required number of pressure solves                      volume tracking methods for use within this framework is a
+and other steps such as those involved in the particle level                  potential subject of future work.
+set method, it increases the communication cost. Thus, one
+cannot indefinitely increase the CFL number although we
+noticed issues in visual accuracy at lower CFL numbers than
+would lead to concerns with communication bottlenecks. For
+example, during the first step of a simulation with a horizon-
+tally facing source, the velocities are purely horizontal and
+thus when a large CFL number is taken, the liquid will move
+a large distance parallel to the ground despite the fact that the
+fluid should be falling. One alternatively could apply gravity
+first but that would mean advecting in a divergent flow field
+which can cause objects to incorrectly advect through solid
+walls. Instead, these problems are partially resolved by run-
+                                                                              Figure 12: Volume vs. time for four different simulations.
+ning with a smaller CFL number when such visual artifacts
+                                                                              The red and blue lines represent the liquid volume present
+manifest which typically occurs in slow moving fluid flows.
+                                                                              in the dam break simulation at frame rate. Notice how our
+                                                                              method (red) fully conserves volume while the PLS algo-
+   It is important to note that although we can maintain a                    rithm (blue) loses a tremendous amount of volume. The
+similar time step size at larger resolutions, the algorithm                   green and purple lines represent the volume present in a
+does scale with the number of grid cells. Therefore, the sim-                 simulation with water from a source flowing over a ball.
+ulation is a factor of 8 slower when the grid size doubles for                Notice how the volume increases linearly until the source
+a fixed time step (which requires doubling the CFL number                     is turned off when using our method (green) but decreases
+                                                                              slowly when using the PLS algorithm (purple).
+c The Eurographics Association 2012.
+                                   Lentine et al. / Simulating Free Surface Flow with Very Large Time Steps
+
+Acknowledgements                                                          [LGF11] L ENTINE M., G RÉTARSSON J., F EDKIW R.: An un-
+                                                                            conditionally stable fully conservative semi-lagrangian method.
+Research supported in part by ONR N00014-06-1-0505,                         J. Comput. Phys. 230 (2011), 2857–2879. 3, 5
+ONR N00014-09-1-0101, ONR N-00014-11-1-0027, ARL                          [LSSF06] L OSASSO F., S HINAR T., S ELLE A., F EDKIW R.:
+AHPCRC W911NF-07-0027, NSF IIS-1048573, and the                             Multiple interacting liquids. ACM Trans. Graph. (SIGGRAPH
+Intel Science and Technology Center for Visual Com-                         Proc.) 25, 3 (2006), 812–819. 3
+puting. Computing resources were provided in part by                      [LTKF08] L OSASSO F., TALTON J., K WATRA N., F EDKIW R.:
+ONR N00014-05-1-0479. We would like to thank Christos                       Two-way coupled sph and particle level set fluid simulation.
+Kozyrakis for additional computing resources as well as Ja-                 IEEE TVCG 14, 4 (2008), 797–804. 1, 5
+cob Leverich for helping us use those resources. We would                 [LZF10] L ENTINE M., Z HENG W., F EDKIW R.: A novel algo-
+also like to thank Avi Robinson-Mosher for his early work                   rithm for incompressible flow using only a coarse grid projection.
+                                                                            ACM Transactions on Graphics (July 2010). 9
+on coupling PLS and VOF methods.
+                                                                          [MCG03] M ÜLLER M., C HARYPAR D., G ROSS M.: Particle-
+References                                                                  based fluid simulation for interactive applications. In Proc. of the
+[BBB10] B ROCHU T., BATTY C., B RIDSON R.: Matching fluid                   2003 ACM SIGGRAPH/Eurographics Symp. on Comput. Anim.
+  simulation elements to surface geometry and topology. ACM                 (2003), pp. 154–159. 1
+  Trans. Graph. (2010). 1                                                 [MMS04] M IHALEF V., M ETAXAS D., S USSMAN M.: An-
+[BGB11] B HATACHARYA H., G AO Y., BARGTEIL A.: A level-                     imation and control of breaking waves. In Proc. of the
+  set method for skinning animated particle data. In Proceedings            2004 ACM SIGGRAPH/Eurographics Symp. on Comput. Anim.
+  of the 2011 ACM SIGGRAPH/Eurographics Symposium on Com-                   (2004), pp. 315–324. 2, 5
+  puter Animation (2011), SCA ’11. 1                                      [MMS09] M IHALEF V., M ETAXAS D. N., S USSMAN M.: Sim-
+[Cho09] C HOPP D.: Another look at velocity extensions in the               ulation of two-phase flow with sub-scale droplet and bubble ef-
+  level set method. SIAM J. Sci. Comput. 31 (2009), 3255–3273. 4            fects. Comput. Graph. Forum (2009). 2
+[CM11] C HENTANEZ N., M ÜLLER M.: Real-time Eulerian wa-                  [MMTD07] M ULLEN P., M C K ENZIE A., T ONG Y., D ESBRUN
+  ter simulation using a restricted tall cell grid. In Proc. of ACM         M.: A variational approach to eulerian geometry processing.
+  SIGGRAPH 2011 (2011), pp. 82:1–82:10. 4, 5                                ACM Trans. Graph. (2007), –1–1. 2
+[DC96] D ESBRUN M., C ANI M.-P.: Smoothed particles: A new                [MST10] M C A DAMS A., S IFAKIS E., T ERAN J.: A parallel
+  paradigm for animating highly deformable bodies. In Com-                  multigrid poisson solver for fluids simulation on large grids. In
+  put. Anim. and Sim. ’96 (Proc. of EG Wrkshp. on Anim. and                 SCA/Eurographics Symp. on Comput. Anim. (2010), pp. 1–10. 9
+  Sim.) (Aug 1996), Boulic R., Hegron G., (Eds.), Springer-Verlag,        [MUM∗ 06] M IHALEF V., U NLUSU B., M ETAXAS D., S USS -
+  pp. 61–76. 1                                                              MAN M., H USSAINI M.: Physics based boiling simulation.
+[EFFM02] E NRIGHT D., F EDKIW R., F ERZIGER J., M ITCHELL                   In SCA ’06: Proc. of the 2006 ACM SIGGRAPH/Eurographics
+  I.: A hybrid particle level set method for improved interface cap-        Symp. on Comput. Anim. (2006), pp. 317–324. 2, 5
+  turing. J. Comput. Phys. 183 (2002), 83–116. 2                          [PP04] P ILLIOD J., P UCKETT E.: Second-order accurate volume-
+[EMF02] E NRIGHT D., M ARSCHNER S., F EDKIW R.: Ani-                        of-fluid algorithms for tracking material interfaces. J. Comput.
+  mation and rendering of complex water surfaces. ACM Trans.                Phys. 199 (2004), 465–502. 2
+  Graph. (SIGGRAPH Proc.) 21, 3 (2002), 736–744. 2, 3                     [REN∗ 04] R ASMUSSEN N., E NRIGHT D., N GUYEN D.,
+[FF01] F OSTER N., F EDKIW R.: Practical animation of liquids.              M ARINO S., S UMNER N., G EIGER W., H OON S., F EDKIW R.:
+  In Proc. of ACM SIGGRAPH 2001 (2001), pp. 23–30. 1                        Directable photorealistic liquids. In Proc. of the 2004 ACM SIG-
+                                                                            GRAPH/Eurographics Symp. on Comput. Anim. (2004), pp. 193–
+[FL04] FATTAL R., L ISCHINSKI D.: Target-driven smoke anima-                202. 4
+  tion. ACM Trans. Graph. (SIGGRAPH Proc.) 23 (2004), 441–
+  448. 7                                                                  [SP00] S USSMAN M., P UCKETT E.: A coupled level set and
+                                                                            volume-of-fluid method for computing 3D and axisymmetric in-
+[FM97] F OSTER N., M ETAXAS D.: Controlling fluid animation.                compressible two-phase flows. J. Comput. Phys. 162 (2000),
+  In Comput. Graph. Int. (1997), pp. 178–188. 1                             301–337. 2, 5, 6
+[FM07] F ROLKOVIC P., M IKULA K.: High-resolution flux-based              [Sta99] S TAM J.: Stable fluids. In Proc. of SIGGRAPH 99 (1999),
+  level set method. SIAM J. Sci. Comput. 29 (2007), 579–597. 2, 5            pp. 121–128. 1, 3
+[GFCK02] G IBOU F., F EDKIW R., C HENG L.-T., K ANG M.:                   [Sus03] S USSMAN M.: A second order coupled level set and
+  A second-order-accurate symmetric discretization of the Poisson            volume-of-fluid method for computing growth and collapse of
+  equation on irregular domains. J. Comput. Phys. 176 (2002),                vapor bubbles. J. Comput. Phys. 187 (2003), 110–136. 2, 4
+  205–227. 3, 4
+                                                                          [WTGT10] W OJTAN C., T HÜREY N., G ROSS M. H., T URK G.:
+[HK05] H ONG J.-M., K IM C.-H.: Discontinuous fluids. ACM                   Physics-inspired topology changes for thin fluid features. ACM
+  Trans. Graph. (SIGGRAPH Proc.) 24, 3 (2005), 915–920. 3                   Trans. Graph. (2010). 1
+[KLL∗ 07] K IM B., L IU Y., L LAMAS I., J IAO X., ROSSIGNAC               [YT10] Y U J., T URK G.: Reconstructing surfaces of particle-
+  J.: Simulation of bubbles in foam with the volume control                 based fluids using anisotropic kernels. In Proc. of the 2010 ACM
+  method. In Proc. of ACM SIGGRAPH 2007 (2007), pp. 98:1–                   SIGGRAPH/Eurographics Symp. on Comput. Anim. (2010). 1
+  98:10. 2
+                                                                          [ZB05] Z HU Y., B RIDSON R.: Animating sand as a fluid. ACM
+[LAF11] L ENTINE M., A ANJANEYA M., F EDKIW R.: Mass and                    Trans. Graph. (SIGGRAPH Proc.) 24, 3 (2005), 965–972. 1
+  momentum conservation for fluid simulation. In SCA ’11: Pro-
+  ceedings of the 2011 ACM SIGGRAPH/Eurographics symposium
+  on Computer animation (2011), pp. 91–100. 1, 2, 4, 5, 7
+
+                                                                                                                 c The Eurographics Association 2012.
+

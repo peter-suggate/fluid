@@ -1,0 +1,1379 @@
+Spatiotemporal FLIP for Fast Free-Surface and Two-Phase Simulation
+With Very Large Time Steps
+BERNHARD BRAUN, Technical University of Munich, Germany
+RENE WINCHENBACH, Technical University of Munich, Germany
+JAN BENDER, RWTH Aachen University, Germany
+NILS THUEREY, Technical University of Munich, Germany
+
+
+
+
+Fig. 1. Our spatiotemporal particle sampling preserves flow coherence at time steps several-fold larger than those typically used in liquid simulation, while
+incurring minimal computational overhead. Left: large-scale whirlpool with over 2 billion particles and 3072 × 3072 × 2048 adaptive grid resolution, completed in
+3.4 days at target CFL number 15. The same simulation would have taken an estimated 2 weeks with standard FLIP at CFL=2. Right: Free-surface comparison:
+our method (top) maintains detailed vortical flow and a smooth surface, whereas standard FLIP (bottom) remains numerically stable but develops severe
+aliasing-driven surface oscillations that rapidly dominate and erase meaningful flow detail.
+
+We present ST-FLIP, a spatiotemporal extension of the Fluid-Implicit Par-                  Our key idea is to interpret particles as samples in four-dimensional
+ticle (FLIP) method for incompressible free-surface and two-phase liquid                space-time: in addition to standard spatial jittering, we randomize particle
+simulation. ST-FLIP enables time steps up to an order of magnitude larger               positions along the time axis as well and perform particle-to-grid deposition
+than those typically used in CFL-constrained solvers, while preserving de-              using a separable 4D kernel. This yields a Monte Carlo estimator of per-
+tailed flow structures and visual fidelity. It addresses a common failure mode          step time-slab-integrated particle quantities. Although particles are treated
+of large time steps in hybrid particle–grid liquid solvers: temporal under-             as samples in 4D space-time, our approach works as a lightweight plug-
+sampling of particle motion produces aliasing-driven free-surface artifacts             in by collapsing to slab-integrated 3D grid fields for projection. Building
+after projection.                                                                       on recent particle-based phase-field work, we reuse the particle-to-grid
+                                                                                        weight accumulators as a conceptual space–time phase field, providing
+Authors’ Contact Information: Bernhard Braun, bernhard.braun@pbs.cit.tum.de, Tech-
+                                                                                        variable-coefficient projection weights and eliminating the need for per-step
+nical University of Munich, Germany; Rene Winchenbach, rene.winchenbach@tum.de,
+Technical University of Munich, Germany; Jan Bender, bender@cs.rwth-aachen.de,          surface reconstruction. The method can be easily integrated into existing
+RWTH Aachen University, Germany; Nils Thuerey, nils.thuerey@tum.de, Technical           FLIP/PIC or APIC solvers with negligible additional computational cost per
+University of Munich, Germany.                                                          time step. The effectiveness of our approach is demonstrated through a series
+                                                                                        of comparisons with state-of-the-art solvers, yielding several-fold speedups
+                                                                                        for multi-billion-particle simulations at high effective 3D resolutions on a
+This work is licensed under a Creative Commons Attribution 4.0 International License.   single workstation.
+© 2026 Copyright held by the owner/author(s).
+ACM 1557-7368/2026/7-ART76
+https://doi.org/10.1145/3811289                                                         CCS Concepts: • Computing methodologies → Physical simulation.
+
+
+                                                                                                  ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+76:2   •   Braun et al.
+
+
+ACM Reference Format:
+Bernhard Braun, Rene Winchenbach, Jan Bender, and Nils Thuerey. 2026.
+Spatiotemporal FLIP for Fast Free-Surface and Two-Phase Simulation With
+Very Large Time Steps. ACM Trans. Graph. 45, 4, Article 76 (July 2026),
+20 pages. https://doi.org/10.1145/3811289
+
+1      Introduction
+Cinematic liquid effects span a vast range of scales–from bulk
+motion to thin sheets and spray–and meeting this visual bar rou-
+tinely pushes simulations to extreme resolutions and prohibitive
+compute budgets. Hybrid Eulerian–Lagrangian methods such as
+PIC/FLIP/APIC [Bridson 2008; Jiang et al. 2015; Qu et al. 2022]
+have emerged as the backbone of many production pipelines [Side-
+Effects-Software 2024; Stringhetti 2024], in part because they com-
+bine detail-preserving advection with high numerical stability, in
+practice often allowing for time steps larger than those imposed
+by the CFL condition [Courant et al. 1928] without catastrophic
+numerical instability [Bridson 2015]. Taking time steps beyond the
+CFL-limit is attractive, especially in graphics, because 3D fluid sim-
+ulation suffers from the ≈ 𝑂 (𝑛 4 ) scaling with grid resolution 𝑛:
+doubling the resolution not only increases the number of grid cells
+eightfold but also dictates halving the time step, for an overall run-
+time increase of about 16×. For high resolutions, CFL-conforming              Fig. 2. Dam break simulated with FLIP (left column) and our method, ST-
+time steps can become orders of magnitude smaller than the video              FLIP (right column). ST-FLIP maintains flow coherence even at very large
+frame interval, substantially limiting the computational feasibility          time steps, speeding up simulation times multi-fold (upper right corners
+of large cinematic-scale simulations. Furthermore, large time steps           show speedup factors compared to the CFL = 1 FLIP baseline).
+can be essential for fast previews at high resolutions, accelerating
+feedback and turnaround cycles in VFX production.
+   However, numerical stability does not guarantee simulation ac-             its versatility by integrating ST-FLIP into the recently published
+curacy or visual fidelity. In practice, the quality of the numerical          high performance PF-FLIP algorithm [Braun et al. 2025]. PF-FLIP is
+solution can deteriorate rapidly with increasing CFL number (the              already optimized for large time steps via adaptively sub-stepped
+maximum distance, in units of grid cells, that fluid parcels travel           higher-order advection. Even on this strong baseline, incorporating
+during a time step). As shown in the left column of Figure 2 and the          ST-FLIP yields a speedup of about a factor of two for large-scale,
+left columns of Figure 8, temporal aliasing and unphysical ripples            high-resolution two-phase simulations, which are numerically sig-
+and waves are amplified by the pressure solve and quickly degrade             nificantly more challenging than the free-surface case.
+the physical structure of the flow. This is especially critical for              The basic idea of our approach is illustrated in Figure 3, which
+liquid or multiphase simulations, where interface kinematics (e.g.,           depicts particles moving along world lines in space-time. Standard
+splashes and breaking waves) are highly nonlinear and topologically           FLIP (left column) samples spatial cells using a set of spatially jit-
+complex.                                                                      tered particles, but at CFL > 1 the motion over a step leaves obvious
+   In this work, we present a space-time extension of standard FLIP,          gaps in spatiotemporal coverage. To address this, we propose to
+which we call ST-FLIP, that supports CFL numbers and, conse-                  jitter particle samples not only in space but also in time, thus ef-
+quently, time steps an order of magnitude larger than those typically         fectively sampling four-dimensional space–time cells instead of
+used in standard liquid solvers, while retaining comparable simu-             the usual three-dimensional spatial cells. As the right-hand side
+lation quality and long-term stability of flow features. While our            of Figure 3 shows, this leads to a much more uniform sampling
+method, like any solver, cannot completely eliminate quality loss             coverage of space-time (and, consequently, of space). We achieve
+at larger time steps, the degradation is much more gradual (Fig-              this by extending the standard particle-to-grid (P2G) transfer to
+ure 2, right column), yielding plausible results even at CFL numbers          four-dimensional space–time, orthogonally augmenting the usual
+greater than ten, delivering multi-fold speedups in wall-clock time.          3D spatial kernel with a carefully designed additional 1D temporal
+   Another key design goal is compatibility with globally adaptive            kernel that distributes each particle’s contribution along the time
+time stepping: our spatiotemporal sampling and staggered-time up-             dimension through a staggered-in-time stochastic advection scheme.
+date remain well-defined and robust when Δ𝑡 changes from step to              Although our particles live in 4D space-time, we keep the solver
+step, which is essential for production-scale simulation. Importantly,        a lightweight drop-in by collapsing the conceptual 4D slab of a
+our scheme can be easily integrated into existing PIC/FLIP/APIC               step’s time interval to slab-integrated 3D grid fields for pressure
+solver pipelines and incurs negligible computational overhead: it             projection.
+requires no additional grids, no additional linear solves, and no                Our scheme leverages the well-known insensitivity of Monte
+extra passes over particles or fields. In Section 4, we demonstrate           Carlo integration to dimensionality [Caflisch 1998], allowing the
+
+ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+                                                              Spatiotemporal FLIP for Fast Free-Surface and Two-Phase Simulation With Very Large Time Steps       •   76:3
+
+
+                    FLIP                              ST-FLIP                            • A spatiotemporal extension for widely used FLIP-like particle-
+ Space                                                                                     grid solvers that supports adaptive time steps an order of
+                              World line
+                                                                                           magnitude larger than those used by prior methods at com-
+ WS                                         WS
+                                                                                           parable visual fidelity, while integrating easily into existing
+                                                                                           solvers with minimal runtime overhead.
+         Gap                                                                             • A free-surface and two-phase interface representation derived
+                                                                                           by reusing P2G weight accumulators as a space–time exten-
+                                                              Spacetime                    sion of PF-FLIP, providing pressure projection coefficients
+                                                              slab
+                                                                                           and avoiding per-step surface reconstruction.
+                    x
+
+               tn          t n+1
+                                                                                    2   Related Work
+                                     Time                       WT
+                                                                                    Fluid simulation has been a major topic of study in computer graph-
+Fig. 3. Moving particles along world lines in space-time at CFL = 2 (uniform        ics for over twenty years [Bridson 2008; Losasso et al. 2004; Stam
+speed= 2Δ𝑥/Δ𝑡 ). Left: standard FLIP moves particles instantaneously to the         1999], and we refer to the comprehensive textbook of Bridson [2015]
+next discrete time point, leaving large gaps in space-time coverage. Right:         and recent survey works [Ren et al. 2018; Wang et al. 2024] for an
+ST-FLIP samples the 4D space-time much more uniformly while using the               in-depth overview.
+same number of particles. In addition to the standard (spatial) particle-
+to-grid transfer kernel 𝑊S , ST-FLIP also uses a transfer kernel 𝑊T for the           Hybrid Particle–Grid Liquid Simulation. Hybrid Eulerian-
+temporal dimension.                                                                Lagrangian methods are widely used for liquid simulation in graph-
+                                                                                   ics, combining an Eulerian grid (e.g., for pressure projection and
+                                                                                   other PDE-based updates) with Lagrangian particles for advec-
+additional temporal dimension to be covered with essentially the                   tion and free-surface tracking. Most of such schemes trace back
+same number of particles per cell as in standard FLIP. While increas-              to particle-in-cell (PIC) methods for fluid dynamics [Harlow 1964],
+ing the dimension does increase estimator variance, going from                     where velocities are transferred from particles to a background grid,
+3D to 4D only moderately increases noise; importantly, this noise                  updated with a finite-difference PDE solve, and then interpolated
+is largely unbiased and uncorrelated and is therefore amenable to                  back to the particles. Although robust, classical PIC is strongly dissi-
+standard surface-smoothing and denoising post-processing tech-                     pative and rapidly damps vortical motion. To reduce this dissipation,
+niques [Bhatacharya et al. 2011; Clarenz et al. 2003; Müller 2009];                the FLIP method [Brackbill and Ruppel 1986; Zhu and Bridson 2005]
+see also Appendix B. We note that this is similar in spirit to Monte               updates particle velocities using grid velocity increments rather
+Carlo methods in rendering, such as distributed ray tracing and path               than absolute values, preserving small-scale detail at the cost of in-
+tracing, where samples are distributed not only over the 2D pixel                  creased noise. APIC [Jiang et al. 2015] enriches each particle with an
+area but also, simultaneously, over additional dimensions (e.g., time              affine velocity field, yielding low-dissipation yet smooth and stable
+and lens position) to efficiently capture effects like motion blur and             transfers at the cost of increased storage requirements. PolyPIC gen-
+depth of field [Cook et al. 1984; Kajiya 1986].                                    eralizes this idea to higher-order polynomial velocity fields [Fu et al.
+   Another key feature of our method, inherited from our gener-                    2017], and more recent methods such as IPIC [Sancho et al. 2024]
+alization of PF-FLIP, is that it does not require the geometrical                  leverage flow maps and an impulse-gauge formulation to further
+construction of a liquid surface, whether explicit by meshing or                   improve detail preservation.
+implicit as a signed distance field. Instead we draw inspiration from                 To meet increasing resolution and runtime requirements, a com-
+the recently proposed PF-FLIP and re-use the particle-to-grid weight               plementary line of work has focused on scalability through spatial
+accumulators as a phase field in the spirit of diffuse interface methods           adaptivity [Ando et al. 2013; Ferstl et al. 2014; Losasso et al. 2004;
+[Anderson et al. 1998; Jacqmin 1999]. ST-FLIP extends this idea to                 Raateland et al. 2022; Setaluri et al. 2014] and faster, more scalable
+an interface that is not only diffuse in space but also over a (short)             pressure Poisson solvers [McAdams et al. 2010; Setaluri et al. 2014;
+period in time. Notably, we obtain this space-time phase-field virtu-              Shao et al. 2022]. These advances are orthogonal to our focus on
+ally for free by re-using the weight accumulators from our 4D-P2G                  large time steps.
+step. Besides computational efficiency, this "volumetric" approach                    Recently, Braun et al. [2025] introduced a particle-based phase-
+to free-surface and two-phase simulation also provides a theoretical               field representation for two-phase simulation that reuses particle-to-
+basis for the pressure projection as a space-time extension to the                 grid (P2G) mass accumulation on a purely spatial grid. Our method
+variational framework of Batty et al. [2007]. Whenever a sharper                   builds on this idea and extends it to a space–time mass estimator,
+representation of the surface is needed (e.g., for final rendering),               coupled to our large-time-step ST-FLIP formulation.
+we perform standard surface reconstruction (Appendix B) directly
+from the particles, whose time-jittered positions we re-synchronize                    Large Time Steps. Although larger time steps can substantially
+on-the-fly to the global time step to avoid unwanted motion blur.                   reduce total simulation cost, comparatively few liquid simulation
+This is typically done only at output frames (typically every 3–10                  methods in graphics are designed explicitly for the regime of very
+time steps), not every step.                                                        large time steps (i.e., allowing for CFL ≫ 1). Here, CFL denotes
+                                                                                    the well-known Courant–Friedrichs–Lewy number [Bridson 2015;
+    Contributions. In summary, we make the following contributions:                 Courant et al. 1928] which measures the maximum distance (in units
+
+                                                                                               ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+76:4   •   Braun et al.
+
+
+of cell spacing Δ𝑥) that fluid parcels (particles) travel during a single        More relevant to our context of low-dissipation hybrid particle-
+time step Δ𝑡.                                                                 grid methods, Kugelstadt et al. [2019] relaxed time-step restrictions
+   Many classical Eulerian methods based on semi-Lagrangian ad-               via implicit density projection (IDP) to address FLIP-typical uneven
+vection [Stam 1999] are unconditionally stable and, in principle,             particle distributions. In their experiments, maximum CFL numbers
+can use time steps corresponding to arbitrarily large CFL numbers.            of 20 are reported for a 2D dam-break example. While this method
+However, unconditional stability in this context only guarantees              can be easily integrated into existing solvers, it adds notable runtime
+that the simulation will not catastrophically diverge (“blow up”) but         overhead due to the need to solve an additional pressure Poisson
+in practice, the visual quality of the numerical solution of liquid           equation per time step, which can be expensive at high resolutions.
+simulations often deteriorates once the CFL number exceeds about
+2–3 [Koike et al. 2020; Lentine et al. 2012].                                    Spatially Adaptive Time Stepping. Another approach to increas-
+   By contrast, purely Lagrangian schemes (e.g., SPH) [Ihmsen et al.          ing the effective time step is spatially adaptive time stepping that
+2014; Koschier et al. 2022; Monaghan 1992], explicit VOF-based                goes beyond locally sub-stepped advection by adapting the entire
+CFD methods Hirt and Nichols [1981]; Kleefsman et al. [2005], and             update—including pressure projection—in a spatially varying man-
+kinetic approaches such as LBM [Li et al. 2020, 2022; Wang et al.             ner. Koike et al. [2020] propose such a method in the Eulerian setting
+2025a] typically impose time-step restrictions equivalent to CFL ≤ 1          and report speedups corresponding to an effective overall CFL of
+for both stability and accuracy. Hybrid particle–grid methods (e.g.,          up to 6. However, because the method uses semi-Lagrangian advec-
+PIC/FLIP variants) can remain numerically stable for a wide range             tion for both velocity and the free surface, it inherits the associated
+of time steps, but—similar to semi-Lagrangian approaches—their                dissipative behavior. Moreover, time-step-based domain decomposi-
+accuracy and visual quality can become unacceptable as the CFL                tion introduces nontrivial coupling issues for boundary conditions
+number grows (Figure 2, left column).                                         between different “time levels” in the pressure solve: since the pres-
+   A number of recent advances have introduced more sophisti-                 sure equation is elliptic, it cannot be consistently partitioned across
+cated particle–grid formulations and representations, including               multiple time steps without violating strict incompressibility.
+PolyPIC [Fu et al. 2017], flow-map-based methods [Chen et al.
+2025; Wang et al. 2025b; Zhou et al. 2024], impulse- and gauge-                  Spatiotemporal Deposition in Plasma PIC. In some plasma-physics
+variable formulations (IPIC) [Sancho et al. 2024], covector-fluid             particle-in-cell codes [Birdsall and Langdon 2005; Villasenor and
+methods [Nabizadeh et al. 2022] and coadjoint-orbit-based CO-                 Buneman 1992], current is deposited from particles to the grid by
+FLIP [Nabizadeh et al. 2024]. These approaches primarily target               accounting for particle motion over the entire time step, rather than
+improved preservation of vortical-flow structure and reduced nu-              instantaneously as in classical PIC, which is effectively equivalent to
+merical dissipation, often in the context of single-phase (e.g., smoke        assigning each particle a temporal shape function spanning Δ𝑡. This
+or gas) scenarios. Large time steps are typically not the primary             deterministic multi-deposition scheme differs from the present work
+design objective in these methods, and reported experiments are               in that our algorithm retains instantaneous deposition of mass and
+commonly conducted near CFL ≈ 1.                                              velocity, relying instead on randomization of particle positions and
+   Only a limited number of works directly target liquid simula-              Monte Carlo integration to achieve spatiotemporal coverage. Conse-
+tion at very large CFL values (e.g., on the order of ten and above).          quently, our space-time splatting requires only a single deposition
+In the Eulerian/semi–Lagrangian context Chentanez and Müller                  per particle per time step, which is attractive in practice because
+[2012] couple an interface sharpening scheme with mass-conserving             neighborhood deposition kernels are often memory bandwidth- and
+semi–Lagrangian advection, involving extra scatter- and reweight-             synchronization-bound.
+ing grid-passes. Reported CFL numbers are in the range of 8–32 for
+                                                                                 Positioning Summary. Prior approaches for very large time steps
+examples with a maximum grid resolution of 256 × 1282 . Lentine
+                                                                              (CFL ≳ 10) in graphics target single-phase simulation and either
+et al. [2012] similarly combine mass- and momentum-conserving
+                                                                              accept increased velocity dissipation (semi-Lagrangian velocity ad-
+advection [Lentine et al. 2011], a particle level set (PLS) method, and
+                                                                              vection) and/or incur significant runtime-overhead (e.g., additional
+a sharpened color-function transport scheme to enable time steps
+                                                                              Poisson solves) and implementation complexity (coupling multiple
+corresponding to reported CFL values in the range 10–40. Although
+                                                                              schemes). In contrast, we support two-phase simulations as well
+the latter method uses particles for low-dissipative surface repre-
+                                                                              and treat Lagrangian particles as space-time samples to obtain low-
+sentation, the velocity advection itself remains a semi-Lagrangian
+                                                                              dissipation at very large time steps with a simple FLIP-extension
+scheme, which can introduce substantial dissipation of flow detail.
+                                                                              that can be easily integrated in existing solvers while incurring
+In addition, the overall algorithm couples multiple numerical com-
+                                                                              minimal per-step runtime overhead.
+ponents; the authors report that this increases per-step runtime
+relative to a standard baseline—approximately doubling the simu-
+lation time per step in their reported setting. In both works, the            3   Method
+reported CFL values are computed from the maximum fluid velocity              This section proceeds as follows: after defining the governing equa-
+over the entire simulation, so per-frame CFL values may be substan-           tions and setting up preliminaries and notation, we describe the
+tially smaller during calmer periods of the flow. In contrast, in our         spatiotemporal sampling machinery that enables large adaptive
+experiments we always report the user-specified target CFL which is           time steps: particle advection and our 4D-to-3D deposition with
+a fixed and reproducible measure, more representative of the overall          temporal jitter and residual carryover (Sections 3.3–3.5). We then
+time-step regime (see Figure 7).                                              describe how these temporally stratified quantities are used for
+
+ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+                                                               Spatiotemporal FLIP for Fast Free-Surface and Two-Phase Simulation With Very Large Time Steps       •   76:5
+
+
+the diffuse interface and pressure projection (Sections 3.6–3.7), and                  Sub-stepped advection is not new [Bridson 2015], so for fairness,
+finally summarize the full algorithm (Section 3.10).                                we employ it (with CFLlocal = 1 throughout) not only in our al-
+                                                                                    gorithm but in all implementations of previous methods that we
+3.1   Goal and Governing Equations                                                  compare against. One consequence of sub-stepped advection is that
+  Incompressible Free-Surface and Two-phase Flow. Our goal is to                    the speedup gained from larger time steps no longer scales linearly
+numerically solve the Euler equations (treating the flow as nominally               with the global CFL number, because the runtime of a global simula-
+inviscid, as is common in graphics)                                                 tion time step now depends on Δ𝑡. In practice, this effect is moderate
+                                                                                    because (i) only fast-moving particles require more than one ad-
+                      𝜕𝑢®                 ∇𝑝 𝑓®                                     vection substep, and (ii) per-step runtime is typically dominated by
+                          = −(𝑢® · ∇)𝑢® −   +                             (1)
+                      𝜕𝑡                  𝜌   𝜌                                     particle-grid transfers and pressure projection – not advection.
+
+                                  ∇ · 𝑢® = 0,                             (2)          External Forces. We apply external forces to the grid velocities
+                                                                                    using the global step size Δ𝑡𝑛 , as in standard FLIP. For spatially
+together with advection of a phase indicator 𝜒ℓ ∈ {0, 1}:                           uniform body accelerations (e.g., gravity), one could alternatively
+           𝜕𝑡 𝜒ℓ + 𝑢® ·∇𝜒ℓ = 0,        𝜌 = 𝜌 ℓ 𝜒ℓ + 𝜌𝑔 (1 − 𝜒ℓ ),         (3)       apply the update directly to particles using each particle’s effec-
+                                                                                    tive time interval, i.e., 𝑢®𝑝 ← 𝑢®𝑝 + Δ𝑡𝑝,act
+                                                                                                                            𝑛     1 ®
+for a heavy liquid (water) and a light gas (air) in a three-dimensional                                                           𝜌 𝑓 , more in line with the
+                                                                                    interpretation of particles as spatiotemporal samples. In our experi-
+domain Ω ⊂ R3 with 𝜌 ∈ {𝜌 ℓ , 𝜌𝑔 }, 𝑡, ®𝑢, 𝑝, and 𝑓® denoting density,              ments, this produced no measurable differences (likely because the
+time, velocity, pressure, and external forces. Subscripts ℓ and 𝑔 refer             per-step accumulation already corresponds to a time-step averaged
+to the liquid and gas phases, respectively.                                         update), so we retain the standard grid-based update to simplify
+  Boundary and Interface Conditions. On solid obstacles 𝜕Ω𝑠 we                      integration into existing solvers and to naturally support spatially
+impose the no-through condition 𝑢® · 𝑛® = 0 on 𝜕Ω𝑠 . At the liquid–                 varying forces computed on the grid (e.g., surface tension).
+gas interface Γ, the kinematic condition coincides with (3); in the
+inviscid, no-surface-tension setting the normal stress is continuous,
+                                                                                     3.4    Staggered Time Integration and Space–Time 4D → 3D
+hence 𝑝 is continuous across Γ.                                                             Particle-to-Grid Transfer
+
+   Free-Surface Model. We treat the common case of free-surface flow
+as the limit 𝜌𝑔 → 0, where we take 𝑝 = 𝑝 atm on Γ and, via gauge
+transformation 𝑝 ← 𝑝 − 𝑝 atm , set Dirichlet 𝑝 = 0 on Γ.
+
+3.2   Preliminaries and Notation
+We denote the current time level by 𝑡𝑛 with variable step size Δ𝑡𝑛 =
+𝑡𝑛+1 − 𝑡𝑛 . For spatial discretization, we use a standard MAC grid
+[Harlow et al. 1965] over a domain Ω ⊂ R3 with cell size Δ𝑥, cell
+centers {𝑥®𝑐 }, and face centers {𝑥®𝑓 }. Particles 𝑝 = 1, . . . , 𝑁 carry
+mass 𝑚𝑝 , position 𝑥®𝑝𝑛 , and velocity 𝑢®𝑝𝑛 . We assume that, initially,
+each cell contains 𝑁 ppc particles on average (e.g., eight for standard
+                                                                                    Fig. 4. Timeline overview: at the beginning of step 𝑛, particle sample times
+FLIP in 3D). We use clamp(𝑥, 𝑎, 𝑏) := min(max(𝑥, 𝑎), 𝑏) and the                     (orange dots) 𝑡𝑝𝑛 are distributed over the current slab 𝐼𝑛 = [𝑡𝑛−1/2 , 𝑡𝑛+1/2 ]
+standard cubic ramp smoothstep(𝑎, 𝑏; 𝑥) := 𝑠 2 (3 − 2𝑠) with 𝑠 =                   as a result of the previous stochastic advection step. Orange: current slab
+         −𝑎 , 0, 1 .
+clamp 𝑥𝑏 −𝑎                                                                         integration with 𝑊T , grey: previous step. Dotted: virtual completion of the
+                                                                                    one-sided time-kernel with conceptual ghost-particles reflected from the
+3.3   Advection                                                                     past to the future-staggered time slab (See Section 3.8).
+At the end of each time step, we integrate particle trajectories, ob-
+taining new positions                                                                   We augment each particle 𝑝 with a scalar time attribute 𝑡𝑝𝑛 , stored
+                                                                                     as an offset 𝛿𝑡𝑝𝑛 ∈ [−0.5Δ𝑡𝑛−1, 0.5Δ𝑡𝑛−1 ], relative to the current
+                     𝑥®𝑝𝑛+1 = A (𝑢®𝑛+1, 𝑥®𝑝𝑛 , Δ𝑡𝑝,act
+                                                 𝑛
+                                                       ).                 (4)        global time 𝑡𝑛 , so that each particle represents a sample (𝑥®𝑝 , 𝑡𝑝 )
+A(®   𝑥, Δ𝑡) is an advection operator, advancing a position 𝑥® through
+   𝑢, ®                                                                              in space-time rather than only in space (Figure 3). Here, Δ𝑡𝑛−1
+velocity field 𝑢® for a time interval Δ𝑡. Typically, A is a higher-                  is used because the current space-time positions are the result of
+order multistage ODE integrator (e.g., RK3). 𝑢®𝑛+1 is the end-of-step                the previous step. Being a small offset, 𝛿𝑡𝑝𝑛 can be stored in half-
+divergence-free advector velocity field and Δ𝑡𝑝,act
+                                                𝑛    is a per-particle               precision, adding only two bytes per particle in our implementation.
+time step as defined below (Equation 11).                                               At the beginning of step 𝑛, we interpret each particle as located
+                                                                                     at its jittered sample time
+   Locally Sub-Stepped Advection. One way to improve temporal                                                         𝑡𝑝𝑛 := 𝑡𝑛 − 𝛿𝑡𝑝𝑛 ,
+adaptivity beyond globally adaptive time stepping is to use sub-
+steps within the advection operator such that the maximum distance                  with 𝑥®𝑝𝑛 already advanced by the previous step’s advection using
+traveled by a particle satisfies a local CFL bound CFLlocal .                       a particle-specific time step Δ𝑡𝑝,act
+                                                                                                                    𝑛−1 (Equation (11), Figure 4). As
+
+
+                                                                                                ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+76:6   •   Braun et al.
+
+
+a result, particle sample times are distributed over the staggered                          velocities in the P2G and G2P steps. This, however, yielded no sig-
+interval (time slab)                                                                        nificant improvement of visual simulation quality while multiplying
+                             1            1                                                 storage requirements. We therefore assume piecewise constant-in
+                𝐼𝑛 := [𝑡𝑛 − Δ𝑡𝑛−1, 𝑡𝑛 + Δ𝑡𝑛−1 ],           (5)                              time representation and only keep a single set of 3D MAC-grid fields
+                             2            2
+                                                                                            per step (4D→3D) by evaluating the slab-integration estimators (8)
+centered at the current step time 𝑡𝑛 .
+                                                                                            at the middle of the current time slab 𝑡 = 𝑡𝑛
+  Let 𝑊S : R3 → R ≥0 be a compactly supported spatial transfer
+kernel and 𝑊T : R → R ≥0 a compact temporal kernel with                                                     𝑚 𝑓 := 𝑚ˆ 𝑛 (𝑥®𝑓 , 𝑡𝑛 ), 𝑃 𝑓 := 𝑃ˆ𝑛 (𝑥®𝑓 , 𝑡𝑛 ),
+              ∫                        ∫
+                                                                                                                      P𝑓                                          (9)
+                  𝑊S (®
+                      𝑟 ) d®
+                           𝑟 = 1,        𝑊T (𝜏) d𝜏 = 1,                                                      𝑢®★               for 𝑚 𝑓 > 𝜖𝑚 ,
+                     R3                          R                                                             𝑓 :=   𝑚𝑓
+over dimensionless (grid-normalized) coordinates 𝑟® and 𝜏. We denote
+                                                                                            with provisional face velocities 𝑢®★
+                                                                                                                               𝑓
+                                                                                                                                 and a small threshold 𝜖𝑚 > 0
+the separable space–time P2G transfer kernel
+                                                                                            (10 −9 in our implementation) used to flag under-sampled faces for
+                          𝑊ST ( ®
+                               𝑥, 𝜏) = 𝑊S ( ®
+                                           𝑥) 𝑊T (𝜏).                                 (6)   velocity extrapolation as usual.
+   4D Monte Carlo Estimator. Classical PIC/FLIP estimate face mass
+and momentum instantaneously. In contrast, we target time-slab-                             3.5   Temporal Jitter and Residual Carryover
+integrated per-face quantities 𝑞 𝑓 :                                                        To cover the time interval with a single sample per particle and step,
+                    ∫ 1/2                                                                   we jitter the per-particle advection time and keep track of a running
+               𝑞𝑓 =       𝑞 𝑓 (𝑡𝑛 + 𝜏Δ𝑡𝑛−1 )𝑊T (𝜏) d𝜏,         (7)                          residual so long–term advancement does not drift.
+                            −1/2                                                               Let 𝑠𝑝𝑛 ∼ Uniform(0, 1) and 𝜉𝑝𝑛 = 𝑠𝑝𝑛 − 12 . With jitter strength 𝛾 ≥ 0
+                                                                                            (default 𝛾 = 1), newly jittered time step
+where 𝑞 𝑓 (𝑡) = 𝑞(𝑥 𝑓 + 𝑟 Δ𝑥, 𝑡)𝑊𝑆 (𝑟 )𝑑𝑟 is the standard spatially
+                      ∫
+
+P2G-integrated quantity 𝑞(𝑡) evaluated at the center of the stag-                                                            𝑛
+                                                                                                                           𝛿𝑡𝑝,jit = 𝛾 𝜉𝑝𝑛 Δ𝑡𝑛 ,                 (10)
+gered MAC grid face 𝑓 . 𝜏 = (𝑡 − 𝑡𝑛 )/Δ𝑡𝑛−1 is the normalized time
+coordinate centered at the current step 𝑛 and the integral is over                          and per–particle residual 𝛿𝑡𝑝𝑛 (𝛿𝑡𝑝0 = 0), we obtain the actual per-
+𝐼𝑛 . We normalize by Δ𝑡𝑛−1 because the current space-time particle                          particle time step Δ𝑡𝑝,act
+                                                                                                                  𝑛    to be passed to the advection operator in
+samples are the result of the previous advection step. Throughout,                          Equation (4) as
+the overline denotes this per-step slab integration/collapse operator                                                                               
+over 𝐼𝑛 ; note that it is not a recursive average across steps.                                        Δ𝑡𝑝,act
+                                                                                                          𝑛
+                                                                                                               = clamp Δ𝑡𝑛 + 𝛿𝑡𝑝𝑛 + 𝛿𝑡𝑝,jit
+                                                                                                                                        𝑛
+                                                                                                                                            , 0, 2Δ𝑡𝑛 ,
+                                                                                                                                                            (11)
+    Evaluating (7) exactly is expensive; instead we define a 4D Monte-                                  𝛿𝑡𝑝𝑛+1 = Δ𝑡𝑛 + 𝛿𝑡𝑝𝑛 − Δ𝑡𝑝,act
+                                                                                                                                𝑛
+                                                                                                                                      .
+Carlo estimator for mass and momentum
+                         ∑︁          𝑥®𝑝𝑛 − 𝑥®        𝑡𝑝𝑛 − 𝑡                              Adaptive Time Stepping and Clamping. In the absence of clamp-
+           𝑚ˆ 𝑛 ( ®
+                 𝑥, 𝑡) =    𝑚𝑝 𝑊S                 𝑊T               ,                        ing, Equation (11) reduces to 𝛿𝑡𝑝𝑛+1 = −𝜉𝑝𝑛 Δ𝑡𝑛 (for 𝛾 = 1), so particle
+                          𝑝
+                                          Δ𝑥             Δ𝑡𝑛−1
+                                                                                            sample times remain uniformly distributed over the current time
+                                                                          (8)
+                         ∑︁               𝑥®𝑝𝑛 − 𝑥®        𝑡𝑝𝑛 − 𝑡                      slab; consequently producing slab-stratified sampling in time with
+              𝑛                   𝑛                                                               𝑛 ] = Δ𝑡 . Although our adaptive time stepping tends to
+            𝑷 (®
+            ˆ    𝑥, 𝑡) =    𝑚𝑝 𝑢®𝑝 𝑊S                  𝑊T               ,
+                          𝑝
+                                               Δ𝑥             Δ𝑡𝑛−1                         E[Δ𝑡𝑝,act        𝑛
+                                                                                            equalize successive time step lengths (by always subdividing the
+where 𝑢®𝑝𝑛 denotes the current particle velocity as updated in the                          remaining video frame time into even parts), Δ𝑡𝑝,act  𝑛    may become
+previous G2P step (Section 3.9). For the default jitter strength 𝛾 = 1                      negative or too large in cases of abrupt changes between Δ𝑡𝑛−1 and
+and in the absence of clamping (Section 3.5), the normalized parti-                         Δ𝑡𝑛 , so we clamp Δ𝑡𝑝,act
+                                                                                                                 𝑛    to [0, 2Δ𝑡𝑛 ] as in Equation (11). Importantly,
+cle sample times, evaluated at 𝑡𝑛 , satisfy 𝜃 𝑝 := (𝑡𝑝𝑛 − 𝑡𝑛 )/Δ𝑡𝑛−1 =                      the residual equals the global/particle time mismatch, 𝑡𝑛 − 𝑡𝑝𝑛 = 𝛿𝑡𝑝𝑛 ;
+−𝛿𝑡𝑝𝑛 /Δ𝑡𝑛−1 ∼ Uniform(−1/2, 1/2). Therefore                                                since the global CFL condition enforces Δ𝑡𝑛 ≤ Δ𝑡 max , we show in
+                                           ∫ 1/2                                            Appendix A that |𝑡𝑝𝑛 − 𝑡𝑛 | = |𝛿𝑡𝑝𝑛 | ≤ Δ𝑡 max /2 for all 𝑛, preventing
+   E 𝑞 𝑓 𝑡𝑛 + 𝜃 𝑝 Δ𝑡𝑛−1 𝑊T (𝜃 𝑝 ) =                𝑞 𝑓 (𝑡𝑛 + 𝜏 Δ𝑡𝑛−1 ) 𝑊T (𝜏 ) d𝜏 .
+                               
+                                                                                            random-walk drift of particle sampling times. So clamping in this
+                                            −1/2
+                                                                                            way does not introduce particle-time drift, but it may perturb the
+Hence, Equation (8) is an unbiased Monte Carlo estimator of the                             ideal quadrature of our MC estimators. However, clamping is rare
+kernel-normalized slab integral in Equation (7) for deposited mass                          in practice: During the violent, large-CFL dam-break stress test (Fig-
+and momentum for constant Δ𝑡𝑛 . With adaptive Δ𝑡, clamping (Equa-                           ure 18, bottom) less than 1% of particle updates required clamping
+tion (11)) can introduce a small bias, but sharp step-size changes                          and of those, the maximum clamping amount was less than 20%.
+are rare in our settings, as discussed below in Section 3.5. For (spa-
+tially adaptive) 𝛾 < 1, 𝜃 𝑝 concentrates towards 0, yielding a locally                         Advancing the Space–Time Position. At the end of the simulation
+narrower effective temporal integration window; we analyze the                              step, Δ𝑡𝑝,act
+                                                                                                    𝑛     is fed into the advection operator (Equation (4)) to
+resulting weight change for 𝑊𝑇 in Section 3.10.                                             advance the particle to its new space–time position
+   In principle, we could store 𝑚ˆ and 𝑷ˆ on a "thin" 4D grid on the
+                                                                                                                 𝑥®𝑝𝑛+1 = A 𝑢®𝑛+1, 𝑥®𝑝𝑛 , Δ𝑡𝑝,act
+                                                                                                                                            𝑛 
+                                                                                                                                                  ,
+current time slab to enable higher-order-in-time reconstruction and                                                                                       (12)
+we experimented with doing so to obtain linear-in-time interpolated                                               𝑡𝑝 = 𝑡𝑝 + Δ𝑡𝑝,act .
+                                                                                                                    𝑛+1   𝑛     𝑛
+
+
+ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+                                                           Spatiotemporal FLIP for Fast Free-Surface and Two-Phase Simulation With Very Large Time Steps       •   76:7
+
+
+   Note that our staggered-in-time scheme effectively combines the              normalization constants, kernel shape, and discretization details.
+two necessary advection steps, (i) undoing the previous jitter for              The parameter 𝜂𝜙 (default value 0.5) provides a simple form of
+stratification/preventing drift and (ii) advancing to the new jittered          interface noise control. Smaller values steepen the phase transition
+position into a single standard advection step with a combined local            and more aggressively level small wells and bumps caused by uneven
+advection time Δ𝑡𝑝,act
+                    𝑛 , facilitating seamless integration into existing         particle distributions, similar in effect to "artificial surface tension",
+FLIP/PIC simulation pipelines without any additional particle passes.           whereas larger values preserve finer interface detail at the cost
+Although in theory it might be advantageous to use the old velocity             of increased sensitivity to such noise. The function 𝐶 is a simple
+field for (i), doing so did not yield any measurable improvement in             saturation/clamping nonlinearity; in all our experiments, we use
+                                                                                              √
+our experiments.                                                                𝐶 (𝑥) = min( 𝑥, 1) and found the results largely insensitive to the
+                                                                                exact choice of 𝐶.
+   Monte Carlo Benefits. One way to see the benefit of the proposed
+scheme is to consider that classical solvers approximate a large time
+                                                                                   Slab-Integrated Phase Field. From the space-time phase field esti-
+step with a (low-CFL constrained) sequence of deterministic "sub-
+                                                                                mator we derive face-centered, slab-integrated estimates of the 3D
+step grids", i.e., 𝑛 sub evaluations equally-spaced in time. In contrast,
+                                                                                phase field 𝜙¯𝑛𝑓 = 𝜙 st (𝑥®𝑓 , 𝑡𝑛 ) ∈ [0, 1], as a discrete, smoothed approx-
+our Monte Carlo sampling advances each particle at a random      √︁ in-
+stant 𝑡𝑖 inside the large step; the quadrature error is 𝑂 (1/ 𝑁 ppc )           imation of the discontinuous physical phase indicator 𝜒ℓ ∈ {0, 1}
+                          √︁
+and, crucially, the 1/ 𝑁 ppc rate is independent of the dimension of            and the corresponding face densities 𝜌 (𝜙 𝑓 ) = 𝜌 ℓ 𝜙 𝑓 +𝜌𝑔 (1−𝜙 𝑓 ). As
+the integral [Caflisch 1998], although the variance prefactor may               mentioned above, these values are simply the (scaled and clamped)
+increase. In our setting, we found that extending from 3D to 4D                 kernel weight accumulators that are computed anyway during the
+does not require increasing the standard particle count (Section 4.5).          particle-to-grid transfer for normalizing the deposited quantities.
+By letting the usual eight particles per cell “fan-out” along time,             While standard hybrid particle–grid methods discard them after-
+we trade eight times 𝑛𝑠𝑢𝑏 deterministic-in-time samples for eight               wards, we reuse them to obtain both a phase indicator field and
+unbiased 4-D samples (see also Figure 3 and experimental validation             the face coefficients for the variable-density pressure Poisson equa-
+in Section 4.5). The fact that our samples are effectively distributed          tion essentially for free, eliminating the need for a per-step surface
+along the spatio-temporally highly correlated characteristics of the            reconstruction.
+velocity field further reduces the estimator’s variance.
+                                                                                   Relationship to Classical Phase-Field Methods. Classical Eulerian
+  Beneficial Implications For Particle Management. The improved                 phase-field methods, typically based on Cahn–Hilliard-type equa-
+particle coverage produced by our spatiotemporal sampling removed               tions [Jacqmin 1999; Jain 2022], evolve a fourth-order PDE and
+the need for particle re-seeding or culling in our tests. In all experi-        usually impose an interface thickness of several grid cells. As with
+ments shown, we keep a fixed particle set, except for liquid inflow             other Eulerian interface-tracking schemes (VOF, level set), it is non-
+sources and irreversibly stuck-in-obstacles cases (less than 0.01% of           trivial to maintain strict consistency between the discretizations
+particles per step).                                                            used for phase/mass and for momentum [Arrufat et al. 2021; Raessi
+                                                                                and Pitsch 2012]. In contrast, the particle-based phase field, which
+3.6   Space–Time Phase Field from Mass Accumulators
+                                                                                we adopt from PF-FLIP and extend to space-time, requires no addi-
+Building on the particle-based phase field used in PF-FLIP, we ex-              tional grids or solves and supports sharper interfaces with a small
+tend it to a space–time phase field 𝜙 st (x, 𝑡) defined over the current        effective thickness of 𝜖𝜙 = 1.5 Δ𝑥. Furthermore, the coupling of
+4D slab Ω × 𝐼𝑛 . Using the Monte Carlo estimators introduced above,             the discrete interface indicator and momentum transfer through
+𝜙 st can be evaluated at arbitrary (x, 𝑡) within this slab. In the imple-       the same P2G accumulators prevents mass–momentum inconsis-
+mentation, however, we do not store a full 4D discretization; instead,          tencies by construction. The trade-off is FLIP-typical noise, but this
+we evaluate and store only a single slab-collapsed value per face               is usually acceptable for the kind of turbulent, "splashy" flows of-
+center, denoted 𝜙 𝑓 . For brevity, we restrict the following definition         ten simulated in graphics, especially given the fact that the noise
+to the free-surface case 𝜌𝑔 = 0 and refer to Equation (7) in [Braun             is mostly uncorrelated and thus amenable to standard denoising
+et al. 2025] for a full two-phase spatial formulation that extends to           methods [Bhatacharya et al. 2011; Clarenz et al. 2003; Yu and Turk
+our spatiotemporal setting by an analogous derivation.                          2013] (Appendix B).
+                                            !
+                     st             𝑚( ®
+                                    ˆ 𝑥, 𝑡)
+                    𝜙 (®                      ∈ [0, 1].
+                         𝑥, 𝑡) := 𝐶
+                                    𝜂𝜙 𝑚 0
+                                                                     (13)
+                                                                                 3.7    Projection as an Instantaneous Constraint on the
+                                                                                        Slab-Integrated Field
+Here, 𝑚 0 is a reference mass for the space–time kernel, defined as the
+expected value of the mass estimator 𝑚ˆ under a spatio-temporally               We treat pressure as a Lagrange multiplier that enforces incom-
+uniform particle distribution with 𝑁 ppc particles per cell:                    pressibility on the slab-integrated provisional velocity 𝑢®★ from
+                                                                              Equation (9). Specifically, we solve the variable-coefficient pressure
+                         𝑚 0 := E ˆ𝑚(𝑥®𝑓 , 𝑡𝑛 ) .                               Poisson equation (PPE)
+In practice, we pre-compute 𝑚 0 by applying 𝑊ST to a small particle-
+filled grid patch with 𝜏 ∼ Uniform(− 21 , 12 ) (averaging the resulting                                                     1
+                                                                                                         ∇· (𝛽 ∇𝑝) =           ∇· (𝛼𝑢®★),                          (14)
+𝑚ˆ over a few random realizations for stability); this is robust to                                                        Δ𝑡𝑛
+
+                                                                                            ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+76:8   •    Braun et al.
+
+
+with discrete face coefficients                                                      separable formulation over the SPH-typical spherical support be-
+                                                 𝛼𝑓                                  cause it better fits our purpose of sampling cubic staggered control
+                               𝛽𝑓 =                             ,             (15)   volumes on a MAC grid.
+                                          max(𝜌 (𝜙 𝑓 ), 𝜖 𝜌 )                          For the temporal kernel 𝑊𝑇 , we use the one-sided shape function
+and update                                                                                                                    
+                                                                                                               35            1
+                                                                                                     𝑊𝑇 (𝜏) =     𝑊poly6 𝜏 −     1        ,          (19)
+                                                      𝛽𝑓                                                       16            2 {𝜏 ≤1/2}
+                                      𝑓 − Δ𝑡𝑛
+                                                                    
+                           𝑢®𝑓𝑛+1 = 𝑢®★                     ∇𝑝                (16)
+                                                      𝛼𝑓                𝑓
+                                                                                     i.e., a half-step shifted and truncated poly6 kernel that peaks at
+to obtain a divergence-free velocity field at time level 𝑡𝑛+1 . Here, 𝜖 𝜌            𝜏 = 12 , so that the latest samples within the current slab 𝐼𝑛 receive
+is a small positive constant to guard against division by zero and                   the most weight. Equivalently, 𝑊𝑇 is the renormalized past half of a
+ill-conditioning of the PPE and 𝛼 𝑓 > 0 are solid face apertures, i.e.,              symmetric kernel centered at the forward slab boundary 𝑡𝑛+ 1 (Fig-
+                                                                                                                                                     2
+the fraction of a cell face that is not covered by solid [Batty et al.               ure 4). This matches applying the symmetric kernel to the current
+2007; Ng et al. 2009].                                                               particle time samples augmented with virtual time-mirrored copies
+    In the absence of a sharp geometric surface representation for                   across 𝑡𝑛+ 1 (reflection boundary correction [Silverman 1986]). Al-
+the liquid–which would be difficult to maintain, or even to define                                2
+                                                                                     though the symmetric completion spans two slabs, the forward
+consistently, in our 4D diffuse-interface setting–our derivation does
+                                                                                     half is virtual/mirrored; the effective window remains 𝐼𝑛 (Figure 4).
+not rely on the commonly used ghost-fluid method (GFM [Kang
+                                                                                     Figure 5 shows that using a naive symmetric temporal kernel cen-
+et al. 2000; Liu et al. 2000]). We instead pose the pressure projection
+                                                                                     tered at 𝑡𝑛 can introduce oscillatory free-surface artifacts at large
+in a volumetric form, following the variational approach proposed
+                                                                                     CFL, while the one-sided kernel does not. While a formal proof or
+by Batty [2010]; Batty et al. [2007] for fluid interfaces. In this view,
+                                                                                     complete analysis is not currently available, a useful way to under-
+the projection is a mass-weighted 𝐿 2 projection of 𝑢®★ onto the
+                                                                                     stand the choice is phase consistency with end-of-step projection:
+discrete incompressibility constraint ∇· (𝛼 ®    𝑢) = 0. Concretely, 𝑢® 𝑛+1
+                                                                                     the solver produces 𝑢𝑛+1 after projection, so deposition should not
+minimizes
+                                                                                     over-emphasize older samples within the slab. A symmetric kernel
+                        1 ∑︁                        2
+                             𝛼 𝑓 𝜌 (𝜙 𝑓 ) 𝑢®𝑓 − 𝑢®★
+                                                  𝑓                    (17)          centered at 𝑡𝑛 biases deposited interface/momentum toward earlier
+                        2                                                            times, introducing lag which can amplify post-projection oscilla-
+                                𝑓
+                                                                                     tions. 𝑊𝑇 corresponds to a reflection-boundary-corrected estimator
+subject to ∇· (𝛼 ®   𝑢) = 0. The corresponding Lagrange multiplier 𝑝
+                                                                                     of a forward-centered kernel near 𝑡𝑛+1/2 , aligning the estimator
+is a single, instantaneous (not slab-integrated) pressure field for
+                                                                                     with the forward step and empirically reducing phase error.
+the step, and the Euler–Lagrange equations yield (14) and (16) with
+𝛽 𝑓 = 𝛼 𝑓 /𝜌 (𝜙 𝑓 ).
+
+   Solving the PPE. To numerically solve the pressure Poisson equa-
+tion in (14), we adapt the approach based on the phase field values.
+For free-surface simulations, we tag cells as empty (air) if their
+phase field (as sampled at the cell centers) 𝜙𝑐 < 0.5 and treat them
+as Dirichlet boundaries with 𝑝 = 0. These cells are removed from
+the linear system, which only increases the matrix diagonal en-
+tries for boundary-adjacent liquid cells while keeping off-diagonal                  Fig. 5. Naive symmetric vs. one-sided temporal weighting at large CFL. Left:
+terms homogeneous, preserving the system’s symmetry, positive                        symmetric kernel centered at 𝑡𝑛 produces oscillatory surface artifacts. Right:
+definiteness and conditioning properties. This allows efficient so-                  one-sided kernel (Equation (19)) avoids them.
+lution using standard preconditioned conjugate gradient methods.
+For fully two-phase flows, the variable-density formulation leads to
+an inhomogeneous PPE with potentially severe ill-conditioning due
+to high density ratios (𝜌𝑙 /𝜌𝑔 ≫ 1), necessitating specialized solvers               3.9   Further Considerations
+such as adaptive multigrid preconditioners [Braun et al. 2025].                         Relationship to the Ghost Fluid Method (GFM). As in GFM [Kang
+                                                                                     et al. 2000; Liu et al. 2000], the liquid-air interface determines the
+3.8        Choice of Deposition Kernels                                              system matrix of the PPE. The difference is how the off-diagonal
+We use a separable kernel based on a 1D variant of the poly6 ker-                    coefficients of the variable-coefficient Poisson equation are formed:
+nel [Müller et al. 2003] 𝑊poly6 (𝑟 ) = max(0, (1 − 𝑟 2 ) 3 ) for the spatial         GFM uses geometry-based fractions 𝜃 𝑓 (1D-distances) from a sharp
+3D weighting function                                                                interface reconstruction, whereas we use a volumetric coefficient
+                                                                                     (Equation (15)) directly from our time-slab averaged phase field,
+                                              3
+                                          35 3 Ö
+                                      
+                                                                                     obtained from the already computed 4D P2G weight accumulators
+                           𝑊S (®
+                               𝑟) =              𝑊poly6 (𝑟𝑑 ).                (18)   (9). This effectively eliminates the conventional per-step surface
+                                          32
+                                                𝑑=1
+                                                                                     reconstruction while at the same time providing an interpretation
+This kernel has higher polynomial order while maintaining an eval-                   of interfacial pressure projection in a volumetric framework which
+uation cost comparable to that of a trilinear kernel. We prefer the                  –unlike sharp surface geometry– naturally extends to 4D.
+
+ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+                                                          Spatiotemporal FLIP for Fast Free-Surface and Two-Phase Simulation With Very Large Time Steps       •   76:9
+
+
+   Slab-Integrated Deposition vs. Viscous Diffusion. Although we in-           𝑚 0 , but we did not find this necessary in practice, because for our
+tegrate deposits over the current time slab, this operation does not           one-sided poly6-Kernel 𝑊𝑇 , the mean weight under a narrowed
+                                                                                                                   ∫ 0.5
+introduce additional spatial smoothing beyond the standard transfer            distribution produced by 𝛾 < 1 is −0.5 𝑊𝑇 (𝛾𝜏)d𝜏 = (945 + 105𝛾 2 −
+kernel 𝑊S , and it is not a recursive temporal filter across simulation        21𝛾 4 − 5𝛾 6 )/1024 ∈ [945/1024, 1]. Hence, the average temporal
+steps. We therefore expect it to suppress temporal aliasing artifacts          weighting and 𝜙 st differ from the 𝛾 = 1 case by at most 7.7% and
+without acting like an added viscosity term. Moreover, using larger            3.9%, respectively. Moreover, in the limit 𝛾 → 0, 𝑤 temporal collapses
+global time steps reduces the number of particle-grid transfer cycles          to the constant𝑊𝑇 (0) and the normalized face velocity (Equation (9))
+per unit physical time, which can reduce accumulated numerical dis-            reduces to the standard instantaneous P2G transfer (up to a uniform
+sipation compared to small-CFL-conforming stepping (Section 4.4).              scaling that cancels in the ratio). Thus, adaptive jitter attenuation
+   Grid-to-Particles (G2P). Particle velocities are updated using the          provides a continuous interpolation between full spatiotemporal
+projected slab-integrated grid velocity 𝑢®𝑛+1 spatially interpolated at        slab sampling and classical single-time-level deposition (𝛾 = 0)
+the particle’s current spatial position (which is associated with its          while the boundedness result of Appendix A remains valid since
+jittered time). Experimentally, we found that additional time inter-           𝛾𝑝 ∈ [0, 1].
+polation of velocities did not significantly improve visual simulation
+quality (while requiring storage for an additional velocity field), so
+in practice, the standard FLIP/PIC G2P operator can be used without
+modification.
+   Surface Tension. We employ a standard Continuum Surface Force
+(CSF) model [Brackbill et al. 1992] to simulate surface tension with
+                                                                               Fig. 6. Drop falling into a quiescent pool of water simulated at CFL = 15.
+interface curvature estimated from a cubic B-spline-smoothed local             Adaptive 𝛾 attenuation (right) reduces noise in the calm water surface region
+reconstruction of the phase field. However, surface tension is a               while preserving the splash details.
+millimeter-scale phenomenon while our method is mostly targeted
+at large-scale simulations. Therefore, surface tension was turned off
+in our experiments, except for the glugging simulation in Figure 23.               Globally Adaptive Time Stepping. We assume that the base solver
+                                                                                uses a standard CFL-based adaptive time step [Bridson 2015; Mole-
+3.10   Basic Algorithm as a Lightweight Extension for
+                                                                                maker et al. 2008], quantizing each step so that the remaining time
+       Existing Solvers                                                         to the next video frame is always covered by an integer number of
+Algorithm 1 illustrates how our scheme integrates into standard                 equal substeps (lines 4–8). This guarantees that frame boundaries
+FLIP, PIC, APIC or PF-FLIP solvers by introducing a single new                  are reached exactly and avoids tiny catch-up steps, while keeping
+particle attribute and modifying the main advection and P2G de-                 time step changes gradual.
+position loops. APIC integration is straightforward: the standard
+affine matrix is retained as an additional per-particle attribute, and             Temporary Re-Synchronization. After finishing a video frame (typ-
+the mass, momentum, and affine P2G contributions are multiplied                 ically every 3–10 time steps), we reconstruct a high-quality surface
+by the same 𝑊𝑇 . The function Jitter() in line 26 implements the jit-           directly from the particles (Appendix B). To avoid distortions in
+tering scheme as defined in Equation (10). Deviates 𝜉𝑝𝑛 are efficiently         the reconstructed surface, we temporarily re-synchronize the time-
+generated by using per-thread PRNGs, seeded with a hash over the                jittered particle positions to align with the global frame time. This
+thread-id, the global step number and a global seed. Because our                is done on the fly during particle rasterization for rendering only
+random deviations affect only the smallest spatio-temporal scales,              and does not alter the actual simulation state.
+runs are reproducible given a fixed global seed; across seeds, we
+observed only negligible differences at small scales.                           4    Results
+   Integrating ST-FLIP does not require additional linear solves or            In this section, we present the experiments conducted to demon-
+extra passes over fields: all changes amount to a few additional               strate and evaluate our method. All tests and simulations were run
+floating-point operations performed on the fly in loops that already           on a single AMD workstation (Ryzen Threadripper PRO, 4.0 GHz)
+traverse particles and grid nodes, where the relevant data are in              with 32 cores and 256 GB of RAM. To ensure fair and meaningful
+cache. In addition to the benefit of enabling larger time steps, inte-         comparisons, we
+grating ST-FLIP can make the solver also significantly faster per step               (i) implemented all methods included in comparisons within the
+at the same CFL number (Section 4) because it removes the need for                       same base solver framework, using the open-source MSBG
+the (often expensive) per-step surface reconstruction (line 17).                         (Multiresolution Sparse Block Grid) library and the adaptive
+   Adaptive Jitter Attenuation for Calm Regions. To reduce Monte                         multigrid Poisson solver from Braun et al. [2025];
+Carlo noise on locally quiescent free surfaces (Figure 6), we choose                (ii) enabled adaptive time stepping and locally sub-stepped ad-
+the jitter strength 𝛾𝑝 ∈ [0, 1] adaptively per particle based on the                     vection for all methods.
+local CFL number ∥𝑢®𝑝 ∥Δ𝑡/Δ𝑥 as a measure of local flow activity                Reported grid resolutions refer to the effective resolution of the adap-
+(Algorithm 1 line 25). In theory this requires also adapting the                tive/sparse grid discretization (implemented with MSBG). Table 2
+temporal kernel in the deposition stage (line 10) and re-scaling                summarizes resolutions, particle counts and target CFL numbers of
+
+                                                                                           ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+76:10   • Braun et al.
+
+
+
+ Algorithm 1: ST-FLIP: Simulating one video frame of length                      Rendering. For rendering we do not use the phase field 𝜙 but
+ Δ𝑡 frame with target CFL number CFLtarget . Additional steps                 reconstruct an implicit render surface 𝜓 ∈ [0, 1] from the temporarily
+ (beyond the standard FLIP algorithm) are marked (+) in                       re-synchronized particles (Algorithm 1, lines 31–34) by splatting a
+ green; removable FLIP steps are marked (-) in orange.                        union-of-spheres density onto a grid with twice the resolution of
+                                                                              the simulation grid, followed by 𝑘𝜓 iterations of feature-preserving
+1  typedef struct Particle
+                                                                              mean curvature flow (MCF) smoothing [Clarenz et al. 2003; Museth
+2     float pos[3]; float vel[3]; float advectedScalars[. . . ]
+                                                                              2014] (see Appendix B for implementation details). We emphasize
+ 3    (+) float16 𝛿𝑡 ⊲ Partial advection time carried over into next step
+                                                                              that this or a similar form of surface smoothing post-processing
+ 4 while Δ𝑡 frame > 0 do
+                                                                              is also necessary for standard FLIP due to inherent noise in the
+ 5    Δ𝑡 prev ← Δ𝑡                                                            particle distribution [Bhatacharya et al. 2011; Yu and Turk 2013].
+ 6    Δ𝑡 ← MaxStep(Δ𝑡 frame, MaxVelocity(), CFLtarget )                       The 0.5 iso-contour of 𝜓 is then rendered by a standard ray marcher.
+ 7    Δ𝑡 ← Δ𝑡 frame /⌈Δ𝑡 frame /Δ𝑡⌉ ⊲ subdivide remainder in even parts       High-curvature areas of the interface are rendered with foam-like
+ 8    Δ𝑡 frame ← Δ𝑡 frame − Δ𝑡                                                scattering coefficients. Apart from this, no post-processing effects
+ 9    foreach particle 𝑝 do ⊲ P2G: particles-to-grid                          or procedural textures are applied.
+10         (+) 𝑤 temporal ← 𝑊T (−𝑝.𝛿𝑡/Δ𝑡 prev ) ⊲ Eq. (19)
+11         foreach MAC face center 𝒙 𝑓 in neighborhood of 𝑝 do                   Parameters. Unless stated otherwise, we used the same values
+12             𝑤 ← 𝑊S ((𝒙 𝑓 − 𝑝.𝑝𝑜𝑠)/Δ𝑥)                                      for all method parameters throughout all experiments: Jitter base-
+                                                                              strength 𝛾 = 1, phase-transition steepness 𝜂𝜙 = 0.5, render-surface
+13             (+) 𝑤 ← 𝑤 temporal 𝑤
+                                                                              regularization iterations 𝑘𝜓 = 30, PIC/FLIP-blend factor 𝛼 FLIP = 0.98
+14             DepositWeightedContribution( x 𝑓 , 𝑝, w )
+                                                                              and 𝜖 = 10 −4 error tolerance for the pressure Poisson solve.
+15         end
+16    end                                                                        Reported CFL Numbers. We report CFL numbers in terms of the
+17    ⊲ Obtain face coefficients for the PPE (-) {𝛽 𝑓 } ←                     user-specified target CFL number (CFLtarget ) passed to Algorithm 1,
+        ConstructSurfaceForGFM() ⊲ No surface necessary                       line 6, with adaptive time stepping; for brevity of notation, we refer
+18    (+) {𝛽 𝑓 } ← GetFromP2GWeightAccumulators() ⊲ Eq. (15)                  to CFLtarget interchangeably as "CFL" throughout the paper.
+19    AddExternalForceToVelocity()                                               Given CFLtarget , the function MaxStep() computes the maximum
+                                                                              admissible time step based on an estimate of the current maximum
+20    SolvePressureAndProjectVelocity({𝛽 𝑓 }) ⊲ Eqs. (14),(16)
+                                                                              velocity magnitude [Bridson 2015]. At this point, however, the true
+21    ExtrapolateVelocity()
+                                                                              maximum velocity in the upcoming step is not yet known, so the
+22    GridToParticles()                                                       estimate uses the maximum from the previous step, which can signif-
+23    foreach particle 𝑝 do ⊲ Advect particles                                icantly underestimate the actual maximum during splashy intervals
+24         Δ𝑡 act ← Δ𝑡                                                        of the simulation (Figure 7). The reporting of target CFL numbers
+25         (+) 𝛾 ← smoothstep (0, 1; ∥𝑝.𝑣𝑒𝑙 ∥Δ𝑡/Δ𝑥) ⊲ local CFL ≤ 1           differs from previous work, which often reports only the global max-
+26         (+) Δ𝑡 act ← clamp (Δ𝑡 act + 𝑝.𝛿𝑡 + Jitter(Δ𝑡, 𝛾), 0, 2Δ𝑡)         imum CFL over the entire simulation [Koike et al. 2020; Kugelstadt
+27         (+) 𝑝.𝛿𝑡 ← Δ𝑡 + 𝑝.𝛿𝑡 − Δ𝑡 act ⊲ Eq. (11)                           et al. 2019; Lentine et al. 2012], a metric whose interpretation may
+28         Advect(𝑝, Δ𝑡 act ) ⊲ Multistep ODE Solver                          tend to overestimate the effective overall speedup because many
+29    end                                                                     steps in calmer phases may operate at CFL values substantially
+30 end
+                                                                              smaller than the global maximum.
+31 foreach particle 𝑝 do           ⊲ Rasterize for export/rendering
+32    posRender ← 𝑝.𝑝𝑜𝑠                                                       4.1   Laminar Flow
+                                                               
+33    (+) posRender ← Advect posRender, 𝑝.𝛿𝑡 ⊲ Un-jitter                      In the first experiment, we evaluate ST-FLIP with a simple laminar
+34    ParticleToRenderGrid(posRender) ⊲ e.g. for SDF construction             flow arising from the very early phase of the standard dam-break test
+35 end
+                                                                              case [Marrone et al. 2016]. Figure
+                                                                                                            √︁ 8 shows the liquid surface at the
+                                                                              non-dimensional time 𝑇 = 𝑡 𝑔/𝐻 = 2.3, shortly before the water
+                                                                              front hits the container wall. As the CFL number increases (top to
+                                                                              bottom row), standard FLIP exhibits temporal aliasing artifacts and
+all experiments. Our solver does not inherently rely on GPU accel-            oscillations that manifest as unphysical surface waves. While APIC
+eration (although any GPU-based solver can be augmented with it               is more robust against uncorrelated noise than FLIP, it too suffers
+via the Algorithm 1 recipe), which is important for our main target           from temporal aliasing at large time steps. In contrast, ST-FLIP
+use case of very large-scale scenarios whose memory requirements              effectively maintains a smooth, artifact-free flow even for very large
+can exceed the limited RAM capacities compared to CPUs.                       time steps corresponding to CFL values as high as 20. At very high
+   Methods other than ours use the standard Ghost Fluid Method                CFL numbers, the Monte Carlo nature of ST-FLIP does introduce
+(GFM) for free-surface treatment. All timings are wall-clock simula-          additional surface noise; however, this noise is low-amplitude and
+tion time, excluding rendering. Speedup factors are always reported           largely uncorrelated, making it visually less objectionable and well
+in terms of total simulation time (or average simulation time per             suited to removal by standard post-processing surface smoothing
+video frame).                                                                 and denoising, which we investigate in the next section more closely.
+
+ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+                                                             Spatiotemporal FLIP for Fast Free-Surface and Two-Phase Simulation With Very Large Time Steps       •   76:11
+
+
+
+
+                  CFLact
+       40         CFLmax
+                  CFLtarget = 16
+       30
+ CFL
+       20
+       10
+        0
+              0            2        4            6            8                     Fig. 9. Effect of MCF surface smoothing as a post-process. Columns show
+                                        T                                           FLIP at CFL = 1 (left), FLIP at CFL = 20 (middle), and ST-FLIP at CFL = 20
+                                                                                    (right). Rows (top to bottom) increase smoothing strength 𝑘𝜓 (0, 30, 100). At
+Fig. 7. Actual, maximum and target CFL number over simulation time for              CFL = 20, MCF smoothing substantially suppresses the largely uncorrelated
+the dam-break example (Figure 2). Adaptive time stepping may overshoot              Monte Carlo surface noise produced by ST-FLIP, with most noise removed
+the target because the step size Δ𝑡 must be chosen before the current-step          already at 𝑘𝜓 = 30. In contrast, the structured aliasing artifacts in FLIP
+maximum velocity is known. Throughout the paper, we report the prescribed           persist even under strong smoothing (𝑘𝜓 = 100).
+CFLtarget as the meaningful, user-controlled stability parameter rather than
+the single global maximum CFL over the entire simulation, which can be
+dominated by brief splashy intervals.
+                                                                                                                                           a) FLIP/CFL=1
+                                                                                                                  0.15                     b) FLIP/CFL=20
+
+
+
+                                                                                                 RMSE (normals)
+                                                                                                                                           c) ST-FLIP/CFL=20
+                                                                                                                  0.10
+
+                                                                                                                  0.05
+
+                                                                                                                  0.00
+                                                                                                                         0      30                        100
+                                                                                                                             Smoothing iterations k
+
+                                                                                    Fig. 10. Quantitative counterpart to Figure 9: surface normal RMSE versus
+                                                                                    smoothing iterations 𝑘𝜓 , measured against the smoothed CFL = 1 reference
+                                                                                    (FLIP, 𝑘𝜓 = 100).
+Fig. 8. Dam-break water front, simulated with increasing time steps (top
+to bottom row). Standard FLIP (left) and APIC (middle) exhibit temporal
+aliasing artifacts manifesting as unphysical waves, while our method (ST-
+FLIP, right) maintains a smooth flow, even at very high CFL numbers.                shows snapshots of the simulation at (non-dimensional time) 𝑇 = 8,
+                                                                                    for target CFL numbers from 1 to 16 for both FLIP and ST-FLIP.
+                                                                                    As the CFL number increases, the simulation quality of standard
+4.2         Influence of Post-Processing Surface Smoothing                          FLIP quickly deteriorates: temporal aliasing and unphysical surface
+To verify that our large-CFL comparisons are not dominated by                       waves (already apparent early in the simulation as shown in Figure 8)
+render-surface smoothing, we vary the number of MCF iterations                      destroy important flow features such as the pronounced arc of the
+𝑘𝜓 . As shown in Figure 9, ST-FLIP noise at CFL = 20 is largely                     main splash-up lip and the hollow region beneath the water surface
+suppressed already at our default 𝑘𝜓 =30, while FLIP’s CFL = 20                     in the lower right part of the domain. In contrast, ST-FLIP maintains
+aliasing ripples persist even at 𝑘𝜓 =100. Figure 10 quantifies this                 coherent large-scale flow structures and provides visually plausible
+trend using an RMSE on the reconstructed unit normal field against                  results even for very large time steps corresponding to CFL = 16.
+the smoothed CFL = 1 reference: ST-FLIP improves rapidly with                       Although ST-FLIP, like any method, cannot completely prevent the
+smoothing, whereas FLIP remains substantially worse. Together,                      loss of quality with increasing time step sizes, the degradation is
+these results support the interpretation that ST-FLIP trades aliasing-              much less severe and more gradual. Effective speedups relative to
+driven, structured free-surface artifacts for predominantly uncor-                  the CFL = 1 FLIP-baseline are shown in the upper right of each
+related noise that can be removed with standard post-processing,                    ST-FLIP snapshot. Increasing the CFL number roughly translates
+and that our large-CFL improvements are not an artifact of the                      linearly into speedup-gains up until about CFL = 4, after which the
+smoothing stage.                                                                    gain flattens (mainly due to sub-stepped advection, as discussed in
+                                                                                    Section 3.3, and additional iterations for a wider velocity extrapo-
+4.3         Standard Dam-Break                                                      lation band). In summary, ST-FLIP achieved speedups of roughly
+Next, we evaluate our method on the fully developed, highly ener-                   2x–4x with slight and up to 8x (at CFL=16) with moderate loss of
+getic dam-break flow, using the standard setup widely adopted in                    quality vs. the CFL = 1 reference; while standard FLIP exhibits large
+graphics and CFD as described by Marrone et al. [2016]. Figure 2                    flow distortions already for CFL=2 and above.
+
+                                                                                               ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+76:12   • Braun et al.
+
+
+   Table 1 breaks down the runtime of an average time step of our                                                                                                                     Physical experiment
+                                                                                                                                                     0.4
+method compared to standard FLIP at the same target CFL number                                                                                                                        ST-FLIP CFL=4
+                                                                                                                                                                                      ST-FLIP CFL=8
+of 16. As can be seen, ST-FLIP does not add measurable overhead                                                                                                                       ST-FLIP CFL=16
+                                                                                                                                                     0.3
+to the solver’s main stages, except for a slightly more expensive
+
+                                                                                                                                  Water height (m)
+advection, which is more than offset by the fact that ST-FLIP time
+                                                                                                                                                     0.2
+steps do not require a surface reconstruction stage.
+
+                                                                                                                                                     0.1
+Table 1. Per-stage runtime breakdown (in seconds) for an average time step
+in the simulation of Figure 2. We compare ST-FLIP to standard FLIP at the
+                                                                                                                                                     0.0
+same target CFL number of 16.                                                                                                                              0   1   2      3       4        5           6
+                                                                                                                                                                       Time (s)
+  Method                       Total                      P2G        Surface             Project     Advect   Other
+                                                                                                                      Fig. 12. Dam-break with obstacle benchmark of Kleefsman et al. [2005]:
+  FLIP                                2.3                 0.5          0.48               0.52        0.52    0.28
+                                                                                                                      water height at gauge H2 over physical time. Dashed: experimental mea-
+  ST-FLIP                             1.86                0.52          —                 0.48         0.6    0.26
+                                                                                                                      surement; solid: ST-FLIP simulation with target CFL = 4, 8, 16. Even at very
+                                                                                                                      large time steps, ST-FLIP reproduces the main features and timing of the
+                                                                                                                      measured height evolution of the physical experiment.
+   For a quantitative assessment, Figure 11 shows the evolution of
+liquid volume and kinetic energy for the CFL = 16 case: ST-FLIP
+exhibits lower energy loss and better volume conservation than
+FLIP, with a volume loss rate of 0.7% per non-dimensional time unit
+compared with 3.5% for FLIP (orange curves). Unlike FLIP, which
+resolves only the primary upward splash (first energy peak), ST-FLIP
+captures multiple subsequent splashes as additional pronounced
+                                                                                                                      Fig. 13. Snapshots of our simulation of the Kleefsman et al. [2005] experi-
+peaks in the energy curve (marked by arrows on the solid blue                                                         ment at CFL = 16. See Figure 12 for a quantitative assessment (same gauge
+curve).                                                                                                               position at H2)
+                                                                                                                                                                       .
+                                                1.0
+
+
+
+
+              Kinetic energy and fluid volume
+                                                0.8                                                                   4.4   Time-Slab Integration vs. Viscous Diffusion
+                                                0.6
+                                                                                                                      As discussed in Section 3.7, 𝑊T does not act as a recursive temporal
+                                                                                                                      filter across simulation steps and should therefore not significantly
+                                                0.4
+                                                           Energy (ST-FLIP)                                           increase the effective viscosity, i.e., the rate at which small-scale
+                                                           Volume (ST-FLIP)
+                                                0.2                                                                   flow features are dissipated by the solver. To assess this, we monitor
+                                                           Energy (FLIP)
+                                                           Volume (FLIP)                                              the evolution of enstrophy
+                                                0.0
+                                                                                                                                                    ∫
+                                                      0          2       4           6           8    10                                          1
+                                                                              Time                                                           E=         ∥∇ × 𝑢® ∥ 2 d𝑉 ,
+                                                                                                                                                  2 Ω
+Fig. 11. Time histories of normalized kinetic energy and fluid volume (frac-                                          defined as half the integral of the squared vorticity over the domain.
+tion of domain volume) for the dam-break simulation at CFL = 16, showing                                              Enstrophy serves as a sensitive metric for capturing the damping
+that ST-FLIP exhibits lower energy loss and better volume conservation than                                           of small-scale vortical flow structures [Donzis et al. 2008]. At equal
+FLIP. Unlike FLIP, which resolves only the primary splash-up (first peak),                                            nominal physical viscosity (assumed zero in our inviscid setting),
+ST-FLIP captures multiple subsequent splash-ups as pronounced peaks in                                                slower decay of enstrophy is consistent with lower numerical dis-
+the energy curve.
+                                                                                                                      sipation. Figure 14 shows the evolution of enstrophy over a long-
+                                                                                                                      running dam-break simulation for different CFL numbers and dif-
+                                                                                                                      ferent FLIP/PIC blends. The solid curve corresponds to a baseline
+   Validation Against a Physical Experiment. To quantitatively vali-                                                  run with CFL = 1 and 𝛼 FLIP = 0.99, where 𝛼 FLIP = 1 − 𝛼 PIC controls
+date that ST-FLIP preserves physical fidelity, we simulate the widely                                                 the usual mix-in of PIC-style smoothing in FLIP [Bridson 2015].
+used dam-break-with-obstacle setup of Kleefsman et al. [2005], for                                                    As shown by the dotted curves, increasing artificial viscosity by
+which water-height time series were measured at several probe lo-                                                     decreasing 𝛼 FLIP leads to a faster loss of enstrophy, as expected.
+cations. Figure 12 compares the water height at sensor H2 from the                                                    In contrast, increasing the temporal support of the slab-integrated
+physical experiment (dashed) to ST-FLIP at increasingly large target                                                  deposition by raising the CFL number in ST-FLIP does not produce
+CFL numbers (4, 8, 16). ST-FLIP captures the overall evolution and                                                    additional loss of vorticity: the dashed curves (higher CFL, same
+timing of the height signal, including the main impact-induced peaks                                                  𝛼 FLIP ) largely coincide with or slightly improve upon the baseline.
+and subsequent evolution; the first peak is somewhat over-predicted                                                   We attribute this mild improvement to the fact that larger time
+at lower CFL, but the response remains stable and qualitatively con-                                                  steps reduce the number of back-and-forth transfers between parti-
+sistent as the time step is increased.                                                                                cles and grid. Figure 15 qualitatively illustrates vorticity decay in
+
+ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+                                                                            Spatiotemporal FLIP for Fast Free-Surface and Two-Phase Simulation With Very Large Time Steps           •   76:13
+
+
+ST-FLIP by showing 2D slices of the vorticity magnitude at time                                    4.5    Varying the Number of Particles per Cell
+𝑇 = 60 for the baseline run (a), the case with increased PIC viscosity                             As discussed in Section 3, ST-FLIP should not require significantly
+𝛼 FLIP = 0.9 (b), and the case with increased CFL = 10 at the original                             more particles (samples) per cell, even though each space–time cell
+𝛼 FLIP (c). While enstrophy is not a strict invariant in 3D turbulence,                            is sampled in an additional (temporal) dimension. To assess this,
+its decay is a practical proxy for the damping of small-scale vortical                             we ran the dam-break test case for varying number of particles
+content and Figure 15 visualizes that this content is not replaced by                              per cell 𝑁 ppc (from 1 to 16) and compared the resulting free-surface
+grid-scale noise.                                                                                  signed distance functions at time 𝑇 = 7 against a high-particle-count
+                                                                                                   (𝑁 ppc = 50) reference obtained with the same method and CFL num-
+                        100                                                                        ber. Figure 16 shows the resulting RMSE for standard FLIP (CFL = 1)
+                                                                                                   and ST-FLIP (CFL = 10). For both methods, improvement saturates
+                                                                                                   around 𝑁 ppc = 8, beyond which other errors (e.g., discretization and
+                                                                                                   chaotic divergence of small-scale flow features) dominate. This is
+
+
+
+
+Normalized Enstrophy
+                                                                                                   consistent with ST-FLIP not requiring significantly more than the
+                       10 1
+                                                                                                   standard choice of eight particles per cell.
+
+
+
+                       10 2                                                                                      0.075
+                                   CFL=1/FLIP=0.99
+                                   CFL=5/FLIP=0.99                                                                                              ST-FLIP, CFL=10
+                                   CFL=10/FLIP=0.99                                                       RMSE   0.050                          FLIP, CFL=1
+                                   CFL=1/FLIP=0.95
+                       10 3        CFL=1/FLIP=0.9
+                                                                                                                 0.025
+                              10        20            30          40   50           60
+                                                           Time
+                                                                                                                           Nppc     4              8             12            16
+Fig. 14. Increasing the CFL number (dashed) does not increase dissipation of
+                                                                                                   Fig. 16. Simulation quality vs. number of particles per cell. For both FLIP
+vortical features (no additional enstrophy loss). Dotted: increasing numerical
+                                                                                                   and ST-FLIP, improvement saturates at about the standard value of 𝑁 ppc = 8,
+viscosity / numerical diffusion via stronger PIC blending (smaller 𝛼 FLIP )
+                                                                                                   indicating that ST-FLIP does not necessitate significantly more particles per
+accelerates enstrophy decay.
+                                                                                                   cell although we sample an additional (time) dimension.
+
+
+                                                                                                   4.6    Comparison With APIC and Implicit Density
+                                                                                                          Projection
+                                                                                                  We next compare ST-FLIP to two widely used modifications of hybrid
+                                                                                                  particle–grid fluid solvers that target common failure modes under
+                                                                                                  large time steps: Affine particle-in-cell (APIC) [Jiang et al. 2015]
+                                                                                                  and Implicit Density Projection (IDP) [Kugelstadt et al. 2019]. APIC
+                                                                                                  improves the particle–grid velocity transfer and typically reduces
+                                                                                                  noise and numerical dissipation. IDP directly regularizes uneven
+                                                                                                  particle distributions, which are a frequent issue at high CFL.
+
+
+
+
+                                                                                                   Fig. 17. Dam break simulated for increasing target CFL numbers with APIC
+                                                                                                   (top row) and our method, ST-FLIP (second row). ST-FLIP maintains flow
+Fig. 15. Vorticity magnitude (2D slice) at T=60: (a) FLIP baseline (CFL = 1,
+                                                                                                   coherence even at very large time steps (CFL = 16) while being more effi-
+𝛼 FLIP = 0.99 ) (b) increased numerical diffusion via stronger PIC blending
+                                                                                                   cient in terms of computation time and memory usage (see Figure 18 for
+(𝛼 FLIP = 0.9) suppresses small-scale vortices; (c) ST-FLIP at much larger time
+                                                                                                   performance metrics).
+steps (CFL = 10) preserves small-scale vortical content comparable to (a),
+consistent with the enstrophy trends in Figure 14.
+                                                                                                     Figure 17 compares ST-FLIP with APIC for the standard 3D dam-
+                                                                                                   break benchmark at target CFLs of 1, 4, and 16. In Figure 18 we
+
+                                                                                                                 ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+76:14   • Braun et al.
+
+
+include IDP and the combination of IDP and APIC in the compari-
+son at a target CFL of 16, compared against a high-fidelity reference
+computed with APIC at CFL = 1 shown in the first row. For each
+method the figure visualizes a 2D slice of the 3D deposited mass-
+density field (after particle-to-grid transfer) at the same simulation
+time 𝑇 = 7, and reports wall-clock simulation time per video frame
+Δ𝑡 frame = 0.1 (excluding rendering), as well as peak memory foot-
+print. At CFL = 16, standard FLIP exhibits severe degradation of
+simulation quality with highly uneven particle density distribution,
+failing to reproduce the characteristic splash-up arc and the cavity
+beneath the free surface. IDP and APIC+IDP noticeably improve
+small-scale density noise but still cannot reproduce the dominant
+flow features. All three prior methods also incur additional compu-
+tational overhead compared to ST-FLIP: per-step surface reconstruc-
+tion (FLIP, APIC, IDP); storing a 3x3 matrix per particle (APIC) or
+solving an additional Poisson equation (IDP). In contrast, ST-FLIP
+preserves the main flow structures at CFL = 16 much closer to the
+CFL = 1 reference, while being an order of magnitude faster and
+using ≈ 40% less memory than the APIC reference run. Compared
+to standard FLIP, ST-FLIP adds one half-precision particle scalar (𝛿𝑡)
+and no extra grids. As reported in Figure 18 this increased the peak
+memory footprint from 350 MB to 363 MB, i.e., by only 3.7%.
+
+4.7     Comparison With Naive Jittering
+A natural question is whether the large-CFL benefits of ST-FLIP can
+be obtained by a simpler modification that merely randomizes the
+per-particle advection time. To test this, we implemented a naive                  Fig. 18. 3D dam-break comparison at CFL = 16 (top: APIC/CFL = 1 refer-
+temporal jittering baseline in which each particle is advected with a              ence). Each row shows a 2D slice of the 3D mass-density field, along with
+randomly perturbed step size,                                                      the corresponding simulation time per video frame (s) and peak memory
+                                                                                   footprint (MB). From top to bottom: CFL = 1 APIC reference, standard
+                                                                                   FLIP, IDP, APIC+IDP, and our ST-FLIP (all CFL = 16 except the reference).
+                                             
+   Δ𝑡𝑝,naive = clamp Δ𝑡𝑛 + 𝛾 𝜏𝑝𝑛 Δ𝑡𝑛 , 0, 2Δ𝑡𝑛 ,
+     𝑛
+                                                                             
+                                                             𝜏𝑝𝑛 ∼ U − 12 , 12 ,
+                                                                                   Standard FLIP exhibits severe degradation of the flow field and fails to re-
+ This baseline corresponds to using only the stochastic term of                    produce the characteristic splash-up arc; IDP and APIC+IDP, while greatly
+Equation (11) but omitting both (i) the residual carryover that defines            suppressing density noise, increase surface-noise and still miss the main
+a consistent particle time state, and (ii) the temporal kernel𝑊𝑇 in the            splash and large cavity. ST-FLIP preserves these features while being more
+deposition step. Figure 19 compares naive jittering to ST-FLIP in the              than ten times faster. Also, APIC and IDP consume more memory due to
+                                                                                   per-particle matrix storage or auxiliary pressure gradient fields.
+dam-break benchmark at target CFL = 10. Although randomizing
+advection times breaks the strict regularity of particle trajectories, it
+does not yield a consistent space–time sampling of the step interval:
+particles are effectively advanced to different times, but these time
+offsets are neither tracked nor accounted for during deposition and
+projection. The mismatch between the particle state and the single-
+time-level grid solve can also accumulate over steps (a random-walk
+drift of the implicit particle time), producing locally inconsistent
+deposited mass/momentum. This manifests as pronounced high-
+                                                                                   Fig. 19. Naive temporal jittering by randomizing the local per-particle advec-
+frequency roughness and “grainy” surface artifacts (Figure 19a).
+                                                                                   tion time leads to marked artifacts due to temporal particle inconsistencies
+                                                                                   (a) which are avoided by our scheme that is based on a true spatiotemporal
+4.8     Further Simulation Results                                                 (4D) particle state (b). Shown is the free surface, early in the dam-break
+In this section, we present a range of liquid simulations that high-               experiment at CFL = 10 for both methods.
+light the robustness, performance and versatility of our solver.
+   Turbulent Flow Around Solid Obstacle. In this test, we consider a               compares FLIP and ST-FLIP for this scenario. The reference solution
+setup designed to generate a turbulent wake behind a static obsta-                 (Figure 20a) uses standard FLIP at CFL = 1 and exhibits a rich turbu-
+cle. We again start from the standard 3D dam-break configuration                   lent wake behind the obstacle. Increasing the time step to CFL = 20
+of Marrone et al. [2016] and place a rectangular obstacle in the                   with standard FLIP (b) leads to severe temporal aliasing: the wake
+middle of the domain, so that the advancing sheet of water breaks                  structure is largely destroyed and replaced by noise and unphysical
+around the obstacle and produces a highly vortical wake. Figure 20                 waves. In contrast, ST-FLIP at CFL = 20 (c) preserves the turbulent
+
+ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+                                                             Spatiotemporal FLIP for Fast Free-Surface and Two-Phase Simulation With Very Large Time Steps       •   76:15
+
+
+wake and overall flow structure, producing results that are visually                strong coupling between phases and the need to preserve a visually
+comparable to the CFL = 1 reference while speeding up total simu-                   plausible interface under large-scale deformation. To test ST-FLIP in
+lation time roughly by a factor of eight, consistent with the speedup               this more demanding setting, we integrate it into PF-FLIP using Al-
+of the dambreak case (Figure 2).                                                    gorithm 1. PF-FLIP is a highly optimized two-phase FLIP framework
+                                                                                    for extreme-scale, spatially adaptive high-resolution simulations
+   High-Speed Jet Impinging on a Thin Obstacle. A fundamental dif-                  and has been demonstrated on multi-billion particle scenarios. It
+ficulty for schemes operating at CFL ≫ 1 arises in the presence                     thus serves as a strong baseline as it also operates with relatively
+of thin obstacles, i.e., obstacles whose thickness is much smaller                  large time steps (CFL numbers up to ∼ 3–4) using globally adaptive
+than the distance traveled by the liquid during a single time step. In              time stepping and locally adaptive sub-stepped advection.
+a naive implementation, liquid may tunnel through a wall only a
+couple of cells thick when the leading edge of the flow advances,
+for example, 15 grid cells per time step. ST-FLIP nevertheless han-                    Glugging/Rising Bubbles. We first demonstrate the feasibility of
+dles this case robustly because (i) locally sub-stepped advection                   ST-FLIP as a two-phase solver by running a canonical two-phase
+(Section 3.3) maintains collision detection at CFLlocal = 1, and (ii)               test, i.e., the “glugging” effect of water pouring through a spout
+spatio-temporal sampling distributes fluid samples over space-time                  that cannot be reproduced with standard single-phase liquid sim-
+(Fig. 3), thereby preserving a usable near-wall velocity field while                ulations. For this test, we simulated two containers, each with a
+free-slip/no-through pressure projection enforces the correct bound-                square bottom of side length 0.5𝐿, connected by a cylinder of radius
+ary conditions on the grid. Consequently, after collision detection                 and length 0.05𝐿, with the initial water level (relative to the box
+and standard out-of-obstacle push-back, particles follow the obstacle               bottom) in the upper container at H=0.5L, where 𝐿 = 1 m is the
+surface rather than becoming trapped or accumulating. To evaluate                   domain size. Figure 23 shows snapshots for the same simulation
+this behavior, we simulated a fast water jet at CFL = 16 impinging                  time at increasingly larger CFL numbers. ST-FLIP remains roughly
+on a plate only one grid cell thick and observed neither particle                   faithful to the CFL = 1 reference even for large CFL numbers. Note
+tunneling nor particle accumulation, as shown in Figure 21.                         that the details of the outflow and the rising disintegrating bubble
+                                                                                    are governed by turbulent, hence chaotic flow so fine-scale breakup
+   Large Whirlpool with Gravity Waves. To further broaden the set                   differs, but the macroscopic glugging pattern is preserved.
+of flow regimes beyond standard benchmarks (e.g., dam breaks),
+we simulate a large-scale ocean whirlpool at high resolution. The
+domain is a 200 × 200 × 80 m3 body of water with a cylindrical                         Large-Scale Dam Break. Next, we simulate a very large-scale dam
+outflow pipe (length 10 m, diameter 20 m) centered on the bottom                    break (domain size is 400 meters, simulated with 3 billion particles).
+boundary. The initial velocity field 𝑢® ( ®
+                                         𝑥) = (0, 0, 𝜔 0 ) × 𝑥® is prescribed       At such scales and resulting high velocities, aerodynamic forces
+as a solid-body rotation about the vertical axis through the origin                 become an important factor, necessitating two-phase simulation in
+with angular speed 𝜔 0 = 0.1 rad s −1 . Due to interactions with the                order to obtain a velocity field not only in the water but also in the
+planar side walls of the box-shaped domain, the flow transitions                    air to drive mist and spray droplet dynamics for realistic, physics-
+into a complex superposition of a spiraling vortical outflow and                    based white water effects [Braun et al. 2025], e.g., the explosive
+large gravity waves, most clearly visible in the accompanying video.                water-impact spray plumes in Figure 24. We used the same setup as
+   Figure 22 shows snapshots from a 5123 simulation and compares                    described in Figure 19 in the aforementioned paper and compared
+different time-step sizes. FLIP at CFL = 3 clearly resolves the vortical            our method to PF-FLIP at CFL = 15. As can be seen in Figure 24,
+and wave motion but already shows small, unphysical ripples on the                  PF-FLIP at such high CFL numbers no longer reproduces the main
+free surface (left). At CFL = 30, the aliasing ripple artifacts largely             splash-up spray plume when the water hits the opposite wall of
+destroy any details and the structure of the overall flow (middle). In              the container. In contrast, ST-FLIP maintains the structure of the
+contrast, ST-FLIP at CFL = 30 avoids these artifacts and preserves                  flow with only moderate loss of quality compared to the CFL = 3
+the flow structures, while using ten times larger time steps (right).               (PF-FLIP) baseline (leftmost image), while finishing the simulation
+   Finally, Figure 1 (left) shows a snapshot of the whirlpool simula-               3.1 times faster than the reference.
+tion at an effective grid resolution of 3072 × 3072 × 2048 with more
+than two billion particles. Using our method at a target CFL = 15, the
+                                                                                       Large-Scale Dam Discharge. We re-simulated the large dam dis-
+simulation completed in about 3.4 days. By comparison, the smaller
+                                                                                    charge scene (Figure 3 in [Braun et al. 2025]) both with basic PF-FLIP
+time steps typical of prior FLIP/PIC-based free-surface methods
+                                                                                    (Figure 25, top) and with ST-FLIP (Figure 25, bottom). With ST-FLIP,
+(CFL ≈ 1–3) would increase the runtime several-fold, pushing the
+                                                                                    we are able to more than double the already high CFL number of
+same setup into a ∼2-week range and rendering it impractical to
+                                                                                    the PF-FLIP baseline without noticeable loss of visual quality. This
+run at this scale.
+                                                                                    translates into an approximately 2× reduction in per-frame simula-
+                                                                                    tion time at comparable visual fidelity. Achieving such a speedup on
+4.9   Two-Phase Simulations: ST-FLIP Integrated Into                                top of an already highly optimized, large-step two-phase solver un-
+      PF-FLIP                                                                       derscores that ST-FLIP provides a substantial and largely orthogonal
+So far, our evaluation focused on single-phase free-surface flows.                  performance benefit, while remaining compatible with production-
+We now turn to two-phase simulations with high density contrast                     scale two-phase simulation pipelines. Photograph © Imaginechina
+(liquid–air), which are substantially more challenging due to the                   Ltd. / Alamy.
+
+                                                                                               ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+76:16    • Braun et al.
+
+
+
+
+Fig. 20. Turbulent flow around obstacle. (a) FLIP at CFL = 1 (reference); (b) FLIP at CFL = 20, where temporal aliasing severely degrades the flow structure; (c)
+ST-FLIP at CFL = 20, which preserves the turbulent wake structure and yields results visually comparable to the reference, despite much larger time steps (8x
+speedup over the CFL = 1 reference).
+
+
+                                                                                     2015], or vorticity confinement) that can be applied to mitigate this
+                                                                                     issue.
+                                                                                         Like other Monte Carlo integration-based approaches, our scheme
+                                                                                     can introduce significant amounts of noise, in particular at very
+                                                                                     high CFL numbers. This is often acceptable for the turbulent, nat-
+                                                                                     urally chaotic flows commonly simulated in graphics, especially
+                                                                                     given that the noise is mostly low amplitude and uncorrelated and
+                                                                                     thus amenable to standard surface denoising methods as shown
+Fig. 21. Fast liquid jet hits a thin obstacle (left). 2D slice of particle density   in Section 4.2. This is analogous to how Monte Carlo methods in
+(right). ST-FLIP handles this at high CFL = 16 and a small obstacle thickness        rendering trade integration speed for noise that can be reduced in
+of Δ𝑥 without particles "tunneling" through or "piling up" on the obstacle           post-processing.
+plate.                                                                                   This limitation is most apparent for calm water surfaces, where
+                                                                                     the ratio of signal to FLIP-noise is low and large time steps can
+        Table 2. Resolution and target CFL summary for our simulations               amplify irregularities in the particle distribution. In our current
+                                                                                     implementation, we mitigate this by adaptively attenuating the
+             Figure     Effective resolution     Particles    Target CFL             jitter strength in regions with lower local flow velocity, but more
+             1 (left)   3072×3072×2048           2.1 B        15                     sophisticated adaptivity and noise suppression schemes could be a
+             2          768×256×192              62 M         1–16                   worthwhile direction for future research.
+             8          384×128×96               8M           1–20                       Finally, ST-FLIP is less effective for surface-tension-dominated
+             12         640×224×120              48 M         4–16                   (i.e., very small-scale) flows, because surface tension imposes an
+             18,17      384×112×96               8M           1–16                   additional restriction on the time step Δ𝑡 < 𝑂 (Δ𝑥 3/2 ) [Brackbill
+             20         768×768×288              200 M        1–20
+                                                                                     et al. 1992], limiting the potential for enlarging the velocity-based
+             22         512×512×512              40 M         3–30
+             23         128×256×128              31 M         1–16
+                                                                                     CFL number.
+             24         1600×1600×1600           3.1 B        3–15
+             25         2048×1024×1024           1.2 B        3–7                    6   Conclusions and Outlook
+                                                                                     We presented ST-FLIP, a spatiotemporal extension of hybrid particle–
+                                                                                     grid liquid solvers that targets free-surface and two-phase flows with
+5       Limitations                                                                  very large time steps. The central observation behind our method
+While our method offers significant advantages for large-scale liquid                is that many large-CFL artifacts in PIC/FLIP/APIC pipelines are
+and two-phase simulations, it is not without limitations. In particular,             fundamentally spatiotemporal sampling problems: when particles
+ST-FLIP, like any method, cannot completely prevent a loss of quality                traverse multiple cells per step, instantaneous particle-to-grid de-
+as the time step size increases. However, the degradation is much                    position leaves gaps in space–time coverage, which manifests as
+less severe and more gradual than with previous methods (Figure 2).                  temporal aliasing and unphysical surface waves after projection.
+   The FLIP-typical time-step-dependent loss of energy and angu-                     ST-FLIP addresses this issue by treating particles as Monte Carlo
+lar momentum induced by the standard first-order time-splitting                      samples in four-dimensional space-time. Concretely, we augment
+scheme is not addressed by our method. Nevertheless, ST-FLIP                         each particle with a time offset within the current step and perform
+is, in principle, compatible with common countermeasures (e.g.,                      particle-to-grid transfers using a carefully designed, separable space–
+advection-reflection [Zehnder et al. 2018], IVOCK [Zhang et al.                      time kernel. This produces a Monte Carlo estimator of per-step time
+
+ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+                                                              Spatiotemporal FLIP for Fast Free-Surface and Two-Phase Simulation With Very Large Time Steps          •   76:17
+
+
+
+
+Fig. 22. Whirlpool simulation. Left: FLIP CFL = 3 resolves the flow well but exhibits small unphysical surface ripples, Middle: FLIP at CFL = 30 largely degrades
+any flow features. Note that the surface ripples are not real waves but unphysical aliasing artifacts, Right: Our method, ST-FLIP at CFL = 30 preserves the flow
+without artifacts, despite using ten times larger time steps with an effective per-frame speedup of approximately a factor of eight.
+
+
+                                                                                     Monte Carlo estimator: replacing pseudo-random temporal jitter
+                                                                                     with low-discrepancy sequences (e.g., Halton or Sobol) together
+                                                                                     with suitable scrambling could improve temporal coherence and
+                                                                                     further suppress residual noise at fixed particle counts.
+                                                                                        Another direction is to enrich the temporal representation. While
+                                                                                     our current implementation collapses the conceptual space–time
+                                                                                     slab of a step’s time interval into a single step-integrated 3D grid,
+                                                                                     retaining a small number of distinct time levels as separate 3D grids
+                                                                                     could enable higher-order temporal reconstruction and potentially
+Fig. 23. Glugging simulation at increasingly larger CFL numbers. Left: CFL =
+1 PF-FLIP reference. Middle and right: ST-FLIP at CFL = 4 and CFL = 16
+                                                                                     further reduce estimator noise.
+respectively.                                                                           More broadly, the underlying spatiotemporal particle–grid view-
+                                                                                     point is not specific to liquids and may translate to other particle or
+                                                                                     hybrid methods (e.g., MPM, SPH), where uneven sampling or large
+slab-integrated mass and momentum on the grid, effectively act-                      time steps similarly affect stability, accuracy, and visual quality.
+ing as temporal anti-aliasing while retaining the low-dissipation
+character of FLIP-style updates.
+                                                                                     Acknowledgements
+   A second key benefit of the spatiotemporal formulation is an in-
+terface representation that is diffuse in both space and time. Building             We thank the Deutsche Forschungsgemeinschaft (DFG) for partial
+on recent particle-based phase field ideas, we reuse the spatiotem-                 funding of this project (BE 5132/4-2, TH 2034/1-2).
+poral P2G weight accumulators as a space–time phase field, which
+provides variable-coefficient projection weights and removes the
+                                                                                     References
+need for explicit per-step surface reconstruction. When a sharp                      Daniel M Anderson, Geoffrey B McFadden, and Adam A Wheeler. 1998. Diffuse-
+surface is needed for export or final rendering, we reconstruct it                      interface methods in fluid mechanics. Annual review of fluid mechanics 30, 1 (1998),
+directly from the particles only at output frames.                                      139–165.
+                                                                                     Ryoichi Ando, Nils Thürey, and Chris Wojtan. 2013. Highly adaptive liquid simulations
+   Importantly, ST-FLIP is designed as an attractively lightweight                      on tetrahedral meshes. ACM Transactions on Graphics (TOG) 32, 4 (2013), 1–10.
+extension: it introduces only one new particle attribute and does                    T Arrufat, M Crialesi-Esposito, D Fuster, Y Ling, L Malan, S Pal, R Scardovelli, G
+not require additional grids, additional linear solves, or extra passes                 Tryggvason, and S Zaleski. 2021. A mass-momentum consistent, volume-of-fluid
+                                                                                        method for incompressible flow on staggered grids. Computers & Fluids 215 (2021),
+over particles/fields. In practice, this keeps the runtime dominated                    104785.
+by the same components as the underlying solver (advection, trans-                   Christopher Batty. 2010. Simulating Viscous Incompressible Fluids with Embedded Bound-
+                                                                                        ary Finite Difference Methods. Ph. D. Dissertation. The University of British Columbia,
+fers, and pressure projection), while enabling substantially larger                     Vancouver.
+stable and visually plausible time steps. Across our benchmarks and                  Christopher Batty, Florence Bertails, and Robert Bridson. 2007. A fast variational
+production-style scenarios, we observed multi-fold reductions in                        framework for accurate solid-fluid coupling. In ACM SIGGRAPH 2007 Papers (San
+                                                                                        Diego, California) (SIGGRAPH ’07). Association for Computing Machinery, New
+wall-clock time for target CFL numbers up to 30, with speedups of                       York, NY, USA, 100–es. doi:10.1145/1275808.1276502
+roughly 2×–8× at high effective 3D resolutions. Finally, integrating                 Haimasree Bhatacharya, Yue Gao, and Adam Bargteil. 2011. A level-set method for skin-
+ST-FLIP into the already fast and highly optimized PF-FLIP two-                         ning animated particle data. In Proceedings of the 2011 ACM SIGGRAPH/Eurographics
+                                                                                        Symposium on Computer Animation (Vancouver, British Columbia, Canada) (SCA
+phase solver yielded a same-quality speedup of about a factor of                        ’11). Association for Computing Machinery, New York, NY, USA, 17–24.
+two in a large-scale, high-resolution two-phase setting, indicating                  C. K. Birdsall and A. B. Langdon. 2005. Plasma Physics via Computer Simulation. Institute
+                                                                                        of Physics Publishing, Bristol and Philadelphia. doi:10.1887/0750300255 Reprint of
+that the approach can benefit strong baselines as well.                                 the 1985 McGraw-Hill edition, with corrections and new material.
+                                                                                     Jeremiah U Brackbill, Douglas B Kothe, and Charles Zemach. 1992. A continuum
+  Outlook. ST-FLIP suggests several promising directions for future                     method for modeling surface tension. Journal of computational physics 100, 2 (1992),
+work. A natural next step is to reduce the variance of the temporal                     335–354.
+
+
+                                                                                                 ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+76:18   • Braun et al.
+
+
+
+
+Fig. 24. Two-Phase simulation of a large-scale dam break with obstacle (domain size 400 meters). At CFL = 15, PF-FLIP (middle) no longer reproduces the
+main impact splash-up spray plumes, whereas ST-FLIP only moderately loses quality in the details but maintains the global structure of the flow.
+
+
+
+
+Fig. 25. Large-scale two-phase flow: Dam discharge using the same setup as Braun et al. [2025] at high effective resolution of 2048x1024x1024. Top: original
+PF-FLIP method with CFL = 3. Bottom: Augmented with our spatiotemporal extension, the same simulation can be run at more than twice the time step size
+without visible loss of quality, effectively doubling the simulation speed of the already fast, highly optimized PF-FLIP solver. Photograph © Imaginechina Ltd. /
+Alamy.
+
+
+
+
+ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+                                                                        Spatiotemporal FLIP for Fast Free-Surface and Two-Phase Simulation With Very Large Time Steps          •   76:19
+
+
+Jeremiah U Brackbill and Hans M Ruppel. 1986. FLIP: A method for adaptively zoned,             Michael Lentine, Matthew Cong, Saket Patkar, and Ronald Fedkiw. 2012. Simulat-
+   particle-in-cell calculations of fluid flows in two dimensions. Journal of Computa-            ing free surface flow with very large time steps. In Proceedings of the ACM SIG-
+   tional physics 65, 2 (1986), 314–343.                                                          GRAPH/Eurographics Symposium on Computer Animation (Lausanne, Switzerland)
+Bernhard Braun, Jan Bender, and Nils Thuerey. 2025. Adaptive Phase-Field-FLIP for                 (SCA ’12). Eurographics Association, Goslar, DEU, 107–116.
+   Very Large Scale Two-Phase Fluid Simulation. ACM Trans. Graph. 44, 4, Article 42            Wei Li, Daoming Liu, Mathieu Desbrun, Jin Huang, and Xiaopei Liu. 2020. Kinetic-
+   (July 2025), 23 pages. doi:10.1145/3730854                                                     based multiphase flow simulation. IEEE Transactions on Visualization and Computer
+Robert Bridson. 2008. Fluid Simulation for Computer Graphics. A. K. Peters, Ltd., USA.            Graphics 27, 7 (2020), 3318–3334.
+Robert Bridson. 2015. Fluid simulation for computer graphics. AK Peters/CRC Press,             Wei Li, Yihui Ma, Xiaopei Liu, and Mathieu Desbrun. 2022. Efficient kinetic simulation
+   Boca Raton, FL.                                                                                of two-phase flows. ACM Transactions on Graphics 41, 4 (2022), 114.
+Russel E. Caflisch. 1998. Monte Carlo and quasi-Monte Carlo methods. Acta Numerica             Xu-Dong Liu, Ronald P Fedkiw, and Myungjoo Kang. 2000. A boundary condition cap-
+   7 (1998), 1–49. doi:10.1017/S0962492900002804                                                  turing method for Poisson’s equation on irregular domains. Journal of computational
+Duowen Chen, Zhiqi Li, Taiyuan Zhang, Jinjin He, Junwei Zhou, Bart van Bloe-                      Physics 160, 1 (2000), 151–178.
+   men Waanders, and Bo Zhu. 2025. Fluid Simulation on Compressible Flow Maps.                 Frank Losasso, Frédéric Gibou, and Ron Fedkiw. 2004. Simulating water and smoke
+   ACM Transactions on Graphics 44, 4 (2025), to appear. to appear.                               with an octree data structure. ACM Trans. Graph. 23, 3 (Aug. 2004), 457–462.
+Nuttapong Chentanez and Matthias Müller. 2012. Mass-conserving eulerian liquid                 Salvatore Marrone, Andrea Colagrossi, Andrea Di Mascio, and David Le Touzé. 2016.
+   simulation. In Proceedings of the 11th ACM SIGGRAPH / Eurographics Conference on               Analysis of free-surface flows through energy considerations: Single-phase versus
+   Computer Animation (Lausanne, Switzerland) (EUROSCA’12). Eurographics Associa-                 two-phase modeling. Physical Review E 93, 5 (2016), 053113.
+   tion, Goslar, DEU, 245–254.                                                                 A. McAdams, E. Sifakis, and J. Teran. 2010. A parallel multigrid Poisson solver for fluids
+Ulrich Clarenz, Gerhard Dziuk, and Martin Rumpf. 2003. On generalized mean curvature              simulation on large grids. In Proceedings of the 2010 ACM SIGGRAPH/Eurographics
+   flow in surface processing. In Geometric analysis and nonlinear partial differential           Symposium on Computer Animation (SCA ’10). Eurographics Association, Goslar,
+   equations. Springer, Berlin, Heidelberg, 217–248.                                              DEU, 65–74.
+Robert L. Cook, Thomas Porter, and Loren Carpenter. 1984. Distributed Ray Tracing.             Jeroen Molemaker, Jonathan M Cohen, Sanjit Patel, Jonyong Noh, et al. 2008. Low
+   In Proceedings of the 11th Annual Conference on Computer Graphics and Interactive              Viscosity Flow Simulations for Animation.. In Symposium on Computer Animation,
+   Techniques (SIGGRAPH ’84). Association for Computing Machinery, New York, NY,                  Vol. 9. ACM, New York, NY, USA, 18.
+   USA, 137–145. doi:10.1145/800031.808590                                                     Joe J Monaghan. 1992. Smoothed particle hydrodynamics. In: Annual review of astronomy
+Richard Courant, K. Friedrichs, and Hans Lewy. 1928. Über die partiellen Differenzen-             and astrophysics. Vol. 30 (A93-25826 09-90), p. 543-574. 30 (1992), 543–574.
+   gleichungen der mathematischen Physik. Math. Ann. 100 (1928), 32–74.                        Matthias Müller. 2009. Fast and robust tracking of fluid surfaces. In Proceedings of the
+DA Donzis, PK Yeung, and KR Sreenivasan. 2008. Dissipation and enstrophy in isotropic             2009 ACM SIGGRAPH/Eurographics Symposium on Computer Animation. ACM, New
+   turbulence: resolution effects and scaling in direct numerical simulations. Physics of         York, NY, USA, 237–245.
+   Fluids 20, 4 (2008), –.                                                                     Matthias Müller, David Charypar, and Markus Gross. 2003. Particle-based fluid
+Florian Ferstl, Rüdiger Westermann, and Christian Dick. 2014. Large-scale liquid                  simulation for interactive applications. In Proceedings of the 2003 ACM SIG-
+   simulation on adaptive hexahedral grids. IEEE Transactions on Visualization and                GRAPH/Eurographics symposium on Computer animation. Eurographics Association,
+   Computer Graphics 20, 10 (2014), 1405–1417.                                                    San Diego, CA, USA, 154–159.
+Chuyuan Fu, Qi Guo, Theodore Gast, Chenfanfu Jiang, and Joseph Teran. 2017. A                  Ken Museth. 2014. A Flexible Image Processing Approach to the Surfacing of Particle-
+   polynomial particle-in-cell method. ACM Transactions on Graphics (TOG) 36, 6                   Based Fluid Animation (Invited Talk). In Mathematical Progress in Expressive Image
+   (2017), 1–12.                                                                                  Synthesis I, Ken Anjyo (Ed.). Mathematics for Industry, Vol. 4. Springer, Tokyo, 81–84.
+Francis H Harlow. 1964. The particle-in-cell computing method for fluid dynamics.                 doi:10.1007/978-4-431-55007-5_11
+   Methods Comput. Phys. 3 (1964), 319–343.                                                    Mohammad Sina Nabizadeh, Ritoban Roy-Chowdhury, Hang Yin, Ravi Ramamoorthi,
+Francis H Harlow, J Eddie Welch, et al. 1965. Numerical calculation of time-dependent             and Albert Chern. 2024. Fluid Implicit Particles on Coadjoint Orbits. ACM Trans.
+   viscous incompressible flow of fluid with free surface. Physics of fluids 8, 12 (1965),        Graph. 43, 6, Article 270 (Nov. 2024), 38 pages.
+   2182.                                                                                       Mohammad Sina Nabizadeh, Stephanie Wang, Ravi Ramamoorthi, and Albert Chern.
+Cyril W Hirt and Billy D Nichols. 1981. Volume of fluid (VOF) method for the dynamics             2022. Covector fluids. ACM Transactions on Graphics (TOG) 41, 4 (2022), 1–16.
+   of free boundaries. Journal of computational physics 39, 1 (1981), 201–225.                 Yen Ting Ng, Chohong Min, and Frédéric Gibou. 2009. An efficient fluid–solid coupling
+Markus Ihmsen, Jens Orthmann, Barbara Solenthaler, Andreas Kolb, and Matthias                     algorithm for single-phase flows. J. Comput. Phys. 228, 23 (2009), 8807–8829.
+   Teschner. 2014. SPH fluids in computer graphics. Computer Graphics Forum 33, 1              Ziyin Qu, Minchen Li, Fernando De Goes, and Chenfanfu Jiang. 2022. The power
+   (2014), 155–188.                                                                               particle-in-cell method. ACM Trans. Graph. 41, 4, Article 118 (2022), 13 pages.
+David Jacqmin. 1999. Calculation of two-phase Navier–Stokes flows using phase-field            Wouter Raateland, Torsten Hädrich, Jorge Alejandro Amador Herrera, Daniel T Banuti,
+   modeling. Journal of computational physics 155, 1 (1999), 96–127.                              Wojciech Pałubicki, Sören Pirk, Klaus Hildebrandt, and Dominik L Michels. 2022.
+Suhas S Jain. 2022. Accurate conservative phase-field method for simulation of two-               Dcgrid: An adaptive grid structure for memory-constrained fluid simulation on the
+   phase flows. J. Comput. Phys. 469 (2022), 111529.                                              gpu. Proceedings of the ACM on Computer Graphics and Interactive Techniques 5, 1
+Chenfanfu Jiang, Craig Schroeder, Andrew Selle, Joseph Teran, and Alexey Stomakhin.               (2022), 1–14.
+   2015. The affine particle-in-cell method. ACM Transactions on Graphics (TOG) 34, 4          Mehdi Raessi and Heinz Pitsch. 2012. Consistent mass and momentum transport for
+   (2015), 1–10.                                                                                  simulating incompressible interfacial flows with large density ratios using the level
+James T. Kajiya. 1986. The Rendering Equation. In Proceedings of the 13th Annual Confer-          set method. Computers & Fluids 63 (2012), 70–81.
+   ence on Computer Graphics and Interactive Techniques (SIGGRAPH ’86). Association            Bo Ren, Xu-Yun Yang, Ming C Lin, Nils Thuerey, Matthias Teschner, and Chenfeng Li.
+   for Computing Machinery, New York, NY, USA, 143–150. doi:10.1145/15922.15902                   2018. Visual simulation of multiple fluids in computer graphics: A state-of-the-art
+Myungjoo Kang, Ronald P Fedkiw, and Xu-Dong Liu. 2000. A boundary condition cap-                  report. Journal of Computer Science and Technology 33, 3 (2018), 431–451.
+   turing method for multiphase incompressible flow. Journal of Scientific Computing           Sergio Sancho, Jingwei Tang, Christopher Batty, and Vinicius C. Azevedo. 2024. The
+   15 (2000), 323–360.                                                                            Impulse Particle-In-Cell Method. Computer Graphics Forum 43, 2 (2024), e15022.
+KMT Kleefsman, G Fekken, AEP Veldman, B Iwanowski, and B Buchner. 2005. A                         doi:10.1111/cgf.15022
+   volume-of-fluid based simulation method for wave impact problems. Journal of                Rajsekhar Setaluri, Mridul Aanjaneya, Sean Bauer, and Eftychios Sifakis. 2014. SPGrid: A
+   computational physics 206, 1 (2005), 363–393.                                                  sparse paged grid structure applied to adaptive smoke simulation. ACM Transactions
+Tatsuya Koike, Shigeo Morishima, and Ryoichi Ando. 2020. Asynchronous Eulerian                    on Graphics (TOG) 33, 6 (2014), 1–12.
+   liquid simulation. In Computer Graphics Forum, Vol. 39. Wiley Online Library, Wiley,        Han Shao, Libo Huang, and Dominik L Michels. 2022. A fast unsmoothed aggregation
+   Hoboken, NJ, 1–8.                                                                              algebraic multigrid framework for the large-scale simulation of incompressible flow.
+Dan Koschier, Jan Bender, Barbara Solenthaler, and Matthias Teschner. 2022. A Survey              ACM Transactions on Graphics (TOG) 41, 4 (2022), 1–18.
+   on SPH Methods in Computer Graphics. Computer Graphics Forum 41, 2 (2022),                  Side-Effects-Software. 2024. Houdini. – –, – (2024), –.
+   737–760. doi:10.1111/cgf.14508                                                              B. W. Silverman. 1986. Density Estimation for Statistics and Data Analysis. Chapman
+Tassilo Kugelstadt, Andreas Longva, Nils Thuerey, and Jan Bender. 2019. Implicit                  and Hall, London. https://nla.gov.au/nla.cat-vn375680 Accessed: 2026-01-09. Via
+   density projection for volume conserving liquids. IEEE Transactions on Visualization           National Library of Australia.
+   and Computer Graphics 27, 4 (2019), 2385–2395.                                              Jos Stam. 1999. Stable fluids. In Proceedings of the 26th Annual Conference on Computer
+Michael Lentine, Mridul Aanjaneya, and Ronald Fedkiw. 2011. Mass and mo-                          Graphics and Interactive Techniques (SIGGRAPH ’99). ACM Press/Addison-Wesley
+   mentum conservation for fluid simulation. In Proceedings of the 2011 ACM SIG-                  Publishing Co., USA, 121–128. doi:10.1145/311535.311548
+   GRAPH/Eurographics Symposium on Computer Animation (Vancouver, British                      Lucas Stringhetti. 2024.        Houdini Water Simulation Techniques: A Detailed
+   Columbia, Canada) (SCA ’11). Association for Computing Machinery, New York,                    Breakdown.        The VFX Media.              Retrieved November 29, 2024, from
+   NY, USA, 91–100. doi:10.1145/2019406.2019419                                                   https://www.thevfxmedia.com/articles/houdini-water-simulation-techniques-
+
+
+
+                                                                                                           ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+76:20    • Braun et al.
+
+
+   from-lucas-stringhetti-a-detailed-breakdown.                                             B   Surface Reconstruction for Rendering
+John Villasenor and Oscar Buneman. 1992. Rigorous charge conservation for local
+   electromagnetic field solvers. Computer Physics Communications 69, 2-3 (1992),           For rendering, we reconstruct an implicit surface as the 0.5-iso-
+   306–316.                                                                                 contour of a field 𝜓 ∈ [0, 1] directly from the particles by splatting
+Haoxiang Wang, Kui Wu, Hui Qiao, Mathieu Desbrun, and Wei Li. 2025a. Kinetic
+   Free-Surface Flows and Foams with Sharp Interfaces. ACM Transactions on Graphics
+                                                                                            a union-of-spheres (radius 0.5Δ𝑥) density 𝜓 0 onto a grid with twice
+   to appear, to appear (2025), to appear.                                                  the resolution of the simulation grid, followed by 𝑘𝜓 narrow-band it-
+Sinan Wang, Junwei Zhou, Fan Feng, Zhiqi Li, Yuchen Sun, Duowen Chen, Greg Turk,            erations of a feature-preserving mean curvature flow in the standard
+   and Bo Zhu. 2025b. Fluid Simulation on Vortex Particle Flow Maps. ACM Trans.
+   Graph. 44, 4, Article 91 (July 2025), 24 pages. doi:10.1145/3731198                      level-set formulation
+                                                                                                                                                    
+Xiaokun Wang, Yanrui Xu, Sinuo Liu, Bo Ren, Jiří Kosinka, Alexandru C. Telea, Jiamin                                                          ∇𝜓 𝑛
+   Wang, Chongming Song, Jian Chang, Chenfeng Li, Jian Jun Zhang, and Xiaojuan                              𝜓 𝑛+1 = 𝜓 𝑛 + Δ𝜏 𝑔 |∇𝜓 𝑛 | ∇ ·             ,
+   Ban. 2024. Physics-based fluid simulation in computer graphics: Survey, research                                                          |∇𝜓 𝑛 |
+   trends, and challenges. Computational Visual Media 10, 5 (October 2024), 803–858.
+Ross T Whitaker. 2002. Isosurfaces and level-set surface models. School of Computing,
+                                                                                            where the pseudo-time step is chosen as Δ𝜏 = 1/(6 maxx 𝑔(x)) = 16
+   University of Utah N/A, N/A (2002), –.                                                   for 𝑔 > 0 (since 𝑔 ≤ 1), i.e. the diffusion-number stability limit for
+Jihun Yu and Greg Turk. 2013. Reconstructing surfaces of particle-based fluids using        second-order level-set terms [Whitaker 2002]. The feature-preserving
+   anisotropic kernels. ACM Transactions on Graphics (TOG) 32, 1 (2013), 1–12.
+Jonas Zehnder, Rahul Narain, and Bernhard Thomaszewski. 2018. An advection-                 mask 𝑔 is based on the quotient of 𝜓 0 to its smoothed version
+   reflection solver for detail-preserving fluid simulation. ACM Transactions on Graphics   (as in self-quotient methods for local contrast normalization): 𝑔 =
+   (TOG) 37, 4 (2018), 1–8.                                                                 1 − smoothstep(𝜃, 𝜁 ;𝜓 0 /(𝐺𝜎 ★ 𝜓 0 + 10 −10 )) with gaussian blur 𝐺𝜎
+Xinxin Zhang, Robert Bridson, and Chen Greif. 2015. Restoring the missing vorticity
+   in advection-projection fluid solvers. ACM Transactions on Graphics (TOG) 34, 4          of standard deviation 𝜎 = 2Δ𝑥. Here, 𝜁 = 5 and 𝜃 = 2 are a fixed
+   (2015), 1–8.                                                                             slope-factor and a noise-threshold respectively. This leaves 𝑘𝜓 as
+Junwei Zhou, Duowen Chen, Molin Deng, Yitong Deng, Yuchen Sun, Sinan Wang,
+   Shiying Xiong, and Bo Zhu. 2024. Eulerian-Lagrangian Fluid Simulation on Particle
+                                                                                            the single free tuning parameter controlling the strength of surface
+   Flow Maps. ACM Trans. Graph. 43, 4, Article 76 (July 2024), 20 pages. doi:10.1145/       smoothing/denoising.
+   3658180
+Yongning Zhu and Robert Bridson. 2005. Animating sand as a fluid. ACM Transactions
+   on Graphics (TOG) 24, 3 (2005), 965–972.
+
+
+A       Boundedness of the Particle Time Deviation
+Recall Equation (11):
+                                             
+Δ𝑡𝑝,act
+  𝑛
+        = clamp Δ𝑡𝑛 + 𝛿𝑡𝑝𝑛 + 𝛾 𝜉𝑝𝑛 Δ𝑡𝑛 ,0,2Δ𝑡𝑛 , 𝛿𝑡𝑝𝑛+1 = Δ𝑡𝑛 +𝛿𝑡𝑝𝑛 −Δ𝑡𝑝,act
+                                                                       𝑛
+
+
+
+ with 𝜉𝑝𝑛 ∈ [− 12 , 12 ] and 𝛾 ∈ [0, 1]. Let 𝑡𝑛+1 = 𝑡𝑛 + Δ𝑡𝑛 and 𝑡𝑝𝑛+1 =
+𝑡𝑝𝑛 + Δ𝑡𝑝,act
+        𝑛 , 𝑡 0 = 𝑡 . By telescoping the residual update,
+              𝑝       0
+
+                               𝑛−1
+                               ∑︁
+                      𝛿𝑡𝑝𝑛 =         (Δ𝑡𝑘 − Δ𝑡𝑝,act
+                                              𝑘
+                                                    ) = 𝑡𝑛 − 𝑡𝑝𝑛 .                 (20)
+                               𝑘=0
+
+Thus bounding |𝛿𝑡𝑝𝑛 | directly bounds the particle/global time mis-
+match.
+
+  Lemma A.1 (Uniform bound; no random walk drift). Assume
+the global CFL bound Δ𝑡𝑛 ≤ Δ𝑡 max for all 𝑛. Then for all 𝑛 ≥ 0,
+
+                      Δ𝑡 max                                          Δ𝑡 max
+          |𝛿𝑡𝑝𝑛 | ≤                  and hence        |𝑡𝑝𝑛 − 𝑡𝑛 | ≤          .
+                         2                                               2
+
+   Proof. Set 𝐻 := Δ𝑡 max /2 and suppose |𝛿𝑡𝑝𝑛 | ≤ 𝐻 . Write ℎ := Δ𝑡𝑛 ,
+𝑟 := 𝛿𝑡𝑝𝑛 , 𝜉 := 𝜉𝑝𝑛 , and 𝑥 := ℎ + 𝑟 + 𝛾 𝜉 ℎ. Let 𝑎 := clamp(𝑥, 0, 2ℎ), so
+𝑟 + := 𝛿𝑡𝑝𝑛+1 = ℎ + 𝑟 − 𝑎. There are three cases:
+   (i) 0 ≤ 𝑥 ≤ 2ℎ: 𝑎 = 𝑥, hence 𝑟 + = −𝛾 𝜉 ℎ, so |𝑟 + | ≤ ℎ/2 ≤ 𝐻 .
+   (ii) 𝑥 < 0: 𝑎 = 0, hence 𝑟 + = ℎ + 𝑟 . From 𝑥 < 0 we get 𝑟 <
+−ℎ(1 + 𝛾𝜉) ≤ −ℎ/2, so 𝑟 + ≤ ℎ/2 ≤ 𝐻 . Also 𝑟 ≥ −𝐻 and ℎ ≤ 2𝐻
+imply 𝑟 + = ℎ + 𝑟 ≥ −𝐻 .
+   (iii) 𝑥 > 2ℎ: 𝑎 = 2ℎ, hence 𝑟 + = 𝑟 − ℎ. From 𝑥 > 2ℎ we get
+𝑟 > ℎ(1 − 𝛾𝜉) ≥ ℎ/2, so 𝑟 + ≥ −ℎ/2 ≥ −𝐻 . Also 𝑟 ≤ 𝐻 implies
+𝑟+ = 𝑟 − ℎ ≤ 𝐻.
+   Thus 𝑟 + ∈ [−𝐻, 𝐻 ]. Since 𝛿𝑡𝑝0 = 0, induction yields |𝛿𝑡𝑝𝑛 | ≤ 𝐻 for
+all 𝑛. The bound on |𝑡𝑝𝑛 − 𝑡𝑛 | follows from (20).                        □
+
+ACM Trans. Graph., Vol. 45, No. 4, Article 76. Publication date: July 2026.
+

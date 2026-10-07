@@ -1,0 +1,88 @@
+{
+  "id": "ferstl-2016-nbflip",
+  "title": "Narrow Band FLIP for Liquid Simulations",
+  "year": 2016,
+  "url": "https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2016/NBFlip/nbflip.pdf",
+  "project": "https://research-explorer.ista.ac.at/record/1415",
+  "accessed": "2026-10-07",
+  "sha256": "9126eb4da40fa0d98a8effe184ffd49c9a60c9c73541ed0f102019050e9a5b78",
+  "pages": 8,
+  "dpi": 144,
+  "embedded_files": 37,
+  "page_map": [
+    {
+      "page": 1,
+      "render": "page-1.png",
+      "figure_mentions": [
+        "Figure 1:"
+      ]
+    },
+    {
+      "page": 2,
+      "render": "page-2.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 3,
+      "render": "page-3.png",
+      "figure_mentions": [
+        "Fig. 2",
+        "Figure 2:",
+        "Fig. 3."
+      ]
+    },
+    {
+      "page": 4,
+      "render": "page-4.png",
+      "figure_mentions": [
+        "Figure 3:",
+        "Fig. 2",
+        "Figure 4:",
+        "Fig. 6."
+      ]
+    },
+    {
+      "page": 5,
+      "render": "page-5.png",
+      "figure_mentions": [
+        "Figure 5:",
+        "Fig. 2",
+        "Fig. 2:",
+        "Fig. 5.",
+        "Fig. 4",
+        "Figure 6:"
+      ]
+    },
+    {
+      "page": 6,
+      "render": "page-6.png",
+      "figure_mentions": [
+        "Fig. 6",
+        "Figure 7:",
+        "Fig. 10",
+        "Fig. 7",
+        "Fig. 8",
+        "Fig. 9"
+      ]
+    },
+    {
+      "page": 7,
+      "render": "page-7.png",
+      "figure_mentions": [
+        "Fig. 7",
+        "Fig. 8",
+        "Fig. 9",
+        "Fig. 10",
+        "Figure 8:"
+      ]
+    },
+    {
+      "page": 8,
+      "render": "page-8.png",
+      "figure_mentions": [
+        "Figure 9:",
+        "Figure 10:"
+      ]
+    }
+  ]
+}

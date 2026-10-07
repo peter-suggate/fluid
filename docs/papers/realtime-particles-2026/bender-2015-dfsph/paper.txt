@@ -1,0 +1,605 @@
+                         Divergence-Free Smoothed Particle Hydrodynamics
+                                                    Jan Bender∗         Dan Koschier†
+                                                           Graduate School CE
+                                                             TU Darmstadt
+
+
+
+
+Figure 1: Our new SPH method allows a stable simulation of incompressible fluids with high velocities while maintaining a divergence-free
+velocity field. This is shown on the left in a simulation with 2.4 million fluid particles and 6 million boundary particles. Moreover, our
+approach is significantly faster than current state-of-the-art SPH methods and is able to simulate complex scenes consisting of 5 million fluid
+particles and 40 million boundary particles in 5 seconds per time step with a maximum volume compression of 0.01 % (right).
+
+
+Abstract                                                                  Keywords: fluid simulation, Smoothed Particle Hydrodynamics,
+                                                                          divergence-free fluids, incompressibility, implicit integration
+In this paper we introduce an efficient and stable implicit SPH
+method for the physically-based simulation of incompressible flu-         1    Introduction
+ids. In the area of computer graphics the most efficient SPH ap-
+proaches focus solely on the correction of the density error to pre-      In the last years Smoothed Particle Hydrodynamics (SPH) became
+vent volume compression. However, the continuity equation for             a popular method in computer graphics to simulate complex water
+incompressible flow also demands a divergence-free velocity field         effects. SPH is a meshless Lagrangian method which computes the
+which is neglected by most methods. Although a few methods con-           fluid quantities at a given point by only considering a finite set of
+sider velocity divergence, they are either slow or have a perceivable     neighboring particles. One of the most challenging problems in this
+density fluctuation.                                                      field is to enforce incompressibility which is essential to simulate
+                                                                          realistic physical behavior.
+Our novel method uses an efficient combination of two pressure            In general the SPH simulation of incompressible fluids is performed
+solvers which enforce low volume compression (below 0.01 %)               using the incompressible, isothermal Navier-Stokes equations in
+and a divergence-free velocity field. This can be seen as enforc-         Lagrangian coordinates
+ing incompressibility both on position level and velocity level.
+The first part is essential for realistic physical behavior while the                        Dρ
+divergence-free state increases the stability significantly and re-                             =0 ⇔ ∇·v =0                                 (1)
+                                                                                             Dt
+duces the number of solver iterations. Moreover, it allows larger                            Dv    1            f
+time steps which yields a considerable performance gain since par-                              = − ∇p + ν∇2 v + ,                          (2)
+                                                                                             Dt    ρ            ρ
+ticle neighborhoods have to be updated less frequently. Therefore,
+our divergence-free SPH (DFSPH) approach is significantly faster          where D(·)/Dt denotes the material derivative and ρ, p, ν, v and
+and more stable than current state-of-the-art SPH methods for in-         f denote density, pressure, kinematic viscosity, velocity and body
+compressible fluids. We demonstrate this in simulations with mil-         forces, respectively. Note that due to the incompressibility the
+lions of fast moving particles.                                           partial derivative of the density with respect to the time is zero,
+                                                                          i.e. ∂ρ/∂t = 0, which implies the equivalence of both equations
+CR Categories: I.3.5 [Computer Graphics]: Computational Ge-
+ometry and Object Modeling—Physically based modeling I.3.7
+[Computer Graphics]: Three-Dimensional Graphics and Realism—
+Animation;
+
+
+  ∗ e-mail:bender@gsc.tu-darmstadt.de
+  † e-mail:koschier@gsc.tu-darmstadt.de
+                                                                         by the second solver which corrects the density error. There al-
+                                                                         ready exist different constant density solvers which could be com-
+                                                                         bined with our divergence-free solver, e.g. Predictive-Corrective In-
+                                                                         compressible SPH (PCISPH) [Solenthaler and Pajarola 2009] and
+                                                                         Implicit Incompressible SPH (IISPH) [Ihmsen et al. 2014a]. How-
+                                                                         ever, in this work we introduce a new method that perfectly fits our
+                                                                         divergence-free solver since it uses an analogue technique and can
+                                                                         therefore reuse precomputed coefficients. The simulation with our
+                                                                         new approach yields speedup factors of more than 20 in comparison
+                                                                         to current state-of-the-art SPH methods.
+
+                                                                         2    Related Work
+                                                                         Within the field of computer graphics a variety of methods for the
+Figure 2: Comparison between the velocity divergence of IISPH            simulation of incompressible fluids were developed. In this section
+(left) and DFSPH (right) in a breaking dam simulation with 125k          we give a brief overview over related approaches. For a general
+particles. The divergence errors are color coded, where white is the     survey we refer to the work of Bridson [2008] while the recent state
+minimum and red is the maximum.                                          of the art report of Ihmsen et al. [2014b] specifically discusses SPH
+                                                                         methods for fluid simulation.
+
+in (1). According to these equations, an incompressible fluid must       Monaghan [1994] used state equations to weakly enforce incom-
+fulfill the divergence-free condition ∇ · v = 0, which means that        pressibility by penalizing density errors using a stiffness-weighted
+the fluid must have a divergence-free velocity field. From the con-      pressure term. They choose the stiffness coefficient dependent on
+                                                                         the speed of sound to keep the compressibility considerable. Des-
+tinuity equation Dρ   = −ρ∇ · v and the divergence-free condition
+                  Dt                                                     brun and Gascuel [1996] made use of an equation of state (EOS)
+it follows that the density must stay constant over time Dρ Dt
+                                                                = 0.     based solver in order to animate highly deformable bodies. Later,
+Hence, in theory, a fluid with a divergence-free velocity field has a    Müller et al. [2003] introduced an EOS-based approach for fluid
+constant density and therefore is incompressible. However, in prac-      simulation to the computer graphics community while Adams et
+tice, enforcing the divergence-free condition in a simulation is not     al. [2007] extended this method by spatial adaptivity. Becker and
+sufficient to guarantee incompressibility. Inevitable errors of nu-      Teschner [2007] proposed an EOS method to restrict the maximum
+merical time integration lead to density deviations which sum up         compression by predetermined, scenario-dependent stiffness coef-
+over the simulation. Since the divergence-free condition does not        ficients. However, small density tolerances lead to high stiffness
+consider the resulting density error, volume compression due to nu-      coefficients resulting in stiff differential equations and therefore to
+merical errors can not be avoided. To correct the numerical density      strict time-step restrictions.
+error a second condition must be fulfilled ρ − ρ0 = 0, which we
+call the constant density condition. In summary, the Navier-Stokes       To further enhance density preservation, pressure can be com-
+equations for incompressible fluids demand a divergence-free ve-         puted using an intermediate density determined after advecting the
+locity field and additionally a stabilization in form of the constant    particles without pressure forces, known as the concept of split-
+density condition is required to counteract numerical errors.            ting [Chorin 1968; Bridson 2008]. Solenthaler and Pajarola [2009]
+                                                                         adopted this splitting concept and extended it by an iterative pres-
+Recently, in the area of computer graphics implicit pressure solvers     sure solver in order to keep the maximum density error within a
+became popular in SPH simulations to simulate incompressible flu-        user-defined tolerance. Later, the method was extended by rigid-
+ids. These solvers determine pressure forces for the particle model      fluid coupling [Akinci et al. 2012] and a novel surface tension
+in order to prevent volume compression. Currently, the most ef-          model [Akinci et al. 2013]. Macklin and Müller [2013] proposed
+ficient SPH pressure solvers for incompressible fluids solely con-       Position Based Fluids (PBF) – a similar concept that iteratively re-
+sider the constant density condition which only depends on the par-      fines particle positions to enforce incompressibility. Holonomic
+ticle positions. However, the resulting velocity field is generally      constraints on the density error motivated by rigid body mechan-
+not divergence-free (see Figure 2, left) which is demanded by the        ics were solved on a velocity level by Bodin et al. [2012]. How-
+continuity equation for incompressible flow. So far only few SPH         ever, they reported compression errors of up to 17 % due to nu-
+approaches exist which consider velocity divergence but either they      merical approximations, a regularization parameter and errors in
+cannot enforce a low density error or they are comparatively slow.       time-integration. All of these EOS-based iterative methods with
+                                                                         splitting enforce incompressibility only either on velocity or den-
+In this paper we introduce a novel efficient and stable SPH approach     sity level while our method considers both. Recently, Kang and
+which in contrast to most previous methods fulfills the divergence-      Sagong [2014] proposed a method extending the work of Mack-
+free condition and the constant density condition. This is achieved      lin and Müller [2013] by additionally satisfying the divergence-free
+by the combination of two pressure solvers which consider the di-        condition. However, they cannot guarantee a divergence-free ve-
+vergence error and the density error, respectively. Our first solver     locity field after each timestep as particle positions are updated
+enforces a divergence-free velocity field (see Figure 2, right) which    subsequently to the velocity projection. Moreover, they report run-
+has several advantages in SPH simulations. First of all, the simu-       times being similar or worse compared to the method of Macklin
+lation gets more stable, especially in simulations with fast moving      and Müller while our method yields large speed-up factors of up to
+particles (see Figure 1). The increased stability allows us to perform   one order of magnitude especially for large time steps (see Table 2).
+larger time steps which increases the overall performance since
+the computationally expensive neighborhood search is required less       In contrast to non-iterative as well as iterative EOS solvers, the
+frequently. Moreover, the maximum time step size can be deter-           Pressure Poisson Equation (PPE) can be solved in order to project
+mined more accurately by the CFL condition which depends on the          intermediate velocities onto a divergence-free state. Especially, in
+maximum particle velocity. Finally, enforcing a divergence-free ve-      grid-based, Eulerian approaches this is common practice [Bridson
+locity field significantly decreases the number of iterations required   2008]. Therefore, Cummins and Rudman [1999] solved the PPE
+using a multigrid approach where the particles are treated as the         determined by the following equation of state (EOS):
+finest level grid. Later, a semi-Lagrangian method was employed                                         γ          
+by Foster and Fedkiw [2001] where incompressibility is enforced                                   κρ0      ρi
+                                                                                             pi =                 −1 ,
+on a simulation grid while they counteracted mass dissipation using                                 γ      ρ0
+a level set and freely moving inertialess particles. Further hybrid
+approaches using particles and a background grid were developed           where κ and γ are stiffness parameters and ρ0 is the rest density. In
+in the following years [Zhu and Bridson 2005; Raveendran et al.           our work we consider the special case
+2011; Ando et al. 2013]. An advanced method was proposed by
+Losasso et al. [2008] where a PPE is solved on a background grid                                    pi = κ(ρi − ρ0 ),                        (3)
+not only to keep the field divergence-free but to maintain a prede-
+fined target density. Another interesting approach was introduced         where γ = 1 which is a common choice in computer graphics [Des-
+by Sin et al. [2009] as they solve the PPE on a Voronoi diagram           brun and Gascuel 1996; Müller et al. 2003; Ihmsen et al. 2014b].
+constructed from the point-samples in each step. However, all of          In the standard SPH approach [Monaghan 1992] the pressure field
+these approaches have to maintain and sometimes reconstruct addi-         computed by the EOS is directly used to determine forces in or-
+tional grid data-structures resulting in high memory consumption,         der to encounter volume compression. However, weakly com-
+especially for large domains. Our method fully avoids background          pressible fluids require a high stiffness coefficient κ which restricts
+grids and therefore consumes a smaller amount of memory espe-             the time step size and therefore the overall performance consider-
+cially for large scenarios like in Figure 1.                              ably. Hence, implicit pressure solvers, e.g. [Solenthaler and Pa-
+Some approaches directly solve the PPE on the meshless discretiza-        jarola 2009; Ihmsen et al. 2014a], were investigated to simulate in-
+tion. An incompressible SPH method for multiphase flows was pro-          compressible fluids. These solvers typically compute the pressure
+posed by Hu et al. [2007], where the time integration step to obtain      field by solving a linear system which allows larger time steps and
+the velocities is subdivided into two halfsteps. During the first half-   as a consequence a significant performance gain.
+step density fluctuations are eliminated using a position-altering it-    In this paper we present a novel implicit SPH method for in-
+erative gradient descent solver. During the second halfstep errors in     compressible fluids. Our approach uses two solvers to fulfill the
+velocity divergence are resolved in a similar fashion. However, they      divergence-free condition and the constant density condition, re-
+applied their method exclusively to non-complex two-dimensional           spectively. The goal of the divergence-free solver (see Section 3.2)
+scenarios of up to 14,400 particles. He et al. [2012] extended the        is to obtain a divergence-free velocity field. However, as discussed
+work of Solenthaler and Parajola [2009] by a local Poisson solver         in Section 1, this is not sufficient to guarantee incompressibility
+enforcing a divergence-free velocity field and constant density. Un-      in practice since density deviations due to numerical errors cannot
+fortunately, they have to determine particle neighbors in each solver     be corrected. Therefore, we employ a constant density solver (see
+iteration for their Poisson solve, while the integration domain is not    Section 3.3) as a stabilization which eliminates the density errors.
+necessarily equal or a subset of the local kernel function support.       The key idea of the solvers is to determine an individual stiffness
+This leads to a considerable computational effort since the search        coefficient κi (see Equation (3)) for each neighborhood to solve
+radius increases. Moreover, they report only a small speedup factor       the respective condition locally. In order to fulfill the conditions
+of approximately 1.5 in comparison to the underlying method of            globally the solvers process the neighborhoods in a parallel Jacobi
+Solenthaler and Parajola while we experienced speedup factors of          fashion which is a common choice in SPH solvers [Solenthaler and
+more than 20 with DFSPH. In a recent work of Ihmsen et al. [2014a]        Pajarola 2009; Macklin and Müller 2013; Ihmsen et al. 2014a]. Ad-
+a PPE is used in order to iteratively decrease the density deviation      justing the stiffness coefficients individually is equivalent to an im-
+to 0.1% or even less. However, they do not consider eliminating           plicit computation of the pressure field. However, this allows us a
+velocity divergence which leads to a large number of solver itera-        simple and consistent formulation of the constant density and the
+tions compared to our method and can even cause artifacts in special      divergence-free forces.
+cases (see Section 4).
+                                                                          3.1   Simulation Step
+3    Fluid Simulation
+                                                                          At the end of a simulation step both the constant density con-
+In our simulation we use the incompressible, isothermal Navier-           dition and the divergence-free condition must be fulfilled. The
+Stokes equations (see Section 1). However, we skip the second,            divergence-free solver computes pressure forces which are inte-
+viscous term on the right hand side of Equation (2) and use the           grated once to obtain the velocity changes that satisfy the corre-
+XSPH variant proposed by Schechter and Bridson [2012] to simu-            sponding condition. The pressure forces determined by the constant
+late viscosity. We spatially discretize Equation (2) using the SPH        density solver must be integrated twice to get the required position
+method as described in the following while the incompressibility          changes. Therefore, as a side-effect, it also modifies the velocities.
+condition represented by Equation (1) is fulfilled by enforcing the       For this reason, first, we execute the constant density solver and
+divergence-free condition and the constant density condition as de-       modify the velocities and positions, and then the divergence-free
+scribed in Sections 3.2 and 3.3, respectively.                            solver which corrects the resulting velocities to obtain a divergence-
+                                                                          free state. Since both steps are executed in a loop, performing the
+Using the SPH concept a quantity at position xi is approximated
+                                                                          density stabilization before computing a divergence-free velocity
+by the values at a set of neighboring particles xj [Monaghan 1992].
+                                                                          field does not impose any restrictions.
+One of the most important quantities in the SPH formulation is the
+density which can be approximated using this concept as:                  Algorithm 1 outlines the simulation with our novel method in detail.
+                       X mj              X                                First, we determine the particle neighborhoods Ni using compact
+                ρi =           ρj Wij =       mj Wij ,                    hashing [Ihmsen et al. 2011]. Then for each particle we compute the
+                        j
+                            ρj             j                              density ρi and the factor αi (see Section 3.2). αi is a common factor
+                                                                          of both solvers which is required to correct the density error and the
+where mj is the mass of particle j and Wij = W (xi − xj , h)              divergence error, respectively. Since this factor solely depends on
+is a Gaussian like kernel function with the support radius h. Af-         the current positions, it is precomputed before executing the solvers
+ter computing the density, the pressure field of a fluid is typically     which reduces the computational effort of both solvers significantly.
+Algorithm 1 Simulation                                                       tion (3) w.r.t. xi using the SPH formulation [Ihmsen et al. 2014b]:
+ 1: function PERFORM S IMULATION                                                                                            X
+ 2:    for all particles i do                  // init neighborhoods                         ∇pi = κvi ∇ρi = κvi                    mj ∇Wij ,
+ 3:       find neighborhoods Ni (0)                                                                                          j
+
+ 4:    for all particles i do             // init ρi and αi
+ 5:       compute densities ρi (0)                                           where κvi is the stiffness parameter that we want to determine. Fur-
+ 6:       compute factors αi (0)                                             thermore, we consider the pressure forces Fpj←i that act from par-
+                                                                             ticle i on the neighboring particles j to obtain a set
+                                                                                                                                  P of symmetric
+ 7:    while (t < tmax ) do               // start simulation loop
+                                                                             pressure forces which fulfill the condition Fpi + j Fpj←i = 0.
+ 8:       for all particles i do
+             compute non-pressure forces Fadv                                This means that all inner forces sum up to zero which is required to
+ 9:                                          i (t)
+                                                                             conserve momentum. The forces Fpj←i are computed analogously
+10:       adapt time step size ∆t according to CFL condition                 to Equation (4) except that we differentiate the pressure with respect
+11:       for all particles i do          // predict velocities v∗i          to the neighboring position xj :
+               ∗                adv
+12:          vi = vi + ∆tFi /mi
+13:       correctDensityError(α, v∗ )     // fulfill ρ∗ − ρ0 = 0                                           mi ∂pi   mi v
+14:       for all particles i do          // update positions                              Fpj←i = −              =    κi mj ∇Wij .                                       (5)
+                                                                                                           ρi ∂xj   ρi
+15:          xi (t + ∆t) = xi (t) + ∆tv∗i
+16:       for all particles i do         // update neighborhoods
+17:          find neighborhoods Ni (t + ∆t)                                  The solver must determine pressure forces that change the veloci-
+18:       for all particles i do          // update ρi and αi                ties of the particles so that the condition Dρ
+                                                                                                                         Dt
+                                                                                                                            i
+                                                                                                                              = 0 is fulfilled. The
+19:          compute densities ρi (t + ∆t)                                   current density change rate in particle i is computed by employing
+20:          compute factors αi (t + ∆t)                                     the SPH formulation of the divergence [Ihmsen et al. 2014b]:
+21:       correctDivergenceError(α, v∗ ) // fulfill Dρ
+                                                     Dt
+                                                        =0                                     Dρi   X
+22:       for all particles i do          // update velocities                                     =   mj (vi − vj )∇Wij .                                                (6)
+23:          vi (t + ∆t) = v∗i                                                                 Dt    j
+
+
+                                                                             This value should be zero after applying the symmetric pressure
+                                                                             forces determined for particle i. The pressure forces cause the ve-
+The first step in the simulation loop is to determine all non-pressure       locity changes ∆vi = ∆tFpi /mi and ∆vj = ∆tFpj←i /mi . Insert-
+forces Fadv such as gravity, surface tension and viscosity and to            ing these terms in Equation (6) yields:
+adapt the time step size by the Courant-Friedrich-Levy (CFL) con-
+                      d
+dition ∆t ≤ 0.4 kvmax      [Monaghan 1992], where d is the particle                                                                      p
+                                                                                                                                              !
+                         k
+                                                                                       Dρi       X                      Fpi   Fj←i
+diameter and vmax is the maximum particle velocity. In line 12 the                         = −∆t   mj                       −                     ∇Wij .                  (7)
+non-pressure forces are used to compute predicted velocities v∗i .                     Dt        j
+                                                                                                                        mi     mi
+The constant density solver uses this prediction and the precom-
+puted factors αi to determine the pressure forces for each neigh-            Using Equations (4) and (5) in Equation (7) gives us an equation
+borhood in order to correct the density error ρ∗i − ρ0 (see Sec-             for the stiffness parameter κvi :
+tion 3.3). Then the positions are integrated forward in time. There-
+fore, the neighborhoods Ni , the densities ρi and the factors αi have                                                   p
+                                                                                                                                 !
+                                                                               Dρi       X                   Fpi   Fj←i
+to be updated. In line 21 the divergence-free solver computes pres-                = −∆t   mj                    −                      ∇Wij
+                                                                               Dt                            mi     mi
+sure forces to fulfill Dρ
+                        Dt
+                           i
+                             = 0 in order to make the velocity field                     j
+divergence-free (see Section 3.2). Finally, the resulting velocity                                                                                        !
+                                                                               Dρi   ∆t X                        X
+changes are used to update the particle velocities.                                =      mj               κvi        mj ∇Wij + κvi mj ∇Wij                       ∇Wij
+                                                                               Dt    ρi j                         j
+Note that Ni , ρi and αi are determined only once per simulation
+                                                                                                                        2                                 !
+step. However, we do not compute these values in the beginning of              Dρi       ∆t      X                              X                     2
+the simulation loop as in previous works since our two solvers are                 = κvi               mj ∇Wij              +            |mj ∇Wij |           .
+                                                                               Dt        ρi
+executed at different points of time. Instead, these values have to                                j                                j
+be initialized before the first simulation step in lines 2-6. They are
+then updated in each time step in lines 16-20.                               Solving for κvi yields:
+
+3.2   Divergence-Free Solver                                                               1 Dρi                                    ρi
+                                                                                   κvi =         · P                            2                                     ,   (8)
+                                                                                           ∆t Dt                                         P                        2
+                                                                                                                 j mj ∇Wij          +        j |mj ∇Wij |
+Our divergence-free solver enforces the condition Dρ
+                                                  Dt
+                                                         = 0 which                                     |                            {z                            }
+means that the density does not change over time. This is equivalent                                                                αi
+to the divergence-free condition (see Equation (1)) and therefore
+leads to a divergence-free velocity field.                                   where αi is a factor that only depends on the current positions. The
+                                                                             pressure forces computed with the stiffness parameter κvi exactly
+If the condition Dρ
+                 Dt
+                    i
+                       = 0 is not fulfilled for a particle i, the solver     fulfill the condition Dρ i
+                                                                                                        = 0 which means that the velocity field in
+computes a set of pressure forces for the particle and its neighbor-                               Dt
+                                                                             the neighborhood of particle i is divergence-free. However, since
+hood which correct the divergence error. The pressure force of par-          the stiffness parameters of neighboring particles depend on each
+ticle i is determined by                                                     other, they are determined iteratively. Note that the denominator
+                                    mi                                       of αi can cause instabilities in the special case that particle i has a
+                          Fpi = −      ∇pi ,                           (4)   low number of neighbors. To solve this problem we simply clamp
+                                    ρi
+                                                                             the denominator if it gets too small. In our simulations we used a
+where the pressure gradient is computed by differentiating Equa-             threshold of 10−6 which did not cause any visual artifacts.
+Algorithm 2 Divergence-free solver                                         Algorithm 3 Constant density solver
+                                                      ∗
+ 1: function 
+             CORRECT D IVERGENCE
+                                E RROR(α, v )                              1: function CORRECT D ENSITY E RROR(α, v∗ )
+ 2:     while    Dρ
+                      
+                        > ηv     ∨ (iter < 1) do                            2:    while (ρavg − ρ0 > η) ∨ (iter < 2) do
+                 Dt avg
+                                                                            3:       for all particles i do         // predict density
+ 3:        for all particles i do             // compute DρDt               4:          compute ρ∗i
+              Dρi                  ∗
+ 4:            Dt
+                    = −ρi ∇ · vi                                            5:       for all particles i do         // adapt velocities
+                                                                                              ρ∗
+                                                                                               i −ρ0
+                                                                                                               ρ∗ −ρ0
+ 5:        for all particles i do             // adapt velocities           6:          κi =         αi , κj = j∆t2 αj
+                      1 Dρi            v    1 Dρj                                              ∆t2
+              κvi = ∆t       α   ,   κ j  ∆t Dt αj
+                                         =
+                                                                                                                       
+ 6:                                                                                                                   κ
+                               i
+                                                                                        v∗i := v∗i − ∆t j mj κρii + ρjj ∇Wij
+                                                                                                         P
+                          Dt                                                7:
+                ∗       ∗                  κv     κv
+              vi := vi − ∆t j mj ρii + ρjj ∇Wij
+                                  P
+ 7:
+
+
+                                                                           Analogous to Equation (7), we determine pressure forces that cor-
+Finally, we determine the total force Fpi,total for particle i including   rect this density error by solving:
+the forces from neighboring particles j as                                                                                 !
+                                                                                      ∗             2
+                                                                                                      X        Fpi   Fpj←i
+                                                                                     ρi − ρ0 = ∆t         mj       −         ∇Wij .      (9)
+                                                         κvj
+                                                 v          
+                    X p              X            κi                                                           mi     mi
+  Fpi,total = Fpi +   Fi←j = −mi          mj          +         ∇Wij ,                                 j
+                    j                 j
+                                                  ρi     ρj
+                                                                           This yields the following stiffness parameter:
+where Fpi←j is computed analogously to Equation (5). Note that
+this pressure force is equivalent to the symmetric pressure force                                       1
+                                                                                                κi =       (ρ∗i − ρ0 )αi .
+introduced by Monaghan [1992].                                                                         ∆t2
+Our solver determines pressure forces in parallel using Jacobi iter-       Our implicit pressure solver is outlined in Algorithm 3. Note that
+ation in order to make the complete velocity field divergence-free.        analogous to the divergence-free solver we perform a warm start to
+Since the factors αi only depend on the current positions, they can        improve the convergence of the solver.
+be precomputed before the iterative process and do not have to be
+updated in each iteration step. This yields computationally cheap
+                                                                           3.4   Kernel
+iteration steps since αi is the most complex term used in our solver.
+Note that since Fpj←i = 0 if particle j is not dynamic, the equation
+                                                                           The kernel function used in SPH simulations is an approximation
+for κvi must be adapted accordingly for static boundary particles.         of the Gaussian. In previous works several kernel functions were
+Algorithm 2 outlines our divergence-free solver. The solver per-           introduced such as the poly6 kernel, the spiky kernel and the cu-
+forms at least one iteration and finishes when the average density         bic spline kernel. In some works even different kernels are used to
+change rate is smaller than a user-defined threshold η v . The con-        compute Wij and its gradient ∇Wij , e.g. in [Müller et al. 2003].
+vergence can be significantly improved by performing a “warm               However, in our predictor-corrector scheme it is important to use
+start” of the solver. This means that we sum up the stiffness val-         the same kernel for both since otherwise the prediction and correc-
+ues κvi for each particle. Then in the next time step we first evaluate    tion steps do not fit together. In our work we use the cubic spline
+line 7 for each particle using the resulting values before starting the    kernel [Monaghan 1992].
+divergence-free solver.                                                    In SPH simulations typically a kernel with compact support is used
+                                                                           which vanishes at a finite distance also known as the support radius
+3.3    Constant Density Solver                                             h. In general a kernel function can be written as Wh (q(x)) with
+                                                                           q = kxk
+                                                                                 h
+                                                                                    . This means that the kernel is only non-zero for 0 ≤ q <
+While the solver described in the last section makes the velocity          1. Hence, the first spatial derivative of such a kernel ∇Wh (q(x))
+field divergence-free, our constant density solver minimizes the           has the same compact support.
+density error which is determined by the deviation ρ − ρ0 of the
+actual density to the rest density. There already exist different          Especially the evaluation of the kernel gradient is one of the most
+pressure solvers that minimize the density deviation and that could        time consuming tasks in a simulation step since gradients have to
+be combined with our divergence-free solver, e.g. PCISPH [Solen-           be determined for the whole neighborhood of each particle in each
+thaler and Pajarola 2009] or IISPH [Ihmsen et al. 2014a]. However,         iteration step of both solvers. Moreover, they are required for dif-
+in this work we introduce a new solver which works analogous to            ferent non-pressure forces and to compute the factors αi . However,
+our divergence-free solver and therefore has the advantage that it         storing the gradients of all neighborhoods requires much memory
+can reuse the factor α. This reduces the computational effort sig-         and is not recommended for large scenes. To speed up the simula-
+nificantly since the presented iterative method is particularly fast       tion we propose a faster computation of the kernel and its gradient
+if the factor α is already known. Our new constant density solver          by using precomputed lookup tables. The idea of using lookup ta-
+employs a predictor-corrector scheme in order to obtain particle po-       bles for a fast function evaluation is not new. However, to the best
+sitions after the time integration that correct the density error. The     of our knowledge it has not been employed yet in SPH simulations.
+key idea of this scheme is similar to the one of PCISPH. However,          Since the kernel Wh is a scalar function with compact support, a
+in contrast to PCISPH we do not use a precomputed prototype con-           lookup table is generated easily by a regular sampling. However,
+figuration with a filled neighborhood to solve the system.                 the gradient is handled differently. Instead of sampling the vec-
+We perform an Euler integration step for the density using Equa-           tor function ∇Wh in all three dimensions, we introduce a scalar
+tion (6) in order to compute a prediction of the density error ρ∗i −ρ0 :   function g(q) to reduce the computational effort and the memory
+                                                                           requirements:
+                      Dρi           X
+      ρ∗i = ρi + ∆t       = ρi + ∆t   mj (v∗i − v∗j )∇Wij .                      ∇Wh (q(x)) = x · g(q)     with g(q) =
+                                                                                                                             ∂Wh
+                                                                                                                                 ·
+                                                                                                                                    1
+                                                                                                                                        .
+                      Dt            j                                                                                         ∂q   hkxk
+                    IISPH               PBF           PCISPH
+    ∆t [ms]     solver total      solver total     solver total
+      4.0        6.9     6.2       13.4     12.0    23.9   21.2
+     2.0         5.3     4.5       10.6     8.8     21.4   17.4
+     1.0         2.3     2.1        3.7     3.1      7.7   6.3
+     0.5         1.1     1.1        1.2     1.1      2.4   2.1
+     0.25        1.1     1.1        0.9     1.0      1.4   1.3
+
+Table 2: This table shows the speedup factors of DFSPH in com-
+parison to IISPH, PBF and PCISPH based on the measured values
+in Table 1.
+
+
+The function g(q) can also be sampled regularly to obtain a corre-
+sponding lookup table. Finally, a gradient is determined by a single
+lookup and a multiplication with x.
+The usage of lookup tables is a simple but efficient trick which can
+also be employed to speed up other SPH methods. In Section 4 we
+discuss details about the sampling distance, the approximation error     Figure 3: Breaking dam model (2.3 million fluid particles) with
+and the performance gain.                                                two dragon models and a moving wall. The velocity field is color
+                                                                         coded: blue is the minimum and white is the maximum.
+4    Results
+                                                                                         neigh.                    const.   div.-
+                                                                                                    α     Fadv                       total
+All timings in this section were measured on two Intel Xeon E5-                          search                   density   free
+2697 processors with 2.7 GHz, 12 cores per processor and 64GB                dragons       0.4     0.1    0.3       0.7      0.6      2.1
+RAM. We parallelized our fluid simulation using OpenMP. In our               canyon        1.2     0.2    0.7       1.9      1.3      5.3
+simulations we performed the neighborhood search using the paral-
+lel method of Ihmsen et al. [2011] and the boundary handling using       Table 3: Average computation times (in seconds) per simulation
+the rigid-fluid coupling of Akinci et al. [2012]. To simulate the vis-   step of the neighborhood search, the computation of α, the compu-
+cosity of the fluid we employed the XSPH variant of Schechter and        tation of all non-pressure forces Fadv , the constant density solver
+Bridson [2012]. We successfully tested our method in combination         and the divergence-free solver for the dam break simulation (see
+with the surface tension models of Becker and Teschner [2007],           Figure 3) and the canyon simulation (see Figure 1, right).
+Akinci et al. [2013] and He et al. [2014]. However, for the results
+in this paper we solely used the surface tension model of Akinci
+et al. [2013]. Particle deficiency at free surfaces is a well-known      speedup factors of 6.9 in comparison to IISPH up to 23.9 in com-
+problem in SPH simulations which causes particle clustering. In the      parison to PCISPH for a time step size of 4 ms. The DFSPH solvers
+simulations we solved this issue by clamping negative pressures to       required only 4.5 and 2.8 iterations to correct the density error and
+zero which is a common solution, see e.g. [Ihmsen et al. 2014a]. We      the divergence error, respectively, while the second best method
+enforced an average density error of less than 0.01 % and a density      IISPH already required 50.5 iterations. In our experiment we mea-
+error due to the density change rate of less than 0.1 % in all simu-     sured a smaller speedup for smaller time step sizes since for DF-
+lations. Unless otherwise stated, we used adaptive time-stepping in      SPH often the minimum number of iterations was used. However,
+the simulations according to the CFL condition (see Section 3.1).        for scenarios with more particles, where the number of iterations
+                                                                         lies clearly above the minimum value, the speedup is also larger for
+Performance We performed a breaking dam simulation with                  small step sizes. In our experiments we noticed that our method
+125k particles in order to compare the performance of our novel          performs best when using a time step size so that the number of
+method with IISPH, PBF and PCISPH. The particle radius was               iterations ranges between 2 and 20 iterations.
+0.02 m and we used different fixed time step sizes. Table 1 summa-       As Table 1 shows, our method has its best overall performance for
+rizes the performance measurements for a simulation over one sec-        larger time steps than IISPH, PBF and PCISPH. This has another
+ond. In Table 2 the speedup factors are shown. Note that in [Ihmsen      advantage: When using larger time steps, the computationally ex-
+et al. 2014a] a similar scenario was used for a performance com-         pensive neighborhood search has to be performed less frequently.
+parison between PCISPH and IISPH and comparable results were
+measured.                                                                In the breaking dam simulation we measured a performance gain of
+                                                                         approximately 30 % by using the kernel optimization introduced in
+By fulfilling the divergence-free condition and the constant density     Section 3.4. For the sampling of the kernel function and its gradient
+condition at the same time, the density error is kept small during the   we used 1000 sample points and measured an maximum local error
+simulation which decreases the required number of solver iterations      of less than 10−11 . Since the implementation is very simple and the
+significantly. Using a warm start in iterative solvers is another way    error is negligible, this is a nice extension for our method.
+to reduce the number of iterations. In our simulation we initialize
+the DFSPH solvers with the sum of the stiffness values of the last       In order to measure the performance of DFSPH in simulations with
+time step. This reduced the number of iterations by a factor of ap-      large numbers of fluid particles, we first simulated a breaking dam
+proximately 3 in the dam break scenario. While DFSPH performs            scenario with two dragon models and a moving wall (see Figure 3).
+best for a full warm start, IISPH has its best performance when          The model consists of 2.3 million fluid particles and 0.7 million
+multiplying the solution of the last step with a factor of 0.5 [Ihmsen   boundary particles. Additionally, we simulated a real breaking dam
+et al. 2014a]. Due to the divergence-free velocity field in our sim-     with 5 million particles flowing through a canyon sampled by 40
+ulation and the performed warm start of the solver, we measured          million boundary particles (see Figure 1, right). The average com-
+                             DFSPH                                IISPH                             PBF                             PCISPH
+ ∆t [ms]     iter. (cd/df)    solver [s]   total [s]   iter.   solver [s]   total [s]    iter.   solver [s]   total [s]    iter.   solver [s]   total [s]
+   4.0          4.5/2.8         45.2         51.3      50.5      312.1       318.1      105.7      607.1       613.5      160.0     1079.1      1085.7
+  2.0           2.1/1.3         47.8         59.4      21.4      256.4       267.9      42.7       508.4       520.7      73.9      1021.2      1033.5
+  1.0           2.0/1.0         85.0        107.5      7.3       197.9       220.7      13.2       314.8       338.0      23.9       656.9       680.0
+  0.5           2.0/1.0         164.1       210.8      2.3       182.3       225.6       3.4       194.1       240.5       6.7       394.9       440.9
+  0.25          2.0/1.0         288.3       372.0      2.0       322.5       402.2       2.0       263.3       354.0       3.0       409.3       498.0
+
+Table 1: Comparison of DFSPH with IISPH, PBF and PCISPH using different fixed time step sizes for a breaking dam scenario with 125k
+particles (see Figure 2). The table shows the average number of required iterations, the total computation time of the solvers and the total
+time including the neighborhood search in a simulation over one second. The lowest total computation times are marked bold. Note that for
+DFSPH we used the sum of the times needed by the divergence-free solver and the constant density solver since the iteration steps of both
+solvers need almost the same time. For DFSPH the column with the iteration count contains the values for the constant density solver (cd)
+and the divergence-free solver (df).
+
+
+
+
+Figure 4: Top of a resting fluid pillar with 80k particles. The                  Figure 5: Stability comparison in a simulation where a cube with
+large divergence errors in the IISPH simulation lead to jumping                  27k particles is falling on the ground with a high velocity. PCISPH
+artifacts (left). DFSPH maintains a divergence-free velocity field               (left) gets instable due to the impact and several fluid particles pass
+and therefore allows a stable simulation without artifacts (right).              through the boundary, DFSPH without divergence-free solver (mid-
+The divergence errors are color coded: white is the minimum and                  dle) shows artifacts and DFSPH with divergence-free solver stays
+red is the maximum.                                                              stable. The same color coding as in Figure 3 is used.
+
+
+putation times for the main steps in Algorithm 1 are shown in Ta-
+                                                                                 5 ms. Large divergence errors of up to 72.9 in the IISPH simulation
+ble 3 for both simulations.
+                                                                                 in combination with large time steps led to visual artifacts: fluid
+                                                                                 particles sometimes jump up due to the errors (see Figure 4, left).
+Memory Requirements         An advantage of our method especially                The maximum local divergence error of DFSPH was 2.5 which al-
+when simulating large scale scenarios with millions of particles is              lowed a stable simulation without artifacts.
+that the memory requirements are low. Per particle we only have
+to store the scalar value αi which is used by both solvers. When                 We performed a stability test with a cube of 27k fast moving parti-
+performing a warm start, we have to store one additional scalar for              cles falling on the ground to show how this influences the stability
+each solver. For comparison, IISPH requires seven scalar values for              (see Figure 5). The time step size was chosen according to the
+the solver and one for the warm start. Hence, our method requires                CFL condition. In this test we compared PCISPH and DFSPH. The
+significantly less memory than IISPH.                                            test with DFSPH was performed twice. In the first simulation we
+                                                                                 deactivated our divergence-free solver and activated it in the sec-
+Stability In the following we show that current state-of-the-art                 ond one in order to show that the simulation is more stable with a
+pressure solvers which do not enforce a divergence-free velocity                 divergence-free velocity field. In the simulation PCISPH got insta-
+                                                                                 ble due to the impact, DFSPH without the divergence-free solver
+field explicitly cannot fulfill the condition Dρ
+                                              Dt
+                                                 = 0 as demanded by
+                                                                                 showed artifacts and DFSPH using both solvers stayed stable. The
+the continuity equation. This can lead to instabilities in simulations,
+                                                                                 instability in the PCISPH simulation even led to several fluid parti-
+especially when particles have high velocities.
+                                                                                 cles which passed through the boundary. For a stable simulation of
+Figure 2 compares the velocity divergence error of IISPH and DF-                 this scenario with PCISPH the time step size had to be decreased
+SPH in a breaking dam simulation with 125k particles. This figure                considerably which reduced the overall performance significantly.
+shows that our approach maintains a divergence-free velocity field
+in contrast to methods which do not correct the velocity divergence.             In order to demonstrate the stability of our approach in a simu-
+The maximum local divergence error of IISPH was 108.3 while the                  lation with dynamic boundaries, we integrated the Bullet physics
+one of DFSPH was only 1.9. In another divergence comparison                      library [Coumans 2014] in our simulator. In another stability ex-
+we simulated a resting fluid pillar with 80k fluid particles (see Fig-           periment we dropped several rigid bodies with different velocities
+ure 4). Since the CFL condition returns arbitrary large values for the           in a breaking dam scenario with 330k particles. The result is shown
+resting particles, we restricted the time step size to a maximum of              in Figure 6 and the accompanying video. Finally, Figure 1 (left)
+                                                                         A KINCI , N., A KINCI , G., AND T ESCHNER , M. 2013. Versatile
+                                                                            surface tension and adhesion for sph fluids. ACM Transactions
+                                                                            on Graphics 32, 6, 182:1–182:8.
+                                                                         A NDO , R., T H ÜREY, N., AND W OJTAN , C. 2013. Highly adaptive
+                                                                            liquid simulations on tetrahedral meshes. ACM Transactions on
+                                                                            Graphics 32, 103:1–103:10.
+                                                                         B ECKER , M., AND T ESCHNER , M. 2007. Weakly compressible
+                                                                            SPH for free surface flows. In ACM SIGGRAPH / Eurographics
+                                                                            Symposium on Computer Animation, 1–8.
+                                                                         B ODIN , K., L ACOURSI ÈRE , C., AND S ERVIN , M. 2012. Con-
+                                                                            straint fluids. IEEE Transactions on Visualization and Computer
+                                                                            Graphics 18, 516–526.
+                                                                         B RIDSON , R. 2008. Fluid Simulation for Computer Graphics. A
+                                                                            K Peters / CRC Press.
+
+Figure 6: Two-way coupling of 330k particles with dynamic rigid          C HORIN , A. J. 1968. Numerical solution of the Navier-Stokes
+bodies.                                                                     equations. Mathematics of Computation 22, 745–762.
+                                                                         C OUMANS , E., 2014. The bullet physics library. http://www.
+                                                                            bulletphysics.org.
+demonstrates that DFSPH even allows a stable simulation with 2.4
+million fast moving particles.                                           C UMMINS , S. J., AND RUDMAN , M. 1999. An SPH Projection
+                                                                            Method. Journal of Computational Physics 152, 584–607.
+5   Conclusion and Future Work                                           D ESBRUN , M., AND G ASCUEL , M.-P. 1996. Smoothed Particles:
+                                                                            A new paradigm for animating highly deformable bodies. In Eu-
+In this paper we presented a novel implicit SPH simulation method           rographics Workshop on Computer Animation and Simulation,
+for incompressible fluids that prevents volume compression and en-          61–76.
+forces a divergence-free velocity field. The divergence-free con-
+figuration leads to a significantly faster convergence of the implicit   F OSTER , N., AND F EDKIW, R. 2001. Practical animation of liq-
+pressure solver resulting in a substantial speedup compared to state-       uids. ACM Transactions on Graphics 28, 12–17.
+of-the-art methods. Moreover, we demonstrated that our method is
+                                                                         H E , X., L IU , N., L I , S., WANG , H., AND WANG , G. 2012. Lo-
+able to handle scenarios with millions of fast moving particles ro-
+                                                                            cal poisson SPH for viscous incompressible fluids. Computer
+bustly and produces a convincing physical behavior.
+                                                                            Graphics Forum 31, 1948–1958.
+Our method also has some limitations. In SPH simulations the den-
+sity near a free surface is underestimated which causes unnatural        H E , X., WANG , H., Z HANG , F., WANG , H., WANG , G., AND
+particle clustering artifacts. In our implementation this problem is        Z HOU , K. 2014. Robust simulation of sparsely sampled thin
+solved by clamping negative pressures to zero. However, a bet-              features in sph-based free surface flows. ACM Transactions on
+ter solution would be to introduce ghost particles as suggested by          Graphics 34, 1 (Dec.), 7:1–7:9.
+Schechter and Bridson [2012] in order to prevent particle deficien-      H U , X., AND A DAMS , N. 2007. An incompressible multi-phase
+cies which improves the physical behavior of the fluid. Moreover,           SPH method. Journal of Computational Physics 227, 264–278.
+without pressure clamping more sophisticated solving algorithms
+like the conjugate gradient method could be employed and would           I HMSEN , M., A KINCI , N., B ECKER , M., AND T ESCHNER , M.
+enhance the converge rate even more. This is a goal for our future          2011. A parallel sph implementation on multi-core cpus. Com-
+research. In this context we also plan to investigate if DFSPH can          puter Graphics Forum 30, 1, 99–112.
+improve the stability of multi-phase simulations with high density
+contrasts.                                                               I HMSEN , M., C ORNELIS , J., S OLENTHALER , B., H ORVATH , C.,
+                                                                            AND T ESCHNER , M. 2014. Implicit incompressible SPH. IEEE
+                                                                            Transactions on Visualization and Computer Graphics 20, 426–
+Acknowledgements                                                            435.
+The work of the authors is supported by the ’Excellence Initiative’      I HMSEN , M., O RTHMANN , J., S OLENTHALER , B., KOLB , A.,
+of the German Federal and State Governments and the Graduate                AND T ESCHNER , M. 2014. SPH Fluids in Computer Graphics.
+School of Computational Engineering at TU Darmstadt. We would               Eurographics (State of the Art Reports), 21–42.
+like to thank Markus Ihmsen and Matthias Teschner for their help.
+                                                                         K ANG , N., AND S AGONG , D. 2014. Incompressible SPH using
+                                                                            the Divergence-Free Condition. Computer Graphics Forum 33,
+References                                                                  7, 219–228.
+A DAMS , B., PAULY, M., K EISER , R., AND G UIBAS , L. J.                L OSASSO , F., TALTON , J. O., K WATRA , N., AND F EDKIW, R.
+   2007. Adaptively sampled particle fluids. ACM Transactions               2008. Two-way coupled SPH and particle level set fluid simula-
+   on Graphics 26, 3, 48.                                                   tion. IEEE Transactions on Visualization and Computer Graph-
+                                                                            ics 14, 797–804.
+A KINCI , N., I HMSEN , M., A KINCI , G., S OLENTHALER , B., AND
+   T ESCHNER , M. 2012. Versatile rigid-fluid coupling for incom-        M ACKLIN , M., AND M ÜLLER , M. 2013. Position Based Fluids.
+   pressible SPH. ACM Transactions on Graphics 31, 4, 62:1–62:8.           ACM Transactions on Graphics 32, 4, 1–5.
+M ONAGHAN , J. J. 1992. Smoothed particle hydrodynamics. Ann.
+  Rev. of Astron. and Astrophys. 30, 543–574.
+M ONAGHAN , J. 1994. Simulating Free Surface Flows with SPH.
+  Journal of Computational Physics 110, 399–406.
+M ÜLLER , M., C HARYPAR , D., AND G ROSS , M. 2003. Particle-
+   Based Fluid Simulation for Interactive Applications. In ACM
+   SIGGRAPH / Eurographics Symposium on Computer Animation,
+   154–159.
+R AVEENDRAN , K., W OJTAN , C., AND T URK , G. 2011. Hybrid
+   smoothed particle hydrodynamics. In ACM SIGGRAPH / Euro-
+   graphics Symposium on Computer Animation, 33–42.
+S CHECHTER , H., AND B RIDSON , R. 2012. Ghost SPH for ani-
+   mating water. ACM Transactions on Graphics 31, 4, 61:1–61:8.
+S IN , F., BARGTEIL , A. W., AND H ODGINS , J. K. 2009. A
+   point-based method for animating incompressible flow. In ACM
+   SIGGRAPH / Eurographics Symposium on Computer Animation,
+   247.
+S OLENTHALER , B., AND PAJAROLA , R. 2009. Predictive-
+   corrective incompressible SPH. ACM Transactions on Graphics
+   28, 3, 40:1–40:6.
+Z HU , Y., AND B RIDSON , R. 2005. Animating sand as a fluid.
+   ACM Transactions on Graphics 24, 3 (July), 965–972.
+

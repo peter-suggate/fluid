@@ -1,0 +1,109 @@
+{
+  "id": "jiang-2015-apic",
+  "title": "The Affine Particle-In-Cell Method",
+  "year": 2015,
+  "url": "https://media.disneyanimation.com/uploads/production/publication_asset/104/asset/apic-aselle-final.pdf",
+  "project": "https://doi.org/10.1145/2766996",
+  "accessed": "2026-10-07",
+  "sha256": "0de6a54c1c09e3ba5948de690c50c23b0368ddbc5a861c0355a30658ef00ecf0",
+  "pages": 10,
+  "dpi": 144,
+  "embedded_files": 25,
+  "page_map": [
+    {
+      "page": 1,
+      "render": "page-01.png",
+      "figure_mentions": [
+        "Figure 1:"
+      ]
+    },
+    {
+      "page": 2,
+      "render": "page-02.png",
+      "figure_mentions": [
+        "Figure 3:",
+        "Figure 4",
+        "Figure 2:"
+      ]
+    },
+    {
+      "page": 3,
+      "render": "page-03.png",
+      "figure_mentions": [
+        "Figure 4:",
+        "Figure 5:"
+      ]
+    },
+    {
+      "page": 4,
+      "render": "page-04.png",
+      "figure_mentions": [
+        "Figure 6:",
+        "Figure 7."
+      ]
+    },
+    {
+      "page": 5,
+      "render": "page-05.png",
+      "figure_mentions": [
+        "Figure 7:",
+        "Figure 4",
+        "Figure 9:",
+        "Figure 8:"
+      ]
+    },
+    {
+      "page": 6,
+      "render": "page-06.png",
+      "figure_mentions": [
+        "Figure 10:",
+        "Figure 9",
+        "Figure 11:"
+      ]
+    },
+    {
+      "page": 7,
+      "render": "page-07.png",
+      "figure_mentions": [
+        "Figure 12:",
+        "Figure 11.",
+        "Figure 8",
+        "Figure 5",
+        "Figure 1",
+        "Figure 3"
+      ]
+    },
+    {
+      "page": 8,
+      "render": "page-08.png",
+      "figure_mentions": [
+        "Figure 13:",
+        "Figure 2.",
+        "Figure 10",
+        "Figure 13",
+        "Figure 14.",
+        "Figure 11.",
+        "Figure 12",
+        "Figure 14",
+        "Figure 16",
+        "Figure 6.",
+        "Figure 15",
+        "Figure 14:"
+      ]
+    },
+    {
+      "page": 9,
+      "render": "page-09.png",
+      "figure_mentions": [
+        "Figure 15:"
+      ]
+    },
+    {
+      "page": 10,
+      "render": "page-10.png",
+      "figure_mentions": [
+        "Figure 16:"
+      ]
+    }
+  ]
+}

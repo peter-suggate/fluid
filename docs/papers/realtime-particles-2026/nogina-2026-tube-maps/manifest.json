@@ -1,0 +1,145 @@
+{
+  "id": "nogina-2026-tube-maps",
+  "title": "Tube Maps: Fast SPH Boundary Handling in Tubular Coordinates",
+  "year": 2026,
+  "url": "https://gatc.cs.columbia.edu/assets/pdf/tubemaps/tubemaps.pdf",
+  "project": "https://gatc.cs.columbia.edu/projects/tubemaps.html",
+  "accessed": "2026-10-07",
+  "sha256": "31cf5fb372fb70e3dc8bca7a2492c561fb4e5dc09ca52bba646c78867ad1b48a",
+  "pages": 15,
+  "dpi": 144,
+  "embedded_files": 232,
+  "page_map": [
+    {
+      "page": 1,
+      "render": "page-01.png",
+      "figure_mentions": [
+        "Fig. 1.",
+        "Fig. 2."
+      ]
+    },
+    {
+      "page": 2,
+      "render": "page-02.png",
+      "figure_mentions": [
+        "Fig. 3.",
+        "Figure 1",
+        "Fig. 4.",
+        "Figure 2",
+        "Figure 3"
+      ]
+    },
+    {
+      "page": 3,
+      "render": "page-03.png",
+      "figure_mentions": [
+        "Fig. 5.",
+        "Fig. 6.",
+        "Figure 3",
+        "Figure 4",
+        "Figure 6"
+      ]
+    },
+    {
+      "page": 4,
+      "render": "page-04.png",
+      "figure_mentions": [
+        "Fig. 7.",
+        "Fig. 8.",
+        "Figure 3"
+      ]
+    },
+    {
+      "page": 5,
+      "render": "page-05.png",
+      "figure_mentions": [
+        "Fig. 9.",
+        "Fig. 10.",
+        "Figure 4",
+        "Figure 8",
+        "Figure 7."
+      ]
+    },
+    {
+      "page": 6,
+      "render": "page-06.png",
+      "figure_mentions": [
+        "Fig. 11."
+      ]
+    },
+    {
+      "page": 7,
+      "render": "page-07.png",
+      "figure_mentions": [
+        "Fig. 12.",
+        "Fig. 13."
+      ]
+    },
+    {
+      "page": 8,
+      "render": "page-08.png",
+      "figure_mentions": [
+        "Fig. 14.",
+        "Figure 14",
+        "Figure 3"
+      ]
+    },
+    {
+      "page": 9,
+      "render": "page-09.png",
+      "figure_mentions": [
+        "Fig. 15.",
+        "Fig. 1",
+        "Figure 9",
+        "Figure 6",
+        "Fig. 16.",
+        "Figure 10",
+        "Figure 11",
+        "Figure 12",
+        "Figure 5",
+        "Figure 1",
+        "Figure 19",
+        "Figure 17",
+        "Figure 15",
+        "Figure 13."
+      ]
+    },
+    {
+      "page": 10,
+      "render": "page-10.png",
+      "figure_mentions": [
+        "Fig. 17.",
+        "Figure 16",
+        "Fig. 18.",
+        "Figure 14",
+        "Figure 18",
+        "Fig. 19."
+      ]
+    },
+    {
+      "page": 11,
+      "render": "page-11.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 12,
+      "render": "page-12.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 13,
+      "render": "page-13.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 14,
+      "render": "page-14.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 15,
+      "render": "page-15.png",
+      "figure_mentions": []
+    }
+  ]
+}

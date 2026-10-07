@@ -1,0 +1,676 @@
+                                           The Affine Particle-In-Cell Method
+                 Chenfanfu Jiang†        Craig Schroeder†       Andrew Selle?     Joseph Teran?†      Alexey Stomakhin?
+
+                              †                                           ?
+                                  University of California Los Angeles        Walt Disney Animation Studios
+
+
+
+
+Figure 1: APIC/PIC blends yield more energetic and more stable behavior than FLIP/PIC blends in a wine pour example. APIC/PIC blends
+are achieved analogously to FLIP/PIC in that it is a scaling of the particle affine matrices. c Disney.
+
+Abstract                                                                 1      Introduction
+                                                                         Simulating natural phenomena for virtual worlds and characters is
+                                                                         an important application that remains extremely challenging. An
+Hybrid Lagrangian/Eulerian simulation is commonplace in com-             artist’s need to manipulate and comprehend physical simulations
+puter graphics for fluids and other materials undergoing large de-       imposes a significant constraint, all but requiring simulation meth-
+formation. In these methods, particles are used to resolve transport     ods to involve Lagrangian particles. In addition, the need for com-
+and topological change, while a background Eulerian grid is used         putational efficiency, topology change and numerical stability has
+for computing mechanical forces and collision responses. Particle-       led engineers toward hybrid Lagrangian/Eulerian methods. This
+in-Cell (PIC) techniques, particularly the Fluid Implicit Particle       is the cause of the ubiquity of incompressible FLIP for simulat-
+(FLIP) variants have become the norm in computer graphics cal-           ing liquids in visual effects [Zhu and Bridson 2005]. While such
+culations. While these approaches have proven very powerful, they        hybridizations solve some problems they also create numerous dif-
+do suffer from some well known limitations. The original PIC is          ficulties. Specifically, while the hybridization allows numerical al-
+stable, but highly dissipative, while FLIP, designed to remove this      gorithms to be done in the most appropriate representation, trans-
+dissipation, is more noisy and at times, unstable. We present a novel    ferring between representations creates error. In this work we show
+technique designed to retain the stability of the original PIC, with-    how that error can be minimized with minimal effort.
+out suffering from the noise and instability of FLIP. Our primary
+observation is that the dissipation in the original PIC results from     While our approach will apply to a wide range of continuum phe-
+a loss of information when transferring between grid and particle        nomena, for simplicity, first consider fluid simulation. Here, pres-
+representations. We prevent this loss of information by augmenting       sure and viscosity updates are best done on an Eulerian grid while
+each particle with a locally affine, rather than locally constant, de-   advection is best done with Lagrangian particles. The first and sim-
+scription of the velocity. We show that this not only stably removes     plest method of this type is Particle-In-Cell (PIC) [Harlow 1964;
+the dissipation of PIC, but that it also allows for exact conservation   Harlow and Welch 1965]. While this method is remarkably ef-
+of angular momentum across the transfers between particles and           fective and simple to implement, it suffers from significant dis-
+grid.
+
+
+
+CR Categories: I.3.7 [Computer Graphics]: Three-Dimensional
+Graphics and Realism—Animation I.6.8 [Simulation and Model-
+ing]: Types of Simulation—Animation;
+
+
+
+Keywords: PIC, FLIP, MPM, fluids, physically-based modeling,
+coupling
+                                                                           Figure 3: We compare APIC with PIC, FLIP and FLIP/PIC blends
+                                                                           for an MPM simulation of granular materials. Notice PIC and
+                                                                           FLIP/PIC blend are stable but exhibit overly viscous behavior,
+                                                                           while pure FLIP is unstable and noisy as evidenced by stray parti-
+                                                                           cles and excessive mixing. APIC however is both stable and nearly
+                                                                           dissipation free. c Disney.
+
+                                                                           change.
+                                                                           A particularly problematic artifact of the dissipation with the tra-
+                                                                           ditional PIC approach is loss of angular momentum. The standard
+                                                                           PIC transfer from grid to particles dissipates a significant amount of
+                                                                           angular momentum, which leads to serious rotational artifacts (see
+                                                                           Figure 4). Objects in free fall disturbingly stop rotating as if under
+                                                                           the action of a viscous fluid drag. While FLIP was developed to
+                                                                           reduce the dissipation of PIC, it also greatly improves the angular
+                                                                           momentum conservation. However, FLIP will only guarantee exact
+Figure 2: We compare against FLIP and APIC with a granular                 conservation of angular momentum with the use of a non-diagonal
+material example. Here, a red cube of sand is dropped onto a torus         (consistent) mass matrix, which is not possible in practice since the
+causing it to exhibit interesting flow patterns. APIC appears more         consistent mass matrix can be singular for some configurations of
+like a fine powder—while FLIP suffers from excessive noise and             the particles [Love and Sulsky 2006]. This can be remedied in prac-
+instability. The dissipative nature of PIC causes the sand to clump        tice by using an effective mass matrix equal to a weighted average
+together, giving it a wet look that also plagues the FLIP/PIC blend.       of a lumped mass matrix and the consistent mass matrix, and while
+ c Disney.                                                                 this does not perfectly conserve angular momentum, it is still a vast
+                                                                           improvement over the original PIC [Love and Sulsky 2006].
+                                                                           In graphics Zhu and Bridson [Zhu and Bridson 2005] advocate
+sipation (viscous appearance) due to frequent particle/grid trans-         blending between pure PIC and FLIP to stabilize the simulator.
+fers. Dissipation is addressed in the Fluid-Implicit-Particle (FLIP)       While this does produce more stable behavior, it re-introduces dis-
+method [Brackbill and Ruppel 1986; Brackbill et al. 1988]. The             sipation and may require manual tuning of the blend weights on a
+main idea is to transfer increments of velocities and displacements        case-by-case basis. The problem is particularly bad for thin sheets
+from grid to particles, rather than directly interpolating from the        of fluid. This has been addressed in a number of ways includ-
+grid. Intuitively, if there is only a small offset, only a small cor-      ing increasing resolution and adaptivity [Hong et al. 2008b; Hong
+rection will be made, typically reducing the dissipation. Unfortu-         et al. 2009; Ando and Tsuruno 2011; Ando et al. 2012; Ando et al.
+nately, there are other errors besides dissipation inherent to hybrid      2013]. For similar reasons, Um et al. develop a sub-grid-cell cor-
+Lagrangian/Eulerian material representations.                              rective forcing procedure to prevent particle bunching in [Um et al.
+                                                                           2014]. Also, Edwards and Bridson add a regularization term to di-
+Specifically, the mismatch in particle and grid degrees of freedom         minish particle noise not corrected by the grid [Edwards and Brid-
+leads to a loss of information. Since there are often more particles       son 2012].
+than grid nodes, some particle modes are not seen by the grid and
+get no physical response. This is the so-called “ringing instability”      The current state leaves us with the difficult choice for every simu-
+(see Figure 4) which was first-discovered in PIC [Brackbill 1988]          lation we run: (1) bias our simulation toward PIC, effectively avoid-
+but is even more-pronounced in FLIP [Love and Sulsky 2006]. In-            ing instability at the expense of dissipation, or (2) bias our simula-
+tuitively, this problem is worse in FLIP, because in PIC, particle-        tion toward FLIP, getting more lively simulations at the expense of
+to-grid transfer followed by grid-to-particle transfer is a true filter-   noise and possible unstable behavior. In this paper we present a
+ing of the instability. However, while PIC forces all information          third option. In particular, we control noise by keeping the pure
+through the grid, FLIP preserves some particle information which           filter property of PIC but minimizing information loss by enriching
+allows the instability to persist and grow unpredictably over mul-         each particle with a 3×3 matrix giving locally affine (rather than lo-
+tiple time steps. This might lead one to believe that the ringing          cally constant) description of the flow. This Affine Particle-In-Cell
+instability should not exist for PIC, however it does to a lesser ex-      (APIC) method effectively reduces dissipation, preserves angular
+tent since movement of particles re-creates the instability in the next    momentum and prevents instabilities. Furthermore, we demonstrate
+time step. In graphics simulations these instabilities lead to practi-     that the method is applicable to both incompressible liquids and
+cal particle positional artifacts such as noise, clumping and volume       Material Point Method (MPM) simulations [Sulsky et al. 1995].
+Figure 4: For illustration, we compare performance with some simple 2D examples. The top row compares the methods in a dam break,
+free surface test. Note that APIC preserves more vorticity than even pure FLIP, while also remaining less noisy. The second row illustrates
+the angular momentum conservation properties of the methods. The blue spiral indicates how far the circle has rotated. The bottom row
+illustrates the ringing instability. Note that for pure FLIP, the velocities are large on particle but zero when transferred to grid.
+
+2 Previous work                                                            Level Sets: Many other graphics approaches utilize similar hybrid
+                                                                           particle/grid data structures, particularly for resolving free-surface
+                                                                           flows. [Enright et al. 2002] use Lagrangian marker particles to im-
+PIC/FLIP: Foster and Metaxas first introduced PIC techniques               prove the accuracy of the level set method for free-surface flows
+to computer graphics with liquid simulation [Foster and Metaxas            with the Particle Level Set Method (PLS). [Mihalef et al. 2007]
+1996]. Zhu and Bridson popularized the now widely-used linear              take a similar approach but concentrate particles directly on the
+combination of FLIP and PIC [Zhu and Bridson 2005]. Bridson et             zero isocontour of the level set. Patkar et al. couple Lagrangian
+al. developed a number of extensions to [Zhu and Bridson 2005], in-        particles with the Particle Level Set Method [Enright et al. 2002] to
+cluding improved treatment of boundary conditions in irregular do-         simulate compressible bubbles in incompressible flow [Patkar et al.
+mains and coupling with rigid bodies [Batty et al. 2007], viscosity        2013]. Kim et al. explore further use of the escaped particles from
+treatment [Batty and Bridson 2008], Discontinuous-Galerkin-based           [Enright et al. 2002] in [Kim et al. 2006]. Song et al. apply the
+adaptivity [Edwards and Bridson 2014], multiphase flow [Boyd and           Constrained Interpolation Profile (CIP) [Yabe et al. 2001] approach
+Bridson 2012] and higher-order accuracy [Edwards and Bridson               with [Enright et al. 2002] by allowing particles and grid to store
+2012]. Notably, the approach of Edwards and Bridson in [Edwards            velocity and level set derivative information in [Song et al. 2009].
+and Bridson 2014] is similar to ours in that both can be seen to im-
+prove results by using more data per cell. [Cornelis et al. 2014] cou-     Hybrid particle/grid: Several works couple SPH with grid-based
+ple high-resolution FLIP with a low-resolution implicit Smoothed           techniques [Losasso et al. 2008; Hong et al. 2008a; Lee et al. 2009;
+Particle Hydrodynamics (SPH) from [Ihmsen et al. 2013]. Ger-               Gao et al. 2009; Zhu et al. 2010; Raveendran et al. 2011]. Sin
+szewski and Bargteil use mass-full FLIP with a unilateral incom-           et al. couple particles with a Voronoi grid-based pressure projec-
+pressibility constraint to resolve large-scale splashing liquids [Ger-     tion [Sin et al. 2009]. Feldman et al. simulate explosions with a
+szewski and Bargteil 2013]. Narain et al. also use FLIP techniques         particle-based advection and grid-based pressure solve [Feldman
+for the simulation of sand dynamics [Narain et al. 2013]. Stom-            et al. 2003]. Chentanez et al. couple Lagrangian particles with
+akhin et al. use MPM to simulate snow [Stomakhin et al. 2013] and          shallow water and semi-Lagrangian techniques to adapt level of de-
+melting/freezing [Stomakhin et al. 2014].                                  tail in [Chentanez and Muller 2010; Chentanez and Muller 2014]
+                                                                           and use particle reseeding for sub-cell detail [Chentanez and Muller
+                                                                           2011]. Muller et al. in [Muller et al. 2015] recently developed an
+                                                                           SPH approach that augments particles with a sample of angular mo-
+                                                                           mentum. This is similar in spirit to some aspects of our approach.
+                                                                           However, because their method is SPH based they do not use a grid
+                                                                           and thus they do not use this to define particle-grid transfers. In
+                                                                           contrast, we only use this information to improve transfers.
+
+                                                                           3   Method Outline
+                                                                           A Lagrangian/Eulerian hybrid simulation time step follows a sim-
+                                                                           ilar pattern regardless of whether one is simulating fluids with in-
+Figure 5: Here we compare the methods on a fountain simulation             compressible FLIP or solids with MPM. Abstractly, kinematic steps
+of free-surface flow. The top row shows that while APIC and FLIP           are done on particles and dynamic steps are done on the grid. The
+are the least dissipative in the initial stages, the FLIP surface is al-   exact form of those steps may be different with each phenomenon,
+ready displaying a noisy leading edge relative to the more smoothly        and one can see examples of a canonical fluid loop in [Zhu and
+resolved APIC. The bottom row shows that the entire surface of the         Bridson 2005] or MPM loop in [Stomakhin et al. 2013]. As such
+fountain becomes noisy with FLIP in the later stages. c Disney.            the basic timestep loop for PIC, FLIP and our method is shown
+                                                                            Symbol      location   type    meaning
+                                                                              mp           p         s     mass
+                                                                               xn p        p         v     position
+                                                                               vpn         p         v     velocity
+                                                                               Fp          p        m      deformation gradient
+                                                                                fp         p         v     force
+                                                                               ωn p        p         v     angular velocity
+                                                                               Ln p        p         v     angular momentum
+                                                                              Kn  p        p        m      inertia tensor
+                                                                              Bn  p        p        m      affine state
+                                                                              Cn  p        p        m      velocity derivatives
+                                                                              cn pa        p         v     velocity derivatives (MAC only)
+                                                                              Dn  p        p        m      inertia-like tensor
+                                                                              mn  i        n         s     mass
+Figure 6: We compare APIC with FLIP and PIC during a lava                      xi          n         v     position
+in free-fall example. Pure FLIP is unstable which leads to parti-              vin         n         v     velocity
+cles exploding out from the interior. FLIP/PIC blends do not suffer          ṽin+1        n         v     intermediate velocity
+from this, but they cannot resolve the detailed flows shown in APIC.            fi         n         v     force
+                                                                                  n
+ c Disney.                                                                    wip         n+p        s     weights
+                                                                                   n
+                                                                             ∇wip         n+p        v     weight gradients
+                                                                              mn  ai        f        s     mass
+in Figure 7. The only difference between the methods is how the               xai           f        v     position
+transfer between grid and particles is done. This difference is the              n
+                                                                               vai          f        s     velocity
+focus of our paper.                                                            n+1
+                                                                             ṽai           f        s     intermediate velocity
+                                                                                 n
+PIC is the canonical technique for coupling, and its diagram clearly         waip         f+p        s     weights
+                                                                                  n
+shows that all data flows through the grid, and in fact the transfer        ∇waip         f+p        v     weight gradients
+from particle to grid is a prefilter to the grid dynamics. By contrast,         Φ          g         s     total potential energy
+even though FLIP has the same prefilter when going from particles            LP,n
+                                                                                tot        g         v     total particle angular momentum
+to the grid, it introduces an additional data path directly from the         LG,n
+                                                                                tot        g         v     total grid angular momentum
+original particle state. The advantage is less dissipation, but the          N (x)         g         s     interpolation kernel
+disadvantage is an unsafe path that can lead to instability. We will          ∆x           g         s     grid spacing
+show that this path is not the only way to reduce dissipation. In fact,        ea          g         v     axis vector
+we show that we can obtain low-dissipation simulations while still             v∗          g        m      cross product matrix of v
+maintaining the safety of the PIC filtering scheme.                                       g         t     permutation tensor
+                                                                                 I         g        m      identity matrix
+The key observation is that normally a single particle receives data
+from multiple grid points, but it is typically forced to reduce those      Table 1: Summary of notation used in this paper. Locations are p
+influences to a single constant value, leading to loss of information      (particle), n (regular grid node), f (MAC face center), or g (global;
+(e.g. dissipation). In Section 5 we develop two approaches for en-         does not live at any location in space). Quantities are of type s
+riching particles to avoid this loss. Rigid Particle-in-cell (RPIC) is     (scalar), v (vector), m (matrix) or t (rank-3 tensor).
+introduced in Section 5.2, and it augments each particle with the an-
+gular momentum lost in the grid to particle transfer. Unfortunately
+this is insufficient because shearing modes are still lost. This leads
+                                                                           exception of angular momentum, a vector quantity that is normally
+to our final method Affine Particle-in-cell (APIC) in which particles
+                                                                           denoted by Lnp . The notation we use is summarized in Table 1.
+are endowed with a full affine representation of the local grid data,
+which we discuss in Section 5.3.
+                                                                           5     Particle-grid transfers
+With our transfer technique developed, we show how to apply it to
+fluids in Section 6. In Section 7, we include a novel Lagrangian           5.1   PIC
+coupling technique for simulating a wide range of interesting be-
+haviors that were impractical without APIC. Lastly, we demonstrate         The standard PIC routine stores mass mp , position xn
+                                                                                                                               p , and velocity
+this method on a range of interesting materials in Section 8.              vpn . Note that mp lacks a time n superscript because it is never
+                                                                           changed to ensure mass conservation. Each time step begins with a
+4    Notation                                                              transfer of mass and momentum from particles to a collocated grid
+                                                                           according to
+                                                                                            X n                      X n
+Before describing out method in detail, we begin by laying out the                   mn i =     wip mp , mn     n
+                                                                                                            i vi =       wip mp vpn ,       (1)
+notation that we use in this paper. Many quantities have subscripts                          p                         p
+(mp ), and some have superscripts as well (vpn ). Subscripts p and q              n
+are used to refer to particles, and subscripts i and j are used to refer   where wip    = N (xn
+                                                                                              p − xi ) are our interpolation weights and xi
+to regular grid indices. When dealing with MAC grids, the subscript        denote the regular Cartesian grid node locations. With mass and
+a refers to an axis direction (ea , where a ∈ {1, 2, 3} in 3D), and        momentum on the grid, we apply forces to the velocities in a grid-
+faces are referred to by cell index and axis (mn   ai ). The superscript
+                                                                           based update, vin → ṽin+1 . Note that we have used ṽin+1 rather
+distinguishes quantities available or computed at the beginning of         than vin+1 to distinguish them from vin at the next time step. Fi-
+the time step (vpn ) from quantities that are computed for use at the      nally, we interpolate the velocity back to particles with
+beginning of the next time step (vpn+1 ). We use lowercase bold
+                                                                                                           X n n+1
+                                                                                                  vpn+1 =      wip ṽi .                  (2)
+for vectors (vpn ) and uppercase bold for matrices (Bn     p ), with the                                    i
+                                                                PIC                                    FLIP                                   APIC
+                                                                    Kinematics                              Kinematics                         Kinematics
+                                                                                        "ﬁlter"                       Transfer                                    "ﬁlter"
+                                                                            Transfer                                                                Aﬃne Transfer
+                                                                                                                 unsafe
+                                                                                      Dynamics                   path          Dynamics                         Dynamics
+
+                                                                            Transfer                              Increment Transfer                Aﬃne Transfer
+                                                                          Particle            Grid                Particle             Grid         Particle            Grid
+
+
+a                                                              c     Stable          Non-dissipative         Stable          Non-dissipative    Stable         Non-dissipative
+                                b
+
+Figure 7: (a) The traditional view of PIC is of a grid filter, which averages particles to a grid node. (b) An equivalent view is of a filter on
+particles, which assigns contributions to particles. With this view, particles are naturally fuzzy and have size, which makes it meaningful for
+particles to have properties like angular momentum. (c) The basic dataflow of various hybrid particle/grid simulation techniques. Both our
+method and PIC gain stability by using a true filtering transfer.
+
+
+A major problem with PIC is that it severely damps rotational mo-                    one particle, we can prevent the loss of angular momentum when
+tion. We can get some insight into this by considering the angular                   transferring from grid to particle.
+momentum conservation properties in the transfers. Note that lin-
+ear momentum is conserved by both transfers. The total angular                       The angular momentum that would normally be lost in the transfer
+momentum over the particles and grid at time tn are given by                         from grid to particles is
+            X n                            X
+    LP,n        xp × mp vpn      LG,n         xi × mn    n                                                       X
+      tot =                        tot =              i vi .   (3)                                     Ln+1
+                                                                                                        p   =              n
+                                                                                                                          wip (xi − xn          n+1
+                                                                                                                                     p ) × mp ṽi   .                          (4)
+              p                                i                                                                    i
+
+While the transfer from particles to the grid conserves angular mo-                  With this definition, the total angular momentum on particles be-
+mentum, the transfer from the grid back to particles does not. This                  comes
+loss of angular momentum manifests as rotational motion damping                                       LP,n
+                                                                                                               X n
+                                                                                                                   (xp × mp vpn + Ln
+                                                                                                        tot =                      p ).            (5)
+(see Figure 4).
+                                                                                                                         p
+
+5.2   Rigid Particle-In-Cell (RPIC)                                                  Also, with this definition, the transfer from grid to particles trivially
+                                                                                     conserves angular momentum. Next, we must define the transfer
+In our efforts to reduce the information loss when transferring from                 from particles to the grid. If we consider the particles to be rigid
+particles to grid and vice versa, we first develop modifications to the              bodies with inertia tensors Kn  p , then we can define the angular ve-
+                                                                                                      n −1 n
+original PIC transfer designed to facilitate conservation of angular                 locity ω n
+                                                                                              p = (Kp )      Lp . The rigid body’s local velocity at a grid
+momentum in the grid to particle transfer. Consider the case of a                    node is vpn + ω n             n
+                                                                                                     p × (xi − xp ), which suggests the natural transfer
+single particle. PIC typically transfers information to multiple grid
+                   n
+locations since wip   is generally non-zero for a few grid nodes at a                                  X                       −1 n
+                                                                                        mn  n
+                                                                                         i vi =
+                                                                                                            n
+                                                                                                           wip mp (vpn + ((Kn
+                                                                                                                            p)   Lp ) × (xi − xn
+                                                                                                                                               p )),                           (6)
+time. Thus, even for a single particle of material, its corresponding
+                                                                                                       p
+representation on the grid is capable of storing angular momentum
+(by virtue of consisting of multiple grid nodes). However, one par-                                                                              n
+                                                                                     One may imagine this transfer as distributing the masses wip  mp
+ticle is incapable of representing angular momentum. Therefore,
+                                                                                     from the rigid body to the grid node i. This suggests using
+to improve the compatibility of the particle representation with the
+grid representation, we can additionally store a sample of local an-                                        X                      ∗       n ∗T
+gular momentum Ln    p on each particle. This way, even in the case of
+                                                                                                     Kn
+                                                                                                      p =
+                                                                                                                   n
+                                                                                                                  wjp mp (xj − xn
+                                                                                                                                p ) (xj − xp )                                 (7)
+                                                                                                             j
+
+
+                                                                                     for the rigid body’s inertia tensor, where v∗ is the cross-product
+                                                                                     matrix associated with vector v. Performing the transfer from par-
+                                                                                     ticles to grid in this way conserves angular momentum as shown in
+                                                                                     a supplementary document.
+
+
+
+
+                                                                                     Figure 9: APIC can handle non-uniform particle distributions. It
+                                                                                     rotates cleanly even when the particle distribution is higher near
+Figure 8: APIC resolves the complex free-surface dynamics of a                       the boundary, such as in this example where particle sampling (and
+rushing river on a rocky terrain. c Disney.                                          mass) is quadrupled in a thin band near the interface.
+Figure 10: We compare APIC with FLIP and PIC in a high energy collision example. APIC resolves interesting spiral shedding behavior
+that the other methods cannot. c Disney.
+                                                                                      X
+5.3 Affine Particle-In-Cell (APIC)                                            LP,n
+                                                                                tot =     mp (xn       n       n T
+                                                                                                p × vp + (Bp ) : ),           (11)
+                                                                                                                    p
+While the piecewise rigid formulation corrects rotational artifacts
+arising from loss of angular momentum in PIC, it still damps out                             where  is the permutation tensor. We take the convention that
+non-rigid motions such as shearing (see supplemental video). We                              A :  means the same thing as Aαβ αβγ . Note that the skew-
+can extend the idea of enriching our velocity representation to han-                         symmetric component of Bn     p contains all of the angular momen-
+
+dle shearing modes by idealizing the velocity as locally affine on                           tum information. In this way, it is analogous to Ln              n n
+                                                                                                                                                      p = Kp ω p
+                                                                                                                        n       n n                     n
+each particle. This requires the introduction of a matrix Cn                                 which combined with Bp = Cp Dp illustrates that Dp is analo-
+                                                                p , and
+the local velocity represented by a particle at the grid node xi is                          gous to the inertia tensor. Using this definition, conservation during
+then vpn + Cn           n                                                                    transfer from particles to grid is automatic. We show that angular
+              p (xi − xp ). This can be used to define a transfer from
+particles to grid as in the piecewise rigid case. However, uniquely                          momentum is conserved during the transfer from grid to particle in
+defining the nine components of Cn                                                           a supplementary document. We note that momentum conservation
+                                      p from the three components of
+Ln                                                                                           allows us to resolve rotations correctly; we do not rely on uniform
+  p as in the piecewise rigid case is not possible, which complicates
+the process of deriving the transfer from grid to particles.                                 sampling or fortuitous cancellation to achieve this (See Figure 9).
+
+An important feature of the piecewise rigid formulation is that                              Note that despite these similarities (9) this is not quite the same
+translational and rotational velocity fields are transferred exactly                         as (7), and Dn p does not strictly speaking have the properties of
+
+from particles to the grid and vice versa. Rather than explicitly                            an inertia tensor. Conveniently, Dn  p takes on a surprisingly simple
+
+trying to conserve angular momentum in the transfer from grid                                form in the case of the quadratic (Dn       1    2
+                                                                                                                                   p = 4 ∆x I) and cubic (Dp =
+                                                                                                                                                               n
+                                                                                             1     2
+to particles, we seek to preserve affine velocity fields across both                         3
+                                                                                               ∆x I) interpolation stencils commonly used for MPM. Note that
+                                                                                                                                                     −1
+transfers. However, we show that a simple solution derived from                              for these interpolating stencils, multiplying by (Dn p)     amounts to
+the preservation of affine velocity fields also conserves angular mo-                        a constant scaling factor. For trilinear interpolation, a complication
+mentum in a supplementary document.                                                          arises since Dn p may be singular if a particle lies on a grid facet
+                                                                                             (node, edge or face). However, in the special case of a trilinear
+The transfer from particles to grid is motivated analogously to the                                                                        n       −1
+                                                                                             stencil, we have the convenient identity wip    (Dnp)    (xi − xnp) =
+piecewise rigid case and is of the form                                                           n
+                                                                                             ∇wip , which allows us to avoid this numerical difficulty entirely
+                                                                                                                                                                −1
+                                                                                             since Equation 8 can be readily evaluated without forming (Dn
+             X n                       n −1
+  mn    n
+     i vi =      wip mp (vpn + Bn  p (Dp )  (xi − xnp )),       (8)                                                                                          p)    .
+                   p
+
+                 n −1                                                                        6    Fluids
+where Cn       n
+        p = Bp (Dp )  and Dn
+                           p is analogous to an inertia tensor.
+Dn
+ p is given by                                                                               To apply these ideas to MAC-based fluid simulations, we formulate
+                               X                                                             a set of transfers between particles and MAC faces. Instead of ma-
+                    Dn
+                     p =
+                                      n
+                                     wip (xi − xn         n T
+                                                p )(xi − xp )                          (9)   trix Bp , we store three vectors per particle denoted by cpa , where
+                                 i                                                           a represents an x, y or z face direction. We transfer from particles
+                                                                                             to faces using
+and is derived by preserving affine motion during the transfers. The
+corresponding transfer from the grid back to particles is
+                                                                                                              X
+                                                                                                      mn ai =
+                                                                                                                       n
+                                                                                                                  mp waip                                    (12)
+                         X n n+1
+                Bn+1
+                  p    =      wip ṽi (xi − xn   T
+                                               p) .              (10)                                        X
+                                                                                                              p
+
+                                     i                                                           mn   n
+                                                                                                  ai vai =
+                                                                                                                      n
+                                                                                                                  mp waip (eTa vpn + (cn   T        n
+                                                                                                                                       pa ) (xai − xp ))       (13)
+                                                                                                              p
+To discuss the angular momentum conservation properties of the
+transfer, we must first define angular momentum over the new par-
+ticle state. A natural definition is the angular momentum on the grid
+after the transfer in Equation 8. This takes the form
+
+                                   Memory Consumption        PIC/FLIP Blend
+ Simulation        Particles   FLIP Base Affine Overhead   1.00 0.99 0.95      PIC   APIC
+ Wine             4.3 × 104     360 MB        1.5 MB       1.2    1.1    1.1   1.0    1.1
+ River            1.4 × 106     2.2 GB        50 MB          -    1.0    1.1   1.0    1.2
+ Collision        1.1 × 106     296 MB        40 MB        9.5    3.2    1.5   1.0    5.0
+ Lava free-fall   1.9 × 106     511 MB        68 MB        2.5    1.1    0.9   1.0    1.3
+ Water fountain   3.4 × 105     677 MB        12 MB        1.1    1.2    1.5   1.0    1.0
+ Sand incline     2.9 × 105      78 MB        10 MB        4.0    1.9    1.5   1.0    2.2
+Table 2: Performance statistics for our 3D simulations. The last
+five columns present runtimes as a multiple of the runtime for the
+PIC simulation to eliminate the performance impact from our par-
+ticular simulator. Typically simulation performance is correlated to                         Figure 11: An APIC coupled simulation of elastoplastic frozen yo-
+CFL, thus unstable and lively simulations take longer.                                       gurt and elastic cloth where coupling is achieved using our MPM
+                                                                                             approach with Lagrangian energy-based forces. c Disney.
+Figure 12: We compare APIC with FLIP and PIC using the Lagrangian force model from Section 7 and a collision scenario with significant
+angular momentum. APIC preserves angular momentum better than even pure FLIP, and is at the same time the most stable of the various
+options. In the bottom row we show that the cube surface remains smooth after collision with APIC relative to the behavior of FLIP. c Disney.
+                                                                                                                        P n
+and from faces to particles using                                        our update rules for xp and xi we find xp = i wip     xi . Using the
+          X n n+1                      X                                 chain rule,
+ vpn+1 =      waip ṽai ea and cn+1
+                                  pa =     n
+                                         ∇waip   n+1
+                                               ṽai  . (14)                            X n                   X n ∂fp n
+           a,i                                 i                                  fi =      wip fp    δfi =        wip     wjq δuj .     (15)
+                                                                                        p                    p,q,j
+                                                                                                                       ∂xq
+Here, xai is the location of a MAC face associated with direction
+                       n
+a. The weights are waip    = N (xai − xnp ), where N (x) is chosen to    Although this formula is written with three nested summations, the
+                                                 n
+be the trilinear interpolation kernel. mnai and vai are the mass and     computation can be done efficiently by computing the summations
+velocity component on the MAC face, and cn    pa is a vector per axis,   consecutively. Since these forces are applied to the grid, both the
+notably requiring the same amount of storage as the collocated case.     MPM and Lagrangian approaches can be employed in the same
+Incompressibility is enforced in the standard way [Bridson 2008].        simulation. Each particle is labeled as an MPM particle or a meshed
+                                                                         particle. Note that the deformation gradient Fn    p stored on meshed
+                                                                         particles is never used, since for those particles this quantity is com-
+7   Lagrangian forces                                                    puted using the mesh. This provides an effective means of coupling
+                                                                         MPM with mesh-based approaches, such as shown in Figure 11.
+Here we describe a new useful model for MPM force computation
+                                                                         This gives the precise surface tracking of Lagrangian techniques
+that we used in a few of our examples. The discussion in this section
+                                                                         coupled with the automatic collision handling of Eulerian grids.
+is independent of grid-particle transfers and works with even the
+traditional PIC/FLIP based MPM.
+                                                                         8    Results
+For most of our simulations, we compute forces as in [Stom-
+akhin et al. 2013]. This approach has the advantages of a mesh-          Free-surface flow: The most common graphics application of PIC
+free method, such as effortless topology change. For objects that        and FLIP is free-surface incompressible flow (Figure 8). We com-
+are not intended to undergo topology change, a meshed approach           pare APIC with pure FLIP, PIC and FLIP/PIC blends in a number of
+is also available using the ideas in [Sifakis et al. 2007]. In this      free-surface calculations. Figure 5 shows a comparison with a foun-
+case, we can use any Lagrangian force model (springs, finite ele-        tain example. The top row (earlier time) shows that while APIC and
+ments, etc.) for which we can write down total potential energy          FLIP start as the least dissipative, the FLIP surface is already dis-
+Φ(xp ). Corresponding to this Lagrangian force model, we com-            playing a noisy leading edge relative to the more smoothly resolved
+                      ∂Φ
+pute forces fp = − ∂x   p
+                          . We also assume that given any vector         APIC. PIC is the most damped, and any amount of PIC/FLIP blend-
+                                                          ∂f             ing leads to a damped leading edge position. The bottom row (later
+δuq on particles we can multiply by force derivatives ∂xpq to ob-
+            P ∂fp                                                        time) shows that FLIP simulates a noisy surface which is still vis-
+tain δfp =     q ∂xq δuq . Since these force-related constructs are      ible on FLIP/PIC blends. In Figure 1 we demonstrate the behav-
+purely Lagrangian and are computed in the usual way, we will not         ior of APIC/PIC blends compared to FLIP/PIC. We note that un-
+elaborate on them here.                                                  like with FLIP, pure APIC is clearly superior to APIC/PIC blends.
+                                                                         Note that APIC produces more smooth and stable wine surfaces
+Although we have defined our mesh-based forces as Lagrangian             than FLIP/PIC blends while simultaneously resolving more ener-
+forces, we must still apply them through the grid. We must describe      getic splashing behavior than even pure FLIP.
+how particle positions xp relate to our (conceptually) moving grid
+nodes xi so that forces can be evaluated. Then, we must compute          Granular materials: In Figure 3 we compare APIC with FLIP and
+fi from fp and find a means of computing δfi given δui . Doing this      FLIP/PIC blends. We model the sand as a granular material using
+allows us to use Lagrangian forces as Eulerian forces. Comparing         the constitutive model from [Stomakhin et al. 2013]. We use an
+                                (a) Rotation                                      (b) Oscillating Circle                          (c) Lagrangian Collision
+                                                                                                                                                             APIC
+                                                                                                                                                             RPIC
+
+
+         Total Energy
+                                                                                                                                                             PIC
+                                                                                                                                                             FLIP
+                                                                                                                                                             FLIP 0.99
+                                                                                                                                                             FLIP 0.95
+
+                                   Time                                                   Time                                             Time
+Figure 13: Total energy is plotted over time for the rotation test (a), an oscillating circle test (b), and the Lagrangian collision test (c). Note
+that APIC and RPIC are quite effective at resolving rotation, but FLIP is more consistent about retaining energy. FLIP is able to retain
+kinetic energy by holding it in transfer null modes, where it is immune to dissipation. This is particularly evident in the Lagrangian collision
+test, where FLIP particles have a significant amount of kinetic energy, even though the objects are not moving. Slight energy increases are
+observed to occur rarely across the grid update, but energy increase is never observed across the APIC transfers (from grid to particle and
+back to grid).
+
+inlet condition at the top of the slide to induce a mixing flow. The                          pours lava with cooler, rockier properties near the outer circum-
+dynamics demonstrate the noise of pure FLIP and the dissipation                               ference into free-fall. APIC resolves an interesting periodic flow,
+of PIC and FLIP/PIC blends. APIC is able to retain the stability                              while pure FLIP goes unstable, with hotter interior particles noisily
+of PIC and FLIP/PIC blends without the excessive dissipation. We                              exploding outwards. FLIP/PIC blends stabilize this behavior, but
+show another comparison with granular materials in Figure 2. Here,                            do not produce flows as detailed as with APIC.
+FLIP again exhibits overly noisy behavior. The dissipation in the
+PIC method causes the sand to bunch together giving it a wet look.                            Energy: To explore energy loss, we set up an oscillating circle test
+While the FLIP/PIC blend is more stable than pure FLIP, it also                               with domain [0, 1] × [0, 1] and resolution 32 × 32 in which we
+suffers from the clumping, wet look of PIC. However, APIC stably                              create a circle centered at (0.5, 0.5) with radius 0.3 by uniformly
+resolves the dynamics of a fine powdery sand. In Figure 10 we                                 sampling four particles per grid cell. The circle has density 2, initial
+show that APIC is better able to retain angular momentum without                              velocity hx − 0.5, 0i, and the constitutive model from [Stomakhin
+the dispersive behavior of FLIP.                                                              et al. 2013] with parameters E = 0.5 and ν = 0.4. Results are
+                                                                                              shown in Figure 13 and Figure 14.
+Coupling MPM and Lagrangian: We demonstrate the accuracy
+and robustness of APIC with a coupling example in Figure 11.
+Here we use a traditional MPM discretization of the elastoplastic                             9     Discussion and limitations
+constitutive model from [Bargteil et al. 2007] to simulate frozen
+yogurt. We couple this with an elastic cloth using the Lagrangian
+force model outlined in Section 7. The cloth is modeled using a                               Although we eliminate nearly all of the artificial dissipation of pure
+standard mass-spring energy. In Figure 12 we show a comparison                                PIC (see Figure 14 for a detailed comparison), our method neither
+using mesh-based cubes with a Lagrangian finite element constitu-                             improves nor exacerbates the ringing instability. This is quite unlike
+tive model. Here, APIC retains angular momentum and energetic                                 FLIP, which avoids dissipation at the cost of losing stability. How-
+behavior better than PIC, FLIP, and FLIP/PIC blends. FLIP and                                 ever, our method does filter information in the transfer from grid
+FLIP/PIC blends produce ringing during the collisions between the                             to particle while FLIP does not. For example Figure 13 shows that
+cube and the glass plates and flexible block.                                                 FLIP does a better job than APIC and RPIC preserving energy in
+                                                                                              many cases. This could be an advantage for FLIP if stability could
+Lava: We demonstrate the benefits of APIC for lava flows using the                            be achieved by some other means.
+model from [Stomakhin et al. 2014]. In Figure 16 we show interest-
+ing lava flows over a rocky terrain. We directly compare APIC with                            Another minor disadvantage of the approach is the need to store an
+FLIP and FLIP/PIC blends in Figure 6. In this example, a spout                                extra matrix per particle and perform a few extra operations during
+                                    Energy loss per frame                                     the transfers. In practice, we have found the extra storage and trans-
+          100                                                                                 fer cost to be negligible as runtime costs are typically dominated
+                                                                  Transfer PIC                by the magnitude of the velocities and our CFL (see Figure 15 for
+          10-1
+                                                                  Transfer APIC               timing breakdown over a typical time step and Table 2 for typical
+          10-2                                                    Grid PIC                    memory usage). PIC tends to be fastest, since it damps out motion
+                                                                                              and has the smallest velocities. On the other hand, FLIP tends to
+          10-3                                                    Grid APIC
+Energy
+                                                                                              be slowest due to its instability and consequent larger velocities. In
+          10-4                                                                                particular, we see that the wine timings in Figure 15 are fairly uni-
+                                                                                              form across all methods, because the maximum velocity is similar.
+          10-5                                                                                Similarly, unstable FLIP simulations like the high energy collision
+          10-6                                                                                tend to be very slow.
+          10-7 0        1   2        3         4          5   6     7     8        9          It is interesting to note that a stable PIC/FLIP blend often con-
+                                                   Time                                       tains artifacts that are desirable, especially in the case of liquids
+Figure 14: Energy loss per frame is shown (on a logarithmic scale)                            and wet sand. FLIP in some ways is akin to forcing functions that
+for an oscillating circle test, broken down by whether the energy                             are required to make grid-based smoke solvers visually interesting.
+was lost due to the transfer step or due to grid-based sources such                           We assert, however, that if such instabilities are desirable, the artist
+as the backward Euler step. Total energy loss for the entire simula-                          would prefer to create them in a way they desire rather than have
+tion due to transfers is 82% for APIC compared to 95% for PIC.                                them uncontrollably imposed by the method.
+                              Per-example Timings
+                       10.0
+
+
+
+
+Time relative to PIC
+                        9.0
+                        6.0                                                                                                                  FLIP 1.0
+                        5.0                                                                                                                  FLIP 1.0
+                        4.0                                                                                                                  FLIP 0.95
+                        3.0                                                                                                                  PIC
+                        2.0
+                        1.0
+                                                                                                                                             APIC
+                        0.0
+                                                                                                                                [
+                                   Wine            River        Collision     Lava free-fall   Water fountain    Sand incline
+
+
+                       0.06
+                              Per-simulation Timings
+                       0.05
+
+
+Time (sec)
+                       0.04
+                       0.03
+                       0.02
+                       0.01
+                          0
+                                 Initialize   Rasterize    Build Phi    Mark Cells Copy Velocity    Projection Update P articles     Other     Total Substep
+                                                                                                                                                (divided by 3)
+   Figure 15: The top chart compares timings of FLIP and APIC for a number of examples. Timings are calculated relative to a standard PIC
+   simulation. Runtime breakdown for a typical time step for the wine simulation is shown on bottom. Steps changed by APIC are shown with
+   green labels. The total runtime for the time step is shown with a blue label, scaled down by a factor of three to fit the plot range.
+
+   Acknowledgements
+                                                                                         B RACKBILL , J., KOTHE , D., AND RUPPEL , H. 1988. Flip: A
+   UCLA authors were partially supported by NSF CCF-1422795,                                low-dissipation, pic method for fluid flow. Comp Phys Comm
+   ONR (N000141110719, N000141210834), Intel STC-Visual Com-                                48, 25–38.
+   puting Grant (20112360) as well as a gift from Disney Research.
+                                                                                         B RACKBILL , J. 1988. The ringing instability in particle-in-cell
+   We also appreciate the support at the studio from D. Meltzer, R.
+                                                                                            calculations of low-speed flow. J Comp Phys 75, 2, 469–492.
+   Sharma, D. Candela, A. Hendrickson, and M. Bryant. Images ren-
+   dered using Disney’s Hyperion Renderer.                                               B RIDSON , R. 2008. Fluid simulation for computer graphics. Tay-
+                                                                                            lor & Francis.
+   References                                                                            C HENTANEZ , N., AND M ULLER , M. 2010. Real-time simulation
+                                                                                            of large bodies of water with small scale details. In Proc ACM
+    A NDO , R., AND T SURUNO , R. 2011. A particle-based method for                         SIGGRAPH/Eurograph Symp Comp Anim, SCA ’10, 197–206.
+       preserving fluid sheets. In Proc ACM SIGGRAPH/Eurographics
+       Symp Comp Anim, SCA ’11, 7–16.                                                    C HENTANEZ , N., AND M ULLER , M. 2011. Real-time eulerian
+                                                                                            water simulation using a restricted tall cell grid. ACM Trans
+    A NDO , R., T HUREY, N., AND T SURUNO , R. 2012. Preserving                             Graph 30, 4, 82:1–82:10.
+       fluid sheets with adaptively sampled anisotropic particles. IEEE
+       Trans Vis Comp Graph 18, 8, 1202–1214.                                            C HENTANEZ , N., AND M ULLER , M. 2014. Coupling 3d eulerian,
+                                                                                            height field and particle methods for the simulation of large scale
+    A NDO , R., T HUREY, N., AND W OJTAN , C. 2013. Highly adaptive                         liquid phenomena. In Proc ACM SIGGRAPH/Eurograph Symp
+       liquid simulations on tetrahedral meshes. ACM Trans Graph 32,                        Comp Anim, SCA ’14.
+       4, 103:1–103:10.
+                                                                                         C ORNELIS , J., I HMSEN , M., P EER , A., AND T ESCHNER , M.
+    BARGTEIL , A., W OJTAN , C., H ODGINS , J., AND T URK , G. 2007.                        2014. Iisph-flip for incompressible fluids. Comp Graph Forum
+      A finite element method for animating large viscoplastic flow.                        33, 2, 255–262.
+      ACM Trans Graph 26, 3.                                                             E DWARDS , E., AND B RIDSON , R. 2012. A high-order accurate
+    BATTY, C., AND B RIDSON , R. 2008. Accurate viscous free sur-                           particle-in-cell method. Int J Numer Meth Eng 90, 1073–1088.
+      faces for buckling, coiling, and rotating liquids. Proc ACM SIG-                   E DWARDS , E., AND B RIDSON , R. 2014. Detailed water with
+      GRAPH/Eurograph Symp Comp Anim, 219–228.                                              coarse grids: combining surface meshes and adaptive discontin-
+    BATTY, C., B ERTAILS , F., AND B RIDSON , R. 2007. A fast vari-                         uous galerkin. ACM Trans Graph 33, 4, 136:1–136:9.
+      ational framework for accurate solid-fluid coupling. ACM Trans                     E NRIGHT, D., M ARSCHNER , S., AND F EDKIW, R. 2002. An-
+      Graph 26, 3.                                                                          imation and rendering of complex water surfaces. ACM Trans
+                                                                                            Graph 21, 3, 736–744.
+    B OYD , L., AND B RIDSON , R. 2012. Multiflip for energetic two-
+       phase fluid simulation. ACM Trans Graph 31, 2, 16:1–16:12.                        F ELDMAN , B., O’B RIEN , J., AND A RIKAN , O. 2003. Animating
+                                                                                            suspended particle explosions. SIGGRAPH ’03 22, 3, 708–715.
+    B RACKBILL , J., AND RUPPEL , H. 1986. Flip: A method for
+       adaptively zoned, particle-in-cell calculations of fluid flows in                 F OSTER , N., AND M ETAXAS , D. 1996. Realistic animation of
+       two dimensions. J Comp Phys 65, 314–343.                                             liquids. Graph Mod Imag Proc 58, 471–483.
+              Figure 16: Here we demonstrate the performance of APIC with an elastoplastic model for lava flow. c Disney.
+
+G AO , Y., L I , C., H U , S., AND BARSKY, B. 2009. Simulating         NARAIN , R., G OLAS , A., AND L IN , M. 2013. Free-flowing gran-
+   gaseous fluids with low and high speeds. Comp Graph Forum             ular materials with two-way solid coupling. ACM Trans Graph
+   28, 28, 1845–1852.                                                    29, 6, 173:1–173:10.
+G ERSZEWSKI , D., AND BARGTEIL , A. 2013. Physics-based an-            PATKAR , S., A ANJANEYA , M., K ARPMAN , D., AND F EDKIW,
+   imation of large-scale splashing liquids. ACM Trans Graph 32,         R. 2013. A hybrid lagrangian-eulerian formulation for bubble
+   6, 185:1–185:6.                                                       generation and dynamics. In Proc ACM SIGGRAPH/Eurograp
+                                                                         Symp Comp Anim, SCA ’13, 105–114.
+H ARLOW, F., AND W ELCH , E. 1965. Numerical calculation of
+   time dependent viscous flow of fluid with a free surface. Phys      R AVEENDRAN , K., W OJTAN , C., AND T URK , G. 2011. Hy-
+   Fluid 8, 12, 2182–2189.                                                brid sph. In Proc 2011 ACM SIGGRAPH/Eurograp Symp Comp
+                                                                          Anim, SCA ’11, 33–42.
+H ARLOW, F. 1964. The particle-in-cell method for numerical solu-      S IFAKIS , E., S HINAR , T., I RVING , G., AND F EDKIW, R. 2007.
+   tion of problems in fluid dynamics. Meth Comp Phys 3, 319–343.         Hybrid simulation of deformable solids. In Proc ACM SIG-
+H ONG , J., L EE , H., YOON , J., AND K IM , C. 2008. Bubbles alive.      GRAPH/Eurograph Symp Comp Anim, 81–90.
+   ACM Trans Graph 27, 3, 48:1–48:4.                                   S IN , F., BARGTEIL , A., AND H ODGINS , J. 2009. A point-based
+                                                                          method for animating incompressible flow. In Proc ACM SIG-
+H ONG , W., H OUSE , D., AND K EYSER , J. 2008. Adaptive particles        GRAPH/Eurograph Symp Comp Anim, 247–255.
+   for incompressible fluid simulation. Vis Comp 24, 7, 535–543.
+                                                                       S ONG , O., K IM , D., AND KO , H. 2009. Derivative particles for
+H ONG , W., H OUSE , D., AND K EYSER , J. 2009. An adaptive               simulating detailed movements of fluids. IEEE Trans Vis Comp
+   sampling approach to incompressible particle-based fluid. The-         Graph, 247–255.
+   ory Pract Comp Graph, 69–76.
+                                                                       S TOMAKHIN , A., S CHROEDER , C., C HAI , L., T ERAN , J., AND
+I HMSEN , M., C ORNELIS , J., S OLENTHALER , B., H ORVATH , C.,           S ELLE , A. 2013. A material point method for snow simulation.
+   AND T ESCHNER , M. 2013. Implicit incompressible sph. IEEE             ACM Trans Graph 32, 4, 102:1–102:10.
+   Trans Vis Comp Graph 20, 3, 426–435.
+                                                                       S TOMAKHIN , A., S CHROEDER , C., J IANG , C., C HAI , L.,
+K IM , J., C HA , D., C HANG , B., KOO , B., AND I HM , I. 2006.          T ERAN , J., AND S ELLE , A. 2014. Augmented mpm for phase-
+   Practical animation of turbulent splashing water. In Proc ACM          change and varied materials. ACM Trans Graph 33, 4, 138:1–
+   SIGGRAPH/Eurograph Symp Comp Anim, SCA ’06, 335–344.                   138:11.
+
+L EE , H., H ONG , J., AND K IM , C. 2009. Interchangeable sph and     S ULSKY, D., Z HOU , S., AND S CHREYER , H. 1995. Application
+   level set method in multiphase fluids. Vis Comp 25, 5, 713–718.        of a pic method to solid mechanics. Comp Phys Comm 87, 1,
+                                                                          236–252.
+L OSASSO , F., TALTON , J., K WATRA , N., AND F EDKIW, R. 2008.        U M , K., BAEK , S., AND H AN , J. 2014. Advanced hybrid particle-
+   Two-way coupled sph and particle level set fluid simulation.          grid method with sub-grid particle correction. Comp Graph Fo-
+   IEEE Trans Vis Comp Graph 14, 797–804.                                rum 33, 209–218.
+L OVE , E., AND S ULSKY, D. 2006. An unconditionally stable,           YABE , T., X IAO , F., AND U TSUMI , T. 2001. The constrained
+   energy-momentum consistent implementation of the the material         interpolation profile method for multiphase analysis. J Comp
+   point method. Comp Meth App Mech Eng 195, 3903–3925.                  Phys 169, 556–593.
+M IHALEF, V., M ETAXAS , D., AND S USSMAN , M. 2007. Textured          Z HU , Y., AND B RIDSON , R. 2005. Animating sand as a fluid.
+  liquids based on the marker level set. Comp Graph Forum, 457–           ACM Trans Graph 24, 3, 965–972.
+  466.
+                                                                       Z HU , B., YANG , X., AND FAN , Y. 2010. Creating and preserving
+M ULLER , K., F EDOSOV, D., AND G OMPPER , G. 2015. Smoothed              vortical details in sph fluid. Comp Graph Forum 29, 7, 2207–
+  dissipative particle dynamics with angular momentum conserva-           2214.
+  tion. J Comp Phys 281, 301–315.
+

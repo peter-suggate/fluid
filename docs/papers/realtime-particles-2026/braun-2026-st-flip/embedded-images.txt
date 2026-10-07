@@ -1,0 +1,22 @@
+page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+--------------------------------------------------------------------------------------------
+   1     0 image    1097   554  rgb     3   8  image  no       993  0   155   155  957K  54%
+   2     1 image    1023  1016  rgb     3   8  image  no         2  0   304   304  923K  30%
+   5     2 image    1540   741  rgb     3   8  image  no        16  0   458   458 60.0K 1.8%
+   8     3 image    1550   458  rgb     3   8  image  no        25  0   461   461  314K  15%
+   9     4 image    1463   298  rgb     3   8  image  no        28  0   435   435  353K  28%
+  11     5 image    1901  1039  rgb     3   8  image  no        35  0   565   565 1157K  20%
+  11     6 image    1890   696  rgb     3   8  image  no        36  0   562   562  774K  20%
+  12     7 image     247   140  rgb     3   8  image  no       141  0   272   272 29.3K  29%
+  12     8 smask     247   140  gray    1   8  image  no       141  0   272   272 1029B 3.0%
+  12     9 image    1907   377  rgb     3   8  image  no       103  0   567   567  262K  12%
+  13    10 image    1162   950  rgb     3   8  image  no       182  0   345   345  654K  20%
+  13    11 image    1450   479  rgb     3   8  image  no       184  0   431   431  445K  22%
+  14    12 image     582   744  rgb     3   8  image  no       251  0   192   192  168K  13%
+  14    13 image    1748   518  rgb     3   8  image  no       252  0   520   520  429K  16%
+  16    14 image    1343   372  rgb     3   8  image  no       257  0   190   190  590K  40%
+  16    15 image    1791   641  rgb     3   8  image  no       258  0   532   532  365K  11%
+  17    16 image    1842   425  rgb     3   8  image  no       261  0   261   261  317K  14%
+  17    17 image    1272   477  rgb     3   8  image  no       262  0   378   378  191K  11%
+  18    18 image    1898   595  rgb     3   8  image  no       265  0   269   269 1106K  33%
+  18    19 image    1674  1074  rgb     3   8  image  no       266  0   237   237 2042K  39%

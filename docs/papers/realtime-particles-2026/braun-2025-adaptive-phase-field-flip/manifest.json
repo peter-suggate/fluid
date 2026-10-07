@@ -1,0 +1,202 @@
+{
+  "id": "braun-2025-adaptive-phase-field-flip",
+  "title": "Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation",
+  "year": 2025,
+  "url": "https://animation.rwth-aachen.de/media/papers/94/2025-Siggraph-Adaptive_Phase_Field_FLIP.pdf",
+  "project": "https://www.animation.rwth-aachen.de/publication/0594/",
+  "accessed": "2026-10-07",
+  "sha256": "bf1ecc32218a7de3ca7a7d34c023ab4fdf104e5195c3d81ebb3f296e79f77e19",
+  "pages": 23,
+  "dpi": 144,
+  "embedded_files": 37,
+  "page_map": [
+    {
+      "page": 1,
+      "render": "page-01.png",
+      "figure_mentions": [
+        "Fig. 1.",
+        "Figure 2.",
+        "Figure 1"
+      ]
+    },
+    {
+      "page": 2,
+      "render": "page-02.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 3,
+      "render": "page-03.png",
+      "figure_mentions": [
+        "Fig. 2."
+      ]
+    },
+    {
+      "page": 4,
+      "render": "page-04.png",
+      "figure_mentions": [
+        "Fig. 3.",
+        "Figure 2",
+        "Fig. 4."
+      ]
+    },
+    {
+      "page": 5,
+      "render": "page-05.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 6,
+      "render": "page-06.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 7,
+      "render": "page-07.png",
+      "figure_mentions": [
+        "Fig. 5.",
+        "Fig. 6.",
+        "Fig. 7.",
+        "Figure 7."
+      ]
+    },
+    {
+      "page": 8,
+      "render": "page-08.png",
+      "figure_mentions": [
+        "Figure 6"
+      ]
+    },
+    {
+      "page": 9,
+      "render": "page-09.png",
+      "figure_mentions": [
+        "Figure 8",
+        "Figure 8."
+      ]
+    },
+    {
+      "page": 10,
+      "render": "page-10.png",
+      "figure_mentions": [
+        "Figure 9",
+        "Figure 12"
+      ]
+    },
+    {
+      "page": 11,
+      "render": "page-11.png",
+      "figure_mentions": [
+        "Fig. 8.",
+        "Fig. 9."
+      ]
+    },
+    {
+      "page": 12,
+      "render": "page-12.png",
+      "figure_mentions": [
+        "Figure 9",
+        "Fig. 10.",
+        "Figure 10"
+      ]
+    },
+    {
+      "page": 13,
+      "render": "page-13.png",
+      "figure_mentions": [
+        "Fig. 11.",
+        "Figure 12",
+        "Figure 11"
+      ]
+    },
+    {
+      "page": 14,
+      "render": "page-14.png",
+      "figure_mentions": [
+        "Fig. 12."
+      ]
+    },
+    {
+      "page": 15,
+      "render": "page-15.png",
+      "figure_mentions": [
+        "Fig. 13.",
+        "Figure 13",
+        "Figure 14."
+      ]
+    },
+    {
+      "page": 16,
+      "render": "page-16.png",
+      "figure_mentions": [
+        "Figure 14.",
+        "Fig. 15.",
+        "Fig. 14.",
+        "Figure 15"
+      ]
+    },
+    {
+      "page": 17,
+      "render": "page-17.png",
+      "figure_mentions": [
+        "Fig. 16.",
+        "Fig. 17.",
+        "Figure 16",
+        "Figure 17",
+        "Figure 13."
+      ]
+    },
+    {
+      "page": 18,
+      "render": "page-18.png",
+      "figure_mentions": [
+        "Figure\n7",
+        "Fig. 18.",
+        "Figure 25",
+        "Figure 18",
+        "Figure 19"
+      ]
+    },
+    {
+      "page": 19,
+      "render": "page-19.png",
+      "figure_mentions": [
+        "Figure 20",
+        "Figure 1.",
+        "Fig. 19.",
+        "Figure 3",
+        "Figure 24",
+        "Fig. 20.",
+        "Figure 21"
+      ]
+    },
+    {
+      "page": 20,
+      "render": "page-20.png",
+      "figure_mentions": [
+        "Fig. 22.",
+        "Fig. 21.",
+        "Fig. 23.",
+        "Figure 25"
+      ]
+    },
+    {
+      "page": 21,
+      "render": "page-21.png",
+      "figure_mentions": [
+        "Fig. 24.",
+        "Fig. 25."
+      ]
+    },
+    {
+      "page": 22,
+      "render": "page-22.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 23,
+      "render": "page-23.png",
+      "figure_mentions": []
+    }
+  ]
+}

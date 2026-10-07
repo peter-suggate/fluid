@@ -1,0 +1,88 @@
+{
+  "id": "lentine-2010-coarse-projection",
+  "title": "A Novel Algorithm for Incompressible Flow Using Only a Coarse Grid Projection",
+  "year": 2010,
+  "url": "https://physbam.stanford.edu/papers/stanford2010-02.pdf",
+  "project": "https://physbam.stanford.edu/",
+  "accessed": "2026-10-07",
+  "sha256": "5ef0981bb8a14c2869f0bdb39196f2bfdfc065bcd92a48317e1f6d2a3785e8a0",
+  "pages": 9,
+  "dpi": 144,
+  "embedded_files": 35,
+  "page_map": [
+    {
+      "page": 1,
+      "render": "page-1.png",
+      "figure_mentions": [
+        "Figure 1:"
+      ]
+    },
+    {
+      "page": 2,
+      "render": "page-2.png",
+      "figure_mentions": [
+        "Figure 2:",
+        "Figure 2"
+      ]
+    },
+    {
+      "page": 3,
+      "render": "page-3.png",
+      "figure_mentions": [
+        "Figure 3:"
+      ]
+    },
+    {
+      "page": 4,
+      "render": "page-4.png",
+      "figure_mentions": [
+        "Figure 4:",
+        "Figure 4"
+      ]
+    },
+    {
+      "page": 5,
+      "render": "page-5.png",
+      "figure_mentions": [
+        "Figure 5:",
+        "Figure 4"
+      ]
+    },
+    {
+      "page": 6,
+      "render": "page-6.png",
+      "figure_mentions": [
+        "Figure 6:",
+        "Figure 4",
+        "Figure 7.",
+        "Figure 6",
+        "Figure 7:"
+      ]
+    },
+    {
+      "page": 7,
+      "render": "page-7.png",
+      "figure_mentions": [
+        "Figure 8:",
+        "Figure 6",
+        "Figure 8",
+        "Figure 9",
+        "Figure 9:"
+      ]
+    },
+    {
+      "page": 8,
+      "render": "page-8.png",
+      "figure_mentions": [
+        "Figure 3",
+        "Figure 5.",
+        "Figure 8."
+      ]
+    },
+    {
+      "page": 9,
+      "render": "page-9.png",
+      "figure_mentions": []
+    }
+  ]
+}

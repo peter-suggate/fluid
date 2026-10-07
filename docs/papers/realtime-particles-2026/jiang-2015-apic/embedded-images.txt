@@ -1,0 +1,27 @@
+page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+--------------------------------------------------------------------------------------------
+   1     0 image    1074   410  rgb     3   8  image  no         3  0   153   153  624K  48%
+   1     1 smask    1074   410  gray    1   8  image  no         3  0   153   153  878B 0.2%
+   2     2 image     937  1200  rgb     3   8  image  no        29  0   281   281 1714K  52%
+   2     3 image    1280   720  rgb     3   8  image  no        44  0   384   384 1365K  51%
+   2     4 smask    1280   720  gray    1   8  image  no        44  0   384   384 1811B 0.2%
+   3     5 image    2160   220  rgb     3   8  image  no       136  0   311   311  719K  52%
+   3     6 smask    2160   220  gray    1   8  image  no       136  0   311   311 19.3K 4.2%
+   3     7 image    2880  1096  rgb     3   8  image  no        49  0   864   864 2757K  30%
+   4     8 image    1280   720  rgb     3   8  image  no       174  0   384   384  938K  35%
+   4     9 smask    1280   720  gray    1   8  image  no       174  0   384   384 1811B 0.2%
+   5    10 image    1006   690  rgb     3   8  image  no       213  0   302   302 1267K  62%
+   5    11 smask    1006   690  gray    1   8  image  no       213  0   302   302 1368B 0.2%
+   6    12 image    2360   360  rgb     3   8  image  no       215  0   337   337  936K  38%
+   6    13 image     768   720  rgb     3   8  image  no       273  0   470   470  479K  30%
+   6    14 image     768   720  rgb     3   8  image  no       274  0   470   470  544K  34%
+   7    15 image     747   537  rgb     3   8  image  no       278  0   323   323  401K  34%
+   7    16 image     747   537  rgb     3   8  image  no       279  0   323   323  406K  35%
+   7    17 image     747   537  rgb     3   8  image  no       280  0   323   323  405K  35%
+   7    18 image     512   512  rgb     3   8  image  no       281  0   373   373  245K  32%
+   7    19 image     512   512  rgb     3   8  image  no       282  0   373   373  240K  31%
+   7    20 image     512   512  rgb     3   8  image  no       283  0   373   373  241K  31%
+   7    21 image     512   512  rgb     3   8  image  no       284  0   373   373  249K  32%
+   7    22 image     512   512  rgb     3   8  image  no       285  0   373   373  225K  29%
+  10    23 image    1102   672  rgb     3   8  image  no       445  0   316   316  797K  37%
+  10    24 image    1102   672  rgb     3   8  image  no       446  0   316   316  839K  39%

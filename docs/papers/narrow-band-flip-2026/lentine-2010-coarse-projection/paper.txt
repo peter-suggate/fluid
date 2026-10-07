@@ -1,0 +1,555 @@
+A Novel Algorithm for Incompressible Flow Using Only a Coarse Grid Projection
+                            Michael Lentine∗                      Wen Zheng                     Ronald Fedkiw
+                          Stanford University                 Stanford University             Stanford University
+                        Industrial Light + Magic                                            Industrial Light + Magic
+
+
+
+
+Figure 1: High resolution smoke and water. (Left) Smoke flowing above a sphere on a 512 × 1024 × 512 grid. (Middle) Water pouring into
+a box on a 512 × 512 × 512 grid. (Right) Smoke flowing around a sphere on a 512 × 1024 × 512 grid.
+
+Abstract                                                                  noise (see [Stam and Fiume 1993; Lamorlette and Foster 2002; Ras-
+                                                                          mussen et al. 2003]) and curl noise (see [Bridson et al. 2007]) can be
+Large scale fluid simulation can be difficult using existing tech-        used to enhance the visual fidelity of fluid simulations by coupling
+niques due to the high computational cost of using large grids. We        the noise to the incompressible Navier-Stokes equations producing
+present a novel technique for simulating detailed fluids quickly. Our     a more detailed flow. Alternatively, [Kim et al. 2008] and [Narain
+technique coarsens the Eulerian fluid grid during the pressure solve,     et al. 2008] determine where to add noise using information from
+allowing for a fast implicit update but still maintaining the resolu-     the existing simulation and then add it as a postprocess which al-
+tion obtained with a large grid. This allows our simulations to run at    lows them to add noise where it is best suited. Other techniques
+a fraction of the cost of existing techniques while still providing the   such as [Schechter and Bridson 2008] both determine where to add
+fine scale structure and details obtained with a full projection. Our     noise and couple the noise to the Navier-Stokes equations. All of
+algorithm scales well to very large grids and large numbers of pro-       these techniques are successful at adding details but are nonphys-
+cessors, allowing for high fidelity simulations that would otherwise      ical and can produce significantly less realistic results than simply
+be intractable.                                                           simulating with a higher resolution grid.
+
+CR Categories: I.3.5 [Computer Graphics]: Computational Ge-               Another approach is to improve the baseline simulation on the exist-
+ometry and Object Modeling—Physically Based Modeling;                     ing grid. This can be done by using higher order methods in space,
+                                                                          such as BFECC, QUICK, and MacCormack methods (see [Dupont
+                                                                          and Liu 2003; Kim et al. 2005; Selle et al. 2008; Molemaker et al.
+Keywords: simulation, incompressible flow, smoke, water
+                                                                          2008]), or in time, such as Runge Kutta. One could also work
+                                                                          to maintain certain invariants such as energy (see [Mullen et al.
+1     Introduction                                                        2009]). Although these methods increase the accuracy and fidelity
+                                                                          of the resulting simulation, they are more expensive than traditional
+Physical simulation of fluids is one of the most interesting and chal-    fluid simulation and are still limited by the Nyquist frequency of the
+lenging problems because of the amount of small scale details that        grid. To increase the grid resolution while keeping the increase in
+realistic fluids exhibit. Although many authors such as [Foster and       cost to a minimum, adaptive grid techniques were introduced such
+Metaxas 1997; Stam 1999; Fedkiw et al. 2001] have used grid-              as AMR [Berger and Oliger 1984] and octrees [Losasso et al. 2004].
+based techniques to produce visually compelling results, the size of      These techniques are effective at reducing the computational cost
+the grids that these techniques can use is limited by the amount of       in cells where there is not much detailed motion while maintaining
+computational power available.                                            details where needed. However, the increased complexity of using
+                                                                          these complicated structures both increases computational cost and
+As a consequence many authors have developed techniques that add          hinders the ability to design robust numerical methods.
+details to these simulations with noise. For example, Kolmolgorov
+                                                                          In contrast to grid-based approaches, particle-based methods (see
+    ∗ e-mail: mlentine,zhw,fedkiw@cs.stanford.edu
+                                                                          e.g. [Reeves 1983; Desbrun and Cani 1996; Müller et al. 2003])
+                                                                          are not limited by the resolution of the grid. However, these ap-
+                                                                          proaches do not store the connectivity of the surface and require
+                                                                          additional computational costs to keep track of the surface and to
+                                                                          re-mesh. Furthermore, these methods increase in cost as they ap-
+                                                                          proach the incompressible limit, and thus many authors use weakly
+                                                                          compressible equation-of-state formulations. There has also been
+                                                                          work on combining particle and grid-based approaches. [Gao et al.
+                                                                          2009] uses a combination of grid and particle-based approaches to
+                                                                          produce realistic simulations at variable speeds. [Selle et al. 2005]
+                                                                          introduced a particle-based method to add vorticity to grid-based
+                                                                          simulations using particles that are able to accurately track the vor-
+ticity of the simulation and [Pfaff et al. 2009] extended it to work
+well with objects. Although these techniques do add details at little
+cost, they are still limited by the base resolution of the simulation.
+In order to handle very high resolution grids, [Wicke et al. 2009] in-
+troduces a reduced order model that can handle large grids at a small
+cost. However, the use of basis functions lacks the physical realism
+and details that are achieved through traditional grid-based tech-
+niques. [Rasmussen et al. 2003; Horvath and Geiger 2009] intro-
+duce methods that can run large scale two-dimensional algorithms           Figure 2: Smoke flowing around a moving sphere with on a 512 ×
+and then can extend the results to three dimensions. Although these        1024 × 512 grid. (Left) uses a CFL number of 0.9 and takes time
+do produce visually compelling results in some instances, the two-         steps half as large as those generally taken on a 256 × 512 × 256
+dimensional simulations are not a very good approximation of the           grid. (Right) uses a CFL number of 2.2 making the time steps
+three-dimensional behavior for the more general case.                      around 2.5 times as large.
+
+Recently, there has been a large interest in methods for creat-
+                                                                           Our goal is to reduce the cost of this system without losing the fine
+ing a higher resolution result from a lower resolution simulation.
+                                                                           scale details of a higher resolution simulation. To achieve this, we
+[Nielsen et al. 2009] introduced a method for increasing the res-
+                                                                           break up the projection into a single projection on a coarser grid,
+olution of a simulation to make it more directable, but this also
+                                                                           which takes time Ccp , and a number of smaller projections that run
+increases the cost. In liquids, authors have worked to track the sur-
+                                                                           fully decoupled on individual coarse grid cells, costing Cf p . This
+face of the liquid on a higher resolution grid than the underlying
+                                                                           makes the cost for our algorithm
+fluid simulation (see e.g. [Kim et al. 2009]). [Yoon et al. 2009]
+uses the vortex particle method in order to increase the resolution
+                                                                                                  C = Cl + Ccp + Cf p .                       (3)
+of a simulation without the cost of running a simulation on a higher
+resolution grid. They demonstrated that the vortex particle method
+                                                                           If we refine our simulation grid, but not our coarse grid, Ccp scales
+of [Selle et al. 2005] inherently contains additional computational
+                                                                           only with the number of time steps, and the entire algorithm scales
+detail which is lost when mapping it onto the underlying grid, and
+                                                                           roughly as
+preserve more of it by mapping it on to the higher resolution grid.
+                                                                                              Ck ≈ k4 Cl + kCcp + k4 Cf p .                  (4)
+In contrast to these methods which rely on a low resolution core
+simulation, we propose a method that runs on a high resolution             Even if we assume that Ccp + Cf p > Cp , for some k, kCcp +
+grid but creates a divergence-free velocity field using a coarser grid     k4 Cf p < k4 Cp . However, we found that Ccp + Cf p > Cp only
+to speed up the calculations. This allows us to run simulations            for very small resolutions (less than 16 × 16 × 16) meaning that
+using higher resolutions while significantly reducing the compu-           for reasonably sized examples or large examples our method runs
+tational cost, and possibly more importantly, run simulations that         significantly faster than traditional grid-based methods. We note
+scale more linearly on large computational frameworks.                     that in our experience, about 90% of the time spent in a one-phase
+                                                                           smoke simulation is spent during the projection meaning that Cp
+                                                                           easily dominates Cl . From a complexity point of view this makes
+2     Performance Analysis                                                 sense since the advection in Cl requires touching every grid point
+                                                                           and its neighbors approximately once whereas a conjugate gradient
+Simulation performance remains a large obstruction to using very           algorithm would require touching every grid point and its neighbors
+large grids. To alleviate this issue we must develop techniques that       once for every iteration of the conjugate gradient solve.
+are not only more efficient but can take advantage of the compu-
+tational power available which can be on one or across many ma-            In spite of the analysis above, in general it seems that one of the k’s
+chines. Our method improves both the performance on one core               can be removed from (4) instead getting Ck ≈ k3 Cl +Ccp +k3 Cf p
+and the scalability across many cores.                                     by keeping the same timestep on the finer grid that was used on the
+                                                                           coarser grid. Semi-Lagrangian advection (see [Stam 1999]) makes
+                                                                           this possible. Although we do not expect this to work for an indefi-
+2.1   Scaling
+                                                                           nite number of refinements, for one or two, we have achieved good
+                                                                           results without halving the time step (see for example Figure 2).
+Traditional grid-based algorithms have a cost
+
+                           C = Cl + Cp ,                            (1)    2.2   Multi-core and Multi-processor Machines
+
+where Cp is the cost of the projection and Cl is the cost of the           As chip technology continues to advance, the use of multi-core
+remainder of the algorithm. When we increase the resolution of the         and multi-processor machines and GPUs becomes more and more
+grid in three dimensions by a factor of k this becomes roughly             important, and algorithms such as [Bolz et al. 2003] that can
+                                                                           take advantage of this with little cost are able to run much more
+                        Ck ≈ k4 Cl + k4 Cp .                        (2)    quickly. Simulating one-phase smoke typically consists of two pri-
+                                                                           mary steps, the explicit advection step and the implicit projection
+                                                                           step. Looking at (1), Cl is the advection step and Cp is the pro-
+This is because as we double the size of the grid we have eight times      jection step. The advection step easily scales to multiple cores and
+as many cells and each cell is half as wide, requiring twice as many       multiple processors as one can simply break up the grid into several
+time steps (when assuming a CFL condition). Note that k4 Cp is             distinct parts and run advection on each part individually. The only
+only an approximation of the real cost since the matrix inversion          issue then becomes how to deal with the boundaries. If the memory
+does not generally scale linearly with the size of the matrix. One         is shared, one can devise various strategies such as keeping sep-
+could use multi-grid methods, limit the number of conjugate gradi-         arate copies of the information to alleviate issues with writing to
+ent iterations, etc. to make this scale more linearly, but Cp will still   data that needs to be read. There are also other strategies such
+scale no better than k4 .                                                  as red/black domain decomposition schemes, locking, etc. Using
+Figure 3: An example with smoke flowing around a moving sphere. The Large figure is a 512 × 1024 × 512 simulation with a 64 × 128 × 64
+coarse grid. The smaller figures are comparisons of a simulation using different grid resolutions. The resolutions are starting from the left to
+right, top to bottom: a 512 × 1024 × 512 simulation with a 64 × 128 × 64 coarse grid, a 256 × 512 × 256 simulation with a 64 × 128 × 64
+coarse grid, a 128 × 256 × 128 simulation with a 64 × 128 × 64 coarse grid, a 64 × 128 × 64 base simulation, a 64 × 128 × 64 simulation
+with a 32 × 64 × 32 coarse grid, and a 64 × 128 × 64 simulation with a 16 × 32 × 16 coarse grid with Kolmolgorov noise.
+
+
+these strategies, one can usually expect to diminish the computa-          more so than on a single core. Our algorithm on the other hand
+tional overhead of the overlapping boundaries. However, for large          uses a far less expensive global solve, Ccp , on a coarse grid, which
+problems, where many computational nodes are desired, one would            increases its computational demands much slower than usual as the
+need a huge many core shared memory machine with a very large              simulation grid is refined (its coefficient is k, not k4 , in (4)). An
+amount of memory – which is quite expensive and can lead to issues         extremely important aspect of this algorithm is that the computa-
+with cooling and energy. If algorithms that run on large computers         tional cost of increasing the resolution of the grid is mostly con-
+become less tightly coupled, they require less synchronization and         tained in Cl and Cf p as can be seen in (4), and both Cl and Cf p
+thus less shared memory, allowing cluster cores to be physically           scale extremely well with the number of processors (almost per-
+further apart (even on separate machines).                                 fectly linearly). The reason for this is that they are comprised of
+                                                                           a large number of independent tasks. During the computations of
+Thus, a more typical scenario is to switch to a non-shared memory          Cf p , no communication of boundary information is required once
+model where memory might be shared by clusters of cores but is not         the boundary conditions are initially set. The result is that on a large
+shared between different clusters. Instead, each cluster has its own       number of processors our algorithm is dominated by Ccp , which is
+RAM. Although much more practical, this large non-shared mem-              significantly less expensive than Cp .
+ory infrastructure leads to a significant computational overhead as
+it requires data communication. That same overhead is also present
+when trying to utilize graphics cards. For the advection step Cl ,         3     Making a Divergence-Free Flow
+boundary data only needs to be copied between clusters of cores
+once for each time step. Note that to do this a CFL condition is as-       In order to use a coarser projection step we must determine how to
+sumed to bound the amount of cells that need to be copied. Projec-         make a coarser grid from our simulation grid, solve on coarser grid,
+tion, on the other hand, requires at least one copy for each iteration     and then map the results to our simulation grid in a way that main-
+of the solver. For a typical conjugate gradient solver this means          tains the divergence-free property. Our algorithm for one-phase
+that we have to copy or exchange data on the boundaries before             smoke proceeds as in [Fedkiw et al. 2001], except instead of solving
+every iteration. If we were to use a multi-grid method instead, we         the Poisson equation on the fine grid we do the following:
+would still need many communications for each step in a V-cycle                1. Map the velocity field to a coarse uniform grid
+and several V-cycles are typically required for convergence.
+                                                                               2. Make the resulting field divergence free on that coarse grid
+Practical experience has shown that the computational bottleneck
+of exchanging boundary information leads to the projection scal-               3. Map these velocities back to our fine simulation grid
+ing relativity poorly and dominating the cost of the simulation even           4. Make the resulting field divergence free on the fine grid
+3.1   Navier-Stokes Equations
+
+On the fine simulation grid, we solve the inviscid, incompressible                              (a)                                    (b)
+Navier-Stokes equations for the conservation of mass and momen-
+tum, given by
+                                       1
+                      �         u = − ∇p + f�
+                           u · ∇�
+                      ut + �                                            (5)
+                                       ρ                                                        (c)                                    (d)
+                             ∇·�u = 0,                                  (6)
+where � u is the velocity field of the fluid, ρ is the density of the fluid,
+                                                                               Figure 4: A refined grid with four coarse cells. (a) A coarse cell
+f� are any external forces (such as gravity), and p is the fluid pres-         with no refinement. (b) A coarse cell with an octree inside (c) A
+sure. We solve these equations by first calculating an intermediate            coarse cell with a uniform grid inside. (d) A coarse cell with multi-
+velocity field �u� using                                                       ple levels of uniform grids inside.
+                      u� − �
+                      �    un                                                  where f aces is the set of fine scale faces that overlap with the
+                                     un = f�
+                               un · ∇�
+                              +�                                        (7)
+                        ∆t                                                     coarse face c, Af is the area of the fine face, and n is the num-
+and subsequently adding in the pressure forces via                             ber of elements in f aces. One could liken this to methods that map
+                                                                               particles to a background grid such as the PIC/FLIP method pro-
+                        un+1 − �
+                        �      u�    1                                         posed in [Zhu and Bridson 2005], the vortex particles proposed
+                                  = − ∇p,                               (8)
+                           ∆t        ρ                                         in [Selle et al. 2005], or the SPH method proposed in [Losasso
+                                                                               et al. 2008]. All these authors had proposed methods for mapping
+where the pressure is calculated by solving a Poisson equation of              from the velocity degrees of freedom defined on particles to a back-
+the form                                                                       ground coarse grid, performing computation on the coarse grid, and
+                           1
+                       ∇ · ∇p̂ = ∇ · �  u�                    (9)              then mapping information back. Contrary to these techniques in
+                           ρ
+                                                                               which the typical particle to grid mapping aims to have every par-
+and p̂ = p∆t.                                                                  ticle influence the coarse grid, we do not map velocity degrees of
+(7) is solved on the fine simulation grid and represents Cl . The              freedom that are not incident on the coarse faces, meaning that they
+                     u� are then mapped to coarse grid (step 1). (8)
+resulting velocities �                                                         have no influence on the coarse grid. We admit that it is desirable to
+and (9) representing Ccp are then solved on the coarse grid (step              map more degrees of freedom; however, it turns out that our map-
+2). After determining �un+1 on the coarse grid, we then determine              ping allows for a more efficient handling of boundary conditions
+un+1 on the fine grid, as represented by Cf p (steps 3-4).
+�                                                                              and is one of the key ideas that allows Cf p to scale linearly with
+                                                                               the number of processors.
+3.2   Mapping to the Coarse Grid
+                                                                               3.3   Coarse Grid Projection
+Conceptually, our scheme was designed by taking a fine simula-
+tion grid and performing binary coarsening up to some level as is              Although we can use the standard Navier-Stokes equations for the
+done with octrees. This results in both a fine and coarse grid that            coarse projection in the absence of objects, we must modify these
+we could use in our algorithm. However, our framework is actu-                 equations when dealing with objects or octrees. This is because our
+ally much more flexible and resembles that proposed in [Losasso                objects are rasterized on the fine simulation grid, and a coarse grid
+et al. 2006]. They started with a base level grid and place an oc-             face can thus contain a fraction of an object. Following [Losasso
+tree in each cell so that the resolution could be increased locally.           et al. 2004], we used the volume-weighted Poisson equation given
+This was done to lower the computational cost of accessing octree              by                           „            «
+nodes by removing the top of the tree which replaces some number                                                    1
+                                                                                                   Vcell ∇ · �u� − ∇p̂ = 0.                     (11)
+of levels with uniform grid access. Their octrees could be any size                                                 ρ
+including no refinement at all, see figures 4(a) and 4(b). The deep-
+est levels of their octrees would represent the simulation grid in our         We can then write
+framework whose degrees of freedom we would like to upgrade and                                           X ` �      ´
+their highest level represents the uniform coarse grid in which we                       u� = Af ace
+                                                                               Vcell ∇ · �                   uf · �nf βf + (�
+                                                                                                             �              us · �nf ) (1 − βf )
+will carry out the projection Ccp . However, our method for Cf p is                                     f ∈f aces
+general enough to not only support different levels of octree refine-                                                                             (12)
+ment as shown in figures 4(a) and 4(b) but to also support uniform             and
+grids inserted into each coarse grid cell as shown in Figure 4(c) or                        „        «                       „        «       !
+even multiple levels of uniform grids as shown in Figure 4(d). This                             1                   X            1
+                                                                                Vcell ∇ ·         ∇p̂ = Af ace                     ∇p̂   · �nf βf (13)
+flexibility comes from our method for solving each coarse cell indi-                            ρ                                ρ     f
+                                                                                                                 f ∈f aces
+vidually. However, we note that for most of our examples we chose
+to use uniform grids within each coarse cell as in Figure 4(c).
+                                                                               where � us is the velocity of the solid and βf is the fraction of the
+From the degree of freedom standpoint, every face on the finest                face that is not covered by a solid. Using (11) with definitions (12)
+resolution of all grids represents one degree of freedom for velocity          and (13) instead of (9) on the coarse grid allows for high fidelity
+whereas each face of the base coarse grid represents a degree of               modeling of stationary and moving solids as shown in figures 3 and
+freedom for a much coarser set of velocities. We map the fine grid             5. Note that in (12) and (13) we have factored Af ace out in front
+velocities to the coarser grid by using an area-weighted average of            of the sum as opposed to [Losasso et al. 2004]. This is because on
+all the fine grid velocities which is given by,                                coarse grid all of our faces have the same size. As long as this is
+                                                                               true, one can omit Af ace from the equations and still retain sym-
+                               1 X                                             metry. Otherwise it is more appropriate to include Af ace inside the
+                        u�c =
+                        �                    u�f
+                                          Af �                   (10)
+                              n                                                summation.
+                                  f ∈f aces
+Figure 5: An example with smoke flowing around a static sphere. The large figure is a 512 × 1024 × 512 simulation with a 64 × 128 × 64
+coarse grid. The smaller figures are comparisons of a simulation using different grid resolutions. The resolutions are starting from the left to
+right, top to bottom: a 512 × 1024 × 512 simulation with a 64 × 128 × 64 coarse grid, a 256 × 512 × 256 simulation with a 64 × 128 × 64
+coarse grid, a 128 × 256 × 128 simulation with a 64 × 128 × 64 coarse grid, a 64 × 128 × 64 base simulation, a 64 × 128 × 64 simulation
+with a 32 × 64 × 32 coarse grid, and a 64 × 128 × 64 simulation with a 16 × 32 × 16 coarse grid with Kolmolgorov noise.
+
+
+3.4   Mapping to the Fine Grid                                             dissipative because it uses a constant velocity difference to update
+                                                                           the fine grid cells as opposed to a constant velocity. Note that when
+After solving for a divergence-free field on the coarse grid, we           α is not 1 or 0, since the divergence operator is linear, one still
+then need to map results of (8) and (9) back to the fine simulation        obtains a divergence-free field on each coarse cell as defined by the
+grid. As mentioned earlier, many particle methods do this; how-            fine grid velocities. Moreover, one can blend a degree of dissipation
+ever, whereas particle-based methods require every particle degree         into the numerical method as is typical of a PIC/FLIP scheme. In
+of freedom to receive information from the coarse grid, we instead         our examples, we found that lower values for an α create more
+only map to the fine grid faces that are incident upon the coarse grid     detailed and dynamic results and thus use a value of 0. Of course if
+faces which we once again stress is a key to our algorithm. As is          one desires the flow to be more damped a higher value of α could
+widely done in PIC/FLIP type methods, one can map either veloci-           easily be substituted. However, in our examples, we found that
+ties or changes in velocities back to the fine degrees of freedom (see     additional damping was not needed. After the mapping, we must
+e.g. [Zhu and Bridson 2005]). In other words, our new velocities for       determine the fine grid velocities interior to each coarse grid cell to
+a given fine simulation grid face are:                                     make a divergence-free velocity field.
+          un+1
+          � f     un+1
+               = α� c            u�f + �
+                       + (1 − α)(�     un+1
+                                         c   u�c )
+                                            −�                   (14)
+                                                                           3.5   Fine Grid Local Projections
+where α is a constant between 0 and 1, �     uc are the velocities on
+our coarsened uniform grid and �   uf are the velocities on the fine       The method we used for mapping to the coarse grid, carrying out
+simulation grid. Note that in the case with α equal to 1, every fine       the coarse grid projection, and mapping back both gives continuity
+grid face is set to have the same velocity as the coarse grid face         across each coarse grid cell as defined by the fine grid velocity de-
+containing it. In this case, the total flux of material into or out of     grees of freedom as well as a divergence-free coarse velocity field.
+any coarse grid cell is defined by the local fluxes of the fine grid       In order to create a divergence-free field on the fine grid, we first
+and is still divergence free, although using α equal to 1 severely         consider each coarse grid cell to be its own unique computational
+dampens the flow field. When α equals 0 the fine grid velocities           domain. �  u� is given for every interior degree of freedom as was
+u�f simply acquire a change in velocity equal to the change that
+�                                                                          computed previously by (7). We then solve (8) and (9) for those in-
+the coarse grid experienced. Because we created the coarse grid            terior degrees of freedom with fixed velocity boundary conditions
+         u�c with an area-weighted average of the �
+velocity �                                          u�f incident upon      for every fine grid velocity incident on the boundaries of this coarse
+the face, adding this change to every fine grid cell incident on the       grid cell.
+face creates a net flux of 0 through the cell and thus a divergence-
+free flow field as defined by the fine grid faces. This is much less       If the coarse grid cell is not refined as in Figure 4(a), nothing needs
+              (a)                           (b)                            (c)                           (d)                           (e)
+Figure 6: A 2D smoke simulation run with a 128 × 128 base grid. (a) is a simulation on a 128 × 128 fine grid and a 64 × 64 coarse grid
+using interpolation. (b) is our method using a 128 × 128 grid and a 64 × 64 grid for projection. (c) is a base simulation on a 128 × 128
+grid. (d) is a simulation on a 256 × 256 fine grid and a 128 × 128 coarse grid with interpolation. (e) is our method using a 256 × 256 grid
+with a 128 × 128 grid for projection.
+to be done. If the coarse grid cell contains a uniform grid as in                4    Discussion
+Figure 4(c), one simply solves (8) and (9) on that uniform grid. If
+the coarse grid cell contains an octree as in Figure 4(b), one can               In our examples section, we choose various examples of both smoke
+simply use the octree method of [Losasso et al. 2004] in order to                and water and ran them using a standard method on a reasonable
+find a divergence-free set of velocities for the interior degrees of             base grid. We then analyzed two different strategies for using our
+freedom. We also propose a new method that can be used based                     method. One was to carry out grid refinements and achieve scal-
+on hierarchical subdivision. Consider Figure 4(b), looking only at               ing as exemplified by (4) where the base grid resolution was used
+the first level of octree refinement. In this case, four new degrees             for our projection in all finer grid simulations. This was done to
+of freedom are added, two vertical velocities and two horizontal                 illustrate that very high resolution simulations can be run using our
+velocities. For this example, (8) has four unknowns at the center of             method without suffering the curse of dimensionality on Ccp . As
+each of the four computational cells. However, because there are                 was proposed in [Fedkiw et al. 2001], the vorticity confinement
+Neumann boundary conditions, the system has a rank 1 degeneracy                  used in the base simulation was reduced linearly proportional to the
+and one unknown pressure can be removed. Thus we can set up a                    size of the grid for the finer grid simulations. Even with less vor-
+3 × 3 system of equations and solve with a fast direct method. For               ticity confinement we achieved significantly more computational
+faces between cells that are not refined any further, that represents            detail. We also consider whether our base simulation could be ac-
+the final velocity degree of freedom. This is true for the bottom and            celerated using an even coarser grid for the projection step. As these
+left velocities in Figure 4(b). For cells that are refined further, e.g.         grids became coarser and coarser, for example sixteen grid cells in a
+the top and right velocities in that figure, one can use (14) to map             dimension, we did notice artifacts resulting from using our method.
+either the velocities or change in velocity to those faces. One would            However, we stress that a fluid simulation on a very low resolution
+then consider each subcell such as the upper right hand corner of                grid would be enormously simplified as shown in Figure 7. To alle-
+Figure 4(b) and repeat the process by subdividing once and solving               viate these artifacts on the very coarse grid, we verified that feasible
+the 3 × 3 system.                                                                but not spectacular results could be obtained by using a Kolmolgo-
+                                                                                 rov spectrum as done in [Rasmussen et al. 2003] in combination
+In two spatial dimensions, these 3 × 3 matrices are very quick to                with a 16 × 32 × 16 grid but stress that it was only used in this
+invert and this leads to a very quick hierarchical solver that can be            one simulation to demonstrate that even at resolutions we would
+efficiently implemented for example on a GPU. In three dimensions                not recommend, one could obtain a plausible result.
+there are eight pressures and seven degrees of freedom, leading to
+a 7 × 7 matrix which can also be solved quickly. One might also                  Figure 6 illustrates that not all algorithms that scale according to
+imagine using the hierarchical subdivision only to do the first level            (4) produce good results. Figure 6(c) is a baseline simulation on a
+and using the octree solver to solve the upper right hand corner                 128 × 128 grid to give a sense one would expect to obtain with a
+of Figure 4(b). Similarly, consider Figure 4(d), one can use the                 standard method. Figure 6(b) shows our method on a 128 × 128
+first level of the hierarchical approach to get the first four veloci-
+ties and then apply a uniform grid solver on the upper right hand
+corner. Note that when solving these small matrices, one can use
+a direct method, such as Cholesky factorization, since these matri-
+ces are symmetric positive definite after the extra degree of free-
+dom is eliminated. Because these systems are fairly quick to solve
+and because there are many independent systems to solve, one can
+imagine using threads to solve these systems simultaneously. This
+problem also lends itself well to specialized architectures such as
+the GPU that can very quickly execute many low cost processes.
+We note that although we implemented and tested all of the above                 Figure 7: A comparison between (Left) a simulation using our
+methods for the fine local projections, for larger subgrids such as              method with a fine resolution of 64 × 128 × 64 and a coarse reso-
+8 × 8 × 8 we primarily used one level of refinement with PCG as                  lution of 16 × 32 × 16 and (Right) without using our method on a
+we found that this was fastest.                                                  16 × 32 × 16 grid.
+Figure 8: An example with water pouring into a box. This is a comparison of a simulation using different grid resolutions. The resolutions
+are starting from the left to right, top to bottom: a 512 × 512 × 512 simulation with a 128 × 128 × 128 coarse grid, a 256 × 256 × 256
+simulation with a 128 × 128 × 128 coarse grid, a 128 × 128 × 128 base simulation, a 128 × 128 × 128 simulation with a 64 × 64 × 64
+coarse grid, and a 128 × 128 × 128 simulation with a 32 × 32 × 32 coarse grid.
+grid using a grid which was coarsened to 64 × 64 for the projection       height columns of water would be lost. If instead, the coarse cell
+step. Note that figures 6(b) and (c) are quite similar in detail and      constant pressure boundary condition is set, this treats the whole
+structure. Figure 6(a) uses our algorithm except that the fine grid       cell as if it was air and may allow too much or too little flow inside
+projections represented by Cf p are replaced with simple interpo-         as this cell is not divergence free. This can result in underwater air
+lation from the coarse grid. This method would also scale as (4)          pockets not only collapsing but losing mass. We tried both of these
+but produces inferior results. Not only is detail lost, but more im-      methods and observed both phenomena to some degree.
+portantly, the structure of the smoke is lost due to added viscosity.
+This exemplifies the need for the fine grid projections represented       Because water waves are generated based on pressure differences
+by Cf p in order to obtain detail and structure that would be present     one would expect that water would be more sensitive to the coarse
+on a finer grid. However, we note that there are other techniques         grid approximation than smoke. However, as shown in Figure 8, we
+such as [Kim et al. 2008] and [Yoon et al. 2009] that do not need         found that refining a reasonable base simulation added detail with-
+to run a large simulation. Instead they run a coarse simulation and       out noticeable issues until the surface started to become flat and
+add details as a postprocess at the fine scale.                           at rest, at which point some minor artifacts could be seen. Under
+                                                                          coarsening, however, these artifacts were harder to ignore. There-
+We carried out this same comparison for the case of using a finer         fore, we decided to use the coarse grid approximation to obtain the
+simulation resolution but using the same resolution for the pro-          flow field only for cells interior to the water. We then collected
+jection as the base simulation shown in Figure 6(c). Figure 6(e)          all fine scale cells near the free surface (i.e. fine grid cells inside
+shows the results obtained using our method. Note the highly in-          a coarse cell that contains a mixture of fluid and air) for a second
+creased structure and detail whereas Figure 6(d), which is obtained       Poisson solve that used the velocities from the fine grid projections
+using interpolation, has no obvious added benefits over Figure 6(c).      as Neumann boundary conditions. Performing this larger solve re-
+In summary, simply using our coarsening methodology with lin-             moved the artifacts albeit adding to the computation cost. However,
+ear interpolation loses large amounts of detail in coarsening (Fig-       since the cells near the surface only represent a lower dimensional
+ure 6(c) becomes Figure 6(a)) and gains no detail when refining           set, essentially two spatial dimensions out of three, this additional
+(Figure 6(c) becomes Figure 6(d)). In contrast, our method pre-           cost disappears under grid refinement, although on the grids we
+serves detail when coarsening (Figure 6(c) becomes Figure 6(b)),          used there was some overhead. We also note that this overhead
+and gains significantly more detail when refining (Figure 6(c) be-        tends to be fairly minimal because the surface solve is only needed
+comes Figure 6(e)). Although our results do achieve similar details       for relatively calm fluid, making the solution quicker to obtain.
+to the fine grid base simulation, our results do have numerical differ-
+ences. Figure 9 demonstrates the quantitative differences between
+our method and a standard projection on the fine grid.
+
+While not our original intent, we also explored using our technique
+for liquids. As for smoke, refinement worked rather well. An added
+complication with water is in dealing with the free surface where
+constant pressure Dirichlet boundary conditions are imposed. Since
+the coarse grid does not contain the pressure degrees of freedom
+to represent the boundary conditions on the fine grid, one has to
+either over or under estimate mixed air/water regions. Failing to put     Figure 9: A quantitative comparison of our technique and a stan-
+constant pressure Dirichlet boundary conditions on the coarse grid        dard fluid simulation. (Left) Our technique with a 128 × 256 fine
+cell means that that cell will be solved in a divergence-free manner      grid and a 32 × 64 coarse gird. (Center) The base simulation with
+on the coarse grid, which is preserved by our mapping to the fine         a 128 × 256 grid. (Right) A comparison of the velocities between
+grid. This means that any air pockets in that cell would not collapse     the two techniques. The warmer colors illustrate bigger differences.
+properly. Moreover, wave type forces that are created by different        The maximum velocity error is about 1%.
+       Example               Fine               Coarse             Fine      Coarse          Ours         Fine        Coarse        Ours
+                                                                  1 proc      1 proc        1 proc      64 procs     64 procs      64 procs
+       Static Sphere     64 × 128 × 64       16 × 32 × 16      5.6m/34s    1.2s/0.4s       20s/2s     2.2m/13s       12s/4s        30s/3s
+       Static Sphere     64 × 128 × 64       32 × 64 × 32      5.6m/34s    4.5s/0.9s       20s/2s     2.2m/13s       30s/6s        1m/6s
+       Static Sphere    128 × 256 × 128     64 × 128 × 64       5.8h/7m    5.6m/34s      8.3m/25s     16m/19s       2.2m/13s      2.7m/8s
+       Static Sphere    256 × 512 × 256     64 × 128 × 64        50h/1h    5.6m/34s      1.6h/2m       2h/2.5m      2.2m/13s      9m/11s
+       Static Sphere   512 × 1024 × 512     64 × 128 × 64            -     5.6m/34s            -      47h/28m       2.2m/13s     43m/26s
+       Moving Sphere     64 × 128 × 64       16 × 32 × 16       8m/32s     0.5s/0.1s       20s/2s      2m/12s        15s/5s        40s/4s
+       Moving Sphere     64 × 128 × 64       32 × 64 × 32       8m/32s      3s/0.6s        20s/2s      2m/12s        45s/9s       1.1m/7s
+       Moving Sphere    128 × 256 × 128     64 × 128 × 64        9h/7m      8m/32s       16m/31s      10m/20s        2m/12s       6m/12s
+       Moving Sphere    256 × 512 × 256     64 × 128 × 64        75h/1h     8m/32s       2.5h/2m       3h/2.5m       2m/12s      17m/15s
+       Moving Sphere   512 × 1024 × 512     64 × 128 × 64            -      8m/32s             -      70h/28m        2m/12s      70m/28s
+       Water            128 × 128 × 128      32 × 32 × 32       10m/15s      20s/2s       5.3m/8s       2m/3s       25s/2.5s      1m/1.5s
+       Water            128 × 128 × 128      64 × 64 × 64       10m/15s     2.3m/7s      6.7m/10s       2m/3s         1m/3s       1m/1.5s
+       Water            256 × 256 × 256    128 × 128 × 128     3.7h/2.2m   10m/15s         2h/74s     43m/17s         2m/3s      11m/4.5s
+       Water            512 × 512 × 512    128 × 128 × 128           -     10m/15s             -      16h/3.2m        2m/3s      65m/13s
+
+Table 1: Timing information for our examples as well as base simulations on the fine and coarse grid using both 1 processor and 64
+processors. Some large resolution simulations (noted by -) could not be run on a single processor due to RAM restrictions. All of our timings
+are given in time per frame/time per time step. Note that all examples were run at 24 frames per second and with a CFL number of 0.9.
+
+5     Examples                                                             When comparing our method to base simulations on the coarse grid,
+                                                                           our method runs slower when using a single processor. This is be-
+We demonstrate the effectiveness of our algorithm on a number of           cause a large amount of time is spent in Cf p . However, our method
+smoke and water simulations. All our smoke simulations contained           scales well with a large number of processors, and we achieve sim-
+a density source at the bottom of the domain, and our water sim-           ilar timings to the coarse grid base simulations for each time step.
+ulations contained a water source at the top of the domain. Fig-           This is because the cost of Cf p scales linearly and as a result, both
+ure 6 shows two-dimensional smoke examples for illustration. We            algorithms are dominated by the global projection (Ccp or Cp ). We
+then demonstrate our algorithm for three dimensional examples of           note that in some cases our method actually runs more quickly per
+smoke and water. For each of these examples, we first ran a base           time step than the base simulation because we take smaller time
+simulation without using our method. We then used our method to            steps for a larger resolution grid.
+coarsen the projection resolution, which improves the performance
+while maintaining similar looking results. We also used our method
+to refine the base simulation, showing that we can achieve very de-
+                                                                           6    Conclusions and Future Work
+tailed results in a reasonable amount of time.
+                                                                           We have introduced a novel algorithm that improves the perfor-
+                                                                           mance of existing fluid simulations and can achieve realistic re-
+5.1   Smoke                                                                sults using large fluid grids. Our algorithm effectively reduces the
+                                                                           amount of time required for the Poisson solve by using a coarse grid
+We ran a number of three-dimensional smoke simulations as shown            projection and then small projections within each coarse grid cell.
+in figures 3 and 5. We would like to point out the stark differences
+in detail resulting from the different structures of the smoke that        Although our method was used to solve the Poisson equation for
+can be achieved by using our method to refine the grid resolution.         incompressible flow, (8) updates u� to un+1 by subtracting ρ1 ∇p̂.
+For example, when comparing the smoke examples of Figure 3, we             This means that at every face of our grid we define ∇p̂, the deriva-
+achieve two distinct vortex rings in the high resolution example but       tives of p, on the entire grid.“ We ”can think of this as solving a
+only achieve one with the lower resolutions. Also note the fine scale
+                                                                           general Poisson equation ∇ · ρ1 ∇p = f for some f . Our method
+vorticies around the sphere as shown in Figure 5.
+                                                                           provides a technique for quickly and efficiently finding an approx-
+5.2   Water                                                                imation for ∇p on the fine grid. Because many other applications
+                                                                           make use of Poisson equations and/or its derivatives, it would be
+                                                                           interesting to explore the use of our methodology in those areas.
+For water, we ran a number of simulations as shown in Figure 8.
+                                                                           However, one should be cautious of the fact that we are not doing
+For these examples, we used the surface solve towards the end of
+                                                                           a formal Hodge decomposition, meaning that the divergence-free
+the simulations when the fluid starts to settle but did not when there
+                                                                           vector field that we get is not the unique field that decomposes u�
+is highly turbulent flow near the beginning of the simulation. As
+                                                                           into a divergence-free field plus the gradient of a scalar field. That
+with smoke, we can achieve a large amount of additional detail by
+                                                                           being said, we have found that this approximation works very well
+using our method to increase the resolution of the water.
+                                                                           for our applications and is likely to do so for others.
+5.3   Timing                                                               One interesting avenue of future work would be to integrate our
+                                                                           method with a multi-grid solver. Standard multi-grid solvers of-
+The timings for our simulations are shown in Table 1. We compare           ten need special treatment for problems involving free surfaces, ob-
+our results with those obtained by running a base simulation on the        ject boundaries, special exterior domain boundary conditions, etc.
+coarse grid, and a base simulation on the refined grid. Note, for          Otherwise, their convergence rate can be a bit slow. The difficulty
+example, that our method runs approximately 67 times faster on             lies in that multi-grid solutions do not obtain a divergence-free flow
+the high resolution static sphere example, shown on line four of the       field until they are fully converged (this is also true for cg and all
+table above. This makes previously infeasible simulations tractable.       traditional methods). Our method provides an interesting twist in
+An important detail to note is that a base high resolution simulation      that it can be used as a prolongation operator for multi-grid. One
+quickly runs up against hard memory limits on a machine. This is           use of this is that instead of running a multi-grid solver fully to con-
+partially alleviated with our method, as there is significantly less       vergence, the solver can be short-circuited and our method can be
+memory access during the projection step.                                  used as a final prolongation producing a divergence-free flow field.
+Acknowledgements                                                       L OSASSO , F., TALTON , J., K WATRA , N., AND F EDKIW, R. 2008.
+                                                                          Two-way coupled sph and particle level set fluid simulation.
+Research supported in part by ONR N0014-06-1-0393, ONR                    IEEE Trans. on Vis. and Comput. Graph. 14, 4, 797–804.
+N00014-06-1-0505, ONR N00014-05-1-0479 for a computing
+                                                                       M OLEMAKER , J., C OHEN , J., PATEL , S., AND N OH , J. 2008.
+cluster, NIH U54-GM072970, NSF ACI-0323866, and King Ab-
+                                                                         Low viscosity flow simulations for animation. In SCA ’08: Pro-
+dullah University of Science and Technology (KAUST) 42959.
+                                                                         ceedings of the 2008 ACM SIGGRAPH/Eurographics Sympo-
+M.L. was supported in part by an Intel Ph.D. Fellowship. We would
+                                                                         sium on Computer Animation, Eurographics Association, 9–18.
+like to thank Christos Kozyrakis for additional computing resources
+and Jacob Leverich for helping us use those resources.                 M ULLEN , P., C RANE , K., PAVLOV, D., T ONG , Y., AND D ES -
+                                                                         BRUN , M. 2009. Energy-preserving integrators for fluid anima-
+
+References                                                               tion. In SIGGRAPH ’09: ACM SIGGRAPH 2009 papers, 1–8.
+                                                                       M ÜLLER , M., C HARYPAR , D., AND G ROSS , M. 2003. Particle-
+B ERGER , M., AND O LIGER , J. 1984. Adaptive mesh refinement             based fluid simulation for interactive applications. In Proc. of the
+   for hyperbolic partial differential equations. J. Comput. Phys.        2003 ACM SIGGRAPH/Eurographics Symp. on Comput. Anim.,
+   53, 484–512.                                                           154–159.
+B OLZ , J., FARMER , I., G RINSPUN , E., AND S CHRODER , P. 2003.      NARAIN , R., S EWALL , J., C ARLSON , M., AND L IN , M. C. 2008.
+   Sparse matrix solvers on the gpu: Conjugate gradients and multi-      Fast animation of turbulence using energy transport and proce-
+   grid. ACM Trans. Graph. (SIGGRAPH Proc.) 22, 3, 917–924.              dural synthesis. In SIGGRAPH Asia ’08: ACM SIGGRAPH Asia
+                                                                         2008 papers, ACM, New York, NY, USA, 1–8.
+B RIDSON , R., H OURIHAM , J., AND N ORDENSTAM , M. 2007.
+   Curl-noise for procedural fluid flow. ACM Trans. Graph. 26, 3,      N IELSEN , M. B., C HRISTENSEN , B. B., Z AFAR , N. B., ROBLE ,
+   46.                                                                    D., AND M USETH , K.        2009. Guiding of smoke ani-
+                                                                          mations through variational coupling of simulations at differ-
+D ESBRUN , M., AND C ANI , M.-P. 1996. Smoothed particles:                ent resolutions. In SCA ’09: Proc. of the 2009 ACM SIG-
+   A new paradigm for animating highly deformable bodies. In              GRAPH/Eurographics Symp. on Comput. Anim., 217–226.
+   Comput. Anim. and Sim. ’96 (Proc. of EG Wrkshp. on Anim. and
+   Sim.), Springer-Verlag, R. Boulic and G. Hegron, Eds., 61–76.       P FAFF , T., T HUEREY, N., S ELLE , A., AND G ROSS , M. 2009.
+                                                                          Synthetic turbulence using artificial boundary layers. In SIG-
+D UPONT, T., AND L IU , Y. 2003. Back and forth error compensa-           GRAPH Asia ’09: ACM SIGGRAPH Asia 2009 papers, 1–10.
+   tion and correction methods for removing errors induced by un-
+                                                                       R ASMUSSEN , N., N GUYEN , D., G EIGER , W., AND F EDKIW, R.
+   even gradients of the level set function. J. Comput. Phys. 190/1,
+                                                                          2003. Smoke simulation for large scale phenomena. ACM Trans.
+   311–324.
+                                                                          Graph. (SIGGRAPH Proc.) 22, 703–707.
+F EDKIW, R., S TAM , J., AND J ENSEN , H. 2001. Visual simulation      R EEVES , W. 1983. Particle systems - a technique for modeling a
+   of smoke. In Proc. of ACM SIGGRAPH 2001, 15–22.                        class of fuzzy objects. In Comput. Graph. (Proc. of SIGGRAPH
+F OSTER , N., AND M ETAXAS , D. 1997. Controlling fluid anima-            83), vol. 17, 359–376.
+   tion. In Comput. Graph. Int., 178–188.                              S CHECHTER , H., AND B RIDSON , R. 2008. Evolving sub-grid
+G AO , Y., L I , C.-F., H U , S.-M., AND BARSKY, B. A. 2009. Simu-        turbulence for smoke animation. In SCA ’08: Proc. of the 2008
+   lating gaseous fluids with low and high speeds. Comput. Graph.         ACM SIGGRAPH/Eurographics Symp. on Comput. Anim., 1–7.
+   Forum 28, 7, 1845–1852.                                             S ELLE , A., R ASMUSSEN , N., AND F EDKIW, R. 2005. A vortex
+                                                                          particle method for smoke, water and explosions. ACM Trans.
+H ORVATH , C., AND G EIGER , W. 2009. Directable, high-resolution
+                                                                          Graph. (SIGGRAPH Proc.) 24, 3, 910–914.
+   simulation of fire on the gpu. ACM Trans. Graph. 28, 3, 1–8.
+                                                                       S ELLE , A., F EDKIW, R., K IM , B., L IU , Y., AND ROSSIGNAC , J.
+K IM , B.-M., L IU , Y., L LAMAS , I., AND ROSSIGNAC , J. 2005.           2008. An unconditionally stable MacCormack method. Journal
+   Using BFECC for fluid simulation. In Eurographics Workshop             of Scientific Computing 35, 2, 350–371.
+   on Natural Phenomena 2005.
+                                                                       S TAM , J., AND F IUME , E. 1993. Turbulent wind fields for gaseous
+K IM , T., T H ÜREY, N., JAMES , D., AND G ROSS , M. 2008.               phenomena. In Proc. of SIGGRAPH 1993, 369–376.
+   Wavelet turbulence for fluid simulation. In SIGGRAPH ’08:
+   ACM SIGGRAPH 2008 papers, 1–6.                                      S TAM , J. 1999. Stable fluids. In Proc. of SIGGRAPH 99, 121–128.
+
+K IM , D., S ONG , O.- Y., AND KO , H.-S. 2009. Stretching and         W ICKE , M., S TANTON , M., AND T REUILLE , A. 2009. Modular
+   wiggling liquids. In SIGGRAPH Asia ’09: ACM SIGGRAPH                  bases for fluid dynamics. In SIGGRAPH ’09: ACM SIGGRAPH
+   Asia 2009 papers, ACM, New York, NY, USA, 1–7.                        2009 papers, ACM, New York, NY, USA, 1–8.
+
+L AMORLETTE , A., AND F OSTER , N. 2002. Structural modeling           YOON , J.-C., K AM , H. R., H ONG , J.-M., K ANG , S.-J., AND
+   of flames for a production environment. ACM Trans. Graph.             K IM , C.-H. 2009. Procedural synthesis using vortex particle
+   (SIGGRAPH Proc.) 21, 3, 729–735.                                      method for fluid simulation. Comput. Graph. Forum 28, 7, 1853–
+                                                                         1859.
+L OSASSO , F., G IBOU , F., AND F EDKIW, R. 2004. Simulating wa-
+                                                                       Z HU , Y., AND B RIDSON , R. 2005. Animating sand as a fluid.
+   ter and smoke with an octree data structure. ACM Trans. Graph.
+                                                                          ACM Trans. Graph. (SIGGRAPH Proc.) 24, 3, 965–972.
+   (SIGGRAPH Proc.) 23, 457–462.
+L OSASSO , F., F EDKIW, R., AND O SHER , S. 2006. Spatially adap-
+   tive techniques for level set methods and incompressible flow.
+   Computers and Fluids 35, 995–1010.
+

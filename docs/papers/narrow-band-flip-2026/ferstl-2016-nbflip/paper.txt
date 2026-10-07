@@ -1,0 +1,536 @@
+EUROGRAPHICS 2016 / J. Jorge and M. Lin                                                                                             Volume 35 (2016), Number 2
+(Guest Editors)
+
+
+
+
+                                  Narrow Band FLIP for Liquid Simulations
+
+                                 Florian Ferstl1 , Ryoichi Ando2 , Chris Wojtan2 , Rüdiger Westermann1 , and Nils Thuerey1
+
+                                                              1 Technische Universität München    2 IST Austria
+
+
+
+
+Figure 1: Two simulations with a (background-)grid resolution of 2003 : Our method (left) is nearly indistinguishable from regular FLIP
+(right), but uses only one million particles instead of 24 million. Computations outside of the pressure solver are sped up by a factor of more
+than 6, the total computation time for 250 frames is reduced from 4.4h to 2h, and the average memory footprint is reduced by a factor of 2.
+
+        Abstract
+        The Fluid Implicit Particle method (FLIP) for liquid simulations uses particles to reduce numerical dissipation and provide
+        important visual cues for events like complex splashes and small-scale features near the liquid surface. Unfortunately, FLIP
+        simulations can be computationally expensive, because they require a dense sampling of particles to fill the entire liquid volume.
+        Furthermore, the vast majority of these FLIP particles contribute nothing to the fluid’s visual appearance, especially for larger
+        volumes of liquid. We present a method that only uses FLIP particles within a narrow band of the liquid surface, while efficiently
+        representing the remaining inner volume on a regular grid. We show that a naïve realization of this idea introduces unstable
+        and uncontrollable energy fluctuations, and we propose a novel coupling scheme between FLIP particles and regular grid
+        which overcomes this problem. Our method drastically reduces the particle count and simulation times while yielding results
+        that are nearly indistinguishable from regular FLIP simulations. Our approach is easy to integrate into any existing FLIP
+        implementation.
+        Categories and Subject Descriptors (according to ACM CCS): I.3.7 [Computer Graphics]: Three-Dimensional Graphics and
+        Realism—Animation
+
+
+
+1. Introduction                                                                          for events like complex splashes and small-scale features near the
+                                                                                         liquid surface.
+The Fluid Implicit Particle method (FLIP) is arguably the most
+widely used simulation algorithm for high-quality liquid special ef-                        Unfortunately, FLIP simulations can be computationally expen-
+fects [BLMB13, BBAW15]. Impressive large-scale effects ranging                           sive, as they require a dense sampling of the fluid domain with par-
+from characters splashing in the ocean to flooding cities have been                      ticles. Furthermore, the vast majority of these FLIP particles con-
+simulated with this method. Its main strengths result from lever-                        tribute nothing to the fluid’s visual appearance, especially for larger
+aging non-diffusive Lagrangian transport in combination with ac-                         volumes of liquid.
+curate Eulerian discretizations to ensure divergence-freeness. The
+particles in a FLIP simulation also provide important visual cues                           We present a method that only uses FLIP particles within a nar-
+
+ c 2016 The Author(s)
+Computer Graphics Forum c 2016 The Eurographics Association and John
+Wiley & Sons Ltd. Published by John Wiley & Sons Ltd.
+                                                           Ferstl et al. / Narrow Band FLIP
+
+row band of the liquid surface, while efficiently representing the re-        a wider range of elastoplastic materials such as snow [SSC∗ 13]
+maining inner body of the fluid on a regular grid. Although the main          or viscoelastic fluids and foams [RGJ∗ 15, YSB∗ 15]. Golas et
+idea may seem straightforward, its implementation is non-trivial,             al. [GNS∗ 12] use Lagrangian particles as a vortex basis in the inte-
+and the naïve approach introduces unstable and uncontrollable en-             rior of a grid-based Eulerian simulation. For the related problem of
+ergy fluctuations. Our method drastically reduces the particle count          surface tracking, Enright et al. [ELF05] augment the Eulerian level
+and simulation times, while still exhibiting the desired bounded en-          set method with Lagrangian marker particles placed on both sides
+ergy behavior and yielding results that are nearly indistinguishable          of a tracked surface, in order to better preserve Lagrangian details
+from regular FLIP simulations.                                                while letting the grid handle topological changes. Their method is
+The contributions of our method are:                                          similar to our tracking of the liquids surface, yet we only require
+                                                                              Lagrangian particles on one side of the surface.
+• A method to efficiently reduce the number of particles in a FLIP
+   simulation, leading to speed-ups up to a factor of 5 in our exam-             Recently, Chentanez et al. [CMK14] coupled a 3D Eulerian
+   ples (factor 2 in average), and                                            method, a 2D Eulerian shallow water solver, and a Lagrangian SPH
+• Insights into instabilities caused by naïve couplings between par-          discretization within the same simulation. Their approach of com-
+   ticle and grid velocities, leading to a stable narrow band ap-             puting an SPH simulation near the surface of an Eulerian solver is
+   proach.                                                                    similar in spirit to ours, but their approach focuses solely on SPH,
+In this way, we achieve significant performance improvements with             not FLIP. Additionally, in our experience, even a non-trivial adop-
+an approach that can be easily integrated into any existing FLIP              tion of their method to pure FLIP simulations leads to inherently
+implementation.                                                               unstable simulations. The analysis and solution of this problem is a
+                                                                              central contribution of our paper.
+1.1. Related Work
+Researchers in computer graphics use a variety of methods for sim-            2. FLIP
+ulating fluid dynamics. Eulerian discretizations are popular because          Our liquid simulation solves the inviscid Navier-Stokes equations
+they avoid complicated re-meshing of Lagrangian meshes and
+                                                                                                        ∂u            1
+neighbor-finding between Lagrangian particles, and they can take                                           = −u · ∇u − ∇p + f,
+advantage of fast methods for indexing and caching data in regu-                                        ∂t            ρ
+lar grids [FM96, Sta99, FF01]. However, Eulerian methods tend to              which are subject to the incompressibility constraint ∇ · u = 0.
+either suffer from CFL conditions or numerical diffusion from con-            Here, u denotes the liquid’s velocity field, p the internal pressure,
+tinual re-sampling operations. On the other hand, Lagrangian fluid            ρ the density and f represents acceleration due to external forces
+simulation techniques, such as smoothed particle hydrodynamics                acting on the liquid. In the following, normal and bold variables
+(SPH) [MCG03, IOS∗ 14] avoid continual re-sampling operations                 represent parameters and variables stored on a regular grid, while
+at the expense of stability restrictions, neighborhood searches, and          variables with the subscript i refer to quantities stored on particles.
+numerical smoothing over the radius of a pre-defined kernel. We re-           Variables with the superscript p refer to particle quantities mapped
+fer the reader to [Bri08] for a more thorough look at fluid dynamics          to the grid.
+research in computer graphics.
+                                                                                 We will briefly review a typical FLIP approach, before detail-
+   Our method is based on an Eulerian-Lagrangian hybrid method                ing our narrow band algorithm. In a time step of the regular FLIP
+called the fluid-implicit particle method (FLIP), which was intro-            algorithm, the particles are first passively advected using the grid
+duced to the graphics community by Zhu and Bridson [ZB05]. The                velocity u. Then, the velocity stored on the particles is mapped to
+FLIP method has also been used for fluid control [PHT∗ 13] and                the grid, yielding a velocity field u p which covers the whole fluid
+two-phase flow [BB12, ATW15]. Note that our narrow band ap-                   domain and which is stored as an intermediate velocity field u∗ . In
+proach is actually used by Ando et al. [ATW15]. In addition, pre-             a similar manner, a particle region is reconstructed on the grid in
+vious researchers have improved upon the FLIP method by cor-                  the form of a scalar field φ p , whose zero-contour encloses all par-
+recting particle positions [UBH14] or adapting grid and particle              ticles. This φ p is used in the remaining steps as level set function φ
+sizes [ATW13]. Ando et al. [ATT12] use directed particle inser-               to mark the location of the liquid surface. The external forces are
+tion in combination with particle merging and splitting to simulate           added, u∗ is projected and the velocity of every particle i is updated
+thin liquid sheets, effectively using a higher FLIP particle density          according to the formula
+near the liquid surface than in the liquids interior. Adaptive particle
+sizes have also been used in purely Lagrangian approaches, e.g., by                                   ui ← (1 − α) uPIC
+                                                                                                                    i   + α uFLIP
+                                                                                                                             i    .                                (1)
+Solenthaler and Gross [SG11].                                                 Here, uPIC  is the current grid velocity, and uFLIP   is the difference
+                                                                                      i                                        i
+   Several other approaches have taken advantage of hybrid meth-              between the current velocity and the velocity right after mapping
+ods in order to leverage the strengths of both Eulerian and La-               the particles to the grid, both interpolated at the position of particle
+grangian fluid discretizations. Several authors [SS06, LTKF08,                i. The parameter α ∈ [0; 1] controls the amount of velocity diffusion
+RWT11] were able to successfully combine SPH simulations with                 in the simulation, and can be related to the fluid viscosity. It is ad-
+regular grid-based simulations, while Cornelis et al. [CIPT14] use            visable to use some form of particle re-sampling to avoid extremely
+SPH particles for the pressure projection step of a FLIP simulation.          densely and/or sparsely sampled regions. In its simplest form, this
+The material point method (MPM) combines a grid-based Eule-                   re-sampling adds and removes particles where necessary to keep
+rian simulation with Lagrangian marker particles in order to model            the per-cell particle count in a chosen range. We do not perform
+
+                                                                                                                                                  c 2016 The Author(s)
+                                                                                 Computer Graphics Forum c 2016 The Eurographics Association and John Wiley & Sons Ltd.
+                                                                          Ferstl et al. / Narrow Band FLIP
+
+this re-sampling in cells at the liquid surface to prevent visual arti-                        1: Advect particles
+facts. In our implementation we use α = 0.95, in combination with                              2: [NB-FLIP] Advect u and φ on grid ⇒ u0 and φ0
+tri-linear weights (i.e., a tri-linear kernel function) to map particle                        3: Map particles to grid ⇒ φ p and u p
+data to the grid, and vice versa. Fig. 2 (with statements colored red)                         4: Update level set and velocity on grid
+summarizes the regular FLIP algorithm described above.                                                [FLIP] φ ← φ p
+                                                                                                             u∗ ← u p
+   In principle, FLIP particles are relatively cheap: In contrast to                              [NB-FLIP] φ ← min(φ0 + h, φ p ) (Eq. 4)
+particles in, e.g., SPH, there is no communication between the                                               Re-initialize φ
+particles themselves, and particle solely communicate via the un-                                            u∗ ← nbcombine(u0 , u p , φ) (Eq. 3)
+derlying grid. Also, FLIP particles typically do not carry a mass                              5: Add external forces f
+and are passively advected with the flow. Hence, they are very ro-                             6: Project u∗ ⇒ u
+bust against variations in sampling density, and can be removed                                7: Update particle velocities (Eq. 1)
+and added without much overhead. However, in practice, the sheer                               8:     [FLIP] Resample particles (optional)
+amount of particles that is required to run a full FLIP simula-                                   [NB-FLIP] Resample particles in narrow-band
+tion leads to a huge computational workload—typically, eight par-
+ticles are used per cell in three dimensions [Bri08, BB12], but                              Figure 2: Comparison of the time step algorithms for FLIP and
+fewer [BB08] or even more [GB13] particles have also been used                               NB-FLIP. Steps tagged with [FLIP] and [NB-FLIP] are unique to
+successfully. In all our examples (see Section 4), the computations                          FLIP and NB-FLIP, respectively. Untagged steps are common to
+involving FLIP particles take up more than 60% of the compu-                                 both methods.
+tation time in each simulation step when using a standard, pre-
+conditioned conjugate gradients solver. This ratio increases fur-                            be observed independently of the order of the employed advection
+ther for advanced variations of FLIP, e.g., when a position correc-                          scheme. Rather, it is a result of the inherent differences between the
+tion step is performed to ensure a more uniform particle distribu-                           backward semi-Lagrangian advection and the forward FLIP advec-
+tion [ATT12, UBH14].                                                                         tion. Close to the surface, these differences are amplified through
+                                                                                             high frequencies in the underlying velocity fields and through the
+3. Narrow band FLIP                                                                          use of approximate, extrapolated velocities outside of the liquid’s
+                                                                                             surface.
+The central idea of our approach is to use FLIP particles only in a
+narrow band of fixed width R inside of the liquid surface, and to use                           A comparison of the memory requirements for a regular FLIP
+a standard, grid-based simulation with semi-Lagrangian advection                             simulation versus a pure Eulerian simulation indicates the mem-
+in the interior of the domain. Hence, we refer to our method as                              ory savings that can potentially be achieved with our method: Each
+narrow band FLIP (NB-FLIP). Our narrow band method consists                                  FLIP particle has to store at least position and velocity (3 floats
+of three main components:                                                                    each). Assuming 8 particles per cell, this leads to a memory re-
+                                                                                             quirement of 48 floating point numbers per cell. In contrast, when
+1. The coupling of grid simulation and FLIP simulation.
+                                                                                             using a purely Eulerian representation, the required information per
+2. A surface tracking method for correctly handling the liquids in-
+                                                                                             cell is a single velocity and a level-set value (4 floats in total). Thus,
+   terior.
+                                                                                             in all areas where our method can switch to the grid based repre-
+3. The re-sampling of particles to maintain a narrow band of fixed
+                                                                                             sentation, memory is reduced by a factor of 12.
+   width.
+The green statements in Fig. 2 highlight that few changes are neces-
+                                                                                             3.1. Grid-particle coupling
+sary to turn a standard FLIP simulation into a NB-FLIP simulation.
+                                                                                             The FLIP simulation in the narrow band has to be properly coupled
+   Throughout our algorithm, we make use of a level set function
+                                                                                             with the grid simulation in the liquids interior: First, we advect the
+φ. In contrast to standard FLIP, we need information about the dis-
+                                                                                             grid velocity u on the whole liquid domain by performing a semi-
+tance of particles to the liquid surface. However, because φ is not
+                                                                                             Lagrangian advection step, which yields an advected grid velocity
+our main visual representation, it does not need to be overly ac-
+                                                                                             u0 . Similarly, we advect all FLIP particles and map them to the grid,
+curate, and we initialize a Manhattan distance with several quick
+                                                                                             which in turn yields an advected particle velocity u p . Finally, at all
+passes over the grid. As a consequence, the reduced amount of par-
+                                                                                             grid vertices where a particle velocity is available (i.e., where u p is
+ticles in NB-FLIP easily compensates for the additional cost of the
+                                                                                             valid), we combine the values of u0 and u p into a single velocity
+level set, as well as for other additional steps that our method intro-
+                                                                                             u∗ . At all remaining grid vertices, we set u∗ equal to u0 . The com-
+duces.
+                                                                                             bination of u p and u0 should ensure a full FLIP simulation near the
+   Our choice to restrict particles to the surface region can be fur-                        liquid surface, i.e., values of u p should completely overwrite val-
+ther motivated by comparing FLIP velocity fields with their counter                          ues of u0 in the interior of the narrow band as well as at the surface
+parts in pure grid-based simulations. We observe that differences                            itself. In addition to that, the transition from grid to narrow band is
+between the velocity fields—advected via FLIP particles on the one                           crucial, and therefore has to be handled properly. To demonstrate
+hand, and advected using a semi-Lagrangian scheme on the other                               that a naive transition can quickly lead to unphysical gains in mo-
+hand—are predominantly noticeable near the surface. The impact                               mentum, we will first present an erroneous combination rule that
+of the FLIP particles is strongest right at the surface and quickly de-                      is based on ideas from existing methods, and, afterwards, we will
+creases away from it, which is illustrated in Fig. 3. This effect can                        present our “fixed” combination rule.
+
+ c 2016 The Author(s)
+Computer Graphics Forum c 2016 The Eurographics Association and John Wiley & Sons Ltd.
+                                                           Ferstl et al. / Narrow Band FLIP
+                                                                 >0.05
+                                                                                                                  Frame 1                              Frame 170
+                                                                 0.04                                             common                      NB-FLIP with Eq. (2)
+
+                                                                 0.03
+
+                                                                 0.02
+
+                                                                 0.01
+
+                                                                 0
+
+                                                                 >0.15
+
+
+
+                                                                 0.1                                            Frame 170                              Frame 170
+                                                                                                                    FLIP                      NB-FLIP with Eq. (3)
+
+                                                                 0.05
+
+
+
+                                                                 0
+
+Figure 3: Comparison of semi-Lagrangian and grid-based advec-
+tion for two timesteps of a 2D simulation. Shown is a color coding
+of ||u0 − u p ||/||u||: the difference between u0 and u p (velocity ad-
+vected with a semi-Lagrangian scheme and FLIP particles, respec-
+tively), relative to the magnitude of the velocity u (see Fig. 2).                                                                        NB-FLIP with Eq. (2)
+                                                                                                 60                                       NB-FLIP with Eq. (3)
+
+
+
+                                                                                Kinetic energy
+                                                                                                                                          FLIP
+   Several previous works deal with particle/grid couplings. The                                 40
+one most closely related to ours is the method by Chentanez et
+al. [CMK14], in which SPH particles at the surface are coupled
+                                                                                                 20
+with a grid-based, semi-Lagrangian simulation. A smooth transi-
+tion from grid to particles is realized based on the ratio between
+a grid density and a particle density. Since we do not use a vari-                               0
+                                                                                                      0   100           200             300            400
+able density formulation, we adapt this to our case by only com-                                                              Frame
+puting a single density on the grid, i.e., a non-physical particle den-
+sity ρ p ≥ 0. At each grid vertex, we determine ρ p by summing up             Figure 4: Comparison of velocity combination variants: (Top) Four
+the kernel weights of all contributing, neighboring FLIP particles,           snapshots of a 323 simulation of surfaces waves. (Bottom) Plot of
+and then calculate a combined velocity from u p and u0 at every               the corresponding kinetic energies. While NB-FLIP with Eq. (2)
+face F = (i + 21 , j, k) of the staggered grid. In line with previous         generates artificial momentum, NB-FLIP with Eq. (3) is almost
+work, an intuitive, yet unfortunately erroneous formulation for this          identical to standard FLIP, and the surface correctly comes to rest.
+combination is given by:
+                                                        p 
+                                                       ρ
+         u∗F ← lerp u0F , uF , t , with t = min 1, pF
+                            p 
+                                                               .    (2)
+                                                      ρmax                    curs at the transition of the narrow band to the inner volume. Grid
+        p                                                                     vertices located just outside of the narrow band —i.e., vertices
+Here, ρmax is a constant threshold, which we set to 1 in all our              whose distance to the liquid surface is larger than the narrow band
+experiments, and lerp(a, b,t) = a + t · (b − a) is the linear interpo-        width R—can receive contributions from the narrow-band particles.
+lation operator. Eq. (2) is analogously applied to the y- and z-              Effectively, this means that particle velocities are extrapolated into
+components of the velocity, which are stored at the correspondingly           the interior grid region, which results in relatively large differences
+oriented faces of the staggered grid.                                         between u p and u0 (compared to the interior of the narrow band).
+   As we will outline below, the combined velocity calculated with            In practice, these differences lead to a consistent over-estimation
+Eq. (2) leads to inherently unstable simulations and cannot be used           of the fluid motion. Amplified by the non-dissipative nature of the
+in practice. Note that in the SPH-coupling approach by Chentanez              FLIP simulation in the narrow band, they typically accumulate to
+et al. [CMK14], the FLIP coefficient α (see Eq. (1)) is varied based          large errors over time.
+on the distance to the liquid surface in addition to mixing particle
+                                                                                 To overcome this problem, we make the combination dependent
+and grid velocities. In our experiments, this variation did not cause
+                                                                              on the distance of the grid vertices to the surface, which ensures
+significant differences other than increasing the amount of numer-
+                                                                              that no extrapolated particle velocities are used in the interior of
+ical diffusion (because of smaller values for α), and hence we do
+                                                                              the liquid. While the narrow band has a width of R, we only use
+not use this variant. For the same reason, we found it unnecessary
+                                                                              the particle velocities u p in a thinner band of width r < R, which
+to employ their proposed temporal filtering of transition weights.
+                                                                              is illustrated in Fig. 6. Because we found, that a smooth transition
+  The problem with the density-based combination of Eq. (2) oc-               between grid and particle velocities does not increase the quality of
+
+                                                                                                                                                      c 2016 The Author(s)
+                                                                                     Computer Graphics Forum c 2016 The Eurographics Association and John Wiley & Sons Ltd.
+                                                                                                Ferstl et al. / Narrow Band FLIP
+
+
+
+
+        (a) Initial state                      (b) Advected                                                 (c) Shrunk level set                     (d) Union               (e) Re-sampled particles
+      (Previous) φ and φ p                        φ0 and φ p                                                        φ0 + h and φ p          φ := min(φ0 + h, φ p ) and φ p
+Figure 5: Surface tracking and particle re-sampling in NB-FLIP: FLIP particles (orange dots), zero-contour of the level set φ (blue, filled)
+and zero-contour of the mapped particle region φ p (orange, contour only) during one time step of our algorithm (see Fig. 2). Note that φ p is
+only shown for illustration purposes in (a+e) and is not actually computed after re-sampling.
+
+
+the simulation, we use a sharp transition between u p and u0 . This                                                            3.2. Surface tracking
+results in the following “fixed” combination rule, which is referred
+                                                                                                                               In standard FLIP, the whole liquid domain is covered by particles,
+to as nbcombine(u0 , u p , φ) in Fig. 2:
+                             p                                                                                                which makes surface tracking straightforward. Compared to that, in
+                     ∗          uF , if φF ≥ −r                                                                                NB-FLIP, particles are missing in the liquids interior, and the inside
+                    uF ←                        .                (3)
+                                u0F , else                                                                                     and outside of the narrow band cannot be distinguished without
+                                                                                                                               additional information. Therefore, to keep track of the particle-free
+The distance r should be chosen depending on the narrow band
+                                                                                                                               regions that belong to the liquids interior, we use the level set φ.
+width R. The choice of R, in turn, is a performance trade-off, with
+NB-FLIP becoming identical to FLIP if R → ∞. Let h denote the                                                                     We initialize φ and a corresponding band of particles directly
+width of one cell. Then, where not stated otherwise, we use a nar-                                                             from analytical object descriptions or meshes. The substeps of one
+row band width of R = 3h, and, because we use a tri-linear interpo-                                                            surface advection step (see Fig. 2) are illustrated in Fig. 5. We start
+lation kernel, we choose r to be one cell smaller, i.e., r = 2h.                                                               by advecting φ, which yields an advected level set φ0 , and map the
+                                                                                                                               advected particles to the grid, yielding a level set φ p of the narrow
+   Fig. 4 compares both versions and illustrates the importance
+                                                                                                                               band particles. The zero-contour of φ0 and the outer zero-contour
+of the velocity transition. The unphysical behavior produced by
+                                                                                                                               of φ p (which corresponds to the liquid surface) are similar, but not
+Eq. (2) is obvious in the energy plot even for this simplified setup.
+                                                                                                                               equal. Since we want to obtain a tracking scheme that is equivalent
+For more complex scenarios this approach quickly leads to overly
+                                                                                                                               to standard FLIP, the particle surface should “overrule” the level
+violent and unstable liquid motions. In contrast, our transition func-
+                                                                                                                               set surface. Therefore, we shrink the surface of the level set φ0 by
+tion using Eq. (3) yields the expected behavior and produces results
+                                                                                                                               the width of one cell h, and then compute its union with φ p . More
+that are very close to a regular FLIP simulation (Fig. 4 bottom left).
+                                                                                                                               precisely, we compute the level set of the next time step as
+Animations of these cases can be found in the accompanying video.
+                                                                                                                                                        φ ← min(φ0 + h, φ p ).                    (4)
+
+           φ                                                                                                                   In principle, this method works if the maximum distance error,
+                                                                                                                               i.e., the distance between the surfaces corresponding to φ0 and φ p ,
+
+
+
+
+                                                                             Combination band
+           0                                                                                                                   is less than h. Thin liquid features are completely sampled with
+                                                                                                                               particles, and are always treated correctly. To ensure a small dis-
+
+
+
+                                                               Narrow band
+        −h                                                                                                                     tance error, we use a 4th order Runge-Kutta scheme to compute the
+
+
+
+
+                                                                                                  Resampling band
+                                                                                                                               forward- and back-traces required for advection. In practice, our
+                                                                                                                               surface tracking works well even for time steps with a CFL number
+         −r                                                                                                                    of 5 and higher. Note that, for stability reasons, we do not shrink
+                                                                                                                               the level set surface by a distance larger than h. This is because
+                                                                                                                               excessive shrinking can lead to spurious holes beneath the narrow
+        −R
+                                                                                                                               band which are hard to fix.
+
+
+                                                                                                                               3.3. Particle re-sampling
+Figure 6: Breakdown of the narrow band: FLIP particles are main-
+tained in a band of width R inside of the liquid surface, but their                                                            In order to maintain a narrow band of fixed width R, we re-sample
+velocities only contribute to vertices in a “combination band” of                                                              the particles at the end of each time step. Our re-sampling is based
+width r < R (see Eq. (3)). Particles are only added/removed in a                                                               on a minimum number n of particles per cell (we use n = 8). First,
+“resampling band” with minimum distance h to the surface, in or-                                                               we remove all particles outside of the narrow band, i.e., particles
+der to prevent changes to the liquid surface.                                                                                  whose distance to the liquid surface is larger than R, and ensure that
+                                                                                                                               no more than 2n particles are present per cell by removing excess
+
+ c 2016 The Author(s)
+Computer Graphics Forum c 2016 The Eurographics Association and John Wiley & Sons Ltd.
+                                                          Ferstl et al. / Narrow Band FLIP
+
+particles. Likewise, we add new particles in cells where less than n
+particles are present, whose velocities are initialized with the cur-
+rent grid velocity. Since the liquid surface should not be changed
+when adding or removing particles, we never add or remove parti-
+cles at positions that are less than one cell width h away from the
+surface, i.e. particles are only re-sampled where −R ≤ φ ≤ −h (see
+Fig. 6).
+   As a consequence of the particle re-sampling in the narrow band
+in combination with our surface tracking, the volume conservation
+of our method is equivalent to regular FLIP, i.e., we do not conserve
+mass exactly. The level set representation in the liquids interior im-
+plicitly conserves mass and the particle density in the narrow band
+is kept uniform. Hence, significant changes in mass can only origi-
+nate right at the liquid’s surface.
+
+
+4. Results
+We have implemented our method in two FLIP simulation frame-
+works: a basic, light-weight solver [PT15], and a more complex
+one with advanced FLIP techniques [ATT12]. Both implementa-
+tions use eight particles per grid cell, as well as a standard conju-
+gate gradients solver with modified incomplete Cholesky precondi-
+tioner for the projection step. Detailed runtimes and particle num-          Figure 7: Filling a glass with liquid (top: regular FLIP, bottom:
+bers for the following simulations can be found in Table 1. For the          NB-FLIP).
+light-weight solver, we additionally specify the average memory
+footprint of the running simulation in the last column (“Avg. Mem-
+ory”). We used narrow band widths of R = 3h and R = 4h (with
+r = R − 1), both of which we have found to be a good compro-
+mise between performance and memory consumption on the one                      To demonstrate that our approach is easily incorporated into ex-
+hand and simulation quality on the other hand. Thinner bands can             isting solvers, we extended a FLIP solver using position correc-
+be problematic because the particles only have an influence in a             tion and an SPH-like velocity interpolation kernel [ATT12] with
+smaller portion of the full narrow band (see Fig. 6), while slightly         our narrow band algorithm. Fig. 10 shows a resulting comparison
+thicker bands do not offer significant gains in simulation quality.          based on this simulation framework. We use a narrow band width
+                                                                             of R = 4h for this example. As this solver performs more calcu-
+   First, we present several examples from our light-weight solver           lations with the FLIP particles, our method leads to even larger
+using R = 3h. In Fig. 7 we simulate an empty glass being filled with         performance speed-ups. In this case, the total simulation time per
+liquid. Here the simulation initially behaves like a regular FLIP            simulation step is reduced by a factor of 5.6. As many implemen-
+simulation, while the grid-based data becomes predominant in later           tations of FLIP in VFX pipelines execute a significant number of
+stages. On average, this simulation reduces the number of particles          calculation passes with the FLIP particles, these numbers are in-
+by a factor of more than 16. The simulation of Fig. 8 demonstrates           dicative of the performance gains that can be expected from our
+how our method handles the complex splashes caused by a series of            approach in a practical setting.
+letter-shaped drops falling into a basin. Here, the regular simulation
+requires 18 times more particles than our narrow band version.               Limitations: While we found that our approach works well
+   The simulation of Fig. 9 is our largest scene, with more than 23          enough in practice to fully replace regular FLIP simulations, there
+million particles for the full FLIP simulation. For this setup, the          are limitations that we want to point out. One limitation is that
+computations outside the pressure solver were six times faster for           for liquid phenomena that purely consist of thin structures (smaller
+our narrow band version. While the time for pressure projection              than 2r) the grid data will not be used, in which case our algorithm
+is untouched by our narrow band implementation, techniques such              will be slightly slower than a regular FLIP simulation while giving
+as multi-grid solvers [CMF12] could be used to further reduce the            identical results.
+overall runtime.
+                                                                                Also, the minimum thickness of the narrow-band depends on the
+   Overall, our experiments show a very good agreement between               maximal error per time step of the Eulerian level-set advection,
+NB-FLIP and regular FLIP in terms of large scale liquid motions.             which is admittedly difficult to quantify in a generic setting. The
+Small scale effects like splashes and drops—due to the random na-            band should be thick enough to prevent these errors from leading
+ture of the particles and the accumulation of small errors—are not           to gaps between the level-set surface and the particles within a sin-
+identical, but are very similar in quality. As a consequence, NB-            gle time step. In practice, we have found our preferred choice of
+FLIP delivers results that are very hard to distinguish from regular         band widths (three to four cells) to be safe, even for cases with
+FLIP simulations.                                                            violent splashes.
+
+                                                                                                                                                 c 2016 The Author(s)
+                                                                                Computer Graphics Forum c 2016 The Eurographics Association and John Wiley & Sons Ltd.
+                                                                          Ferstl et al. / Narrow Band FLIP
+
+                               Table 1: Timings of NB-FLIP compared to FLIP for different scenarios and implementations.
+
+               Scene            Grid Resolution                 Method              Avg. Time/Timestep (s)                    Avg. #Particles           Avg. Memory
+                                                                               Projection + Rest = Total                                                       (MB)
+                                                                FLIP                     4.64      8.66         13.29               9,362,306                       518
+      Fig. 7 / Pour                    1282 × 256
+                                                             NB-FLIP                     4.67      1.98          6.64                 561,997                       303
+                                                                FLIP                     5.06      9.85         14.91              16,559,617                       857
+   Fig. 8 / Letters            256 × 192 × 128
+                                                             NB-FLIP                     5.20      2.67          7.88                 880,827                       456
+                                                                FLIP                     9.00     15.78         24.78              23,891,821                     1180
+   Fig. 9 / Teaser                             2003
+                                                             NB-FLIP                     8.72      2.43         11.15               1,079,688                      578
+                                                               FLIP∗                     1.57     33.22         34.79               2,889,981                        —
+    Fig. 10 / Dam                256 × 128 × 64
+                                                            NB-FLIP∗                     1.49      4.65          6.14                 191,625                        —
+                                                                                                                             ∗ Advanced FLIP implementation [ATT12]
+
+
+
+
+            Figure 8: A series of letter-shaped drops hitting a pool of liquid using narrow-band FLIP requiring 18× fewer particles.
+
+
+5. Conclusions                                                                                  [ATW15] A NDO R., T HUEREY N., W OJTAN C.: A stream function
+                                                                                                  solver for liquid simulations. ACM Transactions on Graphics 34, 4
+We have described a novel approach to significantly reduce the                                    (2015), 53:1–53:9. 2
+number of FLIP particles. Our algorithm readily integrates into ex-
+                                                                                                [BB08] BATTY C., B RIDSON R.: Accurate viscous free surfaces for
+isting FLIP solvers and can result in up to 22× fewer particles. This                             buckling, coiling, and rotating liquids. In Symposium on Computer Ani-
+reduction factor strongly depends on the scenario, but especially                                 mation (2008), pp. 219–228. 3
+for large volumes and advanced FLIP simulation approaches it can                                [BB12] B OYD L., B RIDSON R.: MultiFLIP for energetic two-phase fluid
+lead to speed-up factors larger than 5 without degrading simulation                               simulation. ACM Trans. on Graphics 31, 2 (2012), 16:1–16:12. 2, 3
+quality.
+                                                                                                [BBAW15] BAILEY D., B IDDLE H., AVRAMOUSSIS N., WARNER M.:
+   In addition to performance gains our approach has the potential                                Distributing liquids using OpenVDB. In ACM SIGGRAPH 2015 Talks
+to significantly reduce the amount of data that needs to be stored on                             (2015), ACM, pp. 285:1–285:1. 1
+hard disk (up to the aforementioned factor of 12). This is highly in-                           [BLMB13] B UDSBERG J., L OSURE M., M USETH K., BAER M.: Liq-
+teresting for VFX productions, as legal requirements typically dic-                               uids in “The Croods”. In Digital Prod. Symp. (DigiPro) (2013). 1
+tate that all data of a shot be available long after completion. It                             [Bri08] B RIDSON R.: Fluid Simulation for Computer Graphics. AK Pe-
+will be interesting future work to combine our approach with more                                 ters/CRC Press, 2008. 2, 3
+aggressive compressions schemes to further reduce storage require-                              [CIPT14] C ORNELIS J., I HMSEN M., P EER A., T ESCHNER M.: IISPH-
+ments.                                                                                            FLIP for incompressible fluids. Computer Graphics Forum 33, 2 (2014),
+                                                                                                  255–262. 2
+
+Acknowledgements                                                                                [CMF12] C HENTANEZ N., M UELLER -F ISCHER M.: A multigrid fluid
+                                                                                                  pressure solver handling separating solid boundary conditions. IEEE
+This work was supported by the European Union under the ERC                                       Trans. Visualization and Comp. Graph. 18, 8 (2012), 1191–1201. 6
+Advanced Grant 291372 SaferVis and the ERC Starting Grants                                      [CMK14] C HENTANEZ N., M ÜLLER M., K IM T.: Coupling 3D Eule-
+637014 realFlow and 638176 BigSplash.                                                             rian, heightfield and particle methods for interactive simulation of large
+                                                                                                  scale liquid phenomena. In Symp. Comp. Anim. (2014), pp. 1–10. 2, 4
+
+References                                                                                      [ELF05] E NRIGHT D., L OSASSO F., F EDKIW R.: A fast and accurate
+                                                                                                  semi-Lagrangian particle level set method. Computers & Structures 83,
+[ATT12] A NDO R., T HUEREY N., T SURUNO R.: Preserving fluid sheets                               6-7 (2005), 479–490. 2
+  with adaptively sampled anisotropic particles. IEEE Trans. on Visualiza-
+  tion and Computer Graphics 18 (8) (2012), 1202–1214. 2, 3, 6, 7                               [FF01] F OSTER N., F EDKIW R.: Practical animation of liquids. In ACM
+                                                                                                  Proc. Comp. Graphics and Interactive Techniques (2001), pp. 23–30. 2
+[ATW13] A NDO R., T HUEREY N., W OJTAN C.: Highly adaptive liquid
+  simulations on tetrahedral meshes. ACM Transactions on Graphics 32,                           [FM96] F OSTER N., M ETAXAS D.: Realistic animation of liquids.
+  4 (2013), 103:1–103:10. 2                                                                       Graph. Models and Img. Proc. 58, 5 (1996), 471–483. 2
+
+ c 2016 The Author(s)
+Computer Graphics Forum c 2016 The Eurographics Association and John Wiley & Sons Ltd.
+                                                              Ferstl et al. / Narrow Band FLIP
+
+
+
+
+                 Figure 9: Several frames of a breaking dam hitting a row of cylinders (top: regular FLIP, bottom: NB-FLIP).
+
+
+
+
+Figure 10: Stills generated with a different implementation: the underlying FLIP solver performs significantly more calculations with the
+particles, leading to a speed-up for our narrow band approach of 5.6×. The FLIP particles are color coded according to their position.
+
+
+[GB13] G ERSZEWSKI D., BARGTEIL A. W.: Physics-based animation                      A., T ERAN J., K AVEHPOUR P.: A material point method for viscoelas-
+  of large-scale splashing liquids. ACM Transactions on Graphics 32, 6              tic fluids, foams and sponges. In Symposium on Computer Animation
+  (2013), 185:1–185:6. 3                                                            (2015), pp. 157–163. 2
+[GNS∗ 12] G OLAS A., NARAIN R., S EWALL J., K RAJCEVSKI P.,                      [RWT11] R AVEENDRAN K., W OJTAN C., T URK G.: Hybrid smoothed
+  D UBEY P., L IN M.: Large-scale fluid simulation using velocity-vorticity        particle hydrodynamics. In Symp. on Comp. Anim. (2011), pp. 33–42. 2
+  domain decomposition. ACM Trans. Graph. 31, 6(2012), 148:1–148:9. 2            [SG11] S OLENTHALER B., G ROSS M.: Two-scale particle simulation.
+[IOS∗ 14] I HMSEN M., O RTHMANN J., S OLENTHALER B., KOLB A.,                      ACM Transactions on Graphics 30, 4 (2011), 81:1–81:8. 2
+   T ESCHNER M.: SPH fluids in computer graphics. In Eurographics -              [SS06] S UÁREZ N., S USÍN A.: A mesh-particle model for fluid anima-
+   State of the Art Reports (2014), pp. 21–42. 2                                   tion. In Ibero-American Symposium in Computer Graphics (2006). 2
+[LTKF08] L OSASSO F., TALTON J., K WATRA N., F EDKIW R.: Two-                    [SSC∗ 13] S TOMAKHIN A., S CHROEDER C., C HAI L., T ERAN J.,
+  way coupled SPH and particle level set fluid simulation. IEEE Trans. on           S ELLE A.: A material point method for snow simulation. ACM Trans-
+  Visualization and Computer Graphics 14, 4 (2008), 797–804. 2                     actions on Graphics 32, 4 (2013), 102. 2
+[MCG03] M ÜLLER M., C HARYPAR D., G ROSS M.: Particle-based fluid                [Sta99] S TAM J.: Stable fluids. In Proceedings ACM SIGGRAPH (1999),
+  simulation for interactive applications. In Symposium on Computer Ani-            pp. 121–128. 2
+  mation (2003), pp. 154–159. 2                                                  [UBH14] U M K., BAEK S., H AN J.: Advanced hybrid particle-grid
+                                                                                   method with sub-grid particle correction. Computer Graphics Forum
+[PHT∗ 13]    PAN Z., H UANG J., T ONG Y., Z HENG C., BAO H.: Interac-              33, 7 (Oct. 2014), 209–218. 2, 3
+  tive localized liquid motion editing. ACM Transactions on Graphics 32,
+  6 (2013), 184:1–184:10. 2                                                      [YSB∗ 15] Y UE Y., S MITH B., BATTY C., Z HENG C., G RINSPUN E.:
+                                                                                   Continuum foam: A material point method for shear-dependent flows.
+[PT15] P FAFF T., T HUEREY              N.:          MantaFlow,      2015.         ACM Transactions on Graphics 34, 5 (Nov. 2015), 160:1–160:20. 2
+  http://mantaflow.ethz.ch. 6
+                                                                                 [ZB05] Z HU Y., B RIDSON R.: Animating sand as a fluid. ACM Trans-
+[RGJ∗ 15]   R AM D., G AST T., J IANG C., S CHROEDER C., S TOMAKHIN                actions on Graphics 24, 3 (2005), 965–972. 2
+
+
+                                                                                                                                                     c 2016 The Author(s)
+                                                                                    Computer Graphics Forum c 2016 The Eurographics Association and John Wiley & Sons Ltd.
+

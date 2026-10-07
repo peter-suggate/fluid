@@ -1,0 +1,569 @@
+Implicit Position-Based Fluids
+ELIE DIAZ, University of Utah, USA
+JERRY HSU, University of Utah, USA
+EISEN MONTALVO-RUIZ, University of Utah, USA
+CHRIS GILES, Roblox, USA
+CEM YUKSEL, University of Utah, USA
+
+
+
+
+Fig. 1. Simulation of one million fluid particles falling onto a sphere, using our method on an NVIDIA RTX 4090 GPU. The simulation ran at an
+average of 159 milliseconds per frame.
+The efficient simulation of incompressible fluids remains a difficult and open           (SA Conference Papers ’25), December 15–18, 2025, Hong Kong, Hong Kong.
+problem. Prior works often make various tradeoffs between incompressibility,             ACM, New York, NY, USA, 9 pages. https://doi.org/10.1145/3757377.3764005
+stability, and cost. Yet, it is rare to obtain all three. In this paper, we introduce
+a novel incompressible Smoothed Particle Hydrodynamics (SPH) scheme
+which uses a second-order implicit descent scheme to optimize a variational
+                                                                                         1   Introduction
+energy specially formulated to approach incompressibility. We demonstrate                Lagrangian particles based on smoothed particle hydrodynamics
+that our method is superior in both incompressibility and stability with a               (SPH) [Müller et al. 2003] has been a popular technique for fluid
+minimal cost to computational budget. Furthermore, we demonstrate that                   simulations in computer graphics. Though it is often used for simu-
+our method is unconditionally stable even under extreme time steps, making               lating incompressible fluids (such as water in liquid form), achieving
+it suitable for interactive applications.                                                incompressibility with SPH is a fundamental challenge. This is be-
+CCS Concepts: • Computing methodologies → Physical simulation.                           cause, in the SPH formulation, incompressibility corresponds to hard
+Additional Key Words and Phrases: Smooth Particle Hydrodynamics, Fluid                   constraints which maintain fluid density. As a result, explicit veloc-
+Simulation, Incompressible Fluids, Vertex Block Descent                                  ity integration [Müller et al. 2003] expectedly requires extremely
+                                                                                         small time steps for stability and even smaller timesteps to achieve
+ACM Reference Format:
+                                                                                         incompressibility using highly nonlinear constraints [Becker and
+Elie Diaz, Jerry Hsu, Eisen Montalvo-Ruiz, Chris Giles, and Cem Yuksel. 2025.
+Implicit Position-Based Fluids. In SIGGRAPH Asia 2025 Conference Papers
+                                                                                         Teschner 2007]. Therefore, most recent work has adapted variants
+                                                                                         of semi-implicit velocity integrations that adaptively adjust the con-
+Authors’ Contact Information: Elie Diaz, University of Utah, Salt Lake City, UT, USA,    straint stiffness per particle [Bender and Koschier 2015; Ihmsen et al.
+elie.diaz@utah.edu; Jerry Hsu, University of Utah, Salt Lake City, UT, USA, jerry.hsu.
+research@gmail.com; Eisen Montalvo-Ruiz, University of Utah, Salt Lake City, UT, USA,
+                                                                                         2014]. Unfortunately, these approaches still struggle with stability
+eisen.montalvo@utah.edu; Chris Giles, Roblox, San Mateo, CA, USA, cgiles@roblox.         issues or excessive compression with complex simulations, requir-
+com; Cem Yuksel, University of Utah, Salt Lake City, UT, USA, cem@cemyuksel.com.         ing relatively small time steps. Thus hindering one of the strongest
+                                                                                         advantage of SPH-based methods: their computational performance
+                                                                                         with parallel computing.
+This work is licensed under a Creative Commons Attribution 4.0 International License.       One notable exception has been the position-based fluids (PBF)
+SA Conference Papers ’25, Hong Kong, Hong Kong                                           method [Macklin and Müller 2013], which offers exceptional sta-
+© 2025 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-2137-3/25/12                                                         bility with larger time steps by converting SPH into a constraint
+https://doi.org/10.1145/3757377.3764005                                                  formulation similar to position-based dynamics [Macklin et al. 2016;
+
+                                                                                                 SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+2 •    Diaz et al.
+
+
+Müller et al. 2007]. However, the first-order approximations used in      While improving on stability at higher timesteps, these methods fail
+PBF degrade the quality of the animations, substantially dampening        to remain incompressible when presented with minimal iteration
+the motion and deviating from physically plausible results.               counts and large residual build-up.
+   In this paper, we introduce another position-based formulation            Methods such as Divergence-Free SPH (DFSPH) use two solvers
+for SPH, starting with the variational form of implicit Euler to offer    to address both the constant density constraint and the divergence-
+a fully implicit integration for SPH. Therefore, we call our method       free velocity constraint that are present with incompressible fluids
+implicit position-based fluids (IPBF), although our integration differs   [Bender and Koschier 2015], can improve convergence, but also risks
+significantly from PBF. We use relaxed Jacobi iterations with a           high energy injection when presented with existing error in the
+second-order descent formulation, similar to vertex block descent         system. Recovering from such high-energy states proves impossible
+(VBD) [Chen et al. 2024], which avoids excessive damping while            without enough iterations or low enough timesteps.
+achieving unconditional stability and allowing larger time steps.            Position-based solvers, such as PBF [Macklin and Müller 2013]
+In addition, we can model incompressibility using arbitrarily stiff       and Semi-Implicit SPH (SISPH) [He et al. 2025] are a promising
+density constraints, achieving improved incompressibility at larger       approach for maintaining a simulation stable with large timesteps
+time steps.                                                               and low iteration counts, usually taking advantage of substepping or
+   Stiff systems are known to inject energy, particularly when simu-      careful step size calculations to prevent overcorrection when solving
+lated with limited iteration counts that prevent convergence. IPBF        for optimal positions that can minimize density fluctuations. Similar
+is no exception. Though, even with infinite stiffness, the energy         to our method, SISPH is derived starting from the variational form of
+injection is relatively minor and does not lead to instabilities, it      implicit Euler, but uses a semi-implicit successive substitution method
+prevents the fluid from coming to a rest, which might be undesir-         to minimize the energy of the system, whereas our solution uses
+able for some applications. Therefore, we also introduce a simple         a second-order descent formulation with local Newton iterations,
+damping formulation that extracts kinetic energy by comparing             similar to VBD [Chen et al. 2024].
+to the solution of a less stiff constraint. This optional damping is         Other improvements in SPH tackle other outstanding problems
+designed to have minimal impact in animations until the motion            in the SPH approach to incompressible fluids, such as handling
+subsides.                                                                 highly viscous fluid motion [Peer et al. 2015] and improving tensile
+   Our experiments show that under the same computation budget,           instability in SPH fluid simulations [He et al. 2020; Liu et al. 2024].
+our method provides numerical stability superior to velocity-based        Indeed, our work functions in parallel to these improvements, and
+methods and improved incompressibility behavior against prior             they can be used in conjunction to our solver to further improve
+SPH-based methods, including PBF. Notably, we achieve these with-         fluid motion.
+out dampening the fluid motion or producing unnatural animations.
+                                                                          3     Implicit Position-Based Fluids
+2     Prior Work                                                          We formulate our implicit integration for SPH using the variational
+SPH is a method invented originally for simulating interstellar flows     form of implicit Euler [Gast and Schroeder 2015]. It allows us to sim-
+[Gingold and Monaghan 1977; Lucy 1977] that discretizes fluids into       ulate incompressibility using stiff constraints. We solve the resulting
+particles that store mass, momentum, and other field quantities.          minimization problem using relaxed Jacobi iterations with position
+SPH was introduced to computer graphics applications by Müller            updates. Finally, we discuss approximations to the second-order
+et al. [2003], and has since led to a large body of research into         terms to maintain stability and introduce a damping formulation to
+improving the estimation techniques and force calculations available      counteract the energy injection from solves with high stiffness.
+for SPH-based solvers, as described in Koschier et al. [2022]. The           In this section, we begin with deriving the implicit Euler integra-
+pressure solve in particular has been the subject of many works, as       tion with the variational form (Section 3.1), then we describe how we
+maintaining incompressibility in fluids leads to realistic and dynamic    adapt the variational energy to account for arbitrarily large stiffness
+simulations.                                                              values (Section 3.2). We then demonstrate how we integrate the re-
+   Standard SPH [Müller et al. 2003] introduced a state equation          sults our numerical computation and update the resulting positions
+pressure solve for incompressible fluids, where each particle calcu-      (Section 3.4). Finally, to further prevent instability due to indeter-
+lates a penalty force to compensate for density deviation from rest.      minate matrices, we describe a Hessian approximation technique
+Later improved upon with a non-linear formulation [Becker and             (Section 3.5) and an artificial damping formulation to counteract the
+Teschner 2007], these state equation solvers require a high stiffness     injected energy from high stiffness solves. (Section 3.6).
+constants to achieve realistic fluid flows, forcing the solvers to use
+low timesteps to maintain numerical stability.                            3.1    Implicit Euler Integration for SPH
+   Improvements to maintaining stability with higher timesteps
+were made by iterative solvers that use a predictive-correction           The variational form of implicit Euler aims to minimize the varia-
+scheme to calculate penalty forces based on density fluctuations due      tional energy Ψ for each time step. In a position-based formulation,
+to non-pressure forces [He et al. 2012; Solenthaler and Pajarola 2009].   this can be written as
+Instead of user-defined stiffnesses, some solvers, such as Implicit
+Incompressible SPH (IISPH) calculate per-particle stiffness parame-
+                                                                                                   x = arg min Ψ(x) ,                        (1)
+ters when solving for updated pressure forces [Ihmsen et al. 2014].                                          x
+
+
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+                                                                                                                     Implicit Position-Based Fluids   • 3
+
+
+such that the positions of all particles x is determined by minimizing     where 𝛼 = 1/𝑘 is the compliance parameter. This does not alter the
+the variational energy                                                     results, since x that minimizes Ψ̄(x) also minimizes Ψ(x).
+                            1                                                 This normalization allows us to use arbitrarily large stiffness,
+                                          2
+                   Ψ(x) =       ||x − y|| 𝑀 + 𝐸 (x) ,                (2)   including 𝑘 = ∞ with 𝛼 = 0, which effectively removes the first
+                           2ℎ 2
+                                                                           term in the minimization. Yet, care must be taken when using 𝛼 = 0,
+where the first term is the momentum potential that contains the
+                                                                           as the minimization includes no term that would prevent arbitrary
+time step size ℎ and the mass-weighted norm || · || 𝑀 of the difference
+                                                                           energy injection to satisfy the density constraint. This means that
+between positions of all particles x and their inertial positions
+                                                                           when 𝛼 = 0, we cannot guarantee convergence to a physically
+                         y = x𝑡 + ℎv𝑡 + ℎ 2 a★                       (3)   meaningful solution even under infinitely small time steps and
+calculated using the particle positions and velocities at the beginning    infinitely many iterations.
+of the time step x𝑡 and v𝑡 , and a constant acceleration term a★.             In practice, however, when using relatively large time steps with
+   The last term 𝐸 (x) is the total internal potential and it includes     limited iteration counts, the numerical solution with a sufficiently
+the potential energy of all internal forces that are not included in       small 𝛼 would be close (or be even identical) to 𝛼 = 0. Therefore, we
+a★. It can be written as a sum of all local internal potential terms       omit the momentum term using 𝛼 = 0 in most of our results, unless
+𝐸𝑖 (x) calculated around each particle 𝑖, such that                        otherwise specified, but we begin our iterations by initializing x to
+                                  ∑︁                                       y, to ensure that the existing fluid momentum has some impact. In
+                          𝐸 (x) =     𝐸𝑖 (x) .                       (4)   fact, this is recommended for any small value of 𝛼.
+                                   𝑖
+   The acceleration due to gravity and other external forces that are      3.3   Numerical Integration
+constant over the time step should be included in a★. By making
+                                                                           To solve the minimization problem in Equation 1, we follow a sim-
+the assumption that the viscosity forces remain constant within the
+                                                                           ilar approach to vertex block descent (VBD) [Chen et al. 2024] by
+time step, we include them in a★ such that all that remains for 𝐸 (x)
+                                                                           assuming that all other particles are fixed. Then, for each particle,
+is the potential energy due to pressure.
+                                                                           the global variation energy can be reduced to a local variational
+   Following typical SPH formulations, we can model the pressure
+                                                                           energy per particle
+energy as a quadratic potential
+                                  1         2                                                      𝑚𝑖                    1 ∑︁        2
+                        𝐸𝑖 (x) = 𝑘 𝐶𝑖 (x) ,                         (5)                Ψ𝑖 (x) = 𝛼        ||x𝑖 − y𝑖 || 2 +       𝐶𝑖 (x) ,              (8)
+                                  2                                                                 2ℎ 2                  2
+                                                                                                                            𝑗∈P
+                                                                                                                             𝑖
+where 𝑘 is the stiffness and 𝐶𝑖 (x) is the density constraint, which is
+often referred to as the state equation in SPH. There are different
+                                                                           where 𝑚𝑖 , x𝑖 , and y𝑖 are the mass, position, and inertial position of
+formulations of the state equation in prior work and we opt for the
+                                                                           the particle 𝑖, respectively, and P𝑖 is the set of all particles around
+simple form of
+                                                                           particle 𝑖 within the SPH kernel radius. Thus, P𝑖 includes all particles
+                                     𝜌𝑖                                    that consider particle 𝑖 for evaluating their densities.
+                            𝐶𝑖 (x) =     −1                         (6)
+                                      𝜌                                       As in VBD, minimizing the local variational energy Ψ𝑖 (x) by
+where 𝜌𝑖 is the fluid density around the particle 𝑖 and 𝜌 is the default   moving only x𝑖 guarantees a reduction in the global variational
+density. This simple constraint formulation penalizes deviations           energy Ψ(x). This forms an efficient numerical integration method
+from the rest density and works well in practice with our implicit         via Gauss-Seidel iterations.
+solution. We found that it offers better stability than alternative           However, Gauss-Seidel can be prohibitively expensive for SPH
+forms that use (highly) nonlinear terms. Although, it should not be        under typical conditions as P𝑖 can include hundreds of thousands
+enforced blindly. Specifically, at the fluid surface, the density should   of particles, severely limiting the potential for parallel computa-
+naturally fade to 0. In order to avoid clumping due to negative pres-      tion. Moreover, after moving each particle, the densities of all of its
+sures, a typical solution is to clamp the constraint to zero [Koschier     neighbors must be updated, which also incurs a substantial compu-
+et al. 2022] and we use this approach in all our tests.                    tational cost and potential data hazards when the same neighboring
+                                                                           particle are updated. This would mean either a further reduction in
+3.2   Incompressibility                                                    parallelization or using atomic operations that hinder performance.
+For nearly incompressible fluids like water, small variations in den-         Therefore, we opt for a relaxed Jacobi scheme, which is common
+sity correspond to strong pressure forces. This requires using a large     with SPH-based methods [Ihmsen et al. 2014; Solenthaler and Pa-
+value for the stiffness term 𝑘. While large 𝑘 values lead to instabili-    jarola 2009]. After computing a position update Δx𝑖 for all particles,
+ties with explicit integration, they can also cause numerical issues       we apply half of it using x𝑖 ← x𝑖 + Δx𝑖 /2 in parallel.
+with implicit integration, particularly when using a low-precision
+floating-point representation.                                             3.4   Position Updates
+   To avoid this, we normalize the variational energy by dividing it       Similar to VBD, we adjust particle positions using Newton’s Method,
+by 𝑘, resulting in                                                         which involves solving the second-order linear system
+                         𝛼         2    1 ∑︁         2
+              Ψ̄(x) = 2 ||x − y|| 𝑀   +        𝐶𝑖 (x) ,             (7)
+                       2ℎ               2 𝑖                                                               H𝑖 Δx𝑖 = f𝑖                                 (9)
+
+
+                                                                                   SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+4   •   Diaz et al.
+
+
+where f𝑖 is the force calculated from the negative spatial derivative          minimal impact. Damping is only applied when the animation is
+of the variational form                                                        coming close to a stop, attempting to remove extra kinetic energy
+                𝜕 Ψ̄𝑖 (x)     𝑚𝑖              1 ∑︁ 𝜕𝐸 𝑗 (x)                    introduced due to numerical errors.
+         f𝑖 = −           = −𝛼 2 (x𝑖 − y𝑖 ) −                    (10)             We begin by computing an alternative position x𝑖∗ for each particle
+                   𝜕x𝑖        ℎ               2       𝜕x𝑖
+                                                      𝑗 ∈ P𝑖                   using a larger compliance parameter 𝛼 ∗ (we use 𝛼 ∗ = 1/1000 in our
+and H𝑖 is the Hessian of the variational form                                  tests). In practice, we use a single iteration to calculate x𝑖∗ during
+                  𝜕 2 Ψ̄𝑖 (x)     𝑚𝑖     1 ∑︁ 𝜕 2 𝐸 𝑗 (x)                      the final iteration of the solver, starting with the positions x at the
+            H𝑖 =              = 𝛼    I +                  .             (11)   beginning of the last iteration. In this way, the computation of x𝑖∗
+                      𝜕x𝑖2        ℎ2     2        𝜕x𝑖2
+                                           𝑗∈P    𝑖                            involves minimal overheads.
+   SPH uses smoothing kernels 𝑊 to calculate the particle densities               At the end of the last iteration, we apply damping only if the two
+𝜌𝑖 from the positions and masses of the neighboring particles                  positions x𝑖 and x𝑖∗ are closer than a user-specified multiple 𝛽 of
+                          ∑︁                                                   the kernel radius 𝑟 (we use 𝛽 = 60 in our tests). This implies that a
+                    𝜌𝑖 =     𝑚 𝑗 𝑊 (x𝑖 − x 𝑗 ) .               (12)            large amount of momentum is injected through high stiffness. In
+                              𝑗 ∈ P𝑖                                           that case, we calculate two velocities for each particle using their
+Thus, the derivatives of the density constraints can be calculated             final and alternative positions, such that
+using the derivatives of the kernel function, such that                                        x𝑖 − x𝑖𝑡                                   x∗ − x𝑖𝑡
+                                                     𝜕 2𝑊𝑖 𝑗                            v𝑖 =                    and                v𝑖∗ = 𝑖         . (16)
+    𝜕𝐶𝑖    1 ∑︁     𝜕𝑊𝑖 𝑗            𝜕 2𝐶𝑖   1 ∑︁                                                 ℎ                                          ℎ
+        =       𝑚𝑗           and         2
+                                           =      𝑚𝑗         , (13)
+    𝜕x𝑖   𝜌 𝑗        𝜕x𝑖             𝜕x𝑖     𝜌 𝑗       𝜕x𝑖2                    Then, we compare the kinetic energy of the particle 𝐾𝑖 to the alterna-
+                                                                               tive kinetic energy 𝐾𝑖∗ with this alternative velocity. If 𝐾𝑖 ≤ 𝐾𝑖∗ , we
+where 𝑊𝑖 𝑗 = 𝑊 (x𝑖 − x 𝑗 ). We use a cubic spline kernel in our imple-         do not apply any damping. Otherwise, we bring the kinetic energy
+mentation [Koschier et al. 2019], but our formulation works with               of the particle closer to the alternative. Thus, the final velocity is
+any SPH kernel formulation.                                                    computed using
+  The position change is calculated with a 3 × 3 matrix inverse
+                                                                                                   1,                          if ∥x𝑖 − x𝑖∗ ∥ ≥ 𝛽 𝑟
+                              Δx𝑖 = H𝑖−1 f𝑖 .
+                                                                                                  
+                                                                        (14)
+                                                                                                  
+                                                                                                  
+                                                                                                                                if ∥v𝑖∗ ∥ ≥ ∥v𝑖 ∥
+                                                                                                  
+                                                                                       v𝑖𝑡 +1 = v𝑖 1,
+                                                                                                  
+                                                                                                  
+                                                                                                                                                     (17)
+3.5     Approximate Hessians
+                                                                                                    √︂
+                                                                                                  
+                                                                                                          ∥v𝑖 ∥ 2 − ∥v𝑖∗ ∥ 2
+                                                                                                   1−𝑑                       , otherwise,
+                                                                                                  
+                                                                                                               ∥v𝑖 ∥ 2
+                                                                                                  
+SPH-based Hessians of pressure energies 𝐸 𝑗 (x) take the form                                     
+                                                                               where the damping weight 𝑑 is computed using
+        𝜕 2 𝐸 𝑗 (x)     𝜕𝐶 𝑗 (x) T 𝜕𝐶 𝑗 (x)           𝜕 2𝐶 𝑗 (x)
+                               
+                    =                       + C 𝑗 (x)            . (15)                                           ∥x𝑖∗ − x𝑖 ∥
+            𝜕x𝑖2          𝜕x𝑖        𝜕x𝑖                 𝜕x𝑖2                                             𝑑 =1−                 .                   (18)
+                                                                                                                      𝛽𝑟
+Here, the first term is always symmetric positive-definite, but the
+second term is not guaranteed to be positive-definite and invert-
+ible, especially when using typical pressure clamping techniques to            Algorithm 1 IPBF Algorithm
+address the particle deficiency problem.                                       Input: x𝑡 : position at the beginning of the time step.
+   We avoid this problem by approximating the Hessian, replacing                          v𝑡 : velocity at the beginning of the time step.
+the second term with a diagonal approximation based on the norm                           a★: non-pressure forces at the start of the time step.
+of its columns [Andrews et al. 2017]. This treatment guarantees that           Output: x𝑡 +1, v𝑡 +1 , position and velocity at the end of the time step
+the approximated Hessians are always invertible.                                    for every particle
+                                                                                 1: y ← x𝑡 + ℎv𝑡 + ℎ 2 a★
+3.6     Artificial Damping                                                       2: xguess ← y
+Our implicit integration and position-based updates allow stable                 3: 𝑙 = 0
+SPH simulations even with large time steps and limited iteration                 4: while 𝑙 < 𝑀𝐴𝑋 iterations do
+counts that prevent convergence. The remaining constraint error                  5:     Update all density and density gradients based on xguess
+from the previous time step does not lead to numerical explosion,                6:     for all particles 𝑖 do
+but it can inject energy, depending on the stiffness of the density              7:          Calculate f𝑖 using Equation 10
+constraint. Although implicit Euler is known to introduce numerical              8:          Calculate H𝑖 using Equation 11
+damping, the injected energy from simulating incompressible fluids               9:           Δx𝑖 ← H𝑖−1 f𝑖
+with highly stiff constraints and limited iteration counts can over-                                    guess
+                                                                                10:          x𝑖new ← x𝑖       + Δx𝑖 /2
+whelm this effect and prevent the simulation from ever reaching a               11:     end for
+steady solution without motion. This can be undesirable for some                12:     xguess ← xnew
+applications. Therefore, we include an artificial damping formula-              13:     𝑙 =𝑙 +1
+tion that extracts kinetic energy from the fluid by comparing its               14: end while
+solution to a solution that uses lower stiffness.                               15: x𝑡 +1 ← xguess
+   Our damping formulation only modifies the final velocity of the              16: Set v𝑖𝑡 +1 using Equation 17
+particle by removing kinetic energy, and it is designed to have a
+
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+                                                                                                                                        Implicit Position-Based Fluids   • 5
+
+
+
+
+            PBF                         IISPH                      SISPH                     DFSPH                     IPBF (ours)
+Fig. 2. Double Dam Break example using 4 iterations per time step, run with PBF, SISPH, IISPH, DFSPH (2+2 iterations), and our method. All
+methods in this figure run with a 60 ms compute budget, achieved using ℎ = 1/240 seconds.
+
+
+
+
+              PBF                       IISPH                        SISPH                       DFSPH                       IPBF (ours)
+Fig. 3. Double Dam Break example using 2 iterations per time step, except for DFSPH, which uses an additional divergence iteration (1+2 iterations).
+In this case, IISPH and DFSPH fail to maintain numerical stability.
+
+                                                                                                  1
+4   Results
+We have implemented our method (see Algorithm 1) using CUDA on
+an NVIDIA RTX 4090. Unless otherwise specified, we use 𝛼 = 0 and                             10-1                                                               PBF
+
+
+
+
+                                                                            Mean Relative Error
+our damping. Particle size is set to a diameter of 0.5 with a kernel size                                                                                       IISPH
+of 1. We compare our IPBF method against PBF [Macklin and Müller                             10-2                                                               SISPH
+2013], IISPH [Ihmsen et al. 2014], SISPH [He et al. 2025], and DFSPH                                                                                            IPBF (ours)
+                                                                                                                                                                DFSPH
+[Bender and Koschier 2015]. All methods have a similar computation                           10-3
+cost per iteration, but the computation cost can increase when a
+method fails to maintain the fluid density and particles begin to have
+                                                                                             10-4
+more neighbors. As such, we opt to simply use the same iteration
+count when comparing different methods. One exception is DFSPH,
+which requires at least 1 divergence iteration and 2 density iterations                      10-5
+                                                                                                 0                  100                200                300
+(denoted as 1+2 when reporting iteration counts).                                                                           Frames
+   Figure 2 and Figure 3 show results from our Double Dam Break                  Fig. 4. The mean relative error of density with different methods for
+example, where two columns of fluid collide in the middle and form               the Double Dam Break examples in Figure 2.
+a thin jet. All methods produce comparable results when they are
+stable with 4 iterations (2+2 for DFSPH), as shown in Figure 2. In
+this case, DFSPH exhibits slight numerical instability but excellent
+density preservation, SISPH has slight extra energy injection due to             as plotted in Figure 4. As expected from the animations in our sup-
+density fluctuations, IISPH dissipates energy due to extra compres-              plemental video, the graph shows DFSPH having excellent density
+sion, and PBF dissipates the most energy, as can be seen from the                preservation when stable, even surpassing our method, while SISPH
+height of the jet in comparison to the others.                                   and IISPH have higher density error and fluctuations. PBF has the
+   Measuring the density error in Figure 2 at the start of every frame           largest density error and fluctuations, as shown by larger shifts in
+further highlights the results from stable animation in all methods,             density error even as the animation is coming to rest.
+
+                                                                                                      SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+6 •   Diaz et al.
+
+
+
+
+              PBF                         IISPH                       SISPH                           DFSPH                       IPBF (ours)
+Fig. 5. A compression stability test that begins with a compressed ball of fluid at the center with 7 times the rest density. Our IPBF method recovers
+to a stable state while DFSPH explodes, IISPH does not recover from high density error, and both PBF and SISPH remain with unstable particles. All
+examples were run with ℎ = 1/120 seconds and with 3 iterations (3+3 for DFSPH). The top row shows an earlier frame of the animations.
+
+
+
+
+         ℎ = 1/240 seconds                        ℎ = 1/120 seconds                 ℎ = 1/60 seconds                     ℎ = 1/30 seconds
+Fig. 6. Our method produces stable results for a double dam break even when increasing the time step size up to ℎ = 1/30 seconds and limiting
+iteration counts to 2 iterations per time step. The error due to a large time step size and limited iterations leads to excessive compression.
+
+
+   Figure 3 shows the results with 2 iterations per time step (1+2            stiffer system can result in less compression, it is typically also less
+for DFSPH). In this case, DFSPH and IISPH fail due to numerical               numerically stable. Our method is able to achieve both. In fact, our
+explosion, but all position-based methods produce a similar result            method exhibits unconditional stability in all our tests.
+as before.                                                                       We demonstrate this behavior of our method in Figure 6, where
+                                                                              we gradually increase the time step size ℎ while only using 2 iter-
+   Stability. Figure 5 shows a stress test for stability. In this exam-       ations per time step, using the same Double Dam Break example
+ple, we initialize a sphere of fluid with an initial state of 7× the          in Figure 2. Our method shows little change, raising the ℎ from
+rest density and simulate under the same time step size and equal             1/240 to 1/60 seconds. Even at a time step size of 1/30 seconds, our
+iteration count, except for DFSPH, which is given +3 iterations for           method remains stable at the cost of noticeable compression. This
+its divergence solve. Still, unlike other methods, DFSPH is unable            test shows our method operating with a substantial residual, accu-
+to recover from the large deviation in density, and experiences nu-           mulated over many frames, and unable to correct the density error
+merical explosion soon after the simulation begins. While IISPH               with only 2 iterations for a large time step size, but still remaining
+maintains stability, it does so at the cost of significant volume loss,       stable. In general, our method trades incompressibility for stability
+as it can not recover to the rest density. Similarly to ours, PBF and         when necessary and thus remains stable even at extreme time step
+SISPH are able to recover without significant volume loss, but fail           sizes.
+to organize a coherent flow with many individual fluid particles
+flying around. In contrast, our method recovers from this significant            Incompressibility. When such a tradeoff is not needed, our method
+density deviation without volume loss or incoherent flow. This is             also naturally exhibits superior incompressibility. We demonstrate
+notable as volume loss is often a trade-off with stability. While a           this in Figure 7 with a large static column of water simulated in 2D.
+
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+                                                                                                                                               Implicit Position-Based Fluids   • 7
+
+
+
+                                   ρ0              1.2ρ0
+
+
+
+
+                                                                                  Fig. 9. The frame used to run a 3D convergence test. It is the moment
+                                                                                  a large block of water falls on a puddle of water below.
+
+                                                                                                      10-4
+                         PBF      IISPH   SISPH    DFSPH         IPBF (Ours)
+                                                                                                                                                                      PBF
+                                                                                                      10-5
+
+
+
+
+                                                                                Mean Relative Error
+      Fig. 7. By dropping a column of water in 2D, we measured how much                                                                                               IISPH
+                                                                                                                                                                      SISPH µ = 108
+      compression each method exhibited with 8 iterations (4+4 for DFSPH)
+      and with 𝛼 = 10 −6 (𝜇 = 106 for SISPH). At a converged state, IPBF                              10-6                                                            DFSPH
+
+      visually shows the least amount of compression.
+                                                                                                      10-7
+
+                                                                                                      10-8                                                            IPBF α = 10-8
+                        1.6                             PBF                                                                                                           IPBF α = 0
+                        1.5                             IISPH
+
+
+
+
+Mean Relative Density
+                                                                                                        -9
+                                                        SISPH                                         10
+                        1.4                             DFSPH                                                0        10        20        30          40         50
+                                                        IPBF (Ours)
+                        1.3                                                                                                       Iteration
+                        1.2                                                       Fig. 10. Our method converges to a lower density error with fewer
+                                                                                  iterations when starting at the same initial state, shown in Figure 9.
+                        1.1
+                         1
+                        0.9                                                         We present a convergence test in Figure 10, showing the mean
+                              0   100     200     300            400      500    relative error of fluid density for one time step with increasing itera-
+                                       Frames
+                                                                                 tion count. All methods in this test begin with the exact simulation
+      Fig. 8. This graph shows the average density of particles in the 2D        state shown in Figure 9, which corresponds to a frame of the anima-
+      compression test over the course of the animation shown in Figure 7        tion in Figure 11 when the block of water collides with the puddle.
+      and in our supplemental video. IPBF shows very rapid convergence           Notice in Figure 10 that our IPBF method quickly converges to a low
+      and minimal deviation from the rest density (of 1) as the animation        mean relative error with less than 10 iterations in this test. Using a
+      plays.                                                                     non-zero 𝛼 parameter, a slightly larger density error is observed to
+                                                                                 account for the momentum term in the variational energy. DFSPH
+                                                                                 includes 2 additional iterations for its velocity divergence solve,
+                                                                                 which lags its convergence; otherwise, it also converges quickly,
+      Under equal computation time, our method has a similar compres-
+                                                                                 but to a larger error. The other methods have much slower conver-
+      sion as DFSPH, while PBF, SISPH, and IISPH compress substantially.
+                                                                                 gence. Although not shown in this graph, SISPH continues to reduce
+      In Figure 8, we show the average density over the first 500 frames for
+                                                                                 the error with further iterations below the error level of DFSPH,
+      all methods. Notice that our IPBF method quickly reaches a steady
+                                                                                 but retains a higher error than our IPBF method even after 1000
+      state, while other methods exhibit more oscillations, in addition to
+                                                                                 iterations.
+      higher compression.
+         The same behavior can be observed in 3D. In Figure 11, we drop a             Speed. Since our method has a similar computational cost per iter-
+      block of water onto a puddle. This creates a large amount of compres-       ation, yet allows larger time step sizes to produce stable simulations,
+      sion error upon contact. Figure 12 shows the state of the simulation        our method can be significantly faster than prior work.
+      immediately after this contact, comparing different solvers. Here, in           Table 1 shows the performance results with settings that produce
+      an attempt to enforce incompressibility, DFSPH is unable to main-           a similar density error for all methods. This is achieved by tuning
+      tain stability and explodes upon contact. PBF and IISPH maintained          the iteration count and time step size for each method. Notice that
+      stability, but exhibited excessive compression, which also leads to a       for both examples presented in this paper, our IPBF method has
+      substantial increase in computation cost, because, with high com-           significantly lower computation time per frame, as compared to the
+      pression, each particle interacts with many more particles within a         other methods.
+      kernel radius around it. In this example, SISPH also remains stable,            Figure 1 shows a large simulation example where we pop a balloon
+      but shows some larger energy injection due to a large error residual.       filled with particles over a sphere and a puddle below it, amounting
+
+                                                                                                             SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+8 •   Diaz et al.
+
+
+
+
+Fig. 11. The Block Flop example with 250K particles simulated using our IPBF method. A block of fluid drops onto a puddle. The resulting simulation
+results in a period of high density error, but with 2 iterations and a time step size of ℎ = 1/240, we maintain stability with incompressibility,
+running at an average of 60 ms per frame.
+
+
+
+
+             PBF                         IISPH                       SISPH                        DFSPH                     IPBF (ours)
+Fig. 12. A frame of the Block Flop animation from Figure 11 soon after the block hits the puddle, simulated using different methods. All methods
+have a similar per-frame computation time of 60 ms, using ℎ = 1/240 seconds and all methods with 2 iterations, except for DFSPH, which had 2
+additional divergence iterations that incur extra computation cost. Nonetheless, DFSPH is entirely unstable in this example. SISPH injects energy
+due to density error.
+
+Table 1. Performance comparison with similar average density error,
+achieved using different iteration counts per step and different step
+sizes per frame for different methods. The total computation times per
+frame are measured on an NVIDIA RTX 4090 GPU.
+Figure 2            Solver          Error      Iter.   Step Size      Time
+                    IPBF (Ours)     9.2e-4       2     1 / 480 s     70 ms
+                    DFSPH           1.2e-3     4+4     1 / 240 s    111 ms
+                    SISPH           2.5e-3       2     1 / 480 s    117 ms
+                    IISPH           5.5e-3       5     1 / 480 s    250 ms
+                    PBF             5.6e-3       4     1 / 960 s    250 ms
+
+Figure 12           Solver          Error      Iter.   Step Size      Time
+                    IPBF (Ours)     4.6e-4       1     1 / 480 s     50 ms
+                    DFSPH           5.8e-4     4+4     1 / 240 s    110 ms              No damping                            Damped
+                    SISPH           1.3e-3       2     1 / 480 s    100 ms   Fig. 13. We compare a small dam break with a solve using 𝛼 = 0 and
+                    IISPH           2.6e-3       5     1 / 480 s    250 ms   the same solve using our artificial damping formulation. Without the
+                    PBF             5.5e-3       2     1 / 960 s    142 ms   damping, the fluid surface is noisier and does not come to rest, whereas
+                                                                             it settles to rest after some time with our damping.
+
+to 900K particles in the simulation. On an NVIDIA RTX 4090, we
+are able to maintain stability in this example using 159 milliseconds
+per frame.                                                                   seeing improved energy dissipation without sacrificing the dynamic
+                                                                             energy of splashes in the fluid. As can be seen in our supplemental
+  Damping. Our artificial damping formulation is useful in remov-            video, our damping formulation has minimal effect on the overall
+ing excess energy injected from residual error in the stiff system.          fluid motion, and it only dampens the motion as the particles come
+In Figure 13, we compare our damping with an undamped solve,                 close to rest.
+
+SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+                                                                                                                                        Implicit Position-Based Fluids    • 9
+
+
+
+
+ 𝛼 = 10 −3                          𝛼 = 10 −4                          𝛼 = 10 −5                          𝛼 =0
+Fig. 14. Simulation of a dam break using our IPBF method with different compliance parameters 𝛼 for simulating different fluid compressibility.
+
+
+                                                                                       Jan Bender and Dan Koschier. 2015. Divergence-free smoothed particle hydrodynamics.
+                                                                                           In Proceedings of the 14th ACM SIGGRAPH / Eurographics Symposium on Computer
+                                                                                           Animation (Los Angeles, California) (SCA ’15). Association for Computing Machin-
+                                                                                           ery, New York, NY, USA, 147–155. doi:10.1145/2786784.2786796
+                                                                                       Anka He Chen, Ziheng Liu, Yin Yang, and Cem Yuksel. 2024. Vertex Block Descent.
+                                                                                           ACM Transactions on Graphics (Proceedings of SIGGRAPH 2024) 43, 4, Article 116
+                                                                                           (0766 2024), 16 pages. doi:10.1145/3658179
+                                                                                       T. F. Gast and C. Schroeder. 2015. Optimization integrator for large time steps. In
+                                                                                           Proceedings of the ACM SIGGRAPH/Eurographics Symposium on Computer Animation
+                                                                                           (Copenhagen, Denmark) (SCA ’14). Eurographics Association, Goslar, DEU, 31–40.
+                                                                                       R. A. Gingold and J. J. Monaghan. 1977. Smoothed particle hydrodynamics:
+                                                                                           theory and application to non-spherical stars. Monthly Notices of the Royal
+                                                                                           Astronomical Society 181, 3 (12 1977), 375–389. doi:10.1093/mnras/181.3.375
+                                                                                           arXiv:https://academic.oup.com/mnras/article-pdf/181/3/375/3104055/mnras181-
+    No Hessian approximation                With Hessian approximation                     0375.pdf
+                                                                                       Xiaowei He, Ning Liu, Sheng Li, Hongan Wang, and Guoping Wang. 2012.
+Fig. 15. Simulation of a dam break that fails to maintain numerical                        Local Poisson SPH For Viscous Incompressible Fluids.              Computer Graph-
+stability without our Hessian approximation.                                               ics Forum 31, 6 (2012), 1948–1958.             doi:10.1111/j.1467-8659.2012.03074.x
+                                                                                           arXiv:https://onlinelibrary.wiley.com/doi/pdf/10.1111/j.1467-8659.2012.03074.x
+                                                                                       Xiaowei He, Shusen Liu, Yuzhong Guo, Jian Shi, and Ying Qiao. 2025. A Semi-Implicit
+                                                                                           SPH Method for Compressible and Incompressible Flows with Improved Conver-
+   Compliance. Our IPBF method can be used with different compli-                          gence. Computer Graphics Forum (2025). doi:10.1111/cgf.70043
+ance parameters 𝛼 for simulating fluids with different compressibil-                   Xiaowei He, Huamin Wang, Guoping Wang, Hongan Wang, and Enhua Wu. 2020. A
+                                                                                           Variational Staggered Particle Framework for Incompressible Free-Surface Flows.
+ity behavior. This is demonstrated in Figure 14.                                           arXiv:2001.09421 [cs.GR] https://arxiv.org/abs/2001.09421
+                                                                                       Markus Ihmsen, Jens Cornelis, Barbara Solenthaler, Christopher Horvath, and Matthias
+  Hessian Approximation. Our Hessian approximation is critical for                         Teschner. 2014. Implicit Incompressible SPH. IEEE Transactions on Visualization and
+achieving numerical stability. As can be seen in Figure 15, without                        Computer Graphics 20, 3 (March 2014), 426–435. doi:10.1109/TVCG.2013.105
+                                                                                       Dan Koschier, Jan Bender, Barbara Solenthaler, and Matthias Teschner. 2019. Smoothed
+our Hessian approximations, simulations often quickly run into                             Particle Hydrodynamics Techniques for the Physics Based Simulation of Fluids and
+instability, even with relatively simple cases.                                            Solids. doi:10.2312/egt.20191035
+                                                                                       Dan Koschier, Jan Bender, Barbara Solenthaler, and Matthias Teschner.
+5    Conclusion                                                                            2022.       A Survey on SPH Methods in Computer Graphics.
+                                                                                           puter Graphics Forum 41, 2 (2022), 737–760.
+                                                                                                                                                                           Com-
+                                                                                                                                                          doi:10.1111/cgf.14508
+We have introduced an implicit position-based fluid method for                             arXiv:https://onlinelibrary.wiley.com/doi/pdf/10.1111/cgf.14508
+                                                                                       Shusen Liu, Xiaowei He, Yuzhong Guo, Yue Chang, and Wencheng Wang. 2024. A
+solving SPH fluids with superior stability at large time steps while                       Dual-Particle Approach for Incompressible SPH Fluids. ACM Trans. Graph. 43, 3,
+still maintaining low density error. We show that our method is                            Article 28 (April 2024), 18 pages. doi:10.1145/3649888
+able to outperform prior work while showing comparable quality                         L. B. Lucy. 1977. A numerical approach to the testing of the fission hypothesis. aj 82
+                                                                                           (Dec. 1977), 1013–1024. doi:10.1086/112164
+of simulation and remaining stable even under extreme time steps.                      Miles Macklin and Matthias Müller. 2013. Position based fluids. ACM Trans. Graph. 32,
+                                                                                           4, Article 104 (July 2013), 12 pages. doi:10.1145/2461912.2461984
+   Limitations & Future Work. Although we maintain stability, our                      Miles Macklin, Matthias Müller, and Nuttapong Chentanez. 2016. XPBD: position-based
+method may exhibit artifacts due to energy injection from the high                         simulation of compliant constrained dynamics. In Proceedings of the 9th International
+                                                                                           Conference on Motion in Games (Burlingame, California) (MIG ’16). ACM, New York,
+stiffnesses present in incompressible fluids. This is largely due to                       NY, USA, 49–54. doi:10.1145/2994258.2994272
+residual errors from zero 𝛼 values, preventing our method from                         Matthias Müller, David Charypar, and Markus Gross. 2003. Particle-based fluid
+providing a convergence guarantee. Future work can address this                            simulation for interactive applications. In Proceedings of the 2003 ACM SIG-
+                                                                                           GRAPH/Eurographics Symposium on Computer Animation (San Diego, California)
+by presenting alternative damping formulations that do not require                        (SCA ’03). Eurographics Association, Goslar, DEU, 154–159.
+user-specified tuning for simulations.                                                 Matthias Müller, Bruno Heidelberger, Marcus Hennix, and John Ratcliff. 2007. Position
+                                                                                           based dynamics. J. Vis. Comun. Image Represent. 18, 2 (April 2007), 109–118. doi:10.
+References                                                                                 1016/j.jvcir.2007.01.005
+                                                                                       Andreas Peer, Markus Ihmsen, Jens Cornelis, and Matthias Teschner. 2015. An implicit
+Sheldon Andrews, Marek Teichmann, and Paul G. Kry. 2017.                    Geomet-        viscosity formulation for SPH fluids. ACM Trans. Graph. 34, 4, Article 114 (July
+   ric Stiffness for Real-time Constrained Multibody Dynamics.                  Com-       2015), 10 pages. doi:10.1145/2766925
+   puter Graphics Forum 36, 2 (2017), 235–246.                 doi:10.1111/cgf.13122   B. Solenthaler and R. Pajarola. 2009. Predictive-corrective incompressible SPH. In ACM
+   arXiv:https://onlinelibrary.wiley.com/doi/pdf/10.1111/cgf.13122                         SIGGRAPH 2009 Papers (New Orleans, Louisiana) (SIGGRAPH ’09). Association for
+Markus Becker and Matthias Teschner. 2007. Weakly compressible SPH for free sur-           Computing Machinery, New York, NY, USA, Article 40, 6 pages. doi:10.1145/1576246.
+   face flows. In Proceedings of the 2007 ACM SIGGRAPH/Eurographics Symposium on           1531346
+   Computer Animation (San Diego, California) (SCA ’07). Eurographics Association,
+   Goslar, DEU, 209–217.
+
+
+                                                                                                 SA Conference Papers ’25, December 15–18, 2025, Hong Kong, Hong Kong.
+

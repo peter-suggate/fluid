@@ -1,0 +1,1120 @@
+Tube Maps: Fast SPH Boundary Handling with Tubular Coordinates
+DARIA NOGINA, Columbia University, USA
+SILVIA SELLÁN, Columbia University, USA
+
+
+
+
+                                                                                        same accuracy
+     [Koschier and Bender 2017] : 1.8s/frame (95.6% of simulation time)                                                  Ours: 10ms/frame (6.5% of simulation time)
+
+Fig. 1. In an SPH fluid simulation with 400, 000 particles and several deforming solids, resolving fluid-solid interactions can become a computational bottleneck.
+We propose a drop-in replacement for existing implicit boundary handling methods that reduces their runtime by several orders of magnitude.
+
+Smoothed Particle Hydrodynamics (SPH) simulations rely on accurately                1     Introduction
+and efficiently modeling fluid-solid interactions. However, particle-based          Smoothed Particle Hydrodynamics (SPH) is a popular Lagrangian
+coupling strategies introduce non-deterministic discretization errors, and
+                                                                                    fluid simulation framework thanks to its flexibility, efficiency and
+implicit methods achieve high accuracy at the cost of expensive numerical in-
+tegration. We introduce Tube Maps, a drop-in replacement for SPH boundary
+                                                                                    visual realism. In applications from computer graphics to engineer-
+density computation that achieves accuracy comparable to implicit methods           ing, a fundamental part of any SPH simulation is the modeling of
+while dramatically reducing their computational cost. Our key observation           interactions between fluids and solids (e.g., characters, containers
+is that the boundary density integral is fully determined by the local surface      or mechanical devices). A particularly critical aspect of this solid
+geometry near a fluid particle’s closest point. By expressing this geometry         boundary handling is the computation of the contribution of each
+in tubular coordinates, we reduce the original three-dimensional integral to        solid to the density field at each fluid particle.
+a one-dimensional closed-form expression that can be evaluated in constant             Unfortunately, existing methods provide a sharp tradeoff between
+time. We thus eliminate numerical quadrature and reduce boundary han-               simulation speed and accuracy. By far the most common tactic,
+dling costs by one to three orders of magnitude, enabling fast and accurate         popularized by Akinci et al. [2012], is to discretize the solid’s surface
+SPH simulations with time-varying curved solids.
+                                                                                    using boundary particles, which contribute to the simulation in a
+CCS Concepts: • Computing methodologies → Physical simulation; •                    manner analogous to their fluid counterparts but whose position is
+Theory of computation → Computational geometry.                                     rigidly prescribed. As shown by Koschier and Bender [2017], this
+Additional Key Words and Phrases: Fluid Animation, Computational Geom-              introduces non-deterministic discretization error which can only
+etry                                                                                be alleviated via costly increases to sampling density.
+                                                                                       To remedy this, Koschier and Bender [2017] and Bender et al.
+ACM Reference Format:
+Daria Nogina and Silvia Sellán. 2026. Tube Maps: Fast SPH Boundary Han-
+                                                                                    [2019] proposed implicit boundary handling methods. In these, the
+dling with Tubular Coordinates. In Special Interest Group on Computer Graph-        solid’s contribution to the fluid’s density is computed through a
+ics and Interactive Techniques Conference Conference Papers (SIGGRAPH Con-
+ference Papers ’26), July 19–23, 2026, Los Angeles, CA, USA. ACM, New York,          Prior work: Numerical approximation, This work: Geometric approximation,
+NY, USA, 11 pages. https://doi.org/10.1145/3799902.3811118                           recomputed and cached if solid changes with closed-form, constant-time solution
+
+Authors’ Contact Information: Daria Nogina, Columbia University, New York, USA,
+nogina.daria.ml@gmail.com; Silvia Sellán, Columbia University, New York, USA,
+silviasellan@cs.columbia.edu.
+                                                                                                        [Koschier and Bender 2017]                     Similar accuracy,
+                                                                                                                [Bender et al. 2019]                 signiﬁcantly faster
+
+This work is licensed under a Creative Commons Attribution-NonCommercial-
+                                                                                    Fig. 2. Our algorithm’s key insight is substituting the numerically approxi-
+NoDerivatives 4.0 International License.
+SIGGRAPH Conference Papers ’26, Los Angeles, CA, USA                                mated integral of prior work for a geometric approximation with a closed-
+© 2026 Copyright held by the owner/author(s).                                       form solution, massively improving runtime.
+ACM ISBN 979-8-4007-2554-8/26/07
+https://doi.org/10.1145/3799902.3811118
+                                                                                              SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+2 •    Daria Nogina and Silvia Sellán
+
+
+             Absolute error (log)                                             Absolute error (log)                                                                     Absolute error (log)
+                                       [Bender et al. 2019]
+                                         (increasing number
+        1                               of quadrature nodes)                                             [Bender et al. 2019]                                                                          [Bender et al. 2019]
+               Plane                                                             Cylinder                                                                                      Sphere
+      10⁻¹                                                                                                     [K                                                                                        [K
+                                                                                                                 os                                                                                        os
+                                                                                                                    ch                                                              Planar                    ch
+      10⁻²                                    [Koschier et al. 2017]                                                  ier                                                                                       ier
+                                                 (increasing number                                                             et                                                                                    et
+                                                                                                                                     al.                                                                                   al.
+                                                of quadrature nodes)                                                                       20                                         Similar speed,                             20
+      10⁻³                                                                                      Planar                                         17                                     over 100 times                               17
+                                                                                                                                                    ]                                 more accurate!                                      ]
+      10⁻⁴         Planar approximation
+                (a-là-[Winchenbach et al. 2020])
+      10⁻⁵                                                                                                                                                                     Our output           Similar accuracy, over
+               Our output                                                         Our output                                                                                                         100,000 times faster!
+      10⁻⁶
+              10⁻⁷ 10⁻⁶ 10⁻⁵ 10⁻⁴ 10⁻³ 10⁻² 10⁻¹           1     10     10²      10⁻⁷ 10⁻⁶ 10⁻⁵ 10⁻⁴ 10⁻³ 10⁻² 10⁻¹                      1          10         10²            10⁻⁷ 10⁻⁶ 10⁻⁵ 10⁻⁴ 10⁻³ 10⁻² 10⁻¹                      1       10 10²
+                          Runtime in seconds (log)                                          Runtime in seconds (log)                                                                         Runtime in seconds (log)
+                to compute boundary density at a single ﬂuid particle
+
+
+Fig. 3. Prior work on estimating boundary contributions to a fluid particle’s density introduces a tradeoff between runtime and accuracy: planar approximations
+yield fast-yet-inaccurate results for curved geometry (green, center and right), while numerical methods can achieve high accuracy only by relying on an
+impossibly large number of quadrature evaluations (purple and orange lines). Our new implicit boundary handling strategy matches the accuracy of expensive
+numerical methods without their computational cost.
+
+
+three-dimensional integral that relies on a signed distance represen-                                                    Like other implicit boundary handling methods, we avoid
+                                                                                                                      the irregular bumps and random noise of particle-based ones
+tation of the object, greatly improving accuracy. This integral can                                                                                               X
+                                                                                                                      -1                        0                              2]
+be estimated analytically if the shape is planar or close to planar                                         0.05                                                          201
+                                                                                                                                         ies                          al.                                ]
+[Winchenbach et al. 2020]; however, numerically computing it for                                                                      tor                        et
+                                                                                                                                                                                                         19      17   ]
+                                                                                                                           Tr
+                                                                                                                             aje
+                                                                                                                                     c
+                                                                                                                                                           nci                                         20       20
+                                                                                                                                                        ki
+curved shapes (e.g., using quadrature) is computationally costly. In                                           0
+                                                                                                                                                                                                   l.
+                                                                                                                                                                                                  ta          l.
+                                                                                                                                                [A                                             re           ta
+cases in which the solid shapes are changing over time (e.g., due to                                                                                                                                     re        ur  s
+                                                                                                                                                                                             de
+elasticity, prescribed motion or geometric optimization), this inte-                                            Z                                                                            en     ch
+                                                                                                                                                                                                       ie        O
+                                                                                                                                                                                        [B        [K
+gral must be recomputed in each step of the simulation, which can                                                                                                                                   os
+quickly become a computational bottleneck (see Figure 1).
+   We introduce Tube Maps, a drop-in replacement for existing SPH
+                                                                                                           Fig. 4. A single particle rolls down an inclined plane in this example inspired
+boundary density computation that provides an accuracy similar                                             by Koschier and Bender [2017]. Particle-based methods create irregular
+to prior implicit coupling methods while reducing their runtime by                                         behaviour that is avoided by implicit boundary handling.
+several orders of magnitude (see Figure 1). Our key insight is that by
+proposing to approximate the integral numerically, previous works                                             Through extensive quantitative experimentation on simple analyt-
+are agnostic to the form of the specific integrand. In particular, they                                    ical geometries, we demonstrate our algorithm’s superior accuracy
+do not take advantage of the fact that the integrand is fully deter-                                       and efficiency. We implement our algorithm in a fork of a popular
+mined by a shape’s local geometry around a fluid particle’s closest                                        open-source SPH simulation library [Bender 2025], and highlight
+point (see Figure 2, left). Instead of this numerical approximation,                                       its nature as a plug-in replacement for prior boundary handling
+we propose a surface-based geometric approximation that considers                                          strategies through a diverse set of prototypical applications with
+the surface’s representation in tubular coordinates and converts the                                       complex, curved geometries.
+3D integral into a one-dimensional one with a closed-form analyti-
+cal solution that can be computed in constant time from the fluid                                          2        Related Work
+particle’s SDF and the surface’s curvature (see Figure 2, right).                                          Smoothed Particle Hydrodynamics (SPH) is an increasingly popular
+   By substituting the hundreds of thousands of quadrature node                                            fluid simulation framework. Due to its meshless nature and rela-
+evaluations of prior work with a single closed-form formula, our                                           tively simple implementation, it has been applied in a wide array of
+algorithm reduces the computational cost of SPH boundary handling                                          scientific fields: from astrophysics [Gingold and Monaghan 1977]
+by factors of 10 to 1000. Our contribution is most notable in scenes                                       and aerospace [Siemann and Groenenboom 2014] and automotive
+in which the solid’s shape is complex and changes over time. In                                            engineering [Cleary et al. 2006; Fleissner et al. 2010] to marine
+these simulations, the density integral cannot be pre-computed and                                         industrial design [Le Touzé et al. 2010; Marrone et al. 2011] and
+must instead be approximated and cached with high grid resolution                                          geophysics [Gutfraind and Savage 1998].
+in every simulation step. For medium-scale scenes with hundreds of                                            In the computer graphics research community, SPH has grown
+thousands of particles and deforming solids, our algorithm reduces                                         in popularity thanks to its ability to produce visually plausible sim-
+the total simulation runtime by several orders of magnitude (see                                           ulations of fluids in complex scenes. Over the past two decades, a
+Figure 1). Unlike prior methods, which approximate the surface                                             significant amount of work has been dedicated to improving the
+with planar patches to sacrifice fidelity for speed, our geometric                                         applicability and robustness of SPH in graphics: by simulating tur-
+approximation not only matches but often outperforms the accuracy                                          bulent flows [Launder and Spalding 1972], viscous [Weiler et al.
+of costly numerical quadrature (see Figure 3).                                                             2018] and multi-phase fluids [Pozorski and Olejnik 2024], as well as
+
+SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+                                                                                        Tube Maps: Fast SPH Boundary Handling with Tubular Coordinates • 3
+
+
+
+
+Fig. 5. A set of smooth, curved letters interact with a violent dam break (an invisible wall stands between them and the camera). See Supplemental Video.
+
+
+through novel numerical techniques to enforce incompressibility                             We match the predictions            Y            Trajectories
+                                                                                            of numerical integration
+[Gissler et al. 2019; Skillen et al. 2013]. In recent years, a growing                       methods, without their                 [Koschier et al. 2017]
+body of work has considered strategies to augment SPH simula-                                    computational cost.
+tion using data-driven priors [Dou et al. 2025], and even designed                                                                            Ours
+end-to-end differentiable SPH simulation pipelines [Li et al. 2023;                                   Planar approximations
+Winchenbach and Thuerey 2025].                                                                             sacriﬁce accuracy
+                                                                                                                 and diverge
+   In this paper, we concern ourselves with one specific step in most
+SPH pipelines: namely, the computation of the fluid’s density in                                                                                 Planar
+regions neighboring solid boundaries or boundary handling. Our
+work is thus orthogonal and complementary to the vast existing
+literature dedicated to expanding or improving other aspects of SPH
+simulation. Because of this, we will focus this section only on the
+                                                                                 Our method
+discussion of prior SPH boundary handling strategies, and refer the              and [Koschier et al. 2017]                                                  X
+reader to existing surveys [Ihmsen et al. 2014; Koschier et al. 2022]            perfectly superimposed
+and courses [Koschier et al. 2020] for a comprehensive review of
+SPH in computer graphics.                                                       Fig. 6. A particle rolls down a cylinder using our method, the density maps
+                                                                                proposed by Koschier and Bender [2017], and a planar approximation in
+                                                                                the style of Winchenbach et al. [2020]. The latter accumulates error and
+2.1   SPH Boundary Handling                                                     diverges, while ours matches numerical integration without its cost.
+A critical element in SPH fluid–solid coupling is the estimation of
+field variables (e.g., density) at fluid particles near the solid-fluid
+interface. Mathematically, this amounts to computing the integral               approximate the boundary by a plane defined by the surface normal
+of a function over a complex volumetric domain: the intersection of             at the closest point to the particle. Planar approximation allows for
+the solid with the SPH kernel’s support domain centered at the fluid            a sufficient simplification of the domain to derive a fully analytical
+particle. For this task, different strategies have been proposed: for           solution for a 2D case [Winchenbach and Kolb 2025]. On the other
+our purposes, it is useful to characterize them geometrically based             hand, multi-planar methods also rely on flat primitives, but in a dif-
+on how this complex volumetric domain is discretized.                           ferent sense: they do not replace the local boundary by one tangent
+   Point-based or particle-based methods. The most common SPH                   plane but integrate over a piecewise-flat surface description. Fuji-
+boundary handling strategy consists of densely sampling the solid               sawa and Miura [2015] refine the estimate by progressively clipping
+boundary with its own boundary particles, which are equipped with               the domain with additional planes at the cost of increased runtime.
+estimated pseudovolumes and contribute to the fluid’s density in                   The main drawback of planar and multiplanar methods is fun-
+a way analogous to fluid particles [Akinci et al. 2012]. If the solid           damental: by approximating the surface with flat elements, their
+boundary is changing or deforming, the particles must be resampled              accuracy depend on the relation between the surface’s curvature
+to avoid leakage [Akinci et al. 2013].                                          and the SPH kernel’s support radius. When the solid is flat (see
+   Point-based methods are fast and flexible; however, they introduce           Figure 3, left) or the particle radius is very small, they provide a fast
+artificial irregularities on the solid’s boundary that can cause non-           and accurate estimation. However, for moderately curved solids or
+deterministic artifacts and friction (see Figure 4). If no additional           coarse particles, they quickly accumulate error and visibly deviate
+considerations, such as those in [Band et al. 2018], are made, this             from analytical solutions (see Figure 6). Inspired by these, our work
+drawback can only be alleviated by increasing the density of the                introduces a second-order geometric approximation of the solid’s
+sampling, leading to a significant computational cost even for the              boundary, which not only matches the accuracy of these methods
+simplest boundary geometries.                                                   when the surfaces are flat but is also orders of magnitude more
+   When the boundary surface is flat, or its curvature is low enough,           accurate for arbitrarily curved boundaries (see Figure 3, right).
+planar methods estimate its contribution to the fluid density can                  Numerical methods. Rather than relying on elaborate geometric
+be estimated analytically. For example, Winchenbach et al. [2020]               representations, approaches like Density Maps proposed by Koschier
+
+                                                                                        SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+4   •    Daria Nogina and Silvia Sellán
+
+
+Boundary density                      Particle-based                 Planar                   Multiplanar                   Numerical                       Ours: semi-analytic
+computation methods:                  [Akinci et al. 2012]   [Winchenbach et al. 2020]   [Fujisawa and Miura 2015]                 [Koschier et al. 2017]   curved integration
+                                                                                                                                     [Bender et al. 2019]
+
+
+
+
+Fig. 7. A review of strategies to correct boundary density underestimation in SPH: from particle-based methods to planar and multi-planar estimations,
+numerical methods and our novel curved geometric approximation.
+
+
+and Bender [2017] estimate boundary density via numerical inte-                             Estimating densities by
+                                                                                            summing nearby particles…
+gration schemes such as Gauss–Legendre quadrature. Later, Bender
+et al. [2019] proposed Volume Maps, which separate the boundary
+density integral into two terms that are estimated separately, im-
+proving numerical stability at the cost of accuracy.                                                                                                          …underestimates
+                                                                                                                                                              fluid density near
+   Numerical methods avoid the irregularities of particle-based ap-                                                                                           solids.
+proaches and significantly outperform planar approximations for
+arbitrarily curved boundaries. The volumetric nature of their inte-
+gration allows them to recover missing kernel support from infor-                          Fig. 8. Correct fluid density estimation in SPH requires boundary handling.
+mation in the solid volume. However, they do so at a significant
+computational cost, requiring hundreds of thousands of quadrature
+                                                                                           In this case, the Navier-Stokes equations can be rewritten as
+node evaluations for a single spatial boundary density evaluation.
+                                                                                                               𝑑v    1
+These values may be pre-computed and cached at the beginning of                                                   = − ∇𝑝 + 𝜇∇2 v + 𝑔 ,                  ∇ · v = 0,             (2)
+a simulation if the solid is rigid [Koschier et al. [n. d.]; Koschier and                                      𝑑𝑡    𝜌
+Bender 2017], but must be re-computed fully or partially [Ma et al.                        known as the Lagrangian Navier-Stokes equations.
+2025] at every simulation frame if the solid is deforming or animated.
+Our Tube Maps approach builds directly on these methods; critically,                       3.1     Smoothed Particle Hydrodynamics
+we provide an elaborate mathematical derivation that allows us to                         Smoothed Particle Hydrodynamics (SPH) is a framework encompass-
+approximate the same smoothed integral proposed by Koschier and                           ing a broad set of methods for solving the Lagrangian Navier-Stokes
+Bender [2017] in a surface-based manner - geometrically instead of                        equations. They start by considering 𝑁 particle trajectories x𝑖 (𝑡)
+numerically, leading to a constant-time drop-in replacement that                          with initial positions x𝑖 (0), each with its own mass 𝑚𝑖 and state
+improves their runtime and accuracy by orders of magnitude in the                         variables v𝑖 (𝑡), 𝜌𝑖 (𝑡) and 𝑝𝑖 (𝑡) governed by Equations 1 and 2.
+presence of curved solids (see Figure 3). In section 3, we review these                       Then, for each particle 𝑖 surrounded by other fluid particles, SPH
+strategies in more detail and set the stage for our main contribution.                    discretizes some or all of these state variables (collectively denoted
+                                                                                          𝑎𝑖 ) as a weighted average of the state at its neighbors. Concretely,
+3       Background: SPH and SPH Boundary Handling                                         using a compactly supported kernel 𝑊ℎ with support radius ℎ, and
+The state of an incompressible fluid is usually expressed in terms of                     letting N (𝑖) be the set of fluid particles in a neighborhood of radius
+its velocity v(x), density 𝜌 (x) and pressure 𝑝 (x) functions. These                      ℎ around x𝑖 , they set
+are governed by the Eulerian Navier-Stokes equations                                                                 ∑︁ 𝑚 𝑗
+                                                                                                              𝑎𝑖 =              𝑎 𝑗 𝑊ℎ (x𝑖 − x 𝑗 ) .           (3)
+                                                                                                                             𝜌𝑗
+            𝜕v               1                                                                                        𝑗 ∈ N (𝑖 )
+               + (v · ∇)v = − ∇𝑝 + 𝜇∇2 v + 𝑔 ,               ∇ · v = 0,
+            𝜕𝑡               𝜌                                                             Conveniently, this discretization allows one to write the differential
+                                                                                           quantities of 𝑎𝑖 (e.g., its gradient, ∇𝑎𝑖 , divergence ∇·𝑎𝑖 , and Laplacian
+where 𝑔 represents external forces (e.g., gravity) and 𝜇 is the fluid’s
+                                                                                           ∇2𝑎𝑖 ) in terms of the spatial derivatives of 𝑊ℎ and the state of the
+viscosity coefficient. Intuitively, its first equality says that the fluid’s
+                                                                                           neighboring particles 𝑎 𝑗 .
+velocity changes due to advection, pressure, viscosity and external
+                                                                                              Different ways of exploiting this fact lead to different strategies
+forces, and the second ensures incompressibility.
+                                                                                           for solving Equation 2. Most employ operator splitting: at each sim-
+   A common reformulation of these equations is to imagine x not as
+                                                                                           ulation step, the viscosity and external forces are first used to obtain
+a fixed position in space but as the trajectory x(𝑡) of a fluid particle
+                                                                                           a preliminary velocity. Then, the fluid density 𝜌𝑖 is calculated at
+moving with the fluid flow, i.e.,
+                                                                                           each particle, which is used to estimate its pressure 𝑝𝑖 (be it via an
+                                     𝑑x                                                    equation of state [Becker and Teschner 2007], iteratively [Bender
+                                        = v(x).                                    (1)     and Koschier 2015; Solenthaler and Pajarola 2009] or with a PDE
+                                     𝑑𝑡
+
+SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+                                                                                               Tube Maps: Fast SPH Boundary Handling with Tubular Coordinates • 5
+
+
+ Absolute                                                                            Absolute            Approximating the eﬀect of a smooth sphere through
+ error (log)                                                                         error (log)        boundary handling methods applied to sphere meshes
+                                                                                                            [Kos
+                                                                     nar                10⁻¹                     chier
+ 10⁻²   At this resolution,                                   Pla                                                      et al.
+        1L of fluid requires                                                                                                  2017
+        8 million particles                                                                                                        ]
+                                                                                        10⁻²       Planar (zero-th order)
+
+                                               }
+ 10⁻³
+                                                                                        10⁻³       Good approximation
+                                                   2 orders of                                     even for very
+ 10⁻⁴
+
+                                               }
+                                                                                                   coarse mesh
+
+                }
+                                                   magnitude                            10⁻⁴                     Ours (first order only)
+                    1 order of
+                    magnitude
+ 10⁻⁵                                                                Ours               10⁻⁵               Our full method (including second order)
+               10⁻³                       10⁻²                             10⁻¹
+                                                                                                     10²          10³          10⁴           10⁵          10⁶
+                            Particle radius (log)                                                             Number of vertices in sphere mesh
+
+
+Fig. 9. We consider a litre of fluid interacting with a cylinder of a unit radius.   Fig. 10. Meshes are often approximations of smooth underlying geometries.
+Planar approximations require a very small particle radius to even approach          We consider the case in which one wants to simulate the interaction of a
+our accuracy to a single order of magnitude.                                         fluid with a perfect sphere by using a discrete surface mesh of it, and show
+                                                                                     that our method provides a more accurate approximation (2-4 orders of
+                                                                                     magnitude) than prior work even for the coarsest of meshes.
+[Skillen et al. 2013]). These pressures are used to correct the prelim-
+inary velocities, ensuring incompressibility. Finally, these velocities
+serve to update the particle positions, ending the simulation step.                  irregularity of this sampling leads to non-deterministic noise in the
+   Many variations exist on the schematic SPH method presented                       simulation that can only be alleviated at a significant computational
+above; however, most if not all SPH methods rely on estimating                       expense by increasing its density (see Figure 4).
+each particle’s density 𝜌𝑖 in terms of its immediate neighborhood.                      By contrast, numerical methods [Bender et al. 2019; Koschier and
+When the particle is surrounded by fluid, this can be done with a                    Bender 2017] consider the exact contribution of the solid to the
+direct application of Equation 3:                                                    fluid’s density (or the limit of Equation 6 as the number of sampled
+                        ∑︁ 𝑚 𝑗             ∑︁                                        particles increases), which can be written in integral form as
+                𝜌𝑖 =            𝜌 𝑗 𝑊𝑖 𝑗 =      𝑚 𝑗 𝑊𝑖 𝑗 ,           (4)                                       ∫
+                             𝜌𝑗
+                         𝑗 ∈ N (𝑖 )                     𝑗 ∈ N (𝑖 )                                  𝜌 𝐵 (𝑥) =            𝜌 0𝑊ℎ (||x − x′ ||)𝑑x′         (7)
+                                                                                                                   𝐵ℎ (x)∩Ω
+where we abbreviate 𝑊𝑖 𝑗 = 𝑊ℎ (x𝑖 −x 𝑗 ). However, when the particle
+is near a solid boundary 𝜕Ω, directly applying Equation 4 would lead                 This integral can be computed analytically if the solid boundary
+to an underestimation of the particle density (see Figure 8, in which                𝜕Ω is flat or can be reasonably approximated with planar patches
+the two particles at x would be assigned radically different density                 [Fujisawa and Miura 2015; Harada et al. 2007; Winchenbach et al.
+values). We focus this paper on resolving this underestimation in                    2020; Winchenbach and Kolb 2025]. For more complex surfaces,
+order to provide valid density values at particles near the fluid-solid              Koschier and Bender [2017] propose a continuous version of this
+interface, a task known as boundary handling.                                        integral that aids with differentiability and numerical stability:
+                                                                                                            ∫
+3.2     SPH Boundary Handling                                                                     𝜌 𝐵 (𝑥) =        𝛾 (Φ(𝑥 ′ ))𝑊ℎ (||x − x′ ||)𝑑x′       (8)
+                                                                                                                 𝐵ℎ (x)
+A natural way of resolving the above underestimation is to add a
+boundary density correction 𝜌 𝐵𝑖 accounting for the intersection of                  where Φ is the Signed Distance Function of the boundary, and 𝛾 is a
+the particle’s neighborhood with the solid:                                          continuous piecewise-linear function like
+                         ∑︁                                                                                  (          
+                    𝜌𝑖 =       𝑚 𝑗 𝑊𝑖 𝑗 + 𝜌 𝐵𝑖 (x𝑖 )            (5)                                           𝜌 0 1 − ℎ𝑎   if 𝑎 ≤ ℎ ,
+                                                                                                     𝛾 (𝑎) =                                         (9)
+                                 𝑗 ∈ N (𝑖 )                                                                   0 otherwise.
+Two main strategies for estimating 𝜌 𝐵𝑖 have been proposed in the
+SPH literature, which are summarized in Figure 7. Particle-based                        Koschier and Bender [2017] propose using Gaussian quadrature
+methods [Akinci et al. 2012] rely on a dense sampling of boundary                    to estimate the integral in Equation 8, and show that, if computed
+particles 𝑏 𝑗 , which contribute analogously to the fluid ones but                   accurately, it eliminates the irregularity of particle-based algorithms
+whose spatial position is fixed:                                                     (see Figure 4). An accurate estimation requires a large number of
+                                   ∑︁                                                quadrature nodes: for fixed boundaries, the integral can be estimated
+                       𝜌 𝐵 (x𝑖 ) =    𝑚𝑏 𝑗 𝜌 0𝑊𝑖 𝑏 𝑗 ,          (6)
+                                                                                     and cached once before the start of the simulation. However, if the
+                                              𝑏𝑗
+                                                                                     boundaries are changing due to physical forces, prescribed motions
+where the pseudo-mass 𝑚𝑏 𝑗 may be precomputed or approximated                        or geometric optimization, Equation 8 must be re-estimated at every
+for each particle to account for the interior of the solid, and the                  step of the simulation, becoming a computational bottleneck.
+kernel 𝑊 may differ from the fluid kernel. While this is a convenient                   This computational expense is severe enough to make implicit
+discretization that aligns with the broader SPH framework, the                       methods impracticable in the simulation of fluids with geometrically
+
+                                                                                               SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+6 •   Daria Nogina and Silvia Sellán
+
+
+
+
+           Fig. 11. A deformable frog jumps on a deformable water lily, causing a ripple in the pond. See Supplemental Video for full animation.
+
+
+changing boundaries. In what follows, we introduce an approxima-                 as its tubular coordinates. In this coordinate frame, the boundary
+tion of Equation 8 that eliminates the need for quadrature estimation            integral equation
+and, with it, this computational bottleneck. It will enable us to esti-                               ∫
+mate the value of a fluid particle’s boundary density several orders                        𝜌 𝐵 (𝑥) =           𝛾 (Φ(𝑥 ′ ))𝑊ℎ (||x − x′ ||)𝑑x′  (14)
+                                                                                                                𝐵ℎ (x)∩Ω
+of magnitude more accurately and efficiently, even for moderately
+complex curved surfaces.                                                         becomes
+                                                                                                   ∫ℎ ∫ℎ ∫ℎ
+4     Method                                                                           𝜌 𝐵 (𝑥) =                    𝐽 (𝑠)𝛾 (𝑠)𝑊ℎ (||x − x′ (𝑢, 𝑣, 𝑠)||)𝑑𝑢 𝑑𝑣 𝑑𝑠      (15)
+Given a fluid particle at a spatial position x, a neighboring solid                                −ℎ −ℎ −ℎ
+boundary 𝜕Ω and a choice of compactly supported, radially symmet-                where 𝐽 (𝑠) is the Jacobian of the tubular coordinate transformation,
+ric polynomial kernel 𝑊ℎ , we will compute the particle’s boundary               which takes the form (see A in the Supplementary Material)
+density 𝜌 𝐵 (x) using Equation 8. In particular, we will use two sep-
+arate coordinate transformations to write 𝜌 𝐵 (x) as a polynomial                                                   𝐽 (𝑠) = 1 − 2𝐻𝑠 + 𝐾𝑠 2 .                         (16)
+function of the signed distance at x and the mean and Gaussian
+curvatures at its closest point on the surface. This polynomial can              4.2     From 3D integral to 1D integral
+be easily calculated at runtime using floating-point arithmetic, or              Equation 15 allows us to rewrite the boundary density integral in
+tabulated and cached, without the need for numerical integration.                terms involving local geometric properties of the surface. Critically,
+                                                                                 this new formulation separates the terms in the integral that depend
+4.1    Boundary density in tubular coordinates                                   on the normal displacement 𝑠 (𝐽 and 𝛾), and a single term 𝑊ℎ (||x −
+Let 𝑑 be the signed distance Φ(x) and x∗ be the closest point to x on            x′ (𝑢, 𝑣, 𝑠)||) storing all the dependency on the displacement along
+the surface 𝜕Ω such that 𝑑 = ∥x − x∗ ∥. Let 𝐻 and 𝐾 be the mean and              the surface given by 𝑢, 𝑣:
+Gaussian curvatures of 𝜕Ω at x∗ , and 𝜅 1, 𝜅 2 , e1, e2 , be its principal
+                                                                                                   ∫ℎ        ∫ℎ ∫ℎ
+curvature and curvature directions, respectively, such that
+                                                                                                                   𝑊ℎ (||x − x′ (𝑢, 𝑣, 𝑠)||)𝑑𝑢 𝑑𝑣 ®® 𝑑𝑠 .
+                                                                                                            ©                                      ª
+                                                                                    𝜌 𝐵 (x) =    𝐽 (𝑠)𝛾 (𝑠) ­
+                                                                                                            ­
+                            1
+                     𝐻=       (𝜅 1 + 𝜅 2 ) ,   𝐾 = 𝜅 1𝜅 2 .               (10)                −ℎ            «−ℎ −ℎ                                 ¬
+                            2
+                                                                                   For later derivations, it will be convenient to also include the
+In a local neighborhood of x∗ , any point on the surface r can be                tubular Jacobian 𝐽 (𝑠) in the kernel integral
+parametrized as
+                                                                                                   ∫ℎ              ∫ℎ ∫ℎ
+                          1                                
+ r(𝑢, 𝑣) = x∗ +𝑢e1 + 𝑣e2 + 𝜅 1𝑢 2 + 𝜅 2 𝑣 2 n0 + O ∥ (𝑢, 𝑣)∥ 3 . (11)                                                      𝐽 (𝑠)𝑊ℎ (||x − x′ (𝑢, 𝑣, 𝑠)||)𝑑𝑢 𝑑𝑣 ®® 𝑑𝑠 .
+                                                                                                               ©                                                ª
+                                                                                       𝜌 𝐵 (x) =        𝛾 (𝑠) ­­
+                          2
+                                                                                             −ℎ     «−ℎ −ℎ
+Let n0 be the normal direction of the surface at x∗ . Then, a Taylor                                                                            ¬
+expansion around x∗ lets us write the normal direction at r(𝑢, 𝑣) as             We will resolve the integral in two steps: first, we will obtain a
+                                                                               closed-form polynomial approximation
+           n(𝑢, 𝑣) = n0 − 𝑢𝜅 1 e1 − 𝑣𝜅 2 e2 + O ∥ (𝑢, 𝑣) ∥ 2 .  (12)                              ∫ ℎ∫ ℎ
+                                                                                          𝐹 (𝑠) =         𝐽 (𝑠)𝑊ℎ (||x − x′ (𝑢, 𝑣, 𝑠)||)𝑑𝑢 𝑑𝑣 ,   (17)
+Considering small displacements from the surface in this normal                                            −ℎ       −ℎ
+direction lets us parametrize all points x′ in a narrow volumetric               and then solve the one-dimensional polynomial integral
+band around the surface as                                                                                     ∫ ℎ
+                                                                                                     𝜌 𝐵 (x) =     𝛾 (𝑠)𝐹 (𝑠) 𝑑𝑠 .                                   (18)
+                       x′ (𝑢, 𝑣, 𝑠) = r(𝑢, 𝑣) + 𝑠n(𝑢, 𝑣)                  (13)                                                −ℎ
+
+If |𝑠 | is smaller than the surface’s local feature size, this mapping           Let us begin with 𝐹 (𝑠). Given Equation 13, we can write the dis-
+is guaranteed to be bijective [Lee 2003]. The parametrized narrow                placement vector x − x′ as
+band is known as a tubular neighborhood of 𝜕Ω and 𝑢, 𝑣, 𝑠 are known                                     x − x′ = x∗ + 𝑑n0 − r(𝑢, 𝑣) − 𝑠n(𝑢, 𝑣)                       (19)
+
+SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+                                                                                                Tube Maps: Fast SPH Boundary Handling with Tubular Coordinates • 7
+
+
+
+
+Fig. 12. Two motion capture sequences from [Mahmood et al. 2019], projected on a human body model [Pavlakos et al. 2019], interact with fluids coming
+from an emitter (left) and a dam break (right). See Supplemental Video for full animation.
+
+
+which, separating by basis component e1, e2, n0 and substituting                     Sphere center diﬀerence with                                  frame 60
+                                                                                     [Koschier et al. 2017], 100 nodes
+the expressions in Eqs.11 and 12, leads to
+                                                                                      1.0
+                                                                                                           [Koschier et al. 2017]
+                        x − x′ = Δ0 n0 + Δ1 e1 + Δ2 e2 ,                      (20)
+                                                                                      0.8
+where                                                                                                         [Bender et al. 2019]
+                                                                                      0.6
+                                                                                                                                     ~3000x
+                   𝜅 1𝑢 2 + 𝜅 2 𝑣 2                                                                                                  slower
+ Δ0 = 𝑑 − 𝑠 −                       ,    Δ1 = −𝑢 + 𝑠𝜅 1𝑢 ,     Δ2 = −𝑣 + 𝑠𝜅 2 𝑣 .     0.4
+                          2
+                                                                                      0.2
+Since n0 , e1 and e2 form an orthonormal basis,                                                 Ours
+                                                                                      0.0                                 ~3500x slower
+                                   ′ 2
+                           ∥x − x ∥      = Δ20 + Δ21 + Δ22 .                  (21)          2          5       10      20 30    50       100
+                                                                                                           #Quadrature nodes
+which, expanding the squares, leads to
+                                                                                     Fig. 13. In this simple simulation, we track the position of a rigid yellow
+  ∥x − x′ ∥ 2 = 𝑢 2 + 𝑣 2 + (𝑑 − 𝑠) 2 − (𝑑 + 𝑠) (𝜅 1𝑢 2 + 𝜅 2 𝑣 2 ) + O (ℎ 4 ).
+                                                                                     sphere interacting with a block of fluid. Density Maps [Koschier and Bender
+   Discarding fourth-order terms, this leads to a new estimate for                   2017] introduce a tradeoff between speed and precision, approaching our
+                                                                                     output only when orders of mangitude slower.
+𝐹 (𝑠):
+ ∬ℎ                √︁                                                  
+      𝐽 (𝑠)𝑊ℎ         𝑢 2 + 𝑣 2 + (𝑑 − 𝑠) 2 − (𝑠 + 𝑑)(𝜅 1𝑢 2 + 𝜅 2 𝑣 2 ) 𝑑𝑢 𝑑𝑣 .     Expanding 𝐽 (𝑠) to be 𝐽 (𝑠) = 1 − 2𝐻𝑠 − 𝐾𝑠 2 , this becomes
+                                                                                                   ∬ 
+ −ℎ
+                                                                                        𝐹 (𝑠) ≈ 2𝜋     𝑝 𝑊ℎ (𝑡 0 ) + 𝑊ℎ′ (𝑡 0 ) 𝛿 (𝑝, 𝜃, 𝑠)− 2𝐻𝑠𝑊ℎ (𝑡 0 ) −
+   We will simplify this expression further through another trans-                                                                                  
+formation, this time to polar coordinates 𝑝, 𝜃 :                                                𝐾𝑠 2𝑊ℎ (𝑡 0 ) − 2𝐻𝑠𝑊ℎ′ (𝑡 0 ) 𝛿 (𝑝, 𝜃, 𝑠) + O (ℎ 4 ) 𝑑𝜃 𝑑𝑝 .
+                           𝑢 = 𝑝 cos 𝜃 ,      𝑣 = 𝑝 sin 𝜃                     (22)   We can group these terms by their degree in 𝑠:
+such that                                                                                                  𝐹 (𝑠) ≈ 𝐴0 (𝑠) + 𝐴1 (𝑠) + 𝐴2 (𝑠) + O (ℎ 4 )            (24)
+                ∫ℎ ∫ℎ               √︃                                             where
+  𝐹 (𝑠) ≈ 2𝜋              𝑝 𝐽 (𝑠)𝑊ℎ    𝑝 + (𝑑 − 𝑠) + 𝛿 (𝑝, 𝜃, 𝑠) 𝑑𝜃 𝑑𝑝 .
+                                        2         2                                                          ∬
+               −ℎ −ℎ                                                                 𝐴0 (𝑠, 𝐻, 𝐾) = 2𝜋              𝑝𝑊ℎ (𝑡 0 ) 𝑑𝜃 𝑑𝑝 ,
+                                                                                                            ∬                                   
+where
+                                                                                     𝐴1 (𝑠, 𝐻, 𝐾) = 2𝜋   𝑝 −2𝐻𝑠𝑊ℎ (𝑡 0 ) + 𝑊ℎ′ (𝑡 0 ) 𝛿 (𝑝, 𝜃, 𝑠) 𝑑𝜃 𝑑𝑝 ,
+                     𝛿 (𝑝, 𝜃, 𝑠) = −(𝑠 + 𝑑) (𝜅 1𝑢 2 + 𝜅 2 𝑣 2 ) .             (23)                      ∬                                           
+Note that although the integrals are written over the box [−ℎ, ℎ] 2 ,                𝐴2 (𝑠, 𝐻, 𝐾) = −2𝜋   𝑝 𝐾𝑠 2𝑊ℎ (𝑡 0 ) + 2𝐻𝑠𝑊ℎ′ (𝑡 0 ) 𝛿 (𝑝, 𝜃, 𝑠) 𝑑𝜃 𝑑𝑝 .
+the kernel 𝑊ℎ has compact support, so only points satisfying ∥x −
+x′ ∥ ≤ ℎ contribute.                                                                 We refer to these three integrals as the planar, first and second order
+   Linearizing the square root and carrying out a Taylor expansion                   momenta of our tubular density approximation, respectively (see
+                    √︁                                                               Appendix B in the Supplementary for their precise expression).
+of 𝑊ℎ around 𝑡 0 = 𝑝 2 + 𝑧 2 , we can write
+
+              ∬ℎ                                                                   4.3    A 1D integral with a closed form solution
+ 𝐹 (𝑠) ≈ 2𝜋         𝑝 𝐽 (𝑠) 𝑊ℎ (𝑡 0 ) + 𝑊ℎ′ (𝑡 0 ) 𝛿 (𝑝, 𝜃, 𝑠) + O (ℎ 4 ) 𝑑𝜃 𝑑𝑝 .    The prior derivation of 𝐹 (𝑠), combined with the general expression
+              −ℎ                                                                     for the boundary density in tubular coordinates in Equation 18 and
+
+                                                                                                SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+8 •    Daria Nogina and Silvia Sellán
+
+
+discarding fourth-order terms, results in                                                        Table 1. Density values calculation and total boundary map (BM) construc-
+                                                                                                 tion cost (including SDF and curvature computation) in seconds, fraction
+                                                                                                 of the simulation timestep spent on BM, and speedup of our method over
+             ∫ ℎ
+   𝜌 𝐵 (x) ≈     𝛾 (𝑠) (𝐴0 (𝑠, 𝐻, 𝐾) + 𝐴1 (𝑠, 𝐻, 𝐾) + 𝐴2 (𝑠, 𝐻, 𝐾)) 𝑑𝑠 .                         Density Maps [Koschier and Bender 2017], using the author-provided de-
+                −ℎ
+                                                                                                 fault of 503 quadrature nodes for experiments with deforming solids.
+   Regardless of how arduous the derivation of each 𝐴𝑖 may be, they
+are all polynomials in 𝑠 of degree at most 2 (see B in the Supple-                                                           Density     Total BM     Density     Total BM
+mentary Material). Since 𝛾 (𝑠) is piecewise linear in 𝑠, the integrand                             Fig.       Method         time (s)     time (s)    speedup     speedup
+above is a polynomial of degree at most 3, and therefore can be                                             Density Maps       17.15       17.42
+                                                                                                  12 ←                                                 571×         183×
+integrated analytically.                                                                                        Ours            0.03        0.09
+   Because the kernel has compact support, the projected kernel                                             Density Maps       17.09       17.42
+                                                                                                  12 →                                                 570×         210×
+moments must be expressed differently depending on whether the                                                 Ours             0.03        0.08
+integration domain fully lies inside the kernel support or partially                                        Density Maps       1.88        1.89
+intersects its boundary. This as well as the gamma function cutoff                                   5                                                 188×         83×
+                                                                                                               Ours            0.01        0.02
+induces a number of integration intervals:
+                                                                                                            Density Maps       1026        1028
+             ∫                 ∫                 ∫                                                15 ←                                                 460×         195×
+                  −                                    +                                                       Ours            2.23        5.27
+   𝜌 𝐵 (x) ≈     𝑃out (𝑠) 𝑑𝑠 +      𝑃in (𝑠) 𝑑𝑠 +      𝑃out (𝑠) 𝑑𝑠 (25)
+                  −
+                𝐼 out                       𝐼 in                        +
+                                                                      𝐼 out                                 Density Maps       16.09       16.12
+                                                                                                   15 ↑                                                536×         195×
+                                                                                                               Ours             0.03        0.06
+on each of which the integrand is a cubic polynomial in 𝑠
+                                                                                                            Density Maps       45.1        44.18
+                                                                                                    11                                                 564×         258×
+               3
+              ∑︁                                                 3
+                                                                ∑︁                                             Ours            0.08         0.17
+                                                    ±
+ 𝑃 in (𝑠) =         𝑝𝑘in (𝐻, 𝐾, 𝑑) 𝑠 𝑘 ,           𝑃out (𝑠) =         𝑝𝑘out,± (𝐻, 𝐾, 𝑑) 𝑠 𝑘 .               Density Maps       15.01       15.15
+              𝑘=0                                               𝑘=0                                 19                                                 500×         93×
+                                                                                                               Ours             0.03       0.162
+   Since each integrand in Equation 25 is cubic in 𝑠, each term can be
+integrated analytically in closed form. The boundary density thus                                 Absolute Error (log)
+reduces to a polynomial expression in the signed distance 𝑑,
+                                                                                                                            [Koschier et al. 2017]
+                                            4
+                                           ∑︁                                                     10⁻¹
+                             𝜌 𝐵 (x) ≈             𝑐𝑘 (𝐻, 𝐾) 𝑑 𝑘 ,                        (26)
+                                           𝑘=0                                                    10⁻²           Planar
+where the coefficients 𝑐𝑘 can be derived in closed form for an arbi-
+                                                                                                   10⁻³          Ours: quadric fit
+trary kernel and cutoff function (see Appendix C).
+                                                                                                                                                           Ours:
+5     Results                                                                                     10⁻⁴                                                     osculating
+We implement our algorithm as an additional boundary handling                                                    Ours: angle deficit                       circle
+method in a public fork1 of the popular C++ SPH simulation li-                                    10⁻⁵                       Mesh anisotropy scale
+brary SPlisHSPlasH [Bender 2025] . For experiments involving de-                                                 2             4             6             8               10
+formables, we make use of the Position Based Dynamics library
+[Bender et al. 2015] (see D in the Supplementary). We report timings                             Fig. 14. Despite relying on discrete curvature estimation, our method outper-
+conducted on a Macbook Pro laptop with an M4 Pro chip and 48                                     forms planar and numerical strategies even for highly anisotropic meshes.
+GB of memory, and render our results using BlenderToolbox [Liu
+2023] and SplashSurf to produce fluid surface meshes [Löschner
+et al. 2023].                                                                                       In all experiments, groundtruths are computed through Monte
+   Our closed-form expression for Equation 8 relies on the solid’s                               Carlo integration with a very large number of samples. Compar-
+curvature. We experimented with different discrete curvature esti-                               isons to the works by Koschier and Bender [2017] and Bender et al.
+mation methods, like osculating circle radii and vertex angle deficit,                           [2019] are done using the authors’ official implementations. To rep-
+but eventually selected libigl’s local quadric fitting for its experi-                           resent methods that approximate the boundary density using planar
+mental robustness (see Figure 14).                                                               approximations in the context of our comparisons (e.g., [Fujisawa
+   Our quantitative results rely on the direct evaluation of our poly-                           and Miura 2015; Winchenbach et al. 2020; Winchenbach and Kolb
+nomial integral solution at each particle’s position with no grid                                2025]), we consider a variant of our method in which the higher-
+interpolation and a rest density of 1 g/mL (e.g., Figures 3, 10 and 14).                         order momenta 𝐴1 and 𝐴2 are discarded, and label it as “Planar” (see
+To most seamlessly integrate our method into existing boundary                                   E in the Supplementary).
+handling implementations, for our medium and large-scale simu-                                      Experiments and Comparisons. Through quantitative evaluations,
+lation examples, we compute and cache Tube Map values in a grid                                  we demonstrate our algorithm’s capabilities as a fast substite for
+identical to the one used by Koschier and Bender [2017].                                         existing costly boundary handling strategies. In Figure 3, we analyze
+                                                                                                 our method’s performance on three simple shapes for which signed
+1 https://gatc.cs.columbia.edu/projects/tubemaps.html                                            distances and curvatures are known analytically. It highlights the
+
+SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+                                                                                            Tube Maps: Fast SPH Boundary Handling with Tubular Coordinates • 9
+
+
+Ours
+
+
+
+
+                         Similar runtime                                Similar runtime                                         Similar runtime
+[Koschier et al. 2017]
+
+
+
+
+                         Similar runtime                                Similar runtime                                        Similar runtime
+[Bender et al. 2019]
+
+
+
+
+Fig. 15. Left: A deformable octopus is hit by the water block from the emitter. If forced to match our runtime by reducing the number of integration nodes,
+numerical methods Bender et al. [2019]; Koschier and Bender [2017] cause the fluid block not to interact with the object at all. Center: A red fish splashes on
+a water pool created from a dam break simulation. Right: A group of rigid objects fall on a deep pool in this example inspired by Koschier and Bender [2017]
+(see their Fig. 1). The choice of boundary handling method influences the objects’ trajectories. See Supplemental Video.
+
+
+power of our method’s geometric approximation: despite geometric                     Pressure delta Δρ = ρ - ρ₀ , kg/m³
+simplicity, numerical quadrature methods must rely on an excessive                   0.06
+number of quadrature nodes to approach the accuracy that we obtain
+with a single polynomial evaluation.                                                 0.04
+   Prior work has obtained equally fast boundary density evalua-                                [Bender et al. 2019]
+tions by relying on planar approximations [Fujisawa and Miura
+                                                                                     0.02
+2015; Winchenbach et al. 2020]. As we show in Figure 9, these ap-
+proximations are valid when the particle radius is small; however, at
+medium and large sizes, they pose an undeniable tradeoff between                    0.00                     [Koschier et al.2017]                    Ours
+speed and precision. In Figure 6, this lack of accuracy can even be
+observed qualitatively.                                                                     5            6            7            8              9          10
+   While many simulators use triangle meshes as solid representa-                                                  Simulation time, s
+tions, one must bear in mind that these are usually themselves a
+geometric approximation of a true underlying surface. Our algo-                    Fig. 16. Pressure profile for a water column at rest near a cylindrical con-
+rithm is designed not to best match the fluid’s behaviour when in                  tainer, with gravity. See Supplemental Video for full animation.
+contact with the piecewise flat surface of the mesh, but its underly-
+ing geometry. We make this explicit in Figure 10, where a mesh of a
+sphere is made progressively finer and different boundary density                  Fish stretches and jumps up and down on a scene with 1.46M par-
+computation methods are compared against an analytical sphere’s                    ticles. In Figure 11, a deforming frog jumps on a pond, pushing a
+groundtruth. Our use of a geometric curvature approximation al-                    water lily downwards and creating a ripple. In Figure 12, we use
+lows our method to achieve an accuracy that others can only reach                  the SMPL-X Gender Neutral model [Pavlakos et al. 2019] together
+with orders of mangitude of additional refinement.                                 with captured motions [Mahmood et al. 2019] to simulate scenes of
+   Applications. Once our choice of method has been validated exper-               humans interacting with a complex fluid. In Figure 5 and Figure 1,
+imentally, we use prototypical examples of fluid simulation scenes to              bouncing and stretching letters are placed between a dam breaking
+show its nature as a plug-in substitute for prior boundary handling                and an invisible wall. In Figure 19, a mountain gets progressively
+strategies. In Figure 17, we use a sample scene from the SPlisH-                   eroded as rain falls on it.
+SPlasH library [Bender 2025], in which we modify the rotating                          In all these, our method produces visually plausible results while
+blade to be curved. In Figure 15 (right), we use rigid bodies to design            reducing the cost of boundary handling by between two and three
+a swimming pool scene as an homage to Figure 1 in the original                     orders of magnitude when compared to the germinal implicit bound-
+Density Maps publication Koschier and Bender [2017].                               ary handling work by Koschier and Bender [2017] (see Table 1). To
+   The computational benefits of our method will be most noticable                 further evaluate the impact of this speedup, in Figure 15 we reduce
+in scenes in which the solid changes shape. In these cases, methods                the number of quadrature nodes used by Density Maps and Volume
+like those proposed by Koschier and Bender [2017] and Bender et al.                Maps to 8, leading to a runtime similar to our method’s. The nu-
+[2019] must recompute their numerical integral at every simulation                 merical integration error incurred at such small number of nodes
+timestep, a computational bottleneck that makes most moderate-                     leads to visible differences; e.g., in Figure 15 (left), the block of fluid
+scale simulations impracticable. In Figure 15 (center), a Splashing                passes almost entirely through the object without interacting with
+                                                                                   it. We explore prior work’s tradeoff between speed and precision
+                                                                                   further in Figure 13. Our method also demonstrates low levels of
+
+                                                                                            SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+10   •   Daria Nogina and Silvia Sellán
+
+
+
+
+Fig. 17. We implement our algorithm as a novel boundary handling method in a fork of SPlisHSPlasH [Bender 2025], highlighting its role as a drop-in
+replacement for existing strategies. See Supplemental Video for full animation.
+
+
+artificial layering or drift near walls, as shown in Figure 16 for a          Absolute Error (log)
+hydrostatic experiment. All full simulations are provided in our               1               Planar
+Supplemental Video.                                                           10⁻¹
+                                                                                                                                 Ours
+6    Limitations & Conclusion                                                 10⁻² [Koschier et al. 2017]:
+                                                                                   same speed
+We have introduced Tube Maps, a curved geometric approxima-                                   [Koschier et al. 2017]:
+                                                                              10⁻³
+tion that enables computation of a fluid particle’s boundary density                          2x slower
+contribution with a single polynomial evaluation. Our formula can             10⁻⁴
+be used as a drop-in replacement for prior implicit boundary han-                              [Koschier et al. 2017]:
+dling strategies, reducing their cost by several orders of magnitude          10⁻⁵             1500x slower
+without reducing their accuracy. This targeted boundary handling
+                                                                                       25         50         75        100       125       150        175
+strategy is agnostic to the specific SPH algorithm used and can be
+incorporated into most existing simulation environments.
+   To improve the accuracy of prior work, which occassionally ap-                                                                           Dihedral angle
+proximates solid boundaries with planar patches, we consider a
+curved surface’s higher order local geometric properties. This re-          Fig. 18. Our algorithm assumes a smooth solid. When faced with sharp
+quires estimating the surface’s mean and Gaussian curvatures: if the        features, it underperforms numerical methods, by an amount proportional
+solid is represented as a mesh, this introduces a relation between          to their increase in computational cost.
+simulation accuracy and mesh quality , which we explore further
+in Figure 14). Additionally, this results in inherently smoothing
+geometric sharp features (see Figure 18). In practice, we omit higher-
+order momenta when curvature exceeds a prescribed threshold. If
+the solid is represented as a SDF, it relies on computing differential
+properties that can be costly in some settings (e.g., neural SDFs
+                                                                                       Fig. 19. A mountain is eroded due to rain falling on it
+[Park et al. 2019]).
+   Finally, the combination of stability (relative to particle-based
+methods) and speed (relative to numerical methods) provided by our
+method will likely be useful in differentiable optimization settings in     3D models used throughout this paper. Figures in this work contain
+which the solid boundaries themselves are changing; e.g., topological       the frog [TK3DPrinting 2016], water lily [guppyk 2020], octopus
+optimization of fluidic devices. While we have not explored this            [Banana 2024], fish [C4robotics 2015], seal [Ollender 2024] and ship
+avenue yet, we hope to have smoothed the path for others to wade            [ABIG13 2025] meshes.
+into this potentially rich application space of SPH.
+                                                                            References
+Acknowledgments                                                             ABIG13. 2025. Inflatable benchy. In https://www.thingiverse.com/thing:6941422.
+                                                                            Nadir Akinci, Jens Cornelis, Gizem Akinci, and Matthias Teschner. 2013. Coupling
+The Geometry and the City lab at Columbia University is supported              elastic solids with smoothed particle hydrodynamics fluids. Computer Animation
+by generous gifts from nTop, Adobe, Dandy and Braid Technologies,              and Virtual Worlds 24, 3-4 (2013), 195–203.
+                                                                            Nadir Akinci, Markus Ihmsen, Gizem Akinci, Barbara Solenthaler, and Matthias
+as well as by a sponsored research project from Dreamsports and the            Teschner. 2012. Versatile rigid-fluid coupling for incompressible SPH. ACM Trans-
+Columbia Engineering Interdisciplinary Research Fund. We thank                 actions on Graphics (TOG) 31, 4 (2012), 1–8.
+                                                                            Joe Banana. 2024. Octopus. In https://www.thingiverse.com/thing:6434927.
+Hyunwoo (Brian) Kim for technical help with prescribed motion               Stefan Band, Christoph Gissler, Andreas Peer, and Matthias Teschner. 2018. MLS
+sequences; Eitan Grinspun, Changxi Zheng and Christopher Batty                 pressure boundaries for divergence-free and viscous SPH fluids. Computers &
+for insightful conversations on fluid simulation.                              Graphics 76 (2018), 37–46.
+                                                                            Markus Becker and Matthias Teschner. 2007. Weakly compressible SPH for free sur-
+   We acknowledge and thank Carlos Cardona for authoring the                   face flows. In Proceedings of the 2007 ACM SIGGRAPH/Eurographics symposium on
+Blender shader used to render our results, and the authors of the              Computer animation. 209–217.
+
+
+SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+                                                                                                     Tube Maps: Fast SPH Boundary Handling with Tubular Coordinates •              11
+
+
+Jan Bender. 2025. SPlisHSPlasH: SPH simulation of fluids and solids. https://splishsplash.   Petra Ollender. 2024. Seal on a floater. In https://makerworld.com/ru/models/409987-seal-
+   physics-simulation.org.                                                                      on-a-floater-bathtub-toy.
+Jan Bender and Dan Koschier. 2015. Divergence-free smoothed particle hydrodynamics.          Jeong Joon Park, Peter Florence, Julian Straub, Richard Newcombe, and Steven Love-
+   In Proceedings of the 14th ACM SIGGRAPH/Eurographics symposium on computer                   grove. 2019. Deepsdf: Learning continuous signed distance functions for shape
+   animation. 147–155.                                                                          representation. In Proceedings of the IEEE/CVF conference on computer vision and
+Jan Bender, Tassilo Kugelstadt, Marcel Weiler, and Dan Koschier. 2019. Volume maps: An          pattern recognition. 165–174.
+   implicit boundary representation for SPH. In Proceedings of the 12th ACM SIGGRAPH         Georgios Pavlakos, Vasileios Choutas, Nima Ghorbani, Timo Bolkart, Ahmed AA
+   Conference on Motion, Interaction and Games. 1–10.                                           Osman, Dimitrios Tzionas, and Michael J Black. 2019. Expressive body capture: 3d
+Jan Bender, Matthias Müller, and Miles Macklin. 2015. Position-Based Simulation                 hands, face, and body from a single image. In Proceedings of the IEEE/CVF conference
+   Methods in Computer Graphics.. In Eurographics (tutorials). 8.                               on computer vision and pattern recognition. 10975–10985.
+C4robotics. 2015. Magikarp. In https://www.thingiverse.com/thing:1187825.                    Jacek Pozorski and Michał Olejnik. 2024. Smoothed particle hydrodynamics modelling
+PW Cleary, J Ha, M Prakash, and T Nguyen. 2006. 3D SPH flow predictions and valida-             of multiphase flows: an overview. Acta Mechanica 235, 4 (2024), 1685–1714.
+   tion for high pressure die casting of automotive components. Applied Mathematical         Martin Siemann and Paul Groenenboom. 2014. Modeling and validation of guided
+   Modelling 30, 11 (2006), 1406–1427.                                                          ditching tests using a coupled SPH-FE approach. In Proceedings of 9th SPHERIC
+Zhiyang Dou, Chen Peng, Xinyu Lu, Xiaohan Ye, Lixing Fang, Yuan Liu, Wenping Wang,              international workshop. 260–268.
+   Chuang Gan, Lingjie Liu, and Taku Komura. 2025. CFC: Simulating Character-Fluid           Alex Skillen, Steven Lind, Peter K. Stansby, and Benedict D. Rogers. 2013. Incom-
+   Coupling using a Two-Level World Model. ACM Transactions on Graphics (TOG) 44,               pressible smoothed particle hydrodynamics (SPH) with reduced temporal noise and
+   6 (2025), 1–17.                                                                              generalised Fickian smoothing applied to body–water slam and efficient wave–body
+Florian Fleissner, Alexandra Lehnart, and Peter Eberhard. 2010. Dynamic simulation of           interaction. Computer Methods in Applied Mechanics and Engineering 265 (2013),
+   sloshing fluid and granular cargo in transport vehicles. Vehicle system dynamics 48,         163–173. doi:10.1016/j.cma.2013.05.017
+   1 (2010), 3–15.                                                                           Barbara Solenthaler and Renato Pajarola. 2009. Predictive-corrective incompressible
+Makoto Fujisawa and Kenjiro T Miura. 2015. An efficient boundary handling with a                SPH. In ACM SIGGRApH 2009 papers. 1–6.
+   modified density calculation for SPH. In Computer graphics forum, Vol. 34. Wiley          TK3DPrinting. 2016. Low Poly Frog. In https://www.thingiverse.com/thing:1762864.
+   Online Library, 155–162.                                                                  Marcel Weiler, Dan Koschier, Magnus Brand, and Jan Bender. 2018. A physically
+Robert A Gingold and Joseph J Monaghan. 1977. Smoothed particle hydrodynamics: the-             consistent implicit viscosity solver for SPH fluids. In Computer Graphics Forum,
+   ory and application to non-spherical stars. Monthly notices of the royal astronomical        Vol. 37. Wiley Online Library, 145–155.
+   society 181, 3 (1977), 375–389.                                                           Rene Winchenbach, Rustam Akhunov, and Andreas Kolb. 2020. Semi-analytic boundary
+Christoph Gissler, Andreas Peer, Stefan Band, Jan Bender, and Matthias Teschner. 2019.          handling below particle resolution for smoothed particle hydrodynamics. ACM
+   Interlinked SPH pressure solvers for strong fluid-rigid coupling. ACM Transactions           Transactions on Graphics (TOG) 39, 6 (2020), 1–17.
+   on Graphics (TOG) 38, 1 (2019), 1–13.                                                     Rene Winchenbach and Andreas Kolb. 2025. Solving Boundary Handling Analyti-
+guppyk. 2020.               Lotus Flower / Water Lily with Leaves. In                           cally in Two Dimensions for Smoothed Particle Hydrodynamics. arXiv preprint
+   https://www.thingiverse.com/thing:4364395.                                                   arXiv:2507.21686 (2025).
+Ricardo Gutfraind and Stuart B Savage. 1998. Flow of fractured ice through wedge-            Rene Winchenbach and Nils Thuerey. 2025. diffSPH: Differentiable Smoothed Particle
+   shaped channels: smoothed particle hydrodynamics and discrete-element simula-                Hydrodynamics for Adjoint Optimization and Machine Learning. arXiv preprint
+   tions. Mechanics of materials 29, 1 (1998), 1–17.                                            arXiv:2507.21684 (2025).
+Takahiro Harada, Seiichi Koshizuka, and Yoichiro Kawaguchi. 2007. Smoothed particle
+   hydrodynamics in complex shapes. In Proceedings of the 23rd Spring Conference on
+   Computer Graphics. 191–197.
+Markus Ihmsen, Jens Orthmann, Barbara Solenthaler, Andreas Kolb, and Matthias
+   Teschner. 2014. SPH fluids in computer graphics. (2014).
+Dan Koschier et al. [n. d.].           Discregrid Library.          https://github.com/
+   InteractiveComputerGraphics/Discregrid
+Dan Koschier and Jan Bender. 2017. Density maps for improved SPH boundary han-
+   dling. In Proceedings of the ACM SIGGRAPH/Eurographics Symposium on Computer
+   Animation. 1–10.
+Dan Koschier, Jan Bender, Barbara Solenthaler, and Matthias Teschner. 2020. Smoothed
+   particle hydrodynamics techniques for the physics based simulation of fluids and
+   solids. arXiv preprint arXiv:2009.06944 (2020).
+Dan Koschier, Jan Bender, Barbara Solenthaler, and Matthias Teschner. 2022. A survey
+   on SPH methods in computer graphics. In Computer graphics forum, Vol. 41. Wiley
+   Online Library, 737–760.
+BE Launder and DB Spalding. 1972. Mathematical models of turbulence Academic
+   Press, London and N.
+David Le Touzé, A Marsh, G Oger, Pierre-Michel Guilcher, C Khaddaj-Mallat, B Alessan-
+   drini, and P Ferrant. 2010. SPH simulation of green water and ship flooding scenarios.
+   Journal of Hydrodynamics 22, 1 (2010), 231–236.
+John M Lee. 2003. Smooth manifolds. In Introduction to smooth manifolds. Springer,
+   1–29.
+Zhehao Li, Qingyu Xu, Xiaohan Ye, Bo Ren, and Ligang Liu. 2023. DiffFR: Differentiable
+   SPH-based Fluid-Rigid Coupling for Rigid Body Control. ACM Trans. Graph. 42, 6
+   (Dec 2023), 17 pages. https://doi.org/10.1145/3618318
+Hsueh-Ti Derek Liu. 2023. BlenderToolbox. https://github.com/HTDerekLiu/BlenderToolbox.
+Fabian Löschner, Timna Böttcher, Stefan Rhys Jeske, and Jan Bender. 2023. Weighted
+   Laplacian Smoothing for Surface Reconstruction of Particle-based Fluids. In Vi-
+   sion, Modeling, and Visualization. The Eurographics Association. doi:10.2312/vmv.
+   20231245
+Shang Ma, Xiaoying Nie, Gang Yang, and Chunqing Zhou. 2025. A robust and efficient
+   model for the interaction of fluids with deformable solids. The Visual Computer
+   (2025), 1–14.
+Naureen Mahmood, Nima Ghorbani, Nikolaus F Troje, Gerard Pons-Moll, and Michael J
+   Black. 2019. AMASS: Archive of motion capture as surface shapes. In Proceedings of
+   the IEEE/CVF international conference on computer vision. 5442–5451.
+S Marrone, A Colagrossi, M Antuono, C Lugni, and MP Tulin. 2011. A 2D+ t SPH model
+   to study the breaking wave pattern generated by fast ships. Journal of Fluids and
+   Structures 27, 8 (2011), 1199–1215.
+
+
+
+
+                                                                                                      SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+Tube Maps: Fast SPH Boundary Handling in Tubular Coordinates
+(Supplementary Material)
+DARIA NOGINA, Columbia University, USA
+SILVIA SELLÁN, Columbia University, USA
+ACM Reference Format:                                                                    Using the conventions
+Daria Nogina and Silvia Sellán. 2026. Tube Maps: Fast SPH Boundary Han-
+dling in Tubular Coordinates (Supplementary Material). In Special Interest                                   𝐻 = 12 (𝜅 1 + 𝜅 2 ),       𝐾 = 𝜅 1𝜅 2 ,
+Group on Computer Graphics and Interactive Techniques Conference Confer-               this becomes
+ence Papers (SIGGRAPH Conference Papers ’26), July 19–23, 2026, Los Angeles,
+                                                                                                                   𝐽 (𝑠) = 1 − 2𝐻𝑠 + 𝐾𝑠 2 .
+CA, USA. ACM, New York, NY, USA, 4 pages. https://doi.org/10.1145/3799902.
+3811118                                                                                Consequently, the area element of the offset surface satisfies
+                                                                                                             𝑑𝐴offset = (1 − 2𝐻𝑠 + 𝐾𝑠 2 ) 𝑑𝐴.                         (5)
+Supplementary Material
+A Jacobian for the offset surface                                                      B Derivation of the momenta 𝐴𝑖 (𝑠, 𝐻, 𝐾)
+The area element of the base surface is                                                B.1 𝐴0
+                            𝑑𝐴 = ∥𝑟𝑢 × 𝑟 𝑣 ∥ 𝑑𝑢 𝑑𝑣.                             (1)    The zeroth-order
+                                                                                                      √︁ term corresponds to retaining only the planar
+   Consider the parallel surface at signed distance 𝑠,                                 distance 𝑡 0 = 𝑝 2 + 𝑧 2 in the kernel argument and using the zeroth-
+                                                                                       order Jacobian 𝐽 (𝑠) ≈ 1. Writing the tangential coordinates in polar
+                        𝑟𝑠 (𝑢, 𝑣) = 𝑟 (𝑢, 𝑣) + 𝑠 𝑛(𝑢, 𝑣).                              form 𝑢 = 𝑝 cos 𝜃 , 𝑣 = 𝑝 sin 𝜃 so that 𝑑𝑢 𝑑𝑣 = 𝑝 𝑑𝑝 𝑑𝜃 , we obtain
+Its tangent vectors are                                                                                ∫∫       √                       ∫ 2𝜋 ∫ ∞
+                                                                                                            𝑊ℎ 𝑢 2 + 𝑣 2 + 𝑧 2 𝑑𝑢 𝑑𝑣 =
+                                                                                                                               
+                                                                                       𝐴0 (𝑠, 𝐻, 𝐾) =                                              𝑝 𝑊ℎ (𝑡 0 ) 𝑑𝑝 𝑑𝜃 .
+                     𝑡𝑢 = 𝑟𝑢 + 𝑠𝑛𝑢 ,         𝑡 𝑣 = 𝑟 𝑣 + 𝑠𝑛 𝑣 .                 (2)                                                                0     0
+                                                                                                                                                             (6)
+Using the Weingarten equations,                                                        Since 𝑊ℎ has compact support of radius ℎ, the integrand is nonzero
+                         𝑛𝑢 = −𝑆𝑟𝑢 ,         𝑛 𝑣 = −𝑆𝑟 𝑣 ,                             only when 𝑡 0 ≤√ℎ, i.e. when 𝑝 2 + 𝑧 2 ≤ ℎ 2 . Thus the 𝑝-integration do-
+                                                                                       main is 𝑝 ∈ [0, ℎ 2 − 𝑧 2 ] for |𝑧| ≤ ℎ, and empty otherwise. Carrying
+we obtain
+                                                                                       out the angular integral gives
+                   𝑡𝑢 = (𝐼 − 𝑠𝑆)𝑟𝑢 ,         𝑡 𝑣 = (𝐼 − 𝑠𝑆)𝑟 𝑣 .                (3)
+                                                                                                                   ∫ √ℎ2 −𝑧 2
+   The area element of the offset surface is therefore
+                                                                                               𝐴0 (𝑠, 𝐻, 𝐾) = 2𝜋              𝑝 𝑊ℎ (𝑡 0 ) 𝑑𝑝,   |𝑧| ≤ ℎ,     (7)
+                𝑑𝐴offset = ∥𝑡𝑢 × 𝑡 𝑣 ∥ 𝑑𝑢 𝑑𝑣                                                                            0
+
+                          = ∥(𝐼 − 𝑠𝑆)𝑟𝑢 × (𝐼 − 𝑠𝑆)𝑟 𝑣 ∥ 𝑑𝑢 𝑑𝑣                          and 𝐴0 (𝑠, 𝐻, 𝐾) = 0 for |𝑧| > ℎ.
+
+                          = | det(𝐼 − 𝑠𝑆)| ∥𝑟𝑢 × 𝑟 𝑣 ∥ 𝑑𝑢 𝑑𝑣.                   (4)    B.2 𝐴1
+Hence the area scale factor is                                                         The first-order term collects all contributions linear in curvature.
+                              𝐽 (𝑠) = det(𝐼 − 𝑠𝑆).                                     These arise from the linear term in the Jacobian expansion 𝐽 (𝑠) =
+                                                                                       1−2𝐻𝑠 +𝑂 (𝜅 2 ) and the first-order correction to the kernel argument
+   In the principal frame {𝑒 1, 𝑒 2, 𝑛}, the shape operator has the form               through 𝑊ℎ′ (𝑡 0 ) 𝛿𝑡.
+                              𝑆 = diag(𝜅 1, 𝜅 2, 0),                                     Recall the full distance expansion in Eq. 21. With 𝑝 2 = 𝑢 2 + 𝑣 2 and
+                                                                                                                            ′ 2                      2       2
+so that                                                                                       √︃the omitted part of ∥𝑥 − 𝑥 ∥ is Δ = −(𝑧 + 2𝑠)(𝜅 1𝑢 +𝜅 2 𝑣 ).
+                                                                                       𝑧 = 𝑑 −𝑠,
+
+                     𝐼 − 𝑠𝑆 = diag(1 − 𝜅 1𝑠, 1 − 𝜅 2𝑠, 1),                             Let 𝑡 = 𝑡 02 + Δ be the "true" distance. Using 𝑢 = 𝑝 cos 𝜃 , 𝑣 = 𝑝 sin 𝜃 ,
+                                                                                       for fixed 𝑠 (hence fixed 𝑧), points with radius 𝑝 lie on a ring of length
+and therefore
+                                                                                       2𝜋𝑝 in the (𝑢, 𝑣)-plane we have
+     det(𝐼 − 𝑠𝑆) = (1 − 𝜅 1𝑠)(1 − 𝜅 2𝑠) = 1 − (𝜅 1 + 𝜅 2 )𝑠 + 𝜅 1𝜅 2𝑠 2 .
+                                                                                                    𝜅 1𝑢 2 + 𝜅 2 𝑣 2 = 𝑝 2 (𝜅 1 cos2 𝜃 + 𝜅 2 sin2 𝜃 ),
+Authors’ Contact Information: Daria Nogina, Columbia University, USA, dsn2136@          ∫ 2𝜋
+columbia.edu; Silvia Sellán, Columbia University, USA, silviasellan@cs.columbia.edu.           (𝜅 1𝑢 2 + 𝜅 2 𝑣 2 ) 𝑑𝜃 = 𝑝 2 𝜅 1 𝜋 + 𝜅 2 𝜋 = 𝜋𝑝 2 (𝜅 1 + 𝜅 2 ) = 2𝜋𝑝 2 𝐻,
+                                                                                                                                         
+                                                                                         0
+
+                                                                                       hence the angular average satisfies ⟨𝜅 1𝑢 2 + 𝜅 2 𝑣 2 ⟩𝜃 = 𝑝 2 𝐻 and there-
+This work is licensed under a Creative Commons Attribution-NonCommercial-              fore
+NoDerivatives 4.0 International License.
+                                                                                                                                                             𝑝2
+SIGGRAPH Conference Papers ’26, Los Angeles, CA, USA                                            ⟨Δ⟩𝜃 = −(𝑧 + 2𝑠) 𝐻 𝑝 2,             ⟨𝛿𝑡⟩𝜃 ≈ −(𝑧 + 2𝑠) 𝐻           .   (8)
+© 2026 Copyright held by the owner/author(s).                                                                                                                2𝑡 0
+ACM ISBN 979-8-4007-2554-8/2026/07
+https://doi.org/10.1145/3799902.3811118                                                , where 𝛿𝑡 := 𝑡 − 𝑡 0 ≈ 2𝑡Δ0 .
+
+                                                                                                SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+2    •   Daria Nogina and Silvia Sellán
+
+
+  The first-order distance contribution to 𝐹 (𝑠) is obtained by inte-                  Final form of 𝐴2 (𝑠, 𝐻, 𝐾). The quadratic Jacobian contribution is
+grating 𝑊ℎ′ (𝑡 0 )⟨𝛿𝑡⟩𝜃 over the ring measure 𝑝 𝑑𝑝 𝑑𝜃 :
+                                                                                                          𝐴2𝐽 (𝑠, 𝐻, 𝐾) := 𝐾𝑠 2 𝐴0 (𝑠, 𝐻, 𝐾).                     (16)
+                           ∫ 2𝜋 ∫ ∞
+     𝐴dist (𝑠, 𝐻, 𝐾)    :=            𝑝 𝑊ℎ′ (𝑡 0 ) ⟨𝛿𝑡⟩𝜃 𝑑𝑝 𝑑𝜃               (9)   After angular integration, the remaining second-order distance and
+       1
+                            0     0                                                mixed terms reduce to a combination of the same 𝑊 ′ (𝑡) radial
+                                             ∫ ∞ 2
+                                                      𝑝                            integral that appeared in 𝐴1 and the moment 𝑀2 (𝑧):
+                        = −(𝑧 + 2𝑠) 𝐻 (2𝜋)                 𝑊ℎ′ (𝑡 0 ) 𝑝 𝑑𝑝. (10)
+                                                0     2𝑡 0                                                      𝐴2 (𝑠, 𝐻, 𝐾) = 𝐾𝑠 2 𝐴0 (𝑠, 𝐻, 𝐾)+                 (17)
+Using 𝑡 0 = 𝑝 2 + 𝑧 2 , we have 𝑑𝑡 0 /𝑑𝑝 = 𝑝/𝑡 0 , hence 𝑝 𝑑𝑝 = 𝑡 0 𝑑𝑡 0
+               √︁                                                                                                         ∫ ℎ 2
+                                                                                                                                𝑡 − 𝑧2 ′
+and 𝑝 2 = 𝑡 02 − 𝑧 2 . Restricting to the kernel support 𝑡 0 ≤ ℎ yields                             𝑠 2 (2𝐻 2 − 𝐾) (2𝜋)               𝑊ℎ (𝑡) 𝑑𝑡+                  (18)
+                                                                                                                           |𝑧 |   2
+                                             ∫ ℎ 2                                                       3         1 
+                                                     𝑡 − 𝑧2 ′                                                𝐻 2 − 𝐾 𝑀2 (𝑧),                                      (19)
+    𝐴dist
+      1    (𝑠, 𝐻, 𝐾)   =  −(𝑧 +  2𝑠) 𝐻 (2𝜋)                   𝑊ℎ (𝑡) 𝑑𝑡 .   (11)                          16        16
+                                                                                                                                       𝑧 = 𝑑 − 𝑠.
+                                                |𝑧 |     2
+
+  The first-order Jacobian contribution is simply 𝐴1𝐽 (𝑠, 𝐻, 𝐾) :=                 C     Second-order tubular integral
+(−2𝐻𝑠) 𝐴0 (𝑠, 𝐻, 𝐾). Combining both gives the full moment                          Using the second-order truncation derived in the main text, the
+                                               ∫ ℎ 2                               tubular boundary density can be written as
+                                                     𝑡 − 𝑧2 ′
+𝐴1 (𝑠, 𝐻, 𝐾) = −2𝐻𝑠 𝐴0 (𝑠, 𝐻, 𝐾)−(𝑧+2𝑠) 𝐻 (2𝜋)             𝑊ℎ (𝑡) 𝑑𝑡 .                       ∫ 𝑠max      h                                           i
+                                                |𝑧 |   2                           𝜌 𝐵 (𝑥) ≈        𝛾 (𝑠) A (𝑠; 𝑑, 𝐻, 𝐾) 𝐴0 (𝑑−𝑠) + B (𝐻, 𝐾) 𝐴2 (𝑑−𝑠) 𝑑𝑠,
+                                                                                                𝑠 min
+B.3 𝐴2                                                                                                                                            (20)
+The second-order term collects all contributions quadratic in curva-               where 𝑑 = Φ(𝑥) is the signed distance and 𝑧 = 𝑑 − 𝑠. Here 𝐴0 (·) is
+ture. These arise from the quadratic term in the Jacobian expansion                the projected slice moment, and 𝐴2 (·) is the combined second-order
+𝐾𝑠 2 , second-order terms in the kernel-distance expansion, and mixed              radial moment (Appendix B). Here it’s convenient to introduce a
+Jacobian–distance terms.                                                           prefactor multiplying 𝐴0 as a quadratic polynomial in 𝑠:
+   As in the first-order case, the remaining work is to reduce ring                                               𝐻      𝐻           𝐻2  2
+                                                                                              A (𝑠; 𝑑, 𝐻, 𝐾) = 1 + 𝑑 − 𝑠 + 2𝐾 +           𝑠 ,     (21)
+integrals involving higher powers of  √︁the tangential radius 𝑝 to one-                                            2     2             2
+dimensional radial integrals in 𝑡 = 𝑝 2 + 𝑧 2 . The identities                     and the coefficient multiplying 𝐴2 as
+                 𝑡 2 = 𝑝 2 + 𝑧 2,                       𝑝 2 = 𝑡 2 − 𝑧2
+                                                                                                                     3         1 
+                                     𝑝 𝑑𝑝 = 𝑡 𝑑𝑡,                                                      B (𝐻, 𝐾) = 𝜆𝐵     𝐻2 − 𝐾 .                 (22)
+                                                                                                                      16       16
+will be used repeatedly, with limits 𝑡 ∈ [|𝑧|, ℎ] imposed by compact
+                                                                                     We use the linear extension function as in [Koschier and Bender
+support.
+                                                                                   2017]
+   A useful 𝑡 3 radial moment. Second-order distance terms produce                              factor                                                   ℎ
+ring integrals containing (𝑡 2 − 𝑧 2 )𝑡𝑊 (𝑡). We introduce the 𝑡 3 radial              𝛾 (𝑠) = 1 −     𝑠,     𝛾 (𝑠) = 0 for 𝑠 > 𝑠𝛾 ,            𝑠𝛾 =          .
+                                                                                                   ℎ                                                   factor
+moment                                                                             Kernel support requires |𝑑 − 𝑠 | ≤ ℎ. Therefore,
+                                  ∫ ℎ
+                     𝑀3 (𝑧) := 2𝜋       𝑡 3 𝑊ℎ (𝑡) 𝑑𝑡 .              (12)          𝑠 ∈ [𝑠 min, 𝑠 max ],         𝑠 min = max(−ℎ, 𝑑−ℎ),      𝑠 max = min(ℎ, 𝑑+ℎ, 𝑠𝛾 ).
+                                          |𝑧 |
+                                                                                                                                                           (23)
+     Moreover, rewriting (𝑡 2 − 𝑧 2 )𝑡 = 𝑡 3 − 𝑧 2𝑡 gives
+       ∫ ℎ                               ∫ ℎ                                       C.1     Shift to the symmetric variable 𝑡 = 𝑠 − 𝑑
+    2𝜋     (𝑡 2 − 𝑧 2 ) 𝑡 𝑊ℎ (𝑡) 𝑑𝑡 = 2𝜋     𝑡 3 − 𝑧 2𝑡 𝑊ℎ (𝑡) 𝑑𝑡          (13)
+                                                       
+          |𝑧 |                                   |𝑧 |
+                                                                                   To eliminate the absolute value in the projected moments, we shift
+                                                    ∫ ℎ                                𝑡 := 𝑠 − 𝑑,       𝑠 = 𝑑 + 𝑡,         𝑧 = 𝑑 − 𝑠 = −𝑡,       |𝑧| = |𝑡 |.
+                                     = 𝑀3 (𝑧) − 𝑧 2 2𝜋   𝑡 𝑊ℎ (𝑡) 𝑑𝑡 . (14)
+                                                           |𝑧 |                    The integration bounds become
+The bracketed term is the radial form of the planar slice:                               𝑡 ∈ [𝑡 min, 𝑡 max ],       𝑡 min = 𝑠 min − 𝑑,    𝑡 max = 𝑠 max − 𝑑.
+                                                                                   In particular, using the base support interval [−ℎ, ℎ] and the gamma
+                                ∫ ℎ
+                  𝐴0 (𝑧) := 2𝜋      𝑡 𝑊ℎ (𝑡) 𝑑𝑡,
+                                           |𝑧 |                                    cutoff,
+                                                                                                                   𝑡 max = min ℎ, 𝑠𝛾 − 𝑑 .           (24)
+                                                                                                                                         
+                                                                                                   𝑡 min = −ℎ,
+so the ring integral can be written as 𝑀3 (𝑧) − 𝑧 2𝐴0 (𝑧).
+                                                                                       With 𝑠 = 𝑑 + 𝑡,
+  A combined second-order radial moment. The particular combi-                                                factor
+nation that appears after angular averaging of the second-order                                  𝛾 (𝑑 + 𝑡) = 1 −     (𝑑 + 𝑡) = 𝑔0 + 𝑔1𝑡,                          (25)
+                                                                                                                ℎ
+curvature terms can be written as                                                                                  factor             factor
+                                                                                                         𝑔0 = 1 −         𝑑, 𝑔1 = −          .                    (26)
+                           𝑀2 (𝑧) := 4𝑧 2 𝐴0 (𝑧) − 4𝑀3 (𝑧),                (15)                                       ℎ                  ℎ
+                                                                                       Expanding A (𝑑 + 𝑡) gives a quadratic in 𝑡:
+which combines the (𝐻 2, 𝐾) curvature contributions into a single
+one-dimensional function of 𝑧.                                                                             A (𝑑 + 𝑡) = 𝐴
+                                                                                                                       e0 + 𝐴     e2𝑡 2,
+                                                                                                                            e1𝑡 + 𝐴                               (27)
+
+SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+                                                                                           Tube Maps: Fast SPH Boundary Handling in Tubular Coordinates (Supplementary Material) •         3
+
+
+where, for A (𝑠) = 𝑐 0 + 𝑐 1𝑠 + 𝑐 2𝑠 2 with                                                             i.e. odd powers acquire a sign flip on the negative side.
+                     𝐻                   𝐻                            𝐻2                                   Therefore, on each segment both 𝐴0 (|𝑡 |) and 𝐴2 (|𝑡 |) become or-
+            𝑐 0 = 1 + 𝑑,           𝑐1 = − ,                𝑐 2 = 2𝐾 +    ,                              dinary polynomials in 𝑡.
+                     2                   2                            2
+we have
+                                                                                                        C.4    Segment primitives
+    e0 = 𝑐 0 + 𝑐 1𝑑 + 𝑐 2𝑑 2,
+    𝐴                                  e1 = 𝑐 1 + 2𝑐 2𝑑,
+                                       𝐴                                 e2 = 𝑐 2 .
+                                                                         𝐴                  (28)
+                                                                                                        On a given segment, write
+  Multiplying (25) and (27) yields a cubic polynomial in 𝑡:
+                                                                                                                                        5
+       (𝑔0 + 𝑔1𝑡)(𝐴
+                  e0 + 𝐴     e2𝑡 2 ) = 𝐸 0 + 𝐸 1𝑡 + 𝐸 2𝑡 2 + 𝐸 3𝑡 3,
+                       e1𝑡 + 𝐴                                                              (29)
+                                                                                                                                       ∑︁
+                                                                                                                         𝐴0 (|𝑡 |) =         𝑎𝑖 𝑡 𝑖          (degree 5 in 𝑡).            (41)
+with coefficients                                                                                                                      𝑖=0
+
+ 𝐸 0 = 𝑔0 𝐴           e1 + 𝑔1𝐴
+          e0, 𝐸 1 = 𝑔0𝐴      e0,                        e2 + 𝑔1𝐴
+                                               𝐸 2 = 𝑔0 𝐴      e1,                 𝐸 3 = 𝑔1 𝐴
+                                                                                            e2 .        Multiplying by the cubic factor from (29) gives a degree-8 polyno-
+  Substituting into (20) gives                                                                          mial integrand. Rather than expanding all coefficients explicitly, we
+                ∫ 𝑡max                                                                                  integrate term-by-term:
+                         𝐸 0 + 𝐸 1𝑡 + 𝐸 2𝑡 2 + 𝐸 3𝑡 3 𝐴0 (|𝑡 |) 𝑑𝑡 +                        (30)
+                                                     
+      𝜌 𝐵 (𝑥) ≈                                                                                                                 ∫
+                     𝑡 min
+                                           ∫ 𝑡max                                                                                   𝑎𝑖 𝑡 𝑖 (𝐸 0 + 𝐸 1𝑡 + 𝐸 2𝑡 2 + 𝐸 3𝑡 3 ) 𝑑𝑡 = (42)
+                               B (𝐻, 𝐾)               (𝑔0 + 𝑔1𝑡) 𝐴2 (|𝑡 |) 𝑑𝑡 .             (31)                   
+                                                                                                                       𝐸 0 𝑖+1   𝐸 1 𝑖+2          𝐸 2 𝑖+3        𝐸 3 𝑖+4
+                                                                                                                                                                           
+                                            𝑡 min                                                               𝑎𝑖         𝑡 +       𝑡 +              𝑡 +            𝑡       ,  (43)
+                                                                                                                     𝑖 +1      𝑖 +2             𝑖 +3           𝑖 +4
+C.2      Piecewise polynomial projected moments for the
+         cubic spline kernel                                                                            summed over 𝑖 = 0, . . . , 5. Evaluating the resulting primitive at
+                                                                                                        segment endpoints produces the exact contribution on that segment.
+Let
+                                |𝑡 |                                                                      Similarly, on the same segment write
+                                𝑞 := ∈ [0, 1].                  (32)
+                                 ℎ                                                                                                      7
+For the cubic spline kernel used as the default in the SPlisHSPlasH
+                                                                                                                                       ∑︁
+                                                                                                                         𝐴2 (|𝑡 |) =         𝑏𝑗 𝑡 𝑗          (degree 7 in 𝑡).            (44)
+library [Bender 2025], the projected slice moment 𝐴0 (|𝑡 |) admits a                                                                   𝑗=0
+piecewise degree-5 polynomial representation in 𝑞:
+                                                                                                        Then (𝑔0 + 𝑔1𝑡)𝐴2 (|𝑡 |) is degree 8, and we again integrate term-by-
+                               𝑃 in (𝑞), 0 ≤ 𝑞 ≤ 12 ,
+                            16 
+                               
+                𝐴0 (|𝑡 |) =
+                               
+                                                                (33)                                    term:
+                            ℎ 𝑃out (𝑞), 12 < 𝑞 ≤ 1,                                                           ∫                                                   
+                                                                                                                                                   𝑔0 𝑗+1     𝑔1 𝑗+2
+                                                                                                                   𝑏 𝑗 𝑡 𝑗 (𝑔0 + 𝑔1𝑡) 𝑑𝑡 = 𝑏 𝑗            +              (45)
+                               
+                                                                                                                                                      𝑡          𝑡     ,
+where (ascending powers)                                                                                                                         𝑗 +1       𝑗 +2
+              𝑃 in (𝑞) = 0.0875 − 0.5 𝑞 2 + 1.5 𝑞 4 − 1.2 𝑞 5,                              (34)        summed over 𝑗 = 0, . . . , 7. The curvature prefactor B (𝐻, 𝐾) is ap-
+                                       2             3           4                 5
+             𝑃out (𝑞) = 0.1 − 1.0 𝑞 + 2.0 𝑞 − 1.5 𝑞 + 0.4 𝑞 .                               (35)        plied afterwards.
+  Likewise, the combined second-order radial moment 𝐴2 is rep-
+resented as a piecewise degree-7 polynomial in 𝑞 with an overall                                        C.5    Final form
+scaling:                                                                                                Let the four canonical segments (39) be intersected with [𝑡 min, 𝑡 max ],
+                              𝑃 in (𝑞), 0 ≤ 𝑞 ≤ 12 ,
+                               𝐵                                                                       yielding subintervals [𝑎 ℓ , 𝑏 ℓ ] for ℓ = 1, . . . , 4. On each segment we
+                           ℎ 
+                                                            (36)                                        choose the appropriate in/out polynomials for 𝐴0 and 𝐴2 , apply the
+                              
+               𝐴2 (|𝑡 |) =
+                           35           1
+                                           < 𝑞 ≤ 1,                                                     sign rule (40) to convert 𝑞-polynomials into 𝑡-polynomials, and eval-
+                                 𝐵 (𝑞),
+                              𝑃out      2
+                                                                                                        uate the exact primitives from (42) and (45). Summing the segment
+                              
+with (ascending powers)
+                                                                                                        contributions yields
+       𝐵
+      𝑃in (𝑞) = −31 + 196 𝑞 2 − 560 𝑞 4 + 1120 𝑞 6 − 768 𝑞 7,                               (37)
+                                                                                                                        4
+        (𝑞) = −32 + 224 𝑞 2 − 1120 𝑞 4 + 1792 𝑞 5 − 1120 𝑞 6 + 256 𝑞 7 .
+                                                                                                                           "
+    𝐵                                                                                                                  ∑︁ ∫ 𝑏 ℓ
+   𝑃out
+                                                                                                                                   𝐸 0 + 𝐸 1𝑡 + 𝐸 2𝑡 2 + 𝐸 3𝑡 3 𝐴0 (|𝑡 |) 𝑑𝑡    (46)
+                                                                                                                                                                  
+                                                                                            (38)             𝜌 𝐵 (𝑥) ≈
+                                                                                                                        ℓ=1    𝑎ℓ
+
+C.3      Knot segmentation
+                                                                                                                                                      ∫ 𝑏ℓ                          #
+                                                                                                                                 + B (𝐻, 𝐾)                  (𝑔0 + 𝑔1𝑡) 𝐴2 (|𝑡 |) 𝑑𝑡 .   (47)
+Because (33)–(36) change form at 𝑞 = 21 and depend on |𝑡 |, we split                                                                                   𝑎ℓ
+the integration range into the canonical segments
+                                                                                                        where each integral is evaluated analytically as described above.
+               [−ℎ, − 12 ℎ],    [− 12 ℎ, 0],        [0, 12 ℎ],       [ 12 ℎ, ℎ],            (39)
+and intersect each with [𝑡 min, 𝑡 max ].                                                                D     Effective volume computation for PBD coupling
+  On any fixed segment, the sign 𝜎 = sign(𝑡) ∈ {−1, +1} is constant.
+                                                                                                        For position-based dynamics (PBD) of deformable solids, we ulti-
+Hence we can replace
+                                                                                                        mately need forces on solid vertices. These forces originate from
+                                                                                                        fluid-boundary interactions in the SPH step and must be redis-
+                               𝑘
+                                |𝑡 |     𝜎𝑘
+                       𝑞𝑘 =             = 𝑘 𝑡𝑘,                 (40)
+                                 ℎ       ℎ                                                              tributed to the vertices.
+
+                                                                                                                SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+4   •   Daria Nogina and Silvia Sellán
+
+
+D.1      Boundary particles (Akinci)
+In the particle-based method of [Akinci et al. 2012] each boundary
+particle has an effective volume and receives a force from the fluid
+that does not depend on the solid density. To distribute forces to
+the solid, it is convenient to accumulate force density at boundary
+particles:
+                                    𝐹𝑏𝑖 ←𝑓𝑖
+                              𝑓𝑏𝑖 =         ,                     (48)
+                                     𝑉eff
+where 𝐹𝑏𝑖 ←𝑓𝑖 is the force from fluid particle 𝑓𝑖 to boundary particle
+𝑏𝑖 and 𝑉eff is the effective boundary volume,
+                                        1
+                             𝑉eff = Í
+                                      𝑘 𝑊𝑖𝑘
+as in [Akinci et al. 2012].
+   Force densities 𝑓𝑏𝑖 are then transferred to solid vertices using
+barycentric weights on the solid surface. For the solid, actual vertex
+forces are recovered by multiplying by the vertex volume, i.e. vertex
+mass divided by solid density.
+
+D.2      Implicit-boundary methods
+For implicit-boundary approaches (density maps, volume maps, and
+our method), we likewise accumulate forces 𝐹𝑏←𝑓𝑖 that the fluid
+applies to the boundary region near each fluid particle 𝑓𝑖 . The most
+intuitive strategy is to project these forces to the closest surface point
+and distribute them to nearby vertices using barycentric weights,
+analogous to the particle-based approach.
+   The key question is: what is the correct effective volume 𝑉eff
+associated with this projected point? We define a fictitious boundary
+particle 𝑏𝑖 located at the closest point on the surface, with pseudo-
+mass 𝑚¯ eff (or equivalently volume 𝑉eff ), such that it reproduces the
+same boundary density contribution as the continuous density map.
+That is,
+          ∫
+𝜌 𝐵 (𝑥) =        𝛾 (Φ(𝑥 ′ ))𝑊 (∥𝑥 −𝑥 ′ ∥, ℎ) 𝑑𝑥 ′ = 𝑚¯ eff 𝑊 (∥𝑥 𝑓𝑖 −𝑥𝑏𝑖 ∥, ℎ).
+             𝑁 (𝑥 )
+                                                                          (49)
+By definition,
+                                      𝜌 𝐵 (𝑥)
+                          𝑚¯ eff =                   .                   (50)
+                                𝑊 (∥𝑥 𝑓𝑖 − 𝑥𝑏𝑖 ∥, ℎ)
+   In [Akinci et al. 2012], the fictitious mass is 𝑚¯ eff = 𝑉eff 𝜌 0 , where
+𝜌 0 is the fluid rest density. Thus
+                                      𝜌 𝐵 (𝑥)
+                       𝑉eff =                          .                 (51)
+                              𝜌 0 𝑊 (∥𝑥 𝑓𝑖 − 𝑥𝑏𝑖 ∥, ℎ)
+  For volume-map approach, we can likewise use the estimated
+boundary volume fraction 𝑉𝐵 (𝑥) as an effective volume.
+
+E       Details on comparison with linear methods
+While both Koschier and Bender [2017] and Winchenbach et al .
+[2020] approximate the integral in Eq. 8, Winchenbach et al . [2020]
+use a constant 𝛾 while Koschier and Bender [2017] use a linear one.
+For a fair numerical comparison with Koschier and Bender [2017]
+and ours, our planar baseline uses the same linear 𝛾, but is otherwise
+identical to the method proposed by Winchenbach et al . [2020].
+
+
+
+
+SIGGRAPH Conference Papers ’26, July 19–23, 2026, Los Angeles, CA, USA.
+

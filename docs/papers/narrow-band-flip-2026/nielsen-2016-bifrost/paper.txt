@@ -1,0 +1,136 @@
+                             Spatially Adaptive FLIP Fluid Simulations in Bifrost
+                                                  Michael B. Nielsen∗                     Robert Bridson∗
+                                                      Autodesk                              Autodesk
+
+
+
+
+Figure 1: A “Thresher” jumps into deep adaptive water (left). A slice through the spatially adaptive tile tree with three levels of depth-based
+adaptivity in voxel size and particle density shown (middle). A submarine emerges from deep adaptive water (right). Thresher courtesy of:
+model by Eddie Munoz (ed209.artstation.com), rig by Justin Kirk (justinkirkcg.com), animation by Kostadin Martic (springonionstudio.com).
+
+
+1    Spatial Adaptivity                                                           2    Adaptive tile tree
+                                                                                  The core Bifrost data structure is the tile tree, a generalized octree
+Spatial adaptivity has great promise for fluid simulation in visual ef-           where each node is a 5×5×5 tile rather than just 23 . We allow up to 7
+fects. Given that a 2× increase in spatial resolution incurs an 8×                levels in the tree, providing a domain of 390,625 voxels on each side,
+increase in memory for 3D, using high resolution only where needed                each level five times finer resolution than the
+can offer a huge savings for many interesting scenarios. For example,             next. For voxel data, a value is stored in
+figure 1 shows a large-scale simulation of a creature emerging from               each of the 125 cells of each tile, contigu-
+deep water: the depth is critical for the bulk motion, but the veloc-             ously in a cache-friendly manner: we keep
+ity field away from the creature and surface is relatively smooth and             the advantages of sparse voxel tile structures,
+does not require as high resolution. Adaptive fluid simulation was                but store and work with tiles at any level pro-
+proposed for graphics over a decade ago [Losasso et al. 2004], and                viding spatial adaptivity and level-of-detail
+the combination of FLIP and octrees seven years ago [Hong et al.                  (LOD) capability. This is similar to Open-
+2009], yet it has been slow to catch on in the industry. Instead, FLIP            VDB [Museth 2013], which also stores voxel
+with uniform resolution sparse voxel tiles has emerged as the standard            tiles in a tree. OpenVDB supports an address space bounded only
+approach. Sparse voxel tiles efficiently cover arbitrary domains, give            by the bit-precision of the coordinates, and employs a short wide-
+excellent cache usage and low data structure overhead, and allow the              branching tree with configurable tile sizes based on powers of two at
+use of popular voxel algorithms for level set computations etc. with              each level. While OpenVDB encodes larger voxels at coarser levels,
+barely any changes. By comparison, typical adaptive octree and/or                 it is optimized for uniform resolution voxels at the finest level. Our
+tetrahedral mesh approaches incur sizeable overheads and may rule                 tile tree instead provides operations independent of level, and was
+out many standard voxel algorithms. SPGrid [Setaluri et al. 2014] is              designed from the start to naturally support LOD spatial adaptivity
+one recent option for efficiently achieving octree-like adaptivity via            with a multi-resolution voxel representation at each spatial location.
+multiple levels of sparse voxel tiles; in this talk we discuss a more             We also differ from OpenVDB in handling multiple channels of data
+aggressive approach using a wide-branching tile tree of voxels. We                attached to the same tile tree without duplication of tree topology.
+have fully implemented this in Bifrost in Autodesk Maya, demon-
+strating that even in uniform resolution we achieve the performance               The choice of five is noteworthy. Odd-sized tiles allow voxel-centered
+of optimized sparse voxel tile code, and that spatial adaptivity gives            samples to line up across resolution jumps (instead of being offset by
+significant further improvements in both memory and runtime.                      half a cell for even sizes); five is a sweet spot between tiles large
+                                                                                  enough to amortize data structure overhead and small enough for
+                                                                                  good cache efficiency and efficient adaptivity around irregular data.
+Keywords: fluid simulation, FLIP
+                                                                                  We introduce haloed tiles to simplify voxel operations on spatially
+Concepts: •Computing methodologies → Physical simulation;                         adaptive data. Sampling a continuous interpolant in a tile or eval-
+                                                                                  uating a finite difference stencil, for example, may involve values
+                                                                                  in nearby tiles; handling all possible resolution jumps is cumber-
+    ∗ e-mail:michael.nielsen@autodesk.com, robert.bridson@autodesk.com            some. Instead we provide code to efficiently construct a 73 haloed tile
+Permission to make digital or hard copies of part or all of this work for per-    around any given tile, either copying the halo values from neighbor-
+sonal or classroom use is granted without fee provided that copies are not        ing tiles at the same level, or appropriately interpolating them from
+made or distributed for profit or commercial advantage and that copies bear       coarser levels as needed. Subsequent operations can then work on the
+this notice and the full citation on the first page. Copyrights for third-party   tile as if it were just part of a uniform resolution grid, without explic-
+components of this work must be honored. For all other uses, contact the          itly handling spatial adaptivity. We provide halo constructions for lin-
+owner/author(s). c 2016 Copyright held by the owner/author(s).                    ear interpolants as well as C 1 quadratic B-splines, which are smooth
+SIGGRAPH ’16, July 24-28, 2016, Anaheim, CA,                                      even across resolution jumps. We also provide a variety of efficient
+ISBN: 978-1-4503-4282-7/16/07                                                     parallel breadth- and depth-first traversals, where user-supplied code
+DOI: http://dx.doi.org/10.1145/2897839.2927399                                    to process a tile is plugged in without needing to explicitly handle
+parallelism, even when constructing a new tile tree in parallel.             solvers), second order accuracy across resolution jumps, and full ac-
+                                                                             curacy at non-grid-aligned boundaries (cut cells). By contrast, the fi-
+3    Adaptive Level Sets                                                     nite element method handles these almost automatically. However, in
+                                                                             uniform regions the usual trilinear elements lead to a 27-point stencil,
+                                                                             which is nearly four times more costly than the 7-point finite differ-
+The tile tree allows level sets to be represented adaptively even along
+                                                                             ence stencil. We achieved the best of both worlds with a modified
+the surface. One of the keys to a scalable adaptive liquid solver is per-
+                                                                             finite element method, sparsified to a 7-point stencil in every tile by a
+forming all numerical computations directly with this adaptive repre-
+                                                                             form of lumping, and automatically assembled together into a global
+sentation, as opposed to temporarily reverting to a uniform resolution
+                                                                             matrix via Galerkin projection. We similarly discretized viscosity to
+narrow band representation, for example. We accordingly developed
+                                                                             be equivalent to optimal finite difference methods in uniform resolu-
+a toolbox of lock-free parallel algorithms including:
+                                                                             tion regions, but gracefully handle spatial adaptivity as well.
+    • Adaptive fast sweeping: borrowing ideas from multigrid, our
+                                                                             Assembling and then solving the resulting linear systems required
+      method computes adaptive distance fields on the tile tree with
+                                                                             a variety of sparse matrix operations. However, standard represen-
+      a fine-to-coarse traversal initializing distance followed by a
+                                                                             tations of sparse matrices, such as Compressed Sparse Row (CSR),
+      coarse-to-fine refinement. At each level of the tree we run paral-
+                                                                             pose significant sequential bottlenecks in operations such as matrix-
+      lel red-black fast sweeping in haloed tiles. Additional speed-ups
+                                                                             matrix multiplication. To effectively parallelize our sparse matrix
+      come from transferring values between LOD levels with prolon-
+                                                                             suite we created a segmented sparse matrix structure, where we par-
+      gation and restriction operators.
+                                                                             tition both the rows and columns of a sparse matrix into blocks ac-
+    • Adaptive level set from particles: our adaptive particle repre-        cording to tile trees, and store only the nonzero blocks in a general-
+      sentation is converted to an adaptive level set using a hierarchi-     ized CSR format. Parallelization over both row and columns then be-
+      cal union of spheres algorithm combined with spatially varying         comes trivial, and allows scalable lock-free algorithms for otherwise
+      erosion.                                                               difficult operations such as transposition and general matrix-matrix
+                                                                             multiplication.
+Our toolbox also includes other novel extensions to liquid solver com-
+ponents such as adaptive CSG operations, data extrapolation in the
+normal direction, filtering and more. Generally we found that the            6    Results
+LOD representation, where values are stored at non-leaf voxels as                                    Houdini 15      Bifrost    Bifrost Adaptive
+well, is a critical component of efficient adaptive computations.                  # time/frame        59.3s         37.6s           12.4s
+                                                                                 # particles (avg)    12.1M          12.1M           3.83M
+4    Adaptive Particles                                                           # voxels (avg)      10.1M          11.8M           3.10M
+
+Unlike previous work on adaptive FLIP [Hong et al. 2009; Ando et al.         Table 1: Benchmark results for the submarine simulation on a Win-
+2013], we view the FLIP particles as just samples of a continuous            dows 7 machine with two Intel Xeon E5-2687W 3.10 processors, 32
+function as opposed to particles with a certain radius. For particles        cores and 64GB of RAM. We used one time step per frame, and sub
+at the liquid surface this is especially important as offsetting the sur-    steps for advection with a CFL number of one. All disk caching was
+face away from the particles by some radius visibly dampens wave             disabled.
+propagation. We also neither split nor merge particles, but rather re-       Figure 1 and the accompanying video show several examples of
+seed particles based on the continuous interpolant and delete particles      Bifrost running adaptive liquid simulations in Autodesk Maya. While
+based on a sub-grid partitioning to ensure good sampling, maintain-          currently not every simulation benefits from adaptivity—the flow
+ing a reasonable particle count per voxel. The particle density adapts       needs to be adequately deep for it to be worth it—we were able
+to the voxel size and rapidly decays away from refined regions. Par-         to achieve a factor of five speedup compared to Houdini 15’s FLIP
+ticles are stored in the same tile tree, continuously re-blocked into        solver (Table 1) in our submarine test, for example. The Bifrost adap-
+leaf tiles in which they are spatially located, which optimizes all our      tive liquid solver is currently in use in production, comes with a C++
+particle-voxel operations. Also different from prior work, we perform        API for user extensions, and is freely available for academic use.
+a memory-efficient coarsening and refinement of the tile tree in-place
+by a single depth-first traversal with a criterion at each voxel to deter-
+mine if the branch should be retained, coarsened or refined. Similar         References
+to Ando et al. [2013] our criterion is based on distance metrics such
+as distance to the surface or selected solid boundaries (themselves          A NDO , R., T H ÜREY, N., AND W OJTAN , C. 2013. Highly adaptive
+represented by adaptive level sets), but we do not require expensive            liquid simulations on tetrahedral meshes. ACM Trans. Graph. 32,
+operations such as a Delaunay tetrahedralization. Our contributions             4 (July), 103:1–103:10.
+to adaptive FLIP also include adaptive transfer operations between           H ONG , W., H OUSE , D. H., AND K EYSER , J. 2009. An Adap-
+the particles and the grid based on a modified trilinear interpolant.           tive Sampling Approach to Incompressible Particle-Based Fluid.
+All algorithms are fully lock-free parallel.                                    In Theory and Practice of Computer Graphics, The Eurographics
+                                                                                Association UK, W. Tang and J. Collomosse, Eds.
+5    Adaptive PDEs                                                           L OSASSO , F., G IBOU , F., AND F EDKIW, R. 2004. Simulating wa-
+                                                                                ter and smoke with an octree data structure. ACM Trans. Graph.
+Solving the Poisson equation for pressure is critical to incompress-            (Proc. SIGGRAPH) 23, 457–462.
+ible fluids, and for highly viscous liquids solving for the viscous ef-
+fects implicitly (a parabolic equation) is also essential. We faced two      M USETH , K. 2013. VDB: High-resolution sparse volumes with dy-
+challenges in implementing these for spatially adaptive tile trees: the        namic topology. ACM Trans. Graph. 32, 3 (July), 27:1–27:22.
+discretization, and fully parallelizing the linear algebra operations.
+                                                                             S ETALURI , R., A ANJANEYA , M., BAUER , S., AND S IFAKIS , E.
+Finite difference or finite volume schemes on adaptive grids with T-            2014. SPGrid: A sparse paged grid structure applied to adap-
+junctions (like octrees or our tile tree) have generally not been able          tive smoke simulation. ACM Trans. Graph. 33, 6 (Nov.), 205:1–
+to achieve matrix symmetry (necessary for the most efficient linear             205:12.
+

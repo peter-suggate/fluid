@@ -1,0 +1,64 @@
+{
+  "accessed": "2026-10-07",
+  "papers": [
+    {
+      "id": "ferstl-2016-nbflip",
+      "title": "Narrow Band FLIP for Liquid Simulations",
+      "year": 2016,
+      "url": "https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2016/NBFlip/nbflip.pdf",
+      "project": "https://research-explorer.ista.ac.at/record/1415"
+    },
+    {
+      "id": "sato-2018-exnbflip",
+      "title": "Extended Narrow Band FLIP for Liquid Simulations",
+      "year": 2018,
+      "url": "https://pub.ista.ac.at/group_wojtan/projects/2018_Sato_XNBFLIP/XNBFLIP.pdf",
+      "project": "https://takahirosato.bitbucket.io/publications/exnbflip/"
+    },
+    {
+      "id": "ando-batty-2020-octree",
+      "title": "A Practical Octree Liquid Simulator with Adaptive Surface Resolution",
+      "year": 2020,
+      "url": "https://cs.uwaterloo.ca/~c2batty/papers/Ando2020/Ando2020.pdf",
+      "project": "https://cs.uwaterloo.ca/~c2batty/papers/Ando2020/Ando2020.pdf"
+    },
+    {
+      "id": "nielsen-2016-bifrost",
+      "title": "Spatially Adaptive FLIP Fluid Simulations in Bifrost",
+      "year": 2016,
+      "url": "https://history.siggraph.org/wp-content/uploads/2022/09/2016-Talks-Nielsen_Spatially-Adaptive-FLIP-Fluid-Simulations-in-Bifrost.pdf",
+      "project": "https://history.siggraph.org/wp-content/uploads/2022/09/2016-Talks-Nielsen_Spatially-Adaptive-FLIP-Fluid-Simulations-in-Bifrost.pdf"
+    },
+    {
+      "id": "narita-2026-optical-layers",
+      "title": "Adaptive Optical Layers: Efficient Tall Cell Grids for Liquid Simulation",
+      "year": 2026,
+      "url": "https://diglib.eg.org/server/api/core/bitstreams/36c619dc-cc90-4617-ba6c-817dc5587116/content",
+      "project": "https://graphics.c.u-tokyo.ac.jp/projects/Adaptive-Optical-Layers/"
+    },
+    {
+      "id": "lentine-2012-large-timesteps",
+      "title": "Simulating Free Surface Flow with Very Large Time Steps",
+      "year": 2012,
+      "url": "https://physbam.stanford.edu/papers/stanford2012-02.pdf",
+      "project": "https://diglib.eg.org/items/29d1376e-d6c1-4cbb-90cd-e1b926cfae47"
+    },
+    {
+      "id": "lentine-2010-coarse-projection",
+      "title": "A Novel Algorithm for Incompressible Flow Using Only a Coarse Grid Projection",
+      "year": 2010,
+      "url": "https://physbam.stanford.edu/papers/stanford2010-02.pdf",
+      "project": "https://physbam.stanford.edu/"
+    }
+  ],
+  "reference_only": [
+    {
+      "id": "koike-2020-asynchronous",
+      "title": "Asynchronous Eulerian Liquid Simulation",
+      "year": 2020,
+      "url": "https://diglib.eg.org/server/api/core/bitstreams/bd2c9c5f-7be5-411f-ac85-44d7cd5bffe4/content",
+      "project": "https://diglib.eg.org/items/a25b4a24-7b37-4612-88c8-3ddea8a81200",
+      "status": "Download unavailable: publisher legacy URL redirects to login; current PDF API returns HTTP 401. Abstract consulted only."
+    }
+  ]
+}

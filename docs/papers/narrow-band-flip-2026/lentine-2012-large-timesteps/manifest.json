@@ -1,0 +1,97 @@
+{
+  "id": "lentine-2012-large-timesteps",
+  "title": "Simulating Free Surface Flow with Very Large Time Steps",
+  "year": 2012,
+  "url": "https://physbam.stanford.edu/papers/stanford2012-02.pdf",
+  "project": "https://diglib.eg.org/items/29d1376e-d6c1-4cbb-90cd-e1b926cfae47",
+  "accessed": "2026-10-07",
+  "sha256": "5d28dc2a7a23a0de2a6d224258eae79788eab7956b8c3e42a9fba6767d76de6a",
+  "pages": 10,
+  "dpi": 144,
+  "embedded_files": 32,
+  "page_map": [
+    {
+      "page": 1,
+      "render": "page-01.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 2,
+      "render": "page-02.png",
+      "figure_mentions": [
+        "Figure 1:",
+        "Figure 2",
+        "Figure 3",
+        "Figure 3."
+      ]
+    },
+    {
+      "page": 3,
+      "render": "page-03.png",
+      "figure_mentions": [
+        "Figure 3:",
+        "Figure 2:",
+        "Figure 2",
+        "Figure 3"
+      ]
+    },
+    {
+      "page": 4,
+      "render": "page-04.png",
+      "figure_mentions": [
+        "Figure 4:",
+        "Figure 2"
+      ]
+    },
+    {
+      "page": 5,
+      "render": "page-05.png",
+      "figure_mentions": [
+        "Figure 5:"
+      ]
+    },
+    {
+      "page": 6,
+      "render": "page-06.png",
+      "figure_mentions": [
+        "Figure 6:",
+        "Figure 6",
+        "Figure 2."
+      ]
+    },
+    {
+      "page": 7,
+      "render": "page-07.png",
+      "figure_mentions": [
+        "Figure 7:",
+        "Figure 6",
+        "Figure 8:",
+        "Figure 8"
+      ]
+    },
+    {
+      "page": 8,
+      "render": "page-08.png",
+      "figure_mentions": [
+        "Figure 9:",
+        "Figure 6",
+        "Figure 10",
+        "Figure 12",
+        "Figure 10:"
+      ]
+    },
+    {
+      "page": 9,
+      "render": "page-09.png",
+      "figure_mentions": [
+        "Figure 11:",
+        "Figure 12:"
+      ]
+    },
+    {
+      "page": 10,
+      "render": "page-10.png",
+      "figure_mentions": []
+    }
+  ]
+}

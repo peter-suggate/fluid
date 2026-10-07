@@ -1,0 +1,839 @@
+EUROGRAPHICS 2024 / A. Bermano and E. Kalogerakis                                                                     COMPUTER GRAPHICS forum
+(Guest Editors)                                                                                                                  Volume 43 (2024), Number 2
+
+
+
+
+                                            The Impulse Particle-In-Cell Method
+
+                                            Sergio Sancho1,2 , Jingwei Tang2 , Christopher Batty3 , Vinicius C. Azevedo2
+
+                            1 ETH Zürich, Switzerland         2 DisneyResearch|Studios, Switzerland     3 University of Waterloo, Canada
+
+
+
+
+Figure 1: We propose the Impulse Particle-In-Cell (IPIC) method, a novel extension of the Affine Particle-In-Cell (APIC) method. Our method
+can be used for both liquid and smoke simulations to better preserve circulation and vortical details.
+
+
+         Abstract
+         An ongoing challenge in fluid animation is the faithful preservation of vortical details, which impacts the visual depiction of flows.
+         We propose the Impulse Particle-In-Cell (IPIC) method, a novel extension of the popular Affine Particle-In-Cell (APIC) method
+         that makes use of the impulse gauge formulation of the fluid equations. Our approach performs a coupled advection-stretching
+         during particle-based advection to better preserve circulation and vortical details. The associated algorithmic changes are
+         simple and straightforward to implement, and our results demonstrate that the proposed method is able to achieve more energetic
+         and visually appealing smoke and liquid flows than APIC.
+         CCS Concepts
+         • Computing methodologies → Physical simulation;
+
+
+
+1. Introduction                                                                       discretized and solved in a physically faithful manner. In the context
+                                                                                      of efficient time-splitting schemes, a significant challenge is to si-
+The chaotic, complex, and intricate behaviors of fluids can only                      multaneously satisfy conservation of momentum (force balance dur-
+properly manifest in virtual settings if the equations of motion are                  ing advection) and conservation of mass (incompressibility). Early
+
+© 2024 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+2 of 13                                             S. Sancho et al. / The Impulse Particle-In-Cell Method
+
+           (a) MC                (b) MC+R        (c) CF-BFECC                 velocities. It thus agrees with the backwards flow map correction
+                                                                              used in the semi-Lagrangian context by the Covector Fluids method
+                                                                              of Nabizadeh et al. [NWRC22]. Our method is straightforward
+                                                                              to implement and can be readily integrated into existing solvers,
+                                                                              adding only a small computational overhead. We further present
+                                                                              a practical technique to significantly improve on the stability of
+                                                                              Covector Fluids, by detecting when the correction is likely to be
+                                                                              inaccurate. The presented results demonstrate that the flows obtained
+                                                                              by our technique are more energetic, better preserve vorticity, and
+                                                                              produce more visually compelling details. Our contributions can be
+                                                                              summarized as
+
+                                                                              • The introduction of a novel coupled advection-stretching particle-
+                                                                                based method that makes use of the impulse gauge variable to
+                                                                                preserve circulation and vortical details, with a simple and intu-
+                                                                                itive derivation.
+          (d) FLIP               (e) APIC        (f) IPIC (Ours)              • A modified APIC scheme that admits a per-particle velocity cor-
+                                                                                rection with a Hessian update to preserve the accuracy of the
+                                                                                particle-to-grid transfer.
+                                                                              • The observation that instabilities in velocity-stretching happen be-
+                                                                                cause of errors in the construction of the Jacobian of the flow map.
+                                                                                Thus, we propose a novel Jacobian-Aware blending scheme that
+          (g) IPIC w/o Hessian              (h) IPIC (Ours)
+                                                                                significantly improves the stability of impulse-based methods.
+                                                                              • We demonstrate that our method can be applied in existing hybrid
+Figure 2: 2D Taylor Vortices simulations in resolution 256 × 256.
+                                                                                methods for liquid simulation with minor algorithmic changes in
+MC (a), FLIP (d) and APIC (e) are simulated with ∆t = 0.0125 in
+                                                                                order to enhance vortices and rotational motion.
+the first order integration scheme. MC+R (b), CF-BFECC (c) and
+our method (f) use ∆t = 0.025 with a second order time integration
+scheme. We show results at t = 6. Ours, CF-BFECC and MC+R
+preserve the vortices similarly well, while MC, FLIP and APIC                 2. Related Work
+dissipate more. In (g) and (h), we show the effect of removing the            Early approaches to fluid animation suffered from severe numerical
+Hessian term from our method at t = 2. The energy and vorticity are           dissipation that detrimentally affects the flow dynamics [Sta99],
+similarly preserved, but removing the Hessian term results in more            and several methods have been proposed to tackle this issue.
+noise.                                                                        Energy-preserving integrators [MCP∗ 09] can simulate flows with
+                                                                              close to zero numerical viscosity, but they require a costly non-
+                                                                              linear solve at each time-step. Vortex methods are also known for
+methods typically prioritized stability and conservation of mass over         their excellent conservation properties. They can be discretized
+conservation of momentum, leading to notable energy dissipation               in a Lagrangian fashion, by points [PK05, SRF05, Ang17], seg-
+[Sta99, FSJ01a]. In response, several techniques have been proposed           ments [TRLX22, XTZ∗ 21], filaments [WP10, PCK∗ 19] or sheets
+over the years, ranging from flow enhancements that compensate                [PTG12, BKB12]; or in a hybrid format that combines grid-
+missing information, such as vorticity confinement [SRF05,ZBG15]              based velocity/streamfunction data with Lagrangian vortex ele-
+or synthetic turbulence [KTJG08,PTG12], to more complex schemes               ments [Leo80, CC91, KL95, ZBG15, CCB∗ 08, FDB22]. In gen-
+relying on unsplit formulations of Navier-Stokes [MCP∗ 09] or                 eral, vortex methods suffer from complicated boundary treatments
+higher order integrators [DL03, SFK∗ 08, ZNT18].                              and additional costs or instabilities due to vortex stretching terms.
+   One interesting class of recent approaches incorporates structure-         Among other relevant works that aim to enrich the liveliness of
+preserving integrators [ETK∗ 07, NWRC22] to better resolve the                simulations are vorticity confinement schemes and higher order
+conservation of momentum. Such approaches augment the advec-                  interpolation [FSJ01b, SRF05], method of characteristic mapping
+tion process by accounting for how the underlying space is itself             [TP11,SIBA17,QZG∗ 19], turbulence synthesis [KTJG08,PTSG09],
+deformed by the flow, but they have so far been limited to simulating         and Lattice Boltzmann approaches [LMLD22].
+only smoke (and not liquids) in purely Eulerian (i.e., grid-based)
+                                                                                 Especially relevant to our work is the recent approach of
+settings. In this paper we propose and evaluate a simple modifica-
+                                                                              Nabizadeh et al. [NWRC22], in which the authors propose ad-
+tion to such structure-preserving integrators to handle simulations of
+                                                                              vecting covectors instead of the usual velocity field. A discrete
+either smoke or liquid by integrating these ideas into popular hybrid
+                                                                              covector field is intrinsically connected with the underlying dis-
+particle/grid solvers, such as APIC [JSS∗ 15].
+                                                                              cretization mesh. This assumption requires updating transported
+   Fundamentally, our proposed technique relies on constructing               covector quantities to account for the deformation of the space
+the Jacobian of the forward flow map for all particles that represent         during transport. This approach has connections to impulse meth-
+the fluid. The Jacobian of the Lagrangian forward flow map is then            ods [Ose89, Cor95, SC96, FLX∗ 22], velocity advection schemes
+inverted on a per-particle basis and used to correct the particles’           [But93], and structure-preserving Lie integrators [ETK∗ 07,McK07].
+
+                                                                                                                 © 2024 Eurographics - The European Association
+                                                                                                               for Computer Graphics and John Wiley & Sons Ltd.
+                                                       S. Sancho et al. / The Impulse Particle-In-Cell Method                                           3 of 13
+
+
+
+
+              (a) FLIP                             (b) APIC            (c) IPIC (α=0.99, β=0.998)       (d) IPIC (α=0.8, β=0.9)       (e) IPIC w/o Hessian
+
+Figure 3: 2D Dam Break simulations at the resolution of 64 × 64 grid cells. All examples are initialized with 8 particles per cell. A
+second-order time integration scheme is used with ∆t = 0.25. From top to bottom, we show results at time steps t = 25, t = 220 and t = 389.5.
+Our method (c) shows more vortical structures than FLIP (a) and APIC (b). Employing lower limiter values for α and β (d) allow less accurate
+Jacobian of the flow maps, but is able to provide a more vortical result at t = 220. IPIC without the Hessian correction (e) becomes less
+energetic, but is still more vortical than FLIP and APIC.
+
+
+Crucial to the work of Nabizadeh et al. [NWRC22] is the com-                             APIC has become a fundamental part of production pipelines for
+bination of more accurate semi-Lagrangian advection schemes                              liquid simulations [FSN17]. APIC was further extended to model
+(e.g., BFECC [DL03] or MacCormack [SFK∗ 08]) with two-step                               higher order quantity tracking [FGG∗ 17], combined with a FLIP
+time-splitting methods [ZNT18, NZT19]. Their approach, however,                          scheme [FGW∗ 21], and extended in space with a Taylor expan-
+is limited to purely Eulerian grid-based settings, and does not nat-                     sion [NMM23]. For a more thorough analysis of the convergence
+urally extend to modelling liquids. Recent work has explored the                         and properties of the APIC method applied specifically to fluid
+improvement of the impulse method’s accuracy in a grid-based                             scenarios, please refer to [DSS20].
+setting by using neural fields [DYZ∗ 23].
+
+   Hybrid Lagrangian-Eulerian Fluids combine the capacity of
+particle-based representations to accurately model transport with the
+                                                                                         3. Background
+ability of grids to ensure discrete incompressibility [ZB05]. Hybrid
+methods are thus effective in capturing sub-grid details and have                        We begin by conducting a brief review of impulse-based meth-
+been widely adopted for liquid simulations. Such methods were used                       ods and hybrid particle/grid fluid solvers. The motion of volume-
+to model subgrid details [ABO16, CMSA20, TBBC∗ 22], adopted                              preserving inviscid fluids is governed by the incompressible Euler
+in collocated variable schemes [GHMR∗ 20] and adaptive grids                             equations, given by
+[NNC∗ 20], combined with SPH for small-scale effects [LTKF08,
+CIPT14], improved for efficiency [ATW13, FAW∗ 16, SWT∗ 18], en-                                       ∂u(x)                     1
+hanced with better particle distribution [AT11, UBH14, KLTB21,                                              + u(x) · ∇u(x) = − ∇p(x) + f(x),                 (1)
+                                                                                                       ∂t                       ρ
+QLDJ22], and extended for two-phase flows [BB12, ATW15] and
+                                                                                                                    ∇ · u(x) = 0,                            (2)
+realistic whitewater simulation [WFS22].
+
+   Prominent among hybrid approaches is the popular Fluid Implicit                       where u(x), p(x) and f(x) denote the velocity, pressure and external
+Particle method (FLIP) [BR86, ZB05], which increments, rather                            force fields, respectively, while x represents the spatial coordinates
+than overwrites, the particles’ velocities by transferring only the                      of the domain and ρ the constant fluid density. Viscosity terms are
+interpolated change in the grid velocities before and after pressure                     often omitted due to the inherent dissipation of numerical solvers
+projection. FLIP, however, introduces noise due to the discrepancy                       [ETK∗ 07, MCP∗ 09]. These equations can be discretized through a
+in the information carried by the particles and the discretization grid.                 time-splitting method as
+Jiang et al. [JSS∗ 15,JST17] therefore proposed the Affine Particle in
+Cell method (APIC), which uses concepts of the Generalized Inter-                                     ∂u(x)
+                                                                                                            = −u(x) · ∇u(x) + f(x),                          (3)
+polation Material Point method (GIMP) [BK04, PCW07] to create                                          ∂t
+transfers between particles and grid that preserve angular momen-                                     ∂u(x)    1
+                                                                                                            = − ∇p(x), subject to ∇ · u(x) = 0.              (4)
+tum. Due to its versatility and ability to maintain vortical structures,                               ∂t      ρ
+
+© 2024 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+4 of 13                                               S. Sancho et al. / The Impulse Particle-In-Cell Method
+
+
+
+
+                                                                        (a) APIC
+
+
+
+
+                                                                     (b) IPIC (Ours)
+
+Figure 4: 3D Liquid Street simulations with a resolution 150 × 75 × 45 grid cells. A liquid wave generator causes waves that collide with
+obstacles. Both methods are simulated with ∆t = 0.25 using a second-order integration scheme. From left to right, we show results at t = 75.25,
+t = 86.25 and t = 100.75 respectively. Our method (b) is able to produce more detailed wakes at the downstream of the obstacles when
+compared to APIC (a).
+
+
+3.1. Impulse-based methods                                                      By first solving the advection term u · ∇m to obtain an intermediate
+                                              ∗                                 m∗ , the velocity stretching term can then be discretized by backward
+The impulse formulation [Cor95,SC96,FLX 22] of the equations of
+                                                                                Euler integration as m∗∗ = m∗ − ∆t(∇u)⊤ m∗∗ . Rearranging the
+motion allows for a relaxation of the global incompressibility con-
+                                                                                terms of this equation shows the relationship between the velocity
+straint during advection by employing an additional gauge variable.
+                                                                                gradient and the advected stretched transport as
+Given that the flow u is incompressible (i.e., ∇ · u = 0), the impulse
+gauge variable m is defined as                                                                        m∗∗ = (I + ∆t ∇u)−⊤ m∗ .                                   (9)
+                            m = u + ∇φ,                               (5)       We will demonstrate how the expression I + ∆t ∇u is connected
+                                                                                with the definition of the flow map in the next section.
+where ∇φ is the gradient of an arbitrary scalar field. This term can be
+reinterpreted as the gradient of pressure that will modify m to satisfy
+incompressibility. The resulting equations for mass conservation                3.2. The Flow Map
+become                                                                          A flow map represents the correspondences created by the passively
+                  ∇2 φ(x) = ∇ · m        x ∈ Ω,                                 transported grid variables that track fluid quantities, yielding a con-
+                                                                                nection between an undeformed fluid domain and its deformed
+                    ∂φ(x)
+                          =0             x ∈ ∂Ωb ,                    (6)       counterpart. Flow maps have been employed as part of a circulation-
+                     ∂n                                                         preserving vorticity-streamfunction solver [ETK∗ 07], incorporated
+                     φ(x) = 0            x ∈ ∂Ω f ,                             within a higher-order semi-Lagrangian scheme [NWRC22], inte-
+where Ω represents the fluid domain, and ∂Ωb and ∂Ω f are its fluid-            grated into Material Point Methods [SSC∗ 13, JST∗ 16], and used for
+solid and fluid-air boundaries, respectively. Due to the change of              visualizing flows through Lagrangian coherent structures, such as
+variables induced by the new gauge variable, the inviscid equation              Finite-Time Lyapunov Exponents (FTLEs) [Hal01,Hal02]. The flow
+for advection becomes (see Appendix for the derivation):                        map Φt (x) that maps each fluid initial position x0 in the domain to
+                                                                                its location at time t is defined by the integration of the flow velocity
+                   ∂m
+                       + u · ∇m + (∇u)⊤ m = 0.                   (7)            field as
+                    ∂t                                                                                                Z t
+The major difference between the impulse formulation and the orig-                                  Φt (x0 ) = x0 +         u(x(τ), τ) dτ.                      (10)
+                                                                                                                        0
+inal advection in Equation (3) is the extra (∇u)⊤ m term, which
+accounts for the stretching of the advected velocity due to deforma-               The Jacobian of the flow map, ∇Φt (x), represents the deforma-
+tion of the space. Through operator splitting, this equation can be             tion tensor of the fluid domain, and its derivative over time is directly
+broken down into passive transport and velocity stretching as                   connected with the velocity gradient [Cor95] as
+             ∂m                     ∂m                                                               ∂
+                 + u · ∇m = 0,          + (∇u)⊤ m = 0.                (8)                               ∇Φt (xt ) = ∇u(x) ∇Φt (xt ).                            (11)
+              ∂t                     ∂t                                                              ∂t
+
+                                                                                                                        © 2024 Eurographics - The European Association
+                                                                                                                      for Computer Graphics and John Wiley & Sons Ltd.
+                                                   S. Sancho et al. / The Impulse Particle-In-Cell Method                                             5 of 13
+
+   Covector Fluids [NWRC22] discretizes flow maps by integrating                     notation, in the following explanation we assume that all particles
+grid locations backwards in time, sampling extra points around the                   carry unit mass and that quantity transfers are normalized by the
+advected vector component (Figure 5, (b)). Instead, we adopt an                      transferred mass at the computed position to conserve momentum.
+approach common in FTLE visualizations, computing forward flow
+                                                                                        The advection in a Lagrangian setting updates particle positions
+maps by sampling extra points around a given particle (Figure 5,
+                                                                                     with a forward flow map computed from the grid velocities, while
+(c)). Adopting a forward Euler time integration scheme, one can
+                                                                                     the attributes that these particles carry are kept unchanged. We
+discretize Equation (11) as
+                                                                                     denote the discrete particle-based flow map as Φ◦ : RN×3 → RN×3 ,
+           ∇Φn+1 (xn+1 ) = ∇Φn (xn ) + ∆t∇u(xn )∇Φn (xn ),               (12)        with N being the number of particles. The advected velocities that
+                                                                                     satisfy momentum conservation on the grid are
+with n and ∆t being the time step index and the time step size,
+respectively. Since the Jacobian of the flow map relative to the                                            ũ⊞ ← I p2g (u◦ , Φ◦ (x◦ ), x⊞ ),            (15)
+current time step is the identity ∇Φn (xn ) = I, we have
+                                                                                     where I p2g is a particle-to-grid transfer function. The standard
+                        ∇Φn+1 (xn+1 ) = I + ∆t∇u(xn ).                   (13)        Particle-in-Cell (PIC) method defines the I p2g routine as
+We will drop the subscript n for the rest of the paper, assuming that                                   PIC ◦ ◦ ⊞
+                                                                                                      I p2g (u , x , x ) = ∑ w(x⊞ , x◦p ) u◦p ,          (16)
+the flow map is always computed with respect to the previous time                                                              p
+step. This derivation relates the flow map from Equation (13) to the
+impulse stretching in Equation (9) as                                                with w(x⊞ , x◦p ) representing the weights obtained from a pre-
+                                                                                     specified interpolation function. The summation in Equation (16)
+                               m∗∗ = (∇Φ)−⊤ m∗ .                         (14)        is conducted over the particles inside a small vicinity of each grid
+These definitions set up a mathematical approach that simultane-                     point. Since PIC suffers from severe energy dissipation, the Affine
+ously simplifies the formalism outlined by previous exterior calculus                Particle-in-Cell (APIC) method modifies the particle-to-grid trans-
+approaches, while clarifying how flow maps interact with classical                   fer to better preserve the velocity field. The corresponding I p2g
+impulse methods.                                                                     operation is
+                                                                                                                                                     
+                                                                                          APIC ◦ ◦ ⊞
+                                                                                        I p2g (u , x , x , A◦ ) = ∑ w(x⊞ , x◦p ) u◦p + A◦p (x⊞ − x◦p ) .
+                                                                                                                       p
+                                                                                                                                                         (17)
+                                                                                     where u◦p + A◦p (x⊞ − x◦p ) is the per-particle affine velocity contribu-
+                                                                                     tion relative to a grid variable at x⊞ . After transferring the particle
+                                                                                     velocities, mass conservation (Equation (4)) is solved on the grid.
+                                                                                     The resulting divergence-free velocity field is used to update the
+                                                                                     per-particle linear velocity and affine transformation as
+      (a) [ETK∗ 07]                 (b) [NWRC22]             (c) Ours
+                                                                                           u◦ = ∑ w(x⊞    ◦   ⊞
+                                                                                                     i , x ) ui ,          A◦ = ∑ ∇w(x⊞    ◦   ⊞
+                                                                                                                                      i , x ) ui .       (18)
+                                                                                                  i                                i
+Figure 5: Differences in how flow maps are computed by distinct
+methods. The black color represents the undeformed state, while the                  The above equation assumes that the interpolation kernel w(x, y) is
+blue color represents the deformed state. (a) Elcott et al. [ETK∗ 07]                trilinear [PCW07, NMM23]. This assumption simplifies the compu-
+use a streamfunction-vorticity formulation to backtrace circulation                  tation of the affine velocity, which effectively models the per-particle
+(black empty circle) sampled in the deformed space (blue dotted                      matrix A◦ as the interpolation of the velocity gradient at the given
+lines). (b) Nabizadeh et al. [NWRC22] employ a backwards flow                        location, ∇u(x).
+map discretization: given a staggered grid location (black circle),
+the advected velocity vector is multiplied by a single row of the                    4. An Impulse-based Hybrid Advection Scheme
+transposed Jacobian of the inverse flow map, which is geometrically
+equivalent to the approach of Elcott et al. (c) Our approach samples                 Having outlined how the flow map relates to the impulse equations,
+four additional points (c1 to c4 ) for each particle, which are then                 and how hybrid discretizations can efficiently model advection, we
+advected forward (ĉ1 to ĉ4 ). The full forward flow map Jacobian is                can now propose a simple modification to hybrid schemes that
+computed using a finite-difference approach as in FTLE methods.                      incorporates structure-preserving deformations when advecting the
+                                                                                     impulse gauge variable. Accordingly, the particles are now defined
+                                                                                     to carry impulse (and its affine component), rather than velocity. The
+                                                                                     particle positions are first passively advected by the incompressible
+3.3. Hybrid discretizations
+                                                                                     flow velocities, as usual. Then, per Equation (14), the per-particle
+Hybrid methods discretize the equations of motion with two distinct                  impulse gauge variables are stretched by the inverse transposed
+representations: Lagrangian particles are used to solve the advec-                   Jacobian of the flow map, denoted J ◦ = (∇Φ◦ )−⊤ , using
+tion terms (Equation (3)) and to track the evolution of the surface,
+                                                                                                                     m◦ = J ◦ u◦ .                       (19)
+while a background Eulerian grid is used to enforce incompress-
+ibility (Equation (4)). We represent discrete grid-based positions                   We re-initialize the impulse variable at each step to be the divergence-
+and velocities as x⊞ and u⊞ respectively, while their particle-based                 free velocity u◦ , and denote the impulse gauge variable value after
+counterparts are represented by x◦ and u◦ . For the simplicity in                    stretching as m◦ .
+
+© 2024 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+6 of 13                                             S. Sancho et al. / The Impulse Particle-In-Cell Method
+
+   The next question is how the per-particle affine matrix A◦ for
+the impulse should be stretched. When tri-linear kernels are used,
+the APIC transfer can be interpreted as a first-order Taylor ap-
+proximation of a function centered around a Lagrangian coordi-
+nate [BK04, PCW07, NMM23] as
+                                                
+              u(x⊞ ) = u◦ + ∇u◦ ∆x + O (∆x)2 ,                (20)
+
+where ∆x = (x⊞ − x◦ ) and ∇u◦ = A◦ (Equation (18)). Applying
+the Jacobian of the flow map to the APIC transfer yields
+
+                 m(x⊞ ) ≈ J ◦ u◦ + ∇ J ◦ u◦ ∆x.
+                                             
+                                                         (21)
+                                                                                                             (a) CF-BFECC
+Assuming that the Jacobian of the flow map is locally constant
+around the transported particles, Equation (21) simplifies to
+
+                   m(x⊞ ) = J ◦ u◦ + J ◦ ∇u◦ ∆x.                  (22)
+This means one can simply transform the affine matrix with the in-
+verse transpose of the forward flow map Jacobian to get the stretched
+affine matrix:
+                           A◦m = J ◦ A◦ .                         (23)
+
+   This simple modification allows us to incorporate the per-particle
+stretched impulse m◦ and matrix A◦m as inputs of the APIC transfer
+(Equation (17)). We emphasize that the forward flow map is nec-                                                 (b) APIC
+essary for particle-based advection, since the particle positions are
+evolved forward in time; previous approaches [ETK∗ 07, NWRC22]
+employ semi-Lagrangian schemes instead, which integrate velocities
+by going backwards in time.
+   Our method requires the computation of
+the Jacobian of the per-particle flow map Φ◦
+on an unstructured set of points. This Jaco-
+bian could potentially be computed based on
+the previous positions of neighbouring par-
+ticles. Such an approach, however, would
+require querying closest particle informa-
+tion, which reduces the performance of the                                                                   (c) IPIC (Ours)
+method. Instead, we choose to compute fi-
+                                                                              Figure 6: 2D Smoke Plume simulations with resolution 384 × 512
+nite difference approximations from extra
+                                                                              grid cells. We employ ∆t = 0.25 for CF-BFECC (a) and IPIC (c),
+temporary sampled particles around the lo-
+                                                                              while APIC (b) uses ∆t = 0.125 (first-order integration). From left
+cation of the Jacobian computation. The in-
+                                                                              to right, we show results at t = 50.25, t = 63 and t = 87 respectively.
+set image shows the particle arrangement in
+                                                                              Our method can express more detailed vortices than APIC while
+3D: two particles are created and displaced
+                                                                              maintaining stability. CF-BFECC explodes early and fails to finish:
+in each Cartesian direction. The inverse transpose of the forward
+                                                                              the frame shown in its third column is at t = 66.5 and is the last
+flow map Jacobian J ◦ is computed in 3D by
+                                                                              frame before the simulation becomes unstable.
+                                               −1
+                                  (ĉ2 − ĉ1 )⊤
+                      ◦      1 
+                    J3D  ≈      (ĉ4 − ĉ3 )⊤  ,            (24)
+                                                
+                            δx                ⊤
+                                  (ĉ6 − ĉ5 )
+where δx is the separation of the extra temporary sampled parti-              the non-constant case, Equation (21) expands as
+cles and ĉ is the transported positions of the extra particles. In our
+implementations, we set δx to be the same as the grid spacing.                           m(x⊞ ) = J ◦ u◦ + J ◦ ∇u◦ ∆x + ∇J ◦ · u◦ ∆x.
+                                                                                                                                 
+                                                                                                                                                             (25)
+
+                                                                              The extra term comes from the gradient of the non-constant Jacobian:
+4.1. Non-constant Jacobian Flow Map
+                                                                              ∇J ◦ is the Hessian of the inverse transposed flow map, a third order
+Modifying per-particle quantities with Equation (23) only works if            tensor that is single contracted with the vector u◦ . The last two
+the Jacobian of the flow map is locally constant around a particle. In        terms of Equation (25) can be combined to derive a more convenient
+
+                                                                                                                     © 2024 Eurographics - The European Association
+                                                                                                                   for Computer Graphics and John Wiley & Sons Ltd.
+                                                      S. Sancho et al. / The Impulse Particle-In-Cell Method                                            7 of 13
+
+
+
+
+            (a) SL                           (b) MC               (c) MC+R               (d) CF+BFECC                (e) APIC              (f) IPIC (Ours)
+
+Figure 7: 3D Smoke Plume simulations at a resolution of 128 × 256 × 128 cells. SL (a), MC(b), APIC (e) use ∆t = 0.125 while MC+R (c),
+CF+BFECC (d) and ours (f) are simulated with ∆t = 0.25 using a second-order integration scheme. We show results for all methods at t = 100
+except for CF+BFECC, which explodes after t = 68. Our method exhibits more vortical details than the other methods while also maintaining
+better stability than CF+BFECC.
+
+
+expression to update the per-particle affine matrix as                                  coupled with an accurate position integrator, the determinant of the
+                                                                                        flow map should be equal to 1, indicating that the volume is per-
+       Ã◦m = J ◦ ∇u◦ + ∇J ◦ : u◦ = J ◦ (A◦ − H◦ ),
+                                                  ⊤                                 fectly conserved. To limit the amount of incorrect stretching induced
+                   mx ∇ ∂Φx
+                            + m y ∇
+                                    ∂Φy
+                                        + m z ∇ ∂Φz                                     by inaccurate flow maps, we apply a smoothed double-sided step
+                         ∂x          ∂x          ∂x
+                                                  ⊤                     (26)        function to modulate the strength of the stretching of Lagrangian
+       with H◦ = 
+                                   ∂Φy
+                                                       
+                        ∂Φx                     ∂Φz    ,
+                  mx ∇ ∂y + my ∇ ∂y + mz ∇ ∂y                                         quantities as
+                                                  ⊤ 
+                                                                                                       m◦ = ξ(q◦ )J ◦ u◦ + 1 − ξ(q◦ ) u◦ ,
+                                    ∂Φy         ∂Φz
+                                                                                                                                        
+                        ∂Φx
+                   mx ∇ ∂z + my ∇ ∂z + mz ∇ ∂z
+                                                                                                                                                          (27)
+                                                                                                         Ã◦m = ξ(q◦ )Ã◦m + 1 − ξ(q◦ ) A◦ ,
+                                                                                                                                        
+where m◦ = (mx , my , mz )⊤ and ∇ ∂Φ∂f
+                                       e
+                                         , e, f ∈ (x, y, z) represents the
+second order derivatives of the flow map.                                               with
+                                                                                                                                
+                                         ◦                                                                                                     q≤0
+   The per-particle matrix H requires the evaluation of second                                           ◦                      0,
+                                                                                                                                
+                                                                                                 1 − ||J | − 1| − α
+derivatives of the flow map, and extra points need to be sampled to                       q◦ =                      , ξ(q◦ ) = 3q2 − 2q3 , 0 ≤ q ≤ 1
+in order to compute these derivatives. In the supplementary material                                    β−α                     
+                                                                                                                                 1,            1≤q
+                                                                                                                                
+we include detailed diagrams that illustrate how we sample particles                                                                                   (28)
+to approximate the Hessian, along with the derivations needed to                        where α and β are parameters satisfying 0 ≤ α < β ≤ 1 that control
+obtain Equation (26). In summary, when the Jacobian of the flow                         the blending limits. In Section 5, we demonstrate the impact of the
+map is not constant around the particle positions, the APIC transfer                    Jacobian-aware blending. When ξ(q◦ ) is far from one, the method
+(Equation (17)) employs the stretched velocity m◦ and modified                          is more strict in enforcing flow map correctness, and the behavior
+affine matrix Ã◦m . A full outline of a single time step of the IPIC                   of the solver more closely mimics a standard APIC solver; with
+advection-stretching is shown in Algorithm 1. For time integration,                     less strict enforcement, the method becomes less stable while also
+we employ a second-order multi-stepping algorithm [NWRC22],                             producing and maintaining more intricate, vortical details.
+outlined in Algorithm 2.
+                                                                                           Moreover, when simulating liquids, the evaluation of the Jacobian
+                                                                                        of the flow map at the interface between air and fluid cells can
+4.2. Enforcing Stability by a Jacobian-Aware Blending
+                                                                                        become incorrect, since velocities from the fluid are extrapolated to
+The original covector approach [NWRC22] can simulate fluids with                        the air. Since this creates simulations that have noticeable artifacts,
+intricate vortical details, but suffers from significant instability issues             we revert back to FLIP at the interface of fluid and air cells.
+that severely limit the time step size of the algorithm. We propose a
+novel limiter on the Jacobian of the flow map that improves stability
+of impulse-based formulations. Our key insight is that velocity                         5. Results
+stretching is unstable when flow maps are not accurately constructed.                   We test the effectiveness of our method in several different sce-
+Errors in the construction of the flow map are exacerbated in regions                   narios, evaluating its performance and quality against established
+of higher turbulence or close to boundaries, where inaccuracies due                     state-of-the-art methods. One advantage of our proposed hybrid
+to numerical integration of particle positions and the negative effects                 approach is that it can be seamlessly integrated into liquid solvers,
+of not enforcing strictly divergence-free interpolants [CPAB22] are                     extending previous approaches [NWRC22] that were limited to
+more severe.                                                                            smoke settings. We also reimplemented several methods in our
+  The flow map error can be quantified by measuring the deter-                          pipeline to provide fair comparisons. The first-order (in time)
+minant of its Jacobian: for a strictly divergence-free velocity field                   semi-Lagrangian [Sta99] and MacCormack [SRF05], second-order
+
+© 2024 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+8 of 13                                           S. Sancho et al. / The Impulse Particle-In-Cell Method
+
+
+
+
+                                                                    (a) MC+R
+
+
+
+
+                                                                 (b) CF+BFECC
+
+
+
+
+                                                                    (c) APIC
+
+
+
+
+                                                                 (d) IPIC (Ours)
+
+Figure 8: Vortex Leapfrogging simulations at a resolution of 256 × 128 × 128 cells. MC+R (a), CF+BFECC (b) and our method (d) use
+∆t = 0.5, while APIC (c) employs ∆t = 0.25. From left to right, we show results at t = 121, t = 258, t = 500.5 and t = 767.5, respectively.
+IPIC produces more detailed vortical structures when compared with other methods.
+
+
+           Table 1: Summary of methods used in this paper.                  tics. We refer the reader to the accompanying video for animated
+          Method                        Acronym   Reference                 visualizations of our results.
+          Semi-Lagrangian               SL        [Sta99]                      The Impulse Particle-In-Cell method is implemented in Py-
+          MacCormack                    MC        [SFK∗ 08]                 torch [PGM∗ 19], extending a previous differentiable solver pipeline
+          Back-and-Forth Error                                              [TCCS21]. All simulations were performed on a system with an
+                                        BFECC     [SFK∗ 08]
+          Compensation and Correction                                       NVIDIA RTX3090 GPU with 24GB memory and an AMD Ryzen
+          Advection-Reflection          R         [NZT19]                   7 5800X CPU with 64GB memory. Efficiently performing particle-
+          Covector Fluids               CF        [NWRC22]                  to-grid operations implies increased memory costs, which can be
+          Fluid-Implicit-Particle       FLIP      [ZB05]                    prohibitive when evaluating our method on GPUs. We alleviate
+          Affine Particle-In-Cell       APIC      [JSS∗ 15]                 this requirement by sequentially computing the particle splatting
+          Impulse Particle-In-Cell      IPIC      Our method                operation in chunks, which can make particle-to-grid transfers less
+                                                                            efficient. We use linear interpolation kernels for both grid-to-particle
+                                                                            and particle-to-grid transfers and a third-order Runge-Kutta integra-
+advection-reflection [NZT19], and second-order (in time) Covector           tor for advancing positions.
+Fluids [NWRC22] are the baseline implementations for simulating
+smoke examples; PIC, FLIP [ZB05] and APIC [JSS∗ 15] provide                 5.1. Validation
+baselines for liquid scenes. Table 1 shows all the implemented meth-        2D Taylor Vortices Our 2D solver is validated using a Taylor
+ods, and Table 2 lists experiment parameters and performance statis-        vortices setup [McK07] that has been widely used for testing
+
+                                                                                                                © 2024 Eurographics - The European Association
+                                                                                                              for Computer Graphics and John Wiley & Sons Ltd.
+                                                   S. Sancho et al. / The Impulse Particle-In-Cell Method                                                                       9 of 13
+
+                                                                                                 ·10−2
+Algorithm 1 A single step of the IPIC advection-stretching                                1.2
+                                                                                                 Energy
+                            ⊞                          ◦                   ⊞
+Input: flow field u ; particle positions x ; grid positions x ;
+timestep ∆t; non-constant Jacobian flag H; stability parameters                             1
+α and β.
+ 1: u◦ , A◦ ← Ig2p
+               APIC ◦ ⊞ ⊞
+                   (x , x , u )                                                           0.8
+ 2: for each particle do
+ 3:     c◦ ← C REATE JACOBIAN PARTICLES(x◦ )
+ 4:     if H then                                                                         0.6
+            h◦ ← C REATE H ESSIAN PARTICLES(x◦ )
+                                                                                                                                                                   Time
+ 5:
+ 6:         h◦ ← RUNGE K UTTA(h◦ ; u⊞ , ∆t)                                                                100    200          300             400          500           600
+
+ 7:     end if                                                                                             MC       APIC             CF-BFECC
+
+ 8:        x◦ ← RUNGE K UTTA(x◦ ; u⊞ , ∆t)                                                                 MC+R     IPIC
+
+ 9:        c◦ ← RUNGE K UTTA(c◦ ; u⊞ , ∆t)
+10:        J ◦ ← C OMPUTE JACOBIAN(c◦ )                     ▷ Equation (24)          Figure 9: Kinetic energy plot for different methods used in the 3D
+11:        A◦m ← A◦                                                                  Vortex Leapfrogging example (Figure 8). IPIC better conserves the
+12:        if H then                                                                 energy throughout the simulation.
+13:            H◦ ← C OMPUTE H ESSIAN(h◦ )                  ▷ Equation (26)
+14:            A◦m ← A◦ − H◦                                                         Table 2: Parameters and performance statistics. All runtime statis-
+15:        end if                                                                    tics are reported in seconds per frame when second order integration
+                    1−||J ◦ |−1|−α                                                   schemes are used. For first order integration schemes, runtime is
+16:    q◦ ←      β−α                                                                 reported in seconds per two frames for a fair comparison.
+17:    m◦ ← ξ(q◦ ) J ◦ u◦ + (1 − ξ(q◦ )) u◦
+18:    A◦ ← ξ(q◦ ) J ◦ A◦m + (1 − ξ(q◦ )) A◦                                                                                                                      Ours
+                                                                                       Scene                      Resolution         # Part.         Ours                       APIC
+19: end for                                                                                                                                                       w/o H
+
+20: m   ⊞       APIC
+            ← I p2g  (m◦ , x◦ , x⊞ , A◦ )                                              Taylor Vortices (Fig. 2)   256×256            1.05M           0.77         0.55          0.35
+                                                                                       2D Plume (Fig. 6)          384×512            786k            0.71         0.56          0.44
+                                                       ⊞
+Output: Advected stretched impulse field m                                             2D Dam Break (Fig.3)       64×64              10k             0.18         0.17          0.15
+                                                                                       Leapfrogging (Fig. 8)      256×128×128 16.78M                 69.2         29.0          8.6
+                                                                                       3D Plume (Fig. 7)          128×256×128 16.78M                 67.8         28.6          7.4
+Algorithm 2 Second order time integration scheme
+                                                                                       3D Dam Break (Fig. 10)     128×100×40         471k            2.1          1.0           0.4
+                                                                                       Liquid Sink (Fig. 11)      96×24×96           1.77M           5.3          2.2           0.7
+Input: Flow field u⊞
+                   n ; timestep ∆t
+                                                                                       Liquid Street (Fig. 4)     150×75×45          1.2M∼1.8M 7.2                2.9           0.8
+ 1: m̃n+ 1 ← IPIC(mn ; un , ∆t
+                            2)                                ▷ Algorithm 1
+            2
+ 2: un+ 1 ← D IV F REE P ROJECTION(m̃n+ 1 )
+            2                                      2                                 ging example. Concentric vortex rings with different radii are ini-
+ 3: m̃n+1 ← IPIC(mn ; un+ 1 , ∆t)                             ▷ Algorithm 1          tialized with equal circulations, and the expected behavior is that
+                                       2
+ 4: un+1 ← D IV F REE P ROJECTION(m̃n+1 )                                            one ring will go through the other in alternating fashion. The true
+Output: Velocity field u⊞                                                            analytical solution for the inviscid case would reproduce this behav-
+                        n+1
+                                                                                     ior indefinitely; for numerical solvers, we observe the number of
+                                                                                     times that each vortex ring goes through another before collapsing
+                                                                                     to a single ring. Figure 8 shows leapfrogging results for grid-based
+energy preservation properties in Computer Graphics. We gen-                         Advection-Reflection MacCormack (MC+R) and Covector Fluids
+erate two initial
+                 vortices
+                          separated
+                                        by a distance of 0.81 using
+                                                                                   methods, and for hybrid APIC and IPIC discretizations. APIC was
+                  2                   2
+ω(x) = Ua 2 − ar 2 exp 12 1 − ar 2 , with a = 0.3 and U = 1.0.                       simulated with a halved time step size, since all other methods are
+Vortex core positions are set so that they should theoretically remain               second-order in time. Thus, the number of pressure projections is
+separated through the course of the simulation; dissipative solvers                  the same across different methods. The sequence shows that IPIC
+are not able to preserve this property. Note that methods such as                    produces more detailed vortical structures when compared to other
+MacCormack and APIC are run with halved time steps to match                          methods, while also producing consistent ring motion. We compare
+the number of projection steps of second-order in time methods                       the kinetic energy profile of different methods in Figure 9.
+(Algorithm 2). Figure 2 provides a visualization of the resulting vor-
+ticity maps in each of the methods at time t = 6. We observed that
+                                                                                     5.2. Smoke
+Covector Fluids is very sensitive to MacCormack / BFECC extrema
+clamping modes, and minor changes to the clamping procedure can                      2D Smoke Plume We initialize a 2D smoke source in a rectangular
+drastically decrease or increase the energy of the system.                           domain. For all smoke examples, advection of the smoke concen-
+                                                                                     tration ρ(x) is performed on the regular grid with the MacCormack
+3D Leapfrogging Vortex Rings An alternative evaluation of a                          advection scheme, instead of transporting densities through particles.
+solver’s ability to conserve kinetic energy is to test a vortex leapfrog-            We chose this setting so we could provide fair visual comparisons
+
+© 2024 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+10 of 13                                            S. Sancho et al. / The Impulse Particle-In-Cell Method
+
+against grid-based methods that do not rely on particles for smoke
+concentration advection. A standard buoyancy force f(x) = γ ρ(x) j
+is added for all our smoke examples and for this particular 2D case
+we set γ = 0.002. Figure 6 shows a comparison between Covec-
+tor Fluids, APIC and IPIC: our approach is not only better able to
+produce vortical structures, but is also stable.
+
+3D Smoke Plume Figure 7 shows a comparison of a 3D smoke
+simulation driven by buoyancy forces (γ = 0.004). This example is
+particularly interesting, since it demonstrates that different meth-                                            (a) APIC
+ods affect the spreading of turbulence throughout the simulation.
+All methods, except Covector Fluids, which blows up at t = 68,
+are stable. IPIC creates more turbulent structures that spread more
+realistically along with upward driving forces.
+
+
+5.3. Liquids
+2D Dam Break Existing hybrid liquid solvers can be easily ex-
+tended with our particle-based algorithm, offering better circulation-
+preserving capabilities. In this example, we initialize a column of                                          (b) IPIC (Ours)
+water in the left side of the domain. We show in Figure 3 a com-
+                                                                              Figure 10: 3D Dam Break simulations at a resolution of 128 ×
+parison between FLIP, APIC and IPIC: how our method is able to
+                                                                              100 × 40 with ∆t = 0.25. The liquid block is initialized with 8 par-
+maintain more energetic vortical structures. Additionally, we com-
+                                                                              ticles per cell. From left to right, we show results at t = 27.25 and
+pare the effect of the parameters of the Jacobian-aware blending:
+                                                                              t = 91.25. Our method (b) gives similar results to APIC (a). Because
+less strict (α=0.8, β=0.9) settings allow less accurate Jacobian of the
+                                                                              the flow map at interfaces is not correct due to the extrapolation of
+flow map, making the simulation less stable. But it is able to provide
+                                                                              velocities, IPIC reverts back to FLIP on those regions.
+a more vortical result at t = 220. More strict (α=0.99, β=0.998) pa-
+rameters constrain the Jacobian better, and are also able to provide
+a much more vortical simulation than FLIP and APIC. Lastly, we
+also observe that the simulation is less energetic if we assume the
+Jacobian is constant around a particle position.
+
+3D Dam Break and 3D Liquid Street Figure 10 shows a com-
+parison between APIC and IPIC for a 3D dam break scenario. As
+we revert IPIC back to FLIP at fluid-air interfaces for stability, our
+result looks similar to APIC. Inspired by Yang et al. [YXZ∗ 21], we
+create a 3D “liquid street” example that initializes a column of water
+that moves up and down at the left of the domain. IPIC is better able                       (a) APIC                             (b) IPIC (Ours)
+to create turbulent details behind obstacles and at boundary between
+liquid-air interfaces when compared to APIC.                                  Figure 11: 3D Water Sink simulations at a resolution of 96 ×
+                                                                              24 × 96. Each cell is initialized with 8 particles. Both methods use
+3D Sink Lastly, we create a 3D sink example. A square domain is               ∆t = 0.25 with the second order integration scheme. We show the
+initialized with water, and on the bottom of the domain we add a              results at t = 150. Our method (b) produces richer small structures
+hole that allows the water to flow through. We initialize the water           on the surface than APIC (a), especially near the central vortex.
+velocities with a rotational velocity field. When compared to APIC,
+IPIC creates more interesting motions at the vortex centerline.
+
+
+6. Conclusions
+                                                                                 The major limitation of IPIC is its reliance on sampling extra
+We have presented the Impulse Particle-In-Cell method, a novel                particles to compute the deformation flow map. This can introduce
+hybrid discretization that combines the strength of particle-based            computational inefficiency and higher memory costs, especially
+transport with the versatility of grid-based incompressibility. Our           when assuming that the Jacobian is not constant around particles.
+method can model both smoke and liquid phases, and exhibits im-               Moreover, flow maps can be inaccurate close to interfaces, and
+proved conservation of energy and vortical details compared to                we rely on reverting back to simpler advection schemes in those
+previous methods. Furthermore, we proposed a novel Jacobian-                  scenarios. For future work, we believe that our method can benefit
+aware blending that increases the stability of the velocity-stretching        from a more thorough treatment of boundary conditions. In addition,
+step commonly used in related impulse-based/structure-preserving              the Jacobian-aware blending can be employed as a limiter for pure
+approaches.                                                                   grid-based advection schemes that rely on velocity-stretching.
+
+                                                                                                                     © 2024 Eurographics - The European Association
+                                                                                                                   for Computer Graphics and John Wiley & Sons Ltd.
+                                                   S. Sancho et al. / The Impulse Particle-In-Cell Method                                               11 of 13
+
+References                                                                              Physics 408 (2020), 109311. doi:10.1016/j.jcp.2020.109311.
+                                                                                        3
+[ABO16] A ZEVEDO V. C., BATTY C., O LIVEIRA M. M.: Preserving
+  geometry and topology for fluid flows with thin obstacles and narrow               [DYZ∗ 23] D ENG Y., Y U H.-X., Z HANG D., W U J., Z HU B.: Fluid
+  gaps. ACM Transactions on Graphics 35, 4 (jul 2016), 1–12. doi:                      simulation on neural flow maps. ACM Trans. Graph. 42, 6 (2023). 3
+  10.1145/2897824.2925919. 3                                                         [ETK∗ 07] E LCOTT S., T ONG Y., K ANSO E., S CHRÖDER P., D ESBRUN
+[Ang17] A NGELIDIS A.: Multi-scale vorticle fluids. ACM Transactions on                M.: Stable, circulation-preserving, simplicial fluids. ACM Transactions on
+  Graphics 36, 4 (jul 2017), 1–12. doi:10.1145/3072959.3073606.                        Graphics 26, 1 (jan 2007), 4–es. doi:10.1145/1189762.1189766.
+  2                                                                                    2, 3, 4, 5, 6
+[AT11] A NDO R., T SURUNO R.: A particle-based method for preserving                 [FAW∗ 16] F ERSTL F., A NDO R., W OJTAN C., W ESTERMANN R.,
+  fluid sheets. In Proceedings - SCA 2011: ACM SIGGRAPH / Eurographics                  T HUEREY N.: Narrow band FLIP for liquid simulations. Computer
+  Symposium on Computer Animation (New York, New York, USA, 2011),                     Graphics Forum 35, 2 (may 2016), 225–232. doi:10.1111/cgf.
+  ACM Press, pp. 7–16. doi:10.1145/2019406.2019408. 3                                  12825. 3
+[ATW13] A NDO R., T HÜREY N., W OJTAN C.: Highly adaptive liquid                     [FDB22] F REY M., D RITSCHEL D., B ÖING S.: EPIC: The Elliptical
+  simulations on tetrahedral meshes. ACM Transactions on Graphics 32, 4                Parcel-In-Cell method. Journal of Computational Physics: X 14 (2022),
+  (jul 2013), 1. doi:10.1145/2461912.2461982. 3                                        100109. doi:10.1016/j.jcpx.2022.100109. 2
+[ATW15] A NDO R., T HUEREY N., W OJTAN C.: A stream function solver                  [FGG∗ 17] F U C., G UO Q., G AST T., J IANG C., T ERAN J.: A polynomial
+  for liquid simulations. ACM Transactions on Graphics 34, 4 (jul 2015),               particle-in-cell method. ACM Transactions on Graphics 36, 6 (nov 2017),
+  53:1–53:9. doi:10.1145/2766935. 3                                                    1–12. doi:10.1145/3130800.3130878. 3
+[BB12] B OYD L., B RIDSON R.: MultiFLIP for energetic two-phase fluid                [FGW∗ 21] F EI Y. R., G UO Q., W U R., H UANG L., G AO M.: Revisiting
+  simulation. ACM Transactions on Graphics 31, 2 (apr 2012), 1–12.                     integration in the material point method. ACM Transactions on Graphics
+  doi:10.1145/2159516.2159522. 3                                                       40, 4 (2021). doi:10.1145/3450626.3459678. 3
+[BK04] BARDENHAGEN S., KOBER E.: The Generalized Interpolation                       [FLX∗ 22] F ENG F., L IU J., X IONG S., YANG S., Z HANG Y., Z HU B.:
+  Material Point Method. CMES - Computer Modeling in Engineering and                   Impulse Fluid Simulation. IEEE Transactions on Visualization and Com-
+  Sciences 5 (2004). 3, 6                                                              puter Graphics (2022). doi:10.1109/TVCG.2022.3149466. 2,
+[BKB12] B ROCHU T., K EELER T., B RIDSON R.: Linear-time smoke                         4
+  animation with vortex sheet meshes. Computer Animation 2012 - ACM                  [FSJ01a] F EDKIW R., S TAM J., J ENSEN H. W.: Visual simulation of
+  SIGGRAPH / Eurographics Symposium Proceedings, SCA 2012 (2012),                      smoke. In Proceedings of the 28th Annual Conference on Computer
+  87–95. 2                                                                             Graphics and Interactive Techniques, SIGGRAPH 2001 (New York, NY,
+[BR86] B RACKBILL J. U., RUPPEL H. M.: FLIP: A method for                              USA, aug 2001), ACM, pp. 15–22. doi:10.1145/383259.383260.
+  adaptively zoned, particle-in-cell calculations of fluid flows in two di-            2
+  mensions. Journal of Computational Physics 65, 2 (1986), 314–343.                  [FSJ01b] F EDKIW R., S TAM J., J ENSEN H. W.: Visual simulation of
+  doi:10.1016/0021-9991(86)90211-1. 3                                                  smoke. In Proceedings of the 28th Annual Conference on Computer
+[But93] B UTTKE T. F.: Velicity Methods: Lagrangian Numerical Methods                  Graphics and Interactive Techniques, SIGGRAPH 2001 (New York, New
+  which Preserve the Hamiltonian Structure of Incompressible Fluid Flow.               York, USA, 2001), ACM Press, pp. 15–22. doi:10.1145/383259.
+  Tech. rep., 1993. doi:10.1007/978-94-015-8137-0_3. 2                                 383260. 2
+[CC91] C HANG C. C., C HERN R. L.: A numerical study of flow around                  [FSN17] F ROST B., S TOMAKHIN A., NARITA H.: Moana: Performing
+  an impulsively started circular cylinder by a deterministic vortex method.           water. In ACM SIGGRAPH 2017 Talks, SIGGRAPH 2017 (New York, NY,
+  Journal of Fluid Mechanics 233, 243 (1991), 243–263. doi:10.1017/                    USA, jul 2017), ACM, pp. 1–2. doi:10.1145/3084363.3085091.
+  S0022112091000472. 2                                                                 3
+[CCB∗ 08] C HATELAIN P., C URIONI A., B ERGDORF M., ROSSINELLI                       [GHMR∗ 20] G AGNIERE S., H YDE D., M ARQUEZ -R AZON A., J IANG
+  D., A NDREONI W., KOUMOUTSAKOS P.: Billion vortex particle direct                    C., G E Z., H AN X., G UO Q., T ERAN J.: A hybrid lagrangian/eulerian
+  numerical simulations of aircraft wakes. Computer Methods in Applied                 collocated velocity advection and projection method for fluid simulation.
+  Mechanics and Engineering 197, 13-16 (2008), 1296–1304. doi:10.                      ACM SIGGRAPH/Eurographics Symposium on Computer Animation, SCA
+  1016/j.cma.2007.11.016. 2                                                            2020 39, 8 (dec 2020), 1–14. arXiv:2003.12227, doi:10.1111/
+[CIPT14] C ORNELIS J., I HMSEN M., P EER A., T ESCHNER M.: IISPH-                      cgf.14096. 3
+  FLIP for incompressible fluids. Computer Graphics Forum 33, 2 (may                 [Hal01] H ALLER G.: Distinguished material surfaces and coherent struc-
+  2014), 255–262. doi:10.1111/cgf.12324. 3                                             tures in three-dimensional fluid flows. Physica D: Nonlinear Phenom-
+[CMSA20] C HEN Y. L., M EIER J., S OLENTHALER B., A ZEVEDO V. C.:                      ena 149, 4 (mar 2001), 248–277. doi:10.1016/S0167-2789(00)
+  An extended cut-cell method for sub-grid liquids tracking with surface               00199-8. 4
+  tension. ACM Transactions on Graphics 39, 6 (2020). doi:10.1145/                   [Hal02] H ALLER G.: Lagrangian coherent structures from approximate
+  3414685.3417859. 3                                                                   velocity data. Physics of Fluids 14, 6 (jun 2002), 1851–1861. doi:
+[Cor95] C ORTEZ R.: Impulse-Based Methods for Fluid Flow. Tech. rep.,                  10.1063/1.1477449. 4
+  1995. 2, 4                                                                         [JSS∗ 15] J IANG C., S CHROEDER C., S ELLE A., T ERAN J., S TOMAKHIN
+[CPAB22] C HANG J., PARTONO R., A ZEVEDO V. C., BATTY C.: Curl-                         A.: The affine Particle-In-Cell method. ACM Transactions on Graphics
+  Flow: Boundary-Respecting Pointwise Incompressible Velocity Interpola-                34, 4 (jul 2015), 1–10. doi:10.1145/2766996. 2, 3, 8
+  tion for Grid-Based Fluids. ACM Transactions on Graphics 41, 6 (dec                [JST∗ 16] J IANG C., S CHROEDER C., T ERAN J., S TOMAKHIN A., S ELLE
+  2022), 1–21. doi:10.1145/3550454.3555498. 7                                           A.: The material point method for simulating continuum materials. In
+[DL03] D UPONT T. F., L IU Y.: Back and forth error compensation and                    ACM SIGGRAPH 2016 Courses (New York, NY, USA, jul 2016), ACM,
+  correction methods for removing errors induced by uneven gradients of                 pp. 1–52. doi:10.1145/2897826.2927348. 4
+  the level set function. Journal of Computational Physics 190, 1 (sep               [JST17] J IANG C., S CHROEDER C., T ERAN J.: An angular momen-
+  2003), 311–324. doi:10.1016/S0021-9991(03)00276-6. 2, 3                               tum conserving affine-particle-in-cell method. Journal of Computa-
+[DSS20] D ING O., S HINAR T., S CHROEDER C.: Affine particle in cell                    tional Physics 338 (2017), 137–164. arXiv:1603.06188, doi:
+  method for MAC grids and fluid simulation. Journal of Computational                   10.1016/j.jcp.2017.02.050. 3
+
+© 2024 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+12 of 13                                                S. Sancho et al. / The Impulse Particle-In-Cell Method
+
+[KL95] KOUMOUTSAKOS P., L EONARD A.: High-Resolution simulations                  [PTG12] P FAFF T., T HUEREY N., G ROSS M.: Lagrangian vortex sheets
+  of the flow around an impulsively started cylinder using vortex methods,          for animating fluids. ACM Transactions on Graphics 31, 4 (jul 2012),
+  vol. 296. 1995. doi:10.1017/S0022112095002059. 2                                  1–8. doi:10.1145/2185520.2185608. 2
+[KLTB21] K UGELSTADT T., L ONGVA A., T HUEREY N., B ENDER J.:                     [PTSG09] P FAFF T., T HUEREY N., S ELLE A., G ROSS M.: Synthetic tur-
+  Implicit Density Projection for Volume Conserving Liquids. IEEE Trans-            bulence using artificial boundary layers. ACM Transactions on Graphics
+  actions on Visualization and Computer Graphics 27, 4 (apr 2021), 2385–            28, 5 (dec 2009), 1. doi:10.1145/1618452.1618467. 2
+  2395. doi:10.1109/TVCG.2019.2947437. 3                                          [QLDJ22] Q U Z., L I M., D E G OES F., J IANG C.: The power particle-
+[KTJG08] K IM T., T HÜREY N., JAMES D., G ROSS M.: Wavelet tur-                     in-cell method. ACM Transactions on Graphics 41, 4 (jul 2022). doi:
+  bulence for fluid simulation. In ACM Transactions on Graphics (TOG)               10.1145/3528223.3530066. 3
+  (2008), vol. 27, ACM, p. 50. 2
+                                                                                  [QZG∗ 19] Q U Z., Z HANG X., G AO M., J IANG C., C HEN B.: Efficient
+[Leo80] L EONARD A.: Vortex methods for flow simulation. Journal                    and conservative fluids using bidirectional mapping. ACM Transactions
+  of Computational Physics 37, 3 (1980), 289–335. doi:10.1016/                      on Graphics 38, 4 (2019), 1–12. doi:10.1145/3306346.3322945.
+  0021-9991(80)90040-6. 2                                                           2
+[LMLD22] L I W., M A Y., L IU X., D ESBRUN M.: Efficient kinetic                  [SC96] S UMMERS D. M., C HORIN A. J.: Numerical vorticity creation
+  simulation of two-phase flows. ACM Transactions on Graphics 41, 4                 based on impulse conservation. Tech. Rep. 5, 1996. doi:10.1073/
+  (2022). doi:10.1145/3528223.3530132. 2                                            pnas.93.5.1881. 2, 4
+[LTKF08] L OSASSO F., TALTON J., K WATRA N., F EDKIW R.: Two-way                  [SFK∗ 08] S ELLE A., F EDKIW R., K IM B., L IU Y., ROSSIGNAC J.:
+  coupled sph and particle level set fluid simulation. IEEE Transactions on         An unconditionally stable MacCormack method. Journal of Sci-
+  Visualization and Computer Graphics 14, 4 (2008), 797–804. 3                      entific Computing 35, 2-3 (jun 2008), 350–371. doi:10.1007/
+[McK07] M C K ENZIE A.:        HOLA: a High-Order Lie Advection                     s10915-007-9166-4. 2, 3, 8
+  of discrete differential forms, with applications in fluid dynam-               [SIBA17] S ATO T., I GARASHI T., BATTY C., A NDO R.: A Long-term
+  ics. URL: https://resolver.caltech.edu/CaltechETD:                                 semi-lagrangian method for accurate velocity advection. SIGGRAPH Asia
+  etd-05292007-100432. 2, 8                                                          2017 Technical Briefs, SA 2017 (2017). doi:10.1145/3145749.
+[MCP∗ 09] M ULLEN P., C RANE K., PAVLOV D., T ONG Y., D ESBRUN                       3149443. 2
+  M.: Energy-preserving integrators for fluid animation. ACM Transactions         [SRF05] S ELLE A., R ASMUSSEN N., F EDKIW R.: A vortex particle
+  on Graphics 28, 3 (jul 2009), 1. doi:10.1145/1531326.1531344.                     method for smoke, water and explosions. ACM Transactions on Graphics
+  2, 3                                                                              24, 3 (jul 2005), 910–914. doi:10.1145/1073204.1073282. 2, 7
+[NMM23] NAKAMURA K., M ATSUMURA S., M IZUTANI T.: Taylor                          [SSC∗ 13] S TOMAKHIN A., S CHROEDER C., C HAI L., T ERAN J., S ELLE
+  particle-in-cell transfer and kernel correction for material point method.        A.: A material point method for snow simulation. ACM Transactions on
+  Computer Methods in Applied Mechanics and Engineering 403 (jan 2023),             Graphics 32, 4 (jul 2013), 1–10. doi:10.1145/2461912.2461948.
+  115720. doi:10.1016/j.cma.2022.115720. 3, 5, 6                                    4
+[NNC∗ 20] NAKANISHI R., NASCIMENTO F., C AMPOS R., PAGLIOSA                       [Sta99] S TAM J.: Stable fluids. In Proceedings of the 26th Annual Con-
+  P., PAIVA A.: RBF liquids: An Adaptive PIC Solver Using RBF-FD.                    ference on Computer Graphics and Interactive Techniques, SIGGRAPH
+  ACM Transactions on Graphics 39, 6 (2020), 1–13. doi:10.1145/                      1999 (New York, New York, USA, 1999), ACM Press, pp. 121–128.
+  3414685.3417794. 3                                                                 doi:10.1145/311535.311548. 2, 7, 8
+[NWRC22] NABIZADEH M. S., WANG S., R AMAMOORTHI R., C HERN                        [SWT∗ 18] S ATO T., W OJTAN C., T HUEREY N., I GARASHI T., A NDO R.:
+  A.: Covector fluids. ACM Transactions on Graphics 41, 4 (jul 2022),               Extended narrow band FLIP for liquid simulations. Computer Graphics
+  1–16. doi:10.1145/3528223.3530120. 2, 3, 4, 5, 6, 7, 8                            Forum 37, 2 (may 2018), 169–177. doi:10.1111/cgf.13351. 3
+[NZT19] NARAIN R., Z EHNDER J., T HOMASZEWSKI B.: A second-                       [TBBC∗ 22] TAO M., BATTY C., B EN -C HEN M., F IUME E., L EVIN
+  order advection-reflection solver. Proceedings of the ACM on Computer             D. I.: VEMPIC: Particle-in-Polyhedron Fluid Simulation for Intricate
+  Graphics and Interactive Techniques 2, 2 (jul 2019), 1–14. doi:10.                Solid Boundaries. ACM Transactions on Graphics 41, 4 (2022). doi:
+  1145/3340257. 3, 8                                                                10.1145/3528223.3530138. 3
+[Ose89] O SELEDETS V. I.: On a new way of writing the Navier-Stokes
+                                                                                  [TCCS21] TANG J., C. A ZEVEDO V., C ORDONNIER G., S OLENTHALER
+  equation. The Hamiltonian formalism. Tech. Rep. 3, 1989. doi:10.
+                                                                                    B.: Honey, I Shrunk the Domain: Frequency-aware Force Field Reduction
+  1070/rm1989v044n03abeh002122. 2
+                                                                                    for Efficient Fluids Optimization. Computer Graphics Forum 40, 2 (may
+[PCK∗ 19] PADILLA M., C HERN A., K NÖPPEL F., P INKALL U.,                          2021), 339–353. doi:10.1111/cgf.142637. 8
+  S CHRÖDER P.: On bubble rings and ink chandeliers. ACM Transac-
+                                                                                  [TP11] T ESSENDORF J., P ELFREY B.:  The Characteristic Map
+  tions on Graphics 38, 4 (aug 2019), 1–14. doi:10.1145/3306346.
+                                                                                    for Fast and Efficient VFX Fluid Simulations.   Computer
+  3322962. 2
+                                                                                    (2011).    URL: http://jtessen.people.clemson.edu/
+[PCW07] P. C. WALLSTEDT J. E. G.: Improved Velocity Projection                      papers_files/CMFluids.pdf. 2
+  for the Material Point Method. Computer Modeling in Engineering &
+                                                                                  [TRLX22] TAO R., R EN H., L IU J., X IAO F.: A Lagrangian vor-
+  Sciences 19, 3 (2007), 223–232. doi:10.3970/cmes.2007.019.
+                                                                                    tex method for smoke simulation with two-way fluid–solid coupling.
+  223. 3, 5, 6
+                                                                                    Computers and Graphics (Pergamon) 107 (2022), 289–302. doi:
+[PGM∗ 19] PASZKE A., G ROSS S., M ASSA F., L ERER A., B RADBURY                     10.1016/j.cag.2022.08.007. 2
+  J., C HANAN G., K ILLEEN T., L IN Z., G IMELSHEIN N., A NTIGA L.,
+  D ESMAISON A., K ÖPF A., YANG E., D E V ITO Z., R AISON M., T EJANI             [UBH14] U M K., BAEK S., H AN J.: Advanced Hybrid Particle-Grid
+  A., C HILAMKURTHY S., S TEINER B., FANG L., BAI J., C HINTALA S.:                 Method with Sub-Grid Particle Correction. Computer Graphics Forum
+  PyTorch: An imperative style, high-performance deep learning library.             33, 7 (oct 2014), 209–218. doi:10.1111/cgf.12489. 3
+  Advances in Neural Information Processing Systems 32 (dec 2019). URL:           [WFS22] W RETBORN J., F LYNN S., S TOMAKHIN A.: Guided bubbles
+  http://arxiv.org/abs/1912.01703, arXiv:1912.01703.                                and wet foam for realistic whitewater simulation. ACM Transactions on
+  8                                                                                 Graphics 41, 4 (2022). doi:10.1145/3528223.3530059. 3
+[PK05] PARK S. I., K IM M. J.: Vortex fluid for gaseous phenomena. In             [WP10] W EISSMANN S., P INKALL U.: Filament-based smoke with vortex
+  Computer Animation, Conference Proceedings (New York, New York,                   shedding and variational reconnection. In ACM SIGGRAPH 2010 papers
+  USA, 2005), ACM Press, pp. 261–270. doi:10.1145/1073368.                          on - SIGGRAPH ’10 (New York, New York, USA, 2010), ACM Press,
+  1073406. 2                                                                        p. 1. doi:10.1145/1833349.1778852. 2
+
+
+                                                                                                                      © 2024 Eurographics - The European Association
+                                                                                                                    for Computer Graphics and John Wiley & Sons Ltd.
+                                                   S. Sancho et al. / The Impulse Particle-In-Cell Method   13 of 13
+
+[XTZ∗ 21] X IONG S., TAO R., Z HANG Y., F ENG F., Z HU B.: Incom-
+  pressible flow simulation on vortex segment clouds. ACM Transactions
+  on Graphics 40, 4 (2021). doi:10.1145/3450626.3459865. 2
+[YXZ∗ 21] YANG S., X IONG S., Z HANG Y., F ENG F., L IU J., Z HU
+  B.: Clebsch gauge fluid. ACM Transactions on Graphics 40, 4 (2021).
+  doi:10.1145/3450626.3459866. 10
+[ZB05] Z HU Y., B RIDSON R.: Animating sand as a fluid. ACM Trans-
+  actions on Graphics 24, 3 (jul 2005), 965–972. doi:10.1145/
+  1073204.1073298. 3, 8
+[ZBG15] Z HANG X., B RIDSONY R., G REIFZ C.: Restoring the missing
+  vorticity in advection-projection fluid solvers. ACM Transactions on
+  Graphics 34, 4 (jul 2015), 52:1–52:8. doi:10.1145/2766982. 2
+[ZNT18] Z EHNDER J., NARAIN R., T HOMASZEWSKI B.: An advection-
+  reflection solver for detail-preserving fluid simulation. ACM Transac-
+  tions on Graphics 37, 4 (aug 2018), 1–8. doi:10.1145/3197517.
+  3201324. 2, 3
+
+
+
+
+© 2024 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+

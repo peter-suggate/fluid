@@ -1,0 +1,43 @@
+{
+  "date": "2026-10-07",
+  "base_commit": "5638a7729114a818eafef781a2255405db146135",
+  "working_tree": "Includes existing uncommitted work; no solver source was edited by this research task.",
+  "files": [
+    {
+      "path": "lib/methods/uniform/uniform-pressure-band.ts",
+      "sha256": "e8253e632c1bde8b2df7f278d972e9dc0a88950e2afa95260f78b11fe412cbeb"
+    },
+    {
+      "path": "lib/methods/uniform/uniform-mixed-frame.ts",
+      "sha256": "b4800d32cd6a30c313625bde4e531ece212edbf70df9c91c1de8e45e220e822d"
+    },
+    {
+      "path": "lib/methods/uniform/uniform-detail-fields.ts",
+      "sha256": "583a7094502be892de84569540c0ca777d1013699902fdf2c12224944eed9d3c"
+    },
+    {
+      "path": "lib/methods/particle/shader.ts",
+      "sha256": "075ed446c11d75038da845feb7110cd2ce47e69bddc39c58522ac8f90e2e2636"
+    },
+    {
+      "path": "lib/methods/mac-shared/schedule.ts",
+      "sha256": "5c411e40013ab49cd6e6f8f012f416be4e9d4b8b84e6dc12d8aa5eff6399ad25"
+    },
+    {
+      "path": "docs/verification/apic-parallel-redesign-2026-10-07.md",
+      "sha256": "a2086f3748781c197f5c3d05b131edc6bd85208f411cfe3f6a696f0ee181d7a0"
+    },
+    {
+      "path": "docs/verification/apic-v-uniform-full-dam64-redesigned.json",
+      "sha256": "c1ceea4e23a0b44db26c96f0ca1e98d500694f6de3c317ec4167ec85054bdf72"
+    },
+    {
+      "path": "docs/plans/uniform-compiled-topology-2026-10-06/boundary-phase2.json",
+      "sha256": "a0890a501bbb2844f8030248b18c068b5b47c2fe27b9a2f1b085ad86d233d646"
+    },
+    {
+      "path": "docs/plans/uniform-compiled-topology-2026-10-06/spatial-phase3.json",
+      "sha256": "3a8ab3db40da0361dc05f8800a266ae3bb3d437fa33db32765a3fa609c44ba35"
+    }
+  ]
+}

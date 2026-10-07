@@ -1,0 +1,160 @@
+{
+  "id": "ando-batty-2020-octree",
+  "title": "A Practical Octree Liquid Simulator with Adaptive Surface Resolution",
+  "year": 2020,
+  "url": "https://cs.uwaterloo.ca/~c2batty/papers/Ando2020/Ando2020.pdf",
+  "project": "https://cs.uwaterloo.ca/~c2batty/papers/Ando2020/Ando2020.pdf",
+  "accessed": "2026-10-07",
+  "sha256": "6be5a728488f7c4cf96003b80cf9df0c0e664e8047daf2dd3f245c555f3d0370",
+  "pages": 17,
+  "dpi": 144,
+  "embedded_files": 14,
+  "page_map": [
+    {
+      "page": 1,
+      "render": "page-01.png",
+      "figure_mentions": [
+        "Fig. 1."
+      ]
+    },
+    {
+      "page": 2,
+      "render": "page-02.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 3,
+      "render": "page-03.png",
+      "figure_mentions": [
+        "Fig. 2."
+      ]
+    },
+    {
+      "page": 4,
+      "render": "page-04.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 5,
+      "render": "page-05.png",
+      "figure_mentions": [
+        "Fig. 4.",
+        "Figure 4",
+        "Fig. 3.",
+        "Figure 3."
+      ]
+    },
+    {
+      "page": 6,
+      "render": "page-06.png",
+      "figure_mentions": [
+        "Fig. 5.",
+        "Figure 5"
+      ]
+    },
+    {
+      "page": 7,
+      "render": "page-07.png",
+      "figure_mentions": [
+        "Figure 13.",
+        "Fig. 6.",
+        "Figure 6"
+      ]
+    },
+    {
+      "page": 8,
+      "render": "page-08.png",
+      "figure_mentions": [
+        "Figure 9.",
+        "Fig. 7.",
+        "Figure 7",
+        "Figure 9"
+      ]
+    },
+    {
+      "page": 9,
+      "render": "page-09.png",
+      "figure_mentions": [
+        "Figure 17.",
+        "Figure 8",
+        "Fig. 8.",
+        "Fig. 9."
+      ]
+    },
+    {
+      "page": 10,
+      "render": "page-10.png",
+      "figure_mentions": [
+        "Fig. 10.",
+        "Figure 14"
+      ]
+    },
+    {
+      "page": 11,
+      "render": "page-11.png",
+      "figure_mentions": [
+        "Fig. 11.",
+        "Fig. 12.",
+        "Figure 11.",
+        "Figure 7",
+        "Figure 12.",
+        "Figure 10"
+      ]
+    },
+    {
+      "page": 12,
+      "render": "page-12.png",
+      "figure_mentions": [
+        "Fig. 13.",
+        "Figure 1",
+        "Fig. 1",
+        "Fig. 2",
+        "Fig. 14",
+        "Fig. 15",
+        "Figure 2"
+      ]
+    },
+    {
+      "page": 13,
+      "render": "page-13.png",
+      "figure_mentions": [
+        "Fig. 14.",
+        "Fig. 15.",
+        "Figure 14",
+        "Figure 13.",
+        "Figure 13"
+      ]
+    },
+    {
+      "page": 14,
+      "render": "page-14.png",
+      "figure_mentions": [
+        "Figure 1",
+        "Figure 15",
+        "Figure 2",
+        "Figure 17"
+      ]
+    },
+    {
+      "page": 15,
+      "render": "page-15.png",
+      "figure_mentions": [
+        "Fig. 16.",
+        "Figure 11",
+        "Fig. 17."
+      ]
+    },
+    {
+      "page": 16,
+      "render": "page-16.png",
+      "figure_mentions": [
+        "Figure 2."
+      ]
+    },
+    {
+      "page": 17,
+      "render": "page-17.png",
+      "figure_mentions": []
+    }
+  ]
+}

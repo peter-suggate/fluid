@@ -1,0 +1,184 @@
+{
+  "id": "wang-2025-vortex-particle-flow-maps",
+  "title": "Fluid Simulation on Vortex Particle Flow Maps",
+  "year": 2025,
+  "url": "https://arxiv.org/pdf/2505.21946",
+  "project": "https://arxiv.org/abs/2505.21946",
+  "accessed": "2026-10-07",
+  "sha256": "cd69e9be478f939208e3901aac29f47dcb0bd67f8e2199168592f62bd9b79ac4",
+  "pages": 24,
+  "dpi": 144,
+  "embedded_files": 215,
+  "page_map": [
+    {
+      "page": 1,
+      "render": "page-01.png",
+      "figure_mentions": [
+        "Fig. 1."
+      ]
+    },
+    {
+      "page": 2,
+      "render": "page-02.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 3,
+      "render": "page-03.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 4,
+      "render": "page-04.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 5,
+      "render": "page-05.png",
+      "figure_mentions": [
+        "Fig. 2.",
+        "Figure 11"
+      ]
+    },
+    {
+      "page": 6,
+      "render": "page-06.png",
+      "figure_mentions": [
+        "Fig. 3.",
+        "Fig. 4.",
+        "Figure 4"
+      ]
+    },
+    {
+      "page": 7,
+      "render": "page-07.png",
+      "figure_mentions": [
+        "Fig. 5.",
+        "Figure 4"
+      ]
+    },
+    {
+      "page": 8,
+      "render": "page-08.png",
+      "figure_mentions": [
+        "Fig. 6.",
+        "Figure 9",
+        "Fig. 7.",
+        "Figure 7."
+      ]
+    },
+    {
+      "page": 9,
+      "render": "page-09.png",
+      "figure_mentions": [
+        "Fig. 8.",
+        "Fig. 9.",
+        "Figure 9"
+      ]
+    },
+    {
+      "page": 10,
+      "render": "page-10.png",
+      "figure_mentions": [
+        "Fig. 10.",
+        "Figure 9",
+        "Figure 9."
+      ]
+    },
+    {
+      "page": 11,
+      "render": "page-11.png",
+      "figure_mentions": [
+        "Fig. 11."
+      ]
+    },
+    {
+      "page": 12,
+      "render": "page-12.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 13,
+      "render": "page-13.png",
+      "figure_mentions": [
+        "Fig. 12.",
+        "Fig. 13.",
+        "Figure 14",
+        "Figure 12",
+        "Figure 20"
+      ]
+    },
+    {
+      "page": 14,
+      "render": "page-14.png",
+      "figure_mentions": [
+        "Fig. 14.",
+        "Fig. 16.",
+        "Fig. 17.",
+        "Figure 15.",
+        "Figure 16.",
+        "Fig. 15.",
+        "Figure 19",
+        "Figure 18"
+      ]
+    },
+    {
+      "page": 15,
+      "render": "page-15.png",
+      "figure_mentions": [
+        "Fig. 18.",
+        "Fig. 19.",
+        "Figure 18."
+      ]
+    },
+    {
+      "page": 16,
+      "render": "page-16.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 17,
+      "render": "page-17.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 18,
+      "render": "page-18.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 19,
+      "render": "page-19.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 20,
+      "render": "page-20.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 21,
+      "render": "page-21.png",
+      "figure_mentions": [
+        "Fig. 20."
+      ]
+    },
+    {
+      "page": 22,
+      "render": "page-22.png",
+      "figure_mentions": []
+    },
+    {
+      "page": 23,
+      "render": "page-23.png",
+      "figure_mentions": [
+        "Fig. 21."
+      ]
+    },
+    {
+      "page": 24,
+      "render": "page-24.png",
+      "figure_mentions": []
+    }
+  ]
+}

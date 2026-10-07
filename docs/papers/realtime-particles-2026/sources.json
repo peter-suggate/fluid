@@ -1,0 +1,14 @@
+{
+  "accessed": "2026-10-07",
+  "papers": [
+    {"id":"braun-2026-st-flip","title":"Spatiotemporal FLIP for Fast Free-Surface and Two-Phase Simulation With Very Large Time Steps","year":2026,"url":"https://ge.in.tum.de/download/ST-FLIP.pdf","project":"https://ge.in.tum.de/2026/07/16/siggraph26-spatiotemporal-flip-for-liquid-simulations/"},
+    {"id":"diaz-2025-ipbf","title":"Implicit Position-Based Fluids","year":2025,"url":"https://graphics.cs.utah.edu/research/projects/ipbf/ipbf.pdf","project":"https://graphics.cs.utah.edu/research/projects/ipbf/"},
+    {"id":"braun-2025-adaptive-phase-field-flip","title":"Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation","year":2025,"url":"https://animation.rwth-aachen.de/media/papers/94/2025-Siggraph-Adaptive_Phase_Field_FLIP.pdf","project":"https://www.animation.rwth-aachen.de/publication/0594/"},
+    {"id":"nogina-2026-tube-maps","title":"Tube Maps: Fast SPH Boundary Handling in Tubular Coordinates","year":2026,"url":"https://gatc.cs.columbia.edu/assets/pdf/tubemaps/tubemaps.pdf","project":"https://gatc.cs.columbia.edu/projects/tubemaps.html"},
+    {"id":"sancho-2024-ipic","title":"The Impulse Particle-In-Cell Method","year":2024,"url":"https://cs.uwaterloo.ca/~c2batty/papers/Sancho2024/IPIC.pdf","project":"https://studios.disneyresearch.com/2024/04/25/the-impulse-particle-in-cell-method/"},
+    {"id":"zhou-2024-particle-flow-maps","title":"Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps","year":2024,"url":"https://arxiv.org/pdf/2405.09672","project":"https://zjw49246.github.io/projects/pfm/"},
+    {"id":"wang-2025-vortex-particle-flow-maps","title":"Fluid Simulation on Vortex Particle Flow Maps","year":2025,"url":"https://arxiv.org/pdf/2505.21946","project":"https://arxiv.org/abs/2505.21946"},
+    {"id":"jiang-2015-apic","title":"The Affine Particle-In-Cell Method","year":2015,"url":"https://media.disneyanimation.com/uploads/production/publication_asset/104/asset/apic-aselle-final.pdf","project":"https://doi.org/10.1145/2766996"},
+    {"id":"bender-2015-dfsph","title":"Divergence-Free Smoothed Particle Hydrodynamics","year":2015,"url":"https://animation.rwth-aachen.de/media/papers/2015-SCA-DFSPH.pdf","project":"https://animation.rwth-aachen.de/publication/054/"}
+  ]
+}

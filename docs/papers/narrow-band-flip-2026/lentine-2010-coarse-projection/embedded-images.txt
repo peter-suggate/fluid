@@ -1,0 +1,37 @@
+page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+--------------------------------------------------------------------------------------------
+   1     0 image     640   480  icc     3   8  image  no        11  0   300   300  234K  26%
+   1     1 image     800   600  icc     3   8  image  no        13  0   375   375  595K  42%
+   1     2 image     640   480  icc     3   8  image  no        15  0   300   300  245K  27%
+   2     3 image     400   300  icc     3   8  image  no        34  0   257   257  118K  34%
+   2     4 image     400   300  icc     3   8  image  no        36  0   257   257  118K  33%
+   3     5 image     400   600  icc     3   8  image  no        42  0   143   143  230K  33%
+   3     6 image     400   600  icc     3   8  image  no        44  0   287   287  205K  29%
+   3     7 image     400   600  icc     3   8  image  no        46  0   287   287  193K  28%
+   3     8 image     400   600  icc     3   8  image  no        48  0   287   287  196K  28%
+   3     9 image     400   600  icc     3   8  image  no        50  0   287   287  187K  27%
+   3    10 image     400   600  icc     3   8  image  no        52  0   287   287  183K  26%
+   3    11 image     400   600  icc     3   8  image  no        54  0   287   287  186K  26%
+   4    12 image     519   522  icc     3   8  image  no        64  0   389   389 11.4K 1.4%
+   5    13 image     400   600  icc     3   8  image  no        70  0   143   143  196K  28%
+   5    14 image     400   600  icc     3   8  image  no        72  0   287   287  170K  24%
+   5    15 image     400   600  icc     3   8  image  no        74  0   287   287  166K  24%
+   5    16 image     400   600  icc     3   8  image  no        76  0   287   287  161K  23%
+   5    17 image     400   600  icc     3   8  image  no        78  0   287   287  158K  23%
+   5    18 image     400   600  icc     3   8  image  no        80  0   287   287  161K  23%
+   5    19 image     400   600  icc     3   8  image  no        82  0   287   287  166K  24%
+   6    20 image     320   480  icc     3   8  image  no        88  0   229   229 59.6K  13%
+   6    21 image     320   480  icc     3   8  image  no        90  0   229   229 68.5K  15%
+   6    22 image     320   480  icc     3   8  image  no        92  0   229   229 61.2K  14%
+   6    23 image     320   480  icc     3   8  image  no        94  0   229   229 60.2K  13%
+   6    24 image     320   480  icc     3   8  image  no        96  0   229   229 90.1K  20%
+   6    25 image     400   300  icc     3   8  image  no        98  0   257   257 83.8K  24%
+   6    26 image     400   300  icc     3   8  image  no       100  0   257   257 78.1K  22%
+   7    27 image     800   600  icc     3   8  image  no       106  0   232   232  688K  49%
+   7    28 image     800   600  icc     3   8  image  no       108  0   467   467  625K  44%
+   7    29 image     800   600  icc     3   8  image  no       110  0   467   467  557K  40%
+   7    30 image     800   600  icc     3   8  image  no       112  0   467   467  561K  40%
+   7    31 image     800   600  icc     3   8  image  no       114  0   467   467  556K  40%
+   7    32 image     640   768  icc     3   8  image  no       116  0   658   658  454K  32%
+   7    33 image     640   768  icc     3   8  image  no       118  0   658   658  454K  32%
+   7    34 image     640   768  icc     3   8  jpeg   no       120  0   658   658 70.4K 4.9%

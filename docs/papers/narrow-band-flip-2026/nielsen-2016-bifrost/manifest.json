@@ -1,0 +1,28 @@
+{
+  "id": "nielsen-2016-bifrost",
+  "title": "Spatially Adaptive FLIP Fluid Simulations in Bifrost",
+  "year": 2016,
+  "url": "https://history.siggraph.org/wp-content/uploads/2022/09/2016-Talks-Nielsen_Spatially-Adaptive-FLIP-Fluid-Simulations-in-Bifrost.pdf",
+  "project": "https://history.siggraph.org/wp-content/uploads/2022/09/2016-Talks-Nielsen_Spatially-Adaptive-FLIP-Fluid-Simulations-in-Bifrost.pdf",
+  "accessed": "2026-10-07",
+  "sha256": "94b558625b4a6b140e024ee8f1c09e282c3d1f21e3f73c7e8c618c4c89a0aa47",
+  "pages": 2,
+  "dpi": 144,
+  "embedded_files": 8,
+  "page_map": [
+    {
+      "page": 1,
+      "render": "page-1.png",
+      "figure_mentions": [
+        "Figure 1:"
+      ]
+    },
+    {
+      "page": 2,
+      "render": "page-2.png",
+      "figure_mentions": [
+        "Figure 1"
+      ]
+    }
+  ]
+}

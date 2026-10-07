@@ -1,0 +1,1546 @@
+Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid
+Simulation
+BERNHARD BRAUN, Technical University of Munich, Germany
+JAN BENDER, RWTH Aachen University, Germany
+NILS THUEREY, Technical University of Munich, Germany
+
+
+
+
+Fig. 1. Our simulation method reproduces the intricate and complex two-phase air-water interactions in very large-scale scenarios. It achieves this in a
+physics-based manner, resolving both phases at cinematic resolution on a single workstation: the example above (right) has ca. 3 billion particles, simulated
+with an average of only 2 minutes per time step. No procedural effects or post-processing spray heuristics were employed. Photograph © PA / Eloy Alonso.
+
+Capturing the visually compelling features of large-scale water phenomena,                      of particles and adaptive 3D resolutions with thousands of grid cells per
+such as the spray clouds of crashing waves, stormy seas, or waterfalls, in-                     dimension on a single workstation.
+volves simulating not only the water but also the motion of the air interacting
+                                                                                                CCS Concepts: • Computing methodologies → Physical simulation.
+with it. However, current solutions in the visual effects industry still largely
+rely on single-phase solvers and non-physical "white-water" heuristics. To                      Additional Key Words and Phrases: turbulent flows, large density ratio,
+address these limitations, we present Phase-Field-FLIP (PF-FLIP), a hybrid                      two-phase flows, FLIP, spatial adaptivity, large-scale fluid simulation
+Eulerian/Lagrangian method for the fully physics-based simulation of very
+                                                                                                ACM Reference Format:
+large-scale, highly turbulent multiphase flows at high Reynolds numbers
+                                                                                                Bernhard Braun, Jan Bender, and Nils Thuerey. 2025. Adaptive Phase-Field-
+and high fluid density contrasts. PF-FLIP transports mass and momentum in
+                                                                                                FLIP for Very Large Scale Two-Phase Fluid Simulation. ACM Trans. Graph.
+a consistent, non-dissipative manner and, unlike most existing multiphase
+                                                                                                44, 4 (August 2025), 23 pages. https://doi.org/10.1145/3730854
+approaches, does not require a surface reconstruction step.
+   Furthermore, we employ spatial adaptivity across all critical components
+of the simulation algorithm, including the pressure Poisson solver. We aug-
+                                                                                                1   Introduction
+ment PF-FLIP with a dual multiresolution scheme that couples an efficient                       Visual simulation of large-scale fluid phenomena —such as water-
+treeless adaptive grid with adaptive particles, along with a fast adaptive Pois-                falls, stormy seas, giant waves, or asteroid impacts— is arguably one
+son solver tailored for high-density-contrast multiphase flows. Our method                      of the most challenging and fascinating topics in computer graphics
+enables the simulation of two-phase flow scenarios with a level of physical                     [Wang et al. 2024]. However, existing single-phase liquid simulators
+realism and detail previously unattainable in graphics, supporting billions                     face significant difficulties in producing animations that fully con-
+Authors’ Contact Information: Bernhard Braun, bernhard.braun@pbs.cit.tum.de, Tech-
+                                                                                                vey the awe-inspiring scale and intensity inherent in these natural
+nical University of Munich, Germany; Jan Bender, bender@cs.rwth-aachen.de, RWTH                 phenomena. Simply increasing the physical scale and resolution
+Aachen University, Germany; Nils Thuerey, nils.thuerey@tum.de, Technical University             of a standard single-phase simulation is insufficient to address this
+of Munich, Germany.
+                                                                                                challenge. For example, a single-phase simulation of an asteroid
+Permission to make digital or hard copies of all or part of this work for personal or
+                                                                                                hitting the ocean gives the appearance of a rock being thrown into
+classroom use is granted without fee provided that copies are not made or distributed           a pond in slow motion, conveying the impression of a much smaller
+for profit or commercial advantage and that copies bear this notice and the full citation       scale, as illustrated in Figure 2. This occurs because natural fluid
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or          flows at large scales are inherently two-phase phenomena. They are
+republish, to post on servers or to redistribute to lists, requires prior specific permission   governed by complex and highly nonlinear interactions between
+and/or a fee. Request permissions from permissions@acm.org.                                     water and air that result in striking visual differences between small-
+© 2025 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM 1557-7368/2025/8-ART                                                                        and large-scale air-water flow phenomena. Typical examples, such
+https://doi.org/10.1145/3730854                                                                 as those in Figure 1, make clear that the (turbulent) motion of the air,
+
+                                                                                                         ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+2 •    Braun et al.
+
+
+made visible through spray and mist droplets, contributes at least as         in Volume of Fluid (VOF) or Level-Set methods [Sussman et al.
+much—if not more—to the overall visual impression of large-scale              1994], or the evolution of PDEs, as in classical Phase-Field methods
+water flows as the motion of the water itself.                                [Jacqmin 1999]. Our approach requires surface reconstruction only
+    Cinematic simulations of large-scale two-phase flows have so              for rendering of the video frame, i.e. every 5 to 10 time steps. Its
+far relied on the use of numerous single-phase heuristics [Gissler            Lagrangian advection inherently conserves mass, avoiding the need
+et al. 2017; Ihmsen et al. 2012], complex (post)processing pipelines          for numerical safeguards [Jain 2022] required in traditional methods,
+[Stomakhin et al. 2023; Stringhetti 2024], and labor-intensive manual         and preventing inconsistencies often encountered in popular multi-
+or artistic interventions, often relying on distributed computing             phase schemes like VOF, which typically rely on separate advection
+clusters to achieve cinematic resolutions. In this work, we present a         schemes for velocity and interface geometry.
+fully physics-based method that produces such scenes from simple                 High density ratios, such as 1000 : 1 for water and air, present a
+simulation setups on a single work station. To achieve this, our              significant challenge for many traditional two-phase fluid solvers.
+work addresses three central challenges: (i) two-phase simulation,            One key idea of PF-FLIP is to turn this into an advantage by leverag-
+(ii) spatial adaptivity, and (iii) efficient iterative pressure solvers.      ing the stark density difference to reliably separate phases, even in
+                                                                              the presence of FLIP-typical particle-induced noise. The 1000-fold
+   Necessity of Two-Phase Simulation. Water simulations in Graphics
+                                                                              higher density of water compared to air ensures a high "signal-to-
+often neglect the air phase, assuming constant zero air pressure.
+                                                                              noise" ratio, where noisy density fluctuations in the water phase
+In these free surface methods, the governing Navier-Stokes equa-
+                                                                              remain clearly distinguishable from the noisy background of the air
+tions are thus solved only for the water phase. This simplification,
+                                                                              phase.
+however, becomes insufficient for large-scale phenomena where the
+violent motion of large masses of water induces strong movements
+                                                                                 Spatial Adaptivity. Most existing multiphase fluid simulation
+of the surrounding air and aerodynamic forces, which scale with
+                                                                              methods rely on uniform grids or constant-size particles [Boyd
+the square of the relative air-water velocity, become dominant. The
+                                                                              and Bridson 2012; Li et al. 2022; Mihalef et al. 2009; Song et al. 2005;
+resulting high Weber numbers inhibit surface tension from stabiliz-
+                                                                              Yan and Ren 2023] sufficient for grid resolutions of several hundred
+ing the liquid, leading to fragmentation into spray droplets. These
+                                                                              cells per dimension. Achieving cinematic realism for large-scale sim-
+droplets do not simply follow ballistic trajectories; instead, they
+                                                                              ulations, however, requires both larger simulation domain sizes and
+form intricate, dynamic patterns driven by the complex interplay
+                                                                              substantially larger resolutions. As the computational cost scales
+of gravity, inertial forces and—crucially—the turbulent air velocity
+                                                                              with spatial dimensions and time, this yields a fourth-order scaling
+field [Sirignano 2010]. Accurately capturing these phenomena re-
+                                                                              in terms of resolution. Spatial adaptivity, which focuses resources
+quires both modeling the coupled liquid-air velocity and a numerical
+                                                                              on high-priority regions, is thus essential to avoid an explosion in
+method powerful enough to resolve scales ranging from tiny spray
+                                                                              resource requirements.
+droplets to large gravity-driven waves. Despite the immense visual
+                                                                                 Adaptivity encompasses spatial sparsity and multiresolution tech-
+importance of large-scale two-phase flows, much of the impressive
+                                                                              niques. Spatial sparsity computes and stores data only in "active"
+recent progress in the field of fluid simulation [Aanjaneya et al. 2017;
+                                                                              regions [Ferstl et al. 2016; Hu et al. 2019a; Liu et al. 2016; Museth
+Ando et al. 2013; Ferstl et al. 2014; Fu et al. 2017; Liu et al. 2016;
+                                                                              2013; Shao et al. 2022; Wang et al. 2020]. Multiresolution, as em-
+Nabizadeh et al. 2022; Qu et al. 2019; Shao et al. 2022] has so far
+                                                                              ployed in our algorithm, takes adaptivity and flexibility a step further
+been limited to single-phase cases.
+                                                                              by representing different simulation regions at varying resolutions,
+   When two-phase flows have been addressed, it has typically
+                                                                              based on their complexity (as measured by a user-defined refinement
+been in the context of smaller-scale, surface-tension driven flows
+                                                                              criterion). Modern CPUs and GPUs rely on large caches, high core
+[Boyd and Bridson 2012; Hong and Kim 2005] or medium-scale, real-
+                                                                              counts, and wide SIMD units for performance gains, making regu-
+time scenarios [Li et al. 2020, 2024]. In movie production, however,
+                                                                              larity and coherence in memory access critical. Adaptive schemes
+the lack of sufficiently scalable and fully physics-based two-phase
+                                                                              should therefore retain the efficiency of uniform grids locally, even
+solvers is one of the reasons why the special-effects industry still
+                                                                              within a globally irregular adaptive structure. Tree-based meth-
+largely relies on heuristics, post-processing pipelines and manual
+                                                                              ods achieve this by associating leaf nodes with uniform sub-grids
+intervention to produce convincing large-scale water animations
+                                                                              (blocks) but introduce administrative overhead and parallelization
+[Stringhetti 2024].
+                                                                              challenges.
+   Phase-Field FLIP. Choosing the appropriate computational rep-                 As an efficient tree-less alternative, we introduce Multiresolution
+resentation for a simulated effect is a classic challenge. For liquids,       Sparse Block Grids (MSBG), a hardware-friendly scheme using sim-
+grid-based (Eulerian) approaches have been successfully combined              ple linear indexing of large blocks. In Section 8.1, we show that
+with Lagrangian methods, e.g., in the classic FLIP (Fluid Implicit            MSBG outperforms the industry standard VDB by up to an order
+Particles) approach [Bridson 2015], or for simulating multi-material          of magnitude and demonstrates excellent scalability, solving a test
+flows [Hu et al. 2019b].                                                      PDE with 100 billion unknowns at an effective resolution of 327683
+   We leverage the versatility of hybrid particle-grid representations        in under two minutes on a single workstation.
+by introducing Phase-Field FLIP (PF-FLIP), a variant of FLIP for the             For Eulerian-Lagrangian methods, it is moreover crucial that
+efficient simulation of high density-contrast two-phase flows. PF-            adaptivity targets both representations. We use a dual scheme: the
+FLIP provides a simple and efficient interface-capturing scheme               grid adapts to particle sizes, while particle size and sampling den-
+that eliminates the need for surface maintenance steps, as required           sity are dynamically adjusted based on refinement criteria from
+
+ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+                                                                                      Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation     • 3
+
+
+
+
+Fig. 2. Motivating example: A 50-meter asteroid hits the ocean at high speed. Left: Standard single-phase solver [Bridson 2015]. Middle: With secondary spray
+particles [Ihmsen et al. 2012]. Right: Our two-phase simulation. Single-phase simulations give the impression of a small rock thrown into a pond in slow
+motion. Without air resistance, the water "splash rim" rises unrealistically high and spray particles diffuse unnaturally. In reality, spray follows intricate
+trajectories driven by the turbulent air velocity as captured by our simulation. All simulations used the same resolution of 10243 (pressure) and 30723 (spray
+density).
+
+
+the grid. Previous methods for Lagrangian adaptivity [Adams et al.                  numbers and high fluid density contrast without requiring surface
+2007; Ando et al. 2012, 2013] require particle neighborhoods. This,                 reconstruction.
+however, removes a key advantage of the FLIP method: its light-                   • Multiresolution Sparse Block Grids (MSBG): A simple, efficient,
+weight, noninteracting particles. To maintain this advantage, we                    and modern-hardware-friendly framework for spatially adaptive
+propose a fast stochastic coarsening scheme that eliminates neigh-                  simulations.
+borhood searches altogether, ensuring that the Lagrangian part of                 • A dual particle-grid adaptivity scheme with a fast stochastic
+our pipeline remains fully local and highly efficient.                              method for particle coarsening without neighborhood search.
+                                                                                  • A novel, adaptive Poisson solver, specifically tailored for two-
+   Adaptive Linear System Solvers. A final potential bottleneck re-                 phase, high density-contrast pressure projection.
+mains in the form of the very large linear Poisson problem that needs
+to be solved in pressure projection-based Navier-Stokes simulations.                 In combination, our contributions provide the building blocks
+In the context of two-phase flows, the pressure system also becomes               for very large-scale simulations of two-phase flows. Our overall
+highly ill-conditioned for large density ratios. To address this, we              algorithm, employs adaptivity across all critical components of the
+propose a fully adaptive Poisson solver based on (unsmoothed) alge-               pipeline—i.e., computational grid, particles, and, crucially, also in
+braic aggregation multigrid [Shao et al. 2022]. Leveraging MSBG, we               the pressure Poisson solver—ensuring that no bottlenecks with sub-
+extend the method to support multigrid multiresolution adaptivity.                optimal scaling remain. As a result, the proposed solver surpasses
+A two-stage-red-black hybrid Gauss-Seidel smoother ensures mas-                   existing state-of-the-art methods in terms of scale, efficiency, and
+sive parallelizability while halving the memory footprint compared                the ability to reproduce complex two-phase flow details. We demon-
+to conventional parallel smoothers.                                               strate its capabilities through a series of comparisons and large-scale
+   Crucially, our MSBG-block-based multigrid V-cycle enables the                  multibillion-particle simulations, performed on a single worksta-
+efficient integration of spatially adaptive relaxation [Kowarschik                tion, without using the GPU. A public implementation of the MSBG
+et al. 2006; Rüde 1993], which we adapt for the specific use case of              framework is available at https://github.com/tum-pbs/MSBG.
+high density contrast pressure correction. Furthermore, we extend
+adaptive relaxation-based multigrid to function as a preconditioner               2      Related Work
+for the Conjugate Gradient (CG) method, even accounting for the
+                                                                                  Fluid simulation has been a prominent research area in computer
+inherent asymmetry introduced by adaptive relaxation in the multi-
+                                                                                  graphics for more than two decades [Bridson 2015; Losasso et al.
+grid preconditioner.
+                                                                                  2004; Stam 2023], and we refer to recent surveys for an in-depth
+   These innovations collectively result in a pressure Poisson solver
+                                                                                  overview [Wang et al. 2024].
+with runtime, even at extreme resolutions and density ratios, com-
+                                                                                     Due to the high density ratio of water to air, free surface methods
+parable to other simulation components like particle-grid transfers
+                                                                                  solve the Navier-Stokes equations only for the water phase, applying
+and advection —in effect, eliminating the pressure solve bottleneck.
+                                                                                  curvature-based forces [Brackbill et al. 1992], or use an embedded
+                                                                                  interface via the Ghost Fluid Method (GFM) [Kang et al. 2000; Liu
+1.1   Summary of Contributions                                                    et al. 2000]. In Graphics, single-phase liquid simulation has reached
+To summarize, our work presents four main contributions that, taken               a mature state, producing impressive results [Aanjaneya et al. 2017;
+together, significantly improve the state-of-the-art in physics-based             Ferstl et al. 2014; Liu et al. 2016; Shao et al. 2022; Wang et al. 2024].
+simulation of two-phase flows at very large scales:                               We employ the FLIP method [Zhu and Bridson 2005], which has seen
+                                                                                  numerous extensions [Fu et al. 2017; Jiang et al. 2015; Nabizadeh et al.
+• A hybrid Eulerian/Lagrangian method, Phase-Field-FLIP (PF-FLIP),                2024; Qu et al. 2022], however, typically focusing on improvements
+  for simulating highly turbulent multiphase flows at large Reynolds              for single-phase simulations.
+
+                                                                                              ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+4   •   Braun et al.
+
+
+
+
+Fig. 3. Phase-Field-FLIP simulation of a large dam discharge showing violently turbulent water-air interaction induced by a powerful water jet at high speed
+(≈ 40𝑚/𝑠). A real photograph of a dam discharge event at similar scale (Three Gorges Dam, China, © Picture Alliance ) is included in the lower right corner.
+No effort was made to tune the simulations for the exact conditions of the reference, and no turbulence enhancement or post-processing effects were applied.
+The effective resolution is 2048 × 10242 for the pressure and 8192 × 40962 for the liquid surface and spray density, with ≈ 40s simulation time per time step.
+
+
+   To model the effects of the missing second phase, many previous                very successfully improved through spatial adaptivity and GPU-
+works employ secondary spray particles [Ihmsen et al. 2012], or add               based implementations [Gao et al. 2018; Wang et al. 2020]. MPM can
+an ad-hoc spray velocity field at reduced resolution [Kim et al. 2006].           flexibly handle a wide range of highly complex materials. Our work
+Another heuristic, popular in the special-effects industry, is to use             instead trades in generality for increasing the scale of water-air
+two single-phase solvers, and treat the liquid as a solid boundary                simulations. Additionally, Lattice-Boltzmann methods have recently
+for the air solve [Lesser et al. 2022; Stomakhin et al. 2023]. These              been popularized as an alternative [Li et al. 2020], and were likewise
+heuristics either require extensive manual tuning, or fall short of               employed for two-phase [Li et al. 2022] and multiphase simula-
+fully capturing the large-scale fluid behavior due to the lack of a               tions [Li et al. 2024]. The underlying algorithm is very amenable to
+physically accurate two-phase velocity field (cf. Figure 2). Nielsen              GPUs, and led to impressive results approaching real-time capability.
+and Østerby [2013] proposed treating spray as an additional fluid                 Complementarily, our focus on a CPU-based algorithm removes
+phase. However, this approach does not address the coupling of the                the bottleneck of scarce GPU memory, and simplifies employing
+air with the bulk liquid phase.                                                   spatially adaptive algorithms, which is key for offline-simulation at
+                                                                                  cinematic resolutions in movie-production. Two- and multiphase
+                                                                                  flow simulation has also been explored with Smoothed Particle Hy-
+   Two-Phase Fluid Simulation. Given the importance of coupling                   drodynamics (SPH): Density Contrast Interfaces [Solenthaler and
+both phases, full two-phase solvers have been extensively studied                 Pajarola 2008] handle density ratios of up to 1:100, while Ren et al.
+in the CFD community, with applications ranging from gas bubbles                  [2021, 2014] employ mixture models from CFD. Despite producing
+[Sirignano 2010], to sloshing in containers [Remmerswaal and Veld-                complex mixtures, the corresponding interface model necessitates
+man 2022]. An overview of CFD approaches is given, for example, in                small time steps, which in combination with non-adaptive particles
+Yeoh and Tu [2019]. One of the first two-phase solvers in Graphics                impedes simulating large scales at very high resolutions.
+was introduced by Hong and Kim [2005], employing a Particle Level
+Set (PLS) scheme [Enright et al. 2002], augmented by octree-based
+adaptivity to simulate bubbles. Song et al. [2005] proposed using the
+Constrained Interpolation Profile (CIP) method for low-dissipation
+advection, while Mihalef et al. [2008] used the Coupled Level Set
+Volume-of-Fluid (CLSVOF) method [Xiao 2012] for water-air interac-
+tions with animated models, later refining it with the Marker Level
+Set (MLS) method [Mihalef et al. 2009] to track subgrid bubbles and
+droplets. More closely aligned with our approach, Boyd and Bridson
+[2012] used FLIP for multiphase fluid simulation. In contrast to our
+method, this method requires a relatively costly interface recon-
+struction, and the inability to resolve shear layers between phases
+leads to a heuristic divergence model with "particle bounce-back" to
+impose a free-slip boundary between the phases. Without address-
+ing scalability and density contrast-awareness of the pressure solver,            Fig. 4. Simulation of breaking ocean waves, exhibiting the characteristic
+they focused on small-scale scenarios dominated by surface tension                streamers of mist shaped by turbulent wakes in the air behind wave crests.
+with around 803 grid cells. The Material Point Methods (MPM) can                  The fully physics-based high-resolution animation of such effects has been
+be seen as an extension of FLIP [Zhang et al. 2017] and have been                 unattainable with existing simulation methods in graphics.
+
+
+ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+                                                                              Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation     • 5
+
+
+   Most prior state-of-the-art work on multiphase fluid simulation           requiring hierarchical refinement. Although random access is O(1),
+in Graphics relies on regular grids or constant-size particles. This         it involves traversing a shallow, fixed-depth tree, adding overhead
+approach suffices for many small-scale scenarios, typically at reso-         compared to flat indexing. Additionally, like SPGrid, VDB enforces
+lutions of a few hundred grid cells. However, achieving cinematic            relatively small block sizes. In Section 4.2, we introduce a sparse
+realism in large-scale scenarios demands effective resolutions in            multiresolution scheme (MSBG) that leverages grid blocking for
+the thousands, which is extremely challenging due to the compu-              maximal simplicity and efficiency on modern CPUs.
+tational cost of incompressible fluid simulation increasing with
+                                                                                Adaptive particles. In our hybrid Eulerian-Lagrangian method,
+the fourth power of grid resolution (Section 4). Consequently, spa-
+                                                                             enabling adaptivity solely for the grid is insufficient; adaptivity for
+tial adaptivity—allocating higher resolution to visually important
+                                                                             particles is also required. This is typically achieved through particle
+regions—becomes indispensable.
+                                                                             splitting and merging [Adams et al. 2007; Ando et al. 2012, 2013]. For
+   Sparsity vs. Multiresolution Adaptivity. It is important to distin-       single-phase SPH, Winchenbach et al. [2017] proposed continuously
+guish between two types of adaptivity in simulation methods. Many            adapting particle sizes rather than relying on fixed size levels. While
+approaches [Ferstl et al. 2016; Hu et al. 2019a; Liu et al. 2016; Museth     splitting is purely local, merging requires searching a particle’s
+2013; Shao et al. 2022; Wang et al. 2020; Wu et al. 2018; Liu et al. 2018]   neighborhood. This is not an issue in SPH, where neighborhood
+provide spatial sparsity, where data is stored and computed only in          information has to be gathered anyway, but for FLIP it undermines
+active regions, avoiding empty or inactive areas. In contrast, true          FLIP’s advantage of noninteracting particles. Nevertheless, prior
+multiresolution adaptivity, as employed in this work, allows differ-         work on adaptively sampled FLIP particles has employed neighbor-
+ent regions of the simulation domain to be represented at varying            hood search-based merging [Ando et al. 2012, 2013], thus not fully
+resolutions based on their complexity or "activity" as measured by a         exploiting the efficiency of the FLIP principle.
+user-defined refinement criterion. This is crucial in fluid simulations,        In FLIP-based liquid simulation, Ferstl et al. [2016] introduced
+where the Navier-Stokes equations must be solved not only near the           Narrow Band FLIP (NB-FLIP), which confines particles to a narrow
+surface but also within the fluid "bulk," albeit at reduced resolution.      band around the liquid surface, reducing computational costs away
+                                                                             from the interface. NB-FLIP has become the industry standard for
+   Adaptive grids. For single-phase fluid simulation, various adap-
+                                                                             liquid simulation in VFX production and is implemented in the
+tive techniques have been proposed. Key approaches include using
+                                                                             leading commercial software Houdini. However, its use of a single
+octrees for hierarchical refinement of Cartesian grids [Ando and
+                                                                             layer of uniformly sized particles limits adaptivity. Computationally,
+Batty 2020; Ferstl et al. 2014; Losasso et al. 2004; Popinet 2003],
+                                                                             NB-FLIP is comparable to our scheme with only one level of particle
+tetrahedral meshes [Ando et al. 2013; Chentanez et al. 2007], power
+                                                                             refinement. In the context of single-phase liquid simulation, Ando
+diagrams [Aanjaneya et al. 2017] and memory-constrained GPU-
+                                                                             et al. [2013] proposed an innovative approach to FLIP-based adap-
+based schemes [Raateland et al. 2022]. While tetrahedral meshes
+                                                                             tivity using tetrahedral meshing. Besides two-phase capabilities, a
+provide greater adaptivity and naturally avoid T-junctions at reso-
+                                                                             difference of our work is the lightweight MSBG-based construction
+lution transitions, we prioritize hexahedral Cartesian grids for their
+                                                                             of the adaptive grid topology from the particle cloud while their
+simple structure—enabling regular numerical stencils for highly
+                                                                             work uses relatively expensive meshing, involving building both an
+parallelizable compute kernels and facilitating the construction of
+                                                                             octree and a BBC (Body-Centered Cubic) mesh which, as stated by
+multilevel structures.
+                                                                             the authors themselves, can become a bottleneck.
+   An increasingly important feature of adaptive schemes is the
+ability to preserve the hardware-friendliness of uniform grids locally,         Pressure Poisson Solver. Pressure projection is often the primary
+even within a globally irregular topology. In tree-based schemes,            computational bottleneck in incompressible fluid simulation, par-
+this can be achieved by assigning a uniform sub-grid (grid block)            ticularly for multiphase flows as it requires solving an elliptic PDE,
+to each leaf node instead of a single grid cell. Building on this idea,      whose discretization produces a large, frequently ill-conditioned
+Setaluri et al. [2014] introduced SPGrid, a block-based adaptivity           linear system. This challenge has been extensively addressed in both
+technique later utilized by Aanjaneya et al. [2017] for adaptive power       Graphics and Computational Physics. For a comprehensive overview
+diagrams. While SPGrid’s use of hardware page-address translation            of multigrid pressure solvers in CG, see Shao et al. [2022]. Two-phase
+is elegant, it is not operating-system-agnostic (currently limited           simulations with high fluid density ratios exacerbate this challenge
+to Linux [Setaluri et al. 2014]) and the growing adoption of huge            due to severely ill-conditioned pressure matrices. Computational
+memory pages to reduce TLB overload [Navarro et al. 2002; Panwar             Fluid Dynamics (CFD) pursued various approaches, including geo-
+et al. 2019] conflicts with SPGrid’s reliance on fixed-size traditional      metric multigrid preconditioned Krylov methods [MacLachlan et al.
+4k memory pages. Also, in virtualization and cloud environments,             2008], algebraic multigrid [Raw 1996], operator-dependent intergrid
+direct control over memory pages is often limited. SPGrid natively           transfers [Dendy 1982], and deflation-based methods [Tang and
+supports sparse data storage but requires multiple SPGrids and an            Vuik 2007]. MacLachlan et al. [2008] provides a detailed comparison
+additional octree structure to achieve multiresolution.                      of these techniques for two-phase flows with high density ratio.
+   Finally, we highlight VDB [Museth 2013], the state-of-the-art                Our work emphasizes integrating multigrid methods with spa-
+method in the visual effects (VFX) industry to manage volumetric             tial adaptivity. Adaptive Mesh Refinement (AMR) introduces chal-
+data, which has also been applied to liquid simulation [Shao et al.          lenges for multigrid, such as efficient coarse-grid representation and
+2022]. VDB excels at handling spatial sparsity but lacks support             smooth error transfer across resolution boundaries. CFD research
+for multiresolution adaptivity, limiting its effectiveness in scenarios      addresses this with methods tailored for patch-based [Berger and
+
+                                                                                      ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+6 •    Braun et al.
+
+
+Colella 1989; Martin et al. 2008] and octree-based [Popinet 2003;                   fluid free energy density [Jacqmin 1999] and typically require solv-
+Teunissen and Ebert 2018] AMR frameworks. In Graphics, Setaluri                     ing a fourth-order PDE with regularization terms to evolve the phase
+et al. [2014] and Aanjaneya et al. [2017] developed geometric multi-                field 𝜙. This is often further complicated by specific precautions to
+grid schemes using an octree-derived SPGrid hierarchy, but their                    ensure mass conservation [Jain 2022]. In this work, we present an
+focus on single-phase flows left high-density ratio challenges un-                  alternative hybrid Eulerian-Lagrangian approach, Phase-Field-FLIP,
+addressed. Unlike prior AMR methods, which require additional                       which does not require any interface maintenance or reconstruction
+elliptic solves at resolution boundaries [Martin et al. 2008] or in-                step.
+terlevel transfer passes for ghost cell data [Setaluri et al. 2014], our
+method seamlessly applies smoothing and grid transfer operators                     3.1   Overview of FLIP and Notation
+across resolution levels. Existing multigrid solvers can be very effi-              The FLIP method [Brackbill and Ruppel 1986; Zhu and Bridson 2005]
+cient, but they often still dominate simulation costs. For instance,                is a hybrid technique that combines the advantages of particle-based
+Setaluri et al. [2014] report pressure correction consuming 90% of                  (dissipation-free and mass-conserving advection) and grid-based
+total simulation time in high-resolution scenarios. In Section 6, we                methods (efficient discretization of spatial derivatives for pressure
+introduce a fully adaptive Poisson solver that matches the efficiency               projection). FLIP particles are comparably inexpensive because they
+of the other simulator components, effectively eliminating the pres-                do not interact, i.e. no neighborhood search is necessary. The effi-
+sure solver bottleneck.                                                             ciency of the extremely lightweight but "blind" FLIP particles comes
+                                                                                    at the cost of additional noise. However, this is not a disadvantage
+3     Phase-Field FLIP                                                              for the highly turbulent, splashy scenarios we target, as these al-
+Our goal is to numerically solve the Navier–Stokes equations                        ready exhibit a significant level of "natural" noise. For brevity, we
+                      𝜕u             ∇𝑝           f                                 will not repeat the structure of the basic FLIP- algorithm and refer
+                         = −u · ∇u −    + 𝜈∇2 u +                             (1)   to the work of Zhu and Bridson [2005] instead.
+                      𝜕𝑡             𝜌            𝜌
+                                 ∇·u=0                                (2)              Conventions and Notation. We use subscripts 𝑝,𝑞 for particles and
+for the 3-dimensional velocity field u of two incompressible, immis-                subscripts 𝑖,𝑗 for grid cells. The grid follows a standard staggered
+cible fluids characterized by their densities 𝜌𝑙 , 𝜌𝑔 and kinematic                 MAC layout [Harlow et al. 1965], where pressure and velocity are
+viscosities 𝜈𝑙 ,𝜈𝑔 , where the subscripts 𝑙 and 𝑔 denote liquid and gas             sampled at cell centers and cell face centers, respectively. The sub-
+phase with 𝜌𝑙 ≫ 𝜌𝑔 . For simplicity, we use the terms ’gas’ and ’air’               script 𝑎 refers to a coordinate axis direction (e𝑎 , where 𝑎 ∈ {1, 2, 3}
+interchangeably. 𝑝 is fluid pressure, 𝑡 is time and f denotes external              in 3D), and faces are referred to by cell index and axis. For example
+forces. For two-phase flow, a phase function 𝜙 : Ω = Ω𝑙 ∪Ω𝑔 → [0, 1]                𝑢𝑎𝑖 denotes the cell face velocity sampled at x𝑖 + 12 e𝑎 , i.e. at the
+distinguishes gas and liquid phases within the domain Ω. The den-                   center of the cell 𝑖 plus face offset for axis 𝑎. For brevity, we often
+sity 𝜌 is calculated with 𝜌 (x) = 𝑙𝑒𝑟𝑝 (𝜌𝑙 , 𝜌𝑔 , 𝜙 (x)), where 𝑙𝑒𝑟𝑝 de-            refer interchangeably to a continuous field, for example u and its
+notes linear interpolation. The viscosity 𝜈 (x) is computed analo-                  discrete representation on the grid, for example u𝑎𝑖 .
+gously.
+   Numerical modeling of two-phase flows presents numerous chal-                    3.2   Particles-to-grid Transfer (P2G) in PF-FLIP
+lenges due to the discontinuities at an interface of rapidly changing               For the PF-FLIP algorithm, we assign a type to each particle to
+topology. Numerous interface-tracking methods have been pro-                        associate it either with the air or the liquid phase. At the beginning
+posed, e.g., with explicit representations via a mesh [Wojtan et al.                of each time step we then transfer mass
+2009], and interface-capturing schemes, where the interface is im-                                                   ∑︁
+plicitly defined [Mirjalili et al. 2017]. The latter are popular for                                          𝑚𝑎𝑖 =      𝑤𝑎𝑖,𝑝 𝑚𝑝 ,                     (3)
+                                                                                                                        𝑝
+their ability to effectively handle complex and dynamic topologi-
+cal changes, and can be divided into sharp interface methods such                   and momentum                    ∑︁
+as volume of fluid (VOF) [Hirt and Nichols 1981; Scardovelli and                                            P𝑎𝑖 =        𝑤𝑎𝑖,𝑝 𝑚𝑝 u𝑝 ,                  (4)
+Zaleski 1999], level-set (LS) schemes [Osher and Sethian 1988; Suss-                                                𝑝
+man et al. 1994], and diffusive interface or phase-field (PF) methods
+                                                                                    from the particles to the grid cell faces, where the particle mass
+[Anderson et al. 1998; Jacqmin 1999]. Here, we use the term "phase                                       (
+field" in its most general sense. to distinguish it from sharp-interface                                   𝜌 𝑉𝑝 if 𝑝 is a liquid particle,
+approaches while some authors use the term more specifically to                                   𝑚𝑝 = 𝑙                                               (5)
+                                                                                                           𝜌𝑔𝑉𝑝 if 𝑝 is an air particle,
+denote the Cahn-Hilliard free energy-based phase field approach
+[Jacqmin 1999].                                                                     depends on the particle type (liquid or air) which is fixed throughout
+   VOF methods conserve mass but require relatively complex geo-                    the simulation, thus ensuring mass conservation. 𝑤𝑎𝑖,𝑝 are the cell
+metric interface reconstructions. LS methods, on the other hand,                    face centered splatting kernel weights as defined below. In rare
+typically do not conserve mass and require iterative surface re-                    cases, particles may be deleted, e.g. when "stuck" in solid obstacles,
+initialization. Phase-field (diffusive interface) methods conceptually              but this does not result in any significant mass loss in practice. A
+assign a finite "thickness" to the interface, which helps avoid numer-              re-seeding of particles is generally not necessary. We assume unit
+ical problems associated with discontinuous interface representa-                   volume 𝑉𝑝 = 1 for the particles, except when dealing with spatially
+tions. Classical, Eulerian phase-field methods are based on modeling                adaptive particle sizes (Section 5).
+
+ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+                                                                                                 Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation                               • 7
+
+
+
+
+      Fig. 5. PF-FLIP can resolve realistic large scale water-air interactions. The example above shows breaking ocean waves simulated with our method.
+
+
+  We will later reuse the accumulated splatting kernel weights for
+the phase field, so in order to obtain a sufficiently smooth field, we
+do not rely on the trilinear weighting commonly employed in FLIP.
+Instead, similar to SPH [Monaghan 1992], we use a higher-order
+polynomial kernel
+           𝑤𝑎𝑖,𝑝 = (max(1 − ((||x𝑖 + e𝑎 /2 − x𝑝 ||/𝑟 𝑝 ) 2, 0)) 3,              (6)
+with spherical support that is cubic in the squared distance, thus
+avoiding square root calculations. x𝑖 denotes the center of cell 𝑖
+and 𝑟 𝑝 is the particle radius. Dividing face momentum by face mass
+                                               ∗ = P /𝑚 .
+gives the (preliminary) cell face velocities ũ𝑎𝑖   𝑎𝑖 𝑎𝑖
+
+3.3     Obtaining the Phase Field
+We obtain the phase field essentially for free as a by-product of
+the particle-to-grid transfer of the velocity field by simply reusing
+the splatting kernel weight accumulators as raw mass densities, ˜     𝜌,
+which are already conveniently available at the cell faces 𝜌˜𝑎𝑖 = 𝑚𝑎𝑖
+—exactly where they are needed for the variable-coefficient Poisson                    Fig. 6. 2D slice of a phase field 𝜙 as computed by Eq. (7). The PF-FLIP simu-
+equation in the subsequent pressure projection step.                                   lation algorithm does not require surface reconstruction; the iso-contour
+   The raw densities exhibit irregularities in higher spatial frequen-                 shown here with linear interpolation is only depicted for illustration. The
+cies due to the FLIP-typical noise in the particle distribution (Fig-                  air phase appears uniformly black because density fluctuations have 1000×
+                                                                𝜌𝑙                     smaller amplitude than in the liquid phase.
+ure 6), but we can leverage the large density ratio (𝜌𝑔 = 1000     ) to
+easily separate phases even under noisy conditions. To this end, we
+normalize, compress and clamp the raw values:                                                                 2.00
+                                                                                                                                 Raw Mass Density
+                                                                                                              1.75               Phase Field
+                   0
+                                                              if 𝜌˜ < 𝜌˜𝑚𝑖𝑛,
+                                                                                                                                                                        Density fluctuations due to
+                   
+                                                                                                              1.50
+                   
+          𝜙( ˜                                                                                                                                                          uneven particle distribution
+                            √︂
+            𝜌) =
+
+
+
+                                                                                      Density / Phase field
+                                   max( 𝜌˜ − 𝜌˜𝑚𝑖𝑛 ,0)                          (7)
+                    min(
+                                (    𝛼𝜙 𝜌˜0 𝜌𝑙        ), 1)   else.                                          1.25
+                   
+                                                                                                              1.00
+𝜌˜0 denotes the density obtained by applying the weighting kernel to                                                         Density fluctuations in air have
+perfectly uniformly distributed particles. The parameter 𝛼𝜙 (default                                          0.75           1000 times smaller amplitude
+value: 1) controls the trade-off between noisiness (higher values)                                            0.50
+and "stiffness" (lower values) of the phase field, similar in effect                                          0.25          Air Particles                                             Liquid Particles
+to "artificial surface tension". While not critical for solver stability,
+                                                                                                              0.00
+this parameters offer a potential knob for artistic control of the                                                   2.0         1.5         1.0        0.5     0.0   0.5       1.0         1.5          2.0
+                                                                                                                                                                 x
+interface. 𝜌˜𝑚𝑖𝑛 is 𝜂𝜙 𝜌𝑔 𝜌˜0 , with a scaling factor 𝜂𝜙 = log(𝜌𝑙 /𝜌𝑔 ) —
+large enough to avoid misidentifying spurious air density peaks as                     Fig. 7. 1D example of raw mass density 𝜌˜ from particles and the correspond-
+liquid. We tag cells with phase field values below 0.5 as "air," while                 ing phase field 𝜙 ( 𝜌˜ ) providing a reliable separation.
+others are "liquid." We set 𝜙 = 1 for liquid-liquid cell faces and 𝜙 = 0
+for air-air faces, eliminating all remaining phase field fluctuations
+away from the interface. The interface thickness 𝜖𝜙 of our phase field                 a thickness of more than one grid cell (often employing 3 cells and
+is given by the particle base radius 𝑟 0 which we set equal to the grid                more).
+spacing 𝑟 0 = Δ𝑥 . Note that this allows for sharper interfaces than                      The resulting phase transition is stable, and robust to particle-
+those imposed by classical phase field methods, which typically use                    induced noise, as illustrated in Figure 7. Unlike classical phase-field
+
+                                                                                                                           ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+8 •    Braun et al.
+
+
+methods, the inherently Lagrangian nature of our approach avoids                Taking the divergence on both sides and using ∇ · u = 0 gives the
+numerical interface diffusion, and does not require sharpening or             variable coefficient pressure Poisson equation [Gibou et al. 2002]
+re-initialization steps [Arrufat et al. 2021; Jain 2022; Sussman et al.                     Δ𝑡 ∇ · (𝛽 (x)∇𝑝 (x)) = ∇ · u∗ (x) + 𝑐𝑑𝑖𝑣 (x),             (8)
+1994]. It also naturally ensures consistent transport of mass and
+momentum, which is not necessarily the case for classical phase-field         with face coefficients
+or level-set based simulation methods because those generally use                                            𝛽 (x) = 1/𝜌 (x).                       (9)
+different advection schemes for the velocity field and the interface          Here, the dependence on x highlights the spatially varying coeffi-
+geometry —often requiring complicated numerical countermeasures               cient structure which crucially distinguishes multiphase pressure
+[Arrufat et al. 2021; Raessi and Pitsch 2012]. Figure 6 shows an              projection from its simpler single-phase counterpart with constant
+example of a phase field as computed by Eq. (7). The high-frequency           density. 𝑐𝑑𝑖𝑣 (x) is a divergence correction term to ensure volume
+particle density fluctuations from FLIP manifest as irregularities            conservation by locally maintaining the target particle density 𝜌˜0
+in the phase field, but due to the high density contrast, the field           [Losasso et al. 2008]. Discretizing Eq. (8) on the MAC grid yields a
+achieves a robust separation of the phases.                                   linear system of equations, in 1D for simplicity, giving
+   Finally, we note that our method differs from existing "variable-                      𝑝𝑖+1 − 𝑝𝑖              𝑝𝑖 − 𝑝𝑖 −1    1 ∗
+                                                                                  𝛽𝑖+ 1 (           ) − 𝛽𝑖 − 1 (            )=   (𝑢     − 𝑢 ∗ 1 ). (10)
+density" FLIP-solvers [Bridson 2015], which are essentially single-                   2      Δ𝑥              2      Δ𝑥         Δ𝑡 𝑖+ 12    𝑖− 2
+phase simulators with continuously varying density within the
+                                                                              Note that the coefficients 𝛽 of the Laplacian matrix L of the re-
+phase. In contrast, PF-FLIP explicitly distinguishes the phase field                                    1 D (𝑢 ∗ ), with D being a discrete divergence
+                                                                              sulting system L𝑝 = Δ𝑡
+from the (raw) density field, ensuring stable separation of two
+                                                                              operator, are sampled at the cell faces. Importantly, the PF-FLIP algo-
+distinct phases even under FLIP-induced noise. The phase field
+                                                                              rithm gives these coefficients by construction, while other schemes
+𝜙 ∈ [0, 1] is then used to compute the actual physical density (and
+                                                                              rely on interpolation from cell-center sampled values [Xiao 2012] or
+viscosity) trough interpolation across an interface of finite thickness,
+                                                                              require a signed distance field for ghost-fluid extrapolation [Boyd
+following the principle of classical phase-field methods.
+                                                                              and Bridson 2012].
+                                                                                 L is symmetric and positive definite, making iterative solvers
+3.4    Escaped Particles and Surface Tension
+                                                                              such as the preconditioned conjugate gradient (CG) algorithm a
+Previous FLIP-based two-phase methods [Boyd and Bridson 2012]                 natural choice. However, L becomes ill-conditioned in the presence
+rely on "particle bounce-back" heuristics to prevent uncontrolled             of high fluid density ratios, severely slowing convergence even with
+mixing of air and water particles. This is avoided in PF-FLIP because         multigrid solvers [MacLachlan et al. 2008]. We will address this
+our velocity field adheres to the physically more accurate no-slip            challenge with a custom linear solver in Section 6.
+condition between phases. We can resolve this condition due to
+the high resolution capabilities of our method —thus eliminating              3.6   Grid-to-particles Transfer
+velocity discontinuities at the interface. If particles are still found on
+                                                                              After obtaining the divergence-free grid velocity u𝑎𝑖 , we subtract
+the "wrong" side of the interface, this can be physically interpreted as                                        ∗ (a copy of which was saved before
+                                                                              the preliminary velocity field ũ𝑎𝑖
+subgrid-scale droplets or bubbles. Similarly to earlier work [Enright
+                                                                              adding external forces), yielding the overall velocity change during
+et al. 2002; Mihalef et al. 2007], we treat such escaped particles, 𝑝 ∗ ,
+                                                                              the time step
+at position x∗ , as candidates for conversion into droplets (𝜙 (x∗ ) <
+1                         ∗     1                                                                           Δu = u − ũ∗,                            (11)
+2 − 𝛿𝜙 ) or bubbles (𝜙 (x ) > 2 + 𝛿𝜙 ), respectively. 𝛿𝜙 controls the
+rate of droplet or bubble production, with a default value of 0.2.            which can now be interpolated from the grid at the particle position
+Escaped droplets are subsequently simulated as purely Lagrangian              and added to the velocity stored on the particles. FLIP methods
+point masses as outlined in Section 7. Bubble particles are simply            usually "mix in" a small amount (1 − 𝛼 𝐹 𝐿𝐼 𝑃 ), of grid-interpolated
+deleted in our current implementation because we found that their             velocity 𝑢𝑎𝑖 [Bridson 2015]. Using an interpolation operator 𝐼 , it
+visual contribution is negligible in our large-scale scenarios. When          introduces artificial viscosity for damping noise as follows:
+                                                                                                                       
+droplet particles merge with the liquid body again, we re-convert                u𝑝 new = 𝛼 𝐹 𝐿𝐼 𝑃 u𝑝 old + 𝐼 (Δu, x𝑝 ) + (1 − 𝛼 𝐹 𝐿𝐼 𝑃 )𝐼 (u, x𝑝 ). (12)
+them to FLIP-simulation particles.
+                                                                              3.7   Viscosity and Advection
+   Neglecting Surface Tension. Surface tension is computationally
+expensive to handle in two-phase flow solvers [Popinet 2009], but             Variable, phase-specific viscosity is important in multiphase flows,
+it primarily affects small-scale phenomena, such as capillary waves           as it governs velocity gradients in turbulent water-air boundary
+in the millimeter range, which are not visually significant for our           layers, such as wind over breaking waves. Bridson [2015] observed
+target use case of large-scale flows where we simply neglect it for           that the artificial viscosity induced by the 𝛼 𝐹 𝐿𝐼 𝑃 parameter directly
+efficiency.                                                                   determines physical viscosity:
+                                                                                                                      Δ𝑥 2
+3.5    Two-Phase Pressure Projection                                                                   𝜈 = (1 − 𝛼 𝐹 𝐿𝐼 𝑃 ) .                   (13)
+                                                                                                                      6Δ𝑡
+The velocity field 𝑢 ∗ from the P2G step after adding gravity force           We take advantage of Eq. (13) to solve the full multiphase Navier-
+is generally not divergence-free. To satisfy Eq. (2) we perform a             Stokes equations, including spatially varying viscosity. This is pos-
+standard pressure projection step by subtracting the inverse density          sible at the same computational cost as the inviscid Euler equations,
+weighted pressure gradient, obtaining u = u∗ − Δ𝑡 𝜌1 ∇𝑝.                      by adjusting the FLIP weight based on particle type (liquid or air)
+
+ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+                                                                              Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation     • 9
+
+
+during the G2P step. While efficient, this approach is constrained           The last aspect is particularly important: a small number of blocks
+to a specific range of viscosities between a minimum base viscosity          makes it feasible to use dense linear arrays as a global block index.
+needed to suppress FLIP noise and a maximum dictated by the in-              The curve (d) in Figure 8 shows the memory overhead 1/(0.01𝑛 3 ) of
+herent limitation of explicit schemes in handling large viscosities.         a dense index for a sparsely populated domain with 1% occupancy
+However, for our case of large-scale scenarios involving water and           and a single 4-byte data "channel". Notably, for blocks of size 163 ,
+air at high resolutions and large CFL numbers, Eq. (13) provides a           the dense index requires only 2% of the total memory usage (and
+good approximation.                                                          this relative overhead decreases further with each additional data
+   Finally, the particles are advected through the new, divergence-          channel). Naturally, compared to tree-based and other more sophis-
+free velocities u𝑎𝑖 using third-order Runge-Kutta integration with           ticated alternatives, dense linear indices are attractive due to their
+locally adaptive time stepping [Bridson 2015]. The liquid velocity is        unmatched simplicity and hardware friendliness.
+extrapolated into the air phase by a few cells to ensure that liquid            Besides mere sparsity, another key aspect of adaptivity is han-
+particles are advected with the corresponding velocities.                    dling spatially varying resolution. A common approach in block-
+                                                                             based spatial structures is to recursively decompose grid blocks into
+4     Adaptivity                                                             smaller subblocks, maintaining a constant number of cells per block.
+The computational cost of fluid simulation in 3D scales with 𝑂 (𝑛 4 )        This is typically implemented using tree-based decompositions in
+for grid resolution 𝑛, and multiphase flows further aggravate the scal-      high-performance computing [Dubey et al. 2014; Olson and Mac-
+ing by the higher complexity of the pressure solve. Hence, resolving         Neice 2005; Teunissen and Ebert 2018; Zhang et al. 2021]. Despite
+the turbulent details around the interface in natural flows neces-           their wide-spread use, tree-based methods introduce algorithmic
+sitates computational adaptivity, i.e., sparse and multiresolution-          complexity and overhead. Tree depth affects random access times,
+capable numerical representations. In this context, block-based              and efficient parallelization of operations is challenging [Sundar
+methods, which represent the grid as a union of uniform sub-grids,           et al. 2008]. Stencil-based operations are further complicated by the
+are essential for maintaining the regular data access patterns re-           non-uniform block neighborhood structure.
+quired to fully utilize the computing capabilities of modern hard-
+ware. Existing block-based methods such as VDB [Museth 2013],
+                                                                             4.2   MSBG
+SPGrid [Setaluri et al. 2014] or block-octrees [Teunissen and Ebert
+2018] typically keep the block size small (𝑛 = 43 or 𝑛 = 83 grid cells)      In light of the preceding considerations, we propose a novel data
+to minimize the waste of unused cells within blocks. Indeed, if we           structure based on a dense linear array with large blocks. The dense
+assume that fluid interfaces are smooth 2D manifolds embedded                linear array stores pointers to blocks, whose geometric size is kept
+in 3D space, then the "unused cell overhead" for blocks of size 𝑛            constant while varying only the resolution of each block. Note that
+is 1 − 𝑂 (𝑛 2 )/𝑛 3 , which quickly approaches 100% when block size          this is in contrast to conventional tree-based schemes that adapt the
+increases, as shown in Figure 8 (a).                                         blocks’ size while keeping the resolution constant. In this context,
+                                                                             the distinction between (geometrical) block size and block resolution
+4.1    Block Size Does Matter                                                is important. The former is chosen once for each simulation, while
+                                                                             the latter is spatially adapted during the course of a simulation. For
+We make several key observations that, in contrast to existing work,
+                                                                             brevity, we will often call finely resolved blocks large, in contrast to
+motivate using significantly larger blocks (𝑛 = 16, 𝑛 = 32).
+                                                                             small blocks with a coarse resolution.
+   Fractal interfaces. Visually interesting fluid interfaces in nature          We denote the resulting data structures as Multiresolution Sparse
+are fractals of dimension 𝑑 ≈ 2.5 [Sreenivasan 1991], not smooth             Block Grids (MSBG) in the following. They enable multi-resolution
+2D manifolds. For these 2.5D interfaces, the empty-cell overhead             adaptivity in an extremely simple way, and allow for fast, massively
+(1 − 𝑂 (𝑛 2.5 )/𝑛 3 ) is significantly lower than for 2D interfaces, as      parallel global operations. The resolution of the blocks is varied
+shown by the difference in curves (a) and (b) in Figure 8.                   with a block refinement map 𝑀, the calculation of which is driven
+                                                                             by an application-specified refinement criterion (Section 5.4).
+   Block boundary overhead. In 3D, the fraction of boundary cells               While varying the resolution of fixed-size blocks limits the num-
+per total cells (𝑛 3 − (𝑛 − 2) 3 )/𝑛 3 = 1 − (1 − 𝑛2 ) 3 decreases rapidly   ber of refinement levels to the binary logarithm of the base res-
+with increasing block size (curve c in Figure 8). This is important as       olution, this is not a constraint in practice: in three dimensions,
+stencil-based operations that dominate simulation time (i.e. multi-          computational cost decreases by a factor of eight with each coarser
+grid smoothing) require costly operations at block boundaries.               resolution level. In this study, all results are based on a maximum
+   Hardware efficiency. Modern hardware, with larger CPU caches,             of three or four refinement levels. Unless noted otherwise, the base
+wider SIMD lanes, and larger virtual memory pages, benefits from             block resolution is set to 16. The block boundary overhead (curve
+larger blocks. Unlike a decade ago, blocks of 163 or 323 now fit easily      (c) in Figure 8) increases at coarser MSBG resolution levels. How-
+in L2 or L3 CPU cache, enabling more efficient hardware utilization          ever, this limitation is offset by the fact that most grid cells are still
+than smaller blocks.                                                         contained in MSBG blocks at the finest resolution levels, due to the
+                                                                             factor-of-eight reduction in the number of active cells with each
+  Reduced block count. Naturally, larger blocks drastically reduce           coarser level.
+the number of blocks for a given simulation domain size.                        The discretization of differential operators for gradients, diver-
+                                                                             gence, and the treatment of solid obstacles follows previous work
+
+                                                                                      ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+10    •   Braun et al.
+
+
+            Table 1. Comparison between MSBG and Block-Octree                         Dynamic task based scheduling. At the same time, a naive paral-
+                            MSBG                     Block-Octree                  lelization of operations on a MSBG grid can lead to load balancing
+      Construction, e.g.    𝑂 (𝑛) , Easy             𝑂 (𝑛 log 𝑛) , non-trivial
+                                                                                   issues due to the non-uniform number of grid cells per block. To
+      from particles        parallelization          parallelization               address this, we adopt dynamic task based scheduling [Robison et al.
+      Random access         𝑂 (1)                    𝑂 (𝑙𝑜𝑔 (𝑛) )                  2008], as provided by the TBB multithreading library [Pheatt 2008].
+
+                                                                                   5     Adaptive Particles and Dual Adaptivity
+                                                     Non-uniform access to
+                            Uniform access
+      Stencil access                                 variable number of up to 24
+                            to 6 neighbor blocks
+                                                     neighbor blocks               As PF-FLIP employs particles in addition to the underlying grid, it is
+      Grading               Fast                     Parallelization challenging   crucial to support particle-based adaptivity alongside the grid-based
+                            Only restricted
+                                                     Less flexible because         adaptivity provided by MSBG. In the context of SPH methods, adap-
+      Adaptivity                                     "terminal siblings" have      tivity is typically achieved through particle splitting (coarse-to-fine
+                            by block raster
+                                                     same resolution
+                                                                                   transition) and merging (fine-to-coarse transition) [Adams et al.
+      Supports multi-
+      color techniques
+                            Yes                      No                            2007]. We adopt a similar approach for particle splitting; however,
+                                                                                   instead of merging, we introduce a fast probabilistic coarsening
+      Code complexity       Low                      High
+                                                                                   technique. We assign a particle level 𝑙𝑝 to each particle 𝑝 that deter-
+      Refinement depth      log2 (base-resolution)   Unlimited
+                                                                                   mines its radius as 𝑟 𝑝 = 𝑟 0 2𝑙𝑝 . Note that we consider the particle
+                                                                                   level 𝑙𝑝 orthogonal to the grid level 𝑙𝑖 = 𝑀 [𝑏𝑖 ], of a given grid cell
+                                                                                   within a block 𝑏𝑖 . Here, 𝑀 denotes the block refinement map of the
+[Losasso et al. 2004; Weber et al. 2015], with a straightforward adap-             MSBG grid.
+tation to MSBG. An example of pressure gradients is shown in
+Figure 9(c), where the constant Δ𝑔 = 43 [Losasso et al. 2004].                     5.1    Probabilistic Coarsening
+                                                                                   Existing adaptive particle methods handle the fine-to-coarse transi-
+4.3       Capabilities of MSBG                                                     tion by merging several smaller particles into larger ones [Adams
+Next, we highlight a range of advantages that result from the design               et al. 2007; Ando et al. 2013], a process that requires a particle neigh-
+of the MSBG data structure. Table 1 provides an overview of MSBG                   borhood search. While this is not an issue for SPH methods, where
+compared to block-based octrees representing the state of the art                  neighborhood lists have to be collected anyway, we aim to retain
+in adaptive grid methods [Teunissen and Ebert 2018]. Its uniformly                 the essence of FLIP as a neighborhood-search-free method.
+constant blocks size makes MSBG computationally more efficient                        To this end, we propose a simple and fast probabilistic coarsening
+and improves adaptivity by capturing refinement areas more tightly.                scheme. It is based on the observation that coarsening a uniform
+                                                                                   particle distribution by a factor of two in each spatial dimension
+   Multi-resolution Multi-color schemes. One particularly distinctive              results in a uniform distribution with a particle density eight times
+feature of MSBG is its ability to support Multiresolution multi-color              lower, which can be obtained by randomly removing 7/8 of the
+schemes, such as block-based red-black multigrid smoothers and                     particles. More formally, once a particle is marked for coarsening, we
+fast lock-free 8-color particle splatting. Such algorithms are not sup-            remove it with probability 𝑝𝑟𝑜𝑏 del = 1 − 1/(2𝑙new −𝑙old ) 3 . Oscillations
+ported by, e.g., octrees due to their nonuniform block sizes. Specif-              near the coarse-to-fine transition zone are prevented by a simple
+ically, we employ an adaption of a recently proposed eight-color                   hysteresis scheme using a deferred-coarsening counter.
+splatting scheme [Fang et al. 2018] to achieve lock-free splatting
+during the P2G step of PF-FLIP from Section 3.2, enabling maximum                  5.2    Refinement Criteria
+parallelism of multiresolution particle-grid transfer. We also com-
+                                                                                   As the default particle refinement criterion, we employ the com-
+pute the splatting weights for all faces of a MAC grid cell in parallel
+                                                                                   monly used distance to the liquid–air interface. Since PF-FLIP does
+using SIMD/AVX-vector instructions. In practice, this yields P2G
+                                                                                   not maintain a distance field for the surface, we generate a reduced-
+transfer rates of several hundred million particles per second.
+                                                                                   resolution auxiliary SDF 𝑑˜(x) from the downsampled and thresh-
+   Spatiotemporally coherent memory access. The contiguous blocks                  olded phase field with a simple, first-order accurate, marching algo-
+of MSBG ensure within-block cache efficiency, but we further en-                   rithm. This is sufficient because, unlike previous work, we use the
+hance spatio-temporal memory coherence by conceptually ordering                    distance field solely for particle refinement.
+active blocks along a space-filling curve via Morton coding. Un-                      Optionally, the magnitude of the curl of the velocity can also be
+like SPGrid [Setaluri et al. 2014], which integrates Morton coding                 employed [Popinet 2003] to capture flow details away from the sur-
+into cell address calculations (requiring potentially expensive bit                face, particularly in the air phase, where turbulence is typically more
+interleaving), we retain simple linear indexing and sort active block              intense than in the bulk liquid (Figure 12, left column). However, for
+indices by their Morton codes before traversal. This requires com-                 the examples presented in this study, we found the distance-based
+puting the Morton code only once per block, taking advantage of                    refinement to be sufficient for all cases.
+the additional level of indirection offered by our dense array of block
+pointers. Block-based sorting, like other operations on global grid                5.3    Equalizing Spatially Varying Numerical Viscosity
+topology, is extremely fast in MSBG due to the use of relatively few               Numerical methods for solving the Navier-Stokes equations intro-
+but large blocks.                                                                  duce numerical diffusion, or artificial viscosity, depending on the
+
+ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+                                                                                  Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation      •   11
+
+
+                                                                                                    Refinement Function
+                                                                               a) Smooth
+                                                                               Interface                                    Allocated Blocks
+                                                                                                       Water/Air             0    1     2
+
+                                                                                                       Interface                                    Multiresolution
+                                                                                                                             3    4     5
+                                                                                                                                                   Sparse Block Grid
+                                                                                                     Refinement Map M
+                                                                                                                             6
+                                                                                                                             …     …
+                                                                               b) Fractal              0 0 1 2 2
+                                                                               Interface               0 0 1 1 2
+                                                                                                       0 0 0 1 2
+                                                                                                       0 0 0 1 1
+                                                                                                         Index Grid                                  Computational
+                                                                               In Nature               0 1 5 2 13                                      Domain
+                                                                                                       … …
+
+
+
+
+Fig. 8. (Left) Theoretical overhead of adaptive data structures as a function of block size: (a),(b) Wasted cells per block near the interface for smooth and
+fractal interfaces respectively. (c) Block boundary overhead. (d) Storage overhead of a dense block index assuming a float channel with 1% occupancy. (Right)
+Overview of the MSBG data structure with refinement levels stored in the per-block refinement map, the linear block index and individual blocks constituting
+the final MSBG data structure.
+
+
+grid spacing Δ𝑥. In multiresolution methods with varying Δ𝑥, this                     level. At each touched cell, splat the particle’s weighted mass
+leads to unphysical spatial variations in viscosity—an issue often                    and velocity contributions to the staggered cell locations.
+overlooked in the adaptive mesh refinement literature. A notable                  (5) On the MSBG grid, compute auxiliary fields, such as 𝑑,˜ required
+exception is Ando et al. [2013], and we likewise leverage FLIP’s                      for evaluating the particle refinement criterion.
+controllable numerical viscosity (Eq. (13)) to adjust 𝛼 𝐹 𝐿𝐼 𝑃 . In our           (6) For each particle 𝑝, use the refinement criterion interpolated at
+two-phase framework, we account for both phase-specific physi-                        its position x𝑝 to determine the new particle level, e.g. 𝑙 new =
+cal viscosity and numerical viscosity variations from adaptive grid                   ⌊|𝛽𝑏𝑤 𝑑˜(x𝑝 )|/𝑚 0 ⌋ where 𝑚 0 is the MSBG base block resolution
+spacing. In contrast to Ando et al., we base corrections on local                     and 𝛽𝑏𝑤 controls the width of refinement bands. If 𝑙 new < 𝑙𝑝 ,
+grid spacing instead of particle size. This decouples particle radius                 split the particle into 8 smaller particles 𝑝 ′ , randomly jittered
+from cell size, which is crucial for large time steps with high CFL                   within the octants of the grid cell containing 𝑝, and set 𝑙𝑝 ′ ←
+numbers, where particles may cross grid resolution boundaries.                        𝑙 new . If 𝑙 new > 𝑙𝑝 , increment a deferred-coarsening counter 𝐷𝑝
+                                                                                      and mark 𝑝 for coarsening if 𝐷𝑝 ≥ 3. Reset 𝐷𝑝 = 0 if 𝑙 new ≤ 𝑙𝑝 . If
+                                                                                      𝑝 is marked for coarsening, remove the particle with probability
+5.4    Dual Particle-Grid Adaptivity                                                  𝑝𝑟𝑜𝑏𝑑𝑒𝑙 = 1 − 1/(2𝑙new −𝑙𝑝 ) 3 .
+The resulting algorithm for coupled particle-grid adaptivity pro-                 (7) Advance the PF-FLIP simulation one time step and advect the
+ceeds with the following steps:                                                       particles to their new positions using MSBG for adaptive-grid
+                                                                                      velocity interpolation.
+(1) Compute the block refinement map 𝑀: For each particle 𝑝, deter-
+    mine all blocks 𝐵𝑖 that intersect the particle’s bounding box (en-
+    larged by a CFL-dependent epsilon) and set 𝑀 [𝑖] ← min(𝑙𝑝 , 𝑀 [𝑖])
+    using a fast atomic minimum operation.
+(2) Regularize the block refinement map to enforce a 2:1 grading
+    constraint, ensuring that the resolution levels of neighboring
+    blocks differ by no more than one.
+(3) Initialize the MSBG grid with the new refinement map and
+    allocate grid data channels.
+(4) Transfer data from the particles to the MSBG grid as follows:
+                                                                                  Fig. 9. a) Particle density and size are adapted depending on the distance
+    For each particle 𝑝, determine its containing grid block 𝑏𝑖 , grid            to the fluid interface. b) Velocity field as sampled by particles with grid cell
+    level 𝑙 = 𝑀 [𝑏𝑖 ] and cell-within-block 𝑐𝑖𝑘 . Using the linear, dense         size adapted to particle size (2D slice of 3D simulation, vorticity magnitude).
+                                                                                                                                                  𝑝 1 −𝑝
+    global MSBG block index, this computation requires only shift                 c) Pressure gradient discretization at coarse-fine transition: ℎΔ    𝑔
+                                                                                                                                                         . Thin and
+    and logical-and operations on the particle coordinates. Next,                 bold lines depict cell and MSBG block boundaries, respectively.
+    loop over all neighboring grid blocks 𝑏 𝑗 and cells 𝑐 𝑗𝑙 within
+    the particle’s radius 𝑟 𝑝 = 𝑟 0 2𝑙𝑝 . This corresponds to the usual
+    27-cell neighborhood when the particle level matches the grid                 6    Adaptive Poisson Solver
+    level, i.e., 𝑙𝑝 = 𝑙. We also allow 𝑙𝑝 = 𝑙 + 1 for a smooth transition         Pressure correction is typically the computational bottleneck in in-
+    of coarse particles into regions where the grid is finer by one               compressible fluid simulation, particularly for high density-contrast
+
+                                                                                            ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+12    •   Braun et al.
+
+
+                                                                                     the phase-field via. Eq. (9). The diagonal elements of the (implicitly)
+                                                                                     assembled matrices are the sum of the off-diagonal (face) coefficients.
+                                                                                     The resolution transition scaling constants 𝜎𝐶𝐹 = 1/(4Δ𝑔 ) and
+                                                                                     𝜎𝐹𝐶 = 2𝜎𝐶𝐹 follow from the symmetry-preserving multiresolution
+                                                                                     discretization of the pressure gradient (Section 4.2, Figure 9(c)) and
+                                                                                     the Galerkin coarsening principle Eq. (14).
+
+                                                                                      Algorithm 1: Parallel Multiresolution Galerkin Multigrid
+                                                                                      Coarsening
+                                                                                       Input: Face coefficients F at finest level 𝐿 = 0 Output: Face
+                                                                                         coefficients for all coarse levels
+Fig. 10. Multiresolution multigrid: MSBG maintains multigrid levels inde-              for 𝐿 ← 1 to 𝑀 − 1 ⊲ Multigrid levels
+pendently from MSBG resolution levels                                                   do
+                                                                                            for 𝑖 ← 1 to 𝑁 ⊲MSBG Blocks in parallel
+                                                                                             do in parallel
+multiphase flows, as this step requires solving a large and highly                               𝑙 ← 𝑙𝑒𝑣𝑒𝑙 (𝑖, 𝐿) ⊲Actual resolution level at this multigrid level
+ill-conditioned Poisson problem L𝑥 = 𝑏 (cf. Section 3.5 ). Our mul-                              if 𝑙 = 𝑙𝑒𝑣𝑒𝑙 (𝑖, 𝐿 − 1) then
+tiresolution discretization scheme ensures favorable properties for                                   F [𝑖, 𝐿] ← F [𝑖, 𝐿 − 1];
+the Laplacian system matrix L, such as symmetry and a simple                                            ⊲No finer child block, simply copy block by reference
+7-point stencil. However, for multiphase flows with high density                                      continue
+ratios, the ill-conditioned, nearly discontinuous coefficient structure                          for 𝑎 ← 1 to 3 ⊲Face normal directions (x,y,z)
+of L leads to a deterioration in convergence speed, even when using                               do
+powerful methods such as multigrid-preconditioned CG [MacLach-                                        ⊲Determine scaling factor for resolution transition
+lan et al. 2008]. To address the aforementioned challenges, we pro-                                   switch 𝑙 − 𝑙𝑒𝑣𝑒𝑙 (neighborBlock(𝑖, 𝑎), 𝐿 − 1) ) do
+pose a novel, fully adaptive variant of the multigrid preconditioned                                       case 0 do
+conjugate gradient method, specifically designed to solve pressure                                             𝑠 ← 2𝑙 ⊲Fine-fine
+correction equations arising from highly irregular two-phase flows                                        case 1 do
+with large fluid density contrasts.                                                                           𝑠 ← 2𝑙 𝜎𝐶𝐹         ⊲Coarse-fine
+                                                                                                          case -1 do
+6.1       Algebraic Aggregation Multigrid                                                                     𝑠 ← 2𝑙 𝜎𝐹𝐶         ⊲Fine-coarse
+Shao et al. [2022] successfully employed algebraic aggregation multi-                                𝑛 ← 𝑛 0 2 −𝑙     ⊲Block resolution
+grid, essentially a cell-centered Galerkin coarsening approach, to                                   for 𝑗 ← 1 to 𝑛 3 ⊲Loop over all cells in block
+construct a multigrid hierarchy for fast but fixed-resolution single-                                 do
+phase fluid simulations. We extend this method to multiresolution                                        𝑠𝑢𝑚 ← 0 ;
+adaptive grids by introducing a novel adaptive smoother and inte-                                        ⊲Loop over 2x2 fine cells of coarse cell face in direction 𝑎
+grating it into a specialized conjugate gradient algorithm for efficient                                 for k ← (1, 1) to (2, 2) do
+two-phase pressure projection. In the following, we will not reit-                                            𝑗 ′ ← cellIndexInFineBlock( 𝑗, k, 𝑎)
+erate the full details of the standard multigrid method, such as the                                            𝑠𝑢𝑚 ← 𝑠𝑢𝑚 + F [𝑖, 𝐿 − 1] [ 𝑗 ′ , 𝑎]
+structure of a basic V-cycle, as these are well documented in the                                        F [𝑖, 𝐿] [ 𝑗, 𝑎] ← 𝑠 𝑠𝑢𝑚 4
+literature (e.g., [Briggs et al. 2000; Mandel 1988; Trottenberg et al.
+2000]). Instead, we focus on the aspects that differentiate our method
+from previous approaches. In Galerkin coarsening, grid operators
+are computed algebraically from the fine grid ones via
+                                                                                     6.2   Leveraging MSBG
+                               L 2ℎ = 𝑅ℎ2ℎ Lℎ 𝑃 2ℎ
+                                                ℎ
+                                                   ,                          (14)   We leverage the MSBG block structure to efficiently represent two
+where ℎ is the spacing of the finer grid. 𝑃 and 𝑅 = 𝑃𝑇 denote                        resolution hierarchies: the MSBG hierarchy, defined by the resolu-
+Restriction and Prolongation operators, respectively [Trottenberg                    tion level 𝑙, and the multigrid hierarchy, defined by the multigrid
+et al. 2000]. See Figure 10, bottom left, for a 1D illustration.                     level 𝐿. For the coarsest levels, which are coarser than MSBG’s
+                                                                                     block index, we use additional, uniform grids. Figure 10 illustrates
+   Multiresolution adaptive Galerkin coarsening. Algorithm 1 details                 our extension of basic multigrid construction from uniform to spa-
+the efficient, matrix-free, and massively parallel construction of our               tially adaptive multiresolution grids using a 1D example. While
+multiresolution-adaptive Galerkin multigrid hierarchy, based on the                  our multigrid hierarchy shares similarities with the multiresolution
+MSBG block structure. For each cell 𝑗 of block 𝑖 at multigrid level                  pyramids proposed by Setaluri et al. [2014], there are key distinc-
+𝐿 > 0, three face-coefficients F [𝑖, 𝐿] [ 𝑗, 𝑎] of the symmetric 7-point             tions. First, MSBG does not require maintaining an additional octree,
+stencil are computed (𝑎 ∈ {1, 2, 3} denoting face normal directions                  as in SPGrid-based solvers. Second, the inherent multiresolution
+e𝑎 ). Face coefficients at the finest level are obtained directly from               structure of MSBG facilitates multigrid relaxation across resolution
+
+ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+                                                                                  Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation     •   13
+
+
+                                                                                  6.4   Adaptive Relaxation
+                                                                                  The smoother described in the previous section in combination
+                                                                                  with Galerkin coarsening significantly improves overall multigrid
+                                                                                  convergence. To address the remaining convergence issues of highly
+                                                                                  irregular flows, we leverage ideas from fully adaptive multigrid
+                                                                                  [Kowarschik et al. 2006; Rüde 1993] to perform adaptive relaxation.
+                                                                                  The central idea is to adaptively focus the smoothing effort locally
+                                                                                  on regions with high residual errors. To this end, we maintain a
+                                                                                  dynamic list of active MSBG blocks. Initially, this list includes all
+                                                                                  relaxation-relevant blocks 𝑏𝑖 for a given multigrid level 𝐿—those
+                                                                                  with 𝑙 (𝑖, 𝐿) ≤ 𝐿, along with a one-block-wide transition zone at the
+Fig. 11. (a) Multi-color techniques such as red-black (checkerboard) cannot       next coarser level. Blocks are iteratively selected from the active list
+be efficiently applied to octrees (as indicated by the "?") (b) Active elements   —a fast lockless FIFO queue—for relaxation. If a block’s maximum
+during the first half of one parallel half-sweep (𝐼𝑟𝑏 = 𝑖𝑟𝑏 = 0 in Algorithm      effective residual error exceeds a threshold 𝜃 after relaxation, it is
+2) of our SIMD accelerated, two-stage MSBG block based hybrid red-black-
+                                                                                  reinserted into the list. Neighboring blocks are also added if border
+Gauss-Seidel-Jacobi smoother. Shown are blocks of SIMD vectors at two
+                                                                                  cell residuals exceed the threshold. Unlike Kowarschik et al. [2006];
+different resolution levels 0 and 1.
+                                                                                  Rüde [1993], we do not continue relaxing until the active set becomes
+                                                                                  empty. Instead, we terminate the loop after a fixed number (10–20)
+                                                                                  of adaptive relaxation steps, as this is sufficient for our purpose of
+                                                                                  employing the algorithm within a preconditioner rather than as a
+                                                                                  standalone multigrid solver.
+boundaries, eliminating the need for additional inter-level transfer                 We again leverage the MSBG block structure to keep track of and
+passes to accumulate and propagate ghost cells.                                   process active blocks efficiently and in parallel. The procedure is
+                                                                                  detailed in Algorithm 2, and Figure 12 illustrates how this process
+6.3   Block-based Relaxation
+                                                                                  rapidly reduces the active smoothing area, significantly lowering
+                                                                                  the total computational effort. Overall efficiency is further enhanced
+The smoother is a critical component of multigrid schemes. Com-                   because, after a few iterations, the set of remaining active blocks
+monly, a fixed number (1–3) of weighted Jacobi or Gauss-Seidel re-                often fits entirely into the CPU’s last-level cache, eliminating the
+laxation steps are applied before residual restriction (pre-smoothing)            RAM bandwidth bottleneck (typically associated with relaxation-
+and after error prolongation (post-smoothing) [Briggs et al. 2000].               type small-stencil sweeps) during later iterations.
+For massively parallel implementations, Jacobi-type smoothers are                    To further enhance cache efficiency, we perform multiple relax-
+often preferred due to the parallel nature of updates. However, this              ation sweeps on a block once its active data channels are loaded into
+comes at the cost of slower convergence compared to Gauss-Seidel,                 cache memory. This approach amortizes the cost of transferring data
+where updated values are immediately visible to neighboring cells.                from RAM to the CPU cache and assembling the block’s local "halo
+Moreover, Jacobi-type smoothers require additional memory for a                   buffer", which contains boundary data from neighboring blocks.
+temporary destination grid.                                                       Unlike previous methods [McAdams et al. 2010], we do not fix the
+   Exploiting the regular block structure of MSBG, we propose a                   number of block-local sweeps. Instead, we adaptively determine
+variant of a hybrid Gauss-Seidel smoother [Baker et al. 2011] that                it by monitoring the block-local residual, available as the absolute
+employs red-black ordered, parallel half-passes of Jacobi relaxations             value of the local update during relaxation. The loop terminates
+at the block-level. It additionally uses Gauss-Seidel (in-place) iter-            when the residual is reduced by 1/3, approximating the optimal re-
+ations for the unknowns within blocks, likewise with a red-black                  duction factor for a Gauss-Seidel smoother in 3D Poisson problems
+ordering. These in-place updates are computed at the level of entire              [Mohr and Wienands 2004]. Importantly, this exact value, like other
+SIMD-words, that is, 8 floats for the Intel AVX CPU instruction                   parameters in Algorithm 2, is not critical for overall convergence,
+set. This scheme, illustrated in Figure 11 (b), improves convergence              as our adaptive smoother functions solely within a preconditioner.
+speed due to the partial Gauss-Seidel nature of the updates. It also
+reduces the memory footprint by a factor of two compared to stan-                     Defining an Effective Residual in the Context of High-Contrast
+dard Jacobi, as red-black-ordered MSBG blocks can be updated in                   Phase-Fields. Our algorithm also differs from Kowarschik et al. [2006]
+place without requiring an additional destination buffer. Similar to              in how the effective residual error is defined. While their work uses
+the P2G transfer, this block-"colored" algorithm inherently relies on             the scaled residual—the residual divided by the matrix diagonal— we
+the globally uniform block structure of MSBG and is not applicable                found this approach to be ill-suited for solving the linear systems
+to tree-based data structures (Figure 11(a)).                                     arising in two-phase fluid flow. In such cases, the matrix diagonal is
+   Due to the partial Jacobi nature of our hybrid smoother, it is nec-            orders of magnitude larger in the air phase than in the water phase
+essary to apply a weighting factor 𝜔 [Adams et al. 2003] to dampen                of the simulation domain. This disparity effectively compresses the
+the relaxation updates in order to guarantee overall convergence.                 dynamic range of the residual error in the air phase by a factor
+Here, we chose 𝜔 = 76 , which is optimal in three spatial dimensions              of 1000, making it unlikely for air blocks to ever exceed the error
+[Trottenberg et al. 2000].                                                        threshold for inclusion in the active relaxation list. We therefore
+
+                                                                                           ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+14    •   Braun et al.
+
+
+
+ Algorithm 2: Parallel Two-Stage-Red-Black Adaptive
+ Multigrid Relaxation
+     Input : Multigrid level 𝐿, effective residual threshold 𝜃
+     𝑛, 𝑛 ′ ← 0 ⊲ Number of active blocks (current, new)
+     𝑆 0 , 𝑆, 𝑆 ′ ← {0} ⊲ Block status flags arrays
+     Function RelaxBlock(𝑖, 𝑅):
+            for 𝑖𝑟𝑏 ← 0 to 1 ⊲Inner red-black scheme
+             do
+                  for each cell 𝑗 of block 𝑖 where color( 𝑗 ) = 𝑖𝑟𝑏 do
+                      𝛿 ← 𝜔 (𝑏 𝑗 − L 𝑗 u)/L 𝑗 𝑗 ⊲Weighted Gauss-Seidel; 𝜔 = 76
+                      𝑅[ 𝑗 ] ← 𝛿
+                      𝑢𝑗 ← 𝑢𝑗 + 𝛿
+          return max(𝑅)
+     Procedure ActivateBlock(𝑖, 𝑅):
+        if AtomicCompareExchange(𝑆 ′ [𝑖 ], 1, 0) = 0 then
+            𝐵 ′ [AtomicIncrement(𝑛 ′ ) ] ← 𝑖                                     Fig. 12. Adaptive multigrid relaxation. 2D slices along XY, XZ and YZ of a
+                                                                                 3D simulation are shown (blue: water, yellow: air, orange: active set). Left
+          ⊲Activate affected neighbor blocks
+                                                                                 column: Vorticity magnitude. Middle: Residual error and active relaxation
+          for each face 𝑓𝑘 ∈ [1,6] of block 𝑖 do
+              𝑖 2 ← NeighborBlock(𝑖, 𝑘 )                                         blocks after 2 smoothing steps (~10% of all blocks). Right: Active blocks after
+              if 𝑆 0 [𝑖 2 ] and max 𝑗 ∈ 𝑓𝑘 𝑅 [ 𝑗 ] > 𝜃 then                      6 steps (~1% of all blocks).
+                    if AtomicCompareExchange(𝑆 ′ [𝑖 2 ], 1, 0) = 0 then
+                      𝐵 ′ [AtomicIncrement(𝑛 ′ ) ] ← 𝑖2 ;
+                                                                                 decreasing exponentially) with each CG iteration. We therefore
+     for each block 𝑖 do in parallel
+                                                                                 take a different approach and propose determining 𝜃 adaptively
+         if 𝑙𝑒𝑣𝑒𝑙 (𝑖, 𝐿) ≤ 𝐿 or ((IsResolutionBoundaryBlock(i) and
+          𝑙𝑒𝑣𝑒𝑙 (𝑖, 𝐿) = 𝐿 + 1)) then                                            by computing the log-histogram of the initial effective residual
+              𝐵 [AtomicIncrement(𝑛) ] ← 𝑖 ⊲Initial list of active blocks         and applying fast histogram segmentation. In practice, we found
+              𝑆 0 [𝑖 ] ← 𝑆 [𝑖 ] ← 1                                              that a simple choice of setting 𝜃 to the mean plus two standard
+                                                                                 deviations of the log-histogram works well. Using MSBG, histogram
+     for 𝑖𝑖𝑡𝑒𝑟 ← 1 to 𝑁𝑖𝑡𝑒𝑟,𝑚𝑎𝑥 do
+                                                                                 construction can be performed very efficiently at the block level,
+         if n=0 then break;
+                                                                                 using only the per-block maxima of the residuals.
+         SortByMortonCode(𝐵) ⊲ Improve coherence of memory access
+         for 𝐼𝑟𝑏 ← 0 to 1 ⊲Outer red-black scheme                                   Flexible Preconditioned Conjugate Gradient Method. One reason
+          do                                                                     why adaptive relaxation has not been considered in the context of
+              for 𝑗 ← 1 to 𝑛 do in parallel                                      multigrid-preconditioned CG probably lies in the fact that CG re-
+                  𝑖 ← 𝐵[ 𝑗 ]
+                  𝑥𝑏 , 𝑦𝑏 , 𝑧𝑏 ← BlockCoords(𝑖 )
+                                                                                 quires the preconditioner to preserve symmetry. This constraint ne-
+                  if (𝑥𝑏 + 𝑦𝑏 + 𝑧𝑏 ) mod 2 = 𝐼𝑟𝑏 then continue;                  cessitates performing exactly the same number of relaxation sweeps
+                  𝑟 0 ← RelaxBlock(𝑖, 𝑅); 𝑘 ← 1 ⊲R is a local buffer             during pre- and post-smoothing [McAdams et al. 2010; Tatebe 1993],
+                  repeat                                                         a requirement that is inherently violated by adaptive relaxation.
+                       𝑟, 𝑅 ← RelaxBlock(𝑖, 𝑅) ; 𝑘 ← 𝑘 + 1                          To resolve this issue, we employ the flexible preconditioned conju-
+                  until 𝑟 /𝑟 0 < 13 or 𝑘 ≥ 𝑘𝑚𝑎𝑥 ;                                gate gradient method [Bouwmeester et al. 2015]. It has been shown
+                  if 𝑟 > 𝜃 then ActivateBlock(𝑖, 𝑅) ;                            to be robust even when the preconditioner is not symmetric pos-
+                                                                                 itive definite (SPD), and is implemented efficiently by replacing
+          for 𝑗 ← 1 to 𝑛 do 𝑆 [𝐵 [ 𝑗 ] ] ← 0
+          swap(𝑛, 𝑛 ′ ); swapRef(𝐵, 𝐵 ′ ); swapRef(𝑆, 𝑆 ′ )                      the standard Fletcher–Reeves update step with the more robust
+                                                                                 Polak–Ribière variant. While it requires storing an additional vec-
+                                                                                 tor, this overhead is offset in our overall algorithm thanks to the
+                                                                                 block-based red-black scheme (Section 6.3), which eliminates the
+propose using an alternative metric for the effective residual, namely           need for a temporary destination buffer during parallel iterations.
+the maximum change over all variables of a block after the local                    In combination, our contributions to improved adaptivity on the
+block relaxations, multiplied by the diagonal—effectively "contrast-             Poisson solver side, namely,
+equalizing" the phases.                                                              • Multiresolution Galerkin-multigrid
+   Adaptive error threshold. Previous work on adaptive relaxation                    • Adaptive relaxation with improved residual metric and adap-
+proposed using a fixed user-defined residual error threshold 𝜃 but                     tive error threshold
+provided no guidance on selecting an appropriate value. Relying on                   • Adaptive multigrid as a preconditioner for CG
+a prescribed, fixed 𝜃 is problematic in our case, as we use adaptive                 • A memory-efficient parallel multiresolution smoother
+relaxation-based multigrid as a preconditioner for CG, where the                 resolved the pressure-solver bottleneck in all our examples, regard-
+dynamic range of the effective residual error may vary widely (often             less of simulation resolution or flow complexity.
+
+ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+                                                                                     Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation     •   15
+
+
+
+
+Fig. 13. Asteroid impact with 600 million particles simulated on a laptop. Effective resolution: 10243 for pressure, and 30723 for spray. Avg. simulation time per
+time step: ≈ 70s. Bottom right: 2D-slice of the phase field shaded by velocity curl magnitude.
+
+
+7   Spray and Rendering                                                             then perform comparisons to reference simulations from Graph-
+To simulate spray effects, we largely follow previous work: escaped                 ics and CFD, and highlight the capabilities of PF-FLIP on MSBGs
+FLIP particles (Section 3.4) are converted into purely Lagrangian                   with a range of large-scale simulation examples at very high grid
+droplet particles, which move under the influence of gravity and                    resolutions.
+drag forces induced by the air velocity field [Gissler et al. 2017; Song               Unless stated otherwise, all tests and simulations were conducted
+et al. 2005]. We integrate the corresponding ODE using RK2 with                     on a single AMD workstation (Ryzen Threadripper) with 32 cores
+locally adaptive time stepping. Additional spray particles are emit-                and 256 GB of RAM. To demonstrate the method’s performance
+ted near the interface in areas of steep velocity gradients [Ihmsen                 on less powerful hardware, we also include an example (Figure 13)
+et al. 2012]. For increased physical realism, we employ per-particle                executed on a laptop (Intel Core i7, 14 cores, 32 GB of RAM). We
+droplet radii, 𝑟 𝑝 , which are sampled from a log-normal distribu-                  emphasize that our solver does not rely on GPU acceleration, which
+tion [Babinsky and Sojka 2002] on droplet emission, subsequently                    is important for our target use case of very large-scale scenarios
+evolved according to a physics-based evaporation ODE [Sirignano                     whose memory requirements can exceed the limited RAM capacities
+2010], 𝑑𝑟 𝑝 /𝑑𝑡 ∼ −1/𝑟 .                                                            (compared to CPUs) of even high-end GPUs.
+   We found it crucial for realism to simulate and render spray
+particles at a significantly higher resolution than that provided by                8.1    Adaptive Grids with MSBG
+the base pressure solver. To achieve this, we employ a spray density                   Performance across representative operations. In order to evaluate
+field (at 16 bit float precision) with a resolution two to four times               the performance of MSBG, we conducted tests across representa-
+higher than the pressure and velocity fields. Spray particles are                   tive operations that typically determine the performance of many
+simulated at the increased resolution of this field and rasterized into             physics-based simulation schemes: particle-to-grid transfer (P2G),
+it to yield a volumetric density for rendering. Here, we leverage                   stencil-based iterative evolution of a partial differential equation
+MSBG to efficiently handle sparse grids with up to tens of thousands                (PDE) and interpolation of grid quantities at point positions (G2P).
+of voxels per dimension (Section 8.1).                                                 In these tests, 1.6 billion particles were rasterized (P2G) as spheres
+   We used a (MSBG based) volumetric ray tracer with approximate                    with a radius of 3 grid cells on a sparse grid with an effective resolu-
+multiple scattering to render the spray density field and the water.                tion of 10, 0002 × 5, 000 cells, resulting in 10.6 billion active voxels,
+The rendered surface is reconstructed from the liquid particles using               which were subsequently filtered using ten iterations of Laplacian
+standard particle skinning and surface smoothing [Bhatacharya                       diffusion (PDE). An illustration of this setup is shown in Figure 14.
+et al. 2011]. Note, that spray particle rasterization and water surface             Next, one billion point queries were performed with linear inter-
+reconstruction are only necessary at render time, i.e. every 5-10                   polation of the filtered grid values (G2P). To ensure realistic test
+time steps. High-curvature areas of the air-water interface were                    conditions, the particles were taken from a snapshot of a complex,
+rendered with foam-like scattering coefficients. Apart from this, no                high-resolution simulation (the asteroid impact scenario shown in
+post-processing effects or procedural textures are applied.                         Figure 13). Table 2 presents the results in comparison to the VFX
+                                                                                    industry standard VDB [Museth 2013], which serves as the state-of-
+                                                                                    the-art baseline (we used OpenVDB version 11). Compared to VDB,
+8   Results                                                                         MSBG achieves performance improvements by a factor of 3.7 to 9.6.
+We first evaluate the performance of the key components of our                      At the same time, the memory footprint increases only moderately
+method, the MSBG framework for spatial adaptivity and the adap-                     by 11%, despite the MSBG blocks in this example being twice as
+tive Poisson solver, in comparison to state-of-the-art methods. We                  large (eight times the 3D volume) as the VDB blocks (163 vs. 83 ).
+
+                                                                                              ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+16   •   Braun et al.
+
+
+This provides strong evidence supporting the theoretical considera-                 Table 3. Memory bandwidth utilization of a seven-point stencil Laplacian
+tions presented in Section 4.1, which justify our decision to employ                kernel in percent peak machine bandwidth vs. streaming copy baseline.
+                                                                                    MSBG nearly saturates machine bandwidth.
+significantly larger blocks than those used in prior methods.
+Table 2. MSBG Performance across operations representative of physical                                         Streaming copy         Laplacian kernel
+simulations in graphics: particle- to-grid transfer (P2G), stencil-based it-          Method                                        VDB SPGrid MSBG
+erative evolution of a PDE, and interpolation of grid quantities at point             Bandwidth utilization          100%           11%    39%      90%
+positions (G2P). Performance is measured in units of million particles per
+second (P2G, G2P) or million grid cells per second (PDE). The test scenario
+is shown in Figure 14.
+
+         Test                          VDB       MSBG       Improvement
+         P2G (Mparts/s) ↑              16.7      62.6            × 3.7
+         PDE (Mcells/s) ↑              948       9097            × 9.6
+         G2P (Mparts/s) ↑              634       4051            × 6.4
+         Memory usage (GB) ↓           37.3      41.4            × 0.9
+
+
+
+
+                                                                                    Fig. 15. A 32𝑘 3 MSBG grid with 100 billion active voxels as a narrow band
+                                                                                    surface reconstruction from 32𝑘 bunnies each consisting of the 32𝑘 point
+                                                                                    samples of the Stanford dataset. Effectively, a mean curvature flow PDE
+                                                                                    was evolved on the MSBG grid at a speed of 10 billion unknowns per second
+                                                                                    per iteration.
+
+
+                                                                                       100-billion-voxels. As a final example to showcase the potential
+                                                                                    of MSBG we took the 32𝑘 point samples of the original Stanford
+Fig. 14. The test scenario for the results reported in Table 2 involves raster-     bunny dataset and rasterized them as a cloud of 32𝑘 small bunnies,
+izing 1.6 billion particles as spheres with a radius of 3 grid cells on a sparse    giving 32𝑘 ×32k= 1𝐵 particles in total, onto a 32𝑘 3 MSBG grid (base
+grid with an effective resolution of 10, 0002 × 5, 000, resulting in 10.6 billion   block resolution 32) as a narrow-band signed distance field, yielding
+active voxels, subsequently filtered by Laplacian diffusion.                        approximately 100 billion active out of 35 trillion virtual voxels. Then
+                                                                                    a smooth surface was reconstructed from the particles through ten
+   Memory bandwidth utilization. A key requirement for any spatial                  iterations of a mean curvature flow PDE on the MSBG grid. To fit
+adaptivity method is that the efficiency gained through adaptivity                  100 billion voxels into main memory, we used a single MSBG data
+is not negated by the administrative overhead of managing internal                  channel with half-precision and exploited MSBGs block-multicolor-
+data structures. In this context, a spatial adaptivity scheme can be                based PDE-stencil-operators for solving the mean curvature flow–a
+considered optimal if operations on an adaptive grid can be per-                    second order PDE with wide stencil–in parallel via an eight-color
+formed at nearly the same speed per active cell as on a uniform                     scheme without the need for an additional temporary data channel.
+grid. The performance of uniform grids, in turn, is mostly deter-                   The surface, shown in Figure 15, was rendered at 4K resolution in
+mined by RAM bandwidth due to relatively low arithmetic intensity                   ≈ 30 seconds using a MSBG-based ray tracer.
+(measured in FLOPS per byte transferred) of typical computational
+                                                                                    8.2     Basic Phase-Field Tests
+kernels (PDE). Consequently, the effective RAM transfer rate (ex-
+pressed as a percentage of the peak machine bandwidth) for a given                  In order to evaluate the basic accuracy and physical soundness
+kernel serves as an effective metric for evaluating the efficiency of               of Phase-Field FLIP in comparison with results from established
+adaptivity schemes.                                                                 two-phase flow literature, we conducted two classical benchmark
+   Table 3 compares MSBG to two prominent state-of-the-art meth-                    tests.
+ods, VDB and SPGrid, using the aforementioned metric applied to
+                                                                                          Table 4. Relative phase field error of the shear flow advection test.
+a seven-point stencil Laplacian kernel, which is representative of
+many computations in graphics. A simple streaming copy serves as                                      Model                         Relative error
+the baseline proxy for peak machine bandwidth. The SPGrid result
+                                                                                                      [De Rosis and Enan 2021]          0.0490
+was derived from Table 1 in [Aanjaneya et al. 2017]. As shown, SP-
+                                                                                                      [Li et al. 2022]                  0.0500
+Grid is approximately four times more efficient than VDB but cannot                                   Ours                              0.0314
+fully utilize the available bandwidth. In contrast, MSBG achieves
+performance close to the peak machine bandwidth.
+
+ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+                                                                                                 Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation                                  •   17
+
+
+(a)                  (b)
+                                                                                                                                                                                         PCG Iterations
+                                                          He et al. 1999 0.0                                                          103
+                                                                                                                                                                                         CPU Time (s)
+
+
+
+
+                                                                                                    Iterations / CPU Time (Seconds)
+                                                          Ours
+                                                                                           0.5
+
+
+
+                                                                      Spike-tip position
+                                                                                                                                      102
+                                                                                           1.0
+
+
+                                                                                           1.5
+                                                  Normalized time                                                                     101
+                      0.0        0.5        1.0      1.5        2.0
+Fig. 16. (a) Shear flow advection test, (b) Rayleigh-Taylor Instability at high                                                             Incomplete       Geometric      Galerkin MG       Adaptive
+density ratio (A = 0.9).                                                                                                                     Cholseky        Multigrid      + Boundary        Multigrid
+                                                                                                                                                                             Relaxation        (ours)
+   Advection of phase field in prescribed velocity field. In this test,                          Fig. 17. Number of preconditioned CG iterations and CPU time (logarithmic
+we simulated the passive advection of a spherical shape in a pre-                                y-axis) per time step for the pressure Poisson solve in the asteroid impact
+                                                                                                 scenario. Our adaptive multigrid scheme outperforms the closest competitor
+scribed, time-dependent velocity field that induces a typical shear
+                                                                                                 from previous work roughly by a factor of three.
+flow—commonly used in previous studies [De Rosis and Enan 2021;
+Fakhari et al. 2019; Li et al. 2022]. For a detailed description of the test
+setup, we refer to the work of Li et al. [2022]. Figure 16 (a) shows ren-                        iterations and the total CPU time required per time step, averaged
+derings of the test sphere at the start of the simulation (𝑡 = 0), at the                        over 10 steps during the most challenging phase of the simulation
+point of maximum deformation (𝑡 = 𝑇 /2), and at the end of the test                              in terms of relative speeds between the air, water and solid phases.
+following reverse advection (𝑡 = 𝑇 ). Table 4 presents the resulting                             The results, shown in Figure 17, highlight significant differences
+                                 Í
+relative error, computed as ( 𝑖 (𝜙 (𝑥𝑖 , 0) − 𝜙 (𝑥𝑖 ,𝑇 )) 2 /𝜙 2 (𝑥𝑖 , 0)) 1/2 ,                 among the tested methods: Incomplete Cholesky [Bridson 2015],
+and compares it with previously published results. As expected, our                              Geometric Multigrid (e.g., [Setaluri et al. 2014]), Galerkin Multigrid
+hybrid Lagrangian-Eulerian advection method yields lower error                                   [Shao et al. 2022] with additional boundary relaxations [McAdams
+than existing purely Eulerian phase field transport schemes.                                     et al. 2010], and our fully adaptive multigrid method. The results are
+   3D Rayleigh-Taylor instability. In this test, we adopted the same                             presented on a logarithmic scale on the y-axis to clearly illustrate
+setup as described by He et al. [1999], featuring a simulation of                                the wide range of results across the methods.
+the Rayleigh-Taylor instability with a high density contrast. The                                   Incomplete Cholesky, as a baseline, exhibited the highest iteration
+Atwood number is 𝐴 = (𝜌𝑙 −𝜌𝑔 )/(𝜌𝑙 +𝜌𝑔 ) = 0.9, and surface tension                              count, exceeding 103 . In contrast, Geometric Multigrid significantly
+is neglected. The grid resolution is 256 × 64 × 64. We set the domain                            reduced iteration count and CPU time, achieving approximately
+length to 𝐿 = 0.05, viscosity to 𝜈𝑙 = 𝜈𝑔 = 4 × 10 −5 , gravitational                             an order of magnitude improvement over Incomplete Cholesky.
+acceleration to 𝑔 = 9.81 (all in SI units) and simulation parameters                             Galerkin Multigrid [Shao et al. 2022], when combined with addi-
+𝛼𝜙 = 0.5 and 𝐶𝐹 𝐿 = 0.5. Figure 16 (b) shows the development of the                              tional boundary relaxations [McAdams et al. 2010], further reduced
+spike-tip position, which is in good agreement with the reference.                               computational cost by about a factor of four. Finally, our fully adap-
+In later stages of the simulation, because of the absence of surface                             tive multigrid solver proved to be the most efficient approach, im-
+tension, thin sheets of the interface begin to break up into ligaments                           proving iteration count and CPU time roughly by an additional
+and droplets. This is not observed in the corresponding simulation                               factor of three.
+by He et al. [1999], highlighting the ability of our relatively sharp                               Comparison With High-Performance CFD-Solvers. Next, we present
+(𝜖𝜙 = Δ𝑥) phase field to resolve fine interface structures near the                              a comparison with CFD solutions to demonstrate both the physical
+Nyquist limit of the grid.                                                                       soundness of our overall method and the performance potential of
+                                                                                                 our adaptive pressure solver. We re-simulated the "difficult scenario"
+8.3    Adaptive Poisson Solver                                                                   from the work of MacLachlan et al. [2008] which evaluated fast pres-
+To evaluate the performance of our pressure solver against state-                                sure solvers for high-density-contrast incompressible two-phase
+of-the-art methods, we simulated a highly challenging scenario—                                  flow by simulating rising and disintegrating bubbles. This bench-
+the asteroid impact—using both prior methods and our approach.                                   mark was designed to be particularly challenging because of its
+This scenario features complex dynamic fluid-solid interactions,                                 deliberate exclusion of surface tension, resulting in highly complex
+high density contrast two-phase fluid-fluid interface geometry, and                              and dynamic interface geometries. It is therefore also well suited
+intense turbulence, as illustrated in Figure 13.                                                 for our target of large-scale simulations, where the influence of sur-
+   For this test, the effective grid resolution was set to 15363 , with                          face tension is likewise negligible. The residual error tolerance was
+approximately 1.6 billion particles. The comparison was evaluated                                intentionally set to a low value of 𝜖𝑡𝑜𝑙 = 10 −8 for this benchmark
+based on the number of Preconditioned Conjugate Gradient (PCG)                                   (in contrast to the 10 −4 used for other examples).
+
+                                                                                                                                       ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+18   •   Braun et al.
+
+
+Table 5. Comparison with CFD pressure solvers for a two-phase flow bench-
+mark. CG Iterations per time step for BoxMG and DIC as reported in Figure
+7 a) in MacLachlan et al. [2008] during the "difficult" phase of the simulation.
+
+                    Iterations    Stencil   Pre-processing      Adaptive mesh
+     Method
+                    per step      size      cost per step       refinement
+     Ours           ≈ 30          4         Low                 Native/MSBG
+     BoxMG-CG       ≈ 40          4/14      High                Difficult
+     DIC-CG         > 300         4         Medium              Medium
+
+
+
+
+   Table 5 compares our method with the two best performing meth-
+ods in the study of MacLachlan et al.: Deflation IC (DIC) and Box-
+Multigrid (BoxMG). Our solver requires fewer iterations per time
+step than the best performing method (BoxMG) in the aforemen-
+tioned study, while also incurring lower computational cost per
+iteration due to its smaller, 4-point stencil. In contrast, BoxMG
+requires 14-point stencils on all but the finest resolution levels. An-
+other advantage of our approach is its faster per-step preprocessing.
+Specifically, our method requires only a simple sweep over the
+multigrid hierarchy to calculate three coefficients per cell (see Al-
+gorithm 1), whereas BoxMG involves more expensive sweeps with
+nested loops to compute 14 coefficients for a symmetric 27-point
+                                                                                   Fig. 18. Top row: Rising and disintegrating bubbles as of the CFD-benchmark
+stencil. Most importantly, our method can be naturally extended to                 from [MacLachlan et al. 2008] ("difficult scenario"). Bottom row: 2D slices
+a multiresolution adaptive scheme, as demonstrated in the present                  (zoomed-in) at 𝑡 = 0.0266 seconds, showing the phase field (blue=water,
+work using MSBG. In contrast, extending Box-MG to an adaptive                      yellow=air) and the vorticity magnitude of the velocity field. (a) Grid res-
+framework would be inherently more difficult and less efficient due                olution of 2003 as used by MacLachlan et al. (our re-simulation) (b) Our
+to its 27-point stencil structure in 3D.                                           adaptive simulation at ten times the original resolution.
+
+
+Table 6. Timing breakdown of an average simulation step of our method for
+the scenario shown in Figure 25, compared to the SPGrid-based solver from          8.4   Full Simulation Results
+Setaluri et al. [2014] for their highest resolution example and a recent two-
+phase method in CFD [Zeng et al. 2022] for a dam-break simulation. Our
+                                                                                   We simulated a variety of examples to demonstrate the effectiveness
+method successfully avoids the pressure bottleneck of other methods which          of our method in animating complex, large-scale two-phase flow
+spend a disproportionate amount of time solving the Poisson equation. (A           scenarios at very high, cinematic resolutions. Where possible, we
+dash indicates not available / applicable.)                                        also included real photographs for qualitative comparison. We did
+                                                                                   not, however, make an effort to precisely match the conditions of
+            Method               P2G     Pressure      Advect      Other           the photographs. For an impression of the animated versions we
+            Ours                 27%        30%          13%         30%           also strongly encourage viewing the accompanying video.
+            Setaluri et al.       -         91%           5%         4%               Simulation times were typically on the order of 30 to 100 seconds
+            Zeng et al.           -         83%            -         17%           per time step with 2–7 time steps per frame at CFL numbers of 3–4
+                                                                                   (Table 7). Viscosity-parameters 𝛼 𝐹 𝐿𝐼 𝑃 were set to 0.985 and 0.96 for
+                                                                                   liquid and air, respectively. Resolutions are expressed as effective
+  To demonstrate the full potential of our method, we reran the                    resolution, referring to the equivalent resolution of a uniform grid
+same benchmark scenario at a resolution ten times higher than                      that would be required to resolve the phase interface at the reso-
+the highest reported in MacLachlan’s original study, that is, 20003                lution of the finest MSBG level. All simulations are physics-based,
+compared to 2003 at approximately the same number of iterations                    without vorticity confinement or any other artificial turbulence
+per time step. Figure 18 shows a zoom-in of the complex interface                  enhancement.
+dynamics of a fragmenting air bubble.
+                                                                                      Dam break with obstacle. First, we set up a classic dam break
+   Eliminating the Pressure-Solver Bottleneck. For prior state-of-the-             scenario similar to [Li et al. 2022, 2024], where we enlarged the
+art methods, pressure correction often accounts for the vast majority              relative width of the simulation domain to provide more room for
+of total simulation time, particularly at high grid resolutions and                splashing and water-air interaction. The effective resolution was
+large phase density contrasts. In contrast, in all our examples, the               also increased from 800 × 4002 (Li et al. [2024]) to 16003 . Small-scale
+pressure solve accounted for no more than about one-third of the                   (3 meters) and large-scale (400 meters) simulations were conducted
+total runtime, regardless of grid resolution or flow complexity (cf.               with both a standard single-phase free-surface and our proposed
+Table 6).                                                                          two-phase solver. Figure 19 shows snapshots from the resulting
+
+ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+                                                                                Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation     •   19
+
+
+                                                                                2019]. The resulting two-phase velocity field, shown in Figures 20
+                                                                                and 22 (top), highlights the capability of our method to resolve the
+                                                                                liquid-air boundary layer and to reproduce realistic two-phase tur-
+                                                                                bulence phenomena in the vicinity of a complex, highly dynamic
+                                                                                liquid-air interface. This is crucial for realistic detail of complex
+                                                                                spray movement (encircled areas in Figure 20), and, to the best of
+                                                                                our knowledge, has not been demonstrated before in Graphics at
+                                                                                high resolutions without procedural heuristics.
+                                                                                   Wave and Obstacle at Extreme Resolution. To test the scalability
+                                                                                of our method up to the limits of machine resources (256 GB of
+                                                                                memory), we further increased the adaptive grid resolution to 6𝑘 ×
+                                                                                2𝑘 × 1.6𝑘 for the pressure (and 18𝑘 × 6𝑘 × 5𝑘 for the spray density
+                                                                                field) with more than 3 billion particles. A solid obstacle was also
+                                                                                placed in the middle of the wave tank. A snapshots of the resulting
+                                                                                simulation is shown in Figure 1. The average simulation time was
+                                                                                approximately 2 minutes per time step with a total duration of 3.5
+                                                                                days.
+                                                                                   Dam Discharge. For this experiment, we modeled the discharge
+Fig. 19. Dam break scenario. Small-scale (left column) vs. Large-scale (right
+                                                                                flow of a large hydrodynamic dam, inspired by the Three Gorges
+column) simulations. Single-phase simulations are almost identical regard-
+                                                                                Dam in Sandouping, China. Water flows at a velocity of 40 m s −1
+less of scale, while our two-phase method can reproduce characteristic
+features of violent large-scale flows (d), such as "explosive" jets of spray.   through a floodgate with a diameter of 5 m, inclined at an angle of 18
+                                                                                degrees to the horizontal. The floodgate is located at a height of 9 m
+                                                                                above a reservoir pool with an initial water depth of 3 m. Figure 3
+                                                                                highlights the intense two-phase water-air turbulence caused by the
+                                                                                resulting water jet, ejected at very high speed through the floodgate.
+                                                                                The total size of the simulation domain is 𝐿 = 200 m, resolved at
+                                                                                a resolution of 2048 cells for the pressure and 8192 cells for the
+                                                                                rendered water surface and spray density fields, respectively.
+                                                                                   Tsunami Wave Hitting a Complex Coast Line. The next exam-
+                                                                                ple demonstrates the robustness of PF-FLIP in handling complex
+                                                                                solid geometry alongside an intricate liquid-air interface. In this
+                                                                                scenario, we simulated a tsunami wave impacting a procedurally
+                                                                                generated fractal coast, which exhibits geometric detail across all
+                                                                                spatial frequencies. The initial wave speed is 𝑣 0 = 30 m s −1 . Effective
+                                                                                Resolution is 4096 × 10242 . Figure 24 shows a snapshot of the simula-
+                                                                                tion, with the included reference photograph highlighting the high
+Fig. 20. Fully simulating the surrounding air velocity field is crucial for     level of physical realism achieved by our method in reproducing
+visually convincing large-scale water simulations: An ocean wave break-         the characteristic spray clouds driven by the turbulent air phase of
+ing on the beach was simulated with our proposed method. Shown is the           the two-phase velocity field.
+two-phase velocity field (vorticity). Upper left corner: The same simulation
+                                                                                   Ocean Wave-Train Breaking on the Beach. Finally, we present a
+rendered in 3D. Effective resolution: 4096 × 1024 × 512.
+                                                                                simulation of a large, kilometer-sized ocean scene with multiple
+                                                                                wave trains shoaling and breaking on an artificial beach. Here, in
+simulations. Single-phase simulations essentially look the same re-             order to create more complex and natural wave patterns, we inclined
+gardless of scale (except for time scaling, i.e. large scale looks like         the wave generator to let waves interact with their own reflections
+small scale in slow-motion) because of missing non-linear effects of            from the domain boundary. Figure 21 illustrates the setup. The effec-
+the air phase interactions. In contrast, our two-phase simulation in            tive resolution was set to 3072 × 1536 × 1024, with approximately 2
+(d) conveys the sense of a large-scale dam break. It faithfully repro-          billion particles. Each time step required, on average, 60 seconds of
+duces characteristic large-scale flow features such as explosion-like           CPU time. The resulting simulation snapshots, shown in Figures 4, 5,
+jets and streamers of spray formed by vortex tubes of the turbulent             25, and 23, demonstrate the ability of our solver to faithfully capture
+air velocity (encircled in purple).                                             key visual features of large-scale water-air flows. These features in-
+                                                                                clude wind-blown mist streamers over wave crests, the characteristic
+  Numerical Wave Tank and Two-Phase Turbulence. In the next ex-                 "explosion-like" jets and spray plumes of highly turbulent air-water
+periment, we generated large solitary ocean waves in a numerical                interactions associated with plunging wave lips, and the charac-
+wave tank driven by a standard piston-type wavemaker [Wang et al.               teristic "wave tubes." Owing to the solver’s physics-based nature
+
+                                                                                         ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+20 •         Braun et al.
+
+
+this complex behavior is generated from simple simulation setups
+without requiring procedural detail enhancements, post-processing
+heuristics, or artistic intervention.
+
+Table 7. Statistics for our large scale simulations. The number of active
+pressure cells is number of FLIP particles divided by 8.
+
+    Figure                Effective resolution          Max particles     Min. per
+                     Pressure           Spray-density    FLIP/Spray      Step/frame
+    1           6144×2048×1600       18432×6144×4800      3.1/1.0 B           1.9/9.5
+    3              2048×10242           8192×40962        1.1/0.5 B           0.7/4.0
+    4,5,25      3072×1536×1024       12288×6144×4096      2.0/0.1 B           1.0/5.7
+    22           4096×1024×512       12288×3072×1536      1.0/0.2 B           0.6/6.1
+    24             4096×10242          12288×30722        1.2/0.5 B           0.8/7.0
+
+
+
+
+                                                                                        Fig. 22. Large ocean wave. Adaptive PF-FLIP is capable of resolving the air-
+                                                                                        water boundary layer, flow separation, free shear layer and the turbulent
+                                                                                        wake behind the wave crest in 3D. (a) Shown is part of a 2D slice (vorticity
+               Fig. 21. Simulation setup with inclined wave generator.
+                                                                                        magnitude) from a 3D simulation with an effective resolution of 4096 ×
+                                                                                        1024 × 512 cells and a total simulation domain size of 500 meters. (b) 3D
+                                                                                        rendering of the same wave during breaking.
+9      Limitations
+While our method demonstrates significant improvements and capa-
+bilities, it is not without limitations. One inherent constraint, shared
+with most Cartesian grid-based adaptivity schemes, is that resolu-
+tion boundaries currently cannot cross the liquid-air interface. We
+note that, in principle, it is possible to lift this restriction [Ando and
+Batty 2020] and we plan such an extension in future work. Further-
+more, the maximum depth of refinement is restricted to the binary
+logarithm of the MSBG base block resolution, that is, log2 (16) or
+log2 (32). We have not found this limiting in practice, as in 3D each
+level of refinement reduces computational costs significantly, by a
+factor of eight.
+   Finally, as with other FLIP-based methods, our approach can
+exhibit relatively high levels of noise in field quantities arising from
+                                                                                        Fig. 23. Breaking wave. Turbulent wave tube. Detail zoom-in of the large-
+high-frequency noise in the particle distribution. While this is not                    scale simulation shown in Figure 25
+critical for our large-scale, highly turbulent target scenarios, which                                                       .
+inherently exhibit a high level of "natural" noise, it could impede
+the effectiveness of our method for very small-scale, surface-tension
+dominated scenarios, especially at low density ratios.                                  adaptive Poisson solver. This approach addresses the key challenges
+                                                                                        of large-scale, high-resolution, and highly turbulent two-phase fluid
+10       Conclusions and Outlook                                                        simulation with large density ratios. By leveraging the proposed
+We have introduced Adaptive Phase-Field-FLIP, a method that com-                        MSBG (Multiresolution Sparse Block Grids) framework and integrat-
+bines a novel FLIP variant for two-phase flow, an efficient dual                        ing adaptivity across all critical simulation components, including
+multiresolution scheme for grids and particles, and a highly efficient                  the Poisson solver, our method achieves unprecedented efficiency
+
+ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+                                                                                      Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation       •   21
+
+
+
+
+Fig. 24. Large waves hitting the coast at high speed. Comparison between our simulation and a real photograph for qualitative reference. Photograph © AP
+Photo / Ben Birchall.
+
+
+
+
+Fig. 25. Breaking ocean waves simulated with our method (2 billion particles). Our method faithfully captures key visual features of large-scale air-water flows,
+such as wind-blown mist streamers over wave crests and the characteristic ’explosion-like’ jets and spray plumes of highly turbulent air-water interactions.
+
+
+and scalability. This enables the fully physics-based simulation of                   Bart Adams, Mark Pauly, Richard Keiser, and Leonidas J. Guibas. 2007. Adaptively
+intricate two-phase phenomena like turbulent air wakes of breaking                       sampled particle fluids. ACM Trans. Graph. 26, 3 (July 2007), 48–es.
+                                                                                      Mark Adams, Marian Brezina, Jonathan Hu, and Ray Tuminaro. 2003. Parallel multigrid
+waves, at cinematic resolutions on a single work station.                                smoothing: polynomial versus Gauss–Seidel. J. Comput. Phys. 188, 2 (2003), 593–610.
+   Looking ahead, a number of interesting directions exist for future                 Daniel M Anderson, Geoffrey B McFadden, and Adam A Wheeler. 1998. Diffuse-
+                                                                                         interface methods in fluid mechanics. Annual review of fluid mechanics 30, 1 (1998),
+exploration. As discussed in Section 9, we aim to extend spatial                         139–165.
+adaptivity to cases where resolution boundaries intersect the liquid                  Ryoichi Ando and Christopher Batty. 2020. A practical octree liquid simulator with
+surface. Another interesting line of research enabled by our work                        adaptive surface resolution. ACM Transactions on Graphics (TOG) 39, 4 (2020), 32–1.
+                                                                                      Ryoichi Ando, Nils Thurey, and Reiji Tsuruno. 2012. Preserving fluid sheets with
+would be the integration of simulated turbulent wind fields which                        adaptively sampled anisotropic particles. IEEE transactions on visualization and
+could open up the possibility to simulate realistic storm scenarios                      computer graphics 18, 8 (2012), 1202–1214.
+with ocean waves driven by physical wind dynamics. In future                          Ryoichi Ando, Nils Thürey, and Chris Wojtan. 2013. Highly adaptive liquid simulations
+                                                                                         on tetrahedral meshes. ACM Transactions on Graphics (TOG) 32, 4 (2013), 1–10.
+work we would also like to improve our spray model, possibly by                       T Arrufat, M Crialesi-Esposito, D Fuster, Y Ling, L Malan, S Pal, R Scardovelli, G
+incorporating droplet atomization models from the field of CFD.                          Tryggvason, and S Zaleski. 2021. A mass-momentum consistent, volume-of-fluid
+                                                                                         method for incompressible flow on staggered grids. Computers & Fluids 215 (2021),
+Finally, we see potential for employing adaptive PF-FLIP in the                          104785.
+context of CFD applications, such as large-scale numerical wave                       E Babinsky and PE Sojka. 2002. Modeling drop size distributions. Progress in energy
+tanks or the study of wave-structure interactions in coastal and                         and combustion science 28, 4 (2002), 303–329.
+                                                                                      Allison H Baker, Robert D Falgout, Tzanio V Kolev, and Ulrike Meier Yang. 2011. Multi-
+offshore engineering.                                                                    grid smoothers for ultraparallel computing. SIAM Journal on Scientific Computing
+                                                                                         33, 5 (2011), 2864–2887.
+                                                                                      Marsha J Berger and Phillip Colella. 1989. Local adaptive mesh refinement for shock
+                                                                                         hydrodynamics. Journal of computational Physics 82, 1 (1989), 64–84.
+References                                                                            Haimasree Bhatacharya, Yue Gao, and Adam Bargteil. 2011. A level-set method for skin-
+Mridul Aanjaneya, Ming Gao, Haixiang Liu, Christopher Batty, and Eftychios Sifakis.      ning animated particle data. In Proceedings of the 2011 ACM SIGGRAPH/Eurographics
+  2017. Power diagrams and sparse paged grids for high resolution adaptive liquids.      Symposium on Computer Animation (Vancouver, British Columbia, Canada) (SCA
+  ACM Transactions on Graphics (TOG) 36, 4 (2017), 1–12.                                 ’11). Association for Computing Machinery, New York, NY, USA, 17–24.
+
+
+                                                                                                 ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+22 •    Braun et al.
+
+
+Henricus Bouwmeester, Andrew Dougherty, and Andrew V Knyazev. 2015. Nonsymmet-               Suhas S Jain. 2022. Accurate conservative phase-field method for simulation of two-
+   ric preconditioning for conjugate gradient and steepest descent methods. Procedia            phase flows. J. Comput. Phys. 469 (2022), 111529.
+   Computer Science 51 (2015), 276–285.                                                      Chenfanfu Jiang, Craig Schroeder, Andrew Selle, Joseph Teran, and Alexey Stomakhin.
+Landon Boyd and Robert Bridson. 2012. MultiFLIP for energetic two-phase fluid                   2015. The affine particle-in-cell method. ACM Transactions on Graphics (TOG) 34, 4
+   simulation. ACM Transactions on Graphics (TOG) 31, 2 (2012), 1–12.                           (2015), 1–10.
+Jeremiah U Brackbill, Douglas B Kothe, and Charles Zemach. 1992. A continuum                 Myungjoo Kang, Ronald P Fedkiw, and Xu-Dong Liu. 2000. A boundary condition cap-
+   method for modeling surface tension. Journal of computational physics 100, 2 (1992),         turing method for multiphase incompressible flow. Journal of Scientific Computing
+   335–354.                                                                                     15 (2000), 323–360.
+Jeremiah U Brackbill and Hans M Ruppel. 1986. FLIP: A method for adaptively zoned,           Janghee Kim, Deukhyun Cha, Byungjoon Chang, Bonki Koo, and Insung Ihm. 2006.
+   particle-in-cell calculations of fluid flows in two dimensions. Journal of Computa-          Practical animation of turbulent splashing water. In Proceedings of the 2006 ACM
+   tional physics 65, 2 (1986), 314–343.                                                        SIGGRAPH/Eurographics Symposium on Computer Animation (SCA ’06). Eurographics
+Robert Bridson. 2015. Fluid simulation for computer graphics. AK Peters/CRC Press,              Association, Goslar, DEU, 335–344.
+   Boca Raton, FL.                                                                           Markus Kowarschik, Iris Christadler, and Ulrich Rüde. 2006. Towards Cache-Optimized
+William L Briggs, Van Emden Henson, and Steve F McCormick. 2000. A multigrid                    Multigrid Using Patch-Adaptive Relaxation. In Applied Parallel Computing. State of
+   tutorial. SIAM, Philadelphia, PA.                                                            the Art in Scientific Computing, Jack Dongarra, Kaj Madsen, and Jerzy Waśniewski
+Nuttapong Chentanez, Bryan E Feldman, François Labelle, James F O’Brien, and                    (Eds.). Springer Berlin Heidelberg, Berlin, Heidelberg, 901–910.
+   Jonathan R Shewchuk. 2007. Liquid simulation on lattice-based tetrahedral meshes.         Steve Lesser, Alexey Stomakhin, Gilles Daviet, Joel Wretborn, John Edholm, Noh-Hoon
+   In Proceedings of the 2007 ACM SIGGRAPH/Eurographics symposium on Computer                   Lee, Eston Schweickart, Xiao Zhai, Sean Flynn, and Andrew Moffat. 2022. Loki: a
+   animation. Eurographics Association, Goslar, DEU, 219–228.                                   unified multiphysics simulation framework for production. ACM Transactions on
+Alessandro De Rosis and Enatri Enan. 2021. A three-dimensional phase-field lattice              Graphics (TOG) 41, 4 (2022), 1–20.
+   Boltzmann method for incompressible two-components flows. Physics of Fluids 33,           Wei Li, Daoming Liu, Mathieu Desbrun, Jin Huang, and Xiaopei Liu. 2020. Kinetic-
+   4 (2021), 043315.                                                                            based multiphase flow simulation. IEEE Transactions on Visualization and Computer
+JE Dendy. 1982. Black box multigrid. J. Comput. Phys. 48, 3 (1982), 366–386.                    Graphics 27, 7 (2020), 3318–3334.
+Anshu Dubey, Ann Almgren, John Bell, Martin Berzins, Steve Brandt, Greg Bryan,               Wei Li, Yihui Ma, Xiaopei Liu, and Mathieu Desbrun. 2022. Efficient kinetic simulation
+   Phillip Colella, Daniel Graves, Michael Lijewski, Frank Löffler, et al. 2014. A survey       of two-phase flows. ACM Transactions on Graphics 41, 4 (2022), 114.
+   of high level frameworks in block-structured adaptive mesh refinement packages. J.        Wei Li, Kui Wu, and Mathieu Desbrun. 2024. Kinetic Simulation of Turbulent Multifluid
+   Parallel and Distrib. Comput. 74, 12 (2014), 3217–3227.                                      Flows. ACM Transactions on Graphics (TOG) 43, 4 (2024), 1–17.
+Douglas Enright, Stephen Marschner, and Ronald Fedkiw. 2002. Animation and ren-              Haixiang Liu, Yuanming Hu, Bo Zhu, Wojciech Matusik, and Eftychios Sifakis. 2018.
+   dering of complex water surfaces. In Proceedings of the 29th annual conference on            Narrow-band topology optimization on a sparsely populated grid. ACM Transactions
+   Computer graphics and interactive techniques. Association for Computing Machinery,           on Graphics (TOG) 37, 6 (2018), 1–14.
+   New York, NY, USA, 736–744.                                                               Haixiang Liu, Nathan Mitchell, Mridul Aanjaneya, and Eftychios Sifakis. 2016. A
+Abbas Fakhari, Martin Geier, and Diogo Bolster. 2019. A simple phase-field model for            scalable schur-complement fluids solver for heterogeneous compute platforms.
+   interface tracking in three dimensions. Computers & Mathematics with Applications            ACM Transactions on Graphics (TOG) 35, 6 (2016), 1–12.
+   78, 4 (2019), 1154–1165.                                                                  Xu-Dong Liu, Ronald P Fedkiw, and Myungjoo Kang. 2000. A boundary condition cap-
+Yu Fang, Yuanming Hu, Shi-Min Hu, and Chenfanfu Jiang. 2018. A Temporally Adaptive              turing method for Poisson’s equation on irregular domains. Journal of computational
+   Material Point Method with Regional Time Stepping. Computer Graphics Forum 37,               Physics 160, 1 (2000), 151–178.
+   8 (2018), 195–204.                                                                        Frank Losasso, Frédéric Gibou, and Ron Fedkiw. 2004. Simulating water and smoke
+Florian Ferstl, Ryoichi Ando, Chris Wojtan, RÃ¼diger Westermann, and Nils Thuerey.              with an octree data structure. ACM Trans. Graph. 23, 3 (Aug. 2004), 457–462.
+   2016. Narrow Band FLIP for Liquid Simulations. Computer Graphics Forum 35, 2              Frank Losasso, Jerry Talton, Nipun Kwatra, and Ronald Fedkiw. 2008. Two-way coupled
+   (2016), 225–232.                                                                             SPH and particle level set fluid simulation. IEEE Transactions on Visualization and
+Florian Ferstl, Rüdiger Westermann, and Christian Dick. 2014. Large-scale liquid                Computer Graphics 14, 4 (2008), 797–804.
+   simulation on adaptive hexahedral grids. IEEE Transactions on Visualization and           Scott P MacLachlan, Jok Man Tang, and Cornelis Vuik. 2008. Fast and robust solvers
+   Computer Graphics 20, 10 (2014), 1405–1417.                                                  for pressure-correction in bubbly flow problems. J. Comput. Phys. 227, 23 (2008),
+Chuyuan Fu, Qi Guo, Theodore Gast, Chenfanfu Jiang, and Joseph Teran. 2017. A                   9742–9761.
+   polynomial particle-in-cell method. ACM Transactions on Graphics (TOG) 36, 6              Jan Mandel. 1988. Multi-Grid Methods and Applications (Wolfgang Hackbusch). SIAM
+   (2017), 1–12.                                                                                Rev. 30, 3 (1988), 519–520.
+Ming Gao, Xinlei Wang, Kui Wu, Andre Pradhana, Eftychios Sifakis, Cem Yuksel,                Daniel F Martin, Phillip Colella, and Daniel Graves. 2008. A cell-centered adaptive pro-
+   and Chenfanfu Jiang. 2018. GPU optimization of material point methods. ACM                   jection method for the incompressible Navier–Stokes equations in three dimensions.
+   Transactions on Graphics (TOG) 37, 6 (2018), 1–12.                                           J. Comput. Phys. 227, 3 (2008), 1863–1886.
+Frederic Gibou, Ronald P Fedkiw, Li-Tien Cheng, and Myungjoo Kang. 2002. A second-           A. McAdams, E. Sifakis, and J. Teran. 2010. A parallel multigrid Poisson solver for fluids
+   order-accurate symmetric discretization of the Poisson equation on irregular do-             simulation on large grids. In Proceedings of the 2010 ACM SIGGRAPH/Eurographics
+   mains. J. Comput. Phys. 176, 1 (2002), 205–227.                                              Symposium on Computer Animation (SCA ’10). Eurographics Association, Goslar,
+Christoph Gissler, Stefan Band, Andreas Peer, Markus Ihmsen, and Matthias Teschner.             DEU, 65–74.
+   2017. Generalized drag force for particle-based simulations. Computers & Graphics         Viorel Mihalef, Samet Kadioglu, Mark Sussman, Dimitris Metaxas, and Vassilios Hur-
+   69 (2017), 1–11.                                                                             musiadis. 2008. Interaction of two-phase flow with animated models. Graphical
+Francis H Harlow, J Eddie Welch, et al. 1965. Numerical calculation of time-dependent           Models 70, 3 (2008), 33–42.
+   viscous incompressible flow of fluid with free surface. Physics of fluids 8, 12 (1965),   V. Mihalef, D. Metaxas, and M. Sussman. 2007. Textured Liquids based on the Marker
+   2182.                                                                                        Level Set. Computer Graphics Forum 26, 3 (2007), 457–466.
+Xiaoyi He, Raoyang Zhang, Shiyi Chen, and Gary D Doolen. 1999. On the three-                 Viorel Mihalef, Dimitris Metaxas, and Mark Sussman. 2009. Simulation of two-phase
+   dimensional Rayleigh–Taylor instability. Physics of Fluids 11, 5 (1999), 1143–1152.          flow with sub-scale droplet and bubble effects. Computer Graphics Forum 28, 2
+Cyril W Hirt and Billy D Nichols. 1981. Volume of fluid (VOF) method for the dynamics           (2009), 229–238.
+   of free boundaries. Journal of computational physics 39, 1 (1981), 201–225.               Shahab Mirjalili, Suhas S Jain, and Micheal Dodd. 2017. Interface-capturing methods
+Jeong-Mo Hong and Chang-Hun Kim. 2005. Discontinuous fluids. ACM Transactions                   for two-phase flows: An overview and recent developments. Center for Turbulence
+   on Graphics (TOG) 24, 3 (2005), 915–920.                                                     Research Annual Research Briefs 2017, 117-135 (2017), 13.
+Yuanming Hu, Tzu-Mao Li, Luke Anderson, Jonathan Ragan-Kelley, and Frédo Durand.             Marcus Mohr and Roman Wienands. 2004. Cell-centred multigrid revisited. Computing
+   2019a. Taichi: a language for high-performance computation on spatially sparse               and Visualization in Science 7, 3 (2004), 129–140.
+   data structures. ACM Transactions on Graphics (TOG) 38, 6 (2019), 1–16.                   Joe J Monaghan. 1992. Smoothed particle hydrodynamics. In: Annual review of astronomy
+Yuanming Hu, Xinxin Zhang, Ming Gao, and Chenfanfu Jiang. 2019b. On hybrid                      and astrophysics. Vol. 30 (A93-25826 09-90), p. 543-574. 30 (1992), 543–574.
+   lagrangian-eulerian simulation methods: practical notes and high-performance as-          Ken Museth. 2013. VDB: High-resolution sparse volumes with dynamic topology. ACM
+   pects. In ACM SIGGRAPH 2019 Courses (SIGGRAPH ’19). Association for Computing                transactions on graphics (TOG) 32, 3 (2013), 1–22.
+   Machinery, New York, NY, USA, Article 16, 246 pages.                                      Mohammad Sina Nabizadeh, Ritoban Roy-Chowdhury, Hang Yin, Ravi Ramamoorthi,
+Markus Ihmsen, Nadir Akinci, Gizem Akinci, and Matthias Teschner. 2012. Unified                 and Albert Chern. 2024. Fluid Implicit Particles on Coadjoint Orbits. ACM Trans.
+   spray, foam and air bubbles for particle-based fluids. The Visual Computer 28 (2012),        Graph. 43, 6, Article 270 (Nov. 2024), 38 pages.
+   669–677.                                                                                  Mohammad Sina Nabizadeh, Stephanie Wang, Ravi Ramamoorthi, and Albert Chern.
+David Jacqmin. 1999. Calculation of two-phase Navier–Stokes flows using phase-field             2022. Covector fluids. ACM Transactions on Graphics (TOG) 41, 4 (2022), 1–16.
+   modeling. Journal of computational physics 155, 1 (1999), 96–127.
+
+
+
+ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+                                                                                            Adaptive Phase-Field-FLIP for Very Large Scale Two-Phase Fluid Simulation          •   23
+
+
+Juan Navarro, Sitararn Iyer, Peter Druschel, and Alan Cox. 2002. Practical, transparent        Water Pipeline and Toolset. In Proceedings of the 2023 Digital Production Symposium
+    operating system support for superpages. ACM SIGOPS Operating Systems Review               (Los Angeles, CA, USA). Association for Computing Machinery, New York, NY, USA,
+    36, SI (2002), 89–104.                                                                     Article 11, 13 pages.
+Michael B Nielsen and Ole Østerby. 2013. A two-continua approach to Eulerian simula-        Lucas Stringhetti. 2024.      Houdini Water Simulation Techniques: A Detailed
+    tion of water spray. ACM Transactions on Graphics (TOG) 32, 4 (2013), 1–10.                Breakdown.        The VFX Media.            Retrieved November 29, 2024, from
+Kevin M. Olson and Peter MacNeice. 2005. An Overview of the PARAMESH AMR                       https://www.thevfxmedia.com/articles/houdini-water-simulation-techniques-
+    Software Package and Some of Its Applications. In Adaptive Mesh Refinement -               from-lucas-stringhetti-a-detailed-breakdown.
+    Theory and Applications, Tomasz Plewa, Timur Linde, and V. Gregory Weirs (Eds.).        Hari Sundar, Rahul S Sampath, and George Biros. 2008. Bottom-up construction and
+    Springer Berlin Heidelberg, Berlin, Heidelberg, 315–330.                                   2: 1 balance refinement of linear octrees in parallel. SIAM Journal on Scientific
+Stanley Osher and James A Sethian. 1988. Fronts propagating with curvature-dependent           Computing 30, 5 (2008), 2675–2708.
+    speed: Algorithms based on Hamilton-Jacobi formulations. Journal of computational       Mark Sussman, Peter Smereka, and Stanley Osher. 1994. A level set approach for
+    physics 79, 1 (1988), 12–49.                                                               computing solutions to incompressible two-phase flow. Journal of Computational
+Ashish Panwar, Sorav Bansal, and K. Gopinath. 2019. HawkEye: Efficient Fine-grained            physics 114, 1 (1994), 146–159.
+    OS Support for Huge Pages. In Proceedings of the Twenty-Fourth International Con-       JM Tang and C Vuik. 2007. Efficient deflation methods applied to 3-D bubbly flow
+    ference on Architectural Support for Programming Languages and Operating Systems           problems. Electronic Transactions on Numerical Analysis 26 (2007), 330–349.
+   (ASPLOS ’19). Association for Computing Machinery, New York, NY, USA, 347–360.           Osamu Tatebe. 1993. The Multigrid Preconditioned Conjugate Gradient Method. In
+    https://doi.org/10.1145/3297858.3304064                                                    The Sixth Copper Mountain Conference on Multigrid Methods, Part 2. NASA, Copper
+Chuck Pheatt. 2008. Intel® threading building blocks. Journal of Computing Sciences in         Mountain, Colorado, USA, 621—-634.
+    Colleges 23, 4 (2008), 298–298.                                                         Jannis Teunissen and Ute Ebert. 2018. Afivo: A framework for quadtree/octree AMR
+Stéphane Popinet. 2003. Gerris: a tree-based adaptive solver for the incompressible            with shared-memory parallelization and geometric multigrid methods. Computer
+    Euler equations in complex geometries. Journal of computational physics 190, 2             Physics Communications 233 (2018), 156–166.
+    (2003), 572–600.                                                                        Ulrich Trottenberg, Cornelius W Oosterlee, and Anton Schuller. 2000. Multigrid. Elsevier,
+Stéphane Popinet. 2009. An accurate adaptive solver for surface-tension-driven interfa-        Amsterdam, The Netherlands.
+    cial flows. J. Comput. Phys. 228, 16 (2009), 5838–5866.                                 Dong-xu Wang, Jia-wen Sun, Jin-song Gui, Zhe Ma, De-zhi Ning, and Ke-zhao Fang.
+Ziyin Qu, Minchen Li, Fernando De Goes, and Chenfanfu Jiang. 2022. The power                   2019. A numerical piston-type wave-maker toolbox for the open-source library
+    particle-in-cell method. ACM Trans. Graph. 41, 4, Article 118 (2022), 13 pages.            OpenFOAM. Journal of Hydrodynamics 31, 4 (2019), 800–813.
+Ziyin Qu, Xinxin Zhang, Ming Gao, Chenfanfu Jiang, and Baoquan Chen. 2019. Efficient        Xinlei Wang, Yuxing Qiu, Stuart R Slattery, Yu Fang, Minchen Li, Song-Chun Zhu, Yixin
+    and conservative fluids using bidirectional mapping. ACM Transactions on Graphics          Zhu, Min Tang, Dinesh Manocha, and Chenfanfu Jiang. 2020. A massively parallel
+   (TOG) 38, 4 (2019), 1–12.                                                                   and scalable multi-GPU material point method. ACM Transactions on Graphics
+Wouter Raateland, Torsten Hädrich, Jorge Alejandro Amador Herrera, Daniel T Banuti,            (TOG) 39, 4 (2020), 30–1.
+   Wojciech Pałubicki, Sören Pirk, Klaus Hildebrandt, and Dominik L Michels. 2022.          Xiaokun Wang, Yanrui Xu, Sinuo Liu, Bo Ren, Jiří Kosinka, Alexandru C. Telea, Jiamin
+    Dcgrid: An adaptive grid structure for memory-constrained fluid simulation on the          Wang, Chongming Song, Jian Chang, Chenfeng Li, Jian Jun Zhang, and Xiaojuan
+    gpu. Proceedings of the ACM on Computer Graphics and Interactive Techniques 5, 1           Ban. 2024. Physics-based fluid simulation in computer graphics: Survey, research
+    (2022), 1–14.                                                                              trends, and challenges. Computational Visual Media 10, 5 (October 2024), 803–858.
+Mehdi Raessi and Heinz Pitsch. 2012. Consistent mass and momentum transport for             Daniel Weber, Johannes Mueller-Roemer, AndrÃ© Stork, and Dieter Fellner. 2015.
+    simulating incompressible interfacial flows with large density ratios using the level      A Cut-Cell Geometric Multigrid Poisson Solver for Fluid Simulation. Computer
+    set method. Computers & Fluids 63 (2012), 70–81.                                           Graphics Forum 34, 2 (2015), 481–491.
+M. Raw. 1996. Robustness of coupled Algebraic Multigrid for the Navier-Stokes equa-         Rene Winchenbach, Hendrik Hochstetter, and Andreas Kolb. 2017. Infinite continuous
+    tions. In 34th Aerospace Sciences Meeting and Exhibit. American Institute of Aero-         adaptivity for incompressible SPH. ACM Transactions on Graphics (TOG) 36, 4 (2017),
+    nautics and Astronautics, Reno, Nevada.                                                    1–10.
+Ronald A. Remmerswaal and Arthur E. P. Veldman. 2022. On Simulating Variability of          Chris Wojtan, Nils Thürey, Markus Gross, and Greg Turk. 2009. Deforming meshes
+    Sloshing Loads in LNG Tanks. In Proceedings of the ASME 2022 41st International            that split and merge. In ACM SIGGRAPH 2009 Papers. Association for Computing
+    Conference on Ocean, Offshore and Arctic Engineering (OMAE), Vol. 7: CFD and FSI.          Machinery, New York, NY, USA, Article 76, 10 pages.
+    ASME, Hamburg, Germany, V007T08A012.                                                    Kui Wu, Nghia Truong, Cem Yuksel, and Rama Hoetzlein. 2018. Fast Fluid Simulations
+Bo Ren, Wei He, Chen-Feng Li, and Xu Chen. 2021. Incompressibility enforcement for             with Sparse Volumes on the GPU. Computer Graphics Forum 37, 2 (2018), 157–167.
+    multiple-fluid SPH using deformation gradient. IEEE Transactions on Visualization       Feng Xiao. 2012. Large Eddy Simulation of liquid jet primary breakup. Ph. D. Dissertation.
+    and Computer Graphics 28, 10 (2021), 3417–3427.                                            Loughborough University.
+Bo Ren, Chenfeng Li, Xiao Yan, Ming C Lin, Javier Bonet, and Shi-Min Hu. 2014. Multiple-    Han Yan and Bo Ren. 2023. High Density Ratio Multi-Fluid Simulation with Peridy-
+    fluid SPH simulation using a mixture model. ACM Transactions on Graphics (TOG)             namics. ACM Transactions on Graphics (TOG) 42, 6 (2023), 1–14.
+    33, 5 (2014), 1–11.                                                                     Guan Heng Yeoh and Jiyuan Tu. 2019. Computational techniques for multiphase flows.
+Arch Robison, Michael Voss, and Alexey Kukanov. 2008. Optimization via Reflection              Butterworth-Heinemann, Oxford, United Kingdom.
+    on Work Stealing in TBB. In 2008 IEEE International Symposium on Parallel and           Yadong Zeng, Anqing Xuan, Johannes Blaschke, and Lian Shen. 2022. A parallel cell-
+    Distributed Processing. IEEE, Miami, FL, USA, 1–8.                                         centered adaptive level set framework for efficient simulation of two-phase flows
+Ulrich Rüde. 1993. Fully adaptive multigrid methods. SIAM J. Numer. Anal. 30, 1 (1993),        with subcycling and non-subcycling. J. Comput. Phys. 448 (2022), 110740.
+    230–248.                                                                                Fan Zhang, Xiong Zhang, Kam Yim Sze, Yanping Lian, and Yan Liu. 2017. Incompressible
+Ruben Scardovelli and Stéphane Zaleski. 1999. Direct numerical simulation of free-             material point method for free surface flow. J. Comput. Phys. 330 (2017), 92–110.
+    surface and interfacial flow. Annual review of fluid mechanics 31, 1 (1999), 567–603.   Weiqun Zhang, Andrew Myers, Kevin Gott, Ann Almgren, and John Bell. 2021. AMReX:
+Rajsekhar Setaluri, Mridul Aanjaneya, Sean Bauer, and Eftychios Sifakis. 2014. SPGrid: A       Block-structured adaptive mesh refinement for multiphysics applications. The
+    sparse paged grid structure applied to adaptive smoke simulation. ACM Transactions         International Journal of High Performance Computing Applications 35, 6 (2021), 508–
+    on Graphics (TOG) 33, 6 (2014), 1–12.                                                      526.
+Han Shao, Libo Huang, and Dominik L Michels. 2022. A fast unsmoothed aggregation            Yongning Zhu and Robert Bridson. 2005. Animating sand as a fluid. ACM Transactions
+    algebraic multigrid framework for the large-scale simulation of incompressible flow.       on Graphics (TOG) 24, 3 (2005), 965–972.
+    ACM Transactions on Graphics (TOG) 41, 4 (2022), 1–18.
+William A Sirignano. 2010. Fluid dynamics and transport of droplets and sprays. Cam-
+    bridge university press, Cambridge, United Kingdom.
+B. Solenthaler and R. Pajarola. 2008. Density contrast SPH interfaces. In Proceedings of
+    the 2008 ACM SIGGRAPH/Eurographics Symposium on Computer Animation (Dublin,
+    Ireland) (SCA ’08). Eurographics Association, Goslar, DEU, 211–218.
+Oh-Young Song, Hyuncheol Shin, and Hyeong-Seok Ko. 2005. Stable but nondissipative
+   water. ACM Transactions on Graphics (TOG) 24, 1 (2005), 81–97.
+K_R Sreenivasan. 1991. Fractals and multifractals in fluid turbulence. Annual review of
+    fluid mechanics 23, 1 (1991), 539–604.
+Jos Stam. 2023. Stable Fluids (1 ed.). Association for Computing Machinery, New York,
+    NY, USA, 779–786.
+Alexey Stomakhin, Steve Lesser, Joel Wretborn, Sean Flynn, Johnathan Nixon, Nicholas
+    Illingworth, Adrien Rollet, Kevin Blom, and Douglas Mchale. 2023. Pahi: A Unified
+
+
+
+                                                                                                       ACM Trans. Graph., Vol. 44, No. 4, Article . Publication date: August 2025.
+
