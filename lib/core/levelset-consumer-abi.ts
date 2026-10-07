@@ -311,6 +311,8 @@ export interface DenseLevelSetVolumeConsumerSource {
   /** Shared vertices; logical dimensions are cell dimensions plus one on
    * every axis (vertex class when packed). */
   readonly vertexPhi: GPUTexture;
+  /** Contour this dense nodal field instead of the solver's cell-volume publication. */
+  readonly contourVertexPhi?: boolean;
   /** The 4h vertex base: a (t+1)^3 r32float whose texel g is phi at lattice
    * vertex 4g (t = lattice / 4 per axis), current for every tile corner at
    * each published revision and never folded into an atlas, so its extent is

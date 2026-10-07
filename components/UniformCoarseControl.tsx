@@ -16,7 +16,7 @@ import { ToolstripMenuButton, ToolstripMenuItem, ToolstripMenuRule, ToolstripRow
 import { Choice, ChoiceField, Facts, Field, FieldList, FieldNote, NumberInput, RangeField, SwitchField, ToggleButton } from "./ui";
 
 const POLICIES = [
-  { value: "requested", label: "Requested", hint: "4h everywhere except drawn Fine regions and solid contact." },
+  { value: "requested", label: "Requested", hint: "4h everywhere except drawn Fine regions and enabled solid-contact refinement." },
   { value: "dynamic", label: "Dynamic", hint: "Fine regions, and the tiles the importance criteria ask for, run in h; the rest coarsens to 4h as the water moves." },
   { value: "full", label: "Full", hint: "h everywhere. Regions are kept but change nothing." },
 ] as const satisfies ReadonlyArray<{ value: UniformDetailPolicyMode; label: string; hint: string }>;
@@ -83,9 +83,10 @@ export function UniformDetailRow() {
   const overlayAxis = session.ui(state => state.gridOverlayAxis);
   const [tuning, setTuning] = useState(false);
   const { claim } = useToolstripSection("uniform-detail", () => setTuning(false));
-  if (method.methodId !== "uniform-volume") return null;
-  const settings = uniformDetailSettings(resolvedMethodValues(method)), values = uniformDetailValues(settings);
-  const set = (key: string, value: MethodParamValue) => simulation.setMethodParam("uniform-volume", key, value, session.id);
+  if (method.methodId !== "uniform-volume" && method.methodId !== "uniform-narrow-band-flip") return null;
+  const resolved = resolvedMethodValues(method);
+  const settings = uniformDetailSettings(resolved), values = uniformDetailValues(settings);
+  const set = (key: string, value: MethodParamValue) => simulation.setMethodParam(method.methodId, key, value, session.id);
   const dynamic = settings.policy === "dynamic";
   // The scores layer rides the field view's layer state (FieldQuickBar).
   const drawn = layers ?? { ...legacyVisualLayers(overlayMode), visible: overlayAxis !== "off" };
@@ -163,11 +164,16 @@ export function UniformCoarseControl() {
   const method = session.method();
   const scene = session.scene(state => state.scene);
   const info = session.diagnostics(state => state.gpuInfo);
-  if (method.methodId !== "uniform-volume") return null;
+  if (method.methodId !== "uniform-volume" && method.methodId !== "uniform-narrow-band-flip") return null;
   const values = resolvedMethodValues(method), settings = uniformDetailSettings(values);
-  const set = (key: string, value: MethodParamValue) => simulation.setMethodParam("uniform-volume", key, value, session.id);
-  const reset = (key: string) => simulation.resetMethodParam("uniform-volume", key, session.id);
-  const overrides = method.overrides["uniform-volume"] ?? {};
+  const set = (key: string, value: MethodParamValue) => simulation.setMethodParam(method.methodId, key, value, session.id);
+  const reset = (key: string) => simulation.resetMethodParam(method.methodId, key, session.id);
+  const overrides = method.overrides[method.methodId] ?? {};
+  const narrowBand = method.methodId === "uniform-narrow-band-flip";
+  const coarseParticles = values.coarseParticleMode === "on";
+  const experiment = narrowBand && <SwitchField label="Experimental all-4h FLIP" checked={coarseParticles}
+    hint="Allow particles on 4h tiles and reconstruct their surface. Keeps the selected refinement policy; Requested with no Fine regions gives an all-4h layout. Restarts the simulation. Off uses particles only in h surface regions and the geometric surface."
+    onChange={on => set("coarseParticleMode", on ? "on" : "off")} />;
   const regions = scene.fluid.refinementRegions ?? [];
   const detail = info?.uniformDetail;
   const fine = info?.uniformMixedFineTiles, coarse = info?.uniformMixedCoarseTiles;
@@ -178,6 +184,8 @@ export function UniformCoarseControl() {
   const dynamic = settings.policy === "dynamic";
   const tiles = (fine ?? 0) + (coarse ?? 0);
   return <FieldList testId="uniform-resolution-control">
+    {experiment}
+    {narrowBand && !coarseParticles && <FieldNote>Particles populate the liquid surface band inside h regions. Refinement changes update particle coverage on the next advance; 4h regions use geometric transport.</FieldNote>}
     <ChoiceField<UniformDetailPolicyMode> label="Simulation detail" value={settings.policy} options={POLICIES}
       hint="Where the solver runs h cells on its 4h base. Changes apply at the next frame and keep the running simulation."
       onChange={value => set("detailPolicy", value)} />
@@ -212,7 +220,7 @@ export function UniformCoarseControl() {
           hint={control.hint} onChange={value => set(control.key, value)} />; })}
     </>}
     <Field label="Coverage" className="is-readout"
-      hint="Tiles of 4×4×4 h cells in the accepted layout. Solid contact is h whatever the policy says.">
+      hint="Tiles of 4×4×4 h cells in the accepted layout. Enabled solid-contact refinement also requests h.">
       <output className="ui-value" data-testid="uniform-detail-coverage">
         {!ready ? "Initializing" : `${percent(fine!, tiles)} h · ${percent(coarse ?? 0, tiles)} 4h`}{detail?.preparing ? " · preparing" : pending ? detail.rejected ? " · refused" : " · applying" : ""}
       </output>
@@ -228,7 +236,7 @@ export function UniformCoarseControl() {
     <FieldNote>{settings.policy === "full" ? "Every tile runs h; Fine and Coarse regions are kept for later."
       : regions.length ? "Draw, move or remove regions with the Region tool; Fine regions run h. Edits keep the running simulation."
       : dynamic ? "The importance criteria choose h and 4h tiles as the water moves; turn on the Detail importance layer to see their scores."
-      : "No Fine regions: 4h throughout, except solid contact. Use the Region tool to draw areas needing finer simulation."}</FieldNote>
+      : "No Fine regions: 4h throughout unless solid-contact refinement is enabled. Use the Region tool to draw areas needing finer simulation."}</FieldNote>
     {ready && <details className="instrument-drawer" data-testid="uniform-detail-diagnostics">
       <summary><span>Detail plan</span><small>{detail.mapping}</small></summary>
       <Facts items={[

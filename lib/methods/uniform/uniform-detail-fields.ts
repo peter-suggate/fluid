@@ -1907,7 +1907,7 @@ ${body[kind]}
 
 /** Field class by binding name in the mixed shaders. `output` and `field`
  * depend on their texel type (scalar cell vs face velocity; the phi resolve
- * field is a vertex field). Raw names are tile-resolution caches. */
+ * field is a vertex field). Raw names are tile-resolution caches or independent render fields. */
 const CLASS_BY_NAME:Record<string,UniformDetailClass>={
  volume:"cell",outputVolume:"cell",phase:"cell",centerPhi:"cell",targetFill:"cell",correction:"cell",fineCenterPhi:"cell",
  fineVolume:"cell",pressureCenterPhi:"cell",pressureTarget:"cell",curvature:"cell",
@@ -1916,7 +1916,7 @@ const CLASS_BY_NAME:Record<string,UniformDetailClass>={
  phi:"vertex",outputPhi:"vertex",vertexPhi:"vertex",bodyPhi:"vertex",
  unitVelocity:"atlas",unitVelocityOut:"atlas",
 };
-const RAW_NAMES=new Set(["coarse","coarseOut","coarseExtended","coarseVelocity","origins","originsOut"]);
+const RAW_NAMES=new Set(["coarse","coarseOut","coarseExtended","coarseVelocity","origins","originsOut","surfacePhi","surfaceOpen"]);
 function classify(name:string,type:string):UniformDetailClass|undefined{
  if(RAW_NAMES.has(name))return undefined;
  if(name==="output")return type.includes("rgba")?"face":"cell";

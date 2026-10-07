@@ -2,18 +2,34 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import "../lib/methods";
 import { defaultMethodId, getMethod, interactiveSimulationMethods } from "../lib/core/method-registry";
+import { methodConfigurationImpact } from "../lib/core/method-lifecycle";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { uniformGeometricSolverOptions } from "../lib/methods/uniform/uniform-geometric-options";
 
-test("narrow-band FLIP is selectable and fixes complete surface support without sharpening",async()=>{
+test("narrow-band FLIP is selectable and defaults to the fine band and keeps all-4h behind a structural opt-in",async()=>{
  const method=getMethod("uniform-narrow-band-flip");
  assert.ok(interactiveSimulationMethods().includes(method));assert.equal(defaultMethodId(),"uniform-volume");
  assert.equal((await method.harness!()).methodId,method.id);assert.equal((await method.pipelineGraph!()).methodId,method.id);
- const values=resolveMethodValues(method,"balanced",{detailPolicy:"requested",detailShape:"off",detailShapeTolerance:2,sharpeningSweeps:8});
- assert.equal(values.detailPolicy,"dynamic");assert.equal(values.detailShape,"on");assert.equal(values.detailShapeTolerance,0);
+ const values=resolveMethodValues(method,"balanced",{coarseParticleMode:"on",detailPolicy:"requested",detailShape:"off",detailShapeTolerance:2,sharpeningSweeps:8});
+ assert.equal(values.detailPolicy,"requested");assert.equal(values.detailShape,"off");assert.equal(values.detailShapeTolerance,2);
+ const defaults=resolveMethodValues(method,"balanced",{});
+ assert.equal(defaults.coarseParticleMode,"off");assert.equal(defaults.detailPolicy,"dynamic");assert.equal(defaults.detailSolidContact,"on");
+ assert.equal(defaults.detailSurface,"on");assert.equal(defaults.detailSurfaceDistance,2);assert.equal(defaults.detailShapeTolerance,0);
+ const selected=resolveMethodValues(method,"balanced",{detailPolicy:"requested",detailShape:"off",detailShapeTolerance:2});
+ assert.equal(selected.detailPolicy,"requested");assert.equal(selected.detailShape,"off");assert.equal(selected.detailShapeTolerance,2);
+ for(const detailPolicy of ["requested","dynamic","full"])assert.equal(resolveMethodValues(method,"balanced",{detailPolicy}).detailPolicy,detailPolicy);
+ assert.equal(methodConfigurationImpact(method,"balanced",{},{detailPolicy:"requested"}),"live");
+ assert.equal(methodConfigurationImpact(method,"balanced",{},{detailShapeTolerance:0.5}),"live");
+ assert.equal(method.appDefaults?.coarseParticleMode,"off");
+ assert.equal(methodConfigurationImpact(method,"balanced",{},{coarseParticleMode:"on"}),"rebuild");
+ assert.equal(methodConfigurationImpact(method,"balanced",{coarseParticleMode:"on"},{coarseParticleMode:"off"}),"rebuild");
+ const coarse=resolveMethodValues(method,"balanced",{coarseParticleMode:"on",detailPolicy:"requested",detailSolidContact:"off"});assert.equal(coarse.detailPolicy,"requested");assert.equal(coarse.detailSolidContact,"off");
+ const dynamic=resolveMethodValues(method,"balanced",{detailPolicy:"dynamic",detailStrain:"on",detailShapeTolerance:0.75});assert.equal(dynamic.detailPolicy,"dynamic");assert.equal(dynamic.detailStrain,"on");assert.equal(dynamic.detailShapeTolerance,0.75);
+ const uniform=getMethod("uniform-volume");
+ assert.deepEqual(method.params!.filter(p=>p.key.startsWith("detail")).map(p=>p.key),uniform.params!.filter(p=>p.key.startsWith("detail")).map(p=>p.key));
  assert.equal(values.sharpeningSweeps,0);assert.equal(values.sharpeningDistance,0);
  const options=uniformGeometricSolverOptions(values);
  assert.equal(options.sharpeningSweeps,0);assert.equal(options.pressureCycleBudget,"lagged");
- const fixed=new Set(["detailPolicy","detailShape","detailShapeTolerance","sharpeningSweeps","sharpeningDistance"]);
+ const fixed=new Set(["sharpeningSweeps","sharpeningDistance"]);
  for(const stage of (await method.pipelineGraph!()).stages)for(const control of stage.controls??[])if("param" in control)assert.ok(!fixed.has(control.param));
 });

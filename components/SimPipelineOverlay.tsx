@@ -474,7 +474,7 @@ export function SimPipelineOverlay({ lenses: override }: {
       <code data-testid="fluid-advance-cost" title={sourceLabel}>{advanceLabel}</code>
     </div>
 
-    {methodId === "uniform-volume" && <div className="scene-instrument-section"><UniformCoarseControl /></div>}
+    {(methodId === "uniform-volume" || methodId === "uniform-narrow-band-flip") && <div className="scene-instrument-section"><UniformCoarseControl /></div>}
 
     {backend && <div className="scene-instrument-section" data-testid="physics-backend-control">
       <ChoiceField label={backend.label}

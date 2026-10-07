@@ -101,6 +101,7 @@ export { UNIFORM_PAPER_DT_S } from "./uniform-paper";
 export interface WebGPUUniformReferenceOptions {
   /** Experimental particle velocity transport in the surface band. */
   narrowBandFlip?: boolean;
+  narrowBandCoarseParticles?: boolean;
   /** Independent dense vertex level set and conservative cell volume, advanced
    * only by the mixed-ownership frame. */
   geometricVolume?: boolean;
@@ -448,6 +449,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   get info(): GPUEulerianInfo { this.refreshMixedAllocation();return this.executionInfo; }
   get simulationCellScale(): 1 { return 1; }
   private readonly narrowBandFlip: boolean;
+  private readonly narrowBandCoarseParticles: boolean;
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
   get narrowBandFlipInfo(){const stage=this.mixedFrame?.narrowBandFlip;return stage?{particles:stage.count,capacity:stage.capacity,bandWidth:4,flipRatio:0.95}:undefined;}
   private readonly geometricVolume: boolean;
@@ -504,6 +506,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly executionDenseLevelSetVolumeSource?: DenseLevelSetVolumeConsumerSource;
   private liveSource?: { from: DenseLevelSetVolumeConsumerSource; vertexPhi: GPUTexture; source: DenseLevelSetVolumeConsumerSource };
   get denseLevelSetVolumeSource(): DenseLevelSetVolumeConsumerSource | undefined {
+    const band=this.mixedFrame?.narrowBandFlip;
+    if(band?.coarseParticles&&band.count>0)return band.surfaceSource;
     // The frame re-creates its presented phi with the h-tile capacity; consumers compare the source object.
     // So does the detail vertex field: named only while the frame holds h-tile capacity.
     if (this.mixedSource && this.mixedFrame) {
@@ -813,6 +817,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     options: WebGPUUniformReferenceOptions = {},
   ) {
     this.narrowBandFlip = options.narrowBandFlip === true;
+    this.narrowBandCoarseParticles = options.narrowBandCoarseParticles === true;
     this.geometricVolume = options.geometricVolume === true;
     this.geometricRedistance = options.geometricRedistance !== false;
     this.volumeDustThreshold = Number.isFinite(options.volumeDustThreshold)
@@ -1439,7 +1444,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // pipelines then start in the direct form (UniformDetailStorage.prefer).
     detail.prefer(this.detail.policy!=="requested"||bodies>0);
     this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:fixed??(gpuLayout?tiles:0),liquidBand:gpuLayout,fixed:fixed!==undefined},{
-      narrowBandFlip:this.narrowBandFlip,arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
+      narrowBandFlip:this.narrowBandFlip,narrowBandCoarseParticles:this.narrowBandCoarseParticles,arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
       phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,

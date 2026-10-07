@@ -503,7 +503,15 @@ fn fieldCell(cell: vec3i) -> f32 {
   if(umPresentationEnabled()){return 0.5-umSampleVertex(vec3f(cell)+vec3f(0.5))/(u.container.y/u.gridInfo.y);}
   // Raw loads: a packed field always arrives with its mixed topology, which
   // took the branch above.
-  if (mode < 1.5) { return textureLoad(volume, cell, 0).x; }
+  if (mode < 1.5) {
+    // An explicitly published contour field is nodal (n+1), independent of
+    // the simulation's packed cell volume. Average its corners at the centre.
+    if(all(textureDimensions(volume)==vec3u(dims)+1u)){
+      var phi=0.0;for(var k=0u;k<8u;k++){phi+=textureLoad(volume,cell+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)),0).x;}
+      return 0.5-0.125*phi/(u.container.y/u.gridInfo.y);
+    }
+    return textureLoad(volume, cell, 0).x;
+  }
   if (mode > 2.5) { return occupancyFromPhi(textureLoad(volume, cell, 0).x); }
   let base = i32(round(textureLoad(columnBases, cell.xz, 0).x));
   if (cell.y < base && base > 0) {
@@ -1816,7 +1824,13 @@ fn waterTintScale()->vec3f{return waterScatter()/vec3f(${WATER_OPTICS.scatter.jo
 fn contactOccupancyFromPhi(phi:f32)->f32{let band=4.0*u.container.y/max(u.gridInfo.y,1.0);return clamp(0.5-phi/band,0.0,1.0);}
 fn contactFieldCell(cell:vec3i)->f32{
   let dims=vec3i(u.gridInfo.xyz);if(any(cell<vec3i(0))||any(cell>=dims)){return 0.0;}let mode=u.gridInfo.w;
-  if(mode<1.5){return textureLoad(liquidField,cell,0).x;}if(mode>2.5){return contactOccupancyFromPhi(textureLoad(liquidField,cell,0).x);}
+  if(mode<1.5){
+    if(all(textureDimensions(liquidField)==vec3u(dims)+1u)){
+      var phi=0.0;for(var k=0u;k<8u;k++){phi+=textureLoad(liquidField,cell+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)),0).x;}
+      return 0.5-0.125*phi/(u.container.y/u.gridInfo.y);
+    }
+    return textureLoad(liquidField,cell,0).x;
+  }if(mode>2.5){return contactOccupancyFromPhi(textureLoad(liquidField,cell,0).x);}
   let base=i32(round(textureLoad(tallCellBases,cell.xz,0).x));
   if(cell.y<base&&base>0){let t=clamp(f32(cell.y)/f32(max(base-1,1)),0.0,1.0);return contactOccupancyFromPhi(mix(textureLoad(liquidField,vec3i(cell.x,0,cell.z),0).x,textureLoad(liquidField,vec3i(cell.x,1,cell.z),0).x,t));}
   let packedY=2+cell.y-base;let stored=vec3i(textureDimensions(liquidField));if(packedY<2||packedY>=stored.y){return 0.0;}return contactOccupancyFromPhi(textureLoad(liquidField,vec3i(cell.x,packedY,cell.z),0).x);
@@ -2658,10 +2672,11 @@ export class RasterWaterPipeline {
    * vertex field raw. */
   private adoptLevelSetSource(source: DenseLevelSetVolumeConsumerSource | undefined): boolean {
     if (source === this.levelSetSource) return false;
+    const contourChanged = this.levelSetSource?.contourVertexPhi !== source?.contourVertexPhi;
     this.levelSetSource = source;
     const mixed = source?.mixedOwnership && source.coarseVertexPhi ? source : undefined;
     const detail = mixed ? mixed.detailVertexPhi : source?.vertexPhi, ownership = mixed?.mixedOwnership, coarse = mixed?.coarseVertexPhi;
-    if (this.denseNormalPhi === detail && this.mixedOwnership === ownership && this.coarseVertexPhi === coarse) return false;
+    if (!contourChanged && this.denseNormalPhi === detail && this.mixedOwnership === ownership && this.coarseVertexPhi === coarse) return false;
     this.denseNormalPhi = detail; this.mixedOwnership = ownership; this.coarseVertexPhi = coarse;
     return true;
   }
@@ -3128,8 +3143,9 @@ export class RasterWaterPipeline {
     // the detail field while the solver names one. Its extraction binds no
     // cell field, and no h-sized texture at all while no tile can be at h.
     const mixedSurface = Boolean(this.mixedOwnership && this.coarseVertexPhi);
+    const contourField = this.levelSetSource?.contourVertexPhi ? this.levelSetSource.vertexPhi : this.volume;
     if (this.extractLayout && this.volume && this.columnBases && this.vertexBuffer && this.indirectBuffer && this.activeCubeBuffer && this.globalCubeValues && this.fallbackSparsePageTable && this.fallbackSparseActivePages && this.fallbackSparsePhi && this.fallbackSparseParams && this.fallbackSparseControl && this.fallbackField && this.surfaceWindows) this.extractBindGroup = this.device.createBindGroup({ layout: this.extractLayout, entries: [
-      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: (mixedSurface ? this.fallbackField : this.volume).createView({ dimension: "3d" }) }, { binding: 2, resource: this.columnBases.createView() }, { binding: 3, resource: { buffer: this.vertexBuffer } }, { binding: 4, resource: { buffer: this.indirectBuffer } }, { binding: 5, resource: { buffer: this.activeCubeBuffer } },
+      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: (mixedSurface ? this.fallbackField : contourField!).createView({ dimension: "3d" }) }, { binding: 2, resource: this.columnBases.createView() }, { binding: 3, resource: { buffer: this.vertexBuffer } }, { binding: 4, resource: { buffer: this.indirectBuffer } }, { binding: 5, resource: { buffer: this.activeCubeBuffer } },
       { binding: 7, resource: { buffer: this.fallbackSparsePageTable } },
       { binding: 8, resource: globalFine?.worklist ?? { buffer: this.fallbackSparseActivePages } },
       { binding: 9, resource: globalFine?.samples ?? { buffer: this.fallbackSparsePhi } },
@@ -3204,8 +3220,9 @@ export class RasterWaterPipeline {
     // Under the mixed presentation the contact band samples the nodal level
     // set (17-19) and the cell field at 8 is not read.
     const mixedSurface = Boolean(this.mixedOwnership && this.coarseVertexPhi);
+    const contourField = this.levelSetSource?.contourVertexPhi ? this.levelSetSource.vertexPhi : this.volume;
     const bindGroup = this.device.createBindGroup({ layout: this.compositeLayout, entries: [
-      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: sceneView }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: (mixedSurface ? this.fallbackField : this.volume).createView({ dimension: "3d" }) }, { binding: 9, resource: this.columnBases.createView() }, { binding: 10, resource: this.rearFrontPosition.createView() }, { binding: 11, resource: this.rearFrontNormal.createView() }, { binding: 12, resource: this.rearBackPosition.createView() }, { binding: 13, resource: this.rearBackNormal.createView() }, { binding: 14, resource: this.causticTexture.createView() }, { binding: 15, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 16, resource: this.causticReceiver.createView() },
+      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: sceneView }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: (mixedSurface ? this.fallbackField : contourField!).createView({ dimension: "3d" }) }, { binding: 9, resource: this.columnBases.createView() }, { binding: 10, resource: this.rearFrontPosition.createView() }, { binding: 11, resource: this.rearFrontNormal.createView() }, { binding: 12, resource: this.rearBackPosition.createView() }, { binding: 13, resource: this.rearBackNormal.createView() }, { binding: 14, resource: this.causticTexture.createView() }, { binding: 15, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 16, resource: this.causticReceiver.createView() },
       { binding: 17, resource: mixedSurface ? this.mixedOwnership! : { buffer: this.fallbackSparseControl, size: 4 } },
       { binding: 18, resource: ((mixedSurface ? this.denseNormalPhi : undefined) ?? this.fallbackField).createView({ dimension: "3d" }) },
       { binding: 19, resource: (this.coarseVertexPhi ?? this.fallbackField).createView({ dimension: "3d" }) }

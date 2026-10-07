@@ -54,6 +54,7 @@ export interface UniformMixedFrameTrace {
 
 export interface UniformMixedFrameFields {
  narrowBandFlip?:boolean;
+ narrowBandCoarseParticles?:boolean;
  arena:UniformScratchArena;
  volume:GPUTexture;volumeScratch:GPUTexture;
  velocity:GPUTexture;velocityScratch:GPUTexture;departure:GPUTexture;
@@ -333,7 +334,7 @@ export class UniformMixedFrame {
   this.coarseCache=caches[0]!;
   this.transport=new UniformMixedTransportStage(device,layout,f.volume,f.volumeScratch,f.departure,{phi:f.phi,params:this.params.sharpen,reductions:this.reductions,resolved:true},f.sourceParams,solid,capacity.fineTiles);
   const o=this.ownership;
-  this.narrowBandFlip=f.narrowBandFlip?new UniformNarrowBandFlip(device,o,solid):undefined;
+  this.narrowBandFlip=f.narrowBandFlip?new UniformNarrowBandFlip(device,o,solid,f.narrowBandCoarseParticles):undefined;
   this.displacement=solid?new UniformMixedSolidDisplacement(device,o,solid):undefined;
   this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocity,f.negative,f.velocityScratch,f.negativeScratch,true);
   this.cleanup=new UniformMixedCleanup(device,o,solid,true);
@@ -741,7 +742,7 @@ export class UniformMixedFrame {
    // A kick moves no liquid: no trace, transport, surface volume or 4h base.
    if(!kick){
    this.plan.encodeCertificate(encoder,p.dt);if(this.layoutViews)this.recordStageView(encoder,this.plan.certificate,"certificate");
-   this.cache.encode(encoder,this.cacheGroup);this.hanging.encode(encoder,this.hangingGroup);
+   this.cache.encode(encoder,this.cacheGroup);if(this.ownership.capacity.fineTiles>0)this.hanging.encode(encoder,this.hangingGroup);
    trace?.phase(encoder,V.transportReach);
    this.narrowBandFlip?.move(encoder,p.dt,p.openTop);
    this.surface.encode(encoder,"advect",this.surfaceGroups[0]);this.phiResolve.encode(encoder,this.phiResolveGroups.scratch);this.surface.encode(encoder,"traceCells",this.surfaceGroups[0]);

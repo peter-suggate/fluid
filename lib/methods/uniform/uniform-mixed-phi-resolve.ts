@@ -100,6 +100,9 @@ ${uniformCompiledVertexResolveWGSL("umResolveLattice","umVertexWeight","umVertex
    * the generation the ownership just adopted, when the field was resolved
    * for the ownership it replaced (see the class comment). */
   encode(encoder: GPUCommandEncoder, group: UniformDetailGroup, changes?: GPUBuffer): void {
+    // With no h capacity, every sampled vertex comes from the coarse corners;
+    // there are no hanging h values to materialize.
+    if(this.ownership.capacity.fineTiles===0)return;
     if (!this.pipeline || !this.listed) throw new Error("Mixed phi resolve is not initialized");
     const pass = encoder.beginComputePass({ label: "Uniform mixed phi resolve" });
     pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1,group.group);
