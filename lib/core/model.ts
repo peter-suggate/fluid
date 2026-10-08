@@ -68,6 +68,12 @@ export interface SceneDescription {
   environment?: EnvironmentId;
   /** Surface style: continuous dual-grid raster meshes, tangent reconstruction when traced. Omitted defaults to voxel-flat. */
   surfaceStyle?: "smooth" | "voxel-flat";
+  /**
+   * Presentation only: vessel walls of `solidVoxels` that stand between this
+   * eye and the cavity they hold are left out of the drawn solids, so the
+   * liquid inside shows. The solver keeps every voxel. See `vesselCutawayPatches`.
+   */
+  cutaway?: { eye_m: Vec3 };
   /** Optional image-free lighting grade consumed by the SVO renderer. */
   lighting?: {
     /** Scene-linear directional key. Omitted fields retain the environment defaults. */
@@ -508,6 +514,9 @@ export function validateScene(scene: SceneDescription): string[] {
   const errors: string[] = [];
   if (scene.surfaceStyle !== undefined && scene.surfaceStyle !== "smooth" && scene.surfaceStyle !== "voxel-flat") {
     errors.push(`Unknown scene surface style ${String(scene.surfaceStyle)}`);
+  }
+  if (scene.cutaway !== undefined && !(["x", "y", "z"] as const).every(axis => Number.isFinite(scene.cutaway?.eye_m?.[axis]))) {
+    errors.push("Scene cutaway needs a finite eye position");
   }
   if (scene.schemaVersion !== "2.0.0") errors.push("Unsupported schema version");
   if (!scene.sceneId?.trim()) errors.push("Scene ID is required");

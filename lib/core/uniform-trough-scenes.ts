@@ -1,8 +1,13 @@
-import { cloneScene, defaultScene, type SceneDescription } from "./model";
+import { cameraPosition } from "./math";
+import { cloneScene, defaultCamera, defaultScene, type CameraState, type SceneDescription } from "./model";
 import { sceneLatticeDimensions } from "./scene-lattice-dimensions";
 import { bathInteriorContains, bathSolidContains, bathVoxelBoxes, BATH_FLOOR_HEIGHT_M } from "./voxel-bath";
 
 export type UniformTroughMode = "dam-break" | "settled-tank" | "hose-fill";
+
+/** The view the troughs open on, and the one their near wall is cut away for. */
+export const UNIFORM_TROUGH_CAMERA: Partial<CameraState> =
+  { distance_m: 5.4, target_m: { x: 0, y: 0.4, z: 0 }, elevation_rad: 0.8, azimuth_rad: 0.65 };
 
 /** Matched 3D vessels for transport, hydrostatics, and source growth studies. */
 export function createUniformTroughScene(
@@ -33,6 +38,7 @@ export function createUniformTroughScene(
   const point = (x: number, y: number, z: number) =>
     [(x + 0.5) * cell[0] - 1.6, (y + 0.5) * cell[1], (z + 0.5) * cell[2] - 0.6] as const;
   scene.solidVoxels = bathVoxelBoxes(dimensions, (x, y, z) => bathSolidContains(...point(x, y, z)));
+  scene.cutaway = { eye_m: cameraPosition({ ...defaultCamera, ...UNIFORM_TROUGH_CAMERA }) };
   scene.fluid = {
     density_kg_m3: 998.2,
     dynamicViscosity_Pa_s: 0,

@@ -1,7 +1,14 @@
 import { cloneScene, defaultCamera, defaultScene, type CameraState, type SceneDescription } from "./model";
 import { applyHeroGardenNodeOverrides } from "./hero-garden-overrides";
 import { createMassConservingFigure9DamBreak, createPaperScenario } from "./paper-scenarios";
-import { NBFLIP_LETTERS_GRID, NBFLIP_LETTERS_INTERVAL_FRAMES, NBFLIP_LETTERS_METHOD_PROFILE, NBFLIP_LETTERS_SCENE_ID, createNbflipLetters, nbflipLettersCamera } from "./nbflip-paper-scenes";
+import {
+  NBFLIP_LETTERS_GRID, NBFLIP_LETTERS_INTERVAL_FRAMES, NBFLIP_LETTERS_METHOD_PROFILE, NBFLIP_LETTERS_SCENE_ID, NBFLIP_METHOD_PROFILE,
+  NBFLIP_DAM_CYLINDERS, NBFLIP_DAM_GRID, NBFLIP_DAM_SCENE_ID, NBFLIP_SIMPLE_DAM_GRID, NBFLIP_SIMPLE_DAM_SCENE_ID,
+  NBFLIP_POUR_GRID, NBFLIP_POUR_SCENE_ID, NBFLIP_POUR_STREAM_FRAMES,
+  NBFLIP_TEASER_CYLINDER_COUNT, NBFLIP_TEASER_GRID, NBFLIP_TEASER_SCENE_ID, NBFLIP_WAVES_GRID, NBFLIP_WAVES_SCENE_ID,
+  createNbflipDam, createNbflipLetters, createNbflipPour, createNbflipSimpleDam, createNbflipTeaser, createNbflipWaves,
+  nbflipDamCamera, nbflipLettersCamera, nbflipPourCamera, nbflipSimpleDamCamera, nbflipTeaserCamera, nbflipWavesCamera,
+} from "./nbflip-paper-scenes";
 import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12MethodProfile, cm12Scene, createCm12Figure7_256 } from "./cm12-paper-scenes";
 import { createThinDropletLadderScene, createThinSheetLadderScene, createThinWallFilmScene } from "./thin-liquid-scenes";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
@@ -20,7 +27,7 @@ import { createAnalyticMotionScene, createRerungFreeFallScene, createStandingWav
 import { createGeometricUniformTranslationScene } from "./geometric-translation-scene";
 import { createGentleMovingBlobScene } from "./gentle-moving-blob-scene";
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
-import { createUniformTroughScene } from "./uniform-trough-scenes";
+import { createUniformTroughScene, UNIFORM_TROUGH_CAMERA } from "./uniform-trough-scenes";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
 import type { EnvironmentId } from "./environments";
@@ -2138,7 +2145,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: {} },
     build: () => createUniformTroughScene(mode),
     buildAt: lattice => createUniformTroughScene(mode, lattice.cellSize_m),
-    camera: { distance_m: 5.4, target_m: { x: 0, y: 0.4, z: 0 }, elevation_rad: 0.8, azimuth_rad: 0.65 },
+    camera: UNIFORM_TROUGH_CAMERA,
   })),
   defineScene({
     id: "gentle-moving-blob",
@@ -2487,6 +2494,61 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     methodProfile: NBFLIP_LETTERS_METHOD_PROFILE,
     build: createNbflipLetters,
     camera: nbflipLettersCamera(),
+  }),
+  defineScene({
+    id: NBFLIP_POUR_SCENE_ID,
+    name: "NB-FLIP Figure 7 \u00b7 Pour",
+    blurb: `A stream from an inclined pipe pours into an empty glass for ${NBFLIP_POUR_STREAM_FRAMES} frames. Published ${NBFLIP_POUR_GRID.join("\u00d7")} cells; the glass, stream and camera are reconstructed from the paper's video, whose glass fills twice as far as this stream carries.`,
+    audience: "study",
+    shelf: "Paper figures",
+    environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: createNbflipPour,
+    camera: nbflipPourCamera(),
+  }),
+  defineScene({
+    id: NBFLIP_TEASER_SCENE_ID,
+    name: "NB-FLIP Figure 9 \u00b7 Teaser",
+    blurb: `A dam breaks from the back corner of a pool onto a diagonal row of ${NBFLIP_TEASER_CYLINDER_COUNT} cylinders. Published ${NBFLIP_TEASER_GRID.join("\u00d7")} cells; the pool, dam, cylinders and camera are reconstructed from the paper's video.`,
+    audience: "study",
+    shelf: "Paper figures",
+    environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: createNbflipTeaser,
+    camera: nbflipTeaserCamera(),
+  }),
+  defineScene({
+    id: NBFLIP_DAM_SCENE_ID,
+    name: "NB-FLIP Figure 10 \u00b7 Dam",
+    blurb: `A block of liquid collapses down a shallow channel through ${NBFLIP_DAM_CYLINDERS.length} thin cylinders and up the end wall. Published ${NBFLIP_DAM_GRID.join("\u00d7")} cells; the block, sheet, cylinders, camera and the 120 Hz step are reconstructed from the paper's video.`,
+    audience: "study",
+    shelf: "Paper figures",
+    environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: createNbflipDam,
+    camera: nbflipDamCamera(),
+  }),
+  defineScene({
+    id: NBFLIP_WAVES_SCENE_ID,
+    name: "NB-FLIP Figure 4 \u00b7 Oscillating Surface",
+    blurb: `A mound on a shallow pool collapses and sloshes to rest over 500 frames: the paper's test of its particle-to-grid velocity blend. Published ${NBFLIP_WAVES_GRID.join("\u00d7")} cells; the pool, mound and camera are reconstructed from the paper's video.`,
+    audience: "study",
+    shelf: "Paper figures",
+    environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: createNbflipWaves,
+    camera: nbflipWavesCamera(),
+  }),
+  defineScene({
+    id: NBFLIP_SIMPLE_DAM_SCENE_ID,
+    name: "NB-FLIP Video \u00b7 Simple Breaking Dam",
+    blurb: `A corner block collapses across a shallow basin, runs up the far wall to the ceiling and falls back. ${NBFLIP_SIMPLE_DAM_GRID.join("\u00d7")} cells, from the paper's video alone: it is in no figure.`,
+    audience: "study",
+    shelf: "Paper figures",
+    environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: createNbflipSimpleDam,
+    camera: nbflipSimpleDamCamera(),
   }),
   defineScene({
     id: "cm12-figure-7-256",

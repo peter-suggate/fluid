@@ -6,6 +6,7 @@ import {
 import type { EnvironmentBoxProxy, EnvironmentProxyPrimitive } from "../../../core/voxel-environments";
 import type { SceneDescription } from "../../../core/model";
 import { solidVoxelShellForScene } from "../../../core/scene-lattice";
+import { vesselCutawayPatches } from "../../../core/vessel-cutaway";
 import {
   createSolidWorld,
   planarBoundaryForSolidWorldVoxelPatch,
@@ -65,22 +66,27 @@ export function svoPlanarResidualEnvironmentPrimitives(
 
 /**
  * Rebuild the render-only SolidWorld after removing every fill owned by the
- * exact planar catalogue. Fluid keeps its canonical SolidWorld separately.
+ * exact planar catalogue, and the near walls a scene's cutaway opens. Fluid
+ * keeps its canonical SolidWorld separately.
  *
- * `terrainScene` is the document whenever it has terrain: the ground is baked
- * into pages, not carried as a patch, so the surviving fills have to be laid
- * back over it rather than over nothing.
+ * `scene` is the document. Its terrain is baked into pages, not carried as a
+ * patch, so the surviving fills have to be laid back over it rather than over
+ * nothing; its cutaway is cut from what survives, since that is what is drawn.
  */
 export function svoPlanarResidualSolidWorld(
   world: SolidWorld,
   catalog: SvoSolidWorldPlanarBoundaryCatalog | undefined,
-  terrainScene?: SceneDescription,
+  scene?: SceneDescription,
 ): SolidWorld {
-  if (!catalog || catalog.residualExcludedPatchIndices.size === 0) return world;
-  const patches = world.patches.filter((_, patchIndex) =>
-    !catalog.residualExcludedPatchIndices.has(patchIndex));
-  return terrainScene?.terrain
-    ? terrainSolidWorldWithPatches(terrainScene, patches)
+  const excluded = catalog?.residualExcludedPatchIndices;
+  const drawn = excluded?.size
+    ? world.patches.filter((_, patchIndex) => !excluded.has(patchIndex))
+    : world.patches;
+  const cutaway = scene ? vesselCutawayPatches(scene, drawn) : [];
+  if (drawn === world.patches && cutaway.length === 0) return world;
+  const patches = cutaway.length === 0 ? drawn : [...drawn, ...cutaway];
+  return scene?.terrain
+    ? terrainSolidWorldWithPatches(scene, patches)
     : createSolidWorld(patches);
 }
 
