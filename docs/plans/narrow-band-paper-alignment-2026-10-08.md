@@ -558,3 +558,30 @@ Validation at commit: `npm run check:types` passes; `npm run test:unit` passes
 898 tests (106 GPU-gated cases skipped); the focused ball-insertion Dawn file
 passes both cases. The full serial Dawn suite and final volume/performance
 measurements are still in progress; this is not yet a full clean-gate claim.
+
+### Completed validation
+
+The full serial Dawn run passed all 75 files discovered before the new ball test
+was added; that file passed separately (two tests), covering all 76 current files.
+Types pass and the final unit run passes 898 tests, with 106 GPU-gated skips.
+Figure 9's 900-step / 15-second coarse-interior regression also passes.
+
+Figure 2 measurements sample every frame for 5.1 seconds. Drift below uses the
+original reference volume, including the small initial discretization difference.
+
+| Run | Minimum drift | Maximum drift | Final drift | Maximum shift |
+| --- | ---: | ---: | ---: | ---: |
+| Scalar correction, 17 ms | -1.271% | +1.670% | +0.227% | 0.666h |
+| Scalar correction, 50 ms | -9.035% | +2.139% | +0.286% | 4.000h |
+| Correction disabled, 17 ms | -14.474% | +5.350% | +5.350% | 0h |
+
+The 50 ms run reaches the displacement cap and temporarily loses about 9%;
+this is bounded global control, not exact per-frame conservation or local shape
+recovery. The correction-disabled run also disables the added distance refresh.
+
+A short matched 12-frame timing check measured a median wall time over the last
+six frames of 12.406 ms with correction and 12.633 ms without; this small
+difference is not evidence of a speedup. The surface-volume pass itself averaged
+0.262 ms on this device, with additional distance-refresh work. Pressure solves
+and timestep subdivision are unchanged. Timing artifacts are generated under
+`docs/verification/narrow-band-scalar-{final-normal,final-large,control-normal,cost-on,cost-off}.json`.
