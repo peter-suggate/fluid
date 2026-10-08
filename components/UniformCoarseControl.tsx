@@ -172,7 +172,7 @@ export function UniformCoarseControl() {
   const narrowBand = method.methodId === "uniform-narrow-band-flip";
   const coarseParticles = values.coarseParticleMode === "on";
   const experiment = narrowBand && <SwitchField label="Experimental all-4h FLIP" checked={coarseParticles}
-    hint="Allow particles on 4h tiles and reconstruct their surface. Keeps the selected refinement policy; Requested with no Fine regions gives an all-4h layout. Restarts the simulation. Off uses particles only in h surface regions and the geometric surface."
+    hint="Allow surface particles on 4h tiles as well as h tiles. Keeps the selected refinement policy; Requested with no Fine regions gives an all-4h layout. Restarts the simulation. Both modes couple particle geometry into the simulation."
     onChange={on => set("coarseParticleMode", on ? "on" : "off")} />;
   const regions = scene.fluid.refinementRegions ?? [];
   const detail = info?.uniformDetail;
@@ -185,7 +185,7 @@ export function UniformCoarseControl() {
   const tiles = (fine ?? 0) + (coarse ?? 0);
   return <FieldList testId="uniform-resolution-control">
     {experiment}
-    {narrowBand && !coarseParticles && <FieldNote>Particles populate the liquid surface band inside h regions. Refinement changes update particle coverage on the next advance; 4h regions use geometric transport.</FieldNote>}
+    {narrowBand && !coarseParticles && <FieldNote>Particles track the surface inside h regions and feed pressure geometry. Dynamic refinement retains their swept coverage; explicit Requested regions still control where FLIP is enabled.</FieldNote>}
     <ChoiceField<UniformDetailPolicyMode> label="Simulation detail" value={settings.policy} options={POLICIES}
       hint="Where the solver runs h cells on its 4h base. Changes apply at the next frame and keep the running simulation."
       onChange={value => set("detailPolicy", value)} />

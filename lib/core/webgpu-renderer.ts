@@ -3895,6 +3895,9 @@ export class FluidLabRenderer {
           // A composed layer carries its own opacity; as a planeless view of
           // its own, the slice control is the opacity, as it is for markers.
           opacity: composedLayers ? layerOpacity(composedLayers, "particles") : gridOverlay.position,
+          // Simple water is a murky body the spheres sit in, not a surface
+          // they are drawn over.
+          water: fluidSurfaceRenderMode === "simple" ? this.waterPipeline.simpleWaterInterfaces : undefined,
         });
       }
       // Generic texture fields and compact paper publications each own both

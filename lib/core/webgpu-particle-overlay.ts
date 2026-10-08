@@ -1,5 +1,6 @@
 import { fieldVisualization, type Visualization } from "./visualization-registry";
 import { LAYER_PALETTE, LAYER_PARTICLE_SPEED_SCALE, PARTICLE_LEGEND } from "./visual-layers";
+import { simpleWaterMurkLength_m, simpleWaterShadingWGSL, type SimpleWaterInterfaces } from "./simple-water-shading";
 
 /**
  * Draws a particle method's own particles as shaded spheres over the frame.
@@ -11,9 +12,12 @@ import { LAYER_PALETTE, LAYER_PARTICLE_SPEED_SCALE, PARTICLE_LEGEND } from "./vi
  * Each sphere is an impostor: one camera-facing quad per particle whose
  * fragment stage rebuilds the sphere's normal and depth, so the spheres shade,
  * intersect and occlude one another through a depth buffer this pass owns.
- * Opaque scenery hides them through the dry scene's depth; the water does not,
- * because the particles are inside it and the liquid is what they are drawn
- * over.
+ * Opaque scenery hides them through the dry scene's depth. The shaded water
+ * does not: the particles are inside it and the liquid is what they are drawn
+ * over. Simple water is a murky body, so there each sphere is fogged by the
+ * liquid in front of it and takes the surface's own shading over the top, from
+ * the interfaces the water composite just rastered. A sphere the body hides
+ * outright is dropped in the vertex stage and costs no fragments.
  *
  * Records are read straight out of the solver's particle buffer. There is no
  * readback and no staging copy. A solver whose live count exists only on the
@@ -42,7 +46,7 @@ export interface GPUFluidParticleSource {
   readonly liveCount?: { readonly buffer: GPUBuffer; readonly byteOffset: number };
 }
 
-export const PARTICLE_OVERLAY_UNIFORM_BYTES = 128;
+export const PARTICLE_OVERLAY_UNIFORM_BYTES = 144;
 
 export interface ParticleOverlayCamera {
   readonly position_m: readonly [number, number, number];
@@ -63,6 +67,8 @@ export interface ParticleOverlayFrame {
   readonly depthNear_m: number;
   /** 1 draws opaque spheres. */
   readonly opacity?: number;
+  /** Present when Simple water was composited into the target this frame. */
+  readonly water?: SimpleWaterInterfaces;
 }
 
 const paletteWGSL = (name: string, rgb: readonly number[]) =>
@@ -84,6 +90,8 @@ struct ParticleOverlayUniforms {
   scale:vec4f,
   // xyz world position of the tank's minimum corner
   origin:vec4f,
+  // x Simple water's murk length in metres, zero when there is none to be under
+  water:vec4f,
   // x record stride in floats, y record capacity
   records:vec4u,
 }
@@ -91,14 +99,21 @@ struct ParticleOverlayUniforms {
 @group(0) @binding(0) var<uniform> overlay:ParticleOverlayUniforms;
 @group(0) @binding(1) var<storage, read> particles:array<f32>;
 @group(0) @binding(2) var sceneDepth:texture_depth_2d;
+@group(0) @binding(3) var waterFront:texture_2d<f32>;
+@group(0) @binding(4) var waterBack:texture_2d<f32>;
+@group(0) @binding(5) var waterRearFront:texture_2d<f32>;
+@group(0) @binding(6) var waterRearBack:texture_2d<f32>;
+@group(0) @binding(7) var waterFrontNormal:texture_2d<f32>;
 
 struct VertexOut {
   @builtin(position) position:vec4f,
-  @location(0) color:vec3f,
+  @location(0) @interpolate(flat) color:vec3f,
   // Unit-disc coordinate across the quad.
   @location(1) disc:vec2f,
   // x view depth of the sphere centre, y drawn radius, both in metres.
-  @location(2) sphere:vec2f,
+  @location(2) @interpolate(flat) sphere:vec2f,
+  // x liquid in front of the sphere centre in metres, y one behind a Simple surface.
+  @location(3) @interpolate(flat) water:vec2f,
 }
 
 struct FragmentOut {
@@ -112,23 +127,33 @@ ${paletteWGSL("PARTICLE_FAST", LAYER_PALETTE.particleFast)}
 // A sphere smaller than this would alias into crawling noise, so a distant
 // cloud is drawn slightly fat instead.
 const PARTICLE_MINIMUM_PIXELS:f32=0.75;
+// Murk lengths of liquid past which the least absorbed channel passes under
+// 1.5%: the sphere would change no pixel, so it is not drawn.
+const PARTICLE_HIDDEN_MURK_LENGTHS:f32=7.0;
+${simpleWaterShadingWGSL}
 
 fn particleSpeedColor(speed:f32)->vec3f {
   let t=clamp(speed/max(overlay.scale.w,1e-6),0.0,1.0);
   return mix(mix(PARTICLE_SLOW,PARTICLE_MID,clamp(2.0*t,0.0,1.0)),PARTICLE_FAST,clamp(2.0*t-1.0,0.0,1.0));
 }
 
+// Distance from the eye to an interface texel, negative where none was drawn.
+fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
+  let texel=textureLoad(positions,pixel,0);
+  return select(-1.0,length(texel.xyz-overlay.cameraPosition.xyz),texel.a>=0.5);
+}
+
 @vertex fn vertexMain(
   @builtin(vertex_index) vertexIndex:u32,
   @builtin(instance_index) instance:u32,
 )->VertexOut {
-  var corners=array<vec2f,6>(vec2f(-1.0,-1.0),vec2f(1.0,-1.0),vec2f(1.0,1.0),
-    vec2f(-1.0,-1.0),vec2f(1.0,1.0),vec2f(-1.0,1.0));
+  var corners=array<vec2f,4>(vec2f(-1.0,-1.0),vec2f(1.0,-1.0),vec2f(-1.0,1.0),vec2f(1.0,1.0));
   var output:VertexOut;
   output.color=vec3f(0.0);
   output.disc=corners[vertexIndex];
   output.sphere=vec2f(0.0);
-  // A collapsed quad: a retired record, or one past the buffer.
+  output.water=vec2f(0.0);
+  // A collapsed quad: a retired record, one past the buffer, or a hidden sphere.
   output.position=vec4f(0.0,0.0,0.0,1.0);
   if (instance>=overlay.records.y) { return output; }
   let at=overlay.records.x*instance;
@@ -146,9 +171,29 @@ fn particleSpeedColor(speed:f32)->vec3f {
   let radius=max(overlay.cameraUp.w,PARTICLE_MINIMUM_PIXELS/pixelsPerMetre);
   // The whole sphere stays in front of the near plane, so its depth is valid.
   if (!(view.z-radius>near)) { return output; }
+  let perspective=1.0/(view.z*tangent);
+  let aspect=max(overlay.cameraForward.w,1e-4);
+  if (overlay.water.x>0.0) {
+    // One lookup per sphere, at its centre: the liquid in front of it barely
+    // changes across a footprint that is a few pixels wide.
+    let uv=vec2f(0.5+0.5*view.x*perspective/aspect,0.5-0.5*view.y*perspective);
+    let pixel=vec2i(clamp(uv,vec2f(0.0),vec2f(0.9999))*vec2f(textureDimensions(waterFront)));
+    let front=waterInterfaceDistance(waterFront,pixel);
+    let centre=length(relative);
+    if (front>0.0 && centre>front) {
+      let back=waterInterfaceDistance(waterBack,pixel);
+      var path=centre-front;
+      // Past the nearest interval's exit: the gap behind it is air.
+      if (back>front && centre>back) {
+        path=simpleWaterPath(centre,front,back,waterInterfaceDistance(waterRearFront,pixel),
+          waterInterfaceDistance(waterRearBack,pixel));
+      }
+      if (path-radius>PARTICLE_HIDDEN_MURK_LENGTHS*overlay.water.x) { return output; }
+      output.water=vec2f(path,1.0);
+    }
+  }
   let corner=view.xy+corners[vertexIndex]*radius;
-  output.position=vec4f(corner.x/(view.z*tangent*max(overlay.cameraForward.w,1e-4)),
-    corner.y/(view.z*tangent),0.0,1.0);
+  output.position=vec4f(corner.x*perspective/aspect,corner.y*perspective,0.0,1.0);
   output.color=particleSpeedColor(length(velocity));
   output.sphere=vec2f(view.z,radius);
   return output;
@@ -165,19 +210,35 @@ fn particleSpeedColor(speed:f32)->vec3f {
     let stored=textureLoad(sceneDepth,vec2u(input.position.xy),0);
     if (stored>0.0 && viewDepth_m>near/stored) { discard; }
   }
+  let forward=overlay.cameraForward.xyz;
   let normal=normalize(overlay.cameraRight.xyz*input.disc.x+overlay.cameraUp.xyz*input.disc.y
-    -overlay.cameraForward.xyz*towardCamera);
-  // The key light rides over the viewer's left shoulder, so the spheres read
-  // as round from every orbit rather than going flat on the side away from
-  // a fixed sun.
-  let light=normalize(0.65*overlay.cameraUp.xyz-0.40*overlay.cameraRight.xyz-0.65*overlay.cameraForward.xyz);
-  let diffuse=max(dot(normal,light),0.0);
-  // Sky above, bounce below: the unlit side still reads as round.
-  let ambient=mix(0.28,0.46,0.5+0.5*normal.y);
-  let highlight=pow(max(dot(normal,normalize(light-overlay.cameraForward.xyz)),0.0),32.0);
+    -forward*towardCamera);
+  // The water's own key, wrapped past the terminator, under a sky that is
+  // brighter than the bounce: the lit side says which way is up and the unlit
+  // side still reads as round. The rim is darkened as the neighbours of a
+  // packed sphere would shade it, which is what separates one grain from the
+  // next when each is a few pixels wide.
+  let wrap=0.5+0.5*dot(normal,SIMPLE_WATER_KEY);
+  let light=(mix(0.30,0.50,0.5+0.5*normal.y)+0.62*wrap*wrap)*(0.66+0.34*towardCamera);
+  let highlight=pow(max(dot(normal,normalize(SIMPLE_WATER_KEY-forward)),0.0),40.0);
+  var color=input.color*light+vec3f(0.20*highlight);
+  // The cap of a sphere breaking the surface stays dry; the rest goes under.
+  let travel=input.water.x-input.sphere.y*towardCamera;
+  if (input.water.y>0.5 && travel>0.0) {
+    let viewport=max(overlay.viewport.xy,vec2f(1.0));
+    let screen=input.position.xy/viewport;
+    let surface=textureLoad(waterFrontNormal,vec2u(screen*vec2f(textureDimensions(waterFrontNormal))),0);
+    let tangent=overlay.cameraPosition.w;
+    let rd=normalize(forward+overlay.cameraRight.xyz*((2.0*screen.x-1.0)*overlay.cameraForward.w*tangent)
+      +overlay.cameraUp.xyz*((1.0-2.0*screen.y)*tangent));
+    var facing=-rd;
+    if (surface.a>1e-4 && dot(surface.xyz,surface.xyz)>1e-8) { facing=normalize(surface.xyz); }
+    if (dot(facing,rd)>0.0) { facing=-facing; }
+    color=mix(color,simpleWaterOver(color,travel,facing,rd,overlay.water.x),
+      clamp(2.0*travel/input.sphere.y,0.0,1.0));
+  }
   var output:FragmentOut;
-  output.color=vec4f(input.color*(ambient+0.58*diffuse)+vec3f(0.18*highlight),
-    clamp(overlay.cameraRight.w,0.0,1.0));
+  output.color=vec4f(color,clamp(overlay.cameraRight.w,0.0,1.0));
   output.depth=clamp(near/max(viewDepth_m,near),0.0,1.0);
   return output;
 }
@@ -191,11 +252,14 @@ export class ParticleOverlay {
   private indirect?: GPUBuffer;
   private fallbackDepth?: GPUTexture;
   private fallbackDepthView?: GPUTextureView;
+  private fallbackWater?: GPUTexture;
+  private fallbackWaterViews?: SimpleWaterInterfaces;
   private depth?: GPUTexture;
   private depthView?: GPUTextureView;
   /** One bind group per particle buffer: a solver may alternate two. */
   private readonly bindGroups = new Map<GPUBuffer, GPUBindGroup>();
   private boundSceneDepth?: GPUTextureView;
+  private boundWater?: SimpleWaterInterfaces;
   private source?: GPUFluidParticleSource;
   private destroyed = false;
   private readonly uniformData = new ArrayBuffer(PARTICLE_OVERLAY_UNIFORM_BYTES);
@@ -229,13 +293,25 @@ export class ParticleOverlay {
       label: "Fluid particle overlay draw arguments",
       size: 16, usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
     });
-    this.device.queue.writeBuffer(this.indirect, 0, new Uint32Array([6, 0, 0, 0]));
+    this.device.queue.writeBuffer(this.indirect, 0, new Uint32Array([4, 0, 0, 0]));
     this.fallbackDepth = this.device.createTexture({
       label: "Fluid particle overlay scene depth fallback",
       size: [1, 1], format: "depth32float",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
     });
     this.fallbackDepthView = this.fallbackDepth.createView();
+    // Bound while there is no Simple water; the murk length is zero then and
+    // no stage reads it.
+    this.fallbackWater = this.device.createTexture({
+      label: "Fluid particle overlay water fallback",
+      size: [1, 1], format: "rgba32float", usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
+    const fallbackWaterView = this.fallbackWater.createView();
+    this.fallbackWaterViews = {
+      frontPosition: fallbackWaterView, frontNormal: fallbackWaterView, backPosition: fallbackWaterView,
+      rearFrontPosition: fallbackWaterView, rearBackPosition: fallbackWaterView,
+    };
+    const interfaceTexture = { sampleType: "unfilterable-float" } as const;
     this.layout = this.device.createBindGroupLayout({
       label: "Fluid particle overlay bindings",
       entries: [
@@ -245,6 +321,11 @@ export class ParticleOverlay {
           buffer: { type: "read-only-storage" } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "depth" } },
+        { binding: 3, visibility: GPUShaderStage.VERTEX, texture: interfaceTexture },
+        { binding: 4, visibility: GPUShaderStage.VERTEX, texture: interfaceTexture },
+        { binding: 5, visibility: GPUShaderStage.VERTEX, texture: interfaceTexture },
+        { binding: 6, visibility: GPUShaderStage.VERTEX, texture: interfaceTexture },
+        { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: interfaceTexture },
       ],
     });
     this.pipeline = await this.device.createRenderPipelineAsync({
@@ -261,7 +342,7 @@ export class ParticleOverlay {
           },
         }],
       },
-      primitive: { topology: "triangle-list" },
+      primitive: { topology: "triangle-strip" },
       // Reversed-Z, as the scene depth is: nearer is greater, and the clear is 0.
       depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "greater" },
     });
@@ -275,9 +356,14 @@ export class ParticleOverlay {
     this.source = source;
   }
 
-  private bindGroupFor(buffer: GPUBuffer, sceneDepth: GPUTextureView | undefined): GPUBindGroup {
+  private bindGroupFor(
+    buffer: GPUBuffer, sceneDepth: GPUTextureView | undefined, frameWater: SimpleWaterInterfaces | undefined,
+  ): GPUBindGroup {
     const view = sceneDepth ?? this.fallbackDepthView!;
-    if (view !== this.boundSceneDepth) { this.bindGroups.clear(); this.boundSceneDepth = view; }
+    const water = frameWater ?? this.fallbackWaterViews!;
+    if (view !== this.boundSceneDepth || water !== this.boundWater) {
+      this.bindGroups.clear(); this.boundSceneDepth = view; this.boundWater = water;
+    }
     let group = this.bindGroups.get(buffer);
     if (!group) {
       // A third buffer means a new solver: the cached two are its predecessor's.
@@ -289,6 +375,11 @@ export class ParticleOverlay {
           { binding: 0, resource: { buffer: this.uniforms! } },
           { binding: 1, resource: { buffer } },
           { binding: 2, resource: view },
+          { binding: 3, resource: water.frontPosition },
+          { binding: 4, resource: water.backPosition },
+          { binding: 5, resource: water.rearFrontPosition },
+          { binding: 6, resource: water.rearBackPosition },
+          { binding: 7, resource: water.frontNormal },
         ],
       });
       this.bindGroups.set(buffer, group);
@@ -328,7 +419,8 @@ export class ParticleOverlay {
     f.set([width, height, Math.max(1e-6, frame.depthNear_m), sceneDepth ? 1 : 0], 16);
     f.set([...source.positionScale_m, LAYER_PARTICLE_SPEED_SCALE], 20);
     f.set([-0.5 * frame.container_m[0], 0, -0.5 * frame.container_m[2], 0], 24);
-    u.set([source.strideFloats, source.capacity, 0, 0], 28);
+    f.set([frame.water ? simpleWaterMurkLength_m(frame.container_m) : 0, 0, 0, 0], 28);
+    u.set([source.strideFloats, source.capacity, 0, 0], 32);
     this.device.queue.writeBuffer(this.uniforms!, 0, this.uniformData);
     if (source.liveCount) {
       encoder.copyBufferToBuffer(source.liveCount.buffer, source.liveCount.byteOffset, this.indirect!, 4, 4);
@@ -342,9 +434,9 @@ export class ParticleOverlay {
       },
     });
     pass.setPipeline(this.pipeline!);
-    pass.setBindGroup(0, this.bindGroupFor(source.buffer, sceneDepth));
+    pass.setBindGroup(0, this.bindGroupFor(source.buffer, sceneDepth, frame.water));
     if (source.liveCount) pass.drawIndirect(this.indirect!, 0);
-    else pass.draw(6, source.capacity);
+    else pass.draw(4, source.capacity);
     pass.end();
     return true;
   }
@@ -355,11 +447,15 @@ export class ParticleOverlay {
     this.uniforms?.destroy();
     this.indirect?.destroy();
     this.fallbackDepth?.destroy();
+    this.fallbackWater?.destroy();
     this.depth?.destroy();
     this.bindGroups.clear();
     this.uniforms = undefined;
     this.indirect = undefined;
     this.fallbackDepth = undefined;
+    this.fallbackWater = undefined;
+    this.fallbackWaterViews = undefined;
+    this.boundWater = undefined;
     this.depth = undefined;
     this.pipeline = undefined;
     this.source = undefined;

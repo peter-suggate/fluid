@@ -1,3 +1,4 @@
+import { narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
 import { uniformPreparedSurfaceSamplingWGSL } from "./uniform-prepared-surface.wgsl";
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
@@ -25,6 +26,8 @@ export const uniformMixedSurfaceHeldWord=(d:readonly number[])=>surfaceClaimWord
 const wallReachGroups=(d:readonly number[])=>Math.ceil(Math.max(d[0]!*d[1]!,d[1]!*d[2]!,d[2]!*d[0]!)/256);
 
 export interface UniformMixedSurfaceFields {
+  /** NB-FLIP sticky trajectory failure receipt; absent in Uniform Geometric. */
+  narrowBandState?:GPUBuffer;
   phi: GPUTexture;
   outputPhi: GPUTexture;
   velocity: GPUTexture;
@@ -64,7 +67,7 @@ export class UniformMixedSurface {
   /** Workgroups of the deferred advect launches: the list's bound (one word
    * per lattice vertex), capped where the GPU is saturated. */
   private readonly deferredGrid:number;
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly hanging=false,resolved=false) {
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly hanging=false,resolved=false,private readonly narrowBand=false) {
     // Every sampler, cubic and evidence read assumes UniformMixedPhiResolve.
     if(!resolved)throw new Error("Mixed surface reads a resolved phi field (UniformMixedPhiResolve)");
     this.resources = uniformDetailBindLayout(device,{entries:[
@@ -78,6 +81,7 @@ export class UniformMixedSurface {
       {binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       ...(hanging?[{binding:11,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}}]:[]),
       {binding:12,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      ...(this.narrowBand?[{binding:13,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}]:[]),
     ]});
     this.allocatedBytes=4*(surfaceClaimWords(ownership.capacity.lattice.dimensions)+2*wideVertices(ownership.capacity.lattice.dimensions));
     this.claims=device.createBuffer({label:"Uniform mixed surface job claims",size:this.allocatedBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
@@ -114,6 +118,7 @@ export class UniformMixedSurface {
       ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:176}}]:[]),
       ...(f.unitVelocity?[{binding:11,resource:f.unitVelocity}]:[]),
       {binding:12,resource:{buffer:this.claims}},
+      ...(this.narrowBand?[{binding:13,resource:{buffer:f.narrowBandState!}}]:[]),
     ]});
     return group;
   }
@@ -137,6 +142,7 @@ struct Params {hDt:vec4f,flags:vec4u}
 @group(1) @binding(10) var<storage,read_write> deferred:UMDeferred;
 struct UMDeferred { header:array<atomic<u32>,4>, data:array<u32> }
 @group(1) @binding(12) var<storage,read_write> umClaims:array<atomic<u32>>;
+${this.narrowBand?"@group(1) @binding(13) var<storage,read_write> nbState:array<atomic<u32>>;":""}
 ${this.sourceParams?uniformMixedSourceWGSL(9):""}
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
@@ -155,10 +161,16 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
 fn umLoadCoarseFace(index:vec3i,axis:u32)->f32{return textureLoad(coarseVelocity,index+vec3i(1),0)[axis];}
 ${this.hanging?"@group(1) @binding(11) var unitVelocity:texture_3d<f32>;":""}
 ${velocitySampling}
+${this.narrowBand?narrowBandTraceWGSL("umSampleVelocity"):""}
 fn umSurfaceTrace(p:vec3f)->vec3f{
- let h=params.hDt.xyz;let dt=params.hDt.w;
+ ${this.narrowBand?`let speed=abs(umSampleVelocity(p)/params.hDt.xyz);
+ let steps=max(1u,u32(ceil(params.hDt.w*max(speed.x,max(speed.y,speed.z))/0.5)));
+ if(steps>256u){atomicStore(&nbState[3],1u);return p;}
+ var q=p;let dt=-params.hDt.w/f32(steps);
+ for(var i=0u;i<steps;i++){q=clamp(nbTraceStep(q,dt),vec3f(0),vec3f(UM_D));}
+ return q;`:`let h=params.hDt.xyz;let dt=params.hDt.w;
  let mid=clamp(p-0.5*dt*umSampleVelocity(p)/h,vec3f(0),vec3f(UM_D));
- return clamp(p-dt*umSampleVelocity(mid)/h,vec3f(0),vec3f(UM_D));
+ return clamp(p-dt*umSampleVelocity(mid)/h,vec3f(0),vec3f(UM_D));`}
 }
 ${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
 ${this.solid?/* wgsl */`${uniformMixedVertexBuriedWGSL}

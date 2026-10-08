@@ -451,7 +451,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly narrowBandFlip: boolean;
   private readonly narrowBandCoarseParticles: boolean;
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
-  get narrowBandFlipInfo(){const stage=this.mixedFrame?.narrowBandFlip;return stage?{particles:stage.count,capacity:stage.capacity,bandWidth:4,flipRatio:0.95}:undefined;}
+  get narrowBandFlipInfo(){const stage=this.mixedFrame?.narrowBandFlip;return stage?{particles:stage.count,capacity:stage.capacity,reseedClipped:stage.reseedClipped,bandWidth:5,flipRatio:0.95,...stage.diagnostics}:undefined;}
   private readonly geometricVolume: boolean;
   private geometricRedistance: boolean;
   /** Sec. 3.4/3.5 rounding-residue floor in cell volumes; 0 is off. */
@@ -1299,7 +1299,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         + hostAuxiliaryBytes + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
-      volumeControl: true,
+      volumeControl: !this.narrowBandFlip,
       hostFluidAuthority: "gpu-resident", hostSimulationSizedWorkItems: 0,
       uniformPressureCycleBudget: this.geometricVolume ? "adaptive" : this.pressureCycleBudgetLagged ? "lagged" : "fixed",
       hostSchedulingUsesReadback: this.pressureCycleBudgetLagged && this.pressureMultigrid.residualTolerance > 0,
@@ -2027,6 +2027,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const importance=uniformDetailImportance(this.detail,dynamic.ownership.capacity.tiles);
       // The build's counters clear in the census's blit run.
       builder.encodeClear(encoder);
+      if(this.detail.policy==="dynamic"&&Object.values(importance.criteria).some(Boolean))this.mixedFrame?.narrowBandFlip?.refine(encoder,dynamic.joinTarget(),dt);
       dynamic.encode(encoder,{dt,steps:1,gravity:[g.x,g.y,g.z],reach:Math.max(this.mixedCoarseningReach,this.detail.marginTiles),hysteresis:this.mixedCoarseningHysteresis,
         surfaceTolerance:importance.shapeTolerance,fastTravel:0,importance,
         boundaryTravel:importance.impactTravel,closedWalls:this.scene.container.top==="open"?0b101111:0b111111,up:Math.sign(-g.y),
@@ -3227,7 +3228,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.mixedFramesInFlight++;
       const handled=receipt.then(receipt=>{
         if(this.disposed)return;
-        Object.assign(this.executionInfo,{...(this.narrowBandFlip?{narrowBandFlipParticles:this.mixedFrame?.narrowBandFlip?.count}:{}),simulatedTime_s:advance.nextTime_s,completedTime_s:advance.nextTime_s,
+        Object.assign(this.executionInfo,{...(this.narrowBandFlip?{narrowBandFlipParticles:this.mixedFrame?.narrowBandFlip?.count,narrowBandFlipReseedClipped:this.mixedFrame?.narrowBandFlip?.reseedClipped,narrowBandFlipUnsupportedParticles:this.mixedFrame?.narrowBandFlip?.diagnostics.unsupported,narrowBandFlipMaxSurfaceDistance:this.mixedFrame?.narrowBandFlip?.diagnostics.afterMaxOutside}:{}),simulatedTime_s:advance.nextTime_s,completedTime_s:advance.nextTime_s,
           uniformPressureAcceptedResidual:receipt.residual,uniformPressureCyclesExecuted:receipt.cycles,uniformPressureCyclesConverged:true,
           uniformPressureCyclesEncoded:receipt.encoded,uniformPressureCyclesConfigured:this.pressureSchedule.fullCycles+this.pressureSchedule.vCycles,
           uniformVolumeDustCells:receipt.dustOwners,uniformVolumeDustMass_cells:receipt.dustMass_cells,

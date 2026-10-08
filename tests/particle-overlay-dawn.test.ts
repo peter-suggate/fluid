@@ -3,11 +3,9 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { ParticleOverlay, type GPUFluidParticleSource, type ParticleOverlayFrame } from "../lib/core/webgpu-particle-overlay";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("particle records draw as depth-ordered spheres over exactly the live records", { timeout: 90000 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "particle-overlay");
   let device: GPUDevice | undefined;
   try {
     const dawn = await import(pathToFileURL(modulePath!).href); Object.assign(globalThis, dawn.globals);
@@ -88,6 +86,35 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     assert.deepEqual((await draw({ ...base, buffer: fixed, strideFloats: 8, capacity: 3 }, scenery.createView()))(32, 32), [0, 0, 0, 0], "scenery in front hides the spheres");
     sceneryAt(3);
     assert.equal((await draw({ ...base, buffer: fixed, strideFloats: 8, capacity: 3 }, scenery.createView()))(32, 32)[3], 255, "scenery behind leaves them drawn");
+
+    // Simple water in front of the spheres: its front interface a plane facing the camera, no exit behind it.
+    const interfaceTarget = () => device!.createTexture({ size: [size, size], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    const waterFront = interfaceTarget(), waterNormal = interfaceTarget(), noInterface = interfaceTarget();
+    const interfaceAt = (texture: GPUTexture, value: readonly number[]) => {
+      const encoder = device!.createCommandEncoder();
+      encoder.beginRenderPass({ colorAttachments: [{ view: texture.createView(), loadOp: "clear", storeOp: "store", clearValue: value }] }).end();
+      device!.queue.submit([encoder.finish()]);
+    };
+    interfaceAt(waterNormal, [0, 0, -1, 1]); interfaceAt(noInterface, [0, 0, 0, 0]);
+    const water = { frontPosition: waterFront.createView(), frontNormal: waterNormal.createView(), backPosition: noInterface.createView(),
+      rearFrontPosition: noInterface.createView(), rearBackPosition: noInterface.createView() };
+    const under = async (surfaceZ: number) => {
+      // Every texel names the point on the camera's axis: the liquid in front of the sphere at the centre pixel.
+      interfaceAt(waterFront, [0, 0.5, surfaceZ, 1]);
+      overlay.setSource({ ...base, buffer: fixed, strideFloats: 8, capacity: 3 });
+      const encoder = device!.createCommandEncoder();
+      encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 0] }] }).end();
+      assert.equal(overlay.encode(encoder, target.createView(), undefined, { ...frame, water }), true);
+      encoder.copyTextureToBuffer({ texture: target }, { buffer: readback, bytesPerRow: 256 }, [size, size]); device!.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ); const pixels = new Uint8Array(readback.getMappedRange()).slice(); readback.unmap();
+      return [...pixels.subarray(32 * 256 + 32 * 4, 32 * 256 + 32 * 4 + 4)];
+    };
+    // The fast sphere's centre is 1.8 m from the camera and the murk length of a 1 m tank is 9 cm.
+    assert.deepEqual(await under(0.5), centre, "a sphere in front of the surface is drawn as it is without water");
+    const shallow = await under(-0.5), deep = await under(-0.9);
+    assert.ok(shallow[3] === 255 && shallow[2]! > shallow[0]! && shallow[0]! < centre[0]!, `liquid in front turns the orange sphere toward the water's blue: ${shallow}`);
+    assert.ok(deep[3] === 255 && deep[0]! < shallow[0]!, `more liquid hides more of it: ${deep} after ${shallow}`);
+    assert.deepEqual(await under(-1.5), [0, 0, 0, 0], "a sphere the body hides outright is not drawn");
     assert.deepEqual(errors, []); overlay.destroy();
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

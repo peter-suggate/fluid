@@ -30,6 +30,10 @@ test("narrow-band FLIP is selectable and defaults to the fine band and keeps all
  assert.equal(values.sharpeningSweeps,0);assert.equal(values.sharpeningDistance,0);
  const options=uniformGeometricSolverOptions(values);
  assert.equal(options.sharpeningSweeps,0);assert.equal(options.pressureCycleBudget,"lagged");
- const fixed=new Set(["sharpeningSweeps","sharpeningDistance"]);
+ assert.equal(values.totalSurfaceVolume,"off");assert.equal(values.surfaceVolumeRounds,0);
+ assert.equal(values.surfaceDeficitBalancing,"off");assert.equal(values.phiDrain,"off");
+ const forced=resolveMethodValues(method,"balanced",{totalSurfaceVolume:"on",surfaceVolumeRounds:4,surfaceDeficitBalancing:"on",volumeDustThreshold:0.1});
+ assert.equal(forced.totalSurfaceVolume,"off");assert.equal(forced.surfaceVolumeRounds,0);assert.equal(forced.surfaceDeficitBalancing,"off");assert.equal(forced.volumeDustThreshold,0);
+ const fixed=new Set(["sharpeningSweeps","sharpeningDistance","totalSurfaceVolume","surfaceVolumeRounds","surfaceDeficitBalancing","volumeDustThreshold","orphanDustThreshold","phiDrain"]);
  for(const stage of (await method.pipelineGraph!()).stages)for(const control of stage.controls??[])if("param" in control)assert.ok(!fixed.has(control.param));
 });

@@ -22,6 +22,7 @@ import {
 import { terrainContentStamp, terrainHeightAt, type TerrainDescription } from "./terrain";
 import { fluidOnlyRigidSceneShader, rigidBodyRaymarchShaderLibrary } from "./webgpu-rigid-raymarch";
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
+import { SIMPLE_WATER_MURK_LENGTH_FRACTION, simpleWaterShadingWGSL, type SimpleWaterInterfaces } from "./simple-water-shading";
 import {
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES,
@@ -1805,6 +1806,7 @@ ${rigidBodyRaymarchShaderLibrary}
 ${environmentShaderLibrary}
 ${unifiedLightingShaderLibrary}
 ${unifiedDisplayTransferShaderLibrary}
+${simpleWaterShadingWGSL}
 // The water's key light. A document that authors one wins — that is the only
 // way the highlight on the water can agree with the set the SVO lit from the
 // same record — and one that does not keeps the environment preset's sun, which
@@ -1996,17 +1998,22 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
   let ndc=input.uv*2.0-1.0;let textureUV=vec2f(input.uv.x,1.0-input.uv.y);let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);
   let scene=safeSample(sceneTexture,textureUV);if(wireframeOnly>.5){return finish(scene.rgb,ndc);}var front=safePositionSample(frontPosition,textureUV);if(front.a<.5){return finish(scene.rgb,ndc);}var frontDepth=dot(front.xyz-ro,rd);
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));let depthEpsilon=max(.0015,.18*cellSize);
-  // Diagnostic material: preserve the actual mesh silhouette and normals, with
-  // undistorted scenery showing through. Fixed diffuse lighting exposes folds
-  // without environment reflections, specular highlights or optical contact repair.
+  // Simple material: the actual mesh silhouette and normals over undistorted
+  // scenery, fogged by the liquid the ray crosses. No refraction, environment
+  // or optical contact repair. Shaded in display space, as the particle
+  // spheres drawn over this target are, so both use one definition.
   if(simpleSurface>.5){
-    if(resolvedDrySceneDepth(scene.a)+depthEpsilon<frontDepth){return finish(scene.rgb,ndc);}
+    let dryDepth=resolvedDrySceneDepth(scene.a);let dry=finish(scene.rgb,ndc);
+    if(dryDepth+depthEpsilon<frontDepth){return dry;}
     var normal=normalize(safeInterfaceSample(frontNormal,textureUV).xyz);
     if(dot(normal,rd)>0.0){normal=-normal;}
-    let diffuse=.38+.62*max(dot(normal,normalize(vec3f(-.45,.8,.35))),0.0);
-    let rim=pow(1.0-clamp(dot(normal,-rd),0.0,1.0),2.0);
-    let color=vec3f(.12,.48,.64)*diffuse;
-    return finish(mix(scene.rgb,color,.58+.12*rim),ndc);
+    let pixel=vec2i(textureUV*vec2f(textureDimensions(backPosition)));
+    let nearBack=textureLoad(backPosition,pixel,0);let rearFront=textureLoad(rearFrontPosition,pixel,0);let rearBack=textureLoad(rearBackPosition,pixel,0);
+    // A missing back face is limited to one fluid cell, as it is when shaded.
+    let backDepth=max(frontDepth,select(frontDepth+max(.002,cellSize),dot(nearBack.xyz-ro,rd),nearBack.a>=.5));
+    let travel=simpleWaterPath(max(dryDepth,frontDepth),frontDepth,backDepth,
+      select(-1.0,dot(rearFront.xyz-ro,rd),nearBack.a>=.5&&rearFront.a>=.5),select(-1.0,dot(rearBack.xyz-ro,rd),rearBack.a>=.5));
+    return vec4f(simpleWaterOver(dry.rgb,travel,normal,rd,${SIMPLE_WATER_MURK_LENGTH_FRACTION}*sqrt(u.container.x*u.container.z)),1.0);
   }
   let frontNormalSample=safeInterfaceSample(frontNormal,textureUV);let filmDensity=recoveredWallFilm(front,frontNormalSample);var n=normalize(frontNormalSample.xyz);let rigidFront=nearestRigid(ro,rd);let contactBand=${CONTACT_RESOLVE_BAND_CELLS.toFixed(1)}*cellSize;
   if(u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(scene.rgb,ndc);}}
@@ -2203,6 +2210,7 @@ export class RasterWaterPipeline {
   private rigidBodyCount = 0;
   private sceneTexture?: GPUTexture;
   private sceneTextureView?: GPUTextureView;
+  private interfaceViews?: SimpleWaterInterfaces;
   private frontPosition?: GPUTexture;
   private frontNormal?: GPUTexture;
   private frontDepth?: GPUTexture;
@@ -3087,8 +3095,18 @@ export class RasterWaterPipeline {
     this.causticsValid = false;
     this.dryInterfaceClearsEncoded = false;
     this.clearBackgroundEncoded = false;
+    this.interfaceViews = { frontPosition: this.frontPosition.createView(), frontNormal: this.frontNormal.createView(),
+      backPosition: this.backPosition.createView(), rearFrontPosition: this.rearFrontPosition.createView(),
+      rearBackPosition: this.rearBackPosition.createView() };
     this.targetKey = key; this.rebuildBindGroups();
   }
+
+  /**
+   * The peeled interfaces of the frame last encoded, for the particle spheres
+   * to place themselves under the Simple surface. One object per target
+   * allocation, so its identity keys a consumer's bind groups.
+   */
+  get simpleWaterInterfaces(): SimpleWaterInterfaces | undefined { return this.interfaceViews; }
 
   /**
    * Scene-level fact from the runtime plan. A fluid-less scene has no water
