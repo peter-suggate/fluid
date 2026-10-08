@@ -9,7 +9,6 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 // Retain the native Dawn instance until all asynchronous readbacks finish.
 const live = new Set<GPU>();
@@ -29,7 +28,6 @@ async function read(device: GPUDevice, source: GPUBuffer, bytes = source.size, o
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 assert.ok(dawnModule, "Set WEBGPU_NODE_MODULE to the native Dawn module path");
-await acquireWebGPUExclusiveLock("dawn-probe", "mini32-corner");
 const errors: string[] = [];
 let gpu: GPU | undefined;
 let device: GPUDevice | undefined;
@@ -114,6 +112,5 @@ try {
 } finally {
   solver?.destroy();
   device?.destroy();
-  await releaseWebGPUExclusiveLock();
   if (gpu) live.delete(gpu);
 }

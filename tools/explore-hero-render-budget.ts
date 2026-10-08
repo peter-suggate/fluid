@@ -1,4 +1,4 @@
-/** Smooth/voxel-face x10 render-budget exploration. Run through run-webgpu-exclusive.ts.
+/** Smooth/voxel-face x10 render-budget exploration.
  * Full-frame GPU spans; no pass withholding, solver, or water optical composite.
  * FLUID_EXPLORE_OUT, FLUID_EXPLORE_CYCLES, FLUID_EXPLORE_ARMS, FLUID_EXPLORE_VIEWS select evidence. */
 /** Full depth-3 rendering probe with allocation limits and a fence after every batch. */

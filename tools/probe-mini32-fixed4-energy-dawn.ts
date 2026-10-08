@@ -10,7 +10,6 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock, readWebGPUExclusiveLockHolder } from "../lib/harness/webgpu-smoke-isolation";
 
 const arm = process.argv.find(a=>a.startsWith("--arm="))?.slice(6);
 if (arm) {
@@ -28,11 +27,6 @@ if (arm) {
 const live = new Set<GPU>();
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 assert.ok(dawnModule, "Set WEBGPU_NODE_MODULE to the native Dawn module path");
-if(process.argv.includes("--wait")) {
-  for(let attempt=0;attempt<180 && await readWebGPUExclusiveLockHolder();attempt++)
-    await new Promise(resolve=>setTimeout(resolve,1000));
-}
-await acquireWebGPUExclusiveLock("dawn-probe", "mini32-fixed4-energy");
 const errors: string[] = [];
 let gpu: GPU | undefined;
 let device: GPUDevice | undefined;
@@ -128,6 +122,6 @@ try {
     assert.deepEqual(errors,[]);
   }
 } finally {
-  solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock();
+  solver?.destroy(); device?.destroy(); 
   if(gpu) live.delete(gpu);
 }

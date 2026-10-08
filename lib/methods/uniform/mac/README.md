@@ -12,7 +12,7 @@ the same full 32³ grid and two 0.004 s advances, including shared raster checks
 
 ```sh
 FLUID_SCENE=minimal-power-dam-break-32 FLUID_LANE=uniform-ab \
-  node --import tsx tools/run-webgpu-exclusive.ts --import tsx tools/run-webgpu-smoke.ts
+  node --import tsx tools/run-webgpu-smoke.ts
 ```
 
 Run this only when no other Dawn process or browser is using WebGPU. This short
@@ -98,5 +98,4 @@ resolve air motion, wetting/contact-angle physics, or cut-cell solid boundaries.
 Numerical tests cover hydrostatic balance, signed pressure, gravitational free
 fall, the Laplace pressure jump, wall rest, dam-break motion, linear gravity-wave
 phase, and rejection of an under-solved pressure step. Run
-`npm run test:dawn -- uniform-mac` with no browser or other Dawn process using
-the repository's WebGPU lease.
+`npm run test:dawn -- uniform-mac`.

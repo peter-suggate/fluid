@@ -6,7 +6,6 @@ import { resolve } from "node:path";
 import { createProcessRetainedDawnGPU,type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { readBufferBinding } from "../lib/harness/webgpu-smoke-readbacks";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
@@ -16,7 +15,6 @@ import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu
 const arg=(key:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${key}=`))?.slice(key.length+3)??fallback;
 const passFilter=new RegExp(arg("passes","^(uv|Advect dense|Redistance dense)"));
 const out=arg("out","/tmp/figure9-transport"),steps=Number(arg("steps","120"));
-await acquireWebGPUExclusiveLock("dawn-probe","uniform geometric transport cost");
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 try {
  const dawn=await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href) as NodeDawnProvider;Object.assign(globalThis,dawn.globals);
@@ -67,4 +65,4 @@ try {
   const row={frame,t:frame/30,wallMs,passes,work,donorFanIn};rows.push(row);console.log(JSON.stringify(row));await writeFile(`${out}/trace.json`,JSON.stringify(rows,null,2));assert.deepEqual(errors,[]);
  }
  queries.destroy();result.destroy();read.destroy();
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();}

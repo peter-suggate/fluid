@@ -11,8 +11,6 @@ import {pathToFileURL} from "node:url";
 import sharp from "sharp";
 import {RasterWaterPipeline} from "../lib/core/webgpu-water-pipeline";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
-await acquireWebGPUExclusiveLock("dawn-test","pool-wireframe");
 const {create,globals}=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,globals);
 const gpu=create(["backend=metal"]);const adapter=await gpu.requestAdapter();const device=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
 try{
@@ -43,4 +41,4 @@ if(process.env.FLUID_SVO){
 }
 const encoder=device.createCommandEncoder();const result=pipeline.encode(encoder,output,128,96,128,false,0,1,dryRenderer ? (e,t)=>dryRenderer!.encode(e,t) : undefined,undefined,true,"clear",true,undefined,true,"wireframe");console.log(result);device.queue.submit([encoder.finish()]);await device.queue.onSubmittedWorkDone();
 const readback=device.createBuffer({size:width*height*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const copy=device.createCommandEncoder();copy.copyTextureToBuffer({texture:output},{buffer:readback,bytesPerRow:width*4},[width,height]);device.queue.submit([copy.finish()]);await readback.mapAsync(GPUMapMode.READ);await sharp(Buffer.from(readback.getMappedRange()),{raw:{width,height,channels:4}}).png().toFile("artifacts/pool-gap/wire.png");readback.unmap();pipeline.destroy();
-}finally{device.destroy();await releaseWebGPUExclusiveLock();}
+}finally{device.destroy();}

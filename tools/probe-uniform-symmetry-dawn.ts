@@ -9,7 +9,6 @@ import assert from 'node:assert/strict';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createProcessRetainedDawnGPU,type NodeDawnProvider} from '../lib/harness/node-dawn-provider';
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock,readWebGPUExclusiveLockHolder} from '../lib/harness/webgpu-smoke-isolation';
 import {managedGPUDevice} from '../lib/core/gpu-compilation-manager';
 import {requiredFluidDeviceLimits} from '../lib/core/webgpu-device-limits';
 import {sceneDocument} from '../lib/core/scene-definition';
@@ -22,9 +21,6 @@ const arg=(k:string,d:string)=>process.argv.find(a=>a.startsWith(`--${k}=`))?.sl
 const frames=Number(arg('frames','30')),sceneId=arg('scene','symmetric-expansion'),verbose=arg('verbose','0')==='1';
 const tolerance=Number(arg('tol','0'));
 const values=resolveMethodValues(uniformVolumeMethod,'balanced',JSON.parse(arg('values','{}')));
-console.log('Waiting for repository WebGPU lease');
-while(await readWebGPUExclusiveLockHolder()) await new Promise(r=>setTimeout(r,500));
-await acquireWebGPUExclusiveLock('dawn-probe','uniform symmetry');
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 const owned:GPUTexture[]=[];
 type Kind='cell'|'vertex'|'mac'|'coarse';
@@ -199,4 +195,4 @@ try{
   assert.deepEqual(errors,[]);
  }
  console.log('first broken step per stage:',JSON.stringify(Object.fromEntries(firstBroken)));
-}finally{solver?.destroy();for(const t of owned)t.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();for(const t of owned)t.destroy();device?.destroy();}

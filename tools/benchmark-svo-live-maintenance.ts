@@ -3,8 +3,7 @@
  * What live-scene maintenance costs, per stage, against record count.
  *
  *   npm run benchmark:svo-live-maintenance
- *   FLUID_SVO_MAINTENANCE_RECORDS=501,5010 node --import tsx tools/run-webgpu-exclusive.ts \
- *     --import tsx tools/benchmark-svo-live-maintenance.ts
+ *   FLUID_SVO_MAINTENANCE_RECORDS=501,5010 node --import tsx tools/benchmark-svo-live-maintenance.ts
  *
  * W2 replaced two loops whose cost did not depend on how much of the world
  * changed:

@@ -5,7 +5,6 @@ import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { uniformDetailBaseOf } from "../lib/core/uniform-detail-abi";
 import { getSceneDefinition } from "../lib/core/scenes";
@@ -13,7 +12,6 @@ import { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-unif
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("uniform geometric presentation source",{timeout:180_000},async t=>{
-  await acquireWebGPUExclusiveLock("dawn-test","uniform-volume numerical invariants");
   let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
   try{
     const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
@@ -62,5 +60,5 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
       staging.unmap();for(const b of [params,output,staging,ownership])b.destroy();
     });
     assert.deepEqual(errors,[]);
-  }finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+  }finally{solver?.destroy();device?.destroy();}
 });

@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 const source = readFileSync(new URL(
   "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
@@ -33,7 +32,6 @@ const cases = [
 (process.env.WEBGPU_NODE_MODULE ? test : test.skip)(
   "submerged pressure membership distinguishes walls, air ports and separating contact",
   async () => {
-    await acquireWebGPUExclusiveLock("dawn-test", "submerged-wall");
     let device: GPUDevice | undefined;
     try {
       const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
@@ -96,5 +94,5 @@ fn main(@builtin(global_invocation_id)gid:vec3u){
         if (readback.mapState === "mapped") readback.unmap();
         readback.destroy(); input.destroy(); output.destroy();
       }
-    } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+    } finally { device?.destroy(); }
   });

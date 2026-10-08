@@ -1,4 +1,4 @@
-/** CPU oracle: actual analytic fields, no GPU lease or illustrative substitute.
+/** CPU oracle: actual analytic fields, no GPU or illustrative substitute.
  * OAK_TREE_JSON=... OAK_ANALYTIC_OUT=... OAK_AZIMUTH=... node --import tsx tools/render-oak-analytic.ts
  */
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";

@@ -49,9 +49,7 @@
  * missing tonemap and nothing else — the ΔE₀₀ number would be dominated by a
  * difference that is not in the renderer.
  *
- * This lane therefore spawns the smoke lane, which also means it inherits the
- * `tools/run-webgpu-exclusive.ts` GPU mutex per rep instead of holding one lock
- * across all four.
+ * This lane therefore spawns the smoke lane, one process per rep.
  *
  * ---------------------------------------------------------------------------
  * Environment
@@ -295,9 +293,6 @@ function renderRep(index: number): string {
   const result = spawnSync(
     process.execPath,
     [
-      "--import",
-      "tsx",
-      "tools/run-webgpu-exclusive.ts",
       "--import",
       "tsx",
       "tools/run-svo-dry-render-smoke.ts",

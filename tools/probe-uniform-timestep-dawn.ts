@@ -10,7 +10,7 @@
  * or per-frame stats. --initial=rest uses a still fill.
  * --quality-census reads final canonical GPU owners (unit capacity: use only
  * unsolided scenes). Legacy dense shader ablations are rejected explicitly.
- * Acquires the exclusive Dawn/browser GPU lease. No production code is edited.
+ * No production code is edited.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -24,7 +24,6 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import { auditUniformGPUAllocations } from "./uniform-gpu-allocation-audit";
@@ -61,7 +60,6 @@ const stats = (values: number[]) => {
     median: quantile(.5), p10: quantile(.1), p90: quantile(.9) };
 };
 const rows: { frame: number; time_s: number; wall_ms: number; trace: NonNullable<WebGPUUniformReferenceSolver["info"]["physicsTrace"]>; cpuTrace: unknown; quality: Record<string,unknown>; work: Record<string,unknown> }[] = [];
-await acquireWebGPUExclusiveLock("dawn-probe", `Uniform Geometric stage profile: ${sceneId}`);
 let device: GPUDevice | undefined, solver: WebGPUUniformReferenceSolver | undefined;
 let pressureWorkReadback: GPUBuffer | undefined;
 let allocationAudit: ReturnType<typeof auditUniformGPUAllocations> | undefined;
@@ -252,4 +250,4 @@ try {
   mkdirSync(dirname(out),{recursive:true});
   writeFileSync(out,JSON.stringify({...reportContext,rows,failure:error instanceof Error?error.message:String(error)},null,2)+"\n");
   throw error;
-} finally { pressureWorkReadback?.destroy(); solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }
+} finally { pressureWorkReadback?.destroy(); solver?.destroy(); device?.destroy(); }

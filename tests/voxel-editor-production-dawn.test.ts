@@ -2,7 +2,6 @@ import "../lib/methods";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createEmptyScene } from "../lib/core/empty-scene";
 import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
@@ -28,7 +27,6 @@ test("production editor plugins, worker acceptance and controller history preser
 }, async () => {
   assert.deepEqual(voxelTools.tools.filter(tool => tool.execution !== "release").map(tool => tool.id), expectedSolids,
     "new solid plugins must be added to the production-path acceptance matrix");
-  await acquireWebGPUExclusiveLock("dawn-test", "voxel-editor-production");
   let device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined, display: WebGPULiveSvoScene | undefined;
   let detach: (() => void) | undefined;
   try {
@@ -232,6 +230,5 @@ test("production editor plugins, worker acceptance and controller history preser
   } finally {
     detach?.(); solver?.destroy(); display?.destroy();
     if (device) { await device.queue.onSubmittedWorkDone(); device.destroy(); }
-    await releaseWebGPUExclusiveLock();
   }
 });

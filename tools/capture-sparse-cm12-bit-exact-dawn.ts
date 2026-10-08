@@ -24,10 +24,6 @@ import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 
 const SCHEMA = "fluid.sparse-cm12.bit-exact.v2";
 // The canonical exactness capture spans two physical seconds. A caller may
@@ -285,10 +281,6 @@ const backend = argument("backend") ?? process.env.FLUID_WEBGPU_BACKEND
   ?? process.env.WEBGPU_BACKEND ?? "metal";
 const sourceRoot = argument("source-root") ?? process.cwd();
 
-await acquireWebGPUExclusiveLock(
-  "dawn-acceptance",
-  "tools/capture-sparse-cm12-bit-exact-dawn.ts",
-);
 let device: GPUDevice | undefined;
 try {
   const dawn = await import(pathToFileURL(modulePath).href) as {
@@ -323,5 +315,4 @@ try {
   process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
 } finally {
   device?.destroy();
-  await releaseWebGPUExclusiveLock();
 }

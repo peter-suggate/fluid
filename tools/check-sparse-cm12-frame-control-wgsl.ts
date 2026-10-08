@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import {
   SPARSE_CM12_FRAME_CONTROL_COVERAGE,
   SPARSE_CM12_FRAME_CONTROL_FAULT,
@@ -275,72 +273,67 @@ async function main(): Promise<void> {
     throw new Error("corrupt FCA1 CPU header did not fail closed");
   }
 
-  await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-frame-control");
-  try {
-    const { create, globals } = await import(dawnModule) as {
-      create: (flags: string[]) => GPU; globals: Record<string, unknown>;
-    };
-    Object.assign(globalThis, globals);
-    const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
-    const adapter = await gpu.requestAdapter();
-    if (!adapter) throw new Error("no WebGPU adapter");
-    const device = await adapter.requestDevice();
-    const pipeline = await createPipeline(device, control);
-    const output = SPARSE_CM12_FRAME_CONTROL_COVERAGE.output;
-    assertCommitted(await evaluate(device, pipeline, control,
-      [MODE_NORMAL, 0, 0, 1, 1, 0, 0, output]), "D4-only", {
-      scalarD4: 1, faceD4: 1, solid: 0, bodyLive: 0,
-    });
-    assertCommitted(await evaluate(device, pipeline, control,
-      [MODE_NORMAL, 3, 0, 1, 1, 0, 0, output]), "body-live", {
-      scalarD4: 0, faceD4: 0, solid: 1, bodyLive: 1,
-    });
-    assertCommitted(await evaluate(device, pipeline, control,
-      [MODE_NORMAL, 0, 1, 1, 1, 0, 0, output]), "boundary-live", {
-      scalarD4: 0, faceD4: 0, solid: 1, bodyLive: 0,
-    });
-    assertCommitted(await evaluate(device, pipeline, control,
-      [MODE_NORMAL, 0, 0, 1, 0, 0, 0, output]), "split-D4", {
-      scalarD4: 1, faceD4: 0, solid: 0, bodyLive: 0,
-    });
-    for (const [mode, label] of [[MODE_INVALIDATE_BEFORE_SEAL, "pre-seal invalidate"],
-      [MODE_INVALIDATE_AFTER_SEAL, "post-seal invalidate"]] as const) {
-      const result = await evaluate(device, pipeline, control,
-        [mode, 0, 0, 1, 1, 37, 91, output]);
-      assertCommitted(result, label, {
-        scalarD4: 0, faceD4: 0, solid: 0, bodyLive: 0,
-      });
-      assertEqual(result[13]!, 37, `${label} cause`);
-      assertEqual(result[14]!, 91, `${label} owner`);
-    }
-    assertFault(await evaluate(device, pipeline, control,
-      [MODE_BODY_OVERFLOW, 9, 0, 0, 0, 0, 0, output]), "body overflow",
-    SPARSE_CM12_FRAME_CONTROL_FAULT.bodyCapacity);
-    assertFault(await evaluate(device, pipeline, control,
-      [MODE_NORMAL, 0, 0, 1, 1, 0, 0, SPARSE_CM12_FRAME_CONTROL_COVERAGE.scalarOutput]),
-    "incomplete output", SPARSE_CM12_FRAME_CONTROL_FAULT.incompleteOutput);
-    assertFault(await evaluate(device, pipeline, control,
-      [MODE_MISSING_BODY_EVIDENCE, 0, 0, 0, 0, 0, 0, output]),
-    "missing generation-stamped authority", SPARSE_CM12_FRAME_CONTROL_FAULT.missingEvidence);
-    assertFault(await evaluate(device, pipeline, corruptCPU,
-      [MODE_NORMAL, 0, 0, 1, 1, 0, 0, output]), "corrupt header",
-    SPARSE_CM12_FRAME_CONTROL_FAULT.invalidHeader, false);
-
-    const staticOnly = createSparseCM12FrameControl({
-      cellWorkgroups: 7, rowWorkgroups: 11, initialGeneration: 5,
-    });
-    const staticPipeline = await createPipeline(device, staticOnly);
-    assertCommitted(await evaluate(device, staticPipeline, staticOnly,
-      [MODE_NORMAL, 0, 0, 0, 0, 0, 0, output]), "static capabilities off", {
+  const { create, globals } = await import(dawnModule) as {
+    create: (flags: string[]) => GPU; globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, globals);
+  const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+  const adapter = await gpu.requestAdapter();
+  if (!adapter) throw new Error("no WebGPU adapter");
+  const device = await adapter.requestDevice();
+  const pipeline = await createPipeline(device, control);
+  const output = SPARSE_CM12_FRAME_CONTROL_COVERAGE.output;
+  assertCommitted(await evaluate(device, pipeline, control,
+    [MODE_NORMAL, 0, 0, 1, 1, 0, 0, output]), "D4-only", {
+    scalarD4: 1, faceD4: 1, solid: 0, bodyLive: 0,
+  });
+  assertCommitted(await evaluate(device, pipeline, control,
+    [MODE_NORMAL, 3, 0, 1, 1, 0, 0, output]), "body-live", {
+    scalarD4: 0, faceD4: 0, solid: 1, bodyLive: 1,
+  });
+  assertCommitted(await evaluate(device, pipeline, control,
+    [MODE_NORMAL, 0, 1, 1, 1, 0, 0, output]), "boundary-live", {
+    scalarD4: 0, faceD4: 0, solid: 1, bodyLive: 0,
+  });
+  assertCommitted(await evaluate(device, pipeline, control,
+    [MODE_NORMAL, 0, 0, 1, 0, 0, 0, output]), "split-D4", {
+    scalarD4: 1, faceD4: 0, solid: 0, bodyLive: 0,
+  });
+  for (const [mode, label] of [[MODE_INVALIDATE_BEFORE_SEAL, "pre-seal invalidate"],
+    [MODE_INVALIDATE_AFTER_SEAL, "post-seal invalidate"]] as const) {
+    const result = await evaluate(device, pipeline, control,
+      [mode, 0, 0, 1, 1, 37, 91, output]);
+    assertCommitted(result, label, {
       scalarD4: 0, faceD4: 0, solid: 0, bodyLive: 0,
     });
-    assertFault(await evaluate(device, staticPipeline, staticOnly,
-      [MODE_NORMAL, 0, 0, 1, 0, 0, 0, output]), "D4 capability violation",
-    SPARSE_CM12_FRAME_CONTROL_FAULT.capability);
-    console.log("Sparse CM12 FCA1: B16/P16 GPU authority, complementary indirect triplets, local D4 invalidation, parity commit, and fail-closed cases passed");
-  } finally {
-    await releaseWebGPUExclusiveLock();
+    assertEqual(result[13]!, 37, `${label} cause`);
+    assertEqual(result[14]!, 91, `${label} owner`);
   }
+  assertFault(await evaluate(device, pipeline, control,
+    [MODE_BODY_OVERFLOW, 9, 0, 0, 0, 0, 0, output]), "body overflow",
+  SPARSE_CM12_FRAME_CONTROL_FAULT.bodyCapacity);
+  assertFault(await evaluate(device, pipeline, control,
+    [MODE_NORMAL, 0, 0, 1, 1, 0, 0, SPARSE_CM12_FRAME_CONTROL_COVERAGE.scalarOutput]),
+  "incomplete output", SPARSE_CM12_FRAME_CONTROL_FAULT.incompleteOutput);
+  assertFault(await evaluate(device, pipeline, control,
+    [MODE_MISSING_BODY_EVIDENCE, 0, 0, 0, 0, 0, 0, output]),
+  "missing generation-stamped authority", SPARSE_CM12_FRAME_CONTROL_FAULT.missingEvidence);
+  assertFault(await evaluate(device, pipeline, corruptCPU,
+    [MODE_NORMAL, 0, 0, 1, 1, 0, 0, output]), "corrupt header",
+  SPARSE_CM12_FRAME_CONTROL_FAULT.invalidHeader, false);
+
+  const staticOnly = createSparseCM12FrameControl({
+    cellWorkgroups: 7, rowWorkgroups: 11, initialGeneration: 5,
+  });
+  const staticPipeline = await createPipeline(device, staticOnly);
+  assertCommitted(await evaluate(device, staticPipeline, staticOnly,
+    [MODE_NORMAL, 0, 0, 0, 0, 0, 0, output]), "static capabilities off", {
+    scalarD4: 0, faceD4: 0, solid: 0, bodyLive: 0,
+  });
+  assertFault(await evaluate(device, staticPipeline, staticOnly,
+    [MODE_NORMAL, 0, 0, 1, 0, 0, 0, output]), "D4 capability violation",
+  SPARSE_CM12_FRAME_CONTROL_FAULT.capability);
+  console.log("Sparse CM12 FCA1: B16/P16 GPU authority, complementary indirect triplets, local D4 invalidation, parity commit, and fail-closed cases passed");
 }
 
 void main().catch((error: unknown) => {

@@ -4,11 +4,9 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 const source=readFileSync(new URL("../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts",import.meta.url),"utf8");
 const sampler=source.slice(source.indexOf("fn sampleFaceVelocitySupportAtSpans("),source.indexOf("fn traceFaceDeparture("));
 assert.ok(sampler.startsWith("fn sampleFaceVelocitySupportAtSpans("));
-await acquireWebGPUExclusiveLock("dawn-probe","production velocity roundtrip");
 let device:GPUDevice|undefined;
 try{
  const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
@@ -58,4 +56,4 @@ ${sampler}
  }
  for(const b of [out,params,read])b.destroy();
  mkdirSync("artifacts/level-set-volume",{recursive:true});writeFileSync("artifacts/level-set-volume/velocity-roundtrip-dissipation.json",JSON.stringify({scope:"production sampler; analytic divergence-free staggered source; zero travel",results},null,2)+"\n");console.log(JSON.stringify(results));
-}finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{device?.destroy();}

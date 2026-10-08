@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { acquireSvoTestLease } from "./helpers/svo-gpu-lease";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 import { rasterAoConsumerWGSL, rasterHorizonWGSL, rasterCoarseAoWGSL } from "../lib/svo/features/lighting-visibility/svo-raster-ao";
 
@@ -9,7 +7,6 @@ import { rasterAoConsumerWGSL, rasterHorizonWGSL, rasterCoarseAoWGSL } from "../
 // raised blocker. A perpendicular normal in every reduced sample models a tiny
 // voxel face missed by the 2×2 lighting lattice, without a whole scene fixture.
 (process.env.WEBGPU_NODE_MODULE ? test : test.skip)("raster AO preserves contact and shadow on faces missing from the reduced buffer", async () => {
-  await acquireSvoTestLease("raster AO reconstruction");
   let device: GPUDevice | undefined;
   try {
     const setup = await createDawnRenderDevice(); device = setup.device;
@@ -128,5 +125,5 @@ ${rasterCoarseAoWGSL}
     assert.equal(actual[15], 1, "dense blockers use contact AO instead of coarse horizon bands");
     for (let i = 4; i < 64; i++) assert.equal(actual[i * 4 + 3], 1, `coarse AO must not shadow its own wall (orientation/offset ${i})`);
     [output, read, params].forEach(buffer => buffer.destroy()); [geometry, contact, visibility, shadow].forEach(texture => texture.destroy());
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

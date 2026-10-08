@@ -10,8 +10,7 @@
  * This repository has no CI runner — no workflow file, no pipeline config, no
  * aggregate `verify:` lane; its ~70 `test:webgpu:*` scripts *are* the gate
  * surface, run by hand or by an agent. So "renders in CI" is discharged here as
- * a one-command entry in that surface, and both scripts take the shared
- * `tools/run-webgpu-exclusive.ts` lock like every other GPU lane.
+ * a one-command entry in that surface.
  *
  * This is deliberately *not* an entry in `lib/scene-webgpu-smoke-catalog.ts`.
  * That catalog's `SceneWebGPUSmokeLane` requires `stop.simulatedTime_s > 0` and

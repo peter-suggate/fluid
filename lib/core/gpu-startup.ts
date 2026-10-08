@@ -85,22 +85,12 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
   ].filter((value): value is string => typeof value === "string");
 }
 
-export const BROWSER_GPU_LOCK_NAME = "fluid-lab:webgpu-exclusive";
-
-interface BrowserLockManager {
-  request(
-    name: string,
-    options: { mode: "exclusive"; ifAvailable: true },
-    callback: (lock: { readonly name: string } | null) => Promise<void>,
-  ): Promise<void>;
-}
-
 /**
  * Which viewport pane a GPU session belongs to.
  *
  * `"a"` is the only pane in single-pane mode; compare mode adds `"b"` as a
  * diff over it. Everything that used to be one page-wide slot — the retained
- * viewport lifecycle, the in-page share of the WebGPU lock, a manual
+ * viewport lifecycle, the pane lease, a manual
  * start/stop request — is keyed by this.
  */
 export type PaneId = "a" | "b";
@@ -111,61 +101,12 @@ export function isPaneId(value: unknown): value is PaneId {
   return value === "a" || value === "b";
 }
 
-export type BrowserGPULeaseResult =
-  | { readonly status: "acquired"; readonly release: () => void }
-  // `exhausted` is raised only by the in-page pane broker
-  // (`lib/core/session/pane-lease.ts`) when every pane lease is already out;
-  // `acquireBrowserGPULease` itself never returns it.
-  | { readonly status: "held" | "unsupported" | "error" | "exhausted"; readonly message: string };
-
-/**
- * Hold one Web Lock for the lifetime of the browser GPU device. `ifAvailable`
- * makes a second tab fail immediately instead of queuing a surprise startup.
- */
-export async function acquireBrowserGPULease(
-  manager: BrowserLockManager | undefined,
-): Promise<BrowserGPULeaseResult> {
-  if (!manager) return { status: "unsupported", message: "This browser cannot enforce the cross-tab WebGPU lock" };
-  let resolveAcquisition!: (status: "acquired" | "held" | "error") => void;
-  let releaseLock!: () => void;
-  let settled = false;
-  const acquisition = new Promise<"acquired" | "held" | "error">((resolve) => { resolveAcquisition = resolve; });
-  const release = new Promise<void>((resolve) => { releaseLock = resolve; });
-  try {
-    void manager.request(BROWSER_GPU_LOCK_NAME, { mode: "exclusive", ifAvailable: true }, async (lock) => {
-      settled = true;
-      resolveAcquisition(lock ? "acquired" : "held");
-      if (lock) await release;
-    }).catch(() => {
-      if (!settled) resolveAcquisition("error");
-    });
-  } catch {
-    resolveAcquisition("error");
-  }
-  const acquisitionStatus = await acquisition;
-  if (acquisitionStatus === "held") {
-    return { status: "held", message: "Another Fluid Lab tab owns the WebGPU safety lock" };
-  }
-  if (acquisitionStatus === "error") {
-    return { status: "error", message: "The browser WebGPU safety lock failed" };
-  }
-  let released = false;
-  return { status: "acquired", release: () => {
-    if (released) return;
-    released = true;
-    releaseLock();
-  } };
-}
-
-/** Keep exclusivity until renderer work has settled and its device is gone. */
+/** Keep the pane's lease until renderer work has settled and its device is gone. */
 export async function shutdownBrowserGPUSession(
   renderer: { shutdown(): Promise<void> },
-  pendingLease?: Promise<BrowserGPULeaseResult>,
   releaseCurrentLease?: () => void,
 ): Promise<void> {
   await renderer.shutdown();
-  const acquiredDuringShutdown = pendingLease ? await pendingLease : undefined;
-  if (acquiredDuringShutdown?.status === "acquired") acquiredDuringShutdown.release();
   releaseCurrentLease?.();
 }
 

@@ -85,11 +85,6 @@
  *   --reuse-tables                    rebuild a rejected report from retained
  *                                     NDJSON tables without recapturing
  *
- * Every Dawn entrypoint in the repo serialises on `/tmp/fluid-webgpu-exclusive.lock`,
- * and that path is absolute, so a benchmark running out of any other checkout
- * excludes this capture too. The profiler checks the lock before it spends
- * anything, and names the holder when it finds one.
- *
  * Do NOT reach for xctrace's `--window`: it discards the metadata streams that
  * are recorded when the process starts, which erases every Metal object label
  * and the owning process from the retained intervals -- exactly the two fields
@@ -111,10 +106,6 @@ import {
   powerDamLaneWithSteps,
   type PowerDamRuntimeLane,
 } from "./power-dam-lane-environment";
-import {
-  readWebGPUExclusiveLockHolder,
-  WEBGPU_EXCLUSIVE_LOCK,
-} from "../lib/harness/webgpu-smoke-isolation";
 import { parseTraceTable, readTraceRows } from "./xctrace-trace-tables";
 import {
   buildFrameReport,
@@ -745,9 +736,9 @@ interface WorkerHandle {
    */
   readonly timing: { steppingStartedAt?: number; steppingEndedAt?: number };
   /**
-   * Terminate the worker if it is still running. The profiler owns a solver
-   * that holds the machine-wide GPU lock, so any path that abandons a capture
-   * has to take the solver with it rather than leave it stepping.
+   * Terminate the worker if it is still running. The profiler owns a solver,
+   * so any path that abandons a capture has to take the solver with it rather
+   * than leave it stepping.
    */
   readonly stop: () => void;
 }
@@ -824,19 +815,14 @@ const startWorker = (
     child.once("close", (status, signal) => {
       running = false;
       log.end();
-      const startupFailure = tail.some((line) => line.includes("Refusing concurrent GPU execution"))
-        ? `${label} never started: another GPU run holds ${WEBGPU_EXCLUSIVE_LOCK}.`
-          + " Dawn runs are serialised machine-wide, across checkouts as well as within one;"
-          + ` wait for the holder to finish, then rerun. See ${logPath}`
-        : undefined;
       const failure = signal !== null ? new Error(`${label} exited from ${signal}${quoteTail(tail)}`)
         : status !== 0
-          ? new Error((startupFailure ?? `${label} exited with ${status}; see ${logPath}`)
+          ? new Error(`${label} exited with ${status}; see ${logPath}`
             + quoteTail(tail))
           : undefined;
-      // Keep this exact construction-rejection sequence stable: the lock
-      // lifecycle test treats it as the proof a dead worker cannot strand an
-      // attach waiter. The profiling gate is rejected alongside it.
+      // Keep this exact construction-rejection sequence stable: it is the
+      // proof a dead worker cannot strand an attach waiter. The profiling gate
+      // is rejected alongside it.
       if (failure) { abandonConstruction(failure); fail(failure); }
       if (failure) abandonBeforeFirstAdvance(failure);
       else { announceConstructed(); announceBeforeFirstAdvance(); done(result); }
@@ -942,27 +928,6 @@ const intervalOwners = async (ndjson: string): Promise<Map<string, number>> => {
     tally.set(owner, (tally.get(owner) ?? 0) + 1);
   }
   return tally;
-};
-
-/**
- * Refuse to start while another Dawn run owns the machine.
- *
- * Every GPU entrypoint in the repo serialises on one absolute-path lock, so the
- * holder can be any checkout -- a benchmark running out of a scratch copy
- * counts. A capture is minutes of work whose first second is what fails, and it
- * fails inside the worker, where the only signal reaching the profiler is a
- * non-zero exit. Asking up front turns that into one actionable line.
- */
-const requireExclusiveGPU = async (): Promise<void> => {
-  const holder = await readWebGPUExclusiveLockHolder();
-  if (holder === undefined) return;
-  throw new Error(holder.alive
-    ? `another GPU run holds ${WEBGPU_EXCLUSIVE_LOCK}: ${holder.description}.`
-      + " Dawn runs are serialised machine-wide, across checkouts as well as within one;"
-      + " wait for it to finish or stop it, then rerun."
-    : `${WEBGPU_EXCLUSIVE_LOCK} was left behind by ${holder.description}.`
-      + " Confirm no Dawn or browser GPU run is active, then remove it:"
-      + ` rm -rf ${WEBGPU_EXCLUSIVE_LOCK}`);
 };
 
 const main = async (): Promise<void> => {
@@ -1081,7 +1046,6 @@ const main = async (): Promise<void> => {
     return;
   }
 
-  await requireExclusiveGPU();
 
   let baseline: SmokeResultRecord | undefined;
   if (runBaseline) {
@@ -1183,8 +1147,7 @@ const main = async (): Promise<void> => {
       console.log("  counter window captured; waiting for the run to finish...");
       traced = await handle.finished;
     } catch (error) {
-      // The solver outlives us otherwise, holding the machine-wide GPU lock,
-      // and the next run then fails for a reason that has nothing to do with it.
+      // The solver outlives us otherwise, and keeps stepping on the GPU.
       handle.stop();
       throw error;
     }
@@ -1392,8 +1355,8 @@ const isMain = process.argv[1] !== undefined
   && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 
 if (isMain) {
-  // The interesting failures here -- a held GPU lock, a window that missed the
-  // stepping phase -- are diagnoses, not defects in this file. Print the
+  // The interesting failures here -- a window that missed the stepping
+  // phase, say -- are diagnoses, not defects in this file. Print the
   // diagnosis; a stack trace through the spawn plumbing only buries it.
   await main().catch((error: unknown) => {
     console.error(`\nprofile aborted: ${error instanceof Error ? error.message : String(error)}`);

@@ -7,14 +7,12 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { standingWaveOmega,STANDING_WAVE } from "../lib/core/analytic-motion-scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 const fine=process.argv.includes("--fine");
 const mode=process.argv.find(a=>a.startsWith("--mode="))?.split("=")[1];
 const stepsArg=process.argv.find(a=>a.startsWith("--steps="))?.split("=")[1];
 const results:unknown[]=[];
-await acquireWebGPUExclusiveLock("dawn-probe","standing-wave");
 try {
   assert.ok(process.env.WEBGPU_NODE_MODULE);
   const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE).href);Object.assign(globalThis,dawn.globals);
@@ -84,5 +82,4 @@ try {
 }finally{
   mkdirSync("artifacts/analytic-motion",{recursive:true});
   writeFileSync(`artifacts/analytic-motion/wave-${fine?"fine":"mixed"}-${mode??"both"}.json`,JSON.stringify(results,null,2));
-  await releaseWebGPUExclusiveLock();
 }

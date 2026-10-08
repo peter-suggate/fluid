@@ -10,7 +10,6 @@ import { sceneDocument } from "../../../../../core/scene-definition";
 import { getSceneDefinition } from "../../../../../core/scenes";
 import { usePerformanceInstrumentationStore } from "../../../../../core/stores/performance-instrumentation-store";
 import { requiredFluidDeviceLimits } from "../../../../../core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../../../../../harness/webgpu-smoke-isolation";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from "../../../adaptive-mass-frame-pipeline";
 import { adaptiveMassMethod } from "../../../method";
 import type { WebGPUAdaptiveMassSolver } from "../../../webgpu-adaptive-mass-solver";
@@ -25,7 +24,6 @@ const sourceHashes = Object.fromEntries(await Promise.all([
   "webgpu-adaptive-mass-solver.ts",
 ].map(async name => [name, createHash("sha256").update(await readFile(
   new URL(`../../../${name}`, import.meta.url))).digest("hex")])));
-await acquireWebGPUExclusiveLock("dawn-probe", "coarse-first-pool-impact activity");
 let gpu: GPU | undefined, device: GPUDevice | undefined;
 let solver: WebGPUAdaptiveMassSolver | undefined;
 try {
@@ -104,6 +102,5 @@ try {
   await writeFile(process.env.ACTIVITY_OUT ?? "/tmp/coarse-first-activity.json", JSON.stringify(receipt, null, 2));
 } finally {
   solver?.destroy(); device?.destroy();
-  releaseWebGPUExclusiveLock();
   void gpu;
 }

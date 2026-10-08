@@ -7,12 +7,10 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { readPublishedCM12Field } from "./sparse-cm12-published-field";
 
 const output=process.env.BOWL_REGION_OUTPUT ?? "artifacts/bowl-region-edit";
 const live=new Set<GPU>();
-await acquireWebGPUExclusiveLock("dawn-probe","bowl-region-before-after");
 let gpu:GPU|undefined,device:GPUDevice|undefined,solver:WebGPUAdaptiveMassSolver|undefined;
 try {
   const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE ?? fileURLToPath(new URL('../node_modules/webgpu/index.js',import.meta.url))).href);
@@ -81,4 +79,4 @@ try {
     assert.deepEqual(errors,[]);solver.destroy();solver=undefined;
   }
   await writeFile(`${output}/shader-hashes.json`,JSON.stringify(hashes,null,2));
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();if(gpu)live.delete(gpu);}
+}finally{solver?.destroy();device?.destroy();if(gpu)live.delete(gpu);}

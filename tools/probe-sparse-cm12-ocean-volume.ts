@@ -7,8 +7,6 @@ import { pathToFileURL } from "node:url";
 
 import { createOceanSeicheScene } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
   "../lib/harness/node-dawn-provider";
 import { WebGPUAdaptiveMassSolver } from
@@ -51,8 +49,6 @@ const fieldReceipt = (field: Float32Array) => {
 };
 
 let device: GPUDevice | undefined;
-await acquireWebGPUExclusiveLock("ocean-volume",
-  `Sparse CM12 ocean B${brickFineResolution} compiled transport`);
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE
     ?? `${process.cwd()}/node_modules/webgpu/index.js`;
@@ -210,5 +206,4 @@ try {
   }
 } finally {
   device?.destroy();
-  await releaseWebGPUExclusiveLock();
 }

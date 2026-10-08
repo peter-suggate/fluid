@@ -10,7 +10,6 @@ import {uniformQualityCensus} from './uniform-quality-census';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createProcessRetainedDawnGPU,type NodeDawnProvider} from '../lib/harness/node-dawn-provider';
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock,readWebGPUExclusiveLockHolder} from '../lib/harness/webgpu-smoke-isolation';
 import {managedGPUDevice,gpuCompilationManagerFor} from '../lib/core/gpu-compilation-manager';
 import {requiredFluidDeviceLimits} from '../lib/core/webgpu-device-limits';
 import {sceneDocument} from '../lib/core/scene-definition';
@@ -30,9 +29,6 @@ const control=arg('control','baseline'),switchFrame=Number(arg('switch-frame','0
 assert.ok(Number.isFinite(dt)&&dt>0);
 const values=resolveMethodValues(uniformVolumeMethod,'balanced',JSON.parse(arg('values','{}')));
 UNIFORM_PRESSURE_BAND_SCHEDULE.cycles=Number(arg('band-cycles','4'));
-console.log('Waiting for repository WebGPU lease');
-while(await readWebGPUExclusiveLockHolder()) await new Promise(r=>setTimeout(r,500));
-await acquireWebGPUExclusiveLock('dawn-probe','uniform settling');
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 const snapshots=new Map<string,GPUTexture>();
 try{
@@ -127,4 +123,4 @@ try{
   await writeFile(out,JSON.stringify({sourceFingerprint,sourceFingerprintAfter:fingerprint(),qualitySnapshots,control,values,scene,replacements,bandCycles:UNIFORM_PRESSURE_BAND_SCHEDULE.cycles,energyNote:'Owner-volume-weighted positive-face velocity proxy, omits negative-boundary slabs; positive faces are area-averaged across coarse/fine seams; stage comparisons share the same weights.',rows},null,2));
   assert.deepEqual(errors,[]);
  }
-}finally{solver?.destroy();for(const t of snapshots.values())t.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();for(const t of snapshots.values())t.destroy();device?.destroy();}

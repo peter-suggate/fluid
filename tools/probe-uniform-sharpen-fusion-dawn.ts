@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {createUniformMixedLayout} from "../lib/methods/uniform/uniform-mixed-layout";
 import {UniformMixedOwnership} from "../lib/methods/uniform/uniform-mixed-ownership";
 import {UniformMixedSharpening} from "../lib/methods/uniform/uniform-mixed-sharpening";
@@ -16,7 +15,6 @@ import {readMixedTexture} from "../tests/helpers/uniform-mixed-native-fields";
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 const partition=process.env.UNIFORM_SHARPEN_EXPERIMENT==="jobs";
 (modulePath?test:test.skip)(`${partition?"partitioned jobs":"fused proposal/limit"} preserve every sweep across changing h/4h ownership`,{timeout:240_000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","mixed sharpening fusion parity");
  let device:GPUDevice|undefined,ownership:UniformMixedOwnership|undefined,solid:UniformMixedSolid|undefined;
  const textures:GPUTexture[]=[],buffers:GPUBuffer[]=[];
  try{
@@ -96,5 +94,5 @@ const partition=process.env.UNIFORM_SHARPEN_EXPERIMENT==="jobs";
    }
   }}
   assert.ok(oddCovered,"must exercise a single active seam tile and an unused packed lane block");assert.ok(changed>0,"sharpening must move more volume than dust cleanup alone");assert.deepEqual(errors,[]);
- }finally{ownership?.destroy();solid?.destroy();textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy());device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{ownership?.destroy();solid?.destroy();textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy());device?.destroy();}
 });

@@ -3,7 +3,6 @@ import test from "node:test";
 import { BACKDROP_SHRUB_LEAVES, BACKDROP_SHRUB_STEMS, BACKDROP_SHRUB_REACH, BACKDROP_SHRUB_RISE,
   backdropShrubDistance, backdropShrubWGSL } from "../lib/svo/features/backdrop/backdrop-shrub";
 import { BACKDROP_SCATTER_CLASSES } from "../lib/svo/features/backdrop/backdrop-detail";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 
 test("background shrubs have a fixed connected shoot budget within existing scatter bounds", () => {
@@ -53,7 +52,6 @@ test("shrub packets retain open silhouettes at coarse cells with less surface wo
 });
 
 test("Dawn background shrub field matches CPU leaves, woody stems and empty gaps", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "backdrop-shrub");
   let device: GPUDevice | undefined;
   try {
     device = (await createDawnRenderDevice()).device;
@@ -85,5 +83,5 @@ test("Dawn background shrub field matches CPU leaves, woody stems and empty gaps
     }
     for(const buffer of [input,output,read]) buffer.destroy();
     assert.equal(await device.popErrorScope(),null);
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

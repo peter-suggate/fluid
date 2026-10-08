@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createUniformReferenceComputeShader } from "../lib/methods/uniform/webgpu-uniform-reference.wgsl";
 
 // Exercise the actual generated stencil with analytic fields, independently of
@@ -18,7 +17,6 @@ function shaderFunction(source: string, name: string): string {
 }
 
 (process.env.WEBGPU_NODE_MODULE ? test : test.skip)("geometric curvature preserves a flat solid contact and a curved free surface", async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "uniform geometric curvature");
   let device: GPUDevice | undefined;
   try {
     const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as NodeDawnProvider;
@@ -65,5 +63,5 @@ ${shaderFunction(source, "curvatureAt")}
       }
     }
     phi.destroy(); output.destroy(); readback.destroy();
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

@@ -3,8 +3,7 @@
  * W4's gate: every capacity between here and 10x, swept and *proved to fire*.
  *
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
- *     node --import tsx tools/run-webgpu-exclusive.ts \
- *          --import tsx tools/run-svo-capacity-sweep-smoke.ts
+ *     node --import tsx tools/run-svo-capacity-sweep-smoke.ts
  *
  * `docs/svo-raster-visibility-handoff.md` §5/W4 states the gate as "the W0
  * scene renders correctly at every record count up to 10x; tripwires fire in a

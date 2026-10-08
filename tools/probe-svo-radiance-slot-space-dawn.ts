@@ -122,6 +122,5 @@ if (withdrawn.length > 0) {
     + withdrawn.map((rung) => `${(rung.cellSize_m * 1000).toFixed(2)} mm`).join(", "));
 }
 // Explicit, like every other Dawn lane here: the retained Dawn instance keeps
-// the loop alive, and a lane that never returns holds the exclusive GPU lock
-// for every run after it.
+// the loop alive, so the lane would otherwise never return.
 process.exit(withdrawn.length > 0 ? 1 : 0);

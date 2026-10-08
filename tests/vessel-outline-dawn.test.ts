@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { buildVesselOutlineGeometry } from "../lib/core/vessel-outline";
 import { DecorationOverlay } from "../lib/core/webgpu-decoration-overlay";
@@ -11,9 +10,8 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
 test("Dawn draws the canonical tank voxel-volume wireframe", {
   skip: !dawnModule && "set WEBGPU_NODE_MODULE for vessel-outline parity",
 }, async t => {
-  await acquireWebGPUExclusiveLock("dawn-test", t.name);
   let leasedDevice: GPUDevice | undefined;
-  t.after(async () => { leasedDevice?.destroy(); await releaseWebGPUExclusiveLock(); });
+  t.after(async () => { leasedDevice?.destroy(); });
   const dawn = await import(pathToFileURL(dawnModule!).href) as {
     create(options: string[]): GPU;
     globals: Record<string, unknown>;

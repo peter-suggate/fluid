@@ -12,13 +12,11 @@ import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
 import { adaptiveMassMethod } from '../lib/methods/adaptive-volume/method';
 import type { WebGPUAdaptiveMassSolver } from '../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver';
 import { createProcessRetainedDawnGPU } from '../lib/harness/node-dawn-provider';
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from '../lib/harness/webgpu-smoke-isolation';
 import { axisArtifactStageAudit } from './axis-artifact-stage-audit';
 const steps = Number(process.env.BURST_STEPS ?? 330);
 const from = Number(process.env.BURST_FROM ?? 240);
 const output = process.env.BURST_OUTPUT ?? 'artifacts/mini32-settled-bursts/base';
 const audits = new Set((process.env.BURST_AUDIT_STEPS ?? '').split(',').map(Number));
-await acquireWebGPUExclusiveLock('dawn-probe', 'mini32-settled-bursts');
 let device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
 try {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
@@ -99,4 +97,4 @@ try {
   assert.ok(activity.bricks.every(b=>!b.active || (b.acceptedResolution===8 && b.spanBricks===1)));
   assert.deepEqual(errors,[]);
   await writeFile(`${output}/trace.json`,JSON.stringify(trace,null,2));
-} finally { solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock(); }
+} finally { solver?.destroy();device?.destroy(); }

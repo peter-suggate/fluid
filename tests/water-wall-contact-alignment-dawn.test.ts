@@ -2,13 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { globalFineCubeContourWGSL, globalFineDirectSharpPatchWGSL } from "../lib/core/webgpu-water-global-fine-tetra";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 const live = new Set<GPU>();
 const dawnTest = process.env.WEBGPU_NODE_MODULE ? test : test.skip;
 
 dawnTest("wall contact edges coincide with free-surface coordinates at every sample scale", async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "wall-contact-alignment");
   let gpu: GPU | undefined, device: GPUDevice | undefined;
   try {
     const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
@@ -64,5 +62,5 @@ fn main(@builtin(global_invocation_id)gid:vec3u){
       }
     }
     output.destroy();readback.destroy();assert.deepEqual(errors,[]);
-  } finally { device?.destroy();await releaseWebGPUExclusiveLock();if(gpu)live.delete(gpu); }
+  } finally { device?.destroy();if(gpu)live.delete(gpu); }
 });

@@ -7,11 +7,9 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod, adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
-await acquireWebGPUExclusiveLock("dawn-test", "b4-b8-parity");
 let device: GPUDevice | undefined;
 let solver: WebGPUAdaptiveMassSolver | undefined;
 try {
@@ -60,4 +58,4 @@ try {
     solver.destroy(); solver = undefined;
   }
   assert.deepEqual(errors, []);
-} finally { solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }
+} finally { solver?.destroy(); device?.destroy(); }

@@ -10,7 +10,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {refinementRegionLattice} from "../lib/core/refinement-regions";
@@ -24,7 +23,6 @@ const frames=Number(framesArg),every=Number(everyArg);
 if(arm!=="fine"&&arm!=="default")throw new Error(`Unknown arm ${arm}`);
 const dynamic=arm==="default";
 mkdirSync(out,{recursive:true});
-await acquireWebGPUExclusiveLock("dawn-probe",`Uniform surface compare ${sceneId} ${arm}`);
 let device:GPUDevice|undefined,solver:GPUSolverInstance|undefined;
 try{
  const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
@@ -81,4 +79,4 @@ try{
   }
  }
  writeFileSync(`${out}/run.json`,JSON.stringify({sceneId,arm,dims:d,cellSize:refinementRegionLattice(scene).cellSize_m,rows,errors},null,1));
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();}

@@ -6,7 +6,6 @@ import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
@@ -18,11 +17,6 @@ const arg = (key:string, fallback:string) => process.argv.find(a=>a.startsWith(`
 const output=resolve(arg("out","docs/verification/sph-performance.json")), duration=Number(arg("duration","0.1"));
 const values=JSON.parse(arg("values","{}"));
 const sourceHashes=Object.fromEntries(["solver","shader","parameters"].map(name=>[name,createHash("sha256").update(readFileSync(`lib/methods/sph/${name}.ts`)).digest("hex")]));
-let announced=false;
-for(;;){try{await acquireWebGPUExclusiveLock("dawn-probe","SPH performance breakdown");break;}catch(error){
-  if(!String(error).includes("Refusing concurrent GPU execution"))throw error;
-  if(!announced){console.log("Waiting for WebGPU lease");announced=true;}await new Promise(r=>setTimeout(r,250));
-}}
 let device:GPUDevice|undefined;
 try{
   const dawn=await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href);Object.assign(globalThis,dawn.globals);
@@ -42,4 +36,4 @@ try{
     console.log(JSON.stringify({...report,scene:undefined,info:{...info,physicsTrace:undefined}}));
     assert.deepEqual(errors,[]);
   }finally{solver.destroy();}
-}finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{device?.destroy();}

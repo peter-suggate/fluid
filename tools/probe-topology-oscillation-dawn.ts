@@ -3,7 +3,6 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
@@ -13,7 +12,6 @@ const transferOnly = process.env.TOPOLOGY_TRANSFER_ONLY === "1";
 const steps = Number(process.env.TOPOLOGY_STEPS ?? 60), dt = transferOnly ? 1e-6 : 1 / 60;
 const captureFields = process.env.TOPOLOGY_CAPTURE_FIELDS === "1";
 const output = process.env.TOPOLOGY_OUTPUT ?? `artifacts/topology-oscillation/${mode}`;
-await acquireWebGPUExclusiveLock("dawn-probe", "topology-oscillation");
 const live = new Set<GPU>();
 let device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
 try {
@@ -179,5 +177,5 @@ try {
   assert.ok(trace.every(x => !x.fault && !x.commitFailed));
   if (mode === "oscillate") assert.ok(trace.slice(3).every(x => x.changed > 0), "every requested oscillation must actually commit");
 } finally {
-  solver?.destroy(); device?.destroy(); live.clear(); await releaseWebGPUExclusiveLock();
+  solver?.destroy(); device?.destroy(); live.clear(); 
 }

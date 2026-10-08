@@ -7,7 +7,6 @@ import { getScenePreset } from "../lib/core/scenes";
 import { sceneAtContainerExtents } from "../lib/core/scene-scale";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
 import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
@@ -16,7 +15,6 @@ const steps=Number(arg("steps","5"));const thin=arg("thin","0")==="1";
 const output=arg("out","artifacts/level-set-volume/air-extension-3d.json");
 const report:{scene:string;thin:boolean;steps:number;arms:unknown[];error?:string}={
   scene:arg("scene","coarse-first-pool-impact-half"),thin,steps,arms:[]};
-await acquireWebGPUExclusiveLock("dawn-probe","air-band reset-state A/B");
 let device:GPUDevice|undefined,solver:WebGPUAdaptiveMassSolver|undefined;
 try{
   const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
@@ -76,4 +74,4 @@ try{
     solver.destroy();solver=undefined;assert.deepEqual(errors,[]);
   }
 }catch(error){report.error=error instanceof Error ? `${error.name}: ${error.message}\n${error.stack??""}` : String(error);process.exitCode=1;}
-finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();mkdirSync(dirname(output),{recursive:true});writeFileSync(output,JSON.stringify(report,null,2)+"\n");console.log(JSON.stringify({output,error:report.error}));}
+finally{solver?.destroy();device?.destroy();mkdirSync(dirname(output),{recursive:true});writeFileSync(output,JSON.stringify(report,null,2)+"\n");console.log(JSON.stringify({output,error:report.error}));}

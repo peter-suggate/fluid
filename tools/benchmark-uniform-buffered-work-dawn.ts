@@ -21,7 +21,6 @@ import {getSceneDefinition} from "../lib/core/scenes";
 import {resolveMethodValues} from "../lib/core/method-contract";
 import {usePerformanceInstrumentationStore} from "../lib/core/stores/performance-instrumentation-store";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
 import type {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-uniform-reference";
 import {uniformTransportWorkgroupReference,restoreUniformTransportWorkgroupDispatch} from "../tests/helpers/uniform-transport-workgroup-reference";
@@ -43,10 +42,6 @@ const report:Record<string,unknown>={sceneId,policy,reference,blocks,steps,warmu
 const save=()=>{mkdirSync(dirname(out),{recursive:true});writeFileSync(out,JSON.stringify(report,null,2)+"\n");};
 let device:GPUDevice|undefined;
 const solvers:WebGPUUniformReferenceSolver[]=[];
-let announced=false;
-for(;;){try{await acquireWebGPUExclusiveLock("dawn-benchmark",`Paired Uniform work budgets: ${sceneId}/${reference}`);break;}
- catch(error){if(!(error instanceof Error)||!error.message.includes("Refusing concurrent GPU execution"))throw error;
-  if(!announced){console.log("Waiting for WebGPU lease");announced=true;}await new Promise(r=>setTimeout(r,250));}}
 try{
  const dawn=await import(pathToFileURL(resolve(process.env.WEBGPU_NODE_MODULE??"node_modules/webgpu/index.js")).href);Object.assign(globalThis,dawn.globals);
  const adapter=await createProcessRetainedDawnGPU(dawn,["backend=metal"]).requestAdapter();assert.ok(adapter);
@@ -136,4 +131,4 @@ try{
  report.sourceAfter=fingerprint();save();console.log(JSON.stringify({out,summary:report.summary,fieldsExact:report.fieldsExact}));
  assert.equal(report.fieldsExact,true,"The compared operator or scheduling variant must retain exact final simulation fields in this fixture");
 }catch(error){report.failure=String(error);report.sourceAfter=fingerprint();save();throw error;}
-finally{for(const s of solvers)s.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+finally{for(const s of solvers)s.destroy();device?.destroy();}

@@ -8,9 +8,8 @@ import { resolveMethodValues } from "../../../../../core/method-contract";
 import { requiredFluidDeviceLimits } from "../../../../../core/webgpu-device-limits";
 import { adaptiveMassMethod } from "../../../method";
 import type { WebGPUAdaptiveMassSolver } from "../../../webgpu-adaptive-mass-solver";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../../../../../harness/webgpu-smoke-isolation";
 
-// Run one arm per process, under the same GPU lease as the regression suite.
+// Run one arm per process.
 // Compare the accepted volume averages, independently of the surface renderer.
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 assert.ok(modulePath, "Set WEBGPU_NODE_MODULE to the native Dawn module path");
@@ -21,7 +20,6 @@ const output = process.env.SYMMETRIC_OUTPUT ?? "artifacts/symmetric-coarse-first
 assert.ok([0, 1, 2, 4, 8].includes(maxCell));
 assert.ok(Number.isSafeInteger(steps) && steps > 0);
 assert.ok(Number.isFinite(dt) && dt > 0);
-await acquireWebGPUExclusiveLock("dawn-probe", "symmetric-coarse-first-ab");
 let gpu: GPU | undefined, device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
 try {
   const dawn = await import(pathToFileURL(modulePath).href);
@@ -87,5 +85,5 @@ try {
   }
   await writeFile(`${output}/trace.json`, JSON.stringify(trace, null, 2));
 } finally {
-  solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock();
+  solver?.destroy(); device?.destroy(); 
 }

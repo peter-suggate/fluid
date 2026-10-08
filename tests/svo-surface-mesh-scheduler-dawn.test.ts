@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 import {
   SVO_SURFACE_MESH_BOX_UNION_SLOT,
@@ -22,7 +21,6 @@ import { SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../lib/core/webgpu-sparse-
  * host sequence mirrors the dry scene's per-presentation passes.
  */
 (process.env.WEBGPU_NODE_MODULE ? test : test.skip)("the mesh scheduler builds, re-extracts dirty bricks in place, rolls an overflow back, and flips a replacement", async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "tests/svo-surface-mesh-scheduler-dawn.test.ts");
   let device: GPUDevice | undefined;
   try {
     const initialized = await createDawnRenderDevice(); device = initialized.device;
@@ -317,5 +315,5 @@ import { SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../lib/core/webgpu-sparse-
 
     assert.deepEqual(initialized.validationErrors, []);
     for (const buffer of [publication, nodes, leaves, voxels, state, dispatch, work, visible, maintenance, empty, arenas[0], arenas[1]!, readback]) buffer.destroy();
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

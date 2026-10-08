@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-uniform-reference";
@@ -15,7 +14,6 @@ import {uniformQualityCensus} from "../tools/uniform-quality-census";
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("experimental smooth 4h surface survives long-dam impact with conserved advancing liquid",{timeout:240000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Explicit smooth coarse surface experiment");
  let device:GPUDevice|undefined,solver:GPUSolverInstance|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
@@ -44,5 +42,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    if(step===36)assert.ok(q.massFront_cells.p99!>150&&q.massFront_cells.p99!<180,"Mass front must traverse the tank before impact");
   }
   assert.deepEqual(errors,[]);
- }finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{solver?.destroy();device?.destroy();}
 });

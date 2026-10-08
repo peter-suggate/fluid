@@ -3,11 +3,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { surfaceRasterShader, surfaceWireframeShader } from "../lib/core/webgpu-water-pipeline";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 const dawnTest=process.env.WEBGPU_NODE_MODULE?test:test.skip;
 dawnTest("wireframe depth matches the shaded surface across a hydrostatic pool",async()=>{
-  await acquireWebGPUExclusiveLock("dawn-test","water-wireframe-depth");
   let device:GPUDevice|undefined;
   try{
     const {create,globals}=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
@@ -47,5 +45,5 @@ dawnTest("wireframe depth matches the shaded surface across a hydrostatic pool",
       const pixels=new Uint8Array(result.getMappedRange());let count=0;for(let i=3;i<pixels.length;i+=4)if(pixels[i])count++;counts.push(count);result.unmap();result.destroy();
     }
     console.log({depthTested:counts[0],reference:counts[1]});assert.ok(counts[1]!>1000);assert.equal(counts[0],counts[1],"depth testing must not erase visible pool edges");
-  }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+  }finally{device?.destroy();}
 });

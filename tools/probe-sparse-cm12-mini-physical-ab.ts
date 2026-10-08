@@ -17,10 +17,6 @@ import {
 } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
-import {
   adaptiveMassMethod,
   adaptiveMassSolverOptions,
 } from "../lib/methods/adaptive-volume/method";
@@ -389,8 +385,6 @@ function physicalState(fields: DiagnosticFields, scene: SceneDescription) {
   };
 }
 
-await acquireWebGPUExclusiveLock("dawn-acceptance",
-  "tools/probe-sparse-cm12-mini-physical-ab.ts");
 let device: GPUDevice | undefined;
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE
@@ -551,5 +545,4 @@ try {
   }, null, 2));
 } finally {
   device?.destroy();
-  await releaseWebGPUExclusiveLock();
 }

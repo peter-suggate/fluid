@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 import { svoDualContouringFitWGSL } from "../lib/svo/features/meshing/dual-contouring";
 import { svoDualContouringMeshWGSL } from "../lib/svo/features/meshing/dual-contouring-mesh";
 import { sparseSceneProxyVoxelizationShaderFor } from "../lib/core/webgpu-sparse-scene-proxies";
 
 (process.env.WEBGPU_NODE_MODULE?test:test.skip)("GPU Hermite DC reconstructs closed spheres, sharp rotated boxes and bounded wavy terrain",async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","hermite-dc");let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{
   device=(await createDawnRenderDevice()).device;
   for(const mode of ["dense","occupancy","banded"] as const){
@@ -78,5 +77,5 @@ import { sparseSceneProxyVoxelizationShaderFor } from "../lib/core/webgpu-sparse
    assert.ok(error<(kind===1?.02:.15),"analytic surface/edge fidelity");if(kind===1)assert.ok(sharp>0,"crease metadata survives meshing");
   }
   read.destroy();for(const b of buffers)b.destroy();
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });

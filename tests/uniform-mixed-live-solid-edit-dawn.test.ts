@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import type {FluidRefinementRegion,SceneDescription} from "../lib/core/model";
@@ -52,7 +51,7 @@ async function ownerFields(device:GPUDevice,solver:WebGPUUniformReferenceSolver)
 }
 
 (modulePath?test:test.skip)("live solid voxel edits displace liquid on the mixed frame",{timeout:1800000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform mixed live solid edits");let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
@@ -125,5 +124,5 @@ async function ownerFields(device:GPUDevice,solver:WebGPUUniformReferenceSolver)
    if(a.length!==b.length||cells)failures.push(`solid-free edit: ${cells} cells of volume differ from the solver compiled up front at ${at} (worst ${worst})`);
   }
   assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });

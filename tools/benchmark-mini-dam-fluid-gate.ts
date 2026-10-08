@@ -11,10 +11,6 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import { compareScalarFields } from "../lib/harness/webgpu-smoke-scenarios";
 import { readCubicVolumeField } from "../lib/harness/webgpu-smoke-readbacks";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 
 interface Arm {
   readonly label: string;
@@ -123,10 +119,6 @@ assert.ok(arms.length > 0);
 assert.equal(new Set(arms.map((arm) => arm.label)).size, arms.length,
   "FLUID_MINI_DAM_ARMS must contain unique configurations; this Dawn build cannot safely rebuild an identical specialization in one process");
 
-await acquireWebGPUExclusiveLock(
-  "dawn-benchmark",
-  "tools/benchmark-mini-dam-fluid-gate.ts",
-);
 try {
   usePerformanceInstrumentationStore.getState().setEnabled(traceRequested);
   const modulePath = process.env.WEBGPU_NODE_MODULE
@@ -441,5 +433,4 @@ try {
   device.destroy();
 } finally {
   usePerformanceInstrumentationStore.getState().setEnabled(false);
-  await releaseWebGPUExclusiveLock();
 }

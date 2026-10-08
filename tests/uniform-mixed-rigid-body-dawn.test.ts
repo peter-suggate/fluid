@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import type {Quaternion,RigidBodyDescription,SceneDescription,Vec3} from "../lib/core/model";
@@ -61,7 +60,7 @@ async function ownerFields(device:GPUDevice,solver:WebGPUUniformReferenceSolver,
 }
 
 (modulePath?test:test.skip)("rigid bodies couple on the mixed frame",{timeout:1800000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform mixed rigid bodies");let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
@@ -93,14 +92,14 @@ async function ownerFields(device:GPUDevice,solver:WebGPUUniformReferenceSolver,
    if(!(p1.y>.5*edge-.02&&Math.abs(p1.x)<.4&&Math.abs(p1.z)<.4))failures.push(`falling crate left the tank (${JSON.stringify(p1)})`);
   }finally{solver.destroy();}
   assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });
 
 /** A first body in a body-free scene: setup built no body pipelines, the
  * body waits for them (advancing meanwhile is refused), and once they are
  * prepared it is coupled: it falls, stays in the tank, displaces its liquid. */
 (modulePath?test:test.skip)("a first rigid body waits for its pipelines, then couples",{timeout:1800000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform mixed first rigid body");let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
@@ -140,7 +139,7 @@ async function ownerFields(device:GPUDevice,solver:WebGPUUniformReferenceSolver,
    if(!(p.y>.5*edge-.02&&Math.abs(p.x)<.4&&Math.abs(p.z)<.4))failures.push(`the body left the tank (${JSON.stringify(p)})`);
   }finally{solver.destroy();}
   assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });
 
 /** Requested detail with no request: zero detail, base blocks only. A free
@@ -149,7 +148,7 @@ async function ownerFields(device:GPUDevice,solver:WebGPUUniformReferenceSolver,
  * h tile lies within the body's reach, the rest of the domain stays 4h, and
  * once the body is gone the frame is back at zero detail. */
 (modulePath?test:test.skip)("a free rigid body under Requested carries its h tiles",{timeout:1800000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform mixed free rigid body under Requested");let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
@@ -210,5 +209,5 @@ async function ownerFields(device:GPUDevice,solver:WebGPUUniformReferenceSolver,
    if(!(Math.abs(after.mass-fields.mass)<=1e-4*fields.mass))failures.push(`owner mass ${after.mass} after the body vs ${fields.mass} with it`);
   }finally{solver.destroy();}
   assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });

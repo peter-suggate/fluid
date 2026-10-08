@@ -7,7 +7,6 @@ import { getScenePreset } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { readPublishedCM12Field } from "./sparse-cm12-published-field";
 const arg = (key: string, fallback: string) => process.argv.find(v => v.startsWith(`--${key}=`))?.slice(key.length + 3) ?? fallback;
@@ -17,7 +16,6 @@ const distanceSweeps = Number(arg("distance-sweeps", "8"));
 const returnPasses = Number(arg("return-passes", "4"));
 const output = arg("output", "artifacts/level-set-volume/sharpening-slab.json");
 assert.ok(Number.isInteger(steps) && steps >= 0);
-await acquireWebGPUExclusiveLock("dawn-probe", "sparse geometric sharpening");
 let device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
 const report: Record<string, unknown> = { sceneId, steps, distanceSweeps, returnPasses, dt: 1 / 30, checkpoints: [] };
 const errors: string[] = [];
@@ -75,7 +73,6 @@ try {
 } finally {
   report.validationErrors = errors;
   solver?.destroy(); device?.destroy();
-  await releaseWebGPUExclusiveLock();
   mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, JSON.stringify(report, null, 2) + "\n");
   console.log(JSON.stringify({ output, completed: report.completed, error: report.error }));
 }

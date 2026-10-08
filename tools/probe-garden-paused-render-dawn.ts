@@ -1,4 +1,4 @@
-/** Renderer-only garden probe. Waits for complete mesh publication before timing; run through run-webgpu-exclusive.ts. */
+/** Renderer-only garden probe. Waits for complete mesh publication before timing. */
 /** Full depth-3 rendering probe with allocation limits and a fence after every batch. */
 import assert from "node:assert/strict";
 import {PerformanceObserver} from "node:perf_hooks";

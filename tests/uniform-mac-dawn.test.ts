@@ -4,7 +4,6 @@ import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { UniformMacSolver } from "../lib/methods/uniform/mac/solver";
@@ -14,7 +13,6 @@ import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("uniform MAC numerical and publication contracts", { timeout: 180_000 }, async t => {
-  await acquireWebGPUExclusiveLock("dawn-test", "Uniform MAC baseline");
   let device: GPUDevice | undefined;
   try {
     const dawn = await import(pathToFileURL(modulePath!).href); Object.assign(globalThis, dawn.globals);
@@ -269,5 +267,5 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
       } finally { solver.destroy(); }
     });
     assert.deepEqual(errors, []);
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

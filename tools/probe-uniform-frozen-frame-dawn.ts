@@ -8,7 +8,6 @@ import {dirname,resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 import {createHash} from "node:crypto";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {getSceneDefinition} from "../lib/core/scenes";
@@ -30,8 +29,6 @@ const sourceBefore=fingerprint();
 const report:Record<string,unknown>={sceneId,mode,edge,samples,fine,identity,sourceBefore,scope:"One accepted first frame replayed from a complete GPU checkpoint. GPU timestamps include parameter-copy replay commands; restore and CPU solver planning are excluded. No trajectory, sparse allocation or renderer claim."};
 const save=()=>{mkdirSync(dirname(out),{recursive:true});writeFileSync(out,JSON.stringify(report,null,2)+"\n");};
 let raw:GPUDevice|undefined,solver:any,freeze:UniformFrozenGPUFrame|undefined,atlasResources:{destroy:()=>void}|undefined;
-let waiting=false;const deadline=Date.now()+900_000;
-for(;;){try{await acquireWebGPUExclusiveLock("dawn-benchmark",`Uniform frozen frame ${sceneId}/${mode}`);break;}catch(e){if(!(e instanceof Error)||!(e.cause instanceof Error)||!("code" in e.cause)||e.cause.code!=="EEXIST"||Date.now()>deadline)throw e;if(!waiting){console.log("Waiting for WebGPU lease");waiting=true;}await new Promise(r=>setTimeout(r,250));}}
 try{
  const dawn=await import(pathToFileURL(resolve(process.env.WEBGPU_NODE_MODULE??"node_modules/webgpu/index.js")).href);Object.assign(globalThis,dawn.globals);
  const adapter=await createProcessRetainedDawnGPU(dawn,["backend=metal","disable-dawn-features=timestamp_quantization"]).requestAdapter();assert.ok(adapter);
@@ -61,4 +58,4 @@ try{
  const sorted=[...times].sort((a,b)=>a-b);report.summary={mean:times.reduce((a,b)=>a+b,0)/times.length,median:sorted[Math.floor(sorted.length/2)],p90:sorted[Math.floor(.9*sorted.length)]};
  report.replayedHashes=await fields();assert.deepEqual(report.replayedHashes,report.outputHashes,"Restored replay must reproduce the accepted first frame exactly");
  assert.deepEqual(errors,[]);report.validationErrors=errors;report.checkpoint=freeze.statistics;report.sourceAfter=fingerprint();save();console.log(JSON.stringify({out,summary:report.summary}));
-}catch(e){report.failure=String(e);report.sourceAfter=fingerprint();save();throw e;}finally{solver?.destroy();freeze?.destroy();atlasResources?.destroy();raw?.destroy();await releaseWebGPUExclusiveLock();}
+}catch(e){report.failure=String(e);report.sourceAfter=fingerprint();save();throw e;}finally{solver?.destroy();freeze?.destroy();atlasResources?.destroy();raw?.destroy();}

@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {refinementRegionLattice} from "../lib/core/refinement-regions";
@@ -13,7 +12,6 @@ import type {GPUSolverInstance} from "../lib/core/method-contract";
 import {readMixedTexture} from "../tests/helpers/uniform-mixed-native-fields";
 
 const arm=(process.argv[2]??"fine") as "fine"|"coarse"|"dynamic",frames=Number(process.argv[3]??20);
-await acquireWebGPUExclusiveLock("dawn-probe","Uniform pressure band long dam");
 let device:GPUDevice|undefined,solver:GPUSolverInstance|undefined;
 try{
  const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
@@ -53,4 +51,4 @@ try{
   const row={step,toeMass,wall_ms:+wall.toFixed(1),bandTiles:fields.mixedFrame.bandTiles,bandResidual:fields.mixedFrame.bandResidual,residual:solver.info.pressureResidual,surfaceFront,cycles:solver.info.pressureIterations};
   rows.push(row);console.log(JSON.stringify(row));
  }
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();}

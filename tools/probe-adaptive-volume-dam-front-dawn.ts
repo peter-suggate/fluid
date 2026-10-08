@@ -17,8 +17,6 @@ import { fluidExecutionDeviceFeatures } from "../lib/core/gpu-startup";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { gpuCompilationManagerFor, invalidateGPUCompilationManager, managedGPUDevice } from
   "../lib/core/gpu-compilation-manager";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
   "../lib/harness/node-dawn-provider";
 import { adaptiveMassMethod as adaptiveVolumeMethod } from
@@ -387,7 +385,6 @@ let activeStageObserver: Awaited<ReturnType<typeof createGeometricDamStageEnergy
 let anyFailure = false;
 const validationErrors: string[] = [];
 await checkpoint();
-await acquireWebGPUExclusiveLock("dawn-probe", "tools/probe-adaptive-volume-dam-front-dawn.ts");
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE
     ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
@@ -593,7 +590,6 @@ try {
       await manager.whenIdle(); await device.queue.onSubmittedWorkDone();
     } finally { solver?.destroy(); device.destroy(); }
   }
-  await releaseWebGPUExclusiveLock();
   report.sourceFingerprintAfter = await fingerprintSparseCM12RepositorySources(root);
   report.sourceUnchanged = (report.sourceFingerprintAfter as { sha256: string }).sha256
     === sourceFingerprint.sha256;

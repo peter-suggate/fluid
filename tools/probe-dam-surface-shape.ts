@@ -84,10 +84,6 @@ import { LOSASSO_SURFACE_GRAPH_CONTROL } from
   "../lib/methods/losasso/webgpu-octree-losasso-surface-graph";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { readBufferBinding } from "../lib/harness/webgpu-smoke-readbacks";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 
 const HEADER_WORDS = 8;
 const ROW_WORDS = 8;
@@ -822,288 +818,268 @@ function asciiHeightMap(shape: SurfaceShape, nx: number, nz: number): string {
   return lines.join("\n");
 }
 
-await acquireWebGPUExclusiveLock("dawn-benchmark", "tools/probe-dam-surface-shape.ts");
-try {
-  const modulePath = process.env.WEBGPU_NODE_MODULE
-    ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
-  const { create, globals } = await import(pathToFileURL(modulePath).href) as {
-    create(options: string[]): GPU;
-    globals: Record<string, unknown>;
-  };
-  Object.assign(globalThis, globals);
-  const gpu = create([
-    `backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`,
-    ...(process.env.FLUID_WEBGPU_ADAPTER ? [`adapter=${process.env.FLUID_WEBGPU_ADAPTER}`] : []),
-  ]);
-  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
-  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-  assert.ok(adapter, "WebGPU did not expose an adapter");
-  const requiredFeatures: GPUFeatureName[] = ["subgroups"];
-  if (adapter.features.has("timestamp-query")) requiredFeatures.push("timestamp-query");
-  const device = await adapter.requestDevice({
-    requiredFeatures, requiredLimits: requiredFluidDeviceLimits(adapter.limits),
-  });
-  const validationErrors: string[] = [];
-  device.addEventListener("uncapturederror", (event) => {
-    validationErrors.push(event.error.message);
-  });
+const modulePath = process.env.WEBGPU_NODE_MODULE
+  ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
+const { create, globals } = await import(pathToFileURL(modulePath).href) as {
+  create(options: string[]): GPU;
+  globals: Record<string, unknown>;
+};
+Object.assign(globalThis, globals);
+const gpu = create([
+  `backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`,
+  ...(process.env.FLUID_WEBGPU_ADAPTER ? [`adapter=${process.env.FLUID_WEBGPU_ADAPTER}`] : []),
+]);
+Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
+const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+assert.ok(adapter, "WebGPU did not expose an adapter");
+const requiredFeatures: GPUFeatureName[] = ["subgroups"];
+if (adapter.features.has("timestamp-query")) requiredFeatures.push("timestamp-query");
+const device = await adapter.requestDevice({
+  requiredFeatures, requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+});
+const validationErrors: string[] = [];
+device.addEventListener("uncapturederror", (event) => {
+  validationErrors.push(event.error.message);
+});
 
-  const scenePreset = getScenePreset(sceneId);
-  const scene = scenePreset.create();
-  scene.numerics.fixedDt_s = dt;
-  scene.numerics.maxDt_s = dt;
-  const refinementRegionFloor = Number(process.env.FLUID_REFINEMENT_REGION_FLOOR ?? 0);
-  const refinementRegionCeiling = Number(process.env.FLUID_REFINEMENT_REGION_CEILING ?? 0);
-  if (refinementRegionFloor > 0) {
-    assert.ok(Number.isSafeInteger(refinementRegionFloor)
-      && (refinementRegionFloor & (refinementRegionFloor - 1)) === 0,
-      "FLUID_REFINEMENT_REGION_FLOOR must be a positive power of two");
-    assert.ok(refinementRegionCeiling === 0 || (Number.isSafeInteger(refinementRegionCeiling)
-      && (refinementRegionCeiling & (refinementRegionCeiling - 1)) === 0
-      && refinementRegionCeiling >= refinementRegionFloor),
-    "FLUID_REFINEMENT_REGION_CEILING must be a power of two no smaller than the floor");
-    const nx = Math.round(scene.container.width_m / scene.voxelDomain.finestCellSize_m);
-    const ny = Math.round(scene.container.height_m / scene.voxelDomain.finestCellSize_m);
-    const nz = Math.round(scene.container.depth_m / scene.voxelDomain.finestCellSize_m);
-    const refinementRegionScope = process.env.FLUID_REFINEMENT_REGION_SCOPE ?? "far-half";
-    assert.ok(refinementRegionScope === "far-half" || refinementRegionScope === "full",
-      "FLUID_REFINEMENT_REGION_SCOPE must be far-half or full");
-    const alignedMinX = refinementRegionScope === "full" ? 0
-      : Math.floor(nx / (2 * refinementRegionFloor)) * refinementRegionFloor;
-    const alignedMaxX = refinementRegionScope === "full" ? nx
-      : Math.floor(nx / refinementRegionFloor) * refinementRegionFloor;
-    const alignedMaxY = refinementRegionScope === "full" ? ny
-      : Math.floor(ny / refinementRegionFloor) * refinementRegionFloor;
-    const alignedMaxZ = refinementRegionScope === "full" ? nz
-      : Math.floor(nz / refinementRegionFloor) * refinementRegionFloor;
-    const h = scene.voxelDomain.finestCellSize_m;
-    scene.fluid.refinementRegions = [{
-      id: `dawn-${refinementRegionScope}`,
-      rule: "minimum-cell-size",
-      minimumCellSize_cells: refinementRegionFloor,
-      ...(refinementRegionCeiling > 0
-        ? { maximumCellSize_cells: refinementRegionCeiling } : {}),
-      min_m: { x: -0.5 * scene.container.width_m + alignedMinX * h, y: 0,
-        z: -0.5 * scene.container.depth_m },
-      max_m: { x: -0.5 * scene.container.width_m + alignedMaxX * h,
-        y: alignedMaxY * h,
-        z: -0.5 * scene.container.depth_m + alignedMaxZ * h },
-    }];
-  }
-  // The scene's lane profile, which the product no longer applies on open.
-  const laneProfile = getSceneDefinition(sceneId).methodProfile;
-  const solverQuality = laneProfile?.quality ?? "balanced";
-  const solverValues = {
-    ...losassoMethod.presetFor(solverQuality),
-    ...laneProfile?.overrides,
-    secondaryParticles: "off",
-    // Bisection handles only: the browser never sets these, and the untouched
-    // probe is the shipped preset.
-    ...(process.env.FLUID_MAXIMUM_LEAF_SIZE
-      ? { maximumLeafSize: process.env.FLUID_MAXIMUM_LEAF_SIZE } : {}),
-    ...(process.env.FLUID_OCTREE_INTERFACE_BAND
-      ? { interfaceRefinementBandCells: Number(process.env.FLUID_OCTREE_INTERFACE_BAND) } : {}),
-    ...(process.env.FLUID_SURFACE_BAND
-      ? { interfaceBandCells: Number(process.env.FLUID_SURFACE_BAND) } : {}),
-    ...(process.env.FLUID_FINEST_SURFACE_CELL
-      ? { finestSurfaceCellSize: Number(process.env.FLUID_FINEST_SURFACE_CELL) } : {}),
-    ...(process.env.FLUID_WALL_BAND
-      ? { wallBandCells: Number(process.env.FLUID_WALL_BAND) } : {}),
-    ...(process.env.FLUID_TOPOLOGY_CADENCE_ADVANCES
-      ? { topologyCadenceAdvances: Number(process.env.FLUID_TOPOLOGY_CADENCE_ADVANCES) } : {}),
-    ...(process.env.FLUID_OCTREE_ADAPTIVITY
-      ? { octreeAdaptivity: Number(process.env.FLUID_OCTREE_ADAPTIVITY) } : {}),
-  };
-  const solver = await losassoMethod.createSolverAsync!(device, scene, solverQuality,
-    solverValues, undefined, () => {}) as GPUSolverInstance;
-  solver.applyRuntimeValues?.(solverValues);
-  await device.queue.onSubmittedWorkDone();
-  const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as
-    [number, number, number];
-  const debug = octreeDebugSources(solver);
+const scenePreset = getScenePreset(sceneId);
+const scene = scenePreset.create();
+scene.numerics.fixedDt_s = dt;
+scene.numerics.maxDt_s = dt;
+const refinementRegionFloor = Number(process.env.FLUID_REFINEMENT_REGION_FLOOR ?? 0);
+const refinementRegionCeiling = Number(process.env.FLUID_REFINEMENT_REGION_CEILING ?? 0);
+if (refinementRegionFloor > 0) {
+  assert.ok(Number.isSafeInteger(refinementRegionFloor)
+    && (refinementRegionFloor & (refinementRegionFloor - 1)) === 0,
+    "FLUID_REFINEMENT_REGION_FLOOR must be a positive power of two");
+  assert.ok(refinementRegionCeiling === 0 || (Number.isSafeInteger(refinementRegionCeiling)
+    && (refinementRegionCeiling & (refinementRegionCeiling - 1)) === 0
+    && refinementRegionCeiling >= refinementRegionFloor),
+  "FLUID_REFINEMENT_REGION_CEILING must be a power of two no smaller than the floor");
+  const nx = Math.round(scene.container.width_m / scene.voxelDomain.finestCellSize_m);
+  const ny = Math.round(scene.container.height_m / scene.voxelDomain.finestCellSize_m);
+  const nz = Math.round(scene.container.depth_m / scene.voxelDomain.finestCellSize_m);
+  const refinementRegionScope = process.env.FLUID_REFINEMENT_REGION_SCOPE ?? "far-half";
+  assert.ok(refinementRegionScope === "far-half" || refinementRegionScope === "full",
+    "FLUID_REFINEMENT_REGION_SCOPE must be far-half or full");
+  const alignedMinX = refinementRegionScope === "full" ? 0
+    : Math.floor(nx / (2 * refinementRegionFloor)) * refinementRegionFloor;
+  const alignedMaxX = refinementRegionScope === "full" ? nx
+    : Math.floor(nx / refinementRegionFloor) * refinementRegionFloor;
+  const alignedMaxY = refinementRegionScope === "full" ? ny
+    : Math.floor(ny / refinementRegionFloor) * refinementRegionFloor;
+  const alignedMaxZ = refinementRegionScope === "full" ? nz
+    : Math.floor(nz / refinementRegionFloor) * refinementRegionFloor;
+  const h = scene.voxelDomain.finestCellSize_m;
+  scene.fluid.refinementRegions = [{
+    id: `dawn-${refinementRegionScope}`,
+    rule: "minimum-cell-size",
+    minimumCellSize_cells: refinementRegionFloor,
+    ...(refinementRegionCeiling > 0
+      ? { maximumCellSize_cells: refinementRegionCeiling } : {}),
+    min_m: { x: -0.5 * scene.container.width_m + alignedMinX * h, y: 0,
+      z: -0.5 * scene.container.depth_m },
+    max_m: { x: -0.5 * scene.container.width_m + alignedMaxX * h,
+      y: alignedMaxY * h,
+      z: -0.5 * scene.container.depth_m + alignedMaxZ * h },
+  }];
+}
+// The scene's lane profile, which the product no longer applies on open.
+const laneProfile = getSceneDefinition(sceneId).methodProfile;
+const solverQuality = laneProfile?.quality ?? "balanced";
+const solverValues = {
+  ...losassoMethod.presetFor(solverQuality),
+  ...laneProfile?.overrides,
+  secondaryParticles: "off",
+  // Bisection handles only: the browser never sets these, and the untouched
+  // probe is the shipped preset.
+  ...(process.env.FLUID_MAXIMUM_LEAF_SIZE
+    ? { maximumLeafSize: process.env.FLUID_MAXIMUM_LEAF_SIZE } : {}),
+  ...(process.env.FLUID_OCTREE_INTERFACE_BAND
+    ? { interfaceRefinementBandCells: Number(process.env.FLUID_OCTREE_INTERFACE_BAND) } : {}),
+  ...(process.env.FLUID_SURFACE_BAND
+    ? { interfaceBandCells: Number(process.env.FLUID_SURFACE_BAND) } : {}),
+  ...(process.env.FLUID_FINEST_SURFACE_CELL
+    ? { finestSurfaceCellSize: Number(process.env.FLUID_FINEST_SURFACE_CELL) } : {}),
+  ...(process.env.FLUID_WALL_BAND
+    ? { wallBandCells: Number(process.env.FLUID_WALL_BAND) } : {}),
+  ...(process.env.FLUID_TOPOLOGY_CADENCE_ADVANCES
+    ? { topologyCadenceAdvances: Number(process.env.FLUID_TOPOLOGY_CADENCE_ADVANCES) } : {}),
+  ...(process.env.FLUID_OCTREE_ADAPTIVITY
+    ? { octreeAdaptivity: Number(process.env.FLUID_OCTREE_ADAPTIVITY) } : {}),
+};
+const solver = await losassoMethod.createSolverAsync!(device, scene, solverQuality,
+  solverValues, undefined, () => {}) as GPUSolverInstance;
+solver.applyRuntimeValues?.(solverValues);
+await device.queue.onSubmittedWorkDone();
+const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as
+  [number, number, number];
+const debug = octreeDebugSources(solver);
 
-  const projection = (solver as unknown as {
-    octreeProjection?: {
-      readSolveDiagnostics(): Promise<void>;
-      readTopologyLeafCensus(): Promise<{
-        leafCountsBySize: Readonly<Record<string, number>>;
-        topologyLeaves: number;
-        topologyNodes: number;
-        residentOwnerPages: number;
-      }>;
-      readCoarseSurfaceTrackerReceipt(): Promise<{
-        predictedVolume: number;
-        targetVolume: number;
-        interfaceCells: number;
-        correction: number;
-        movingInterfaceCells?: number;
-        advancingInterfaceCells?: number;
-        retreatingInterfaceCells?: number;
-        correctedRegionCells?: number;
-        frozenCells?: number;
-        interfaceVelocityQueries?: number;
-        interfaceVelocityValid?: number;
-        interfacePhiMoved?: number;
-        maximumInterfaceSpeed?: number;
-      } | undefined>;
-      readAdaptiveNodeReceipt(): Promise<{
-        count: number;
-        generation: number;
-        published: boolean;
-        errors: number;
-        capacity: number;
-        dispatch: readonly [number, number, number];
-      } | undefined>;
-      readAdaptiveVelocityReceipts(): Promise<readonly number[] | undefined>;
-      readLosassoAuthorityDiagnostics(): Promise<Readonly<{
-        candidate: readonly number[];
-        candidateAdaptiveGraph: readonly number[];
-        ownerCandidate: readonly number[];
-        frontierControl: readonly number[];
-        adaptiveMassControl: readonly number[];
-        adaptiveMassReceipts: readonly number[];
-        velocityMigration: readonly number[];
-      }> | undefined>;
-      readPowerFrontierFailure(): Promise<Record<string, unknown>>;
-      powerLeafHeaders?: GPUBuffer;
-      powerCandidateLeafHeaders?: GPUBuffer;
-      losassoExtensionControl?: GPUBuffer;
-      losassoBackend?: {
-        sources?: { operator?: { control: GPUBuffer } };
-        candidateAuthorityControl?: GPUBuffer;
-        candidateTopologyCapacities?: Readonly<Record<string, number>>;
-        adaptiveSurfaceGraphSources?: {
-          accepted: { control: GPUBuffer; leaves: GPUBuffer; nodes: GPUBuffer;
-            phi: GPUBuffer; surfaceMass: GPUBuffer; nodalVelocity: GPUBuffer };
-          candidate: { control: GPUBuffer; leaves: GPUBuffer; nodes: GPUBuffer;
-            phi: GPUBuffer; surfaceMass: GPUBuffer; nodalVelocity: GPUBuffer };
-        };
-        extensionBand?: { source?: { faceMetrics?: GPUBuffer } };
-        adaptivePhiSource?: { receipts: GPUBuffer };
-        adaptiveMassSource?: { control: GPUBuffer; receipts: GPUBuffer;
-          transferRecords: GPUBuffer; transportAdmission: GPUBuffer };
-        adaptiveVelocity?: { candidateStencilControl: GPUBuffer };
+const projection = (solver as unknown as {
+  octreeProjection?: {
+    readSolveDiagnostics(): Promise<void>;
+    readTopologyLeafCensus(): Promise<{
+      leafCountsBySize: Readonly<Record<string, number>>;
+      topologyLeaves: number;
+      topologyNodes: number;
+      residentOwnerPages: number;
+    }>;
+    readCoarseSurfaceTrackerReceipt(): Promise<{
+      predictedVolume: number;
+      targetVolume: number;
+      interfaceCells: number;
+      correction: number;
+      movingInterfaceCells?: number;
+      advancingInterfaceCells?: number;
+      retreatingInterfaceCells?: number;
+      correctedRegionCells?: number;
+      frozenCells?: number;
+      interfaceVelocityQueries?: number;
+      interfaceVelocityValid?: number;
+      interfacePhiMoved?: number;
+      maximumInterfaceSpeed?: number;
+    } | undefined>;
+    readAdaptiveNodeReceipt(): Promise<{
+      count: number;
+      generation: number;
+      published: boolean;
+      errors: number;
+      capacity: number;
+      dispatch: readonly [number, number, number];
+    } | undefined>;
+    readAdaptiveVelocityReceipts(): Promise<readonly number[] | undefined>;
+    readLosassoAuthorityDiagnostics(): Promise<Readonly<{
+      candidate: readonly number[];
+      candidateAdaptiveGraph: readonly number[];
+      ownerCandidate: readonly number[];
+      frontierControl: readonly number[];
+      adaptiveMassControl: readonly number[];
+      adaptiveMassReceipts: readonly number[];
+      velocityMigration: readonly number[];
+    }> | undefined>;
+    readPowerFrontierFailure(): Promise<Record<string, unknown>>;
+    powerLeafHeaders?: GPUBuffer;
+    powerCandidateLeafHeaders?: GPUBuffer;
+    losassoExtensionControl?: GPUBuffer;
+    losassoBackend?: {
+      sources?: { operator?: { control: GPUBuffer } };
+      candidateAuthorityControl?: GPUBuffer;
+      candidateTopologyCapacities?: Readonly<Record<string, number>>;
+      adaptiveSurfaceGraphSources?: {
+        accepted: { control: GPUBuffer; leaves: GPUBuffer; nodes: GPUBuffer;
+          phi: GPUBuffer; surfaceMass: GPUBuffer; nodalVelocity: GPUBuffer };
+        candidate: { control: GPUBuffer; leaves: GPUBuffer; nodes: GPUBuffer;
+          phi: GPUBuffer; surfaceMass: GPUBuffer; nodalVelocity: GPUBuffer };
       };
+      extensionBand?: { source?: { faceMetrics?: GPUBuffer } };
+      adaptivePhiSource?: { receipts: GPUBuffer };
+      adaptiveMassSource?: { control: GPUBuffer; receipts: GPUBuffer;
+        transferRecords: GPUBuffer; transportAdmission: GPUBuffer };
+      adaptiveVelocity?: { candidateStencilControl: GPUBuffer };
     };
-  }).octreeProjection;
-  const projectionRuntime = projection as unknown as {
-    interfaceBandCellsEffective?: number;
-    surfaceGradingLayersEffective?: number;
-    finestSurfaceCellSizeEffective?: number;
-    wallBandCellsEffective?: number;
   };
-  const stagedVelocity = (projection as unknown as {
-    losassoBackend?: { sources?: { velocitySampler?: { stagedVelocity?: GPUBuffer } } };
-  }).losassoBackend?.sources?.velocitySampler?.stagedVelocity;
-  const runtimeTopologyDials = {
-    surfaceBandCells: projectionRuntime.interfaceBandCellsEffective,
-    surfaceGradingLayers: projectionRuntime.surfaceGradingLayersEffective,
-    finestSurfaceCellSize: projectionRuntime.finestSurfaceCellSizeEffective,
-    wallBandCells: projectionRuntime.wallBandCellsEffective,
-  };
+}).octreeProjection;
+const projectionRuntime = projection as unknown as {
+  interfaceBandCellsEffective?: number;
+  surfaceGradingLayersEffective?: number;
+  finestSurfaceCellSizeEffective?: number;
+  wallBandCellsEffective?: number;
+};
+const stagedVelocity = (projection as unknown as {
+  losassoBackend?: { sources?: { velocitySampler?: { stagedVelocity?: GPUBuffer } } };
+}).losassoBackend?.sources?.velocitySampler?.stagedVelocity;
+const runtimeTopologyDials = {
+  surfaceBandCells: projectionRuntime.interfaceBandCellsEffective,
+  surfaceGradingLayers: projectionRuntime.surfaceGradingLayersEffective,
+  finestSurfaceCellSize: projectionRuntime.finestSurfaceCellSizeEffective,
+  wallBandCells: projectionRuntime.wallBandCellsEffective,
+};
 
-  const samples: Array<Record<string, unknown>> = [];
-  let step = 0;
-  let previousMassVisibleVolumeCells: number | undefined;
-  let previousMassVisibleVolumeStep: number | undefined;
-  let previousReconstructedVisibleVolumeCells: number | undefined;
-  let previousReconstructedVisibleVolumeStep: number | undefined;
-  let previousAuthoritativeField: Float32Array | undefined;
-  let previousAuthoritativeFieldStep: number | undefined;
-  let previousAuthoritativeSpanField: Uint8Array | undefined;
-  for (const target of sampleTimes) {
-    const wanted = Math.round(target / dt);
-    while (step < wanted) {
-      step += 1;
-      try {
-        while (!solver.advanceTo(step * dt, [])) {
-          await new Promise((resolve) => setImmediate(resolve));
-        }
-      } catch (error) {
-        if (process.env.FLUID_CAPTURE_POWER_FRONTIER_FAILURE === "1" && projection) {
-          await device.queue.onSubmittedWorkDone();
-          const failure = await projection.readPowerFrontierFailure();
-          const frontier = Array.isArray(failure.frontier)
-            ? failure.frontier.map(Number) : [];
-          const active = frontier[2] ?? 0;
-          const inactive = frontier[7] ?? (1 - active);
-          const acceptedCount = frontier[active] ?? 0;
-          const candidateCount = frontier[inactive] ?? 0;
-          const leafSizeHistogram = async (buffer: GPUBuffer | undefined, count: number) => {
-            if (!buffer || count <= 0) return {};
-            const rows = Math.min(count, Math.floor(buffer.size / 48));
-            const bytes = await readBufferBinding(device, { buffer }, rows * 48);
-            const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
-            const histogram: Record<string, number> = {};
-            for (let row = 0; row < rows; row += 1) {
-              const span = words[12 * row + 3] ?? 0;
-              histogram[String(span)] = (histogram[String(span)] ?? 0) + 1;
-            }
-            return histogram;
-          };
-          const [acceptedLeafSizes, inactiveLeafSizes, authority] = await Promise.all([
-            leafSizeHistogram(projection.powerLeafHeaders, acceptedCount),
-            leafSizeHistogram(projection.powerCandidateLeafHeaders, candidateCount),
-            projection.readLosassoAuthorityDiagnostics(),
-          ]);
-          console.error("[dam-frontier-failure]", JSON.stringify({
-            step, t_s: step * dt,
-            candidateAuthority: authority?.candidate,
-            candidateTopologyCapacities: projection.losassoBackend
-              ?.candidateTopologyCapacities,
-            candidateGraph: authority?.candidateAdaptiveGraph,
-            ownerCandidate: failure.ownerCandidate,
-            frontier,
-            frontierFailure: failure.frontierFailure,
-            frontierPublication: failure.frontierPublication,
-            dirtyAuthority: failure.dirtyAuthority,
-            dirtyAuthorityState: failure.dirtyAuthorityState,
-            rowDelta: failure.rowDelta,
-            candidateSchedules: failure.candidateSchedules,
-            controlSummary: failure.controlSummary,
-            acceptedCount, candidateCount, acceptedLeafSizes, inactiveLeafSizes,
-          }));
-        }
-        throw error;
+const samples: Array<Record<string, unknown>> = [];
+let step = 0;
+let previousMassVisibleVolumeCells: number | undefined;
+let previousMassVisibleVolumeStep: number | undefined;
+let previousReconstructedVisibleVolumeCells: number | undefined;
+let previousReconstructedVisibleVolumeStep: number | undefined;
+let previousAuthoritativeField: Float32Array | undefined;
+let previousAuthoritativeFieldStep: number | undefined;
+let previousAuthoritativeSpanField: Uint8Array | undefined;
+for (const target of sampleTimes) {
+  const wanted = Math.round(target / dt);
+  while (step < wanted) {
+    step += 1;
+    try {
+      while (!solver.advanceTo(step * dt, [])) {
+        await new Promise((resolve) => setImmediate(resolve));
       }
+    } catch (error) {
+      if (process.env.FLUID_CAPTURE_POWER_FRONTIER_FAILURE === "1" && projection) {
+        await device.queue.onSubmittedWorkDone();
+        const failure = await projection.readPowerFrontierFailure();
+        const frontier = Array.isArray(failure.frontier)
+          ? failure.frontier.map(Number) : [];
+        const active = frontier[2] ?? 0;
+        const inactive = frontier[7] ?? (1 - active);
+        const acceptedCount = frontier[active] ?? 0;
+        const candidateCount = frontier[inactive] ?? 0;
+        const leafSizeHistogram = async (buffer: GPUBuffer | undefined, count: number) => {
+          if (!buffer || count <= 0) return {};
+          const rows = Math.min(count, Math.floor(buffer.size / 48));
+          const bytes = await readBufferBinding(device, { buffer }, rows * 48);
+          const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+          const histogram: Record<string, number> = {};
+          for (let row = 0; row < rows; row += 1) {
+            const span = words[12 * row + 3] ?? 0;
+            histogram[String(span)] = (histogram[String(span)] ?? 0) + 1;
+          }
+          return histogram;
+        };
+        const [acceptedLeafSizes, inactiveLeafSizes, authority] = await Promise.all([
+          leafSizeHistogram(projection.powerLeafHeaders, acceptedCount),
+          leafSizeHistogram(projection.powerCandidateLeafHeaders, candidateCount),
+          projection.readLosassoAuthorityDiagnostics(),
+        ]);
+        console.error("[dam-frontier-failure]", JSON.stringify({
+          step, t_s: step * dt,
+          candidateAuthority: authority?.candidate,
+          candidateTopologyCapacities: projection.losassoBackend
+            ?.candidateTopologyCapacities,
+          candidateGraph: authority?.candidateAdaptiveGraph,
+          ownerCandidate: failure.ownerCandidate,
+          frontier,
+          frontierFailure: failure.frontierFailure,
+          frontierPublication: failure.frontierPublication,
+          dirtyAuthority: failure.dirtyAuthority,
+          dirtyAuthorityState: failure.dirtyAuthorityState,
+          rowDelta: failure.rowDelta,
+          candidateSchedules: failure.candidateSchedules,
+          controlSummary: failure.controlSummary,
+          acceptedCount, candidateCount, acceptedLeafSizes, inactiveLeafSizes,
+        }));
+      }
+      throw error;
     }
-    await device.queue.onSubmittedWorkDone();
-    if (transactionOnly) {
-      // Consume/re-arm the same LosassoStepSnapshot ring used by the UI
-      // fail-stop path. Sampling authority buffers alone would miss a rejected
-      // intermediate candidate that a later topology attempt overwrote.
-      await projection?.readSolveDiagnostics();
-      const candidateDiagnostics = await projection?.readLosassoAuthorityDiagnostics();
-      assert.ok(candidateDiagnostics, `t=${step * dt}: candidate diagnostics absent`);
-      const candidate = candidateDiagnostics.candidate;
-      const graph = candidateDiagnostics.candidateAdaptiveGraph;
-      const mass = candidateDiagnostics.adaptiveMassControl;
-      if (candidate[0] === 0) {
-        // Epoch zero is an intentional cadence-reuse step. Graph, mass, and
-        // migration receipts retain the preceding candidate and therefore do
-        // not form a tuple with this empty authority bank. The UI-equivalent
-        // step snapshot above remains responsible for rejecting any latched
-        // authority error before this diagnostic branch runs.
-        assert.deepEqual(candidate.slice(3, 5), [0, 0],
-          `t=${step * dt}: absent candidate carried a fatal verdict`);
-        samples.push({ t_s: step * dt,
-          candidateAuthority: candidate,
-          candidateGraph: graph,
-          massControl: mass,
-          velocityMigration: candidateDiagnostics.velocityMigration });
-        continue;
-      }
-      assertCandidateVelocityMigration(candidateDiagnostics, step * dt);
-      assert.equal(candidate[3], 1, `t=${step * dt}: candidate authority publication `
-        + `candidate=${candidate.join("/")} graph=${graph.slice(0, 7).join("/")}`);
-      assert.equal(candidate[4], 0, `t=${step * dt}: candidate authority errors`);
-      assert.equal(graph[0], candidate[0], `t=${step * dt}: candidate graph epoch`);
-      assert.equal(graph[3], graph[0], `t=${step * dt}: candidate graph publication`);
-      assert.equal(graph[4], 0, `t=${step * dt}: candidate graph errors`);
-      assert.equal(graph[6], graph[5], `t=${step * dt}: candidate graph velocity`);
-      assert.equal(mass[1], candidate[0], `t=${step * dt}: candidate mass epoch`);
-      assert.equal(mass[7], 1, `t=${step * dt}: candidate mass publication`);
-      assert.equal(mass[12], 0, `t=${step * dt}: candidate mass errors`);
+  }
+  await device.queue.onSubmittedWorkDone();
+  if (transactionOnly) {
+    // Consume/re-arm the same LosassoStepSnapshot ring used by the UI
+    // fail-stop path. Sampling authority buffers alone would miss a rejected
+    // intermediate candidate that a later topology attempt overwrote.
+    await projection?.readSolveDiagnostics();
+    const candidateDiagnostics = await projection?.readLosassoAuthorityDiagnostics();
+    assert.ok(candidateDiagnostics, `t=${step * dt}: candidate diagnostics absent`);
+    const candidate = candidateDiagnostics.candidate;
+    const graph = candidateDiagnostics.candidateAdaptiveGraph;
+    const mass = candidateDiagnostics.adaptiveMassControl;
+    if (candidate[0] === 0) {
+      // Epoch zero is an intentional cadence-reuse step. Graph, mass, and
+      // migration receipts retain the preceding candidate and therefore do
+      // not form a tuple with this empty authority bank. The UI-equivalent
+      // step snapshot above remains responsible for rejecting any latched
+      // authority error before this diagnostic branch runs.
+      assert.deepEqual(candidate.slice(3, 5), [0, 0],
+        `t=${step * dt}: absent candidate carried a fatal verdict`);
       samples.push({ t_s: step * dt,
         candidateAuthority: candidate,
         candidateGraph: graph,
@@ -1111,662 +1087,677 @@ try {
         velocityMigration: candidateDiagnostics.velocityMigration });
       continue;
     }
-    const fineSource = solver.globalFineLevelSetSource;
-    const coarseSource = solver.coarseLevelSetSource;
-    const directory = fineSource?.coarsePhiDirectory
-      ? { buffer: fineSource.coarsePhiDirectory }
-      : coarseSource?.directory;
-    assert.ok(directory, "factor-one octree published no coarse fallback directory");
-    const directoryBytes = fineSource?.coarsePhiDirectory
-      ? 32 + (fineSource.coarsePhiRowCapacity ?? 0) * ROW_WORDS * 4
-      : directory.size ?? directory.buffer.size - (directory.offset ?? 0);
-    const bytes = await readBufferBinding(device, directory, directoryBytes);
-    const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
-    const fineField = fineSource
-      ? await readFactorOneFineField(device, fineSource, dimensions) : undefined;
-    const shape = surfaceShape(words, dimensions, fineField);
-    const { heights: _heights, field: _field, sizeField: _sizeField, ...summary } = shape;
-    if (process.env.FLUID_SURFACE_ROWS === "1") {
-      const [nx, ny, nz] = dimensions;
-      const rowCount = words[2] ?? 0;
-      const byY = new Array<number>(ny).fill(0);
-      const byZ = new Array<number>(nz).fill(0);
-      const byX = new Array<number>(nx).fill(0);
-      const preview: string[] = [];
-      for (let slot = 0; slot < rowCount; slot += 1) {
-        const base = HEADER_WORDS + slot * ROW_WORDS;
-        const cellPlusOne = words[base] ?? 0;
-        const size = words[base + 1] ?? 0;
-        const flags = words[base + 5] ?? 0;
-        if (cellPlusOne === 0 || size === 0) continue;
-        const cell = cellPlusOne - 1;
-        const ox = cell % nx, oy = Math.floor(cell / nx) % ny, oz = Math.floor(cell / (nx * ny));
-        if (ox < nx) byX[ox]! += 1;
-        if (oy < ny) byY[oy]! += 1;
-        if (oz < nz) byZ[oz]! += 1;
-        if (preview.length < 8) {
-          preview.push(`cell=${cell} -> (${ox},${oy},${oz}) size=${size} `
-            + `flags=0x${flags.toString(16)} phi=${(decodeFloat(words[base + 2] ?? 0) / shape.cellWidth).toFixed(2)}c`);
-        }
+    assertCandidateVelocityMigration(candidateDiagnostics, step * dt);
+    assert.equal(candidate[3], 1, `t=${step * dt}: candidate authority publication `
+      + `candidate=${candidate.join("/")} graph=${graph.slice(0, 7).join("/")}`);
+    assert.equal(candidate[4], 0, `t=${step * dt}: candidate authority errors`);
+    assert.equal(graph[0], candidate[0], `t=${step * dt}: candidate graph epoch`);
+    assert.equal(graph[3], graph[0], `t=${step * dt}: candidate graph publication`);
+    assert.equal(graph[4], 0, `t=${step * dt}: candidate graph errors`);
+    assert.equal(graph[6], graph[5], `t=${step * dt}: candidate graph velocity`);
+    assert.equal(mass[1], candidate[0], `t=${step * dt}: candidate mass epoch`);
+    assert.equal(mass[7], 1, `t=${step * dt}: candidate mass publication`);
+    assert.equal(mass[12], 0, `t=${step * dt}: candidate mass errors`);
+    samples.push({ t_s: step * dt,
+      candidateAuthority: candidate,
+      candidateGraph: graph,
+      massControl: mass,
+      velocityMigration: candidateDiagnostics.velocityMigration });
+    continue;
+  }
+  const fineSource = solver.globalFineLevelSetSource;
+  const coarseSource = solver.coarseLevelSetSource;
+  const directory = fineSource?.coarsePhiDirectory
+    ? { buffer: fineSource.coarsePhiDirectory }
+    : coarseSource?.directory;
+  assert.ok(directory, "factor-one octree published no coarse fallback directory");
+  const directoryBytes = fineSource?.coarsePhiDirectory
+    ? 32 + (fineSource.coarsePhiRowCapacity ?? 0) * ROW_WORDS * 4
+    : directory.size ?? directory.buffer.size - (directory.offset ?? 0);
+  const bytes = await readBufferBinding(device, directory, directoryBytes);
+  const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+  const fineField = fineSource
+    ? await readFactorOneFineField(device, fineSource, dimensions) : undefined;
+  const shape = surfaceShape(words, dimensions, fineField);
+  const { heights: _heights, field: _field, sizeField: _sizeField, ...summary } = shape;
+  if (process.env.FLUID_SURFACE_ROWS === "1") {
+    const [nx, ny, nz] = dimensions;
+    const rowCount = words[2] ?? 0;
+    const byY = new Array<number>(ny).fill(0);
+    const byZ = new Array<number>(nz).fill(0);
+    const byX = new Array<number>(nx).fill(0);
+    const preview: string[] = [];
+    for (let slot = 0; slot < rowCount; slot += 1) {
+      const base = HEADER_WORDS + slot * ROW_WORDS;
+      const cellPlusOne = words[base] ?? 0;
+      const size = words[base + 1] ?? 0;
+      const flags = words[base + 5] ?? 0;
+      if (cellPlusOne === 0 || size === 0) continue;
+      const cell = cellPlusOne - 1;
+      const ox = cell % nx, oy = Math.floor(cell / nx) % ny, oz = Math.floor(cell / (nx * ny));
+      if (ox < nx) byX[ox]! += 1;
+      if (oy < ny) byY[oy]! += 1;
+      if (oz < nz) byZ[oz]! += 1;
+      if (preview.length < 8) {
+        preview.push(`cell=${cell} -> (${ox},${oy},${oz}) size=${size} `
+          + `flags=0x${flags.toString(16)} phi=${(decodeFloat(words[base + 2] ?? 0) / shape.cellWidth).toFixed(2)}c`);
       }
-      console.error(`# t=${(step * dt).toFixed(3)} rowCount=${rowCount} maxCellIndex=${nx * ny * nz - 1}`);
-      console.error(`  byX: ${byX.join(",")}`);
-      console.error(`  byY: ${byY.join(",")}`);
-      console.error(`  byZ: ${byZ.join(",")}`);
-      console.error(`  ${preview.join("\n  ")}`);
     }
-    // The exact nearest-interface scan is O(cells x interface cells); it is the
-    // point of the probe on a 24x18x16 box and untenable on a 64x48x64 one.
-    const fidelity = dimensions[0] * dimensions[1] * dimensions[2] <= 50_000
-      ? phiDistanceFidelity(shape.field, dimensions, shape.cellWidth) : undefined;
-    const census = await projection?.readTopologyLeafCensus();
-    const coarseVolume = await projection?.readCoarseSurfaceTrackerReceipt();
-    const adaptiveNodes = await projection?.readAdaptiveNodeReceipt();
-    const adaptiveVelocityReceipts = await projection?.readAdaptiveVelocityReceipts();
-    const candidateDiagnostics = await projection?.readLosassoAuthorityDiagnostics();
-    // The ordinary grading probe may sample immediately after a candidate was
-    // committed and its authority bank cleared; only the transaction-only
-    // lane promises a live candidate tuple at every requested checkpoint.
-    if (transactionOnly && candidateDiagnostics) {
-      assertCandidateVelocityMigration(candidateDiagnostics, step * dt);
-    }
-    const adaptivePhiReceipts = projection?.losassoBackend?.adaptivePhiSource?.receipts;
-    const adaptivePhiReceiptBytes = adaptivePhiReceipts
-      ? await readBufferBinding(device, { buffer: adaptivePhiReceipts }, adaptivePhiReceipts.size)
-      : undefined;
-    const adaptivePhiReceipt = adaptivePhiReceiptBytes
-      ? unpackAdaptivePhiReceipt(new Uint32Array(adaptivePhiReceiptBytes.buffer,
-        adaptivePhiReceiptBytes.byteOffset, adaptivePhiReceiptBytes.byteLength / 4))
-      : undefined;
-    const adaptiveMassReceipts = projection?.losassoBackend?.adaptiveMassSource?.receipts;
-    const adaptiveMassReceiptBytes = adaptiveMassReceipts
-      ? await readBufferBinding(device, { buffer: adaptiveMassReceipts }, adaptiveMassReceipts.size)
-      : undefined;
-    const adaptiveMassReceipt = adaptiveMassReceiptBytes
-      ? unpackAdaptiveMassReceipt(new Uint32Array(adaptiveMassReceiptBytes.buffer,
-        adaptiveMassReceiptBytes.byteOffset, adaptiveMassReceiptBytes.byteLength / 4))
-      : undefined;
-    let adaptiveMassDensity: {
-      dry: number; airSide: number; liquidSide: number; compressed: number;
-      maximum: number; airSideMass_m3: number; compressedMass_m3: number;
-      compressionExcessMass_m3: number;
-    } | undefined;
-    let massSurfaceConnectivity: SurfaceShape["wetConnectivity"] | undefined;
-    let massSurfaceQuadrature: SurfaceShape["zeroSetQuadrature"] | undefined;
-    let massSurfaceWallProximity: {
-      positiveXGapCells: number;
-      ceilingGapCellLayers: number;
-      wallWetCells: readonly [number, number, number, number, number, number];
-    } | undefined;
-    let massWetTransition: WetTransitionAttribution | undefined;
-    let currentAuthoritativeField: Float32Array | undefined;
-    let currentAuthoritativeSpanField: Uint8Array | undefined;
-    let ceilingWetLeaves: readonly Record<string, unknown>[] | undefined;
-    let ceilingTransferTrace: readonly Record<string, unknown>[] | undefined;
-    let reconstructionMismatchNeighborhood: Record<string, unknown> | undefined;
-    let adaptiveVelocityProfile: readonly Record<string, number>[] | undefined;
-    const acceptedMassGraph = projection?.losassoBackend
-      ?.adaptiveSurfaceGraphSources?.accepted;
-    if (acceptedMassGraph) {
-      const graphControl = await readControlWords(device, acceptedMassGraph.control, 32);
-      const leafCount = Math.min(graphControl?.[1] ?? 0,
-        Math.floor(acceptedMassGraph.leaves.size / 64),
-        Math.floor(acceptedMassGraph.surfaceMass.size / 4));
-      if (leafCount > 0) {
-        const [leafBytes, massBytes] = await Promise.all([
-          readBufferBinding(device, { buffer: acceptedMassGraph.leaves }, leafCount * 64),
-          readBufferBinding(device, { buffer: acceptedMassGraph.surfaceMass }, leafCount * 4),
-        ]);
-        const leaves = new Uint32Array(leafBytes.buffer, leafBytes.byteOffset,
-          leafBytes.byteLength / 4);
-        const mass = new Float32Array(massBytes.buffer, massBytes.byteOffset,
-          massBytes.byteLength / 4);
-        let dry = 0, airSide = 0, liquidSide = 0, compressed = 0;
-        let maximum = 0, airSideMass_m3 = 0, compressedMass_m3 = 0;
-        let compressionExcessMass_m3 = 0;
-        let maximumWetY = -1;
-        const wetCeilingLeafRows: Array<Record<string, unknown>> = [];
-        const wallWetCells: [number, number, number, number, number, number] =
-          [0, 0, 0, 0, 0, 0];
-        const massPseudoPhi = new Float32Array(dimensions[0] * dimensions[1]
-          * dimensions[2]).fill(0.5);
-        const massSpanField = new Uint8Array(massPseudoPhi.length);
-        for (let leaf = 0; leaf < leafCount; leaf += 1) {
-          const origin = [leaves[16 * leaf] ?? 0, leaves[16 * leaf + 1] ?? 0,
-            leaves[16 * leaf + 2] ?? 0] as const;
-          const span = leaves[16 * leaf + 3] ?? 0;
-          const volume = (span * shape.cellWidth) ** 3;
-          const value = volume > 0 ? (mass[leaf] ?? 0) / volume : 0;
-          if (value > 0.5 && origin[1] + span >= dimensions[1]) {
-            wetCeilingLeafRows.push({ leaf, origin, span, rho: value,
-              mass_m3: mass[leaf] ?? 0 });
-          }
-          for (let z = origin[2]; z < Math.min(dimensions[2], origin[2] + span); z += 1) {
-            for (let y = origin[1]; y < Math.min(dimensions[1], origin[1] + span); y += 1) {
-              for (let x = origin[0]; x < Math.min(dimensions[0], origin[0] + span); x += 1) {
-                massPseudoPhi[x + dimensions[0] * (y + dimensions[1] * z)] = 0.5 - value;
-                massSpanField[x + dimensions[0] * (y + dimensions[1] * z)] = span;
-                if (value > 0.5) {
-                  maximumWetY = Math.max(maximumWetY, y);
-                  if (x === 0) wallWetCells[0]! += 1;
-                  if (x === dimensions[0] - 1) wallWetCells[1]! += 1;
-                  if (y === 0) wallWetCells[2]! += 1;
-                  if (y === dimensions[1] - 1) wallWetCells[3]! += 1;
-                  if (z === 0) wallWetCells[4]! += 1;
-                  if (z === dimensions[2] - 1) wallWetCells[5]! += 1;
-                }
+    console.error(`# t=${(step * dt).toFixed(3)} rowCount=${rowCount} maxCellIndex=${nx * ny * nz - 1}`);
+    console.error(`  byX: ${byX.join(",")}`);
+    console.error(`  byY: ${byY.join(",")}`);
+    console.error(`  byZ: ${byZ.join(",")}`);
+    console.error(`  ${preview.join("\n  ")}`);
+  }
+  // The exact nearest-interface scan is O(cells x interface cells); it is the
+  // point of the probe on a 24x18x16 box and untenable on a 64x48x64 one.
+  const fidelity = dimensions[0] * dimensions[1] * dimensions[2] <= 50_000
+    ? phiDistanceFidelity(shape.field, dimensions, shape.cellWidth) : undefined;
+  const census = await projection?.readTopologyLeafCensus();
+  const coarseVolume = await projection?.readCoarseSurfaceTrackerReceipt();
+  const adaptiveNodes = await projection?.readAdaptiveNodeReceipt();
+  const adaptiveVelocityReceipts = await projection?.readAdaptiveVelocityReceipts();
+  const candidateDiagnostics = await projection?.readLosassoAuthorityDiagnostics();
+  // The ordinary grading probe may sample immediately after a candidate was
+  // committed and its authority bank cleared; only the transaction-only
+  // lane promises a live candidate tuple at every requested checkpoint.
+  if (transactionOnly && candidateDiagnostics) {
+    assertCandidateVelocityMigration(candidateDiagnostics, step * dt);
+  }
+  const adaptivePhiReceipts = projection?.losassoBackend?.adaptivePhiSource?.receipts;
+  const adaptivePhiReceiptBytes = adaptivePhiReceipts
+    ? await readBufferBinding(device, { buffer: adaptivePhiReceipts }, adaptivePhiReceipts.size)
+    : undefined;
+  const adaptivePhiReceipt = adaptivePhiReceiptBytes
+    ? unpackAdaptivePhiReceipt(new Uint32Array(adaptivePhiReceiptBytes.buffer,
+      adaptivePhiReceiptBytes.byteOffset, adaptivePhiReceiptBytes.byteLength / 4))
+    : undefined;
+  const adaptiveMassReceipts = projection?.losassoBackend?.adaptiveMassSource?.receipts;
+  const adaptiveMassReceiptBytes = adaptiveMassReceipts
+    ? await readBufferBinding(device, { buffer: adaptiveMassReceipts }, adaptiveMassReceipts.size)
+    : undefined;
+  const adaptiveMassReceipt = adaptiveMassReceiptBytes
+    ? unpackAdaptiveMassReceipt(new Uint32Array(adaptiveMassReceiptBytes.buffer,
+      adaptiveMassReceiptBytes.byteOffset, adaptiveMassReceiptBytes.byteLength / 4))
+    : undefined;
+  let adaptiveMassDensity: {
+    dry: number; airSide: number; liquidSide: number; compressed: number;
+    maximum: number; airSideMass_m3: number; compressedMass_m3: number;
+    compressionExcessMass_m3: number;
+  } | undefined;
+  let massSurfaceConnectivity: SurfaceShape["wetConnectivity"] | undefined;
+  let massSurfaceQuadrature: SurfaceShape["zeroSetQuadrature"] | undefined;
+  let massSurfaceWallProximity: {
+    positiveXGapCells: number;
+    ceilingGapCellLayers: number;
+    wallWetCells: readonly [number, number, number, number, number, number];
+  } | undefined;
+  let massWetTransition: WetTransitionAttribution | undefined;
+  let currentAuthoritativeField: Float32Array | undefined;
+  let currentAuthoritativeSpanField: Uint8Array | undefined;
+  let ceilingWetLeaves: readonly Record<string, unknown>[] | undefined;
+  let ceilingTransferTrace: readonly Record<string, unknown>[] | undefined;
+  let reconstructionMismatchNeighborhood: Record<string, unknown> | undefined;
+  let adaptiveVelocityProfile: readonly Record<string, number>[] | undefined;
+  const acceptedMassGraph = projection?.losassoBackend
+    ?.adaptiveSurfaceGraphSources?.accepted;
+  if (acceptedMassGraph) {
+    const graphControl = await readControlWords(device, acceptedMassGraph.control, 32);
+    const leafCount = Math.min(graphControl?.[1] ?? 0,
+      Math.floor(acceptedMassGraph.leaves.size / 64),
+      Math.floor(acceptedMassGraph.surfaceMass.size / 4));
+    if (leafCount > 0) {
+      const [leafBytes, massBytes] = await Promise.all([
+        readBufferBinding(device, { buffer: acceptedMassGraph.leaves }, leafCount * 64),
+        readBufferBinding(device, { buffer: acceptedMassGraph.surfaceMass }, leafCount * 4),
+      ]);
+      const leaves = new Uint32Array(leafBytes.buffer, leafBytes.byteOffset,
+        leafBytes.byteLength / 4);
+      const mass = new Float32Array(massBytes.buffer, massBytes.byteOffset,
+        massBytes.byteLength / 4);
+      let dry = 0, airSide = 0, liquidSide = 0, compressed = 0;
+      let maximum = 0, airSideMass_m3 = 0, compressedMass_m3 = 0;
+      let compressionExcessMass_m3 = 0;
+      let maximumWetY = -1;
+      const wetCeilingLeafRows: Array<Record<string, unknown>> = [];
+      const wallWetCells: [number, number, number, number, number, number] =
+        [0, 0, 0, 0, 0, 0];
+      const massPseudoPhi = new Float32Array(dimensions[0] * dimensions[1]
+        * dimensions[2]).fill(0.5);
+      const massSpanField = new Uint8Array(massPseudoPhi.length);
+      for (let leaf = 0; leaf < leafCount; leaf += 1) {
+        const origin = [leaves[16 * leaf] ?? 0, leaves[16 * leaf + 1] ?? 0,
+          leaves[16 * leaf + 2] ?? 0] as const;
+        const span = leaves[16 * leaf + 3] ?? 0;
+        const volume = (span * shape.cellWidth) ** 3;
+        const value = volume > 0 ? (mass[leaf] ?? 0) / volume : 0;
+        if (value > 0.5 && origin[1] + span >= dimensions[1]) {
+          wetCeilingLeafRows.push({ leaf, origin, span, rho: value,
+            mass_m3: mass[leaf] ?? 0 });
+        }
+        for (let z = origin[2]; z < Math.min(dimensions[2], origin[2] + span); z += 1) {
+          for (let y = origin[1]; y < Math.min(dimensions[1], origin[1] + span); y += 1) {
+            for (let x = origin[0]; x < Math.min(dimensions[0], origin[0] + span); x += 1) {
+              massPseudoPhi[x + dimensions[0] * (y + dimensions[1] * z)] = 0.5 - value;
+              massSpanField[x + dimensions[0] * (y + dimensions[1] * z)] = span;
+              if (value > 0.5) {
+                maximumWetY = Math.max(maximumWetY, y);
+                if (x === 0) wallWetCells[0]! += 1;
+                if (x === dimensions[0] - 1) wallWetCells[1]! += 1;
+                if (y === 0) wallWetCells[2]! += 1;
+                if (y === dimensions[1] - 1) wallWetCells[3]! += 1;
+                if (z === 0) wallWetCells[4]! += 1;
+                if (z === dimensions[2] - 1) wallWetCells[5]! += 1;
               }
             }
           }
-          maximum = Math.max(maximum, value);
-          if (value <= 1e-8) dry += 1;
-          else if (value < 0.5) { airSide += 1; airSideMass_m3 += mass[leaf] ?? 0; }
-          else if (value <= 1) liquidSide += 1;
-          else {
-            compressed += 1;
-            compressedMass_m3 += mass[leaf] ?? 0;
-            compressionExcessMass_m3 += Math.max(0, (mass[leaf] ?? 0) - volume);
-          }
         }
-        adaptiveMassDensity = { dry, airSide, liquidSide, compressed, maximum,
-          airSideMass_m3, compressedMass_m3, compressionExcessMass_m3 };
-        massSurfaceConnectivity = wetConnectivity(massPseudoPhi, dimensions);
-        ceilingWetLeaves = Object.freeze(wetCeilingLeafRows);
-        currentAuthoritativeField = massPseudoPhi;
-        currentAuthoritativeSpanField = massSpanField;
-        if (previousAuthoritativeField
-          && previousAuthoritativeFieldStep !== undefined
-          && step - previousAuthoritativeFieldStep === 1) {
-          massWetTransition = wetTransitionAttribution(previousAuthoritativeField,
-            massPseudoPhi, dimensions, previousAuthoritativeSpanField);
+        maximum = Math.max(maximum, value);
+        if (value <= 1e-8) dry += 1;
+        else if (value < 0.5) { airSide += 1; airSideMass_m3 += mass[leaf] ?? 0; }
+        else if (value <= 1) liquidSide += 1;
+        else {
+          compressed += 1;
+          compressedMass_m3 += mass[leaf] ?? 0;
+          compressionExcessMass_m3 += Math.max(0, (mass[leaf] ?? 0) - volume);
         }
-        massSurfaceQuadrature = zeroSetQuadrature(massPseudoPhi, dimensions);
-        massSurfaceWallProximity = {
-          positiveXGapCells: Math.max(0, dimensions[0] - massSurfaceQuadrature.frontCells),
-          ceilingGapCellLayers: maximumWetY < 0
-            ? dimensions[1] : dimensions[1] - 1 - maximumWetY,
-          wallWetCells: Object.freeze(wallWetCells),
-        };
-        if (process.env.FLUID_TRACE_CEILING_TRANSFERS === "1"
-          && wetCeilingLeafRows.length > 0) {
-          const adaptiveMassSource = projection?.losassoBackend?.adaptiveMassSource;
-          const massControl = await readControlWords(device, adaptiveMassSource?.control, 32);
-          const transferCount = Math.min(massControl?.[5] ?? 0,
-            Math.floor((adaptiveMassSource?.transferRecords.size ?? 0) / 16));
-          if (adaptiveMassSource && transferCount > 0) {
-            const [transferBytes, admissionBytes] = await Promise.all([
-              readBufferBinding(device, { buffer: adaptiveMassSource.transferRecords },
-                transferCount * 16),
-              readBufferBinding(device, { buffer: adaptiveMassSource.transportAdmission },
-                leafCount * 4),
-            ]);
-            const transferWords = new Uint32Array(transferBytes.buffer,
-              transferBytes.byteOffset, transferBytes.byteLength / 4);
-            const admissionWords = new Uint32Array(admissionBytes.buffer,
-              admissionBytes.byteOffset, admissionBytes.byteLength / 4);
-            const ceilingSlots = new Set(wetCeilingLeafRows.map((row) => Number(row.leaf)));
-            const traced: Array<Record<string, unknown>> = [];
-            for (let transfer = 0; transfer < transferCount; transfer += 1) {
-              const donor = transferWords[4 * transfer] ?? 0xffff_ffff;
-              const recipient = transferWords[4 * transfer + 1] ?? 0xffff_ffff;
-              const units = transferWords[4 * transfer + 2] ?? 0;
-              const flags = transferWords[4 * transfer + 3] ?? 0;
-              if (!ceilingSlots.has(recipient) || units === 0 || (flags & 1) === 0) continue;
-              const donorBase = 16 * donor;
-              traced.push({ transfer, donor, recipient, units, flags,
-                donorOrigin: donor < leafCount ? [leaves[donorBase] ?? 0,
-                  leaves[donorBase + 1] ?? 0, leaves[donorBase + 2] ?? 0] : undefined,
-                donorSpan: donor < leafCount ? leaves[donorBase + 3] : undefined });
-            }
-            for (const row of wetCeilingLeafRows) {
-              const leaf = Number(row.leaf);
-              const admission = admissionWords[leaf] ?? 0;
-              row.admissionReach = (admission & 0x8000_0000) !== 0;
-              row.admissionRemoteUnits = admission & 0x7fff_ffff;
-            }
-            ceilingTransferTrace = Object.freeze(traced);
+      }
+      adaptiveMassDensity = { dry, airSide, liquidSide, compressed, maximum,
+        airSideMass_m3, compressedMass_m3, compressionExcessMass_m3 };
+      massSurfaceConnectivity = wetConnectivity(massPseudoPhi, dimensions);
+      ceilingWetLeaves = Object.freeze(wetCeilingLeafRows);
+      currentAuthoritativeField = massPseudoPhi;
+      currentAuthoritativeSpanField = massSpanField;
+      if (previousAuthoritativeField
+        && previousAuthoritativeFieldStep !== undefined
+        && step - previousAuthoritativeFieldStep === 1) {
+        massWetTransition = wetTransitionAttribution(previousAuthoritativeField,
+          massPseudoPhi, dimensions, previousAuthoritativeSpanField);
+      }
+      massSurfaceQuadrature = zeroSetQuadrature(massPseudoPhi, dimensions);
+      massSurfaceWallProximity = {
+        positiveXGapCells: Math.max(0, dimensions[0] - massSurfaceQuadrature.frontCells),
+        ceilingGapCellLayers: maximumWetY < 0
+          ? dimensions[1] : dimensions[1] - 1 - maximumWetY,
+        wallWetCells: Object.freeze(wallWetCells),
+      };
+      if (process.env.FLUID_TRACE_CEILING_TRANSFERS === "1"
+        && wetCeilingLeafRows.length > 0) {
+        const adaptiveMassSource = projection?.losassoBackend?.adaptiveMassSource;
+        const massControl = await readControlWords(device, adaptiveMassSource?.control, 32);
+        const transferCount = Math.min(massControl?.[5] ?? 0,
+          Math.floor((adaptiveMassSource?.transferRecords.size ?? 0) / 16));
+        if (adaptiveMassSource && transferCount > 0) {
+          const [transferBytes, admissionBytes] = await Promise.all([
+            readBufferBinding(device, { buffer: adaptiveMassSource.transferRecords },
+              transferCount * 16),
+            readBufferBinding(device, { buffer: adaptiveMassSource.transportAdmission },
+              leafCount * 4),
+          ]);
+          const transferWords = new Uint32Array(transferBytes.buffer,
+            transferBytes.byteOffset, transferBytes.byteLength / 4);
+          const admissionWords = new Uint32Array(admissionBytes.buffer,
+            admissionBytes.byteOffset, admissionBytes.byteLength / 4);
+          const ceilingSlots = new Set(wetCeilingLeafRows.map((row) => Number(row.leaf)));
+          const traced: Array<Record<string, unknown>> = [];
+          for (let transfer = 0; transfer < transferCount; transfer += 1) {
+            const donor = transferWords[4 * transfer] ?? 0xffff_ffff;
+            const recipient = transferWords[4 * transfer + 1] ?? 0xffff_ffff;
+            const units = transferWords[4 * transfer + 2] ?? 0;
+            const flags = transferWords[4 * transfer + 3] ?? 0;
+            if (!ceilingSlots.has(recipient) || units === 0 || (flags & 1) === 0) continue;
+            const donorBase = 16 * donor;
+            traced.push({ transfer, donor, recipient, units, flags,
+              donorOrigin: donor < leafCount ? [leaves[donorBase] ?? 0,
+                leaves[donorBase + 1] ?? 0, leaves[donorBase + 2] ?? 0] : undefined,
+              donorSpan: donor < leafCount ? leaves[donorBase + 3] : undefined });
           }
+          for (const row of wetCeilingLeafRows) {
+            const leaf = Number(row.leaf);
+            const admission = admissionWords[leaf] ?? 0;
+            row.admissionReach = (admission & 0x8000_0000) !== 0;
+            row.admissionRemoteUnits = admission & 0x7fff_ffff;
+          }
+          ceilingTransferTrace = Object.freeze(traced);
         }
       }
     }
-    if (process.env.FLUID_VELOCITY_PROFILE === "1" && acceptedMassGraph) {
-      const control = await readControlWords(device, acceptedMassGraph.control, 32);
-      const nodeCount = Math.min(control?.[2] ?? 0,
-        Math.floor(acceptedMassGraph.nodes.size / 16),
-        Math.floor(acceptedMassGraph.phi.size / 8),
-        Math.floor(acceptedMassGraph.nodalVelocity.size / 32));
-      const [nodeBytes, phiBytes, velocityBytes] = await Promise.all([
-        readBufferBinding(device, { buffer: acceptedMassGraph.nodes }, nodeCount * 16),
-        readBufferBinding(device, { buffer: acceptedMassGraph.phi }, nodeCount * 8),
-        readBufferBinding(device, { buffer: acceptedMassGraph.nodalVelocity }, nodeCount * 32),
+  }
+  if (process.env.FLUID_VELOCITY_PROFILE === "1" && acceptedMassGraph) {
+    const control = await readControlWords(device, acceptedMassGraph.control, 32);
+    const nodeCount = Math.min(control?.[2] ?? 0,
+      Math.floor(acceptedMassGraph.nodes.size / 16),
+      Math.floor(acceptedMassGraph.phi.size / 8),
+      Math.floor(acceptedMassGraph.nodalVelocity.size / 32));
+    const [nodeBytes, phiBytes, velocityBytes] = await Promise.all([
+      readBufferBinding(device, { buffer: acceptedMassGraph.nodes }, nodeCount * 16),
+      readBufferBinding(device, { buffer: acceptedMassGraph.phi }, nodeCount * 8),
+      readBufferBinding(device, { buffer: acceptedMassGraph.nodalVelocity }, nodeCount * 32),
+    ]);
+    const nodes = new Uint32Array(nodeBytes.buffer, nodeBytes.byteOffset,
+      nodeBytes.byteLength / 4);
+    const phi = new Float32Array(phiBytes.buffer, phiBytes.byteOffset,
+      phiBytes.byteLength / 4);
+    const velocityWords = new Uint32Array(velocityBytes.buffer, velocityBytes.byteOffset,
+      velocityBytes.byteLength / 4);
+    const velocity = new Float32Array(velocityBytes.buffer, velocityBytes.byteOffset,
+      velocityBytes.byteLength / 4);
+    const bins = Array.from({ length: dimensions[0] + 1 }, () => ({
+      count: 0, sumX: 0, minimumX: Infinity, maximumX: -Infinity,
+    }));
+    for (let node = 0; node < nodeCount; node += 1) {
+      if (Math.min(Math.abs(phi[2 * node] ?? Infinity),
+        Math.abs(phi[2 * node + 1] ?? Infinity)) > 2 * shape.cellWidth) continue;
+      const mask = velocityWords[8 * node + 3] ?? 0;
+      const vx = velocity[8 * node] ?? Number.NaN;
+      if ((mask & 7) !== 7 || !Number.isFinite(vx)) continue;
+      const lattice = nodes[4 * node] ?? 0;
+      const x = lattice % (dimensions[0] + 1);
+      const bin = bins[x]!;
+      bin.count += 1; bin.sumX += vx;
+      bin.minimumX = Math.min(bin.minimumX, vx);
+      bin.maximumX = Math.max(bin.maximumX, vx);
+    }
+    adaptiveVelocityProfile = bins.map((bin, x) => ({ x, count: bin.count,
+      meanX: bin.count ? Number((bin.sumX / bin.count).toFixed(5)) : Number.NaN,
+      minimumX: bin.count ? Number(bin.minimumX.toFixed(5)) : Number.NaN,
+      maximumX: bin.count ? Number(bin.maximumX.toFixed(5)) : Number.NaN }));
+  }
+  if (adaptiveMassReceipt
+    && adaptiveMassReceipt.firstReconstructionSignMismatchItem !== 0xffff_ffff
+    && projection?.losassoBackend?.adaptiveSurfaceGraphSources) {
+    const cell = adaptiveMassReceipt.firstReconstructionSignMismatchItem;
+    const nodeDimensions = [dimensions[0] + 1, dimensions[1] + 1,
+      dimensions[2] + 1] as const;
+    const node = [cell % nodeDimensions[0],
+      Math.floor(cell / nodeDimensions[0]) % nodeDimensions[1],
+      Math.floor(cell / (nodeDimensions[0] * nodeDimensions[1]))] as const;
+    const inspect = async (bank: "accepted" | "candidate") => {
+      const graph = projection.losassoBackend!.adaptiveSurfaceGraphSources![bank];
+      const control = await readControlWords(device, graph.control, 32);
+      const count = Math.min(control?.[1] ?? 0, Math.floor(graph.leaves.size / 64));
+      const nodeCount = Math.min(control?.[2] ?? 0, Math.floor(graph.nodes.size / 16),
+        Math.floor(graph.phi.size / 8));
+      const [leafBytes, massBytes, nodeBytes, phiBytes] = await Promise.all([
+        readBufferBinding(device, { buffer: graph.leaves }, count * 64),
+        readBufferBinding(device, { buffer: graph.surfaceMass }, count * 4),
+        readBufferBinding(device, { buffer: graph.nodes }, nodeCount * 16),
+        readBufferBinding(device, { buffer: graph.phi }, nodeCount * 8),
       ]);
+      const leaves = new Uint32Array(leafBytes.buffer, leafBytes.byteOffset,
+        leafBytes.byteLength / 4);
+      const mass = new Float32Array(massBytes.buffer, massBytes.byteOffset,
+        massBytes.byteLength / 4);
       const nodes = new Uint32Array(nodeBytes.buffer, nodeBytes.byteOffset,
         nodeBytes.byteLength / 4);
       const phi = new Float32Array(phiBytes.buffer, phiBytes.byteOffset,
         phiBytes.byteLength / 4);
-      const velocityWords = new Uint32Array(velocityBytes.buffer, velocityBytes.byteOffset,
-        velocityBytes.byteLength / 4);
-      const velocity = new Float32Array(velocityBytes.buffer, velocityBytes.byteOffset,
-        velocityBytes.byteLength / 4);
-      const bins = Array.from({ length: dimensions[0] + 1 }, () => ({
-        count: 0, sumX: 0, minimumX: Infinity, maximumX: -Infinity,
-      }));
-      for (let node = 0; node < nodeCount; node += 1) {
-        if (Math.min(Math.abs(phi[2 * node] ?? Infinity),
-          Math.abs(phi[2 * node + 1] ?? Infinity)) > 2 * shape.cellWidth) continue;
-        const mask = velocityWords[8 * node + 3] ?? 0;
-        const vx = velocity[8 * node] ?? Number.NaN;
-        if ((mask & 7) !== 7 || !Number.isFinite(vx)) continue;
-        const lattice = nodes[4 * node] ?? 0;
-        const x = lattice % (dimensions[0] + 1);
-        const bin = bins[x]!;
-        bin.count += 1; bin.sumX += vx;
-        bin.minimumX = Math.min(bin.minimumX, vx);
-        bin.maximumX = Math.max(bin.maximumX, vx);
+      const incident: Array<Record<string, unknown>> = [];
+      for (let leaf = 0; leaf < count; leaf += 1) {
+        const base = 16 * leaf, span = leaves[base + 3] ?? 0;
+        const origin = [leaves[base] ?? 0, leaves[base + 1] ?? 0,
+          leaves[base + 2] ?? 0] as const;
+        if (!origin.every((value, axis) => value <= node[axis]
+          && node[axis] <= value + span)) continue;
+        const volume = (span * shape.cellWidth) ** 3;
+        incident.push({ leaf, origin, span, rho: volume > 0 ? (mass[leaf] ?? 0) / volume : 0 });
       }
-      adaptiveVelocityProfile = bins.map((bin, x) => ({ x, count: bin.count,
-        meanX: bin.count ? Number((bin.sumX / bin.count).toFixed(5)) : Number.NaN,
-        minimumX: bin.count ? Number(bin.minimumX.toFixed(5)) : Number.NaN,
-        maximumX: bin.count ? Number(bin.maximumX.toFixed(5)) : Number.NaN }));
-    }
-    if (adaptiveMassReceipt
-      && adaptiveMassReceipt.firstReconstructionSignMismatchItem !== 0xffff_ffff
-      && projection?.losassoBackend?.adaptiveSurfaceGraphSources) {
-      const cell = adaptiveMassReceipt.firstReconstructionSignMismatchItem;
-      const nodeDimensions = [dimensions[0] + 1, dimensions[1] + 1,
-        dimensions[2] + 1] as const;
-      const node = [cell % nodeDimensions[0],
-        Math.floor(cell / nodeDimensions[0]) % nodeDimensions[1],
-        Math.floor(cell / (nodeDimensions[0] * nodeDimensions[1]))] as const;
-      const inspect = async (bank: "accepted" | "candidate") => {
-        const graph = projection.losassoBackend!.adaptiveSurfaceGraphSources![bank];
-        const control = await readControlWords(device, graph.control, 32);
-        const count = Math.min(control?.[1] ?? 0, Math.floor(graph.leaves.size / 64));
-        const nodeCount = Math.min(control?.[2] ?? 0, Math.floor(graph.nodes.size / 16),
-          Math.floor(graph.phi.size / 8));
-        const [leafBytes, massBytes, nodeBytes, phiBytes] = await Promise.all([
-          readBufferBinding(device, { buffer: graph.leaves }, count * 64),
-          readBufferBinding(device, { buffer: graph.surfaceMass }, count * 4),
-          readBufferBinding(device, { buffer: graph.nodes }, nodeCount * 16),
-          readBufferBinding(device, { buffer: graph.phi }, nodeCount * 8),
-        ]);
-        const leaves = new Uint32Array(leafBytes.buffer, leafBytes.byteOffset,
-          leafBytes.byteLength / 4);
-        const mass = new Float32Array(massBytes.buffer, massBytes.byteOffset,
-          massBytes.byteLength / 4);
-        const nodes = new Uint32Array(nodeBytes.buffer, nodeBytes.byteOffset,
-          nodeBytes.byteLength / 4);
-        const phi = new Float32Array(phiBytes.buffer, phiBytes.byteOffset,
-          phiBytes.byteLength / 4);
-        const incident: Array<Record<string, unknown>> = [];
-        for (let leaf = 0; leaf < count; leaf += 1) {
-          const base = 16 * leaf, span = leaves[base + 3] ?? 0;
-          const origin = [leaves[base] ?? 0, leaves[base + 1] ?? 0,
-            leaves[base + 2] ?? 0] as const;
-          if (!origin.every((value, axis) => value <= node[axis]
-            && node[axis] <= value + span)) continue;
-          const volume = (span * shape.cellWidth) ** 3;
-          incident.push({ leaf, origin, span, rho: volume > 0 ? (mass[leaf] ?? 0) / volume : 0 });
-        }
-        const slot = Array.from({ length: nodeCount }, (_, index) => index)
-          .find((index) => nodes[4 * index] === cell);
-        const rho = incident.reduce((sum, entry) => sum + Number(entry.rho), 0)
-          / Math.max(incident.length, 1);
-        return { rho, expectedPhi: (0.5 - rho) * shape.cellWidth,
-          phi: slot === undefined ? undefined : [phi[2 * slot], phi[2 * slot + 1]],
-          incident };
-      };
-      reconstructionMismatchNeighborhood = { node,
-        accepted: await inspect("accepted"), candidate: await inspect("candidate") };
-    }
-    if (process.env.FLUID_REQUIRE_CONNECTED_SURFACE === "1") {
-      assert.ok(massSurfaceConnectivity,
-        `t=${(step * dt).toFixed(3)}: authoritative surface-mass census is absent`);
-      assert.equal(massSurfaceConnectivity.componentCount, 1,
-        `t=${(step * dt).toFixed(3)}: expected exactly one rho>.5 component; `
-        + JSON.stringify(massSurfaceConnectivity.disconnectedComponents));
-      assert.equal(massSurfaceConnectivity.disconnectedCells, 0,
-        `t=${(step * dt).toFixed(3)}: authoritative rho>.5 liquid contains `
-        + `${massSurfaceConnectivity.disconnectedCells} cells outside its primary `
-        + `face-connected component`);
-    }
-    const fineTransportControl = await readControlWords(device,
-      debug.globalFineTransportControl, 16);
-    const fineTopologyControl = await readControlWords(device,
-      fineSource?.topologyControl, 16);
-    const fineRedistanceControl = await readControlWords(device,
-      debug.globalFineRedistanceControl, 24);
-    const transitionSources = projection?.losassoBackend;
-    const topologyTransition = topologyTransitionDiagnostics ? {
-      acceptedAuthority: authorityControlSummary(await readControlWords(device,
-        transitionSources?.sources?.operator?.control, 8)),
-      candidateAuthority: authorityControlSummary(await readControlWords(device,
-        transitionSources?.candidateAuthorityControl, 8)),
-      acceptedGraph: graphControlSummary(await readControlWords(device,
-        transitionSources?.adaptiveSurfaceGraphSources?.accepted.control, 32)),
-      candidateGraph: graphControlSummary(await readControlWords(device,
-        transitionSources?.adaptiveSurfaceGraphSources?.candidate.control, 32)),
-      mass: massControlSummary(await readControlWords(device,
-        transitionSources?.adaptiveMassSource?.control, 32)),
-      candidateVelocityStencil: await readControlWords(device,
-        transitionSources?.adaptiveVelocity?.candidateStencilControl, 8),
-      handoff: adaptiveMassReceipt ? {
-        sourceMass_m3: adaptiveMassReceipt.handoffSourceMass_m3,
-        targetMass_m3: adaptiveMassReceipt.handoffTargetMass_m3,
-        signedDrift_m3: adaptiveMassReceipt.signedHandoffDrift_m3,
-        leaves: adaptiveMassReceipt.handoffLeafCount,
-        errors: adaptiveMassReceipt.errors,
-      } : undefined,
-    } : undefined;
-    const extensionControl = projection?.losassoExtensionControl;
-    const extensionControlBytes = extensionControl
-      ? await readBufferBinding(device, { buffer: extensionControl }, extensionControl.size)
-      : undefined;
-    const extensionBandControl = extensionControlBytes
-      ? Array.from(new Uint32Array(extensionControlBytes.buffer,
-        extensionControlBytes.byteOffset, extensionControlBytes.byteLength / 4))
-      : undefined;
-    const extensionBandFaces = extensionBandControl?.[2];
-    let extensionBandLayers: number[] | undefined;
-    const extensionMetrics = projection?.losassoBackend?.extensionBand?.source?.faceMetrics;
-    if (process.env.FLUID_EXTENSION_BAND_CENSUS === "1"
-      && extensionMetrics && extensionBandFaces !== undefined) {
-      const bytes = await readBufferBinding(device, { buffer: extensionMetrics },
-        extensionMetrics.size);
-      const metrics = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
-      extensionBandLayers = new Array<number>(8).fill(0);
-      for (let face = 0; face < Math.min(extensionBandFaces, metrics.length / 4); face += 1) {
-        const layer = metrics[4 * face + 3] ?? 0;
-        if (layer < extensionBandLayers.length) extensionBandLayers[layer]! += 1;
-      }
-    }
-    let stagedOwnerCells: number | undefined;
-    let stagedOwnerRows: number | undefined;
-    let stagedMacValid: number | undefined;
-    let stagedRawMacValid: number | undefined;
-    let stagedMacInvalid: number | undefined;
-    let stagedRawBoundary: number | undefined;
-    if (process.env.FLUID_STAGED_OWNER_CENSUS === "1" && stagedVelocity) {
-      const stagedBytes = await readBufferBinding(device, { buffer: stagedVelocity },
-        stagedVelocity.size);
-      const staged = new Uint32Array(stagedBytes.buffer, stagedBytes.byteOffset,
-        stagedBytes.byteLength / 4);
-      const [nx, ny, nz] = dimensions;
-      const mac = (nx + 1) * ny * nz + nx * (ny + 1) * nz + nx * ny * (nz + 1);
-      const stagedFloats = new Float32Array(staged.buffer, staged.byteOffset, staged.length);
-      stagedMacValid = stagedFloats.subarray(0, mac)
-        .reduce((count, value) => count + Number(Number.isFinite(value)), 0);
-      stagedMacInvalid = mac - stagedMacValid;
-      stagedRawMacValid = staged.subarray(mac, 2 * mac)
-        .reduce((count, value) => count + Number(value !== 0x7fc0_0000
-          && value !== 0x7fc0_0001), 0);
-      stagedRawBoundary = staged.subarray(mac, 2 * mac)
-        .reduce((count, value) => count + Number(value === 0x7fc0_0001), 0);
-      stagedOwnerCells = staged.subarray(2 * mac, 2 * mac + nx * ny * nz)
-        .reduce((count, encoded) => count + Number(encoded !== 0), 0);
-      stagedOwnerRows = new Set(staged.subarray(2 * mac, 2 * mac + nx * ny * nz)
-        .filter((encoded) => encoded !== 0)).size;
-    }
-    // Refresh the projection receipt at this exact accepted time. Without this
-    // readback, readStats() can expose the last checkpoint's cached residual
-    // even though the surface directory below is current.
-    await projection?.readSolveDiagnostics();
-    const stats = await solver.readStats() as unknown as Record<string, unknown>;
-    const massVisibleVolumeCells = massSurfaceQuadrature?.volumeCells;
-    const massVisibleVolumeDeltaCells = massVisibleVolumeCells === undefined
-      || previousMassVisibleVolumeCells === undefined
-      ? undefined : massVisibleVolumeCells - previousMassVisibleVolumeCells;
-    const massVisibleVolumeJumpFraction = massVisibleVolumeDeltaCells === undefined
-      || previousMassVisibleVolumeCells === undefined || previousMassVisibleVolumeCells === 0
-      ? undefined : massVisibleVolumeDeltaCells / previousMassVisibleVolumeCells;
-    const massVisibleVolumeSampleInterval_s = previousMassVisibleVolumeStep === undefined
-      ? undefined : (step - previousMassVisibleVolumeStep) * dt;
-    const reconstructedVisibleVolumeCells = adaptiveMassReceipt
-      ? adaptiveMassReceipt.reconstructionMeasuredUnits / 65536 : undefined;
-    const reconstructedVisibleVolumeDeltaCells = reconstructedVisibleVolumeCells === undefined
-      || previousReconstructedVisibleVolumeCells === undefined
-      ? undefined : reconstructedVisibleVolumeCells - previousReconstructedVisibleVolumeCells;
-    const reconstructedVisibleVolumeJumpFraction = reconstructedVisibleVolumeDeltaCells === undefined
-      || previousReconstructedVisibleVolumeCells === undefined
-      || previousReconstructedVisibleVolumeCells === 0
-      ? undefined : reconstructedVisibleVolumeDeltaCells / previousReconstructedVisibleVolumeCells;
-    const reconstructedVisibleVolumeSampleInterval_s =
-      previousReconstructedVisibleVolumeStep === undefined
-        ? undefined : (step - previousReconstructedVisibleVolumeStep) * dt;
-    samples.push({
-      t_s: Number((step * dt).toFixed(6)), ...summary,
-      phiDistance: fidelity,
-      leafCountsBySize: census?.leafCountsBySize,
-      topologyLeaves: census?.topologyLeaves,
-      topologyNodes: census?.topologyNodes,
-      adaptiveNodes,
-      adaptiveVelocityReceipts,
-      adaptivePhiReceipt,
-      adaptiveMassReceipt,
-      adaptiveMassDensity,
-      adaptiveVelocityProfile,
-      massSurfaceConnectivity,
-      massSurfaceQuadrature,
-      massVisibleVolume_m3: massVisibleVolumeCells === undefined
-        ? undefined : massVisibleVolumeCells * shape.cellWidth ** 3,
-      massVisibleVolumeDelta_m3: massVisibleVolumeDeltaCells === undefined
-        ? undefined : massVisibleVolumeDeltaCells * shape.cellWidth ** 3,
-      massVisibleVolumeJumpFraction,
-      massVisibleVolumeSampleInterval_s,
-      massSurfaceWallProximity,
-      massWetTransition,
-      ceilingWetLeaves,
-      ceilingTransferTrace,
-      reconstructedVisibleVolume_m3: reconstructedVisibleVolumeCells === undefined
-        ? undefined : reconstructedVisibleVolumeCells * shape.cellWidth ** 3,
-      reconstructedVisibleVolumeDelta_m3: reconstructedVisibleVolumeDeltaCells === undefined
-        ? undefined : reconstructedVisibleVolumeDeltaCells * shape.cellWidth ** 3,
-      reconstructedVisibleVolumeJumpFraction,
-      reconstructedVisibleVolumeSampleInterval_s,
-      reconstructionMismatchNeighborhood,
-      fineTransportControl: fineTransportControl
-        ? Array.from(fineTransportControl) : undefined,
-      fineTopologyControl: fineTopologyControl
-        ? Array.from(fineTopologyControl) : undefined,
-      fineRedistanceControl: fineRedistanceControl
-        ? Array.from(fineRedistanceControl) : undefined,
-      topologyTransition,
-      candidateDiagnostics,
-      residentOwnerPages: census?.residentOwnerPages,
-      maximumNeighborDelta: stats.maximumNeighborDelta,
-      pressureRequiredRows: stats.pressureRequiredRows,
-      pressureRowCapacity: stats.pressureRowCapacity,
-      pressureCapacityOverflow: stats.pressureCapacityOverflow ? 1 : 0,
-      frontierCapacityOverflow: stats.frontierCapacityOverflow ? 1 : 0,
-      // The solve's own verdict. A front that will not advance and a residual
-      // that will not fall are the same defect seen from two ends, so the
-      // shape and the convergence have to be read from one sample.
-      pressureResidual: stats.pressureResidual,
-      pressureRelativeResidual: stats.pressureRelativeResidual,
-      quadtreePressureIterationsUsed: stats.quadtreePressureIterationsUsed,
-      coarseVolume,
-      extensionBandControl,
-      extensionBandFaces,
-      extensionBandLayers,
-      stagedOwnerCells,
-      stagedOwnerRows,
-      stagedMacValid,
-      stagedMacInvalid,
-      stagedRawMacValid,
-      stagedRawBoundary,
-      currentVolume: stats.currentVolume,
-      referenceVolume: stats.referenceVolume,
-      maximumDivergence: stats.maximumDivergence,
-      maximumSpeed: stats.maximumSpeed,
-    });
-    if (massVisibleVolumeCells !== undefined) {
-      previousMassVisibleVolumeCells = massVisibleVolumeCells;
-      previousMassVisibleVolumeStep = step;
-    }
-    if (reconstructedVisibleVolumeCells !== undefined) {
-      previousReconstructedVisibleVolumeCells = reconstructedVisibleVolumeCells;
-      previousReconstructedVisibleVolumeStep = step;
-    }
-    if (currentAuthoritativeField) {
-      previousAuthoritativeField = currentAuthoritativeField;
-      previousAuthoritativeSpanField = currentAuthoritativeSpanField;
-      previousAuthoritativeFieldStep = step;
-    }
-    if (printAscii) {
-      console.error(`# t=${(step * dt).toFixed(3)} peak=${shape.peakCells} `
-        + `columns=${shape.peakColumns} at=${shape.peakAt.join(",")}`);
-      console.error(asciiHeightMap(shape, dimensions[0], dimensions[2]));
-    }
-    if (process.env.FLUID_SURFACE_PHI === "1") {
-      const z = Math.floor(dimensions[2] / 2);
-      const [nx, ny] = dimensions;
-      console.error(`# t=${(step * dt).toFixed(3)} phi in cells at z=${z}`);
-      for (let y = ny - 1; y >= 0; y -= 1) {
-        let line = `${String(y).padStart(2)} `;
-        for (let x = 0; x < nx; x += 1) {
-          const value = shape.field[x + nx * (y + ny * z)]!;
-          line += Number.isFinite(value)
-            ? String(Math.round(value / shape.cellWidth)).padStart(5) : "    .";
-        }
-        console.error(line);
-      }
-    }
-    if (process.env.FLUID_SURFACE_SLICE === "1") {
-      const z = Math.floor(dimensions[2] / 2);
-      console.error(`# t=${(step * dt).toFixed(3)} leaf-size slice at z=${z}`);
-      console.error(asciiSizeSlice(shape.field, shape.sizeField, dimensions, z));
+      const slot = Array.from({ length: nodeCount }, (_, index) => index)
+        .find((index) => nodes[4 * index] === cell);
+      const rho = incident.reduce((sum, entry) => sum + Number(entry.rho), 0)
+        / Math.max(incident.length, 1);
+      return { rho, expectedPhi: (0.5 - rho) * shape.cellWidth,
+        phi: slot === undefined ? undefined : [phi[2 * slot], phi[2 * slot + 1]],
+        incident };
+    };
+    reconstructionMismatchNeighborhood = { node,
+      accepted: await inspect("accepted"), candidate: await inspect("candidate") };
+  }
+  if (process.env.FLUID_REQUIRE_CONNECTED_SURFACE === "1") {
+    assert.ok(massSurfaceConnectivity,
+      `t=${(step * dt).toFixed(3)}: authoritative surface-mass census is absent`);
+    assert.equal(massSurfaceConnectivity.componentCount, 1,
+      `t=${(step * dt).toFixed(3)}: expected exactly one rho>.5 component; `
+      + JSON.stringify(massSurfaceConnectivity.disconnectedComponents));
+    assert.equal(massSurfaceConnectivity.disconnectedCells, 0,
+      `t=${(step * dt).toFixed(3)}: authoritative rho>.5 liquid contains `
+      + `${massSurfaceConnectivity.disconnectedCells} cells outside its primary `
+      + `face-connected component`);
+  }
+  const fineTransportControl = await readControlWords(device,
+    debug.globalFineTransportControl, 16);
+  const fineTopologyControl = await readControlWords(device,
+    fineSource?.topologyControl, 16);
+  const fineRedistanceControl = await readControlWords(device,
+    debug.globalFineRedistanceControl, 24);
+  const transitionSources = projection?.losassoBackend;
+  const topologyTransition = topologyTransitionDiagnostics ? {
+    acceptedAuthority: authorityControlSummary(await readControlWords(device,
+      transitionSources?.sources?.operator?.control, 8)),
+    candidateAuthority: authorityControlSummary(await readControlWords(device,
+      transitionSources?.candidateAuthorityControl, 8)),
+    acceptedGraph: graphControlSummary(await readControlWords(device,
+      transitionSources?.adaptiveSurfaceGraphSources?.accepted.control, 32)),
+    candidateGraph: graphControlSummary(await readControlWords(device,
+      transitionSources?.adaptiveSurfaceGraphSources?.candidate.control, 32)),
+    mass: massControlSummary(await readControlWords(device,
+      transitionSources?.adaptiveMassSource?.control, 32)),
+    candidateVelocityStencil: await readControlWords(device,
+      transitionSources?.adaptiveVelocity?.candidateStencilControl, 8),
+    handoff: adaptiveMassReceipt ? {
+      sourceMass_m3: adaptiveMassReceipt.handoffSourceMass_m3,
+      targetMass_m3: adaptiveMassReceipt.handoffTargetMass_m3,
+      signedDrift_m3: adaptiveMassReceipt.signedHandoffDrift_m3,
+      leaves: adaptiveMassReceipt.handoffLeafCount,
+      errors: adaptiveMassReceipt.errors,
+    } : undefined,
+  } : undefined;
+  const extensionControl = projection?.losassoExtensionControl;
+  const extensionControlBytes = extensionControl
+    ? await readBufferBinding(device, { buffer: extensionControl }, extensionControl.size)
+    : undefined;
+  const extensionBandControl = extensionControlBytes
+    ? Array.from(new Uint32Array(extensionControlBytes.buffer,
+      extensionControlBytes.byteOffset, extensionControlBytes.byteLength / 4))
+    : undefined;
+  const extensionBandFaces = extensionBandControl?.[2];
+  let extensionBandLayers: number[] | undefined;
+  const extensionMetrics = projection?.losassoBackend?.extensionBand?.source?.faceMetrics;
+  if (process.env.FLUID_EXTENSION_BAND_CENSUS === "1"
+    && extensionMetrics && extensionBandFaces !== undefined) {
+    const bytes = await readBufferBinding(device, { buffer: extensionMetrics },
+      extensionMetrics.size);
+    const metrics = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+    extensionBandLayers = new Array<number>(8).fill(0);
+    for (let face = 0; face < Math.min(extensionBandFaces, metrics.length / 4); face += 1) {
+      const layer = metrics[4 * face + 3] ?? 0;
+      if (layer < extensionBandLayers.length) extensionBandLayers[layer]! += 1;
     }
   }
-  solver.destroy();
-  const telemetrySamples = samples.map((sample) => ({
-      t_s: sample.t_s,
-      massVisibleVolume_m3: sample.massVisibleVolume_m3,
-      massVisibleVolumeDelta_m3: sample.massVisibleVolumeDelta_m3,
-      massVisibleVolumeJumpFraction: sample.massVisibleVolumeJumpFraction,
-      reconstructedVisibleVolume_m3: sample.reconstructedVisibleVolume_m3,
-      reconstructedVisibleVolumeDelta_m3: sample.reconstructedVisibleVolumeDelta_m3,
-      reconstructedVisibleVolumeJumpFraction: sample.reconstructedVisibleVolumeJumpFraction,
-      publishedVisibleVolume_m3: sample.zeroSetQuadrature === undefined
-        ? undefined
-        : (sample.zeroSetQuadrature as SurfaceShape["zeroSetQuadrature"]).volumeCells
-          * dimensions.reduce(
-            (volume, _dimension) => volume * (sample.cellWidth as number), 1),
-      wallProximity: sample.massSurfaceWallProximity,
-      compressedExcessMass_m3: (sample.adaptiveMassDensity as
-        { compressionExcessMass_m3?: number } | undefined)?.compressionExcessMass_m3,
-      conservedMass_m3: (sample.adaptiveMassReceipt as ReturnType<
-        typeof unpackAdaptiveMassReceipt> | undefined)?.acceptedMass_m3,
-      connectivity: sample.massSurfaceConnectivity,
-      wetTransition: sample.massWetTransition,
-      ceilingWetLeaves: sample.ceilingWetLeaves,
-      ceilingTransferTrace: sample.ceilingTransferTrace,
-      massErrors: (sample.adaptiveMassReceipt as ReturnType<
-        typeof unpackAdaptiveMassReceipt> | undefined)?.errors,
-    }));
-  const maximumBy = (key: "massVisibleVolumeJumpFraction"
-    | "reconstructedVisibleVolumeJumpFraction") => telemetrySamples.reduce(
-    (maximum, sample) => Number(sample[key] ?? -Infinity)
-      > Number(maximum?.[key] ?? -Infinity) ? sample : maximum,
-    undefined as typeof telemetrySamples[number] | undefined);
-  const wallVolumeSummary = volumeSummaryOnly ? {
-    maximumMassVisibleJump: maximumBy("massVisibleVolumeJumpFraction"),
-    maximumReconstructedVisibleJump: maximumBy("reconstructedVisibleVolumeJumpFraction"),
-    firstPositiveXWallContact: telemetrySamples.find((sample) =>
-      ((sample.wallProximity as { positiveXGapCells?: number } | undefined)
-        ?.positiveXGapCells ?? Infinity) <= 0.125),
-    keySamples: [0.552, 0.736, 0.8].map((time) => telemetrySamples.find((sample) =>
-      Math.abs(Number(sample.t_s) - time) < dt / 2)),
-  } : undefined;
-  const reportedSamples = transactionOnly ? samples : volumeSummaryOnly ? []
-    : volumeTelemetryOnly ? telemetrySamples : compact ? samples.map((sample) => {
-    const quadrature = sample.zeroSetQuadrature as SurfaceShape["zeroSetQuadrature"];
-    const phiReceipt = sample.adaptivePhiReceipt as ReturnType<
-      typeof unpackAdaptivePhiReceipt> | undefined;
-    const massReceipt = sample.adaptiveMassReceipt as ReturnType<
-      typeof unpackAdaptiveMassReceipt> | undefined;
-    const candidateDiagnostics = sample.candidateDiagnostics as Awaited<ReturnType<
-      NonNullable<typeof projection>["readLosassoAuthorityDiagnostics"]>>;
-    return {
-      t_s: sample.t_s,
-      wetCells: sample.wetCells,
-      wettedColumns: sample.wettedColumns,
-      volumeCells: quadrature.volumeCells,
-      centerOfMassCells: quadrature.centerOfMassCells,
-      frontCells: quadrature.frontCells,
-      medianHeightCells: sample.medianHeightCells,
-      maximumHeightCells: sample.maximumHeightCells,
-      peakCells: sample.peakCells,
-      peakColumns: sample.peakColumns,
-      peakAt: sample.peakAt,
-      maximumNeighborStepCells: sample.maximumNeighborStepCells,
-      wetConnectivity: sample.wetConnectivity,
-      profileX: sample.profileX,
-      interiorRidgeCells: sample.interiorRidgeCells,
-      interiorRidgeAtX: sample.interiorRidgeAtX,
-      measuredVolume_m3: phiReceipt?.measuredVolume_m3,
-      targetVolume_m3: phiReceipt?.targetVolume_m3,
-      acceptedAdvanceValid: phiReceipt?.acceptedAdvanceValid,
-      conservedMass_m3: massReceipt?.acceptedMass_m3,
-      transportDrift_m3: massReceipt?.signedTransportDrift_m3,
-      massDonors: massReceipt?.donors,
-      massTransfers: massReceipt?.transfers,
-      missingMassRecipients: massReceipt?.missingRecipients,
-      handoffDrift_m3: massReceipt?.signedHandoffDrift_m3,
-      massErrors: massReceipt?.errors,
-      reconstructionThreshold: massReceipt?.reconstructionThreshold,
-      reconstructionTargetUnits: massReceipt?.reconstructionTargetUnits,
-      reconstructionMeasuredUnits: massReceipt?.reconstructionMeasuredUnits,
-      reconstructionSignMismatches: massReceipt?.reconstructionSignMismatches,
-      adaptiveMassDensity: sample.adaptiveMassDensity,
-      adaptiveVelocityProfile: sample.adaptiveVelocityProfile,
-      massSurfaceConnectivity: sample.massSurfaceConnectivity,
-      massSurfaceQuadrature: sample.massSurfaceQuadrature,
-      massVisibleVolume_m3: sample.massVisibleVolume_m3,
-      massVisibleVolumeDelta_m3: sample.massVisibleVolumeDelta_m3,
-      massVisibleVolumeJumpFraction: sample.massVisibleVolumeJumpFraction,
-      massVisibleVolumeSampleInterval_s: sample.massVisibleVolumeSampleInterval_s,
-      massSurfaceWallProximity: sample.massSurfaceWallProximity,
-      reconstructedVisibleVolume_m3: sample.reconstructedVisibleVolume_m3,
-      reconstructedVisibleVolumeDelta_m3: sample.reconstructedVisibleVolumeDelta_m3,
-      reconstructedVisibleVolumeJumpFraction: sample.reconstructedVisibleVolumeJumpFraction,
-      reconstructedVisibleVolumeSampleInterval_s: sample.reconstructedVisibleVolumeSampleInterval_s,
-      reconstructionMismatchNeighborhood: sample.reconstructionMismatchNeighborhood,
-      firstReconstructionSignMismatchNode: massReceipt
-        && massReceipt.firstReconstructionSignMismatchItem !== 0xffff_ffff
-        ? [massReceipt.firstReconstructionSignMismatchItem % (dimensions[0] + 1),
-          Math.floor(massReceipt.firstReconstructionSignMismatchItem / (dimensions[0] + 1))
-            % (dimensions[1] + 1),
-          Math.floor(massReceipt.firstReconstructionSignMismatchItem
-            / ((dimensions[0] + 1) * (dimensions[1] + 1)))]
-        : undefined,
-      leafCountsBySize: sample.leafCountsBySize,
-      surfaceRowSizeHistogram: sample.surfaceRowSizeHistogram,
-      airRowSizeHistogram: sample.airRowSizeHistogram,
-      topologyLeaves: sample.topologyLeaves,
-      residentOwnerPages: sample.residentOwnerPages,
-      adaptiveVelocityReceipts: sample.adaptiveVelocityReceipts,
-      topologyTransition: sample.topologyTransition,
-      fineTransportControl: sample.fineTransportControl,
-      fineTopologyControl: sample.fineTopologyControl,
-      fineRedistanceControl: sample.fineRedistanceControl,
-      candidateAuthority: candidateDiagnostics?.candidate,
-      candidateGraph: candidateDiagnostics?.candidateAdaptiveGraph,
-      ownerCandidate: candidateDiagnostics?.ownerCandidate,
-      frontierControl: candidateDiagnostics?.frontierControl,
-      massControl: candidateDiagnostics?.adaptiveMassControl,
-      velocityMigration: candidateDiagnostics?.velocityMigration,
-      maximumSpeed: sample.maximumSpeed,
-      pressureResidual: sample.pressureResidual,
-      pressureRelativeResidual: sample.pressureRelativeResidual,
-    };
-  }) : samples;
-  console.log(JSON.stringify({
-    phase: "dam-surface-shape", scene: sceneId, dt, dimensions, runtimeTopologyDials,
-    refinementRegionFloor: refinementRegionFloor || undefined,
-    refinementRegionCeiling: refinementRegionCeiling || undefined,
-    validationErrors, wallVolumeSummary, samples: reportedSamples,
-  }, null, compact ? undefined : 1));
-  device.destroy();
-} finally {
-  await releaseWebGPUExclusiveLock();
+  let stagedOwnerCells: number | undefined;
+  let stagedOwnerRows: number | undefined;
+  let stagedMacValid: number | undefined;
+  let stagedRawMacValid: number | undefined;
+  let stagedMacInvalid: number | undefined;
+  let stagedRawBoundary: number | undefined;
+  if (process.env.FLUID_STAGED_OWNER_CENSUS === "1" && stagedVelocity) {
+    const stagedBytes = await readBufferBinding(device, { buffer: stagedVelocity },
+      stagedVelocity.size);
+    const staged = new Uint32Array(stagedBytes.buffer, stagedBytes.byteOffset,
+      stagedBytes.byteLength / 4);
+    const [nx, ny, nz] = dimensions;
+    const mac = (nx + 1) * ny * nz + nx * (ny + 1) * nz + nx * ny * (nz + 1);
+    const stagedFloats = new Float32Array(staged.buffer, staged.byteOffset, staged.length);
+    stagedMacValid = stagedFloats.subarray(0, mac)
+      .reduce((count, value) => count + Number(Number.isFinite(value)), 0);
+    stagedMacInvalid = mac - stagedMacValid;
+    stagedRawMacValid = staged.subarray(mac, 2 * mac)
+      .reduce((count, value) => count + Number(value !== 0x7fc0_0000
+        && value !== 0x7fc0_0001), 0);
+    stagedRawBoundary = staged.subarray(mac, 2 * mac)
+      .reduce((count, value) => count + Number(value === 0x7fc0_0001), 0);
+    stagedOwnerCells = staged.subarray(2 * mac, 2 * mac + nx * ny * nz)
+      .reduce((count, encoded) => count + Number(encoded !== 0), 0);
+    stagedOwnerRows = new Set(staged.subarray(2 * mac, 2 * mac + nx * ny * nz)
+      .filter((encoded) => encoded !== 0)).size;
+  }
+  // Refresh the projection receipt at this exact accepted time. Without this
+  // readback, readStats() can expose the last checkpoint's cached residual
+  // even though the surface directory below is current.
+  await projection?.readSolveDiagnostics();
+  const stats = await solver.readStats() as unknown as Record<string, unknown>;
+  const massVisibleVolumeCells = massSurfaceQuadrature?.volumeCells;
+  const massVisibleVolumeDeltaCells = massVisibleVolumeCells === undefined
+    || previousMassVisibleVolumeCells === undefined
+    ? undefined : massVisibleVolumeCells - previousMassVisibleVolumeCells;
+  const massVisibleVolumeJumpFraction = massVisibleVolumeDeltaCells === undefined
+    || previousMassVisibleVolumeCells === undefined || previousMassVisibleVolumeCells === 0
+    ? undefined : massVisibleVolumeDeltaCells / previousMassVisibleVolumeCells;
+  const massVisibleVolumeSampleInterval_s = previousMassVisibleVolumeStep === undefined
+    ? undefined : (step - previousMassVisibleVolumeStep) * dt;
+  const reconstructedVisibleVolumeCells = adaptiveMassReceipt
+    ? adaptiveMassReceipt.reconstructionMeasuredUnits / 65536 : undefined;
+  const reconstructedVisibleVolumeDeltaCells = reconstructedVisibleVolumeCells === undefined
+    || previousReconstructedVisibleVolumeCells === undefined
+    ? undefined : reconstructedVisibleVolumeCells - previousReconstructedVisibleVolumeCells;
+  const reconstructedVisibleVolumeJumpFraction = reconstructedVisibleVolumeDeltaCells === undefined
+    || previousReconstructedVisibleVolumeCells === undefined
+    || previousReconstructedVisibleVolumeCells === 0
+    ? undefined : reconstructedVisibleVolumeDeltaCells / previousReconstructedVisibleVolumeCells;
+  const reconstructedVisibleVolumeSampleInterval_s =
+    previousReconstructedVisibleVolumeStep === undefined
+      ? undefined : (step - previousReconstructedVisibleVolumeStep) * dt;
+  samples.push({
+    t_s: Number((step * dt).toFixed(6)), ...summary,
+    phiDistance: fidelity,
+    leafCountsBySize: census?.leafCountsBySize,
+    topologyLeaves: census?.topologyLeaves,
+    topologyNodes: census?.topologyNodes,
+    adaptiveNodes,
+    adaptiveVelocityReceipts,
+    adaptivePhiReceipt,
+    adaptiveMassReceipt,
+    adaptiveMassDensity,
+    adaptiveVelocityProfile,
+    massSurfaceConnectivity,
+    massSurfaceQuadrature,
+    massVisibleVolume_m3: massVisibleVolumeCells === undefined
+      ? undefined : massVisibleVolumeCells * shape.cellWidth ** 3,
+    massVisibleVolumeDelta_m3: massVisibleVolumeDeltaCells === undefined
+      ? undefined : massVisibleVolumeDeltaCells * shape.cellWidth ** 3,
+    massVisibleVolumeJumpFraction,
+    massVisibleVolumeSampleInterval_s,
+    massSurfaceWallProximity,
+    massWetTransition,
+    ceilingWetLeaves,
+    ceilingTransferTrace,
+    reconstructedVisibleVolume_m3: reconstructedVisibleVolumeCells === undefined
+      ? undefined : reconstructedVisibleVolumeCells * shape.cellWidth ** 3,
+    reconstructedVisibleVolumeDelta_m3: reconstructedVisibleVolumeDeltaCells === undefined
+      ? undefined : reconstructedVisibleVolumeDeltaCells * shape.cellWidth ** 3,
+    reconstructedVisibleVolumeJumpFraction,
+    reconstructedVisibleVolumeSampleInterval_s,
+    reconstructionMismatchNeighborhood,
+    fineTransportControl: fineTransportControl
+      ? Array.from(fineTransportControl) : undefined,
+    fineTopologyControl: fineTopologyControl
+      ? Array.from(fineTopologyControl) : undefined,
+    fineRedistanceControl: fineRedistanceControl
+      ? Array.from(fineRedistanceControl) : undefined,
+    topologyTransition,
+    candidateDiagnostics,
+    residentOwnerPages: census?.residentOwnerPages,
+    maximumNeighborDelta: stats.maximumNeighborDelta,
+    pressureRequiredRows: stats.pressureRequiredRows,
+    pressureRowCapacity: stats.pressureRowCapacity,
+    pressureCapacityOverflow: stats.pressureCapacityOverflow ? 1 : 0,
+    frontierCapacityOverflow: stats.frontierCapacityOverflow ? 1 : 0,
+    // The solve's own verdict. A front that will not advance and a residual
+    // that will not fall are the same defect seen from two ends, so the
+    // shape and the convergence have to be read from one sample.
+    pressureResidual: stats.pressureResidual,
+    pressureRelativeResidual: stats.pressureRelativeResidual,
+    quadtreePressureIterationsUsed: stats.quadtreePressureIterationsUsed,
+    coarseVolume,
+    extensionBandControl,
+    extensionBandFaces,
+    extensionBandLayers,
+    stagedOwnerCells,
+    stagedOwnerRows,
+    stagedMacValid,
+    stagedMacInvalid,
+    stagedRawMacValid,
+    stagedRawBoundary,
+    currentVolume: stats.currentVolume,
+    referenceVolume: stats.referenceVolume,
+    maximumDivergence: stats.maximumDivergence,
+    maximumSpeed: stats.maximumSpeed,
+  });
+  if (massVisibleVolumeCells !== undefined) {
+    previousMassVisibleVolumeCells = massVisibleVolumeCells;
+    previousMassVisibleVolumeStep = step;
+  }
+  if (reconstructedVisibleVolumeCells !== undefined) {
+    previousReconstructedVisibleVolumeCells = reconstructedVisibleVolumeCells;
+    previousReconstructedVisibleVolumeStep = step;
+  }
+  if (currentAuthoritativeField) {
+    previousAuthoritativeField = currentAuthoritativeField;
+    previousAuthoritativeSpanField = currentAuthoritativeSpanField;
+    previousAuthoritativeFieldStep = step;
+  }
+  if (printAscii) {
+    console.error(`# t=${(step * dt).toFixed(3)} peak=${shape.peakCells} `
+      + `columns=${shape.peakColumns} at=${shape.peakAt.join(",")}`);
+    console.error(asciiHeightMap(shape, dimensions[0], dimensions[2]));
+  }
+  if (process.env.FLUID_SURFACE_PHI === "1") {
+    const z = Math.floor(dimensions[2] / 2);
+    const [nx, ny] = dimensions;
+    console.error(`# t=${(step * dt).toFixed(3)} phi in cells at z=${z}`);
+    for (let y = ny - 1; y >= 0; y -= 1) {
+      let line = `${String(y).padStart(2)} `;
+      for (let x = 0; x < nx; x += 1) {
+        const value = shape.field[x + nx * (y + ny * z)]!;
+        line += Number.isFinite(value)
+          ? String(Math.round(value / shape.cellWidth)).padStart(5) : "    .";
+      }
+      console.error(line);
+    }
+  }
+  if (process.env.FLUID_SURFACE_SLICE === "1") {
+    const z = Math.floor(dimensions[2] / 2);
+    console.error(`# t=${(step * dt).toFixed(3)} leaf-size slice at z=${z}`);
+    console.error(asciiSizeSlice(shape.field, shape.sizeField, dimensions, z));
+  }
 }
+solver.destroy();
+const telemetrySamples = samples.map((sample) => ({
+    t_s: sample.t_s,
+    massVisibleVolume_m3: sample.massVisibleVolume_m3,
+    massVisibleVolumeDelta_m3: sample.massVisibleVolumeDelta_m3,
+    massVisibleVolumeJumpFraction: sample.massVisibleVolumeJumpFraction,
+    reconstructedVisibleVolume_m3: sample.reconstructedVisibleVolume_m3,
+    reconstructedVisibleVolumeDelta_m3: sample.reconstructedVisibleVolumeDelta_m3,
+    reconstructedVisibleVolumeJumpFraction: sample.reconstructedVisibleVolumeJumpFraction,
+    publishedVisibleVolume_m3: sample.zeroSetQuadrature === undefined
+      ? undefined
+      : (sample.zeroSetQuadrature as SurfaceShape["zeroSetQuadrature"]).volumeCells
+        * dimensions.reduce(
+          (volume, _dimension) => volume * (sample.cellWidth as number), 1),
+    wallProximity: sample.massSurfaceWallProximity,
+    compressedExcessMass_m3: (sample.adaptiveMassDensity as
+      { compressionExcessMass_m3?: number } | undefined)?.compressionExcessMass_m3,
+    conservedMass_m3: (sample.adaptiveMassReceipt as ReturnType<
+      typeof unpackAdaptiveMassReceipt> | undefined)?.acceptedMass_m3,
+    connectivity: sample.massSurfaceConnectivity,
+    wetTransition: sample.massWetTransition,
+    ceilingWetLeaves: sample.ceilingWetLeaves,
+    ceilingTransferTrace: sample.ceilingTransferTrace,
+    massErrors: (sample.adaptiveMassReceipt as ReturnType<
+      typeof unpackAdaptiveMassReceipt> | undefined)?.errors,
+  }));
+const maximumBy = (key: "massVisibleVolumeJumpFraction"
+  | "reconstructedVisibleVolumeJumpFraction") => telemetrySamples.reduce(
+  (maximum, sample) => Number(sample[key] ?? -Infinity)
+    > Number(maximum?.[key] ?? -Infinity) ? sample : maximum,
+  undefined as typeof telemetrySamples[number] | undefined);
+const wallVolumeSummary = volumeSummaryOnly ? {
+  maximumMassVisibleJump: maximumBy("massVisibleVolumeJumpFraction"),
+  maximumReconstructedVisibleJump: maximumBy("reconstructedVisibleVolumeJumpFraction"),
+  firstPositiveXWallContact: telemetrySamples.find((sample) =>
+    ((sample.wallProximity as { positiveXGapCells?: number } | undefined)
+      ?.positiveXGapCells ?? Infinity) <= 0.125),
+  keySamples: [0.552, 0.736, 0.8].map((time) => telemetrySamples.find((sample) =>
+    Math.abs(Number(sample.t_s) - time) < dt / 2)),
+} : undefined;
+const reportedSamples = transactionOnly ? samples : volumeSummaryOnly ? []
+  : volumeTelemetryOnly ? telemetrySamples : compact ? samples.map((sample) => {
+  const quadrature = sample.zeroSetQuadrature as SurfaceShape["zeroSetQuadrature"];
+  const phiReceipt = sample.adaptivePhiReceipt as ReturnType<
+    typeof unpackAdaptivePhiReceipt> | undefined;
+  const massReceipt = sample.adaptiveMassReceipt as ReturnType<
+    typeof unpackAdaptiveMassReceipt> | undefined;
+  const candidateDiagnostics = sample.candidateDiagnostics as Awaited<ReturnType<
+    NonNullable<typeof projection>["readLosassoAuthorityDiagnostics"]>>;
+  return {
+    t_s: sample.t_s,
+    wetCells: sample.wetCells,
+    wettedColumns: sample.wettedColumns,
+    volumeCells: quadrature.volumeCells,
+    centerOfMassCells: quadrature.centerOfMassCells,
+    frontCells: quadrature.frontCells,
+    medianHeightCells: sample.medianHeightCells,
+    maximumHeightCells: sample.maximumHeightCells,
+    peakCells: sample.peakCells,
+    peakColumns: sample.peakColumns,
+    peakAt: sample.peakAt,
+    maximumNeighborStepCells: sample.maximumNeighborStepCells,
+    wetConnectivity: sample.wetConnectivity,
+    profileX: sample.profileX,
+    interiorRidgeCells: sample.interiorRidgeCells,
+    interiorRidgeAtX: sample.interiorRidgeAtX,
+    measuredVolume_m3: phiReceipt?.measuredVolume_m3,
+    targetVolume_m3: phiReceipt?.targetVolume_m3,
+    acceptedAdvanceValid: phiReceipt?.acceptedAdvanceValid,
+    conservedMass_m3: massReceipt?.acceptedMass_m3,
+    transportDrift_m3: massReceipt?.signedTransportDrift_m3,
+    massDonors: massReceipt?.donors,
+    massTransfers: massReceipt?.transfers,
+    missingMassRecipients: massReceipt?.missingRecipients,
+    handoffDrift_m3: massReceipt?.signedHandoffDrift_m3,
+    massErrors: massReceipt?.errors,
+    reconstructionThreshold: massReceipt?.reconstructionThreshold,
+    reconstructionTargetUnits: massReceipt?.reconstructionTargetUnits,
+    reconstructionMeasuredUnits: massReceipt?.reconstructionMeasuredUnits,
+    reconstructionSignMismatches: massReceipt?.reconstructionSignMismatches,
+    adaptiveMassDensity: sample.adaptiveMassDensity,
+    adaptiveVelocityProfile: sample.adaptiveVelocityProfile,
+    massSurfaceConnectivity: sample.massSurfaceConnectivity,
+    massSurfaceQuadrature: sample.massSurfaceQuadrature,
+    massVisibleVolume_m3: sample.massVisibleVolume_m3,
+    massVisibleVolumeDelta_m3: sample.massVisibleVolumeDelta_m3,
+    massVisibleVolumeJumpFraction: sample.massVisibleVolumeJumpFraction,
+    massVisibleVolumeSampleInterval_s: sample.massVisibleVolumeSampleInterval_s,
+    massSurfaceWallProximity: sample.massSurfaceWallProximity,
+    reconstructedVisibleVolume_m3: sample.reconstructedVisibleVolume_m3,
+    reconstructedVisibleVolumeDelta_m3: sample.reconstructedVisibleVolumeDelta_m3,
+    reconstructedVisibleVolumeJumpFraction: sample.reconstructedVisibleVolumeJumpFraction,
+    reconstructedVisibleVolumeSampleInterval_s: sample.reconstructedVisibleVolumeSampleInterval_s,
+    reconstructionMismatchNeighborhood: sample.reconstructionMismatchNeighborhood,
+    firstReconstructionSignMismatchNode: massReceipt
+      && massReceipt.firstReconstructionSignMismatchItem !== 0xffff_ffff
+      ? [massReceipt.firstReconstructionSignMismatchItem % (dimensions[0] + 1),
+        Math.floor(massReceipt.firstReconstructionSignMismatchItem / (dimensions[0] + 1))
+          % (dimensions[1] + 1),
+        Math.floor(massReceipt.firstReconstructionSignMismatchItem
+          / ((dimensions[0] + 1) * (dimensions[1] + 1)))]
+      : undefined,
+    leafCountsBySize: sample.leafCountsBySize,
+    surfaceRowSizeHistogram: sample.surfaceRowSizeHistogram,
+    airRowSizeHistogram: sample.airRowSizeHistogram,
+    topologyLeaves: sample.topologyLeaves,
+    residentOwnerPages: sample.residentOwnerPages,
+    adaptiveVelocityReceipts: sample.adaptiveVelocityReceipts,
+    topologyTransition: sample.topologyTransition,
+    fineTransportControl: sample.fineTransportControl,
+    fineTopologyControl: sample.fineTopologyControl,
+    fineRedistanceControl: sample.fineRedistanceControl,
+    candidateAuthority: candidateDiagnostics?.candidate,
+    candidateGraph: candidateDiagnostics?.candidateAdaptiveGraph,
+    ownerCandidate: candidateDiagnostics?.ownerCandidate,
+    frontierControl: candidateDiagnostics?.frontierControl,
+    massControl: candidateDiagnostics?.adaptiveMassControl,
+    velocityMigration: candidateDiagnostics?.velocityMigration,
+    maximumSpeed: sample.maximumSpeed,
+    pressureResidual: sample.pressureResidual,
+    pressureRelativeResidual: sample.pressureRelativeResidual,
+  };
+}) : samples;
+console.log(JSON.stringify({
+  phase: "dam-surface-shape", scene: sceneId, dt, dimensions, runtimeTopologyDials,
+  refinementRegionFloor: refinementRegionFloor || undefined,
+  refinementRegionCeiling: refinementRegionCeiling || undefined,
+  validationErrors, wallVolumeSummary, samples: reportedSamples,
+}, null, compact ? undefined : 1));
+device.destroy();

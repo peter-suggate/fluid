@@ -6,12 +6,10 @@ import { resolveMethodValues } from '../lib/core/method-contract';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
 import { adaptiveMassMethod } from '../lib/methods/adaptive-volume/method';
 import type { WebGPUAdaptiveMassSolver } from '../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver';
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from '../lib/harness/webgpu-smoke-isolation';
 const modulePath=process.env.WEBGPU_NODE_MODULE;assert.ok(modulePath);
 const output=process.env.MINI64_DEFICIT_OUTPUT??'artifacts/mini64-deficit/probe';
 const steps=Number(process.env.MINI64_DEFICIT_STEPS??8);
 const uiCadence=process.env.MINI64_DEFICIT_UI_CADENCE==='1';
-await acquireWebGPUExclusiveLock('dawn-probe','mini64-deficit');
 const live=new Set<GPU>();Object.assign(globalThis,{mini64DeficitGPU:live});
 let device:GPUDevice|undefined,solver:WebGPUAdaptiveMassSolver|undefined;
 try{
@@ -62,4 +60,4 @@ try{
   assert.equal(failure,null,`simulation failure at step ${step}`);
  }
  assert.deepEqual(errors,[]);
-}finally{solver?.destroy();device?.destroy();live.clear();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();live.clear();}

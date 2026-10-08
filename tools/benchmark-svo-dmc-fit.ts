@@ -1,15 +1,11 @@
-/** Interleaved GPU-only fitting comparison against the frozen pre-optimization fitter.
- * Run exclusively via this tool; it owns the standard WebGPU lease.
- */
+/** Interleaved GPU-only fitting comparison against the frozen pre-optimization fitter. */
 import assert from "node:assert/strict";
 import { writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "./svo-dry-frame-harness";
 import { svoDualMarchingCubesCachedFitWGSL } from "../lib/svo/features/meshing/dual-marching-cubes";
 import { referenceDmcFitWGSL } from "../tests/fixtures/svo-dmc-fit-reference";
 
-await acquireWebGPUExclusiveLock("dawn-probe", "benchmark-svo-dmc-fit");
 let device: GPUDevice | undefined;
 try {
   const dawn=await createDawnRenderDevice({requireTimestampQuery:true});
@@ -99,4 +95,4 @@ fn dcField(p:vec3f,dirty:u32,candidateCount:u32)->f32{
   assert.equal(changedSigns,0,"fitting optimization preserves dual topology signs");
   assert.deepEqual(dawn.validationErrors,[],"GPU validation errors");
   queries.destroy();queryResolve.destroy();queryRead.destroy();read.destroy();output.destroy();
-} finally {device?.destroy();await releaseWebGPUExclusiveLock();}
+} finally {device?.destroy();}

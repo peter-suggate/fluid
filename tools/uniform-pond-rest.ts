@@ -3,7 +3,6 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { managedGPUDevice, gpuCompilationManagerFor } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { sceneDocument } from "../lib/core/scene-definition";
@@ -42,9 +41,8 @@ export interface PondRestResult {
   samples: PondRestSample[]; [key: string]: unknown;
 }
 
-/** A Dawn device holding the repository GPU lease for `run`. */
+/** A Dawn device that lives for `run`. */
 export async function withPondRestDevice(label: string, run: (device: GPUDevice) => Promise<void>): Promise<void> {
-  await acquireWebGPUExclusiveLock("dawn-probe", label);
   let device: GPUDevice | undefined;
   try {
     const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE ?? resolve("node_modules/webgpu/index.js")).href) as NodeDawnProvider;
@@ -54,7 +52,7 @@ export async function withPondRestDevice(label: string, run: (device: GPUDevice)
     const errors: string[] = []; device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); });
     await run(device); await device.queue.onSubmittedWorkDone();
     assert.deepEqual(errors, []);
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 }
 
 /**

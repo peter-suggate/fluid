@@ -9,7 +9,6 @@ import {pathToFileURL} from 'node:url';
 import {createCm12Figure7} from '../lib/core/cm12-paper-scenes';
 import {resolveMethodValues} from '../lib/core/method-contract';
 import {requiredFluidDeviceLimits} from '../lib/core/webgpu-device-limits';
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from '../lib/harness/webgpu-smoke-isolation';
 import {adaptiveMassMethod,adaptiveMassSolverOptions} from '../lib/methods/adaptive-volume/method';
 import {WebGPUAdaptiveMassSolver} from '../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver';
 import type {SparseCM12Phase1TransportQALayout} from '../lib/methods/adaptive-volume/sparse-cm12-phase1-transport-receipt';
@@ -28,7 +27,6 @@ type ResidentBuffers={topologyArena:GPUBuffer;topologyWorklistBaseBytes:number;
 type Cell={id:number;center:number[];width:number[];rho:number;velocity:number[]};
 const live=new Set<GPU>();
 let device:GPUDevice|undefined,solver:WebGPUAdaptiveMassSolver|undefined,gpu:GPU|undefined;
-await acquireWebGPUExclusiveLock('dawn-probe','prospective-destination-shadow-census');
 try{
  const dawn=await import(pathToFileURL(resolve('node_modules/webgpu/index.js')).href);
  Object.assign(globalThis,dawn.globals);gpu=dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND??'metal'}`]);live.add(gpu!);
@@ -130,4 +128,4 @@ try{
  }
  assert.deepEqual(errors,[]);
  writeFileSync(resolve(out,'report.json'),JSON.stringify({scene,values,scope:'Read-only CPU candidate census against production GPU transport QA; no allocation reduction or GPU selection timing claimed.',reports},null,2)+'\n');
-}finally{solver?.destroy();device?.destroy();if(gpu)live.delete(gpu);await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();if(gpu)live.delete(gpu);}

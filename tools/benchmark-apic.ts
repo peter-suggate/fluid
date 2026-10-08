@@ -13,7 +13,6 @@ import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
@@ -54,15 +53,6 @@ const report = { date: new Date().toISOString(), node: process.version, revision
   duration_s: duration, warmup_s: warmup, adapter: {}, runs: [] as Record<string, unknown>[] };
 const save = () => { mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, JSON.stringify(report, null, 2) + "\n"); };
 
-let announcedWait = false;
-for (;;) {
-  try { await acquireWebGPUExclusiveLock("dawn-probe", "APIC timestep and dispatch performance comparison"); break; }
-  catch (error) {
-    if (!String(error).includes("Refusing concurrent GPU execution")) throw error;
-    if (!announcedWait) { console.log("Waiting for the repository WebGPU lease."); announcedWait = true; }
-    await new Promise(resolve => setTimeout(resolve, 250));
-  }
-}
 const profileEnabled = process.argv.includes("--profile-gpu");
 let passProfile: GPUPassProfile | undefined;
 let device: GPUDevice | undefined;
@@ -187,5 +177,5 @@ try {
       report.runs.push(run); save(); console.log(JSON.stringify({ ...run, sceneDocument: undefined, clockRows: undefined, profileRows: undefined }));
     }
   }
-} finally { passProfile?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); save(); }
+} finally { passProfile?.destroy(); device?.destroy(); save(); }
 if (report.runs.some(run => !run.ok)) process.exitCode = 1;

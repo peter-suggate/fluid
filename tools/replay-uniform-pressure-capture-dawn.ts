@@ -9,7 +9,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
@@ -19,7 +18,6 @@ const arg=(key:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${k
 const path=arg("capture","docs/benchmarks/uniform-midstep-pressure-failure-2026-09-28.json.gz");
 const capture=JSON.parse(gunzipSync(readFileSync(path)).toString());
 const count=Number(arg("cycles","1"));assert.ok(Number.isInteger(count)&&count>0&&count<=100);
-await acquireWebGPUExclusiveLock("dawn-benchmark","Uniform captured pressure replay");
 let device:GPUDevice|undefined,solver:GPUSolverInstance|undefined;
 try {
  const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE??`${process.cwd()}/node_modules/webgpu/index.js`).href);
@@ -59,4 +57,4 @@ try {
   const state=await report(encoder,"cycle",cycle);if(state[4]||state[5])break;
  }
  assert.deepEqual(errors,[]);
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();}

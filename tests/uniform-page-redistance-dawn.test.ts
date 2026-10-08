@@ -2,13 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {pathToFileURL} from "node:url";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {UniformPageGeneration} from "../lib/methods/uniform/uniform-page-generation";
 import {UniformPageRedistance} from "../lib/methods/uniform/uniform-page-redistance";
 async function read(d:GPUDevice,src:GPUBuffer){const b=d.createBuffer({size:src.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});try{const e=d.createCommandEncoder();e.copyBufferToBuffer(src,0,b,0,b.size);d.queue.submit([e.finish()]);await b.mapAsync(GPUMapMode.READ);return b.getMappedRange().slice(0);}finally{if(b.mapState==="mapped")b.unmap();b.destroy();}}
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("page redistance preserves oblique planes and signed distant seam coordinates",{timeout:60000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform page redistance");let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const gpu=createProcessRetainedDawnGPU(dawn,[`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`]);const adapter=await gpu.requestAdapter();assert.ok(adapter);device=await adapter.requestDevice();
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
@@ -42,5 +41,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    }finally{solver.destroy();pool.destroy();}
   }
   assert.deepEqual(errors,[]);
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });

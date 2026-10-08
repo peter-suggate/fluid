@@ -37,7 +37,6 @@ import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createProcessRetainedDawnGPU,type NodeDawnProvider} from '../lib/harness/node-dawn-provider';
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock,readWebGPUExclusiveLockHolder} from '../lib/harness/webgpu-smoke-isolation';
 import {managedGPUDevice,gpuCompilationManagerFor} from '../lib/core/gpu-compilation-manager';
 import {requiredFluidDeviceLimits} from '../lib/core/webgpu-device-limits';
 import {sceneDocument} from '../lib/core/scene-definition';
@@ -66,12 +65,6 @@ const jobs:Job[]=arg('jobs','')?arg('jobs','').split(',').map(j=>{const [scene,a
  const values=Object.fromEntries(parts.filter(a=>a.includes('=')).map(a=>a.split('=') as [string,string]));
  return {sceneId:scene,arm,patches,values,out:outDir?`${outDir}/${scene}-${arm}.json`:''};})
  :[{sceneId,arm:'cli',patches:JSON.parse(patchArg.startsWith('@')?readFileSync(patchArg.slice(1),'utf8'):patchArg),values:{},out}];
-// A killed probe must not orphan the lease (the next Dawn run would wait forever).
-for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{void releaseWebGPUExclusiveLock().finally(()=>process.exit(130));});
-
-console.log('Waiting for repository WebGPU lease');
-while(await readWebGPUExclusiveLockHolder()) await new Promise(r=>setTimeout(r,500));
-await acquireWebGPUExclusiveLock('dawn-probe','uniform thin liquid');
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 const owned:GPUTexture[]=[];const runStart=performance.now();
 try{
@@ -267,4 +260,4 @@ try{
  };
  for(const job of jobs)await runJob(job);
  console.log(`all jobs in ${((performance.now()-runStart)/1000).toFixed(1)} s`);
-}finally{solver?.destroy();for(const t of owned)t.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();for(const t of owned)t.destroy();device?.destroy();}

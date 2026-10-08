@@ -5,7 +5,7 @@
  *  - private cleanup is limited to `instruments*.ktrace` in TMPDIR and
  *    `xrtmp__*` in InstrumentsCLI's sibling cache, plus manifest paths that
  *    resolve to one of those same roots;
- *  - an active xctrace process or Dawn's machine-wide lock aborts the cleanup.
+ *  - an active xctrace process aborts the cleanup.
  */
 import { execFileSync } from "node:child_process";
 import {
@@ -19,7 +19,6 @@ import {
 } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readWebGPUExclusiveLockHolder } from "../lib/harness/webgpu-smoke-isolation";
 
 // fileURLToPath preserves the directory URL's trailing slash while dirname()
 // does not. Normalise once so the exact-root safety comparison is meaningful.
@@ -99,8 +98,6 @@ const activeXctrace = (): string | undefined => {
 const main = async (): Promise<void> => {
   const processEvidence = activeXctrace();
   if (processEvidence) throw new Error(`refusing cleanup while xctrace is active:\n${processEvidence}`);
-  const lock = await readWebGPUExclusiveLockHolder();
-  if (lock?.alive) throw new Error(`refusing cleanup while Dawn holds the GPU lock: ${lock.description}`);
   if (basename(artifactRoot) !== "artifacts" || dirname(artifactRoot) !== repositoryRoot) {
     throw new Error(`refusing unexpected artifact root ${artifactRoot}`);
   }

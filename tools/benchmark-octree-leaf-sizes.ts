@@ -11,12 +11,7 @@ import type { PaperPhaseId, PerformanceTrace } from "../lib/core/performance-tra
 import { usePerformanceInstrumentationStore } from
   "../lib/core/stores/performance-instrumentation-store";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 
-await acquireWebGPUExclusiveLock("dawn-benchmark", "tools/benchmark-octree-leaf-sizes.ts");
 try {
 usePerformanceInstrumentationStore.getState().setEnabled(true);
 const modulePath = process.env.WEBGPU_NODE_MODULE
@@ -193,5 +188,4 @@ assert.deepEqual(validationErrors, [], `WebGPU validation errors: ${validationEr
 device.destroy();
 } finally {
   usePerformanceInstrumentationStore.getState().setEnabled(false);
-  await releaseWebGPUExclusiveLock();
 }

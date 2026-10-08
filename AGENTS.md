@@ -17,6 +17,3 @@ npm run test:dawn
 filters (`npm run test:dawn -- uniform`) while diagnosing, and `-- --list` to
 see the set. Do not silently weaken a Uniform lane or raise a timing ceiling to
 make a change pass.
-
-Do not run Dawn concurrently with the browser or another Dawn process; the
-tests take the repository-wide WebGPU lease and the runner waits for it.

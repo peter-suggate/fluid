@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {uniformMixedDustMass} from "../lib/methods/uniform/uniform-mixed-dust-accounting.wgsl";
 import {createUniformMixedLayout} from "../lib/methods/uniform/uniform-mixed-layout";
 import {UniformMixedOwnership} from "../lib/methods/uniform/uniform-mixed-ownership";
@@ -22,7 +21,6 @@ import {readMixedTexture} from "./helpers/uniform-mixed-native-fields";
 // Nothing here reads the work list or knows how jobs are packed.
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("mixed sharpening matches a dense reference and conserves volume across h/4h seams",{timeout:240_000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","mixed sharpening seam parity");
  let device:GPUDevice|undefined,ownership:UniformMixedOwnership|undefined,solid:UniformMixedSolid|undefined,reference:UniformSharpeningReference|undefined;
  const textures:GPUTexture[]=[],buffers:GPUBuffer[]=[];
  try{
@@ -151,5 +149,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   assert.deepEqual([...seen.sides].sort(),[1,2,3,4,5,6],"seam owners with every number of h sides must move volume");
   assert.ok(seen.closedOwners>0&&seen.solidMatters,"the solid block must close owners and change the result");
   assert.ok(seen.moved>10*seen.dust,"sharpening must move more volume than dust cleanup alone");assert.deepEqual(errors,[]);
- }finally{reference?.destroy();ownership?.destroy();solid?.destroy();textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy());device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{reference?.destroy();ownership?.destroy();solid?.destroy();textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy());device?.destroy();}
 });

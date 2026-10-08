@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 import { svoCellContourWGSL } from "../lib/svo/features/construction/svo-cell-contour";
 import { svoCellContourFitWGSL } from "../lib/svo/features/construction/svo-cell-contour-fit";
@@ -28,7 +27,6 @@ function distance(p:number[],kind:number,r:number[]){
   return Math.hypot(...q.map(v=>Math.max(v,0)))+Math.min(Math.max(...q),0);
 }
 (process.env.WEBGPU_NODE_MODULE?test:test.skip)("Dawn contours track analytic shapes across cell phases",async(t)=>{
-  await acquireWebGPUExclusiveLock("dawn-test","svo-cell-contour-analytic");
   let device:GPUDevice|undefined;
   try{
     device=(await createDawnRenderDevice()).device;
@@ -136,5 +134,5 @@ ${svoCellContourFitWGSL(false,false)}
     await t.test("smooth contours and retained cubes meet the geometric quality budget", {
       todo: process.env.FLUID_SVO_CONTOUR_ENFORCE_QUALITY === "1" ? false : "Known reproduction: independent conservative slabs have no shared boundary constraint",
     },()=>assert.deepEqual(failures,[]));
-  }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+  }finally{device?.destroy();}
 });

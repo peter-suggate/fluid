@@ -3,12 +3,10 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { MacMultigrid } from "../lib/methods/mac-shared/multigrid";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("APIC pressure obeys the absolute ceiling, relative reduction and small-residual floor", { timeout: 30_000 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "APIC pressure acceptance");
   const owned: GPUBuffer[] = []; let mg: MacMultigrid | undefined; let device: GPUDevice | undefined;
   try {
     const dawn = await import(pathToFileURL(modulePath!).href); Object.assign(globalThis, dawn.globals);
@@ -47,5 +45,5 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
       }
     }
     assert.deepEqual(errors, []);
-  } finally { mg?.destroy(); owned.forEach(b => b.destroy()); device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { mg?.destroy(); owned.forEach(b => b.destroy()); device?.destroy(); }
 });

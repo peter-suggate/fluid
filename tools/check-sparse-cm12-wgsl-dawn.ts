@@ -16,8 +16,6 @@
 import { createLevelSetVolumeLayout } from "../lib/methods/adaptive-volume/levelset-volume-layout";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createWebgpuSparseCM12ResidentWGSL } from
   "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl";
@@ -116,7 +114,6 @@ function entryPointsUsingSecondGroup(
 
 async function main(): Promise<void> {
   if (!emitSourceOnly) {
-    await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-resident");
   }
   let gpu: GPU | undefined;
   let device: GPUDevice | undefined;
@@ -450,7 +447,6 @@ async function main(): Promise<void> {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
     gpu = undefined;
-    if (!emitSourceOnly) await releaseWebGPUExclusiveLock();
   }
 }
 

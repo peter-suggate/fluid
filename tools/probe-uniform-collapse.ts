@@ -6,8 +6,7 @@
  *
  * Usage:
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
- *     node --import tsx tools/run-webgpu-exclusive.ts \
- *     --import tsx tools/probe-uniform-collapse.ts
+ *     node --import tsx tools/probe-uniform-collapse.ts
  *
  * Environment:
  *   FLUID_UNIFORM_COLLAPSE_SCENE       scene preset (default symmetric-expansion)

@@ -17,10 +17,6 @@ import {
   createProcessRetainedDawnGPU,
   type NodeDawnProvider,
 } from "../lib/harness/node-dawn-provider";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DEFAULT_DAWN_MODULE = `${ROOT}/node_modules/webgpu/index.js`;
@@ -39,10 +35,6 @@ async function main(): Promise<void> {
   const backend = argument("backend") ?? process.env.FLUID_WEBGPU_BACKEND ?? "metal";
   const modulePath = process.env.WEBGPU_NODE_MODULE ?? DEFAULT_DAWN_MODULE;
   const outputPath = argument("out");
-  await acquireWebGPUExclusiveLock(
-    "dawn-acceptance",
-    "tools/check-gpu-compilation-manager-dawn-lifecycle.ts",
-  );
 
   let device: GPUDevice | undefined;
   let manager: ReturnType<typeof gpuCompilationManagerFor> | undefined;
@@ -104,7 +96,6 @@ fn main() {
       device.destroy();
       await nextEventLoopTurn();
     }
-    await releaseWebGPUExclusiveLock();
   }
 
   const receipt = {

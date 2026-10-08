@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
@@ -14,7 +13,6 @@ import {mixedPhysical,readMixedTexture,readMixedTileWords} from "./helpers/unifo
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("cached curvature preserves forces on the same evolving mixed/solid state",{timeout:240000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform force curvature cache");
  let device:GPUDevice|undefined,solver:GPUSolverInstance|undefined;
  const copies:GPUTexture[]=[];
  const bind=UniformMixedForces.prototype.bind;
@@ -67,5 +65,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    samples++;
   }
   assert.equal(samples,7);assert.ok(seams,"Exercise h/4h face stencils");assert.deepEqual(errors,[]);
- }finally{UniformMixedForces.prototype.bind=bind;solver?.destroy();for(const t of copies)t.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{UniformMixedForces.prototype.bind=bind;solver?.destroy();for(const t of copies)t.destroy();device?.destroy();}
 });

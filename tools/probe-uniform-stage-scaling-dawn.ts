@@ -16,7 +16,7 @@
  * --atlas=table|affine|dense --atlas-edge=32 tests full-occupancy field placement.
  * --field-hashes checks complete canonical volume/velocity/phi and ownership.
  * These experiments do not alter production policy or acceptance thresholds.
- * Run serially under the WebGPU lease. Adds timestamp boundaries around
+ * Adds timestamp boundaries around
  * existing encodes, never simulation passes. Mixed pins x<0 at 4h and x>=0
  * at h. All cases use the same scene, timestep and numerical parameters.
  */
@@ -34,7 +34,6 @@ import {resolveMethodValues} from "../lib/core/method-contract";
 import {initializeRigidBodies} from "../lib/core/rigid-body";
 import {usePerformanceInstrumentationStore} from "../lib/core/stores/performance-instrumentation-store";
 import {createProcessRetainedDawnGPU, type NodeDawnProvider} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
 import {UniformMixedExtension} from "../lib/methods/uniform/uniform-mixed-extension";
 import type {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-uniform-reference";
@@ -91,15 +90,6 @@ const qualitySnapshots:unknown[]=[];
 let context:Record<string,unknown>={kind,sceneId,frames,dt_s:dt,throughput,rebuildEveryStep,inlineCurvature,warmup,sharpeningBaseline,coarseExtension,sourceFingerprint,surfaceTolerance,pressureReserve,qualitySnapshots,detailCensus,bandTarget,focusBox,focusTravel,coarseCadence,elideEmptyBand,experimentFingerprintBefore};
 const save=(value:unknown)=>{mkdirSync(dirname(out),{recursive:true});writeFileSync(out,JSON.stringify(value,null,2)+"\n");};
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
-const leaseDeadline=Date.now()+300_000;let waiting=false;
-for(;;){
- try{await acquireWebGPUExclusiveLock("dawn-benchmark",`Uniform stage scaling: ${sceneId}/${kind}`);break;}
- catch(error){
-  if(!(error instanceof Error)||!(error.cause instanceof Error)||!("code" in error.cause)||error.cause.code!=="EEXIST"||Date.now()>leaseDeadline)throw error;
-  if(!waiting){console.log("Waiting for the repository WebGPU lease");waiting=true;}
-  await new Promise(resolve=>setTimeout(resolve,250));
- }
-}
 try {
  const dawn=await import(pathToFileURL(resolve(process.env.WEBGPU_NODE_MODULE??"node_modules/webgpu/index.js")).href) as NodeDawnProvider;
  Object.assign(globalThis,dawn.globals);
@@ -303,4 +293,4 @@ try {
  const report={capturedAt:new Date().toISOString(),sourceFingerprint,sourceFingerprintAfter:fingerprint(),kind,sceneId,adapter:adapterInfo,backend:"Dawn/Metal",method:uniformVolumeMethod.id,dt_s:dt,frames,discardFrames:throughput?warmup:8,throughput,rebuildEveryStep,inlineCurvature,warmup,sharpeningBaseline,scope:"Simulation only; rendering excluded. Throughput uses two frames in flight without timestamps or per-frame stats. Trace mode fences each frame; GPU stage seams exclude CPU waits. Warmup frames are reported in discardFrames.",scene,values,lattice,setup_ms,initial,final,finalWork,dustMass,summary,rows,validationErrors:errors};
  save({...report,experimentFingerprintBefore,experimentFingerprintAfter:experimentFingerprint(),surfaceTolerance,pressureReserve:pressureReserve??(coarsening==="dynamic"&&surfaceTolerance>0?1:0),coarseExtension,qualitySnapshots,detailCensus,bandTarget,focusBox,focusTravel,coarseCadence,elideEmptyBand,atlasMode,atlasEdge,atlasCounts:atlas?.counts,atlasMetadataBytes:atlasMode==="table"?atlas?.offsets.byteLength:0,...(fieldHashes?{fieldHashes:await hashFields(true)}:{}),fullPressureEnvelope:process.argv.includes("--full-pressure-envelope")});console.log(JSON.stringify({out,summary}));
 }catch(error){save({...context,sourceFingerprintAfter:fingerprint(),rows,failure:error instanceof Error?error.message:String(error),final:solver?.info});throw error;
-}finally{solver?.destroy();atlasResources?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();atlasResources?.destroy();device?.destroy();}

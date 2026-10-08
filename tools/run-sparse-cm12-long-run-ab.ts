@@ -28,10 +28,6 @@ import { initialFluidBrickUnionBounds } from "../lib/core/initial-fluid";
 import { createSymmetricExpansionScene } from "../lib/core/scenes";
 import { sceneAtFinestCellSize } from "../lib/core/scene-scale";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { AdaptiveMassStepTelemetry } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
@@ -608,213 +604,208 @@ const uniformLatticeScale: 1 | 2 = uniformResolutionMode === "matched"
   && sparseResolutionMode === "all-coarse" ? 2 : 1;
 const uniformDimensions = fineDimensions.map((value) =>
   value / uniformLatticeScale) as unknown as Dimensions;
-await acquireWebGPUExclusiveLock("dawn-acceptance", "tools/run-sparse-cm12-long-run-ab.ts");
+const modulePath = process.env.WEBGPU_NODE_MODULE
+  ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
+const dawn = await import(pathToFileURL(modulePath).href) as {
+  create(options: string[]): GPU;
+  globals: Record<string, unknown>;
+};
+Object.assign(globalThis, dawn.globals);
+const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
+const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+assert.ok(adapter);
+const features: GPUFeatureName[] = [];
+if (adapter.features.has("timestamp-query")) features.push("timestamp-query");
+const device = await adapter.requestDevice({
+  requiredFeatures: features,
+  requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+});
+const validationErrors: string[] = [];
+device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
 try {
-  const modulePath = process.env.WEBGPU_NODE_MODULE
-    ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
-  const dawn = await import(pathToFileURL(modulePath).href) as {
-    create(options: string[]): GPU;
-    globals: Record<string, unknown>;
-  };
-  Object.assign(globalThis, dawn.globals);
-  const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
-  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
-  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-  assert.ok(adapter);
-  const features: GPUFeatureName[] = [];
-  if (adapter.features.has("timestamp-query")) features.push("timestamp-query");
-  const device = await adapter.requestDevice({
-    requiredFeatures: features,
-    requiredLimits: requiredFluidDeviceLimits(adapter.limits),
-  });
-  const validationErrors: string[] = [];
-  device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
-  try {
-    let uniformFinalDensity: Float32Array | undefined;
-    let uniformFinalVelocity: Float32Array | undefined;
-    let sparseFinalDensity: Float32Array | undefined;
-    let sparseFinalVelocity: Float32Array | undefined;
-    const uniform = await runArm(
-      device, uniformMethod, uniformDimensions, dt_s, steps, regime,
-      uniformLatticeScale, sparseResolutionMode,
-      (density, velocity) => {
-        uniformFinalDensity = density;
-        uniformFinalVelocity = velocity;
-      });
-    const sparse = await runArm(
-      device, adaptiveMassMethod, fineDimensions, dt_s, steps, regime,
-      1, sparseResolutionMode,
-      (density, velocity) => {
-        sparseFinalDensity = density;
-        sparseFinalVelocity = velocity;
-      });
-    assert.ok(uniformFinalDensity && uniformFinalVelocity
-      && sparseFinalDensity && sparseFinalVelocity);
-    uniformFinalDensity = upsampleDensityNearest(
-      uniformFinalDensity, uniformDimensions, fineDimensions,
-    );
-    const failures: string[] = [];
-    for (const arm of [uniform, sparse]) {
-      const final = arm.checkpoints.at(-1)!;
-      if (Math.abs(final.relativeMassDrift) > 1e-3) failures.push(`${arm.method}: mass drift`);
-      if (!Number.isFinite(final.densityWeightedKineticEnergyProxy)
-        || !Number.isFinite(final.maximumLiquidSpeed_m_s)) failures.push(`${arm.method}: energy/speed`);
-    }
-    const sparseFinal = sparse.checkpoints.at(-1)!;
-    if (sparseFinal.symmetry.densityMaximumAbsolute > 1e-3) failures.push("sparse: density D4");
-    if (sparseFinal.symmetry.velocityMaximumAbsolute_m_s > 1e-4) failures.push("sparse: velocity D4");
-    if (sparse.evolution.maximumPressureRelativeResidual > 1e-8) failures.push("sparse: pressure residual");
-    if (sparse.evolution.maximumPostProjectionDivergence_s > 1e-5) failures.push("sparse: divergence");
-    if (sparse.evolution.maximumMixedSeamDivergence_s > 1e-5) failures.push("sparse: seam divergence");
-    if (sparse.evolution.maximumInactiveFaceSpeedAfter_m_s !== 0) failures.push("sparse: inactive face carry");
-    if (sparse.evolution.maximumMixedSeamRows !== 0
-      || sparse.evolution.maximumFineCoarseConnectedPairs !== 0) {
-      failures.push(`sparse: ${sparseResolutionMode} mode produced a mixed-resolution seam`);
-    }
-    if (sparseResolutionMode === "all-fine"
-      && (sparse.sparseTopology?.maximumCoarseBrickCount ?? 0) !== 0) {
-      failures.push("sparse: all-fine mode created a coarse brick");
-    }
-    if (sparseResolutionMode === "all-coarse"
-      && (sparse.sparseTopology?.maximumFineBrickCount ?? 0) !== 0) {
-      failures.push("sparse: all-coarse mode created a fine brick");
-    }
-    const uniformFinal = uniform.checkpoints.at(-1)!;
-    const horizontalSpreadRatios = [0, 2].map((axis) =>
-      sparseFinal.massStandardDeviationNormalized[axis] / Math.max(
-        1e-30,
-        uniformFinal.massStandardDeviationNormalized[axis],
-      ));
-    const supportExtentRatios = [0, 2].map((axis) =>
-      sparseFinal.supportExtentNormalized[axis] / Math.max(
-        1e-30,
-        uniformFinal.supportExtentNormalized[axis],
-      ));
-    const kineticEnergyRatio = sparseFinal.densityWeightedKineticEnergyProxy
-      / Math.max(1e-30, uniformFinal.densityWeightedKineticEnergyProxy);
-    const liquidSpeedRatio = sparseFinal.maximumLiquidSpeed_m_s
-      / Math.max(1e-30, uniformFinal.maximumLiquidSpeed_m_s);
-    const maximumDensityRatio = sparseFinal.maximumDensity
-      / Math.max(1e-30, uniformFinal.maximumDensity);
-    const centerOfMassYDifference = Math.abs(
-      sparseFinal.centerOfMassNormalized[1] - uniformFinal.centerOfMassNormalized[1],
-    );
-    let densityAbsolute = 0, densitySquared = 0;
-    let uniformDensityAbsolute = 0, uniformDensitySquared = 0;
-    let densityMaximumAbsolute = 0, supportIntersection = 0, supportUnion = 0;
-    let symmetrizedUniformDensityAbsolute = 0;
-    const symmetrizedUniformDensity = d4SymmetrizedDensity(
-      uniformFinalDensity, fineDimensions,
-    );
-    for (let index = 0; index < uniformFinalDensity.length; index += 1) {
-      const difference = sparseFinalDensity[index] - uniformFinalDensity[index];
-      densityAbsolute += Math.abs(difference);
-      densitySquared += difference * difference;
-      uniformDensityAbsolute += Math.abs(uniformFinalDensity[index]);
-      uniformDensitySquared += uniformFinalDensity[index] ** 2;
-      densityMaximumAbsolute = Math.max(densityMaximumAbsolute, Math.abs(difference));
-      const uniformSupported = uniformFinalDensity[index] > 1e-3;
-      const sparseSupported = sparseFinalDensity[index] > 1e-3;
-      supportIntersection += uniformSupported && sparseSupported ? 1 : 0;
-      supportUnion += uniformSupported || sparseSupported ? 1 : 0;
-      symmetrizedUniformDensityAbsolute += Math.abs(
-        sparseFinalDensity[index] - symmetrizedUniformDensity[index],
-      );
-    }
-    const densityRelativeL1 = densityAbsolute / Math.max(1e-30, uniformDensityAbsolute);
-    const densityRelativeL2 = Math.sqrt(
-      densitySquared / Math.max(1e-30, uniformDensitySquared),
-    );
-    const supportIntersectionOverUnion = supportIntersection / Math.max(1, supportUnion);
-    if (horizontalSpreadRatios.some((ratio) => ratio < 0.85 || ratio > 1.15)) {
-      failures.push("similarity: horizontal mass spread ratio outside [0.85, 1.15]");
-    }
-    if (densityRelativeL1 > 0.05) {
-      failures.push("similarity: final density relative L1 exceeds 0.05");
-    }
-    if (supportIntersectionOverUnion < 0.85) {
-      failures.push("similarity: rho>1e-3 support intersection/union is below 0.85");
-    }
-    if (centerOfMassYDifference > 0.03) {
-      failures.push("similarity: normalized vertical center of mass differs by more than 0.03");
-    }
-    if (maximumDensityRatio < 0.75 || maximumDensityRatio > 1.25) {
-      failures.push("similarity: maximum-density ratio outside [0.75, 1.25]");
-    }
-    if (kineticEnergyRatio < 0.65 || kineticEnergyRatio > 1.35) {
-      failures.push("similarity: kinetic-energy ratio outside [0.65, 1.35]");
-    }
-    if (liquidSpeedRatio < 0.2 || liquidSpeedRatio > 2) {
-      failures.push("similarity: liquid-speed ratio outside [0.2, 2]");
-    }
-    console.log(JSON.stringify({
-      passed: failures.length === 0 && validationErrors.length === 0,
-      scenario: "symmetric-expansion",
-      sparseResolutionMode,
-      uniformResolutionMode,
-      regime,
-      grids: { sparse: fineDimensions, uniform: uniformDimensions },
-      dt_s,
-      steps,
-      exactTargetTime_s: steps * dt_s,
-      uniform,
-      sparse,
-      finalRatios: {
-        isovalueCellVolume: sparseFinal.isovalueCellVolume_cells
-          / Math.max(1e-30, uniformFinal.isovalueCellVolume_cells),
-        subIsovalueMassFraction: {
-          uniform: uniformFinal.subIsovalueMassFraction,
-          sparse: sparseFinal.subIsovalueMassFraction,
-        },
-        densityWeightedKineticEnergy: kineticEnergyRatio,
-        maximumLiquidSpeed: liquidSpeedRatio,
-        maximumDensity: maximumDensityRatio,
-        centerOfMassYAbsoluteDifference: centerOfMassYDifference,
-        massStandardDeviation: sparse.checkpoints.at(-1)!.massStandardDeviationNormalized
-          .map((value, axis) => value / Math.max(
-            1e-30,
-            uniform.checkpoints.at(-1)!.massStandardDeviationNormalized[axis],
-          )),
-        supportExtent: sparse.checkpoints.at(-1)!.supportExtentNormalized
-          .map((value, axis) => value / Math.max(
-            1e-30,
-            uniform.checkpoints.at(-1)!.supportExtentNormalized[axis],
-          )),
-      },
-      finalDensityDifference: {
-        relativeL1: densityRelativeL1,
-        relativeL2: densityRelativeL2,
-        maximumAbsolute: densityMaximumAbsolute,
-        supportIntersectionOverUnion1e3: supportIntersectionOverUnion,
-        relativeL1AgainstD4SymmetrizedUniform:
-          symmetrizedUniformDensityAbsolute / Math.max(1e-30, uniformDensityAbsolute),
-      },
-      finalFieldHashes: {
-        uniformDensity: fieldHash(uniformFinalDensity),
-        uniformVelocity: fieldHash(uniformFinalVelocity),
-        sparseDensity: fieldHash(sparseFinalDensity),
-        sparseVelocity: fieldHash(sparseFinalVelocity),
-      },
-      similarityThresholds: {
-        horizontalMassSpreadRatio: [0.85, 1.15],
-        finalDensityRelativeL1: 0.05,
-        supportIntersectionOverUnion1e3: 0.85,
-        centerOfMassYAbsoluteDifference: 0.03,
-        maximumDensityRatio: [0.75, 1.25],
-        densityWeightedKineticEnergyRatio: [0.65, 1.35],
-        maximumLiquidSpeedRatio: [0.2, 2],
-      },
-      uniformBaselineSymmetry: uniform.checkpoints.map((checkpoint) => ({
-        time_s: checkpoint.time_s,
-        ...checkpoint.symmetry,
-      })),
-      validationErrors,
-      failures,
-    }, null, 2));
-    if (failures.length > 0 || validationErrors.length > 0) process.exitCode = 1;
-  } finally {
-    device.destroy();
+  let uniformFinalDensity: Float32Array | undefined;
+  let uniformFinalVelocity: Float32Array | undefined;
+  let sparseFinalDensity: Float32Array | undefined;
+  let sparseFinalVelocity: Float32Array | undefined;
+  const uniform = await runArm(
+    device, uniformMethod, uniformDimensions, dt_s, steps, regime,
+    uniformLatticeScale, sparseResolutionMode,
+    (density, velocity) => {
+      uniformFinalDensity = density;
+      uniformFinalVelocity = velocity;
+    });
+  const sparse = await runArm(
+    device, adaptiveMassMethod, fineDimensions, dt_s, steps, regime,
+    1, sparseResolutionMode,
+    (density, velocity) => {
+      sparseFinalDensity = density;
+      sparseFinalVelocity = velocity;
+    });
+  assert.ok(uniformFinalDensity && uniformFinalVelocity
+    && sparseFinalDensity && sparseFinalVelocity);
+  uniformFinalDensity = upsampleDensityNearest(
+    uniformFinalDensity, uniformDimensions, fineDimensions,
+  );
+  const failures: string[] = [];
+  for (const arm of [uniform, sparse]) {
+    const final = arm.checkpoints.at(-1)!;
+    if (Math.abs(final.relativeMassDrift) > 1e-3) failures.push(`${arm.method}: mass drift`);
+    if (!Number.isFinite(final.densityWeightedKineticEnergyProxy)
+      || !Number.isFinite(final.maximumLiquidSpeed_m_s)) failures.push(`${arm.method}: energy/speed`);
   }
+  const sparseFinal = sparse.checkpoints.at(-1)!;
+  if (sparseFinal.symmetry.densityMaximumAbsolute > 1e-3) failures.push("sparse: density D4");
+  if (sparseFinal.symmetry.velocityMaximumAbsolute_m_s > 1e-4) failures.push("sparse: velocity D4");
+  if (sparse.evolution.maximumPressureRelativeResidual > 1e-8) failures.push("sparse: pressure residual");
+  if (sparse.evolution.maximumPostProjectionDivergence_s > 1e-5) failures.push("sparse: divergence");
+  if (sparse.evolution.maximumMixedSeamDivergence_s > 1e-5) failures.push("sparse: seam divergence");
+  if (sparse.evolution.maximumInactiveFaceSpeedAfter_m_s !== 0) failures.push("sparse: inactive face carry");
+  if (sparse.evolution.maximumMixedSeamRows !== 0
+    || sparse.evolution.maximumFineCoarseConnectedPairs !== 0) {
+    failures.push(`sparse: ${sparseResolutionMode} mode produced a mixed-resolution seam`);
+  }
+  if (sparseResolutionMode === "all-fine"
+    && (sparse.sparseTopology?.maximumCoarseBrickCount ?? 0) !== 0) {
+    failures.push("sparse: all-fine mode created a coarse brick");
+  }
+  if (sparseResolutionMode === "all-coarse"
+    && (sparse.sparseTopology?.maximumFineBrickCount ?? 0) !== 0) {
+    failures.push("sparse: all-coarse mode created a fine brick");
+  }
+  const uniformFinal = uniform.checkpoints.at(-1)!;
+  const horizontalSpreadRatios = [0, 2].map((axis) =>
+    sparseFinal.massStandardDeviationNormalized[axis] / Math.max(
+      1e-30,
+      uniformFinal.massStandardDeviationNormalized[axis],
+    ));
+  const supportExtentRatios = [0, 2].map((axis) =>
+    sparseFinal.supportExtentNormalized[axis] / Math.max(
+      1e-30,
+      uniformFinal.supportExtentNormalized[axis],
+    ));
+  const kineticEnergyRatio = sparseFinal.densityWeightedKineticEnergyProxy
+    / Math.max(1e-30, uniformFinal.densityWeightedKineticEnergyProxy);
+  const liquidSpeedRatio = sparseFinal.maximumLiquidSpeed_m_s
+    / Math.max(1e-30, uniformFinal.maximumLiquidSpeed_m_s);
+  const maximumDensityRatio = sparseFinal.maximumDensity
+    / Math.max(1e-30, uniformFinal.maximumDensity);
+  const centerOfMassYDifference = Math.abs(
+    sparseFinal.centerOfMassNormalized[1] - uniformFinal.centerOfMassNormalized[1],
+  );
+  let densityAbsolute = 0, densitySquared = 0;
+  let uniformDensityAbsolute = 0, uniformDensitySquared = 0;
+  let densityMaximumAbsolute = 0, supportIntersection = 0, supportUnion = 0;
+  let symmetrizedUniformDensityAbsolute = 0;
+  const symmetrizedUniformDensity = d4SymmetrizedDensity(
+    uniformFinalDensity, fineDimensions,
+  );
+  for (let index = 0; index < uniformFinalDensity.length; index += 1) {
+    const difference = sparseFinalDensity[index] - uniformFinalDensity[index];
+    densityAbsolute += Math.abs(difference);
+    densitySquared += difference * difference;
+    uniformDensityAbsolute += Math.abs(uniformFinalDensity[index]);
+    uniformDensitySquared += uniformFinalDensity[index] ** 2;
+    densityMaximumAbsolute = Math.max(densityMaximumAbsolute, Math.abs(difference));
+    const uniformSupported = uniformFinalDensity[index] > 1e-3;
+    const sparseSupported = sparseFinalDensity[index] > 1e-3;
+    supportIntersection += uniformSupported && sparseSupported ? 1 : 0;
+    supportUnion += uniformSupported || sparseSupported ? 1 : 0;
+    symmetrizedUniformDensityAbsolute += Math.abs(
+      sparseFinalDensity[index] - symmetrizedUniformDensity[index],
+    );
+  }
+  const densityRelativeL1 = densityAbsolute / Math.max(1e-30, uniformDensityAbsolute);
+  const densityRelativeL2 = Math.sqrt(
+    densitySquared / Math.max(1e-30, uniformDensitySquared),
+  );
+  const supportIntersectionOverUnion = supportIntersection / Math.max(1, supportUnion);
+  if (horizontalSpreadRatios.some((ratio) => ratio < 0.85 || ratio > 1.15)) {
+    failures.push("similarity: horizontal mass spread ratio outside [0.85, 1.15]");
+  }
+  if (densityRelativeL1 > 0.05) {
+    failures.push("similarity: final density relative L1 exceeds 0.05");
+  }
+  if (supportIntersectionOverUnion < 0.85) {
+    failures.push("similarity: rho>1e-3 support intersection/union is below 0.85");
+  }
+  if (centerOfMassYDifference > 0.03) {
+    failures.push("similarity: normalized vertical center of mass differs by more than 0.03");
+  }
+  if (maximumDensityRatio < 0.75 || maximumDensityRatio > 1.25) {
+    failures.push("similarity: maximum-density ratio outside [0.75, 1.25]");
+  }
+  if (kineticEnergyRatio < 0.65 || kineticEnergyRatio > 1.35) {
+    failures.push("similarity: kinetic-energy ratio outside [0.65, 1.35]");
+  }
+  if (liquidSpeedRatio < 0.2 || liquidSpeedRatio > 2) {
+    failures.push("similarity: liquid-speed ratio outside [0.2, 2]");
+  }
+  console.log(JSON.stringify({
+    passed: failures.length === 0 && validationErrors.length === 0,
+    scenario: "symmetric-expansion",
+    sparseResolutionMode,
+    uniformResolutionMode,
+    regime,
+    grids: { sparse: fineDimensions, uniform: uniformDimensions },
+    dt_s,
+    steps,
+    exactTargetTime_s: steps * dt_s,
+    uniform,
+    sparse,
+    finalRatios: {
+      isovalueCellVolume: sparseFinal.isovalueCellVolume_cells
+        / Math.max(1e-30, uniformFinal.isovalueCellVolume_cells),
+      subIsovalueMassFraction: {
+        uniform: uniformFinal.subIsovalueMassFraction,
+        sparse: sparseFinal.subIsovalueMassFraction,
+      },
+      densityWeightedKineticEnergy: kineticEnergyRatio,
+      maximumLiquidSpeed: liquidSpeedRatio,
+      maximumDensity: maximumDensityRatio,
+      centerOfMassYAbsoluteDifference: centerOfMassYDifference,
+      massStandardDeviation: sparse.checkpoints.at(-1)!.massStandardDeviationNormalized
+        .map((value, axis) => value / Math.max(
+          1e-30,
+          uniform.checkpoints.at(-1)!.massStandardDeviationNormalized[axis],
+        )),
+      supportExtent: sparse.checkpoints.at(-1)!.supportExtentNormalized
+        .map((value, axis) => value / Math.max(
+          1e-30,
+          uniform.checkpoints.at(-1)!.supportExtentNormalized[axis],
+        )),
+    },
+    finalDensityDifference: {
+      relativeL1: densityRelativeL1,
+      relativeL2: densityRelativeL2,
+      maximumAbsolute: densityMaximumAbsolute,
+      supportIntersectionOverUnion1e3: supportIntersectionOverUnion,
+      relativeL1AgainstD4SymmetrizedUniform:
+        symmetrizedUniformDensityAbsolute / Math.max(1e-30, uniformDensityAbsolute),
+    },
+    finalFieldHashes: {
+      uniformDensity: fieldHash(uniformFinalDensity),
+      uniformVelocity: fieldHash(uniformFinalVelocity),
+      sparseDensity: fieldHash(sparseFinalDensity),
+      sparseVelocity: fieldHash(sparseFinalVelocity),
+    },
+    similarityThresholds: {
+      horizontalMassSpreadRatio: [0.85, 1.15],
+      finalDensityRelativeL1: 0.05,
+      supportIntersectionOverUnion1e3: 0.85,
+      centerOfMassYAbsoluteDifference: 0.03,
+      maximumDensityRatio: [0.75, 1.25],
+      densityWeightedKineticEnergyRatio: [0.65, 1.35],
+      maximumLiquidSpeedRatio: [0.2, 2],
+    },
+    uniformBaselineSymmetry: uniform.checkpoints.map((checkpoint) => ({
+      time_s: checkpoint.time_s,
+      ...checkpoint.symmetry,
+    })),
+    validationErrors,
+    failures,
+  }, null, 2));
+  if (failures.length > 0 || validationErrors.length > 0) process.exitCode = 1;
 } finally {
-  await releaseWebGPUExclusiveLock();
+  device.destroy();
 }

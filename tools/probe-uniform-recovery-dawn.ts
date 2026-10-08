@@ -11,7 +11,6 @@ import {writeFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createProcessRetainedDawnGPU,type NodeDawnProvider} from '../lib/harness/node-dawn-provider';
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock,readWebGPUExclusiveLockHolder} from '../lib/harness/webgpu-smoke-isolation';
 import {managedGPUDevice} from '../lib/core/gpu-compilation-manager';
 import {requiredFluidDeviceLimits} from '../lib/core/webgpu-device-limits';
 import {sceneDocument} from '../lib/core/scene-definition';
@@ -26,9 +25,6 @@ const arg=(k:string,d:string)=>process.argv.find(a=>a.startsWith(`--${k}=`))?.sl
 const frames=Number(arg('frames','600')),every=Number(arg('every','3')),out=arg('out','/tmp/recovery.json');
 const sceneId=arg('scene','minimal-power-dam-break-64'),dt=Number(arg('dt',String(1/30))),tau=Number(arg('tau','0.2'));
 const values=resolveMethodValues(uniformVolumeMethod,'balanced',JSON.parse(arg('values','{}')));
-console.log('Waiting for repository WebGPU lease');
-while(await readWebGPUExclusiveLockHolder()) await new Promise(r=>setTimeout(r,500));
-await acquireWebGPUExclusiveLock('dawn-probe','uniform recovery');
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 const owned:GPUTexture[]=[];
 try{
@@ -173,4 +169,4 @@ try{
   assert.deepEqual(errors,[]);
  }
  await writeFile(out,JSON.stringify({sceneId,initial:arg('initial','dam'),dt,tau,values,recovery,detectors,rows},null,1));
-}finally{solver?.destroy();for(const t of owned)t.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();for(const t of owned)t.destroy();device?.destroy();}

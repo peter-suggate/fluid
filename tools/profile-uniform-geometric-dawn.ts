@@ -27,7 +27,6 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import { initializeRigidBodies } from "../lib/core/rigid-body";
@@ -60,7 +59,6 @@ const sourceFiles=Object.fromEntries(readdirSync(sourceDirectory).filter(p=>p.en
 const source={commit:execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim(),uniformFiles:sourceFiles};
 const surfaceAuditSourceHash=surfaceWorkAudit?createHash("sha256").update(readFileSync(resolve("tools/uniform-surface-work-audit.ts"))).digest("hex"):undefined;
 const rows: { frame: number; time_s: number; wall_ms: number; trace: NonNullable<WebGPUUniformReferenceSolver["info"]["physicsTrace"]>; cpuTrace: unknown; quality: Record<string,unknown>; work: Record<string,unknown> }[] = [];
-await acquireWebGPUExclusiveLock("dawn-probe", `Uniform Geometric stage profile: ${sceneId}`);
 let device: GPUDevice | undefined, solver: WebGPUUniformReferenceSolver | undefined;
 let kernelAudit:UniformKernelTimestamps|undefined;
 let kernelReport:unknown;
@@ -158,4 +156,4 @@ try {
   if(maxGPUBytes>0)assert.ok(allocationSnapshot!.peakBytes<=maxGPUBytes,
     `Peak live GPU resources ${allocationSnapshot!.peakBytes} exceed budget ${maxGPUBytes}`);
   console.log(JSON.stringify({out,windows},null,2));
-} finally { pressureWorkReadback?.destroy(); kernelAudit?.destroy(); surfaceAudit?.destroy(); solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }
+} finally { pressureWorkReadback?.destroy(); kernelAudit?.destroy(); surfaceAudit?.destroy(); solver?.destroy(); device?.destroy(); }

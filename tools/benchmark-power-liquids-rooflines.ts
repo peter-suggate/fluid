@@ -1,6 +1,5 @@
 import { pathToFileURL } from "node:url";
 import { GPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 // The captured large-lane band spans roughly 14–18K pages. Use its lower
 // observed resident point: Dawn/Metal terminates a single 8-tap dispatch at
@@ -22,7 +21,6 @@ if (![pages, repeats, rounds, substeps].every((value) => Number.isSafeInteger(va
   throw new RangeError("page, repeat, round and substep counts must be positive integers");
 }
 
-await acquireWebGPUExclusiveLock("dawn-benchmark", "tools/benchmark-power-liquids-rooflines.ts");
 // Dawn's native promises are not libuv handles. Keep the standalone process
 // alive until its explicit queue/map fences and cleanup finish.
 const nodeKeepAlive = setInterval(() => { /* native GPU completion owns exit */ }, 1_000);
@@ -128,8 +126,7 @@ fn gather(page:u32,local:u32,corner:u32)->f32{
     debugLog(`${variant.entryPoint} submitted`);
     // Dawn's map callback alone does not keep Node's event loop alive. The
     // queue fence makes this standalone probe own a live asynchronous handle
-    // until timestamp bytes are ready, so it cannot silently exit and strand
-    // the process-wide GPU lock.
+    // until timestamp bytes are ready, so it cannot silently exit.
     await device.queue.onSubmittedWorkDone();
     debugLog(`${variant.entryPoint} queue complete`);
     const wall_ms = performance.now() - started;
@@ -164,5 +161,4 @@ fn gather(page:u32,local:u32,corner:u32)->f32{
   device.destroy();
 } finally {
   clearInterval(nodeKeepAlive);
-  await releaseWebGPUExclusiveLock();
 }

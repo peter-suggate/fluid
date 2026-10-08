@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickContainingCoordinate,
@@ -347,48 +345,43 @@ async function main(): Promise<void> {
   if (process.argv.includes("--emit-wgsl")) {
     process.stdout.write(source);return;
   }
-  await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-logical-owner-directory");
-  try {
-    const { create, globals } = await import(dawnModule) as {
-      create: (flags: string[]) => GPU;
-      globals: Record<string, unknown>;
-    };
-    Object.assign(globalThis, globals);
-    const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
-    const adapter = await gpu.requestAdapter();
-    if (!adapter) throw new Error("no WebGPU adapter");
-    const device = await adapter.requestDevice();
-    device.pushErrorScope("validation");
-    const module = device.createShaderModule({ label: "LOD1 logical-owner checker", code: source });
-    const info = await module.getCompilationInfo();
-    const errors = info.messages.filter((message) => message.type === "error");
-    for (const error of errors) console.error(`${error.lineNum}:${error.linePos} ${error.message}`);
-    if (errors.length > 0) throw new Error(`${errors.length} WGSL compilation error(s)`);
-    const pipeline = await device.createComputePipelineAsync({
-      layout: "auto", compute: { module, entryPoint: "checkLogicalOwners" },
-    });
-    const scope = await device.popErrorScope();
-    if (scope) throw new Error(scope.message);
-    const valid = await evaluate(device, pipeline, directory, runtime, directory.words);
-    assertValidGPU(valid, atlas, directory, runtime, finestDimensions);
-    const corrupt = directory.words.slice();
-    corrupt[SPARSE_CM12_LOGICAL_OWNER_HEADER.magic] = 0;
-    const rejected = await evaluate(device, pipeline, directory, runtime, corrupt);
-    assertFailClosedGPU(rejected, directory.layout.logicalBrickCount);
-    const corruptRecord = directory.words.slice();
-    const rejectedKey = 4;
-    corruptRecord[directory.layout.recordBaseWords
-      + SPARSE_CM12_LOGICAL_OWNER_RECORD_WORDS * rejectedKey] =
-      (directory.layout.residentBrickCount << 5) | 1;
-    const locallyRejected = await evaluate(
-      device, pipeline, directory, runtime, corruptRecord,
-    );
-    assertRecordFailClosedGPU(locallyRejected, valid,
-      directory.layout.logicalBrickCount, rejectedKey);
-    console.log(`Sparse CM12 LOD1: valid B16/P16 eight-byte directory (${directory.layout.logicalBrickCount} logical bricks; macro override and fail-closed receipts passed)`);
-  } finally {
-    await releaseWebGPUExclusiveLock();
-  }
+  const { create, globals } = await import(dawnModule) as {
+    create: (flags: string[]) => GPU;
+    globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, globals);
+  const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+  const adapter = await gpu.requestAdapter();
+  if (!adapter) throw new Error("no WebGPU adapter");
+  const device = await adapter.requestDevice();
+  device.pushErrorScope("validation");
+  const module = device.createShaderModule({ label: "LOD1 logical-owner checker", code: source });
+  const info = await module.getCompilationInfo();
+  const errors = info.messages.filter((message) => message.type === "error");
+  for (const error of errors) console.error(`${error.lineNum}:${error.linePos} ${error.message}`);
+  if (errors.length > 0) throw new Error(`${errors.length} WGSL compilation error(s)`);
+  const pipeline = await device.createComputePipelineAsync({
+    layout: "auto", compute: { module, entryPoint: "checkLogicalOwners" },
+  });
+  const scope = await device.popErrorScope();
+  if (scope) throw new Error(scope.message);
+  const valid = await evaluate(device, pipeline, directory, runtime, directory.words);
+  assertValidGPU(valid, atlas, directory, runtime, finestDimensions);
+  const corrupt = directory.words.slice();
+  corrupt[SPARSE_CM12_LOGICAL_OWNER_HEADER.magic] = 0;
+  const rejected = await evaluate(device, pipeline, directory, runtime, corrupt);
+  assertFailClosedGPU(rejected, directory.layout.logicalBrickCount);
+  const corruptRecord = directory.words.slice();
+  const rejectedKey = 4;
+  corruptRecord[directory.layout.recordBaseWords
+    + SPARSE_CM12_LOGICAL_OWNER_RECORD_WORDS * rejectedKey] =
+    (directory.layout.residentBrickCount << 5) | 1;
+  const locallyRejected = await evaluate(
+    device, pipeline, directory, runtime, corruptRecord,
+  );
+  assertRecordFailClosedGPU(locallyRejected, valid,
+    directory.layout.logicalBrickCount, rejectedKey);
+  console.log(`Sparse CM12 LOD1: valid B16/P16 eight-byte directory (${directory.layout.logicalBrickCount} logical bricks; macro override and fail-closed receipts passed)`);
 }
 
 void main().catch((error: unknown) => {

@@ -6,7 +6,6 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { managedGPUDevice, gpuCompilationManagerFor } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { sceneDocument } from "../lib/core/scene-definition";
@@ -28,15 +27,6 @@ async function read(device:GPUDevice,texture:GPUTexture){
  }finally{if(buffer.mapState==="mapped")buffer.unmap();buffer.destroy();}
 }
 
-// Wait for a competing local GPU job before importing Dawn; never overlap it.
-const leaseStart=performance.now();
-for(;;){
- try{await acquireWebGPUExclusiveLock("dawn-probe",`trough wall contact ${arm}`);break;}
- catch(error){
-  if(performance.now()-leaseStart>120_000||!String(error).includes("Refusing concurrent GPU execution"))throw error;
-  await new Promise(resolve=>setTimeout(resolve,250));
- }
-}
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 try{
  const dawn=await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href) as NodeDawnProvider;Object.assign(globalThis,dawn.globals);
@@ -94,4 +84,4 @@ try{
  assert.deepEqual(errors,[]);
  mkdirSync("artifacts/trough-contact",{recursive:true});
  writeFileSync(`artifacts/trough-contact/${arm}.json`,JSON.stringify({arm,contact,values,dimensions:[nx,ny,nz],h,patches,samples},null,2));
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();}

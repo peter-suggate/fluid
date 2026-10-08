@@ -75,9 +75,7 @@ test("the mesh shader extracts every level once and lets the camera pick one per
 });
 
 (process.env.WEBGPU_NODE_MODULE ? test : test.skip)("the full dry-scene bundle validates in Dawn in every mesh variant", async () => {
-  const { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } = await import("../lib/harness/webgpu-smoke-isolation");
   const { createDawnRenderDevice } = await import("../tools/svo-dry-frame-harness");
-  await acquireWebGPUExclusiveLock("dawn-test", "tests/svo-surface-mesh-detail.test.ts");
   let device: GPUDevice | undefined;
   try {
     device = (await createDawnRenderDevice()).device;
@@ -87,5 +85,5 @@ test("the mesh shader extracts every level once and lets the camera pick one per
         { surfaceMesh: true, surfaceMeshCulling: culling }) });
       assert.deepEqual((await module.getCompilationInfo()).messages.filter(message => message.type === "error"), []);
     }
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

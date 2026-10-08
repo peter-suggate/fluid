@@ -9,7 +9,6 @@ import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { planUniformPages, lookupUniformPage, uniformPageCellAddress,
   UNIFORM_PAGE_MISSING, type UniformPageCoordinate, type UniformPageEdge,
@@ -65,7 +64,6 @@ function verify(layout: UniformPageLayout, input: Float32Array, output: Float32A
   }
 }
 
-await acquireWebGPUExclusiveLock("dawn-probe", "uniform fixed-resolution page stencil");
 let device: GPUDevice | undefined;
 try {
   const dawn=await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href);
@@ -140,4 +138,4 @@ try {
     }
   }
   if(arg("out"))writeFileSync(arg("out")!,JSON.stringify(report,null,2)+"\n");
-} finally {device?.destroy();await releaseWebGPUExclusiveLock();}
+} finally {device?.destroy();}

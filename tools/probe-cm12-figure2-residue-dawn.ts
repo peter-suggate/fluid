@@ -4,8 +4,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCm12Figure2 } from "../lib/core/cm12-paper-scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
@@ -85,117 +83,112 @@ function summarizePublishedDensity(density: Float32Array) {
   };
 }
 
-await acquireWebGPUExclusiveLock("dawn-acceptance", "tools/probe-cm12-figure2-residue-dawn.ts");
+const modulePath = process.env.WEBGPU_NODE_MODULE
+  ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
+const dawn = await import(pathToFileURL(modulePath).href) as {
+  create(options: string[]): GPU; globals: Record<string, unknown>;
+};
+Object.assign(globalThis, dawn.globals);
+const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
+const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+assert.ok(adapter);
+const device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+const validationErrors: string[] = [];
+device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
 try {
-  const modulePath = process.env.WEBGPU_NODE_MODULE
-    ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
-  const dawn = await import(pathToFileURL(modulePath).href) as {
-    create(options: string[]): GPU; globals: Record<string, unknown>;
-  };
-  Object.assign(globalThis, dawn.globals);
-  const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
-  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
-  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-  assert.ok(adapter);
-  const device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
-  const validationErrors: string[] = [];
-  device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
+  const scene = createCm12Figure2();
+  const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
+    timeStep: "paper",
+    resolutionMode: "all-fine",
+  });
+  const solver = await adaptiveMassMethod.createSolverAsync!(
+    device, scene, "balanced", values, undefined, () => {},
+  ) as WebGPUAdaptiveMassSolver;
   try {
-    const scene = createCm12Figure2();
-    const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
-      timeStep: "paper",
-      resolutionMode: "all-fine",
-    });
-    const solver = await adaptiveMassMethod.createSolverAsync!(
-      device, scene, "balanced", values, undefined, () => {},
-    ) as WebGPUAdaptiveMassSolver;
-    try {
-      const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as Dimensions;
-      assert.deepEqual(dimensions, [128, 128, 8]);
-      await device.queue.onSubmittedWorkDone();
-      const initialDensity = summarizePublishedDensity(
-        await readDensity(device, solver.volumeTexture, dimensions),
-      );
-      for (let step = 1; step <= steps; step += 1) {
-        assert.equal(solver.advanceTo(step * dt_s, []), true);
-      }
-      await device.queue.onSubmittedWorkDone();
-      const density = await readDensity(device, solver.volumeTexture, dimensions);
-      const publishedDensity = summarizePublishedDensity(density);
-      const activity = await solver.readGPUActivityPolicy();
-      const brickWidth = 8;
-      const brickDimensions = dimensions.map((value) =>
-        value / brickWidth) as unknown as Dimensions;
-      const residueBricks: Array<Record<string, unknown>> = [];
-      const rows: string[] = [];
-      let rawMassFromBrickMeans = 0;
-      let hiddenActiveBricks = 0;
-      for (const brick of activity.bricks) rawMassFromBrickMeans += brick.meanDensity * brick.resolution ** 3;
-      for (let by = brickDimensions[1] - 1; by >= 0; by -= 1) {
-        let row = "";
-        for (let bx = 0; bx < brickDimensions[0]; bx += 1) {
-          const brick = activity.bricks.find((candidate) => candidate.coordinate[0] === bx
-            && candidate.coordinate[1] === by && candidate.coordinate[2] === 0)!;
-          let maximum = 0, mass = 0, cellsAbove1e5 = 0, cellsAbove1e4 = 0;
-          for (let z = 0; z < brickWidth; z += 1) for (let y = 0; y < brickWidth; y += 1) {
-            for (let x = 0; x < brickWidth; x += 1) {
-              const gx = brickWidth * bx + x, gy = brickWidth * by + y;
-              const rho = density[gx + dimensions[0] * (gy + dimensions[1] * z)]!;
-              maximum = Math.max(maximum, rho); mass += rho;
-              cellsAbove1e5 += rho > 1e-5 ? 1 : 0;
-              cellsAbove1e4 += rho > 1e-4 ? 1 : 0;
-            }
-          }
-          const published = maximum > 0;
-          if (brick.active && !published) hiddenActiveBricks += 1;
-          const character = !brick.active ? " " : maximum >= 0.5 ? "L"
-            : maximum >= 0.05 ? "s" : maximum > 1e-4 ? "d"
-              : maximum > 1e-5 ? "r" : ".";
-          row += character;
-          if (published && maximum < 0.05) residueBricks.push({
-            coordinate: brick.coordinate,
-            maximumDensity: maximum,
-            publishedMass_cells: mass,
-            rawMassFromMean_cells: brick.meanDensity * brick.resolution ** 3,
-            cellsAbove1e5,
-            cellsAbove1e4,
-            scoreByte: brick.scoreByte,
-            reasons: brick.reasons,
-            supportMask: brick.supportMask,
-          });
-        }
-        rows.push(row);
-      }
-      console.log(JSON.stringify({
-        scene: "cm12-figure-2",
-        method: "adaptive-volume",
-        resolutionMode: "all-fine",
-        timeStep: "paper",
-        steps,
-        time_s: steps * dt_s,
-        dimensions,
-        legend: "L max rho>=.5; s >=.05; d >1e-4; r >1e-5; . active but unpublished; space inactive",
-        brickMapTopToBottom: rows,
-        activity: {
-          acceptedSteps: activity.acceptedSteps,
-          activeBricks: activity.bricks.filter((brick) => brick.active).length,
-          occupiedReasonBricks: activity.bricks.filter((brick) => (brick.reasons & 64) !== 0).length,
-          hiddenActiveBricks,
-          rawMassFromBrickMeans_cells: rawMassFromBrickMeans,
-          relativeRawMassDrift: (rawMassFromBrickMeans - initialDensity.mass_cells)
-            / Math.max(initialDensity.mass_cells, Number.MIN_VALUE),
-        },
-        initialDensity,
-        publishedDensity,
-        residueBricks,
-        validationErrors,
-      }, null, 2));
-    } finally {
-      solver.destroy();
+    const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as Dimensions;
+    assert.deepEqual(dimensions, [128, 128, 8]);
+    await device.queue.onSubmittedWorkDone();
+    const initialDensity = summarizePublishedDensity(
+      await readDensity(device, solver.volumeTexture, dimensions),
+    );
+    for (let step = 1; step <= steps; step += 1) {
+      assert.equal(solver.advanceTo(step * dt_s, []), true);
     }
+    await device.queue.onSubmittedWorkDone();
+    const density = await readDensity(device, solver.volumeTexture, dimensions);
+    const publishedDensity = summarizePublishedDensity(density);
+    const activity = await solver.readGPUActivityPolicy();
+    const brickWidth = 8;
+    const brickDimensions = dimensions.map((value) =>
+      value / brickWidth) as unknown as Dimensions;
+    const residueBricks: Array<Record<string, unknown>> = [];
+    const rows: string[] = [];
+    let rawMassFromBrickMeans = 0;
+    let hiddenActiveBricks = 0;
+    for (const brick of activity.bricks) rawMassFromBrickMeans += brick.meanDensity * brick.resolution ** 3;
+    for (let by = brickDimensions[1] - 1; by >= 0; by -= 1) {
+      let row = "";
+      for (let bx = 0; bx < brickDimensions[0]; bx += 1) {
+        const brick = activity.bricks.find((candidate) => candidate.coordinate[0] === bx
+          && candidate.coordinate[1] === by && candidate.coordinate[2] === 0)!;
+        let maximum = 0, mass = 0, cellsAbove1e5 = 0, cellsAbove1e4 = 0;
+        for (let z = 0; z < brickWidth; z += 1) for (let y = 0; y < brickWidth; y += 1) {
+          for (let x = 0; x < brickWidth; x += 1) {
+            const gx = brickWidth * bx + x, gy = brickWidth * by + y;
+            const rho = density[gx + dimensions[0] * (gy + dimensions[1] * z)]!;
+            maximum = Math.max(maximum, rho); mass += rho;
+            cellsAbove1e5 += rho > 1e-5 ? 1 : 0;
+            cellsAbove1e4 += rho > 1e-4 ? 1 : 0;
+          }
+        }
+        const published = maximum > 0;
+        if (brick.active && !published) hiddenActiveBricks += 1;
+        const character = !brick.active ? " " : maximum >= 0.5 ? "L"
+          : maximum >= 0.05 ? "s" : maximum > 1e-4 ? "d"
+            : maximum > 1e-5 ? "r" : ".";
+        row += character;
+        if (published && maximum < 0.05) residueBricks.push({
+          coordinate: brick.coordinate,
+          maximumDensity: maximum,
+          publishedMass_cells: mass,
+          rawMassFromMean_cells: brick.meanDensity * brick.resolution ** 3,
+          cellsAbove1e5,
+          cellsAbove1e4,
+          scoreByte: brick.scoreByte,
+          reasons: brick.reasons,
+          supportMask: brick.supportMask,
+        });
+      }
+      rows.push(row);
+    }
+    console.log(JSON.stringify({
+      scene: "cm12-figure-2",
+      method: "adaptive-volume",
+      resolutionMode: "all-fine",
+      timeStep: "paper",
+      steps,
+      time_s: steps * dt_s,
+      dimensions,
+      legend: "L max rho>=.5; s >=.05; d >1e-4; r >1e-5; . active but unpublished; space inactive",
+      brickMapTopToBottom: rows,
+      activity: {
+        acceptedSteps: activity.acceptedSteps,
+        activeBricks: activity.bricks.filter((brick) => brick.active).length,
+        occupiedReasonBricks: activity.bricks.filter((brick) => (brick.reasons & 64) !== 0).length,
+        hiddenActiveBricks,
+        rawMassFromBrickMeans_cells: rawMassFromBrickMeans,
+        relativeRawMassDrift: (rawMassFromBrickMeans - initialDensity.mass_cells)
+          / Math.max(initialDensity.mass_cells, Number.MIN_VALUE),
+      },
+      initialDensity,
+      publishedDensity,
+      residueBricks,
+      validationErrors,
+    }, null, 2));
   } finally {
-    device.destroy();
+    solver.destroy();
   }
 } finally {
-  await releaseWebGPUExclusiveLock();
+  device.destroy();
 }

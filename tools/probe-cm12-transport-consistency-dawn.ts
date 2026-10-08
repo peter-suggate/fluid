@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 // An affine field's mean on each cubic cell is its value at the centre.
 // Exercise the actual production stencil on a synthetic symmetric 2:1 grid.
@@ -11,7 +10,6 @@ function production(name: string): string {
   assert.ok(result, name); return result;
 }
 assert.ok(process.env.WEBGPU_NODE_MODULE);
-await acquireWebGPUExclusiveLock("dawn-probe", "transport-affine-consistency");
 const live = new Set<GPU>();
 Object.assign(globalThis, { cm12ConsistencyGPUs: live });
 let gpu: GPU | undefined, device: GPUDevice | undefined;
@@ -78,4 +76,4 @@ fn main(@builtin(global_invocation_id)id:vec3u){
   assert.ok(rows.every(r=>Number.isFinite(r.actual)&&Math.abs(r.partition!-1)<1e-6));
   console.log(JSON.stringify({affineConsistent:rows.every(r=>Math.abs(r.actual!-r.expected)<1e-5),rows},null,2));
   copy.unmap();input.destroy();output.destroy();copy.destroy();assert.deepEqual(errors,[]);
-} finally { device?.destroy(); await releaseWebGPUExclusiveLock(); if(gpu)live.delete(gpu); }
+} finally { device?.destroy(); if(gpu)live.delete(gpu); }

@@ -1,4 +1,4 @@
-/** Paired renderer-world preparation; run under run-webgpu-exclusive.ts. */
+/** Paired renderer-world preparation. */
 import assert from "node:assert/strict";
 import { createDawnRenderDevice } from "./svo-dry-frame-harness";
 import { WebGPULiveSvoScene, type LiveSvoSceneOptions } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";

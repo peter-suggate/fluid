@@ -6,7 +6,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {refinementRegionLattice} from "../lib/core/refinement-regions";
@@ -22,7 +21,6 @@ const transportCounts=process.argv.includes("--transport-counts");
 const stageTiming=arg("timing","passes")==="stages";
 if(stageTiming)usePerformanceInstrumentationStore.getState().setEnabled(true);
 assert.ok(["fine","mixed","live","dynamic"].includes(arm));
-await acquireWebGPUExclusiveLock("dawn-benchmark",`Water box pressure ${arm}`);
 let device:GPUDevice|undefined,solver:GPUSolverInstance|undefined,recorder:GPUPassTimestampRecorder|undefined;
 try{
  const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE??`${process.cwd()}/node_modules/webgpu/index.js`).href);Object.assign(globalThis,dawn.globals);
@@ -92,4 +90,4 @@ try{
   if(failure||solver.info.simulationPipelineError)throw new Error(String(failure??solver.info.simulationPipelineError));
  }
  assert.deepEqual(errors,[]);
-}finally{recorder?.destroy();solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{recorder?.destroy();solver?.destroy();device?.destroy();}

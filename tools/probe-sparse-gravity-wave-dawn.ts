@@ -7,7 +7,6 @@ import { cloneScene, defaultScene } from "../lib/core/model";
 import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import { CM12_GHOST_FLUID_THETA_MIN } from "../lib/core/cm12-numerics";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, readWebGPUExclusiveLockHolder, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { createSparseWaveStageAudit } from "./sparse-wave-stage-audit";
@@ -42,12 +41,7 @@ assert.ok(nx !== nz, "the manufactured seed must not inherit square-tank D4 auth
 assert.ok([nx, ny, nz].every(n => Number.isInteger(n) && n >= 8 && n % 8 === 0));
 assert.ok(height > amplitude && height + amplitude < ny * h);
 assert.ok(Number.isInteger(steps) && steps > 0 && dt > 0 && h > 0);
-if (process.argv.includes("--wait")) {
-  for (let attempt = 0; attempt < 600 && await readWebGPUExclusiveLockHolder(); attempt++)
-    await new Promise(resolve => setTimeout(resolve, 1000));
-}
 const liveGPU = new Set<GPU>();
-await acquireWebGPUExclusiveLock("dawn-probe", `gravity-wave:${arm}:${direction}`);
 let gpu: GPU | undefined, device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
@@ -241,6 +235,6 @@ try {
   }
   await writeFile(`${output}/timings.json`, JSON.stringify({ kind: "serialized simulation wall time, excluding diagnostics", timings }));
 } finally {
-  solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock();
+  solver?.destroy(); device?.destroy(); 
   if (gpu) liveGPU.delete(gpu);
 }

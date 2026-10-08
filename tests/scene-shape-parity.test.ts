@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 import type { Vec3 } from "../lib/core/model";
 import {
@@ -159,9 +158,8 @@ test("the emitted WGSL states every shape exactly once, with a neutral fallback"
 test("the WGSL half of every shape fact agrees with the TypeScript half", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for shape-table parity on a device",
 }, async t => {
-  await acquireWebGPUExclusiveLock("dawn-test", t.name);
   let leasedDevice: GPUDevice | undefined;
-  t.after(async () => { leasedDevice?.destroy(); await releaseWebGPUExclusiveLock(); });
+  t.after(async () => { leasedDevice?.destroy(); });
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
     create(options: string[]): GPU; globals: Record<string, unknown>;
   };

@@ -5,7 +5,6 @@ import {requiredFluidDeviceLimits} from "../../lib/core/webgpu-device-limits";
 import {resolveMethodValues, type MethodParamValues} from "../../lib/core/method-contract";
 import type {SceneDescription} from "../../lib/core/model";
 import {createProcessRetainedDawnGPU} from "../../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../../lib/harness/webgpu-smoke-isolation";
 import {uniformVolumeMethod} from "../../lib/methods/uniform/uniform-volume-method";
 import type {WebGPUUniformReferenceSolver} from "../../lib/methods/uniform/webgpu-uniform-reference";
 import {uniformMixedSolidWGSL, type UniformMixedSolid} from "../../lib/methods/uniform/uniform-mixed-solid.wgsl";
@@ -19,14 +18,14 @@ export async function createUniformSolver(device:GPUDevice,scene:SceneDescriptio
 }
 
 export async function withUniformDevice(label:string,run:(device:GPUDevice)=>Promise<void>){
- await acquireWebGPUExclusiveLock("dawn-test",label);let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
   const adapter=await createProcessRetainedDawnGPU(dawn,[`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`]).requestAdapter();assert.ok(adapter);
   device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
   await run(device);await device.queue.onSubmittedWorkDone();assert.deepEqual(errors,[]);
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 }
 
 export async function advanceUniform(solver:WebGPUUniformReferenceSolver,time:number){

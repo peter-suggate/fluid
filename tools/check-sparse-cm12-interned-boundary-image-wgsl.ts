@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import type { SparseCM12InternedBoundaryLayout } from
   "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-operators";
 import { createSparseCM12InternedBoundaryImageWGSL } from
@@ -53,7 +51,6 @@ fn checkIBO1(){let slot=fixtureIBOAcceptedSlot();let generation=fixtureIBOAccept
     |fixtureIBOStablePacketLeaf(0u));}
 `;
 
-await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-interned-boundary-image");
 let gpu: GPU | undefined;
 let device: GPUDevice | undefined;
 try {
@@ -82,6 +79,5 @@ try {
     baseWords: 4096, packetsPerLeaf: 64, passed: true }));
 } finally {
   device?.destroy();
-  await releaseWebGPUExclusiveLock();
   void gpu;
 }

@@ -39,13 +39,6 @@ import {
   makeCounterExtractionPolicy,
   type CounterExtractionPolicy,
 } from "./profile-mini-dam-xctrace";
-import {
-  acquireWebGPUExclusiveLock,
-  readWebGPUExclusiveLockHolder,
-  releaseWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLockSync,
-  WEBGPU_EXCLUSIVE_LOCK,
-} from "../lib/harness/webgpu-smoke-isolation";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo/features/lighting-visibility/svo-screen-space-termination";
 import { SVO_DRY_TRAVERSAL_MODES, type SvoDryTraversalMode } from "../lib/svo/features/shading/program";
 import { buildFrameReport, renderFrameReportHtml, type FrameReport } from "./xctrace-frame-report";
@@ -542,37 +535,26 @@ const main = async (): Promise<void> => {
     resolution: { width, height }, counterSeconds, counterReduction, source,
     tracePath, startedAt: new Date().toISOString(),
   }, null, 2)}\n`);
-  const holder = await readWebGPUExclusiveLockHolder();
-  if (holder) {
-    throw new Error(`${WEBGPU_EXCLUSIVE_LOCK} is held by ${holder.description}`);
-  }
-  await acquireWebGPUExclusiveLock("svo-render-xctrace", `${scene} ${width}x${height}`);
-  let lockHeld = true;
-  const onSignal = (): void => {
-    if (lockHeld) { releaseWebGPUExclusiveLockSync(); lockHeld = false; }
-  };
-  process.once("SIGINT", onSignal); process.once("SIGTERM", onSignal);
-  try {
-    const logPath = resolve(outputDirectory, "worker.log");
-    const developer = execFileSync("xcode-select", ["-p"]).toString().trim();
-    const blankTemplate = resolve(developer,
-      "../Applications/Instruments.app/Contents/Packages/Base.instrdst/Contents/Templates/Blank.tracetemplate");
-    if (!existsSync(blankTemplate)) throw new Error(`Instruments Blank template not found at ${blankTemplate}`);
+  const logPath = resolve(outputDirectory, "worker.log");
+  const developer = execFileSync("xcode-select", ["-p"]).toString().trim();
+  const blankTemplate = resolve(developer,
+    "../Applications/Instruments.app/Contents/Packages/Base.instrdst/Contents/Templates/Blank.tracetemplate");
+  if (!existsSync(blankTemplate)) throw new Error(`Instruments Blank template not found at ${blankTemplate}`);
 
-    // `--launch`, never `--attach`. The pid this process sees for a child it
-    // spawned is namespace-local, so the Instruments daemon answers "Cannot
-    // find process for provided pid" and the capture holds nothing but other
-    // processes' GPU work. Launching hands xctrace the process itself.
-    //
-    // The environment travels in a wrapper script rather than in `--env`
-    // flags: `--env` takes one KEY=VALUE per flag, and a comma-separated list
-    // silently collapses into the first variable, which produces a worker
-    // running some other scene at some other resolution with no error at all.
-    // `use_user_defined_labels_in_backend` is load-bearing — without it Metal
-    // never sees the WebGPU pass names and every encoder exports as
-    // "Render Command N", leaving nothing to attribute per-pass time to.
-    const wrapperPath = resolve(outputDirectory, "render-worker.sh");
-    await writeFile(wrapperPath, `#!/bin/sh
+  // `--launch`, never `--attach`. The pid this process sees for a child it
+  // spawned is namespace-local, so the Instruments daemon answers "Cannot
+  // find process for provided pid" and the capture holds nothing but other
+  // processes' GPU work. Launching hands xctrace the process itself.
+  //
+  // The environment travels in a wrapper script rather than in `--env`
+  // flags: `--env` takes one KEY=VALUE per flag, and a comma-separated list
+  // silently collapses into the first variable, which produces a worker
+  // running some other scene at some other resolution with no error at all.
+  // `use_user_defined_labels_in_backend` is load-bearing — without it Metal
+  // never sees the WebGPU pass names and every encoder exports as
+  // "Render Command N", leaving nothing to attribute per-pass time to.
+  const wrapperPath = resolve(outputDirectory, "render-worker.sh");
+  await writeFile(wrapperPath, `#!/bin/sh
 set -e
 cd ${JSON.stringify(root)}
 export WEBGPU_NODE_MODULE=${JSON.stringify(resolve(root, "node_modules/webgpu/index.js"))}
@@ -600,55 +582,41 @@ ${Object.entries(process.env)
 exec ${JSON.stringify(process.execPath)} --import tsx ${JSON.stringify(worker)} > ${JSON.stringify(logPath)} 2>&1
 `, { mode: 0o755 });
 
-    console.log(`building ${scene} at ${width}x${height} and capturing under xctrace...`);
-    // The launched run is construction plus the render loop, so the limit has
-    // to cover both; the reducer's own window selection trims the front.
-    const launchTimeLimit = `${CONSTRUCTION_ALLOWANCE_S + counterSeconds + 20}s`;
-    await run(["xcrun", "xctrace", "record",
-      "--template", blankTemplate,
-      "--instrument", "Metal Application",
-      "--instrument", "GPU",
-      ...(timingOnly ? [] : ["--instrument", "Metal GPU Counters"]),
-      "--output", tracePath,
-      "--no-prompt",
-      "--time-limit", launchTimeLimit,
-      "--launch", "--", wrapperPath,
-    ]);
+  console.log(`building ${scene} at ${width}x${height} and capturing under xctrace...`);
+  // The launched run is construction plus the render loop, so the limit has
+  // to cover both; the reducer's own window selection trims the front.
+  const launchTimeLimit = `${CONSTRUCTION_ALLOWANCE_S + counterSeconds + 20}s`;
+  await run(["xcrun", "xctrace", "record",
+    "--template", blankTemplate,
+    "--instrument", "Metal Application",
+    "--instrument", "GPU",
+    ...(timingOnly ? [] : ["--instrument", "Metal GPU Counters"]),
+    "--output", tracePath,
+    "--no-prompt",
+    "--time-limit", launchTimeLimit,
+    "--launch", "--", wrapperPath,
+  ]);
 
-    const result = workerResultFromLog();
+  const result = workerResultFromLog();
 
-    // Counter-table export is CPU/disk reduction over an immutable completed
-    // trace and can take several minutes. Release the process-wide GPU lock as
-    // soon as the measured worker exits so unrelated shader compilation is not
-    // blocked by report generation. `lockHeld` prevents the finalizer from
-    // deleting a newer owner's lock.
-    await releaseWebGPUExclusiveLock();
-    lockHeld = false;
-
-    console.log("exporting and reducing trace tables...");
-    const { tables, policy } = await exportTables();
-    // Under `--launch` the traced pid belongs to the wrapper's exec'd worker,
-    // which this process never learns; the encoders table is the authority.
-    const report = await writeReport(tables, policy, result, await tracedPidFromEncoders(tables.encoders));
-    await writeFile(capturePath, `${JSON.stringify({
+  console.log("exporting and reducing trace tables...");
+  const { tables, policy } = await exportTables();
+  // Under `--launch` the traced pid belongs to the wrapper's exec'd worker,
+  // which this process never learns; the encoders table is the authority.
+  const report = await writeReport(tables, policy, result, await tracedPidFromEncoders(tables.encoders));
+  await writeFile(capturePath, `${JSON.stringify({
       state: "complete",
       variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene, refinement, sceneModule, screenSpacePixels, coneFanout, resolution: { width, height }, counterSeconds, counterReduction,
       source,
       worker: result, tracePath, capturedAt: new Date().toISOString(),
     }, null, 2)}\n`);
-    if (!keepTables) for (const path of Object.values(tables)) rmSync(path, { force: true });
+  if (!keepTables) for (const path of Object.values(tables)) rmSync(path, { force: true });
 
-    console.log("");
-    for (const line of report.console) console.log(line);
-    console.log(`\nreport:  ${resolve(outputDirectory, "report.html")}`);
-    console.log(`summary: ${resolve(outputDirectory, "summary.json")}`);
-    console.log(`trace:   ${tracePath}`);
-  } finally {
-    // No child to stop: xctrace owns the launched worker and its own
-    // `--time-limit` ends the run.
-    process.removeListener("SIGINT", onSignal); process.removeListener("SIGTERM", onSignal);
-    if (lockHeld) await releaseWebGPUExclusiveLock();
-  }
+  console.log("");
+  for (const line of report.console) console.log(line);
+  console.log(`\nreport:  ${resolve(outputDirectory, "report.html")}`);
+  console.log(`summary: ${resolve(outputDirectory, "summary.json")}`);
+  console.log(`trace:   ${tracePath}`);
 };
 
 await main().catch((error: unknown) => {

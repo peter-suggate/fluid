@@ -28,10 +28,6 @@ import {
   createSymmetricExpansionScene,
 } from "../../../../../core/scenes";
 import { requiredFluidDeviceLimits } from "../../../../../core/webgpu-device-limits";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../../../../../harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../../../method";
 import { WebGPUAdaptiveMassSolver } from
   "../../../webgpu-adaptive-mass-solver";
@@ -87,95 +83,90 @@ function magnitudes(values: Float32Array, live: Float32Array, count: number) {
   };
 }
 
-await acquireWebGPUExclusiveLock("dawn-probe", "lib/methods/adaptive-mass/features/pressure-inspection/verification/probe.ts");
-try {
-  const modulePath = process.env.WEBGPU_NODE_MODULE
-    ?? fileURLToPath(new URL("../../../../../../node_modules/webgpu/index.js", import.meta.url));
-  const { create, globals } = await import(pathToFileURL(modulePath).href) as {
-    create(options: string[]): GPU; globals: Record<string, unknown>;
-  };
-  Object.assign(globalThis, globals);
-  const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
-  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
-  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-  assert.ok(adapter, "WebGPU did not expose an adapter");
-  const device = await adapter.requestDevice({
-    requiredLimits: requiredFluidDeviceLimits(adapter.limits),
-  });
-  const scene = buildScene();
-  const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
-    timeStep: "scene", pressureIterations: iterations,
-  });
-  const solver = await adaptiveMassMethod.createSolverAsync!(
-    device, scene, "balanced", { ...values, pressureJournal: true },
-    undefined, () => {}) as WebGPUAdaptiveMassSolver;
-  const dt_s = scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
+const modulePath = process.env.WEBGPU_NODE_MODULE
+  ?? fileURLToPath(new URL("../../../../../../node_modules/webgpu/index.js", import.meta.url));
+const { create, globals } = await import(pathToFileURL(modulePath).href) as {
+  create(options: string[]): GPU; globals: Record<string, unknown>;
+};
+Object.assign(globalThis, globals);
+const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
+const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+assert.ok(adapter, "WebGPU did not expose an adapter");
+const device = await adapter.requestDevice({
+  requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+});
+const scene = buildScene();
+const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
+  timeStep: "scene", pressureIterations: iterations,
+});
+const solver = await adaptiveMassMethod.createSolverAsync!(
+  device, scene, "balanced", { ...values, pressureJournal: true },
+  undefined, () => {}) as WebGPUAdaptiveMassSolver;
+const dt_s = scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
 
-  // Film the last frame rather than the first: a t=0 solve starts from a
-  // hydrostatic-free state and converges unrepresentatively fast.
-  for (let frame = 1; frame < frames; frame += 1) {
-    while (!solver.advanceTo(frame * dt_s, [])) await new Promise(setImmediate);
-  }
-  assert.ok(solver.sparseWorldUI.control.pressureFilm!.setCaptureEnabled(true),
-    "the solver reserved no journal");
-  while (!solver.advanceTo(frames * dt_s, [])) await new Promise(setImmediate);
-
-  const journal = await solver.sparseWorldUI.diagnostics.readPressureFilm();
-  assert.ok(journal, "the armed advance left no capture");
-  const source = solver.sparseWorldUI.overlays.pressureFilm;
-  assert.ok(source, "the solver published no journal source");
-
-  // One readback for every captured field of every captured iteration. This is
-  // the expensive thing the live view exists to avoid; here it is the point.
-  const cells = source.cellCount;
-  const readback = device.createBuffer({
-    label: "journal snapshot readback",
-    size: 4 * cells,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-  });
-  const read = async (floatOffset: number): Promise<Float32Array> => {
-    const encoder = device.createCommandEncoder();
-    encoder.copyBufferToBuffer(source.state, 4 * floatOffset, readback, 0, 4 * cells);
-    device.queue.submit([encoder.finish()]);
-    await readback.mapAsync(GPUMapMode.READ);
-    const copy = new Float32Array(readback.getMappedRange()).slice();
-    readback.unmap();
-    return copy;
-  };
-  const live = await read(source.liquidFloatOffset);
-
-  const snapshots: unknown[] = [];
-  for (const [slot, iteration] of journal.snapshotIterations.entries()) {
-    const fields: Record<string, unknown> = {};
-    for (const [field, name] of SPARSE_CM12_PRESSURE_JOURNAL_FIELDS.entries()) {
-      const offset = source.journalFloatOffset
-        + sparseCM12PressureJournalSnapshotOffset(source.layout, slot, field);
-      fields[name] = magnitudes(await read(offset), live, cells);
-    }
-    snapshots.push({ slot, iteration, fields });
-  }
-  readback.destroy();
-
-  console.log(JSON.stringify({
-    probe: "sparse-cm12-pressure-journal",
-    scene: sceneName, frame: frames, cells,
-    liveCells: live.reduce((total, value) => total + (value >= 0.5 ? 1 : 0), 0),
-    encodedIterations: journal.encodedIterations,
-    executedIterations: journal.executedIterations,
-    firstCrossingIteration: journal.firstCrossingIteration,
-    records: journal.records.map((record) => ({
-      iteration: record.iteration, active: record.active,
-      alpha: record.alpha, beta: record.beta, gamma: record.gamma,
-      recursiveRelativeL2: record.recursiveRelativeL2,
-      guardedRelativeL2: record.guardedRelativeL2,
-      snapshot: record.snapshot,
-    })),
-    snapshots,
-  }, null, 2));
-  solver.destroy();
-} finally {
-  releaseWebGPUExclusiveLock();
+// Film the last frame rather than the first: a t=0 solve starts from a
+// hydrostatic-free state and converges unrepresentatively fast.
+for (let frame = 1; frame < frames; frame += 1) {
+  while (!solver.advanceTo(frame * dt_s, [])) await new Promise(setImmediate);
 }
+assert.ok(solver.sparseWorldUI.control.pressureFilm!.setCaptureEnabled(true),
+  "the solver reserved no journal");
+while (!solver.advanceTo(frames * dt_s, [])) await new Promise(setImmediate);
+
+const journal = await solver.sparseWorldUI.diagnostics.readPressureFilm();
+assert.ok(journal, "the armed advance left no capture");
+const source = solver.sparseWorldUI.overlays.pressureFilm;
+assert.ok(source, "the solver published no journal source");
+
+// One readback for every captured field of every captured iteration. This is
+// the expensive thing the live view exists to avoid; here it is the point.
+const cells = source.cellCount;
+const readback = device.createBuffer({
+  label: "journal snapshot readback",
+  size: 4 * cells,
+  usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+});
+const read = async (floatOffset: number): Promise<Float32Array> => {
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(source.state, 4 * floatOffset, readback, 0, 4 * cells);
+  device.queue.submit([encoder.finish()]);
+  await readback.mapAsync(GPUMapMode.READ);
+  const copy = new Float32Array(readback.getMappedRange()).slice();
+  readback.unmap();
+  return copy;
+};
+const live = await read(source.liquidFloatOffset);
+
+const snapshots: unknown[] = [];
+for (const [slot, iteration] of journal.snapshotIterations.entries()) {
+  const fields: Record<string, unknown> = {};
+  for (const [field, name] of SPARSE_CM12_PRESSURE_JOURNAL_FIELDS.entries()) {
+    const offset = source.journalFloatOffset
+      + sparseCM12PressureJournalSnapshotOffset(source.layout, slot, field);
+    fields[name] = magnitudes(await read(offset), live, cells);
+  }
+  snapshots.push({ slot, iteration, fields });
+}
+readback.destroy();
+
+console.log(JSON.stringify({
+  probe: "sparse-cm12-pressure-journal",
+  scene: sceneName, frame: frames, cells,
+  liveCells: live.reduce((total, value) => total + (value >= 0.5 ? 1 : 0), 0),
+  encodedIterations: journal.encodedIterations,
+  executedIterations: journal.executedIterations,
+  firstCrossingIteration: journal.firstCrossingIteration,
+  records: journal.records.map((record) => ({
+    iteration: record.iteration, active: record.active,
+    alpha: record.alpha, beta: record.beta, gamma: record.gamma,
+    recursiveRelativeL2: record.recursiveRelativeL2,
+    guardedRelativeL2: record.guardedRelativeL2,
+    snapshot: record.snapshot,
+  })),
+  snapshots,
+}, null, 2));
+solver.destroy();
 // Dawn keeps handles that hold the loop open after the device is gone; the
 // probe's whole output is already on stdout by here.
 process.exit(0);

@@ -12,10 +12,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { createOceanSeicheScene } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
@@ -99,8 +95,6 @@ async function runArm(device: GPUDevice, rounds: number) {
   }
 }
 
-await acquireWebGPUExclusiveLock("dawn-probe",
-  "tools/probe-ocean-seiche-sharpening-capacity-rounds-dawn.ts");
 let device: GPUDevice | undefined;
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE
@@ -140,5 +134,4 @@ try {
   assert.deepEqual(validationErrors, []);
 } finally {
   device?.destroy();
-  await releaseWebGPUExclusiveLock();
 }

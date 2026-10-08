@@ -4,7 +4,6 @@ import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { ApicTransport, type ApicInfo } from "../lib/methods/particle/transport";
@@ -14,7 +13,6 @@ import type { MacMultigrid } from "../lib/methods/mac-shared/multigrid";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("PIC/FLIP preserves increments, blends with PIC and switches live", { timeout: 120_000 }, async t => {
-  await acquireWebGPUExclusiveLock("dawn-test", "particle transfer modes");
   let device: GPUDevice | undefined;
   try {
     const dawn = await import(pathToFileURL(modulePath!).href); Object.assign(globalThis, dawn.globals);
@@ -164,5 +162,5 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
       assert.ok(maximumDifference < 2e-5, `continuation changed the surface by ${maximumDifference} m`);
     });
     assert.deepEqual(errors, []);
-  } finally { device?.destroy(); releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

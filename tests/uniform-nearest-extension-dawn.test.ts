@@ -4,7 +4,6 @@ import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { readRgbaTexture3D } from "../lib/harness/webgpu-smoke-readbacks";
 import { WebGPUUniformVelocityExtrapolator } from "../lib/methods/uniform/webgpu-uniform-velocity-extrapolation";
 
@@ -16,7 +15,6 @@ function equalFields(actual: Float32Array, expected: Float32Array, message: stri
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("nearest source extension isolates a falling drop from a remote pool with two sweeps", { timeout: 120_000 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "nearest source extension");
   let device: GPUDevice | undefined;
   try {
     const dawn = await import(pathToFileURL(modulePath!).href); Object.assign(globalThis, dawn.globals);
@@ -91,5 +89,5 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     assert.ok(empty.field.every(v=>v===0),"empty shell issues zero finest work without publishing stale transport");
     assert.deepEqual(errors,[]);
     console.log(JSON.stringify({prior:at(prior.field,36),fixed:at(fixed.field,36),passes:fixed.passes}));
-  } finally {device?.destroy();await releaseWebGPUExclusiveLock();}
+  } finally {device?.destroy();}
 });

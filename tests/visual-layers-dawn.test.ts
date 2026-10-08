@@ -4,11 +4,9 @@ import { pathToFileURL } from "node:url";
 import { GridOverlayPipeline } from "../lib/core/webgpu-grid-overlay";
 import { VISUAL_LAYERS, visualLayers, type VisualLayerState } from "../lib/core/visual-layers";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("all layers draw independently and compose with simultaneous tile/window records", { timeout: 90000 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "visual-layers");
   let device: GPUDevice | undefined;
   try {
     const dawn = await import(pathToFileURL(modulePath!).href); Object.assign(globalThis, dawn.globals);
@@ -82,5 +80,5 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     assert.ok((await draw(visualLayers(["pressure"]), true, [99, 99, 99])).every(n => n === 0), "pressure respects its moving lattice origin");
     assert.deepEqual(await draw(visualLayers(["tiles", "window"])), await draw(visualLayers(["window", "tiles"])), "composition is independent of selection order");
     assert.deepEqual(errors, []); pipeline.destroy();
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

@@ -28,7 +28,6 @@ import {writeFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createProcessRetainedDawnGPU,type NodeDawnProvider} from '../lib/harness/node-dawn-provider';
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock,readWebGPUExclusiveLockHolder} from '../lib/harness/webgpu-smoke-isolation';
 import {managedGPUDevice} from '../lib/core/gpu-compilation-manager';
 import {requiredFluidDeviceLimits} from '../lib/core/webgpu-device-limits';
 import {sceneDocument} from '../lib/core/scene-definition';
@@ -51,12 +50,6 @@ const HEADER=20;
 const ZERO_JOIN='f.low=min(vec3f(0),f.low+min(shift,vec3f(0)));f.high=max(vec3f(0),f.high+max(shift,vec3f(0)));';
 const SIGNED='f.low=f.low+min(shift,vec3f(0));f.high=f.high+max(shift,vec3f(0));';
 
-console.log('Waiting for repository WebGPU lease');
-for(;;){
- while(await readWebGPUExclusiveLockHolder())await new Promise(r=>setTimeout(r,200));
- try{await acquireWebGPUExclusiveLock('dawn-probe','uniform band reasons');break;}catch{/* lost the race: wait again */}
-}
-console.log('Lease acquired');
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 const owned:{destroy():void}[]=[];
 try{
@@ -198,4 +191,4 @@ try{
   await writeFile(out,JSON.stringify({scene:sceneId,tiles:T,dimensions:layout0.lattice.dimensions,captures,rows},null,2));
  }
  assert.deepEqual(errors,[]);
-}finally{for(const o of owned)o.destroy();solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{for(const o of owned)o.destroy();solver?.destroy();device?.destroy();}

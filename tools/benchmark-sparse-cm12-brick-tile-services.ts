@@ -22,8 +22,6 @@ import { createSparseCM12TransportExecutionImage } from
 import { createSparseAdaptiveMassAtlas, sparseBrickKey,
   type SparseAdaptiveMassBrick, type SparseBrickResolution } from
   "../lib/methods/adaptive-volume/sparse-brick-atlas";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 
 const args = new Map(process.argv.slice(2).map((argument) => {
   const [key, value = "true"] = argument.replace(/^--/, "").split("=", 2);
@@ -184,146 +182,140 @@ const variants: Variant[] = [
       + faceProgram.layout.seamPacketCount), selectedCount: grid.gradientRows.length },
 ];
 
-await acquireWebGPUExclusiveLock("dawn-benchmark",
-  "tools/benchmark-sparse-cm12-brick-tile-services.ts");
+const modulePath = process.env.WEBGPU_NODE_MODULE
+  ?? `${process.cwd()}/node_modules/webgpu/index.js`;
+const dawn = await import(pathToFileURL(modulePath).href) as {
+  create(options: string[]): GPU;globals: Record<string, unknown> };
+Object.assign(globalThis, dawn.globals);
+const backend = process.env.WEBGPU_BACKEND ?? "metal";
+const adapter = await dawn.create([`backend=${backend}`]).requestAdapter({
+  powerPreference: "high-performance" });
+if (!adapter || !adapter.features.has("timestamp-query")) {
+  throw new Error("BTI1 service benchmark requires timestamp-query");
+}
+const device = await adapter.requestDevice({ requiredFeatures: ["timestamp-query"] });
+const storage = (values: Uint32Array, label: string) => {
+  const buffer = device.createBuffer({ label, size: Math.max(4, values.byteLength),
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(buffer, 0, values.buffer as ArrayBuffer,
+    values.byteOffset, values.byteLength);return buffer;
+};
+const buffers = [storage(bti.words, "BTI1"), storage(tei.words, "TEI2"),
+  storage(logical.words, "LOD1"), storage(descriptors, "leaf descriptors"),
+  storage(denseOwners, "dense owners"), storage(faceProgram.words, "BFP1")];
+const maximumOutputWords = Math.max(bti.layout.tileCapacity * 384,
+  grid.gradientRows.length, pointCount);
+const output = device.createBuffer({ label: "BTI1 benchmark output",
+  size: maximumOutputWords * 4, usage: GPUBufferUsage.STORAGE });
 try {
-  const modulePath = process.env.WEBGPU_NODE_MODULE
-    ?? `${process.cwd()}/node_modules/webgpu/index.js`;
-  const dawn = await import(pathToFileURL(modulePath).href) as {
-    create(options: string[]): GPU;globals: Record<string, unknown> };
-  Object.assign(globalThis, dawn.globals);
-  const backend = process.env.WEBGPU_BACKEND ?? "metal";
-  const adapter = await dawn.create([`backend=${backend}`]).requestAdapter({
-    powerPreference: "high-performance" });
-  if (!adapter || !adapter.features.has("timestamp-query")) {
-    throw new Error("BTI1 service benchmark requires timestamp-query");
-  }
-  const device = await adapter.requestDevice({ requiredFeatures: ["timestamp-query"] });
-  const storage = (values: Uint32Array, label: string) => {
-    const buffer = device.createBuffer({ label, size: Math.max(4, values.byteLength),
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(buffer, 0, values.buffer as ArrayBuffer,
-      values.byteOffset, values.byteLength);return buffer;
-  };
-  const buffers = [storage(bti.words, "BTI1"), storage(tei.words, "TEI2"),
-    storage(logical.words, "LOD1"), storage(descriptors, "leaf descriptors"),
-    storage(denseOwners, "dense owners"), storage(faceProgram.words, "BFP1")];
-  const maximumOutputWords = Math.max(bti.layout.tileCapacity * 384,
-    grid.gradientRows.length, pointCount);
-  const output = device.createBuffer({ label: "BTI1 benchmark output",
-    size: maximumOutputWords * 4, usage: GPUBufferUsage.STORAGE });
-  try {
-    const module = device.createShaderModule({ label: "BTI1 service benchmark", code: shader });
-    const info = await module.getCompilationInfo();
-    const errors = info.messages.filter((message) => message.type === "error");
-    if (errors.length) throw new Error(errors.map((message) => message.message).join("\n"));
-    const layoutEntries: GPUBindGroupLayoutEntry[] = [0, 1, 2, 3, 4, 5].map(
-      (binding) => ({ binding, visibility: GPUShaderStage.COMPUTE,
-        buffer: { type: "read-only-storage" } }),
-    );
-    layoutEntries.push({ binding: 6, visibility: GPUShaderStage.COMPUTE,
-      buffer: { type: "storage" } });
-    const bindGroupLayout = device.createBindGroupLayout({ label: "BTI1 service benchmark",
-      entries: layoutEntries });
-    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
-    const group = device.createBindGroup({ layout: bindGroupLayout,
-      entries: [...buffers.map((buffer, binding) =>
-        ({ binding, resource: { buffer } })),
-      { binding: 6, resource: { buffer: output } }] });
-    const compiled = await Promise.all(variants.map(async (variant) => {
-      const pipelines = await Promise.all(variant.steps.map((step) =>
-        device.createComputePipelineAsync({ label: `${variant.name}/${step.entryPoint}`,
-          layout: pipelineLayout, compute: { module, entryPoint: step.entryPoint } })));
-      return { ...variant, pipelines, group };
-    }));
-    const measureOnce = async (variant: typeof compiled[number]): Promise<number> => {
-      const querySet = device.createQuerySet({ type: "timestamp", count: 2 });
-      const resolveBuffer = device.createBuffer({ size: 16,
-        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-      const readBuffer = device.createBuffer({ size: 16,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-      const encoder = device.createCommandEncoder();
-      const pass = encoder.beginComputePass({ timestampWrites: { querySet,
-        beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } });
-      pass.setBindGroup(0, variant.group);
-      for (let repeat = 0; repeat < repeats; repeat += 1) {
-        for (let step = 0; step < variant.steps.length; step += 1) {
-          pass.setPipeline(variant.pipelines[step]!);
-          pass.dispatchWorkgroups(variant.steps[step]!.workgroups);
-        }
+  const module = device.createShaderModule({ label: "BTI1 service benchmark", code: shader });
+  const info = await module.getCompilationInfo();
+  const errors = info.messages.filter((message) => message.type === "error");
+  if (errors.length) throw new Error(errors.map((message) => message.message).join("\n"));
+  const layoutEntries: GPUBindGroupLayoutEntry[] = [0, 1, 2, 3, 4, 5].map(
+    (binding) => ({ binding, visibility: GPUShaderStage.COMPUTE,
+      buffer: { type: "read-only-storage" } }),
+  );
+  layoutEntries.push({ binding: 6, visibility: GPUShaderStage.COMPUTE,
+    buffer: { type: "storage" } });
+  const bindGroupLayout = device.createBindGroupLayout({ label: "BTI1 service benchmark",
+    entries: layoutEntries });
+  const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+  const group = device.createBindGroup({ layout: bindGroupLayout,
+    entries: [...buffers.map((buffer, binding) =>
+      ({ binding, resource: { buffer } })),
+    { binding: 6, resource: { buffer: output } }] });
+  const compiled = await Promise.all(variants.map(async (variant) => {
+    const pipelines = await Promise.all(variant.steps.map((step) =>
+      device.createComputePipelineAsync({ label: `${variant.name}/${step.entryPoint}`,
+        layout: pipelineLayout, compute: { module, entryPoint: step.entryPoint } })));
+    return { ...variant, pipelines, group };
+  }));
+  const measureOnce = async (variant: typeof compiled[number]): Promise<number> => {
+    const querySet = device.createQuerySet({ type: "timestamp", count: 2 });
+    const resolveBuffer = device.createBuffer({ size: 16,
+      usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+    const readBuffer = device.createBuffer({ size: 16,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass({ timestampWrites: { querySet,
+      beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } });
+    pass.setBindGroup(0, variant.group);
+    for (let repeat = 0; repeat < repeats; repeat += 1) {
+      for (let step = 0; step < variant.steps.length; step += 1) {
+        pass.setPipeline(variant.pipelines[step]!);
+        pass.dispatchWorkgroups(variant.steps[step]!.workgroups);
       }
-      pass.end();encoder.resolveQuerySet(querySet, 0, 2, resolveBuffer, 0);
-      encoder.copyBufferToBuffer(resolveBuffer, 0, readBuffer, 0, 16);
-      device.queue.submit([encoder.finish()]);
-      try {
-        await readBuffer.mapAsync(GPUMapMode.READ);
-        const timestamps = new BigUint64Array(readBuffer.getMappedRange().slice(0));
-        if (timestamps[0] === 0n || timestamps[1] <= timestamps[0]!) {
-          return Number.NaN;
-        }
-        return Number(timestamps[1]! - timestamps[0]!) / 1e6 / repeats;
-      } finally {
-        if (readBuffer.mapState === "mapped") readBuffer.unmap();
-        querySet.destroy();resolveBuffer.destroy();readBuffer.destroy();
-      }
-    };
-    const measure = async (variant: typeof compiled[number]): Promise<number> => {
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        const value = await measureOnce(variant);
-        if (Number.isFinite(value)) return value;
-      }
-      throw new Error(`five invalid GPU timestamp samples for ${variant.name}`);
-    };
-    for (let warmup = 0; warmup < 3; warmup += 1)
-      for (const variant of compiled) await measure(variant);
-    const timings = new Map<string, number[]>(variants.map((variant) => [variant.name, []]));
-    for (let sample = 0; sample < sampleCount; sample += 1) {
-      const order = sample % 2 === 0 ? compiled : [...compiled].reverse();
-      for (const variant of order) timings.get(variant.name)!.push(await measure(variant));
     }
-    const median = (values: readonly number[]) => [...values]
-      .sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
-    const results = variants.map((variant) => {
-      const samplesMs = timings.get(variant.name)!;const medianMs = median(samplesMs);
-      return { name: variant.name,
-        workgroups: variant.steps.reduce((sum, step) => sum + step.workgroups, 0),
-        invokedLanes: variant.operationCount, selectedItems: variant.selectedCount,
-        selectionRatio: variant.selectedCount / variant.operationCount,
-        medianMilliseconds: medianMs,
-        medianNanosecondsPerInvokedLane: medianMs * 1e6 / variant.operationCount,
-        medianNanosecondsPerSelectedItem: medianMs * 1e6 / variant.selectedCount,
-        samplesMilliseconds: samplesMs };
-    });
-    const byName = new Map(results.map((result) => [result.name, result]));
-    const report = { schema: "sparse-cm12-brick-tile-gpu-services/v1",
-      generatedAt: new Date().toISOString(), backend,
-      adapter: (adapter as GPUAdapter & { readonly info?: GPUAdapterInfo }).info,
-      fixture: { lattice, dimensions, leaves: atlas.bricks.length,
-        cells: grid.cells.length, rows: grid.gradientRows.length,
-        mixedSeamRows: grid.mixedSeamRowCount, points: pointCount,
-        btiBytes: bti.layout.totalBytes, teiBytes: tei.layout.totalBytes,
-        lodBytes: logical.layout.totalBytes }, repeats, sampleCount, results,
-      ratios: {
-        btiVsTEICell: byName.get("cell-bti1")!.medianMilliseconds
-          / byName.get("cell-current-tei2")!.medianMilliseconds,
-        btiVsLODPoint: byName.get("point-bti1")!.medianMilliseconds
-          / byName.get("point-current-lod1")!.medianMilliseconds,
-        btiVsDenseCell: byName.get("cell-bti1")!.medianMilliseconds
-          / byName.get("cell-dense")!.medianMilliseconds,
-        btiVsDensePoint: byName.get("point-bti1")!.medianMilliseconds
-          / byName.get("point-dense")!.medianMilliseconds,
-        btiVsDenseFace: byName.get("face-bti1")!.medianMilliseconds
-          / byName.get("face-dense")!.medianMilliseconds,
-        splitVsBroadBTIFace: byName.get("face-split-bfp1")!.medianMilliseconds
-          / byName.get("face-bti1")!.medianMilliseconds,
-        splitVsDenseFace: byName.get("face-split-bfp1")!.medianMilliseconds
-          / byName.get("face-dense")!.medianMilliseconds,
-      }, caveat: "Face-dense is a lower bound, not current ITR1. Production migration requires a matched live DFRM/ITR1 consumer A/B." };
-    const json = `${JSON.stringify(report, null, 2)}\n`;
-    if (outputPath) await writeFile(resolve(outputPath), json);process.stdout.write(json);
-  } finally {
-    for (const buffer of buffers) buffer.destroy();output.destroy();device.destroy();
+    pass.end();encoder.resolveQuerySet(querySet, 0, 2, resolveBuffer, 0);
+    encoder.copyBufferToBuffer(resolveBuffer, 0, readBuffer, 0, 16);
+    device.queue.submit([encoder.finish()]);
+    try {
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const timestamps = new BigUint64Array(readBuffer.getMappedRange().slice(0));
+      if (timestamps[0] === 0n || timestamps[1] <= timestamps[0]!) {
+        return Number.NaN;
+      }
+      return Number(timestamps[1]! - timestamps[0]!) / 1e6 / repeats;
+    } finally {
+      if (readBuffer.mapState === "mapped") readBuffer.unmap();
+      querySet.destroy();resolveBuffer.destroy();readBuffer.destroy();
+    }
+  };
+  const measure = async (variant: typeof compiled[number]): Promise<number> => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const value = await measureOnce(variant);
+      if (Number.isFinite(value)) return value;
+    }
+    throw new Error(`five invalid GPU timestamp samples for ${variant.name}`);
+  };
+  for (let warmup = 0; warmup < 3; warmup += 1)
+    for (const variant of compiled) await measure(variant);
+  const timings = new Map<string, number[]>(variants.map((variant) => [variant.name, []]));
+  for (let sample = 0; sample < sampleCount; sample += 1) {
+    const order = sample % 2 === 0 ? compiled : [...compiled].reverse();
+    for (const variant of order) timings.get(variant.name)!.push(await measure(variant));
   }
+  const median = (values: readonly number[]) => [...values]
+    .sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
+  const results = variants.map((variant) => {
+    const samplesMs = timings.get(variant.name)!;const medianMs = median(samplesMs);
+    return { name: variant.name,
+      workgroups: variant.steps.reduce((sum, step) => sum + step.workgroups, 0),
+      invokedLanes: variant.operationCount, selectedItems: variant.selectedCount,
+      selectionRatio: variant.selectedCount / variant.operationCount,
+      medianMilliseconds: medianMs,
+      medianNanosecondsPerInvokedLane: medianMs * 1e6 / variant.operationCount,
+      medianNanosecondsPerSelectedItem: medianMs * 1e6 / variant.selectedCount,
+      samplesMilliseconds: samplesMs };
+  });
+  const byName = new Map(results.map((result) => [result.name, result]));
+  const report = { schema: "sparse-cm12-brick-tile-gpu-services/v1",
+    generatedAt: new Date().toISOString(), backend,
+    adapter: (adapter as GPUAdapter & { readonly info?: GPUAdapterInfo }).info,
+    fixture: { lattice, dimensions, leaves: atlas.bricks.length,
+      cells: grid.cells.length, rows: grid.gradientRows.length,
+      mixedSeamRows: grid.mixedSeamRowCount, points: pointCount,
+      btiBytes: bti.layout.totalBytes, teiBytes: tei.layout.totalBytes,
+      lodBytes: logical.layout.totalBytes }, repeats, sampleCount, results,
+    ratios: {
+      btiVsTEICell: byName.get("cell-bti1")!.medianMilliseconds
+        / byName.get("cell-current-tei2")!.medianMilliseconds,
+      btiVsLODPoint: byName.get("point-bti1")!.medianMilliseconds
+        / byName.get("point-current-lod1")!.medianMilliseconds,
+      btiVsDenseCell: byName.get("cell-bti1")!.medianMilliseconds
+        / byName.get("cell-dense")!.medianMilliseconds,
+      btiVsDensePoint: byName.get("point-bti1")!.medianMilliseconds
+        / byName.get("point-dense")!.medianMilliseconds,
+      btiVsDenseFace: byName.get("face-bti1")!.medianMilliseconds
+        / byName.get("face-dense")!.medianMilliseconds,
+      splitVsBroadBTIFace: byName.get("face-split-bfp1")!.medianMilliseconds
+        / byName.get("face-bti1")!.medianMilliseconds,
+      splitVsDenseFace: byName.get("face-split-bfp1")!.medianMilliseconds
+        / byName.get("face-dense")!.medianMilliseconds,
+    }, caveat: "Face-dense is a lower bound, not current ITR1. Production migration requires a matched live DFRM/ITR1 consumer A/B." };
+  const json = `${JSON.stringify(report, null, 2)}\n`;
+  if (outputPath) await writeFile(resolve(outputPath), json);process.stdout.write(json);
 } finally {
-  await releaseWebGPUExclusiveLock();
+  for (const buffer of buffers) buffer.destroy();output.destroy();device.destroy();
 }

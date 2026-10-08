@@ -7,7 +7,6 @@ import { sceneAtContainerExtents } from "../lib/core/scene-scale";
 import { getScenePreset } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
 import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { createGeometricDamStageEnergy } from "./geometric-dam-stage-energy";
@@ -17,7 +16,6 @@ const dt=Number(arg("dt",String(1/30))), sharpen=arg("sharpen","1")!=="0";
 const airExtensionEnabled=arg("air","0")==="1";
 const output=arg("output","artifacts/level-set-volume/half-pool-dissipation-3d.json");
 const tapSteps=new Set(arg("taps","5,10,15,20,30,45,60").split(",").map(Number));
-await acquireWebGPUExclusiveLock("dawn-probe","half-pool dissipation");
 let device:GPUDevice|undefined,solver:WebGPUAdaptiveMassSolver|undefined;
 const report:any={steps,dt,extruded,freeze,sharpen,airExtensionEnabled,checkpoints:[],stageEnergy:[]};
 try{
@@ -55,4 +53,4 @@ try{
  }
  report.completed=true;
 }catch(e){report.completed=false;report.error=String(e);process.exitCode=1;}
-finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();mkdirSync(dirname(output),{recursive:true});writeFileSync(output,JSON.stringify(report,null,2)+"\n");console.log(JSON.stringify({output,completed:report.completed,error:report.error}));}
+finally{solver?.destroy();device?.destroy();mkdirSync(dirname(output),{recursive:true});writeFileSync(output,JSON.stringify(report,null,2)+"\n");console.log(JSON.stringify({output,completed:report.completed,error:report.error}));}

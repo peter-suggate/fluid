@@ -3,7 +3,6 @@ import { buildSvoScenePrimitives } from "../lib/svo/features/scene-publication/s
 import { getScenePreset } from "../lib/core/scenes";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 import { svoDualMarchingCubesCachedFitWGSL } from "../lib/svo/features/meshing/dual-marching-cubes";
 import { svoDualMarchingCubesMeshWGSL } from "../lib/svo/features/meshing/dual-marching-cubes-mesh";
@@ -15,7 +14,7 @@ import { backdropDetailCentreLattice, backdropDetailFromPlan, backdropDetailVoxe
 import { backdropTerrainWGSL, packBackdropTerrainTable, planBackdropTiles } from "../lib/svo/features/backdrop/backdrop-terrain-tiles";
 
 (process.env.WEBGPU_NODE_MODULE?test:test.skip)("GPU Dual Marching Cubes reconstructs closed surfaces and a wall missed by primal corner signs",async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","dual-marching-cubes");let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{
   device=(await createDawnRenderDevice()).device;
   const built=buildSvoScenePrimitives(getScenePreset("garden-svo-lighting").create());
@@ -334,5 +333,5 @@ import { backdropTerrainWGSL, packBackdropTerrainTable, planBackdropTiles } from
    rays.destroy();hits.destroy();hitRead.destroy();table.destroy();
   }
   read.destroy();for(const b of buffers)b.destroy();
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });

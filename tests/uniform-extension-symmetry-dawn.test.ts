@@ -4,13 +4,11 @@ import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { readRgbaTexture3D } from "../lib/harness/webgpu-smoke-readbacks";
 import { WebGPUUniformVelocityExtrapolator } from "../lib/methods/uniform/webgpu-uniform-velocity-extrapolation";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("nearest extension preserves reflected MAC fields and excludes closed pressure dual faces", { timeout: 120_000 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "Uniform extension source and wall symmetry");
   let device: GPUDevice | undefined;
   let extension: WebGPUUniformVelocityExtrapolator | undefined;
   const textures: GPUTexture[] = [], buffers: GPUBuffer[] = [];
@@ -77,6 +75,6 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     }
     assert.deepEqual(errors,[]);
   } finally {
-    extension?.destroy();textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy());device?.destroy();await releaseWebGPUExclusiveLock();
+    extension?.destroy();textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy());device?.destroy();
   }
 });

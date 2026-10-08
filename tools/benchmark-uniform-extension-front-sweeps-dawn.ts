@@ -43,9 +43,6 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import {
-  acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock, readWebGPUExclusiveLockHolder,
-} from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
@@ -70,7 +67,6 @@ const COST_BUDGETS = [16, 1, 8, 2, 4, 16];
 const COST_FRAMES = Number(argument("cost-frames", "30"));
 const COST_WARMUP = 3;
 
-const delay = (ms: number) => new Promise(done => setTimeout(done, ms));
 const median = (xs: number[]) => {
   const s = [...xs].sort((a, b) => a - b);
   return (s[Math.floor((s.length - 1) / 2)]! + s[Math.floor(s.length / 2)]!) / 2;
@@ -319,21 +315,6 @@ function volumeDifference(a: Float32Array, b: Float32Array) {
     totalArm: sumA, totalReference: sumB, totalDelta: sumA - sumB };
 }
 
-async function acquireWithWait(): Promise<void> {
-  for (let attempt = 0; ; attempt += 1) {
-    const holder = await readWebGPUExclusiveLockHolder();
-    if (holder) {
-      if (!holder.alive) throw new Error(`GPU lock held by a dead owner (${holder.description}); clear it by hand`);
-      if (attempt % 4 === 0) console.error(`waiting for GPU lock: ${holder.description}`);
-      await delay(15_000);
-      continue;
-    }
-    try { await acquireWebGPUExclusiveLock("dawn-probe", "uniform extension front-sweep budget"); return; }
-    catch { await delay(5_000); }
-  }
-}
-
-await acquireWithWait();
 let device: GPUDevice | undefined;
 const report: Record<string, unknown> = {
   tool: "tools/benchmark-uniform-extension-front-sweeps-dawn.ts",
@@ -592,7 +573,6 @@ try {
   report.uncapturedErrors = errors;
 } finally {
   device?.destroy();
-  await releaseWebGPUExclusiveLock();
   mkdirSync("docs/benchmarks", { recursive: true });
   writeFileSync(OUT, JSON.stringify(report, null, 2));
   console.error(`wrote ${OUT}`);

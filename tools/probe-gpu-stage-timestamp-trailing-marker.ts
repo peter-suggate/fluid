@@ -15,10 +15,6 @@ import {
   createProcessRetainedDawnGPU,
   type NodeDawnProvider,
 } from "../lib/harness/node-dawn-provider";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 
 const output = fileURLToPath(new URL(
   "../artifacts/sparse-cm12-stage-timestamp-trailing-marker-debug.json", import.meta.url));
@@ -27,7 +23,6 @@ const trailing: GPUTimestampPhase = {
   id: "adaptive-publication", label: "minimal multipass tail",
 };
 
-await acquireWebGPUExclusiveLock("dawn-probe", "minimal trailing timestamp marker");
 let device: GPUDevice | undefined;
 let receipt: Record<string, unknown> = { passed: false, probe: "trailing-marker" };
 try {
@@ -96,7 +91,6 @@ struct Word { value: atomic<u32> }
     device.destroy();
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
-  await releaseWebGPUExclusiveLock();
 }
 process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
 if (!receipt.passed) process.exitCode = 1;

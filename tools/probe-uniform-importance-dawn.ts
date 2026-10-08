@@ -23,7 +23,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import type {MethodParamValues} from "../lib/core/method-contract";
@@ -43,7 +42,6 @@ const arms:Arm[]=JSON.parse(arg("arms","null"))??[
 ];
 const modulePath=process.env.WEBGPU_NODE_MODULE;assert.ok(modulePath,"WEBGPU_NODE_MODULE is required");
 
-await acquireWebGPUExclusiveLock("dawn-probe","Uniform detail importance census");
 let device:GPUDevice|undefined;
 try{
  const dawn=await import(pathToFileURL(modulePath).href);Object.assign(globalThis,dawn.globals);
@@ -95,4 +93,4 @@ try{
   }finally{solver.destroy();}
  }
  if(errors.length)console.log(JSON.stringify({uncaptured:errors.slice(0,3)}));
-}finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{device?.destroy();}

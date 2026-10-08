@@ -106,7 +106,7 @@ function scoreBatch(candidates: ReadonlyArray<{ label: string; camera: CameraSta
   writeFileSync(sweepFile, JSON.stringify(candidates.map((entry) => ({ label: entry.label, camera: entry.camera }))));
   const result = spawnSync(
     process.execPath,
-    ["--import", "tsx", "tools/run-webgpu-exclusive.ts", "--import", "tsx", "tools/run-svo-dry-render-smoke.ts"],
+    ["--import", "tsx", "tools/run-svo-dry-render-smoke.ts"],
     {
       stdio: ["ignore", "pipe", "inherit"],
       encoding: "utf8",

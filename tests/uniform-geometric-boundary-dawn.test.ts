@@ -4,7 +4,6 @@ import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { solidWorldForScene, sampleSolidWorld } from "../lib/core/solid-world";
@@ -21,7 +20,6 @@ const read=readMixedTexture;
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("uniform geometric separates from domain and embedded solids",{timeout:420_000},async t=>{
-  await acquireWebGPUExclusiveLock("dawn-test","uniform geometric separating contact");
   let device:GPUDevice|undefined;
   try {
     const dawn=await import(pathToFileURL(modulePath!).href) as NodeDawnProvider;Object.assign(globalThis,dawn.globals);
@@ -103,5 +101,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
       }finally{solver.destroy();}
     });
     assert.deepEqual(errors,[]);
-  }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+  }finally{device?.destroy();}
 });

@@ -9,7 +9,6 @@ import { sceneDocument } from '../lib/core/scene-definition';
 import { getSceneDefinition } from '../lib/core/scenes';
 import { resolveMethodValues } from '../lib/core/method-contract';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from '../lib/harness/webgpu-smoke-isolation';
 import { adaptiveMassMethod } from '../lib/methods/adaptive-volume/method';
 import type { WebGPUAdaptiveMassSolver } from '../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver';
 const arg=(name:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${name}=`))?.split('=')[1]??fallback;
@@ -22,7 +21,6 @@ assert.ok(['mixed','coarse','medium','fine'].includes(lane));
 assert.ok(['translation','free-fall','rerung','standing-wave'].includes(motion));
 assert.ok(Number.isInteger(steps)&&steps>0);
 assert.ok(process.env.WEBGPU_NODE_MODULE);
-await acquireWebGPUExclusiveLock('dawn-probe','analytic-topology-stages');
 let device:GPUDevice|undefined, solver:WebGPUAdaptiveMassSolver|undefined;
 // Dawn's native GPU must stay rooted through asynchronous readback and JS GC.
 const liveGPUs=new Set<GPU>();Object.assign(globalThis,{analyticTopologyAuditGPUs:liveGPUs});
@@ -136,6 +134,6 @@ try {
    }
    writeFileSync(`${artifactDirectory}/step-${step}.json`,JSON.stringify(frameResults));
  }
-} finally {solver?.destroy();device?.destroy();liveGPUs.clear();await releaseWebGPUExclusiveLock();}
+} finally {solver?.destroy();device?.destroy();liveGPUs.clear();}
 mkdirSync('artifacts/analytic-motion',{recursive:true});
 writeFileSync(`${artifactDirectory}.json`,JSON.stringify(results));

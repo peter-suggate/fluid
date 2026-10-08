@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {createUniformMixedLayout} from "../lib/methods/uniform/uniform-mixed-layout";
 import {UniformMixedOwnership} from "../lib/methods/uniform/uniform-mixed-ownership";
 import {UniformMixedSurface} from "../lib/methods/uniform/uniform-mixed-surface";
@@ -14,7 +13,6 @@ import {readMixedTexture} from "./helpers/uniform-mixed-native-fields";
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("solid-free cubic sampling preserves advection and redistance across changing h/4h layouts",{timeout:240_000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","mixed cubic surface parity");
  let device:GPUDevice|undefined;
  const textures:GPUTexture[]=[],buffers:GPUBuffer[]=[],surfaces:UniformMixedSurface[]=[];
  let ownership:UniformMixedOwnership|undefined,solid:UniformMixedSolid|undefined;
@@ -106,5 +104,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   }
   }
   assert.deepEqual(errors,[]);
- }finally{surfaces.forEach(s=>s.destroy());ownership?.destroy();solid?.destroy();textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy());device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{surfaces.forEach(s=>s.destroy());ownership?.destroy();solid?.destroy();textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy());device?.destroy();}
 });

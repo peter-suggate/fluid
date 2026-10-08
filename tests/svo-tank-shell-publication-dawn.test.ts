@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 import { getScenePreset } from "../lib/core/scenes";
 import { sceneWithSolidStroke, solidWorldForScene, sampleSolidWorld } from "../lib/core/solid-world";
@@ -10,7 +9,6 @@ import { sparseBrickScenePayloadIdentityAt } from "../lib/svo/features/construct
 test("production SVO excludes tank glass at reset and after live edit/undo", {
   skip: !process.env.WEBGPU_NODE_MODULE, timeout: 120_000,
 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "svo-tank-shell-publication");
   let device: GPUDevice | undefined, display: WebGPULiveSvoScene | undefined;
   try {
     const initialized = await createDawnRenderDevice(); device = initialized.device;
@@ -70,6 +68,5 @@ test("production SVO excludes tank glass at reset and after live edit/undo", {
     assert.deepEqual(initialized.validationErrors, []);
   } finally {
     display?.destroy(); if (device) { await device.queue.onSubmittedWorkDone(); device.destroy(); }
-    await releaseWebGPUExclusiveLock();
   }
 });

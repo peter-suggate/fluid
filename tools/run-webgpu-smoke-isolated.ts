@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   parseWebGPUSmokeTimeout,
-  WEBGPU_EXCLUSIVE_LOCK,
   WEBGPU_SMOKE_KILL_REAP_MS,
   WEBGPU_SMOKE_TERMINATE_GRACE_MS,
 } from "../lib/harness/webgpu-smoke-isolation";
@@ -13,7 +12,6 @@ const timeout_ms = parseWebGPUSmokeTimeout(process.env.FLUID_WEBGPU_SMOKE_TIMEOU
 const worker = fileURLToPath(new URL("./run-webgpu-smoke-isolated-worker.ts", import.meta.url));
 const reproduction = dawnReproductionForSmokeEnvironment(process.env);
 
-console.error("SAFETY: close every browser WebGPU tab before this isolated Dawn smoke. Never run Dawn and browser GPU validation concurrently.");
 const child = spawn(process.execPath, ["--import", "tsx", worker], {
   cwd: process.cwd(),
   env: process.env,
@@ -23,7 +21,6 @@ console.log(JSON.stringify({
   phase: "webgpu-smoke-launch",
   pid: child.pid,
   timeout_ms,
-  exclusiveLock: WEBGPU_EXCLUSIVE_LOCK,
   isolation: "child-process",
   ...(reproduction ? { reproduction } : {}),
 }));
@@ -39,7 +36,7 @@ const timeoutTimer = setTimeout(() => {
     console.error(`WebGPU smoke PID ${child.pid ?? "unknown"} did not exit after SIGTERM; sending SIGKILL`);
     child.kill("SIGKILL");
     forcedExitTimer = setTimeout(() => {
-      console.error(`WebGPU smoke PID ${child.pid ?? "unknown"} was not reaped after SIGKILL; leaving ${WEBGPU_EXCLUSIVE_LOCK} as owner evidence`);
+      console.error(`WebGPU smoke PID ${child.pid ?? "unknown"} was not reaped after SIGKILL`);
       child.unref();
       process.exit(124);
     }, WEBGPU_SMOKE_KILL_REAP_MS);

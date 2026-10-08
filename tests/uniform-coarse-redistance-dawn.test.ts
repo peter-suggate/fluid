@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {createUniformMixedLayout} from "../lib/methods/uniform/uniform-mixed-layout";
 import {UniformMixedOwnership} from "../lib/methods/uniform/uniform-mixed-ownership";
 import {UniformMixedSurface} from "../lib/methods/uniform/uniform-mixed-surface";
@@ -12,7 +11,6 @@ import {readMixedTexture} from "./helpers/uniform-mixed-native-fields";
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("coarse redistancing leaves stationary surfaces fixed and resumes after material travel",{timeout:120_000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","coarse redistance interface");
  let device:GPUDevice|undefined,ownership:UniformMixedOwnership|undefined,surface:UniformMixedSurface|undefined;
  const textures:GPUTexture[]=[],buffers:GPUBuffer[]=[];
  try{
@@ -88,5 +86,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   }
   assert.ok(rebuilt,"material travel must still trigger distance rebuilding");
   assert.deepEqual(errors,[]);
- }finally{surface?.destroy();ownership?.destroy();textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy());device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{surface?.destroy();ownership?.destroy();textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy());device?.destroy();}
 });

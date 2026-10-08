@@ -5,7 +5,6 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from '../lib/harness/node-dawn-provider';
 import { managedGPUDevice } from '../lib/core/gpu-compilation-manager';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from '../lib/harness/webgpu-smoke-isolation';
 import { sceneDocument } from '../lib/core/scene-definition';
 import { getSceneDefinition } from '../lib/core/scenes';
 import { uniformVolumeMethod } from '../lib/methods/uniform/uniform-volume-method';
@@ -23,7 +22,6 @@ function tetra(v:number[]):number {
 }
 const tets=[[0,1,3,7],[0,1,5,7],[0,2,3,7],[0,2,6,7],[0,4,5,7],[0,4,6,7]];
 const arg=(name:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
-await acquireWebGPUExclusiveLock('dawn-probe','hero hose floor');
 let device:GPUDevice|undefined, solver:WebGPUUniformReferenceSolver|undefined;
 try {
  const dawn=await import(pathToFileURL(resolve('node_modules/webgpu/index.js')).href) as NodeDawnProvider;
@@ -81,4 +79,4 @@ try {
  }
  assert.deepEqual(errors,[]);
  const out=arg('out','artifacts/hero-hose-floor/baseline.json');mkdirSync(resolve(out,'..'),{recursive:true});writeFileSync(out,JSON.stringify({scene:scene.sceneId,dimensions:[nx,ny,nz],values,samples},null,2));
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();}

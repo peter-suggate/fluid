@@ -1,4 +1,3 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 // Composition root for this entry point: importing the method catalog installs
 // the simulation methods and the octree coarse-dynamics lanes, without which
@@ -20,7 +19,6 @@ import {
 } from "./webgpu-bringup-stages";
 
 const COMPUTE_SENTINEL_WORD = 0x4f43_5452;
-const EXCLUSIVE_LOCK = "/tmp/fluid-webgpu-exclusive.lock";
 
 class SolverResourceBoundary extends Error {
   constructor() { super("solver resources compiled and allocated before sparse t=0 warmup"); }
@@ -34,17 +32,6 @@ class SolverResourceBoundary extends Error {
 async function flushGPUErrorDelivery(device: GPUDevice): Promise<void> {
   await device.queue.onSubmittedWorkDone();
   await new Promise<void>((resolve) => setImmediate(resolve));
-}
-
-async function acquireExclusiveGPUProcessLock() {
-  try {
-    await mkdir(EXCLUSIVE_LOCK);
-  } catch (error) {
-    let owner = "unknown owner";
-    try { owner = await readFile(`${EXCLUSIVE_LOCK}/owner.json`, "utf8"); } catch { /* best-effort diagnostic */ }
-    throw new Error(`Refusing concurrent GPU bring-up; ${EXCLUSIVE_LOCK} already exists (${owner}). Remove it only after confirming no Dawn or browser GPU run is active.`, { cause: error });
-  }
-  await writeFile(`${EXCLUSIVE_LOCK}/owner.json`, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), kind: "dawn-bringup" }));
 }
 
 async function assertComputeSentinel(device: GPUDevice): Promise<number> {
@@ -327,7 +314,6 @@ function solverValues(): MethodParamValues {
   return values;
 }
 
-await acquireExclusiveGPUProcessLock();
 let device: GPUDevice | undefined;
 let solver: GPUSolverInstance | undefined;
 let lost: GPUDeviceLostInfo | undefined;
@@ -495,5 +481,4 @@ try {
   solver?.destroy();
   device?.destroy();
   Reflect.deleteProperty(globalThis, "navigator");
-  await rm(EXCLUSIVE_LOCK, { recursive: true, force: true });
 }

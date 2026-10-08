@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice,gpuCompilationManagerFor} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {createUniformMixedLayoutFromWidths} from "../lib/methods/uniform/uniform-mixed-layout";
 import {UniformMixedTransportStage} from "../lib/methods/uniform/uniform-mixed-transport";
 import {uniformTransportWorkgroupReference,restoreUniformTransportWorkgroupDispatch} from "./helpers/uniform-transport-workgroup-reference";
@@ -12,7 +11,6 @@ import {readMixedTexture} from "./helpers/uniform-mixed-native-fields";
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("batched-row transport matches the original across live h/4h changes and donor footprints",{timeout:120_000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","uniform transport pruning");
  let device:GPUDevice|undefined;
  const owned:{destroy():void}[]=[];
  try{
@@ -62,5 +60,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    assert.ok(actual!.every(Number.isFinite));
   }
   await device.queue.onSubmittedWorkDone();assert.deepEqual(errors,[]);
- }finally{for(const resource of owned.reverse())resource.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{for(const resource of owned.reverse())resource.destroy();device?.destroy();}
 });

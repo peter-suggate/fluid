@@ -9,7 +9,6 @@ import { resolveMethodValues } from '../lib/core/method-contract';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
 import { adaptiveMassMethod, adaptiveMassSolverOptions } from '../lib/methods/adaptive-volume/method';
 import { WebGPUAdaptiveMassSolver } from '../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver';
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from '../lib/harness/webgpu-smoke-isolation';
 import { readPublishedCM12Field } from './sparse-cm12-published-field';
 const arg=(name:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
 const arm=arg('arm','adaptive'), steps=Number(arg('steps','120'));
@@ -26,7 +25,6 @@ const output=arg('output',`artifacts/stationary-bowl-2x/baseline/${arm}`);
 assert.ok(['adaptive','fixed1','fixed2','fixed4','fixed8'].includes(arm));
 assert.ok(['on','off','gamma-only','sharpen-only'].includes(conditioning));
 assert.ok(Number.isInteger(steps)&&steps>=0);
-await acquireWebGPUExclusiveLock('dawn-probe',`stationary-bowl-2x:${arm}`);
 let gpu:GPU|undefined, device:GPUDevice|undefined, solver:WebGPUAdaptiveMassSolver|undefined;
 const live=new Set<GPU>();
 try {
@@ -213,4 +211,4 @@ try {
  await mkdir(output,{recursive:true});
  await writeFile(`${output}/failure.json`,JSON.stringify({message:String(error),encodedSteps:solver?.info.encodedSteps},null,2));
  throw error;
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();if(gpu)live.delete(gpu);}
+}finally{solver?.destroy();device?.destroy();if(gpu)live.delete(gpu);}

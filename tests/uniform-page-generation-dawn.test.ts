@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { UniformPageGeneration, uniformPageFieldAccessWGSL } from "../lib/methods/uniform/uniform-page-generation";
 import { planUniformPages, type UniformPageCoordinate, UNIFORM_PAGE_MISSING } from "../lib/methods/uniform/uniform-page-layout";
 
@@ -16,7 +15,6 @@ async function read(device: GPUDevice, buffer: GPUBuffer): Promise<Uint32Array> 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 for(const edge of [16,32] as const)
 (modulePath?test:test.skip)(`${edge}³ GPU pages preserve fields, signed seams and accepted state on exhaustion`,{timeout:60000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform GPU residency transactions");
  let device:GPUDevice|undefined;let pool:UniformPageGeneration|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
@@ -110,5 +108,5 @@ for(const edge of [16,32] as const)
   const next=await read(d,p.accepted);assert.equal(next[0],meta[0]!+1);assert.equal(next[2],0);
   for(const slot of slots(next).values())assert.equal(next[16+16*slot+3],8);
   assert.deepEqual(errors,[]);
- }finally{pool?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{pool?.destroy();device?.destroy();}
 });

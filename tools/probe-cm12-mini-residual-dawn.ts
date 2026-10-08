@@ -9,8 +9,6 @@ import {
 } from "../lib/core/scenes";
 import { sceneAtFinestCellSize } from "../lib/core/scene-scale";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
@@ -569,68 +567,63 @@ function upsampleDensityNearest(
   return result;
 }
 
-await acquireWebGPUExclusiveLock("dawn-acceptance", "tools/probe-cm12-mini-residual-dawn.ts");
+const modulePath = process.env.WEBGPU_NODE_MODULE
+  ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
+const dawn = await import(pathToFileURL(modulePath).href) as {
+  create(options: string[]): GPU; globals: Record<string, unknown>;
+};
+Object.assign(globalThis, dawn.globals);
+const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
+const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+assert.ok(adapter);
+const device = await adapter.requestDevice({
+  requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+});
+const validationErrors: string[] = [];
+device.addEventListener("uncapturederror", (event) =>
+  validationErrors.push(event.error.message));
 try {
-  const modulePath = process.env.WEBGPU_NODE_MODULE
-    ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
-  const dawn = await import(pathToFileURL(modulePath).href) as {
-    create(options: string[]): GPU; globals: Record<string, unknown>;
-  };
-  Object.assign(globalThis, dawn.globals);
-  const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
-  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
-  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-  assert.ok(adapter);
-  const device = await adapter.requestDevice({
-    requiredLimits: requiredFluidDeviceLimits(adapter.limits),
-  });
-  const validationErrors: string[] = [];
-  device.addEventListener("uncapturederror", (event) =>
-    validationErrors.push(event.error.message));
-  try {
-    const uniform = arm === "sparse" ? undefined : await run(
-      device, uniformMethod, uniformDimensions, uniformLatticeScale,
-    );
-    const sparse = arm === "uniform" ? undefined
-      : await run(device, adaptiveMassMethod, fineDimensions, 1);
-    const uniformDensity = uniform && upsampleDensityNearest(
-      uniform.density, uniformDimensions, fineDimensions,
-    );
-    let absolute = 0, squared = 0, uniformAbsolute = 0, uniformSquared = 0;
-    let maximumAbsolute = 0, supportIntersection = 0, supportUnion = 0;
-    const comparisonLength = uniformDensity && sparse ? uniformDensity.length : 0;
-    for (let index = 0; index < comparisonLength; index += 1) {
-      const difference = sparse!.density[index] - uniformDensity![index];
-      absolute += Math.abs(difference);
-      squared += difference * difference;
-      uniformAbsolute += Math.abs(uniformDensity![index]);
-      uniformSquared += uniformDensity![index] ** 2;
-      maximumAbsolute = Math.max(maximumAbsolute, Math.abs(difference));
-      const uniformSupported = uniformDensity![index] > 1e-3;
-      const sparseSupported = sparse!.density[index] > 1e-3;
-      supportIntersection += uniformSupported && sparseSupported ? 1 : 0;
-      supportUnion += uniformSupported || sparseSupported ? 1 : 0;
-    }
-    console.log(JSON.stringify({
-      scene: `minimal-power-dam-break-${gridSize}`,
-      sparseResolutionMode,
-      uniformResolutionMode,
-      grids: { sparse: fineDimensions, uniform: uniformDimensions },
-      time_s: steps * dt_s,
-      uniform: uniform?.receipt,
-      sparse: sparse?.receipt,
-      fieldDifference: uniform && sparse ? {
-        relativeL1: absolute / Math.max(1e-30, uniformAbsolute),
-        relativeL2: Math.sqrt(squared / Math.max(1e-30, uniformSquared)),
-        maximumAbsolute,
-        supportIntersectionOverUnion1e3:
-          supportIntersection / Math.max(1, supportUnion),
-      } : undefined,
-      validationErrors,
-    }, null, 2));
-  } finally {
-    device.destroy();
+  const uniform = arm === "sparse" ? undefined : await run(
+    device, uniformMethod, uniformDimensions, uniformLatticeScale,
+  );
+  const sparse = arm === "uniform" ? undefined
+    : await run(device, adaptiveMassMethod, fineDimensions, 1);
+  const uniformDensity = uniform && upsampleDensityNearest(
+    uniform.density, uniformDimensions, fineDimensions,
+  );
+  let absolute = 0, squared = 0, uniformAbsolute = 0, uniformSquared = 0;
+  let maximumAbsolute = 0, supportIntersection = 0, supportUnion = 0;
+  const comparisonLength = uniformDensity && sparse ? uniformDensity.length : 0;
+  for (let index = 0; index < comparisonLength; index += 1) {
+    const difference = sparse!.density[index] - uniformDensity![index];
+    absolute += Math.abs(difference);
+    squared += difference * difference;
+    uniformAbsolute += Math.abs(uniformDensity![index]);
+    uniformSquared += uniformDensity![index] ** 2;
+    maximumAbsolute = Math.max(maximumAbsolute, Math.abs(difference));
+    const uniformSupported = uniformDensity![index] > 1e-3;
+    const sparseSupported = sparse!.density[index] > 1e-3;
+    supportIntersection += uniformSupported && sparseSupported ? 1 : 0;
+    supportUnion += uniformSupported || sparseSupported ? 1 : 0;
   }
+  console.log(JSON.stringify({
+    scene: `minimal-power-dam-break-${gridSize}`,
+    sparseResolutionMode,
+    uniformResolutionMode,
+    grids: { sparse: fineDimensions, uniform: uniformDimensions },
+    time_s: steps * dt_s,
+    uniform: uniform?.receipt,
+    sparse: sparse?.receipt,
+    fieldDifference: uniform && sparse ? {
+      relativeL1: absolute / Math.max(1e-30, uniformAbsolute),
+      relativeL2: Math.sqrt(squared / Math.max(1e-30, uniformSquared)),
+      maximumAbsolute,
+      supportIntersectionOverUnion1e3:
+        supportIntersection / Math.max(1, supportUnion),
+    } : undefined,
+    validationErrors,
+  }, null, 2));
 } finally {
-  await releaseWebGPUExclusiveLock();
+  device.destroy();
 }

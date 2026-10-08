@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 import { renderTerrainProxyWGSL, sparseSceneProxyVoxelizationShaderFor } from "../lib/core/webgpu-sparse-scene-proxies";
 import { svoCellContourFitWGSL } from "../lib/svo/features/construction/svo-cell-contour-fit";
 import { SVO_GBUFFER_NORMAL_OCT8_WGSL } from "../lib/svo/contracts/svo-gbuffer";
 
 (process.env.WEBGPU_NODE_MODULE?test:test.skip)("terrain contour source shares continuous heights, normals and conservative crossing coverage",async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","terrain-contour");let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{
   device=(await createDawnRenderDevice()).device;
   const terrain={baseWords:0,heightsBaseWords:16,width:8,depth:8,patchBaseWords:80,patchCapacity:1};
@@ -72,5 +71,5 @@ import { SVO_GBUFFER_NORMAL_OCT8_WGSL } from "../lib/svo/contracts/svo-gbuffer";
    }
   }
   input.destroy();output.destroy();read.destroy();
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });

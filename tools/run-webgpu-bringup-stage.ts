@@ -28,10 +28,9 @@ const timer = setTimeout(() => {
     child.kill("SIGKILL");
     // A wedged Metal/Dawn process can remain in macOS's exiting state after
     // SIGKILL. Do not let that keep the launcher (and its caller) alive
-    // indefinitely. The worker-owned exclusive lock intentionally remains,
-    // preventing any later GPU run until the OS has actually reaped it.
+    // indefinitely.
     forcedExitTimer = setTimeout(() => {
-      console.error(`WebGPU bring-up child for ${stage} did not exit after SIGKILL; leaving the exclusive GPU lock in place`);
+      console.error(`WebGPU bring-up child for ${stage} did not exit after SIGKILL`);
       child.unref();
       process.exit(124);
     }, 2_000);

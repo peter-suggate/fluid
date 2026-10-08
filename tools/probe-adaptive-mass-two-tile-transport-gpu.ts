@@ -23,10 +23,6 @@ import {
 } from "../lib/methods/adaptive-volume/two-tile-composite-grid";
 import { WebGPUTwoTileConservativeTransport } from
   "../lib/methods/adaptive-volume/webgpu-two-tile-conservative-transport";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 
 interface FieldError {
   readonly maximumAbsoluteError: number;
@@ -214,69 +210,61 @@ const executeVariant = async (
   };
 };
 
-await acquireWebGPUExclusiveLock(
-  "dawn-probe",
-  "tools/probe-adaptive-mass-two-tile-transport-gpu.ts",
-);
+const modulePath = process.env.WEBGPU_NODE_MODULE
+  ?? `${process.cwd()}/node_modules/webgpu/index.js`;
+const dawn = await import(pathToFileURL(modulePath).href) as {
+  create(options: string[]): GPU;
+  globals: Record<string, unknown>;
+};
+Object.assign(globalThis, dawn.globals);
+const backend = process.env.WEBGPU_BACKEND ?? "metal";
+const gpu = dawn.create([`backend=${backend}`]);
+const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+if (!adapter) throw new Error(`No Dawn WebGPU adapter is available for backend ${backend}`);
+const device = await adapter.requestDevice();
 try {
-  const modulePath = process.env.WEBGPU_NODE_MODULE
-    ?? `${process.cwd()}/node_modules/webgpu/index.js`;
-  const dawn = await import(pathToFileURL(modulePath).href) as {
-    create(options: string[]): GPU;
-    globals: Record<string, unknown>;
-  };
-  Object.assign(globalThis, dawn.globals);
-  const backend = process.env.WEBGPU_BACKEND ?? "metal";
-  const gpu = dawn.create([`backend=${backend}`]);
-  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-  if (!adapter) throw new Error(`No Dawn WebGPU adapter is available for backend ${backend}`);
-  const device = await adapter.requestDevice();
-  try {
-    const variants: VariantReceipt[] = [];
-    for (const axis of [0, 1, 2] as const) {
-      for (const [negativeResolution, positiveResolution] of
-        [[8, 8], [4, 4], [8, 4], [4, 8]] as const) {
-        for (const direction of [-1, 1] as const) {
-          variants.push(await executeVariant(
-            device,
-            axis,
-            negativeResolution,
-            positiveResolution,
-            direction,
-          ));
-        }
+  const variants: VariantReceipt[] = [];
+  for (const axis of [0, 1, 2] as const) {
+    for (const [negativeResolution, positiveResolution] of
+      [[8, 8], [4, 4], [8, 4], [4, 8]] as const) {
+      for (const direction of [-1, 1] as const) {
+        variants.push(await executeVariant(
+          device,
+          axis,
+          negativeResolution,
+          positiveResolution,
+          direction,
+        ));
       }
     }
-    const passed = variants.every((variant) => variant.passed);
-    const adapterInfo = (adapter as GPUAdapter & { readonly info?: GPUAdapterInfo }).info;
-    const receipt = {
-      passed,
-      scope: "operator parity from CPU-built rows; GPU trace construction is not exercised",
-      backend,
-      adapter: adapterInfo ? {
-        vendor: adapterInfo.vendor,
-        architecture: adapterInfo.architecture,
-        device: adapterInfo.device,
-        description: adapterInfo.description,
-      } : undefined,
-      variantCount: variants.length,
-      densityProbeCount: variants.reduce((sum, variant) => sum + variant.probes.length, 0),
-      maximumDensityAbsoluteError: Math.max(
-        ...variants.map((variant) => variant.maximumDensityAbsoluteError),
-      ),
-      maximumGammaAbsoluteError: Math.max(
-        ...variants.map((variant) => variant.maximumGammaAbsoluteError),
-      ),
-      maximumGpuMassAbsoluteError: Math.max(
-        ...variants.map((variant) => variant.maximumGpuMassAbsoluteError),
-      ),
-      variants,
-    };
-    console.log(JSON.stringify(receipt, null, 2));
-    if (!passed) process.exitCode = 1;
-  } finally {
-    device.destroy();
   }
+  const passed = variants.every((variant) => variant.passed);
+  const adapterInfo = (adapter as GPUAdapter & { readonly info?: GPUAdapterInfo }).info;
+  const receipt = {
+    passed,
+    scope: "operator parity from CPU-built rows; GPU trace construction is not exercised",
+    backend,
+    adapter: adapterInfo ? {
+      vendor: adapterInfo.vendor,
+      architecture: adapterInfo.architecture,
+      device: adapterInfo.device,
+      description: adapterInfo.description,
+    } : undefined,
+    variantCount: variants.length,
+    densityProbeCount: variants.reduce((sum, variant) => sum + variant.probes.length, 0),
+    maximumDensityAbsoluteError: Math.max(
+      ...variants.map((variant) => variant.maximumDensityAbsoluteError),
+    ),
+    maximumGammaAbsoluteError: Math.max(
+      ...variants.map((variant) => variant.maximumGammaAbsoluteError),
+    ),
+    maximumGpuMassAbsoluteError: Math.max(
+      ...variants.map((variant) => variant.maximumGpuMassAbsoluteError),
+    ),
+    variants,
+  };
+  console.log(JSON.stringify(receipt, null, 2));
+  if (!passed) process.exitCode = 1;
 } finally {
-  await releaseWebGPUExclusiveLock();
+  device.destroy();
 }

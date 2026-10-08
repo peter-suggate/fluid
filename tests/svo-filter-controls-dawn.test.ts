@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 import { svoSurfaceMeshWGSL } from "../lib/svo/features/primary-visibility/svo-surface-mesh";
 import { createSvoDrySceneFragmentWGSL } from "../lib/svo/features/shading/program";
@@ -9,7 +8,6 @@ import { svoFeatureQuery } from "../lib/svo/pipeline/persistence";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning } from "../lib/svo/pipeline/svo-render-tuning";
 
 (process.env.WEBGPU_NODE_MODULE ? test : test.skip)("Dawn filtering controls preserve settings, clamp LOD, stabilize transitions and blend normals", async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "tests/svo-filter-controls-dawn.test.ts");
   let device: GPUDevice | undefined;
   try {
     device = (await createDawnRenderDevice()).device;
@@ -112,5 +110,5 @@ import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning } from "../lib/svo/
     face(await run(1,0),6); face(await run(0,1),6); face(await run(1,1,0),6);
     assert.ok(Math.abs((await run(1,1,1,0))[32]-Math.SQRT1_2)<1e-5, "close-up preservation is independently switchable");
     params.destroy(); output.destroy(); readback.destroy();
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

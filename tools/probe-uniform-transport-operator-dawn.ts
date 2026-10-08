@@ -14,7 +14,6 @@ import {writeFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createProcessRetainedDawnGPU,type NodeDawnProvider} from '../lib/harness/node-dawn-provider';
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock,readWebGPUExclusiveLockHolder} from '../lib/harness/webgpu-smoke-isolation';
 import {managedGPUDevice,gpuCompilationManagerFor} from '../lib/core/gpu-compilation-manager';
 import {requiredFluidDeviceLimits} from '../lib/core/webgpu-device-limits';
 import {sceneDocument} from '../lib/core/scene-definition';
@@ -31,9 +30,6 @@ const out=arg('out','/tmp/operator.json'),sceneId=arg('scene','minimal-power-dam
 const steps=arg('steps','18,30,360').split(',').map(Number),rounds=arg('rounds','1,2,3,4,6,8,12,16').split(',').map(Number);
 const fields=['capacity','volume','bounded'] as const;
 const values=resolveMethodValues(uniformVolumeMethod,'balanced',JSON.parse(arg('values','{}')));
-console.log('Waiting for repository WebGPU lease');
-while(await readWebGPUExclusiveLockHolder()) await new Promise(r=>setTimeout(r,500));
-await acquireWebGPUExclusiveLock('dawn-probe','uniform transport operator');
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 const owned:(GPUTexture|GPUBuffer)[]=[];
 try{
@@ -253,4 +249,4 @@ override mode:u32;override k:f32=1.0;
   for(const v of variantRows)console.log(`  variant ${v.name.padEnd(11)} R${RV} defect +${v.positiveDefect.toFixed(1)} max ${v.maxDefect.toFixed(2)} ΣBV-ΣV ${(v.massOut-massIn).toExponential(2)} excessOut ${v.excessOut.toFixed(1)} boundedExcess ${v.boundedExcess.toFixed(1)} (liquid ${v.boundedLiquid.toFixed(1)} / air ${v.boundedAir.toFixed(1)}) shift ${v.meanShift.toFixed(3)} coverage mass ${v.coverage.mass.join('/')}${v.name==='base'?` control ${v.controlDiff.toExponential(2)}`:''}`);
   await writeFile(out,JSON.stringify({sceneId,initial:arg('initial','dam'),control,dt,values,rounds,results},null,1));
  }
-}finally{solver?.destroy();for(const r of owned)r.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();for(const r of owned)r.destroy();device?.destroy();}

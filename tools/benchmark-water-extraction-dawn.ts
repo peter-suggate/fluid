@@ -58,7 +58,6 @@ import { uniformDetailExtent } from "../lib/methods/uniform/uniform-detail-field
 import { uniformGeometricSolverOptions } from "../lib/methods/uniform/uniform-geometric-options";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
 import { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 const flag = (name: string) => process.argv.find(arg => arg.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
 const method = flag("method") === "adaptive-volume" ? adaptiveMassMethod : uniformVolumeMethod;
 const render = process.argv.includes("--render") || method !== uniformVolumeMethod;
@@ -345,14 +344,6 @@ async function renderSamples(device: GPUDevice, errors: string[]) {
   } finally { water?.destroy(); solver.destroy(); }
 }
 
-// `--wait` polls for the repository-wide lease instead of failing when another Dawn process holds it.
-for (;;) {
-  try { await acquireWebGPUExclusiveLock("dawn-benchmark", render ? "water extraction render" : "water extraction classify arms"); break; }
-  catch (error) {
-    if (!process.argv.includes("--wait")) throw error;
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-}
 let device: GPUDevice | undefined;
 try {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE ?? `${process.cwd()}/node_modules/webgpu/index.js`).href);
@@ -366,4 +357,4 @@ try {
   const result = render ? await renderSamples(device, errors) : await classifyMatrix(device, errors);
   await mkdir(dirname(outputPath), { recursive: true }); await writeFile(outputPath, JSON.stringify(result, null, 2));
   if (render) console.log(JSON.stringify(result));
-} finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+} finally { device?.destroy(); }

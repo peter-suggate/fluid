@@ -8,10 +8,9 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { adaptiveMassMethod, adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { readPublishedCM12Field } from "./sparse-cm12-published-field";
 
-// Run one arm per process, under the same GPU lease as the regression suite.
+// Run one arm per process.
 // Compare the accepted volume averages, independently of the surface renderer.
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 assert.ok(modulePath, "Set WEBGPU_NODE_MODULE to the native Dawn module path");
@@ -35,7 +34,6 @@ const residentSourceHashes = await sourceHashes();
 assert.ok([0, 1, 2, 4, 8].includes(maxCell));
 assert.ok(Number.isSafeInteger(steps) && steps > 0);
 assert.ok(Number.isFinite(dt) && dt > 0);
-await acquireWebGPUExclusiveLock("dawn-probe", "pool-impact-symmetry");
 const live = new Set<GPU>();
 Object.assign(globalThis, { poolImpactSymmetryGPU: live });
 let gpu: GPU | undefined, device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
@@ -265,6 +263,6 @@ try {
     assert.deepEqual(failures, [], `Symmetry gate failed; full trajectory saved to ${output}`);
   }
 } finally {
-  solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock();
+  solver?.destroy(); device?.destroy(); 
   if (gpu) live.delete(gpu);
 }

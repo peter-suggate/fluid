@@ -30,10 +30,6 @@ import {
 } from "../lib/core/scenes";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
@@ -486,10 +482,6 @@ function summarizeFrameState(samples: readonly FrameStateSample[]) {
   };
 }
 
-await acquireWebGPUExclusiveLock(
-  "dawn-benchmark",
-  "tools/benchmark-sparse-cm12-frame.ts",
-);
 let uniform: MutableArm | undefined;
 let sparse: MutableArm | undefined;
 try {
@@ -744,5 +736,4 @@ try {
 } finally {
   uniform?.solver.destroy();
   sparse?.solver.destroy();
-  await releaseWebGPUExclusiveLock();
 }

@@ -150,7 +150,7 @@ import {
   shutdownBrowserGPUSession,
   type PaneId,
 } from "../lib/core/gpu-startup";
-import { acquirePaneGPULease, type PaneLeaseResult } from "../lib/core/session/pane-lease";
+import { acquirePaneGPULease } from "../lib/core/session/pane-lease";
 
 type Vec3 = RigidBodyState["position_m"];
 
@@ -1242,7 +1242,6 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     let initializationStarted = false;
     let stopping = false;
     let stopped = false;
-    let leaseAcquisition: Promise<PaneLeaseResult> | undefined;
     let stopPromise: Promise<void> | undefined;
     const safeViolations = () => {
       const sceneState = session.scene.getState(), methodState = session.method.getState(), ui = session.ui.getState();
@@ -1268,7 +1267,6 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       simulation.setRunState("paused");
       cancelAnimationFrame(frame);
       if (publishStatus) diagnostics.set({ gpuStatus: { state: "stopping", label: `${label} — stopping WebGPU and draining pending work`, resource: webGPUPlatformResourcePlugin } });
-      const pendingLease = leaseAcquisition;
       const releasedLabel = label.includes("device released") ? label : `${label}; device released — safe to close this tab`;
       const sceneState = session.scene.getState();
       const methodState = session.method.getState();
@@ -1288,7 +1286,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         maxDt_s: failureScene.numerics.maxDt_s,
       });
       stopPromise = (async () => {
-        await shutdownBrowserGPUSession(renderer, pendingLease, releaseGPULease);
+        await shutdownBrowserGPUSession(renderer, releaseGPULease);
         releaseGPULease = undefined;
         stopping = false;
         stopped = true;
@@ -1310,23 +1308,14 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       initializationStarted = true;
       window.removeEventListener(GPU_MANUAL_START_EVENT, manualStart);
       unsubscribeAutomaticStart();
-      diagnostics.set({ gpuStatus: { state: "initializing", label: "Acquiring exclusive browser WebGPU lease", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup", resource: webGPUPlatformResourcePlugin } });
-      // One page-exclusive Web Lock, leased per pane. A second *tab* is still
-      // refused by the lock itself; a second pane rides the lock this page
-      // already holds, and the lock is released when the last pane lets go.
-      const acquisition = acquirePaneGPULease(paneId);
-      leaseAcquisition = acquisition;
-      const lease = await acquisition;
-      if (leaseAcquisition === acquisition) leaseAcquisition = undefined;
-      if (!alive || stopping || stopped) { if (lease.status === "acquired") lease.release(); return; }
+      const lease = acquirePaneGPULease(paneId);
       if (lease.status !== "acquired") {
         initializationStarted = false;
-        if (safeBringup || lease.status !== "unsupported") {
-          diagnostics.set({ gpuStatus: { state: "manual", label: `WebGPU start refused: ${lease.message}`, resource: webGPUPlatformResourcePlugin } });
-          window.addEventListener(GPU_MANUAL_START_EVENT, manualStart);
-          return;
-        }
-      } else releaseGPULease = lease.release;
+        diagnostics.set({ gpuStatus: { state: "manual", label: `WebGPU start refused: ${lease.message}`, resource: webGPUPlatformResourcePlugin } });
+        window.addEventListener(GPU_MANUAL_START_EVENT, manualStart);
+        return;
+      }
+      releaseGPULease = lease.release;
       diagnostics.set({ gpuStatus: { state: "initializing", label: "Initializing WebGPU", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup", resource: webGPUPlatformResourcePlugin } });
       void renderer.initialize().then(async () => {
       if (!alive || stopping || stopped) return;

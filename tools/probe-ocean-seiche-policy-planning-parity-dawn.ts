@@ -6,10 +6,6 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import { createOceanSeicheScene } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
-import {
   adaptiveMassMethod,
   adaptiveMassSolverOptions,
 } from "../lib/methods/adaptive-volume/method";
@@ -88,8 +84,6 @@ async function runArm(device: GPUDevice, compact: boolean) {
   }
 }
 
-await acquireWebGPUExclusiveLock("dawn-probe",
-  "tools/probe-ocean-seiche-policy-planning-parity-dawn.ts");
 let device: GPUDevice | undefined;
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE
@@ -129,5 +123,4 @@ try {
     && !entry.activityDifferent && entry.workDifferences.length === 0));
 } finally {
   device?.destroy();
-  await releaseWebGPUExclusiveLock();
 }

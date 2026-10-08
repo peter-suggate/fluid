@@ -13,7 +13,6 @@ import { gpuCompilationManagerFor } from "../lib/core/gpu-compilation-manager";
 import { fluidExecutionDeviceFeatures } from "../lib/core/gpu-startup";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { uniformMethod } from "../lib/methods/uniform/method";
 
@@ -29,7 +28,6 @@ const output = resolve(arg("out", `artifacts/scene-loading/${methodId}.json`));
 const report: Record<string, unknown> = { methodId, sceneId, nextSceneId, repeats, backend: process.env.FLUID_WEBGPU_BACKEND ?? "metal", runs: [] };
 const runs = report.runs as Record<string, unknown>[];
 const save = () => { mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, JSON.stringify(report, null, 2) + "\n"); };
-await acquireWebGPUExclusiveLock("dawn-probe", `scene loading ${methodId}`);
 let device: GPUDevice | undefined;
 let solver: GPUSolverInstance | undefined;
 let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -104,6 +102,6 @@ try {
   report.error = error instanceof Error ? error.stack : String(error); process.exitCode = 1;
 } finally {
   if (heartbeat) clearInterval(heartbeat);
-  solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); save();
+  solver?.destroy(); device?.destroy(); save();
   console.log(JSON.stringify({ output, error: report.error }));
 }

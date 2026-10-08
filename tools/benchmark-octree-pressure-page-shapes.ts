@@ -1,12 +1,6 @@
 import { pathToFileURL } from "node:url";
 import { GPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 
-await acquireWebGPUExclusiveLock("dawn-benchmark", "tools/benchmark-octree-pressure-page-shapes.ts");
-try {
 const modulePath = process.env.WEBGPU_NODE_MODULE ?? `${process.cwd()}/node_modules/webgpu/index.js`;
 const dawn = await import(pathToFileURL(modulePath).href) as {
   create(options: string[]): GPU;
@@ -109,6 +103,3 @@ for (const v of variants) {
   v.params.destroy(); v.output.destroy();
 }
 device.destroy();
-} finally {
-  await releaseWebGPUExclusiveLock();
-}

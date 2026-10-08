@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {refinementRegionLattice} from "../lib/core/refinement-regions";
@@ -22,7 +21,6 @@ import {uniformDetailField} from "../lib/methods/uniform/uniform-detail-fields";
 const STEPS=Number(process.env.UNIFORM_DYNAMIC_LANE_STEPS??30);
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("dynamic coarsening follows the 128³ dam break on h/4h ownership without drift or recompilation",{timeout:1200000},async t=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform dynamic coarsening lane");
  let device:GPUDevice|undefined,solver:GPUSolverInstance|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
@@ -113,14 +111,13 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   const compiled=allocations.filter(a=>!a.startsWith("createBuffer")&&!a.startsWith("createTexture"));
   assert.deepEqual(compiled,[],"relayout compiled shaders or pipelines");
   t.diagnostic(`allocations after frame 2: ${allocations.length ? allocations.join("; ") : "none"}`);
- }finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{solver?.destroy();device?.destroy();}
 });
 
 // A ball dropped into far 4h air: the host refines its footprint for the
 // frame that seeds it, and the census then decides its ownership. Its mass
 // must arrive whole.
 (modulePath?test:test.skip)("dynamic coarsening takes a liquid ball dropped into 4h air",{timeout:600000},async t=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform dynamic coarsening drop");
  let device:GPUDevice|undefined,solver:GPUSolverInstance|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
@@ -142,5 +139,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   t.diagnostic(`fine tiles ${fineBefore} -> ${info.uniformMixedFineTiles}; added ${added.toFixed(1)} of ${expected.toFixed(1)} cells`);
   assert.ok(Math.abs(added-expected)<.02*expected,`drop added ${added} cells, expected ${expected}`);
   assert.deepEqual(errors,[]);
- }finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{solver?.destroy();device?.destroy();}
 });

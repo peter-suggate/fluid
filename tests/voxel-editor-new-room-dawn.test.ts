@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createEmptyScene } from "../lib/core/empty-scene";
 import { sceneWithSolidStroke } from "../lib/core/solid-world";
@@ -14,7 +13,6 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
 test("default New scene accepts a depth-eight Box at renderer refinement and Undo clears its local occupancy", {
   skip: !modulePath && "set WEBGPU_NODE_MODULE for the default editor native regression", timeout: 180_000,
 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "voxel-editor-new-room");
   let device: GPUDevice | undefined, display: WebGPULiveSvoScene | undefined;
   try {
     const dawn = await import(pathToFileURL(modulePath!).href) as { create(options: string[]): GPU; globals: Record<string, unknown> };
@@ -85,6 +83,5 @@ test("default New scene accepts a depth-eight Box at renderer refinement and Und
     assert.equal(await device.popErrorScope(), null);
   } finally {
     display?.destroy(); if (device) { await device.queue.onSubmittedWorkDone(); device.destroy(); }
-    await releaseWebGPUExclusiveLock();
   }
 });

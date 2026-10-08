@@ -11,7 +11,6 @@ import { createAnalyticMotionScene } from "../lib/core/analytic-motion-scenes";
 import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 const arg = (name:string, fallback:string) => process.argv.find(v=>v.startsWith(`--${name}=`))?.slice(name.length+3) ?? fallback;
@@ -23,7 +22,6 @@ const modulePath=process.env.WEBGPU_NODE_MODULE ?? resolve("node_modules/webgpu/
 const files=["lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", "lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts"];
 const fingerprint=()=>Object.fromEntries(files.map(file=>[file,createHash("sha256").update(readFileSync(file)).digest("hex")]));
 const beforeFingerprint=fingerprint();
-await acquireWebGPUExclusiveLock("dawn-probe", "face-advection-vortex");
 let device:GPUDevice|undefined, solver:WebGPUAdaptiveMassSolver|undefined;
 const captures=new Map<string,GPUBuffer>();
 try {
@@ -145,5 +143,4 @@ try {
   invalidateGPUCompilationManager(device,"Steady vortex probe complete");
   await manager.whenIdle();await device.queue.onSubmittedWorkDone();device.destroy();
  }
- await releaseWebGPUExclusiveLock();
 }

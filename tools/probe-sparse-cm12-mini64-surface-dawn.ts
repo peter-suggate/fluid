@@ -18,8 +18,6 @@ import { createMinimalPowerDamBreak32Scene,
   createSparseCM12LongDamBreakScene } from "../lib/core/scenes";
 import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
   "../lib/harness/node-dawn-provider";
 import { adaptiveMassMethod } from
@@ -566,8 +564,6 @@ async function writeHeightImage(heights: Float32Array, nx: number, ny: number,
     .resize(nx * 8, nz * 8, { kernel: "nearest" }).png().toFile(destination);
 }
 
-await acquireWebGPUExclusiveLock("dawn-probe",
-  "tools/probe-sparse-cm12-mini64-surface-dawn.ts");
 let device: GPUDevice | undefined;
 let solver: WebGPUAdaptiveMassSolver | undefined;
 try {
@@ -888,5 +884,5 @@ try {
         deepTopSurface.maximumNeighbourStepCells} cells`);
   }
 } finally {
-  solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();
+  solver?.destroy();device?.destroy();
 }

@@ -8,8 +8,7 @@
  *
  * Usage:
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
- *     node --import tsx tools/run-webgpu-exclusive.ts \
- *     --import tsx tools/probe-symmetric-adaptive-surface.ts
+ *     node --import tsx tools/probe-symmetric-adaptive-surface.ts
  *
  * Environment:
  *   FLUID_SURFACE_AUDIT_STEPS  accepted steps to inspect (default 4)

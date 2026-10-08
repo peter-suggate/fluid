@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import type { SparseCM12InternedRefLookupLayout } from
   "../lib/methods/adaptive-volume/sparse-cm12-interned-ref-lookup";
 import { createSparseCM12InternedRefLookupWGSL } from
@@ -35,7 +33,6 @@ fn checkIRL1(){let count=fixtureIBOInstantiationCount(0u,0u);
   atomicStore(&output[0],count|entry.y|reference.x);}
 `;
 
-await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-interned-ref-lookup");
 let gpu: GPU | undefined;
 let device: GPUDevice | undefined;
 try {
@@ -59,5 +56,5 @@ try {
   console.log(JSON.stringify({ schema: "sparse-cm12-interned-ref-lookup-wgsl/v1",
     maximumEntriesPerSide: layout.maximumEntriesPerSide, passed: true }));
 } finally {
-  device?.destroy();await releaseWebGPUExclusiveLock();void gpu;
+  device?.destroy();void gpu;
 }

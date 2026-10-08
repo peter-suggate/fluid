@@ -1,8 +1,4 @@
 import { pathToFileURL } from "node:url";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 
 export const DENSE_CACHE_MINI_DIMENSIONS = Object.freeze([
   [16, 16, 16], [8, 8, 8], [4, 4, 4], [2, 2, 2], [1, 1, 1],
@@ -386,256 +382,251 @@ async function main(): Promise<void> {
     || !Number.isSafeInteger(samples) || samples < 1) {
     throw new RangeError("Dense cache benchmark repeats and samples must be positive integers");
   }
-  await acquireWebGPUExclusiveLock("dawn-benchmark", "tools/benchmark-dense-hierarchy-cache.ts");
-  try {
-    const modulePath = process.env.WEBGPU_NODE_MODULE
-      ?? `${process.cwd()}/node_modules/webgpu/index.js`;
-    const dawn = await import(pathToFileURL(modulePath).href) as {
-      create(options: string[]): GPU;
-      globals: Record<string, unknown>;
-    };
-    Object.assign(globalThis, dawn.globals);
-    const backend = process.env.WEBGPU_BACKEND ?? "metal";
-    const gpu = dawn.create([`backend=${backend}`]);
-    const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-    if (!adapter?.features.has("timestamp-query")) {
-      throw new Error("Dense hierarchy cache benchmark requires timestamp-query");
+  const modulePath = process.env.WEBGPU_NODE_MODULE
+    ?? `${process.cwd()}/node_modules/webgpu/index.js`;
+  const dawn = await import(pathToFileURL(modulePath).href) as {
+    create(options: string[]): GPU;
+    globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, dawn.globals);
+  const backend = process.env.WEBGPU_BACKEND ?? "metal";
+  const gpu = dawn.create([`backend=${backend}`]);
+  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+  if (!adapter?.features.has("timestamp-query")) {
+    throw new Error("Dense hierarchy cache benchmark requires timestamp-query");
+  }
+  const device = await adapter.requestDevice({ requiredFeatures: ["timestamp-query"] });
+  const hierarchy = createDenseCacheFrozenMini();
+  const makeStorage = (label: string, size: number, readback = false) => device.createBuffer({
+    label, size: Math.max(4, size), usage: readback
+      ? GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      : GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+  });
+  const variants: RuntimeVariant[] = [];
+  for (const layout of DENSE_CACHE_LAYOUTS) {
+    const plan = denseCachePhysicalPlan(hierarchy, layout);
+    const packedFlags = new Uint32Array(plan.totalPhysicalSlots);
+    const packedValues = new Float32Array(plan.totalPhysicalSlots);
+    const packedDiagonal = new Float32Array(plan.totalPhysicalSlots);
+    for (let level = 0; level < hierarchy.dimensions.length; level += 1) {
+      const d = hierarchy.dimensions[level]!;
+      const logicalBase = hierarchy.logicalBases[level]!;
+      for (let local = 0; local < hierarchy.volumes[level]!; local += 1) {
+        const physical = denseCachePhysicalIndex(plan, d, level, coordinate(local, d));
+        packedFlags[physical] = hierarchy.canonicalFlags[logicalBase + local]!;
+        packedValues[physical] = hierarchy.canonicalValues[logicalBase + local]!;
+        packedDiagonal[physical] = hierarchy.canonicalDiagonal[logicalBase + local]!;
+      }
     }
-    const device = await adapter.requestDevice({ requiredFeatures: ["timestamp-query"] });
-    const hierarchy = createDenseCacheFrozenMini();
-    const makeStorage = (label: string, size: number, readback = false) => device.createBuffer({
-      label, size: Math.max(4, size), usage: readback
-        ? GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-        : GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    const flags = makeStorage(`${layout} flags`, packedFlags.byteLength);
+    const values = makeStorage(`${layout} values`, packedValues.byteLength);
+    const diagonal = makeStorage(`${layout} diagonal`, packedDiagonal.byteLength);
+    const output = makeStorage(`${layout} output`, plan.totalPhysicalSlots * 4);
+    device.queue.writeBuffer(flags, 0, packedFlags);
+    device.queue.writeBuffer(values, 0, packedValues);
+    device.queue.writeBuffer(diagonal, 0, packedDiagonal);
+    let worklist: GPUBuffer | undefined;
+    if (layout === "xfast-worklist") {
+      worklist = makeStorage("Dense cache sorted occupied worklist", hierarchy.worklist.byteLength);
+      device.queue.writeBuffer(worklist, 0,
+        hierarchy.worklist as Uint32Array<ArrayBuffer>);
+    }
+    variants.push({ layout, plan, flags, values, diagonal, output, worklist });
+  }
+
+  const querySet = device.createQuerySet({ type: "timestamp", count: 2 });
+  const resolve = device.createBuffer({
+    size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+  });
+  const timestampRead = makeStorage("Dense cache timestamp readback", 16, true);
+  const results: Array<Record<string, unknown>> = [];
+  const expected = Object.fromEntries(DENSE_CACHE_KERNELS.map((kernel) => [
+    kernel, canonicalExpected(hierarchy, kernel),
+  ])) as Record<DenseCacheKernel, Float32Array>;
+  const expectedHashes = Object.fromEntries(DENSE_CACHE_KERNELS.map((kernel) => [
+    kernel, denseCacheCoordinateHash(expected[kernel]),
+  ]));
+
+  for (const workgroupSize of DENSE_CACHE_WORKGROUP_SIZES) for (const runtime of variants) {
+    const module = device.createShaderModule({
+      label: `${runtime.layout} wg${workgroupSize}`,
+      code: benchmarkShader(runtime.layout, workgroupSize),
     });
-    const variants: RuntimeVariant[] = [];
-    for (const layout of DENSE_CACHE_LAYOUTS) {
-      const plan = denseCachePhysicalPlan(hierarchy, layout);
-      const packedFlags = new Uint32Array(plan.totalPhysicalSlots);
-      const packedValues = new Float32Array(plan.totalPhysicalSlots);
-      const packedDiagonal = new Float32Array(plan.totalPhysicalSlots);
+    const compilation = await module.getCompilationInfo();
+    const errors = compilation.messages.filter((message) => message.type === "error");
+    if (errors.length > 0) {
+      throw new Error(`${runtime.layout} wg${workgroupSize} shader: `
+        + errors.map((message) => `${message.lineNum}:${message.linePos} ${message.message}`).join(" | "));
+    }
+    const pipelines = Object.fromEntries(await Promise.all(
+      [...DENSE_CACHE_KERNELS, "empty"].map(async (entryPoint) => [entryPoint,
+        await device.createComputePipelineAsync({
+          label: `${runtime.layout} ${entryPoint} wg${workgroupSize}`,
+          layout: "auto", compute: {
+            module,
+            entryPoint: entryPoint === "restrict" ? "restrictKernel"
+              : entryPoint === "prolong" ? "prolongKernel"
+                : entryPoint,
+          },
+        })]),
+    )) as Record<DenseCacheKernel | "empty", GPUComputePipeline>;
+
+    for (const kernel of DENSE_CACHE_KERNELS) {
+      const levelDispatches = dispatches(
+        hierarchy, runtime.plan, runtime.layout, kernel, workgroupSize,
+      );
+      const parameterBuffers: GPUBuffer[] = [];
+      const groups: GPUBindGroup[] = [];
+      for (const record of levelDispatches) {
+        const params = device.createBuffer({
+          label: `${runtime.layout} ${kernel} L${record.level} params`,
+          size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(params, 0, record.params as Uint32Array<ArrayBuffer>);
+        parameterBuffers.push(params);
+        const entries: GPUBindGroupEntry[] = [
+          { binding: 0, resource: { buffer: params } },
+          { binding: 1, resource: { buffer: runtime.flags } },
+          { binding: 2, resource: { buffer: runtime.values } },
+          { binding: 4, resource: { buffer: runtime.output } },
+        ];
+        if (kernel === "apply") {
+          entries.push({ binding: 3, resource: { buffer: runtime.diagonal } });
+        }
+        if (runtime.worklist) entries.push({ binding: 5, resource: { buffer: runtime.worklist } });
+        groups.push(device.createBindGroup({
+          layout: pipelines[kernel].getBindGroupLayout(0), entries,
+        }));
+      }
+
+      const run = async (empty: boolean, iterations: number, readOutput: boolean) => {
+        const encoder = device.createCommandEncoder();
+        if (readOutput) encoder.clearBuffer(runtime.output);
+        const pass = encoder.beginComputePass({
+          timestampWrites: {
+            querySet,
+            beginningOfPassWriteIndex: 0,
+            endOfPassWriteIndex: 1,
+          },
+        });
+        pass.setPipeline(empty ? pipelines.empty : pipelines[kernel]);
+        for (let repeat = 0; repeat < iterations; repeat += 1) {
+          for (let index = 0; index < levelDispatches.length; index += 1) {
+            if (!empty) pass.setBindGroup(0, groups[index]!);
+            pass.dispatchWorkgroups(levelDispatches[index]!.workgroups);
+          }
+        }
+        pass.end();
+        encoder.resolveQuerySet(querySet, 0, 2, resolve, 0);
+        encoder.copyBufferToBuffer(resolve, 0, timestampRead, 0, 16);
+        let outputRead: GPUBuffer | undefined;
+        if (readOutput) {
+          outputRead = makeStorage("Dense cache output readback", runtime.output.size, true);
+          encoder.copyBufferToBuffer(runtime.output, 0, outputRead, 0, runtime.output.size);
+        }
+        device.queue.submit([encoder.finish()]);
+        await timestampRead.mapAsync(GPUMapMode.READ);
+        const times = new BigUint64Array(timestampRead.getMappedRange().slice(0));
+        timestampRead.unmap();
+        const elapsed = Number(times[1]! - times[0]!) / 1e6 / iterations;
+        let physicalOutput: Float32Array | undefined;
+        if (outputRead) {
+          await outputRead.mapAsync(GPUMapMode.READ);
+          physicalOutput = new Float32Array(outputRead.getMappedRange().slice(0));
+          outputRead.unmap(); outputRead.destroy();
+        }
+        return { elapsed, physicalOutput };
+      };
+      // Large single command buffers trigger a native Dawn/Metal failure for this
+      // dispatch-heavy matrix. Preserve the requested sample population while
+      // accumulating timestamp-only chunks below that backend limit.
+      const runBatch = async (empty: boolean, iterations: number) => {
+        let weightedElapsed = 0;
+        for (let remaining = iterations; remaining > 0;) {
+          const chunk = Math.min(8, remaining);
+          weightedElapsed += (await run(empty, chunk, false)).elapsed * chunk;
+          remaining -= chunk;
+        }
+        return weightedElapsed / iterations;
+      };
+
+      const validation = await run(false, 1, true);
+      const canonical = new Float32Array(hierarchy.totalLogicalSlots);
       for (let level = 0; level < hierarchy.dimensions.length; level += 1) {
         const d = hierarchy.dimensions[level]!;
         const logicalBase = hierarchy.logicalBases[level]!;
         for (let local = 0; local < hierarchy.volumes[level]!; local += 1) {
-          const physical = denseCachePhysicalIndex(plan, d, level, coordinate(local, d));
-          packedFlags[physical] = hierarchy.canonicalFlags[logicalBase + local]!;
-          packedValues[physical] = hierarchy.canonicalValues[logicalBase + local]!;
-          packedDiagonal[physical] = hierarchy.canonicalDiagonal[logicalBase + local]!;
+          canonical[logicalBase + local] = validation.physicalOutput![
+            denseCachePhysicalIndex(runtime.plan, d, level, coordinate(local, d))
+          ]!;
         }
       }
-      const flags = makeStorage(`${layout} flags`, packedFlags.byteLength);
-      const values = makeStorage(`${layout} values`, packedValues.byteLength);
-      const diagonal = makeStorage(`${layout} diagonal`, packedDiagonal.byteLength);
-      const output = makeStorage(`${layout} output`, plan.totalPhysicalSlots * 4);
-      device.queue.writeBuffer(flags, 0, packedFlags);
-      device.queue.writeBuffer(values, 0, packedValues);
-      device.queue.writeBuffer(diagonal, 0, packedDiagonal);
-      let worklist: GPUBuffer | undefined;
-      if (layout === "xfast-worklist") {
-        worklist = makeStorage("Dense cache sorted occupied worklist", hierarchy.worklist.byteLength);
-        device.queue.writeBuffer(worklist, 0,
-          hierarchy.worklist as Uint32Array<ArrayBuffer>);
+      const actualWords = new Uint32Array(canonical.buffer);
+      const expectedWords = new Uint32Array(expected[kernel].buffer);
+      for (let index = 0; index < actualWords.length; index += 1) {
+        if (actualWords[index] !== expectedWords[index]) {
+          throw new Error(`${runtime.layout} ${kernel} wg${workgroupSize} differs at canonical slot ${index}: `
+            + `0x${actualWords[index]!.toString(16)} != 0x${expectedWords[index]!.toString(16)}`);
+        }
       }
-      variants.push({ layout, plan, flags, values, diagonal, output, worklist });
-    }
-
-    const querySet = device.createQuerySet({ type: "timestamp", count: 2 });
-    const resolve = device.createBuffer({
-      size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
-    });
-    const timestampRead = makeStorage("Dense cache timestamp readback", 16, true);
-    const results: Array<Record<string, unknown>> = [];
-    const expected = Object.fromEntries(DENSE_CACHE_KERNELS.map((kernel) => [
-      kernel, canonicalExpected(hierarchy, kernel),
-    ])) as Record<DenseCacheKernel, Float32Array>;
-    const expectedHashes = Object.fromEntries(DENSE_CACHE_KERNELS.map((kernel) => [
-      kernel, denseCacheCoordinateHash(expected[kernel]),
-    ]));
-
-    for (const workgroupSize of DENSE_CACHE_WORKGROUP_SIZES) for (const runtime of variants) {
-      const module = device.createShaderModule({
-        label: `${runtime.layout} wg${workgroupSize}`,
-        code: benchmarkShader(runtime.layout, workgroupSize),
+      const actualHash = denseCacheCoordinateHash(canonical);
+      await runBatch(false, repeats); await runBatch(true, repeats);
+      const kernelSamples: number[] = [], emptySamples: number[] = [];
+      for (let sample = 0; sample < samples; sample += 1) {
+        if ((sample & 1) === 0) {
+          kernelSamples.push(await runBatch(false, repeats));
+          emptySamples.push(await runBatch(true, repeats));
+        } else {
+          emptySamples.push(await runBatch(true, repeats));
+          kernelSamples.push(await runBatch(false, repeats));
+        }
+      }
+      const gross = median(kernelSamples), overhead = median(emptySamples);
+      results.push({
+        layout: runtime.layout, kernel, workgroupSize,
+        levels: levelDispatches.length,
+        workgroupsPerApplication: levelDispatches.reduce((sum, record) => sum + record.workgroups, 0),
+        grossMicroseconds: gross * 1000,
+        emptyMicroseconds: overhead * 1000,
+        netMicroseconds: (gross - overhead) * 1000,
+        timingResolved: gross > overhead,
+        coordinateHash: actualHash,
+        bitExact: actualHash === expectedHashes[kernel],
       });
-      const compilation = await module.getCompilationInfo();
-      const errors = compilation.messages.filter((message) => message.type === "error");
-      if (errors.length > 0) {
-        throw new Error(`${runtime.layout} wg${workgroupSize} shader: `
-          + errors.map((message) => `${message.lineNum}:${message.linePos} ${message.message}`).join(" | "));
-      }
-      const pipelines = Object.fromEntries(await Promise.all(
-        [...DENSE_CACHE_KERNELS, "empty"].map(async (entryPoint) => [entryPoint,
-          await device.createComputePipelineAsync({
-            label: `${runtime.layout} ${entryPoint} wg${workgroupSize}`,
-            layout: "auto", compute: {
-              module,
-              entryPoint: entryPoint === "restrict" ? "restrictKernel"
-                : entryPoint === "prolong" ? "prolongKernel"
-                  : entryPoint,
-            },
-          })]),
-      )) as Record<DenseCacheKernel | "empty", GPUComputePipeline>;
-
-      for (const kernel of DENSE_CACHE_KERNELS) {
-        const levelDispatches = dispatches(
-          hierarchy, runtime.plan, runtime.layout, kernel, workgroupSize,
-        );
-        const parameterBuffers: GPUBuffer[] = [];
-        const groups: GPUBindGroup[] = [];
-        for (const record of levelDispatches) {
-          const params = device.createBuffer({
-            label: `${runtime.layout} ${kernel} L${record.level} params`,
-            size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-          });
-          device.queue.writeBuffer(params, 0, record.params as Uint32Array<ArrayBuffer>);
-          parameterBuffers.push(params);
-          const entries: GPUBindGroupEntry[] = [
-            { binding: 0, resource: { buffer: params } },
-            { binding: 1, resource: { buffer: runtime.flags } },
-            { binding: 2, resource: { buffer: runtime.values } },
-            { binding: 4, resource: { buffer: runtime.output } },
-          ];
-          if (kernel === "apply") {
-            entries.push({ binding: 3, resource: { buffer: runtime.diagonal } });
-          }
-          if (runtime.worklist) entries.push({ binding: 5, resource: { buffer: runtime.worklist } });
-          groups.push(device.createBindGroup({
-            layout: pipelines[kernel].getBindGroupLayout(0), entries,
-          }));
-        }
-
-        const run = async (empty: boolean, iterations: number, readOutput: boolean) => {
-          const encoder = device.createCommandEncoder();
-          if (readOutput) encoder.clearBuffer(runtime.output);
-          const pass = encoder.beginComputePass({
-            timestampWrites: {
-              querySet,
-              beginningOfPassWriteIndex: 0,
-              endOfPassWriteIndex: 1,
-            },
-          });
-          pass.setPipeline(empty ? pipelines.empty : pipelines[kernel]);
-          for (let repeat = 0; repeat < iterations; repeat += 1) {
-            for (let index = 0; index < levelDispatches.length; index += 1) {
-              if (!empty) pass.setBindGroup(0, groups[index]!);
-              pass.dispatchWorkgroups(levelDispatches[index]!.workgroups);
-            }
-          }
-          pass.end();
-          encoder.resolveQuerySet(querySet, 0, 2, resolve, 0);
-          encoder.copyBufferToBuffer(resolve, 0, timestampRead, 0, 16);
-          let outputRead: GPUBuffer | undefined;
-          if (readOutput) {
-            outputRead = makeStorage("Dense cache output readback", runtime.output.size, true);
-            encoder.copyBufferToBuffer(runtime.output, 0, outputRead, 0, runtime.output.size);
-          }
-          device.queue.submit([encoder.finish()]);
-          await timestampRead.mapAsync(GPUMapMode.READ);
-          const times = new BigUint64Array(timestampRead.getMappedRange().slice(0));
-          timestampRead.unmap();
-          const elapsed = Number(times[1]! - times[0]!) / 1e6 / iterations;
-          let physicalOutput: Float32Array | undefined;
-          if (outputRead) {
-            await outputRead.mapAsync(GPUMapMode.READ);
-            physicalOutput = new Float32Array(outputRead.getMappedRange().slice(0));
-            outputRead.unmap(); outputRead.destroy();
-          }
-          return { elapsed, physicalOutput };
-        };
-        // Large single command buffers trigger a native Dawn/Metal failure for this
-        // dispatch-heavy matrix. Preserve the requested sample population while
-        // accumulating timestamp-only chunks below that backend limit.
-        const runBatch = async (empty: boolean, iterations: number) => {
-          let weightedElapsed = 0;
-          for (let remaining = iterations; remaining > 0;) {
-            const chunk = Math.min(8, remaining);
-            weightedElapsed += (await run(empty, chunk, false)).elapsed * chunk;
-            remaining -= chunk;
-          }
-          return weightedElapsed / iterations;
-        };
-
-        const validation = await run(false, 1, true);
-        const canonical = new Float32Array(hierarchy.totalLogicalSlots);
-        for (let level = 0; level < hierarchy.dimensions.length; level += 1) {
-          const d = hierarchy.dimensions[level]!;
-          const logicalBase = hierarchy.logicalBases[level]!;
-          for (let local = 0; local < hierarchy.volumes[level]!; local += 1) {
-            canonical[logicalBase + local] = validation.physicalOutput![
-              denseCachePhysicalIndex(runtime.plan, d, level, coordinate(local, d))
-            ]!;
-          }
-        }
-        const actualWords = new Uint32Array(canonical.buffer);
-        const expectedWords = new Uint32Array(expected[kernel].buffer);
-        for (let index = 0; index < actualWords.length; index += 1) {
-          if (actualWords[index] !== expectedWords[index]) {
-            throw new Error(`${runtime.layout} ${kernel} wg${workgroupSize} differs at canonical slot ${index}: `
-              + `0x${actualWords[index]!.toString(16)} != 0x${expectedWords[index]!.toString(16)}`);
-          }
-        }
-        const actualHash = denseCacheCoordinateHash(canonical);
-        await runBatch(false, repeats); await runBatch(true, repeats);
-        const kernelSamples: number[] = [], emptySamples: number[] = [];
-        for (let sample = 0; sample < samples; sample += 1) {
-          if ((sample & 1) === 0) {
-            kernelSamples.push(await runBatch(false, repeats));
-            emptySamples.push(await runBatch(true, repeats));
-          } else {
-            emptySamples.push(await runBatch(true, repeats));
-            kernelSamples.push(await runBatch(false, repeats));
-          }
-        }
-        const gross = median(kernelSamples), overhead = median(emptySamples);
-        results.push({
-          layout: runtime.layout, kernel, workgroupSize,
-          levels: levelDispatches.length,
-          workgroupsPerApplication: levelDispatches.reduce((sum, record) => sum + record.workgroups, 0),
-          grossMicroseconds: gross * 1000,
-          emptyMicroseconds: overhead * 1000,
-          netMicroseconds: (gross - overhead) * 1000,
-          timingResolved: gross > overhead,
-          coordinateHash: actualHash,
-          bitExact: actualHash === expectedHashes[kernel],
-        });
-        parameterBuffers.forEach((buffer) => buffer.destroy());
-      }
+      parameterBuffers.forEach((buffer) => buffer.destroy());
     }
-
-    const winners = Object.fromEntries(DENSE_CACHE_KERNELS.map((kernel) => {
-      const candidates = results.filter((result) => result.kernel === kernel)
-        .filter((result) => result.timingResolved)
-        .sort((left, right) => Number(left.netMicroseconds) - Number(right.netMicroseconds));
-      return [kernel, candidates[0] ?? { unresolved: true }];
-    }));
-    console.log(JSON.stringify({
-      benchmark: "factor1-dense-hierarchy-cache",
-      backend,
-      adapter: Object.fromEntries(Object.entries(adapter.info)),
-      configuration: {
-        dimensions: hierarchy.dimensions,
-        occupiedCounts: hierarchy.occupiedCounts,
-        totalLogicalSlots: hierarchy.totalLogicalSlots,
-        repeats, samples,
-        methodology: "median timestamp batch per application minus matched empty-dispatch batch; "
-          + "batches chunked to at most 8 applications for Dawn/Metal stability",
-      },
-      physicalSlots: Object.fromEntries(variants.map((variant) =>
-        [variant.layout, variant.plan.totalPhysicalSlots])),
-      expectedCoordinateHashes: expectedHashes,
-      results,
-      winners,
-    }, null, 2));
-
-    for (const variant of variants) {
-      variant.flags.destroy(); variant.values.destroy(); variant.diagonal.destroy();
-      variant.output.destroy(); variant.worklist?.destroy();
-    }
-    timestampRead.destroy(); resolve.destroy(); querySet.destroy(); device.destroy();
-  } finally {
-    await releaseWebGPUExclusiveLock();
   }
+
+  const winners = Object.fromEntries(DENSE_CACHE_KERNELS.map((kernel) => {
+    const candidates = results.filter((result) => result.kernel === kernel)
+      .filter((result) => result.timingResolved)
+      .sort((left, right) => Number(left.netMicroseconds) - Number(right.netMicroseconds));
+    return [kernel, candidates[0] ?? { unresolved: true }];
+  }));
+  console.log(JSON.stringify({
+    benchmark: "factor1-dense-hierarchy-cache",
+    backend,
+    adapter: Object.fromEntries(Object.entries(adapter.info)),
+    configuration: {
+      dimensions: hierarchy.dimensions,
+      occupiedCounts: hierarchy.occupiedCounts,
+      totalLogicalSlots: hierarchy.totalLogicalSlots,
+      repeats, samples,
+      methodology: "median timestamp batch per application minus matched empty-dispatch batch; "
+        + "batches chunked to at most 8 applications for Dawn/Metal stability",
+    },
+    physicalSlots: Object.fromEntries(variants.map((variant) =>
+      [variant.layout, variant.plan.totalPhysicalSlots])),
+    expectedCoordinateHashes: expectedHashes,
+    results,
+    winners,
+  }, null, 2));
+
+  for (const variant of variants) {
+    variant.flags.destroy(); variant.values.destroy(); variant.diagonal.destroy();
+    variant.output.destroy(); variant.worklist?.destroy();
+  }
+  timestampRead.destroy(); resolve.destroy(); querySet.destroy(); device.destroy();
 }
 
 const invokedPath = process.argv[1];

@@ -15,10 +15,6 @@ import {
 } from "../lib/methods/adaptive-volume/two-tile-composite-grid";
 import { WebGPUTwoTilePressureOperator } from
   "../lib/methods/adaptive-volume/webgpu-two-tile-pressure-operator";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 
 interface ProbeError {
   readonly name: string;
@@ -142,47 +138,42 @@ const executeVariant = async (
   };
 };
 
-await acquireWebGPUExclusiveLock("dawn-probe", "tools/probe-adaptive-mass-two-tile-pressure-gpu.ts");
+const modulePath = process.env.WEBGPU_NODE_MODULE
+  ?? `${process.cwd()}/node_modules/webgpu/index.js`;
+const dawn = await import(pathToFileURL(modulePath).href) as {
+  create(options: string[]): GPU;
+  globals: Record<string, unknown>;
+};
+Object.assign(globalThis, dawn.globals);
+const backend = process.env.WEBGPU_BACKEND ?? "metal";
+const gpu = dawn.create([`backend=${backend}`]);
+const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+if (!adapter) throw new Error(`No Dawn WebGPU adapter is available for backend ${backend}`);
+const device = await adapter.requestDevice();
 try {
-  const modulePath = process.env.WEBGPU_NODE_MODULE
-    ?? `${process.cwd()}/node_modules/webgpu/index.js`;
-  const dawn = await import(pathToFileURL(modulePath).href) as {
-    create(options: string[]): GPU;
-    globals: Record<string, unknown>;
-  };
-  Object.assign(globalThis, dawn.globals);
-  const backend = process.env.WEBGPU_BACKEND ?? "metal";
-  const gpu = dawn.create([`backend=${backend}`]);
-  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-  if (!adapter) throw new Error(`No Dawn WebGPU adapter is available for backend ${backend}`);
-  const device = await adapter.requestDevice();
-  try {
-    const results: VariantResult[] = [];
-    for (const axis of [0, 1, 2] as const) {
-      for (const [negativeResolution, positiveResolution] of
-        [[8, 8], [4, 4], [8, 4], [4, 8]] as const) {
-        results.push(await executeVariant(device, axis, negativeResolution, positiveResolution));
-      }
+  const results: VariantResult[] = [];
+  for (const axis of [0, 1, 2] as const) {
+    for (const [negativeResolution, positiveResolution] of
+      [[8, 8], [4, 4], [8, 4], [4, 8]] as const) {
+      results.push(await executeVariant(device, axis, negativeResolution, positiveResolution));
     }
-    const passed = results.every((result) => result.passed);
-    const adapterInfo = (adapter as GPUAdapter & { readonly info?: GPUAdapterInfo }).info;
-    console.log(JSON.stringify({
-      passed,
-      backend,
-      adapter: adapterInfo ? {
-        vendor: adapterInfo.vendor,
-        architecture: adapterInfo.architecture,
-        device: adapterInfo.device,
-        description: adapterInfo.description,
-      } : undefined,
-      variantCount: results.length,
-      maximumAbsoluteError: Math.max(...results.map((result) => result.maximumAbsoluteError)),
-      results,
-    }, null, 2));
-    if (!passed) process.exitCode = 1;
-  } finally {
-    device.destroy();
   }
+  const passed = results.every((result) => result.passed);
+  const adapterInfo = (adapter as GPUAdapter & { readonly info?: GPUAdapterInfo }).info;
+  console.log(JSON.stringify({
+    passed,
+    backend,
+    adapter: adapterInfo ? {
+      vendor: adapterInfo.vendor,
+      architecture: adapterInfo.architecture,
+      device: adapterInfo.device,
+      description: adapterInfo.description,
+    } : undefined,
+    variantCount: results.length,
+    maximumAbsoluteError: Math.max(...results.map((result) => result.maximumAbsoluteError)),
+    results,
+  }, null, 2));
+  if (!passed) process.exitCode = 1;
 } finally {
-  await releaseWebGPUExclusiveLock();
+  device.destroy();
 }

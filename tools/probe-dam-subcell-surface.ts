@@ -8,8 +8,7 @@
  *
  * Usage:
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
- *     node --import tsx tools/run-webgpu-exclusive.ts \
- *     --import tsx tools/probe-dam-subcell-surface.ts
+ *     node --import tsx tools/probe-dam-subcell-surface.ts
  */
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";

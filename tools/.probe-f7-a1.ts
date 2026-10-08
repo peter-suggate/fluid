@@ -9,7 +9,6 @@ import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {GPUStageTimestampRecorder,GPUPassTimestampRecorder} from "../lib/core/performance-trace";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {resolveMethodValues} from "../lib/core/method-contract";
@@ -18,7 +17,6 @@ import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method"
 
 const [out,stepsArg,fromArg]=process.argv.slice(2);
 const steps=Number(stepsArg??60),from=Number(fromArg??36),sceneId=process.env.PROBE_SCENE??"sparse-cm12-long-dam-break";
-await acquireWebGPUExclusiveLock("dawn-probe",`fluid-a1 mixed frame ${sceneId}`);
 let device:GPUDevice|undefined;const solvers:{destroy():void}[]=[];
 try{
  const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
@@ -73,4 +71,4 @@ try{
   solver.destroy();solvers.pop();
  }
  writeFileSync(out,JSON.stringify(result,null,1));
-}finally{for(const s of solvers)s.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{for(const s of solvers)s.destroy();device?.destroy();}

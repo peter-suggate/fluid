@@ -16,10 +16,6 @@
  * and a sample whose VALID bit is clear must not contribute.
  */
 import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
-import {
   packFineLevelSetSample,
   unpackFineLevelSetPackedPhi,
 } from "../lib/core/fine-levelset-packed-sample";
@@ -174,107 +170,102 @@ async function main(): Promise<void> {
   if (!dawnModule) throw new Error("WEBGPU_NODE_MODULE is required");
   const publication = publish();
 
-  await acquireWebGPUExclusiveLock("wgsl-check", "svo-fluid-coverage-compact");
-  try {
-    const { create, globals } = await import(dawnModule) as {
-      create: (flags: string[]) => GPU;
-      globals: Record<string, unknown>;
-    };
-    Object.assign(globalThis, globals);
-    const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
-    const adapter = await gpu.requestAdapter();
-    if (!adapter) throw new Error("no WebGPU adapter");
-    const device = await adapter.requestDevice();
-    device.pushErrorScope("validation");
+  const { create, globals } = await import(dawnModule) as {
+    create: (flags: string[]) => GPU;
+    globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, globals);
+  const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+  const adapter = await gpu.requestAdapter();
+  if (!adapter) throw new Error("no WebGPU adapter");
+  const device = await adapter.requestDevice();
+  device.pushErrorScope("validation");
 
-    const source: WebGpuSvoFluidCoverageCompactSource = {
-      kind: "compact",
-      worklist: { buffer: storageBuffer(device, "fixture worklist", publication.worklist) },
-      metadata: { buffer: storageBuffer(device, "fixture metadata", publication.metadata) },
-      samples: { buffer: storageBuffer(device, "fixture samples", publication.samples) },
-      sampleDimensions: [LATTICE, LATTICE, LATTICE],
-      brickDimensions: [BRICKS_PER_AXIS, BRICKS_PER_AXIS, BRICKS_PER_AXIS],
-      brickResolution: BRICK_RESOLUTION,
-      samplesPerBrick: SAMPLES_PER_BRICK,
-      pageCapacity: PAGE_COUNT,
-      fineFactor: 1,
-      fineCellWidth: CELL_WIDTH_M,
-      domainOrigin: [0, 0, 0],
-      generation: GENERATION,
-    };
-    const coverage = new WebGpuSvoFluidCoverage(device, {
-      fieldDimensions: [LATTICE, LATTICE, LATTICE],
-      worldOrigin_m: [...WORLD_ORIGIN_M],
-      cellSize_m: [WORLD_CELL_SIZE_M, WORLD_CELL_SIZE_M, WORLD_CELL_SIZE_M],
-      cellsPerTexel: CELLS_PER_TEXEL,
-    }, source);
-    await coverage.initializePipelines();
+  const source: WebGpuSvoFluidCoverageCompactSource = {
+    kind: "compact",
+    worklist: { buffer: storageBuffer(device, "fixture worklist", publication.worklist) },
+    metadata: { buffer: storageBuffer(device, "fixture metadata", publication.metadata) },
+    samples: { buffer: storageBuffer(device, "fixture samples", publication.samples) },
+    sampleDimensions: [LATTICE, LATTICE, LATTICE],
+    brickDimensions: [BRICKS_PER_AXIS, BRICKS_PER_AXIS, BRICKS_PER_AXIS],
+    brickResolution: BRICK_RESOLUTION,
+    samplesPerBrick: SAMPLES_PER_BRICK,
+    pageCapacity: PAGE_COUNT,
+    fineFactor: 1,
+    fineCellWidth: CELL_WIDTH_M,
+    domainOrigin: [0, 0, 0],
+    generation: GENERATION,
+  };
+  const coverage = new WebGpuSvoFluidCoverage(device, {
+    fieldDimensions: [LATTICE, LATTICE, LATTICE],
+    worldOrigin_m: [...WORLD_ORIGIN_M],
+    cellSize_m: [WORLD_CELL_SIZE_M, WORLD_CELL_SIZE_M, WORLD_CELL_SIZE_M],
+    cellsPerTexel: CELLS_PER_TEXEL,
+  }, source);
+  await coverage.initializePipelines();
 
-    // The box the volume occupies is the world's, not the publication's. Pinned
-    // here because a misplaced box still samples cleanly and still reports a
-    // valid frame: it simply puts the shadow somewhere no receiver is standing.
-    const boxOrigin = coverage.plan.origin_m;
-    const boxTexel = coverage.plan.texelSize_m;
-    if (WORLD_ORIGIN_M.some((value, axis) => boxOrigin[axis] !== value)) {
-      throw new Error(`coverage box origin ${boxOrigin.join(",")} is not the world origin ${WORLD_ORIGIN_M.join(",")}`);
-    }
-    if (boxTexel.some((value) => Math.abs(value - WORLD_CELL_SIZE_M * CELLS_PER_TEXEL) > 1e-9)) {
-      throw new Error(`coverage texel ${boxTexel.join(",")} is not the world cell size times ${CELLS_PER_TEXEL}`);
-    }
-    const dimensions = coverage.plan.dimensions;
-    const encoder = device.createCommandEncoder();
-    if (!coverage.encode(encoder)) throw new Error("coverage fill was not encoded");
-    // 256-byte row alignment is a copy requirement, so the readback is padded.
-    const bytesPerRow = Math.ceil(dimensions[0] * SVO_FLUID_COVERAGE_LAYOUT.bytesPerTexel / 256) * 256;
-    const readback = device.createBuffer({
-      label: "coverage readback", size: bytesPerRow * dimensions[1] * dimensions[2],
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    encoder.copyTextureToBuffer(
-      { texture: (coverage as unknown as { texture: GPUTexture }).texture, mipLevel: 0 },
-      { buffer: readback, bytesPerRow, rowsPerImage: dimensions[1] },
-      [dimensions[0], dimensions[1], dimensions[2]],
-    );
-    device.queue.submit([encoder.finish()]);
-    await readback.mapAsync(GPUMapMode.READ);
-    const bytes = new Uint8Array(readback.getMappedRange().slice(0));
-    readback.unmap();
+  // The box the volume occupies is the world's, not the publication's. Pinned
+  // here because a misplaced box still samples cleanly and still reports a
+  // valid frame: it simply puts the shadow somewhere no receiver is standing.
+  const boxOrigin = coverage.plan.origin_m;
+  const boxTexel = coverage.plan.texelSize_m;
+  if (WORLD_ORIGIN_M.some((value, axis) => boxOrigin[axis] !== value)) {
+    throw new Error(`coverage box origin ${boxOrigin.join(",")} is not the world origin ${WORLD_ORIGIN_M.join(",")}`);
+  }
+  if (boxTexel.some((value) => Math.abs(value - WORLD_CELL_SIZE_M * CELLS_PER_TEXEL) > 1e-9)) {
+    throw new Error(`coverage texel ${boxTexel.join(",")} is not the world cell size times ${CELLS_PER_TEXEL}`);
+  }
+  const dimensions = coverage.plan.dimensions;
+  const encoder = device.createCommandEncoder();
+  if (!coverage.encode(encoder)) throw new Error("coverage fill was not encoded");
+  // 256-byte row alignment is a copy requirement, so the readback is padded.
+  const bytesPerRow = Math.ceil(dimensions[0] * SVO_FLUID_COVERAGE_LAYOUT.bytesPerTexel / 256) * 256;
+  const readback = device.createBuffer({
+    label: "coverage readback", size: bytesPerRow * dimensions[1] * dimensions[2],
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  encoder.copyTextureToBuffer(
+    { texture: (coverage as unknown as { texture: GPUTexture }).texture, mipLevel: 0 },
+    { buffer: readback, bytesPerRow, rowsPerImage: dimensions[1] },
+    [dimensions[0], dimensions[1], dimensions[2]],
+  );
+  device.queue.submit([encoder.finish()]);
+  await readback.mapAsync(GPUMapMode.READ);
+  const bytes = new Uint8Array(readback.getMappedRange().slice(0));
+  readback.unmap();
 
-    const scope = await device.popErrorScope();
-    if (scope) throw new Error(`GPU validation: ${scope.message}`);
+  const scope = await device.popErrorScope();
+  if (scope) throw new Error(`GPU validation: ${scope.message}`);
 
-    const expected = expectedCoverage(publication, dimensions);
-    let worst = 0, worstAt = "", wet = 0, dry = 0;
-    for (let z = 0; z < dimensions[2]; z += 1) {
-      for (let y = 0; y < dimensions[1]; y += 1) {
-        for (let x = 0; x < dimensions[0]; x += 1) {
-          const byte = bytes[z * bytesPerRow * dimensions[1] + y * bytesPerRow
-            + x * SVO_FLUID_COVERAGE_LAYOUT.bytesPerTexel + SVO_FLUID_COVERAGE_LAYOUT.coverageChannel]!;
-          const reference = quantizeSvoFluidCoverage(expected[x + dimensions[0] * (y + dimensions[1] * z)]!);
-          const error = Math.abs(byte / 255 - reference);
-          if (error > worst) { worst = error; worstAt = `(${x},${y},${z})`; }
-          if (byte > 128) wet += 1; else if (byte === 0) dry += 1;
-        }
+  const expected = expectedCoverage(publication, dimensions);
+  let worst = 0, worstAt = "", wet = 0, dry = 0;
+  for (let z = 0; z < dimensions[2]; z += 1) {
+    for (let y = 0; y < dimensions[1]; y += 1) {
+      for (let x = 0; x < dimensions[0]; x += 1) {
+        const byte = bytes[z * bytesPerRow * dimensions[1] + y * bytesPerRow
+          + x * SVO_FLUID_COVERAGE_LAYOUT.bytesPerTexel + SVO_FLUID_COVERAGE_LAYOUT.coverageChannel]!;
+        const reference = quantizeSvoFluidCoverage(expected[x + dimensions[0] * (y + dimensions[1] * z)]!);
+        const error = Math.abs(byte / 255 - reference);
+        if (error > worst) { worst = error; worstAt = `(${x},${y},${z})`; }
+        if (byte > 128) wet += 1; else if (byte === 0) dry += 1;
       }
     }
-    // One byte lane, so a single quantization step is the floor on agreement.
-    const tolerance = 1.5 / 255;
-    if (worst > tolerance) {
-      throw new Error(`compact fill disagrees with the CPU reference by ${worst.toFixed(5)} at ${worstAt}`);
-    }
-    const texels = dimensions[0] * dimensions[1] * dimensions[2];
-    // A fill that read nothing would be uniformly dry, and one over a stand-in
-    // texture uniformly half-covered; both are excluded by needing each side.
-    if (wet < texels / 8 || dry < texels / 8) {
-      throw new Error(`degenerate volume: ${wet} wet and ${dry} dry of ${texels} texels`);
-    }
-    coverage.destroy();
-    console.log(`SVO fluid coverage: compact publication resampled over ${dimensions.join("x")}`
-      + ` texels (${wet} wet, ${dry} dry, worst error ${(worst * 255).toFixed(2)}/255;`
-      + ` omitted page ${OMITTED_KEY} and one invalid sample both read as air)`);
-  } finally {
-    await releaseWebGPUExclusiveLock();
   }
+  // One byte lane, so a single quantization step is the floor on agreement.
+  const tolerance = 1.5 / 255;
+  if (worst > tolerance) {
+    throw new Error(`compact fill disagrees with the CPU reference by ${worst.toFixed(5)} at ${worstAt}`);
+  }
+  const texels = dimensions[0] * dimensions[1] * dimensions[2];
+  // A fill that read nothing would be uniformly dry, and one over a stand-in
+  // texture uniformly half-covered; both are excluded by needing each side.
+  if (wet < texels / 8 || dry < texels / 8) {
+    throw new Error(`degenerate volume: ${wet} wet and ${dry} dry of ${texels} texels`);
+  }
+  coverage.destroy();
+  console.log(`SVO fluid coverage: compact publication resampled over ${dimensions.join("x")}`
+    + ` texels (${wet} wet, ${dry} dry, worst error ${(worst * 255).toFixed(2)}/255;`
+    + ` omitted page ${OMITTED_KEY} and one invalid sample both read as air)`);
 }
 
 void main().catch((error: unknown) => {

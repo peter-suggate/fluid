@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { sampleSvoPrimitive, svoPrimitiveWGSL, svoFieldProgramAbsentWGSL, type SvoSmoothUnionClusterPrimitive } from "../lib/svo/contracts/svo-primitive-abi";
 import { svoProceduralNoiseWGSL } from "../lib/svo/features/materials/svo-procedural-material";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 import { planBonsai, BONSAI_POND_CANOPY } from "../lib/core/voxel-scenery/bonsai";
 import type { SceneryGroupNode } from "../lib/core/scenery-graph";
@@ -89,7 +88,6 @@ test("sampling footprint survives both cluster arena publication paths", async (
 test("Dawn leaf density matches the CPU field across seeds, leaves and gaps", {
   skip: !process.env.WEBGPU_NODE_MODULE,
 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "foliage-density");
   let device: GPUDevice | undefined;
   try {
     device = (await createDawnRenderDevice()).device;
@@ -132,5 +130,5 @@ test("Dawn leaf density matches the CPU field across seeds, leaves and gaps", {
     }
     for (const buffer of [input, output, read]) buffer.destroy();
     assert.equal(await device.popErrorScope(), null);
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

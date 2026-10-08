@@ -8,7 +8,6 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { uniformMethod } from "../lib/methods/uniform/method";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { readFloatTexture3D, readRgbaTexture3D } from "../lib/harness/webgpu-smoke-readbacks";
 
 async function readBuffer(device: GPUDevice, source: GPUBuffer) {
@@ -30,7 +29,6 @@ const captureEvery = Number(process.env.POOL_CAPTURE_EVERY ?? 5);
 const stageSteps = new Set((process.env.POOL_STAGE_STEPS ?? "1,10,20,30").split(",").map(Number));
 process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT = "1";
 assert.ok(Number.isSafeInteger(steps) && steps >= 0 && Number.isFinite(dt) && dt > 0);
-await acquireWebGPUExclusiveLock("dawn-probe", "uniform-pool-impact-ab");
 const live = new Set<GPU>();
 let gpu: GPU | undefined, device: GPUDevice | undefined, solver: WebGPUUniformReferenceSolver | undefined;
 try {
@@ -117,6 +115,6 @@ try {
   }
   await writeFile(`${output}/trace.json`, JSON.stringify(trace, null, 2));
 } finally {
-  solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock();
+  solver?.destroy(); device?.destroy(); 
   if (gpu) live.delete(gpu);
 }

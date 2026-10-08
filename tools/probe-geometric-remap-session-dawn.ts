@@ -4,7 +4,6 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { GeometricRemapSession, type RemapSettings, type RemapFrame } from "../lib/core/geometric-remap/session";
 import { fingerprintSparseCM12RepositorySources } from "./sparse-cm12-source-content-fingerprint";
 
@@ -13,10 +12,9 @@ const report: Record<string, unknown> & { cases: Record<string, unknown>[] } = {
   probe: "geometric-remap-ui-session", passed: false, cases: [],
   sourceFingerprint: await fingerprintSparseCM12RepositorySources(process.cwd()),
 };
-let device: GPUDevice | undefined, locked = false;
+let device: GPUDevice | undefined;
 const validationErrors: string[] = [];
 try {
-  await acquireWebGPUExclusiveLock("dawn-probe", "geometric-remap-ui-session"); locked = true;
   const dawn = await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href) as NodeDawnProvider;
   Object.assign(globalThis, dawn.globals);
   const gpu = createProcessRetainedDawnGPU(dawn, [`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
@@ -68,7 +66,7 @@ try {
 } catch (e) { report.failure = e instanceof Error ? e.stack : String(e); }
 finally {
   try { if (device) await device.queue.onSubmittedWorkDone(); }
-  finally { device?.destroy(); if (locked) await releaseWebGPUExclusiveLock(); }
+  finally { device?.destroy(); }
   report.validationErrors = validationErrors;
   report.sourceFingerprintAfter = await fingerprintSparseCM12RepositorySources(process.cwd());
   report.sourceUnchanged = (report.sourceFingerprint as { sha256: string }).sha256

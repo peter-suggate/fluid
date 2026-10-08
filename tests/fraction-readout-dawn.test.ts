@@ -18,7 +18,6 @@ import {
 import {
   FRACTION_READOUT_FONT, FRACTION_READOUT_GLYPH_HEIGHT, fractionReadoutShaderLibrary,
 } from "../lib/core/fraction-readout.wgsl";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 
 const RASTER_WIDTH = 120, RASTER_HEIGHT = 32;
@@ -100,7 +99,6 @@ function expectedRaster(text: string, scale: number, centre: [number, number]): 
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("the shader writes V/K as fractionReadout does, in FRACTION_READOUT_FONT", { timeout: 60_000 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "fraction-readout");
   let device: GPUDevice | undefined;
   try {
     const dawn = await import(pathToFileURL(modulePath!).href);
@@ -189,5 +187,5 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     }
     for (const buffer of [fillBuffer, glyphBuffer, caseBuffer, rasterBuffer]) buffer.destroy();
     assert.deepEqual(errors, []);
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

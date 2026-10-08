@@ -7,7 +7,6 @@ import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { fingerprintSparseCM12RepositorySources } from "./sparse-cm12-source-content-fingerprint";
 import { compileMap, inverseMapReference, mapPoint, translatedReference, type MapSpec, type Shear, type V3 } from "../lib/core/geometric-remap/geometry";
 import { remapOverlapWGSL } from "../lib/core/geometric-remap/overlap.wgsl";
@@ -106,11 +105,10 @@ function approximationError(spec: MapSpec): number {
   return maximum;
 }
 
-let device: GPUDevice | undefined, locked = false;
+let device: GPUDevice | undefined;
 const validationErrors: string[] = [];
 await checkpoint();
 try {
-  await acquireWebGPUExclusiveLock("dawn-probe", "geometric-large-remap"); locked = true;
   const modulePath = process.env.WEBGPU_NODE_MODULE ?? resolve(root, "node_modules/webgpu/index.js");
   const dawn = await import(pathToFileURL(resolve(modulePath)).href) as NodeDawnProvider;
   Object.assign(globalThis, dawn.globals);
@@ -309,7 +307,6 @@ try {
   report.failure = e instanceof Error ? e.stack : String(e);
 } finally {
   if (device) { await device.queue.onSubmittedWorkDone(); device.destroy(); }
-  if (locked) await releaseWebGPUExclusiveLock();
   report.validationErrors = validationErrors;
   report.sourceFingerprintAfter = await fingerprintSparseCM12RepositorySources(root);
   report.sourceUnchanged = (report.sourceFingerprintAfter as { sha256: string }).sha256 === fingerprint.sha256;

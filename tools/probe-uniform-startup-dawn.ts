@@ -4,7 +4,6 @@
 import {pathToFileURL} from 'node:url';
 import {writeFile} from 'node:fs/promises';
 import {createProcessRetainedDawnGPU} from '../lib/harness/node-dawn-provider';
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from '../lib/harness/webgpu-smoke-isolation';
 import {managedGPUDevice} from '../lib/core/gpu-compilation-manager';
 import {requiredFluidDeviceLimits} from '../lib/core/webgpu-device-limits';
 import {sceneDocument} from '../lib/core/scene-definition';
@@ -12,7 +11,6 @@ import {getSceneDefinition} from '../lib/core/scenes';
 import {uniformGeometricSolverOptions} from '../lib/methods/uniform/uniform-geometric-options';
 import {WebGPUUniformReferenceSolver} from '../lib/methods/uniform/webgpu-uniform-reference';
 
-await acquireWebGPUExclusiveLock('dawn-test','Uniform startup compilation profile');
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 const jobs:{entry:string;label:string;ms:number}[]=[],errors:string[]=[];
 try{
@@ -39,4 +37,4 @@ try{
  const report={scene:process.env.SCENE??'water-box-dam-break',initializationMs,firstFrameMs:performance.now()-start-initializationMs,errors,jobs:jobs.sort((a,b)=>b.ms-a.ms)};
  await writeFile(process.env.REPORT??'/tmp/uniform-startup-profile.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report));
  if(errors.length)throw new Error('GPU validation errors');
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();}

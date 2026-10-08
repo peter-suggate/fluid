@@ -1,4 +1,4 @@
-/** Native 2D causal audit; no GPU lease or browser required.
+/** Native 2D causal audit; no GPU or browser required.
  * node --import tsx tools/wasm/uniform-geometric-volume-phi-audit.ts
  * Optional: --seconds=4 --arm=dt30-eight --out=/absolute/directory
  */

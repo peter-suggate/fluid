@@ -6,10 +6,6 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 
 const requestedSteps = Number(process.env.FLUID_SOLID_WORLD_CM12_STEPS ?? 2);
 assert.ok(Number.isSafeInteger(requestedSteps) && requestedSteps >= 0);
@@ -19,7 +15,6 @@ assert.ok(brickFineResolution === 4 || brickFineResolution === 8
 const checkpoints = new Set([0, 1, 2, 4, 8, 16, 24, requestedSteps]
   .filter((step) => step <= requestedSteps));
 
-await acquireWebGPUExclusiveLock("dawn-benchmark", "probe-water-box-solid-world-cm12");
 let device: GPUDevice | undefined;
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE
@@ -155,5 +150,4 @@ try {
   }
 } finally {
   device?.destroy();
-  await releaseWebGPUExclusiveLock();
 }

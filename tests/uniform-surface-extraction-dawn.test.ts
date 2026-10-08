@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import type {FluidRefinementRegion,SceneDescription} from "../lib/core/model";
@@ -223,7 +222,7 @@ async function lifecycle(device:GPUDevice,scene:SceneDescription,framesPerPhase:
 
 for(const [name,scene,frames] of [["32³",base32,6],["64³",base64,10]] as const){
  (modulePath?test:test.skip)(`water surface from the 4h vertex base, ${name}: current base, window scan equals full scan and the shipped polygonise equals its reference at zero, partial and full detail`,{timeout:1800000},async()=>{
-  await acquireWebGPUExclusiveLock("dawn-test",`Uniform surface extraction ${name}`);let device:GPUDevice|undefined;
+  let device:GPUDevice|undefined;
   try{
    const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
    const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
@@ -233,6 +232,6 @@ for(const [name,scene,frames] of [["32³",base32,6],["64³",base64,10]] as const
    await lifecycle(device,scene(),frames,failures,report);
    console.log(JSON.stringify(report));
    assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
-  }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+  }finally{device?.destroy();}
  });
 }

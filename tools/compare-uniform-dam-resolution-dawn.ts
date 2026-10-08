@@ -19,7 +19,6 @@ import {getSceneDefinition} from "../lib/core/scenes";
 import {resolveMethodValues} from "../lib/core/method-contract";
 import {usePerformanceInstrumentationStore} from "../lib/core/stores/performance-instrumentation-store";
 import {createProcessRetainedDawnGPU, type NodeDawnProvider} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
 import type {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-uniform-reference";
 import type {UniformMixedFrameTrace} from "../lib/methods/uniform/uniform-mixed-frame";
@@ -45,10 +44,6 @@ const sourceFingerprint=fingerprint();
 let context:Record<string,unknown>={kind,frames,dt_s:dt,throughput};
 const save=(value:unknown)=>{mkdirSync(dirname(out),{recursive:true});writeFileSync(out,JSON.stringify(value,null,2)+"\n");};
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
-let waiting=false;
-for(;;){try{await acquireWebGPUExclusiveLock("dawn-benchmark",`Uniform dam resolution comparison: ${kind}`);break;}
- catch(error){if(!(error instanceof Error)||!error.message.includes("Refusing concurrent GPU execution"))throw error;
-  if(!waiting){console.log("Waiting for WebGPU lease");waiting=true;}await new Promise(r=>setTimeout(r,250));}}
 try {
  const dawn=await import(pathToFileURL(resolve(process.env.WEBGPU_NODE_MODULE??"node_modules/webgpu/index.js")).href) as NodeDawnProvider;
  Object.assign(globalThis,dawn.globals);
@@ -148,4 +143,4 @@ try {
  const report={capturedAt:new Date().toISOString(),kind,adapter:adapterInfo,backend:"Dawn/Metal",method:uniformVolumeMethod.id,dt_s:dt,frames,discardFrames:8,throughput,scope:"Simulation only; rendering excluded. Throughput uses two frames in flight without timestamps or per-frame stats. Trace mode fences each frame; GPU stage seams exclude CPU waits. First eight frames excluded.",scene,values,lattice,setup_ms,initial,final,dustMass,summary,rows,validationErrors:errors};
  save({...report,workCounts,sourceFingerprint,sourceFingerprintAfter:fingerprint(),bandGrid,workGrid,fieldHashes,fieldCensus,fullPressureEnvelope:process.argv.includes("--full-pressure-envelope")});console.log(JSON.stringify({out,summary,fieldCensus,fieldHashes}));
 }catch(error){save({...context,rows,failure:error instanceof Error?error.message:String(error),final:solver?.info});throw error;
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();}

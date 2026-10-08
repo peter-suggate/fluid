@@ -20,10 +20,6 @@ import { usePerformanceInstrumentationStore } from
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { BROWSER_GPU_THROUGHPUT_DEPTH } from "../lib/core/webgpu-renderer";
 import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
-import {
   createProcessRetainedDawnGPU,
   type NodeDawnProvider,
 } from "../lib/harness/node-dawn-provider";
@@ -101,8 +97,6 @@ const rounded = (value: number): number => Number(value.toFixed(4));
 const root = fileURLToPath(new URL("..", import.meta.url));
 const sourceContentFingerprint = await fingerprintSparseCM12RepositorySources(root);
 
-await acquireWebGPUExclusiveLock(
-  "dawn-benchmark", "tools/benchmark-sparse-cm12-production-frame.ts");
 let device: GPUDevice | undefined;
 let solver: Awaited<ReturnType<NonNullable<typeof adaptiveMassMethod.createSolverAsync>>> | undefined;
 try {
@@ -245,6 +239,5 @@ try {
     solver?.destroy();
     device?.destroy();
     await new Promise<void>((resolve) => setImmediate(resolve));
-    await releaseWebGPUExclusiveLock();
   }
 }

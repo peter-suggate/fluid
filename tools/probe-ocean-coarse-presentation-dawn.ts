@@ -13,14 +13,12 @@ import { resolveMethodValues } from '../lib/core/method-contract';
 import { sceneDocument } from '../lib/core/scene-definition';
 import { getSceneDefinition } from '../lib/core/scenes';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from '../lib/harness/webgpu-smoke-isolation';
 import { adaptiveMassMethod } from '../lib/methods/adaptive-volume/method';
 import type { WebGPUAdaptiveMassSolver } from '../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver';
 
 const steps=Number(process.env.OCEAN_STEPS ?? 10);
 assert.ok(Number.isSafeInteger(steps)&&steps>0);
 assert.ok(process.env.WEBGPU_NODE_MODULE, "Set WEBGPU_NODE_MODULE to native Dawn");
-await acquireWebGPUExclusiveLock('dawn-probe', 'ocean coarse-first presentation');
 let device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
 try {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
@@ -93,4 +91,4 @@ try {
   const fields=await solver.readDiagnosticFields(true);
   const densityHash=createHash('sha256').update(new Uint8Array(fields.density.buffer)).digest('hex');
   await writeFile(process.env.OCEAN_OUT ?? '/tmp/ocean-coarse-presentation.json', JSON.stringify({sourceHash,samples,densityHash,errors},null,2));
-} finally { solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }
+} finally { solver?.destroy(); device?.destroy(); }

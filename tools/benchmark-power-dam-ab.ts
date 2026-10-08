@@ -28,8 +28,8 @@
  *
  * The control arm is implicit (the lane's own defaults) and needs no `--arm`.
  * Each `--arm=label:KEY=VALUE[,KEY=VALUE]` adds one variant. Every run goes
- * through `benchmark-power-dam.ts`, so the lane table, the tripwire floor and
- * the exclusive GPU lock are inherited rather than reimplemented here.
+ * through `benchmark-power-dam.ts`, so the lane table and the tripwire floor
+ * are inherited rather than reimplemented here.
  */
 
 import { spawn } from "node:child_process";

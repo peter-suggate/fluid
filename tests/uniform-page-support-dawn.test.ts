@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { UniformPageGeneration } from "../lib/methods/uniform/uniform-page-generation";
 import { UniformPageSupport } from "../lib/methods/uniform/uniform-page-support";
 
@@ -13,7 +12,6 @@ async function read(device:GPUDevice,buffer:GPUBuffer){
 }
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("GPU support grows signed frontiers, retains mass and rejects insufficient budgets",{timeout:60000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform page support");
  let device:GPUDevice|undefined,pool:UniformPageGeneration|undefined,support:UniformPageSupport|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
@@ -61,11 +59,10 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   d.queue.writeBuffer(s.sources,0,new Uint32Array([1,0,0,0,0xfff0bdc0,20,0,1]));advance();
   meta=await read(d,p.accepted);assert.equal(meta[1],27);assert.equal(meta[2],27);
   assert.deepEqual(errors,[]);
- }finally{support?.destroy();pool?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{support?.destroy();pool?.destroy();device?.destroy();}
 });
 
 (modulePath?test:test.skip)("Local support follows occupancy, closes over air velocity, and preserves physical units",{timeout:60000},async t=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform minimal residency support");
  let device:GPUDevice|undefined;
  try {
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
@@ -142,5 +139,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    });
   }
   assert.deepEqual(errors,[]);
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });

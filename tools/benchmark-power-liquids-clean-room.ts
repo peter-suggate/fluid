@@ -1,6 +1,5 @@
 import { pathToFileURL } from "node:url";
 import { GPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 // Match the captured large-lane resident range without landing on Dawn/Metal's
 // unstable synthetic 16,384-page boundary (the same boundary that kills the
@@ -13,7 +12,6 @@ if (!Number.isSafeInteger(pages) || pages < 1 || !Number.isSafeInteger(steps) ||
   throw new RangeError("clean-room pages and steps must be positive integers");
 }
 
-await acquireWebGPUExclusiveLock("dawn-benchmark", "tools/benchmark-power-liquids-clean-room.ts");
 const nodeKeepAlive = setInterval(() => { /* native GPU completion owns exit */ }, 1_000);
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE ?? `${process.cwd()}/node_modules/webgpu/index.js`;
@@ -133,5 +131,4 @@ fn tap(sourceA:bool,page:u32,local:u32,corner:u32)->f32{let targetPage=halo[page
   device.destroy();
 } finally {
   clearInterval(nodeKeepAlive);
-  await releaseWebGPUExclusiveLock();
 }

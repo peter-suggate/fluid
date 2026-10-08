@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import { buildSparseAtlasCompositeGrid, type SparseAtlasCompositeGrid } from
   "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import {
@@ -238,54 +236,49 @@ async function main(): Promise<void> {
   const { topology, commonRow, variableRow, probeCell, grid } = fixture();
   const source = shaderSource(topology, commonRow, variableRow, probeCell);
   if (process.argv.includes("--emit-wgsl")) { process.stdout.write(source); return; }
-  await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-hot-topology");
-  try {
-    const { create, globals } = await import(dawnModule) as {
-      create: (flags: string[]) => GPU; globals: Record<string, unknown>;
-    };
-    Object.assign(globalThis, globals);
-    const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
-    const adapter = await gpu.requestAdapter();
-    if (!adapter) throw new Error("no WebGPU adapter");
-    const device = await adapter.requestDevice();
-    device.pushErrorScope("validation");
-    const module = device.createShaderModule({ label: "HTP1 hot-topology checker", code: source });
-    const info = await module.getCompilationInfo();
-    const errors = info.messages.filter((message) => message.type === "error");
-    errors.forEach((error) => console.error(`${error.lineNum}:${error.linePos} ${error.message}`));
-    if (errors.length > 0) throw new Error(`${errors.length} WGSL compilation error(s)`);
-    const pipeline = await device.createComputePipelineAsync({
-      layout: "auto", compute: { module, entryPoint: "checkHotTopology" },
-    });
-    const scope = await device.popErrorScope();
-    if (scope) throw new Error(scope.message);
-    const valid = await evaluate(device, pipeline, topology.words);
-    assertWords(valid, expectedValid(topology, commonRow, variableRow, probeCell), "valid HTP1");
+  const { create, globals } = await import(dawnModule) as {
+    create: (flags: string[]) => GPU; globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, globals);
+  const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+  const adapter = await gpu.requestAdapter();
+  if (!adapter) throw new Error("no WebGPU adapter");
+  const device = await adapter.requestDevice();
+  device.pushErrorScope("validation");
+  const module = device.createShaderModule({ label: "HTP1 hot-topology checker", code: source });
+  const info = await module.getCompilationInfo();
+  const errors = info.messages.filter((message) => message.type === "error");
+  errors.forEach((error) => console.error(`${error.lineNum}:${error.linePos} ${error.message}`));
+  if (errors.length > 0) throw new Error(`${errors.length} WGSL compilation error(s)`);
+  const pipeline = await device.createComputePipelineAsync({
+    layout: "auto", compute: { module, entryPoint: "checkHotTopology" },
+  });
+  const scope = await device.popErrorScope();
+  if (scope) throw new Error(scope.message);
+  const valid = await evaluate(device, pipeline, topology.words);
+  assertWords(valid, expectedValid(topology, commonRow, variableRow, probeCell), "valid HTP1");
 
-    const corruptHeader = corruptSparseCM12HotTopologyWord(topology,
-      topology.layout.headerBaseWords + SPARSE_CM12_HOT_TOPOLOGY_HEADER.magic, 0);
-    if (sparseCM12HotTopologyHeaderValid(corruptHeader)) throw new Error("CPU header corruption accepted");
-    const globalRejected = await evaluate(device, pipeline, corruptHeader.words);
-    if (globalRejected[0] !== 0 || globalRejected[2] !== 0
-      || globalRejected[8] !== 0 || globalRejected[16] !== 0
-      || globalRejected[1] !== 1) throw new Error("global HTP1 corruption did not fail closed");
+  const corruptHeader = corruptSparseCM12HotTopologyWord(topology,
+    topology.layout.headerBaseWords + SPARSE_CM12_HOT_TOPOLOGY_HEADER.magic, 0);
+  if (sparseCM12HotTopologyHeaderValid(corruptHeader)) throw new Error("CPU header corruption accepted");
+  const globalRejected = await evaluate(device, pipeline, corruptHeader.words);
+  if (globalRejected[0] !== 0 || globalRejected[2] !== 0
+    || globalRejected[8] !== 0 || globalRejected[16] !== 0
+    || globalRejected[1] !== 1) throw new Error("global HTP1 corruption did not fail closed");
 
-    const corruptVariable = corruptSparseCM12HotTopologyWord(topology,
-      topology.layout.rowBaseWords + variableRow * SPARSE_CM12_HOT_TOPOLOGY_ROW_WORDS
-        + SPARSE_CM12_HOT_TOPOLOGY_ROW.identity, SPARSE_CM12_HOT_TOPOLOGY_INVALID);
-    const localRejected = await evaluate(device, pipeline, corruptVariable.words);
-    if (localRejected[0] !== 1 || localRejected[8] !== 1 || localRejected[16] !== 0
-      || localRejected[19] !== SPARSE_CM12_HOT_TOPOLOGY_INVALID
-      || localRejected[20] !== 0) throw new Error("row-local HTP1 corruption escaped its blast radius");
-    let validatorRejected = false;
-    try { validateSparseCM12HotTopology(corruptVariable, grid); }
-    catch { validatorRejected = true; }
-    if (!validatorRejected) throw new Error("exhaustive validator accepted corrupt topology");
+  const corruptVariable = corruptSparseCM12HotTopologyWord(topology,
+    topology.layout.rowBaseWords + variableRow * SPARSE_CM12_HOT_TOPOLOGY_ROW_WORDS
+      + SPARSE_CM12_HOT_TOPOLOGY_ROW.identity, SPARSE_CM12_HOT_TOPOLOGY_INVALID);
+  const localRejected = await evaluate(device, pipeline, corruptVariable.words);
+  if (localRejected[0] !== 1 || localRejected[8] !== 1 || localRejected[16] !== 0
+    || localRejected[19] !== SPARSE_CM12_HOT_TOPOLOGY_INVALID
+    || localRejected[20] !== 0) throw new Error("row-local HTP1 corruption escaped its blast radius");
+  let validatorRejected = false;
+  try { validateSparseCM12HotTopology(corruptVariable, grid); }
+  catch { validatorRejected = true; }
+  if (!validatorRejected) throw new Error("exhaustive validator accepted corrupt topology");
 
-    console.log(`Sparse CM12 HTP1: B16/P16 ${topology.layout.totalBytes} bytes; ${topology.layout.cellCount} cells, ${topology.layout.rowCount} rows, ${topology.layout.directedEdgeCount} directed edges; common/mixed and fail-closed receipts passed`);
-  } finally {
-    await releaseWebGPUExclusiveLock();
-  }
+  console.log(`Sparse CM12 HTP1: B16/P16 ${topology.layout.totalBytes} bytes; ${topology.layout.cellCount} cells, ${topology.layout.rowCount} rows, ${topology.layout.directedEdgeCount} directed edges; common/mixed and fail-closed receipts passed`);
 }
 
 void main().catch((error: unknown) => {

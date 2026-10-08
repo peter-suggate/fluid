@@ -7,7 +7,6 @@ import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { uniformVolumeDonorSumWGSL } from "../lib/methods/uniform/uniform-volume-donor-sum.wgsl";
 const arg=(key:string)=>process.argv.find(a=>a.startsWith(`--${key}=`))?.slice(key.length+3);
@@ -40,7 +39,6 @@ function roundedBits(sum:bigint):number {
  if(q===0x1000000n){q>>=1n;exponent++;}
  return (exponent<<23)|(Number(q)&0x7fffff);
 }
-await acquireWebGPUExclusiveLock("dawn-probe","bounded donor sum");
 let device:GPUDevice|undefined;
 try {
  const dawn=await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href) as NodeDawnProvider;
@@ -99,4 +97,4 @@ try {
  }
  assert.deepEqual(errors,[]);
  if(arg("out"))await writeFile(arg("out")!,JSON.stringify(reports,null,2));
-}finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{device?.destroy();}

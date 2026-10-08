@@ -5,14 +5,12 @@ import { writeFileSync } from "node:fs";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { uniformGeometricSolverOptions } from "../lib/methods/uniform/uniform-geometric-options";
 import { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import { readFloatTexture3D } from "../lib/harness/webgpu-smoke-readbacks";
 import type { WebGPUUniformVelocityExtrapolator } from "../lib/methods/uniform/webgpu-uniform-velocity-extrapolation";
-await acquireWebGPUExclusiveLock("dawn-probe","3D nearest source extension scene and timing");
 let device: GPUDevice | undefined;
 const results: unknown[] = [];
 try {
@@ -64,4 +62,4 @@ try {
   }
   const out=process.argv.find(v=>v.startsWith("--out="))?.slice(6);
   if(out)writeFileSync(out,JSON.stringify(results,null,2)+"\n");
-}finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{device?.destroy();}

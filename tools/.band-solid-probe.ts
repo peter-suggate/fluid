@@ -3,7 +3,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import type {SceneDescription} from "../lib/core/model";
@@ -16,7 +15,7 @@ s.solidVoxels=[];s.rigidBodies=[];s.fluid.inflow=undefined;s.fluid.initialDamBre
 if(kind==="voxel")s.solidVoxels.push({operation:"fill",minimum:[3,5,10],maximumExclusive:[7,9,14]},{operation:"fill",minimum:[16,0,12],maximumExclusive:[20,4,20]});
 if(kind==="terrain")s.terrain={baseHeight_m:.03,features:[{kind:"mound",center_m:{x:.05,z:0},radius_m:{x:.2,z:.25},amount_m:.11,flat:.2}]};
 if(process.argv[5]==="coarse")s.fluid.refinementRegions=[{id:"coarse",rule:"minimum-cell-size",minimumCellSize_cells:4,maximumCellSize_cells:4,min_m:{x:-.4,y:0,z:-.4},max_m:{x:.4,y:.8,z:.4}}];
-await acquireWebGPUExclusiveLock("dawn-test","band solid probe");let device:GPUDevice|undefined;
+let device:GPUDevice|undefined;
 try{
  const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
  const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();
@@ -54,4 +53,4 @@ try{
    console.log(JSON.stringify({tiles,partial,closed,cut,vlow,liquid4h:liquid,pmax,topologyMatchesRecord:same,sample:[...r.slice(0,16)]}));
   }
  }finally{solver.destroy();}
-}finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{device?.destroy();}

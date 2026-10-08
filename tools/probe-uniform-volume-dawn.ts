@@ -5,7 +5,6 @@ import { resolve } from "node:path";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
@@ -14,7 +13,6 @@ import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-metho
 import { resolveMethodValues } from "../lib/core/method-contract";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 const arg=(name:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
-await acquireWebGPUExclusiveLock("dawn-probe", "uniform-volume");
 let device:GPUDevice|undefined, solver:GPUSolverInstance|undefined;
 try {
   const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE??resolve("node_modules/webgpu/index.js")).href);
@@ -62,4 +60,4 @@ try {
   }
   const sorted=times.slice(Math.min(3,times.length-1)).sort((a,b)=>a-b);
   console.log(JSON.stringify({method:method.id,scene:scene.sceneId,phase:"result",frames,medianMs:sorted[Math.floor(sorted.length/2)],times,stats,info:solver.info},null,2));
-} finally { solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock(); }
+} finally { solver?.destroy();device?.destroy(); }

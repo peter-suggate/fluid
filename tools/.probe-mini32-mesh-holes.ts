@@ -14,7 +14,6 @@ import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import type { WebGPUFineLevelSetBrickSource } from "../lib/core/levelset-consumer-abi";
 import { rasterMeshSymmetryMetrics } from "../lib/harness/raster-mesh-symmetry";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 const INVALID=0xffffffff;
 const dimensions=[32,24,24] as const;
 const sampleCount=32*24*24;
@@ -218,7 +217,6 @@ async function runField(device: GPUDevice, name: string, ratio: 0|1|2|4,
 }
 
 const fs=await import("node:fs/promises");
-await acquireWebGPUExclusiveLock("dawn-probe","mini32-mesh-holes");
 const {create,globals}=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
 Object.assign(globalThis,globals);const gpu=create(["backend=metal"]);liveDawnInstances.add(gpu);
 const adapter=await gpu.requestAdapter();const device=await adapter!.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter!.limits)});
@@ -232,4 +230,4 @@ try {
   }
   for(const key of ["metadata","worklist","samples"])source[key].destroy();
  }
-}finally{device.destroy();await releaseWebGPUExclusiveLock();liveDawnInstances.delete(gpu);}
+}finally{device.destroy();liveDawnInstances.delete(gpu);}

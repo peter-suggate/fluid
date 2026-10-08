@@ -5,8 +5,6 @@ import { pathToFileURL } from "node:url";
 import { createRigidFloatScene } from "../lib/core/scenes";
 import { initializeRigidBodies } from "../lib/core/rigid-body";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
   "../lib/harness/node-dawn-provider";
 import {
@@ -136,8 +134,6 @@ async function main() {
   const backend = argument("backend", process.env.FLUID_WEBGPU_BACKEND ?? "metal");
   const modulePath = process.env.WEBGPU_NODE_MODULE
     ?? `${process.cwd()}/node_modules/webgpu/index.js`;
-  await acquireWebGPUExclusiveLock("dawn-acceptance",
-    "tools/probe-sparse-cm12-vex-moving-injection.ts");
   let device: GPUDevice | undefined;
   let solver: WebGPUAdaptiveMassSolver | undefined;
   let validationScopeOpen = false;
@@ -240,7 +236,6 @@ async function main() {
     if (validationScopeOpen) await device?.popErrorScope().catch(() => null);
     solver?.destroy();
     device?.destroy();
-    await releaseWebGPUExclusiveLock();
   }
 }
 

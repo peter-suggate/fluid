@@ -35,10 +35,6 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { RasterWaterPipeline } from "../lib/core/webgpu-water-pipeline";
 import { GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE } from
   "../lib/core/webgpu-water-global-fine-classify";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 import { rasterMeshSymmetryMetrics } from
   "../lib/harness/raster-mesh-symmetry";
 import { adaptiveMassMethod, adaptiveMassSolverOptions } from
@@ -107,8 +103,6 @@ function imageReceipt(rgb: Uint8Array) {
   };
 }
 
-await acquireWebGPUExclusiveLock("dawn-probe",
-  "tools/capture-sparse-cm12-mini64-presentation-dawn.ts");
 let device: GPUDevice | undefined;
 let solver: WebGPUAdaptiveMassSolver | undefined;
 let pipeline: RasterWaterPipeline | undefined;
@@ -646,31 +640,27 @@ try {
   ]);
   process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
 } finally {
-  try {
-    if (frameReadback?.mapState === "mapped") frameReadback.unmap();
-    frameReadback?.destroy();
-    classifiedCubeReadback?.destroy();
-    classifiedOffsetReadback?.destroy();
-    surfaceVertexReadback?.destroy();
-    interfacePositionReadback?.destroy();
-    backInterfacePositionReadback?.destroy();
-    interfaceNormalReadback?.destroy();
-    backInterfaceNormalReadback?.destroy();
-    pipeline?.destroy();
-    output?.destroy();
-    columnFallback?.destroy();
-    uniformBuffer?.destroy();
-    bodyBuffer?.destroy();
-    solver?.destroy();
-    if (device) {
-      await device.queue.onSubmittedWorkDone().catch(() => undefined);
-      try {
-        device.destroy();
-      } catch {
-        // A failed native pipeline may already have retired its Dawn device.
-      }
+  if (frameReadback?.mapState === "mapped") frameReadback.unmap();
+  frameReadback?.destroy();
+  classifiedCubeReadback?.destroy();
+  classifiedOffsetReadback?.destroy();
+  surfaceVertexReadback?.destroy();
+  interfacePositionReadback?.destroy();
+  backInterfacePositionReadback?.destroy();
+  interfaceNormalReadback?.destroy();
+  backInterfaceNormalReadback?.destroy();
+  pipeline?.destroy();
+  output?.destroy();
+  columnFallback?.destroy();
+  uniformBuffer?.destroy();
+  bodyBuffer?.destroy();
+  solver?.destroy();
+  if (device) {
+    await device.queue.onSubmittedWorkDone().catch(() => undefined);
+    try {
+      device.destroy();
+    } catch {
+      // A failed native pipeline may already have retired its Dawn device.
     }
-  } finally {
-    await releaseWebGPUExclusiveLock();
   }
 }

@@ -7,7 +7,6 @@ import { resolve } from "node:path";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { readBufferBinding,readFloatTexture3D,readRgbaTexture3D } from "../lib/harness/webgpu-smoke-readbacks";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
@@ -19,7 +18,6 @@ import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu
 const arg=(key:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${key}=`))?.slice(key.length+3)??fallback;
 const n=Number(arg("n","64")),steps=Number(arg("steps","45")),out=arg("out","/tmp/figure12-current");
 process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT="1";
-await acquireWebGPUExclusiveLock("dawn-probe","figure12 boundary energy");
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 try {
  const dawn=await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href) as NodeDawnProvider;Object.assign(globalThis,dawn.globals);
@@ -72,4 +70,4 @@ try {
   if(capture){if(Number(arg("coarse","0"))>0)await writeFile(`${out}/${frame}-coarse.json`,JSON.stringify(await solver.readCM11aCoarsestCapture(),null,2));await writeFile(`${out}/${frame}-boundary.bin`,boundary);for(const [key,data] of Object.entries({volume,phi,pressure,pre:pre!,post:post!}))await writeFile(`${out}/${frame}-${key}.bin`,new Uint8Array(data.buffer,data.byteOffset,data.byteLength));await writeFile(`${out}/open.bin`,open);}
   assert.deepEqual(errors,[]);if((stages.projection as {max:number}).max>10000)break;
  }
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();}

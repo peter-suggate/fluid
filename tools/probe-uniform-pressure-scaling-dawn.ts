@@ -11,7 +11,6 @@ import { resolve } from "node:path";
 import { createProcessRetainedDawnGPU,type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice, gpuCompilationManagerFor } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
@@ -22,7 +21,6 @@ const passFilter=new RegExp(arg("passes","^Uniform CM11a"));
 const out=arg("out","/tmp/pressure-kernels"),steps=Number(arg("steps","120"));
 assert.equal(process.env.FLUID_UNIFORM_MG_LEVEL_LABELS,"1","Set FLUID_UNIFORM_MG_LEVEL_LABELS=1 for per-dispatch attribution");
 assert.ok(Number.isInteger(steps)&&steps>4);
-await acquireWebGPUExclusiveLock("dawn-probe","uniform pressure scaling");
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 try {
  const dawn=await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href) as NodeDawnProvider;Object.assign(globalThis,dawn.globals);
@@ -76,4 +74,4 @@ try {
   const row={frame,t:frame/30,wallMs,passes,work};rows.push(row);console.log(JSON.stringify({frame,wallMs,pressureMs:passes.reduce((sum,p)=>sum+p.ms,0),work}));await writeFile(`${out}/trace.json`,JSON.stringify(rows,null,2));assert.deepEqual(errors,[]);
  }
  queries.destroy();result.destroy();read.destroy();
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();}

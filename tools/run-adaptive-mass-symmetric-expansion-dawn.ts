@@ -26,10 +26,6 @@ import { createSymmetricExpansionScene,
 import type { GPUSolverInstance } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
-import {
   type AdaptiveMassGPUActivityBrick,
   type AdaptiveMassStepTelemetry,
   WebGPUAdaptiveMassSolver,
@@ -590,685 +586,677 @@ const backend = argument("backend") ?? process.env.WEBGPU_BACKEND
 const modulePath = process.env.WEBGPU_NODE_MODULE
   ?? `${process.cwd()}/node_modules/webgpu/index.js`;
 
-await acquireWebGPUExclusiveLock(
-  "dawn-acceptance",
-  "tools/run-adaptive-mass-symmetric-expansion-dawn.ts",
-);
-try {
-  const dawn = await import(pathToFileURL(modulePath).href) as {
-    create(options: string[]): GPU;
-    globals: Record<string, unknown>;
-  };
-  Object.assign(globalThis, dawn.globals);
-  const gpu = dawn.create([`backend=${backend}`]);
-  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-  if (!adapter) throw new Error(`No Dawn WebGPU adapter is available for backend ${backend}`);
-  const device = await adapter.requestDevice({
-    requiredLimits: requiredFluidDeviceLimits(adapter.limits),
-  });
-  const validationErrors: string[] = [];
-  device.addEventListener("uncapturederror", (event) => {
-    event.preventDefault();
-    validationErrors.push(event.error.message);
-  });
-  device.pushErrorScope("validation");
+const dawn = await import(pathToFileURL(modulePath).href) as {
+  create(options: string[]): GPU;
+  globals: Record<string, unknown>;
+};
+Object.assign(globalThis, dawn.globals);
+const gpu = dawn.create([`backend=${backend}`]);
+const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+if (!adapter) throw new Error(`No Dawn WebGPU adapter is available for backend ${backend}`);
+const device = await adapter.requestDevice({
+  requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+});
+const validationErrors: string[] = [];
+device.addEventListener("uncapturederror", (event) => {
+  event.preventDefault();
+  validationErrors.push(event.error.message);
+});
+device.pushErrorScope("validation");
 
-  const scene = createSymmetricExpansionScene();
-  scene.voxelDomain.finestCellSize_m = scene.container.width_m / horizontalGrid;
-  const verticalGrid = horizontalGrid / 2;
-  const brickSize = scene.voxelDomain.brickSize_cells;
-  const brickGrid = [horizontalGrid / brickSize, verticalGrid / brickSize,
-    horizontalGrid / brickSize] as const;
-  scene.fluid.initialBrickSeeds_m = [];
-  for (let bz = brickGrid[2] / 4; bz < 3 * brickGrid[2] / 4; bz += 1)
-    for (let by = 0; by < brickGrid[1] / 2; by += 1)
-      for (let bx = brickGrid[0] / 4; bx < 3 * brickGrid[0] / 4; bx += 1) {
-        scene.fluid.initialBrickSeeds_m.push({
-          x: -0.5 * scene.container.width_m
-            + (bx + 0.5) * brickSize * scene.voxelDomain.finestCellSize_m,
-          y: (by + 0.5) * brickSize * scene.voxelDomain.finestCellSize_m,
-          z: -0.5 * scene.container.depth_m
-            + (bz + 0.5) * brickSize * scene.voxelDomain.finestCellSize_m,
-        });
-      }
-  const requestedDt_s = argument("dt");
-  if (requestedDt_s !== undefined && Number(requestedDt_s) !== CM12_PAPER_DT_S) {
-    throw new RangeError(`symmetric expansion is locked to the production CM12 step ${
-      CM12_PAPER_DT_S}; received ${requestedDt_s}`);
-  }
-  const dt_s = CM12_PAPER_DT_S;
-  const brickFineResolution = Number(argument("brick-fine") ?? 8);
-  const presentationPageResolution = Number(argument("presentation-page") ?? 8);
-  const massRelativeErrorLimit = brickFineResolution === 8
-    ? Math.max(MASS_RELATIVE_ERROR_LIMIT, 3e-3) : MASS_RELATIVE_ERROR_LIMIT;
-  const resolvedPressureRelativeResidualLimit = accuracyMode === "production"
-    && brickFineResolution === 8
-    ? Math.max(pressureRelativeResidualLimit, 4.1e-6)
-    : pressureRelativeResidualLimit;
-  if (brickFineResolution !== 4 && brickFineResolution !== 8
-    && brickFineResolution !== 16) {
-    throw new RangeError("brick-fine must be 4, 8, or 16");
-  }
-  if ((presentationPageResolution !== 4 && presentationPageResolution !== 8
-    && presentationPageResolution !== 16)
-    || presentationPageResolution > brickFineResolution
-    || brickFineResolution % presentationPageResolution !== 0) {
-    throw new RangeError("presentation-page must be 4, 8, or 16 and divide brick-fine");
-  }
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = dt_s;
-  const expectedInitialMass_cells = (scene.fluid.initialBrickSeeds_m?.length ?? 0)
-    * scene.voxelDomain.brickSize_cells ** 3;
-  let solver: WebGPUAdaptiveMassSolver | undefined;
-  const failures: string[] = [];
-  const checkpoints: Checkpoint[] = [];
-  let initialDensity: Float32Array | undefined;
-  const wallTiming = {
-    solverConstruction_ms: 0,
-    initialCapture_ms: 0,
-    encode_ms: [] as number[],
-    stepCapture_ms: [] as number[],
-    queueCompletion_ms: [] as number[],
-  };
-  const debugProgress = process.env.FLUID_SYMMETRIC_DAWN_DEBUG === "1";
-  const debug = (message: string) => {
-    if (debugProgress) process.stderr.write(`[symmetric-dawn] ${message}\n`);
-  };
-  try {
-    const constructionStarted_ms = performance.now();
-    const solverOptions = {
-        initialResolutionForQA: resolutionMode === "all-fine"
-          ? brickFineResolution : undefined,
-        brickFineResolution,
-        presentationPageResolution,
-        timeStep: "paper",
-        pressureIterations: pressureIterationsOverride,
-        // This is a deterministic acceptance lane: execute the complete
-        // production budget instead of inheriting the interactive early-out.
-        // The final true-residual receipt below remains the authority.
-        pressureRelativeTolerance: 0,
-      } as const;
-    solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
-      device, scene, "balanced", undefined, solverOptions, () => {});
-    await solver.waitForSimulationReady();
-    wallTiming.solverConstruction_ms = performance.now() - constructionStarted_ms;
-    const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
-    expect(failures, dimensions[0] === horizontalGrid
-      && dimensions[1] === verticalGrid && dimensions[2] === horizontalGrid,
-    `grid must be exactly ${horizontalGrid}x${verticalGrid}x${horizontalGrid}; observed ${dimensions.join("x")}`);
-    const missingPublications = requirePublications(solver);
-    for (const publication of missingPublications) failures.push(`missing required publication: ${publication}`);
-
-    const capture = async (step: number): Promise<Checkpoint> => {
-      const captureStarted_ms = performance.now();
-      debug(`capture ${step} queue begin`);
-      await device.queue.onSubmittedWorkDone();
-      const queueComplete_ms = performance.now();
-      if (step > 0) wallTiming.queueCompletion_ms.push(
-        queueComplete_ms - captureStarted_ms);
-      debug(`capture ${step} queue complete in ${
-        (queueComplete_ms - captureStarted_ms).toFixed(3)}ms; stats begin`);
-      if (step > 0) {
-        const [fca, fsm] = await Promise.all([
-          solver!.readFrameControlQA(), solver!.readFinalScalarMaskHeaderQA(),
-        ]);
-        const expectedGeneration = step + 1;
-        expect(failures, fca.phase === 1 && fca.fault === 0
-          && fca.acceptedGeneration === expectedGeneration,
-        `step ${step}: FCA1 phase/fault/generation ${fca.phase}/${fca.fault}/${
-          fca.acceptedGeneration}`);
-        expect(failures, fsm.phase === 2 && fsm.fault === 0
-          && fsm.firstFaultPacket === 0xffff_ffff
-          && fsm.generation === expectedGeneration,
-        `step ${step}: FSM1 phase/fault/packet/generation ${fsm.phase}/${fsm.fault}/${
-          fsm.firstFaultPacket}/${fsm.generation}`);
-        debug(`capture ${step} FCA=${fca.phase}/${fca.fault}/${fca.acceptedGeneration} `
-          + `FSM=${fsm.phase}/${fsm.fault}/${fsm.generation}`);
-      }
-      if (debugProgress) {
-        debug(`capture ${step} acceptedIndirect=${
-          (await solver!.readAcceptedIndirectQA()).join(",")}`);
-        debug(`capture ${step} FCAIndirect=${
-          (await solver!.readFrameControlIndirectQA()).join(",")}`);
-        debug(`capture ${step} transportPacketIndirect=${
-          (await solver!.readTransportPacketIndirectQA()).join(",")}`);
-      }
-      const stats = await solver!.readStats();
-      const statsComplete_ms = performance.now();
-      debug(`capture ${step} stats complete in ${
-        (statsComplete_ms - queueComplete_ms).toFixed(3)}ms; activity begin`);
-      const activity = await solver!.readGPUActivityPolicy();
-      const activityComplete_ms = performance.now();
-      debug(`capture ${step} activity complete in ${
-        (activityComplete_ms - statsComplete_ms).toFixed(3)}ms; fields begin`);
-      const adaptiveStats = stats as typeof stats & AdaptiveMassStepTelemetry;
-      const diagnosticFields = await solver!.readDiagnosticFields(true);
-      const fieldsComplete_ms = performance.now();
-      debug(`capture ${step} fields complete in ${
-        (fieldsComplete_ms - activityComplete_ms).toFixed(3)}ms; total ${
-        (fieldsComplete_ms - captureStarted_ms).toFixed(3)}ms`);
-      const density = diagnosticFields.density;
-      if (step === 0 && initialDensity === undefined) initialDensity = density.slice();
-      const levelSet = Float32Array.from(density, (rho) =>
-        (0.5 - rho) * 4 * solver!.info.cellSize_m);
-      const velocityRgba = diagnosticFields.velocity;
-      const pressure = diagnosticFields.pressure;
-      const divergence = diagnosticFields.divergence;
-      const velocity = velocityRgba && Float32Array.from(
-        { length: dimensions[0] * dimensions[1] * dimensions[2] * 3 },
-        (_, index) => velocityRgba[4 * Math.floor(index / 3) + index % 3],
-      );
-      const topologyField = new Float32Array(dimensions[0] * dimensions[1] * dimensions[2]);
-      for (const brick of activity.bricks) {
-        if (!brick.active) continue;
-        const scale = brickFineResolution / brick.acceptedResolution;
-        for (let z = 0; z < brickFineResolution; z += 1)
-          for (let y = 0; y < brickFineResolution; y += 1)
-            for (let x = 0; x < brickFineResolution; x += 1) {
-            const qx = brickFineResolution * brick.coordinate[0] + x;
-            const qy = brickFineResolution * brick.coordinate[1] + y;
-            const qz = brickFineResolution * brick.coordinate[2] + z;
-            if (qx < dimensions[0] && qy < dimensions[1] && qz < dimensions[2]) {
-              topologyField[qx + dimensions[0] * (qy + dimensions[1] * qz)] = scale;
-            }
-          }
-      }
-      const topology = { field: topologyField, invalidOwnershipCount: 0 };
-      const residentOwnerScales = topology
-        ? [...new Set(topology.field)].filter((scale) =>
-          scale === 1 || scale === 2 || scale === 4 || scale === 8)
-          .sort((left, right) => left - right)
-        : [];
-      if (topology) expect(failures, topology.invalidOwnershipCount === 0,
-        `step ${step}: ${topology.invalidOwnershipCount} ownership keys do not contain their published cells`);
-      const mass_cells = summarize(density).sum;
-      const brickDimensions = dimensions.map((value) =>
-        value / brickFineResolution) as [number, number, number];
-      const horizontalCorner = (coordinate: readonly number[]) =>
-        (coordinate[0] === 0 || coordinate[0] === brickDimensions[0] - 1)
-        && (coordinate[2] === 0 || coordinate[2] === brickDimensions[2] - 1);
-      let horizontalCornerMass_cells = 0;
-      for (let z = 0; z < dimensions[2]; z += 1)
-        for (let y = 0; y < dimensions[1]; y += 1)
-          for (let x = 0; x < dimensions[0]; x += 1) {
-            if (!horizontalCorner([
-              Math.floor(x / brickFineResolution),
-              Math.floor(y / brickFineResolution),
-              Math.floor(z / brickFineResolution),
-            ])) continue;
-            horizontalCornerMass_cells += density[
-              x + dimensions[0] * (y + dimensions[1] * z)]!;
-          }
-      let densityL1Change_cells = 0;
-      if (initialDensity) for (let cell = 0; cell < density.length; cell += 1) {
-        densityL1Change_cells += Math.abs(density[cell] - initialDensity[cell]);
-      }
-      const pressureRelativeResidual = stats.pressureRelativeResidual ?? stats.pressureResidual;
-      const maximumPostProjectionDivergence_s = divergence
-        ? summarize(divergence).maximumAbsolute : undefined;
-      const levelSetOwnerPhaseMismatches = 0;
-      let maximumAbsoluteVerticalVelocity_m_s: number | undefined;
-      if (velocity) {
-        maximumAbsoluteVerticalVelocity_m_s = 0;
-        for (let cell = 0; cell < velocity.length / 3; cell += 1) {
-          maximumAbsoluteVerticalVelocity_m_s = Math.max(
-            maximumAbsoluteVerticalVelocity_m_s,
-            Math.abs(velocity[3 * cell + 1]),
-          );
-        }
-      }
-      return {
-        step,
-        time_s: step * dt_s,
-        mass_cells,
-        relativeMassDrift: (mass_cells - expectedInitialMass_cells)
-          / Math.max(1, expectedInitialMass_cells),
-        normalizedL1DensityChange: densityL1Change_cells
-          / Math.max(1, expectedInitialMass_cells),
-        density: summarize(density),
-        levelSet: summarize(levelSet ?? []),
-        levelSetOwnerPhaseMismatchCount: levelSetOwnerPhaseMismatches,
-        velocity: velocity ? summarize(velocity) : undefined,
-        pressure: pressure ? summarize(pressure) : undefined,
-        divergence: divergence ? summarize(divergence) : undefined,
-        symmetry: {
-          density: scalarD4(density, dimensions),
-          topology: topology ? scalarD4(topology.field, dimensions) : undefined,
-          velocity: velocity ? velocityD4(velocity, dimensions) : undefined,
-          pressure: pressure ? scalarD4(pressure, dimensions) : undefined,
-          divergence: divergence ? scalarD4(divergence, dimensions) : undefined,
-        },
-        dominantBodyMassFraction: dominantBodyMassFraction(density, dimensions),
-        pressureRelativeResidual,
-        pressureRecursiveRelativeResidual: stats.pressureRecursiveRelativeResidual,
-        pressureIterationsExecuted: stats.pressureIterationsExecuted,
-        pressureResidualDrift: stats.pressureResidualDrift,
-        adaptivePressureCellCount: stats.adaptivePressureCellCount,
-        maximumPostProjectionDivergence_s,
-        statsMaximumPostProjectionDivergence_s: stats.maxDivergenceAfter_s,
-        maximumAbsoluteVerticalVelocity_m_s,
-        maximumCfl: stats.maxComponentCfl,
-        kineticEnergyBeforeFineUnits:
-          adaptiveStats.adaptiveKineticEnergyBeforeFineUnits,
-        kineticEnergyAfterFineUnits:
-          adaptiveStats.adaptiveKineticEnergyAfterFineUnits,
-        projectionKineticEnergyBeforeFineUnits:
-          adaptiveStats.adaptiveProjectionKineticEnergyBeforeFineUnits,
-        projectionKineticEnergyAfterFineUnits:
-          adaptiveStats.adaptiveProjectionKineticEnergyAfterFineUnits,
-        inactiveFaceCount: adaptiveStats.adaptiveInactiveFaceCount,
-        maximumInactiveFaceSpeedBefore_m_s:
-          adaptiveStats.adaptiveMaximumInactiveFaceSpeedBefore_m_s,
-        maximumInactiveFaceSpeedAfter_m_s:
-          adaptiveStats.adaptiveMaximumInactiveFaceSpeedAfter_m_s,
-        maximumMixedSeamDivergence_s:
-          adaptiveStats.adaptiveMaximumMixedSeamDivergence_s,
-        pressureIterations: stats.pressureIterations,
-        adaptiveMixedSeamFaceCount: (stats as typeof stats & {
-          readonly adaptiveMixedSeamFaceCount?: number;
-        }).adaptiveMixedSeamFaceCount,
-        adaptiveResolutionTopologyEpoch: stats.adaptiveResolutionTopologyEpoch,
-        adaptiveResolutionPromotedBrickCount:
-          stats.adaptiveResolutionPromotedBrickCount,
-        adaptiveResolutionDemotedBrickCount:
-          stats.adaptiveResolutionDemotedBrickCount,
-        adaptiveResolutionDeferredPromotionCount:
-          stats.adaptiveResolutionDeferredPromotionCount,
-        adaptiveFineBrickCount: stats.adaptiveFineBrickCount,
-        adaptiveCoarseBrickCount: stats.adaptiveCoarseBrickCount,
-        adaptiveActivityAcceptedSteps: activity.acceptedSteps,
-        adaptiveActivityD4MismatchCount: activityD4MismatchCount(
-          activity.bricks, dimensions, brickFineResolution,
-        ),
-        adaptiveActivityMaximumScore: stats.adaptiveActivityMaximumScore,
-        adaptiveActivityMeasuredBrickCount: stats.adaptiveActivityMeasuredBrickCount,
-        adaptiveActivitySurfaceBrickCount: stats.adaptiveActivitySurfaceBrickCount,
-        adaptiveActivityHotBrickCount: stats.adaptiveActivityHotBrickCount,
-        adaptiveActivityQuietBrickCount: stats.adaptiveActivityQuietBrickCount,
-        adaptiveResidentBrickCount: activity.bricks.length,
-        adaptiveActiveBrickCount: activity.bricks.filter((brick) => brick.active).length,
-        adaptiveActiveHorizontalCornerBrickCount: activity.bricks.filter((brick) =>
-          brick.active && horizontalCorner(brick.coordinate)).length,
-        adaptiveNewlyActivatedBrickCount: step > 0 ? activity.bricks.filter((brick) =>
-          brick.activatedStep === step).length : 0,
-        horizontalCornerMass_cells,
-        adaptiveTopologyPreparedBrickCount:
-          stats.adaptiveTopologyPreparedBrickCount,
-        adaptiveTopologyCommittedBrickCount:
-          stats.adaptiveTopologyCommittedBrickCount,
-        adaptiveTopologyDeferredBrickCount:
-          stats.adaptiveTopologyDeferredBrickCount,
-        adaptiveTopologyShadowGeneration:
-          stats.adaptiveTopologyShadowGeneration,
-        adaptiveTransactions: activity.bricks.filter((brick) =>
-          (step > 0 && (brick.candidateEpoch === step || brick.activatedStep === step))
-          || brick.retiredResidueMassFineCells !== 0).map((brick) => ({
-            coordinate: brick.coordinate,
-            active: brick.active,
-            accepted: brick.acceptedResolution,
-            candidate: brick.candidateResolution,
-            candidateStatus: brick.candidateStatus,
-            candidateEpoch: brick.candidateEpoch,
-            transferMassBefore: brick.transferMassBeforeFineCells,
-            transferMassAfter: brick.transferMassAfterFineCells,
-            transferStatus: brick.transferStatus,
-            faceTransferStatus: brick.faceTransferStatus,
-            retiredMass: brick.retiredResidueMassFineCells,
-          })),
-        residentOwnerScales,
-        encodedSteps: stats.encodedSteps,
-        submittedTime_s: stats.submittedTime_s,
-        simulatedTime_s: stats.simulatedTime_s,
-        completedTime_s: stats.completedTime_s,
-        hostFluidAuthority: stats.hostFluidAuthority,
-        hostSimulationSizedWorkItems: stats.hostSimulationSizedWorkItems,
-      };
-    };
-
-    const initialCaptureStarted_ms = performance.now();
-    checkpoints.push(await capture(0));
-    wallTiming.initialCapture_ms = performance.now() - initialCaptureStarted_ms;
-    const initialRelativeMassError = Math.abs(
-      (checkpoints[0]!.mass_cells - expectedInitialMass_cells) / Math.max(1, expectedInitialMass_cells),
-    );
-    expect(failures, expectedInitialMass_cells > 0,
-      "symmetric-expansion authored mass could not be derived from its brick seeds");
-    expect(failures, initialRelativeMassError <= massRelativeErrorLimit,
-      `initial mass relative error ${initialRelativeMassError} exceeds ${massRelativeErrorLimit}`);
-    const initial = checkpoints[0]!;
-    expect(failures, initial.density.nonFiniteCount === 0
-      && initial.density.minimum >= -1e-6
-      && initial.density.maximum <= MAXIMUM_DENSITY_ACCEPTED,
-    `initial density is non-finite or outside [-1e-6, ${MAXIMUM_DENSITY_ACCEPTED}]`);
-    expect(failures, initial.levelSet.count > 0 && initial.levelSet.nonFiniteCount === 0,
-      "initial level-set publication is absent or non-finite");
-    expect(failures, initial.levelSetOwnerPhaseMismatchCount === 0,
-      `initial level-set phase disagrees with density in ${initial.levelSetOwnerPhaseMismatchCount} owners`);
-    expect(failures, initial.symmetry.density?.maximumAbsoluteError === 0,
-      `initial density is not exactly D4 symmetric (error ${initial.symmetry.density?.maximumAbsoluteError ?? "missing"})`);
-    expect(failures, initial.symmetry.topology?.maximumAbsoluteError === 0,
-      `initial topology is not exactly D4 symmetric (error ${initial.symmetry.topology?.maximumAbsoluteError ?? "missing"})`);
-    expect(failures, initial.symmetry.velocity?.maximumAbsoluteError === 0,
-      `initial velocity is not exactly D4 symmetric (error ${initial.symmetry.velocity?.maximumAbsoluteError ?? "missing"})`);
-    expect(failures, initial.symmetry.pressure?.maximumAbsoluteError === 0,
-      `initial pressure is not exactly D4 symmetric (error ${initial.symmetry.pressure?.maximumAbsoluteError ?? "missing"})`);
-    expect(failures, initial.dominantBodyMassFraction >= MINIMUM_DOMINANT_BODY_MASS_FRACTION,
-      `initial dominant connected body fraction ${initial.dominantBodyMassFraction} is below ${MINIMUM_DOMINANT_BODY_MASS_FRACTION}`);
-    expect(failures, initial.encodedSteps === 0
-      && initial.submittedTime_s === 0 && initial.simulatedTime_s === 0
-      && initial.completedTime_s === 0,
-    "initial exact step/time publication is not zero");
-
-    for (let step = 1; step <= steps; step += 1) {
-      const stepStarted_ms = performance.now();
-      const target_s = step * dt_s;
-      debug(`step ${step} encode begin`);
-      const advanced = solver.advanceTo(target_s, []);
-      wallTiming.encode_ms.push(performance.now() - stepStarted_ms);
-      debug(`step ${step} encoded=${advanced}`);
-      expect(failures, advanced, `step ${step}: advanceTo(${target_s}) did not encode exactly one step`);
-      const checkpoint = await capture(step);
-      debug(`step ${step} density=[${checkpoint.density.minimum},${checkpoint.density.maximum}]`);
-      wallTiming.stepCapture_ms.push(performance.now() - stepStarted_ms);
-      checkpoints.push(checkpoint);
-      if (step === 1) expect(failures,
-        checkpoint.adaptiveActiveHorizontalCornerBrickCount === 8,
-        `step 1: only ${checkpoint.adaptiveActiveHorizontalCornerBrickCount}/8 `
-          + "horizontal corner tiles were allocated");
-      expect(failures, Math.abs(checkpoint.relativeMassDrift) <= massRelativeErrorLimit,
-        `step ${step}: mass drift ${checkpoint.relativeMassDrift} exceeds ${massRelativeErrorLimit}`);
-      expect(failures, checkpoint.density.nonFiniteCount === 0
-        && checkpoint.density.minimum >= -1e-6
-        && checkpoint.density.maximum <= MAXIMUM_DENSITY_ACCEPTED,
-      `step ${step}: density is non-finite or outside [-1e-6, ${MAXIMUM_DENSITY_ACCEPTED}]`);
-      const domainDiagonal_m = Math.hypot(
-        scene.container.width_m, scene.container.height_m, scene.container.depth_m,
-      );
-      expect(failures, checkpoint.levelSet.count > 0
-        && checkpoint.levelSet.nonFiniteCount === 0
-        && checkpoint.levelSet.maximumAbsolute <= 2 * domainDiagonal_m,
-      `step ${step}: level set is absent, non-finite, or exceeds twice the domain diagonal`);
-      expect(failures, checkpoint.levelSetOwnerPhaseMismatchCount === 0,
-        `step ${step}: level-set phase disagrees with density in ${checkpoint.levelSetOwnerPhaseMismatchCount} owners`);
-      expect(failures, checkpoint.symmetry.density !== undefined
-        && checkpoint.symmetry.density.nonFiniteCount === 0
-        && checkpoint.symmetry.density.maximumAbsoluteError <= DENSITY_SYMMETRY_LIMIT,
-      `step ${step}: density D4 error ${checkpoint.symmetry.density?.maximumAbsoluteError ?? "missing"} exceeds ${DENSITY_SYMMETRY_LIMIT}`);
-      expect(failures, checkpoint.symmetry.topology !== undefined
-        && checkpoint.symmetry.topology.nonFiniteCount === 0
-        && checkpoint.symmetry.topology.maximumAbsoluteError === 0,
-      `step ${step}: topology is missing or not exactly D4 symmetric`);
-      expect(failures, checkpoint.velocity !== undefined
-        && checkpoint.velocity.nonFiniteCount === 0
-        && checkpoint.velocity.maximumAbsolute <= 4 * solver.info.cellSize_m / dt_s,
-      `step ${step}: velocity is missing, non-finite, or exceeds the 4-cell CFL bound`);
-      expect(failures, checkpoint.symmetry.velocity !== undefined
-        && checkpoint.symmetry.velocity.nonFiniteCount === 0
-        && checkpoint.symmetry.velocity.maximumAbsoluteError <= VELOCITY_SYMMETRY_LIMIT_M_S,
-      `step ${step}: velocity D4 error ${checkpoint.symmetry.velocity?.maximumAbsoluteError ?? "missing"} exceeds ${VELOCITY_SYMMETRY_LIMIT_M_S}`);
-      expect(failures, checkpoint.maximumAbsoluteVerticalVelocity_m_s !== undefined
-        && checkpoint.maximumAbsoluteVerticalVelocity_m_s > 1e-6,
-      `step ${step}: force-evolved vertical velocity is missing or identically zero`);
-      expect(failures, checkpoint.pressure !== undefined
-        && checkpoint.pressure.nonFiniteCount === 0
-        && checkpoint.pressure.maximumAbsolute <= 1e6,
-      `step ${step}: pressure is missing, non-finite, or exceeds 1 MPa`);
-      expect(failures, checkpoint.symmetry.pressure !== undefined
-        && checkpoint.symmetry.pressure.nonFiniteCount === 0
-        && checkpoint.symmetry.pressure.maximumAbsoluteError <= PRESSURE_SYMMETRY_LIMIT,
-      `step ${step}: pressure D4 error ${checkpoint.symmetry.pressure?.maximumAbsoluteError ?? "missing"} exceeds ${PRESSURE_SYMMETRY_LIMIT}`);
-      // The first freely falling frame can have a zero pressure correction:
-      // gravity changes velocity but not divergence.  Iteration/residual and
-      // divergence assertions below still prove that projection executed.
-      expect(failures, checkpoint.pressure !== undefined
-        && (checkpoint.pressure.maximumAbsolute > 1e-6
-          || (step === 1
-            && checkpoint.maximumAbsoluteVerticalVelocity_m_s !== undefined
-            && checkpoint.maximumAbsoluteVerticalVelocity_m_s > 1e-6)),
-      `step ${step}: projected pressure is missing or identically zero outside the first free-fall frame`);
-      expect(failures, checkpoint.pressureIterations !== undefined
-        && checkpoint.pressureIterations > 0,
-      `step ${step}: pressureIterations is ${checkpoint.pressureIterations ?? "missing"}; no iterative projection was executed`);
-      expect(failures, resolutionMode !== "adaptive" || (checkpoint.pressureRelativeResidual !== undefined
-        && Number.isFinite(checkpoint.pressureRelativeResidual)
-        && checkpoint.pressureRelativeResidual <= resolvedPressureRelativeResidualLimit),
-      `step ${step}: pressure relative residual ${checkpoint.pressureRelativeResidual ?? "missing"} exceeds ${resolvedPressureRelativeResidualLimit} (${accuracyMode})`);
-      expect(failures, checkpoint.divergence !== undefined
-        && checkpoint.divergence.nonFiniteCount === 0,
-      `step ${step}: post-projection divergence publication is missing or non-finite`);
-      expect(failures, checkpoint.maximumPostProjectionDivergence_s !== undefined
-        && checkpoint.maximumPostProjectionDivergence_s <= postProjectionDivergenceLimit_s,
-      `step ${step}: post-projection divergence ${checkpoint.maximumPostProjectionDivergence_s ?? "missing"} exceeds ${postProjectionDivergenceLimit_s}`);
-      expect(failures, resolutionMode !== "adaptive"
-        || checkpoint.maximumInactiveFaceSpeedAfter_m_s === 0,
-        `step ${step}: pressure-inactive faces retained ${checkpoint.maximumInactiveFaceSpeedAfter_m_s ?? "missing"} m/s after projection`);
-      expect(failures, resolutionMode !== "adaptive"
-        || (checkpoint.maximumMixedSeamDivergence_s !== undefined
-        && checkpoint.maximumMixedSeamDivergence_s <= postProjectionDivergenceLimit_s),
-      `step ${step}: mixed-seam divergence ${checkpoint.maximumMixedSeamDivergence_s ?? "missing"} exceeds ${postProjectionDivergenceLimit_s} (${accuracyMode})`);
-      const divergenceAgreementTolerance = DIVERGENCE_PUBLICATION_ABSOLUTE_AGREEMENT_S
-        + DIVERGENCE_PUBLICATION_RELATIVE_AGREEMENT * Math.max(
-          Math.abs(checkpoint.maximumPostProjectionDivergence_s ?? Number.POSITIVE_INFINITY),
-          Math.abs(checkpoint.statsMaximumPostProjectionDivergence_s ?? Number.POSITIVE_INFINITY),
-        );
-      expect(failures, resolutionMode !== "adaptive"
-        || (checkpoint.statsMaximumPostProjectionDivergence_s !== undefined
-        && Number.isFinite(checkpoint.statsMaximumPostProjectionDivergence_s)
-        && checkpoint.maximumPostProjectionDivergence_s !== undefined
-        && Math.abs(checkpoint.statsMaximumPostProjectionDivergence_s
-          - checkpoint.maximumPostProjectionDivergence_s) <= divergenceAgreementTolerance),
-      `step ${step}: max-divergence stats ${checkpoint.statsMaximumPostProjectionDivergence_s ?? "missing"} disagree with texture ${checkpoint.maximumPostProjectionDivergence_s ?? "missing"}`);
-      expect(failures, checkpoint.dominantBodyMassFraction >= MINIMUM_DOMINANT_BODY_MASS_FRACTION,
-      `step ${step}: dominant connected body fraction ${checkpoint.dominantBodyMassFraction} is below ${MINIMUM_DOMINANT_BODY_MASS_FRACTION}`);
-      expect(failures, checkpoint.encodedSteps === step,
-        `step ${step}: encodedSteps is ${checkpoint.encodedSteps ?? "missing"}`);
-      expect(failures, checkpoint.hostFluidAuthority === "gpu-resident",
-        `step ${step}: host fluid authority is ${checkpoint.hostFluidAuthority ?? "missing"}`);
-      expect(failures, checkpoint.hostSimulationSizedWorkItems === 0,
-        `step ${step}: host scheduled ${checkpoint.hostSimulationSizedWorkItems ?? "missing"} simulation-sized work items`);
-      expect(failures, checkpoint.adaptiveActivityAcceptedSteps === step,
-        `step ${step}: GPU activity clock is ${checkpoint.adaptiveActivityAcceptedSteps}`);
-      // The measured count is the dirty census captured before residency
-      // retirement.  The activity snapshot below is the post-retirement live
-      // census, so a transition frame may legitimately measure more leaves
-      // than remain resident by the time QA reads them back.  Bound it by the
-      // finite scene domain instead of comparing two different frame phases.
-      const domainBrickCount = dimensions.reduce((count, extent) =>
-        count * (extent / brickFineResolution), 1);
-      expect(failures, (checkpoint.adaptiveActivityMeasuredBrickCount ?? 0) > 0
-        && (checkpoint.adaptiveActivityMeasuredBrickCount ?? Number.POSITIVE_INFINITY)
-          <= domainBrickCount,
-      `step ${step}: GPU measured ${checkpoint.adaptiveActivityMeasuredBrickCount ?? "missing"} activity bricks`);
-      expect(failures, checkpoint.adaptiveActivityD4MismatchCount === 0,
-        `step ${step}: GPU activity/history map has ${checkpoint.adaptiveActivityD4MismatchCount} D4 mismatches`);
-      for (const [clock, actual] of [
-        ["submittedTime_s", checkpoint.submittedTime_s],
-        ["simulatedTime_s", checkpoint.simulatedTime_s],
-        ["completedTime_s", checkpoint.completedTime_s],
-      ] as const) {
-        expect(failures, actual !== undefined && Math.abs(actual - target_s) <= 1e-12,
-          `step ${step}: ${clock} is ${actual ?? "missing"}; expected exactly ${target_s}`);
-      }
+const scene = createSymmetricExpansionScene();
+scene.voxelDomain.finestCellSize_m = scene.container.width_m / horizontalGrid;
+const verticalGrid = horizontalGrid / 2;
+const brickSize = scene.voxelDomain.brickSize_cells;
+const brickGrid = [horizontalGrid / brickSize, verticalGrid / brickSize,
+  horizontalGrid / brickSize] as const;
+scene.fluid.initialBrickSeeds_m = [];
+for (let bz = brickGrid[2] / 4; bz < 3 * brickGrid[2] / 4; bz += 1)
+  for (let by = 0; by < brickGrid[1] / 2; by += 1)
+    for (let bx = brickGrid[0] / 4; bx < 3 * brickGrid[0] / 4; bx += 1) {
+      scene.fluid.initialBrickSeeds_m.push({
+        x: -0.5 * scene.container.width_m
+          + (bx + 0.5) * brickSize * scene.voxelDomain.finestCellSize_m,
+        y: (by + 0.5) * brickSize * scene.voxelDomain.finestCellSize_m,
+        z: -0.5 * scene.container.depth_m
+          + (bz + 0.5) * brickSize * scene.voxelDomain.finestCellSize_m,
+      });
     }
-
-    await device.queue.onSubmittedWorkDone();
-    const finalCheckpoint = checkpoints.at(-1)!;
-    expect(failures,
-      finalCheckpoint.normalizedL1DensityChange >= MINIMUM_FINAL_NORMALIZED_L1_DENSITY_CHANGE,
-      `final normalized L1 density change ${finalCheckpoint.normalizedL1DensityChange} is below ${MINIMUM_FINAL_NORMALIZED_L1_DENSITY_CHANGE}; the liquid did not visibly evolve`);
-    expect(failures, finalCheckpoint.horizontalCornerMass_cells > 1e-3,
-      `final horizontal-corner mass ${finalCheckpoint.horizontalCornerMass_cells} `
-        + "shows that liquid never entered the allocated corner tiles");
-    const maximumMixedSeamFaceCount = Math.max(...checkpoints.map(
-      (checkpoint) => checkpoint.adaptiveMixedSeamFaceCount ?? 0));
-    const maximumPromotedBrickCount = Math.max(...checkpoints.map(
-      (checkpoint) => checkpoint.adaptiveResolutionPromotedBrickCount ?? 0));
-    const maximumDemotedBrickCount = Math.max(...checkpoints.map(
-      (checkpoint) => checkpoint.adaptiveResolutionDemotedBrickCount ?? 0));
-    const maximumDeferredPromotionCount = Math.max(...checkpoints.map(
-      (checkpoint) => checkpoint.adaptiveResolutionDeferredPromotionCount ?? 0));
-    const exercisedMixedResolution = checkpoints.some(
-      (checkpoint) => checkpoint.residentOwnerScales.length > 1);
-    expect(failures, resolutionMode !== "adaptive" || !exercisedMixedResolution
-      || maximumMixedSeamFaceCount > 0,
-    "a mixed-resolution topology was published without a live mixed seam");
-    expect(failures, resolutionMode !== "adaptive" || maximumDeferredPromotionCount === 0,
-      `${maximumDeferredPromotionCount} eligible promotions were deferred`);
-    expect(failures, resolutionMode === "all-fine"
-      ? finalCheckpoint.residentOwnerScales.length === 1
-        && finalCheckpoint.residentOwnerScales[0] === 1
-      : finalCheckpoint.residentOwnerScales.includes(1),
-    `final resident topology scales ${finalCheckpoint.residentOwnerScales.join(",") || "missing"} do not include accepted fine leaves`);
-    const scopedError = await device.popErrorScope();
-    if (scopedError) validationErrors.push(scopedError.message);
-    const finalStats = await solver.readStats();
-    if (finalStats.gpuValidationError) validationErrors.push(finalStats.gpuValidationError);
-    for (const message of validationErrors) failures.push(`WebGPU validation error: ${message}`);
-
-    const maximum = (select: (checkpoint: Checkpoint) => number | undefined): number => {
-      const values = checkpoints.map(select).filter(
-        (value): value is number => value !== undefined && Number.isFinite(value),
-      );
-      return values.length > 0 ? Math.max(...values) : Number.NaN;
-    };
-    const report = {
-      passed: failures.length === 0,
-      scenario: scene.sceneId,
-      method: "adaptive-volume",
-      accuracyMode,
-      pressureIterations: pressureIterationsOverride,
-      resolutionMode,
+const requestedDt_s = argument("dt");
+if (requestedDt_s !== undefined && Number(requestedDt_s) !== CM12_PAPER_DT_S) {
+  throw new RangeError(`symmetric expansion is locked to the production CM12 step ${
+      CM12_PAPER_DT_S}; received ${requestedDt_s}`);
+}
+const dt_s = CM12_PAPER_DT_S;
+const brickFineResolution = Number(argument("brick-fine") ?? 8);
+const presentationPageResolution = Number(argument("presentation-page") ?? 8);
+const massRelativeErrorLimit = brickFineResolution === 8
+  ? Math.max(MASS_RELATIVE_ERROR_LIMIT, 3e-3) : MASS_RELATIVE_ERROR_LIMIT;
+const resolvedPressureRelativeResidualLimit = accuracyMode === "production"
+  && brickFineResolution === 8
+  ? Math.max(pressureRelativeResidualLimit, 4.1e-6)
+  : pressureRelativeResidualLimit;
+if (brickFineResolution !== 4 && brickFineResolution !== 8
+  && brickFineResolution !== 16) {
+  throw new RangeError("brick-fine must be 4, 8, or 16");
+}
+if ((presentationPageResolution !== 4 && presentationPageResolution !== 8
+  && presentationPageResolution !== 16)
+  || presentationPageResolution > brickFineResolution
+  || brickFineResolution % presentationPageResolution !== 0) {
+  throw new RangeError("presentation-page must be 4, 8, or 16 and divide brick-fine");
+}
+scene.numerics.fixedDt_s = scene.numerics.maxDt_s = dt_s;
+const expectedInitialMass_cells = (scene.fluid.initialBrickSeeds_m?.length ?? 0)
+  * scene.voxelDomain.brickSize_cells ** 3;
+let solver: WebGPUAdaptiveMassSolver | undefined;
+const failures: string[] = [];
+const checkpoints: Checkpoint[] = [];
+let initialDensity: Float32Array | undefined;
+const wallTiming = {
+  solverConstruction_ms: 0,
+  initialCapture_ms: 0,
+  encode_ms: [] as number[],
+  stepCapture_ms: [] as number[],
+  queueCompletion_ms: [] as number[],
+};
+const debugProgress = process.env.FLUID_SYMMETRIC_DAWN_DEBUG === "1";
+const debug = (message: string) => {
+  if (debugProgress) process.stderr.write(`[symmetric-dawn] ${message}\n`);
+};
+try {
+  const constructionStarted_ms = performance.now();
+  const solverOptions = {
+      initialResolutionForQA: resolutionMode === "all-fine"
+        ? brickFineResolution : undefined,
       brickFineResolution,
       presentationPageResolution,
-      backend,
-      adapter: (adapter as GPUAdapter & { readonly info?: GPUAdapterInfo }).info,
-      grid: dimensions,
-      steps,
-      dt_s,
-      exactTargetTime_s: steps * dt_s,
-      wallTiming,
-      initializationCensus: readInitializationCensus(),
-      expectedInitialMass_cells,
-      observedInitialMass_cells: checkpoints[0]!.mass_cells,
-      maximumDensity: maximum((sample) => sample.density.maximum),
-      maximumAbsoluteVelocity_m_s: maximum((sample) => sample.velocity?.maximumAbsolute),
-      maximumAbsoluteRelativeMassDrift: maximum((sample) => Math.abs(sample.relativeMassDrift)),
-      finalNormalizedL1DensityChange: finalCheckpoint.normalizedL1DensityChange,
-      maximumDensityD4Error: maximum((sample) => sample.symmetry.density?.maximumAbsoluteError),
-      maximumVelocityD4Error_m_s: maximum((sample) => sample.symmetry.velocity?.maximumAbsoluteError),
-      maximumPressureD4Error: maximum((sample) => sample.symmetry.pressure?.maximumAbsoluteError),
-      maximumTopologyD4Error: maximum((sample) => sample.symmetry.topology?.maximumAbsoluteError),
-      maximumPressureRelativeResidual: maximum((sample) => sample.pressureRelativeResidual),
-      maximumPressureRecursiveRelativeResidual: maximum(
-        (sample) => sample.pressureRecursiveRelativeResidual,
-      ),
-      maximumPressureIterationsExecuted: maximum(
-        (sample) => sample.pressureIterationsExecuted,
-      ),
-      pressureResidualDriftCount: checkpoints.filter(
-        (sample) => sample.pressureResidualDrift,
-      ).length,
-      maximumPostProjectionDivergence_s: maximum((sample) => sample.maximumPostProjectionDivergence_s),
-      maximumMixedSeamDivergence_s: maximum(
-        (sample) => sample.maximumMixedSeamDivergence_s,
-      ),
-      maximumInactiveFaceSpeedBefore_m_s: maximum(
-        (sample) => sample.maximumInactiveFaceSpeedBefore_m_s,
-      ),
-      maximumInactiveFaceSpeedAfter_m_s: maximum(
-        (sample) => sample.maximumInactiveFaceSpeedAfter_m_s,
-      ),
-      maximumCfl: maximum((sample) => sample.maximumCfl),
-      maximumKineticEnergyAfterFineUnits: maximum(
-        (sample) => sample.kineticEnergyAfterFineUnits,
-      ),
-      maximumProjectionKineticEnergyAfterFineUnits: maximum(
-        (sample) => sample.projectionKineticEnergyAfterFineUnits,
-      ),
-      maximumAdaptiveMixedSeamFaceCount: maximumMixedSeamFaceCount,
-      maximumAdaptivePromotedBrickCount: maximumPromotedBrickCount,
-      maximumAdaptiveDemotedBrickCount: maximumDemotedBrickCount,
-      maximumAdaptiveDeferredPromotionCount: maximumDeferredPromotionCount,
-      minimumDominantBodyMassFraction: Math.min(...checkpoints.map(
-        (sample) => sample.dominantBodyMassFraction)),
-      requiredThresholds: {
-        maximumDensity: MAXIMUM_DENSITY_ACCEPTED,
-        maximumDensityNominal: MAXIMUM_DENSITY,
-        maximumDensityRelativeTolerance: MAXIMUM_DENSITY_RELATIVE_TOLERANCE,
-        densityD4: DENSITY_SYMMETRY_LIMIT,
-        velocityD4_m_s: VELOCITY_SYMMETRY_LIMIT_M_S,
-        pressureD4: PRESSURE_SYMMETRY_LIMIT,
-        topologyD4: 0,
-        pressureRelativeResidual: resolvedPressureRelativeResidualLimit,
-        postProjectionDivergence_s: postProjectionDivergenceLimit_s,
-        massRelativeError: massRelativeErrorLimit,
-        minimumFinalNormalizedL1DensityChange: MINIMUM_FINAL_NORMALIZED_L1_DENSITY_CHANGE,
-        divergencePublicationAbsoluteAgreement_s:
-          DIVERGENCE_PUBLICATION_ABSOLUTE_AGREEMENT_S,
-        divergencePublicationRelativeAgreement: DIVERGENCE_PUBLICATION_RELATIVE_AGREEMENT,
-        dominantBodyMassFraction: MINIMUM_DOMINANT_BODY_MASS_FRACTION,
-      },
-      validationErrors,
-      failures,
-      topologyTimeline: checkpoints.map((sample) => ({
-        step: sample.step,
-        time_s: sample.time_s,
-        mass_cells: sample.mass_cells,
-        densityMinimum: sample.density.minimum,
-        densityMaximum: sample.density.maximum,
-        densityD4: sample.symmetry.density?.maximumAbsoluteError,
-        activeBricks: sample.adaptiveActiveBrickCount,
-        newlyActivatedBricks: sample.adaptiveNewlyActivatedBrickCount,
-        preparedBricks: sample.adaptiveTopologyPreparedBrickCount,
-        committedBricks: sample.adaptiveTopologyCommittedBrickCount,
-        deferredBricks: sample.adaptiveTopologyDeferredBrickCount,
-        topologyGeneration: sample.adaptiveTopologyShadowGeneration,
-        transactions: sample.adaptiveTransactions,
-      })),
-      finalCheckpoint: checkpoints.at(-1),
-    };
-    const output = argument("summary") === "1" ? {
-      passed: report.passed,
-      scenario: report.scenario,
-      accuracyMode: report.accuracyMode,
-      pressureIterations: report.pressureIterations,
-      resolutionMode: report.resolutionMode,
-      brickFineResolution: report.brickFineResolution,
-      presentationPageResolution: report.presentationPageResolution,
-      grid: report.grid,
-      steps: report.steps,
-      expectedInitialMass_cells: report.expectedInitialMass_cells,
-      observedInitialMass_cells: report.observedInitialMass_cells,
-      maximumDensity: report.maximumDensity,
-      maximumAbsoluteVelocity_m_s: report.maximumAbsoluteVelocity_m_s,
-      maximumAbsoluteRelativeMassDrift: report.maximumAbsoluteRelativeMassDrift,
-      finalNormalizedL1DensityChange: report.finalNormalizedL1DensityChange,
-      maximumDensityD4Error: report.maximumDensityD4Error,
-      maximumVelocityD4Error_m_s: report.maximumVelocityD4Error_m_s,
-      maximumPressureD4Error: report.maximumPressureD4Error,
-      maximumTopologyD4Error: report.maximumTopologyD4Error,
-      maximumAdaptiveMixedSeamFaceCount: report.maximumAdaptiveMixedSeamFaceCount,
-      maximumAdaptiveDeferredPromotionCount: report.maximumAdaptiveDeferredPromotionCount,
-      validationErrors: report.validationErrors,
-      failures: report.failures,
-      wallTiming: report.wallTiming,
-      initializationCensus: report.initializationCensus,
-    } : report;
-    console.log(JSON.stringify(output, null, 2));
-    if (failures.length > 0) {
-      throw new Error(`Adaptive-mass symmetric-expansion acceptance failed (${failures.length} gates)`);
+      timeStep: "paper",
+      pressureIterations: pressureIterationsOverride,
+      // This is a deterministic acceptance lane: execute the complete
+      // production budget instead of inheriting the interactive early-out.
+      // The final true-residual receipt below remains the authority.
+      pressureRelativeTolerance: 0,
+    } as const;
+  solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
+    device, scene, "balanced", undefined, solverOptions, () => {});
+  await solver.waitForSimulationReady();
+  wallTiming.solverConstruction_ms = performance.now() - constructionStarted_ms;
+  const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
+  expect(failures, dimensions[0] === horizontalGrid
+    && dimensions[1] === verticalGrid && dimensions[2] === horizontalGrid,
+  `grid must be exactly ${horizontalGrid}x${verticalGrid}x${horizontalGrid}; observed ${dimensions.join("x")}`);
+  const missingPublications = requirePublications(solver);
+  for (const publication of missingPublications) failures.push(`missing required publication: ${publication}`);
+
+  const capture = async (step: number): Promise<Checkpoint> => {
+    const captureStarted_ms = performance.now();
+    debug(`capture ${step} queue begin`);
+    await device.queue.onSubmittedWorkDone();
+    const queueComplete_ms = performance.now();
+    if (step > 0) wallTiming.queueCompletion_ms.push(
+      queueComplete_ms - captureStarted_ms);
+    debug(`capture ${step} queue complete in ${
+        (queueComplete_ms - captureStarted_ms).toFixed(3)}ms; stats begin`);
+    if (step > 0) {
+      const [fca, fsm] = await Promise.all([
+        solver!.readFrameControlQA(), solver!.readFinalScalarMaskHeaderQA(),
+      ]);
+      const expectedGeneration = step + 1;
+      expect(failures, fca.phase === 1 && fca.fault === 0
+        && fca.acceptedGeneration === expectedGeneration,
+      `step ${step}: FCA1 phase/fault/generation ${fca.phase}/${fca.fault}/${
+          fca.acceptedGeneration}`);
+      expect(failures, fsm.phase === 2 && fsm.fault === 0
+        && fsm.firstFaultPacket === 0xffff_ffff
+        && fsm.generation === expectedGeneration,
+      `step ${step}: FSM1 phase/fault/packet/generation ${fsm.phase}/${fsm.fault}/${
+          fsm.firstFaultPacket}/${fsm.generation}`);
+      debug(`capture ${step} FCA=${fca.phase}/${fca.fault}/${fca.acceptedGeneration} `
+        + `FSM=${fsm.phase}/${fsm.fault}/${fsm.generation}`);
     }
-  } finally {
-    await device.queue.onSubmittedWorkDone().catch(() => undefined);
-    solver?.destroy();
-    const compiler = gpuCompilationManagerFor(device);
-    invalidateGPUCompilationManager(device, "symmetric-expansion Dawn runner retired");
-    await compiler.whenIdle().catch(() => undefined);
-    await device.queue.onSubmittedWorkDone().catch(() => undefined);
-    // If construction/capture threw before the normal pop, drain the scope.
-    await device.popErrorScope().catch(() => null);
-    device.destroy();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (debugProgress) {
+      debug(`capture ${step} acceptedIndirect=${
+          (await solver!.readAcceptedIndirectQA()).join(",")}`);
+      debug(`capture ${step} FCAIndirect=${
+          (await solver!.readFrameControlIndirectQA()).join(",")}`);
+      debug(`capture ${step} transportPacketIndirect=${
+          (await solver!.readTransportPacketIndirectQA()).join(",")}`);
+    }
+    const stats = await solver!.readStats();
+    const statsComplete_ms = performance.now();
+    debug(`capture ${step} stats complete in ${
+        (statsComplete_ms - queueComplete_ms).toFixed(3)}ms; activity begin`);
+    const activity = await solver!.readGPUActivityPolicy();
+    const activityComplete_ms = performance.now();
+    debug(`capture ${step} activity complete in ${
+        (activityComplete_ms - statsComplete_ms).toFixed(3)}ms; fields begin`);
+    const adaptiveStats = stats as typeof stats & AdaptiveMassStepTelemetry;
+    const diagnosticFields = await solver!.readDiagnosticFields(true);
+    const fieldsComplete_ms = performance.now();
+    debug(`capture ${step} fields complete in ${
+        (fieldsComplete_ms - activityComplete_ms).toFixed(3)}ms; total ${
+        (fieldsComplete_ms - captureStarted_ms).toFixed(3)}ms`);
+    const density = diagnosticFields.density;
+    if (step === 0 && initialDensity === undefined) initialDensity = density.slice();
+    const levelSet = Float32Array.from(density, (rho) =>
+      (0.5 - rho) * 4 * solver!.info.cellSize_m);
+    const velocityRgba = diagnosticFields.velocity;
+    const pressure = diagnosticFields.pressure;
+    const divergence = diagnosticFields.divergence;
+    const velocity = velocityRgba && Float32Array.from(
+      { length: dimensions[0] * dimensions[1] * dimensions[2] * 3 },
+      (_, index) => velocityRgba[4 * Math.floor(index / 3) + index % 3],
+    );
+    const topologyField = new Float32Array(dimensions[0] * dimensions[1] * dimensions[2]);
+    for (const brick of activity.bricks) {
+      if (!brick.active) continue;
+      const scale = brickFineResolution / brick.acceptedResolution;
+      for (let z = 0; z < brickFineResolution; z += 1)
+        for (let y = 0; y < brickFineResolution; y += 1)
+          for (let x = 0; x < brickFineResolution; x += 1) {
+          const qx = brickFineResolution * brick.coordinate[0] + x;
+          const qy = brickFineResolution * brick.coordinate[1] + y;
+          const qz = brickFineResolution * brick.coordinate[2] + z;
+          if (qx < dimensions[0] && qy < dimensions[1] && qz < dimensions[2]) {
+            topologyField[qx + dimensions[0] * (qy + dimensions[1] * qz)] = scale;
+          }
+        }
+    }
+    const topology = { field: topologyField, invalidOwnershipCount: 0 };
+    const residentOwnerScales = topology
+      ? [...new Set(topology.field)].filter((scale) =>
+        scale === 1 || scale === 2 || scale === 4 || scale === 8)
+        .sort((left, right) => left - right)
+      : [];
+    if (topology) expect(failures, topology.invalidOwnershipCount === 0,
+      `step ${step}: ${topology.invalidOwnershipCount} ownership keys do not contain their published cells`);
+    const mass_cells = summarize(density).sum;
+    const brickDimensions = dimensions.map((value) =>
+      value / brickFineResolution) as [number, number, number];
+    const horizontalCorner = (coordinate: readonly number[]) =>
+      (coordinate[0] === 0 || coordinate[0] === brickDimensions[0] - 1)
+      && (coordinate[2] === 0 || coordinate[2] === brickDimensions[2] - 1);
+    let horizontalCornerMass_cells = 0;
+    for (let z = 0; z < dimensions[2]; z += 1)
+      for (let y = 0; y < dimensions[1]; y += 1)
+        for (let x = 0; x < dimensions[0]; x += 1) {
+          if (!horizontalCorner([
+            Math.floor(x / brickFineResolution),
+            Math.floor(y / brickFineResolution),
+            Math.floor(z / brickFineResolution),
+          ])) continue;
+          horizontalCornerMass_cells += density[
+            x + dimensions[0] * (y + dimensions[1] * z)]!;
+        }
+    let densityL1Change_cells = 0;
+    if (initialDensity) for (let cell = 0; cell < density.length; cell += 1) {
+      densityL1Change_cells += Math.abs(density[cell] - initialDensity[cell]);
+    }
+    const pressureRelativeResidual = stats.pressureRelativeResidual ?? stats.pressureResidual;
+    const maximumPostProjectionDivergence_s = divergence
+      ? summarize(divergence).maximumAbsolute : undefined;
+    const levelSetOwnerPhaseMismatches = 0;
+    let maximumAbsoluteVerticalVelocity_m_s: number | undefined;
+    if (velocity) {
+      maximumAbsoluteVerticalVelocity_m_s = 0;
+      for (let cell = 0; cell < velocity.length / 3; cell += 1) {
+        maximumAbsoluteVerticalVelocity_m_s = Math.max(
+          maximumAbsoluteVerticalVelocity_m_s,
+          Math.abs(velocity[3 * cell + 1]),
+        );
+      }
+    }
+    return {
+      step,
+      time_s: step * dt_s,
+      mass_cells,
+      relativeMassDrift: (mass_cells - expectedInitialMass_cells)
+        / Math.max(1, expectedInitialMass_cells),
+      normalizedL1DensityChange: densityL1Change_cells
+        / Math.max(1, expectedInitialMass_cells),
+      density: summarize(density),
+      levelSet: summarize(levelSet ?? []),
+      levelSetOwnerPhaseMismatchCount: levelSetOwnerPhaseMismatches,
+      velocity: velocity ? summarize(velocity) : undefined,
+      pressure: pressure ? summarize(pressure) : undefined,
+      divergence: divergence ? summarize(divergence) : undefined,
+      symmetry: {
+        density: scalarD4(density, dimensions),
+        topology: topology ? scalarD4(topology.field, dimensions) : undefined,
+        velocity: velocity ? velocityD4(velocity, dimensions) : undefined,
+        pressure: pressure ? scalarD4(pressure, dimensions) : undefined,
+        divergence: divergence ? scalarD4(divergence, dimensions) : undefined,
+      },
+      dominantBodyMassFraction: dominantBodyMassFraction(density, dimensions),
+      pressureRelativeResidual,
+      pressureRecursiveRelativeResidual: stats.pressureRecursiveRelativeResidual,
+      pressureIterationsExecuted: stats.pressureIterationsExecuted,
+      pressureResidualDrift: stats.pressureResidualDrift,
+      adaptivePressureCellCount: stats.adaptivePressureCellCount,
+      maximumPostProjectionDivergence_s,
+      statsMaximumPostProjectionDivergence_s: stats.maxDivergenceAfter_s,
+      maximumAbsoluteVerticalVelocity_m_s,
+      maximumCfl: stats.maxComponentCfl,
+      kineticEnergyBeforeFineUnits:
+        adaptiveStats.adaptiveKineticEnergyBeforeFineUnits,
+      kineticEnergyAfterFineUnits:
+        adaptiveStats.adaptiveKineticEnergyAfterFineUnits,
+      projectionKineticEnergyBeforeFineUnits:
+        adaptiveStats.adaptiveProjectionKineticEnergyBeforeFineUnits,
+      projectionKineticEnergyAfterFineUnits:
+        adaptiveStats.adaptiveProjectionKineticEnergyAfterFineUnits,
+      inactiveFaceCount: adaptiveStats.adaptiveInactiveFaceCount,
+      maximumInactiveFaceSpeedBefore_m_s:
+        adaptiveStats.adaptiveMaximumInactiveFaceSpeedBefore_m_s,
+      maximumInactiveFaceSpeedAfter_m_s:
+        adaptiveStats.adaptiveMaximumInactiveFaceSpeedAfter_m_s,
+      maximumMixedSeamDivergence_s:
+        adaptiveStats.adaptiveMaximumMixedSeamDivergence_s,
+      pressureIterations: stats.pressureIterations,
+      adaptiveMixedSeamFaceCount: (stats as typeof stats & {
+        readonly adaptiveMixedSeamFaceCount?: number;
+      }).adaptiveMixedSeamFaceCount,
+      adaptiveResolutionTopologyEpoch: stats.adaptiveResolutionTopologyEpoch,
+      adaptiveResolutionPromotedBrickCount:
+        stats.adaptiveResolutionPromotedBrickCount,
+      adaptiveResolutionDemotedBrickCount:
+        stats.adaptiveResolutionDemotedBrickCount,
+      adaptiveResolutionDeferredPromotionCount:
+        stats.adaptiveResolutionDeferredPromotionCount,
+      adaptiveFineBrickCount: stats.adaptiveFineBrickCount,
+      adaptiveCoarseBrickCount: stats.adaptiveCoarseBrickCount,
+      adaptiveActivityAcceptedSteps: activity.acceptedSteps,
+      adaptiveActivityD4MismatchCount: activityD4MismatchCount(
+        activity.bricks, dimensions, brickFineResolution,
+      ),
+      adaptiveActivityMaximumScore: stats.adaptiveActivityMaximumScore,
+      adaptiveActivityMeasuredBrickCount: stats.adaptiveActivityMeasuredBrickCount,
+      adaptiveActivitySurfaceBrickCount: stats.adaptiveActivitySurfaceBrickCount,
+      adaptiveActivityHotBrickCount: stats.adaptiveActivityHotBrickCount,
+      adaptiveActivityQuietBrickCount: stats.adaptiveActivityQuietBrickCount,
+      adaptiveResidentBrickCount: activity.bricks.length,
+      adaptiveActiveBrickCount: activity.bricks.filter((brick) => brick.active).length,
+      adaptiveActiveHorizontalCornerBrickCount: activity.bricks.filter((brick) =>
+        brick.active && horizontalCorner(brick.coordinate)).length,
+      adaptiveNewlyActivatedBrickCount: step > 0 ? activity.bricks.filter((brick) =>
+        brick.activatedStep === step).length : 0,
+      horizontalCornerMass_cells,
+      adaptiveTopologyPreparedBrickCount:
+        stats.adaptiveTopologyPreparedBrickCount,
+      adaptiveTopologyCommittedBrickCount:
+        stats.adaptiveTopologyCommittedBrickCount,
+      adaptiveTopologyDeferredBrickCount:
+        stats.adaptiveTopologyDeferredBrickCount,
+      adaptiveTopologyShadowGeneration:
+        stats.adaptiveTopologyShadowGeneration,
+      adaptiveTransactions: activity.bricks.filter((brick) =>
+        (step > 0 && (brick.candidateEpoch === step || brick.activatedStep === step))
+        || brick.retiredResidueMassFineCells !== 0).map((brick) => ({
+          coordinate: brick.coordinate,
+          active: brick.active,
+          accepted: brick.acceptedResolution,
+          candidate: brick.candidateResolution,
+          candidateStatus: brick.candidateStatus,
+          candidateEpoch: brick.candidateEpoch,
+          transferMassBefore: brick.transferMassBeforeFineCells,
+          transferMassAfter: brick.transferMassAfterFineCells,
+          transferStatus: brick.transferStatus,
+          faceTransferStatus: brick.faceTransferStatus,
+          retiredMass: brick.retiredResidueMassFineCells,
+        })),
+      residentOwnerScales,
+      encodedSteps: stats.encodedSteps,
+      submittedTime_s: stats.submittedTime_s,
+      simulatedTime_s: stats.simulatedTime_s,
+      completedTime_s: stats.completedTime_s,
+      hostFluidAuthority: stats.hostFluidAuthority,
+      hostSimulationSizedWorkItems: stats.hostSimulationSizedWorkItems,
+    };
+  };
+
+  const initialCaptureStarted_ms = performance.now();
+  checkpoints.push(await capture(0));
+  wallTiming.initialCapture_ms = performance.now() - initialCaptureStarted_ms;
+  const initialRelativeMassError = Math.abs(
+    (checkpoints[0]!.mass_cells - expectedInitialMass_cells) / Math.max(1, expectedInitialMass_cells),
+  );
+  expect(failures, expectedInitialMass_cells > 0,
+    "symmetric-expansion authored mass could not be derived from its brick seeds");
+  expect(failures, initialRelativeMassError <= massRelativeErrorLimit,
+    `initial mass relative error ${initialRelativeMassError} exceeds ${massRelativeErrorLimit}`);
+  const initial = checkpoints[0]!;
+  expect(failures, initial.density.nonFiniteCount === 0
+    && initial.density.minimum >= -1e-6
+    && initial.density.maximum <= MAXIMUM_DENSITY_ACCEPTED,
+  `initial density is non-finite or outside [-1e-6, ${MAXIMUM_DENSITY_ACCEPTED}]`);
+  expect(failures, initial.levelSet.count > 0 && initial.levelSet.nonFiniteCount === 0,
+    "initial level-set publication is absent or non-finite");
+  expect(failures, initial.levelSetOwnerPhaseMismatchCount === 0,
+    `initial level-set phase disagrees with density in ${initial.levelSetOwnerPhaseMismatchCount} owners`);
+  expect(failures, initial.symmetry.density?.maximumAbsoluteError === 0,
+    `initial density is not exactly D4 symmetric (error ${initial.symmetry.density?.maximumAbsoluteError ?? "missing"})`);
+  expect(failures, initial.symmetry.topology?.maximumAbsoluteError === 0,
+    `initial topology is not exactly D4 symmetric (error ${initial.symmetry.topology?.maximumAbsoluteError ?? "missing"})`);
+  expect(failures, initial.symmetry.velocity?.maximumAbsoluteError === 0,
+    `initial velocity is not exactly D4 symmetric (error ${initial.symmetry.velocity?.maximumAbsoluteError ?? "missing"})`);
+  expect(failures, initial.symmetry.pressure?.maximumAbsoluteError === 0,
+    `initial pressure is not exactly D4 symmetric (error ${initial.symmetry.pressure?.maximumAbsoluteError ?? "missing"})`);
+  expect(failures, initial.dominantBodyMassFraction >= MINIMUM_DOMINANT_BODY_MASS_FRACTION,
+    `initial dominant connected body fraction ${initial.dominantBodyMassFraction} is below ${MINIMUM_DOMINANT_BODY_MASS_FRACTION}`);
+  expect(failures, initial.encodedSteps === 0
+    && initial.submittedTime_s === 0 && initial.simulatedTime_s === 0
+    && initial.completedTime_s === 0,
+  "initial exact step/time publication is not zero");
+
+  for (let step = 1; step <= steps; step += 1) {
+    const stepStarted_ms = performance.now();
+    const target_s = step * dt_s;
+    debug(`step ${step} encode begin`);
+    const advanced = solver.advanceTo(target_s, []);
+    wallTiming.encode_ms.push(performance.now() - stepStarted_ms);
+    debug(`step ${step} encoded=${advanced}`);
+    expect(failures, advanced, `step ${step}: advanceTo(${target_s}) did not encode exactly one step`);
+    const checkpoint = await capture(step);
+    debug(`step ${step} density=[${checkpoint.density.minimum},${checkpoint.density.maximum}]`);
+    wallTiming.stepCapture_ms.push(performance.now() - stepStarted_ms);
+    checkpoints.push(checkpoint);
+    if (step === 1) expect(failures,
+      checkpoint.adaptiveActiveHorizontalCornerBrickCount === 8,
+      `step 1: only ${checkpoint.adaptiveActiveHorizontalCornerBrickCount}/8 `
+        + "horizontal corner tiles were allocated");
+    expect(failures, Math.abs(checkpoint.relativeMassDrift) <= massRelativeErrorLimit,
+      `step ${step}: mass drift ${checkpoint.relativeMassDrift} exceeds ${massRelativeErrorLimit}`);
+    expect(failures, checkpoint.density.nonFiniteCount === 0
+      && checkpoint.density.minimum >= -1e-6
+      && checkpoint.density.maximum <= MAXIMUM_DENSITY_ACCEPTED,
+    `step ${step}: density is non-finite or outside [-1e-6, ${MAXIMUM_DENSITY_ACCEPTED}]`);
+    const domainDiagonal_m = Math.hypot(
+      scene.container.width_m, scene.container.height_m, scene.container.depth_m,
+    );
+    expect(failures, checkpoint.levelSet.count > 0
+      && checkpoint.levelSet.nonFiniteCount === 0
+      && checkpoint.levelSet.maximumAbsolute <= 2 * domainDiagonal_m,
+    `step ${step}: level set is absent, non-finite, or exceeds twice the domain diagonal`);
+    expect(failures, checkpoint.levelSetOwnerPhaseMismatchCount === 0,
+      `step ${step}: level-set phase disagrees with density in ${checkpoint.levelSetOwnerPhaseMismatchCount} owners`);
+    expect(failures, checkpoint.symmetry.density !== undefined
+      && checkpoint.symmetry.density.nonFiniteCount === 0
+      && checkpoint.symmetry.density.maximumAbsoluteError <= DENSITY_SYMMETRY_LIMIT,
+    `step ${step}: density D4 error ${checkpoint.symmetry.density?.maximumAbsoluteError ?? "missing"} exceeds ${DENSITY_SYMMETRY_LIMIT}`);
+    expect(failures, checkpoint.symmetry.topology !== undefined
+      && checkpoint.symmetry.topology.nonFiniteCount === 0
+      && checkpoint.symmetry.topology.maximumAbsoluteError === 0,
+    `step ${step}: topology is missing or not exactly D4 symmetric`);
+    expect(failures, checkpoint.velocity !== undefined
+      && checkpoint.velocity.nonFiniteCount === 0
+      && checkpoint.velocity.maximumAbsolute <= 4 * solver.info.cellSize_m / dt_s,
+    `step ${step}: velocity is missing, non-finite, or exceeds the 4-cell CFL bound`);
+    expect(failures, checkpoint.symmetry.velocity !== undefined
+      && checkpoint.symmetry.velocity.nonFiniteCount === 0
+      && checkpoint.symmetry.velocity.maximumAbsoluteError <= VELOCITY_SYMMETRY_LIMIT_M_S,
+    `step ${step}: velocity D4 error ${checkpoint.symmetry.velocity?.maximumAbsoluteError ?? "missing"} exceeds ${VELOCITY_SYMMETRY_LIMIT_M_S}`);
+    expect(failures, checkpoint.maximumAbsoluteVerticalVelocity_m_s !== undefined
+      && checkpoint.maximumAbsoluteVerticalVelocity_m_s > 1e-6,
+    `step ${step}: force-evolved vertical velocity is missing or identically zero`);
+    expect(failures, checkpoint.pressure !== undefined
+      && checkpoint.pressure.nonFiniteCount === 0
+      && checkpoint.pressure.maximumAbsolute <= 1e6,
+    `step ${step}: pressure is missing, non-finite, or exceeds 1 MPa`);
+    expect(failures, checkpoint.symmetry.pressure !== undefined
+      && checkpoint.symmetry.pressure.nonFiniteCount === 0
+      && checkpoint.symmetry.pressure.maximumAbsoluteError <= PRESSURE_SYMMETRY_LIMIT,
+    `step ${step}: pressure D4 error ${checkpoint.symmetry.pressure?.maximumAbsoluteError ?? "missing"} exceeds ${PRESSURE_SYMMETRY_LIMIT}`);
+    // The first freely falling frame can have a zero pressure correction:
+    // gravity changes velocity but not divergence.  Iteration/residual and
+    // divergence assertions below still prove that projection executed.
+    expect(failures, checkpoint.pressure !== undefined
+      && (checkpoint.pressure.maximumAbsolute > 1e-6
+        || (step === 1
+          && checkpoint.maximumAbsoluteVerticalVelocity_m_s !== undefined
+          && checkpoint.maximumAbsoluteVerticalVelocity_m_s > 1e-6)),
+    `step ${step}: projected pressure is missing or identically zero outside the first free-fall frame`);
+    expect(failures, checkpoint.pressureIterations !== undefined
+      && checkpoint.pressureIterations > 0,
+    `step ${step}: pressureIterations is ${checkpoint.pressureIterations ?? "missing"}; no iterative projection was executed`);
+    expect(failures, resolutionMode !== "adaptive" || (checkpoint.pressureRelativeResidual !== undefined
+      && Number.isFinite(checkpoint.pressureRelativeResidual)
+      && checkpoint.pressureRelativeResidual <= resolvedPressureRelativeResidualLimit),
+    `step ${step}: pressure relative residual ${checkpoint.pressureRelativeResidual ?? "missing"} exceeds ${resolvedPressureRelativeResidualLimit} (${accuracyMode})`);
+    expect(failures, checkpoint.divergence !== undefined
+      && checkpoint.divergence.nonFiniteCount === 0,
+    `step ${step}: post-projection divergence publication is missing or non-finite`);
+    expect(failures, checkpoint.maximumPostProjectionDivergence_s !== undefined
+      && checkpoint.maximumPostProjectionDivergence_s <= postProjectionDivergenceLimit_s,
+    `step ${step}: post-projection divergence ${checkpoint.maximumPostProjectionDivergence_s ?? "missing"} exceeds ${postProjectionDivergenceLimit_s}`);
+    expect(failures, resolutionMode !== "adaptive"
+      || checkpoint.maximumInactiveFaceSpeedAfter_m_s === 0,
+      `step ${step}: pressure-inactive faces retained ${checkpoint.maximumInactiveFaceSpeedAfter_m_s ?? "missing"} m/s after projection`);
+    expect(failures, resolutionMode !== "adaptive"
+      || (checkpoint.maximumMixedSeamDivergence_s !== undefined
+      && checkpoint.maximumMixedSeamDivergence_s <= postProjectionDivergenceLimit_s),
+    `step ${step}: mixed-seam divergence ${checkpoint.maximumMixedSeamDivergence_s ?? "missing"} exceeds ${postProjectionDivergenceLimit_s} (${accuracyMode})`);
+    const divergenceAgreementTolerance = DIVERGENCE_PUBLICATION_ABSOLUTE_AGREEMENT_S
+      + DIVERGENCE_PUBLICATION_RELATIVE_AGREEMENT * Math.max(
+        Math.abs(checkpoint.maximumPostProjectionDivergence_s ?? Number.POSITIVE_INFINITY),
+        Math.abs(checkpoint.statsMaximumPostProjectionDivergence_s ?? Number.POSITIVE_INFINITY),
+      );
+    expect(failures, resolutionMode !== "adaptive"
+      || (checkpoint.statsMaximumPostProjectionDivergence_s !== undefined
+      && Number.isFinite(checkpoint.statsMaximumPostProjectionDivergence_s)
+      && checkpoint.maximumPostProjectionDivergence_s !== undefined
+      && Math.abs(checkpoint.statsMaximumPostProjectionDivergence_s
+        - checkpoint.maximumPostProjectionDivergence_s) <= divergenceAgreementTolerance),
+    `step ${step}: max-divergence stats ${checkpoint.statsMaximumPostProjectionDivergence_s ?? "missing"} disagree with texture ${checkpoint.maximumPostProjectionDivergence_s ?? "missing"}`);
+    expect(failures, checkpoint.dominantBodyMassFraction >= MINIMUM_DOMINANT_BODY_MASS_FRACTION,
+    `step ${step}: dominant connected body fraction ${checkpoint.dominantBodyMassFraction} is below ${MINIMUM_DOMINANT_BODY_MASS_FRACTION}`);
+    expect(failures, checkpoint.encodedSteps === step,
+      `step ${step}: encodedSteps is ${checkpoint.encodedSteps ?? "missing"}`);
+    expect(failures, checkpoint.hostFluidAuthority === "gpu-resident",
+      `step ${step}: host fluid authority is ${checkpoint.hostFluidAuthority ?? "missing"}`);
+    expect(failures, checkpoint.hostSimulationSizedWorkItems === 0,
+      `step ${step}: host scheduled ${checkpoint.hostSimulationSizedWorkItems ?? "missing"} simulation-sized work items`);
+    expect(failures, checkpoint.adaptiveActivityAcceptedSteps === step,
+      `step ${step}: GPU activity clock is ${checkpoint.adaptiveActivityAcceptedSteps}`);
+    // The measured count is the dirty census captured before residency
+    // retirement.  The activity snapshot below is the post-retirement live
+    // census, so a transition frame may legitimately measure more leaves
+    // than remain resident by the time QA reads them back.  Bound it by the
+    // finite scene domain instead of comparing two different frame phases.
+    const domainBrickCount = dimensions.reduce((count, extent) =>
+      count * (extent / brickFineResolution), 1);
+    expect(failures, (checkpoint.adaptiveActivityMeasuredBrickCount ?? 0) > 0
+      && (checkpoint.adaptiveActivityMeasuredBrickCount ?? Number.POSITIVE_INFINITY)
+        <= domainBrickCount,
+    `step ${step}: GPU measured ${checkpoint.adaptiveActivityMeasuredBrickCount ?? "missing"} activity bricks`);
+    expect(failures, checkpoint.adaptiveActivityD4MismatchCount === 0,
+      `step ${step}: GPU activity/history map has ${checkpoint.adaptiveActivityD4MismatchCount} D4 mismatches`);
+    for (const [clock, actual] of [
+      ["submittedTime_s", checkpoint.submittedTime_s],
+      ["simulatedTime_s", checkpoint.simulatedTime_s],
+      ["completedTime_s", checkpoint.completedTime_s],
+    ] as const) {
+      expect(failures, actual !== undefined && Math.abs(actual - target_s) <= 1e-12,
+        `step ${step}: ${clock} is ${actual ?? "missing"}; expected exactly ${target_s}`);
+    }
+  }
+
+  await device.queue.onSubmittedWorkDone();
+  const finalCheckpoint = checkpoints.at(-1)!;
+  expect(failures,
+    finalCheckpoint.normalizedL1DensityChange >= MINIMUM_FINAL_NORMALIZED_L1_DENSITY_CHANGE,
+    `final normalized L1 density change ${finalCheckpoint.normalizedL1DensityChange} is below ${MINIMUM_FINAL_NORMALIZED_L1_DENSITY_CHANGE}; the liquid did not visibly evolve`);
+  expect(failures, finalCheckpoint.horizontalCornerMass_cells > 1e-3,
+    `final horizontal-corner mass ${finalCheckpoint.horizontalCornerMass_cells} `
+      + "shows that liquid never entered the allocated corner tiles");
+  const maximumMixedSeamFaceCount = Math.max(...checkpoints.map(
+    (checkpoint) => checkpoint.adaptiveMixedSeamFaceCount ?? 0));
+  const maximumPromotedBrickCount = Math.max(...checkpoints.map(
+    (checkpoint) => checkpoint.adaptiveResolutionPromotedBrickCount ?? 0));
+  const maximumDemotedBrickCount = Math.max(...checkpoints.map(
+    (checkpoint) => checkpoint.adaptiveResolutionDemotedBrickCount ?? 0));
+  const maximumDeferredPromotionCount = Math.max(...checkpoints.map(
+    (checkpoint) => checkpoint.adaptiveResolutionDeferredPromotionCount ?? 0));
+  const exercisedMixedResolution = checkpoints.some(
+    (checkpoint) => checkpoint.residentOwnerScales.length > 1);
+  expect(failures, resolutionMode !== "adaptive" || !exercisedMixedResolution
+    || maximumMixedSeamFaceCount > 0,
+  "a mixed-resolution topology was published without a live mixed seam");
+  expect(failures, resolutionMode !== "adaptive" || maximumDeferredPromotionCount === 0,
+    `${maximumDeferredPromotionCount} eligible promotions were deferred`);
+  expect(failures, resolutionMode === "all-fine"
+    ? finalCheckpoint.residentOwnerScales.length === 1
+      && finalCheckpoint.residentOwnerScales[0] === 1
+    : finalCheckpoint.residentOwnerScales.includes(1),
+  `final resident topology scales ${finalCheckpoint.residentOwnerScales.join(",") || "missing"} do not include accepted fine leaves`);
+  const scopedError = await device.popErrorScope();
+  if (scopedError) validationErrors.push(scopedError.message);
+  const finalStats = await solver.readStats();
+  if (finalStats.gpuValidationError) validationErrors.push(finalStats.gpuValidationError);
+  for (const message of validationErrors) failures.push(`WebGPU validation error: ${message}`);
+
+  const maximum = (select: (checkpoint: Checkpoint) => number | undefined): number => {
+    const values = checkpoints.map(select).filter(
+      (value): value is number => value !== undefined && Number.isFinite(value),
+    );
+    return values.length > 0 ? Math.max(...values) : Number.NaN;
+  };
+  const report = {
+    passed: failures.length === 0,
+    scenario: scene.sceneId,
+    method: "adaptive-volume",
+    accuracyMode,
+    pressureIterations: pressureIterationsOverride,
+    resolutionMode,
+    brickFineResolution,
+    presentationPageResolution,
+    backend,
+    adapter: (adapter as GPUAdapter & { readonly info?: GPUAdapterInfo }).info,
+    grid: dimensions,
+    steps,
+    dt_s,
+    exactTargetTime_s: steps * dt_s,
+    wallTiming,
+    initializationCensus: readInitializationCensus(),
+    expectedInitialMass_cells,
+    observedInitialMass_cells: checkpoints[0]!.mass_cells,
+    maximumDensity: maximum((sample) => sample.density.maximum),
+    maximumAbsoluteVelocity_m_s: maximum((sample) => sample.velocity?.maximumAbsolute),
+    maximumAbsoluteRelativeMassDrift: maximum((sample) => Math.abs(sample.relativeMassDrift)),
+    finalNormalizedL1DensityChange: finalCheckpoint.normalizedL1DensityChange,
+    maximumDensityD4Error: maximum((sample) => sample.symmetry.density?.maximumAbsoluteError),
+    maximumVelocityD4Error_m_s: maximum((sample) => sample.symmetry.velocity?.maximumAbsoluteError),
+    maximumPressureD4Error: maximum((sample) => sample.symmetry.pressure?.maximumAbsoluteError),
+    maximumTopologyD4Error: maximum((sample) => sample.symmetry.topology?.maximumAbsoluteError),
+    maximumPressureRelativeResidual: maximum((sample) => sample.pressureRelativeResidual),
+    maximumPressureRecursiveRelativeResidual: maximum(
+      (sample) => sample.pressureRecursiveRelativeResidual,
+    ),
+    maximumPressureIterationsExecuted: maximum(
+      (sample) => sample.pressureIterationsExecuted,
+    ),
+    pressureResidualDriftCount: checkpoints.filter(
+      (sample) => sample.pressureResidualDrift,
+    ).length,
+    maximumPostProjectionDivergence_s: maximum((sample) => sample.maximumPostProjectionDivergence_s),
+    maximumMixedSeamDivergence_s: maximum(
+      (sample) => sample.maximumMixedSeamDivergence_s,
+    ),
+    maximumInactiveFaceSpeedBefore_m_s: maximum(
+      (sample) => sample.maximumInactiveFaceSpeedBefore_m_s,
+    ),
+    maximumInactiveFaceSpeedAfter_m_s: maximum(
+      (sample) => sample.maximumInactiveFaceSpeedAfter_m_s,
+    ),
+    maximumCfl: maximum((sample) => sample.maximumCfl),
+    maximumKineticEnergyAfterFineUnits: maximum(
+      (sample) => sample.kineticEnergyAfterFineUnits,
+    ),
+    maximumProjectionKineticEnergyAfterFineUnits: maximum(
+      (sample) => sample.projectionKineticEnergyAfterFineUnits,
+    ),
+    maximumAdaptiveMixedSeamFaceCount: maximumMixedSeamFaceCount,
+    maximumAdaptivePromotedBrickCount: maximumPromotedBrickCount,
+    maximumAdaptiveDemotedBrickCount: maximumDemotedBrickCount,
+    maximumAdaptiveDeferredPromotionCount: maximumDeferredPromotionCount,
+    minimumDominantBodyMassFraction: Math.min(...checkpoints.map(
+      (sample) => sample.dominantBodyMassFraction)),
+    requiredThresholds: {
+      maximumDensity: MAXIMUM_DENSITY_ACCEPTED,
+      maximumDensityNominal: MAXIMUM_DENSITY,
+      maximumDensityRelativeTolerance: MAXIMUM_DENSITY_RELATIVE_TOLERANCE,
+      densityD4: DENSITY_SYMMETRY_LIMIT,
+      velocityD4_m_s: VELOCITY_SYMMETRY_LIMIT_M_S,
+      pressureD4: PRESSURE_SYMMETRY_LIMIT,
+      topologyD4: 0,
+      pressureRelativeResidual: resolvedPressureRelativeResidualLimit,
+      postProjectionDivergence_s: postProjectionDivergenceLimit_s,
+      massRelativeError: massRelativeErrorLimit,
+      minimumFinalNormalizedL1DensityChange: MINIMUM_FINAL_NORMALIZED_L1_DENSITY_CHANGE,
+      divergencePublicationAbsoluteAgreement_s:
+        DIVERGENCE_PUBLICATION_ABSOLUTE_AGREEMENT_S,
+      divergencePublicationRelativeAgreement: DIVERGENCE_PUBLICATION_RELATIVE_AGREEMENT,
+      dominantBodyMassFraction: MINIMUM_DOMINANT_BODY_MASS_FRACTION,
+    },
+    validationErrors,
+    failures,
+    topologyTimeline: checkpoints.map((sample) => ({
+      step: sample.step,
+      time_s: sample.time_s,
+      mass_cells: sample.mass_cells,
+      densityMinimum: sample.density.minimum,
+      densityMaximum: sample.density.maximum,
+      densityD4: sample.symmetry.density?.maximumAbsoluteError,
+      activeBricks: sample.adaptiveActiveBrickCount,
+      newlyActivatedBricks: sample.adaptiveNewlyActivatedBrickCount,
+      preparedBricks: sample.adaptiveTopologyPreparedBrickCount,
+      committedBricks: sample.adaptiveTopologyCommittedBrickCount,
+      deferredBricks: sample.adaptiveTopologyDeferredBrickCount,
+      topologyGeneration: sample.adaptiveTopologyShadowGeneration,
+      transactions: sample.adaptiveTransactions,
+    })),
+    finalCheckpoint: checkpoints.at(-1),
+  };
+  const output = argument("summary") === "1" ? {
+    passed: report.passed,
+    scenario: report.scenario,
+    accuracyMode: report.accuracyMode,
+    pressureIterations: report.pressureIterations,
+    resolutionMode: report.resolutionMode,
+    brickFineResolution: report.brickFineResolution,
+    presentationPageResolution: report.presentationPageResolution,
+    grid: report.grid,
+    steps: report.steps,
+    expectedInitialMass_cells: report.expectedInitialMass_cells,
+    observedInitialMass_cells: report.observedInitialMass_cells,
+    maximumDensity: report.maximumDensity,
+    maximumAbsoluteVelocity_m_s: report.maximumAbsoluteVelocity_m_s,
+    maximumAbsoluteRelativeMassDrift: report.maximumAbsoluteRelativeMassDrift,
+    finalNormalizedL1DensityChange: report.finalNormalizedL1DensityChange,
+    maximumDensityD4Error: report.maximumDensityD4Error,
+    maximumVelocityD4Error_m_s: report.maximumVelocityD4Error_m_s,
+    maximumPressureD4Error: report.maximumPressureD4Error,
+    maximumTopologyD4Error: report.maximumTopologyD4Error,
+    maximumAdaptiveMixedSeamFaceCount: report.maximumAdaptiveMixedSeamFaceCount,
+    maximumAdaptiveDeferredPromotionCount: report.maximumAdaptiveDeferredPromotionCount,
+    validationErrors: report.validationErrors,
+    failures: report.failures,
+    wallTiming: report.wallTiming,
+    initializationCensus: report.initializationCensus,
+  } : report;
+  console.log(JSON.stringify(output, null, 2));
+  if (failures.length > 0) {
+    throw new Error(`Adaptive-mass symmetric-expansion acceptance failed (${failures.length} gates)`);
   }
 } finally {
-  await releaseWebGPUExclusiveLock();
+  await device.queue.onSubmittedWorkDone().catch(() => undefined);
+  solver?.destroy();
+  const compiler = gpuCompilationManagerFor(device);
+  invalidateGPUCompilationManager(device, "symmetric-expansion Dawn runner retired");
+  await compiler.whenIdle().catch(() => undefined);
+  await device.queue.onSubmittedWorkDone().catch(() => undefined);
+  // If construction/capture threw before the normal pop, drain the scope.
+  await device.popErrorScope().catch(() => null);
+  device.destroy();
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }

@@ -26,9 +26,6 @@ import {
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
 } from "../lib/methods/adaptive-volume/sparse-brick-atlas";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLockSync } from
-  "../lib/harness/webgpu-smoke-isolation";
 
 // Keep >2:1 grading bypass local to this topology-service adversary. The tail
 // is the ordinary four-rung row; the prefix adds both unsupported-jump probes.
@@ -86,93 +83,80 @@ fn checkFaces(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)la
 }
 `;
 
-let lockReleased = false;
-await acquireWebGPUExclusiveLock("dawn-check", "tools/check-sparse-cm12-brick-tile-wgsl.ts");
-try {
-  const modulePath = process.env.WEBGPU_NODE_MODULE
-    ?? `${process.cwd()}/node_modules/webgpu/index.js`;
-  const dawn = await import(pathToFileURL(modulePath).href) as {
-    create(options: string[]): GPU;
-    globals: Record<string, unknown>;
-  };
-  Object.assign(globalThis, dawn.globals);
-  const backend = process.env.WEBGPU_BACKEND ?? "metal";
-  // The native instance owns asynchronous compile/map callbacks. Retain it
-  // through the isolated process, as the other Dawn harnesses do, so GC cannot
-  // destroy the instance while this gate is validating mixed-rung queries.
-  const gpu = createProcessRetainedDawnGPU(dawn, [`backend=${backend}`]);
-  const adapter = await gpu.requestAdapter();
-  if (!adapter) throw new Error(`No Dawn adapter for ${backend}`);
-  const device = await adapter.requestDevice();
-  const topology = device.createBuffer({ size: image.words.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  const output = device.createBuffer({ size: outputWords * 4,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-  const readback = device.createBuffer({ size: outputWords * 4,
-    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-  try {
-    device.queue.writeBuffer(topology, 0, image.words.buffer as ArrayBuffer,
-      image.words.byteOffset, image.words.byteLength);
-    const shaderModule = device.createShaderModule({ label: "BTI1 service check", code: shader });
-    const info = await shaderModule.getCompilationInfo();
-    const errors = info.messages.filter((message) => message.type === "error");
-    if (errors.length > 0) throw new Error(errors.map((message) =>
-      `${message.lineNum}:${message.linePos} ${message.message}`).join("\n"));
-    const entryPoints = ["checkCells", "checkPoints", "checkFaces"] as const;
-    const pipelines = await Promise.all(entryPoints.map((entryPoint) =>
-      device.createComputePipelineAsync({ label: `BTI1 ${entryPoint}`,
-        layout: "auto", compute: { module: shaderModule, entryPoint } })));
-    for (let check = 0; check < pipelines.length; check += 1) {
-      device.queue.writeBuffer(output, 0, new Uint32Array(outputWords));
-      const pipeline = pipelines[check]!;
-      const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: topology } },
-        { binding: 1, resource: { buffer: output } },
-      ] });
-      const encoder = device.createCommandEncoder();
-      const pass = encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0, group);
-      if (check === 1) pass.dispatchWorkgroups(Math.ceil(
-        atlas.dimensions[0] * atlas.dimensions[1] * atlas.dimensions[2] / 64));
-      else pass.dispatchWorkgroups(image.layout.tileCapacity);
-      pass.end();encoder.copyBufferToBuffer(output, 0, readback, 0, outputWords * 4);
-      device.queue.submit([encoder.finish()]);await readback.mapAsync(GPUMapMode.READ);
-      const actual = new Uint32Array(readback.getMappedRange()).slice();readback.unmap();
-      if (check === 0) for (let tile = 0; tile < image.layout.tileCapacity; tile += 1)
-        for (let lane = 0; lane < 64; lane += 1) assert.equal(actual[64 * tile + lane],
-          sparseCM12BrickTileCell(image, tile, lane) ?? 0xffff_ffff);
-      if (check === 1) for (let z = 0; z < atlas.dimensions[2]; z += 1)
-        for (let y = 0; y < atlas.dimensions[1]; y += 1)
-          for (let x = 0; x < atlas.dimensions[0]; x += 1) {
-            const at = x + atlas.dimensions[0] * (y + atlas.dimensions[1] * z);
-            assert.equal(actual[at], sparseCM12BrickTileCellAtFine(image, [x, y, z])
-              ?? 0xffff_ffff);
-          }
-      if (check === 2) for (let tile = 0; tile < image.layout.tileCapacity; tile += 1)
-        for (let family = 0; family < 6; family += 1)
-          for (let lane = 0; lane < 64; lane += 1) {
-            const rows = sparseCM12BrickTileRows(image, tile, family, lane);
-            const at = 2 * (384 * tile + 64 * family + lane);
-            assert.equal(actual[at], rows.length);
-            assert.equal(actual[at + 1], rows.reduce((sum, row) => (sum + row) >>> 0, 0));
-          }
-    }
-    const receipt = `${JSON.stringify({ passed: true, backend,
-      resolutions,
-      cells: grid.cells.length, rows: grid.gradientRows.length,
-      mixedSeamRows: grid.mixedSeamRowCount,
-      seamPorts: faceProgram.layout.seamPortCount, shaderBytes: shader.length })}\n`;
-    // Dawn's Node wrapper faults while finalizing an intentionally ungraded
-    // B1 image on Metal. This gate is process-isolated, so after all readbacks
-    // pass, return the repository lease synchronously and let the OS retire
-    // the child process's native resources without running wrapper finalizers.
-    releaseWebGPUExclusiveLockSync();
-    lockReleased = true;
-    writeSync(1, receipt);
-    process.exit(0);
-  } finally {
-    // The standalone process owns these buffers; Dawn releases them with the
-    // device after the repository lease is returned below.
-  }
-} finally {
-  if (!lockReleased) await releaseWebGPUExclusiveLock();
+const modulePath = process.env.WEBGPU_NODE_MODULE
+  ?? `${process.cwd()}/node_modules/webgpu/index.js`;
+const dawn = await import(pathToFileURL(modulePath).href) as {
+  create(options: string[]): GPU;
+  globals: Record<string, unknown>;
+};
+Object.assign(globalThis, dawn.globals);
+const backend = process.env.WEBGPU_BACKEND ?? "metal";
+// The native instance owns asynchronous compile/map callbacks. Retain it
+// through the isolated process, as the other Dawn harnesses do, so GC cannot
+// destroy the instance while this gate is validating mixed-rung queries.
+const gpu = createProcessRetainedDawnGPU(dawn, [`backend=${backend}`]);
+const adapter = await gpu.requestAdapter();
+if (!adapter) throw new Error(`No Dawn adapter for ${backend}`);
+const device = await adapter.requestDevice();
+const topology = device.createBuffer({ size: image.words.byteLength,
+  usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+const output = device.createBuffer({ size: outputWords * 4,
+  usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+const readback = device.createBuffer({ size: outputWords * 4,
+  usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+device.queue.writeBuffer(topology, 0, image.words.buffer as ArrayBuffer,
+  image.words.byteOffset, image.words.byteLength);
+const shaderModule = device.createShaderModule({ label: "BTI1 service check", code: shader });
+const info = await shaderModule.getCompilationInfo();
+const errors = info.messages.filter((message) => message.type === "error");
+if (errors.length > 0) throw new Error(errors.map((message) =>
+  `${message.lineNum}:${message.linePos} ${message.message}`).join("\n"));
+const entryPoints = ["checkCells", "checkPoints", "checkFaces"] as const;
+const pipelines = await Promise.all(entryPoints.map((entryPoint) =>
+  device.createComputePipelineAsync({ label: `BTI1 ${entryPoint}`,
+    layout: "auto", compute: { module: shaderModule, entryPoint } })));
+for (let check = 0; check < pipelines.length; check += 1) {
+  device.queue.writeBuffer(output, 0, new Uint32Array(outputWords));
+  const pipeline = pipelines[check]!;
+  const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+    { binding: 0, resource: { buffer: topology } },
+    { binding: 1, resource: { buffer: output } },
+  ] });
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0, group);
+  if (check === 1) pass.dispatchWorkgroups(Math.ceil(
+    atlas.dimensions[0] * atlas.dimensions[1] * atlas.dimensions[2] / 64));
+  else pass.dispatchWorkgroups(image.layout.tileCapacity);
+  pass.end();encoder.copyBufferToBuffer(output, 0, readback, 0, outputWords * 4);
+  device.queue.submit([encoder.finish()]);await readback.mapAsync(GPUMapMode.READ);
+  const actual = new Uint32Array(readback.getMappedRange()).slice();readback.unmap();
+  if (check === 0) for (let tile = 0; tile < image.layout.tileCapacity; tile += 1)
+    for (let lane = 0; lane < 64; lane += 1) assert.equal(actual[64 * tile + lane],
+      sparseCM12BrickTileCell(image, tile, lane) ?? 0xffff_ffff);
+  if (check === 1) for (let z = 0; z < atlas.dimensions[2]; z += 1)
+    for (let y = 0; y < atlas.dimensions[1]; y += 1)
+      for (let x = 0; x < atlas.dimensions[0]; x += 1) {
+        const at = x + atlas.dimensions[0] * (y + atlas.dimensions[1] * z);
+        assert.equal(actual[at], sparseCM12BrickTileCellAtFine(image, [x, y, z])
+          ?? 0xffff_ffff);
+      }
+  if (check === 2) for (let tile = 0; tile < image.layout.tileCapacity; tile += 1)
+    for (let family = 0; family < 6; family += 1)
+      for (let lane = 0; lane < 64; lane += 1) {
+        const rows = sparseCM12BrickTileRows(image, tile, family, lane);
+        const at = 2 * (384 * tile + 64 * family + lane);
+        assert.equal(actual[at], rows.length);
+        assert.equal(actual[at + 1], rows.reduce((sum, row) => (sum + row) >>> 0, 0));
+      }
 }
+const receipt = `${JSON.stringify({ passed: true, backend,
+    resolutions,
+    cells: grid.cells.length, rows: grid.gradientRows.length,
+    mixedSeamRows: grid.mixedSeamRowCount,
+    seamPorts: faceProgram.layout.seamPortCount, shaderBytes: shader.length })}\n`;
+// Dawn's Node wrapper faults while finalizing an intentionally ungraded
+// B1 image on Metal. This gate is process-isolated, so after all readbacks
+// pass, let the OS retire the child process's native resources without
+// running wrapper finalizers.
+writeSync(1, receipt);
+process.exit(0);

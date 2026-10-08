@@ -11,10 +11,6 @@ import {
 } from "../lib/core/scenes";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import {
-  acquireWebGPUExclusiveLock,
-  releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type {
   SparseCM12DiagnosticFields,
@@ -252,17 +248,6 @@ function fieldMetrics(fields: SparseCM12DiagnosticFields,
   });
 }
 
-for (;;) {
-  try {
-    await acquireWebGPUExclusiveLock("dawn-probe", "sparse-cm12-long-dam-conditioning");
-    break;
-  } catch (error) {
-    if (!(error instanceof Error)
-      || !error.message.startsWith("Refusing concurrent GPU execution")) throw error;
-    process.stderr.write("[conditioning-probe] GPU busy; waiting for the exclusive lane\n");
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_000));
-  }
-}
 let device: GPUDevice | undefined;
 try {
   const dawn = await import(pathToFileURL(dawnModule).href) as {
@@ -376,5 +361,4 @@ try {
   process.stdout.write(`${JSON.stringify({ outputPath, report }, null, 2)}\n`);
 } finally {
   device?.destroy();
-  await releaseWebGPUExclusiveLock();
 }

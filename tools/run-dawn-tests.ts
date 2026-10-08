@@ -2,21 +2,15 @@
  * Run every Dawn-gated test file (one that reads WEBGPU_NODE_MODULE) serially,
  * one isolated `node --test` process per file.
  *
- * Many of these files take the repository-wide WebGPU lease themselves, so this
- * runner never holds it: it waits for the lease to be free before each file and
- * re-runs a file whose only failure was losing the lease race to another run.
- *
  *   npm run test:dawn                      # every Dawn file
  *   npm run test:dawn -- uniform svo       # files whose path contains a filter
  *   npm run test:dawn -- --list
  */
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { WEBGPU_EXCLUSIVE_LOCK } from "../lib/harness/webgpu-smoke-isolation";
 
 const FILE_TIMEOUT_MS = Number(process.env.FLUID_DAWN_FILE_TIMEOUT_MS ?? 900_000);
-const LOCK_CONFLICT = "Refusing concurrent GPU execution";
 
 async function discover(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -26,25 +20,6 @@ async function discover(directory: string): Promise<string[]> {
     return Promise.resolve(entry.isFile() && /\.test\.tsx?$/.test(entry.name) ? [path] : []);
   }));
   return groups.flat();
-}
-
-async function lockHeld(): Promise<boolean> {
-  try { await stat(WEBGPU_EXCLUSIVE_LOCK); return true; } catch { return false; }
-}
-
-async function waitForLease(): Promise<void> {
-  let announced = false;
-  while (await lockHeld()) {
-    if (!announced) {
-      let owner = "unknown owner";
-      try { owner = await readFile(`${WEBGPU_EXCLUSIVE_LOCK}/owner.json`, "utf8"); } catch { /* diagnostic only */ }
-      console.log(`waiting for WebGPU lease (${owner})`);
-      announced = true;
-    }
-    // Notice the gap between consecutive profiling jobs before another run
-    // takes the lease. Acquisition in the fixture still arbitrates races.
-    await new Promise(resolve => setTimeout(resolve, 250));
-  }
 }
 
 function runFile(file: string): Promise<{ code: number; output: string; ms: number }> {
@@ -80,12 +55,7 @@ if (args.includes("--list")) {
 
 const failed: string[] = [];
 for (const file of files) {
-  let result;
-  for (let attempt = 0; ; attempt++) {
-    await waitForLease();
-    result = await runFile(file);
-    if (result.code === 0 || !result.output.includes(LOCK_CONFLICT) || attempt >= 20) break;
-  }
+  const result = await runFile(file);
   const count = (name: string) => Number(result.output.match(new RegExp(`^# ${name} (\\d+)`, "m"))?.[1] ?? 0);
   const status = result.code !== 0 ? "FAIL" : count("pass") === 0 ? "SKIP" : "pass";
   console.log(`${status} ${(result.ms / 1000).toFixed(1).padStart(7)} s  ${file}  (${count("pass")} pass, ${count("skipped")} skipped)`);

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../../../../harness/webgpu-smoke-isolation";
 
 import { cupDistance_m, cupWallThickness_m } from "../../../../core/scene-shape";
 import type { Vec3 } from "../../../../core/model";
@@ -149,9 +148,8 @@ test("the live voxelizer knows a cup's wall is its finest feature", () => {
 test("the WGSL cup agrees with the TypeScript cup on a device", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for cup ABI parity on a device",
 }, async t => {
-  await acquireWebGPUExclusiveLock("dawn-test", t.name);
   let leasedDevice: GPUDevice | undefined;
-  t.after(async () => { leasedDevice?.destroy(); await releaseWebGPUExclusiveLock(); });
+  t.after(async () => { leasedDevice?.destroy(); });
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
     create(options: string[]): GPU; globals: Record<string, unknown>;
   };

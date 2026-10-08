@@ -3,10 +3,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { airFixture, runAirFixture } from "../tests/support/air-extension-fixture";
 const output=process.argv.find(v=>v.startsWith("--out="))?.slice(6)??"artifacts/level-set-volume/air-frozen-3d.json";
-await acquireWebGPUExclusiveLock("dawn-probe","frozen air correction surface flux");let device:GPUDevice|undefined;
+let device:GPUDevice|undefined;
 try{
   const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
   const gpu=dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`]);const adapter=await gpu.requestAdapter();assert.ok(adapter);device=await adapter.requestDevice();assert.ok(device);
@@ -30,4 +29,4 @@ try{
     results.push({widths,center,radius,samples:count,arms});
   }
   mkdirSync(dirname(output),{recursive:true});writeFileSync(output,JSON.stringify({kind:"frozen manufactured 3D sphere, identical face extension and sampler",results},null,2)+"\n");console.log(JSON.stringify(results));
-}finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{device?.destroy();}

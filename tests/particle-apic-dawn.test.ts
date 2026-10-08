@@ -4,7 +4,6 @@ import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { apicMethod, APIC_CONFIGURATION } from "../lib/methods/particle/method";
@@ -15,7 +14,6 @@ import { readFloatTexture3D, smokeRenderHybridPresentation } from "../lib/harnes
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("APIC particle transport, incompressibility and publication", { timeout: 240_000 }, async t => {
-  await acquireWebGPUExclusiveLock("dawn-test", "APIC particle plugin");
   let device: GPUDevice | undefined;
   try {
     const dawn = await import(pathToFileURL(modulePath!).href); Object.assign(globalThis, dawn.globals);
@@ -451,5 +449,5 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
       } finally { solver.destroy(); }
     });
     assert.deepEqual(errors, []);
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

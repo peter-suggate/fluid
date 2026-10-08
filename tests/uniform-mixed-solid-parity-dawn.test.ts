@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import type {FluidRefinementRegion,SceneDescription} from "../lib/core/model";
@@ -64,7 +63,7 @@ async function ownerMass(device:GPUDevice,solver:WebGPUUniformReferenceSolver):P
 }
 
 (modulePath?test:test.skip)("coarse regions promote solid neighbourhoods to h and conserve mass",{timeout:1800000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform mixed solid regions");let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
@@ -86,5 +85,5 @@ async function ownerMass(device:GPUDevice,solver:WebGPUUniformReferenceSolver):P
    if(!(Math.abs(report.massMixed-report.massInitial)<=1e-3*report.massInitial))failures.push(`${c.id}: mass ${report.massMixed} vs initial ${report.massInitial}`);
   }
   assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });

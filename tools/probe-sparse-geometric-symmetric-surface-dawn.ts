@@ -20,8 +20,6 @@ import { SimulationFailureError } from "../lib/core/simulation-failure";
 import { createSymmetricExpansionScene } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
   "../lib/harness/node-dawn-provider";
 import { WebGPUAdaptiveMassSolver } from
@@ -242,7 +240,6 @@ function changeFromInitial(current: ArrayLike<number>, initial: ArrayLike<number
 }
 
 const modulePath = process.env.WEBGPU_NODE_MODULE ?? `${process.cwd()}/node_modules/webgpu/index.js`;
-await acquireWebGPUExclusiveLock("dawn-probe", `symmetric-surface-${arm}`);
 let device: GPUDevice | undefined;
 let solver: WebGPUAdaptiveMassSolver | undefined;
 let faultAudit: ReturnType<typeof sparseGeometricLsvFaultContextAudit> | undefined;
@@ -429,11 +426,9 @@ try {
   persist();
   process.exitCode = 1;
 } finally {
-  try {
-    try { faultAudit?.destroy(); } catch {}
-    try { solver?.destroy(); } catch {}
-    try { device?.destroy(); } catch {}
-  } finally { await releaseWebGPUExclusiveLock(); }
+  try { faultAudit?.destroy(); } catch {}
+  try { solver?.destroy(); } catch {}
+  try { device?.destroy(); } catch {}
 }
 const json = JSON.stringify(report, null, 2) + "\n";
 if (outputPath) writeFileSync(outputPath, json);

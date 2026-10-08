@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import { createSparseCM12TopologyEffectsAuthorityInitialWords,
   createSparseCM12TopologyEffectsAuthorityLayout } from
   "../lib/methods/adaptive-volume/sparse-cm12-topology-effects-authority";
@@ -32,7 +30,6 @@ const entryPoints = ["beginSparseCM12TopologyEffectsPreflight",
   "finalizeSparseCM12TopologyEffectsPreflight", "publishSparseCM12TopologyPTREffects",
   "finishSparseCM12TopologyEffectsPublication"] as const;
 
-await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-topology-effects-authority");
 let gpu: GPU | undefined;
 let device: GPUDevice | undefined;
 try {
@@ -60,6 +57,5 @@ try {
     passed: true, entryPoints, bytes: createSparseCM12TopologyEffectsAuthorityInitialWords(layout).byteLength }));
 } finally {
   device?.destroy();
-  await releaseWebGPUExclusiveLock();
   void gpu;
 }

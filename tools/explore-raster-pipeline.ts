@@ -1,4 +1,4 @@
-/** Paired whole-frame trials. Run through run-webgpu-exclusive.ts. */
+/** Paired whole-frame trials. */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";

@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 import { createSvoDrySceneFragmentWGSL } from "../lib/svo/features/shading/program";
 
 (process.env.WEBGPU_NODE_MODULE ? test : test.skip)("Dawn reconstructed receivers preserve arbitrary face normals and rigid ownership", async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "tests/svo-reconstructed-receiver-dawn.test.ts");
   let device: GPUDevice | undefined;
   try {
     device = (await createDawnRenderDevice()).device;
@@ -58,5 +56,5 @@ import { createSvoDrySceneFragmentWGSL } from "../lib/svo/features/shading/progr
     assert.deepEqual(Array.from(result.slice(32,40)), [1,0,0,5,1,1,0,0]);
     assert.deepEqual(Array.from(result.slice(56,60)), [1,0,0,0], "creases reject incompatible receiver normals");
     output.destroy();read.destroy();
-  } finally { device?.destroy();await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

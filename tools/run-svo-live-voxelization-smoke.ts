@@ -3,8 +3,7 @@
  * The W2 gate: ABI-true incremental voxelization.
  *
  *   npm run test:webgpu:svo-live-voxelization
- *   FLUID_SVO_VOXELIZATION_SCENE=<preset> node --import tsx tools/run-webgpu-exclusive.ts \
- *     --import tsx tools/run-svo-live-voxelization-smoke.ts
+ *   FLUID_SVO_VOXELIZATION_SCENE=<preset> node --import tsx tools/run-svo-live-voxelization-smoke.ts
  *
  * `tools/run-svo-dry-render-smoke.ts` proves one *published* frame is healthy.
  * It cannot prove anything about editing, because it publishes once and never
@@ -130,7 +129,7 @@ console.warn = (...args: unknown[]) => {
 };
 
 // ---------------------------------------------------------------------------
-// (A) Fixtures. No device: a layout drift should fail before the GPU lock.
+// (A) Fixtures. No device: a layout drift should fail before any GPU work.
 // ---------------------------------------------------------------------------
 /**
  * The live voxelizer packs aggregate blocks itself, against its own maintenance

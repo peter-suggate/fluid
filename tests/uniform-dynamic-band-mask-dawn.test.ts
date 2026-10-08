@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {pathToFileURL} from "node:url";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {createUniformMixedLayout} from "../lib/methods/uniform/uniform-mixed-layout";
 import {UniformMixedOwnership} from "../lib/methods/uniform/uniform-mixed-ownership";
 import {UniformMixedDynamicClassifier,UNIFORM_MIXED_DYNAMIC_SURFACE_DRIFT} from "../lib/methods/uniform/uniform-mixed-dynamic";
@@ -16,7 +15,6 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
 // prefix fast path. The oracle enumerates crossing owners and intersects
 // their closed physical boxes; it does not use packed masks or face gaps.
 (modulePath?test:test.skip)("dynamic band intersects actual crossing cells and preserves closed support",{timeout:120000},async t=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform crossing-cell band mask");
  let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
@@ -82,5 +80,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    }finally{classifier.destroy();ownership.destroy();phi.destroy();volume.destroy();velocity.destroy();}
   }
   assert.deepEqual(errors,[]);
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });

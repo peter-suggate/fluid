@@ -6,8 +6,6 @@ import { resolveMethodValues } from '../lib/core/method-contract';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
 import { adaptiveMassMethod } from '../lib/methods/adaptive-volume/method';
 import type { WebGPUAdaptiveMassSolver } from '../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver';
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from '../lib/harness/webgpu-smoke-isolation';
-await acquireWebGPUExclusiveLock('dawn-test', 'half-pool-residue');
 let device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
 const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
 Object.assign(globalThis, dawn.globals);
@@ -42,4 +40,4 @@ try {
   }
  }
  assert.deepEqual(errors, []);
-} finally {solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock(); assert.ok(gpu);}
+} finally {solver?.destroy();device?.destroy(); assert.ok(gpu);}

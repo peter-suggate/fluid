@@ -16,7 +16,6 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 async function read(device: GPUDevice, source: GPUBuffer, bytes = source.size, offset = 0) {
   const target = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -36,7 +35,7 @@ async function writeFile(path: string, data: Parameters<typeof originalWriteFile
   if (/configuration\.json$|trace\.json$|\/0-solidOpenFraction\.bin$|\/\d+-density\.bin$|presentation-\d+\/(phi\.bin|source\.json)$/.test(path)) await originalWriteFile(path, data);
 }
 
-// Run one arm per process, under the same GPU lease as the regression suite.
+// Run one arm per process.
 // Compare the accepted volume averages, independently of the surface renderer.
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 assert.ok(modulePath, "Set WEBGPU_NODE_MODULE to the native Dawn module path");
@@ -59,7 +58,6 @@ const output = process.env.POOL_OUTPUT ?? "artifacts/axis-artifacts-2026-09-10/b
 assert.ok([0, 1, 2, 4, 8].includes(maxCell));
 assert.ok(Number.isSafeInteger(steps) && steps > 0);
 assert.ok(Number.isFinite(dt) && dt > 0);
-await acquireWebGPUExclusiveLock("dawn-probe", "pool-impact-ab");
 const live = new Set<GPU>();
 let gpu: GPU | undefined, device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
 try {
@@ -249,6 +247,6 @@ try {
   await writeFile(`${output}/trace.json`, JSON.stringify(trace, null, 2));
   await failureAudit?.finish();
 } finally {
-  solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock();
+  solver?.destroy(); device?.destroy(); 
   if (gpu) live.delete(gpu);
 }

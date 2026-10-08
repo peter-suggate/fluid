@@ -3,7 +3,6 @@ import test from "node:test";
 import {pathToFileURL} from "node:url";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {createUniformMixedLayout,MIXED_CELL_MASK} from "../lib/methods/uniform/uniform-mixed-layout";
 import {UniformMixedOwnership} from "../lib/methods/uniform/uniform-mixed-ownership";
 import {UniformPressureBand} from "../lib/methods/uniform/uniform-pressure-band";
@@ -11,7 +10,6 @@ import {readMixedBuffer} from "./helpers/uniform-mixed-native-fields";
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("h pressure preserves air interfaces hidden from the 4h pressure grid",{timeout:120000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform pressure phase agreement");
  let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
@@ -60,5 +58,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    }
    assert.deepEqual(errors,[]);
   }finally{band.destroy();simulation.destroy();pressure.destroy();textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy());}
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });

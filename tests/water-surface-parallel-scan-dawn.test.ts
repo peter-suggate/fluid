@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { globalFineClassifiedIndirectScanShader } from "../lib/core/webgpu-water-global-fine-tetra";
 import { parallelSurfaceScanShader, surfaceClassifyDispatchShader } from "../lib/core/webgpu-water-surface-scan";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("parallel surface offsets match the original GPU scan, including publication and capacity edges", { timeout: 180_000 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "water surface parallel scan");
   let device: GPUDevice | undefined;
   try {
     const dawn = await import(pathToFileURL(modulePath!).href);
@@ -89,5 +87,5 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ cubes: capacity, ...timing }));
     device.destroy(); device = undefined;
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

@@ -6,7 +6,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, readWebGPUExclusiveLockHolder, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { sampleCoarseBowlVolumeKernel } from "./coarse-surface-volume-kernel";
@@ -32,15 +31,6 @@ const topology = (a: Awaited<ReturnType<WebGPUAdaptiveMassSolver["readGPUActivit
   leaves: a.bricks.map(b => [b.leafId, b.coordinate, b.spanBricks, b.active, b.acceptedResolution]),
 });
 const liveGPU = new Set<GPU>();
-for (let attempt = 0; ; attempt++) {
-  try { await acquireWebGPUExclusiveLock("dawn-probe", `surface-grid-imprint:${arm}:${profile}`); break; }
-  catch (error) {
-    const holder = await readWebGPUExclusiveLockHolder();
-    if (!process.argv.includes("--wait") || attempt >= 120 || !holder?.alive) throw error;
-    if (attempt === 0) console.log(`Waiting for ${holder.description}`);
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-}
 let gpu: GPU | undefined, device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
 try {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url))).href);
@@ -188,7 +178,7 @@ try {
   await writeFile(`${output}/presentation-faults.json`, JSON.stringify(await solver.readFramePlanPresentationFaultRecordQA() ?? null));
   assert.deepEqual(errors, []);
 } finally {
-  solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock();
+  solver?.destroy(); device?.destroy(); 
   // gpu stays live through the last readback.
   if (gpu) liveGPU.delete(gpu);
 }

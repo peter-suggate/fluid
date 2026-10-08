@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import type { SparseCM12InternedBoundaryLayout } from
   "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-operators";
 import { createSparseCM12InternedBoundaryImageWGSL } from
@@ -48,7 +46,6 @@ ${isa}
   let receipt=fixtureISAValidateLeaf(0u,0u,fixtureIBOLeafDescriptorId(0u,0u));
   atomicStore(&output[0],receipt.x);}
 `;
-await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-ibo-semantic-authority");
 let gpu: GPU | undefined; let device: GPUDevice | undefined;
 try { const dawn = await import(dawnModule) as { create:(flags:string[])=>GPU;
     globals:Record<string,unknown> }; Object.assign(globalThis,dawn.globals);
@@ -62,4 +59,4 @@ try { const dawn = await import(dawnModule) as { create:(flags:string[])=>GPU;
   await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"checkISA1"}});
   const validation=await device.popErrorScope();if(validation)throw validation;
   console.log(JSON.stringify({schema:"sparse-cm12-ibo-semantic-authority-wgsl/v1",passed:true}));
-}finally{device?.destroy();await releaseWebGPUExclusiveLock();void gpu;}
+}finally{device?.destroy();void gpu;}

@@ -10,8 +10,7 @@
  *
  * Usage:
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
- *     node --import tsx tools/run-webgpu-exclusive.ts \
- *     --import tsx tools/probe-mixed-cell-adaptive-raster.ts
+ *     node --import tsx tools/probe-mixed-cell-adaptive-raster.ts
  */
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";

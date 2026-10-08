@@ -3,11 +3,9 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { sceneWithSolidStroke } from "../lib/core/solid-world";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("voxel scene presentation accepts repeated solid edits without rebuilding its SVO", { timeout: 240000 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "voxel-editor-live-presentation");
   let device: GPUDevice | undefined;
   let display: import("../lib/svo/features/scene-publication/webgpu-live-svo-scene").WebGPULiveSvoScene | undefined;
   try {
@@ -37,6 +35,5 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
   } finally {
     display?.destroy();
     if (device) { await device.queue.onSubmittedWorkDone(); device.destroy(); }
-    await releaseWebGPUExclusiveLock();
   }
 });

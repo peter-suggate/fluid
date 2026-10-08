@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 import { svoCellContourWGSL } from "../lib/svo/features/construction/svo-cell-contour";
 import { svoCellContourFitWGSL } from "../lib/svo/features/construction/svo-cell-contour-fit";
@@ -9,7 +8,6 @@ import { createWebgpuSolidWorldPageLayout } from "../lib/core/webgpu-solid-world
 import { sparseSceneProxyVoxelizationShaderFor } from "../lib/core/webgpu-sparse-scene-proxies";
 
 (process.env.WEBGPU_NODE_MODULE ? test : test.skip)("Dawn contour producer bounds a source plane and polygonizer emits a closed clipped cube", async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "svo-cell-contour");
   let device: GPUDevice | undefined;
   try {
     device = (await createDawnRenderDevice()).device;
@@ -95,5 +93,5 @@ import { sparseSceneProxyVoxelizationShaderFor } from "../lib/core/webgpu-sparse
       assert.ok([...edges.values()].every(count=>count===2), "closed triangulation: every undirected edge has two owners");
     }
     maintenance.destroy(); primitives.destroy(); output.destroy(); read.destroy();
-  } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  } finally { device?.destroy(); }
 });

@@ -10,8 +10,6 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { probeOceanWavePropagation } from "../lib/harness/ocean-wave-propagation-probe";
 import { readFloatTexture3D, readRgbaTexture3D } from
   "../lib/harness/webgpu-smoke-readbacks";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { uniformMethod } from "../lib/methods/uniform/method";
 
@@ -28,7 +26,6 @@ const outputPath = process.env.OCEAN_AB_OUT;
 assert.ok(Number.isSafeInteger(minimumCellSize) && minimumCellSize >= 0,
   "OCEAN_AB_MINIMUM_CELL_SIZE must be a non-negative integer");
 
-await acquireWebGPUExclusiveLock("dawn-probe", "probe-ocean-seiche-uniform-ab-dawn");
 let device: GPUDevice | undefined;
 try {
   const dawn = await import(pathToFileURL(dawnModule).href) as {
@@ -428,5 +425,4 @@ try {
   console.log(serialized);
 } finally {
   device?.destroy();
-  await releaseWebGPUExclusiveLock();
 }

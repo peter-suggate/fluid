@@ -5,7 +5,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import type {FluidRefinementRegion,SceneDescription} from "../lib/core/model";
@@ -92,7 +91,7 @@ function passClock(raw:GPUDevice){
 const DYNAMIC_ENTRY_MULTIPLE=5;
 
 (modulePath?test:test.skip)("detail policy changes ownership live: zero, partial, full, zero, moving focus",{timeout:1800000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform detail policy lifecycle");let device:GPUDevice|undefined,clock:ReturnType<typeof passClock>|undefined;
+ let device:GPUDevice|undefined,clock:ReturnType<typeof passClock>|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal","disable-dawn-features=timestamp_quantization"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
@@ -165,14 +164,14 @@ const DYNAMIC_ENTRY_MULTIPLE=5;
    if(process.env.UNIFORM_DETAIL_POLICY_REPORT)writeFileSync(process.env.UNIFORM_DETAIL_POLICY_REPORT,JSON.stringify(report));
   }finally{solver.destroy();}
   assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
- }finally{clock?.restore();device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{clock?.restore();device?.destroy();}
 });
 
 /** Full above 32³: the 64³ dam break with every tile h from the first frame,
  * through the impact and the first return. The pressure gate throws on a
  * rejected or unconverged frame, so reaching frame 60 is 60 accepted solves. */
 (modulePath?test:test.skip)("full detail runs the 64³ dam break: every tile h, accepted pressure, bounded phi",{timeout:900000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform detail policy full 64");let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
@@ -198,7 +197,7 @@ const DYNAMIC_ENTRY_MULTIPLE=5;
    console.log(JSON.stringify({label:"full 64",tiles,residualMax,bandMax,mass:[start.mass,end.mass]}));
   }finally{solver.destroy();}
   assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });
 
 /** A Fine region drawn live far from the liquid, with solid contact on (the
@@ -210,7 +209,7 @@ const DYNAMIC_ENTRY_MULTIPLE=5;
  * frame after an ordinary gesture (garden hose x10, 5 October 2026). The
  * certificate now seeds the static h tiles. 64³: 16³ tiles, 4³ pages. */
 (modulePath?test:test.skip)("a Fine region drawn and moved far from the liquid under solid contact keeps its pages resident",{timeout:900000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform detail policy far region");let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
@@ -257,5 +256,5 @@ const DYNAMIC_ENTRY_MULTIPLE=5;
    console.log(JSON.stringify(report));
   }finally{solver.destroy();}
   assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });

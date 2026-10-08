@@ -4,7 +4,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-uniform-reference";
@@ -15,7 +14,7 @@ import {mixedExtent,readMixedTexture} from "./helpers/uniform-mixed-native-field
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 
 (modulePath?test:test.skip)("Surface intersects Dynamic selection with phi crossings and never seeds detail",{timeout:180000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test","Uniform Surface filter");let device:GPUDevice|undefined;
+ let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
@@ -71,5 +70,5 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    console.log(JSON.stringify({surfaceOffTiles:off.fineTiles,surfaceOnTiles:on.fineTiles,crossingTiles:crossing.reduce((a,b)=>a+b,0)}));
    assert.deepEqual(errors,[]);
   }finally{solver.destroy();}
- }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+ }finally{device?.destroy();}
 });

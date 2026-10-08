@@ -6,7 +6,6 @@ import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../lib/core/webgpu-device-limits";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
-import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {refinementRegionLattice} from "../lib/core/refinement-regions";
@@ -35,7 +34,6 @@ async function surfaceFront(device:GPUDevice,solver:GPUSolverInstance):Promise<n
   return front;
  }finally{readback.unmap();readback.destroy();}
 }
-await acquireWebGPUExclusiveLock("dawn-benchmark","Uniform bulk/surface 2% frame-time gate");
 let device:GPUDevice|undefined,solver:GPUSolverInstance|undefined;
 try{
  const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE??`${process.cwd()}/node_modules/webgpu/index.js`).href);Object.assign(globalThis,dawn.globals);
@@ -98,4 +96,4 @@ try{
  }
  assert.deepEqual(errors,[]);
  if(!diagnostic)assert.deepEqual(failures,[],"Uniform bulk/surface frame-time gate");
-}finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{solver?.destroy();device?.destroy();}

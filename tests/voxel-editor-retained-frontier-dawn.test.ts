@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import {createUniformSolver,readUniformFields} from "./helpers/uniform-geometric";
 import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
@@ -12,7 +11,6 @@ import {managedGPUDevice} from "../lib/core/gpu-compilation-manager";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("Uniform mixed ownership advances the edited scene without replacing its fields", { timeout: 240000 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "tests/voxel-editor-retained-frontier-dawn.test.ts");
   let device: GPUDevice | undefined;
   let solver: WebGPUUniformReferenceSolver | undefined;
   try {
@@ -52,6 +50,5 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
   } finally {
     solver?.destroy();
     if (device) { await device.queue.onSubmittedWorkDone(); device.destroy(); }
-    await releaseWebGPUExclusiveLock();
   }
 });

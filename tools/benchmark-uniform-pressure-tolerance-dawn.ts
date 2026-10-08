@@ -4,7 +4,6 @@ import { resolve } from "node:path";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
@@ -14,7 +13,6 @@ interface Access {
   pressureMultigrid:{diagnostics:GPUBuffer;encode(encoder:GPUCommandEncoder,group:GPUBindGroup,boundary?:unknown):void};
 }
 const median=(xs:number[])=>[...xs].sort((a,b)=>a-b)[Math.floor(xs.length/2)]!;
-await acquireWebGPUExclusiveLock("dawn-probe","uniform pressure tolerance benchmark");
 let device:GPUDevice|undefined;
 try {
  const dawn=await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href);Object.assign(globalThis,dawn.globals);
@@ -48,4 +46,4 @@ try {
   const measured=samples.slice(3);console.log(JSON.stringify({case:process.argv.includes("--rest")?"rest":"dam",size,tolerance,medianWall_ms:median(measured.map(s=>s.wall_ms)),medianPressure_ms:median(measured.map(s=>s.pressure_ms)),meanPressure_ms:measured.reduce((a,s)=>a+s.pressure_ms,0)/measured.length,stats:await solver.readStats(),samples}));
   solver.destroy();query.destroy();resolved.destroy();readback.destroy();assert.deepEqual(errors,[]);
  }
-}finally{device?.destroy();await releaseWebGPUExclusiveLock();}
+}finally{device?.destroy();}
