@@ -333,6 +333,7 @@ export function SimPipelineOverlay({ lenses: override }: {
             value={Number(values[control.param] ?? control.min)}
             min={control.min} max={control.max} step={control.step} digits={control.digits ?? 0}
             hint={control.hint} editable={control.editable} disabled={disabled}
+            onInput={control.live ? (next) => setParam(control.param, next) : undefined}
             onChange={(next) => setParam(control.param, next)} />;
       }
     };

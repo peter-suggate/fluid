@@ -409,6 +409,7 @@ export function ToolstripMenuButton({
   // listener is bound once per opening rather than re-bound on every render the
   // caller happens to do underneath it.
   const close = useRef(onOpen);
+  const menu = useMenuFit(open);
   useEffect(() => {
     close.current = onOpen;
   });
@@ -437,8 +438,57 @@ export function ToolstripMenuButton({
         {hint !== undefined && <small>{hint}</small>}
       </span>
     </button>
-    {open && <div className="toolstrip-menu" role="menu" aria-label={label}>{children}</div>}
+    {open && <div ref={menu.ref} style={menu.style} className="toolstrip-menu" role="menu" aria-label={label}>{children}</div>}
   </span>;
+}
+
+/** Dropdowns are outside the strip's measured box. Keep them inside their
+ * viewport pane, including split views and a strip moved by the camera. */
+function useMenuFit(open: boolean) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [placement, setPlacement] = useState<Record<string, number>>({});
+  useLayoutEffect(() => {
+    const menu = ref.current;
+    const parent = menu?.offsetParent;
+    if (!open || !menu || !(parent instanceof HTMLElement)) return;
+    const shell = menu.closest(".viewport-shell");
+    const strip = menu.closest(".toolstrip");
+    const docked = strip?.classList.contains("is-docked");
+    const fit = () => {
+      const clip = shell?.getBoundingClientRect();
+      const left = Math.max(0, clip?.left ?? 0) + 12;
+      const top = Math.max(0, clip?.top ?? 0) + 12;
+      const right = Math.min(window.innerWidth, clip?.right ?? window.innerWidth) - 12;
+      const bottom = Math.min(window.innerHeight, clip?.bottom ?? window.innerHeight) - 12;
+      const maxWidth = Math.max(0, Math.min(docked ? parent.clientWidth : 232, right - left));
+      const maxHeight = Math.max(0, Math.min(window.innerHeight * 0.46, bottom - top));
+      const box = parent.getBoundingClientRect();
+      const width = Math.min(menu.offsetWidth, maxWidth), height = Math.min(menu.offsetHeight, maxHeight);
+      const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(n, hi));
+      const next = {
+        left: clamp(box.left - (docked ? 0 : 5), left, right - width) - box.left,
+        top: clamp(box.bottom + 4, top, bottom - height) - box.top,
+        minWidth: Math.min(148, maxWidth), maxWidth, maxHeight,
+        ...(docked ? { width: maxWidth } : {}),
+      };
+      setPlacement(previous => Object.keys(next).every(key => previous[key] === next[key as keyof typeof next]) ? previous : next);
+    };
+    fit();
+    const sizes = new ResizeObserver(fit);
+    for (const element of [menu, parent, shell, strip]) if (element) sizes.observe(element);
+    const positions = new MutationObserver(fit);
+    for (let element: HTMLElement | null = parent; element && element !== shell; element = element.parentElement) {
+      positions.observe(element, { attributes: true, attributeFilter: ["style", "class"] });
+    }
+    window.addEventListener("resize", fit);
+    window.addEventListener("scroll", fit, true);
+    return () => {
+      sizes.disconnect(); positions.disconnect();
+      window.removeEventListener("resize", fit);
+      window.removeEventListener("scroll", fit, true);
+    };
+  }, [open]);
+  return { ref, style: { ...placement, right: "auto" } };
 }
 
 /**

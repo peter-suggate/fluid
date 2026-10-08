@@ -185,6 +185,8 @@ gpuTest("NB-FLIP bounded distance sweeps match a brute-force nearest-crossing se
    device.queue.writeBuffer(bins,0,words);
    const module=device.createShaderModule({code:`
 const UM_D=vec3u(16u,12u,8u);const UM_T=UM_D/4u;const NB_SURFACE_TILES=0u;
+// This fixture measures the exhaustive distance search, with activity pruning off.
+const NB_ACTIVITY_TARGET=0u;fn nbAdaptive()->bool{return false;}
 @group(0) @binding(0) var<storage,read_write> bins:array<atomic<u32>>;
 fn cellIndex(p:vec3i)->u32{return u32(p.x)+UM_D.x*(u32(p.y)+UM_D.y*u32(p.z));}
 fn umCorner(k:u32,n:u32)->vec3u{return vec3u(k%n,(k/n)%n,k/(n*n));}

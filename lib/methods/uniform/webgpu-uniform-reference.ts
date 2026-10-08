@@ -103,6 +103,9 @@ export { UNIFORM_PAPER_DT_S } from "./uniform-paper";
 export interface WebGPUUniformReferenceOptions {
   /** Experimental particle velocity transport in the surface band. */
   narrowBandFlip?: boolean;
+  narrowBandAdaptiveSurface?: boolean;
+  narrowBandAdaptiveBudgetPercent?: number;
+  narrowBandAdaptiveFadeSeconds?: number;
   narrowBandCoarseParticles?: boolean;
   narrowBandFinePadding?: number;
   /** Independent dense vertex level set and conservative cell volume, advanced
@@ -490,10 +493,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   get info(): GPUEulerianInfo { this.refreshMixedAllocation();return this.executionInfo; }
   get simulationCellScale(): 1 { return 1; }
   private readonly narrowBandFlip: boolean;
+  private readonly narrowBandAdaptiveSurface: boolean;
+  private narrowBandAdaptiveBudgetPercent: number;
+  private narrowBandAdaptiveFadeSeconds: number;
   private readonly narrowBandCoarseParticles: boolean;
   private narrowBandFinePadding: number;
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
-  get narrowBandFlipInfo(){const stage=this.mixedFrame?.narrowBandFlip;return stage?{particles:stage.count,capacity:stage.capacity,reseedClipped:stage.reseedClipped,bandWidth:4,fineGridPadding:this.narrowBandFinePadding,flipRatio:0.95,...stage.diagnostics}:undefined;}
+  get narrowBandFlipInfo(){const stage=this.mixedFrame?.narrowBandFlip;return stage?{adaptiveSurface:stage.adaptiveSurface,adaptiveBudgetPercent:this.narrowBandAdaptiveBudgetPercent,adaptiveFadeSeconds:this.narrowBandAdaptiveFadeSeconds,particles:stage.count,capacity:stage.capacity,reseedClipped:stage.reseedClipped,bandWidth:4,fineGridPadding:this.narrowBandFinePadding,flipRatio:0.95,...stage.diagnostics}:undefined;}
   private readonly geometricVolume: boolean;
   private geometricRedistance: boolean;
   /** Sec. 3.4/3.5 rounding-residue floor in cell volumes; 0 is off. */
@@ -861,6 +867,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     options: WebGPUUniformReferenceOptions = {},
   ) {
     this.narrowBandFlip = options.narrowBandFlip === true;
+    this.narrowBandAdaptiveSurface = options.narrowBandAdaptiveSurface === true;
+    this.narrowBandAdaptiveBudgetPercent = Math.max(0,Math.min(100,options.narrowBandAdaptiveBudgetPercent??50));
+    this.narrowBandAdaptiveFadeSeconds = Math.max(0.05,Math.min(2,options.narrowBandAdaptiveFadeSeconds??0.5));
     this.narrowBandCoarseParticles = options.narrowBandCoarseParticles === true;
     this.narrowBandFinePadding = options.narrowBandFinePadding ?? 1;
     this.geometricVolume = options.geometricVolume === true;
@@ -1489,7 +1498,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // pipelines then start in the direct form (UniformDetailStorage.prefer).
     detail.prefer(this.detail.policy!=="requested"||bodies>0);
     this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:fixed??(gpuLayout?tiles:0),liquidBand:gpuLayout,fixed:fixed!==undefined},{
-      narrowBandFlip:this.narrowBandFlip,narrowBandCoarseParticles:this.narrowBandCoarseParticles,arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
+      narrowBandFlip:this.narrowBandFlip,narrowBandAdaptiveSurface:this.narrowBandAdaptiveSurface,narrowBandCoarseParticles:this.narrowBandCoarseParticles,arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
       phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,
@@ -1502,10 +1511,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.reduce((n,c)=>n+c,0),cutMapOffsetWords:this.solidCutMapOffsetWords,paramsWritten:()=>this.paramsWritten},
       pressureGeometry,detail,needs,
     },this.scene.container.top==="open",this.pressureSchedule);
+    this.mixedFrame.narrowBandFlip?.setAdaptive(this.narrowBandAdaptiveSurface&&this.detail.policy==="dynamic");
     this.mixedFrame.solid!.present=solids||bodies>0;
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
     // The scene uniform: the census marks this frame's drop and inflow plug band on the GPU.
-    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.heldDistance);
+    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.heldDistance,this.narrowBandAdaptiveSurface);
     this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership);
     this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange});
     // One concurrent compile: serial stages left a first load waiting on
@@ -2069,14 +2079,18 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const build=this.mixedBuilds++,join=this.mixedEditJoin;if(join&&join.build===undefined)join.build=build;
       const g=this.scene.fluid.gravity_m_s2;
       // The detail controls' importance criteria: what the census requires at h.
-      const importance={...uniformDetailImportance(this.detail,dynamic.ownership.capacity.tiles),surfaceAuthority:this.narrowBandFlip};
+      const adaptive=this.narrowBandAdaptiveSurface&&this.detail.policy==="dynamic";
+      const importance={...uniformDetailImportance(this.detail,dynamic.ownership.capacity.tiles),surfaceAuthority:this.narrowBandFlip,
+        ...(adaptive?{budgetTiles:undefined,activityBudget:{percent:this.narrowBandAdaptiveBudgetPercent}}:{})};
       // The build's counters clear in the census's blit run.
       builder.encodeClear(encoder);
-      if(this.detail.policy==="dynamic"&&Object.values(importance.criteria).some(Boolean))this.mixedFrame?.narrowBandFlip?.refine(encoder,dynamic.joinTarget(),dt,this.narrowBandFinePadding);
+      this.mixedFrame?.narrowBandFlip?.setAdaptive(this.narrowBandAdaptiveSurface&&this.detail.policy==="dynamic");
+      if(this.detail.policy==="dynamic"&&(this.mixedFrame?.narrowBandFlip?.adaptiveSurface||Object.values(importance.criteria).some(Boolean)))this.mixedFrame?.narrowBandFlip?.refine(encoder,dynamic.joinTarget(),dt,this.narrowBandFinePadding);
       dynamic.encode(encoder,{dt,steps:1,gravity:[g.x,g.y,g.z],reach:Math.max(this.mixedCoarseningReach,this.detail.marginTiles),hysteresis:this.mixedCoarseningHysteresis,
         surfaceTolerance:importance.shapeTolerance,fastTravel:0,importance,
         boundaryTravel:importance.impactTravel,closedWalls:this.scene.container.top==="open"?0b101111:0b111111,up:Math.sign(-g.y),
         fullTolerance:UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE,emptyTolerance:Math.max(this.volumeDustThreshold,1e-6),reasons:views},false);
+      this.mixedFrame?.narrowBandFlip?.activity(encoder,dynamic.importance,dt,this.narrowBandAdaptiveFadeSeconds);
       builder.encode(encoder);
     },adopted:encoder=>{
       // Diagnostics only: a free read takes this build's receipt; mapped
@@ -2561,7 +2575,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const value = Number(values[key]);
       return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
     };
+    this.mixedFrame?.narrowBandFlip?.setAdaptive(this.narrowBandAdaptiveSurface&&this.detail.policy==="dynamic");
     this.narrowBandFinePadding=finite("fineGridPadding",this.narrowBandFinePadding,0,4);
+    this.narrowBandAdaptiveBudgetPercent=finite("adaptiveBudgetPercent",this.narrowBandAdaptiveBudgetPercent,0,100);
+    this.narrowBandAdaptiveFadeSeconds=finite("adaptiveFadeSeconds",this.narrowBandAdaptiveFadeSeconds,0.05,2);
     this.pressureMultigrid.setResidualTolerance(finite("pressureResidualTolerance", UNIFORM_PRESSURE_RESIDUAL_TOLERANCE, 0, 100));
     // Switching to "fixed" mid-run restores the full encoded schedule on the
     // next step; switching back drops the previous demand sample and uses
@@ -2620,6 +2637,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         // its frames were built for. The request is withdrawn (asked again
         // only when it is made again); its rejection stays reported.
         if (!this.syncMixedLayout()) { this.detail = accepted; this.mixedCoarsening = accepted.policy === "dynamic" ? "dynamic" : "regions"; this.mixedRefusedKey = ""; }
+        this.mixedFrame?.narrowBandFlip?.setAdaptive(this.narrowBandAdaptiveSurface&&this.detail.policy==="dynamic");
       } else if (this.executionInfo.uniformDetail?.rejected && UNIFORM_DETAIL_PARAM_KEYS.some(k => values[k] !== undefined)) {
         // The request is the running generation again: nothing is refused.
         this.executionInfo.uniformDetail = { ...this.executionInfo.uniformDetail, rejected: undefined };

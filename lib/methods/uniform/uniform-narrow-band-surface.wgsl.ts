@@ -13,10 +13,11 @@ export const narrowBandParticleSurfaceWGSL=/* wgsl */`
 const NB_SURFACE_RADIUS=${NARROW_BAND_SURFACE_RADIUS};
 const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
 fn particleSurfaceBulk(q:vec3i)->vec2f{
+ if(nbAdaptive()&&nbTheta(vec3f(q))<=0.0){return vec2f(bandPhi(vec3f(q)),0.0);}
  let bulk=bulkDepth(vec3f(q));let tile=umTileAt(min(vec3u(q)/4u,UM_T-1u));
  // Deeper than this the shrunk level set wins the union whatever the samples
  // are; nothing bounds how far into the air they may carry the surface.
- let gather=atomicLoad(&bins[NB_SURFACE_TILES+tile])!=0u&&bulk>-2.0;
+ let gather=atomicLoad(&bins[NB_SURFACE_TILES+tile])!=0u&&bulk>-2.0&&nbTheta(vec3f(q))>0.0;
  return vec2f(bulk,select(0.0,1.0,gather));
 }
 // Squared distance to the nearest sample within 2h; 4 when there is none.
@@ -50,7 +51,10 @@ fn particleSurfaceNearest(q:vec3i)->f32{
  return nearest2;
 }
 fn particleSurfaceFinish(q:vec3i,bulk:f32,nearest2:f32)->f32{
- return nbSourcePhi(vec3f(q),min(bulk+1.0,sqrt(nearest2)-NB_SURFACE_RADIUS));
+ // An empty gather has no particle surface to blend; never erode a cold
+ // or newly activated region before its surface samples exist.
+ if(nbAdaptive()&&nearest2>=4.0){return nbSourcePhi(vec3f(q),bulk);}
+ return nbSourcePhi(vec3f(q),mix(bulk,min(bulk+1.0,sqrt(nearest2)-NB_SURFACE_RADIUS),nbTheta(vec3f(q))));
 }
 fn particleSurface(q:vec3i)->f32{
  let bulk=particleSurfaceBulk(q);if(bulk.y==0.0){return bulk.x;}
@@ -128,6 +132,7 @@ var<workgroup> nbMass:array<vec3f,64>;
 var<workgroup> nbMomentumNext:array<vec3f,64>;
 var<workgroup> nbMassNext:array<vec3f,64>;
 var<workgroup> nbBlend:array<f32,24>;
+var<workgroup> nbExpected:array<f32,24>;
 var<workgroup> nbRuns:array<vec2u,128>;
 @compute @workgroup_size(64) fn transfer(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  let first=(gid.x/16u)*2u;let owner=umAllOwner(vec3u(first,0,0));let origin=umOrigin(owner);
@@ -135,12 +140,12 @@ var<workgroup> nbRuns:array<vec2u,128>;
  let team=lane/16u;let member=lane%16u;let centre=vec3f(origin)+0.5;
  if(member<6u){
   let axis=member%3u;let o=select(origin,nextOrigin,member>=3u);let width=select(owner.width,next.width,member>=3u);
-  var near=0.0;
+  var near=0.0;var expected=1.0;
   if(width==1u&&o[axis]+1u<UM_D[axis]){
    var q=vec3f(o)+0.5;q[axis]+=0.5;let depth=particleDepth(q);
-   if(depth<=1.5&&depth>=-2.0){near=1.0;}
+   if(depth<=1.5&&depth>=-2.0){near=nbTheta(q);expected=max(1.0,8.0*clamp(0.5-depth,0.0,1.0));}
   }
-  nbBlend[6u*team+member]=near;
+  nbBlend[6u*team+member]=near;nbExpected[6u*team+member]=expected;
  }
  workgroupBarrier();
  let blend=vec3f(nbBlend[6u*team],nbBlend[6u*team+1u],nbBlend[6u*team+2u]);
@@ -179,12 +184,16 @@ var<workgroup> nbRuns:array<vec2u,128>;
  }
  if(member==0u&&owner.width==1u){
   let original=textureLoad(velocity,vec3i(origin),0);let mass=nbMass[lane];
-  let value=mix(original.xyz,nbMomentum[lane]/max(mass,vec3f(1e-30)),select(vec3f(0),blend,mass>=vec3f(1e-5)));
+  var transition=blend;
+  if(nbAdaptive()){for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+a]),1.0,blend[a]);}}
+  let value=mix(original.xyz,nbMomentum[lane]/max(mass,vec3f(1e-30)),select(vec3f(0),transition,mass>=vec3f(1e-5)));
   textureStore(output,vec3i(origin),vec4f(value,original.w));
  }
  if(member==0u&&next.width==1u){
   let original=textureLoad(velocity,vec3i(nextOrigin),0);let mass=nbMassNext[lane];
-  let value=mix(original.xyz,nbMomentumNext[lane]/max(mass,vec3f(1e-30)),select(vec3f(0),nextBlend,mass>=vec3f(1e-5)));
+  var transition=nextBlend;
+  if(nbAdaptive()){for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+3u+a]),1.0,nextBlend[a]);}}
+  let value=mix(original.xyz,nbMomentumNext[lane]/max(mass,vec3f(1e-30)),select(vec3f(0),transition,mass>=vec3f(1e-5)));
   textureStore(output,vec3i(nextOrigin),vec4f(value,original.w));
  }
 }
@@ -214,6 +223,6 @@ var<workgroup> coarseSums:array<vec2f,64>;
  }
  coarseSums[lane]=sum;workgroupBarrier();
  for(var stride=32u;stride>0u;stride/=2u){if(lane<stride){coarseSums[lane]+=coarseSums[lane+stride];}workgroupBarrier();}
- if(lane==0u){var value=original;let result=coarseSums[0];if(result.y>1e-5){value[axis]=mix(original[axis],result.x/result.y,blend);}textureStore(output,anchor,value);}
+ if(lane==0u){var value=original;let result=coarseSums[0];if(result.y>1e-5){value[axis]=mix(original[axis],result.x/result.y,blend*nbTransferBlend(q,depth,result.y));}textureStore(output,anchor,value);}
 }
 `;

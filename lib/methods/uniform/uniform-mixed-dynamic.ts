@@ -1,3 +1,4 @@
+import { narrowBandBudgetWGSL, narrowBandBudgetWords, NARROW_BAND_BUDGET_ENTRIES } from "./uniform-narrow-band-budget.wgsl";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import type {UniformMixedBandBits} from "./uniform-mixed-layout-builder";
@@ -109,6 +110,8 @@ export interface UniformMixedDynamicImportance {
   * (closure and travel ride on them): a one-census lag. A saturated score
   * (shape at tolerance 0) is never cut. */
  budgetTiles?:number;
+ /** NB-only quota over requesting tiles; absent/100 admits every candidate. */
+ activityBudget?:{percent:number};
  /** A tile this frame's drop or inflow plug can fill is band (absent: it
   * is). Off under a census of requests only: a source is not a request. */
  sources?:boolean;
@@ -273,7 +276,7 @@ export class UniformMixedDynamicClassifier {
   * nothing is marked.
   * held: the surface stage's held-vertex corrections (UniformMixedSurface.held);
   * without it every 4h vertex reads as stored. */
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,extended:GPUTexture,source?:GPUBuffer,held?:{readonly buffer:GPUBuffer;readonly word:number}){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,extended:GPUTexture,source?:GPUBuffer,held?:{readonly buffer:GPUBuffer;readonly word:number},private readonly activityBudgetSupported=false){
   const tiles=ownership.capacity.tiles;
   this.words=Math.ceil(tiles/32);
   const t=ownership.capacity.lattice.dimensions.map(n=>n/4);
@@ -286,10 +289,10 @@ export class UniformMixedDynamicClassifier {
   // Append two crossing-cell words per tile; existing diagnostic offsets stay stable.
   // Then two importance words per tile and the importance state.
   this.importanceOffset=this.nearOffset+this.words+1+this.pages+2*tiles;
-  const workBytes=(this.importanceOffset+2*tiles+importanceStateWords(tiles))*4,readBytes=(HEADER+this.words)*4;
+  const workBytes=(this.importanceOffset+2*tiles+importanceStateWords(tiles)+(activityBudgetSupported?narrowBandBudgetWords(tiles):0))*4,readBytes=(HEADER+this.words)*4;
   this.work=device.createBuffer({label:"Uniform dynamic ownership census",size:workBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.readback=device.createBuffer({label:"Uniform dynamic ownership readback",size:readBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-  this.params=device.createBuffer({label:"Uniform dynamic ownership policy",size:96,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  this.params=device.createBuffer({label:"Uniform dynamic ownership policy",size:112,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   this.solidTiles=device.createBuffer({label:"Uniform dynamic ownership solid tiles",size:this.words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
   this.staticSolidTiles=device.createBuffer({label:"Uniform dynamic ownership static solid tiles",size:this.words*4,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.joinTiles=device.createBuffer({label:"Uniform dynamic ownership join tiles",size:3*this.words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
@@ -301,7 +304,7 @@ export class UniformMixedDynamicClassifier {
   this.heldWord=held?.word??0;
   const boundsBytes=(6*CUBE_LEVELS*tiles+(t[0]!+1)*(t[1]!+1)*(t[2]!+1))*4;
   this.bounds=device.createBuffer({label:"Uniform dynamic ownership bound cubes",size:boundsBytes,usage:GPUBufferUsage.STORAGE});
-  this.allocatedBytes=workBytes+boundsBytes+readBytes+96+this.words*16+(this.noSource?SOURCE_PARAMS_BYTES:0)+(this.noHeld?heldBytes:0);
+  this.allocatedBytes=workBytes+boundsBytes+readBytes+112+this.words*16+(this.noSource?SOURCE_PARAMS_BYTES:0)+(this.noHeld?heldBytes:0);
   this.resources=uniformDetailBindLayout(device,{entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
@@ -335,7 +338,7 @@ export class UniformMixedDynamicClassifier {
 // UNIFORM_DETAIL_CRITERIA), bit 8 bulk, bit 9 sources and bit 11 the
 // displacement shape metric, bit 12 surface admission, bits 13..14 its tile distance, hold steps, the seed budget's band
 // tiles (all ones: none), the score byte that keeps a hold.
-struct DynamicPolicy {step:vec4f,reach:vec4u,surface:vec4f,flow:vec4f,importance:vec4f,shaping:vec4u}
+struct DynamicPolicy {step:vec4f,reach:vec4u,surface:vec4f,flow:vec4f,importance:vec4f,shaping:vec4u,activity:vec4u}
 @group(1) @binding(4) var<uniform> policy:DynamicPolicy;
 @group(1) @binding(5) var<storage,read> solidTiles:array<u32>;
 @group(1) @binding(6) var<storage,read_write> bounds:array<u32>;
@@ -424,7 +427,7 @@ fn unseeded()->bool{return (policy.shaping.x&1024u)!=0u;}
 fn shapeDisplacement()->bool{return (policy.shaping.x&2048u)!=0u;}
 // A tile shape requires needs no other score, unless a layer shows them or
 // the budget ranks it by its top one.
-fn scoreAll()->bool{return recordReasons()||budgetOn();}
+fn scoreAll()->bool{return recordReasons()||budgetOn()||nbBudgetOn();}
 // The lowest score, over its threshold, that can matter: a trigger, or with
 // a hold the score that keeps it; a layer shows every one.
 fn scoreFloor()->f32{
@@ -915,6 +918,12 @@ fn umScoreByte(w0:u32,w1:u32,k:u32)->u32{
   if(w1!=own.y){atomicStore(&census[importanceIndex(tile,1u)],w1);}
  }
  if(holding){atomicStore(&census[holdIndex(tile)],remaining);}
+ if(nbBudgetOn()){nbBudgetRecord(tile,w0,w1,required);return;}
+ publishImportance(tile,w1);
+}
+fn publishImportance(tile:u32,w1:u32){
+ let p=umTileCoord(tile);let required=(w1&${IMPORTANCE.required}u)!=0u;
+ let crossing=(w1&${IMPORTANCE.crossing}u)!=0u;let shaped=(w1&triggerBit(SHAPE))!=0u;
  // Required tiles seed decide: their prefix flag, crossing cells (the whole
  // tile without a surface of its own), gap and, for a boundary tile, its
  // directed travel. classify stored a crossing tile's as if required.
@@ -933,6 +942,8 @@ fn umScoreByte(w0:u32,w1:u32,k:u32)->u32{
  // A 4h tile the criteria require: refined by this census.
  if(umTileWidth(tile)!=1u){let slot=atomicAdd(&census[1],1u);if(slot<3u){atomicStore(&census[13u+slot],tile);}}
 }
+const nbBudgetSupported=${this.activityBudgetSupported};
+${narrowBandBudgetWGSL}
 // The budget, after the band is final: the seeds allowed are the budget's
 // share of the band that this census's seeds were of it (closure, travel and
 // promotion ride on the seeds). The cutoff keeps whole score bins from the
@@ -1303,7 +1314,7 @@ var<workgroup> compactCounts:array<u32,256>;
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-  await Promise.all(["classify","classifyCoarse","importance","prefix0","prefix1","prefix2","decide","solidActive","solidPromote","budget","pageSeed","pageMark","pageCompact"].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));}));
+  await Promise.all(["classify","classifyCoarse","importance","prefix0","prefix1","prefix2","decide","solidActive","solidPromote","budget","pageSeed","pageMark","pageCompact",...(this.activityBudgetSupported?NARROW_BAND_BUDGET_ENTRIES:[])].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));}));
   await Promise.all(Array.from({length:CUBE_LEVELS},async(_,i)=>{const level=i+1;
    this.pipelines.set(`cube${level}`,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"boundCube",constants:{umDispatchX:this.ownership.dispatchX,cubeLevel:level}}}));}));
  }
@@ -1363,7 +1374,7 @@ var<workgroup> compactCounts:array<u32,256>;
   * readback: copy the header and band bits for read() (tools, tests and the
   * host relayout path); without it the census reads nothing back. */
  encode(encoder:GPUCommandEncoder,policy:UniformMixedDynamicPolicy,readback=true):void{
-  if(this.pipelines.size!==13+CUBE_LEVELS)throw new Error("Dynamic ownership census is not initialized");
+  if(this.pipelines.size!==13+CUBE_LEVELS+(this.activityBudgetSupported?NARROW_BAND_BUDGET_ENTRIES.length:0))throw new Error("Dynamic ownership census is not initialized");
   for(const [name,value] of Object.entries({dt:policy.dt,fullTolerance:policy.fullTolerance,emptyTolerance:policy.emptyTolerance}))
    if(!Number.isFinite(value)||value<0)throw new Error(`Dynamic ownership ${name} must be finite and non-negative: ${value}`);
   for(const [name,value] of Object.entries({reach:policy.reach,hysteresis:policy.hysteresis}))
@@ -1387,7 +1398,15 @@ var<workgroup> compactCounts:array<u32,256>;
   if(!Number.isSafeInteger(importance.holdSteps)||importance.holdSteps<0)throw new Error(`Dynamic ownership importance holdSteps must be a non-negative integer: ${importance.holdSteps}`);
   const surfaceDistance=importance.surfaceDistance??0;
   if(!Number.isSafeInteger(surfaceDistance)||surfaceDistance<0||surfaceDistance>3)throw new Error(`Dynamic ownership surfaceDistance must be an integer in 0..3: ${surfaceDistance}`);
+  const activityBudget=importance.activityBudget;
+  if(activityBudget){
+   if(!this.activityBudgetSupported)throw new Error("Activity budget requires an adaptive narrow-band classifier");
+   for(const value of [activityBudget.percent])if(!Number.isFinite(value)||value<0||value>100)throw new Error("Activity budget values must be in 0..100");
+  }
+  const activityPercent=Math.round(activityBudget?.percent??100);
+  const activityBudgetOn=!!activityBudget&&activityPercent<100;
   const budget=importance.budgetTiles;
+  this.device.queue.writeBuffer(this.params,96,new Uint32Array([activityPercent,0,0,0]));
   const shapeMetric=importance.shapeMetric??"value";
   if(shapeMetric!=="value"&&shapeMetric!=="displacement")throw new Error(`Dynamic ownership importance shapeMetric must be "value" or "displacement": ${String(shapeMetric)}`);
   if(budget!==undefined&&(!Number.isSafeInteger(budget)||budget<0))throw new Error(`Dynamic ownership importance budgetTiles must be a non-negative integer: ${budget}`);
@@ -1417,13 +1436,13 @@ var<workgroup> compactCounts:array<u32,256>;
   // the earlier ones wrote.
   const pass=encoder.beginComputePass({label:"Uniform dynamic ownership census"});
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);
-  for(const entry of ["classify","classifyCoarse",...(seeded?["importance","prefix0","prefix1","prefix2",...Array.from({length:CUBE_LEVELS},(_,j)=>`cube${j+1}`)]:[]),...(this.solid||this.bodies?["decide","solidActive","solidPromote"]:["decide"]),...(budget===undefined?[]:["budget"]),"pageSeed","pageMark","pageCompact"]){
+  for(const entry of ["classify","classifyCoarse",...(seeded?["importance",...(activityBudgetOn?NARROW_BAND_BUDGET_ENTRIES:[]),"prefix0","prefix1","prefix2",...Array.from({length:CUBE_LEVELS},(_,j)=>`cube${j+1}`)]:[]),...(this.solid||this.bodies?["decide","solidActive","solidPromote"]:["decide"]),...(budget===undefined?[]:["budget"]),"pageSeed","pageMark","pageCompact"]){
    // Fixed grids: classify strides over the h list; classifyCoarse has a
    // lane per tile, bounded by the 4h count; the rest are lattice-sized.
    const lines=entry.startsWith("prefix")?[0,1,2].filter(k=>k!==Number(entry.at(-1))).reduce((n,k)=>n*t[k]!,1):entry.startsWith("page")?this.pages:tiles;
    pass.setPipeline(uniformDetailPick(this.pipelines.get(entry)!));
    if(entry==="classify")pass.dispatchWorkgroups(Math.min(CENSUS_TILE_GRID,tiles));
-   else if(entry==="pageCompact"||entry==="budget")pass.dispatchWorkgroups(1);
+   else if(entry==="pageCompact"||entry==="budget"||entry==="activityCutoff"||entry==="activityTiePrefix")pass.dispatchWorkgroups(1);
    else{const groups=Math.ceil(lines/64);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));}
   }
   pass.end();

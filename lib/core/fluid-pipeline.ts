@@ -88,6 +88,8 @@ export type FluidStageControl =
     readonly step: number;
     readonly digits?: number;
     readonly editable?: boolean;
+    /** Apply runtime controls during a slider drag, rather than on release. */
+    readonly live?: boolean;
     readonly hint?: string;
     /** Hide the input semantics (while retaining its readout) when a parent
      * stage gate makes the value irrelevant. */

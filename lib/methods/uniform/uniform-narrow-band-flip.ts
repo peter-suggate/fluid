@@ -1,3 +1,4 @@
+import { narrowBandActivityWGSL, NARROW_BAND_ACTIVITY_WORDS_PER_TILE } from "./uniform-narrow-band-activity.wgsl";
 import { narrowBandRedistanceWGSL } from "./uniform-narrow-band-redistance.wgsl";
 import { narrowBandMembershipWGSL } from "./uniform-narrow-band-membership.wgsl";
 import { NARROW_BAND_TRACE_LIMIT, narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
@@ -66,6 +67,11 @@ export class UniformNarrowBandFlip {
  private parity=0;
  private started=false;
  private bandCurrent=false;
+ private seedAll=false;
+ private adaptive=false;
+ setAdaptive(enabled:boolean):void{enabled=enabled&&this.activitySupported;if(this.adaptive&&!enabled)this.seedAll=true;this.adaptive=enabled;}
+ get adaptiveSurface():boolean{return this.adaptive;}
+ private get activityWord():number{const d=this.ownership.capacity.lattice.dimensions;return 3*d.reduce((a,b)=>a*b,1)+d.reduce((a,b)=>a*(b+1),1)+9*this.ownership.capacity.tiles+4;}
  private refinementPipeline?:GPUComputePipeline;
  private refinementLayout?:GPUBindGroupLayout;
  private readonly refinementParams:GPUBuffer;
@@ -73,7 +79,7 @@ export class UniformNarrowBandFlip {
  private readonly coarseVelocity:GPUTexture;
  private cacheGroups:Record<string,UniformDetailGroup>={};
  private stageTaps?:{builder:UniformMixedHangingTaps;group:UniformDetailGroup;unit:GPUTexture};
- constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,readonly coarseParticles=false,private readonly sourceParams?:GPUBuffer){
+ constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,readonly coarseParticles=false,private readonly sourceParams?:GPUBuffer,private readonly activitySupported=false){
   const cells=ownership.capacity.lattice.dimensions.reduce((n,v)=>n*v,1);
   const vertices=ownership.capacity.lattice.dimensions.reduce((n,v)=>n*(v+1),1);
   // The band is a surface, but what a scene's surface grows to is not known
@@ -84,7 +90,7 @@ export class UniformNarrowBandFlip {
   const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.particles=[buffer("particles A",this.capacity*48),buffer("particles B",this.capacity*48)];
   this.moveDispatch=device.createBuffer({label:"Narrow-band FLIP live particle dispatch",size:12,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT});
-  this.state=buffer("receipt",48);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+ownership.capacity.tiles*36+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*32);this.params=buffer("parameters",32,true);
+  this.state=buffer("receipt",48);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+ownership.capacity.tiles*(36+(activitySupported?4*NARROW_BAND_ACTIVITY_WORDS_PER_TILE:0))+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*32);this.params=buffer("parameters",48,true);
   this.order=new UniformNarrowBandOrder(device,ownership.capacity.lattice.dimensions,this.particles,this.bins,this.next,this.state);
   this.refinementParams=buffer("refinement prediction",32,true);
   this.cache=new UniformMixedMomentumCache(device,ownership);
@@ -93,7 +99,7 @@ export class UniformNarrowBandFlip {
   const dims=ownership.capacity.lattice.dimensions;
   const field=(label:string,size:readonly number[])=>device.createTexture({label,size:[...size],dimension:"3d",format:"r32float",usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC});
   this.surfaceSource={contourVertexPhi:true,vertexPhi:field("Narrow-band particle render surface",coarseParticles?dims.map(n=>n+1):[1,1,1]),openFraction:field("Narrow-band render solid fractions",coarseParticles?dims:[1,1,1]),cellSize_m:dims.map((_,a)=>ownership.capacity.lattice.cellSize_m[a]!) as [number,number,number]};
-  this.baseAllocatedBytes=this.capacity*132+(3*cells+vertices)*4+ownership.capacity.tiles*32+128+size.reduce((n,v)=>n*v,16)+(coarseParticles?4*(cells+dims.reduce((n,v)=>n*(v+1),1)):8);
+  this.baseAllocatedBytes=this.capacity*132+(3*cells+vertices)*4+ownership.capacity.tiles*(32+(activitySupported?4*NARROW_BAND_ACTIVITY_WORDS_PER_TILE:0))+144+size.reduce((n,v)=>n*v,16)+(coarseParticles?4*(cells+dims.reduce((n,v)=>n*(v+1),1)):8);
   this.resources=uniformDetailBindLayout(device,{entries:[
    ...[0,1,2,3,4,5].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:(binding===5?"read-only-storage":"storage") as GPUBufferBindingType}})),
    {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
@@ -206,7 +212,7 @@ struct Particle{position:vec4f,velocity:vec4f,before:vec4f}
 @group(1) @binding(3) var<storage,read_write> links:array<u32>;
 @group(1) @binding(4) var<storage,read_write> state:array<atomic<u32>>;
 @group(1) @binding(5) var<storage,read> negative:array<f32>;
-struct Params{hDt:vec4f,settings:vec4f}
+struct Params{hDt:vec4f,settings:vec4f,activity:vec4f}
 @group(1) @binding(6) var<uniform> params:Params;
 @group(1) @binding(7) var phi:texture_3d<f32>;
 @group(1) @binding(8) var velocity:texture_3d<f32>;
@@ -263,6 +269,7 @@ fn bandPhi(p:vec3f)->f32{
 }
 ${narrowBandMembershipWGSL}
 ${narrowBandRedistanceWGSL}
+${narrowBandActivityWGSL}
 // The same liquid/retained-mass owners used by velocity extrapolation.
 // Negative phi at a particle is insufficient: a sub-cell droplet may have
 // no resolved cell at all, so the grid cannot evolve its momentum.
@@ -290,10 +297,12 @@ fn store(p:Particle){
  particles[i]=p;
 }
 // The tiles a sample's surface can reach.
-fn markSurfaceTiles(position:vec3f){
+fn markSurfaceTiles(position:vec3f,heat:f32){
  let lo=max(vec3i(floor((position-2.0)/4.0)),vec3i(0));let hi=min(vec3i(floor((position+2.0)/4.0)),vec3i(UM_T)-1);
  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
-  atomicStore(&bins[NB_SURFACE_TILES+umTileAt(vec3u(vec3i(x,y,z)))],1u);
+  let tile=umTileAt(vec3u(vec3i(x,y,z)));
+  atomicStore(&bins[NB_SURFACE_TILES+tile],1u);
+  if(nbAdaptive()){atomicMax(&bins[NB_ACTIVITY_THETA+tile],bitcast<u32>(max(heat,0.0)));}
  }}}
 }
 ${narrowBandTraceWGSL("sampleVelocity")}
@@ -303,6 +312,10 @@ ${narrowBandTraceWGSL("sampleVelocity")}
   // Solid collision, rather than grid ownership, limits particle motion.
   if(umCellOpen(vec3i(q))<0.5){source[i].position.x=-1.0;return;}
   let ballistic=p.before.w==1.0||!gridSupported(q);p.before.w=max(p.before.w,select(0.0,1.0,ballistic));
+  if(nbAdaptive()){
+   p.position.w=max(nbTargetHeat(q),max(0.0,p.position.w-select(nbCooling()*params.hDt.w,0.0,ballistic)));
+   if(p.position.w<=0.0){source[i].position.x=-1.0;return;}
+  }
   // Uniform stores velocity half a step ahead of position. Ballistic drift
   // uses that midpoint velocity; update supplies the next full gravity kick.
   var speed=p.velocity.xyz/params.hDt.xyz;
@@ -342,7 +355,7 @@ ${narrowBandTraceWGSL("sampleVelocity")}
   // each cell's count from the bins. Nothing gathers before it.
   // A trajectory can cross from h into a coarse owner during this step.
   p.position=vec4f(q,p.position.w);source[i]=p;
-  atomicAdd(&bins[nbOrder(vec3u(q))],1u);${this.order.sparse?"atomicAdd(&bins[NB_COVERAGE+umTileAt(vec3u(q)/4u)],1u);":""}markSurfaceTiles(q);
+  atomicAdd(&bins[nbOrder(vec3u(q))],1u);${this.order.sparse?"atomicAdd(&bins[NB_COVERAGE+umTileAt(vec3u(q)/4u)],1u);":""}markSurfaceTiles(q,p.position.w);
 }
 // End-of-step sampling uses the reconstructed surface and projected velocity.
 // Protect the outer h; retire only the deep interior and crowded overlap.
@@ -350,7 +363,7 @@ fn nbKept(i:u32)->bool{
  // The depth update just stored, of this position in this band.
  let depth=source[i].velocity.w;let order=nbOrder(vec3u(source[i].position.xyz));
  // Seeding tops a cell up to its count: the samples it keeps and the crowded ones it sheds.
- if(depth<-4.0){atomicSub(&bins[order],1u);return false;}
+ if(depth<-4.0||(nbAdaptive()&&source[i].position.w<=0.0)){atomicSub(&bins[order],1u);return false;}
  // Preserve surface samples even when compressed. Thin structures cannot
  // survive an arbitrary per-cell cap. Only deep overlap samples retire: the
  // source is still in cell order, so a sample's place in its run is its rank.
@@ -389,6 +402,9 @@ fn seedCell(c:vec3u,initial:bool){
  if((nbBandReach(c)&1u)==0u){return;}
  let d=particleDepth(vec3f(c)+0.5);if(d>0.9||d < -4.5){return;}
  if(umCellOpen(vec3i(c))<0.5){return;}
+ let heat=nbTargetHeat(vec3f(c)+0.5);
+ if(nbAdaptive()&&heat<=0.0){return;}
+ let activated=nbAdaptive()&&atomicLoad(&bins[NB_ACTIVITY_NEW+nbBandTile(c)])!=0u;
  let count=atomicLoad(&bins[nbOrder(c)]);if(count>=8u){return;}
  for(var k=count;k<8u;k++){
   let q=vec3f(c)+0.25+0.5*vec3f(umCorner(k,2u));let distance=particleDepth(q);
@@ -398,13 +414,16 @@ fn seedCell(c:vec3u,initial:bool){
   // of ownership or an uncovered tile cannot bootstrap one from the bulk
   // field. Section 3.2: liquid made from a description gets its whole band,
   // at initialization and where a source has just made it.
-  if(!initial&&distance>-1.0&&nbSourcePhi(q,1.0)>=0.0){continue;}
-  if(distance<=-NB_SURFACE_RADIUS){let v=sampleVelocity(q);store(Particle(vec4f(q,1),vec4f(v,distance),vec4f(v,0)));continue;}
+  if(!initial&&!activated&&(u32(params.settings.w)&2u)==0u&&distance>-1.0&&nbSourcePhi(q,1.0)>=0.0){continue;}
+  // New surface samples need resolved fine owners. The overlap collar may
+  // still use 4h, as in the fixed-band method.
+  if(nbAdaptive()&&distance>-1.0&&umOwnerAt(vec3i(c)).width!=1u){continue;}
+  if(distance<=-NB_SURFACE_RADIUS){let v=sampleVelocity(q);store(Particle(vec4f(q,heat),vec4f(v,distance),vec4f(v,0)));continue;}
   let shell=seedShell(q);let p=shell.xyz;
   if(shell.w>0.0||umCellOpen(vec3i(p))<0.5){continue;}
   // A shell sample can land in another cell, whose own seeding decision
   // does not see it: no count changes here, whatever the dispatch order.
-  let v=sampleVelocity(p);store(Particle(vec4f(p,1),vec4f(v,particleDepth(p)),vec4f(v,0)));
+  let v=sampleVelocity(p);store(Particle(vec4f(p,heat),vec4f(v,particleDepth(p)),vec4f(v,0)));
  }
 }
 // Seed the geometric particle band, including its overlap on 4h owners: one
@@ -460,7 +479,7 @@ fn transferFace(face:UMFace)->f32{
    total+=w;momentum+=w*motion[face.axis];
   }
  }}}
- if(total<1e-5){return original;}return mix(original,momentum/total,blend);
+ if(total<1e-5){return original;}return mix(original,momentum/total,blend*nbTransferBlend(q,depth,total));
 }
 ${narrowBandFineTransferWGSL}
 // The 4h owners, one a lane. An owner whose whole stencil is 4h has one
@@ -549,10 +568,11 @@ ${narrowBandSurfaceWGSL}
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
-  await Promise.all([false,true].flatMap(coarse=>["advectParticles","seed","seedSources","seedInitial","classify","transfer","transferOwners","transferSeams","transferCoarse","snapshot","update","surface","couple","coupleFine","commitCount","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists","depthNearest","redistanceFine","redistanceCoarse"].map(async entryPoint=>{
+  await Promise.all([false,true].flatMap(coarse=>["activity","activitySpread","advectParticles","seed","seedSources","seedInitial","classify","transfer","transferOwners","transferSeams","transferCoarse","snapshot","update","surface","couple","coupleFine","commitCount","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists","depthNearest","redistanceFine","redistanceCoarse"].map(async entryPoint=>{
+   if((entryPoint==="activity"||entryPoint==="activitySpread")&&!this.activitySupported)return;
    if((entryPoint==="transferCoarse"&&!coarse)||(entryPoint==="surface"&&!this.coarseParticles))return;
    const module=modules[["advectParticles","snapshot","update","seed","seedSources"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint} ${coarse?"4h":"mixed"}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,nbCoarseOnly:+coarse,...s}}})).catch(e=>{throw new Error(`${entryPoint} ${coarse}: ${e.message} ${e.reason}`,{cause:e});});
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint} ${coarse?"4h":"mixed"}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,nbCoarseOnly:+coarse,nbActivityEnabled:+this.activitySupported,...s}}})).catch(e=>{throw new Error(`${entryPoint} ${coarse}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(`${entryPoint}:${coarse}`,p);
   })));
 
@@ -574,10 +594,12 @@ ${narrowBandSurfaceWGSL}
  }
  move(encoder:GPUCommandEncoder,dt:number,openTop:boolean,gravity=0):void{
   this.bandCurrent=false;
-  this.device.queue.writeBuffer(this.params,0,new Float32Array([...this.ownership.capacity.lattice.cellSize_m,dt,0.95,+openTop,gravity,0]));
+  this.device.queue.writeBuffer(this.params,0,new Float32Array([...this.ownership.capacity.lattice.cellSize_m,dt,0.95,+openTop,gravity,+this.adaptive+(this.seedAll?2:0)]));
   const cells=this.ownership.capacity.lattice.dimensions.reduce((n,v)=>n*v,1);
   encoder.clearBuffer(this.state,16,32);
   this.bootstrap(encoder);
+  this.seedAll=false;
+  if(this.adaptive)encoder.clearBuffer(this.bins,(this.activityWord+5*this.ownership.capacity.tiles)*4,this.ownership.capacity.tiles*4);
   // The samples move in place, counting themselves into clear bins and
   // marking the tiles they reach; the order packs them into the other buffer.
   encoder.clearBuffer(this.state,4,8);this.order.prepare(encoder,1-this.parity);
@@ -602,7 +624,7 @@ ${narrowBandSurfaceWGSL}
   const lattice=this.ownership.capacity.lattice;
   // The first frame also needs a sweep; bootstrap from the head's extension
   // before choosing its grid layout, instead of after the first census.
-  if(!this.started){this.device.queue.writeBuffer(this.params,0,new Float32Array([...lattice.cellSize_m,dt,0.95,0,0,0]));this.bootstrap(encoder);}
+  if(!this.started&&!this.adaptive){this.device.queue.writeBuffer(this.params,0,new Float32Array([...lattice.cellSize_m,dt,0.95,0,0,0]));this.bootstrap(encoder);}
   this.device.queue.writeBuffer(this.refinementParams,0,new Float32Array([...lattice.dimensions,dt,...lattice.cellSize_m,padding]));
   const group=this.device.createBindGroup({layout:this.refinementLayout!,entries:[
    {binding:0,resource:{buffer:this.activeParticles}},{binding:1,resource:{buffer:this.state}},
@@ -611,6 +633,16 @@ ${narrowBandSurfaceWGSL}
    {binding:4,resource:{buffer:this.bins}},
   ]});
   const pass=encoder.beginComputePass({label:"Narrow-band FLIP surface refinement"});pass.setPipeline(this.refinementPipeline!);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1024);pass.end();
+ }
+ /** The head census runs before remapping and advection. Copy its scores
+  * into the existing arena, then publish heat in separate neighbour passes. */
+ activity(encoder:GPUCommandEncoder,importance:{buffer:GPUBuffer;offset:number},dt:number,fadeSeconds=0.5):void{
+  if(!this.adaptive)return;
+  const tiles=this.ownership.capacity.tiles;
+  this.device.queue.writeBuffer(this.params,32,new Float32Array([2/Math.max(0.05,fadeSeconds),0,0,0]));
+  this.device.queue.writeBuffer(this.params,0,new Float32Array([...this.ownership.capacity.lattice.cellSize_m,dt,0.95,0,0,1]));
+  encoder.copyBufferToBuffer(importance.buffer,importance.offset,this.bins,this.activityWord*4,tiles*8);
+  this.dispatch(encoder,"activity","bootstrap");this.dispatch(encoder,"activitySpread","bootstrap");
  }
  reconstruct(encoder:GPUCommandEncoder):void{this.bandCurrent=false;this.measureBand(encoder);this.dispatch(encoder,"diagnoseBefore");if(!this.ownership.coarseOnly)this.dispatch(encoder,"coupleFine");this.dispatch(encoder,"couple");}
  transfer(encoder:GPUCommandEncoder):void{

@@ -249,3 +249,9 @@ select.ui-select:disabled { opacity: .45; cursor: not-allowed; }
    short 76px track is for a line beside a mark, and in a 236px pane it left a
    track the width of its thumb. */
 .toolstrip .toolstrip-pane .ui-field-control > input.ui-slider[type="range"] { width: 100%; flex: 1 1 auto; }
+/* Tune needs a full track and a visible value even beside a viewport edge. */
+.toolstrip-menu .ui-field { grid-template-columns: minmax(0,1fr) auto; grid-template-areas: "label value" "control control"; row-gap: 2px; padding: 3px 4px; }
+.toolstrip-menu .ui-field > .ui-field-label { grid-area: label; }
+.toolstrip-menu .ui-field > .ui-field-value { grid-area: value; }
+.toolstrip-menu .ui-field > .ui-field-control { grid-area: control; }
+.toolstrip .toolstrip-menu .ui-field-control > input.ui-slider[type="range"] { width: 100%; flex: 1 1 auto; }

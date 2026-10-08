@@ -54,6 +54,7 @@ export interface UniformMixedFrameTrace {
 
 export interface UniformMixedFrameFields {
  narrowBandFlip?:boolean;
+ narrowBandAdaptiveSurface?:boolean;
  narrowBandCoarseParticles?:boolean;
  arena:UniformScratchArena;
  volume:GPUTexture;volumeScratch:GPUTexture;
@@ -342,7 +343,7 @@ export class UniformMixedFrame {
   this.coarseCache=caches[0]!;
   this.transport=f.narrowBandFlip?undefined:new UniformMixedTransportStage(device,layout,f.volume,f.volumeScratch,f.departure,{phi:f.phi,params:this.params.sharpen,reductions:this.reductions,resolved:true},f.sourceParams,solid,capacity.fineTiles);
   const o=this.ownership=this.transport?.ownership??new UniformMixedOwnership(device,layout,true,capacity.fineTiles);
-  this.narrowBandFlip=f.narrowBandFlip?new UniformNarrowBandFlip(device,o,solid,f.narrowBandCoarseParticles,f.sourceParams):undefined;
+  this.narrowBandFlip=f.narrowBandFlip?new UniformNarrowBandFlip(device,o,solid,f.narrowBandCoarseParticles,f.sourceParams,f.narrowBandAdaptiveSurface):undefined;
   this.displacement=solid&&!f.narrowBandFlip?new UniformMixedSolidDisplacement(device,o,solid):undefined;
   this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocity,f.negative,f.velocityScratch,f.negativeScratch,true,!!this.narrowBandFlip);
   this.cleanup=f.narrowBandFlip?undefined:new UniformMixedCleanup(device,o,solid,true);

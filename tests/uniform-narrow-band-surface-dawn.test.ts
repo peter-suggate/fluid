@@ -139,6 +139,7 @@ import { readMixedBuffer, readMixedTexture } from "./helpers/uniform-mixed-nativ
   const data=new Float32Array(samples.flat()),counts=new Uint32Array(cells),starts=new Uint32Array(cells);
   for(const s of samples)counts[orderOf(s)]!++;
   for(let at=1;at<cells;at++)starts[at]=starts[at-1]!+counts[at-1]!;
+  for(const heat of [1,0.35,0]){
   const buffer=(data:Uint32Array<ArrayBuffer>|Float32Array<ArrayBuffer>)=>{const b=device.createBuffer({size:data.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(b,0,data);return b;};
   const buffers=[buffer(data),buffer(counts),buffer(starts)];
   const texture=()=>device.createTexture({size:[dims,dims,dims],dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.COPY_SRC});
@@ -162,6 +163,9 @@ fn nbPosition(i:u32)->vec3f{return particles[i].position.xyz;}
 fn nbMotion(i:u32)->vec4f{return particles[i].motion;}
 fn transferFallback(o:UMOwner){}
 fn weight(x:f32)->f32{let a=abs(x);if(a<0.5){return 0.75-a*a;}let b=max(0.0,1.5-a);return 0.5*b*b;}
+// Exercise the fixed band and both fractional and zero particle influence.
+fn nbAdaptive()->bool{return ${heat<1};}
+fn nbTheta(p:vec3f)->f32{return ${heat};}
 ${narrowBandFineTransferWGSL}
 `});
    const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"transfer"}});
@@ -176,14 +180,17 @@ ${narrowBandFineTransferWGSL}
      const q=origin.map(v=>v+0.5);q[axis]!+=0.5;const depth=q[1]!-4;
      let mass=0,momentum=0;
      for(let i=0;i<n;i++)if(data[8*i+7]!==1){const w=weight(q[0]!-data[8*i]!)*weight(q[1]!-data[8*i+1]!)*weight(q[2]!-data[8*i+2]!);mass+=w;momentum+=w*data[8*i+4+axis]!;}
-     const blend=origin[axis]!+1>=dims||depth>1.5||mass<1e-5?0:(depth>=-2?1:0);
+     const expectedMass=Math.max(1,8*Math.max(0,Math.min(1,0.5-depth)));
+     const coverage=Math.min(1,mass/expectedMass);
+     const blend=origin[axis]!+1>=dims||depth>1.5||mass<1e-5?0:(depth>=-2?heat*(coverage+(1-coverage)*heat):0);
      const expected=initial[4*cell+axis]!*(1-blend)+(mass?momentum/mass:0)*blend;
      maxError=Math.max(maxError,Math.abs(actual[4*cell+axis]!-expected));
     }
     assert.equal(actual[4*cell+3],9,"transfer preserves the fourth channel");
    }
-   assert.ok(maxError<2e-5,`quadratic transfer error ${maxError}`);
+   assert.ok(maxError<2e-5,`heat ${heat}: quadratic transfer error ${maxError}`);
   }finally{buffers.forEach(b=>b.destroy());velocity.destroy();output.destroy();}
+  }
  });
 });
 
@@ -226,6 +233,8 @@ fn nbPosition(i:u32)->vec3f{return particles[i].position.xyz;}
 fn nbSourcePhi(p:vec3f,value:f32)->f32{return value;}
 fn bandPhi(p:vec3f)->f32{return select(3.0,-2.0,p.x<1.0);}
 fn bulkDepth(p:vec3f)->f32{return bandPhi(p);}
+fn nbAdaptive()->bool{return false;}
+fn nbTheta(p:vec3f)->f32{return 1.0;}
 ${narrowBandParticleSurfaceWGSL}
 ${narrowBandTiledSurfaceWGSL}
 @compute @workgroup_size(64) fn serial(@builtin(global_invocation_id) gid:vec3u){

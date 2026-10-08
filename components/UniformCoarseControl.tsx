@@ -11,6 +11,7 @@ import { UNIFORM_DETAIL_CONTROL_DEFAULTS, UNIFORM_DETAIL_CRITERION_PARAMS, UNIFO
 import { UNIFORM_DETAIL_CRITERIA, type UniformDetailCriterion } from "../lib/methods/uniform/uniform-stage-grids";
 import { IMPORTANCE_LEGEND, legacyVisualLayers, toggleVisualLayer } from "../lib/core/visual-layers";
 import { uniformDetailDomain, uniformDetailFocusRadius_m, uniformDetailRequestKey } from "../lib/methods/uniform/uniform-detail-requests";
+import { NARROW_BAND_ACTIVITY_CONTROLS, narrowBandActivityValues } from "../lib/methods/uniform/uniform-narrow-band-controls";
 import { Grid3X3 } from "lucide-react";
 import { ToolstripMenuButton, ToolstripMenuItem, ToolstripMenuRule, ToolstripRow, useToolstripSection } from "./toolstrip";
 import { Choice, ChoiceField, Facts, Field, FieldList, FieldNote, NumberInput, RangeField, SwitchField, ToggleButton } from "./ui";
@@ -85,6 +86,9 @@ export function UniformDetailRow() {
   const { claim } = useToolstripSection("uniform-detail", () => setTuning(false));
   if (method.methodId !== "uniform-volume" && method.methodId !== "uniform-narrow-band-flip") return null;
   const resolved = resolvedMethodValues(method);
+  const narrowBand = method.methodId === "uniform-narrow-band-flip";
+  const adaptive = narrowBand && resolved.adaptiveSurface === "on";
+  const activityValues = narrowBandActivityValues(resolved);
   const settings = uniformDetailSettings(resolved), values = uniformDetailValues(settings);
   const set = (key: string, value: MethodParamValue) => simulation.setMethodParam(method.methodId, key, value, session.id);
   const dynamic = settings.policy === "dynamic";
@@ -110,6 +114,12 @@ export function UniformDetailRow() {
     testId="scene-detail-tune"
     onOpen={value => { claim(value); setTuning(value); }}
   >
+    {adaptive && <>
+      {NARROW_BAND_ACTIVITY_CONTROLS.map(c => <RangeField key={c.key} label={c.label} value={activityValues[c.key]}
+        min={c.min} max={c.max} step={c.step} digits={c.digits} unit={c.unit} hint={c.hint}
+        onInput={value => set(c.key, value)} onChange={value => set(c.key, value)} />)}
+      <ToolstripMenuRule />
+    </>}
     <ToolstripMenuItem multiple label="Surface" title={SURFACE_ONLY_HINT} active={settings.surfaceOnly}
       testId="scene-detail-surface" onClick={() => set("detailSurface", settings.surfaceOnly ? "off" : "on")} />
     {settings.surfaceOnly && <RangeField label="Surface distance" value={settings.surfaceDistance} min={0} max={3} step={1} digits={0} unit="tiles"
@@ -131,7 +141,7 @@ export function UniformDetailRow() {
       title="Strain and Spin also judge liquid tiles with no surface in them. Off: surface tiles only."
       active={settings.bulk} testId="scene-detail-bulk" onClick={() => set("detailBulk", settings.bulk ? "off" : "on")} />}
     <ToolstripMenuRule />
-    {SHAPING.map(control => <div key={control.key} role="none" className="toolstrip-menu-option" title={control.hint}>
+    {SHAPING.filter(c => !adaptive || c.key !== "detailBudgetPercent").map(control => <div key={control.key} role="none" className="toolstrip-menu-option" title={control.hint}>
       <span>{control.label}</span>
       {dial(control.key, control.unit, `Detail ${control.label.toLowerCase()}`, control.hint)}
     </div>)}
@@ -145,6 +155,9 @@ export function UniformDetailRow() {
       <span className="toolstrip-gutter" aria-hidden />
       <Choice<UniformDetailPolicyMode> ariaLabel="Simulation detail" value={settings.policy} options={POLICIES}
         onChange={value => set("detailPolicy", value)} />
+      {narrowBand && <ToggleButton pressed={adaptive} disabled={!dynamic} ariaLabel="Adaptive surface" testId="scene-adaptive-surface"
+        hint="Use the existing detail criteria to retire calm particles and fine tiles. Dynamic mode only. Changing this restarts the simulation."
+        onChange={on => set("adaptiveSurface", on ? "on" : "off")}>Adaptive</ToggleButton>}
       {dynamic && menu}
       {dynamic && <ToggleButton pressed={scores} ariaLabel="Show detail importance scores" testId="scene-detail-scores"
         hint="Draw every criterion's score per tile on the slice (the Detail importance layer): 1 is where it starts asking for h. Criteria that are off are scored too."
@@ -170,6 +183,8 @@ export function UniformCoarseControl() {
   const reset = (key: string) => simulation.resetMethodParam(method.methodId, key, session.id);
   const overrides = method.overrides[method.methodId] ?? {};
   const narrowBand = method.methodId === "uniform-narrow-band-flip";
+  const adaptive = narrowBand && values.adaptiveSurface === "on";
+  const activityValues = narrowBandActivityValues(values);
   const coarseParticles = values.coarseParticleMode === "on";
   const experiment = narrowBand && <SwitchField label="Experimental all-4h FLIP" checked={coarseParticles}
     hint="Allow surface particles on 4h tiles as well as h tiles. Keeps the selected refinement policy; Requested with no Fine regions gives an all-4h layout. Restarts the simulation. Both modes couple particle geometry into the simulation."
@@ -184,12 +199,21 @@ export function UniformCoarseControl() {
   const dynamic = settings.policy === "dynamic";
   const tiles = (fine ?? 0) + (coarse ?? 0);
   return <FieldList testId="uniform-resolution-control">
+    {narrowBand && <SwitchField label="Adaptive surface" checked={adaptive}
+      hint="Use the existing detail criteria to concentrate particles and fine tiles on active surfaces. Calm areas return to the 4h level set. Dynamic mode only; changing this restarts the simulation."
+      onChange={on => set("adaptiveSurface", on ? "on" : "off")} />}
     {experiment}
-    {narrowBand && !coarseParticles && <FieldNote>Particles track the surface inside h regions and feed pressure geometry. Dynamic refinement retains their swept coverage; explicit Requested regions still control where FLIP is enabled.</FieldNote>}
+    {narrowBand && !coarseParticles && <FieldNote>{adaptive
+      ? "Automatic candidates use the existing criterion scores. The adaptive budget keeps the highest scores; cooling particles retain support until they retire. Full and Requested use a fixed particle band."
+      : "Particles retain a fixed surface band. Dynamic refinement follows their swept coverage; Full and Requested keep their selected grid layout."}</FieldNote>}
     <ChoiceField<UniformDetailPolicyMode> label="Simulation detail" value={settings.policy} options={POLICIES}
       hint="Where the solver runs h cells on its 4h base. Changes apply at the next frame and keep the running simulation."
       onChange={value => set("detailPolicy", value)} />
     {dynamic && <>
+      {adaptive && NARROW_BAND_ACTIVITY_CONTROLS.map(c => <RangeField key={c.key} label={c.label} value={activityValues[c.key]}
+        min={c.min} max={c.max} step={c.step} digits={c.digits} unit={c.unit} editable defaultValue={c.default}
+        modified={overrides[c.key] !== undefined} onReset={() => reset(c.key)} hint={c.hint}
+        onInput={value => set(c.key, value)} onChange={value => set(c.key, value)} />)}
       <SwitchField label="Surface" checked={settings.surfaceOnly} hint={SURFACE_ONLY_HINT}
         onChange={on => set("detailSurface", on ? "on" : "off")} />
       <RangeField label="Surface distance" value={settings.surfaceDistance} min={0} max={3} step={1} digits={0} unit="tiles"
@@ -213,7 +237,7 @@ export function UniformCoarseControl() {
         </Fragment>; })}
       <SwitchField label="Bulk liquid" checked={settings.bulk} onChange={on => set("detailBulk", on ? "on" : "off")}
         hint="Deformation and rotation also judge liquid tiles with no surface in them. Off: surface tiles only." />
-      {SHAPING.map(control => { const [min, max, step, digits] = UNIFORM_DETAIL_RANGES[control.key];
+      {SHAPING.filter(c => !adaptive || c.key !== "detailBudgetPercent").map(control => { const [min, max, step, digits] = UNIFORM_DETAIL_RANGES[control.key];
         return <RangeField key={control.key} label={control.label} value={thresholdOf(values, control.key)} min={min} max={max} step={step} digits={digits}
           unit={control.unit || undefined} defaultValue={UNIFORM_DETAIL_CONTROL_DEFAULTS[control.key]}
           modified={overrides[control.key] !== undefined} onReset={() => reset(control.key)}
@@ -243,7 +267,8 @@ export function UniformCoarseControl() {
         { label: "Requests", value: `${detail.reasons.region.toLocaleString()} region · ${detail.reasons.full.toLocaleString()} full · ${detail.reasons.focus.toLocaleString()} focus · ${detail.reasons.activity.toLocaleString()} activity tiles` },
         { label: "Support overhead", value: `${detail.supportTiles.toLocaleString()} tiles (${percent(detail.supportTiles, detail.admittedTiles + detail.supportTiles)})`,
           hint: "Tiles around admitted h tiles that a patch store must also hold." },
-        { label: "Automatic budget", value: `${detail.automaticCostTiles.toLocaleString()} / ${detail.budgetTiles.toLocaleString()} tiles${detail.budgetClippedTiles ? ` · ${detail.budgetClippedTiles.toLocaleString()} clipped` : ""}` },
+        ...(adaptive ? [{ label: "Adaptive budget", value: `${activityValues.adaptiveBudgetPercent}% of requesting tiles`, hint: "Automatic candidates only; cooling support, sources and required contact may add tiles." }]
+          : [{ label: "Domain budget", value: `${detail.automaticCostTiles.toLocaleString()} / ${detail.budgetTiles.toLocaleString()} tiles${detail.budgetClippedTiles ? ` · ${detail.budgetClippedTiles.toLocaleString()} clipped` : ""}` }]),
         { label: "Patches", value: `${detail.residentPatches.toLocaleString()} × ${detail.patchCells}³ · ${percent(detail.wastedCells, detail.allocatedCells)} unused`,
           hint: "What a 4h-first patch store would allocate for this plan; this build still holds the full h lattice." },
         ...(detail.deferredTiles ? [{ label: "Deferred", value: `${detail.deferredTiles.toLocaleString()} tiles over capacity` }] : []),

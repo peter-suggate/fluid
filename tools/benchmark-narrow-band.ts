@@ -1,6 +1,9 @@
 /** Focused Figure 9 benchmark: browser GPU must be off. Default dt is 17ms.
  * node --import tsx tools/benchmark-narrow-band.ts baseline
  * Add --uniform for Uniform Geometric with the same refinement criteria.
+ * --adaptive enables activity-driven particles with shape/thin/contact protection.
+ * --adaptive-budget=50 admits half of requesting tiles; 100 admits all.
+ * --adaptive-fade=0.5 sets particle retirement time in seconds.
  * Add --steps=180 for the later splash phase.
  * --fine-padding=0|1|2 tests grid padding with the fixed 4h particle band.
  * --dt=0.05 tests larger global steps without changing trajectory subdivision.
@@ -18,7 +21,7 @@ import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
 import { sceneDocument } from '../lib/core/scene-definition';
 import { getSceneDefinition } from '../lib/core/scenes';
 import { uniformVolumeMethod } from '../lib/methods/uniform/uniform-volume-method';
-import { uniformNarrowBandMethod } from '../lib/methods/uniform/uniform-narrow-band-method';
+import { uniformNarrowBandMethod, narrowBandFixedDetail, narrowBandAdaptiveDetail } from '../lib/methods/uniform/uniform-narrow-band-method';
 import type { WebGPUUniformReferenceSolver } from '../lib/methods/uniform/webgpu-uniform-reference';
 const method=process.argv.includes("--uniform")?uniformVolumeMethod:uniformNarrowBandMethod;
 const coarseParticleMode=process.argv.includes("--coarse-particles")?"on":"off";
@@ -28,15 +31,21 @@ const fineGridPadding=Number(process.argv.find(a=>a.startsWith("--fine-padding="
 const dt=Number(process.argv.find(a=>a.startsWith("--dt="))?.split("=")[1]??0.017);
 assert.ok(fineGridPadding>=0&&fineGridPadding<=4&&dt>0&&dt<=0.1);
 const sceneId=process.argv.find(a=>a.startsWith("--scene="))?.split("=")[1]??"cm12-figure-9";
+const adaptiveBudgetPercent=Number(process.argv.find(a=>a.startsWith("--adaptive-budget="))?.split("=")[1]??50);
+const adaptiveFadeSeconds=Number(process.argv.find(a=>a.startsWith("--adaptive-fade="))?.split("=")[1]??0.5);
+assert.ok(Number.isInteger(adaptiveBudgetPercent)&&adaptiveBudgetPercent>=0&&adaptiveBudgetPercent<=100);
+assert.ok(Number.isFinite(adaptiveFadeSeconds)&&adaptiveFadeSeconds>=0.05&&adaptiveFadeSeconds<=2);
 const statsEvery=Number(process.argv.find(a=>a.startsWith("--stats-every="))?.split("=")[1]??0);
 assert.ok(Number.isInteger(statsEvery)&&statsEvery>=0);
 const name=process.argv[2]??'current';
 assert.match(name,/^[a-z0-9-]+$/);
 const hash=createHash('sha256');
-for(const file of ['uniform-narrow-band-flip.ts','uniform-narrow-band-advection.wgsl.ts','uniform-narrow-band-membership.wgsl.ts','uniform-narrow-band-redistance.wgsl.ts','uniform-narrow-band-order.ts','uniform-narrow-band-surface.wgsl.ts','uniform-mixed-surface-volume.ts','uniform-narrow-band-method.ts','webgpu-uniform-reference.ts','uniform-mixed-frame.ts','uniform-mixed-frame-plan.ts','uniform-mixed-remap.ts','uniform-mixed-surface.ts','uniform-mixed-dynamic.ts','uniform-mixed-pressure-authority.ts'])hash.update(readFileSync(`lib/methods/uniform/${file}`));
+for(const file of ['uniform-narrow-band-flip.ts','uniform-narrow-band-activity.wgsl.ts','uniform-narrow-band-advection.wgsl.ts','uniform-narrow-band-membership.wgsl.ts','uniform-narrow-band-redistance.wgsl.ts','uniform-narrow-band-order.ts','uniform-narrow-band-surface.wgsl.ts','uniform-mixed-surface-volume.ts','uniform-narrow-band-method.ts','webgpu-uniform-reference.ts','uniform-mixed-frame.ts','uniform-mixed-frame-plan.ts','uniform-mixed-remap.ts','uniform-mixed-surface.ts','uniform-mixed-dynamic.ts','uniform-mixed-pressure-authority.ts'])hash.update(readFileSync(`lib/methods/uniform/${file}`));
+for(const file of ['uniform-narrow-band-budget.wgsl.ts','uniform-narrow-band-controls.ts'])hash.update(readFileSync(`lib/methods/uniform/${file}`));
 const sourceHash=hash.digest('hex');
 const {sharpeningSweeps,sharpeningDistance,...sharedDefaults}=uniformNarrowBandMethod.appDefaults!;
-const values={...(method===uniformVolumeMethod?sharedDefaults:uniformNarrowBandMethod.appDefaults),timeStep:'scene',fineGridPadding,coarseParticleMode,...(process.argv.includes("--full")?{detailPolicy:"full"}:{}),...(coarseParticleMode==='on'?{detailPolicy:'requested',detailSolidContact:'off'}:{})};
+const activityValues:import("../lib/core/method-contract").MethodParamValues=process.argv.includes("--adaptive")?{...narrowBandAdaptiveDetail,adaptiveBudgetPercent,adaptiveFadeSeconds}:{...narrowBandFixedDetail,adaptiveSurface:"off"};
+const values={...(method===uniformVolumeMethod?sharedDefaults:uniformNarrowBandMethod.appDefaults),timeStep:'scene',fineGridPadding,coarseParticleMode,...activityValues,...(process.argv.includes("--full")?{detailPolicy:"full"}:{}),...(coarseParticleMode==='on'?{detailPolicy:'requested',detailSolidContact:'off'}:{})};
 const scene=structuredClone(sceneDocument(getSceneDefinition(sceneId)));
 scene.numerics={...scene.numerics,fixedDt_s:dt,maxDt_s:dt};
 if(process.argv.includes("--no-gravity"))scene.fluid.gravity_m_s2={x:0,y:0,z:0};
@@ -72,8 +81,20 @@ try {
   if(frame%10===0||measured)console.log(JSON.stringify({...row,passes:passes?.filter(p=>p.label.includes('Narrow-band'))}));
  }
  const final=await solver.readStats();assert.deepEqual(errors,[]);
+ let activityCensus:Record<string,number>|undefined;
+ if(process.argv.includes("--activity-census")){
+  const info=solver.info,tiles=info.nx*info.ny*info.nz/64;
+  const source=(solver as unknown as {mixedDynamic:{importance:{buffer:GPUBuffer;offset:number}}}).mixedDynamic.importance;
+  const read=device.createBuffer({size:tiles*8,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(source.buffer,source.offset,read,0,tiles*8);device.queue.submit([encoder.finish()]);
+  await read.mapAsync(GPUMapMode.READ);const words=new Uint32Array(read.getMappedRange());
+  const names=["shape","thin","strain","rotation","impact","approach"];
+  activityCensus=Object.fromEntries([...names,"held","required","crossing"].map(n=>[n,0]));
+  for(let t=0;t<tiles;t++){const f=words[2*t+1]!;for(let k=0;k<6;k++)if(f&(1<<(16+k)))activityCensus[names[k]!]!++;for(const [key,bit] of [["held",26],["required",25],["crossing",28]] as const)if(f&(1<<bit))activityCensus[key]!++;}
+  read.unmap();read.destroy();console.log(JSON.stringify({activityCensus}));
+ }
  mkdirSync('docs/verification',{recursive:true});
- writeFileSync(`docs/verification/narrow-band-${name}.json`,JSON.stringify({date:new Date().toISOString(),arguments:process.argv.slice(2),method:method.id,values,coarseParticleMode,sourceHash,adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},scene,rows,final,errors},null,2)+'\n');
+ writeFileSync(`docs/verification/narrow-band-${name}.json`,JSON.stringify({date:new Date().toISOString(),arguments:process.argv.slice(2),method:method.id,values,coarseParticleMode,sourceHash,adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},scene,rows,final,activityCensus,errors},null,2)+'\n');
 }catch(error){
  mkdirSync('docs/verification',{recursive:true});
  writeFileSync(`docs/verification/narrow-band-${name}-failed.json`,JSON.stringify({date:new Date().toISOString(),arguments:process.argv.slice(2),method:method.id,values,sourceHash,scene,rows,errors,error:String(error)},null,2)+'\n');

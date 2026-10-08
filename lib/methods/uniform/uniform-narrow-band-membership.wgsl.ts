@@ -37,6 +37,10 @@ fn nbBandCrossing(c:vec3u)->bool{
 // be stored h vertices, so it is listed with the h tiles and decided there.
 @compute @workgroup_size(64) fn depthTiles(@builtin(global_invocation_id) gid:vec3u){
  for(var t=gid.x;t<NB_BAND_TILES;t+=65536u){
+  // Pure 4h Eulerian surfaces neither reconstruct particles nor redistance
+  // h vertices. Search only where fine geometry or live/activating samples
+  // need it; the existing reach dilation supplies the inner overlap collar.
+  if(nbAdaptive()&&umTileMinimumWidth(t)==4u&&atomicLoad(&bins[NB_SURFACE_TILES+t])==0u&&bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+t]))<=0.0){continue;}
   var candidate=true;
   if(umTileMinimumWidth(t)==4u){
    let origin=4u*umTileCoord(t);var low=3.0e38;var high=-3.0e38;
