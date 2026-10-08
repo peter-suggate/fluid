@@ -32,8 +32,11 @@ export class UniformNarrowBandFlip {
  readonly particles:readonly [GPUBuffer,GPUBuffer];
  readonly state:GPUBuffer;
  private readonly baseAllocatedBytes:number;
- get allocatedBytes():number{return this.baseAllocatedBytes+this.order.allocatedBytes;}
+ get allocatedBytes():number{return this.baseAllocatedBytes+this.order.allocatedBytes+this.moveDispatch.size;}
  private readonly order:UniformNarrowBandOrder;
+ private readonly moveDispatch:GPUBuffer;
+ private moveDispatchPipeline!:GPUComputePipeline;
+ private moveDispatchGroup!:GPUBindGroup;
  readonly surfaceSource:{contourVertexPhi:true;vertexPhi:GPUTexture;openFraction:GPUTexture;cellSize_m:readonly [number,number,number]};
  get coarseOnly():boolean{return this.ownership.capacity.fineTiles===0;}
  count=0;
@@ -76,6 +79,7 @@ export class UniformNarrowBandFlip {
   this.capacity=Math.min(cells*8,Math.max(1_048_576,cells>>1),Math.floor(device.limits.maxStorageBufferBindingSize/48));
   const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.particles=[buffer("particles A",this.capacity*48),buffer("particles B",this.capacity*48)];
+  this.moveDispatch=device.createBuffer({label:"Narrow-band FLIP live particle dispatch",size:12,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT});
   this.state=buffer("receipt",48);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+ownership.capacity.tiles*36+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*32);this.params=buffer("parameters",32,true);
   this.order=new UniformNarrowBandOrder(device,ownership.capacity.lattice.dimensions,this.particles,this.bins,this.next,this.state);
   this.refinementParams=buffer("refinement prediction",32,true);
@@ -123,6 +127,18 @@ export class UniformNarrowBandFlip {
  }
  async initialize():Promise<void>{
   await Promise.all([this.cache.initialize(),this.order.initialize()]);
+  // One particle per lane: the old fixed 65,536-lane grid made each lane
+  // trace many unrelated particles in series. The GPU receipt is current
+  // even during bootstrap or source growth; no CPU count/readback is used.
+  const moveModule=this.device.createShaderModule({label:"Narrow-band FLIP live work",code:/* wgsl */`
+@group(0) @binding(0) var<storage,read> state:array<u32>;
+@group(0) @binding(1) var<storage,read_write> work:array<u32>;
+@compute @workgroup_size(1) fn main(){
+ let groups=(min(state[0],${this.capacity}u)+63u)/64u;
+ work[0]=min(groups,65535u);work[1]=(groups+65534u)/65535u;work[2]=1u;
+}`});
+  this.moveDispatchPipeline=await this.device.createComputePipelineAsync({layout:"auto",compute:{module:moveModule,entryPoint:"main"}});
+  this.moveDispatchGroup=this.device.createBindGroup({layout:this.moveDispatchPipeline.getBindGroupLayout(0),entries:[this.state,this.moveDispatch].map((buffer,binding)=>({binding,resource:{buffer}}))});
   this.refinementLayout=this.device.createBindGroupLayout({entries:[
    {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
    {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -277,10 +293,10 @@ fn markSurfaceTiles(position:vec3f){
 }
 ${narrowBandTraceWGSL("sampleVelocity")}
 @compute @workgroup_size(64) fn advectParticles(@builtin(global_invocation_id) gid:vec3u){
- for(var i=gid.x;i<min(atomicLoad(&state[0]),arrayLength(&source));i+=65536u){
+ let i=gid.x+65535u*64u*gid.y;if(i>=min(atomicLoad(&state[0]),arrayLength(&source))){return;}
   var p=source[i];var q=p.position.xyz;
   // Solid collision, rather than grid ownership, limits particle motion.
-  if(umCellOpen(vec3i(q))<0.5){source[i].position.x=-1.0;continue;}
+  if(umCellOpen(vec3i(q))<0.5){source[i].position.x=-1.0;return;}
   let ballistic=p.before.w==1.0||!gridSupported(q);p.before.w=max(p.before.w,select(0.0,1.0,ballistic));
   // Uniform stores velocity half a step ahead of position. Ballistic drift
   // uses that midpoint velocity; update supplies the next full gravity kick.
@@ -288,7 +304,7 @@ ${narrowBandTraceWGSL("sampleVelocity")}
   if(!ballistic){speed=sampleVelocity(q)/params.hDt.xyz;}
   let steps=nbTraceSteps(speed,params.hDt.w);
   // Trajectory refinement leaves the global pressure timestep unchanged.
-  if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&state[3],1u);source[i].position.x=-1.0;continue;}
+  if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&state[3],1u);source[i].position.x=-1.0;return;}
   let base=params.hDt.w/f32(steps);var units=1u;
   for(var s=0u;s<steps;s+=units){
    var end=q+base*p.velocity.xyz/params.hDt.xyz;
@@ -309,14 +325,13 @@ ${narrowBandTraceWGSL("sampleVelocity")}
    for(var axis=0u;axis<3u;axis++){if(endpoint[axis]!=end[axis]){p.velocity[axis]=0.0;}}
    if(hit){break;}
   }
-  if(any(q<vec3f(0))||any(q>=vec3f(UM_D))){source[i].position.x=-1.0;continue;}
+  if(any(q<vec3f(0))||any(q>=vec3f(UM_D))){source[i].position.x=-1.0;return;}
   // The sample moves where it is stored: the spatial order that follows
   // reads every slot, drops the ones marked here (a negative x) and takes
   // each cell's count from the bins. Nothing gathers before it.
   // A trajectory can cross from h into a coarse owner during this step.
   p.position=vec4f(q,p.position.w);source[i]=p;
   atomicAdd(&bins[nbOrder(vec3u(q))],1u);markSurfaceTiles(q);
- }
 }
 // End-of-step sampling uses the reconstructed surface and projected velocity.
 // Protect the outer h; retire only the deep interior and crowded overlap.
@@ -529,6 +544,7 @@ ${narrowBandSurfaceWGSL}
   else {
    pass.setPipeline(uniformDetailPick(pipeline));
    if(entry==="transferCoarse")pass.dispatchWorkgroups(256,Math.ceil(this.ownership.capacity.tiles/256),3);
+   else if(entry==="advectParticles")pass.dispatchWorkgroupsIndirect(this.moveDispatch,0);
    else pass.dispatchWorkgroups(1024);
   }
   pass.end();
@@ -543,6 +559,7 @@ ${narrowBandSurfaceWGSL}
   // marking the tiles they reach; the order packs them into the other buffer.
   encoder.clearBuffer(this.state,4,8);encoder.clearBuffer(this.bins,0,cells*8);
   encoder.clearBuffer(this.bins,cells*8+this.ownership.capacity.tiles*4,this.ownership.capacity.tiles*4);
+  const work=encoder.beginComputePass({label:"Narrow-band FLIP live particle work"});work.setPipeline(this.moveDispatchPipeline);work.setBindGroup(0,this.moveDispatchGroup);work.dispatchWorkgroups(1);work.end();
   this.dispatch(encoder,"advectParticles");
   this.order.encode(encoder,1-this.parity);
   this.dispatch(encoder,"commitCount");
@@ -609,5 +626,5 @@ ${narrowBandSurfaceWGSL}
   // reseeding is deferred; never destroy a surface to make room for it.
   if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?`trajectory exceeded ${NARROW_BAND_TRACE_LIMIT} cells`:"nonfinite velocity"}`);
  }
- destroy():void{this.order.destroy();this.surfaceSource.vertexPhi.destroy();this.surfaceSource.openFraction.destroy();this.coarseVelocity.destroy();this.stageTaps?.unit.destroy();this.refinementParams.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params])b.destroy();}
+ destroy():void{this.order.destroy();this.moveDispatch.destroy();this.surfaceSource.vertexPhi.destroy();this.surfaceSource.openFraction.destroy();this.coarseVelocity.destroy();this.stageTaps?.unit.destroy();this.refinementParams.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params])b.destroy();}
 }
