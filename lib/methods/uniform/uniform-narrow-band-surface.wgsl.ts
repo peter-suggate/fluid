@@ -125,26 +125,28 @@ fn nbCoupleVertex(owner:UMOwner,regular:bool,k:u32,lane:u32){
  * runs up between them and then each take every eighth sample of every run:
  * equal shares of consecutive memory, whatever each cell holds. Eight lanes a
  * cell also keep a workgroup on one x row of cells, which the band holds or
- * misses together. */
+ * misses together. The launch covers the h owners alone; a 4h owner's faces
+ * are transferOwners' (uniform-narrow-band-flip.ts). */
 export const narrowBandFineTransferWGSL=/* wgsl */`
 var<workgroup> nbMomentum:array<vec3f,64>;
 var<workgroup> nbMass:array<vec3f,64>;
-var<workgroup> nbBlend:array<vec3f,8>;
+var<workgroup> nbBlend:array<f32,24>;
 var<workgroup> nbRuns:array<vec2u,256>;
 @compute @workgroup_size(64) fn transfer(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  let owner=umAllOwner(vec3u(gid.x/8u,0,0));let origin=umOrigin(owner);
  let team=lane/8u;let member=lane%8u;let centre=vec3f(origin)+0.5;
- if(member==0u){
-  var blend=vec3f(0);
-  if(owner.width==1u){for(var axis=0u;axis<3u;axis++){
-   if(origin[axis]+1u>=UM_D[axis]){continue;}
-   var q=centre;q[axis]+=0.5;let depth=particleDepth(q);
-   if(depth<=1.5){blend[axis]=select(0.0,1.0,depth>=-2.0);}
-  }}
-  nbBlend[team]=blend;
+ // A lane for each face's depth under the surface.
+ if(member<3u){
+  var near=0.0;
+  if(owner.width==1u&&origin[member]+1u<UM_D[member]){
+   var q=centre;q[member]+=0.5;let depth=particleDepth(q);
+   if(depth<=1.5&&depth>=-2.0){near=1.0;}
+  }
+  nbBlend[3u*team+member]=near;
  }
  workgroupBarrier();
- let gather=owner.width==1u&&any(nbBlend[team]>vec3f(0));
+ let blend=vec3f(nbBlend[3u*team],nbBlend[3u*team+1u],nbBlend[3u*team+2u]);
+ let gather=any(blend>vec3f(0));
  if(gather){
   let low=vec3i(origin)-1;
   // The row past both far planes weighs nothing; one in a far plane weighs
@@ -177,12 +179,10 @@ var<workgroup> nbRuns:array<vec2u,256>;
  for(var stride=4u;stride>0u;stride/=2u){
   if(member<stride){nbMomentum[lane]+=nbMomentum[lane+stride];nbMass[lane]+=nbMass[lane+stride];}workgroupBarrier();
  }
- if(member==0u&&owner.width!=0u){
-  if(owner.width==1u){
-   let original=textureLoad(velocity,vec3i(origin),0);let mass=nbMass[lane];
-   let value=mix(original.xyz,nbMomentum[lane]/max(mass,vec3f(1e-30)),select(vec3f(0),nbBlend[team],mass>=vec3f(1e-5)));
-   textureStore(output,vec3i(origin),vec4f(value,original.w));
-  }else{transferFallback(owner);}
+ if(member==0u&&owner.width==1u){
+  let original=textureLoad(velocity,vec3i(origin),0);let mass=nbMass[lane];
+  let value=mix(original.xyz,nbMomentum[lane]/max(mass,vec3f(1e-30)),select(vec3f(0),blend,mass>=vec3f(1e-5)));
+  textureStore(output,vec3i(origin),vec4f(value,original.w));
  }
 }
 `;

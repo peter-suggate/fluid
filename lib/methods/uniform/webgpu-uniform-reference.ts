@@ -3651,7 +3651,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         encoder.copyBufferToBuffer(this.reductions,0,this.statsReadback,0,24);
         encoder.copyBufferToBuffer(this.mixedFrame.ownership.support,this.mixedFrame.ownership.capacity.tiles*16,this.statsReadback,24,16);
         const budget=this.mixedFrame.narrowBandVolumeBudget;
-        if(budget)encoder.copyBufferToBuffer(budget,0,this.statsReadback,40,32);
+        if(budget){encoder.copyBufferToBuffer(budget,0,this.statsReadback,40,32);this.mixedFrame.requestNarrowBandVolumeProbe();}
         this.device.queue.submit([encoder.finish()]);
         await this.statsReadback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(this.statsReadback.getMappedRange(),0,budget?18:10).slice();
         if(budget){const b=new Float32Array(words.buffer,40,8);if(b[1]!>0)Object.assign(this.executionInfo,{

@@ -1,4 +1,4 @@
-import { narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
+import { NARROW_BAND_TRACE_LIMIT, narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
 import { uniformPreparedSurfaceSamplingWGSL } from "./uniform-prepared-surface.wgsl";
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
@@ -163,11 +163,14 @@ ${this.hanging?"@group(1) @binding(11) var unitVelocity:texture_3d<f32>;":""}
 ${velocitySampling}
 ${this.narrowBand?narrowBandTraceWGSL("umSampleVelocity"):""}
 fn umSurfaceTrace(p:vec3f)->vec3f{
- ${this.narrowBand?`let speed=abs(umSampleVelocity(p)/params.hDt.xyz);
- let steps=max(1u,u32(ceil(params.hDt.w*max(speed.x,max(speed.y,speed.z))/0.5)));
- if(steps>256u){atomicStore(&nbState[3],1u);return p;}
- var q=p;let dt=-params.hDt.w/f32(steps);
- for(var i=0u;i<steps;i++){q=clamp(nbTraceStep(q,dt),vec3f(0),vec3f(UM_D));}
+ ${this.narrowBand?`var k1=umSampleVelocity(p)/params.hDt.xyz;
+ let steps=nbTraceSteps(k1,params.hDt.w);
+ if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&nbState[3],1u);return p;}
+ var q=p;let base=-params.hDt.w/f32(steps);var units=1u;
+ for(var i=0u;i<steps;i+=units){
+  if(i>0u){k1=umSampleVelocity(q)/params.hDt.xyz;}let span=nbTraceSpan(q,base,k1,steps-i);
+  units=u32(span.w);q=clamp(span.xyz,vec3f(0),vec3f(UM_D));
+ }
  return q;`:`let h=params.hDt.xyz;let dt=params.hDt.w;
  let mid=clamp(p-0.5*dt*umSampleVelocity(p)/h,vec3f(0),vec3f(UM_D));
  return clamp(p-dt*umSampleVelocity(mid)/h,vec3f(0),vec3f(UM_D));`}

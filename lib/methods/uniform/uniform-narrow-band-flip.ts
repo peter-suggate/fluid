@@ -1,13 +1,13 @@
 import { narrowBandRedistanceWGSL } from "./uniform-narrow-band-redistance.wgsl";
 import { narrowBandMembershipWGSL } from "./uniform-narrow-band-membership.wgsl";
-import { narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
+import { NARROW_BAND_TRACE_LIMIT, narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
 import { UniformNarrowBandOrder } from "./uniform-narrow-band-order";
 import { NARROW_BAND_SURFACE_RADIUS, narrowBandSurfaceWGSL, narrowBandCoarseTransferWGSL, narrowBandFineTransferWGSL } from "./uniform-narrow-band-surface.wgsl";
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
 import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailGroup } from "./uniform-detail-fields";
 import { uniformMixedTopologyWGSL, uniformMixedCertifiedEntriesWGSL } from "./uniform-mixed-topology.wgsl";
-import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
+import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedSolidWGSL, uniformMixedSolidPipeline, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
@@ -76,7 +76,7 @@ export class UniformNarrowBandFlip {
   this.capacity=Math.min(cells*8,Math.max(1_048_576,cells>>1),Math.floor(device.limits.maxStorageBufferBindingSize/48));
   const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.particles=[buffer("particles A",this.capacity*48),buffer("particles B",this.capacity*48)];
-  this.state=buffer("receipt",48);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+ownership.capacity.tiles*32+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*32);this.params=buffer("parameters",32,true);
+  this.state=buffer("receipt",48);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+ownership.capacity.tiles*36+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*32);this.params=buffer("parameters",32,true);
   this.order=new UniformNarrowBandOrder(device,ownership.capacity.lattice.dimensions,this.particles,this.bins,this.next,this.state);
   this.refinementParams=buffer("refinement prediction",32,true);
   this.cache=new UniformMixedMomentumCache(device,ownership);
@@ -101,11 +101,13 @@ export class UniformNarrowBandFlip {
   // Its unit taps are filled first, against this stage's own 4h cache and
   // into this stage's own texture (viscosity still reads the frame's), so a
   // seam tap is one load there as it is in advection.
+  // The transfer writes the stored velocity: momentum was its last reader,
+  // and the pressure split rewrites every face of it after the forces.
   // One texture for the solver's life: a detail field is created before the
   // first layout, and the frame binds its stages again when capacity grows.
   const unit=this.stageTaps?.unit??f.hanging.createTaps("Narrow-band FLIP stage unit taps");
   this.stageTaps={builder:f.hanging,unit,group:f.hanging.bind({extended:f.velocityScratch,negative:f.negativeScratch,coarse:this.coarseVelocity},unit)};
-  for(const [name,velocity,negative,output] of [["bootstrap",f.velocityScratch,f.negativeScratch,f.departure],["advectParticles",f.velocityScratch,f.negativeScratch,f.departure],["seed",f.departure,f.negativeDeparture,f.velocityScratch],["transfer",f.departure,f.negativeDeparture,f.velocityScratch],["snapshot",f.velocityScratch,f.negativeScratch,f.departure],["surface",f.velocity,f.negative,f.departure],["redistance",f.velocity,f.negative,f.departure],["update",f.velocityScratch,f.negativeScratch,f.departure]] as const){
+  for(const [name,velocity,negative,output] of [["bootstrap",f.velocityScratch,f.negativeScratch,f.departure],["advectParticles",f.velocityScratch,f.negativeScratch,f.departure],["seed",f.departure,f.negativeDeparture,f.velocityScratch],["transfer",f.departure,f.negativeDeparture,f.velocity],["snapshot",f.velocityScratch,f.negativeScratch,f.departure],["surface",f.velocity,f.negative,f.departure],["redistance",f.velocity,f.negative,f.departure],["update",f.velocityScratch,f.negativeScratch,f.departure]] as const){
    this.cacheGroups[name]=this.cache.bind({extended:velocity,negative,coarseExtended:this.coarseVelocity});
    this.groups[name]=[0,1].map(parity=>uniformDetailGroup(this.device,{layout:this.resources,entries:[
     {binding:0,resource:{buffer:this.particles[parity]!}},{binding:1,resource:{buffer:this.particles[1-parity]!}},
@@ -284,15 +286,17 @@ ${narrowBandTraceWGSL("sampleVelocity")}
   // uses that midpoint velocity; update supplies the next full gravity kick.
   var speed=p.velocity.xyz/params.hDt.xyz;
   if(!ballistic){speed=sampleVelocity(q)/params.hDt.xyz;}
-  let bound=abs(speed);
-  let steps=max(1u,u32(ceil(params.hDt.w*max(bound.x,max(bound.y,bound.z))/0.5)));
+  let steps=nbTraceSteps(speed,params.hDt.w);
   // Trajectory refinement leaves the global pressure timestep unchanged.
-  if(steps>256u){atomicStore(&state[3],1u);source[i].position.x=-1.0;continue;}
-  let dt=params.hDt.w/f32(steps);
-  for(var s=0u;s<steps;s++){
-   var end=q+dt*p.velocity.xyz/params.hDt.xyz;
-   // The first subdivision starts where the speed was sampled.
-   if(!ballistic){if(s>0u){speed=sampleVelocity(q)/params.hDt.xyz;}end=nbTraceFrom(q,dt,speed);}
+  if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&state[3],1u);source[i].position.x=-1.0;continue;}
+  let base=params.hDt.w/f32(steps);var units=1u;
+  for(var s=0u;s<steps;s+=units){
+   var end=q+base*p.velocity.xyz/params.hDt.xyz;
+   if(ballistic){units=1u;}else{
+    // The first subdivision starts where the speed was sampled.
+    if(s>0u){speed=sampleVelocity(q)/params.hDt.xyz;}
+    let span=nbTraceSpan(q,base,speed,steps-s);end=span.xyz;units=u32(span.w);
+   }
    if(params.settings.y>0.5&&end.y>=f32(UM_D.y)){q=end;break;}
    let endpoint=clamp(end,vec3f(0.01),vec3f(UM_D)-0.01);
    let travel=endpoint-q;let walk=max(1u,u32(ceil(2.0*max(abs(travel.x),max(abs(travel.y),abs(travel.z))))));
@@ -377,20 +381,30 @@ fn seedCell(c:vec3u,initial:bool){
   let v=sampleVelocity(p);store(Particle(vec4f(p,1),vec4f(v,particleDepth(p)),vec4f(v,0)));
  }
 }
-@compute @workgroup_size(64) fn seed(@builtin(global_invocation_id) gid:vec3u){
- // Seed the geometric particle band, including its overlap on 4h owners.
- for(var i=gid.x;i<UM_D.x*UM_D.y*UM_D.z;i+=65536u){seedCell(nbCell(i),false);}
+// Seed the geometric particle band, including its overlap on 4h owners: one
+// workgroup for each tile of the band search's list, the only ones seedCell
+// passes.
+@compute @workgroup_size(64) fn seed(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=atomicLoad(&bins[NB_BAND_SEARCH+group.x]);
+ seedCell(4u*vec3u(tile%UM_T.x,(tile/UM_T.x)%UM_T.y,tile/(UM_T.x*UM_T.y))+vec3u(lane%4u,(lane/4u)%4u,lane/16u),false);
 }
 
 @compute @workgroup_size(64) fn seedInitial(@builtin(global_invocation_id) gid:vec3u){
  for(var i=gid.x;i<UM_D.x*UM_D.y*UM_D.z;i+=65536u){seedCell(nbCell(i),true);}
 }
 fn weight(x:f32)->f32{let a=abs(x);if(a<0.5){return 0.75-a*a;}let b=max(0.0,1.5-a);return 0.5*b*b;}
+// Also the receipt's census of the samples against the surface they made.
 @compute @workgroup_size(64) fn classify(@builtin(global_invocation_id) gid:vec3u){
+ var outside=0.0;var counts=vec3u(0);
+ if(gid.x==0u){atomicStore(&bins[NB_BAND+3u],0u);}
  for(var i=gid.x;i<min(atomicLoad(&state[1]),arrayLength(&particles));i+=65536u){
-  particles[i].before.w=select(1.0,0.0,gridSupported(particles[i].position.xyz));
+  let q=particles[i].position.xyz;let supported=gridSupported(q);let d=bandPhi(q);outside=max(outside,d);
+  counts+=vec3u(u32(d>0.5),u32(!supported),u32(particleDepth(q)<-4.0));
+  particles[i].before.w=select(1.0,0.0,supported);
   nbStoreMotion(i,vec4f(particles[i].velocity.xyz,particles[i].before.w));
  }
+ atomicMax(&state[5],bitcast<u32>(outside));
+ for(var k=0u;k<3u;k++){if(counts[k]!=0u){atomicAdd(&state[6u+k],counts[k]);}}
 }
 fn transferFace(face:UMFace)->f32{
  let original=umLoadMixedFace(face.anchor,face.axis);
@@ -411,10 +425,43 @@ fn transferFace(face:UMFace)->f32{
  if(total<1e-5){return original;}return mix(original,momentum/total,blend);
 }
 ${narrowBandFineTransferWGSL}
-// Negative walls are deliberately untouched: their boundary condition is
-// owned by Uniform. The generated traversal writes a dummy boundary array;
-// remove those writes below since the input boundary binding is read-only.
-${uniformMixedFaceDispatchWGSL("transferFallback","transferFace(face)",true,"value.w=textureLoad(velocity,ownedFace.anchor,0).w;").replace(/boundary\[umNegativeBoundaryIndex\(origin,axis\)\]=transferFace\(face\);/g,"").replace(/@compute @workgroup_size\(64\) fn transferFallback\(@builtin\(global_invocation_id\) gid:vec3u\)\{\n let owner=umAllOwner\(gid\);/,"fn transferFallback(owner:UMOwner){")}
+// The 4h owners, one a lane. An owner whose whole stencil is 4h has one
+// patch a face, and a face centred in a tile past the reach lies more than
+// two cells from the surface: it keeps its velocity without a gather. The
+// rest are listed for transferSeams. Negative walls are untouched: their
+// boundary condition is Uniform's.
+@compute @workgroup_size(64) fn transferOwners(@builtin(global_invocation_id) gid:vec3u){
+ let owner=umAllOwner(vec3u(umCounts.x*64u+gid.x,0,0));if(owner.width==0u){return;}
+ let origin=umOrigin(owner);var far=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
+ for(var axis=0u;axis<3u;axis++){
+  var c=origin+2u;c[axis]=min(origin[axis]+4u,UM_D[axis]-1u);far=far&&(nbBandReach(c)&1u)==0u;
+ }
+ if(!far){atomicStore(&bins[NB_BAND_SEAM+atomicAdd(&bins[NB_BAND+3u],1u)],owner.tile);return;}
+ for(var axis=0u;axis<3u;axis++){
+  var anchor=vec3i(origin);anchor[axis]+=3;let original=textureLoad(velocity,anchor,0);
+  var value=vec4f(0,0,0,original.w);value[axis]=original[axis];textureStore(output,anchor,value);
+ }
+}
+// A listed 4h owner a workgroup, a lane for each patch of each positive face:
+// one beside h cells has sixteen a face, each with its own gather.
+var<workgroup> nbSeam:array<vec2f,64>;
+@compute @workgroup_size(64) fn transferSeams(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=atomicLoad(&bins[NB_BAND_SEAM+group.x]);let owner=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
+ let part=lane/3u;let axis=lane%3u;var anchor=vec3i(0);var result=vec2f(0);
+ if(lane<48u){let face=umFace(owner,axis,1,part);if(face.width!=0u){anchor=face.anchor;result=vec2f(transferFace(face),1);}}
+ nbSeam[lane]=result;workgroupBarrier();
+ if(result.y==0.0){return;}
+ // One writer a texel: the lowest axis with a patch at this anchor.
+ let offset=anchor-vec3i(umOrigin(owner));var value=vec4f(0);var writer=true;
+ for(var other=0u;other<3u;other++){
+  if(other==axis){value[other]=result.x;continue;}
+  let face=umPositiveFaceAtAnchor(owner,other,anchor);if(face.width==0u){continue;}
+  if(other<axis){writer=false;}
+  let u=(other+1u)%3u;let v=(other+2u)%3u;let side=4u/face.width;
+  value[other]=nbSeam[3u*(u32(offset[u])/face.width+side*(u32(offset[v])/face.width))+other].x;
+ }
+ if(writer){value.w=textureLoad(velocity,anchor,0).w;textureStore(output,anchor,value);}
+}
 
 @compute @workgroup_size(64) fn snapshot(@builtin(global_invocation_id) gid:vec3u){
  for(var i=gid.x;i<min(atomicLoad(&state[1]),arrayLength(&particles));i+=65536u){
@@ -442,18 +489,13 @@ ${uniformMixedFaceDispatchWGSL("transferFallback","transferFace(face)",true,"val
   particles[i].before=vec4f(pic,select(0.0,1.0,mode==1.0));
  }
 }
+// A lane reduces its own samples and touches the shared receipt once.
 @compute @workgroup_size(64) fn diagnoseBefore(@builtin(global_invocation_id) gid:vec3u){
+ var outside=0.0;
  for(var i=gid.x;i<min(atomicLoad(&state[1]),arrayLength(&particles));i+=65536u){
-  atomicMax(&state[4],bitcast<u32>(max(0.0,bandPhi(particles[i].position.xyz))));
+  outside=max(outside,bandPhi(particles[i].position.xyz));
  }
-}
-@compute @workgroup_size(64) fn diagnoseAfter(@builtin(global_invocation_id) gid:vec3u){
- for(var i=gid.x;i<min(atomicLoad(&state[1]),arrayLength(&particles));i+=65536u){
-  let q=particles[i].position.xyz;let d=bandPhi(q);
-  atomicMax(&state[5],bitcast<u32>(max(0.0,d)));
-  if(d>0.5){atomicAdd(&state[6],1u);}if(!gridSupported(q)){atomicAdd(&state[7],1u);}
-  if(particleDepth(q)<-4.0){atomicAdd(&state[8],1u);}
- }
+ atomicMax(&state[4],bitcast<u32>(outside));
 }
 @compute @workgroup_size(64) fn commitCount(@builtin(global_invocation_id) gid:vec3u){if(gid.x==0u){let n=min(atomicLoad(&state[1]),arrayLength(&particles));atomicStore(&state[0],n);atomicStore(&state[1],n);}}
 ${narrowBandCoarseTransferWGSL}
@@ -463,13 +505,13 @@ ${narrowBandSurfaceWGSL}
   // prepared; snapshot, update and seed fill their own from the field they
   // sample (stageTaps). The other stages read their own fresh 4h cache and
   // resolve fine seam taps in place.
-  const modules=[false,true].map(unitTaps=>uniformDetailModule(this.device,{label:`Uniform narrow-band FLIP ${unitTaps?"extended":"stage"}`,code:uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(sourceCode(unitTaps),["depthSeeds"],"atomicLoad(&bins[NB_BAND])"),["depthNearest"],"atomicLoad(&bins[NB_BAND+1u])"),["buildDistance"],"atomicLoad(&bins[NB_BAND+2u])"),["transfer"],"8u*umLaunchJobCount()"),["couple"],"(umCounts.y+3u)/4u"),["coupleFine"],"umCounts.x"),["redistanceFine"],"umCounts.x")}));
+  const modules=[false,true].map(unitTaps=>uniformDetailModule(this.device,{label:`Uniform narrow-band FLIP ${unitTaps?"extended":"stage"}`,code:uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(sourceCode(unitTaps),["depthSeeds"],"atomicLoad(&bins[NB_BAND])"),["seed"],"atomicLoad(&bins[NB_BAND+1u])"),["depthNearest"],"atomicLoad(&bins[NB_BAND+1u])"),["buildDistance"],"atomicLoad(&bins[NB_BAND+2u])"),["transfer"],"8u*umCounts.x"),["transferOwners"],"(umCounts.y+63u)/64u"),["transferSeams"],"atomicLoad(&bins[NB_BAND+3u])"),["couple"],"(umCounts.y+3u)/4u"),["coupleFine"],"umCounts.x"),["redistanceFine"],"umCounts.x")}));
   for(const module of modules){
    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
-  await Promise.all([false,true].flatMap(coarse=>["advectParticles","seed","seedInitial","classify","transfer","transferCoarse","snapshot","update","surface","couple","coupleFine","commitCount","resample","diagnoseBefore","diagnoseAfter","buildDistance","depthTiles","depthSeeds","depthLists","depthNearest","redistanceFine","redistanceCoarse"].map(async entryPoint=>{
+  await Promise.all([false,true].flatMap(coarse=>["advectParticles","seed","seedInitial","classify","transfer","transferOwners","transferSeams","transferCoarse","snapshot","update","surface","couple","coupleFine","commitCount","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists","depthNearest","redistanceFine","redistanceCoarse"].map(async entryPoint=>{
    if((entryPoint==="transferCoarse"&&!coarse)||(entryPoint==="surface"&&!this.coarseParticles))return;
    const module=modules[["advectParticles","snapshot","update","seed"].includes(entryPoint)?1:0]!;
    const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint} ${coarse?"4h":"mixed"}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,nbCoarseOnly:+coarse,...s}}})).catch(e=>{throw new Error(`${entryPoint} ${coarse}: ${e.message} ${e.reason}`,{cause:e});});
@@ -479,7 +521,7 @@ ${narrowBandSurfaceWGSL}
  }
  private dispatch(encoder:GPUCommandEncoder,entry:string,groupName?:string):void{
   const pass=encoder.beginComputePass({label:`Narrow-band FLIP ${entry}`});
-  pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.groups[groupName??(entry==="resample"?"update":entry==="diagnoseBefore"||entry==="diagnoseAfter"||entry==="buildDistance"||entry.startsWith("depth")?"surface":entry==="transferCoarse"||entry==="classify"?"transfer":entry==="couple"||entry==="coupleFine"||entry==="commitCount"?"surface":entry)]![this.parity]!.group);
+  pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.groups[groupName??(entry==="resample"?"update":entry==="diagnoseBefore"||entry==="buildDistance"||entry.startsWith("depth")?"surface":entry.startsWith("transfer")||entry==="classify"?"transfer":entry==="couple"||entry==="coupleFine"||entry==="commitCount"?"surface":entry)]![this.parity]!.group);
   if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
   const selected=this.pipelines.get(`${entry}:${this.coarseOnly}`)!;
   const pipeline=this.solid?.select(selected)??selected;
@@ -534,7 +576,7 @@ ${narrowBandSurfaceWGSL}
  transfer(encoder:GPUCommandEncoder):void{
   // Each FLIP stage samples a different field. Rebuild the small 4h cache
   // after every grid write; keep Uniform's extended-field caches intact.
-  this.dispatch(encoder,"diagnoseAfter");this.cache.encode(encoder,this.cacheGroups.seed!);this.dispatch(encoder,"classify");this.dispatch(encoder,this.coarseOnly?"transferCoarse":"transfer");}
+  this.cache.encode(encoder,this.cacheGroups.seed!);this.dispatch(encoder,"classify");if(this.coarseOnly)this.dispatch(encoder,"transferCoarse");else{this.dispatch(encoder,"transfer");this.dispatch(encoder,"transferOwners");this.dispatch(encoder,"transferSeams");}}
  snapshot(encoder:GPUCommandEncoder):void{this.cache.encode(encoder,this.cacheGroups.snapshot!);this.encodeStageTaps(encoder);this.dispatch(encoder,"snapshot");}
  private encodeStageTaps(encoder:GPUCommandEncoder):void{if(this.stageTaps&&this.ownership.capacity.fineTiles>0)this.stageTaps.builder.encode(encoder,this.stageTaps.group);}
  /** The crossing set is unchanged by this redistance, so its search also
@@ -565,7 +607,7 @@ ${narrowBandSurfaceWGSL}
   this.diagnostics={beforeMaxOutside:distances[4]!,afterMaxOutside:distances[5]!,outsideSurface:words[6]!,unsupported:words[7]!,deepInterior:words[8]!};
   // Persistent samples own the budget first. At capacity only optional
   // reseeding is deferred; never destroy a surface to make room for it.
-  if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?"trajectory exceeded 256 substeps":"nonfinite velocity"}`);
+  if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?`trajectory exceeded ${NARROW_BAND_TRACE_LIMIT} cells`:"nonfinite velocity"}`);
  }
  destroy():void{this.order.destroy();this.surfaceSource.vertexPhi.destroy();this.surfaceSource.openFraction.destroy();this.coarseVelocity.destroy();this.stageTaps?.unit.destroy();this.refinementParams.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params])b.destroy();}
 }

@@ -316,6 +316,10 @@ export class UniformMixedFrame {
  private failed=false;
  readonly narrowBandFlip?:UniformNarrowBandFlip;
  get narrowBandVolumeBudget():GPUBuffer|undefined{return this.surfaceVolume?.budget;}
+ /** The budget's shift and measured volumes are those of the last step that
+  * measured them: the first, and the one after each request. */
+ private narrowBandVolumeProbe=true;
+ requestNarrowBandVolumeProbe():void{this.narrowBandVolumeProbe=true;}
  get allocatedBytes():number{return (this.narrowBandFlip?.allocatedBytes??0)+(this.surfaceVolume?.allocatedBytes??0)+this.coarsePhi.allocatedBytes+(this.displacement?.allocatedBytes??0)+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+(this.transport?.allocatedBytes??this.ownership.allocatedBytes)+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.levels.filter(l=>l.ownership!==this.ownership).reduce((n,l)=>n+l.ownership.allocatedBytes,0)+this.owned.reduce((n,r)=>n+("size" in r?r.size:r.width*r.height*r.depthOrArrayLayers*16),0);}
  /** layout: the generation the t=0 fields are in (all h; the first
   * updateLayout remaps from it). capacity: the h tiles the owner-indexed
@@ -458,12 +462,14 @@ export class UniformMixedFrame {
   const f=this.fields,stage:GPUBufferBinding={buffer:this.stageScratch};
   this.transport?.bindScratch(this.stageScratch);
   this.extensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negative,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:stage,params:this.params.extension});
-  if(this.narrowBandFlip)this.flipSnapshotExtensionGroups=this.extension.bind({physical:f.departure,phase:f.phase,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:stage,params:this.params.extension});
+  if(this.narrowBandFlip)this.flipSnapshotExtensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:stage,params:this.params.extension});
   const surfaceFields={narrowBandState:this.narrowBandFlip?.state,unitVelocity:this.hanging.unitVelocity,velocity:f.velocityScratch,coarseVelocity:this.coarseCache,volume:f.volume,negative:f.negativeScratch,departures:f.departure,params:this.params.surface,evidence:stage};
   this.surfaceGroups=[this.surface.bind({...surfaceFields,phi:f.phi,outputPhi:f.phiScratch}),this.surface.bind({...surfaceFields,phi:f.phiScratch,outputPhi:f.phi})];
   if(this.surfaceVolume)this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,this.narrowBandFlip?f.target:f.volume,f.phi,stage,f.velocityScratch);
   if(this.sharpen)this.sharpenGroups=[this.sharpen.bind(f.volume,f.volumeScratch,f.phi,f.target,f.centerPhi,stage,this.params.sharpen,this.reductions),this.sharpen.bind(f.volumeScratch,f.volume,f.phi,f.target,f.centerPhi,stage,this.params.sharpen,this.reductions)];
-  this.forceGroup=this.forces.bind({unitVelocity:this.hanging.unitVelocity,advected:f.departure,phi:f.phi,volume:f.volume,centerPhi:f.centerPhi,coarseVelocity:this.coarseCache,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.forces,curvature:f.phase,normals:stage});
+  // NB-FLIP's transfer leaves the advected field in the stored velocity (a
+  // kick forces that field where it stands), under momentum's walls.
+  this.forceGroup=this.forces.bind({unitVelocity:this.hanging.unitVelocity,advected:this.narrowBandFlip?f.velocity:f.departure,phi:f.phi,volume:f.volume,centerPhi:f.centerPhi,coarseVelocity:this.coarseCache,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.forces,curvature:f.phase,normals:stage});
  }
  private bindAuthority():UniformDetailGroup{
   const f=this.fields;
@@ -754,7 +760,9 @@ export class UniformMixedFrame {
    this.cache.encode(encoder,this.cacheGroup);if(this.ownership.capacity.fineTiles>0)this.hanging.encode(encoder,this.hangingGroup);
    trace?.phase(encoder,V.transportReach);
    if(this.narrowBandFlip)this.surfaceVolume!.beginStep(encoder,this.surfaceVolumeGroup,p.dt,p.addedVolumeCells??0,p.openTop);
-   this.narrowBandFlip?.move(encoder,p.dt,p.openTop,p.gravity);
+   // The samples' move is the frame's first long stage: it runs while the
+   // host encodes the surface stages behind it.
+   if(this.narrowBandFlip){this.narrowBandFlip.move(encoder,p.dt,p.openTop,p.gravity);flush();}
    this.surface.encode(encoder,"advect",this.surfaceGroups[0]);this.phiResolve.encode(encoder,this.phiResolveGroups.scratch);
    // Cell departures feed conservative volume transport only. NB-FLIP
    // measures volume from phi, and momentum writes this scratch field later.
@@ -780,7 +788,9 @@ export class UniformMixedFrame {
    // NB-FLIP measures its volume against the budget and does not move the
    // surface to meet it: a shift the samples do not share is undone by the
    // next step's union with them, so it would be paid again every step.
-   if(this.narrowBandFlip)this.surfaceVolume!.encode(encoder,this.surfaceVolumeGroup,1,false,false);
+   // That measurement is a diagnostic alone, so a step encodes it only for
+   // a reader that asked (requestNarrowBandVolumeProbe).
+   if(this.narrowBandFlip){if(this.narrowBandVolumeProbe){this.narrowBandVolumeProbe=false;this.surfaceVolume!.encode(encoder,this.surfaceVolumeGroup,1,false,false);}}
    else if(p.totalSurfaceVolume!==false&&(p.surfaceVolumeRounds??2)>0){this.surfaceVolume!.encode(encoder,this.surfaceVolumeGroup,p.surfaceVolumeRounds??2);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}
    // Nothing after this pass writes phi: the next advance starts from it,
    // and the renderer's 4h vertex base is published from it.
@@ -800,7 +810,6 @@ export class UniformMixedFrame {
     this.plan.encode(encoder,p.supportPolicy);
     this.authority.encode(encoder,this.authorityGroup,false);
     this.narrowBandFlip.transfer(encoder);
-    this.copyWhole(encoder,this.fields.velocityScratch,this.fields.departure);
     // G2P must compare the same extrapolation of valid fluid faces on both
     // sides of pressure. Raw air-face clearing is not a physical FLIP delta.
     this.extension.encode(encoder,this.flipSnapshotExtensionGroups!,p.extensionSweeps??2);

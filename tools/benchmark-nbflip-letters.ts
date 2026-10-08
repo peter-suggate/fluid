@@ -12,6 +12,8 @@
  *   coverage is the method's default (dynamic, surface tiles at h);
  *   --set=detailPolicy=full is the published grid everywhere. Repeatable.
  * --from=N averages the summary over frames N.. only (rows keep every frame).
+ * --plain takes no pass timestamps: wall is then the frame time the app pays,
+ *   without the per-pass timestamp writes and the encoder proxy that reads them.
  * Every compute pass is timestamped on every step. A pass is projection when
  * its label names the pressure solve; the per-label totals are in the output
  * so that split can be audited. Wall is advance plus completion of one step
@@ -37,7 +39,7 @@ import type { WebGPUUniformReferenceSolver } from '../lib/methods/uniform/webgpu
 import { readUniformFields } from '../tests/helpers/uniform-geometric';
 
 const option=(key:string)=>process.argv.find(a=>a.startsWith(`--${key}=`))?.slice(key.length+3);
-const steps=Number(option("steps")??NBFLIP_LETTERS_FRAMES),track=process.argv.includes("--track"),out=option("out")??'docs/verification';
+const steps=Number(option("steps")??NBFLIP_LETTERS_FRAMES),track=process.argv.includes("--track"),plain=process.argv.includes("--plain"),out=option("out")??'docs/verification';
 assert.ok(Number.isInteger(steps)&&steps>=1&&steps<=NBFLIP_LETTERS_FRAMES,`--steps must be an integer from 1 to ${NBFLIP_LETTERS_FRAMES}`);
 const name=process.argv.slice(2).find(a=>!a.startsWith("--"))??'current';
 assert.match(name,/^[a-z0-9-]+$/);
@@ -63,20 +65,20 @@ try {
  const dawn=await import(pathToFileURL(resolve('node_modules/webgpu/index.js')).href);Object.assign(globalThis,dawn.globals);
  const gpu=createProcessRetainedDawnGPU(dawn,['backend=metal']);const adapter=await gpu.requestAdapter();assert.ok(adapter);
  const raw=await adapter.requestDevice({requiredFeatures:['timestamp-query'],requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
- profile=new GPUPassProfile(raw);device=managedGPUDevice(profile.device,{requireWorkerRealm:false});
+ profile=new GPUPassProfile(raw);device=managedGPUDevice(plain?raw:profile.device,{requireWorkerRealm:false});
  device.addEventListener('uncapturederror',e=>{e.preventDefault();errors.push(e.error.message);console.error(e.error.message);});
  const built=performance.now();
  solver=await uniformNarrowBandMethod.createSolverAsync!(device,scene,definition.methodProfile!.quality,values,undefined,()=>{}) as WebGPUUniformReferenceSolver;
  const construction_ms=performance.now()-built;
  assert.deepEqual([solver.info.nx,solver.info.ny,solver.info.nz],[nx,ny,nz],"the published grid");
  for(let frame=1;frame<=steps;frame++){
-  const start=performance.now();profile.start();
+  const start=performance.now();if(!plain)profile.start();
   solver.advanceTo(frame*dt,[]);const encode_ms=performance.now()-start;await solver.awaitFrameCompletion();
   const wall_ms=performance.now()-start;
   assert.equal(solver.info.simulationPipelineError,undefined);
   assert.ok(Math.abs((solver.info.completedTime_s??0)-frame*dt)<1e-8,"complete exactly one requested clock step");
   assert.equal(solver.info.encodedSteps,frame,"one solver step a frame");
-  const passes=await profile.finish();let projection_ms=0,rest_ms=0,between_ms=0;const byLabel:Record<string,number>={},before:Record<string,number>={};
+  const passes=plain?[]:await profile.finish();let projection_ms=0,rest_ms=0,between_ms=0;const byLabel:Record<string,number>={},before:Record<string,number>={};
   for(const pass of passes){
    byLabel[pass.label]=(byLabel[pass.label]??0)+pass.ms;between_ms+=pass.idle_ms;
    if(pass.idle_ms>0.05)before[pass.label]=(before[pass.label]??0)+pass.idle_ms;
@@ -107,7 +109,7 @@ try {
   wallMedian_ms:of("wall_ms").sort((a,b)=>a-b)[(steps-from+1)>>1],wallMax_ms:Math.max(...of("wall_ms")),
   particles:mean(of("particles")),particlesMax:Math.max(...of("particles")),particleCapacity:rows.at(-1)!.particleCapacity,
   allocatedBytes:mean(of("allocatedBytes")),allocatedBytesMax:Math.max(...of("allocatedBytes")),
-  volumeDrift:final.volumeDrift,tracked:track};
+  volumeDrift:final.volumeDrift,tracked:track,plain};
  console.log(JSON.stringify(summary));
  write(`nbflip-letters-${name}.json`,{date:new Date().toISOString(),arguments:process.argv.slice(2),method:uniformNarrowBandMethod.id,values,
   adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},

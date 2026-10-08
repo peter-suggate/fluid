@@ -11,8 +11,12 @@ fn nbTrilinear(v:array<f32,8>,q:vec3f)->vec4f{
  return vec4f(dx,mix(x10-x00,x11-x01,q.z),y1-y0,mix(y0,y1,q.z));
 }
 fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
- let origin=vec3f(nbCell(cell));var v:array<f32,8>;
- for(var k=0u;k<8u;k++){v[k]=bandPhi(origin+vec3f(umCorner(k,2u)));}
+ let base=nbCell(cell);let origin=vec3f(base);var v:array<f32,8>;
+ // The cell's corners are lattice vertices: among h tiles each is one load.
+ let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+ for(var k=0u;k<8u;k++){
+  if(nbCoarseOnly){v[k]=bandPhi(origin+vec3f(umCorner(k,2u)));}else{v[k]=umVertexValue(base+umCorner(k,2u))/h;}
+ }
  // Edge crossings supply a zero-set fallback if a clamped Newton solve
  // cannot reach zero inside this cell (thin or badly conditioned patches).
  var distance=1e20;

@@ -16,6 +16,7 @@ const NB_NO_SURFACE:u32=0xffffffffu;
 // Tile banks of the search, rebuilt with it: three list counts (candidates,
 // search, distance), a crossing mask of two words a tile (bit x+4y+16z), the
 // reach (1: within two tiles of a crossing, 2: within three), the lists.
+// The fourth count and list are the transfer's: its 4h owners with a gather.
 const NB_BAND_TILES:u32=UM_T.x*UM_T.y*UM_T.z;
 const NB_BAND:u32=NB_DEPTH_B+UM_D.x*UM_D.y*UM_D.z;
 const NB_BAND_MASK:u32=NB_BAND+4u;
@@ -23,6 +24,7 @@ const NB_BAND_REACH:u32=NB_BAND_MASK+2u*NB_BAND_TILES;
 const NB_BAND_CANDIDATES:u32=NB_BAND_REACH+NB_BAND_TILES;
 const NB_BAND_SEARCH:u32=NB_BAND_CANDIDATES+NB_BAND_TILES;
 const NB_BAND_DISTANCE:u32=NB_BAND_SEARCH+NB_BAND_TILES;
+const NB_BAND_SEAM:u32=NB_BAND_DISTANCE+NB_BAND_TILES;
 fn nbCell(i:u32)->vec3u{return vec3u(i%UM_D.x,(i/UM_D.x)%UM_D.y,i/(UM_D.x*UM_D.y));}
 fn nbBandTile(c:vec3u)->u32{let t=c/4u;return t.x+UM_T.x*(t.y+UM_T.y*t.z);}
 fn nbBandReach(c:vec3u)->u32{return atomicLoad(&bins[NB_BAND_REACH+nbBandTile(c)]);}
