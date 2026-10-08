@@ -10,7 +10,7 @@ import { sphKernelNormalization, sphOptions, validateSphScene } from "../lib/met
 test("SPH is selectable with its own controls, pipeline and harness", async () => {
   const method = getMethod("particle-sph");
   assert.equal(method.id, "particle-sph"); assert.ok(interactiveSimulationMethods().includes(method));
-  assert.equal(defaultMethodId(), "uniform-volume"); assert.ok(Object.isFrozen(method.composition));
+  assert.equal(defaultMethodId(), "uniform-narrow-band-flip"); assert.ok(Object.isFrozen(method.composition));
   assert.equal((await method.harness!()).methodId, method.id); assert.equal((await method.pipelineGraph!()).methodId, method.id);
   assert.deepEqual(method.params.map(p => p.key), ["particlesPerCell", "artificialViscosity", "soundSpeed", "cfl"]);
   assert.ok(!method.runtimeParamKeys?.includes("particlesPerCell"));

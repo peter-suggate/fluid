@@ -33,7 +33,7 @@ assert.ok(Number.isInteger(statsEvery)&&statsEvery>=0);
 const name=process.argv[2]??'current';
 assert.match(name,/^[a-z0-9-]+$/);
 const hash=createHash('sha256');
-for(const file of ['uniform-narrow-band-flip.ts','uniform-narrow-band-advection.wgsl.ts','uniform-narrow-band-membership.wgsl.ts','uniform-narrow-band-redistance.wgsl.ts','uniform-narrow-band-order.ts','uniform-narrow-band-surface.wgsl.ts','uniform-narrow-band-activity.wgsl.ts','uniform-narrow-band-spray.ts','uniform-mixed-frame.ts','uniform-mixed-frame-plan.ts','uniform-mixed-remap.ts','uniform-mixed-surface.ts','uniform-mixed-dynamic.ts','uniform-mixed-pressure-authority.ts'])hash.update(readFileSync(`lib/methods/uniform/${file}`));
+for(const file of ['uniform-narrow-band-flip.ts','uniform-narrow-band-advection.wgsl.ts','uniform-narrow-band-membership.wgsl.ts','uniform-narrow-band-redistance.wgsl.ts','uniform-narrow-band-order.ts','uniform-narrow-band-surface.wgsl.ts','uniform-narrow-band-activity.wgsl.ts','uniform-narrow-band-spray.ts','uniform-mixed-surface-volume.ts','uniform-narrow-band-method.ts','webgpu-uniform-reference.ts','uniform-mixed-frame.ts','uniform-mixed-frame-plan.ts','uniform-mixed-remap.ts','uniform-mixed-surface.ts','uniform-mixed-dynamic.ts','uniform-mixed-pressure-authority.ts'])hash.update(readFileSync(`lib/methods/uniform/${file}`));
 const sourceHash=hash.digest('hex');
 const {sharpeningSweeps,sharpeningDistance,...sharedDefaults}=uniformNarrowBandMethod.appDefaults!;
 const values={...(method===uniformVolumeMethod?sharedDefaults:uniformNarrowBandMethod.appDefaults),timeStep:'scene',fineGridPadding,coarseParticleMode,...(process.argv.includes("--full")?{detailPolicy:"full"}:{}),...(coarseParticleMode==='on'?{detailPolicy:'requested',detailSolidContact:'off'}:{})};
@@ -50,6 +50,10 @@ try {
  profile=new GPUPassProfile(raw);device=managedGPUDevice(profile.device,{requireWorkerRealm:false});
  device.addEventListener('uncapturederror',e=>{e.preventDefault();errors.push(e.error.message);console.error(e.error.message);});
  solver=await method.createSolverAsync!(device,scene,'balanced',values,undefined,()=>{}) as WebGPUUniformReferenceSolver;
+ if(process.argv.includes("--no-volume-correction")){
+  const frame=(solver as unknown as {mixedFrame:{surfaceVolume:{beginStep(...args:unknown[]):void;encode(...args:unknown[]):void};narrowBandFlip:{refreshBand(...args:unknown[]):void}}}).mixedFrame;
+  frame.surfaceVolume.beginStep=()=>{};frame.surfaceVolume.encode=()=>{};frame.narrowBandFlip.refreshBand=()=>{};
+ }
  if(process.argv.includes("--no-reseed")){
   const stage=(solver as unknown as {mixedFrame:{narrowBandFlip:{dispatch(encoder:GPUCommandEncoder,entry:string,group?:string):void}}}).mixedFrame.narrowBandFlip;
   const dispatch=stage.dispatch.bind(stage);stage.dispatch=(encoder,entry,group)=>{if(entry!=="seed"||group!=="update")dispatch(encoder,entry,group);};
@@ -64,7 +68,7 @@ try {
   const passes=measured?await profile.finish():undefined;
   const stats=statsEvery&&frame%statsEvery===0?await solver.readStats():undefined;
   const volumeStages=await volumeProbe?.read();
-  const row={frame,...(volumeStages?{volumeStages}:{}),...(stats?{volumeDrift:stats.volumeDrift,volumeCellSum:stats.volumeCellSum}:{}),time:solver.info.completedTime_s,wall_ms,...solver.narrowBandFlipInfo,fineTiles:solver.info.uniformMixedFineTiles,fineCapacity:solver.info.uniformMixedFineCapacity,bandTiles:solver.info.uniformPressureBandTiles,passes};rows.push(row);
+  const row={frame,...(volumeStages?{volumeStages}:{}),...(stats?{volumeDrift:stats.volumeDrift,volumeCellSum:stats.volumeCellSum,target:stats.narrowBandTargetVolume_cells,shift:stats.narrowBandVolumeShift_cells,before:stats.narrowBandVolumeBeforeCorrection_cells,outflow:stats.narrowBandOutflowVolume_cells}:{}),time:solver.info.completedTime_s,wall_ms,...solver.narrowBandFlipInfo,fineTiles:solver.info.uniformMixedFineTiles,fineCapacity:solver.info.uniformMixedFineCapacity,bandTiles:solver.info.uniformPressureBandTiles,passes};rows.push(row);
   if(frame%10===0||measured)console.log(JSON.stringify({...row,passes:passes?.filter(p=>p.label.includes('Narrow-band'))}));
  }
  const final=await solver.readStats();assert.deepEqual(errors,[]);

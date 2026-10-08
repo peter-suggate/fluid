@@ -5,7 +5,7 @@ import { resolveUniformGeometricValues } from "./uniform-geometric-parameters";
 import { WebGPUUniformReferenceSolver } from "./webgpu-uniform-reference";
 
 /** A fixed 4h particle band with independently controlled grid coverage. */
-const fixed:MethodParamValues={sharpeningSweeps:0,sharpeningDistance:0,totalSurfaceVolume:"off",surfaceVolumeRounds:0,surfaceDeficitBalancing:"off",volumeDustThreshold:0,orphanDustThreshold:0,phiDrain:"off"};
+const fixed:MethodParamValues={sharpeningSweeps:0,sharpeningDistance:0,totalSurfaceVolume:"on",surfaceVolumeRounds:2,surfaceDeficitBalancing:"off",volumeDustThreshold:0,orphanDustThreshold:0,phiDrain:"off"};
 // Restrict elective refinement to crossings. Particle swept-support joins and
 // mandatory solid promotion retain priority over this distance filter.
 const fineBand:MethodParamValues={detailPolicy:"dynamic",detailSolidContact:"on",detailSurface:"on",detailSurfaceDistance:0,
@@ -18,7 +18,7 @@ export const narrowBandFlipValues=(values:MethodParamValues={})=>({
 export const uniformNarrowBandMethod:SimulationMethod={
  ...uniformVolumeMethod,
  id:"uniform-narrow-band-flip",label:"Uniform Narrow-band FLIP",shortLabel:"Narrow-band FLIP",badge:"NARROW-BAND FLIP · EXPERIMENTAL",
- description:"An advected level set tracks liquid, with bounded particle corrections in active regions and smoothing of small calm-surface wrinkles. Escaped spray uses ballistic motion and optical droplet rendering without claiming liquid geometry or fine-grid support. Volume is measured from the level set; there is no target-volume correction.",
+ description:"An advected level set tracks liquid, with bounded particle corrections in active regions and smoothing of small calm-surface wrinkles. Escaped spray uses ballistic motion and optical droplet rendering without claiming liquid geometry or fine-grid support. A bounded global surface shift controls volume against a scalar budget, including sources and open-top outflow.",
  resource:{...uniformVolumeMethod.resource!,id:"fluid.uniform-narrow-band-flip",label:"Narrow-band FLIP fluid"},
  // The geometric method's layers, plus the band's velocity samples as spheres.
  capabilities:{...uniformVolumeMethod.capabilities,visualLayers:{hidden:["pages","window","release"]}},

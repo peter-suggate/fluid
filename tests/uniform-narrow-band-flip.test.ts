@@ -8,7 +8,7 @@ import { uniformGeometricSolverOptions } from "../lib/methods/uniform/uniform-ge
 
 test("narrow-band FLIP is selectable and defaults to the fine band and keeps all-4h behind a structural opt-in",async()=>{
  const method=getMethod("uniform-narrow-band-flip");
- assert.ok(interactiveSimulationMethods().includes(method));assert.equal(defaultMethodId(),"uniform-volume");
+ assert.ok(interactiveSimulationMethods().includes(method));assert.equal(defaultMethodId(),"uniform-narrow-band-flip");
  assert.equal((await method.harness!()).methodId,method.id);assert.equal((await method.pipelineGraph!()).methodId,method.id);
  const values=resolveMethodValues(method,"balanced",{coarseParticleMode:"on",detailPolicy:"requested",detailShape:"off",detailShapeTolerance:2,sharpeningSweeps:8});
  assert.equal(values.detailPolicy,"requested");assert.equal(values.detailShape,"off");assert.equal(values.detailShapeTolerance,2);
@@ -32,10 +32,10 @@ test("narrow-band FLIP is selectable and defaults to the fine band and keeps all
  assert.equal(values.sharpeningSweeps,0);assert.equal(values.sharpeningDistance,0);
  const options=uniformGeometricSolverOptions(values);
  assert.equal(options.sharpeningSweeps,0);assert.equal(options.pressureCycleBudget,"lagged");
- assert.equal(values.totalSurfaceVolume,"off");assert.equal(values.surfaceVolumeRounds,0);
+ assert.equal(values.totalSurfaceVolume,"on");assert.equal(values.surfaceVolumeRounds,2);
  assert.equal(values.surfaceDeficitBalancing,"off");assert.equal(values.phiDrain,"off");
- const forced=resolveMethodValues(method,"balanced",{totalSurfaceVolume:"on",surfaceVolumeRounds:4,surfaceDeficitBalancing:"on",volumeDustThreshold:0.1});
- assert.equal(forced.totalSurfaceVolume,"off");assert.equal(forced.surfaceVolumeRounds,0);assert.equal(forced.surfaceDeficitBalancing,"off");assert.equal(forced.volumeDustThreshold,0);
+ const forced=resolveMethodValues(method,"balanced",{totalSurfaceVolume:"off",surfaceVolumeRounds:0,surfaceDeficitBalancing:"on",volumeDustThreshold:0.1});
+ assert.equal(forced.totalSurfaceVolume,"on");assert.equal(forced.surfaceVolumeRounds,2);assert.equal(forced.surfaceDeficitBalancing,"off");assert.equal(forced.volumeDustThreshold,0);
  const fixed=new Set(["sharpeningSweeps","sharpeningDistance","totalSurfaceVolume","surfaceVolumeRounds","surfaceDeficitBalancing","volumeDustThreshold","orphanDustThreshold","phiDrain"]);
  for(const stage of (await method.pipelineGraph!()).stages)for(const control of stage.controls??[])if("param" in control)assert.ok(!fixed.has(control.param));
 });

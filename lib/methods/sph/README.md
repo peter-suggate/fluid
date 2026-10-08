@@ -2,7 +2,7 @@
 
 Method id **`particle-sph`** is selectable as **SPH** under **EDIT → Fluid solver**.
 [Open the existing mini dam with SPH](http://localhost:3000/scene?scene=minimal-power-dam-break-32&method=particle-sph).
-Any existing scene can select the method through its normal URL/picker. Uniform Geometric remains the default.
+Any existing scene can select the method through its normal URL/picker. Narrow-band FLIP is the default.
 
 This is a standalone, GPU-resident weakly compressible SPH solver. Its basic kernels and explicit force formulation follow [Müller, Charypar and Gross (2003)](https://matthias-research.github.io/pages/publications/sca03.pdf). There is no Poisson solve, particle/grid velocity transfer, affine particle state or iterative density correction.
 

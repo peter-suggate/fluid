@@ -29,9 +29,10 @@ gpuTest("NB-FLIP surface authority bypasses volume transport and recovery, inclu
   try{
    assert.equal(solver.info.volumeControl,false,"NB-FLIP reports no volume-control authority");
    const frame=(solver as unknown as {mixedFrame:{surface:{encode(...args:unknown[]):void};transport:{encodeTransport(...args:unknown[]):void};surfaceVolume:{encode(...args:unknown[]):void};cleanup:{encode(...args:unknown[]):void};fields:{target:GPUTexture;volume:GPUTexture;correction:GPUTexture}}}).mixedFrame;
-   for(const key of ["transport","surfaceVolume","cleanup"] as const){
+   for(const key of ["transport","cleanup"] as const){
     assert.equal(frame[key],undefined,`NB-FLIP must not construct ${key}`);
    }
+   assert.ok(frame.surfaceVolume,"NB-FLIP keeps global surface correction with a scalar target");
    const encodeSurface=frame.surface.encode.bind(frame.surface);
    frame.surface.encode=(...args:unknown[])=>{assert.notEqual(args[1],"traceCells","NB-FLIP must not trace unused volume departures");encodeSurface(...args);};
    solver.applyRuntimeValues({totalSurfaceVolume:"on",surfaceVolumeRounds:4,surfaceDeficitBalancing:"on",volumeDustThreshold:0.1,orphanDustThreshold:0.1});
@@ -115,6 +116,9 @@ gpuTest("NB-FLIP keeps a hydrostatic pool stable without surface-volume recovery
   Object.assign(scene.fluid,{initialVelocity_m_s:{x:0,y:0,z:0},initialLiquidVolumes:[],gravity_m_s2:{x:0,y:-9.81,z:0}});
   const solver=await uniformNarrowBandMethod.createSolverAsync!(device,scene,"balanced",{timeStep:"scene",detailPolicy:"full"},undefined,()=>{}) as WebGPUUniformReferenceSolver;
   try{
+   // Keep this a transport/projection regression even though production now
+   // corrects total volume. A global shift must not hide hydrostatic drift.
+   (solver as unknown as {mixedFrame:{surfaceVolume:{encode:()=>void}}}).mixedFrame.surfaceVolume.encode=()=>{};
    for(let step=1;step<=20;step++)await advanceUniform(solver,step/30);
    const frame=(solver as unknown as {mixedFrame:{fields:{phi:GPUTexture;velocity:GPUTexture;volume:GPUTexture};narrowBandFlip:UniformNarrowBandFlip}}).mixedFrame;
    const phi=await readMixedTexture(device,frame.fields.phi),velocity=await readMixedTexture(device,frame.fields.velocity),volume=await readMixedTexture(device,frame.fields.volume);

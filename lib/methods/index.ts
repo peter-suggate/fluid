@@ -72,8 +72,8 @@ installSimulationMethods({
   // link would have hydrated as the default method and simulated something
   // else.
   interactive: [losassoMethod, powerLiquidsMethod, uniformMethod, uniformVolumeMethod, uniformNarrowBandMethod, uniformMacMethod, apicMethod, sphMethod, adaptiveMassMethod, adaptiveVolumeMethod],
-  // Uniform Geometric is the application default for every scene. A scene profile
+  // Narrow-band FLIP is the application default for every scene. A scene profile
   // seeds settings for an explicitly selected comparison method; opening the
   // scene does not switch to that method.
-  defaultId: uniformVolumeMethod.id,
+  defaultId: uniformNarrowBandMethod.id,
 });

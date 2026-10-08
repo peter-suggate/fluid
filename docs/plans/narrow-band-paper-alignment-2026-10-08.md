@@ -495,3 +495,66 @@ spray/activity work changes surface authority from the paper's unconditional
 union to a bounded correction of the advected level set. Its combined volume
 accuracy must be measured independently; these sphere-union results do not
 establish the accuracy of that newer reconstruction.
+
+### Scalar volume control after the rollback
+
+The rollback retained the advected level set with bounded particle corrections.
+This surface tracker does not have the paper's particle-dominated volume
+behavior. Restore one global surface constraint without restoring conservative
+cell-volume transport or pressure-driven volume recovery.
+
+- Capture the target once from the initialized surface's measured occupancy.
+  Thereafter a persistent GPU scalar owns it; refinement changes and particle
+  reseeding cannot reset it. Do not infer liquid volume from particle count.
+- Add explicit nozzle/drop volume using the existing source accounting. At an
+  open top, subtract the liquid in the upward velocity's swept boundary column;
+  split that geometric integral at h-cell boundaries for large timesteps. This
+  uses the frozen boundary velocity and is an approximation of multidimensional
+  outflow, not a conservative transport field.
+- Reuse the existing two secant-Newton surface-volume rounds before geometry and
+  pressure. NB's correction band uses h-cell distance, not a count of h/4h
+  owners. The displacement limit is 4h, inside that four-cell support. Uniform
+  Geometric retains its original band, target and displacement limits.
+- Refresh the particle distance cache after shifting phi so transfer, retention
+  and reseeding use the corrected surface. No extra pressure solve, pressure
+  iteration budget, or global timestep subdivision is introduced.
+- Publish target volume, cumulative outflow, volume before correction, the
+  applied normal shift and remaining budget error. The pipeline's geometry row
+  displays the shift and error. The original unadjusted volume-drift statistic
+  remains available; outflow does not silently redefine it.
+
+A 0.5h displacement cap was insufficient: Figure 2 at 50 ms temporarily lost
+43% during impact, although correction recovered the total later. This is why
+large required corrections remain visible rather than being described as small
+numerical drift. Global control preserves the total; it does not reconstruct
+lost sheets or detached droplets. Separate optical spray is not independently
+mass-accounted by this scalar liquid budget.
+
+The focused regression checks every frame over 5.1 s at 17 ms and 50 ms, retains
+its 10% volume bound, and checks the requested clock and encoded step count. An
+isolated planar test checks loss/gain correction despite corrupted cell mass,
+target retention across h/4h remaps, one-time source addition, and a 2h open-top
+exit in one step. The focused volume regression passes all three cases.
+
+### Default method and live liquid balls
+
+The application registry now defaults to narrow-band FLIP. Explicit method URLs
+and scene method profiles retain their selection semantics.
+
+Ball insertion had two independent gates to fix. The editor's availability
+predicate omitted narrow-band FLIP. After admitting it, an empty-tank GPU
+regression reproduced a residency failure: surface-only refinement discarded
+an explicit source because it did not yet have a surface crossing. Sources now
+retain priority alongside explicit joins, allowing the existing source census
+to allocate fine coverage and resident pages before injection. This adds no
+extra per-frame pass.
+
+The new GPU regression adds balls through `editFluid` into empty and quarter-full
+tanks with dynamic coverage and 50 ms timesteps. It checks accepted edits, pending
+edit protection, a liquid interior, surface particles, one-time source volume
+accounting, and the unchanged step count. Both cases pass.
+
+Validation at commit: `npm run check:types` passes; `npm run test:unit` passes
+898 tests (106 GPU-gated cases skipped); the focused ball-insertion Dawn file
+passes both cases. The full serial Dawn suite and final volume/performance
+measurements are still in progress; this is not yet a full clean-gate claim.

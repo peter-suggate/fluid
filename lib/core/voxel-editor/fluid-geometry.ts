@@ -27,7 +27,7 @@ export function fluidToolUnavailable({ scene, methodId }: { scene: SceneDescript
   if (scene.systems?.fluid === false) return "Enable water from Scene to use fluid tools.";
   if (methodId === "adaptive-mass" || methodId === "adaptive-volume") return undefined;
   // The uniform solvers own one water source shape, a ball dropped on the next step.
-  if ((methodId === "uniform" || methodId === "uniform-volume") && shape === "ball") return undefined;
+  if ((methodId === "uniform" || methodId === "uniform-volume" || methodId === "uniform-narrow-band-flip") && shape === "ball") return undefined;
   return "Choose Sparse Geometric to edit moving water with this shape.";
 }
 

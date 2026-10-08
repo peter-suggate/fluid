@@ -10,7 +10,7 @@ import { apicOptions, validateApicScene } from "../lib/methods/particle/paramete
 test("APIC is an independent selectable plugin with matching pipeline and harness identities", async () => {
   const method = getMethod("particle-apic");
   assert.equal(method.id, "particle-apic"); assert.ok(interactiveSimulationMethods().includes(method));
-  assert.equal(defaultMethodId(), "uniform-volume"); assert.ok(Object.isFrozen(method.composition));
+  assert.equal(defaultMethodId(), "uniform-narrow-band-flip"); assert.ok(Object.isFrozen(method.composition));
   assert.equal((await method.harness!()).methodId, method.id);
   assert.equal((await method.pipelineGraph!()).methodId, method.id);
   assert.ok(!method.params.some(p => p.key === "advection"), "Eulerian transport controls must not leak into APIC");

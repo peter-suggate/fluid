@@ -97,6 +97,8 @@ export interface UniformMixedFrameParameters {
  fullPressureEnvelope?:boolean;
  /** Extra slots beyond the lagged planner's existing spare; bounded by the configured maximum. */
  pressureReserve?:number;
+ /** Explicit source volume added this step, in h-cell units (NB scalar budget). */
+ addedVolumeCells?:number;
  totalSurfaceVolume?:boolean;redistance?:boolean;sharpening?:boolean;surfaceDeficitBalancing?:boolean;extensionSweeps?:number;
  supportPolicy?:{fineReach:number;shellReach:number;twoLevel:boolean;shellOnly:boolean};
  dust:number;orphanDust?:number;sharpeningStrength:number;sharpeningDistance:number;pressureTolerance:number;
@@ -313,7 +315,8 @@ export class UniformMixedFrame {
  private busy=false;
  private failed=false;
  readonly narrowBandFlip?:UniformNarrowBandFlip;
- get allocatedBytes():number{return (this.narrowBandFlip?.allocatedBytes??0)+this.coarsePhi.allocatedBytes+(this.displacement?.allocatedBytes??0)+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+(this.transport?.allocatedBytes??this.ownership.allocatedBytes)+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.levels.filter(l=>l.ownership!==this.ownership).reduce((n,l)=>n+l.ownership.allocatedBytes,0)+this.owned.reduce((n,r)=>n+("size" in r?r.size:r.width*r.height*r.depthOrArrayLayers*16),0);}
+ get narrowBandVolumeBudget():GPUBuffer|undefined{return this.surfaceVolume?.budget;}
+ get allocatedBytes():number{return (this.narrowBandFlip?.allocatedBytes??0)+(this.surfaceVolume?.allocatedBytes??0)+this.coarsePhi.allocatedBytes+(this.displacement?.allocatedBytes??0)+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+(this.transport?.allocatedBytes??this.ownership.allocatedBytes)+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.levels.filter(l=>l.ownership!==this.ownership).reduce((n,l)=>n+l.ownership.allocatedBytes,0)+this.owned.reduce((n,r)=>n+("size" in r?r.size:r.width*r.height*r.depthOrArrayLayers*16),0);}
  /** layout: the generation the t=0 fields are in (all h; the first
   * updateLayout remaps from it). capacity: the h tiles the owner-indexed
   * buffers hold until a layout reserves its own, independent of that seed. */
@@ -383,7 +386,7 @@ export class UniformMixedFrame {
   // between the cache and forces writes it, negativeScratch or cache 0.
   this.hangingGroup=this.hanging.bind({extended:f.velocityScratch,negative:f.negativeScratch,coarse:caches[0]!});
   this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,true,true,!!this.narrowBandFlip);
-  this.surfaceVolume=f.narrowBandFlip?undefined:new UniformMixedSurfaceVolume(device,o,solid,true);
+  this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid,true,!!f.narrowBandFlip);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
   this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,true,true);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry);
   if(!this.narrowBandFlip){
@@ -458,7 +461,7 @@ export class UniformMixedFrame {
   if(this.narrowBandFlip)this.flipSnapshotExtensionGroups=this.extension.bind({physical:f.departure,phase:f.phase,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:stage,params:this.params.extension});
   const surfaceFields={narrowBandState:this.narrowBandFlip?.state,unitVelocity:this.hanging.unitVelocity,velocity:f.velocityScratch,coarseVelocity:this.coarseCache,volume:f.volume,negative:f.negativeScratch,departures:f.departure,params:this.params.surface,evidence:stage};
   this.surfaceGroups=[this.surface.bind({...surfaceFields,phi:f.phi,outputPhi:f.phiScratch}),this.surface.bind({...surfaceFields,phi:f.phiScratch,outputPhi:f.phi})];
-  if(this.surfaceVolume)this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,f.volume,f.phi,stage);
+  if(this.surfaceVolume)this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,this.narrowBandFlip?f.target:f.volume,f.phi,stage,f.velocityScratch);
   if(this.sharpen)this.sharpenGroups=[this.sharpen.bind(f.volume,f.volumeScratch,f.phi,f.target,f.centerPhi,stage,this.params.sharpen,this.reductions),this.sharpen.bind(f.volumeScratch,f.volume,f.phi,f.target,f.centerPhi,stage,this.params.sharpen,this.reductions)];
   this.forceGroup=this.forces.bind({unitVelocity:this.hanging.unitVelocity,advected:f.departure,phi:f.phi,volume:f.volume,centerPhi:f.centerPhi,coarseVelocity:this.coarseCache,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.forces,curvature:f.phase,normals:stage});
  }
@@ -750,6 +753,7 @@ export class UniformMixedFrame {
    this.plan.encodeCertificate(encoder,p.dt);if(this.layoutViews)this.recordStageView(encoder,this.plan.certificate,"certificate");
    this.cache.encode(encoder,this.cacheGroup);if(this.ownership.capacity.fineTiles>0)this.hanging.encode(encoder,this.hangingGroup);
    trace?.phase(encoder,V.transportReach);
+   if(this.narrowBandFlip)this.surfaceVolume!.beginStep(encoder,this.surfaceVolumeGroup,p.dt,p.addedVolumeCells??0,p.openTop);
    this.narrowBandFlip?.move(encoder,p.dt,p.openTop,p.gravity);
    this.surface.encode(encoder,"advect",this.surfaceGroups[0]);this.phiResolve.encode(encoder,this.phiResolveGroups.scratch);
    // Cell departures feed conservative volume transport only. NB-FLIP
@@ -773,7 +777,7 @@ export class UniformMixedFrame {
    trace?.phase(encoder,V.coupling);
    // Apply shifts canonical vertices only; resolved readers below and the
    // next advect read the hanging texels.
-   if(!this.narrowBandFlip&&p.totalSurfaceVolume!==false&&(p.surfaceVolumeRounds??2)>0){this.surfaceVolume!.encode(encoder,this.surfaceVolumeGroup,p.surfaceVolumeRounds??2);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}
+   if(this.narrowBandFlip||(p.totalSurfaceVolume!==false&&(p.surfaceVolumeRounds??2)>0)){this.surfaceVolume!.encode(encoder,this.surfaceVolumeGroup,this.narrowBandFlip?2:p.surfaceVolumeRounds??2);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);this.narrowBandFlip?.refreshBand(encoder);}
    // Nothing after this pass writes phi: the next advance starts from it,
    // and the renderer's 4h vertex base is published from it.
    this.coarsePhi.encode(encoder);
@@ -1099,5 +1103,5 @@ export class UniformMixedFrame {
   if(this.coarsePhi.adopted)return;
   const e=this.device.createCommandEncoder({label:"Uniform publish 4h vertex phi base"});this.coarsePhi.encode(e);this.device.queue.submit([e.finish()]);
  }
- destroy():void{this.narrowBandFlip?.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.displacement?.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();if(this.transport)this.transport.destroy();else this.ownership.destroy();this.cleanup?.destroy();this.split.transfer.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
+ destroy():void{this.surfaceVolume?.destroy();this.narrowBandFlip?.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.displacement?.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();if(this.transport)this.transport.destroy();else this.ownership.destroy();this.cleanup?.destroy();this.split.transfer.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
 }

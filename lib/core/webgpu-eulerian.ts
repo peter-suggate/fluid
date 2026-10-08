@@ -424,6 +424,13 @@ export interface GPUEulerianInfo {
   volumeDrift?:number;
   rawVolumeDrift?:number;
   referenceLiquidVolume_cells?: number;
+  /** NB scalar budget and correction diagnostics; independent of geometric V. */
+  narrowBandTargetVolume_cells?:number;
+  narrowBandOutflowVolume_cells?:number;
+  narrowBandVolumeShift_cells?:number;
+  narrowBandVolumeBeforeCorrection_cells?:number;
+  narrowBandInitialVolume_cells?:number;
+  narrowBandVolumeBudgetDrift?:number;
   /** CM11a coarsest-grid convergence and finest-grid post-cycle residuals. */
   uniformCM11aResidualInfinity?: number;
   uniformCM11aConverged?: boolean;

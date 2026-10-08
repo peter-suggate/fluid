@@ -508,6 +508,8 @@ ${narrowBandSurfaceWGSL}
   if(!this.ownership.coarseOnly)this.dispatch(encoder,"redistanceFine","redistance");
   this.dispatch(encoder,"redistanceCoarse","redistance");this.bandCurrent=true;
  }
+ /** A global surface shift changes crossing cells and particle membership. */
+ refreshBand(encoder:GPUCommandEncoder):void{this.measureBand(encoder);this.dispatch(encoder,"buildDistance");this.bandCurrent=true;}
  private measureBand(encoder:GPUCommandEncoder,group?:string):void{
   for(const entry of ["depthSeeds","depthSpreadX","depthSpreadY","depthSpreadZ"])this.dispatch(encoder,entry,group);
  }

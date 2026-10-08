@@ -1155,9 +1155,11 @@ fn surfaceAllowed(tile:u32,p:vec3i)->bool{
  let hostJoined=umJoined(tile);let source=!hostJoined&&umSourceTile(p);
  // Intersect the existing selection, including hold, closure and travel,
  // with the allowed distance from actual geometric crossings.
- // Explicit joins and the later mandatory solid promotion retain priority.
+ // Explicit joins, new liquid sources and mandatory solid promotion retain
+ // priority. A source has no existing surface crossing yet; excluding it here
+ // also excludes its pages from the residency certificate below.
  // Keep the census and residency closure intact: this changes ownership only.
- if((policy.shaping.x&4096u)!=0u&&!hostJoined&&!surfaceAllowed(tile,p)){
+ if((policy.shaping.x&4096u)!=0u&&!hostJoined&&!source&&!surfaceAllowed(tile,p)){
   if(umTileWidth(tile)==1u){atomicAdd(&census[5],1u);}recordReason(tile,${REASON.skipped}u);return;
  }
  let joined=hostJoined||source;

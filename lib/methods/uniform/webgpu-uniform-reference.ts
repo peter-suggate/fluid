@@ -3150,6 +3150,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.stepBodyCount = activeBodies.length;
     this.rigidSystem.syncBodies(activeBodies);
     const c = this.scene.container;
+    const volumeBeforeSources=this.referenceVolumeCells;
     const inflow = this.scene.fluid.inflow;
     const strength = inflow ? averageInflowStrength(inflow, this.lastTime - dt, this.lastTime) : 0;
     if (this.inflowBoundary && strength > 0) {
@@ -3205,7 +3206,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.mixedHadBodies=bodyCount>0;
       let receipt:Promise<UniformMixedFrameReceipt>,kick:Promise<unknown>|undefined;
       try{
-        const p={dt,gravity:this.scene.fluid.gravity_m_s2.y,density:this.scene.fluid.density_kg_m3,
+        const p={dt,addedVolumeCells:this.referenceVolumeCells-volumeBeforeSources,gravity:this.scene.fluid.gravity_m_s2.y,density:this.scene.fluid.density_kg_m3,
         viscosity:this.scene.fluid.dynamicViscosity_Pa_s,surfaceTension:this.scene.fluid.surfaceTension_N_m,
         openTop:this.scene.container.top==="open",noSlip:this.scene.container.fluidWallMode==="no-slip",cubic:this.phiCubicAdvection,drain:this.phiDrain,preserve:this.phiPreserveSurface,
         dust:this.volumeDustThreshold,orphanDust:this.orphanDustThreshold,sharpeningStrength:this.densitySharpening?this.sharpeningStrength:0,
@@ -3584,8 +3585,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         const encoder=this.device.createCommandEncoder();this.mixedDiagnostics!.encode(encoder);
         encoder.copyBufferToBuffer(this.reductions,0,this.statsReadback,0,24);
         encoder.copyBufferToBuffer(this.mixedFrame.ownership.support,this.mixedFrame.ownership.capacity.tiles*16,this.statsReadback,24,16);
+        const budget=this.mixedFrame.narrowBandVolumeBudget;
+        if(budget)encoder.copyBufferToBuffer(budget,0,this.statsReadback,40,32);
         this.device.queue.submit([encoder.finish()]);
-        await this.statsReadback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(this.statsReadback.getMappedRange(),0,10).slice();
+        await this.statsReadback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(this.statsReadback.getMappedRange(),0,budget?18:10).slice();
+        if(budget){const b=new Float32Array(words.buffer,40,8);if(b[1]!>0)Object.assign(this.executionInfo,{
+          narrowBandTargetVolume_cells:b[0],narrowBandOutflowVolume_cells:b[2],
+          narrowBandVolumeShift_cells:b[3]!/Math.min(...this.mixedFrame.ownership.capacity.lattice.cellSize_m),
+          narrowBandVolumeBeforeCorrection_cells:b[4],narrowBandInitialVolume_cells:b[5],
+          narrowBandVolumeBudgetDrift:(words[3]!/2048-b[0]!)/Math.max(1,b[0]!),
+        });}
         const represented=words[0]!/2048,volume=words[3]!/2048,reference=Math.max(1,this.referenceVolumeCells);
         Object.assign(this.executionInfo,{representedVolumeCellSum:represented,volumeCellSum:volume,
           representedVolumeDrift:(represented-reference)/reference,rawVolumeDrift:(volume-reference)/reference,volumeDrift:(volume-reference)/reference,

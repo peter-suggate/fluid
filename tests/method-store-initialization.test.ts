@@ -5,7 +5,7 @@ import { useMethodStore } from "../lib/core/stores/method-store";
 test("default method store can be imported before the entry point installs methods", async () => {
   await import("../lib/methods");
   const first = useMethodStore.getState();
-  assert.equal(first.methodId, "uniform-volume");
+  assert.equal(first.methodId, "uniform-narrow-band-flip");
   assert.equal(useMethodStore.getState(), first);
   let notifications = 0;
   const unsubscribe = useMethodStore.subscribe(() => notifications++);

@@ -78,7 +78,8 @@ gpuTest("NB wall advection neither repairs liquid from stored volume nor changes
    // without needing stored mass as evidence (or manufacturing it at rest).
    for(let z=0;z<=32;z++)for(let y=0;y<=32;y++)for(let x=0;x<=32;x++)phi[vertex(x,y,z)]=Math.max(1.25-y,y-5)/32;
    upload(frame.fields.phi,phi);
-   const velocity=(frame as unknown as {fields:{velocity:GPUTexture}}).fields.velocity;
+   // Surface transport reads the extended velocity scratch, not the physical MAC field.
+   const velocity=(frame as unknown as {fields:{velocityScratch:GPUTexture}}).fields.velocityScratch;
    const falling=new Float32Array(32**3*4);for(let i=0;i<32**3;i++)falling[4*i+1]=-2;
    upload(velocity,falling);baseline=undefined;
    for(const mass of [0,10]){

@@ -9,7 +9,7 @@ import { macOptions, macTimeStep, validateMacScene } from "../lib/methods/unifor
 test("MAC baseline installs through the method catalog without changing the default", async () => {
   const method = getMethod("uniform-mac");
   assert.equal(method.id, "uniform-mac"); assert.ok(interactiveSimulationMethods().includes(method));
-  assert.equal(defaultMethodId(), "uniform-volume"); assert.ok(Object.isFrozen(method.composition));
+  assert.equal(defaultMethodId(), "uniform-narrow-band-flip"); assert.ok(Object.isFrozen(method.composition));
   assert.equal((await method.pipelineGraph!()).methodId, method.id);
   assert.equal((await method.harness!()).methodId, method.id);
   assert.ok(method.supportedFieldModes?.includes("volume-levelset"));
