@@ -118,71 +118,74 @@ fn nbCoupleVertex(owner:UMOwner,regular:bool,k:u32,lane:u32){
 }
 `;
 
-/** Three fine MAC components share the same particle reads. Their union is
- * the 4 cubed cells around the cell less the ten that weigh nothing on any of
- * its three faces, read as 15 x rows. A row is one run of the ordered
- * samples, or two where it crosses a tile face. A cell's eight lanes look the
- * runs up between them and then each take every eighth sample of every run:
- * equal shares of consecutive memory, whatever each cell holds. Eight lanes a
- * cell also keep a workgroup on one x row of cells, which the band holds or
- * misses together. The launch covers the h owners alone; a 4h owner's faces
- * are transferOwners' (uniform-narrow-band-flip.ts). */
+/** Adjacent fine cells share their particle reads. Each sixteen-lane team
+ * gathers the union of two neighboring x cells' quadratic MAC supports and
+ * accumulates both results in registers. Spatial order makes each x row at
+ * most two runs, without a per-bin particle limit. */
 export const narrowBandFineTransferWGSL=/* wgsl */`
 var<workgroup> nbMomentum:array<vec3f,64>;
 var<workgroup> nbMass:array<vec3f,64>;
+var<workgroup> nbMomentumNext:array<vec3f,64>;
+var<workgroup> nbMassNext:array<vec3f,64>;
 var<workgroup> nbBlend:array<f32,24>;
-var<workgroup> nbRuns:array<vec2u,256>;
+var<workgroup> nbRuns:array<vec2u,128>;
 @compute @workgroup_size(64) fn transfer(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let owner=umAllOwner(vec3u(gid.x/8u,0,0));let origin=umOrigin(owner);
- let team=lane/8u;let member=lane%8u;let centre=vec3f(origin)+0.5;
- // A lane for each face's depth under the surface.
- if(member<3u){
+ let first=(gid.x/16u)*2u;let owner=umAllOwner(vec3u(first,0,0));let origin=umOrigin(owner);
+ let next=umAllOwner(vec3u(first+1u,0,0));let nextOrigin=umOrigin(next);
+ let team=lane/16u;let member=lane%16u;let centre=vec3f(origin)+0.5;
+ if(member<6u){
+  let axis=member%3u;let o=select(origin,nextOrigin,member>=3u);let width=select(owner.width,next.width,member>=3u);
   var near=0.0;
-  if(owner.width==1u&&origin[member]+1u<UM_D[member]){
-   var q=centre;q[member]+=0.5;let depth=particleDepth(q);
+  if(width==1u&&o[axis]+1u<UM_D[axis]){
+   var q=vec3f(o)+0.5;q[axis]+=0.5;let depth=particleDepth(q);
    if(depth<=1.5&&depth>=-2.0){near=1.0;}
   }
-  nbBlend[3u*team+member]=near;
+  nbBlend[6u*team+member]=near;
  }
  workgroupBarrier();
- let blend=vec3f(nbBlend[3u*team],nbBlend[3u*team+1u],nbBlend[3u*team+2u]);
- let gather=any(blend>vec3f(0));
+ let blend=vec3f(nbBlend[6u*team],nbBlend[6u*team+1u],nbBlend[6u*team+2u]);
+ let nextBlend=vec3f(nbBlend[6u*team+3u],nbBlend[6u*team+4u],nbBlend[6u*team+5u]);
+ let gather=any(blend>vec3f(0))||any(nextBlend>vec3f(0));
  if(gather){
-  let low=vec3i(origin)-1;
-  // The row past both far planes weighs nothing; one in a far plane weighs
-  // nothing in its last cell.
-  for(var row=member;row<16u;row+=8u){
-   let y=low.y+i32(row%4u);let z=low.z+i32(row/4u);var runs=array<vec2u,2>();
-   if(row<15u&&y>=0&&y<i32(UM_D.y)&&z>=0&&z<i32(UM_D.z)){
-    let last=min(low.x+select(3,2,row%4u==3u||row>=12u),i32(UM_D.x)-1);
-    var x=max(low.x,0);
-    for(var part=0u;x<=last;part++){let stop=min(last,x|3);runs[part]=nbRun(vec3i(x,y,z),vec3i(stop,y,z));x=stop+1;}
-   }
-   nbRuns[32u*team+2u*row]=runs[0];nbRuns[32u*team+2u*row+1u]=runs[1];
+  let low=vec3i(origin)-1;let row=member;
+  let y=low.y+i32(row%4u);let z=low.z+i32(row/4u);var runs=array<vec2u,2>();
+  if(row<15u&&y>=0&&y<i32(UM_D.y)&&z>=0&&z<i32(UM_D.z)){
+   let last=min(low.x+select(4,3,row%4u==3u||row>=12u),i32(UM_D.x)-1);
+   var x=max(low.x,0);
+   for(var part=0u;x<=last;part++){let stop=min(last,x|3);runs[part]=nbRun(vec3i(x,y,z),vec3i(stop,y,z));x=stop+1;}
   }
+  nbRuns[32u*team+2u*row]=runs[0];nbRuns[32u*team+2u*row+1u]=runs[1];
  }
  workgroupBarrier();
- var momentum=vec3f(0);var total=vec3f(0);
+ var momentum=vec3f(0);var total=vec3f(0);var momentumNext=vec3f(0);var totalNext=vec3f(0);
  if(gather){
   for(var slot=0u;slot<30u;slot++){
    let run=nbRuns[32u*team+slot];
-   for(var i=run.x+member;i<run.y;i+=8u){
+   for(var i=run.x+member;i<run.y;i+=16u){
     let motion=nbMotion(i);if(motion.w==1.0){continue;}
     let d=centre-nbPosition(i);let f=d+0.5;
     let wc=vec3f(weight(d.x),weight(d.y),weight(d.z));let wf=vec3f(weight(f.x),weight(f.y),weight(f.z));
     let w=vec3f(wf.x*wc.y*wc.z,wc.x*wf.y*wc.z,wc.x*wc.y*wf.z);
     total+=w;momentum+=w*motion.xyz;
+    let xc=weight(d.x+1.0);let xf=weight(f.x+1.0);
+    let wn=vec3f(xf*wc.y*wc.z,xc*wf.y*wc.z,xc*wc.y*wf.z);
+    totalNext+=wn;momentumNext+=wn*motion.xyz;
    }
   }
  }
- nbMomentum[lane]=momentum;nbMass[lane]=total;workgroupBarrier();
- for(var stride=4u;stride>0u;stride/=2u){
-  if(member<stride){nbMomentum[lane]+=nbMomentum[lane+stride];nbMass[lane]+=nbMass[lane+stride];}workgroupBarrier();
+ nbMomentum[lane]=momentum;nbMass[lane]=total;nbMomentumNext[lane]=momentumNext;nbMassNext[lane]=totalNext;workgroupBarrier();
+ for(var stride=8u;stride>0u;stride/=2u){
+  if(member<stride){nbMomentum[lane]+=nbMomentum[lane+stride];nbMass[lane]+=nbMass[lane+stride];nbMomentumNext[lane]+=nbMomentumNext[lane+stride];nbMassNext[lane]+=nbMassNext[lane+stride];}workgroupBarrier();
  }
  if(member==0u&&owner.width==1u){
   let original=textureLoad(velocity,vec3i(origin),0);let mass=nbMass[lane];
   let value=mix(original.xyz,nbMomentum[lane]/max(mass,vec3f(1e-30)),select(vec3f(0),blend,mass>=vec3f(1e-5)));
   textureStore(output,vec3i(origin),vec4f(value,original.w));
+ }
+ if(member==0u&&next.width==1u){
+  let original=textureLoad(velocity,vec3i(nextOrigin),0);let mass=nbMassNext[lane];
+  let value=mix(original.xyz,nbMomentumNext[lane]/max(mass,vec3f(1e-30)),select(vec3f(0),nextBlend,mass>=vec3f(1e-5)));
+  textureStore(output,vec3i(nextOrigin),vec4f(value,original.w));
  }
 }
 `;

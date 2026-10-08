@@ -14,19 +14,28 @@ import { ParticleBinScan } from "../particle/scan";
  * bank so a crowded bin cannot serialize an entire workgroup. */
 export class UniformNarrowBandOrder {
  private readonly enabled:GPUBuffer;
+ private readonly tileOffsets?:GPUBuffer;
+ private preparePipeline!:GPUComputePipeline;
+ private prefixPipeline!:GPUComputePipeline;
  private scan!:ParticleBinScan;
  private pipeline!:GPUComputePipeline;
  private groups!:readonly [GPUBindGroup,GPUBindGroup];
- get allocatedBytes():number{return this.enabled.size+(this.scan?.allocatedBytes??0);}
- constructor(private readonly device:GPUDevice,private readonly dims:readonly number[],private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer){
+ get allocatedBytes():number{return this.enabled.size+(this.tileOffsets?.size??0)+(this.scan?.allocatedBytes??0);}
+ /** The optional policy override lets small fixtures exercise both paths. */
+ constructor(private readonly device:GPUDevice,private readonly dims:readonly number[],private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer,readonly sparse=dims.reduce((n,v)=>n*v,1)>=8_388_608){
   // Shared APIC scan's activation record: no failure and an active step.
   // This immutable record makes our sort unconditional, including bootstrap.
   this.enabled=device.createBuffer({label:"FLIP spatial order scan activation",size:88,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+  if(this.sparse)this.tileOffsets=device.createBuffer({label:"FLIP tile offsets",size:dims.reduce((n,v)=>n*v,1)/16,usage:GPUBufferUsage.STORAGE});
   const activation=new Float32Array(22);activation[21]=1;device.queue.writeBuffer(this.enabled,0,activation);
  }
  async initialize():Promise<void>{
   const cells=this.dims.reduce((n,v)=>n*v,1);
-  this.scan=await ParticleBinScan.create(this.device,cells,{buffer:this.bins,offset:0,size:4*cells},{buffer:this.links,offset:0,size:4*cells},this.enabled);
+  // Extra tile counting pays for itself only on large domains. The dense
+  // path retains the original scan and clears, without tile storage/atomics.
+  this.scan=await ParticleBinScan.create(this.device,this.sparse?cells/64:cells,
+   {buffer:this.bins,offset:this.sparse?8*cells:0,size:this.sparse?cells/16:4*cells},
+   this.sparse?this.tileOffsets!:{buffer:this.links,offset:0,size:4*cells},this.enabled);
   const module=this.device.createShaderModule({label:"FLIP spatial order",code:/* wgsl */`
 struct Particle{position:vec4f,velocity:vec4f,before:vec4f}
 @group(0) @binding(0) var<storage,read> input:array<Particle>;
@@ -37,10 +46,35 @@ struct Particle{position:vec4f,velocity:vec4f,before:vec4f}
 @group(0) @binding(3) var<storage,read_write> links:array<u32>;
 // The receipt: [0] the input's slots, [1] the live samples packed.
 @group(0) @binding(4) var<storage,read_write> state:array<u32>;
+${this.sparse?"@group(0) @binding(5) var<storage,read> tileOffsets:array<u32>;":""}
 const CELLS:u32=${cells}u;
+const TILES:u32=CELLS/64u;
+${this.sparse?/* wgsl */`
+var<workgroup> prefix:array<u32,64>;
+var<workgroup> tilePopulation:u32;
+// Only tiles populated by the previous move contain cell counts to clear.
+@compute @workgroup_size(64) fn prepare(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=group.x+65535u*group.y;if(tile>=TILES){return;}
+ let live=atomicLoad(&bins[2u*CELLS+tile]);
+ if(live!=0u){atomicStore(&bins[64u*tile+lane],0u);atomicStore(&bins[CELLS+64u*tile+lane],0u);}
+ workgroupBarrier();
+ if(lane==0u){atomicStore(&bins[2u*CELLS+tile],0u);}
+}
+@compute @workgroup_size(64) fn prefixTile(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=group.x+65535u*group.y;if(tile>=TILES){return;}
+ if(lane==0u){tilePopulation=atomicLoad(&bins[2u*CELLS+tile]);}
+ if(workgroupUniformLoad(&tilePopulation)==0u){return;}
+ let cell=64u*tile+lane;let count=atomicLoad(&bins[cell]);prefix[lane]=count;workgroupBarrier();
+ for(var stride=1u;stride<64u;stride*=2u){
+  var add=0u;if(lane>=stride){add=prefix[lane-stride];}
+  workgroupBarrier();prefix[lane]+=add;workgroupBarrier();
+ }
+ links[cell]=tileOffsets[tile]+prefix[lane]-count;
+}
+`:""}
 @compute @workgroup_size(64) fn pack(@builtin(global_invocation_id) gid:vec3u){
  let dims=vec3u(${this.dims.map(n=>`${n}u`).join(',')});let tiles=dims/4u;
- if(gid.x==0u){state[1]=links[CELLS-1u]+atomicLoad(&bins[CELLS-1u]);}
+ if(gid.x==0u){state[1]=${this.sparse?"tileOffsets[TILES-1u]+atomicLoad(&bins[2u*CELLS+TILES-1u])":"links[CELLS-1u]+atomicLoad(&bins[CELLS-1u])"};}
  for(var i=gid.x;i<min(state[0],arrayLength(&input));i+=65536u){
   let p=input[i];if(p.position.x<0.0){continue;}
   let c=vec3u(p.position.xyz);let t=c/4u;let l=c%4u;
@@ -50,14 +84,24 @@ const CELLS:u32=${cells}u;
   links[a]=position.x;links[a+1u]=position.y;links[a+2u]=position.z;links[a+3u]=position.w;
  }
 }`});
-  const layout=this.device.createBindGroupLayout({entries:[0,1,2,3,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0?"read-only-storage" as const:"storage" as const}}))});
-  this.pipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module,entryPoint:"pack"}});
-  this.groups=[0,1].map(parity=>this.device.createBindGroup({layout,entries:[this.particles[1-parity]!,this.particles[parity]!,this.bins,this.links,this.state].map((buffer,binding)=>({binding,resource:{buffer}}))})) as [GPUBindGroup,GPUBindGroup];
+  const layout=this.device.createBindGroupLayout({entries:(this.sparse?[0,1,2,3,4,5]:[0,1,2,3,4]).map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0||binding===5?"read-only-storage" as const:"storage" as const}}))});
+  const pipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[layout]});
+  [this.pipeline,this.preparePipeline,this.prefixPipeline]=await Promise.all((this.sparse?["pack","prepare","prefixTile"]:["pack"]).map(entryPoint=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
+  this.groups=[0,1].map(parity=>this.device.createBindGroup({layout,entries:[this.particles[1-parity]!,this.particles[parity]!,this.bins,this.links,this.state,...(this.sparse?[this.tileOffsets!]:[])].map((buffer,binding)=>({binding,resource:{buffer}}))})) as [GPUBindGroup,GPUBindGroup];
  }
- /** The bins hold the counts of the samples to pack and a clear cursor. */
+ prepare(encoder:GPUCommandEncoder,parity:number):void{
+  if(!this.sparse){encoder.clearBuffer(this.bins,0,this.dims.reduce((n,v)=>n*v,1)*8);return;}
+  const tiles=this.dims.reduce((n,v)=>n*v,1)/64;
+  const pass=encoder.beginComputePass({label:"Narrow-band FLIP clear occupied bins"});pass.setPipeline(this.preparePipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(Math.min(tiles,65535),Math.ceil(tiles/65535));pass.end();
+ }
+ /** Dense scan for small domains; occupied-tile cell scans for large ones. */
  encode(encoder:GPUCommandEncoder,parity:number):void{
   this.scan.encode(encoder);
+  if(this.sparse){
+   const tiles=this.dims.reduce((n,v)=>n*v,1)/64;
+   const prefix=encoder.beginComputePass({label:"Narrow-band FLIP occupied cell offsets"});prefix.setPipeline(this.prefixPipeline);prefix.setBindGroup(0,this.groups[parity]!);prefix.dispatchWorkgroups(Math.min(tiles,65535),Math.ceil(tiles/65535));prefix.end();
+  }
   const pass=encoder.beginComputePass({label:"Narrow-band FLIP order pack"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(1024);pass.end();
  }
- destroy():void{this.scan?.destroy();this.enabled.destroy();}
+ destroy():void{this.scan?.destroy();this.enabled.destroy();this.tileOffsets?.destroy();}
 }

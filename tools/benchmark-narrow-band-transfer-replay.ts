@@ -1,3 +1,4 @@
+/** Exact-input production P2G replay, 32 dispatches per measured frame. */
 /** Focused Figure 9 benchmark: browser GPU must be off. Default dt is 17ms.
  * node --import tsx tools/benchmark-narrow-band.ts baseline
  * Add --uniform for Uniform Geometric with the same refinement criteria.
@@ -50,6 +51,13 @@ try {
  profile=new GPUPassProfile(raw);device=managedGPUDevice(profile.device,{requireWorkerRealm:false});
  device.addEventListener('uncapturederror',e=>{e.preventDefault();errors.push(e.error.message);console.error(e.error.message);});
  solver=await method.createSolverAsync!(device,scene,'balanced',values,undefined,()=>{}) as WebGPUUniformReferenceSolver;
+ // Replaying this gather is idempotent: input velocity, particle runs and
+ // motion remain read-only; each dispatch overwrites the same output faces.
+ const replay=(solver as unknown as {mixedFrame:{narrowBandFlip:{dispatch(encoder:GPUCommandEncoder,entry:string,group?:string):void}}}).mixedFrame.narrowBandFlip;
+ const originalDispatch=replay.dispatch.bind(replay);let replayTransfer=false;
+ replay.dispatch=(encoder,entry,group)=>{
+  for(let repeat=0;repeat<(replayTransfer&&entry==="transfer"?32:1);repeat++)originalDispatch(encoder,entry,group);
+ };
  if(process.argv.includes("--no-volume-correction")){
   const frame=(solver as unknown as {mixedFrame:{surfaceVolume:{beginStep(...args:unknown[]):void;encode(...args:unknown[]):void}}}).mixedFrame;
   frame.surfaceVolume.beginStep=()=>{};frame.surfaceVolume.encode=()=>{};
@@ -60,7 +68,7 @@ try {
  }
  if(process.argv.includes("--volume-stages"))volumeProbe=await narrowBandVolumeProbe(device,solver);
  for(let frame=1;frame<=steps;frame++){
-  const measured=frame>steps-6;const start=performance.now();if(measured)profile.start();
+  const measured=frame>steps-6;replayTransfer=measured;const start=performance.now();if(measured)profile.start();
   solver.advanceTo(frame*dt,[]);await solver.awaitFrameCompletion();
   assert.equal(solver.info.simulationPipelineError,undefined);
   assert.ok(Math.abs((solver.info.completedTime_s??0)-frame*dt)<1e-8,"complete exactly one requested clock step");
@@ -73,7 +81,7 @@ try {
  }
  const final=await solver.readStats();assert.deepEqual(errors,[]);
  mkdirSync('docs/verification',{recursive:true});
- writeFileSync(`docs/verification/narrow-band-${name}.json`,JSON.stringify({date:new Date().toISOString(),arguments:process.argv.slice(2),method:method.id,values,coarseParticleMode,sourceHash,adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},scene,rows,final,errors},null,2)+'\n');
+ writeFileSync(`docs/verification/narrow-band-${name}.json`,JSON.stringify({date:new Date().toISOString(),arguments:process.argv.slice(2),method:method.id,values,coarseParticleMode,sourceHash,transferReplays:32,adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},scene,rows,final,errors},null,2)+'\n');
 }catch(error){
  mkdirSync('docs/verification',{recursive:true});
  writeFileSync(`docs/verification/narrow-band-${name}-failed.json`,JSON.stringify({date:new Date().toISOString(),arguments:process.argv.slice(2),method:method.id,values,sourceHash,scene,rows,errors,error:String(error)},null,2)+'\n');

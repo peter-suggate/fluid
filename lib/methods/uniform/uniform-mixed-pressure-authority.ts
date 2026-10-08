@@ -170,6 +170,12 @@ fn umPressurePhiCell(p:vec3i)->f32{
 fn umCapacity(o:UMOwner)->f32{${this.coarse?"return umSolidCoarse(o.index).x;":"if(!umSolidEnabled()){return 1.0;}if(o.width==1u){return umCellOpen(vec3i(umOrigin(o)));}return umTileOpen(o.tile);"}}
 // umPressureLiquid on this authority's phi: the rows' liquid owners.
 fn umAuthorityLiquid(o:UMOwner,distance:f32)->bool{return ${uniformMixedPressureLiquidWGSL("distance","f32(o.width)*UM_HMIN")};}
+// A closed owner continues its neighbours' phi in the pressure rows but owns
+// no phase. The extension takes a phase owner's faces as physical, and a face
+// between two closed owners holds no velocity of its own: as a source it is
+// a zero that every sample within half a cell of the wall blends in. Unowned,
+// it continues the liquid's tangential velocity (free slip).
+fn umPhase(o:UMOwner,liquid:bool)->f32{return select(0.0,1.0,liquid&&umCapacity(o)>1e-5);}
 ${this.resident?"@group(1) @binding(9) var<storage,read> umSimulationTiles:array<u32>;":""}
 // V claims a row only where the simulation holds the owner at 4h.
 fn umClaims(o:UMOwner)->bool{return ${this.resident?"(umSimulationTiles[o.tile]&0x80000000u)==0u":"o.width>=2u"};}
@@ -279,7 +285,7 @@ var<workgroup> sums:array<vec4f,64>;
  let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);if(o.width==0u){return;}
  let distance=umAuthority(o,0.0);let origin=vec3i(umOrigin(o));
  phi[o.index]=distance;
- ${this.resident?"":"textureStore(phase,origin,vec4f(select(0.0,1.0,umAuthorityLiquid(o,distance))));"}
+ ${this.resident?"":"textureStore(phase,origin,vec4f(umPhase(o,umAuthorityLiquid(o,distance))));"}
  textureStore(correction,origin,vec4f(0));
 }
 fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(l<stride){sums[l]+=sums[l+stride];}workgroupBarrier();}}
@@ -287,7 +293,7 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
  let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);var values=vec4f(0);
  if(o.width!=0u){let origin=vec3i(umOrigin(o));let v=umOwnerVolume(o);let distance=phi[o.index];
   let liquid=umAuthorityLiquid(o,distance);let detached=!liquid&&umDetachedMass(o);
-  ${this.resident?"":"textureStore(phase,origin,vec4f(select(0.0,1.0,liquid||detached)));"}
+  ${this.resident?"":"textureStore(phase,origin,vec4f(umPhase(o,liquid||detached)));"}
   if(umAuthorityBalance){
   let cap=umCapacity(o);
   values=vec4f(uvVolumeCorrectionAmountAt(v,cap,params.x),umDeficit(o,v,distance),umStranded(o,v,distance,detached),umBulkDeficit(o,v,distance))*f32(o.width*o.width*o.width);
