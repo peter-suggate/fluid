@@ -7,8 +7,9 @@ import {
 } from "../../../components/toolstrip";
 import { Choice, ControlRow, Select, Slider, Value } from "../../../components/ui";
 import {
-  IMPORTANCE_VIEW_OPTIONS, MIXED_TILE_LEGEND, PARTICLE_LEGEND, VISUAL_LAYERS, importanceLegend, importanceView, layerOpacity,
-  setImportanceView, toggleVisualLayer, type ImportanceView, type VisualLayerId, type VisualLayerState,
+  IMPORTANCE_VIEW_OPTIONS, MIXED_TILE_LEGEND, PARTICLE_VIEW_OPTIONS, VISUAL_LAYERS, importanceLegend, importanceView, layerOpacity,
+  particleLegend, particleView, setImportanceView, setParticleView, toggleVisualLayer,
+  type ImportanceView, type ParticleView, type VisualLayerId, type VisualLayerState,
 } from "../../core/visual-layers";
 
 const PAGE_LEGEND = [
@@ -83,6 +84,33 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
         <i aria-hidden className={entry.wide ? "is-wide" : undefined} style={{ background: entry.color }} />{entry.label}
       </span>)}
     </div>;
+  const planeControls = plane && state.visible ? <>
+    <Choice<"x" | "y" | "z">
+      ariaLabel="Field view plane"
+      value={plane.axis === "off" || plane.axis === "volume" ? "z" : plane.axis as "x" | "y" | "z"}
+      options={[
+        { value: "x", label: "X" }, { value: "y", label: "Y" }, { value: "z", label: "Z" },
+      ]}
+      onChange={plane.setAxis}
+    />
+    <Slider
+      min={0} max={1} step={0.005}
+      value={plane.slice}
+      ariaLabel="Field slice"
+      onInput={plane.setSlice}
+    />
+    <Value value={`${Math.round(plane.slice * 100)}%`} />
+  </> : null;
+  // On the strip beside the plane, not in the menu: it is switched back and
+  // forth against the moving picture, and the menu covers the picture.
+  const particleControls = shown("particles") ? <Choice<ParticleView>
+    ariaLabel="Particle view"
+    value={particleView(state)}
+    options={PARTICLE_VIEW_OPTIONS}
+    onChange={view => onChange(setParticleView(state, view))}
+  /> : null;
+  // One child or none: the row reads any child as its open state.
+  const controls = planeControls || particleControls ? <>{planeControls}{particleControls}</> : null;
   return <><ToolstripRow
     icon={<Eye size={14} />}
     name="Visual layers"
@@ -92,27 +120,11 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
     onClick={() => onChange({ ...state, visible: !state.visible })}
     after={<>{menu}<span className="toolstrip-name">{state.enabled.length} {state.enabled.length === 1 ? "layer" : "layers"}</span></>}
   >
-    {plane && state.visible && <>
-      <Choice<"x" | "y" | "z">
-        ariaLabel="Field view plane"
-        value={plane.axis === "off" || plane.axis === "volume" ? "z" : plane.axis as "x" | "y" | "z"}
-        options={[
-          { value: "x", label: "X" }, { value: "y", label: "Y" }, { value: "z", label: "Z" },
-        ]}
-        onChange={plane.setAxis}
-      />
-      <Slider
-        min={0} max={1} step={0.005}
-        value={plane.slice}
-        ariaLabel="Field slice"
-        onInput={plane.setSlice}
-      />
-      <Value value={`${Math.round(plane.slice * 100)}%`} />
-    </>}
+    {controls}
   </ToolstripRow>
   {shown("pages") && legend("Domain page states", "Last-step volume work. Resident pages may also support pressure and the interface. Absent pages are hidden.", PAGE_LEGEND)}
   {shown("tiles") && legend("Mixed Uniform tile reasons", "Why each h tile is h (the frame head's census), and which velocity sampler it took.", MIXED_TILE_LEGEND)}
-  {shown("particles") && legend("Particle speed", "The method's own particles as spheres, coloured by speed.", PARTICLE_LEGEND)}
+  {shown("particles") && legend("Particle speed", "The method's own particles as spheres, painted by speed.", particleLegend(particleView(state)))}
   {shown("importance") && legend("Mixed Uniform detail importance", "The frame head census's detail importance. Every score is its measure over its threshold: 1 triggers.", importanceLegend(importanceView(state)))}
   </>;
 }

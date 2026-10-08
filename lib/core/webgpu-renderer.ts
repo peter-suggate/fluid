@@ -1,4 +1,4 @@
-import { layerOpacity, legacyVisualLayers, particleLayerShown, sliceLayersShown, type VisualLayerState } from "./visual-layers";
+import { layerOpacity, legacyVisualLayers, particleLayerShown, particleView, sliceLayersShown, type VisualLayerState } from "./visual-layers";
 import { authoredFluidGeometryKey } from "./authored-fluid-edit";
 import { publishOpaqueSurfaceCapability } from "../svo/features/shading/deferred-specialization";
 import { validateLiveFluidEdit, type LiveFluidEdit, type LiveFluidEditResult } from "./live-fluid-edit";
@@ -3773,8 +3773,13 @@ export class FluidLabRenderer {
       undefined,
       // A paused manual step gets one repaint. Its newly published surface
       // must therefore displace the retained mesh even if that repaint lands
-      // inside the ordinary 60 Hz extraction cadence window.
-      !this.simulationRunning,
+      // inside the ordinary 60 Hz extraction cadence window. So must a running
+      // solver's: a draw that passed presentationHeldForSimulationState shows
+      // a state not presented before, and pipelined advances present in pairs
+      // a few milliseconds apart. Pacing the second one's surface away drew
+      // everything read live from the solver (the particle layer, fogged and
+      // hidden by this surface) against the surface of the step before.
+      !this.simulationRunning || (gpuInfo?.submittedTime_s ?? 0) > 0,
       fluidSurfaceRenderMode,
     );
     if (!rasterResult) throw new Error("Water optics pipeline is not ready");
@@ -3897,6 +3902,7 @@ export class FluidLabRenderer {
           // A composed layer carries its own opacity; as a planeless view of
           // its own, the slice control is the opacity, as it is for markers.
           opacity: composedLayers ? layerOpacity(composedLayers, "particles") : gridOverlay.position,
+          view: composedLayers ? particleView(composedLayers) : undefined,
           // Simple water is a murky body the spheres sit in, not a surface
           // they are drawn over.
           water: fluidSurfaceRenderMode === "simple" ? this.waterPipeline.simpleWaterInterfaces : undefined,

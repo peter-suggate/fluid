@@ -1,5 +1,7 @@
 import { fieldVisualization, type Visualization } from "./visualization-registry";
-import { LAYER_PALETTE, LAYER_PARTICLE_SPEED_SCALE, PARTICLE_LEGEND } from "./visual-layers";
+import {
+  LAYER_PALETTE, LAYER_PARTICLE_MOTION_FLOOR, LAYER_PARTICLE_SPEED_SCALE, PARTICLE_LEGEND, type ParticleView,
+} from "./visual-layers";
 import { simpleWaterMurkLength_m, simpleWaterShadingWGSL, type SimpleWaterInterfaces } from "./simple-water-shading";
 
 /**
@@ -18,6 +20,18 @@ import { simpleWaterMurkLength_m, simpleWaterShadingWGSL, type SimpleWaterInterf
  * liquid in front of it and takes the surface's own shading over the top, from
  * the interfaces the water composite just rastered. A sphere the body hides
  * outright is dropped in the vertex stage and costs no fragments.
+ *
+ * The Motion view paints speed as opacity instead of colour: a sphere at rest
+ * is nearly transparent, one at full scale white and opaque, so the picture is
+ * of where the liquid is moving. A faint slow grain must not hide a fast one
+ * behind it, so those samples write no depth, and a solver reorders its records
+ * every step, so they cannot be blended over one another either: the picture
+ * would change with the order. Each adds its optical depth to an offscreen
+ * target, and one composite draws the sum: as opaque as the depths together
+ * make it, in their depth-weighted mean colour, whatever order they came in.
+ * They are also not drawn as separate spheres, which strobe as a fast flow
+ * carries the seed lattice across the pixels: each is a wide smooth footprint
+ * that overlaps its neighbours', so a sheet of samples reads as a sheet.
  *
  * Records are read straight out of the solver's particle buffer. There is no
  * readback and no staging copy. A solver whose live count exists only on the
@@ -47,6 +61,10 @@ export interface GPUFluidParticleSource {
 }
 
 export const PARTICLE_OVERLAY_UNIFORM_BYTES = 144;
+/** Sphere radii a Motion sample's footprint spans; the shader says why. */
+const PARTICLE_MOTION_REACH = 3;
+/** The Motion view's sum: summed by the blend, so a float format that blends. */
+const PARTICLE_MOTION_FORMAT: GPUTextureFormat = "rgba16float";
 
 export interface ParticleOverlayCamera {
   readonly position_m: readonly [number, number, number];
@@ -67,6 +85,8 @@ export interface ParticleOverlayFrame {
   readonly depthNear_m: number;
   /** 1 draws opaque spheres. */
   readonly opacity?: number;
+  /** Absent draws the speed ramp. */
+  readonly view?: ParticleView;
   /** Present when Simple water was composited into the target this frame. */
   readonly water?: SimpleWaterInterfaces;
 }
@@ -74,7 +94,7 @@ export interface ParticleOverlayFrame {
 const paletteWGSL = (name: string, rgb: readonly number[]) =>
   `const ${name}:vec3f=vec3f(${rgb.map(n => (n / 255).toFixed(8)).join(",")});`;
 
-export const particleOverlayShader = /* wgsl */ `
+const particleOverlayUniformsWGSL = /* wgsl */ `
 struct ParticleOverlayUniforms {
   // xyz camera position, w tan(halfFov)
   cameraPosition:vec4f,
@@ -92,10 +112,13 @@ struct ParticleOverlayUniforms {
   origin:vec4f,
   // x Simple water's murk length in metres, zero when there is none to be under
   water:vec4f,
-  // x record stride in floats, y record capacity
+  // x record stride in floats, y record capacity, z one in the Motion view
   records:vec4u,
 }
+`;
 
+export const particleOverlayShader = /* wgsl */ `
+${particleOverlayUniformsWGSL}
 @group(0) @binding(0) var<uniform> overlay:ParticleOverlayUniforms;
 @group(0) @binding(1) var<storage, read> particles:array<f32>;
 @group(0) @binding(2) var sceneDepth:texture_depth_2d;
@@ -107,7 +130,8 @@ struct ParticleOverlayUniforms {
 
 struct VertexOut {
   @builtin(position) position:vec4f,
-  @location(0) @interpolate(flat) color:vec3f,
+  // rgb the sphere's colour, a its opacity before the layer's own.
+  @location(0) @interpolate(flat) color:vec4f,
   // Unit-disc coordinate across the quad.
   @location(1) disc:vec2f,
   // x view depth of the sphere centre, y drawn radius, both in metres.
@@ -124,6 +148,14 @@ struct FragmentOut {
 ${paletteWGSL("PARTICLE_SLOW", LAYER_PALETTE.particleSlow)}
 ${paletteWGSL("PARTICLE_MID", LAYER_PALETTE.particleMid)}
 ${paletteWGSL("PARTICLE_FAST", LAYER_PALETTE.particleFast)}
+${paletteWGSL("PARTICLE_STILL", LAYER_PALETTE.particleStill)}
+${paletteWGSL("PARTICLE_RUSHING", LAYER_PALETTE.particleRushing)}
+const PARTICLE_MOTION_FLOOR:f32=${LAYER_PARTICLE_MOTION_FLOOR};
+// The most one Motion sample can cover: its optical depth has to stay finite.
+const PARTICLE_MOTION_OPAQUE:f32=0.98;
+// A Motion sample is drawn this many sphere radii wide. A sphere's radius is a
+// little under half the seed spacing, so this reaches past the neighbouring samples.
+const PARTICLE_MOTION_REACH:f32=${PARTICLE_MOTION_REACH};
 // A sphere smaller than this would alias into crawling noise, so a distant
 // cloud is drawn slightly fat instead.
 const PARTICLE_MINIMUM_PIXELS:f32=0.75;
@@ -132,9 +164,13 @@ const PARTICLE_MINIMUM_PIXELS:f32=0.75;
 const PARTICLE_HIDDEN_MURK_LENGTHS:f32=7.0;
 ${simpleWaterShadingWGSL}
 
-fn particleSpeedColor(speed:f32)->vec3f {
+fn particleSpeedColor(speed:f32)->vec4f {
   let t=clamp(speed/max(overlay.scale.w,1e-6),0.0,1.0);
-  return mix(mix(PARTICLE_SLOW,PARTICLE_MID,clamp(2.0*t,0.0,1.0)),PARTICLE_FAST,clamp(2.0*t-1.0,0.0,1.0));
+  if (overlay.records.z==1u) {
+    // The eased ramp holds the slow half of the scale near the floor.
+    return vec4f(mix(PARTICLE_STILL,PARTICLE_RUSHING,t),mix(PARTICLE_MOTION_FLOOR,1.0,smoothstep(0.0,1.0,t)));
+  }
+  return vec4f(mix(mix(PARTICLE_SLOW,PARTICLE_MID,clamp(2.0*t,0.0,1.0)),PARTICLE_FAST,clamp(2.0*t-1.0,0.0,1.0)),1.0);
 }
 
 // Distance from the eye to an interface texel, negative where none was drawn.
@@ -149,7 +185,7 @@ fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
 )->VertexOut {
   var corners=array<vec2f,4>(vec2f(-1.0,-1.0),vec2f(1.0,-1.0),vec2f(-1.0,1.0),vec2f(1.0,1.0));
   var output:VertexOut;
-  output.color=vec3f(0.0);
+  output.color=vec4f(0.0);
   output.disc=corners[vertexIndex];
   output.sphere=vec2f(0.0);
   output.water=vec2f(0.0);
@@ -168,7 +204,8 @@ fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
   let tangent=max(overlay.cameraPosition.w,1e-4);
   let viewport=max(overlay.viewport.xy,vec2f(1.0));
   let pixelsPerMetre=0.5*viewport.y/(max(view.z,near)*tangent);
-  let radius=max(overlay.cameraUp.w,PARTICLE_MINIMUM_PIXELS/pixelsPerMetre);
+  let reach=select(1.0,PARTICLE_MOTION_REACH,overlay.records.z==1u);
+  let radius=max(overlay.cameraUp.w*reach,PARTICLE_MINIMUM_PIXELS/pixelsPerMetre);
   // The whole sphere stays in front of the near plane, so its depth is valid.
   if (!(view.z-radius>near)) { return output; }
   let perspective=1.0/(view.z*tangent);
@@ -199,7 +236,15 @@ fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
   return output;
 }
 
-@fragment fn fragmentMain(input:VertexOut)->FragmentOut {
+struct SphereSample {
+  color:vec3f,
+  // Cosine between the sphere's normal and the eye at this fragment.
+  towardCamera:f32,
+  viewDepth_m:f32,
+}
+
+// One fragment of a sphere, discarded off its disc and behind the scenery.
+fn sphereSample(input:VertexOut)->SphereSample {
   let radial=dot(input.disc,input.disc);
   if (radial>1.0 || input.sphere.y<=0.0) { discard; }
   let towardCamera=sqrt(1.0-radial);
@@ -221,7 +266,9 @@ fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
   let wrap=0.5+0.5*dot(normal,SIMPLE_WATER_KEY);
   let light=(mix(0.30,0.50,0.5+0.5*normal.y)+0.62*wrap*wrap)*(0.66+0.34*towardCamera);
   let highlight=pow(max(dot(normal,normalize(SIMPLE_WATER_KEY-forward)),0.0),40.0);
-  var color=input.color*light+vec3f(0.20*highlight);
+  var color=input.color.rgb*light+vec3f(0.20*highlight);
+  // Motion spheres are unlit, so a fast one is white on every side.
+  if (overlay.records.z==1u) { color=input.color.rgb; }
   // The cap of a sphere breaking the surface stays dry; the rest goes under.
   let travel=input.water.x-input.sphere.y*towardCamera;
   if (input.water.y>0.5 && travel>0.0) {
@@ -237,16 +284,64 @@ fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
     color=mix(color,simpleWaterOver(color,travel,facing,rd,overlay.water.x),
       clamp(2.0*travel/input.sphere.y,0.0,1.0));
   }
+  return SphereSample(color,towardCamera,viewDepth_m);
+}
+
+@fragment fn fragmentMain(input:VertexOut)->FragmentOut {
+  let sphere=sphereSample(input);
+  let near=overlay.viewport.z;
   var output:FragmentOut;
-  output.color=vec4f(color,clamp(overlay.cameraRight.w,0.0,1.0));
-  output.depth=clamp(near/max(viewDepth_m,near),0.0,1.0);
+  output.color=vec4f(sphere.color,input.color.a*clamp(overlay.cameraRight.w,0.0,1.0));
+  output.depth=clamp(near/max(sphere.viewDepth_m,near),0.0,1.0);
   return output;
+}
+
+// The Motion view's accumulation, summed by the blend: rgb the colour weighted
+// by the fragment's optical depth, a that depth.
+//
+// A sample is not drawn as its sphere here. Samples are seeded on a lattice and
+// a fast flow carries that lattice a good part of its spacing every frame, so
+// a picture of separate dots strobes: it alternates between the lattice and
+// its shifted copy. Each sample is instead a smooth footprint that falls to
+// nothing at its neighbours, which a lattice of them sums to an even sheet, and
+// it carries the optical depth its sphere would have, spread over that width.
+@fragment fn fragmentMotion(input:VertexOut)->@location(0) vec4f {
+  let sphere=sphereSample(input);
+  let footprint=sphere.towardCamera*sphere.towardCamera;
+  let depth=-log(1.0-min(input.color.a,PARTICLE_MOTION_OPAQUE))
+    *(2.0/(PARTICLE_MOTION_REACH*PARTICLE_MOTION_REACH))*footprint*footprint;
+  return vec4f(sphere.color*depth,depth);
+}
+`;
+
+/** Draws the Motion view's accumulated optical depth over the frame. */
+export const particleMotionCompositeShader = /* wgsl */ `
+${particleOverlayUniformsWGSL}
+@group(0) @binding(0) var<uniform> overlay:ParticleOverlayUniforms;
+@group(0) @binding(1) var accumulated:texture_2d<f32>;
+
+@vertex fn vertexMain(@builtin(vertex_index) vertexIndex:u32)->@builtin(position) vec4f {
+  var corners=array<vec2f,3>(vec2f(-1.0,-1.0),vec2f(3.0,-1.0),vec2f(-1.0,3.0));
+  return vec4f(corners[vertexIndex],0.0,1.0);
+}
+
+@fragment fn fragmentMain(@builtin(position) position:vec4f)->@location(0) vec4f {
+  let sum=textureLoad(accumulated,vec2u(position.xy),0);
+  if (!(sum.a>0.0)) { discard; }
+  return vec4f(sum.rgb/sum.a,(1.0-exp(-sum.a))*clamp(overlay.cameraRight.w,0.0,1.0));
 }
 `;
 
 /** One instanced draw over the solver's resident particle records. */
 export class ParticleOverlay {
   private pipeline?: GPURenderPipeline;
+  /** The Motion view's two: spheres summed into `motion`, and that sum drawn over the frame. */
+  private motionPipeline?: GPURenderPipeline;
+  private compositePipeline?: GPURenderPipeline;
+  private compositeLayout?: GPUBindGroupLayout;
+  private motion?: GPUTexture;
+  private motionView?: GPUTextureView;
+  private compositeGroup?: GPUBindGroup;
   private layout?: GPUBindGroupLayout;
   private uniforms?: GPUBuffer;
   private indirect?: GPUBuffer;
@@ -275,12 +370,17 @@ export class ParticleOverlay {
     const shaderModule = this.device.createShaderModule({
       label: "Fluid particle overlay", code: particleOverlayShader,
     });
-    const info = await shaderModule.getCompilationInfo();
-    const errors = info.messages.filter((message) => message.type === "error");
-    if (errors.length > 0) {
-      throw new Error(`Fluid particle overlay:\n${errors
-        .map((error) => `${error.lineNum}:${error.linePos} ${error.message}`)
-        .join("\n")}`);
+    const compositeModule = this.device.createShaderModule({
+      label: "Fluid particle overlay motion composite", code: particleMotionCompositeShader,
+    });
+    for (const module of [shaderModule, compositeModule]) {
+      const info = await module.getCompilationInfo();
+      const errors = info.messages.filter((message) => message.type === "error");
+      if (errors.length > 0) {
+        throw new Error(`${module.label}:\n${errors
+          .map((error) => `${error.lineNum}:${error.linePos} ${error.message}`)
+          .join("\n")}`);
+      }
     }
     this.uniforms = this.device.createBuffer({
       label: "Fluid particle overlay uniforms",
@@ -328,28 +428,47 @@ export class ParticleOverlay {
         { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: interfaceTexture },
       ],
     });
-    this.pipeline = await this.device.createRenderPipelineAsync({
-      label: "Fluid particle overlay",
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
-      vertex: { module: shaderModule, entryPoint: "vertexMain" },
-      fragment: {
-        module: shaderModule, entryPoint: "fragmentMain",
-        targets: [{
-          format: this.targetFormat,
-          blend: {
-            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha" },
-            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" },
-          },
-        }],
-      },
-      primitive: { topology: "triangle-strip" },
-      // Reversed-Z, as the scene depth is: nearer is greater, and the clear is 0.
-      depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "greater" },
+    this.compositeLayout = this.device.createBindGroupLayout({
+      label: "Fluid particle overlay motion composite bindings",
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: interfaceTexture },
+      ],
     });
+    const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
+    const over: GPUBlendState = {
+      color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha" },
+      alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" },
+    };
+    const sum: GPUBlendComponent = { srcFactor: "one", dstFactor: "one" };
+    [this.pipeline, this.motionPipeline, this.compositePipeline] = await Promise.all([
+      this.device.createRenderPipelineAsync({
+        label: "Fluid particle overlay", layout,
+        vertex: { module: shaderModule, entryPoint: "vertexMain" },
+        fragment: { module: shaderModule, entryPoint: "fragmentMain", targets: [{ format: this.targetFormat, blend: over }] },
+        primitive: { topology: "triangle-strip" },
+        // Reversed-Z, as the scene depth is: nearer is greater, and the clear is 0.
+        depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "greater" },
+      }),
+      // No depth: every sphere reaches the sum. Scenery still hides them: that
+      // test is the fragment stage's own, against the scene depth.
+      this.device.createRenderPipelineAsync({
+        label: "Fluid particle overlay motion", layout,
+        vertex: { module: shaderModule, entryPoint: "vertexMain" },
+        fragment: { module: shaderModule, entryPoint: "fragmentMotion", targets: [{ format: PARTICLE_MOTION_FORMAT, blend: { color: sum, alpha: sum } }] },
+        primitive: { topology: "triangle-strip" },
+      }),
+      this.device.createRenderPipelineAsync({
+        label: "Fluid particle overlay motion composite",
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.compositeLayout] }),
+        vertex: { module: compositeModule, entryPoint: "vertexMain" },
+        fragment: { module: compositeModule, entryPoint: "fragmentMain", targets: [{ format: this.targetFormat, blend: over }] },
+      }),
+    ]);
   }
 
   get ready(): boolean {
-    return Boolean(this.pipeline && this.uniforms && this.layout && this.indirect);
+    return Boolean(this.pipeline && this.motionPipeline && this.compositePipeline && this.uniforms && this.layout && this.indirect);
   }
 
   setSource(source: GPUFluidParticleSource | undefined): void {
@@ -400,6 +519,27 @@ export class ParticleOverlay {
     return this.depthView!;
   }
 
+  private motionViewFor(width: number, height: number): GPUTextureView {
+    if (!this.motion || this.motion.width !== width || this.motion.height !== height) {
+      this.motion?.destroy();
+      this.motion = this.device.createTexture({
+        label: "Fluid particle overlay motion sum",
+        size: [width, height], format: PARTICLE_MOTION_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      });
+      this.motionView = this.motion.createView();
+      this.compositeGroup = this.device.createBindGroup({
+        label: "Fluid particle overlay motion composite bind group",
+        layout: this.compositeLayout!,
+        entries: [
+          { binding: 0, resource: { buffer: this.uniforms! } },
+          { binding: 1, resource: this.motionView },
+        ],
+      });
+    }
+    return this.motionView!;
+  }
+
   encode(
     encoder: GPUCommandEncoder,
     target: GPUTextureView,
@@ -420,12 +560,18 @@ export class ParticleOverlay {
     f.set([...source.positionScale_m, LAYER_PARTICLE_SPEED_SCALE], 20);
     f.set([-0.5 * frame.container_m[0], 0, -0.5 * frame.container_m[2], 0], 24);
     f.set([frame.water ? simpleWaterMurkLength_m(frame.container_m) : 0, 0, 0, 0], 28);
-    u.set([source.strideFloats, source.capacity, 0, 0], 32);
+    const motion = frame.view === "motion";
+    u.set([source.strideFloats, source.capacity, motion ? 1 : 0, 0], 32);
     this.device.queue.writeBuffer(this.uniforms!, 0, this.uniformData);
     if (source.liveCount) {
       encoder.copyBufferToBuffer(source.liveCount.buffer, source.liveCount.byteOffset, this.indirect!, 4, 4);
     }
-    const pass = encoder.beginRenderPass({
+    const pass = encoder.beginRenderPass(motion ? {
+      label: "Fluid particle overlay motion",
+      colorAttachments: [{
+        view: this.motionViewFor(width, height), clearValue: [0, 0, 0, 0], loadOp: "clear", storeOp: "store",
+      }],
+    } : {
       label: "Fluid particle overlay",
       colorAttachments: [{ view: target, loadOp: "load", storeOp: "store" }],
       depthStencilAttachment: {
@@ -433,11 +579,21 @@ export class ParticleOverlay {
         depthClearValue: 0, depthLoadOp: "clear", depthStoreOp: "discard",
       },
     });
-    pass.setPipeline(this.pipeline!);
+    pass.setPipeline(motion ? this.motionPipeline! : this.pipeline!);
     pass.setBindGroup(0, this.bindGroupFor(source.buffer, sceneDepth, frame.water));
     if (source.liveCount) pass.drawIndirect(this.indirect!, 0);
     else pass.draw(4, source.capacity);
     pass.end();
+    if (motion) {
+      const composite = encoder.beginRenderPass({
+        label: "Fluid particle overlay motion composite",
+        colorAttachments: [{ view: target, loadOp: "load", storeOp: "store" }],
+      });
+      composite.setPipeline(this.compositePipeline!);
+      composite.setBindGroup(0, this.compositeGroup!);
+      composite.draw(3);
+      composite.end();
+    }
     return true;
   }
 
@@ -449,6 +605,7 @@ export class ParticleOverlay {
     this.fallbackDepth?.destroy();
     this.fallbackWater?.destroy();
     this.depth?.destroy();
+    this.motion?.destroy();
     this.bindGroups.clear();
     this.uniforms = undefined;
     this.indirect = undefined;
@@ -457,7 +614,12 @@ export class ParticleOverlay {
     this.fallbackWaterViews = undefined;
     this.boundWater = undefined;
     this.depth = undefined;
+    this.motion = undefined;
+    this.motionView = undefined;
+    this.compositeGroup = undefined;
     this.pipeline = undefined;
+    this.motionPipeline = undefined;
+    this.compositePipeline = undefined;
     this.source = undefined;
   }
 }

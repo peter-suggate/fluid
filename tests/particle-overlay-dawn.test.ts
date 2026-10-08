@@ -29,11 +29,11 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
       const buffer = device!.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       device!.queue.writeBuffer(buffer, 0, data); return buffer;
     };
-    async function draw(source: GPUFluidParticleSource, sceneDepth?: GPUTextureView, opacity?: number) {
+    async function draw(source: GPUFluidParticleSource, sceneDepth?: GPUTextureView, opacity?: number, view?: ParticleOverlayFrame["view"]) {
       overlay.setSource(source);
       const encoder = device!.createCommandEncoder();
       encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 0] }] }).end();
-      assert.equal(overlay.encode(encoder, target.createView(), sceneDepth, { ...frame, opacity }), true);
+      assert.equal(overlay.encode(encoder, target.createView(), sceneDepth, { ...frame, opacity, view }), true);
       encoder.copyTextureToBuffer({ texture: target }, { buffer: readback, bytesPerRow: 256 }, [size, size]); device!.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ); const pixels = new Uint8Array(readback.getMappedRange()).slice(); readback.unmap();
       return (x: number, y: number) => [...pixels.subarray(y * 256 + x * 4, y * 256 + x * 4 + 4)];
@@ -56,6 +56,31 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     const edge = pixel(36, 32);
     assert.ok(edge[3] === 255 && edge.slice(0, 3).join() !== centre.slice(0, 3).join(), "the sphere is shaded across its face, not flat");
     assert.ok((await draw({ ...base, buffer: fixed, strideFloats: 8, capacity: 3 }, undefined, 0.5))(32, 32)[3]! < 200, "layer opacity reaches the spheres");
+
+    // The Motion view: speed is opacity and whiteness, each sample a soft footprint three radii wide that hides no other.
+    const moving = await draw({ ...base, buffer: fixed, strideFloats: 8, capacity: 3 }, undefined, undefined, "motion");
+    const lit = moving(32, 32);
+    assert.ok(lit[3]! > 130 && lit[3]! < 170 && lit[0]! >= lit[3]! - 4 && lit[2]! >= lit[3]! - 4, `one sample at full speed is white and translucent: ${lit}`);
+    assert.ok(moving(44, 32)[3]! > 0 && moving(44, 32)[3]! < lit[3]! - 40, `and fades out past its sphere's rim: ${moving(44, 32)}`);
+    const slowInFront = records(8, [
+      [0.5, 0.5, 0.3, 1, 0, 0, 0, 0],
+      [0.5, 0.5, 0.5, 1, 3, 0, 0, 0],
+      [-0.3, 0.5, 0.5, 1, 0, 0, 0, 0],
+    ]);
+    const veiled = await draw({ ...base, buffer: slowInFront, strideFloats: 8, capacity: 3 }, undefined, undefined, "motion");
+    assert.ok(veiled(32, 32)[3]! > 130 && veiled(32, 32)[0]! >= veiled(32, 32)[3]! - 4, `a slow sample in front does not hide the fast one behind it: ${veiled(32, 32)}`);
+    const still = veiled(6, 32)[3]!;
+    assert.ok(still > 0 && still < 8, `a sample at rest is nearly, not fully, transparent: ${veiled(6, 32)}`);
+    assert.equal((await draw({ ...base, buffer: slowInFront, strideFloats: 8, capacity: 3 }))(6, 32)[3], 255, "the speed ramp draws the same sample as an opaque sphere");
+
+    // A solver reorders its records every step, so the picture must not depend on the order: three overlapping
+    // spheres at three speeds, drawn in both orders.
+    const crowd = [[0.5, 0.5, 0.3, 1, 1, 0, 0, 0], [0.55, 0.5, 0.5, 1, 3, 0, 0, 0], [0.45, 0.55, 0.7, 1, 0.5, 0, 0, 0]];
+    const forwards = await draw({ ...base, buffer: records(8, crowd), strideFloats: 8, capacity: 3 }, undefined, undefined, "motion");
+    const backwards = await draw({ ...base, buffer: records(8, [...crowd].reverse()), strideFloats: 8, capacity: 3 }, undefined, undefined, "motion");
+    let reordered = 0;
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) forwards(x, y).forEach((channel, i) => { reordered = Math.max(reordered, Math.abs(channel - backwards(x, y)[i]!)); });
+    assert.ok(reordered <= 1, `the Motion view is the same picture in either record order: channels differ by ${reordered}`);
 
     // Lattice-cell positions in a wider record, and a live prefix counted on the GPU.
     const band = records(12, [

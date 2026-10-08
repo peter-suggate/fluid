@@ -14,7 +14,7 @@ export const VISUAL_LAYERS = [
   { id: "surface", requires: ["phi"], label: "Liquid surface · φ = 0", color: "#ef9f35", opacity: 0.9, mode: 24, description: "Reconstructed liquid and its zero level-set interface. Mixed Uniform colours the interface by the velocity that advected it: teal where all three components were h velocity (h bulk, or retained and extended projected h velocity), amber where the 4h bulk sampler moved it, blended where only some components were h." },
   // The one layer that is not a slice: mode -1 keeps it out of the plane pass,
   // and the particle overlay draws it over the whole liquid instead.
-  { id: "particles", requires: ["particles"], label: "Particles", color: "#8f8cdb", opacity: 1, mode: -1, description: "The method's own particles as shaded spheres through the whole liquid, coloured by speed (full scale at 2 m/s). Under the Simple surface they sit in the water: fogged by the liquid in front of them and hidden once it is deep enough. Narrow-band FLIP draws its velocity samples: the 4h surface band only, none in the Eulerian interior." },
+  { id: "particles", requires: ["particles"], label: "Particles", color: "#8f8cdb", opacity: 1, mode: -1, description: "The method's own particles as shaded spheres through the whole liquid, coloured by speed (full scale at 2 m/s). Under the Simple surface they sit in the water: fogged by the liquid in front of them and hidden once it is deep enough. Narrow-band FLIP draws its velocity samples: the 4h surface band only, none in the Eulerian interior. The Motion view draws them as soft overlapping footprints instead: whiter and more opaque with speed, nearly transparent at rest, so only the moving liquid shows." },
   { id: "grid", requires: ["dimensions"], label: "Grid", color: "#a8c7d8", opacity: 0.7, mode: 0, description: "Represented cell boundaries, independently of field fills. Mixed Uniform draws its live h and 4h bulk owners with orange resolution seams, and hatches the tiles this frame's head relayout changed: orange refined to h, blue coarsened to 4h (a host relayout after the last transport hatches orange)." },
   { id: "velocity", requires: ["velocity"], label: "Velocity", color: "#dce9ee", opacity: 0.9, mode: 26, description: "Cell velocity magnitude and in-plane direction; full scale at 1 m/s. Mixed Uniform draws one arrow per h or 4h bulk owner, the grid momentum is advected on." },
   { id: "release", requires: ["releasedFaces"], label: "Released faces", color: "#f5be52", opacity: 1, mode: 25, description: "Solid faces released by the pressure projection." },
@@ -22,12 +22,17 @@ export const VISUAL_LAYERS = [
 export type VisualLayerId = typeof VISUAL_LAYERS[number]["id"];
 /** What the importance layer shows: every criterion's winner, or one criterion's score. */
 export type ImportanceView = "all" | UniformDetailCriterion;
+/** How the particle layer paints a sphere: opaque on the speed ramp, or
+ * translucent with speed as its opacity and whiteness. */
+export type ParticleView = "speed" | "motion";
 export interface VisualLayerState {
   enabled: VisualLayerId[];
   visible: boolean;
   opacity: Partial<Record<VisualLayerId, number>>;
   /** The importance layer's view; absent is "all" (the canonical default). */
   importance?: ImportanceView;
+  /** The particle layer's view; absent is "speed" (the canonical default). */
+  particles?: ParticleView;
 }
 export function visualLayers(enabled: readonly VisualLayerId[] = ["surface"]): VisualLayerState {
   return { enabled: VISUAL_LAYERS.filter(l => enabled.includes(l.id)).map(l => l.id), visible: true, opacity: {} };
@@ -47,6 +52,13 @@ export function setImportanceView(state: VisualLayerState, view: ImportanceView)
 export function importanceViewCode(state: VisualLayerState): number {
   const view = importanceView(state);
   return view === "all" ? 0 : 1 + UNIFORM_DETAIL_CRITERIA.indexOf(view);
+}
+export const particleView = (state: VisualLayerState): ParticleView => state.particles ?? "speed";
+export function setParticleView(state: VisualLayerState, view: ParticleView): VisualLayerState {
+  const next: VisualLayerState = { ...state, particles: view };
+  // "speed" is stored as absence, as "all" is for the importance view.
+  if (view === "speed") delete next.particles;
+  return next;
 }
 /** Whether a layer is sampled on the slice plane, as every layer but the particle spheres is. */
 export const isSliceLayer = (id: VisualLayerId): boolean => VISUAL_LAYERS.find(l => l.id === id)!.mode >= 0;
@@ -80,6 +92,7 @@ export function readVisualLayers(raw: string | null, fallback = visualLayers()):
     }
     const criterion = UNIFORM_DETAIL_CRITERIA.find(c => c === value.importance);
     if (criterion) state.importance = criterion;
+    if (value.particles === "motion") state.particles = "motion";
     return state;
   } catch { return fallback; }
 }
@@ -105,6 +118,8 @@ export const LAYER_PALETTE = {
   importanceHot: [255, 244, 214], importanceOutline: [250, 248, 240], importanceHeld: [198, 202, 210], importanceDropped: [18, 22, 28],
   // Particle spheres by speed: at rest, half scale, full scale.
   particleSlow: [143, 140, 219], particleMid: [226, 222, 246], particleFast: [244, 158, 52],
+  // Particle spheres in the Motion view: at rest and at full scale.
+  particleStill: [120, 176, 232], particleRushing: [255, 255, 255],
 } as const;
 
 /** The tiles layer's key on mixed Uniform: why each h tile is h (first rule
@@ -169,6 +184,21 @@ export const LAYER_PARTICLE_SPEED_SCALE = 2;
 export const PARTICLE_LEGEND = [
   { color: `linear-gradient(90deg,${rgb(LAYER_PALETTE.particleSlow)},${rgb(LAYER_PALETTE.particleMid)},${rgb(LAYER_PALETTE.particleFast)})`, label: `Speed 0 · ${LAYER_PARTICLE_SPEED_SCALE / 2} · ${LAYER_PARTICLE_SPEED_SCALE} m/s`, title: "Each sphere is one particle, coloured by its own speed.", wide: true },
 ] as const;
+/** Opacity of a particle at rest in the Motion view: nearly, not fully, transparent. */
+export const LAYER_PARTICLE_MOTION_FLOOR = 0.02;
+/** The particle layer's selector: the speed ramp, or speed as opacity. */
+export const PARTICLE_VIEW_OPTIONS: ReadonlyArray<{ value: ParticleView; label: string; hint: string }> = [
+  { value: "speed", label: "Speed", hint: "Opaque spheres, coloured by speed." },
+  { value: "motion", label: "Motion", hint: "Soft overlapping samples: whiter and more opaque where fast, nearly transparent where slow." },
+];
+/** The key of the view the particle layer is showing. */
+export function particleLegend(view: ParticleView): ReadonlyArray<{ color: string; label: string; title: string; wide?: boolean }> {
+  if (view === "speed") return PARTICLE_LEGEND;
+  const still = LAYER_PALETTE.particleStill.join(",");
+  return [
+    { color: `linear-gradient(90deg,rgba(${still},${LAYER_PARTICLE_MOTION_FLOOR}),rgba(${still},0.5) 50%,${rgb(LAYER_PALETTE.particleRushing)})`, label: `Speed 0 · ${LAYER_PARTICLE_SPEED_SCALE / 2} · ${LAYER_PARTICLE_SPEED_SCALE} m/s`, title: "Each soft footprint is one particle: nearly transparent at rest, whiter and more opaque with its own speed.", wide: true },
+  ];
+}
 export function scalarLayerPaint(id: VisualLayerId, value: number): { color: readonly number[]; alpha: number } {
   const p = LAYER_PALETTE;
   const mix = (a: readonly number[], b: readonly number[], t: number) => a.map((v, i) => v + (b[i]! - v) * Math.max(0, Math.min(1, t)));

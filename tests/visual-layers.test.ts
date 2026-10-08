@@ -1,7 +1,7 @@
 import "../lib/methods";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { VISUAL_LAYERS, visualLayers, readVisualLayers, writeVisualLayers, legacyVisualLayers, toggleVisualLayer } from "../lib/core/visual-layers";
+import { VISUAL_LAYERS, visualLayers, readVisualLayers, writeVisualLayers, legacyVisualLayers, toggleVisualLayer, particleView, setParticleView } from "../lib/core/visual-layers";
 import { uniformLabQuery } from "../advance-lab/uniform-lab-state";
 import { createUIStore } from "../lib/core/stores/ui-store";
 import { parseQueryState, serializeQueryState } from "../lib/core/url-state";
@@ -15,6 +15,16 @@ test("layer selection is canonical, independent and preserves hidden selections"
   assert.deepEqual(readVisualLayers(writeVisualLayers(state)), state);
   assert.deepEqual(toggleVisualLayer(state, "pressure").enabled, ids.filter(id => id !== "pressure"));
   assert.deepEqual(readVisualLayers('{"enabled":["bogus","grid","grid"],"opacity":{"grid":99}}'), { enabled: ["grid"], visible: true, opacity: { grid: 1 } });
+});
+test("the particle view roundtrips a link and defaults to the speed ramp", () => {
+  const motion = setParticleView(visualLayers(["particles"]), "motion");
+  assert.equal(particleView(readVisualLayers(writeVisualLayers(motion))), "motion");
+  assert.deepEqual(setParticleView(motion, "speed"), visualLayers(["particles"]), "the default is stored as absence");
+  assert.equal(particleView(readVisualLayers('{"enabled":["particles"],"particles":"bogus"}')), "speed");
+  const state = parseQueryState("method=uniform-volume&grid=z");
+  state.ui.visualLayers = motion;
+  const query = serializeQueryState("", { presetId: state.presetId, scene: state.scene }, state, state.ui);
+  assert.deepEqual(parseQueryState(query).ui.visualLayers, motion);
 });
 test("old lab links migrate surface/released faces and the independent grid", () => {
   const state = uniformLabQuery.read(new URLSearchParams("field=release&grid=1"));
