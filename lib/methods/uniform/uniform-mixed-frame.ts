@@ -454,7 +454,7 @@ export class UniformMixedFrame {
  }
  /** Every group over the stage scratch or the sharpening list (reserveFine binds them again). */
  private bindStage():void{
-  this.narrowBandFlip?.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity});
+  this.narrowBandFlip?.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity,hanging:this.hanging});
   const f=this.fields,stage:GPUBufferBinding={buffer:this.stageScratch};
   this.transport?.bindScratch(this.stageScratch);
   this.extensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negative,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:stage,params:this.params.extension});

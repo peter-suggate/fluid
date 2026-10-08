@@ -45,7 +45,9 @@ export class GPUPassProfile {
       await read.mapAsync(GPUMapMode.READ);
       const times = new BigUint64Array(read.getMappedRange());
       if (times.every(t => t === 0n)) throw new Error("GPU timestamps were not written");
-      const passes = this.rows.map((r, i) => ({ ...r, ms: Number(times[2 * i + 1] - times[2 * i]) / 1e6 }));
+      // idle_ms is the time since the previous pass ended: the copies and clears encoded between the two.
+      const passes = this.rows.map((r, i) => ({ ...r, ms: Number(times[2 * i + 1] - times[2 * i]) / 1e6,
+        idle_ms: i ? Number(times[2 * i] - times[2 * i - 1]) / 1e6 : 0 }));
       read.unmap(); return passes;
     } finally { output.destroy(); read.destroy(); }
   }

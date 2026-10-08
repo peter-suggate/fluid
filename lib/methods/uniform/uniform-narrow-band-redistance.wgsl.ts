@@ -32,13 +32,20 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
  if(abs(nbTrilinear(v,q).w)<1e-4){distance=min(distance,length(p-origin-q));}
  return distance;
 }
-@compute @workgroup_size(64) fn buildDistance(@builtin(global_invocation_id) gid:vec3u){
- let dims=UM_D+1u;let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- for(var i=gid.x;i<dims.x*dims.y*dims.z;i+=65536u){
-  let p=vec3u(i%dims.x,(i/dims.x)%dims.y,i/(dims.x*dims.y));let initial=umSampleVertex(vec3f(p));
+// A vertex is its cell's tile's; the upper domain faces go with the last
+// cell. The tiles within three of a crossing are written: a sample in a tile
+// within two reads only those.
+@compute @workgroup_size(128) fn buildDistance(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(lane>=125u){return;}
+ let tile=atomicLoad(&bins[NB_BAND_DISTANCE+group.x]);let local=umCorner(lane,5u);let p=4u*umTileCoord(tile)+local;
+ if(any((local==vec3u(4u))&(p<UM_D))){return;}
+ let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+ {
+  let initial=umSampleVertex(vec3f(p));
   var value=initial/h;
   if(abs(initial)>1e-8){
-   let nearest=atomicLoad(&bins[NB_DEPTH_B+cellIndex(vec3i(min(p,UM_D-1u)))]);
+   var nearest=NB_NO_SURFACE;
+   if((atomicLoad(&bins[NB_BAND_REACH+tile])&1u)!=0u){nearest=atomicLoad(&bins[NB_DEPTH_B+cellIndex(vec3i(min(p,UM_D-1u)))]);}
    var distance=max(abs(value),6.0);
    if(nearest!=NB_NO_SURFACE){distance=nbSurfaceDistance(vec3f(p),nearest);}
    // Cell-centre proximity alone can select the wrong interface beside a
@@ -60,18 +67,17 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
    }
    value=sign(initial)*max(distance,1e-8/h);
   }
-  atomicStore(&bins[NB_DEPTH_A+i],bitcast<u32>(value));
+  atomicStore(&bins[NB_DEPTH_A+nbVertexIndex(p)],bitcast<u32>(value));
  }
 }
 fn nbInterfaceVertex(p:vec3u)->bool{
- // Every crossing cell retains itself as its nearest seed. A vertex touching
+ // A vertex touching a crossing cell (its bit in the tile mask)
  // any such cell determines its interpolated zero set: changing its magnitude
  // would move that surface even if its sign stayed fixed.
  for(var k=0u;k<8u;k++){
   let c=vec3i(p)-vec3i(umCorner(k,2u));
   if(any(c<vec3i(0))||any(c>=vec3i(UM_D))){continue;}
-  let index=cellIndex(c);
-  if(atomicLoad(&bins[NB_DEPTH_B+index])==index){return true;}
+  if(nbBandCrossing(vec3u(c))){return true;}
  }
  return false;
 }
@@ -79,7 +85,12 @@ fn nbRedistanceVertex(p:vec3u,width:u32){
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  // Coarse samples retain the reconstructed field and hanging-vertex signs.
  var value=umSampleVertex(vec3f(p));
- if(width==1u&&!nbInterfaceVertex(p)){value=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+nbVertexIndex(p)]))*h;}
+ if(width==1u&&!nbInterfaceVertex(p)){
+  // An h vertex past the reach has no crossing within three tiles: as the
+  // metric field holds one with none near, at least six cells away.
+  if((nbBandReach(min(p,UM_D-1u))&2u)!=0u){value=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+nbVertexIndex(p)]))*h;}
+  else if(abs(value)>1e-8){value=sign(value)*max(abs(value),6.0*h);}
+ }
  textureStore(outputPhi,vec3i(p),vec4f(value));
 }
 @compute @workgroup_size(128) fn redistanceFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){

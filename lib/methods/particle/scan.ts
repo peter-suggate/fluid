@@ -32,14 +32,16 @@ export class ParticleBinScan {
   private levels: { count: number; scan: GPUBindGroup; add?: GPUBindGroup }[] = [];
   private pipelines!: Record<string, GPUComputePipeline>;
   private constructor(private readonly device: GPUDevice) {}
-  static async create(device: GPUDevice, count: number, input: GPUBuffer, output: GPUBuffer, scalars: GPUBuffer, signal?: AbortSignal) {
+  /** The counts and their offsets may each be a range of a larger buffer. */
+  static async create(device: GPUDevice, count: number, input: GPUBuffer | GPUBufferBinding, output: GPUBuffer | GPUBufferBinding, scalars: GPUBuffer, signal?: AbortSignal) {
     const result = new ParticleBinScan(device);
     try {
       const bundle = await gpuCompilationManagerFor(device).acquire({ id: "apic-bin-scan", revision: 1,
         modules: { scan: { source: SOURCE } }, compute: Object.fromEntries(["scan", "add"].map(entryPoint =>
           [entryPoint, { layout: "auto" as const, compute: { module: "scan", entryPoint } }])), render: {} }, { signal });
       result.pipelines = bundle.compute;
-      const resources: { count: number; params: GPUBuffer; input: GPUBuffer; output: GPUBuffer; sums: GPUBuffer }[] = [];
+      const resources: { count: number; params: GPUBuffer; input: GPUBuffer | GPUBufferBinding; output: GPUBuffer | GPUBufferBinding; sums: GPUBuffer }[] = [];
+      const resource = (b: GPUBuffer | GPUBufferBinding): GPUBufferBinding => "buffer" in b ? b : { buffer: b };
       for (;;) {
         const groups = Math.ceil(count / 128), params = result.buffer(16, true), sums = result.buffer(groups * 4);
         device.queue.writeBuffer(params, 0, new Uint32Array([count, 0, 0, 0]));
@@ -49,10 +51,10 @@ export class ParticleBinScan {
       }
       result.levels = resources.map((r, i) => ({ count: r.count,
         scan: device.createBindGroup({ layout: bundle.compute.scan.getBindGroupLayout(0), entries:
-          [r.params, r.input, r.output, r.sums, scalars].map((buffer, binding) => ({ binding, resource: { buffer } })) }),
+          [r.params, r.input, r.output, r.sums, scalars].map((buffer, binding) => ({ binding, resource: resource(buffer) })) }),
         add: i + 1 < resources.length ? device.createBindGroup({ layout: bundle.compute.add.getBindGroupLayout(0), entries:
           [[0, r.params], [1, resources[i + 1].output], [2, r.output], [4, scalars]].map(([binding, buffer]) =>
-            ({ binding: binding as number, resource: { buffer: buffer as GPUBuffer } })) }) : undefined,
+            ({ binding: binding as number, resource: resource(buffer as GPUBuffer | GPUBufferBinding) })) }) : undefined,
       }));
       return result;
     } catch (error) { result.destroy(); throw error; }

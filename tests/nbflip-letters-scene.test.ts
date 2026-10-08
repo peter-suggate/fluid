@@ -66,7 +66,7 @@ test("NB-FLIP Figure 8 is the published grid with nine letters on a ten-frame sc
   const definition = getSceneDefinition(NBFLIP_LETTERS_SCENE_ID), scene = sceneDocument(definition);
   assert.deepEqual(validateScene(scene), []);
   assert.deepEqual(parseScene(serializeScene(scene)).fluid, scene.fluid);
-  assert.deepEqual(definition.methodProfile, { methodId: "uniform-narrow-band-flip", quality: "balanced", overrides: { timeStep: "scene", detailPolicy: "full" } });
+  assert.deepEqual(definition.methodProfile, { methodId: "uniform-narrow-band-flip", quality: "balanced", overrides: { timeStep: "scene" } });
   const h = scene.voxelDomain.finestCellSize_m, c = scene.container;
   assert.equal(h, NBFLIP_LETTERS_CELL_SIZE_M);
   assert.deepEqual([c.width_m, c.height_m, c.depth_m].map((length) => length / h), [...NBFLIP_LETTERS_GRID]);

@@ -11,7 +11,7 @@ import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL } from "./uni
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedSolidWGSL, uniformMixedSolidPipeline, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
-import { UniformMixedMomentumCache } from "./uniform-mixed-momentum-cache";
+import { UniformMixedMomentumCache, type UniformMixedHangingTaps } from "./uniform-mixed-momentum-cache";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import type { GPUFluidParticleSource } from "../../core/webgpu-particle-overlay";
 
@@ -66,6 +66,7 @@ export class UniformNarrowBandFlip {
  private readonly cache:UniformMixedMomentumCache;
  private readonly coarseVelocity:GPUTexture;
  private cacheGroups:Record<string,UniformDetailGroup>={};
+ private stageTaps?:{builder:UniformMixedHangingTaps;group:UniformDetailGroup;unit:GPUTexture};
  constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,readonly coarseParticles=false,private readonly sourceParams?:GPUBuffer){
   const cells=ownership.capacity.lattice.dimensions.reduce((n,v)=>n*v,1);
   const vertices=ownership.capacity.lattice.dimensions.reduce((n,v)=>n*(v+1),1);
@@ -75,8 +76,8 @@ export class UniformNarrowBandFlip {
   this.capacity=Math.min(cells*8,Math.max(1_048_576,cells>>1),Math.floor(device.limits.maxStorageBufferBindingSize/48));
   const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.particles=[buffer("particles A",this.capacity*48),buffer("particles B",this.capacity*48)];
-  this.state=buffer("receipt",48);this.bins=buffer("cell heads, counts, coverage, surface tiles and depth guard",(3*cells+vertices)*4+ownership.capacity.tiles*8);this.next=buffer("links and compact neighbor samples",this.capacity*36);this.params=buffer("parameters",32,true);
-  this.order=new UniformNarrowBandOrder(device,ownership.capacity.lattice.dimensions,this.particles,this.bins,this.next);
+  this.state=buffer("receipt",48);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+ownership.capacity.tiles*32+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*32);this.params=buffer("parameters",32,true);
+  this.order=new UniformNarrowBandOrder(device,ownership.capacity.lattice.dimensions,this.particles,this.bins,this.next,this.state);
   this.refinementParams=buffer("refinement prediction",32,true);
   this.cache=new UniformMixedMomentumCache(device,ownership);
   const size=ownership.capacity.lattice.dimensions.map(n=>n/4+2);
@@ -84,7 +85,7 @@ export class UniformNarrowBandFlip {
   const dims=ownership.capacity.lattice.dimensions;
   const field=(label:string,size:readonly number[])=>device.createTexture({label,size:[...size],dimension:"3d",format:"r32float",usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC});
   this.surfaceSource={contourVertexPhi:true,vertexPhi:field("Narrow-band particle render surface",coarseParticles?dims.map(n=>n+1):[1,1,1]),openFraction:field("Narrow-band render solid fractions",coarseParticles?dims:[1,1,1]),cellSize_m:dims.map((_,a)=>ownership.capacity.lattice.cellSize_m[a]!) as [number,number,number]};
-  this.baseAllocatedBytes=this.capacity*132+(3*cells+vertices)*4+ownership.capacity.tiles*8+112+size.reduce((n,v)=>n*v,16)+(coarseParticles?4*(cells+dims.reduce((n,v)=>n*(v+1),1)):8);
+  this.baseAllocatedBytes=this.capacity*132+(3*cells+vertices)*4+ownership.capacity.tiles*32+128+size.reduce((n,v)=>n*v,16)+(coarseParticles?4*(cells+dims.reduce((n,v)=>n*(v+1),1)):8);
   this.resources=uniformDetailBindLayout(device,{entries:[
    ...[0,1,2,3,4,5].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:(binding===5?"read-only-storage":"storage") as GPUBufferBindingType}})),
    {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
@@ -94,8 +95,16 @@ export class UniformNarrowBandFlip {
    ...(sourceParams?[{binding:16,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
   ]});
  }
- bind(fields:{phi:GPUTexture;phiScratch:GPUTexture;phase:GPUTexture;velocity:GPUTexture;velocityScratch:GPUTexture;departure:GPUTexture;negative:GPUBuffer;negativeScratch:GPUBuffer;negativeDeparture:GPUBuffer;coarseExtended:GPUTexture;unitExtended:GPUTexture}):void{
+ bind(fields:{phi:GPUTexture;phiScratch:GPUTexture;phase:GPUTexture;velocity:GPUTexture;velocityScratch:GPUTexture;departure:GPUTexture;negative:GPUBuffer;negativeScratch:GPUBuffer;negativeDeparture:GPUBuffer;coarseExtended:GPUTexture;unitExtended:GPUTexture;hanging:UniformMixedHangingTaps}):void{
   const f=fields;
+  // Snapshot, update and seed sample velocityScratch after it is rewritten.
+  // Its unit taps are filled first, against this stage's own 4h cache and
+  // into this stage's own texture (viscosity still reads the frame's), so a
+  // seam tap is one load there as it is in advection.
+  // One texture for the solver's life: a detail field is created before the
+  // first layout, and the frame binds its stages again when capacity grows.
+  const unit=this.stageTaps?.unit??f.hanging.createTaps("Narrow-band FLIP stage unit taps");
+  this.stageTaps={builder:f.hanging,unit,group:f.hanging.bind({extended:f.velocityScratch,negative:f.negativeScratch,coarse:this.coarseVelocity},unit)};
   for(const [name,velocity,negative,output] of [["bootstrap",f.velocityScratch,f.negativeScratch,f.departure],["advectParticles",f.velocityScratch,f.negativeScratch,f.departure],["seed",f.departure,f.negativeDeparture,f.velocityScratch],["transfer",f.departure,f.negativeDeparture,f.velocityScratch],["snapshot",f.velocityScratch,f.negativeScratch,f.departure],["surface",f.velocity,f.negative,f.departure],["redistance",f.velocity,f.negative,f.departure],["update",f.velocityScratch,f.negativeScratch,f.departure]] as const){
    this.cacheGroups[name]=this.cache.bind({extended:velocity,negative,coarseExtended:this.coarseVelocity});
    this.groups[name]=[0,1].map(parity=>uniformDetailGroup(this.device,{layout:this.resources,entries:[
@@ -104,7 +113,7 @@ export class UniformNarrowBandFlip {
     {binding:5,resource:{buffer:negative}},{binding:6,resource:{buffer:this.params}},
     {binding:7,resource:name==="redistance"?f.phiScratch:f.phi},{binding:8,resource:velocity},{binding:9,resource:output},
     {binding:10,resource:name==="advectParticles"?f.coarseExtended:this.coarseVelocity},
-    {binding:11,resource:f.unitExtended},{binding:12,resource:this.surfaceSource.vertexPhi},{binding:13,resource:this.surfaceSource.openFraction},{binding:14,resource:name==="redistance"?f.phi:f.phiScratch},
+    {binding:11,resource:name==="snapshot"||name==="update"?unit:f.unitExtended},{binding:12,resource:this.surfaceSource.vertexPhi},{binding:13,resource:this.surfaceSource.openFraction},{binding:14,resource:name==="redistance"?f.phi:f.phiScratch},
     {binding:15,resource:f.phase},
     ...(this.sourceParams?[{binding:16,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
    ]})) as [UniformDetailGroup,UniformDetailGroup];
@@ -118,7 +127,6 @@ export class UniformNarrowBandFlip {
    {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
-   {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
   ]});
   const refine=this.device.createShaderModule({label:"FLIP surface refinement prediction",code:/* wgsl */`
 struct Particle{position:vec4f,velocity:vec4f,before:vec4f}
@@ -127,8 +135,7 @@ struct Particle{position:vec4f,velocity:vec4f,before:vec4f}
 @group(0) @binding(2) var<storage,read_write> joins:array<atomic<u32>>;
 struct Params{dimsDt:vec4f,h:vec4f}
 @group(0) @binding(3) var<uniform> p:Params;
-@group(0) @binding(4) var<storage,read> links:array<u32>;
-@group(0) @binding(5) var<storage,read> bins:array<u32>;
+@group(0) @binding(4) var<storage,read> bins:array<u32>;
 struct Box{low:vec3u,high:vec3u}
 fn sweptSurface(sample:Particle)->Box{
  let dims=vec3u(p.dimsDt.xyz);let tiles=dims/4u;
@@ -136,7 +143,9 @@ fn sweptSurface(sample:Particle)->Box{
  let travel=p.dimsDt.w*motion/p.h.xyz;
  let c=vec3u(clamp(floor(start),vec3f(0),vec3f(dims)-1.0));
  let bank=2u*dims.x*dims.y*dims.z+2u*tiles.x*tiles.y*tiles.z+(dims.x+1u)*(dims.y+1u)*(dims.z+1u);
- let nearest=bins[bank+c.x+dims.x*(c.y+dims.y*c.z)];
+ // The nearest-crossing bank holds a tile only within two tiles of a crossing (its reach bit).
+ let t=c/4u;let reach=bins[bank+dims.x*dims.y*dims.z+4u+2u*tiles.x*tiles.y*tiles.z+t.x+tiles.x*(t.y+tiles.y*t.z)];
+ var nearest=0xffffffffu;if((reach&1u)!=0u){nearest=bins[bank+c.x+dims.x*(c.y+dims.y*c.z)];}
  var low=start-${NARROW_BAND_SURFACE_RADIUS};var high=start+${NARROW_BAND_SURFACE_RADIUS};
  // Interior samples request the actual crossing cell, not their 4h collar.
  // Escaped samples still request their own swept support for reconstruction.
@@ -151,10 +160,11 @@ fn sweptSurface(sample:Particle)->Box{
  let tiles=vec3u(p.dimsDt.xyz)/4u;
  for(var i=gid.x;i<min(count[0],arrayLength(&samples));i+=65536u){
   let sample=samples[i];if(sample.velocity.w < -1.0||sample.before.w==1.0){continue;}
-  let box=sweptSurface(sample);let next=links[i];
-  // A linked successor with a superset sweep can mark for both samples.
-  if(next!=0u&&next-1u<min(count[0],arrayLength(&samples))){
-   let other=samples[next-1u];
+  let box=sweptSurface(sample);
+  // The samples keep their cell order, so the next one is usually a
+  // neighbor: one with a superset sweep can mark for both.
+  if(i+1u<min(count[0],arrayLength(&samples))){
+   let other=samples[i+1u];
    if(other.velocity.w>=-1.0&&other.before.w!=1.0){let b=sweptSurface(other);if(all(b.low<=box.low)&&all(b.high>=box.high)){continue;}}
   }
   for(var z=box.low.z;z<=box.high.z;z++){for(var y=box.low.y;y<=box.high.y;y++){for(var x=box.low.x;x<=box.high.x;x++){
@@ -185,13 +195,23 @@ struct Params{hDt:vec4f,settings:vec4f}
 @group(1) @binding(13) var surfaceOpen:texture_storage_3d<r32float,write>;
 @group(1) @binding(14) var outputPhi:texture_storage_3d<r32float,write>;
 @group(1) @binding(15) var phase:texture_3d<f32>;
+// The spatial order leaves the samples sorted by cell, a tile's 64 cells
+// together and x fastest inside it. A cell's samples are one contiguous run
+// from its start, and the cells of an x row inside a tile follow one another,
+// so a gather reads memory in order and follows no list. The bins hold each
+// cell's count at its order; the head of the link arena holds its start.
+const NB_CELLS:u32=UM_D.x*UM_D.y*UM_D.z;
+fn nbOrder(c:vec3u)->u32{let t=c/4u;let l=c%4u;return 64u*umTileAt(t)+l.x+4u*l.y+16u*l.z;}
+// The samples [x,y) of cells a to b, two cells of one x row of one tile.
+fn nbRun(a:vec3i,b:vec3i)->vec2u{let last=nbOrder(vec3u(b));return vec2u(links[nbOrder(vec3u(a))],links[last]+atomicLoad(&bins[last]));}
+fn nbCellRun(c:vec3i)->vec2u{return nbRun(c,c);}
 // Compact read-mostly neighbor data shares the link arena in disjoint banks.
 // This stays within the ten-storage-buffer limit, including solid bindings.
-fn nbPosition(i:u32)->vec3f{let a=arrayLength(&particles)+4u*i;return bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}
-fn nbMotion(i:u32)->vec4f{let a=5u*arrayLength(&particles)+4u*i;return bitcast<vec4f>(vec4u(links[a],links[a+1u],links[a+2u],links[a+3u]));}
-fn nbStorePosition(i:u32,p:vec4f){let a=arrayLength(&particles)+4u*i;let v=bitcast<vec4u>(p);links[a]=v.x;links[a+1u]=v.y;links[a+2u]=v.z;links[a+3u]=v.w;}
-fn nbStoreMotion(i:u32,p:vec4f){let a=5u*arrayLength(&particles)+4u*i;let v=bitcast<vec4u>(p);links[a]=v.x;links[a+1u]=v.y;links[a+2u]=v.z;links[a+3u]=v.w;}
-const NB_COVERAGE:u32=2u*UM_D.x*UM_D.y*UM_D.z;
+fn nbPosition(i:u32)->vec3f{let a=NB_CELLS+4u*i;return bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}
+fn nbMotion(i:u32)->vec4f{let a=NB_CELLS+4u*(arrayLength(&particles)+i);return bitcast<vec4f>(vec4u(links[a],links[a+1u],links[a+2u],links[a+3u]));}
+fn nbStoreMotion(i:u32,p:vec4f){let a=NB_CELLS+4u*(arrayLength(&particles)+i);let v=bitcast<vec4u>(p);links[a]=v.x;links[a+1u]=v.y;links[a+2u]=v.z;links[a+3u]=v.w;}
+// A tile bank no kernel uses any longer keeps its place before the others.
+const NB_COVERAGE:u32=2u*NB_CELLS;
 const NB_SURFACE_TILES:u32=NB_COVERAGE+UM_T.x*UM_T.y*UM_T.z;
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
@@ -240,29 +260,17 @@ fn gridSupported(p:vec3f)->bool{
 fn nbSourcePhi(p:vec3f,value:f32)->f32{
  ${this.sourceParams?"let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));return umSourceuvSourcePhi(p,value*h)/h;":"return value;"}
 }
-fn store(p:Particle,protectSurface:bool){
+// A sample made at the end of a step joins the tail of the epoch. The next
+// move counts, marks and orders every sample, so nothing is filed for it here.
+fn store(p:Particle){
  let i=atomicAdd(&state[1],1u);if(i>=arrayLength(&particles)){atomicAdd(&state[2],1u);return;}
- particles[i]=p;nbStorePosition(i,p.position);linkParticle(p,i,protectSurface);
+ particles[i]=p;
 }
-fn append(p:Particle,resampling:bool){
- let cell=cellIndex(vec3i(p.position.xyz));
- // Preserve surface samples even when compressed. Thin structures cannot
- // survive an arbitrary per-cell cap. Only deep overlap samples retire.
- let n=atomicAdd(&bins[2u*cell+1u],1u);
- if(resampling&&n>=16u&&particleDepth(p.position.xyz)<-1.0){return;}
- store(p,resampling);
-}
-fn linkParticle(p:Particle,i:u32,protectSurface:bool){
- let cell=cellIndex(vec3i(p.position.xyz));let previous=atomicExchange(&bins[2u*cell],i+1u);links[i]=previous;
- // Idempotent tile writes avoid reading a concurrently stored predecessor's
- // non-atomic particle metadata.
- let lo=max(vec3i(floor((p.position.xyz-2.0)/4.0)),vec3i(0));let hi=min(vec3i(floor((p.position.xyz+2.0)/4.0)),vec3i(UM_T)-1);
+// The tiles a sample's surface can reach.
+fn markSurfaceTiles(position:vec3f){
+ let lo=max(vec3i(floor((position-2.0)/4.0)),vec3i(0));let hi=min(vec3i(floor((position+2.0)/4.0)),vec3i(UM_T)-1);
  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
-  let tile=umTileAt(vec3u(vec3i(x,y,z)));atomicStore(&bins[NB_SURFACE_TILES+tile],1u);
-  // Freeze current survivors' support before the seed dispatch. A particle
-  // entering a formerly empty tile already defines its outer surface; it
-  // must not trigger bootstrap reseeding there. Seed never writes this mask.
-  if(protectSurface){atomicStore(&bins[NB_COVERAGE+tile],1u);}
+  atomicStore(&bins[NB_SURFACE_TILES+umTileAt(vec3u(vec3i(x,y,z)))],1u);
  }}}
 }
 ${narrowBandTraceWGSL("sampleVelocity")}
@@ -270,7 +278,7 @@ ${narrowBandTraceWGSL("sampleVelocity")}
  for(var i=gid.x;i<min(atomicLoad(&state[0]),arrayLength(&source));i+=65536u){
   var p=source[i];var q=p.position.xyz;
   // Solid collision, rather than grid ownership, limits particle motion.
-  if(umCellOpen(vec3i(q))<0.5){continue;}
+  if(umCellOpen(vec3i(q))<0.5){source[i].position.x=-1.0;continue;}
   let ballistic=p.before.w==1.0||!gridSupported(q);p.before.w=max(p.before.w,select(0.0,1.0,ballistic));
   // Uniform stores velocity half a step ahead of position. Ballistic drift
   // uses that midpoint velocity; update supplies the next full gravity kick.
@@ -279,11 +287,12 @@ ${narrowBandTraceWGSL("sampleVelocity")}
   let bound=abs(speed);
   let steps=max(1u,u32(ceil(params.hDt.w*max(bound.x,max(bound.y,bound.z))/0.5)));
   // Trajectory refinement leaves the global pressure timestep unchanged.
-  if(steps>256u){atomicStore(&state[3],1u);continue;}
+  if(steps>256u){atomicStore(&state[3],1u);source[i].position.x=-1.0;continue;}
   let dt=params.hDt.w/f32(steps);
   for(var s=0u;s<steps;s++){
    var end=q+dt*p.velocity.xyz/params.hDt.xyz;
-   if(!ballistic){end=nbTraceStep(q,dt);}
+   // The first subdivision starts where the speed was sampled.
+   if(!ballistic){if(s>0u){speed=sampleVelocity(q)/params.hDt.xyz;}end=nbTraceFrom(q,dt,speed);}
    if(params.settings.y>0.5&&end.y>=f32(UM_D.y)){q=end;break;}
    let endpoint=clamp(end,vec3f(0.01),vec3f(UM_D)-0.01);
    let travel=endpoint-q;let walk=max(1u,u32(ceil(2.0*max(abs(travel.x),max(abs(travel.y),abs(travel.z))))));
@@ -296,17 +305,38 @@ ${narrowBandTraceWGSL("sampleVelocity")}
    for(var axis=0u;axis<3u;axis++){if(endpoint[axis]!=end[axis]){p.velocity[axis]=0.0;}}
    if(hit){break;}
   }
-  if(any(q<vec3f(0))||any(q>=vec3f(UM_D))){continue;}
+  if(any(q<vec3f(0))||any(q>=vec3f(UM_D))){source[i].position.x=-1.0;continue;}
+  // The sample moves where it is stored: the spatial order that follows
+  // reads every slot, drops the ones marked here (a negative x) and takes
+  // each cell's count from the bins. Nothing gathers before it.
   // A trajectory can cross from h into a coarse owner during this step.
-  p.position=vec4f(q,p.position.w);append(p,false);
+  p.position=vec4f(q,p.position.w);source[i]=p;
+  atomicAdd(&bins[nbOrder(vec3u(q))],1u);markSurfaceTiles(q);
  }
 }
 // End-of-step sampling uses the reconstructed surface and projected velocity.
 // Protect the outer h; retire only the deep interior and crowded overlap.
+fn nbKept(i:u32)->bool{
+ // The depth update just stored, of this position in this band.
+ let depth=source[i].velocity.w;let order=nbOrder(vec3u(source[i].position.xyz));
+ // Seeding tops a cell up to its count: the samples it keeps and the crowded ones it sheds.
+ if(depth<-4.0){atomicSub(&bins[order],1u);return false;}
+ // Preserve surface samples even when compressed. Thin structures cannot
+ // survive an arbitrary per-cell cap. Only deep overlap samples retire: the
+ // source is still in cell order, so a sample's place in its run is its rank.
+ return depth>=-1.0||i-links[order]<16u;
+}
+// Each lane compacts one contiguous block of the ordered source, so the
+// survivors stay beside their neighbors, and reserves its slots 32 samples
+// at a time instead of contending for the cursor once a sample.
 @compute @workgroup_size(64) fn resample(@builtin(global_invocation_id) gid:vec3u){
- for(var i=gid.x;i<min(atomicLoad(&state[0]),arrayLength(&source));i+=65536u){
-  let p=source[i];if(particleDepth(p.position.xyz)<-4.0){continue;}
-  append(p,true);
+ let n=min(atomicLoad(&state[0]),arrayLength(&source));let block=(n+65535u)/65536u;
+ let end=min(n,(gid.x+1u)*block);
+ for(var first=gid.x*block;first<end;first+=32u){
+  let size=min(32u,end-first);var keep=0u;
+  for(var k=0u;k<size;k++){if(nbKept(first+k)){keep|=1u<<k;}}
+  var next=atomicAdd(&state[1],countOneBits(keep));
+  for(var k=0u;k<size;k++){if((keep&(1u<<k))!=0u){particles[next]=source[first+k];next++;}}
  }
 }
 // Fit the outer lattice to the sphere reconstruction's nodal interface.
@@ -325,9 +355,11 @@ fn seedShell(lattice:vec3f)->vec4f{
  return vec4f(q,d);
 }
 fn seedCell(c:vec3u,initial:bool){
+ // No tile past the reach is within six cells of the surface.
+ if((nbBandReach(c)&1u)==0u){return;}
  let d=particleDepth(vec3f(c)+0.5);if(d>0.9||d < -4.5){return;}
  if(umCellOpen(vec3i(c))<0.5){return;}
- let count=atomicLoad(&bins[2u*cellIndex(vec3i(c))+1u]);if(count>=8u){return;}
+ let count=atomicLoad(&bins[nbOrder(c)]);if(count>=8u){return;}
  for(var k=count;k<8u;k++){
   let q=vec3f(c)+0.25+0.5*vec3f(umCorner(k,2u));let distance=particleDepth(q);
   if(distance>0.0||distance < -4.0){continue;}
@@ -337,12 +369,12 @@ fn seedCell(c:vec3u,initial:bool){
   // field. Section 3.2: liquid made from a description gets its whole band,
   // at initialization and where a source has just made it.
   if(!initial&&distance>-1.0&&nbSourcePhi(q,1.0)>=0.0){continue;}
-  if(distance<=-NB_SURFACE_RADIUS){let v=sampleVelocity(q);append(Particle(vec4f(q,1),vec4f(v,distance),vec4f(v,0)),false);continue;}
+  if(distance<=-NB_SURFACE_RADIUS){let v=sampleVelocity(q);store(Particle(vec4f(q,1),vec4f(v,distance),vec4f(v,0)));continue;}
   let shell=seedShell(q);let p=shell.xyz;
   if(shell.w>0.0||umCellOpen(vec3i(p))<0.5){continue;}
-  // A shell sample can land in another cell. Leave that cell's count alone:
-  // its own seeding decision must not depend on dispatch order.
-  let v=sampleVelocity(p);store(Particle(vec4f(p,1),vec4f(v,particleDepth(p)),vec4f(v,0)),false);
+  // A shell sample can land in another cell, whose own seeding decision
+  // does not see it: no count changes here, whatever the dispatch order.
+  let v=sampleVelocity(p);store(Particle(vec4f(p,1),vec4f(v,particleDepth(p)),vec4f(v,0)));
  }
 }
 @compute @workgroup_size(64) fn seed(@builtin(global_invocation_id) gid:vec3u){
@@ -369,9 +401,9 @@ fn transferFace(face:UMFace)->f32{
  let width=1.0;let lo=max(vec3i(floor(q-1.5*width)),vec3i(0));let hi=min(vec3i(ceil(q+1.5*width))-1,vec3i(UM_D)-1);
  var momentum=0.0;var total=0.0;
  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
-  var link=atomicLoad(&bins[2u*cellIndex(vec3i(x,y,z))]);
-  for(var j=0u;link!=0u;j++){
-   let i=link-1u;let motion=nbMotion(i);link=links[i];if(motion.w==1.0){continue;}
+  let run=nbCellRun(vec3i(x,y,z));
+  for(var i=run.x;i<run.y;i++){
+   let motion=nbMotion(i);if(motion.w==1.0){continue;}
    let r=(q-nbPosition(i))/width;let w=weight(r.x)*weight(r.y)*weight(r.z);
    total+=w;momentum+=w*motion[face.axis];
   }
@@ -424,24 +456,22 @@ ${uniformMixedFaceDispatchWGSL("transferFallback","transferFace(face)",true,"val
  }
 }
 @compute @workgroup_size(64) fn commitCount(@builtin(global_invocation_id) gid:vec3u){if(gid.x==0u){let n=min(atomicLoad(&state[1]),arrayLength(&particles));atomicStore(&state[0],n);atomicStore(&state[1],n);}}
-@compute @workgroup_size(64) fn coverage(@builtin(global_invocation_id) gid:vec3u){
- for(var t=gid.x;t<UM_T.x*UM_T.y*UM_T.z;t+=65536u){atomicStore(&bins[NB_COVERAGE+t],select(0u,1u,atomicLoad(&bins[NB_SURFACE_TILES+t])!=0u));}
-}
 ${narrowBandCoarseTransferWGSL}
 ${narrowBandSurfaceWGSL}
 `,[]);
   // Advection borrows the exact extended-field unit taps Uniform already
-  // prepared. Later FLIP stages read their own fresh 4h cache and resolve
-  // fine seam taps directly, leaving Uniform's force inputs untouched.
-  const modules=[false,true].map(unitTaps=>uniformDetailModule(this.device,{label:`Uniform narrow-band FLIP ${unitTaps?"extended":"stage"}`,code:uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(sourceCode(unitTaps),["transfer"],"8u*umLaunchJobCount()"),["couple"],"(umCounts.y+3u)/4u"),["coupleFine"],"umCounts.x"),["redistanceFine"],"umCounts.x")}));
+  // prepared; snapshot, update and seed fill their own from the field they
+  // sample (stageTaps). The other stages read their own fresh 4h cache and
+  // resolve fine seam taps in place.
+  const modules=[false,true].map(unitTaps=>uniformDetailModule(this.device,{label:`Uniform narrow-band FLIP ${unitTaps?"extended":"stage"}`,code:uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(sourceCode(unitTaps),["depthSeeds"],"atomicLoad(&bins[NB_BAND])"),["depthNearest"],"atomicLoad(&bins[NB_BAND+1u])"),["buildDistance"],"atomicLoad(&bins[NB_BAND+2u])"),["transfer"],"8u*umLaunchJobCount()"),["couple"],"(umCounts.y+3u)/4u"),["coupleFine"],"umCounts.x"),["redistanceFine"],"umCounts.x")}));
   for(const module of modules){
    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
-  await Promise.all([false,true].flatMap(coarse=>["advectParticles","seed","seedInitial","classify","transfer","transferCoarse","snapshot","update","surface","couple","coupleFine","coverage","commitCount","resample","diagnoseBefore","diagnoseAfter","buildDistance","depthSeeds","depthSpreadX","depthSpreadY","depthSpreadZ","redistanceFine","redistanceCoarse"].map(async entryPoint=>{
+  await Promise.all([false,true].flatMap(coarse=>["advectParticles","seed","seedInitial","classify","transfer","transferCoarse","snapshot","update","surface","couple","coupleFine","commitCount","resample","diagnoseBefore","diagnoseAfter","buildDistance","depthTiles","depthSeeds","depthLists","depthNearest","redistanceFine","redistanceCoarse"].map(async entryPoint=>{
    if((entryPoint==="transferCoarse"&&!coarse)||(entryPoint==="surface"&&!this.coarseParticles))return;
-   const module=modules[entryPoint==="advectParticles"?1:0]!;
+   const module=modules[["advectParticles","snapshot","update","seed"].includes(entryPoint)?1:0]!;
    const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint} ${coarse?"4h":"mixed"}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,nbCoarseOnly:+coarse,...s}}})).catch(e=>{throw new Error(`${entryPoint} ${coarse}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(`${entryPoint}:${coarse}`,p);
   })));
@@ -449,7 +479,7 @@ ${narrowBandSurfaceWGSL}
  }
  private dispatch(encoder:GPUCommandEncoder,entry:string,groupName?:string):void{
   const pass=encoder.beginComputePass({label:`Narrow-band FLIP ${entry}`});
-  pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.groups[groupName??(entry==="resample"?"update":entry==="diagnoseBefore"||entry==="diagnoseAfter"||entry==="buildDistance"||entry.startsWith("depth")?"surface":entry==="transferCoarse"||entry==="classify"?"transfer":entry==="couple"||entry==="coupleFine"||entry==="coverage"||entry==="commitCount"?"surface":entry)]![this.parity]!.group);
+  pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.groups[groupName??(entry==="resample"?"update":entry==="diagnoseBefore"||entry==="diagnoseAfter"||entry==="buildDistance"||entry.startsWith("depth")?"surface":entry==="transferCoarse"||entry==="classify"?"transfer":entry==="couple"||entry==="coupleFine"||entry==="commitCount"?"surface":entry)]![this.parity]!.group);
   if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
   const selected=this.pipelines.get(`${entry}:${this.coarseOnly}`)!;
   const pipeline=this.solid?.select(selected)??selected;
@@ -465,12 +495,14 @@ ${narrowBandSurfaceWGSL}
   this.bandCurrent=false;
   this.device.queue.writeBuffer(this.params,0,new Float32Array([...this.ownership.capacity.lattice.cellSize_m,dt,0.95,+openTop,gravity,0]));
   const cells=this.ownership.capacity.lattice.dimensions.reduce((n,v)=>n*v,1);
-  const clearBins=()=>{encoder.clearBuffer(this.bins,0,cells*8);encoder.clearBuffer(this.bins,cells*8+this.ownership.capacity.tiles*4,this.ownership.capacity.tiles*4);};
-  const clear=()=>{encoder.clearBuffer(this.state,4,8);clearBins();};
   encoder.clearBuffer(this.state,16,32);
   this.bootstrap(encoder);
-  clear();this.dispatch(encoder,"advectParticles");
-  this.order.encode(encoder,this.parity);this.parity=1-this.parity;
+  // The samples move in place, counting themselves into clear bins and
+  // marking the tiles they reach; the order packs them into the other buffer.
+  encoder.clearBuffer(this.state,4,8);encoder.clearBuffer(this.bins,0,cells*8);
+  encoder.clearBuffer(this.bins,cells*8+this.ownership.capacity.tiles*4,this.ownership.capacity.tiles*4);
+  this.dispatch(encoder,"advectParticles");
+  this.order.encode(encoder,1-this.parity);
   this.dispatch(encoder,"commitCount");
  }
  private bootstrap(encoder:GPUCommandEncoder):void{
@@ -479,7 +511,7 @@ ${narrowBandSurfaceWGSL}
   encoder.clearBuffer(this.state,4,8);encoder.clearBuffer(this.bins,0,cells*8);
   encoder.clearBuffer(this.bins,cells*8+this.ownership.capacity.tiles*4,this.ownership.capacity.tiles*4);
   this.measureBand(encoder);this.dispatch(encoder,"buildDistance");this.cache.encode(encoder,this.cacheGroups.bootstrap!);
-  this.dispatch(encoder,"seedInitial","bootstrap");this.dispatch(encoder,"coverage");this.dispatch(encoder,"commitCount");
+  this.dispatch(encoder,"seedInitial","bootstrap");this.dispatch(encoder,"commitCount");
   this.parity=1-this.parity;this.started=true;
  }
  /** Called only for enabled automatic refinement. Explicit Requested/Full
@@ -494,7 +526,7 @@ ${narrowBandSurfaceWGSL}
    {binding:0,resource:{buffer:this.activeParticles}},{binding:1,resource:{buffer:this.state}},
    {binding:2,resource:{buffer:target.buffer,offset:target.wordOffset*4,size:4*Math.ceil(this.ownership.capacity.tiles/32)}},
    {binding:3,resource:{buffer:this.refinementParams}},
-   {binding:4,resource:{buffer:this.next}},{binding:5,resource:{buffer:this.bins}},
+   {binding:4,resource:{buffer:this.bins}},
   ]});
   const pass=encoder.beginComputePass({label:"Narrow-band FLIP surface refinement"});pass.setPipeline(this.refinementPipeline!);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1024);pass.end();
  }
@@ -503,7 +535,8 @@ ${narrowBandSurfaceWGSL}
   // Each FLIP stage samples a different field. Rebuild the small 4h cache
   // after every grid write; keep Uniform's extended-field caches intact.
   this.dispatch(encoder,"diagnoseAfter");this.cache.encode(encoder,this.cacheGroups.seed!);this.dispatch(encoder,"classify");this.dispatch(encoder,this.coarseOnly?"transferCoarse":"transfer");}
- snapshot(encoder:GPUCommandEncoder):void{this.cache.encode(encoder,this.cacheGroups.snapshot!);this.dispatch(encoder,"snapshot");}
+ snapshot(encoder:GPUCommandEncoder):void{this.cache.encode(encoder,this.cacheGroups.snapshot!);this.encodeStageTaps(encoder);this.dispatch(encoder,"snapshot");}
+ private encodeStageTaps(encoder:GPUCommandEncoder):void{if(this.stageTaps&&this.ownership.capacity.fineTiles>0)this.stageTaps.builder.encode(encoder,this.stageTaps.group);}
  /** The crossing set is unchanged by this redistance, so its search also
   * serves end-step particle membership; forces and pressure never edit phi. */
  redistance(encoder:GPUCommandEncoder):void{
@@ -512,16 +545,18 @@ ${narrowBandSurfaceWGSL}
   this.dispatch(encoder,"redistanceCoarse","redistance");this.bandCurrent=true;
  }
  private measureBand(encoder:GPUCommandEncoder,group?:string):void{
-  for(const entry of ["depthSeeds","depthSpreadX","depthSpreadY","depthSpreadZ"])this.dispatch(encoder,entry,group);
+  // The search's tile banks follow the cell and vertex banks: counts, masks and reach start clear.
+  const d=this.ownership.capacity.lattice.dimensions,cells=d.reduce((n,v)=>n*v,1),tiles=this.ownership.capacity.tiles;
+  encoder.clearBuffer(this.bins,(3*cells+d.reduce((n,v)=>n*(v+1),1)+2*tiles)*4,(4+3*tiles)*4);
+  for(const entry of ["depthTiles","depthSeeds","depthLists","depthNearest"])this.dispatch(encoder,entry,group);
  }
  update(encoder:GPUCommandEncoder):void{
-  if(!this.bandCurrent){this.measureBand(encoder);this.dispatch(encoder,"buildDistance");}this.bandCurrent=false;this.cache.encode(encoder,this.cacheGroups.update!);this.dispatch(encoder,"update");
+  if(!this.bandCurrent){this.measureBand(encoder);this.dispatch(encoder,"buildDistance");}this.bandCurrent=false;this.cache.encode(encoder,this.cacheGroups.update!);this.encodeStageTaps(encoder);this.dispatch(encoder,"update");
+  // The ordered epoch compacts into the other buffer; the bins keep its counts for the seeding.
   this.parity=1-this.parity;
-  const cells=this.ownership.capacity.lattice.dimensions.reduce((n,v)=>n*v,1);
-  encoder.clearBuffer(this.state,4,4);encoder.clearBuffer(this.bins,0,cells*8);
-  encoder.clearBuffer(this.bins,cells*8+this.ownership.capacity.tiles*4,this.ownership.capacity.tiles*4);
+  encoder.clearBuffer(this.state,4,4);
   this.dispatch(encoder,"resample");this.dispatch(encoder,"seed","update");
-  this.dispatch(encoder,"coverage");this.dispatch(encoder,"commitCount");
+  this.dispatch(encoder,"commitCount");
   if(this.coarseParticles)this.dispatch(encoder,"surface");this.parity=1-this.parity;
  }
  noteReceipt(words:Uint32Array):void{
@@ -532,5 +567,5 @@ ${narrowBandSurfaceWGSL}
   // reseeding is deferred; never destroy a surface to make room for it.
   if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?"trajectory exceeded 256 substeps":"nonfinite velocity"}`);
  }
- destroy():void{this.order.destroy();this.surfaceSource.vertexPhi.destroy();this.surfaceSource.openFraction.destroy();this.coarseVelocity.destroy();this.refinementParams.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params])b.destroy();}
+ destroy():void{this.order.destroy();this.surfaceSource.vertexPhi.destroy();this.surfaceSource.openFraction.destroy();this.coarseVelocity.destroy();this.stageTaps?.unit.destroy();this.refinementParams.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params])b.destroy();}
 }

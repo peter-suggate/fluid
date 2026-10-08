@@ -175,27 +175,34 @@ gpuTest("NB-FLIP bounded distance sweeps match a brute-force nearest-crossing se
  await withUniformDevice("NB-FLIP bounded distance sweeps",async device=>{
   const dims=[16,12,8],cells=dims.reduce((a,b)=>a*b,1),index=(x:number,y:number,z:number)=>x+dims[0]!*(y+dims[1]!*z);
   const seeds=[[0,0,0],[15,11,7],[8,6,4],[2,10,3],[12,1,2],[4,4,7],[9,10,0]];
-  const words=new Uint32Array(cells+dims.reduce((a,b)=>a*(b+1),1)).fill(0xffffffff);for(const [x,y,z] of seeds)words[index(x!,y!,z!)]=index(x!,y!,z!);
+  // The shader's banks with no surface-tile bank before them: nodal distances, nearest cells, then the search's tile banks.
+  const tiles=cells/64,vertices=dims.reduce((a,b)=>a*(b+1),1),nearest=tiles+vertices,band=nearest+cells,mask=band+4,search=mask+4*tiles;
+  const words=new Uint32Array(band+4+6*tiles);words.fill(0xffffffff,0,band);
+  for(const [x,y,z] of seeds){const tile=(x!>>2)+(dims[0]!/4)*((y!>>2)+(dims[1]!/4)*(z!>>2)),bit=(x!&3)+4*(y!&3)+16*(z!&3);words[mask+2*tile+(bit>>5)]!|=1<<(bit&31);}
+  for(let t=0;t<tiles;t++)words[search+t]=t;
   const bins=device.createBuffer({size:words.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   try{
    device.queue.writeBuffer(bins,0,words);
    const module=device.createShaderModule({code:`
-const UM_D=vec3u(16u,12u,8u);const UM_T=vec3u(0);const NB_SURFACE_TILES=0u;
+const UM_D=vec3u(16u,12u,8u);const UM_T=UM_D/4u;const NB_SURFACE_TILES=0u;
 @group(0) @binding(0) var<storage,read_write> bins:array<atomic<u32>>;
 fn cellIndex(p:vec3i)->u32{return u32(p.x)+UM_D.x*(u32(p.y)+UM_D.y*u32(p.z));}
 fn umCorner(k:u32,n:u32)->vec3u{return vec3u(k%n,(k/n)%n,k/(n*n));}
+fn umTileCoord(t:u32)->vec3u{return vec3u(t%UM_T.x,(t/UM_T.x)%UM_T.y,t/(UM_T.x*UM_T.y));}
+fn umTileMinimumWidth(t:u32)->u32{return 1u;}
 fn umSampleVertex(p:vec3f)->f32{return p.y-6.0;}
 fn umCellOpen(p:vec3i)->f32{return 1.0;}
 fn bandPhi(p:vec3f)->f32{return p.y-6.0;}
 ${narrowBandMembershipWGSL}`});
    const layout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
    const group=device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:bins}}]});
-   const pipelines=await Promise.all(["depthSpreadX","depthSpreadY","depthSpreadZ"].map(entryPoint=>device.createComputePipelineAsync({layout:device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module,entryPoint}})));
-   const encoder=device.createCommandEncoder();for(const pipeline of pipelines){const pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(cells/64));pass.end();}device.queue.submit([encoder.finish()]);
+   // One workgroup a listed tile: every tile here.
+   const pipeline=await device.createComputePipelineAsync({layout:device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module,entryPoint:"depthNearest"}});
+   const encoder=device.createCommandEncoder();{const pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(tiles);pass.end();}device.queue.submit([encoder.finish()]);
    const result=new Uint32Array((await readMixedBuffer(device,bins)).buffer);
    for(let z=0;z<dims[2]!;z++)for(let y=0;y<dims[1]!;y++)for(let x=0;x<dims[0]!;x++){
     const eligible=seeds.filter(s=>Math.abs(s[0]!-x)<=5&&Math.abs(s[1]!-y)<=5&&Math.abs(s[2]!-z)<=5);
-    const actual=result[dims.reduce((a,b)=>a*(b+1),1)+index(x,y,z)]!;
+    const actual=result[nearest+index(x,y,z)]!;
     if(!eligible.length){assert.equal(actual,0xffffffff);continue;}
     const cost=(s:number[])=> (s[0]!-x)**2+(s[1]!-y)**2+(s[2]!-z)**2;
     assert.notEqual(actual,0xffffffff,`missing crossing near ${x},${y},${z}`);

@@ -12,30 +12,35 @@ import { readMixedBuffer, readMixedTexture } from "./helpers/uniform-mixed-nativ
 
 (process.env.WEBGPU_NODE_MODULE?test:test.skip)("FLIP spatial ordering preserves crowded bins, sample identity and compact neighbor positions",async()=>{
  await withUniformDevice("FLIP spatial order",async device=>{
-  const n=257,cells=8**3,data=new Float32Array(n*12),heads=new Uint32Array(cells*2),chain=new Uint32Array(n*9);
+  // The move's half of the contract: each cell's count at its tile-major order, over a clear cursor bank.
+  const n=257,cells=8**3,data=new Float32Array(n*12),counts=new Uint32Array(cells*2),arenaWords=cells+4*n;
+  const orderOf=(cell:number)=>{const x=cell%8,y=Math.floor(cell/8)%8,z=Math.floor(cell/64);return 64*((x>>2)+2*((y>>2)+2*(z>>2)))+(x&3)+4*(y&3)+16*(z&3);};
   for(let i=0;i<n;i++){
    const cell=i<150?19:(i*137)%cells;
    data.set([cell%8+0.25,Math.floor(cell/8)%8+0.25,Math.floor(cell/64)+0.25,i+1,i,-i,0.5*i,1,2,3,4,5],12*i);
-   chain[i]=heads[2*cell]!;heads[2*cell]=i+1;heads[2*cell+1]++;
+   counts[orderOf(cell)]!++;
   }
   const buffer=(size:number)=>device.createBuffer({size,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-  const a=buffer(data.byteLength),b=buffer(data.byteLength),bins=buffer(heads.byteLength),links=buffer(chain.byteLength);
-  device.queue.writeBuffer(b,0,data);device.queue.writeBuffer(bins,0,heads);device.queue.writeBuffer(links,0,chain);
-  const order=new UniformNarrowBandOrder(device,[8,8,8],[a,b],bins,links);
+  const a=buffer(data.byteLength),b=buffer(data.byteLength),bins=buffer(counts.byteLength),links=buffer(4*arenaWords),state=buffer(48);
+  device.queue.writeBuffer(b,0,data);device.queue.writeBuffer(bins,0,counts);device.queue.writeBuffer(state,0,new Uint32Array([n]));
+  const order=new UniformNarrowBandOrder(device,[8,8,8],[a,b],bins,links,state);
   try{
    await order.initialize();const encoder=device.createCommandEncoder();order.encode(encoder,0);device.queue.submit([encoder.finish()]);
-   const sorted=await readMixedBuffer(device,a),newHeads=new Uint32Array((await readMixedBuffer(device,bins)).buffer),arena=await readMixedBuffer(device,links),newLinks=new Uint32Array(arena.buffer),seen=new Set<number>();
-   for(let cell=0;cell<cells;cell++){
-    let link=newHeads[2*cell]!,count=0;
-    while(link){const i=link-1;assert.ok(i<n&&!seen.has(i),"every sample appears in exactly one acyclic bin");seen.add(i);count++;
-     const id=sorted[12*i+3]!-1;assert.deepEqual(sorted.slice(12*i,12*i+12),data.slice(12*id,12*id+12));
-     assert.equal(Math.floor(sorted[12*i]!)+8*(Math.floor(sorted[12*i+1]!)+8*Math.floor(sorted[12*i+2]!)),cell);
-     assert.deepEqual(arena.slice(n+4*i,n+4*i+4),sorted.slice(12*i,12*i+4));link=newLinks[i]!;
+   const sorted=await readMixedBuffer(device,a),arena=await readMixedBuffer(device,links),starts=new Uint32Array(arena.buffer),seen=new Set<number>();
+   assert.equal(new Uint32Array((await readMixedBuffer(device,state)).buffer)[1],n,"the receipt counts the packed samples");
+   let next=0;
+   for(let at=0;at<cells;at++){
+    assert.equal(starts[at],next,"cells in order hold consecutive runs");
+    for(let i=next;i<next+counts[at]!;i++){
+     const id=sorted[12*i+3]!-1;assert.ok(!seen.has(id),"every sample appears in exactly one run");seen.add(id);
+     assert.deepEqual(sorted.slice(12*i,12*i+12),data.slice(12*id,12*id+12));
+     assert.equal(orderOf(Math.floor(sorted[12*i]!)+8*(Math.floor(sorted[12*i+1]!)+8*Math.floor(sorted[12*i+2]!))),at);
+     assert.deepEqual(arena.slice(cells+4*i,cells+4*i+4),sorted.slice(12*i,12*i+4));
     }
-    assert.equal(count,heads[2*cell+1]);
+    next+=counts[at]!;
    }
    assert.equal(seen.size,n);
-  }finally{order.destroy();for(const resource of [a,b,bins,links])resource.destroy();}
+  }finally{order.destroy();for(const resource of [a,b,bins,links,state])resource.destroy();}
  });
 });
 
@@ -121,17 +126,21 @@ import { readMixedBuffer, readMixedTexture } from "./helpers/uniform-mixed-nativ
 
 (process.env.WEBGPU_NODE_MODULE?test:test.skip)("cooperative FLIP transfer matches independent quadratic MAC gathers with crowded and ballistic samples",async()=>{
  await withUniformDevice("FLIP cooperative transfer",async device=>{
-  const n=521,dims=8,cells=dims**3,data=new Float32Array(n*8),heads=new Uint32Array(cells*2),chain=new Uint32Array(n);
+  const n=521,dims=8,cells=dims**3,samples:number[][]=[];
+  // The samples in the spatial order's layout: sorted by tile then cell, each cell's count and first sample at its order.
+  const orderOf=(s:number[])=>{const [x,y,z]=s.map(Math.floor) as [number,number,number];return 64*((x>>2)+2*((y>>2)+2*(z>>2)))+(x&3)+4*(y&3)+16*(z&3);};
   for(let i=0;i<n;i++){
    const x=i<180?3.1+(i%7)*0.11:0.1+((i*137)%780)/100;
    const y=i<180?3.2+(i%5)*0.12:0.1+((i*239)%780)/100;
    const z=i<180?3.1+(i%9)*0.09:0.1+((i*317)%780)/100;
-   data.set([x,y,z,1,Math.sin(i)*2,Math.cos(i)*3,(i%13-6)/3,i%11===0?1:0],i*8);
-   const cell=Math.floor(data[8*i]!)+dims*(Math.floor(data[8*i+1]!)+dims*Math.floor(data[8*i+2]!));
-   chain[i]=heads[2*cell]!;heads[2*cell]=i+1;
+   samples.push([x,y,z,1,Math.sin(i)*2,Math.cos(i)*3,(i%13-6)/3,i%11===0?1:0].map(Math.fround));
   }
+  samples.sort((a,b)=>orderOf(a)-orderOf(b));
+  const data=new Float32Array(samples.flat()),counts=new Uint32Array(cells),starts=new Uint32Array(cells);
+  for(const s of samples)counts[orderOf(s)]!++;
+  for(let at=1;at<cells;at++)starts[at]=starts[at-1]!+counts[at-1]!;
   const buffer=(data:Uint32Array<ArrayBuffer>|Float32Array<ArrayBuffer>)=>{const b=device.createBuffer({size:data.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(b,0,data);return b;};
-  const buffers=[buffer(data),buffer(heads),buffer(chain)];
+  const buffers=[buffer(data),buffer(counts),buffer(starts)];
   const texture=()=>device.createTexture({size:[dims,dims,dims],dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.COPY_SRC});
   const velocity=texture(),output=texture(),initial=new Float32Array(cells*4);
   for(let i=0;i<cells;i++)initial.set([0.3,-0.2,0.7,9],4*i);
@@ -147,7 +156,8 @@ const UM_D=vec3u(8);struct Particle{position:vec4f,motion:vec4f} struct UMOwner{
 fn umAllOwner(g:vec3u)->UMOwner{return UMOwner(g.x,select(0u,1u,g.x<512u));}
 fn umOrigin(o:UMOwner)->vec3u{return vec3u(o.index%8u,(o.index/8u)%8u,o.index/64u);}
 fn particleDepth(p:vec3f)->f32{return p.y-4.0;}
-fn cellIndex(p:vec3i)->u32{return u32(p.x+8*(p.y+8*p.z));}
+fn nbOrder(c:vec3u)->u32{let t=c/4u;let l=c%4u;return 64u*(t.x+2u*(t.y+2u*t.z))+l.x+4u*l.y+16u*l.z;}
+fn nbRun(a:vec3i,b:vec3i)->vec2u{let last=nbOrder(vec3u(b));return vec2u(links[nbOrder(vec3u(a))],links[last]+atomicLoad(&bins[last]));}
 fn nbPosition(i:u32)->vec3f{return particles[i].position.xyz;}
 fn nbMotion(i:u32)->vec4f{return particles[i].motion;}
 fn transferFallback(o:UMOwner){}
@@ -179,12 +189,16 @@ ${narrowBandFineTransferWGSL}
 
 (process.env.WEBGPU_NODE_MODULE?test:test.skip)("tiled FLIP reconstruction matches vertex gathers across crowded bins and closed walls",async()=>{
  await withUniformDevice("FLIP shared reconstruction",async device=>{
-  const n=1129,data=new Float32Array(n*4),heads=new Uint32Array(2*512+2*8),chain=new Uint32Array(n);
+  // The samples in the spatial order's layout: sorted by tile then cell, each cell's count and first sample at its order.
+  const n=1129,samples:number[][]=[],heads=new Uint32Array(2*512+2*8),chain=new Uint32Array(512);
+  const orderOf=(s:number[])=>{const [x,y,z]=s.map(Math.floor) as [number,number,number];return 64*((x>>2)+2*((y>>2)+2*(z>>2)))+(x&3)+4*(y&3)+16*(z&3);};
   for(let i=0;i<n;i++){
    const p=i<700?[3.1+(i%7)*0.11,3.2+(i%5)*0.12,3.1+(i%9)*0.09]:[0.1+((i*137)%780)/100,0.1+((i*239)%780)/100,0.1+((i*317)%780)/100];
-   data.set([...p,1+i%3],4*i);const cell=Math.floor(data[4*i]!)+8*(Math.floor(data[4*i+1]!)+8*Math.floor(data[4*i+2]!));
-   chain[i]=heads[2*cell]!;heads[2*cell]=i+1;
+   samples.push([...p,1+i%3].map(Math.fround));
   }
+  samples.sort((a,b)=>orderOf(a)-orderOf(b));const data=new Float32Array(samples.flat());
+  for(const s of samples)heads[orderOf(s)]!++;
+  for(let at=1;at<512;at++)chain[at]=chain[at-1]!+heads[at-1]!;
   heads.fill(1,1024);
   const buffer=(data:Uint32Array<ArrayBuffer>|Float32Array<ArrayBuffer>)=>{const b=device.createBuffer({size:data.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});device.queue.writeBuffer(b,0,data);return b;};
   const buffers=[buffer(data),buffer(heads),buffer(chain),buffer(new Float32Array(9**3))];
@@ -206,7 +220,8 @@ fn umOrigin(o:UMOwner)->vec3u{let l=o.index%64u;return 4u*umTileCoord(o.tile)+ve
 fn umTileMinimumWidth(t:u32)->u32{return 1u;} fn umTileMaximumWidth(t:u32)->u32{return 1u;}
 fn umVertexAuthority(q:vec3u)->UMOwner{return UMOwner();}
 fn umTileAt(p:vec3u)->u32{return p.x+2u*(p.y+2u*p.z);}
-fn cellIndex(p:vec3i)->u32{return u32(p.x+8*(p.y+8*p.z));}
+fn nbOrder(c:vec3u)->u32{let t=c/4u;let l=c%4u;return 64u*(t.x+2u*(t.y+2u*t.z))+l.x+4u*l.y+16u*l.z;}
+fn nbCellRun(c:vec3i)->vec2u{let o=nbOrder(vec3u(c));return vec2u(links[o],links[o]+atomicLoad(&bins[o]));}
 fn nbPosition(i:u32)->vec3f{return particles[i].position.xyz;}
 fn nbSourcePhi(p:vec3f,value:f32)->f32{return value;}
 fn bandPhi(p:vec3f)->f32{return select(3.0,-2.0,p.x<1.0);}

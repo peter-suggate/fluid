@@ -24,9 +24,27 @@ fn particleSurfaceGather(q:vec3i,member:u32,stride:u32)->f32{
  let x=vec3f(q);var nearest2=4.0;
  for(var bin=member;bin<64u;bin+=stride){
   let cell=q-2+vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u));if(any(cell<vec3i(0))||any(cell>=vec3i(UM_D))){continue;}
-  var link=atomicLoad(&bins[2u*cellIndex(cell)]);
-  for(var j=0u;link!=0u;j++){
-   let index=link-1u;let offset=x-nbPosition(index);link=links[index];nearest2=min(nearest2,dot(offset,offset));
+  let run=nbCellRun(cell);
+  for(var index=run.x;index<run.y;index++){let offset=x-nbPosition(index);nearest2=min(nearest2,dot(offset,offset));}
+ }
+ return nearest2;
+}
+// The same minimum, nearest cells first. A sample in one of the eight cells
+// at the vertex is within sqrt(3); a cell whose box is no nearer than the
+// best sample so far cannot improve on it and is not read. In the band the
+// eight cells settle it, 64 samples in place of the 512 of the whole 4-cube.
+fn particleSurfaceNearest(q:vec3i)->f32{
+ let x=vec3f(q);var nearest2=4.0;
+ for(var ring=0u;ring<2u;ring++){
+  if(ring==1u&&nearest2<=1.0){break;}
+  for(var bin=0u;bin<64u;bin++){
+   let o=vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u))-2;
+   // Whole cells between the vertex and this cell's box, per axis.
+   let gap=max(o,-o-1);if(any(gap>vec3i(0))!=(ring==1u)){continue;}
+   if(f32(dot(gap,gap))>=nearest2){continue;}
+   let cell=q+o;if(any(cell<vec3i(0))||any(cell>=vec3i(UM_D))){continue;}
+   let run=nbCellRun(cell);
+   for(var index=run.x;index<run.y;index++){let offset=x-nbPosition(index);nearest2=min(nearest2,dot(offset,offset));}
   }
  }
  return nearest2;
@@ -39,46 +57,17 @@ fn particleSurface(q:vec3i)->f32{
  return particleSurfaceFinish(q,bulk.x,particleSurfaceGather(q,0u,1u));
 }
 `;
-/** A fine tile's canonical vertices share streamed batches from its 8^3
- * neighboring bins. Batches are compacted in workgroup memory and unbounded
- * in number: a crowded bin never truncates particles or allocates a bucket. */
+/** A fine tile's canonical vertices, one lane each. */
 export const narrowBandTiledSurfaceWGSL=/* wgsl */`
-var<workgroup> nbTileSamples:array<vec3f,128>;
-var<workgroup> nbTileCounter:atomic<u32>;
-var<workgroup> nbTileCount:u32;
 @compute @workgroup_size(128) fn coupleFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(lane>=125u){return;}
  let owner=umAllOwner(vec3u(group.x*64u,0,0));let origin=vec3i(umTileCoord(owner.tile)*4u);
- let local=vec3u(lane%5u,(lane/5u)%5u,lane/25u);let q=origin+vec3i(local);let x=vec3f(q);
- let regular=umTileMaximumWidth(owner.tile)==1u&&umTileMinimumWidth(owner.tile)==1u;
- var owned=false;if(lane<125u){
-  if(regular){owned=all((local>vec3u(0))|(origin==vec3i(0)));}
-  else{let authority=umVertexAuthority(vec3u(q));owned=authority.width==1u&&authority.tile==owner.tile;}
- }
- var bulk=vec2f(0);if(owned){bulk=particleSurfaceBulk(q);}
- if(lane==0u){atomicStore(&nbTileCounter,0u);}workgroupBarrier();
- if(owned&&bulk.y>0.0){atomicOr(&nbTileCounter,1u);}
- if(owned&&bulk.y==0.0){textureStore(outputPhi,q,vec4f(bulk.x*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));}
- workgroupBarrier();if(lane==0u){nbTileCount=atomicLoad(&nbTileCounter);}
- if(workgroupUniformLoad(&nbTileCount)==0u){return;}
- var nearest2=4.0;
- for(var block=0u;block<512u;block+=128u){
-  let bin=block+lane;let c=origin-2+vec3i(i32(bin%8u),i32((bin/8u)%8u),i32(bin/64u));var link=0u;
-  if(bin<512u&&all(c>=vec3i(0))&&all(c<vec3i(UM_D))){link=atomicLoad(&bins[2u*cellIndex(c)]);}
-  loop {
-   if(lane==0u){atomicStore(&nbTileCounter,0u);}workgroupBarrier();
-   if(link!=0u){let i=link-1u;let slot=atomicAdd(&nbTileCounter,1u);nbTileSamples[slot]=nbPosition(i);link=links[i];}
-   workgroupBarrier();if(lane==0u){nbTileCount=atomicLoad(&nbTileCounter);}
-   let count=workgroupUniformLoad(&nbTileCount);if(count==0u){break;}
-   if(owned&&bulk.y>0.0){for(var j=0u;j<count;j++){
-    let offset=x-nbTileSamples[j];nearest2=min(nearest2,dot(offset,offset));
-   }}
-   workgroupBarrier();
-  }
- }
- if(owned&&bulk.y>0.0){
-  let value=particleSurfaceFinish(q,bulk.x,nearest2);
-  textureStore(outputPhi,q,vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
- }
+ let local=vec3u(lane%5u,(lane/5u)%5u,lane/25u);let q=origin+vec3i(local);
+ if(umTileMaximumWidth(owner.tile)==1u&&umTileMinimumWidth(owner.tile)==1u){if(!all((local>vec3u(0))|(origin==vec3i(0)))){return;}}
+ else{let authority=umVertexAuthority(vec3u(q));if(authority.width!=1u||authority.tile!=owner.tile){return;}}
+ let bulk=particleSurfaceBulk(q);var value=bulk.x;
+ if(bulk.y>0.0){value=particleSurfaceFinish(q,bulk.x,particleSurfaceNearest(q));}
+ textureStore(outputPhi,q,vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
 }
 `;
 
@@ -130,11 +119,18 @@ fn nbCoupleVertex(owner:UMOwner,regular:bool,k:u32,lane:u32){
 `;
 
 /** Three fine MAC components share the same particle reads. Their union is
- * 4 cubed bins, versus three separate 4 by 3 by 3 gathers. */
+ * the 4 cubed cells around the cell less the ten that weigh nothing on any of
+ * its three faces, read as 15 x rows. A row is one run of the ordered
+ * samples, or two where it crosses a tile face. A cell's eight lanes look the
+ * runs up between them and then each take every eighth sample of every run:
+ * equal shares of consecutive memory, whatever each cell holds. Eight lanes a
+ * cell also keep a workgroup on one x row of cells, which the band holds or
+ * misses together. */
 export const narrowBandFineTransferWGSL=/* wgsl */`
 var<workgroup> nbMomentum:array<vec3f,64>;
 var<workgroup> nbMass:array<vec3f,64>;
 var<workgroup> nbBlend:array<vec3f,8>;
+var<workgroup> nbRuns:array<vec2u,256>;
 @compute @workgroup_size(64) fn transfer(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  let owner=umAllOwner(vec3u(gid.x/8u,0,0));let origin=umOrigin(owner);
  let team=lane/8u;let member=lane%8u;let centre=vec3f(origin)+0.5;
@@ -148,13 +144,28 @@ var<workgroup> nbBlend:array<vec3f,8>;
   nbBlend[team]=blend;
  }
  workgroupBarrier();
+ let gather=owner.width==1u&&any(nbBlend[team]>vec3f(0));
+ if(gather){
+  let low=vec3i(origin)-1;
+  // The row past both far planes weighs nothing; one in a far plane weighs
+  // nothing in its last cell.
+  for(var row=member;row<16u;row+=8u){
+   let y=low.y+i32(row%4u);let z=low.z+i32(row/4u);var runs=array<vec2u,2>();
+   if(row<15u&&y>=0&&y<i32(UM_D.y)&&z>=0&&z<i32(UM_D.z)){
+    let last=min(low.x+select(3,2,row%4u==3u||row>=12u),i32(UM_D.x)-1);
+    var x=max(low.x,0);
+    for(var part=0u;x<=last;part++){let stop=min(last,x|3);runs[part]=nbRun(vec3i(x,y,z),vec3i(stop,y,z));x=stop+1;}
+   }
+   nbRuns[32u*team+2u*row]=runs[0];nbRuns[32u*team+2u*row+1u]=runs[1];
+  }
+ }
+ workgroupBarrier();
  var momentum=vec3f(0);var total=vec3f(0);
- if(owner.width==1u&&any(nbBlend[team]>vec3f(0))){
-  for(var bin=member;bin<64u;bin+=8u){
-   let c=vec3i(origin)-1+vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u));
-   if(any(c<vec3i(0))||any(c>=vec3i(UM_D))){continue;}
-   var link=atomicLoad(&bins[2u*cellIndex(c)]);
-   while(link!=0u){let i=link-1u;let motion=nbMotion(i);link=links[i];if(motion.w==1.0){continue;}
+ if(gather){
+  for(var slot=0u;slot<30u;slot++){
+   let run=nbRuns[32u*team+slot];
+   for(var i=run.x+member;i<run.y;i+=8u){
+    let motion=nbMotion(i);if(motion.w==1.0){continue;}
     let d=centre-nbPosition(i);let f=d+0.5;
     let wc=vec3f(weight(d.x),weight(d.y),weight(d.z));let wf=vec3f(weight(f.x),weight(f.y),weight(f.z));
     let w=vec3f(wf.x*wc.y*wc.z,wc.x*wf.y*wc.z,wc.x*wc.y*wf.z);
@@ -190,9 +201,9 @@ var<workgroup> coarseSums:array<vec2f,64>;
  if(blend>0.0&&depth<=1.5&&q[axis]<f32(UM_D[axis])){
   let lo=max(vec3i(floor(q-1.5)),vec3i(0));let hi=min(vec3i(ceil(q+1.5)),vec3i(UM_D));let size=vec3u(hi-lo);
   for(var cell=lane;cell<size.x*size.y*size.z;cell+=64u){
-   let p=lo+vec3i(vec3u(cell%size.x,(cell/size.x)%size.y,cell/(size.x*size.y)));var link=atomicLoad(&bins[2u*cellIndex(p)]);
-   for(var j=0u;link!=0u;j++){
-    let i=link-1u;link=links[i];let motion=nbMotion(i);if(motion.w==1.0){continue;}
+   let run=nbCellRun(lo+vec3i(vec3u(cell%size.x,(cell/size.x)%size.y,cell/(size.x*size.y))));
+   for(var i=run.x;i<run.y;i++){
+    let motion=nbMotion(i);if(motion.w==1.0){continue;}
     let r=q-nbPosition(i);let w=weight(r.x)*weight(r.y)*weight(r.z);
     sum+=vec2f(w*motion[axis],w);
    }

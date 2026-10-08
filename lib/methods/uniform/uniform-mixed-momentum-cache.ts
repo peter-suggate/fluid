@@ -99,26 +99,31 @@ export class UniformMixedHangingTaps {
   /** detail: the solver's detail storage. The taps are read atlas-only (no
    * tile outside resident patches is ever a hanging tap), but the texture is
    * face-class: the remap borrows it as the census extension's face scratch. */
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,detail?:UniformDetailStorage){
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly detail?:UniformDetailStorage){
     this.resources=uniformDetailBindLayout(device,{entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:3,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},
     ]});
-    const [x,y,z]=ownership.capacity.lattice.dimensions;
-    const label="Uniform mixed unit velocity taps";
-    this.unitVelocity=detail?detail.createField(label,"atlas","rgba32float"):device.createTexture({label,size:[x!,y!,z!],dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING});
+    this.unitVelocity=this.createTaps("Uniform mixed unit velocity taps");
     // A detail field's bytes are its storage's.
     const t=this.unitVelocity;this.allocatedBytes=detail?0:16*t.width*t.height*t.depthOrArrayLayers;
   }
-  bind(f:UniformMixedHangingTapFields):UniformDetailGroup{
+  /** Another texture this fill can write: the unit taps of a second field,
+   * kept beside unitVelocity (the caller destroys it). */
+  createTaps(label:string):GPUTexture{
+    const [x,y,z]=this.ownership.capacity.lattice.dimensions;
+    return this.detail?this.detail.createField(label,"atlas","rgba32float"):this.device.createTexture({label,size:[x!,y!,z!],dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING});
+  }
+  /** output: a createTaps texture to fill in place of unitVelocity. */
+  bind(f:UniformMixedHangingTapFields,output=this.unitVelocity):UniformDetailGroup{
     const d=this.ownership.capacity.lattice.dimensions;
     for(const [i,t] of [f.extended,f.coarse].entries())
       if(uniformDetailExtent(t).some((n,a)=>n!==(i===0?d[a]:d[a]!/4+2))||t.format!=="rgba32float")throw new Error("Hanging taps require native velocity and the 4h sampling cache");
     return uniformDetailGroup(this.device,{layout:this.resources,entries:[
       {binding:0,resource:f.extended},{binding:1,resource:{buffer:f.negative}},{binding:2,resource:f.coarse},
-      {binding:3,resource:this.unitVelocity},
+      {binding:3,resource:output},
     ]});
   }
   async initialize():Promise<void>{

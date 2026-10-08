@@ -8,10 +8,17 @@
  *   letter as it falls. It is a readback per step, so a tracked run's wall
  *   times are not the benchmark's; pass timestamps are unaffected.
  * --out=DIR writes somewhere other than docs/verification.
+ * --set=key=value overrides one method value over the scene's profile, whose
+ *   coverage is the method's default (dynamic, surface tiles at h);
+ *   --set=detailPolicy=full is the published grid everywhere. Repeatable.
+ * --from=N averages the summary over frames N.. only (rows keep every frame).
  * Every compute pass is timestamped on every step. A pass is projection when
  * its label names the pressure solve; the per-label totals are in the output
  * so that split can be audited. Wall is advance plus completion of one step
- * and excludes the timestamp readback. */
+ * and excludes the timestamp readback; encode is the host's share of it, the
+ * synchronous advance that encodes and submits the step. Between is the GPU
+ * time outside every pass, the copies and clears encoded between two of them;
+ * a row's `before` attributes it to the pass that follows. */
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -38,7 +45,9 @@ const PROJECTION=/pressure|projection/i;
 const definition=getSceneDefinition(NBFLIP_LETTERS_SCENE_ID),scene=structuredClone(sceneDocument(definition)),dt=NBFLIP_LETTERS_TIME_STEP_S;
 assert.equal(definition.methodProfile?.methodId,uniformNarrowBandMethod.id);
 // The values the app resolves for this scene: the method's app defaults under the scene's own overrides.
-const values=resolveMethodValues(uniformNarrowBandMethod,definition.methodProfile!.quality,{...uniformNarrowBandMethod.appDefaults,...definition.methodProfile!.overrides});
+const sets=Object.fromEntries(process.argv.filter(a=>a.startsWith("--set=")).map(a=>{const [key,...value]=a.slice(6).split("=");const text=value.join("=");return [key!,text!==""&&Number.isFinite(Number(text))?Number(text):text==="true"?true:text==="false"?false:text];}));
+const from=Number(option("from")??1);
+const values=resolveMethodValues(uniformNarrowBandMethod,definition.methodProfile!.quality,{...uniformNarrowBandMethod.appDefaults,...definition.methodProfile!.overrides,...sets});
 const [nx,ny,nz]=NBFLIP_LETTERS_GRID,h=scene.voxelDomain.finestCellSize_m;
 // Each letter's highest outline point, as the vertex column under it and the height its liquid starts at.
 const letters=scene.fluid.scheduledDrops!.map((drop,index)=>{
@@ -62,21 +71,23 @@ try {
  assert.deepEqual([solver.info.nx,solver.info.ny,solver.info.nz],[nx,ny,nz],"the published grid");
  for(let frame=1;frame<=steps;frame++){
   const start=performance.now();profile.start();
-  solver.advanceTo(frame*dt,[]);await solver.awaitFrameCompletion();
+  solver.advanceTo(frame*dt,[]);const encode_ms=performance.now()-start;await solver.awaitFrameCompletion();
   const wall_ms=performance.now()-start;
   assert.equal(solver.info.simulationPipelineError,undefined);
   assert.ok(Math.abs((solver.info.completedTime_s??0)-frame*dt)<1e-8,"complete exactly one requested clock step");
   assert.equal(solver.info.encodedSteps,frame,"one solver step a frame");
-  const passes=await profile.finish();let projection_ms=0,rest_ms=0;
+  const passes=await profile.finish();let projection_ms=0,rest_ms=0,between_ms=0;const byLabel:Record<string,number>={},before:Record<string,number>={};
   for(const pass of passes){
+   byLabel[pass.label]=(byLabel[pass.label]??0)+pass.ms;between_ms+=pass.idle_ms;
+   if(pass.idle_ms>0.05)before[pass.label]=(before[pass.label]??0)+pass.idle_ms;
    if(PROJECTION.test(pass.label))projection_ms+=pass.ms;else rest_ms+=pass.ms;
    const total=labels.get(pass.label)??{ms:0,passes:0,dispatches:0};
    total.ms+=pass.ms;total.passes++;total.dispatches+=pass.dispatches;labels.set(pass.label,total);
   }
   const flip=solver.narrowBandFlipInfo!;
-  const row:Record<string,unknown>={frame,time_s:frame*dt,wall_ms,projection_ms,rest_ms,gpu_ms:projection_ms+rest_ms,passes:passes.length,
+  const row:Record<string,unknown>={frame,time_s:frame*dt,wall_ms,encode_ms,projection_ms,rest_ms,gpu_ms:projection_ms+rest_ms,between_ms,before,passes:passes.length,
    particles:flip.particles,particleCapacity:flip.capacity,reseedClipped:flip.reseedClipped,allocatedBytes:solver.info.allocatedBytes,
-   fineTiles:solver.info.uniformMixedFineTiles,bandTiles:solver.info.uniformPressureBandTiles};
+   fineTiles:solver.info.uniformMixedFineTiles,bandTiles:solver.info.uniformPressureBandTiles,labels:byLabel};
   if(track){
    // The highest liquid vertex in each falling letter's column, with the crossing above it interpolated.
    const fields=await readUniformFields(device,solver);
@@ -87,13 +98,13 @@ try {
    }));
   }
   rows.push(row);
-  if(frame%10===0||frame===steps||track)console.log(JSON.stringify(row));
+  if(frame%10===0||frame===steps||track)console.log(JSON.stringify({...row,labels:undefined}));
  }
  const final=await solver.readStats();assert.deepEqual(errors,[]);
- const of=(key:string)=>rows.map(r=>r[key] as number);
- const summary={steps,grid:[nx,ny,nz],cellSize_m:h,dt_s:dt,construction_ms,
-  projection_ms:mean(of("projection_ms")),rest_ms:mean(of("rest_ms")),gpu_ms:mean(of("gpu_ms")),wall_ms:mean(of("wall_ms")),
-  wallMedian_ms:of("wall_ms").sort((a,b)=>a-b)[steps>>1],wallMax_ms:Math.max(...of("wall_ms")),
+ const of=(key:string)=>rows.slice(from-1).map(r=>r[key] as number);
+ const summary={steps,from,sets,grid:[nx,ny,nz],cellSize_m:h,dt_s:dt,construction_ms,
+  projection_ms:mean(of("projection_ms")),rest_ms:mean(of("rest_ms")),gpu_ms:mean(of("gpu_ms")),wall_ms:mean(of("wall_ms")),encode_ms:mean(of("encode_ms")),between_ms:mean(of("between_ms")),
+  wallMedian_ms:of("wall_ms").sort((a,b)=>a-b)[(steps-from+1)>>1],wallMax_ms:Math.max(...of("wall_ms")),
   particles:mean(of("particles")),particlesMax:Math.max(...of("particles")),particleCapacity:rows.at(-1)!.particleCapacity,
   allocatedBytes:mean(of("allocatedBytes")),allocatedBytesMax:Math.max(...of("allocatedBytes")),
   volumeDrift:final.volumeDrift,tracked:track};

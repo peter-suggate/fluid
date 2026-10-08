@@ -1,11 +1,135 @@
-import { cloneScene, defaultScene, type CameraState, type SceneDescription, type ScheduledLiquidDrop } from "./model";
+import { cloneScene, defaultScene, type CameraState, type InitialLiquidVolume, type SceneDescription, type ScheduledLiquidDrop } from "./model";
 import type { LiquidExtrusion } from "./liquid-extrusion";
 import type { MethodProfile } from "./method-contract";
+import type { SolidWorldVoxelPatch } from "./solid-world";
+import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 
 /**
- * Figure 8, "Letters", of Ferstl, Ando, Wojtan, Westermann & Thuerey, *Narrow
- * Band FLIP for Liquid Simulations* (Eurographics 2016) --
- * `docs/papers/narrow-band-flip-2026/ferstl-2016-nbflip/`.
+ * Scenes of Ferstl, Ando, Wojtan, Westermann & Thuerey, *Narrow Band FLIP for
+ * Liquid Simulations* (Eurographics 2016) --
+ * `docs/papers/narrow-band-flip-2026/ferstl-2016-nbflip/` -- rebuilt from the
+ * paper's supplemental video (https://youtu.be/fEj2Hw7Vxd8, 24 fps).
+ *
+ * The paper publishes each scene's grid and little else, so every scene below
+ * says what was measured from the footage and how. What they share comes from
+ * the authors' own mantaflow example of the method, `scenes/flip05_nbflip.py`:
+ *
+ *  - **One video frame is one solver frame.** The step here is one frame.
+ *  - **Gravity is 0.003 of the largest grid dimension**, in cells per frame
+ *    squared: mantaflow scales its `gravity = (0, -0.003, 0)` by that
+ *    dimension. Each scene's fall was also measured, and is stated beside it.
+ *    An inviscid solve has no other scale, so the cell size is whatever makes
+ *    that fall terrestrial gravity at 24 frames a second.
+ *  - **The box is closed and its walls are free-slip.**
+ *  - **Shapes sit on round fractions of the grid.**
+ *
+ * mantaflow's outermost layer of cells is the wall, so its liquid has two
+ * cells fewer on each axis than the published grid. The footage cannot tell
+ * the two apart -- both fit the Teaser's frame to 0.89 px -- and the scenes
+ * here take the published grid as the liquid's box: this method's 4h tiles
+ * need every axis to be a multiple of four.
+ *
+ * They run on Uniform Narrow-band FLIP because that method is this paper's.
+ * Its particle band is 4h where the mantaflow scenes used 3h.
+ */
+
+export const NBFLIP_FRAME_RATE_HZ = 24;
+const GRAVITY_M_S2 = 9.81;
+/** The cell at which a fall of `cellsPerFrame2` is terrestrial gravity. */
+const cellSizeForFall_m = (cellsPerFrame2: number) => GRAVITY_M_S2 / (cellsPerFrame2 * NBFLIP_FRAME_RATE_HZ ** 2);
+/** mantaflow's gravity for a grid, in cells per frame squared. */
+const mantaflowFall = (grid: readonly [number, number, number]) => 0.003 * Math.max(...grid);
+
+/**
+ * Pins the scene's own step -- the method's default is a sixtieth of a second.
+ * Grid coverage is the method's default: dynamic, with the tiles the surface
+ * crosses at the published cell size and the rest of the liquid at 4h.
+ */
+export const NBFLIP_METHOD_PROFILE: MethodProfile = {
+  methodId: "uniform-narrow-band-flip", quality: "balanced", overrides: { timeStep: "scene" },
+};
+
+/**
+ * A closed, free-slip box of `grid` cells (width, height, depth) holding a
+ * pool `poolCells` deep, stepped once a frame for `frames` frames. Surface
+ * tension is zeroed because the paper's solver has none.
+ */
+function nbflipDomain(
+  sceneId: string, grid: readonly [number, number, number], cellSize_m: number, frames: number, poolCells: number,
+): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  const [nx, ny, nz] = grid, h = cellSize_m, dt = 1 / NBFLIP_FRAME_RATE_HZ;
+  scene.sceneId = sceneId;
+  scene.randomSeed = 2016;
+  scene.duration_s = frames * dt;
+  scene.solidVoxels = [];
+  scene.rigidBodies = [];
+  scene.container = {
+    ...scene.container,
+    width_m: nx * h,
+    height_m: ny * h,
+    depth_m: nz * h,
+    fillFraction: poolCells / ny,
+    top: "closed",
+    fluidWallMode: "free-slip",
+  };
+  scene.voxelDomain = { ...scene.voxelDomain, finestCellSize_m: h };
+  scene.nominalResolution = { length_m: h };
+  scene.numerics = { ...scene.numerics, fixedDt_s: dt, maxDt_s: dt };
+  scene.fluid = {
+    ...scene.fluid,
+    gravity_m_s2: { x: 0, y: -GRAVITY_M_S2, z: 0 },
+    surfaceTension_N_m: 0,
+    initialCondition: "tank-fill",
+  };
+  delete scene.fluid.initialDamBreakDimensions_m;
+  delete scene.fluid.initialDamBreakOrigin_m;
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.initialLiquidVolumes;
+  delete scene.fluid.inflow;
+  delete scene.terrain;
+  return scene;
+}
+
+/**
+ * A camera on the domain's centre plane, as a pinhole fit of the footage gives
+ * it: `height` cells above the floor and `back` cells in front of the domain's
+ * centre, pitched down, with its focal length in pixels of the 720 px frame.
+ */
+function footageCamera(cellSize_m: number, height: number, back: number, pitch_deg: number, focal_px: number): Partial<CameraState> {
+  const pitch_rad = pitch_deg * Math.PI / 180;
+  return {
+    azimuth_rad: 0,
+    elevation_rad: pitch_rad,
+    distance_m: back / Math.cos(pitch_rad) * cellSize_m,
+    target_m: { x: 0, y: (height - back * Math.tan(pitch_rad)) * cellSize_m, z: 0 },
+    tanHalfFov: 360 / focal_px,
+  };
+}
+
+/** A box of liquid between two corners given in cells from the domain's minimum corner. */
+function liquidBox(grid: readonly [number, number, number], cellSize_m: number, min: readonly [number, number, number], max: readonly [number, number, number]): InitialLiquidVolume {
+  const at = (cells: readonly [number, number, number]) => ({ x: (cells[0] - grid[0] / 2) * cellSize_m, y: cells[1] * cellSize_m, z: (cells[2] - grid[2] / 2) * cellSize_m });
+  return { shape: "box", min_m: at(min), max_m: at(max) };
+}
+
+/**
+ * An upright solid cylinder standing on the floor, as voxel runs: every cell
+ * whose centre its circle covers, one run per row of z.
+ */
+function cylinderVoxels(centreX: number, centreZ: number, radius: number, height: number): SolidWorldVoxelPatch[] {
+  const runs: SolidWorldVoxelPatch[] = [];
+  for (let z = Math.floor(centreZ - radius); z < centreZ + radius; z++) {
+    const half = Math.sqrt(radius ** 2 - (z + 0.5 - centreZ) ** 2);
+    const from = Math.ceil(centreX - half - 0.5), to = Math.floor(centreX + half - 0.5) + 1;
+    if (to > from) runs.push({ operation: "fill", minimum: [from, 0, z], maximumExclusive: [to, height, z + 1], materialId: VOXEL_MATERIAL_IDS.cylinder });
+  }
+  return runs;
+}
+
+/**
+ * Figure 8, "Letters".
  *
  * What is published and what is not, because the difference decides how much
  * of the scene below is a reconstruction:
@@ -41,15 +165,12 @@ import type { MethodProfile } from "./method-contract";
  *    extruded, which is what a bevelled text object makes. It is a match and
  *    not an identification: the footage's H is about a fifth wider and its E
  *    and F about two cells narrower than these outlines.
- *
- * The scene runs on Uniform Narrow-band FLIP because that method is this
- * paper's. Its particle band is 4h where the figure used 3h.
  */
 
 /** Table 1: "Fig. 8 / Letters, 256 x 192 x 128". Width, height, depth. */
 export const NBFLIP_LETTERS_GRID = [256, 192, 128] as const;
 /** The supplemental video's frame rate; one solver step is one frame. */
-export const NBFLIP_LETTERS_FRAME_RATE_HZ = 24;
+export const NBFLIP_LETTERS_FRAME_RATE_HZ = NBFLIP_FRAME_RATE_HZ;
 export const NBFLIP_LETTERS_TIME_STEP_S = 1 / NBFLIP_LETTERS_FRAME_RATE_HZ;
 /** Measured free fall of the letters, in cells per frame squared. */
 export const NBFLIP_LETTERS_GRAVITY_CELLS_PER_FRAME2 = 0.8;
@@ -214,52 +335,11 @@ export function nbflipLettersDrops(): ScheduledLiquidDrop[] {
 
 export const NBFLIP_LETTERS_SCENE_ID = "nbflip-figure-8-letters";
 
-/**
- * Pins the scene's own step -- the method's default is a sixtieth of a second
- * -- and the published grid everywhere: the paper's solver has one cell size.
- */
-export const NBFLIP_LETTERS_METHOD_PROFILE: MethodProfile = {
-  methodId: "uniform-narrow-band-flip", quality: "balanced", overrides: { timeStep: "scene", detailPolicy: "full" },
-};
+export const NBFLIP_LETTERS_METHOD_PROFILE = NBFLIP_METHOD_PROFILE;
 
-/**
- * `top: "closed"` and free-slip walls are reconstructions: the paper names no
- * boundary conditions. Surface tension is zeroed because its solver has none.
- */
 export function createNbflipLetters(): SceneDescription {
-  const scene = cloneScene(defaultScene);
-  const [nx, ny, nz] = NBFLIP_LETTERS_GRID, h = NBFLIP_LETTERS_CELL_SIZE_M;
-  scene.sceneId = NBFLIP_LETTERS_SCENE_ID;
-  scene.randomSeed = 2016;
-  scene.duration_s = NBFLIP_LETTERS_FRAMES * NBFLIP_LETTERS_TIME_STEP_S;
-  scene.solidVoxels = [];
-  scene.rigidBodies = [];
-  scene.container = {
-    ...scene.container,
-    width_m: nx * h,
-    height_m: ny * h,
-    depth_m: nz * h,
-    fillFraction: NBFLIP_LETTERS_POOL_CELLS / ny,
-    top: "closed",
-    fluidWallMode: "free-slip",
-  };
-  scene.voxelDomain = { ...scene.voxelDomain, finestCellSize_m: h };
-  scene.nominalResolution = { length_m: h };
-  scene.numerics = { ...scene.numerics, fixedDt_s: NBFLIP_LETTERS_TIME_STEP_S, maxDt_s: NBFLIP_LETTERS_TIME_STEP_S };
-  scene.fluid = {
-    ...scene.fluid,
-    gravity_m_s2: { x: 0, y: -NBFLIP_LETTERS_GRAVITY_M_S2, z: 0 },
-    surfaceTension_N_m: 0,
-    initialCondition: "tank-fill",
-    scheduledDrops: nbflipLettersDrops(),
-  };
-  delete scene.fluid.initialDamBreakDimensions_m;
-  delete scene.fluid.initialDamBreakOrigin_m;
-  delete scene.fluid.initialBrickSeeds_m;
-  delete scene.fluid.initialBrickSeedsAdditive;
-  delete scene.fluid.initialLiquidVolumes;
-  delete scene.fluid.inflow;
-  delete scene.terrain;
+  const scene = nbflipDomain(NBFLIP_LETTERS_SCENE_ID, NBFLIP_LETTERS_GRID, NBFLIP_LETTERS_CELL_SIZE_M, NBFLIP_LETTERS_FRAMES, NBFLIP_LETTERS_POOL_CELLS);
+  scene.fluid.scheduledDrops = nbflipLettersDrops();
   return scene;
 }
 
@@ -269,12 +349,70 @@ export function createNbflipLetters(): SceneDescription {
  * degrees, with a 1445 px focal length on a 720 px frame.
  */
 export function nbflipLettersCamera(): Partial<CameraState> {
-  const h = NBFLIP_LETTERS_CELL_SIZE_M, pitch_rad = 19.4 * Math.PI / 180, height = 244.38, back = 469.35;
-  return {
-    azimuth_rad: 0,
-    elevation_rad: pitch_rad,
-    distance_m: back / Math.cos(pitch_rad) * h,
-    target_m: { x: 0, y: (height - back * Math.tan(pitch_rad)) * h, z: 0 },
-    tanHalfFov: 360 / 1445.5,
-  };
+  return footageCamera(NBFLIP_LETTERS_CELL_SIZE_M, 244.38, 469.35, 19.4, 1445.5);
+}
+
+/**
+ * Figures 1 and 9, "Teaser": "a breaking dam hitting a row of cylinders".
+ *
+ *  - **Published**, in Table 1: the grid, 200 x 200 x 200.
+ *  - **Measured**, from the single-view take that opens at video frame 340,
+ *    with a pinhole camera fitted to thirteen edges of the pool and the dam.
+ *    The round numbers below reproject onto those edges to 1.05 px rms; the
+ *    same fit with every length free closes to 0.67 px and lands within a
+ *    cell of each.
+ *
+ * What the fit gives, in cells from the back-left corner of the floor:
+ *
+ *  - **Pool.** 40 deep, a fifth of the grid (39.2 to 40.3 by three readings).
+ *  - **Dam.** A block 60 x 80 x 60 standing on the pool in the back-left
+ *    corner: three tenths of the grid across and deep, and up to six tenths.
+ *    Fifty or sixty-seven across fit five to eight times worse.
+ *  - **Cylinders.** Seven, of radius 5, from the floor to one cell above the
+ *    dam's top. Their centres step 10 across and 25 toward the camera, from
+ *    (50, 175) at the front to (110, 25) at the back. A radius of 4.5 or 5.5
+ *    fits the silhouettes half again as badly.
+ *  - **Scale.** The dam's top and two wall jets fall at 0.60 +- 0.04 cells
+ *    per frame squared, which is mantaflow's 0.003 x 200.
+ *  - **Start.** The take's first frame is not the release: the dam's top has
+ *    already dropped a cell one frame later, as it would a frame and a half
+ *    into its fall. This scene's frame n is the take's frame n - 1.5.
+ *
+ * Liquid never reaches the ceiling in the footage, so closing the top is the
+ * solver's convention and not something the take shows.
+ */
+
+/** Table 1: "Fig. 9 / Teaser, 200^3". */
+export const NBFLIP_TEASER_GRID = [200, 200, 200] as const;
+export const NBFLIP_TEASER_CELL_SIZE_M = cellSizeForFall_m(mantaflowFall(NBFLIP_TEASER_GRID));
+/** Rest depth of the pool, in cells. */
+export const NBFLIP_TEASER_POOL_CELLS = 40;
+/** The dam: its far corner from the back-left corner of the floor, in cells. It stands on the pool. */
+export const NBFLIP_TEASER_DAM_CELLS = [60, 120, 60] as const;
+export const NBFLIP_TEASER_CYLINDER_COUNT = 7;
+export const NBFLIP_TEASER_CYLINDER_RADIUS_CELLS = 5;
+export const NBFLIP_TEASER_CYLINDER_HEIGHT_CELLS = 121;
+/** Frames from the take's first frame to the end of its fade. */
+export const NBFLIP_TEASER_FRAMES = 248;
+export const NBFLIP_TEASER_SCENE_ID = "nbflip-figure-9-teaser";
+
+/** Centre of cylinder `index`, front to back, in cells across (x) and toward the camera (z). */
+export const nbflipTeaserCylinderCentre = (index: number): readonly [x: number, z: number] => [50 + 10 * index, 175 - 25 * index];
+
+export function createNbflipTeaser(): SceneDescription {
+  const grid = NBFLIP_TEASER_GRID, h = NBFLIP_TEASER_CELL_SIZE_M, [damX, damY, damZ] = NBFLIP_TEASER_DAM_CELLS;
+  const scene = nbflipDomain(NBFLIP_TEASER_SCENE_ID, grid, h, NBFLIP_TEASER_FRAMES, NBFLIP_TEASER_POOL_CELLS);
+  scene.fluid.initialLiquidVolumes = [liquidBox(grid, h, [0, NBFLIP_TEASER_POOL_CELLS, 0], [damX, damY, damZ])];
+  scene.solidVoxels = Array.from({ length: NBFLIP_TEASER_CYLINDER_COUNT }, (_, index) =>
+    cylinderVoxels(...nbflipTeaserCylinderCentre(index), NBFLIP_TEASER_CYLINDER_RADIUS_CELLS, NBFLIP_TEASER_CYLINDER_HEIGHT_CELLS)).flat();
+  return scene;
+}
+
+/**
+ * The take's camera, static throughout: on the centre plane, 309 cells up and
+ * 431 in front of the domain's centre, pitched down 29.4 degrees, with a
+ * 1400 px focal length on the 720 px frame.
+ */
+export function nbflipTeaserCamera(): Partial<CameraState> {
+  return footageCamera(NBFLIP_TEASER_CELL_SIZE_M, 308.8, 430.7, 29.4, 1400);
 }
