@@ -4,40 +4,38 @@ export const NARROW_BAND_SURFACE_RADIUS=0.875;
 // A quarter-cell lattice has two tangential offsets of h/4 at a vertex.
 export const NARROW_BAND_SEED_DEPTH=Math.sqrt(NARROW_BAND_SURFACE_RADIUS**2-0.125);
 export const narrowBandParticleSurfaceWGSL=/* wgsl */`
-// Particles supply a candidate interface, not an enclosure constraint.
-// Calm regions follow the Eulerian surface; ballistic samples never enter it.
+// Ferstl et al. 2016, Eq. 4: phi <- min(phi' + h, phi_p). The advected level
+// set, shrunk by one cell, is united with the surface of the samples, so the
+// samples overrule it: a sheet or droplet they carry is liquid whatever grid
+// advection made of it, and liquid they have left is not. phi_p is the union
+// of one sphere per sample. A tile no sample reaches has no phi_p and keeps
+// phi' as it is; liquid a source adds this step joins after the union.
 const NB_SURFACE_RADIUS=${NARROW_BAND_SURFACE_RADIUS};
 const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
 fn particleSurfaceBulk(q:vec3i)->vec2f{
  let bulk=bulkDepth(vec3f(q));let tile=umTileAt(min(vec3u(q)/4u,UM_T-1u));
- let gather=atomicLoad(&bins[NB_SURFACE_TILES+tile])!=0u&&abs(bulk)<2.0;
+ // Deeper than this the shrunk level set wins the union whatever the samples
+ // are; nothing bounds how far into the air they may carry the surface.
+ let gather=atomicLoad(&bins[NB_SURFACE_TILES+tile])!=0u&&bulk>-2.0;
  return vec2f(bulk,select(0.0,1.0,gather));
 }
 // Squared distance to the nearest sample within 2h; 4 when there is none.
-fn particleSurfaceGather(q:vec3i,member:u32,stride:u32)->vec2f{
- let x=vec3f(q);var nearest2=4.0;var activity=0.0;
+fn particleSurfaceGather(q:vec3i,member:u32,stride:u32)->f32{
+ let x=vec3f(q);var nearest2=4.0;
  for(var bin=member;bin<64u;bin+=stride){
   let cell=q-2+vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u));if(any(cell<vec3i(0))||any(cell>=vec3i(UM_D))){continue;}
   var link=atomicLoad(&bins[2u*cellIndex(cell)]);
   for(var j=0u;link!=0u;j++){
-   let index=link-1u;let sample=nbSurfaceSample(index);link=links[index];
-   if(sample.w>=3.0){continue;}let offset=x-sample.xyz;let d2=dot(offset,offset);nearest2=min(nearest2,d2);
-   if(d2<2.25){activity=max(activity,clamp(sample.w-1.0,0.0,1.0));}
+   let index=link-1u;let offset=x-nbPosition(index);link=links[index];nearest2=min(nearest2,dot(offset,offset));
   }
  }
- return vec2f(nearest2,activity);
+ return nearest2;
 }
-fn particleSurfaceFinish(q:vec3i,bulk:f32,gather:vec2f)->f32{
- let base=nbRelaxedBulk(q,bulk,gather.y);
- if(gather.x>=4.0){return base;}
- let candidate=min(bulk+1.0,sqrt(gather.x)-NB_SURFACE_RADIUS);
- // Unlike NB-FLIP's union, correction cannot engulf an escaped particle or
- // erase a sheet in one step. Eulerian tracking always retains authority.
- let correction=clamp(candidate-base,-0.5,0.5);
- return base+0.5*gather.y*(1.0-exp(-8.0*params.hDt.w))*correction;
+fn particleSurfaceFinish(q:vec3i,bulk:f32,nearest2:f32)->f32{
+ return nbSourcePhi(vec3f(q),min(bulk+1.0,sqrt(nearest2)-NB_SURFACE_RADIUS));
 }
 fn particleSurface(q:vec3i)->f32{
- let bulk=particleSurfaceBulk(q);if(bulk.y==0.0){return nbRelaxedBulk(q,bulk.x,0.0);}
+ let bulk=particleSurfaceBulk(q);if(bulk.y==0.0){return bulk.x;}
  return particleSurfaceFinish(q,bulk.x,particleSurfaceGather(q,0u,1u));
 }
 `;
@@ -45,7 +43,7 @@ fn particleSurface(q:vec3i)->f32{
  * neighboring bins. Batches are compacted in workgroup memory and unbounded
  * in number: a crowded bin never truncates particles or allocates a bucket. */
 export const narrowBandTiledSurfaceWGSL=/* wgsl */`
-var<workgroup> nbTileSamples:array<vec4f,128>;
+var<workgroup> nbTileSamples:array<vec3f,128>;
 var<workgroup> nbTileCounter:atomic<u32>;
 var<workgroup> nbTileCount:u32;
 @compute @workgroup_size(128) fn coupleFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -59,35 +57,33 @@ var<workgroup> nbTileCount:u32;
  var bulk=vec2f(0);if(owned){bulk=particleSurfaceBulk(q);}
  if(lane==0u){atomicStore(&nbTileCounter,0u);}workgroupBarrier();
  if(owned&&bulk.y>0.0){atomicOr(&nbTileCounter,1u);}
- if(owned&&bulk.y==0.0){textureStore(outputPhi,q,vec4f(nbRelaxedBulk(q,bulk.x,0.0)*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));}
+ if(owned&&bulk.y==0.0){textureStore(outputPhi,q,vec4f(bulk.x*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));}
  workgroupBarrier();if(lane==0u){nbTileCount=atomicLoad(&nbTileCounter);}
  if(workgroupUniformLoad(&nbTileCount)==0u){return;}
- var nearest2=4.0;var activity=0.0;
+ var nearest2=4.0;
  for(var block=0u;block<512u;block+=128u){
   let bin=block+lane;let c=origin-2+vec3i(i32(bin%8u),i32((bin/8u)%8u),i32(bin/64u));var link=0u;
   if(bin<512u&&all(c>=vec3i(0))&&all(c<vec3i(UM_D))){link=atomicLoad(&bins[2u*cellIndex(c)]);}
   loop {
    if(lane==0u){atomicStore(&nbTileCounter,0u);}workgroupBarrier();
-   if(link!=0u){let i=link-1u;let slot=atomicAdd(&nbTileCounter,1u);nbTileSamples[slot]=nbSurfaceSample(i);link=links[i];}
+   if(link!=0u){let i=link-1u;let slot=atomicAdd(&nbTileCounter,1u);nbTileSamples[slot]=nbPosition(i);link=links[i];}
    workgroupBarrier();if(lane==0u){nbTileCount=atomicLoad(&nbTileCounter);}
    let count=workgroupUniformLoad(&nbTileCount);if(count==0u){break;}
    if(owned&&bulk.y>0.0){for(var j=0u;j<count;j++){
-    let sample=nbTileSamples[j];if(sample.w>=3.0){continue;}
-    let offset=x-sample.xyz;let d2=dot(offset,offset);nearest2=min(nearest2,d2);
-    if(d2<2.25){activity=max(activity,clamp(sample.w-1.0,0.0,1.0));}
+    let offset=x-nbTileSamples[j];nearest2=min(nearest2,dot(offset,offset));
    }}
    workgroupBarrier();
   }
  }
  if(owned&&bulk.y>0.0){
-  let value=particleSurfaceFinish(q,bulk.x,vec2f(nearest2,activity));
+  let value=particleSurfaceFinish(q,bulk.x,nearest2);
   textureStore(outputPhi,q,vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
  }
 }
 `;
 
 export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiledSurfaceWGSL+/* wgsl */`
-var<workgroup> nbSurfaceNearest:array<vec2f,64>;
+var<workgroup> nbSurfaceNearest:array<f32,64>;
 var<workgroup> nbSurfaceBoundary:atomic<u32>;
 var<workgroup> nbSurfaceBoundaryCount:u32;
 fn nbCoupleVertex(owner:UMOwner,regular:bool,k:u32,lane:u32){
@@ -97,14 +93,14 @@ fn nbCoupleVertex(owner:UMOwner,regular:bool,k:u32,lane:u32){
   if(regular){owned=all((corner!=vec3u(0))|(origin==vec3u(0)));}
   else{owned=umVertexAuthority(vec3u(q)).index==owner.index;}
  }
- var bulk=vec2f(0);var gather=vec2f(4,0);
+ var bulk=vec2f(0);var gather=4.0;
  if(owned){bulk=particleSurfaceBulk(q);if(bulk.y>0.0){gather=particleSurfaceGather(q,member,16u);}}
  nbSurfaceNearest[lane]=gather;workgroupBarrier();
  for(var stride=8u;stride>0u;stride/=2u){
-  if(member<stride){nbSurfaceNearest[lane]=vec2f(min(nbSurfaceNearest[lane].x,nbSurfaceNearest[lane+stride].x),max(nbSurfaceNearest[lane].y,nbSurfaceNearest[lane+stride].y));}workgroupBarrier();
+  if(member<stride){nbSurfaceNearest[lane]=min(nbSurfaceNearest[lane],nbSurfaceNearest[lane+stride]);}workgroupBarrier();
  }
  if(member==0u&&owned){
-  var value=nbRelaxedBulk(q,bulk.x,0.0);if(bulk.y>0.0){value=particleSurfaceFinish(q,bulk.x,nbSurfaceNearest[lane]);}
+  var value=bulk.x;if(bulk.y>0.0){value=particleSurfaceFinish(q,bulk.x,nbSurfaceNearest[lane]);}
   textureStore(outputPhi,q,vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
  }
  workgroupBarrier();

@@ -492,7 +492,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly narrowBandFlip: boolean;
   private readonly narrowBandCoarseParticles: boolean;
   private narrowBandFinePadding: number;
-  get secondaryParticles(){return this.mixedFrame?.narrowBandFlip?.secondaryParticles;}
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
   get narrowBandFlipInfo(){const stage=this.mixedFrame?.narrowBandFlip;return stage?{particles:stage.count,capacity:stage.capacity,reseedClipped:stage.reseedClipped,bandWidth:4,fineGridPadding:this.narrowBandFinePadding,flipRatio:0.95,...stage.diagnostics}:undefined;}
   private readonly geometricVolume: boolean;
@@ -3300,7 +3299,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.mixedFramesInFlight++;
       const handled=receipt.then(receipt=>{
         if(this.disposed)return;
-        Object.assign(this.executionInfo,{...(this.narrowBandFlip?{narrowBandFlipParticles:this.mixedFrame?.narrowBandFlip?.count,narrowBandFlipReseedClipped:this.mixedFrame?.narrowBandFlip?.reseedClipped,narrowBandFlipUnsupportedParticles:this.mixedFrame?.narrowBandFlip?.diagnostics.unsupported,narrowBandFlipSprayParticles:this.mixedFrame?.narrowBandFlip?.diagnostics.spray,narrowBandFlipMaxSurfaceDistance:this.mixedFrame?.narrowBandFlip?.diagnostics.afterMaxOutside}:{}),simulatedTime_s:advance.nextTime_s,completedTime_s:advance.nextTime_s,
+        Object.assign(this.executionInfo,{...(this.narrowBandFlip?{narrowBandFlipParticles:this.mixedFrame?.narrowBandFlip?.count,narrowBandFlipReseedClipped:this.mixedFrame?.narrowBandFlip?.reseedClipped,narrowBandFlipUnsupportedParticles:this.mixedFrame?.narrowBandFlip?.diagnostics.unsupported,narrowBandFlipMaxSurfaceDistance:this.mixedFrame?.narrowBandFlip?.diagnostics.afterMaxOutside}:{}),simulatedTime_s:advance.nextTime_s,completedTime_s:advance.nextTime_s,
           uniformPressureAcceptedResidual:receipt.residual,uniformPressureCyclesExecuted:receipt.cycles,uniformPressureCyclesConverged:true,
           uniformPressureCyclesEncoded:receipt.encoded,uniformPressureCyclesConfigured:this.pressureSchedule.fullCycles+this.pressureSchedule.vCycles,
           uniformVolumeDustCells:receipt.dustOwners,uniformVolumeDustMass_cells:receipt.dustMass_cells,

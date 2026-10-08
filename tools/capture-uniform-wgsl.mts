@@ -7,6 +7,7 @@
 //   default = dynamic coarsening; fine = all-h simulation (detailPolicy full). Pressure is always band.
 //   env FRAMES=n (frames to encode; the mock's zero readbacks stop after frame 1's encode,
 //   reported as "did not converge ... 0 cycles" — expected).
+//   env METHOD=narrow-band (Uniform Narrow-band FLIP's modules instead of Uniform Geometric's).
 //   env DETAIL=<spec> (QA detail storage: identity, packed, compact:<slots>, compact:all, each [:edge]).
 // Naga quirks that Dawn accepts: "already in scope", "read-write storage textures prior to MSL 1.2".
 import {mkdirSync,writeFileSync,readdirSync,readFileSync} from "node:fs";
@@ -16,6 +17,7 @@ import {join} from "node:path";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
+import {uniformNarrowBandMethod} from "../lib/methods/uniform/uniform-narrow-band-method";
 import {setUniformDetailStorageForQA,uniformDetailOptionsFromSpec} from "../lib/methods/uniform/uniform-detail-fields";
 
 // The dump defaults to the system temp directory: a relative default left a wgsl/ folder in the repository.
@@ -55,7 +57,9 @@ const scene=structuredClone(sceneDocument(getSceneDefinition(sceneId)));scene.fl
 if(arm!=="default"&&arm!=="fine")throw new Error(`Unknown arm ${arm}`);
 const dynamic=arm==="default";
 const t0=performance.now();
-const solver:any=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",{detailPolicy:dynamic?"dynamic":"full",surfaceDeficitBalancing:"off"},undefined,()=>{});
+if(process.env.METHOD&&process.env.METHOD!=="narrow-band")throw new Error(`Unknown METHOD ${process.env.METHOD}`);
+const method=process.env.METHOD?uniformNarrowBandMethod:uniformVolumeMethod;
+const solver:any=await method.createSolverAsync!(device,scene,"balanced",{...(process.env.METHOD?method.appDefaults:{}),detailPolicy:dynamic?"dynamic":"full",surfaceDeficitBalancing:"off"},undefined,()=>{});
 console.log(JSON.stringify({modules,pipelines:pipes.length,ms:performance.now()-t0}));
 const by=new Map<string,{n:number,bytes:number,label:string}>();for(const [id,label,bytes] of pipes){const k=String(id);const e=by.get(k)??{n:0,bytes,label};e.n++;by.set(k,e);}
 const rows=[...by].map(([id,e])=>({id,...e,cost:e.n*e.bytes})).sort((a,b)=>b.cost-a.cost);let tot=0;for(const r of rows)tot+=r.cost;

@@ -338,7 +338,7 @@ export class UniformMixedFrame {
   this.coarseCache=caches[0]!;
   this.transport=f.narrowBandFlip?undefined:new UniformMixedTransportStage(device,layout,f.volume,f.volumeScratch,f.departure,{phi:f.phi,params:this.params.sharpen,reductions:this.reductions,resolved:true},f.sourceParams,solid,capacity.fineTiles);
   const o=this.ownership=this.transport?.ownership??new UniformMixedOwnership(device,layout,true,capacity.fineTiles);
-  this.narrowBandFlip=f.narrowBandFlip?new UniformNarrowBandFlip(device,o,solid,f.narrowBandCoarseParticles):undefined;
+  this.narrowBandFlip=f.narrowBandFlip?new UniformNarrowBandFlip(device,o,solid,f.narrowBandCoarseParticles,f.sourceParams):undefined;
   this.displacement=solid&&!f.narrowBandFlip?new UniformMixedSolidDisplacement(device,o,solid):undefined;
   this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocity,f.negative,f.velocityScratch,f.negativeScratch,true,!!this.narrowBandFlip);
   this.cleanup=f.narrowBandFlip?undefined:new UniformMixedCleanup(device,o,solid,true);
@@ -760,8 +760,8 @@ export class UniformMixedFrame {
    // measures volume from phi, and momentum writes this scratch field later.
    if(!this.narrowBandFlip)this.surface.encode(encoder,"traceCells",this.surfaceGroups[0]);
    if(this.narrowBandFlip){
-    // Activity-weighted particle corrections inform the advected interface
-    // before distance, occupancy and pressure; spray cannot claim liquid.
+    // Eq. 4: the samples overrule the advected interface before distance,
+    // occupancy and pressure read it.
     this.copyWhole(encoder,this.fields.phiScratch,this.fields.phi);
     this.narrowBandFlip.reconstruct(encoder);
     this.phiResolve.encode(encoder,this.phiResolveGroups.scratch);
@@ -777,7 +777,11 @@ export class UniformMixedFrame {
    trace?.phase(encoder,V.coupling);
    // Apply shifts canonical vertices only; resolved readers below and the
    // next advect read the hanging texels.
-   if(this.narrowBandFlip||(p.totalSurfaceVolume!==false&&(p.surfaceVolumeRounds??2)>0)){this.surfaceVolume!.encode(encoder,this.surfaceVolumeGroup,this.narrowBandFlip?2:p.surfaceVolumeRounds??2);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);this.narrowBandFlip?.refreshBand(encoder);}
+   // NB-FLIP measures its volume against the budget and does not move the
+   // surface to meet it: a shift the samples do not share is undone by the
+   // next step's union with them, so it would be paid again every step.
+   if(this.narrowBandFlip)this.surfaceVolume!.encode(encoder,this.surfaceVolumeGroup,1,false,false);
+   else if(p.totalSurfaceVolume!==false&&(p.surfaceVolumeRounds??2)>0){this.surfaceVolume!.encode(encoder,this.surfaceVolumeGroup,p.surfaceVolumeRounds??2);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}
    // Nothing after this pass writes phi: the next advance starts from it,
    // and the renderer's 4h vertex base is published from it.
    this.coarsePhi.encode(encoder);

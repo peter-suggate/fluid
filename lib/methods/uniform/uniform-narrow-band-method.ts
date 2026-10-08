@@ -6,10 +6,13 @@ import { WebGPUUniformReferenceSolver } from "./webgpu-uniform-reference";
 
 /** A fixed 4h particle band with independently controlled grid coverage. */
 const fixed:MethodParamValues={sharpeningSweeps:0,sharpeningDistance:0,totalSurfaceVolume:"on",surfaceVolumeRounds:2,surfaceDeficitBalancing:"off",volumeDustThreshold:0,orphanDustThreshold:0,phiDrain:"off"};
-// Restrict elective refinement to crossings. Particle swept-support joins and
-// mandatory solid promotion retain priority over this distance filter.
+// Fine tiles at surface crossings, and nothing else: shape at tolerance 0 asks
+// for every surface tile, the distance filter keeps only the crossing ones, and
+// no other criterion, margin or hold is on. Particle swept-support joins and
+// mandatory solid promotion are not elective and stay.
 const fineBand:MethodParamValues={detailPolicy:"dynamic",detailSolidContact:"on",detailSurface:"on",detailSurfaceDistance:0,
- detailShape:"on",detailShapeTolerance:0,detailThin:"off",detailNearFocus:"off",detailBulk:"off",detailMarginTiles:1};
+ detailShape:"on",detailShapeTolerance:0,detailThin:"off",detailStrain:"off",detailRotation:"off",detailImpact:"off",detailApproach:"off",
+ detailNearFocus:"off",detailBulk:"off",detailMarginTiles:0,detailHoldSteps:0};
 export const narrowBandFlipValues=(values:MethodParamValues={})=>({
  ...resolveUniformGeometricValues({...fineBand,...values}),...fixed,
  fineGridPadding:Math.max(0,Math.min(4,Number.isFinite(Number(values.fineGridPadding))?Number(values.fineGridPadding):1)),
@@ -18,7 +21,7 @@ export const narrowBandFlipValues=(values:MethodParamValues={})=>({
 export const uniformNarrowBandMethod:SimulationMethod={
  ...uniformVolumeMethod,
  id:"uniform-narrow-band-flip",label:"Uniform Narrow-band FLIP",shortLabel:"Narrow-band FLIP",badge:"NARROW-BAND FLIP · EXPERIMENTAL",
- description:"An advected level set tracks liquid, with bounded particle corrections in active regions and smoothing of small calm-surface wrinkles. Escaped spray uses ballistic motion and optical droplet rendering without claiming liquid geometry or fine-grid support. A bounded global surface shift controls volume against a scalar budget, including sources and open-top outflow.",
+ description:"FLIP particles in a band under the surface carry its velocity and overrule the advected level set there (Ferstl et al. 2016): the sheets and droplets they carry are liquid. The interior is a grid. Volume is measured against a budget of sources and open-top outflow and, as in FLIP, not corrected.",
  resource:{...uniformVolumeMethod.resource!,id:"fluid.uniform-narrow-band-flip",label:"Narrow-band FLIP fluid"},
  // The geometric method's layers, plus the band's velocity samples as spheres.
  capabilities:{...uniformVolumeMethod.capabilities,visualLayers:{hidden:["pages","window","release"]}},

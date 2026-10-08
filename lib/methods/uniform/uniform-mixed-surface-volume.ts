@@ -551,11 +551,12 @@ ${shared(uniformMixedVertexSamplingSource("",false))}
    uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.applyResources]}),compute:{module:applyModule,entryPoint:"apply",constants:{...constants,...resident}}}).then(p=>{this.pipelines.set("apply",p);}),
   ]);
  }
- /** rounds: secant Newton rounds (measure, reduce, solve); a converged solve skips the rest's work. */
- encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,rounds=2,capture=false):void{
+ /** rounds: secant Newton rounds (measure, reduce, solve); a converged solve skips the rest's work.
+  * apply false measures the volume and the shift that would restore it, and leaves phi alone. */
+ encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,rounds=2,capture=false,apply=true):void{
   if(!Number.isInteger(rounds)||rounds<1)throw new Error(`Mixed surface constraint needs a positive whole round count, not ${rounds}`);
   if(this.pipelines.size!==((this.resolved?12:11)+(this.scalarTarget?4:0)))throw new Error("Mixed surface constraint is not initialized");
-  const apply=this.applyGroups.get(group);if(!apply)throw new Error("Mixed surface constraint group was not bound by this stage");
+  const applyGroup=this.applyGroups.get(group);if(!applyGroup)throw new Error("Mixed surface constraint group was not bound by this stage");
   const pass=encoder.beginComputePass({label:"Uniform mixed global surface volume"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
   // The apply modules hold no solid library: only the constraint's own pipelines have twins.
   const run=(entry:string)=>{const own=this.pipelines.get(entry)!;const pipeline=uniformDetailPick(entry==="apply"?own:this.solid?.select(own)??own);pass.setPipeline(pipeline);
@@ -568,7 +569,7 @@ ${shared(uniformMixedVertexSamplingSource("",false))}
   if(capture){run("clearBand");run("measureInitial");run("reduce");run("capture");pass.end();return;}
   run("clearBand");run("seed");for(let i=0;i<4;i++)run(`dilate${i%2}`);run("grow");run("measureGrow");run("metric");if(this.resolved)run("resolveScale");
   for(let i=0;i<rounds;i++){run("measure");run("reduce");run("solve");}
-  pass.setBindGroup(1,apply.group);run("apply");pass.end();
+  if(apply){pass.setBindGroup(1,applyGroup.group);run("apply");}pass.end();
  }
  /** Capture the initialized surface once; thereafter only explicit sources
   * and boundary outflow change the target. No CPU readback feeds correction. */

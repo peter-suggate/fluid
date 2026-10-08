@@ -1,6 +1,96 @@
 # NB-FLIP surface authority and large timesteps
 
-## Current surface contract: level set with particle detail and optical spray
+## Current surface contract: particles overrule the level set (Ferstl Eq. 4)
+
+This supersedes every contract below, including the "level set with particle
+detail and optical spray" section that follows. It was prompted by the Figure 8
+Letters scene (`nbflip-figure-8-letters`): letters deformed in flight, splashes
+were smooth and weak, and the particle overlay showed the "spray" to be the
+simulation's own samples, separated from the liquid they should have been
+carrying.
+
+What the paper specifies (Ferstl et al. 2016, section 3.2-3.3) and the code now does:
+
+- **Eq. 4, unweighted.** After advection the surface is
+  `phi <- min(phi' + h, phi_p)`: the advected level set pushed out by one cell,
+  united with the spheres of the samples (radius 0.875h, mantaflow's
+  `unionParticleLevelset` factor). "Thin liquid features are completely
+  sampled with particles." The union is gathered wherever the guarded advected
+  distance is above -2h; deeper than that the shrunk level set wins whatever
+  the samples are, and nothing limits how far into the air a sample may carry
+  the surface. The previous rule moved the surface toward the samples by at
+  most about 0.07h a step (0.5h clamp, activity weight, `1 - exp(-8 dt)`) and
+  ran a six-tap relaxation over calm patches; both are gone, with the activity
+  channel that drove them.
+- **No spray class.** A sample is either coupled to the grid or, for the steps
+  it has no grid support, ballistic under gravity (`before.w`). It keeps its
+  sphere in the union throughout, so it is liquid, enters P2G when the grid
+  reaches it, and takes an ordinary FLIP update on its way back in. The
+  optical droplet renderer, the PIC re-entry and `secondaryParticles` on this
+  method are removed.
+- **Sources seed their band.** "We initialize phi and a corresponding band of
+  particles directly from analytical object descriptions." Liquid a scheduled
+  drop or inflow creates this step is seeded through its outer cell as well as
+  its interior; before, the outer shell of new liquid waited for resampling,
+  which only fills `-R <= phi <= -h`, and a letter was born with no samples at
+  its surface.
+- **Capacity follows the grid.** `min(8 cells, max(2^20, cells / 2), binding
+  limit / 48)`: 3.1 M at 256 x 192 x 128. The fixed 2^20 was filled by the
+  resting pool there and every later seed was clipped.
+- **No volume correction.** "We do not conserve mass exactly." The scalar
+  shift of `Scalar volume control after the rollback` is measured against the
+  budget and reported, not applied. Under Eq. 4 a shift the samples do not
+  share is undone by the next union, so applying it re-paid the whole
+  cumulative deficit every step: on Letters the shift reached 0.36 cells after
+  the first impact and inflated the letter falling behind it.
+
+Measured on Letters at full fine detail, 22 steps, letters A and B
+(scratch probe, one process):
+
+| | Before | Now |
+| --- | ---: | ---: |
+| Samples a new letter is born with | none (seeds clipped) | 82,881 (A), about 100,000 (B) |
+| Particle count against capacity | 2^20 of 2^20, filled by the pool | 1.13 M to 1.41 M of 3.1 M |
+| Samples without grid support | the spray population | 0, except 2 at steps 20-21 |
+| B in flight, steps 11-17 | +9.5% volume | within 0.4% of its outline, symmetric, exact fall speed |
+
+Open:
+
+- At step 18 the bottom of B stops about 2.5 cells short of where it should be
+  and stays behind for two steps; A shows a 2.2-cell bulge at step 10. The
+  extended velocity under a falling letter reaches one to three cells past its
+  surface while the letter moves 5.6 to 8.8 cells a step, so backward traces
+  from below it sample air that was never given a velocity.
+- With nothing correcting it, measured volume falls about 230 cells a step
+  while a letter is in the air and about 10,000 cells (most of a letter) at an
+  impact: at one step per frame the letter is advected into the pool before
+  the pool is displaced. One step per frame is this reproduction's choice, not
+  a published number.
+
+Dawn lanes under this contract (`npm run test:dawn -- narrow-band`, 13 files):
+nine files pass, plus the surface lane once its tests of the retired rules
+were removed (isolated samples not enclosed, PIC re-entry) and the volume
+lane's budget test once the applied-shift assertions were. The calm-relaxation
+test and the two spray tests are deleted. Five tests are red and are left
+red, because each measures something this contract made worse:
+
+| Lane | Measured | Bound |
+| --- | ---: | ---: |
+| contract: hydrostatic pool, 20 steps | surface 0.24h off, speed 0.119 m/s | 0.05h, 0.001 m/s |
+| settling: disturbed pool at rest | roughness 0.070h rms, mean -0.065h, speed 0.107 m/s | particle-spacing noise floor |
+| settling: translating 2h sheet, 12 steps | thickness 2.00h, volume 84.4% | within 10% |
+| volume: Figure 2, dt 17 ms | -12.4% at 0.918 s | bounded throughout 5.1 s |
+| volume: Figure 2, dt 50 ms | -35.4% at 0.95 s | bounded throughout 5.1 s |
+
+The first two are one fault. A union of spheres 0.875h in radius over samples
+0.5h apart dips 0.07h between them, so resting water carries an egg-crate at
+exactly the measured amplitude; the pressure solve sees it and drives a
+0.1 m/s current that never decays. That is what the removed relaxation was
+hiding. The Figure 2 loss is of the size the previous tracker showed with its
+correction disabled (-14.5%), so it predates Eq. 4 and was being covered by
+the shift rather than caused by its removal.
+
+## Superseded: level set with particle detail and optical spray
 
 The following implementation supersedes the particle-enclosure contract in the
 historical notes below. It is an EXNB-inspired adaptation, not a verbatim Sato

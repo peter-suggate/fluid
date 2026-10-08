@@ -424,7 +424,8 @@ export interface GPUEulerianInfo {
   volumeDrift?:number;
   rawVolumeDrift?:number;
   referenceLiquidVolume_cells?: number;
-  /** NB scalar budget and correction diagnostics; independent of geometric V. */
+  /** NB scalar volume budget, independent of geometric V. The shift is the one
+   * that would return the liquid to its budget: measured, never applied. */
   narrowBandTargetVolume_cells?:number;
   narrowBandOutflowVolume_cells?:number;
   narrowBandVolumeShift_cells?:number;

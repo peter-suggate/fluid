@@ -44,9 +44,9 @@ for(const dt of [0.017,0.05])gpuTest(`NB Figure 2 bounds geometric volume throug
  });
 });
 
-// Isolate correction from transport: it must repair both signs of error,
-// ignore stale cell mass, preserve its budget through remaps, and debit exits.
-gpuTest("NB scalar correction repairs loss and gain and accounts sources/outflow",{timeout:120_000},async()=>{
+// The budget the surface is measured against: captured once, kept through
+// remaps, credited by sources and debited by exits.
+gpuTest("NB volume budget survives remaps and accounts sources/outflow",{timeout:120_000},async()=>{
  await withUniformDevice("NB scalar volume contract",async device=>{
   const scene=structuredClone(sceneDocument(getSceneDefinition("minimal-power-dam-break-32")));
   Object.assign(scene.container,{width_m:1,height_m:1,depth_m:1,fillFraction:0.5,top:"closed",fluidWallMode:"free-slip"});
@@ -60,16 +60,6 @@ gpuTest("NB scalar correction repairs loss and gain and accounts sources/outflow
    const initial=await readMixedBuffer(device,frame.narrowBandVolumeBudget);
    assert.ok(Math.abs(initial[0]!-16*32*32)<0.01,"capture initialized geometry once");
    const phi=await readMixedTexture(device,frame.fields.phi);
-   for(const offset of [-0.25,0.25]){
-    upload(frame.fields.phi,Float32Array.from(phi,v=>v+offset/32));
-    upload(frame.fields.volume,new Float32Array(32**3).fill(offset<0?0:10));
-    const e=device.createCommandEncoder();frame.surfaceVolume.encode(e,frame.surfaceVolumeGroup,2);device.queue.submit([e.finish()]);
-    const corrected=await readMixedTexture(device,frame.fields.phi);
-    for(let z=0;z<=32;z++)for(let x=0;x<=32;x++)assert.ok(Math.abs(corrected[x+33*(16+33*z)]!)<1e-5,"restore the original planar surface for both error signs");
-    const state=await readMixedBuffer(device,frame.narrowBandVolumeBudget);
-    assert.equal(state[0],initial[0],"corrupted geometric mass never changes the target");
-    assert.ok(Math.abs(state[3]!*32-offset)<0.005,"report the applied normal shift");
-   }
    frame.setRelayout();
    assert.equal(frame.updateLayout(createUniformMixedLayout(frame.ownership.capacity.lattice,[],4)),undefined);
    assert.equal((await readMixedBuffer(device,frame.narrowBandVolumeBudget))[0],initial[0],"remapping does not reset the target");
@@ -91,7 +81,7 @@ gpuTest("NB scalar correction repairs loss and gain and accounts sources/outflow
    const e=device.createCommandEncoder();frame.surfaceVolume.beginStep(e,frame.surfaceVolumeGroup,2/32,0,true);device.queue.submit([e.finish()]);
    const afterExit=await readMixedBuffer(device,frame.narrowBandVolumeBudget);
    assert.ok(Math.abs(afterExit[2]!-2*32*32)<0.01,"debit swept boundary volume at large timesteps");
-   assert.ok(Math.abs(afterExit[0]!-(afterSource[0]!-2*32*32))<0.01,"outflow cannot be restored by correction");
+   assert.ok(Math.abs(afterExit[0]!-(afterSource[0]!-2*32*32))<0.01,"outflow leaves the budget");
   }finally{solver.destroy();}
  });
 });

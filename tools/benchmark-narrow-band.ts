@@ -33,7 +33,7 @@ assert.ok(Number.isInteger(statsEvery)&&statsEvery>=0);
 const name=process.argv[2]??'current';
 assert.match(name,/^[a-z0-9-]+$/);
 const hash=createHash('sha256');
-for(const file of ['uniform-narrow-band-flip.ts','uniform-narrow-band-advection.wgsl.ts','uniform-narrow-band-membership.wgsl.ts','uniform-narrow-band-redistance.wgsl.ts','uniform-narrow-band-order.ts','uniform-narrow-band-surface.wgsl.ts','uniform-narrow-band-activity.wgsl.ts','uniform-narrow-band-spray.ts','uniform-mixed-surface-volume.ts','uniform-narrow-band-method.ts','webgpu-uniform-reference.ts','uniform-mixed-frame.ts','uniform-mixed-frame-plan.ts','uniform-mixed-remap.ts','uniform-mixed-surface.ts','uniform-mixed-dynamic.ts','uniform-mixed-pressure-authority.ts'])hash.update(readFileSync(`lib/methods/uniform/${file}`));
+for(const file of ['uniform-narrow-band-flip.ts','uniform-narrow-band-advection.wgsl.ts','uniform-narrow-band-membership.wgsl.ts','uniform-narrow-band-redistance.wgsl.ts','uniform-narrow-band-order.ts','uniform-narrow-band-surface.wgsl.ts','uniform-mixed-surface-volume.ts','uniform-narrow-band-method.ts','webgpu-uniform-reference.ts','uniform-mixed-frame.ts','uniform-mixed-frame-plan.ts','uniform-mixed-remap.ts','uniform-mixed-surface.ts','uniform-mixed-dynamic.ts','uniform-mixed-pressure-authority.ts'])hash.update(readFileSync(`lib/methods/uniform/${file}`));
 const sourceHash=hash.digest('hex');
 const {sharpeningSweeps,sharpeningDistance,...sharedDefaults}=uniformNarrowBandMethod.appDefaults!;
 const values={...(method===uniformVolumeMethod?sharedDefaults:uniformNarrowBandMethod.appDefaults),timeStep:'scene',fineGridPadding,coarseParticleMode,...(process.argv.includes("--full")?{detailPolicy:"full"}:{}),...(coarseParticleMode==='on'?{detailPolicy:'requested',detailSolidContact:'off'}:{})};
@@ -51,8 +51,8 @@ try {
  device.addEventListener('uncapturederror',e=>{e.preventDefault();errors.push(e.error.message);console.error(e.error.message);});
  solver=await method.createSolverAsync!(device,scene,'balanced',values,undefined,()=>{}) as WebGPUUniformReferenceSolver;
  if(process.argv.includes("--no-volume-correction")){
-  const frame=(solver as unknown as {mixedFrame:{surfaceVolume:{beginStep(...args:unknown[]):void;encode(...args:unknown[]):void};narrowBandFlip:{refreshBand(...args:unknown[]):void}}}).mixedFrame;
-  frame.surfaceVolume.beginStep=()=>{};frame.surfaceVolume.encode=()=>{};frame.narrowBandFlip.refreshBand=()=>{};
+  const frame=(solver as unknown as {mixedFrame:{surfaceVolume:{beginStep(...args:unknown[]):void;encode(...args:unknown[]):void}}}).mixedFrame;
+  frame.surfaceVolume.beginStep=()=>{};frame.surfaceVolume.encode=()=>{};
  }
  if(process.argv.includes("--no-reseed")){
   const stage=(solver as unknown as {mixedFrame:{narrowBandFlip:{dispatch(encoder:GPUCommandEncoder,entry:string,group?:string):void}}}).mixedFrame.narrowBandFlip;
