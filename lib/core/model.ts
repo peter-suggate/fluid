@@ -1,6 +1,7 @@
 import { SCENE_SHAPES_BY_CODE } from "./scene-shape";
 import sharedDefaultScene from "./default-scene.json";
 import type { InitialLiquidHeightField } from "./initial-height-field";
+import { liquidExtrusionBounds, liquidExtrusionRefusal, type LiquidExtrusion } from "./liquid-extrusion";
 import { validateRefinementRegions } from "./refinement-regions";
 import { validateTerrain, type TerrainDescription } from "./terrain";
 import type { SolidWorldVoxelPatch } from "./solid-world";
@@ -234,6 +235,14 @@ export interface SceneDescription {
      * so scene authors do not need a solver-specific seeding field per shape.
      */
     initialLiquidVolumes?: InitialLiquidVolume[];
+    /**
+     * Liquid added to the running solve at fixed times, at rest.
+     *
+     * Unlike `initialLiquidVolumes` these are not part of the t = 0 state: each
+     * is added by the solver step that ends at its `time_s`, which is how a
+     * figure whose bodies appear one after another is authored.
+     */
+    scheduledDrops?: ScheduledLiquidDrop[];
     inflow?: FluidInflow;
     /**
      * What the liquid looks like, as opposed to how it moves.
@@ -338,6 +347,13 @@ export interface InitialLiquidCylinder {
   center_m: Vec3;
   radius_m: number;
   halfHeight_m: number;
+}
+
+/** A body of liquid that appears, at rest, when the simulation clock reaches `time_s`. */
+export interface ScheduledLiquidDrop {
+  /** Strictly positive: liquid present at t = 0 belongs in `initialLiquidVolumes`. */
+  time_s: number;
+  volume: InitialLiquidSphere | LiquidExtrusion;
 }
 
 export interface FluidInflow {
@@ -692,6 +708,31 @@ export function validateScene(scene: SceneDescription): string[] {
           errors.push(`Initial liquid hemisphere ${index} outward normal must be finite and non-zero`);
         }
       }
+    }
+  }
+  if (scene.fluid?.scheduledDrops) {
+    const drops = scene.fluid.scheduledDrops;
+    if (!Array.isArray(drops) || drops.length === 0) errors.push("Scheduled drops must be a non-empty array");
+    else for (const [index, drop] of drops.entries()) {
+      if (!(drop?.time_s > 0) || !Number.isFinite(drop.time_s)) errors.push(`Scheduled drop ${index} time must be positive and finite`);
+      else if (index > 0 && !(drop.time_s > drops[index - 1]!.time_s)) errors.push(`Scheduled drop ${index} must come after drop ${index - 1}`);
+      const volume = drop?.volume;
+      if (volume?.shape === "sphere") {
+        const centre = volume.center_m;
+        if (![centre?.x, centre?.y, centre?.z].every(Number.isFinite) || !(volume.radius_m > 0) || !Number.isFinite(volume.radius_m)) {
+          errors.push(`Scheduled drop ${index} sphere needs a finite centre and positive radius`);
+        } else if (Math.abs(centre.x) > c.width_m / 2 || centre.y < 0 || centre.y > c.height_m || Math.abs(centre.z) > c.depth_m / 2) {
+          errors.push(`Scheduled drop ${index} centre must be inside the container`);
+        }
+      } else if (volume?.shape === "extrusion") {
+        const refusal = liquidExtrusionRefusal(volume);
+        if (refusal) errors.push(`Scheduled drop ${index} extrusion ${refusal}`);
+        else {
+          const { min_m, max_m } = liquidExtrusionBounds(volume);
+          if (min_m.x < -c.width_m / 2 || max_m.x > c.width_m / 2 || min_m.y < 0 || max_m.y > c.height_m
+            || min_m.z < -c.depth_m / 2 || max_m.z > c.depth_m / 2) errors.push(`Scheduled drop ${index} extrusion must lie inside the container`);
+        }
+      } else errors.push(`Scheduled drop ${index} has an unsupported shape`);
     }
   }
   const inflow = scene.fluid?.inflow;

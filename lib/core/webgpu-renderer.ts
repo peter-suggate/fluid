@@ -26,7 +26,7 @@ import { decodeGPURigidBodyPoses, GPU_RIGID_RENDER_BYTES, SCENE_ENVIRONMENT_OWNE
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
 import type { GPUQuality } from "./gpu-quality";
 import { getMethod, svoRenderRefinementPermitted } from "./method-registry";
-import type { GPUSolverInstance, InjectedLiquidBall, MethodParamValues, OverlayPipeline } from "./method-contract";
+import { takesScheduledDrops, type GPUSolverInstance, type InjectedLiquidBall, type MethodParamValues, type OverlayPipeline } from "./method-contract";
 import { GridOverlayPipeline } from "./webgpu-grid-overlay";
 import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE, requiredFluidDeviceLimits } from "./webgpu-device-limits";
 import { RasterWaterPipeline, type WaterRenderDiagnostics, type WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
@@ -2545,6 +2545,8 @@ export class FluidLabRenderer {
           backdropRefinedRings: typeof config.values.svoBackdropRefinedRings === "number" ? config.values.svoBackdropRefinedRings : undefined,
         });
       } else {
+        if (scene.fluid.scheduledDrops && !takesScheduledDrops(method.id))
+          throw new Error(`${method.label} cannot add liquid on a schedule; this scene's timed drops need a Uniform method`);
         solver=await (method.createSolverAsync
           ? method.createSolverAsync(device,scene,config.quality,config.values,this.gpuRigidLoadCallback,report,abort.signal)
           : new Promise<GPUSolverInstance>((resolve,reject)=>setTimeout(()=>{try{resolve(method.createSolver!(device,scene,config.quality,config.values,this.gpuRigidLoadCallback));}catch(error){reject(error);}},0)));

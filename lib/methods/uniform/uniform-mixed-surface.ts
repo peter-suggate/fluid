@@ -2,7 +2,7 @@ import { narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
 import { uniformPreparedSurfaceSamplingWGSL } from "./uniform-prepared-surface.wgsl";
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
-import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
+import {UNIFORM_PARAMS_BYTES,uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
@@ -115,7 +115,7 @@ export class UniformMixedSurface {
       {binding:7,resource:f.departures},
       {binding:8,resource:{...f.evidence,size:evidenceBytes}},
       {binding:10,resource:{buffer:f.evidence.buffer,offset:deferredOffset,size:deferredBytes}},
-      ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:176}}]:[]),
+      ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
       ...(f.unitVelocity?[{binding:11,resource:f.unitVelocity}]:[]),
       {binding:12,resource:{buffer:this.claims}},
       ...(this.narrowBand?[{binding:13,resource:{buffer:f.narrowBandState!}}]:[]),

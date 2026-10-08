@@ -1,4 +1,4 @@
-import {uniformDropSourceWGSL} from "./uniform-source.wgsl";
+import {uniformDropSourceWGSL,uniformExtrusionParamsWGSL} from "./uniform-source.wgsl";
 import { uniformVelocityDepartureWGSL } from "./uniform-velocity-departure.wgsl";
 import {uniformPageDomainWGSL,type UniformPageDomain} from "./uniform-page-domain";
 import { uniformVolumePagesWGSL, type UniformVolumePageShaderOptions } from "./uniform-volume-pages.wgsl";
@@ -93,7 +93,7 @@ struct Params {
   // x: extra dilute orphan floor; zero disables cleanup.
   // y: certified receiver-list dispatch for gather, cleanup and targets.
   cleanup: vec4f,
-}
+  // The drop's outline when it is an extrusion rather than a ball or disk.${uniformExtrusionParamsWGSL}}
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
 @group(0) @binding(2) var pressureIn: texture_3d<f32>;

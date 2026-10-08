@@ -1,6 +1,6 @@
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
-import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
+import {UNIFORM_PARAMS_BYTES,uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, UNIFORM_MIXED_FUSED_GATE, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
@@ -85,7 +85,7 @@ export class UniformMixedForces {
       {binding:8,resource:f.centerPhi??f.volume},
       {binding:10,resource:coarse},{binding:11,resource:unit},
       ...(f.curvature?[{binding:12,resource:f.curvature},{binding:13,resource:{...f.normals!,size:normalBytes}}]:[]),
-      ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:176}}]:[]),
+      ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
     ]});
   }
   async initialize():Promise<void>{

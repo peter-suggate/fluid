@@ -2,7 +2,7 @@ import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, un
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import type {UniformMixedBandBits} from "./uniform-mixed-layout-builder";
 import {uniformMixedPageCount,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
-import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
+import {UNIFORM_PARAMS_BYTES,uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_STAGE_REASON as REASON,UNIFORM_STAGE_IMPORTANCE as IMPORTANCE,UNIFORM_DETAIL_CRITERIA,type UniformDetailCriterion} from "./uniform-stage-grids";
 
@@ -43,7 +43,7 @@ const IMPORTANCE_BINS=64;
  * budget's score cutoff, its histogram. */
 const importanceStateWords=(tiles:number)=>tiles+1+IMPORTANCE_BINS;
 /** Bytes of the scene uniform prefix the source mark reads (UMSourceParams). */
-const SOURCE_PARAMS_BYTES=176;
+const SOURCE_PARAMS_BYTES=UNIFORM_PARAMS_BYTES;
 /** Residency closure radius beyond the travel, in tiles
  * (uniformMixedResidencyWord). The census certifies the state a frame
  * starts from; the frame's readers of the certificate run on that state

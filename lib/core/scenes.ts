@@ -1,6 +1,7 @@
 import { cloneScene, defaultCamera, defaultScene, type CameraState, type SceneDescription } from "./model";
 import { applyHeroGardenNodeOverrides } from "./hero-garden-overrides";
 import { createMassConservingFigure9DamBreak, createPaperScenario } from "./paper-scenarios";
+import { NBFLIP_LETTERS_GRID, NBFLIP_LETTERS_INTERVAL_FRAMES, NBFLIP_LETTERS_METHOD_PROFILE, NBFLIP_LETTERS_SCENE_ID, createNbflipLetters, nbflipLettersCamera } from "./nbflip-paper-scenes";
 import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12MethodProfile, cm12Scene, createCm12Figure7_256 } from "./cm12-paper-scenes";
 import { createThinDropletLadderScene, createThinSheetLadderScene, createThinWallFilmScene } from "./thin-liquid-scenes";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
@@ -2473,6 +2474,19 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       build: () => cm12Scene(figure.id),
       camera: cm12Camera(cm12Scene(figure.id)),
     });
+  }),
+  // Ferstl et al. 2016, Figure 8. See lib/core/nbflip-paper-scenes.ts for what
+  // is published (the grid) and what is measured from the paper's video.
+  defineScene({
+    id: NBFLIP_LETTERS_SCENE_ID,
+    name: "NB-FLIP Figure 8 \u00b7 Letters",
+    blurb: `Letter-shaped drops A to I fall into a basin, one every ${NBFLIP_LETTERS_INTERVAL_FRAMES} frames. Published ${NBFLIP_LETTERS_GRID.join("\u00d7")} cells; pool depth, letterforms, placement and the 24 fps schedule are reconstructed from the paper's video.`,
+    audience: "study",
+    shelf: "Paper figures",
+    environment: "stage",
+    methodProfile: NBFLIP_LETTERS_METHOD_PROFILE,
+    build: createNbflipLetters,
+    camera: nbflipLettersCamera(),
   }),
   defineScene({
     id: "cm12-figure-7-256",

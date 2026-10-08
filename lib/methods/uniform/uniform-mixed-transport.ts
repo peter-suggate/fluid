@@ -3,6 +3,7 @@ import { UniformMixedOwnership, compileMixedTiers } from "./uniform-mixed-owners
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL } from "./uniform-mixed-topology.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import { UNIFORM_MIXED_TRANSPORT_LIVE_HEADER, uniformMixedTransportWGSL } from "./uniform-mixed-transport.wgsl";
+import { UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
 import { uniformMixedSolidPipeline, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
 /** Workgroups per live-list transport launch at most. */
@@ -108,7 +109,7 @@ export class UniformMixedTransportStage {
       { binding: 3, resource: { buffer: scratch, ...r.sums } },
       { binding: 4, resource: input }, { binding: 5, resource: output },
       { binding: 6, resource: this.departures },
-      ...(this.sourceParams?[{binding:7,resource:{buffer:this.sourceParams,size:176}}]:[]),
+      ...(this.sourceParams?[{binding:7,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
       { binding: 8, resource: { buffer: this.live } },
       { binding: 9, resource: dust.phi }, { binding: 10, resource: { buffer: dust.params, size: 32 } },
       { binding: 11, resource: { buffer: dust.reductions, size: 48 } },

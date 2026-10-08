@@ -215,6 +215,14 @@ export type OverlayPipelineFactory = (
 const LIVE_SOLID_EDIT_METHODS: ReadonlySet<string> = new Set(["adaptive-mass", "adaptive-volume", "uniform", "uniform-volume"]);
 export const takesLiveSolidEdits = (methodId: string): boolean => LIVE_SOLID_EDIT_METHODS.has(methodId);
 
+/**
+ * Methods whose solver adds `scene.fluid.scheduledDrops` as its clock passes
+ * them. Any other method would run such a scene without its liquid and call
+ * the result the scene, so the host refuses the pairing instead.
+ */
+const SCHEDULED_DROP_METHODS: ReadonlySet<string> = new Set(["uniform", "uniform-volume", "uniform-narrow-band-flip"]);
+export const takesScheduledDrops = (methodId: string): boolean => SCHEDULED_DROP_METHODS.has(methodId);
+
 export interface InjectedLiquidBall {
   readonly centre_m: Vec3;
   readonly radius_m: number;

@@ -5,7 +5,7 @@ import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
-import { uniformMixedSourceWGSL } from "./uniform-mixed-source.wgsl";
+import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-source.wgsl";
 import { uniformVelocityDepartureWGSL } from "./uniform-velocity-departure.wgsl";
 
 export interface UniformMixedMomentumFields {
@@ -38,6 +38,7 @@ const uniformMixedMomentumUnitWGSL = uniformCachedMomentumSamplingWGSL + /* wgsl
 fn umUnitMomentum(owner:UMOwner,face:UMFace)->f32 {
  if(umCullAir&&!umPredictionCellLive(owner)&&!umPredictionCellLive(face.neighbor)){return 0.0;}
  if(face.anchor[face.axis]<0||umClosedPositive(face)){return umOriginalMomentum(face);}
+ if(umDropFace(face)){return 0.0;}
  let departure=umUnitDeparture(umFaceCenter(face),momentum.hDt.w,momentum.hDt.xyz);
  if(umUnitEscaped){return 0.0;}
  return umUnitSampleComponent(departure,face.axis);
@@ -198,7 +199,7 @@ export class UniformMixedMomentum {
       {binding:12,resource:fields.coarseExtended},
       ...(fields.unitVelocity?[{binding:16,resource:fields.unitVelocity}]:[]),
       {binding:13,resource:{buffer:this.claims}},{binding:14,resource:{buffer:this.deferred}},
-      ...(this.sourceParams?[{binding:17,resource:{buffer:this.sourceParams,size:176}}]:[]),
+      ...(this.sourceParams?[{binding:17,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
     ] });
   }
   async initialize(): Promise<void> {
@@ -256,6 +257,15 @@ fn umPredictionCellLive(owner:UMOwner)->bool {
  if(!umRegularFine&&owner.width==4u){return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,at,0).x>0.0||${UNIFORM_DETAIL_4H_LOAD}textureLoad(centerPhi,at,0).x<0.0;}
  return textureLoad(volume,at,0).x>0.0||textureLoad(centerPhi,at,0).x<0.0;
 }
+// A face within a patch width of this step's drop borders liquid the source
+// made. That liquid arrives at rest: the characteristic would instead hand it
+// whatever the air it replaces was extrapolated to from the liquid around it,
+// and a body born with that field is torn apart by its own projection.
+fn umDropFace(face:UMFace)->bool {
+ ${this.sourceParams?/* wgsl */`if(umSourceParams.drop.w<=0.0){return false;}
+ let h=umSourceParams.cellGravity.xyz;let reach=f32(face.width)*max(h.x,max(h.y,h.z));
+ return umSourcedropDistance(umSourcetraceWorld(umFaceCenter(face)),reach)<reach;`:"return false;"}
+}
 fn umMomentum(owner:UMOwner,face:UMFace)->f32 {
  if(umCullAir&&!umPredictionCellLive(owner)&&!umPredictionCellLive(face.neighbor)){return 0.0;}
  // Every closed wall carries its projected velocity; the projection's
@@ -263,6 +273,7 @@ fn umMomentum(owner:UMOwner,face:UMFace)->f32 {
  // advected away-velocity (min) released where its negative mirror could
  // not, so a D4-symmetric flow drifted off its symmetry at the walls.
  if(face.anchor[face.axis]<0||umClosedPositive(face)){return umOriginalMomentum(face);}
+ if(umDropFace(face)){return 0.0;}
  return umAdvectedMomentum(face,momentum.hDt.w);
 }
 // A certified unit stencil has one MAC patch per face. Keep its geometry

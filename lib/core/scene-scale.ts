@@ -274,6 +274,14 @@ function scaledScene(scene: SceneDescription, axis: SceneScaleAxis, factor: Scen
           halfHeight_m: volume.halfHeight_m * factor }
         : { ...volume, center_m: scaleVec3(volume.center_m, factor), radius_m: volume.radius_m * factor });
   }
+  // Scheduled drops are absolute metres too. Their times do not scale.
+  if (next.fluid.scheduledDrops) {
+    next.fluid.scheduledDrops = next.fluid.scheduledDrops.map((drop) => ({ ...drop, volume: drop.volume.shape === "sphere"
+      ? { ...drop.volume, center_m: scaleVec3(drop.volume.center_m, factor), radius_m: drop.volume.radius_m * factor }
+      : { ...drop.volume, contours_m: drop.volume.contours_m.map((contour) => contour.map((value) => value * factor)),
+        centerZ_m: drop.volume.centerZ_m * factor, halfDepth_m: drop.volume.halfDepth_m * factor,
+        offset_m: drop.volume.offset_m * factor, edgeRadius_m: drop.volume.edgeRadius_m * factor } }));
+  }
   // WORLD changes metres per cell, so re-materialize the same canonical water
   // regions against the resulting metric lattice.
   applyInitialFluidLayout(next, water);

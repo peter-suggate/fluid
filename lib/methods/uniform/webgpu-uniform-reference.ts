@@ -35,7 +35,9 @@ import { createUniformReferenceComputeShader } from "./webgpu-uniform-reference.
 import { uniformAbOn } from "./uniform-ab-switch";
 import { uniformVolumeInitialPhi, uniformInitialVolume } from "./uniform-volume-initial";
 import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "../../core/inflow-boundary";
-import type { SceneDescription } from "../../core/model";
+import type { InitialLiquidSphere, SceneDescription, ScheduledLiquidDrop } from "../../core/model";
+import { liquidExtrusionBounds, liquidExtrusionEdges, liquidExtrusionVolume_m3, LIQUID_EXTRUSION_MAX_EDGES, type LiquidExtrusion } from "../../core/liquid-extrusion";
+import { UNIFORM_PARAMS_BYTES, UNIFORM_PARAMS_HEAD_BYTES } from "./uniform-source.wgsl";
 import { planUniformHostAllocation } from "./uniform-host-allocation";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { UniformMixedBodies } from "./uniform-mixed-bodies";
@@ -220,6 +222,44 @@ export interface WebGPUUniformReferenceOptions {
  * serially (1, 4 and all at once take the same 44-45 s on dam64 and none
  * moves the frame), so one a round: a change that waits queues behind one. */
 const UNIFORM_PIPELINE_WARM_PACE = 1;
+/**
+ * One step's liquid source as the parameter block carries it: the ball or disk
+ * a caller injected, or a scheduled extrusion behind its bounding ball.
+ */
+interface UniformLiquidDrop extends InjectedLiquidBall {
+  /** The liquid the source asks for, which is what joins the volume reference. */
+  readonly volume_m3: number;
+  /** An extrusion's outline edges as uploaded; the three lengths shape it. */
+  readonly outline?: Float32Array<ArrayBuffer>;
+  readonly offset_m?: number;
+  readonly halfDepth_m?: number;
+  readonly edgeRadius_m?: number;
+}
+
+function uniformInjectedDrop(ball: InjectedLiquidBall): UniformLiquidDrop {
+  return { ...ball, volume_m3: ball.halfHeight_m !== undefined
+    ? Math.PI * ball.radius_m ** 2 * 2 * ball.halfHeight_m
+    : (4 / 3) * Math.PI * ball.radius_m ** 3 };
+}
+
+/** A scheduled volume in source form; `cell_m` sets how finely an outline's volume is measured. */
+function uniformScheduledDrop(volume: InitialLiquidSphere | LiquidExtrusion, cell_m: number): UniformLiquidDrop {
+  if (volume.shape === "sphere") return uniformInjectedDrop({ centre_m: volume.center_m, radius_m: volume.radius_m });
+  const outline = liquidExtrusionEdges(volume);
+  if (outline.length > 4 * LIQUID_EXTRUSION_MAX_EDGES) throw new Error(`Uniform scheduled drops: an extrusion has ${outline.length / 4} outline edges, over the ${LIQUID_EXTRUSION_MAX_EDGES} the parameter block holds`);
+  // The bounding ball sits on the mid-plane at the outline's centre: the
+  // shader reads the mid-plane from its z and skips the outline outside it.
+  const { min_m, max_m } = liquidExtrusionBounds(volume);
+  const centre_m = { x: 0.5 * (min_m.x + max_m.x), y: 0.5 * (min_m.y + max_m.y), z: volume.centerZ_m };
+  let reach = 0;
+  for (let index = 0; index < outline.length; index += 4) reach = Math.max(reach, Math.hypot(outline[index]! - centre_m.x, outline[index + 1]! - centre_m.y));
+  return {
+    centre_m, radius_m: Math.hypot(reach + volume.offset_m, volume.halfDepth_m),
+    volume_m3: liquidExtrusionVolume_m3(volume, 0.25 * cell_m),
+    outline, offset_m: volume.offset_m, halfDepth_m: volume.halfDepth_m, edgeRadius_m: volume.edgeRadius_m,
+  };
+}
+
 /**
  * No cell of this lattice is covered by a static solid voxel.
  *
@@ -688,6 +728,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private referenceVolumeCells = 0;
   /** A ball waiting for a step to wet its cells. See `injectLiquidBall`. */
   private pendingDrop?: InjectedLiquidBall;
+  /** The scene's scheduled drops in source form, built once per schedule. */
+  private scheduledDrops?: { readonly schedule: readonly ScheduledLiquidDrop[]; readonly drops: readonly UniformLiquidDrop[] };
   private densityPostProcessing: boolean;
   private densitySharpening: boolean;
   private sharpeningMassCorrection: boolean;
@@ -1004,7 +1046,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         pressureProjection: velocity("Uniform audit velocity after pressure projection"),
       });
     }
-    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 272, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.params = device.createBuffer({ label: "Uniform reference parameters", size: UNIFORM_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.solidMask = new SolidOccupancyMask([nx, ny, nz]);
     this.solidMask.update(solidWorldForScene(scene));
     this.solidVoxelsEmpty = uniformSolidMaskEmpty(this.solidMask);
@@ -2377,7 +2419,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   /** The parameter block has been written: the all-4h solid record may be built from it. */
   private paramsWritten = false;
-  private writeParams(dt: number, activeBodyCount: number, inflowStrength: number, drop?: InjectedLiquidBall): void {
+  private writeParams(dt: number, activeBodyCount: number, inflowStrength: number, drop?: UniformLiquidDrop): void {
     const c = this.scene.container;
     const inflow = this.scene.fluid.inflow;
     const outlet = this.inflowBoundary?.outletCenter_m;
@@ -2425,7 +2467,31 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // retired airborne momentum.
       this.geometricVolume && this.phiCubicAdvection ? 1 : 0, 0, this.geometricVolume && this.phiDrain ? 1 : 0, 0,
       this.geometricVolume ? this.orphanDustThreshold : 0, 0, 0, 0,
+      // extrusion: the edge count is what selects the outline over the ball,
+      // so it is rewritten every step and zero on all but an extrusion's own.
+      (drop?.outline?.length ?? 0) / 4, drop?.offset_m ?? 0, drop?.halfDepth_m ?? 0, drop?.edgeRadius_m ?? 0,
     ]));
+    if (drop?.outline) this.device.queue.writeBuffer(this.params, UNIFORM_PARAMS_HEAD_BYTES + 16, drop.outline);
+  }
+
+  /**
+   * The scheduled drop this step adds: the one whose time lies in
+   * (start, end]. Steps tile the clock, so each drop is added exactly once.
+   */
+  private scheduledDrop(start_s: number, end_s: number): UniformLiquidDrop | undefined {
+    const schedule = this.scene.fluid.scheduledDrops;
+    if (!schedule) return undefined;
+    if (this.scheduledDrops?.schedule !== schedule) {
+      const c = this.scene.container, { nx, ny, nz } = this.executionInfo;
+      const cell_m = Math.min(c.width_m / nx, c.height_m / ny, c.depth_m / nz);
+      this.scheduledDrops = { schedule, drops: schedule.map(({ volume }) => uniformScheduledDrop(volume, cell_m)) };
+    }
+    // Accumulated step ends miss a time written as a fraction by an ulp either
+    // way; the same slack on both ends keeps the intervals a tiling.
+    const slack = 1e-6 * (end_s - start_s);
+    const due = schedule.flatMap((drop, index) => drop.time_s > start_s + slack && drop.time_s <= end_s + slack ? [index] : []);
+    if (due.length > 1) throw new Error(`Uniform scheduled drops: ${due.length} drops fall in the step ending at ${end_s} s (the first at ${schedule[due[0]!]!.time_s} s); a step adds one drop, so space them at least a step apart`);
+    return due.length ? this.scheduledDrops.drops[due[0]!] : undefined;
   }
 
   /**
@@ -3137,7 +3203,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (!advance) return false;
     if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
     const pipelines = this.pipelines;
-    const dt = advance.dt_s;
+    const dt = advance.dt_s, stepStart_s = this.lastTime;
     this.lastTime = advance.nextTime_s;
     this.executionInfo.submittedTime_s = this.lastTime;
     if (!this.deferredFramePublication) this.executionInfo.simulatedTime_s = this.lastTime;
@@ -3164,15 +3230,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // asked for rather than from the volume that fitted — because the guard
     // that caps a cell at full is the same guard, and the drift telemetry is
     // the instrument that says how much the two disagreed.
-    const drop = this.pendingDrop;
-    this.pendingDrop = undefined;
+    // A scheduled drop is the scene's own and takes its step; a ball injected
+    // for the same one waits for the next, exactly as it waits out a pause.
+    const scheduled = this.scheduledDrop(stepStart_s, this.lastTime);
+    const drop = scheduled ?? (this.pendingDrop ? uniformInjectedDrop(this.pendingDrop) : undefined);
+    if (!scheduled) this.pendingDrop = undefined;
     if (drop) {
       const cellVolume = c.width_m * c.height_m * c.depth_m
         / (this.executionInfo.nx * this.executionInfo.ny * this.executionInfo.nz);
-      const dropped = drop.halfHeight_m !== undefined
-        ? Math.PI * drop.radius_m ** 2 * 2 * drop.halfHeight_m
-        : (4 / 3) * Math.PI * drop.radius_m ** 3;
-      this.referenceVolumeCells += dropped / cellVolume;
+      this.referenceVolumeCells += drop.volume_m3 / cellVolume;
     }
     this.executionInfo.referenceLiquidVolume_cells = this.referenceVolumeCells;
     if(this.mixedFrame){
