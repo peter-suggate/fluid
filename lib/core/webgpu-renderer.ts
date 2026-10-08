@@ -3903,6 +3903,7 @@ export class FluidLabRenderer {
           // its own, the slice control is the opacity, as it is for markers.
           opacity: composedLayers ? layerOpacity(composedLayers, "particles") : gridOverlay.position,
           view: composedLayers ? particleView(composedLayers) : undefined,
+          gravity_m_s2: [scene.fluid.gravity_m_s2.x, scene.fluid.gravity_m_s2.y, scene.fluid.gravity_m_s2.z],
           // Simple water is a murky body the spheres sit in, not a surface
           // they are drawn over.
           water: fluidSurfaceRenderMode === "simple" ? this.waterPipeline.simpleWaterInterfaces : undefined,

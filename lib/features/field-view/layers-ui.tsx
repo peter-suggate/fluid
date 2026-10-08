@@ -124,7 +124,7 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
   </ToolstripRow>
   {shown("pages") && legend("Domain page states", "Last-step volume work. Resident pages may also support pressure and the interface. Absent pages are hidden.", PAGE_LEGEND)}
   {shown("tiles") && legend("Mixed Uniform tile reasons", "Why each h tile is h (the frame head's census), and which velocity sampler it took.", MIXED_TILE_LEGEND)}
-  {shown("particles") && legend("Particle speed", "The method's own particles as spheres, painted by speed.", particleLegend(particleView(state)))}
+  {shown("particles") && legend(particleView(state) === "motion" ? "Particle energy" : "Particle speed", "The method's own particles, painted by the view the strip selects.", particleLegend(particleView(state)))}
   {shown("importance") && legend("Mixed Uniform detail importance", "The frame head census's detail importance. Every score is its measure over its threshold: 1 triggers.", importanceLegend(importanceView(state)))}
   </>;
 }

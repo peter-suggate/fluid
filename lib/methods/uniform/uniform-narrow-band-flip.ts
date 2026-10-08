@@ -48,11 +48,14 @@ export class UniformNarrowBandFlip {
  get activeParticles():GPUBuffer{return this.particles[this.parity]!;}
  /** The completed frame's samples for the particle layer: positions in h cells,
   * live prefix counted by the receipt's first word. Eight samples seed a cell,
-  * so a sphere is a little under a quarter cell in radius. */
+  * so a sphere is a little under a quarter cell in radius. update leaves each
+  * record the grid velocity it took and its depth; the inner collar is the
+  * surface's share of the band. */
  get particleSource():GPUFluidParticleSource{
   const h=this.ownership.capacity.lattice.cellSize_m;
   return {buffer:this.activeParticles,strideFloats:12,capacity:this.capacity,positionScale_m:[h[0]!,h[1]!,h[2]!],
-   radius_m:0.22*Math.min(...h),liveCount:{buffer:this.state,byteOffset:0}};
+   radius_m:0.22*Math.min(...h),liveCount:{buffer:this.state,byteOffset:0},
+   grid:{velocityFloat:8,depthFloat:7,ballisticFloat:11,surfaceDepth:2}};
  }
  private readonly bins:GPUBuffer;
  private readonly next:GPUBuffer;

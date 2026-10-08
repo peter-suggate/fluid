@@ -1,6 +1,7 @@
 import { fieldVisualization, type Visualization } from "./visualization-registry";
 import {
-  LAYER_PALETTE, LAYER_PARTICLE_MOTION_FLOOR, LAYER_PARTICLE_SPEED_SCALE, PARTICLE_LEGEND, type ParticleView,
+  LAYER_PALETTE, LAYER_PARTICLE_AGITATION_SCALE, LAYER_PARTICLE_MOTION_FLOOR, LAYER_PARTICLE_SPEED_SCALE, PARTICLE_LEGEND,
+  type ParticleView,
 } from "./visual-layers";
 import { simpleWaterMurkLength_m, simpleWaterShadingWGSL, type SimpleWaterInterfaces } from "./simple-water-shading";
 
@@ -21,10 +22,20 @@ import { simpleWaterMurkLength_m, simpleWaterShadingWGSL, type SimpleWaterInterf
  * the interfaces the water composite just rastered. A sphere the body hides
  * outright is dropped in the vertex stage and costs no fragments.
  *
- * The Motion view paints speed as opacity instead of colour: a sphere at rest
- * is nearly transparent, one at full scale white and opaque, so the picture is
- * of where the liquid is moving. A faint slow grain must not hide a fast one
- * behind it, so those samples write no depth, and a solver reorders its records
+ * The Motion view paints energy as opacity instead of speed as colour: a calm
+ * sample is nearly transparent, one at full scale white and opaque, so the
+ * picture is of where the liquid would be white. Speed does not make water
+ * white, and no whitewater model takes it to: Ihmsen et al. 2012 count the
+ * velocity a sample has relative to its neighbours, Wretborn et al. 2022 the
+ * Reynolds stress of its fluctuation about the local mean near the surface. A
+ * FLIP record carries that fluctuation, its own velocity less the grid's, and
+ * its energy is the measure: liquid falling, sliding or streaming as one body
+ * has none however fast it goes, and liquid colliding, shearing or breaking
+ * has. A sample no grid carries has no mean to differ from. Its measure is its
+ * kinetic energy less what falling gives, the part of its velocity that runs
+ * with gravity left out, so a droplet thrown sideways or upward lights up and
+ * one that is only dropping does not. A faint calm grain must not hide a
+ * lively one behind it, so those samples write no depth, and a solver reorders its records
  * every step, so they cannot be blended over one another either: the picture
  * would change with the order. Each adds its optical depth to an offscreen
  * target, and one composite draws the sum: as opaque as the depths together
@@ -58,9 +69,21 @@ export interface GPUFluidParticleSource {
    * `capacity` records may be live.
    */
   readonly liveCount?: { readonly buffer: GPUBuffer; readonly byteOffset: number };
+  /**
+   * Where a record also keeps the grid's side of the sample, as float offsets:
+   * the grid's velocity at it (m/s, three floats), its signed depth in position
+   * units (negative inside the liquid), and a float that is one while no grid
+   * cell carries it. A sample counts in full down to `surfaceDepth`, in whole
+   * position units, and fades out over as much again. Absent: no sample has a
+   * grid to differ from.
+   */
+  readonly grid?: {
+    readonly velocityFloat: number; readonly depthFloat: number; readonly ballisticFloat: number;
+    readonly surfaceDepth: number;
+  };
 }
 
-export const PARTICLE_OVERLAY_UNIFORM_BYTES = 144;
+export const PARTICLE_OVERLAY_UNIFORM_BYTES = 176;
 /** Sphere radii a Motion sample's footprint spans; the shader says why. */
 const PARTICLE_MOTION_REACH = 3;
 /** The Motion view's sum: summed by the blend, so a float format that blends. */
@@ -87,6 +110,8 @@ export interface ParticleOverlayFrame {
   readonly opacity?: number;
   /** Absent draws the speed ramp. */
   readonly view?: ParticleView;
+  /** The Motion view leaves falling out of a ballistic sample's energy. Absent: it counts. */
+  readonly gravity_m_s2?: readonly [number, number, number];
   /** Present when Simple water was composited into the target this frame. */
   readonly water?: SimpleWaterInterfaces;
 }
@@ -112,8 +137,13 @@ struct ParticleOverlayUniforms {
   origin:vec4f,
   // x Simple water's murk length in metres, zero when there is none to be under
   water:vec4f,
+  // xyz the unit direction of gravity, zero where there is none, w full-scale fluctuation in m/s
+  gravity:vec4f,
   // x record stride in floats, y record capacity, z one in the Motion view
   records:vec4u,
+  // Float offsets into a record: x the grid's velocity, y depth, z the ballistic
+  // flag; w the depth a sample counts to in full, zero where records keep none
+  grid:vec4u,
 }
 `;
 
@@ -164,12 +194,33 @@ const PARTICLE_MINIMUM_PIXELS:f32=0.75;
 const PARTICLE_HIDDEN_MURK_LENGTHS:f32=7.0;
 ${simpleWaterShadingWGSL}
 
-fn particleSpeedColor(speed:f32)->vec4f {
-  let t=clamp(speed/max(overlay.scale.w,1e-6),0.0,1.0);
-  if (overlay.records.z==1u) {
-    // The eased ramp holds the slow half of the scale near the floor.
-    return vec4f(mix(PARTICLE_STILL,PARTICLE_RUSHING,t),mix(PARTICLE_MOTION_FLOOR,1.0,smoothstep(0.0,1.0,t)));
+// The Motion view's measure of the record at a float offset, zero to one.
+fn particleAgitation(at:u32,velocity:vec3f)->f32 {
+  if (overlay.grid.w>0u && particles[at+overlay.grid.z]!=1.0) {
+    // The energy of the sample's velocity about the grid's, which is the mean
+    // of the samples around it. Entrainment happens at the surface, so a
+    // sample counts less the deeper it sits.
+    let mean=vec3f(particles[at+overlay.grid.x],particles[at+overlay.grid.x+1u],particles[at+overlay.grid.x+2u]);
+    let fluctuation=velocity-mean;
+    let full=max(overlay.gravity.w,1e-6);
+    let reach=f32(overlay.grid.w);
+    let surface=clamp(2.0+particles[at+overlay.grid.y]/reach,0.0,1.0);
+    return clamp(dot(fluctuation,fluctuation)/(full*full),0.0,1.0)*surface;
   }
+  // Kinetic energy as a fraction of the full-scale speed's, without the
+  // speed a sample has along gravity: that much it got by dropping.
+  let scale=max(overlay.scale.w,1e-6);
+  let fall=max(dot(velocity,overlay.gravity.xyz),0.0);
+  return clamp((dot(velocity,velocity)-fall*fall)/(scale*scale),0.0,1.0);
+}
+
+fn particleColor(at:u32,velocity:vec3f)->vec4f {
+  let scale=max(overlay.scale.w,1e-6);
+  if (overlay.records.z==1u) {
+    let t=particleAgitation(at,velocity);
+    return vec4f(mix(PARTICLE_STILL,PARTICLE_RUSHING,t),mix(PARTICLE_MOTION_FLOOR,1.0,t));
+  }
+  let t=clamp(length(velocity)/scale,0.0,1.0);
   return vec4f(mix(mix(PARTICLE_SLOW,PARTICLE_MID,clamp(2.0*t,0.0,1.0)),PARTICLE_FAST,clamp(2.0*t-1.0,0.0,1.0)),1.0);
 }
 
@@ -231,7 +282,7 @@ fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
   }
   let corner=view.xy+corners[vertexIndex]*radius;
   output.position=vec4f(corner.x*perspective/aspect,corner.y*perspective,0.0,1.0);
-  output.color=particleSpeedColor(length(velocity));
+  output.color=particleColor(at,velocity);
   output.sphere=vec2f(view.z,radius);
   return output;
 }
@@ -560,8 +611,11 @@ export class ParticleOverlay {
     f.set([...source.positionScale_m, LAYER_PARTICLE_SPEED_SCALE], 20);
     f.set([-0.5 * frame.container_m[0], 0, -0.5 * frame.container_m[2], 0], 24);
     f.set([frame.water ? simpleWaterMurkLength_m(frame.container_m) : 0, 0, 0, 0], 28);
-    const motion = frame.view === "motion";
-    u.set([source.strideFloats, source.capacity, motion ? 1 : 0, 0], 32);
+    const gravity = frame.gravity_m_s2 ?? [0, 0, 0], pull = Math.hypot(...gravity) || 1;
+    f.set([gravity[0] / pull, gravity[1] / pull, gravity[2] / pull, LAYER_PARTICLE_AGITATION_SCALE], 32);
+    const motion = frame.view === "motion", grid = source.grid;
+    u.set([source.strideFloats, source.capacity, motion ? 1 : 0, 0], 36);
+    u.set(grid ? [grid.velocityFloat, grid.depthFloat, grid.ballisticFloat, grid.surfaceDepth] : [0, 0, 0, 0], 40);
     this.device.queue.writeBuffer(this.uniforms!, 0, this.uniformData);
     if (source.liveCount) {
       encoder.copyBufferToBuffer(source.liveCount.buffer, source.liveCount.byteOffset, this.indirect!, 4, 4);
