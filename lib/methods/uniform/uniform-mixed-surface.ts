@@ -354,6 +354,7 @@ fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
   let upper=side==1u;let inward=select(1.0,-1.0,upper);let plane=select(0.0,f32(UM_D[axis]),upper);
   if(abs(p[axis]-plane)>1e-5||(axis==1u&&upper&&(params.flags.x&1u)!=0u)){continue;}
   var probe=p;probe[axis]+=inward*f32(width);
+  ${this.narrowBand?"if(inward*umSampleVelocity(probe)[axis]>=-1e-6){continue;}":""}
   if(value>=0.0&&inward*umSampleVelocity(probe)[axis]>=-1e-6){continue;}
   interior[axis]+=inward*f32(width);contact=true;
  }}
@@ -433,10 +434,10 @@ fn umAdvected(p:vec3f,width:u32)->f32{
  let end=umSurfaceTrace(p);let walk=umWalk(p,end);let q=walk.q;`:"let q=umTrace(p);"}let cell=umVertexCell(q);var value=cell.value;umRecordTravel(p,q,width);
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  if(params.flags.y!=0u&&abs(value)<2.0*h){value=umCubicPhi(q,cell);}
- ${this.solid?/* wgsl */`value=umWallContact(p,value,width);
+ ${this.narrowBand?(this.solid?"value=umWallContact(p,value,width);if(walk.hit){value=umEmbeddedAir(p,end,value);}value=umReleasedWalls(p,value);":"value=umReleasedWalls(p,umWallContact(p,value,width));"):this.solid?/* wgsl */`value=umWallContact(p,value,width);
  if(!clear){value=umEmbeddedContact(p,value);}if(walk.hit){value=umEmbeddedAir(p,end,value);}
  value=umReleasedWalls(p,value);`:"value=umReleasedWalls(p,umWallContact(p,value,width));"}
- if(params.flags.z!=0u){value=umDrain(q,value,width);}return ${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
+ ${this.narrowBand?"":"if(params.flags.z!=0u){value=umDrain(q,value,width);}"}return ${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
 }
 // The first non-ambient domain plane through p (2*axis+side), or 6: the only
 // vertices umWallContact can change. advectWalls owns them.
@@ -482,7 +483,7 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  // only its eight incident cells (a cut 4h owner's corner also its tiles'
  // capacity): a buried vertex keeps its value, umAdvected's first exit, and
  // umEmbeddedContact is the identity unless an in-domain incident cell is closed.
- if(!umSolidClear(vec3i(p))){
+ ${this.narrowBand?"if(!umSolidClear(vec3i(p))&&umBuried(p)){textureStore(outputPhi,vec3i(vertex),vec4f(umLoadVertex(vertex)));return;}":` if(!umSolidClear(vec3i(p))){
   var open=false;
   for(var k=0u;k<8u;k++){
    let cell=vec3i(p)-vec3i(1)+vec3i(umCorner(k,2u));let cellOpen=umCellOpen(cell)>1e-5;
@@ -490,12 +491,13 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   }
   if(!open&&umBuried(p)){textureStore(outputPhi,vec3i(vertex),vec4f(umLoadVertex(vertex)));return;}
  }
+`}
  if(!defer){let walk=umWalk(p,umSurfaceTrace(p));defer=walk.hit;let q=walk.q;`:"{let q=umTrace(p);"}
   let cell=umVertexCell(q);value=cell.value;
   let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
   if(params.flags.y!=0u&&abs(value)<2.0*h){value=umCubicPhi(q,cell);}
   defer=defer||umReleasedMayChange(p,value);
-  if(params.flags.z!=0u){value=umDrain(q,value,width);}value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
+  ${this.narrowBand?"":"if(params.flags.z!=0u){value=umDrain(q,value,width);}"}value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
   if(!defer){umRecordTravel(p,q,width);}
  }
  if(!defer){textureStore(outputPhi,vec3i(vertex),vec4f(value));return;}
@@ -1104,7 +1106,13 @@ var<workgroup> traceMergedClaim:u32;
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[]),...(this.hanging?[this.ownership.hangingLayout]:[])]});
     const compile=(entryPoint:string,constants:Record<string,number>,solidsOnly=false)=>this.twin(s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants,...s}}}),{solidsOnly,entry:entryPoint});
-    const keyed=async<K>(into:Map<K,GPUComputePipeline>,key:K,entryPoint:string,constants:Record<string,number>={},solidsOnly=false)=>{into.set(key,await compile(entryPoint,constants,solidsOnly));};
+    // NB shares its own crossing search with membership and never dispatches
+    // the inherited distance/evidence or volume-characteristic kernels.
+    const unusedInNarrowBand=new Set(["evidenceDistance","retirementEvidence","retirementEvidenceCoarse","redistance","redistanceFine","redistanceBand","prepareSurface","traceCells","traceCellsMerged"]);
+    const keyed=async<K>(into:Map<K,GPUComputePipeline>,key:K,entryPoint:string,constants:Record<string,number>={},solidsOnly=false)=>{
+      if(this.narrowBand&&unusedInNarrowBand.has(entryPoint))return;
+      into.set(key,await compile(entryPoint,constants,solidsOnly));
+    };
     const regular={umCellWidth:1,umPlannedFine:1,umRegularFine:1};
     await Promise.all([
       // Dispatched only under solids (encode: solid.present): no solid-free twin.

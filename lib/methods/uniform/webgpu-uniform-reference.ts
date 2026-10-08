@@ -102,6 +102,7 @@ export interface WebGPUUniformReferenceOptions {
   /** Experimental particle velocity transport in the surface band. */
   narrowBandFlip?: boolean;
   narrowBandCoarseParticles?: boolean;
+  narrowBandFinePadding?: number;
   /** Independent dense vertex level set and conservative cell volume, advanced
    * only by the mixed-ownership frame. */
   geometricVolume?: boolean;
@@ -450,8 +451,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   get simulationCellScale(): 1 { return 1; }
   private readonly narrowBandFlip: boolean;
   private readonly narrowBandCoarseParticles: boolean;
+  private narrowBandFinePadding: number;
+  get secondaryParticles(){return this.mixedFrame?.narrowBandFlip?.secondaryParticles;}
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
-  get narrowBandFlipInfo(){const stage=this.mixedFrame?.narrowBandFlip;return stage?{particles:stage.count,capacity:stage.capacity,reseedClipped:stage.reseedClipped,bandWidth:5,flipRatio:0.95,...stage.diagnostics}:undefined;}
+  get narrowBandFlipInfo(){const stage=this.mixedFrame?.narrowBandFlip;return stage?{particles:stage.count,capacity:stage.capacity,reseedClipped:stage.reseedClipped,bandWidth:4,fineGridPadding:this.narrowBandFinePadding,flipRatio:0.95,...stage.diagnostics}:undefined;}
   private readonly geometricVolume: boolean;
   private geometricRedistance: boolean;
   /** Sec. 3.4/3.5 rounding-residue floor in cell volumes; 0 is off. */
@@ -818,6 +821,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   ) {
     this.narrowBandFlip = options.narrowBandFlip === true;
     this.narrowBandCoarseParticles = options.narrowBandCoarseParticles === true;
+    this.narrowBandFinePadding = options.narrowBandFinePadding ?? 1;
     this.geometricVolume = options.geometricVolume === true;
     this.geometricRedistance = options.geometricRedistance !== false;
     this.volumeDustThreshold = Number.isFinite(options.volumeDustThreshold)
@@ -2024,10 +2028,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const build=this.mixedBuilds++,join=this.mixedEditJoin;if(join&&join.build===undefined)join.build=build;
       const g=this.scene.fluid.gravity_m_s2;
       // The detail controls' importance criteria: what the census requires at h.
-      const importance=uniformDetailImportance(this.detail,dynamic.ownership.capacity.tiles);
+      const importance={...uniformDetailImportance(this.detail,dynamic.ownership.capacity.tiles),surfaceAuthority:this.narrowBandFlip};
       // The build's counters clear in the census's blit run.
       builder.encodeClear(encoder);
-      if(this.detail.policy==="dynamic"&&Object.values(importance.criteria).some(Boolean))this.mixedFrame?.narrowBandFlip?.refine(encoder,dynamic.joinTarget(),dt);
+      if(this.detail.policy==="dynamic"&&Object.values(importance.criteria).some(Boolean))this.mixedFrame?.narrowBandFlip?.refine(encoder,dynamic.joinTarget(),dt,this.narrowBandFinePadding);
       dynamic.encode(encoder,{dt,steps:1,gravity:[g.x,g.y,g.z],reach:Math.max(this.mixedCoarseningReach,this.detail.marginTiles),hysteresis:this.mixedCoarseningHysteresis,
         surfaceTolerance:importance.shapeTolerance,fastTravel:0,importance,
         boundaryTravel:importance.impactTravel,closedWalls:this.scene.container.top==="open"?0b101111:0b111111,up:Math.sign(-g.y),
@@ -2492,6 +2496,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const value = Number(values[key]);
       return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
     };
+    this.narrowBandFinePadding=finite("fineGridPadding",this.narrowBandFinePadding,0,4);
     this.pressureMultigrid.setResidualTolerance(finite("pressureResidualTolerance", UNIFORM_PRESSURE_RESIDUAL_TOLERANCE, 0, 100));
     // Switching to "fixed" mid-run restores the full encoded schedule on the
     // next step; switching back drops the previous demand sample and uses
@@ -3228,7 +3233,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.mixedFramesInFlight++;
       const handled=receipt.then(receipt=>{
         if(this.disposed)return;
-        Object.assign(this.executionInfo,{...(this.narrowBandFlip?{narrowBandFlipParticles:this.mixedFrame?.narrowBandFlip?.count,narrowBandFlipReseedClipped:this.mixedFrame?.narrowBandFlip?.reseedClipped,narrowBandFlipUnsupportedParticles:this.mixedFrame?.narrowBandFlip?.diagnostics.unsupported,narrowBandFlipMaxSurfaceDistance:this.mixedFrame?.narrowBandFlip?.diagnostics.afterMaxOutside}:{}),simulatedTime_s:advance.nextTime_s,completedTime_s:advance.nextTime_s,
+        Object.assign(this.executionInfo,{...(this.narrowBandFlip?{narrowBandFlipParticles:this.mixedFrame?.narrowBandFlip?.count,narrowBandFlipReseedClipped:this.mixedFrame?.narrowBandFlip?.reseedClipped,narrowBandFlipUnsupportedParticles:this.mixedFrame?.narrowBandFlip?.diagnostics.unsupported,narrowBandFlipSprayParticles:this.mixedFrame?.narrowBandFlip?.diagnostics.spray,narrowBandFlipMaxSurfaceDistance:this.mixedFrame?.narrowBandFlip?.diagnostics.afterMaxOutside}:{}),simulatedTime_s:advance.nextTime_s,completedTime_s:advance.nextTime_s,
           uniformPressureAcceptedResidual:receipt.residual,uniformPressureCyclesExecuted:receipt.cycles,uniformPressureCyclesConverged:true,
           uniformPressureCyclesEncoded:receipt.encoded,uniformPressureCyclesConfigured:this.pressureSchedule.fullCycles+this.pressureSchedule.vCycles,
           uniformVolumeDustCells:receipt.dustOwners,uniformVolumeDustMass_cells:receipt.dustMass_cells,

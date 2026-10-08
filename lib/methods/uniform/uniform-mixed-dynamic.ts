@@ -85,6 +85,8 @@ export interface UniformMixedDynamicImportance {
  surfaceOnly?:boolean;
  /** Allowed neighbouring tile layers, including diagonals (0..3). */
  surfaceDistance?:number;
+ /** NB has surface-derived occupancy; include zero boundaries on both sides. */
+ surfaceAuthority?:boolean;
  criteria:Readonly<Record<UniformDetailCriterion,boolean>>;
  /** Liquid or air thinner than this across a surface tile, in h. Twice the
   * deepest phi on either side, over the 4-aligned vertices one tile around. */
@@ -601,20 +603,22 @@ fn umDepthSample(tile:u32,i:u32)->vec2u{
 // without one is counted, not refined: 4h V error is at or below fine on the
 // same cells (plan, same-cell A/B).
 fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
+ let surfaceAuthority=(policy.shaping.x&32768u)!=0u;
  let side=4u/width;
  let origin=umTileCoord(tile)*4u+umCorner(lane,side)*width;
  // By the owner's width: a 4h owner's texels are canonical, an h owner's the h texture's.
  let coarseOwner=width==4u;
- var v=0.0;if(coarseOwner){v=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(origin),0).x;}else{v=textureLoad(volume,vec3i(origin),0).x;}
- var inside=0u;var deep=0u;
+ var v=0.0;if(!surfaceAuthority){if(coarseOwner){v=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(origin),0).x;}else{v=textureLoad(volume,vec3i(origin),0).x;}}
+ var inside=0u;var deep=0u;var lowPhi=3.0e38;var highPhi=-3.0e38;
  for(var k=0u;k<8u;k++){
   var value=0.0;if(coarseOwner){value=umLoadCorner(origin+umCorner(k,2u)*4u);}else{value=umLoadFine(origin+umCorner(k,2u)*width);}
+  lowPhi=min(lowPhi,value);highPhi=max(highPhi,value);
   if(value<0.0){inside++;}
   if(value< -2.0*MAX_H*f32(width)){deep++;}
   // Flag 8: the frame plan seed would mark this owner (residency near).
   if(value<4.0*MAX_H*f32(width)){(*c).flags|=8u;}
  }
- if(v!=0.0){(*c).flags|=8u;}
+ if(!surfaceAuthority&&v!=0.0){(*c).flags|=8u;}
  // Signed bounds of the extended face velocities the next trace samples.
  // An h owner's faces are single patches anchored at its origin (+) and one
  // cell below it (-), whatever the neighbour (umFace).
@@ -639,27 +643,30 @@ fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
  }
  // Largest interior deficit and largest air volume, per fine/coarse width.
  let coarse=select(0u,1u,width!=1u);
- if(deep==8u){atomicMax(&groupExtreme[coarse],bitcast<u32>(max(1.0-v,0.0)));}
- if(inside==0u){atomicMax(&groupExtreme[2u+coarse],bitcast<u32>(max(v,0.0)));}
+ if(!surfaceAuthority&&deep==8u){atomicMax(&groupExtreme[coarse],bitcast<u32>(max(1.0-v,0.0)));}
+ if(!surfaceAuthority&&inside==0u){atomicMax(&groupExtreme[2u+coarse],bitcast<u32>(max(v,0.0)));}
  let local=umCorner(lane,side)*width;
- if(inside!=0u&&inside!=8u){
+ // Include both sides of an interface on a tile plane despite roundoff.
+ let epsilon=1e-6*MAX_H;
+ let crosses=select(inside!=0u&&inside!=8u,lowPhi<=epsilon&&highPhi>=-epsilon&&lowPhi<highPhi,surfaceAuthority);
+ if(crosses){
   if(width==4u){(*c).crossing=vec2u(0xffffffffu);}
   else{(*c).crossing[lane/32u]|=1u<<(lane%32u);}
   for(var a=0u;a<3u;a++){(*c).gap[a]=min((*c).gap[a],local[a]);(*c).gap[3u+a]=min((*c).gap[3u+a],4u-width-local[a]);}
  }
- let interior=inside==8u&&v>=1.0-policy.step.z;
- let air=inside==0u&&v<=policy.step.w;
+ let interior=!crosses&&inside==8u&&(surfaceAuthority||v>=1.0-policy.step.z);
+ let air=!crosses&&inside==0u&&(surfaceAuthority||v<=policy.step.w);
  // Flag 4: liquid (any owner that is not air).
  if(!air){(*c).flags|=4u;}
  if(!interior&&!air){
   for(var a=0u;a<3u;a++){(*c).reach[a]=min((*c).reach[a],local[a]);(*c).reach[3u+a]=min((*c).reach[3u+a],4u-width-local[a]);}
   // Bit 2: the geometric surface itself (a phi sign change) is in this owner.
-  (*c).flags|=select(1u,3u,inside!=0u&&inside!=8u);
+  (*c).flags|=select(1u,3u,crosses);
   // Why a coarse owner is interface: V between the tolerances, or a phi sign change.
   if(width!=1u){
-   if(v>policy.step.w&&v<1.0-policy.step.z){atomicAdd(&census[6],1u);}
-   if(inside!=0u&&inside!=8u){atomicAdd(&census[7],1u);}
-   if(inside==8u&&v<=policy.step.w){atomicAdd(&census[3],1u);}
+   if(!surfaceAuthority&&v>policy.step.w&&v<1.0-policy.step.z){atomicAdd(&census[6],1u);}
+   if(crosses){atomicAdd(&census[7],1u);}
+   if(!surfaceAuthority&&inside==8u&&v<=policy.step.w){atomicAdd(&census[3],1u);}
   }
  }
 }
@@ -1387,7 +1394,7 @@ var<workgroup> compactCounts:array<u32,256>;
   // solids and bodies remain) requires no tile: decide then reads no table.
   const seeded=!!policy.reasons||policy.fastTravel>0||importance.holdSteps>0||UNIFORM_DETAIL_CRITERIA.some(name=>importance.criteria[name]);
   this.device.queue.writeBuffer(this.params,80,new Uint32Array([
-   UNIFORM_DETAIL_CRITERIA.reduce((bits,name,k)=>bits|(importance.criteria[name]?1<<k:0),(importance.bulk?256:0)|(importance.sources===false?0:512)|(seeded?0:1024)|(shapeMetric==="displacement"?2048:0)|(importance.surfaceOnly?4096:0)|(surfaceDistance<<13)),
+   UNIFORM_DETAIL_CRITERIA.reduce((bits,name,k)=>bits|(importance.criteria[name]?1<<k:0),(importance.bulk?256:0)|(importance.sources===false?0:512)|(seeded?0:1024)|(shapeMetric==="displacement"?2048:0)|(importance.surfaceOnly?4096:0)|(surfaceDistance<<13)|(importance.surfaceAuthority?32768:0)),
    importance.holdSteps,budget??0xffffffff,Math.min(255,Math.floor(importance.retireRatio*IMPORTANCE.scoreOne))]));
   // Cube levels are written wherever decide can read them before it does,
   // classify writes every tile's keys, gap, travel and importance words and

@@ -5,7 +5,7 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { narrowBandFlipValues, uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
-import { readMixedBuffer, readMixedTexture, readMixedTileWords } from "./helpers/uniform-mixed-native-fields";
+import { readMixedBuffer, readMixedTexture } from "./helpers/uniform-mixed-native-fields";
 import type { UniformNarrowBandFlip } from "../lib/methods/uniform/uniform-narrow-band-flip";
 import { withUniformDevice, advanceUniform, readUniformFields } from "./helpers/uniform-geometric";
 
@@ -82,7 +82,7 @@ import { withUniformDevice, advanceUniform, readUniformFields } from "./helpers/
     }
     if(rest&&!coarseParticles){
      // Exercise the same normalized values and live region edits as the UI.
-     // Every surviving sample must belong to an accepted h tile, including
+     // Particle retention is independent of accepted h tiles, including
      // after moving a region across the tank and removing it altogether.
      let frame=7,controls=narrowBandFlipValues({timeStep:"paper"});
      const tune=async(values:Record<string,string|number>)=>{
@@ -91,25 +91,23 @@ import { withUniformDevice, advanceUniform, readUniformFields } from "./helpers/
      const run=async(label:string)=>{
       for(let i=0;i<3;i++)await advanceUniform(solver,++frame/30);
       const count=solver.narrowBandFlipInfo!.particles;
-      const tiles=await readMixedTileWords(device,solver),data=await readMixedBuffer(device,raw.mixedFrame.narrowBandFlip.activeParticles);
-      for(let i=0;i<count;i++){
-       const at=12*i,x=Math.floor(data[at]!/4),y=Math.floor(data[at+1]!/4),z=Math.floor(data[at+2]!/4);
-       assert.ok((tiles[x+8*(y+8*z)]!&0x80000000)!==0,`${label}: particle ${i} lies outside h ownership`);
-      }
+      const data=await readMixedBuffer(device,raw.mixedFrame.narrowBandFlip.activeParticles);
+      assert.equal(count,info.particles,`${label}: refinement must not truncate the resting 4h particle band`);
+      for(let i=0;i<count;i++)assert.ok(data[12*i+1]!>=12&&data[12*i+1]!<=16,`${label}: particle remains in the surface band`);
       console.log(JSON.stringify({label,particles:count,fineTiles:solver.info.uniformMixedFineTiles,massRatio:sum((await fields()).density)/mass,...solver.narrowBandFlipInfo}));return count;
      };
      const region=(right:boolean)=>({id:"particle-region",rule:"minimum-cell-size" as const,minimumCellSize_cells:1,maximumCellSize_cells:1,
       min_m:{x:right?0:-0.5,y:0,z:-0.5},max_m:{x:right?0.5:0,y:1,z:0.5}});
      await tune({detailPolicy:"requested",detailSolidContact:"off"});
      const drawn=structuredClone(scene);drawn.fluid.refinementRegions=[region(false)];solver.applySceneUniforms(drawn);await solver.pipelinesPrepared();
-     const left=await run("left Fine region");assert.ok(left>1000&&left<info.particles*0.8,"a half-tank h region limits particle generation");
+     const left=await run("left Fine region");assert.ok(left===info.particles,"a half-tank h region preserves complete particle coverage");
      drawn.fluid.refinementRegions=[region(true)];solver.applySceneUniforms(drawn);await solver.pipelinesPrepared();
      assert.ok(await run("moved Fine region")>1000,"moving a region seeds its new surface coverage");
      solver.applySceneUniforms(scene);await solver.pipelinesPrepared();
-     assert.equal(await run("no Fine regions"),0,"removing h regions retires all fine-band particles");assert.equal(solver.info.uniformMixedFineTiles,0);
-     await tune({detailPolicy:"full"});assert.ok(await run("Full")>left,"Full restores complete surface particle coverage");
+     assert.equal(await run("no Fine regions"),left,"removing h regions preserves the particle band");assert.equal(solver.info.uniformMixedFineTiles,0);
+     await tune({detailPolicy:"full"});assert.ok(await run("Full")===left,"Full preserves complete surface particle coverage");
      await tune({detailPolicy:"dynamic",detailShape:"off",detailThin:"off",detailStrain:"off",detailRotation:"off",detailImpact:"off",detailApproach:"off",detailNearFocus:"off",detailMarginTiles:0,detailHoldSteps:0});
-     assert.equal(await run("Dynamic criteria off"),0);
+     assert.equal(await run("Dynamic criteria off"),left);
      await tune({detailShape:"on",detailShapeTolerance:0});assert.ok(await run("Dynamic shape on")>1000,"shape criteria regenerate surface particles");
      const relayoutMassRatio=sum((await fields()).density)/mass;console.log(JSON.stringify({relayoutMassRatio}));
      // Match uniform-detail-policy-dawn's repeated live-remap bound. The

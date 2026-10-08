@@ -39,53 +39,59 @@ import { readMixedBuffer, readMixedTexture, readMixedTileWords } from "./helpers
  });
 });
 
-(process.env.WEBGPU_NODE_MODULE?test:test.skip)("FLIP reconstruction does not invent liquid in unsupported particle gaps",async()=>{
+(process.env.WEBGPU_NODE_MODULE?test:test.skip)("NB reconstruction preserves a calm level set without enclosing isolated samples",async()=>{
  await withUniformDevice("FLIP reconstruction support",async device=>{
-  // Six isolated samples surround an empty vertex. Their weighted centroid
-  // is exactly that vertex, although every sample is 1.5h away.
-  const positions=[[6.5,8,8],[9.5,8,8],[8,6.5,8],[8,9.5,8],[8,8,6.5],[8,8,9.5]];
-  // A real detached patch and a flat pool (including a closed corner) must
-  // retain their surface; support limiting must not clip to the bulk phi.
-  for(let z=0.25;z<16;z+=0.5)for(let y=0.25;y<4;y+=0.5)for(let x=0.25;x<16;x+=0.5)positions.push([x,y,z]);
+  // Six isolated samples surround an empty vertex, each 1.5h away. A seventh
+  // sits at a cell centre, as far from every vertex as a sample can be.
+  const positions=[[6.5,8,8],[9.5,8,8],[8,6.5,8],[8,9.5,8],[8,8,6.5],[8,8,9.5],[3.5,9.5,3.5]];
+  // A detached particle patch must not create Eulerian liquid, while the
+  // flat pool (including a closed corner) retains its tracked surface.
+  // The pool's outer samples sit one reconstruction radius below y=4.
+  for(let z=0.25;z<16;z+=0.5)for(let y=0.25;y<3;y+=0.5)for(let x=0.25;x<16;x+=0.5)positions.push([x,y,z]);
+  for(let z=0;z<16;z+=0.5)for(let x=0;x<16;x+=0.5)positions.push([x,3.125,z]);
   for(let z=11.25;z<13;z+=0.5)for(let y=11.25;y<13;y+=0.5)for(let x=11.25;x<13;x+=0.5)positions.push([x,y,z]);
   const bins=new Uint32Array(2*16**3+2*4**3),links=new Uint32Array(positions.length),samples=new Float32Array(positions.length*4);
   positions.forEach((p,i)=>{samples.set([...p,1],4*i);const cell=Math.floor(p[0]!)+16*(Math.floor(p[1]!)+16*Math.floor(p[2]!));links[i]=bins[2*cell]!;bins[2*cell]=i+1;});
   bins.fill(1,2*16**3);
   const buffer=(data:Uint32Array<ArrayBuffer>|Float32Array<ArrayBuffer>)=>{const b=device.createBuffer({size:data.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});device.queue.writeBuffer(b,0,data);return b;};
-  const resources=[buffer(samples),buffer(bins),buffer(links),buffer(new Float32Array(5))];
+  const resources=[buffer(samples),buffer(bins),buffer(links),buffer(new Float32Array(13))];
   try{
    const module=device.createShaderModule({code:/* wgsl */`
 const UM_D=vec3u(16);const UM_T=vec3u(4);const NB_COVERAGE=8192u;const NB_SURFACE_TILES=8256u;
-struct Particle{position:vec4f} struct Params{settings:vec4f} const params=Params(vec4f(0));
+struct Particle{position:vec4f} struct Params{settings:vec4f,hDt:vec4f} const params=Params(vec4f(0),vec4f(1.0/30.0));
 @group(0) @binding(0) var<storage,read> particles:array<Particle>;
 @group(0) @binding(1) var<storage,read_write> bins:array<atomic<u32>>;
 @group(0) @binding(2) var<storage,read> links:array<u32>;
 @group(0) @binding(3) var<storage,read_write> result:array<f32>;
 fn nbPosition(i:u32)->vec3f{return particles[i].position.xyz;}
-fn bandPhi(p:vec3f)->f32{return p.y-4.0;}
+fn nbSurfaceSample(i:u32)->vec4f{return particles[i].position;}
+fn nbRelaxedBulk(q:vec3i,bulk:f32,activity:f32)->f32{return bulk;}
+fn particleDepth(p:vec3f)->f32{return p.y-4.0;}
 fn umTileAt(p:vec3u)->u32{return p.x+4u*(p.y+4u*p.z);}
 fn cellIndex(p:vec3i)->u32{return u32(p.x+16*(p.y+16*p.z));}
-fn particleDepth(p:vec3f)->f32{return bandPhi(p);}
+fn bulkDepth(p:vec3f)->f32{return p.y-4.0;}
 ${narrowBandParticleSurfaceWGSL}
 @compute @workgroup_size(1) fn probe(){
  result[0]=particleSurface(vec3i(8,8,8));result[1]=particleSurface(vec3i(12,12,12));
  result[2]=particleSurface(vec3i(8,4,8));result[3]=particleSurface(vec3i(0,4,0));
  result[4]=particleSurface(vec3i(8,3,8));
+ for(var k=0u;k<8u;k++){result[5u+k]=particleSurface(vec3i(3,9,3)+vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u)));}
 }`});
    const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"probe"}});
    const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:resources.map((b,binding)=>({binding,resource:{buffer:b}}))});
    const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1);pass.end();device.queue.submit([encoder.finish()]);
    const values=await readMixedBuffer(device,resources[3]!);
    assert.ok(values[0]!>0,`empty gap must remain air, got phi=${values[0]}`);
-   assert.ok(values[1]!<0,"dense detached particle patch remains liquid");
+   assert.ok(values[1]!>0,"a detached particle patch cannot overwrite distant Eulerian air");
    assert.ok(Math.abs(values[2]!)<1e-6,"flat pool zero crossing is unchanged");
-   assert.ok(Math.abs(values[3]!)<1e-6,"mirrored closed corner zero crossing is unchanged");
+   assert.ok(Math.abs(values[3]!)<1e-6,"closed corner zero crossing is unchanged");
    assert.ok(values[4]!<0,"bulk liquid remains liquid");
+   for(let k=0;k<8;k++)assert.ok(values[5+k]!>0,`an isolated sample need not be enclosed, got phi=${values[5+k]} at corner ${k}`);
   }finally{resources.forEach(b=>b.destroy());}
  });
 });
 
-(process.env.WEBGPU_NODE_MODULE?test:test.skip)("FLIP surface particles outside the old level set refine and define simulation geometry before pressure",{timeout:120_000},async()=>{
+(process.env.WEBGPU_NODE_MODULE?test:test.skip)("NB particles displaced away from liquid become spray without creating a detached liquid patch",{timeout:120_000},async()=>{
  await withUniformDevice("FLIP coupled surface",async device=>{
   const scene=structuredClone(sceneDocument(getSceneDefinition("minimal-power-dam-break-32")));
   Object.assign(scene.container,{width_m:1,height_m:1,depth_m:1,fillFraction:0.5,top:"closed",fluidWallMode:"free-slip"});
@@ -102,7 +108,7 @@ ${narrowBandParticleSurfaceWGSL}
    assert.equal(initialTiles[4+8*(6+8*4)]!>>>31,0,"destination begins coarse and outside the old surface");
    const data=await readMixedBuffer(device,stage.activeParticles);let moved=0;
    // Move only the outer h layer to a detached patch. No grid/volume writes:
-   // a velocity-only tracer implementation deletes these samples and fails.
+   // retain the samples as spray instead of deleting them or inventing liquid.
    for(let i=0;i<stage.count;i++){
     const at=12*i,x=data[at]!,y=data[at+1]!,z=data[at+2]!;
     if(x>=12&&x<20&&z>=12&&z<20&&y>=15){data[at+1]=y+9;moved++;}
@@ -110,22 +116,23 @@ ${narrowBandParticleSurfaceWGSL}
    assert.ok(moved>=256);device.queue.writeBuffer(stage.activeParticles,0,new Float32Array(data));
    await advanceUniform(solver,2/30);
    const after=await fields(),tiles=await readMixedTileWords(device,solver);
-   assert.equal(tiles[4+8*(6+8*4)]!>>>31,1,"particle geometry admits h coverage before advection");
-   assert.ok(after.vertex(16,24,16)<0,"particles create simulation liquid outside the former level set");
+   assert.equal(tiles[4+8*(6+8*4)]!>>>31,1,"unclassified teleported samples initially request support before classification");
+   assert.ok(after.vertex(16,24,16)>0,"escaped samples do not create liquid outside the advected level set");
    const center=await readMixedTexture(device,raw.surfaceB);
-   assert.ok(center[16+32*(24+32*16)]!<0,"pressure's fine cell geometry sees the reconstructed liquid in this same advance");
+   assert.ok(center[16+32*(24+32*16)]!>0,"pressure retains air at the escaped samples");
    const sum=(v:Float32Array)=>v.reduce((a,b)=>a+b,0);
-   // NB-FLIP has no independent conservative material field: the resolved
-   // particle patch must register as liquid occupancy in the same frame.
-   assert.ok(after.density[16+32*(24+32*16)]!>0,"particle geometry defines measured liquid volume");
+   // Occupancy measures the level set. A disconnected sample patch has
+   // optical spray geometry without a second claim on liquid occupancy.
+   assert.equal(after.density[16+32*(24+32*16)],0,"spray is excluded from liquid occupancy");
    console.log(JSON.stringify({patchDiagnostics:stage.diagnostics}));
-   assert.ok(stage.diagnostics.afterMaxOutside<1,"resolved patch remains enclosed by its reconstructed surface");
+   assert.equal(stage.diagnostics.spray,moved,"all escaped samples become optical spray");
+   assert.ok(stage.diagnostics.afterMaxOutside<1,"coupled samples remain near liquid while spray is counted separately");
    const live=await readMixedBuffer(device,stage.activeParticles);let retained=0;
    for(let i=0;i<stage.count;i++)if(live[12*i+1]!>23)retained++;
    assert.equal(retained,moved,"escaped surface particles survive without deletion or routine surface reseeding");
    for(let step=3;step<=6;step++){
     await advanceUniform(solver,step/30);
-    assert.ok(stage.diagnostics.afterMaxOutside<0.5,`detached sheet stays represented at step ${step}: ${JSON.stringify(stage.diagnostics)}`);
+    assert.ok(stage.diagnostics.afterMaxOutside<0.5,`coupled liquid stays resolved at step ${step}: ${JSON.stringify(stage.diagnostics)}`);
    }
    console.log(JSON.stringify({moved,retained,phi:after.vertex(16,24,16),centerPhi:center[16+32*(24+32*16)],massRatio:sum(after.density)/sum(before.density)}));
   }finally{solver.destroy();}
@@ -250,9 +257,11 @@ const UM_D=vec3u(8);struct Particle{position:vec4f,motion:vec4f} struct UMOwner{
 @group(0) @binding(4) var output:texture_storage_3d<rgba32float,write>;
 fn umAllOwner(g:vec3u)->UMOwner{return UMOwner(g.x,select(0u,1u,g.x<512u));}
 fn umOrigin(o:UMOwner)->vec3u{return vec3u(o.index%8u,(o.index/8u)%8u,o.index/64u);}
-fn bandPhi(p:vec3f)->f32{return p.y-4.0;}
+fn particleDepth(p:vec3f)->f32{return p.y-4.0;}
 fn cellIndex(p:vec3i)->u32{return u32(p.x+8*(p.y+8*p.z));}
 fn nbPosition(i:u32)->vec3f{return particles[i].position.xyz;}
+fn nbSurfaceSample(i:u32)->vec4f{return particles[i].position;}
+fn nbRelaxedBulk(q:vec3i,bulk:f32,activity:f32)->f32{return bulk;}
 fn nbMotion(i:u32)->vec4f{return particles[i].motion;}
 fn transferFallback(o:UMOwner){}
 fn weight(x:f32)->f32{let a=abs(x);if(a<0.5){return 0.75-a*a;}let b=max(0.0,1.5-a);return 0.5*b*b;}
@@ -286,7 +295,7 @@ ${narrowBandFineTransferWGSL}
   const n=1129,data=new Float32Array(n*4),heads=new Uint32Array(2*512+2*8),chain=new Uint32Array(n);
   for(let i=0;i<n;i++){
    const p=i<700?[3.1+(i%7)*0.11,3.2+(i%5)*0.12,3.1+(i%9)*0.09]:[0.1+((i*137)%780)/100,0.1+((i*239)%780)/100,0.1+((i*317)%780)/100];
-   data.set([...p,1],4*i);const cell=Math.floor(data[4*i]!)+8*(Math.floor(data[4*i+1]!)+8*Math.floor(data[4*i+2]!));
+   data.set([...p,1+i%3],4*i);const cell=Math.floor(data[4*i]!)+8*(Math.floor(data[4*i+1]!)+8*Math.floor(data[4*i+2]!));
    chain[i]=heads[2*cell]!;heads[2*cell]=i+1;
   }
   heads.fill(1,1024);
@@ -312,8 +321,10 @@ fn umVertexAuthority(q:vec3u)->UMOwner{return UMOwner();}
 fn umTileAt(p:vec3u)->u32{return p.x+2u*(p.y+2u*p.z);}
 fn cellIndex(p:vec3i)->u32{return u32(p.x+8*(p.y+8*p.z));}
 fn nbPosition(i:u32)->vec3f{return particles[i].position.xyz;}
+fn nbSurfaceSample(i:u32)->vec4f{return particles[i].position;}
+fn nbRelaxedBulk(q:vec3i,bulk:f32,activity:f32)->f32{return bulk;}
 fn bandPhi(p:vec3f)->f32{return select(3.0,-2.0,p.x<1.0);}
-fn particleDepth(p:vec3f)->f32{return bandPhi(p);}
+fn bulkDepth(p:vec3f)->f32{return bandPhi(p);}
 ${narrowBandParticleSurfaceWGSL}
 ${narrowBandTiledSurfaceWGSL}
 @compute @workgroup_size(64) fn serial(@builtin(global_invocation_id) gid:vec3u){

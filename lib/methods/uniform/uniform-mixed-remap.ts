@@ -58,7 +58,7 @@ export class UniformMixedRemap {
   * receipt, bound per changes buffer. */
  private readonly listResources:GPUBindGroupLayout;
  private listGroup?:{readonly changes:GPUBuffer;readonly receipt:GPUBuffer;readonly group:UniformDetailGroup};
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,input:Fields,scratch:Fields,private readonly solid?:UniformMixedSolid){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,input:Fields,scratch:Fields,private readonly solid?:UniformMixedSolid,private readonly surfaceOnly=false){
   this.worklist=device.createBuffer({label:"Uniform mixed remap worklist",size:(4+ownership.capacity.tiles)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.tiles=ownership.capacity.tiles;
   if(this.tiles>0x04000000)throw new Error("Remap worklist entries pack a tile index below 2^26");
@@ -108,7 +108,7 @@ export class UniformMixedRemap {
   // the solid library for the face and cell kernels (twinned, see select).
   const modules=new Map<RemapPart,Promise<GPUShaderModule>>(),moduleOf=(part:RemapPart)=>{
    let module=modules.get(part);
-   if(!module)modules.set(part,module=(async()=>{const m=uniformDetailModule(this.device,{label:`Uniform mixed remap ${part}`,code:uniformMixedRemapWGSL(this.ownership.layout,part,this.solid)});
+   if(!module)modules.set(part,module=(async()=>{const m=uniformDetailModule(this.device,{label:`Uniform mixed remap ${part}`,code:uniformMixedRemapWGSL(this.ownership.layout,part,this.solid,this.surfaceOnly)});
     const errors=(await m.getCompilationInfo()).messages.filter(e=>e.type==="error");if(errors.length)throw new Error(errors.map(e=>`${e.lineNum}: ${e.message}`).join("\n"));return m;})());
    return module;
   };
@@ -497,9 +497,9 @@ fn tFineToSimulation(tile:u32,lane:u32){
 /** The remap's two modules. Faces (group 2 = resources): the changed-tile
  * worklist, face remap from the live fields into the scratch fields, and
  * their publish. Cells (group 2 = cellsResources): volume and phi remapped
- * in place on the live fields. */
+ * in place on the live fields. NB only remaps phi; geometry regenerates V. */
 type RemapPart="list"|"faces"|"cells";
-function uniformMixedRemapWGSL(layout:UniformMixedLayout,part:RemapPart,solid?:UniformMixedSolid):string{
+function uniformMixedRemapWGSL(layout:UniformMixedLayout,part:RemapPart,solid?:UniformMixedSolid,surfaceOnly=false):string{
  const topology=uniformMixedTopologyWGSL(layout,0,"old")+uniformMixedTopologyWGSL(layout,1);
  // A statically cut tile's h faces are weighted by their V.
  const cut=(tile:string)=>solid?.coarse?`umSolidEnabled()&&umSolidStaticCut(${tile})`:"false";
@@ -773,12 +773,12 @@ ${vertexSampling}
 ${geometricPlaneBoxWGSL}
 fn uvCorner(k:u32)->vec3i{return vec3i(umCorner(k,2u));}
 fn d4Sum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
-${uniformVolumeTargetWGSL(true,true)}
-var<workgroup> tileVolume:array<f32,64>;
+${surfaceOnly?"":uniformVolumeTargetWGSL(true,true)}
+${surfaceOnly?"":`var<workgroup> tileVolume:array<f32,64>;
 var<workgroup> tileFill:array<f32,64>;
 // Each h cell's open fraction, and each new owner's (its cells' mean).
 var<workgroup> tileOpen:array<f32,64>;
-var<workgroup> tileCapacity:array<f32,64>;
+var<workgroup> tileCapacity:array<f32,64>;`}
 // umVertexBuried under the old layout's widths.
 fn oldBuried(p:vec3i)->bool{
  let base=p-vec3i(1);
@@ -967,7 +967,7 @@ fn remapTileCells(group:vec3u,lane:u32){
  if(same&&(umTileWidth(tile)==4u||(entry&(1u<<26u))==0u)){return;}
  let base=umTileCoord(tile)*4u;let cell=base+umCorner(lane,4u);
  let o=umOwnerAt(vec3i(cell));
- var split=false;var donor:oldUMOwner;
+ ${surfaceOnly?"":"var split=false;var donor:oldUMOwner;"}
  if(refine&&lane<8u){
   let corner=vec3i(base+umCorner(lane,2u)*4u);tileCorners[lane]=textureLoad(phi,corner).x;
   tileCornerBuried[lane]=select(0u,1u,umSolidEnabled()&&oldBuried(corner));
@@ -975,12 +975,13 @@ fn remapTileCells(group:vec3u,lane:u32){
  // A tile handed to a cut 4h owner (workgroup-uniform): a closed h cell
  // leaves the tile's mean open fraction under 63/64.
  let plane=!same&&!refine&&umSolidEnabled()&&planeTile(tile)&&umTileOpen(tile)<0.99;
- if(!same){
+ ${surfaceOnly?"":` if(!same){
   donor=oldumOwnerAt(vec3i(cell));
   tileVolume[lane]=textureLoad(volume,vec3i(oldumOrigin(donor))).x;
   split=o.width<donor.width;
   tileOpen[lane]=umCellOpen(vec3i(cell));
  }
+`}
  workgroupBarrier();textureBarrier();
  if(refine){
   for(var v=lane;v<125u;v+=64u){
@@ -991,7 +992,7 @@ fn remapTileCells(group:vec3u,lane:u32){
   }
  }
  workgroupBarrier();
- // Tile widths are uniform: a new owner's cells share its origin lane's fill.
+ ${surfaceOnly?"":` // Tile widths are uniform: a new owner's cells share its origin lane's fill.
  let ownerLocal=(umCorner(lane,4u)/o.width)*o.width;
  if(split&&all(cell==umOrigin(o))){
   var vertices:array<f32,8>;
@@ -1003,6 +1004,7 @@ fn remapTileCells(group:vec3u,lane:u32){
   open/=f32(o.width*o.width*o.width);
   tileCapacity[lane]=open;tileFill[lane]=umSurfaceTarget(o,vertices)*open;
  }
+`}
  // The tile's corners that take a plane, one at a time across the workgroup.
  if(lane==0u){
   var wanted=0u;
@@ -1012,7 +1014,7 @@ fn remapTileCells(group:vec3u,lane:u32){
  let corners=workgroupUniformLoad(&planeCorners);
  for(var k=0u;k<8u;k++){if((corners&(1u<<k))!=0u){planeCorner(vec3i(base+umCorner(k,2u)*4u),lane);}}
  workgroupBarrier();
- // A split donor is wider than one cell, so it lies inside this tile.
+ ${surfaceOnly?"":` // A split donor is wider than one cell, so it lies inside this tile.
  if(split){
   let local=oldumOrigin(donor)-base;let n=donor.width*donor.width*donor.width;var fill=0.0;var capacity=0.0;
   for(var z=0u;z<donor.width;z++){for(var y=0u;y<donor.width;y++){for(var x=0u;x<donor.width;x++){
@@ -1035,6 +1037,7 @@ fn remapTileCells(group:vec3u,lane:u32){
   }}}
   textureStore(volume,vec3i(cell),vec4f(value/f32(o.width*o.width*o.width)));
  }
+`}
  for(var v=lane;v<125u;v+=64u){
   let p=base+umCorner(v,5u);let a=umVertexAuthority(p);
   if(a.width==0u||a.tile!=tile||!umVertexIsCanonical(p,a)){continue;}

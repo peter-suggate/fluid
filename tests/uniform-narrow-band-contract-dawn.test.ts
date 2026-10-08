@@ -6,6 +6,9 @@ import {uniformNarrowBandMethod} from "../lib/methods/uniform/uniform-narrow-ban
 import type {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-uniform-reference";
 import type {UniformNarrowBandFlip} from "../lib/methods/uniform/uniform-narrow-band-flip";
 import {advanceUniform,withUniformDevice} from "./helpers/uniform-geometric";
+import {narrowBandMembershipWGSL} from "../lib/methods/uniform/uniform-narrow-band-membership.wgsl";
+import type {UniformMixedPressureAuthority} from "../lib/methods/uniform/uniform-mixed-pressure-authority";
+import type {UniformDetailGroup} from "../lib/methods/uniform/uniform-detail-fields";
 import {uniformDetailField} from "../lib/methods/uniform/uniform-detail-fields";
 import {readMixedBuffer,readMixedTexture,readMixedTileWords} from "./helpers/uniform-mixed-native-fields";
 
@@ -26,8 +29,8 @@ gpuTest("NB-FLIP surface authority bypasses volume transport and recovery, inclu
   try{
    assert.equal(solver.info.volumeControl,false,"NB-FLIP reports no volume-control authority");
    const frame=(solver as unknown as {mixedFrame:{surface:{encode(...args:unknown[]):void};transport:{encodeTransport(...args:unknown[]):void};surfaceVolume:{encode(...args:unknown[]):void};cleanup:{encode(...args:unknown[]):void};fields:{target:GPUTexture;volume:GPUTexture;correction:GPUTexture}}}).mixedFrame;
-   for(const [object,key] of [[frame.transport,"encodeTransport"],[frame.surfaceVolume,"encode"],[frame.cleanup,"encode"]] as const){
-    (object as unknown as Record<string,unknown>)[key]=()=>assert.fail(`NB-FLIP must not execute ${key}`);
+   for(const key of ["transport","surfaceVolume","cleanup"] as const){
+    assert.equal(frame[key],undefined,`NB-FLIP must not construct ${key}`);
    }
    const encodeSurface=frame.surface.encode.bind(frame.surface);
    frame.surface.encode=(...args:unknown[])=>{assert.notEqual(args[1],"traceCells","NB-FLIP must not trace unused volume departures");encodeSurface(...args);};
@@ -40,6 +43,33 @@ gpuTest("NB-FLIP surface authority bypasses volume transport and recovery, inclu
     const correction=await readMixedTexture(device,frame.fields.correction);
     assert.ok(correction.every(v=>v===0),"projection has no volume-recovery source");
    }
+  }finally{solver.destroy();}
+ });
+});
+
+gpuTest("NB-FLIP coarse pressure and donor phase ignore independently corrupted volume",{timeout:120_000},async()=>{
+ await withUniformDevice("NB-FLIP surface-only pressure",async device=>{
+  const solver=await uniformNarrowBandMethod.createSolverAsync!(device,movingDrop(1/30),"balanced",{timeStep:"scene",coarseParticleMode:"on",detailPolicy:"requested",detailSolidContact:"off"},undefined,()=>{}) as WebGPUUniformReferenceSolver;
+  try{
+   await advanceUniform(solver,1/30);
+   const frame=(solver as unknown as {mixedFrame:{
+    authority:UniformMixedPressureAuthority;authorityGroup:UniformDetailGroup;authorityPhi:GPUBuffer;
+    split:{authority:UniformMixedPressureAuthority;authorityGroup:UniformDetailGroup};
+    levels:{phi:GPUBufferBinding}[];params:{authority:GPUBuffer};
+    fields:{volume:GPUTexture;volumeScratch:GPUTexture;phase:GPUTexture;correction:GPUTexture};
+   }}).mixedFrame;
+   const classify=async()=>{
+    const encoder=device.createCommandEncoder();frame.authority.encode(encoder,frame.authorityGroup);frame.split.authority.encode(encoder,frame.split.authorityGroup);
+    device.queue.submit([encoder.finish()]);await device.queue.onSubmittedWorkDone();
+    return {phi:await readMixedBuffer(device,frame.authorityPhi),root:await readMixedBuffer(device,frame.levels[0]!.phi.buffer),phase:await readMixedTexture(device,frame.fields.phase)};
+   };
+   const baseline=await classify();
+   // Simulate arbitrarily stale/overfilled geometric mass and re-enable its
+   // old recovery controls. Neither may alter NB pressure rows or donor phase.
+   for(const volume of [frame.fields.volume,frame.fields.volumeScratch])uniformDetailField(volume)!.storage.upload(volume,new Float32Array(32**3).fill(10));
+   device.queue.writeBuffer(frame.params.authority,0,new Float32Array([1/30,0,0,0]));
+   assert.deepEqual(await classify(),baseline,"the reconstructed surface is the only pressure and phase authority");
+   assert.ok((await readMixedTexture(device,frame.fields.correction)).every(v=>v===0),"no mass recovery even with nonzero dt and enabled balancing");
   }finally{solver.destroy();}
  });
 });
@@ -123,7 +153,7 @@ gpuTest("NB-FLIP stale interior distances cannot seed particles or hold fine bul
    const count=new Uint32Array((await readMixedBuffer(device,stage.state)).buffer)[0]!;
    const particles=await readMixedBuffer(device,stage.activeParticles);
    assert.ok(count>1000,"retain the actual surface band");
-   for(let i=0;i<count;i++)assert.ok(particles[12*i+1]!>=10,`particle ${i} at y=${particles[12*i+1]} escaped the conservative 5h band around y=16`);
+   for(let i=0;i<count;i++)assert.ok(particles[12*i+1]!>=11,`particle ${i} at y=${particles[12*i+1]} escaped the conservative 4h band around y=16`);
    await advanceUniform(solver,2/30);
    const guarded=await readMixedTexture(device,frame.fields.phi);
    for(let z=0;z<=32;z++)for(let y=0;y<10;y++)for(let x=0;x<=32;x++)assert.ok(guarded[x+33*(y+33*z)]!<0,"retirement and erosion must not hollow the deep liquid");
@@ -133,5 +163,41 @@ gpuTest("NB-FLIP stale interior distances cannot seed particles or hold fine bul
    const tiles=await readMixedTileWords(device,solver);
    for(let z=0;z<8;z++)for(let y=0;y<2;y++)for(let x=0;x<8;x++)assert.equal(tiles[x+8*(y+8*z)]!>>>31,0,"deep liquid returns to 4h after Full is disabled");
   }finally{solver.destroy();}
+ });
+});
+
+
+gpuTest("NB-FLIP bounded distance sweeps match a brute-force nearest-crossing search",async()=>{
+ await withUniformDevice("NB-FLIP bounded distance sweeps",async device=>{
+  const dims=[16,12,8],cells=dims.reduce((a,b)=>a*b,1),index=(x:number,y:number,z:number)=>x+dims[0]!*(y+dims[1]!*z);
+  const seeds=[[0,0,0],[15,11,7],[8,6,4],[2,10,3],[12,1,2],[4,4,7],[9,10,0]];
+  const words=new Uint32Array(cells+dims.reduce((a,b)=>a*(b+1),1)).fill(0xffffffff);for(const [x,y,z] of seeds)words[index(x!,y!,z!)]=index(x!,y!,z!);
+  const bins=device.createBuffer({size:words.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  try{
+   device.queue.writeBuffer(bins,0,words);
+   const module=device.createShaderModule({code:`
+const UM_D=vec3u(16u,12u,8u);const UM_T=vec3u(0);const NB_SURFACE_TILES=0u;
+@group(0) @binding(0) var<storage,read_write> bins:array<atomic<u32>>;
+fn cellIndex(p:vec3i)->u32{return u32(p.x)+UM_D.x*(u32(p.y)+UM_D.y*u32(p.z));}
+fn umCorner(k:u32,n:u32)->vec3u{return vec3u(k%n,(k/n)%n,k/(n*n));}
+fn umSampleVertex(p:vec3f)->f32{return p.y-6.0;}
+fn umCellOpen(p:vec3i)->f32{return 1.0;}
+fn bandPhi(p:vec3f)->f32{return p.y-6.0;}
+${narrowBandMembershipWGSL}`});
+   const layout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
+   const group=device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:bins}}]});
+   const pipelines=await Promise.all(["depthSpreadX","depthSpreadY","depthSpreadZ"].map(entryPoint=>device.createComputePipelineAsync({layout:device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module,entryPoint}})));
+   const encoder=device.createCommandEncoder();for(const pipeline of pipelines){const pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(cells/64));pass.end();}device.queue.submit([encoder.finish()]);
+   const result=new Uint32Array((await readMixedBuffer(device,bins)).buffer);
+   for(let z=0;z<dims[2]!;z++)for(let y=0;y<dims[1]!;y++)for(let x=0;x<dims[0]!;x++){
+    const eligible=seeds.filter(s=>Math.abs(s[0]!-x)<=5&&Math.abs(s[1]!-y)<=5&&Math.abs(s[2]!-z)<=5);
+    const actual=result[dims.reduce((a,b)=>a*(b+1),1)+index(x,y,z)]!;
+    if(!eligible.length){assert.equal(actual,0xffffffff);continue;}
+    const cost=(s:number[])=> (s[0]!-x)**2+(s[1]!-y)**2+(s[2]!-z)**2;
+    assert.notEqual(actual,0xffffffff,`missing crossing near ${x},${y},${z}`);
+    const selected=[actual%dims[0]!,Math.floor(actual/dims[0]!)%dims[1]!,Math.floor(actual/(dims[0]!*dims[1]!))];
+    assert.equal(cost(selected),Math.min(...eligible.map(cost)),`nearest crossing near ${x},${y},${z}`);
+   }
+  }finally{bins.destroy();}
  });
 });

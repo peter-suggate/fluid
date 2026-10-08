@@ -12,6 +12,8 @@ import {advanceUniform,readUniformFields,withUniformDevice} from "./helpers/unif
   scene.numerics={...scene.numerics,fixedDt_s:1/60,maxDt_s:1/60};
   const solver=await uniformNarrowBandMethod.createSolverAsync!(device,scene,"balanced",{...uniformNarrowBandMethod.appDefaults,timeStep:"scene"},undefined,()=>{}) as WebGPUUniformReferenceSolver;
   try{
+   const frame=(solver as unknown as {mixedFrame:{band:{capacity:number};ownership:{capacity:{fineTiles:number}}}}).mixedFrame;
+   assert.equal(frame.band.capacity,Math.max(1,frame.ownership.capacity.fineTiles),"particle spray can make every admitted h tile wet; volume cannot bound pressure storage");
    for(let step=1;step<=900;step++){
     await advanceUniform(solver,step/60);
     if(step%180===0)console.log(JSON.stringify({step,time:solver.info.completedTime_s,fineTiles:solver.info.uniformMixedFineTiles,...solver.narrowBandFlipInfo}));
@@ -24,7 +26,8 @@ import {advanceUniform,readUniformFields,withUniformDevice} from "./helpers/unif
     for(let k=0;k<64;k++)if(fields.density[x+k%4+nx*(y+Math.floor(k/4)%4+ny*(z+Math.floor(k/16)))]!<0.99){full=false;break;}
     if(full){wet++;if(fields.widthAt(x,y,z)===1)fineWet++;}
    }
-   console.log(JSON.stringify({wetTiles:wet,fineWetTiles:fineWet,fineWetFraction:fineWet/wet,...solver.narrowBandFlipInfo}));
+   const stats=await solver.readStats();
+   console.log(JSON.stringify({volumeDrift:stats.volumeDrift,wetTiles:wet,fineWetTiles:fineWet,fineWetFraction:fineWet/wet,...solver.narrowBandFlipInfo}));
    assert.ok(wet>1000,"the dam still has a substantial liquid interior");
    assert.ok(fineWet/wet<0.8,`surface refinement swallowed the liquid interior: ${fineWet}/${wet} fully wet tiles at h`);
   }finally{solver.destroy();}

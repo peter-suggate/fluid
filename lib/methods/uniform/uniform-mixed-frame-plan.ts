@@ -23,7 +23,7 @@ export class UniformMixedFramePlan {
   private readonly pipelines=new Map<string,GPUComputePipeline>();
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,velocity:GPUTexture,negative:GPUBuffer,
     /** The extended field every characteristic samples, valid at encodeCertificate. */
-    extended:GPUTexture,extendedNegative:GPUBuffer,directionalCertificate=false){
+    extended:GPUTexture,extendedNegative:GPUBuffer,directionalCertificate=false,private readonly surfaceOnly=false){
     if(!directionalCertificate)throw new Error("The mixed frame plan certifies signed per-axis reach only");
     this.params=device.createBuffer({label:"Uniform shared support policy",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     this.resources=uniformDetailBindLayout(device,{entries:[...[0,1,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
@@ -120,10 +120,10 @@ var<workgroup> seedSpeed:atomic<u32>;
   // tile corner is its load): the base blocks.
   var occupied=false;
   if(width==4u){
-   occupied=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(origin),0).x!=0.0;
+   ${this.surfaceOnly?"":`occupied=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(origin),0).x!=0.0;`}
    for(var k=0u;k<8u;k++){occupied=occupied||umLoadCorner(origin+umCorner(k,2u)*4u)<${16*Math.max(...h)};}
   }else{
-   occupied=textureLoad(volume,vec3i(origin),0).x!=0.0;
+   ${this.surfaceOnly?"":"occupied=textureLoad(volume,vec3i(origin),0).x!=0.0;"}
    for(var k=0u;k<8u;k++){
     // Every vertex of a unit-stencil tile is stored.
     let vertex=origin+umCorner(k,2u)*width;

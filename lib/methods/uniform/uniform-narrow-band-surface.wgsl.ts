@@ -1,67 +1,43 @@
 /** Particle geometry enters the canonical simulation phi before pressure.
  * The optional dense publication uses the same reconstruction, at h vertices. */
+export const NARROW_BAND_SURFACE_RADIUS=0.875;
+// A quarter-cell lattice has two tangential offsets of h/4 at a vertex.
+export const NARROW_BAND_SEED_DEPTH=Math.sqrt(NARROW_BAND_SURFACE_RADIUS**2-0.125);
 export const narrowBandParticleSurfaceWGSL=/* wgsl */`
-// Weighted half-space centroid for the eight-per-cell lattice and this
-// radius-2 kernel. Calibrating the reconstruction radius to that centroid
-// preserves a seeded planar interface without any target-volume shift.
-const NB_SURFACE_RADIUS=0.5054021866589737;
-fn surfaceWeight(d:vec3f)->f32{let t=max(0.0,1.0-dot(d,d)/4.0);return t*t*t;}
+// Particles supply a candidate interface, not an enclosure constraint.
+// Calm regions follow the Eulerian surface; ballistic samples never enter it.
+const NB_SURFACE_RADIUS=${NARROW_BAND_SURFACE_RADIUS};
+const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
 fn particleSurfaceBulk(q:vec3i)->vec2f{
- let x=vec3f(q);let bulk=particleDepth(x);let tile=umTileAt(min(vec3u(q)/4u,UM_T-1u));
- // Guard stale shallow bulk values before erosion, too: retiring interior
- // samples must not turn their former covered tiles into artificial air.
- // The advected particles mark their support, including excursions outside
- // the Eulerian level set. Never clip reconstruction to that old surface.
- let covered=atomicLoad(&bins[NB_COVERAGE+tile])!=0u;
- let erosion=select(0.0,1.0,covered&&bulk>-1.5&&bulk<2.0);
- let erodedBulk=bulk+erosion;
- if(atomicLoad(&bins[NB_SURFACE_TILES+tile])==0u){return vec2f(erodedBulk,0);}
- // The particle surface is bounded below by -NB_SURFACE_RADIUS. Here the bulk wins
- // the union for every possible particle configuration; no gather is needed.
- return vec2f(erodedBulk,select(1.0,0.0,erodedBulk<=-NB_SURFACE_RADIUS));
+ let bulk=bulkDepth(vec3f(q));let tile=umTileAt(min(vec3u(q)/4u,UM_T-1u));
+ let gather=atomicLoad(&bins[NB_SURFACE_TILES+tile])!=0u&&abs(bulk)<2.0;
+ return vec2f(bulk,select(0.0,1.0,gather));
 }
-struct NBSurfaceGather{weighted:vec4f,nearest2:f32}
-fn particleSurfaceGather(q:vec3i,member:u32,stride:u32)->NBSurfaceGather{
- let x=vec3f(q);
-   var sum=vec3f(0);var total=0.0;var nearest2=4.0;var wallMask=0u;var mirrorOrigin=vec3f(0);
-   for(var a=0u;a<3u;a++){
-    if(x[a]<2.0){wallMask|=1u<<a;}
-    else if(x[a]>f32(UM_D[a])-2.0&&!(a==1u&&params.settings.y>0.5)){wallMask|=1u<<a;mirrorOrigin[a]=2.0*f32(UM_D[a]);}
-   }
-   for(var bin=member;bin<64u;bin+=stride){
-    let cell=q-2+vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u));if(any(cell<vec3i(0))||any(cell>=vec3i(UM_D))){continue;}
-    var link=atomicLoad(&bins[2u*cellIndex(cell)]);
-    for(var j=0u;link!=0u;j++){
-     let index=link-1u;let centre=nbPosition(index);
-     let offset=x-centre;nearest2=min(nearest2,dot(offset,offset));
-     let w=surfaceWeight(offset);sum+=w*offset;total+=w;
-     if(wallMask!=0u){let mirror=mirrorOrigin-centre;
-      for(var mask=1u;mask<8u;mask++){
-       if((mask&wallMask)!=mask){continue;}
-       let c=select(centre,mirror,vec3<bool>((mask&1u)!=0u,(mask&2u)!=0u,(mask&4u)!=0u));
-       let mw=surfaceWeight(x-c);sum+=mw*(x-c);total+=mw;
-      }
-     }
-     link=links[index];
-    }
-   }
- return NBSurfaceGather(vec4f(sum,total),nearest2);
-}
-fn particleSurfaceFinish(q:vec3i,bulk:f32,gather:NBSurfaceGather)->f32{
- var particlePhi=4.0;
- if(gather.weighted.w>1e-6){
-  // The centroid cannot create liquid without nearby actual samples.
-  particlePhi=max(length(gather.weighted.xyz/gather.weighted.w)-NB_SURFACE_RADIUS,sqrt(gather.nearest2)-0.75);
-  // The centroid alone rounds off sheet corners and can exclude their
-  // samples. Union the inscribed sample spheres; sqrt(3)/4 is the distance
-  // from a seeded quarter-cell sample to its nearest grid vertex, preserving
-  // the flat lattice's zero contour while keeping sparse corners represented.
-  particlePhi=min(particlePhi,sqrt(gather.nearest2)-0.4330127018922193);
+// Squared distance to the nearest sample within 2h; 4 when there is none.
+fn particleSurfaceGather(q:vec3i,member:u32,stride:u32)->vec2f{
+ let x=vec3f(q);var nearest2=4.0;var activity=0.0;
+ for(var bin=member;bin<64u;bin+=stride){
+  let cell=q-2+vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u));if(any(cell<vec3i(0))||any(cell>=vec3i(UM_D))){continue;}
+  var link=atomicLoad(&bins[2u*cellIndex(cell)]);
+  for(var j=0u;link!=0u;j++){
+   let index=link-1u;let sample=nbSurfaceSample(index);link=links[index];
+   if(sample.w>=3.0){continue;}let offset=x-sample.xyz;let d2=dot(offset,offset);nearest2=min(nearest2,d2);
+   if(d2<2.25){activity=max(activity,clamp(sample.w-1.0,0.0,1.0));}
+  }
  }
- return min(bulk,particlePhi);
+ return vec2f(nearest2,activity);
+}
+fn particleSurfaceFinish(q:vec3i,bulk:f32,gather:vec2f)->f32{
+ let base=nbRelaxedBulk(q,bulk,gather.y);
+ if(gather.x>=4.0){return base;}
+ let candidate=min(bulk+1.0,sqrt(gather.x)-NB_SURFACE_RADIUS);
+ // Unlike NB-FLIP's union, correction cannot engulf an escaped particle or
+ // erase a sheet in one step. Eulerian tracking always retains authority.
+ let correction=clamp(candidate-base,-0.5,0.5);
+ return base+0.5*gather.y*(1.0-exp(-8.0*params.hDt.w))*correction;
 }
 fn particleSurface(q:vec3i)->f32{
- let bulk=particleSurfaceBulk(q);if(bulk.y==0.0){return bulk.x;}
+ let bulk=particleSurfaceBulk(q);if(bulk.y==0.0){return nbRelaxedBulk(q,bulk.x,0.0);}
  return particleSurfaceFinish(q,bulk.x,particleSurfaceGather(q,0u,1u));
 }
 `;
@@ -69,7 +45,7 @@ fn particleSurface(q:vec3i)->f32{
  * neighboring bins. Batches are compacted in workgroup memory and unbounded
  * in number: a crowded bin never truncates particles or allocates a bucket. */
 export const narrowBandTiledSurfaceWGSL=/* wgsl */`
-var<workgroup> nbTileSamples:array<vec3f,128>;
+var<workgroup> nbTileSamples:array<vec4f,128>;
 var<workgroup> nbTileCounter:atomic<u32>;
 var<workgroup> nbTileCount:u32;
 @compute @workgroup_size(128) fn coupleFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -83,48 +59,35 @@ var<workgroup> nbTileCount:u32;
  var bulk=vec2f(0);if(owned){bulk=particleSurfaceBulk(q);}
  if(lane==0u){atomicStore(&nbTileCounter,0u);}workgroupBarrier();
  if(owned&&bulk.y>0.0){atomicOr(&nbTileCounter,1u);}
- if(owned&&bulk.y==0.0){textureStore(outputPhi,q,vec4f(bulk.x*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));}
+ if(owned&&bulk.y==0.0){textureStore(outputPhi,q,vec4f(nbRelaxedBulk(q,bulk.x,0.0)*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));}
  workgroupBarrier();if(lane==0u){nbTileCount=atomicLoad(&nbTileCounter);}
  if(workgroupUniformLoad(&nbTileCount)==0u){return;}
- var sum=vec3f(0);var total=0.0;var nearest2=4.0;var wallMask=0u;var mirrorOrigin=vec3f(0);
- for(var a=0u;a<3u;a++){
-  if(x[a]<2.0){wallMask|=1u<<a;}
-  else if(x[a]>f32(UM_D[a])-2.0&&!(a==1u&&params.settings.y>0.5)){wallMask|=1u<<a;mirrorOrigin[a]=2.0*f32(UM_D[a]);}
- }
+ var nearest2=4.0;var activity=0.0;
  for(var block=0u;block<512u;block+=128u){
   let bin=block+lane;let c=origin-2+vec3i(i32(bin%8u),i32((bin/8u)%8u),i32(bin/64u));var link=0u;
   if(bin<512u&&all(c>=vec3i(0))&&all(c<vec3i(UM_D))){link=atomicLoad(&bins[2u*cellIndex(c)]);}
   loop {
    if(lane==0u){atomicStore(&nbTileCounter,0u);}workgroupBarrier();
-   if(link!=0u){let i=link-1u;let slot=atomicAdd(&nbTileCounter,1u);nbTileSamples[slot]=nbPosition(i);link=links[i];}
+   if(link!=0u){let i=link-1u;let slot=atomicAdd(&nbTileCounter,1u);nbTileSamples[slot]=nbSurfaceSample(i);link=links[i];}
    workgroupBarrier();if(lane==0u){nbTileCount=atomicLoad(&nbTileCounter);}
    let count=workgroupUniformLoad(&nbTileCount);if(count==0u){break;}
    if(owned&&bulk.y>0.0){for(var j=0u;j<count;j++){
-    let centre=nbTileSamples[j];let offset=x-centre;let distance2=dot(offset,offset);
-    // A closed-wall mirror cannot be nearer than its real sample.
-    if(distance2>=4.0){continue;}
-    nearest2=min(nearest2,distance2);let w=surfaceWeight(offset);sum+=w*offset;total+=w;
-    if(wallMask!=0u){let mirror=mirrorOrigin-centre;
-     for(var mask=1u;mask<8u;mask++){
-      if((mask&wallMask)!=mask){continue;}
-      let m=select(centre,mirror,vec3<bool>((mask&1u)!=0u,(mask&2u)!=0u,(mask&4u)!=0u));
-      let mw=surfaceWeight(x-m);sum+=mw*(x-m);total+=mw;
-     }
-    }
+    let sample=nbTileSamples[j];if(sample.w>=3.0){continue;}
+    let offset=x-sample.xyz;let d2=dot(offset,offset);nearest2=min(nearest2,d2);
+    if(d2<2.25){activity=max(activity,clamp(sample.w-1.0,0.0,1.0));}
    }}
    workgroupBarrier();
   }
  }
  if(owned&&bulk.y>0.0){
-  let value=particleSurfaceFinish(q,bulk.x,NBSurfaceGather(vec4f(sum,total),nearest2));
+  let value=particleSurfaceFinish(q,bulk.x,vec2f(nearest2,activity));
   textureStore(outputPhi,q,vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
  }
 }
 `;
 
 export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiledSurfaceWGSL+/* wgsl */`
-var<workgroup> nbSurfaceSums:array<vec4f,64>;
-var<workgroup> nbSurfaceNearest:array<f32,64>;
+var<workgroup> nbSurfaceNearest:array<vec2f,64>;
 var<workgroup> nbSurfaceBoundary:atomic<u32>;
 var<workgroup> nbSurfaceBoundaryCount:u32;
 fn nbCoupleVertex(owner:UMOwner,regular:bool,k:u32,lane:u32){
@@ -134,14 +97,14 @@ fn nbCoupleVertex(owner:UMOwner,regular:bool,k:u32,lane:u32){
   if(regular){owned=all((corner!=vec3u(0))|(origin==vec3u(0)));}
   else{owned=umVertexAuthority(vec3u(q)).index==owner.index;}
  }
- var bulk=vec2f(0);var gathered=NBSurfaceGather(vec4f(0),4.0);
- if(owned){bulk=particleSurfaceBulk(q);if(bulk.y>0.0){gathered=particleSurfaceGather(q,member,16u);}}
- nbSurfaceSums[lane]=gathered.weighted;nbSurfaceNearest[lane]=gathered.nearest2;workgroupBarrier();
+ var bulk=vec2f(0);var gather=vec2f(4,0);
+ if(owned){bulk=particleSurfaceBulk(q);if(bulk.y>0.0){gather=particleSurfaceGather(q,member,16u);}}
+ nbSurfaceNearest[lane]=gather;workgroupBarrier();
  for(var stride=8u;stride>0u;stride/=2u){
-  if(member<stride){nbSurfaceSums[lane]+=nbSurfaceSums[lane+stride];nbSurfaceNearest[lane]=min(nbSurfaceNearest[lane],nbSurfaceNearest[lane+stride]);}workgroupBarrier();
+  if(member<stride){nbSurfaceNearest[lane]=vec2f(min(nbSurfaceNearest[lane].x,nbSurfaceNearest[lane+stride].x),max(nbSurfaceNearest[lane].y,nbSurfaceNearest[lane+stride].y));}workgroupBarrier();
  }
  if(member==0u&&owned){
-  var value=bulk.x;if(bulk.y>0.0){value=particleSurfaceFinish(q,bulk.x,NBSurfaceGather(nbSurfaceSums[lane],nbSurfaceNearest[lane]));}
+  var value=nbRelaxedBulk(q,bulk.x,0.0);if(bulk.y>0.0){value=particleSurfaceFinish(q,bulk.x,nbSurfaceNearest[lane]);}
   textureStore(outputPhi,q,vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
  }
  workgroupBarrier();
@@ -183,7 +146,7 @@ var<workgroup> nbBlend:array<vec3f,8>;
   var blend=vec3f(0);
   if(owner.width==1u){for(var axis=0u;axis<3u;axis++){
    if(origin[axis]+1u>=UM_D[axis]){continue;}
-   var q=centre;q[axis]+=0.5;let depth=bandPhi(q);
+   var q=centre;q[axis]+=0.5;let depth=particleDepth(q);
    if(depth<=1.5){blend[axis]=select(0.0,1.0,depth>=-2.0);}
   }}
   nbBlend[team]=blend;
@@ -218,15 +181,15 @@ var<workgroup> nbBlend:array<vec3f,8>;
 `;
 
 /** One workgroup per coarse face, with an exact particle gather and parallel
- * reduction. It uses the same h-scale quadratic kernel as the fine transfer. The 5h particle
- * band provides the full 1.5h footprint at the -2h combination boundary. */
+ * reduction. It uses the same h-scale quadratic kernel as the fine transfer. The 4h particle
+ * band retains the axial footprint, omitting only the small diagonal tail. */
 export const narrowBandCoarseTransferWGSL=/* wgsl */`
 var<workgroup> coarseSums:array<vec2f,64>;
 @compute @workgroup_size(64) fn transferCoarse(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let tile=group.x+256u*group.y;if(tile>=UM_T.x*UM_T.y*UM_T.z){return;}
  let axis=group.z;let origin=vec3i(vec3u(tile%UM_T.x,(tile/UM_T.x)%UM_T.y,tile/(UM_T.x*UM_T.y)))*4;
  var anchor=origin;anchor[axis]+=3;var q=vec3f(origin)+2.0;q[axis]+=2.0;
- let depth=bandPhi(q);let blend=select(0.0,1.0,depth>=-2.0);
+ let depth=particleDepth(q);let blend=select(0.0,1.0,depth>=-2.0);
  let original=textureLoad(velocity,anchor,0);var sum=vec2f(0);
  if(blend>0.0&&depth<=1.5&&q[axis]<f32(UM_D[axis])){
   let lo=max(vec3i(floor(q-1.5)),vec3i(0));let hi=min(vec3i(ceil(q+1.5)),vec3i(UM_D));let size=vec3u(hi-lo);

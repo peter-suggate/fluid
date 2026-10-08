@@ -14,7 +14,9 @@ test("narrow-band FLIP is selectable and defaults to the fine band and keeps all
  assert.equal(values.detailPolicy,"requested");assert.equal(values.detailShape,"off");assert.equal(values.detailShapeTolerance,2);
  const defaults=resolveMethodValues(method,"balanced",{});
  assert.equal(defaults.coarseParticleMode,"off");assert.equal(defaults.detailPolicy,"dynamic");assert.equal(defaults.detailSolidContact,"on");
- assert.equal(defaults.detailSurface,"on");assert.equal(defaults.detailSurfaceDistance,2);assert.equal(defaults.detailShapeTolerance,0);
+ assert.equal(defaults.detailSurface,"on");assert.equal(defaults.detailSurfaceDistance,0);assert.equal(defaults.detailShapeTolerance,0);
+ assert.equal(defaults.fineGridPadding,1);
+ assert.equal(methodConfigurationImpact(method,"balanced",{},{fineGridPadding:2}),"live");
  const selected=resolveMethodValues(method,"balanced",{detailPolicy:"requested",detailShape:"off",detailShapeTolerance:2});
  assert.equal(selected.detailPolicy,"requested");assert.equal(selected.detailShape,"off");assert.equal(selected.detailShapeTolerance,2);
  for(const detailPolicy of ["requested","dynamic","full"])assert.equal(resolveMethodValues(method,"balanced",{detailPolicy}).detailPolicy,detailPolicy);
