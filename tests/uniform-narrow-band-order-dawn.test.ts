@@ -30,6 +30,9 @@ for(const sparse of [false,true])(process.env.WEBGPU_NODE_MODULE?test:test.skip)
      input.set([live?x+0.25:-1,y+0.25,z+0.25,1,i,epoch,0,0,0,0,0,0],i*12);
      if(live){const cell=cellOrder(x,y,z);counts[cell]++;counts[2*cells+Math.floor(cell/64)]++;const list=expected.get(cell)??[];list.push(i);expected.set(cell,list);}
     }
+    // Transfer borrows expired cursors; each newly occupied cell must reset
+    // its cursor in the prefix pass before any particle scatters.
+    if(sparse)for(const cell of expected.keys())counts[cells+cell]=12345;
     device.queue.writeBuffer(particles[1],0,input);device.queue.writeBuffer(bins,0,counts);device.queue.writeBuffer(state,0,new Uint32Array([count,0,0,0]));
     const e=device.createCommandEncoder();order.encode(e,0);device.queue.submit([e.finish()]);
     const receipt=await words(state),starts=await words(links),output=await readMixedBuffer(device,particles[0]);

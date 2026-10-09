@@ -181,6 +181,7 @@ fn umOpenAt(q:vec3f)->f32{return umCellOpen(clamp(vec3i(floor(q)),vec3i(0),vec3i
 // uvTrace: walk every crossed half-cell so no characteristic tunnels a wall.
 struct UMWalk{q:vec3f,hit:bool}
 fn umWalk(p:vec3f,end:vec3f)->UMWalk{
+ if(!umSolidEnabled()){return UMWalk(end,false);}
  let steps=max(1u,u32(ceil(2.0*max(abs(end.x-p.x),max(abs(end.y-p.y),abs(end.z-p.z))))));
  var previous=p;
  for(var s=1u;s<=steps;s++){let q=mix(p,end,f32(s)/f32(steps));if(umOpenAt(q)<=1e-5){return UMWalk(previous,true);}previous=q;}

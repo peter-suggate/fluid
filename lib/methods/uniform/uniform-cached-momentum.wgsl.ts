@@ -10,11 +10,9 @@ fn umUnitInterpolant(p:vec3f,axis:u32)->f32 {
  let base=vec3i(floor(q));let fraction=fract(q);var terms:array<f32,8>;
  for(var k=0u;k<8u;k++){
   let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
-  let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));
-  let weight=weights.x*weights.y*weights.z;
-  terms[k]=select(0.0,weight*textureLoad(unitVelocity,base+bit,0)[axis],weight>0.0);
+  terms[k]=textureLoad(unitVelocity,base+bit,0)[axis];
  }
- return umVelocitySum8(terms);
+ return umVelocityLerp8(terms,fraction);
 }
 // 0 native fine stencil, 1 prepared blend, 2 negative-plane escape.
 fn umUnitSampleKind(p:vec3f,axis:u32)->u32 {

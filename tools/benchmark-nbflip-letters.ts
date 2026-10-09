@@ -14,6 +14,10 @@
  * --from=N averages the summary over frames N.. only (rows keep every frame).
  * --plain takes no pass timestamps: wall is then the frame time the app pays,
  *   without the per-pass timestamp writes and the encoder proxy that reads them.
+ * --transfer-probe replays diagnostic fine-P2G ablations at frames 40/100/180.
+ *   Production transfer runs last to restore its output. Wall times include
+ *   probes and are not normal scene timings; transferStage holds each replay.
+ * --probe-at=120 selects probe frames (default 40,100,180); 120 is 5 s.
  * Every compute pass is timestamped on every step. A pass is projection when
  * its label names the pressure solve; the per-label totals are in the output
  * so that split can be audited. Wall is advance plus completion of one step
@@ -26,6 +30,8 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
 import { GPUPassProfile } from './gpu-pass-profile';
+import { NarrowBandTransferProbe } from './narrow-band-transfer-probe';
+import { NarrowBandDispatchProbe } from './narrow-band-dispatch-probe';
 import { createProcessRetainedDawnGPU } from '../lib/harness/node-dawn-provider';
 import { managedGPUDevice } from '../lib/core/gpu-compilation-manager';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
@@ -40,6 +46,15 @@ import { readUniformFields } from '../tests/helpers/uniform-geometric';
 
 const option=(key:string)=>process.argv.find(a=>a.startsWith(`--${key}=`))?.slice(key.length+3);
 const steps=Number(option("steps")??NBFLIP_LETTERS_FRAMES),track=process.argv.includes("--track"),plain=process.argv.includes("--plain"),out=option("out")??'docs/verification';
+// --transfer-probe replays diagnostic shader ablations at frames 40/100/180.
+// It restores production output before continuing; wall times include probes.
+const probeTransfer=process.argv.includes("--transfer-probe");
+const probeDispatch=process.argv.includes("--dispatch-probe");
+// Select simulation frames for focused diagnostics, e.g. frame 120 is 5 s.
+const probeFrames=(option("probe-at")??"40,100,180").split(",").map(Number);
+assert.ok(probeFrames.every(n=>Number.isInteger(n)&&n>=1&&(!option("probe-at")||n<=steps)),"Probe frames must be within the take");
+assert.ok(!probeTransfer||!plain,"Transfer probes require pass timestamps");
+assert.ok(!probeDispatch||!plain,"Dispatch probes require pass timestamps");
 assert.ok(Number.isInteger(steps)&&steps>=1&&steps<=NBFLIP_LETTERS_FRAMES,`--steps must be an integer from 1 to ${NBFLIP_LETTERS_FRAMES}`);
 const name=process.argv.slice(2).find(a=>!a.startsWith("--"))??'current';
 assert.match(name,/^[a-z0-9-]+$/);
@@ -64,14 +79,38 @@ const mean=(values:number[])=>values.reduce((a,b)=>a+b,0)/values.length;
 try {
  const dawn=await import(pathToFileURL(resolve('node_modules/webgpu/index.js')).href);Object.assign(globalThis,dawn.globals);
  const gpu=createProcessRetainedDawnGPU(dawn,['backend=metal']);const adapter=await gpu.requestAdapter();assert.ok(adapter);
- const raw=await adapter.requestDevice({requiredFeatures:['timestamp-query'],requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
- profile=new GPUPassProfile(raw);device=managedGPUDevice(plain?raw:profile.device,{requireWorkerRealm:false});
+ const raw=await adapter.requestDevice({requiredFeatures:['timestamp-query',...(adapter.features.has('subgroups')?['subgroups' as const]:[])],requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
+ profile=new GPUPassProfile(raw);
+ const dispatchProbe=probeDispatch?new NarrowBandDispatchProbe(profile.device):undefined;
+ const transferProbe=probeTransfer?new NarrowBandTransferProbe(dispatchProbe?.device??profile.device):undefined;
+ device=managedGPUDevice(transferProbe?.device??dispatchProbe?.device??(plain?raw:profile.device),{requireWorkerRealm:false});
  device.addEventListener('uncapturederror',e=>{e.preventDefault();errors.push(e.error.message);console.error(e.error.message);});
  const built=performance.now();
  solver=await uniformNarrowBandMethod.createSolverAsync!(device,scene,definition.methodProfile!.quality,values,undefined,()=>{}) as WebGPUUniformReferenceSolver;
  const construction_ms=performance.now()-built;
+ let probeFrame=0;
+ if(transferProbe){
+  const stage=(solver as unknown as {mixedFrame:{narrowBandFlip:{dispatchBatch(e:GPUCommandEncoder,entries:readonly string[],group:string|undefined,label:string,shared?:GPUComputePassEncoder):void}}}).mixedFrame.narrowBandFlip;
+  const dispatch=stage.dispatchBatch.bind(stage);
+  stage.dispatchBatch=(encoder,entries,group,label,shared)=>{
+   if(!entries.includes("transfer")||!probeFrames.includes(probeFrame)){dispatch(encoder,entries,group,label,shared);return;}
+   // Split the measured batch only for probes; every replay has identical
+   // classified particles and pre-transfer velocity. Production runs last.
+   for(const entry of entries){
+    if(entry==="transfer"){
+     for(let round=0;round<4;round++)for(const name of (round%2?[...transferProbe.names].reverse():transferProbe.names)){
+      transferProbe.variant=name;dispatch(encoder,[entry],group,entry);
+     }
+     transferProbe.variant=undefined;
+    }
+    dispatch(encoder,[entry],group,entry);
+   }
+  };
+ }
  assert.deepEqual([solver.info.nx,solver.info.ny,solver.info.nz],[nx,ny,nz],"the published grid");
  for(let frame=1;frame<=steps;frame++){
+  probeFrame=frame;
+  if(dispatchProbe)dispatchProbe.enabled=probeFrames.includes(frame);
   const start=performance.now();if(!plain)profile.start();
   solver.advanceTo(frame*dt,[]);const encode_ms=performance.now()-start;await solver.awaitFrameCompletion();
   const wall_ms=performance.now()-start;
@@ -90,6 +129,11 @@ try {
   const row:Record<string,unknown>={frame,time_s:frame*dt,wall_ms,encode_ms,projection_ms,rest_ms,gpu_ms:projection_ms+rest_ms,between_ms,before,passes:passes.length,
    particles:flip.particles,particleCapacity:flip.capacity,reseedClipped:flip.reseedClipped,allocatedBytes:solver.info.allocatedBytes,
    fineTiles:solver.info.uniformMixedFineTiles,bandTiles:solver.info.uniformPressureBandTiles,labels:byLabel};
+  if(transferProbe&&probeFrames.includes(frame)){
+   const begin=passes.findIndex(p=>p.label==="Uniform mixed momentum");
+   const end=passes.findIndex((p,i)=>i>=begin&&p.label==="Uniform mixed body forces");
+   row.transferStage=passes.slice(begin,end+1);
+  }
   if(track){
    // The highest liquid vertex in each falling letter's column, with the crossing above it interpolated.
    const fields=await readUniformFields(device,solver);
@@ -109,10 +153,10 @@ try {
   wallMedian_ms:of("wall_ms").sort((a,b)=>a-b)[(steps-from+1)>>1],wallMax_ms:Math.max(...of("wall_ms")),
   particles:mean(of("particles")),particlesMax:Math.max(...of("particles")),particleCapacity:rows.at(-1)!.particleCapacity,
   allocatedBytes:mean(of("allocatedBytes")),allocatedBytesMax:Math.max(...of("allocatedBytes")),
-  volumeDrift:final.volumeDrift,tracked:track,plain};
+  volumeDrift:final.volumeDrift,tracked:track,plain,transferProbe:probeTransfer,dispatchProbe:probeDispatch};
  console.log(JSON.stringify(summary));
  write(`nbflip-letters-${name}.json`,{date:new Date().toISOString(),arguments:process.argv.slice(2),method:uniformNarrowBandMethod.id,values,
-  adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},
+  adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description,subgroupMinSize:adapter.info.subgroupMinSize,subgroupMaxSize:adapter.info.subgroupMaxSize},
   summary,letters,labels:[...labels].map(([label,t])=>({label,projection:PROJECTION.test(label),msPerStep:t.ms/steps,passesPerStep:t.passes/steps,dispatchesPerStep:t.dispatches/steps})).sort((a,b)=>b.msPerStep-a.msPerStep),
   scene,rows,final,errors});
 }catch(error){

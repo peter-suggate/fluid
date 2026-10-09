@@ -102,6 +102,7 @@ export class WebGPUUniformVelocityExtrapolator {
   }
   private readonly hierarchyDownGroups: GPUBindGroup[] = [];
   private readonly hierarchyUpGroups: GPUBindGroup[] = [];
+  private readonly mixedReplayGroups: GPUBindGroup[] = [];
   private readonly seedCurrentGroup: GPUBindGroup;
   private readonly seedPredictedGroup: GPUBindGroup;
   private readonly prepareSeedCurrentGroup: GPUBindGroup;
@@ -122,7 +123,7 @@ export class WebGPUUniformVelocityExtrapolator {
   /** Mixed continuation: levels [2, tail) dispatch one lane per (cell,
    * component); levels [tail, end) run in one workgroup (mixedHierarchyTail). */
   private readonly mixedTail?: { readonly level: number; readonly group?: GPUBindGroup };
-  private mixedPipelines?: { readonly restrict: GPUComputePipeline; readonly prolong: GPUComputePipeline; readonly tail: GPUComputePipeline };
+  private mixedPipelines?: { readonly restrict: GPUComputePipeline; readonly prolong: GPUComputePipeline; readonly replay: GPUComputePipeline; readonly tail: GPUComputePipeline };
 
   constructor(
     private readonly device: GPUDevice,
@@ -394,6 +395,10 @@ export class WebGPUUniformVelocityExtrapolator {
         currentVelocity, coarser, existingFine, filledFine, this.valuesB, hierarchyConfig, false,
         coarserOrigins, this.hierarchyLevels[levelIndex]?.originsDown, this.hierarchyLevels[levelIndex]?.originsUp,
       ));
+      this.mixedReplayGroups.push(group(
+        currentVelocity, coarser, existingFine, filledFine, this.valuesB, hierarchyConfig, false,
+        coarserOrigins, this.hierarchyLevels[levelIndex]?.originsUp, this.dummyOriginsOut,
+      ));
       if (levelIndex < 0) {
         for (const target of [currentTransport, predictedTransport]) this.fusedGroups.push(group(
           currentVelocity, coarser, existingFine, target, this.valuesB, hierarchyConfig, false, coarserOrigins,
@@ -456,13 +461,13 @@ export class WebGPUUniformVelocityExtrapolator {
     return {input:root.down,inputOrigins:root.originsDown,
       output:hasLower?root.up:root.down,outputOrigins:hasLower?root.originsUp:root.originsDown,
       /** Encodes into the caller's compute pass; its group 0 is left rebound. */
-      encode:(pass:GPUComputePassEncoder)=>{
+      encode:(pass:GPUComputePassEncoder,replay=false)=>{
         const count=this.hierarchyLevels.length,groups=(level:number)=>this.hierarchyLevels[level]!.dims.map(n=>Math.ceil(n/4)) as [number,number,number];
         pass.setPipeline(mixed.restrict);
         for(let level=2;level<tail.level;level++){pass.setBindGroup(0,this.hierarchyDownGroups[level]!);pass.dispatchWorkgroups(...groups(level));}
         if(tail.group){pass.setPipeline(mixed.tail);pass.setBindGroup(0,tail.group);pass.dispatchWorkgroups(1);}
-        pass.setPipeline(mixed.prolong);
-        for(let level=Math.min(tail.level,count-1)-1;level>=1;level--){pass.setBindGroup(0,this.hierarchyUpGroups[count-2-level]!);pass.dispatchWorkgroups(...groups(level));}
+        pass.setPipeline(replay?mixed.replay:mixed.prolong);
+        for(let level=Math.min(tail.level,count-1)-1;level>=1;level--){pass.setBindGroup(0,(replay?this.mixedReplayGroups:this.hierarchyUpGroups)[count-2-level]!);pass.dispatchWorkgroups(...groups(level));}
       }};
   }
 
@@ -572,12 +577,13 @@ export class WebGPUUniformVelocityExtrapolator {
   }
 
   private async compileMixed(compile: (label: string, entryPoint: string) => Promise<GPUComputePipeline>): Promise<void> {
-    const [restrict, prolong, tail] = await Promise.all([
+    const [restrict, prolong, replay, tail] = await Promise.all([
       compile("Uniform mixed extension hierarchy restrict", "mixedRestrictKnownVelocity"),
       compile("Uniform mixed extension hierarchy prolong", "mixedProlongUnknownVelocity"),
+      compile("Uniform mixed extension hierarchy replay", "mixedReplayUnknownVelocity"),
       compile("Uniform mixed extension hierarchy tail", "mixedHierarchyTail"),
     ]);
-    this.mixedPipelines = { restrict, prolong, tail };
+    this.mixedPipelines = { restrict, prolong, replay, tail };
   }
 
   /**

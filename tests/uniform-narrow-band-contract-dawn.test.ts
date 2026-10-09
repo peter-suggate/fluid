@@ -196,6 +196,7 @@ fn umSampleVertex(p:vec3f)->f32{return p.y-6.0;}
 fn umCellOpen(p:vec3i)->f32{return 1.0;}
 fn bandPhi(p:vec3f)->f32{return p.y-6.0;}
 ${narrowBandMembershipWGSL}`});
+   assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);
    const layout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
    const group=device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:bins}}]});
    // One workgroup a listed tile: every tile here.
@@ -210,6 +211,8 @@ ${narrowBandMembershipWGSL}`});
     assert.notEqual(actual,0xffffffff,`missing crossing near ${x},${y},${z}`);
     const selected=[actual%dims[0]!,Math.floor(actual/dims[0]!)%dims[1]!,Math.floor(actual/(dims[0]!*dims[1]!))];
     assert.equal(cost(selected),Math.min(...eligible.map(cost)),`nearest crossing near ${x},${y},${z}`);
+    const expected=eligible.sort((a,b)=>cost(a)-cost(b)||a[2]!-b[2]!||a[1]!-b[1]!||a[0]!-b[0]!)[0]!;
+    assert.deepEqual(selected,expected,`equal-distance tie near ${x},${y},${z}`);
    }
   }finally{bins.destroy();}
  });

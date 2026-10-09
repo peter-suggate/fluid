@@ -36,17 +36,25 @@ fn particleSurfaceGather(q:vec3i,member:u32,stride:u32)->f32{
 // eight cells settle it, 64 samples in place of the 512 of the whole 4-cube.
 fn particleSurfaceNearest(q:vec3i)->f32{
  let x=vec3f(q);var nearest2=4.0;
- for(var ring=0u;ring<2u;ring++){
-  if(ring==1u&&nearest2<=1.0){break;}
-  for(var bin=0u;bin<64u;bin++){
-   let o=vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u))-2;
-   // Whole cells between the vertex and this cell's box, per axis.
-   let gap=max(o,-o-1);if(any(gap>vec3i(0))!=(ring==1u)){continue;}
-   if(f32(dot(gap,gap))>=nearest2){continue;}
-   let cell=q+o;if(any(cell<vec3i(0))||any(cell>=vec3i(UM_D))){continue;}
-   let run=nbCellRun(cell);
+ // The eight incident cells are four x rows in sorted particle storage.
+ // Split only at a tile boundary, keeping the original z/y/x visit order.
+ for(var row=0u;row<4u;row++){
+  let y=q.y-1+i32(row%2u);let z=q.z-1+i32(row/2u);
+  if(y<0||z<0||y>=i32(UM_D.y)||z>=i32(UM_D.z)){continue;}
+  var start=max(q.x-1,0);let last=min(q.x,i32(UM_D.x)-1);
+  while(start<=last){
+   let end=min(last,start|3);let run=nbRun(vec3i(start,y,z),vec3i(end,y,z));
    for(var index=run.x;index<run.y;index++){let offset=x-nbPosition(index);nearest2=min(nearest2,dot(offset,offset));}
+   start=end+1;
   }
+ }
+ if(nearest2<=1.0){return nearest2;}
+ for(var bin=0u;bin<64u;bin++){
+  let o=vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u))-2;
+  let gap=max(o,-o-1);if(all(gap==vec3i(0))||f32(dot(gap,gap))>=nearest2){continue;}
+  let cell=q+o;if(any(cell<vec3i(0))||any(cell>=vec3i(UM_D))){continue;}
+  let run=nbCellRun(cell);
+  for(var index=run.x;index<run.y;index++){let offset=x-nbPosition(index);nearest2=min(nearest2,dot(offset,offset));}
  }
  return nearest2;
 }
@@ -79,41 +87,43 @@ export const narrowBandTiledSurfaceWGSL=/* wgsl */`
 }
 `;
 
-export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiledSurfaceWGSL+/* wgsl */`
-var<workgroup> nbSurfaceNearest:array<f32,64>;
-var<workgroup> nbSurfaceBoundary:atomic<u32>;
-var<workgroup> nbSurfaceBoundaryCount:u32;
-fn nbCoupleVertex(owner:UMOwner,regular:bool,k:u32,lane:u32){
- let origin=umOrigin(owner);let corner=umCorner(k,2u);let q=vec3i(origin+corner*owner.width);let member=lane%16u;
- var owned=false;
- if(owner.width==4u){
-  if(regular){owned=all((corner!=vec3u(0))|(origin==vec3u(0)));}
-  else{owned=umVertexAuthority(vec3u(q)).index==owner.index;}
+/** Reconstruction first scatters occupied-cell distances into the expired
+ * metric bank, then each canonical vertex reads one nearest-distance word. */
+export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+
+ narrowBandTiledSurfaceWGSL.replace("particleSurfaceNearest(q)","nbCachedSurfaceNearest(q)")+/* wgsl */`
+// The compact motion arena is dead until classify, after reconstruction.
+fn nbSurfaceCells()->u32{return NB_CELLS+4u*arrayLength(&particles);}
+@compute @workgroup_size(64) fn surfaceCells(@builtin(global_invocation_id) gid:vec3u){
+ for(var cell=gid.x;cell<NB_CELLS;cell+=65536u){
+  if(nbSparseBins&&atomicLoad(&bins[NB_COVERAGE+cell/64u])==0u){continue;}
+  if(atomicLoad(&bins[cell])==0u){continue;}
+  let slot=atomicAdd(&bins[NB_BAND+3u],1u);links[nbSurfaceCells()+slot]=cell;
  }
- var bulk=vec2f(0);var gather=4.0;
- if(owned){bulk=particleSurfaceBulk(q);if(bulk.y>0.0){gather=particleSurfaceGather(q,member,16u);}}
- nbSurfaceNearest[lane]=gather;workgroupBarrier();
- for(var stride=8u;stride>0u;stride/=2u){
-  if(member<stride){nbSurfaceNearest[lane]=min(nbSurfaceNearest[lane],nbSurfaceNearest[lane+stride]);}workgroupBarrier();
- }
- if(member==0u&&owned){
-  var value=bulk.x;if(bulk.y>0.0){value=particleSurfaceFinish(q,bulk.x,nbSurfaceNearest[lane]);}
-  textureStore(outputPhi,q,vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
- }
- workgroupBarrier();
 }
-@compute @workgroup_size(64) fn couple(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let owner=umAllOwner(vec3u(umCounts.x*64u+gid.x/16u,0,0));let origin=umOrigin(owner);
- let regular=umTileMaximumWidth(owner.tile)==owner.width&&umTileMinimumWidth(owner.tile)==owner.width;
- // Fine tiles publish all of their canonical vertices in coupleFine. This
- // launch visits only coarse owners, including their transition vertices.
- if(lane==0u){atomicStore(&nbSurfaceBoundary,0u);}workgroupBarrier();
- if(lane%16u==0u&&owner.width==4u&&(!regular||any(origin==vec3u(0)))){atomicOr(&nbSurfaceBoundary,1u);}
- workgroupBarrier();
- nbCoupleVertex(owner,regular,7u,lane);
- if(lane==0u){nbSurfaceBoundaryCount=atomicLoad(&nbSurfaceBoundary);}
- let boundaries=workgroupUniformLoad(&nbSurfaceBoundaryCount);
- if(boundaries!=0u){for(var k=0u;k<7u;k++){nbCoupleVertex(owner,regular,k,lane);}}
+@compute @workgroup_size(64) fn surfaceSplat(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let cell=links[nbSurfaceCells()+group.x];let c=4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u);
+ let q=vec3i(c)+vec3i(umCorner(lane,4u))-1;
+ if(any(q<vec3i(0))||any(q>vec3i(UM_D))){return;}
+ let start=links[cell];let end=start+atomicLoad(&bins[cell]);var nearest2=4.0;
+ for(var i=start;i<end;i++){let d=vec3f(q)-nbPosition(i);nearest2=min(nearest2,dot(d,d));}
+ // Positive float bit order: complement reverses it; zero is the empty key.
+ if(nearest2<4.0){atomicMax(&bins[NB_DEPTH_A+nbVertexIndex(vec3u(q))],~bitcast<u32>(nearest2));}
+}
+fn nbCachedSurfaceNearest(q:vec3i)->f32{
+ let key=atomicLoad(&bins[NB_DEPTH_A+nbVertexIndex(vec3u(q))]);
+ if(key==0u){return 4.0;}return bitcast<f32>(~key);
+}
+@compute @workgroup_size(64) fn couple(@builtin(global_invocation_id) gid:vec3u){
+ let owner=umAllOwner(vec3u(umCounts.x*64u+gid.x,0,0));if(owner.width!=4u){return;}
+ let origin=umOrigin(owner);let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
+ for(var k=0u;k<8u;k++){
+  let corner=umCorner(k,2u);let q=origin+4u*corner;
+  if(regular){if(!all((corner!=vec3u(0))|(origin==vec3u(0)))){continue;}}
+  else if(umVertexAuthority(q).index!=owner.index){continue;}
+  let bulk=particleSurfaceBulk(vec3i(q));var value=bulk.x;
+  if(bulk.y>0.0){value=particleSurfaceFinish(vec3i(q),bulk.x,nbCachedSurfaceNearest(vec3i(q)));}
+  textureStore(outputPhi,vec3i(q),vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
+ }
 }
 @compute @workgroup_size(64) fn surface(@builtin(global_invocation_id) gid:vec3u){
  let dims=UM_D+1u;let count=dims.x*dims.y*dims.z;
@@ -126,11 +136,61 @@ fn nbCoupleVertex(owner:UMOwner,regular:bool,k:u32,lane:u32){
 }
 `;
 
+/** Each fine tile prepares its face blend once, sharing the 5³ metric vertices.
+ * The expired scatter cursors fit six words per fine cell at sparse layouts. */
+export function narrowBandTransferPropertiesSource(subgroups=false):string{return /* wgsl */`
+fn nbTransferPropertiesFit()->bool{return 416u*umCounts.x<=NB_CELLS;}
+var<workgroup> nbTransferDepth:array<f32,125>;
+var<workgroup> nbTransferActive:array<u32,64>;
+var<workgroup> nbTransferHeat:array<f32,27>;
+fn nbTransferTheta(local:vec3f)->f32{
+ if(!nbAdaptive()){return 1.0;}
+ let q=local/4.0+0.5;let base=vec3u(floor(q));let f=fract(q);var theta=0.0;
+ for(var k=0u;k<8u;k++){let bit=umCorner(k,2u);let at=base+bit;let w=select(1.0-f,f,bit!=vec3u(0));theta+=w.x*w.y*w.z*nbTransferHeat[at.x+3u*(at.y+3u*at.z)];}
+ return clamp(theta,0.0,1.0);
+}
+@compute @workgroup_size(64) fn transferProperties(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32${subgroups?",@builtin(subgroup_invocation_id) subgroupLane:u32":""}){
+ if(!nbTransferPropertiesFit()){return;}
+ let owner=umAllOwner(vec3u(group.x*64u,0u,0u));let origin=4u*umTileCoord(owner.tile);
+ for(var k=lane;k<125u;k+=64u){let q=origin+umCorner(k,5u);nbTransferDepth[k]=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+nbVertexIndex(q)]));}
+ if(lane<27u&&nbAdaptive()){
+  let t=vec3u(clamp(vec3i(umTileCoord(owner.tile))+vec3i(umCorner(lane,3u))-1,vec3i(0),vec3i(UM_T)-1));
+  nbTransferHeat[lane]=clamp(bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_THETA+umTileAt(t)])),0.0,1.0);
+ }
+ workgroupBarrier();
+ let local=umCorner(lane,4u);let cell=origin+local;let at=NB_CELLS+6u*(64u*group.x+lane);var needed=false;var properties:array<vec2f,3>;
+ for(var axis=0u;axis<3u;axis++){
+  var near=0.0;var expected=1.0;var low=local;low[axis]+=1u;
+  if(cell[axis]+1u<UM_D[axis]&&(nbBandReach(origin+low)&1u)!=0u){
+   var depth=0.0;
+   // The positive MAC face has fraction zero along its normal. Preserve the
+   // eight-corner accumulation order while skipping its four zero terms.
+   for(var k=0u;k<8u;k++){let bit=umCorner(k,2u);if(bit[axis]!=0u){continue;}let q=low+bit;depth+=0.25*nbTransferDepth[q.x+5u*(q.y+5u*q.z)];}
+   if(depth<=1.5&&depth>=-2.0){var q=vec3f(local)+0.5;q[axis]+=0.5;near=nbTransferTheta(q);expected=max(1.0,8.0*clamp(0.5-depth,0.0,1.0));}
+  }
+  needed=needed||near>0.0;
+  properties[axis]=vec2f(near,expected);
+ }
+ nbTransferActive[lane]=u32(needed);workgroupBarrier();
+ let neededPair=(nbTransferActive[lane&~1u]|nbTransferActive[lane|1u])!=0u;
+ let emit=neededPair&&lane%2u==0u;
+ ${subgroups?`// Reserve each subgroup's tile-local pairs together, retaining locality
+ // without relying on a mapping between local and subgroup lane indices.
+ let rank=subgroupExclusiveAdd(u32(emit));let count=subgroupAdd(u32(emit));var first=0u;
+ if(subgroupLane==0u&&count!=0u){first=atomicAdd(&state[9],count);}first=subgroupBroadcastFirst(first);
+ if(emit){atomicStore(&bins[NB_CELLS+384u*umCounts.x+first+rank],32u*group.x+lane/2u);}`:`
+ if(emit){let slot=atomicAdd(&state[9],1u);atomicStore(&bins[NB_CELLS+384u*umCounts.x+slot],32u*group.x+lane/2u);}`}
+ if(!neededPair){textureStore(output,vec3i(cell),textureLoad(velocity,vec3i(cell),0));return;}
+ for(var axis=0u;axis<3u;axis++){atomicStore(&bins[at+2u*axis],bitcast<u32>(properties[axis].x));atomicStore(&bins[at+2u*axis+1u],bitcast<u32>(properties[axis].y));}
+}
+`;}
+export const narrowBandTransferPropertiesWGSL=narrowBandTransferPropertiesSource();
+
 /** Adjacent fine cells share their particle reads. Each sixteen-lane team
  * gathers the union of two neighboring x cells' quadratic MAC supports and
  * accumulates both results in registers. Spatial order makes each x row at
  * most two runs, without a per-bin particle limit. */
-export const narrowBandFineTransferWGSL=/* wgsl */`
+export function narrowBandFineTransferSource(subgroups=false,prepared=false):string{return /* wgsl */`
 var<workgroup> nbMomentum:array<vec3f,64>;
 var<workgroup> nbMass:array<vec3f,64>;
 var<workgroup> nbMomentumNext:array<vec3f,64>;
@@ -138,14 +198,24 @@ var<workgroup> nbMassNext:array<vec3f,64>;
 var<workgroup> nbBlend:array<f32,24>;
 var<workgroup> nbExpected:array<f32,24>;
 var<workgroup> nbRuns:array<vec2u,128>;
-@compute @workgroup_size(64) fn transfer(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let first=(gid.x/16u)*2u;let owner=umAllOwner(vec3u(first,0,0));let origin=umOrigin(owner);
+@compute @workgroup_size(${subgroups?32:64}) fn transfer(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) ${subgroups?"localLane:u32,@builtin(subgroup_invocation_id) subgroupLane:u32":"lane:u32"}){
+ ${subgroups?/* wgsl */`
+ // The 32-lane workgroup is one subgroup (the adapter minimum is 32).
+ // Assign logical lanes directly, independent of local invocation order.
+ let lane=subgroupLane;
+ `:""}
+ let pair=(gid.x/${subgroups?32:64}u)*${subgroups?2:4}u+lane/16u;var first=2u*pair;var valid=true;
+ ${prepared?`if(nbTransferPropertiesFit()){valid=pair<atomicLoad(&state[9]);first=2u*atomicLoad(&bins[NB_CELLS+384u*umCounts.x+pair]);}`:""}
+ let owner=umAllOwner(vec3u(first,0,0));let origin=umOrigin(owner);
  let next=umAllOwner(vec3u(first+1u,0,0));let nextOrigin=umOrigin(next);
  let team=lane/16u;let member=lane%16u;let centre=vec3f(origin)+0.5;
  if(member<6u){
   let axis=member%3u;let o=select(origin,nextOrigin,member>=3u);let width=select(owner.width,next.width,member>=3u);
   var near=0.0;var expected=1.0;
-  if(width==1u&&o[axis]+1u<UM_D[axis]){
+  ${prepared?`if(nbTransferPropertiesFit()){
+   let at=NB_CELLS+6u*(first+u32(member>=3u))+2u*axis;
+   near=select(0.0,bitcast<f32>(atomicLoad(&bins[at])),valid);expected=bitcast<f32>(atomicLoad(&bins[at+1u]));
+  }else `:""}if(width==1u&&o[axis]+1u<UM_D[axis]){
    var q=vec3f(o)+0.5;q[axis]+=0.5;let depth=particleDepth(q);
    if(depth<=1.5&&depth>=-2.0){near=nbTheta(q);expected=max(1.0,8.0*clamp(0.5-depth,0.0,1.0));}
   }
@@ -168,9 +238,13 @@ var<workgroup> nbRuns:array<vec2u,128>;
  workgroupBarrier();
  var momentum=vec3f(0);var total=vec3f(0);var momentumNext=vec3f(0);var totalNext=vec3f(0);
  if(gather){
-  for(var slot=0u;slot<30u;slot++){
-   let run=nbRuns[32u*team+slot];
-   for(var i=run.x+member;i<run.y;i+=16u){
+  // Both parts of an x row form one logical stream. A partial run no
+  // longer leaves the other lanes idle before the second part starts.
+  for(var slot=0u;slot<30u;slot+=2u){
+   let run=nbRuns[32u*team+slot];let second=nbRuns[32u*team+slot+1u];let count=run.y-run.x;
+   let length=count+second.y-second.x;
+   for(var index=member;index<length;index+=16u){
+    let i=select(second.x+index-count,run.x+index,index<count);
     let motion=nbMotion(i);if(motion.w==1.0){continue;}
     let d=centre-nbPosition(i);let f=d+0.5;
     let wc=vec3f(weight(d.x),weight(d.y),weight(d.z));let wf=vec3f(weight(f.x),weight(f.y),weight(f.z));
@@ -182,26 +256,41 @@ var<workgroup> nbRuns:array<vec2u,128>;
    }
   }
  }
+ ${subgroups?/* wgsl */`
+ // A subgroup holds whole 16-lane teams. Keep the original reduction tree,
+ // exchanging registers instead of writing four shared arrays each round.
+ for(var stride=8u;stride>0u;stride/=2u){
+  let m=subgroupShuffleDown(momentum,stride);let w=subgroupShuffleDown(total,stride);
+  let mn=subgroupShuffleDown(momentumNext,stride);let wn=subgroupShuffleDown(totalNext,stride);
+  if(member<stride){momentum+=m;total+=w;momentumNext+=mn;totalNext+=wn;}
+ }
+ `:/* wgsl */`
  nbMomentum[lane]=momentum;nbMass[lane]=total;nbMomentumNext[lane]=momentumNext;nbMassNext[lane]=totalNext;workgroupBarrier();
  for(var stride=8u;stride>0u;stride/=2u){
   if(member<stride){nbMomentum[lane]+=nbMomentum[lane+stride];nbMass[lane]+=nbMass[lane+stride];nbMomentumNext[lane]+=nbMomentumNext[lane+stride];nbMassNext[lane]+=nbMassNext[lane+stride];}workgroupBarrier();
  }
- if(member==0u&&owner.width==1u){
-  let original=textureLoad(velocity,vec3i(origin),0);let mass=nbMass[lane];
+ momentum=nbMomentum[lane];total=nbMass[lane];momentumNext=nbMomentumNext[lane];totalNext=nbMassNext[lane];
+ `}
+ if(valid&&member==0u&&owner.width==1u){
+  let original=textureLoad(velocity,vec3i(origin),0);let mass=total;
   var transition=blend;
   if(nbAdaptive()){for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+a]),1.0,blend[a]);}}
-  let value=mix(original.xyz,nbMomentum[lane]/max(mass,vec3f(1e-30)),select(vec3f(0),transition,mass>=vec3f(1e-5)));
+  let value=mix(original.xyz,momentum/max(mass,vec3f(1e-30)),select(vec3f(0),transition,mass>=vec3f(1e-5)));
   textureStore(output,vec3i(origin),vec4f(value,original.w));
  }
- if(member==0u&&next.width==1u){
-  let original=textureLoad(velocity,vec3i(nextOrigin),0);let mass=nbMassNext[lane];
+ if(valid&&member==0u&&next.width==1u){
+  let original=textureLoad(velocity,vec3i(nextOrigin),0);let mass=totalNext;
   var transition=nextBlend;
   if(nbAdaptive()){for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+3u+a]),1.0,nextBlend[a]);}}
-  let value=mix(original.xyz,nbMomentumNext[lane]/max(mass,vec3f(1e-30)),select(vec3f(0),transition,mass>=vec3f(1e-5)));
+  let value=mix(original.xyz,momentumNext/max(mass,vec3f(1e-30)),select(vec3f(0),transition,mass>=vec3f(1e-5)));
   textureStore(output,vec3i(nextOrigin),vec4f(value,original.w));
  }
 }
 `;
+
+}
+/** Portable reference variant; small subgroups also use its shared tree. */
+export const narrowBandFineTransferWGSL=narrowBandFineTransferSource();
 
 /** One workgroup per coarse face, with an exact particle gather and parallel
  * reduction. It uses the same h-scale quadratic kernel as the fine transfer. The 4h particle

@@ -863,7 +863,7 @@ export class UniformMixedFrame {
    split.transfer.encodeToSimulation(encoder,split.toSimulation);
    this.band.encodeSolve(encoder);
    if(!kick&&this.narrowBandFlip){
-    this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2);
+    this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2,true);
     this.narrowBandFlip.update(encoder);
    }
    const root=this.levels[0]!;

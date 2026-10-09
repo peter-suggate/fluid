@@ -5,7 +5,7 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import type { UniformNarrowBandFlip } from "../lib/methods/uniform/uniform-narrow-band-flip";
-import { narrowBandParticleSurfaceWGSL, narrowBandFineTransferWGSL, narrowBandTiledSurfaceWGSL } from "../lib/methods/uniform/uniform-narrow-band-surface.wgsl";
+import { narrowBandParticleSurfaceWGSL, narrowBandFineTransferWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource, narrowBandTiledSurfaceWGSL } from "../lib/methods/uniform/uniform-narrow-band-surface.wgsl";
 import { UniformNarrowBandOrder } from "../lib/methods/uniform/uniform-narrow-band-order";
 import { withUniformDevice, advanceUniform } from "./helpers/uniform-geometric";
 import { readMixedBuffer, readMixedTexture } from "./helpers/uniform-mixed-native-fields";
@@ -139,24 +139,37 @@ import { readMixedBuffer, readMixedTexture } from "./helpers/uniform-mixed-nativ
   const data=new Float32Array(samples.flat()),counts=new Uint32Array(cells),starts=new Uint32Array(cells);
   for(const s of samples)counts[orderOf(s)]!++;
   for(let at=1;at<cells;at++)starts[at]=starts[at-1]!+counts[at-1]!;
-  for(const heat of [1,0.35,0]){
+  for(const subgroups of [false,...(device.features.has("subgroups")&&(device.adapterInfo.subgroupMinSize??0)>=32?[true]:[])])for(const prepared of [false,true])for(const slope of [0,0.375])for(const heat of [1,0.35,0]){
   const buffer=(data:Uint32Array<ArrayBuffer>|Float32Array<ArrayBuffer>)=>{const b=device.createBuffer({size:data.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(b,0,data);return b;};
-  const buffers=[buffer(data),buffer(counts),buffer(starts)];
+  // Oversized scratch exercises the sparse preparation path in this tiny fixture.
+  const arena=new Uint32Array(9008);arena.set(counts);
+  new Float32Array(arena.buffer,9000*4,8).fill(heat);
+  const metric=new Float32Array(arena.buffer,8192*4,9**3);
+  for(let z=0;z<9;z++)for(let y=0;y<9;y++)for(let x=0;x<9;x++)metric[x+9*(y+9*z)]=y+slope*(x+0.5*z)-4;
+  const buffers=[buffer(data),buffer(arena),buffer(starts),buffer(new Uint32Array(12))];
   const texture=()=>device.createTexture({size:[dims,dims,dims],dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.COPY_SRC});
   const velocity=texture(),output=texture(),initial=new Float32Array(cells*4);
   for(let i=0;i<cells;i++)initial.set([0.3,-0.2,0.7,9],4*i);
   device.queue.writeTexture({texture:velocity},initial,{bytesPerRow:dims*16,rowsPerImage:dims},[dims,dims,dims]);
   try{
    const module=device.createShaderModule({code:/* wgsl */`
-const UM_D=vec3u(8);struct Particle{position:vec4f,motion:vec4f} struct UMOwner{index:u32,width:u32}
+${subgroups?"enable subgroups;":""}
+const UM_D=vec3u(8);const UM_T=vec3u(2);const NB_ACTIVITY_THETA=9000u;const umCounts=vec4u(8,0,0,8);const NB_CELLS=4096u;const NB_DEPTH_A=8192u;
+struct Particle{position:vec4f,motion:vec4f} struct UMOwner{index:u32,width:u32,tile:u32}
 @group(0) @binding(0) var<storage,read> particles:array<Particle>;
 @group(0) @binding(1) var<storage,read_write> bins:array<atomic<u32>>;
 @group(0) @binding(2) var<storage,read> links:array<u32>;
 @group(0) @binding(3) var velocity:texture_3d<f32>;
 @group(0) @binding(4) var output:texture_storage_3d<rgba32float,write>;
-fn umAllOwner(g:vec3u)->UMOwner{return UMOwner(g.x,select(0u,1u,g.x<512u));}
-fn umOrigin(o:UMOwner)->vec3u{return vec3u(o.index%8u,(o.index/8u)%8u,o.index/64u);}
-fn particleDepth(p:vec3f)->f32{return p.y-4.0;}
+@group(0) @binding(5) var<storage,read_write> state:array<atomic<u32>>;
+fn umAllOwner(g:vec3u)->UMOwner{return UMOwner(g.x,select(0u,1u,g.x<512u),g.x/64u);}
+fn umCorner(k:u32,n:u32)->vec3u{return vec3u(k%n,(k/n)%n,k/(n*n));}
+fn umTileCoord(t:u32)->vec3u{return umCorner(t,2u);}
+fn umTileAt(t:vec3u)->u32{return t.x+2u*(t.y+2u*t.z);}
+fn umOrigin(o:UMOwner)->vec3u{return 4u*umTileCoord(o.tile)+umCorner(o.index%64u,4u);}
+fn nbBandReach(p:vec3u)->u32{return 1u;}
+fn nbVertexIndex(p:vec3u)->u32{return p.x+9u*(p.y+9u*p.z);}
+fn particleDepth(p:vec3f)->f32{return p.y+${slope}*(p.x+0.5*p.z)-4.0;}
 fn nbOrder(c:vec3u)->u32{let t=c/4u;let l=c%4u;return 64u*(t.x+2u*(t.y+2u*t.z))+l.x+4u*l.y+16u*l.z;}
 fn nbRun(a:vec3i,b:vec3i)->vec2u{let last=nbOrder(vec3u(b));return vec2u(links[nbOrder(vec3u(a))],links[last]+atomicLoad(&bins[last]));}
 fn nbPosition(i:u32)->vec3f{return particles[i].position.xyz;}
@@ -166,18 +179,29 @@ fn weight(x:f32)->f32{let a=abs(x);if(a<0.5){return 0.75-a*a;}let b=max(0.0,1.5-
 // Exercise the fixed band and both fractional and zero particle influence.
 fn nbAdaptive()->bool{return ${heat<1};}
 fn nbTheta(p:vec3f)->f32{return ${heat};}
-${narrowBandFineTransferWGSL}
+${prepared?narrowBandTransferPropertiesSource(subgroups):""}
+${narrowBandFineTransferSource(subgroups,prepared)}
 `});
-   const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"transfer"}});
-   const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[...buffers.map((buffer,binding)=>({binding,resource:{buffer}})),{binding:3,resource:velocity.createView()},{binding:4,resource:output.createView()}]});
-   const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(cells*8/64);pass.end();device.queue.submit([encoder.finish()]);
+   assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error"),[]);
+   const layout=device.createBindGroupLayout({entries:[
+    ...[0,1,2,5].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0||binding===2?"read-only-storage" as const:"storage" as const}})),
+    {binding:3,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
+    {binding:4,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},
+   ]});
+   const pipelineLayout=device.createPipelineLayout({bindGroupLayouts:[layout]});
+   const pipeline=await device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint:"transfer"}});
+   const preparation=prepared?await device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint:"transferProperties"}}):undefined;
+   const group=device.createBindGroup({layout,entries:[...buffers.slice(0,3).map((buffer,binding)=>({binding,resource:{buffer}})),{binding:3,resource:velocity.createView()},{binding:4,resource:output.createView()},{binding:5,resource:{buffer:buffers[3]!}}]});
+   const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setBindGroup(0,group);
+   if(preparation){pass.setPipeline(preparation);pass.dispatchWorkgroups(8);}
+   pass.setPipeline(pipeline);pass.dispatchWorkgroups(cells*8/(subgroups?32:64));pass.end();device.queue.submit([encoder.finish()]);
    const actual=await readMixedTexture(device,output);
    const weight=(v:number)=>{const a=Math.abs(v);return a<0.5?0.75-a*a:0.5*Math.max(0,1.5-a)**2;};
    let maxError=0;
    for(let cell=0;cell<cells;cell++){
     const origin=[cell%8,Math.floor(cell/8)%8,Math.floor(cell/64)];
     for(let axis=0;axis<3;axis++){
-     const q=origin.map(v=>v+0.5);q[axis]!+=0.5;const depth=q[1]!-4;
+     const q=origin.map(v=>v+0.5);q[axis]!+=0.5;const depth=q[1]!+slope*(q[0]!+0.5*q[2]!)-4;
      let mass=0,momentum=0;
      for(let i=0;i<n;i++)if(data[8*i+7]!==1){const w=weight(q[0]!-data[8*i]!)*weight(q[1]!-data[8*i+1]!)*weight(q[2]!-data[8*i+2]!);mass+=w;momentum+=w*data[8*i+4+axis]!;}
      const expectedMass=Math.max(1,8*Math.max(0,Math.min(1,0.5-depth)));
@@ -188,10 +212,10 @@ ${narrowBandFineTransferWGSL}
     }
     assert.equal(actual[4*cell+3],9,"transfer preserves the fourth channel");
    }
-   assert.ok(maxError<2e-5,`heat ${heat}: quadratic transfer error ${maxError}`);
+   assert.ok(maxError<2e-5,`subgroups ${subgroups}, prepared ${prepared}, slope ${slope}, heat ${heat}: quadratic transfer error ${maxError}`);
   }finally{buffers.forEach(b=>b.destroy());velocity.destroy();output.destroy();}
   }
- });
+ },["subgroups"]);
 });
 
 (process.env.WEBGPU_NODE_MODULE?test:test.skip)("tiled FLIP reconstruction matches vertex gathers across crowded bins and closed walls",async()=>{
@@ -229,6 +253,8 @@ fn umVertexAuthority(q:vec3u)->UMOwner{return UMOwner();}
 fn umTileAt(p:vec3u)->u32{return p.x+2u*(p.y+2u*p.z);}
 fn nbOrder(c:vec3u)->u32{let t=c/4u;let l=c%4u;return 64u*(t.x+2u*(t.y+2u*t.z))+l.x+4u*l.y+16u*l.z;}
 fn nbCellRun(c:vec3i)->vec2u{let o=nbOrder(vec3u(c));return vec2u(links[o],links[o]+atomicLoad(&bins[o]));}
+fn nbRun(first:vec3i,last:vec3i)->vec2u{return vec2u(nbCellRun(first).x,nbCellRun(last).y);}
+fn umCorner(k:u32,n:u32)->vec3u{return vec3u(k%n,(k/n)%n,k/(n*n));}
 fn nbPosition(i:u32)->vec3f{return particles[i].position.xyz;}
 fn nbSourcePhi(p:vec3f,value:f32)->f32{return value;}
 fn bandPhi(p:vec3f)->f32{return select(3.0,-2.0,p.x<1.0);}

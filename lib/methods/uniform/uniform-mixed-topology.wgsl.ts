@@ -305,6 +305,7 @@ export function uniformMixedCertifiedEntriesWGSL(source: string, entries: readon
     if (!match) throw new Error(`Certified entry ${entry} not found`);
     const size = Number(match[1]);
     const args: string[] = [];
+    const forwarded:string[]=[];
     const params = match[2]!.split(",").map(p => p.trim()).filter(Boolean).map(p => {
       const m = /^@builtin\((\w+)\)\s*(\w+)\s*:\s*(\w+)$/.exec(p);
       if (!m) throw new Error(`Certified entry ${entry} has an unsupported parameter ${p}`);
@@ -312,13 +313,14 @@ export function uniformMixedCertifiedEntriesWGSL(source: string, entries: readon
       args.push(builtin === "global_invocation_id" ? `vec3u(umJob*${size}u+umLane,0u,0u)`
         : builtin === "workgroup_id" ? "vec3u(umJob,0u,0u)"
         : builtin === "local_invocation_index" ? "umLane"
+        : builtin === "subgroup_invocation_id" || builtin === "subgroup_size" ? (forwarded.push(`@builtin(${builtin}) um_${builtin}:${type}`),`um_${builtin}`)
         : (() => { throw new Error(`Certified entry ${entry} reads ${builtin}`); })());
       return `${name}:${type}`;
     });
     if (pattern.test(out.slice(match.index + 1))) throw new Error(`Certified entry ${entry} is ambiguous`);
     out = out.slice(0, match.index) + `fn ${entry}Job(${params.join(",")}){` + out.slice(match.index + match[0].length) + /* wgsl */ `
 var<workgroup> ${entry}Jobs:u32;
-@compute @workgroup_size(${size}) fn ${entry}(@builtin(workgroup_id) umGroup:vec3u,@builtin(num_workgroups) umGroups:vec3u,@builtin(local_invocation_index) umLane:u32){
+@compute @workgroup_size(${size}) fn ${entry}(@builtin(workgroup_id) umGroup:vec3u,@builtin(num_workgroups) umGroups:vec3u,@builtin(local_invocation_index) umLane:u32${forwarded.length?","+forwarded.join(","):""}){
  if(umLane==0u){${entry}Jobs=${count};}
  let jobs=workgroupUniformLoad(&${entry}Jobs);
  for(var umJob=umGroup.x;umJob<jobs;umJob+=umGroups.x){${entry}Job(${args.join(",")});workgroupBarrier();}

@@ -654,7 +654,9 @@ fn originalFace(origin: u32) -> vec3i {
   let d = vec3u(ROOT_NX,ROOT_NY,ROOT_NZ); let index = origin - 1u;
   return vec3i(vec3u(index % d.x, (index / d.x) % d.y, index / (d.x*d.y)));
 }
+var<private> nearestSelection:u32;
 fn nearestHierarchySample(p: vec3i, sd: vec3i, td: vec3i, component: u32, footprint: bool) -> NearestSample {
+  nearestSelection=0u;
   let location = faceLocation(p, td, component);
   var sourcePosition = (vec3f(p)+vec3f(0.5))*vec3f(sd)/vec3f(td)-vec3f(0.5);
   sourcePosition[component] = f32(p[component]+1)*f32(sd[component])/f32(td[component])-1.0;
@@ -696,7 +698,7 @@ fn nearestHierarchySample(p: vec3i, sd: vec3i, td: vec3i, component: u32, footpr
   for(var k=0u;k<8u;k++){
     contributions[k]=vec2f(0.0);
     if(lowers[k]!=0u && abs(distances[k]-best)<=epsilon){
-      contributions[k]=vec2f(values[k],1.0);
+      contributions[k]=vec2f(values[k],1.0);nearestSelection|=1u<<k;
       supportLower=min(supportLower,originalFace(lowers[k]));supportUpper=max(supportUpper,originalFace(uppers[k]));
     }
   }
@@ -974,17 +976,42 @@ fn mixedProlongUnknownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_i
     if(componentKnown(existing,component)){entry.w=1u;}
     else{
       let result=nearestHierarchySample(p,sd,td,component,false);
-      if(result.weight>0.0){entry=mixedHierarchyEntry(result);}
+      if(result.weight>0.0){entry=mixedHierarchyEntry(result);entry.w|=nearestSelection<<1u;}
     }
   }
   mixedHierarchyLanes[lane]=entry;
   workgroupBarrier();
   if(component!=0u||!inside){return;}
   let x=mixedHierarchyLanes[cell];let y=mixedHierarchyLanes[cell+64u];let z=mixedHierarchyLanes[cell+128u];
-  textureStore(outputOrigins,p,vec4u(x.y,y.y,z.y,0u));
+  textureStore(outputOrigins,p,vec4u(x.y,y.y,z.y,(x.w>>1u)|((y.w>>1u)<<8u)|((z.w>>1u)<<16u)));
   textureStore(outputOrigins,p+vec3i(0,0,td.z),vec4u(x.z,y.z,z.z,0u));
-  let mask=u32(round(existing.w))|x.w|(y.w<<1u)|(z.w<<2u);
+  let mask=u32(round(existing.w))|(x.w&1u)|((y.w&1u)<<1u)|((z.w&1u)<<2u);
   textureStore(primaryOut,p,vec4f(bitcast<f32>(x.x),bitcast<f32>(y.x),bitcast<f32>(z.x),f32(mask)));
+}
+
+@compute @workgroup_size(192)
+fn mixedReplayUnknownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
+ let component=lane/64u;let cell=lane%64u;let p=mixedHierarchyCell(wid,cell);
+ let sd=hierarchySourceDims();let td=hierarchyTargetDims();let inside=inBounds(p,td);var value=0.0;var mask=0u;
+ if(inside){
+  let existing=textureLoad(secondaryIn,p,0);value=existing[component];mask=u32(round(existing.w));
+  if(!componentKnown(existing,component)){
+   let selected=(textureLoad(existingOrigins,p,0).w>>(8u*component))&255u;
+   if(selected!=0u){
+    var sourcePosition=(vec3f(p)+0.5)*vec3f(sd)/vec3f(td)-0.5;
+    sourcePosition[component]=f32(p[component]+1)*f32(sd[component])/f32(td[component])-1.0;
+    let lower=vec3i(floor(sourcePosition));var terms:array<vec2f,8>;
+    for(var k=0u;k<8u;k++){
+     terms[k]=vec2f(0);if((selected&(1u<<k))!=0u){let q=clamp(lower+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)),vec3i(0),sd-1);terms[k]=vec2f(textureLoad(primaryIn,q,0)[component],1.0);}
+    }
+    let sum=d4Sum8Vec2(terms);value=sum.x/sum.y;mask|=1u<<component;
+   }
+  }
+ }
+ mixedHierarchyLanes[lane]=vec4u(bitcast<u32>(value),0u,0u,mask);workgroupBarrier();
+ if(component!=0u||!inside){return;}
+ let x=mixedHierarchyLanes[cell];let y=mixedHierarchyLanes[cell+64u];let z=mixedHierarchyLanes[cell+128u];
+ textureStore(primaryOut,p,vec4f(bitcast<f32>(x.x),bitcast<f32>(y.x),bitcast<f32>(z.x),f32(x.w|y.w|z.w)));
 }
 
 // The tiny tail of the mixed hierarchy in one workgroup. primaryIn and

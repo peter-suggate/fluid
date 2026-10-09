@@ -22,7 +22,7 @@ export class UniformNarrowBandOrder {
  private groups!:readonly [GPUBindGroup,GPUBindGroup];
  get allocatedBytes():number{return this.enabled.size+(this.tileOffsets?.size??0)+(this.scan?.allocatedBytes??0);}
  /** The optional policy override lets small fixtures exercise both paths. */
- constructor(private readonly device:GPUDevice,private readonly dims:readonly number[],private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer,readonly sparse=dims.reduce((n,v)=>n*v,1)>=8_388_608){
+ constructor(private readonly device:GPUDevice,private readonly dims:readonly number[],private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer,readonly sparse=dims.reduce((n,v)=>n*v,1)>=4_194_304){
   // Shared APIC scan's activation record: no failure and an active step.
   // This immutable record makes our sort unconditional, including bootstrap.
   this.enabled=device.createBuffer({label:"FLIP spatial order scan activation",size:88,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
@@ -70,20 +70,40 @@ var<workgroup> tilePopulation:u32;
   workgroupBarrier();prefix[lane]+=add;workgroupBarrier();
  }
  links[cell]=tileOffsets[tile]+prefix[lane]-count;
+ atomicStore(&bins[CELLS+cell],0u);
 }
 `:""}
-@compute @workgroup_size(64) fn pack(@builtin(global_invocation_id) gid:vec3u){
+var<workgroup> packKeys:array<u32,64>;
+var<workgroup> packStarts:array<u32,64>;
+var<workgroup> packCount:u32;
+@compute @workgroup_size(64) fn pack(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let dims=vec3u(${this.dims.map(n=>`${n}u`).join(',')});let tiles=dims/4u;
- if(gid.x==0u){state[1]=${this.sparse?"tileOffsets[TILES-1u]+atomicLoad(&bins[2u*CELLS+TILES-1u])":"links[CELLS-1u]+atomicLoad(&bins[CELLS-1u])"};}
- for(var i=gid.x;i<min(state[0],arrayLength(&input));i+=65536u){
-  let p=input[i];if(p.position.x<0.0){continue;}
-  let c=vec3u(p.position.xyz);let t=c/4u;let l=c%4u;
-  let order=64u*(t.x+tiles.x*(t.y+tiles.y*t.z))+l.x+4u*l.y+16u*l.z;
-  let next=links[order]+atomicAdd(&bins[CELLS+order],1u);output[next]=p;
-  let a=CELLS+4u*next;let position=bitcast<vec4u>(p.position);
-  links[a]=position.x;links[a+1u]=position.y;links[a+2u]=position.z;links[a+3u]=position.w;
+ let job=group.x+groups.x*group.y;
+ if(lane==0u){packCount=min(state[0],arrayLength(&input));}
+ let count=workgroupUniformLoad(&packCount);
+ if(job==0u&&lane==0u){state[1]=${this.sparse?"tileOffsets[TILES-1u]+atomicLoad(&bins[2u*CELLS+TILES-1u])":"links[CELLS-1u]+atomicLoad(&bins[CELLS-1u])"};}
+ for(var base=64u*job;base<count;base+=64u*groups.x*groups.y){
+  let i=base+lane;var p=Particle();var key=0xffffffffu;
+  if(i<count){p=input[i];if(p.position.x>=0.0){
+   let c=vec3u(p.position.xyz);let t=c/4u;let l=c%4u;
+   key=64u*(t.x+tiles.x*(t.y+tiles.y*t.z))+l.x+4u*l.y+16u*l.z;
+  }}
+  packKeys[lane]=key;workgroupBarrier();
+  if(key!=0xffffffffu&&(lane==0u||packKeys[lane-1u]!=key)){
+   var end=lane+1u;while(end<64u&&packKeys[end]==key){end++;}
+   packStarts[lane]=links[key]+atomicAdd(&bins[CELLS+key],end-lane);
+  }
+  workgroupBarrier();
+  if(key!=0xffffffffu){
+   var first=lane;while(first>0u&&packKeys[first-1u]==key){first--;}
+   let next=packStarts[first]+lane-first;output[next]=p;
+   let a=CELLS+4u*next;let position=bitcast<vec4u>(p.position);
+   links[a]=position.x;links[a+1u]=position.y;links[a+2u]=position.z;links[a+3u]=position.w;
+  }
+  workgroupBarrier();
  }
-}`});
+}
+`});
   const layout=this.device.createBindGroupLayout({entries:(this.sparse?[0,1,2,3,4,5]:[0,1,2,3,4]).map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0||binding===5?"read-only-storage" as const:"storage" as const}}))});
   const pipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[layout]});
   [this.pipeline,this.preparePipeline,this.prefixPipeline]=await Promise.all((this.sparse?["pack","prepare","prefixTile"]:["pack"]).map(entryPoint=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
@@ -95,13 +115,13 @@ var<workgroup> tilePopulation:u32;
   const pass=encoder.beginComputePass({label:"Narrow-band FLIP clear occupied bins"});pass.setPipeline(this.preparePipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(Math.min(tiles,65535),Math.ceil(tiles/65535));pass.end();
  }
  /** Dense scan for small domains; occupied-tile cell scans for large ones. */
- encode(encoder:GPUCommandEncoder,parity:number):void{
+ encode(encoder:GPUCommandEncoder,parity:number,work?:GPUBuffer):void{
   this.scan.encode(encoder);
   if(this.sparse){
    const tiles=this.dims.reduce((n,v)=>n*v,1)/64;
    const prefix=encoder.beginComputePass({label:"Narrow-band FLIP occupied cell offsets"});prefix.setPipeline(this.prefixPipeline);prefix.setBindGroup(0,this.groups[parity]!);prefix.dispatchWorkgroups(Math.min(tiles,65535),Math.ceil(tiles/65535));prefix.end();
   }
-  const pass=encoder.beginComputePass({label:"Narrow-band FLIP order pack"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(1024);pass.end();
+  const pass=encoder.beginComputePass({label:"Narrow-band FLIP order pack"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.groups[parity]!);if(work)pass.dispatchWorkgroupsIndirect(work,0);else pass.dispatchWorkgroups(1024);pass.end();
  }
  destroy():void{this.scan?.destroy();this.enabled.destroy();this.tileOffsets?.destroy();}
 }

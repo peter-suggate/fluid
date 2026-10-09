@@ -67,10 +67,10 @@ fn umCacheExtended(anchor:vec3i,axis:u32)->f32 {
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     this.pipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]}),compute:{module,entryPoint:"cache"}});
   }
-  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
+  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,shared?:GPUComputePassEncoder):void{
     if(!this.pipeline)throw new Error("Mixed momentum cache is not initialized");
-    const pass=encoder.beginComputePass({label:"Uniform mixed 4h sampling cache"});pass.setPipeline(uniformDetailPick(this.pipeline));pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);
-    pass.dispatchWorkgroups(...this.ownership.capacity.lattice.dimensions.map(n=>Math.ceil((n/4+2)/4)) as [number,number,number]);pass.end();
+    const pass=shared??encoder.beginComputePass({label:"Uniform mixed 4h sampling cache"});pass.setPipeline(uniformDetailPick(this.pipeline));pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);
+    pass.dispatchWorkgroups(...this.ownership.capacity.lattice.dimensions.map(n=>Math.ceil((n/4+2)/4)) as [number,number,number]);if(!shared)pass.end();
   }
 }
 
@@ -180,14 +180,14 @@ fn umCoarseSlots()->vec2u{let header=7u*UM_TILES+16u;let fine=umSupport[header];
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     this.pipeline=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"unitVelocityTaps",constants:{umDispatchX:this.ownership.dispatchX}}});
   }
-  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
+  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,shared?:GPUComputePassEncoder):void{
     if(!this.pipeline)throw new Error("Mixed hanging taps are not initialized");
     // A fixed grid from capacity; the GPU counts the h tiles (forces
     // viscosity reads every unit tile's texels, so they are refreshed even
     // without a slot) and the seam 4h slots. At most one job per tile.
-    const pass=encoder.beginComputePass({label:"Uniform mixed hanging fine taps"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,this.ownership.hangingGroup);
+    const pass=shared??encoder.beginComputePass({label:"Uniform mixed hanging fine taps"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,this.ownership.hangingGroup);
     this.ownership.dispatchCounted(pass,this.pipeline,this.ownership.capacity.tiles,"fineAndSeams");
-    pass.end();
+    if(!shared)pass.end();
   }
   destroy():void{this.unitVelocity.destroy();}
 }

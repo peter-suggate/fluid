@@ -10,6 +10,22 @@ fn nbTrilinear(v:array<f32,8>,q:vec3f)->vec4f{
  let dx=mix(mix(v[1]-v[0],v[3]-v[2],q.y),mix(v[5]-v[4],v[7]-v[6],q.y),q.z);
  return vec4f(dx,mix(x10-x00,x11-x01,q.z),y1-y0,mix(y0,y1,q.z));
 }
+// Differentiate the represented trilinear field directly. A gradient needs
+// its eight corners, rather than six additional interpolated phi queries.
+fn nbPhiGradient(p:vec3f)->vec4f{
+ let q=clamp(p,vec3f(0),vec3f(UM_D));let c=min(vec3u(floor(q)),UM_D-1u);
+ let width=select(umTileWidth(umTileAt(c/4u)),4u,nbCoarseOnly);let origin=(c/width)*width;
+ let f=(q-vec3f(origin))/f32(width);var v:array<f32,8>;var terms:array<f32,8>;var value=0.0;
+ for(var k=0u;k<8u;k++){
+  let corner=umCorner(k,2u);let vertex=origin+corner*width;
+  if(width==4u){v[k]=umLoadCorner(vertex);}else{v[k]=umLoadVertex(vertex);}
+  let w=select(vec3f(1)-f,f,corner!=vec3u(0));terms[k]=v[k]*w.x*w.y*w.z;
+  if(nbCoarseOnly){value+=w.x*w.y*w.z*v[k];}
+ }
+ if(!nbCoarseOnly){value=umVertexSum8(terms);}
+ let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+ return vec4f(nbTrilinear(v,f).xyz/(h*f32(width)),value/h);
+}
 fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
  let base=nbCell(cell);let origin=vec3f(base);var v:array<f32,8>;
  // The cell's corners are lattice vertices: among h tiles each is one load.
@@ -39,10 +55,7 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
 // A vertex is its cell's tile's; the upper domain faces go with the last
 // cell. The tiles within three of a crossing are written: a sample in a tile
 // within two reads only those.
-@compute @workgroup_size(128) fn buildDistance(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- if(lane>=125u){return;}
- let tile=atomicLoad(&bins[NB_BAND_DISTANCE+group.x]);let local=umCorner(lane,5u);let p=4u*umTileCoord(tile)+local;
- if(any((local==vec3u(4u))&(p<UM_D))){return;}
+fn nbBuildDistance(p:vec3u,tile:u32){
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  {
   let initial=umSampleVertex(vec3f(p));
@@ -58,13 +71,8 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
    if(abs(value)<4.5){
     var q=vec3f(p);
     for(var iteration=0u;iteration<5u;iteration++){
-     let f=bandPhi(q);if(abs(f)<1e-5){distance=min(distance,length(q-vec3f(p)));break;}
-     var g=vec3f(0);
-     for(var axis=0u;axis<3u;axis++){
-      var e=vec3f(0);e[axis]=0.5;
-      let lo=clamp(q-e,vec3f(0),vec3f(UM_D));let hi=clamp(q+e,vec3f(0),vec3f(UM_D));
-      g[axis]=(bandPhi(hi)-bandPhi(lo))/max(hi[axis]-lo[axis],0.01);
-     }
+     let sample=nbPhiGradient(q);let f=sample.w;if(abs(f)<1e-5){distance=min(distance,length(q-vec3f(p)));break;}
+     let g=sample.xyz;
      let g2=dot(g,g);if(g2<1e-8){break;}
      q=clamp(q-clamp(f/sqrt(g2),-1.5,1.5)*g*inverseSqrt(g2),vec3f(0),vec3f(UM_D));
     }
@@ -72,6 +80,19 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
    value=sign(initial)*max(distance,1e-8/h);
   }
   atomicStore(&bins[NB_DEPTH_A+nbVertexIndex(p)],bitcast<u32>(value));
+ }
+}
+// The 64 interior vertices use every lane. Only a last-domain tile has
+// additional high-face vertices; evaluate those once after the dense cube.
+@compute @workgroup_size(64) fn buildDistance(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=atomicLoad(&bins[NB_BAND_DISTANCE+group.x]);let origin=4u*umTileCoord(tile);
+ nbBuildDistance(origin+umCorner(lane,4u),tile);
+ if(any(origin+4u==UM_D)){
+  for(var k=lane;k<125u;k+=64u){
+   let local=umCorner(k,5u);let p=origin+local;
+   if(!any(local==vec3u(4u))||any((local==vec3u(4u))&(p<UM_D))){continue;}
+   nbBuildDistance(p,tile);
+  }
  }
 }
 fn nbInterfaceVertex(p:vec3u)->bool{

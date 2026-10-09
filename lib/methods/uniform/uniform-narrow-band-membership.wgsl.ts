@@ -106,11 +106,9 @@ var<workgroup> nbBandColumns:array<u32,56>;
   if(bits!=0u){
    packed=0u;
    for(var x=0u;x<4u;x++){
-    var code=255u;
-    for(var d=0u;d<=5u;d++){
-     if(((bits>>(x+5u-d))&1u)!=0u){code=5u-d;break;}
-     if(((bits>>(x+5u+d))&1u)!=0u){code=5u+d;break;}
-    }
+    let centre=x+5u;let left=bits&((1u<<(centre+1u))-1u);let right=bits>>centre;
+    let dl=select(255u,centre-firstLeadingBit(left),left!=0u);let dr=select(255u,firstTrailingBit(right),right!=0u);
+    let delta=min(dl,dr);let code=select(255u,select(5u+dr,5u-dl,dl<=dr),delta<=5u);
     packed|=code<<(8u*x);
    }
   }
@@ -118,17 +116,13 @@ var<workgroup> nbBandColumns:array<u32,56>;
  }
  workgroupBarrier();
  if(lane<56u){
-  let y=lane%4u;let z=lane/4u;var packed=0u;
-  for(var x=0u;x<4u;x++){
-   var best=255u;var distance=1000;
-   for(var o=-5;o<=5;o++){
-    let code=(nbBandRows[u32(i32(y)+o+5)+14u*z]>>(8u*x))&255u;if(code==255u){continue;}
-    let dx=i32(code)-5;let d=dx*dx+o*o;
-    if(d<distance){distance=d;best=code|(u32(o+5)<<4u);}
-   }
-   packed|=best<<(8u*x);
+  let y=lane%4u;let z=lane/4u;var best=vec4u(255u);var distance=vec4i(1000);
+  for(var o=-5;o<=5;o++){
+   let row=nbBandRows[u32(i32(y)+o+5)+14u*z];let code=(vec4u(row)>>vec4u(0u,8u,16u,24u))&vec4u(255u);
+   let dx=vec4i(code)-5;let d=dx*dx+o*o;let closer=(code!=vec4u(255u))&(d<distance);
+   best=select(best,code|vec4u(u32(o+5)<<4u),closer);distance=select(distance,d,closer);
   }
-  nbBandColumns[lane]=packed;
+  nbBandColumns[lane]=best.x|(best.y<<8u)|(best.z<<16u)|(best.w<<24u);
  }
  workgroupBarrier();
  let l=umCorner(lane,4u);var nearest=NB_NO_SURFACE;var distance=1000;

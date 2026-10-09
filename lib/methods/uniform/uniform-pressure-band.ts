@@ -46,7 +46,8 @@ const LIST_GROUPS=4096;
  * past the live count exit at once. Completed-frame evidence sizes the
  * launch with headroom; every kernel still strides the full current list. */
 const SLOT_GROUPS=4096,MIDDLE_GROUPS=1024,COARSE_GROUPS=256;
-/** The h half sweeps run one colour's 32 cells of a slot per 32-lane group. */
+/** An h half-sweep group holds four slots, 32 cells of the swept colour each. */
+const CELL_BLOCK=4;
 const CELL_GROUPS=2048;
 /** Slots the one group of a fused h launch relaxes at once: 256 lanes, the
  * workgroup size every WebGPU device has. */
@@ -772,7 +773,7 @@ fn bCoarseCarry(b:vec3i,w:vec3f)->BCarry{
   rows[cell]=bRhs(cell)+((sums.x+sums.z)+sums.y-open*own);
  }
 }`,
-   sweep:sweep(1),sweepWide:sweep(FUSED_BLOCK),
+   sweep:sweep(CELL_BLOCK),sweepWide:sweep(FUSED_BLOCK),
    // h residual into the 2h aggregates, and its largest liquid row into
    // cycle bCycle's history word. With every 2h correction zero, the first
    // red half sweep of the 2h level is local: it runs here.
@@ -1123,7 +1124,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   if(launch==="tiles"){this.simulation.dispatchBuffered(pass,pipeline,"fine",LIST_GROUPS);return;}
   pass.setPipeline(uniformDetailPick(pipeline));
   const c=this.workSlots;
-  pass.dispatchWorkgroups(typeof launch==="number"?launch:launch==="cells"?Math.min(c,CELL_GROUPS):launch==="slots"?Math.min(c,SLOT_GROUPS):launch==="middle"?Math.min(Math.ceil(c/8),MIDDLE_GROUPS):Math.min(Math.ceil(c/64),COARSE_GROUPS));
+  pass.dispatchWorkgroups(typeof launch==="number"?launch:launch==="cells"?Math.min(Math.ceil(c/CELL_BLOCK),CELL_GROUPS):launch==="slots"?Math.min(c,SLOT_GROUPS):launch==="middle"?Math.min(Math.ceil(c/8),MIDDLE_GROUPS):Math.min(Math.ceil(c/64),COARSE_GROUPS));
  }
  private sweep(pass:GPUComputePassEncoder,name:string,launch:"cells"|"middle"|"coarse",count:number):void{
   for(let i=0;i<count;i++){this.dispatch(pass,`${name}0`,launch);this.dispatch(pass,`${name}1`,launch);}

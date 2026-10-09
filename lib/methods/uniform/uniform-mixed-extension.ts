@@ -397,6 +397,7 @@ var<workgroup> ueNew:array<atomic<u32>,2>;
 // Avoid a duplicate 27-word width array for each packed job.
 fn ueStagedWidth(index:u32)->u32{return select(4u,1u,(ueWords[index]&0x80000000u)!=0u);}
 var<workgroup> ueMasks:array<vec2u,27u*ueStagePack>;
+var<workgroup> ueFineNeighborBase:array<u32,6>;
 fn ueStaged(t:vec3i)->u32{let r=vec3u(t-ueJobTile()+vec3i(1));return ueJobBase()+r.x+3u*(r.y+3u*r.z);}
 fn ueCellFinite(cell:vec3i)->bool{
  let t=cell/4;let m=ueMasks[ueStaged(t)];let l=vec3u(cell-4*t);let b=l.x+4u*(l.y+4u*l.z);
@@ -469,6 +470,11 @@ fn ueStage(owner:UMOwner,lane:u32,seed:bool,fine:bool)->bool{
   if(all(t>=vec3i(0))&&all(t<vec3i(UM_T))){let tile=umTileAt(vec3u(t));word=umTopology[tile];width=select(4u,1u,(word&0x80000000u)!=0u);mask=ueMaskIn(tile);}
   ueWords[lane]=word;ueMasks[lane]=mask;
   let offset=vec3i(umCorner(lane,3u))-vec3i(1);let far=abs(offset.x)+abs(offset.y)+abs(offset.z);
+  if(ueCacheFineRequests&&fine&&far==1){
+   var base=0xffffffffu;
+   if(width==1u){base=UE_NONE;if((umTileSupport(umTileAt(vec3u(t)))&2u)!=0u){base=UE_UNIT+15u*((word&0x3fffffffu)>>2u);}}
+   ueFineNeighborBase[ueDirection(offset)]=base;
+  }
   let filled=any(mask!=vec2u(0u));var live=0u;
   if(!fine||far==0){live=select(0u,1u,filled);}
   else if(far==1){
@@ -558,13 +564,34 @@ ${uniformCompiledExtensionNeighborWGSL}
 // Immutable request geometry comes from the layout recipe; liveness still
 // comes from this sweep's staged masks. Classify and consume in one loop,
 // retaining the old per-axis combination and candidate reduction order.
+override ueCacheFineRequests:bool=false;
+var<private> ueFineRequestSlots:array<u32,6>;
+// Fine neighbours share an address across components; only the 64-slot
+// component offset changes. Resolve each of the six anchors once per cell.
+fn uePrepareFineRequests(owner:UMOwner){
+ let local=umCorner(owner.lane,4u);let own=ueOwnSlot(owner,0u);
+ for(var n=0u;n<6u;n++){
+  let axis=n/2u;let sign=select(-1,1,(n&1u)!=0u);let next=i32(local[axis])+sign;
+  // The current tile is supported; only requests crossing its edge need
+  // the neighbor base shared by all sixteen cells along that face.
+  if(next>=0&&next<4){ueFineRequestSlots[n]=u32(i32(own)+sign*i32(1u<<(2u*axis)));continue;}
+  let base=ueFineNeighborBase[n];ueFineRequestSlots[n]=base;
+  if(base==0xffffffffu||base==UE_NONE){continue;}
+  var across=local;across[axis]=select(3u,0u,sign>0);
+  ueFineRequestSlots[n]=base+across.x+4u*(across.y+4u*across.z);
+ }
+}
 fn ueExtend(face:UMFace,old:vec2f,need:u32)->vec2f{
  let center=umFaceCenter(face);let origin=4*ueJobTile();
  var low:array<UMNeighbor,3>;var high:array<UMNeighbor,3>;
  for(var n=0u;n<6u;n++){
   var anchor=face.anchor;anchor[n/2u]+=select(-i32(face.width),i32(face.width),(n&1u)!=0u);
   var answer=UMNeighbor(0,UM_INF,1);
-  if(ueRequestInside(anchor,face.axis)){
+  if(ueCacheFineRequests&&face.width==1u&&ueFineRequestSlots[n]!=0xffffffffu){
+   let slot=ueFineRequestSlots[n];var value=vec2f(0.0,UM_INF);
+   if(slot!=UE_NONE){value=stateIn[slot+64u*face.axis];}
+   answer=UMNeighbor(value.x,value.y,h[n/2u]);
+  }else if(ueRequestInside(anchor,face.axis)){
    let search=(need&(1u<<n))!=0u&&!ueTopologyDirectAt(ueRecipe,anchor-origin,face.axis,face.width);
    if(search){
     if(ueRequestAnchorLive(anchor,face.axis,face.width)){
@@ -704,6 +731,7 @@ fn ueSweepSeamFine(owner:UMOwner,lane:u32){
  if(!ueStage(owner,lane,false,true)){return;}
  let origin=vec3i(umOrigin(owner));var bits=vec2u(0u);
  let flags=atomicLoad(&ueLive);let local=umCorner(owner.lane,4u);let edge=ueEdge(local);let live=ueCellLive(local,edge,flags);
+ if(ueCacheFineRequests&&live){uePrepareFineRequests(owner);}
  for(var axis=0u;axis<3u;axis++){
   if(!live){continue;}
   let face=uePatch(origin,axis,1u);let old=stateIn[ueOwnSlot(owner,axis)];
@@ -1077,10 +1105,10 @@ ${["publishList"].map(name=>uniformMixedFaceDispatchWGSL(name,"umPublished(face)
    this.listPipelines.set(entryPoint,await compile(4,C.regularCoarse,`${entryPoint}List`,true));
    // The seam launch reads no launch constant; a sweep's tile jobs stage their tiles.
    this.seamPipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:`${entryPoint}Seams`,constants:entryPoint==="sweep"?{ueStagedTiles:1,ueMixedJobs:1,ueSweepKind:2}:{}}}));
-   if(entryPoint==="sweep")this.fineSeamSweep=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"sweepSeams",constants:{ueStagedTiles:1,ueMixedJobs:0,ueSweepKind:1,ueStagePack:1}}});
+   if(entryPoint==="sweep")this.fineSeamSweep=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"sweepSeams",constants:{ueStagedTiles:1,ueMixedJobs:0,ueSweepKind:1,ueStagePack:1,ueCacheFineRequests:1}}});
   }));
  }
- encode(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2):void{
+ encode(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2,replayHierarchy=false):void{
   if(this.seamPipelines.size!==(this.regularBulk?1:3)||!this.restrictPipeline)throw new Error("Mixed extension is not initialized");
   // One pass: seed, sweeps, restriction, the hierarchy continuation, publish.
   let open:GPUComputePassEncoder|undefined;
@@ -1116,6 +1144,6 @@ ${["publishList"].map(name=>uniformMixedFaceDispatchWGSL(name,"umPublished(face)
   // physical supported faces directly, and publication preserves them at h.
   if(!this.regularBulk){run("seed",groups[1]);for(let i=0;i<sweeps;i++)run("sweep",groups[i%2]!);}
   const final=groups[sweeps%2]!;run("restrictBand",final);
-  this.hierarchy.encode(open!);open!.setBindGroup(0,this.ownership.bindGroup);run("publish",final);end();
+  this.hierarchy.encode(open!,replayHierarchy);open!.setBindGroup(0,this.ownership.bindGroup);run("publish",final);end();
  }
 }

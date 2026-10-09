@@ -20,14 +20,16 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const adapter=await createProcessRetainedDawnGPU(dawn,["backend=metal"]).requestAdapter();assert.ok(adapter);
   const raw=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
-  // Compile the previous cubic solid-tap checks as a GPU reference.
+  // Compile the previous cubic solid-tap checks and collision walk as a GPU reference.
   // Both variants execute the production owner dispatch and seam handling.
   const create=raw.createShaderModule.bind(raw);let reference=false,replaced=0;
   Object.defineProperty(raw,"createShaderModule",{configurable:true,writable:true,value:(descriptor:GPUShaderModuleDescriptor)=>{
    let code=descriptor.code;
    if(reference&&code.includes("fn umCubicPhi(")){
     const before=code;code=code.replace("!umSolidEnabled()||((umRegularFine||cell.width==1u)&&umSolidClear(base))","(umRegularFine||cell.width==1u)&&umSolidClear(base)");
-    assert.notEqual(code,before,"reference must restore the old tap checks");replaced++;
+    assert.notEqual(code,before,"reference must restore the old tap checks");
+    const walked=code.replace(" if(!umSolidEnabled()){return UMWalk(end,false);}","");
+    assert.notEqual(walked,code,"reference must retain the empty collision walk");code=walked;replaced++;
    }
    return create({...descriptor,code});
   }});

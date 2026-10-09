@@ -48,7 +48,8 @@ export class UniformMixedForces {
   private regularFinePipeline?: GPUComputePipeline;
   private readonly resources: GPUBindGroupLayout;
   private regularCoarsePipeline?: GPUComputePipeline;
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly cachedCurvature=false) {
+  /** vectorViscosity=false retains the scalar evaluator for differential validation. */
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly cachedCurvature=false,private readonly vectorViscosity=true) {
     this.resources = uniformDetailBindLayout(device,{ entries: [
       ...[1,2,3,10,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -102,6 +103,7 @@ struct UMForceParams {hDt:vec4f,physical:vec4f,controls:vec4f}
 @group(1) @binding(8) var centerPhi:texture_3d<f32>;
 override umCachedGeometry:bool=false;
 override umForceCached:bool=false;
+override umVectorViscosity:bool=${this.vectorViscosity};
 ${this.cachedCurvature?"@group(1) @binding(12) var curvature:texture_storage_3d<r32float,read_write>; @group(1) @binding(13) var<storage,read_write> normals:array<vec4f>;":""}
 const UM_H=vec3f(${h.map(n=>`${n}`).join(",")});
 ${this.sourceParams?uniformMixedSourceWGSL(9):""}
@@ -212,6 +214,27 @@ fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32 {
  }`:""}
  return value;
 }
+fn umViscosityVector(site:vec3i)->vec3f{
+ let at=clamp(site,vec3i(0),vec3i(UM_D)-1);let value=textureLoad(unitVelocity,at,0).xyz;
+ return select(value,-value,force.controls.x>0.5&&any(site!=at));
+}
+@compute @workgroup_size(64) fn forcesFine(@builtin(global_invocation_id) gid:vec3u){
+ let owner=umAllOwner(gid);if(owner.width!=1u){return;}let origin=umOrigin(owner);let at=vec3i(origin);
+ for(var axis=0u;axis<3u;axis++){if(origin[axis]==0u){boundary[umNegativeBoundaryIndex(origin,axis)]=negative[umNegativeBoundaryIndex(origin,axis)];}}
+ if(!umVectorViscosity||force.physical.w>0.0${this.sourceParams?"||umSourceinflowStrength()>0.0":""}){
+  var value=vec3f(0);for(var axis=0u;axis<3u;axis++){value[axis]=umForcedVelocity(owner,umFace(owner,axis,1,0u));}
+  textureStore(output,at,vec4f(value,0));return;
+ }
+ var value=textureLoad(advected,at,0).xyz;let occupancy=umOccupancy(owner);
+ if(occupancy>0.0&&force.physical.z>0.0){
+  let center=umViscosityVector(at);var terms:array<vec3f,3>;
+  for(var axis=0u;axis<3u;axis++){var delta=vec3i(0);delta[axis]=1;terms[axis]=(umViscosityVector(at+delta)-2.0*center+umViscosityVector(at-delta))/(UM_H[axis]*UM_H[axis]);}
+  value+=force.hDt.w*(force.physical.z/force.physical.y)*((terms[0]+terms[1])+terms[2]);
+ }
+ let neighbor=umFace(owner,1u,1,0u).neighbor;
+ if(occupancy>1e-5||umOccupancy(neighbor)>1e-5||umCoarseMass(neighbor)){value.y+=force.hDt.w*force.physical.x;}
+ textureStore(output,at,vec4f(value,0));
+}
 ${uniformMixedFaceDispatchWGSL("forcesRegular","umForcedVelocity(owner,face)").replace(" let origin=umOrigin(owner);",` let origin=umOrigin(owner);
  if(umRegularFine){
   for(var axis=0u;axis<3u;axis++){
@@ -238,8 +261,8 @@ fn umForcedVelocityFar(owner:UMOwner,face:UMFace,far:bool)->f32 {
  return 0.0;
 }
 ${uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocityFar(owner,face,far)",false,"","umForcesRegularCoarseOwner").replace(" let origin=umOrigin(owner);"," let origin=umOrigin(owner);let far=umFarAirOwner(owner);")}
-${uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)")}
-`,["forcesRegular","forcesRegularCoarse","forces",...(this.cachedCurvature?["cacheNormals","cacheCurvature"]:[])])});
+${uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)").replace("if(firstOwner.width!=0u)","if(firstOwner.width>1u)")}
+`,["forcesFine","forcesRegular","forcesRegularCoarse","forces",...(this.cachedCurvature?["cacheNormals","cacheCurvature"]:[])])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
     // Compile by need: the cached set while a 4h surface may exist (encode's
@@ -255,11 +278,11 @@ ${uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)")}
     const skipFused=UNIFORM_MIXED_FUSED_GATE.skipFused;
     [this.pipeline,this.regularFinePipeline,this.regularCoarsePipeline]=await Promise.all([
       compile("forces",{umMergedTiles:1,umFusedJobs:1,umCountedJobs:UNIFORM_MIXED_COUNTED.fusedQuad}),
-      compile("forcesRegular",{umCellWidth:1,umRegularTiles:1,umRegularFine:1,umCountedJobs:UNIFORM_MIXED_COUNTED.owners,umFusedRegularGate:skipFused}),
+      compile("forcesFine",{umCountedJobs:UNIFORM_MIXED_COUNTED.fineTiles}),
       compile("forcesRegularCoarse",{umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused})]);
     if(this.cachedCurvature)this.inlinePipelines=await Promise.all([
       compile("forces",{umForceCached:0,umMergedTiles:1,umFusedJobs:1,umCountedJobs:UNIFORM_MIXED_COUNTED.fusedQuad},["forceInline"]),
-      compile("forcesRegular",{umForceCached:0,umCellWidth:1,umRegularTiles:1,umRegularFine:1,umCountedJobs:UNIFORM_MIXED_COUNTED.owners,umFusedRegularGate:skipFused},["forceInline"]),
+      compile("forcesFine",{umForceCached:0,umCountedJobs:UNIFORM_MIXED_COUNTED.fineTiles},["forceInline"]),
       compile("forcesRegularCoarse",{umForceCached:0,umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused},["forceInline"])]);
   }
   encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,capillarity=true,useCache=this.cachedCurvature):void{
@@ -272,7 +295,7 @@ ${uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)")}
       this.ownership.dispatchAllCounted(pass,variant(this.curvaturePipeline));
     }
     const [general,fine,coarse]=!useCache&&this.inlinePipelines?this.inlinePipelines:[this.pipeline,this.regularFinePipeline!,this.regularCoarsePipeline!];
-    this.ownership.dispatchTierCounted(pass,variant(fine!),0);
+    this.ownership.dispatchCounted(pass,variant(fine!),this.ownership.capacity.fineTiles,"fine");
     // A regular 4h owner (a 3x3x3 stencil of 4h tiles) with the cached
     // curvature reads its own and its face neighbours' origins, anchors and
     // corners, and stores its anchors: the base blocks. The inline curvature
