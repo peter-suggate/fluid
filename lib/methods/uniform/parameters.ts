@@ -83,7 +83,7 @@ export const UNIFORM_PARAMS: MethodParamSpec[] = [
     tier: "fine",
     unit: "cycles",
     min: 0,
-    max: 5,
+    max: 8,
     step: 1,
     digits: 0,
     hint: "CM11a Full-Cycles seed corrections from the coarsest grid upward. The paper schedule uses three. This prebuilt dispatch schedule resets the solver when changed.",

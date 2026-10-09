@@ -2326,7 +2326,9 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // under hose inflow; zero would unnecessarily force every cycle. Keep the
     // surface h: 4h partial surface owners disturb hydrostatic balance in this
     // shallow pond, even with the full pressure solve (resting-lane oracle).
-    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: { pressureResidualTolerance: 1e-3, detailShapeTolerance: 0 } },
+    // The 3.125 mm lattice needs up to eight Full-Cycles under hose inflow;
+    // retain the same residual target and let the GPU stop early on convergence.
+    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: { pressureResidualTolerance: 1e-3, pressureFullCycles: 8, detailShapeTolerance: 0 } },
     // The catalog presents the filled pond; dry render measurements use the
     // same stress factory with its default water-off setting.
     audience: "validation",

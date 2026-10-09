@@ -174,9 +174,9 @@ export const HERO_GARDEN_SOLVER_CELL_M = 0.0125;
 
 /** Compact Uniform tank; the authored garden retains its own full footprint. */
 export const HERO_GARDEN_POND_TANK = { width_m: 1.2, height_m: 0.8, depth_m: 0.9 } as const;
-// 6.25 mm keeps the full garden's render SolidWorld image below its 64 MiB
-// budget (40.75 MiB) and all tank axes divisible by four for Uniform.
-export const HERO_GARDEN_POND_CELL_M = 0.00625;
+// 3.125 mm resolves the water 4x finer than the original 12.5 mm lattice.
+// The renderer stores terrain as a heightfield rather than a second voxel copy.
+export const HERO_GARDEN_POND_CELL_M = 0.003125;
 
 /** Preserve the authored waterline and set placement as the solver gets finer. */
 const HERO_GARDEN_WATERLINE_REFERENCE_CELL_M = 0.025;

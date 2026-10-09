@@ -3077,7 +3077,10 @@ export class SparseSceneProxyVoxelizer {
     if (options.solidWorld && !options.solidWorldLattice) {
       throw new RangeError("A SolidWorld GPU image needs its physical lattice");
     }
-    this.solidWorldLayout = options.solidWorld ? createWebgpuSolidWorldPageLayout({
+    // The terrain shader samples its heightfield and ordered edit overlay only
+    // (solidWorldProxyWGSL). Do not reserve or upload an unused voxel copy of
+    // every cell below that surface: it scales cubically with physics detail.
+    this.solidWorldLayout = options.solidWorld && !options.renderTerrain ? createWebgpuSolidWorldPageLayout({
       baseWords: solidWorldBaseWords,
       authoredPageCount: Math.max(256, options.solidWorld.pages.length),
       includesMaterial: true,
@@ -3218,8 +3221,11 @@ export class SparseSceneProxyVoxelizer {
 
   /** Replace the canonical static-solid image without allocating a host mirror. */
   validateSolidWorld(world: SolidWorld): void {
-    if (this.renderTerrainLayout && world.patches.length > this.renderTerrainLayout.patchCapacity) {
-      throw new RangeError(`Live terrain edit capacity reached (${this.renderTerrainLayout.patchCapacity} patches). Undo or open a new scene.`);
+    if (this.renderTerrainLayout) {
+      if (world.patches.length > this.renderTerrainLayout.patchCapacity) {
+        throw new RangeError(`Live terrain edit capacity reached (${this.renderTerrainLayout.patchCapacity} patches). Undo or open a new scene.`);
+      }
+      return;
     }
     if (!this.solidWorldLayout || world.pages.length > this.solidWorldLayout.pageCapacity) {
       throw new Error("Live display capacity reached; remove some voxels before adding more.");
@@ -3229,17 +3235,19 @@ export class SparseSceneProxyVoxelizer {
   setSolidWorld(world: SolidWorld): void {
     const layout = this.solidWorldLayout;
     const lattice = this.options.solidWorldLattice;
-    if (!layout || !lattice) {
+    if ((!layout && !this.renderTerrainLayout) || !lattice) {
       if (world.pages.length > 0) throw new Error("This voxelizer has no SolidWorld capacity");
       return;
     }
     this.validateSolidWorld(world);
-    const clear = this.device.createCommandEncoder({ label: "Clear SVO SolidWorld image" });
-    clear.clearBuffer(this.maintenanceArena, 4 * (layout.baseWords + layout.directoryBaseWords),
-      4 * (layout.pageBaseWords - layout.directoryBaseWords));
-    this.device.queue.submit([clear.finish()]);
-    writeWebgpuSolidWorldPages(this.device.queue, this.maintenanceArena,
-      layout, world, [0, 0, 0], lattice, this.uploadedSolidWorld);
+    if (layout) {
+      const clear = this.device.createCommandEncoder({ label: "Clear SVO SolidWorld image" });
+      clear.clearBuffer(this.maintenanceArena, 4 * (layout.baseWords + layout.directoryBaseWords),
+        4 * (layout.pageBaseWords - layout.directoryBaseWords));
+      this.device.queue.submit([clear.finish()]);
+      writeWebgpuSolidWorldPages(this.device.queue, this.maintenanceArena,
+        layout, world, [0, 0, 0], lattice, this.uploadedSolidWorld);
+    }
     if (this.renderTerrainLayout) {
       const overlay = packTerrainOverlay(terrainOverlayPatches(world, lattice), this.renderTerrainLayout.patchCapacity);
       if (overlay.byteLength) this.device.queue.writeBuffer(this.maintenanceArena,

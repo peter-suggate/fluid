@@ -144,7 +144,10 @@ fn umPlan(){
    let stalled=(state[1]&0x7f800000u)==0x7f800000u||residual>umF(3)*0.5;
    var next=step;
    if(stalled&&next<V&&F>0u){next=V;control[6]=1u;}
-   control[1]=next;control[3]=state[1];control[4]+=1u;control[select(17u,16u,step-1u<V)]+=1u;control[17u+step]=state[0];
+   control[1]=next;control[3]=state[1];control[4]+=1u;control[select(17u,16u,step-1u<V)]+=1u;
+   // The diagnostic receipt holds the first seven slots, even when the
+   // configured solve has more. Never write past the fixed control record.
+   if(step<=7u){control[17u+step]=state[0];}
    if(stalled){control[7]=1u;}
   }
   var open=!umFrameFailed()&&state[5]==0u&&state[4]==0u&&control[1]==step;
