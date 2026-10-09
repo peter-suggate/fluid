@@ -8,7 +8,8 @@ import {
 } from "./planar-boundary";
 import {
   terrainCellSolidFraction,
-  terrainColumnHeights,
+  terrainColumnHeightsForLattice,
+  terrainWorldContainer,
   terrainContentStamp,
 } from "./terrain";
 import {
@@ -422,9 +423,19 @@ export function createSolidWorld(
 
 function terrainSolidWorldForScene(scene: SceneDescription): SolidWorld {
   if (!scene.terrain) return createSolidWorld();
-  const [nx, ny, nz] = sceneLatticeDimensions(scene);
-  const cellHeight_m = scene.container.height_m / ny;
-  const heights = terrainColumnHeights(scene, nx, nz);
+  const [hx, cellHeight_m, hz] = sceneCellSizes_m(scene);
+  const terrain = terrainWorldContainer(scene);
+  // Signed SolidWorld coordinates allow the garden banks to extend beyond the
+  // solver tank. Physics still samples only its own rectangular domain.
+  const x0 = Math.round((scene.container.width_m - terrain.width_m) / (2 * hx));
+  const z0 = Math.round((scene.container.depth_m - terrain.depth_m) / (2 * hz));
+  const nx = Math.round(terrain.width_m / hx), nz = Math.round(terrain.depth_m / hz);
+  const ny = Math.round(terrain.height_m / cellHeight_m);
+  const heights = terrainColumnHeightsForLattice(scene.terrain, {
+    originX_m: -scene.container.width_m / 2 + x0 * hx,
+    originZ_m: -scene.container.depth_m / 2 + z0 * hz,
+    cellX_m: hx, cellZ_m: hz, nx, nz, maximumHeight_m: terrain.height_m,
+  });
   const pages = new Map<string, SolidWorldPage>();
   const key = (coordinate: SolidWorldCoordinate): string => coordinate.join(",");
   for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
@@ -435,7 +446,7 @@ function terrainSolidWorldForScene(scene: SceneDescription): SolidWorld {
         cellHeight_m);
       const quantizedFraction = Math.round(255 * fraction);
       if (quantizedFraction === 0) continue;
-      const address = solidWorldPageAddress([x, y, z]);
+      const address = solidWorldPageAddress([x + x0, y, z + z0]);
       let page = pages.get(key(address.page));
       if (!page) {
         page = emptyPage(address.page, 1);

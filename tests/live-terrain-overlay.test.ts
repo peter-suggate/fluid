@@ -22,7 +22,7 @@ test("hero-garden-hose-x10 starts with fluid and offers solid editing", () => {
   assert.equal(scene.systems?.fluid, true);
   assert.equal(scene.fluid.initialCondition, "tank-fill");
   assert.ok(scene.container.fillFraction > 0);
-  assert.equal(scene.voxelDomain.finestCellSize_m, 0.0125);
+  assert.equal(scene.voxelDomain.finestCellSize_m, 0.00625);
   assert.equal(scene.voxelDomain.detailCellSize_m, 0.00625);
   assert.equal(getSceneDefinition("hero-garden-hose-x10").buildAt?.({ cellSize_m: 0.0125 }).voxelDomain.detailCellSize_m, 0.00625);
   assert.ok(initialFluidLayout(scene).regions.some(region => region.codec === "tank-fill"));

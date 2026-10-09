@@ -1,6 +1,6 @@
 import type { SceneDescription } from "../../../core/model";
 import { walkSceneryNodes } from "../../../core/scenery-graph";
-import { terrainHeightAt } from "../../../core/terrain";
+import { terrainHeightAt, terrainWorldContainer } from "../../../core/terrain";
 import { VOXEL_MATERIAL_IDS, type LinearRgb } from "../../../core/voxel-scene";
 import type { SvoVec3 } from "../primary-visibility/webgpu-svo-traversal";
 
@@ -135,7 +135,7 @@ export function sceneSvoGroundPlane(
   let shell = false;
   for (const { node } of walkSceneryNodes(scene.scenery?.nodes ?? [])) if (node.kind === "terrain-shell") { shell = true; break; }
   if (!shell) return undefined;
-  const { width_m, depth_m, height_m } = scene.container;
+  const { width_m, depth_m, height_m } = terrainWorldContainer(scene);
   const minX = -0.5 * width_m, minZ = -0.5 * depth_m, maxX = 0.5 * width_m, maxZ = 0.5 * depth_m;
   const heights: number[] = [];
   const top = (x: number, z: number) => heights.push(Math.min(height_m, Math.max(0, terrainHeightAt(terrain, x, z))));

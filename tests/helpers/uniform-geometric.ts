@@ -68,18 +68,21 @@ export async function readUniformFields(device:GPUDevice,solver:WebGPUUniformRef
  * open: the open fraction itself (umCellOpen), not its complement. */
 export async function readUniformSolidFractions(device:GPUDevice,solver:WebGPUUniformReferenceSolver,open=false){
  const {nx,ny,nz}=solver.info;
+ // Large pond grids exceed 65,535 groups; cover every cell with a 2-D launch.
+ const groups=Math.ceil(nx*ny*nz/64),dispatchX=Math.min(groups,device.limits.maxComputeWorkgroupsPerDimension);
+ const dispatchY=Math.ceil(groups/dispatchX);
  const solid=(solver as unknown as {mixedFrame:{solid:UniformMixedSolid}}).mixedFrame.solid;
  const module=device.createShaderModule({code:`const UM_D=vec3u(${nx}u,${ny}u,${nz}u);
 ${uniformMixedSolidWGSL(0,undefined,false)}
 @group(1) @binding(0) var<storage,read_write> result:array<f32>;
-@compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) gid:vec3u){let i=gid.x;if(i>=arrayLength(&result)){return;}let p=vec3i(vec3u(i%UM_D.x,(i/UM_D.x)%UM_D.y,i/(UM_D.x*UM_D.y)));result[i]=${open?"umCellOpen(p)":"1.0-umCellOpen(p)"};}`});
+@compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) gid:vec3u){let i=gid.x+${dispatchX*64}u*gid.y;if(i>=arrayLength(&result)){return;}let p=vec3i(vec3u(i%UM_D.x,(i/UM_D.x)%UM_D.y,i/(UM_D.x*UM_D.y)));result[i]=${open?"umCellOpen(p)":"1.0-umCellOpen(p)"};}`});
  const resultLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
  const pipeline=await device.createComputePipelineAsync({layout:device.createPipelineLayout({bindGroupLayouts:[solid.bindLayout,resultLayout]}),compute:{module,entryPoint:"probe"}});
  const output=device.createBuffer({size:4*nx*ny*nz,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
  const read=device.createBuffer({size:output.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
  try{
   const group=device.createBindGroup({layout:resultLayout,entries:[{binding:0,resource:{buffer:output}}]});
-  const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,solid.bindGroup);pass.setBindGroup(1,group);pass.dispatchWorkgroups(Math.ceil(nx*ny*nz/64));pass.end();
+  const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,solid.bindGroup);pass.setBindGroup(1,group);pass.dispatchWorkgroups(dispatchX,dispatchY);pass.end();
   encoder.copyBufferToBuffer(output,0,read,0,output.size);device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);return new Float32Array(read.getMappedRange()).slice();
  }finally{if(read.mapState==="mapped")read.unmap();read.destroy();output.destroy();}
 }

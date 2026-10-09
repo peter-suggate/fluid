@@ -196,7 +196,7 @@ export class UniformPressureBand {
  constructor(private readonly device:GPUDevice,private readonly simulation:UniformMixedOwnership,private readonly pressure:UniformMixedOwnership,private fields:UniformPressureBandFields,
   readonly schedule:UniformPressureBandSchedule=UNIFORM_PRESSURE_BAND_SCHEDULE,
   /** Static solids, with the all-4h record (its cut-tile flags). */
-  private readonly solid?:UniformMixedSolid){
+  private readonly solid?:UniformMixedSolid,readonly spatialOrder=true){
   const layout=simulation.layout,tiles=layout.tiles.length;
   if(pressure.layout.tiles.some(word=>(word&0xc0000000)!==0))throw new Error("The pressure band's global stage must be all-4h");
   if(solid&&!solid.coarse)throw new Error("The solid pressure band needs the all-4h solid record");
@@ -204,7 +204,7 @@ export class UniformPressureBand {
   if(schedule.middleSweeps<1)throw new Error("The pressure band's 2h level needs a sweep: its first red half sweep carries the restriction and the prolongation");
   this.rowFields=solid?SOLID_ROW_FIELDS:ROW_FIELDS;
   this.listSlots=tiles;
-  this.index=device.createBuffer({label:"Uniform pressure band tiles",size:(HEADER+this.listSlots+tiles)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  this.index=device.createBuffer({label:"Uniform pressure band tiles",size:(HEADER+this.listSlots+tiles+Math.ceil(tiles/256))*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   const texture=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}});
   const buffer=(binding:number,type:GPUBufferBindingType="storage")=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type}});
   const params=buffer(0,"uniform");
@@ -533,10 +533,62 @@ var<workgroup> member:atomic<u32>;
   workgroupBarrier();
   if(bWet(bPhiH(vec3i(umTileCoord(t)*4u+bLocal(lane))),1.0)){atomicStore(&member,1u);}
   if(workgroupUniformLoad(&member)!=0u&&lane==0u){
-   let slot=atomicAdd(&index[0],1u);
-   if(slot<bCap()){atomicStore(&index[LIST+slot],t);atomicStore(&index[SLOTS+t],slot+1u);}else{atomicStore(&index[1],1u);}
+   ${this.spatialOrder?"atomicStore(&index[SLOTS+t],1u);":`let slot=atomicAdd(&index[0],1u);
+   if(slot<bCap()){atomicStore(&index[LIST+slot],t);atomicStore(&index[SLOTS+t],slot+1u);}else{atomicStore(&index[1],1u);}`}
   }
  }
+}`,
+
+   listPrefix:header+indexed(true)+/* wgsl */`
+const B_BLOCKS=(UM_TILES+255u)/256u;
+const B_TOTALS=SLOTS+UM_TILES;
+fn bSpatialTile(i:u32)->u32{
+ if(any((UM_T%vec3u(4u))!=vec3u(0u))){return i;}
+ let block=i/64u;let b=vec3u(block%(UM_T.x/4u),(block/(UM_T.x/4u))%(UM_T.y/4u),block/((UM_T.x/4u)*(UM_T.y/4u)));
+ let k=i%64u;let l=vec3u((k&1u)|((k>>2u)&2u),((k>>1u)&1u)|((k>>3u)&2u),((k>>2u)&1u)|((k>>4u)&2u));
+ return umTileAt(4u*b+l);
+}
+var<workgroup> prefix:array<u32,256>;
+@compute @workgroup_size(256) fn main(${slots}){
+ let i=256u*group.x+lane;var count=0u;
+ if(i<UM_TILES){count=atomicLoad(&index[SLOTS+bSpatialTile(i)]);}
+ prefix[lane]=count;workgroupBarrier();
+ for(var stride=1u;stride<256u;stride*=2u){
+  var add=0u;if(lane>=stride){add=prefix[lane-stride];}
+  workgroupBarrier();prefix[lane]+=add;workgroupBarrier();
+ }
+ if(i<UM_TILES){atomicStore(&index[SLOTS+bSpatialTile(i)],select(0u,prefix[lane],count!=0u));}
+ if(lane==255u){atomicStore(&index[B_TOTALS+group.x],prefix[lane]);}
+}`,
+   listOffsets:header+indexed(true)+/* wgsl */`
+const B_BLOCKS=(UM_TILES+255u)/256u;
+const B_TOTALS=SLOTS+UM_TILES;
+var<workgroup> prefix:array<u32,256>;
+@compute @workgroup_size(256) fn main(@builtin(local_invocation_index) lane:u32){
+ let per=(B_BLOCKS+255u)/256u;let first=min(B_BLOCKS,lane*per);let last=min(B_BLOCKS,first+per);
+ var total=0u;for(var i=first;i<last;i++){total+=atomicLoad(&index[B_TOTALS+i]);}
+ prefix[lane]=total;workgroupBarrier();
+ for(var stride=1u;stride<256u;stride*=2u){
+  var add=0u;if(lane>=stride){add=prefix[lane-stride];}
+  workgroupBarrier();prefix[lane]+=add;workgroupBarrier();
+ }
+ var offset=prefix[lane]-total;
+ for(var i=first;i<last;i++){let count=atomicLoad(&index[B_TOTALS+i]);atomicStore(&index[B_TOTALS+i],offset);offset+=count;}
+ if(lane==255u){atomicStore(&index[0],prefix[lane]);if(prefix[lane]>bCap()){atomicStore(&index[1],1u);}}
+}`,
+   listScatter:header+indexed(true)+/* wgsl */`
+const B_TOTALS=SLOTS+UM_TILES;
+fn bSpatialRank(t:vec3u)->u32{
+ if(any((UM_T%vec3u(4u))!=vec3u(0u))){return umTileAt(t);}
+ let b=t/4u;let l=t%4u;
+ let k=(l.x&1u)|((l.y&1u)<<1u)|((l.z&1u)<<2u)|((l.x&2u)<<2u)|((l.y&2u)<<3u)|((l.z&2u)<<4u);
+ return 64u*(b.x+(UM_T.x/4u)*(b.y+(UM_T.y/4u)*b.z))+k;
+}
+@compute @workgroup_size(256) fn main(${slots}){
+ let t=256u*group.x+lane;if(t>=UM_TILES){return;}
+ let local=atomicLoad(&index[SLOTS+t]);if(local==0u){return;}
+ let slot=atomicLoad(&index[B_TOTALS+bSpatialRank(umTileCoord(t))/256u])+local-1u;
+ if(slot<bCap()){atomicStore(&index[LIST+slot],t);atomicStore(&index[SLOTS+t],slot+1u);}else{atomicStore(&index[SLOTS+t],0u);}
 }`,
    prep:header+indexed(false)+theta+surface+/* wgsl */`
 @group(1) @binding(9) var<storage,read_write> rows:array<f32>;
@@ -1091,6 +1143,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    middleSweep:[...[0,1].map(c=>[`${c}`,{bColour:c}] as [string,Record<string,number>]),["P",{bColour:0,bProlong:1}],["D",{bColour:1,bHalves:2*schedule.middleSweeps-1}],["U",{bColour:0,bProlong:1,bHalves:2*schedule.middleSweeps}]],
    restrict:range(schedule.cycles).map(k=>[`@${k}`,{bCycle:k}]),measure:range(schedule.cycles,1).map(k=>[`@${k}`,{bCycles:k}]),
   };
+  if(!this.spatialOrder)for(const key of ["listPrefix","listOffsets","listScatter"])delete sources[key];
   await Promise.all(Object.entries(sources).map(async([name,code])=>{
    // Each launch's own entry name: per-dispatch timing attributes it.
    const module=uniformDetailModule(this.device,{label:`Uniform pressure band ${name}`,code:code.replace(/fn main\(/,`fn ${entryOf(name)}(`)});
@@ -1107,7 +1160,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  /** The pass the band's static groups were last bound in, and its group 1. */
  private boundPass?:GPUComputePassEncoder;
  private boundGroup?:UniformDetailGroup;
- private layoutOf(name:string):string{const base=name.replace(/([01PDUF]|@\d+)$/,"");if(base==="rebase")return "init";return ["list","copy","prep","init","project","present"].includes(base)?base:"solver";}
+ private layoutOf(name:string):string{const base=name.replace(/([01PDUF]|@\d+)$/,"");if(base==="rebase")return "init";if(base.startsWith("list"))return "list";return ["list","copy","prep","init","project","present"].includes(base)?base:"solver";}
  /** launch: a fixed group count, the simulation's h tiles (one group per
   * tile of its buffered evidence), or a slot-list stride (one 32-lane group
   * per slot colour, one group per slot, per 8 slots, per 64 slots) capped by
@@ -1141,6 +1194,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   if(this.empty)return;
   const pass=encoder.beginComputePass({label:"Uniform pressure band list and rows"});
   this.dispatch(pass,"list","tiles");
+  if(this.spatialOrder){const groups=Math.ceil(this.simulation.capacity.tiles/256);this.dispatch(pass,"listPrefix",groups);this.dispatch(pass,"listOffsets",1);this.dispatch(pass,"listScatter",groups);}
   this.dispatch(pass,"prep","slots");this.dispatch(pass,"middleBake","middle");this.dispatch(pass,"coarseBake","coarse");pass.end();
  }
  /** After the 4h projection reaches simulation ownership: start from the 4h

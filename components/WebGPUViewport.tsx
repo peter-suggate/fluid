@@ -1358,7 +1358,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
               inFlightDepth: simulation.inFlightDepth(),
               detailFocus: detailFocus(ui.camera.target_m),
             },
-            { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode, lensPhase: ui.gridOverlayLensPhase, layers: ui.visualLayers },
+            { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode, lensPhase: ui.gridOverlayLensPhase, layers: ui.visualLayers, particles: ui.fluidParticleDisplay },
             scenePreset.background,
             scenePreset.id === sceneState.presetId ? scenePreset.presentationMode : "full-scene",
             ui.fluidSurfaceRenderMode,

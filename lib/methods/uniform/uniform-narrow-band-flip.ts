@@ -44,7 +44,11 @@ export class UniformNarrowBandFlip {
  reseedClipped=0;
  /** Positive distances in h cells, before union and on the accepted surface.
   * Unresolved samples are reported separately from the resolved liquid band. */
- diagnostics={beforeMaxOutside:0,afterMaxOutside:0,outsideSurface:0,unsupported:0,deepInterior:0};
+ diagnostics={beforeMaxOutside:NaN,afterMaxOutside:0,outsideSurface:0,unsupported:0,deepInterior:0};
+ /** The separation before the union is a diagnostic alone, a sweep of every
+  * sample that nothing in the step reads: a step measures it only for a
+  * reader that set this before stepping. Unmeasured, it reports NaN. */
+ measureTraces=false;
  /** Completed frame samples, exposed for transfer/conservation verification.
   * Resampling preserves the survivors' cell order, but seeding appends an
   * unsorted tail. The complete buffer is not yet a cell-sorted epoch. */
@@ -76,6 +80,7 @@ export class UniformNarrowBandFlip {
  private get activityWord():number{const d=this.ownership.capacity.lattice.dimensions;return 3*d.reduce((a,b)=>a*b,1)+d.reduce((a,b)=>a*(b+1),1)+9*this.ownership.capacity.tiles+4;}
  private refinementPipeline?:GPUComputePipeline;
  private refinementLayout?:GPUBindGroupLayout;
+ private readonly refinementGroups:({particles:GPUBuffer;target:GPUBuffer;wordOffset:number;size:number;group:GPUBindGroup}|undefined)[]=[];
  private readonly refinementParams:GPUBuffer;
  private readonly cache:UniformMixedMomentumCache;
  private readonly coarseVelocity:GPUTexture;
@@ -361,7 +366,12 @@ ${narrowBandTraceWGSL("sampleVelocity")}
   if(umCellOpen(vec3i(q))<0.5){source[i].position.x=-1.0;return;}
   let ballistic=p.before.w==1.0||!gridSupported(q);p.before.w=max(p.before.w,select(0.0,1.0,ballistic));
   if(nbAdaptive()){
-   p.position.w=max(nbTargetHeat(q),max(0.0,p.position.w-select(nbCooling()*params.hDt.w,0.0,ballistic)));
+   // A coupled sample has the heat of the tile it is in: the census's, cooled
+   // over the retirement time and spread one tile (activitySpread). Carried
+   // with the liquid instead, it held every tile that liquid reached in that
+   // time at h, whatever the census admitted there. A ballistic sample has
+   // no tile's support to lose and keeps its own.
+   p.position.w=max(nbTargetHeat(q),select(0.0,p.position.w,ballistic));
    if(p.position.w<=0.0){source[i].position.x=-1.0;return;}
   }
   // Uniform stores velocity half a step ahead of position. Ballistic drift
@@ -778,12 +788,18 @@ ${narrowBandSurfaceWGSL}
   // before choosing its grid layout, instead of after the first census.
   if(!this.started&&!this.adaptive){this.device.queue.writeBuffer(this.params,0,new Float32Array([...lattice.cellSize_m,dt,0.95,0,0,0]));this.bootstrap(encoder);}
   this.device.queue.writeBuffer(this.refinementParams,0,new Float32Array([...lattice.dimensions,dt,...lattice.cellSize_m,padding]));
-  const group=this.device.createBindGroup({layout:this.refinementLayout!,entries:[
-   {binding:0,resource:{buffer:this.activeParticles}},{binding:1,resource:{buffer:this.state}},
-   {binding:2,resource:{buffer:target.buffer,offset:target.wordOffset*4,size:4*Math.ceil(this.ownership.capacity.tiles/32)}},
-   {binding:3,resource:{buffer:this.refinementParams}},
-   {binding:4,resource:{buffer:this.bins}},
-  ]});
+  // One group per particle bank: the bank alternates every step, the census's target does not.
+  const particles=this.activeParticles,size=4*Math.ceil(this.ownership.capacity.tiles/32);
+  let held=this.refinementGroups[this.parity];
+  if(held?.particles!==particles||held.target!==target.buffer||held.wordOffset!==target.wordOffset||held.size!==size){
+   held=this.refinementGroups[this.parity]={particles,target:target.buffer,wordOffset:target.wordOffset,size,group:this.device.createBindGroup({layout:this.refinementLayout!,entries:[
+    {binding:0,resource:{buffer:particles}},{binding:1,resource:{buffer:this.state}},
+    {binding:2,resource:{buffer:target.buffer,offset:target.wordOffset*4,size}},
+    {binding:3,resource:{buffer:this.refinementParams}},
+    {binding:4,resource:{buffer:this.bins}},
+   ]})};
+  }
+  const group=held.group;
   const pass=encoder.beginComputePass({label:"Narrow-band FLIP surface refinement"});pass.setPipeline(this.refinementPipeline!);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1024);pass.end();
  }
  /** The head census runs before remapping and advection. Copy its scores
@@ -796,7 +812,7 @@ ${narrowBandSurfaceWGSL}
   encoder.copyBufferToBuffer(importance.buffer,importance.offset,this.bins,this.activityWord*4,tiles*8);
   this.dispatchBatch(encoder,["activity","activitySpread"],"bootstrap","activity");
  }
- reconstruct(encoder:GPUCommandEncoder):void{this.bandCurrent=false;this.measureBand(encoder);this.dispatch(encoder,"diagnoseBefore");
+ reconstruct(encoder:GPUCommandEncoder):void{this.bandCurrent=false;this.measureBand(encoder);if(this.measureTraces)this.dispatch(encoder,"diagnoseBefore");
   const cells=this.ownership.capacity.lattice.dimensions.reduce((a,b)=>a*b,1),vertices=this.ownership.capacity.lattice.dimensions.reduce((a,b)=>a*(b+1),1);
   encoder.clearBuffer(this.bins,(2*cells+2*this.ownership.capacity.tiles)*4,vertices*4);
   this.dispatchBatch(encoder,["surfaceCells","surfaceSplat",...(!this.ownership.coarseOnly?["coupleFine"]:[]),"couple"],"surface","surface reconstruction");}
@@ -836,7 +852,7 @@ ${narrowBandSurfaceWGSL}
  noteReceipt(words:Uint32Array):void{
   this.count=words[1]!;this.reseedClipped=words[2]!;
   const distances=new Float32Array(words.buffer,words.byteOffset,words.length);
-  this.diagnostics={beforeMaxOutside:distances[4]!,afterMaxOutside:distances[5]!,outsideSurface:words[6]!,unsupported:words[7]!,deepInterior:words[8]!};
+  this.diagnostics={beforeMaxOutside:this.measureTraces?distances[4]!:NaN,afterMaxOutside:distances[5]!,outsideSurface:words[6]!,unsupported:words[7]!,deepInterior:words[8]!};
   // Persistent samples own the budget first. At capacity only optional
   // reseeding is deferred; never destroy a surface to make room for it.
   if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?`trajectory exceeded ${NARROW_BAND_TRACE_LIMIT} cells`:"nonfinite velocity"}`);

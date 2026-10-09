@@ -127,7 +127,10 @@ const REMAP_WORK_RECEIPT=SHARPEN_WORK_RECEIPT+8;
 const ROOT_WORK_RECEIPT=REMAP_WORK_RECEIPT+4;
 const FLIP_RECEIPT=ROOT_WORK_RECEIPT+4;
 const TRACE_RECEIPT=FLIP_RECEIPT+48;
-const extensionKey=(p:UniformMixedFrameParameters)=>JSON.stringify({...p,dt:0});
+// A source's added volume is the scalar budget's alone (beginStep): the
+// source itself writes liquid after the head, inside the frame it is due in,
+// so a frame with a drop starts from the last tail's extension like any other.
+const extensionKey=(p:UniformMixedFrameParameters)=>JSON.stringify({...p,dt:0,addedVolumeCells:0});
 /** Frames whose receipts may be unchecked at once: the host's frames-ahead cap. */
 export const UNIFORM_MIXED_RECEIPT_RING=2;
 /** Rigid bodies this frame (the solid library reads their GPU state):
@@ -393,7 +396,7 @@ export class UniformMixedFrame {
   this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,true,true,!!this.narrowBandFlip);
   this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid,true,!!f.narrowBandFlip);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
-  this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,true,true);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry);
+  this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,true,true,!!f.narrowBandFlip);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.narrowBandFlip?f.volume:undefined);
   if(!this.narrowBandFlip){
   this.sharpenList=buffer("Uniform mixed sharpening tile list",UniformMixedSharpening.workBytes(layout.tiles.length,o.capacity.owners),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.sharpen=new UniformMixedSharpening(device,o,solid,{list:this.sharpenList},true);
@@ -763,7 +766,9 @@ export class UniformMixedFrame {
    if(this.narrowBandFlip)this.surfaceVolume!.beginStep(encoder,this.surfaceVolumeGroup,p.dt,p.addedVolumeCells??0,p.openTop);
    // The samples' move is the frame's first long stage: it runs while the
    // host encodes the surface stages behind it.
-   if(this.narrowBandFlip){this.narrowBandFlip.move(encoder,p.dt,p.openTop,p.gravity);flush();}
+   // The move closes its own share of the phi stage: passes after a
+   // submission's last mark are in no stage's time.
+   if(this.narrowBandFlip){this.narrowBandFlip.move(encoder,p.dt,p.openTop,p.gravity);trace?.phase(encoder,V.phi);flush();}
    this.surface.encode(encoder,"advect",this.surfaceGroups[0]);this.phiResolve.encode(encoder,this.phiResolveGroups.scratch);
    // Cell departures feed conservative volume transport only. NB-FLIP
    // measures volume from phi, and momentum writes this scratch field later.
@@ -946,10 +951,11 @@ export class UniformMixedFrame {
   }catch(error){this.failed=true;throw new Error(`Uniform mixed ${kick?`kick before frame ${frame+1}`:`frame ${frame}`}: ${error instanceof Error?error.message:String(error)}`,{cause:error});}
  }
  /** NB occupancy is a measurement, including immediately after a relayout.
-  * No consumer may see stale independently remapped or displaced mass. */
+  * No consumer may see stale independently remapped or displaced mass: the
+  * geometry's own pass copies every live owner's target into the volume
+  * (its mirror), where a whole-field copy followed each launch. */
  private encodeGeometry(encoder:GPUCommandEncoder,options:Parameters<UniformMixedSurfaceGeometry["encode"]>[2]={}):void{
   this.geometry.encode(encoder,this.geometryGroup,options);
-  if(this.narrowBandFlip)this.copyWhole(encoder,this.fields.target,this.fields.volume);
  }
  /** Two fields of one class: the physical textures copy whole. */
  private copyWhole(encoder:GPUCommandEncoder,from:GPUTexture,to:GPUTexture):void{

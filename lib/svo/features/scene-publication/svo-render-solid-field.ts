@@ -1,6 +1,6 @@
 import type { SceneDescription } from "../../../core/model";
 import { solidWorldVoxelPatchBounds_m } from "../../../core/solid-world";
-import { terrainHeightAt } from "../../../core/terrain";
+import { terrainHeightAt, terrainWorldContainer } from "../../../core/terrain";
 import type { SparseBrickCoordinate } from "../construction/sparse-brick-octree";
 
 /**
@@ -33,16 +33,17 @@ export function* buildSvoRenderTerrainFieldSteps(
   materialId: number,
 ): Generator<unknown, SvoRenderTerrainField | undefined, undefined> {
   if (!scene.terrain) return undefined;
-  const nx = Math.max(1, Math.round(scene.container.width_m / cellSize_m[0]));
-  const nz = Math.max(1, Math.round(scene.container.depth_m / cellSize_m[2]));
-  const originX = -0.5 * scene.container.width_m;
-  const originZ = -0.5 * scene.container.depth_m;
+  const terrainContainer = terrainWorldContainer(scene);
+  const nx = Math.max(1, Math.round(terrainContainer.width_m / cellSize_m[0]));
+  const nz = Math.max(1, Math.round(terrainContainer.depth_m / cellSize_m[2]));
+  const originX = -0.5 * terrainContainer.width_m;
+  const originZ = -0.5 * terrainContainer.depth_m;
   const heights_m = new Float32Array(new ArrayBuffer(nx * nz * Float32Array.BYTES_PER_ELEMENT));
   for (let z = 0; z < nz; z += 1) {
     const worldZ = originZ + (z + 0.5) * cellSize_m[2];
     for (let x = 0; x < nx; x += 1) {
       const worldX = originX + (x + 0.5) * cellSize_m[0];
-      heights_m[x + nx * z] = Math.min(scene.container.height_m,
+      heights_m[x + nx * z] = Math.min(terrainContainer.height_m,
         Math.max(0, terrainHeightAt(scene.terrain, worldX, worldZ)));
     }
     if ((z + 1) % TERRAIN_ROWS_PER_OFFER === 0) yield;

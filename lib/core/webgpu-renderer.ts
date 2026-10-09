@@ -1,4 +1,4 @@
-import { layerOpacity, legacyVisualLayers, particleLayerShown, particleView, sliceLayersShown, type VisualLayerState } from "./visual-layers";
+import { layerOpacity, legacyVisualLayers, particleLayerShown, particleView, sliceLayersShown, withParticleDisplay, type ParticleDisplay, type VisualLayerState } from "./visual-layers";
 import { authoredFluidGeometryKey } from "./authored-fluid-edit";
 import { publishOpaqueSurfaceCapability } from "../svo/features/shading/deferred-specialization";
 import { validateLiveFluidEdit, type LiveFluidEdit, type LiveFluidEditResult } from "./live-fluid-edit";
@@ -347,6 +347,12 @@ export interface GridOverlayConfig {
   position: number;
   mode?: GridOverlayMode;
   layers?: VisualLayerState;
+  /**
+   * The liquid's own particles, for a method that composes layers and
+   * publishes them. It decides the particle layer whatever `layers` holds, and
+   * draws with the slice layers hidden; absent leaves `layers` as given.
+   */
+  particles?: ParticleDisplay;
   /** Scrubber position within the selected lens's phases. */
   lensPhase?: number;
 }
@@ -3194,9 +3200,12 @@ export class FluidLabRenderer {
     // A method declares that its field views compose as layers; every other
     // method draws one overlay mode, and a layer selection left behind by a
     // composing method means nothing to it.
-    const composesLayers = Boolean(getMethod(config.methodId).capabilities?.visualLayers);
-    if (composesLayers && gridOverlay && !isStageLensOverlayMode(gridOverlay.mode ?? "")) {
-      const layers = gridOverlay.layers ?? { ...legacyVisualLayers(gridOverlay.mode ?? "structure"), visible: gridOverlay.axis !== "off" };
+    const composed = getMethod(config.methodId).capabilities?.visualLayers;
+    const composesLayers = Boolean(composed);
+    if (composed && gridOverlay && !isStageLensOverlayMode(gridOverlay.mode ?? "")) {
+      const selected = gridOverlay.layers ?? { ...legacyVisualLayers(gridOverlay.mode ?? "structure"), visible: gridOverlay.axis !== "off" };
+      const layers = gridOverlay.particles === undefined ? selected
+        : withParticleDisplay(selected, composed.hidden.includes("particles") ? "off" : gridOverlay.particles);
       const visible = layers.visible && layers.enabled.length > 0;
       const axis = gridOverlay.axis === "off" || gridOverlay.axis === "volume" ? "z" : gridOverlay.axis;
       gridOverlay = { ...gridOverlay, layers, mode: "structure", axis: visible ? axis : "off" };

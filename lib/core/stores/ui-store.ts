@@ -49,7 +49,7 @@ import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../../svo/featu
 import { FLUID_CELL_TRACE_LAYERS, type FluidCellTraceLayer } from "../fluid-cell-trace";
 import { isStageLensOverlayMode } from "../stage-lens";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
-import type { FluidSurfaceRenderMode } from "../../features/surface-display/definition";
+import type { FluidParticleDisplay, FluidSurfaceRenderMode } from "../../features/surface-display/definition";
 
 /**
  * The object currently in the user's hand.
@@ -233,6 +233,8 @@ interface UIStore {
   gridOverlayLensPhase: number;
   /** Selected tank's liquid presentation; never changes simulation state. */
   fluidSurfaceRenderMode: FluidSurfaceRenderMode;
+  /** The liquid's own particles, for a method that keeps them; presentation only. */
+  fluidParticleDisplay: FluidParticleDisplay;
   svoShadowsEnabled: boolean;
   svoAmbientOcclusionEnabled: boolean;
   /** Full-rate visibility refinement at reduced-cone geometry silhouettes. */
@@ -336,6 +338,7 @@ interface UIStore {
   setGridOverlayMode: (mode: GridOverlayMode) => void;
   setGridOverlayLensPhase: (phase: number) => void;
   setFluidSurfaceRenderMode: (mode: FluidSurfaceRenderMode) => void;
+  setFluidParticleDisplay: (display: FluidParticleDisplay) => void;
   setSvoShadowsEnabled: (enabled: boolean) => void;
   setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
   setSilhouetteRefinementEnabled: (enabled: boolean) => void;
@@ -540,10 +543,14 @@ export const createUIStore = () => create<UIStore>((set) => ({
       ? 0 : state.gridOverlayLensPhase,
   })),
   setGridOverlayLensPhase: (phase) => set({ gridOverlayLensPhase: Math.max(0, Math.floor(phase)) }),
-  setFluidSurfaceRenderMode: (fluidSurfaceRenderMode) => {
-    surfaceDisplayQuery.write(new URLSearchParams(), { fluidSurfaceRenderMode });
-    set({ fluidSurfaceRenderMode });
-  },
+  setFluidSurfaceRenderMode: (fluidSurfaceRenderMode) => set(state => {
+    surfaceDisplayQuery.write(new URLSearchParams(), { fluidSurfaceRenderMode, fluidParticleDisplay: state.fluidParticleDisplay });
+    return { fluidSurfaceRenderMode };
+  }),
+  setFluidParticleDisplay: (fluidParticleDisplay) => set(state => {
+    surfaceDisplayQuery.write(new URLSearchParams(), { fluidSurfaceRenderMode: state.fluidSurfaceRenderMode, fluidParticleDisplay });
+    return { fluidParticleDisplay };
+  }),
   setSvoShadowsEnabled: (svoShadowsEnabled) => set({ svoShadowsEnabled }),
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
   setSilhouetteRefinementEnabled: (silhouetteRefinementEnabled) => set({ silhouetteRefinementEnabled }),

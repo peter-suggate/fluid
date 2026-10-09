@@ -91,24 +91,31 @@ export const UNIFORM_DETAIL_RANGES = Object.freeze({
  * It grows, between frames, to (1 + headroom) need + floorTiles as soon as
  * (1 + grow) need would not fit: a build defers only when its need outruns
  * (1 + grow) times the last receipt's, which is two or three frames old.
- * It returns when the peak of the last windowBuilds receipts, held the same
- * way, is under C / returnRatio, and none of them grew it. */
+ * hold: C never returns, and keeps the host's bound whatever the receipts
+ * count (Dynamic every tile, a request its host count). A change of C
+ * re-creates every buffer it sizes and binds every group again, 4 to 7 ms of
+ * host time in the frame it lands on (NB-FLIP letters, 256x192x128), so the
+ * storage the attach already had to hold is kept: memory for a frame time no
+ * capacity event interrupts. Without hold it returns when the peak of the
+ * last windowBuilds receipts, held the same way, is under C / returnRatio,
+ * and none of them grew it. */
 export interface UniformDetailCapacityRule {
   readonly grow: number;
   readonly headroom: number;
   readonly floorTiles: number;
   readonly windowBuilds: number;
   readonly returnRatio: number;
+  readonly hold: boolean;
 }
-/** QA only (probes, before they build a solver). hold: capacity never
- * returns (Dynamic keeps every tile, requests their host bound). double:
- * a growth is at least twice the held capacity. grow < 0: growth only after
- * a deferred build. lagFrames: a receipt is used this many frames late. */
-export interface UniformDetailCapacityRuleForQA extends UniformDetailCapacityRule { readonly hold: boolean; readonly double: boolean; readonly lagFrames: number }
+/** QA only (probes, before they build a solver). hold: false follows the
+ * receipts down again. double: a growth is at least twice the held capacity.
+ * grow < 0: growth only after a deferred build. lagFrames: a receipt is used
+ * this many frames late. */
+export interface UniformDetailCapacityRuleForQA extends UniformDetailCapacityRule { readonly double: boolean; readonly lagFrames: number }
 let qaCapacityRule: Partial<UniformDetailCapacityRuleForQA> | undefined;
 export function setUniformDetailCapacityRuleForQA(rule?: Partial<UniformDetailCapacityRuleForQA>): void { qaCapacityRule = rule; }
 export function uniformDetailCapacityRule(): UniformDetailCapacityRuleForQA {
-  return { ...UNIFORM_DETAIL_POLICY.capacity, hold: false, double: false, lagFrames: 0, ...qaCapacityRule };
+  return { ...UNIFORM_DETAIL_POLICY.capacity, double: false, lagFrames: 0, ...qaCapacityRule };
 }
 
 /** Starting constants of the planner and pool. */
@@ -148,7 +155,7 @@ export const UNIFORM_DETAIL_POLICY: UniformDetailPolicy = Object.freeze({
   retireSteps: 8,
   churnFraction: 0.05,
   poolGrowth: 2,
-  capacity: Object.freeze({ grow: 0.5, headroom: 1, floorTiles: 256, windowBuilds: 30, returnRatio: 1.5 }),
+  capacity: Object.freeze({ grow: 0.5, headroom: 1, floorTiles: 256, windowBuilds: 30, returnRatio: 1.5, hold: true }),
   strainThreshold: 0.1,
   curvatureThreshold: 0.5,
   contactHorizonSteps: 2,

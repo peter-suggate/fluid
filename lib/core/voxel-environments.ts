@@ -1,3 +1,4 @@
+import { terrainWorldContainer } from "./terrain";
 import type { EnvironmentId } from "./environments";
 import { environmentIndex } from "./environments";
 import type { SceneDescription, Vec3 } from "./model";
@@ -62,7 +63,8 @@ export function environmentSceneryContext(
   environmentId: EnvironmentId,
   options: EnvironmentProxyCatalogOptions = {},
 ): EnvironmentSceneryContext {
-  const s = Math.max(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
+  const extent = terrainWorldContainer(scene);
+  const s = Math.max(extent.width_m, extent.height_m, extent.depth_m);
   const thickness = options.shellThickness_m ?? scene.voxelDomain.finestCellSize_m;
   if (!(thickness > 0) || !Number.isFinite(thickness)) throw new Error("Environment shell thickness must be positive and finite");
   // Absent means the two lattices are the same, which is every scene that has
@@ -78,9 +80,9 @@ export function environmentSceneryContext(
     floorY_m: environmentId === "night-lab" ? -.72 * s
       : environmentId === "garden" ? (scene.terrain?.baseHeight_m ?? 0) : -.025,
     roomHalf_m: V(
-      Math.max(scene.container.width_m * 2.8, s * 2.25),
-      Math.max(scene.container.height_m * 1.85, s * 1.8),
-      Math.max(scene.container.depth_m * 2.8, s * 2.25),
+      Math.max(extent.width_m * 2.8, s * 2.25),
+      Math.max(extent.height_m * 1.85, s * 1.8),
+      Math.max(extent.depth_m * 2.8, s * 2.25),
     ),
     shellThickness_m: thickness,
     detailCellSize_m,

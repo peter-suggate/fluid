@@ -17,6 +17,9 @@ test("filled hero pond seeds no mass in cells closed by the static solid mask", 
     const fraction = sampleSolidWorld(world, [x, y, z]).solidFraction;
     const volume = seed.volume[x + nx * (y + ny * z)]!;
     if (fraction > 0) assert.equal(volume, 0, `closed cell ${x},${y},${z}`);
+    const terrainOpen = Math.fround(1 - Math.max(0, Math.min(1,
+      Math.fround(seed.terrain[x + nx * z]! / h) - y)));
+    assert.ok(volume <= terrainOpen, `GPU terrain capacity at ${x},${y},${z}`);
     if (fraction > 0 && fraction < 1) fractionalCells++;
     liquid += volume;
   }

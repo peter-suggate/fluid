@@ -172,6 +172,12 @@ export const HERO_GARDEN_BRICK_CELLS = 8 as const;
  */
 export const HERO_GARDEN_SOLVER_CELL_M = 0.0125;
 
+/** Compact Uniform tank; the authored garden retains its own full footprint. */
+export const HERO_GARDEN_POND_TANK = { width_m: 1.2, height_m: 0.8, depth_m: 0.9 } as const;
+// 6.25 mm keeps the full garden's render SolidWorld image below its 64 MiB
+// budget (40.75 MiB) and all tank axes divisible by four for Uniform.
+export const HERO_GARDEN_POND_CELL_M = 0.00625;
+
 /** Preserve the authored waterline and set placement as the solver gets finer. */
 const HERO_GARDEN_WATERLINE_REFERENCE_CELL_M = 0.025;
 
@@ -936,6 +942,8 @@ function heroGardenInflow(): SceneDescription["fluid"]["inflow"] {
 }
 
 export interface HeroGardenHoseOptions {
+  /** Fit the Uniform water domain to the pond without resizing its scenery. */
+  readonly pondTank?: boolean;
   /**
    * Whether the fluid solver owns this document. Off by default.
    *
@@ -996,9 +1004,9 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
   // Every scene wants the finest picture; the solver is the one system that
   // cannot carry it, so it is the one that pays — rather than the whole product
   // rendering at the coarsest thing any subsystem happens to need.
-  const requestedCell_m = options.cellSize_m ?? HERO_GARDEN_CELL_M;
+  const requestedCell_m = options.cellSize_m ?? (options.pondTank ? HERO_GARDEN_POND_CELL_M : HERO_GARDEN_CELL_M);
   const cellSize_m = options.water === true
-    ? Math.max(requestedCell_m, HERO_GARDEN_SOLVER_CELL_M)
+    ? Math.max(requestedCell_m, options.pondTank ? HERO_GARDEN_POND_CELL_M : HERO_GARDEN_SOLVER_CELL_M)
     : requestedCell_m;
   // The factory does what it is told. The *product's* default rung is a
   // document-construction policy and lives in `sceneDocument`, so a tool or a
@@ -1011,17 +1019,18 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
   }
   scene.sceneId = "hero-garden-hose";
   scene.systems = { ...scene.systems, fluid: options.water === true };
-  scene.container.width_m = HERO_GARDEN_CONTAINER.width_m;
-  scene.container.height_m = HERO_GARDEN_CONTAINER.height_m;
-  scene.container.depth_m = HERO_GARDEN_CONTAINER.depth_m;
+  const tank = options.pondTank ? HERO_GARDEN_POND_TANK : HERO_GARDEN_CONTAINER;
+  scene.container.width_m = tank.width_m;
+  scene.container.height_m = tank.height_m;
+  scene.container.depth_m = tank.depth_m;
   scene.container.top = "closed";
   scene.container.vessel = "none";
   scene.voxelDomain = {
     finestCellSize_m: cellSize_m,
     brickSize_cells: HERO_GARDEN_BRICK_CELLS,
-    // Written only when it says something the lattice does not, so a document
-    // built at the authored size round-trips byte for byte as it always did.
-    ...(detailCellSize_m < cellSize_m ? { detailCellSize_m } : {}),
+    // Pin the fitted pond's scenery detail even when water reaches that pitch.
+    // Other documents omit a redundant detail override as before.
+    ...(detailCellSize_m < cellSize_m || options.pondTank ? { detailCellSize_m } : {}),
   };
   /**
    * The vessel, described rather than baked.
@@ -1058,7 +1067,7 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
   const waterline_m = heroGardenWaterline_m(options.water === true
     ? Math.max(cellSize_m, HERO_GARDEN_WATERLINE_REFERENCE_CELL_M)
     : HERO_GARDEN_WATERLINE_REFERENCE_CELL_M);
-  scene.container.fillFraction = waterline_m / HERO_GARDEN_CONTAINER.height_m;
+  scene.container.fillFraction = waterline_m / tank.height_m;
   scene.fluid.initialCondition = "tank-fill";
   scene.fluid.inflow = heroGardenInflow();
   /**

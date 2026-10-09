@@ -102,7 +102,12 @@ export function initialLiquidCellVolumes(scene: SceneDescription, dimensions: re
     const base=geometric?baseInitialLiquidFractionAtCell(scene,x,y,z,dimensions):scene.fluid.initialCondition==="dam-break"
       ?damBreakBoxContains(dam,(x+0.5)/nx,(y+0.5)/ny,(z+0.5)/nz):(y+0.5)/ny<=c.fillFraction;
     const liquidFraction=aboveGround?initialLiquidFractionAtCell(scene,x,y,z,dimensions,base):0;
-    const density=Math.min(solidOpen,liquidFraction);
+    // Match the uploaded f32 terrain height in cell units. A sliver can round
+    // to zero in SolidWorld's u8 mask while still reducing GPU cell capacity.
+    // This matters more as a finely resolved pond exposes more shore cells.
+    const terrainOpen=geometric ? Math.fround(1-Math.max(0,Math.min(1,
+      Math.fround(terrain[x+nx*z]!/cellHeight)-y))) : 1;
+    const density=Math.fround(Math.min(solidOpen,terrainOpen,liquidFraction));
     volume[x+nx*(y+ny*outputZ)]=density;
     initial+=density;
     if(density>1e-5){

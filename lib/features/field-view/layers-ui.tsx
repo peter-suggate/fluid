@@ -7,9 +7,9 @@ import {
 } from "../../../components/toolstrip";
 import { Choice, ControlRow, Select, Slider, Value } from "../../../components/ui";
 import {
-  IMPORTANCE_VIEW_OPTIONS, MIXED_TILE_LEGEND, PARTICLE_VIEW_OPTIONS, VISUAL_LAYERS, importanceLegend, importanceView, layerOpacity,
-  particleLegend, particleView, setImportanceView, setParticleView, toggleVisualLayer,
-  type ImportanceView, type ParticleView, type VisualLayerId, type VisualLayerState,
+  IMPORTANCE_VIEW_OPTIONS, MIXED_TILE_LEGEND, VISUAL_LAYERS, importanceLegend, importanceView, isSliceLayer, layerOpacity,
+  setImportanceView, toggleVisualLayer,
+  type ImportanceView, type VisualLayerId, type VisualLayerState,
 } from "../../core/visual-layers";
 
 const PAGE_LEGEND = [
@@ -29,9 +29,15 @@ interface VisualLayerRowsProps {
   };
 }
 
-/** The same multi-select instrument in the 2D lab and 3D studio. */
+/**
+ * The same multi-select instrument in the 2D lab and 3D studio. It lists what
+ * is sampled on the slice plane; the particle display is a setting of its own
+ * beside the surface mode (`SurfaceDisplayRow`).
+ */
 export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualLayerRowsProps) {
   const [open, setOpen] = useState(false);
+  const layers = VISUAL_LAYERS.filter(layer => isSliceLayer(layer.id) && !hidden.includes(layer.id));
+  const enabled = layers.filter(layer => state.enabled.includes(layer.id)).length;
   const { claim } = useToolstripSection("visual-layers", () => setOpen(false));
   const menu = <ToolstripMenuButton
     label="Visual layers"
@@ -39,7 +45,7 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
     open={open}
     onOpen={value => { claim(value); setOpen(value); }}
   >
-    {VISUAL_LAYERS.filter(layer => !hidden.includes(layer.id)).map(layer => {
+    {layers.map(layer => {
       const selected = state.enabled.includes(layer.id);
       return <div key={layer.id} role="none" className="visual-layer-option">
         <ToolstripMenuItem
@@ -101,30 +107,19 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
     />
     <Value value={`${Math.round(plane.slice * 100)}%`} />
   </> : null;
-  // On the strip beside the plane, not in the menu: it is switched back and
-  // forth against the moving picture, and the menu covers the picture.
-  const particleControls = shown("particles") ? <Choice<ParticleView>
-    ariaLabel="Particle view"
-    value={particleView(state)}
-    options={PARTICLE_VIEW_OPTIONS}
-    onChange={view => onChange(setParticleView(state, view))}
-  /> : null;
-  // One child or none: the row reads any child as its open state.
-  const controls = planeControls || particleControls ? <>{planeControls}{particleControls}</> : null;
   return <><ToolstripRow
     icon={<Eye size={14} />}
     name="Visual layers"
     hint="Hide or restore the selected layers."
-    active={state.visible && state.enabled.length > 0}
+    active={state.visible && enabled > 0}
     testId="visual-layers"
     onClick={() => onChange({ ...state, visible: !state.visible })}
-    after={<>{menu}<span className="toolstrip-name">{state.enabled.length} {state.enabled.length === 1 ? "layer" : "layers"}</span></>}
+    after={<>{menu}<span className="toolstrip-name">{enabled} {enabled === 1 ? "layer" : "layers"}</span></>}
   >
-    {controls}
+    {planeControls}
   </ToolstripRow>
   {shown("pages") && legend("Domain page states", "Last-step volume work. Resident pages may also support pressure and the interface. Absent pages are hidden.", PAGE_LEGEND)}
   {shown("tiles") && legend("Mixed Uniform tile reasons", "Why each h tile is h (the frame head's census), and which velocity sampler it took.", MIXED_TILE_LEGEND)}
-  {shown("particles") && legend(particleView(state) === "motion" ? "Particle energy" : "Particle speed", "The method's own particles, painted by the view the strip selects.", particleLegend(particleView(state)))}
   {shown("importance") && legend("Mixed Uniform detail importance", "The frame head census's detail importance. Every score is its measure over its threshold: 1 triggers.", importanceLegend(importanceView(state)))}
   </>;
 }

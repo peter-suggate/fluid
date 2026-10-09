@@ -1,3 +1,4 @@
+import { terrainWorldContainer } from "../../../core/terrain";
 import type { SceneDescription } from "../../../core/model";
 import { solidWorldVoxelPatchBounds_m } from "../../../core/solid-world";
 import { buildPondVesselPlanIndex, pondVesselPlanCurve, pondVesselFloorDishReach, POND_VESSEL_FLOOR_DISH, type WallProfile } from "../../../core/voxel-scenery/pond-vessel";
@@ -20,7 +21,7 @@ export function svoPondTerrainProgram(scene: SceneDescription,cellSize:readonly 
   const append=(values:ArrayLike<number>)=>{const base=data.length;for(let i=0;i<values.length;i++)data.push(values[i]>>>0);return base;};
   const points=append(new Uint32Array(new Float32Array(curve.flat()).buffer));
   const cells=append(index.cellStart),items=append(index.cellItems),bands=append(index.bandStart),bandItems=append(index.bandItems);
-  const nx=Math.max(1,Math.round(scene.container.width_m/cellSize[0])),nz=Math.max(1,Math.round(scene.container.depth_m/cellSize[2]));
+  const nx=Math.max(1,Math.round(container.width_m/cellSize[0])),nz=Math.max(1,Math.round(container.depth_m/cellSize[2]));
   const gridNx=Math.max(2,Math.ceil(container.width_m/spacing_m)+1),gridNz=Math.max(2,Math.ceil(container.depth_m/spacing_m)+1);
   const spline=(salt:number)=>`array<f32,${spec.lobes+4}>(${Array.from({length:spec.lobes+4},(_,i)=>f(hashSigned(spec.seed+salt+61*i))).join(",")})`;
   const terraces=(spec.terraces??[]).map((t,i)=>{
@@ -111,8 +112,8 @@ fn sample(p:vec2f)->f32{
 @compute @workgroup_size(64)
 fn bake(@builtin(global_invocation_id) id:vec3u){
   let i=batch.x+id.x;if(i>=${nx*nz}u){return;}
-  let p=${v2([-scene.container.width_m/2,-scene.container.depth_m/2])}+(vec2f(f32(i%${nx}u),f32(i/${nx}u))+0.5)*${v2([cellSize[0],cellSize[2]])};
-  heights[i]=clamp(sample(p),0.0,${f(scene.container.height_m)});
+  let p=${v2([-container.width_m/2,-container.depth_m/2])}+(vec2f(f32(i%${nx}u),f32(i/${nx}u))+0.5)*${v2([cellSize[0],cellSize[2]])};
+  heights[i]=clamp(sample(p),0.0,${f(container.height_m)});
 }
 `;
   return {shader,data:new Uint32Array(data),nx,nz};
@@ -138,7 +139,8 @@ export async function buildSvoRenderTerrainGpu(device:GPUDevice,scene:SceneDescr
       device.queue.submit([encoder.finish()]);await device.queue.onSubmittedWorkDone();}
     const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(output,0,receipt,0,size);device.queue.submit([encoder.finish()]);await receipt.mapAsync(GPUMapMode.READ);check();
     const heights_m=new Float32Array(receipt.getMappedRange().slice(0));receipt.unmap();
-    return {origin_m:[-scene.container.width_m/2,-scene.container.depth_m/2],cellSize_m:[cellSize[0],cellSize[2]],dimensions:[program.nx,program.nz],heights_m,materialId,
+    const container=terrainWorldContainer(scene);
+    return {origin_m:[-container.width_m/2,-container.depth_m/2],cellSize_m:[cellSize[0],cellSize[2]],dimensions:[program.nx,program.nz],heights_m,materialId,
       patches:scene.solidVoxels.map(p=>{const b=solidWorldVoxelPatchBounds_m(scene,p);return {operation:p.operation,minimum_m:b.minimum,maximum_m:b.maximum,materialId:p.materialId??1};})};
   }finally{for(const b of owned)b.destroy();}
 }

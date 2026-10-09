@@ -918,7 +918,8 @@ fn umScoreByte(w0:u32,w1:u32,k:u32)->u32{
   if(w1!=own.y){atomicStore(&census[importanceIndex(tile,1u)],w1);}
  }
  if(holding){atomicStore(&census[holdIndex(tile)],remaining);}
- if(nbBudgetOn()){nbBudgetRecord(tile,w0,w1,required);return;}
+ // The budget ranks and decides after this pass (activityRank .. activityAdmit).
+ if(nbBudgetOn()){return;}
  publishImportance(tile,w1);
 }
 fn publishImportance(tile:u32,w1:u32){

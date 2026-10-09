@@ -14,7 +14,7 @@ import { createThinDropletLadderScene, createThinSheetLadderScene, createThinWal
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
 import {
   createHeroGardenHoseScene,
-  HERO_GARDEN_CELL_M,
+  HERO_GARDEN_POND_CELL_M,
   heroGardenCamera,
   type HeroGardenHoseOptions,
 } from "./hero-garden-scene";
@@ -2341,14 +2341,16 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // so unlike the hero above there is nothing to append here.
     build: () => createHeroGardenHoseStressScene({
       recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
-      detailCellSize_m: HERO_GARDEN_CELL_M,
+      detailCellSize_m: HERO_GARDEN_POND_CELL_M,
       water: true,
+      pondTank: true,
     }),
     buildAt: (lattice: SceneLattice) => createHeroGardenHoseStressScene({
       recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
       ...lattice,
-      detailCellSize_m: lattice.detailCellSize_m ?? Math.min(lattice.cellSize_m, HERO_GARDEN_CELL_M),
+      detailCellSize_m: lattice.detailCellSize_m ?? Math.min(lattice.cellSize_m, HERO_GARDEN_POND_CELL_M),
       water: true,
+      pondTank: true,
     }),
     camera: heroGardenCamera,
   }),

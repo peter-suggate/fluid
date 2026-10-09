@@ -84,6 +84,7 @@ gpuTest("NB-FLIP translates a resolved drop across multiple h cells per pressure
     const velocity=new Float32Array(32**3*4);for(let i=0;i<32**3;i++)velocity[4*i]=0.8;
     solver.initializeVelocityForQA(velocity);
     const stage=(solver as unknown as {mixedFrame:{narrowBandFlip:UniformNarrowBandFlip}}).mixedFrame.narrowBandFlip;
+    stage.measureTraces=true;
     const steps=Math.round(0.4/dt);let first=0;
     for(let step=1;step<=steps;step++){
      await advanceUniform(solver,step*dt);

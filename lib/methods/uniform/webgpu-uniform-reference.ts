@@ -1954,8 +1954,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * with no liquid moving (the bodies' reach, a live edit's join, static
    * tiles newly planned), held above what the receipts count. live: the
    * liquid moves the need (a census), so the capacity keeps the rule's
-   * headroom over the last receipt (UniformDetailCapacityRule) and returns
-   * after a window of them. Growth is between frames (reserveFine). A
+   * headroom over the last receipt (UniformDetailCapacityRule). Growth is
+   * between frames (reserveFine). The rule holds what it reserved (hold);
+   * a rule that does not returns after a window of receipts, and that
    * return is staged: A is lowered, and the storage follows when a receipt
    * of a build under the cap confirms that no later generation holds more.
    * Returns the device's refusal of a growth, with nothing changed. */

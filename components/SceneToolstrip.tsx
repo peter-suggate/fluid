@@ -315,8 +315,6 @@ const ContainerToolstripRows = memo(function ContainerToolstripRows({ entity }: 
   const hasSolver = scene.systems?.fluid !== false;
 
   return <>
-    {hasFields && <FieldViewRows />}
-    <FeatureSlot slot="scene.visibility" />
     {/* The high-priority readings first, in the order a reader changes them:
         what is moving the water, how its surface is drawn, and whether gravity
         is on. The slots order their own placements by declared priority. */}
@@ -324,6 +322,10 @@ const ContainerToolstripRows = memo(function ContainerToolstripRows({ entity }: 
     {/* The solver's own detail switches, directly under its name. */}
     {hasSolver && <UniformDetailRow />}
     {hasSolver && <FeatureSlot slot="scene.surface" />}
+    {/* The inspection views follow the solver, its detail and the surface:
+        they are opened to question a run, the three above to set one up. */}
+    {hasFields && <FieldViewRows />}
+    <FeatureSlot slot="scene.visibility" />
     {hasSolver && <FeatureSlot slot="scene.physics" />}
     {hasSolver && <><FeatureSlot slot="scene.adaptivity" /><FeatureSlot slot="scene.simulation" /></>}
     {/* The seam between the two halves of the column: readings that say what

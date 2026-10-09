@@ -973,3 +973,10 @@ export function validateTerrain(
   }
   return errors;
 }
+
+/** Authored terrain extent, independent of a pond's smaller fluid tank. */
+export function terrainWorldContainer(
+  scene: Pick<SceneDescription, "terrain" | "container">,
+): Pick<SceneDescription["container"], "width_m" | "height_m" | "depth_m"> {
+  return scene.terrain?.procedural?.container ?? scene.container;
+}

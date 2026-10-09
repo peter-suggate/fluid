@@ -30,7 +30,7 @@ import {
 } from "./voxel-scenery/index";
 import { emitProceduralTree, planProceduralTree } from "./voxel-scenery/procedural-tree";
 import { foliagePadClusterNode } from "./voxel-scenery/recursive-foliage";
-import { terrainHeightAt } from "./terrain";
+import { terrainHeightAt, terrainWorldContainer } from "./terrain";
 
 /**
  * Turn a scene's declarative scenery into the primitive catalog every
@@ -434,7 +434,7 @@ function emitShell(
   // Open-world scenery publishes no inferred floor boxes. Static ground comes
   // from the scene's canonical SolidWorld like every other static solid.
   const { roomHalf_m: roomHalf, floorY_m: floorY, scene } = context;
-  const terrainTop = Math.max(scene.container.height_m, scene.terrain?.baseHeight_m ?? 0);
+  const terrainTop = Math.max(terrainWorldContainer(scene).height_m, scene.terrain?.baseHeight_m ?? 0);
   return {
     kind: "open-world", floorY_m: floorY,
     bounds_m: { min: V(-roomHalf.x, 0, -roomHalf.z), max: V(roomHalf.x, terrainTop, roomHalf.z) },

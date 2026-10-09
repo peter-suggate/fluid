@@ -12,8 +12,9 @@ export const VISUAL_LAYERS = [
   { id: "pages", requires: ["pages"], label: "Domain pages", color: "#b39bea", opacity: 0.65, mode: 27, description: "Page states from the last step: teal = transport active; amber = sharpening only; faint purple = resident without volume work. Absent pages are hidden. Residency can include pressure/interface support; authored pages currently remain allocated." },
   { id: "window", requires: ["window"], label: "Working window", color: "#5fb4e6", opacity: 0.8, mode: 23, description: "Actual dispatched window, seed box, launch slack and clipping. Dense scheduling uses the whole domain." },
   { id: "surface", requires: ["phi"], label: "Liquid surface · φ = 0", color: "#ef9f35", opacity: 0.9, mode: 24, description: "Reconstructed liquid and its zero level-set interface. Mixed Uniform colours the interface by the velocity that advected it: teal where all three components were h velocity (h bulk, or retained and extended projected h velocity), amber where the 4h bulk sampler moved it, blended where only some components were h." },
-  // The one layer that is not a slice: mode -1 keeps it out of the plane pass,
-  // and the particle overlay draws it over the whole liquid instead.
+  // The one layer that is not a slice: mode -1 keeps it out of the plane pass
+  // and out of the layer menu. The particle overlay draws it over the whole
+  // liquid, switched by the particle display (withParticleDisplay).
   { id: "particles", requires: ["particles"], label: "Particles", color: "#8f8cdb", opacity: 1, mode: -1, description: "The method's own particles as shaded spheres through the whole liquid, coloured by speed (full scale at 2 m/s). Under the Simple surface they sit in the water: fogged by the liquid in front of them and hidden once it is deep enough. Narrow-band FLIP draws its velocity samples: the 4h surface band only, none in the Eulerian interior. The Motion view draws them as soft overlapping footprints instead, whiter and more opaque where the liquid would be white: by the kinetic energy of a sample's velocity about the grid's (full scale at 0.125 J/kg, a difference of 0.5 m/s), counted in full through the top two cells of the band and fading out below. Liquid falling, sliding or streaming as one body stays dark however fast it goes; liquid colliding, shearing or breaking lights up. A droplet no grid cell carries is measured by its own kinetic energy without the speed it has along gravity (full scale at 2 m/s)." },
   { id: "grid", requires: ["dimensions"], label: "Grid", color: "#a8c7d8", opacity: 0.7, mode: 0, description: "Represented cell boundaries, independently of field fills. Mixed Uniform draws its live h and 4h bulk owners with orange resolution seams, and hatches the tiles this frame's head relayout changed: orange refined to h, blue coarsened to 4h (a host relayout after the last transport hatches orange)." },
   { id: "velocity", requires: ["velocity"], label: "Velocity", color: "#dce9ee", opacity: 0.9, mode: 26, description: "Cell velocity magnitude and in-plane direction; full scale at 1 m/s. Mixed Uniform draws one arrow per h or 4h bulk owner, the grid momentum is advected on." },
@@ -65,6 +66,18 @@ export const isSliceLayer = (id: VisualLayerId): boolean => VISUAL_LAYERS.find(l
 /** The plane pass has something to draw. */
 export const sliceLayersShown = (state: VisualLayerState): boolean => state.visible && state.enabled.some(isSliceLayer);
 export const particleLayerShown = (state: VisualLayerState): boolean => state.visible && state.enabled.includes("particles");
+/** The liquid's own particle display: a setting beside the surface mode, not a layer the menu lists. */
+export type ParticleDisplay = "off" | ParticleView;
+/**
+ * The layers a frame composes once the particle display has its say. The
+ * display alone decides the particle layer; the slice layers keep their own
+ * visibility, so hiding them leaves the particles drawn.
+ */
+export function withParticleDisplay(state: VisualLayerState, display: ParticleDisplay): VisualLayerState {
+  const slices = state.enabled.filter(isSliceLayer);
+  if (display === "off") return { ...state, enabled: slices };
+  return setParticleView({ ...state, visible: true, enabled: visualLayers([...(state.visible ? slices : []), "particles"]).enabled }, display);
+}
 export function toggleVisualLayer(state: VisualLayerState, id: VisualLayerId): VisualLayerState {
   return { ...state, visible: true, enabled: VISUAL_LAYERS.filter(l => l.id === id ? !state.enabled.includes(id) : state.enabled.includes(l.id)).map(l => l.id) };
 }
@@ -190,19 +203,12 @@ export const LAYER_PARTICLE_AGITATION_SCALE = 0.5;
 export const LAYER_PARTICLE_ENERGY_SCALE = 0.5 * LAYER_PARTICLE_AGITATION_SCALE ** 2;
 /** Opacity of a particle at rest in the Motion view: nearly, not fully, transparent. */
 export const LAYER_PARTICLE_MOTION_FLOOR = 0.02;
-/** The particle layer's selector: the speed ramp, or energy as opacity. */
-export const PARTICLE_VIEW_OPTIONS: ReadonlyArray<{ value: ParticleView; label: string; hint: string }> = [
-  { value: "speed", label: "Speed", hint: "Opaque spheres, coloured by speed." },
-  { value: "motion", label: "Motion", hint: "Soft overlapping samples: whiter and more opaque where a sample moves against the liquid around it; nearly transparent where the liquid moves as one body, however fast." },
+/** The particle display's selector: off, energy as opacity, or the speed ramp. */
+export const PARTICLE_DISPLAY_OPTIONS: ReadonlyArray<{ value: ParticleDisplay; label: string; hint: string }> = [
+  { value: "off", label: "Off", hint: "Draw no particles." },
+  { value: "motion", label: "Motion", hint: `Soft overlapping samples, whiter and more opaque where the liquid would be white: by the kinetic energy of a sample's velocity about the grid's (full scale at ${LAYER_PARTICLE_ENERGY_SCALE} J/kg, a difference of ${LAYER_PARTICLE_AGITATION_SCALE} m/s). Liquid moving as one body stays nearly transparent however fast it goes; liquid colliding, shearing or breaking lights up.` },
+  { value: "speed", label: "Speed", hint: `Opaque spheres, coloured by each particle's own speed: violet at rest, pale at ${LAYER_PARTICLE_SPEED_SCALE / 2} m/s, orange from ${LAYER_PARTICLE_SPEED_SCALE} m/s.` },
 ];
-/** The key of the view the particle layer is showing. */
-export function particleLegend(view: ParticleView): ReadonlyArray<{ color: string; label: string; title: string; wide?: boolean }> {
-  if (view === "speed") return PARTICLE_LEGEND;
-  const still = LAYER_PALETTE.particleStill.join(",");
-  return [
-    { color: `linear-gradient(90deg,rgba(${still},${LAYER_PARTICLE_MOTION_FLOOR}),rgba(${still},0.5) 50%,${rgb(LAYER_PALETTE.particleRushing)})`, label: `Energy 0 · ${LAYER_PARTICLE_ENERGY_SCALE / 2} · ${LAYER_PARTICLE_ENERGY_SCALE} J/kg`, title: "Each soft footprint is one particle: whiter and more opaque with the kinetic energy of its velocity about the grid's, the mean of the samples around it. Liquid moving as one body stays nearly transparent however fast it goes.", wide: true },
-  ];
-}
 export function scalarLayerPaint(id: VisualLayerId, value: number): { color: readonly number[]; alpha: number } {
   const p = LAYER_PALETTE;
   const mix = (a: readonly number[], b: readonly number[], t: number) => a.map((v, i) => v + (b[i]! - v) * Math.max(0, Math.min(1, t)));
