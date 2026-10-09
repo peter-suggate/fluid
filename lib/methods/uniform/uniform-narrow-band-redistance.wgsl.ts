@@ -1,7 +1,7 @@
 /** Reuse the reconstructed surface's bounded crossing search for redistance
  * and particle membership. Vertex signs stay fixed so the crossing-cell cache remains valid.
- * Coarse values are advected surface samples, not a particle distance field;
- * keep them unchanged, which also preserves hanging-vertex signs. */
+ * Fixed-band coarse values remain advected surface samples. Adaptive coarse
+ * vertices beside retiring h owners recover metric magnitudes before handoff. */
 export const narrowBandRedistanceWGSL=/* wgsl */`
 fn nbTrilinear(v:array<f32,8>,q:vec3f)->vec4f{
  let x00=mix(v[0],v[1],q.x);let x10=mix(v[2],v[3],q.x);
@@ -87,9 +87,13 @@ fn nbInterfaceVertex(p:vec3u)->bool{
 }
 fn nbRedistanceVertex(p:vec3u,width:u32){
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- // Coarse samples retain the reconstructed field and hanging-vertex signs.
+ // Coarse samples normally retain their reconstructed values.
  var value=umSampleVertex(vec3f(p));
- if(width==1u&&!nbInterfaceVertex(p)){
+ // Before retiring adjacent h owners, recover the metric coarse samples.
+ // Particle sphere unions preserve their fine zero set but distort interior
+ // magnitudes; inheriting those magnitudes as a 4h chord moves a flat surface.
+ let retiring=nbAdaptive()&&width==4u&&nbSurfaceTheta(vec3f(p))<=0.0&&umTileMinimumWidth(umTileAt(min(p,UM_D-1u)/4u))==1u;
+ if((width==1u&&!nbInterfaceVertex(p))||retiring){
   // An h vertex past the reach has no crossing within three tiles: as the
   // metric field holds one with none near, at least six cells away.
   if((nbBandReach(min(p,UM_D-1u))&2u)!=0u){value=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+nbVertexIndex(p)]))*h;}

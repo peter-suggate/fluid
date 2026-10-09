@@ -235,6 +235,7 @@ fn bandPhi(p:vec3f)->f32{return select(3.0,-2.0,p.x<1.0);}
 fn bulkDepth(p:vec3f)->f32{return bandPhi(p);}
 fn nbAdaptive()->bool{return false;}
 fn nbTheta(p:vec3f)->f32{return 1.0;}
+fn nbSurfaceTheta(p:vec3f)->f32{return 1.0;}
 ${narrowBandParticleSurfaceWGSL}
 ${narrowBandTiledSurfaceWGSL}
 @compute @workgroup_size(64) fn serial(@builtin(global_invocation_id) gid:vec3u){

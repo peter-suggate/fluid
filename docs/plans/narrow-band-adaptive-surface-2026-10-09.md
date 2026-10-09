@@ -31,20 +31,23 @@ Two GPU passes update local heat and spread half-strength heat to the 26
 neighboring tiles, providing a one-tile overlap collar without a read/write
 race. There is no additional step-count hold in the tile census.
 
-At the default retirement time of 0.5 seconds, heat cools at 4 units per simulated second. A particle takes the maximum
-of its cooled heat and local target heat, retaining full influence for
-approximately 0.25 seconds and fading over the following 0.25 seconds after
-a sustained trigger stops. The overlap collar fades sooner. Ballistic
-particles retain their heat. Zero-heat particles retire, and zero-target
-regions stop reseeding.
+At the default retirement time of 0.5 seconds, heat cools at 4 units per
+simulated second. A particle takes the maximum of cooled heat and target heat.
+Velocity and particle-addition influence hold for half the retirement interval,
+then fade. Surface-erasure influence fades during the first half, retaining a
+seeded support collar until retirement. Ballistic particles retain their heat.
+Zero-heat particles retire, and zero-target regions stop reseeding.
 
-Particles rasterize maximum heat into the tiles within their surface
-support. Trilinear interpolation of that raster, clamped to [0, 1], gives
-the transition theta at shared vertices and velocity faces. Reconstruction
-blends the advected Eulerian surface with the existing narrow-band surface:
+The expanded heat raster still controls velocity transfer and adding liquid.
+A separate occupied-tile raster controls erasure through `clamp(heat-1,0,1)`.
+Air without particles is excluded from this interpolation's denominator; cold
+liquid remains included. This avoids eroding an unseeded pool while preserving
+particle geometry around thin sheets and droplets. Both heat fields travel
+with the particles. The refinement criteria and budget ranking are unchanged.
 
 ```
 phiNB = min(phiEulerian + h, phiParticles)
+theta = phiNB > phiEulerian ? erasureHeat : expandedHeat
 phi   = (1 - theta) * phiEulerian + theta * phiNB
 ```
 
@@ -105,7 +108,7 @@ retire together.
 Below 100%, the classifier runs four additional GPU stages. The budget
 arena adds `259 + tiles + ceil(tiles / 64)` words only for adaptive NB.
 At 100%, all four selection stages are skipped. Retirement time is tunable
-from 0.05 to 2 seconds: half holds full influence, half fades to the grid.
+from 0.05 to 2 seconds; erasure influence fades before particle support retires.
 
 ## Scope and cost
 

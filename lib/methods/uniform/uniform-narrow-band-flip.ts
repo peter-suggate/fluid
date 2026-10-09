@@ -296,8 +296,10 @@ fn store(p:Particle){
  let i=atomicAdd(&state[1],1u);if(i>=arrayLength(&particles)){atomicAdd(&state[2],1u);return;}
  particles[i]=p;
 }
-// The tiles a sample's surface can reach.
+// Gather/addition/velocity support reaches neighboring tiles. Erasure heat
+// belongs to occupied tiles: dilating it erodes unseeded neighbors.
 fn markSurfaceTiles(position:vec3f,heat:f32){
+ if(nbAdaptive()){let tile=umTileAt(min(vec3u(position)/4u,UM_T-1u));atomicMax(&bins[NB_ACTIVITY_SURFACE_HEAT+tile],bitcast<u32>(max(heat,0.0)));}
  let lo=max(vec3i(floor((position-2.0)/4.0)),vec3i(0));let hi=min(vec3i(floor((position+2.0)/4.0)),vec3i(UM_T)-1);
  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
   let tile=umTileAt(vec3u(vec3i(x,y,z)));
@@ -415,8 +417,8 @@ fn seedCell(c:vec3u,initial:bool){
   // field. Section 3.2: liquid made from a description gets its whole band,
   // at initialization and where a source has just made it.
   if(!initial&&!activated&&(u32(params.settings.w)&2u)==0u&&distance>-1.0&&nbSourcePhi(q,1.0)>=0.0){continue;}
-  // New surface samples need resolved fine owners. The overlap collar may
-  // still use 4h, as in the fixed-band method.
+  // The heat-one overlap supplies support without authority to erase
+  // liquid. Its outer shell only seeds on resolved fine owners.
   if(nbAdaptive()&&distance>-1.0&&umOwnerAt(vec3i(c)).width!=1u){continue;}
   if(distance<=-NB_SURFACE_RADIUS){let v=sampleVelocity(q);store(Particle(vec4f(q,heat),vec4f(v,distance),vec4f(v,0)));continue;}
   let shell=seedShell(q);let p=shell.xyz;
@@ -599,7 +601,7 @@ ${narrowBandSurfaceWGSL}
   encoder.clearBuffer(this.state,16,32);
   this.bootstrap(encoder);
   this.seedAll=false;
-  if(this.adaptive)encoder.clearBuffer(this.bins,(this.activityWord+5*this.ownership.capacity.tiles)*4,this.ownership.capacity.tiles*4);
+  if(this.adaptive)encoder.clearBuffer(this.bins,(this.activityWord+5*this.ownership.capacity.tiles)*4,2*this.ownership.capacity.tiles*4);
   // The samples move in place, counting themselves into clear bins and
   // marking the tiles they reach; the order packs them into the other buffer.
   encoder.clearBuffer(this.state,4,8);this.order.prepare(encoder,1-this.parity);
@@ -651,12 +653,13 @@ ${narrowBandSurfaceWGSL}
   this.dispatch(encoder,"classify");if(this.coarseOnly)this.dispatch(encoder,"transferCoarse");else{this.dispatch(encoder,"transfer");this.dispatch(encoder,"transferOwners");this.dispatch(encoder,"transferSeams");}}
  snapshot(encoder:GPUCommandEncoder):void{this.cache.encode(encoder,this.cacheGroups.snapshot!);this.encodeStageTaps(encoder);this.dispatch(encoder,"snapshot");}
  private encodeStageTaps(encoder:GPUCommandEncoder):void{if(this.stageTaps&&this.ownership.capacity.fineTiles>0)this.stageTaps.builder.encode(encoder,this.stageTaps.group);}
- /** The crossing set is unchanged by this redistance, so its search also
-  * serves end-step particle membership; forces and pressure never edit phi. */
+ /** Fixed-band redistance preserves the crossing set. Adaptive retirement
+  * can move a hanging zero when it normalizes coarse corner magnitudes;
+  * rebuild its search/metric cache before end-step particle membership. */
  redistance(encoder:GPUCommandEncoder):void{
   this.measureBand(encoder,"redistance");this.dispatch(encoder,"buildDistance","redistance");
   if(!this.ownership.coarseOnly)this.dispatch(encoder,"redistanceFine","redistance");
-  this.dispatch(encoder,"redistanceCoarse","redistance");this.bandCurrent=true;
+  this.dispatch(encoder,"redistanceCoarse","redistance");this.bandCurrent=!this.adaptive;
  }
  private measureBand(encoder:GPUCommandEncoder,group?:string):void{
   // The search's tile banks follow the cell and vertex banks: counts, masks and reach start clear.

@@ -54,7 +54,11 @@ fn particleSurfaceFinish(q:vec3i,bulk:f32,nearest2:f32)->f32{
  // An empty gather has no particle surface to blend; never erode a cold
  // or newly activated region before its surface samples exist.
  if(nbAdaptive()&&nearest2>=4.0){return nbSourcePhi(vec3f(q),bulk);}
- return nbSourcePhi(vec3f(q),mix(bulk,min(bulk+1.0,sqrt(nearest2)-NB_SURFACE_RADIUS),nbTheta(vec3f(q))));
+ let particle=min(bulk+1.0,sqrt(nearest2)-NB_SURFACE_RADIUS);
+ // A transported particle may add liquid throughout its sphere support.
+ // Erasure needs the complete seeded footprint, inside the overlap collar.
+ let theta=select(nbTheta(vec3f(q)),nbSurfaceTheta(vec3f(q)),particle>bulk);
+ return nbSourcePhi(vec3f(q),mix(bulk,particle,theta));
 }
 fn particleSurface(q:vec3i)->f32{
  let bulk=particleSurfaceBulk(q);if(bulk.y==0.0){return bulk.x;}
