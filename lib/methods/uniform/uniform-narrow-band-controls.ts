@@ -8,7 +8,7 @@ export const NARROW_BAND_ACTIVITY_CONTROLS = [
 ] as const;
 /** Volume control: the pressure solve closes the liquid's gap to its volume budget over this time. */
 export const NARROW_BAND_VOLUME_CONTROL = {key:"volumeControlSeconds",label:"Volume control time",unit:"s",min:0,max:2,step:0.05,digits:2,default:0.1,
-  hint:"Time over which the liquid's measured gap to its volume budget is closed, as a uniform divergence in the pressure solve that carries the particles and the surface together. Shorter holds the volume tighter and moves the liquid more. 0 turns volume control off."} as const;
+  hint:"Time over which the liquid's measured gap to its volume budget is closed, as a uniform divergence in the pressure solve that carries the particles and the surface together. Shorter holds the volume tighter and moves the liquid more. A gap under 1% of the budget is left alone, so liquid at rest stays at rest. 0 turns volume control off."} as const;
 const controls=[...NARROW_BAND_ACTIVITY_CONTROLS,NARROW_BAND_VOLUME_CONTROL] as const;
 export const narrowBandControlValues = (values:MethodParamValues={}) => Object.fromEntries(controls.map(c=>{
  const raw=Number(values[c.key]);

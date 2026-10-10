@@ -43,6 +43,12 @@ export const NB_VOLUME_BUDGET_FLOATS=9,NB_VOLUME_RATE_FLOAT=8;
 /** The most volume control may ask of the liquid, in 1/s: the long dam break
  * at 1/30 s loses its volume at about 1/s where its front lands. */
 const NB_VOLUME_RATE_LIMIT=4;
+/** The share of the budget volume control leaves alone. The gauge is not the
+ * capture: a resting film over a voxel ledge measures half a percent off the
+ * budget it was captured at, and a flat pool a cell in ten thousand. Liquid
+ * at rest must be asked for nothing, or the divergence moves its waterline
+ * and wakes the adaptive surface. */
+const NB_VOLUME_DEAD_BAND=0.01;
 export class UniformMixedSurfaceVolume {
  /** NB budget: target, initialized, cumulative outflow, last normal shift,
   * volume before correction, initial volume, last measured volume, target,
@@ -477,7 +483,8 @@ var<workgroup> svReduceJobs:u32;
    // The gauge is a step behind what it asks for: closing the gap in under
    // three steps would overshoot it.
    let gain=min(budgetParams.w,1.0/(3.0*max(budgetParams.x,1e-6)));
-   budget[${NB_VOLUME_RATE_FLOAT}u]=select(0.0,clamp(gap*gain/max(filled,0.5*budget[0]),-${NB_VOLUME_RATE_LIMIT},${NB_VOLUME_RATE_LIMIT}),budget[1]>0.0&&budget[0]>0.0);}
+   let excess=sign(gap)*max(abs(gap)-${NB_VOLUME_DEAD_BAND}*budget[0],0.0);
+   budget[${NB_VOLUME_RATE_FLOAT}u]=select(0.0,clamp(excess*gain/max(filled,0.5*budget[0]),-${NB_VOLUME_RATE_LIMIT},${NB_VOLUME_RATE_LIMIT}),budget[1]>0.0&&budget[0]>0.0);}
   return;
  }`:""}
  if(l==0u&&scratch[${S+3}u]==0.0){
