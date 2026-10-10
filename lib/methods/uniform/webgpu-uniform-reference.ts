@@ -106,6 +106,8 @@ export interface WebGPUUniformReferenceOptions {
   narrowBandAdaptiveSurface?: boolean;
   narrowBandAdaptiveBudgetPercent?: number;
   narrowBandAdaptiveFadeSeconds?: number;
+  /** Seconds over which NB-FLIP closes its gap to the volume budget; zero for no volume control. */
+  narrowBandVolumeControlSeconds?: number;
   narrowBandCoarseParticles?: boolean;
   narrowBandFinePadding?: number;
   /** Independent dense vertex level set and conservative cell volume, advanced
@@ -496,6 +498,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly narrowBandAdaptiveSurface: boolean;
   private narrowBandAdaptiveBudgetPercent: number;
   private narrowBandAdaptiveFadeSeconds: number;
+  private narrowBandVolumeControlSeconds: number;
   private readonly narrowBandCoarseParticles: boolean;
   private narrowBandFinePadding: number;
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
@@ -870,6 +873,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.narrowBandAdaptiveSurface = options.narrowBandAdaptiveSurface === true;
     this.narrowBandAdaptiveBudgetPercent = Math.max(0,Math.min(100,options.narrowBandAdaptiveBudgetPercent??50));
     this.narrowBandAdaptiveFadeSeconds = Math.max(0.05,Math.min(2,options.narrowBandAdaptiveFadeSeconds??0.5));
+    this.narrowBandVolumeControlSeconds = Math.max(0,Math.min(2,options.narrowBandVolumeControlSeconds??0.1));
     this.narrowBandCoarseParticles = options.narrowBandCoarseParticles === true;
     this.narrowBandFinePadding = options.narrowBandFinePadding ?? 1;
     this.geometricVolume = options.geometricVolume === true;
@@ -2580,6 +2584,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.narrowBandFinePadding=finite("fineGridPadding",this.narrowBandFinePadding,0,4);
     this.narrowBandAdaptiveBudgetPercent=finite("adaptiveBudgetPercent",this.narrowBandAdaptiveBudgetPercent,0,100);
     this.narrowBandAdaptiveFadeSeconds=finite("adaptiveFadeSeconds",this.narrowBandAdaptiveFadeSeconds,0.05,2);
+    this.narrowBandVolumeControlSeconds=finite("volumeControlSeconds",this.narrowBandVolumeControlSeconds,0,2);
     this.pressureMultigrid.setResidualTolerance(finite("pressureResidualTolerance", UNIFORM_PRESSURE_RESIDUAL_TOLERANCE, 0, 100));
     // Switching to "fixed" mid-run restores the full encoded schedule on the
     // next step; switching back drops the previous demand sample and uses
@@ -3290,7 +3295,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.mixedHadBodies=bodyCount>0;
       let receipt:Promise<UniformMixedFrameReceipt>,kick:Promise<unknown>|undefined;
       try{
-        const p={dt,addedVolumeCells:this.referenceVolumeCells-volumeBeforeSources,gravity:this.scene.fluid.gravity_m_s2.y,density:this.scene.fluid.density_kg_m3,
+        const p={dt,addedVolumeCells:this.referenceVolumeCells-volumeBeforeSources,volumeControlSeconds:this.narrowBandVolumeControlSeconds,gravity:this.scene.fluid.gravity_m_s2.y,density:this.scene.fluid.density_kg_m3,
         viscosity:this.scene.fluid.dynamicViscosity_Pa_s,surfaceTension:this.scene.fluid.surfaceTension_N_m,
         openTop:this.scene.container.top==="open",noSlip:this.scene.container.fluidWallMode==="no-slip",cubic:this.phiCubicAdvection,drain:this.phiDrain,preserve:this.phiPreserveSurface,
         dust:this.volumeDustThreshold,orphanDust:this.orphanDustThreshold,sharpeningStrength:this.densitySharpening?this.sharpeningStrength:0,
@@ -3670,10 +3675,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         encoder.copyBufferToBuffer(this.reductions,0,this.statsReadback,0,24);
         encoder.copyBufferToBuffer(this.mixedFrame.ownership.support,this.mixedFrame.ownership.capacity.tiles*16,this.statsReadback,24,16);
         const budget=this.mixedFrame.narrowBandVolumeBudget;
-        if(budget){encoder.copyBufferToBuffer(budget,0,this.statsReadback,40,32);this.mixedFrame.requestNarrowBandVolumeProbe();}
+        if(budget){encoder.copyBufferToBuffer(budget,0,this.statsReadback,40,36);this.mixedFrame.requestNarrowBandVolumeProbe();}
         this.device.queue.submit([encoder.finish()]);
-        await this.statsReadback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(this.statsReadback.getMappedRange(),0,budget?18:10).slice();
-        if(budget){const b=new Float32Array(words.buffer,40,8);if(b[1]!>0)Object.assign(this.executionInfo,{
+        await this.statsReadback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(this.statsReadback.getMappedRange(),0,budget?19:10).slice();
+        if(budget){const b=new Float32Array(words.buffer,40,9);if(b[1]!>0)Object.assign(this.executionInfo,{
+          narrowBandVolumeControlRate_per_s:this.narrowBandVolumeControlSeconds>0?b[8]:0,
           narrowBandTargetVolume_cells:b[0],narrowBandOutflowVolume_cells:b[2],
           narrowBandVolumeShift_cells:b[3]!/Math.min(...this.mixedFrame.ownership.capacity.lattice.cellSize_m),
           narrowBandVolumeBeforeCorrection_cells:b[4],narrowBandInitialVolume_cells:b[5],

@@ -280,13 +280,16 @@ var<workgroup> sums:array<vec4f,64>;
  let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);if(o.width!=0u){phi[o.index]=umAuthority(o,umOwnerVolume(o));}
 }
 // NB-FLIP has one liquid authority: reconstructed phi. No mass claims,
-// detached-mass phase flags, balance reductions or recovery source.
+// detached-mass phase flags, balance reductions or recovery source. Its one
+// correction is volume control: the divergence the budget's gauge asks of
+// every liquid owner alike (params.z, 1/s), over the owner's open share.
 @compute @workgroup_size(64) fn surface(@builtin(global_invocation_id) gid:vec3u){
  let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);if(o.width==0u){return;}
  let distance=umAuthority(o,0.0);let origin=vec3i(umOrigin(o));
  phi[o.index]=distance;
  ${this.resident?"":"textureStore(phase,origin,vec4f(umPhase(o,umAuthorityLiquid(o,distance))));"}
- textureStore(correction,origin,vec4f(0));
+ var control=0.0;if(params.z!=0.0&&umAuthorityLiquid(o,distance)){control=params.z*umCapacity(o);}
+ textureStore(correction,origin,vec4f(control));
 }
 fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(l<stride){sums[l]+=sums[l+stride];}workgroupBarrier();}}
 @compute @workgroup_size(64) fn build(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) group:vec3u){

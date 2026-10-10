@@ -35,12 +35,18 @@ import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,uniformMixedVertexBuried
  *
  * bind(phi,volume,phi,scratch) corrects phi in place, touching only band
  * vertices. In scalar-target mode volume is the measured geometry output:
- * read once at initialization, then a 32-byte budget owns the target. The
+ * read once at initialization, then a 36-byte budget owns the target. The
  * correction band spans four h cells and the shift is bounded by 4h, including
  * large timesteps; the required shift remains visible in diagnostics. */
+/** Floats of the NB scalar volume budget, and where its control rate sits. */
+export const NB_VOLUME_BUDGET_FLOATS=9,NB_VOLUME_RATE_FLOAT=8;
+/** The most volume control may ask of the liquid, in 1/s: the long dam break
+ * at 1/30 s loses its volume at about 1/s where its front lands. */
+const NB_VOLUME_RATE_LIMIT=4;
 export class UniformMixedSurfaceVolume {
  /** NB budget: target, initialized, cumulative outflow, last normal shift,
-  * volume before correction, initial volume, last measured volume, target. */
+  * volume before correction, initial volume, last measured volume, target,
+  * then the gauge's volume control rate in 1/s. */
  readonly budget?:GPUBuffer;
  private readonly budgetParams?:GPUBuffer;
  private budgetCaptured=false;
@@ -75,7 +81,7 @@ export class UniformMixedSurfaceVolume {
   const texture=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}});
   const scratch={binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}};
   if(scalarTarget){
-   this.budget=device.createBuffer({label:"NB scalar volume budget",size:32,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+   this.budget=device.createBuffer({label:"NB scalar volume budget",size:4*NB_VOLUME_BUDGET_FLOATS,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
    this.budgetParams=device.createBuffer({label:"NB volume budget parameters",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   }
   this.resources=uniformDetailBindLayout(device,{entries:[texture(0),texture(1),scratch,...(scalarTarget?[texture(4),{binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}},{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[])]});
@@ -131,7 +137,7 @@ override parity:u32=0u;
 ${this.scalarTarget?`@group(1) @binding(4) var velocity:texture_3d<f32>;
 @group(1) @binding(5) var<storage,read_write> budget:array<f32>;
 @group(1) @binding(6) var<uniform> budgetParams:vec4f;
-override captureBudget:bool=false;`:""}
+override captureBudget:bool=false;override gaugeBudget:bool=false;`:""}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner, and below a 4h owner's own texel (its tile origin): the
 // base blocks (UNIFORM_DETAIL_4H_LOAD).
@@ -461,6 +467,19 @@ var<workgroup> svReduceJobs:u32;
  if(l==0u){svReduceJobs=svJobs();}
  let count=(workgroupUniformLoad(&svReduceJobs)+63u)/64u;
  var sum=vec4f(0);for(var i=l;i<count;i+=64u){sum+=loadSum(${R}u+4u*i);}sums[l]=sum;sumGroup(l);
+ ${this.scalarTarget?/* wgsl */`
+ // Volume control (Kim et al. 2007, the proportional term): the divergence
+ // that closes the liquid's gap to its budget over the control time. The
+ // pressure authority asks it of every liquid owner, so the samples and the
+ // surface they rebuild are carried to the budget together.
+ if(gaugeBudget){
+  if(l==0u){let filled=sums[0].x;let gap=budget[0]-filled;budget[6]=filled;budget[7]=budget[0];
+   // The gauge is a step behind what it asks for: closing the gap in under
+   // three steps would overshoot it.
+   let gain=min(budgetParams.w,1.0/(3.0*max(budgetParams.x,1e-6)));
+   budget[${NB_VOLUME_RATE_FLOAT}u]=select(0.0,clamp(gap*gain/max(filled,0.5*budget[0]),-${NB_VOLUME_RATE_LIMIT},${NB_VOLUME_RATE_LIMIT}),budget[1]>0.0&&budget[0]>0.0);}
+  return;
+ }`:""}
  if(l==0u&&scratch[${S+3}u]==0.0){
   let filled=sums[0].x;
   ${this.scalarTarget?`if(captureBudget){budget[0]=filled;budget[1]=1.0;budget[5]=filled;scratch[${S+3}u]=1.0;return;}
@@ -543,7 +562,7 @@ ${shared(uniformMixedVertexSamplingSource("",false))}
   const create=(key:string,entryPoint:string,extra:Record<string,number>={})=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{...constants,...extra,...s}}})).then(p=>{this.pipelines.set(key,p);});
   await Promise.all([
    ...["clearBand","reduce","solve"].map(entry=>create(entry,entry)),
-   ...(this.scalarTarget?[create("capture","solve",{captureBudget:1}),create("measureInitial","measureInitial",resident),create("outflow","outflow"),create("updateBudget","updateBudget")]:[]),
+   ...(this.scalarTarget?[create("capture","solve",{captureBudget:1}),create("gauge","solve",{gaugeBudget:1}),create("measureInitial","measureInitial",resident),create("outflow","outflow"),create("updateBudget","updateBudget")]:[]),
    ...["seed","metric","measure"].map(entry=>create(entry,entry,resident)),
    ...(this.resolved?[create("resolveScale","resolveScale",{umCountedJobs:UNIFORM_MIXED_COUNTED.fused})]:[]),
    create("dilate0","dilate",{parity:0,...resident}),create("dilate1","dilate",{parity:1,...resident}),
@@ -553,31 +572,36 @@ ${shared(uniformMixedVertexSamplingSource("",false))}
  }
  /** rounds: secant Newton rounds (measure, reduce, solve); a converged solve skips the rest's work.
   * apply false measures the volume and the shift that would restore it, and leaves phi alone. */
- encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,rounds=2,capture=false,apply=true):void{
+ encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,rounds=2,capture:boolean|"gauge"=false,apply=true):void{
   if(!Number.isInteger(rounds)||rounds<1)throw new Error(`Mixed surface constraint needs a positive whole round count, not ${rounds}`);
-  if(this.pipelines.size!==((this.resolved?12:11)+(this.scalarTarget?4:0)))throw new Error("Mixed surface constraint is not initialized");
+  if(this.pipelines.size!==((this.resolved?12:11)+(this.scalarTarget?5:0)))throw new Error("Mixed surface constraint is not initialized");
   const applyGroup=this.applyGroups.get(group);if(!applyGroup)throw new Error("Mixed surface constraint group was not bound by this stage");
   const pass=encoder.beginComputePass({label:"Uniform mixed global surface volume"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
   // The apply modules hold no solid library: only the constraint's own pipelines have twins.
   const run=(entry:string)=>{const own=this.pipelines.get(entry)!;const pipeline=uniformDetailPick(entry==="apply"?own:this.solid?.select(own)??own);pass.setPipeline(pipeline);
-   if(entry==="solve"||entry==="capture")pass.dispatchWorkgroups(1);
+   if(entry==="solve"||entry==="capture"||entry==="gauge")pass.dispatchWorkgroups(1);
    else if(entry==="reduce")this.ownership.dispatchCounted(pass,pipeline,this.chunks);
    else if(entry==="resolveScale")this.ownership.dispatchFusedCounted(pass,pipeline);
    else if(entry==="grow"||entry==="measureGrow")this.ownership.dispatchCounted(pass,pipeline,this.pages);
    else if(entry==="clearBand"){const groups=Math.ceil(this.tiles/64);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));}
    else this.ownership.dispatchAllCounted(pass,pipeline);};
-  if(capture){run("clearBand");run("measureInitial");run("reduce");run("capture");pass.end();return;}
+  if(capture){run("clearBand");run("measureInitial");run("reduce");run(capture==="gauge"?"gauge":"capture");pass.end();return;}
   run("clearBand");run("seed");for(let i=0;i<4;i++)run(`dilate${i%2}`);run("grow");run("measureGrow");run("metric");if(this.resolved)run("resolveScale");
   for(let i=0;i<rounds;i++){run("measure");run("reduce");run("solve");}
   if(apply){pass.setBindGroup(1,applyGroup.group);run("apply");}pass.end();
  }
  /** Capture the initialized surface once; thereafter only explicit sources
-  * and boundary outflow change the target. No CPU readback feeds correction. */
- beginStep(encoder:GPUCommandEncoder,group:UniformDetailGroup,dt:number,addedCells:number,openTop:boolean):void{
+  * and boundary outflow change the target. No CPU readback feeds correction.
+  * controlRate (1/s, zero for none) gauges the step's opening occupancy
+  * against the budget as it stood before this step's sources and outflow,
+  * and leaves the volume control rate in the budget. */
+ beginStep(encoder:GPUCommandEncoder,group:UniformDetailGroup,dt:number,addedCells:number,openTop:boolean,controlRate=0):void{
   if(!this.scalarTarget)throw new Error("Scalar budget is only available for NB-FLIP");
   if(!this.budgetCaptured){this.encode(encoder,group,1,true);this.budgetCaptured=true;}
+  if(!openTop&&addedCells===0&&controlRate===0)return;
+  this.device.queue.writeBuffer(this.budgetParams!,0,new Float32Array([dt,addedCells,+openTop,controlRate]));
+  if(controlRate>0)this.encode(encoder,group,1,"gauge");
   if(!openTop&&addedCells===0)return;
-  this.device.queue.writeBuffer(this.budgetParams!,0,new Float32Array([dt,addedCells,+openTop,0]));
   const pass=encoder.beginComputePass({label:"NB scalar volume sources and outflow"});
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
   const run=(entry:string,n:number)=>{const own=this.pipelines.get(entry)!;pass.setPipeline(uniformDetailPick(this.solid?.select(own)??own));pass.dispatchWorkgroups(n);};

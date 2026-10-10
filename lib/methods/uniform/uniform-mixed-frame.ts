@@ -21,7 +21,7 @@ import {UNIFORM_WORK_RECEIPT_WORDS,UniformMixedOwnership,type UniformMixedGenera
 import {UniformMixedExtension} from "./uniform-mixed-extension";
 import {UniformMixedHangingTaps, UniformMixedMomentumCache} from "./uniform-mixed-momentum-cache";
 import {UniformMixedSurface} from "./uniform-mixed-surface";
-import {UniformMixedSurfaceVolume} from "./uniform-mixed-surface-volume";
+import {NB_VOLUME_RATE_FLOAT,UniformMixedSurfaceVolume} from "./uniform-mixed-surface-volume";
 import {UniformMixedSurfaceGeometry} from "./uniform-mixed-surface-geometry";
 import {UniformMixedSharpening} from "./uniform-mixed-sharpening";
 import {UNIFORM_WORK_RELAYOUT_RESERVE,type UniformWorkEdit} from "./uniform-buffered-work";
@@ -100,6 +100,8 @@ export interface UniformMixedFrameParameters {
  pressureReserve?:number;
  /** Explicit source volume added this step, in h-cell units (NB scalar budget). */
  addedVolumeCells?:number;
+ /** NB-FLIP volume control: seconds over which the liquid's gap to its budget is closed; zero for none. */
+ volumeControlSeconds?:number;
  totalSurfaceVolume?:boolean;redistance?:boolean;sharpening?:boolean;surfaceDeficitBalancing?:boolean;extensionSweeps?:number;
  supportPolicy?:{fineReach:number;shellReach:number;twoLevel:boolean;shellOnly:boolean};
  dust:number;orphanDust?:number;sharpeningStrength:number;sharpeningDistance:number;pressureTolerance:number;
@@ -762,7 +764,13 @@ export class UniformMixedFrame {
    this.plan.encodeCertificate(encoder,p.dt);if(this.layoutViews)this.recordStageView(encoder,this.plan.certificate,"certificate");
    this.cache.encode(encoder,this.cacheGroup);if(this.ownership.capacity.fineTiles>0)this.hanging.encode(encoder,this.hangingGroup);
    trace?.phase(encoder,V.transportReach);
-   if(this.narrowBandFlip)this.surfaceVolume!.beginStep(encoder,this.surfaceVolumeGroup,p.dt,p.addedVolumeCells??0,p.openTop);
+   if(this.narrowBandFlip){
+    const control=(p.volumeControlSeconds??0)>0?1/p.volumeControlSeconds!:0;
+    this.surfaceVolume!.beginStep(encoder,this.surfaceVolumeGroup,p.dt,p.addedVolumeCells??0,p.openTop,control);
+    // The gauge's rate reaches the authorities' parameters on the GPU: this
+    // frame's host write left that word zero, and no readback sets it.
+    if(control>0)encoder.copyBufferToBuffer(this.surfaceVolume!.budget!,4*NB_VOLUME_RATE_FLOAT,this.params.authority,8,4);
+   }
    // The samples' move is the frame's first long stage: it runs while the
    // host encodes the surface stages behind it.
    // The move closes its own share of the phi stage: passes after a

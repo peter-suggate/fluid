@@ -25,10 +25,10 @@ function movingDrop(dt:number){
 
 gpuTest("NB-FLIP surface authority bypasses volume transport and recovery, including direct runtime overrides",{timeout:120_000},async()=>{
  await withUniformDevice("NB-FLIP surface authority",async device=>{
-  const solver=await uniformNarrowBandMethod.createSolverAsync!(device,movingDrop(1/30),"balanced",{timeStep:"scene",detailPolicy:"full"},undefined,()=>{}) as WebGPUUniformReferenceSolver;
+  const solver=await uniformNarrowBandMethod.createSolverAsync!(device,movingDrop(1/30),"balanced",{timeStep:"scene",detailPolicy:"full",volumeControlSeconds:0},undefined,()=>{}) as WebGPUUniformReferenceSolver;
   try{
    assert.equal(solver.info.volumeControl,false,"NB-FLIP reports no volume-control authority");
-   const frame=(solver as unknown as {mixedFrame:{surface:{encode(...args:unknown[]):void};transport:{encodeTransport(...args:unknown[]):void};surfaceVolume:{encode(...args:unknown[]):void};cleanup:{encode(...args:unknown[]):void};fields:{target:GPUTexture;volume:GPUTexture;correction:GPUTexture}}}).mixedFrame;
+   const frame=(solver as unknown as {mixedFrame:{surface:{encode(...args:unknown[]):void};transport:{encodeTransport(...args:unknown[]):void};surfaceVolume:{encode(...args:unknown[]):void};cleanup:{encode(...args:unknown[]):void};fields:{target:GPUTexture;volume:GPUTexture;correction:GPUTexture;phase:GPUTexture}}}).mixedFrame;
    for(const key of ["transport","cleanup"] as const){
     assert.equal(frame[key],undefined,`NB-FLIP must not construct ${key}`);
    }
@@ -42,7 +42,17 @@ gpuTest("NB-FLIP surface authority bypasses volume transport and recovery, inclu
     const target=await readMixedTexture(device,frame.fields.target),volume=await readMixedTexture(device,frame.fields.volume);
     assert.deepEqual(volume,target,"occupancy is measured directly from the current surface");
     const correction=await readMixedTexture(device,frame.fields.correction);
-    assert.ok(correction.every(v=>v===0),"projection has no volume-recovery source");
+    assert.ok(correction.every(v=>v===0),"without volume control the projection has no volume source");
+   }
+   // Volume control is the projection's one source: one divergence over the liquid the projection saw, none elsewhere.
+   solver.applyRuntimeValues({volumeControlSeconds:0.1});
+   for(let step=4;step<=6;step++){
+    await advanceUniform(solver,step/30);
+    const correction=await readMixedTexture(device,frame.fields.correction),phase=await readMixedTexture(device,frame.fields.phase);
+    const rates=new Set<number>();let sourced=0,liquid=0;correction.forEach((v,i)=>{if(v!==0){rates.add(v);sourced++;}if(phase[i]!>0.5)liquid++;});
+    assert.equal(rates.size,1,`one control rate across the liquid: ${[...rates]}`);
+    assert.ok(sourced>0.5*liquid&&sourced<1.5*liquid,`the source covers the liquid and no more: ${sourced} cells for ${liquid} liquid`);
+    assert.ok(Math.abs([...rates][0]!)<=4,"within the control's limit");
    }
   }finally{solver.destroy();}
  });
@@ -79,7 +89,8 @@ gpuTest("NB-FLIP translates a resolved drop across multiple h cells per pressure
  await withUniformDevice("NB-FLIP large timestep",async device=>{
   const endpoints:number[]=[];
   for(const dt of [0.1,0.05]){
-   const solver=await uniformNarrowBandMethod.createSolverAsync!(device,movingDrop(dt),"balanced",{timeStep:"scene",detailPolicy:"full"},undefined,()=>{}) as WebGPUUniformReferenceSolver;
+   // Transport alone: volume control answers the drop's volume error with a divergence, which is a velocity.
+   const solver=await uniformNarrowBandMethod.createSolverAsync!(device,movingDrop(dt),"balanced",{timeStep:"scene",detailPolicy:"full",volumeControlSeconds:0},undefined,()=>{}) as WebGPUUniformReferenceSolver;
    try{
     const velocity=new Float32Array(32**3*4);for(let i=0;i<32**3;i++)velocity[4*i]=0.8;
     solver.initializeVelocityForQA(velocity);

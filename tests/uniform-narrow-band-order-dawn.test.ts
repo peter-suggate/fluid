@@ -73,7 +73,8 @@ async function createOrderPolicySolver(device:GPUDevice,moving:boolean,sparse:bo
   replaced=true;return initialize.call(this);
  };
  try{
-  const solver=await uniformNarrowBandMethod.createSolverAsync!(device,scene,"balanced",{timeStep:"scene",detailPolicy:"full"},undefined,()=>{}) as WebGPUUniformReferenceSolver;
+  // Transport alone: volume control answers a drop's volume error with a divergence, which is a velocity.
+  const solver=await uniformNarrowBandMethod.createSolverAsync!(device,scene,"balanced",{timeStep:"scene",detailPolicy:"full",volumeControlSeconds:0},undefined,()=>{}) as WebGPUUniformReferenceSolver;
   if(sparse)assert.ok(replaced,"force sparse before compiling the real move and gather stages");
   return solver;
  }finally{UniformNarrowBandFlip.prototype.initialize=initialize;}

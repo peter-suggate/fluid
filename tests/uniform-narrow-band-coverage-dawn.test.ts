@@ -51,7 +51,8 @@ gpuTest("NB zero-padding grid coverage follows a drop moving 2.56h per pressure 
   for(const padding of [0,1,2]){
    const s=scene();s.container.fillFraction=0;
    Object.assign(s.fluid,{initialVelocity_m_s:{x:0.8,y:0,z:0},initialLiquidVolumes:[{shape:"sphere",center_m:{x:-0.15,y:0.6,z:0},radius_m:0.12}]});
-   const solver=await uniformNarrowBandMethod.createSolverAsync!(device,s,"balanced",{...controls,fineGridPadding:padding},undefined,()=>{}) as WebGPUUniformReferenceSolver;
+   // Transport alone: volume control answers a drop's volume error with a divergence, which is a velocity.
+   const solver=await uniformNarrowBandMethod.createSolverAsync!(device,s,"balanced",{...controls,fineGridPadding:padding,volumeControlSeconds:0},undefined,()=>{}) as WebGPUUniformReferenceSolver;
    try{
     const velocity=new Float32Array(32**3*4);for(let i=0;i<32**3;i++)velocity[4*i]=0.8;solver.initializeVelocityForQA(velocity);
     const stage=(solver as unknown as {mixedFrame:{narrowBandFlip:UniformNarrowBandFlip}}).mixedFrame.narrowBandFlip;

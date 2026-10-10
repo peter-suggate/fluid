@@ -11,7 +11,7 @@ import { UNIFORM_DETAIL_CONTROL_DEFAULTS, UNIFORM_DETAIL_CRITERION_PARAMS, UNIFO
 import { UNIFORM_DETAIL_CRITERIA, type UniformDetailCriterion } from "../lib/methods/uniform/uniform-stage-grids";
 import { IMPORTANCE_LEGEND, legacyVisualLayers, toggleVisualLayer } from "../lib/core/visual-layers";
 import { uniformDetailDomain, uniformDetailFocusRadius_m, uniformDetailRequestKey } from "../lib/methods/uniform/uniform-detail-requests";
-import { NARROW_BAND_ACTIVITY_CONTROLS, narrowBandActivityValues } from "../lib/methods/uniform/uniform-narrow-band-controls";
+import { NARROW_BAND_ACTIVITY_CONTROLS, narrowBandControlValues } from "../lib/methods/uniform/uniform-narrow-band-controls";
 import { Grid3X3 } from "lucide-react";
 import { ToolstripMenuButton, ToolstripMenuItem, ToolstripMenuRule, ToolstripRow, useToolstripSection } from "./toolstrip";
 import { Choice, ChoiceField, Facts, Field, FieldList, FieldNote, NumberInput, RangeField, SwitchField, ToggleButton } from "./ui";
@@ -88,7 +88,7 @@ export function UniformDetailRow() {
   const resolved = resolvedMethodValues(method);
   const narrowBand = method.methodId === "uniform-narrow-band-flip";
   const adaptive = narrowBand && resolved.adaptiveSurface === "on";
-  const activityValues = narrowBandActivityValues(resolved);
+  const activityValues = narrowBandControlValues(resolved);
   const settings = uniformDetailSettings(resolved), values = uniformDetailValues(settings);
   const set = (key: string, value: MethodParamValue) => simulation.setMethodParam(method.methodId, key, value, session.id);
   const dynamic = settings.policy === "dynamic";
@@ -184,7 +184,7 @@ export function UniformCoarseControl() {
   const overrides = method.overrides[method.methodId] ?? {};
   const narrowBand = method.methodId === "uniform-narrow-band-flip";
   const adaptive = narrowBand && values.adaptiveSurface === "on";
-  const activityValues = narrowBandActivityValues(values);
+  const activityValues = narrowBandControlValues(values);
   const coarseParticles = values.coarseParticleMode === "on";
   const experiment = narrowBand && <SwitchField label="Experimental all-4h FLIP" checked={coarseParticles}
     hint="Allow surface particles on 4h tiles as well as h tiles. Keeps the selected refinement policy; Requested with no Fine regions gives an all-4h layout. Restarts the simulation. Both modes couple particle geometry into the simulation."

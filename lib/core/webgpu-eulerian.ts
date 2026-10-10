@@ -432,6 +432,8 @@ export interface GPUEulerianInfo {
   narrowBandVolumeBeforeCorrection_cells?:number;
   narrowBandInitialVolume_cells?:number;
   narrowBandVolumeBudgetDrift?:number;
+  /** The divergence volume control asked of the liquid at the last gauge, in 1/s. */
+  narrowBandVolumeControlRate_per_s?:number;
   /** CM11a coarsest-grid convergence and finest-grid post-cycle residuals. */
   uniformCM11aResidualInfinity?: number;
   uniformCM11aConverged?: boolean;
