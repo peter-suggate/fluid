@@ -568,6 +568,21 @@ export class GPUCompilationManager implements GPUCompilationService {
 const managerByDevice = new WeakMap<GPUDevice, GPUCompilationManager>();
 const managedDeviceByRawDevice = new WeakMap<GPUDevice, GPUDevice>();
 
+function defaultGPUCompilationConcurrency():number{
+  // This is intentionally not the old Promise-all fanout: the manager remains
+  // the sole scheduler and never has more than this many driver compilation
+  // calls active. Three separate B16/P16 Dawn processes completed cleanly at
+  // width three (~2.58 s resident construction versus ~3.50 s at width two).
+  // Width four was faster in isolated construction runs but repeated full
+  // resident builds could leave Metal in a degraded state, so production
+  // deliberately retains one slot of headroom below the hard cap.
+  const requestedConcurrency = typeof process !== "undefined"
+    ? Number(process.env?.FLUID_GPU_COMPILATION_CONCURRENCY ?? 3) : 3;
+  return Number.isSafeInteger(requestedConcurrency)
+    && requestedConcurrency >= 1 && requestedConcurrency <= 4
+    ? requestedConcurrency : 1;
+}
+
 /**
  * Resolve the one compilation authority for a device.
  *
@@ -579,18 +594,7 @@ export function gpuCompilationManagerFor(device: GPUDevice): GPUCompilationManag
   const existing = managerByDevice.get(device);
   if (existing) return existing;
   const requireWorkerRealm = typeof document !== "undefined" || isWorkerRealm();
-  // This is intentionally not the old Promise-all fanout: the manager remains
-  // the sole scheduler and never has more than this many driver compilation
-  // calls active. Three separate B16/P16 Dawn processes completed cleanly at
-  // width three (~2.58 s resident construction versus ~3.50 s at width two).
-  // Width four was faster in isolated construction runs but repeated full
-  // resident builds could leave Metal in a degraded state, so production
-  // deliberately retains one slot of headroom below the hard cap.
-  const requestedConcurrency = typeof process !== "undefined"
-    ? Number(process.env?.FLUID_GPU_COMPILATION_CONCURRENCY ?? 3) : 3;
-  const maximumConcurrentBundles = Number.isSafeInteger(requestedConcurrency)
-    && requestedConcurrency >= 1 && requestedConcurrency <= 4
-    ? requestedConcurrency : 1;
+  const maximumConcurrentBundles = defaultGPUCompilationConcurrency();
   const manager = new GPUCompilationManager(device, {
     requireWorkerRealm,
     maximumConcurrentBundles,
@@ -610,7 +614,7 @@ export function managedGPUDevice(
 ): GPUDevice {
   const existing = managedDeviceByRawDevice.get(rawDevice);
   if (existing) return existing;
-  const manager = new GPUCompilationManager(rawDevice, options);
+  const manager = new GPUCompilationManager(rawDevice, {...options,maximumConcurrentBundles:options.maximumConcurrentBundles??defaultGPUCompilationConcurrency()});
   const managed = new Proxy(rawDevice, {
     get(target, property) {
       if (property === "createShaderModule") {

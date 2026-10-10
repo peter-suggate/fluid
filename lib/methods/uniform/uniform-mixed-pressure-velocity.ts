@@ -59,7 +59,7 @@ export class UniformMixedPressureVelocity {
  private readonly projectLayout:GPUBindGroupLayout;
  private rhsPipeline?:GPUComputePipeline;
  private projectPipeline?:GPUComputePipeline;
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly coarse=false){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly coarse=false,private readonly rounding?:GPUBuffer){
   if(coarse&&(!solid?.coarse||ownership.layout.tiles.some(word=>(word&0xc0000000)!==0)))throw new Error("Coarse mixed pressure coupling requires the all-4h solid record and all-4h ownership");
   const texture=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}});
   // Read-write buffer views allow disjoint ranges of the shared arena.
@@ -68,7 +68,7 @@ export class UniformMixedPressureVelocity {
   const topology=coarse?[texture(8),storage(9)]:solid?[{binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"rgba32float" as const,viewDimension:"3d" as const}}]:[];
   this.rhsLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,texture(4),storage(5),storage(6),storage(7),...topology]});
   this.projectLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,storage(4),texture(7),
-   {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),...(solid&&!coarse?[texture(11)]:[])]});
+   {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),...(solid&&!coarse?[texture(11)]:[]),...(rounding?[storage(12)]:[])]});
  }
  private scalar(view:GPUBufferBinding,count:number):GPUBufferBinding{
   const offset=view.offset??0,size=4*count;
@@ -102,7 +102,7 @@ export class UniformMixedPressureVelocity {
    {binding:7,resource:f.volume},{binding:8,resource:f.output},
    {binding:9,resource:this.scalar(f.outputNegative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
    ...(this.sourceParams?[{binding:10,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
-   ...(this.topology(f.topology)?[{binding:11,resource:f.topology!}]:[])]});
+   ...(this.topology(f.topology)?[{binding:11,resource:f.topology!}]:[]),...(this.rounding?[{binding:12,resource:{buffer:this.rounding}}]:[])]});
  }
  async initialize():Promise<void>{
   const ownership=this.ownership,h=ownership.layout.lattice.cellSize_m;
@@ -225,10 +225,17 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
 @group(1) @binding(8) var output:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(9) var<storage,read_write> boundary:array<f32>;
 fn umPressure(o:UMOwner)->f32{return pressures[o.index];}
+${this.rounding?"@group(1) @binding(12) var<storage,read_write> rounding:array<vec2f>;":""}
+fn umPressureLow(i:u32)->f32{return ${this.rounding?"rounding[i+1u].x":"0.0"};}
+fn umPressureRounded(x:f32)->f32{return ${this.rounding?"bitcast<f32>(bitcast<u32>(x)^bitcast<u32>(rounding[0].x))":"x"};}
+fn umPressureDelta(owner:UMOwner,neighbor:UMOwner)->f32{
+ return umPressureRounded(umPressureRounded(select(0.0,umPressure(neighbor),umPressureLiquid(neighbor))-select(0.0,umPressure(owner),umPressureLiquid(owner)))
+ +umPressureRounded(select(0.0,umPressureLow(neighbor.index),umPressureLiquid(neighbor))-select(0.0,umPressureLow(owner.index),umPressureLiquid(owner))));
+}
 ${this.sourceParams?uniformMixedSourceWGSL(10):""}
 // The all-4h root has no seams: every reconstruction slope is zero.
 fn umPressureSlope(o:UMOwner)->vec3f{return vec3f(0);}
-${uniformMixedPressureReconstructionSource(true)}
+${uniformMixedPressureReconstructionSource(true,undefined,"umPressureDelta(owner,face.neighbor)")}
 ${this.coarse?`// The record V of a 4h face: its low owner's V+, or the wall halo's.
 fn umProjectV(o:UMOwner,face:UMFace)->f32{
  if(face.neighbor.width==0u){return umSolidCoarse(umBoundaryIndex(o,face.axis,face.sign)).x;}
@@ -256,7 +263,8 @@ fn umProject(o:UMOwner,face:UMFace)->f32{
   if(!liquid){return v;}
   var other=pressures[umBoundaryIndex(o,face.axis,face.sign)];var theta=1.0;
   if(umOpenTop(face)){other=0.0;theta=umPressureSurfaceTheta(umPressurePhi(o),0.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)));}
-  return v-scale*f32(face.sign)*(other-umPressure(o))/(f32(o.width)*UM_H[face.axis]*theta);
+  let low=select(umPressureLow(umBoundaryIndex(o,face.axis,face.sign)),0.0,umOpenTop(face));
+  return v-scale*f32(face.sign)*umPressureRounded(umPressureRounded(other-umPressure(o))+umPressureRounded(low-umPressureLow(o.index)))/(f32(o.width)*UM_H[face.axis]*theta);
  }
  if(!liquid&&!umPressureLiquid(face.neighbor)){return v;}
  return v-scale*umReconstructedPressureGradient(o,face);

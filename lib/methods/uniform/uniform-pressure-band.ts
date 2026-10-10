@@ -524,14 +524,22 @@ var<workgroup> bSweepCount:u32;
 @group(1) @binding(0) var<uniform> params:BandParams;
 @group(1) @binding(2) var<storage,read_write> index:array<atomic<u32>>;
 var<workgroup> member:atomic<u32>;
-// Every h simulation tile with a liquid pressure row is a band tile: its
-// h velocity is divergence-free only after the h solve.
+// Include cut surface cells even when their centres are air. Otherwise a
+// shallow film inherits the coarse projection's velocity and bypasses the
+// fine air/solid boundary conditions entirely.
+fn bSurfaceCell(q:vec3i)->bool{
+ ${S?"if(umCellOpen(q)<=1e-5){return false;}":""}
+ for(var k=0u;k<8u;k++){if(textureLoad(vertexPhi,q+vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u)),0).x<0.0){return true;}}
+ return false;
+}
+// Every tile with liquid rows or an unresolved surface needs h projection.
 @compute @workgroup_size(64) fn main(${slots}){
  for(var j=group.x;j<umCounts.x;j+=groups.x){
   let t=bHTile(j);
   if(lane==0u){atomicStore(&member,0u);}
   workgroupBarrier();
-  if(bWet(bPhiH(vec3i(umTileCoord(t)*4u+bLocal(lane))),1.0)){atomicStore(&member,1u);}
+  let q=vec3i(umTileCoord(t)*4u+bLocal(lane));
+  if(bWet(bPhiH(q),1.0)||bSurfaceCell(q)){atomicStore(&member,1u);}
   if(workgroupUniformLoad(&member)!=0u&&lane==0u){
    ${this.spatialOrder?"atomicStore(&index[SLOTS+t],1u);":`let slot=atomicAdd(&index[0],1u);
    if(slot<bCap()){atomicStore(&index[LIST+slot],t);atomicStore(&index[SLOTS+t],slot+1u);}else{atomicStore(&index[1],1u);}`}
@@ -544,7 +552,10 @@ const B_BLOCKS=(UM_TILES+255u)/256u;
 const B_TOTALS=SLOTS+UM_TILES;
 fn bSpatialTile(i:u32)->u32{
  if(any((UM_T%vec3u(4u))!=vec3u(0u))){return i;}
- let block=i/64u;let b=vec3u(block%(UM_T.x/4u),(block/(UM_T.x/4u))%(UM_T.y/4u),block/((UM_T.x/4u)*(UM_T.y/4u)));
+ // WGSL validates constant divisors even in the branch skipped above.
+ // Small grids use linear order, but must still compile this tiled path.
+ let blocks=max(UM_T/4u,vec3u(1u));
+ let block=i/64u;let b=vec3u(block%blocks.x,(block/blocks.x)%blocks.y,block/(blocks.x*blocks.y));
  let k=i%64u;let l=vec3u((k&1u)|((k>>2u)&2u),((k>>1u)&1u)|((k>>3u)&2u),((k>>2u)&1u)|((k>>4u)&2u));
  return umTileAt(4u*b+l);
 }
@@ -775,7 +786,9 @@ fn bCoarseCarry(b:vec3i,w:vec3f)->BCarry{
   }
   // prep left the row's phi in the iterate.
   var start=0.0;
-  if(sum.z>=0.99999){start=sum.x/sum.z;}
+  // Clamped boundary samples all report liquid, but their mean height is
+  // the first/last coarse centre. Continue the vertical gradient there too.
+  if(sum.z>=0.99999&&b.y>=0&&b.y+1<i32(UM_T.y)){start=sum.x/sum.z;}
   else if(sum.z>0.0){
    let carry=bCoarseCarry(b,w);
    if(carry.air>0.0||carry.rise.y==0.0){start=sum.x/sum.z*clamp(solve[cell]*sum.z/min(sum.y,-1e-30),0.0,${(1/UNIFORM_MIXED_THETA_MIN).toFixed(1)});}

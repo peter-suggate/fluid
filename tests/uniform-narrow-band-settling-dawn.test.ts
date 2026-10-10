@@ -71,6 +71,10 @@ gpuTest("NB retains a resolved translating thin sheet in the level set",{timeout
   scene.fluid.initialVelocity_m_s={x:0.15,y:0,z:0};
   const solver=await uniformNarrowBandMethod.createSolverAsync!(device,scene,"balanced",{timeStep:"scene",detailPolicy:"full"},undefined,()=>{}) as WebGPUUniformReferenceSolver;
   try{
+   // Seed the actual MAC field; this backend does not consume the scene vector.
+   const velocity=new Float32Array(32**3*4);
+   for(let i=0;i<32**3;i++)velocity[4*i]=0.15;
+   solver.initializeVelocityForQA(velocity);
    const raw=frameOf(solver) as unknown as {fields:{phi:GPUTexture;volume:GPUTexture}};
    const initial=(await readMixedTexture(device,raw.fields.volume)).reduce((a,b)=>a+b,0);
    for(let step=1;step<=12;step++)await advanceUniform(solver,step/30);
@@ -78,7 +82,11 @@ gpuTest("NB retains a resolved translating thin sheet in the level set",{timeout
    const crossings:number[]=[];
    for(let y=0;y<32;y++){
     const a=phi[vertex(16,y,16)]!,b=phi[vertex(16,y+1,16)]!;
-    if(a*b<=0&&a!==b)crossings.push(y+a/(a-b));
+    if(a*b<=0&&a!==b){
+     const crossing=y+a/(a-b);
+     // An exact nodal zero belongs to both incident edges, but is one interface.
+     if(crossings.length===0||Math.abs(crossing-crossings[crossings.length-1]!)>1e-6)crossings.push(crossing);
+    }
    }
    assert.equal(crossings.length,2,"coherent sheet has two liquid interfaces");
    const thickness=crossings[1]!-crossings[0]!;

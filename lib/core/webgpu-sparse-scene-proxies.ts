@@ -1528,7 +1528,10 @@ fn sampleRenderTerrain(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
 }`;
 }
 
-function solidWorldProxyWGSL(
+/** Page voxels either side of a point that `swSmoothNormal` reads. `swSmoothField` reads two. */
+export const SOLID_WORLD_PAGE_SMOOTH_REACH_CELLS = 4;
+
+export function solidWorldProxyWGSL(
   layout?: WebgpuSolidWorldPageLayout,
   renderTerrainLayout?: RenderTerrainShaderLayout,
   backdropDetail?: string,
@@ -1554,6 +1557,9 @@ fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
 struct SolidWorldSample{fraction:f32,distance:f32,material:u32,normal:vec3f}
 fn sampleSolidWorld(_world:vec3f,_cellExtent:vec3f)->SolidWorldSample{
   return SolidWorldSample(0.0,1e20,0u,vec3f(0.0));}`;
+  // The page window holds two pages an axis: nine cells, a reach of four.
+  const reach = SOLID_WORLD_PAGE_SMOOTH_REACH_CELLS;
+  const falloff = 2 / (reach * reach), cutoff = Math.exp(-falloff * (reach + 0.5) ** 2);
   return /* wgsl */ `
 const SW_BASE:u32=${layout.baseWords}u;
 const SW_DIRECTORY_CAPACITY:u32=${layout.directoryCapacity}u;
@@ -1615,7 +1621,86 @@ fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{let cell=max
   let full=fractionQ8==255u;
   let distance=select(sdfDistance,-faceDistance[axis],full);
   let normal=select(sdfNormal,fullNormal,full);
-  return SolidWorldSample(fraction,distance,swMaterial(q),normal);}`;
+  return SolidWorldSample(fraction,distance,swMaterial(q),normal);}
+// Continuous reconstructions of the page fractions for function-fitted
+// surfaces. A stencil at most nine cells wide touches two pages an axis, so
+// its pages are resolved once and every tap is a single word load.
+var<private> swWindowPages:array<u32,8>;
+var<private> swWindowSplit:vec3i;
+var<private> swWindowOccupied:bool;
+fn swWindowLoad(lo:vec3i,hi:vec3i){
+  let a=vec3i(swFloorDiv8(lo.x),swFloorDiv8(lo.y),swFloorDiv8(lo.z));
+  let b=vec3i(swFloorDiv8(hi.x),swFloorDiv8(hi.y),swFloorDiv8(hi.z));
+  swWindowSplit=b*8;swWindowOccupied=false;
+  for(var c=0u;c<8u;c+=1u){
+    let upper=vec3<bool>((c&1u)!=0u,(c&2u)!=0u,(c&4u)!=0u);
+    // On an axis with one page every cell reads the upper entry.
+    if(any((a==b)&!upper)){continue;}
+    swWindowPages[c]=swPageAt(select(a,b,upper));
+    swWindowOccupied=swWindowOccupied||swWindowPages[c]!=INVALID_INDEX;
+  }
+}
+fn swWindowFraction(q:vec3i)->f32{
+  let upper=q>=swWindowSplit;
+  let page=swWindowPages[select(0u,1u,upper.x)|select(0u,2u,upper.y)|select(0u,4u,upper.z)];
+  if(page==INVALID_INDEX){return 0.0;}
+  let local=vec3u(q&vec3i(7));let index=local.x+8u*(local.y+8u*local.z);
+  let word=atomicLoad(&maintenance[SW_BASE+SW_PAGE_BASE+page*SW_PAGE_WORDS+(index>>2u)]);
+  return f32((word>>(8u*(index&3u)))&255u)/255.0;
+}
+// The cubic B-spline of the fractions, as a field with unit slope across a
+// flat voxel face: its zero set is that face exactly, and a staircase's
+// corners round into one closed surface. No solid within the stencil returns
+// the shared positive sentinel, so other sources keep their own exterior.
+fn swSmoothField(world:vec3f)->f32{
+  let cell=max(swCell(),vec3f(1e-8));
+  let p=(world-swOrigin())/cell-vec3f(0.5);let base=vec3i(floor(p));let t=p-vec3f(base);let u=vec3f(1.0)-t;
+  let weights=array<vec3f,4>(u*u*u/6.0,(3.0*t*t*t-6.0*t*t+4.0)/6.0,
+    (-3.0*t*t*t+3.0*t*t+3.0*t+1.0)/6.0,t*t*t/6.0);
+  swWindowLoad(base-vec3i(1),base+vec3i(2));
+  if(!swWindowOccupied){return 1e20;}
+  var solid=0.0;
+  for(var k=0;k<4;k+=1){for(var j=0;j<4;j+=1){for(var i=0;i<4;i+=1){
+    solid+=weights[i].x*weights[j].y*weights[k].z*swWindowFraction(base+vec3i(i,j,k)-vec3i(1));
+  }}}
+  if(solid<=0.0){return 1e20;}
+  return (0.5-solid)*min(cell.x,min(cell.y,cell.z))*(4.0/3.0);
+}
+// The plateau swSmoothField reaches deep inside a solid.
+fn swSmoothFieldLimit()->f32{let cell=swCell();return min(cell.x,min(cell.y,cell.z))*(2.0/3.0);}
+// The direction away from the solid within its reach: minus the gradient of
+// a Gaussian blur of the fractions, half the reach wide. A binary staircase holds a
+// slope only in the spacing of its steps, which no stencil narrower than a
+// step can read; this one spans them, so a tapered or curved voxel wall
+// shades as the wall instead of as its terraces. Zero where nothing is near.
+fn swSmoothNormal(world:vec3f)->vec3f{
+  let cell=max(swCell(),vec3f(1e-8));
+  let p=(world-swOrigin())/cell-vec3f(0.5);let centre=vec3i(round(p));
+  swWindowLoad(centre-vec3i(${reach}),centre+vec3i(${reach}));
+  if(!swWindowOccupied){return vec3f(0.0);}
+  var away=vec3f(0.0);
+  for(var k=-${reach};k<=${reach};k+=1){for(var j=-${reach};j<=${reach};j+=1){for(var i=-${reach};i<=${reach};i+=1){
+    let q=centre+vec3i(i,j,k);let fraction=swWindowFraction(q);
+    if(fraction<=0.0){continue;}
+    let d=p-vec3f(q);
+    // Less the Gaussian's value half a cell past the reach, so the support is compact.
+    away+=fraction*max(exp(-${falloff}*dot(d,d))-${cutoff},0.0)*d;
+  }}}
+  away/=cell;
+  if(dot(away,away)<1e-12){return vec3f(0.0);}
+  return normalize(away);
+}
+// The material of the nearest solid voxel around an empty one.
+fn swNearestMaterial(world:vec3f)->u32{
+  let q=vec3i(floor((world-swOrigin())/max(swCell(),vec3f(1e-8))));
+  var material=0u;var nearest=4;
+  for(var k=-1;k<=1;k+=1){for(var j=-1;j<=1;j+=1){for(var i=-1;i<=1;i+=1){
+    let reach=i*i+j*j+k*k;if(reach>=nearest){continue;}
+    let candidate=swMaterial(q+vec3i(i,j,k));
+    if(candidate!=0u){material=candidate;nearest=reach;}
+  }}}
+  return material;
+}`;
 }
 
 export function sparseSceneProxyVoxelizationShaderFor(
@@ -1633,6 +1718,8 @@ export function sparseSceneProxyVoxelizationShaderFor(
   const format = dry ? sceneGeometryFormat : "f32x2";
   const mode = dry ? leafPayloadMode : "dense";
   const dual = dualOffsetWords > 0 && dry;
+  // Solids published as SolidWorld pages rather than as the render terrain.
+  const pageSolids = Boolean(solidWorldLayout) && !renderTerrainLayout;
   const contours = surfaceContours && dry && format === "f16-unorm8";
   // A payload word shared by more than one invocation of this dispatch needs an
   // atomic binding. Atomicity used to be keyed on the geometry format as well,
@@ -2081,7 +2168,10 @@ fn dcField(world:vec3f,dirty:u32,count:u32)->f32{
     let at=RT_PATCH_BASE+i*8u;let lo=vec3f(rtFloat(at),rtFloat(at+1u),rtFloat(at+2u));let hi=vec3f(rtFloat(at+4u),rtFloat(at+5u),rtFloat(at+6u));
     let d=boxDistance(world-.5*(lo+hi),.5*(hi-lo));
     if(atomicLoad(&maintenance[at+3u])==0u){value=max(value,-d);}else{value=min(value,d);}
-  }` : solidWorldLayout ? `let solid=${backdropDetail ? "sampleSolidWorldBase" : "sampleSolidWorld"}(world,params.cell.xyz);if(solid.fraction>0.){value=-max(abs(solid.distance),1e-6);}` : ""}
+  }` : solidWorldLayout ? `// Page voxels are binary. Their own nearest-face distance is no field: it
+  // has a sentinel exterior and a seam on every interior face, which fits to
+  // terraces with gaps between them.
+  value=swSmoothField(world);` : ""}
   ${backdropDetail ? `// The backdrop is fitted from its continuous ground and scatter, never
   // from the voxel occupancy those became.
   value=min(value,backdropDetailField(world,.25*min(params.cell.x,params.cell.z)));` : ""}
@@ -2482,8 +2572,18 @@ ${dual && dualMarchingCubes ? `
   atomicStore(&maintenance[dcAt+3u],bitcast<u32>(fitted.value));
   ${backdropDetail ? `// A fitted interior no sample claimed is the backdrop's ground.
   if(fitted.value<0.&&primitiveFraction<=0.){bestMaterial=backdropTerrainMaterial();}` : ""}
+  ${pageSolids ? `// The smoothed page field fills concave corners with cells no voxel claims.
+  if(fitted.value<0.&&primitiveFraction<=0.){let near=swNearestMaterial(world);if(near!=0u){bestMaterial=near;}}` : ""}
   if(fitted.value<0.){primitiveFraction=max(primitiveFraction,1.0/255.0);}
   if(primitiveFraction>0.){bestNormal=fitted.normal;}
+  ${pageSolids ? `// A page surface shades from the wide normal. Only the cells a dual edge can
+  // cross need one: off the field's interior plateau and within two cells.
+  if(primitiveFraction>0.&&bestPrimitive==INVALID_INDEX&&abs(fitted.value)<.99*swSmoothFieldLimit()
+    &&fitted.value>-2.*max(cellExtent.x,max(cellExtent.y,cellExtent.z))){
+    let wide=swSmoothNormal(world-.5*cellExtent+fitted.point*cellExtent);
+    // Between two solids a cell or two apart the blur has no direction.
+    if(dot(wide,fitted.normal)>0.){bestNormal=wide;}
+  }` : ""}
 ` : dual ? `  let fitted=dcFit(world-.5*cellExtent,cellExtent,dirtyIndex,candidateCount);
   let dcAt=${dualOffsetWords}u+output*4u;
   let point=(world-.5*cellExtent+fitted.point*cellExtent-params.worldOrigin.xyz)/params.cell.xyz;
@@ -3313,7 +3413,14 @@ export class SparseSceneProxyVoxelizer {
       maximum:bounds.maximum.map(v=>v+halo) as unknown as SparseSceneVector3,
     });
     const bounds = publication.primitives.map(p=>samplingBounds(sparseScenePrimitiveBounds(p)));
-    const dirtyRegions=publication.dirtyRegions.map(samplingBounds);
+    // A fitted page surface reads voxels up to the wide normal's reach away,
+    // so an edit invalidates every cell whose fit or normal it can move.
+    const pageReach=this.dualOffsetWords&&this.solidWorldLayout&&!this.renderTerrainLayout&&this.options.solidWorldLattice
+      ? SOLID_WORLD_PAGE_SMOOTH_REACH_CELLS*Math.max(...this.options.solidWorldLattice.cellSize_m) : 0;
+    const dirtyRegions=publication.dirtyRegions.map(samplingBounds).map(region=>pageReach===0 ? region : ({
+      minimum:region.minimum.map(v=>v-pageReach) as unknown as SparseSceneVector3,
+      maximum:region.maximum.map(v=>v+pageReach) as unknown as SparseSceneVector3,
+    }));
     const primitiveBounds = packBounds(bounds);
     const dirtyBounds = packBounds(dirtyRegions);
     const worldOrigin = (this.options.worldOrigin ?? [0, 0, 0]) as SparseSceneVector3;

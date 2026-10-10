@@ -56,3 +56,47 @@ fn referenceGradient(p:vec3f)->vec3f{
   }finally{read.destroy();counts.destroy();field.destroy();}
  });
 });
+
+(process.env.WEBGPU_NODE_MODULE?test:test.skip)("voxel contact gradients ignore buried air without flattening tangential slopes",async()=>{
+ const {createUniformPreparedSurfaceSamplingWGSL,uniformSurfaceSampleInsideSolidWGSL}=await import("../lib/methods/uniform/uniform-prepared-surface.wgsl");
+ await withUniformDevice("Voxel contact surface gradients",async device=>{
+  const n=5,field=device.createBuffer({size:4*(4+n**3),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+  const data=new Float32Array(4+n**3);
+  // A submerged voxel step. Only the buried vertices contain the air sentinel;
+  // every actual fluid vertex belongs to the horizontal plane y = 2.5.
+  for(let z=0;z<n;z++)for(let y=0;y<n;y++)for(let x=0;x<n;x++)data[4+x+n*(y+n*z)]=x<2&&y<2?10:y-2.5;
+  device.queue.writeBuffer(field,0,data);
+  const output=device.createBuffer({size:4*4*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+  const read=device.createBuffer({size:output.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  try{
+   const module=device.createShaderModule({code:/* wgsl */`
+const UM_D=vec3u(4);
+struct UMDeferred {header:array<atomic<u32>,4>,data:array<u32>}
+@group(0) @binding(0) var<storage,read_write> deferred:UMDeferred;
+@group(0) @binding(1) var<storage,read_write> output:array<vec4f>;
+fn umCorner(k:u32,n:u32)->vec3u{return vec3u(k%n,(k/n)%n,k/(n*n));}
+fn umVertexSum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
+fn umPreparedIndex(p:vec3u)->u32{return p.x+5u*(p.y+5u*p.z);}
+fn umSampleClosed(p:vec3f)->bool{
+ let cell=min(vec3u(floor(p)),UM_D-vec3u(1));
+ return (cell.x<2u&&cell.y<2u)||cell.x==3u;
+}
+${uniformSurfaceSampleInsideSolidWGSL}
+${createUniformPreparedSurfaceSamplingWGSL(true)}
+@compute @workgroup_size(4) fn sample(@builtin(local_invocation_index) lane:u32){
+ let points=array<vec3f,4>(vec3f(2,1,2),vec3f(1,2,2),vec3f(2,2,2),vec3f(3,2,2));
+ let thinWall=array<vec3f,4>(vec3f(3.5,2,2),vec3f(3,2,2),vec3f(4,2,2),vec3f(2.5,2,2));
+ output[lane]=vec4f(umPreparedGradient(points[lane]),select(0.0,1.0,umSampleInsideSolid(thinWall[lane])));
+}`});
+   const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"sample"}});
+   const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:field}},{binding:1,resource:{buffer:output}}]});
+   const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();
+   pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1);pass.end();
+   encoder.copyBufferToBuffer(output,0,read,0,output.size);device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);
+   const result=new Float32Array(read.getMappedRange().slice(0));read.unmap();
+   for(let i=0;i<4;i++)assert.deepEqual([...result.subarray(4*i,4*i+3)],[0,1,0],`step contact ${i} retains the flat surface normal`);
+   assert.deepEqual([result[3],result[7],result[11],result[15]],[1,0,1,0],
+    "a thin solid has no valid interior even when its vertices are live; its fluid-facing plane remains valid");
+  }finally{read.destroy();output.destroy();field.destroy();}
+ });
+});

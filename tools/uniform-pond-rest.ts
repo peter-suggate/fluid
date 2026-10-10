@@ -8,6 +8,7 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
+import { uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import { UNIFORM_MIXED_THETA_MIN } from "../lib/methods/uniform/uniform-mixed-pressure-surface.wgsl";
@@ -15,6 +16,7 @@ import type { WebGPUUniformPressureMultigrid } from "../lib/methods/uniform/webg
 import type { UniformTexturePages } from "../lib/methods/uniform/uniform-texture-pages";
 import { readUniformFields, readUniformSolidFractions } from "../tests/helpers/uniform-geometric";
 import { readMixedBuffer, readMixedTexture } from "../tests/helpers/uniform-mixed-native-fields";
+import { uniformFixedStep_s } from "../lib/methods/uniform/uniform-paper";
 
 /** One resting-pond sample. Lengths in mm, speeds in m/s, V in h cells. */
 export interface PondRestSample {
@@ -59,6 +61,9 @@ export async function withPondRestDevice(label: string, run: (device: GPUDevice)
  * One resting-pond arm on the hero-garden-hose-x10 lattice. `argv` holds
  * `--key=value` options (the last occurrence wins, so a batch entry overrides
  * the shared ones):
+ *   --method=uniform|nb-flip  select the solver used in the app.
+ *   --profile=lane|app      app includes UI timestep and detail defaults before
+ *                            scene overrides; lane retains the test defaults.
  *   --detail=scene|none      none: Requested policy with no Fine region (all 4h
  *                            except whatever the solver still promotes).
  *   --basin=pond|flat|floor|open|slope|terrace|step|vessels
@@ -91,6 +96,7 @@ export async function withPondRestDevice(label: string, run: (device: GPUDevice)
  *   --vertex-dump=x0,x1,y0,y1,z:f,f  vertex phi against the authored plane on an x-y window (stderr;
  *                            --vertex-unit=<cells>, default 1e-3).
  *   --volume-dump=x0,x1,y0,y1,z:f,f  owner V against the authored plane's fill on an x-y window (stderr).
+ *   --surface-window=<n>    search this many cells above/below the initial level (default 4).
  *   --top=<n>                the n fastest wet owners at each sampled frame (stderr).
  *   --band-dump=x0,x1,y0,y1,z:f,f  the h band's pressure against hydrostatic and its
  *                            row residuals on an x-y window at those frames (stderr).
@@ -102,6 +108,9 @@ export async function withPondRestDevice(label: string, run: (device: GPUDevice)
 export async function runPondRestArm(device: GPUDevice, argv: readonly string[]): Promise<PondRestResult> {
   const arg = (key: string, fallback: string) => argv.findLast(a => a.startsWith(`--${key}=`))?.slice(key.length + 3) ?? fallback;
   const arm = arg("arm", "baseline");
+  const methodName = arg("method", "uniform");
+  assert.ok(methodName === "uniform" || methodName === "nb-flip");
+  const method = methodName === "nb-flip" ? uniformNarrowBandMethod : uniformVolumeMethod;
   const frames = Number(arg("frames", "30"));
   const overrides = JSON.parse(arg("values", "{}"));
   const out = arg("out", `artifacts/pond-rest/${arm}.json`);
@@ -192,11 +201,15 @@ export async function runPondRestArm(device: GPUDevice, argv: readonly string[])
     // profile so a passing reference solve cannot hide an overly loose default.
     const pressureMode = arg("pressure", "full");
     assert.ok(pressureMode === "full" || pressureMode === "scene");
-    const values = resolveMethodValues(uniformVolumeMethod, "balanced", {
-      ...definition.methodProfile?.overrides,
+    const profile = arg("profile", "lane");
+    assert.ok(profile === "lane" || profile === "app");
+    const values = resolveMethodValues(method, "balanced", {
+      ...(profile === "app" ? method.appDefaults : {}),
+      ...(definition.methodProfile?.methodId === method.id ? definition.methodProfile.overrides : {}),
       ...(pressureMode === "full" ? { pressureResidualTolerance: 0 } : {}),
       ...(detail === "none" ? { detailPolicy: "requested" } : {}), ...overrides,
     });
+    const sampleStep = profile === "app" ? uniformFixedStep_s(values.timeStep) ?? scene.numerics.maxDt_s : 1 / 30;
     const weightOverride = arg("jacobi-weight", "production");
     const weight = weightOverride === "production" ? 0.6666667 : Number(weightOverride);
     let dampingReplacements = 0;
@@ -210,7 +223,7 @@ export async function runPondRestArm(device: GPUDevice, argv: readonly string[])
         return createModule.call(compiler, { ...descriptor, code });
       };
     }
-    solver = await uniformVolumeMethod.createSolverAsync!(device, scene, "balanced", values, undefined, () => {}) as WebGPUUniformReferenceSolver;
+    solver = await method.createSolverAsync!(device, scene, "balanced", values, undefined, () => {}) as WebGPUUniformReferenceSolver;
     if (weightOverride !== "production") assert.ok(dampingReplacements > 0, "experimental damping must patch the compiled shader");
     for (const p of patches) assert.ok(p.count > 0, `A/B patch ${p.pattern} matched no compiled shader`);
     const { nx, ny, nz } = solver.info, h = c.height_m / ny, tx = nx / 4, ty = ny / 4, tz = nz / 4;
@@ -304,7 +317,7 @@ export async function runPondRestArm(device: GPUDevice, argv: readonly string[])
           solver.applySceneUniforms(drawn); await solver.pipelinesPrepared();
         }
         if (frame === switchFrame) { solver.applyRuntimeValues({ ...values, ...switchValues }); await solver.pipelinesPrepared(); }
-        try { if (!holds.includes(frame)) { assert.ok(solver.advanceTo(frame / 30, [])); await solver.awaitFrameCompletion(); } await device.queue.onSubmittedWorkDone(); }
+        try { if (!holds.includes(frame)) { assert.ok(solver.advanceTo(frame * sampleStep, [])); await solver.awaitFrameCompletion(); } await device.queue.onSubmittedWorkDone(); }
         catch (error) {
           await dumpRootRows(frame);
           // --root-dump=on: a rejected solve's worst all-4h root rows (stderr),
@@ -363,7 +376,7 @@ export async function runPondRestArm(device: GPUDevice, argv: readonly string[])
           }
           const r = rhs[i]! - ap, gap = Math.max(0, p[i]! - minimum[i]!);
           const projected = Math.max(r < 0 && -r >= gap * diagonal ? gap * diagonal : Math.abs(r), Math.max(0, minimum[i]! - p[i]!) * diagonal);
-          const residual = projected / 30 / scene.fluid.density_kg_m3;
+          const residual = projected * sampleStep / scene.fluid.density_kg_m3;
           if (worst.length < 20 || residual > worst.at(-1)!.residual) {
             worst.push({ cell: [x - 1, y - 1, z - 1], residual, open: open[x - 1 + nx * (y - 1 + ny * (z - 1))]!, pressure: p[i]!, rhs: rhs[i]!, diagonal });
             worst.sort((a, b) => b.residual - a.residual); worst.length = Math.min(20, worst.length);
@@ -387,9 +400,10 @@ export async function runPondRestArm(device: GPUDevice, argv: readonly string[])
       };
       const regions = { all: [] as number[], interior: [] as number[] };
       let missing = 0;
+      const surfaceWindow = Number(arg("surface-window", "4"));
       for (const c of columns) {
         let height: number | undefined;
-        for (let y = Math.max(0, surfaceY - 3); y < Math.min(ny, surfaceY + 4); y++) {
+        for (let y = Math.max(0, surfaceY - surfaceWindow + 1); y < Math.min(ny, surfaceY + surfaceWindow); y++) {
           const a = fields.vertex(c.x, y, c.z), b = fields.vertex(c.x, y + 1, c.z);
           if (a <= 0 && b > 0) height = y - a / (b - a);
         }
@@ -505,7 +519,7 @@ export async function runPondRestArm(device: GPUDevice, argv: readonly string[])
           return (slot - 1) * 64 + ((l[0]! + l[1]! + l[2]!) & 1) * 32 + (l[0]! >> 1) + 2 * l[1]! + 8 * l[2]!;
         };
         const halo = (q: number[], axis: number, side: number) => N + (axis === 0 ? side * ny * nz + q[1]! + ny * q[2]! : axis === 1 ? 2 * ny * nz + side * nx * nz + q[0]! + nx * q[2]! : 2 * (ny * nz + nx * nz) + side * nx * ny + q[0]! + nx * q[1]!);
-        const ulp = (v: number) => Math.pow(2, Math.floor(Math.log2(Math.max(Math.abs(v), 1e-30))) - 23), scale = -scene.fluid.density_kg_m3 * 30;
+        const ulp = (v: number) => Math.pow(2, Math.floor(Math.log2(Math.max(Math.abs(v), 1e-30))) - 23), scale = -scene.fluid.density_kg_m3 / sampleStep;
         // With the correction form the rows' last field is the start pressure and the iterate its correction.
         const fieldCount = Math.round(rows.length / N), baseOf = (c: number) => fieldCount === 16 || fieldCount === 22 ? rows[(fieldCount - 1) * N + c]! : 0;
         const face = (x: number, y: number, zz: number, a: number) => x < 0 || y < 0 || zz < 0 ? 0 : velocity[4 * (x + nx * (y + ny * zz)) + a]!;
@@ -553,7 +567,7 @@ export async function runPondRestArm(device: GPUDevice, argv: readonly string[])
           return (slot - 1) * 64 + ((l[0]! + l[1]! + l[2]!) & 1) * 32 + (l[0]! >> 1) + 2 * l[1]! + 8 * l[2]!;
         };
         const halo = (q: number[], axis: number, side: number) => N + (axis === 0 ? side * ny * nz + q[1]! + ny * q[2]! : axis === 1 ? 2 * ny * nz + side * nx * nz + q[0]! + nx * q[2]! : 2 * (ny * nz + nx * nz) + side * nx * ny + q[0]! + nx * q[1]!);
-        const ulp = (v: number) => Math.pow(2, Math.floor(Math.log2(Math.max(Math.abs(v), 1e-30))) - 23), scale = -scene.fluid.density_kg_m3 * 30;
+        const ulp = (v: number) => Math.pow(2, Math.floor(Math.log2(Math.max(Math.abs(v), 1e-30))) - 23), scale = -scene.fluid.density_kg_m3 / sampleStep;
         const fieldCount = Math.round(rows.length / N), baseOf = (c: number) => fieldCount === 16 || fieldCount === 22 ? rows[(fieldCount - 1) * N + c]! : 0;
         const face = (xx: number, y: number, zz: number, a: number) => velocity[4 * (xx + nx * (y + ny * zz)) + a]!;
         const lines = [`${arm} frame ${frame} band column x ${x}, z ${z} (row fields ${fieldCount}):\n  y kinds   pressure Pa   step ulps  correction   rhs  forced+y  published+y  from row    div(pub)   residual   div x,y,z parts`];
@@ -568,9 +582,9 @@ export async function runPondRestArm(device: GPUDevice, argv: readonly string[])
           }
           const r = rows[c]! + off - rows[N + c]! * solve[c]!;
           const step = above >= 0 ? (solve[above]! + baseOf(above)) - total : NaN;
-          const fromRow = above >= 0 ? rows[(9 + 3) * N + c]! - (1 / 30 / scene.fluid.density_kg_m3) * step * rows[(3 + 3) * N + c]! * h : NaN;
+          const fromRow = above >= 0 ? rows[(9 + 3) * N + c]! - (sampleStep / scene.fluid.density_kg_m3) * step * rows[(3 + 3) * N + c]! * h : NaN;
           const parts = [0, 1, 2].map(a => { const q = [x, y, z]; q[a]! -= 1; return scale * (face(x, y, z, a) - face(q[0]!, q[1]!, q[2]!, a)) / h; });
-          lines.push(`${String(y).padStart(3)} ${names.join("")}${kinds & 0x80000000 ? "L" : "a"} ${total.toFixed(5).padStart(12)} ${(step / ulp(total)).toFixed(2).padStart(11)} ${solve[c]!.toPrecision(5).padStart(11)} ${rows[c]!.toPrecision(4).padStart(9)} ${(1e6 * (rows[(9 + 3) * N + c]! + 9.81 / 30)).toFixed(3).padStart(9)} ${(1e6 * face(x, y, z, 1)).toFixed(4).padStart(11)} ${(1e6 * fromRow).toFixed(4).padStart(10)} ${(parts[0]! + parts[1]! + parts[2]!).toPrecision(4).padStart(10)} ${r.toPrecision(4).padStart(10)}   ${parts.map(v => v.toPrecision(3)).join(" ")}`);
+          lines.push(`${String(y).padStart(3)} ${names.join("")}${kinds & 0x80000000 ? "L" : "a"} ${total.toFixed(5).padStart(12)} ${(step / ulp(total)).toFixed(2).padStart(11)} ${solve[c]!.toPrecision(5).padStart(11)} ${rows[c]!.toPrecision(4).padStart(9)} ${(1e6 * (rows[(9 + 3) * N + c]! + -scene.fluid.gravity_m_s2.y * sampleStep)).toFixed(3).padStart(9)} ${(1e6 * face(x, y, z, 1)).toFixed(4).padStart(11)} ${(1e6 * fromRow).toFixed(4).padStart(10)} ${(parts[0]! + parts[1]! + parts[2]!).toPrecision(4).padStart(10)} ${r.toPrecision(4).padStart(10)}   ${parts.map(v => v.toPrecision(3)).join(" ")}`);
         }
         console.error(lines.join("\n"));
       }
@@ -710,7 +724,7 @@ export async function runPondRestArm(device: GPUDevice, argv: readonly string[])
       samples.push(sample); console.log(JSON.stringify({ arm, ...sample }));
     }
     const fineTiles = tiles.reduce((n, word) => n + (word & 0x80000000 ? 1 : 0), 0);
-    const result: PondRestResult = { arm, dimensions: [nx, ny, nz], level, h, depth_m: depthCells * h, time_s: frames / 30, detail, basin, fineTiles, tiles: tiles.length, values, hose: scene.fluid.inflow.enabled, jacobiWeight: weight, dampingReplacements, noRecovery, sigma: scene.fluid.surfaceTension_N_m, gravity: scene.fluid.gravity_m_s2, vesselFinal, samples, pressureDiagnostic, stepTimes_ms };
+    const result: PondRestResult = { arm, method: method.id, dimensions: [nx, ny, nz], level, h, depth_m: depthCells * h, time_s: solver.info.simulatedTime_s ?? frames * sampleStep, profile, detail, basin, fineTiles, tiles: tiles.length, values, hose: scene.fluid.inflow.enabled, jacobiWeight: weight, dampingReplacements, noRecovery, sigma: scene.fluid.surfaceTension_N_m, gravity: scene.fluid.gravity_m_s2, vesselFinal, samples, pressureDiagnostic, stepTimes_ms };
     mkdirSync(resolve(out, ".."), { recursive: true });
     writeFileSync(out, JSON.stringify(result, null, 2));
     return result;

@@ -44,6 +44,7 @@ export class UniformMixedSurfaceGeometry {
   readonly allocatedBytes:number;
   private pipeline?:GPUComputePipeline;
   private pressurePipeline?:GPUComputePipeline;
+  private metricPipeline?:GPUComputePipeline;
   private readonly changedPipelines:GPUComputePipeline[]=[];
   private readonly resources:GPUBindGroupLayout;
   private readonly mirrorResources?:GPUBindGroupLayout;
@@ -61,7 +62,7 @@ export class UniformMixedSurfaceGeometry {
    * mirror: bind() also takes a second field for the fill (a caller whose
    * volume is that measurement): every launch then copies each live owner's
    * target into it in the same pass, where the caller copied the whole field. */
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly resolved=false,private readonly pressure=false,private readonly mirror=false){
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly resolved=false,private readonly pressure=false,private readonly mirror=false,private readonly metric?:{buffer:GPUBuffer;first:number;reach:number}){
     const tiles=ownership.capacity.tiles;
     this.changes=device.createBuffer({label:"Uniform mixed geometry changed tiles",size:4*(4+2*tiles),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     this.listResources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
@@ -70,6 +71,7 @@ export class UniformMixedSurfaceGeometry {
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       ...[1,2,...(pressure?[3,4]:[])].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"r32float" as const,viewDimension:"3d" as const}})),
       {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      ...(metric?[{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]:[]),
     ]});
     if(mirror)this.mirrorResources=uniformDetailBindLayout(device,{entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
@@ -87,6 +89,7 @@ export class UniformMixedSurfaceGeometry {
     const group=uniformDetailGroup(this.device,{layout:this.resources,entries:[
       ...[phi,targetFill,centerPhi,...(pressure?[pressure.target,pressure.centerPhi]:[])].map((t,binding)=>({binding,resource:t})),
       {binding:5,resource:{buffer:this.changes}},
+      ...(this.metric?[{binding:6,resource:{buffer:this.metric.buffer}}]:[]),
     ]});
     if(mirror)this.mirrorGroups.set(group,uniformDetailGroup(this.device,{layout:this.mirrorResources!,entries:[{binding:0,resource:targetFill},{binding:1,resource:mirror}]}));
     return group;
@@ -102,6 +105,13 @@ ${this.pressure?`@group(1) @binding(3) var pressureTarget:texture_storage_3d<r32
 @group(1) @binding(4) var pressureCenterPhi:texture_storage_3d<r32float,write>;`:""}
 @group(1) @binding(5) var<storage,read_write> changes:array<atomic<u32>>;
 override geometryPressure:bool=false;
+override geometryMetric:bool=false;
+${this.metric?`@group(1) @binding(6) var<storage,read> metric:array<u32>;
+fn gcDistance(p:vec3u,fallback:f32)->f32{
+ let tile=umTileAt(min(p,UM_D-1u)/4u);
+ if((metric[${this.metric.reach}u+tile]&2u)==0u){return fallback;}
+ let d=UM_D+1u;return bitcast<f32>(metric[${this.metric.first}u+p.x+d.x*(p.y+d.y*p.z)])*${Math.min(...this.ownership.capacity.lattice.cellSize_m)};
+}`:""}
 const GC_FINE:u32=4u;const GC_COARSE:u32=${4+tiles}u;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner: the base block (UNIFORM_DETAIL_4H_LOAD).
@@ -163,7 +173,14 @@ fn gcOwner(owner:UMOwner,terms:bool){
  if(owner.width==4u){for(var j=0u;j<8u;j++){vertices[j]=umLoadCorner(origin+vec3u(uvCorner(j))*4u);}}
  else{for(var j=0u;j<8u;j++){vertices[j]=${this.resolved?"umLoadVertex":"umVertexValue"}(origin+vec3u(uvCorner(j))*owner.width);}}
  var open=1.0;if(owner.width==4u){open=umTileOpen(owner.tile);}
- let value=gcEvaluate(owner,vertices,open,false);
+ var value=gcEvaluate(owner,vertices,open,false);
+ ${this.metric?`if(geometryMetric){
+  // Pressure needs metric distances; reconstruction's interface vertices
+  // deliberately retain nonmetric magnitudes to preserve their zero set.
+  var terms:array<f32,8>;
+  for(var j=0u;j<8u;j++){terms[j]=0.125*gcDistance(origin+vec3u(uvCorner(j))*owner.width,vertices[j]);}
+  value.y=d4Sum8(terms);
+ }`:""}
  // Native uvTarget scales by the open fraction; a 4h owner's fill is already
  // over its tile's open cells.
  textureStore(targetFill,vec3i(origin),vec4f(value.x*select(1.0,umCellOpen(vec3i(origin)),owner.width==1u)));
@@ -175,6 +192,7 @@ fn gcOwner(owner:UMOwner,terms:bool){
    let tileOwner=UMOwner(owner.tile,0u,4u,0u);var corners:array<f32,8>;
    for(var j=0u;j<8u;j++){corners[j]=umLoadCorner(origin+vec3u(uvCorner(j))*4u);}
    coarse=gcEvaluate(tileOwner,corners,umTileOpen(owner.tile),terms);
+   ${this.metric?`if(geometryMetric){var distances:array<f32,8>;for(var j=0u;j<8u;j++){distances[j]=0.125*gcDistance(origin+vec3u(uvCorner(j))*4u,corners[j]);}coarse.y=d4Sum8(distances);}`:""}
   }
   textureStore(pressureTarget,vec3i(origin),vec4f(coarse.x));textureStore(pressureCenterPhi,vec3i(origin),vec4f(coarse.y));
  }`:""}
@@ -212,6 +230,7 @@ var<workgroup> gcJobs:vec2u;
     const create=(entryPoint:string,constants:Record<string,number>={},pipelineLayout=layout,needs?:readonly UniformPipelineNeed[])=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout:pipelineLayout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants,...s}}}),{needs,entry:entryPoint});
     const all={umCountedJobs:UNIFORM_MIXED_COUNTED.all};
     [this.pipeline,this.pressurePipeline]=await Promise.all([create("geometry",all),this.pressure?create("geometry",{...all,geometryPressure:1}):undefined]);
+    if(this.metric)this.metricPipeline=await create("geometry",{...all,geometryPressure:1,geometryMetric:1});
     if(this.mirror){
       // Every live owner's texel, as a launch above wrote it.
       const mirror=uniformDetailModule(this.device,{label:"Uniform mixed geometric fill mirror",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
@@ -231,8 +250,9 @@ var<workgroup> gcJobs:vec2u;
    * changed: the changed tiles (UniformMixedGenerationBuffers.changes) of the
    * generation the ownership adopted since the last encode: evaluate only
    * their neighbourhoods (see the class comment for the caller's precondition). */
-  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,options:{pressure?:boolean;changed?:GPUBuffer}={}):void{
+  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,options:{pressure?:boolean;changed?:GPUBuffer;metric?:boolean}={}):void{
     if(!this.pipeline)throw new Error("Mixed surface geometry is not initialized");
+    if(options.metric&&(!options.pressure||!this.metricPipeline))throw new Error("Metric pressure geometry requires a current distance field and pressure outputs");
     if(options.pressure&&options.changed)throw new Error("Mixed geometry writes pressure outputs only in a full launch");
     if(options.pressure&&!this.pressurePipeline)throw new Error("Mixed geometry was built without pressure outputs");
     const revision=this.ownership.revision;
@@ -250,7 +270,7 @@ var<workgroup> gcJobs:vec2u;
       pass.setPipeline(variant(compact!));pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
       pass.setPipeline(variant(changed!));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
     }
-    else this.ownership.dispatchAllCounted(pass,variant(options.pressure?this.pressurePipeline!:this.pipeline));
+    else this.ownership.dispatchAllCounted(pass,variant(options.metric?this.metricPipeline!:options.pressure?this.pressurePipeline!:this.pipeline));
     // Every live owner, after a changed launch too: the mirror may have been
     // remapped in tiles this launch did not evaluate.
     const mirror=this.mirrorGroups.get(group);

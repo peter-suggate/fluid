@@ -1,5 +1,5 @@
 import { NARROW_BAND_TRACE_LIMIT, narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
-import { uniformPreparedSurfaceSamplingWGSL } from "./uniform-prepared-surface.wgsl";
+import { createUniformPreparedSurfaceSamplingWGSL, uniformSurfaceSampleInsideSolidWGSL } from "./uniform-prepared-surface.wgsl";
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_PARAMS_BYTES,uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
@@ -566,14 +566,16 @@ fn umSampleClosed(q:vec3f)->bool{
  let c=clamp(vec3i(floor(q)),vec3i(0),vec3i(UM_D)-vec3i(1));let t=umTileAt(vec3u(c)/4u);
  if(umTileWidth(t)==4u){return umTileOpen(t)<=1e-5;}
  return umCellOpen(c)<=1e-5;
-}`:""}
+}
+${uniformSurfaceSampleInsideSolidWGSL}`:""}
 fn umSurfaceGradient(p:vec3f,width:f32)->vec3f{
  var g=vec3f(0);var lowValue=0.0;
  for(var k=0u;k<6u;k++){
   let axis=k/2u;var delta=vec3f(0);delta[axis]=0.25*width;
   var low=clamp(p-delta,vec3f(0),vec3f(UM_D));var high=clamp(p+delta,vec3f(0),vec3f(UM_D));
-  // A wide slope is one-sided beside a closed owner.
-  ${this.solid?"if(width>1.0){if(umSampleClosed(low)){low=p;}if(umSampleClosed(high)){high=p;}}":""}
+  // Solid interiors contain air sentinels, not a liquid surface. Use the
+  // open side of the stencil at both h and 4h voxel contacts.
+  ${this.solid?"if(width>1.0){if(umSampleClosed(low)){low=p;}if(umSampleClosed(high)){high=p;}}else{if(umSampleInsideSolid(low)){low=p;}if(umSampleInsideSolid(high)){high=p;}}":""}
   let value=umSampleVertex(select(low,high,(k&1u)!=0u));
   if((k&1u)==0u){lowValue=value;}else{g[axis]=(value-lowValue)/max(high[axis]-low[axis],1e-6);}
  }return g;
@@ -836,6 +838,7 @@ fn ${name}(p:vec3f,initial:f32,width:u32${param})->f32{
  for(var i=0u;i<umCounts.w;i++){
   let g=${global?"umSurfaceGradient(q,w)":"umPreparedGradient(q)"};let norm=dot(g/h,g/h);if(norm<1e-16){break;}
   let next=clamp(q-clamp(phiQ*g/(h*h*norm),vec3f(-2.0*w),vec3f(2.0*w)),max(vec3f(0),p-vec3f(4.0*w)),min(vec3f(UM_D),p+vec3f(4.0*w)));
+  ${this.solid ? "if(width==1u&&umSampleInsideSolid(next)){break;}" : ""}
   var phiNext=0.0;
   ${global?/* wgsl */`// The cell's width is next's owner width (its tile's).
   let cell=umVertexCell(next);var wide=cubic&&cell.width==width;
@@ -912,7 +915,7 @@ fn umPreparedIndex(p:vec3u)->u32{return p.x+(UM_D.x+1u)*(p.y+(UM_D.y+1u)*p.z);}
   deferred.data[umPreparedIndex(p)]=bitcast<u32>(umVertexSum8(values));
  }
 }
-${uniformPreparedSurfaceSamplingWGSL}
+${createUniformPreparedSurfaceSamplingWGSL(!!this.solid)}
 @compute @workgroup_size(64) fn redistanceFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let owner=umTileJobOwner(group);if(owner.width==0u){return;}
  let tile=umTileCoord(owner.tile);let wide=umFineWideMask(owner.tile);

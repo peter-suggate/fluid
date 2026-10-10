@@ -6,7 +6,7 @@
  * sample is the value a neighbour lends the owner's slope (default its pressure).
  * This adds no topology tables and does not change geometric divergence.
  */
-export function uniformMixedPressureReconstructionSource(surface = false, sample = surface ? "umPressureGhostSlopeSample(owner,neighbor)" : "umPressure(neighbor)"): string { return /* wgsl */ `
+export function uniformMixedPressureReconstructionSource(surface = false, sample = surface ? "umPressureGhostSlopeSample(owner,neighbor)" : "umPressure(neighbor)", difference?:string): string { return /* wgsl */ `
 // The pressure a finer or equal neighbour contributes to the owner's slope.
 fn umReconstructSample(owner:UMOwner,neighbor:UMOwner)->f32 {return ${sample};}
 // A slope is needed beside a finer neighbour${surface ? " or an unequal air neighbour" : ""}.
@@ -70,7 +70,7 @@ ${surface ? " if(umPressureLiquid(owner)!=umPressureLiquid(face.neighbor)){retur
 fn umReconstructedPressureGradient(owner:UMOwner,face:UMFace)->f32 {
  if(face.neighbor.width==0u){return 0.0;}
 ${surface ? ` if(!umPressureLiquid(owner)&&!umPressureLiquid(face.neighbor)){return 0.0;}
- let base=f32(face.sign)*(select(0.0,umPressure(face.neighbor),umPressureLiquid(face.neighbor))-select(0.0,umPressure(owner),umPressureLiquid(owner)))
+ let base=f32(face.sign)*(${difference??"select(0.0,umPressure(face.neighbor),umPressureLiquid(face.neighbor))-select(0.0,umPressure(owner),umPressureLiquid(owner))"})
   /(umPressureTheta(owner,face.neighbor)*0.5*f32(owner.width+face.neighbor.width)*UM_H[face.axis]);` : ` let base=f32(face.sign)*(umPressure(face.neighbor)-umPressure(owner))
   /(0.5*f32(owner.width+face.neighbor.width)*UM_H[face.axis]);`}
  return base+umPressureFaceCorrection(owner,face);

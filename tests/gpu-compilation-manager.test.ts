@@ -316,3 +316,19 @@ test("managed direct compilations share the bounded priority scheduler", async (
   assert.deepEqual(gpu.calls.labels, ["direct critical", "direct background"]);
   assert.equal(gpu.calls.maximumConcurrent, 1);
 });
+
+// Managed device entry must use the same bounded scheduler as direct lookup.
+// Otherwise every solver shader is serialized despite the production policy.
+test("managed devices retain production compilation concurrency and explicit overrides",async()=>{
+ const raw=fakeGPU(),wrapped=fakeGPU(),serial=fakeGPU();
+ const device=managedGPUDevice(wrapped.device,{requireWorkerRealm:false});
+ const serialDevice=managedGPUDevice(serial.device,{requireWorkerRealm:false,maximumConcurrentBundles:1});
+ const build=async(device:GPUDevice)=>{
+  const manager=gpuCompilationManagerFor(device);
+  const module=manager.createShaderModule({code:"@compute @workgroup_size(1) fn main(){}"});
+  await Promise.all(Array.from({length:6},()=>manager.compileComputePipeline({layout:"auto",compute:{module,entryPoint:"main"}})));
+ };
+ await build(raw.device);await build(device);await build(serialDevice);
+ assert.equal(wrapped.calls.maximumConcurrent,raw.calls.maximumConcurrent);
+ assert.equal(serial.calls.maximumConcurrent,1);
+});

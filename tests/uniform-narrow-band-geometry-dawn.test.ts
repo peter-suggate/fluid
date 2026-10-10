@@ -8,6 +8,7 @@ import type {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-u
 import type {UniformMixedFrame} from "../lib/methods/uniform/uniform-mixed-frame";
 import type {UniformMixedSurface} from "../lib/methods/uniform/uniform-mixed-surface";
 import type {UniformMixedPhiResolve} from "../lib/methods/uniform/uniform-mixed-phi-resolve";
+import type {UniformMixedMomentumCache,UniformMixedHangingTaps} from "../lib/methods/uniform/uniform-mixed-momentum-cache";
 import type {UniformDetailGroup} from "../lib/methods/uniform/uniform-detail-fields";
 import {uniformDetailField} from "../lib/methods/uniform/uniform-detail-fields";
 import {advanceUniform,withUniformDevice} from "./helpers/uniform-geometric";
@@ -57,7 +58,7 @@ gpuTest("NB wall advection neither repairs liquid from stored volume nor changes
   try{
    await advanceUniform(solver,1/60);
    const frame=(solver as unknown as {mixedFrame:Frame}).mixedFrame;
-   const privateFrame=frame as unknown as {surface:UniformMixedSurface;surfaceGroups:UniformDetailGroup[];params:{surface:GPUBuffer};displacement:unknown};
+   const privateFrame=frame as unknown as {surface:UniformMixedSurface;surfaceGroups:UniformDetailGroup[];params:{surface:GPUBuffer};displacement:unknown;cache:UniformMixedMomentumCache;cacheGroup:UniformDetailGroup;hanging:UniformMixedHangingTaps;hangingGroup:UniformDetailGroup};
    assert.equal(privateFrame.displacement,undefined,"NB has no independent solid-displacement mass deposits");
    const phi=await readMixedTexture(device,frame.fields.phi);
    for(let z=0;z<=32;z++)for(let y=0;y<=32;y++)for(let x=0;x<=32;x++)phi[vertex(x,y,z)]=(y+0.2*x-16.125)/32;
@@ -82,6 +83,12 @@ gpuTest("NB wall advection neither repairs liquid from stored volume nor changes
    const velocity=(frame as unknown as {fields:{velocityScratch:GPUTexture}}).fields.velocityScratch;
    const falling=new Float32Array(32**3*4);for(let i=0;i<32**3;i++)falling[4*i+1]=-2;
    upload(velocity,falling);baseline=undefined;
+   // Production resolves both interpolation caches after extending velocity
+   // and before advection. A direct field upload must refresh those too.
+   const prepare=device.createCommandEncoder();
+   privateFrame.cache.encode(prepare,privateFrame.cacheGroup);
+   privateFrame.hanging.encode(prepare,privateFrame.hangingGroup);
+   device.queue.submit([prepare.finish()]);
    for(const mass of [0,10]){
     upload(frame.fields.volume,new Float32Array(32**3).fill(mass));
     upload(frame.fields.phiScratch,phi);

@@ -3,6 +3,27 @@
  * Fixed-band coarse values remain advected surface samples. Adaptive coarse
  * vertices beside retiring h owners recover metric magnitudes before handoff. */
 export const narrowBandRedistanceWGSL=/* wgsl */`
+// A voxel boundary belongs to the closure of its open incident cells. The
+// cell on the positive side can be solid; its buried corners are air
+// sentinels, not samples of the liquid distance field.
+fn nbOpenSurfaceCell(p:vec3f)->vec3i{
+ let q=clamp(p,vec3f(0),vec3f(UM_D));let base=vec3i(floor(q));let c=min(base,vec3i(UM_D)-1);
+ if(!umSolidEnabled()||umCellOpen(c)>1e-5){return c;}
+ let onPlane=q==vec3f(base);
+ for(var k=1u;k<8u;k++){
+  let back=umCorner(k,2u);if(any((back!=vec3u(0))&!onPlane)){continue;}
+  let other=base-vec3i(back);
+  if(any(other<vec3i(0))||any(other>=vec3i(UM_D))){continue;}
+  if(umCellOpen(other)>1e-5){return other;}
+ }
+ return vec3i(-1);
+}
+fn nbSurfaceSegmentOpen(a:vec3f,b:vec3f)->bool{
+ if(!umSolidEnabled()){return true;}
+ let d=abs(b-a);let steps=max(1u,u32(ceil(2.0*max(d.x,max(d.y,d.z)))));
+ for(var i=1u;i<=steps;i++){if(nbOpenSurfaceCell(mix(a,b,f32(i)/f32(steps))).x<0){return false;}}
+ return true;
+}
 fn nbTrilinear(v:array<f32,8>,q:vec3f)->vec4f{
  let x00=mix(v[0],v[1],q.x);let x10=mix(v[2],v[3],q.x);
  let x01=mix(v[4],v[5],q.x);let x11=mix(v[6],v[7],q.x);
@@ -13,7 +34,9 @@ fn nbTrilinear(v:array<f32,8>,q:vec3f)->vec4f{
 // Differentiate the represented trilinear field directly. A gradient needs
 // its eight corners, rather than six additional interpolated phi queries.
 fn nbPhiGradient(p:vec3f)->vec4f{
- let q=clamp(p,vec3f(0),vec3f(UM_D));let c=min(vec3u(floor(q)),UM_D-1u);
+ let q=clamp(p,vec3f(0),vec3f(UM_D));let open=nbOpenSurfaceCell(q);
+ if(open.x<0){return vec4f(0,0,0,1e20);}
+ let c=vec3u(open);
  let width=select(umTileWidth(umTileAt(c/4u)),4u,nbCoarseOnly);let origin=(c/width)*width;
  let f=(q-vec3f(origin))/f32(width);var v:array<f32,8>;var terms:array<f32,8>;var value=0.0;
  for(var k=0u;k<8u;k++){
@@ -25,6 +48,16 @@ fn nbPhiGradient(p:vec3f)->vec4f{
  if(!nbCoarseOnly){value=umVertexSum8(terms);}
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  return vec4f(nbTrilinear(v,f).xyz/(h*f32(width)),value/h);
+}
+// Does the represented surface have room on its liquid side for the outer
+// sphere layer? Only this layer needs the test; deeper bulk stays liquid.
+fn nbSurfaceSeedFits(q:vec3f,d:f32)->bool{
+ if(!umSolidEnabled()||d < -NB_SURFACE_RADIUS){return true;}
+ let sample=nbPhiGradient(q);let g2=dot(sample.xyz,sample.xyz);
+ if(g2<1e-8){return false;}
+ let n=sample.xyz*inverseSqrt(g2);
+ let depth=nbPlanarSeedDepth(q,d,n);
+ return nbSurfaceSegmentOpen(q,q-(d+depth)*n);
 }
 fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
  let base=nbCell(cell);let origin=vec3f(base);var v:array<f32,8>;
@@ -74,7 +107,9 @@ fn nbBuildDistance(p:vec3u,tile:u32){
      let sample=nbPhiGradient(q);let f=sample.w;if(abs(f)<1e-5){distance=min(distance,length(q-vec3f(p)));break;}
      let g=sample.xyz;
      let g2=dot(g,g);if(g2<1e-8){break;}
-     q=clamp(q-clamp(f/sqrt(g2),-1.5,1.5)*g*inverseSqrt(g2),vec3f(0),vec3f(UM_D));
+     let next=clamp(q-clamp(f/sqrt(g2),-1.5,1.5)*g*inverseSqrt(g2),vec3f(0),vec3f(UM_D));
+     if(!nbSurfaceSegmentOpen(q,next)){break;}
+     q=next;
     }
    }
    value=sign(initial)*max(distance,1e-8/h);

@@ -111,10 +111,12 @@ type RootEnd = 0 | 1 | 2 | 3;
  * native RHS with the correction bound and a zero correction; one adds (or
  * assigns) the native correction back. The pressure layout is all-4h with no
  * seams, so every owner is a regular row and reconstruction slopes are zero.
- * All fields are borrowed. Convergence validation and publication remain the
- * frame's job. */
+ * The pressure fields are borrowed; low rounding words are owned here.
+ * Convergence validation and publication remain the frame's job. */
 export class UniformMixedPressureCycles {
-  readonly allocatedBytes = 0;
+  readonly rounding:GPUBuffer;
+  get allocatedBytes():number{return this.rounding.size;}
+  destroy():void{this.rounding.destroy();}
   private readonly resources: GPUBindGroupLayout;
   private readonly group: GPUBindGroup;
   /** A launch: its fixed workgroup grid, or (tiled) its level's tile count,
@@ -168,6 +170,7 @@ export class UniformMixedPressureCycles {
     this.tileLanes = Math.min(ROOT_TILE_LANES, device.limits.maxComputeInvocationsPerWorkgroup);
     const smoothing = UNIFORM_MIXED_ROOT_SMOOTHING, M = ROOT_LAUNCH_ITERATIONS;
     if (!smoothing.length || smoothing.some(w => !(w > 0 && w <= 1))) throw new Error("Mixed pressure root smoothing weights must lie in (0, 1]");
+    this.rounding=device.createBuffer({label:"Uniform root pressure rounding and Full-Cycle backup",size:8*(count+1),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     this.visit = Array.from({ length: Math.ceil(smoothing.length / M) }, (_, k) => ({
       first: k * M, count: Math.min(M, smoothing.length - k * M) }));
     this.lanes = Math.min(ROOT_COARSE_LANES, device.limits.maxComputeInvocationsPerWorkgroup);
@@ -195,12 +198,12 @@ export class UniformMixedPressureCycles {
       if (native.cycle.tiles !== tiles) throw new Error("Mixed pressure cycle list does not cover the native continuation lattice");
       this.listed = { list: native.cycle.list };
     }
-    this.resources = device.createBindGroupLayout({ entries: [0, 1, 2, ...(this.listed ? [3] : []), ...(topology ? [4] : [])].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE,
-      buffer: { type: binding >= 3 ? "read-only-storage" as const : "storage" as const } })) });
+    this.resources = device.createBindGroupLayout({ entries: [0, 1, 2, ...(this.listed ? [3] : []), ...(topology ? [4] : []),5].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE,
+      buffer: { type: binding === 3 || binding === 4 ? "read-only-storage" as const : "storage" as const } })) });
     this.group = device.createBindGroup({ layout: this.resources, entries: [
       { binding: 0, resource: { buffer: arena, ...mixedRange } }, { binding: 1, resource: { buffer: arena, ...nativeRange } }, { binding: 2, resource: phi },
       ...(this.listed ? [{ binding: 3, resource: { buffer: this.listed.list } }] : []),
-      ...(topology ? [{ binding: 4, resource: topology }] : [])] });
+      ...(topology ? [{ binding: 4, resource: topology }] : []),{binding:5,resource:{buffer:this.rounding}}] });
   }
   async initialize(): Promise<void> {
     const layout = this.level.ownership.layout, h = layout.lattice.cellSize_m, t = layout.lattice.dimensions.map(n => n / 4), w = this.words;
@@ -212,6 +215,7 @@ export class UniformMixedPressureCycles {
 @group(1) @binding(0) var<storage,read_write> mixed:array<f32>;
 @group(1) @binding(1) var<storage,read_write> native:array<f32>;
 @group(1) @binding(2) var<storage,read_write> phi:array<f32>;
+@group(1) @binding(5) var<storage,read_write> rounding:array<vec2f>;
 const UM_T=vec3u(${t.map(n => `${n}u`).join(",")});const UM_N=UM_T+vec3u(2u);const UM_CELLS=${layout.tiles.length}u;
 const UM_H=vec3f(${h.map(n => n.toFixed(8)).join(",")});const UM_MIN_H=min(UM_H.x,min(UM_H.y,UM_H.z));
 const UM_OPEN_TOP=${open};
@@ -262,6 +266,19 @@ fn umCell(p:vec3u)->UMCell{
  cell.kind=2u;cell.slot=umSlot(c,cell.axis,cell.side);return cell;
 }
 fn umP(i:u32)->f32{return mixed[UM_P+i];}
+// Keep the rounding lost when a small correction joins the hydrostatic
+// pressure. Stencils subtract the high and low words independently.
+// The immutable zero header forces each result through its float bit pattern.
+// Without this fence Metal fast-math reassociates TwoSum to zero and expands
+// pressure differences before their multiplication, losing the low word again.
+fn umRounded(x:f32)->f32{return bitcast<f32>(bitcast<u32>(x)^bitcast<u32>(rounding[0].x));}
+fn umAddPressure(i:u32,value:f32){
+ let a=umP(i);let b=umRounded(value+rounding[i+1u].x);let sum=umRounded(a+b);
+ let recovered=umRounded(sum-a);let rest=umRounded(sum-recovered);
+ let error=umRounded(a-rest)+umRounded(b-recovered);
+ mixed[UM_P+i]=sum;rounding[i+1u].x=error;
+}
+fn umDifference(a:u32,b:u32)->f32{return umRounded(umRounded(umP(a)-umP(b))+umRounded(rounding[a+1u].x-rounding[b+1u].x));}
 // umPressureLiquid of a 4h owner.
 fn umLiquid(k:u32)->bool{return ${uniformMixedPressureLiquidWGSL("phi[k]", "4.0*UM_MIN_H")};}
 ${solid ? `@group(1) @binding(4) var<storage,read> umRecord:array<vec4f>;
@@ -290,15 +307,13 @@ fn umRow(c:vec3u,k:u32)->vec2f{
   let at=2u*axis+side;
   if(select(c[axis]==0u,c[axis]+1u==UM_T[axis],side==1u)){
    let s=umSlot(c,axis,side);let weight=umWall(k,s,axis,side);
-   var p=0.0;if(!umOpen(axis,side)){p=umP(s);}
-   diagonal[at]=weight;values[at]=weight*own-weight*p;
+   diagonal[at]=weight;values[at]=weight*select(umDifference(k,s),own+rounding[k+1u].x,umOpen(axis,side));
   }else{
    let n=select(k-umStride(axis),k+umStride(axis),side==1u);
    let distance=4.0*UM_H[axis];
    ${solid ? `let volume=select(umTopo(n)[axis+1u],umTopo(k)[axis+1u],side==1u);
    let coefficient=select(volume/(distance*distance*umTheta(k,n)),0.0,volume<=1e-6);` : "let coefficient=1.0/(distance*distance*umTheta(k,n));"}
-   let other=select(0.0,umP(n),umLiquid(n));
-   diagonal[at]=coefficient;values[at]=coefficient*(own-other);
+   diagonal[at]=coefficient;values[at]=coefficient*select(own+rounding[k+1u].x,umDifference(k,n),umLiquid(n));
   }
  }}
  return vec2f(umSum6(diagonal),umSum6(values));
@@ -308,7 +323,7 @@ fn umSlotCoefficient(cell:UMCell)->f32{return select(umWall(cell.key,cell.slot,c
 fn umResidual(cell:UMCell,rhs:u32)->f32{
  // Branch, not select: an air row must not assemble its stencil.
  if(cell.kind==1u){if(!umLiquid(cell.key)){return 0.0;}return mixed[rhs+cell.key]-umRow(cell.c,cell.key).y;}
- return mixed[rhs+cell.slot]-umSlotCoefficient(cell)*(umP(cell.slot)-umP(cell.key));
+ return mixed[rhs+cell.slot]-umSlotCoefficient(cell)*umDifference(cell.slot,cell.key);
 }
 fn umNonfinite(v:f32)->bool{return (bitcast<u32>(v)&0x7f800000u)==0x7f800000u;}
 // The CM11a projected residual of one row; a maximal sentinel on failure.
@@ -359,7 +374,7 @@ fn restrictAt(p:vec3u){
  var b=0.0;var lower=0.0;
  if(cell.kind!=0u){
   let s=cell.slot;let own=umP(s);b=umResidual(cell,UM_RHS);lower=mixed[UM_MIN+s]-own;
-  if(UM_FULL){mixed[UM_BACKUP+s]=own;mixed[UM_M1+s]=lower;mixed[UM_B1+s]=b;}
+  if(UM_FULL){mixed[UM_BACKUP+s]=own;rounding[s+1u].y=rounding[s+1u].x;mixed[UM_M1+s]=lower;mixed[UM_B1+s]=b;}
  }
  native[MG_P+at]=0.0;native[MG_B+at]=b;native[MG_MIN+at]=lower;
 }
@@ -368,7 +383,7 @@ fn measureAt(p:vec3u){
  let cell=umCell(p);let s=cell.slot;
  if(cell.kind==2u){
   let coefficient=umSlotCoefficient(cell);let q=umP(s);
-  mixed[UM_RES+s]=umProjected(q,mixed[UM_B0+s]-coefficient*(q-umP(cell.key)),mixed[UM_M0+s],coefficient);return;
+  mixed[UM_RES+s]=umProjected(q,mixed[UM_B0+s]-coefficient*umDifference(s,cell.key),mixed[UM_M0+s],coefficient);return;
  }
  if(cell.kind!=1u){return;}
  let q=umP(s);
@@ -472,9 +487,9 @@ fn umBlockEnd(q:vec3i,at:u32,value:f32,to:u32){
  if(UM_BEND==0u){native[to+at]=value;return;}
  let cell=umCell(vec3u(q));if(cell.kind==0u){return;}
  let s=cell.slot;
- if(UM_BEND==2u){mixed[UM_P+s]=value;}
- else if(UM_BEND==3u){mixed[UM_P+s]=(mixed[UM_P+s]+value)+mixed[UM_BACKUP+s];}
- else{mixed[UM_P+s]+=value;}
+ if(UM_BEND==2u){mixed[UM_P+s]=value;rounding[s+1u].x=0.0;}
+ else if(UM_BEND==3u){umAddPressure(s,value);umAddPressure(s,rounding[s+1u].y);umAddPressure(s,mixed[UM_BACKUP+s]);}
+ else{umAddPressure(s,value);}
 }
 @compute @workgroup_size(UM_BLANES) fn smoothTiles(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) n:vec3u,@builtin(local_invocation_index) lane:u32){
  let R=umLevel(UM_BL);let rhs=R.b[UM_BRHS];let low=R.m[UM_BRHS];let src=R.p[UM_BSRC];let to=R.p[UM_BSRC^1u];
@@ -790,6 +805,7 @@ fn umLV(a:u32,rhsA:u32,lowA:u32,start:u32,lane:u32)->u32{
   /** Per solve, after RHS assembly and before the initial measure: the native
    * n/4 geometry and the continuation's setup. Ungated. */
   encodeSetup(encoder: GPUCommandEncoder): void {
+    encoder.clearBuffer(this.rounding);
     // One pass with the native setup; only its tile-list clears end it.
     this.batch(encoder, "setup", passes => { this.dispatch(passes, "setup"); this.boundPass = undefined; this.native.encodeSetup(encoder, this.uniformGroup, passes); });
   }

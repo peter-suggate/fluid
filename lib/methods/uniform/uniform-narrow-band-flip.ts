@@ -39,6 +39,12 @@ export class UniformNarrowBandFlip {
  private particleDispatchPipeline!:GPUComputePipeline;
  private particleDispatchGroup!:GPUBindGroup;
  readonly surfaceSource:{contourVertexPhi:true;vertexPhi:GPUTexture;openFraction:GPUTexture;cellSize_m:readonly [number,number,number]};
+ /** The nodal metric bank, valid after redistance until reconstruction reuses it. */
+ get pressureDistance():{buffer:GPUBuffer;first:number;reach:number}{
+  const d=this.ownership.capacity.lattice.dimensions,cells=d.reduce((a,b)=>a*b,1),tiles=cells/64;
+  const first=2*cells+2*tiles,vertices=d.reduce((a,b)=>a*(b+1),1);
+  return {buffer:this.bins,first,reach:first+vertices+cells+4+2*tiles};
+ }
  get coarseOnly():boolean{return this.ownership.capacity.fineTiles===0;}
  count=0;
  reseedClipped=0;
@@ -491,10 +497,31 @@ ${subgroups?/* wgsl */`
 fn seedShell(lattice:vec3f)->vec4f{
  var q=lattice;var d=particleDepth(q);
  for(var i=0u;i<4u;i++){
-  let rise=d+NB_SEED_DEPTH;if(rise<=1e-3){break;}
-  let g=vec3f(particleDepth(q+vec3f(0.5,0,0))-particleDepth(q-vec3f(0.5,0,0)),particleDepth(q+vec3f(0,0.5,0))-particleDepth(q-vec3f(0,0.5,0)),particleDepth(q+vec3f(0,0,0.5))-particleDepth(q-vec3f(0,0,0.5)));
+  if(d+NB_SEED_DEPTH<=1e-3){break;}
+  var g=vec3f(0);var curvature=0.0;
+  for(var axis=0u;axis<3u;axis++){
+   var delta=vec3f(0);delta[axis]=0.5;var low=q-delta;var high=q+delta;
+   // The metric field inside a voxel is not a liquid distance. Continue
+   // the open side's derivative instead of pushing seeds into the wall.
+   if(!nbSurfaceSegmentOpen(q,low)){low=q;}
+   if(!nbSurfaceSegmentOpen(q,high)){high=q;}
+   let below=particleDepth(low);let above=particleDepth(high);
+   g[axis]=(above-below)/max(high[axis]-low[axis],1e-6);
+   if(low[axis]<q[axis]&&high[axis]>q[axis]){curvature+=abs(above+below-2.0*d);}
+  }
   let g2=dot(g,g);if(g2<1e-8){break;}
-  let next=clamp(q-min(rise,0.5)*g*inverseSqrt(g2),vec3f(0.01),vec3f(UM_D)-0.01);
+  let normal=g*inverseSqrt(g2);
+  // The chord fit assumes a plane on the quarter-cell lattice. Preserve
+  // the sphere fit on curved interfaces (notably small moving drops), with
+  // a continuous transition above the metric field's rounding noise.
+  let planar=1.0-smoothstep(1e-4,1e-3,curvature);
+  let rise=d+mix(NB_SEED_DEPTH,nbPlanarSeedDepth(q,d,normal),planar);
+  if(rise<=1e-3){break;}
+  let next=clamp(q-min(rise,0.5)*normal,vec3f(0.01),vec3f(UM_D)-0.01);
+  // A sphere that cannot reach its fitted depth would protrude above the
+  // authored surface (especially in sub-cell films over voxel ledges).
+  // Leave that unresolved film to the level set instead of adding liquid.
+  if(!nbSurfaceSegmentOpen(q,next)){return vec4f(-1,0,0,1);}
   let depth=particleDepth(next);if(depth>=d){break;}
   q=next;d=depth;
  }

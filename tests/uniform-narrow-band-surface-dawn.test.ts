@@ -262,6 +262,8 @@ fn bulkDepth(p:vec3f)->f32{return bandPhi(p);}
 fn nbAdaptive()->bool{return false;}
 fn nbTheta(p:vec3f)->f32{return 1.0;}
 fn nbSurfaceTheta(p:vec3f)->f32{return 1.0;}
+// This fixture has no embedded solids; wall fit is covered by the voxel-distance lane.
+fn nbSurfaceSeedFits(q:vec3f,d:f32)->bool{return true;}
 ${narrowBandParticleSurfaceWGSL}
 ${narrowBandTiledSurfaceWGSL}
 @compute @workgroup_size(64) fn serial(@builtin(global_invocation_id) gid:vec3u){

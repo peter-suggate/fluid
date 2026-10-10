@@ -12,6 +12,27 @@ export const narrowBandParticleSurfaceWGSL=/* wgsl */`
 // phi' as it is; liquid a source adds this step joins after the union.
 const NB_SURFACE_RADIUS=${NARROW_BAND_SURFACE_RADIUS};
 const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
+// Fit the local plane to the *interpolated vertex field*. Placing a
+// sphere's analytic zero on the plane is exact only when the waterline is
+// a lattice vertex: between vertices the chord of its distance field sinks
+// the surface. The tangential quarter-cell offsets contribute 1/8 to r^2.
+fn nbPlanarSeedDepth(q:vec3f,d:f32,n:vec3f)->f32{
+ let fraction=fract(q-d*n);var offsets:array<f32,8>;var weights:array<f32,8>;
+ for(var k=0u;k<8u;k++){
+  let corner=umCorner(k,2u);let w=select(1.0-fraction,fraction,corner!=vec3u(0));
+  offsets[k]=dot(vec3f(corner)-fraction,n);weights[k]=w.x*w.y*w.z;
+ }
+ var depth=NB_SEED_DEPTH;
+ for(var i=0u;i<4u;i++){
+  var value=0.0;var derivative=0.0;
+  for(var k=0u;k<8u;k++){
+   let offset=depth+offsets[k];let radius=sqrt(0.125+offset*offset);
+   value+=weights[k]*radius;derivative+=weights[k]*offset/radius;
+  }
+  depth-=(value-NB_SURFACE_RADIUS)/max(derivative,1e-6);
+ }
+ return depth;
+}
 fn particleSurfaceBulk(q:vec3i)->vec2f{
  if(nbAdaptive()&&nbTheta(vec3f(q))<=0.0){return vec2f(bandPhi(vec3f(q)),0.0);}
  let bulk=bulkDepth(vec3f(q));let tile=umTileAt(min(vec3u(q)/4u,UM_T-1u));
@@ -63,6 +84,12 @@ fn particleSurfaceFinish(q:vec3i,bulk:f32,nearest2:f32)->f32{
  // or newly activated region before its surface samples exist.
  if(nbAdaptive()&&nearest2>=4.0){return nbSourcePhi(vec3f(q),bulk);}
  let particle=min(bulk+1.0,sqrt(nearest2)-NB_SURFACE_RADIUS);
+ // Shrinking assumes the outer particle layer could be seeded here. A
+ // voxel ledge can leave less room than a fitted sphere needs; nearby deep
+ // water's samples must not erase that unrepresented shallow film. Its
+ // advected level set still moves normally, and incoming particles may add
+ // liquid (particle <= bulk) across this contact.
+ if(particle>bulk&&!nbSurfaceSeedFits(vec3f(q),bulk)){return nbSourcePhi(vec3f(q),bulk);}
  // A transported particle may add liquid throughout its sphere support.
  // Erasure needs the complete seeded footprint, inside the overlap collar.
  let theta=select(nbTheta(vec3f(q)),nbSurfaceTheta(vec3f(q)),particle>bulk);
