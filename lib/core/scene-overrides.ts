@@ -124,11 +124,8 @@ function shortValue(raw: string, boolish = false) {
 }
 
 function methodParamOverride(key: string, raw: string): SceneOverride | undefined {
-  // `param.<methodId>.<paramKey>`; a method id never contains a dot, so the
-  // remainder after the second segment is the parameter key.
-  const [, methodId, ...rest] = key.split(".");
-  const paramKey = rest.join(".");
-  const method = registeredSimulationMethods().find((candidate) => candidate.id === methodId);
+  const method = getMethod(defaultMethodId());
+  const paramKey = key.slice("param.".length);
   const spec = method?.params.find((candidate) => candidate.key === paramKey);
   if (!method || !spec) return undefined;
   return {
@@ -267,7 +264,6 @@ export function countedSceneOverrides(overrides: readonly SceneOverride[]) {
 export interface SceneOverrideClearPlan {
   /** Absent when no scene-document key was among the cleared keys. */
   readonly scene?: SceneDescription;
-  readonly methodId?: string;
   readonly quality?: GPUQuality;
   /** `value` absent means the override is simply dropped to the preset chain. */
   readonly methodParams: readonly { readonly methodId: string; readonly key: string; readonly value?: MethodParamValue }[];
@@ -327,9 +323,8 @@ export function sceneOverrideClearPlan(
 
   for (const key of cleared) {
     if (key.startsWith("param.")) {
-      const [, methodId, ...rest] = key.split(".");
-      const paramKey = rest.join(".");
-      if (!registeredSimulationMethods().some((method) => method.id === methodId)) { reload.push(key); continue; }
+      const methodId = defaultMethodId(), paramKey = key.slice("param.".length);
+      if (!getMethod(methodId).params.some(spec => spec.key === paramKey)) { reload.push(key); continue; }
       // Restoring means the quality chain: no scene carries a solver baseline.
       methodParams.push({ methodId, key: paramKey, value: undefined });
       continue;
@@ -341,7 +336,6 @@ export function sceneOverrideClearPlan(
       case "gridSlice": ui.gridOverlaySlice = initialUI.gridOverlaySlice; break;
       case "layers": ui.visualLayers = initialUI.visualLayers; break;
       case "gridMode": ui.gridOverlayMode = initialUI.gridOverlayMode; break;
-      case "lensPhase": ui.gridOverlayLensPhase = initialUI.gridOverlayLensPhase; break;
       case "svoShadows": ui.svoShadowsEnabled = initialUI.svoShadowsEnabled; break;
       case "svoAO": ui.svoAmbientOcclusionEnabled = initialUI.svoAmbientOcclusionEnabled; break;
       case "svoPrimarySeamClosure": ui.silhouetteRefinementEnabled = initialUI.silhouetteRefinementEnabled; break;
@@ -375,7 +369,6 @@ export function sceneOverrideClearPlan(
 
   return {
     scene: baseScene && scene !== document.scene ? scene : undefined,
-    methodId: cleared.has("method") ? defaultMethodId() : undefined,
     quality: cleared.has("quality") ? "balanced" : undefined,
     methodParams,
     ui,

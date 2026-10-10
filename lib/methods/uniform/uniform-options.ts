@@ -24,12 +24,8 @@ export function uniformReferenceSolverOptions(
   const whole = (key: string) => Math.round(numberValue(values, params, key));
   return {
     activeRegion: values.activeRegion === "on",
-    densitySharpening: values.densitySharpening !== "off",
-    sharpeningMassCorrection: values.sharpeningMassCorrection !== "off",
     gammaDiffusionIterations: values.gammaDiffusion === "off"
       ? 0 : whole("gammaDiffusionIterations"),
-    sharpeningStrength: numberValue(values, params, "sharpeningStrength"),
-    sharpeningDistance: numberValue(values, params, "sharpeningDistance"),
     solidExcessCorrection: values.solidExcessCorrection !== "off",
     rigidCoupling: values.rigidCoupling !== "off",
     extensionFrontSweeps: whole("extensionFrontSweeps"),

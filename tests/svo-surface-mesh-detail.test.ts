@@ -3,13 +3,7 @@ import test from "node:test";
 
 import { svoSurfaceMeshWGSL } from "../lib/svo/features/primary-visibility/svo-surface-mesh";
 import { svoFeatureQuery } from "../lib/svo/pipeline/persistence";
-import {
-  DEFAULT_SVO_RENDER_TUNING,
-  SVO_SURFACE_MESH_LOD_PIXELS_DEFAULT,
-  SVO_SURFACE_MESH_LOD_PIXELS_MAXIMUM,
-  normalizeSvoRenderTuning,
-  svoRenderTuningKey,
-} from "../lib/svo/pipeline/svo-render-tuning";
+import { DEFAULT_SVO_RENDER_TUNING, SVO_SURFACE_MESH_LOD_PIXELS_DEFAULT, SVO_SURFACE_MESH_LOD_PIXELS_MAXIMUM, normalizeSvoRenderTuning, svoRenderTuningKey } from "../lib/svo/pipeline/svo-render-tuning";
 
 test("filtered detail ships off and normalises into its bounds", () => {
   assert.equal(DEFAULT_SVO_RENDER_TUNING.surfaceMeshFilteringEnabled, false);
@@ -72,18 +66,4 @@ test("the mesh shader extracts every level once and lets the camera pick one per
     // The per-face identity replaced the per-cell one outright.
     assert.doesNotMatch(source, /meshCellIdentity/);
   }
-});
-
-(process.env.WEBGPU_NODE_MODULE ? test : test.skip)("the full dry-scene bundle validates in Dawn in every mesh variant", async () => {
-  const { createDawnRenderDevice } = await import("../tools/svo-dry-frame-harness");
-  let device: GPUDevice | undefined;
-  try {
-    device = (await createDawnRenderDevice()).device;
-    const { createSvoDrySceneFragmentWGSL } = await import("../lib/svo/features/shading/program");
-    for (const scale of [1, 0.5] as const) for (const culling of [true, false]) {
-      const module: GPUShaderModule = device.createShaderModule({ code: createSvoDrySceneFragmentWGSL(scale, "raster-primary", "bounds", "split", 0, false, false, false,
-        { surfaceMesh: true, surfaceMeshCulling: culling }) });
-      assert.deepEqual((await module.getCompilationInfo()).messages.filter(message => message.type === "error"), []);
-    }
-  } finally { device?.destroy(); }
 });

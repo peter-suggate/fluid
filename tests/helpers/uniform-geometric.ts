@@ -5,16 +5,16 @@ import {requiredFluidDeviceLimits} from "../../lib/core/webgpu-device-limits";
 import {resolveMethodValues, type MethodParamValues} from "../../lib/core/method-contract";
 import type {SceneDescription} from "../../lib/core/model";
 import {createProcessRetainedDawnGPU} from "../../lib/harness/node-dawn-provider";
-import {uniformVolumeMethod} from "../../lib/methods/uniform/uniform-volume-method";
+import {uniformNarrowBandMethod} from "../../lib/methods/uniform/uniform-narrow-band-method";
 import type {WebGPUUniformReferenceSolver} from "../../lib/methods/uniform/webgpu-uniform-reference";
 import {uniformMixedSolidWGSL, type UniformMixedSolid} from "../../lib/methods/uniform/uniform-mixed-solid.wgsl";
 import {readMixedTexture,readMixedTileWords} from "./uniform-mixed-native-fields";
 
 /** The production method, including its defaults and mixed ownership. */
 export async function createUniformSolver(device:GPUDevice,scene:SceneDescription,values:MethodParamValues={}){
- assert.equal(uniformVolumeMethod.id,"uniform-volume");
- return await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",
-  resolveMethodValues(uniformVolumeMethod,"balanced",{timeStep:"scene",...values}),undefined,()=>{}) as WebGPUUniformReferenceSolver;
+ assert.equal(uniformNarrowBandMethod.id,"uniform-narrow-band-flip");
+ return await uniformNarrowBandMethod.createSolverAsync!(device,scene,"balanced",
+  resolveMethodValues(uniformNarrowBandMethod,"balanced",{...uniformNarrowBandMethod.appDefaults,timeStep:"scene",...values}),undefined,()=>{}) as WebGPUUniformReferenceSolver;
 }
 
 export async function withUniformDevice(label:string,run:(device:GPUDevice)=>Promise<void>,features:readonly GPUFeatureName[]=[]){

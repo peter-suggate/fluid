@@ -24,7 +24,6 @@
 
 export type RenderStageSwitchId =
   | "sparse-world-build"
-  | "fluid-coverage"
   | "primary-entry-prepass"
   | "primary-traversal"
   | "scene-primitive"
@@ -42,7 +41,6 @@ export type RenderStageSwitchId =
 
 export const RENDER_STAGE_SWITCH_IDS: readonly RenderStageSwitchId[] = Object.freeze([
   "sparse-world-build",
-  "fluid-coverage",
   "primary-entry-prepass",
   "primary-traversal",
   "scene-primitive",

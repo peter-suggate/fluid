@@ -1,5 +1,4 @@
 import { cloneScene, defaultScene, type CameraState, type InitialLiquidCylinder, type InitialLiquidSphere, type RigidBodyDescription, type SceneDescription } from "./model";
-import type { MethodProfile } from "./method-contract";
 import type { TerrainDescription } from "./terrain";
 import { studioStageSceneryGraph } from "./studio-stage-scene";
 
@@ -152,32 +151,6 @@ export function cm12Figure(id: string): Cm12Figure {
 /** The cell counts a figure is actually simulated at, 2D cases included. */
 export function cm12Grid(figure: Cm12Figure): readonly [number, number, number] {
   return [figure.grid[0], figure.grid[1], figure.grid[2] ?? CM12_SLAB_DEPTH_CELLS];
-}
-
-/**
- * The paper's parameter tuple, pinned.
- *
- * Every value here is quoted in Sec. 3 or Sec. 4 rather than chosen: D and S
- * from Sec. 4 and Sec. 3.6, the 1/30 s step from Sec. 4, and the three
- * ablatable stages left on because the paper's results are the un-ablated
- * method. `densityPostProcessing` is the only entry that varies, because Sec. 4
- * says it "was turned off unless otherwise stated" and Figure 6 states it.
- */
-export function cm12MethodProfile(figure: Cm12Figure): MethodProfile {
-  return Object.freeze({
-    methodId: "uniform",
-    quality: "balanced",
-    overrides: Object.freeze({
-      timeStep: "paper",
-      sharpeningDistance: CM12_TRACE_DISTANCE_CELLS,
-      sharpeningStrength: CM12_SOLID_EXCESS_STRENGTH,
-      densitySharpening: "on",
-      sharpeningMassCorrection: "on",
-      gammaDiffusion: "on",
-      solidExcessCorrection: "on",
-      densityPostProcessing: figure.densityPostProcessing ? "on" : "off",
-    }),
-  });
 }
 
 /**

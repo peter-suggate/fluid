@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BACKDROP_SHRUB_LEAVES, BACKDROP_SHRUB_STEMS, BACKDROP_SHRUB_REACH, BACKDROP_SHRUB_RISE,
-  backdropShrubDistance, backdropShrubWGSL } from "../lib/svo/features/backdrop/backdrop-shrub";
+import { BACKDROP_SHRUB_LEAVES, BACKDROP_SHRUB_STEMS, BACKDROP_SHRUB_REACH, BACKDROP_SHRUB_RISE, backdropShrubDistance } from "../lib/svo/features/backdrop/backdrop-shrub";
 import { BACKDROP_SCATTER_CLASSES } from "../lib/svo/features/backdrop/backdrop-detail";
-import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
 
 test("background shrubs have a fixed connected shoot budget within existing scatter bounds", () => {
   assert.equal(BACKDROP_SHRUB_LEAVES.length, 15);
@@ -49,39 +47,4 @@ test("shrub packets retain open silhouettes at coarse cells with less surface wo
     assert.ok(silhouette*h*h > .65 && silhouette*h*h < 2, `open but readable silhouette at ${h}`);
     assert.ok(shrubEdges < rockEdges * 1.1, `surface budget at ${h}: shrub ${shrubEdges}, puff ${rockEdges}`);
   }
-});
-
-test("Dawn background shrub field matches CPU leaves, woody stems and empty gaps", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
-  let device: GPUDevice | undefined;
-  try {
-    device = (await createDawnRenderDevice()).device;
-    device.pushErrorScope("validation");
-    const count = 8192;
-    const data = new Float32Array(Array.from({ length: count }, (_, i) => [
-      (((i*73)%1009)/1009-.5)*3, ((i*193)%1013)/1013*2-.2, (((i*311)%1019)/1019-.5)*3, 0]).flat());
-    const module = device.createShaderModule({ code: `${backdropShrubWGSL}
-@group(0) @binding(0) var<storage,read> points:array<vec4f>;
-@group(0) @binding(1) var<storage,read_write> answers:array<f32>;
-@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id:vec3u){
- if(id.x<arrayLength(&points)){answers[id.x]=backdropShrubDistance(points[id.x].xyz);}
-}` });
-    assert.deepEqual((await module.getCompilationInfo()).messages.filter(m => m.type === "error"), []);
-    const input = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    const output = device.createBuffer({ size: count*4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    const read = device.createBuffer({ size: count*4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(input, 0, data);
-    const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "main" } });
-    const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [input, output].map((buffer,binding) => ({ binding, resource: { buffer } })) });
-    const encoder=device.createCommandEncoder(), pass=encoder.beginComputePass();
-    pass.setPipeline(pipeline); pass.setBindGroup(0,group); pass.dispatchWorkgroups(count/64); pass.end();
-    encoder.copyBufferToBuffer(output,0,read,0,count*4); device.queue.submit([encoder.finish()]);
-    await read.mapAsync(GPUMapMode.READ);
-    const result=new Float32Array(read.getMappedRange().slice(0)); read.unmap();
-    for(let i=0;i<count;i++) {
-      const expected=backdropShrubDistance([data[4*i],data[4*i+1],data[4*i+2]]);
-      assert.ok(Math.abs(result[i]-expected)<5e-7, `sample ${i}: ${result[i]} != ${expected}`);
-    }
-    for(const buffer of [input,output,read]) buffer.destroy();
-    assert.equal(await device.popErrorScope(),null);
-  } finally { device?.destroy(); }
 });

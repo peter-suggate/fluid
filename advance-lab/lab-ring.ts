@@ -9,7 +9,7 @@ import { regionEntity } from "../lib/features/refinement-region/policy";
 import { regionDrawWedge } from "../lib/features/refinement-region/ring";
 import {
   ADVANCE_SURFACE_VIEWS, type AdvanceSurfaceViewId,
-} from "../lib/methods/adaptive-volume/features/advance-slice/definition";
+} from "./definition";
 import { labRegionSpace, type LabRegionDocument } from "./lab-region-space";
 import { SLICE_OVERLAY_ORDER, SLICE_OVERLAYS, type SliceOverlayId } from "./lenses";
 

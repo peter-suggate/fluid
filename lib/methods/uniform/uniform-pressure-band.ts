@@ -25,16 +25,9 @@ export interface UniformPressureBandSchedule {
   * converge ~0.2 per cycle at 0.6 but only ~0.5 at 0.5 (0.4 stalls); the
   * cm12 figure-12 surface band is ~0.1 at 0.5 and ~0.2 at 0.6. */
  coarseScale:number;
- /** A band of at most this many slots (the buffered estimate the launch
-  * widths use) runs each level's consecutive half sweeps as one one-group
-  * launch: the same kernels in the same order, a storage barrier where a
-  * launch boundary was, 35 launches for 95. One group is serial over the
-  * slots (128-class pool, band solve of 1 / 4 / 27 band tiles: 0.50 / 0.59 /
-  * 1.65 ms fused against 0.88 / 1.03 / 0.99), so only a band of a few tiles
-  * gains. 0 never fuses. */
- fusedSlots:number;
+
 }
-export const UNIFORM_PRESSURE_BAND_SCHEDULE:UniformPressureBandSchedule={cycles:4,fineSweeps:3,middleSweeps:2,coarseSweeps:16,coarseScale:0.6,fusedSlots:8};
+export const UNIFORM_PRESSURE_BAND_SCHEDULE:UniformPressureBandSchedule={cycles:4,fineSweeps:3,middleSweeps:2,coarseSweeps:16,coarseScale:0.6};
 
 /** Workgroups of the tile classification pass at most: a grid-stride launch
  * over the simulation's h tile worklist, as wide as the ownership's buffered
@@ -51,7 +44,6 @@ const CELL_BLOCK=4;
 const CELL_GROUPS=2048;
 /** Slots the one group of a fused h launch relaxes at once: 256 lanes, the
  * workgroup size every WebGPU device has. */
-const FUSED_BLOCK=8;
 /** The single-workgroup 4h aggregate solve: up to this many lanes (the
  * device's workgroup limit), and the aggregates it solves from registers
  * (fig-9's band holds 3582; a device with less workgroup memory holds
@@ -67,12 +59,6 @@ const FUSED_BLOCK=8;
  * colour's rows couple only to the other colour's, so neither path's order
  * changes a value. */
 const COARSE_SOLVE_LANES=1024,COARSE_SOLVE_SLOTS=4096;
-/** Narrow forms of that solve, by lanes: a band of at most as many slots
- * (the buffered estimate) launches the narrowest that holds it, a position
- * to a lane. Every barrier of the one workgroup costs its lanes, whether or
- * not they hold a row, and the solve is `2 coarseSweeps` of them. Each
- * form is complete for any band (a larger one streams its rows). */
-const COARSE_SMALL_LANES=[64,256];
 /** A band of more slots than this (the buffered estimate) runs the 4h
  * level as a launch per half sweep across workgroups instead (coarseSweep):
  * the same red-black updates. One workgroup streams a large band's rows
@@ -121,7 +107,7 @@ export interface UniformPressureBandFields {
   * (1/s, the h-equivalent pressure tolerance), then 1/h^2 per axis (f32):
   * a face whose coefficient is exactly that is flagged, and its sweeps skip
   * the coefficient load. Then four u32 the band writes itself: its slot
-  * capacity, 64 and 8 times it, and a spare (64 bytes in all). */
+  * capacity, 64 and 8 times it, and the presentation word offset (64 bytes in all). */
  params:GPUBuffer;
  /** The stage grids' band section: the live band pressures land at this
   * word of the buffer (uniform-stage-grids). */
@@ -245,8 +231,8 @@ export class UniformPressureBand {
   this.rows=device.createBuffer({label:"Uniform pressure band rows",size:bytes.rows,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
   this.coarse=device.createBuffer({label:"Uniform pressure band aggregates",size:bytes.aggregates,usage:GPUBufferUsage.STORAGE});
   this.solve=device.createBuffer({label:"Uniform pressure band iterate",size:bytes.iterate,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-  // BandParams.capacity: slots, rows per field, 2h aggregates per field.
-  device.queue.writeBuffer(this.fields.params,48,new Uint32Array([capacity,rows,8*capacity,0]));
+  // BandParams.capacity: slots, rows per field, 2h aggregates per field, presentation offset.
+  device.queue.writeBuffer(this.fields.params,48,new Uint32Array([capacity,rows,8*capacity,this.fields.presentation.word]));
   const f=this.fields,cells=c.owners,faces=d[0]!*d[1]!+d[0]!*d[2]!+d[1]!*d[2]!;
   const scalars=(view:GPUBufferBinding,count:number):GPUBufferBinding=>{
    const offset=view.offset??0;if((view.size??view.buffer.size-offset)<4*count)throw new Error("Pressure band field view is too small");return {buffer:view.buffer,offset,size:4*count};
@@ -291,7 +277,7 @@ struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u}
 // baked): CAP slots, N = 64 CAP rows per field, M = 8 CAP 2h aggregates.
 fn bCap()->u32{return params.capacity.x;}
 fn bN()->u32{return params.capacity.y;}
-const LIST:u32=${HEADER}u;const SLOTS:u32=${HEADER+this.listSlots}u;const HISTORY:u32=${HISTORY_WORD}u;const CYCLE:u32=4u;const DONE:u32=6u;
+const LIST:u32=${HEADER}u;const SLOTS:u32=${HEADER}u+UM_TILES;const HISTORY:u32=${HISTORY_WORD}u;const CYCLE:u32=4u;const DONE:u32=6u;
 const K_GHOST:u32=0u;const K_BAND:u32=1u;const K_WALL:u32=2u;const K_OPEN:u32=3u;const K_NEUMANN:u32=4u;const K_CLOSED:u32=5u;
 fn bLocal(lane:u32)->vec3u{return vec3u(lane%4u,(lane/4u)%4u,lane/16u);}
 // A slot's row of local cell l: colour-major, then the half sweep's lane order.
@@ -517,8 +503,7 @@ var<workgroup> bSweepCount:u32;
   if(bHalves>1u){storageBarrier();}
  }
 }`;
-  const coarseForms:[string,number,number,number][]=[["coarseSolve",lanes,held,shared],
-   ...COARSE_SMALL_LANES.filter(n=>n<lanes).map(n=>[`coarseSolve${n}`,n,1,n] as [string,number,number,number])];
+  const coarseForms:[string,number,number,number][]=[["coarseSolve",lanes,held,shared]];
   const sources:Record<string,string>={
    list:header+surface+/* wgsl */`
 @group(1) @binding(0) var<uniform> params:BandParams;
@@ -838,7 +823,7 @@ fn bCoarseCarry(b:vec3i,w:vec3f)->BCarry{
   rows[cell]=bRhs(cell)+((sums.x+sums.z)+sums.y-open*own);
  }
 }`,
-   sweep:sweep(CELL_BLOCK),sweepWide:sweep(FUSED_BLOCK),
+   sweep:sweep(CELL_BLOCK),
    // h residual into the 2h aggregates, and its largest liquid row into
    // cycle bCycle's history word. With every 2h correction zero, the first
    // red half sweep of the 2h level is local: it runs here.
@@ -1140,7 +1125,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
 @group(1) @binding(21) var<storage,read_write> presented:array<f32>;
 // The live band pressures (start plus correction) into the stage grids' band section.
 @compute @workgroup_size(64) fn main(${slots}){
- for(var s=group.x;s<bCount();s+=groups.x){let cell=s*64u+bRow(bLocal(lane));presented[${this.fields.presentation.word}u+s*64u+lane]=bBase(cell)+solve[cell];}
+ for(var s=group.x;s<bCount();s+=groups.x){let cell=s*64u+bRow(bLocal(lane));presented[params.capacity.w+s*64u+lane]=bBase(cell)+solve[cell];}
 }`,
   };
   const entryOf=(name:string)=>`band${name[0]!.toUpperCase()}${name.slice(1)}`;
@@ -1149,12 +1134,10 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   // measure after each encodable cycle count.
   const variants:Record<string,[string,Record<string,number>][]>={
    sweep:[...[0,1].map(c=>[`${c}`,{bColour:c}] as [string,Record<string,number>]),...[0,1].map(c=>[`S${c}`,{bColour:c,bSettle:1}] as [string,Record<string,number>])],
-   // F: a cycle's h half sweeps before or after the correction, in one launch. SF: the two settling ones.
-   sweepWide:[["F",{bColour:0,bHalves:2*schedule.fineSweeps}],["SF",{bColour:0,bSettle:1,bHalves:2}]],
    // D: the descent's half sweeps after the restriction, black first. U: the ascent's, the prolonging red first.
    coarseSweep:[0,1].map(c=>[`${c}`,{bColour:c}] as [string,Record<string,number>]),
-   middleSweep:[...[0,1].map(c=>[`${c}`,{bColour:c}] as [string,Record<string,number>]),["P",{bColour:0,bProlong:1}],["D",{bColour:1,bHalves:2*schedule.middleSweeps-1}],["U",{bColour:0,bProlong:1,bHalves:2*schedule.middleSweeps}]],
-   restrict:range(schedule.cycles).map(k=>[`@${k}`,{bCycle:k}]),measure:range(schedule.cycles,1).map(k=>[`@${k}`,{bCycles:k}]),
+   middleSweep:[...[0,1].map(c=>[`${c}`,{bColour:c}] as [string,Record<string,number>]),["P",{bColour:0,bProlong:1}]],
+   restrict:range(schedule.cycles).map(k=>[`@${k}`,{bCycle:k}]),measure:[["",{bCycles:schedule.cycles}]],
   };
   if(!this.spatialOrder)for(const key of ["listPrefix","listOffsets","listScatter"])delete sources[key];
   await Promise.all(Object.entries(sources).map(async([name,code])=>{
@@ -1217,27 +1200,21 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  encodeSolve(encoder:GPUCommandEncoder):void{
   if(this.empty)return;
   const s=this.schedule;const pass=encoder.beginComputePass({label:"Uniform pressure band solve"});
-  // A small band's launches are a handful of workgroups each: one group
-  // then runs a level's consecutive half sweeps in one launch.
-  const fused=this.workSlots<=s.fusedSlots;
-  const fine=()=>{if(fused)this.dispatch(pass,"sweepWideF",1);else this.sweep(pass,"sweep","cells",s.fineSweeps);};
-  // The 4h level: the narrowest one-workgroup form that holds the band, or
-  // a large band's launches.
+  const fine=()=>this.sweep(pass,"sweep","cells",s.fineSweeps);
   const wide=this.workSlots>COARSE_WIDE_SLOTS;
-  const narrow=COARSE_SMALL_LANES.find(n=>this.workSlots<=n&&this.pipelines.has(`coarseSolve${n}`)),coarse=narrow?`coarseSolve${narrow}`:"coarseSolve";
   this.dispatch(pass,"init","slots");this.dispatch(pass,"rebase","slots");
   // Shut rows exist only beside a solid.
-  if(this.solid?.present){if(fused)this.dispatch(pass,"sweepWideSF",1);else{this.dispatch(pass,"sweepS0","cells");this.dispatch(pass,"sweepS1","cells");}}
+  if(this.solid?.present){this.dispatch(pass,"sweepS0","cells");this.dispatch(pass,"sweepS1","cells");}
   for(let cycle=0;cycle<s.cycles;cycle++){
    fine();
    this.dispatch(pass,`restrict@${cycle}`,"slots");
-   if(fused)this.dispatch(pass,"middleSweepD",1);else{this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps-1);}
+   this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps-1);
    this.dispatch(pass,"middleRestrict","middle");
-   if(wide)this.sweep(pass,"coarseSweep","coarse",s.coarseSweeps);else this.dispatch(pass,coarse,1);
-   if(fused)this.dispatch(pass,"middleSweepU",1);else{this.dispatch(pass,"middleSweepP","middle");this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps-1);}
+   if(wide)this.sweep(pass,"coarseSweep","coarse",s.coarseSweeps);else this.dispatch(pass,"coarseSolve",1);
+   this.dispatch(pass,"middleSweepP","middle");this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps-1);
    this.dispatch(pass,"middleProlong","slots");fine();
   }
-  this.dispatch(pass,`measure@${s.cycles}`,"slots");
+  this.dispatch(pass,"measure","slots");
   pass.end();
   const project=encoder.beginComputePass({label:"Uniform pressure band projection"});this.dispatch(project,"copy","slots");this.dispatch(project,"project","slots");this.dispatch(project,"present","slots");project.end();
  }

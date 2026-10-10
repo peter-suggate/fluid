@@ -206,10 +206,6 @@ export function performEditorAction(
         ui.setPixelTraceEnabled(true);
         ui.setPixelTracePinned(false);
         ui.requestPixelTracePin(request);
-      } else {
-        ui.setFluidCellTraceEnabled(true);
-        ui.setFluidCellTracePinned(false);
-        ui.requestFluidCellTracePin(request);
       }
       return;
     }

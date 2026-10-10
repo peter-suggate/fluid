@@ -37,7 +37,6 @@ export type EditorTargetKind =
   | "entity"
   | "solid-voxel"
   | "tank-wall"
-  | "fluid-cell"
   | "terrain"
   | "room";
 

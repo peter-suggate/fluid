@@ -59,7 +59,7 @@ fn umNegativeIndex(origin:vec3u,axis:u32)->u32{
 // Tiles, in Chebyshev tile distance, that any characteristic of this frame
 // can reach, including cubic taps, wall continuation and the Newton search.
 fn umCertificateRadius(speed:f32)->u32{
- let travel=speed*policy.step.x/${Math.min(...h)};
+ let travel=speed*policy.step.x/umSceneMinimumSpacing();
  return u32(min(ceil(travel*1.00001/4.0)+2.0,1e8));
 }
 // Signed per-axis reach, in tiles. A departure moves by -v*dt and every
@@ -121,13 +121,13 @@ var<workgroup> seedSpeed:atomic<u32>;
   var occupied=false;
   if(width==4u){
    ${this.surfaceOnly?"":`occupied=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(origin),0).x!=0.0;`}
-   for(var k=0u;k<8u;k++){occupied=occupied||umLoadCorner(origin+umCorner(k,2u)*4u)<${16*Math.max(...h)};}
+   for(var k=0u;k<8u;k++){occupied=occupied||umLoadCorner(origin+umCorner(k,2u)*4u)<(16.0*umSceneMaximumSpacing());}
   }else{
    ${this.surfaceOnly?"":"occupied=textureLoad(volume,vec3i(origin),0).x!=0.0;"}
    for(var k=0u;k<8u;k++){
     // Every vertex of a unit-stencil tile is stored.
     let vertex=origin+umCorner(k,2u)*width;
-    occupied=occupied||select(umVertexValue(vertex),umLoadVertex(vertex),unit)<${4*Math.max(...h)}*f32(width);
+    occupied=occupied||select(umVertexValue(vertex),umLoadVertex(vertex),unit)<(4.0*umSceneMaximumSpacing())*f32(width);
    }
   }
   if(occupied){atomicOr(&seeded[slot],3u);}
@@ -167,7 +167,7 @@ var<workgroup> tileReach:array<atomic<u32>,384>;
  for(var k=0u;k<6u;k++){atomicStore(&tileReach[64u*k+lane],0u);}
  workgroupBarrier();
  if(owner.width!=0u){
-  let origin=umOrigin(owner);let unit=umTileMaximumWidth(owner.tile)==1u;let scale=policy.step.x/${Math.min(...h)};
+  let origin=umOrigin(owner);let unit=umTileMaximumWidth(owner.tile)==1u;let scale=policy.step.x/umSceneMinimumSpacing();
   for(var axis=0u;axis<3u;axis++){
    let e=umSignedFaceExtent(unit,origin,axis);
    // NaN fails both comparisons: it saturates.

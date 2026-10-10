@@ -286,19 +286,7 @@ export interface SceneDescription {
   rigidBodies: RigidBodyDescription[];
 }
 
-/**
- * A drawn box that bounds how finely or coarsely the pressure octree resolves
- * its fully contained leaves.
- *
- * Deliberately declarative about *meaning* rather than about machinery: `rule`
- * names what the box is for, so the next thing worth declaring over a region —
- * a viscosity, a solve budget, a visualization mask — arrives as another rule
- * rather than as another parallel list of boxes. Today there is exactly one.
- *
- * See `lib/core/refinement-regions.ts` for the ladder and the lattice, and
- * `lib/methods/octree-shared/octree-refinement-regions.ts` for the containment
- * contract and for why this is a uniform-tier input.
- */
+/** An authored box carrying lower and upper fluid cell-size bounds. */
 export interface FluidRefinementRegion {
   id: string;
   min_m: Vec3;

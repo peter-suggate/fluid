@@ -80,11 +80,6 @@ function snapshot(runtime: FluidLabRenderer): WebGPURenderWorkerSnapshot {
     pixelTraceStatus: runtime.pixelTraceStatus,
     pixelTraceAnswersRequest: runtime.pixelTraceAnswersRequest,
     pixelTraceStale: runtime.pixelTraceStale,
-    latestFluidCellTrace: runtime.latestFluidCellTrace,
-    fluidCellTraceRevision: runtime.fluidCellTraceRevision,
-    fluidCellTraceReady: runtime.fluidCellTraceReady,
-    fluidCellTraceFineBand: runtime.fluidCellTraceFineBand,
-    fluidCellTraceDomain: runtime.fluidCellTraceDomain,
     rigidBodyPoses: runtime.rigidBodyPoses,
     rigidBodyPoseRevision: runtime.rigidBodyPoseRevision,
   };
@@ -115,10 +110,7 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       (loads) => post({ type: "rigid-loads", loads }),
       (time_s) => post({ type: "advance-completed", time_s }),
       (status) => post({ type: "effective-renderer-status", status }),
-      (journal) => post({ type: "pressure-journal", journal }),
-      (receipt, layers) => post({ type: "stage-lens", receipt, layers }),
     );
-    renderer.enableSolverPipelineWarmup();
     post({ type: "attached" });
     return;
   }

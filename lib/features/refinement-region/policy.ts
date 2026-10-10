@@ -40,27 +40,7 @@ function dyadicFloor(value: number): number {
   return 2 ** Math.floor(Math.log2(value) + TOLERANCE);
 }
 
-/**
- * The lattice a region's sides land on: **the brick**, not the region's own
- * floor cell.
- *
- * The old step was the region's smallest allowed cell, so a region asking for
- * `MIN = 1` snapped to one finest cell — which is why resizing a box in 3-D
- * felt smooth rather than deliberate. The solver does not bind at that
- * granularity. `cellSizeBoundsForBrick`
- * (`lib/methods/adaptive-volume/sparse-cm12-refinement-regions.ts`) raises the
- * **floor** for every brick the region *intersects* and lowers the **ceiling**
- * only for bricks it fully *contains*; `region_bounds` in
- * `rust/crates/fluid-core/src/resolution.rs` runs the same test with `B = 8`.
- * So an edge inside a brick over-applies the floor and does nothing at all for
- * the ceiling — it is not a distinction the solver can honour.
- *
- * `max` of the two, because both constraints are powers of two: a floor coarser
- * than the brick still needs its own coarser lattice, and one finer than the
- * brick has nothing finer than the brick to land on. With the studio default
- * `MIN = 8` the step is unchanged, so the shipped 3-D behaviour moves only for
- * `MIN` of 1, 2 or 4 — which is the case Peter asked to fix.
- */
+/** Snap region sides to a brick boundary or their coarser requested floor. */
 export function regionSnapStep_cells(
   record: Pick<RefinementRegionRecord, "minimumCellSize_cells">,
   brick_cells: number,

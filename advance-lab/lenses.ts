@@ -9,8 +9,8 @@
  * What a lens *claims* is not in this file. The caption a stage reads under,
  * the marks its picture may put on a cell, what carrying one of them says and
  * the numbers each is cut at are all declarations about the encoder, and they
- * live beside it, in `lib/methods/adaptive-volume/features/advance-slice/` —
- * the per-stage half on `SPARSE_CM12_STAGES[stage].slice`, the thresholds as
+ * live in `advance-lab/` —
+ * the per-stage half on `ADVANCE_STAGE_DECLARATIONS[stage].slice`, the thresholds as
  * `ADVANCE_SLICE_THRESHOLDS`. What stays here is the drawing: the palette the
  * page resolves per theme, the canvas primitives, one `draw(c)` per stage, and
  * the predicate that answers each declared mark for the cell under the pointer.
@@ -34,15 +34,15 @@ import {
 } from "../lib/core/visualization-registry";
 import {
   ADVANCE_STAGE_ORDER, type AdvanceStageId,
-} from "../lib/methods/adaptive-volume/features/advance-slice/advance-work";
+} from "./advance-work";
 import {
   ADVANCE_REPRESENT_SLICE, ADVANCE_SLICE_THRESHOLDS,
   type AdvanceSliceDeclaration, type AdvanceSliceKey, type AdvanceSliceTone,
-} from "../lib/methods/adaptive-volume/features/advance-slice/definition";
+} from "./definition";
 import {
   advanceStageSlice,
-} from "../lib/methods/adaptive-volume/features/advance-slice/loop";
-import { sparseCM12Stage } from "../lib/methods/adaptive-volume/sparse-cm12-stages";
+} from "./loop";
+import { advanceStage } from "./advance-stages";
 import { fieldViewQuery } from "../lib/features/field-view/persistence";
 
 /**
@@ -892,7 +892,7 @@ export const SLICE_OVERLAYS: Readonly<Record<SliceOverlayId, SliceOverlay>> = {
  * The drawing half of every stage lens, and nothing else.
  *
  * What each mark is *called*, what it *means* and what colour role it takes
- * are declared beside the method, in `SPARSE_CM12_STAGES[stage].slice`. This
+ * are declared beside the method, in `ADVANCE_STAGE_DECLARATIONS[stage].slice`. This
  * table answers the other half: how the stage is painted, and — per declared
  * mark id — the one predicate that decides whether the cell under the pointer
  * carries it. The two are joined below, so a mark declared with no predicate,
@@ -1347,7 +1347,7 @@ export const ADVANCE_LENS_VIEWS: readonly FieldVisualization[] = Object.freeze([
   lensView(REPRESENT_LENS_MODE, "The state entering the advance",
     REPRESENT_LENS, "adaptivity", "grid"),
   ...ADVANCE_STAGE_ORDER.map((stage, at) => {
-    const declared = sparseCM12Stage(stage);
+    const declared = advanceStage(stage);
     const band = declared.band as keyof typeof BAND_TONE;
     return lensView(stage, `${at + 1}. ${declared.label}`,
       ADVANCE_LENSES[stage], BAND_TONE[band], BAND_ICON[band]);

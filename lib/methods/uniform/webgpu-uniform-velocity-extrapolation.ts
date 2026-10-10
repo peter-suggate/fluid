@@ -1,4 +1,3 @@
-import { uniformAbOn } from "./uniform-ab-switch";
 import type { UniformPageDomain } from "./uniform-page-domain";
 import { uniformVelocityPagedShader, uniformVelocityPageWorkgroups } from "./uniform-velocity-pages";
 import { UniformTexturePages } from "./uniform-texture-pages";
@@ -155,9 +154,9 @@ export class WebGPUUniformVelocityExtrapolator {
       && fieldPages?.nativeStorage !== false;
     // A 4³ fine workgroup samples a 4³ coarse stencil only for an exact 2:1
     // transfer. Window/page adapters retain their existing sampling path.
-    this.cacheFineHierarchy = !baselineForQA && uniformAbOn("extensioncache")
+    this.cacheFineHierarchy = !baselineForQA
       && nativeFullGrid && sourceAwareHierarchy && dims.every(d => d % 4 === 0);
-    this.cacheConvergence = !baselineForQA && uniformAbOn("frontreceipts") && nativeFullGrid;
+    this.cacheConvergence = !baselineForQA && nativeFullGrid;
     // Reused within each encode: source/open bits during seeding, then updated
     // distances and convergence bits before each subsequent FIM sweep.
     this.frontReceipts = device.createBuffer({
@@ -165,10 +164,10 @@ export class WebGPUUniformVelocityExtrapolator {
       size: this.cacheConvergence && !mixedOnly ? dims.reduce((n, d) => n * d, 16) : 16,
       usage: GPUBufferUsage.STORAGE,
     });
-    this.reuseConvergenceDistance = !baselineForQA && uniformAbOn("frontreuse") && nativeFullGrid;
+    this.reuseConvergenceDistance = !baselineForQA && nativeFullGrid;
     this.compactShell = sourceAwareHierarchy && dims.every(d => d % 4 === 0)
-      && !baselineForQA && uniformAbOn("shelllist") && nativeFullGrid;
-    this.shellHierarchy = !baselineForQA && uniformAbOn("shellhierarchy") && nativeFullGrid;
+      && !baselineForQA && nativeFullGrid;
+    this.shellHierarchy = !baselineForQA && nativeFullGrid;
     this.shellTiles = device.createBuffer({
       label: "Uniform extension shell list",
       size: this.compactShell && !mixedOnly ? 16 + 4 * dims.reduce((n, d) => n * Math.ceil(d / 4), 1) : 16,
@@ -536,7 +535,6 @@ export class WebGPUUniformVelocityExtrapolator {
         COMPACT_SHELL: Number(this.compactShell),
         SOURCE_AWARE_HIERARCHY: Number(this.sourceAwareHierarchy),
         SHELL_HIERARCHY: Number(this.shellHierarchy),
-        ROOT_NX: this.dims[0], ROOT_NY: this.dims[1], ROOT_NZ: this.dims[2],
       } },
     }, { priority: "critical", signal });
     if (this.mixedOnly) {

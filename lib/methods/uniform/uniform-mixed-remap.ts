@@ -161,7 +161,7 @@ export class UniformMixedRemap {
    {binding:8,resource:{buffer:this.worklist}},{binding:9,resource:{buffer:source.changes}},
    {binding:10,resource:{buffer:receipt.buffer,offset:receipt.offset,size:UNIFORM_MIXED_RELAYOUT_RECEIPT.words*4}}]})};
   if(this.targetGroup?.topology!==source.topology)this.targetGroup={topology:source.topology,group:uniformDetailGroup(this.device,{layout:this.ownership.bindLayout,entries:[
-   {binding:0,resource:{buffer:source.topology}},{binding:1,resource:{buffer:source.counts.buffer,offset:source.counts.offset,size:16}},{binding:2,resource:{buffer:source.support}}]})};
+   {binding:0,resource:{buffer:source.topology}},{binding:1,resource:{buffer:source.counts.buffer,offset:source.counts.offset,size:48}},{binding:2,resource:{buffer:source.support}}]})};
   const target=this.targetGroup.group.group;
   const grid=this.work??Math.min(REMAP_GRID,this.tiles);
   this.encodePass(encoder,false,target,extension,grid,this.listGroup.group);

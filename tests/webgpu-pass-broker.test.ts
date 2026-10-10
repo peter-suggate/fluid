@@ -350,76 +350,10 @@ test("raw command encoder access is an explicit pass boundary", () => {
 
 test("PassBroker cutover has no raw-encoder adapter or proxy facade", () => {
   const brokerSource = readFileSync(new URL("../lib/core/webgpu-pass-broker.ts", import.meta.url), "utf8");
-  const ownerPageSource = readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree-owner-pages.ts", import.meta.url), "utf8");
-  const powerDescriptorSource = readFileSync(
-    new URL("../lib/methods/power/webgpu-octree-power-descriptor.ts", import.meta.url), "utf8");
-  const powerTopologySource = readFileSync(
-    new URL("../lib/methods/power/webgpu-octree-power-topology.ts", import.meta.url), "utf8");
-  const structuredVelocitySource = readFileSync(
-    new URL("../lib/methods/power/webgpu-octree-structured-velocity-gpu.ts", import.meta.url), "utf8");
-  const structuredBoundarySource = readFileSync(
-    new URL("../lib/methods/power/webgpu-octree-structured-boundary.ts", import.meta.url), "utf8");
-  const structuredDynamicsSource = readFileSync(
-    new URL("../lib/methods/power/webgpu-octree-structured-dynamics.ts", import.meta.url), "utf8");
-  const fineTopologySource = readFileSync(
-    new URL("../lib/methods/octree-shared/webgpu-octree-fine-levelset-topology.ts", import.meta.url), "utf8");
-  const fineTransportSource = readFileSync(
-    new URL("../lib/methods/octree-shared/webgpu-octree-fine-levelset-transport.ts", import.meta.url), "utf8");
-  const spgridSource = readFileSync(
-    new URL("../lib/methods/power/webgpu-octree-spgrid-vcycle.ts", import.meta.url), "utf8");
-  const octreeSource = readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree.ts", import.meta.url), "utf8");
-  const advanceSource = readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
-
   for (const legacyName of ["PassBrokerSource", "withPassBroker", "commandEncoderFacade", "PASS_BROKER_OWNER",
     "legacy encoder boundary"]) {
     assert.doesNotMatch(brokerSource, new RegExp(legacyName), `${legacyName} must stay deleted`);
   }
   assert.match(brokerSource, /constructor\(private readonly encoder: GPUCommandEncoder[,)]/,
     "raw encoder access must go through the fencing commandEncoder boundary");
-  assert.match(ownerPageSource, /encodeInactiveCandidate\(broker: PassBroker\): void/);
-  assert.match(ownerPageSource, /encodeReadyCommit\(broker: PassBroker\): void/);
-  assert.match(ownerPageSource, /encodeAnalyticBootstrap\(broker: PassBroker\): void/);
-  assert.doesNotMatch(ownerPageSource, /GPUCommandEncoder \| PassBroker|PassBrokerSource|withPassBroker/);
-  for (const [name, source] of [
-    ["power descriptors", powerDescriptorSource],
-    ["power topology", powerTopologySource],
-    ["direct structured velocity", structuredVelocitySource],
-  ] as const) {
-    assert.match(source, /encode(?:RowDirectory)?\(broker: PassBroker/,
-      `${name} must consume the caller's shared broker`);
-    assert.doesNotMatch(source, /beginComputePass/,
-      `${name} must not own local compute passes after cutover`);
-  }
-  for (const [name, source] of [
-    ["structured boundary coefficients", structuredBoundarySource],
-    ["structured velocity dynamics", structuredDynamicsSource],
-  ] as const) {
-    assert.match(source, /encode[A-Za-z]*\(broker: PassBroker/,
-      `${name} must consume the caller's pressure-spine broker`);
-    assert.doesNotMatch(source, /beginComputePass|new PassBroker|commandEncoder\(\)/,
-      `${name} must not own a pass or construct a broker beneath the pressure spine`);
-  }
-  assert.match(fineTopologySource, /encode\(broker: PassBroker,/,
-    "fine topology publication must consume the caller's shared broker");
-  assert.match(fineTopologySource, /encodeFromAllInterfaceLeaves\(broker: PassBroker,/,
-    "fine interface seeding must consume the caller's shared broker");
-  assert.match(fineTopologySource, /encodeFinalizePublication\(broker: PassBroker,/,
-    "fine publication finalization must consume the caller's shared broker");
-  assert.doesNotMatch(fineTopologySource, /beginComputePass|encode(?:FromAllInterfaceLeaves|FinalizePublication)?\(encoder: GPUCommandEncoder/,
-    "fine topology must not retain standalone compute-pass ownership or raw encoder entry points");
-  assert.match(fineTransportSource, /encode\(broker: PassBroker,/,
-    "fine transport must consume the caller's shared broker");
-  assert.doesNotMatch(fineTransportSource, /beginComputePass|new PassBroker|GPUCommandEncoder/,
-    "fine transport must not retain standalone pass ownership or a raw encoder escape");
-  assert.doesNotMatch(fineTransportSource,
-    /broker\.fence\("fine transport publication complete"\)/,
-    "fine transport leaves pass ownership with its caller after publication");
-  assert.match(spgridSource, /PassBroker/, "SPGrid V-cycle must use broker-owned encoding");
-  assert.doesNotMatch(spgridSource, /GPUCommandEncoder|beginComputePass|new PassBroker/,
-    "SPGrid V-cycle must not retain raw encoder or optional-pass ownership paths");
-  assert.doesNotMatch(octreeSource,
-    /this\.powerFaces|this\.powerOperator|this\.powerVelocity|this\.globalFineFaceExtension/,
-    "the retired generalized-face graph must not remain in the pressure spine");
-  assert.doesNotMatch(advanceSource, /commandEncoderFacade|new PassBroker\(commandEncoder\)/,
-    "the production advance must not route raw helpers through a compatibility proxy");
 });

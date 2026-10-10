@@ -13,7 +13,6 @@ import {
 export * from "./pressure-policy";
 export * from "./pressure-plan";
 import { UNIFORM_CM11A_COARSE_ROW_BYTES, UNIFORM_CM11A_COARSE_HEADER_BYTES } from "./uniform-coarse-solver.wgsl";
-import { uniformAbOn } from "./uniform-ab-switch";
 import { planUniformCM11aHierarchy, type UniformCM11aLevelSize } from "./pressure-plan";
 
 /**
@@ -26,8 +25,8 @@ import { planUniformCM11aHierarchy, type UniformCM11aLevelSize } from "./pressur
  * environment lookup, and leaving the flag unset reproduces the previous label
  * byte-for-byte.
  */
-const BATCH_PASSES = uniformAbOn("batch");
-const FUSE_VISITS = uniformAbOn("fusevisit");
+const BATCH_PASSES = true;
+const FUSE_VISITS = true;
 /**
  * The recovery finish is always encoded and almost never runs (0 of 450 steps
  * across mini64, fig7 and the garden, 2026-09-21): 128 finest-level launches
@@ -37,7 +36,7 @@ const FUSE_VISITS = uniformAbOn("fusevisit");
  */
 const ROW_SEGMENT = Math.max(1, Number((typeof process !== "undefined"
   ? process.env?.FLUID_UNIFORM_ROW_SEGMENT : undefined) ?? 8));
-const ROW_SWEEP = !uniformAbOn("rowsweep") ? "off" : ((typeof process !== "undefined"
+const ROW_SWEEP = ((typeof process !== "undefined"
   ? process.env?.FLUID_UNIFORM_ROW_SWEEP : undefined) ?? "lagged");
 const FUSED_VISIT_LANES = Math.max(1, Number((typeof process !== "undefined"
   ? process.env?.FLUID_UNIFORM_FUSED_VISIT_LANES : undefined) ?? 1024));
@@ -50,10 +49,10 @@ const FUSED_VISIT_LANES = Math.max(1, Number((typeof process !== "undefined"
 const FUSED_VISIT_MAX_CELLS = Math.max(0, Number((typeof process !== "undefined"
   ? process.env?.FLUID_UNIFORM_FUSED_VISIT_CELLS : undefined) ?? 1000));
 /** Measure the fine residual from the finest cycle list instead of densely. */
-const MEASURE_TILES = uniformAbOn("measuretiles");
-const SEED_FUSE = uniformAbOn("seedfuse");
+const MEASURE_TILES = true;
+const SEED_FUSE = true;
 /** Wall tiles enter the finest cycle list as halo-face entries; see the WGSL. */
-const WALL_HALO = uniformAbOn("wallhalo");
+const WALL_HALO = true;
 /** Upper bound on a list operator's direct launch (64-lane workgroups). */
 const MG_TILE_GRID = 1024;
 const MG_LEVEL_LABELS = typeof process !== "undefined"
@@ -305,7 +304,7 @@ export class WebGPUUniformPressureMultigrid {
     // level kernel was still reading five storage words to add that zero.
     const multigrid=uniformPressureMultigridWGSL;
     const smoother=this.inPlaceCapable?uniformPressureInPlaceSmootherWGSL:"";
-    if(!this.activeDispatch&&uniformAbOn("mgstaticid")){
+    if(!this.activeDispatch){
       const dynamic="fn mgActiveId(gid:vec3u)->vec3i{";
       if(!uniformPressureMultigridWGSL.includes(dynamic)) throw new Error("mgActiveId specialisation lost its anchor");
       const source=multigrid.replace(dynamic,`${dynamic}\n  if(true){return vec3i(gid);}`)+smoother;
@@ -459,16 +458,9 @@ export class WebGPUUniformPressureMultigrid {
         minimum: pair("p-min"), coefficients: texture(`Uniform CM11a L${index} coefficients`, "rgba32float", size) }));
     }
     this.levels = Object.freeze(levels);
-    if (typeof process !== "undefined" && process.env.FLUID_UNIFORM_PRESSURE_SETUP_AUDIT === "1"
-      && !this.pagedStorage && !this.scratchFields) {
-      const size = levels[0]!.dimensions;
-      this.setupRhsSnapshot = [0, 1].map(index => device.createTexture({
-        label: `Uniform CM11a setup RHS ${index} QA`, size: [...size], dimension: "3d",
-        format: "r32float", usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
-      })) as [GPUTexture, GPUTexture];
-    }
-    if(this.inPlaceCapable && !this.gpuCycleDispatch && compactSmoothing && uniformAbOn("pressuretiles")) {
-      const cycleTiles=uniformAbOn("cycletiles");this.cycleTiles=cycleTiles;
+
+    if(this.inPlaceCapable && !this.gpuCycleDispatch && compactSmoothing) {
+      const cycleTiles=true;this.cycleTiles=cycleTiles;
       // A plan lists only levels past the fused visit, and cycles from its
       // first level's list: the finest, or the mixed continuation's (the
       // shared arena serves only the continuation).
@@ -656,11 +648,11 @@ export class WebGPUUniformPressureMultigrid {
         layout: this.device.createPipelineLayout({ label: `Uniform CM11a layout - ${entryPoint}`,
           bindGroupLayouts: [this.tileEntry(entryPoint) ? this.smoothTileInputLayout! : entryPoint === "mgPublishCycleDispatch" ? emptyUniformLayout : input.uniformBindGroupLayout, this.groupLayouts[entryPoint]] }),
         compute: { module: shaderModule, entryPoint,
-          ...(entryPoint === "mgBakeCoefficients" ? {constants:{MG_MASK_FIRST:Number(this.maskFirst && uniformAbOn("maskfirst"))}} : {}),
+          ...(entryPoint === "mgBakeCoefficients" ? {constants:{MG_MASK_FIRST:Number(this.maskFirst)}} : {}),
           ...(entryPoint === "mgBuildSmoothTiles" ? {constants:{MG_CYCLE_TILES:Number(this.cycleTiling)}} : {}),
           ...(entryPoint === "mgBuildCycleTiles" && WALL_HALO ? {constants:{MG_HALO_ENTRIES:Number(this.haloEntries)}} : {}),
           ...(entryPoint === "mgBuildSmoothTilesSeeded" ? {constants:{MG_CYCLE_TILES:Number(this.cycleTiling)}} : {}),
-          ...(entryPoint === "mgBuildFinestRhs" ? {constants:{MG_REUSE_FINEST_AUTHORITY:Number(this.reuseFinestAuthority && uniformAbOn("pressureauthority"))}} : {}),
+          ...(entryPoint === "mgBuildFinestRhs" ? {constants:{MG_REUSE_FINEST_AUTHORITY:Number(this.reuseFinestAuthority)}} : {}),
           ...(/^(mgSmoothVisitInPlace|mgSmoothVisitLocalInPlace)$/.test(entryPoint) ? { constants: { MG_VISIT_LANES: this.visitLanes } } : {}),
           ...(entryPoint === "mgSmoothRowInPlace" || /Quiet$/.test(entryPoint)
             ? { constants: { MG_ROW_SEGMENT: ROW_SEGMENT } } : {}) } },

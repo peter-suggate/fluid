@@ -1,3 +1,4 @@
+import {uniformRuntimeConstantsWGSL} from "./uniform-scene-constants";
 import { uniformCompileStencilWGSL } from "./uniform-compiled-topology";
 import {UNIFORM_MIXED_OVERFLOW_FINE,UNIFORM_MIXED_OVERFLOW_HANGING} from "./uniform-mixed-topology.wgsl";
 import type {UniformMixedGenerationBuffers,UniformMixedOwnership} from "./uniform-mixed-ownership";
@@ -5,7 +6,7 @@ import type {UniformMixedGenerationBuffers,UniformMixedOwnership} from "./unifor
 const BLOCK=256;
 /** Work header: the cleared counters [0, CLEARED), then umCounts at COUNTS
  * (256 B aligned: the remap binds them as its target's uniform counts). */
-const CLEARED=16,COUNTS=64,RECEIPT=COUNTS+4;
+const CLEARED=16,COUNTS=64,RECEIPT=COUNTS+12;
 /** Scan categories: h tiles, 4h tiles (one coarse owner each), seam h and 4h
  * tiles, regular 4h tiles. The simulation layout is ungraded h/4h. */
 const CATEGORIES=5;
@@ -30,13 +31,14 @@ export function uniformMixedChangedTilesWords(tiles:number){
  * at @group(group) @binding(binding): umChangedCount/umChangedTile and
  * umDilatedCount/umDilatedTile. */
 export function uniformMixedChangedTilesWGSL(tiles:number,group:number,binding:number):string{
- const w=uniformMixedChangedTilesWords(tiles);
+ void tiles;
  return /* wgsl */`
 @group(${group}) @binding(${binding}) var<storage,read> umChanges:array<u32>;
-fn umChangedCount()->u32{return umChanges[${w.changedCount}u];}
-fn umChangedTile(i:u32)->u32{return umChanges[${w.changedList}u+i];}
-fn umDilatedCount()->u32{return umChanges[${w.dilatedCount}u];}
-fn umDilatedTile(i:u32)->u32{return umChanges[${w.dilatedList}u+i];}
+fn umChangedList()->u32{let n=umChanges[8u];return 76u+n+5u*((n+255u)/256u);}
+fn umChangedCount()->u32{return umChanges[0u];}
+fn umChangedTile(i:u32)->u32{return umChanges[umChangedList()+i];}
+fn umDilatedCount()->u32{return umChanges[5u];}
+fn umDilatedTile(i:u32)->u32{return umChanges[umChangedList()+umChanges[8u]+i];}
 `;
 }
 
@@ -142,7 +144,10 @@ export class UniformMixedLayoutBuilder {
   // Hanging capacity: the ownership's preallocated tap cache.
   // Residency audit word, or none. h-tile capacity: the owner-indexed buffers'.
   // Admission capacity: none (setAdmission).
-  device.queue.writeBuffer(params,0,new Uint32Array([band.wordOffset,ownership.capacity.hangingSlots,band.auditWord??0xffffffff,ownership.capacity.fineTiles,0xffffffff,0,0,0]));
+  const lattice=ownership.capacity.lattice;
+  device.queue.writeBuffer(params,0,new Uint32Array([band.wordOffset,ownership.capacity.hangingSlots,band.auditWord??0xffffffff,ownership.capacity.fineTiles,0xffffffff,...lattice.dimensions.map(d=>d/4)]));
+  device.queue.writeBuffer(work,COUNTS*4+16,new Uint32Array([...lattice.dimensions,n]));
+  device.queue.writeBuffer(work,COUNTS*4+32,new Float32Array([...lattice.cellSize_m,Math.min(...lattice.cellSize_m)]));
   const status=device.createBuffer({label:"Uniform layout builder relayout receipt",size:R.words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   // Standalone stages visit everything until a frame census: support[0,4n) = 3.
   device.queue.writeBuffer(support,0,new Uint32Array(4*n).fill(3));
@@ -162,11 +167,11 @@ export class UniformMixedLayoutBuilder {
   const flags=RECEIPT,totals=RECEIPT+n,lists=uniformMixedChangedTilesWords(n);
   const R=UNIFORM_MIXED_RELAYOUT_RECEIPT,F=UNIFORM_MIXED_RELAYOUT_FATAL;
   if(Math.ceil(n/64)>0xffff)throw new Error(`Mixed layout builder verifies ${Math.ceil(n/64)} groups, above the 16-bit ticket`);
-  const module=this.device.createShaderModule({label:"Uniform mixed layout builder",code:/* wgsl */`
+  const module=this.device.createShaderModule({label:"Uniform mixed layout builder",code:uniformRuntimeConstantsWGSL(/* wgsl */`
 @group(0) @binding(0) var<storage,read> band:array<u32>;
 @group(0) @binding(1) var<storage,read> statics:array<u32>;
 @group(0) @binding(2) var<storage,read> current:array<u32>;
-struct Params {bandOffset:u32,hangingCapacity:u32,audit:u32,fineCapacity:u32,admitCapacity:u32}
+struct Params {bandOffset:u32,hangingCapacity:u32,audit:u32,fineCapacity:u32,admitCapacity:u32,tileX:u32,tileY:u32,tileZ:u32}
 @group(0) @binding(3) var<uniform> params:Params;
 @group(0) @binding(4) var<storage,read_write> work:array<atomic<u32>>;
 @group(0) @binding(5) var<storage,read_write> topology:array<u32>;
@@ -194,6 +199,7 @@ fn widthAt(t:u32)->u32{return atomicLoad(&work[FLAGS+t])&7u;}
 // 27 neighbour reads are plain loads.
 @compute @workgroup_size(64) fn widths(@builtin(global_invocation_id) gid:vec3u){
  let t=gid.x;if(t>=N){return;}
+ if(t==0u){atomicStore(&work[8u],N);}
  let w=select(4u,1u,fineAt(t));
  topology[t]=w;
  if(w==1u){atomicAdd(&work[NEED],1u);}
@@ -384,7 +390,16 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
  if(atomicLoad(&status[R_FATAL])!=0u){if(atomicLoad(&status[R_FATAL_BUILD])==0u){atomicStore(&status[R_FATAL_BUILD],build);}}
  else if(atomicLoad(&status[R_CHANGED])!=0u){atomicAdd(&status[R_GENERATION],1u);}
 }
-`});
+`,{
+ N:{type:"u32",value:"params.tileX*params.tileY*params.tileZ"},
+ T:{type:"vec3u",value:"vec3u(params.tileX,params.tileY,params.tileZ)"},
+ BLOCKS:{type:"u32",value:"(N+255u)/256u"},
+ TOTALS:{type:"u32",value:"76u+N"},
+ CHANGED:{type:"u32",value:"76u+N+5u*BLOCKS"},
+ DILATED:{type:"u32",value:"CHANGED+N"},
+ WORDS:{type:"u32",value:"(N+31u)/32u"},
+ VERIFY_GROUPS:{type:"u32",value:"(N+63u)/64u"},
+ })});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.resources]});

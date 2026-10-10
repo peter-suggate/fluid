@@ -7,9 +7,8 @@ import { sharePaneStep } from "../lib/core/simulation/shared-pane-step";
 
 function setup() {
   const a = createPaneSession("a"), b = createPaneSession("b");
-  a.method.getState().setParam("uniform-volume", "timeStep", "scene");
+  a.method.getState().setParam("uniform-narrow-band-flip", "timeStep", "scene");
   a.scene.getState().patchNumerics({ fixedDt_s: 1 / 60, maxDt_s: 1 / 60 });
-  b.method.getState().setMethodId("uniform-volume");
   const shared = sharePaneStep([a, b]);
   const check = (dt: number) => {
     for (const pane of [a, b]) {
@@ -21,26 +20,15 @@ function setup() {
   return { a, b, shared, check };
 }
 
-test("shared edits reach both panes and survive scene and solver changes", () => {
+test("shared edits reach both panes and survive scene changes", () => {
   const { a, b, shared, check } = setup();
   try {
     shared.setStepSize(0.012);
     check(0.012);
     b.scene.getState().patchNumerics({ fixedDt_s: 1 / 30, maxDt_s: 1 / 30 });
-    b.method.getState().resetParams("uniform-volume");
-    a.method.getState().setMethodId("uniform-volume");
+    b.method.getState().resetParams("uniform-narrow-band-flip");
     check(0.012);
   } finally { shared.stop(); }
   b.scene.getState().patchNumerics({ fixedDt_s: 0.025 });
   assert.equal(b.scene.getState().scene.numerics.fixedDt_s, 0.025);
-});
-
-test("APIC follows editable shared timesteps in a comparison without a hidden method pin", () => {
-  const { a, b, shared, check } = setup();
-  try {
-    b.method.getState().setMethodId("particle-apic");
-    for (const dt of [0.004, 1 / 60, 0.033, 0.05]) { shared.setStepSize(dt); check(dt); }
-    a.method.getState().setMethodId("particle-apic");
-    shared.setStepSize(0.008); check(0.008);
-  } finally { shared.stop(); }
 });

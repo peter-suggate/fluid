@@ -116,7 +116,6 @@ export function editorEntityContext(session: EditorCatalogSession = defaultCatal
     scene: displaySceneSnapshot(session.scene, session.sceneDraft),
     methodId: session.method?.getState().methodId,
     voxelRegion: session.ui.getState().voxelRegion,
-    fluidCell: fluidCellSnapshot(session),
     // One definition of "a ray can hit something", shared with the viewport:
     // the capability gate, not a second reading of the renderer's status enum.
     pickingAvailable: resourceInteractionGates(
@@ -134,20 +133,6 @@ export function editorEntityContext(session: EditorCatalogSession = defaultCatal
  * gizmo, a hover chip or a grab resolved against the roster lands nowhere near
  * the object it belongs to. See `bodyPoses` in the diagnostics store.
  */
-/**
- * The published cell trace with the reader's pin state folded in.
- *
- * Two stores, because they answer two questions: the diagnostics store holds
- * what the frame published, and the UI store holds whether the reader has held
- * it on a pixel. Only together do they say whether the trace describes where the
- * cursor is now — which is the whole of what the fluid-cell probe needs.
- */
-function fluidCellSnapshot(session: EditorCatalogSession): EditorEntityContext["fluidCell"] {
-  const publication = session.diagnostics.getState().fluidCellTrace;
-  if (!publication) return undefined;
-  return { ...publication, pinned: session.ui.getState().fluidCellTracePinned };
-}
-
 export function editorBodyPoses(bodies = drawnBodies()): EditorEntityContext["bodies"] {
   return bodies.map((body) => ({
     id: body.description.id,

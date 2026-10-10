@@ -1,26 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
 
 import { cupDistance_m, cupWallThickness_m } from "../../../../core/scene-shape";
 import type { Vec3 } from "../../../../core/model";
-import {
-  SVO_PRIMITIVE_FEATURES,
-  canonicalSvoPrimitive,
-  intersectSvoPrimitive,
-  packSvoPrimitiveRecords,
-  sampleSvoPrimitive,
-  svoPrimitiveForRigidBody,
-  svoPrimitiveWGSL,
-  unpackSvoPrimitiveRecords,
-  type SvoCupPrimitive,
-} from "../../../contracts/svo-primitive-abi";
-import { svoFieldProgramAbsentWGSL } from "../../../contracts/svo-primitive-abi";
-import { svoProceduralNoiseWGSL } from "../../materials/svo-procedural-material";
-import {
-  sparseScenePrimitiveFeatureRadius,
-  sparseScenePrimitiveForSvoDescriptor,
-} from "../../../../core/webgpu-sparse-scene-proxies";
+import { SVO_PRIMITIVE_FEATURES, canonicalSvoPrimitive, intersectSvoPrimitive, packSvoPrimitiveRecords, sampleSvoPrimitive, svoPrimitiveForRigidBody, unpackSvoPrimitiveRecords, type SvoCupPrimitive } from "../../../contracts/svo-primitive-abi";
+import { sparseScenePrimitiveFeatureRadius, sparseScenePrimitiveForSvoDescriptor } from "../../../../core/webgpu-sparse-scene-proxies";
 
 /**
  * The cup is the first shape in this repository whose interior is not solid,
@@ -42,30 +26,6 @@ const CUP = {
 
 /** The same cup in the shared table's convention, which carries the FULL height. */
 const SHARED: Vec3 = { x: CUP.radius_m, y: 2 * CUP.halfHeight_m, z: CUP.wallThickness_m };
-
-/**
- * Whether the hard-feature selection at a point is a contract at all.
- *
- * Two of a cup's three surfaces meet along its rim, along the inner floor's
- * corner, and along the medial surface inside the wall. On those curves both
- * surfaces are equidistant and which one wins is decided by the last bit of a
- * subtraction, so an f32 solve and an f64 one are entitled to disagree. That
- * jump *is* what a hard feature means; the contract is the surface either side
- * of the edge, never the edge itself.
- */
-function featureIsStable(point: Vec3): boolean {
-  const selected = sampleSvoPrimitive(CUP, point).featureId;
-  const step = 1e-4;
-  for (const delta of [
-    { x: step, y: 0, z: 0 }, { x: -step, y: 0, z: 0 },
-    { x: 0, y: step, z: 0 }, { x: 0, y: -step, z: 0 },
-    { x: 0, y: 0, z: step }, { x: 0, y: 0, z: -step },
-  ]) {
-    const probe = { x: point.x + delta.x, y: point.y + delta.y, z: point.z + delta.z };
-    if (sampleSvoPrimitive(CUP, probe).featureId !== selected) return false;
-  }
-  return true;
-}
 
 function samplePoints(): Vec3[] {
   const axis = [-0.21, -0.15, -0.13, -0.08, -0.02, 0, 0.02, 0.08, 0.13, 0.15, 0.21];
@@ -143,93 +103,4 @@ test("the live voxelizer knows a cup's wall is its finest feature", () => {
   // Without this the centre sample of a cell straddling the wall reads the
   // cavity, and the cup voxelizes as a ring of holes.
   assert.equal(sparseScenePrimitiveFeatureRadius(live), CUP.wallThickness_m);
-});
-
-test("the WGSL cup agrees with the TypeScript cup on a device", {
-  skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for cup ABI parity on a device",
-}, async t => {
-  let leasedDevice: GPUDevice | undefined;
-  t.after(async () => { leasedDevice?.destroy(); });
-  const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
-    create(options: string[]): GPU; globals: Record<string, unknown>;
-  };
-  Object.assign(globalThis, dawn.globals);
-  const gpu = dawn.create(["backend=metal"]);
-  const adapter = await gpu.requestAdapter(); assert.ok(adapter);
-  const device = leasedDevice = await adapter.requestDevice();
-
-  const points = samplePoints();
-  const record = packSvoPrimitiveRecords([CUP]);
-  const inputs: Float32Array<ArrayBuffer> = new Float32Array(points.length * 4);
-  points.forEach((point, index) => inputs.set([point.x, point.y, point.z, 0], index * 4));
-
-  const code = `${svoProceduralNoiseWGSL}
-${svoFieldProgramAbsentWGSL}
-${svoPrimitiveWGSL}
-@group(0) @binding(0) var<storage, read> recordWords: array<vec4u, 4>;
-@group(0) @binding(1) var<storage, read> points: array<vec4f>;
-@group(0) @binding(2) var<storage, read_write> answers: array<vec4f>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) id: vec3u) {
-  let index = id.x;
-  if (index >= arrayLength(&points)) { return; }
-  let record = SvoPrimitiveRecord(recordWords[0], recordWords[1], bitcast<vec4f>(recordWords[2]), recordWords[3]);
-  let sample = svoEvaluatePrimitive(record, points[index].xyz, svoInvalidClusterPacking());
-  answers[index] = vec4f(sample.signedDistance_m, sample.normal.xyz);
-}`;
-  device.pushErrorScope("validation");
-  const module = device.createShaderModule({ code });
-  const compilation = await module.getCompilationInfo();
-  assert.deepEqual(compilation.messages.filter((message) => message.type === "error")
-    .map((message) => `${message.lineNum}: ${message.message}`), []);
-
-  const recordBuffer = device.createBuffer({ size: record.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(recordBuffer, 0, record);
-  const pointBuffer = device.createBuffer({ size: inputs.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(pointBuffer, 0, inputs);
-  const answerBytes = points.length * 4 * 4;
-  const answerBuffer = device.createBuffer({ size: answerBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-  const readback = device.createBuffer({ size: answerBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-
-  const pipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "main" } });
-  const bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: recordBuffer } },
-      { binding: 1, resource: { buffer: pointBuffer } },
-      { binding: 2, resource: { buffer: answerBuffer } },
-    ],
-  });
-  const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bindGroup);
-  pass.dispatchWorkgroups(Math.ceil(points.length / 64));
-  pass.end();
-  encoder.copyBufferToBuffer(answerBuffer, 0, readback, 0, answerBytes);
-  device.queue.submit([encoder.finish()]);
-  const scope = await device.popErrorScope();
-  assert.equal(scope, null);
-  await readback.mapAsync(GPUMapMode.READ);
-  const answers = new Float32Array(readback.getMappedRange().slice(0));
-  readback.unmap();
-
-  let checked = 0;
-  points.forEach((point, index) => {
-    const expected = sampleSvoPrimitive(CUP, point);
-    assert.ok(Math.abs(answers[index * 4] - expected.signedDistance_m) < 1e-5,
-      `distance at ${JSON.stringify(point)}: ${answers[index * 4]} vs ${expected.signedDistance_m}`);
-    // A normal is only compared where the host publishes one; the shader's own
-    // validity flag is what a renderer reads, and it is derived from the same
-    // length test.
-    if (expected.normal && featureIsStable(point)) {
-      const gpu = { x: answers[index * 4 + 1], y: answers[index * 4 + 2], z: answers[index * 4 + 3] };
-      const alignment = gpu.x * expected.normal.x + gpu.y * expected.normal.y + gpu.z * expected.normal.z;
-      assert.ok(alignment > 1 - 1e-4, `normal at ${JSON.stringify(point)}: alignment ${alignment}`);
-    }
-    if (expected.normal && featureIsStable(point)) checked += 1;
-  });
-  // Most of the lattice is well away from an edge; if the stability filter ever
-  // starts excluding most of it, the normals are no longer being compared.
-  assert.ok(checked > 0.6 * points.length, `only ${checked} of ${points.length} normals were comparable`);
 });

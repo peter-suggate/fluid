@@ -3,7 +3,6 @@ import { constrainedAxes, EDITOR_AXES, type AxisConstraint, type EditorAxis } fr
 import { GIZMO_AXIS_DIRECTIONS, gizmoHandleLength_m } from "./editor-gizmo";
 import type { EditorSelection, EditorSelectionKind } from "./editor-tools";
 import type { VoxelSelectionRegion } from "./editor-voxel-region";
-import type { FluidCellTraceSnapshot } from "./fluid-cell-trace";
 import { add, scale, sub } from "./math";
 import { quaternionInverseRotate, quaternionRotate } from "./rigid-body";
 import type { CameraState, Quaternion, SceneDescription, Vec3 } from "./model";
@@ -651,7 +650,6 @@ export interface EditorEntityContext {
    * — runtime state a probe must be able to describe without reaching into the
    * renderer — and its absence simply means no fluid cell can be pointed at.
    */
-  readonly fluidCell?: FluidCellTraceSnapshot;
 }
 
 /** The runtime pose an entity definition needs, without importing the solver. */

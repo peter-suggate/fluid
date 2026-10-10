@@ -69,9 +69,9 @@ export function uniformMixedPressureSpareFull(plan:UniformMixedPressurePlan,maxi
  * 10 V skip streak, 11 the previous three accepted
  * frames' cycles (8 bits each), 12-13 this frame's V/Full
  * slots (host), 14-15 the next frame's (planner), 16-17 V/Full cycles run.
- * Diagnostics (read by FLUID_MIXED_PRESSURE_TRACE only): 7 any stall,
+ * Residual history: 7 any stall,
  * 8 initial residual, 18-24 each run slot's candidate residual.
- * Words 10-11 and 14-15 persist. The gate writes the cycle count into
+ * Word25 holds the runtime support gate offset. Words10-11 and14-15 persist. The gate writes the cycle count into
  * acceptance word 7. */
 export class UniformMixedPressureSchedule {
  /** The schedule's cap per kind; plans never exceed it. */
@@ -94,6 +94,7 @@ export class UniformMixedPressureSchedule {
    readonly acceptance:GPUBuffer}){
   this.maximum={vCycles:schedule.vCycles,fullCycles:schedule.fullCycles};
   this.control=device.createBuffer({label:"Uniform mixed pressure schedule",size:128,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  device.queue.writeBuffer(this.control,100,new Uint32Array([words.supportWord]));
  }
  async initialize():Promise<void>{
   const {vCycles:VMAX,fullCycles:FMAX}=this.maximum;
@@ -104,7 +105,7 @@ export class UniformMixedPressureSchedule {
 @group(0) @binding(6) var<storage,read_write> band:array<u32,8>;
 @group(0) @binding(7) var<uniform> acceptance:vec4f;
 ${uniformMixedPressureVerdictWGSL("acceptance")}
-${uniformMixedFrameStatusWGSL(0,5,"read_write")}const VMAX=${VMAX}u;const FMAX=${FMAX}u;const SUPPORT_GATE=${this.words.supportWord}u;const BAND_CLOSED=${this.words.bandClosedWord}u;
+${uniformMixedFrameStatusWGSL(0,5,"read_write")}const VMAX=${VMAX}u;const FMAX=${FMAX}u;fn supportGate()->u32{return control[25u];}const BAND_CLOSED=${this.words.bandClosedWord}u;
 fn umF(word:u32)->f32{return bitcast<f32>(control[word]);}
 // The next frame's slot list, after an accepted solve:
 // the cycles of each kind this frame ran, one spare where the solve ended.
@@ -168,7 +169,7 @@ fn umPlan(){
   // An open slot's checkpoint reduces into a clear candidate.
   if(open&&step<SLOTS){state[0]=0u;}
   // The slot gate word (0 open).
-  fine[SUPPORT_GATE]=u32(!open);
+  fine[supportGate()]=u32(!open);
 }
 `});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
@@ -190,8 +191,6 @@ fn umPlan(){
  encodePlanCopy(encoder:GPUCommandEncoder,destination:GPUBuffer,offset:number):void{
   encoder.copyBufferToBuffer(this.control,56,destination,offset,8);
  }
- /** Diagnostics: copy the 32 control words (FLUID_MIXED_PRESSURE_TRACE). */
- encodeTraceCopy(encoder:GPUCommandEncoder,destination:GPUBuffer,offset:number):void{encoder.copyBufferToBuffer(this.control,0,destination,offset,128);}
  /** Encode gate `slot` (the projection is slot `slots`). The slot's kernels
   * that follow read its gate word themselves; clears and copies encoded
   * inside a slot run whether or not it is open (only per-cycle scratch). */

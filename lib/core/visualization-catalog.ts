@@ -13,15 +13,8 @@
  * visualization means exporting it from its pass and adding one line here.
  */
 import { blastRadiusVisualizations } from "./fluid-blast-radius";
-import { fineBandCellVisualizations } from "./fine-band-cell-visualizations";
-import { faceVelocityOverlayVisualizations } from "./webgpu-face-velocity-overlay";
-import { fineFloodVisualizations } from "./fine-flood-provenance";
-import { fluidCellVisualizations } from "./fluid-cell-visualizations";
 import { gridOverlayVisualizations } from "./grid-overlay-visualizations";
-import { octreeFieldVisualizations } from "./octree-technique-debug";
-import { pressureJournalOverlayVisualizations } from "../features/pressure-inspection/gpu/overlay";
 import { svoPixelTraceVisualizations } from "../svo/features/diagnostics/svo-pixel-trace";
-import { tracerOverlayVisualizations } from "./webgpu-tracer-overlay";
 import { particleOverlayVisualizations } from "./webgpu-particle-overlay";
 import {
   decorationVisualizations,
@@ -33,26 +26,19 @@ import {
 export const VISUALIZATION_CATALOG: readonly Visualization[] = Object.freeze([
   // Gathered state first, so a derived shell never draws over the cell it
   // describes.
-  ...fluidCellVisualizations,
   // The fine band's detail draws over the cell it describes and under the
   // derived shells, which is the order a reader builds the picture up in:
   // the leaf, then what is inside it, then the bounds around it.
-  ...fineBandCellVisualizations,
-  ...fineFloodVisualizations,
   ...blastRadiusVisualizations,
   ...svoPixelTraceVisualizations,
   // Generic dense-grid views first: they are the fields every method can
   // publish, so a picker narrowed by method lists the universal set before
   // the octree-only publications.
   ...gridOverlayVisualizations,
-  ...tracerOverlayVisualizations,
   ...particleOverlayVisualizations,
-  ...faceVelocityOverlayVisualizations,
   // Last of the overlay draws: a captured solve is drawn over the live scene,
   // and it is the one view that answers a question about a frame that has
   // already finished rather than about the frame on screen.
-  ...pressureJournalOverlayVisualizations,
-  ...octreeFieldVisualizations,
 ]);
 
 /** Field views, in catalog order — the list the mode UI is built from. */

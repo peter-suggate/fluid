@@ -65,7 +65,7 @@ async function onPage(url: string, body: (win: ReturnType<typeof fakeWindow>) =>
 const tick = () => new Promise<void>((resolve) => queueMicrotask(resolve));
 
 /** One link naming every key §9.3 gives this page, in the writer's own order. */
-const MAXIMAL = "scene=high-resolution-dam-break&freezeTopology=1"
+const MAXIMAL = "scene=high-resolution-dam-break"
   + "&transport=baseline&solve=48&surface=plic"
   + "&gridMode=pressure-solve&overlays=fraction_normal"
   + "&view.zoom=4&view.x=0.25&view.y=0.75"
@@ -73,7 +73,7 @@ const MAXIMAL = "scene=high-resolution-dam-break&freezeTopology=1"
 
 test("the page claims its own keys and nobody else's", () => {
   for (const key of ["scene", "transport", "solve", "surface", "gridMode",
-    "overlays", "view.zoom", "view.x", "view.y", "regions", "freezeTopology"]) {
+    "overlays", "view.zoom", "view.x", "view.y", "regions"]) {
     assert.equal(isLabQueryKey(key), true, key);
   }
   // The studio's families are not this page's: it has no patch layer and no
@@ -104,7 +104,6 @@ test("a link naming everything hydrates and re-writes to itself", async () => {
     assert.deepEqual([...state.overlays].sort(), ["fraction", "normal"]);
     assert.equal(state.linkedRegions, "25_25_50_50_8");
     assert.deepEqual(state.linkedView, { zoom: 4, x: 0.25, y: 0.75 });
-    assert.equal(session.runtime.getState().topologyFrozen, true);
 
     // A second write changes nothing, so the loop settles rather than chasing
     // its own output.
@@ -151,7 +150,7 @@ test("a value the page cannot honour reads as the default", () => {
 
 test("a foreign key is carried through untouched", () => {
   const out = new URLSearchParams(serializeLabQuery("?utm_source=mail&ref=x",
-    createLabStore().getState(), { topologyFrozen: false }));
+    createLabStore().getState()));
   assert.equal(out.get("utm_source"), "mail");
   assert.equal(out.get("ref"), "x");
 });
@@ -202,9 +201,9 @@ test("adaptive SDF defaults on and its off comparison survives a link round trip
   assert.equal(lab.getState().adaptiveSdf, true);
   assert.equal(parseLabQuery("").adaptiveSdf, true);
   lab.getState().setAdaptiveSdf(false);
-  const query = serializeLabQuery("?ref=kept", lab.getState(), { topologyFrozen: false });
+  const query = serializeLabQuery("?ref=kept", lab.getState());
   assert.equal(new URLSearchParams(query).get("adaptiveSdf"), "0");
   assert.equal(parseLabQuery(query).adaptiveSdf, false);
   lab.getState().setAdaptiveSdf(true);
-  assert.equal(new URLSearchParams(serializeLabQuery(query, lab.getState(), { topologyFrozen: false })).has("adaptiveSdf"), false);
+  assert.equal(new URLSearchParams(serializeLabQuery(query, lab.getState())).has("adaptiveSdf"), false);
 });

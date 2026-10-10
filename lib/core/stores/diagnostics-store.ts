@@ -3,10 +3,6 @@ import type { GPUStatus } from "../gpu-status";
 import { webGPUPlatformResourcePlugin } from "../webgpu-platform-resource";
 import type { EffectiveRendererStatus } from "../renderer-status";
 import type { GPUEulerianInfo } from "../webgpu-eulerian";
-import type { PressureJournal } from "../../features/pressure-inspection/journal";
-import type { FluidCellPublication } from "../fluid-cell-trace";
-import type { StageLensReceipt } from "../stage-lens";
-import type { StageLensLayerReport } from "../webgpu-stage-lens-overlay";
 import type { RigidBodyState, RigidStepDiagnostics } from "../rigid-body";
 import type { GPURigidBodyPose } from "../webgpu-rigid-body";
 import type { CouplingDiagnostics } from "../fluid-rigid-coupling";
@@ -78,42 +74,6 @@ interface DiagnosticsStore {
   /** Capability-oriented readiness. Unlike gpuStatus, independent work cannot overwrite another lane. */
   resourceReadiness: ResourceReadinessSnapshot;
   gpuInfo: GPUEulerianInfo | null;
-  /**
-   * The last captured pressure film's iteration records.
-   *
-   * Refreshed only when the simulation pauses, because that is the boundary at
-   * which the renderer may map solver state — so the curve describes the frame
-   * the run stopped on, which is the one the film's overlay is drawing too.
-   * Null means no capture: either the film was never reserved, or no view has
-   * armed it yet.
-   */
-  pressureJournal: PressureJournal | null;
-  /**
-   * The armed stage lens's counters, as of the frame that just drew.
-   *
-   * Unlike the film above this refreshes while the run moves, because a lens
-   * reads a stage of the advance that is happening — pausing it would answer a
-   * different question. Null whenever no lens is open, and set to null the
-   * moment one closes: a receipt left behind by a view nobody is looking at
-   * would describe a frame that no longer exists.
-   */
-  stageLensReceipt: StageLensReceipt | null;
-  /** What the lens's layers actually drew, including any instance decimation. */
-  stageLensLayers: readonly StageLensLayerReport[];
-  /**
-   * The pressure cell the last published trace described, with the frame that
-   * turns its index space into a world box.
-   *
-   * Here rather than in the viewport's own state because two unrelated readers
-   * need it: the HUD, which narrates the cell, and the editor's fluid-cell
-   * probe, which lights up the leaf under the cursor. It is a read-only output
-   * of the running simulation like everything else in this store, and the probe
-   * cannot reach into a React component to get one.
-   *
-   * Null whenever the `C` instrument is off — the gather does not run, so there
-   * is nothing to describe and no cell to point at.
-   */
-  fluidCellTrace: FluidCellPublication | null;
   effectiveRendererStatus: EffectiveRendererStatus;
   waterSurfacePresentation: WaterSurfacePresentationDiagnostics | null;
   frameMs: number;
@@ -158,10 +118,6 @@ export const createDiagnosticsStore = () => create<DiagnosticsStore>((set) => ({
   gpuStatus: { state: "initializing", label: "Initializing WebGPU", resource: webGPUPlatformResourcePlugin },
   resourceReadiness: initialResourceReadiness(),
   gpuInfo: null,
-  pressureJournal: null,
-  stageLensReceipt: null,
-  stageLensLayers: [],
-  fluidCellTrace: null,
   effectiveRendererStatus: {
     state: "pending",
     failureReason: "missing-source",

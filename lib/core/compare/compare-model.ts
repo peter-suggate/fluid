@@ -1,8 +1,4 @@
-import { getMethod, interactiveMethodId } from "../method-registry";
-import { isOctreeTechniqueOverlayMode } from "../octree-technique-debug";
-import { isSparseCM12DirtyOverlayMode } from "../sparse-cm12-dirty-visualizations";
-import { isStageLensOverlayMode, stageLensOverlayMode } from "../stage-lens";
-import { isPressureJournalOverlayMode } from "../../features/pressure-inspection/gpu/overlay";
+import { getMethod, defaultMethodId } from "../method-registry";
 import type { PaneSession } from "../session/session";
 import { useShellStore } from "../stores/shell-store";
 import type { TracePinRequest } from "../stores/ui-store";
@@ -128,18 +124,9 @@ function applyLayers(
     }
     if (session.scene.getState().scene !== previous) replaced = previous;
   }
-  let switchedMethod = false;
   if (changed.some(isMethodKey)) {
     const method = parseMethodQueryState(search);
-    const methodId = interactiveMethodId(method.methodId);
-    // A solver is not a value: adopting one has to rebuild this pane's GPU work
-    // and put its clock back to a defined t=0, which is what the controller's
-    // own switch does and what a bare store write does not. Only when the id
-    // actually moves — quality and a parameter override are settings *of* the
-    // running solver and the viewport picks those up on its own.
-    switchedMethod = methodId !== session.method.getState().methodId;
-    session.method.setState({ methodId, quality: method.quality, overrides: method.overrides });
-    if (switchedMethod) adopt.onMethodSwitched?.(session, methodId);
+    session.method.setState({ methodId: defaultMethodId(), quality: method.quality, overrides: method.overrides });
   }
   // After the document, so a camera that falls back to a preset framing falls
   // back to the preset this pane is now actually holding.
@@ -151,10 +138,8 @@ function applyLayers(
   // the document it used to hold, and a store write moves neither. Last, so the
   // adoption sees every layer this pass wrote; and never behind a solver
   // switch, whose own rebuild starts this pane from the new document anyway.
-  if (replaced && !switchedMethod) adopt.onSceneAdopted?.(session, replaced);
-  if (changed.includes("freezeTopology") || replaced || switchedMethod) {
-    session.runtime.getState().setTopologyFrozen(desired.get("freezeTopology") === "1");
-  }
+  if (replaced) adopt.onSceneAdopted?.(session, replaced);
+
 }
 
 /** The compare record, as a store the mirror can read, write and watch. */
@@ -188,16 +173,6 @@ export interface CompareSync {
 }
 
 /**
- * What to do when the mirror hands a pane a different solver.
- *
- * A callback rather than a controller import, so this module — and the CPU test
- * over it — stays clear of the simulation singleton and of WebGPU. The host
- * passes `simulation.setMethod`'s rebuild; a test passes nothing and reads the
- * stores.
- */
-export type CompareMethodSwitch = (session: PaneSession, methodId: string) => void;
-
-/**
  * What to do when the mirror hands a pane a different *document*.
  *
  * The same argument as the solver, one tier down. A pane's rigid roster and its
@@ -220,7 +195,6 @@ export type CompareSceneAdopt = (session: PaneSession, previous: PaneScene) => v
  * and reads the stores, or passes a spy and counts the calls.
  */
 export interface CompareAdoptions {
-  readonly onMethodSwitched?: CompareMethodSwitch;
   readonly onSceneAdopted?: CompareSceneAdopt;
 }
 
@@ -361,41 +335,27 @@ export function startCompareSync(
   let mirroringProbe = false;
   const probeMirror = (from: PaneSession, to: PaneSession) => {
     let lastPixelRequest: TracePinRequest | null = from.ui.getState().pixelTracePinRequest;
-    let lastCellRequest: TracePinRequest | null = from.ui.getState().fluidCellTracePinRequest;
     let lastPixelEnabled = from.ui.getState().pixelTraceEnabled;
-    let lastCellEnabled = from.ui.getState().fluidCellTraceEnabled;
     return from.ui.subscribe(() => {
       if (stopped || mirroringProbe) return;
       const source = from.ui.getState();
       const target = to.ui.getState();
       const pixelRequest = source.pixelTracePinRequest;
-      const cellRequest = source.fluidCellTracePinRequest;
       const pixelEnabled = source.pixelTraceEnabled;
-      const cellEnabled = source.fluidCellTraceEnabled;
       const changedPixelRequest = pixelRequest !== lastPixelRequest && pixelRequest !== null;
-      const changedCellRequest = cellRequest !== lastCellRequest && cellRequest !== null;
       const changedPixelEnabled = pixelEnabled !== lastPixelEnabled;
-      const changedCellEnabled = cellEnabled !== lastCellEnabled;
       lastPixelRequest = pixelRequest;
-      lastCellRequest = cellRequest;
       lastPixelEnabled = pixelEnabled;
-      lastCellEnabled = cellEnabled;
-      if (!changedPixelRequest && !changedCellRequest && !changedPixelEnabled && !changedCellEnabled) return;
+      if (!changedPixelRequest && !changedPixelEnabled) return;
       mirroringProbe = true;
       try {
         if (changedPixelEnabled && !changedPixelRequest) target.setPixelTraceEnabled(pixelEnabled);
-        if (changedCellEnabled && !changedCellRequest) target.setFluidCellTraceEnabled(cellEnabled);
         // Same three calls, same order, as the ring's own probe effect: enabling
         // clears the held pin, so the ask has to follow it.
         if (changedPixelRequest) {
           target.setPixelTraceEnabled(true);
           target.setPixelTracePinned(false);
           target.requestPixelTracePin({ aim: pixelRequest?.aim });
-        }
-        if (changedCellRequest) {
-          target.setFluidCellTraceEnabled(true);
-          target.setFluidCellTracePinned(false);
-          target.requestFluidCellTracePin({ aim: cellRequest?.aim });
         }
       } finally {
         mirroringProbe = false;
@@ -411,8 +371,6 @@ export function startCompareSync(
   const unsubscribe = [
     a.scene.subscribe(onA), a.method.subscribe(onA), a.ui.subscribe(onA),
     b.scene.subscribe(onB), b.method.subscribe(onB), b.ui.subscribe(onB),
-    a.runtime.subscribe((state, previous) => { if (state.topologyFrozen !== previous.topologyFrozen) onA(); }),
-    b.runtime.subscribe((state, previous) => { if (state.topologyFrozen !== previous.topologyFrozen) onB(); }),
     store.subscribe(() => {
       if (stopped) return;
       const state = store.getState();
@@ -554,13 +512,6 @@ export function compareDiffRows(
  */
 export function compareOverlayModeDrawable(mode: string, methodId: string): boolean {
   const method = getMethod(methodId);
-  if (isStageLensOverlayMode(mode)) {
-    return (method.stageLenses ?? []).some((lens) => stageLensOverlayMode(lens.stage) === mode);
-  }
-  if (isSparseCM12DirtyOverlayMode(mode) || isOctreeTechniqueOverlayMode(mode)
-    || isPressureJournalOverlayMode(mode)) {
-    return (method.supportedFieldModes ?? []).includes(mode);
-  }
   return true;
 }
 

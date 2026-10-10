@@ -10,8 +10,6 @@ import { resolvedMethodValues } from "../lib/core/stores/method-store";
 
 function telemetrySourceLabel(source?: string) {
   return ({
-    "global-fine": "authoritative global-fine field",
-    "adaptive-pages": "adaptive page transport",
     "dense-volume": "dense GPU volume field",
     "initial-condition": "analytic t=0 condition",
     unavailable: "unavailable — no authoritative field published",
@@ -36,7 +34,6 @@ export function DiagnosticsOverlay() {
   const simulationTime = session.runtime((state) => state.simulationTime);
   const { bodies, rigidState, couplingState, gpuInfo, waterSurfacePresentation } = session.diagnostics();
   const method = getMethod(methodId);
-  const globalFineVolumeEstimate = gpuInfo?.volumeTelemetrySource === "global-fine";
   const authoredMassChange = Boolean(scene.fluid.inflow);
   const representedVolumeAliasesPrimary = gpuInfo?.volumeDrift !== undefined
     && gpuInfo?.representedVolumeDrift !== undefined
@@ -72,7 +69,7 @@ export function DiagnosticsOverlay() {
       <Metric label="GPU component CFL" value={gpuInfo?.maxComponentCfl !== undefined ? gpuInfo.maxComponentCfl.toFixed(3) : "—"} unit={`${gpuInfo?.highCflCellCount ?? 0} wet samples above 1`} tone={gpuInfo?.maxComponentCfl !== undefined && gpuInfo.maxComponentCfl <= 4 && (gpuInfo.highCflCellCount ?? 0) < 32 ? "good" : "warn"} />
       <Metric label="Phi transport substeps" value={gpuInfo?.lastSubsteps !== undefined ? `${gpuInfo.lastSubsteps}×` : "—"} unit={gpuInfo?.lastDt_s !== undefined ? `${(gpuInfo.lastDt_s * 1000).toFixed(2)} ms interface dt · latest stats sample` : "GPU-governed · latest stats sample"} tone={gpuInfo?.lastSubsteps !== undefined && gpuInfo.lastSubsteps <= 1 ? "good" : "warn"} />
       <Metric label="GPU NaN / infinity" value={gpuInfo?.nonFiniteCount !== undefined ? String(gpuInfo.nonFiniteCount) : "—"} unit="across pre-pressure, pressure, and projected fields" tone={gpuInfo?.nonFiniteCount === 0 ? "good" : "warn"} />
-      <Metric label={globalFineVolumeEstimate ? "GPU pre-correction occupancy drift" : authoredMassChange ? "GPU net mass change" : "GPU mass drift"} value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}${globalFineVolumeEstimate ? " · smoothed occupancy estimate" : ""}`} tone={authoredMassChange ? "neutral" : gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
+      <Metric label={authoredMassChange ? "GPU net mass change" : "GPU mass drift"} value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}`} tone={authoredMassChange ? "neutral" : gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
       {!representedVolumeAliasesPrimary && <Metric label={authoredMassChange ? "GPU represented-volume change" : "GPU represented-volume drift"} value={gpuInfo?.representedVolumeDrift !== undefined ? (gpuInfo.representedVolumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}`} tone={authoredMassChange ? "neutral" : gpuInfo?.representedVolumeDrift !== undefined && Math.abs(gpuInfo.representedVolumeDrift) < 0.05 ? "good" : "warn"} />}
     </section>
     {rigidState && <section className="scene-instrument-section">

@@ -6,7 +6,7 @@ import { createEmptyScene } from "../lib/core/empty-scene";
 import type { SceneDescription } from "../lib/core/model";
 import { initialResourceReadiness, reduceGPUResourceStatus, resourceActivities } from "../lib/core/resource-readiness";
 import { liveSvoSceneResourcePlugin } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
-import { uniformMethod } from "../lib/methods/uniform/method";
+import { uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { createPaneSession } from "../lib/core/session/session";
 import { hostTransportFailure } from "../lib/core/simulation/host-transport-status";
 
@@ -20,7 +20,7 @@ test("replacing a pending initializer retires the superseded resource's progress
     gpuFluidInitializationAbort: abort,
     gpuFluidInitializationResource: liveSvoSceneResourcePlugin,
   });
-  const config = { methodId: "uniform-volume", quality: "balanced", values: {} } as SimulationRunConfig;
+  const config = { methodId: "uniform-narrow-band-flip", quality: "balanced", values: {} } as SimulationRunConfig;
   const access = renderer as unknown as {
     beginGPUFluidInitialization(scene: SceneDescription, config: SimulationRunConfig, key: string, mode: "full-scene"): void;
   };
@@ -53,7 +53,7 @@ test("cancelling replacement work preserves the previously usable resource", () 
 test("superseded initialization is cancellation rather than a terminal transport failure", () => {
   const pane = createPaneSession("a");
   pane.diagnostics.setState({ gpuStatus: {
-    state: "cancelled", label: "Previous scene initialization superseded", resource: uniformMethod.resource,
+    state: "cancelled", label: "Previous scene initialization superseded", resource: uniformNarrowBandMethod.resource,
   } });
   assert.equal(hostTransportFailure([pane]), undefined);
 });
@@ -63,13 +63,13 @@ test("a stale owner's cancellation keeps the active runtime, new owner and runni
   const pane = createPaneSession("a");
   pane.runtime.getState().setRunState("running");
   pane.diagnostics.getState().set({ gpuStatus: { state: "initializing", label: "Old scene", resource: oldOwner } });
-  pane.diagnostics.getState().set({ gpuStatus: { state: "ready", label: "Current fluid", adapter: "mock", resource: uniformMethod.resource } });
+  pane.diagnostics.getState().set({ gpuStatus: { state: "ready", label: "Current fluid", adapter: "mock", resource: uniformNarrowBandMethod.resource } });
   const before = pane.diagnostics.getState();
   pane.diagnostics.getState().set({ gpuStatus: { state: "cancelled", label: "Old scene superseded", resource: oldOwner } });
   const after = pane.diagnostics.getState();
   assert.equal(after.gpuStatus, before.gpuStatus);
   assert.equal(after.resourceReadiness.activeLane, before.resourceReadiness.activeLane);
-  assert.equal(after.resourceReadiness.plugins[uniformMethod.resource.id], before.resourceReadiness.plugins[uniformMethod.resource.id]);
+  assert.equal(after.resourceReadiness.plugins[uniformNarrowBandMethod.resource.id], before.resourceReadiness.plugins[uniformNarrowBandMethod.resource.id]);
   assert.equal(after.resourceReadiness.plugins[oldOwner.id].activity, undefined);
   assert.equal(after.resourceReadiness.plugins[oldOwner.id].usable, false);
   assert.equal(hostTransportFailure([pane]), undefined);

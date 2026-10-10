@@ -1,5 +1,6 @@
 import { cloneScene, parseScene, type SceneDescription } from "./model";
 import type { MethodProfile } from "./method-contract";
+import { defaultMethodId, getMethod } from "./method-registry";
 
 /**
  * Named local scene storage.
@@ -94,24 +95,10 @@ export function savedSceneEntries(entries: readonly SceneLibraryEntry[]): SceneL
   return entries.filter((entry) => !isSceneAutosaveEntry(entry));
 }
 
-/**
- * Rewrite a profile saved before the adaptive backends became two methods.
- *
- * `isMethodProfile` accepts any string as a method id, so a stored `"octree"`
- * passes validation and reaches the store intact — where it names no
- * registered method, so its overrides land in a bucket nothing ever reads and
- * `getMethod` quietly hands back the default. The reader's saved tuning would
- * be gone with no error anywhere: the scene reopens, on a different solver,
- * looking like it worked. The autosave shares this array, so restoring the
- * working document crosses the same map.
- */
+/** Retired solver profiles reopen on the application defaults. */
 function migratedMethodProfile(profile: MethodProfile): MethodProfile {
-  if (profile.methodId !== "octree") return profile;
-  const { coarseBackend, ...overrides } = profile.overrides;
-  return {
-    ...profile,
-    methodId: coarseBackend === "power2017" ? "power-liquids" : "losasso",
-    overrides,
+  return getMethod(profile.methodId).id === profile.methodId ? profile : {
+    methodId: defaultMethodId(), quality: profile.quality, overrides: {},
   };
 }
 

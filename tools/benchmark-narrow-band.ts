@@ -1,6 +1,5 @@
 /** Focused Figure 9 benchmark: browser GPU must be off. Default dt is 17ms.
  * node --import tsx tools/benchmark-narrow-band.ts baseline
- * Add --uniform for Uniform Geometric with the same refinement criteria.
  * --adaptive enables activity-driven particles with shape/thin/contact protection.
  * --adaptive-budget=50 admits half of requesting tiles; 100 admits all.
  * --adaptive-fade=0.5 sets particle retirement time in seconds.
@@ -20,11 +19,9 @@ import { managedGPUDevice } from '../lib/core/gpu-compilation-manager';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
 import { sceneDocument } from '../lib/core/scene-definition';
 import { getSceneDefinition } from '../lib/core/scenes';
-import { uniformVolumeMethod } from '../lib/methods/uniform/uniform-volume-method';
-import { uniformNarrowBandMethod, narrowBandFixedDetail, narrowBandAdaptiveDetail } from '../lib/methods/uniform/uniform-narrow-band-method';
+import { uniformNarrowBandMethod } from '../lib/methods/uniform/uniform-narrow-band-method';
 import type { WebGPUUniformReferenceSolver } from '../lib/methods/uniform/webgpu-uniform-reference';
-const method=process.argv.includes("--uniform")?uniformVolumeMethod:uniformNarrowBandMethod;
-const coarseParticleMode=process.argv.includes("--coarse-particles")?"on":"off";
+const method=uniformNarrowBandMethod;
 const steps=Number(process.argv.find(a=>a.startsWith("--steps="))?.slice(8)??48);
 assert.ok(Number.isInteger(steps)&&steps>=6&&steps<=2400,"--steps must be an integer from 6 to 2400");
 const fineGridPadding=Number(process.argv.find(a=>a.startsWith("--fine-padding="))?.split("=")[1]??1);
@@ -43,9 +40,7 @@ const hash=createHash('sha256');
 for(const file of ['uniform-narrow-band-flip.ts','uniform-narrow-band-activity.wgsl.ts','uniform-narrow-band-advection.wgsl.ts','uniform-narrow-band-membership.wgsl.ts','uniform-narrow-band-redistance.wgsl.ts','uniform-narrow-band-order.ts','uniform-narrow-band-surface.wgsl.ts','uniform-mixed-surface-volume.ts','uniform-narrow-band-method.ts','webgpu-uniform-reference.ts','uniform-mixed-frame.ts','uniform-mixed-frame-plan.ts','uniform-mixed-remap.ts','uniform-mixed-surface.ts','uniform-mixed-dynamic.ts','uniform-mixed-pressure-authority.ts'])hash.update(readFileSync(`lib/methods/uniform/${file}`));
 for(const file of ['uniform-narrow-band-budget.wgsl.ts','uniform-narrow-band-controls.ts'])hash.update(readFileSync(`lib/methods/uniform/${file}`));
 const sourceHash=hash.digest('hex');
-const {sharpeningSweeps,sharpeningDistance,...sharedDefaults}=uniformNarrowBandMethod.appDefaults!;
-const activityValues:import("../lib/core/method-contract").MethodParamValues=process.argv.includes("--adaptive")?{...narrowBandAdaptiveDetail,adaptiveBudgetPercent,adaptiveFadeSeconds}:{...narrowBandFixedDetail,adaptiveSurface:"off"};
-const values={...(method===uniformVolumeMethod?sharedDefaults:uniformNarrowBandMethod.appDefaults),timeStep:'scene',fineGridPadding,coarseParticleMode,...activityValues,...(process.argv.includes("--full")?{detailPolicy:"full"}:{}),...(coarseParticleMode==='on'?{detailPolicy:'requested',detailSolidContact:'off'}:{})};
+const values={...method.appDefaults,timeStep:'scene',fineGridPadding,adaptiveBudgetPercent,adaptiveFadeSeconds};
 const scene=structuredClone(sceneDocument(getSceneDefinition(sceneId)));
 scene.numerics={...scene.numerics,fixedDt_s:dt,maxDt_s:dt};
 if(process.argv.includes("--no-gravity"))scene.fluid.gravity_m_s2={x:0,y:0,z:0};
@@ -94,7 +89,7 @@ try {
   read.unmap();read.destroy();console.log(JSON.stringify({activityCensus}));
  }
  mkdirSync('docs/verification',{recursive:true});
- writeFileSync(`docs/verification/narrow-band-${name}.json`,JSON.stringify({date:new Date().toISOString(),arguments:process.argv.slice(2),method:method.id,values,coarseParticleMode,sourceHash,adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},scene,rows,final,activityCensus,errors},null,2)+'\n');
+ writeFileSync(`docs/verification/narrow-band-${name}.json`,JSON.stringify({date:new Date().toISOString(),arguments:process.argv.slice(2),method:method.id,values,sourceHash,adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},scene,rows,final,activityCensus,errors},null,2)+'\n');
 }catch(error){
  mkdirSync('docs/verification',{recursive:true});
  writeFileSync(`docs/verification/narrow-band-${name}-failed.json`,JSON.stringify({date:new Date().toISOString(),arguments:process.argv.slice(2),method:method.id,values,sourceHash,scene,rows,errors,error:String(error)},null,2)+'\n');

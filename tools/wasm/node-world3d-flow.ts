@@ -37,10 +37,10 @@ const source = findSceneDefinition("water-box-dam-break");
 if (!source) throw new Error("Missing water-box-dam-break scene");
 const uiDefaultDocument = sceneDocument(source);
 const uiDefaultMethodValues = resolvedMethodValues({
-  methodId: "adaptive-volume", quality: "balanced",
-  overrides: { "adaptive-volume": { physicsExecutionBackend: "cpu" } },
+  methodId: "uniform-narrow-band-flip", quality: "balanced",
+  overrides: {},
 });
-const uiDefaultDt = getMethod("adaptive-volume")
+const uiDefaultDt = getMethod("uniform-narrow-band-flip")
   .effectiveStep_s?.(uiDefaultDocument, uiDefaultMethodValues)
   ?? uiDefaultDocument.numerics.fixedDt_s;
 const document = structuredClone(uiDefaultDocument);

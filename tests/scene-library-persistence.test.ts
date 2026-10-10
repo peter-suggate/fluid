@@ -121,3 +121,14 @@ test("malformed pooled references cannot masquerade as usable entries", () => {
   ] }));
   assert.deepEqual(readSceneLibrary(fixture.storage).map(entry => entry.id), ["valid"]);
 });
+
+test("a saved retired method migrates to the retained solver and keeps its document", async () => {
+  await import("../lib/methods");
+  const fixture = quotaStorage(Infinity);
+  const scene = serializeScene(defaultScene);
+  fixture.storage.setItem(SCENE_LIBRARY_STORAGE_KEY, JSON.stringify([{ id: "old", name: "Old scene", savedAt_ms: 1, presetId: "fixture", scene,
+    methodProfile: { methodId: "retired-solver", quality: "balanced", overrides: { timeStep: "paper" } } }]));
+  const [entry] = readSceneLibrary(fixture.storage);
+  assert.deepEqual(entry!.methodProfile, { methodId: "uniform-narrow-band-flip", quality: "balanced", overrides: {} });
+  assert.equal(entry!.scene, scene);
+});

@@ -6,7 +6,6 @@ import type { EditorAction, EditorActionTarget } from "./editor-action";
 import { liquidBallWedge, liquidWedge } from "../features/liquid-drop/ring";
 import { regionDrawWedge } from "../features/refinement-region/ring";
 import { studioRegionSpaceForMethod } from "./editor-refinement-region";
-import { cellProbeAction } from "./editor-probe-actions";
 import {
   boxCenter,
   boxHandles,
@@ -756,7 +755,6 @@ export function fluidRingActions(
       hint: "Instruments and probes: pipelines, diagnostics, and what is behind this pixel",
       children: [
         ...fluidInstrumentActions(scene),
-        cellProbeAction(target),
         // The ray probe lands here too, appended by `targetActionsAt` to
         // whichever ring carries this group — a ray through water is as real as
         // a ray into a stone, and the water is where the expensive ones are.

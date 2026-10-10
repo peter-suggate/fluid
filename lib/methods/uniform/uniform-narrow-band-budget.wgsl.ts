@@ -26,7 +26,7 @@ const NB_BUDGET_KEYS=${KEYS}u;
 const NB_BUDGET_NONE=0xffffffffu;
 const NB_BUDGET_KEPT=0xfffffffeu;
 fn nbBudgetOn()->bool{return nbBudgetSupported&&policy.activity.x<100u;}
-fn nbBudgetHist(b:u32)->u32{return binIndex(64u)+b;}
+fn nbBudgetHist(b:u32)->u32{return holdIndex(UM_TILES)+b;}
 fn nbBudgetState(k:u32)->u32{return nbBudgetHist(NB_BUDGET_KEYS)+k;}
 fn nbBudgetRank(t:u32)->u32{return nbBudgetState(3u)+t;}
 fn nbBudgetChunk(c:u32)->u32{return nbBudgetRank(UM_TILES)+c;}

@@ -11,7 +11,6 @@
  * Nothing here allocates, binds or dispatches: these are descriptions.
  */
 import type { FineLevelSetBrickPlan } from "./fine-levelset-brick-abi";
-import type { SparseCM12FramePlanSource } from "./sparse-cm12-frame-plan";
 
 /** GPU-resident authority for one domain-global fine level-set generation. */
 export interface WebGPUFineLevelSetBrickSource {
@@ -48,75 +47,6 @@ export interface WebGPUFineLevelSetBrickSource {
    * gate used by existing consumers.
    */
   presentationControl?: GPUBufferBinding;
-}
-
-/** Sparse directory plus the live accepted physical topology and CM12 field
- * arenas. Scientific overlays sample the GPU-published generation directly;
- * no finest-domain ownership or field texture is materialized for them. */
-export interface SparseAdaptiveGridConsumerSource {
-  readonly kind: "sparse-adaptive-grid-sampling";
-  readonly params: GPUBufferBinding;
-  readonly topology: GPUBufferBinding;
-  /** Immutable 1/2/4/8 templates followed by accepted/shadow worklists. */
-  readonly topologyArena: GPUBufferBinding;
-  readonly state: GPUBufferBinding;
-  readonly activity: GPUBufferBinding;
-  /** Word stride of one live activity/topology record. Renderer-side sparse
-   * ownership must use the producer's stride rather than freezing an ABI copy. */
-  readonly activityRecordWords: number;
-  readonly fineMetadata: GPUBufferBinding;
-  readonly fineWorklist: GPUBufferBinding;
-  readonly fineSamples: GPUBufferBinding;
-  /**
-   * Accepted adaptive level set plus committed extensive liquid/capacity data.
-   *
-   * This is layout metadata only. The buffers are the `topologyArena` and
-   * `state` bindings above, so a slice renderer can read the accepted physics
-   * publication without allocating a mirror texture or scheduling a compute
-   * pass. All offsets are in four-byte words/floats.
-   */
-  readonly levelSetVolume?: SparseLevelSetVolumeConsumerLayout;
-  /**
-   * Word offset of the WDR1 signed-coordinate directory in `topologyArena`.
-   *
-   * Older sparse publications used the dense logical-key hash embedded in
-   * `topology`; current SparseWorld publications grow beyond that lattice and
-   * resolve ownership through WDR1 instead. Keeping the offset with the source
-   * lets read-only overlays follow the same authority without knowing the
-   * resident arena layout.
-  */
-  readonly worldDirectoryBaseWords?: number;
-  /** Number of immutable atlas leaves preceding WDR1's dynamic frontier leaves. */
-  readonly worldDirectoryInitialLeaves?: number;
-  /** Prepared dynamic cell slab. Omitted for legacy single-rung pages. */
-  readonly dynamicPageCellStride?: number;
-  /** B1, B2, B4, B8 offsets within that slab. */
-  readonly dynamicPageRungOffsets?: readonly [number, number, number, number];
-  /** Optional versioned 4³ temporal-dirty publication. Missing is UNKNOWN. */
-  /** Optional GPU-authored FPL1 schedule/receipt publication. Missing falls back to CMD1. */
-  readonly framePlan?: SparseCM12FramePlanSource;
-}
-
-export interface SparseLevelSetVolumeConsumerLayout {
-  readonly globalHeaderBaseWords: number;
-  readonly slot0BaseWords: number;
-  readonly slotStrideWords: number;
-  readonly slotHeaderOffsetWords: number;
-  readonly cornerRefsOffsetWords: number;
-  readonly cellRecordsOffsetWords: number;
-  readonly cellHashOffsetWords: number;
-  readonly phi0OffsetWords: number;
-  readonly phi1OffsetWords: number;
-  readonly support0OffsetWords: number;
-  readonly support1OffsetWords: number;
-  readonly cellCapacity: number;
-  readonly vertexCapacity: number;
-  readonly cellHashCapacity: number;
-  readonly hashProbeLimit: number;
-  /** Dynamic-solid open fraction; absent when the scene has no cut solids. */
-  readonly solidCellOpenOffsetFloats?: number;
-  /** Authored SolidWorld open fraction; absent when no voxel solids exist. */
-  readonly solidVoxelCellOpenOffsetFloats?: number;
 }
 
 /**

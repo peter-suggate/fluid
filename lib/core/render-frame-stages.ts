@@ -56,7 +56,6 @@ export const RENDER_FRAME_STAGES = Object.freeze([
   "world-derived-lighting",
   "world-radiance-feedback",
   "rigid-pose-mirror",
-  "fluid-coverage",
   // WATER SURFACE — the isosurface and what is projected from it.
   "surface-extraction",
   "caustics",
@@ -105,7 +104,6 @@ export type RenderPipelineNodeId =
   | "sparse-world-build"
   | "derived-lighting"
   | "rigid-pose-mirror"
-  | "fluid-coverage"
   | "primary-entry-prepass"
   | "filtered-detail"
   | "primary-traversal"
@@ -177,11 +175,6 @@ export const RENDER_FRAME_STAGE_PLUGINS = Object.freeze({
     owner: "renderer",
     node: "rigid-pose-mirror",
     phase: { id: "scene-upload", label: "Rigid pose mirror + readback" },
-  },
-  "fluid-coverage": {
-    owner: "renderer",
-    node: "fluid-coverage",
-    phase: { id: "scene-upload", label: "SVO fluid coverage" },
   },
   "surface-extraction": {
     owner: "water",

@@ -46,8 +46,6 @@ import { RENDER_STAGE_SWITCH_IDS, type RenderStageSwitchId } from "../../svo/pip
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, svoRenderStageUsesPrimaryWorkMap, type SvoRenderStageView } from "../../svo/features/diagnostics/svo-render-diagnostics";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuning } from "../../svo/pipeline/svo-render-tuning";
 import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../../svo/features/diagnostics/svo-pixel-trace";
-import { FLUID_CELL_TRACE_LAYERS, type FluidCellTraceLayer } from "../fluid-cell-trace";
-import { isStageLensOverlayMode } from "../stage-lens";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
 import type { FluidParticleDisplay, FluidSurfaceRenderMode } from "../../features/surface-display/definition";
 
@@ -230,7 +228,6 @@ interface UIStore {
   visualLayers?: VisualLayerState;
   gridOverlayMode: GridOverlayMode;
   /** Scrubber position along a stage lens's phases. Ignored by every other mode. */
-  gridOverlayLensPhase: number;
   /** Selected tank's liquid presentation; never changes simulation state. */
   fluidSurfaceRenderMode: FluidSurfaceRenderMode;
   /** The liquid's own particles, for a method that keeps them; presentation only. */
@@ -274,42 +271,6 @@ interface UIStore {
   /** An outstanding ask for a pin, consumed by the viewport. See `TracePinRequest`. */
   pixelTracePinRequest: TracePinRequest | null;
   pixelTraceLayers: readonly SvoPixelTraceLayer[];
-  /** Per-cell fluid work diagnostic; the solver-side counterpart of the ray probe. */
-  fluidCellTraceEnabled: boolean;
-  fluidCellTracePinned: boolean;
-  fluidCellTracePinRequest: TracePinRequest | null;
-  fluidCellTraceLayers: readonly FluidCellTraceLayer[];
-  /**
-   * Which leaf along the pointer ray is described, nearest first. Held here
-   * rather than in the renderer because it survives the ray moving under it:
-   * stepping to the third leaf and then nudging the pointer should still
-   * describe the third leaf, not jump back to the surface.
-   */
-  fluidCellTraceHitIndex: number;
-  /**
-   * Leaves the last gather found under the pointer. Published by the viewport
-   * because only the GPU knows it, and held here so the keyboard can wrap the
-   * step without reaching into the renderer.
-   */
-  fluidCellTraceHitCount: number;
-  /**
-   * Indices within that run whose leaf the interface passes through.
-   *
-   * Published beside the count and for the same reason: only the gather knows
-   * which leaves those are, and the keyboard has to be able to jump to one
-   * without reaching into the renderer. A pixel names the nearest leaf, which on
-   * a liquid is a surface cell, so stepping inward one at a time is the wrong
-   * instrument for finding the cell actually worth reading.
-   */
-  fluidCellTraceInterfaceHits: readonly number[];
-  /**
-   * Whether the cell HUD's account is unfolded past the legend and figures.
-   *
-   * Kept here rather than in the component so it survives leaving and
-   * re-entering pick mode: asking for the detail is a statement about how this
-   * reader wants to read, not about one selection.
-   */
-  fluidCellTraceExpanded: boolean;
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   setViewportMode: (mode: ViewportMode) => void;
   /** Adopt a swept box as the selection, or clear it with `undefined`. */
@@ -336,7 +297,6 @@ interface UIStore {
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
   setGridOverlaySlice: (slice: number) => void;
   setGridOverlayMode: (mode: GridOverlayMode) => void;
-  setGridOverlayLensPhase: (phase: number) => void;
   setFluidSurfaceRenderMode: (mode: FluidSurfaceRenderMode) => void;
   setFluidParticleDisplay: (display: FluidParticleDisplay) => void;
   setSvoShadowsEnabled: (enabled: boolean) => void;
@@ -362,21 +322,7 @@ interface UIStore {
   requestPixelTracePin: (request?: TracePinRequest) => void;
   togglePixelTraceLayer: (layer: SvoPixelTraceLayer) => void;
   setPixelTraceLayers: (layers: readonly SvoPixelTraceLayer[]) => void;
-  setFluidCellTraceEnabled: (enabled: boolean) => void;
-  setFluidCellTracePinned: (pinned: boolean) => void;
-  requestFluidCellTracePin: (request?: TracePinRequest) => void;
-  toggleFluidCellTraceLayer: (layer: FluidCellTraceLayer) => void;
-  /**
-   * Step along the ray run. The caller wraps against the run length it has seen,
-   * because only the gather knows how many leaves the ray met — the store would
-   * be clamping against a count it cannot refresh.
-   */
-  setFluidCellTraceHitIndex: (index: number) => void;
-  setFluidCellTraceHitCount: (count: number) => void;
-  setFluidCellTraceInterfaceHits: (indices: readonly number[]) => void;
-  /** Move the selection to the next interface leaf on the run, wrapping. */
-  jumpFluidCellTraceToInterface: () => void;
-  toggleFluidCellTraceExpanded: () => void;
+
 }
 
 /**
@@ -419,7 +365,6 @@ export const createUIStore = () => create<UIStore>((set) => ({
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
-  gridOverlayLensPhase: 0,
   ...uiFeatureQuery.read(new URLSearchParams()),
   svoGlobalIlluminationEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.globalIlluminationEnabled ?? false,
   svoWorldGiCacheEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.worldGiCacheEnabled ?? false,
@@ -432,14 +377,6 @@ export const createUIStore = () => create<UIStore>((set) => ({
   pixelTracePinned: false,
   pixelTracePinRequest: null,
   pixelTraceLayers: SVO_PIXEL_TRACE_LAYERS,
-  fluidCellTraceEnabled: false,
-  fluidCellTracePinned: false,
-  fluidCellTracePinRequest: null,
-  fluidCellTraceLayers: FLUID_CELL_TRACE_LAYERS,
-  fluidCellTraceHitIndex: 0,
-  fluidCellTraceHitCount: 0,
-  fluidCellTraceInterfaceHits: [],
-  fluidCellTraceExpanded: false,
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
   // Leaving INTERACT puts down everything it was holding. A selection, an armed
   // tool or an axis lock surviving into LOOK would be invisible state waiting to
@@ -539,10 +476,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   setGridOverlayMode: (gridOverlayMode) => set((state) => ({
     gridOverlayMode,
     visualLayers: undefined,
-    gridOverlayLensPhase: isStageLensOverlayMode(gridOverlayMode) && gridOverlayMode !== state.gridOverlayMode
-      ? 0 : state.gridOverlayLensPhase,
   })),
-  setGridOverlayLensPhase: (phase) => set({ gridOverlayLensPhase: Math.max(0, Math.floor(phase)) }),
   setFluidSurfaceRenderMode: (fluidSurfaceRenderMode) => set(state => {
     surfaceDisplayQuery.write(new URLSearchParams(), { fluidSurfaceRenderMode, fluidParticleDisplay: state.fluidParticleDisplay });
     return { fluidSurfaceRenderMode };
@@ -630,48 +564,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   setPixelTraceLayers: (pixelTraceLayers) => set({
     pixelTraceLayers: SVO_PIXEL_TRACE_LAYERS.filter((entry) => pixelTraceLayers.includes(entry)),
   }),
-  setFluidCellTraceEnabled: (fluidCellTraceEnabled) => set((state) => ({
-    fluidCellTraceEnabled,
-    fluidCellTracePinned: fluidCellTraceEnabled ? state.fluidCellTracePinned : false,
-    fluidCellTracePinRequest: null,
-    fluidCellTraceHitIndex: fluidCellTraceEnabled ? state.fluidCellTraceHitIndex : 0,
-    fluidCellTraceHitCount: fluidCellTraceEnabled ? state.fluidCellTraceHitCount : 0,
-    fluidCellTraceInterfaceHits: fluidCellTraceEnabled ? state.fluidCellTraceInterfaceHits : [],
-  })),
-  // As with the ray probe, only the viewport may declare a pin, because only it
-  // knows the pointer position the pin must record.
-  setFluidCellTracePinned: (fluidCellTracePinned) => set({
-    fluidCellTracePinned, fluidCellTracePinRequest: null,
-  }),
-  requestFluidCellTracePin: (request = {}) => set({ fluidCellTracePinRequest: request }),
-  toggleFluidCellTraceLayer: (layer) => set((state) => ({
-    fluidCellTraceLayers: state.fluidCellTraceLayers.includes(layer)
-      ? state.fluidCellTraceLayers.filter((entry) => entry !== layer)
-      : FLUID_CELL_TRACE_LAYERS.filter(
-        (entry) => entry === layer || state.fluidCellTraceLayers.includes(entry)),
-  })),
-  setFluidCellTraceHitIndex: (fluidCellTraceHitIndex) => set({
-    fluidCellTraceHitIndex: Math.max(0, Math.floor(fluidCellTraceHitIndex)),
-  }),
-  setFluidCellTraceHitCount: (fluidCellTraceHitCount) => set((state) =>
-    state.fluidCellTraceHitCount === fluidCellTraceHitCount ? {} : { fluidCellTraceHitCount }),
-  // Compared before writing, because the viewport republishes this on every
-  // gather and an unchanged array would re-render the HUD each frame.
-  setFluidCellTraceInterfaceHits: (indices) => set((state) =>
-    state.fluidCellTraceInterfaceHits.length === indices.length
-      && state.fluidCellTraceInterfaceHits.every((value, at) => value === indices[at])
-      ? {} : { fluidCellTraceInterfaceHits: [...indices] }),
-  jumpFluidCellTraceToInterface: () => set((state) => {
-    const targets = state.fluidCellTraceInterfaceHits;
-    if (targets.length === 0) return {};
-    // Strictly forward with wrap, so pressing it again always advances rather
-    // than sticking on whichever target happens to be nearest.
-    const next = targets.find((index) => index > state.fluidCellTraceHitIndex) ?? targets[0];
-    return next === state.fluidCellTraceHitIndex ? {} : { fluidCellTraceHitIndex: next };
-  }),
-  toggleFluidCellTraceExpanded: () => set((state) => ({
-    fluidCellTraceExpanded: !state.fluidCellTraceExpanded,
-  })),
+
 }));
 
 export type UIStoreHook = ReturnType<typeof createUIStore>;

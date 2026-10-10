@@ -93,11 +93,10 @@
  * subject, and the prose is what you reach for when the picture raises a
  * question.
  *
- * Nothing here restates the method. Everything this page shows *about* the
- * advance is declared beside it, in
- * `lib/methods/adaptive-volume/features/advance-slice/`: the lens captions and
+ * The declarations this page displays about the adaptive advance live in
+ * `advance-lab/`: the lens captions and
  * the marks each stage's picture may put on a cell hang off
- * `SPARSE_CM12_STAGES[stage].slice` alongside the labels, tips and sub-seam
+ * `ADVANCE_STAGE_DECLARATIONS[stage].slice` alongside the labels, tips and sub-seam
  * names; the sizing rules are `ADVANCE_WORK`; the thresholds every mark is cut
  * at are `ADVANCE_SLICE_THRESHOLDS`; the surface and transport choices this
  * page offers are `ADVANCE_SURFACE_VIEWS` and `ADVANCE_TRANSPORT_EXPERIMENTS`;
@@ -150,14 +149,14 @@ import {
   advanceStageWork, advanceWorkModel, ADVANCE_DISPATCH_KINDS,
   type AdvanceCost, type AdvanceKernel, type AdvanceStageId,
   type AdvanceWorkScene,
-} from "../lib/methods/adaptive-volume/features/advance-slice/advance-work";
+} from "./advance-work";
 import {
   ADVANCE_SLICE_SETTINGS, ADVANCE_SURFACE_VIEWS,
   ADVANCE_TRANSPORT_EXPERIMENTS, type AdvanceSurfaceViewId,
-} from "../lib/methods/adaptive-volume/features/advance-slice/definition";
+} from "./definition";
 import {
   ADVANCE_LOOP_STEPS,
-} from "../lib/methods/adaptive-volume/features/advance-slice/loop";
+} from "./loop";
 import { AdvanceLabController, type AdvanceAuthoredScene,
   type AdvanceRefinementRegion, type AdvanceTransportExperiment,
 } from "../lib/physics-wasm/advance-controller";
@@ -167,8 +166,8 @@ import {
   type AdvanceRdfView, type AdvanceView,
 } from "../lib/physics-wasm/advance-view";
 import {
-  SPARSE_CM12_STAGE_BANDS, sparseCM12Stage,
-} from "../lib/methods/adaptive-volume/sparse-cm12-stages";
+  ADVANCE_STAGE_BANDS, advanceStage,
+} from "./advance-stages";
 import styles from "./AdvanceLab.module.css";
 import {
   ADVANCE_LENSES, BAND_TONE, CELL_FILL_KEYS, DIRECT_LEVEL_SET_CONTOUR_KEY,
@@ -1022,7 +1021,7 @@ function AdvanceSlice({ session, lab }: {
 
   const representing = step === 1;
   const index = ADVANCE_STAGE_ORDER.indexOf(selected);
-  const declaration = sparseCM12Stage(selected);
+  const declaration = advanceStage(selected);
   const work = advanceStageWork(selected);
   const readingCellwiseTransport = transportExperiment === "cellwise-remap"
     && selected === "conservative-transport";
@@ -2141,10 +2140,10 @@ function AdvanceSlice({ session, lab }: {
             {ADVANCE_STAGE_ORDER.map((stage, i) => {
               const active = LOOP_STEPS.find(loop => loop.n === step);
               const inStep = !active || (active.from >= 1 && i + 1 >= active.from && i + 1 <= active.to);
-              const color = paletteVar(BAND_TONE[sparseCM12Stage(stage).band]);
+              const color = paletteVar(BAND_TONE[advanceStage(stage).band]);
               return <button type="button" key={stage} aria-pressed={stage === selected}
                 className={`${styles.tick}${inStep ? "" : ` ${styles.dim}`}`}
-                title={`${i + 1}. ${sparseCM12Stage(stage).label}`}
+                title={`${i + 1}. ${advanceStage(stage).label}`}
                 onClick={() => select(stage)}>
                 <span className={styles.bar} style={{
                   background: color,
@@ -2336,7 +2335,7 @@ function AdvanceSlice({ session, lab }: {
           </Fold>}
 
           {!representing && !readingDirectLevelSet && <Fold id="io" title="Reads, writes and feeds"
-            meta={SPARSE_CM12_STAGE_BANDS[declaration.band].toLowerCase()}
+            meta={ADVANCE_STAGE_BANDS[declaration.band].toLowerCase()}
             open={folds.has("io")} toggle={toggleFold}>
             <dl className={styles.io}>
               <dt>reads</dt><dd>{declaration.tip.reads ?? "—"}</dd>

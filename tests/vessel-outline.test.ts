@@ -37,8 +37,7 @@ test("missing vessel presentation defaults to the canonical shell-volume wirefra
     "floor and closed lid rails include their actual one-cell thickness");
   assertExtrema(2, [-0.45, 0.45],
     "front and back rails include the actual one-cell wall thickness");
-  assert.ok(optionalRendererPipelineRequests(undefined, false, false,
-    false, false, false, true, true).includes("decoration-overlay"));
+  assert.ok(optionalRendererPipelineRequests(undefined, false, false, true, true).includes("decoration-overlay"));
 });
 
 test("an edited shell face is not falsely represented by the volume wireframe", () => {

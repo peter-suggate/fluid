@@ -10,8 +10,7 @@ export function hostTransportFailure(panes: readonly PaneSession[]): string | un
     const { gpuStatus, gpuInfo } = pane.diagnostics.getState();
     const detail = ["lost", "unavailable", "blocked", "stopping"].includes(gpuStatus.state)
       ? gpuStatus.label
-      : gpuInfo?.simulationPipelineError ?? gpuInfo?.topologyGenerationError
-        ?? gpuInfo?.sparseWorldStatus?.fault?.code ?? gpuInfo?.sparseWorldDeviceFault?.code;
+      : gpuInfo?.simulationPipelineError ?? gpuInfo?.topologyGenerationError;
     if (detail) return `Pane ${pane.id.toUpperCase()}: ${detail}`;
   }
   const steps = panes.map((pane) => ({ id: pane.id, dt: effectiveSimulationStep_s(pane.scene.getState().scene, pane.method.getState()) }));

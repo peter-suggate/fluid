@@ -1,7 +1,6 @@
 "use client";
 
 import { RigidDropRow } from "../lib/features/rigid-placement/ui";
-import { TopologyFreezeButton } from "../lib/features/topology-freeze/ui";
 import { LiquidDropRow as SharedLiquidDropRow } from "../lib/features/liquid-drop/ui";
 import { RegionRow as SharedRegionRow } from "../lib/features/refinement-region/ui";
 import { studioRegionSpaceForMethod } from "../lib/core/editor-refinement-region";
@@ -57,7 +56,6 @@ export function RegionRow() {
   return <SharedRegionRow
     space={studioRegionSpaceForMethod(methodId)}
     doc={scene}
-    after={<TopologyFreezeButton />}
   />;
 }
 

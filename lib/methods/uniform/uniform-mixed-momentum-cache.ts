@@ -36,7 +36,9 @@ export class UniformMixedMomentumCache {
       {binding:2,resource:f.coarseExtended},
     ]});
   }
-  async initialize():Promise<void>{
+  private initialization?:Promise<void>;
+  initialize():Promise<void>{return this.initialization??=this.compile();}
+  private async compile():Promise<void>{
     const module=uniformDetailModule(this.device,{label:"Uniform mixed momentum cache",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var extended:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read> negative:array<f32>;

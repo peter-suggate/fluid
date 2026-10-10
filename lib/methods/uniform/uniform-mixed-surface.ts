@@ -414,7 +414,7 @@ fn umReleasedWalls(p:vec3f,value:f32)->f32{
   if(whole>0.0){result=max(result,whole-inward*(p[axis]-plane)*h[axis]);}
  }}return result;
 }
-const UM_TRAVEL_BASE:u32=${surfaceClaimWords(this.ownership.capacity.lattice.dimensions)}u;
+const UM_TRAVEL_BASE:u32=${SURFACE_CLAIM_WORDS}u+6u*UM_WALL_PLANE_TILES;
 // A coarse rebuild has a spatial interpolation error even at u=0. Applying
 // it every small timestep makes that error a persistent artificial motion.
 // Accumulate characteristic travel in owner-cell units in the existing
@@ -592,11 +592,11 @@ fn umSurfaceGradient(p:vec3f,width:f32)->vec3f{
 // bounds the probes whose owners lie in that tile.
 const UM_WALL_REACH:u32=${UNIFORM_MIXED_CLAIM_WORDS}u;
 const UM_WALL_TILE_REACH:u32=${SURFACE_CLAIM_WORDS}u;
-const UM_WALL_PLANE_TILES:u32=${wallReachTiles(this.ownership.capacity.lattice.dimensions)}u;
-override umWallReachGroups:u32=1u;
+const UM_WALL_PLANE_TILES:u32=max(UM_T.x*UM_T.y,max(UM_T.y*UM_T.z,UM_T.z*UM_T.x));
+fn umWallReachGroups()->u32{return (max(UM_D.x*UM_D.y,max(UM_D.y*UM_D.z,UM_D.z*UM_D.x))+255u)/256u;}
 var<workgroup> wallReachBits:atomic<u32>;
 @compute @workgroup_size(256) fn wallReach(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let plane=group.x/umWallReachGroups;let chunk=group.x%umWallReachGroups;
+ let plane=group.x/umWallReachGroups();let chunk=group.x%umWallReachGroups();
  let axis=plane/2u;let side=plane%2u;let upper=side==1u;let inward=select(1.0,-1.0,upper);
  let u=(axis+1u)%3u;let v=(axis+2u)%3u;let h=params.hDt.xyz;let dt=params.hDt.w;
  let ambient=axis==1u&&upper&&(params.flags.x&1u)!=0u;
@@ -1124,7 +1124,7 @@ var<workgroup> traceMergedClaim:u32;
     await Promise.all([
       // Dispatched only under solids (encode: solid.present): no solid-free twin.
       ...(this.solid?["solidClosed","solidClear"]:[]).map(entryPoint=>keyed(this.pipelines,entryPoint,entryPoint,{},true)),
-      keyed(this.pipelines,"wallReach","wallReach",{umWallReachGroups:wallReachGroups(this.ownership.capacity.lattice.dimensions)}),
+      keyed(this.pipelines,"wallReach","wallReach"),
       ...[0,1,2].map(axis=>keyed(this.pipelines,`evidenceDistance${axis}`,"evidenceDistance",{umEvidenceAxis:axis})),
       ...([["retirementEvidence",UNIFORM_MIXED_COUNTED.fineTiles],["retirementEvidenceCoarse",UNIFORM_MIXED_COUNTED.coarseTiles]] as const).map(([entryPoint,umCountedJobs])=>keyed(this.pipelines,entryPoint,entryPoint,{umCountedJobs})),
       ...(["advect","redistance"] as const).map(entry=>keyed(this.pipelines,entry,entry,{umMergedTiles:1,umMergedCoarse:1,umMergedPack:8,umCertifiedJobs:2,umClaimWord:2})),

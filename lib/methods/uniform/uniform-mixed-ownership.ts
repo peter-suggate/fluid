@@ -234,8 +234,10 @@ export class UniformMixedOwnership {
     this.presentation={buffer:this.topology,size:this.topology.size};
     // The tail's last word locates the table (lib/core/uniform-detail-abi.ts).
     device.queue.writeBuffer(this.topology,this.topology.size-4,Uint32Array.of(layout.metadataBytes/4));
-    this.counts = device.createBuffer({ label: "Uniform mixed work counts", size: 16,
+    this.counts = device.createBuffer({ label: "Uniform mixed work counts and scene geometry", size: 48,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC | GPUBufferUsage.UNIFORM });
+    device.queue.writeBuffer(this.counts, 16, new Uint32Array([...layout.lattice.dimensions, n]));
+    device.queue.writeBuffer(this.counts, 32, new Float32Array([...layout.lattice.cellSize_m, Math.min(...layout.lattice.cellSize_m)]));
     // 9n+24: the mixed pressure schedule's slot gate (umSlotClosed), zero
     // except on a pressure level inside a closed slot. Builders stop at 9n+24.
     // 9n+28: the residency certificate (uniformMixedResidencyWord), all

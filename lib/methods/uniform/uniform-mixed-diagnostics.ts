@@ -46,7 +46,7 @@ var<workgroup> lanes:array<vec4u,64>;
     positive[axis]+=${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(velocity,face.anchor,0)[axis]*f32(face.width*face.width)/f32(owner.width*owner.width);
    }
   }
-  let represented=clamp(0.5-center/(4.0*w*${h[1]}),0.0,1.0);
+  let represented=clamp(0.5-center/(4.0*w*umSceneSpacing().y),0.0,1.0);
   receipt=vec4u(u32(represented*weight*2048.0+0.5),select(0u,q.x+owner.width,center<0.0),
    bitcast<u32>(length(positive)),u32(max(0.0,${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(volume,vec3i(q),0).x)*weight*2048.0+0.5));
  }

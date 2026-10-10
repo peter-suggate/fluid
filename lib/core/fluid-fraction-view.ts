@@ -21,10 +21,6 @@
  * - The visualization registry hands {@link FRACTION_VIEW_BANDS} to a legend,
  *   which is therefore derived rather than hand-kept.
  *
- * This module is in `lib/core` rather than beside the adaptive-volume method
- * that produces V/K because both of its renderers are core: `lib/core` may not
- * import a method (see `tools/check-module-boundaries.ts` rule 2), so a copy
- * under `lib/methods/adaptive-volume/` could not be the shared one.
  */
 
 /**

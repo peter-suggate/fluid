@@ -13,8 +13,8 @@ import { VISUAL_LAYERS, visualLayerPaintWGSL, importanceViewCode, layerOpacity, 
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import { fractionViewShaderConstants } from "./fluid-fraction-view";
 import { fractionReadoutShaderLibrary } from "./fraction-readout.wgsl";
-import type { SparseAdaptiveGridConsumerSource, DenseLevelSetVolumeConsumerSource } from "./levelset-consumer-abi";
-import { createGridOverlayLevelSetVolumeWGSL, gridOverlayLevelSetVolumeUniform } from "./grid-overlay-levelset-volume.wgsl";
+import type { DenseLevelSetVolumeConsumerSource } from "./levelset-consumer-abi";
+import { gridOverlayLevelSetVolumeWGSL, gridOverlayLevelSetVolumeUniform } from "./grid-overlay-levelset-volume.wgsl";
 import { uniformDetailBaseOf } from "./uniform-detail-abi";
 import { methodViewShaderConstants } from "./grid-overlay-visualizations";
 import {
@@ -61,7 +61,7 @@ const TILE_CLASS_SHELL:u32=${TILE_CLASS_SHELL}u;
 fn tileClassAt(cell:vec3i,dims:vec3i)->u32{
   if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
    let t=umTileAt(vec3u(clamp(cell,vec3i(0),dims-1))/4u);
-   return sparseFineMetadata[3u*umTileCount()+t];
+   return mixedSupport[3u*umTileCount()+t];
   }
   let tiles=(dims+vec3i(3))/4;
   let count=u32(tiles.x*tiles.y*tiles.z);
@@ -134,26 +134,12 @@ ${cameraApertureShaderLibrary("u")}
 // a 4h tile's value is read there, an h tile's in the field's h store.
 @group(0) @binding(26) var densityBase: texture_3d<f32>;
 @group(0) @binding(27) var velocityBase: texture_3d<f32>;
-struct SparseParams {
-  counts:vec4u, dimensions:vec4u, topologyOffsets:vec4u, topologyOffsets2:vec4u,
-  stateOffsets0:vec4u, stateOffsets1:vec4u, stateOffsets2:vec4u,
-  stateOffsets3:vec4u, stateOffsets4:vec4u, stateOffsets5:vec4u,
-  frame:vec4f, acceleration:vec4f, dispatch:vec4u,
-  injectionCenter:vec4f, injectionRadius:vec4f, sharpening:vec4f,
-}
-@group(0) @binding(10) var<uniform> sparseP: SparseParams;
-@group(0) @binding(11) var<storage,read> sparseTopology: array<u32>;
-@group(0) @binding(12) var<storage,read> sparseState: array<f32>;
-@group(0) @binding(13) var<storage,read> sparseActivity: array<u32>;
-@group(0) @binding(14) var<storage,read> sparseFineMetadata: array<u32>;
-@group(0) @binding(15) var<storage,read> sparseFineWorklist: array<u32>;
-@group(0) @binding(16) var<storage,read> sparseFineSamples: array<u32>;
-@group(0) @binding(17) var<storage,read> sparseTopologyArena: array<u32>;
-struct SparseOverlayParams { worldDirectory:vec4u, dynamicCells:vec4u, rungOffsets:vec4u }
-@group(0) @binding(18) var<uniform> sparseOverlayP: SparseOverlayParams;
-@group(0) @binding(19) var<storage,read> sparseFramePlan: array<u32>;
-${createGridOverlayLevelSetVolumeWGSL(true)}
-${uniformStageGridsWGSL("sparseActivity")}
+@group(0) @binding(12) var<storage,read> pressureValues:array<f32>;
+@group(0) @binding(13) var<storage,read> pressurePhi:array<u32>;
+@group(0) @binding(14) var<storage,read> mixedSupport:array<u32>;
+@group(0) @binding(17) var<storage,read> mixedTopology:array<u32>;
+${gridOverlayLevelSetVolumeWGSL}
+${uniformStageGridsWGSL("pressurePhi")}
 ${gridOverlayViewRecordsWGSL}
 struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
@@ -243,601 +229,12 @@ fn nearestBodyDistance(ro: vec3f, rd: vec3f) -> f32 {
   return nearest;
 }
 
-const SPARSE_INVALID:u32=0xffffffffu;
-const SPARSE_ACTIVITY_HEADER_WORDS:u32=28u;
-const SPARSE_FRAME_PLAN_MAGIC:u32=0x46504c31u;
-const SPARSE_FRAME_PLAN_VERSION:u32=1u;
-const SPARSE_FRAME_PLAN_HEADER_WORDS:u32=64u;
-const SPARSE_FRAME_PLAN_SLOT_HEADER_WORDS:u32=32u;
-const SPARSE_FRAME_PLAN_BRICK_WORDS:u32=32u;
-const SPARSE_FRAME_PLAN_TILE_WORDS:u32=4u;
-const SPARSE_FRAME_PLAN_STAGE_COUNT:u32=6u;
-const SPARSE_FRAME_PLAN_FLAG_INITIALIZED:u32=1u;
-const SPARSE_FRAME_PLAN_FLAG_ACCEPTED:u32=8u;
-const SPARSE_FRAME_PLAN_FLAG_GLOBAL_FAULT:u32=16u;
-const SPARSE_FRAME_PLAN_SLOT_FLAG_BRICK_SEALED:u32=2u;
-const SPARSE_FRAME_PLAN_SLOT_FLAG_INDIRECT_SEALED:u32=4u;
-const SPARSE_FRAME_PLAN_SLOT_FLAG_ACCEPTED:u32=8u;
-const SPARSE_FRAME_PLAN_BRICK_FLAG_SEALED:u32=2u;
-const SPARSE_FRAME_PLAN_BRICK_FLAG_LOCAL_FAULT:u32=4u;
-const SPARSE_WORLD_DIRECTORY_MAGIC:u32=0x57445231u;
-const SPARSE_WORLD_DIRECTORY_VERSION:u32=1u;
-const SPARSE_WORLD_DIRECTORY_HEADER_WORDS:u32=24u;
-const SPARSE_WORLD_DIRECTORY_ENTRY_WORDS:u32=7u;
-const SPARSE_WORLD_DIRECTORY_LEAF_WORDS:u32=5u;
-fn sparseGridEnabled()->bool{
-  return sparseP.counts.x>0u&&all(sparseP.dimensions.xyz==vec3u(u.gridInfo.xyz));
-}
-fn sparseBrickFineResolution()->u32{return max(1u,sparseP.dimensions.w>>1u);}
-fn sparseActivityRecordWords()->u32{return sparseOverlayP.worldDirectory.w;}
-fn sparseWorldDirectoryBase()->u32{return sparseOverlayP.worldDirectory.x;}
-fn sparseWorldDirectoryEnabled()->bool{
-  if(sparseOverlayP.worldDirectory.y==0u){return false;}
-  let base=sparseWorldDirectoryBase();let length=arrayLength(&sparseTopologyArena);
-  if(base>length||length-base<SPARSE_WORLD_DIRECTORY_HEADER_WORDS){return false;}
-  let total=sparseTopologyArena[base+11u];
-  return sparseTopologyArena[base]==SPARSE_WORLD_DIRECTORY_MAGIC
-    &&sparseTopologyArena[base+1u]==SPARSE_WORLD_DIRECTORY_VERSION
-    &&sparseTopologyArena[base+2u]==SPARSE_WORLD_DIRECTORY_HEADER_WORDS
-    &&sparseTopologyArena[base+3u]==SPARSE_WORLD_DIRECTORY_ENTRY_WORDS
-    &&total>=SPARSE_WORLD_DIRECTORY_HEADER_WORDS&&total<=length-base;
-}
-fn sparseWorldHash(q:vec3i,spanLog:u32)->u32{
-  var hash=0x811c9dc5u;
-  hash=(hash^bitcast<u32>(q.x))*0x01000193u;hash^=hash>>16u;
-  hash=(hash^bitcast<u32>(q.y))*0x01000193u;hash^=hash>>16u;
-  hash=(hash^bitcast<u32>(q.z))*0x01000193u;hash^=hash>>16u;
-  hash=(hash^spanLog)*0x01000193u;hash^=hash>>16u;
-  return hash|1u;
-}
-fn sparseWorldLookupExact(q:vec3i,spanLog:u32)->u32{
-  let base=sparseWorldDirectoryBase();let capacity=sparseTopologyArena[base+4u];
-  let mask=sparseTopologyArena[base+5u];let entryBase=sparseTopologyArena[base+6u];
-  if(capacity==0u||mask!=capacity-1u||(capacity&(capacity-1u))!=0u){return SPARSE_INVALID;}
-  let hash=sparseWorldHash(q,spanLog);var slot=hash&mask;
-  for(var probe=0u;probe<capacity;probe+=1u){
-    let at=base+entryBase+slot*SPARSE_WORLD_DIRECTORY_ENTRY_WORDS;
-    if(at+SPARSE_WORLD_DIRECTORY_ENTRY_WORDS>arrayLength(&sparseTopologyArena)){return SPARSE_INVALID;}
-    let state=sparseTopologyArena[at];if(state==0u){return SPARSE_INVALID;}
-    if(state==2u&&sparseTopologyArena[at+1u]==hash
-      &&bitcast<i32>(sparseTopologyArena[at+2u])==q.x
-      &&bitcast<i32>(sparseTopologyArena[at+3u])==q.y
-      &&bitcast<i32>(sparseTopologyArena[at+4u])==q.z
-      &&sparseTopologyArena[at+5u]==spanLog){return sparseTopologyArena[at+6u];}
-    slot=(slot+1u)&mask;
-  }
-  return SPARSE_INVALID;
-}
-fn sparseWorldFloorToSpan(value:i32,span:i32)->i32{
-  var quotient=value/span;if(value%span<0){quotient-=1;}return quotient*span;
-}
-fn sparseWorldOwnerAt(q:vec3i)->u32{
-  let base=sparseWorldDirectoryBase();let maximum=sparseTopologyArena[base+8u];
-  if(maximum>30u){return SPARSE_INVALID;}
-  for(var spanLog=0u;spanLog<=maximum;spanLog+=1u){
-    let span=i32(1u<<spanLog);let origin=vec3i(
-      sparseWorldFloorToSpan(q.x,span),sparseWorldFloorToSpan(q.y,span),
-      sparseWorldFloorToSpan(q.z,span));
-    let leaf=sparseWorldLookupExact(origin,spanLog);
-    if(leaf!=SPARSE_INVALID){return leaf;}
-  }
-  return SPARSE_INVALID;
-}
-fn sparseWorldLeafCoordinate(leaf:u32)->vec3i{
-  let base=sparseWorldDirectoryBase();let leafBase=sparseTopologyArena[base+12u];
-  let capacity=sparseTopologyArena[base+13u];if(leaf>=capacity){return vec3i(0x7fffffffi);}
-  let at=base+leafBase+leaf*SPARSE_WORLD_DIRECTORY_LEAF_WORDS;
-  if(at+SPARSE_WORLD_DIRECTORY_LEAF_WORDS>arrayLength(&sparseTopologyArena)){
-    return vec3i(0x7fffffffi);}
-  return vec3i(bitcast<i32>(sparseTopologyArena[at]),
-    bitcast<i32>(sparseTopologyArena[at+1u]),bitcast<i32>(sparseTopologyArena[at+2u]));
-}
-fn sparseWorldLeafSpan(leaf:u32)->u32{
-  let base=sparseWorldDirectoryBase();let leafBase=sparseTopologyArena[base+12u];
-  let capacity=sparseTopologyArena[base+13u];if(leaf>=capacity){return 0u;}
-  let at=base+leafBase+leaf*SPARSE_WORLD_DIRECTORY_LEAF_WORDS;
-  if(at+SPARSE_WORLD_DIRECTORY_LEAF_WORDS>arrayLength(&sparseTopologyArena)){return 0u;}
-  let spanLog=sparseTopologyArena[at+3u];if(spanLog>30u){return 0u;}return 1u<<spanLog;
-}
-fn sparseWorldOrderedCoordinate(word:u32)->i32{return bitcast<i32>(word^0x80000000u);}
-struct SparseFineBounds { minimum:vec3i, maximum:vec3i }
-fn sparseWorldFineBounds()->SparseFineBounds{
-  let fallback=SparseFineBounds(vec3i(0),vec3i(sparseP.dimensions.xyz));
-  if(!sparseWorldDirectoryEnabled()){return fallback;}
-  let base=sparseWorldDirectoryBase();let brickFine=i32(sparseBrickFineResolution());
-  let minimum=vec3i(sparseWorldOrderedCoordinate(sparseTopologyArena[base+16u]),
-    sparseWorldOrderedCoordinate(sparseTopologyArena[base+17u]),
-    sparseWorldOrderedCoordinate(sparseTopologyArena[base+18u]))*brickFine;
-  let maximum=vec3i(sparseWorldOrderedCoordinate(sparseTopologyArena[base+19u]),
-    sparseWorldOrderedCoordinate(sparseTopologyArena[base+20u]),
-    sparseWorldOrderedCoordinate(sparseTopologyArena[base+21u]))*brickFine;
-  if(all(maximum>minimum)){return SparseFineBounds(minimum,maximum);}
-  return fallback;
-}
-fn sparseLegacyBrickLookup(key:u32)->u32{
-  let brickFine=sparseBrickFineResolution();
-  let brickDims=(sparseP.dimensions.xyz+vec3u(brickFine-1u))/brickFine;
-  let count=brickDims.x*brickDims.y*brickDims.z;
-  if(key>=count){return SPARSE_INVALID;}
-  let xy=brickDims.x*brickDims.y;let z=key/xy;let remainder=key-z*xy;
-  let y=remainder/brickDims.x;let coordinate=vec3u(remainder-y*brickDims.x,y,z);
-  let capacity=sparseP.topologyOffsets2.z-sparseP.topologyOffsets2.y;
-  let mask=capacity-1u;let maximumSpanLog=sparseTopology[sparseP.topologyOffsets2.w+1u]&31u;
-  for(var spanLog=0u;spanLog<=maximumSpanLog;spanLog+=1u){
-    let span=1u<<spanLog;let origin=(coordinate/span)*span;
-    let originKey=origin.x+brickDims.x*(origin.y+brickDims.y*origin.z);
-    var slot=(originKey*0x9e3779b1u)&mask;
-    for(var probe=0u;probe<capacity;probe+=1u){
-      let brick=sparseTopology[sparseP.topologyOffsets2.y+slot];
-      if(brick==SPARSE_INVALID){break;}
-      let candidate=sparseTopology[sparseP.topologyOffsets2.z+2u*brick+1u];
-      if(candidate==originKey){
-        if(sparseBrickSpan(brick)==span){return brick;}break;}slot=(slot+1u)&mask;}
-  }
-  return SPARSE_INVALID;
-}
-fn sparseBrickActive(brick:u32)->bool{
-  let at=SPARSE_ACTIVITY_HEADER_WORDS+sparseActivityRecordWords()*brick+10u;
-  return brick<sparseP.dispatch.w&&at<arrayLength(&sparseActivity)&&sparseActivity[at]!=0u;
-}
-fn sparseBrickOccupied(brick:u32)->bool{
-  let at=SPARSE_ACTIVITY_HEADER_WORDS+sparseActivityRecordWords()*brick+1u;
-  return brick<sparseP.dispatch.w&&at<arrayLength(&sparseActivity)
-    &&(sparseActivity[at]&64u)!=0u;
-}
-fn sparseAcceptedResolution(brick:u32)->u32{
-  return sparseActivity[SPARSE_ACTIVITY_HEADER_WORDS
-    +sparseActivityRecordWords()*brick+12u];
-}
-fn sparseBrickSpan(brick:u32)->u32{
-  if(sparseWorldDirectoryEnabled()){return sparseWorldLeafSpan(brick);}
-  return 1u<<(sparseTopology[sparseP.topologyOffsets2.z+2u*brick]&31u);
-}
-fn sparseTemplateLevelIndex(resolution:u32)->u32{
-  var level=0u;var rung=resolution;
-  while(rung>1u){rung/=2u;level+=1u;}return level;
-}
-fn sparseTemplateCellRange(brick:u32,resolution:u32)->vec2u{
-  if(sparseWorldDirectoryEnabled()&&brick>=sparseOverlayP.worldDirectory.z){
-    let brickFine=sparseBrickFineResolution();
-    let count=resolution*resolution*resolution;
-    var stride=brickFine*brickFine*brickFine;var offset=0u;
-    if(sparseOverlayP.dynamicCells.x!=0u){
-      if(resolution==0u||resolution>8u||(resolution&(resolution-1u))!=0u){return vec2u(0u);}
-      stride=sparseOverlayP.dynamicCells.x;
-      offset=sparseOverlayP.rungOffsets[sparseTemplateLevelIndex(resolution)];
-    }else if(resolution!=brickFine){return vec2u(0u);}
-    let page=brick-sparseOverlayP.worldDirectory.z;
-    let first=sparseTopologyArena[2u]+page*stride+offset;
-    if(first>sparseP.counts.x||count>sparseP.counts.x-first){return vec2u(0u);}
-    return vec2u(first,count);
-  }
-  let levelCount=u32(round(log2(f32(sparseBrickFineResolution()))))+1u;
-  let at=sparseTopologyArena[11u]
-    +2u*(levelCount*brick+sparseTemplateLevelIndex(resolution));
-  return vec2u(sparseTopologyArena[at],sparseTopologyArena[at+1u]);
-}
-fn sparseOwner(q:vec3i)->vec2u{
-  if(!sparseGridEnabled()){return vec2u(SPARSE_INVALID);}
-  let brickFine=sparseBrickFineResolution();let directory=sparseWorldDirectoryEnabled();
-  if(!directory&&(any(q<vec3i(0))||any(q>=vec3i(sparseP.dimensions.xyz)))){
-    return vec2u(SPARSE_INVALID);}
-  let brickDims=(sparseP.dimensions.xyz+vec3u(brickFine-1u))/brickFine;
-  let querySigned=sparseFloorDiv(q,i32(brickFine));
-  let queryCoordinate=vec3u(max(querySigned,vec3i(0)));
-  let key=queryCoordinate.x+brickDims.x*(queryCoordinate.y+brickDims.y*queryCoordinate.z);
-  var brick=SPARSE_INVALID;
-  if(directory){brick=sparseWorldOwnerAt(querySigned);}
-  else{brick=sparseLegacyBrickLookup(key);}
-  if(brick==SPARSE_INVALID||!sparseBrickActive(brick)){return vec2u(SPARSE_INVALID);}
-  let span=sparseBrickSpan(brick);
-  if(span==0u){return vec2u(SPARSE_INVALID);}
-  var brickCoordinate=vec3i((queryCoordinate/span)*span);
-  if(directory){brickCoordinate=sparseWorldLeafCoordinate(brick);}
-  let resolution=sparseAcceptedResolution(brick);
-  let brickExtent=brickFine*span;
-  if(resolution==0u||resolution>brickExtent||brickExtent%resolution!=0u){
-    return vec2u(SPARSE_INVALID);}
-  let range=sparseTemplateCellRange(brick,resolution);
-  let first=range.x;let count=range.y;
-  let scale=brickExtent/resolution;
-  let origin=brickCoordinate*i32(brickFine);let extent=i32(brickFine*span);
-  if(any(q<origin)||any(q>=origin+vec3i(extent))){return vec2u(SPARSE_INVALID);}
-  let local=vec3u(q-origin)/scale;
-  var valid=vec3u(resolution);
-  if(count<resolution*resolution*resolution){
-    let remaining=max(vec3i(0),vec3i(sparseP.dimensions.xyz)-origin);
-    valid=vec3u(min(remaining+vec3i(i32(scale)-1),vec3i(extent)))/scale;
-  }
-  if(any(local>=valid)){return vec2u(SPARSE_INVALID);}
-  let cell=first+local.x+valid.x*(local.y+valid.y*local.z);
-  return select(vec2u(SPARSE_INVALID),vec2u(cell,brick),cell<first+count);
-}
-fn sparseDensityOffset()->u32{
-  var parity=select(0u,1u,sparseP.frame.w>0.5);
-  if(sparseP.stateOffsets4.z==0x46434131u){
-    parity=sparseTopologyArena[sparseP.stateOffsets4.w]&1u;
-  }
-  return select(sparseP.stateOffsets0.x,sparseP.stateOffsets0.y,parity!=0u);
-}
-fn sparseVelocityOffset()->u32{
-  var parity=select(0u,1u,sparseP.frame.w>0.5);
-  if(sparseP.stateOffsets4.z==0x46434131u){
-    parity=sparseTopologyArena[sparseP.stateOffsets4.w]&1u;
-  }
-  return select(sparseP.stateOffsets1.x,sparseP.stateOffsets1.y,parity!=0u);
-}
-fn sparseDensityAt(q:vec3i)->f32{
-  let owner=sparseOwner(q);if(owner.x==SPARSE_INVALID){return 0.0;}
-  return sparseState[sparseDensityOffset()+owner.x];
-}
-fn sparseFinePage(key:u32)->u32{
-  let count=min(sparseFineWorklist[1],arrayLength(&sparseFineMetadata)/4u);
-  var low=0u;var high=count;loop{if(low>=high){break;}let middle=low+(high-low)/2u;
-    let page=sparseFineWorklist[7u+middle];
-    if(sparseFineMetadata[4u*page+1u]<key){low=middle+1u;}else{high=middle;}}
-  var page=SPARSE_INVALID;if(low<count){page=sparseFineWorklist[7u+low];}
-  return select(SPARSE_INVALID,page,page<arrayLength(&sparseFineMetadata)/4u
-    &&sparseFineMetadata[4u*page+1u]==key);
-}
-fn sparseFineSourceSpanLog(source:u32)->u32{
-  let encodedPage=(sparseFineWorklist[3]>>21u)&31u;
-  let pageResolution=select(4u,encodedPage,encodedPage!=0u);
-  if(sparseBrickFineResolution()/pageResolution==4u){
-    return select(0u,(source>>24u)&31u,(source&0x80000000u)!=0u);
-  }
-  return source>>27u;
-}
-fn sparseSignedFineAddressing()->bool{return (sparseFineWorklist[3]&0x40000000u)!=0u;}
-fn sparseFloorDiv(q:vec3i,divisor:i32)->vec3i{
-  var adjusted=q;for(var axis=0u;axis<3u;axis+=1u){
-    if(adjusted[axis]<0){adjusted[axis]-=divisor-1;}}
-  return adjusted/divisor;
-}
-fn sparseSignedFineKey(page:vec3i)->u32{
-  if(page.x< -1024||page.x>1023||page.y< -512||page.y>511
-    ||page.z< -1024||page.z>1022){return SPARSE_INVALID;}
-  return u32(page.x+1024)|(u32(page.y+512)<<11u)|(u32(page.z+1024)<<21u);
-}
-fn sparseFineKey(page:vec3i,pageDims:vec3u)->u32{
-  if(sparseSignedFineAddressing()){return sparseSignedFineKey(page);}
-  if(any(page<vec3i(0))||any(page>=vec3i(pageDims))){return SPARSE_INVALID;}
-  let q=vec3u(page);return q.x+pageDims.x*(q.y+pageDims.y*q.z);
-}
-fn sparseFineAddress(q:vec3i)->vec2u{
-  let encodedPage=(sparseFineWorklist[3]>>21u)&31u;
-  let pageResolution=select(4u,encodedPage,encodedPage!=0u);
-  let pagesPerSolver=max(1u,sparseBrickFineResolution()/pageResolution);
-  let pageDims=(sparseP.dimensions.xyz+vec3u(pageResolution-1u))/pageResolution;
-  let pageCoordinate=sparseFloorDiv(q,i32(pageResolution));
-  let exactKey=sparseFineKey(pageCoordinate,pageDims);
-  if(exactKey==SPARSE_INVALID){return vec2u(SPARSE_INVALID);}
-  let exact=sparseFinePage(exactKey);if(exact!=SPARSE_INVALID){
-    let source=sparseFineMetadata[4u*exact+3u];
-    let spanLog=sparseFineSourceSpanLog(source);
-    if(spanLog==0u){let local=vec3u(q-pageCoordinate*i32(pageResolution));
-      return vec2u(exact,local.x+pageResolution*(local.y+pageResolution*local.z));}
-    let scale=pagesPerSolver*(1u<<spanLog);
-    let local=min(vec3u((q-pageCoordinate*i32(pageResolution))/i32(scale)),
-      vec3u(pageResolution-1u));
-    return vec2u(exact,local.x+pageResolution*(local.y+pageResolution*local.z));
-  }
-  let maximumSpanLog=(sparseFineWorklist[3]>>8u)&31u;
-  for(var spanLog=1u;spanLog<=maximumSpanLog;spanLog+=1u){let span=1u<<spanLog;
-    let pageSpan=pagesPerSolver*span;
-    let originPage=sparseFloorDiv(pageCoordinate,i32(pageSpan))*i32(pageSpan);
-    let key=sparseFineKey(originPage,pageDims);if(key==SPARSE_INVALID){continue;}
-    let page=sparseFinePage(key);if(page==SPARSE_INVALID){continue;}
-    let source=sparseFineMetadata[4u*page+3u];
-    let sourceSpanLog=sparseFineSourceSpanLog(source);
-    if(sourceSpanLog!=spanLog){continue;}
-    let local=min(vec3u((q-originPage*i32(pageResolution))/i32(pageSpan)),
-      vec3u(pageResolution-1u));
-    return vec2u(page,local.x+pageResolution*(local.y+pageResolution*local.z));
-  }
-  return vec2u(SPARSE_INVALID);
-}
-fn sparseFinePhiAt(q:vec3i)->f32{
-  let air=4.0*sparseP.frame.y;
-  if(!sparseSignedFineAddressing()
-    &&(any(q<vec3i(0))||any(q>=vec3i(sparseP.dimensions.xyz)))){return air;}
-  let address=sparseFineAddress(q);if(address.x==SPARSE_INVALID){return air;}
-  let encodedPage=(sparseFineWorklist[3]>>21u)&31u;
-  let pageResolution=select(4u,encodedPage,encodedPage!=0u);
-  let at=pageResolution*pageResolution*pageResolution*address.x+address.y;
-  if(at>=arrayLength(&sparseFineSamples)){return air;}let packed=sparseFineSamples[at];
-  return select(air,unpack2x16float(packed&0xffffu).x,((packed>>16u)&1u)!=0u);
-}
-fn sparseOwnerKey(q:vec3i)->vec2u{
-  let owner=sparseOwner(q);if(owner.x==SPARSE_INVALID){return vec2u(SPARSE_INVALID);}
-  return owner;
-}
-fn sparseOwnerOriginScale(q:vec3i)->vec4i{
-  let owner=sparseOwner(q);if(owner.x==SPARSE_INVALID){return vec4i(0,0,0,1);}
-  // CM12 cells are isotropic in the fine lattice. Derive their presentation
-  // cube from the stable brick/rung ABI instead of decoding the physical cell
-  // record: that record is an internal solver layout and was compacted from 16
-  // to 8 words without changing the represented topology.
-  let resolution=max(1u,sparseAcceptedResolution(owner.y));
-  let scale=max(1u,sparseBrickFineResolution()*sparseBrickSpan(owner.y)/resolution);
-  var brickCoordinate=vec3i(0);
-  if(sparseWorldDirectoryEnabled()){brickCoordinate=sparseWorldLeafCoordinate(owner.y);}
-  else{
-    let brickFine=sparseBrickFineResolution();
-    let brickDims=(sparseP.dimensions.xyz+vec3u(brickFine-1u))/brickFine;
-    let record=sparseTopology[sparseP.topologyOffsets2.z+2u*owner.y+1u];
-    let xy=brickDims.x*brickDims.y;let z=record/xy;let remainder=record-z*xy;
-    let y=remainder/brickDims.x;
-    brickCoordinate=vec3i(vec3u(remainder-y*brickDims.x,y,z));
-  }
-  let brickOrigin=brickCoordinate*i32(sparseBrickFineResolution());
-  let lower=brickOrigin+sparseFloorDiv(q-brickOrigin,i32(scale))*i32(scale);
-  return vec4i(lower,i32(scale));
-}
-
-
-// FPL1 is optional. A real binding is at least its 256-byte header; the
-// four-byte dummy therefore means "absent", while any bound but malformed
-// publication remains present and renders UNKNOWN instead of falling back.
-fn sparseFramePlanPresent()->bool{
-  return arrayLength(&sparseFramePlan)>=SPARSE_FRAME_PLAN_HEADER_WORDS;
-}
-fn sparseFramePlanBaseWords()->u32{
-  return sparseFramePlan[24u]-SPARSE_FRAME_PLAN_HEADER_WORDS;
-}
-fn sparseFramePlanRelative(absolute:u32)->u32{
-  return absolute-sparseFramePlanBaseWords();
-}
-fn sparseFramePlanHeaderValid()->bool{
-  if(!sparseFramePlanPresent()){return false;}
-  if(sparseFramePlan[0u]!=SPARSE_FRAME_PLAN_MAGIC
-    ||sparseFramePlan[1u]!=SPARSE_FRAME_PLAN_VERSION
-    ||sparseFramePlan[2u]!=SPARSE_FRAME_PLAN_HEADER_WORDS
-    ||sparseFramePlan[3u]!=SPARSE_FRAME_PLAN_SLOT_HEADER_WORDS
-    ||sparseFramePlan[4u]!=SPARSE_FRAME_PLAN_BRICK_WORDS
-    ||sparseFramePlan[5u]!=SPARSE_FRAME_PLAN_TILE_WORDS
-    ||sparseFramePlan[6u]!=SPARSE_FRAME_PLAN_STAGE_COUNT
-    ||sparseFramePlan[7u]!=4u){return false;}
-  let brickFine=sparseFramePlan[8u];let axis=sparseFramePlan[9u];
-  let tiles=sparseFramePlan[10u];let capacity=sparseFramePlan[11u];
-  if((brickFine!=4u&&brickFine!=8u&&brickFine!=16u)
-    ||brickFine!=sparseBrickFineResolution()||axis*4u!=brickFine
-    ||tiles!=axis*axis*axis||capacity!=sparseP.dispatch.w){return false;}
-  let slot0=sparseFramePlan[24u];let slot1=sparseFramePlan[25u];
-  let slotWords=sparseFramePlan[26u];let total=sparseFramePlan[27u];
-  if(slot0<SPARSE_FRAME_PLAN_HEADER_WORDS||slot1!=slot0+slotWords
-    ||total!=slot1+slotWords){return false;}
-  let base=slot0-SPARSE_FRAME_PLAN_HEADER_WORDS;
-  if(total<base||total-base>arrayLength(&sparseFramePlan)){return false;}
-  let minimumSlot=SPARSE_FRAME_PLAN_SLOT_HEADER_WORDS
-    +SPARSE_FRAME_PLAN_BRICK_WORDS*capacity
-    +SPARSE_FRAME_PLAN_TILE_WORDS*tiles*capacity
-    +sparseFramePlan[29u]*capacity;
-  if(slotWords<minimumSlot||(slotWords&63u)!=0u){return false;}
-  let packets=sparseFramePlan[29u];
-  return packets>0u&&packets<=SPARSE_FRAME_PLAN_STAGE_COUNT
-    &&sparseFramePlan[28u]==3u*packets
-    &&sparseFramePlan[12u]<2u&&sparseFramePlan[13u]<2u
-    &&sparseFramePlan[12u]!=sparseFramePlan[13u]
-    &&sparseFramePlan[30u]<0x40000000u
-    &&sparseFramePlan[31u]<2u;
-}
-fn sparseFramePlanSlotBase(slot:u32)->u32{
-  return sparseFramePlanRelative(sparseFramePlan[24u+slot]);
-}
-fn sparseFramePlanPublicationValid()->bool{
-  if(!sparseFramePlanHeaderValid()){return false;}
-  let flags=sparseFramePlan[16u];
-  if((flags&(SPARSE_FRAME_PLAN_FLAG_INITIALIZED|SPARSE_FRAME_PLAN_FLAG_ACCEPTED))
-      !=(SPARSE_FRAME_PLAN_FLAG_INITIALIZED|SPARSE_FRAME_PLAN_FLAG_ACCEPTED)
-    ||(flags&SPARSE_FRAME_PLAN_FLAG_GLOBAL_FAULT)!=0u
-    ||sparseFramePlan[17u]!=0u){return false;}
-  let slot=sparseFramePlan[12u];let base=sparseFramePlanSlotBase(slot);
-  let slotFlags=sparseFramePlan[base+2u];
-  return sparseFramePlan[base]==sparseFramePlan[14u]
-    &&sparseFramePlan[base+1u]==sparseFramePlan[21u]
-    &&(slotFlags&(SPARSE_FRAME_PLAN_SLOT_FLAG_BRICK_SEALED
-      |SPARSE_FRAME_PLAN_SLOT_FLAG_INDIRECT_SEALED
-      |SPARSE_FRAME_PLAN_SLOT_FLAG_ACCEPTED))
-      ==(SPARSE_FRAME_PLAN_SLOT_FLAG_BRICK_SEALED
-        |SPARSE_FRAME_PLAN_SLOT_FLAG_INDIRECT_SEALED
-        |SPARSE_FRAME_PLAN_SLOT_FLAG_ACCEPTED);
-}
-fn sparseFramePlanAddress(q:vec3i)->vec4u{
-  if(!sparseFramePlanPublicationValid()){return vec4u(SPARSE_INVALID);}
-  let owner=sparseOwner(q);if(owner.x==SPARSE_INVALID){return vec4u(SPARSE_INVALID);}
-  let brick=owner.y;let capacity=sparseFramePlan[11u];
-  if(brick>=capacity){return vec4u(SPARSE_INVALID);}
-  let slot=sparseFramePlan[12u];let slotBase=sparseFramePlanSlotBase(slot);
-  let brickAt=slotBase+SPARSE_FRAME_PLAN_SLOT_HEADER_WORDS
-    +SPARSE_FRAME_PLAN_BRICK_WORDS*brick;
-  let key=sparseFramePlan[brickAt+3u];let brickFine=sparseFramePlan[8u];
-  var brickCoordinate=vec3i(0);
-  if(sparseWorldDirectoryEnabled()){
-    brickCoordinate=sparseWorldLeafCoordinate(brick);
-    let expected=sparseSignedFineKey(brickCoordinate);
-    if(expected==SPARSE_INVALID||key!=expected){return vec4u(SPARSE_INVALID);}
-  }else{
-    let brickDims=(sparseP.dimensions.xyz+vec3u(brickFine-1u))/brickFine;
-    let logicalCount=brickDims.x*brickDims.y*brickDims.z;
-    if(key>=logicalCount
-      ||key!=sparseTopology[sparseP.topologyOffsets2.z+2u*brick+1u]){
-      return vec4u(SPARSE_INVALID);
-    }
-    let xy=brickDims.x*brickDims.y;let bz=key/xy;let remainder=key-bz*xy;
-    let by=remainder/brickDims.x;
-    brickCoordinate=vec3i(vec3u(remainder-by*brickDims.x,by,bz));
-  }
-  let span=max(1u,sparseBrickSpan(brick));let origin=brickCoordinate*i32(brickFine);
-  let extent=i32(brickFine*span);
-  if(any(q<origin)||any(q>=origin+vec3i(extent))){return vec4u(SPARSE_INVALID);}
-  let axis=sparseFramePlan[9u];let local=vec3u(q-origin)/(4u*span);
-  if(any(local>=vec3u(axis))){return vec4u(SPARSE_INVALID);}
-  let tile=local.x+axis*(local.y+axis*local.z);
-  let validWord=sparseFramePlan[brickAt+28u+select(0u,1u,tile>=32u)];
-  if((validWord&(1u<<(tile&31u)))==0u){return vec4u(SPARSE_INVALID);}
-  let tileBase=slotBase+SPARSE_FRAME_PLAN_SLOT_HEADER_WORDS
-    +SPARSE_FRAME_PLAN_BRICK_WORDS*capacity;
-  let tileAt=tileBase+SPARSE_FRAME_PLAN_TILE_WORDS
-    *(brick*sparseFramePlan[10u]+tile);
-  return vec4u(brickAt,tileAt,brick,tile);
-}
-fn sparseFramePlanLocalFault(address:vec4u)->bool{
-  let brickAt=address.x;
-  return sparseFramePlan[brickAt+24u]!=0u
-    ||(sparseFramePlan[brickAt+2u]&SPARSE_FRAME_PLAN_BRICK_FLAG_LOCAL_FAULT)!=0u;
-}
-fn sparseFramePlanTileValid(address:vec4u)->bool{
-  let brickAt=address.x;let tileAt=address.y;let generation=sparseFramePlan[14u];
-  return !sparseFramePlanLocalFault(address)
-    &&(sparseFramePlan[brickAt+2u]&SPARSE_FRAME_PLAN_BRICK_FLAG_SEALED)!=0u
-    &&sparseFramePlan[brickAt]==generation&&sparseFramePlan[tileAt]==generation
-    &&sparseFramePlan[brickAt+1u]==sparseFramePlan[21u]
-    &&sparseFramePlan[brickAt+22u]==generation;
-}
-fn sparseFramePlanStageScheduled(address:vec4u,stage:u32)->bool{
-  let pair=address.x+4u+2u*stage;let tile=address.w;
-  return (sparseFramePlan[pair+select(0u,1u,tile>=32u)]
-    &(1u<<(tile&31u)))!=0u;
-}
-fn sparseFramePlanStageColor(address:vec4u,stage:u32)->vec4f{
-  if(!sparseFramePlanTileValid(address)){return vec4f(1.0,0.035,0.63,0.96);}
-  let packed=sparseFramePlan[address.y+1u];let bit=1u<<stage;
-  let direct=(packed&bit)!=0u;let closure=(packed&(bit<<6u))!=0u;
-  let executed=(packed&(bit<<12u))!=0u;let skipped=(packed&(bit<<18u))!=0u;
-  let uncovered=(packed&(bit<<24u))!=0u;
-  let depths=sparseFramePlan[address.y+3u];
-  if((packed&0xc0000000u)!=0u||(depths&0xff000000u)!=0u
-    ||(direct&&closure)||uncovered||(executed&&skipped)||(executed&&!(direct||closure))
-    ||sparseFramePlanStageScheduled(address,stage)!=(direct||closure)){
-    return vec4f(1.0,0.035,0.63,0.96);
-  }
-  let depth=(depths>>(4u*stage))&15u;
-  if((direct&&depth!=0u)||(closure&&depth==0u)){return vec4f(1.0,0.035,0.63,0.96);}
-  if(direct){return vec4f(0.96,0.59,0.08,0.94);}
-  if(closure){return vec4f(mix(vec3f(0.15,0.55,1.0),vec3f(0.35,0.16,0.82),
-      clamp(f32(depth-1u)/7.0,0.0,1.0)),max(0.36,0.88-0.055*f32(depth)));}
-  return vec4f(0.055,0.31,0.18,0.25);
-}
-fn sparseFramePlanCauseColor(address:vec4u)->vec4f{
-  if(!sparseFramePlanTileValid(address)){return vec4f(1.0,0.035,0.63,0.96);}
-  let packed=sparseFramePlan[address.y+1u];
-  if(((packed>>24u)&63u)!=0u){return vec4f(1.0,0.035,0.63,0.96);}
-  let activeStages=(packed&63u)|((packed>>6u)&63u);
-  if(activeStages==0u){return vec4f(0.055,0.31,0.18,0.22);}
-  let causes=sparseFramePlan[address.y+2u];
-  if((causes&((1u<<11u)|(1u<<12u)))!=0u){return vec4f(1.0,0.035,0.63,0.96);}
-  if((causes&(1u<<8u))!=0u){return vec4f(0.95,0.38,0.07,0.92);}
-  if((causes&((1u<<5u)|(1u<<6u)|(1u<<7u)))!=0u){return vec4f(0.04,0.72,0.82,0.90);}
-  if((causes&((1u<<2u)|(1u<<3u)|(1u<<4u)))!=0u){return vec4f(0.95,0.76,0.08,0.90);}
-  if((causes&((1u<<0u)|(1u<<1u)|(1u<<9u)))!=0u){return vec4f(0.94,0.94,0.88,0.88);}
-  return vec4f(0.42,0.28,0.82,0.78);
-}
-fn sparseFramePlanClosureColor(address:vec4u)->vec4f{
-  if(!sparseFramePlanTileValid(address)){return vec4f(1.0,0.035,0.63,0.96);}
-  let packed=sparseFramePlan[address.y+1u];
-  if(((packed>>24u)&63u)!=0u){return vec4f(1.0,0.035,0.63,0.96);}
-  var maximum=0u;
-  for(var stage=0u;stage<SPARSE_FRAME_PLAN_STAGE_COUNT;stage+=1u){
-    maximum=max(maximum,(sparseFramePlan[address.y+3u]>>(4u*stage))&15u);
-  }
-  if(maximum==0u){return select(vec4f(0.055,0.31,0.18,0.22),
-    vec4f(0.98,0.98,0.94,0.94),(packed&63u)!=0u);}
-  let t=clamp(f32(maximum-1u)/14.0,0.0,1.0);
-  return vec4f(mix(vec3f(0.10,0.58,1.0),vec3f(0.50,0.08,0.70),t),0.90);
-}
-fn sparseFramePlanGenerationColor(address:vec4u)->vec4f{
-  if(!sparseFramePlanTileValid(address)){return vec4f(1.0,0.035,0.63,0.96);}
-  let generation=sparseFramePlan[14u];let consumer=sparseFramePlan[address.x+23u];
-  if(consumer!=0u&&consumer!=generation){return vec4f(1.0,0.035,0.63,0.96);}
-  let packed=sparseFramePlan[address.y+1u];let work=(packed&0xfffu)!=0u;
-  return select(vec4f(0.08,0.65,0.36,0.76),vec4f(0.04,0.48,0.84,0.90),work);
-}
-fn sparseFramePlanStagePacket(brickAt:u32,stage:u32)->u32{
-  return (sparseFramePlan[brickAt+16u]>>(5u*stage))&31u;
-}
-// Physical packets need stable categorical colours: tiles coalesced into one
-// pass should read as one colour, while separate packets stay distinct. The
-// execution generation is already validated by the caller and deliberately
-// does not repaint the field every frame.
-fn sparseDirtyPacketColor(packet:u32,epoch:u32)->vec3f{
-  _=epoch;
-  var stops=array<vec3f,4>(
-    vec3f(0.125,0.780,0.718),vec3f(0.259,0.475,0.910),
-    vec3f(0.718,0.357,0.910),vec3f(0.937,0.467,0.435));
-  let span=f32(max(1u,SPARSE_FRAME_PLAN_STAGE_COUNT-1u));
-  let t=clamp(f32(min(packet,SPARSE_FRAME_PLAN_STAGE_COUNT-1u))/span,0.0,1.0)*3.0;
-  let stop=min(u32(t),2u);
-  return mix(stops[stop],stops[stop+1u],t-f32(stop));
-}
-fn sparseFramePlanPassPackingColor(address:vec4u,q:vec3i)->vec4f{
-  if(!sparseFramePlanHeaderValid()){return vec4f(1.0,0.035,0.63,0.96);}
-  if((sparseFramePlan[16u]&SPARSE_FRAME_PLAN_FLAG_GLOBAL_FAULT)!=0u){
-    let fault=sparseFramePlan[17u];
-    return select(vec4f(1.0,0.035,0.63,0.96),vec4f(1.0,0.025,0.018,0.98),
-      fault==6u||fault==9u);
-  }
-  if(sparseFramePlan[17u]!=0u){
-    let fault=sparseFramePlan[17u];
-    return select(vec4f(1.0,0.035,0.63,0.96),vec4f(1.0,0.025,0.018,0.98),
-      fault==6u||fault==9u);
-  }
-  if(address.x==SPARSE_INVALID||!sparseFramePlanTileValid(address)){
-    return vec4f(1.0,0.035,0.63,0.96);
-  }
-  let packed=sparseFramePlan[address.y+1u];let logical=(packed&63u)|((packed>>6u)&63u);
-  if(sparseFramePlan[address.x+17u]!=0u
-    ||sparseFramePlan[address.x+30u]!=sparseFramePlan[14u]){
-    return vec4f(1.0,0.025,0.018,0.98);
-  }
-  if(logical==0u){return vec4f(0.055,0.31,0.18,0.25);}
-  let packets=sparseFramePlan[29u];let slotBase=sparseFramePlanSlotBase(sparseFramePlan[12u]);
-  var selected=SPARSE_INVALID;var sharedCount=0u;var logicalCount=0u;
-  for(var stage=0u;stage<SPARSE_FRAME_PLAN_STAGE_COUNT;stage+=1u){
-    if((logical&(1u<<stage))==0u){continue;}
-    logicalCount+=1u;let packet=sparseFramePlanStagePacket(address.x,stage);
-    if(packet>=packets){return vec4f(1.0,0.025,0.018,0.98);}
-    let packetAt=slotBase+8u+4u*packet;let count=sparseFramePlan[32u+packet];
-    if(count>sparseFramePlan[11u]||sparseFramePlan[packetAt]!=count
-      ||sparseFramePlan[packetAt+1u]!=sparseFramePlan[11u]
-      ||sparseFramePlan[packetAt+2u]!=1u||sparseFramePlan[packetAt+3u]!=1u
-      ||sparseFramePlan[38u+3u*packet]!=sparseFramePlan[11u]
-      ||sparseFramePlan[39u+3u*packet]!=1u||sparseFramePlan[40u+3u*packet]!=1u){
-      return vec4f(1.0,0.025,0.018,0.98);
-    }
-  }
-  let ordinal=u32(abs(q.x+q.y+q.z))%logicalCount;var cursor=0u;
-  for(var stage=0u;stage<SPARSE_FRAME_PLAN_STAGE_COUNT;stage+=1u){
-    if((logical&(1u<<stage))==0u){continue;}
-    if(cursor==ordinal){selected=sparseFramePlanStagePacket(address.x,stage);break;}
-    cursor+=1u;
-  }
-  for(var stage=0u;stage<SPARSE_FRAME_PLAN_STAGE_COUNT;stage+=1u){
-    sharedCount+=select(0u,1u,(logical&(1u<<stage))!=0u
-      &&sparseFramePlanStagePacket(address.x,stage)==selected);
-  }
-  if(selected==SPARSE_INVALID){return vec4f(1.0,0.025,0.018,0.98);}
-  let color=sparseDirtyPacketColor(selected,sparseFramePlan[address.x+30u]);
-  return vec4f(mix(vec3f(0.39,0.45,0.51),color,select(0.42,0.96,sharedCount>1u)),
-    select(0.66,0.94,sharedCount>1u));
-}
-fn sparseFramePlanColor(q:vec3i,fieldMode:i32)->vec4f{
-  let address=sparseFramePlanAddress(q);
-  if(fieldMode==20){return sparseFramePlanPassPackingColor(address,q);}
-  if(address.x==SPARSE_INVALID){return vec4f(1.0,0.035,0.63,0.96);}
-  if(fieldMode<=16){return sparseFramePlanStageColor(address,u32(fieldMode-11));}
-  if(fieldMode==17){return sparseFramePlanCauseColor(address);}
-  if(fieldMode==18){return sparseFramePlanClosureColor(address);}
-  if(fieldMode==19){return sparseFramePlanGenerationColor(address);}
-  return vec4f(1.0,0.035,0.63,0.96);
-}
-
 fn fluidSample(cell: vec3i) -> f32 {
   if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
    let h=u.container.y/max(u.gridInfo.y,1.0);return clamp(0.5-umSampleVertex(vec3f(cell)+vec3f(0.5))/h,0.0,1.0);
   }
   let dims = vec3i(u.gridInfo.xyz);
-  if(sparseGridEnabled()){return sparseDensityAt(cell);}
+
   let q = clamp(cell, vec3i(0), dims - vec3i(1));
   if (u.gridInfo.w < 1.5) { return textureLoad(fluidField, q, 0).x; }
   let cellSizeY = u.container.y / max(u.gridInfo.y, 1.0);
@@ -853,7 +250,7 @@ fn fluidSample(cell: vec3i) -> f32 {
 fn levelSetSample(cell: vec3i) -> f32 {
   let dims = vec3i(u.gridInfo.xyz);
   if(layers.control.x>0.5 && sliceLsvP.global.x==2u){return sliceDenseLevelSetPhi(vec3f(cell)+vec3f(0.5)).x*bitcast<f32>(sliceLsvP.reserved.x);}
-  if(sparseGridEnabled()){return sparseFinePhiAt(cell);}
+
   let q = clamp(cell, vec3i(0), dims - vec3i(1));
   let h = u.container.y / max(u.gridInfo.y, 1.0);
   if (u.gridInfo.w > 2.5) { return textureLoad(fluidField, q, 0).x; }
@@ -865,7 +262,7 @@ fn densitySample(cell: vec3i) -> f32 {
     let o=umOwnerAt(clamp(cell,vec3i(0),vec3i(umDimensions())-1));return udrLoadCell(densityField,densityBase,vec3i(umOrigin(o))).x;
   }
   let dims = vec3i(u.gridInfo.xyz);
-  if(sparseGridEnabled()){return sparseDensityAt(cell);}
+
   return textureLoad(densityField, clamp(cell, vec3i(0), dims - vec3i(1)), 0).x;
 }
 
@@ -873,16 +270,15 @@ fn hasLiquidPressureDof(cell: vec3i) -> bool {
   if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
    let base=umStageBase();let band=umStageBandCell(base,cell);
    if(band!=0u){return umStageBandPressure(base,band-1u)!=0.0;}
-   let owner=umStageOwner(base,UM_STAGE_PRESSURE,cell);return owner.width!=0u&&bitcast<f32>(sparseActivity[owner.index])<0.0;
+   let owner=umStageOwner(base,UM_STAGE_PRESSURE,cell);return owner.width!=0u&&bitcast<f32>(pressurePhi[owner.index])<0.0;
   }
-  if(sparseGridEnabled()){let owner=sparseOwner(cell);return owner.x!=SPARSE_INVALID
-    &&sparseState[sparseP.stateOffsets2.w+owner.x]>0.5;}
+
   let samples = textureLoad(pressureSamples, cell, 0);
   return samples.x != 0xffffffffu || samples.y != 0xffffffffu;
 }
 
 fn adaptiveCellKey(cell: vec3i, dims: vec3i) -> vec2u {
-  if(sparseGridEnabled()){return sparseOwnerKey(cell);}
+
   return textureLoad(adaptiveCells, clamp(cell, vec3i(0), dims - vec3i(1)), 0).xy;
 }
 
@@ -901,9 +297,7 @@ fn adaptiveCellOriginScale(key: vec2u) -> vec4i {
 // texture therefore visualizes the conservative layer actually consumed by
 // the pressure solve, including changes introduced by quadtree reduction.
 fn adaptiveCellVerticalShape(cell: vec3i, dims: vec3i) -> vec3i {
-  if(sparseGridEnabled()){
-    let owner=sparseOwnerOriginScale(cell);return vec3i(owner.y,owner.y+owner.w,owner.w);
-  }
+
   let key = adaptiveCellKey(cell, dims);
   let owner = adaptiveCellOriginScale(key);
   return vec3i(owner.y, owner.y + owner.w, owner.w);
@@ -933,9 +327,7 @@ fn velocitySample(cell: vec3i) -> vec3f {
    let owner=umOwnerAt(cell);return umSampleVelocity(vec3f(umOrigin(owner))+vec3f(0.5*f32(max(owner.width,1u))));
   }
   let dims = vec3i(u.gridInfo.xyz);
-  if(sparseGridEnabled()){let owner=sparseOwner(cell);if(owner.x==SPARSE_INVALID){return vec3f(0.0);}
-    let at=sparseVelocityOffset()+4u*owner.x;return sparseP.frame.y
-      *vec3f(sparseState[at],sparseState[at+1u],sparseState[at+2u]);}
+
   let q = clamp(cell, vec3i(0), dims - vec3i(1));
   if(layers.control.x>0.5){
     let positive=textureLoad(velocityField,q,0).xyz;var negative=vec3f(0.0);
@@ -977,8 +369,7 @@ fn divergenceSample(cell:vec3i)->f32{
     }
    }}return divergence;
   }
-  if(sparseGridEnabled()){let owner=sparseOwner(cell);if(owner.x==SPARSE_INVALID){return 0.0;}
-    return sparseState[sparseP.stateOffsets4.y+owner.x];}
+
   return textureLoad(divergenceField,cell,0).x;
 }
 // phi is the caller's levelSetSample(cell).
@@ -989,8 +380,8 @@ fn mappedPressureSample(cell:vec3i,phi:f32)->f32{
    let base=umStageBase();let band=umStageBandCell(base,cell);
    if(band!=0u){return umStageBandPressure(base,band-1u);}
    let owner=umStageOwner(base,UM_STAGE_PRESSURE,cell);
-   if(owner.width==0u||bitcast<f32>(sparseActivity[owner.index])>=0.0){return 0.0;}
-   return sparseState[owner.index];
+   if(owner.width==0u||bitcast<f32>(pressurePhi[owner.index])>=0.0){return 0.0;}
+   return pressureValues[owner.index];
   }
   if(layers.control.x>0.5){
     if(phi>=0.0){return 0.0;}
@@ -998,8 +389,7 @@ fn mappedPressureSample(cell:vec3i,phi:f32)->f32{
     if(any(q<vec3i(0))||any(q>=vec3i(textureDimensions(mappedPressureField)))){return 0.0;}
     return textureLoad(mappedPressureField,q,0).x;
   }
-  if(sparseGridEnabled()){let owner=sparseOwner(cell);if(owner.x==SPARSE_INVALID){return 0.0;}
-    return sparseState[sparseP.stateOffsets2.x+owner.x]*sparseP.frame.z;}
+
   return textureLoad(mappedPressureField,cell,0).x;
 }
 
@@ -1028,8 +418,7 @@ fn representedCell(cell: vec3i, dims: vec3i, fineOrigin:vec3i,
     upper = lower + vec3i(i32(max(owner.width, 1u)));
   } else if (adaptiveGrid) {
     var owner=vec4i(0,0,0,1);
-    if(sparseGridEnabled()){owner=sparseOwnerOriginScale(cell);}
-    else{owner=adaptiveCellOriginScale(adaptiveCellKey(cell,dims));}
+    owner=adaptiveCellOriginScale(adaptiveCellKey(cell,dims));
     lower = owner.xyz;
     upper = lower + vec3i(owner.w);
   } else if (tallGrid) {
@@ -1176,10 +565,6 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   let local3 = clamp((point - boundsMin) / size, vec3f(0.0), vec3f(0.99999)) * vec3f(dims);
   let localCell=clamp(vec3i(floor(local3)),vec3i(0),dims-vec3i(1));
   let cell=fineOrigin+localCell;let fineMaximum=fineOrigin+dims;
-  let sparseOwnerAtCell=sparseOwner(cell);
-  if(sparseGridEnabled()&&sparseOwnerAtCell.x==SPARSE_INVALID){
-    return GridSample(vec3f(0.0),0.0,0.0,false);
-  }
   var samplePosition = local3.xy;
   var cellPerPixel = vec2f(footprint * f32(dims.x) / size.x, footprint * f32(dims.y) / size.y);
   var firstPlaneAxis = 0;
@@ -1292,14 +677,6 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   // closing into a flat wash once the cells are themselves a few pixels wide.
   let lineHalfWidth = min(select(0.8, 1.5, structureView),
     max(pixelsPerLatticeCell * 0.2, 0.32));
-  // SparseWorld keeps non-occupied B8 pages around a surface as transport and
-  // presentation halo capacity. They are not liquid pressure topology, so the
-  // structure view must not paint their internal fine graph over a coarsened
-  // wet surface. Show only a faint leaf boundary: hiding them completely made
-  // the supported, dilute diagonal dam front look like missing topology.
-  // Field/debug modes still show their cell contents.
-  let sparseStructureHalo=sparseGridEnabled()&&fieldMode==0
-    &&!sparseBrickOccupied(sparseOwnerAtCell.y);
   let tallGrid = u.gridInfo.w > 1.5 && u.gridInfo.w < 2.5;
   let octreeGrid = u.gridInfo.w > 2.5;
   var base = 0.0;
@@ -1412,28 +789,13 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     alpha = 0.05 + 0.07 * stripe;
     line = firstGridLine * 0.35;
   }
-  if(sparseStructureHalo){
-    let extent=i32(sparseBrickFineResolution()*sparseBrickSpan(sparseOwnerAtCell.y));
-    let origin=sparseFloorDiv(cell,extent)*extent;
-    let position=local3+vec3f(fineOrigin-origin);
-    let edgeDistance=min(position,vec3f(f32(extent))-position);
-    let distance=min(edgeDistance[firstPlaneAxis]/derivative.x,
-      edgeDistance[secondPlaneAxis]/derivative.y);
-    fill=vec3f(0.0);alpha=0.0;sampleDot=0.0;
-    // Inset in screen space so a support boundary remains distinguishable
-    // from the wet neighbour's bright grid edge and the tank wall outline.
-    line=gridLinePaint(abs(distance-2.5),0.8);lineStrength=0.45;
-  }
   // Field modes recolor represented cells from the live velocity texture;
   // structural lines, sample dots, the above-band hatch, and rigid-body
   // occupancy all stay so the heatmap keeps its spatial reference frame.
   if (fieldMode > 0 && (adaptiveGrid || cell.y < bandTop)) {
     let velocity = cellVelocity;
     let wet = wetSample;
-    if (fieldMode >= 11 && fieldMode <= 20) {
-      let dirtyDisplay=sparseFramePlanColor(cell,fieldMode);
-      fill=dirtyDisplay.rgb;alpha=dirtyDisplay.a;lineStrength=0.24;sampleDot=0.0;
-    } else if (fieldMode == 1) {
+    if (fieldMode == 1) {
       // Per-cell component CFL at the solver's substep dt: the quantity whose
       // global maximum picks the substep count (substeps = ceil(maxCfl / 2)).
       let h = size / vec3f(dims);
@@ -1521,7 +883,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       // liquid colour scale. No density threshold is used to classify phi.
       excessHatch = select(0.0, sliceScreenHatch(samplePosition, derivative, footprint),
         volume.y > 0.0 && volume.x > FRACTION_OVERFULL);
-    } else if (fieldMode == 27 && !sparseGridEnabled()) {
+    } else if (fieldMode == 27) {
       let base=u32(layers.control.w);
       if(base==0u || arrayLength(&viewRecords)<base+8u){return GridSample(vec3f(0),0.0,0.0,false);}
       let edge=viewRecords[base];
@@ -1543,7 +905,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
         min(pageFraction.y,1.0-pageFraction.y)*f32(edge)/derivative.y);
       viewBoundary=gridLinePaint(pageDistance,1.5)*select(0.3,1.0,transport||work);
       liquidContour=zeroContour;
-    } else if (fieldMode == 22 && !sparseGridEnabled()) {
+    } else if (fieldMode == 22) {
       // One class per 4^3 tile, from the step just taken. Far air keeps only
       // the tile lattice: it is the part of the domain the view is about
       // being able to see through.
@@ -1569,7 +931,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
         * select(0.75, 1.0, fine || shell);
       // The level set locates the liquid the classes were seeded from.
       liquidContour = zeroContour;
-    } else if (fieldMode == 23 && !sparseGridEnabled()) {
+    } else if (fieldMode == 23) {
       // Where the step ran. Cells the launch never reached are the point of
       // the window, so they are veiled; the window itself stays clear over
       // the liquid it was built around.
@@ -1895,10 +1257,7 @@ fn overlayGridFrame()->OverlayGridFrame{
   let authoredMinimum=vec3f(-0.5*authoredSize.x,0.0,-0.5*authoredSize.z);
   let cellSize=authoredSize/vec3f(authoredDimensions);
   var minimumFine=vec3i(0);var maximumFine=authoredDimensions;
-  if(sparseGridEnabled()){
-    let sparseBounds=sparseWorldFineBounds();
-    minimumFine=sparseBounds.minimum;maximumFine=sparseBounds.maximum;
-  }
+
   let dimensions=max(maximumFine-minimumFine,vec3i(1));
   return OverlayGridFrame(minimumFine,dimensions,
     authoredMinimum+vec3f(minimumFine)*cellSize,vec3f(dimensions)*cellSize);
@@ -2109,7 +1468,6 @@ export class GridOverlayPipeline {
   private divergence?: GPUTexture;
   private mappedPressure?: GPUTexture;
   private density?: GPUTexture;
-  private sparseSource?: SparseAdaptiveGridConsumerSource;
   private denseLevelSetVolumeSource?: DenseLevelSetVolumeConsumerSource;
   /** The dense source's fields as bound: packed storage reallocates them
    * when it grows, possibly under the same source object. */
@@ -2118,11 +1476,8 @@ export class GridOverlayPipeline {
   private denseOpenFraction?: GPUTexture;
   private denseOwnership?: GPUBuffer;
   private viewRecords?: GPUFluidViewRecords;
-  private readonly sparseDummyParams: GPUBuffer;
-  private readonly sparseOverlayParams: GPUBuffer;
-  private readonly sparseLevelSetVolumeParams: GPUBuffer;
-  private readonly sparseDummyStorage: GPUBuffer;
-  private readonly sparseInvalidFramePlan: GPUBuffer;
+  private readonly levelSetVolumeParams: GPUBuffer;
+  private readonly dummyStorage: GPUBuffer;
 
   constructor(
     private readonly device: GPUDevice,
@@ -2131,28 +1486,13 @@ export class GridOverlayPipeline {
     private readonly bodyBuffer: GPUBuffer
   ) {
     this.layerUniform = device.createBuffer({ label: "Visual layer selection", size: 4 * LAYER_UNIFORM_FLOATS, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.sparseDummyParams = device.createBuffer({
-      label: "Grid overlay empty sparse parameters",
-      size: 256,
-      usage: GPUBufferUsage.UNIFORM,
-    });
-    this.sparseOverlayParams = device.createBuffer({
-      label: "Grid overlay sparse-world addressing parameters",
-      size: 256,
+    this.levelSetVolumeParams = device.createBuffer({
+      label: "Grid overlay volume and level-set addresses", size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    this.sparseLevelSetVolumeParams = device.createBuffer({
-      label: "Grid overlay volume and level-set addresses", size: 96,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    this.sparseDummyStorage = device.createBuffer({
-      label: "Grid overlay empty sparse storage",
+    this.dummyStorage = device.createBuffer({
+      label: "Grid overlay empty storage",
       size: 4,
-      usage: GPUBufferUsage.STORAGE,
-    });
-    this.sparseInvalidFramePlan = device.createBuffer({
-      label: "Grid overlay invalid FPL1 sentinel",
-      size: 256,
       usage: GPUBufferUsage.STORAGE,
     });
   }
@@ -2205,8 +1545,8 @@ export class GridOverlayPipeline {
       && source?.openFraction === this.denseOpenFraction && source?.mixedOwnership?.buffer === this.denseOwnership) return;
     this.denseLevelSetVolumeSource = source;
     this.denseVertexPhi = phi; this.denseCoarsePhi = coarse; this.denseOpenFraction = source?.openFraction; this.denseOwnership = source?.mixedOwnership?.buffer;
-    this.device.queue.writeBuffer(this.sparseLevelSetVolumeParams, 0,
-      gridOverlayLevelSetVolumeUniform(this.sparseSource?.levelSetVolume, source));
+    this.device.queue.writeBuffer(this.levelSetVolumeParams, 0,
+      gridOverlayLevelSetVolumeUniform(source));
     this.rebuildBindGroup();
   }
 
@@ -2259,48 +1599,8 @@ export class GridOverlayPipeline {
     this.device.queue.writeBuffer(this.layerUniform, 0, values);
   }
 
-  setSparseSource(source: SparseAdaptiveGridConsumerSource | undefined) {
-    if (this.sparseSource === source) return;
-    this.sparseSource = source;
-    this.device.queue.writeBuffer(this.sparseLevelSetVolumeParams, 0,
-      gridOverlayLevelSetVolumeUniform(source?.levelSetVolume, this.denseLevelSetVolumeSource));
-    const base = source?.worldDirectoryBaseWords;
-    const initialLeaves = source?.worldDirectoryInitialLeaves;
-    const activityRecordWords = source?.activityRecordWords;
-    this.device.queue.writeBuffer(this.sparseOverlayParams, 0,
-      new Uint32Array([Number.isSafeInteger(base) && base! >= 0 ? base! : 0,
-        Number.isSafeInteger(base) && base! >= 0 ? 1 : 0,
-        Number.isSafeInteger(initialLeaves) && initialLeaves! >= 0
-          ? initialLeaves! : 0,
-        Number.isSafeInteger(activityRecordWords) && activityRecordWords! > 0
-          ? activityRecordWords! : 0,
-        source?.dynamicPageCellStride ?? 0, 0, 0, 0,
-        ...(source?.dynamicPageRungOffsets ?? [0, 0, 0, 0])]));
-    this.rebuildBindGroup();
-  }
-
   private rebuildBindGroup() {
     if (!this.pipeline || !this.volume || !this.columnBases || !this.adaptiveCells || !this.velocity || !this.pressureSamples || !this.divergence || !this.mappedPressure || !this.density) return;
-    const framePlan = this.sparseSource?.framePlan;
-    let framePlanResource: GPUBufferBinding = { buffer: this.sparseDummyStorage };
-    if (framePlan) {
-      const sourceOffset = framePlan.plan.offset ?? 0;
-      const sourceSize = framePlan.plan.size
-        ?? framePlan.plan.buffer.size - sourceOffset;
-      const baseBytes = 4 * framePlan.layout.baseWords;
-      const overlayBytes = 4 * (framePlan.layout.totalWords - framePlan.layout.baseWords);
-      const overlayOffset = sourceOffset + baseBytes;
-      const alignment = this.device.limits.minStorageBufferOffsetAlignment;
-      const validRange = Number.isSafeInteger(overlayOffset) && Number.isSafeInteger(overlayBytes)
-        && baseBytes >= 0 && overlayBytes >= 256 && sourceSize >= baseBytes + overlayBytes
-        && overlayOffset % alignment === 0
-        && overlayOffset + overlayBytes <= framePlan.plan.buffer.size;
-      framePlanResource = validRange ? {
-        buffer: framePlan.plan.buffer,
-        offset: overlayOffset,
-        size: overlayBytes,
-      } : { buffer: this.sparseInvalidFramePlan };
-    }
     this.bindGroup = this.device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
@@ -2314,28 +1614,18 @@ export class GridOverlayPipeline {
         { binding: 7, resource: this.divergence.createView({ dimension: "3d" }) },
         { binding: 8, resource: this.mappedPressure.createView({ dimension: "3d" }) },
         { binding: 9, resource: this.density.createView({ dimension: "3d" }) },
-        { binding: 10, resource: this.sparseSource?.params
-          ?? { buffer: this.sparseDummyParams } },
-        { binding: 11, resource: this.sparseSource?.topology
-          ?? { buffer: this.sparseDummyStorage } },
-        { binding: 12, resource: this.denseLevelSetVolumeSource?.mixedPressure ?? this.sparseSource?.state
-          ?? { buffer: this.sparseDummyStorage } },
-        { binding: 13, resource: this.denseLevelSetVolumeSource?.mixedPressurePhi ?? this.sparseSource?.activity
-          ?? { buffer: this.sparseDummyStorage } },
-        { binding: 14, resource: this.denseLevelSetVolumeSource?.mixedSupport ?? this.sparseSource?.fineMetadata
-          ?? { buffer: this.sparseDummyStorage } },
-        { binding: 15, resource: this.sparseSource?.fineWorklist
-          ?? { buffer: this.sparseDummyStorage } },
-        { binding: 16, resource: this.sparseSource?.fineSamples
-          ?? { buffer: this.sparseDummyStorage } },
-        { binding: 17, resource: this.denseLevelSetVolumeSource?.mixedOwnership ?? this.sparseSource?.topologyArena
-          ?? { buffer: this.sparseDummyStorage } },
-        { binding: 18, resource: { buffer: this.sparseOverlayParams } },
-        { binding: 19, resource: framePlanResource },
-        { binding: 20, resource: { buffer: this.sparseLevelSetVolumeParams } },
+        { binding: 12, resource: this.denseLevelSetVolumeSource?.mixedPressure
+          ?? { buffer: this.dummyStorage } },
+        { binding: 13, resource: this.denseLevelSetVolumeSource?.mixedPressurePhi
+          ?? { buffer: this.dummyStorage } },
+        { binding: 14, resource: this.denseLevelSetVolumeSource?.mixedSupport
+          ?? { buffer: this.dummyStorage } },
+        { binding: 17, resource: this.denseLevelSetVolumeSource?.mixedOwnership
+          ?? { buffer: this.dummyStorage } },
+        { binding: 20, resource: { buffer: this.levelSetVolumeParams } },
         { binding: 21, resource: (this.denseVertexPhi ?? this.volume).createView({dimension:"3d"}) },
         { binding: 22, resource: (this.denseLevelSetVolumeSource?.openFraction ?? this.density).createView({dimension:"3d"}) },
-        { binding: 23, resource: this.viewRecords?.records ?? { buffer: this.sparseDummyStorage } },
+        { binding: 23, resource: this.viewRecords?.records ?? { buffer: this.dummyStorage } },
         { binding: 24, resource: { buffer: this.layerUniform } },
         { binding: 25, resource: (this.denseCoarsePhi ?? this.volume).createView({dimension:"3d"}) },
         { binding: 26, resource: uniformDetailBaseOf(this.density).createView({ dimension: "3d" }) },
@@ -2370,9 +1660,7 @@ export class GridOverlayPipeline {
   destroy() {
     this.layerUniform.destroy();
     this.layerRecords?.destroy();
-    this.sparseDummyParams.destroy();
-    this.sparseOverlayParams.destroy();
-    this.sparseLevelSetVolumeParams.destroy();
-    this.sparseDummyStorage.destroy();
+    this.levelSetVolumeParams.destroy();
+    this.dummyStorage.destroy();
   }
 }

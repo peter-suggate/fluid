@@ -37,15 +37,14 @@ fn nbPhiGradient(p:vec3f)->vec4f{
  let q=clamp(p,vec3f(0),vec3f(UM_D));let open=nbOpenSurfaceCell(q);
  if(open.x<0){return vec4f(0,0,0,1e20);}
  let c=vec3u(open);
- let width=select(umTileWidth(umTileAt(c/4u)),4u,nbCoarseOnly);let origin=(c/width)*width;
- let f=(q-vec3f(origin))/f32(width);var v:array<f32,8>;var terms:array<f32,8>;var value=0.0;
+ let width=umTileWidth(umTileAt(c/4u));let origin=(c/width)*width;
+ let f=(q-vec3f(origin))/f32(width);var v:array<f32,8>;var terms:array<f32,8>;
  for(var k=0u;k<8u;k++){
   let corner=umCorner(k,2u);let vertex=origin+corner*width;
   if(width==4u){v[k]=umLoadCorner(vertex);}else{v[k]=umLoadVertex(vertex);}
   let w=select(vec3f(1)-f,f,corner!=vec3u(0));terms[k]=v[k]*w.x*w.y*w.z;
-  if(nbCoarseOnly){value+=w.x*w.y*w.z*v[k];}
  }
- if(!nbCoarseOnly){value=umVertexSum8(terms);}
+ let value=umVertexSum8(terms);
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  return vec4f(nbTrilinear(v,f).xyz/(h*f32(width)),value/h);
 }
@@ -64,7 +63,7 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
  // The cell's corners are lattice vertices: among h tiles each is one load.
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  for(var k=0u;k<8u;k++){
-  if(nbCoarseOnly){v[k]=bandPhi(origin+vec3f(umCorner(k,2u)));}else{v[k]=umVertexValue(base+umCorner(k,2u))/h;}
+  v[k]=umVertexValue(base+umCorner(k,2u))/h;
  }
  // Edge crossings supply a zero-set fallback if a clamped Newton solve
  // cannot reach zero inside this cell (thin or badly conditioned patches).

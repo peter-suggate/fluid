@@ -10,31 +10,19 @@ import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
 import type { RigidBodyState } from "./rigid-body";
 import type { GPURigidBodyPick, GPURigidBodyPose } from "./webgpu-rigid-body";
 import type { Vec3 } from "./model";
-import type { GPUSecondaryParticleSource } from "./webgpu-secondary-particles";
-import type { GPUFluidFaceVelocitySource } from "./webgpu-face-velocity-overlay";
 import type { GPUFluidSolveWindowSource, GPUFluidTileClassSource, GPUFluidVolumePageSource } from "./method-view-records";
-import type { GPUPressureJournalSource } from "../features/pressure-inspection/gpu/overlay";
-import type { PressureJournal, PressureJournalDescriptor } from "../features/pressure-inspection/journal";
-import type { AnyStageLens, StageLensSource } from "./stage-lens";
-import type { GPUFluidTracerSource } from "./webgpu-tracer-overlay";
 import type { GPUFluidParticleSource } from "./webgpu-particle-overlay";
 import type { VisualLayerId } from "./visual-layers";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import type {
   DenseLevelSetVolumeConsumerSource,
-  SparseAdaptiveGridConsumerSource,
-  WebGPUFineLevelSetBrickSource,
 } from "./levelset-consumer-abi";
 import type { GPUInitializationPhase } from "./gpu-initialization";
-import type { OctreeTechniqueDebugSource } from "./levelset-consumer-abi";
-import type { CoarseLevelSetConsumerSource } from "./levelset-consumer-abi";
 import type { ResourcePluginDefinition } from "./resource-plugin";
 import type { SparseScenePrimitiveUpdate } from "./webgpu-sparse-scene-proxies";
 import type { ConfigurationReadout, DiagnosticRow } from "./method-diagnostics";
 import type { WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
 import type { ViewportFailureIndicator } from "./viewport-failure-diagnostics";
-import type { MethodHarnessPlugin } from "./method-harness-contract";
-import type { SparseWorld, SparseWorldDevice, SparseWorldUI } from "../sparse-world";
 
 /**
  * Method plugin contract.
@@ -171,36 +159,6 @@ export interface RuntimeDials {
 }
 
 /**
- * A method-owned render pass the renderer composes onto the finished frame.
- *
- * The renderer drives overlays but does not own them: these bake a method's
- * own generated constants into their WGSL and read its compact debug source,
- * so relocating them into core would move a method's shaders there with them.
- * Instead the method registers a factory under the renderer's optional
- * pipeline key and the renderer constructs through this shape, which is
- * exactly what it drives and nothing more.
- */
-export interface OverlayPipeline {
-  initialize(): Promise<void>;
-  setSource(source: OctreeTechniqueDebugSource | undefined): void;
-  setOwnerRows(ownerRows: GPUTexture | undefined): void;
-  /** Draws when the mode code selects one of its programs; false when it has nothing to draw. */
-  encode(encoder: GPUCommandEncoder, target: GPUTextureView, modeCode: number): boolean;
-  /**
-   * Optional because the renderer retires these overlays by dropping the
-   * reference with the device they were built on; a pipeline holding host
-   * allocations of its own declares this and gets cleaned up on device loss.
-   */
-  destroy?(): void;
-}
-
-export type OverlayPipelineFactory = (
-  device: GPUDevice,
-  format: GPUTextureFormat,
-  uniformBuffer: GPUBuffer,
-) => OverlayPipeline;
-
-/**
  * A ball of liquid added to a solve that is already running.
  *
  * Authoring one into the document would re-seed from t = 0, which throws away
@@ -212,16 +170,14 @@ export type OverlayPipelineFactory = (
  * `validateLiveSolidEdit` and `applySceneUniforms`. Any other method answers a
  * stroke with a reset, so the editor does not offer it solid tools over water.
  */
-const LIVE_SOLID_EDIT_METHODS: ReadonlySet<string> = new Set(["adaptive-mass", "adaptive-volume", "uniform", "uniform-volume"]);
-export const takesLiveSolidEdits = (methodId: string): boolean => LIVE_SOLID_EDIT_METHODS.has(methodId);
+export const takesLiveSolidEdits = (methodId: string): boolean => methodId === "uniform-narrow-band-flip";
 
 /**
  * Methods whose solver adds `scene.fluid.scheduledDrops` as its clock passes
  * them. Any other method would run such a scene without its liquid and call
  * the result the scene, so the host refuses the pairing instead.
  */
-const SCHEDULED_DROP_METHODS: ReadonlySet<string> = new Set(["uniform", "uniform-volume", "uniform-narrow-band-flip"]);
-export const takesScheduledDrops = (methodId: string): boolean => SCHEDULED_DROP_METHODS.has(methodId);
+export const takesScheduledDrops = (methodId: string): boolean => methodId === "uniform-narrow-band-flip";
 
 export interface InjectedLiquidBall {
   readonly centre_m: Vec3;
@@ -242,22 +198,6 @@ export interface GPUSolverInstance {
     readonly cellSize_m: readonly [number, number, number];
     readonly dimensions: readonly [number, number, number];
   };
-  /**
-   * Semantic sparse-world authority, when this solver is backed by one.
-   *
-   * Consumers take presentation and lifecycle state from this boundary. The
-   * legacy fields below remain only so other methods can migrate separately.
-   */
-  readonly sparseWorld?: SparseWorld;
-  /**
-   * Device-wide sparse program library used by `sparseWorld`.
-   *
-   * Sparse consumers gate work on this semantic readiness surface. They must
-   * not inspect a method adapter's compilation queues or pipeline names.
-   */
-  readonly sparseWorldDevice?: SparseWorldDevice;
-  /** Sparse-specific UI capabilities grouped behind one stable facade. */
-  readonly sparseWorldUI?: SparseWorldUI;
   /**
    * False while t=0 can be presented but the larger physics pipeline family
    * is still compiling. Absent means ready for methods with an atomic bundle.
@@ -297,35 +237,13 @@ export interface GPUSolverInstance {
   readonly gridCellTexture?: GPUTexture;
   /** Live velocity field for scientific slice modes (CFL/speed heatmaps). */
   readonly velocityTexture?: GPUTexture;
-  /** Optional one-way escaped spray droplets rendered above the liquid surface. */
-  readonly secondaryParticles?: GPUSecondaryParticleSource;
   /**
    * The particles a particle method simulates with, for the particle layer.
    * Like the face velocities below it needs no enable: the records exist
    * because the step needs them, so drawing them adds no simulation work.
    */
   readonly particleSource?: GPUFluidParticleSource;
-  /** Optional presentation-only fluid markers, for the seed-spectrum view. */
-  readonly tracerSource?: GPUFluidTracerSource;
-  /**
-   * Turn marker advection on or off. Absent means the method has no markers.
-   *
-   * The renderer calls this from the view it is asked to draw, because the view
-   * is the only thing that knows whether anyone is looking: markers are pure
-   * presentation and a solver that advected them unwatched would be charging
-   * every frame for a picture nobody asked for.
-   */
-  setTracersEnabled?(enabled: boolean): void;
   /** Retain existing sparse bricks and cell widths while allowing new support to grow. */
-  setTopologyFrozen?(frozen: boolean): void;
-  /**
-   * Optional MAC face velocities, for the face-arrow view.
-   *
-   * There is no enable to pair with this, and that asymmetry with the markers
-   * above is the point: face velocities exist because the solve needs them, so
-   * a view that reads them adds a draw and no simulation work at all.
-   */
-  readonly faceVelocitySource?: GPUFluidFaceVelocitySource;
   /**
    * Optional 4³ tile classes, for the fine-tiles view. Like face velocities it
    * reads what the step already wrote; unlike them it comes and goes with a
@@ -351,47 +269,8 @@ export interface GPUSolverInstance {
   readonly gridPressureOrigin?: readonly [number, number, number];
   /** Packed negative-domain MAC faces, for cell-centred diagnostic velocity. */
   readonly gridVelocityBoundary?: GPUBufferBinding;
-  /**
-   * Optional captured pressure-solve journal, for the pressure-lab film.
-   *
-   * Unlike face velocities this one *is* paired with an enable, and for the
-   * same reason the markers are: the numbers it draws do not otherwise exist.
-   * The snapshots are written by dispatches the encoder only emits for an
-   * armed frame, so an unwatched solve encodes none of them.
-   */
-  readonly pressureJournalSource?: GPUPressureJournalSource;
-  /** Arm or disarm journal capture; false when the method reserved no journal. */
-  armPressureJournal?(armed: boolean): boolean;
-  /**
-   * Read back the captured film's iteration records.
-   *
-   * Maps a buffer, so it belongs to the same paused-ownership boundary as
-   * `readStats` and never to a live frame. Resolves undefined when nothing has
-   * been captured. The whole-field snapshots stay on the device — only these
-   * few kilobytes of scalars ever cross.
-   */
-  readPressureJournal?(): Promise<PressureJournal | undefined>;
-  /**
-   * Per-stage lenses and the buffers they draw. Absent on methods with none.
-   *
-   * A lens is a reading of one *stage*, so a method whose advance is not
-   * partitioned into named resident stages has nothing to offer here. Declaring
-   * one costs nothing: no snapshot is copied, no header read back and no
-   * pipeline compiled until a view arms a lens, and only ever one at a time.
-   */
-  readonly stageLensSource?: StageLensSource;
   /** Always-resident structural sparse scene used by production SVO rendering. */
   readonly sparseVoxelSceneSource?: SparseVoxelSceneRenderSource;
-  /** Exact compact topology/geometry buffers for paper-technique overlays. */
-  readonly octreeTechniqueDebugSource?: OctreeTechniqueDebugSource;
-  /** True only after the complete t=0 sparse authority has passed its queue fence. */
-  readonly initialSparseAuthorityReady?: boolean;
-  /** Row-independent, globally indexed sparse fine level-set bricks. */
-  readonly globalFineLevelSetSource?: WebGPUFineLevelSetBrickSource;
-  /** Live sparse represented-cell fields for scientific grid overlays. */
-  readonly sparseAdaptiveGridSource?: SparseAdaptiveGridConsumerSource;
-  /** Compact moving surface used when coarse-1 deliberately has no fine band. */
-  readonly coarseLevelSetSource?: CoarseLevelSetConsumerSource;
   /**
    * Whatever the owning method publishes for quality assurance, unnamed here.
    *
@@ -482,18 +361,6 @@ export interface GPUSolverInstance {
   reseed?(scene: SceneDescription): Promise<boolean>;
   /** Apply configuration explicitly classified as runtime-safe by the method. */
   applyRuntimeValues?(values: MethodParamValues): void;
-  /**
-   * Compile by need. A solver builds the pipelines its accepted state can
-   * dispatch; a change that needs others (a first voxel, body, policy) waits
-   * for them and reports the wait in its diagnostics. A presenting host
-   * accepts that the accepted state keeps advancing meanwhile; any other
-   * caller awaits `pipelinesPrepared` before it advances again (advanceTo
-   * throws while a change waits). `warmPipelines` builds the remaining
-   * pipelines in the background, once the first frame has presented.
-   */
-  acceptPipelineWaits?(): void;
-  pipelinesPrepared?(): Promise<void>;
-  warmPipelines?(): Promise<void>;
   /** Transient per-pane detail input (focus); latest revision wins at the next accepted frame. Never persisted. */
   applyDetailInput?(input: SolverDetailInput): void;
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean;
@@ -538,18 +405,6 @@ export interface SimulationMethod {
    * method module.
    */
   supportedFieldModes?: readonly string[];
-  /**
-   * Lenses on this method's resident stages, in stage order.
-   *
-   * Separate from `supportedFieldModes` because a lens is not a field view: a
-   * field view samples what survived to the end of the frame, and a lens
-   * reports what one stage did in the middle of it. Declared on the descriptor
-   * rather than fetched from the solver so a picker can offer them before a
-   * device exists, and so a method with none simply has none.
-   */
-  stageLenses?: readonly AnyStageLens[];
-  /** Pressure-film scrub stops declared without importing method numerics in UI. */
-  pressureJournal?: PressureJournalDescriptor<MethodParamValues>;
   /**
    * Method-specific parameters. Common parameters (resolution, time step,
    * pressure solve effort) live in the scene numerics and are declared once
@@ -614,15 +469,6 @@ export interface SimulationMethod {
   capabilities?: {
     /** Publishes a volume the renderer can ray-march, not just a slice field. */
     volumeRendering?: boolean;
-    /** Owns simulation and presentation behind the semantic sparse-world API. */
-    sparseWorld?: boolean;
-    /**
-     * The initial sparse authority and adaptive raster source are published
-     * separately and must cross a presentation fence before transport unlocks.
-     * A method that attaches its field textures atomically with the warmed
-     * solver leaves this off.
-     */
-    fencedInitialPresentation?: boolean;
     /**
      * A change in the *shape* of the rigid roster — gaining its first body, or
      * its first moving one — is adopted by the running solver rather than
@@ -732,19 +578,6 @@ export interface SimulationMethod {
     scene: SceneDescription,
   ): ViewportFailureIndicator | undefined;
   /**
-   * Diagnostic render passes this method contributes, keyed by the renderer's
-   * optional pipeline key.
-   *
-   * The renderer resolves a key to a factory through the registry; it never
-   * names an overlay module. That direction is the whole point: an overlay
-   * bakes its method's generated catalog constants into its WGSL, so an
-   * import from core would drag one method's shader constants into the
-   * renderer for every method's frame. A key nothing registers compiles
-   * nothing, which is also how a method that publishes no such source avoids
-   * building a pass that could only draw nothing.
-   */
-  overlayPipelines?: Readonly<Record<string, OverlayPipelineFactory>>;
-  /**
    * The clock step this method actually advances, when its own numerics pin
    * one. Returning `undefined` accepts the scene's fixed step.
    *
@@ -758,18 +591,6 @@ export interface SimulationMethod {
     scene: Pick<SceneDescription, "numerics">,
     values: MethodParamValues,
   ): number | undefined;
-  /**
-   * This method's node-only harness half, loaded on demand.
-   *
-   * The Dawn smoke executor asked fifty-three questions of the form
-   * `method.id !== "uniform"`, imported twenty-two modules out of three method
-   * packages, and carried a thousand lines of one lane's terminal oracle. None
-   * of that belongs to a generic run loop, and none of it can be answered
-   * generically. The thunk is what keeps it out of the browser: a plugin is a
-   * node-only module reaching freely into its own method's ABI, and nothing in
-   * the app ever calls this.
-   */
-  harness?(): Promise<MethodHarnessPlugin>;
   /** WebGPU methods create a solver; the CPU reference method does not. */
   createSolver?(
     device: GPUDevice,

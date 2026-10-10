@@ -1,4 +1,4 @@
-import { cellProbeWedge, rayProbeWedge } from "../features/inspect/ring";
+import { rayProbeWedge } from "../features/inspect/ring";
 import type { EditorAction, EditorActionTarget } from "./editor-action";
 
 /**
@@ -41,21 +41,5 @@ export function rayProbeAction(target: AimedTarget): EditorAction {
   return rayProbeWedge({
     hint: "Pin the ray behind this pixel and read the work that drew it · orbit to see it in 3D",
     effect: { kind: "probe", probe: "ray", aim: target.aim },
-  });
-}
-
-/**
- * Read the pressure cell behind this pixel.
- *
- * Toned like the pipeline and the diagnostic cards, the water's other two
- * instruments, because it answers the same kind of question about the same
- * thing. `[` and `]` walk the ray inward from the cell it pins, which is how an
- * interior unknown is reached — the pixel alone can only ever name the nearest
- * leaf, and on a liquid that is a surface cell.
- */
-export function cellProbeAction(target: AimedTarget): EditorAction {
-  return cellProbeWedge({
-    hint: "Pin the pressure cell behind this pixel · [ and ] walk the ray in and out",
-    effect: { kind: "probe", probe: "cell", aim: target.aim },
   });
 }

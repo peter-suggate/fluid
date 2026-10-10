@@ -29,7 +29,7 @@ test("hero-garden-hose-x10 starts with fluid and offers solid editing", () => {
   assert.equal(planSceneRuntime(scene).waterPresentation, true);
   assert.equal(createHeroGardenHoseStressScene().systems?.fluid, false);
   for (const plugin of voxelTools.tools) {
-    const unavailable = plugin.unavailable({ scene, methodId: "uniform-volume" });
+    const unavailable = plugin.unavailable({ scene, methodId: "uniform-narrow-band-flip" });
     if (plugin.id === "fluid-cube" || plugin.id === "fluid-torus") assert.ok(unavailable, plugin.id);
     else assert.equal(unavailable, undefined, plugin.id);
   }

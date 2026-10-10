@@ -11,7 +11,7 @@ import {
 } from "./editor-entity";
 import { entityActionsAt, entityAtRay, findEntity, sceneActionsAt } from "./editor-entity-catalog";
 import { sceneryHighlightRange, sceneryIdFromSelection } from "./editor-scenery";
-import { cellProbeAction, rayProbeAction } from "./editor-probe-actions";
+import { rayProbeAction } from "./editor-probe-actions";
 import { containerShellContains, pickSolidVoxel, solidVoxelWorldBox } from "./editor-solid-voxel";
 import { tankBox, TANK_SELECTION_ID } from "./editor-tank";
 import { terrainFeatureAt, terrainFeatureSelectionId } from "./editor-terrain";
@@ -22,7 +22,6 @@ import { add, scale } from "./math";
 import type { SceneDescription, Vec3 } from "./model";
 import type { SolidWorldCoordinate } from "./solid-world";
 import { intersectAuthoredTerrain, sceneHasTerrain, terrainNormalAt } from "./terrain";
-import { fluidCellLeafBox, FLUID_CELL_TRACE_STATUS } from "./fluid-cell-trace";
 
 /**
  * What is under the cursor, as a catalog of things that can answer.
@@ -261,75 +260,6 @@ function wallLabel(axis: "x" | "y" | "z", sign: -1 | 1): string {
   return sign > 0 ? "tank wall · +Z" : "tank wall · −Z";
 }
 
-// ---- fluid cell -----------------------------------------------------------
-
-/**
- * The pressure cell behind the pixel, while the cell instrument is running.
- *
- * The one target nothing in the document describes. A leaf's extent is decided
- * by the solver's topology — how far the octree refined here, this frame — so
- * there is no analytic answer to compute and no scene field to read. It comes
- * from the GPU or not at all, which makes this the probe the plugin boundary was
- * really designed for: it answers a ray without raycasting anything, purely from
- * what the last frame published.
- *
- * Three rules keep that honest:
- *
- * - **It is silent unless the `C` instrument is on.** No gather runs otherwise,
- *   so there is no cell to point at. The probe does not turn it on, because a
- *   hover must not start a readback.
- * - **It is silent while the trace is pinned.** A pinned trace describes a pixel
- *   the reader chose earlier and has since moved away from; lighting up that
- *   leaf under the current cursor would be pointing at the wrong place with
- *   great confidence.
- * - **It re-tests the leaf against the live ray.** The published leaf is one
- *   frame behind the pointer, and a slab test is what makes that lag
- *   self-correcting rather than a lie: if the pointer has moved off the leaf,
- *   the probe declines and something else answers.
- *
- * It carries no `selection` — a cell exists in the solve, not in the document —
- * so it never takes a click away from the water body it sits inside. It ranks
- * behind the entities for that reason too, and reaches the surface exactly where
- * a leaf is genuinely the nearest thing: over water that has moved away from the
- * box it was authored in, and under a selected fluid body, which `exclude` makes
- * transparent.
- */
-const fluidCellProbe: EditorProbeDefinition = {
-  id: "fluid-cell",
-  probe: (context, ray) => {
-    const snapshot = context.fluidCell;
-    if (!snapshot || snapshot.pinned) return undefined;
-    const trace = snapshot.trace;
-    if (trace.status !== FLUID_CELL_TRACE_STATUS.resolved) return undefined;
-    const leaf = fluidCellLeafBox(snapshot.lattice, trace.leafOrigin, trace.leafSize);
-    const box: BoxExtent = {
-      min: { x: leaf.min[0], y: leaf.min[1], z: leaf.min[2] },
-      max: { x: leaf.max[0], y: leaf.max[1], z: leaf.max[2] },
-    };
-    const distance_m = pickSolidBox(ray, box);
-    if (distance_m === undefined) return undefined;
-    const point_m = add(ray.origin, scale(ray.direction, distance_m));
-    return {
-      probeId: "fluid-cell",
-      kind: "fluid-cell",
-      id: trace.leafOrigin.join(","),
-      label: trace.leafSize > 1
-        ? `fluid cell ${trace.cell.join(" · ")} · ${trace.leafSize}³ leaf`
-        : `fluid cell ${trace.cell.join(" · ")}`,
-      tone: "fluid",
-      distance_m,
-      point_m,
-      normal: boxFaceNormalAt(box, point_m),
-      highlight: { kind: "box", box },
-      detail: { row: trace.row, leafSize: trace.leafSize, hitIndex: trace.hitIndex },
-    };
-  },
-  // Re-aimed at this pixel rather than left to the HUD, so the ring can walk the
-  // trace to whatever the reader right-clicked without them going back to the
-  // pointer they had when they first pinned it.
-  actions: (_context, _target, aim) => [cellProbeAction({ aim })],
-};
-
 /**
  * Which face of a box a point on its surface sits on.
  *
@@ -484,7 +414,6 @@ export const EDITOR_PROBES: readonly EditorProbeDefinition[] = Object.freeze([
   tankWallProbe,
   solidVoxelProbe,
   entityProbe,
-  fluidCellProbe,
   terrainProbe,
   roomProbe,
 ]);

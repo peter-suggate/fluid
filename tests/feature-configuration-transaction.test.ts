@@ -6,25 +6,16 @@ import { createMethodStore } from "../lib/core/stores/method-store";
 test("a forbidden pressure override leaves the entire method store unchanged", () => {
   const store = createMethodStore();
   const before = store.getState();
-  assert.throws(() => before.setParam("uniform-volume", "pressureCycleBudget", 1), /fixes "pressureCycleBudget"/);
+  assert.throws(() => before.setParam("uniform-narrow-band-flip", "pressureCycleBudget", 1), /fixes "pressureCycleBudget"/);
   assert.equal(store.getState(), before);
-  assert.throws(() => before.setMethodId("nonexistent"), /Unknown simulation method/);
   assert.equal(store.getState(), before);
 });
-test("method settings survive reselecting the maintained method", () => {
-  const store = createMethodStore();
-  store.getState().setParam("uniform-volume", "detailPolicy", "full");
-  store.getState().setMethodId("uniform-volume");
-  store.getState().setMethodId("uniform-volume");
-  assert.equal(store.getState().overrides["uniform-volume"]?.detailPolicy, "full");
-});
-
 test("controller rejects forbidden overrides before announcing GPU work", async () => {
   const { simulation } = await import("../lib/core/simulation/controller");
   const { defaultSession } = await import("../lib/core/session/session");
   const methodBefore = defaultSession.method.getState();
   const statusBefore = defaultSession.diagnostics.getState().gpuStatus;
-  assert.throws(() => simulation.setMethodParam("uniform-volume", "pressureCycleBudget", 1), /fixes "pressureCycleBudget"/);
+  assert.throws(() => simulation.setMethodParam("uniform-narrow-band-flip", "pressureCycleBudget", 1), /fixes "pressureCycleBudget"/);
   assert.equal(defaultSession.method.getState(), methodBefore);
   assert.equal(defaultSession.diagnostics.getState().gpuStatus, statusBefore);
 });
@@ -36,14 +27,13 @@ test("restoring an explicit default removes the override without resetting the a
   const savedRuntime = session.runtime.getState();
   const savedDiagnostics = session.diagnostics.getState();
   try {
-    session.method.setState({ methodId: "uniform-volume", overrides: { "uniform-volume": { phiCubicAdvection: "off" } } });
-    session.runtime.setState({ simulationTime: 2, topologyFrozen: true });
-    simulation.resetMethodParam("uniform-volume", "phiCubicAdvection");
-    assert.equal(session.method.getState().overrides["uniform-volume"]?.phiCubicAdvection, undefined);
+    session.method.setState({ methodId: "uniform-narrow-band-flip", overrides: { "uniform-narrow-band-flip": { phiCubicAdvection: "off" } } });
+    session.runtime.setState({ simulationTime: 2 });
+    simulation.resetMethodParam("uniform-narrow-band-flip", "phiCubicAdvection");
+    assert.equal(session.method.getState().overrides["uniform-narrow-band-flip"]?.phiCubicAdvection, undefined);
     assert.equal(session.runtime.getState().simulationTime, 2);
-    assert.equal(session.runtime.getState().topologyFrozen, true);
     assert.equal(session.diagnostics.getState().gpuStatus, savedDiagnostics.gpuStatus);
-    simulation.setMethodParam("uniform-volume", "phiCubicAdvection", "off");
+    simulation.setMethodParam("uniform-narrow-band-flip", "phiCubicAdvection", "off");
     assert.equal(session.runtime.getState().simulationTime, 2);
   } finally {
     session.method.setState(savedMethod, true);

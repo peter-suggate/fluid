@@ -11,7 +11,7 @@ import { ComposedFeatureSlot } from "../lib/framework/ui/slot";
 import {
   ADVANCE_SLICE_SETTINGS, ADVANCE_SURFACE_VIEWS, ADVANCE_TRANSPORT_EXPERIMENT_ORDER,
   advanceSliceFeature,
-} from "../lib/methods/adaptive-volume/features/advance-slice/definition";
+} from "./definition";
 import {
   LAB_FEATURE_COMPOSITION, LAB_FEATURE_VIEWS, LabFeatureSlot,
 } from "./LabFeatureSlot";

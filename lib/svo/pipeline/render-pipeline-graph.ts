@@ -299,25 +299,6 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     chip: () => "copy · staged readback",
   },
   {
-    id: "fluid-coverage",
-    band: "source",
-    side: "right",
-    label: "Fluid coverage",
-    stage: "fluid-coverage",
-    taps: [],
-    toggleable: true,
-    tip: {
-      summary: "Fills the fluid-coverage volume and reduces it down its mip chain, one compute pass per level, so the dry passes know where water occludes the scene. Off freezes the volume at its last fill — consumers keep reading the retained texture — so the delta is the fill plus the whole mip chain and nothing downstream.",
-      writes: "fluid coverage volume · one mip per level",
-      feeds: "primary traversal · deferred lighting",
-      gate: "a scene with fluid, under the sparse presentation",
-    },
-    state: (context) => (context.disabledStages.has("fluid-coverage") ? "off"
-      : context.sceneHasFluid && context.rendererActive ? "on" : "unavailable"),
-    chip: (context) => (context.disabledStages.has("fluid-coverage") ? "withheld · volume frozen"
-      : context.sceneHasFluid ? "fill + mip chain" : "dry scene"),
-  },
-  {
     id: "primary-entry-prepass",
     band: "primary",
     side: "left",

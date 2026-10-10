@@ -7,7 +7,7 @@ test("paused uniform presentations never submit zero-duration physics or change 
   for (const lastTime of [0, 0.017, 1]) {
     const info = { encodedSteps: 7, submittedTime_s: lastTime };
     const solver = Object.assign(Object.create(WebGPUUniformReferenceSolver.prototype), {
-      disposed: false, paperTimeStep: false, lastTime, executionInfo: info,
+      disposed: false, mixedFrame: {}, assertMixedOptions: () => {}, lastTime, executionInfo: info,
       scene: { numerics: { maxDt_s: 0.017 } },
       // There is intentionally no GPU device: a paused advance must return
       // before touching pipelines, queue submissions, or field resources.

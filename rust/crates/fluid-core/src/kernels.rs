@@ -568,24 +568,4 @@ mod tests {
             )
         }
     }
-
-    #[test]
-    #[ignore = "manual throughput receipt; timings are machine-specific"]
-    fn benchmark_pressure_kernels() {
-        let n = 1 << 20;
-        let source: Vec<f32> = (0..n).map(|i| (i % 251) as f32 / 251.0).collect();
-        let mut destination = source.clone();
-        let order: Vec<u32> = (0..n as u32).collect();
-        let mut scratch = vec![0.0; n];
-        let start = std::time::Instant::now();
-        let mut checksum = 0u32;
-        for _ in 0..64 {
-            scaled_add_dense(&source, 0.125, &mut destination);
-            checksum ^= reduce_dot(&source, &destination, &order, &mut scratch).to_bits()
-        }
-        eprintln!(
-            "pressure-kernel n={n} rounds=64 elapsed_ms={} checksum={checksum:08x}",
-            start.elapsed().as_millis()
-        );
-    }
 }

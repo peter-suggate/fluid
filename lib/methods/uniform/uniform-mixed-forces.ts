@@ -7,7 +7,6 @@ import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL, uniformMixed
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
-import type { UniformPipelineNeed } from "./uniform-pipeline-needs";
 
 export interface UniformMixedForceFields {
   advected: GPUTexture;
@@ -44,7 +43,6 @@ export class UniformMixedForces {
   private pipeline?: GPUComputePipeline;
   private normalPipeline?: GPUComputePipeline;
   private curvaturePipeline?: GPUComputePipeline;
-  private inlinePipelines?:GPUComputePipeline[];
   private regularFinePipeline?: GPUComputePipeline;
   private readonly resources: GPUBindGroupLayout;
   private regularCoarsePipeline?: GPUComputePipeline;
@@ -265,36 +263,30 @@ ${uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)").repl
 `,["forcesFine","forcesRegular","forcesRegularCoarse","forces",...(this.cachedCurvature?["cacheNormals","cacheCurvature"]:[])])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
-    // Compile by need: the cached set while a 4h surface may exist (encode's
-    // useCache), its caches under capillarity, the inline set otherwise.
-    const cachedNeeds:UniformPipelineNeed[]=this.cachedCurvature?["forceCache"]:[];
-    const compile=(entryPoint:string,constants:Record<string,number>,needs:readonly UniformPipelineNeed[]=cachedNeeds)=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{
-      umDispatchX:this.ownership.dispatchX,umCachedGeometry:+this.cachedGeometry,umForceCached:+this.cachedCurvature,...constants,...s}}}),{needs,entry:entryPoint});
+    const compile=(entryPoint:string,constants:Record<string,number>)=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{
+      umDispatchX:this.ownership.dispatchX,umCachedGeometry:+this.cachedGeometry,umForceCached:+this.cachedCurvature,...constants,...s}}}),{entry:entryPoint});
     // Seam tiles of every tier and the small regular tiers share one launch,
     // so their serial per-tile latencies overlap; seam 4h tiles pack four
     // per job (fusedQuad). Every launch is GPU-counted: a regular tier that
     // rides the fused launch counts zero jobs in its own (skipFused gate).
-    if(this.cachedCurvature)[this.normalPipeline,this.curvaturePipeline]=await Promise.all(["cacheNormals","cacheCurvature"].map(entry=>compile(entry,{umCountedJobs:UNIFORM_MIXED_COUNTED.all},["forceCache","capillary"])));
+    if(this.cachedCurvature)[this.normalPipeline,this.curvaturePipeline]=await Promise.all(["cacheNormals","cacheCurvature"].map(entry=>compile(entry,{umCountedJobs:UNIFORM_MIXED_COUNTED.all})));
     const skipFused=UNIFORM_MIXED_FUSED_GATE.skipFused;
     [this.pipeline,this.regularFinePipeline,this.regularCoarsePipeline]=await Promise.all([
       compile("forces",{umMergedTiles:1,umFusedJobs:1,umCountedJobs:UNIFORM_MIXED_COUNTED.fusedQuad}),
       compile("forcesFine",{umCountedJobs:UNIFORM_MIXED_COUNTED.fineTiles}),
       compile("forcesRegularCoarse",{umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused})]);
-    if(this.cachedCurvature)this.inlinePipelines=await Promise.all([
-      compile("forces",{umForceCached:0,umMergedTiles:1,umFusedJobs:1,umCountedJobs:UNIFORM_MIXED_COUNTED.fusedQuad},["forceInline"]),
-      compile("forcesFine",{umForceCached:0,umCountedJobs:UNIFORM_MIXED_COUNTED.fineTiles},["forceInline"]),
-      compile("forcesRegularCoarse",{umForceCached:0,umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused},["forceInline"])]);
+
   }
-  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,capillarity=true,useCache=this.cachedCurvature):void{
+  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,capillarity=true):void{
     if(!this.pipeline)throw new Error("Mixed forces are not initialized");
     const pass=encoder.beginComputePass({label:"Uniform mixed body forces"});
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
     const variant=(p:GPUComputePipeline)=>uniformDetailPick(this.solid?.select(p)??p);
-    if(useCache&&capillarity&&this.curvaturePipeline){
+    if(capillarity&&this.curvaturePipeline){
       this.ownership.dispatchAllCounted(pass,variant(this.normalPipeline!));
       this.ownership.dispatchAllCounted(pass,variant(this.curvaturePipeline));
     }
-    const [general,fine,coarse]=!useCache&&this.inlinePipelines?this.inlinePipelines:[this.pipeline,this.regularFinePipeline!,this.regularCoarsePipeline!];
+    const [general,fine,coarse]=[this.pipeline,this.regularFinePipeline!,this.regularCoarsePipeline!];
     this.ownership.dispatchCounted(pass,variant(fine!),this.ownership.capacity.fineTiles,"fine");
     // A regular 4h owner (a 3x3x3 stencil of 4h tiles) with the cached
     // curvature reads its own and its face neighbours' origins, anchors and

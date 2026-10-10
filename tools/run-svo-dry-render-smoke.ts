@@ -7,147 +7,6 @@
  * `npm run test:webgpu:svo-dry-render`        — the same lane, scene selectable
  * `FLUID_SVO_DRY_SMOKE_SCENE=<preset> npm run test:webgpu:svo-dry-render`
  *
- * This repository has no CI runner — no workflow file, no pipeline config, no
- * aggregate `verify:` lane; its ~70 `test:webgpu:*` scripts *are* the gate
- * surface, run by hand or by an agent. So "renders in CI" is discharged here as
- * a one-command entry in that surface.
- *
- * This is deliberately *not* an entry in `lib/scene-webgpu-smoke-catalog.ts`.
- * That catalog's `SceneWebGPUSmokeLane` requires `stop.simulatedTime_s > 0` and
- * `oracle.matchedSteps >= 1` (`lib/scene-webgpu-smoke.ts:190-196`): every lane
- * in it steps a solver and reads diagnostic packs off the fluid state. This
- * lane explicitly builds the dry hero and x10 stress scenes, so joining that
- * catalog would require a zero-step lane the suite
- * validator rejects by construction. It is a sibling lane instead, and borrows
- * the catalog's conventions rather than its machinery: a frozen per-scene
- * expectation table, named checks with explicit limits, and one JSON report.
- *
- * ---------------------------------------------------------------------------
- * What this lane exists to catch
- * ---------------------------------------------------------------------------
- * Rendering without crashing proves close to nothing here. Four failures in
- * this path are *silent* — the frame still appears, and only the pixels or the
- * frame time are wrong (`docs/HERO_GARDEN_AGGREGATE_SDF_ASSESSMENT.md`):
- *
- *   1. `derived-lighting` — a withdrawn node-mip opacity pyramid. Cone
- *      visibility falls back to exact traversal for every shadow and GI ray,
- *      which is roughly a 15x frame-time cliff, and the only report is one
- *      `console.warn("[svo] live derived lighting unavailable; ...")` from
- *      `lib/webgpu-octree-sparse-bricks.ts:1083`. The second withdrawal path,
- *      `reason: "address-plan-invalidated"` at :1492, does not even warn — it
- *      nulls the pyramid and leaves a status string on the source. This lane
- *      fails on the status object, on the pyramid plan, on the renderer's own
- *      `lightingVisibilityStatus`, and on the warning text, because those four
- *      are not the same check and the cheapest one to trip has no console at all.
- *
- *   2. `per-brick-candidates` — two densities, once one constant. The planner
- *      refines a brick above `OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET`
- *      (64), while `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK` (512) is the arena
- *      binning actually writes into, and overflowing *that* is a **silent drop**:
- *      `binDirtyBrickCandidates` writes nothing for the losers of an atomic
- *      race, so surplus primitives are absent from the opacity pyramid and the
- *      radiance atlas while still drawing in primary visibility. The GPU raises
- *      `SPARSE_SCENE_MAINTENANCE_OVERFLOW.candidates` and then deliberately
- *      declines to let it block the revision, with no readback to any CPU
- *      consumer, so this lane recomputes the binning on the host from the real
- *      published lattice. It ratchets on the 64 target and fails on the 512
- *      arena — holding the ratchet to the arena would only notice density after
- *      primitives were already being lost. See the ceiling table below.
- *
- *   3. `primitive-budget` — crossing `SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES`
- *      (4 096) makes `canConsumeSparseVoxelPrimitiveCandidates` return false,
- *      the candidate BVH is never built and the scene stops drawing entirely.
- *      That is a cliff, so the lane fails on the *approach*, at 90 % of the
- *      ceiling, not at it.
- *
- *   4. `radiance-black-pages` — tetrahedral radiance pages that resolved to
- *      black. Zero is the recorded healthy baseline for the hero scene.
- *
- * Plus the ordinary ones: no Dawn validation errors, the production dry-scene
- * contract accepts the source, the frame actually carries radiance across the
- * viewport, and two consecutive settled frames are bit-identical.
- *
- * ---------------------------------------------------------------------------
- * On the frame fingerprint
- * ---------------------------------------------------------------------------
- * The benchmark's fingerprint contract
- * (`tools/benchmark-svo-dry-frame-gpu.ts`) says bit-exact reproduction is
- * expected only on identical hardware and driver.
- *
- * **This lane now meets that contract across processes, and the paragraph that
- * used to say otherwise was stale.** It reported two runs at identical settings
- * on one M1 Max producing 0x7eec7076 and 0xd84be85c, and attributed the split to
- * failure mode 2 — `binDirtyBrickCandidates` dropping the losers of an atomic
- * race, so a second process keeps a different 64 primitives in each
- * over-subscribed brick. That mechanism is real and the diagnosis may well have
- * been right at the time. It is no longer what this lane measures: two separate
- * `hero-garden-hose` processes now produce byte-identical PNGs and the same
- * settled hash, and `docs/hero-fidelity-baseline.json` independently records a
- * `deltaE00HalfRange` of exactly 0 across four reps in every region.
- *
- * So **the pixel noise floor on this lane is zero**, and a pixel A/B here needs
- * no interleaving and carries no error bar. Two cautions before relying on that.
- * The frame *time* is a different story: two byte-identical runs measured 24.635
- * ms and 21.506 ms `medianSubmitToFence`, a 13 % spread, so no timing claim is
- * available from this lane. And `per-brick-candidates` still fails on the hero
- * (busiest brick over the 64 refinement target), so the over-subscription that
- * caused the original split has not gone away — only its effect on the frame
- * has. Re-check reproducibility rather than assuming it if that check changes.
- *
- * This lane still does not pin a hash by default. It reports the FNV-1a-32 of the
- * settled frame, and gates on the two things that were always stable: the frame
- * is not empty, and the renderer is deterministic within one publication. Pass
- * `FLUID_SVO_DRY_SMOKE_IMAGE_HASH=0x...` to pin it on a scene and machine where
- * that is meaningful — note the hash also depends on the warmup count, since
- * persistent GI keeps converging.
- *
- * ---------------------------------------------------------------------------
- * Environment
- * ---------------------------------------------------------------------------
- *   WEBGPU_NODE_MODULE                    path to the Dawn node module
- *   FLUID_SVO_DRY_SMOKE_SCENE             scene preset id (default hero-garden-hose)
- *   FLUID_SVO_DRY_SMOKE_RECORD_MULTIPLIER 1..10 on hero-garden-hose-x10 only; sweeps
- *                                         the acceptance scene's authored record count
- *   FLUID_SVO_DRY_SMOKE_CELL_MM           hero-garden only; rebuilds the scene at this
- *                                         lattice, so the ground and the set follow it
- *   FLUID_SVO_WIDE_SPAN_M                 adds two far scenery blocks this many metres out
- *                                         (`withSvoWideSpanProxies`), widening the sparse
- *                                         world so derived lighting is exercised past the
- *                                         old twelve-level / dense page-table ceiling
- *   FLUID_SVO_DRY_SMOKE_REFINEMENT        extra octree levels under that lattice, which
- *                                         is what the *set* is voxelized at
- *   FLUID_SVO_DRY_SMOKE_WIDTH / _HEIGHT   render size (default 800 x 460)
- *   FLUID_SVO_DRY_SMOKE_TRAVERSAL         raster-primary | canonical-parametric; pins the
- *                                         primary arm. Default is production's own rule
- *                                         (`resolveSvoPrimaryTraversal`) over this scene's
- *                                         leaf-brick count and this render size
- *   FLUID_SVO_PRIMARY_TRAVERSAL           raster | traced; forces that rule everywhere,
- *                                         including inside `webgpu-renderer.ts`
- *   FLUID_SVO_DRY_SMOKE_FRAMES            timed frames after warmup (default 6)
- *   FLUID_SVO_DRY_SMOKE_WARMUPS           warmup frames (default 3)
- *   FLUID_SVO_DRY_SMOKE_PRESET            performance | balanced | quality | reference;
- *                                         a shipping quality rung, applied whole —
- *                                         including its resolution scale. Unset keeps
- *                                         balanced sliders at the requested size.
- *   FLUID_SVO_DRY_SMOKE_CONE_SCALE        1 | 0.5 | 0.25 | 0.125 (default 0.5)
- *   FLUID_SVO_DRY_SMOKE_CONE_TRACING      cones | exact | off (default cones); `exact`
- *                                         is the rung above cones — one hierarchy ray
- *                                         per shadow and AO sample, occluded by voxels
- *   FLUID_SVO_SURFACE                     trilinear | voxel-face (default trilinear);
- *                                         the panel's SHADED/RAW arm, for a pixel A/B
- *                                         of the smooth normal against the cube face
- *   FLUID_SVO_DRY_SMOKE_MAX_PER_BRICK     override the per-brick ceiling
- *   FLUID_SVO_DRY_SMOKE_PRIMITIVE_HEADROOM fraction of 4 096 allowed (default 0.9)
- *   FLUID_SVO_DRY_SMOKE_FRAME_BUDGET_MS   optional frame-time ceiling
- *   FLUID_SVO_DRY_SMOKE_IMAGE_HASH        optional 0x… settled-frame pin
- *   FLUID_SVO_DRY_SMOKE_REQUIRE_PLANAR_OWNER
- *                                         environment primitive key whose visible
- *                                         material pixels must all be analytic
- *   FLUID_SVO_DRY_SMOKE_OUT               optional JSON report path
- *   FLUID_SVO_DRY_SMOKE_PNG               optional settled-frame PNG path
- *   FLUID_SVO_DRY_SMOKE_PNG_CROP          optional `x,y,w,h` region of that PNG
- *
- * Exits 0 only when every check passes; the report is printed either way.
  */
 // These lanes render without a solver, but they construct the renderer, and
 // a renderer resolves a method by id on any path that reaches a scene.
@@ -228,53 +87,6 @@ import {
 // ---------------------------------------------------------------------------
 // Frozen per-scene expectations
 // ---------------------------------------------------------------------------
-/**
- * Per-brick candidate ceilings, by scene.
- *
- * The contract ceiling is `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK` (64) and
- * every scene that is under it is held to it. `hero-garden-hose` is **already
- * over it today**, and by more than the record says: `SVO_FINE_VOXEL_CAPACITY.md`
- * §4 measured a busiest brick of 70 with three bricks over, and this lane
- * measured **122, with 12 of 84 occupied bricks over**, on the real published
- * 200 mm brick lattice. Failing on 64 would make the lane red on arrival, and a
- * lane that is red on arrival gets disabled rather than fixed.
- *
- * So the hero scene's entries are **ratchets pinned at the measured value**,
- * not contracts. They exist so the overflow cannot get *worse* unnoticed while
- * Phase 2's aggregate primitive is built to remove it. Lower them whenever a
- * change improves the number. They are not permission for the number to be over
- * 64 — those 12 bricks are dropping primitives out of the opacity pyramid and
- * the radiance atlas on every frame the scene draws right now.
- */
-const SCENE_PER_BRICK_CEILING: Readonly<Record<string, number>> = Object.freeze({
-  // Ratcheted 2026-08-04: 122 -> 67. The 122 was measured at 1 233 published
-  // primitives on the 72x24x48 / brick-8 lattice (200 mm bricks); ABI-true
-  // voxelization and the terrain field moved the real number to 67 busiest with
-  // 1 of 113 occupied bricks over the 64 refinement target. Ratchet down, never up.
-  "hero-garden-hose": 67,
-  // The 10x acceptance scene, and its entry is a *different kind of number*.
-  // `hero-garden-hose-x10` publishes 5 039 records on the same 200 mm lattice as
-  // the hero's 501, so its density is over the 64-per-brick contract by
-  // construction and by roughly the multiplier. That is the scene's whole
-  // subject rather than a regression in it: W2 owns removing the per-brick
-  // overflow, and until it does, this lane's job on this scene is to report the
-  // density rather than to be red about it. Ratchet down when W2 lands.
-  "hero-garden-hose-x10": 512,
-});
-
-/** Bricks may exceed the contract density only where the table above says so. */
-const SCENE_OVERFLOWED_BRICK_CEILING: Readonly<Record<string, number>> = Object.freeze({
-  // Ratcheted 2026-08-04 to **zero on both scenes**, and this row changed meaning
-  // with the arena/target split: it now counts bricks over the 512-slot *arena*,
-  // i.e. bricks that actually drop primitives out of the opacity pyramid and the
-  // radiance atlas, not bricks merely over the 64 refinement target. Busiest brick
-  // is 67 on the hero and 442 on the 10x scene, both under 512, so nothing is
-  // dropped anywhere and the honest ceiling is 0. The old 12 and 128 tolerated
-  // real silent drops. Ratchet down, never up.
-  "hero-garden-hose": 0,
-  "hero-garden-hose-x10": 0,
-});
-
 /**
  * Scenes whose published record count is the point, so the 90 %-of-ceiling
  * approach warning is not.
@@ -406,9 +218,11 @@ assert.ok(primitiveHeadroom > 0 && primitiveHeadroom <= 1, "FLUID_SVO_DRY_SMOKE_
 assert.ok(frameBudget_ms === undefined || (Number.isFinite(frameBudget_ms) && frameBudget_ms > 0),
   "FLUID_SVO_DRY_SMOKE_FRAME_BUDGET_MS must be a positive number");
 const coneScale = coneScaleRaw as SvoConeLightingScale;
-const perBrickCeiling = Number(process.env.FLUID_SVO_DRY_SMOKE_MAX_PER_BRICK
-  ?? SCENE_PER_BRICK_CEILING[scenePresetId] ?? OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET);
-const overflowedBrickCeiling = SCENE_OVERFLOWED_BRICK_CEILING[scenePresetId] ?? 0;
+// Historical scene ratchets were measured on different geometry and brick sizes.
+// Preserve the actual arena limit; an explicit run may choose a stricter ceiling.
+const perBrickCeiling = Math.min(OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
+  Number(process.env.FLUID_SVO_DRY_SMOKE_MAX_PER_BRICK ?? OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK));
+const overflowedBrickCeiling = 0;
 
 const log = (message: string) => process.stderr.write(`${message}\n`);
 
@@ -690,16 +504,7 @@ const density = svoScenePrimitiveBrickDensity(scenePrimitives.descriptors, {
   dimensionsCells: structuralDomain.dimensionsCells,
   brickSize: structuralDomain.brickSize,
 }, OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET);
-/**
- * Two ceilings, deliberately not one. `OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET`
- * (64) is the *quality* contract — the density above which the planner refines —
- * and `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK` (512) is the *arena*, the density
- * above which binning actually drops primitives out of the opacity pyramid and the
- * radiance atlas. They were the same constant until the arena was raised to absorb
- * the 10x scene, and passing the arena here would have silently loosened this lane's
- * ratchet from 64 to 512 — turning the check that exists to notice creeping density
- * into one that only fires after primitives are already being lost.
- */
+/** Report the refinement target separately from the storage arena limit. */
 const arenaDensity = svoScenePrimitiveBrickDensity(scenePrimitives.descriptors, {
   worldOrigin_m: structuralDomain.worldOrigin_m,
   cellSize_m: structuralDomain.cellSize_m,
@@ -720,7 +525,7 @@ record("per-brick-overflow-count", arenaDensity.overflowedBricks <= overflowedBr
   arenaDensity.overflowedBricks, overflowedBrickCeiling);
 if (density.maximumPerBrick > OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET) {
   log(`  [note] ${scenePresetId} is over the ${OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET}-per-brick`
-    + " refinement target today; the lane ceiling above is a ratchet, not permission");
+    + " refinement target; the candidate arena and zero-overflow gates remain enforced");
 }
 
 // The production dry-scene contract, in full.

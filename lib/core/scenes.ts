@@ -9,7 +9,7 @@ import {
   createNbflipDam, createNbflipLetters, createNbflipPour, createNbflipSimpleDam, createNbflipTeaser, createNbflipWaves,
   nbflipDamCamera, nbflipLettersCamera, nbflipPourCamera, nbflipSimpleDamCamera, nbflipTeaserCamera, nbflipWavesCamera,
 } from "./nbflip-paper-scenes";
-import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12MethodProfile, cm12Scene, createCm12Figure7_256 } from "./cm12-paper-scenes";
+import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12Scene, createCm12Figure7_256 } from "./cm12-paper-scenes";
 import { createThinDropletLadderScene, createThinSheetLadderScene, createThinWallFilmScene } from "./thin-liquid-scenes";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
 import {
@@ -31,7 +31,6 @@ import { createUniformTroughScene, UNIFORM_TROUGH_CAMERA } from "./uniform-troug
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
 import type { EnvironmentId } from "./environments";
-import type { MethodProfile } from "./method-contract";
 import { sceneDamBreakFractions } from "./initial-fluid";
 import { solidVoxelEditsForScene, solidVoxelShellForScene } from "./scene-lattice";
 import { sceneWithEnvironment } from "./scenery-presets";
@@ -79,69 +78,6 @@ export interface ScenePreset {
   /** Whether the authored dry world is presented behind the raster water. */
   presentationMode: ScenePresentationMode;
 }
-
-export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
-  // Historical profile name retained for callers: this is a Losasso profile.
-  // Product scenes start on Losasso; the smoke catalog opts into the frozen
-  // Power Liquids method explicitly, by naming it.
-  methodId: "losasso",
-  quality: "balanced",
-  overrides: Object.freeze({
-    maximumLeafSize: "16",
-    interfaceRefinementBandCells: 3,
-    globalFineLevelSetFactor: "1",
-  }),
-});
-
-/**
- * Canonical Sparse CM12 front-propagation lane: adaptive policy, paper step.
- *
- * Every scene that runs a CM12 lane runs it at the paper's 1/30 s, this one
- * included. Sec. 3.5 sharpening only balances transport diffusion at that
- * per-step dose, so a scene-step profile was asking the gate to certify a
- * front the shipped method never propagates. The scene defaults to
- * 1/30 s for every method that opens it; the A/B tool in
- * tools/run-sparse-cm12-long-dam-ab-dawn.ts still opts into the scene step
- * explicitly, which is what a matched-dt comparison lane is for.
- */
-export const SPARSE_CM12_LONG_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
-  methodId: "adaptive-volume",
-  quality: "balanced",
-  overrides: Object.freeze({
-    // These thresholds remain the long-dam activity tuning when that optional
-    // criterion is selected; the product default is coarse-first.
-    finestTravelCells: 4,
-    fourTravelCells: 2,
-    twoTravelCells: 1,
-    timeStep: "paper",
-  }),
-});
-
-/** The production UI tuple exercised by every Sparse CM12 complexity rung. */
-export const SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE: MethodProfile = Object.freeze({
-  methodId: "adaptive-volume",
-  quality: "balanced",
-  overrides: Object.freeze({
-    brickFineResolution: "4",
-    maximumMacroSpanBricks: "auto",
-    selectorMode: "surface",
-    surfaceFineRings: 1,
-    timeStep: "paper",
-  }),
-});
-
-/** Conservative profile for the small bounded transfer demonstration. */
-export const BOUNDED_POOL_TRANSFER_METHOD_PROFILE: MethodProfile = Object.freeze({
-  methodId: "adaptive-volume",
-  quality: "balanced",
-  overrides: Object.freeze({
-    brickFineResolution: "4",
-    maximumMacroSpanBricks: "auto",
-    selectorMode: "surface",
-    surfaceFineRings: 1,
-    timeStep: "paper",
-  }),
-});
 
 /**
  * A deliberately small uniform-solid transfer demonstration.
@@ -214,316 +150,20 @@ export function createBoundedPoolTransferScene(): SceneDescription {
   return createExternalVoxelPoolTransferScene("bounded-pool-transfer");
 }
 
-/** Canonical factor-one adaptive LoSasso profile for interactive water.
- * This exact tuple is exercised by Dawn raster lanes before it is offered by
- * the dam-break or symmetry presets. */
-export const ADAPTIVE_LOSASSO_UI_METHOD_PROFILE: MethodProfile = Object.freeze({
-  methodId: "losasso",
-  quality: "balanced",
-  overrides: Object.freeze({
-    losassoVelocityExtension: "causal-front",
-    // The visible D4 gate is 32x16x32, so 16 is its largest common dyadic leaf.
-    maximumLeafSize: "16",
-    interfaceRefinementBandCells: 4,
-    globalFineLevelSetFactor: "1",
-  }),
-});
-
-/** Reproducible Aanjaneya et al. 2017 comparison tuple.
- *
- * Section 5 keeps a separate uniformly high-resolution sparse level set,
- * typically 4× or 8× the background octree. Factor four is the canonical
- * benchmark here; band reach four is the existing symmetric-expansion oracle.
- */
-export const POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE: MethodProfile = Object.freeze({
-  methodId: "power-liquids",
-  quality: "balanced",
-  overrides: Object.freeze({
-    maximumLeafSize: "32",
-    interfaceRefinementBandCells: 4,
-    // Every-advance topology is a construction constant of that method, not an
-    // authored value, so this profile no longer states it.
-    globalFineLevelSetFactor: "4",
-  }),
-});
-
-/** Historical oracle name retained for focused symmetry callers. */
-export const SYMMETRIC_EXPANSION_METHOD_PROFILE = ADAPTIVE_LOSASSO_UI_METHOD_PROFILE;
-
-/** Canonical Sparse CM12 product path for the same D4 expansion oracle.
- *
- * Keep the octree/LoSasso card above as its independent comparison lane. The
- * Sparse CM12 card names B4/P4 and the interactive production pressure
- * budget. The stricter 108-iteration accuracy oracle remains a separate Dawn
- * lane; making that offline budget the UI default needlessly drops the scene
- * below real time.
- */
-export const SPARSE_CM12_SYMMETRIC_EXPANSION_METHOD_PROFILE:
-MethodProfile = Object.freeze({
-  methodId: "adaptive-volume",
-  quality: "balanced",
-  overrides: Object.freeze({
-    brickFineResolution: "4",
-    presentationPageResolution: "4",
-    selectorMode: "surface",
-    timeStep: "paper",
-    pressureIterations: 64,
-  }),
-});
-
-/**
- * Shared coarse-only dam experiment. The surface field and pressure octree use
- * the same lattice; size-32 leaves preserve a materially coarse far field while
- * three grading layers expose the intermediate dyadic shells.
- */
-export const COARSE_ONLY_POWER_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
-  methodId: "losasso",
-  quality: "balanced",
-  overrides: Object.freeze({
-    maximumLeafSize: "32",
-    interfaceRefinementBandCells: 3,
-    surfaceRefinementGradingLayers: 3,
-    globalFineLevelSetFactor: "1",
-  }),
-});
-
-/** Fixed WebGPU pool for the room-sized scene's physically unchanged water.
- * The initial paper-style publication occupies 3,114 pages, but Section 5
- * rebuilds around the deformed surface: a floor-spanning sheet needs the
- * 64 x 64 brick footprint times band-1's seven recurring layers, or 28,672
- * pages. One additional footprint rounds that physical bound to 32,768 while
- * exact active residency remains the rebuilt band rather than the whole pool. */
-export const LARGE_POWER_DAM_FINE_BRICK_CAPACITY = 32_768;
-
-/** The room-sized comparison keeps empty regions aggressively coarse. */
-export const LARGE_POWER_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
-  ...POWER_VALIDATION_METHOD_PROFILE,
-  overrides: Object.freeze({
-    ...POWER_VALIDATION_METHOD_PROFILE.overrides,
-    // 64x20x64: four is the largest dyadic leaf dividing every axis.
-    maximumLeafSize: "4",
-    interfaceRefinementBandCells: 1,
-    // The authored 1,472-cell reservoir publishes 1,185 rows at t=0. An
-    // 8,192-row footprint pool leaves >6.9x growth headroom while the existing
-    // overflow receipt rejects an over-budget generation.
-    pressureRowCapacity: 8_192,
-    globalFineLevelSetMaximumBricks: LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
-  }),
-});
-
-/** Footprint-budgeted allocation for the quarter-volume large still-water
- * lane. Cold publication uses 1,028 pressure rows and recurring fine residency
- * is 6,405 bricks. Its fine-band reach needs 5,456 non-liquid support records;
- * 4,096 rows author 6,144 while the existing GPU overflow sentinels reject any
- * generation that exceeds either reserve. */
-export const LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY = 4_096;
-export const LARGE_POWER_HYDROSTATIC_METHOD_PROFILE: MethodProfile = Object.freeze({
-  ...POWER_VALIDATION_METHOD_PROFILE,
-  overrides: Object.freeze({
-    ...POWER_VALIDATION_METHOD_PROFILE.overrides,
-    // This scene shares the 64x20x64 container with the large dam.
-    maximumLeafSize: "4",
-    interfaceRefinementBandCells: 1,
-    pressureRowCapacity: LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
-  }),
-});
-
-/**
- * Row reserve for the deep still-water lane (`deep-power-hydrostatic`).
- *
- * A CPU model of the shipped refinement rule — unit owners inside the three-
- * cell closed-wall strips (`OCTREE_POWER_BOUNDARY_STRIP_MIN_CELLS`) and across
- * the free surface, `interfaceRefinementBandCells + surfaceRefinementGrading-
- * Layers * (size - 2)` of outward distance protection, then 2:1 balance —
- * publishes 57,776 rows on this 64x48x64 tank: 50,944 unit, 6,048 size-2, 752
- * size-4 and 32 size-8 leaves. That is 0.353 rows per liquid cell, against
- * `large-power-hydrostatic`'s 1.004. The same model reproduces the ocean
- * lane's measured 363,336-row frontier bank to within 5%, and it deliberately
- * over-refines (it ignores that a leaf outside the published fine narrow band
- * has no summary to refine against at all), so 57,776 is an upper bound.
- *
- * `planOctreePressureCapacity`'s own scene-shaped request here is 59,392
- * (15,360 surface + 43,764 closed-wall strip + 48 coarse rows, 256-aligned) —
- * only 2.8% above that bound, which is not enough for a settling transient.
- * 65,536 is the smallest 256-aligned power of two clearing both by >= 1.10x.
- * It is not an air-support allowance: above `domain / 5` rows
- * `octreeAirSupportFootprintCapacity` returns the dense domain-sized support
- * reserve (196,608) at any capacity in this range, which already covers the
- * 64 x 4 x 64 = 16,384-cell air reach above the free surface. The GPU overflow
- * receipt still rejects any generation that exceeds the reserve.
- */
-export const DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY = 65_536;
-
-/**
- * Physical single-interface fine-band reserve for the same lane.
- *
- * The deep tank's fluid footprint *is* the tank, so the footprint-shaped
- * default (`planFluidFootprintFineNarrowBandBrickCapacity`, which reserves all
- * three exposed faces of the authored liquid box) asks for 152,064 of the
- * 196,608 logical fine bricks — 77% of a dense lattice, for a scene whose
- * interface is one horizontal plane. The physical bound is that plane:
- * 64 x 64 = 4,096 fine bricks of interface area times the eleven-layer
- * capacity band that `planFineLevelSetCapacityDilationBrickRings(4, 1, 4)`
- * (five rings) implies is 45,056 resident bricks, and the planner's own 1.5x
- * deformation safety rounds that to 67,584 — exactly
- * `planGlobalFineNarrowBandBrickCapacity([64, 48, 64], 5).maximumResidentBricks`,
- * which the scene test pins. Authoring it removes 2.25x of reserve rather than
- * adding any.
- */
-export const DEEP_POWER_HYDROSTATIC_FINE_BRICK_CAPACITY = 67_584;
-
-/** The deep still-water lane keeps the 20x still lane's interface and fine
- * surface settings. Its 64x48x64 domain can use a larger compatible leaf than
- * the shallow 64x20x64 tank. */
-export const DEEP_POWER_HYDROSTATIC_METHOD_PROFILE: MethodProfile = Object.freeze({
-  ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
-  overrides: Object.freeze({
-    ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE.overrides,
-    maximumLeafSize: "16",
-    pressureRowCapacity: DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
-    globalFineLevelSetMaximumBricks: DEEP_POWER_HYDROSTATIC_FINE_BRICK_CAPACITY,
-  }),
-});
-
-// ---- the droplet-in-a-vast-domain family ------------------------------------
-//
-// `wall(scene) ~= intercept(fluid footprint, solver constants) + slope * domain`.
-// Every other authored lane moves both terms at once, so neither can be read.
-// This family pins the fluid term to ~zero — one hundred liquid cells, always
-// the same hundred — and sweeps only the container. The measured ms/advance vs
-// nx*ny*nz curve therefore *is* the domain tax: its slope is what the program
-// attacks, and its intercept belongs to the solve-constant work that the
-// persistent-MGPCG program already owns. See
-// `docs/POWER_LIQUIDS_DROPLET_VAST_DOMAIN_PLAN.md`.
-
 /** Finest cell shared with the whole hydrostatic/dam family, so a wall measured
  * here is comparable to theirs: only the lattice *extent* differs. */
 export const POWER_DROPLET_CELL_SIZE_M = 0.05;
 
-/**
- * The reservoir, and the reason it is a corner reservoir.
- *
- * 0.25 x 0.2 x 0.25 m is 5 x 4 x 5 = 100 finest cells at 0.05 m, and it is
- * authored with **no** `initialDamBreakOrigin_m`. That is not a stylistic
- * choice: `analyticSparseBootstrap` (`lib/webgpu-octree.ts`) requires no brick
- * seeds, no bodies, no terrain and a reservoir anchored at the container
- * corner. Any offset origin, or an equivalent `initialBrickSeeds_m` droplet,
- * flips the whole bootstrap dense — `Float32Array(nx*ny*nz)`, a full-domain
- * signed-distance transform, a 67-134 MB phi texture and a persistent
- * `cellCount * 4 B` surface-state allocation — which is precisely the
- * domain-shaped cost this family exists to measure, moved into the setup where
- * it cannot be separated. A free-floating droplet is a later, deliberate
- * variant with those costs budgeted; it is not the v1 scene.
- */
+
 export const POWER_DROPLET_RESERVOIR_M = Object.freeze({ x: 0.25, y: 0.2, z: 0.25 });
 
 /** 5 x 4 x 5 cells of the authored reservoir. The invariant of the family. */
 export const POWER_DROPLET_LIQUID_CELLS = 100;
 
-/** Container edges of the swept family, in finest cells.
- *
- * 64 is the control (3.2 m — the large-dam footprint, so its intercept is
- * directly comparable to that lane's). 240 is the vast end at 12 m: 13,824,000
- * cells, whose recurring fine-band ladder issues 54,000 workgroups and clears
- * the 65,535 device dispatch limit. 256 is 16,777,216 cells = 65,536
- * workgroups, one over that limit, and did not run at all until the recurring
- * ladder was routed through `planFineLevelSetDispatch2D`; it is kept in the
- * family as the regression test for the scene that could not exist. */
+/** Container edges of the geometric domain sweep, in finest cells. */
 export const POWER_DROPLET_EDGE_CELLS = Object.freeze([64, 128, 240, 256] as const);
 export type PowerDropletEdgeCells = typeof POWER_DROPLET_EDGE_CELLS[number];
 
-/**
- * Row reserve for every droplet lane — deliberately independent of N.
- *
- * The planner's footprint-shaped default collapses to 256 rows at 100 liquid
- * cells (`planOctreePressureCapacity`: `maximumLiquidCells * 2`, 256-aligned).
- * That is too tight the moment the three-cell closed-wall strip and 2:1
- * balance publish around a reservoir sitting in the container corner, and an
- * under-authored value does not merely reserve less — it dies at the
- * `cold-topology` / `pressureCapacityOverflow` gates, the way
- * `large-power-dam-break` dies at its planner default.
- *
- * The derivation, in rows:
- *
- *   liquid rows        5 * 4 * 5 unit owners                     =   100
- *   wall strip         the reservoir touches three closed walls;
- *                      the 3-cell strip around a 5x4x5 corner
- *                      block is bounded by 11 * 10 * 11 - 100    = 1,110
- *   surface band       band 1 plus the Section 5 transport reach
- *                      of 4 cells, i.e. a further four layers
- *                      outward: 19 * 18 * 19 - 11 * 10 * 11      = 5,288 cells,
- *                      of which only wet leaves publish rows
- *   2:1 balance        dry, coarsening outward: no rows
- *
- * Every term is a *local* shell around a fixed 100-cell body, so none of them
- * moves with N — which is the whole point of the instrument. 4,096 covers the
- * liquid plus wall terms with the surface band entirely dry, with 3.7x
- * headroom, and the t=0 `pressureRequiredRows` readback verifies it. The GPU
- * overflow receipt still rejects any generation that exceeds the reserve.
- */
-export const POWER_DROPLET_PRESSURE_ROW_CAPACITY = 4_096;
-
-/**
- * Fine narrow-band brick reserve, likewise independent of N.
- *
- * At `globalFineLevelSetFactor: "4"` and a 4-cubed brick resolution the fine
- * lattice has exactly one brick per finest cell, so the *logical* lattice is
- * nx*ny*nz — 13.8M bricks at 240 — while the resident set is the band around
- * 100 cells. The footprint-shaped default asks for ~1,073 resident bricks for
- * this reservoir; 4,096 authors 3.8x of that for the slump transient and is
- * still four orders of magnitude below the logical lattice. There is no
- * environment path for this knob (`lib/methods/octree.ts` reads it only from
- * authored method values), so a lane that wants it must carry it in the smoke
- * catalog overrides.
- */
-export const POWER_DROPLET_FINE_BRICK_CAPACITY = 4_096;
-
-/** Every surface discretization knob of the 20x still lane — interface band 1,
- * fine factor 4 — so the droplet sweep's intercept is comparable to the
- * hydrostatic family's wall. Only the two footprint reserves are re-authored,
- * and both are constants of the family rather than functions of N. */
-export const POWER_DROPLET_METHOD_PROFILE: MethodProfile = Object.freeze({
-  ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
-  overrides: Object.freeze({
-    ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE.overrides,
-    // All swept cube edges (64, 128, 240, 256) are divisible by 16.
-    maximumLeafSize: "16",
-    pressureRowCapacity: POWER_DROPLET_PRESSURE_ROW_CAPACITY,
-    globalFineLevelSetMaximumBricks: POWER_DROPLET_FINE_BRICK_CAPACITY,
-  }),
-});
-
-// ---- the live-occupancy fill family: the droplet sweep's dual ---------------
-//
-// The droplet family pins the fluid and sweeps the container, so it measures
-// `slope * domain`. It has run out of resolving power on the other term:
-// *every* pass driven by live work is flat across that sweep by construction,
-// so "flat in N" cannot tell correctly live-shaped work apart from
-// capacity-shaped work or from fixed overhead. At 256 cubed the two largest
-// GPU labels — resident grading closure and structured advection — are both
-// flat, and one of them (advection, `publishUnionDispatch` in
-// `lib/webgpu-octree-structured-dynamics.ts`) is provably live-count-driven.
-// Flatness in N is therefore not evidence of anything.
-//
-// This family is the dual instrument. The container is FIXED at 256 cubed and
-// only the reservoir moves, so a per-pass cost read across its members answers
-// the question the droplet sweep cannot:
-//
-//   flat in live occupancy        -> fixed overhead; deletable, and the only
-//                                    place a 5x frame win can come from
-//   linear in live occupancy      -> honest work; attack per-item cost
-//   superlinear in live occupancy -> algorithmic defect
-//
-// Read together the two families span the plane: droplet holds fluid and moves
-// domain, fill holds domain and moves fluid.
-
-/** Container edge for every member of the fill family, in finest cells.
- *
- * Fixed on purpose, and fixed at the *largest* droplet member so the two
- * instruments share a container: `power-fill-256-100` and `power-droplet-256`
- * are the same 256-cubed box holding the same hundred cells, differing only in
- * their authored reserves. That coincidence is the capacity control — see
- * `POWER_FILL_PRESSURE_ROW_CAPACITY`. */
 export const POWER_FILL_EDGE_CELLS = 256;
 
 /**
@@ -557,74 +197,6 @@ export const POWER_FILL_RESERVOIR_CELLS = Object.freeze([
 export const POWER_FILL_LIQUID_CELLS = Object.freeze([100, 800, 6_400] as const);
 export type PowerFillLiquidCells = typeof POWER_FILL_LIQUID_CELLS[number];
 
-/**
- * Row reserve for every fill lane — deliberately independent of the reservoir.
- *
- * A capacity that grew with the member would be a hidden confound: a pass that
- * is capacity-shaped would then read as live-shaped and the instrument would
- * report the opposite of the truth. So one value covers all three, authored for
- * the 6,400-cell member and carried unchanged by the 100-cell one.
- *
- * The derivation, in rows, for the largest member (the same shape as
- * `POWER_DROPLET_PRESSURE_ROW_CAPACITY`, evaluated on a 20x16x20 corner block):
- *
- *   liquid rows        20 * 16 * 20 unit owners                  =  6,400
- *   wall strip         three closed walls; the 3-cell strip
- *                      around the block is 26 * 22 * 26 - 6,400  =  8,472
- *   surface band       band 1 plus the Section 5 transport reach,
- *                      dry at t=0 and wetting as the block slumps
- *   2:1 balance        dry, coarsening outward: no rows
- *
- * 14,872 liquid-plus-wall rows against `planOctreePressureCapacity`'s own
- * footprint-shaped ask of 12,800. 65,536 is 4.4x the derivation and 5.1x the
- * planner, matching the droplet family's 3.4x headroom over its own
- * liquid-plus-wall term with extra room for a reservoir eight times deeper that
- * genuinely spreads. It is also a magnitude the codebase already runs:
- * `deep-power-hydrostatic` authors exactly 65,536 rows.
- *
- * Raising a reserve is not inert here ([[capacity-is-not-inert]]) — a lane has
- * failed at t=0 under a LARGER row capacity — which is precisely why this
- * number is also an experiment. `power-fill-256-100` is the same hundred cells
- * in the same 256-cubed container as `power-droplet-256`, differing ONLY in
- * carrying 65,536/65,536 where that lane carries 4,096/4,096. Diffing the two
- * per-label captures is a direct measurement of capacity-shaped GPU cost at
- * identical live occupancy, with no attribution guesswork at all.
- */
-export const POWER_FILL_PRESSURE_ROW_CAPACITY = 65_536;
-
-/**
- * Fine narrow-band brick reserve, likewise constant across the family.
- *
- * `planFluidFootprintFineNarrowBandBrickCapacity` asks 1,073 / 4,290 / 17,160
- * bricks for the three reservoirs. 65,536 is 3.8x the largest ask — the same
- * ratio the droplet family authors over its own (4,096 against 1,073) — and is
- * still 256x below the 16,777,216-brick logical lattice a 256-cubed container
- * carries at fine factor 4. Constant across members for the same reason as the
- * row reserve, and 16x the droplet family's value so the capacity control above
- * moves both reserves by the same factor.
- *
- * There is no environment path for this knob (`lib/methods/octree.ts` reads it
- * only from authored method values), so it must be carried by the authored
- * profile and by the smoke-catalog overrides; the benchmark reaches it through
- * the latter.
- */
-export const POWER_FILL_FINE_BRICK_CAPACITY = 65_536;
-
-/** Every surface discretization knob of the droplet family — interface band 1,
- * fine factor 4, 0.05 m cells, 0.004 s steps — so a per-label capture on a fill
- * lane is directly comparable to a droplet one. Only the two reserves differ,
- * and both are constants of the family rather than functions of the member. */
-export const POWER_FILL_METHOD_PROFILE: MethodProfile = Object.freeze({
-  ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
-  overrides: Object.freeze({
-    ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE.overrides,
-    // The fill family is a fixed 256-cubed domain.
-    maximumLeafSize: "32",
-    pressureRowCapacity: POWER_FILL_PRESSURE_ROW_CAPACITY,
-    globalFineLevelSetMaximumBricks: POWER_FILL_FINE_BRICK_CAPACITY,
-  }),
-});
-
 /** The reservoir a member is built from, in finest cells. Keyed by the liquid
  * count because that count is the family's independent variable and the thing
  * its scene ids are named for. */
@@ -635,22 +207,7 @@ export function powerFillReservoirCells(liquidCells: PowerFillLiquidCells) {
   return reservoir;
 }
 
-/**
- * `liquidCells` cells of water in a fixed 256-cubed container.
- *
- * One factory for the same reason the droplet family has one: the only authored
- * difference between members must be the reservoir, or the measured slope is a
- * scene difference rather than a live-occupancy law.
- *
- * The corner dam-break with **no** `initialDamBreakOrigin_m` is mandatory and
- * not stylistic. `analyticSparseBootstrap` (`lib/webgpu-octree.ts`) requires no
- * brick seeds, no bodies, no terrain and a reservoir anchored at the container
- * corner; any offset origin flips the bootstrap dense — `Float32Array(nx*ny*nz)`
- * over 16.7M cells, a full-domain signed-distance transform and a ~134 MB phi
- * texture — which at 256 cubed would swamp the very measurement this family
- * exists to take. See `POWER_DROPLET_RESERVOIR_M` for the same argument at the
- * other end of the plane.
- */
+
 export function createPowerFillScene(liquidCells: PowerFillLiquidCells): SceneDescription {
   const scene = sceneBody();
   scene.sceneId = `power-fill-${POWER_FILL_EDGE_CELLS}-${liquidCells}`;
@@ -658,8 +215,6 @@ export function createPowerFillScene(liquidCells: PowerFillLiquidCells): SceneDe
   scene.rigidBodies = [];
   const extent_m = POWER_FILL_EDGE_CELLS * POWER_DROPLET_CELL_SIZE_M;
   const cells = powerFillReservoirCells(liquidCells);
-  // Built from the authored integer lattice times one spacing, never decimal
-  // literals: the power catalog requires isotropic finest cells to 1e-5.
   const reservoir = {
     x: cells.x * POWER_DROPLET_CELL_SIZE_M,
     y: cells.y * POWER_DROPLET_CELL_SIZE_M,
@@ -688,67 +243,6 @@ export function createPowerFillScene(liquidCells: PowerFillLiquidCells): SceneDe
   scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
-
-/** The Bet-4 work verdict is about avoided machinery, not surface accuracy: a
- * factor-1 surface keeps the frame's cost in the pressure path the census
- * measures, and band 1 keeps the refined shell off the deep interior. */
-export const POWER_HYBRID_DEEP_OCEAN_METHOD_PROFILE: MethodProfile = Object.freeze({
-  methodId: "losasso",
-  quality: "balanced",
-  overrides: Object.freeze({
-    // 64x64x48: sixteen is the largest common dyadic leaf.
-    maximumLeafSize: "16",
-    interfaceRefinementBandCells: 1,
-    globalFineLevelSetFactor: "1",
-  }),
-});
-
-/** Product profile for the 320x96x80 rolling-wave scene. The old leaf-32 UI
- * suggestion could not divide the 80-cell depth; leaf 16 is the largest
- * Losasso hierarchy root common to all axes. */
-export const OCEAN_SEICHE_METHOD_PROFILE: MethodProfile = Object.freeze({
-  methodId: "losasso",
-  quality: "balanced",
-  overrides: Object.freeze({
-    maximumLeafSize: "16",
-  }),
-});
-
-/** The ceiling-drop UI oracle uses the narrow interface reach and the common
- * leaf-8 Losasso hierarchy shared by all four free-fall scenes. */
-export const CEILING_DROP_METHOD_PROFILE: MethodProfile = Object.freeze({
-  ...POWER_VALIDATION_METHOD_PROFILE,
-  overrides: Object.freeze({
-    ...POWER_VALIDATION_METHOD_PROFILE.overrides,
-    // Both 24x16x24 and 24-cubed free-fall variants admit leaf 8.
-    maximumLeafSize: "8",
-    interfaceRefinementBandCells: 1,
-  }),
-});
-
-/** Minimal 16-cubed Losasso coupling oracle profile. */
-export const RIGID_COUPLING_ORACLE_METHOD_PROFILE: MethodProfile = Object.freeze({
-  ...POWER_VALIDATION_METHOD_PROFILE,
-  overrides: Object.freeze({
-    ...POWER_VALIDATION_METHOD_PROFILE.overrides,
-    maximumLeafSize: "8",
-    interfaceRefinementBandCells: 4,
-    globalFineLevelSetFactor: "1",
-  }),
-});
-
-/** The larger offset tank needs one additional interface-support cell to keep
- * its adaptive Section 5 band inside complete catalog support. This mirrors the
- * isolated Dawn oracle instead of inheriting the tiny 16-cubed profile. */
-export const LARGE_HYDROSTATIC_POWER_METHOD_PROFILE: MethodProfile = Object.freeze({
-  ...POWER_VALIDATION_METHOD_PROFILE,
-  overrides: Object.freeze({
-    ...POWER_VALIDATION_METHOD_PROFILE.overrides,
-    // 32x24x16: eight is the largest common dyadic leaf.
-    maximumLeafSize: "8",
-    interfaceRefinementBandCells: 4,
-  }),
-});
 
 /** World-space centre of the single seeded 8-cubed fluid brick (the -x/-z quadrant). */
 export const BRICK_QUAD_DAM_SEED_M = { x: -0.2, y: 0.2, z: -0.2 };
@@ -870,14 +364,7 @@ export function createLargeHydrostaticScene(): SceneDescription {
   return scene;
 }
 
-/**
- * A minimal three-dimensional analytic dam break on the 16-cubed paper path.
- * A 23/64-domain reservoir has an exact ten-cell footprint: the smallest
- * clean rational fill that leaves a two-cell liquid interior after the
- * four-cell interface refinement band.
- * Keeping the authored dam initializer (rather than imported brick geometry)
- * preserves authoritative generalized-face projection at t=0.
- */
+
 export function createMinimalPowerDamBreakScene(): SceneDescription {
   const scene = sceneBody();
   scene.sceneId = "minimal-power-dam-break";
@@ -903,13 +390,7 @@ export function createMinimalPowerDamBreakScene(): SceneDescription {
   return scene;
 }
 
-/**
- * Smallest brick-authored power-octree scene with an exact horizontal D4
- * symmetry frame. A 32-cell dyadic domain and a centred 2x1x2 brick body are
- * the minimum that leave an equal one-brick gap to all four walls; a 24-cell
- * domain centres one brick geometrically but introduces a non-dyadic root
- * decomposition that is itself not an invariant of the octree algorithm.
- */
+
 export function createSymmetricExpansionScene(): SceneDescription {
   const scene = sceneBody();
   scene.sceneId = "symmetric-expansion";
@@ -934,9 +415,6 @@ export function createSymmetricExpansionScene(): SceneDescription {
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.initialDamBreakDimensions_m;
   delete scene.fluid.inflow;
-  // This is the Losasso-2004 fidelity oracle.  That method solves inviscid
-  // Euler flow; zero the inherited water viscosity rather than presenting a
-  // damped scene parameter that the reduced backend does not consume.
   scene.fluid.dynamicViscosity_Pa_s = 0;
   scene.fluid.surfaceTension_N_m = 0;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
@@ -944,16 +422,9 @@ export function createSymmetricExpansionScene(): SceneDescription {
   return scene;
 }
 
-/**
- * The minimal dam break at four times the linear resolution. All physical
- * geometry, fluid properties, and time integration settings are inherited
- * unchanged; only the finest octree/surface lattice changes from 16³ to 64³.
- */
+
 export function createMinimalPowerDamBreak64Scene(): SceneDescription {
   const scene = createMinimalPowerDamBreakScene();
-  // The source scene carries a shell expressed in its 16^3 lattice. Strip it
-  // before changing the lattice; otherwise the document compiler cannot
-  // recognise it at 64^3 and preserves it as an internal solid obstacle.
   scene.solidVoxels = solidVoxelEditsForScene(scene);
   scene.sceneId = "minimal-power-dam-break-64";
   scene.voxelDomain = {
@@ -1052,15 +523,7 @@ export function createMinimalPowerDamBreak32Scene(): SceneDescription {
   return scene;
 }
 
-/**
- * Canonical Sparse CM12 traversal scene. A full-width reservoir starts at the
- * negative end of a 192x96x32 tank, leaving twenty brick columns for the front to
- * cross before it reaches the far wall. The doubled vertical air column makes
- * sparse omission visually and numerically explicit; the authored DETAIL x2
- * keeps the initial liquid block physical size unchanged. The narrow transverse section
- * keeps a long residency test affordable while still exercising genuine 3D
- * pressure, transport, and 2:1 face ports.
- */
+
 export function createSparseCM12LongDamBreakScene(): SceneDescription {
   const scene = createMinimalPowerDamBreakScene();
   scene.solidVoxels = solidVoxelEditsForScene(scene);
@@ -1137,18 +600,7 @@ export const TALL_CELLS_FLOOD_DOWNHILL_HEIGHT_M = 0.1;
  * travel axis.
  */
 export const TALL_CELLS_FLOOD_RUNOUT_M = 4;
-/**
- * The hillside is a ski jump, not a ramp.
- *
- * A single straight grade over this drop is either steep everywhere — in which
- * case the sheet arrives at the runout still falling and simply stops — or
- * gentle everywhere, which is the shallow 10-degree hill this scene used to be.
- * Raising `(1 - progress)` to a power instead gives a convex profile that
- * leaves the crest at 46 degrees and reaches the toe *tangent* to the flat
- * runout, so the front accelerates hard, is turned rather than stopped, and
- * spreads. Two is the lowest exponent with both of those properties; higher
- * ones push the whole drop into the first metre and leave a shelf below it.
- */
+
 export const TALL_CELLS_FLOOD_SLOPE_EASE_EXPONENT = 2;
 /**
  * Peak height of the transverse bank, at the domain's z edges and mid-slope.
@@ -1254,16 +706,7 @@ export function createTallCellsFloodTerrain(): TerrainDescription {
   };
 }
 
-/**
- * Paper-inspired hillside dam break for the vast sparse-world path.
- *
- * The reservoir is exactly 3 x 2 x 6 B8 tiles and its origin is aligned to the
- * 50 mm lattice — the shelf height is a whole number of tiles for that reason,
- * not by coincidence. Everything downhill begins dry. Fluid residency therefore
- * starts local even though the logical domain contains 1,835,008 cells, and a
- * travelling front has to create and later retire topology while terrain
- * remains authoritative for solid contact and rendering.
- */
+/** A hillside dam break with a lattice-aligned reservoir and a dry slope. */
 export function createTallCellsHillsideDamBreakScene(): SceneDescription {
   const scene = sceneBody();
   const [nx, ny, nz] = TALL_CELLS_FLOOD_GRID;
@@ -1348,11 +791,6 @@ export function createTallCellsHillsideDamBreakScene(): SceneDescription {
   // tank (including clear patches cut into it). Like theirs it is physics
   // only: presentation leaves the uncut shell out of the render field.
   scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
-  // Preserve the clear-water look used by the small tank scenes. Optical
-  // coefficients are rates per metre; applying their tank-scale defaults to a
-  // 2.4 m reservoir makes an otherwise identical medium strongly cyan. This
-  // ten-times-lower rate gives the large paper figure the same shallow optical
-  // depth without changing the shared material used by existing scenes.
   scene.fluid.optics = {
     absorption_mInv: [0.045, 0.009, 0.006],
     scatter: [0.0012, 0.0055, 0.0049],
@@ -1392,17 +830,7 @@ export function createLargePowerDamBreakScene(): SceneDescription {
   return scene;
 }
 
-/**
- * The still-water partner of the room-sized dam-break scene. The tank and
- * lattice are identical to `large-power-dam-break`, while the initial liquid
- * is a full-footprint hydrostatic slab with exactly the same represented
- * order of volume as the mini/large dam reservoir. The mathematically exact
- * equal-volume slab is thinner than half a finest cell and therefore has no
- * liquid cell centre for the sparse bootstrap to seed. Use the smallest
- * representable slab instead. It is one 0.05 m cell deep with a 32x32-cell
- * footprint: 1,024 of 81,920 cells. This is one quarter of the earlier
- * full-footprint one-cell slab and keeps the benchmark genuinely sparse.
- */
+
 export function createLargePowerHydrostaticScene(): SceneDescription {
   const mini = createMinimalPowerDamBreakScene();
   const scene = createLargePowerDamBreakScene();
@@ -1422,45 +850,7 @@ export function createLargePowerHydrostaticScene(): SceneDescription {
   return scene;
 }
 
-/**
- * The 20x still-water tank made deep: the only lane that can express Bet 4.2.
- *
- * `large-power-hydrostatic` is one finest cell deep, so every one of its liquid
- * cells touches the floor *and* the free surface. It publishes 1.004 rows per
- * liquid cell and zero `regularInterior` rows, which makes the paper's Section
- * 8 interior-coarsening cost model unmeasurable on it — a hybrid discretization
- * that skips the power machinery on regular interior rows has nothing to skip.
- * This scene changes exactly two authored numbers: tank height 1.0 -> 2.4 m and
- * fill 1/80 -> 5/6. Footprint (3.2 x 3.2 m), lattice (0.05 m finest cell, 8-cell
- * bricks), closed lid, free-slip walls, zero surface tension and the 0.004 s
- * step are the 20x family's, unchanged, so the two lanes differ only in depth.
- *
- * Geometry, in finest cells. The domain is 64 x 48 x 64 = 196,608 and 5/6 of 48
- * puts the flat free surface exactly on the y = 40 cell boundary, so the liquid
- * is 64 x 40 x 64 = 163,840 cells (2.0 m of water). Classify those against the
- * two reaches the solver actually uses:
- *
- *   - closed-wall shell: `OCTREE_POWER_BOUNDARY_STRIP_MIN_CELLS` = 3 cells
- *     inside each of the four vertical walls and the floor are split to unit
- *     owners (the lid strip is dry).
- *   - free-surface band: the Section 5 transport band is
- *     `max(2, band) * fineFactor` = 8 fine cells = 2 coarse cells, plus one
- *     extension layer and one interpolation halo — the same reach = 4 the
- *     large-hydro air-support budget is derived from.
- *
- *   interior     = (64 - 2*3) * (40 - 3 - 4) * (64 - 2*3)
- *                = 58 * 33 * 58            = 111,012 cells = 67.8%
- *   surface band = 64 * 4 * 64             =  16,384 cells = 10.0%
- *   wall-only    = 163,840 - 111,012 - 16,384 = 36,444 cells = 22.2%
- *
- * Two thirds is the target, and 40 cells is close to the shallowest depth that
- * reaches it: the shell is 6 cells wide horizontally and 7 cells tall, so the
- * interior fraction is (1 - 6/64)^2 * (1 - 7/H) and drops below 2/3 for any
- * H < 38. There is no cheap deep scene — that is the finding, not a shortcut
- * being missed. Below the shell the octree coarsens: the CPU leaf model behind
- * `DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY` puts 112,896 of the 163,840
- * liquid cells (69%) inside 6,832 coarse leaves, i.e. under 0.36 rows per cell.
- */
+
 export function createDeepPowerHydrostaticScene(): SceneDescription {
   const scene = createLargePowerHydrostaticScene();
   scene.solidVoxels = solidVoxelEditsForScene(scene);
@@ -1480,28 +870,7 @@ export function createDeepPowerHydrostaticScene(): SceneDescription {
   return scene;
 }
 
-/**
- * One hundred cells of water in a container of `edgeCells` cubed.
- *
- * The whole family is one factory because the only authored difference between
- * its members is the container edge — if the reservoir, lattice, lid, wall
- * mode, surface tension or timestep could drift between two entries, the
- * measured slope would be a scene difference rather than a domain tax.
- *
- * Extents are `edgeCells * 0.05 m` computed from the authored integer lattice,
- * not decimal literals: the power catalog requires isotropic finest cells to
- * within 1e-5 (`lib/webgpu-octree.ts`), and a cube built by multiplying one
- * spacing by one integer is isotropic by construction. `fillFraction` is
- * likewise computed from the reservoir rather than written down, because
- * `validateScene` requires it to equal the authored dam-break volume fraction
- * to within 1e-9 and that fraction changes with every N (3.81e-4 at 64 down to
- * 5.96e-6 at 256).
- *
- * The physics is deliberately boring. A corner puddle five cells wide slumps
- * for a few steps, wets the floor and two walls, and settles; there is no
- * front to track, no splash, and no interface worth refining. That is the
- * instrument: whatever the wall does across the sweep is not the fluid.
- */
+
 export function createPowerDropletScene(edgeCells: PowerDropletEdgeCells): SceneDescription {
   const scene = sceneBody();
   scene.sceneId = `power-droplet-${edgeCells}`;
@@ -1523,8 +892,6 @@ export function createPowerDropletScene(edgeCells: PowerDropletEdgeCells): Scene
   scene.voxelDomain = { finestCellSize_m: POWER_DROPLET_CELL_SIZE_M, brickSize_cells: 8 };
   scene.fluid.initialCondition = "dam-break";
   scene.fluid.initialDamBreakDimensions_m = { ...reservoir };
-  // The four deletions that keep `analyticSparseBootstrap` true. See
-  // `POWER_DROPLET_RESERVOIR_M` for what each one would otherwise cost.
   delete scene.fluid.initialDamBreakOrigin_m;
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
@@ -1707,33 +1074,7 @@ const TWIN_DAM_BRICK_TIERS = Object.freeze({
   z: Object.freeze([0, 1] as const),
 });
 
-/**
- * A wide tank holding two reservoirs on diagonally opposite floor corners.
- * The finest solver grid is exactly 56x16x16 cells of 0.05 m (7x2x2 fluid
- * bricks); each dam is a 2x1x1-brick slab (0.8 x 0.4 x 0.4 m) leaving three
- * bricks — 1.2 m — of dry floor between them and one brick of headroom under
- * the closed lid. Released together they run down the long axis, and because
- * they are offset in z the fronts meet mid-tank at an angle rather than
- * head-on, so the collision produces an oblique churn instead of a symmetric
- * standing wall.
- *
- * The reservoirs are authored as explicit brick seeds rather than the analytic
- * `dam-break` initializer, which only ever builds one corner-anchored box.
- * Seeded geometry therefore takes the dense host bootstrap that terrain and
- * rigid-body scenes already use.
- *
- * Both extents are solver limits rather than taste, and both are pinned by
- * tests:
- *  - 14336 cells keeps the octree lane inside the bounded SPGrid V-cycle. At
- *    this domain size `planOctreePressureCapacity` saturates at the cell
- *    count, so the pressure plan is the tank volume itself. The V-cycle's row
- *    ceiling was 16,384 when this tank was authored; it is now
- *    `SPGRID_MAXIMUM_ROW_CAPACITY`, and the test below reads that constant
- *    rather than the number.
- *  - Eight-cell reservoirs stay inside the tall-cell method's default twelve
- *    regular layers. Columns taller than that band are compressed by the
- *    remesh, which loses most of their volume over half a second.
- */
+
 export function createTwinDamCollisionScene(): SceneDescription {
   const scene = sceneBody();
   scene.sceneId = "twin-dam-collision";
@@ -1772,17 +1113,7 @@ export function createTwinDamCollisionScene(): SceneDescription {
   return scene;
 }
 
-/**
- * A wide ocean tank sized so the finest solver grid is exactly 320x96x80
- * cells of 0.025 m (40x12x10 fluid bricks). The pool fills to 72 cells
- * (1.8 m); a 2x1x10-brick slab of extra water (0.4 m wide, 0.2 m tall, full
- * depth extent) rests on the surface along the -x wall. Releasing it launches
- * a long gravity wave (~sqrt(gH) = 4.2 m/s) that crosses the tank in ~1.9 s
- * and reflects. The calm deep interior is exactly what large octree leaves
- * coarsen best: below the graded surface band the water collapses into
- * 16-cubed and 32-cubed pressure cells when the octree method's maximum leaf
- * is raised to 32.
- */
+
 export function createOceanSeicheScene(): SceneDescription {
   const scene = sceneBody();
   scene.sceneId = "ocean-seiche";
@@ -1900,27 +1231,7 @@ function pinStep(scene: SceneDescription, dt_s: number): void {
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = dt_s;
 }
 
-/**
- * The hero garden, vessel and set, as one document.
- *
- * The set is composed here rather than inside `createHeroGardenHoseScene`
- * because the layout depends on the vessel — it seats every prop through
- * `pondVesselHeightAt` and runs its pebble beds along `pondVesselPlanCurve` —
- * and a scene module that imported it back would close a cycle that dies in the
- * temporal dead zone. Vessel, then set, then catalog is the one ordering with no
- * arrow pointing backwards.
- *
- * Exported, and with the factory's own options, because a lane that wants this
- * scene at another lattice has exactly one place to ask. The alternative was the
- * one `tools/run-svo-dry-render-smoke.ts` used to take: build the preset, then
- * overwrite `voxelDomain.finestCellSize_m` on the finished document. That moves
- * the octree and nothing else — the heightfield is already baked at whatever
- * spacing the default asked for and every generator has already expanded at the
- * 25 mm leaf — so the lattice got finer and nothing that feeds it did. A size
- * has to be an *input* to construction, which is what this signature is for.
- * `FLUID_SVO_DRY_SMOKE_RECORD_MULTIPLIER` already set the precedent by calling
- * `createHeroGardenHoseStressScene` rather than editing a built scene.
- */
+
 export function createHeroGardenHoseSceneWithSet(
   options: HeroGardenHoseOptions = {},
 ): SceneDescription {
@@ -1968,42 +1279,38 @@ export type SparseCM12ComplexityScene = Readonly<{
   defaultSteps: number;
 }>;
 
-/**
- * The visible projection of the Dawn complexity ladder. The scene factory
- * below is shared by the browser and the probe; these labels are kept here too
- * so adding a rung cannot leave it hidden from the scene library.
- */
+/** A geometric progression from small still tanks to moving water fronts. */
 export const SPARSE_CM12_COMPLEXITY_SCENES: readonly SparseCM12ComplexityScene[] = Object.freeze([
   { id: "empty-16", ordinal: 0, title: "Empty 16³-cell world",
-    introducedFeature: "construction and advance with no accepted fluid ownership", defaultSteps: 2 },
+    introducedFeature: "an empty tank", defaultSteps: 2 },
   { id: "full-16", ordinal: 1, title: "Smallest fully wet quiescent world",
-    introducedFeature: "one complete macro owner, one accepted cell and no pressure rows", defaultSteps: 2 },
-  { id: "cut-mixed-seam-16", ordinal: 2, title: "Smallest production cut/mixed-seam bundle",
-    introducedFeature: "smallest one-cell cut, cross-owner rows and mixed seams", defaultSteps: 2 },
+    introducedFeature: "a completely filled still tank", defaultSteps: 2 },
+  { id: "cut-mixed-seam-16", ordinal: 2, title: "One-cell water seed",
+    introducedFeature: "a small seed of water", defaultSteps: 2 },
   { id: "double-x-32", ordinal: 3, title: "Doubled x extent",
-    introducedFeature: "double domain/reservoir x extent with the same owner closure", defaultSteps: 2 },
-  { id: "planar-interface-16", ordinal: 4, title: "Planar interface fanout",
-    introducedFeature: "larger free-surface support and row fanout", defaultSteps: 2 },
-  { id: "first-split-bundle", ordinal: 5, title: "First production split bundle",
-    introducedFeature: "first accepted moving rung/split/page transaction", defaultSteps: 8 },
-  { id: "recursive-split", ordinal: 6, title: "Recursive split lineage",
-    introducedFeature: "a child created in one generation later becomes a split parent", defaultSteps: 40 },
-  { id: "frontier-create", ordinal: 7, title: "Demand-led frontier creation",
-    introducedFeature: "front travel commits a new world page", defaultSteps: 160 },
-  { id: "frontier-advance", ordinal: 8, title: "Repeated frontier advance",
-    introducedFeature: "a moving front advances through successive missing-solid pages", defaultSteps: 240 },
-  { id: "row-only-replace", ordinal: 9, title: "Row-only seam replacement",
-    introducedFeature: "row pages change while accepted cell IDs and scalar bits remain exact", defaultSteps: 40 },
-  { id: "retire-reuse", ordinal: 10, title: "Stable-slot retirement and reuse",
-    introducedFeature: "a retired owner/page slot reappears at a newer generation", defaultSteps: 300 },
+    introducedFeature: "a tank doubled along its x axis", defaultSteps: 2 },
+  { id: "planar-interface-16", ordinal: 4, title: "Planar water surface",
+    introducedFeature: "a flat half-filled tank", defaultSteps: 2 },
+  { id: "first-split-bundle", ordinal: 5, title: "Water above a two-level floor",
+    introducedFeature: "falling water above a stepped floor", defaultSteps: 8 },
+  { id: "recursive-split", ordinal: 6, title: "Falling water block",
+    introducedFeature: "a falling block deforming under gravity", defaultSteps: 40 },
+  { id: "frontier-create", ordinal: 7, title: "Dam front",
+    introducedFeature: "water advancing across a dry floor", defaultSteps: 160 },
+  { id: "frontier-advance", ordinal: 8, title: "Longer front travel",
+    introducedFeature: "a longer observation of the advancing water front", defaultSteps: 240 },
+  { id: "row-only-replace", ordinal: 9, title: "Shallow tank motion",
+    introducedFeature: "water motion in a shallow tank", defaultSteps: 40 },
+  { id: "retire-reuse", ordinal: 10, title: "Extended tank motion",
+    introducedFeature: "a longer observation of water motion", defaultSteps: 300 },
   { id: "symmetric-2d", ordinal: 11, title: "Two-dimensional symmetric expansion",
-    introducedFeature: "symmetric front evolution with a depth symmetry boundary", defaultSteps: 20 },
+    introducedFeature: "symmetric expansion in a shallow tank", defaultSteps: 20 },
   { id: "symmetric-3d", ordinal: 12, title: "Three-dimensional D4 symmetric expansion",
     introducedFeature: "the production D4 correctness oracle", defaultSteps: 20 },
-  { id: "brick-quad", ordinal: 13, title: "Brick-quad moving topology",
-    introducedFeature: "four-owner x/z-transpose topology and frontier churn", defaultSteps: 20 },
+  { id: "brick-quad", ordinal: 13, title: "Brick-quad water motion",
+    introducedFeature: "water crossing the four brick quadrants", defaultSteps: 20 },
   { id: "long-dam", ordinal: 14, title: "Long dam traversal",
-    introducedFeature: "large sparse moving front with repeated topology transactions", defaultSteps: 30 },
+    introducedFeature: "a water front traversing a long tank", defaultSteps: 30 },
 ]);
 
 const SPARSE_CM12_LADDER_CELL_M = 0.05;
@@ -2115,13 +1422,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: () => {
       const scene = sceneBody();
       scene.rigidBodies = [];
-      // Give the canonical B8 Sparse CM12 layout one genuinely featureless
-      // wet corner page. The legacy fill-derived reservoir was narrower than
-      // eight finest cells in depth, so every wet page also contained a
-      // liquid-air interface and correctly stayed B8; no wall classifier could
-      // demonstrate physical coarsening without weakening surface fidelity.
-      // This 12x14x10-cell column preserves the familiar corner dam break while
-      // leaving [0,0,0] separated from all three liquid-air faces.
       scene.fluid.initialDamBreakDimensions_m = { x: 0.6, y: 0.7, z: 0.5 };
       scene.container.fillFraction = 0.6 * 0.7 * 0.5
         / (scene.container.width_m * scene.container.height_m * scene.container.depth_m);
@@ -2142,7 +1442,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     environment: "stage",
     presentationMode: "full-scene",
     containerShell: "authored",
-    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: {} },
     build: () => createUniformTroughScene(mode),
     buildAt: lattice => createUniformTroughScene(mode, lattice.cellSize_m),
     camera: UNIFORM_TROUGH_CAMERA,
@@ -2154,7 +1453,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "validation",
     shelf: "Transport lab",
     environment: "stage",
-    methodProfile: SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE,
     build: createGentleMovingBlobScene,
     camera: { distance_m: 2.5, target_m: { x: -0.05, y: 0.6, z: 0 } },
   }),
@@ -2193,7 +1491,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "explore",
     shelf: "Tanks",
     environment: "stage",
-    methodProfile: BOUNDED_POOL_TRANSFER_METHOD_PROFILE,
     build: createBoundedPoolTransferScene,
     camera: {
       azimuth_rad: 0.18,
@@ -2260,7 +1557,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     shelf: "Tall-cell studies",
     environment: "stage",
     presentationMode: "full-scene",
-    methodProfile: SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE,
     build: createTallCellsHillsideDamBreakScene,
     // Aimed at the drop rather than at the domain.
     //
@@ -2321,14 +1617,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     id: "hero-garden-hose-x10",
     name: "Porcelain pond · ten times the set",
     blurb: "The same pond, already filled to its waterline, with ten times as many authored records standing on its banks.",
-    // The global loose pressure target visibly excites this shallow resting
-    // pond. Keep adaptive early exit, with accuracy validated both at rest and
-    // under hose inflow; zero would unnecessarily force every cycle. Keep the
-    // surface h: 4h partial surface owners disturb hydrostatic balance in this
-    // shallow pond, even with the full pressure solve (resting-lane oracle).
-    // The 3.125 mm lattice needs up to eight Full-Cycles under hose inflow;
-    // retain the same residual target and let the GPU stop early on convergence.
-    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: { pressureResidualTolerance: 1e-3, pressureFullCycles: 8, detailShapeTolerance: 0 } },
     // The catalog presents the filled pond; dry render measurements use the
     // same stress factory with its default water-off setting.
     audience: "validation",
@@ -2481,7 +1769,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       audience: "study",
       shelf: "CM12 paper figures",
       environment: "stage",
-      methodProfile: cm12MethodProfile(figure),
       build: () => cm12Scene(figure.id),
       camera: cm12Camera(cm12Scene(figure.id)),
     });
@@ -2561,7 +1848,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "study",
     shelf: "Method comparisons",
     environment: "stage",
-    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: {} },
     build: createCm12Figure7_256,
     camera: cm12Camera(createCm12Figure7_256()),
   }),
@@ -2576,7 +1862,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "validation",
     shelf: "Thin liquid",
     environment: "stage",
-    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: {} },
     build,
     camera: cm12Camera(build()),
   })),
@@ -2642,13 +1927,10 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "geometric-uniform-translation",
     name: "Geometric · uniform high-speed translation",
-    blurb: "Two all-fine bricks. A liquid plug moves at 6 m/s with zero gravity, viscosity or surface tension. It should translate two cells per step without changing shape or speed; the short run ends before wall contact.",
+    blurb: "A liquid plug moves at 6 m/s with zero gravity, viscosity or surface tension. It should translate two cells per step without changing shape or speed; the short run ends before wall contact.",
     audience: "validation", shelf: "Analytic motion", environment: "stage",
     build: () => createGeometricUniformTranslationScene(),
     camera: { distance_m: 1.3, target_m: { x: 0, y: .2, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
-    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      ...SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE.overrides, timeStep: "scene",
-    } },
   }),
   ...(["translation", "free-fall"] as const).map(motion => defineScene({
     id: `coarse-surface-${motion}`,
@@ -2659,48 +1941,35 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "validation", shelf: "Analytic motion", environment: "stage",
     build: () => createAnalyticMotionScene(motion),
     camera: { distance_m: 2.6, target_m: { x: 0, y: .8, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
-    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
-    } },
   })),
   defineScene({
     id: "coarse-surface-free-fall-rerung", name: "Coarse surface · free fall with refinement",
-    blurb: "The falling rectangle swaps its coarse and fine halves at 0.1 s and swaps back at 0.2 s. Expect the same ballistic motion, with no mass or velocity jumps during refinement and coarsening.",
+    blurb: "A falling rectangle crosses the same tank at the finest-cell resolution. Expect ballistic motion before floor contact.",
     audience: "validation", shelf: "Analytic motion", environment: "stage",
     build: createRerungFreeFallScene,
     camera: { distance_m: 2.6, target_m: { x: 0, y: .8, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
-    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
-    } },
   }),
   ...([false, true] as const).map(live => defineScene({
     id: live ? "coarse-surface-standing-wave-live" : "coarse-surface-standing-wave",
     name: live ? "Coarse surface · standing wave, live refinement" : "Coarse surface · standing wave",
     blurb: live
-      ? "A gentle standing wave with coarse-first choosing resolution as it moves. Compare its period and amplitude with the fixed-resolution wave; watch the surface refine and coarsen."
-      : "A 3 cm cosine disturbance sloshes across a narrow 1.6 m tank, with a fixed B2/B4 seam away from the centre. Expect one oscillation in about 1.58 s and unchanged mean depth.",
+      ? "A gentle standing wave with narrow-band refinement following the moving surface. Compare its period and amplitude with the fixed-resolution wave; watch the surface refine and coarsen."
+      : "A 3 cm cosine disturbance sloshes across a narrow 1.6 m tank, with the same authored geometry. Expect one oscillation in about 1.58 s and unchanged mean depth.",
     audience: "validation", shelf: "Analytic motion", environment: "stage",
     build: () => createStandingWaveScene(live),
     camera: { distance_m: 2.6, target_m: { x: 0, y: .5, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
-    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
-      curvatureTolerance: .05,
-    } },
   })),
   ...([1, 2] as const).map((curvatureMultiplier) => defineScene({
     id: curvatureMultiplier === 2 ? "stationary-bowl-2x" : "stationary-bowl",
     name: curvatureMultiplier === 2 ? "Stationary bowl · 2× curvature" : "Stationary bowl",
     blurb: curvatureMultiplier === 2
       ? "The stationary bowl with twice the curvature in both horizontal directions, the same center height and no enforced refinement regions, for inspecting surface reconstruction artifacts."
-      : "A shallow curved water surface held still by zero gravity. Starts with width-4 cells; set the region to min1/max1 to compare fine detail and inspect grid ripples.",
+      : "A shallow curved water surface held still by zero gravity for inspecting surface reconstruction and grid ripples.",
     audience: "study",
     shelf: "Surface reconstruction",
     environment: "stage",
     build: () => createStationaryBowlScene(curvatureMultiplier),
     camera: { distance_m: 4.6, target_m: { x: 0, y: .65, z: 0 }, elevation_rad: .58, azimuth_rad: .72 },
-    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
-    } },
   })),
   defineScene({
     id: "brick-quad-dam-break",
@@ -2724,51 +1993,47 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   }),
   defineScene({
     id: "hydrostatic-power-two-level",
-    name: "Octree · tiny hydrostatic",
-    blurb: "A 16³ settled tank for the first coarse-pressure oracle. Leaf 16 is the largest hierarchy root that divides the authored domain, while interface band 3 keeps the surface support explicit.",
+    name: "Water · tiny hydrostatic",
+    blurb: "A settled 16³ tank for checking hydrostatic pressure.",
     audience: "validation",
     shelf: "Hydrostatic oracles",
     environment: "stage",
-    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
     build: createTinyHydrostaticScene,
     camera: { distance_m: 1.85, target_m: { x: 0, y: 0.35, z: 0 } },
   }),
   defineScene({
     id: "hydrostatic-power-large-offset",
-    name: "Octree · larger hydrostatic",
-    blurb: "A 32x24x16 settled tank with a cell-cut free surface. Leaf 8 is the largest hierarchy root shared by all three axes, while exercising a larger adaptive pressure layout than the tiny oracle.",
+    name: "Water · larger hydrostatic",
+    blurb: "A settled 32×24×16 tank with a free surface that cuts through the finest cells.",
     audience: "validation",
     shelf: "Hydrostatic oracles",
     environment: "stage",
-    methodProfile: LARGE_HYDROSTATIC_POWER_METHOD_PROFILE,
     build: createLargeHydrostaticScene,
     camera: { distance_m: 2.75, target_m: { x: 0, y: 0.5, z: 0 } },
   }),
   defineScene({
     id: "large-power-hydrostatic",
-    name: "Octree · 20× hydrostatic",
+    name: "Water · 20× hydrostatic",
     blurb: "The 20× dam tank with a representable one-cell-deep 32×32 sparse pool (1,024 finest-cell volumes), completing the large-scene/minimal-liquid benchmark cell.",
     audience: "validation",
     shelf: "Hydrostatic oracles",
     environment: "stage",
-    methodProfile: LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
     build: createLargePowerHydrostaticScene,
     camera: { distance_m: 6.4, target_m: { x: 0, y: 0.2, z: 0 } },
   }),
   defineScene({
     id: "deep-power-hydrostatic",
-    name: "Octree · deep hydrostatic",
-    blurb: "The 20× still tank filled 2 m deep (64×48×64, 163,840 liquid cells). 67.8% of its liquid is interior — away from every wall strip and the surface band — so it is the only authored lane on which interior coarsening, and the Section 8 hybrid cost model, can be measured at all.",
+    name: "Water · deep hydrostatic",
+    blurb: "A still 64×48×64 tank filled 2 m deep, with 163,840 liquid cells for inspecting a broad interior and its surface.",
     audience: "validation",
     shelf: "Hydrostatic oracles",
     environment: "stage",
-    methodProfile: DEEP_POWER_HYDROSTATIC_METHOD_PROFILE,
     build: createDeepPowerHydrostaticScene,
     camera: { distance_m: 7.4, target_m: { x: 0, y: 1, z: 0 } },
   }),
   ...POWER_DROPLET_EDGE_CELLS.map((edgeCells) => defineScene({
     id: `power-droplet-${edgeCells}`,
-    name: `Octree · droplet in a ${edgeCells}³ domain`,
+    name: `Water · droplet in a ${edgeCells}³ domain`,
     blurb: `One hundred cells of water — a 5×4×5 corner puddle — in a ${edgeCells}³ container (${(edgeCells * POWER_DROPLET_CELL_SIZE_M).toFixed(1)} m on a side). The fluid is identical across the family, so the only thing that changes between these scenes is how much empty space the solver is asked to carry. Wall against domain volume across the sweep is the domain tax, measured directly.`,
     audience: "validation",
     // Its own shelf rather than the hydrostatic one: these four are a single
@@ -2776,7 +2041,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // for their own sake. The shelf is the unit of meaning here.
     shelf: "Domain-tax sweep",
     environment: "stage",
-    methodProfile: POWER_DROPLET_METHOD_PROFILE,
     build: () => createPowerDropletScene(edgeCells),
     camera: {
       distance_m: edgeCells * POWER_DROPLET_CELL_SIZE_M * 1.6,
@@ -2787,15 +2051,14 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     const cells = powerFillReservoirCells(liquidCells);
     return defineScene({
       id: `power-fill-${POWER_FILL_EDGE_CELLS}-${liquidCells}`,
-      name: `Octree · ${liquidCells.toLocaleString("en-US")}-cell fill of a ${POWER_FILL_EDGE_CELLS}³ domain`,
-      blurb: `${liquidCells.toLocaleString("en-US")} cells of water — a ${cells.x}×${cells.y}×${cells.z} corner reservoir — in a fixed ${POWER_FILL_EDGE_CELLS}³ container (${(POWER_FILL_EDGE_CELLS * POWER_DROPLET_CELL_SIZE_M).toFixed(1)} m on a side) at a capacity shared with every member. The container, the lattice and both reserves are identical across the family, so the only thing that changes is how much live water there is. A GPU pass measured across the sweep is flat (fixed overhead), linear (honest work) or superlinear (a defect), and nothing else.`,
+      name: `Water · ${liquidCells.toLocaleString("en-US")}-cell fill of a ${POWER_FILL_EDGE_CELLS}³ domain`,
+      blurb: `${liquidCells.toLocaleString("en-US")} cells of water — a ${cells.x}×${cells.y}×${cells.z} corner reservoir — in a fixed ${POWER_FILL_EDGE_CELLS}³ container (${(POWER_FILL_EDGE_CELLS * POWER_DROPLET_CELL_SIZE_M).toFixed(1)} m on a side) with identical geometry across the family. Only the amount of water changes.`,
       audience: "validation",
       // Its own shelf, beside the domain-tax sweep: these three are one
       // instrument read across its members, and the pair of shelves is the
       // pair of axes.
       shelf: "Live-occupancy sweep",
       environment: "stage",
-      methodProfile: POWER_FILL_METHOD_PROFILE,
       build: () => createPowerFillScene(liquidCells),
       camera: {
         distance_m: POWER_FILL_EDGE_CELLS * POWER_DROPLET_CELL_SIZE_M * 1.6,
@@ -2805,44 +2068,40 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   }),
   defineScene({
     id: "power-hybrid-deep-ocean",
-    name: "Octree · hybrid deep ocean",
-    blurb: "A 64×64×48 pool filled to 56 wet layers, with no wave seed at all. The regular deep interior dominates the free-surface and wall bands, which is what makes one step of it a verdict on the machinery a hybrid discretization avoids rather than on surface accuracy.",
+    name: "Water · hybrid deep ocean",
+    blurb: "A 64×64×48 pool filled to 56 wet layers, with no wave seed at all. Its broad interior provides a still-water pressure and rendering case.",
     audience: "validation",
     shelf: "Hydrostatic oracles",
     environment: "stage",
-    methodProfile: POWER_HYBRID_DEEP_OCEAN_METHOD_PROFILE,
     build: createPowerHybridDeepOceanScene,
     camera: { distance_m: 7.4, target_m: { x: 0, y: 1.4, z: 0 } },
   }),
   ...SPARSE_CM12_COMPLEXITY_SCENES.map((rung) => defineScene({
     id: `sparse-cm12-ladder-${rung.id}`,
-    name: `Sparse Geometric ${String(rung.ordinal).padStart(2, "0")} · ${rung.title}`,
-    blurb: `${rung.introducedFeature}. Dawn's default observation window is ${rung.defaultSteps} solver ${rung.defaultSteps === 1 ? "step" : "steps"}.`,
+    name: `Water ${String(rung.ordinal).padStart(2, "0")} · ${rung.title}`,
+    blurb: `${rung.introducedFeature}. Suggested observation: ${rung.defaultSteps} solver ${rung.defaultSteps === 1 ? "step" : "steps"}.`,
     audience: "validation",
-    shelf: "Sparse Geometric complexity ladder",
+    shelf: "Geometry ladder",
     environment: "stage",
-    methodProfile: SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE,
     build: () => createSparseCM12ComplexityScene(rung.id),
   })),
   defineScene({
     id: "minimal-power-dam-break",
     name: "Minimal dam break",
-    blurb: "The analytic 12.5%-volume dam initializer collapses inside a 16³ tank, providing the smallest dynamic solver-comparison scene.",
+    blurb: "The analytic 12.5%-volume dam initializer collapses inside a 16³ tank, providing a small dynamic water scene.",
     audience: "validation",
     shelf: "Dam-break ladder",
     environment: "stage",
-    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
     build: createMinimalPowerDamBreakScene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
   }),
   defineScene({
     id: "minimal-power-dam-break-32",
     name: "Minimal dam break 32³",
-    blurb: "The same 0.8 m analytic mini dam at 0.025 m resolution, suitable for comparing the Uniform reference lane with the retained Octree profile.",
+    blurb: "An analytic mini dam at 0.025 m resolution.",
     audience: "validation",
     shelf: "Dam-break ladder",
     environment: "stage",
-    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
     build: createMinimalPowerDamBreak32Scene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
   }),
@@ -2851,140 +2110,109 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     name: "Falling water torus",
     blurb: "A suspended ring of water drops onto a dry floor. Watch the hole deform as the ring flattens and spreads on impact.",
     audience: "explore", shelf: "Tanks", environment: "stage",
-    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "surface", timeStep: "paper", brickFineResolution: "4",
-      surfaceMeshRefinement: "2",
-    } },
     build: createFallingWaterTorusScene,
     camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } },
   }),
   defineScene({
     id: "coarse-first-pool-impact",
-    name: "Coarse-first · ball into still pool",
-    blurb: "A fine liquid ball falls into a broad hydrostatic pool. Coarse-first adaptation refines from local curvature and energy while approaching liquid retains detail already established at the receiver.",
+    name: "Water · ball into still pool",
+    blurb: "A liquid ball falls into a broad still pool. Watch the impact and spreading surface.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
-    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "4",
-    } },
     build: createCoarseFirstPoolImpactScene,
     camera: { distance_m: 11, target_m: { x: 0, y: 1.8, z: 0 } },
   }),
   defineScene({
     id: "coarse-first-pool-impact-half",
-    name: "Coarse-first · ball into still pool (half resolution)",
+    name: "Water · ball into still pool (half resolution)",
     blurb: "The same 6.4 × 4.8 × 6.4 m pool impact at half the linear resolution: 0.1 m finest cells on a 64×48×64 lattice, one eighth of the cells. Identical physical dimensions and falling ball, so only resolution varies across the family.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
-    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "4",
-    } },
     build: createCoarseFirstPoolImpactHalfScene,
     camera: { distance_m: 11, target_m: { x: 0, y: 1.8, z: 0 } },
   }),
   defineScene({
     id: "coarse-first-pool-impact-half-slab",
-    name: "Coarse-first · disk into still pool (half-resolution slab)",
+    name: "Water · disk into still pool (half-resolution slab)",
     blurb: "A 6.4 × 4.8 × 0.8 m extrusion for 2D comparison: 64×48×8 finest cells at 0.1 m, a 1 m radius disk centred at 3.65 m above a 1.6 m pool, and closed free-slip walls. Matches the half-resolution pool's XY cross-section, gravity and timestep; compare the centre slice and volume per 0.8 m depth.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
-    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "4",
-    } },
     build: createCoarseFirstPoolImpactHalfSlabScene,
     camera: { azimuth_rad: 0, elevation_rad: 0, distance_m: 10,
       target_m: { x: 0, y: 2.4, z: 0 } },
   }),
   defineScene({
     id: "coarse-first-pool-impact-quarter",
-    name: "Coarse-first · ball into still pool (quarter resolution)",
+    name: "Water · ball into still pool (quarter resolution)",
     blurb: "The same 6.4 × 4.8 × 6.4 m pool impact at one quarter the linear resolution: 0.2 m finest cells on a 32×24×32 lattice, one sixty-fourth of the cells. Identical physical dimensions and falling ball.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
-    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "4",
-    } },
     build: createCoarseFirstPoolImpactQuarterScene,
     camera: { distance_m: 11, target_m: { x: 0, y: 1.8, z: 0 } },
   }),
   defineScene({
     id: "minimal-power-dam-break-64",
     name: "Minimal dam break 64³",
-    blurb: "The same 0.8 m analytic mini dam at 0.0125 m resolution, suitable for comparing the Uniform reference lane with the retained Octree profile.",
+    blurb: "An analytic mini dam at 0.0125 m resolution.",
     audience: "validation",
     shelf: "Dam-break ladder",
     environment: "stage",
-    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
     build: createMinimalPowerDamBreak64Scene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
   }),
   defineScene({
     id: "sparse-geometric-ritter-dam-break",
-    name: "Sparse Geometric Ritter dam break",
+    name: "Ritter dam break",
     blurb: "A shallow 4 m free-slip flume with a 0.1 m head. Accepted-volume depth and pre-impact sensor arrivals can be compared with Ritter's dry-bed solution; the later wall impact is a separate physical observation.",
     audience: "validation",
     shelf: "Dam-break ladder",
     environment: "stage",
-    methodProfile: SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE,
     build: createSparseGeometricRitterDamBreakScene,
     camera: { distance_m: 5.2, target_m: { x: 0.4, y: 0.1, z: 0 } },
   }),
   defineScene({
     id: "sparse-cm12-long-dam-break",
-    name: "Sparse Geometric · long-tank dam break",
-    blurb: "A 192x96x32 tall, narrow tank with a full-width reservoir at the negative end. Its doubled empty air column showcases sparse omission while the canonical gate follows the front across twenty initially dry brick columns and checks resident 2:1 transitions, conservation, and Uniform comparison checkpoints.",
+    name: "Water · long-tank dam break",
+    blurb: "A tall 192×96×32 tank with a full-width reservoir at one end. Watch the water front travel along its dry floor.",
     audience: "validation",
     shelf: "Dam-break ladder",
     environment: "stage",
-    methodProfile: SPARSE_CM12_LONG_DAM_METHOD_PROFILE,
     build: createSparseCM12LongDamBreakScene,
     camera: { distance_m: 4.35, target_m: { x: 0, y: 0.5, z: 0 } },
   }),
   defineScene({
     id: "large-power-dam-break",
-    name: "Octree · 20× dam break",
-    blurb: "The mini dam break's exact water block in a tank with 20× the volume: 4× longer, 4× wider, and 25% taller, using the compatible leaf-4 hierarchy and a band-1 interface.",
+    name: "Water · 20× dam break",
+    blurb: "The mini dam break's exact water block in a tank with 20× the volume: 4× longer, 4× wider, and 25% taller, at the same finest-cell resolution.",
     audience: "validation",
     shelf: "Dam-break ladder",
     environment: "stage",
-    methodProfile: LARGE_POWER_DAM_METHOD_PROFILE,
     build: createLargePowerDamBreakScene,
     camera: { distance_m: 6.4, target_m: { x: 0, y: 0.45, z: 0 } },
   }),
   defineScene({
     id: "symmetric-expansion",
-    name: "Octree · symmetric expansion",
-    blurb: "One exact central 2×1×2-brick water body collapses across the minimum dyadic 32×16×32 tank using the default factor-1 coarse surface and level-4 coupled reach. Dawn checks D4 symmetry of volume, velocity, pressure, topology, and four-wall contact after every step.",
+    name: "Water · symmetric expansion",
+    blurb: "A central 2×1×2-brick water body collapses in a 32×16×32 tank. Its four matching walls make symmetry easy to inspect.",
     audience: "validation",
     shelf: "Symmetry",
     environment: "stage",
-    // Watch this one first if the stage ever eats a publication. The set's floor
-    // puts its top face on y=0 because that is a cell plane, and this oracle's
-    // centred seeded bricks share that plane; against the room shell this scene
-    // used to be presented in, the floor could win the depth test and turn a
-    // healthy water publication into an apparently empty tank. The house set
-    // builds no room faces at all now and the failure has not been seen since,
-    // but this is the scene it was seen on, and it is the one where a rendering
-    // artifact would be read as a physics result.
-    methodProfile: SYMMETRIC_EXPANSION_METHOD_PROFILE,
     build: createSymmetricExpansionScene,
     camera: { distance_m: 2.5, target_m: { x: 0, y: 0.25, z: 0 } },
   }),
   defineScene({
     id: "sparse-cm12-symmetric-expansion",
-    name: "Sparse Geometric · symmetric expansion",
-    blurb: "The exact 32×16×32 D4 expansion oracle on the production Sparse Geometric B8/P8 resident (copied CM12 algorithm). The card uses the real-time production pressure budget; a separate 108-iteration Dawn lane preserves the stricter accuracy oracle.",
+    name: "Water · central expansion",
+    blurb: "A central water block expands across a 32×16×32 tank with four matching walls.",
     audience: "validation",
     shelf: "Symmetry",
     environment: "stage",
-    methodProfile: SPARSE_CM12_SYMMETRIC_EXPANSION_METHOD_PROFILE,
     build: createSymmetricExpansionScene,
     camera: { distance_m: 2.5, target_m: { x: 0, y: 0.25, z: 0 } },
   }),
   defineScene({
     id: "ceiling-slab-drop",
-    name: "Octree · ceiling drop oracle",
+    name: "Water · ceiling drop oracle",
     blurb: "One 8³ fluid brick seeded flush under the closed lid, touching nothing else. The exact answer is free fall (y = y₀ − gt²/2, impact ≈0.29 s); any hesitation is wall adhesion.",
     audience: "validation",
     shelf: "Free-fall contact",
     environment: "stage",
-    methodProfile: CEILING_DROP_METHOD_PROFILE,
     build: createCeilingSlabDropScene,
     camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } },
   }),
@@ -2993,7 +2221,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     name: "Rigid coupling · hydrostatic sphere",
     blurb: "A fully submerged static sphere measures pressure buoyancy, volume displacement, and publication liveness.",
     audience: "validation", shelf: "Rigid coupling", environment: "stage",
-    methodProfile: RIGID_COUPLING_ORACLE_METHOD_PROFILE,
     build: createRigidHydrostaticScene,
     camera: { distance_m: 1.8, target_m: { x: 0, y: 0.3, z: 0 } },
   }),
@@ -3002,7 +2229,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     name: "Rigid coupling · buoyant sphere",
     blurb: "A half-density sphere released at the waterline checks settling, drag, and plunge-through.",
     audience: "validation", shelf: "Rigid coupling", environment: "stage",
-    methodProfile: RIGID_COUPLING_ORACLE_METHOD_PROFILE,
     build: createRigidFloatScene,
     camera: { distance_m: 1.8, target_m: { x: 0, y: 0.4, z: 0 } },
   }),
@@ -3011,40 +2237,36 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     name: "Rigid coupling · dense sphere drop",
     blurb: "A dense sphere enters from above and checks bounded splash, conserved displacement, and floor arrival.",
     audience: "validation", shelf: "Rigid coupling", environment: "stage",
-    methodProfile: RIGID_COUPLING_ORACLE_METHOD_PROFILE,
     build: createRigidSinkScene,
     camera: { distance_m: 1.8, target_m: { x: 0, y: 0.4, z: 0 } },
   }),
   defineScene({
     id: "corner-brick-drop",
-    name: "Octree · corner drop oracle",
+    name: "Water · corner drop oracle",
     blurb: "One 8³ fluid brick seeded into a top corner: lid, two walls, and their vertical edge seam. Frictionless walls exert only normal force, so the exact answer is still free fall.",
     audience: "validation",
     shelf: "Free-fall contact",
     environment: "stage",
-    methodProfile: CEILING_DROP_METHOD_PROFILE,
     build: createCornerBrickDropScene,
     camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } },
   }),
   defineScene({
     id: "midair-brick-drop",
-    name: "Octree · mid-air drop control",
+    name: "Water · mid-air drop control",
     blurb: "The same 8³ brick hanging in open space, touching no boundary at all. The zero-contact control: whatever it deviates from free fall is the scheme's own transient, not adhesion.",
     audience: "validation",
     shelf: "Free-fall contact",
     environment: "stage",
-    methodProfile: CEILING_DROP_METHOD_PROFILE,
     build: createMidairBrickDropScene,
     camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } },
   }),
   defineScene({
     id: "midair-corner-drop",
-    name: "Octree · mid-air corner oracle",
+    name: "Water · mid-air corner oracle",
     blurb: "The same 8³ brick against two vertical walls and their seam, but clear of the lid. Gravity is tangential to both walls, so free-slip walls cannot slow it: this isolates seam adhesion from ceiling adhesion.",
     audience: "validation",
     shelf: "Free-fall contact",
     environment: "stage",
-    methodProfile: CEILING_DROP_METHOD_PROFILE,
     build: createMidairCornerDropScene,
     camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } },
   }),

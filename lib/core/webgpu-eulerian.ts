@@ -1,8 +1,6 @@
 import type { SimulationFailure } from "./simulation-failure";
 import type { PerformanceTrace } from "./performance-trace";
-import type { TallCellLayout } from "./tall-cell-grid";
 import type { GPUQuality } from "./gpu-quality";
-import type { SparseWorldDevice, SparseWorldFault, SparseWorldStatus } from "../sparse-world";
 import type { SolverDetailDiagnostics } from "./solver-detail";
 export type GPUGridMethod = "octree";
 export type GPUVelocityTransport = "semi-lagrangian" | "maccormack";
@@ -14,7 +12,7 @@ export interface GPUFieldLocation {
 }
 
 export interface GPUEulerianInfo {
-  /** Uniform Geometric: the accepted detail plan (policy, requested/admitted, support, residency). */
+  /** Narrow-band FLIP: the accepted detail plan (policy, requested/admitted, support, residency). */
   uniformDetail?: SolverDetailDiagnostics;
   uniformMixedGeneration?: number;
   uniformMixedFineTiles?: number;
@@ -62,14 +60,13 @@ export interface GPUEulerianInfo {
   gridKind: "octree" | "uniform";
   /** True only after the complete sparse t=0 authority passed its queue fence. */
   initialSparseAuthorityReady?: boolean;
-  /** Renderer-owned gate: a warmed octree is not transport-ready until its first t=0 raster publication is fenced. */
+  /** Whether the renderer has attached the initial water surface. */
   initialRasterSurfaceReady?: boolean;
   /** Presentation may be ready while non-critical simulation pipelines finish in the worker. */
   simulationPipelinesReady?: boolean;
   /** Background compilation failure, if a presentation-only solver could not become runnable. */
   simulationPipelineError?: string;
   simulationFailure?: SimulationFailure;
-  /** Shared CM12 topology-generation preparation and bounded deferral receipt. */
   /** Latest compact activity census, weighted by represented liquid volume. */
   adaptivePhysicalWidthCensus?: readonly { width: number; leaves: number; liquidVolumeFineCells: number }[];
   adaptivePhysicalWidthCensusStep?: number;
@@ -87,238 +84,13 @@ export interface GPUEulerianInfo {
     leaves: number; cells: number; requestedBytes?: number; availableBytes?: number;
     reason?: "volume-capacity"; detail?: string;
   };
-  /** Public sparse device readiness projected across the renderer worker seam. */
-  sparseWorldDeviceStatus?: SparseWorldDevice["status"];
-  sparseWorldDeviceFault?: SparseWorldFault;
-  /** Semantic sparse-world lifecycle; implementation phases never cross this boundary. */
-  sparseWorldStatus?: SparseWorldStatus;
   /** Honest distinction between GPU-only authority, a readback-confirmed crossing, and fail-closed startup. */
   initialRasterSurfaceState?: "pending" | "gpu-authoritative" | "compact-confirmed" | "crossing-confirmed" | "failed-closed";
   initialRasterSurfaceDiagnostic?: string;
   cellSize_m: number;
   pressureIterations: number;
   pressureSolver?: string;
-  /** Construction-time octree coarse-dynamics selection. */
-  coarseDynamicsBackend?: "losasso" | "power2017";
   allocatedBytes: number;
-  /** Fixed GPU ring capacity for one-way escaped spray droplets. */
-  secondaryParticleCapacity?: number;
-  /** Logical sparse-fluid page table capacity and latest GPU-owned lifecycle counts. */
-  fluidBrickCapacity?: number;
-  fluidBrickResidentCount?: number;
-  fluidBrickCoreCount?: number;
-  fluidBrickHaloCount?: number;
-  fluidBrickActivatedCount?: number;
-  fluidBrickRetiredCount?: number;
-  fluidBrickGeneration?: number;
-  /** Sparse CM12 4^3/8^3 topology receipt. These are brick adjacencies, not leaf rows. */
-  adaptiveFineBrickCount?: number;
-  adaptiveCoarseBrickCount?: number;
-  adaptiveFineCoarseFaceConnectedPairCount?: number;
-  /** Sparse CM12 activity-controller receipt for the latest accepted step. */
-  adaptiveActivityMaximumScore?: number;
-  adaptiveActivityMeasuredBrickCount?: number;
-  adaptiveActivitySurfaceBrickCount?: number;
-  adaptiveActivityHotBrickCount?: number;
-  adaptiveActivityQuietBrickCount?: number;
-  adaptiveResolutionTopologyEpoch?: boolean;
-  adaptiveResolutionPromotedBrickCount?: number;
-  adaptiveResolutionDemotedBrickCount?: number;
-  adaptiveResolutionDeferredPromotionCount?: number;
-  /** GPU-only staged topology scheduler receipt. No value here drives host scheduling. */
-  adaptiveTopologyUrgentQueuedBrickCount?: number;
-  adaptiveTopologyOrdinaryQueuedBrickCount?: number;
-  adaptiveTopologyPreparedBrickCount?: number;
-  adaptiveTopologyCommittedBrickCount?: number;
-  adaptiveTopologyDeferredBrickCount?: number;
-  adaptiveTopologyPageAllocator?: {
-    freePages: number;
-    capacity: number;
-    allocationCancellations: number;
-  };
-  adaptiveTopologyShadowGeneration?: number;
-  adaptiveTopologyShadowFineBrickCount?: number;
-  adaptiveTopologyShadowCoarseBrickCount?: number;
-  /** Physically accepted Sparse CM12 worklists consumed by indirect dispatch. */
-  adaptiveAcceptedCellCount?: number;
-  adaptiveAcceptedRowCount?: number;
-  /** Accepted same-level rows whose required brick resolution is below 8. */
-  adaptiveAcceptedSameLevelCoarseRowCount?: number;
-  /** Accepted rows that couple different 2:1 pressure resolutions. */
-  adaptiveAcceptedMixedSeamRowCount?: number;
-  /** Accepted rows retained by the latest liquid/ghost-fluid classification. */
-  adaptivePressureActiveRowCount?: number;
-  /** Compact live-liquid cells invoked by the latest pressure solve. */
-  adaptivePressureCellCount?: number;
-  /**
-   * Human-facing attribution for the pressure-topology timestamp sample.
-   * Pressure repair runs before the frame's topology commit, so its input is
-   * the prior terminal receipt. This tuple keeps that input separate from the
-   * current end-frame commit which will feed the next repair.
-   */
-  adaptivePressureTopologyAttribution?: {
-    readonly status: "matched" | "unavailable";
-    readonly encodedStep: number;
-    readonly inputTopologyGeneration?: number;
-    readonly priorCommittedBrickCount?: number;
-    readonly currentEndFrameTopologyGeneration: number;
-    readonly currentEndFrameCommittedBrickCount: number;
-    readonly acceptedCellCount: number;
-    readonly acceptedRowCount: number;
-    readonly pressureCellCount: number;
-    readonly pressureActiveRowCount: number;
-    readonly pcmCellDirtyLeafCount: number;
-    readonly pcmRowPublishedWordCount: number;
-    readonly pcmCellAcceptedGeneration: number;
-    readonly pcmRowAcceptedGeneration: number;
-    readonly pcmMatched: boolean;
-    /**
-     * GPU-authored local-work receipts for the pressure cutover. Missing is
-     * deliberately different from zero work: the UI renders it unavailable.
-     */
-    readonly authorities?: {
-      readonly status: "matched" | "fault" | "unavailable";
-      readonly inputTopologyGeneration: number;
-      readonly pca: GPUAdaptivePressureLocalStageReceipt & {
-        readonly familyDirtyCount: readonly [number, number, number, number];
-        readonly familyExecutedCount: readonly [number, number, number, number];
-      };
-    };
-    readonly detail: string;
-  };
-  /** GPU-authored PCM1 publication receipt. QA-only; never a host scheduling input. */
-  adaptivePressureCanonicalMembership?: {
-    readonly cell: {
-      readonly phase: number; readonly fault: number; readonly firstFault: number;
-      readonly dirtyCount: number; readonly directWriteCount?: number;
-      readonly totalCount: number;
-      readonly candidateGeneration: number; readonly acceptedGeneration: number;
-    };
-    readonly row: {
-      readonly phase: number; readonly fault: number; readonly firstFault: number;
-      readonly dirtyCount: number; readonly directWriteCount?: number;
-      readonly totalCount: number;
-      readonly candidateGeneration: number; readonly acceptedGeneration: number;
-    };
-  };
-  /** GPU-authored PTR1 bounded topology-repair receipt; diagnostic only. */
-  adaptivePressureTopologyRepair?: {
-    readonly phase: number; readonly fault: number;
-    readonly firstFaultFamily: number; readonly firstFaultId: number;
-    readonly candidateGeneration: number; readonly acceptedGeneration: number;
-    readonly topologyGeneration: number;
-    readonly changedBrickCount: number; readonly cellExecutionCount: number;
-    readonly brickDirtyLeafCount: number;
-    readonly expectedProducerReceipts: number;
-    readonly coveredProducerReceipts: number;
-  };
-  /** Wet-domain storage residency, independent from the narrow surface band. */
-  fluidBulkBrickResidentCount?: number;
-  fluidBulkBrickHaloCount?: number;
-  fluidBulkBrickActivatedCount?: number;
-  fluidBulkBrickRetiredCount?: number;
-  powerDiagramReady?: boolean;
-  powerDiagramAuthoritative?: boolean;
-  /** Host-known generation stamped into the live GPU power topology/face publication. */
-  powerDiagramGeneration?: number;
-  powerDiagramAllocatedBytes?: number;
-  globalFineLevelSetAllocatedBytes?: number;
-  globalFineLevelSetResidentBrickCapacity?: number;
-  globalFineLevelSetLogicalBrickCount?: number;
-  /** Global, uniformly indexed sparse fine narrow-band level set. */
-  globalFineLevelSetEnabled?: boolean;
-  globalFineLevelSetFactor?: 1 | 4 | 8;
-  /** Static sparse fine-transport schedule; these host-known values require no readback. */
-  globalFineTransportQueryCapacity?: number;
-  globalFineTransportChunkCapacity?: number;
-  globalFineTransportChunkCount?: number;
-  globalFineTransportSegmentCount?: number;
-  globalFineTransportEncodedPasses?: number;
-  globalFineTransportPrepassScratchBytes?: number;
-  globalFineTransportVertexScratchBytes?: number;
-  /** QA-only global-fine handoff/publication counters. */
-  globalFineSeedCount?: number;
-  globalFineSeedError?: number;
-  globalFineTopologyFlags?: number;
-  /** Bit mask: 1 topology, 2 redistance, 4 volume, 8 transport. */
-  globalFineDownstreamFinalizeReason?: number;
-  globalFineRedistanceUnresolvedCells?: number;
-  globalFineRedistanceSeeds?: number;
-  globalFineRedistanceCommitted?: boolean;
-  globalFineVolumeFlags?: number;
-  globalFineTransportDepartureOutsideBand?: number;
-  globalFineTransportNonfiniteVelocity?: number;
-  globalFineTransportCommitted?: boolean;
-  globalFineTransportStructuredAuthorityUnavailable?: number;
-  globalFineTransportVelocityUnavailable?: number;
-  /** Invalid Stage-B velocity statuses observed while tracing the fine band. */
-  globalFineTransportInvalidVelocityStatus?: number;
-  /** Velocity samples that returned a non-positive validity weight. */
-  globalFineTransportNonpositiveVelocityResult?: number;
-  /** Bitwise union of invalid Stage-B velocity status reasons. */
-  globalFineTransportVelocityStatusReasonOr?: number;
-  /** Exact status and chunk-local sample index for the first invalid velocity. */
-  globalFineTransportFirstInvalidVelocityStatus?: number;
-  globalFineTransportFirstInvalidVelocityLocalIndex?: number;
-  /** Exact solver-local position in metres at which that status was observed.
-   * Solver-local x/z begin at the negative-world container walls. */
-  globalFineTransportFirstInvalidVelocityPosition_m?: GPUFieldLocation;
-  /** Accepted structured velocity publication sampled by fine transport. */
-  structuredVelocityGeneration?: number;
-  structuredVelocityRows?: number;
-  structuredVelocitySlots?: number;
-  structuredVelocityValid?: boolean;
-  /** Exact terminal Section-5 sparse-air publication workload. These are
-   * successful GPU-owned counts, not capacities or host estimates. */
-  structuredAirSupportRows?: number;
-  structuredAirSupportCells?: number;
-  structuredAirSupportCapacity?: number;
-  structuredAirSupportFaceItems?: number;
-  structuredAirSupportSeedFaces?: number;
-  structuredAirSupportMarchDepth?: number;
-  /** First live or latched Section-5 air-support publication rejection. */
-  structuredAirSupportFailureFlags?: number;
-  structuredAirSupportFailureItem?: number;
-  /** Decoded structured-dynamics reject carry. A rejection zeroes every class
-   * dispatch, so the step silently freezes; these name the responsible stage
-   * instead of leaving it to surface as a step-count or volume-drift failure. */
-  structuredRejectStage?: number;
-  structuredRejectIndex?: number;
-  structuredRejectSummary?: string;
-  structuredBoundaryGeneration?: number;
-  structuredBoundaryValid?: boolean;
-  /** Exact same-generation face-weighted kinetic-energy stages across the
-   * substep: start-of-step (post-remap), post-advection, post-force
-   * (pre-projection), post-projection. */
-  structuredStartKineticEnergyProxy?: number;
-  structuredPostAdvectionKineticEnergyProxy?: number;
-  structuredPreProjectionKineticEnergyProxy?: number;
-  structuredPostProjectionKineticEnergyProxy?: number;
-  /** Sampler-path census over wet faces (transition / staggered / cell). */
-  structuredWetFaceCount?: number;
-  structuredWetStartThetaEnergyProxy?: number;
-  structuredWetPostAdvectionThetaEnergyProxy?: number;
-  structuredWetPreProjectionThetaEnergyProxy?: number;
-  structuredWetPostProjectionThetaEnergyProxy?: number;
-  structuredStaggeredPathCount?: number;
-  /** Same stages restricted to faces with a liquid incident row. */
-  structuredWetStartKineticEnergyProxy?: number;
-  structuredWetPostAdvectionKineticEnergyProxy?: number;
-  structuredWetPreProjectionKineticEnergyProxy?: number;
-  structuredWetPostProjectionKineticEnergyProxy?: number;
-  structuredProjectionEnergyRatio?: number;
-  structuredProjectionEnergySampleCount?: number;
-  /** Power-coarse φ authority failure bits and first compact row. Bit 512
-   * identifies a missing causal non-obtuse Delaunay simplex. */
-  globalFineCoarseLevelSetFlags?: number;
-  globalFineCoarseLevelSetFirstErrorRow?: number;
-  globalFineInterfaceBricks?: number;
-  globalFineDesiredBricks?: number;
-  globalFineActivatedBricks?: number;
-  globalFinePublished?: boolean;
-  globalFineRolledBack?: boolean;
-  globalFineActiveBricks?: number;
-  globalFineGeneration?: number;
   /** First validation error captured by the solver's diagnostic error scope.
    * Reporting is asynchronous and never feeds simulation state. */
   gpuValidationError?: string;
@@ -327,8 +99,7 @@ export interface GPUEulerianInfo {
   representedVolumeCellSum?: number;
   representedVolumeDrift?: number;
   /** GPU field which supplied the displayed physical volume. */
-  volumeTelemetrySource?: "global-fine" | "adaptive-conservative-mass" | "adaptive-pages"
-    | "dense-volume" | "initial-condition" | "unavailable";
+  volumeTelemetrySource?: "dense-volume" | "initial-condition" | "unavailable";
   front_m?: number;
   /** GPU field which supplied the displayed dam-front location. */
   frontTelemetrySource?: "dense-volume" | "initial-condition" | "unavailable";
@@ -338,16 +109,13 @@ export interface GPUEulerianInfo {
   maxDivergenceAfter_s?: number;
   projectionDivergenceRatio?: number;
   maxAirSpeed_m_s?: number;
-  /** Physical pressure in Pa for dense/tall-cell methods. The octree power
-   * projection stores dt·p/rho (m²/s), which is why the producing method
-   * prints this counter through `diagnosticRows` rather than a panel guessing
-   * the unit from a grid kind two methods share. */
+  /** Maximum physical pressure in Pa. */
   maxPressure_Pa?: number;
   pressureResidual?: number;
   /** Initial fresh infinity norm and effective per-step target, in s^-1. */
   pressureInitialResidual?: number;
   pressureResidualTarget?: number;
-  /** Fresh b-Ap relative L2 residual; authoritative for Sparse CM12 convergence. */
+  /** Fresh b-Ap relative L2 residual. */
   pressureRelativeResidual?: number;
   /** Recursively updated CG residual, retained only to diagnose f32 drift. */
   pressureRecursiveRelativeResidual?: number;
@@ -370,31 +138,9 @@ export interface GPUEulerianInfo {
   frontierRequiredLeaves?: number;
   frontierCapacityOverflow?: boolean;
   maxComponentCfl?: number;
-  /** Faces processed by the latest compact octree velocity transport pass. */
-  adaptiveFaceTransportedCount?: number;
   highCflCellCount?: number;
   nonFiniteCount?: number;
   stabilityFlags?: string[];
-  /** Nonempty when the last advance's encoded stage order deviated from the
-   * declared physics step program (lib/physics-step-program.ts). */
-  stepSequenceDeviations?: string[];
-  /** Step index of the latest step-coherent structured snapshot consumed by
-   * diagnostics, and its exact whole-step authority lag (0 = current). */
-  structuredSnapshotStep?: number;
-  structuredAuthorityLagSteps?: number;
-  /** Fine active-brick count from the same record: worklist header word ONE.
-   * Word zero is the generation; the overflow flag is the 0xFFFFFFFF sentinel
-   * that silently no-ops the solver (P0.4 / docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md
-   * A3, A4.3). */
-  structuredSnapshotActiveFineBricks?: number;
-  structuredSnapshotFineBandOverflow?: boolean;
-  /** MGPCG counters from the same record: outer iterations the GPU executed
-   * and whether it converged inside the encoded budget. */
-  structuredSnapshotExecutedSolveIterations?: number;
-  structuredSnapshotSolveConverged?: boolean;
-  /** Nonempty when a step's encode predicted zero work for a stage it deleted
-   * and the GPU's own counters for that step disagreed (P0.5 lag-k check). */
-  stepPredictionFailures?: string[];
   maxSpeedLocation?: GPUFieldLocation;
   maxDivergenceBeforeLocation?: GPUFieldLocation;
   maxDivergenceAfterLocation?: GPUFieldLocation;
@@ -543,14 +289,6 @@ export interface GPUEulerianInfo {
   /** Instances built since load, and how long the last one took. */
   uniformPressureLatticeReplans?: number;
   uniformPressureLatticeReplanMs?: number;
-  /** Chentanez--Mueller mass stored above rho=1 after the latest transport. */
-  adaptiveCompressedExcessVolume_cells?: number;
-  /** Conserved mass currently below the rho=.5 visible-surface threshold. */
-  adaptiveSubIsoVolume_cells?: number;
-  adaptiveOverfullLeafCount?: number;
-  adaptiveSubIsoLeafCount?: number;
-  /** Legacy alias for the live accepted mixed-seam pressure-row count. */
-  adaptiveMixedSeamFaceCount?: number;
   phiInterfaceCellCount?: number;
   volumeCorrectionNormalSpeed_cells_s?: number;
   /** Diagnostic divergence-rate equivalent of the normal volume correction. */
@@ -655,56 +393,6 @@ export interface GPUEulerianInfo {
     context: string;
     frameId: string;
   };
-}
-
-/** Compact diagnostics projection of one GPU-resident local authority header. */
-export interface GPUAdaptivePressureLocalStageReceipt {
-  readonly acceptedGeneration: number;
-  readonly candidateGeneration: number;
-  readonly topologyGeneration: number;
-  readonly directCount: number;
-  readonly closureCount: number;
-  readonly dirtyCount: number;
-  readonly workCount: number;
-  readonly executedCount: number;
-  readonly skippedCount: number;
-  readonly expectedProducerReceipts: number;
-  readonly coveredProducerReceipts: number;
-  readonly causeMask: number;
-  readonly fault: number;
-  readonly firstFaultId: number;
-}
-
-export interface WebGPUEulerianSolverOptions {
-  velocityTransport?: GPUVelocityTransport;
-  /** Layout overrides applied on top of the quality preset. */
-  tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>;
-  /** Multigrid refinement V-cycles after the initial full cycle. */
-  pressureCycles?: number;
-  /** Reuse the previous frame's pressure as the fine-grid initial guess. */
-  pressureWarmStart?: boolean;
-  /** Rebuild divergence after projection and apply a second pressure solve. */
-  pressureDefectCorrection?: boolean;
-  /** Mass-Conserving Eulerian Liquid Simulation Sec 3.5 density sharpening
-   * after conservative advection. Defaults to on. */
-  densitySharpening?: boolean;
-  /** Restricted tall cells now use the paper's signed-distance surface.
-   * Retained as an informational compatibility parameter. */
-  surfaceField?: "levelset";
-  /** Apply the narrow-band global normal level-set volume controller on the
-   * restricted tall-cell level set. Defaults to on. */
-  volumeControl?: boolean;
-  /** Smoke-only step-response probe; scales the initial volume reference. */
-  referenceVolumeScale?: number;
-  /** Tall-cell paper Sec 3.3.1 hierarchical velocity extrapolation beyond the
-   * two-cell narrow band. Defaults to on; off reverts to the legacy repeated
-   * neighbor passes (a documented diagnostic departure). */
-  hierarchicalExtrapolation?: boolean;
-  /** Internal browser path: allocate resources now, compile pipelines with the
-   * asynchronous WebGPU API before exposing the solver. */
-  deferPipelineCompilation?: boolean;
-  /** Test-only layout injection for the one-tall-cell differential probe. */
-  layoutOverride?: TallCellLayout;
 }
 
 export interface GPURigidLoad {

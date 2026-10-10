@@ -1,4 +1,3 @@
-import { initialRuntimeFeatures, resetRuntimeFeatures } from "../../features/runtime-lifecycle";
 import { create } from "zustand";
 import type { RunState } from "../model";
 
@@ -10,9 +9,6 @@ interface RuntimeStore {
   simulationTime: number;
   /** Monotonic identity for the t=0 simulation timeline. */
   simulationEpoch: number;
-  /** Hold the current sparse topology while the physical clock keeps advancing. */
-  topologyFrozen: boolean;
-  setTopologyFrozen: (frozen: boolean) => void;
   notice: string;
   noticeTone: NoticeTone;
   /**
@@ -39,15 +35,13 @@ export const createRuntimeStore = () => create<RuntimeStore>((set) => ({
   runState: "paused",
   simulationTime: 0,
   simulationEpoch: 0,
-  ...initialRuntimeFeatures(),
-  setTopologyFrozen: (topologyFrozen) => set({ topologyFrozen }),
   notice: "Dam-break initialized · Eulerian projection active",
   noticeTone: "info",
   noticeSaid: 0,
   simRate: null,
   setRunState: (runState) => set({ runState }),
   setSimulationTime: (simulationTime) => set({ simulationTime }),
-  resetSimulationTime: () => set((state) => ({ simulationTime: 0, simulationEpoch: state.simulationEpoch + 1, ...resetRuntimeFeatures("simulation") })),
+  resetSimulationTime: () => set((state) => ({ simulationTime: 0, simulationEpoch: state.simulationEpoch + 1 })),
   setNotice: (notice, tone = "info") => set((state) => ({ notice, noticeTone: tone, noticeSaid: state.noticeSaid + 1 })),
   setSimRate: (simRate) => set({ simRate })
 }));

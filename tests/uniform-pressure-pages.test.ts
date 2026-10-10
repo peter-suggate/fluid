@@ -18,13 +18,14 @@ test("pressure page coordinates cover each logical cell once across partial page
   assert.equal(count,d[0]*d[1]*d[2]);assert.equal(visited.size,count);
  }
 });
-test("CM11a page conversion covers nested loads and all hierarchy fields",()=>{
+test("CM11a page conversion covers retained topology loads and stores",()=>{
  const shader=uniformPressurePagedShader(uniformPressureMultigridWGSL);
  const operators=shader.slice(0,shader.indexOf("fn mgPageAddress"));
  assert.doesNotMatch(operators,/texture(?:Load|Store)\(mg/);
- assert.match(operators,/mgPressureOutStore\(id,mgResidualInLoad\(id\)\)/);
- assert.match(operators,/mgRhsInLoad\(id\)/);
- assert.match(operators,/mgMinimumInLoad\(id\)/);
+ assert.match(operators,/mgVolumeInLoad\(mgClamp\(p,mg.levelDims.xyz\)\)/);
+ assert.match(operators,/mgPhiInLoad\(mgClamp\(p,mg.levelDims.xyz\)\)/);
+ assert.match(operators,/mgVolumeOutStore\(id,topology\)/);
+ assert.match(operators,/mgPhiOutStore\(id,vec4f\(coarsePhi\)\)/);
  assert.match(operators,/let slot=gid.x\/16u/);
 });
 
@@ -32,6 +33,6 @@ test("logical-dispatch oracle retains atlas loads without tile launch decoding",
  const shader=uniformPressurePagedShader(uniformPressureMultigridWGSL,true);
  assert.match(shader,/fn mgActiveId\(gid:vec3u\)->vec3i\{return vec3i\(gid\);\}/);
  assert.doesNotMatch(shader,/let slot=gid.x\/16u/);
- assert.match(shader,/mgPressureInLoad/);
+ assert.match(shader,/mgPhiInLoad/);
  assert.match(shader,/fn mgPageAddress/);
 });

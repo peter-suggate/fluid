@@ -15,7 +15,7 @@ import { labRegionSpace, type LabRegionDocument } from "./lab-region-space";
  * here any more, and that is the whole of what WP7 and WP8 did to it:
  *
  *   - **the slots** are `advanceSliceFeature`'s placements
- *     (`lib/methods/adaptive-volume/features/advance-slice/definition.ts`),
+ *     (`advance-lab/definition.ts`),
  *     rendered by `ComposedFeatureSlot` — the same component
  *     `components/SceneToolstrip.tsx` renders the studio's declarations with.
  *     The row order inside a slot is the placement order ranked by declared

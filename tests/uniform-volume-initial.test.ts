@@ -3,7 +3,7 @@ import test from "node:test";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { uniformVolumeInitialPhi } from "../lib/methods/uniform/uniform-volume-initial";
-import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
+import { uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { resolveMethodValues } from "../lib/core/method-contract";
 
 test("uniform geometric vertex planes use metres and include all domain faces",()=>{
@@ -22,7 +22,7 @@ test("explicit shapes union with the reservoir; an empty scene has no zero-value
   assert.ok(uniformVolumeInitialPhi(scene,[8,8,8]).every(p=>p>0));
 });
 test("uniform geometric controls resolve independently from density algorithms",()=>{
-  const values=resolveMethodValues(uniformVolumeMethod,"balanced",{});
+  const values=resolveMethodValues(uniformNarrowBandMethod,"balanced",{});
   assert.equal(values.densitySharpening,"on");assert.equal(values.gammaDiffusion,undefined);
-  assert.ok(uniformVolumeMethod.resolveComposition?.(values));
+  assert.ok(uniformNarrowBandMethod.resolveComposition?.(values));
 });

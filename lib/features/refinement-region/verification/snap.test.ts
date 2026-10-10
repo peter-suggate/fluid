@@ -85,17 +85,12 @@ test("at or above the brick the metre snap is exactly what it was", () => {
   }
 });
 
-test("below the brick the snap is the brick, which is the change", () => {
+test("fine regions snap to the narrow-band four-cell tile", () => {
   const scene = cloneScene(defaultScene);
-  const brick = metreSnapAsItWas(scene, drawn, BRICK_FINE_CELLS);
+  const brick = metreSnapAsItWas(scene, drawn, 4);
   for (const cells of [1, 2, 4]) {
     close(snapRefinementRegionBox(scene, drawn, cells), brick, `MIN ${cells}`);
-    // And it is genuinely coarser than the old per-floor-cell answer.
-    const asItWas = metreSnapAsItWas(scene, drawn, cells);
-    assert.notDeepEqual(
-      [asItWas.min.x, asItWas.max.x],
-      [brick.min.x, brick.max.x],
-      `MIN ${cells} should have moved`);
+
   }
 });
 
@@ -103,18 +98,18 @@ test("the resize handle steps by the brick at the studio default", () => {
   const scene = cloneScene(defaultScene);
   const { cellSize_m } = refinementRegionLattice(scene);
   const region = refinementRegionFromDrag(scene, drawn.min, drawn.max, {})!;
-  assert.equal(region.minimumCellSize_cells, 8);
+  assert.equal(region.minimumCellSize_cells, 1);
   const step_m = (floor: number) =>
     refinementRegionResizePolicy(scene, { ...region, minimumCellSize_cells: floor }).snap_m ?? [];
   const policy = refinementRegionResizePolicy(scene, region);
   for (let axis = 0; axis < 3; axis += 1) {
-    assert.ok(Math.abs((policy.snap_m ?? [])[axis]! - cellSize_m[axis]! * BRICK_FINE_CELLS) < 1e-12,
+    assert.ok(Math.abs((policy.snap_m ?? [])[axis]! - cellSize_m[axis]! * 4) < 1e-12,
       `axis ${axis}`);
     assert.equal((policy.minimum_m ?? [])[axis], (policy.snap_m ?? [])[axis]);
   }
   // A region asking for one finest cell still steps by a brick; a coarser floor
   // keeps its own coarser step.
-  assert.ok(Math.abs(step_m(1)[0]! - cellSize_m[0]! * BRICK_FINE_CELLS) < 1e-12);
+  assert.ok(Math.abs(step_m(1)[0]! - cellSize_m[0]! * 4) < 1e-12);
   assert.ok(Math.abs(step_m(32)[0]! - cellSize_m[0]! * 32) < 1e-12);
 });
 
@@ -129,15 +124,15 @@ test("a drawn box survives the metres round trip unchanged", () => {
 test("the studio RegionSpace round-trips a document region through the shared record", () => {
   const scene = cloneScene(defaultScene);
   const region = refinementRegionFromDrag(scene, drawn.min, drawn.max,
-    { minimumCellSize_cells: 8, maximumCellSize_cells: 16 })!;
+    { minimumCellSize_cells: 4, maximumCellSize_cells: 4 })!;
   const withRegion = withRefinementRegion(scene, region.id, region);
 
   const records = studioRegionSpace.list(withRegion);
   assert.equal(records.length, 1);
   const record = records[0]!;
   assert.equal(record.min_cells.length, 3);
-  assert.equal(record.minimumCellSize_cells, 8);
-  assert.equal(record.maximumCellSize_cells, 16);
+  assert.equal(record.minimumCellSize_cells, 4);
+  assert.equal(record.maximumCellSize_cells, 4);
 
   const back = refinementRegionFromRecord(withRegion, record);
   close({ min: back.min_m, max: back.max_m }, { min: region.min_m, max: region.max_m },

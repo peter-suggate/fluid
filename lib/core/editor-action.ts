@@ -123,7 +123,7 @@ export type EditorActionEffect =
   | {
     readonly kind: "probe";
     /** The ray behind the pixel, or the pressure cell behind it. */
-    readonly probe: "ray" | "cell";
+    readonly probe: "ray";
     readonly aim?: TracePinAim;
   }
   /**
@@ -232,8 +232,8 @@ export type EditorActionIcon =
   | "pipeline"
   | "render-pipeline"
   | "diagnostics"
-  | "trace-ray"
   | "inspect-cell"
+  | "trace-ray"
   | "scene"
   | "scene-new"
   | "scene-save"

@@ -105,16 +105,20 @@ export class UniformMixedSurfaceVolume {
   return group;
  }
  async initialize():Promise<void>{
-  const P=this.vertices,R=P+4*this.groups,S=R+4*this.chunks,T=this.tiles;
   const topology=uniformMixedTopologyWGSL(this.ownership.capacity,0);
   const shared=(sampling:string)=>/* wgsl */`
 const UM_H=vec3f(${this.ownership.capacity.lattice.cellSize_m.join(",")});
 ${sampling}
 fn umVertexIndex(p:vec3u)->u32{let d=UM_D+vec3u(1);return p.x+d.x*(p.y+d.y*p.z);}
 // Band tiles, visited tiles, measured tiles.
-const SV_BAND:u32=${S+8}u;const SV_VISIT:u32=${S+8+T}u;const SV_MEASURE:u32=${S+8+2*T}u;
+const SV_P:u32=(UM_D.x+1u)*(UM_D.y+1u)*(UM_D.z+1u);
+const SV_PAGES:u32=((UM_D.x+15u)/16u)*((UM_D.y+15u)/16u)*((UM_D.z+15u)/16u);
+const SV_GROUPS:u32=UM_TILES+SV_PAGES;
+const SV_CHUNKS:u32=(SV_GROUPS+63u)/64u;
+const SV_R:u32=SV_P+4u*SV_GROUPS;const SV_S:u32=SV_R+4u*SV_CHUNKS;
+const SV_BAND:u32=SV_S+8u;const SV_VISIT:u32=SV_S+8u+UM_TILES;const SV_MEASURE:u32=SV_S+8u+2u*UM_TILES;
 // The band by owner index: two parities (svBandAt), the last section.
-const SV_OWNERS:u32=${S+8+3*T}u;
+const SV_OWNERS:u32=SV_S+8u+3u*UM_TILES;
 fn svVisited(o:UMOwner)->bool{return scratch[SV_VISIT+o.tile]!=0.0;}
 // Every incident owner of a unit-stencil owner's corners has unit width: the
 // corners are stored, and a corner belongs to the lowest incident cell, so
@@ -195,7 +199,7 @@ fn loadSum(at:u32)->vec4f{return vec4f(scratch[at],scratch[at+1u],scratch[at+2u]
 fn storePartial(l:u32,group:vec3u){
  workgroupBarrier();
  if(any(sums[l]!=vec4f(0))){atomicOr(&measureLive,1u);}
- let at=${P}u+4u*(group.x+umDispatchX*group.y);
+ let at=SV_P+4u*(group.x+umDispatchX*group.y);
  if(workgroupUniformLoad(&measureLive)==0u){if(l<4u){scratch[at+l]=0.0;}return;}
  sumGroup(l);
  if(l==0u){storeSum(at,sums[0]);}
@@ -204,7 +208,7 @@ fn storePartial(l:u32,group:vec3u){
 // shift, the bracket's low and high, converged, secant step.
 @compute @workgroup_size(64) fn clearBand(@builtin(global_invocation_id) gid:vec3u){
  let t=gid.x+umDispatchX*64u*gid.y;if(t<UM_TILES){scratch[SV_BAND+t]=0.0;scratch[SV_VISIT+t]=0.0;scratch[SV_MEASURE+t]=0.0;}
- if(t==0u){let limit=umShiftLimit();scratch[${S}u]=0.0;scratch[${S+1}u]=-limit;scratch[${S+2}u]=limit;scratch[${S+3}u]=0.0;scratch[${S+4}u]=limit/64.0;}
+ if(t==0u){let limit=umShiftLimit();scratch[SV_S]=0.0;scratch[(SV_S+1u)]=-limit;scratch[(SV_S+2u)]=limit;scratch[(SV_S+3u)]=0.0;scratch[(SV_S+4u)]=limit/64.0;}
 }
 // One owner's corner (general owners reconstruct hanging corners).
 fn svCorner(o:UMOwner,k:u32)->f32{
@@ -248,7 +252,7 @@ fn svCorner(o:UMOwner,k:u32)->f32{
  }
  seedScratch[2u*l]=row.x;seedScratch[2u*l+1u]=row.y;
  if(any(row!=vec2f(0))){atomicOr(&measureLive,1u);}
- let at=${P}u+4u*(group.x+umDispatchX*group.y);
+ let at=SV_P+4u*(group.x+umDispatchX*group.y);
  if(workgroupUniformLoad(&measureLive)==0u){if(l<4u){scratch[at+l]=0.0;}return;}
  for(var stride=32u;stride>0u;stride/=2u){if(l<stride){seedScratch[2u*l]+=seedScratch[2u*(l+stride)];seedScratch[2u*l+1u]+=seedScratch[2u*(l+stride)+1u];}workgroupBarrier();}
  let total=vec2f(seedScratch[0],seedScratch[1]);
@@ -421,13 +425,13 @@ fn umMeasureCorners(o:UMOwner)->array<f32,16>{
  let o=umResidentAllOwner(gid);
  if(l==0u){atomicStore(&measureLive,0u);atomicStore(&measureBand,0u);}
  workgroupBarrier();
- if(o.width!=0u&&svVisited(o)&&scratch[${S+3}u]==0.0){atomicOr(&measureBand,1u);}
+ if(o.width!=0u&&svVisited(o)&&scratch[(SV_S+3u)]==0.0){atomicOr(&measureBand,1u);}
  if(workgroupUniformLoad(&measureBand)==0u){return;}
  var row=vec4f(0);
  if(o.width!=0u){
   let origin=umOrigin(o);let capacity=umCapacity(o);let mass=f32(o.width*o.width*o.width)*capacity;row.z=svVolume(o)*f32(o.width*o.width*o.width);
   var raw:array<f32,8>;var scale:array<f32,8>;var low=1e30;var high=-1e30;
-  let shift=scratch[${S}u];let step=scratch[${S+4}u];
+  let shift=scratch[SV_S];let step=scratch[(SV_S+4u)];
   if(svDirect(o)){
    // Every corner is a stored (or resolved) vertex: eight direct loads.
    for(var k=0u;k<8u;k++){let vertex=origin+umCorner(k,2u)*o.width;raw[k]=umLoadVertexW(vertex,o.width);scale[k]=umScaleLoadVertex(vertex);}
@@ -453,7 +457,7 @@ fn umMeasureCorners(o:UMOwner)->array<f32,16>{
  storePartial(l,group);
 }
 // A fixed grid strides the chunks of 64 measure partials the GPU count
-// holds (at most ${this.chunks}); solve reads exactly those chunk sums.
+// holds; solve reads exactly those chunk sums.
 var<workgroup> svReduceJobs:u32;
 @compute @workgroup_size(64) fn reduce(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
  // The job count lives in storage: made workgroup-uniform for the barriers.
@@ -461,8 +465,8 @@ var<workgroup> svReduceJobs:u32;
  let count=workgroupUniformLoad(&svReduceJobs);let chunks=(count+63u)/64u;
  for(var chunk=group.x;chunk<chunks;chunk+=groups.x){
   let i=chunk*64u+l;
-  sums[l]=vec4f(0);if(i<count){sums[l]=loadSum(${P}u+4u*i);}sumGroup(l);
-  if(l==0u){storeSum(${R}u+4u*chunk,sums[0]);}
+  sums[l]=vec4f(0);if(i<count){sums[l]=loadSum(SV_P+4u*i);}sumGroup(l);
+  if(l==0u){storeSum(SV_R+4u*chunk,sums[0]);}
   workgroupBarrier();
  }
 }
@@ -472,7 +476,7 @@ var<workgroup> svReduceJobs:u32;
 @compute @workgroup_size(64) fn solve(@builtin(local_invocation_index) l:u32){
  if(l==0u){svReduceJobs=svJobs();}
  let count=(workgroupUniformLoad(&svReduceJobs)+63u)/64u;
- var sum=vec4f(0);for(var i=l;i<count;i+=64u){sum+=loadSum(${R}u+4u*i);}sums[l]=sum;sumGroup(l);
+ var sum=vec4f(0);for(var i=l;i<count;i+=64u){sum+=loadSum(SV_R+4u*i);}sums[l]=sum;sumGroup(l);
  ${this.scalarTarget?/* wgsl */`
  // Volume control (Kim et al. 2007, the proportional term): the divergence
  // that closes the liquid's gap to its budget over the control time. The
@@ -487,20 +491,20 @@ var<workgroup> svReduceJobs:u32;
    budget[${NB_VOLUME_RATE_FLOAT}u]=select(0.0,clamp(excess*gain/max(filled,0.5*budget[0]),-${NB_VOLUME_RATE_LIMIT},${NB_VOLUME_RATE_LIMIT}),budget[1]>0.0&&budget[0]>0.0);}
   return;
  }`:""}
- if(l==0u&&scratch[${S+3}u]==0.0){
+ if(l==0u&&scratch[(SV_S+3u)]==0.0){
   let filled=sums[0].x;
-  ${this.scalarTarget?`if(captureBudget){budget[0]=filled;budget[1]=1.0;budget[5]=filled;scratch[${S+3}u]=1.0;return;}
-  if(scratch[${S}u]==0.0){budget[4]=filled;}
+  ${this.scalarTarget?`if(captureBudget){budget[0]=filled;budget[1]=1.0;budget[5]=filled;scratch[(SV_S+3u)]=1.0;return;}
+  if(scratch[SV_S]==0.0){budget[4]=filled;}
   budget[6]=filled;budget[7]=budget[0];`:""}
-  let desired=${this.scalarTarget?"budget[0]":"sums[0].z"};let shift=scratch[${S}u];let step=scratch[${S+4}u];
+  let desired=${this.scalarTarget?"budget[0]":"sums[0].z"};let shift=scratch[SV_S];let step=scratch[(SV_S+4u)];
   let rise=sums[0].y-filled;
-  if(abs(filled-desired)<=max(1e-5,1e-7*abs(desired))||rise*(2.0*umShiftLimit()/step)<=1e-6){scratch[${S+3}u]=1.0;}
+  if(abs(filled-desired)<=max(1e-5,1e-7*abs(desired))||rise*(2.0*umShiftLimit()/step)<=1e-6){scratch[(SV_S+3u)]=1.0;}
   else{
-   var low=scratch[${S+1}u];var high=scratch[${S+2}u];
+   var low=scratch[(SV_S+1u)];var high=scratch[(SV_S+2u)];
    if(filled<desired){low=shift;}else{high=shift;}
-   scratch[${S+1}u]=low;scratch[${S+2}u]=high;scratch[${S}u]=clamp(shift+(desired-filled)*step/max(rise,1e-30),low,high);
+   scratch[(SV_S+1u)]=low;scratch[(SV_S+2u)]=high;scratch[SV_S]=clamp(shift+(desired-filled)*step/max(rise,1e-30),low,high);
   }
-  ${this.scalarTarget?`budget[3]=scratch[${S}u];`:""}
+  ${this.scalarTarget?`budget[3]=scratch[SV_S];`:""}
  }
 }
 ${this.scalarTarget?/* wgsl */`
@@ -536,11 +540,11 @@ ${this.scalarTarget?/* wgsl */`
   }
  }
  sums[l]=vec4f(lost,0,0,0);sumGroup(l);
- if(l==0u){scratch[${P}u+group.x]=sums[0].x;}
+ if(l==0u){scratch[SV_P+group.x]=sums[0].x;}
 }
 @compute @workgroup_size(64) fn updateBudget(@builtin(local_invocation_index) l:u32){
  var lost=0.0;
- if(budgetParams.z>0.0){for(var i=l;i<(UM_D.x*UM_D.z+63u)/64u;i+=64u){lost+=scratch[${P}u+i];}}
+ if(budgetParams.z>0.0){for(var i=l;i<(UM_D.x*UM_D.z+63u)/64u;i+=64u){lost+=scratch[SV_P+i];}}
  sums[l]=vec4f(lost,0,0,0);sumGroup(l);
  if(l==0u){let out=min(budget[0],sums[0].x);budget[0]=max(0.0,budget[0]+budgetParams.y-out);budget[2]+=out;budget[3]=0.0;}
 }`:""}
@@ -557,7 +561,7 @@ ${shared(uniformMixedVertexSamplingSource("",false))}
  for(var k=0u;k<umCounts.w;k++){if(!svAuthority(o,k)){continue;}let p=umOrigin(o)+umCorner(k,2u)*o.width;
   // Unvisited owners' scales are zero and were not rewritten this frame; a
   // zero shift or scale leaves the texel as it is.
-  let shift=scratch[${S}u]*scratch[umVertexIndex(p)];
+  let shift=scratch[SV_S]*scratch[umVertexIndex(p)];
   if(shift!=0.0){textureStore(phi,vec3i(p),vec4f(umLoadVertex(p)-shift));}
  }
 }`,["apply"])});

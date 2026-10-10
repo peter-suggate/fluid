@@ -318,31 +318,3 @@ var<workgroup> nbRuns:array<vec2u,128>;
 }
 /** Portable reference variant; small subgroups also use its shared tree. */
 export const narrowBandFineTransferWGSL=narrowBandFineTransferSource();
-
-/** One workgroup per coarse face, with an exact particle gather and parallel
- * reduction. It uses the same h-scale quadratic kernel as the fine transfer. The 4h particle
- * band retains the axial footprint, omitting only the small diagonal tail. */
-export const narrowBandCoarseTransferWGSL=/* wgsl */`
-var<workgroup> coarseSums:array<vec2f,64>;
-@compute @workgroup_size(64) fn transferCoarse(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=group.x+256u*group.y;if(tile>=UM_T.x*UM_T.y*UM_T.z){return;}
- let axis=group.z;let origin=vec3i(vec3u(tile%UM_T.x,(tile/UM_T.x)%UM_T.y,tile/(UM_T.x*UM_T.y)))*4;
- var anchor=origin;anchor[axis]+=3;var q=vec3f(origin)+2.0;q[axis]+=2.0;
- let depth=particleDepth(q);let blend=select(0.0,1.0,depth>=-2.0);
- let original=textureLoad(velocity,anchor,0);var sum=vec2f(0);
- if(blend>0.0&&depth<=1.5&&q[axis]<f32(UM_D[axis])){
-  let lo=max(vec3i(floor(q-1.5)),vec3i(0));let hi=min(vec3i(ceil(q+1.5)),vec3i(UM_D));let size=vec3u(hi-lo);
-  for(var cell=lane;cell<size.x*size.y*size.z;cell+=64u){
-   let run=nbCellRun(lo+vec3i(vec3u(cell%size.x,(cell/size.x)%size.y,cell/(size.x*size.y))));
-   for(var i=run.x;i<run.y;i++){
-    let motion=nbMotion(i);if(motion.w==1.0){continue;}
-    let r=q-nbPosition(i);let w=weight(r.x)*weight(r.y)*weight(r.z);
-    sum+=vec2f(w*motion[axis],w);
-   }
-  }
- }
- coarseSums[lane]=sum;workgroupBarrier();
- for(var stride=32u;stride>0u;stride/=2u){if(lane<stride){coarseSums[lane]+=coarseSums[lane+stride];}workgroupBarrier();}
- if(lane==0u){var value=original;let result=coarseSums[0];if(result.y>1e-5){value[axis]=mix(original[axis],result.x/result.y,blend*nbTransferBlend(q,depth,result.y));}textureStore(output,anchor,value);}
-}
-`;

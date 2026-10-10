@@ -1,3 +1,5 @@
+import { defaultMethodId } from "./method-registry";
+
 export type GPUStartupMode = "off" | "manual" | "automatic" | "safe";
 
 export interface GPUStartupContext {
@@ -9,8 +11,7 @@ export interface GPUStartupContext {
  * Resolve browser GPU startup without touching navigator.gpu.
  *
  * `gpu=off` is the safe UI-only mode, `gpu=manual` requires an explicit user
- * action, and `gpu=on` restores eager startup. The high-risk default Losasso
- * dam-break scene starts manually when no explicit policy is supplied.
+ * action, and `gpu=on` restores eager startup.
  */
 export function resolveGPUStartupMode(search: string, context: GPUStartupContext): GPUStartupMode {
   const requested = new URLSearchParams(search).get("gpu");
@@ -18,9 +19,7 @@ export function resolveGPUStartupMode(search: string, context: GPUStartupContext
   if (requested === "safe") return "safe";
   if (requested === "manual") return "manual";
   if (requested === "on") return "automatic";
-  return context.presetId === "water-box-dam-break" && context.methodId === "losasso"
-    ? "manual"
-    : "automatic";
+  return "automatic";
 }
 
 /** One-shot browser bring-up: explicit start, pinned workload, one STEP, then STOP GPU. */
@@ -56,27 +55,15 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
   const query = new URLSearchParams(config.search);
   const values = config.methodValues;
   const canonical = config.canonicalMethodValues;
-  const safeVariantKeys = new Set(["globalFineLevelSetFactor", "surfaceRefinementGradingLayers"]);
   const parameterDrift = [...new Set([...Object.keys(values), ...Object.keys(canonical)])]
-    .filter((key) => !safeVariantKeys.has(key))
     .filter((key) => JSON.stringify(values[key]) !== JSON.stringify(canonical[key]));
-  const approvedQueryKeys = new Set([
-    "gpu", "method", "scene", "quality",
-    "param.losasso.globalFineLevelSetFactor",
-    "param.losasso.maximumLeafSize",
-    "param.losasso.interfaceRefinementBandCells",
-    "param.losasso.surfaceRefinementGradingLayers",
-    "param.losasso.topologyCadenceAdvances",
-  ]);
+  const approvedQueryKeys = new Set(["gpu", "method", "scene", "quality"]);
   const unapprovedQueryKeys = [...new Set([...query.keys()].filter((key) => !approvedQueryKeys.has(key)))];
   return [
     config.presetId !== "water-box-dam-break" && "scene must be water-box-dam-break",
-    config.methodId !== "losasso" && "method must be losasso",
+    config.methodId !== defaultMethodId() && `method must be ${defaultMethodId()}`,
     config.quality !== "balanced" && "quality must be balanced",
     !config.exactScene && "scene parameters must match the authored dam-break preset",
-    !["1", "4", "8"].includes(String(values.globalFineLevelSetFactor))
-      && "global fine level set must be factor 1, 4, or 8",
-    values.maximumLeafSize !== "16" && "maximum leaf size must be 16",
     parameterDrift.length > 0 && `method profile drifted: ${parameterDrift.join(", ")}`,
     config.gridOverlayAxis !== "off" && "grid overlays must remain off",
     config.armedGesture !== undefined && "no authoring gesture may be armed",

@@ -1,0 +1,734 @@
+[
+  {
+    "file": "tests/backdrop-shrub.test.ts",
+    "total": 3,
+    "removed": 1,
+    "deletedFile": false,
+    "cases": [
+      "\"Dawn background shrub field matches CPU leaves, woody stems and empty gaps\""
+    ]
+  },
+  {
+    "file": "tests/falling-water-torus-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"Uniform torus begins hollow and falls onto the floor\""
+    ]
+  },
+  {
+    "file": "tests/foliage-density.test.ts",
+    "total": 5,
+    "removed": 1,
+    "deletedFile": false,
+    "cases": [
+      "\"Dawn leaf density matches the CPU field across seeds, leaves and gaps\""
+    ]
+  },
+  {
+    "file": "tests/fraction-readout-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"the shader writes V/K as fractionReadout does, in FRACTION_READOUT_FONT\""
+    ]
+  },
+  {
+    "file": "tests/particle-overlay-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"particle records draw as depth-ordered spheres over exactly the live records\""
+    ]
+  },
+  {
+    "file": "tests/particle-overlay-narrow-band-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"narrow-band FLIP publishes its surface band as spheres\""
+    ]
+  },
+  {
+    "file": "tests/scene-shape-parity.test.ts",
+    "total": 8,
+    "removed": 1,
+    "deletedFile": false,
+    "cases": [
+      "\"the WGSL half of every shape fact agrees with the TypeScript half\""
+    ]
+  },
+  {
+    "file": "tests/svo-cell-contour-analytic-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"Dawn contours track analytic shapes across cell phases\""
+    ]
+  },
+  {
+    "file": "tests/svo-cell-contour-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"Dawn contour producer bounds a source plane and polygonizer emits a closed clipped cube\""
+    ]
+  },
+  {
+    "file": "tests/svo-dual-contouring-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"GPU Hermite DC reconstructs closed spheres, sharp rotated boxes and bounded wavy terrain\""
+    ]
+  },
+  {
+    "file": "tests/svo-dual-marching-cubes-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"GPU Dual Marching Cubes reconstructs closed surfaces and a wall missed by primal corner signs\""
+    ]
+  },
+  {
+    "file": "tests/svo-filter-controls-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"Dawn filtering controls preserve settings, clamp LOD, stabilize transitions and blend normals\""
+    ]
+  },
+  {
+    "file": "tests/svo-raster-ao-reconstruction-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"raster AO preserves contact and shadow on faces missing from the reduced buffer\""
+    ]
+  },
+  {
+    "file": "tests/svo-reconstructed-receiver-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"Dawn reconstructed receivers preserve arbitrary face normals and rigid ownership\""
+    ]
+  },
+  {
+    "file": "tests/svo-solid-page-smooth-field-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"GPU page solids reconstruct a continuous field and a staircase's slope\""
+    ]
+  },
+  {
+    "file": "tests/svo-surface-mesh-detail.test.ts",
+    "total": 4,
+    "removed": 1,
+    "deletedFile": false,
+    "cases": [
+      "\"the full dry-scene bundle validates in Dawn in every mesh variant\""
+    ]
+  },
+  {
+    "file": "tests/svo-surface-mesh-scheduler-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"the mesh scheduler builds, re-extracts dirty bricks in place, rolls an overflow back, and flips a replacement\""
+    ]
+  },
+  {
+    "file": "tests/svo-tank-shell-publication-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"production SVO excludes tank glass at reset and after live edit/undo\""
+    ]
+  },
+  {
+    "file": "tests/svo-terrain-contour-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"terrain contour source shares continuous heights, normals and conservative crossing coverage\""
+    ]
+  },
+  {
+    "file": "tests/svo-terrain-storage-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"terrain rendering omits oversized voxel storage and preserves live fill, carve and undo\""
+    ]
+  },
+  {
+    "file": "tests/uniform-atlas-address-dawn.test.ts",
+    "total": 2,
+    "removed": 2,
+    "deletedFile": true,
+    "cases": [
+      "\"atlas fixture preserves cross-page stencils, vertex planes and storage loads\"",
+      "\"frozen frame restores textures and mutable buffers and replays typed queue writes\""
+    ]
+  },
+  {
+    "file": "tests/uniform-cached-momentum-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"prepared momentum blends preserve general samples and local-width characteristics across 256 layouts\""
+    ]
+  },
+  {
+    "file": "tests/uniform-coarse-redistance-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"coarse redistancing leaves stationary surfaces fixed and resumes after material travel\""
+    ]
+  },
+  {
+    "file": "tests/uniform-coarse-surface-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"experimental smooth 4h surface survives long-dam impact with conserved advancing liquid\""
+    ]
+  },
+  {
+    "file": "tests/uniform-compiled-extension-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"compiled extension decisions and neighbors match across 256 adopted three-cubed layouts\""
+    ]
+  },
+  {
+    "file": "tests/uniform-compiled-topology-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"GPU compiled topology matches CPU builders and original vertex/face traversal through all 256 layouts\""
+    ]
+  },
+  {
+    "file": "tests/uniform-cubic-surface-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"solid-free cubic sampling preserves advection and redistance across changing h/4h layouts\""
+    ]
+  },
+  {
+    "file": "tests/uniform-curvature-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"geometric curvature preserves a flat solid contact and a curved free surface\""
+    ]
+  },
+  {
+    "file": "tests/uniform-detail-policy-dawn.test.ts",
+    "total": 3,
+    "removed": 3,
+    "deletedFile": true,
+    "cases": [
+      "\"detail policy changes ownership live: zero, partial, full, zero, moving focus\"",
+      "\"full detail runs the 64³ dam break: every tile h, accepted pressure, bounded phi\"",
+      "\"a Fine region drawn and moved far from the liquid under solid contact keeps its pages resident\""
+    ]
+  },
+  {
+    "file": "tests/uniform-detail-surface-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"Surface intersects Dynamic selection with phi crossings and never seeds detail\""
+    ]
+  },
+  {
+    "file": "tests/uniform-dynamic-band-mask-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"dynamic band intersects actual crossing cells and preserves closed support\""
+    ]
+  },
+  {
+    "file": "tests/uniform-dynamic-coarsening-dawn.test.ts",
+    "total": 2,
+    "removed": 2,
+    "deletedFile": true,
+    "cases": [
+      "\"dynamic coarsening follows the 128³ dam break on h/4h ownership without drift or recompilation\"",
+      "\"dynamic coarsening takes a liquid ball dropped into 4h air\""
+    ]
+  },
+  {
+    "file": "tests/uniform-force-cache-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"cached curvature stays current across evolving mixed and solid seams\""
+    ]
+  },
+  {
+    "file": "tests/uniform-force-vector-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"vector viscosity preserves scalar force evaluation across h/4h layouts and walls\""
+    ]
+  },
+  {
+    "file": "tests/uniform-mixed-live-solid-edit-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"narrow-band live voxel edits update solids without compiling pipelines\""
+    ]
+  },
+  {
+    "file": "tests/uniform-mixed-rigid-body-dawn.test.ts",
+    "total": 2,
+    "removed": 2,
+    "deletedFile": true,
+    "cases": [
+      "\"rigid bodies couple on the mixed frame\"",
+      "\"a first rigid body couples with pipelines prepared at setup\""
+    ]
+  },
+  {
+    "file": "tests/uniform-mixed-solid-parity-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"coarse regions promote solid neighbourhoods to h and conserve mass\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-activity-dawn.test.ts",
+    "total": 7,
+    "removed": 7,
+    "deletedFile": true,
+    "cases": [
+      "\"adaptive NB percentage counts requesting tiles and changes live from zero to full\"",
+      "\"adaptive NB retirement time tunes live particle and fine-tile release\"",
+      "\"adaptive NB calm pool runs at 4h with no particles under gravity\"",
+      "\"adaptive NB reactivates from zero particles and returns to a cold 4h surface\"",
+      "\"adaptive NB retains a quiet thin sheet while releasing the surrounding pool\"",
+      "\"adaptive NB seeds new source liquid above a particle-free pool\"",
+      "\"adaptive NB carries a thin translating component through cold tiles\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-budget-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"adaptive quota ranks pooled scores and prior admissions with exact, stable saturated-score ties\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-containment-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"adaptive NB-FLIP contains a 20-second trough hose fill\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-contract-dawn.test.ts",
+    "total": 6,
+    "removed": 6,
+    "deletedFile": true,
+    "cases": [
+      "\"NB-FLIP surface authority bypasses volume transport and recovery, including direct runtime overrides\"",
+      "\"NB-FLIP coarse pressure and donor phase ignore independently corrupted volume\"",
+      "\"NB-FLIP translates a resolved drop across multiple h cells per pressure step\"",
+      "\"NB-FLIP keeps a hydrostatic pool stable without surface-volume recovery\"",
+      "\"NB-FLIP stale interior distances cannot seed particles or hold fine bulk\"",
+      "\"NB-FLIP bounded distance sweeps match a brute-force nearest-crossing search\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-coverage-dawn.test.ts",
+    "total": 2,
+    "removed": 2,
+    "deletedFile": true,
+    "cases": [
+      "\"NB particle width stays 4h while surface grid padding changes live\"",
+      "\"NB zero-padding grid coverage follows a drop moving 2.56h per pressure step\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-extension-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"FLIP post-pressure extension equals a fresh next-frame rebuild\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-flip-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"narrow-band FLIP preserves a resting pool and advances a dam at 1/30 s\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-fluid-edit-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "`NB editor adds a ball with dynamic coverage, fill=${fillFraction}`"
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-geometry-dawn.test.ts",
+    "total": 3,
+    "removed": 3,
+    "deletedFile": true,
+    "cases": [
+      "\"NB remap regenerates occupancy from phi instead of redistributing a corrupted mass budget\"",
+      "\"NB wall advection neither repairs liquid from stored volume nor changes a stationary surface\"",
+      "\"NB shared distance rebuild preserves every zero-crossing cell across an h/4h seam\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-handoff-surface-dawn.test.ts",
+    "total": 2,
+    "removed": 2,
+    "deletedFile": true,
+    "cases": [
+      "\"adaptive NB handoff preserves a flat surface across partial activation and retirement\"",
+      "\"Letters impact has no rectangular handoff trench at 0.6 and 0.7 seconds\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-inflow-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"NB inflow keeps its particles when interior reseeding exceeds the budget\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-locality-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"NB stable compaction preserves survivors and tile marking matches individual particles\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-order-dawn.test.ts",
+    "total": 2,
+    "removed": 2,
+    "deletedFile": true,
+    "cases": [
+      "`NB ${sparse?\"occupied-tile\":\"dense\"} ordering clears stale cells and preserves every live sample`",
+      "\"NB production sparse bins count real moves and preserve rest and translated geometry\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-packets-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"Particle tile packets cover every index once, bound work to 64, and refresh topology\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-residency-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"NB-FLIP Figure 9 keeps a coarse liquid interior after 15 seconds\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-sampling-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"particle cached samplers preserve mixed velocity at seams and domain walls\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-scheduled-drop-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"NB adds a scheduled extrusion once, in the shape its outline gives\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-seeding-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"listed seed candidates preserve cell seeding and capacity receipts\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-settling-dawn.test.ts",
+    "total": 2,
+    "removed": 2,
+    "deletedFile": true,
+    "cases": [
+      "\"NB disturbed pool settles under gravity without a particle-spacing noise floor\"",
+      "\"NB retains a resolved translating thin sheet in the level set\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-surface-dawn.test.ts",
+    "total": 6,
+    "removed": 6,
+    "deletedFile": true,
+    "cases": [
+      "\"FLIP spatial ordering preserves crowded bins, sample identity and compact neighbor positions\"",
+      "\"FLIP preserves crowded surface samples and defers reseeding at the particle budget\"",
+      "\"unresolved detached FLIP particles fall under gravity instead of following empty grid velocities\"",
+      "\"FLIP surface and interior samples share the same free-fall acceleration\"",
+      "\"cooperative FLIP transfer matches independent quadratic MAC gathers with crowded and ballistic samples\"",
+      "\"tiled FLIP reconstruction matches vertex gathers across crowded bins and closed walls\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-volume-dawn.test.ts",
+    "total": 2,
+    "removed": 2,
+    "deletedFile": true,
+    "cases": [
+      "`NB Figure 2 bounds geometric volume throughout 5.1s at dt=${dt}`",
+      "\"NB volume budget survives remaps and accounts sources/outflow\""
+    ]
+  },
+  {
+    "file": "tests/uniform-narrow-band-voxel-distance-dawn.test.ts",
+    "total": 2,
+    "removed": 2,
+    "deletedFile": true,
+    "cases": [
+      "\"NB distance searches retain the water plane at voxel walls\"",
+      "\"NB reconstruction keeps a stationary waterline against a voxel riser for four seconds\""
+    ]
+  },
+  {
+    "file": "tests/uniform-pond-rest-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"filled hero pond stays visually at rest with the hose disabled\""
+    ]
+  },
+  {
+    "file": "tests/uniform-prepared-surface-dawn.test.ts",
+    "total": 2,
+    "removed": 2,
+    "deletedFile": true,
+    "cases": [
+      "\"prepared surface gradients retain window arithmetic on random f32 fields\"",
+      "\"voxel contact gradients ignore buried air without flattening tangential slopes\""
+    ]
+  },
+  {
+    "file": "tests/uniform-pressure-band-dispatch-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"grouped pressure half sweeps preserve the one-tile solve across partial workgroups\""
+    ]
+  },
+  {
+    "file": "tests/uniform-pressure-phase-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"h pressure preserves air interfaces hidden from the 4h pressure grid\""
+    ]
+  },
+  {
+    "file": "tests/uniform-pressure-shader-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"pressure shaders compile with and without the optional in-place smoother\""
+    ]
+  },
+  {
+    "file": "tests/uniform-sharpening-seam-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"mixed sharpening matches a dense reference and conserves volume across h/4h seams\""
+    ]
+  },
+  {
+    "file": "tests/uniform-split-extension-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"split extension sweeps match merged state across changing layouts and dispatch widths\""
+    ]
+  },
+  {
+    "file": "tests/uniform-surface-extraction-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "`water surface from the 4h vertex base, ${name}: current base, window scan equals full scan and the shipped polygonise equals its reference at zero, partial and full detail`"
+    ]
+  },
+  {
+    "file": "tests/uniform-transport-pruning-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"batched-row transport matches the original across live h/4h changes and donor footprints\""
+    ]
+  },
+  {
+    "file": "tests/uniform-volume-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"uniform geometric presentation source\""
+    ]
+  },
+  {
+    "file": "tests/uniform-voxel-rest-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"a resting pool over a voxel step does not generate edge currents\""
+    ]
+  },
+  {
+    "file": "tests/vessel-outline-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"Dawn draws the canonical tank voxel-volume wireframe\""
+    ]
+  },
+  {
+    "file": "tests/visual-layers-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"all layers draw independently and compose with simultaneous tile/window records\""
+    ]
+  },
+  {
+    "file": "tests/voxel-editor-live-boundary-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"voxel scene presentation accepts repeated solid edits without rebuilding its SVO\""
+    ]
+  },
+  {
+    "file": "tests/voxel-editor-new-room-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"default New scene accepts a depth-eight Box at renderer refinement and Undo clears its local occupancy\""
+    ]
+  },
+  {
+    "file": "tests/voxel-editor-retained-frontier-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"Uniform mixed ownership advances the edited scene without replacing its fields\""
+    ]
+  },
+  {
+    "file": "tests/water-wireframe-depth-dawn.test.ts",
+    "total": 1,
+    "removed": 1,
+    "deletedFile": true,
+    "cases": [
+      "\"wireframe depth matches the shaded surface across a hydrostatic pool\""
+    ]
+  },
+  {
+    "file": "lib/svo/features/scene-publication/tests/svo-cup-primitive.test.ts",
+    "total": 7,
+    "removed": 1,
+    "deletedFile": false,
+    "cases": [
+      "\"the WGSL cup agrees with the TypeScript cup on a device\""
+    ]
+  },
+  {
+    "file": "tests/svo-gbuffer-normal-split.test.ts",
+    "total": 4,
+    "removed": 1,
+    "deletedFile": false,
+    "cases": [
+      "\"the split validates under naga with and without the voxel mesh\""
+    ]
+  }
+]

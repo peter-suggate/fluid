@@ -5,8 +5,6 @@ import {UNIFORM_DETAIL_POLICY} from "./uniform-detail-policy";
 import {UNIFORM_DETAIL_RECEIPT_BYTES,UNIFORM_DETAIL_VIOLATION,type UniformDetailGroup,type UniformDetailStorage} from "./uniform-detail-fields";
 import {UniformPressureSurfaceBand} from "./uniform-pressure-surface-band";
 import {UniformPressureBand} from "./uniform-pressure-band";
-import {uniformMixedDustMass} from "./uniform-mixed-dust-accounting.wgsl";
-import {UniformMixedCleanup} from "./uniform-mixed-cleanup";
 import {UniformMixedFramePlan} from "./uniform-mixed-frame-plan";
 import {UniformMixedOwnershipTransfer,UniformMixedRemap} from "./uniform-mixed-remap";
 import {UniformMixedPhiResolve} from "./uniform-mixed-phi-resolve";
@@ -16,14 +14,12 @@ import type {UniformMixedLayout} from "./uniform-mixed-layout";
 import type {UniformScratchArena} from "./uniform-scratch-arena";
 import type {WebGPUUniformPressureMultigrid} from "./webgpu-uniform-pressure-multigrid";
 import type {WebGPUUniformVelocityExtrapolator} from "./webgpu-uniform-velocity-extrapolation";
-import {UniformMixedTransportStage} from "./uniform-mixed-transport";
 import {UNIFORM_WORK_RECEIPT_WORDS,UniformMixedOwnership,type UniformMixedGenerationBuffers} from "./uniform-mixed-ownership";
 import {UniformMixedExtension} from "./uniform-mixed-extension";
 import {UniformMixedHangingTaps, UniformMixedMomentumCache} from "./uniform-mixed-momentum-cache";
 import {UniformMixedSurface} from "./uniform-mixed-surface";
 import {NB_VOLUME_RATE_FLOAT,UniformMixedSurfaceVolume} from "./uniform-mixed-surface-volume";
 import {UniformMixedSurfaceGeometry} from "./uniform-mixed-surface-geometry";
-import {UniformMixedSharpening} from "./uniform-mixed-sharpening";
 import {UNIFORM_WORK_RELAYOUT_RESERVE,type UniformWorkEdit} from "./uniform-buffered-work";
 import {UniformMixedMomentum,UNIFORM_MIXED_MOMENTUM_LIMITS} from "./uniform-mixed-momentum";
 import {UniformMixedForces} from "./uniform-mixed-forces";
@@ -40,8 +36,6 @@ import type {GPUTimestampPhase} from "../../core/performance-trace";
 import {UNIFORM_ADVANCE_PHASE as A} from "./uniform-stages";
 import {UNIFORM_VOLUME_PHASE as V} from "./uniform-volume-stages";
 import {UniformMixedSolid,type UniformMixedSolidResources} from "./uniform-mixed-solid.wgsl";
-import {UniformMixedSolidDisplacement} from "./uniform-mixed-solid-displacement";
-import {UniformPipelineNeeds} from "./uniform-pipeline-needs";
 import {UNIFORM_STAGE_GRID_HEADER_WORDS,UNIFORM_STAGE_VIEWS,uniformStageBandWords,uniformStageGridHeader,uniformStageGridWords,uniformStageViewWord} from "./uniform-stage-grids";
 
 export interface UniformMixedFrameTrace {
@@ -53,7 +47,6 @@ export interface UniformMixedFrameTrace {
 }
 
 export interface UniformMixedFrameFields {
- narrowBandFlip?:boolean;
  narrowBandAdaptiveSurface?:boolean;
  narrowBandCoarseParticles?:boolean;
  arena:UniformScratchArena;
@@ -70,9 +63,7 @@ export interface UniformMixedFrameFields {
   * through editSolids(), bodies through advance(). The host must keep every
   * coarse owner a full tile away from a cut cell liquid can reach. */
  solid?:UniformMixedSolidResources;
- /** Compile by need: the host's registry (uniform-pipeline-needs). Omitted:
-  * every variant is built by initialize(). */
- needs?:UniformPipelineNeeds;
+
  /** Two-stage pressure: an all-4h solve, then the h surface band
   * (UniformPressureBand). With solids, the all-4h levels read the static
   * coarse solid record and every liquid solid-coupled tile joins the band.
@@ -102,12 +93,9 @@ export interface UniformMixedFrameParameters {
  addedVolumeCells?:number;
  /** NB-FLIP volume control: seconds over which the liquid's gap to its budget is closed; zero for none. */
  volumeControlSeconds?:number;
- totalSurfaceVolume?:boolean;redistance?:boolean;sharpening?:boolean;surfaceDeficitBalancing?:boolean;extensionSweeps?:number;
+ redistance?:boolean;extensionSweeps?:number;
  supportPolicy?:{fineReach:number;shellReach:number;twoLevel:boolean;shellOnly:boolean};
- dust:number;orphanDust?:number;sharpeningStrength:number;sharpeningDistance:number;pressureTolerance:number;
- /** Sharpening sweeps (even: the last writes V; default 8) and surface-volume Newton rounds (default 2).
-  * Zero sweeps or a zero sharpening band skips sharpening; zero rounds skips the surface-volume shift. */
- sharpeningSweeps?:number;surfaceVolumeRounds?:number;
+ pressureTolerance:number;
 }
 
 /** One owner-driven frame sequence. All persistent fields and large scratch
@@ -117,14 +105,12 @@ export interface UniformMixedFrameParameters {
 /** Plan support, phase and extension are dt-free (the certificate takes dt),
  * so a census extension serves the next frame whatever its step. */
 /** Diagnostics: log each frame's pressure slots, coarse solves and band history. */
-const PRESSURE_TRACE=typeof process!=="undefined"&&!!process.env.FLUID_MIXED_PRESSURE_TRACE;
 /** Receipt bytes of the detail violation words (simulation, pressure root),
  * then the detail storage's residency header. */
 const DETAIL_RECEIPT=120+4*UNIFORM_MIXED_STATUS_WORDS;
 const DETAIL_RECEIPT_WORDS=2+UNIFORM_DETAIL_RECEIPT_BYTES/4;
 const WORK_RECEIPT=DETAIL_RECEIPT+4*DETAIL_RECEIPT_WORDS;
-const SHARPEN_WORK_RECEIPT=WORK_RECEIPT+4*UNIFORM_WORK_RECEIPT_WORDS;
-const REMAP_WORK_RECEIPT=SHARPEN_WORK_RECEIPT+8;
+const REMAP_WORK_RECEIPT=WORK_RECEIPT+4*UNIFORM_WORK_RECEIPT_WORDS;
 // The root cycle list's count: the width of the root's listed launches.
 const ROOT_WORK_RECEIPT=REMAP_WORK_RECEIPT+4;
 const FLIP_RECEIPT=ROOT_WORK_RECEIPT+4;
@@ -198,7 +184,6 @@ function uniformMixedPressureTarget(p:{pressureTolerance:number}):number{
 export interface UniformMixedFrameCapacity{fineTiles:number;liquidBand:boolean;fixed?:boolean;byteBudget?:number}
 
 export class UniformMixedFrame {
- readonly transport?:UniformMixedTransportStage;
  readonly ownership:UniformMixedOwnership;
  /** The surface stage's held-vertex corrections (UniformMixedSurface.held), for the Dynamic census. */
  get heldDistance(){return this.surface.held;}
@@ -231,8 +216,7 @@ export class UniformMixedFrame {
  /** Largest band row residual of the last accepted advance, 1/s. */
  bandResidual?:number;
  readonly solid?:UniformMixedSolid;
- private readonly displacement?:UniformMixedSolidDisplacement;
- /** A live voxel edit awaits its displacement at the next frame's head. */
+ /** A live voxel edit refreshes its geometry at the next frame's head. */
  private solidEditPending=false;
  /** The solid record's simulation widths predate the live layout. */
  private solidWidthsStale=true;
@@ -243,8 +227,6 @@ export class UniformMixedFrame {
  private readonly solidTopology?:GPUBufferBinding;
  private readonly owned:(GPUTexture|GPUBuffer)[]=[];
  private readonly plan:UniformMixedFramePlan;
- private readonly cleanup?:UniformMixedCleanup;
- private readonly cleanupGroups?:readonly [UniformDetailGroup,UniformDetailGroup];
  private readonly remap:UniformMixedRemap;
  /** The level set lives at owner resolution: canonical writers (remap, advect,
   * redistance) leave hanging texels stale, and every reader is compiled with
@@ -262,7 +244,6 @@ export class UniformMixedFrame {
  private readonly surface:UniformMixedSurface;
  private readonly surfaceVolume?:UniformMixedSurfaceVolume;
  private readonly geometry:UniformMixedSurfaceGeometry;
- private readonly sharpen?:UniformMixedSharpening;
  private readonly momentum:UniformMixedMomentum;
  private readonly forces:UniformMixedForces;
  private readonly authority:UniformMixedPressureAuthority;
@@ -275,7 +256,6 @@ export class UniformMixedFrame {
  private surfaceGroups!:readonly [UniformDetailGroup,UniformDetailGroup];
  private surfaceVolumeGroup!:UniformDetailGroup;
  private readonly geometryGroup:UniformDetailGroup;
- private sharpenGroups?:readonly [UniformDetailGroup,UniformDetailGroup];
  private readonly momentumGroup:UniformDetailGroup;
  private forceGroup!:UniformDetailGroup;
  /** The scratch every non-pressure stage overlaps from offset 0, none of
@@ -284,7 +264,7 @@ export class UniformMixedFrame {
  private readonly coarseCache:GPUTexture;
  private authorityGroup:UniformDetailGroup;
  private readonly acceptanceGroup:GPUBindGroup;
- private readonly params:Record<"extension"|"surface"|"momentum"|"forces"|"authority"|"sharpen"|"projection"|"acceptance",GPUBuffer>;
+ private readonly params:Record<"extension"|"surface"|"momentum"|"forces"|"authority"|"projection"|"acceptance",GPUBuffer>;
  private readonly state:GPUBuffer;
  /** The sticky GPU failure record (uniform-mixed-frame-status): the pressure
   * schedule's last gate is the frame's verdict and latches it; a latched
@@ -302,7 +282,7 @@ export class UniformMixedFrame {
   * which receipts have mapped depends on wall-clock timing, so a newest-wins
   * plan made free-running and awaited runs diverge. The receipt ring makes
   * frame N reuse that frame's buffer, so its receipt is always checked. */
- private readonly lagged=new Map<number,UniformMixedPressurePlan & {bandTiles:number;work:Uint32Array;sharpenWork:Uint32Array;listed:number;rootListed:number}>();
+ private readonly lagged=new Map<number,UniformMixedPressurePlan & {bandTiles:number;work:Uint32Array;listed:number;rootListed:number}>();
  private readonly reductions:GPUBuffer;
  private pressureSchedule!:UniformMixedPressureSchedule;
  /** The slot list of the first UNIFORM_MIXED_RECEIPT_RING frames: conservative. */
@@ -313,20 +293,19 @@ export class UniformMixedFrame {
  /** The simulation authority's pressure phi, one word per simulation owner
   * the capacity holds. */
  private authorityPhi:GPUBuffer;
- private sharpenList?:GPUBuffer;
  /** See UniformMixedFrameCapacity: a GPU relayout sets it, detaching clears it. */
  private liquidBand:boolean;
  private readonly fixedCapacity:boolean;
  private readonly byteBudget?:number;
  private busy=false;
  private failed=false;
- readonly narrowBandFlip?:UniformNarrowBandFlip;
+ readonly narrowBandFlip:UniformNarrowBandFlip;
  get narrowBandVolumeBudget():GPUBuffer|undefined{return this.surfaceVolume?.budget;}
  /** The budget's shift and measured volumes are those of the last step that
   * measured them: the first, and the one after each request. */
  private narrowBandVolumeProbe=true;
  requestNarrowBandVolumeProbe():void{this.narrowBandVolumeProbe=true;}
- get allocatedBytes():number{return this.cycles.allocatedBytes+(this.narrowBandFlip?.allocatedBytes??0)+(this.surfaceVolume?.allocatedBytes??0)+this.coarsePhi.allocatedBytes+(this.displacement?.allocatedBytes??0)+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+(this.transport?.allocatedBytes??this.ownership.allocatedBytes)+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.levels.filter(l=>l.ownership!==this.ownership).reduce((n,l)=>n+l.ownership.allocatedBytes,0)+this.owned.reduce((n,r)=>n+("size" in r?r.size:r.width*r.height*r.depthOrArrayLayers*16),0);}
+ get allocatedBytes():number{return this.cycles.allocatedBytes+(this.narrowBandFlip.allocatedBytes??0)+(this.surfaceVolume?.allocatedBytes??0)+this.coarsePhi.allocatedBytes+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+this.ownership.allocatedBytes+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.levels.filter(l=>l.ownership!==this.ownership).reduce((n,l)=>n+l.ownership.allocatedBytes,0)+this.owned.reduce((n,r)=>n+("size" in r?r.size:r.width*r.height*r.depthOrArrayLayers*16),0);}
  /** layout: the generation the t=0 fields are in (all h; the first
   * updateLayout remaps from it). capacity: the h tiles the owner-indexed
   * buffers hold until a layout reserves its own, independent of that seed. */
@@ -335,25 +314,21 @@ export class UniformMixedFrame {
   this.liquidBand=capacity.liquidBand;this.fixedCapacity=!!capacity.fixed;this.byteBudget=capacity.byteBudget;
   const buffer=(label:string,size:number,usage:number)=>{const b=device.createBuffer({label,size,usage});this.owned.push(b);return b;};
   const uniform=(name:string,size:number)=>buffer(`Uniform ${name} parameters`,size,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
-  this.params={extension:uniform("extension",16),surface:uniform("surface",32),momentum:uniform("momentum",32),forces:uniform("forces",48),authority:uniform("authority",16),sharpen:uniform("sharpen",32),projection:uniform("projection",32),acceptance:uniform("acceptance",16)};
+  this.params={extension:uniform("extension",16),surface:uniform("surface",32),momentum:uniform("momentum",32),forces:uniform("forces",48),authority:uniform("authority",16),projection:uniform("projection",32),acceptance:uniform("acceptance",16)};
   this.state=buffer("Uniform pressure acceptance",32,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.status=buffer("Uniform mixed frame status",4*UNIFORM_MIXED_STATUS_WORDS,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.initialPlan={vCycles:schedule.vCycles,fullCycles:schedule.fullCycles};
-  this.readbacks=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},(_,i)=>buffer(`Uniform pressure receipt and mass accounting ${i}`,TRACE_RECEIPT+(PRESSURE_TRACE?224:0),GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ));
+  this.readbacks=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},(_,i)=>buffer(`Uniform pressure receipt and mass accounting ${i}`,TRACE_RECEIPT,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ));
   this.reductions=buffer("Uniform dust accounting",48,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC);
   const caches=Array.from({length:1},(_,i)=>{const t=device.createTexture({label:`Uniform 4h sampling cache ${i}`,size:layout.lattice.dimensions.map(n=>n/4+2),dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});this.owned.push(t);return t;});
   const coarseLayout=uniformMixedAllCoarseLayout(layout);
   const solid=this.solid=f.solid?new UniformMixedSolid(device,f.solid,coarseLayout):undefined;
-  if(solid&&f.needs)solid.needs=f.needs;
   this.coarseCache=caches[0]!;
-  this.transport=f.narrowBandFlip?undefined:new UniformMixedTransportStage(device,layout,f.volume,f.volumeScratch,f.departure,{phi:f.phi,params:this.params.sharpen,reductions:this.reductions,resolved:true},f.sourceParams,solid,capacity.fineTiles);
-  const o=this.ownership=this.transport?.ownership??new UniformMixedOwnership(device,layout,true,capacity.fineTiles);
-  this.narrowBandFlip=f.narrowBandFlip?new UniformNarrowBandFlip(device,o,solid,f.narrowBandCoarseParticles,f.sourceParams,f.narrowBandAdaptiveSurface):undefined;
-  this.displacement=solid&&!f.narrowBandFlip?new UniformMixedSolidDisplacement(device,o,solid):undefined;
-  this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocity,f.negative,f.velocityScratch,f.negativeScratch,true,!!this.narrowBandFlip);
-  this.cleanup=f.narrowBandFlip?undefined:new UniformMixedCleanup(device,o,solid,true);
-  this.cleanupGroups=this.cleanup?[this.cleanup.bind(f.volume,f.volumeScratch,f.phi,this.params.sharpen,this.reductions),this.cleanup.bind(f.volumeScratch,f.volume,f.phi,this.params.sharpen,this.reductions)]:undefined;
-  this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,!!this.narrowBandFlip);
+  const o=this.ownership=new UniformMixedOwnership(device,layout,true,capacity.fineTiles);
+  this.cache=new UniformMixedMomentumCache(device,o);
+  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.narrowBandCoarseParticles,f.sourceParams,f.narrowBandAdaptiveSurface,this.cache);
+  this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocity,f.negative,f.velocityScratch,f.negativeScratch,true,true);
+  this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
   // The census extension crosses a relayout in these instead of being
   // rebuilt. Its faces stage in the unit taps: every texel a sampler reads
   // is rewritten by hanging/unitFaces before the first sampler, and nothing
@@ -389,20 +364,16 @@ export class UniformMixedFrame {
   // The h near-surface extension carries the advancing level-set toe.
   // A regular-only hierarchy previously lost long-dam toe motion.
   this.extension=new UniformMixedExtension(device,o,f.extension,false,true);
-  this.cache=new UniformMixedMomentumCache(device,o);
   const cacheFields={coarseExtended:caches[0]!};
   this.cacheGroup=this.cache.bind({extended:f.velocityScratch,negative:f.negativeScratch,...cacheFields});
   // Surface and momentum share hanging taps of velocityScratch: nothing
   // between the cache and forces writes it, negativeScratch or cache 0.
   this.hangingGroup=this.hanging.bind({extended:f.velocityScratch,negative:f.negativeScratch,coarse:caches[0]!});
-  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,true,true,!!this.narrowBandFlip);
-  this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid,true,!!f.narrowBandFlip);
+  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,true,true,true);
+  this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid,true,true);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
-  this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,true,true,!!f.narrowBandFlip,this.narrowBandFlip?.pressureDistance);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.narrowBandFlip?f.volume:undefined);
-  if(!this.narrowBandFlip){
-  this.sharpenList=buffer("Uniform mixed sharpening tile list",UniformMixedSharpening.workBytes(layout.tiles.length,o.capacity.owners),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
-  this.sharpen=new UniformMixedSharpening(device,o,solid,{list:this.sharpenList},true);
-  }
+  this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,true,true,true,this.narrowBandFlip.pressureDistance);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.volume);
+
   // Retain the projected h velocity detail: restricting all momentum to 4h
   // removes the long-dam toe even when total liquid volume is conserved.
   this.momentum=new UniformMixedMomentum(device,o,true,true,f.sourceParams);
@@ -411,7 +382,7 @@ export class UniformMixedFrame {
   // velocity): h sites in the unit texture, 4h sites in the coarse cache.
   this.forces=new UniformMixedForces(device,o,true,f.sourceParams,solid,true);
   this.stageScratch=buffer("Uniform mixed stage scratch",this.stageBytesAt(o.capacity.fineTiles),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);this.bindStage();
-  this.authority=new UniformMixedPressureAuthority(device,o,solid,false,false,!!this.narrowBandFlip);this.authorityGroup=this.bindAuthority();
+  this.authority=new UniformMixedPressureAuthority(device,o,solid,false,false,true);this.authorityGroup=this.bindAuthority();
   // Pressure couples the all-4h owners through the static coarse record.
   this.cycles=new UniformMixedPressureCycles(device,root,view(memory.backup),f.pressure,f.uniformGroup,openTop);
   const coarseSolid=!!solid;
@@ -438,7 +409,7 @@ export class UniformMixedFrame {
    // keeps the simulation layout's capacity).
    this.stageBandWord=p.layout.cellCount;this.stageGridWord=this.stageBandWord+uniformStageBandWords(n,this.stageBandTiles);
    this.presentation={pressure:{buffer:present("pressure",4*uniformMixedPressureStorage(p.layout).count)},phi:{buffer:present("pressure phi and stage grids",4*(this.stageGridWord+uniformStageGridWords(n)))}};
-   const authority=new UniformMixedPressureAuthority(device,p,solid,coarseSolid,true,!!this.narrowBandFlip);
+   const authority=new UniformMixedPressureAuthority(device,p,solid,coarseSolid,true,true);
    this.split={transfer,rhsGroup,projectionGroup,
     toPressure:transfer.bind({volume:f.volume,velocity:f.velocityScratch,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,negative:f.negative},this.status),
     toSimulation:transfer.bind({volume:f.volume,velocity:f.velocityScratch,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,negative:f.negative},this.status),
@@ -458,23 +429,21 @@ export class UniformMixedFrame {
   * each of which checks the buffer against its own need when it binds. */
  private stageBytesAt(fineTiles:number):number{
   const n=this.ownership.capacity.tiles;
-  return Math.ceil(Math.max(this.transport?UniformMixedTransportStage.scratchRanges(n,fineTiles).bytes:0,this.extension.scratchBytesAt(fineTiles),this.surface.scratchBytes,
-   this.surfaceVolume?.scratchBytesAt(fineTiles)??0,this.sharpen?UniformMixedSharpening.scratchBytes(63*fineTiles+n,fineTiles):0,UniformMixedForces.normalBytes(63*fineTiles+n))/256)*256;
+  return Math.ceil(Math.max(this.extension.scratchBytesAt(fineTiles),this.surface.scratchBytes,
+   this.surfaceVolume?.scratchBytesAt(fineTiles)??0,UniformMixedForces.normalBytes(63*fineTiles+n))/256)*256;
  }
- /** Every group over the stage scratch or the sharpening list (reserveFine binds them again). */
+ /** Every group over the stage scratch (reserveFine binds them again). */
  private bindStage():void{
-  this.narrowBandFlip?.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity,hanging:this.hanging});
+  this.narrowBandFlip.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity,hanging:this.hanging});
   const f=this.fields,stage:GPUBufferBinding={buffer:this.stageScratch};
-  this.transport?.bindScratch(this.stageScratch);
   this.extensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negative,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:stage,params:this.params.extension});
-  if(this.narrowBandFlip)this.flipSnapshotExtensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:stage,params:this.params.extension});
-  const surfaceFields={narrowBandState:this.narrowBandFlip?.state,unitVelocity:this.hanging.unitVelocity,velocity:f.velocityScratch,coarseVelocity:this.coarseCache,volume:f.volume,negative:f.negativeScratch,departures:f.departure,params:this.params.surface,evidence:stage};
+  this.flipSnapshotExtensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:stage,params:this.params.extension});
+  const surfaceFields={narrowBandState:this.narrowBandFlip.state,unitVelocity:this.hanging.unitVelocity,velocity:f.velocityScratch,coarseVelocity:this.coarseCache,volume:f.volume,negative:f.negativeScratch,departures:f.departure,params:this.params.surface,evidence:stage};
   this.surfaceGroups=[this.surface.bind({...surfaceFields,phi:f.phi,outputPhi:f.phiScratch}),this.surface.bind({...surfaceFields,phi:f.phiScratch,outputPhi:f.phi})];
-  if(this.surfaceVolume)this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,this.narrowBandFlip?f.target:f.volume,f.phi,stage,f.velocityScratch);
-  if(this.sharpen)this.sharpenGroups=[this.sharpen.bind(f.volume,f.volumeScratch,f.phi,f.target,f.centerPhi,stage,this.params.sharpen,this.reductions),this.sharpen.bind(f.volumeScratch,f.volume,f.phi,f.target,f.centerPhi,stage,this.params.sharpen,this.reductions)];
+  if(this.surfaceVolume)this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,f.target,f.phi,stage,f.velocityScratch);
   // NB-FLIP's transfer leaves the advected field in the stored velocity (a
   // kick forces that field where it stands), under momentum's walls.
-  this.forceGroup=this.forces.bind({unitVelocity:this.hanging.unitVelocity,advected:this.narrowBandFlip?f.velocity:f.departure,phi:f.phi,volume:f.volume,centerPhi:f.centerPhi,coarseVelocity:this.coarseCache,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.forces,curvature:f.phase,normals:stage});
+  this.forceGroup=this.forces.bind({unitVelocity:this.hanging.unitVelocity,advected:f.velocity,phi:f.phi,volume:f.volume,centerPhi:f.centerPhi,coarseVelocity:this.coarseCache,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.forces,curvature:f.phase,normals:stage});
  }
  private bindAuthority():UniformDetailGroup{
   const f=this.fields;
@@ -483,14 +452,13 @@ export class UniformMixedFrame {
  private bandTilesAt(fineTiles:number,liquidBand:boolean):number{
   // Particle spray can put a wet pressure row in every admitted fine tile.
   // The geometric method's half-domain liquid bound does not bound that set.
-  return liquidBand&&!this.narrowBandFlip?UniformPressureBand.capacityOf(this.ownership.capacity.tiles,fineTiles):Math.max(1,fineTiles);
+  return false?UniformPressureBand.capacityOf(this.ownership.capacity.tiles,fineTiles):Math.max(1,fineTiles);
  }
  /** Every buffer the h-tile capacity sizes, at `fineTiles` h tiles and
   * `bandTiles` band tiles: label and bytes. Each is one storage binding. */
  private capacityBuffers(fineTiles:number,bandTiles:number):[string,number][]{
   const n=this.ownership.capacity.tiles,owners=63*fineTiles+n,band=this.band.bytesAt(bandTiles);
-  return [["stage scratch",this.stageBytesAt(fineTiles)],["velocity tap cache",uniformMixedHangingBytes(n,fineTiles)],["pressure phi",4*owners],["sharpening tile list",UniformMixedSharpening.workBytes(n,owners)],
-   ...(this.displacement?[["solid displacement deposits",4*owners] as [string,number]]:[]),
+  return [["stage scratch",this.stageBytesAt(fineTiles)],["velocity tap cache",uniformMixedHangingBytes(n,fineTiles)],["pressure phi",4*owners],
    ["pressure band rows",band.rows],["pressure band aggregates",band.aggregates],["pressure band iterate",band.iterate],
    ["presented pressure phi",4*(this.stageBandWord+uniformStageBandWords(n,bandTiles)+uniformStageGridWords(n))]];
  }
@@ -542,7 +510,6 @@ export class UniformMixedFrame {
   if(owners){
    o.reserveFine(r.fineTiles,exact&&!!this.relayout);
    this.authorityPhi=replace(this.authorityPhi,4*o.capacity.owners);
-   if(this.sharpen&&this.sharpenList){this.sharpenList=replace(this.sharpenList,UniformMixedSharpening.workBytes(n,o.capacity.owners));this.sharpen.setWork(this.sharpenList);}
    this.stageScratch=replace(this.stageScratch,this.stageBytesAt(r.fineTiles));
    this.authorityGroup=this.bindAuthority();this.bindStage();
   }
@@ -567,10 +534,8 @@ export class UniformMixedFrame {
   const root=this.pressureOwnership;
   this.pressureSchedule=new UniformMixedPressureSchedule(this.device,this.schedule,this.state,
    {fine:root.support,supportWord:9*root.layout.tiles.length+24,status:this.status,band:this.band.index,bandClosedWord:UniformPressureBand.closedWord,acceptance:this.params.acceptance});
-  // Displacement runs on a live voxel edit or a body: built when that state is first prepared.
-  const needs=this.fields.needs??this.solid?.needs??new UniformPipelineNeeds();
-  await Promise.all([this.solid,{initialize:()=>needs.declare(["displace"],async()=>{await this.displacement?.initialize();})},this.transport,this.plan,this.cleanup,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band,this.narrowBandFlip]
-   .map(stage=>stage?.initialize()).concat(this.fields.detail?.prepare(this.ownership,needs)));
+  await Promise.all([this.solid,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band,this.narrowBandFlip]
+   .map(stage=>stage?.initialize()).concat(this.fields.detail?.prepare(this.ownership)));
   this.ready=true;
  }
  private lastParameters?:UniformMixedFrameParameters;
@@ -623,11 +588,11 @@ export class UniformMixedFrame {
   const h=this.ownership.capacity.lattice.cellSize_m;
   const floats=(b:GPUBuffer,v:number[])=>this.device.queue.writeBuffer(b,0,new Float32Array(v));
   const flags=(b:GPUBuffer,v:number[])=>this.device.queue.writeBuffer(b,16,new Uint32Array(v));
-  floats(this.params.extension,[...h,+p.openTop]);floats(this.params.surface,[...h,p.dt]);flags(this.params.surface,[+p.openTop|(p.preserve?2:0)|(p.coarseSurfaceTravel&&!this.narrowBandFlip?4:0)|(p.coarseHeldDistance&&!this.narrowBandFlip?8:0),+p.cubic,+(p.drain&&!this.narrowBandFlip),4]);
+  floats(this.params.extension,[...h,+p.openTop]);floats(this.params.surface,[...h,p.dt]);flags(this.params.surface,[+p.openTop|(p.preserve?2:0)|(false?4:0)|(false?8:0),+p.cubic,+(false),4]);
   floats(this.params.momentum,[...h,p.dt]);flags(this.params.momentum,[+p.openTop,0,0,UNIFORM_MIXED_MOMENTUM_LIMITS]);
-  floats(this.params.forces,[...h,p.dt,p.gravity,p.density,p.viscosity,p.surfaceTension,+p.noSlip,+p.openTop,0,p.dust]);
-  floats(this.params.authority,[this.narrowBandFlip?0:p.dt,!this.narrowBandFlip&&p.surfaceDeficitBalancing===true?0:-1,0,p.dust]);floats(this.params.sharpen,[p.sharpeningStrength,p.sharpeningDistance,p.dust,p.orphanDust??0,0,0,0,0]);
-  floats(this.params.projection,[...h,p.dt,p.density,+p.openTop,0,p.dust]);floats(this.params.acceptance,[p.dt/p.density,uniformMixedPressureTarget(p),UNIFORM_PRESSURE_RELATIVE_REDUCTION,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE]);
+  floats(this.params.forces,[...h,p.dt,p.gravity,p.density,p.viscosity,p.surfaceTension,+p.noSlip,+p.openTop,0,0]);
+  floats(this.params.authority,[0,false?0:-1,0,0]);
+  floats(this.params.projection,[...h,p.dt,p.density,+p.openTop,0,0]);floats(this.params.acceptance,[p.dt/p.density,uniformMixedPressureTarget(p),UNIFORM_PRESSURE_RELATIVE_REDUCTION,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE]);
   floats(this.bandParams,[...h,p.dt,p.density,+p.openTop,p.dt/p.density,Math.min(...h),0,...h.map(x=>Math.fround(1/Math.fround(Math.fround(x)*Math.fround(x))))]);
   const views=this.layoutViews?(this.relayout?UNIFORM_STAGE_VIEWS.previous|UNIFORM_STAGE_VIEWS.reasons|UNIFORM_STAGE_VIEWS.importance:0)|UNIFORM_STAGE_VIEWS.certificate|UNIFORM_STAGE_VIEWS.band:0;
   this.device.queue.writeBuffer(this.presentation.phi.buffer,4*this.stageGridWord,uniformStageGridHeader(this.ownership.capacity.tiles,this.stageBandTiles,views));
@@ -650,7 +615,7 @@ export class UniformMixedFrame {
  }
  /** Discarded mass uses native sixty-fourths-of-threshold counters, weighted
   * by owner volume. It is a quantized lower bound; counts name owners, not
-  * fine cells. Counters are reset once per frame, before transport cleanup. */
+  * fine cells. Counters are reset once per frame. */
  /** The projected kick U <- P(U + lead g): a frame's head, then forces and
   * the whole pressure solve over `lead` seconds, and no drift. A frame
   * drifts by dt U and then adds g dt, so the stored velocity is the drift's,
@@ -698,7 +663,7 @@ export class UniformMixedFrame {
    // carry its count until the receipt of the frame that built it is the one observed.
    const edit=relayout?.edit?.();
    if(edit)this.edits.push({frame,edit});
-   else if(relayout&&!this.censused){this.workEpoch=frame-1;this.band.observeWork(this.band.capacity);this.ownership.forgetWork();this.sharpen?.forgetWork();this.remap.forgetWork();}
+   else if(relayout&&!this.censused){this.workEpoch=frame-1;this.band.observeWork(this.band.capacity);this.ownership.forgetWork();this.remap.forgetWork();}
    while(this.edits.length&&this.edits[0]!.frame<=frame-UNIFORM_MIXED_RECEIPT_RING)this.edits.shift();
    const edited=this.edits.length?{tiles:this.edits.reduce((sum,e)=>sum+e.edit.tiles,0),reach:this.edits.reduce((sum,e)=>sum+e.edit.reach,0)}:undefined;
    const work=!kick&&frame-UNIFORM_MIXED_RECEIPT_RING>this.workEpoch?this.lagged.get(frame-UNIFORM_MIXED_RECEIPT_RING):undefined;
@@ -706,7 +671,7 @@ export class UniformMixedFrame {
    // A counted edit's build admits none but its own.
    const reserve=relayout&&!edit?UNIFORM_WORK_RELAYOUT_RESERVE:0;
    // The band's tiles are wet h tiles: an edit adds its own at most.
-   if(work){this.band.observeWork(work.bandTiles+(edited?.tiles??0),reserve);this.ownership.observeWork(work.work,reserve,edited);this.sharpen?.observeWork(work.sharpenWork,reserve,edited?.reach);this.remap.observeWork(work.listed,reserve,edited?.reach);this.cycles.observeWork(work.rootListed);}
+   if(work){this.band.observeWork(work.bandTiles+(edited?.tiles??0),reserve);this.ownership.observeWork(work.work,reserve,edited);this.remap.observeWork(work.listed,reserve,edited?.reach);this.cycles.observeWork(work.rootListed);}
    // Only a census certifies residency: a frame without one must not skip a page the last one did.
    if(!kick||relayout){if(!relayout&&this.censused)this.ownership.resetResidency();this.censused=!!relayout;}
    for(const ownership of new Set([this.ownership,...this.levels.map(l=>l.ownership)]))releases.push(ownership.acquireFrame());
@@ -714,7 +679,7 @@ export class UniformMixedFrame {
    const resetSurfaceTravel=this.lastParameters!==undefined&&!!this.lastParameters.coarseSurfaceTravel!==!!p.coarseSurfaceTravel;
    this.write(p);let encoder=makeEncoder();
    // The projection alone: at dt 0 the authority's volume correction and deficit balance are zero.
-   if(kick)this.device.queue.writeBuffer(this.params.authority,0,new Float32Array([0,-1,0,p.dust]));
+   if(kick)this.device.queue.writeBuffer(this.params.authority,0,new Float32Array([0,-1,0,0]));
    if(resetSurfaceTravel)this.surface.resetTravel(encoder);
    // Bodies moved at the last frame's tail: their cut cells are new, and the
    // census extension no longer matches the solid record or V.
@@ -726,7 +691,7 @@ export class UniformMixedFrame {
    // A host layout: a live solid edit, or the cells bodies entered, lands on
    // the live (host-promoted) ownership. A GPU relayout displaces after its
    // adopt, on the generation that promoted them (encodeRelayoutHead).
-   if(!relayout&&(this.solidEditPending||bodies)){this.displacement?.encode(encoder,this.fields.volume,!this.solidEditPending);this.solidEditPending=false;}
+   if(!relayout&&(this.solidEditPending||bodies)){this.solidEditPending=false;}
    // An attached relayout that built nothing this frame changed nothing: the view of the generation before is this one.
    if(!relayout&&this.relayout&&this.layoutViews)this.recordStageView(encoder,{buffer:this.ownership.presentation.buffer,offset:this.ownership.presentation.offset??0},"previous");
    // Submit the frame in segments as it encodes: the GPU starts each one
@@ -764,7 +729,7 @@ export class UniformMixedFrame {
    this.plan.encodeCertificate(encoder,p.dt);if(this.layoutViews)this.recordStageView(encoder,this.plan.certificate,"certificate");
    this.cache.encode(encoder,this.cacheGroup);if(this.ownership.capacity.fineTiles>0)this.hanging.encode(encoder,this.hangingGroup);
    trace?.phase(encoder,V.transportReach);
-   if(this.narrowBandFlip){
+   {
     const control=(p.volumeControlSeconds??0)>0?1/p.volumeControlSeconds!:0;
     this.surfaceVolume!.beginStep(encoder,this.surfaceVolumeGroup,p.dt,p.addedVolumeCells??0,p.openTop,control);
     // The gauge's rate reaches the authorities' parameters on the GPU: this
@@ -775,26 +740,20 @@ export class UniformMixedFrame {
    // host encodes the surface stages behind it.
    // The move closes its own share of the phi stage: passes after a
    // submission's last mark are in no stage's time.
-   if(this.narrowBandFlip){this.narrowBandFlip.move(encoder,p.dt,p.openTop,p.gravity);trace?.phase(encoder,V.phi);flush();}
+   {this.narrowBandFlip.move(encoder,p.dt,p.openTop,p.gravity);trace?.phase(encoder,V.phi);flush();}
    this.surface.encode(encoder,"advect",this.surfaceGroups[0]);this.phiResolve.encode(encoder,this.phiResolveGroups.scratch);
    // Cell departures feed conservative volume transport only. NB-FLIP
    // measures volume from phi, and momentum writes this scratch field later.
-   if(!this.narrowBandFlip)this.surface.encode(encoder,"traceCells",this.surfaceGroups[0]);
-   if(this.narrowBandFlip){
+   {
     // Eq. 4: the samples overrule the advected interface before distance,
     // occupancy and pressure read it.
     this.copyWhole(encoder,this.fields.phiScratch,this.fields.phi);
     this.narrowBandFlip.reconstruct(encoder);
     this.phiResolve.encode(encoder,this.phiResolveGroups.scratch);
    }
-   if(p.redistance!==false){if(this.narrowBandFlip)this.narrowBandFlip.redistance(encoder);else this.surface.encode(encoder,"redistance",this.surfaceGroups[1]);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}else this.copyWhole(encoder,this.fields.phiScratch,this.fields.phi);
+   if(p.redistance!==false){this.narrowBandFlip.redistance(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}else this.copyWhole(encoder,this.fields.phiScratch,this.fields.phi);
    trace?.phase(encoder,V.phi);flush();
-   if(!this.narrowBandFlip){
-   this.transport!.encodeTransport(encoder);
-   // Cleanup and surface correction read the independent h phi field.
-   // Transport leaves V (regular floor applied) in volumeScratch: the orphan census or the copy returns it.
-   if(p.dust>0)this.cleanup!.encode(encoder,this.cleanupGroups![1]);else this.transport!.encodeCopy(encoder);
-   }
+
    trace?.phase(encoder,V.coupling);
    // Apply shifts canonical vertices only; resolved readers below and the
    // next advect read the hanging texels.
@@ -803,8 +762,7 @@ export class UniformMixedFrame {
    // next step's union with them, so it would be paid again every step.
    // That measurement is a diagnostic alone, so a step encodes it only for
    // a reader that asked (requestNarrowBandVolumeProbe).
-   if(this.narrowBandFlip){if(this.narrowBandVolumeProbe){this.narrowBandVolumeProbe=false;this.surfaceVolume!.encode(encoder,this.surfaceVolumeGroup,1,false,false);}}
-   else if(p.totalSurfaceVolume!==false&&(p.surfaceVolumeRounds??2)>0){this.surfaceVolume!.encode(encoder,this.surfaceVolumeGroup,p.surfaceVolumeRounds??2);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}
+   {if(this.narrowBandVolumeProbe){this.narrowBandVolumeProbe=false;this.surfaceVolume!.encode(encoder,this.surfaceVolumeGroup,1,false,false);}}
    // Nothing after this pass writes phi: the next advance starts from it,
    // and the renderer's 4h vertex base is published from it.
    this.coarsePhi.encode(encoder);
@@ -812,14 +770,13 @@ export class UniformMixedFrame {
    }
 
    // Nothing below writes phi before the split reads the pressure geometry.
-   this.encodeGeometry(encoder,{pressure:true,metric:!!this.narrowBandFlip&&!kick&&p.redistance!==false});this.geometryCurrent=true;
+   this.encodeGeometry(encoder,{pressure:true,metric:!kick&&p.redistance!==false});this.geometryCurrent=true;
    trace?.phase(encoder,V.gather);
-   if(this.sharpen&&this.sharpenGroups&&!kick&&p.sharpening!==false&&(p.sharpeningSweeps??8)>0&&p.sharpeningDistance>0){this.sharpen.encodeGeometry(encoder,this.sharpenGroups[0]);this.sharpen.encodeSweeps(encoder,this.sharpenGroups,p.sharpeningSweeps??8);}
-   trace?.phase(encoder,V.sharpen);
+
    // A kick forces the stored field where it stands.
    if(kick){this.copyWhole(encoder,this.fields.velocity,this.fields.departure);encoder.copyBufferToBuffer(this.fields.negative,0,this.fields.negativeDeparture,0,this.fields.negative.size);}
    else this.momentum.encode(encoder,this.momentumGroup);
-   if(!kick&&this.narrowBandFlip){
+   if(!kick){
     this.plan.encode(encoder,p.supportPolicy);
     this.authority.encode(encoder,this.authorityGroup,false);
     this.narrowBandFlip.transfer(encoder);
@@ -828,7 +785,7 @@ export class UniformMixedFrame {
     this.extension.encode(encoder,this.flipSnapshotExtensionGroups!,p.extensionSweeps??2);
     this.narrowBandFlip.snapshot(encoder);
    }
-   this.forces.encode(encoder,this.forceGroup,p.surfaceTension>0,p.coarseSurfaceTravel===true);
+   this.forces.encode(encoder,this.forceGroup,p.surfaceTension>0);
    trace?.phase(encoder,A.advectionCorrection);flush();
    // Pressure stays all-4h; no layout build and no CPU wait. The band rows
    // need this frame's simulation authority and u*, both rewritten in
@@ -874,7 +831,7 @@ export class UniformMixedFrame {
    trace?.phase(encoder,A.pressureProjection);
    split.transfer.encodeToSimulation(encoder,split.toSimulation);
    this.band.encodeSolve(encoder);
-   if(!kick&&this.narrowBandFlip){
+   if(!kick){
     this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2,true);
     this.narrowBandFlip.update(encoder);
    }
@@ -897,15 +854,12 @@ export class UniformMixedFrame {
    encoder.copyBufferToBuffer(this.ownership.support,violation,readback,DETAIL_RECEIPT,4);encoder.copyBufferToBuffer(this.pressureOwnership.support,violation,readback,DETAIL_RECEIPT+4,4);
    if(this.fields.detail)this.fields.detail.encodeReceipt(encoder,readback,DETAIL_RECEIPT+8);
    this.ownership.encodeWorkReceipt(encoder,readback,WORK_RECEIPT);
-   if(this.sharpen)this.sharpen.encodeWorkReceipt(encoder,readback,SHARPEN_WORK_RECEIPT);
-   else encoder.clearBuffer(readback,SHARPEN_WORK_RECEIPT,REMAP_WORK_RECEIPT-SHARPEN_WORK_RECEIPT);
    this.remap.encodeWorkReceipt(encoder,readback,REMAP_WORK_RECEIPT);this.cycles.encodeWorkReceipt(encoder,readback,ROOT_WORK_RECEIPT);
-   if(this.narrowBandFlip)encoder.copyBufferToBuffer(this.narrowBandFlip.state,0,readback,FLIP_RECEIPT,48);
-   if(PRESSURE_TRACE){const at=TRACE_RECEIPT;schedule.encodeTraceCopy(encoder,readback,at);encoder.copyBufferToBuffer(this.band.index,0,readback,at+128,96);}
+   encoder.copyBufferToBuffer(this.narrowBandFlip.state,0,readback,FLIP_RECEIPT,48);
    // The next head's census and advection read this extension: it is the
    // frame's velocity extension, priced there, not the census's.
    // Phase is this frame's simulation authority's unless rigid bodies moved since.
-   if(!kick&&this.narrowBandFlip&&!bodies){
+   if(!kick&&!bodies){
     // G2P changed only particles. Its post-pressure extension is already the
     // next frame's field. Refresh the speed/support plan, not that extension.
     // Moving bodies retain the normal rebuild after their velocity/solid edits.
@@ -917,22 +871,15 @@ export class UniformMixedFrame {
    return this.check(readback,frame,p,plan.vCycles+plan.fullCycles,kick>0);
   }catch(error){trace?.abort();this.failed=true;throw error;}finally{for(const release of releases)release();this.busy=false;}
  }
- private tracePressure(frame:number,w:Uint32Array):void{
-  const f=new Float32Array(w.buffer,w.byteOffset,w.length),c=f.subarray(0,32),band=w.subarray(32,56),bf=f.subarray(32,56);
-  const slots=w[12]!+w[13]!,ran=w[16]!+w[17]!;
-  console.log(`PTRACE ${JSON.stringify({frame,plan:[w[12],w[13]],ran:[w[16],w[17]],initial:c[8],slots:Array.from({length:ran},(_,i)=>c[18+i]),stalled:w[7],vStalled:w[6],next:[w[14],w[15]],
-   band:{tiles:band[0],cycles:band[4],final:bf[2],history:Array.from(bf.subarray(8,8+6))},slotsEncoded:slots})}`);
- }
  /** Frame `frame`'s receipt: fail fast on a rejected or unconverged solve. */
  private async check(readback:GPUBuffer,frame:number,p:UniformMixedFrameParameters,encoded:number,kick=false):Promise<UniformMixedFrameReceipt>{
   let mapped:Uint32Array;
   try{
    await readback.mapAsync(GPUMapMode.READ);
-   mapped=new Uint32Array(readback.getMappedRange(),0,TRACE_RECEIPT/4+(PRESSURE_TRACE?56:0)).slice();readback.unmap();
-   if(PRESSURE_TRACE)this.tracePressure(frame,mapped.slice(TRACE_RECEIPT/4));
+   mapped=new Uint32Array(readback.getMappedRange(),0,TRACE_RECEIPT/4).slice();readback.unmap();
   }catch(error){this.failed=true;throw error;}finally{this.unchecked.delete(readback);}
   try{
-   this.narrowBandFlip?.noteReceipt(mapped.subarray(FLIP_RECEIPT/4,FLIP_RECEIPT/4+12));
+   this.narrowBandFlip.noteReceipt(mapped.subarray(FLIP_RECEIPT/4,FLIP_RECEIPT/4+12));
    const state=mapped.slice(0,8),accounting=mapped.slice(8,20);
    // The GPU's own verdict first: it names the first failing frame.
    const failure=describeUniformMixedFrameStatus(mapped.slice(30,30+UNIFORM_MIXED_STATUS_WORDS));
@@ -940,20 +887,20 @@ export class UniformMixedFrame {
    this.fields.detail?.noteReceipt(mapped.subarray(DETAIL_RECEIPT/4+2,DETAIL_RECEIPT/4+DETAIL_RECEIPT_WORDS));
    const detail=mapped[DETAIL_RECEIPT/4]!|mapped[DETAIL_RECEIPT/4+1]!;
    if(detail)throw new Error(`Uniform detail storage: a store a non-resident tile cannot hold (${Object.entries(UNIFORM_DETAIL_VIOLATION).filter(([,bit])=>detail&bit).map(([kind])=>kind).join(", ")} field; simulation ${mapped[DETAIL_RECEIPT/4]}, pressure ${mapped[DETAIL_RECEIPT/4+1]})${failure?`; ${failure}`:""}`);
-   if(failure)throw new Error(`${failure}${mapped[30]===UNIFORM_MIXED_FAILURE.layoutCapacity&&mapped[33]!&UNIFORM_MIXED_OVERFLOW_FINE?`; the layout holds ${mapped[WORK_RECEIPT/4]} h tiles, capacity ${this.ownership.capacity.fineTiles}`:""}; projection withheld${typeof process!=="undefined"&&process.env.FLUID_MIXED_HOST_DIAGNOSTICS?`; params ${JSON.stringify(p)}; receipt ${[...state]}`:""}`);
+   if(failure)throw new Error(`${failure}${mapped[30]===UNIFORM_MIXED_FAILURE.layoutCapacity&&mapped[33]!&UNIFORM_MIXED_OVERFLOW_FINE?`; the layout holds ${mapped[WORK_RECEIPT/4]} h tiles, capacity ${this.ownership.capacity.fineTiles}`:""}; projection withheld${""}`);
    const residual=new Float32Array(state.buffer)[1]!,count=state[7]!;
    if(state[4]!==0||state[5]===0||!Number.isFinite(residual)||residual<0||residual>uniformMixedPressureTarget(p)){
-    throw new Error(`Uniform mixed pressure ${state[4]!==0?"rejected a non-improving cycle":"did not converge"}: candidate ${new Float32Array(state.buffer)[0]}, accepted ${residual}, tolerance ${uniformMixedPressureTarget(p)}, ${count} cycles; projection withheld${typeof process!=="undefined"&&process.env.FLUID_MIXED_HOST_DIAGNOSTICS?`; params ${JSON.stringify(p)}; receipt ${[...state]}`:""}`);
+    throw new Error(`Uniform mixed pressure ${state[4]!==0?"rejected a non-improving cycle":"did not converge"}: candidate ${new Float32Array(state.buffer)[0]}, accepted ${residual}, tolerance ${uniformMixedPressureTarget(p)}, ${count} cycles; projection withheld${""}`);
    }
    if(mapped[23]!==0)throw new Error(`Uniform pressure band needs ${mapped[22]} tiles, over its capacity; projection is incomplete`);
    this.bandTiles=mapped[22]!;this.bandResidual=new Float32Array(mapped.buffer)[24]!;
    // Only an accepted solve plans; a failed one threw above. Frame
    // frame+UNIFORM_MIXED_RECEIPT_RING encodes it, whenever this resolves.
-   if(!kick)this.lagged.set(frame,{vCycles:mapped[20]!,fullCycles:mapped[21]!,bandTiles:mapped[22]!,work:mapped.slice(WORK_RECEIPT/4,SHARPEN_WORK_RECEIPT/4),sharpenWork:mapped.slice(SHARPEN_WORK_RECEIPT/4,REMAP_WORK_RECEIPT/4),listed:mapped[REMAP_WORK_RECEIPT/4]!,rootListed:mapped[ROOT_WORK_RECEIPT/4]!});
+   if(!kick)this.lagged.set(frame,{vCycles:mapped[20]!,fullCycles:mapped[21]!,bandTiles:mapped[22]!,work:mapped.slice(WORK_RECEIPT/4,REMAP_WORK_RECEIPT/4),listed:mapped[REMAP_WORK_RECEIPT/4]!,rootListed:mapped[ROOT_WORK_RECEIPT/4]!});
    const cells=this.ownership.capacity.lattice.dimensions.reduce((n,d)=>n*d,1);
-   const orphanDustMass_cells=uniformMixedDustMass(accounting,10,p.orphanDust??0,cells);
+   const orphanDustMass_cells=0;
    return {cycles:count,encoded,residual,converged:true,
-    dustOwners:accounting[5]!+accounting[10]!,dustMass_cells:uniformMixedDustMass(accounting,5,p.dust,cells)+orphanDustMass_cells,
+    dustOwners:accounting[5]!+accounting[10]!,dustMass_cells:0,
     orphanDustOwners:accounting[10]!,orphanDustMass_cells,bandTiles:mapped[22]!,bandCycles:mapped[26]!,bandResidual:this.bandResidual};
   }catch(error){this.failed=true;throw new Error(`Uniform mixed ${kick?`kick before frame ${frame+1}`:`frame ${frame}`}: ${error instanceof Error?error.message:String(error)}`,{cause:error});}
  }
@@ -976,7 +923,7 @@ export class UniformMixedFrame {
  updateLayout(layout:UniformMixedLayout):string|undefined{
   if(!this.ready||this.busy||this.failed)throw new Error("Ownership edits require a completed frame");
   if(this.relayout)throw new Error("A GPU relayout owns the mixed layout: detach it (setRelayout()) before a host relayout");
-  const refusal=this.fields.detail?.refusal(layout)??this.reserveFine(layout.fineTiles.length);if(refusal)return refusal;
+  const refusal=this.reserveFine(layout.fineTiles.length);if(refusal)return refusal;
   // An authored refinement is immediate evidence of possible new band work;
   // reserve launch parallelism before its first frame, ahead of the lagged
   // liquid-band receipts. The actual band may occupy fewer of these tiles.
@@ -1005,7 +952,7 @@ export class UniformMixedFrame {
   if(!first)detail?.encodeRetire(e);
   // The pressure root takes the adopted generation's ring bit (a first layout has no admit).
   detail?.encodeSettle(e,true);
-  if(this.narrowBandFlip){
+  {
    this.solid?.encodeSimulation(e,this.ownership.presentation);this.solidWidthsStale=false;
    this.plan.encode(e);this.encodeGeometry(e);
   }
@@ -1052,7 +999,7 @@ export class UniformMixedFrame {
   // the host UNIFORM_MIXED_RECEIPT_RING frames late: launch at the ceilings
   // until a receipt of this owner arrives. A budget left at the host
   // layout's (one group from all-4h) runs the new h tiles on a few lanes.
-  if(relayout&&!counted){this.workEpoch=this.frameIndex;this.band.observeWork(this.band.capacity);this.ownership.forgetWork();this.sharpen?.forgetWork();this.remap.forgetWork();}
+  if(relayout&&!counted){this.workEpoch=this.frameIndex;this.band.observeWork(this.band.capacity);this.ownership.forgetWork();this.remap.forgetWork();}
   // The GPU census admits patches with no host round trip: every patch has a slot.
   if(relayout)this.fields.detail?.reserveAll();
   // markChanged latches a builder fatal into this frame's record.
@@ -1070,7 +1017,7 @@ export class UniformMixedFrame {
   *  3. adopt (UniformMixedRemap.applyGpu): the builder's buffers into the
   *     target, remap volume, velocity, phi and the extension, adopt into the
   *     live ownership, publish; an unchanged generation lists no tile;
-  *  4. phi resolve, displacement (solid edits, bodies' new cells) and the
+  *  4. phi resolve, geometry (solid edits, bodies' new cells) and the
   *     cut widths on the adopted generation;
   *  5. plan, gather and phase on it: they belong to the ownership, not the
   *     field, so they are rebuilt every frame (the host no longer knows
@@ -1114,7 +1061,7 @@ export class UniformMixedFrame {
   this.fields.detail?.encodeSettle(encoder,false);
   // Only the relayout moved phi since the last geometry unless solids moved.
   const solidsMoved=this.solidEditPending||bodies;
-  if(this.solidEditPending||bodies){this.displacement?.encode(encoder,this.fields.volume,!this.solidEditPending);this.solidEditPending=false;}
+  if(this.solidEditPending||bodies){this.solidEditPending=false;}
   // Which cut tiles the simulation holds at h: the all-4h levels read their h texels.
   this.solid?.encodeSimulation(encoder,this.ownership.presentation,this.solidWidthsStale?undefined:changes);this.solidWidthsStale=false;
   if(this.solid)trace?.phase(encoder,V.solids);
@@ -1130,5 +1077,5 @@ export class UniformMixedFrame {
   if(this.coarsePhi.adopted)return;
   const e=this.device.createCommandEncoder({label:"Uniform publish 4h vertex phi base"});this.coarsePhi.encode(e);this.device.queue.submit([e.finish()]);
  }
- destroy():void{this.cycles.destroy();this.surfaceVolume?.destroy();this.narrowBandFlip?.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.displacement?.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();if(this.transport)this.transport.destroy();else this.ownership.destroy();this.cleanup?.destroy();this.split.transfer.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
+ destroy():void{this.cycles.destroy();this.surfaceVolume?.destroy();this.narrowBandFlip.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.ownership.destroy();this.split.transfer.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
 }

@@ -172,7 +172,7 @@ test("a pass encoded after the last seam is unclaimed, never charged to a row", 
   const recorder = new RenderFrameSeamRecorder();
   const encoder = recorder.instrument(fakeEncoder());
   encoder.beginComputePass();
-  recorder.close("fluid-coverage");
+  recorder.close("rigid-pose-mirror");
   encoder.beginComputePass();
   assert.equal(recorder.manifest().unclaimed, 1);
 });
@@ -218,11 +218,10 @@ test("a band sums its rows' own stages and nothing else", () => {
     ["world-topology-publish", { expected_ms: 1.5, encodedFraction: 1 }],
     ["world-proxy-voxelize", { expected_ms: 2.5, encodedFraction: 1 }],
     ["world-derived-lighting", { expected_ms: 3, encodedFraction: 1 }],
-    ["fluid-coverage", { expected_ms: 0.07, encodedFraction: 1 }],
   ]);
   const band = measureRenderPipelineBand("source", durations, 40);
   assert.equal(band.kind, "measured");
-  assert.ok(Math.abs((band.duration_ms ?? 0) - 7.07) < 1e-9);
+  assert.ok(Math.abs((band.duration_ms ?? 0) - 7) < 1e-9);
 });
 
 test("stage durations come from the trace by label, and unowned labels are reported", () => {

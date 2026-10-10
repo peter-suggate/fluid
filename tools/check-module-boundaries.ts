@@ -1,24 +1,7 @@
-/**
- * Module boundary check for the fluid-core / method-plugin layout.
- *
- * Rules (docs/method-decoupling-handoff.md §2.1):
- *   1. lib/core imports nothing outside lib/core.
- *   2. lib/methods/<m> imports lib/core, itself, and (losasso/power only)
- *      lib/methods/octree-shared; Uniform/APIC may use mac-shared. Never another method.
- *   3. lib/methods/octree-shared imports only lib/core and itself.
- *   4. Nothing imports lib/harness except tools/ and tests/.
- *   5. components/, app/, worker/ import lib/core only.
- *   6. Nothing in lib/ imports shape-lab/.
- *   7. lib/svo is a rendering layer, not a method: it imports lib/core and
- *      itself, and no method may import it. The renderer composes it; nothing
- *      about a simulation method may reach it, and it may not reach a method.
- *   8. Only a composition root may import the method catalog. Everything else
- *      resolves a method through lib/core/method-registry.
- *   9. lib/sparse-world is a public semantic boundary shared by core and sparse
- *      methods. Its internal adapters may reach a method implementation; its
- *      public index may not.
- *
- * Run: node --import tsx tools/check-module-boundaries.ts [--strict]
+/** Plugin boundaries for the retained solver, shared features and SVO renderer.
+ * The advance and shape labs are independent hosts. Only composition roots
+ * install the simulation catalog; other modules resolve the contract registry.
+ * Run with --strict to fail on a forbidden edge.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -33,16 +16,7 @@ type Zone =
   | "feature"
   | "composition"
   | "core"
-  | "method-sph"
-  | "method-particle"
-  | "mac-shared"
   | "method-uniform"
-  | "method-losasso"
-  | "method-power"
-  | "method-adaptive-mass"
-  | "method-adaptive-volume"
-  | "octree-shared"
-  | "sparse-world"
   | "svo"
   | "harness"
   | "shape-lab"
@@ -57,16 +31,7 @@ function zoneOf(relPath: string): Zone {
   if (relPath.startsWith("lib/features/ui/")) return "composition";
   if (relPath.startsWith("lib/features/")) return "feature";
   if (relPath.startsWith("lib/core/")) return "core";
-  if (relPath.startsWith("lib/methods/sph/")) return "method-sph";
-  if (relPath.startsWith("lib/methods/particle/")) return "method-particle";
-  if (relPath.startsWith("lib/methods/mac-shared/")) return "mac-shared";
   if (relPath.startsWith("lib/methods/uniform/")) return "method-uniform";
-  if (relPath.startsWith("lib/methods/losasso/")) return "method-losasso";
-  if (relPath.startsWith("lib/methods/power/")) return "method-power";
-  if (relPath.startsWith("lib/methods/adaptive-mass/")) return "method-adaptive-mass";
-  if (relPath.startsWith("lib/methods/adaptive-volume/")) return "method-adaptive-volume";
-  if (relPath.startsWith("lib/methods/octree-shared/")) return "octree-shared";
-  if (relPath.startsWith("lib/sparse-world/")) return "sparse-world";
   if (relPath.startsWith("lib/svo/")) return "svo";
   if (relPath.startsWith("lib/harness/")) return "harness";
   if (relPath.startsWith("shape-lab/")) return "shape-lab";
@@ -80,26 +45,11 @@ function zoneOf(relPath: string): Zone {
 const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
   framework: new Set<Zone>(["framework"]),
   feature: new Set<Zone>(["framework", "core", "feature", "ui"]),
-  composition: new Set<Zone>(["framework", "core", "feature", "composition", "ui", "svo", "method-sph", "method-particle", "method-uniform", "method-losasso", "method-power", "method-adaptive-mass", "method-adaptive-volume"]),
+  composition: new Set<Zone>(["framework", "core", "feature", "composition", "ui", "svo", "method-uniform"]),
   // Core composes the SVO layer: the production renderer draws through it.
   // The reverse direction is what carries the meaning — see "svo" below.
-  core: new Set<Zone>(["core", "svo", "sparse-world", "framework", "feature"]),
-  "method-uniform": new Set<Zone>(["core", "method-uniform", "mac-shared"]),
-  "method-sph": new Set<Zone>(["core", "method-sph"]),
-  "method-particle": new Set<Zone>(["core", "method-particle", "mac-shared"]),
-  "mac-shared": new Set<Zone>(["core", "mac-shared"]),
-  "method-losasso": new Set<Zone>(["core", "octree-shared", "method-losasso"]),
-  "method-power": new Set<Zone>(["core", "octree-shared", "method-power"]),
-  "method-adaptive-mass": new Set<Zone>([
-    "core", "method-adaptive-mass", "sparse-world",
-  ]),
-  "method-adaptive-volume": new Set<Zone>([
-    "core", "method-adaptive-volume", "sparse-world",
-  ]),
-  "octree-shared": new Set<Zone>(["core", "octree-shared"]),
-  // The method edge exists only under sparse-world/internal during Phase A;
-  // a dedicated public-index audit below keeps it out of the semantic API.
-  "sparse-world": new Set<Zone>(["core", "sparse-world", "method-adaptive-mass", "method-adaptive-volume"]),
+  core: new Set<Zone>(["core", "svo", "framework", "feature"]),
+  "method-uniform": new Set<Zone>(["core", "method-uniform"]),
   // The SVO stack encodes and traces voxels. Which solver filled them is not
   // its business, so no method zone appears here — that absence is the rule.
   svo: new Set<Zone>(["core", "svo"]),
@@ -108,15 +58,6 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "harness",
     "svo",
     "method-uniform",
-    "method-sph",
-    "method-particle",
-    "mac-shared",
-    "method-losasso",
-    "method-power",
-    "method-adaptive-mass",
-    "method-adaptive-volume",
-    "octree-shared",
-    "sparse-world",
   ]),
   // The lab expands SVO primitives and field programs on CPU — that is what it
   // is for. It stays barred from every method, which is the rule that matters.
@@ -124,9 +65,8 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
   // The 2-D advance lab is a second *host*, not a second method: it renders the
   // same capability modules the studio does over a Rust/Wasm world. So it may
   // reach core, the shared UI primitives, the feature packages and the framework
-  // that composes them, plus `lib/physics-wasm` (its world) and the adaptive-
-  // volume method's own declarations (the stage list it draws). What it may not
-  // reach is another method — the same absence every other zone carries.
+  // that composes them, plus `lib/physics-wasm` (its world). Solver packages
+  // remain private to their composition roots.
   "advance-lab": new Set<Zone>([
     "core",
     "ui",
@@ -134,7 +74,6 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "composition",
     "framework",
     "lib-other",
-    "method-adaptive-volume",
     "advance-lab",
     "tooling",
   ]),
@@ -143,15 +82,6 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "lib-other",
     "svo",
     "method-uniform",
-    "method-sph",
-    "method-particle",
-    "mac-shared",
-    "method-losasso",
-    "method-power",
-    "method-adaptive-mass",
-    "method-adaptive-volume",
-    "octree-shared",
-    "sparse-world",
     "harness",
   ]),
   // The UI presents the render layer's own diagnostics (pixel traces, SVO
@@ -166,15 +96,6 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "harness",
     "svo",
     "method-uniform",
-    "method-sph",
-    "method-particle",
-    "mac-shared",
-    "method-losasso",
-    "method-power",
-    "method-adaptive-mass",
-    "method-adaptive-volume",
-    "octree-shared",
-    "sparse-world",
     "lib-other",
     "shape-lab",
     "advance-lab",
@@ -189,7 +110,7 @@ function listSources(dir: string, out: string[] = []): string[] {
     const p = join(dir, name);
     const st = statSync(p);
     if (st.isDirectory()) listSources(p, out);
-    else if (/\.(ts|tsx)$/.test(name)) out.push(p);
+    else if (/\.(ts|tsx|mts)$/.test(name)) out.push(p);
   }
   return out;
 }
@@ -199,7 +120,7 @@ function resolveSpec(fromFile: string, spec: string): string | null {
   if (spec.startsWith(".")) base = resolve(dirname(fromFile), spec);
   else if (spec.startsWith("@/")) base = resolve(REPO, spec.slice(2));
   else return null;
-  for (const c of [base, `${base}.ts`, `${base}.tsx`, join(base, "index.ts"), join(base, "index.tsx")]) {
+  for (const c of [base, `${base}.ts`, `${base}.tsx`, `${base}.mts`, join(base, "index.ts"), join(base, "index.tsx")]) {
     if (existsSync(c) && statSync(c).isFile()) return c;
   }
   return null;
@@ -232,15 +153,6 @@ const COMPOSITION_ROOTS = new Set<string>([
 
 const METHOD_CATALOG = "lib/methods/index.ts";
 
-// These are the only sparse-world composition edges into either independent
-// method. Neither method may use the other's adapter/device-library pair.
-const SPARSE_METHOD_OWNERS = new Map<string, Zone>([
-  ["lib/sparse-world/internal/cm12-adapter.ts", "method-adaptive-mass"],
-  ["lib/sparse-world/internal/cm12-device-library.ts", "method-adaptive-mass"],
-  ["lib/sparse-world/internal/adaptive-volume-adapter.ts", "method-adaptive-volume"],
-  ["lib/sparse-world/internal/adaptive-volume-device-library.ts", "method-adaptive-volume"],
-]);
-
 function main() {
   const strict = process.argv.includes("--strict");
   const violations: string[] = [];
@@ -263,19 +175,11 @@ function main() {
           continue;
         }
         const to = zoneOf(targetRel);
-        const adapterOwner = SPARSE_METHOD_OWNERS.get(targetRel);
-        const sourceAdapterOwner = SPARSE_METHOD_OWNERS.get(rel);
-        if ((from === "sparse-world" && to.startsWith("method-") && sourceAdapterOwner !== to)
-          || (adapterOwner && from.startsWith("method-") && adapterOwner !== from)
-          || (adapterOwner && sourceAdapterOwner && adapterOwner !== sourceAdapterOwner)) {
-          violations.push(`${rel} [${from}] → ${targetRel} [${to}]`);
-          continue;
-        }
         // Feature-owned React adapters consume the shared UI primitives. Numerical
         // modules retain the prohibition against reaching the UI layer.
         const featureView = /\/(?:ui|controls)\.tsx$/.test(rel) && (from === "svo" || from.startsWith("method-"));
         const persistenceCatalog = rel === "lib/features/persistence.ts" && to === "svo";
-        const sharedFeatureDefinition = (from.startsWith("method-") || rel === "lib/sparse-world/ui.ts") && to === "feature" && (targetRel.endsWith("/definition.ts") || targetRel === "lib/features/pressure-inspection/journal.ts" || targetRel === "lib/features/pressure-inspection/gpu/overlay.ts");
+        const sharedFeatureDefinition = from.startsWith("method-") && to === "feature" && (targetRel.endsWith("/definition.ts"));
         const frameworkConsumer = to === "framework" && from !== "framework";
         if (!ALLOWED[from].has(to) && !frameworkConsumer && !persistenceCatalog && !sharedFeatureDefinition && !(featureView && to === "ui")) {
           violations.push(`${rel} [${from}] → ${relative(REPO, target)} [${to}]`);

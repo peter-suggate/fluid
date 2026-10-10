@@ -1,9 +1,9 @@
 import { create, type StoreApi, type UseBoundStore } from "zustand";
-import type { AdvanceStageId } from "../lib/methods/adaptive-volume/features/advance-slice/advance-work";
+import type { AdvanceStageId } from "./advance-work";
 import {
   ADVANCE_DEFAULT_SURFACE_VIEW, ADVANCE_DEFAULT_TRANSPORT_EXPERIMENT,
   ADVANCE_TRANSPORT_EXPERIMENTS, type AdvanceSurfaceViewId,
-} from "../lib/methods/adaptive-volume/features/advance-slice/definition";
+} from "./definition";
 import type { AdvanceRefinementRegion, AdvanceTransportExperiment } from "../lib/physics-wasm/advance-controller";
 import { ADVANCE_DEFAULT_LENS_MODE, type SliceOverlayId } from "./lenses";
 import { DEFAULT_LAB_SCENE_ID } from "./lab-scenes";

@@ -4,15 +4,13 @@ import { defaultMethodId, getMethod } from "../method-registry";
 import { resolveMethodValues, type MethodParamValue, type MethodParamValues, type MethodProfile } from "../method-contract";
 
 /**
- * Which simulation method runs, at what quality, and any sparse per-method
- * parameter overrides on top of the quality preset. Overrides are keyed by
- * method id so switching methods round-trips user tuning.
+ * The installed solver configuration. The registry key keeps this store
+ * compatible with plugin consumers; only the application default is admitted.
  */
 interface MethodStore {
   methodId: string;
   quality: GPUQuality;
   overrides: Record<string, MethodParamValues>;
-  setMethodId: (methodId: string) => void;
   setQuality: (quality: GPUQuality) => void;
   setParam: (methodId: string, key: string, value: MethodParamValue) => void;
   resetParam: (methodId: string, key: string) => void;
@@ -32,10 +30,6 @@ export const createMethodStore = () => create<MethodStore>((set) => ({
   methodId: defaultMethodId(),
   quality: "balanced",
   overrides: {},
-  setMethodId: (methodId) => set(state => {
-    validateMethodConfiguration(methodId, state.quality, state.overrides[methodId] ?? {});
-    return { methodId };
-  }),
   setQuality: (quality) => set(state => {
     validateMethodConfiguration(state.methodId, quality, state.overrides[state.methodId] ?? {});
     return { quality };
@@ -55,15 +49,17 @@ export const createMethodStore = () => create<MethodStore>((set) => ({
     validateMethodConfiguration(methodId, state.quality, {});
     return { overrides: { ...state.overrides, [methodId]: {} } };
   }),
-  // Scene profiles replace their method's overrides atomically.
-  applyProfile: ({ methodId, quality, overrides }) => set(state => {
-    validateMethodConfiguration(methodId, quality, overrides);
-    return { methodId, quality, overrides: { ...state.overrides, [methodId]: { ...overrides } } };
+  applyProfile: (profile) => set(() => {
+    const methodId = defaultMethodId();
+    const overrides = profile.methodId === methodId ? profile.overrides : {};
+    validateMethodConfiguration(methodId, profile.quality, overrides);
+    return { methodId, quality: profile.quality, overrides: { [methodId]: { ...overrides } } };
   }),
-  // Retain another method's authored configuration without selecting it.
+  // Retired scene profiles contribute no settings to the retained solver.
   seedProfile: ({ methodId, overrides }) => set(state => {
+    if (methodId !== defaultMethodId()) return state;
     validateMethodConfiguration(methodId, state.quality, overrides);
-    return { overrides: { ...state.overrides, [methodId]: { ...overrides } } };
+    return { overrides: { [methodId]: { ...overrides } } };
   }),
 }));
 

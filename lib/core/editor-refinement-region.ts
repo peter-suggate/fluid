@@ -268,7 +268,7 @@ const uniformRegionSpace: RegionSpace<SceneDescription, Partial<SceneDescription
   ],
 };
 export function studioRegionSpaceForMethod(methodId?: string) {
-  return methodId === "uniform-volume" ? uniformRegionSpace : studioRegionSpace;
+  return uniformRegionSpace;
 }
 
 /**

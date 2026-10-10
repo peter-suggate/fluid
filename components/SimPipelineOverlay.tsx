@@ -2,7 +2,6 @@
 
 import { UniformCoarseControl } from "./UniformCoarseControl";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { stageLensOverlayMode, type AnyStageLens } from "../lib/core/stage-lens";
 import { useSession } from "../lib/core/session/session-context";
 import { resolvedMethodValues } from "../lib/core/stores/method-store";
 import { DEFAULT_GRID_OVERLAY_AXIS } from "../lib/core/stores/ui-store";
@@ -213,10 +212,7 @@ type StageSetting = Exclude<FluidStageControl, StageReadout>;
  * the frame graph, and it survives the merge as a field rather than as a second
  * diagram.
  */
-export function SimPipelineOverlay({ lenses: override }: {
-  /** Overrides the running method's own roster. For tests and previews. */
-  readonly lenses?: readonly AnyStageLens[];
-}) {
+export function SimPipelineOverlay() {
   const session = useSession();
   const methodId = session.method((state) => state.methodId);
   const quality = session.method((state) => state.quality);
@@ -225,17 +221,8 @@ export function SimPipelineOverlay({ lenses: override }: {
   const bodyCount = session.diagnostics((state) => state.bodies.length);
   const scene = session.scene((state) => state.scene);
   const running = session.runtime((state) => state.runState === "running");
-  const topologyFrozen = session.runtime((state) => state.topologyFrozen);
-  const setTopologyFrozen = session.runtime((state) => state.setTopologyFrozen);
-  const overlayMode = session.ui((state) => state.gridOverlayMode);
-  const overlayAxis = session.ui((state) => state.gridOverlayAxis);
-  const setOverlayMode = session.ui((state) => state.setGridOverlayMode);
-  const setOverlayAxis = session.ui((state) => state.setGridOverlayAxis);
 
   const method = getMethod(methodId);
-  // An override roster (tests and previews) is matched to rows by stage id;
-  // otherwise each graph node carries its own lens.
-  const lensByStage = new Map((override ?? []).map((lens) => [lens.stage, lens]));
   const values = resolvedMethodValues({ methodId, quality, overrides });
   const backend = method.params.find((spec): spec is SelectParamSpec =>
     spec.key === PHYSICS_EXECUTION_BACKEND_KEY && spec.kind === "select");
@@ -362,16 +349,6 @@ export function SimPipelineOverlay({ lenses: override }: {
       checked ? stage.toggle.on : stage.toggle.off, session.id);
   };
 
-  // The timing row *is* the partition, so the lens opens from the row that
-  // prices the stage rather than from a list somewhere else that would have to
-  // be read against this one. A lens is a slice view like any other, so an
-  // overlay that is off adopts a plane the way the field picker does.
-  const openLens = (stageId: string, open: boolean) => {
-    if (!open) { setOverlayAxis("off"); return; }
-    setOverlayMode(stageLensOverlayMode(stageId));
-    if (overlayAxis === "off") setOverlayAxis(DEFAULT_GRID_OVERLAY_AXIS);
-  };
-
   // The method's declared graph, resolved into the shared diagram's view model.
   // Computed per render rather than memoized: every input is already a render
   // input, and a memo keyed on a closure over `toggleStage` would have to list
@@ -396,11 +373,6 @@ export function SimPipelineOverlay({ lenses: override }: {
           const statusLabel = toggleable
             ? state === "on" ? "encoding" : state === "off" ? "configured off" : "not applicable to this scene"
             : "always encoded";
-          // The node carries its own lens; the roster lookup is only for a
-          // caller that overrides the method's lenses.
-          const lens = override ? lensByStage.get(stage.id) : stage.lens;
-          const lensOpen = Boolean(lens)
-            && overlayAxis !== "off" && overlayMode === stageLensOverlayMode(stage.id);
           return {
             id: stage.id,
             label: stage.label,
@@ -425,12 +397,6 @@ export function SimPipelineOverlay({ lenses: override }: {
                 : `Always encoded · fixed pipeline stage\n\n${tip}`,
               onToggle: toggleable ? () => toggleStage(stage.id, state !== "on") : undefined,
             },
-            tap: lens ? {
-              label: "◎",
-              title: `Draw what this stage did, phase by phase, on the slice.\n\n${lens.description}`,
-              active: lensOpen,
-              onToggle: () => openLens(stage.id, !lensOpen),
-            } : undefined,
             controls: controls[stage.id]?.node,
             fold: controls[stage.id] ? { summary: controls[stage.id].summary } : undefined,
           };
@@ -507,9 +473,6 @@ export function SimPipelineOverlay({ lenses: override }: {
         <FieldList data-testid="cpu-physics-controls">
           {cpuParams.map((spec) => <CPUPhysicsParam key={spec.key} spec={spec}
             methodId={methodId} value={values[spec.key]} />)}
-          <SwitchField label="Freeze topology" checked={topologyFrozen}
-            hint="Holds the accepted sparse topology while fluid and rigid bodies continue to advance."
-            onChange={setTopologyFrozen} />
         </FieldList>
       </div>
       : graph

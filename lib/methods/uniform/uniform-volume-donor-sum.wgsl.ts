@@ -1,6 +1,5 @@
-import { uniformAbOn } from "./uniform-ab-switch";
-const bricks = uniformAbOn("donorbricks");
-const fuse = uniformAbOn("donorfuse");
+const bricks = true;
+const fuse = true;
 /** Cells of a field stored in 4^3 bricks: each axis padded to a multiple of four. */
 export const uniformBrickCells = (dims: readonly number[]): number =>
   dims.reduce((n, d) => n * Math.ceil(d / 4) * 4, 1);

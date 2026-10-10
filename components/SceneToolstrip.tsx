@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState } from "react";
+import { memo } from "react";
 import { Cuboid, Sigma } from "lucide-react";
 import type { EditorEntity, EditorField } from "../lib/core/editor-entity";
 import { sceneryIdFromSelection } from "../lib/core/editor-scenery";
@@ -8,8 +8,7 @@ import { TANK_SELECTION_ID, tankExtentFields } from "../lib/core/editor-tank";
 import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
 import { sceneDocumentVerbs } from "../lib/core/editor-scene-document";
-import { getMethod, interactiveSimulationMethods } from "../lib/core/method-registry";
-import { resolvedMethodValues } from "../lib/core/stores/method-store";
+import { getMethod } from "../lib/core/method-registry";
 import { simulation } from "../lib/core/simulation/controller";
 import { sceneStoneNode } from "../lib/core/stone-look-controls";
 import { isEditableOak } from "../lib/core/oak-tree-controls";
@@ -28,13 +27,10 @@ import { CanopyDialRows } from "./TreeCanopyFlyout";
 import { RimDialRows } from "./VesselRimFlyout";
 import {
   Toolstrip,
-  ToolstripMenuButton,
-  ToolstripMenuItem,
   ToolstripMoreRow,
   ToolstripRow,
   ToolstripRule,
   ToolstripTitle,
-  useToolstripSection,
 } from "./toolstrip";
 import { useSession } from "../lib/core/session/session-context";
 import { sceneScaleOption, sceneScaleSummary } from "../lib/core/scene-scale";
@@ -122,117 +118,16 @@ function TankRow() {
   />;
 }
 
-/**
- * The solver behind the water, and the way to swap it.
- *
- * On this strip because switching methods is part of the same watch-the-water
- * loop as choosing a view — and under the field, ray-work and tank rows because
- * it answers the last question in that reading: what is moving it.
- *
- * A mark and a chevron rather than a SOLVER tag and a segmented strip of every
- * installed method. The strip of names was as wide as the column and grew with
- * the registry; the name of the one that is running says as much, and the rest
- * are one click away.
- */
+/** The installed fluid solver, shown beside the scene controls. */
 function SolverRow() {
   const session = useSession();
-  const methodState = session.method();
-  const methodId = methodState.methodId;
-  const method = getMethod(methodId);
-  const values = resolvedMethodValues(methodState);
-  const stiffness = methodId === "particle-sph"
-    ? method.params.find((spec) => spec.key === "soundSpeed") : undefined;
-  const transfer = methodId === "particle-apic"
-    ? method.params.find((spec) => spec.key === "transferMode") : undefined;
-  const flipRatio = methodId === "particle-apic"
-    ? method.params.find((spec) => spec.key === "flipRatio") : undefined;
-  const transferMode = values.transferMode === "pic" ? "pic" : values.transferMode === "flip" ? "flip" : "apic";
-  const transferLabel = transferMode === "flip" ? "PIC/FLIP" : transferMode.toUpperCase();
-  const [picking, setPicking] = useState(false);
-  const [pickingTransfer, setPickingTransfer] = useState(false);
-  const { claim } = useToolstripSection("solver", () => { setPicking(false); setPickingTransfer(false); });
-  const pick = (open: boolean) => {
-    claim(open);
-    if (open) setPickingTransfer(false);
-    setPicking(open);
-  };
-  const pickTransfer = (open: boolean) => {
-    claim(open);
-    if (open) setPicking(false);
-    setPickingTransfer(open);
-  };
+  const method = getMethod(session.method(state => state.methodId));
   return <ToolstripRow
     icon={<Sigma width={14} height={14} strokeWidth={1.7} aria-hidden />}
     name="Fluid solver"
     hint={method.description}
     testId="scene-solver-row"
-    after={<>
-      <ToolstripMenuButton
-        label="Fluid solver"
-        hint="Every method installed in this build. Switching one reloads the run."
-        open={picking}
-        testId="scene-solver-pick"
-        onOpen={pick}
-      >
-        {interactiveSimulationMethods().map((candidate) => <ToolstripMenuItem
-          key={candidate.id}
-          label={candidate.shortLabel}
-          title={candidate.description}
-          active={candidate.id === methodId}
-          testId={`scene-solver-pick-${candidate.id}`}
-          onClick={() => {
-            simulation.setMethod(candidate.id, session.id);
-            pick(false);
-          }}
-        />)}
-      </ToolstripMenuButton>
-      <span className="toolstrip-name">{method.shortLabel}</span>
-      {transfer?.kind === "select" && <ToolstripMenuButton
-        label="Particle transfer"
-        caption={`Transfer: ${transferLabel}`}
-        hint="Choose APIC, PIC or PIC/FLIP. Changes apply to the next frame and keep the running simulation."
-        open={pickingTransfer}
-        testId="scene-particle-transfer"
-        onOpen={pickTransfer}
-      >
-        {transfer.options.map(option => <ToolstripMenuItem
-          key={option.value}
-          label={option.label}
-          active={option.value === transferMode}
-          testId={`scene-particle-transfer-${option.value}`}
-          onClick={() => {
-            simulation.setMethodParam(methodId, transfer.key, option.value, session.id);
-            pickTransfer(false);
-          }}
-        />)}
-      </ToolstripMenuButton>}
-      {transfer?.kind === "select" && transferMode === "flip" && flipRatio?.kind === "number" && <span data-testid="scene-particle-flip-blend">
-        <NumberInput
-          tag="FLIP"
-          value={Number(values[flipRatio.key])}
-          scale={100}
-          min={flipRatio.min}
-          max={flipRatio.max}
-          step={1}
-          digits={0}
-          unit="%"
-          ariaLabel="FLIP blend (%)"
-          hint={flipRatio.hint}
-          onChange={value => simulation.setMethodParam(methodId, flipRatio.key, value, session.id)}
-        />
-      </span>}
-      {stiffness?.kind === "number" && <NumberInput
-        tag="stiffness"
-        value={Number(values[stiffness.key])}
-        min={stiffness.min}
-        max={stiffness.max}
-        step={stiffness.step}
-        unit={stiffness.unit}
-        ariaLabel="SPH stiffness (sound speed)"
-        hint={stiffness.hint}
-        onChange={(value) => simulation.setMethodParam(methodId, stiffness.key, value, session.id)}
-      />}
-    </>}
+    after={<span className="toolstrip-name">{method.shortLabel}</span>}
   />;
 }
 

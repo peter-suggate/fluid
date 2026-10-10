@@ -2,15 +2,12 @@ import { startHostQueryStateSync } from "../lib/core/query-state-sync";
 import type { PaneSession } from "../lib/core/session/session";
 import { managedQueryKey } from "../lib/framework/persistence";
 import {
-  runtimeFeatureQuery, runtimeFeaturesChanged, type RuntimeFeatureState,
-} from "../lib/features/runtime-lifecycle";
-import {
   REGIONS_QUERY_KEY, regionsFromQuery, regionsToQuery,
 } from "../lib/features/refinement-region/persistence";
 import {
   advanceRunQuery,
-} from "../lib/methods/adaptive-volume/features/advance-slice/definition";
-import type { AdvanceStageId } from "../lib/methods/adaptive-volume/features/advance-slice/advance-work";
+} from "./definition";
+import type { AdvanceStageId } from "./advance-work";
 import type { AdvanceRefinementRegion } from "../lib/physics-wasm/advance-controller";
 import { advanceFieldViewQuery, type SliceOverlayId } from "./lenses";
 import { labSceneQuery } from "./lab-scenes";
@@ -62,7 +59,6 @@ export interface LabQueryState {
   readonly lens: AdvanceStageId;
   readonly overlays: ReadonlySet<SliceOverlayId>;
   readonly surface: LabState["surface"];
-  readonly runtime: RuntimeFeatureState;
   /** The raw `regions=` value, or `null` when the link named none. */
   readonly regions: string | null;
   readonly view: ReturnType<typeof sliceViewFraction>;
@@ -84,7 +80,6 @@ export const isLabQueryKey = managedQueryKey(
   advanceRunQuery,
   advanceFieldViewQuery,
   sliceViewQuery,
-  runtimeFeatureQuery,
   { keys: [REGIONS_QUERY_KEY] },
 );
 
@@ -112,7 +107,6 @@ export function parseLabQuery(search: string): LabQueryState {
     lens: field.mode as AdvanceStageId,
     overlays: new Set(field.overlays as readonly SliceOverlayId[]),
     surface: run.surfaceView,
-    runtime: runtimeFeatureQuery.read(query),
     regions: query.get(REGIONS_QUERY_KEY),
     view: sliceViewQuery.read(query).sliceView,
   };
@@ -140,7 +134,6 @@ export function labRegionsToQuery(
 export function serializeLabQuery(
   search: string,
   state: LabState,
-  runtime: RuntimeFeatureState,
 ): string {
   const query = new URLSearchParams(search);
   for (const key of [...query.keys()]) if (isLabQueryKey(key)) query.delete(key);
@@ -161,7 +154,6 @@ export function serializeLabQuery(
     sliceView: state.linkedView
       ?? sliceViewFraction(shownView(state), state.nx, state.ny),
   });
-  runtimeFeatureQuery.write(query, runtime);
   // The boxes, on the same present-key-means-removal contract the studio's
   // `regions=` carries: a scene's own authored boxes stay out of the address
   // until they are edited, and an emptied list still writes the key — as the
@@ -199,7 +191,7 @@ export function startLabQueryStateSync(
   return startHostQueryStateSync({
     path: LAB_PATH,
     serialize: (search) =>
-      serializeLabQuery(search, lab.getState(), session.runtime.getState()),
+      serializeLabQuery(search, lab.getState()),
     hydrate: (search) => {
       const state = parseLabQuery(search);
       const store = lab.getState();
@@ -211,14 +203,10 @@ export function startLabQueryStateSync(
       store.setOverlays(state.overlays);
       store.setSurface(state.surface);
       store.setLinked(state.regions, state.view);
-      session.runtime.setState(state.runtime);
     },
     sources: [
       (onChange) => lab.subscribe(onChange),
       (onChange) => session.ui.subscribe(onChange),
-      (onChange) => session.runtime.subscribe((next, previous) => {
-        if (runtimeFeaturesChanged(previous, next)) onChange();
-      }),
     ],
     ...(options.hydrateFromUrl === undefined ? {}
       : { hydrateFromUrl: options.hydrateFromUrl }),

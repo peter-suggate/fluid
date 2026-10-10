@@ -9,15 +9,11 @@ function PaneFailureReport({ session }: { session: PaneSession }) {
   const status = session.diagnostics((state) => state.gpuStatus);
   const info = session.diagnostics((state) => state.gpuInfo);
   const failure = status.state === "unavailable" ? status.failure : info?.simulationFailure;
-  const reproduction = status.state === "unavailable" ? status.reproduction : undefined;
-  if (!failure && !reproduction) return null;
+  if (!failure) return null;
   return <div aria-label={`Pane ${session.id.toUpperCase()} failure evidence`}>
     {failure && <SimulationFailureDetails failure={failure} showSummary={false}
       configuration={{ scene: session.scene.getState().scene, method: session.method.getState() }} />}
-    {reproduction && <div data-testid="gpu-failure-reproduction">
-      <small>Dawn case <strong>{reproduction.caseId}</strong> · validated · serialized</small>
-      <code>{reproduction.command}</code>
-    </div>}
+
   </div>;
 }
 

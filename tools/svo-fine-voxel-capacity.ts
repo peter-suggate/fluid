@@ -4,7 +4,7 @@
  *
  * Every number the dry render path allocates is decided on the CPU, by the same
  * three functions the production path calls in the same order:
- * `createTallCellLayout` (how many cells), `planSparseSceneDomain` (which bricks
+ * `sceneLatticeDimensions` (how many cells), `planSparseSceneDomain` (which bricks
  * exist) and `planAdaptiveSparseBrickOctree` (how many leaves and voxels those
  * bricks become). This tool calls exactly those, at a sweep of cell sizes, and
  * prints the allocation each one implies against the device limits it has to fit
@@ -14,7 +14,7 @@
  *
  * The byte model mirrors `SparseBrickOctreeGPU` and `OctreeSparseBrickWorld`
  * field by field; if either changes shape this tool is wrong and should be
- * changed with it. See `docs/SVO_FINE_VOXEL_CAPACITY.md`.
+ * changed with it.
  *
  *   node --import tsx tools/svo-fine-voxel-capacity.ts [cellSize_mm ...]
  */
@@ -45,7 +45,7 @@ import {
 import { SVO_SCENE_PRIMITIVE_RASTER_CONTRACT } from "../lib/svo/features/shading/program";
 import { buildSvoScenePrimitives } from "../lib/svo/features/scene-publication/svo-scene-primitives";
 import { svoPrimitiveCandidateBounds } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
-import { createTallCellLayout } from "../lib/core/tall-cell-grid";
+import { sceneLatticeDimensions } from "../lib/core/scene-lattice-dimensions";
 import { terrainHeightAt } from "../lib/core/terrain";
 import {
   environmentMaximumCoarseningPower,
@@ -69,22 +69,8 @@ const M1_MAX_LIMITS = {
 const requested = process.argv.slice(2).map(Number).filter((value) => Number.isFinite(value) && value > 0);
 const cellSizes_mm = requested.length > 0 ? requested : [25, 15, 12.5, 10, 7.5, 5, 4, 3, 2.5, 2, 1.5, 1];
 
-/**
- * `FLUID_SVO_CAPACITY_SURFACE_ONLY=1` reports the geometry-driven brick count
- * alone and skips `createTallCellLayout`, which is minutes of CPU at a
- * millimetre lattice because it walks every cell to build an initial liquid
- * field a dry scene never reads. The dimensions are then derived rather than
- * planned, by the three lines `createTallCellLayout` uses; `sweep` asserts the
- * derivation against the real thing on every row it does plan, so the two can
- * never quietly disagree.
- */
+/** Select the geometry-only capacity estimate rather than a complete SVO plan. */
 const surfaceOnly = process.env.FLUID_SVO_CAPACITY_SURFACE_ONLY === "1";
-
-function derivedDimensions(scene: SceneDescription): readonly [number, number, number] {
-  const requestedCellSize = scene.voxelDomain.finestCellSize_m;
-  const clamp = (extent: number) => Math.min(M1_MAX_LIMITS.maxTextureDimension3D, Math.max(8, Math.round(extent / requestedCellSize)));
-  return [clamp(scene.container.width_m), clamp(scene.container.height_m), clamp(scene.container.depth_m)];
-}
 
 const mib = (bytes: number) => bytes / 1024 ** 2;
 
@@ -192,18 +178,7 @@ function sweep(cellSize_m: number, sceneFactory: () => SceneDescription = defaul
   const result: Record<string, unknown> = { cellSize_mm: cellSize_m * 1000 };
 
   const brickSize = scene.voxelDomain.brickSize_cells === 4 ? 4 : 8;
-  let dimensions = derivedDimensions(scene);
-  if (!surfaceOnly) {
-    const layoutStart = performance.now();
-    const layout = createTallCellLayout(scene, "balanced", M1_MAX_LIMITS.maxTextureDimension3D, {
-      regularLayers: 2, liquidHalo: 0, airHalo: 0,
-    });
-    result.layout_ms = performance.now() - layoutStart;
-    if ([layout.nx, layout.fineNy, layout.nz].some((value, axis) => value !== dimensions[axis])) {
-      throw new Error(`Derived lattice ${dimensions} disagrees with createTallCellLayout ${[layout.nx, layout.fineNy, layout.nz]}`);
-    }
-    dimensions = [layout.nx, layout.fineNy, layout.nz];
-  }
+  const dimensions = sceneLatticeDimensions(scene, M1_MAX_LIMITS.maxTextureDimension3D);
   result.solverCells = dimensions;
   result.clampedByTexture3D = dimensions.some((value) => value === M1_MAX_LIMITS.maxTextureDimension3D);
   Object.assign(result, primitivesPerBrick(scene, dimensions, brickSize));

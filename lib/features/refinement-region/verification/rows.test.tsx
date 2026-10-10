@@ -161,11 +161,11 @@ test("the draft reaches a box drawn on either host", () => {
   assert.equal(record.minimumCellSize_cells, 4);
   assert.equal(record.maximumCellSize_cells, 4);
 
-  // Floor only: neither host invents a ceiling.
+  // The studio always holds one supported tier; the lab permits a floor-only box.
   const floorOnly: RegionDraft = { ...draft, holdAtOneTier: false };
   assert.equal(refinementRegionFromDrag(scene(),
     { x: 0.2, y: 0, z: 0.2 }, { x: 0.8, y: 0, z: 0.8 },
-    { id: "region-1", draft: floorOnly })!.maximumCellSize_cells, undefined);
+    { id: "region-1", draft: floorOnly })!.maximumCellSize_cells, 4);
   assert.equal(regionFromDraw(labRegionSpace, LAB_DOC, [10, 10], [70, 50], floorOnly,
     { id: "region-1" })!.maximumCellSize_cells, undefined);
 });

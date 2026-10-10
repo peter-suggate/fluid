@@ -24,7 +24,6 @@ import { Choice, Slider, Value } from "../../../components/ui";
 import {
   pickFieldOverlay, type FieldOverlayAxis, type FieldOverlayView,
 } from "../../core/field-overlay-pick";
-import { isPressureJournalOverlayMode } from "../pressure-inspection/gpu/overlay";
 import type {
   FieldVisualization, FieldVisualizationIcon,
 } from "../../core/visualization-registry";
@@ -270,7 +269,7 @@ export function FieldViewRows({ views, catalog, state, volumeCapable }: {
   // makes a stop mean anything is in the film pane — so the scrub goes there
   // with it rather than standing here detached from its own curve.
   const volumetric = drawing !== undefined && (drawing.planeless || state.axis === "volume");
-  const scrub = adjustable && drawing && !isPressureJournalOverlayMode(drawing.mode)
+  const scrub = adjustable && drawing
     && <>
       <Slider
         min={volumetric ? 0.05 : 0}

@@ -6,12 +6,6 @@ import type { SolverDetailFocus } from "./solver-detail";
 import type { FluidSurfaceRenderMode } from "../features/surface-display/definition";
 import type { SparseVoxelDrySceneData } from "../svo/contracts/scene-publication";
 import { SimulationFailureError } from "./simulation-failure";
-import { planSvoFluidCoverageRatio, type SvoFluidCoverageTriple } from "../svo/features/scene-publication/svo-fluid-coverage";
-import {
-  WebGpuSvoFluidCoverage,
-  type WebGpuSvoFluidCoverageOptions,
-  type WebGpuSvoFluidCoverageSource,
-} from "../svo/features/scene-publication/webgpu-svo-fluid-coverage";
 import { cameraBasis, dot } from "./math";
 import { sceneLatticeDimensions } from "./scene-lattice";
 import { canonicalScene, sceneRevision, sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "./model";
@@ -26,7 +20,7 @@ import { decodeGPURigidBodyPoses, GPU_RIGID_RENDER_BYTES, SCENE_ENVIRONMENT_OWNE
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
 import type { GPUQuality } from "./gpu-quality";
 import { getMethod, svoRenderRefinementPermitted } from "./method-registry";
-import { takesScheduledDrops, type GPUSolverInstance, type InjectedLiquidBall, type MethodParamValues, type OverlayPipeline } from "./method-contract";
+import { takesScheduledDrops, type GPUSolverInstance, type InjectedLiquidBall, type MethodParamValues } from "./method-contract";
 import { GridOverlayPipeline } from "./webgpu-grid-overlay";
 import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE, requiredFluidDeviceLimits } from "./webgpu-device-limits";
 import { RasterWaterPipeline, type WaterRenderDiagnostics, type WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
@@ -34,7 +28,6 @@ import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./en
 import type { ScenePresentationMode } from "./scene-definition";
 import { sceneHasTerrain, terrainContentStamp } from "./terrain";
 import { solidVoxelPatchesKey } from "./solid-world";
-import { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import { cameraTanHalfFov, viewportAspect, viewportRayForPixel } from "./webgpu-camera";
 import {
@@ -42,21 +35,6 @@ import {
   type SvoPixelTraceLayer,
 } from "../svo/features/diagnostics/svo-pixel-trace";
 import { DecorationOverlay } from "./webgpu-decoration-overlay";
-import { FaceVelocityOverlay } from "./webgpu-face-velocity-overlay";
-import type { PressureJournal } from "../features/pressure-inspection/journal";
-import {
-  isPressureJournalOverlayMode,
-  pressureJournalOverlayChannel,
-  PressureJournalOverlay,
-  type PressureJournalOverlayMode,
-} from "../features/pressure-inspection/gpu/overlay";
-import {
-  isStageLensOverlayMode,
-  type StageLensOverlayMode,
-  type StageLensReceipt,
-} from "./stage-lens";
-import { StageLensOverlay, type StageLensLayerReport } from "./webgpu-stage-lens-overlay";
-import { TracerOverlay } from "./webgpu-tracer-overlay";
 import { ParticleOverlay } from "./webgpu-particle-overlay";
 import { VISUALIZATION_CATALOG } from "./visualization-catalog";
 import { FINE_TILES_OVERLAY_MODE_CODE, SOLVE_WINDOW_OVERLAY_MODE_CODE, VOLUME_LEVELSET_OVERLAY_MODE_CODE } from "./grid-overlay-visualizations";
@@ -67,9 +45,6 @@ import {
 } from "./visualization-registry";
 import { containerDecorationSpace, DecorationBuilder } from "./visualization-decorations";
 import { buildVesselOutlineGeometry, sceneVesselPresentation } from "./vessel-outline";
-import { WebGPUFluidCellTrace } from "./webgpu-fluid-cell-trace";
-import type { FluidCellLattice, FluidCellTrace } from "./fluid-cell-trace";
-import type { FineBandCellContext } from "./fine-band-cell-model";
 import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "../svo/pipeline/webgpu-svo-dry-scene";
 import { SVO_DRY_SCENE_REVERSED_Z_NEAR_M } from "../svo/features/shading/program";
 import {
@@ -112,18 +87,8 @@ import { DEFAULT_SVO_RENDER_TUNING, resolveSvoSurfaceTuning, svoRenderTuningKey,
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../svo/features/lighting-visibility/svo-screen-space-termination";
 import { isGPUInitializationAbort } from "./gpu-initialization";
 import {
-  createGlobalFineLevelSetConsumerSource,
-  type GlobalFineLevelSetConsumerSource,
-} from "./octree-consumer-sampling";
-import { OCTREE_TECHNIQUE_OVERLAY_CODES, isOctreeTechniqueOverlayMode, type OctreeTechniqueOverlayMode } from "./octree-technique-debug";
-import {
-  sparseCM12DirtyOverlayCode,
-  type SparseCM12DirtyOverlayMode,
-} from "./sparse-cm12-dirty-visualizations";
-import {
   fluidExecutionDeviceFeatures,
 } from "./gpu-startup";
-import { initialRasterPresentationReadiness, requiresFencedInitialRasterPresentation } from "./gpu-t0-presentation";
 import { liveSvoSceneResourcePlugin, WebGPULiveSvoScene } from "../svo/features/scene-publication/webgpu-live-svo-scene";
 import {
   surfaceMeshAllowsLiveStartup,
@@ -151,22 +116,10 @@ import {
   invalidateGPUCompilationManager,
   managedGPUDevice,
 } from "./gpu-compilation-manager";
-import type {
-  SparseWorldDevice,
-  SparseWorldFault,
-  SparseWorldPresentation,
-  SparseWorldStatus,
-} from "../sparse-world";
 
 /** One item executing and one queued keeps the GPU busy without visible FIFO bursts. */
 export const BROWSER_GPU_THROUGHPUT_DEPTH = 2;
 
-interface SparseWorldSnapshot {
-  readonly deviceStatus: SparseWorldDevice["status"];
-  readonly deviceFault: SparseWorldFault | undefined;
-  readonly status: SparseWorldStatus;
-  readonly presentation: SparseWorldPresentation;
-}
 
 /**
  * Solver advances encoded per presented frame.
@@ -337,9 +290,7 @@ export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, n
  * normalized by the last reported liquid maximum. Both sample live solver
  * textures in the overlay shader — no readback is involved.
  */
-export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation" | "density" | "volume-levelset" | "fine-tiles" | "solve-window" | "tracers" | "face-velocity" | "particles"
-  | PressureJournalOverlayMode | OctreeTechniqueOverlayMode | SparseCM12DirtyOverlayMode
-  | StageLensOverlayMode;
+export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation" | "density" | "volume-levelset" | "fine-tiles" | "solve-window" | "particles";
 
 export interface GridOverlayConfig {
   /** Slice axes, or a ray-integrated diagnostic through the complete volume. */
@@ -357,20 +308,7 @@ export interface GridOverlayConfig {
   lensPhase?: number;
 }
 
-export type OptionalRendererPipeline =
-  | "grid-overlay"
-  | "technique-overlay"
-  | "technique-audit-overlay"
-  | "svo-dry-scene"
-  | "secondary-particles"
-  | "decoration-overlay"
-  | "fluid-cell-trace"
-  | "tracer-overlay"
-  | "particle-overlay"
-  | "face-velocity-overlay"
-  | "pressure-journal-overlay"
-  | "stage-lens"
-  | "svo-stage-overlay";
+export type OptionalRendererPipeline = "grid-overlay" | "svo-dry-scene" | "decoration-overlay" | "particle-overlay" | "svo-stage-overlay";
 
 /**
  * Live pixel-trace diagnostic state.
@@ -398,39 +336,6 @@ export type PixelTraceStatus =
  * that camera ray to decide which pressure cell the pointer means, so the two
  * diagnostics share one gesture and one camera transform.
  */
-export interface FluidCellTraceConfig {
-  /** Viewport fractions, 0..1 from the top-left. */
-  readonly normalizedX: number;
-  readonly normalizedY: number;
-  /**
-   * A pinned cell stops re-aiming, so orbiting cannot silently reselect it.
-   *
-   * It does not change what is drawn or reported: a hovered cell shows exactly
-   * what a pinned one shows, because needing to commit before you can read
-   * anything is what makes a picker tedious to explore with. Pinning is for
-   * holding a cell still while the camera moves around it, nothing more.
-   */
-  readonly pinned: boolean;
-  /**
-   * Which leaf along the ray to describe, nearest first. The pointer alone can
-   * only ever name the first, which on a liquid is a surface cell; stepping this
-   * is how an interior unknown gets selected. Clamped to the run in the shader.
-   */
-  readonly hitIndex?: number;
-  /** Visualization ids to draw. Absent draws nothing for this selection. */
-  readonly layers?: readonly string[];
-  readonly widthScale?: number;
-  /**
-   * Solve policy the dependency cone is grown against. Supplied by the caller
-   * because the tail policy lives with the solver, not with the picked cell;
-   * absent simply means no cone.
-   */
-  readonly solvePolicy?: {
-    readonly outerIterations: number;
-    readonly levels: number;
-    readonly smoothsPerLevel: number;
-  };
-}
 
 export interface PixelTraceConfig {
   /** Viewport fractions, 0..1 from the top-left. */
@@ -478,9 +383,9 @@ export function svoPixelTraceProbeDue(
   return now_ms - lastEncodedAt_ms >= SVO_PIXEL_TRACE_LIVE_PROBE_INTERVAL_MS;
 }
 
-/** The layers a frame composes: none while a stage lens has the view. */
+/** The layers a frame composes. */
 function composedVisualLayers(gridOverlay: GridOverlayConfig): VisualLayerState | undefined {
-  return gridOverlay.layers && !isStageLensOverlayMode(gridOverlay.mode ?? "") ? gridOverlay.layers : undefined;
+  return gridOverlay.layers;
 }
 
 /**
@@ -490,42 +395,19 @@ function composedVisualLayers(gridOverlay: GridOverlayConfig): VisualLayerState 
  */
 export function optionalRendererPipelineRequests(
   gridOverlay: GridOverlayConfig | undefined,
-  simulationRunning: boolean,
-  secondaryParticlesAvailable: boolean,
   pixelTraceActive = false,
-  fluidCellTraceActive = false,
   stageViewActive = false,
   sparsePresentationRequired = true,
   vesselOutlineActive = false,
 ): OptionalRendererPipeline[] {
   const requested: OptionalRendererPipeline[] = [];
   if (gridOverlay && gridOverlay.axis !== "off") {
-    const technique = Boolean(gridOverlay.mode && isOctreeTechniqueOverlayMode(gridOverlay.mode));
-    // Particle spheres are their own instanced draw: a view of their own, or
-    // one composed layer among the plane's.
     const layers = composedVisualLayers(gridOverlay);
     if (gridOverlay.mode === "particles" || (layers && particleLayerShown(layers))) requested.push("particle-overlay");
-    if (gridOverlay.mode === "particles") { /* no plane pass */ }
-    // Markers are their own instanced draw over the finished frame, so they
-    // compile neither the generic slice raymarch nor the technique programs.
-    else if (gridOverlay.mode === "tracers") requested.push("tracer-overlay");
-    else if (gridOverlay.mode === "face-velocity") requested.push("face-velocity-overlay");
-    else if (isPressureJournalOverlayMode(gridOverlay.mode)) {
-      requested.push("pressure-journal-overlay");
-    }
-    else if (gridOverlay.mode && isStageLensOverlayMode(gridOverlay.mode)) {
-      requested.push("stage-lens");
-    }
-    // Composed layers with nothing on the plane compile no slice raymarch.
-    else if (!technique) { if (!layers || sliceLayersShown(layers)) requested.push("grid-overlay"); }
-    else requested.push("technique-overlay", "technique-audit-overlay");
+    if (gridOverlay.mode !== "particles" && (!layers || sliceLayersShown(layers))) requested.push("grid-overlay");
   }
   if (sparsePresentationRequired) requested.push("svo-dry-scene");
-  if (simulationRunning && secondaryParticlesAvailable) requested.push("secondary-particles");
-  // One generic line compositor serves diagnostics and the cheap vessel cue.
   if (pixelTraceActive || vesselOutlineActive) requested.push("decoration-overlay");
-  if (fluidCellTraceActive) requested.push("fluid-cell-trace", "decoration-overlay");
-  // A session that never opens a render stage view never compiles its pass.
   if (stageViewActive) requested.push("svo-stage-overlay");
   return requested;
 }
@@ -538,7 +420,6 @@ export interface SimulationRunConfig {
   /** Controller-owned identity for a fresh t=0 simulation. */
   simulationEpoch?: number;
   /** Live sparse topology control; intentionally absent from solver rebuild keys. */
-  topologyFrozen?: boolean;
   /**
    * How many advances this pane's transport may hold at once.
    *
@@ -843,14 +724,6 @@ export interface RendererFrameMetrics {
   waterSurfacePresentation?: WaterSurfacePresentationDiagnostics;
 }
 
-interface PendingInitialRasterPresentation {
-  readonly solver: GPUSolverInstance;
-  readonly solverGeneration: number;
-  readonly requestGeneration: number;
-  readonly resource: ResourcePluginDefinition;
-  submitted: boolean;
-}
-
 interface PendingGPUAdvanceCompletion {
   readonly solver: GPUSolverInstance;
   readonly solverGeneration: number;
@@ -949,7 +822,6 @@ export class FluidLabRenderer {
   private upscaleSampler?: GPUSampler;
   private upscaleBindGroup?: GPUBindGroup;
   private waterPipeline?: RasterWaterPipeline;
-  private secondaryParticlePipeline?: SecondaryParticleRenderPipeline;
   private svoDryScenePipeline?: SparseVoxelDrySceneRenderer;
   private svoDrySceneSource?: SparseVoxelSceneRenderSource;
   private svoDrySceneData?: SparseVoxelDrySceneData;
@@ -972,19 +844,9 @@ export class FluidLabRenderer {
   private svoPublicationFailure?: string;
   private gridOverlayPipeline?: GridOverlayPipeline;
   /** Registered by the running method; core never names an overlay module. */
-  private techniqueOverlayPipeline?: OverlayPipeline;
-  private techniqueAuditOverlayPipeline?: OverlayPipeline;
   private decorationOverlayPipeline?: DecorationOverlay;
-  private tracerOverlayPipeline?: TracerOverlay;
   private particleOverlayPipeline?: ParticleOverlay;
-  private faceVelocityOverlayPipeline?: FaceVelocityOverlay;
-  private pressureJournalOverlayPipeline?: PressureJournalOverlay;
-  private stageLensOverlayPipeline?: StageLensOverlay;
-  private fluidCellTracePipeline?: WebGPUFluidCellTrace;
   private svoStageOverlay?: SparseVoxelRenderStageOverlay;
-  private latestFluidCellTraceValue?: FluidCellTrace;
-  private fluidCellTraceRevisionValue = 0;
-  private fluidCellTraceReadInFlight = false;
   /** Latest decoded trace, and a revision the UI polls instead of a callback. */
   private latestPixelTraceValue?: SvoPixelTrace;
   private pixelTraceRevisionValue = 0;
@@ -1047,12 +909,9 @@ export class FluidLabRenderer {
   private gpuFluid?: GPUSolverInstance;
   private readonly deferredPresentedTimes = new WeakMap<GPUSolverInstance, number>();
   /** The app worker's choice (enableSolverPipelineWarmup): harness hosts compile only what their states need. */
-  private solverPipelineWarmup = false;
   private readonly warmedSolvers = new WeakSet<GPUSolverInstance>();
   /** Newest submitted solver time each solver's last presentation carried. */
   private readonly presentedStateTimes = new WeakMap<GPUSolverInstance, number>();
-  private topologyFreezeSolver?: GPUSolverInstance;
-  private topologyFrozen = false;
   /** Renderer-owned sparse source for fluid methods that do not publish one. */
   private svoSceneSidecar?: WebGPULiveSvoScene;
   private readonly retiredGPUFluids = new Set<GPUSolverInstance>();
@@ -1064,13 +923,7 @@ export class FluidLabRenderer {
   private gpuFluidRequestGeneration = 0;
   private adapterName = "WebGPU adapter";
   private gpuInfoCallback?: (info: GPUEulerianInfo) => void;
-  private gpuPressureJournalCallback?: (journal: PressureJournal | undefined) => void;
-  private gpuStageLensCallback?: (
-    receipt: StageLensReceipt | undefined,
-    layers: readonly StageLensLayerReport[],
-  ) => void;
   /** Lens the last published receipt described, so the clearing post fires once. */
-  private publishedStageLens?: string;
   private gpuRigidLoadCallback?: (loads: GPURigidLoad[]) => void;
   private gpuAdvanceCompletedCallback?: (time_s: number) => void;
   private effectiveRendererStatusCallback?: (status: EffectiveRendererStatus) => void;
@@ -1114,18 +967,13 @@ export class FluidLabRenderer {
   private simulationRunning = true;
   private gpuFluidGeneration = 0;
   private reportedSimulationPipelineState = "";
-  private reportedSparseWorldStatus = "";
   /** True only while both compact t=0 raster sources are attached. */
-  private globalFineWaterAttached = false;
   /**
    * Water's shadow term. Owned here rather than by the sparse publication: its
    * source is the solver's dense coarse level set, which reaches presentation
    * as a texture and only means signed distance while the global-fine lane is
    * attached. Rebuilt whenever that field or its geometry changes.
    */
-  private svoFluidCoverage?: WebGpuSvoFluidCoverage;
-  private svoFluidCoverageKey?: string;
-  private pendingInitialRasterPresentation?: PendingInitialRasterPresentation;
   /** A sparse presentation becomes ready only after its first source-matched frame completes. */
   private pendingLiveSvoPresentation?: PendingLiveSvoPresentation;
   private svoPipelineProgress?: { label: string; completed: number; total: number };
@@ -1161,7 +1009,7 @@ export class FluidLabRenderer {
 
   get presentationRevision(): number { return this.pausedPresentationRevision; }
 
-  constructor(private readonly canvas: HTMLCanvasElement | OffscreenCanvas, private readonly statusCallback: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void, onEffectiveRendererStatus?: (status: EffectiveRendererStatus) => void, onGPUPressureJournal?: (journal: PressureJournal | undefined) => void, onGPUStageLens?: (receipt: StageLensReceipt | undefined, layers: readonly StageLensLayerReport[]) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuPressureJournalCallback = onGPUPressureJournal; this.gpuStageLensCallback = onGPUStageLens; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; this.effectiveRendererStatusCallback = onEffectiveRendererStatus; }
+  constructor(private readonly canvas: HTMLCanvasElement | OffscreenCanvas, private readonly statusCallback: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void, onEffectiveRendererStatus?: (status: EffectiveRendererStatus) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; this.effectiveRendererStatusCallback = onEffectiveRendererStatus; }
 
   /** Worker exceptions use the same terminal path as asynchronous GPU failures. */
   stopAfterFailure(error: unknown): void {
@@ -1376,7 +1224,6 @@ export class FluidLabRenderer {
     // by registration key. A method that registers nothing under a key compiles
     // nothing for it: the pass could only ever read a compact debug source that
     // method does not publish, so the absence is the answer rather than a gap.
-    const overlays = getMethod(methodId).overlayPipelines;
     if (wants.has("grid-overlay")) this.ensureOptionalPipeline(
       "grid-overlay", this.gridOverlayPipeline,
       (device) => new GridOverlayPipeline(device, this.format!, this.uniformBuffer!, this.bodyBuffer!),
@@ -1384,47 +1231,12 @@ export class FluidLabRenderer {
       (pipeline) => { this.gridOverlayPipeline = pipeline; this.updateRenderSources(); },
       (pipeline) => pipeline.destroy(),
     );
-    const techniqueOverlay = overlays?.["technique-overlay"];
-    if (wants.has("technique-overlay") && techniqueOverlay) this.ensureOptionalPipeline(
-      "technique-overlay", this.techniqueOverlayPipeline,
-      (device) => techniqueOverlay(device, this.format!, this.uniformBuffer!),
-      (pipeline) => pipeline.initialize(),
-      (pipeline) => {
-        this.techniqueOverlayPipeline = pipeline;
-        pipeline.setSource(this.gpuFluid?.octreeTechniqueDebugSource);
-        pipeline.setOwnerRows(this.gpuFluid?.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture!);
-      },
-    );
     if (wants.has("svo-stage-overlay")) this.ensureOptionalPipeline(
       "svo-stage-overlay", this.svoStageOverlay,
       (device) => new SparseVoxelRenderStageOverlay(device, this.format!),
       (pipeline) => pipeline.initialize(),
       (pipeline) => { this.svoStageOverlay = pipeline; },
       (pipeline) => pipeline.destroy(),
-    );
-    if (wants.has("fluid-cell-trace")) this.ensureOptionalPipeline(
-      "fluid-cell-trace", this.fluidCellTracePipeline,
-      (device) => new WebGPUFluidCellTrace(device, this.uniformBuffer!),
-      (pipeline) => pipeline.initialize(),
-      (pipeline) => {
-        this.fluidCellTracePipeline = pipeline;
-        pipeline.setSource(
-          this.gpuFluid?.octreeTechniqueDebugSource,
-          this.gpuFluid?.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture!,
-        );
-      },
-      (pipeline) => pipeline.destroy(),
-    );
-    const techniqueAuditOverlay = overlays?.["technique-audit-overlay"];
-    if (wants.has("technique-audit-overlay") && techniqueAuditOverlay) this.ensureOptionalPipeline(
-      "technique-audit-overlay", this.techniqueAuditOverlayPipeline,
-      (device) => techniqueAuditOverlay(device, this.format!, this.uniformBuffer!),
-      (pipeline) => pipeline.initialize(),
-      (pipeline) => {
-        this.techniqueAuditOverlayPipeline = pipeline;
-        pipeline.setSource(this.gpuFluid?.octreeTechniqueDebugSource);
-        pipeline.setOwnerRows(this.gpuFluid?.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture!);
-      },
     );
     if (wants.has("svo-dry-scene")) this.ensureOptionalPipeline(
       "svo-dry-scene", this.svoDryScenePipeline,
@@ -1467,17 +1279,6 @@ export class FluidLabRenderer {
       (pipeline) => { this.decorationOverlayPipeline = pipeline; },
       (pipeline) => pipeline.destroy(),
     );
-    if (wants.has("tracer-overlay")) this.ensureOptionalPipeline(
-      "tracer-overlay", this.tracerOverlayPipeline,
-      (device) => new TracerOverlay(device, this.format!),
-      (pipeline) => pipeline.initialize(),
-      (pipeline) => {
-        this.tracerOverlayPipeline = pipeline;
-        pipeline.setSource(this.gpuFluid?.sparseWorldUI?.overlays.tracers
-          ?? this.gpuFluid?.tracerSource);
-      },
-      (pipeline) => pipeline.destroy(),
-    );
     if (wants.has("particle-overlay")) this.ensureOptionalPipeline(
       "particle-overlay", this.particleOverlayPipeline,
       (device) => new ParticleOverlay(device, this.format!),
@@ -1488,49 +1289,7 @@ export class FluidLabRenderer {
       },
       (pipeline) => pipeline.destroy(),
     );
-    if (wants.has("face-velocity-overlay")) this.ensureOptionalPipeline(
-      "face-velocity-overlay", this.faceVelocityOverlayPipeline,
-      (device) => new FaceVelocityOverlay(device, this.format!),
-      (pipeline) => pipeline.initialize(),
-      (pipeline) => {
-        this.faceVelocityOverlayPipeline = pipeline;
-        pipeline.setSource(this.gpuFluid?.sparseWorldUI?.overlays.faceVelocity
-          ?? this.gpuFluid?.faceVelocitySource);
-      },
-      (pipeline) => pipeline.destroy(),
-    );
-    if (wants.has("pressure-journal-overlay")) this.ensureOptionalPipeline(
-      "pressure-journal-overlay", this.pressureJournalOverlayPipeline,
-      (device) => new PressureJournalOverlay(device, this.format!),
-      (pipeline) => pipeline.initialize(),
-      (pipeline) => {
-        this.pressureJournalOverlayPipeline = pipeline;
-        pipeline.setSource(this.gpuFluid?.sparseWorldUI?.overlays.pressureFilm
-          ?? this.gpuFluid?.pressureJournalSource);
-      },
-      (pipeline) => pipeline.destroy(),
-    );
-    if (wants.has("stage-lens")) this.ensureOptionalPipeline(
-      "stage-lens", this.stageLensOverlayPipeline,
-      (device) => new StageLensOverlay(device, this.format!),
-      (pipeline) => pipeline.initialize(),
-      (pipeline) => {
-        this.stageLensOverlayPipeline = pipeline;
-        pipeline.setSource(this.gpuFluid?.sparseWorldUI?.overlays.stageLenses
-          ?? this.gpuFluid?.stageLensSource);
-      },
-      (pipeline) => pipeline.destroy(),
-    );
-    if (wants.has("secondary-particles")) this.ensureOptionalPipeline(
-      "secondary-particles", this.secondaryParticlePipeline,
-      (device) => new SecondaryParticleRenderPipeline(device, this.uniformBuffer!),
-      (pipeline) => pipeline.initialize(),
-      (pipeline) => {
-        this.secondaryParticlePipeline = pipeline;
-        pipeline.setSource(this.gpuFluid?.secondaryParticles);
-        this.waterPipeline?.setSecondaryParticles(pipeline);
-      },
-    );
+
   }
 
   /**
@@ -1687,60 +1446,6 @@ export class FluidLabRenderer {
     return this.pixelTraceSceneRevisionOfTrace !== this.pixelTraceSceneRevisionValue;
   }
 
-  get latestFluidCellTrace(): FluidCellTrace | undefined { return this.latestFluidCellTraceValue; }
-  get fluidCellTraceRevision(): number { return this.fluidCellTraceRevisionValue; }
-  /** Ready once the gather pipeline exists and has a published topology to read. */
-  get fluidCellTraceReady(): boolean { return this.fluidCellTracePipeline?.ready === true; }
-
-  /**
-   * The physical frame the trace's index space sits in, when the solver has one.
-   *
-   * Not folded into the trace: the trace ABI is written by a shader that has no
-   * idea where the domain is in metres, and a host-side copy inside a
-   * GPU-authored record is exactly how two answers to one question start
-   * disagreeing. Undefined means "the tank is the domain", which the host
-   * resolves against the scene it already holds — see `fluidCellTraceLattice`.
-   */
-  get fluidCellTraceDomain(): FluidCellLattice | undefined {
-    const domain = this.gpuFluid?.fluidDomain;
-    return domain ? { origin_m: domain.origin_m, cellSize_m: domain.cellSize_m } : undefined;
-  }
-
-  /**
-   * The band widths and redistance ladder the HUD reads a cell against.
-   *
-   * Frame-wide rather than per-cell, so it stays out of the trace ABI: copying
-   * these into every record would invite the two to disagree, and the whole
-   * point of reading the planner's own output is that it cannot. Undefined on a
-   * scene with no fine band, which is what makes the HUD's fine-band panels
-   * conditional rather than empty.
-   */
-  get fluidCellTraceFineBand(): FineBandCellContext | undefined {
-    const bands = this.gpuFluid?.octreeTechniqueDebugSource?.fineBandLifecycle?.bands;
-    if (!bands) return undefined;
-    return {
-      widths: {
-        pressureBandCells: bands.pressureBandCells,
-        surfaceBandCells: bands.surfaceBandCells,
-        transportBandFineCells: bands.transportBandFineCells,
-        redistanceBandFineCells: bands.redistanceBandFineCells,
-      },
-      ladderStrides: bands.ladderStrides,
-    };
-  }
-
-  private pumpFluidCellTraceReadback(): void {
-    const pipeline = this.fluidCellTracePipeline;
-    if (!pipeline || this.fluidCellTraceReadInFlight) return;
-    this.fluidCellTraceReadInFlight = true;
-    void pipeline.read().then((trace) => {
-      if (this.disposed || this.runtimeFailure || this.deviceLost || this.fluidCellTracePipeline !== pipeline || !trace) return;
-      this.latestFluidCellTraceValue = trace;
-      this.fluidCellTraceRevisionValue += 1;
-    }).catch(() => { /* A superseded or unmapped readback is not a frame error. */ })
-      .finally(() => { this.fluidCellTraceReadInFlight = false; });
-  }
-
   private pumpPixelTraceReadback(): void {
     const pipeline = this.svoDryScenePipeline;
     if (!pipeline || this.pixelTraceReadInFlight) return;
@@ -1776,31 +1481,18 @@ export class FluidLabRenderer {
     tanHalfFov: number,
     scene: SceneDescription,
     pixelTrace: PixelTraceConfig | undefined,
-    fluidCellTrace: FluidCellTraceConfig | undefined,
   ): boolean {
     const overlay = this.decorationOverlayPipeline;
     if (!overlay?.ready || !this.presentationTexture) return false;
     const vesselOutline = buildVesselOutlineGeometry(scene);
-    const cellTrace = fluidCellTrace ? this.latestFluidCellTraceValue : undefined;
     const subjects: unknown[] = [];
     if (pixelTrace && this.latestPixelTraceValue) subjects.push(this.latestPixelTraceValue);
-    if (cellTrace) {
-      // The picked cell, plus what the derived decorators need to grow their own
-      // views of it. Each declaration narrows this itself, so adding a field for
-      // one of them cannot disturb the others.
-      subjects.push(fluidCellTrace?.solvePolicy
-        ? { ...cellTrace, solvePolicy: fluidCellTrace.solvePolicy }
-        : cellTrace);
-    }
     if (subjects.length === 0 && !vesselOutline) {
       if (this.decorationGeometryKey !== "") { overlay.clear(); this.decorationGeometryKey = ""; }
       return false;
     }
-    const dimensions = cellTrace?.dimensions
-      ?? (this.gpuFluid?.octreeTechniqueDebugSource?.pressureRows.dimensions);
     const enabledIds = new Set<string>([
       ...(pixelTrace?.layers ?? []).map((layer) => `svo-traversal/${layer}`),
-      ...(fluidCellTrace?.layers ?? []),
     ]);
     const assemblyOptions: AssembleDecorationsOptions = {
       definitions: VISUALIZATION_CATALOG,
@@ -1808,11 +1500,11 @@ export class FluidLabRenderer {
       // Both producers place work through this lattice; the ray probe's records
       // are already world metres and bypass it by appending directly.
       space: containerDecorationSpace(
-        (dimensions ?? [1, 1, 1]) as readonly [number, number, number],
+        [1, 1, 1] as readonly [number, number, number],
         [scene.container.width_m, scene.container.height_m, scene.container.depth_m],
       ),
-      emphasis: fluidCellTrace && !fluidCellTrace.pinned ? "hover" : "selected",
-      widthScale: pixelTrace?.widthScale ?? fluidCellTrace?.widthScale,
+      emphasis: "selected",
+      widthScale: pixelTrace?.widthScale,
       enabled: (definition) => enabledIds.has(definition.id),
     };
     // Resolve plug-in identity before running any builder. A pinned ray's
@@ -1937,7 +1629,7 @@ export class FluidLabRenderer {
       const sidecar = this.svoSceneSidecar;
       this.gpuFluid = undefined;
       this.svoSceneSidecar = undefined;
-      this.pendingInitialRasterPresentation = undefined;
+
       this.pendingLiveSvoPresentation = undefined;
       this.gpuFluidKey = "";
       this.attachedStructuralKey = "";
@@ -1986,7 +1678,6 @@ export class FluidLabRenderer {
       progress("Compiling raster water pipelines",3);
       await waterPipeline.initialize(
         (label,completed,total)=>progress(label,completed,total,"water-renderer"),
-        { deferSceneClassifiers: true },
       );
     } catch (error) {
       waterPipeline.destroy();
@@ -2002,135 +1693,15 @@ export class FluidLabRenderer {
     this.onStatus({ state: "ready", label: "WebGPU renderer ready", adapter: this.adapterName, resource: webGPUPlatformResourcePlugin });
   }
 
-  /**
-   * Build or reuse the fluid coverage volume for this frame.
-   *
-   * Gated on the global-fine lane, because that is the only configuration whose
-   * surface is a signed distance; the tall-cell and quadtree lanes pack
-   * occupancy into the same texture, and resampling that as a distance would put
-   * a shadow wherever the field happened to be positive. Outside the lane the
-   * volume is released and water casts no shadow, which is the behaviour every
-   * lane had before.
-   *
-   * Inside the lane the source is whichever the solver actually publishes.
-   * Sparse CM12 is buffer-native: it allocates 1x1x1 stand-ins for every texture
-   * field on `GPUSolverInstance` and keeps the real surface in its page set, so
-   * the dense arm is admissible only when the texture genuinely covers the
-   * lattice it claims to. That check is the point — a fill over the stand-in
-   * reads out of bounds and quantizes to half coverage across the entire domain,
-   * which is not "no shadow", it is a uniform fog nobody asked for.
-   */
-  private ensureFluidCoverage(
-    solver: GPUSolverInstance | undefined,
-    scene: SceneDescription,
-  ): WebGpuSvoFluidCoverage | undefined {
-    const device = this.device;
-    const sparsePresentation = this.sparseWorldPresentation(solver);
-    const brickSource = device && solver && this.globalFineWaterAttached
-      ? sparsePresentation?.fineLevelSet ?? solver.globalFineLevelSetSource : undefined;
-    // The factory validates, so a solver mid-rebuild can throw here. A shadow is
-    // never worth taking the frame down with it: an unusable publication is the
-    // same answer as no publication.
-    let publication: GlobalFineLevelSetConsumerSource | undefined;
-    try {
-      publication = brickSource ? createGlobalFineLevelSetConsumerSource(brickSource) : undefined;
-    } catch {
-      publication = undefined;
-    }
-    const info = solver?.info;
-    if (!publication || !info || !device) {
-      this.svoFluidCoverage?.destroy();
-      this.svoFluidCoverage = undefined;
-      this.svoFluidCoverageKey = undefined;
-      return undefined;
-    }
-    // surfaceFieldTexture is the contoured level set when the solver keeps one
-    // apart from volumeTexture; it is the field globalCoarsePhi already reads.
-    const dense = solver?.surfaceFieldTexture ?? solver?.volumeTexture;
-    const spansLattice = Boolean(dense) && dense!.width >= info.nx
-      && dense!.height >= info.ny && dense!.depthOrArrayLayers >= info.nz;
-    const container = scene.container;
-    const fluidDomain = solver.fluidDomain;
-    // Both arms span the same physical world box. Usually that is the authored
-    // lattice, centred in x/z with y from its origin; sparse flow may publish a
-    // larger fluid world so newly created frontier pages render in the same frame.
-    // Only the lattice differs: the dense field is the solver grid, the compact
-    // publication is the fine one.
-    //
-    // Deliberately NOT `publication.domainOrigin` / `publication.fineCellWidth`.
-    // Those are the publication's *own* frame, and Sparse CM12 publishes it as
-    // index space — `domainOrigin: [0,0,0]`, `fineCellWidth: 1`
-    // (`webgpu-sparse-cm12-resident.ts`). `createGlobalFineLevelSetConsumerSource`
-    // even refuses a non-zero origin outright. Taking them for metres puts the
-    // volume at the world origin with one-metre texels: a box in the wrong
-    // place, at the wrong scale, that still samples and still reports valid.
-    const lattice: SvoFluidCoverageTriple = spansLattice
-      ? [info.nx, info.ny, info.nz] : publication.sampleDimensions;
-    const field: WebGpuSvoFluidCoverageOptions = {
-      fieldDimensions: lattice,
-      worldOrigin_m: fluidDomain?.origin_m
-        ?? [-container.width_m / 2, 0, -container.depth_m / 2],
-      cellSize_m: fluidDomain?.cellSize_m
-        ?? [container.width_m / lattice[0], container.height_m / lattice[1], container.depth_m / lattice[2]],
-    };
-    // A compact publication's lattice is the fine one, so the dense arm's "one
-    // texel per two cells" would ask for gigabytes on a large scene. Coarsen
-    // until the volume fits, and decline rather than build one that does not.
-    const cellsPerTexel = planSvoFluidCoverageRatio(
-      field.fieldDimensions, spansLattice ? undefined : publication.brickResolution,
-    );
-    if (cellsPerTexel === undefined) {
-      this.svoFluidCoverage?.destroy();
-      this.svoFluidCoverage = undefined;
-      this.svoFluidCoverageKey = undefined;
-      return undefined;
-    }
-    const options: WebGpuSvoFluidCoverageOptions = { ...field, cellsPerTexel };
-    const key = `${spansLattice ? "dense" : "compact"}:${options.fieldDimensions.join(",")}`
-      + `:${options.worldOrigin_m.join(",")}:${options.cellSize_m.join(",")}:${cellsPerTexel}`;
-    // The page set is republished every step, so a live owner still has to take
-    // this frame's generation; only a shape or buffer change forces a rebuild.
-    if (this.svoFluidCoverage && this.svoFluidCoverageKey === key
-      && (spansLattice || this.svoFluidCoverage.adoptPublication({ ...publication, kind: "compact" }))) {
-      return this.svoFluidCoverage;
-    }
-    this.svoFluidCoverage?.destroy();
-    this.svoFluidCoverageKey = key;
-    try {
-      const source: WebGpuSvoFluidCoverageSource = spansLattice
-        ? { kind: "dense", coarsePhi: dense!.createView({ dimension: "3d" }) }
-        : { ...publication, kind: "compact" };
-      this.svoFluidCoverage = new WebGpuSvoFluidCoverage(device, options, source);
-      void this.svoFluidCoverage.initializePipelines();
-    } catch {
-      this.svoFluidCoverage = undefined;
-      this.svoFluidCoverageKey = undefined;
-    }
-    return this.svoFluidCoverage;
-  }
-
   private updateRenderSources(texture = this.fluidTexture, columnSource?: GPUTexture, gridCells = this.gridCellTexture, velocity = this.velocityFallbackTexture, pressureSamples = this.pressureSamplesFallbackTexture, divergence = this.scalarFallbackTexture, pressure = this.scalarFallbackTexture, density = this.scalarFallbackTexture) {
     const columnBases = columnSource ?? this.columnBaseTexture;
     if (!this.device || this.disposed || this.runtimeFailure || this.deviceLost || !texture || !columnBases || !gridCells || !velocity || !pressureSamples || !divergence || !pressure || !density) return;
     this.attachedSurfaceTexture = texture;
-    this.waterPipeline?.setVolume(texture, columnBases, this.gpuFluid?.denseLevelSetVolumeSource);
+    this.waterPipeline?.setVolume(texture, this.gpuFluid?.denseLevelSetVolumeSource);
     this.waterPipeline?.setFluidDomain(this.gpuFluid?.fluidDomain);
-    const sparsePresentation = this.sparseWorldPresentation(this.gpuFluid);
-    const globalFineLevelSet = sparsePresentation?.fineLevelSet
-      ?? this.gpuFluid?.globalFineLevelSetSource;
-    this.waterPipeline?.setGlobalFineLevelSet(globalFineLevelSet
-      ? createGlobalFineLevelSetConsumerSource(globalFineLevelSet)
-      : undefined);
-    this.waterPipeline?.setCoarseLevelSet(this.gpuFluid?.coarseLevelSetSource);
     this.gridOverlayPipeline?.setDenseLevelSetVolumeSource(this.gpuFluid?.denseLevelSetVolumeSource);
     this.gridOverlayPipeline?.setVolume(texture, columnBases, gridCells, velocity, pressureSamples, divergence, pressure, density);
-    this.gridOverlayPipeline?.setSparseSource(sparsePresentation?.adaptiveGrid
-      ?? this.gpuFluid?.sparseAdaptiveGridSource);
-    this.techniqueOverlayPipeline?.setSource(this.gpuFluid?.octreeTechniqueDebugSource);
-    this.techniqueOverlayPipeline?.setOwnerRows(pressureSamples);
-    this.techniqueAuditOverlayPipeline?.setSource(this.gpuFluid?.octreeTechniqueDebugSource);
-    this.techniqueAuditOverlayPipeline?.setOwnerRows(pressureSamples);
-    this.fluidCellTracePipeline?.setSource(this.gpuFluid?.octreeTechniqueDebugSource, pressureSamples);
+
   }
 
   private solverKey(scene:SceneDescription,config:SimulationRunConfig,presentationMode:ScenePresentationMode){
@@ -2169,18 +1740,11 @@ export class FluidLabRenderer {
       this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.resetGPUQueueTracking();
       if(presentationMode === "full-scene")this.attachSparsePresentationSource(
         solver,requestGeneration,performance.now(),solver.sparseVoxelSceneSource);
-      // reset() intentionally clears the diagnostics store. A warm re-seed
-      // must therefore republish its authority just like a replacement attach,
-      // then earn a fresh raster fence before transport unlocks. Merely moving
-      // gpuFluidKey leaves the renderer ready while the UI waits forever for
-      // initialSparseAuthorityReady/initialRasterSurfaceReady to reappear.
-      solver.info.initialRasterSurfaceReady=false;
-      solver.info.initialRasterSurfaceState="pending";
-      solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication after re-seed";
-      this.globalFineWaterAttached=false;
-      this.pendingInitialRasterPresentation={solver,solverGeneration:generation,requestGeneration,submitted:false,resource};
+      solver.info.initialRasterSurfaceReady=true;
+      solver.info.initialRasterSurfaceState="gpu-authoritative";
+      solver.info.initialRasterSurfaceDiagnostic="Direct solver field attached after re-seed";
       this.gpuInfoCallback?.({...solver.info});
-      this.onStatus({state:"initializing",label:"Re-seeded solver ready; publishing fenced t=0 raster surface",phase:"presentation",completed:0,total:1,startedAt_ms:performance.now(),kind:"rebuild",retainingPrevious:false,resource});
+      this.onStatus({state:"ready",label:"Re-seeded solver ready",adapter:this.adapterName,resource});
     }).catch(()=>{
       if(!this.disposed&&this.gpuFluid===solver&&this.gpuFluidGeneration===generation
         &&this.gpuFluidRequestGeneration===requestGeneration)this.beginGPUFluidInitialization(scene,config,key,presentationMode);
@@ -2200,72 +1764,12 @@ export class FluidLabRenderer {
     this.gpuAccountedSubmittedTime_s = 0;
     this.pendingGPUAdvanceCompletions.length = 0;
     this.reportedSimulationPipelineState = "";
-    this.reportedSparseWorldStatus = "";
   }
 
-  /**
-   * The renderer's only view of sparse simulation state. Both values come
-   * from the public sparse-world module; adapter compilation details stay on
-   * the other side of that boundary.
-   */
-  private sparseWorldSnapshot(
-    solver: GPUSolverInstance | undefined,
-  ): SparseWorldSnapshot | undefined {
-    if (!solver?.sparseWorld) return undefined;
-    return {
-      // A sparse solver that has not supplied its device owner is incomplete.
-      // Fail closed while adapters finish migrating to the public contract.
-      deviceStatus: solver.sparseWorldDevice?.status ?? "loading",
-      deviceFault: solver.sparseWorldDevice?.fault,
-      status: solver.sparseWorld.status(),
-      presentation: solver.sparseWorld.presentation(),
-    };
-  }
 
-  /** Project the public sparse receipt across the renderer worker seam. */
-  private refreshSparseWorldState(
-    solver: GPUSolverInstance,
-    publish = false,
-  ): SparseWorldSnapshot | undefined {
-    const snapshot = this.sparseWorldSnapshot(solver);
-    if (!snapshot) return undefined;
-    const { deviceStatus, deviceFault, status } = snapshot;
-    solver.info.sparseWorldDeviceStatus = deviceStatus;
-    solver.info.sparseWorldDeviceFault = deviceFault;
-    solver.info.sparseWorldStatus = status;
-    const key = `${deviceStatus}:${deviceFault?.code ?? ""}:${status.state}`
-      + `:${status.acceptedGeneration}:${status.residentTiles}`
-      + `:${status.capacityTiles}:${status.lastAcceptedTime}:${status.fault?.code ?? ""}`;
-    if (publish && key !== this.reportedSparseWorldStatus) {
-      this.reportedSparseWorldStatus = key;
-      this.gpuInfoCallback?.({ ...solver.info });
-    }
-    return snapshot;
-  }
-
-  /** One accepted presentation snapshot supplies every sparse renderer binding. */
-  private sparseWorldPresentation(
-    solver: GPUSolverInstance | undefined,
-  ): SparseWorldPresentation | undefined {
-    const presentation = this.sparseWorldSnapshot(solver)?.presentation;
-    if (!presentation) return undefined;
-    // Mesh quality is a renderer preference; the snapshot remains the sole
-    // authority for buffers and accepted generation.
-    const surfaceMeshRefinement = solver?.globalFineLevelSetSource?.surfaceMeshRefinement;
-    return { ...presentation, fineLevelSet: {
-      ...presentation.fineLevelSet, surfaceMeshRefinement,
-    } };
-  }
-
-  private sparseAuthorityReady(solver: GPUSolverInstance | undefined): boolean {
-    const status = this.sparseWorldSnapshot(solver)?.status;
-    return status ? status.state !== "fault" : solver?.initialSparseAuthorityReady === true;
-  }
 
   private sparseDeviceReady(solver: GPUSolverInstance | undefined): boolean {
-    const snapshot = this.sparseWorldSnapshot(solver);
-    return snapshot ? snapshot.deviceStatus === "ready" && snapshot.status.state !== "fault"
-      : solver?.simulationReady !== false;
+    return solver?.simulationReady !== false;
   }
 
   /** Begin a new controller timeline before any old GPU completion can commit. */
@@ -2307,7 +1811,7 @@ export class FluidLabRenderer {
     if (this.disposed || this.runtimeFailure || this.deviceLost) return;
     this.simulationRunning = false;
     this.timelineResetPending = true;
-    this.pendingInitialRasterPresentation = undefined;
+
     // Every admitted completion captures this generation. Advancing it here,
     // rather than at replacement attachment, makes old callbacks stale at the
     // same synchronous instant that the controller publishes t=0.
@@ -2334,21 +1838,7 @@ export class FluidLabRenderer {
           this.gpuInfoCallback?.({ ...info });
         }
       }).catch(() => { /* Device loss is reported by device.lost. */ });
-      // The film's iteration records ride the same boundary, and for the same
-      // reason: reading them maps a buffer the solver owns. Pausing is also
-      // when the curve is wanted — it is what one does to study a solve — so
-      // the restriction and the interaction want the same moment.
-      const readPressureFilm = fluid.sparseWorldUI
-        ? () => fluid.sparseWorldUI!.diagnostics.readPressureFilm()
-        : fluid.readPressureJournal?.bind(fluid);
-      if (this.gpuPressureJournalCallback && readPressureFilm) {
-        void frameCompletion.then(() => readPressureFilm()).then((journal) => {
-          if (!this.disposed && !this.deviceLost && this.gpuFluid === fluid
-            && !this.simulationRunning) {
-            this.gpuPressureJournalCallback?.(journal);
-          }
-        }).catch(() => { /* Device loss is reported by device.lost. */ });
-      }
+
     }
     // The host uses this value as its pause floor. Wait for an admitted
     // continuation to publish its exact completed step before acknowledging
@@ -2373,23 +1863,6 @@ export class FluidLabRenderer {
    * frozen receipt beside an empty viewport is the one reading that is never
    * true of anything.
    */
-  private publishStageLensReceipt(lensId: string | undefined): void {
-    const callback = this.gpuStageLensCallback;
-    if (!callback) return;
-    if (!lensId) {
-      if (this.publishedStageLens === undefined) return;
-      this.publishedStageLens = undefined;
-      callback(undefined, []);
-      return;
-    }
-    this.publishedStageLens = lensId;
-    callback(
-      (this.gpuFluid?.sparseWorldUI?.overlays.stageLenses
-        ?? this.gpuFluid?.stageLensSource)?.receipt(lensId),
-      this.stageLensOverlayPipeline?.report ?? [],
-    );
-  }
-
   /** Clear presentation samples whenever their semantic identity changes. */
   private resetPresentationTrace() {
     this.latestPresentationTrace = undefined;
@@ -2429,11 +1902,6 @@ export class FluidLabRenderer {
       presentationSubmitted,
       ...(water ? { waterSurfacePresentation: {
         surfaceGeometrySource: water.surfaceGeometrySource,
-        globalFineAttached: water.globalFineAttached,
-        globalFineAttachedGeneration: water.globalFineAttachedGeneration,
-        meshPublicationGeneration: water.meshPublicationGeneration,
-        globalFineCrossingPublished: water.globalFineCrossingPublished,
-        presentationFallbackActive: water.presentationFallbackActive,
         sourceFrameCounts: water.sourceFrameCounts,
       } } : {}),
     };
@@ -2461,7 +1929,6 @@ export class FluidLabRenderer {
   private beginGPUFluidInitialization(scene:SceneDescription,config:SimulationRunConfig,key:string,presentationMode:ScenePresentationMode){
     if(!this.device||this.disposed||this.runtimeFailure||this.deviceLost)return;
     const method=getMethod(config.methodId);if(!canInitializeGPUSceneSource(scene,config.methodId))return;
-    const sparseWorldMethod=method.capabilities?.sparseWorld===true;
     const rendererOnlyScene=!planSceneRuntime(scene).fluidSolver;
     const initializationResource=rendererOnlyScene?liveSvoSceneResourcePlugin:method.resource;
     this.gpuFluidInitializationAbort?.abort();
@@ -2505,9 +1972,7 @@ export class FluidLabRenderer {
     // transaction. Only the warmed candidate is allowed to replace it.
     this.gpuFluidPendingKey=key;
     let reportedCompleted=0,reportedTotal=1;
-    const report=(progress:{phase:string;taskId?:string;label:string;completed:number;total:number})=>{if(this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration)return;reportedCompleted=progress.completed;reportedTotal=progress.total;this.onStatus(sparseWorldMethod
-      ? {state:"initializing",label:"Loading sparse world",startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:Boolean(previous),resource:initializationResource}
-      : {state:"initializing",...progress,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:Boolean(previous),resource:initializationResource});};
+    const report=(progress:{phase:string;taskId?:string;label:string;completed:number;total:number})=>{if(this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration)return;reportedCompleted=progress.completed;reportedTotal=progress.total;this.onStatus({state:"initializing",...progress,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:Boolean(previous),resource:initializationResource});};
     let previousDestroyedForReset=false;
     let previousSidecarDestroyedForReset=false;
     const prepare=async()=>{
@@ -2523,7 +1988,6 @@ export class FluidLabRenderer {
       if(this.gpuFluid===previous){
         this.gpuFluid=undefined;this.gpuFluidKey="";
         this.updateRenderSources();
-        this.secondaryParticlePipeline?.setSource(undefined);
         this.svoDrySceneSource=undefined;this.svoDrySceneData=undefined;this.liveSceneAnimation=undefined;this.liveSceneAnimationFailure=undefined;this.renderSceneKey="";this.renderSceneStamp=0;this.svoDryScenePipeline?.setSource(undefined);
         previous.destroy();previousDestroyedForReset=true;
       }
@@ -2590,22 +2054,17 @@ export class FluidLabRenderer {
         this.onStatus({ state: "ready", label: `Scenery rebuilt${degraded}; fluid state retained`, adapter: this.adapterName, resource: initializationResource });
         return;
       }
-      if(requiresFencedInitialRasterPresentation(config.methodId)&&!this.sparseAuthorityReady(solver)){solver.destroy();sidecar?.destroy();throw new Error(`${method.label} solver returned before fenced sparse t=0 authority`);}
       report({phase:"attach",taskId:"solver.attach",label:"Attach warmed solver",completed:reportedCompleted,total:reportedTotal+1});
       // This renderer presents while a change waits for pipelines.
-      solver.acceptPipelineWaits?.();
       solver.applyRuntimeValues?.(config.values);
       if (config.detailFocus) solver.applyDetailInput?.({ focus: config.detailFocus });
       this.attachedSolverDocumentKey = gpuSceneSolverKey(scene, config);
-      this.gpuFluid=solver;this.svoSceneSidecar=sidecar;this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.attachedPresentationMode=presentationMode;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.globalFineWaterAttached=false;
-      const sparseWorldState=this.refreshSparseWorldState(solver);
-      const fencedInitialRaster=requiresFencedInitialRasterPresentation(config.methodId);
-      if(rendererOnlyScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Live scene source ready; fluid authority intentionally absent";this.pendingInitialRasterPresentation=undefined;}
-      else if(fencedInitialRaster){solver.info.initialRasterSurfaceReady=false;solver.info.initialRasterSurfaceState="pending";solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication";this.pendingInitialRasterPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,submitted:false,resource:method.resource};}
-      else{solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Direct solver field attached; sparse raster fence not required";this.pendingInitialRasterPresentation=undefined;}
-      this.updateRenderSources(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture,solver.volumeTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);
-      if(presentationMode === "full-scene")this.attachSparsePresentationSource(solver,generation,startedAt_ms,sidecar?.sparseVoxelSceneSource??solver.sparseVoxelSceneSource);
-      else{this.svoDrySceneSource=undefined;this.svoDrySceneData=undefined;this.liveSceneAnimation=undefined;this.liveSceneAnimationFailure=undefined;this.svoDryScenePipeline?.setSource(undefined);}
+      this.gpuFluid=solver;this.svoSceneSidecar=sidecar;this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.attachedPresentationMode=presentationMode;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;
+      solver.info.initialRasterSurfaceReady=true;
+      solver.info.initialRasterSurfaceState="gpu-authoritative";
+      solver.info.initialRasterSurfaceDiagnostic=rendererOnlyScene
+        ? "Live scene source ready; fluid authority intentionally absent" : "Direct solver field attached";
+
       // A world that had to step its refinement ladder down says so in the one
       // status a user reads to the end, because "the leaf is 3.125 mm, not the
       // 1.5625 mm you asked for" is otherwise indistinguishable from a depth
@@ -2620,14 +2079,8 @@ export class FluidLabRenderer {
       if(previous&&previous!==solver&&!previousDestroyedForReset)this.retireGPUFluid(previous);
       if(previousSidecar&&previousSidecar!==sidecar&&!previousSidecarDestroyedForReset)this.retireGPUFluid(previousSidecar);
       this.gpuInfoCallback?.(solver.info);
-      const sparseFault=sparseWorldState?.status.fault??sparseWorldState?.deviceFault;
-      if(!rendererOnlyScene&&solver.sparseWorld&&(sparseWorldState?.status.state==="fault"||sparseWorldState?.deviceStatus==="fault"))this.onStatus({state:"blocked",label:`Sparse world fault · ${sparseFault?.code ?? "internal"}`,resource:method.resource});
-      else if(!rendererOnlyScene&&solver.sparseWorld&&sparseWorldState?.deviceStatus!=="ready")this.onStatus({state:"initializing",label:"Loading sparse world",startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:false,resource:method.resource});
-      else if(!rendererOnlyScene&&solver.sparseWorld&&fencedInitialRaster)this.onStatus({state:"initializing",label:"Loading sparse world",startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:false,resource:method.resource});
-      else if(!rendererOnlyScene&&solver.sparseWorld)this.onStatus({state:"ready",label:sparseWorldState?.status.state==="saturated"?"Sparse world capacity reached":"Sparse world ready",adapter:this.adapterName,resource:method.resource});
-      else if(!rendererOnlyScene&&fencedInitialRaster)this.onStatus({state:"initializing",label:"Warmed solver attached; publishing fenced t=0 raster surface",phase:"presentation",completed:reportedCompleted,total:reportedTotal+1,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:false,resource:method.resource});
-      else if(!rendererOnlyScene)this.onStatus({state:"ready",label:"WebGPU direct-field solver ready",adapter:this.adapterName,resource:method.resource});
-    }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.pendingInitialRasterPresentation=undefined;this.pendingLiveSvoPresentation=undefined;if(isGPUInitializationAbort(error))return;if(error instanceof SimulationFailureError){this.stopAfterSimulationFailure(error);return;}this.onStatus({state:"unavailable",label:`GPU ${previous ? "rebuild" : "initialization"} failed: ${error instanceof Error ? error.message : String(error)}`,failure:error instanceof SimulationFailureError ? error.failure : undefined,resource:initializationResource});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration){this.gpuFluidPending=undefined;if(this.gpuFluidInitializationAbort===abort)this.gpuFluidInitializationAbort=undefined;}});
+      if(!rendererOnlyScene)this.onStatus({state:"ready",label:"WebGPU direct-field solver ready",adapter:this.adapterName,resource:method.resource});
+    }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.pendingLiveSvoPresentation=undefined;if(isGPUInitializationAbort(error))return;if(error instanceof SimulationFailureError){this.stopAfterSimulationFailure(error);return;}this.onStatus({state:"unavailable",label:`GPU ${previous ? "rebuild" : "initialization"} failed: ${error instanceof Error ? error.message : String(error)}`,failure:error instanceof SimulationFailureError ? error.failure : undefined,resource:initializationResource});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration){this.gpuFluidPending=undefined;if(this.gpuFluidInitializationAbort===abort)this.gpuFluidInitializationAbort=undefined;}});
   }
 
   /**
@@ -2666,7 +2119,6 @@ export class FluidLabRenderer {
 
   /** Complete the GPU wet-overlap proof and publish within the same continuation. */
   /** After each solver's first presentation, build its remaining pipelines in the background. */
-  enableSolverPipelineWarmup(): void { this.solverPipelineWarmup = true; }
   async acceptLiveSolidEdit(scene: SceneDescription, stillCurrent: () => boolean = () => true): Promise<void> {
     if (this.pendingLiveSolidEdit) throw new Error("A solid edit is still being accepted.");
     this.validateLiveSolidEdit(scene);
@@ -2983,59 +2435,7 @@ export class FluidLabRenderer {
       this.gpuInfoCallback?.({ ...this.gpuFluid.info });
       this.pausedPresentationRevision += 1;
     }
-    const topologyFrozen = config.topologyFrozen === true;
-    if (this.topologyFreezeSolver !== this.gpuFluid || this.topologyFrozen !== topologyFrozen) {
-      this.gpuFluid.setTopologyFrozen?.(topologyFrozen);
-      this.topologyFreezeSolver = this.gpuFluid;
-      this.topologyFrozen = topologyFrozen;
-    }
-    this.secondaryParticlePipeline?.setSource(this.gpuFluid.secondaryParticles);
     return this.gpuFluid;
-  }
-
-  private settleInitialRasterPresentation(
-    pending: PendingInitialRasterPresentation,
-    diagnosticsRequired: boolean,
-    diagnostics: WaterRenderDiagnostics | undefined,
-  ) {
-    if (this.disposed || this.runtimeFailure || this.deviceLost || this.pendingInitialRasterPresentation !== pending
-      || this.gpuFluid !== pending.solver || this.gpuFluidGeneration !== pending.solverGeneration
-      || this.gpuFluidRequestGeneration !== pending.requestGeneration) return;
-    const sparsePresentation = this.sparseWorldPresentation(pending.solver);
-    const outcome = diagnosticsRequired && !diagnostics
-      ? { ready: false, state: "failed-closed" as const,
-          label: "t=0 raster publication failed closed: bounded diagnostics readback was unavailable" }
-      : initialRasterPresentationReadiness({
-          solverAttached: true,
-          initialSparseAuthorityReady: this.sparseAuthorityReady(pending.solver),
-          globalFineAttached: Boolean(sparsePresentation?.fineLevelSet
-            || pending.solver.globalFineLevelSetSource
-            || pending.solver.coarseLevelSetSource),
-          surfaceSourceAttached: this.globalFineWaterAttached,
-          surfaceExtractionSubmitted: pending.submitted,
-          presentationFenceCompleted: true,
-          diagnosticsRequired,
-          diagnostics,
-        });
-    if (!outcome.ready && outcome.state !== "failed-closed") return;
-    pending.solver.info.initialRasterSurfaceReady = outcome.ready;
-    pending.solver.info.initialRasterSurfaceState = outcome.state;
-    pending.solver.info.initialRasterSurfaceDiagnostic = outcome.label;
-    this.pendingInitialRasterPresentation = undefined;
-    const sparseWorldState = this.refreshSparseWorldState(pending.solver);
-    this.gpuInfoCallback?.(pending.solver.info);
-    this.pausedPresentationRevision += 1;
-    if (pending.solver.sparseWorld) {
-      const sparseFault = sparseWorldState?.status.fault ?? sparseWorldState?.deviceFault;
-      if (!outcome.ready || sparseWorldState?.status.state === "fault"
-        || sparseWorldState?.deviceStatus === "fault") {
-        this.onStatus({ state: "blocked", label: `Sparse world fault · ${sparseFault?.code ?? "presentation"}`, resource: pending.resource });
-      } else if (sparseWorldState?.deviceStatus !== "ready") {
-        this.onStatus({ state: "initializing", label: "Loading sparse world", resource: pending.resource });
-      } else this.onStatus({ state: "ready", label: sparseWorldState.status.state === "saturated"
-        ? "Sparse world capacity reached" : "Sparse world ready", adapter: this.adapterName, resource: pending.resource });
-    } else if (outcome.ready) this.onStatus({ state: "ready", label: outcome.label, adapter: this.adapterName, resource: pending.resource });
-    else this.onStatus({ state: "blocked", label: outcome.label, resource: pending.resource });
   }
 
   private settleLiveSvoPresentation(pending: PendingLiveSvoPresentation) {
@@ -3063,9 +2463,6 @@ export class FluidLabRenderer {
 
   private submitPreparedGPUFluid(fluid: GPUSolverInstance, time_s: number, bodies: RigidBodyState[], maximumPendingAdvances = 1, resource?: ResourcePluginDefinition) {
     if (!this.device) return fluid.info;
-    const sparseWorldState = this.refreshSparseWorldState(fluid, true);
-    if (sparseWorldState?.status.state === "fault"
-      || sparseWorldState?.deviceStatus === "fault") return fluid.info;
     if (fluid.info.simulationFailure) {
       this.stopAfterSimulationFailure(new SimulationFailureError(fluid.info.simulationFailure));
       return fluid.info;
@@ -3074,11 +2471,9 @@ export class FluidLabRenderer {
       this.onStatus({ state: "unavailable", label: fluid.info.simulationPipelineError ?? fluid.info.topologyGenerationError!, resource: resource ?? webGPUPlatformResourcePlugin });
       return fluid.info;
     }
-    const sparseWorldLoading = Boolean(fluid.sparseWorld
-      && sparseWorldState?.deviceStatus !== "ready");
-    if (sparseWorldLoading || (!fluid.sparseWorld && fluid.simulationReady === false)) {
-      if (!fluid.sparseWorld) fluid.info.simulationPipelinesReady = false;
-      const state = sparseWorldLoading ? "sparse-world-loading" : fluid.info.simulationPipelineError
+    if (fluid.simulationReady === false) {
+      fluid.info.simulationPipelinesReady = false;
+      const state = fluid.info.simulationPipelineError
         ? `failed:${fluid.info.simulationPipelineError}`
         : "compiling";
       if (state !== this.reportedSimulationPipelineState) {
@@ -3087,16 +2482,10 @@ export class FluidLabRenderer {
       }
       return fluid.info;
     }
-    if (!fluid.sparseWorld && fluid.info.simulationPipelinesReady === false) {
+    if (fluid.info.simulationPipelinesReady === false) {
       fluid.info.simulationPipelinesReady = true;
       this.reportedSimulationPipelineState = "ready";
       this.gpuInfoCallback?.({ ...fluid.info });
-    } else if (fluid.sparseWorld && this.reportedSimulationPipelineState !== "ready") {
-      this.reportedSimulationPipelineState = "ready";
-      this.gpuInfoCallback?.({ ...fluid.info });
-      if (resource) this.onStatus({ state: "ready", label:
-        sparseWorldState?.status.state === "saturated" ? "Sparse world capacity reached"
-          : "Sparse world ready", adapter: this.adapterName, resource });
     }
     // The presentation that follows carries whatever state these advances end
     // on, so no later simulation work can overtake the frame that visualizes
@@ -3125,7 +2514,6 @@ export class FluidLabRenderer {
         solver: fluid, solverGeneration: generation, submittedTime_s: submittedTime,
       });
     }
-    this.refreshSparseWorldState(fluid, true);
     return fluid.info;
   }
 
@@ -3196,13 +2584,13 @@ export class FluidLabRenderer {
     this.hoverHighlight = range && range.last >= range.first ? range : undefined;
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, presentationMode: ScenePresentationMode = "full-scene", fluidSurfaceRenderMode: FluidSurfaceRenderMode = "shaded", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig, fluidCellTrace?: FluidCellTraceConfig): RendererFrameMetrics {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, presentationMode: ScenePresentationMode = "full-scene", fluidSurfaceRenderMode: FluidSurfaceRenderMode = "shaded", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig): RendererFrameMetrics {
     // A method declares that its field views compose as layers; every other
     // method draws one overlay mode, and a layer selection left behind by a
     // composing method means nothing to it.
     const composed = getMethod(config.methodId).capabilities?.visualLayers;
     const composesLayers = Boolean(composed);
-    if (composed && gridOverlay && !isStageLensOverlayMode(gridOverlay.mode ?? "")) {
+    if (composed && gridOverlay) {
       const selected = gridOverlay.layers ?? { ...legacyVisualLayers(gridOverlay.mode ?? "structure"), visible: gridOverlay.axis !== "off" };
       const layers = gridOverlay.particles === undefined ? selected
         : withParticleDisplay(selected, composed.hidden.includes("particles") ? "off" : gridOverlay.particles);
@@ -3262,7 +2650,7 @@ export class FluidLabRenderer {
     // zero-filled texture: row 0 everywhere, whose header decodes as a 1³ leaf
     // at the origin with no couplings. Asking for it whenever the picker is on
     // is what makes a pick land on the cell under the pointer.
-    if (gridOverlay?.axis !== "off" || fluidCellTrace) {
+    if (gridOverlay?.axis !== "off") {
       this.gpuFluid?.ensureGridDiagnosticTextures?.();
     }
     const sceneRuntime = planSceneRuntime(scene);
@@ -3325,9 +2713,7 @@ export class FluidLabRenderer {
       }, primaryWorkMapRequested, activeSvoTuning.sunlightCacheEnabled, activeSvoTuning.waterShadowsEnabled, svoLightingOptions.coneTracingMode === "raster-ao" && !primaryWorkMapRequested);
     }
     this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
-      gridOverlay, this.simulationRunning,
-      Boolean((readyGPUFluid ?? this.gpuFluid)?.secondaryParticles),
-      pixelTraceRequested, Boolean(fluidCellTrace),
+      gridOverlay, pixelTraceRequested,
       sparsePresentationRequired && activeSvoDiagnostics.stageView !== "off",
       sparsePresentationRequired,
       sceneVesselPresentation(scene) === "outline",
@@ -3368,31 +2754,6 @@ export class FluidLabRenderer {
         pixelTracePixel![0], pixelTracePixel![1],
       );
     }
-    // The step along the ray applies to a pinned selection too: freezing the ray
-    // is exactly when walking into the interior along it becomes useful.
-    if (fluidCellTrace) this.fluidCellTracePipeline?.setHitIndex(fluidCellTrace.hitIndex ?? 0);
-    // A pinned cell stops re-aiming, so orbiting cannot silently reselect it.
-    // Freezing the pixel was not enough to do that: the gather still marched a
-    // ray built from that pixel and the *current* camera, so panning swung the
-    // ray and the pin slid onto whatever moved under it. The aim is recorded in
-    // world space instead, from the same pixel centre the shader would have
-    // used, and simply stops being updated once pinned.
-    if (fluidCellTrace && !fluidCellTrace.pinned) {
-      const width = this.presentationTexture.width, height = this.presentationTexture.height;
-      const pixelX = Math.floor(Math.max(0, Math.min(1, fluidCellTrace.normalizedX)) * width);
-      const pixelY = Math.floor(Math.max(0, Math.min(1, fluidCellTrace.normalizedY)) * height);
-      this.fluidCellTracePipeline?.requestPixel(pixelX, pixelY);
-      const aim = viewportRayForPixel(camera, pixelX, pixelY, width, height);
-      this.fluidCellTracePipeline?.setAim(aim.origin, aim.direction);
-    } else if (!fluidCellTrace) {
-      // Leaving pick mode drops the frozen aim, so re-entering starts from the
-      // pointer rather than answering the cell picked a scene ago.
-      this.fluidCellTracePipeline?.clearAim();
-      if (this.latestFluidCellTraceValue) {
-        this.latestFluidCellTraceValue = undefined;
-        this.fluidCellTraceRevisionValue += 1;
-      }
-    }
     if (!pixelTraceRequested) {
       this.svoDryScenePipeline?.clearPixelTraceRequest();
       this.pixelTraceEncodedRequestKey = "";
@@ -3426,28 +2787,11 @@ export class FluidLabRenderer {
         readyGPUFluid.info.submittedTime_s ?? 0, this.presentedStateTimes.get(readyGPUFluid)))) {
       return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
-    // The global fine narrow band double-buffers generations. Refresh its
-    // tagged renderer binding after each admitted solver encode so extraction
-    // follows the newly published generation without any CPU field copy.
-    const sparseWorldPresentation = this.sparseWorldPresentation(readyGPUFluid);
     this.waterPipeline.setFluidDomain(readyGPUFluid?.fluidDomain);
-    const globalFineLevelSet = sparseWorldPresentation?.fineLevelSet
-      ?? readyGPUFluid?.globalFineLevelSetSource;
-    if (globalFineLevelSet) {
-      this.waterPipeline.setGlobalFineLevelSet(createGlobalFineLevelSetConsumerSource(globalFineLevelSet));
-    } else {
-      this.waterPipeline.setGlobalFineLevelSet(undefined);
-    }
-    this.waterPipeline.setCoarseLevelSet(readyGPUFluid?.coarseLevelSetSource);
-    const globalFineWaterReady = Boolean(readyGPUFluid
-      && this.sparseAuthorityReady(readyGPUFluid)
-      && (globalFineLevelSet || readyGPUFluid.coarseLevelSetSource));
     const requestedSurface = readyGPUFluid
-      ? globalFineWaterReady ? this.scalarFallbackTexture : readyGPUFluid.surfaceFieldTexture ?? readyGPUFluid.volumeTexture
+      ? readyGPUFluid.surfaceFieldTexture ?? readyGPUFluid.volumeTexture
       : undefined;
-    if (readyGPUFluid && (globalFineWaterReady !== this.globalFineWaterAttached
-      || requestedSurface !== this.attachedSurfaceTexture)) {
-      this.globalFineWaterAttached = globalFineWaterReady;
+    if (readyGPUFluid && requestedSurface !== this.attachedSurfaceTexture) {
       this.updateRenderSources(
         requestedSurface,
         readyGPUFluid.columnBaseTexture,
@@ -3474,13 +2818,7 @@ export class FluidLabRenderer {
     this.gpuFluid?.setLayoutViewsEnabled?.(Boolean(gridOverlay?.axis !== "off" && uniformLayers?.visible
       && uniformLayers.enabled.some(id => id === "tiles" || id === "importance" || id === "grid" || id === "pressure")));
     this.gridOverlayPipeline?.setLayers(uniformLayers, this.gpuFluid?.tileClassSource, this.gpuFluid?.solveWindowSource, this.gpuFluid?.gridPressureOrigin, this.gpuFluid?.gridVelocityBoundary, this.gpuFluid?.volumePageSource);
-    if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {const activeSparsePresentation=this.sparseWorldPresentation(this.gpuFluid);const compactSurface=Boolean(activeSparsePresentation?.fineLevelSet||this.gpuFluid.globalFineLevelSetSource||this.gpuFluid.coarseLevelSetSource);this.gridOverlayPipeline?.setVolume(compactSurface?this.scalarFallbackTexture:this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture, this.gpuFluid.volumeTexture);this.gridOverlayPipeline?.setSparseSource(activeSparsePresentation?.adaptiveGrid??this.gpuFluid.sparseAdaptiveGridSource);}
-    // A newly attached sparse source may still be compiling its water
-    // classifier/scan/emitter. Wait before creating an encoder or claiming
-    // presentation receipts; the next frame retries with the same source.
-    if (!this.waterPipeline.prepareSurfacePipelines()) {
-      return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
-    }
+    if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {this.gridOverlayPipeline?.setVolume(this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture, this.gpuFluid.volumeTexture);}
     cpuTrace?.transition({ id: "scene-upload", label: "Scene and field uploads" });
     const cameraStabilityKey = [
       basis.position.x, basis.position.y, basis.position.z,
@@ -3490,70 +2828,12 @@ export class FluidLabRenderer {
     ].join("|");
     const cameraChanging = cameraStabilityKey !== this.svoCameraStabilityKey;
     this.svoCameraStabilityKey = cameraStabilityKey;
-    const techniqueModeCode = gridOverlay?.mode && isOctreeTechniqueOverlayMode(gridOverlay.mode)
-      ? OCTREE_TECHNIQUE_OVERLAY_CODES[gridOverlay.mode]
-      : 0;
-    // Keep the diagnostic selected even when the active solver has not
-    // published CMD1. The grid overlay binds its one-word dummy storage in
-    // that case; the version/extent checks deliberately render UNKNOWN
-    // magenta instead of silently falling back to Grid structure.
-    const dirtyModeCode = sparseCM12DirtyOverlayCode(gridOverlay?.mode);
-    // The compact pressure solve ping-pongs its row buffer. Refresh the
-    // diagnostic bundle only while a technique view is visible so pressure
-    // updates never keep a bind group pointed at the preceding solve bank.
-    if (techniqueModeCode) {
-      this.techniqueOverlayPipeline?.setSource(this.gpuFluid?.octreeTechniqueDebugSource);
-    }
-    // The view drives the marker advection, because the view is the only thing
-    // that knows whether anyone is looking. Off is free rather than cheap: the
-    // solver encodes no marker dispatch at all, and the off-to-on transition
-    // re-seeds so switching the view on colours the liquid as it is now.
-    const tracersVisible = gridOverlay?.axis !== "off" && gridOverlay?.mode === "tracers";
-    const sparseUI = this.gpuFluid?.sparseWorldUI;
-    if (sparseUI) sparseUI.control.tracers?.setEnabled(tracersVisible);
-    else this.gpuFluid?.setTracersEnabled?.(tracersVisible);
-    if (tracersVisible) this.tracerOverlayPipeline?.setSource(
-      sparseUI?.overlays.tracers ?? this.gpuFluid?.tracerSource);
-    // Particle spheres likewise read what the step already keeps. The source
-    // is re-read every frame: a solver may alternate two particle buffers.
     const composedLayers = gridOverlay ? composedVisualLayers(gridOverlay) : undefined;
     const particlesVisible = gridOverlay?.axis !== "off" && (composedLayers
       ? particleLayerShown(composedLayers) : gridOverlay?.mode === "particles");
+    // Particle spheres read what the step already keeps. The source is re-read
+    // every frame: a solver may alternate two particle buffers.
     if (particlesVisible) this.particleOverlayPipeline?.setSource(this.gpuFluid?.particleSource);
-    // Face arrows need no counterpart to setTracersEnabled: they read numbers
-    // the solve already produced, so an unwatched frame is charged nothing.
-    // The source is re-read every frame because its bank swaps with parity.
-    const faceVelocityVisible = gridOverlay?.axis !== "off"
-      && gridOverlay?.mode === "face-velocity";
-    if (faceVelocityVisible) {
-      this.faceVelocityOverlayPipeline?.setSource(
-        sparseUI?.overlays.faceVelocity ?? this.gpuFluid?.faceVelocitySource);
-    }
-    // The film follows the marker rule rather than the face-arrow one, because
-    // unlike face velocities the numbers it draws do not otherwise exist: an
-    // unarmed advance encodes no snapshot dispatch at all. So the view arms the
-    // capture, and a session that never opens it never pays for one.
-    const journalMode = isPressureJournalOverlayMode(gridOverlay?.mode)
-      ? gridOverlay.mode : undefined;
-    const journalVisible = gridOverlay?.axis !== "off" && journalMode !== undefined;
-    if (sparseUI) sparseUI.control.pressureFilm?.setCaptureEnabled(journalVisible);
-    else this.gpuFluid?.armPressureJournal?.(journalVisible);
-    if (journalVisible) {
-      this.pressureJournalOverlayPipeline?.setSource(
-        sparseUI?.overlays.pressureFilm ?? this.gpuFluid?.pressureJournalSource);
-    }
-    // A lens is the film's bargain again — its taps encode nothing until one is
-    // armed — but the arming belongs to `select`. The overlay is the only thing
-    // that knows which lens is current, so a second caller arming the source
-    // behind it would leave the two disagreeing about whose snapshots are in
-    // the buffers. The source is offered every frame because a rebuilt solver
-    // publishes a new one and the overlay ignores a repeat.
-    const lensMode = gridOverlay?.mode && isStageLensOverlayMode(gridOverlay.mode)
-      ? gridOverlay.mode : undefined;
-    const lensVisible = gridOverlay?.axis !== "off" && lensMode !== undefined;
-    this.stageLensOverlayPipeline?.setSource(
-      sparseUI?.overlays.stageLenses ?? this.gpuFluid?.stageLensSource);
-    this.stageLensOverlayPipeline?.select(lensVisible ? lensMode : undefined);
     const uniform = new Float32Array([
       this.presentationTexture.width, this.presentationTexture.height, time_s, cameraChanging ? SVO_CAMERA_CHANGING_FRAME : -1,
       // cameraPosition.w is the aperture, tan(fov/2). It was padding until the
@@ -3573,7 +2853,7 @@ export class FluidLabRenderer {
       // Field mode: 1 = raw occupancy, 3 = uniform-layout level set.
       gpuInfo?.nx ?? 1, gpuInfo?.ny ?? 1, gpuInfo?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "octree" ? 3 : 1) : 0,
       gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : gridOverlay?.axis === "y" ? 3 : gridOverlay?.axis === "volume" ? 4 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "octree" ? 1 : 0,
-      techniqueModeCode || dirtyModeCode || (gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : gridOverlay?.mode === "resolution" && gpuInfo?.gridKind === "octree" ? 9 : gridOverlay?.mode === "density" ? 10 : gridOverlay?.mode === "volume-levelset" ? VOLUME_LEVELSET_OVERLAY_MODE_CODE : gridOverlay?.mode === "fine-tiles" ? FINE_TILES_OVERLAY_MODE_CODE : gridOverlay?.mode === "solve-window" ? SOLVE_WINDOW_OVERLAY_MODE_CODE : 0),
+      (gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : gridOverlay?.mode === "resolution" && gpuInfo?.gridKind === "octree" ? 9 : gridOverlay?.mode === "density" ? 10 : gridOverlay?.mode === "volume-levelset" ? VOLUME_LEVELSET_OVERLAY_MODE_CODE : gridOverlay?.mode === "fine-tiles" ? FINE_TILES_OVERLAY_MODE_CODE : gridOverlay?.mode === "solve-window" ? SOLVE_WINDOW_OVERLAY_MODE_CODE : 0),
       environmentIndex(environmentId), gpuInfo?.lastDt_s ?? 0, gpuInfo?.maxSpeed_m_s ?? 0,
       0
     ]);
@@ -3701,11 +2981,8 @@ export class FluidLabRenderer {
     closeStage("rigid-pose-mirror");
     if (sparsePresentationRequired) {
       this.svoDryScenePipeline?.setRigidMotionSource(this.gpuFluid?.rigidMotionBuffer);
-      this.svoDryScenePipeline?.setFluidCoverage(this.ensureFluidCoverage(readyGPUFluid, scene));
-    } else {
-      this.ensureFluidCoverage(undefined, scene);
+
     }
-    this.secondaryParticlePipeline?.setSource(this.gpuFluid?.secondaryParticles);
     let svoEncoded = false;
     let requestedBundleStatus = this.svoDryScenePipeline?.presentationBundleStatus;
     const drySceneReplacement = (
@@ -3753,32 +3030,17 @@ export class FluidLabRenderer {
       terrainContentStamp: this.renderSceneTerrainContentStamp,
       container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
     });
-    // Before the dry pass samples it, and outside the water pipeline's own
-    // passes so the volume is complete for the whole frame. Withheld, the
-    // volume freezes at its last fill — consumers keep reading the retained
-    // texture — so the delta is the fill + mip chain and nothing downstream.
-    if (!disabledStages.has("fluid-coverage")) this.svoFluidCoverage?.encode(encoder);
-    closeStage("fluid-coverage");
-    const pendingInitialRaster = this.pendingInitialRasterPresentation;
-    const initialRasterSourceReady = Boolean(pendingInitialRaster
-      && !pendingInitialRaster.submitted
-      && pendingInitialRaster.solver === readyGPUFluid
-      && this.sparseAuthorityReady(readyGPUFluid)
-      && (globalFineLevelSet || readyGPUFluid.coarseLevelSetSource)
-      && this.globalFineWaterAttached);
-    const surfaceDiagnosticsRequired = true;
     // Everything encoded so far — world maintenance, rigid copies, coverage —
     // is the source band; the water/SVO pipelines cross their own boundaries.
     const rasterResult = this.waterPipeline.encode(
       encoder, this.presentationTexture,
       gpuInfo?.nx ?? 1, gpuInfo?.ny ?? 1, gpuInfo?.nz ?? 1,
-      false, gpuInfo?.maximumNeighborDelta ?? 0,
       gpuInfo?.surfaceRevision ?? gpuInfo?.encodedSteps ?? 0,
       sparsePresentationRequired ? drySceneReplacement : undefined,
       closeStage,
-      surfaceDiagnosticsRequired && initialRasterSourceReady,
+      false,
       sparsePresentationRequired ? "require-dry-scene" : "clear",
-      !this.simulationRunning || initialRasterSourceReady,
+      !this.simulationRunning,
       undefined,
       // A paused manual step gets one repaint. Its newly published surface
       // must therefore displace the retained mesh even if that repaint lands
@@ -3792,13 +3054,6 @@ export class FluidLabRenderer {
       fluidSurfaceRenderMode,
     );
     if (!rasterResult) throw new Error("Water optics pipeline is not ready");
-    const initialRasterSubmission = pendingInitialRaster
-      && initialRasterSourceReady
-      && rasterResult.surfaceUpdated
-      && (!surfaceDiagnosticsRequired || rasterResult.surfaceDiagnosticsCaptured)
-      ? pendingInitialRaster
-      : undefined;
-    if (initialRasterSubmission) initialRasterSubmission.submitted = true;
     const pendingLiveSvo = this.pendingLiveSvoPresentation;
     const startupMesh = this.svoDryScenePipeline?.surfaceMeshStatus;
     if (pendingLiveSvo?.attached && !pendingLiveSvo.submitted && startupMesh?.state === "pending") {
@@ -3883,14 +3138,6 @@ export class FluidLabRenderer {
     // pending may not appear in a submit — including the very submit that
     // carries this copy. Mapping before submitting rejects the whole command
     // buffer, so the frame that was gathering the cell also fails to present.
-    if (fluidCellTrace && !inspectionWithheld) {
-      // Lazy allocation means the owner map may have arrived after the last
-      // source refresh; `setSource` is a no-op once it stops changing.
-      this.fluidCellTracePipeline?.setSource(
-        this.gpuFluid?.octreeTechniqueDebugSource,
-        this.gpuFluid?.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture);
-      this.fluidCellTracePipeline?.encode(encoder);
-    }
     if (gridOverlay && gridOverlay.axis !== "off" && !inspectionWithheld) {
       const overlayView=this.presentationTexture.createView();
       // Spheres first, so the plane's layers read over them.
@@ -3921,100 +3168,8 @@ export class FluidLabRenderer {
       // Generic texture fields and compact paper publications each own both
       // their slice and ray-integrated volume presentation.
       if(gridOverlay.mode==="particles"){/* no plane pass */}
-      else if(tracersVisible){
-        this.tracerOverlayPipeline?.encode(encoder,overlayView,this.pixelTraceSceneDepthView(),{
-          camera: {
-            position_m: [basis.position.x, basis.position.y, basis.position.z],
-            forward: [basis.forward.x, basis.forward.y, basis.forward.z],
-            right: [basis.right.x, basis.right.y, basis.right.z],
-            up: [basis.up.x, basis.up.y, basis.up.z],
-            tanHalfFov: cameraTanHalfFov(camera),
-            aspect: viewportAspect(this.presentationTexture.width, this.presentationTexture.height),
-          },
-          viewportWidth: this.presentationTexture.width,
-          viewportHeight: this.presentationTexture.height,
-          container_m: [scene.container.width_m, scene.container.height_m, scene.container.depth_m],
-          depthNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M,
-          // The view is planeless, so its slice control is a cloud opacity —
-          // the same meaning the slider already carries in a volume view.
-          globalAlpha: gridOverlay.position,
-        });
-      }
-      else if(faceVelocityVisible){
-        this.faceVelocityOverlayPipeline?.encode(encoder,overlayView,this.pixelTraceSceneDepthView(),{
-          camera: {
-            position_m: [basis.position.x, basis.position.y, basis.position.z],
-            forward: [basis.forward.x, basis.forward.y, basis.forward.z],
-            right: [basis.right.x, basis.right.y, basis.right.z],
-            up: [basis.up.x, basis.up.y, basis.up.z],
-            tanHalfFov: cameraTanHalfFov(camera),
-            aspect: viewportAspect(this.presentationTexture.width, this.presentationTexture.height),
-          },
-          viewportWidth: this.presentationTexture.width,
-          viewportHeight: this.presentationTexture.height,
-          container_m: [scene.container.width_m, scene.container.height_m, scene.container.depth_m],
-          depthNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M,
-          globalAlpha: gridOverlay.position,
-        });
-      }
-      else if(journalVisible&&journalMode){
-        // `position` is the film's scrub rather than a slice depth: the view is
-        // planeless, so the slider has no plane to place, and stepping through
-        // the captured iterations is the one control the film cannot do without.
-        const source=this.gpuFluid?.sparseWorldUI?.overlays.pressureFilm
-          ??this.gpuFluid?.pressureJournalSource;
-        const captured=Math.max(1,source?.snapshotCount??1);
-        this.pressureJournalOverlayPipeline?.encode(encoder,overlayView,this.pixelTraceSceneDepthView(),{
-          camera: {
-            position_m: [basis.position.x, basis.position.y, basis.position.z],
-            forward: [basis.forward.x, basis.forward.y, basis.forward.z],
-            right: [basis.right.x, basis.right.y, basis.right.z],
-            up: [basis.up.x, basis.up.y, basis.up.z],
-            tanHalfFov: cameraTanHalfFov(camera),
-            aspect: viewportAspect(this.presentationTexture.width, this.presentationTexture.height),
-          },
-          viewportWidth: this.presentationTexture.width,
-          viewportHeight: this.presentationTexture.height,
-          container_m: [scene.container.width_m, scene.container.height_m, scene.container.depth_m],
-          depthNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M,
-          snapshot: Math.round(Math.max(0,Math.min(1,gridOverlay.position))*(captured-1)),
-          // The residual family is normalised on the device from the capture's
-          // own seed record, so this reference is only the fallback; pressure is
-          // the channel it actually sets.
-          channel: pressureJournalOverlayChannel(journalMode, 1),
-        });
-      }
-      else if(lensVisible&&lensMode){
-        // The one inspection view whose slider keeps its plain meaning: a lens
-        // is authored for the slice plane, so `position` places the plane
-        // rather than dimming a cloud, and the scrub it needs instead is the
-        // phase. No scene depth either — glyphs read over the frame, because a
-        // row occluded by the water is the row a projection view is about.
-        this.stageLensOverlayPipeline?.encode(encoder,overlayView,{
-          camera: {
-            position_m: [basis.position.x, basis.position.y, basis.position.z],
-            forward: [basis.forward.x, basis.forward.y, basis.forward.z],
-            right: [basis.right.x, basis.right.y, basis.right.z],
-            up: [basis.up.x, basis.up.y, basis.up.z],
-            tanHalfFov: cameraTanHalfFov(camera),
-            aspect: viewportAspect(this.presentationTexture.width, this.presentationTexture.height),
-          },
-          viewportWidth: this.presentationTexture.width,
-          viewportHeight: this.presentationTexture.height,
-          container_m: [scene.container.width_m, scene.container.height_m, scene.container.depth_m],
-          axis: gridOverlay.axis,
-          position: gridOverlay.position,
-          phase: gridOverlay.lensPhase ?? 0,
-        });
-      }
-      // Composed layers with nothing on the plane draw no plane.
-      else if(!techniqueModeCode){if(!composedLayers||sliceLayersShown(composedLayers))this.gridOverlayPipeline?.encode(encoder,overlayView);}
-      else{
-        this.techniqueOverlayPipeline?.encode(encoder,overlayView,techniqueModeCode);
-        this.techniqueAuditOverlayPipeline?.encode(encoder,overlayView,techniqueModeCode);
-      }
+      else if(!composedLayers||sliceLayersShown(composedLayers))this.gridOverlayPipeline?.encode(encoder,overlayView);
     }
-    this.publishStageLensReceipt(lensVisible ? lensMode : undefined);
     if (pixelTraceRequested && pixelTrace && !inspectionWithheld) {
       // The probe re-traces the requested pixel against the topology this frame
       // just drew from, and the overlay draws the trace decoded from the last
@@ -4036,8 +3191,7 @@ export class FluidLabRenderer {
     if (!inspectionWithheld || vesselOutlineActive) {
       this.encodeDecorationOverlay(
         encoder, basis, cameraTanHalfFov(camera), scene,
-        !inspectionWithheld && pixelTraceRequested ? pixelTrace : undefined,
-        !inspectionWithheld ? fluidCellTrace : undefined);
+        !inspectionWithheld && pixelTraceRequested ? pixelTrace : undefined);
     }
     // Closed after the probes and the decoration draw, not before them: the
     // seam is what attributes their passes, and closing early charged every
@@ -4070,11 +3224,6 @@ export class FluidLabRenderer {
     presentationQueueTrace?.begin();
     this.device.queue.submit([presentationCommands]);
     if (readyGPUFluid) this.presentedStateTimes.set(readyGPUFluid, readyGPUFluid.info.submittedTime_s ?? 0);
-    // The app's first image is on its way: build the pipelines no state has needed yet.
-    if (this.solverPipelineWarmup && readyGPUFluid && !this.warmedSolvers.has(readyGPUFluid)) {
-      this.warmedSolvers.add(readyGPUFluid);
-      void readyGPUFluid.warmPipelines?.();
-    }
     if (readyGPUFluid?.deferredFramePublication) {
       // The image carries the newest submitted state, not the newest receipt.
       this.deferredPresentedTimes.set(readyGPUFluid, Math.max(readyGPUFluid.info.completedTime_s ?? 0,
@@ -4116,7 +3265,6 @@ export class FluidLabRenderer {
     });
     if (poseStaging) this.publishRigidBodyPoses(poseStaging, bodies.slice(0, 12).map((body) => body.description.id));
     if (pixelTraceProbing) this.pumpPixelTraceReadback();
-    if (fluidCellTrace) this.pumpFluidCellTraceReadback();
     const presentationQueueTraceRead = presentationQueueTrace?.read({ onSubmittedWorkDone: () => presentationCompletion });
     const presentationStageTraceRead = presentationTraceResolved && presentationTrace
       ? presentationTrace.readSemanticFrontierTrace({
@@ -4146,19 +3294,16 @@ export class FluidLabRenderer {
         this.presentationTracePending = false;
       });
     }
-    const surfaceDiagnosticsCompletion = this.waterPipeline.completeSurfaceDiagnostics(presentationCompletion);
+    void this.waterPipeline.completeSurfaceDiagnostics(presentationCompletion);
     // The ordinary completion callback only retires a throughput slot and feeds
     // FPS evidence. First-frame startup additionally needs proof that its exact
     // submission completed before publishing renderer authority.
-    if(initialLiveSvoSubmission||initialRasterSubmission){
+    if(initialLiveSvoSubmission){
       const presentationDevice=this.device;
       void presentationCompletion.then(async()=>{
         if(this.disposed||this.runtimeFailure||this.deviceLost||this.device!==presentationDevice)return;
         if(initialLiveSvoSubmission)this.settleLiveSvoPresentation(initialLiveSvoSubmission);
-        if(initialRasterSubmission){
-          const initialDiagnostics=await surfaceDiagnosticsCompletion;
-          this.settleInitialRasterPresentation(initialRasterSubmission,surfaceDiagnosticsRequired,initialDiagnostics);
-        }
+
       }).catch(()=>{ /* Device loss is reported by device.lost. */ });
     }
     return this.currentFrameMetrics(
@@ -4176,7 +3321,7 @@ export class FluidLabRenderer {
     const sidecar = this.svoSceneSidecar;
     this.gpuFluid = undefined;
     this.svoSceneSidecar = undefined;
-    this.pendingInitialRasterPresentation = undefined;
+
     this.pendingLiveSvoPresentation = undefined;
     this.svoPickingAvailable = false;
     this.lastSvoPickingBodies = [];
@@ -4192,11 +3337,7 @@ export class FluidLabRenderer {
     this.retiredGPUFluids.clear();
     try { this.waterPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.gridOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
-    try { this.tracerOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.particleOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
-    try { this.faceVelocityOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
-    try { this.pressureJournalOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
-    try { this.stageLensOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.svoDryScenePipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, ...this.rigidPoseStaging.map((slot) => slot.buffer)]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }

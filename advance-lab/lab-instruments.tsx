@@ -11,7 +11,7 @@ import {
   ADVANCE_PRESSURE_BUDGET_RANGE, ADVANCE_SLICE_SETTINGS, ADVANCE_SURFACE_VIEWS,
   ADVANCE_TRANSPORT_EXPERIMENTS, ADVANCE_TRANSPORT_EXPERIMENT_ORDER,
   type AdvanceSurfaceViewId,
-} from "../lib/methods/adaptive-volume/features/advance-slice/definition";
+} from "./definition";
 import type { LabRegionDocument } from "./lab-region-space";
 import {
   ADVANCE_LENS_VIEWS, REPRESENT_LENS_MODE, SLICE_OVERLAY_VIEWS,

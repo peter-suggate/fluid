@@ -28,6 +28,13 @@ const ROOT_COARSEST_PAIRS = 8;
 /** Lanes of the one workgroup that runs the small levels: a lane to a row of
  * the largest of them. */
 const ROOT_COARSE_LANES = 1024;
+/** Padded hierarchy capacity. Dimensions, arena offsets and the active
+ * depth belong to this solve's data, never its compiled shader. */
+const ROOT_MAX_LEVELS = 12;
+const ROOT_CONFIG_WORDS = 28 + 12 * ROOT_MAX_LEVELS;
+const ROOT_LAUNCH_KEYS = ["UM_RHS", "UM_MIN", "UM_FULL", "UM_BL", "UM_BRHS", "UM_BSRC", "UM_BFIRST", "UM_BCOUNT", "UM_BEND",
+  "UM_CRHS", "UM_CFULL", "UM_TL", "UM_TSRC", "UM_TRHS", "UM_TFULL", "UM_PL", "UM_PSRC", "UM_PTO", "UM_PCOARSE", "UM_PADD"] as const;
+const ROOT_LAUNCH_BYTES = 4 * ROOT_LAUNCH_KEYS.length;
 /** A level of more cells than this is run a tile to a workgroup; the rest
  * share the one-workgroup launch (a workgroup is one core's worth of the
  * GPU, so it only pays where a launch's fixed cost exceeds the level's work). */
@@ -115,13 +122,17 @@ type RootEnd = 0 | 1 | 2 | 3;
  * Convergence validation and publication remain the frame's job. */
 export class UniformMixedPressureCycles {
   readonly rounding:GPUBuffer;
-  get allocatedBytes():number{return this.rounding.size;}
-  destroy():void{this.rounding.destroy();}
+  private readonly configuration: GPUBuffer;
+  private launches?: GPUBuffer;
+  private readonly fallbackList?: GPUBuffer;
+  get allocatedBytes():number{return this.rounding.size + this.configuration.size + (this.launches?.size ?? 0) + (this.fallbackList?.size ?? 0);}
+  destroy():void{this.rounding.destroy();this.configuration.destroy();this.launches?.destroy();this.fallbackList?.destroy();}
   private readonly resources: GPUBindGroupLayout;
-  private readonly group: GPUBindGroup;
+  private group!: GPUBindGroup;
+  private readonly resourceEntries: GPUBindGroupEntry[];
   /** A launch: its fixed workgroup grid, or (tiled) its level's tile count,
    * its workgroup's lanes and whether its jobs are the cycle list's. */
-  private readonly pipelines = new Map<string, { pipeline: GPUComputePipeline; groups?: readonly number[]; tiles: number; lanes: number; listed: boolean }>();
+  private readonly pipelines = new Map<string, { pipeline: GPUComputePipeline; groups?: readonly number[]; tiles: number; lanes: number; listed: boolean; offset: number }>();
   /** Levels run a tile to a workgroup (the leading ones); the rest are the
    * one-workgroup launch's. */
   private readonly tiled: number;
@@ -132,8 +143,6 @@ export class UniformMixedPressureCycles {
   private readonly tileLanes: number;
   private boundPass?: GPUComputePassEncoder;
   private readonly lanes: number;
-  /** The largest one-workgroup level's row count. */
-  private readonly rows: number;
   private readonly workgroups: [number, number, number];
   /** The continuation's cycle list: the root lattice's kernels walk its tiles. */
   private readonly listed?: { list: GPUBuffer };
@@ -178,8 +187,9 @@ export class UniformMixedPressureCycles {
     const cells = this.levels.map(l => l.d[0]! * l.d[1]! * l.d[2]!);
     const single = cells.findIndex(n => n <= Math.min(ROOT_SINGLE_MAX_CELLS, this.lanes));
     this.tiled = Math.max(1, single < 0 ? this.levels.length - 1 : single);
-    this.rows = Math.max(...cells.slice(this.tiled));
-    if (this.rows > this.lanes) throw new Error(`Mixed pressure root: a ${this.rows}-row level does not fit one workgroup of ${this.lanes} lanes`);
+    const rows = Math.max(...cells.slice(this.tiled));
+    if (rows > this.lanes) throw new Error(`Mixed pressure root: a ${rows}-row level does not fit one workgroup of ${this.lanes} lanes`);
+    if (this.levels.length > ROOT_MAX_LEVELS) throw new Error(`Mixed pressure root exceeds ${ROOT_MAX_LEVELS} hierarchy levels`);
     if (mixedRange.offset < nativeRange.offset + nativeRange.size && nativeRange.offset < mixedRange.offset + mixedRange.size)
       throw new Error("Mixed pressure root and native continuation fields overlap");
     const [p, b0, b1, m0, m1, backupWord, residual] = mixed.map(f => ((f.offset ?? 0) - mixedRange.offset) / 4) as number[];
@@ -198,50 +208,67 @@ export class UniformMixedPressureCycles {
       if (native.cycle.tiles !== tiles) throw new Error("Mixed pressure cycle list does not cover the native continuation lattice");
       this.listed = { list: native.cycle.list };
     }
-    this.resources = device.createBindGroupLayout({ entries: [0, 1, 2, ...(this.listed ? [3] : []), ...(topology ? [4] : []),5].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE,
-      buffer: { type: binding === 3 || binding === 4 ? "read-only-storage" as const : "storage" as const } })) });
-    this.group = device.createBindGroup({ layout: this.resources, entries: [
+    this.configuration = device.createBuffer({ label: "Uniform root pressure hierarchy", size: 4 * ROOT_CONFIG_WORDS,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const config = new Uint32Array(ROOT_CONFIG_WORDS), scalar = new Float32Array(config.buffer);
+    config.set(t, 0); scalar.set(layout.lattice.cellSize_m, 4);
+    config.set([openTop ? 1 : 0, this.tiled, this.levels.length - 1, this.listed ? 1 : 0], 8);
+    config.set([this.words.p, this.words.b0, this.words.b1, this.words.m0], 12);
+    config.set([this.words.m1, this.words.backup, this.words.residual, layout.tiles.length], 16);
+    config.set([this.words.np, this.words.nb, this.words.nmin, this.words.nphi], 20);
+    config.set([this.words.nv, this.words.np1], 24);
+    this.levels.forEach((l, i) => {
+      const at = 28 + 12 * i;
+      config.set(l.d, at); config.set([...l.p, ...l.b], at + 4); config.set([...l.m, l.c], at + 8);
+    });
+    device.queue.writeBuffer(this.configuration, 0, config);
+    if (!this.listed) this.fallbackList = device.createBuffer({ label: "Uniform root pressure empty tile list", size: 16, usage: GPUBufferUsage.STORAGE });
+    this.resources = device.createBindGroupLayout({ entries: [
+      ...[0, 1, 2, 3, ...(topology ? [4] : []), 5].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: binding === 3 || binding === 4 ? "read-only-storage" as const : "storage" as const } })),
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform", minBindingSize: this.configuration.size } },
+      { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: ROOT_LAUNCH_BYTES } },
+    ] });
+    this.resourceEntries = [
       { binding: 0, resource: { buffer: arena, ...mixedRange } }, { binding: 1, resource: { buffer: arena, ...nativeRange } }, { binding: 2, resource: phi },
-      ...(this.listed ? [{ binding: 3, resource: { buffer: this.listed.list } }] : []),
-      ...(topology ? [{ binding: 4, resource: topology }] : []),{binding:5,resource:{buffer:this.rounding}}] });
+      { binding: 3, resource: { buffer: this.listed?.list ?? this.fallbackList! } },
+      ...(topology ? [{ binding: 4, resource: topology }] : []), { binding: 5, resource: { buffer: this.rounding } },
+      { binding: 6, resource: { buffer: this.configuration } },
+    ];
   }
   async initialize(): Promise<void> {
-    const layout = this.level.ownership.layout, h = layout.lattice.cellSize_m, t = layout.lattice.dimensions.map(n => n / 4), w = this.words;
-    const solid = this.solid, open = this.openTop, listed = this.listed !== undefined;
-    const levels = this.levels, count = levels.length, weights = UNIFORM_MIXED_ROOT_SMOOTHING, M = ROOT_LAUNCH_ITERATIONS;
-    const vec = (v: readonly number[]) => `vec${v.length}u(${v.map(n => `${n}u`).join(",")})`;
-    const code = /* wgsl */ `
+    const w = this.words, solid = this.solid, listed = this.listed !== undefined;
+    const levels = this.levels, weights = UNIFORM_MIXED_ROOT_SMOOTHING, M = ROOT_LAUNCH_ITERATIONS;
+    const sourceCode = /* wgsl */ `
 @group(0) @binding(2) var<storage,read_write> umSupport:array<u32>;
 @group(1) @binding(0) var<storage,read_write> mixed:array<f32>;
 @group(1) @binding(1) var<storage,read_write> native:array<f32>;
 @group(1) @binding(2) var<storage,read_write> phi:array<f32>;
 @group(1) @binding(5) var<storage,read_write> rounding:array<vec2f>;
-const UM_T=vec3u(${t.map(n => `${n}u`).join(",")});const UM_N=UM_T+vec3u(2u);const UM_CELLS=${layout.tiles.length}u;
-const UM_H=vec3f(${h.map(n => n.toFixed(8)).join(",")});const UM_MIN_H=min(UM_H.x,min(UM_H.y,UM_H.z));
-const UM_OPEN_TOP=${open};
-const UM_P=${w.p}u;const UM_B0=${w.b0}u;const UM_B1=${w.b1}u;const UM_M0=${w.m0}u;const UM_M1=${w.m1}u;const UM_BACKUP=${w.backup}u;const UM_RES=${w.residual}u;
-const MG_P=${w.np}u;const MG_B=${w.nb}u;const MG_MIN=${w.nmin}u;const MG_PHI=${w.nphi}u;const MG_V=${w.nv}u;
-${listed ? `const MG_P1=${w.np1}u;
+struct UMLevelWords{d:vec4u,pb:vec4u,mc:vec4u}
+struct UMConfiguration{t:vec4u,h:vec4f,flags:vec4u,mixed0:vec4u,mixed1:vec4u,native0:vec4u,native1:vec4u,levels:array<UMLevelWords,${ROOT_MAX_LEVELS}>}
+@group(1) @binding(6) var<uniform> umConfig:UMConfiguration;
+struct UMLaunch{${ROOT_LAUNCH_KEYS.map(k => `${k}:u32`).join(",")}}
+@group(1) @binding(7) var<uniform> umLaunch:UMLaunch;
 @group(1) @binding(3) var<storage,read> umList:array<u32>;
-` : ""}
-// A tiled launch's jobs: level l's 4^3 tiles${listed ? " (the root lattice's listed ones)" : ""}.
+// A tiled launch's jobs: level l's 4^3 tiles (the root lattice's listed ones when supplied).
 // Workgroup w of a launch of W runs jobs w, w+W, ..., so the width is the
 // host's parallelism estimate and no job is ever beyond a launch.
-fn umTiles(l:u32)->vec3u{let d=UM_LD;return (d[l]+vec3u(3u))/4u;}
-fn umJobs(l:u32)->u32{${listed ? "if(l==0u){return umList[0];}" : ""}let d=umTiles(l);return d.x*d.y*d.z;}
+fn umTiles(l:u32)->vec3u{return (umConfig.levels[l].d.xyz+vec3u(3u))/4u;}
+fn umJobs(l:u32)->u32{if(l==0u&&umConfig.flags.w!=0u){return umList[0];}let d=umTiles(l);return d.x*d.y*d.z;}
 fn umJobOrigin(l:u32,job:u32)->vec3i{
- var tile=job;${listed ? "if(l==0u){tile=umList[4u+job];}" : ""}
+ var tile=job;if(l==0u&&umConfig.flags.w!=0u){tile=umList[4u+job];}
  let d=umTiles(l);return 4*vec3i(vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y)));
 }
 fn umLaneCell(lane:u32)->vec3i{return vec3i(i32(lane%4u),i32((lane/4u)%4u),i32(lane/16u));}
 // restrict: the row's RHS and bound, and whether it opens a Full-Cycle.
-override UM_RHS:u32=UM_B0;override UM_MIN:u32=UM_M0;override UM_FULL:bool=false;
+
 // The mixed pressure schedule's slot gate (support 9n+24, 0 open).
 fn umSlotClosed()->bool{return umSupport[9u*UM_CELLS+24u]!=0u;}
 fn umNative(p:vec3u)->u32{return p.x+UM_N.x*(p.y+UM_N.y*p.z);}
 // The residency certificate the transfer copies into this ownership's support
 // (uniformMixedResidencyWord): a flag per page of 4^3 owners.
-const UM_PD=(UM_T+vec3u(3u))/4u;const UM_RESIDENCY=9u*UM_CELLS+28u;
+
 fn umAbsent(c:vec3u)->bool{let q=c/4u;return umSupport[UM_RESIDENCY+4u+q.x+UM_PD.x*(q.y+UM_PD.y*q.z)]==0u;}
 fn umKey(c:vec3u)->u32{return c.x+UM_T.x*(c.y+UM_T.y*c.z);}
 fn umStride(axis:u32)->u32{return select(select(UM_T.x*UM_T.y,UM_T.x,axis==1u),1u,axis==0u);}
@@ -347,7 +374,7 @@ fn umProjected(p:f32,r:f32,low:f32,diagonal:f32)->f32{
   ${solid ? "else if(umTopo(cell.key).x<=1e-5){bound=0.0;}" : ""}
   mixed[UM_P+cell.slot]=0.0;mixed[UM_B0+cell.slot]=0.0;mixed[UM_M0+cell.slot]=bound;
  }
- var distance:f32=${2 * Math.min(...h)};var topology=vec4f(0.0);
+ var distance:f32=2.0*UM_MIN_H;var topology=vec4f(0.0);
  if(cell.kind==1u){
   distance=phi[cell.key];${solid ? "topology=umTopo(cell.key);" : `topology=vec4f(1.0);
   for(var axis=0u;axis<3u;axis++){if(p[axis]==UM_N[axis]-2u){topology[axis+1u]=select(0.5,1.0,UM_OPEN_TOP&&axis==1u);}}`}
@@ -356,7 +383,8 @@ fn umProjected(p:f32,r:f32,low:f32,diagonal:f32)->f32{
   if(UM_OPEN_TOP&&p.y==UM_N.y-1u){topology.x=1.0;}
  }
  native[MG_PHI+at]=distance;for(var component=0u;component<4u;component++){native[MG_V+4u*at+component]=topology[component];}
-${listed ? `// The far-field seeds of the listed cycle kernels: every value a dense
+if(umConfig.flags.w!=0u){
+ // The far-field seeds of the listed cycle kernels: every value a dense
  // cycle leaves at a row outside the list that anything listed reads. Air
  // rows restrict a zero residual (air slots carry a zero RHS), take a zero
  // correction, and keep the bound restrictRoot would give them at p = 0
@@ -364,7 +392,8 @@ ${listed ? `// The far-field seeds of the listed cycle kernels: every value a de
  // is zero. The seeded bound is also what the native list builder reads to
  // list every interior-bounded tile.
  var lower=0.0;if(cell.kind!=0u){lower=mixed[UM_M0+cell.slot];mixed[UM_RES+cell.slot]=0.0;}
- native[MG_P+at]=0.0;native[MG_P1+at]=0.0;native[MG_B+at]=0.0;native[MG_MIN+at]=lower;` : ""}
+ native[MG_P+at]=0.0;native[MG_P1+at]=0.0;native[MG_B+at]=0.0;native[MG_MIN+at]=lower;
+ }
 }
 // The correction problem: its RHS is the mixed residual, its bound the row's
 // bound less the pressure, its initial value zero. A Full-Cycle also keeps
@@ -402,17 +431,12 @@ ${["restrict", "measure"].map(name => `
 
 // ---- The correction's traversal. Level 0 is the root lattice (UM_N); the
 // rest are the native levels below it. Each field is a word offset of native.
-const UM_LAST=${count - 1}u;
-const UM_LD=array<vec3u,${count}>(${levels.map(l => vec(l.d)).join(",")});
-const UM_LP=array<vec2u,${count}>(${levels.map(l => vec(l.p)).join(",")});
-const UM_LB=array<vec2u,${count}>(${levels.map(l => vec(l.b)).join(",")});
-const UM_LM=array<vec2u,${count}>(${levels.map(l => vec(l.m)).join(",")});
-const UM_LC=array<u32,${count}>(${levels.map(l => `${l.c}u`).join(",")});
+
 // p, b, m: both parities of the pressure, RHS and bound (the Full-Cycle's
 // own RHS and bound below the root lattice are the second); c: the baked
 // (+x,+y,+z) coefficients and liquid mask, four words a cell.
 struct UMLevel{d:vec3u,p:vec2u,b:vec2u,m:vec2u,c:u32}
-fn umLevel(l:u32)->UMLevel{let d=UM_LD;let p=UM_LP;let b=UM_LB;let m=UM_LM;let c=UM_LC;return UMLevel(d[l],p[l],b[l],m[l],c[l]);}
+fn umLevel(l:u32)->UMLevel{let L=umConfig.levels[l];return UMLevel(L.d.xyz,L.pb.xy,L.pb.zw,L.mc.xy,L.mc.z);}
 const UM_WN=${weights.length}u;
 fn umWeight(i:u32)->f32{let w=array<f32,${weights.length}>(${weights.map(w => w.toFixed(7)).join(",")});return w[i];}
 fn umLAt(d:vec3u,q:vec3i)->u32{return u32(q.x)+d.x*(u32(q.y)+d.y*u32(q.z));}
@@ -478,7 +502,7 @@ fn umTrilinear(fine:vec3u,C:UMLevel,par:u32,id:vec3i)->f32{
 // (from its UM_BFIRST-th) on every tile of level UM_BL (the root lattice's
 // listed tiles), a workgroup to a tile at a time. UM_BRHS: the level's
 // V-cycle RHS and bound, or its Full-Cycle ones.
-override UM_BL:u32=0u;override UM_BRHS:u32=0u;override UM_BSRC:u32=0u;override UM_BFIRST:u32=0u;override UM_BCOUNT:u32=${M}u;override UM_BEND:u32=0u;override UM_BLANES:u32=64u;
+override UM_BLANES:u32=64u;
 var<workgroup> umGo:u32;var<workgroup> umAny:u32;var<workgroup> umFlag:array<u32,64>;
 // The tile and its halo, iterate by iterate: sides 4+2m, then 2+2m, then 2m.
 var<workgroup> umBlockA:array<f32,${(4 + 2 * M) ** 3}>;var<workgroup> umBlockB:array<f32,${(2 + 2 * M) ** 3}>;
@@ -540,13 +564,13 @@ fn umBlockEnd(q:vec3i,at:u32,value:f32,to:u32){
 
 // ---- The small levels (UM_SINGLE and below), in one workgroup. Each helper
 // is a former pass, ended by a storage barrier.
-const UM_SINGLE=${this.tiled}u;const UM_ROWS=${this.rows}u;
-override UM_LANES:u32=256u;override UM_CRHS:u32=0u;override UM_CFULL:bool=false;
+const UM_ROWS=${ROOT_COARSE_LANES}u;
+override UM_LANES:u32=256u;
 // A visit (or, for the coarsest level, its solve) from parity start; the
 // parity it ends on. A lane owns one row: it reads the row's coefficients,
 // RHS and bound once, the iterates pass between lanes through workgroup
 // memory, and only the visit's last is stored.
-var<workgroup> umIterate:array<f32,${2 * this.rows}>;
+var<workgroup> umIterate:array<f32,${2 * ROOT_COARSE_LANES}>;
 fn umLSmooth(l:u32,start:u32,rhs:u32,low:u32,solve:bool,lane:u32)->u32{
  let L=umLevel(l);let own=lane<L.d.x*L.d.y*L.d.z;
  let iterations=select(UM_WN,${2 * ROOT_COARSEST_PAIRS}u,solve);
@@ -620,7 +644,7 @@ fn umLRestrict(l:u32,rhs:u32,low:u32,lane:u32){
 // level below at a time: a V-cycle's from the iterate in parity UM_TSRC, or a
 // Full-Cycle's (UM_TFULL). UM_TRHS: the level's V-cycle RHS and bound, or its
 // Full-Cycle ones.
-override UM_TL:u32=0u;override UM_TSRC:u32=0u;override UM_TRHS:u32=0u;override UM_TFULL:bool=false;
+
 @compute @workgroup_size(64) fn descendTiles(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) n:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umSlotClosed()){return;}
  let F=umLevel(UM_TL);let C=umLevel(UM_TL+1u);let rhs=F.b[UM_TRHS];let low=F.m[UM_TRHS];
@@ -646,7 +670,7 @@ fn umLProlong(l:u32,src:u32,to:u32,coarse:u32,add:bool,lane:u32){
 // The same onto a tiled level UM_PL, a workgroup to a tile at a time (the
 // root lattice's listed tiles: its far field keeps the zero correction its
 // seeds hold).
-override UM_PL:u32=0u;override UM_PSRC:u32=0u;override UM_PTO:u32=0u;override UM_PCOARSE:u32=0u;override UM_PADD:bool=true;
+
 @compute @workgroup_size(64) fn ascendTiles(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) n:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umSlotClosed()){return;}
  let F=umLevel(UM_PL);let count=umJobs(UM_PL);
@@ -658,7 +682,7 @@ override UM_PL:u32=0u;override UM_PSRC:u32=0u;override UM_PTO:u32=0u;override UM
 // A V-cycle of level a and everything below it, on (rhs, low) at level a
 // and each level's V-cycle fields below; the parity level a's result is in.
 fn umLV(a:u32,rhsA:u32,lowA:u32,start:u32,lane:u32)->u32{
- var par:array<u32,${count}>;par[a]=start;
+ var par:array<u32,${ROOT_MAX_LEVELS}>;par[a]=start;
  for(var l=a;l<UM_LAST;l++){
   let L=umLevel(l);let rhs=select(L.b.x,rhsA,l==a);let low=select(L.m.x,lowA,l==a);
   par[l]=umLSmooth(l,par[l],rhs,low,false,lane);
@@ -701,6 +725,18 @@ fn umLV(a:u32,rhsA:u32,lowA:u32,start:u32,lane:u32)->u32{
  }
 }
 `;
+    const aliases: Record<string, string> = {
+      UM_T: "umConfig.t.xyz", UM_N: "(umConfig.t.xyz+vec3u(2u))", UM_CELLS: "umConfig.mixed1.w",
+      UM_H: "umConfig.h.xyz", UM_MIN_H: "min(umConfig.h.x,min(umConfig.h.y,umConfig.h.z))", UM_OPEN_TOP: "(umConfig.flags.x!=0u)",
+      UM_P: "umConfig.mixed0.x", UM_B0: "umConfig.mixed0.y", UM_B1: "umConfig.mixed0.z", UM_M0: "umConfig.mixed0.w",
+      UM_M1: "umConfig.mixed1.x", UM_BACKUP: "umConfig.mixed1.y", UM_RES: "umConfig.mixed1.z",
+      MG_P: "umConfig.native0.x", MG_B: "umConfig.native0.y", MG_MIN: "umConfig.native0.z", MG_PHI: "umConfig.native0.w",
+      MG_V: "umConfig.native1.x", MG_P1: "umConfig.native1.y", UM_LAST: "umConfig.flags.z", UM_SINGLE: "umConfig.flags.y",
+      UM_PD: "((umConfig.t.xyz+vec3u(3u))/4u)", UM_RESIDENCY: "(9u*umConfig.mixed1.w+28u)",
+    };
+    for (const key of ROOT_LAUNCH_KEYS) aliases[key] = ["UM_FULL", "UM_CFULL", "UM_TFULL", "UM_PADD"].includes(key) ? `(umLaunch.${key}!=0u)` : `umLaunch.${key}`;
+    const body = sourceCode.indexOf("// A tiled launch's jobs:");
+    const code = sourceCode.slice(0, body) + sourceCode.slice(body).replace(/\b(?:UM|MG)_[A-Z0-9_]+\b/g, key => aliases[key] ?? key);
     const module = this.device.createShaderModule({ label: "Uniform mixed pressure root", code });
     const info = await module.getCompilationInfo(), errors = info.messages.filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
@@ -722,12 +758,38 @@ fn umLV(a:u32,rhsA:u32,lowA:u32,start:u32,lane:u32)->u32{
     };
     for (const end of [1, 2, 3] as const) this.cycle(0, 0, 0, end, add);
     this.opening(add);
-    await Promise.all(Object.entries(variants).map(async ([entry, [entryPoint, constants, shape]]) => {
-      const pipeline = await this.device.createComputePipelineAsync({ layout: pipelineLayout, compute: { module, entryPoint, constants } });
+    // Every encoded launch has its own immutable record. Dynamic offsets
+    // select records within one bind group; submitting several cycles cannot
+    // overwrite the parameters of an earlier dispatch.
+    const stride = Math.ceil(ROOT_LAUNCH_BYTES / this.device.limits.minUniformBufferOffsetAlignment) * this.device.limits.minUniformBufferOffsetAlignment;
+    const entries = Object.entries(variants), launchWords = new Uint32Array(stride / 4 * entries.length);
+    this.launches = this.device.createBuffer({ label: "Uniform root pressure launches", size: launchWords.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const shared = new Map<string, Promise<GPUComputePipeline>>();
+    // Both tiled widths are part of the installed path, independent of how
+    // many of this tank's levels happen to fit the coarse workgroup.
+    const deepConstants = { UM_BLANES: this.tileLanes };
+    const deepKey = `smoothTiles:${JSON.stringify(deepConstants)}`;
+    shared.set(deepKey, this.device.createComputePipelineAsync({ layout: pipelineLayout,
+      compute: { module, entryPoint: "smoothTiles", constants: deepConstants } }));
+    await Promise.all(entries.map(async ([entry, [entryPoint, parameters, shape]], i) => {
+      const defaults: Record<string, number> = { UM_RHS: w.b0, UM_MIN: w.m0, UM_BCOUNT: M, UM_PADD: 1, ...parameters };
+      ROOT_LAUNCH_KEYS.forEach((key, k) => { launchWords[i * stride / 4 + k] = defaults[key] ?? 0; });
+      const constants: Record<string, number> = {};
+      if (entryPoint === "coarse") constants.UM_LANES = this.lanes;
+      if (entryPoint === "smoothTiles") constants.UM_BLANES = "level" in shape ? shape.lanes : 64;
+      const key = `${entryPoint}:${JSON.stringify(constants)}`;
+      let compilation = shared.get(key);
+      if (!compilation) { compilation = this.device.createComputePipelineAsync({ layout: pipelineLayout, compute: { module, entryPoint, constants } }); shared.set(key, compilation); }
+      const pipeline = await compilation, offset = i * stride;
       this.pipelines.set(entry, "level" in shape
-        ? { pipeline, tiles: levels[shape.level]!.d.reduce((n, d) => n * Math.ceil(d / 4), 1), lanes: shape.lanes, listed: listed && shape.level === 0 }
-        : { pipeline, groups: shape, tiles: 0, lanes: 0, listed: false });
+        ? { pipeline, offset, tiles: levels[shape.level]!.d.reduce((n, d) => n * Math.ceil(d / 4), 1), lanes: shape.lanes, listed: listed && shape.level === 0 }
+        : { pipeline, offset, groups: shape, tiles: 0, lanes: 0, listed: false });
     }));
+    await Promise.all(shared.values());
+    this.device.queue.writeBuffer(this.launches, 0, launchWords);
+    this.group = this.device.createBindGroup({ layout: this.resources, entries: [...this.resourceEntries,
+      { binding: 7, resource: { buffer: this.launches, size: ROOT_LAUNCH_BYTES } },
+    ] });
   }
   /** The parity the one-workgroup launch leaves level `tiled`'s result in
    * from parity 0: the coarsest solve is an even count of iterations; a
@@ -777,8 +839,8 @@ fn umLV(a:u32,rhsA:u32,lowA:u32,start:u32,lane:u32)->u32{
     const launch = this.pipelines.get(entry); if (!launch) throw new Error("Mixed pressure root is not initialized");
     const pass = passes.pass;
     pass.setPipeline(launch.pipeline);
-    // Both groups are the same for every launch of the root: once a pass.
-    if (this.boundPass !== pass) { this.boundPass = pass; pass.setBindGroup(0, this.level.ownership.bindGroup); pass.setBindGroup(1, this.group); }
+    if (this.boundPass !== pass) { this.boundPass = pass; pass.setBindGroup(0, this.level.ownership.bindGroup); }
+    pass.setBindGroup(1, this.group, [launch.offset]);
     if (launch.groups) { pass.dispatchWorkgroups(...(launch.groups as [number, number?, number?])); return; }
     let width = launch.listed ? Math.min(launch.tiles, this.work ?? launch.tiles) : launch.tiles;
     if (capacity) width = Math.min(width, Math.max(1, Math.floor(ROOT_CAPACITY_THREADS / launch.lanes)));

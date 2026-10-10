@@ -1,9 +1,6 @@
 import { adoptEnvironmentProxyCatalog, useRemoteEnvironmentCatalogs, cachedEnvironmentProxyCatalog, reuseEnvironmentProxyCatalog, markEnvironmentCatalogRemote, type EnvironmentProxyCatalog } from "./voxel-environments";
 import type { LiveFluidEdit, LiveFluidEditResult } from "./live-fluid-edit";
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
-import type { PressureJournal } from "../features/pressure-inspection/journal";
-import type { StageLensReceipt } from "./stage-lens";
-import type { StageLensLayerReport } from "./webgpu-stage-lens-overlay";
 import type { InjectedLiquidBall } from "./method-contract";
 import type { SceneDescription } from "./model";
 import { terrainContentStamp, type TerrainDescription } from "./terrain";
@@ -30,12 +27,7 @@ export interface WebGPURenderWorkerSnapshot {
   pixelTraceStatus: FluidLabRenderer["pixelTraceStatus"];
   pixelTraceAnswersRequest: boolean;
   pixelTraceStale: boolean;
-  latestFluidCellTrace: FluidLabRenderer["latestFluidCellTrace"];
-  fluidCellTraceRevision: number;
-  fluidCellTraceReady: boolean;
-  fluidCellTraceFineBand: FluidLabRenderer["fluidCellTraceFineBand"];
   /** Absent means the tank is the domain; the host resolves it against the scene. */
-  fluidCellTraceDomain: FluidLabRenderer["fluidCellTraceDomain"];
   /** Poses the drawn frame used, in roster order. See FluidLabRenderer. */
   rigidBodyPoses: FluidLabRenderer["rigidBodyPoses"];
   rigidBodyPoseRevision: number;
@@ -63,8 +55,6 @@ export type WebGPURenderWorkerResponse =
   | { type: "attached" }
   | { type: "status"; status: GPUStatus; workerNow_ms: number }
   | { type: "gpu-info"; info: GPUEulerianInfo }
-  | { type: "pressure-journal"; journal: PressureJournal | undefined }
-  | { type: "stage-lens"; receipt?: StageLensReceipt; layers: readonly StageLensLayerReport[] }
   | { type: "rigid-loads"; loads: GPURigidLoad[] }
   | { type: "advance-completed"; time_s: number }
   | { type: "effective-renderer-status"; status: EffectiveRendererStatus }
@@ -81,11 +71,6 @@ export type WebGPURenderWorkerResponse =
 interface WorkerClientCallbacks {
   onStatus(status: GPUStatus): void;
   onGPUInfo?(info: GPUEulerianInfo): void;
-  onGPUPressureJournal?(journal: PressureJournal | undefined): void;
-  onGPUStageLens?(
-    receipt: StageLensReceipt | undefined,
-    layers: readonly StageLensLayerReport[],
-  ): void;
   onGPURigidLoads?(loads: GPURigidLoad[]): void;
   onGPUAdvanceCompleted?(time_s: number): void;
   onEffectiveRendererStatus?(status: EffectiveRendererStatus): void;
@@ -101,11 +86,6 @@ const EMPTY_SNAPSHOT: WebGPURenderWorkerSnapshot = {
   pixelTraceStatus: "path-inactive",
   pixelTraceAnswersRequest: false,
   pixelTraceStale: false,
-  latestFluidCellTrace: undefined,
-  fluidCellTraceRevision: 0,
-  fluidCellTraceReady: false,
-  fluidCellTraceFineBand: undefined,
-  fluidCellTraceDomain: undefined,
   rigidBodyPoses: [],
   rigidBodyPoseRevision: 0,
 };
@@ -179,11 +159,6 @@ export class WebGPURenderWorkerClient {
   get pixelTraceStatus() { return this.snapshot.pixelTraceStatus; }
   get pixelTraceAnswersRequest() { return this.snapshot.pixelTraceAnswersRequest; }
   get pixelTraceStale() { return this.snapshot.pixelTraceStale; }
-  get latestFluidCellTrace() { return this.snapshot.latestFluidCellTrace; }
-  get fluidCellTraceRevision() { return this.snapshot.fluidCellTraceRevision; }
-  get fluidCellTraceReady() { return this.snapshot.fluidCellTraceReady; }
-  get fluidCellTraceFineBand() { return this.snapshot.fluidCellTraceFineBand; }
-  get fluidCellTraceDomain() { return this.snapshot.fluidCellTraceDomain; }
   get rigidBodyPoses() { return this.snapshot.rigidBodyPoses; }
   get rigidBodyPoseRevision() { return this.snapshot.rigidBodyPoseRevision; }
 
@@ -391,12 +366,6 @@ export class WebGPURenderWorkerClient {
       this.callbacks.onStatus(status);
     }
     else if (message.type === "gpu-info") this.callbacks.onGPUInfo?.(message.info);
-    else if (message.type === "pressure-journal") {
-      this.callbacks.onGPUPressureJournal?.(message.journal);
-    }
-    else if (message.type === "stage-lens") {
-      this.callbacks.onGPUStageLens?.(message.receipt, message.layers);
-    }
     else if (message.type === "rigid-loads") this.callbacks.onGPURigidLoads?.(message.loads);
     else if (message.type === "advance-completed") this.callbacks.onGPUAdvanceCompleted?.(message.time_s);
     else if (message.type === "effective-renderer-status") this.callbacks.onEffectiveRendererStatus?.(message.status);

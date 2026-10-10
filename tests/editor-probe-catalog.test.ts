@@ -136,8 +136,6 @@ test("a ring with an Inspect group offers the ray probe inside it", () => {
   const inspect = actions.find((action) => action.id === "inspect");
   assert.ok(inspect, "the vessel's ring carries the instrument group");
   assert.equal((inspect.children ?? []).filter((action) => action.id === "trace-ray").length, 1);
-  // Beside the cell probe, which is the other question asked of this pixel.
-  assert.ok((inspect.children ?? []).some((action) => action.id === "inspect-cell"));
 });
 
 // Every ray wedge carries the pixel it was composed on. Without it the probe

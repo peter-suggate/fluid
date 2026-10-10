@@ -4,7 +4,7 @@ import { narrowBandMembershipWGSL } from "./uniform-narrow-band-membership.wgsl"
 import { NARROW_BAND_TRACE_LIMIT, narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
 import { UniformNarrowBandOrder } from "./uniform-narrow-band-order";
-import { NARROW_BAND_SURFACE_RADIUS, narrowBandSurfaceWGSL, narrowBandCoarseTransferWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
+import { NARROW_BAND_SURFACE_RADIUS, narrowBandSurfaceWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
 import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailGroup } from "./uniform-detail-fields";
 import { uniformMixedTopologyWGSL, uniformMixedCertifiedEntriesWGSL } from "./uniform-mixed-topology.wgsl";
@@ -45,7 +45,6 @@ export class UniformNarrowBandFlip {
   const first=2*cells+2*tiles,vertices=d.reduce((a,b)=>a*(b+1),1);
   return {buffer:this.bins,first,reach:first+vertices+cells+4+2*tiles};
  }
- get coarseOnly():boolean{return this.ownership.capacity.fineTiles===0;}
  count=0;
  reseedClipped=0;
  /** Positive distances in h cells, before union and on the accepted surface.
@@ -92,7 +91,7 @@ export class UniformNarrowBandFlip {
  private readonly coarseVelocity:GPUTexture;
  private cacheGroups:Record<string,UniformDetailGroup>={};
  private stageTaps?:{builder:UniformMixedHangingTaps;group:UniformDetailGroup;unit:GPUTexture};
- constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,readonly coarseParticles=false,private readonly sourceParams?:GPUBuffer,private readonly activitySupported=false){
+ constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,readonly coarseParticles=false,private readonly sourceParams?:GPUBuffer,private readonly activitySupported=false,cache?:UniformMixedMomentumCache){
   const cells=ownership.capacity.lattice.dimensions.reduce((n,v)=>n*v,1);
   const vertices=ownership.capacity.lattice.dimensions.reduce((n,v)=>n*(v+1),1);
   // The band is a surface, but what a scene's surface grows to is not known
@@ -106,7 +105,7 @@ export class UniformNarrowBandFlip {
   this.state=buffer("receipt",48);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+ownership.capacity.tiles*(36+(activitySupported?4*NARROW_BAND_ACTIVITY_WORDS_PER_TILE:0))+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*32);this.params=buffer("parameters",48,true);
   this.order=new UniformNarrowBandOrder(device,ownership.capacity.lattice.dimensions,this.particles,this.bins,this.next,this.state);
   this.refinementParams=buffer("refinement prediction",32,true);
-  this.cache=new UniformMixedMomentumCache(device,ownership);
+  this.cache=cache??new UniformMixedMomentumCache(device,ownership);
   const size=ownership.capacity.lattice.dimensions.map(n=>n/4+2);
   this.coarseVelocity=device.createTexture({label:"Narrow-band FLIP stage sampling cache",size,dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
   const dims=ownership.capacity.lattice.dimensions;
@@ -157,12 +156,14 @@ export class UniformNarrowBandFlip {
   const particleModule=this.device.createShaderModule({label:"Narrow-band FLIP live work",code:/* wgsl */`
 @group(0) @binding(0) var<storage,read> state:array<u32>;
 @group(0) @binding(1) var<storage,read_write> work:array<u32>;
+struct DispatchParticle{position:vec4f,velocity:vec4f,before:vec4f}
+@group(0) @binding(2) var<storage,read> dispatchParticles:array<DispatchParticle>;
 @compute @workgroup_size(1) fn main(){
- let groups=(min(state[0],${this.capacity}u)+63u)/64u;
+ let groups=(min(state[0],arrayLength(&dispatchParticles))+63u)/64u;
  work[0]=min(groups,65535u);work[1]=(groups+65534u)/65535u;work[2]=1u;
 }`});
   this.particleDispatchPipeline=await this.device.createComputePipelineAsync({layout:"auto",compute:{module:particleModule,entryPoint:"main"}});
-  this.particleDispatchGroup=this.device.createBindGroup({layout:this.particleDispatchPipeline.getBindGroupLayout(0),entries:[this.state,this.particleDispatch].map((buffer,binding)=>({binding,resource:{buffer}}))});
+  this.particleDispatchGroup=this.device.createBindGroup({layout:this.particleDispatchPipeline.getBindGroupLayout(0),entries:[this.state,this.particleDispatch,this.particles[0]].map((buffer,binding)=>({binding,resource:{buffer}}))});
   this.refinementLayout=this.device.createBindGroupLayout({entries:[
    {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
    {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -218,7 +219,6 @@ fn sweptSurface(sample:Particle)->Box{
   if(refineErrors.length)throw new Error(refineErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   this.refinementPipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.refinementLayout]}),compute:{module:refine,entryPoint:"refine"}}).catch(e=>{throw new Error(`Refinement pipeline: ${e.message} ${e.reason}`,{cause:e});});
   const sourceCode=(unitTaps:boolean)=>uniformMixedCertifiedEntriesWGSL((this.device.features.has("subgroups")?"enable subgroups;\n":"")+uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
-override nbCoarseOnly:bool=false;
 const nbSparseBins:bool=${this.order.sparse};
 struct Particle{position:vec4f,velocity:vec4f,before:vec4f}
 @group(1) @binding(0) var<storage,read_write> source:array<Particle>;
@@ -271,15 +271,10 @@ ${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
 ${this.sourceParams?uniformMixedSourceWGSL(16):""}
 fn cellIndex(p:vec3i)->u32{return u32(p.x)+UM_D.x*(u32(p.y)+UM_D.y*u32(p.z));}
 fn sampleVelocity(p:vec3f)->vec3f{
- if(nbCoarseOnly){return vec3f(umSampleVelocity4(p,0u),umSampleVelocity4(p,1u),umSampleVelocity4(p,2u));}
  return umSampleVelocity(p);
 }
 fn bandPhi(p:vec3f)->f32{
- var value=0.0;
- if(nbCoarseOnly){
-  let q=clamp(p/4.0,vec3f(0),vec3f(UM_T));let base=min(vec3u(floor(q)),UM_T-1u);let f=q-vec3f(base);
-  for(var k=0u;k<8u;k++){let bit=umCorner(k,2u);let w=select(vec3f(1)-f,f,bit!=vec3u(0));value+=w.x*w.y*w.z*umLoadCorner(4u*(base+bit));}
- }else{value=umSampleVertex(p);}
+ let value=umSampleVertex(p);
  return value/min(params.hDt.x,min(params.hDt.y,params.hDt.z));
 }
 ${narrowBandMembershipWGSL}
@@ -731,7 +726,6 @@ var<workgroup> nbSeam:array<vec2f,64>;
  atomicMax(&state[4],bitcast<u32>(outside));
 }
 @compute @workgroup_size(64) fn commitCount(@builtin(global_invocation_id) gid:vec3u){if(gid.x==0u){let n=min(atomicLoad(&state[1]),arrayLength(&particles));atomicStore(&state[0],n);atomicStore(&state[1],n);}}
-${narrowBandCoarseTransferWGSL}
 ${narrowBandSurfaceWGSL}
 
 `,[]);
@@ -745,13 +739,13 @@ ${narrowBandSurfaceWGSL}
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
-  await Promise.all([false,true].flatMap(coarse=>["activity","activitySpread","advectParticles","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","transferCoarse","snapshot","update","surface","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists","depthNearest","redistanceFine","redistanceCoarse"].map(async entryPoint=>{
+  await Promise.all(["activity","activitySpread","advectParticles","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","surface","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists","depthNearest","redistanceFine","redistanceCoarse"].map(async entryPoint=>{
    if((entryPoint==="activity"||entryPoint==="activitySpread")&&!this.activitySupported)return;
-   if((entryPoint==="transferCoarse"&&!coarse)||(entryPoint==="surface"&&!this.coarseParticles))return;
+   if(entryPoint==="surface"&&!this.coarseParticles)return;
    const module=modules[["advectParticles","snapshot","update","seed","seedSources"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint} ${coarse?"4h":"mixed"}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,nbCoarseOnly:+coarse,nbActivityEnabled:+this.activitySupported,...s}}})).catch(e=>{throw new Error(`${entryPoint} ${coarse}: ${e.message} ${e.reason}`,{cause:e});});
-   this.pipelines.set(`${entryPoint}:${coarse}`,p);
-  })));
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,nbActivityEnabled:+this.activitySupported,...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+   this.pipelines.set(entryPoint,p);
+  }));
 
  }
  private dispatch(encoder:GPUCommandEncoder,entry:string,groupName?:string):void{
@@ -764,13 +758,12 @@ ${narrowBandSurfaceWGSL}
   for(const entry of entries){
   const group=this.groups[groupName??(entry.startsWith("resample")?"update":entry==="markParticleTiles"||entry==="surfaceCells"||entry==="surfaceSplat"||entry==="diagnoseBefore"||entry==="buildDistance"||entry.startsWith("depth")?"surface":entry.startsWith("transfer")||entry==="classify"?"transfer":entry==="couple"||entry==="coupleFine"||entry==="commitCount"?"surface":entry)]![this.parity]!.group;
   if(group!==bound){pass.setBindGroup(1,group);bound=group;}
-  const selected=this.pipelines.get(`${entry}:${this.coarseOnly}`)!;
+  const selected=this.pipelines.get(entry)!;
   const pipeline=this.solid?.select(selected)??selected;
   if(entry==="couple"||entry==="transfer")this.ownership.dispatchAllCounted(pass,pipeline);
   else {
    pass.setPipeline(uniformDetailPick(pipeline));
    if(entry==="markParticleTiles")pass.dispatchWorkgroups(Math.min(this.ownership.capacity.tiles,65535),Math.ceil(this.ownership.capacity.tiles/65535));
-   else if(entry==="transferCoarse")pass.dispatchWorkgroups(256,Math.ceil(this.ownership.capacity.tiles/256),3);
    else if(entry==="resamplePrefix")pass.dispatchWorkgroups(1);
    else if(entry==="advectParticles"||entry==="snapshot"||entry==="update"||entry==="resampleCount"||entry==="resample")pass.dispatchWorkgroupsIndirect(this.particleDispatch,0);
    else pass.dispatchWorkgroups(1024);
@@ -846,7 +839,7 @@ ${narrowBandSurfaceWGSL}
  transfer(encoder:GPUCommandEncoder):void{
   // Classification reads phase and phi. Transfer loads canonical face
   // texels directly in both mixed and all-4h modes; neither samples a cache.
-  this.dispatchBatch(encoder,["classify",...(this.coarseOnly?["transferCoarse"]:["transferProperties","transfer","transferOwners","transferSeams"])],"transfer","transfer");}
+  this.dispatchBatch(encoder,["classify","transferProperties","transfer","transferOwners","transferSeams"],"transfer","transfer");}
  snapshot(encoder:GPUCommandEncoder):void{
   const pass=encoder.beginComputePass({label:"Narrow-band FLIP snapshot"});
   this.cache.encode(encoder,this.cacheGroups.snapshot!,pass);this.encodeStageTaps(encoder,pass);this.encodeParticleWork(encoder,pass);

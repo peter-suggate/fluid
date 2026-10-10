@@ -1,4 +1,4 @@
-import { ParticleBinScan } from "../lib/methods/particle/scan";
+import { ParticleBinScan } from "../lib/methods/uniform/particle-bin-scan";
 
 /** Diagnostic tile index over an existing particle epoch. It changes neither
  * particle order nor any simulation parameter. The caller lends the expired

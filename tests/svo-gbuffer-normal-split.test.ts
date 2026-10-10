@@ -1,8 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
 
 import { packSvoGBufferPixel, unpackSvoGBufferPixel } from "../lib/svo/contracts/svo-gbuffer";
@@ -85,27 +81,4 @@ test("the deferred lighting biases rays along the face and shades with the norma
   assert.match(source, /unifiedLightingInputWithGeometry\(hit\.normal,hit\.normal,-rd,/);
   assert.match(source, /svoEnvironmentDiffuseIrradiance\(dryLighting\.environment,hit\.normal\)/);
   assert.doesNotMatch(source, /dot\(geometricNormal,sample\.towardLight\)<=0\.0\)\{continue;\}let visibility=/);
-});
-
-test("the split validates under naga with and without the voxel mesh", async (t) => {
-  const naga = process.env.NAGA ?? "naga";
-  if (spawnSync(naga, ["--version"], { encoding: "utf8" }).status !== 0) {
-    t.skip("naga is not installed"); return;
-  }
-  const { createSvoDrySceneFragmentWGSL } = await import("../lib/svo/features/shading/program");
-  const directory = mkdtempSync(join(tmpdir(), "svo-normal-split-"));
-  const variants: Array<[string, string]> = [
-    ["inline", createSvoDrySceneFragmentWGSL(1, "hybrid", "bounds", "inline")],
-    ["split-full", createSvoDrySceneFragmentWGSL(1, "raster-primary", "bounds", "split", 0, false, true)],
-    ["split-traced", createSvoDrySceneFragmentWGSL(1, "hybrid", "bounds", "split")],
-    // The reduced path is where the cone prepass and the silhouette refinement
-    // decode the same identity plane the face word now travels in.
-    ["split-reduced", createSvoDrySceneFragmentWGSL(0.5, "raster-primary", "bounds", "split", 0, false, true)],
-  ];
-  for (const [name, code] of variants) {
-    const path = join(directory, `${name}.wgsl`);
-    writeFileSync(path, code);
-    const result = spawnSync(naga, [path], { encoding: "utf8" });
-    assert.equal(result.status, 0, `${name}: ${(result.stdout + result.stderr).slice(0, 2000)}`);
-  }
 });

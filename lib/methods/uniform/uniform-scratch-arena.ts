@@ -4,7 +4,6 @@
  *
  * The scratch the non-pressure stages overlap follows the h-tile capacity
  * and is the mixed frame's own buffer (UniformMixedFrame.stageBytesAt). */
-import { uniformAbOn } from "./uniform-ab-switch";
 import { planUniformCM11aHierarchy } from "./pressure-plan";
 import { rewritePressureTextureCalls } from "./uniform-pressure-pages";
 
@@ -158,7 +157,7 @@ export function uniformVolumeScratchShader(source:string,sharpenBaseWords:number
   return result+`
 // Planar members within a padded 64-cell brick: adjacent SIMD lanes now
 // load adjacent words instead of a 40-byte stride. Same 10 words per cell.
-fn uvEdgeWord(i:u32,k:u32)->u32{return ${uniformAbOn("edgeplanes") && uniformAbOn("edgebricks") ? "(i/64u)*640u+k*64u+i%64u" : "10u*i+k"};}
+fn uvEdgeWord(i:u32,k:u32)->u32{return ${"(i/64u)*640u+k*64u+i%64u"};}
 fn uvBase(i:u32)->u32{return uniformScratch[uvEdgeWord(i,0u)];}
 fn uvSetBase(i:u32,value:u32){uniformScratch[uvEdgeWord(i,0u)]=value;}
 fn uvWeight(i:u32,k:u32)->f32{return bitcast<f32>(uniformScratch[uvEdgeWord(i,1u+k)]);}

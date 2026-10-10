@@ -1,12 +1,8 @@
 /**
  * Discover colocated feature tests as well as cross-feature integration tests.
  *
- * `advance-lab/` is here because the 2-D advance lab is a route with its own
- * drawing and playback code, and a test that never runs in the default suite is
- * a test nobody is holding to anything. Everything the lab knows *about* the
- * method has moved under `lib/methods/adaptive-volume/features/advance-slice/`
- * and is discovered by the `lib` root; what stays in the page's own folder is
- * the picture, and this is what keeps it checked.
+ * `advance-lab/` includes the independent 2-D lab's drawing, controls,
+ * declarations and playback checks.
  */
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";

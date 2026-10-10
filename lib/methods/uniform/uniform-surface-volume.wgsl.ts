@@ -1,11 +1,10 @@
 import { levelSetFillWGSL as uniformSurfaceFillWGSL } from "../../core/level-set-fill.wgsl";
 export { levelSetFillWGSL as uniformSurfaceFillWGSL } from "../../core/level-set-fill.wgsl";
 
-import { uniformAbOn } from "./uniform-ab-switch";
 
-const leanMeasure = uniformAbOn("measurelean");
-const deadGroups = uniformAbOn("deadgroups");
-const measureSamples = uniformAbOn("measuresamples");
+const leanMeasure = true;
+const deadGroups = true;
+const measureSamples = true;
 /** Experimental global surface-volume constraint. No cellwise reconstruction. */
 /** `receiverBase` (compact only): word of the transport receiver list's count
  * inside binding 11. Given, the seed runs over the phi window and those tiles. */

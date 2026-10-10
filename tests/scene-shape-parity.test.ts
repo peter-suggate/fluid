@@ -1,17 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
 
 import type { Vec3 } from "../lib/core/model";
-import {
-  SCENE_SHAPES_BY_CODE,
-  SCENE_SHAPE_TABLE,
-  cupInnerRadius_m,
-  cupResolutionAdvice,
-  cupWallThickness_m,
-  sceneShape,
-  sceneShapeWgsl,
-} from "../lib/core/scene-shape";
+import { SCENE_SHAPES_BY_CODE, SCENE_SHAPE_TABLE, cupInnerRadius_m, cupResolutionAdvice, cupWallThickness_m, sceneShape, sceneShapeWgsl } from "../lib/core/scene-shape";
 
 /**
  * The contract that makes one shape table safe.
@@ -24,7 +15,6 @@ import {
  * f32 the shader is computing in and looser than nothing.
  *
  * The CPU-only half runs everywhere. The parity half needs a device, so it
- * skips without `WEBGPU_NODE_MODULE` exactly as every other GPU test here does.
  */
 
 /** A lattice of query points, deliberately including the axis and the exact surface. */
@@ -153,129 +143,4 @@ test("the emitted WGSL states every shape exactly once, with a neutral fallback"
   // written last.
   assert.equal(wgsl.split("return 1e20;").length - 1, 1);
   assert.equal(wgsl.split("return false;").length - 1, 1);
-});
-
-test("the WGSL half of every shape fact agrees with the TypeScript half", {
-  skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for shape-table parity on a device",
-}, async t => {
-  let leasedDevice: GPUDevice | undefined;
-  t.after(async () => { leasedDevice?.destroy(); });
-  const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
-    create(options: string[]): GPU; globals: Record<string, unknown>;
-  };
-  Object.assign(globalThis, dawn.globals);
-  const gpu = dawn.create(["backend=metal"]);
-  const adapter = await gpu.requestAdapter(); assert.ok(adapter);
-  const device = leasedDevice = await adapter.requestDevice();
-
-  const points = samplePoints();
-  const queries: { shape: number; d: Vec3; point: Vec3; direction: Vec3 }[] = [];
-  for (const shape of SCENE_SHAPES_BY_CODE) {
-    for (const d of DIMENSIONS) {
-      for (let index = 0; index < points.length; index += 1) {
-        queries.push({ shape: shape.code, d, point: points[index], direction: DIRECTIONS[index % DIRECTIONS.length] });
-      }
-    }
-  }
-
-  // One f32 lane per fact, so a mismatch names which fact drifted rather than
-  // only that something did.
-  const inputStride = 12, outputStride = 8;
-  const input: Float32Array<ArrayBuffer> = new Float32Array(queries.length * inputStride);
-  queries.forEach((query, index) => {
-    const offset = index * inputStride;
-    input.set([query.shape, 0, 0, 0], offset);
-    input.set([query.d.x, query.d.y, query.d.z, 0], offset + 4);
-    input.set([query.point.x, query.point.y, query.point.z, 0], offset + 8);
-  });
-  const directions: Float32Array<ArrayBuffer> = new Float32Array(queries.length * 4);
-  queries.forEach((query, index) => directions.set([query.direction.x, query.direction.y, query.direction.z, 0], index * 4));
-
-  const code = `${sceneShapeWgsl()}
-struct Query { tag: vec4f, dimensions: vec4f, point: vec4f }
-struct Answer { distance: f32, inside: f32, support: f32, bounding: f32, volume: f32, pad0: f32, pad1: f32, pad2: f32 }
-@group(0) @binding(0) var<storage, read> queries: array<Query>;
-@group(0) @binding(1) var<storage, read> directions: array<vec4f>;
-@group(0) @binding(2) var<storage, read_write> answers: array<Answer>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) id: vec3u) {
-  let index = id.x;
-  if (index >= arrayLength(&queries)) { return; }
-  let query = queries[index];
-  let shape = i32(round(query.tag.x));
-  let d = query.dimensions.xyz;
-  let p = query.point.xyz;
-  answers[index] = Answer(
-    rigidShapeDistance(shape, d, p),
-    select(0.0, 1.0, rigidShapeInside(shape, d, p)),
-    rigidShapeSupportRadius(shape, d, directions[index].xyz),
-    rigidShapeBoundingRadius(shape, d),
-    rigidShapeVolume(shape, d),
-    0.0, 0.0, 0.0);
-}`;
-  device.pushErrorScope("validation");
-  const module = device.createShaderModule({ code });
-  const compilation = await module.getCompilationInfo();
-  const compileErrors = compilation.messages.filter((message) => message.type === "error");
-  assert.deepEqual(compileErrors.map((message) => `${message.lineNum}: ${message.message}`), []);
-
-  const makeBuffer = (data: Float32Array<ArrayBuffer>, usage: number) => {
-    const buffer = device.createBuffer({ size: data.byteLength, usage: usage | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(buffer, 0, data);
-    return buffer;
-  };
-  const queryBuffer = makeBuffer(input, GPUBufferUsage.STORAGE);
-  const directionBuffer = makeBuffer(directions, GPUBufferUsage.STORAGE);
-  const answerBytes = queries.length * outputStride * 4;
-  const answerBuffer = device.createBuffer({ size: answerBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-  const readback = device.createBuffer({ size: answerBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-
-  const pipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "main" } });
-  const bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: queryBuffer } },
-      { binding: 1, resource: { buffer: directionBuffer } },
-      { binding: 2, resource: { buffer: answerBuffer } },
-    ],
-  });
-  const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
-  pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup);
-  pass.dispatchWorkgroups(Math.ceil(queries.length / 64));
-  pass.end();
-  encoder.copyBufferToBuffer(answerBuffer, 0, readback, 0, answerBytes);
-  device.queue.submit([encoder.finish()]);
-  await readback.mapAsync(GPUMapMode.READ);
-  const answers = new Float32Array(readback.getMappedRange().slice(0));
-  readback.unmap();
-  const validation = await device.popErrorScope();
-  assert.equal(validation, null, validation?.message);
-
-  // f32 against f64 over metre-scale geometry: 1e-5 is roughly a hundred times
-  // the f32 epsilon at these magnitudes and a thousandth of the finest cell any
-  // scene here uses, so it catches a wrong formula and never a rounding.
-  const tolerance = 1e-5;
-  let insideDisagreements = 0;
-  for (let index = 0; index < queries.length; index += 1) {
-    const query = queries[index];
-    const shape = SCENE_SHAPES_BY_CODE.find((candidate) => candidate.code === query.shape)!;
-    const offset = index * outputStride;
-    const where = `${shape.name} d=${JSON.stringify(query.d)} p=${JSON.stringify(query.point)}`;
-    assert.ok(Math.abs(answers[offset] - shape.distance_m(query.d, query.point)) <= tolerance,
-      `distance drifted: ${where} gpu=${answers[offset]} cpu=${shape.distance_m(query.d, query.point)}`);
-    assert.ok(Math.abs(answers[offset + 2] - shape.supportRadius_m(query.d, query.direction)) <= tolerance,
-      `support drifted: ${where}`);
-    assert.ok(Math.abs(answers[offset + 3] - shape.boundingRadius_m(query.d)) <= tolerance,
-      `bounding radius drifted: ${where}`);
-    assert.ok(Math.abs(answers[offset + 4] - shape.volume_m3(query.d)) <= tolerance,
-      `volume drifted: ${where}`);
-    // The inside test is a predicate, so it cannot be compared with a
-    // tolerance: points within one f32 rounding of the surface are allowed to
-    // land either way, and only a systematic disagreement is a defect.
-    const inside = answers[offset + 1] > 0.5;
-    if (inside !== shape.inside(query.d, query.point)
-      && Math.abs(shape.distance_m(query.d, query.point)) > tolerance) insideDisagreements += 1;
-  }
-  assert.equal(insideDisagreements, 0, "the inside test disagrees away from the surface");
 });

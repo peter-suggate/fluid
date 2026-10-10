@@ -18,16 +18,8 @@ import type { SceneDescription } from "./model";
  * the fix rather than silently falling back to some default method and
  * simulating the wrong thing.
  */
-/**
- * What one installation declares.
- *
- * `interactive` is a strict subset of `methods`: the picker offers it, while
- * the full set stays reachable for offline comparison lanes that should not
- * appear as a product choice.
- */
 export interface SimulationMethodInstallation {
   readonly methods: ReadonlyArray<SimulationMethod>;
-  readonly interactive: ReadonlyArray<SimulationMethod>;
   readonly defaultId: string;
 }
 
@@ -37,12 +29,6 @@ export function installSimulationMethods(installation: SimulationMethodInstallat
   const byId = new Map(installation.methods.map(method => [method.id, method]));
   if (byId.size !== installation.methods.length) throw new Error("Duplicate simulation method ID");
   if (!byId.has(installation.defaultId)) throw new Error(`Unknown default simulation method ${installation.defaultId}`);
-  const interactive = new Set<string>();
-  for (const method of installation.interactive) {
-    if (byId.get(method.id) !== method) throw new Error(`Interactive method ${method.id} is not the installed definition`);
-    if (interactive.has(method.id)) throw new Error(`Duplicate interactive method ${method.id}`);
-    interactive.add(method.id);
-  }
   for (const method of installation.methods) {
     if (!method.composition || !Object.isFrozen(method.composition)) {
       throw new Error(`Method ${method.id} must supply a resolved feature composition`);
@@ -50,7 +36,6 @@ export function installSimulationMethods(installation: SimulationMethodInstallat
   }
   installed = Object.freeze({
     methods: Object.freeze([...installation.methods]),
-    interactive: Object.freeze([...installation.interactive]),
     defaultId: installation.defaultId,
   });
 }
@@ -69,11 +54,6 @@ export function registeredSimulationMethods(): ReadonlyArray<SimulationMethod> {
   return installation().methods;
 }
 
-/** The methods offered as production/experimental choices in the UI. */
-export function interactiveSimulationMethods(): ReadonlyArray<SimulationMethod> {
-  return installation().interactive;
-}
-
 /**
  * The method the application selects when a scene is opened without an
  * explicit method in its URL. Scene profiles may seed method-specific tuning,
@@ -81,12 +61,6 @@ export function interactiveSimulationMethods(): ReadonlyArray<SimulationMethod> 
  */
 export function defaultMethodId(): string {
   return installation().defaultId;
-}
-
-/** The id itself when it names an interactive method, otherwise the default. */
-export function interactiveMethodId(id: string): string {
-  const { interactive, defaultId } = installation();
-  return interactive.some((method) => method.id === id) ? id : defaultId;
 }
 
 export function getMethod(id: string): SimulationMethod {

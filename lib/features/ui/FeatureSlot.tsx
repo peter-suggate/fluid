@@ -1,15 +1,9 @@
 "use client";
 import { useMemo } from "react";
-import { PressureInspectionRow } from "../pressure-inspection/ui";
 import { SurfaceDisplayRow } from "../surface-display/ui";
-import { TopologyFreezeRow } from "../topology-freeze/ui";
 
 import { resolvedMethodValues } from "../../core/stores/method-store";
 import { useSession } from "../../core/session/session-context";
-import { adaptiveMassAdaptivityFeature } from "../../methods/adaptive-mass/features/adaptivity/definition";
-import { AdaptiveMassControlRow, AdaptiveMassToolstripRow } from "../../methods/adaptive-mass/features/adaptivity/ui";
-import { adaptiveMassAdaptivityFeature as adaptiveVolumeAdaptivityFeature } from "../../methods/adaptive-volume/features/adaptivity/definition";
-import { AdaptiveMassControlRow as AdaptiveVolumeControlRow, AdaptiveMassToolstripRow as AdaptiveVolumeToolstripRow } from "../../methods/adaptive-volume/features/adaptivity/ui";
 import { SVO_FEATURE_VIEWS } from "../../svo/pipeline/ui-slots";
 import { GravityRow, GravityYRow } from "../gravity/ui";
 import { composeFeatureUI } from "./composition";
@@ -17,17 +11,9 @@ import { ComposedFeatureSlot, type FeatureControlViews } from "../../framework/u
 
 /** Only application composition knows the installed React implementations. */
 export const applicationViews: FeatureControlViews = {
-  "simulation.pressure-inspection/film": PressureInspectionRow,
   "presentation.surface-display/mode": SurfaceDisplayRow,
-  "simulation.topology-freeze/enabled": TopologyFreezeRow,
   "scene.gravity/enabled": GravityRow,
   "scene.gravity/y": GravityYRow,
-  ...Object.fromEntries(adaptiveMassAdaptivityFeature.controls!.map(control =>
-    [`${adaptiveMassAdaptivityFeature.id}/${control.id}`, AdaptiveMassControlRow])),
-  "simulation.adaptive-mass.adaptivity/adaptivity": AdaptiveMassToolstripRow,
-  ...Object.fromEntries(adaptiveVolumeAdaptivityFeature.controls!.map(control =>
-    [`${adaptiveVolumeAdaptivityFeature.id}/${control.id}`, AdaptiveVolumeControlRow])),
-  "simulation.adaptive-volume.adaptivity/adaptivity": AdaptiveVolumeToolstripRow,
   ...SVO_FEATURE_VIEWS,
 };
 

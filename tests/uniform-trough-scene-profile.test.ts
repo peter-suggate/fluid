@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import "../lib/methods";
 import { getSceneDefinition } from "../lib/core/scenes";
-import { createMethodStore } from "../lib/core/stores/method-store";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
 import { buildVesselOutlineGeometry } from "../lib/core/vessel-outline";
@@ -38,14 +37,5 @@ for (const mode of ["dam-break", "settled-tank", "hose-fill"] as const) {
     // these opaque walls with the glass tank's outline.
     delete scene.container.vessel;
     assert.equal(buildVesselOutlineGeometry(scene), undefined);
-  });
-  test(`voxel trough ${mode} can seed its profile when opened`, () => {
-    const profile = getSceneDefinition(`uniform-trough-${mode}`).methodProfile;
-    assert.ok(profile);
-    const store = createMethodStore();
-    // Scene selection uses seedProfile, including registry/parameter validation.
-    assert.doesNotThrow(() => store.getState().seedProfile(profile));
-    assert.equal(profile.methodId, "uniform-volume");
-    assert.deepEqual(store.getState().overrides["uniform-volume"], {});
   });
 }

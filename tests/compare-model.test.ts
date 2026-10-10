@@ -84,19 +84,6 @@ test("opening compare with an empty diff makes B a copy of A", () => {
   sync.stop();
 });
 
-test("changing B's solver records exactly one override", () => {
-  const { a, b } = panes();
-  const store = fakeStore();
-  const sync = startCompareSync(a, b, store);
-  const other = otherMethodId(b);
-  b.method.getState().setMethodId(other);
-  assert.deepEqual(Object.keys(store.getState().diff), ["method"]);
-  assert.equal(store.getState().diff.method, other);
-  assert.equal(a.method.getState().methodId, "uniform-narrow-band-flip");
-  assert.notEqual(a.method.getState().methodId, other);
-  sync.stop();
-});
-
 test("a solver key is config: it never moves both panes, whatever the padlocks say", () => {
   assert.equal(compareGroupForKey("method"), "config");
   assert.equal(compareGroupForKey("scene.container.width_m"), "config");
@@ -218,62 +205,6 @@ test("with View linked, B's camera moves A and records nothing", () => {
   assert.deepEqual(store.getState().diff, {});
   assert.equal(a.ui.getState().camera.azimuth_rad, target);
   assert.equal(b.ui.getState().camera.azimuth_rad, target);
-  sync.stop();
-});
-
-test("dropping an override returns B to A", () => {
-  const { a, b } = panes();
-  const store = fakeStore();
-  const sync = startCompareSync(a, b, store);
-  const other = otherMethodId(b);
-  const original = a.method.getState().methodId;
-  b.method.getState().setMethodId(other);
-  dropCompareOverride(store, "method");
-  assert.deepEqual(store.getState().diff, {});
-  assert.equal(b.method.getState().methodId, original);
-  assert.equal(search(b), search(a));
-  sync.stop();
-});
-
-test("moving an override to A leaves both panes on B's value", () => {
-  const { a, b } = panes();
-  const store = fakeStore();
-  const sync = startCompareSync(a, b, store);
-  const other = otherMethodId(b);
-  b.method.getState().setMethodId(other);
-  moveCompareOverrideToA(store, a, "method");
-  assert.deepEqual(store.getState().diff, {});
-  assert.equal(a.method.getState().methodId, other);
-  assert.equal(b.method.getState().methodId, other);
-  sync.stop();
-});
-
-test("keeping B promotes the diff onto A and empties it", () => {
-  const { a, b } = panes();
-  const store = fakeStore();
-  const sync = startCompareSync(a, b, store);
-  const other = otherMethodId(b);
-  b.method.getState().setMethodId(other);
-  promoteCompareDiff(store, a);
-  assert.deepEqual(store.getState().diff, {});
-  assert.equal(a.method.getState().methodId, other);
-  sync.stop();
-});
-
-test("swapping inverts the diff", () => {
-  const { a, b } = panes();
-  const store = fakeStore();
-  const sync = startCompareSync(a, b, store);
-  const original = a.method.getState().methodId;
-  const other = otherMethodId(b);
-  b.method.getState().setMethodId(other);
-  swapComparePanes(store, a);
-  assert.equal(a.method.getState().methodId, other);
-  // A was on the product default, which the serializer writes as the *absence*
-  // of the key — so the inverted diff has to be able to say "absent", or B
-  // would silently re-inherit A's new solver instead of taking A's old one.
-  assert.equal(store.getState().diff.method, COMPARE_ABSENT);
-  assert.equal(b.method.getState().methodId, original);
   sync.stop();
 });
 
@@ -555,29 +486,6 @@ test("the diff round-trips through the address as b.* keys", () => {
   assert.equal(parseCompareQuery("?scene=dam-break").active, false);
 });
 
-test("the strip reads one row per override", () => {
-  const { a, b } = panes();
-  const store = fakeStore();
-  const sync = startCompareSync(a, b, store);
-  const other = otherMethodId(b);
-  b.method.getState().setMethodId(other);
-  const rows = compareDiffRows(store.getState(), a, b);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0]!.key, "method");
-  assert.equal(rows[0]!.group, "config");
-  assert.equal(rows[0]!.valueB, other);
-  sync.stop();
-});
-
-/** A numeric parameter of the pane's own method, with a value it does not hold. */
-function* registeredParams(session: PaneSession) {
-  const method = getMethod(session.method.getState().methodId);
-  for (const spec of method.params) {
-    if (spec.kind === "select") continue;
-    yield { key: spec.key, value: (spec.min + spec.max) / 2 };
-  }
-}
-
 test("freeze and region links default to separated and survive all link combinations", () => {
   for (const topology of [false, true]) for (const regions of [false, true]) {
     const state = { ...INITIAL_COMPARE_STATE, active: true,
@@ -587,31 +495,6 @@ test("freeze and region links default to separated and survive all link combinat
   }
   assert.equal(parseCompareQuery("b=1").links.topology, false);
   assert.equal(parseCompareQuery("b=1").links.regions, false);
-});
-
-test("freeze changes stay local in either pane, round-trip, and can be linked", () => {
-  const { a, b } = panes();
-  const store = fakeStore();
-  const sync = startCompareSync(a, b, store);
-  a.runtime.getState().setTopologyFrozen(true);
-  assert.equal(b.runtime.getState().topologyFrozen, false);
-  assert.equal(store.getState().diff.freezeTopology, COMPARE_ABSENT);
-  const query = serializeQueryState("", a.scene.getState(), a.method.getState(), a.ui.getState(),
-    { compare: store.getState() }, undefined, a.runtime.getState());
-  assert.equal(parseQueryState(query).topologyFrozen, true);
-  const restored = panes();
-  restored.a.runtime.getState().setTopologyFrozen(parseQueryState(query).topologyFrozen);
-  const restoredSync = startCompareSync(restored.a, restored.b, fakeStore(parseCompareQuery(query)));
-  assert.equal(restored.b.runtime.getState().topologyFrozen, false);
-  restoredSync.stop();
-  b.runtime.getState().setTopologyFrozen(true);
-  a.runtime.getState().setTopologyFrozen(false);
-  assert.equal(b.runtime.getState().topologyFrozen, true);
-  store.setState({ ...store.getState(), links: { ...store.getState().links, topology: true } });
-  assert.equal(b.runtime.getState().topologyFrozen, false);
-  b.runtime.getState().setTopologyFrozen(true);
-  assert.equal(a.runtime.getState().topologyFrozen, true);
-  sync.stop();
 });
 
 test("enforcement region edits remain separate in either pane and relink to A", async () => {
@@ -636,3 +519,12 @@ test("enforcement region edits remain separate in either pane and relink to A", 
   assert.equal(refinementRegionsToQuery(a.scene.getState().scene), "");
   sync.stop();
 });
+
+/** A numeric parameter of the active solver with an in-range alternate value. */
+function* registeredParams(session: PaneSession) {
+  const method = getMethod(session.method.getState().methodId);
+  for (const spec of method.params) {
+    if (spec.kind === "select") continue;
+    yield { key: spec.key, value: (spec.min + spec.max) / 2 };
+  }
+}

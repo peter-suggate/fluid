@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "source": "lib/methods/adaptive-volume/sparse-cm12-generation-transfer.ts#compileSparseCM12GenerationTransfer",
+  "source": "tools/wasm/generate-transfer3d-golden.ts#compileTransfer",
   "cases": [
     {
       "id": "split-eight",

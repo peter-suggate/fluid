@@ -1,6 +1,6 @@
 import type { SceneDescription } from "./model";
 
-/** Matches `createTallCellLayout`'s default device cap. */
+/** Default WebGPU texture extent cap used by scene planning. */
 export const DEFAULT_MAXIMUM_LATTICE_DIMENSION = 2048;
 /** Below this a container axis stops resolving anything, so the layout floors. */
 export const MINIMUM_LATTICE_DIMENSION = 8;

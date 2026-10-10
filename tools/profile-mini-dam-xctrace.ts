@@ -17,28 +17,10 @@
  * Usage:
  *   node --import tsx tools/profile-mini-dam-xctrace.ts [options]
  *
- *   --lane=mini|large|high-resolution-dam-break|moving-interface|ui|ocean|ceiling-drop
- *                                    scene lane (default mini)
- *   --band=0|1|2|3|4                override the octree interface-band level
- *                                    after applying the lane preset
- *   --fine-factor=N                  override the global fine factor
- *   --maximum-leaf-size=N            override the maximum octree leaf size
- *   --method=ID                      override the lane's simulation method
- *   --no-tripwires                   disable runtime control-buffer tripwires
- *   --first-frame                    gate before advance 1 and reduce the
- *                                    capture to literal advance 1
- *   --losasso-d4-first-frame         one-command production-cutover preset:
- *                                    symmetric-expansion, Losasso, factor/band
- *                                    4, one complete post-construction advance
- *   --uniform-mini-64                dense uniform method on the 64-cubed mini
- *                                    dam; captures two adjacent advances by
- *                                    default with every Uniform pass isolated.
- *                                    Combine with --method=uniform-volume to
- *                                    profile Uniform Geometric on the same
- *                                    scene; that method owns the paper 1/30 s
- *                                    cadence, so the lane switches to it.
- *   --frames=N                       adjacent representative advances retained
- *                                    in the report (default 1, uniform preset 2)
+ *   --lane=mini|large               narrow-band dam size (default mini)
+ *   --scene=ID                       override the scene
+ *   --first-frame                    capture literal advance 1 (--frames=1)
+ *   --frames=N                       adjacent advances retained (default 2)
  *   --counter-start-gate             gate before advance 1 only until the
  *                                    counter recorder is live, then reduce a
  *                                    representative recurring advance
@@ -99,13 +81,7 @@ import { createInterface } from "node:readline";
 import { arch, platform, release } from "node:os";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
-import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
-import { UNIFORM_PAPER_DT_S } from "../lib/methods/uniform/uniform-paper";
-import {
-  POWER_DAM_LANE_ENVIRONMENT,
-  powerDamLaneWithSteps,
-  type PowerDamRuntimeLane,
-} from "./power-dam-lane-environment";
+import { NARROW_BAND_DAM_LANES, narrowBandDamLaneWithSteps, type NarrowBandDamLane } from "./narrow-band-dam-lane-environment";
 import { parseTraceTable, readTraceRows } from "./xctrace-trace-tables";
 import {
   buildFrameReport,
@@ -115,88 +91,24 @@ import {
 import "../lib/methods";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const worker = fileURLToPath(new URL("./run-webgpu-smoke-isolated-worker.ts", import.meta.url));
+const worker = fileURLToPath(new URL("./profile-narrow-band-worker.ts", import.meta.url));
 
 const flag = (name: string): string | undefined => process.argv
   .find((argument) => argument.startsWith(`--${name}=`))?.slice(name.length + 3);
 
-const losassoD4FirstFrame = process.argv.includes("--losasso-d4-first-frame");
-const uniformMini64 = process.argv.includes("--uniform-mini-64");
-if (uniformMini64 && losassoD4FirstFrame) {
-  throw new Error("--uniform-mini-64 and --losasso-d4-first-frame are mutually exclusive");
+const lane = (flag("lane") ?? "mini") as NarrowBandDamLane;
+if (!(lane in NARROW_BAND_DAM_LANES)) {
+  throw new Error(`--lane must be one of ${Object.keys(NARROW_BAND_DAM_LANES).join(", ")}`);
 }
-if (uniformMini64 && flag("lane") !== undefined) {
-  throw new Error("--uniform-mini-64 owns its scene lane and cannot be combined with --lane");
+const steps = flag("steps") === undefined ? undefined : Number(flag("steps"));
+if (steps !== undefined && (!Number.isInteger(steps) || steps < 1)) {
+  throw new Error("--steps must be a positive integer");
 }
-/**
- * The uniform preset's scene, harness lane and expected grid.
- *
- * `--uniform-mini-64` used to hard-code `minimal-power-dam-break-64` at
- * 64^3, which is below the threshold at which the uniform solver turns on its
- * compact tile work list and indirect volume dispatch -- so that preset can
- * only ever profile the small-lattice code path. The three values are flags so
- * a larger, sparser scene can be profiled through exactly the same capture and
- * reduction; the defaults reproduce the mini64 preset byte-for-byte.
- */
-const uniformScene = flag("uniform-scene") ?? "minimal-power-dam-break-64";
-const uniformSceneLane = flag("uniform-lane") ?? "uniform-one-step";
-const expectGrid = flag("expect-grid") ?? (uniformScene === "minimal-power-dam-break-64"
-  ? "64,64,64" : undefined);
-if (!uniformMini64 && (flag("uniform-scene") !== undefined
-  || flag("uniform-lane") !== undefined || flag("expect-grid") !== undefined)) {
-  throw new Error("--uniform-scene/--uniform-lane/--expect-grid require --uniform-mini-64");
-}
-if (uniformMini64 && expectGrid === undefined) {
-  throw new Error("--uniform-scene needs --expect-grid=nx,ny,nz so the capture states the lattice it ran");
-}
-if (expectGrid !== undefined && !/^\d+,\d+,\d+$/.test(expectGrid)) {
-  throw new Error("--expect-grid must be three comma-separated positive integers");
-}
-if (losassoD4FirstFrame && flag("lane") !== undefined
-  && flag("lane") !== "symmetric-expansion") {
-  throw new Error("--losasso-d4-first-frame is locked to --lane=symmetric-expansion");
-}
-const lane = (flag("lane") ?? (losassoD4FirstFrame
-  ? "symmetric-expansion" : "mini")) as PowerDamRuntimeLane;
-if (!(lane in POWER_DAM_LANE_ENVIRONMENT)) {
-  throw new Error(`--lane must be one of ${Object.keys(POWER_DAM_LANE_ENVIRONMENT).join(", ")}`);
-}
-const bandLevel = flag("band") === undefined
-  ? losassoD4FirstFrame ? 4 : undefined : Number(flag("band"));
-if (bandLevel !== undefined
-  && (!Number.isInteger(bandLevel) || bandLevel < 0 || bandLevel > 4)) {
-  throw new Error("--band must be an integer from 0 through 4");
-}
-const fineFactor = flag("fine-factor") === undefined
-  ? undefined : Number(flag("fine-factor"));
-if (fineFactor !== undefined && (!Number.isInteger(fineFactor) || fineFactor < 1)) {
-  throw new Error("--fine-factor must be a positive integer");
-}
-const maximumLeafSize = flag("maximum-leaf-size") === undefined
-  ? undefined : Number(flag("maximum-leaf-size"));
-if (maximumLeafSize !== undefined
-  && (!Number.isInteger(maximumLeafSize) || maximumLeafSize < 1)) {
-  throw new Error("--maximum-leaf-size must be a positive integer");
-}
-const methodOverride = flag("method");
-/**
- * Uniform Geometric (`uniform-volume`) on the same 64-cubed mini dam.
- *
- * It shares the dense lane's scene, grid and harness plugin, but not its
- * cadence. `resolveUniformGeometricValues` rebuilds the value bag from the
- * geometric parameter list alone, which declares no `timeStep`, so the solver
- * always runs the paper's 1/30 s step. Forwarding the dense lane's 4 ms
- * cadence would make it reject eight advances in nine and trip
- * FLUID_MAX_CONSECUTIVE_REJECTED_ADVANCES before Instruments sees a frame.
- */
-const uniformGeometric = uniformMini64 && methodOverride === "uniform-volume";
-const steps = flag("steps") === undefined
-  ? losassoD4FirstFrame ? 1 : uniformMini64 ? 8 : undefined : Number(flag("steps"));
-const retainedFrames = Number(flag("frames") ?? (uniformMini64 ? 2 : 1));
+const retainedFrames = Number(flag("frames") ?? 2);
 if (!Number.isInteger(retainedFrames) || retainedFrames < 1) {
   throw new Error("--frames must be a positive integer");
 }
-const firstFrame = losassoD4FirstFrame || process.argv.includes("--first-frame");
+const firstFrame = process.argv.includes("--first-frame");
 if (firstFrame && retainedFrames !== 1) {
   throw new Error("--first-frame captures exactly one advance; use --frames=1");
 }
@@ -205,15 +117,15 @@ if (firstFrame && retainedFrames !== 1) {
 // cannot make labels and counters overlap reliably. This gate starts the
 // recorder before recurring work without changing representative-frame
 // selection (unlike --first-frame, which intentionally selects bootstrap).
-const counterStartGate = uniformMini64 || process.argv.includes("--counter-start-gate");
+const counterStartGate = true;
 const profileGate = firstFrame || counterStartGate;
 const counters = true;
-const counterSeconds = Number(flag("counter-seconds") ?? (losassoD4FirstFrame ? 5 : 3));
+const counterSeconds = Number(flag("counter-seconds") ?? 3);
 if (!Number.isFinite(counterSeconds) || counterSeconds < 3) {
   throw new Error("--counter-seconds must be at least 3 for full labels plus occupancy");
 }
 const counterGateWarmupMs = Number(flag("counter-gate-warmup-ms")
-  ?? (losassoD4FirstFrame ? 3_000 : 1_200));
+  ?? 1_200);
 if (!Number.isFinite(counterGateWarmupMs) || counterGateWarmupMs < 0
   || counterGateWarmupMs > counterSeconds * 1_000) {
   throw new Error("--counter-gate-warmup-ms must be between 0 and the counter window");
@@ -243,10 +155,7 @@ if (!Number.isFinite(counterReduction) || counterReduction < 1) {
 const discardTables = process.argv.includes("--discard-tables");
 const discardTrace = process.argv.includes("--discard-trace");
 const reuseTables = process.argv.includes("--reuse-tables");
-const outputDirectory = resolve(root, flag("out")
-  ?? (losassoD4FirstFrame
-    ? "artifacts/xctrace-losasso-d4-frame"
-    : uniformMini64 ? "artifacts/xctrace-uniform-mini-dam-64" : "artifacts/xctrace-mini-dam"));
+const outputDirectory = resolve(root, flag("out") ?? `artifacts/xctrace-narrow-band-${lane}`);
 
 /** Stage timings and labels come from Metal interval tables and are never
  * downsampled. These are the only counter series consumed by the report; LLC
@@ -432,14 +341,14 @@ export const planCounterWindow = (input: {
   };
 };
 
-const requestedSteps = steps ?? Number(POWER_DAM_LANE_ENVIRONMENT[lane].FLUID_ORACLE_STEPS);
+const requestedSteps = steps ?? Number(NARROW_BAND_DAM_LANES[lane].FLUID_ORACLE_STEPS);
 /**
  * The step count is fixed before either run starts so the baseline and the
  * traced run remain comparable, which means the plan that sizes it can only
  * use the assumed pace. Placement is re-planned against the measured pace once
  * the baseline has run.
  */
-const sizingPlan = counters && !firstFrame && !uniformMini64 ? planCounterWindow({
+const sizingPlan = counters && !firstFrame && !counterStartGate ? planCounterWindow({
   requestedSteps,
   perAdvanceMs: ASSUMED_MS_PER_ADVANCE,
   counterSeconds,
@@ -451,36 +360,8 @@ const laneSteps = sizingPlan?.steps ?? steps;
  * The clean measurement regime. Every in-process probe is off: those probes
  * are what distort the frame, and Instruments replaces them from outside.
  */
-const uniformMini64Dt = uniformGeometric ? UNIFORM_PAPER_DT_S : 0.004;
-const inheritedLaneEnvironment = uniformMini64 ? {
-  FLUID_SCENE: uniformScene,
-  FLUID_LANE: uniformSceneLane,
-  FLUID_TARGET_S: String(requestedSteps * uniformMini64Dt),
-  FLUID_MAX_DT: String(uniformMini64Dt),
-  FLUID_ORACLE_STEPS: String(requestedSteps),
-  FLUID_EXPECT_EXACT_STEPS: String(requestedSteps),
-  FLUID_EXPECT_GRID: expectGrid!,
-  FLUID_METHOD: "uniform",
-  // Uniform Geometric honours neither of these: `timeStep` is dropped by its
-  // own value resolution (paper cadence above) and density post-processing is
-  // hardwired off in `uniformGeometricSolverOptions`. Forwarding them would
-  // state a configuration the running method never applies.
-  ...(uniformGeometric ? {} : {
-    FLUID_UNIFORM_TIME_STEP: "scene",
-    FLUID_UNIFORM_DENSITY_POSTPROCESSING: "0",
-  }),
-} : laneSteps === undefined
-  ? POWER_DAM_LANE_ENVIRONMENT[lane] : powerDamLaneWithSteps(lane, laneSteps);
-const laneEnvironment = methodOverride === "adaptive-volume" ? {
-  ...inheritedLaneEnvironment,
-  // Sparse CM12's shipping preset owns the CM12 paper cadence. The Power/Losasso
-  // lane catalog uses 0.004 s; forwarding that value makes every Sparse CM12
-  // advance correctly reject before xctrace can observe a frame. Preserve the
-  // requested frame count while deriving target time from the method cadence.
-  FLUID_TARGET_S: String(Number(inheritedLaneEnvironment.FLUID_ORACLE_STEPS)
-    * CM12_PAPER_DT_S),
-  FLUID_MAX_DT: String(CM12_PAPER_DT_S),
-} : inheritedLaneEnvironment;
+const laneEnvironment = narrowBandDamLaneWithSteps(lane, laneSteps ?? requestedSteps);
+if (flag("scene")) laneEnvironment.FLUID_SCENE = flag("scene")!;
 
 const profileEnvironment: Record<string, string> = {
   WEBGPU_NODE_MODULE: `${root}node_modules/webgpu/index.js`,
@@ -510,10 +391,8 @@ const profileEnvironment: Record<string, string> = {
   // A 64^3 CM11a advance exceeds the historical 1,024-pass query-pair ceiling.
   // 4,096 timestamps is Metal's 32 KiB counter-sample-buffer maximum and keeps
   // up to 2,048 labelled passes instead of silently dropping the late solve.
-  FLUID_GPU_PASS_TIMESTAMP_QUERY_CAPACITY: uniformMini64 ? "4096" : "2048",
-  FLUID_GPU_PASS_TIMESTAMP_LABEL_PREFIXES:
-    isolateLabelPrefix ?? (uniformMini64
-      ? "Uniform" : "Fine JFA -,SPGrid accurate A2 -,SPGrid Section 6.3 -"),
+  FLUID_GPU_PASS_TIMESTAMP_QUERY_CAPACITY: "4096",
+  FLUID_GPU_PASS_TIMESTAMP_LABEL_PREFIXES: "Uniform,Narrow-band",
   FLUID_ALGORITHM_DIAGNOSTICS: "0",
   FLUID_GPU_COMMAND_AUDIT: "1",
   // Match benchmark-power-dam's shipping graph. Scene catalog defaults enable
@@ -539,28 +418,7 @@ const profileEnvironment: Record<string, string> = {
   FLUID_TRIPWIRES: tripwires ? "1" : "0",
   FLUID_PROFILE_FIRST_ADVANCE_GATE: profileGate ? "1" : "0",
   ...laneEnvironment,
-  // This deliberately follows the lane preset. A shell-level override cannot
-  // win against startWorker's explicit environment, which previously made
-  // comparative traces silently profile the lane's default band every time.
-  ...(bandLevel === undefined ? {} : { FLUID_OCTREE_INTERFACE_BAND: String(bandLevel) }),
-  ...(losassoD4FirstFrame ? {
-    // The Losasso method comes from the locked `symmetric-expansion` lane
-    // record; only the D4 shape knobs are restated here.
-    // This is a timing capture of the shipping command graph. The separate
-    // fine-factor-4 smoke owns raster/evidence correctness; enabling its
-    // FLUID_LOSASSO_D4_CUTOVER gate here would reject the intentionally lean
-    // performance lane before Instruments can record the first advance.
-    FLUID_MAXIMUM_LEAF_SIZE: "16",
-    FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
-    FLUID_GLOBAL_FINE_GENERATION_TRANSITION: "1",
-  } : {}),
-  ...(methodOverride === undefined ? {} : { FLUID_METHOD: methodOverride }),
-  ...(maximumLeafSize === undefined ? {}
-    : { FLUID_MAXIMUM_LEAF_SIZE: String(maximumLeafSize) }),
-  ...(fineFactor === undefined ? {} : {
-    FLUID_OCTREE_GLOBAL_FINE_FACTOR: String(fineFactor),
-    FLUID_GLOBAL_FINE_GENERATION_TRANSITION: fineFactor > 1 ? "1" : "0",
-  }),
+
 };
 type FrameReportResult = Awaited<ReturnType<typeof buildFrameReport>>;
 const commandVersion = (command: string, arguments_: readonly string[]): string | undefined => {
@@ -576,10 +434,8 @@ const writeCaptureManifest = async (
     schemaVersion: 1,
     status,
     generatedAt: new Date().toISOString(),
-    preset: losassoD4FirstFrame ? "losasso-d4-first-frame"
-      : uniformMini64 ? "uniform-mini-dam-64" : undefined,
-    reproduce: losassoD4FirstFrame ? "npm run profile:losasso-d4-xctrace"
-      : uniformMini64 ? "npm run profile:uniform-mini-dam-64-xctrace" : undefined,
+    preset: "narrow-band-flip",
+    reproduce: "npm run profile:mini-dam-xctrace",
     argv: process.argv.slice(2),
     git: {
       revision: commandVersion("git", ["rev-parse", "HEAD"]),
@@ -591,12 +447,9 @@ const writeCaptureManifest = async (
       xctrace: commandVersion("xcrun", ["xctrace", "version"]),
     },
     configuration: {
-      lane: uniformMini64 ? "uniform-mini-64" : lane,
+      lane: lane,
       scene: profileEnvironment.FLUID_SCENE, method: profileEnvironment.FLUID_METHOD,
       grid: profileEnvironment.FLUID_EXPECT_GRID,
-      maximumLeafSize: profileEnvironment.FLUID_MAXIMUM_LEAF_SIZE,
-      interfaceBand: profileEnvironment.FLUID_OCTREE_INTERFACE_BAND,
-      fineFactor: profileEnvironment.FLUID_OCTREE_GLOBAL_FINE_FACTOR,
       steps: profileEnvironment.FLUID_ORACLE_STEPS,
       counterSeconds, counterGateWarmupMs, counterReduction, retainedFrames,
       retainedCounters: [...RETAINED_GPU_COUNTERS],
@@ -933,7 +786,7 @@ const intervalOwners = async (ndjson: string): Promise<Map<string, number>> => {
 const main = async (): Promise<void> => {
   mkdirSync(outputDirectory, { recursive: true });
   await writeCaptureManifest("prepared");
-  const tracePath = `${outputDirectory}/${uniformMini64 ? "uniform-mini-dam-64" : "mini-dam"}.trace`;
+  const tracePath = `${outputDirectory}/${`narrow-band-${lane}`}.trace`;
   const scratchBefore = instrumentsScratchSnapshot();
   const observedScratch = new Map(scratchBefore);
   const observeCaptureScratch = (): void => {
@@ -962,11 +815,10 @@ const main = async (): Promise<void> => {
   rmSync(`${outputDirectory}/report.html`, { force: true });
   const nodeBinary = process.execPath;
 
-  console.log(`lane ${uniformMini64 ? "uniform-mini-64" : lane}: ${profileEnvironment.FLUID_ORACLE_STEPS} advances`
+  console.log(`lane ${lane}: ${profileEnvironment.FLUID_ORACLE_STEPS} advances`
     + ` of ${profileEnvironment.FLUID_SCENE} at grid ${profileEnvironment.FLUID_EXPECT_GRID}`
     + ` with method ${profileEnvironment.FLUID_METHOD} at dt ${profileEnvironment.FLUID_MAX_DT} s`
-    + (uniformMini64 ? `, retaining ${retainedFrames} adjacent detailed frames`
-      : `, interface band ${profileEnvironment.FLUID_OCTREE_INTERFACE_BAND ?? "scene default"}`));
+    + `, retaining ${retainedFrames} adjacent detailed frames`);
   console.log(fullDiagnostics
     ? "  capture instruments: full Metal System Trace + GPU counters"
     : "  capture instruments: Metal Application + GPU + GPU counters (stage diagnostics only)");
@@ -1019,7 +871,7 @@ const main = async (): Promise<void> => {
     };
     const report = await buildFrameReport({
       tables,
-      lane: uniformMini64 ? "uniform-mini-64" : lane,
+      lane: lane,
       environment: profileEnvironment,
       traced: resultFromLog("traced"),
       baseline: resultFromLog("baseline"),
@@ -1308,7 +1160,7 @@ const main = async (): Promise<void> => {
   console.log("reducing to a frame report...");
   const report = await buildFrameReport({
     tables,
-    lane: uniformMini64 ? "uniform-mini-64" : lane,
+    lane: lane,
     environment: profileEnvironment,
     traced,
     baseline,

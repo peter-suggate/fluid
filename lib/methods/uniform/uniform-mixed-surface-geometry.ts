@@ -6,7 +6,6 @@ import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-samplin
 import { uniformVolumeTargetWGSL } from "./uniform-volume.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
-import type { UniformPipelineNeed } from "./uniform-pipeline-needs";
 import { uniformMixedChangedTilesWGSL } from "./uniform-mixed-layout-builder";
 
 /** Workgroups of the changed-tile geometry launch at most (grid-stride). */
@@ -107,12 +106,15 @@ ${this.pressure?`@group(1) @binding(3) var pressureTarget:texture_storage_3d<r32
 override geometryPressure:bool=false;
 override geometryMetric:bool=false;
 ${this.metric?`@group(1) @binding(6) var<storage,read> metric:array<u32>;
+const GC_CELLS:u32=UM_D.x*UM_D.y*UM_D.z;
+const GC_FIRST:u32=2u*GC_CELLS+2u*UM_TILES;
+const GC_REACH:u32=GC_FIRST+(UM_D.x+1u)*(UM_D.y+1u)*(UM_D.z+1u)+GC_CELLS+4u+2u*UM_TILES;
 fn gcDistance(p:vec3u,fallback:f32)->f32{
  let tile=umTileAt(min(p,UM_D-1u)/4u);
- if((metric[${this.metric.reach}u+tile]&2u)==0u){return fallback;}
- let d=UM_D+1u;return bitcast<f32>(metric[${this.metric.first}u+p.x+d.x*(p.y+d.y*p.z)])*${Math.min(...this.ownership.capacity.lattice.cellSize_m)};
+ if((metric[GC_REACH+tile]&2u)==0u){return fallback;}
+ let d=UM_D+1u;return bitcast<f32>(metric[GC_FIRST+p.x+d.x*(p.y+d.y*p.z)])*umSceneMinimumSpacing();
 }`:""}
-const GC_FINE:u32=4u;const GC_COARSE:u32=${4+tiles}u;
+const GC_FINE:u32=4u;const GC_COARSE:u32=4u+UM_TILES;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner: the base block (UNIFORM_DETAIL_4H_LOAD).
 fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
@@ -227,7 +229,7 @@ var<workgroup> gcJobs:vec2u;
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const groups=[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])];
     const layout=this.device.createPipelineLayout({bindGroupLayouts:groups}),listed=this.device.createPipelineLayout({bindGroupLayouts:[...groups,this.listResources]});
-    const create=(entryPoint:string,constants:Record<string,number>={},pipelineLayout=layout,needs?:readonly UniformPipelineNeed[])=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout:pipelineLayout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants,...s}}}),{needs,entry:entryPoint});
+    const create=(entryPoint:string,constants:Record<string,number>={},pipelineLayout=layout)=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout:pipelineLayout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants,...s}}}),{entry:entryPoint});
     const all={umCountedJobs:UNIFORM_MIXED_COUNTED.all};
     [this.pipeline,this.pressurePipeline]=await Promise.all([create("geometry",all),this.pressure?create("geometry",{...all,geometryPressure:1}):undefined]);
     if(this.metric)this.metricPipeline=await create("geometry",{...all,geometryPressure:1,geometryMetric:1});
@@ -244,7 +246,7 @@ var<workgroup> gcJobs:vec2u;
       this.mirrorPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.mirrorResources!]}),compute:{module:mirror,entryPoint:"mirror",constants:{umDispatchX:this.ownership.dispatchX,...all}}});
     }
     // The changed launch follows a GPU relayout's changed tiles (Dynamic).
-    this.changedPipelines.push(...await Promise.all([create("compactChanged",{},listed,["dynamic"]),create("geometryChanged",{},layout,["dynamic"])]));
+    this.changedPipelines.push(...await Promise.all([create("compactChanged",{},listed),create("geometryChanged",{},layout)]));
   }
   /** pressure: also write the all-4h pressure geometry (a full launch).
    * changed: the changed tiles (UniformMixedGenerationBuffers.changes) of the

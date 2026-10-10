@@ -117,8 +117,8 @@ test("real threaded Rust adapter bounds target-clock debt and publishes paused e
     restitution: 0.2, friction: 0.4,
   }];
   const methodValues = resolvedMethodValues({
-    methodId: "adaptive-volume", quality: "balanced",
-    overrides: { "adaptive-volume": { physicsExecutionBackend: "cpu" } },
+    methodId: "uniform-narrow-band-flip", quality: "balanced",
+    overrides: {},
   });
   const wasm = await loadFluidWasmForNode(undefined, { artifact: "threaded", threadCount: 8 });
   const client = new DirectWorldClient(wasm);

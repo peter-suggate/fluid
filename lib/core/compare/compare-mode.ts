@@ -8,7 +8,6 @@ import {
   shellCompareStore,
   swapComparePanes,
   type CompareAdoptions,
-  type CompareMethodSwitch,
   type CompareSceneAdopt,
 } from "./compare-model";
 
@@ -60,19 +59,6 @@ export function toggleCompareMode(sessionB?: PaneSession): void {
 }
 
 /**
- * Adopting a solver, rather than merely recording one.
- *
- * The mirror writes a pane's stores directly, which is right for a quality
- * setting and wrong for the method itself: a different solver is different GPU
- * work and a different t=0, and only the controller knows how to rebuild one.
- * The model takes this as a callback so it stays free of the singleton; this is
- * the one implementation, and every surface that mirrors passes it.
- */
-export const adoptCompareMethod: CompareMethodSwitch = (session, methodId) => {
-  simulation.setMethod(methodId, session.id);
-};
-
-/**
  * Adopting a document, rather than merely holding one.
  *
  * The mirror's document write is the same shape of half-measure the method
@@ -94,7 +80,6 @@ export const adoptCompareScene: CompareSceneAdopt = (session, previous) => {
  * remembered one call site at a time.
  */
 export const COMPARE_ADOPTIONS: CompareAdoptions = {
-  onMethodSwitched: adoptCompareMethod,
   onSceneAdopted: adoptCompareScene,
 };
 

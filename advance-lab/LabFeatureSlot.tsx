@@ -6,7 +6,7 @@ import {
 } from "../lib/framework/ui/slot";
 import {
   advanceSliceFeature,
-} from "../lib/methods/adaptive-volume/features/advance-slice/definition";
+} from "./definition";
 import {
   LabAdaptiveSdfRow, LabBudgetRow, LabLensRow, LabOverlayRows, LabSurfaceRow, LabTransportRow,
 } from "./lab-instruments";

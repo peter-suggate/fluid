@@ -9,9 +9,31 @@ test("default method store can be imported before the entry point installs metho
   assert.equal(useMethodStore.getState(), first);
   let notifications = 0;
   const unsubscribe = useMethodStore.subscribe(() => notifications++);
-  first.setParam("uniform-volume", "volumeStorage", "pages32");
-  assert.equal(useMethodStore.getState().overrides["uniform-volume"]?.volumeStorage, "pages32");
+  first.setParam("uniform-narrow-band-flip", "fineGridPadding", 2);
+  assert.equal(useMethodStore.getState().overrides["uniform-narrow-band-flip"]?.fineGridPadding, 2);
   assert.equal(notifications, 1);
   unsubscribe();
-  useMethodStore.getState().resetParams("uniform-volume");
+  useMethodStore.getState().resetParams("uniform-narrow-band-flip");
+});
+
+test("retired scene profiles reopen on the default solver without their tuning", async () => {
+  await import("../lib/methods");
+  const { createMethodStore, resolvedMethodValues } = await import("../lib/core/stores/method-store");
+  const store = createMethodStore();
+  store.getState().applyProfile({ methodId: "retired-solver", quality: "balanced", overrides: { timeStep: "paper", fineGridPadding: 4 } });
+  assert.equal(store.getState().methodId, "uniform-narrow-band-flip");
+  assert.equal(resolvedMethodValues(store.getState()).timeStep, "sixtieth");
+  assert.equal(resolvedMethodValues(store.getState()).fineGridPadding, 1);
+});
+
+test("retired URL methods fall back and current parameters have no solver namespace", async () => {
+  await import("../lib/methods");
+  const { parseQueryState, serializeQueryState } = await import("../lib/core/url-state");
+  const parsed = parseQueryState("?method=losasso&param.losasso.maximumLeafSize=32&param.fineGridPadding=2");
+  assert.equal(parsed.methodId, "uniform-narrow-band-flip");
+  assert.deepEqual(parsed.overrides, { "uniform-narrow-band-flip": { fineGridPadding: 2 } });
+  const query = new URLSearchParams(serializeQueryState("?method=losasso", parsed, parsed, parsed.ui));
+  assert.equal(query.has("method"), false);
+  assert.equal(query.get("param.fineGridPadding"), "2");
+  assert.equal(query.has("param.losasso.maximumLeafSize"), false);
 });

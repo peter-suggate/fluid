@@ -6,7 +6,6 @@ import { toggledViewportMode, VIEWPORT_MODE_SHORTCUT } from "./editor-viewport-m
 import { cameraForFraming, cameraFramingForKey } from "./editor-camera-framing";
 import { toggleCompareMode } from "./compare/compare-mode";
 import { editorGestureForShortcut } from "./editor-gesture-catalog";
-import { stepFluidCellTraceHit } from "./fluid-cell-trace";
 import { editorEntityContext, findEntity } from "./editor-entity-catalog";
 import { sceneInstrumentForShortcut } from "./scene-instruments";
 import { voxelRailToolForKey } from "./editor-voxel-tool-actions";
@@ -113,9 +112,8 @@ export function useEditorShortcuts(focused?: PaneSession): void {
         // its own field — which swallows the key itself so that Escape means
         // "discard the typing" first.
         if (ui.sceneSelectorOpen) { ui.setSceneSelectorOpen(false); return; }
-        if (ui.pixelTraceEnabled || ui.fluidCellTraceEnabled) {
+        if (ui.pixelTraceEnabled) {
           ui.setPixelTraceEnabled(false);
-          ui.setFluidCellTraceEnabled(false);
           return;
         }
         if (ui.sceneOverlay) { ui.setSceneOverlay(null); return; }
@@ -177,14 +175,6 @@ export function useEditorShortcuts(focused?: PaneSession): void {
         ui.setSceneSelectorOpen(!ui.sceneSelectorOpen);
         return;
       }
-      // Entering and leaving pick mode. "c" for cell, and no editor tool claims
-      // it; the scene's own toggle carries the same letter so the two cannot
-      // drift apart in a reader's head.
-      if (event.key.toLowerCase() === "c") {
-        event.preventDefault();
-        ui.setFluidCellTraceEnabled(!ui.fluidCellTraceEnabled);
-        return;
-      }
       // The ray picker, on the same bargain. "r" for ray, claimed by no tool and
       // by no instrument. It exists for the same reason the cell key does: a
       // right-click is the only other route to it, and a right-click needs
@@ -195,23 +185,6 @@ export function useEditorShortcuts(focused?: PaneSession): void {
       if (event.key.toLowerCase() === "r") {
         event.preventDefault();
         ui.setPixelTraceEnabled(!ui.pixelTraceEnabled);
-        return;
-      }
-      // Walking the cell picker along the pointer ray. Bracket keys because the
-      // run is ordered by depth and they read as "further in" / "back out", and
-      // because no editor tool claims them.
-      if (ui.fluidCellTraceEnabled && (event.key === "[" || event.key === "]")) {
-        event.preventDefault();
-        ui.setFluidCellTraceHitIndex(stepFluidCellTraceHit(
-          ui.fluidCellTraceHitIndex, event.key === "]" ? 1 : -1, ui.fluidCellTraceHitCount));
-        return;
-      }
-      // Jumping to the next leaf the surface passes through. Stepping one at a
-      // time crosses a dozen interior cells first, and the interesting cell in a
-      // domain of thousands is almost always one the interface touches.
-      if (ui.fluidCellTraceEnabled && event.key.toLowerCase() === "i") {
-        event.preventDefault();
-        ui.jumpFluidCellTraceToInterface();
         return;
       }
       // The sculpt rail, by place: the third mark is `3`. Only in EDIT, where

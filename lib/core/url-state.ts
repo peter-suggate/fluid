@@ -1,18 +1,14 @@
 import { readVisualLayers, writeVisualLayers, type VisualLayerState } from "./visual-layers";
 import { managedQueryKey } from "../framework/persistence";
 import { uiFeatureQuery, type FeatureUIQueryState } from "../features/persistence";
-import { runtimeFeatureQuery, initialRuntimeFeatures, pickRuntimeFeatures, runtimeFeaturesChanged, type RuntimeFeatureState } from "../features/runtime-lifecycle";
 import { GRAVITY_QUERY_PATHS, isGravityVector } from "../features/gravity/state";
 import { refinementRegionsToQuery, withRefinementRegionsFromQuery } from "./editor-refinement-region";
 import { REGIONS_QUERY_KEY } from "../features/refinement-region/persistence";
 import { sceneSeedsQuery, withSceneSeedsFromQuery } from "./initial-brick-seed-query";
 import { CAMERA_DISTANCE_RANGE } from "./math";
-import { defaultMethodId, interactiveMethodId, registeredSimulationMethods } from "./method-registry";
+import { defaultMethodId, getMethod, registeredSimulationMethods } from "./method-registry";
 import type { MethodParamValue, MethodParamValues } from "./method-contract";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
-import { isOctreeTechniqueOverlayMode } from "./octree-technique-debug";
-import { isSparseCM12DirtyOverlayMode } from "./sparse-cm12-dirty-visualizations";
-import { isPressureJournalOverlayMode } from "../features/pressure-inspection/gpu/overlay";
 import { cameraForPreset, defaultScenePresetId, findSceneDefinition, getScenePreset, scenePresets, type ScenePreset } from "./scenes";
 import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "./scene-definition";
 import { solidVoxelsOnMovedLattice } from "./scene-lattice";
@@ -31,7 +27,6 @@ import type { GPUQuality } from "./gpu-quality";
 import { sceneStoneQuery, withSceneStoneQuery } from "./stone-look-controls";
 import { sceneRimQuery, withSceneRimQuery } from "./vessel-rim-controls";
 import { sceneCanopyQuery, withSceneCanopyQuery } from "./tree-canopy-controls";
-import { isStageLensOverlayMode } from "./stage-lens";
 import type { GridOverlayConfig, GridOverlayMode } from "./webgpu-renderer";
 import { isSliceOnlyGridOverlayMode } from "./grid-overlay-visualizations";
 
@@ -78,7 +73,7 @@ const sceneQueryPaths = [
   "rigidBodies"
 ] as const;
 
-export type QueryState = RuntimeFeatureState & {
+export type QueryState = {
   methodId: string;
   quality: GPUQuality;
   overrides: Record<string, MethodParamValues>;
@@ -107,7 +102,6 @@ export type UIQueryState = FeatureUIQueryState & {
   gridOverlaySlice: number;
   visualLayers?: VisualLayerState;
   gridOverlayMode: GridOverlayMode;
-  gridOverlayLensPhase: number;
 
 };
 
@@ -416,9 +410,7 @@ const DENSE_GRID_OVERLAY_MODES: Readonly<Record<string, true>> = {
  */
 function parseGridOverlayMode(raw: string | null, fallback: GridOverlayMode): GridOverlayMode {
   if (raw === null) return fallback;
-  return Object.hasOwn(DENSE_GRID_OVERLAY_MODES, raw) || isOctreeTechniqueOverlayMode(raw)
-    || isSparseCM12DirtyOverlayMode(raw) || isPressureJournalOverlayMode(raw)
-    || isStageLensOverlayMode(raw)
+  return Object.hasOwn(DENSE_GRID_OVERLAY_MODES, raw)
     ? raw as GridOverlayMode : fallback;
 }
 
@@ -429,90 +421,25 @@ function numberParam(query: URLSearchParams, key: string, fallback: number, min 
   return Number.isFinite(value) && value >= min && value <= max ? value : fallback;
 }
 
-/**
- * Rewrite a pre-split `method=octree` link into the method it actually named.
- *
- * The two adaptive backends used to be one registered method forked by a
- * `coarseBackend` parameter, and parameters are namespaced by method id in the
- * URL (`param.<methodId>.<key>`), so a legacy link is a whole namespace keyed
- * on a sibling key's value. Without this, `exactMethod("octree")` returns
- * undefined, `parseQueryState` falls through to `defaultMethodId()`, and every
- * shared link would quietly open on the *uniform* solver with its tuning
- * dropped — a different simulation, reported as success. There is no error to
- * notice, which is the whole reason this runs before the id is resolved.
- *
- * `serializeQueryState` deletes every `param.*` key it does not re-emit, so
- * the first canonicalisation after hydration erases the legacy namespace; this
- * only has to survive that one read.
- */
-function migrateLegacyOctreeMethodQuery(query: URLSearchParams): void {
-  const LEGACY_ID = "octree";
-  const LEGACY_PREFIX = `param.${LEGACY_ID}.`;
-  if (query.get("method") !== LEGACY_ID && ![...query.keys()].some((key) => key.startsWith(LEGACY_PREFIX))) return;
-  // Only the frozen reference backend names itself; absent, empty or unknown
-  // reads as the product default the picker offered, which is Losasso.
-  const resolvedId = query.get(`${LEGACY_PREFIX}coarseBackend`) === "power2017" ? "power-liquids" : "losasso";
-  if (query.get("method") === LEGACY_ID) query.set("method", resolvedId);
-  for (const [key, value] of [...query.entries()]) {
-    if (!key.startsWith(LEGACY_PREFIX)) continue;
-    query.delete(key);
-    const paramKey = key.slice(LEGACY_PREFIX.length);
-    // The backend is the method now, so it survives as the id above and not as
-    // a parameter; re-emitting it would resurrect a key no schema declares.
-    if (paramKey !== "coarseBackend") query.set(`param.${resolvedId}.${paramKey}`, value);
-  }
-}
-
-/**
- * The solver layer of a query, on its own.
- *
- * Split out for the compare mirror, which has to push pane A's method onto
- * pane B without rebuilding pane B's document: `parseQueryState` runs the
- * preset factory, and the hero pond bakes a 289 x 193 heightfield to produce
- * one. Reading the halves separately is what keeps a solver swap in pane B
- * from costing a scene rebuild in pane A.
- */
+/** Parameters and quality for the retained solver, shared with compare mode. */
 function methodQueryState(query: URLSearchParams): SerializableMethodState {
-  // Every scene opens on the method defaults: a scene's lane profile is not a
-  // product setting, so only explicit `method=`/`quality=`/`param.*` keys differ.
-  const methodId = exactMethod(query.get("method"))?.id ?? defaultMethodId();
+  const methodId = defaultMethodId(), method = getMethod(methodId);
   const qualityCandidate = query.get("quality") as GPUQuality | null;
-  const quality = qualityCandidate && qualities.includes(qualityCandidate)
-    ? qualityCandidate : "balanced";
-  const overrides: Record<string, MethodParamValues> = {};
-  let methodNotice: string | undefined;
-  for (const method of registeredSimulationMethods()) {
-    let values: MethodParamValues = {};
-    for (const spec of method.params) {
-      const raw = query.get(`param.${method.id}.${spec.key}`);
-      if (raw === null) continue;
-      const value = parseMethodValue(method.id, spec.key, raw);
-      if (value !== undefined) values[spec.key] = value;
-    }
-    if (method.migrateOverrides) {
-      // Undeclared keys reach the method's migration as raw strings; serialize drops them.
-      const prefix = `param.${method.id}.`, retired: MethodParamValues = {};
-      for (const [key, raw] of query.entries()) {
-        const name = key.startsWith(prefix) ? key.slice(prefix.length) : undefined;
-        if (name && !method.params.some(spec => spec.key === name)) retired[name] = raw;
-      }
-      if (Object.keys(retired).length) {
-        const migrated = method.migrateOverrides({ ...retired, ...values });
-        values = Object.fromEntries(Object.entries(migrated.overrides).filter(([key]) => method.params.some(spec => spec.key === key)));
-        if (method.id === methodId && migrated.notice) methodNotice = migrated.notice;
-      }
-    }
-    if (Object.keys(values).length > 0) {
-      overrides[method.id] = { ...overrides[method.id], ...values };
-    }
+  const quality = qualityCandidate && qualities.includes(qualityCandidate) ? qualityCandidate : "balanced";
+  const values: MethodParamValues = {};
+  for (const spec of method.params) {
+    // Existing narrow-band links remain readable; canonical links carry no method namespace.
+    const raw = query.get(`param.${spec.key}`) ?? query.get(`param.${methodId}.${spec.key}`);
+    if (raw === null) continue;
+    const value = parseMethodValue(methodId, spec.key, raw);
+    if (value !== undefined) values[spec.key] = value;
   }
-  return { methodId, quality, overrides, ...(methodNotice ? { methodNotice } : {}) };
+  return { methodId, quality, overrides: Object.keys(values).length ? { [methodId]: values } : {} };
 }
 
 /** The solver layer of an external query string. See `methodQueryState`. */
 export function parseMethodQueryState(search: string): SerializableMethodState {
   const query = new URLSearchParams(search);
-  migrateLegacyOctreeMethodQuery(query);
   return methodQueryState(query);
 }
 
@@ -531,7 +458,6 @@ export function parseUIQueryState(search: string, presetId: string): UIQueryStat
 /** Parse external URL input into a complete, validated store snapshot. */
 export function parseQueryState(search: string): QueryState {
   const query = new URLSearchParams(search);
-  migrateLegacyOctreeMethodQuery(query);
   const preset = exactPreset(query.get("scene")) ?? getScenePreset(defaultScenePresetId);
   const { methodId, quality, overrides, methodNotice } = methodQueryState(query);
 
@@ -656,7 +582,6 @@ export function parseQueryState(search: string): QueryState {
     scene: validateScene(scene).length === 0 ? scene : baseScene,
     view: shellViewFromQuery(search),
     ui: uiQueryState(query, preset),
-    ...runtimeFeatureQuery.read(query),
   };
 }
 
@@ -706,8 +631,6 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
     // Only the lens knows how many phases it has, so the ceiling is the
     // overlay's to enforce; a link can only be stopped from naming a
     // fractional or negative one.
-    gridOverlayLensPhase: Math.max(0,
-      Math.floor(numberParam(query, "lensPhase", initialUI.gridOverlayLensPhase, 0))),
     ...uiFeatureQuery.read(query),
   };
 }
@@ -755,7 +678,6 @@ export const isSceneQueryKey = managedQueryKey(
  */
 const isManagedKey = managedQueryKey(
   uiFeatureQuery,
-  runtimeFeatureQuery,
   { matches: [isSceneQueryKey] },
   { keys: STUDIO_QUERY_KEYS },
   { keys: RETIRED_QUERY_KEYS },
@@ -790,16 +712,13 @@ export function serializeQueryState(
   uiState: SerializableUIState = useUIStore.getInitialState(),
   shellState: SerializableShellState = { view: "studio" },
   preparedSceneEntries?: readonly SceneQueryEntry[],
-  runtimeState: RuntimeFeatureState = initialRuntimeFeatures(),
+  _runtimeState?: unknown,
 ): string {
   const query = new URLSearchParams(search);
   for (const key of [...query.keys()]) if (isManagedKey(key)) query.delete(key);
 
   query.set("scene", sceneState.presetId);
-  runtimeFeatureQuery.write(query, runtimeState);
-  const baselineMethodId = defaultMethodId();
   const baselineQuality = "balanced";
-  if (methodState.methodId !== baselineMethodId) query.set("method", methodState.methodId);
   if (methodState.quality !== baselineQuality) query.set("quality", methodState.quality);
   // The studio is the absence of the layer, not a second value: a link to a
   // scene should not also have to say that it is not the shelf it came from.
@@ -816,13 +735,6 @@ export function serializeQueryState(
   if (serializedGridSlice !== 0.5) query.set("gridSlice", String(serializedGridSlice));
   if (uiState.visualLayers) query.set("layers", writeVisualLayers(uiState.visualLayers));
   if (uiState.gridOverlayMode !== "structure") query.set("gridMode", uiState.gridOverlayMode);
-  // Gated on the mode as well as the value: a scrubber position outside a lens
-  // addresses nothing, and a key that rode along on every other field view
-  // would be noise in every link the picker writes.
-  if (uiState.gridOverlayLensPhase !== 0 && isStageLensOverlayMode(uiState.gridOverlayMode)) {
-    query.set("lensPhase", String(uiState.gridOverlayLensPhase));
-  }
-
   for (const [key, value, base] of cameraQueryValues(uiState.camera, sceneState.presetId)) {
     if (value !== base) query.set(key, String(value));
   }
@@ -834,7 +746,7 @@ export function serializeQueryState(
     for (const spec of method.params) {
       const value = values[spec.key];
       if (value !== undefined) {
-        query.set(`param.${method.id}.${spec.key}`, String(value));
+        query.set(`param.${spec.key}`, String(value));
       }
     }
   }
@@ -855,13 +767,12 @@ export function serializeQueryState(
 export function applyQueryStateToSession(session: PaneSession, search: string): void {
   const state = parseQueryState(search);
   session.method.setState({
-    methodId: interactiveMethodId(state.methodId),
+    methodId: defaultMethodId(),
     quality: state.quality,
     overrides: state.overrides,
   });
   session.scene.getState().setScene(state.scene, state.presetId);
   session.ui.setState(state.ui);
-  session.runtime.setState(pickRuntimeFeatures(state));
   if (state.methodNotice) session.runtime.getState().setNotice(state.methodNotice, "info");
 }
 
@@ -961,13 +872,10 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void, opti
           : INITIAL_COMPARE_STATE,
         ...(restoredShell.view === "studio" ? { librarySearch: "" } : {}),
       });
-      // Offline comparison methods remain parseable and serializable, while the
-      // interactive application admits only the choices exposed by its picker.
-      session.method.setState({ methodId: interactiveMethodId(state.methodId), quality: state.quality, overrides: state.overrides });
+      session.method.setState({ methodId: defaultMethodId(), quality: state.quality, overrides: state.overrides });
       session.scene.getState().setScene(state.scene, state.presetId);
       session.ui.setState(state.ui);
       onHydrated(state.presetId);
-      session.runtime.setState(pickRuntimeFeatures(state));
       if (state.methodNotice) session.runtime.getState().setNotice(state.methodNotice, "info");
     },
     sources: [
@@ -983,9 +891,6 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void, opti
         });
         return () => { clearTimeout(settle); unsubscribe(); };
       },
-      (onChange) => session.runtime.subscribe((state, previous) => {
-        if (runtimeFeaturesChanged(previous, state)) onChange();
-      }),
       // Search text and section disclosure are intentionally session-only; only
       // the layer in front belongs in the address bar. The compare record is in
       // the address for the same reason the view is: it says which page this is,

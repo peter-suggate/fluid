@@ -1072,15 +1072,6 @@ class SimulationController {
     this.session(paneId).runtime.getState().setNotice(`Quality ${quality} · simulation reset`);
   }
 
-  setMethod(methodId: string, paneId: PaneId = PRIMARY_PANE_ID) {
-    const state = this.session(paneId).method.getState();
-    validateMethodConfiguration(methodId, state.quality, state.overrides[methodId] ?? {});
-    this.announceGPURebuild(`Switch to ${getMethod(methodId).label}`, paneId);
-    this.session(paneId).method.getState().setMethodId(methodId);
-    this.reset(undefined, undefined, paneId);
-    this.session(paneId).runtime.getState().setNotice(`${getMethod(methodId).label} selected`);
-  }
-
   /** Structural settings start from a defined t=0 state. Runtime-safe settings
    * are applied to the live GPU solver without changing the simulation clock. */
   private announceGPURebuild(operation: string, paneId: PaneId = PRIMARY_PANE_ID) {
@@ -1850,7 +1841,6 @@ class SimulationController {
       else this.setMethodParam(param.methodId, param.key, param.value, paneId);
     }
     if (plan.quality) this.setQuality(plan.quality, paneId);
-    if (plan.methodId) this.setMethod(plan.methodId, paneId);
 
     if (!plan.scene && plan.reload.length === keys.length) return { reload: plan.reload };
     this.session(paneId).runtime.getState().setNotice(keys.length === 1
