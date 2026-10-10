@@ -278,7 +278,8 @@ fn umLaunchJobCount()->u32 {
  if(umCountedJobs!=0u){return umCountedJobCount();}
  return umCertifiedJobCount();
 }
-fn umOrigin(o:UMOwner)->vec3u{return umTileCoord(o.tile)*4u+umCorner(o.lane,4u/o.width)*o.width;}
+// Fine lanes encode their 4³ local cell; coarse and invalid owners have lane 0.
+fn umOrigin(o:UMOwner)->vec3u{return umTileCoord(o.tile)*4u+umCorner(o.lane,4u);}
 ${uniformMixedFacesWGSL}
 `;
   // Transfers read two ownership levels in one shader. Namespace their entire

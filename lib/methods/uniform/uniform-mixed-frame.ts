@@ -747,11 +747,12 @@ export class UniformMixedFrame {
    {
     // Eq. 4: the samples overrule the advected interface before distance,
     // occupancy and pressure read it.
-    this.copyWhole(encoder,this.fields.phiScratch,this.fields.phi);
+    // Reconstruction reads the advected scratch and writes the live field.
+    // Its metric bank then lets redistance update canonical vertices in place.
     this.narrowBandFlip.reconstruct(encoder);
-    this.phiResolve.encode(encoder,this.phiResolveGroups.scratch);
+    this.phiResolve.encode(encoder,this.phiResolveGroups.phi);
    }
-   if(p.redistance!==false){this.narrowBandFlip.redistance(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}else this.copyWhole(encoder,this.fields.phiScratch,this.fields.phi);
+   if(p.redistance!==false){this.narrowBandFlip.redistance(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}
    trace?.phase(encoder,V.phi);flush();
 
    trace?.phase(encoder,V.coupling);
@@ -792,7 +793,12 @@ export class UniformMixedFrame {
    // pressure ownership by the split below.
    // The surface census only feeds the overlay: nothing in the solve reads it.
    if(this.layoutViews){this.surfaceBand.encode(encoder);this.recordStageGrid(encoder,this.surfaceBand.band.buffer,"band");}
-   this.authority.encode(encoder,this.authorityGroup);this.phaseKey=bodies?undefined:extensionKey(p);this.band.encodePrepare(encoder);
+   // The surface-only authority before transfer already wrote these exact
+   // phi, phase and correction values. Transfer/extension/snapshot only read
+   // them; forces overwrite phase only when caching capillary curvature.
+   // A kick skips the earlier authority, so it still needs this build.
+   if(kick||p.surfaceTension>0)this.authority.encode(encoder,this.authorityGroup);
+   this.phaseKey=bodies?undefined:extensionKey(p);this.band.encodePrepare(encoder);
    const split=this.split;
    split.transfer.encodeToPressure(encoder,split.toPressure);
    split.authority.encode(encoder,split.authorityGroup);

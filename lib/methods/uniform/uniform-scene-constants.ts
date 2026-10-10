@@ -1,6 +1,8 @@
-/** Replace scene geometry baked into mixed shaders with the ownership uniform.
- * The first sixteen bytes remain the GPU-updated work counts. Geometry follows
- * them and survives adoption of a new ownership generation. */
+/** Keep physical spacing and work counts in the ownership uniform. Integer
+ * grid dimensions remain specialized: constant division and addressing are
+ * substantially cheaper than runtime integer division in the mixed kernels.
+ * The first sixteen bytes are GPU-updated counts; geometry survives adoption
+ * of a new ownership generation. */
 export function uniformRuntimeConstantsWGSL(code: string, roots: Readonly<Record<string, { type: string; value: string }>>): string {
   const definitions = new Map<string, { type: string; value: string; source: string }>();
   for (const match of code.matchAll(/\bconst\s+(\w+)\s*(?::\s*([^=;]+))?\s*=\s*([^;]+);/g)) {
@@ -31,8 +33,8 @@ export function uniformSceneConstantsWGSL(code: string): string {
       definitions.set(match[1]!, { type: match[2]?.trim() ?? "", value: match[3]!.trim(), source: match[0] });
     }
     const replacements = new Map<string, { type: string; value: string }>();
-    if (definitions.has(`${prefix}UM_D`)) replacements.set(`${prefix}UM_D`, { type: "vec3u", value: `${name}.dimensions.xyz` });
-    if (definitions.has(`${prefix}UM_TILES`)) replacements.set(`${prefix}UM_TILES`, { type: "u32", value: `${name}.dimensions.w` });
+    if (definitions.has(`${prefix}UM_D`)) replacements.set(`${prefix}UM_D`, { type: "vec3u", value: definitions.get(`${prefix}UM_D`)!.value });
+    if (definitions.has(`${prefix}UM_TILES`)) replacements.set(`${prefix}UM_TILES`, { type: "u32", value: definitions.get(`${prefix}UM_TILES`)!.value });
     if (definitions.has(`${prefix}UM_H`)) {
       const scalar = definitions.get(`${prefix}UM_H`)!.type === "f32";
       replacements.set(`${prefix}UM_H`, { type: scalar ? "f32" : "vec3f", value: `${name}.spacing.${scalar ? "w" : "xyz"}` });

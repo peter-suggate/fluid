@@ -19,7 +19,8 @@ function paperScene(id: string): SceneDescription {
   assert.deepEqual(validateScene(scene), [], id);
   assert.deepEqual(parseScene(serializeScene(scene)).fluid, scene.fluid, id);
   assert.deepEqual(parseScene(serializeScene(scene)).solidVoxels, scene.solidVoxels, id);
-  assert.deepEqual(definition.methodProfile, NBFLIP_METHOD_PROFILE, id);
+  assert.deepEqual(definition.methodProfile, id === NBFLIP_TEASER_SCENE_ID
+    ? { ...NBFLIP_METHOD_PROFILE, overrides: {} } : NBFLIP_METHOD_PROFILE, id);
   assert.ok(lattice(scene).every((cells) => cells % 4 === 0), `${id}: the method's tiles are four cells wide`);
   assert.equal(scene.container.top, "closed");
   assert.equal(scene.container.fluidWallMode, "free-slip");
@@ -43,8 +44,10 @@ test("NB-FLIP Figure 9 stands the published 200^3 box behind solid, with seven c
   const scene = paperScene(NBFLIP_TEASER_SCENE_ID), margin = (NBFLIP_TEASER_LATTICE[0] - NBFLIP_TEASER_GRID[0]) / 2;
   assert.deepEqual(NBFLIP_TEASER_GRID, [200, 200, 200]);
   assert.deepEqual(lattice(scene), [...NBFLIP_TEASER_LATTICE]);
-  assert.ok(Math.abs(fall(scene) - 0.6) < 1e-12, "mantaflow: 0.003 x 200");
-  assert.equal(scene.numerics.fixedDt_s, 1 / 24);
+  assert.ok(Math.abs(fall(scene) - 0.6 * (24 / 60) ** 2) < 1e-12, "the footage's physical scale at 60 Hz");
+  assert.equal(scene.numerics.fixedDt_s, 1 / 60);
+  assert.equal(scene.numerics.maxDt_s, 1 / 60);
+  assert.equal(scene.duration_s, 248 * (1 / 24), "the physical take duration is unchanged");
   // The liquid's box is the published grid: solid begins exactly outside it.
   for (const y of [0, 100, 199]) {
     assert.ok(solid(scene, [margin - 1, y, 112]) && !solid(scene, [margin, y, margin]));

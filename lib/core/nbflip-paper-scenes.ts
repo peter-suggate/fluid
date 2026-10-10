@@ -462,6 +462,9 @@ export const nbflipTeaserCylinderCentre = (index: number): readonly [x: number, 
 export function createNbflipTeaser(): SceneDescription {
   const grid = NBFLIP_TEASER_GRID, h = NBFLIP_TEASER_CELL_SIZE_M, [damX, damY, damZ] = NBFLIP_TEASER_DAM_CELLS;
   const scene = nbflipDomain(NBFLIP_TEASER_SCENE_ID, grid, h, NBFLIP_TEASER_FRAMES, NBFLIP_TEASER_POOL_CELLS, NBFLIP_TEASER_LATTICE);
+  // Run at the UI's 60 Hz step. The footage still defines physical scale and
+  // take duration; increasing the sampling rate does not shorten the take.
+  scene.numerics = { ...scene.numerics, fixedDt_s: 1 / 60, maxDt_s: 1 / 60 };
   const [marginX, marginZ] = latticeMargin(grid, NBFLIP_TEASER_LATTICE);
   scene.fluid.initialLiquidVolumes = [liquidBox(grid, h, [0, NBFLIP_TEASER_POOL_CELLS, 0], [damX, damY, damZ])];
   for (let index = 0; index < NBFLIP_TEASER_CYLINDER_COUNT; index++) {

@@ -36,11 +36,11 @@ fn ueCompiledNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)
  if(width==4u){
   // A non-direct 4h request lies on an h face plane. Its transverse
   // coordinates are integers: four h patches meet at the requested point.
-  for(var k=0u;k<4u;k++){
+  ${[0,1,2,3].map(k=>`{
    var anchor=vec3i(point);anchor[component]=plane-1;
-   anchor[u]+=select(-1,0,(k&1u)!=0u);anchor[v]+=select(-1,0,(k&2u)!=0u);
-   candidates[k]=vec4i(anchor,1);
-  }
+   anchor[u]+=select(-1,0,(${k}u&1u)!=0u);anchor[v]+=select(-1,0,(${k}u&2u)!=0u);
+   candidates[${k}]=vec4i(anchor,1);
+  }`).join("\n")}
   n=4u;
  }else if((plane&3)==0){
   // A non-direct unit request on a 4h plane names one coarse patch.
@@ -51,28 +51,31 @@ fn ueCompiledNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)
   // bounding face is either one coarse patch or the h patch at this column.
   let tile=min(vec3u(point),UM_D-vec3u(1))/4u;let origin=vec3i(tile*4u);
   let fine=umFineFaceSides(umTileAt(tile));
-  for(var side=0u;side<2u;side++){
-   let code=2u*component+1u-side;let patchWidth=select(4,1,(fine&(1u<<code))!=0u);
-   var anchor=origin;anchor[component]+=select(-1,3,side!=0u);
+  ${[0,1].map(side=>`{
+   let code=2u*component+1u-${side}u;let patchWidth=select(4,1,(fine&(1u<<code))!=0u);
+   var anchor=origin;anchor[component]+=select(-1,3,${side}u!=0u);
    anchor[u]+=(i32(floor(point[u]))-origin[u])/patchWidth*patchWidth;
    anchor[v]+=(i32(floor(point[v]))-origin[v])/patchWidth*patchWidth;
-   candidates[side]=vec4i(anchor,patchWidth);
-  }
+   candidates[${side}]=vec4i(anchor,patchWidth);
+  }`).join("\n")}
   n=2u;
  }
  var spatials:array<f32,4>;var slots:array<vec2f,4>;var nearest=UM_INF;
- for(var i=0u;i<n;i++){
-  spatials[i]=UM_INF;let face=candidates[i];
+ // Constant indices let the compiler keep each candidate in registers. Keep
+ // candidate visits and the two ordered reductions identical to the loop.
+ ${[0,1,2,3].map(i=>`if(${i}u<n){
+  spatials[${i}]=UM_INF;let face=candidates[${i}];
   var location=vec3f(face.xyz)+vec3f(0.5*f32(face.w));location[component]=f32(face[component]+1);
   let delta=(location-center)*h.xyz;
-  if(abs(location[step]-center[step])<1e-5){continue;}
-  spatials[i]=dot(delta,delta);slots[i]=umSlotState(face.xyz,component,u32(face.w));nearest=min(nearest,spatials[i]);
- }
+  if(!(abs(location[step]-center[step])<1e-5)){
+   spatials[${i}]=dot(delta,delta);slots[${i}]=umSlotState(face.xyz,component,u32(face.w));nearest=min(nearest,spatials[${i}]);
+  }
+ }`).join("\n")}
  if(nearest>=0.5*UM_INF){return UMNeighbor(0,UM_INF,1);}
  var distance=UM_INF;
- for(var i=0u;i<n;i++){if(spatials[i]<=nearest*(1.0+1e-5)){distance=min(distance,slots[i].y);}}
+ ${[0,1,2,3].map(i=>`if(${i}u<n){if(spatials[${i}]<=nearest*(1.0+1e-5)){distance=min(distance,slots[${i}].y);}}`).join("\n")}
  var sum=0.0;var count=0.0;
- for(var i=0u;i<n;i++){if(spatials[i]<=nearest*(1.0+1e-5)&&abs(slots[i].y-distance)<=1e-6*max(1.0,distance)){sum+=slots[i].x;count+=1.0;}}
+ ${[0,1,2,3].map(i=>`if(${i}u<n){if(spatials[${i}]<=nearest*(1.0+1e-5)&&abs(slots[${i}].y-distance)<=1e-6*max(1.0,distance)){sum+=slots[${i}].x;count+=1.0;}}`).join("\n")}
  return UMNeighbor(select(0.0,sum/count,count>0.0),distance,sqrt(nearest));
 }
 `;

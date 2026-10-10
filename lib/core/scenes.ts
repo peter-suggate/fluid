@@ -1804,7 +1804,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "study",
     shelf: "Paper figures",
     environment: "stage",
-    methodProfile: NBFLIP_METHOD_PROFILE,
+    methodProfile: { ...NBFLIP_METHOD_PROFILE, overrides: {} },
     build: createNbflipTeaser,
     camera: nbflipTeaserCamera(),
   }),

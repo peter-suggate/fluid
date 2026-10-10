@@ -47,6 +47,24 @@ function owner(l:UniformMixedLayout,p:V){
  const local=p.map(v=>Math.floor((v%4)/width));const lane=local[0]!+n*(local[1]!+n*local[2]!);
  return {tile,width,lane,index:(word&0x3fffffff)+lane,origin:p.map(v=>v-v%width) as V};
 }
+test("all h/4h owner origins decode with a fixed four-cell local side",()=>{
+ const l=layout([8,4,4],new Uint8Array([1,4])),states=new Set<string>();
+ const origin=(tile:number,lane:number):V=>{
+  const d=l.tileDimensions,t:V=[tile%d[0],Math.floor(tile/d[0])%d[1],Math.floor(tile/(d[0]*d[1]))];
+  return [4*t[0]+(lane&3),4*t[1]+((lane>>2)&3),4*t[2]+(lane>>4)];
+ };
+ // Every point in both tiles exercises the independent geometric owner
+ // oracle, including the 64 points that all resolve to one coarse owner.
+ for(let z=0;z<4;z++)for(let y=0;y<4;y++)for(let x=0;x<8;x++){
+  const o=owner(l,[x,y,z])!;states.add(`${o.width}/${o.lane}`);
+  assert.deepEqual(origin(o.tile,o.lane),o.origin,`owner at ${x},${y},${z}`);
+  assert.ok(o.width===1||o.width===4&&o.lane===0);
+ }
+ assert.equal(states.size,65);
+ // The WGSL out-of-domain lookup returns the zero-initialized UMOwner.
+ assert.equal(owner(l,[-1,0,0]),undefined);assert.equal(owner(l,[8,0,0]),undefined);
+ assert.deepEqual(origin(0,0),[0,0,0]);
+});
 function reference(l:UniformMixedLayout,p:V){
  let best:ReturnType<typeof owner>;
  for(let k=0;k<8;k++){

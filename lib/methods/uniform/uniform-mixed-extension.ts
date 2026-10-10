@@ -16,7 +16,7 @@ function farValueWGSL(name:string,state:string,lower:string,upper:string):string
  return /* wgsl */`fn ${name}(face:UMFace)->f32{
  let point=umFaceCenter(face);var q=point/4.0-vec3f(0.5);q[face.axis]-=0.5;
  let base=vec3i(floor(q));let fraction=fract(q);var distances:array<f32,8>;var values:array<f32,8>;var best=UM_INF;
- for(var k=0u;k<umCounts.w;k++){
+ for(var k=0u;k<8u;k++){
   distances[k]=UM_INF;let bit=vec3i(umCorner(k,2u));let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));if(any(weights<=vec3f(0))){continue;}
   let p=clamp(base+bit,vec3i(0),ueFarTop(face.axis));let state=${state};
   if((u32(round(state.w))&(1u<<face.axis))==0u){continue;}
@@ -27,7 +27,7 @@ function farValueWGSL(name:string,state:string,lower:string,upper:string):string
   best=min(best,distance);distances[k]=distance;values[k]=state[face.axis];
  }
  var sum=0.0;var count=0.0;
- for(var k=0u;k<umCounts.w;k++){if(distances[k]<0.5*UM_INF&&abs(distances[k]-best)<=1e-6*max(1.0,best)){sum+=values[k];count+=1.0;}}
+ for(var k=0u;k<8u;k++){if(distances[k]<0.5*UM_INF&&abs(distances[k]-best)<=1e-6*max(1.0,best)){sum+=values[k];count+=1.0;}}
  return select(0.0,sum/count,count>0.0);
 }
 `;
@@ -973,6 +973,7 @@ fn umFarValueStaged(face:UMFace)->f32{
 }
 // Bit a set: the tile's in-domain staged cells differ in component a.
 var<workgroup> farMixed:atomic<u32>;
+var<workgroup> farRequired:u32;
 // When every staged cell of a component holds one state, each tap umFarValueStaged
 // keeps has the same box and value: its distances are equal (all tie), or all
 // infinite. Its result is then this same k-ordered sum over the kept taps.
@@ -994,6 +995,22 @@ fn umPublished(face:UMFace)->f32{
 fn uePublishFine(owner:UMOwner,lane:u32){
  if(lane==0u){farTile=select(UM_TILES,owner.tile,owner.width!=0u);atomicStore(&farMixed,0u);}
  if(workgroupUniformLoad(&farTile)>=UM_TILES){return;}
+ // Resolve seeded and wall faces before preparing the distant-source cache.
+ // Many h tiles already have every component: they publish these exact
+ // values without loading or decoding the 27-cell fallback neighborhood.
+ let origin=umOrigin(owner);var value=vec4f(0);var needsFar=0u;
+ for(var axis=0u;axis<3u;axis++){
+  if(origin[axis]==0u){let face=umUnitExtensionFace(owner,axis,-1);boundary[umNegativeBoundaryIndex(origin,axis)]=umPhysical(face);}
+  let face=umUnitExtensionFace(owner,axis,1);${this.regularBulk?"let slot=select(vec2f(0,UM_INF),vec2f(umPhysical(face),0),umSource(face,owner));":"let slot=select(vec2f(0.0,UM_INF),stateIn[ueOwnSlot(owner,axis)],(umTileSupport(owner.tile)&2u)!=0u);"}
+  if(umClosedWall(face)){value[axis]=umPhysical(face);}
+  else if(slot.y<0.5*UM_INF){value[axis]=slot.x;}
+  else{needsFar|=1u<<axis;}
+ }
+ if(needsFar!=0u){atomicOr(&farMixed,needsFar);}
+ workgroupBarrier();
+ if(lane==0u){farRequired=atomicLoad(&farMixed);atomicStore(&farMixed,0u);}
+ let required=workgroupUniformLoad(&farRequired);
+ if(required==0u){value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);return;}
  for(var item=lane;item<81u;item+=64u){
   let cell=item/3u;let axis=item%3u;
   let p=vec3i(umTileCoord(farTile))+vec3i(umCorner(cell,3u))-vec3i(1);
@@ -1022,13 +1039,10 @@ fn uePublishFine(owner:UMOwner,lane:u32){
  }
  workgroupBarrier();
  let mixed=atomicLoad(&farMixed);
- let origin=umOrigin(owner);var value=vec4f(0);
  for(var axis=0u;axis<3u;axis++){
-  if(origin[axis]==0u){let face=umUnitExtensionFace(owner,axis,-1);boundary[umNegativeBoundaryIndex(origin,axis)]=umPhysical(face);}
-  let face=umUnitExtensionFace(owner,axis,1);${this.regularBulk?"let slot=select(vec2f(0,UM_INF),vec2f(umPhysical(face),0),umSource(face,owner));":"let slot=select(vec2f(0.0,UM_INF),stateIn[ueOwnSlot(owner,axis)],(umTileSupport(owner.tile)&2u)!=0u);"}
-  if(umClosedWall(face)){value[axis]=umPhysical(face);}
-  else if(slot.y<0.5*UM_INF){value[axis]=slot.x;}
-  else if((mixed&(1u<<axis))==0u){value[axis]=umFarValueUniform(face,farState[13u][axis],farLo[39u+axis].w>=0.0);}
+  if((needsFar&(1u<<axis))==0u){continue;}
+  let face=umUnitExtensionFace(owner,axis,1);
+  if((mixed&(1u<<axis))==0u){value[axis]=umFarValueUniform(face,farState[13u][axis],farLo[39u+axis].w>=0.0);}
   else{value[axis]=umFarValueStaged(face);}
  }
  value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);

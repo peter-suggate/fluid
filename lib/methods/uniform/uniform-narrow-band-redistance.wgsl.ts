@@ -1,5 +1,6 @@
 /** Reuse the reconstructed surface's bounded crossing search for redistance
- * and particle membership. Vertex signs stay fixed so the crossing-cell cache remains valid.
+ * and particle membership. Canonical vertex signs stay fixed; adaptive coarse
+ * interpolation still needs the final crossing search.
  * Fixed-band coarse values remain advected surface samples. Adaptive coarse
  * vertices beside retiring h owners recover metric magnitudes before handoff. */
 export const narrowBandRedistanceWGSL=/* wgsl */`
@@ -133,6 +134,17 @@ fn nbInterfaceVertex(p:vec3u)->bool{
  // A vertex touching a crossing cell (its bit in the tile mask)
  // any such cell determines its interpolated zero set: changing its magnitude
  // would move that surface even if its sign stayed fixed.
+ let local=p&vec3u(3u);
+ if(all(local!=vec3u(0u))){
+  // Interior vertices touch one tile only. Test all incident cells with one
+  // mask load, or two when the z pair crosses the packed word boundary.
+  let x=(1u<<local.x)|(1u<<(local.x-1u));
+  let xy=(x<<(4u*local.y))|(x<<(4u*(local.y-1u)));
+  let at=NB_BAND_MASK+2u*nbBandTile(p);
+  if(local.z==2u){return (((atomicLoad(&bins[at])>>16u)|atomicLoad(&bins[at+1u]))&xy)!=0u;}
+  let bits=atomicLoad(&bins[at+(local.z>>1u)]);
+  return (bits&(xy|(xy<<16u)))!=0u;
+ }
  for(var k=0u;k<8u;k++){
   let c=vec3i(p)-vec3i(umCorner(k,2u));
   if(any(c<vec3i(0))||any(c>=vec3i(UM_D))){continue;}
@@ -142,18 +154,25 @@ fn nbInterfaceVertex(p:vec3u)->bool{
 }
 fn nbRedistanceVertex(p:vec3u,width:u32){
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- // Coarse samples normally retain their reconstructed values.
- var value=umSampleVertex(vec3f(p));
  // Before retiring adjacent h owners, recover the metric coarse samples.
  // Particle sphere unions preserve their fine zero set but distort interior
  // magnitudes; inheriting those magnitudes as a 4h chord moves a flat surface.
  let retiring=nbAdaptive()&&width==4u&&nbSurfaceTheta(vec3f(p))<=0.0&&umTileMinimumWidth(umTileAt(min(p,UM_D-1u)/4u))==1u;
- if((width==1u&&!nbInterfaceVertex(p))||retiring){
-  // An h vertex past the reach has no crossing within three tiles: as the
-  // metric field holds one with none near, at least six cells away.
-  if((nbBandReach(min(p,UM_D-1u))&2u)!=0u){value=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+nbVertexIndex(p)]))*h;}
-  else if(abs(value)>1e-8){value=sign(value)*max(abs(value),6.0*h);}
+ let normalize=(width==1u&&!nbInterfaceVertex(p))||retiring;
+ // The metric replacement needs no sample of the old field. Keep its exact
+ // multiply, and read phi only where the reconstructed value is consumed.
+ if(normalize&&(nbBandReach(min(p,UM_D-1u))&2u)!=0u){
+  let value=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+nbVertexIndex(p)]))*h;
+  textureStore(outputPhi,vec3i(p),vec4f(value));return;
  }
+ // Coarse/interface samples retain their reconstructed values. Past reach,
+ // preserve the old field's sign and its minimum six-cell magnitude.
+ // Every dispatched vertex is canonical and has one writer. The metric
+ // bank was completed before this pass, so only this vertex's old value is
+ // needed. Coarse dispatches bind its base home; fine ones its resident h
+ // home. No neighbor can be read while another invocation overwrites it.
+ var value=textureLoad(outputPhi,vec3i(p)).x;
+ if(normalize&&abs(value)>1e-8){value=sign(value)*max(abs(value),6.0*h);}
  textureStore(outputPhi,vec3i(p),vec4f(value));
 }
 @compute @workgroup_size(128) fn redistanceFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){

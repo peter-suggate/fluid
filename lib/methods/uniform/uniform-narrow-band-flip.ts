@@ -116,7 +116,8 @@ export class UniformNarrowBandFlip {
    ...[0,1,2,3,4,5].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:(binding===5?"read-only-storage":"storage") as GPUBufferBindingType}})),
    {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    ...[7,8,10,11,15].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
-   ...[12,13,14].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"r32float" as const,viewDimension:"3d" as const}})),
+   ...[12,13].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"r32float" as const,viewDimension:"3d" as const}})),
+   {binding:14,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write",format:"r32float",viewDimension:"3d"}},
    {binding:9,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},
    ...(sourceParams?[{binding:16,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
   ]});
@@ -133,15 +134,15 @@ export class UniformNarrowBandFlip {
   // first layout, and the frame binds its stages again when capacity grows.
   const unit=this.stageTaps?.unit??f.hanging.createTaps("Narrow-band FLIP stage unit taps");
   this.stageTaps={builder:f.hanging,unit,group:f.hanging.bind({extended:f.velocityScratch,negative:f.negativeScratch,coarse:this.coarseVelocity},unit)};
-  for(const [name,velocity,negative,output] of [["bootstrap",f.velocityScratch,f.negativeScratch,f.departure],["advectParticles",f.velocityScratch,f.negativeScratch,f.departure],["seed",f.departure,f.negativeDeparture,f.velocityScratch],["transfer",f.departure,f.negativeDeparture,f.velocity],["snapshot",f.velocityScratch,f.negativeScratch,f.departure],["surface",f.velocity,f.negative,f.departure],["redistance",f.velocity,f.negative,f.departure],["update",f.velocityScratch,f.negativeScratch,f.departure]] as const){
+  for(const [name,velocity,negative,output] of [["bootstrap",f.velocityScratch,f.negativeScratch,f.departure],["advectParticles",f.velocityScratch,f.negativeScratch,f.departure],["seed",f.departure,f.negativeDeparture,f.velocityScratch],["transfer",f.departure,f.negativeDeparture,f.velocity],["snapshot",f.velocityScratch,f.negativeScratch,f.departure],["surface",f.velocity,f.negative,f.departure],["reconstruct",f.velocity,f.negative,f.departure],["redistance",f.velocity,f.negative,f.departure],["redistanceStore",f.velocity,f.negative,f.departure],["update",f.velocityScratch,f.negativeScratch,f.departure]] as const){
    this.cacheGroups[name]=this.cache.bind({extended:velocity,negative,coarseExtended:this.coarseVelocity});
    this.groups[name]=[0,1].map(parity=>uniformDetailGroup(this.device,{layout:this.resources,entries:[
     {binding:0,resource:{buffer:this.particles[parity]!}},{binding:1,resource:{buffer:this.particles[1-parity]!}},
     {binding:2,resource:{buffer:this.bins}},{binding:3,resource:{buffer:this.next}},{binding:4,resource:{buffer:this.state}},
     {binding:5,resource:{buffer:negative}},{binding:6,resource:{buffer:this.params}},
-    {binding:7,resource:name==="redistance"?f.phiScratch:f.phi},{binding:8,resource:velocity},{binding:9,resource:output},
+    {binding:7,resource:name==="reconstruct"||name==="redistanceStore"?f.phiScratch:f.phi},{binding:8,resource:velocity},{binding:9,resource:output},
     {binding:10,resource:name==="advectParticles"?f.coarseExtended:this.coarseVelocity},
-    {binding:11,resource:name==="snapshot"||name==="update"?unit:f.unitExtended},{binding:12,resource:this.surfaceSource.vertexPhi},{binding:13,resource:this.surfaceSource.openFraction},{binding:14,resource:name==="redistance"?f.phi:f.phiScratch},
+    {binding:11,resource:name==="snapshot"||name==="update"?unit:f.unitExtended},{binding:12,resource:this.surfaceSource.vertexPhi},{binding:13,resource:this.surfaceSource.openFraction},{binding:14,resource:name==="reconstruct"||name==="redistanceStore"?f.phi:f.phiScratch},
     {binding:15,resource:f.phase},
     ...(this.sourceParams?[{binding:16,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
    ]})) as [UniformDetailGroup,UniformDetailGroup];
@@ -236,7 +237,7 @@ struct Params{hDt:vec4f,settings:vec4f,activity:vec4f}
 @group(1) @binding(11) var unitVelocity:texture_3d<f32>;
 @group(1) @binding(12) var surfacePhi:texture_storage_3d<r32float,write>;
 @group(1) @binding(13) var surfaceOpen:texture_storage_3d<r32float,write>;
-@group(1) @binding(14) var outputPhi:texture_storage_3d<r32float,write>;
+@group(1) @binding(14) var outputPhi:texture_storage_3d<r32float,read_write>;
 @group(1) @binding(15) var phase:texture_3d<f32>;
 // The spatial order leaves the samples sorted by cell, a tile's 64 cells
 // together and x fastest inside it. A cell's samples are one contiguous run
@@ -756,7 +757,10 @@ ${narrowBandSurfaceWGSL}
   pass.setBindGroup(0,this.ownership.bindGroup);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
   let bound:GPUBindGroup|undefined;
   for(const entry of entries){
-  const group=this.groups[groupName??(entry.startsWith("resample")?"update":entry==="markParticleTiles"||entry==="surfaceCells"||entry==="surfaceSplat"||entry==="diagnoseBefore"||entry==="buildDistance"||entry.startsWith("depth")?"surface":entry.startsWith("transfer")||entry==="classify"?"transfer":entry==="couple"||entry==="coupleFine"||entry==="commitCount"?"surface":entry)]![this.parity]!.group;
+  const binding=this.groups[groupName??(entry.startsWith("redistance")?"redistanceStore":entry.startsWith("resample")?"update":entry==="markParticleTiles"||entry==="surfaceCells"||entry==="surfaceSplat"||entry==="diagnoseBefore"||entry==="buildDistance"||entry.startsWith("depth")?"surface":entry.startsWith("transfer")||entry==="classify"?"transfer":entry==="couple"||entry==="coupleFine"||entry==="commitCount"?"surface":entry)]![this.parity]!;
+  // In-place redistance reads its own canonical texel: coarse vertices
+  // always read the base home, including those outside the resident h ring.
+  const group=entry==="redistanceCoarse"?binding.base:binding.group;
   if(group!==bound){pass.setBindGroup(1,group);bound=group;}
   const selected=this.pipelines.get(entry)!;
   const pipeline=this.solid?.select(selected)??selected;
@@ -832,10 +836,10 @@ ${narrowBandSurfaceWGSL}
   encoder.copyBufferToBuffer(importance.buffer,importance.offset,this.bins,this.activityWord*4,tiles*8);
   this.dispatchBatch(encoder,["activity","activitySpread"],"bootstrap","activity");
  }
- reconstruct(encoder:GPUCommandEncoder):void{this.bandCurrent=false;this.measureBand(encoder);if(this.measureTraces)this.dispatch(encoder,"diagnoseBefore");
+ reconstruct(encoder:GPUCommandEncoder):void{this.bandCurrent=false;this.measureBand(encoder,"reconstruct");if(this.measureTraces)this.dispatch(encoder,"diagnoseBefore","reconstruct");
   const cells=this.ownership.capacity.lattice.dimensions.reduce((a,b)=>a*b,1),vertices=this.ownership.capacity.lattice.dimensions.reduce((a,b)=>a*(b+1),1);
   encoder.clearBuffer(this.bins,(2*cells+2*this.ownership.capacity.tiles)*4,vertices*4);
-  this.dispatchBatch(encoder,["surfaceCells","surfaceSplat",...(!this.ownership.coarseOnly?["coupleFine"]:[]),"couple"],"surface","surface reconstruction");}
+  this.dispatchBatch(encoder,["surfaceCells","surfaceSplat",...(!this.ownership.coarseOnly?["coupleFine"]:[]),"couple"],"reconstruct","surface reconstruction");}
  transfer(encoder:GPUCommandEncoder):void{
   // Classification reads phase and phi. Transfer loads canonical face
   // texels directly in both mixed and all-4h modes; neither samples a cache.
@@ -850,7 +854,7 @@ ${narrowBandSurfaceWGSL}
   * can move a hanging zero when it normalizes coarse corner magnitudes;
   * rebuild its search/metric cache before end-step particle membership. */
  redistance(encoder:GPUCommandEncoder):void{
-  this.measureBand(encoder,"redistance");this.dispatchBatch(encoder,["buildDistance",...(!this.ownership.coarseOnly?["redistanceFine"]:[]),"redistanceCoarse"],"redistance","redistance");this.bandCurrent=!this.adaptive;
+  this.measureBand(encoder,"redistance");this.dispatchBatch(encoder,["buildDistance",...(!this.ownership.coarseOnly?["redistanceFine"]:[]),"redistanceCoarse"],undefined,"redistance");this.bandCurrent=!this.adaptive;
  }
  private measureBand(encoder:GPUCommandEncoder,group?:string):void{
   // The search's tile banks follow the cell and vertex banks: counts, masks and reach start clear.
