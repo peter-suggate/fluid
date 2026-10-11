@@ -109,12 +109,17 @@ export function uniformStageGridWords(tiles: number): number {
 
 /** Word offset from the header of a view section (after the band bits). */
 export function uniformStageViewWord(tiles: number, section: "previous" | "reasons" | "certificate" | "importance"): number {
-  return UNIFORM_STAGE_GRID_HEADER_WORDS + 2 * tiles + Math.ceil(tiles / 32) + ["previous", "reasons", "certificate", "importance"].indexOf(section) * tiles;
+  return UNIFORM_STAGE_GRID_HEADER_WORDS + 2 * tiles + Math.ceil(tiles / 32) + (section === "previous" ? 0 : section === "reasons" ? 1 : section === "certificate" ? 2 : 3) * tiles;
 }
 
+/** The header words, for a queue write (which copies them): one array,
+ * rewritten in place by the next call. Read-only to the caller. */
 export function uniformStageGridHeader(tiles: number, bandTiles: number, views = 0): Uint32Array<ArrayBuffer> {
-  return new Uint32Array([UNIFORM_STAGE_GRID_MAGIC, tiles, 0, Math.ceil(tiles / 32), bandTiles, views, 0, 0]);
+  const header = STAGE_GRID_HEADER;
+  header[0] = UNIFORM_STAGE_GRID_MAGIC; header[1] = tiles; header[2] = 0; header[3] = (tiles + 31) >>> 5; header[4] = bandTiles; header[5] = views; header[6] = 0; header[7] = 0;
+  return header;
 }
+const STAGE_GRID_HEADER = new Uint32Array(8);
 
 /** Readers over `buffer: array<u32>`, which ends with the record. Needs the
  * presentation topology helpers (umTileCount, umTileAt, umDimensions,

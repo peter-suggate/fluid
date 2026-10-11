@@ -42,9 +42,13 @@ fn umLatchFailure(cause:u32,a:u32,b:u32){
 `;
 }
 
-/** The host's reading of a copied record: undefined when healthy. */
+/** The host's reading of a copied record: undefined when healthy. The
+ * description is its own function: one holding a closure allocates that
+ * closure's context at every entry, and the healthy read runs every frame. */
 export function describeUniformMixedFrameStatus(words:Uint32Array):string|undefined{
- const cause=words[0]!;if(cause===0)return undefined;
+ const cause=words[0]!;return cause===0?undefined:describeFailure(words,cause);
+}
+function describeFailure(words:Uint32Array,cause:number):string{
  const f=new Float32Array(words.buffer,words.byteOffset,words.length);
  const detail=cause===1||cause===3?`candidate ${f[3]}, accepted ${f[4]}`:cause===2?`accepted ${f[3]} after ${words[4]} cycles`:cause===4?`${words[3]} tiles`:cause===6||cause===7?relayoutDetail(words[3]!,words[4]!):`detail ${words[3]} ${words[4]}`;
  const all=Array.from({length:31},(_,i)=>i+1).filter(i=>words[5]!&(1<<i)&&i!==cause).map(i=>CAUSE_NAMES[i]??`cause ${i}`);

@@ -753,6 +753,13 @@ export class WebGPURigidBodySystem {
   }
 
   syncBodies(bodies: readonly RigidBodyState[]) {
+    // No body held and none given: the signatures are empty on both sides, so
+    // a scene without bodies builds none of them each step. The upload is its
+    // own function: its closures would cost this one a context on every call.
+    if (bodies.length === 0 && this.bodyIds.length === 0) return;
+    this.uploadBodies(bodies);
+  }
+  private uploadBodies(bodies: readonly RigidBodyState[]) {
     const active = bodies.slice(0, GPU_RIGID_BODY_CAPACITY);
     const ids = active.map((body) => body.description.id);
     const structural = active.map((body) => JSON.stringify([body.description.shape,body.description.dimensions_m,body.description.density_kg_m3,body.description.restitution,body.description.friction,body.description.motion]));

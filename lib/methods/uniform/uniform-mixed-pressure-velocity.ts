@@ -37,6 +37,9 @@ export interface UniformMixedPressureProjectionFields extends CommonFields {
  topology?:GPUTexture;
 }
 
+/** The stage's passes, described once. */
+const RHS_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure rhs"};
+const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure project"};
 /** Pressure/velocity coupling on exactly the same canonical patches as the
  * mixed matrix. With static solids, fine owners use the native CM11a face V,
  * p_min=0 solid rows and embedded contact release; the RHS pass publishes the
@@ -59,8 +62,11 @@ export class UniformMixedPressureVelocity {
  private readonly projectLayout:GPUBindGroupLayout;
  private rhsPipeline?:GPUComputePipeline;
  private projectPipeline?:GPUComputePipeline;
+ /** Both launches' jobs: the lattice's residency pages. */
+ private readonly pages:number;
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly coarse=false,private readonly rounding?:GPUBuffer){
   if(coarse&&(!solid?.coarse||ownership.layout.tiles.some(word=>(word&0xc0000000)!==0)))throw new Error("Coarse mixed pressure coupling requires the all-4h solid record and all-4h ownership");
+  this.pages=uniformMixedPageCount(ownership.capacity.lattice);
   const texture=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}});
   // Read-write buffer views allow disjoint ranges of the shared arena.
   const storage=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}});
@@ -157,7 +163,13 @@ fn umCutFlux(o:UMOwner,axis:u32,sign:i32)->f32{
   var c=origin;c[a]+=i;c[b]+=j;c[axis]+=select(-1,3,sign>0);
   var u=0.0;
   if(c[axis]<0){u=fineNegative[umNegativeBoundaryIndex(vec3u(max(c,vec3i(0))),axis)];}else{u=textureLoad(fineVelocity,c,0)[axis];}
-  let volume=umPressureFaceV(c,axis);sum+=volume*u;
+  // Every in-domain patch lies on a tile's positive plane, including the
+  // negative face owned by its neighbour. Reuse its exact cached fraction;
+  // uncached fractions fall back inside umPatchFaceV. Negative domain walls
+  // and the disabled-solid variant retain their original boundary rules.
+  var volume=0.0;
+  if(umSolidEnabled()&&c[axis]>=0){volume=umPatchFaceV(umTileAt(vec3u(c)/4u),c,axis);}
+  else{volume=umPressureFaceV(c,axis);}sum+=volume*u;
   // A moving wall's (V_i - V) u_s, V_i the owner-side h cell (divergenceAtWithCapacity).
   if(umBodyCount()>0u){var inner=c;if(sign<0){inner[axis]+=1;}sum+=(umCellOpen(inner)-volume)*umSolidFaceVelocity(c,axis);}
  }}
@@ -322,7 +334,7 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
  }
  encode(encoder:GPUCommandEncoder,entry:"rhs"|"project",group:UniformDetailGroup):void{
   const pipeline=entry==="rhs"?this.rhsPipeline:this.projectPipeline;if(!pipeline)throw new Error("Mixed pressure velocity stage is not initialized");
-  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);// The all-4h ownership's residentAll jobs are its resident pages.
-  this.ownership.dispatchCounted(pass,this.solid?.select(pipeline)??pipeline,uniformMixedPageCount(this.ownership.capacity.lattice));pass.end();
+  const pass=encoder.beginComputePass(entry==="rhs"?RHS_PASS:PROJECT_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);// The all-4h ownership's residentAll jobs are its resident pages.
+  this.ownership.dispatchCounted(pass,this.solid?.select(pipeline)??pipeline,this.pages);pass.end();
  }
 }

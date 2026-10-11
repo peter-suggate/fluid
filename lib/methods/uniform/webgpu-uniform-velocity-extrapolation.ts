@@ -457,16 +457,18 @@ export class WebGPUUniformVelocityExtrapolator {
       || [root.down,root.up].some(t=>t.width!==root.dims[0]||t.height!==root.dims[1]||t.depthOrArrayLayers!==root.dims[2]))
       throw new Error("Mixed extension requires the resident 4h nearest-source hierarchy");
     const hasLower=this.hierarchyLevels.length>2;
+    // Each level's workgroups: fixed with the hierarchy, so the per-frame encode builds nothing.
+    const groups=this.hierarchyLevels.map(level=>level.dims.map(n=>Math.ceil(n/4)) as [number,number,number]);
     return {input:root.down,inputOrigins:root.originsDown,
       output:hasLower?root.up:root.down,outputOrigins:hasLower?root.originsUp:root.originsDown,
       /** Encodes into the caller's compute pass; its group 0 is left rebound. */
       encode:(pass:GPUComputePassEncoder,replay=false)=>{
-        const count=this.hierarchyLevels.length,groups=(level:number)=>this.hierarchyLevels[level]!.dims.map(n=>Math.ceil(n/4)) as [number,number,number];
+        const count=this.hierarchyLevels.length,up=replay?this.mixedReplayGroups:this.hierarchyUpGroups;
         pass.setPipeline(mixed.restrict);
-        for(let level=2;level<tail.level;level++){pass.setBindGroup(0,this.hierarchyDownGroups[level]!);pass.dispatchWorkgroups(...groups(level));}
+        for(let level=2;level<tail.level;level++){const g=groups[level]!;pass.setBindGroup(0,this.hierarchyDownGroups[level]!);pass.dispatchWorkgroups(g[0],g[1],g[2]);}
         if(tail.group){pass.setPipeline(mixed.tail);pass.setBindGroup(0,tail.group);pass.dispatchWorkgroups(1);}
         pass.setPipeline(replay?mixed.replay:mixed.prolong);
-        for(let level=Math.min(tail.level,count-1)-1;level>=1;level--){pass.setBindGroup(0,(replay?this.mixedReplayGroups:this.hierarchyUpGroups)[count-2-level]!);pass.dispatchWorkgroups(...groups(level));}
+        for(let level=Math.min(tail.level,count-1)-1;level>=1;level--){const g=groups[level]!;pass.setBindGroup(0,up[count-2-level]!);pass.dispatchWorkgroups(g[0],g[1],g[2]);}
       }};
   }
 

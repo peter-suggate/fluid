@@ -14,6 +14,16 @@ export function planGPUAdvance(requestedTime_s: number, currentTime_s: number, m
   return { dt_s, nextTime_s, lag_s: Math.max(0, requestedTime_s - nextTime_s) };
 }
 
+/** planGPUAdvance into a plan the caller owns (an advance every frame builds
+ * nothing): false where planGPUAdvance returns undefined, the plan untouched. */
+export function planGPUAdvanceInto(plan: GPUAdvancePlan, requestedTime_s: number, currentTime_s: number, maximumDt_s: number): boolean {
+  if (requestedTime_s <= currentTime_s) return false;
+  const dt_s = Math.min(maximumDt_s, requestedTime_s - currentTime_s);
+  const nextTime_s = currentTime_s + dt_s;
+  plan.dt_s = dt_s; plan.nextTime_s = nextTime_s; plan.lag_s = Math.max(0, requestedTime_s - nextTime_s);
+  return true;
+}
+
 export interface TallCellStabilitySignals {
   nonFiniteCount: number;
   pressureRelativeResidual: number;

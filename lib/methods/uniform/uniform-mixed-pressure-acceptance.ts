@@ -31,6 +31,9 @@ fn umCheck(initial:bool){
  let bound=min(${params}.y,max(${params}.z*bitcast<f32>(state[2]),${params}.w));
  state[5]=select(0u,1u,${params}.y>0.0&&bitcast<f32>(candidate)<=bound);
 }`;
+/** The checkpoints' passes, described once. */
+const INITIAL_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure initial checkpoint"};
+const CYCLE_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure cycle checkpoint"};
 /** GPU-only convergence measure: the reduction of a checkpoint's candidate
  * norm, whose verdict (uniformMixedPressureVerdictWGSL) the schedule's next
  * gate runs, and which that gate clears before each open slot. This stage
@@ -48,11 +51,14 @@ export class UniformMixedPressureAcceptance {
  readonly allocatedBytes=0;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
+ /** The reduction's jobs: the lattice's residency pages. */
+ private readonly pages:number;
  /** The receipt each group binds: the reset kernels clear it in the pass. */
  private readonly states=new WeakMap<GPUBindGroup,GPUBuffer>();
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership){
   this.resources=device.createBindGroupLayout({entries:[...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
    {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}}]});
+  this.pages=uniformMixedPageCount(ownership.capacity.lattice);
  }
  bind(f:UniformMixedPressureAcceptanceFields):GPUBindGroup{
   const size=4*uniformMixedPressureStorage(this.ownership.layout).count;
@@ -91,10 +97,10 @@ var<workgroup> maxima:array<u32,64>;
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,state:GPUBuffer,kind:"initial"|"cycle"):void{
   if(this.pipelines.size!==2)throw new Error("Mixed pressure acceptance is not initialized");
   if(this.states.get(group)!==state)throw new Error("Mixed pressure acceptance group does not bind this state");
-  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${kind} checkpoint`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
-  for(const entry of kind==="initial"?["resetInitial","reduce"]:["reduce"]){const pipeline=uniformDetailPick(this.pipelines.get(entry)!);pass.setPipeline(pipeline);
-   if(entry==="reduce")this.ownership.dispatchCounted(pass,pipeline,uniformMixedPageCount(this.ownership.capacity.lattice));else pass.dispatchWorkgroups(1);
-  }
+  const pass=encoder.beginComputePass(kind==="initial"?INITIAL_PASS:CYCLE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
+  if(kind==="initial"){pass.setPipeline(uniformDetailPick(this.pipelines.get("resetInitial")!));pass.dispatchWorkgroups(1);}
+  const reduce=uniformDetailPick(this.pipelines.get("reduce")!);pass.setPipeline(reduce);
+  this.ownership.dispatchCounted(pass,reduce,this.pages);
   pass.end();
  }
 }

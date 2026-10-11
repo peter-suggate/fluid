@@ -29,6 +29,8 @@ export interface UniformMixedForceFields {
   normals?: GPUBufferBinding;
 }
 
+const FORCES_PASS:GPUComputePassDescriptor={label:"Uniform mixed body forces"};
+
 /** Apply native force terms once, after SL or MacCormack resampling. The
  * certified domain has no interior solids. Capillarity uses the same seam
  * reconstruction as pressure; viscosity uses physical local MAC spacing on
@@ -114,7 +116,7 @@ ${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
 // to weigh a capillary force with and no normal to lend a curvature.
 fn umOwnerClosed(owner:UMOwner)->bool{
  if(!umSolidEnabled()){return false;}
- if(owner.width==1u){return umCellOpen(vec3i(umOrigin(owner)))<=1e-5;}
+ if(owner.width==1u){return !umCellIsOpen(vec3i(umOrigin(owner)));}
  return umTileOpen(owner.tile)<=1e-5;
 }
 @group(1) @binding(10) var coarseVelocity:texture_3d<f32>;
@@ -279,23 +281,23 @@ ${uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)").repl
   }
   encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,capillarity=true):void{
     if(!this.pipeline)throw new Error("Mixed forces are not initialized");
-    const pass=encoder.beginComputePass({label:"Uniform mixed body forces"});
+    const pass=encoder.beginComputePass(FORCES_PASS);
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
-    const variant=(p:GPUComputePipeline)=>uniformDetailPick(this.solid?.select(p)??p);
     if(capillarity&&this.curvaturePipeline){
-      this.ownership.dispatchAllCounted(pass,variant(this.normalPipeline!));
-      this.ownership.dispatchAllCounted(pass,variant(this.curvaturePipeline));
+      this.ownership.dispatchAllCounted(pass,this.variant(this.normalPipeline!));
+      this.ownership.dispatchAllCounted(pass,this.variant(this.curvaturePipeline));
     }
-    const [general,fine,coarse]=[this.pipeline,this.regularFinePipeline!,this.regularCoarsePipeline!];
-    this.ownership.dispatchCounted(pass,variant(fine!),this.ownership.capacity.fineTiles,"fine");
+    const general=this.pipeline,fine=this.regularFinePipeline!,coarse=this.regularCoarsePipeline!;
+    this.ownership.dispatchCounted(pass,this.variant(fine),this.ownership.capacity.fineTiles,"fine");
     // A regular 4h owner (a 3x3x3 stencil of 4h tiles) with the cached
     // curvature reads its own and its face neighbours' origins, anchors and
     // corners, and stores its anchors: the base blocks. The inline curvature
     // reads the neighbours' neighbours, which may be h.
     const based=coarse===this.regularCoarsePipeline&&this.cachedCurvature;
     if(based)pass.setBindGroup(1,group.base);
-    this.ownership.dispatchRegularCoarseCounted(pass,variant(coarse!));
+    this.ownership.dispatchRegularCoarseCounted(pass,this.variant(coarse));
     if(based)pass.setBindGroup(1,group.group);
-    this.ownership.dispatchFusedCounted(pass,variant(general!));pass.end();
+    this.ownership.dispatchFusedCounted(pass,this.variant(general));pass.end();
   }
+  private variant(p:GPUComputePipeline):GPUComputePipeline{return uniformDetailPick(this.solid?.select(p)??p);}
 }

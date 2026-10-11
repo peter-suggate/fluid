@@ -235,11 +235,16 @@ export class UniformMixedDynamicClassifier {
  /** One word per tile after the active bits: the band reason
   * (UNIFORM_STAGE_REASON), written by every decide of a census encoded with
   * policy.reasons, and by solid promotion. Undefined content otherwise. */
- get reasons():{readonly buffer:GPUBuffer;readonly offset:number}{return {buffer:this.work,offset:(this.wetOffset+2*this.words)*4};}
+ get reasons():{readonly buffer:GPUBuffer;readonly offset:number}{return this.reasonsView??={buffer:this.work,offset:(this.wetOffset+2*this.words)*4};}
+ /** The views below name fixed buffers and offsets: each is built once. */
+ private reasonsView?:{readonly buffer:GPUBuffer;readonly offset:number};
+ private importanceView?:{readonly buffer:GPUBuffer;readonly offset:number};
+ private bandView?:UniformMixedBandBits;
+ private joinView?:UniformMixedBandBits;
  /** Two words per tile (UNIFORM_STAGE_IMPORTANCE), written by every census.
   * Criteria that are off, and tiles shape alone decides, are scored only by
   * a census encoded with policy.reasons. */
- get importance():{readonly buffer:GPUBuffer;readonly offset:number}{return {buffer:this.work,offset:this.importanceOffset*4};}
+ get importance():{readonly buffer:GPUBuffer;readonly offset:number}{return this.importanceView??={buffer:this.work,offset:this.importanceOffset*4};}
  /** First importance word, after the crossing-cell words. */
  private readonly importanceOffset:number;
  /** setSolid marked a coupled tile: the promotion passes run. */
@@ -264,7 +269,7 @@ export class UniformMixedDynamicClassifier {
  private readonly noSource?:GPUBuffer;
  /** The band decided by the last encode, for the GPU layout builder. Words
   * [0, HEADER) of the buffer are the census header its receipt carries. */
- get bandBits():UniformMixedBandBits{return {buffer:this.work,wordOffset:HEADER,headerWords:HEADER,auditWord:this.nearOffset+this.words};}
+ get bandBits():UniformMixedBandBits{return this.bandView??={buffer:this.work,wordOffset:HEADER,headerWords:HEADER,auditWord:this.nearOffset+this.words};}
  /** source: the host's scene uniform (UMSourceParams prefix ABI, as the
   * mixed frame's sourceParams). decide marks every tile this frame's drop or
   * inflow plug can fill (uvSourcePhi, frame dt dimsDt.w) as band, so the
@@ -1348,7 +1353,33 @@ var<workgroup> compactCounts:array<u32,256>;
  /** The GPU join words: a producer ors one bit per tile (atomicOr) in work
   * submitted before the next census, or encoded before it in its encoder;
   * that census consumes and clears them. */
- joinTarget():UniformMixedBandBits{this.joinLive=true;return {buffer:this.joinTiles,wordOffset:0};}
+ joinTarget():UniformMixedBandBits{this.joinLive=true;return this.joinView??={buffer:this.joinTiles,wordOffset:0};}
+ /** encode's params words, for the queue (which copies them at each write). */
+ private readonly float4=new Float32Array(4);
+ private readonly float8=new Float32Array(8);
+ private readonly uint4=new Uint32Array(4);
+ /** encode's launches in order, with their fixed grids (y 0: one argument).
+  * when: 0 always, 1 a seeded census, 2 one under an activity budget, 3 solids or bodies. */
+ private launches?:readonly {readonly pipeline:GPUComputePipeline;readonly when:0|1|2|3;readonly x:number;readonly y:number}[];
+ private censusLaunches(){
+  const tiles=this.ownership.capacity.tiles,x=this.ownership.dispatchX,t=this.ownership.capacity.lattice.dimensions.map(n=>n/4+1);
+  const launch=(entry:string,when:0|1|2|3)=>{
+   // Fixed grids: classify strides over the h list; classifyCoarse has a
+   // lane per tile, bounded by the 4h count; the rest are lattice-sized.
+   const lines=entry.startsWith("prefix")?[0,1,2].filter(k=>k!==Number(entry.at(-1))).reduce((n,k)=>n*t[k]!,1):entry.startsWith("page")?this.pages:tiles;
+   const pipeline=this.pipelines.get(entry)!,groups=Math.ceil(lines/64);
+   if(entry==="classify")return {pipeline,when,x:Math.min(CENSUS_TILE_GRID,tiles),y:0};
+   if(entry==="pageCompact"||entry==="activityCutoff"||entry==="activityTiePrefix")return {pipeline,when,x:1,y:0};
+   return {pipeline,when,x:Math.min(groups,x),y:Math.ceil(groups/x)};
+  };
+  return [launch("classify",0),launch("classifyCoarse",0),launch("importance",1),...(this.activityBudgetSupported?NARROW_BAND_BUDGET_ENTRIES.map(entry=>launch(entry,2)):[]),
+   launch("prefix0",1),launch("prefix1",1),launch("prefix2",1),...Array.from({length:CUBE_LEVELS},(_,j)=>launch(`cube${j+1}`,1)),
+   launch("decide",0),launch("solidActive",3),launch("solidPromote",3),launch("pageSeed",0),launch("pageMark",0),launch("pageCompact",0)];
+ }
+ private static readonly PASS:GPUComputePassDescriptor={label:"Uniform dynamic ownership census"};
+ /** encode's range checks: the message is built by the failure alone. */
+ private finite(name:string,value:number):void{if(!Number.isFinite(value)||value<0)throw new Error(`Dynamic ownership ${name} must be finite and non-negative: ${value}`);}
+ private distance(name:string,value:number):void{if(!Number.isSafeInteger(value)||value<0||value>UNIFORM_MIXED_DYNAMIC_DISTANCE_CAP)throw new Error(`Dynamic ownership ${name} must be an integer in 0..${UNIFORM_MIXED_DYNAMIC_DISTANCE_CAP}: ${value}`);}
  /** Encode after a completed frame, while its ownership and the local speed
   * velocity (the one the next frame advects with) are still in place. Every
   * launch is a fixed grid bounded on the GPU (umCounts): no host tile count.
@@ -1356,46 +1387,51 @@ var<workgroup> compactCounts:array<u32,256>;
   * host relayout path); without it the census reads nothing back. */
  encode(encoder:GPUCommandEncoder,policy:UniformMixedDynamicPolicy,readback=true):void{
   if(this.pipelines.size!==12+CUBE_LEVELS+(this.activityBudgetSupported?NARROW_BAND_BUDGET_ENTRIES.length:0))throw new Error("Dynamic ownership census is not initialized");
-  for(const [name,value] of Object.entries({dt:policy.dt,fullTolerance:policy.fullTolerance,emptyTolerance:policy.emptyTolerance}))
-   if(!Number.isFinite(value)||value<0)throw new Error(`Dynamic ownership ${name} must be finite and non-negative: ${value}`);
-  for(const [name,value] of Object.entries({reach:policy.reach,hysteresis:policy.hysteresis}))
-   if(!Number.isSafeInteger(value)||value<0||value>UNIFORM_MIXED_DYNAMIC_DISTANCE_CAP)throw new Error(`Dynamic ownership ${name} must be an integer in 0..${UNIFORM_MIXED_DYNAMIC_DISTANCE_CAP}: ${value}`);
-  if(!Number.isFinite(policy.surfaceTolerance)||policy.surfaceTolerance<0)throw new Error(`Dynamic ownership surfaceTolerance must be finite and non-negative: ${policy.surfaceTolerance}`);
-  this.device.queue.writeBuffer(this.params,0,new Float32Array([policy.dt,policy.surfaceTolerance,policy.fullTolerance,policy.emptyTolerance]));
-  if(!Number.isSafeInteger(policy.closedWalls)||policy.closedWalls<0||policy.closedWalls>63)throw new Error(`Dynamic ownership closedWalls must be a 6-bit mask: ${policy.closedWalls}`);
-  if(policy.up!==1&&policy.up!==-1&&policy.up!==0)throw new Error(`Dynamic ownership up must be 1, -1 or 0: ${policy.up}`);
-  this.device.queue.writeBuffer(this.params,16,new Uint32Array([policy.reach,policy.hysteresis,policy.closedWalls,policy.up===1?1:policy.up===-1?2:0]));
-  for(const [name,value] of Object.entries({fastTravel:policy.fastTravel,boundaryTravel:policy.boundaryTravel}))
-   if(!Number.isFinite(value)||value<0)throw new Error(`Dynamic ownership ${name} must be finite and non-negative: ${value}`);
-  if(!Number.isSafeInteger(policy.steps)||policy.steps<1)throw new Error(`Dynamic ownership steps must be a positive integer: ${policy.steps}`);
-  if(policy.gravity.length!==3||!policy.gravity.every(Number.isFinite))throw new Error(`Dynamic ownership gravity must be three finite components: ${policy.gravity}`);
-  const frame=policy.dt/policy.steps;
-  this.device.queue.writeBuffer(this.params,32,new Float32Array([policy.fastTravel,policy.boundaryTravel,policy.steps,policy.reasons?1:0,...policy.gravity.map(g=>g*frame),UNIFORM_MIXED_DYNAMIC_SURFACE_DRIFT]));
+  const queue=this.device.queue,f4=this.float4,f8=this.float8,u4=this.uint4;
+  // Each of the policy's numbers is read once: a read of one is a heap number until this function is optimised.
+  const dt=policy.dt,surfaceTolerance=policy.surfaceTolerance,fullTolerance=policy.fullTolerance,emptyTolerance=policy.emptyTolerance,reach=policy.reach,hysteresis=policy.hysteresis;
+  this.finite("dt",dt);this.finite("fullTolerance",fullTolerance);this.finite("emptyTolerance",emptyTolerance);
+  this.distance("reach",reach);this.distance("hysteresis",hysteresis);
+  if(!Number.isFinite(surfaceTolerance)||surfaceTolerance<0)throw new Error(`Dynamic ownership surfaceTolerance must be finite and non-negative: ${surfaceTolerance}`);
+  f4[0]=dt;f4[1]=surfaceTolerance;f4[2]=fullTolerance;f4[3]=emptyTolerance;queue.writeBuffer(this.params,0,f4);
+  const closedWalls=policy.closedWalls,up=policy.up;
+  if(!Number.isSafeInteger(closedWalls)||closedWalls<0||closedWalls>63)throw new Error(`Dynamic ownership closedWalls must be a 6-bit mask: ${closedWalls}`);
+  if(up!==1&&up!==-1&&up!==0)throw new Error(`Dynamic ownership up must be 1, -1 or 0: ${up}`);
+  u4[0]=reach;u4[1]=hysteresis;u4[2]=closedWalls;u4[3]=up===1?1:up===-1?2:0;queue.writeBuffer(this.params,16,u4);
+  const fastTravel=policy.fastTravel,boundaryTravel=policy.boundaryTravel,steps=policy.steps;
+  this.finite("fastTravel",fastTravel);this.finite("boundaryTravel",boundaryTravel);
+  if(!Number.isSafeInteger(steps)||steps<1)throw new Error(`Dynamic ownership steps must be a positive integer: ${steps}`);
+  const gravity=policy.gravity,gx=gravity[0],gy=gravity[1],gz=gravity[2];
+  if(gravity.length!==3||!Number.isFinite(gx)||!Number.isFinite(gy)||!Number.isFinite(gz))throw new Error(`Dynamic ownership gravity must be three finite components: ${policy.gravity}`);
+  // (One step: the frame is the step, and no quotient is taken.)
+  const frame=steps===1?dt:dt/steps;
+  f8[0]=fastTravel;f8[1]=boundaryTravel;f8[2]=steps;f8[3]=policy.reasons?1:0;f8[4]=gx*frame;f8[5]=gy*frame;f8[6]=gz*frame;f8[7]=UNIFORM_MIXED_DYNAMIC_SURFACE_DRIFT;
+  queue.writeBuffer(this.params,32,f8);
   const importance=policy.importance??LEGACY_IMPORTANCE;
-  for(const [name,value] of Object.entries({thinThickness:importance.thinThickness,strainThreshold:importance.strainThreshold,rotationThreshold:importance.rotationThreshold,approachSteps:importance.approachSteps,retireRatio:importance.retireRatio}))
-   if(!Number.isFinite(value)||value<0)throw new Error(`Dynamic ownership importance ${name} must be finite and non-negative: ${value}`);
+  const thinThickness=importance.thinThickness,strainThreshold=importance.strainThreshold,rotationThreshold=importance.rotationThreshold,approachSteps=importance.approachSteps,retireRatio=importance.retireRatio,holdSteps=importance.holdSteps;
+  this.finite("importance thinThickness",thinThickness);this.finite("importance strainThreshold",strainThreshold);this.finite("importance rotationThreshold",rotationThreshold);
+  this.finite("importance approachSteps",approachSteps);this.finite("importance retireRatio",retireRatio);
   // Thin reads vertices one tile around: phi is a distance there only so far.
-  if(importance.thinThickness>8)throw new Error(`Dynamic ownership importance thinThickness must be at most 8 h: ${importance.thinThickness}`);
-  if(!Number.isSafeInteger(importance.holdSteps)||importance.holdSteps<0)throw new Error(`Dynamic ownership importance holdSteps must be a non-negative integer: ${importance.holdSteps}`);
+  if(thinThickness>8)throw new Error(`Dynamic ownership importance thinThickness must be at most 8 h: ${thinThickness}`);
+  if(!Number.isSafeInteger(holdSteps)||holdSteps<0)throw new Error(`Dynamic ownership importance holdSteps must be a non-negative integer: ${holdSteps}`);
   const surfaceDistance=importance.surfaceDistance??0;
   if(!Number.isSafeInteger(surfaceDistance)||surfaceDistance<0||surfaceDistance>3)throw new Error(`Dynamic ownership surfaceDistance must be an integer in 0..3: ${surfaceDistance}`);
   const activityBudget=importance.activityBudget;
-  if(activityBudget){
-   if(!this.activityBudgetSupported)throw new Error("Activity budget requires an adaptive narrow-band classifier");
-   for(const value of [activityBudget.percent])if(!Number.isFinite(value)||value<0||value>100)throw new Error("Activity budget values must be in 0..100");
-  }
-  const activityPercent=Math.round(activityBudget?.percent??100);
+  if(activityBudget&&!this.activityBudgetSupported)throw new Error("Activity budget requires an adaptive narrow-band classifier");
+  const budgetPercent=activityBudget?activityBudget.percent:100;
+  if(!Number.isFinite(budgetPercent)||budgetPercent<0||budgetPercent>100)throw new Error("Activity budget values must be in 0..100");
+  const activityPercent=Math.round(budgetPercent);
   const activityBudgetOn=!!activityBudget&&activityPercent<100;
-  this.device.queue.writeBuffer(this.params,96,new Uint32Array([activityPercent,0,0,0]));
+  u4[0]=activityPercent;u4[1]=0;u4[2]=0;u4[3]=0;queue.writeBuffer(this.params,96,u4);
   const shapeMetric=importance.shapeMetric??"value";
   if(shapeMetric!=="value"&&shapeMetric!=="displacement")throw new Error(`Dynamic ownership importance shapeMetric must be "value" or "displacement": ${String(shapeMetric)}`);
-  this.device.queue.writeBuffer(this.params,64,new Float32Array([importance.thinThickness,importance.strainThreshold,importance.rotationThreshold,importance.approachSteps]));
+  f4[0]=thinThickness;f4[1]=strainThreshold;f4[2]=rotationThreshold;f4[3]=approachSteps;queue.writeBuffer(this.params,64,f4);
   // A census of requests only (no criterion, hold or layer; joins, sources,
   // solids and bodies remain) requires no tile: decide then reads no table.
-  const seeded=!!policy.reasons||policy.fastTravel>0||importance.holdSteps>0||UNIFORM_DETAIL_CRITERIA.some(name=>importance.criteria[name]);
-  this.device.queue.writeBuffer(this.params,80,new Uint32Array([
-   UNIFORM_DETAIL_CRITERIA.reduce((bits,name,k)=>bits|(importance.criteria[name]?1<<k:0),(importance.bulk?256:0)|(importance.sources===false?0:512)|(seeded?0:1024)|(shapeMetric==="displacement"?2048:0)|(importance.surfaceOnly?4096:0)|(surfaceDistance<<13)|(importance.surfaceAuthority?32768:0)),
-   importance.holdSteps,0xffffffff,Math.min(255,Math.floor(importance.retireRatio*IMPORTANCE.scoreOne))]));
+  let criteria=0;for(let k=0;k<UNIFORM_DETAIL_CRITERIA.length;k++)if(importance.criteria[UNIFORM_DETAIL_CRITERIA[k]!])criteria|=1<<k;
+  const seeded=!!policy.reasons||fastTravel>0||holdSteps>0||criteria!==0;
+  u4[0]=(importance.bulk?256:0)|(importance.sources===false?0:512)|(seeded?0:1024)|(shapeMetric==="displacement"?2048:0)|(importance.surfaceOnly?4096:0)|(surfaceDistance<<13)|(importance.surfaceAuthority?32768:0)|criteria;
+  u4[1]=holdSteps;u4[2]=0xffffffff;u4[3]=Math.min(255,Math.floor(retireRatio*IMPORTANCE.scoreOne));queue.writeBuffer(this.params,80,u4);
   // Cube levels are written wherever decide can read them before it does,
   // classify writes every tile's keys, gap, travel and importance words and
   // importance its prefix entry; only the counters, band bits and wet/active
@@ -1410,19 +1446,16 @@ var<workgroup> compactCounts:array<u32,256>;
   // Host joins upload now, ordered after every earlier submission (and
   // after the census that consumed the last ones); GPU producers or theirs.
   if(this.hostJoin){this.device.queue.writeBuffer(this.joinTiles,this.words*4,this.hostJoin);this.hostJoin=undefined;this.joinLive=true;}
-  const tiles=this.ownership.capacity.tiles,x=this.ownership.dispatchX,t=this.ownership.capacity.lattice.dimensions.map(n=>n/4+1);
   // One pass: every dispatch is its own usage scope, so each reads what
   // the earlier ones wrote.
-  const pass=encoder.beginComputePass({label:"Uniform dynamic ownership census"});
+  const launches=this.launches??=this.censusLaunches(),solids=this.solid||!!this.bodies;
+  const pass=encoder.beginComputePass(UniformMixedDynamicClassifier.PASS);
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);
-  for(const entry of ["classify","classifyCoarse",...(seeded?["importance",...(activityBudgetOn?NARROW_BAND_BUDGET_ENTRIES:[]),"prefix0","prefix1","prefix2",...Array.from({length:CUBE_LEVELS},(_,j)=>`cube${j+1}`)]:[]),...(this.solid||this.bodies?["decide","solidActive","solidPromote"]:["decide"]),"pageSeed","pageMark","pageCompact"]){
-   // Fixed grids: classify strides over the h list; classifyCoarse has a
-   // lane per tile, bounded by the 4h count; the rest are lattice-sized.
-   const lines=entry.startsWith("prefix")?[0,1,2].filter(k=>k!==Number(entry.at(-1))).reduce((n,k)=>n*t[k]!,1):entry.startsWith("page")?this.pages:tiles;
-   pass.setPipeline(uniformDetailPick(this.pipelines.get(entry)!));
-   if(entry==="classify")pass.dispatchWorkgroups(Math.min(CENSUS_TILE_GRID,tiles));
-   else if(entry==="pageCompact"||entry==="activityCutoff"||entry==="activityTiePrefix")pass.dispatchWorkgroups(1);
-   else{const groups=Math.ceil(lines/64);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));}
+  for(let i=0;i<launches.length;i++){
+   const l=launches[i]!;
+   if(l.when===1?!seeded:l.when===2?!(seeded&&activityBudgetOn):l.when===3&&!solids)continue;
+   pass.setPipeline(uniformDetailPick(l.pipeline));
+   if(l.y===0)pass.dispatchWorkgroups(l.x);else pass.dispatchWorkgroups(l.x,l.y);
   }
   pass.end();
   // The band now holds the joins: clear them for the next producers.

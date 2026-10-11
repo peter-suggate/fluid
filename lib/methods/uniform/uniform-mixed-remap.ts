@@ -186,27 +186,32 @@ export class UniformMixedRemap {
   * launch reads what the one before it wrote. target: group 1, the
   * generation being adopted. */
  private encodePass(e:GPUCommandEncoder,copy:boolean,target:GPUBindGroup,extension=false,grid=Math.min(REMAP_GRID,this.tiles),listed?:UniformDetailGroup):void{
-  const x=this.ownership.dispatchX,dispatch=(pass:GPUComputePassEncoder)=>pass.dispatchWorkgroups(Math.min(grid,x),Math.ceil(grid/x));
-  const pass=e.beginComputePass({label:copy?"Uniform mixed remap publish":"Uniform mixed remap"});
+  const x=this.ownership.dispatchX,gx=Math.min(grid,x),gy=ceilDiv(grid,x);
+  const pass=e.beginComputePass(copy?REMAP_PUBLISH_PASS:REMAP_PASS);
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,target);
-  const solid=this.solid,faces=(group:UniformDetailGroup,name:string)=>{pass.setBindGroup(2,group.group);pass.setPipeline(uniformDetailPick(solid?solid.select(this.pipelines.get(name)!):this.pipelines.get(name)!));dispatch(pass);};
+  const solid=this.solid;
   // The list compares the live (old) and target widths, so it is built
   // before the live ownership adopts the target and reused by the publish.
   // Either launch is one lane per tile, the list's bound.
   if(!copy){
-   const groups=Math.ceil(this.tiles/64);
+   const groups=(this.tiles+63)>>>6;
    pass.setBindGroup(2,(listed??this.groups[0]).group);pass.setBindGroup(3,this.statusGroup.group);pass.setPipeline(uniformDetailPick(this.pipelines.get(listed?"markListed":"markChanged")!));
-   pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
+   pass.dispatchWorkgroups(Math.min(groups,x),ceilDiv(groups,x));
   }
   if(solid)pass.setBindGroup(3,solid.tileGroup);
   // The extension leaves the scratch velocity before the velocity remap
   // writes it, and returns after the velocity publish read it.
-  if(extension&&!copy)faces(this.extensionGroups![0],"remapFaces");
+  if(extension&&!copy)this.encodeFaces(pass,this.extensionGroups![0],"remapFaces",gx,gy);
   // Cells run in place before the faces, which read neither volume nor phi.
-  if(!copy)faces(this.cellsGroup,"remapCells");
-  faces(this.groups[copy?1:0],copy?"copyFaces":"remapFaces");
-  if(extension&&copy)faces(this.extensionGroups![1],"copyFaces");
+  if(!copy)this.encodeFaces(pass,this.cellsGroup,"remapCells",gx,gy);
+  this.encodeFaces(pass,this.groups[copy?1:0],copy?"copyFaces":"remapFaces",gx,gy);
+  if(extension&&copy)this.encodeFaces(pass,this.extensionGroups![1],"copyFaces",gx,gy);
   pass.end();
+ }
+ /** One launch of encodePass over its grid: the fields of `group` through the kernel `name`. */
+ private encodeFaces(pass:GPUComputePassEncoder,group:UniformDetailGroup,name:string,gx:number,gy:number):void{
+  const solid=this.solid,pipeline=this.pipelines.get(name)!;
+  pass.setBindGroup(2,group.group);pass.setPipeline(uniformDetailPick(solid?solid.select(pipeline):pipeline));pass.dispatchWorkgroups(gx,gy);
  }
  destroy():void{this.worklist.destroy();this.idleStatus.destroy();}
 }
@@ -242,6 +247,11 @@ export class UniformMixedRemap {
  * the simulation's residency words into the pressure ownership's support,
  * so the all-4h pressure stages stride the same resident pages. */
 const TRANSFER_GRID=4096;
+/** Pass descriptors, built once. */
+const REMAP_PASS:GPUComputePassDescriptor={label:"Uniform mixed remap"},REMAP_PUBLISH_PASS:GPUComputePassDescriptor={label:"Uniform mixed remap publish"};
+const TRANSFER_TO_PRESSURE_PASS:GPUComputePassDescriptor={label:"Uniform mixed transfer to pressure"},TRANSFER_TO_SIMULATION_PASS:GPUComputePassDescriptor={label:"Uniform mixed transfer to simulation"};
+/** ceil(jobs / per) of non-negative integers in integer steps (a fractional quotient is a heap number until the call is optimized). */
+const ceilDiv=(jobs:number,per:number):number=>{const up=jobs+per-1;return (up-up%per)/per;};
 export class UniformMixedOwnershipTransfer {
  readonly allocatedBytes=0;
  private readonly resources:GPUBindGroupLayout;
@@ -286,15 +296,14 @@ export class UniformMixedOwnershipTransfer {
  }
  /** Both launches write disjoint tiles and read only the source fields. */
  private encode(e:GPUCommandEncoder,entry:"toPressure"|"toSimulation",group:UniformDetailGroup):void{
-  const coarse=this.pipelines.get(`${entry}Coarse`),fine=this.pipelines.get(`${entry}Fine`);if(!coarse||!fine)throw new Error("Ownership transfer has not been initialized");
-  const pass=e.beginComputePass({label:entry==="toPressure"?"Uniform mixed transfer to pressure":"Uniform mixed transfer to simulation"});
+  const coarse=this.pipelines.get(entry==="toPressure"?"toPressureCoarse":"toSimulationCoarse"),fine=this.pipelines.get(entry==="toPressure"?"toPressureFine":"toSimulationFine");if(!coarse||!fine)throw new Error("Ownership transfer has not been initialized");
+  const pass=e.beginComputePass(entry==="toPressure"?TRANSFER_TO_PRESSURE_PASS:TRANSFER_TO_SIMULATION_PASS);
   pass.setBindGroup(0,this.simulation.bindGroup);pass.setBindGroup(1,group.group);
   const weighted=!!this.solid&&entry==="toPressure";if(weighted)pass.setBindGroup(2,this.solid!.tileGroup);
-  const variant=(p:GPUComputePipeline)=>weighted?this.solid!.select(p):p;
-  this.simulation.dispatchCounted(pass,variant(coarse),this.pages);
+  this.simulation.dispatchCounted(pass,weighted?this.solid!.select(coarse):coarse,this.pages);
   // A grid-stride over the h tiles (umCounts.x): sized by them, and not
   // issued while the simulation holds no h-tile capacity.
-  this.simulation.dispatchBuffered(pass,variant(fine),"fine",this.fineGroups);
+  this.simulation.dispatchBuffered(pass,weighted?this.solid!.select(fine):fine,"fine",this.fineGroups);
   pass.end();
  }
  /** Simulation to pressure: volume, faces and negative walls. */
@@ -784,9 +793,9 @@ fn oldBuried(p:vec3i)->bool{
  let base=p-vec3i(1);
  for(var k=0u;k<8u;k++){
   let cell=base+vec3i(umCorner(k,2u));if(!umSolidValid(cell)){continue;}
-  let t=umTileAt(vec3u(cell)/4u);var open=0.0;
-  if(oldumTileWidth(t)==4u){open=umTileOpen(t);}else{open=umCellOpen(cell);}
-  if(open>1e-5){return false;}
+  let t=umTileAt(vec3u(cell)/4u);
+  if(oldumTileWidth(t)==4u){if(umTileOpen(t)>1e-5){return false;}}
+  else if(umCellIsOpen(cell)){return false;}
  }
  return true;
 }
@@ -829,7 +838,7 @@ struct PlaneCell{count:u32,value:array<f32,8>}
 // may hold the authority.
 fn planeCell(cell:vec3i)->PlaneCell{
  var out:PlaneCell;
- if(umCellOpen(cell)<=1e-5){return out;}
+ if(!umCellIsOpen(cell)){return out;}
  for(var k=0u;k<8u;k++){
   let at=vec3u(cell)+umCorner(k,2u);
   if(any(at%vec3u(4u)==vec3u(0))){

@@ -46,7 +46,7 @@ fn umHangingPlaneAddress(slot:u32,local:vec3u,axis:u32)->u32 {
 /** unitTexture names UniformMixedHangingTaps.unitVelocity: the unit
  * interpolant of every sample the weighted sampler gives fine weight reads
  * its interior taps there directly. */
-export function uniformMixedVelocitySamplingSource(payload = false, coarseCache = false, regularTexture?: string, hangingGroup?: number, unitTexture?: string): string {
+export function uniformMixedVelocitySamplingSource(payload = false, coarseCache = false, regularTexture?: string, hangingGroup?: number, unitTexture?: string, regularFace?: string): string {
 const type = payload ? "vec3f" : "f32", zero = payload ? "vec3f(0)" : "0.0";
 if (hangingGroup !== undefined && payload) throw new Error("The hanging fine-tap cache holds scalar samples");
 if (hangingGroup !== undefined && !unitTexture) throw new Error("Hanging fine taps are read from the unit velocity texture");
@@ -95,7 +95,7 @@ fn umSampleVelocityFine(p:vec3f,axis:u32)->${type} {
   for(var k=0u;k<8u;k++){
    let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
    let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));
-   terms[k]=${UNIFORM_DETAIL_H_LOAD}textureLoad(${regularTexture},base+bit,0)[axis];
+   terms[k]=${regularFace?`${regularFace}(base+bit,axis)`:`${UNIFORM_DETAIL_H_LOAD}textureLoad(${regularTexture},base+bit,0)[axis]`};
   }
   return umVelocityLerp8(terms,fraction);
  }`:""}
@@ -153,7 +153,7 @@ fn umSampleVelocity${width}(p:vec3f,axis:u32)->${type} {
   for(var k=0u;k<8u;k++){
    let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
    let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));
-   terms[k]=${UNIFORM_DETAIL_H_LOAD}textureLoad(${regularTexture},base+bit,0)[axis];
+   terms[k]=${regularFace?`${regularFace}(base+bit,axis)`:`${UNIFORM_DETAIL_H_LOAD}textureLoad(${regularTexture},base+bit,0)[axis]`};
   }
   return umVelocityLerp8(terms,fraction);
  }`:""}

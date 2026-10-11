@@ -27,6 +27,8 @@ export interface UniformMixedMomentumFields {
   params: GPUBuffer;
 }
 
+const MOMENTUM_PASS: GPUComputePassDescriptor = { label: "Uniform mixed momentum" };
+
 /** Momentum on general h tiles reads prepared h and 4h velocity fields.
  * Classification and blend weight are shared by the three components. The
  * characteristic retains its actual local owner width even when a sample
@@ -322,11 +324,11 @@ ${this.hanging?uniformMixedMomentumUnitWGSL:""}
   encode(encoder: GPUCommandEncoder, group: UniformDetailGroup): void {
     if (!this.pipeline) throw new Error("Mixed momentum is not initialized");
     encoder.clearBuffer(this.claims);encoder.clearBuffer(this.deferred,0,16);
-    const pass = encoder.beginComputePass({ label: "Uniform mixed momentum" });
+    const pass = encoder.beginComputePass(MOMENTUM_PASS);
     pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1,group.group); if (this.hanging) pass.setBindGroup(2, this.ownership.hangingGroup);
     // Buffered direct grids: GPU claims consume the complete current queues.
     const grid=Math.min(UNIFORM_MIXED_CLAIMED_GRID,this.ownership.capacity.tiles);
-    for(const pipeline of [this.regularPipeline!,this.generalPipeline!])this.ownership.dispatchBuffered(pass,pipeline,"fine",grid);
+    this.ownership.dispatchBuffered(pass,this.regularPipeline!,"fine",grid);this.ownership.dispatchBuffered(pass,this.generalPipeline!,"fine",grid);
     // The deferred cells follow the unit launch that lists them. Their tiles
     // are seam h tiles (a faster characteristic can list others; the claims
     // consume the whole list at any grid) and a round packs several, so the

@@ -67,15 +67,37 @@ export interface UniformMixedPressureCycleLevel {
 
 /** One compute pass shared by consecutive mixed pressure dispatches. A
  * dispatch is its own WebGPU usage scope, so dependent dispatches may share a
- * pass; encoder commands (copies, clears, foreign passes) end it first. */
+ * pass; encoder commands (copies, clears, foreign passes) end it first.
+ * One instance serves every frame's batch of its label (begin, then finish):
+ * the encode path constructs nothing, the pass descriptor included. */
 export class UniformMixedPressurePasses {
   private open?: GPUComputePassEncoder;
-  constructor(private readonly encoder: GPUCommandEncoder, readonly label: string) {}
-  get pass(): GPUComputePassEncoder { return this.open ??= this.encoder.beginComputePass({ label: this.label }); }
+  private readonly descriptor: GPUComputePassDescriptor;
+  constructor(private encoder: GPUCommandEncoder | undefined, readonly label: string) { this.descriptor = { label }; }
+  /** The next batch, on `encoder` (a pass an abandoned batch left open is
+   * that encoder's, and is dropped with it). */
+  begin(encoder: GPUCommandEncoder): this { this.open = undefined; this.encoder = encoder; return this; }
+  get pass(): GPUComputePassEncoder {
+    if (this.open) return this.open;
+    if (!this.encoder) throw new Error(`${this.label}: no batch is open`);
+    return this.open = this.encoder.beginComputePass(this.descriptor);
+  }
   /** The encoder with no pass open. */
-  get commands(): GPUCommandEncoder { this.end(); return this.encoder; }
-  end(): void { this.open?.end(); this.open = undefined; }
+  get commands(): GPUCommandEncoder {
+    this.end(); if (!this.encoder) throw new Error(`${this.label}: no batch is open`);
+    return this.encoder;
+  }
+  end(): void { if (this.open) { this.open.end(); this.open = undefined; } }
+  /** Ends the batch; the encoder is not kept. */
+  finish(): void { this.end(); this.encoder = undefined; }
 }
+
+/** A launch: its fixed workgroup grid, or (tiled) its level's tile count,
+ * its workgroup's lanes and whether its jobs are the cycle list's. offsets:
+ * its record's dynamic offset, as setBindGroup takes it. */
+interface RootLaunch { pipeline: GPUComputePipeline; groups?: readonly number[]; tiles: number; lanes: number; listed: boolean; offset: number; offsets: number[] }
+/** Every traversal's launches in encode order. */
+interface RootTraversals { setup: RootLaunch; measure: readonly RootLaunch[]; vCycle: readonly RootLaunch[]; fullCycle: readonly RootLaunch[] }
 
 /** How a root-lattice smoothing launch stores its last iterate: in the other
  * native parity, or straight into the mixed pressure (added, assigned, or
@@ -130,9 +152,14 @@ export class UniformMixedPressureCycles {
   private readonly resources: GPUBindGroupLayout;
   private group!: GPUBindGroup;
   private readonly resourceEntries: GPUBindGroupEntry[];
-  /** A launch: its fixed workgroup grid, or (tiled) its level's tile count,
-   * its workgroup's lanes and whether its jobs are the cycle list's. */
-  private readonly pipelines = new Map<string, { pipeline: GPUComputePipeline; groups?: readonly number[]; tiles: number; lanes: number; listed: boolean; offset: number }>();
+  private readonly pipelines = new Map<string, RootLaunch>();
+  /** Resolved by initialize(): the sequences are fixed from there on
+   * (cycle() and opening() run once), and a frame replays them. */
+  private traversals?: RootTraversals;
+  private readonly setupPasses = new UniformMixedPressurePasses(undefined, "Uniform mixed pressure setup");
+  private readonly measurePasses = new UniformMixedPressurePasses(undefined, "Uniform mixed pressure measure");
+  private readonly vCyclePasses = new UniformMixedPressurePasses(undefined, "Uniform mixed pressure V-cycle");
+  private readonly fullCyclePasses = new UniformMixedPressurePasses(undefined, "Uniform mixed pressure Full-cycle");
   /** Levels run a tile to a workgroup (the leading ones); the rest are the
    * one-workgroup launch's. */
   private readonly tiled: number;
@@ -144,6 +171,10 @@ export class UniformMixedPressureCycles {
   private boundPass?: GPUComputePassEncoder;
   private readonly lanes: number;
   private readonly workgroups: [number, number, number];
+  /** The root lattice's tiles (the workgroups' product): the listed
+   * launches' widest. */
+  private readonly rootTiles: number;
+  private readonly maxWorkgroups: number;
   /** The continuation's cycle list: the root lattice's kernels walk its tiles. */
   private readonly listed?: { list: GPUBuffer };
   /** The listed launches' width (see observeWork); the lattice without one. */
@@ -203,9 +234,10 @@ export class UniformMixedPressureCycles {
       throw new Error("Mixed pressure root topology is smaller than its owners");
     this.solid = !!topology;
     this.workgroups = t.map(n => Math.ceil((n + 2) / 4)) as [number, number, number];
+    this.rootTiles = this.workgroups.reduce((n, d) => n * d, 1);
+    this.maxWorkgroups = device.limits.maxComputeWorkgroupsPerDimension;
     if (native.cycle) {
-      const tiles = this.workgroups.reduce((n, d) => n * d, 1);
-      if (native.cycle.tiles !== tiles) throw new Error("Mixed pressure cycle list does not cover the native continuation lattice");
+      if (native.cycle.tiles !== this.rootTiles) throw new Error("Mixed pressure cycle list does not cover the native continuation lattice");
       this.listed = { list: native.cycle.list };
     }
     this.configuration = device.createBuffer({ label: "Uniform root pressure hierarchy", size: 4 * ROOT_CONFIG_WORDS,
@@ -782,14 +814,29 @@ fn umLV(a:u32,rhsA:u32,lowA:u32,start:u32,lane:u32)->u32{
       if (!compilation) { compilation = this.device.createComputePipelineAsync({ layout: pipelineLayout, compute: { module, entryPoint, constants } }); shared.set(key, compilation); }
       const pipeline = await compilation, offset = i * stride;
       this.pipelines.set(entry, "level" in shape
-        ? { pipeline, offset, tiles: levels[shape.level]!.d.reduce((n, d) => n * Math.ceil(d / 4), 1), lanes: shape.lanes, listed: listed && shape.level === 0 }
-        : { pipeline, offset, groups: shape, tiles: 0, lanes: 0, listed: false });
+        ? { pipeline, offset, offsets: [offset], tiles: levels[shape.level]!.d.reduce((n, d) => n * Math.ceil(d / 4), 1), lanes: shape.lanes, listed: listed && shape.level === 0 }
+        : { pipeline, offset, offsets: [offset], groups: shape, tiles: 0, lanes: 0, listed: false });
     }));
     await Promise.all(shared.values());
     this.device.queue.writeBuffer(this.launches, 0, launchWords);
     this.group = this.device.createBindGroup({ layout: this.resources, entries: [...this.resourceEntries,
       { binding: 7, resource: { buffer: this.launches, size: ROOT_LAUNCH_BYTES } },
     ] });
+    const resolve = (entry: string) => {
+      const launch = this.pipelines.get(entry); if (!launch) throw new Error(`Mixed pressure root has no launch ${entry}`);
+      return launch;
+    };
+    const traversal = (body: (launch: (entry: string) => void) => void) => {
+      const launches: RootLaunch[] = []; body(entry => launches.push(resolve(entry))); return launches;
+    };
+    this.traversals = { setup: resolve("setup"), measure: [resolve("measure")],
+      vCycle: traversal(launch => { launch("restrictV"); this.cycle(0, 0, 0, 1, launch); }),
+      // Algorithm 3 at the root: the Full-Cycle on the residual under the
+      // shifted bound, a closing V-cycle, then the saved pressure added back.
+      fullCycle: traversal(launch => {
+        launch("restrictFull"); this.opening(launch); this.cycle(0, 0, 0, 2, launch);
+        launch("restrictInner"); this.cycle(0, 0, 0, 3, launch);
+      }) };
   }
   /** The parity the one-workgroup launch leaves level `tiled`'s result in
    * from parity 0: the coarsest solve is an even count of iterations; a
@@ -835,24 +882,26 @@ fn umLV(a:u32,rhsA:u32,lowA:u32,start:u32,lane:u32)->u32{
   }
   /** capacity: a launch of a slot the plan holds in reserve (see
    * ROOT_CAPACITY_THREADS). */
-  private dispatch(passes: UniformMixedPressurePasses, entry: string, capacity = false): void {
-    const launch = this.pipelines.get(entry); if (!launch) throw new Error("Mixed pressure root is not initialized");
+  private dispatch(passes: UniformMixedPressurePasses, launch: RootLaunch, capacity: boolean): void {
     const pass = passes.pass;
     pass.setPipeline(launch.pipeline);
     if (this.boundPass !== pass) { this.boundPass = pass; pass.setBindGroup(0, this.level.ownership.bindGroup); }
-    pass.setBindGroup(1, this.group, [launch.offset]);
-    if (launch.groups) { pass.dispatchWorkgroups(...(launch.groups as [number, number?, number?])); return; }
+    pass.setBindGroup(1, this.group, launch.offsets);
+    const groups = launch.groups;
+    if (groups) {
+      if (groups.length === 1) pass.dispatchWorkgroups(groups[0]!); else pass.dispatchWorkgroups(groups[0]!, groups[1], groups[2]);
+      return;
+    }
     let width = launch.listed ? Math.min(launch.tiles, this.work ?? launch.tiles) : launch.tiles;
     if (capacity) width = Math.min(width, Math.max(1, Math.floor(ROOT_CAPACITY_THREADS / launch.lanes)));
-    const x = Math.min(width, this.device.limits.maxComputeWorkgroupsPerDimension);
+    const x = Math.min(width, this.maxWorkgroups);
     pass.dispatchWorkgroups(x, Math.ceil(width / x));
   }
   /** The listed launches' width from a completed frame's list count
    * (uniformBufferedWork: parallelism only, every kernel strides the live
    * list). */
   observeWork(listed: number): void {
-    const tiles = this.workgroups.reduce((n, d) => n * d, 1);
-    this.work = uniformBufferedWork(this.work ?? tiles, listed, tiles);
+    this.work = uniformBufferedWork(this.work ?? this.rootTiles, listed, this.rootTiles);
   }
   /** The cycle list's count (this solve's) into a frame receipt: one word,
    * zero without a list. */
@@ -860,30 +909,29 @@ fn umLV(a:u32,rhsA:u32,lowA:u32,start:u32,lane:u32)->u32{
     if (this.listed) encoder.copyBufferToBuffer(this.listed.list, 0, target, offset, 4);
     else encoder.clearBuffer(target, offset, 4);
   }
-  private batch(encoder: GPUCommandEncoder, label: string, body: (passes: UniformMixedPressurePasses) => void): void {
-    const passes = new UniformMixedPressurePasses(encoder, `Uniform mixed pressure ${label}`);
-    body(passes); passes.end();
+  /** One pass of a traversal's launches, in order. */
+  private replay(passes: UniformMixedPressurePasses, encoder: GPUCommandEncoder, launches: readonly RootLaunch[], capacity: boolean): void {
+    passes.begin(encoder);
+    for (let i = 0; i < launches.length; i++) this.dispatch(passes, launches[i]!, capacity);
+    passes.finish();
+  }
+  private get resolved(): RootTraversals {
+    if (!this.traversals) throw new Error("Mixed pressure root is not initialized");
+    return this.traversals;
   }
   /** Per solve, after RHS assembly and before the initial measure: the native
    * n/4 geometry and the continuation's setup. Ungated. */
   encodeSetup(encoder: GPUCommandEncoder): void {
     encoder.clearBuffer(this.rounding);
     // One pass with the native setup; only its tile-list clears end it.
-    this.batch(encoder, "setup", passes => { this.dispatch(passes, "setup"); this.boundPass = undefined; this.native.encodeSetup(encoder, this.uniformGroup, passes); });
+    const setup = this.resolved.setup, passes = this.setupPasses.begin(encoder);
+    this.dispatch(passes, setup, false); this.boundPass = undefined; this.native.encodeSetup(encoder, this.uniformGroup, passes);
+    passes.finish();
   }
   /** capacity (here and on the cycles): the slot is one the plan holds in
    * reserve, launched narrow. */
-  encodeMeasure(encoder: GPUCommandEncoder, capacity = false): void { this.batch(encoder, "measure", passes => this.dispatch(passes, "measure", capacity)); }
-  encodeVCycle(encoder: GPUCommandEncoder, capacity = false): void {
-    this.batch(encoder, "V-cycle", passes => { this.dispatch(passes, "restrictV", capacity); this.cycle(0, 0, 0, 1, entry => this.dispatch(passes, entry, capacity)); });
-  }
-  /** Algorithm 3 at the root: the Full-Cycle on the residual under the
-   * shifted bound, a closing V-cycle, then the saved pressure added back. */
-  encodeFullCycle(encoder: GPUCommandEncoder, capacity = false): void {
-    this.batch(encoder, "Full-cycle", passes => {
-      const launch = (entry: string) => this.dispatch(passes, entry, capacity);
-      launch("restrictFull"); this.opening(launch); this.cycle(0, 0, 0, 2, launch);
-      launch("restrictInner"); this.cycle(0, 0, 0, 3, launch);
-    });
-  }
+  encodeMeasure(encoder: GPUCommandEncoder, capacity = false): void { this.replay(this.measurePasses, encoder, this.resolved.measure, capacity); }
+  encodeVCycle(encoder: GPUCommandEncoder, capacity = false): void { this.replay(this.vCyclePasses, encoder, this.resolved.vCycle, capacity); }
+  /** Algorithm 3 at the root (see initialize). */
+  encodeFullCycle(encoder: GPUCommandEncoder, capacity = false): void { this.replay(this.fullCyclePasses, encoder, this.resolved.fullCycle, capacity); }
 }

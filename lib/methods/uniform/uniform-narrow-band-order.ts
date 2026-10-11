@@ -1,5 +1,9 @@
 import { ParticleBinScan } from "./particle-bin-scan";
 
+/** The stage's pass descriptors: begun every frame, built once. */
+const PREPARE_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP clear occupied bins"},COUNT_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP spatial tile counts"};
+const PREFIX_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP occupied cell offsets"},PACK_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP order pack"};
+
 /** Reorder the live particles by cell without a bucket limit or another
  * particle allocation. The expired source epoch becomes the sorted output.
  * The input is every slot of the last epoch, moved in place: a sample that
@@ -23,9 +27,15 @@ export class UniformNarrowBandOrder {
  private scan!:ParticleBinScan;
  private pipeline!:GPUComputePipeline;
  private groups!:readonly [GPUBindGroup,GPUBindGroup];
+ /** Cells of the lattice: every launch width here is a fixed fraction of it. */
+ private readonly cells:number;
+ /** The per-tile launches' grid and the tile count's groups: the lattice's, for life. */
+ private readonly tileGroups:readonly [number,number];
+ private readonly countGroups:number;
  get allocatedBytes():number{return this.enabled.size+this.dimensions.size+(this.spatialCounts?.size??0)+(this.tileOffsets?.size??0)+(this.scan?.allocatedBytes??0);}
  /** The optional policy override lets small fixtures exercise both paths. */
  constructor(private readonly device:GPUDevice,private readonly dims:readonly number[],private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer,readonly sparse=dims.reduce((n,v)=>n*v,1)>=4_194_304,readonly spatialOrder=sparse&&dims.every(n=>n%16===0)){
+  this.cells=dims.reduce((n,v)=>n*v,1);{const tiles=this.cells/64;this.tileGroups=[Math.min(tiles,65535),Math.ceil(tiles/65535)];this.countGroups=Math.ceil(this.cells/4096);}
   // Shared APIC scan's activation record: no failure and an active step.
   // This immutable record makes our sort unconditional, including bootstrap.
   this.dimensions=device.createBuffer({label:"FLIP spatial order dimensions",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -128,19 +138,17 @@ var<workgroup> packCount:u32;
   this.groups=[0,1].map(parity=>this.device.createBindGroup({layout,entries:[{binding:7,resource:{buffer:this.dimensions}},...[this.particles[1-parity]!,this.particles[parity]!,this.bins,this.links,this.state,...(this.sparse?[this.tileOffsets!]:[]),...(this.spatialOrder?[this.spatialCounts!]:[])].map((buffer,binding)=>({binding,resource:{buffer}}))]})) as [GPUBindGroup,GPUBindGroup];
  }
  prepare(encoder:GPUCommandEncoder,parity:number):void{
-  if(!this.sparse){encoder.clearBuffer(this.bins,0,this.dims.reduce((n,v)=>n*v,1)*8);return;}
-  const tiles=this.dims.reduce((n,v)=>n*v,1)/64;
-  const pass=encoder.beginComputePass({label:"Narrow-band FLIP clear occupied bins"});pass.setPipeline(this.preparePipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(Math.min(tiles,65535),Math.ceil(tiles/65535));pass.end();
+  if(!this.sparse){encoder.clearBuffer(this.bins,0,this.cells*8);return;}
+  const pass=encoder.beginComputePass(PREPARE_PASS);pass.setPipeline(this.preparePipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(this.tileGroups[0],this.tileGroups[1]);pass.end();
  }
  /** Dense scan for small domains; occupied-tile cell scans for large ones. */
  encode(encoder:GPUCommandEncoder,parity:number,work?:GPUBuffer):void{
-  if(this.spatialOrder){const pass=encoder.beginComputePass({label:"Narrow-band FLIP spatial tile counts"});pass.setPipeline(this.spatialPipeline!);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(Math.ceil(this.dims.reduce((n,v)=>n*v,1)/4096));pass.end();}
+  if(this.spatialOrder){const pass=encoder.beginComputePass(COUNT_PASS);pass.setPipeline(this.spatialPipeline!);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(this.countGroups);pass.end();}
   this.scan.encode(encoder);
   if(this.sparse){
-   const tiles=this.dims.reduce((n,v)=>n*v,1)/64;
-   const prefix=encoder.beginComputePass({label:"Narrow-band FLIP occupied cell offsets"});prefix.setPipeline(this.prefixPipeline);prefix.setBindGroup(0,this.groups[parity]!);prefix.dispatchWorkgroups(Math.min(tiles,65535),Math.ceil(tiles/65535));prefix.end();
+   const prefix=encoder.beginComputePass(PREFIX_PASS);prefix.setPipeline(this.prefixPipeline);prefix.setBindGroup(0,this.groups[parity]!);prefix.dispatchWorkgroups(this.tileGroups[0],this.tileGroups[1]);prefix.end();
   }
-  const pass=encoder.beginComputePass({label:"Narrow-band FLIP order pack"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.groups[parity]!);if(work)pass.dispatchWorkgroupsIndirect(work,0);else pass.dispatchWorkgroups(1024);pass.end();
+  const pass=encoder.beginComputePass(PACK_PASS);pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.groups[parity]!);if(work)pass.dispatchWorkgroupsIndirect(work,0);else pass.dispatchWorkgroups(1024);pass.end();
  }
  destroy():void{this.scan?.destroy();this.enabled.destroy();this.dimensions.destroy();this.tileOffsets?.destroy();this.spatialCounts?.destroy();}
 }

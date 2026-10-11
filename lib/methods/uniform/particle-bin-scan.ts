@@ -26,6 +26,11 @@ var<workgroup> running:u32;
 }
 `;
 
+/** One descriptor for every encode: the pass is begun each frame. */
+const SCAN_PASS: GPUComputePassDescriptor = { label: "APIC bin prefix scan" };
+/** ceil(jobs / per) in whole steps: a fractional quotient is a heap number until its caller is optimized. */
+const ceilDiv = (jobs: number, per: number): number => { const up = jobs + per - 1; return (up - up % per) / per; };
+
 export class ParticleBinScan {
   allocatedBytes = 0;
   private owned: GPUBuffer[] = [];
@@ -65,14 +70,14 @@ export class ParticleBinScan {
     this.owned.push(buffer); this.allocatedBytes += size; return buffer;
   }
   encode(encoder: GPUCommandEncoder): void {
-    const pass = encoder.beginComputePass({ label: "APIC bin prefix scan" });
-    const run = (entry: string, count: number, group: GPUBindGroup) => {
-      const groups = Math.ceil(count / 128); pass.setPipeline(this.pipelines[entry]); pass.setBindGroup(0, group);
-      pass.dispatchWorkgroups(Math.min(groups, 65535), Math.ceil(groups / 65535));
-    };
-    for (const l of this.levels) run("scan", l.count, l.scan);
-    for (let i = this.levels.length - 2; i >= 0; i--) run("add", this.levels[i].count, this.levels[i].add!);
+    const pass = encoder.beginComputePass(SCAN_PASS), levels = this.levels;
+    for (let i = 0; i < levels.length; i++) this.run(pass, this.pipelines.scan, levels[i].count, levels[i].scan);
+    for (let i = levels.length - 2; i >= 0; i--) this.run(pass, this.pipelines.add, levels[i].count, levels[i].add!);
     pass.end();
+  }
+  private run(pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, count: number, group: GPUBindGroup): void {
+    const groups = ceilDiv(count, 128); pass.setPipeline(pipeline); pass.setBindGroup(0, group);
+    pass.dispatchWorkgroups(Math.min(groups, 65535), ceilDiv(groups, 65535));
   }
   destroy(): void { this.owned.forEach(buffer => buffer.destroy()); }
 }

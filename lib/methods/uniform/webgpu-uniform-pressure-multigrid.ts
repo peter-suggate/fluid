@@ -715,6 +715,10 @@ export class WebGPUUniformPressureMultigrid {
       const steps=this.buildPlanSteps(level);
       for (;;) {const next=steps.next();if(next.done)return next.value;}
     })();
+    // Per dispatch, built once: its own pass's descriptor (no shared pass)
+    // and whether its group 0 is the tile lists' (see encodeSetup).
+    const setupPasses:GPUComputePassDescriptor[]=setup.map(d=>({label:`Uniform mixed continuation ${d.entryPoint}`}));
+    const setupTiled=setup.map(d=>this.tileEntry(d.entryPoint));
     const root=this.levels[level]!;
     const listed=this.cycleListed(level,level);
     const field=(texture:GPUTexture)=>{
@@ -750,26 +754,25 @@ export class WebGPUUniformPressureMultigrid {
       encodeSetup:(encoder:GPUCommandEncoder,uniformGroup:GPUBindGroup,
         shared?:{readonly pass:GPUComputePassEncoder;readonly commands:GPUCommandEncoder})=>{
         this.assertLive();
-        const commands=()=>shared?.commands??encoder;
         for(let i=level;i<this.levels.length;i++){
-          if(this.smoothTileBuffers[i])commands().clearBuffer(this.smoothTileBuffers[i]!,0,4);
+          if(this.smoothTileBuffers[i])(shared?shared.commands:encoder).clearBuffer(this.smoothTileBuffers[i]!,0,4);
         }
         if(listed){
-          const cycle=this.cycleTileBuffers[level]!;commands().clearBuffer(cycle,0,4);
-          if(WALL_HALO)commands().clearBuffer(cycle,16+4*this.tileCounts[level]!,4);
+          const cycle=this.cycleTileBuffers[level]!;(shared?shared.commands:encoder).clearBuffer(cycle,0,4);
+          if(WALL_HALO)(shared?shared.commands:encoder).clearBuffer(cycle,16+4*this.tileCounts[level]!,4);
         }
         // A shared pass keeps its pipeline and groups between dispatches:
         // rebind only what changes (each call is host encode and submit work).
-        let bound:{pass?:GPUComputePassEncoder;pipeline?:GPUComputePipeline;group0?:GPUBindGroup;group1?:GPUBindGroup}={};
-        for(const dispatch of setup){
-          const pass=shared?.pass??encoder.beginComputePass({label:`Uniform mixed continuation ${dispatch.entryPoint}`});
-          if(bound.pass!==pass)bound={pass};
-          const group0=this.tileEntry(dispatch.entryPoint)?this.smoothTileInputGroup!:uniformGroup;
-          if(bound.pipeline!==dispatch.pipeline){bound.pipeline=dispatch.pipeline;pass.setPipeline(dispatch.pipeline);}
-          if(bound.group1!==dispatch.group){bound.group1=dispatch.group;pass.setBindGroup(1,dispatch.group);}
-          if(bound.group0!==group0){bound.group0=group0;pass.setBindGroup(0,group0);}
+        let bound:GPUComputePassEncoder|undefined,pipeline:GPUComputePipeline|undefined,bound0:GPUBindGroup|undefined,bound1:GPUBindGroup|undefined;
+        for(let i=0;i<setup.length;i++){
+          const dispatch=setup[i]!,pass=shared?shared.pass:encoder.beginComputePass(setupPasses[i]!);
+          if(bound!==pass){bound=pass;pipeline=undefined;bound0=undefined;bound1=undefined;}
+          const group0=setupTiled[i]?this.smoothTileInputGroup!:uniformGroup;
+          if(pipeline!==dispatch.pipeline){pipeline=dispatch.pipeline;pass.setPipeline(dispatch.pipeline);}
+          if(bound1!==dispatch.group){bound1=dispatch.group;pass.setBindGroup(1,dispatch.group);}
+          if(bound0!==group0){bound0=group0;pass.setBindGroup(0,group0);}
           if(dispatch.tileGrid!==undefined)pass.dispatchWorkgroups(dispatch.tileGrid);
-          else pass.dispatchWorkgroups(...dispatch.workgroups);
+          else pass.dispatchWorkgroups(dispatch.workgroups[0],dispatch.workgroups[1],dispatch.workgroups[2]);
           if(!shared)pass.end();
         }
       },

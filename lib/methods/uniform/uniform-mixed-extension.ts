@@ -1,4 +1,6 @@
+import { uniformMixedExtensionSlotWGSL } from "./uniform-mixed-extension-slots.wgsl";
 import { uniformCompiledExtensionNeighborWGSL } from "./uniform-compiled-extension.wgsl";
+import { pairedExtensionSource, pairedSnapshotSource, replayedPublicationSource } from "./uniform-mixed-extension-pair.wgsl";
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import type { WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
@@ -10,6 +12,9 @@ type Hierarchy=ReturnType<WebGPUUniformVelocityExtrapolator["prepareMixedContinu
 interface Fields {
  physical:GPUTexture;phase:GPUTexture;negative:GPUBuffer;output:GPUTexture;outputNegative:GPUBuffer;
  scratch:GPUBufferBinding;params:GPUBuffer;
+ companion?:{scratch:GPUBuffer;physical:GPUTexture;negative:GPUBuffer};
+ /** Existing FLIP fine-tap texture for finalized-slot publication. */
+ snapshot?:GPUTexture;
 }
 /** umFarValue with its coarse state and source-bound loads supplied. */
 function farValueWGSL(name:string,state:string,lower:string,upper:string):string{
@@ -47,6 +52,11 @@ const UE_PACK_TILES=2;
  * nearest-source hierarchy, then retains supported h faces on publication.
  * The legacy mode first performs Godunov sweeps on canonical mixed patches;
  * its two transient vec2f slot arrays borrow the caller's stage scratch. */
+/** Per-frame pass descriptors, built once. */
+const EXTENSION_PASS:GPUComputePassDescriptor={label:"Uniform mixed extension"},RETAIN_PASS:GPUComputePassDescriptor={label:"Uniform mixed extension retain"},
+ SNAPSHOT_PASS:GPUComputePassDescriptor={label:"Uniform mixed extension slot snapshot"};
+/** ceil(jobs/per) in whole steps: a fractional quotient is a heap number until its caller is optimized. */
+const ceilDiv=(jobs:number,per:number):number=>{const up=jobs+per-1;return (up-up%per)/per;};
 export class UniformMixedExtension {
  readonly allocatedBytes=0;
  /** One slot array at `fineTiles` h tiles. */
@@ -54,7 +64,17 @@ export class UniformMixedExtension {
  /** bind()'s scratch at `fineTiles` h tiles: both slot arrays. bind() takes
   * the ownership's capacity, so a capacity change binds again. */
  scratchBytesAt(fineTiles:number):number{return 2*this.slotBytesAt(fineTiles);}
+ /** One scalar companion per slot and epoch, borrowed until G2P resampling. */
+ companionBytesAt(fineTiles:number):number{return 2*Math.ceil(this.slotBytesAt(fineTiles)/2/256)*256;}
  private readonly resources:GPUBindGroupLayout;
+ private readonly pairedResources?:GPUBindGroupLayout;
+ private readonly snapshotResources?:GPUBindGroupLayout;
+ private snapshotPipelines?:{restrict:GPUComputePipeline;fine:GPUComputePipeline;coarse:GPUComputePipeline};
+ private replayPublishers?:{regular:Map<string,GPUComputePipeline>;list:Map<string,GPUComputePipeline>;seams:Map<string,GPUComputePipeline>};
+ /** The encoder holding a finished slot snapshot, and its sweep count. */
+ private snapshotEncoder?:GPUCommandEncoder;
+ private snapshotSweeps=0;
+ get supportsPair():boolean{return this.pairedResources!==undefined&&!this.regularBulk;}
  /** GPU-counted launches (UNIFORM_MIXED_COUNTED), each of a fixed grid: no
   * launch size, variant or skip reads the host membership. Regular h owners. */
  private readonly regularPipelines=new Map<string,GPUComputePipeline>();
@@ -65,10 +85,19 @@ export class UniformMixedExtension {
  private readonly seamPipelines=new Map<string,GPUComputePipeline>();
  private fineSeamSweep?:GPUComputePipeline;
  private restrictPipeline?:GPUComputePipeline;
+ private readonly pairedRegular=new Map<string,GPUComputePipeline>();
+ private readonly pairedList=new Map<string,GPUComputePipeline>();
+ private readonly pairedSeams=new Map<string,GPUComputePipeline>();
+ private pairedFineSweep?:GPUComputePipeline;
+ private retainPipelines?:readonly [GPUComputePipeline,GPUComputePipeline];
+ private readonly companionRegular=new Map<string,GPUComputePipeline>();
+ private readonly companionList=new Map<string,GPUComputePipeline>();
+ private readonly companionSeams=new Map<string,GPUComputePipeline>();
+ private companionRestrict?:GPUComputePipeline;
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy,private readonly regularBulk=false,directRestriction=false){
   if(ownership.capacity.lattice.dimensions.some(n=>n%4!==0))throw new Error("Mixed extension requires a 4-aligned lattice");
   if(!directRestriction)throw new Error("Mixed extension restricts the face-plane anchors directly");
-  this.resources=uniformDetailBindLayout(device,{entries:[
+  const entries:GPUBindGroupLayoutEntry[]=[
    ...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
    ...[4,5,9].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    {binding:10,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"uint",viewDimension:"3d"}},
@@ -77,7 +106,15 @@ export class UniformMixedExtension {
    ...[8,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"rgba32float" as const,viewDimension:"3d" as const}})),
    {binding:12,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32uint",viewDimension:"3d"}},
    {binding:13,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
-  ]});
+  ];
+  this.resources=uniformDetailBindLayout(device,{entries});
+  if(device.limits.maxStorageBuffersPerShaderStage>=9){const paired:GPUBindGroupLayoutEntry[]=[...entries,
+   ...[2,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
+   {binding:14,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
+   {binding:15,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+  ];this.pairedResources=uniformDetailBindLayout(device,{entries:paired});
+   this.snapshotResources=uniformDetailBindLayout(device,{entries:[...paired,{binding:16,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}}]},[16]);
+  }
  }
  bind(f:Fields):readonly [UniformDetailGroup,UniformDetailGroup]{
   const d=this.ownership.capacity.lattice.dimensions;
@@ -85,7 +122,12 @@ export class UniformMixedExtension {
   if(f.physical===f.output||f.negative===f.outputNegative)throw new Error("Mixed extension outputs must be disjoint");
   const size=this.slotBytesAt(this.ownership.capacity.fineTiles),offset=f.scratch.offset??0;
   if((f.scratch.size??f.scratch.buffer.size-offset)<2*size)throw new Error("Mixed extension scratch is too small");
-  return [0,1].map(parity=>uniformDetailGroup(this.device,{layout:this.resources,entries:[
+  const companionSize=this.companionBytesAt(this.ownership.capacity.fineTiles)/2;
+  if(f.companion&&!this.supportsPair)throw new Error("Paired extension is unsupported by this device or mode");
+  if(f.companion&&f.companion.scratch.size<2*companionSize)throw new Error("Paired extension companion scratch is too small");
+  if(f.snapshot&&!f.companion)throw new Error("Slot snapshot requires paired extension");
+  return [0,1].map(parity=>uniformDetailGroup(this.device,{layout:f.snapshot?this.snapshotResources!:f.companion?this.pairedResources!:this.resources,entries:[
+   ...(f.snapshot?[{binding:16,resource:f.snapshot}]:[]),
    ...[parity,parity^1].map((slot,binding)=>({binding,resource:{buffer:f.scratch.buffer,offset:offset+slot*size,size}})),
    {binding:4,resource:f.physical},{binding:5,resource:f.phase},
    {binding:6,resource:{buffer:f.negative}},{binding:7,resource:{buffer:f.params,size:16}},
@@ -93,10 +135,20 @@ export class UniformMixedExtension {
    {binding:10,resource:this.hierarchy.outputOrigins},
    {binding:11,resource:this.hierarchy.input},{binding:12,resource:this.hierarchy.inputOrigins},
    {binding:13,resource:{buffer:f.outputNegative}},
+   ...(f.companion?[
+    ...[parity,parity^1].map((slot,i)=>({binding:2+i,resource:{buffer:f.companion!.scratch,offset:slot*companionSize,size:companionSize}})),
+    {binding:14,resource:f.companion.physical},{binding:15,resource:{buffer:f.companion.negative}},
+   ]:[]),
   ]})) as unknown as readonly [UniformDetailGroup,UniformDetailGroup];
  }
+ /** The active epoch selects the completed scalar payload after its sweeps. */
+ companionBindings(buffer:GPUBuffer):readonly [GPUBufferBinding,GPUBufferBinding]{
+  const size=this.companionBytesAt(this.ownership.capacity.fineTiles)/2;
+  if(buffer.size<2*size)throw new Error("Paired extension companion scratch is too small");
+  return [{buffer,offset:0,size},{buffer,offset:size,size}];
+ }
  async initialize():Promise<void>{
-  const module=uniformDetailModule(this.device,{label:"Uniform mixed extension",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+  const source=uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> stateIn:array<vec2f>;
 @group(1) @binding(1) var<storage,read_write> stateOut:array<vec2f>;
 @group(1) @binding(4) var physical:texture_3d<f32>;
@@ -126,29 +178,7 @@ fn ueFarTop(axis:u32)->vec3i{
 // in a component-major n/4 layer, so neighbouring 4h owners are neighbouring
 // words. Negative domain-wall patches (anchor[axis] = -1) have planes of
 // their own. Their addresses need the patch width, never a topology load.
-const UE_TILES=UM_T.x*UM_T.y*UM_T.z;
-const UE_COARSE=0u;
-const UE_UNIT_WALL=UE_COARSE+3u*UE_TILES;
-const UE_COARSE_WALL=UE_UNIT_WALL+UM_D.y*UM_D.z+UM_D.x*UM_D.z+UM_D.x*UM_D.y;
-// Per tile finite-cell masks (ueMaskIn), two words per tile.
-const UE_FLAGS=UE_COARSE_WALL+UM_T.y*UM_T.z+UM_T.x*UM_T.z+UM_T.x*UM_T.y;
-// The slot of a unit address that names no patch: never written, and read
-// only by loads issued ahead of the test that discards them.
-const UE_NONE=UE_FLAGS+2u*UE_TILES;
-// Unit patches by fine-tile rank (h tiles are packed first: a tile word is
-// 64 * rank), 240 slots an h tile. (component, 64 cells) for the patches
-// anchored in the tile: its lanes read one 512-byte run per component. Then
-// per component the sixteen unit patches of a 4h tile below it on that axis
-// (a 4h seam owner's, anchored in that tile's top layer), by column. The
-// address takes the anchor tile's word, and the word of the tile above when
-// the anchor tile is 4h (upper; 0 without one).
-const UE_UNIT=UE_NONE+1u;
-fn ueUnitSlotIn(word:u32,upper:u32,l:vec3u,axis:u32)->u32{
- if((word&0x80000000u)!=0u){return UE_UNIT+15u*((word&0x3fffffffu)>>2u)+axis*64u+l.x+4u*(l.y+4u*l.z);}
- return select(UE_NONE,UE_UNIT+15u*((upper&0x3fffffffu)>>2u)+192u+16u*axis+l[(axis+1u)%3u]+4u*l[(axis+2u)%3u],l[axis]==3u&&(upper&0x80000000u)!=0u);
-}
-// A unit owner's positive patch is anchored at its origin: no tile word.
-fn ueOwnSlot(owner:UMOwner,axis:u32)->u32{return UE_UNIT+15u*((owner.index-owner.lane)>>2u)+axis*64u+owner.lane;}
+${uniformMixedExtensionSlotWGSL}
 // The sweep tile jobs stage the words of the 3x3x3 tiles around theirs
 // (ueStage), which hold every anchor their faces read (ueFaceLive): those
 // jobs take a word from workgroup memory instead of a topology load.
@@ -178,22 +208,9 @@ fn ueTileWord(t:vec3u)->u32{
  if(ueStagedTiles&&(!ueMixedJobs||ueStagedJob)){let r=vec3u(vec3i(t)-ueJobTile()+vec3i(1));if(all(r<=vec3u(2u))){return ueWords[ueJobBase()+r.x+3u*(r.y+3u*r.z)];}}
  return umTopology[umTileAt(t)];
 }
-fn ueUnitSlot(p:vec3u,axis:u32)->u32{
- let t=p/4u;let l=p%4u;let word=ueTileWord(t);var upper=0u;
- if((word&0x80000000u)==0u&&l[axis]==3u&&t[axis]+1u<UM_T[axis]){var above=t;above[axis]+=1u;upper=ueTileWord(above);}
- return ueUnitSlotIn(word,upper,l,axis);
-}
-fn ueCoarseWallIndex(t:vec3u,axis:u32)->u32{
- if(axis==0u){return t.y+UM_T.y*t.z;}
- if(axis==1u){return UM_T.y*UM_T.z+t.x+UM_T.x*t.z;}
- return UM_T.y*UM_T.z+UM_T.x*UM_T.z+t.x+UM_T.x*t.y;
-}
-fn umSlot(anchor:vec3i,axis:u32,width:u32)->u32{
- let p=vec3u(max(anchor,vec3i(0)));
- if(anchor[axis]<0){return select(UE_COARSE_WALL+ueCoarseWallIndex(p/4u,axis),UE_UNIT_WALL+umNegativeBoundaryIndex(p,axis),width==1u);}
- if(width==1u){return ueUnitSlot(p,axis);}
- return UE_COARSE+axis*UE_TILES+umTileAt(p/4u);
-}
+
+
+
 // The shared sampler source needs this symbol; no entry of this module samples.
 fn umLoadMixedFace(p:vec3i,axis:u32)->f32{return stateIn[umSlot(p,axis,1u)].x;}
 // A slot is written only by the owner holding its (clamped) anchor cell. Off
@@ -1108,7 +1125,8 @@ ${["publishList"].map(name=>uniformMixedFaceDispatchWGSL(name,"umPublished(face)
   }
   value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);return;
  }`)).join("\n")}
-`,["seed","sweep","seedList","sweepList","publishList","publishFine"])});
+`,["seed","sweep","seedList","sweepList","publishList","publishFine"]);
+  const module=uniformDetailModule(this.device,{label:"Uniform mixed extension",code:source});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
   this.restrictPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"restrictBand",constants:{umDispatchX:this.ownership.dispatchX}}});
@@ -1121,43 +1139,121 @@ ${["publishList"].map(name=>uniformMixedFaceDispatchWGSL(name,"umPublished(face)
    this.seamPipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:`${entryPoint}Seams`,constants:entryPoint==="sweep"?{ueStagedTiles:1,ueMixedJobs:1,ueSweepKind:2}:{}}}));
    if(entryPoint==="sweep")this.fineSeamSweep=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"sweepSeams",constants:{ueStagedTiles:1,ueMixedJobs:0,ueSweepKind:1,ueStagePack:1,ueCacheFineRequests:1}}});
   }));
+  if(this.supportsPair){
+   const pairedSource=pairedExtensionSource(source,true);
+   const paired=uniformDetailModule(this.device,{label:"Uniform mixed paired extension",code:pairedSource});
+   const messages=(await paired.getCompilationInfo()).messages.filter(m=>m.type==="error");if(messages.length)throw new Error(messages.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+   const pairLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.pairedResources!]});
+   const compile=(entryPoint:string,constants:Record<string,number>={})=>uniformDetailPipeline(this.device,this.ownership,{layout:pairLayout,compute:{module:paired,entryPoint,constants}});
+   this.retainPipelines=await Promise.all([compile("retainFine"),compile("retainCoarse")]);
+   await Promise.all(["seed","sweep"].map(async name=>{
+    const C=UNIFORM_MIXED_COUNTED;
+    this.pairedRegular.set(name,await compile(`pair_${name}`,{umDispatchX:this.ownership.dispatchX,umCellWidth:1,umRegularTiles:1,umRegularFine:1,umCountedJobs:C.owners,ueStagedTiles:+(name==="sweep")}));
+    this.pairedList.set(name,await compile(`pair_${name}List`,{umDispatchX:this.ownership.dispatchX,umCellWidth:4,umRegularTiles:1,umRegularFine:0,ueRegularCoarseList:1,umCountedJobs:C.regularCoarse}));
+    this.pairedSeams.set(name,await compile(`pair_${name}Seams`,name==="sweep"?{ueStagedTiles:1,ueMixedJobs:1,ueSweepKind:2}:{}));
+   }));
+   this.pairedFineSweep=await compile("pair_sweepSeams",{ueStagedTiles:1,ueMixedJobs:0,ueSweepKind:1,ueStagePack:1,ueCacheFineRequests:1});
+   this.companionRestrict=await compile("restrictBand",{umDispatchX:this.ownership.dispatchX,ueCompanionValues:1});
+   this.companionRegular.set("publish",await compile("publishFine",{umDispatchX:this.ownership.dispatchX,umCellWidth:1,umRegularTiles:1,umRegularFine:1,umCountedJobs:UNIFORM_MIXED_COUNTED.owners,ueCompanionValues:1}));
+   this.companionList.set("publish",await compile("publishList",{umDispatchX:this.ownership.dispatchX,umCellWidth:4,umRegularTiles:1,ueRegularCoarseList:1,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,ueCompanionValues:1}));
+   this.companionSeams.set("publish",await compile("publishSeams",{ueCompanionValues:1}));
+   // Old publication retains geometric source selections in the dead epoch.
+   // The current payload reuses them only after a matching old snapshot.
+   const replay=uniformDetailModule(this.device,{label:"Uniform mixed extension publication replay",code:replayedPublicationSource(source)});
+   const replayErrors=(await replay.getCompilationInfo()).messages.filter(m=>m.type==="error");if(replayErrors.length)throw new Error(replayErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+   const replayPipeline=(entryPoint:string,constants:Record<string,number>)=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module:replay,entryPoint,constants}});
+   const C=UNIFORM_MIXED_COUNTED;
+   const replayEntries=await Promise.all([
+    replayPipeline("publishFine",{umDispatchX:this.ownership.dispatchX,umCellWidth:1,umRegularTiles:1,umRegularFine:1,umCountedJobs:C.owners}),
+    replayPipeline("publishList",{umDispatchX:this.ownership.dispatchX,umCellWidth:4,umRegularTiles:1,ueRegularCoarseList:1,umCountedJobs:C.regularCoarse}),
+    replayPipeline("publishSeams",{}),
+   ]);
+   this.replayPublishers={regular:new Map([["publish",replayEntries[0]!]]),list:new Map([["publish",replayEntries[1]!]]),seams:new Map([["publish",replayEntries[2]!]])};
+   const snapshot=uniformDetailModule(this.device,{label:"Uniform mixed extension slot snapshot",code:pairedSnapshotSource(pairedSource,true)});
+   const snapshotErrors=(await snapshot.getCompilationInfo()).messages.filter(m=>m.type==="error");if(snapshotErrors.length)throw new Error(snapshotErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+   const snapshotLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.snapshotResources!]});
+   const make=(entryPoint:string)=>uniformDetailPipeline(this.device,this.ownership,{layout:snapshotLayout,compute:{module:snapshot,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,ueCompanionValues:1}}});
+   const [restrict,fine,coarse]=await Promise.all([make("restrictBand"),make("snapshotFine"),make("snapshotCoarse")]);this.snapshotPipelines={restrict,fine,coarse};
+  }
  }
  encode(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2,replayHierarchy=false):void{
+  this.snapshotEncoder=undefined;this.encodeStages(encoder,groups,sweeps,replayHierarchy);
+ }
+ /** Before forces/pressure, retain old canonical values in both companion
+  * epochs. Their inactive particle bank stays untouched until G2P resampling.
+  * A saturated fixed grid strides the GPU counts without empty per-tile jobs. */
+ retainPair(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup]):void{
+  if(!this.retainPipelines)throw new Error("Paired extension is not initialized");
+  const pass=encoder.beginComputePass(RETAIN_PASS),o=this.ownership;
+  pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,groups[0].group);
+  if(o.capacity.fineTiles>0){pass.setPipeline(uniformDetailPick(this.retainPipelines[0]));pass.dispatchWorkgroups(Math.min(4096,o.capacity.fineTiles));}
+  pass.setPipeline(uniformDetailPick(this.retainPipelines[1]));pass.dispatchWorkgroups(Math.min(4096,o.capacity.tiles));pass.end();
+ }
+ /** Seed the current field and shared geometry without overwriting the old
+  * scalar payload retained before pressure, then sweep both together. */
+ preparePair(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2):void{this.snapshotEncoder=undefined;this.encodeStages(encoder,groups,sweeps,false,"pair");}
+ /** Publish either payload; snapshot consumes the old one before the new
+  * publication reuses the same output field. */
+ finishPair(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2,companion=false):void{
+  const replay=!companion&&this.snapshotEncoder===encoder&&this.snapshotSweeps===sweeps;
+  this.snapshotEncoder=undefined;this.encodeStages(encoder,groups,sweeps,!companion,companion?"companion":"current",replay);
+ }
+ /** Finalize old canonical slots and fine taps without materializing RGBA. */
+ finishSnapshot(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2):void{
+  if(!this.snapshotPipelines)throw new Error("Slot snapshot is not initialized");
+  if(!Number.isSafeInteger(sweeps)||sweeps<0)throw new Error("Invalid mixed extension sweep count");
+  const pass=encoder.beginComputePass(SNAPSHOT_PASS),p=this.snapshotPipelines,o=this.ownership,d=o.capacity.tileDimensions;
+  pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,groups[sweeps%2]!.group);pass.setPipeline(uniformDetailPick(p.restrict));
+  pass.dispatchWorkgroups(ceilDiv(d[0]!,4),ceilDiv(d[1]!,4),ceilDiv(d[2]!,4));this.hierarchy.encode(pass,false);
+  pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,groups[sweeps%2]!.group);
+  // The fine publisher grid-strides its live tile list; cap empty launch groups.
+  if(o.capacity.fineTiles>0){pass.setPipeline(uniformDetailPick(p.fine));pass.dispatchWorkgroups(Math.min(8192,o.capacity.fineTiles));}
+  const count=ceilDiv(3*o.capacity.tiles,64);pass.setPipeline(uniformDetailPick(p.coarse));pass.dispatchWorkgroups(Math.min(65535,count),ceilDiv(count,65535));pass.end();
+  this.snapshotEncoder=encoder;this.snapshotSweeps=sweeps;
+ }
+ private encodeStages(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps:number,replayHierarchy:boolean,mode?:"pair"|"companion"|"current",replayPublication=false):void{
   if(this.seamPipelines.size!==(this.regularBulk?1:3)||!this.restrictPipeline)throw new Error("Mixed extension is not initialized");
-  // One pass: seed, sweeps, restriction, the hierarchy continuation, publish.
-  let open:GPUComputePassEncoder|undefined;
-  const run=(entry:string,group:UniformDetailGroup)=>{
-   if(!open){open=encoder.beginComputePass({label:"Uniform mixed extension"});open.setBindGroup(0,this.ownership.bindGroup);}
-   const pass=open;pass.setBindGroup(1,group.group);
-   if(entry==="restrictBand"){pass.setPipeline(uniformDetailPick(this.restrictPipeline!));pass.dispatchWorkgroups(...this.ownership.capacity.tileDimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);}
-   else {
-    // Counted launches, each empty (not skipped) when its GPU count is zero
-    // unless no h tile can exist.
-    const o=this.ownership,tiles=o.capacity.tiles,packs=Math.ceil(tiles/64);
-    o.dispatchTierCounted(pass,this.regularPipelines.get(entry)!,0);
-    // Fine seams reserve only their own staged neighborhood. Regular 4h
-    // owners share the coarse seam launch to avoid a third sweep dispatch.
-    // A coarse-only capacity continues to use the existing list kernel.
-    if(entry==="sweep"&&!o.coarseOnly){
-     o.dispatchCounted(pass,this.fineSeamSweep!,o.capacity.fineTiles,"seamFine");
-     o.dispatchCounted(pass,this.seamPipelines.get(entry)!,Math.ceil(tiles/UE_PACK_TILES)+packs,"seams");return;
-    }
-    // A regular 4h owner (a 3x3x3 stencil of 4h tiles) seeds from and
-    // publishes at tile origins and +face anchors only: the base blocks.
-    // Its sweep touches no field.
-    const based=entry!=="sweep";
-    if(based)pass.setBindGroup(1,group.base);
-    o.dispatchRegularCoarseCounted(pass,this.listPipelines.get(entry)!);
-    if(based)pass.setBindGroup(1,group.group);
-    if(based)o.dispatchCounted(pass,this.seamPipelines.get(entry)!,tiles,"hanging");
-   }
-  };
-  const end=()=>{open?.end();open=undefined;};
   if(!Number.isSafeInteger(sweeps)||sweeps<0)throw new Error("Invalid mixed extension sweep count");
   // Bulk extension uses only the regular hierarchy. Its restriction reads
   // physical supported faces directly, and publication preserves them at h.
-  if(!this.regularBulk){run("seed",groups[1]);for(let i=0;i<sweeps;i++)run("sweep",groups[i%2]!);}
-  const final=groups[sweeps%2]!;run("restrictBand",final);
-  this.hierarchy.encode(open!,replayHierarchy);open!.setBindGroup(0,this.ownership.bindGroup);run("publish",final);end();
+  const swept=!this.regularBulk&&mode!=="companion"&&mode!=="current";
+  if(mode==="pair"&&!swept)return;
+  // One pass: seed, sweeps, restriction, the hierarchy continuation, publish.
+  const pass=encoder.beginComputePass(EXTENSION_PASS);pass.setBindGroup(0,this.ownership.bindGroup);
+  if(swept){this.encodeStage(pass,"seed",groups[1],mode,replayPublication);for(let i=0;i<sweeps;i++)this.encodeStage(pass,"sweep",groups[i%2]!,mode,replayPublication);}
+  if(mode==="pair"){pass.end();return;}
+  const final=groups[sweeps%2]!;this.encodeStage(pass,"restrictBand",final,mode,replayPublication);
+  this.hierarchy.encode(pass,replayHierarchy);pass.setBindGroup(0,this.ownership.bindGroup);this.encodeStage(pass,"publish",final,mode,replayPublication);pass.end();
+ }
+ /** One stage of encodeStages' pass. A method, not a closure there: a closure is a fresh object every frame. */
+ private encodeStage(pass:GPUComputePassEncoder,entry:string,group:UniformDetailGroup,mode:"pair"|"companion"|"current"|undefined,replayPublication:boolean):void{
+  const o=this.ownership;pass.setBindGroup(1,group.group);
+  if(entry==="restrictBand"){
+   const d=o.capacity.tileDimensions;pass.setPipeline(uniformDetailPick((mode==="companion"?this.companionRestrict:this.restrictPipeline)!));
+   pass.dispatchWorkgroups(ceilDiv(d[0]!,4),ceilDiv(d[1]!,4),ceilDiv(d[2]!,4));return;
+  }
+  const publication=replayPublication?this.replayPublishers:undefined;
+  const regular=mode==="pair"?this.pairedRegular:mode==="companion"?this.companionRegular:publication?.regular??this.regularPipelines;
+  const list=mode==="pair"?this.pairedList:mode==="companion"?this.companionList:publication?.list??this.listPipelines;
+  const seams=mode==="pair"?this.pairedSeams:mode==="companion"?this.companionSeams:publication?.seams??this.seamPipelines;
+  // Counted launches, each empty (not skipped) when its GPU count is zero
+  // unless no h tile can exist.
+  const tiles=o.capacity.tiles,packs=ceilDiv(tiles,64);
+  o.dispatchTierCounted(pass,regular.get(entry)!,0);
+  // Fine seams reserve only their own staged neighborhood. Regular 4h
+  // owners share the coarse seam launch to avoid a third sweep dispatch.
+  // A coarse-only capacity continues to use the existing list kernel.
+  if(entry==="sweep"&&!o.coarseOnly){
+   o.dispatchCounted(pass,(mode==="pair"?this.pairedFineSweep:this.fineSeamSweep)!,o.capacity.fineTiles,"seamFine");
+   o.dispatchCounted(pass,seams.get(entry)!,ceilDiv(tiles,UE_PACK_TILES)+packs,"seams");return;
+  }
+  // A regular 4h owner (a 3x3x3 stencil of 4h tiles) seeds from and
+  // publishes at tile origins and +face anchors only: the base blocks.
+  // Its sweep touches no field.
+  const based=entry!=="sweep";
+  if(based)pass.setBindGroup(1,group.base);
+  o.dispatchRegularCoarseCounted(pass,list.get(entry)!);
+  if(based)pass.setBindGroup(1,group.group);
+  if(based)o.dispatchCounted(pass,seams.get(entry)!,tiles,"hanging");
  }
 }

@@ -1,21 +1,53 @@
 /** Reuse the reconstructed surface's bounded crossing search for redistance
- * and particle membership. Canonical vertex signs stay fixed; adaptive coarse
- * interpolation still needs the final crossing search.
+ * and particle membership. Canonical vertex signs stay fixed, and fine
+ * redistance leaves every interface vertex alone: its crossing set is final.
  * Fixed-band coarse values remain advected surface samples. Adaptive coarse
- * vertices beside retiring h owners recover metric magnitudes before handoff. */
+ * vertices beside retiring h owners recover metric magnitudes before handoff;
+ * that can move a hanging zero, so they are stored first (depthCoarse, then
+ * redistanceCoarse) and the fine band's search and metric follow them. */
 export const narrowBandRedistanceWGSL=/* wgsl */`
+// Sort cursors expire after particle ordering. Before each metric build,
+// borrow that bank for eight exact normalized corners per crossing cell.
+// Transfer properties may overwrite it later; the next metric rebuilds it.
+override nbCachedGeometry:bool=true;
+fn nbGeometryCapacity()->u32{return (NB_CELLS-1u)/8u;}
+fn nbGeometryRank(mask:vec2u,lane:u32)->u32{
+ let word=lane>>5u;let below=(1u<<(lane&31u))-1u;
+ return select(0u,countOneBits(mask.x),word!=0u)+countOneBits(mask[word]&below);
+}
+var<workgroup> nbGeometryBase:u32;
+var<workgroup> nbGeometryMask:vec2u;
+@compute @workgroup_size(64) fn depthGeometry(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=atomicLoad(&bins[NB_BAND_SEARCH+group.x]);
+ if(lane==0u){
+  nbGeometryMask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*tile]),atomicLoad(&bins[NB_BAND_MASK+2u*tile+1u]));
+  let count=countOneBits(nbGeometryMask.x)+countOneBits(nbGeometryMask.y);
+  nbGeometryBase=atomicAdd(&bins[NB_CELLS],count);
+  // The candidate list has been consumed by depthSeeds; use it as a map.
+  atomicStore(&bins[NB_BAND_CANDIDATES+tile],nbGeometryBase);
+ }
+ let base=workgroupUniformLoad(&nbGeometryBase);let mask=nbGeometryMask;
+ if((mask[lane>>5u]&(1u<<(lane&31u)))==0u){return;}
+ let slot=base+nbGeometryRank(mask,lane);if(slot>=nbGeometryCapacity()){return;}
+ let p=4u*umTileCoord(tile)+umCorner(lane,4u);
+ let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+ for(var k=0u;k<8u;k++){
+  let value=umVertexValue(p+umCorner(k,2u))/h;
+  atomicStore(&bins[NB_CELLS+1u+8u*slot+k],bitcast<u32>(value));
+ }
+}
 // A voxel boundary belongs to the closure of its open incident cells. The
 // cell on the positive side can be solid; its buried corners are air
 // sentinels, not samples of the liquid distance field.
 fn nbOpenSurfaceCell(p:vec3f)->vec3i{
  let q=clamp(p,vec3f(0),vec3f(UM_D));let base=vec3i(floor(q));let c=min(base,vec3i(UM_D)-1);
- if(!umSolidEnabled()||umCellOpen(c)>1e-5){return c;}
+ if(!umSolidEnabled()||umCellIsOpen(c)){return c;}
  let onPlane=q==vec3f(base);
  for(var k=1u;k<8u;k++){
   let back=umCorner(k,2u);if(any((back!=vec3u(0))&!onPlane)){continue;}
   let other=base-vec3i(back);
   if(any(other<vec3i(0))||any(other>=vec3i(UM_D))){continue;}
-  if(umCellOpen(other)>1e-5){return other;}
+  if(umCellIsOpen(other)){return other;}
  }
  return vec3i(-1);
 }
@@ -63,8 +95,18 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
  let base=nbCell(cell);let origin=vec3f(base);var v:array<f32,8>;
  // The cell's corners are lattice vertices: among h tiles each is one load.
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- for(var k=0u;k<8u;k++){
-  v[k]=umVertexValue(base+umCorner(k,2u))/h;
+ var slot=nbGeometryCapacity();
+ if(nbCachedGeometry){
+  let tile=nbBandTile(base);let first=atomicLoad(&bins[NB_BAND_CANDIDATES+tile]);
+  if(first<nbGeometryCapacity()){
+   let mask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*tile]),atomicLoad(&bins[NB_BAND_MASK+2u*tile+1u]));
+   let local=base&vec3u(3u);slot=first+nbGeometryRank(mask,local.x+4u*(local.y+4u*local.z));
+  }
+ }
+ if(slot<nbGeometryCapacity()){
+  for(var k=0u;k<8u;k++){v[k]=bitcast<f32>(atomicLoad(&bins[NB_CELLS+1u+8u*slot+k]));}
+ }else{
+  for(var k=0u;k<8u;k++){v[k]=umVertexValue(base+umCorner(k,2u))/h;}
  }
  // Edge crossings supply a zero-set fallback if a clamped Newton solve
  // cannot reach zero inside this cell (thin or badly conditioned patches).
@@ -183,6 +225,25 @@ fn nbRedistanceVertex(p:vec3u,width:u32){
  if(regular){if(!all((local>vec3u(0))|(origin==vec3u(0)))){return;}}
  else{let a=umVertexAuthority(p);if(a.width!=1u||a.tile!=owner.tile){return;}}
  nbRedistanceVertex(p,1u);
+}
+// The metric of the coarse corners retirement can normalize, where
+// redistanceCoarse reads it: one writer each. Every corner beside an h owner
+// is built: the surface heat that selects the retiring ones reads the phi of
+// the store's own bindings, not this pass's. Compiled without the geometry
+// cache, which the fine band's metric builds after its own search.
+@compute @workgroup_size(64) fn depthCoarse(@builtin(global_invocation_id) gid:vec3u){
+ for(var i=gid.x;i<umCounts.y;i+=65536u){
+  let owner=umAllOwner(vec3u(umCounts.x*64u+i,0u,0u));let origin=umOrigin(owner);
+  let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
+  for(var k=0u;k<8u;k++){
+   let corner=umCorner(k,2u);let p=origin+corner*4u;
+   if(regular){if(!all((corner!=vec3u(0))|(origin==vec3u(0)))){continue;}}
+   else{if(umVertexAuthority(p).index!=owner.index){continue;}}
+   let c=min(p,UM_D-1u);
+   if(!nbAdaptive()||umTileMinimumWidth(umTileAt(c/4u))!=1u||(nbBandReach(c)&2u)==0u){continue;}
+   nbBuildDistance(p,nbBandTile(c));
+  }
+ }
 }
 @compute @workgroup_size(64) fn redistanceCoarse(@builtin(global_invocation_id) gid:vec3u){
  for(var i=gid.x;i<umCounts.y;i+=65536u){

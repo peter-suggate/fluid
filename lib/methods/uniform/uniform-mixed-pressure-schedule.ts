@@ -19,6 +19,18 @@ export interface UniformMixedPressurePlan {readonly vCycles:number;readonly full
  * trajectories) and failed. */
 export const UNIFORM_MIXED_SCHEDULE_FLOOR=3;
 
+/** The one plan object of each slot list: a frame's plan arithmetic returns
+ * these, so planning a frame constructs nothing once its lists have been
+ * seen. A plan is immutable. */
+const PLANS:UniformMixedPressurePlan[][]=[];
+function planOf(vCycles:number,fullCycles:number):UniformMixedPressurePlan{
+ // Slot counts are small naturals (the schedule's caps); anything else is
+ // the caller's to reject and is not kept.
+ if(!(Number.isInteger(vCycles)&&vCycles>=0&&vCycles<256&&Number.isInteger(fullCycles)&&fullCycles>=0&&fullCycles<256))return {vCycles,fullCycles};
+ const row=PLANS[vCycles]??=[];
+ return row[fullCycles]??=Object.freeze({vCycles,fullCycles});
+}
+
 /** Add capacity without reviving a V phase the planner dropped after a stall.
  * Positive surface coarsening needs another spare across abrupt impacts;
  * the ordinary GPU plan already includes its own one-cycle headroom. */
@@ -27,7 +39,7 @@ export function uniformMixedPressureReserve(plan:UniformMixedPressurePlan,maximu
  if(fullCycles===0){const add=Math.min(remaining,maximum.vCycles-vCycles);vCycles+=add;remaining-=add;}
  const add=Math.min(remaining,maximum.fullCycles-fullCycles);fullCycles+=add;remaining-=add;
  if(vCycles>0)vCycles=Math.min(maximum.vCycles,vCycles+remaining);
- return {vCycles,fullCycles};
+ return planOf(vCycles,fullCycles);
 }
 
 /** A V-only plan gives its last V slot to a Full-Cycle, so the stall jump
@@ -36,7 +48,7 @@ export function uniformMixedPressureReserve(plan:UniformMixedPressurePlan,maximu
  * against a plan of three, 3 of 8 perturbed runs by frame 34), and no lagged
  * receipt separates those frames from their neighbours. */
 export function uniformMixedPressureSpareFull(plan:UniformMixedPressurePlan,maximum:UniformMixedPressurePlan):UniformMixedPressurePlan{
- return plan.fullCycles===0&&plan.vCycles>1&&maximum.fullCycles>0?{vCycles:plan.vCycles-1,fullCycles:1}:plan;
+ return plan.fullCycles===0&&plan.vCycles>1&&maximum.fullCycles>0?planOf(plan.vCycles-1,1):plan;
 }
 
 /** GPU-resident CM11a schedule for the mixed pressure solve. The host encodes
@@ -82,6 +94,12 @@ export class UniformMixedPressureSchedule {
  private pipeline?:GPUComputePipeline;
  private group?:GPUBindGroup;
  private gates=0;
+ private readonly queue:GPUQueue;
+ /** begin's writes: the cleared step counter, and the frame's V and Full slots. */
+ private readonly stepWord=new Uint32Array(1);
+ private readonly planWords=new Uint32Array(2);
+ /** Each gate's pass, described once (the projection's is the last). */
+ private readonly gatePasses:GPUComputePassDescriptor[];
  constructor(private readonly device:GPUDevice,private readonly schedule:UniformCM11aSchedule,
   private readonly state:GPUBuffer,
   /** The slot gate word: the pressure root's support (umSlotClosed word
@@ -92,7 +110,8 @@ export class UniformMixedPressureSchedule {
    readonly status:GPUBuffer;readonly band:GPUBuffer;readonly bandClosedWord:number;
    /** The acceptance uniform (UniformMixedPressureAcceptanceFields.params). */
    readonly acceptance:GPUBuffer}){
-  this.maximum={vCycles:schedule.vCycles,fullCycles:schedule.fullCycles};
+  this.maximum={vCycles:schedule.vCycles,fullCycles:schedule.fullCycles};this.queue=device.queue;
+  this.gatePasses=Array.from({length:schedule.vCycles+schedule.fullCycles+1},(_,slot)=>({label:`Uniform mixed pressure gate ${slot}`}));
   this.control=device.createBuffer({label:"Uniform mixed pressure schedule",size:128,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   device.queue.writeBuffer(this.control,100,new Uint32Array([words.supportWord]));
  }
@@ -181,11 +200,13 @@ fn umPlan(){
  /** Starts a frame's slot list for `plan`. The step counter restarts here. */
  begin(plan:UniformMixedPressurePlan):void{
   if(!this.pipeline)throw new Error("Mixed pressure schedule is not initialized");
-  if(![plan.vCycles,plan.fullCycles].every(n=>Number.isInteger(n)&&n>=0)||plan.vCycles>this.maximum.vCycles||plan.fullCycles>this.maximum.fullCycles||plan.vCycles+plan.fullCycles===0)
+  const v=plan.vCycles,f=plan.fullCycles;
+  if(!Number.isInteger(v)||v<0||!Number.isInteger(f)||f<0||v>this.maximum.vCycles||f>this.maximum.fullCycles||v+f===0)
    throw new Error(`Invalid mixed pressure plan ${JSON.stringify(plan)}`);
   this.plan=plan;this.gates=0;
-  this.device.queue.writeBuffer(this.control,0,new Uint32Array(1));
-  this.device.queue.writeBuffer(this.control,48,new Uint32Array([plan.vCycles,plan.fullCycles]));
+  this.planWords[0]=v;this.planWords[1]=f;
+  this.queue.writeBuffer(this.control,0,this.stepWord);
+  this.queue.writeBuffer(this.control,48,this.planWords);
  }
  /** Copy the planner's next slot list (two u32: V, Full) for the host. */
  encodePlanCopy(encoder:GPUCommandEncoder,destination:GPUBuffer,offset:number):void{
@@ -197,7 +218,7 @@ fn umPlan(){
  gate(encoder:GPUCommandEncoder,slot:number):GPUCommandEncoder{
   if(slot!==this.gates||slot>this.slots)throw new Error(`Mixed pressure gate ${slot} encoded out of order`);
   this.gates++;
-  const pass=encoder.beginComputePass({label:`Uniform mixed pressure gate ${slot}`});
+  const pass=encoder.beginComputePass(this.gatePasses[slot]!);
   pass.setPipeline(this.pipeline!);pass.setBindGroup(0,this.group!);pass.dispatchWorkgroups(1);pass.end();
   return encoder;
  }

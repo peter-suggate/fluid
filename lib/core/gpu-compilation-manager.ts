@@ -615,24 +615,26 @@ export function managedGPUDevice(
   const existing = managedDeviceByRawDevice.get(rawDevice);
   if (existing) return existing;
   const manager = new GPUCompilationManager(rawDevice, {...options,maximumConcurrentBundles:options.maximumConcurrentBundles??defaultGPUCompilationConcurrency()});
+  // One bound method per property for the device's life: the frame path reads
+  // createCommandEncoder and the like every frame and must not allocate.
+  const methods = new Map<string | symbol, unknown>();
+  const disabled = (property: string) => () => {
+    throw new Error(`${property} is disabled; acquire the pipeline through GPUCompilationManager`);
+  };
+  methods.set("createShaderModule", (descriptor: GPUShaderModuleDescriptor) => manager.createShaderModule(descriptor));
+  methods.set("createComputePipelineAsync", (descriptor: GPUComputePipelineDescriptor) => manager.compileComputePipeline(descriptor));
+  methods.set("createRenderPipelineAsync", (descriptor: GPURenderPipelineDescriptor) => manager.compileRenderPipeline(descriptor));
+  methods.set("createComputePipeline", disabled("createComputePipeline"));
+  methods.set("createRenderPipeline", disabled("createRenderPipeline"));
   const managed = new Proxy(rawDevice, {
     get(target, property) {
-      if (property === "createShaderModule") {
-        return (descriptor: GPUShaderModuleDescriptor) => manager.createShaderModule(descriptor);
-      }
-      if (property === "createComputePipelineAsync") {
-        return (descriptor: GPUComputePipelineDescriptor) => manager.compileComputePipeline(descriptor);
-      }
-      if (property === "createRenderPipelineAsync") {
-        return (descriptor: GPURenderPipelineDescriptor) => manager.compileRenderPipeline(descriptor);
-      }
-      if (property === "createComputePipeline" || property === "createRenderPipeline") {
-        return () => {
-          throw new Error(`${String(property)} is disabled; acquire the pipeline through GPUCompilationManager`);
-        };
-      }
+      const method = methods.get(property);
+      if (method) return method;
       const value = Reflect.get(target, property, target);
-      return typeof value === "function" ? value.bind(target) : value;
+      if (typeof value !== "function") return value;
+      const bound = value.bind(target);
+      methods.set(property, bound);
+      return bound;
     },
   }) as GPUDevice;
   managerByDevice.set(rawDevice, manager);

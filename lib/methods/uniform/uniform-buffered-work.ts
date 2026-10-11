@@ -23,5 +23,10 @@ export interface UniformWorkEdit{readonly tiles:number;readonly reach:number}
 export function uniformBufferedWork(previous:number,observed:number,ceiling:number,reserve=0):number{
  if(!Number.isInteger(previous)||previous<1||!Number.isInteger(observed)||observed<0||!Number.isInteger(ceiling)||ceiling<1||!Number.isInteger(reserve)||reserve<0)
   throw new Error("Buffered work needs positive integer budgets, a nonnegative count and a nonnegative reserve");
- return Math.min(ceiling,Math.max(1,reserve,Math.ceil(previous/2),Math.ceil(observed*1.25)));
+ // ceil(previous/2) and ceil(1.25 observed) in exact integer steps, and the
+ // bounds by comparison: this runs every frame for every launch family, and
+ // a fractional intermediate is a heap number until the call is optimized.
+ const half=(previous+(previous&1))/2,headroom=observed+(observed+((4-(observed&3))&3))/4;
+ let work=reserve>1?reserve:1;if(half>work)work=half;if(headroom>work)work=headroom;
+ return work<ceiling?work:ceiling;
 }

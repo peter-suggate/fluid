@@ -47,7 +47,11 @@ export const UNIFORM_MIXED_PAGE_TILES=4;
 export function uniformMixedPageDimensions(lattice:{readonly dimensions:readonly number[]}):[number,number,number]{
   const p=lattice.dimensions.map(d=>Math.ceil(d/4/UNIFORM_MIXED_PAGE_TILES));return [p[0]!,p[1]!,p[2]!];
 }
-export const uniformMixedPageCount=(lattice:{readonly dimensions:readonly number[]})=>uniformMixedPageDimensions(lattice).reduce((n,d)=>n*d,1);
+/** The product of uniformMixedPageDimensions, with no array made: frame
+ * paths call it. */
+export const uniformMixedPageCount=(lattice:{readonly dimensions:readonly number[]})=>{
+  const d=lattice.dimensions;return Math.ceil(d[0]!/4/UNIFORM_MIXED_PAGE_TILES)*Math.ceil(d[1]!/4/UNIFORM_MIXED_PAGE_TILES)*Math.ceil(d[2]!/4/UNIFORM_MIXED_PAGE_TILES);
+};
 /** Sticky detail-storage violation bits (uniform-detail-fields.ts): set by
  * a store a non-resident tile cannot hold; the frame receipt makes it fatal. */
 export const uniformMixedDetailViolationWord=(tiles:number,lattice:{readonly dimensions:readonly number[]})=>uniformMixedResidencyWord(tiles)+4+2*uniformMixedPageCount(lattice);

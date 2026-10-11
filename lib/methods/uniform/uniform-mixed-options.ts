@@ -7,6 +7,8 @@ export interface UniformMixedOptionalFeatures {
 }
 
 export function assertUniformMixedOptions(options: UniformMixedOptionalFeatures): void {
+  // The supported options name nothing: the list is the failure's alone.
+  if (options.velocityTransport === "semi-lagrangian" && !options.liquidOnlyVelocityAdvection) return;
   const unsupported: string[] = [];
   if (options.velocityTransport !== "semi-lagrangian") unsupported.push("MacCormack momentum");
   if (options.liquidOnlyVelocityAdvection) unsupported.push("liquid-only momentum advection");

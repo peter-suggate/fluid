@@ -24,6 +24,12 @@ const wideVertices=(d:readonly number[])=>d.reduce((n,v)=>n*(v/4+1),1);
 export const uniformMixedSurfaceHeldWord=(d:readonly number[])=>surfaceClaimWords(d)+wideVertices(d);
 /** Workgroups of 256 lanes wallReach spends on one plane: its cells. */
 const wallReachGroups=(d:readonly number[])=>Math.ceil(Math.max(d[0]!*d[1]!,d[1]!*d[2]!,d[2]!*d[0]!)/256);
+/** encode()'s pass descriptors by entry, and its per-axis evidence pipeline keys. */
+const SURFACE_PASS:Readonly<Record<"advect"|"redistance"|"traceCells",GPUComputePassDescriptor>>={advect:{label:"Uniform mixed surface advect"},redistance:{label:"Uniform mixed surface redistance"},traceCells:{label:"Uniform mixed surface traceCells"}};
+const DEFERRED_PASS:GPUComputePassDescriptor={label:"Uniform mixed surface advect deferred"};
+/** ceil(jobs/per) in whole steps: a fractional quotient is a heap number until its caller is optimized. */
+const ceilDiv=(jobs:number,per:number):number=>{const up=jobs+per-1;return (up-up%per)/per;};
+const EVIDENCE_DISTANCE=["evidenceDistance0","evidenceDistance1","evidenceDistance2"] as const;
 
 export interface UniformMixedSurfaceFields {
   /** NB-FLIP sticky trajectory failure receipt; absent in Uniform Geometric. */
@@ -57,7 +63,8 @@ export class UniformMixedSurface {
    * Only the scratch prefix is cleared per frame. */
   readonly claims: GPUBuffer;
   /** The held-vertex corrections, for the Dynamic census (umHeldIndex). */
-  get held():{readonly buffer:GPUBuffer;readonly word:number}{return {buffer:this.claims,word:uniformMixedSurfaceHeldWord(this.ownership.capacity.lattice.dimensions)};}
+  get held():{readonly buffer:GPUBuffer;readonly word:number}{return this.heldView;}
+  private readonly heldView:{readonly buffer:GPUBuffer;readonly word:number};
   private readonly pipelines = new Map<string, GPUComputePipeline>();
   private readonly regularPipelines=new Map<string,GPUComputePipeline>();
   /** advect and redistance over the general h list, a lane per vertex. */
@@ -67,6 +74,12 @@ export class UniformMixedSurface {
   /** Workgroups of the deferred advect launches: the list's bound (one word
    * per lattice vertex), capped where the GPU is saturated. */
   private readonly deferredGrid:number;
+  /** Launch widths the lattice fixes: advect's claim clear (bytes), wallReach,
+   * the three evidence distance axes' tile lines, and advectWalls. */
+  private readonly advectClearBytes:number;
+  private readonly wallGroups:number;
+  private readonly evidenceLines:readonly [number,number,number];
+  private readonly deferredWallGroups:number;
   constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly hanging=false,resolved=false,private readonly narrowBand=false) {
     // Every sampler, cubic and evidence read assumes UniformMixedPhiResolve.
     if(!resolved)throw new Error("Mixed surface reads a resolved phi field (UniformMixedPhiResolve)");
@@ -86,6 +99,11 @@ export class UniformMixedSurface {
     this.allocatedBytes=4*(surfaceClaimWords(ownership.capacity.lattice.dimensions)+2*wideVertices(ownership.capacity.lattice.dimensions));
     this.claims=device.createBuffer({label:"Uniform mixed surface job claims",size:this.allocatedBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     this.deferredGrid=Math.min(1024,Math.ceil(ownership.capacity.lattice.dimensions.reduce((a,n)=>a*(n+1),1)/64));
+    const d=ownership.capacity.lattice.dimensions,t=d.map(n=>n/4),v=d.map(n=>n+1);
+    this.heldView={buffer:this.claims,word:uniformMixedSurfaceHeldWord(d)};
+    this.advectClearBytes=4*surfaceClaimWords(d);this.wallGroups=6*wallReachGroups(d);
+    this.evidenceLines=[t[1]!*t[2]!,t[2]!*t[0]!,t[0]!*t[1]!];
+    this.deferredWallGroups=Math.ceil(2*(v[1]!*v[2]!+v[2]!*v[0]!+v[0]!*v[1]!)/64);
   }
   /** bind()'s evidence scratch from a 256-aligned offset: the tile words, then the deferred advect list. */
   get scratchBytes():number{
@@ -177,14 +195,15 @@ fn umSurfaceTrace(p:vec3f)->vec3f{
 }
 ${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
 ${this.solid?/* wgsl */`${uniformMixedVertexBuriedWGSL}
-fn umOpenAt(q:vec3f)->f32{return umCellOpen(clamp(vec3i(floor(q)),vec3i(0),vec3i(UM_D)-vec3i(1)));}
+// Every caller needs only the open predicate; the coarse record caches it.
+fn umOpenAt(q:vec3f)->bool{return umCellIsOpen(clamp(vec3i(floor(q)),vec3i(0),vec3i(UM_D)-vec3i(1)));}
 // uvTrace: walk every crossed half-cell so no characteristic tunnels a wall.
 struct UMWalk{q:vec3f,hit:bool}
 fn umWalk(p:vec3f,end:vec3f)->UMWalk{
  if(!umSolidEnabled()){return UMWalk(end,false);}
  let steps=max(1u,u32(ceil(2.0*max(abs(end.x-p.x),max(abs(end.y-p.y),abs(end.z-p.z))))));
  var previous=p;
- for(var s=1u;s<=steps;s++){let q=mix(p,end,f32(s)/f32(steps));if(umOpenAt(q)<=1e-5){return UMWalk(previous,true);}previous=q;}
+ for(var s=1u;s<=steps;s++){let q=mix(p,end,f32(s)/f32(steps));if(!umOpenAt(q)){return UMWalk(previous,true);}previous=q;}
  return UMWalk(end,false);
 }
 fn umTrace(p:vec3f)->vec3f{return umWalk(p,umSurfaceTrace(p)).q;}
@@ -215,9 +234,9 @@ fn umEmbeddedAir(p:vec3f,end:vec3f,advected:f32)->f32{
  var previous=p;var result=advected;
  for(var step=1u;step<=steps;step++){
   let q=mix(p,end,f32(step)/f32(steps));let solid=vec3i(floor(q));
-  if(umSolidValid(solid)&&umCellOpen(solid)<=1e-5){
+  if(umSolidValid(solid)&&!umCellIsOpen(solid)){
    for(var axis=0u;axis<3u;axis++){for(var side=-1;side<=1;side+=2){
-    var fluid=solid;fluid[axis]+=side;if(umCellOpen(fluid)<=1e-5){continue;}
+    var fluid=solid;fluid[axis]+=side;if(!umCellIsOpen(fluid)){continue;}
     let inward=f32(side);let plane=f32(solid[axis])+select(0.0,1.0,side>0);
     let distance=inward*(p[axis]-plane);if(distance< -1e-5||inward*(end[axis]-p[axis])>=0.0){continue;}
     let a=inward*(previous[axis]-plane);let b=inward*(q[axis]-plane);
@@ -242,7 +261,7 @@ fn umEmbeddedContact(p:vec3f,advected:f32)->f32{
  let base=vec3i(p)-vec3i(1);var open=0u;var valid=0u;
  for(var k=0u;k<8u;k++){
   let cell=base+vec3i(umCorner(k,2u));
-  if(umSolidValid(cell)){valid|=1u<<k;}if(umCellOpen(cell)>1e-5){open|=1u<<k;}
+  if(umSolidValid(cell)){valid|=1u<<k;}if(umCellIsOpen(cell)){open|=1u<<k;}
  }
  var directions=0u;
  for(var k=0u;k<8u;k++){
@@ -362,7 +381,7 @@ fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
   if(value>=0.0&&inward*umSampleVelocity(probe)[axis]>=-1e-6){continue;}
   interior[axis]+=inward*f32(width);contact=true;
  }}
- if(!contact${this.solid?"||umOpenAt(interior)<=1e-5":""}){return value;}let continued=umSampleVertex(umTrace(interior));
+ if(!contact${this.solid?"||!umOpenAt(interior)":""}){return value;}let continued=umSampleVertex(umTrace(interior));
  return select(value,min(value,continued),continued<0.0);
 }
 // The six plane reach words (UM_WALL_REACH) are final once wallReach, an
@@ -490,19 +509,22 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  ${this.narrowBand?"if(!umSolidClear(vec3i(p))&&umBuried(p)){textureStore(outputPhi,vec3i(vertex),vec4f(umLoadVertex(vertex)));return;}":` if(!umSolidClear(vec3i(p))){
   var open=false;
   for(var k=0u;k<8u;k++){
-   let cell=vec3i(p)-vec3i(1)+vec3i(umCorner(k,2u));let cellOpen=umCellOpen(cell)>1e-5;
+   let cell=vec3i(p)-vec3i(1)+vec3i(umCorner(k,2u));let cellOpen=umCellIsOpen(cell);
    open=open||cellOpen;defer=defer||(umSolidValid(cell)&&!cellOpen);
   }
   if(!open&&umBuried(p)){textureStore(outputPhi,vec3i(vertex),vec4f(umLoadVertex(vertex)));return;}
  }
 `}
- if(!defer){let walk=umWalk(p,umSurfaceTrace(p));defer=walk.hit;let q=walk.q;`:"{let q=umTrace(p);"}
+ // A hit is evaluated by advectDeferred. Its first-pass phi and source
+ // samples are discarded, and travel is recorded only by that later pass.
+ if(!defer){let walk=umWalk(p,umSurfaceTrace(p));defer=walk.hit;let q=walk.q;if(!defer){`:"{let q=umTrace(p);"}
   let cell=umVertexCell(q);value=cell.value;
   let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
   if(params.flags.y!=0u&&abs(value)<2.0*h){value=umCubicPhi(q,cell);}
   defer=defer||umReleasedMayChange(p,value);
   ${this.narrowBand?"":"if(params.flags.z!=0u){value=umDrain(q,value,width);}"}value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
   if(!defer){umRecordTravel(p,q,width);}
+ ${this.solid?"}":""}
  }
  if(!defer){textureStore(outputPhi,vec3i(vertex),vec4f(value));return;}
  // Each canonical vertex is stored once: the list holds at most every vertex.
@@ -565,7 +587,7 @@ fn umSampleClosed(q:vec3f)->bool{
  if(!umSolidEnabled()){return false;}
  let c=clamp(vec3i(floor(q)),vec3i(0),vec3i(UM_D)-vec3i(1));let t=umTileAt(vec3u(c)/4u);
  if(umTileWidth(t)==4u){return umTileOpen(t)<=1e-5;}
- return umCellOpen(c)<=1e-5;
+ return !umCellIsOpen(c);
 }
 ${uniformSurfaceSampleInsideSolidWGSL}`:""}
 fn umSurfaceGradient(p:vec3f,width:f32)->vec3f{
@@ -624,13 +646,22 @@ var<workgroup> wallReachBits:atomic<u32>;
  if(lane==0u&&plane<6u){let bits=atomicLoad(&wallReachBits);if(bits!=0u){atomicMax(&umClaims[UM_WALL_REACH+plane],bits);}}
 }
 ${this.solid?/* wgsl */`
-var<workgroup> solidClosedFlag:atomic<u32>;
+${this.solid.coarse?/* wgsl */`
+// The frame's solid record already classifies all 64 cells of each tile.
+// One lane reads its mask instead of re-evaluating geometry in 64 lanes.
+@compute @workgroup_size(64) fn solidClosed(@builtin(global_invocation_id) gid:vec3u){
+ let tile=gid.x+64u*umDispatchX*gid.y;if(tile>=UM_TILES){return;}
+ var closed=false;if(umSolidEnabled()){closed=any(umSolidOpenCells(tile)!=vec2u(0xffffffffu));}
+ evidence[UM_SOLID_WORDS+tile]=u32(closed);
+}
+`:/* wgsl */`var<workgroup> solidClosedFlag:atomic<u32>;
 @compute @workgroup_size(64) fn solidClosed(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let tile=group.x+umDispatchX*group.y;if(tile>=UM_TILES){return;}
  if(lane==0u){atomicStore(&solidClosedFlag,0u);}workgroupBarrier();
  if(umCellOpen(vec3i(umTileCoord(tile)*4u+umCorner(lane,4u)))<=1e-5){atomicStore(&solidClosedFlag,1u);}
  workgroupBarrier();if(lane==0u){evidence[UM_SOLID_WORDS+tile]=atomicLoad(&solidClosedFlag);}
 }
+`}
 @compute @workgroup_size(64) fn solidClear(@builtin(global_invocation_id) gid:vec3u){
  let tile=gid.x+64u*umDispatchX*gid.y;if(tile>=UM_TILES){return;}
  let t=vec3i(umTileCoord(tile));var clear=1u;
@@ -1057,7 +1088,7 @@ fn umCutDeparture(owner:UMOwner)->vec3f{
   if(open>1e-5){sum+=open*(vec3f(local)+0.5);total+=open;mask[k>>5u]|=1u<<(k&31u);}
  }
  let centroid=origin+sum/total;
- if(umOpenAt(centroid)>1e-5){return umTrace(centroid)-centroid;}
+ if(umOpenAt(centroid)){return umTrace(centroid)-centroid;}
  var best=3.402823e38;
  for(var k=0u;k<64u;k++){if((mask[k>>5u]&(1u<<(k&31u)))!=0u){
   let r=origin+vec3f(umCorner(k,4u))+0.5-centroid;best=min(best,dot(r,r));
@@ -1145,15 +1176,16 @@ var<workgroup> traceMergedClaim:u32;
     const pipeline=this.pipelines.get(entry);if(!pipeline)throw new Error("Mixed surface stage is not initialized");
     // Only advect reads wall reach. Travel beyond the scratch prefix is
     // persistent, including across the intervening redistance/trace stages.
-    encoder.clearBuffer(this.claims,0,entry==="advect"?4*surfaceClaimWords(this.ownership.capacity.lattice.dimensions):4*SURFACE_CLAIM_WORDS);
-    const pass=encoder.beginComputePass({label:`Uniform mixed surface ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);if(this.hanging)pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
+    encoder.clearBuffer(this.claims,0,entry==="advect"?this.advectClearBytes:4*SURFACE_CLAIM_WORDS);
+    const pass=encoder.beginComputePass(SURFACE_PASS[entry]);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);if(this.hanging)pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
     if(entry==="advect"){
-      pass.setPipeline(this.variant(this.pipelines.get("wallReach")!));pass.dispatchWorkgroups(6*wallReachGroups(this.ownership.capacity.lattice.dimensions));
+      pass.setPipeline(this.variant(this.pipelines.get("wallReach")!));pass.dispatchWorkgroups(this.wallGroups);
       // The closed/clear evidence only exists for a scene holding solids.
       if(this.solid?.present){
-        const tiles=this.ownership.capacity.tiles,x=this.ownership.dispatchX,groups=Math.ceil(tiles/64);
-        pass.setPipeline(this.variant(this.pipelines.get("solidClosed")!));pass.dispatchWorkgroups(Math.min(tiles,x),Math.ceil(tiles/x));
-        pass.setPipeline(this.variant(this.pipelines.get("solidClear")!));pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
+        const tiles=this.ownership.capacity.tiles,x=this.ownership.dispatchX,groups=ceilDiv(tiles,64);
+        const closedGroups=this.solid.coarse?groups:tiles;
+        pass.setPipeline(this.variant(this.pipelines.get("solidClosed")!));pass.dispatchWorkgroups(Math.min(closedGroups,x),ceilDiv(closedGroups,x));
+        pass.setPipeline(this.variant(this.pipelines.get("solidClear")!));pass.dispatchWorkgroups(Math.min(groups,x),ceilDiv(groups,x));
       }
     }
     if(entry==="redistance"){
@@ -1163,17 +1195,16 @@ var<workgroup> traceMergedClaim:u32;
       pass.setBindGroup(1,group.base);
       this.ownership.dispatchTierCounted(pass,this.variant(this.pipelines.get("retirementEvidenceCoarse")!),1);
       pass.setBindGroup(1,group.group);
-      const t=this.ownership.capacity.lattice.dimensions.map(n=>n/4);
-      for(const axis of [0,1,2]){
-        const lines=t[(axis+1)%3]!*t[(axis+2)%3]!;
-        pass.setPipeline(this.variant(this.pipelines.get(`evidenceDistance${axis}`)!));
-        pass.dispatchWorkgroups(Math.min(lines,this.ownership.dispatchX),Math.ceil(lines/this.ownership.dispatchX));
+      for(let axis=0;axis<3;axis++){
+        const lines=this.evidenceLines[axis]!;
+        pass.setPipeline(this.variant(this.pipelines.get(EVIDENCE_DISTANCE[axis]!)!));
+        pass.dispatchWorkgroups(Math.min(lines,this.ownership.dispatchX),ceilDiv(lines,this.ownership.dispatchX));
       }
     }
     if(entry==="redistance"&&!this.ownership.coarseOnly){
       const tiles=this.ownership.capacity.tiles,x=this.ownership.dispatchX;
       pass.setPipeline(this.variant(this.pipelines.get("prepareSurface")!));
-      pass.dispatchWorkgroups(Math.min(tiles,x),Math.ceil(tiles/x));
+      pass.dispatchWorkgroups(Math.min(tiles,x),ceilDiv(tiles,x));
     }
     // Buffered direct grids; the claim loops consume the full current lists.
     const grid=Math.min(UNIFORM_MIXED_CLAIMED_GRID,this.ownership.capacity.tiles);
@@ -1184,17 +1215,16 @@ var<workgroup> traceMergedClaim:u32;
     // regular owner and a few a seam 4h tile, so its job budget covers them.
     if(entry==="redistance")this.ownership.dispatchBuffered(pass,this.variant(this.pipelines.get("redistanceBand")!),"coarseMerged",grid);
     if(entry==="advect"){
-      const d=this.ownership.capacity.lattice.dimensions.map(n=>n+1),x=this.ownership.dispatchX;
-      const groups=Math.ceil(2*(d[1]!*d[2]!+d[2]!*d[0]!+d[0]!*d[1]!)/64);
-      pass.setPipeline(this.variant(this.deferredPipelines[0]!));pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
+      const groups=this.deferredWallGroups,x=this.ownership.dispatchX;
+      pass.setPipeline(this.variant(this.deferredPipelines[0]!));pass.dispatchWorkgroups(Math.min(groups,x),ceilDiv(groups,x));
     }
     pass.end();
     if(entry==="advect"){
-      const deferred=encoder.beginComputePass({label:"Uniform mixed surface advect deferred"});deferred.setBindGroup(0,this.ownership.bindGroup);deferred.setBindGroup(1,group.group);
+      const deferred=encoder.beginComputePass(DEFERRED_PASS);deferred.setBindGroup(0,this.ownership.bindGroup);deferred.setBindGroup(1,group.group);
       if(this.solid)deferred.setBindGroup(2,this.solid.tileGroup);if(this.hanging)deferred.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
       // [merged, regular h]: each strides the entries its own launch listed,
       // and no h launch ran without h-tile capacity.
-      for(const pipeline of this.deferredPipelines.slice(1,this.ownership.coarseOnly?2:3)){deferred.setPipeline(this.variant(pipeline));deferred.dispatchWorkgroups(this.deferredGrid);}
+      for(let i=1,n=this.ownership.coarseOnly?2:3;i<n&&i<this.deferredPipelines.length;i++){deferred.setPipeline(this.variant(this.deferredPipelines[i]!));deferred.dispatchWorkgroups(this.deferredGrid);}
       deferred.end();
     }
   }

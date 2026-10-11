@@ -1,9 +1,9 @@
 import {UniformMixedDiagnostics} from "./uniform-mixed-diagnostics";
-import { UNIFORM_MIXED_RECEIPT_RING, UniformMixedFrame, type UniformMixedFrameReceipt, type UniformMixedFrameRelayout, type UniformMixedFrameTrace } from "./uniform-mixed-frame";
+import { UNIFORM_MIXED_RECEIPT_RING, UniformMixedFrame, type UniformMixedFrameBodies, type UniformMixedFrameParameters, type UniformMixedFrameReceipt, type UniformMixedFrameRelayout, type UniformMixedFrameTrace } from "./uniform-mixed-frame";
 import { uniformMixedFixedFineCapacity } from "./uniform-mixed-ownership";
 import { uniformDetailCapacityRule } from "./uniform-detail-policy";
 import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
-import { assertUniformMixedOptions } from "./uniform-mixed-options";
+import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedLiquidSolidPromotion, uniformMixedSolidTiles } from "./uniform-mixed-layout";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailCoarseSurface, uniformDetailHeldDistance, uniformDetailImportance, uniformDetailRequests, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
 import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
@@ -11,7 +11,7 @@ import { UniformDetailPlanner, UniformDetailRequestTiles, uniformDetailTileBound
 import type { UniformWorkEdit } from "./uniform-buffered-work";
 import type { SolverDetailFocus, SolverDetailInput } from "../../core/solver-detail";
 import { UniformMixedLayoutBuilder, UNIFORM_MIXED_RELAYOUT_RECEIPT } from "./uniform-mixed-layout-builder";
-import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE } from "./uniform-mixed-dynamic";
+import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, type UniformMixedDynamicPolicy } from "./uniform-mixed-dynamic";
 import { refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
 import { uniformBrickCells } from "./uniform-volume-donor-sum.wgsl";
@@ -42,7 +42,7 @@ import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../.
 import { UniformMixedBodies } from "./uniform-mixed-bodies";
 import { UniformPrescribedSolidMotion } from "./uniform-prescribed-solid-motion";
 import { sceneLatticeDimensions } from "../../core/scene-lattice";
-import { planGPUAdvance } from "../../core/tall-cell-diagnostics";
+import { planGPUAdvanceInto, type GPUAdvancePlan } from "../../core/tall-cell-diagnostics";
 import type { GPUQuality } from "../../core/gpu-quality";
 import { sceneHasTerrain } from "../../core/terrain";
 import {
@@ -369,9 +369,32 @@ const UNIFORM_PRESSURE_STAGE_PHASE: Readonly<Record<UniformCM11aPlanStage, GPUTi
  * for diagnostics; a frame that finds none free reports nothing. */
 const UNIFORM_MIXED_RELAYOUT_READS = 3;
 
+/** Two tile boxes name the same tiles (their joined text is equal): neither, or entry for entry. */
+function sameTileBox(a:readonly number[]|undefined,b:readonly number[]|undefined):boolean{
+  if(!a||!b)return !a&&!b;
+  if(a.length!==b.length)return false;
+  for(let i=0;i<a.length;i++)if(a[i]!==b[i])return false;
+  return true;
+}
+/** A stack over a store it keeps. An array popped or shifted to empty drops
+ * its store and the next push allocates another: once a step, for a pool
+ * that holds one record. */
+class KeptStack<T>{
+  private readonly items:T[]=[];
+  size=0;
+  take():T|undefined{return this.size>0?this.items[--this.size]:undefined;}
+  give(item:T):void{this.items[this.size++]=item;}
+  at(index:number):T{return this.items[index]!;}
+}
+/** executionInfo with the counters this solver publishes beside GPUEulerianInfo's own. */
+type UniformPublishedInfo=GPUEulerianInfo&Record<string,unknown>;
+/** Parameter records the mixed frame may still hold: the receipts in flight, the last step's and this one's, with room. */
+const UNIFORM_MIXED_PARAMETER_RING=UNIFORM_MIXED_RECEIPT_RING+6;
+/** Advances after an allocation event whose `info` reads sum the mixed frame's bytes again. */
+const UNIFORM_MIXED_ALLOCATION_WATCH=8;
 export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly executionInfo: GPUEulerianInfo;
-  get info(): GPUEulerianInfo { this.refreshMixedAllocation();return this.executionInfo; }
+  get info(): GPUEulerianInfo { if(this.mixedAllocationDue())this.refreshMixedAllocation();return this.executionInfo; }
   get simulationCellScale(): 1 { return 1; }
 
 
@@ -381,7 +404,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   private narrowBandFinePadding: number;
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
-  get narrowBandFlipInfo(){const stage=this.mixedFrame?.narrowBandFlip;return stage?{adaptiveSurface:stage.adaptiveSurface,adaptiveBudgetPercent:this.narrowBandAdaptiveBudgetPercent,adaptiveFadeSeconds:this.narrowBandAdaptiveFadeSeconds,particles:stage.count,capacity:stage.capacity,reseedClipped:stage.reseedClipped,bandWidth:4,fineGridPadding:this.narrowBandFinePadding,flipRatio:0.95,...stage.diagnostics}:undefined;}
+  get narrowBandFlipInfo(){
+    const stage=this.mixedFrame?.narrowBandFlip;if(!stage)return undefined;
+    // One record, rewritten by each read: the values are the stage's at the read.
+    const info=this.narrowBandFlipRecord??=this.narrowBandFlipInfoOf(stage),d=stage.diagnostics;
+    info.adaptiveSurface=stage.adaptiveSurface;info.adaptiveBudgetPercent=this.narrowBandAdaptiveBudgetPercent;info.adaptiveFadeSeconds=this.narrowBandAdaptiveFadeSeconds;
+    info.particles=stage.count;info.capacity=stage.capacity;info.reseedClipped=stage.reseedClipped;info.fineGridPadding=this.narrowBandFinePadding;
+    let key:keyof typeof d;for(key in d)info[key]=d[key];
+    return info;
+  }
+  private narrowBandFlipInfoOf(stage:UniformMixedFrame["narrowBandFlip"]){return {adaptiveSurface:stage.adaptiveSurface,adaptiveBudgetPercent:this.narrowBandAdaptiveBudgetPercent,adaptiveFadeSeconds:this.narrowBandAdaptiveFadeSeconds,particles:stage.count,capacity:stage.capacity,reseedClipped:stage.reseedClipped,bandWidth:4,fineGridPadding:this.narrowBandFinePadding,flipRatio:0.95,...stage.diagnostics};}
+  private narrowBandFlipRecord?:ReturnType<WebGPUUniformReferenceSolver["narrowBandFlipInfoOf"]>;
   private appliedRuntimeValues?: MethodParamValues;
   /** Two-level velocity sampling; off when the lattice has no 4h table. */
   private twoLevelVelocity: boolean;
@@ -603,7 +636,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * they request an h tile. No host layout runs until it is detached. */
   private mixedGpuLayout = false;
   /** Free relayout receipt reads, and the one this frame's head copied into. */
-  private readonly mixedRelayoutReads: GPUBuffer[] = [];
+  private readonly mixedRelayoutReads = new KeptStack<GPUBuffer>();
   private mixedRelayoutRead?: GPUBuffer;
   /** Diagnostics sequence: an older read never overwrites a newer one. */
   private mixedRelayoutSequence = 0;
@@ -1128,8 +1161,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   private mixedFrame?: UniformMixedFrame;
   private mixedFrameTrace(): UniformMixedFrameTrace | undefined {
-    const instrumentation=usePerformanceInstrumentationStore.getState(),requested=performance.now();
-    if(!instrumentation.enabled||this.physicsTracePending||requested-this.lastPhysicsTraceAt_ms<UNIFORM_PHYSICS_TRACE_CADENCE_MS)return undefined;
+    const instrumentation=usePerformanceInstrumentationStore.getState();
+    // The clock is read only for a trace that may start (its reading is a heap number).
+    if(!instrumentation.enabled||this.physicsTracePending)return undefined;
+    return this.openMixedFrameTrace(performance.now());
+  }
+  /** mixedFrameTrace for a trace that may start (apart from it: these closures would cost every advance a context). */
+  private openMixedFrameTrace(requested:number): UniformMixedFrameTrace | undefined {
+    if(requested-this.lastPhysicsTraceAt_ms<UNIFORM_PHYSICS_TRACE_CADENCE_MS)return undefined;
     this.executionInfo.physicsCPUTrace=undefined;
     if(!GPUStageTimestampRecorder.supported(this.device)||!GPUStageTimestampRecorder.markersReady(this.device)){
       this.executionInfo.physicsTrace=undefined;
@@ -1179,7 +1218,24 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private refreshMixedAllocation():void{
     if(!this.mixedFrame||this.mixedAccountedBytes===undefined)return;
     const bytes=this.mixedFrame.allocatedBytes,detail=this.detailStorage?.allocatedBytes??0;
+    // Bytes that moved may move again (a stage's first launch, a reservation's follow-up): the next advances read too.
+    if(bytes!==this.mixedAccountedBytes||detail!==this.detailAccountedBytes)this.mixedAllocationWatch=UNIFORM_MIXED_ALLOCATION_WATCH;
     this.executionInfo.allocatedBytes+=bytes-this.mixedAccountedBytes+detail-this.detailAccountedBytes;this.mixedAccountedBytes=bytes;this.detailAccountedBytes=detail;
+    this.mixedAllocationStale=false;this.mixedAllocationRevision=this.mixedFrame.ownership.capacityRevision;this.detailAllocationRevision=this.detailStorage?this.detailStorage.allocationRevision:-1;
+  }
+  /** `info` sums the frame's and the detail storage's bytes only when they
+   * may have moved: an event that reserves, attaches, lays out or fails
+   * (watchMixedAllocation), the advances and receipts of the watch after one,
+   * another h-tile capacity (capacityRevision) or another set of detail
+   * textures (allocationRevision). A read with none of these builds nothing. */
+  private mixedAllocationStale=true;
+  private mixedAllocationWatch=UNIFORM_MIXED_ALLOCATION_WATCH;
+  private mixedAllocationRevision=-1;
+  private detailAllocationRevision=-1;
+  private watchMixedAllocation():void{this.mixedAllocationStale=true;this.mixedAllocationWatch=UNIFORM_MIXED_ALLOCATION_WATCH;}
+  private mixedAllocationDue():boolean{
+    const frame=this.mixedFrame;if(!frame||this.mixedAccountedBytes===undefined)return false;
+    return this.mixedAllocationStale||frame.ownership.capacityRevision!==this.mixedAllocationRevision||(this.detailStorage?this.detailStorage.allocationRevision:-1)!==this.detailAllocationRevision;
   }
   /** Layout identity of the applied host layout. */
   private mixedRegionKey="";
@@ -1239,10 +1295,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     await Promise.all([this.mixedFrame.initialize(),this.mixedDiagnostics.initialize(),
       dynamic.initialize(),builder.initialize(),mixedBodies.initialize()]);
     this.mixedFrame.setLayoutViews(this.layoutViews);
-    this.mixedAccountedBytes=this.mixedFrame.allocatedBytes;
+    this.mixedAccountedBytes=this.mixedFrame.allocatedBytes;this.watchMixedAllocation();
     this.executionInfo.allocatedBytes+=this.mixedAccountedBytes+this.mixedDynamic.allocatedBytes+this.mixedBuilder.allocatedBytes+(this.mixedBodies?.allocatedBytes??0);
     this.mixedSource={vertexPhi:this.vertexPhiField,coarseVertexPhi:this.mixedFrame.coarseVertexPhi,detailVertexPhi:this.mixedFrame.ownership.capacity.fineTiles>0?this.vertexPhiField:undefined,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedPressure:this.mixedFrame.presentation.pressure,mixedPressurePhi:this.mixedFrame.presentation.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support}};
-    for(let i=0;i<UNIFORM_MIXED_RELAYOUT_READS;i++)this.mixedRelayoutReads.push(this.device.createBuffer({label:`Uniform mixed relayout receipt read ${i}`,size:UNIFORM_MIXED_RELAYOUT_RECEIPT.words*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}));
+    for(let i=0;i<UNIFORM_MIXED_RELAYOUT_READS;i++)this.mixedRelayoutReads.give(this.device.createBuffer({label:`Uniform mixed relayout receipt read ${i}`,size:UNIFORM_MIXED_RELAYOUT_RECEIPT.words*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}));
     this.executionInfo.allocatedBytes+=UNIFORM_MIXED_RELAYOUT_READS*UNIFORM_MIXED_RELAYOUT_RECEIPT.words*4;
     // The initial layout is the host's (authored regions, solids and bodies
     // at h); dynamic coarsening then relayouts it on the GPU every frame.
@@ -1335,7 +1391,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedCap?:{tiles:number;build:number;confirmed?:boolean};
   /** Builds encoded; the receipts read back from them, for the next sync. */
   private mixedBuilds=0;
-  private mixedReceipts:{build:number;epoch:number;sync:number;need:number;admit:number;fine:number}[]=[];
+  private readonly mixedReceipts:{build:number;epoch:number;sync:number;need:number;admit:number;fine:number}[]=[];
+  /** The receipts waiting at the head of mixedReceipts, which keeps its store (KeptStack). */
+  private mixedReceiptCount=0;
   private mixedSyncs=0;
   /** Static h tiles the builder was given that no receipt counts yet (Dynamic: a region, a moved focus). */
   private mixedStaticsAdded?:{tiles:number;build:number};
@@ -1367,6 +1425,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * with the first build that sees it. Their union is the store's box. */
   private mixedWindows:{box?:readonly number[];build:number}[]=[];
   private mixedWindowOf?:{input:unknown;join?:Uint8Array;box?:readonly number[]};
+  private readonly mixedWindowUnion=[0,0,0,0,0,0];
   private readonly mixedTileBoxes=new WeakMap<Uint8Array,readonly number[]|null>();
   /** A tile mask's box, scanned once per mask; null: no tile. */
   private mixedTileBox(tiles:Uint8Array):readonly number[]|null{
@@ -1400,11 +1459,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }
     if(first)queue.push({build:this.mixedBuilds});
     const last=queue[queue.length-1];
-    if(!last||last.box?.join()!==box?.join())queue.push({box,build:this.mixedBuilds});
+    if(!last||!sameTileBox(last.box,box))queue.push({box,build:this.mixedBuilds});
+    // The union in one box this solver keeps (the storage reads it and keeps nothing).
     let union:number[]|undefined;
-    for(const e of queue){
-      if(!e.box){union=undefined;break;}
-      const o=e.box,u:number[]|undefined=union;union=u?[0,1,2].map(a=>Math.min(u[a]!,o[a]!)).concat([3,4,5].map(a=>Math.max(u[a]!,o[a]!))):[...o];
+    for(let i=0;i<queue.length;i++){
+      const o=queue[i]!.box;
+      if(!o){union=undefined;break;}
+      if(!union){union=this.mixedWindowUnion;for(let a=0;a<6;a++)union[a]=o[a]!;}
+      else for(let a=0;a<3;a++){if(o[a]!<union[a]!)union[a]=o[a]!;if(o[a+3]!>union[a+3]!)union[a+3]=o[a+3]!;}
     }
     storage.window(union);
   }
@@ -1498,13 +1560,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         // Every tile at the attach: frame 1's head runs on the all-h start,
         // and a census's first build may ask for any tile. The receipts
         // return what it does not use.
-        frame.setRelayout(this.mixedRelayout());
+        frame.setRelayout(this.mixedRelayout());this.watchMixedAllocation();
         this.mixedGpuLayout=true;this.mixedCensus=true;this.mixedRequest=undefined;this.resetMixedCapacity();
-        this.mixedBuilderStaticKey=undefined;this.mixedRegionKey="";this.mixedRefusedKey="";this.mixedLive=false;this.mixedSynced=undefined;this.mixedEditJoin=undefined;
+        this.mixedBuilderStaticKey=undefined;this.mixedBuilderStaticOf=undefined;this.mixedRegionKey="";this.mixedRefusedKey="";this.mixedLive=false;this.mixedSynced=undefined;this.mixedEditJoin=undefined;
       }
       // Static h tiles reach the builder here, ahead of the build that reads
       // them, so the capacity holds the new ones before any receipt counts them.
-      if(advancing&&this.detailStaticKey()!==this.mixedBuilderStaticKey){
+      if(advancing&&!this.detailStaticCurrent()){
         const before=this.detailPlan?.fine;this.refreshMixedBuilderStatics(this.mixedSolidPromotion());
         const after=this.detailPlan!.fine;let added=0;
         for(let t=0;t<after.length;t++)if(after[t]&&!before?.[t])added++;
@@ -1531,6 +1593,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       }
       return true;
     }
+    return this.requestMixedLayout(frame,first,tiles,bodies,dt);
+  }
+  /** syncMixedLayout for another request, roster or owner (apart from it: these closures would cost every sync a context). */
+  private requestMixedLayout(frame:UniformMixedFrame,first:boolean,tiles:number,bodies:readonly RigidBodyState[],dt:number):boolean{
+    // Whatever it reserves or attaches moves the frame's bytes.
+    this.watchMixedAllocation();
     const requestKey=`${JSON.stringify(this.scene.fluid.refinementRegions??[])}:${this.detail.policy}:${this.detail.solidContact}`,key=`${this.mixedSolidMaskStamp}:${requestKey}`;
     // The roster, not its poses: the census follows those on the GPU.
     const roster=bodies.length?JSON.stringify(bodies.map(b=>[b.description.id,b.description.shape,b.description.dimensions_m,b.description.motion])):"";
@@ -1628,8 +1696,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * requests again. A build under the staged cap that fit it confirms the cap. */
   private takeMixedReceipts():{any:boolean;released:boolean}{
     const rule=this.mixedCapacityRule,sync=++this.mixedSyncs;let any=false,released=false;
-    while(this.mixedReceipts.length&&this.mixedReceipts[0]!.sync+rule.lagFrames<sync){
-      const r=this.mixedReceipts.shift()!,over=r.need>r.admit,join=this.mixedEditJoin;any=true;
+    const waiting=this.mixedReceipts;
+    while(this.mixedReceiptCount&&waiting[0]!.sync+rule.lagFrames<sync){
+      // Read here and nowhere later: the record is the next receipt's to fill (readMixedRelayout).
+      const r=waiting[0]!,over=r.need>r.admit,join=this.mixedEditJoin,left=--this.mixedReceiptCount;any=true;this.mixedReceiptPool.give(r);
+      for(let i=0;i<left;i++)waiting[i]=waiting[i+1]!;
       // An admitted build was adopted: the boxes of the requests before the one it saw hold no h tile any more.
       if(!over){const queue=this.mixedWindows;let seen=-1;for(let i=0;i<queue.length;i++)if(queue[i]!.build<=r.build)seen=i;if(seen>0)queue.splice(0,seen);}
       if(join?.build!==undefined&&r.build>=join.build){
@@ -1651,8 +1722,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const cap=this.mixedCap;
       if(cap&&r.build>=cap.build){if(over)this.mixedCap=undefined;else if(r.admit===cap.tiles)cap.confirmed=true;}
     }
-    return {any,released};
+    const taken=this.mixedTaken;taken.any=any;taken.released=released;
+    return taken;
   }
+  /** takeMixedReceipts' answer, rewritten by each call, and the receipt records it has read. */
+  private readonly mixedTaken={any:false,released:false};
+  private readonly mixedReceiptPool=new KeptStack<{build:number;epoch:number;sync:number;need:number;admit:number;fine:number}>();
   /** One h-tile capacity rule for Requested, Dynamic and Full. The storage
    * holds C h tiles and the builder admits A <= C: a build that asks for
    * more keeps its generation and its receipt says what it needed.
@@ -1678,15 +1753,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(!liquidBand&&most>held)throw new Error(`Uniform mixed ownership needs ${most} h tiles; its owner-indexed storage holds ${held}`);
       this.admitMixed(liquidBand?undefined:held);return undefined;
     }
-    const last=Math.max(this.mixedNeeds.at(-1)??0,this.mixedDeferredNeed),peak=Math.max(last,...this.mixedNeeds);
+    const needs=this.mixedNeeds,last=Math.max(needs.length?needs[needs.length-1]!:0,this.mixedDeferredNeed);
+    let peak=last;for(let i=0;i<needs.length;i++)if(needs[i]!>peak)peak=needs[i]!;
     const hint=this.mixedHinted||rule.hold||!live?bound:0;
-    const hold=(need:number,fraction:number)=>Math.min(T,Math.ceil((1+fraction)*need)+extra);
     // What must fit now, and what a growth reserves.
-    const must=Math.max(hint,this.mixedDeferredNeed,live&&rule.grow>=0?hold(last,rule.grow):0);
+    const must=Math.max(hint,this.mixedDeferredNeed,live&&rule.grow>=0?Math.min(T,this.grownMixedTiles(last)+extra):0);
     let cap=this.mixedCap;
     if(cap&&must>cap.tiles)cap=this.mixedCap=undefined;
     if(must>held){
-      const want=Math.max(must,live?Math.min(T,hold(last,rule.headroom)+rule.floorTiles):0,rule.double&&held>0?Math.min(T,2*held):0);
+      const want=Math.max(must,live?Math.min(T,Math.min(T,this.roomedMixedTiles(last)+extra)+rule.floorTiles):0,rule.double&&held>0?Math.min(T,2*held):0);
+      this.watchMixedAllocation();
       let reservation=frame.fineReservation(want,liquidBand,live);
       if(reservation.refusal&&want>must)reservation=frame.fineReservation(must,liquidBand,true);
       if(reservation.refusal)return reservation.refusal;
@@ -1694,12 +1770,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.mixedQuiet=0;this.mixedDeferrals.changes++;
     }else if(cap?.confirmed){
       // Every generation since the cap fits it: the storage returns.
+      this.watchMixedAllocation();
       const refusal=frame.reserveFine(cap.tiles,liquidBand,true);if(refusal)return refusal;
       this.mixedCap=undefined;this.mixedDeferrals.changes++;
     }else if(!cap&&!rule.hold){
       // A census returns to its window's peak, held as a growth would hold
       // it; a host request to what a host layout of it would reserve.
-      const want=live?Math.min(T,hold(peak,rule.headroom)+rule.floorTiles):frame.fineReservation(bound,liquidBand).fineTiles;
+      const want=live?Math.min(T,Math.min(T,this.roomedMixedTiles(peak)+extra)+rule.floorTiles):frame.fineReservation(bound,liquidBand).fineTiles;
       // The cap holds what the requests ask: the build under it moves no tile (a zero edit; a census counts none).
       if(live?!this.mixedHinted&&this.mixedQuiet>=rule.windowBuilds&&want*rule.returnRatio<=held:want<held){this.mixedCap={tiles:want,build:this.mixedBuilds};this.staleMixed(live?undefined:{tiles:0,reach:0});}
     }
@@ -1710,6 +1787,18 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
   /** The builder's admission capacity. A capacity of every tile admits anything: no admit launch.
    * fits: it holds everything a host-counted request asks, so the build under it moves no tile (a zero edit). */
+  /** ceil((1 + grow) need) and ceil((1 + headroom) need) of the capacity rule,
+   * each kept for the need it last answered: the product is a heap number
+   * until the call is optimized, and the need is the same from frame to frame. */
+  private grownMixedTiles(need:number):number{
+    if(need!==this.mixedGrownNeed){this.mixedGrownNeed=need;this.mixedGrown=Math.ceil((1+this.mixedCapacityRule.grow)*need);}
+    return this.mixedGrown;
+  }
+  private roomedMixedTiles(need:number):number{
+    if(need!==this.mixedRoomedNeed){this.mixedRoomedNeed=need;this.mixedRoomed=Math.ceil((1+this.mixedCapacityRule.headroom)*need);}
+    return this.mixedRoomed;
+  }
+  private mixedGrownNeed=-1;private mixedGrown=0;private mixedRoomedNeed=-1;private mixedRoomed=0;
   private admitMixed(tiles?:number,fits=false):void{
     const frame=this.mixedFrame!,capacity=frame.ownership.capacity;
     if(tiles!==this.mixedReserved){this.mixedBuilder!.setAdmission(tiles===undefined||tiles>=capacity.tiles?undefined:tiles);this.mixedReserved=tiles;this.staleMixed(fits?{tiles:0,reach:0}:undefined);}
@@ -1717,9 +1806,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
   private publishMixedCapacity():void{
     const capacity=this.mixedFrame!.ownership.capacity.fineTiles,d=this.mixedDeferrals;
-    if(capacity!==this.executionInfo.uniformMixedFineCapacity)this.refreshMixedAllocation();
-    Object.assign(this.executionInfo,{uniformMixedFineCapacity:capacity,uniformMixedAdmission:this.mixedGpuLayout?this.mixedReserved??capacity:capacity,
-      uniformMixedDeferredBuilds:d.builds,uniformMixedDeferredTiles:d.tiles,uniformMixedCapacityChanges:d.changes});
+    const info=this.executionInfo;
+    if(capacity!==info.uniformMixedFineCapacity)this.refreshMixedAllocation();
+    info.uniformMixedFineCapacity=capacity;info.uniformMixedAdmission=this.mixedGpuLayout?this.mixedReserved??capacity:capacity;
+    info.uniformMixedDeferredBuilds=d.builds;info.uniformMixedDeferredTiles=d.tiles;info.uniformMixedCapacityChanges=d.changes;
   }
   /** Plan detail for the current policy, regions and latest focus at the
    * accepted step, and commit it (the planner's automatic state advances). */
@@ -1771,6 +1861,31 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const focus=this.detail.nearFocus?this.detailFocusPending?.revision??0:0;
     return `${this.mixedSolidMaskStamp}:${JSON.stringify(this.scene.fluid.refinementRegions??[])}:${JSON.stringify(this.detail)}:${focus}${pending?`:${this.detailAcceptedStep}`:""}`;
   }
+  /** What mixedBuilderStaticKey was built from (holdDetailStaticKey): the
+   * region list and the settings by identity (each is replaced, never
+   * rewritten), the rest by value. */
+  private mixedBuilderStaticOf?:{regions:unknown;detail:UniformDetailSettings;stamp:number;focus:number;pending:boolean;step:number};
+  private holdDetailStaticKey():void{
+    const pending=!!(this.detailPlanner&&(!this.detailPlanner.settled||(this.detailPlan?.diagnostics.churnDeferredTiles??0)>0));
+    this.mixedBuilderStaticKey=this.detailStaticKey();
+    this.mixedBuilderStaticOf={regions:this.scene.fluid.refinementRegions,detail:this.detail,stamp:this.mixedSolidMaskStamp,
+      focus:this.detail.nearFocus?this.detailFocusPending?.revision??0:0,pending,step:this.detailAcceptedStep};
+  }
+  /** detailStaticKey() === mixedBuilderStaticKey, asked every frame: under
+   * the held region list and settings the key's other terms decide it and no
+   * text is built. Another list or settings object compares the keys (equal
+   * content under another object holds it from then on). */
+  private detailStaticCurrent():boolean{
+    const held=this.mixedBuilderStaticOf;
+    if(held&&this.mixedBuilderStaticKey!==undefined&&held.regions===this.scene.fluid.refinementRegions&&held.detail===this.detail){
+      const pending=!!(this.detailPlanner&&(!this.detailPlanner.settled||(this.detailPlan?.diagnostics.churnDeferredTiles??0)>0));
+      const focus=this.detail.nearFocus?this.detailFocusPending?.revision??0:0;
+      return held.stamp===this.mixedSolidMaskStamp&&held.focus===focus&&held.pending===pending&&(!pending||held.step===this.detailAcceptedStep);
+    }
+    const current=this.detailStaticKey()===this.mixedBuilderStaticKey;
+    if(current&&held){held.regions=this.scene.fluid.refinementRegions;held.detail=this.detail;}
+    return current;
+  }
   /** Horizon one: the frame head classifies the state the frame starts from
    * for this frame's dt and advects on the generation it builds. Smooth
    * surface tiles may use 4h; detail and impact protection retain h. This
@@ -1783,61 +1898,103 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     due:()=>this.detail.policy==="dynamic"||this.mixedLive||this.mixedStale,
     edit:()=>this.detail.policy==="dynamic"||this.mixedLive||!this.mixedStale?undefined:this.mixedEdit,encode:(encoder,dt,views)=>{
       // Requests-only statics are the host's, refreshed with their admission (syncMixedLayout).
-      if(this.detail.policy==="dynamic"&&this.detailStaticKey()!==this.mixedBuilderStaticKey)this.refreshMixedBuilderStatics(this.mixedSolidPromotion());
+      if(this.detail.policy==="dynamic"&&!this.detailStaticCurrent())this.refreshMixedBuilderStatics(this.mixedSolidPromotion());
       // One more build after the last live frame returns what its bodies held.
       this.mixedStale=this.mixedLive;this.mixedEdit=undefined;
       const build=this.mixedBuilds++,join=this.mixedEditJoin;if(join&&join.build===undefined)join.build=build;
       const g=this.scene.fluid.gravity_m_s2;
       // The detail controls' importance criteria: what the census requires at h.
-      const adaptive=this.detail.policy==="dynamic";
-      const importance={...uniformDetailImportance(this.detail,dynamic.ownership.capacity.tiles),surfaceAuthority:true,
-        ...(adaptive?{budgetTiles:undefined,activityBudget:{percent:this.narrowBandAdaptiveBudgetPercent}}:{})};
+      const held=this.mixedImportance(dynamic.ownership.capacity.tiles),importance=held.importance;
       // The build's counters clear in the census's blit run.
       builder.encodeClear(encoder);
       this.mixedFrame?.narrowBandFlip?.setAdaptive(this.detail.policy==="dynamic");
-      if(this.detail.policy==="dynamic"&&(this.mixedFrame?.narrowBandFlip?.adaptiveSurface||Object.values(importance.criteria).some(Boolean)))this.mixedFrame?.narrowBandFlip?.refine(encoder,dynamic.joinTarget(),dt,this.narrowBandFinePadding);
-      dynamic.encode(encoder,{dt,steps:1,gravity:[g.x,g.y,g.z],reach:this.detail.marginTiles,hysteresis:0,
+      if(this.detail.policy==="dynamic"&&(this.mixedFrame?.narrowBandFlip?.adaptiveSurface||held.criteria))this.mixedFrame?.narrowBandFlip?.refine(encoder,dynamic.joinTarget(),dt,this.narrowBandFinePadding);
+      // One policy record, rewritten for each census (the census keeps none of it).
+      // (The scene's gravity when it is applied, the settings' numbers when they are replaced: read each step, each is a heap number.)
+      const gravity=this.mixedCensusGravity,applied=this.mixedCensusSceneRevision!==this.sceneRevision;
+      if(applied){this.mixedCensusSceneRevision=this.sceneRevision;gravity[0]=g.x;gravity[1]=g.y;gravity[2]=g.z;}
+      const policy=this.mixedCensusPolicy??={dt,steps:1,gravity,reach:this.detail.marginTiles,hysteresis:0,
         surfaceTolerance:importance.shapeTolerance,fastTravel:0,importance,
         boundaryTravel:importance.impactTravel,closedWalls:this.scene.container.top==="open"?0b101111:0b111111,up:Math.sign(-g.y),
-        fullTolerance:UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE,emptyTolerance:Math.max(0,1e-6),reasons:views},false);
+        fullTolerance:UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE,emptyTolerance:Math.max(0,1e-6),reasons:views};
+      policy.dt=dt;policy.reach=this.detail.marginTiles;policy.closedWalls=this.scene.container.top==="open"?0b101111:0b111111;policy.reasons=views;
+      if(applied)policy.up=Math.sign(-g.y);
+      if(policy.importance!==importance){policy.importance=importance;policy.surfaceTolerance=importance.shapeTolerance;policy.boundaryTravel=importance.impactTravel;}
+      dynamic.encode(encoder,policy,false);
       this.mixedFrame?.narrowBandFlip?.activity(encoder,dynamic.importance,dt,this.narrowBandAdaptiveFadeSeconds);
       builder.encode(encoder);
     },adopted:encoder=>{
       // Diagnostics only: a free read takes this build's receipt; mapped
       // once the frame submits (readMixedRelayout), never awaited.
-      const read=this.mixedRelayoutReads.pop();
+      const read=this.mixedRelayoutReads.take();
       if(read){const r=builder.receipt;encoder.copyBufferToBuffer(r.buffer,r.offset,read,0,r.words*4);this.mixedRelayoutRead=read;}
     }};
   }
+  /** The census's importance policy for these settings and this lattice
+   * (uniformDetailImportance, with the census's own additions), kept while
+   * both stand: the settings are replaced, never rewritten. criteria: one is on. */
+  private mixedImportance(tiles:number){
+    let held=this.mixedImportanceOf;
+    if(!held||held.detail!==this.detail||held.tiles!==tiles)held=this.mixedImportanceOf=this.mixedImportanceFor(this.detail,tiles);
+    held.budget.percent=this.narrowBandAdaptiveBudgetPercent;
+    return held;
+  }
+  private mixedImportanceFor(detail:UniformDetailSettings,tiles:number){
+    const budget={percent:this.narrowBandAdaptiveBudgetPercent};
+    const importance={...uniformDetailImportance(detail,tiles),surfaceAuthority:true,
+      ...(detail.policy==="dynamic"?{budgetTiles:undefined,activityBudget:budget}:{})};
+    return {detail,tiles,importance,budget,criteria:Object.values(importance.criteria).some(Boolean)};
+  }
+  private mixedImportanceOf?:ReturnType<WebGPUUniformReferenceSolver["mixedImportanceFor"]>;
+  private readonly mixedCensusGravity:[number,number,number]=[0,0,0];
+  private mixedCensusSceneRevision=0;
+  private mixedCensusPolicy?:UniformMixedDynamicPolicy;
   /** Map the relayout receipt the frame just submitted into executionInfo. */
   private readMixedRelayout():void{
     const read=this.mixedRelayoutRead;this.mixedRelayoutRead=undefined;if(!read)return;
-    const sequence=++this.mixedRelayoutSequence,epoch=this.mixedRequestEpoch,host=this.mixedGeneration,build=this.mixedBuilds-1,sync=this.mixedSyncs;
-    read.mapAsync(GPUMapMode.READ).then(()=>{
-      const r=new Uint32Array(read.getMappedRange()).slice();read.unmap();this.mixedRelayoutReads.push(read);
-      const R=UNIFORM_MIXED_RELAYOUT_RECEIPT,C=R.census,f=new Float32Array(r.buffer);
-      if(this.disposed)return;
-      // The h tiles the build asked for, the admission it ran under and the
-      // generation it left: the next sync's capacity (takeMixedReceipts).
-      this.mixedReceipts.push({build,epoch,sync,need:r[R.need]!,admit:r[R.admit]!,fine:r[R.tiers]!});
-      if(sequence<this.mixedRelayoutShown)return;
-      this.mixedRelayoutShown=sequence;
-      // A fatal build latches frame failure 6/7 on the GPU (the remap); the
-      // frame's receipt names it. Nothing here decides anything.
-      // A host layout replaced the generation this build belongs to: its counts are not the running layout's.
-      if(host!==this.mixedGeneration||!this.mixedGpuLayout)return;
-      const generation=r[R.generation]!,fine=r[R.tiers]!,coarse=r[R.tiers+1]!;
-      this.publishContact(fine);
-      Object.assign(this.executionInfo,{uniformMixedGeneration:this.mixedGeneration+generation,
-        uniformMixedFineTiles:fine,uniformMixedCoarseTiles:coarse,uniformMixedOwners:64*fine+coarse,uniformSimulationCellScale:undefined,
-        uniformMixedLayoutBuild_ms:0,uniformMixedLayoutApply_ms:0,
-        uniformMixedDynamicRelayouts:generation,uniformMixedDynamicChangedTiles:r[R.changed]!,
-        uniformMixedDynamicInterfaceTiles:r[C]!,uniformMixedDynamicBandTiles:r[C+2]!,
-        uniformMixedDynamicRefined:r[C+4]!,uniformMixedDynamicCoarsened:r[C+5]!,uniformMixedDynamicRequiredTiles:r[C+12]!,uniformMixedDynamicBoundaryTiles:r[C+16]!,uniformMixedDynamicSolidTiles:r[C+19]!,uniformMixedDynamicUnresolvedCoarse:r[C+1]!,
-        uniformMixedDynamicCoarsePartialVolume:r[C+6]!,uniformMixedDynamicCoarsePhiCrossing:r[C+7]!,uniformMixedDynamicCoarseDryLiquidPhi:r[C+3]!,
-        uniformMixedDynamicInteriorDeficit:[f[C+8]!,f[C+9]!],uniformMixedDynamicAirVolume:[f[C+10]!,f[C+11]!]});
-    },error=>{if(!this.disposed)this.failMixedFrame(error);});
+    // The read's own record carries what its receipt answers to: a read is mapped once at a time.
+    const slot=this.mixedRelayoutSlots.get(read)??this.mixedRelayoutSlot(read);
+    slot.sequence=++this.mixedRelayoutSequence;slot.epoch=this.mixedRequestEpoch;slot.host=this.mixedGeneration;slot.build=this.mixedBuilds-1;slot.sync=this.mixedSyncs;
+    read.mapAsync(GPUMapMode.READ).then(slot.mapped,this.failMixedRelayout);
   }
+  /** A read's record, made once (apart from readMixedRelayout: this closure would cost every read a context). */
+  private mixedRelayoutSlot(read:GPUBuffer){const made={read,sequence:0,epoch:0,host:0,build:0,sync:0,mapped:():void=>this.takeMixedRelayout(made)};this.mixedRelayoutSlots.set(read,made);return made;}
+  private readonly mixedRelayoutSlots=new Map<GPUBuffer,{read:GPUBuffer;sequence:number;epoch:number;host:number;build:number;sync:number;mapped:()=>void}>();
+  private readonly failMixedRelayout=(error:unknown):void=>{if(!this.disposed)this.failMixedFrame(error);};
+  /** A mapped receipt's words, copied out of the mapping (float lanes over the same words). */
+  private mixedRelayoutWords?:Uint32Array<ArrayBuffer>;
+  private mixedRelayoutFloats?:Float32Array<ArrayBuffer>;
+  private takeMixedRelayout(slot:{read:GPUBuffer;sequence:number;epoch:number;host:number;build:number;sync:number}):void{
+    const read=slot.read,mapped=new Uint32Array(read.getMappedRange()),r=this.mixedRelayoutWords?.length===mapped.length?this.mixedRelayoutWords:this.mixedRelayoutWords=new Uint32Array(mapped.length);
+    r.set(mapped);read.unmap();this.mixedRelayoutReads.give(read);
+    const R=UNIFORM_MIXED_RELAYOUT_RECEIPT,C=R.census,f=this.mixedRelayoutFloats?.buffer===r.buffer?this.mixedRelayoutFloats:this.mixedRelayoutFloats=new Float32Array(r.buffer);
+    if(this.disposed)return;
+    // The h tiles the build asked for, the admission it ran under and the
+    // generation it left: the next sync's capacity (takeMixedReceipts).
+    const receipt=this.mixedReceiptPool.take()??{build:0,epoch:0,sync:0,need:0,admit:0,fine:0};
+    receipt.build=slot.build;receipt.epoch=slot.epoch;receipt.sync=slot.sync;receipt.need=r[R.need]!;receipt.admit=r[R.admit]!;receipt.fine=r[R.tiers]!;
+    this.mixedReceipts[this.mixedReceiptCount++]=receipt;
+    if(slot.sequence<this.mixedRelayoutShown)return;
+    this.mixedRelayoutShown=slot.sequence;
+    // A fatal build latches frame failure 6/7 on the GPU (the remap); the
+    // frame's receipt names it. Nothing here decides anything.
+    // A host layout replaced the generation this build belongs to: its counts are not the running layout's.
+    if(slot.host!==this.mixedGeneration||!this.mixedGpuLayout)return;
+    const generation=r[R.generation]!,fine=r[R.tiers]!,coarse=r[R.tiers+1]!,info=this.executionInfo as UniformPublishedInfo;
+    this.publishContact(fine);
+    info.uniformMixedGeneration=this.mixedGeneration+generation;
+    info.uniformMixedFineTiles=fine;info.uniformMixedCoarseTiles=coarse;info.uniformMixedOwners=64*fine+coarse;info.uniformSimulationCellScale=undefined;
+    info.uniformMixedLayoutBuild_ms=0;info.uniformMixedLayoutApply_ms=0;
+    info.uniformMixedDynamicRelayouts=generation;info.uniformMixedDynamicChangedTiles=r[R.changed]!;
+    info.uniformMixedDynamicInterfaceTiles=r[C]!;info.uniformMixedDynamicBandTiles=r[C+2]!;
+    info.uniformMixedDynamicRefined=r[C+4]!;info.uniformMixedDynamicCoarsened=r[C+5]!;info.uniformMixedDynamicRequiredTiles=r[C+12]!;info.uniformMixedDynamicBoundaryTiles=r[C+16]!;info.uniformMixedDynamicSolidTiles=r[C+19]!;info.uniformMixedDynamicUnresolvedCoarse=r[C+1]!;
+    info.uniformMixedDynamicCoarsePartialVolume=r[C+6]!;info.uniformMixedDynamicCoarsePhiCrossing=r[C+7]!;info.uniformMixedDynamicCoarseDryLiquidPhi=r[C+3]!;
+    // The two pairs are this solver's, rewritten in place like the record that holds them.
+    const deficit=this.mixedInteriorDeficit,air=this.mixedAirVolume;deficit[0]=f[C+8]!;deficit[1]=f[C+9]!;air[0]=f[C+10]!;air[1]=f[C+11]!;
+    info.uniformMixedDynamicInteriorDeficit=deficit;info.uniformMixedDynamicAirVolume=air;
+  }
+  private readonly mixedInteriorDeficit:[number,number]=[0,0];
+  private readonly mixedAirVolume:[number,number]=[0,0];
   /** Tiles a roster's bodies can touch over `dt` (bounding sphere dilated by
    * its travel and one cell), plus one tile around them: the host's count of
    * what the census promotes around the GPU poses (UniformMixedBodies
@@ -1913,7 +2070,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedBuilder!.setStatic(plan.fine,Uint8Array.from(suppressed,(s,t)=>s&&!plan.fine[t]&&!solid.forced[t]?1:0));
     this.mixedDynamic!.setStatic(plan.fine);this.mixedDynamic!.setSolid(solid.coupled);
     this.mixedStaticsOf=undefined;this.mixedSolidSet=solid.coupled;
-    this.mixedBuilderStaticKey=this.detailStaticKey();
+    this.holdDetailStaticKey();
     this.publishDetail(plan);
   }
   /** A requests-only relayout's statics: the request's h tiles, no 4h mask (no
@@ -1928,20 +2085,21 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     request.moved.length=0;
     const coupled=request.coupled??(this.mixedNoSolid?.length===fine.length?this.mixedNoSolid:this.mixedNoSolid=new Uint8Array(fine.length));
     if(coupled!==this.mixedSolidSet){dynamic.setSolid(coupled);this.mixedSolidSet=coupled;}
-    this.mixedBuilderStaticKey=this.detailStaticKey();
+    this.holdDetailStaticKey();
   }
   /** A frame's encode or receipt failed: fatal for the solver. */
   private failMixedFrame(error:unknown):void{
     if(this.disposed||this.pressureFrameFailure)return;
     this.pressureFrameFailure=error instanceof Error?error:new Error(String(error));
-    this.executionInfo.simulationPipelineError=this.pressureFrameFailure.message;
+    this.executionInfo.simulationPipelineError=this.pressureFrameFailure.message;this.watchMixedAllocation();
   }
   private assertMixedOptions(): void {
-    assertUniformMixedOptions({
-      velocityTransport: this.velocityTransport,
-      liquidOnlyVelocityAdvection: this.liquidOnlyVelocityAdvection,
-    });
+    const options = this.mixedOptions;
+    options.velocityTransport = this.velocityTransport; options.liquidOnlyVelocityAdvection = this.liquidOnlyVelocityAdvection;
+    assertUniformMixedOptions(options);
   }
+  /** assertMixedOptions' record, rewritten by each check. */
+  private readonly mixedOptions: UniformMixedOptionalFeatures = { velocityTransport: "semi-lagrangian", liquidOnlyVelocityAdvection: false };
 
   private initializationTasks(signal?: AbortSignal): GPUInitializationTask[] {
     const tasks = [...this.rigidSystem.initializationTasks()];
@@ -2042,58 +2200,117 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   /** The parameter block has been written: the all-4h solid record may be built from it. */
   private paramsWritten = false;
-  private writeParams(dt: number, activeBodyCount: number, inflowStrength: number, drop?: UniformLiquidDrop): void {
+  /** Counts applySceneUniforms: what is derived from the scene alone is derived once per count, not once per step. */
+  private sceneRevision = 1;
+  private paramsSceneRevision = 0;
+  /** writeParams' head words (the Float32Array the queue copies). */
+  private readonly paramsWords = new Float32Array(72);
+  private writeParams(dt: number, activeBodyCount: number, inflowStrength: number, drop?: UniformLiquidDrop, volumeCells = this.referenceVolumeCells): void {
     const c = this.scene.container;
-    const inflow = this.scene.fluid.inflow;
-    const outlet = this.inflowBoundary?.outletCenter_m;
     this.paramsWritten = true;
-    this.device.queue.writeBuffer(this.params, 0, new Float32Array([
-      this.executionInfo.nx, this.executionInfo.ny, this.executionInfo.nz, dt,
-      c.width_m / this.executionInfo.nx, c.height_m / this.executionInfo.ny, c.depth_m / this.executionInfo.nz, this.scene.fluid.gravity_m_s2.y,
-      c.width_m, c.height_m, c.depth_m, sceneHasTerrain(this.scene) ? 1 : 0,
-      this.scene.fluid.density_kg_m3, this.scene.fluid.dynamicViscosity_Pa_s,
-      // The mixed frame's fine reach in 4h tiles, or -1 with two-level off: the
-      // two-level branch in sampleVelocityComponent is then never taken.
-      // w: the retired V-claims-pressure-rows lane, always zero.
-      this.twoLevelEnabled ? UNIFORM_TWO_LEVEL_FINE_REACH : -1, 0,
-      this.scene.fluid.surfaceTension_N_m, c.fluidWallMode === "no-slip" ? 1 : 0, activeBodyCount, c.top === "open" ? 1 : 0,
-      outlet?.x ?? 0, outlet?.y ?? 0, outlet?.z ?? 0, inflow?.radius_m ?? 0,
-      inflow?.velocity_m_s.x ?? 0, inflow?.velocity_m_s.y ?? 0, inflow?.velocity_m_s.z ?? 0, this.inflowBoundary?.apertureScale ?? 0,
-      inflowStrength, this.referenceVolumeCells, c.fillFraction * this.executionInfo.ny, 4,
-      0, 0,
-      0,
-      c.depthBoundary === "symmetry" ? 1 : 0,
-      drop?.centre_m.x ?? 0, drop?.centre_m.y ?? 0, drop?.centre_m.z ?? 0, drop?.radius_m ?? 0,
-      drop?.halfHeight_m ?? 0, this.liquidOnlyVelocityAdvection ? 1 : 0,
-      // w: velocityD still holds this advance's V_face authority when pressure
-      // runs. MacCormack and the stage audit both overwrite it after the store.
-      this.solidVoxelScratchOffsetWords, this.sharedFaceOpenValid() ? 1 : 0,
-      // The shell reach in 4h tiles, whether the extension's finest passes and
-      // the far-air advection arm run on those tiles, and the transport lane
-      // (reach + 8, or -1 with the live set off). All inert while two-level is off.
-      this.twoLevelShellReach, this.twoLevelEnabled ? 1 : 0,
-      this.twoLevelEnabled ? 1 : 0,
-      this.twoLevelEnabled && 0 > 0 ? UNIFORM_TRANSPORT_REACH + 8 : -1,
-      // agreement: the retired compaction, phi seed and shift lanes; clamp.
-      0, 0, 0, UNIFORM_PHI_AGREEMENT_CLAMP,
-      // lean.x: the no-cut-cell certificate. All three sources of a cut cell
-      // are host state -- the packed voxel mask, the terrain heightfield and
-      // the live body list -- so this is decided here once a step rather than
-      // probed per sample. See uvSolidFree.
-      this.solidVoxelsEmpty
-        && !sceneHasTerrain(this.scene) && activeBodyCount === 0 ? 1 : 0,
-      // lean.yzw and splash: retired census window, phi far-air arm, per-tile
-      // reach and splash-survival lanes, always zero.
-      0, 0, 0,
-      0, 0, 0, 0,
-      // splashB: cubic phi advection, retired seed cells, ghost-phi drain,
-      // retired airborne momentum.
-      this.phiCubicAdvection ? 1 : 0, 0, this.phiDrain ? 1 : 0, 0,
-      0, 0, 0, 0,
-      // extrusion: the edge count is what selects the outline over the ball,
-      // so it is rewritten every step and zero on all but an extrusion's own.
-      (drop?.outline?.length ?? 0) / 4, drop?.offset_m ?? 0, drop?.halfDepth_m ?? 0, drop?.edgeRadius_m ?? 0,
-    ]));
+    // The head's words in a scratch the queue copies: one lane per line.
+    const f = this.paramsWords;
+    // The lanes that follow the scene alone (its lattice, container, liquid
+    // and nozzle) are written when it is applied and stand in the scratch
+    // between: each is a number read from the scene, which is a heap number a
+    // step until this function is optimised.
+    if (this.paramsSceneRevision !== this.sceneRevision) {
+      this.paramsSceneRevision = this.sceneRevision;
+      const width = c.width_m, height = c.height_m, depth = c.depth_m;
+      const inflow = this.scene.fluid.inflow, outlet = this.inflowBoundary?.outletCenter_m;
+      f[0] = this.executionInfo.nx;
+      f[1] = this.executionInfo.ny;
+      f[2] = this.executionInfo.nz;
+      f[4] = width / this.executionInfo.nx;
+      f[5] = height / this.executionInfo.ny;
+      f[6] = depth / this.executionInfo.nz;
+      f[7] = this.scene.fluid.gravity_m_s2.y;
+      f[8] = width;
+      f[9] = height;
+      f[10] = depth;
+      f[12] = this.scene.fluid.density_kg_m3;
+      f[13] = this.scene.fluid.dynamicViscosity_Pa_s;
+      f[16] = this.scene.fluid.surfaceTension_N_m;
+      f[20] = outlet?.x ?? 0;
+      f[21] = outlet?.y ?? 0;
+      f[22] = outlet?.z ?? 0;
+      f[23] = inflow?.radius_m ?? 0;
+      f[24] = inflow?.velocity_m_s.x ?? 0;
+      f[25] = inflow?.velocity_m_s.y ?? 0;
+      f[26] = inflow?.velocity_m_s.z ?? 0;
+      f[27] = this.inflowBoundary?.apertureScale ?? 0;
+      f[30] = c.fillFraction * this.executionInfo.ny;
+    }
+    f[3] = dt;
+    f[11] = sceneHasTerrain(this.scene) ? 1 : 0;
+    // The mixed frame's fine reach in 4h tiles, or -1 with two-level off: the
+    // two-level branch in sampleVelocityComponent is then never taken.
+    // w: the retired V-claims-pressure-rows lane, always zero.
+    f[14] = this.twoLevelEnabled ? UNIFORM_TWO_LEVEL_FINE_REACH : -1;
+    f[15] = 0;
+    f[17] = c.fluidWallMode === "no-slip" ? 1 : 0;
+    f[18] = activeBodyCount;
+    f[19] = c.top === "open" ? 1 : 0;
+    f[28] = inflowStrength;
+    f[29] = volumeCells;
+    f[31] = 4;
+    f[32] = 0;
+    f[33] = 0;
+    f[34] = 0;
+    f[35] = c.depthBoundary === "symmetry" ? 1 : 0;
+    f[36] = drop?.centre_m.x ?? 0;
+    f[37] = drop?.centre_m.y ?? 0;
+    f[38] = drop?.centre_m.z ?? 0;
+    f[39] = drop?.radius_m ?? 0;
+    f[40] = drop?.halfHeight_m ?? 0;
+    f[41] = this.liquidOnlyVelocityAdvection ? 1 : 0;
+    // w: velocityD still holds this advance's V_face authority when pressure
+    // runs. MacCormack and the stage audit both overwrite it after the store.
+    f[42] = this.solidVoxelScratchOffsetWords;
+    f[43] = this.sharedFaceOpenValid() ? 1 : 0;
+    // The shell reach in 4h tiles, whether the extension's finest passes and
+    // the far-air advection arm run on those tiles, and the transport lane
+    // (reach + 8, or -1 with the live set off). All inert while two-level is off.
+    f[44] = this.twoLevelShellReach;
+    f[45] = this.twoLevelEnabled ? 1 : 0;
+    f[46] = this.twoLevelEnabled ? 1 : 0;
+    f[47] = this.twoLevelEnabled && 0 > 0 ? UNIFORM_TRANSPORT_REACH + 8 : -1;
+    // agreement: the retired compaction, phi seed and shift lanes; clamp.
+    f[48] = 0;
+    f[49] = 0;
+    f[50] = 0;
+    f[51] = UNIFORM_PHI_AGREEMENT_CLAMP;
+    // lean.x: the no-cut-cell certificate. All three sources of a cut cell
+    // are host state -- the packed voxel mask, the terrain heightfield and
+    // the live body list -- so this is decided here once a step rather than
+    // probed per sample. See uvSolidFree.
+    f[52] = this.solidVoxelsEmpty && !sceneHasTerrain(this.scene) && activeBodyCount === 0 ? 1 : 0;
+    // lean.yzw and splash: retired census window, phi far-air arm, per-tile
+    // reach and splash-survival lanes, always zero.
+    f[53] = 0;
+    f[54] = 0;
+    f[55] = 0;
+    f[56] = 0;
+    f[57] = 0;
+    f[58] = 0;
+    f[59] = 0;
+    // splashB: cubic phi advection, retired seed cells, ghost-phi drain,
+    // retired airborne momentum.
+    f[60] = this.phiCubicAdvection ? 1 : 0;
+    f[61] = 0;
+    f[62] = this.phiDrain ? 1 : 0;
+    f[63] = 0;
+    f[64] = 0;
+    f[65] = 0;
+    f[66] = 0;
+    f[67] = 0;
+    // extrusion: the edge count is what selects the outline over the ball,
+    // so it is rewritten every step and zero on all but an extrusion's own.
+    f[68] = (drop?.outline?.length ?? 0) / 4;
+    f[69] = drop?.offset_m ?? 0;
+    f[70] = drop?.halfDepth_m ?? 0;
+    f[71] = drop?.edgeRadius_m ?? 0;
+    this.device.queue.writeBuffer(this.params, 0, f);
     if (drop?.outline) this.device.queue.writeBuffer(this.params, UNIFORM_PARAMS_HEAD_BYTES + 16, drop.outline);
   }
 
@@ -2112,9 +2329,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Accumulated step ends miss a time written as a fraction by an ulp either
     // way; the same slack on both ends keeps the intervals a tiling.
     const slack = 1e-6 * (end_s - start_s);
-    const due = schedule.flatMap((drop, index) => drop.time_s > start_s + slack && drop.time_s <= end_s + slack ? [index] : []);
-    if (due.length > 1) throw new Error(`Uniform scheduled drops: ${due.length} drops fall in the step ending at ${end_s} s (the first at ${schedule[due[0]!]!.time_s} s); a step adds one drop, so space them at least a step apart`);
-    return due.length ? this.scheduledDrops.drops[due[0]!] : undefined;
+    let due = 0, first = -1;
+    for (let index = 0; index < schedule.length; index++) {
+      const time_s = schedule[index]!.time_s;
+      if (time_s > start_s + slack && time_s <= end_s + slack) { if (!due++) first = index; }
+    }
+    if (due > 1) throw new Error(`Uniform scheduled drops: ${due} drops fall in the step ending at ${end_s} s (the first at ${schedule[first]!.time_s} s); a step adds one drop, so space them at least a step apart`);
+    return due ? this.scheduledDrops.drops[first] : undefined;
   }
 
   /**
@@ -2585,31 +2806,36 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // method than the Dawn/paper lane and overwhelming sharpening with many
     // extra resamples. Accumulate target time until one complete paper step
     // is available; never encode a fractional paper step.
-    if (this.fixedStep_s !== undefined && !uniformFixedAdvanceReady(time_s, this.lastTime, this.fixedStep_s)) return false;
-    const advance = planGPUAdvance(time_s, this.lastTime, this.fixedStep_s ?? this.scene.numerics.maxDt_s);
-    if (!advance) return false;
+    // Each clock number is read once below: a read of one is a heap number until this is optimised.
+    const stepStart_s = this.lastTime, fixedStep_s = this.fixedStep_s;
+    if (fixedStep_s !== undefined && !uniformFixedAdvanceReady(time_s, stepStart_s, fixedStep_s)) return false;
+    const advance = this.advancePlan;
+    if (!planGPUAdvanceInto(advance, time_s, stepStart_s, fixedStep_s ?? this.scene.numerics.maxDt_s)) return false;
     if(!this.mixedFrame) throw new Error("Narrow-band FLIP advances only through the mixed-ownership frame");
     if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
-    const dt = advance.dt_s, stepStart_s = this.lastTime;
-    this.lastTime = advance.nextTime_s;
-    this.executionInfo.submittedTime_s = this.lastTime;
-    if (!this.deferredFramePublication) this.executionInfo.simulatedTime_s = this.lastTime;
+    const dt = advance.dt_s, stepEnd_s = advance.nextTime_s;
+    this.lastTime = stepEnd_s;
+    this.executionInfo.submittedTime_s = stepEnd_s;
+    if (!this.deferredFramePublication) this.executionInfo.simulatedTime_s = stepEnd_s;
     this.executionInfo.simulationLag_s = advance.lag_s;
     this.executionInfo.lastDt_s = dt;
     this.executionInfo.lastSubsteps = 1;
     this.executionInfo.encodedSteps = (this.executionInfo.encodedSteps ?? 0) + 1;
-    const roster = bodies.slice(0, 12);
+    // The first twelve bodies, in a roster this solver keeps (the sample reads it and keeps nothing).
+    const roster = this.advanceRoster, rostered = Math.min(12, bodies.length);
+    for (let i = 0; i < rostered; i++) roster[i] = bodies[i]!;
+    if (roster.length !== rostered) roster.length = rostered;
     const activeBodies = this.prescribedSolidMotion.sample(roster, dt);
     this.stepBodyCount = activeBodies.length;
     this.rigidSystem.syncBodies(activeBodies);
     const c = this.scene.container;
-    const volumeBeforeSources=this.referenceVolumeCells;
+    const volumeBeforeSources=this.referenceVolumeCells;let volumeCells=volumeBeforeSources;
     const inflow = this.scene.fluid.inflow;
-    const strength = inflow ? averageInflowStrength(inflow, this.lastTime - dt, this.lastTime) : 0;
+    const strength = inflow ? averageInflowStrength(inflow, stepEnd_s - dt, stepEnd_s) : 0;
     if (this.inflowBoundary && strength > 0) {
       const cellVolume = c.width_m * c.height_m * c.depth_m
         / (this.executionInfo.nx * this.executionInfo.ny * this.executionInfo.nz);
-      this.referenceVolumeCells += this.inflowBoundary.flowRate_m3_s * strength * dt / cellVolume;
+      volumeCells += this.inflowBoundary.flowRate_m3_s * strength * dt / cellVolume; this.referenceVolumeCells = volumeCells;
     }
     // The drop is consumed by this step and only this step, so the lane is
     // cleared before anything can encode a second one. Its mass joins the
@@ -2619,86 +2845,170 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // the instrument that says how much the two disagreed.
     // A scheduled drop is the scene's own and takes its step; a ball injected
     // for the same one waits for the next, exactly as it waits out a pause.
-    const scheduled = this.scheduledDrop(stepStart_s, this.lastTime);
+    const scheduled = this.scheduledDrop(stepStart_s, stepEnd_s);
     const drop = scheduled ?? (this.pendingDrop ? uniformInjectedDrop(this.pendingDrop) : undefined);
     if (!scheduled) this.pendingDrop = undefined;
     if (drop) {
       const cellVolume = c.width_m * c.height_m * c.depth_m
         / (this.executionInfo.nx * this.executionInfo.ny * this.executionInfo.nz);
-      this.referenceVolumeCells += drop.volume_m3 / cellVolume;
+      volumeCells += drop.volume_m3 / cellVolume; this.referenceVolumeCells = volumeCells;
     }
-    this.executionInfo.referenceLiquidVolume_cells = this.referenceVolumeCells;
+    this.executionInfo.referenceLiquidVolume_cells = volumeCells;
     if(this.mixedFrame){
       this.mixedFrame.solid!.present=!this.solidVoxelsEmpty||sceneHasTerrain(this.scene)||activeBodies.length>0;
       // The layout's owner for this roster: the census follows the bodies' GPU poses.
       try{this.syncMixedLayout(activeBodies,dt,true);}catch(error){this.failMixedFrame(error);return true;}
     }
-    this.writeParams(dt, activeBodies.length, strength, drop);
+    this.writeParams(dt, activeBodies.length, strength, drop, volumeCells);
     if(this.mixedFrame){
       const frame=this.mixedFrame;
       // Dynamic coarsening: the frame's head classifies the state it starts
       // from for this one step and adopts the generation it builds before
       // advecting (horizon one); moving bodies sweep this step's tiles into
       // that census. The tail extends the final velocity for the next head.
-      const mixedBodies=this.mixedBodies!,bodyCount=activeBodies.length;
-      this.mixedDynamic?.setBodies(bodyCount?(encoder,tiles)=>mixedBodies.encodeTiles(encoder,tiles,dt):undefined);
+      const bodyCount=activeBodies.length;
+      // The census's body mark and the coupling read this step's values when
+      // the frame encodes them, inside advance below: each is one function.
+      // The cell's volume and height follow the scene alone.
+      if(this.mixedStepSceneRevision!==this.sceneRevision){
+        this.mixedStepSceneRevision=this.sceneRevision;this.mixedStepCellHeight=c.height_m/this.executionInfo.ny;
+        this.mixedStepCellVolume=c.width_m*c.height_m*c.depth_m/(this.executionInfo.nx*this.executionInfo.ny*this.executionInfo.nz);
+      }
+      this.mixedStepDt=dt;
+      this.mixedDynamic?.setBodies(bodyCount?this.markMixedBodies:undefined);
       // Bodies: the frame rebuilds its solid record and displaces liquid out
       // of the cells they entered; once more after the last one leaves. Native
       // coupleRigid then the rigid integration run after the projection.
-      const cellVolume=c.width_m*c.height_m*c.depth_m/(this.executionInfo.nx*this.executionInfo.ny*this.executionInfo.nz);
-      const frameBodies=bodyCount||this.mixedHadBodies?{couple:bodyCount&&this.rigidCoupling?(encoder:GPUCommandEncoder)=>{
-        mixedBodies.encodeCoupling(encoder);this.rigidSystem.encode(encoder,dt,cellVolume,1,c.height_m/this.executionInfo.ny);
-        frame.solid!.encodeBodies(encoder);
-      }:undefined}:undefined;
+      const frameBodies=bodyCount||this.mixedHadBodies?bodyCount&&this.rigidCoupling?this.mixedCoupledBodies:this.mixedUncoupledBodies:undefined;
       this.mixedHadBodies=bodyCount>0;
       let receipt:Promise<UniformMixedFrameReceipt>,kick:Promise<unknown>|undefined;
       try{
-        const p={dt,addedVolumeCells:this.referenceVolumeCells-volumeBeforeSources,volumeControlSeconds:this.narrowBandVolumeControlSeconds,gravity:this.scene.fluid.gravity_m_s2.y,density:this.scene.fluid.density_kg_m3,
-        viscosity:this.scene.fluid.dynamicViscosity_Pa_s,surfaceTension:this.scene.fluid.surfaceTension_N_m,
-        openTop:this.scene.container.top==="open",noSlip:this.scene.container.fluidWallMode==="no-slip",cubic:this.phiCubicAdvection,drain:this.phiDrain,preserve:this.phiPreserveSurface,pressureTolerance:this.pressureMultigrid.residualTolerance,redistance:true,extensionSweeps:this.velocityExtrapolator.frontPasses,
+        // The frame keeps a step's parameters until its receipt is checked and
+        // compares the last step's with this one's: a ring longer than the
+        // receipts in flight, each record rewritten when its turn returns.
+        const ring=this.mixedParameters,slot=this.mixedParameter=(this.mixedParameter+1)%UNIFORM_MIXED_PARAMETER_RING,p=ring[slot]??={} as UniformMixedFrameParameters;
+        p.dt=dt;p.addedVolumeCells=volumeCells-volumeBeforeSources;p.volumeControlSeconds=this.narrowBandVolumeControlSeconds;
+        // The scene's own numbers stand in a record until the scene is applied again.
+        if(this.mixedParameterScenes[slot]!==this.sceneRevision){
+          this.mixedParameterScenes[slot]=this.sceneRevision;
+          p.gravity=this.scene.fluid.gravity_m_s2.y;p.density=this.scene.fluid.density_kg_m3;p.viscosity=this.scene.fluid.dynamicViscosity_Pa_s;p.surfaceTension=this.scene.fluid.surfaceTension_N_m;
+        }
+        p.openTop=this.scene.container.top==="open";p.noSlip=this.scene.container.fluidWallMode==="no-slip";p.cubic=this.phiCubicAdvection;p.drain=this.phiDrain;p.preserve=this.phiPreserveSurface;p.pressureTolerance=this.pressureMultigrid.residualTolerance;p.redistance=true;p.extensionSweeps=this.velocityExtrapolator.frontPasses;
         // Impacts raise pressure demand faster than a plan two frames old
         // follows. One additional reserve covers long-dam frame 79's third
         // cycle under a 4h surface, and the dam 128^3 all-fine far-wall
         // impact's fourth (8 of 8 perturbed runs through 60 frames with it,
         // 7 of 8 without), without encoding the seven-slot envelope.
-        pressureReserve:1,
-        coarseSurfaceTravel:uniformDetailCoarseSurface(this.detail),coarseHeldDistance:uniformDetailHeldDistance(this.detail),
-        supportPolicy:{fineReach:UNIFORM_TWO_LEVEL_FINE_REACH,shellReach:this.twoLevelShellReach,twoLevel:this.twoLevelEnabled,shellOnly:this.twoLevelEnabled},
-      };
+        p.pressureReserve=1;
+        const surface=this.mixedSurfacePolicy();
+        p.coarseSurfaceTravel=surface.travel;p.coarseHeldDistance=surface.held;
+        const support=p.supportPolicy??={fineReach:UNIFORM_TWO_LEVEL_FINE_REACH,shellReach:this.twoLevelShellReach,twoLevel:this.twoLevelEnabled,shellOnly:this.twoLevelEnabled};
+        support.fineReach=UNIFORM_TWO_LEVEL_FINE_REACH;support.shellReach=this.twoLevelShellReach;support.twoLevel=this.twoLevelEnabled;support.shellOnly=this.twoLevelEnabled;
         // The seed is t=0's velocity; the drift reads it half a step on. The
         // kick is encoded ahead of the first frame with a frame's head (its
         // census, where one is due), so that frame's census bounds the
         // kicked field. Its receipt holds a ring slot until it is checked.
-        if(!this.mixedKicked){this.mixedKicked=true;const k=frame.kick(p,dt/2,!!frameBodies);this.readMixedRelayout();this.mixedFramesInFlight++;kick=k.finally(()=>{this.mixedFramesInFlight--;});}
+        if(!this.mixedKicked)kick=this.kickMixedFrame(frame,p,dt,!!frameBodies);
         receipt=frame.advance(p,this.mixedFrameTrace(),this.mixedGpuLayout&&(this.detail.policy==="dynamic"||this.mixedLive),frameBodies);
         if(kick)receipt=Promise.all([receipt,kick]).then(([frame])=>frame);
       }catch(error){kick?.catch(()=>undefined);this.mixedRelayoutRead=undefined;this.failMixedFrame(error);return true;}
       this.readMixedRelayout();
       this.mixedFramesInFlight++;
-      const handled=receipt.then(receipt=>{
-        if(this.disposed)return;
-        Object.assign(this.executionInfo,{...({narrowBandFlipParticles:this.mixedFrame?.narrowBandFlip?.count,narrowBandFlipReseedClipped:this.mixedFrame?.narrowBandFlip?.reseedClipped,narrowBandFlipUnsupportedParticles:this.mixedFrame?.narrowBandFlip?.diagnostics.unsupported,narrowBandFlipMaxSurfaceDistance:this.mixedFrame?.narrowBandFlip?.diagnostics.afterMaxOutside}),simulatedTime_s:advance.nextTime_s,completedTime_s:advance.nextTime_s,
-          uniformPressureAcceptedResidual:receipt.residual,uniformPressureCyclesExecuted:receipt.cycles,uniformPressureCyclesConverged:true,
-          uniformPressureCyclesEncoded:receipt.encoded,uniformPressureCyclesConfigured:this.pressureSchedule.fullCycles+this.pressureSchedule.vCycles,
-          uniformVolumeDustCells:receipt.dustOwners,uniformVolumeDustMass_cells:receipt.dustMass_cells,
-          uniformVolumeOrphanDustCells:receipt.orphanDustOwners,uniformVolumeOrphanDustMass_cells:receipt.orphanDustMass_cells,
-          uniformPressureBandTiles:receipt.bandTiles,uniformPressureBandCycles:receipt.bandCycles,uniformPressureBandResidual:receipt.bandResidual});
-        // The detail planner's clock: hysteresis and expiry count accepted frames.
-        this.detailAcceptedStep++;
-      }).catch(error=>this.failMixedFrame(error)).finally(()=>{
-        this.mixedFramesInFlight--;
-        if(this.disposed||this.pressureFrameFailure||this.mixedFrameInFlight)return;
-        const scene=this.deferredFrameScene,values=this.deferredFrameValues,bodies=this.deferredFrameBodies;
-        this.deferredFrameScene=undefined;this.deferredFrameValues=undefined;this.deferredFrameBodies=undefined;
-        if(scene)this.applySceneUniforms(scene);if(values)this.applyRuntimeValues(values);if(bodies)this.syncRigidBodies(bodies);
-      });
-      this.mixedFrameChain=Promise.all([this.mixedFrameChain,handled]).then(()=>undefined);
+      if(this.mixedAllocationWatch>0){this.mixedAllocationWatch--;this.mixedAllocationStale=true;}
+      // The step's completion record (its time, with handlers built once) is
+      // its receipt's alone until one of them has run.
+      const completion=this.mixedCompletions.take()??this.mixedCompletion();completion.time_s=stepEnd_s;
+      const handled=receipt.then(completion.accepted,completion.failed);
+      // awaitFrameCompletion's fence: this frame's handling while it is the
+      // only one unhandled, else one promise for every frame until none is.
+      if(this.mixedFrameChainFailure===undefined){
+        if(this.mixedFramesUnhandled===0)this.mixedFrameChain=handled;
+        else if(!this.mixedFramesIdle)this.mixedFrameChain=new Promise<void>(this.holdMixedFramesIdle);
+      }
+      this.mixedFramesUnhandled++;
       return true;
     }
 
     throw new Error("Narrow-band FLIP requires its mixed ownership frame");
   }
 
+  /** The first frame's half kick (apart from advanceTo: this closure would cost every advance a context). */
+  private kickMixedFrame(frame:UniformMixedFrame,p:UniformMixedFrameParameters,dt:number,bodies:boolean):Promise<unknown>{
+    this.mixedKicked=true;const k=frame.kick(p,dt/2,bodies);this.readMixedRelayout();this.mixedFramesInFlight++;
+    return k.finally(()=>{this.mixedFramesInFlight--;});
+  }
+  /** One advance's plan and roster, rewritten by each advance. */
+  private readonly advancePlan: GPUAdvancePlan = { dt_s: 0, nextTime_s: 0, lag_s: 0 };
+  private readonly advanceRoster: RigidBodyState[] = [];
+  /** This step's values for the body mark and the coupling the frame encodes inside its advance. */
+  private mixedStepDt=0;private mixedStepCellVolume=0;private mixedStepCellHeight=0;private mixedStepSceneRevision=0;
+  private readonly markMixedBodies=(encoder:GPUCommandEncoder,tiles:GPUBuffer):void=>this.mixedBodies!.encodeTiles(encoder,tiles,this.mixedStepDt);
+  private readonly mixedCoupledBodies:UniformMixedFrameBodies={couple:(encoder:GPUCommandEncoder)=>{
+    this.mixedBodies!.encodeCoupling(encoder);this.rigidSystem.encode(encoder,this.mixedStepDt,this.mixedStepCellVolume,1,this.mixedStepCellHeight);
+    this.mixedFrame!.solid!.encodeBodies(encoder);
+  }};
+  private readonly mixedUncoupledBodies:UniformMixedFrameBodies={couple:undefined};
+  private readonly mixedParameters:UniformMixedFrameParameters[]=[];
+  /** The scene revision each record's scene numbers were read at. */
+  private readonly mixedParameterScenes:number[]=[];
+  private mixedParameter=0;
+  /** Whether a surface tile may run at 4h and whether held distances are published, for the settings they were asked of. */
+  private mixedSurfacePolicy(){
+    let held=this.mixedSurfacePolicyOf;
+    if(!held||held.detail!==this.detail)held=this.mixedSurfacePolicyOf={detail:this.detail,travel:uniformDetailCoarseSurface(this.detail),held:uniformDetailHeldDistance(this.detail)};
+    return held;
+  }
+  private mixedSurfacePolicyOf?:{detail:UniformDetailSettings;travel:boolean;held:boolean};
+  /** Frames whose receipt no handler has finished with, and the fence a second one opens. */
+  private mixedFramesUnhandled=0;
+  private mixedFramesIdle?:{resolve:()=>void;reject:(error:unknown)=>void};
+  private readonly holdMixedFramesIdle=(resolve:()=>void,reject:(error:unknown)=>void):void=>{this.mixedFramesIdle={resolve,reject};};
+  /** A handler threw (a deferred edit's): every later fence rejects with it, as the chain of handlers did. */
+  private mixedFrameChainFailure?:{error:unknown};
+  private readonly mixedCompletions=new KeptStack<{time_s:number;accepted:(receipt:UniformMixedFrameReceipt)=>void;failed:(error:unknown)=>void}>();
+  private mixedCompletion(){
+    const completion={time_s:0,
+      accepted:(receipt:UniformMixedFrameReceipt):void=>{
+        try{this.acceptMixedFrame(completion.time_s,receipt);}catch(error){this.failMixedFrame(error);}
+        this.mixedCompletions.give(completion);this.settleMixedFrame();
+      },
+      failed:(error:unknown):void=>{this.failMixedFrame(error);this.mixedCompletions.give(completion);this.settleMixedFrame();}};
+    return completion;
+  }
+  /** A frame's receipt was accepted: its counters, and the clock it completed. */
+  private acceptMixedFrame(time_s:number,receipt:UniformMixedFrameReceipt):void{
+    if(this.disposed)return;
+    const info=this.executionInfo as UniformPublishedInfo,flip=this.mixedFrame?.narrowBandFlip;
+    info.narrowBandFlipParticles=flip?.count;info.narrowBandFlipReseedClipped=flip?.reseedClipped;info.narrowBandFlipUnsupportedParticles=flip?.diagnostics.unsupported;info.narrowBandFlipMaxSurfaceDistance=flip?.diagnostics.afterMaxOutside;
+    info.simulatedTime_s=time_s;info.completedTime_s=time_s;
+    info.uniformPressureAcceptedResidual=receipt.residual;info.uniformPressureCyclesExecuted=receipt.cycles;info.uniformPressureCyclesConverged=true;
+    info.uniformPressureCyclesEncoded=receipt.encoded;info.uniformPressureCyclesConfigured=this.pressureSchedule.fullCycles+this.pressureSchedule.vCycles;
+    info.uniformVolumeDustCells=receipt.dustOwners;info.uniformVolumeDustMass_cells=receipt.dustMass_cells;
+    info.uniformVolumeOrphanDustCells=receipt.orphanDustOwners;info.uniformVolumeOrphanDustMass_cells=receipt.orphanDustMass_cells;
+    info.uniformPressureBandTiles=receipt.bandTiles;info.uniformPressureBandCycles=receipt.bandCycles;info.uniformPressureBandResidual=receipt.bandResidual;
+    // The detail planner's clock: hysteresis and expiry count accepted frames.
+    this.detailAcceptedStep++;
+  }
+  /** After a frame's receipt was handled either way: the edits that waited for
+   * every submitted frame, then the fence once no frame is unhandled. */
+  private settleMixedFrame():void{
+    try{
+      this.mixedFramesInFlight--;
+      if(this.mixedAllocationWatch>0)this.mixedAllocationStale=true;
+      if(!(this.disposed||this.pressureFrameFailure||this.mixedFrameInFlight)){
+        const scene=this.deferredFrameScene,values=this.deferredFrameValues,bodies=this.deferredFrameBodies;
+        this.deferredFrameScene=undefined;this.deferredFrameValues=undefined;this.deferredFrameBodies=undefined;
+        if(scene)this.applySceneUniforms(scene);if(values)this.applyRuntimeValues(values);if(bodies)this.syncRigidBodies(bodies);
+      }
+    }catch(error){
+      this.mixedFrameChainFailure??={error};
+      const idle=this.mixedFramesIdle;this.mixedFramesIdle=undefined;this.mixedFramesUnhandled--;
+      // The fence that covers this frame rejects: the shared one, else this handler's own promise.
+      if(idle){idle.reject(error);return;}
+      throw error;
+    }
+    if(--this.mixedFramesUnhandled===0){const idle=this.mixedFramesIdle;this.mixedFramesIdle=undefined;idle?.resolve();}
+  }
   async readStats(): Promise<GPUEulerianInfo> {
    
     await this.awaitFrameCompletion();
@@ -2762,7 +3072,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedFrame?.invalidateExtension();
     this.appliedRuntimeValues = undefined;
     if (this.mixedFrameInFlight) { this.deferredFrameScene = scene; return; }
-    this.scene = scene;
+    this.scene = scene; this.sceneRevision++;
     this.faceAuthorityStored = false;
     const dirty = this.solidMask.update(solidWorldForScene(scene));
     if (dirty) { this.solidVoxelsEmpty = uniformSolidMaskEmpty(this.solidMask); this.mixedSolidMaskStamp++; }
@@ -2796,7 +3106,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.disposed = true;
     this.mixedFrame?.destroy();this.mixedPressureGeometry?.target.destroy();this.mixedPressureGeometry?.centerPhi.destroy();
     this.detailStorage?.destroy();
-    this.mixedDynamic?.destroy();this.mixedBuilder?.destroy();for(const read of this.mixedRelayoutReads)read.destroy();this.mixedRelayoutRead?.destroy();this.mixedBodies?.destroy();
+    this.mixedDynamic?.destroy();this.mixedBuilder?.destroy();for(let i=0;i<this.mixedRelayoutReads.size;i++)this.mixedRelayoutReads.at(i).destroy();this.mixedRelayoutRead?.destroy();this.mixedBodies?.destroy();
     for (const texture of new Set([
       this.velocityA, this.velocityB, this.velocityC, this.velocityD,
       this.pressureA, this.pressureB, this.volumeA, this.volumeB,

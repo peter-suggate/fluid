@@ -113,10 +113,17 @@ export class UniformMixedLayoutBuilder {
  /** The compact relayout receipt: copy UNIFORM_MIXED_RELAYOUT_RECEIPT.words
   * words from `offset` bytes. Per-build words are complete once this
   * builder's encode has run; generation, builds and the fatal bits persist. */
- get receipt():{readonly buffer:GPUBuffer;readonly offset:number;readonly words:number}{return {buffer:this.level.status,offset:0,words:UNIFORM_MIXED_RELAYOUT_RECEIPT.words};}
+ get receipt():{readonly buffer:GPUBuffer;readonly offset:number;readonly words:number}{return this.receiptView??={buffer:this.level.status,offset:0,words:UNIFORM_MIXED_RELAYOUT_RECEIPT.words};}
+ private receiptView?:{readonly buffer:GPUBuffer;readonly offset:number;readonly words:number};
  /** The built generation's buffers, complete once encode has run: what
   * UniformMixedOwnership.adoptGpu copies, with no host mirror. */
- get generation():UniformMixedGenerationBuffers{const l=this.level;return {topology:l.topology,support:l.support,slots:l.slots,counts:{buffer:l.work,offset:COUNTS*4},changes:l.work};}
+ get generation():UniformMixedGenerationBuffers{const l=this.level;return this.generationView??={topology:l.topology,support:l.support,slots:l.slots,counts:{buffer:l.work,offset:COUNTS*4},changes:l.work};}
+ private generationView?:UniformMixedGenerationBuffers;
+ /** One word for a params write (the queue copies it at the call). */
+ private readonly word=new Uint32Array(1);
+ /** encode's launches in order (admit only under an admission capacity), resolved once. */
+ private launches?:readonly GPUComputePipeline[];
+ private static readonly PASS:GPUComputePassDescriptor={label:"Uniform mixed layout build"};
  /** ownership: the simulation ownership the built generation replaces. */
  constructor(private readonly device:GPUDevice,band:UniformMixedBandBits,ownership:UniformMixedOwnership){
   const n=ownership.capacity.tiles;
@@ -458,7 +465,7 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
   * whose capacity is every tile. Queue-ordered: the next encode's build. */
  setAdmission(tiles?:number):void{
   if(tiles!==undefined&&(!Number.isSafeInteger(tiles)||tiles<0||tiles>this.tiles))throw new Error(`Mixed layout builder admission capacity must be an integer in 0..${this.tiles}: ${tiles}`);
-  this.admission=tiles;this.device.queue.writeBuffer(this.level.params,16,new Uint32Array([tiles??0xffffffff]));
+  this.admission=tiles;this.word[0]=tiles??0xffffffff;this.device.queue.writeBuffer(this.level.params,16,this.word);
  }
  private admission?:number;
  /** Zero the build's counters: encode once before each encode, in the same
@@ -468,6 +475,8 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
  private cleared=false;
  /** The ownership capacity the params' hanging and h-tile bounds were written at. */
  private capacityRevision:number;
+ /** encode's launches in order, resolved once (apart from encode: a closure there would cost every encode a context). */
+ private buildLaunches():readonly GPUComputePipeline[]{return ["widths","admit","classify","mirror","dilate","scan","scatter","verifyWords"].map(entry=>this.pipelines.get(entry)!);}
  /** Encode after the band bits are written, while the ownership is still
   * the generation to compare against; encodeClear must precede it. */
  encode(encoder:GPUCommandEncoder):void{
@@ -475,20 +484,26 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
   if(!this.staticReady)throw new Error("Mixed layout builder has no static fine mask");
   if(!this.cleared)throw new Error("Mixed layout builder encoded without encodeClear");
   this.cleared=false;
-  const n=this.tiles,groups64=Math.ceil(n/64);
+  const groups64=(this.tiles+63)>>>6;
   const level=this.level;
   // The ownership's capacity was reserved anew: this build's bounds follow
   // (queue-ordered, ahead of this encoder's submit).
   if(level.current.capacityRevision!==this.capacityRevision){
    this.capacityRevision=level.current.capacityRevision;
-   this.device.queue.writeBuffer(level.params,4,new Uint32Array([level.current.capacity.hangingSlots]));
-   this.device.queue.writeBuffer(level.params,12,new Uint32Array([level.current.capacity.fineTiles]));
+   this.word[0]=level.current.capacity.hangingSlots;this.device.queue.writeBuffer(level.params,4,this.word);
+   this.word[0]=level.current.capacity.fineTiles;this.device.queue.writeBuffer(level.params,12,this.word);
   }
-  const pass=encoder.beginComputePass({label:"Uniform mixed layout build"});pass.setBindGroup(0,level.group);
+  const launches=this.launches??=this.buildLaunches();
+  const pass=encoder.beginComputePass(UniformMixedLayoutBuilder.PASS);pass.setBindGroup(0,level.group);
   // admit is launched only under an admission capacity: without one it could never act.
-  for(const [entry,groups] of [["widths",groups64],...(this.admission===undefined?[]:[["admit",groups64] as const]),["classify",this.blocks],["mirror",groups64],["dilate",groups64],["scan",1],["scatter",this.blocks],["verifyWords",groups64]] as const){
-   pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(groups);
-  }
+  pass.setPipeline(launches[0]!);pass.dispatchWorkgroups(groups64);
+  if(this.admission!==undefined){pass.setPipeline(launches[1]!);pass.dispatchWorkgroups(groups64);}
+  pass.setPipeline(launches[2]!);pass.dispatchWorkgroups(this.blocks);
+  pass.setPipeline(launches[3]!);pass.dispatchWorkgroups(groups64);
+  pass.setPipeline(launches[4]!);pass.dispatchWorkgroups(groups64);
+  pass.setPipeline(launches[5]!);pass.dispatchWorkgroups(1);
+  pass.setPipeline(launches[6]!);pass.dispatchWorkgroups(this.blocks);
+  pass.setPipeline(launches[7]!);pass.dispatchWorkgroups(groups64);
   pass.end();
  }
  destroy():void{

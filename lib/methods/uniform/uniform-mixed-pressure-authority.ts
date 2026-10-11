@@ -1,4 +1,5 @@
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformMixedPressureCutWGSL } from "./uniform-mixed-pressure-cut.wgsl";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedPageCount, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
@@ -59,8 +60,8 @@ export interface UniformMixedPressureAuthorityFields {
  * value there, which is what a cut owner simulated at 4h reads from its eight
  * corners, so a resting plane surface is one hydrostatic root across an h/4h
  * seam (native's open-child vote prefers air and broke it at shorelines).
- * The fit runs first, one workgroup per cut tile, into the scratch after the
- * balance words; build reads it for the owner and for a closed owner's cut
+ * The fit runs first, sharing each workgroup across cut tiles, into scratch
+ * after the balance words; build reads it for the owner and for a closed owner's cut
  * neighbours.
  * Resident mode (the split's all-4h pressure ownership, whose support carries
  * the simulation's residency certificate) strides the resident pages' owners
@@ -75,6 +76,10 @@ export interface UniformMixedPressureAuthorityFields {
  * absent page: the same value the dense build writes there. */
 /** Owner entries: GPU-counted launches over every tier (umAllOwner). */
 const counted:readonly string[]=["rows","build","resolve","surface"];
+/** The stage's passes, described once. */
+const SURFACE_PASS:GPUComputePassDescriptor={label:"NB-FLIP surface pressure authority"};
+const BALANCE_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure authority and volume correction"};
+const PHASE_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure authority phase"};
 
 /** surfaceOnly is the NB-FLIP contract: pressure and donor phase follow phi,
  * with solid continuation but no independently conserved mass. Its one owner
@@ -88,6 +93,10 @@ export class UniformMixedPressureAuthority {
  /** Balance partials (one per counted job) and their chunk sums. */
  private readonly groups:number;
  private readonly chunks:number;
+ /** Resident mode's coarse jobs: the lattice's residency pages. */
+ private readonly pages:number;
+ /** The cut launch's groups: 64 tiles of the lattice each. */
+ private readonly cutGroups:number;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly coarse=false,private readonly resident=false,readonly surfaceOnly=false){
@@ -102,7 +111,8 @@ export class UniformMixedPressureAuthority {
   // than ceil(tiles/64) unless every dimension is a multiple of 16 (27 pages
   // for the 16 groups of 40^3, whose last 11 partials were dropped).
   this.owners=ownership.layout.cellCount;
-  this.groups=surfaceOnly?0:Math.ceil(this.owners/64)+(resident?uniformMixedPageCount(ownership.capacity.lattice):0);this.chunks=Math.ceil(this.groups/1024);
+  this.pages=uniformMixedPageCount(ownership.capacity.lattice);this.cutGroups=Math.max(1,Math.min(1024,Math.ceil(ownership.capacity.tiles/64)));
+  this.groups=surfaceOnly?0:Math.ceil(this.owners/64)+(resident?this.pages:0);this.chunks=Math.ceil(this.groups/1024);
   // Two vec2f words per partial; coarse: one vec2f cut-phi slot per owner
   // after the balance words.
   this.scratchBytes=8*(1+2*(this.groups+this.chunks)+(coarse?this.owners:0));
@@ -157,7 +167,7 @@ fn umSurfacePhiCell(p:vec3i)->f32{let o=umOwnerAt(p);return textureLoad(centerPh
 // pressurePhi of an h owner's cell: a closed cell continues its open liquid
 // neighbours, an open one reads its own texel.
 fn umPressurePhiCell(p:vec3i)->f32{
- if(umCellOpen(p)>1e-5){return textureLoad(centerPhi,p,0).x;}
+ if(umCellIsOpen(p)){return textureLoad(centerPhi,p,0).x;}
  var terms:array<f32,6>;var weights:array<f32,6>;
  for(var i=0u;i<6u;i++){var q=p;q[i/2u]+=select(-1,1,(i&1u)!=0u);let open=umCellOpen(q);
   terms[i]=0.0;weights[i]=0.0;if(open<=1e-5){continue;}
@@ -195,13 +205,7 @@ fn umOwnerSurfacePhi(o:UMOwner,v:f32,cap:f32)->f32{
 ${uniformMixedDetachedMassWGSL(o=>`umAuthorityLiquid(${o},phi[${o}.index])`,o=>`umOwnerVolume(${o})`,"params.w")}
 ${this.coarse?`@group(1) @binding(8) var vertexPhi:texture_3d<f32>;
 const UM_CUT_BASE=${1+2*(this.groups+this.chunks)}u;
-// A cut h tile's owner phi: the plane through its live vertices, at the tile
-// centre. A fixed grid of workgroups strides over the lattice 64 tiles at a
-// time, a lane per tile: an uncut tile costs its lane one test, a cut one its
-// vertex loads and the fit (its open cells come with the solid record).
-@compute @workgroup_size(64) fn cut(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
- for(var start=64u*group.x;start<UM_TILES;start+=64u*groups.x){let t=start+l;if(t<UM_TILES&&umSolidCut(t)){cutTile(t);}}
-}
+${uniformMixedPressureCutWGSL}
 // Vertex v of the tile's 5^3: live when one of the tile's h cells at it is open.
 fn cutLive(open:vec2u,v:u32)->bool{
  let g=vec3i(vec3u(v%5u,(v/5u)%5u,v/25u));
@@ -209,8 +213,20 @@ fn cutLive(open:vec2u,v:u32)->bool{
   if(all(c>=vec3i(0))&&all(c<vec3i(4))){let i=u32(c.x+4*c.y+16*c.z);if(((open[i>>5u]>>(i&31u))&1u)!=0u){return true;}}}
  return false;
 }
+// Ordered reference for frozen shader replays; unreachable from production
+// entry points, so the shader compiler removes its private vertex array.
+// Keep physics edits in sync with uniform-mixed-pressure-cut.wgsl.ts.
 fn cutTile(t:u32){
  let origin=vec3i(4u*umTileCoord(t));let open=umSolidOpenCells(t);
+ // Empty/full masks preserve the ordered fit: no live vertices use 2h;
+ // all 125 vertices have exactly zero centred mean, so only their mean
+ // phi contributes at the tile centre. Partial masks keep the full fit.
+ if(all(open==vec2u(0u))){balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(2.0*UM_HMIN,0.0);return;}
+ if(all(open==vec2u(0xffffffffu))){
+  var count=0.0;var total=0.0;
+  for(var v=0u;v<125u;v++){count+=1.0;total+=textureLoad(vertexPhi,origin+vec3i(vec3u(v%5u,(v/5u)%5u,v/25u)),0).x;}
+  balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(total/count,0.0);return;
+ }
  var cutVertex:array<f32,125>;var live=array<u32,4>(0u,0u,0u,0u);
  for(var v=0u;v<125u;v++){if(cutLive(open,v)){live[v>>5u]|=1u<<(v&31u);cutVertex[v]=textureLoad(vertexPhi,origin+vec3i(vec3u(v%5u,(v/5u)%5u,v/25u)),0).x;}}
  // Centred normal equations in cell units about the tile centre: a live
@@ -349,23 +365,24 @@ ${this.resident?`// One group per page: the 4h owners of an absent page take the
  /** The owner launches: resident mode's all-4h ownership has no h jobs, so
   * its jobs are its resident pages (any grid is correct; this prices it). */
  private dispatchOwners(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void{
-  if(this.resident)this.ownership.dispatchCounted(pass,pipeline,uniformMixedPageCount(this.ownership.capacity.lattice));else this.ownership.dispatchAllCounted(pass,pipeline);
+  if(this.resident)this.ownership.dispatchCounted(pass,pipeline,this.pages);else this.ownership.dispatchAllCounted(pass,pipeline);
  }
  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,balance=true):void{
   if(this.pipelines.size!==(this.surfaceOnly?1:6)+(this.coarse?1:0)+(this.resident?1:0))throw new Error("Mixed pressure authority is not initialized");
-  const pass=encoder.beginComputePass({label:this.surfaceOnly?"NB-FLIP surface pressure authority":balance?"Uniform mixed pressure authority and volume correction":"Uniform mixed pressure authority phase"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
-  if(this.coarse){pass.setPipeline(this.variant(this.pipelines.get("cut")!));pass.dispatchWorkgroups(Math.max(1,Math.min(1024,Math.ceil(this.ownership.capacity.tiles/64))));}
+  const pass=encoder.beginComputePass(this.surfaceOnly?SURFACE_PASS:balance?BALANCE_PASS:PHASE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
+  if(this.coarse){pass.setPipeline(this.variant(this.pipelines.get("cut")!));pass.dispatchWorkgroups(this.cutGroups);}
   // The all-4h ownership's owners are tiles: every load and store below is
   // a tile origin, of the owner or of a face neighbour (cut alone reads h
   // vertices): the base blocks.
   if(this.resident)pass.setBindGroup(1,group.base);
-  if(this.resident){pass.setPipeline(this.variant(this.pipelines.get("absent")!));pass.dispatchWorkgroups(uniformMixedPageCount(this.ownership.capacity.lattice));}
+  if(this.resident){pass.setPipeline(this.variant(this.pipelines.get("absent")!));pass.dispatchWorkgroups(this.pages);}
   if(this.surfaceOnly){this.dispatchOwners(pass,this.variant(this.pipelines.get("surface")!));pass.end();return;}
   this.dispatchOwners(pass,this.variant(this.pipelines.get("rows")!));
   if(!balance){this.dispatchOwners(pass,this.variant(this.pipelines.get("phase")!));pass.end();return;}
-  for(const entry of ["build","chunks","reduce","resolve"]){const pipeline=this.variant(this.pipelines.get(entry)!);pass.setPipeline(pipeline);
-   if(entry==="chunks")pass.dispatchWorkgroups(this.chunks);else if(entry==="reduce")pass.dispatchWorkgroups(1);else this.dispatchOwners(pass,pipeline);
-  }
+  const build=this.variant(this.pipelines.get("build")!);pass.setPipeline(build);this.dispatchOwners(pass,build);
+  pass.setPipeline(this.variant(this.pipelines.get("chunks")!));pass.dispatchWorkgroups(this.chunks);
+  pass.setPipeline(this.variant(this.pipelines.get("reduce")!));pass.dispatchWorkgroups(1);
+  const resolve=this.variant(this.pipelines.get("resolve")!);pass.setPipeline(resolve);this.dispatchOwners(pass,resolve);
   pass.end();
  }
 }

@@ -69,6 +69,10 @@ export interface UniformMixedSolidCoarse {
  readonly count:number;
 }
 
+const RECORD_PASS:GPUComputePassDescriptor={label:"Uniform mixed all-4h solid record"},WIDTHS_PASS:GPUComputePassDescriptor={label:"Uniform mixed solid simulation widths"};
+/** ceil(jobs/per) in whole steps: a fractional quotient is a heap number until its caller is optimized. */
+const ceilDiv=(jobs:number,per:number):number=>{const up=jobs+per-1;return (up-up%per)/per;};
+
 export class UniformMixedSolid {
  readonly bindLayout:GPUBindGroupLayout;
  readonly bindGroup:GPUBindGroup;
@@ -89,11 +93,13 @@ export class UniformMixedSolid {
  private readonly scratch:GPUBuffer;private readonly cutMapOffsetWords:number;private readonly params:GPUBuffer;
  private built=false;
  private readonly paramsWritten?:()=>boolean;
+ /** The device's workgroups per dimension: read once, the limits object is the device's to rebuild. */
+ private readonly maxGroups:number;
  constructor(private readonly device:GPUDevice,resources:UniformMixedSolidResources,private readonly coarseLayout?:UniformMixedLayout){
   if(resources.params.size<272||resources.terrain.format!=="r32float")throw new Error("Mixed solids require the native parameter block and terrain heightfield");
   if(resources.bodies.size<12*128)throw new Error("Mixed solids require the rigid-body state buffer");
   if(!Number.isSafeInteger(resources.coupledTiles)||resources.coupledTiles<0)throw new Error("Mixed solids require the host's coupled tile count");
-  this.coupledTiles=resources.coupledTiles;
+  this.coupledTiles=resources.coupledTiles;this.maxGroups=device.limits.maxComputeWorkgroupsPerDimension;
   this.scratch=resources.scratch;this.cutMapOffsetWords=resources.cutMapOffsetWords;this.params=resources.params;
   if(coarseLayout&&!resources.paramsWritten)throw new Error("The coarse solid record requires the host's parameter-block write receipt");
   this.paramsWritten=resources.paramsWritten;
@@ -273,11 +279,11 @@ override umDispatchX:u32=65535u;
   const layout=this.coarseLayout;if(!layout||this.built)return;
   if(!this.builder)throw new Error("The coarse solid record is not initialized");
   if(!this.paramsWritten!())throw new Error("The coarse solid record was encoded before the host's first write of the native parameter block: built from a zero block it holds every tile uncut");
-  const tiles=layout.tiles.length,x=Math.min(tiles,this.device.limits.maxComputeWorkgroupsPerDimension);
-  const pass=encoder.beginComputePass({label:"Uniform mixed all-4h solid record"});
-  pass.setPipeline(this.full?this.builder.pipeline:this.builder.bodies!);pass.setBindGroup(0,this.bindGroup);pass.setBindGroup(1,this.builder.group);pass.dispatchWorkgroups(x,Math.ceil(tiles/x));
-  const groups=Math.ceil(tiles/64),gx=Math.min(groups,this.device.limits.maxComputeWorkgroupsPerDimension);
-  pass.setPipeline(this.cutMap!.pipeline);pass.setBindGroup(0,this.cutMap!.group);pass.dispatchWorkgroups(gx,Math.ceil(groups/gx));pass.end();
+  const tiles=layout.tiles.length,x=Math.min(tiles,this.maxGroups);
+  const pass=encoder.beginComputePass(RECORD_PASS);
+  pass.setPipeline(this.full?this.builder.pipeline:this.builder.bodies!);pass.setBindGroup(0,this.bindGroup);pass.setBindGroup(1,this.builder.group);pass.dispatchWorkgroups(x,ceilDiv(tiles,x));
+  const groups=ceilDiv(tiles,64),gx=Math.min(groups,this.maxGroups);
+  pass.setPipeline(this.cutMap!.pipeline);pass.setBindGroup(0,this.cutMap!.group);pass.dispatchWorkgroups(gx,ceilDiv(groups,gx));pass.end();
   encoder.copyBufferToBuffer(this.bodies,0,this.builtBodies!,0,12*128);this.full=false;
   this.built=true;
  }
@@ -296,8 +302,8 @@ override umDispatchX:u32=65535u;
  encodeSimulation(encoder:GPUCommandEncoder,topology:GPUBufferBinding,changes?:GPUBuffer):void{
   const layout=this.coarseLayout,coarse=this.coarse,s=this.simulation;if(!layout||!coarse)return;
   if(!s)throw new Error("The coarse solid record is not initialized");
-  const groups=Math.ceil(layout.tiles.length/64),x=Math.min(groups,this.device.limits.maxComputeWorkgroupsPerDimension);
-  const pass=encoder.beginComputePass({label:"Uniform mixed solid simulation widths"});
+  const groups=ceilDiv(layout.tiles.length,64),x=Math.min(groups,this.maxGroups);
+  const pass=encoder.beginComputePass(WIDTHS_PASS);
   if(changes){
    if(s.list?.topology!==topology.buffer||s.list.changes!==changes)s.list={topology:topology.buffer,changes,group:this.device.createBindGroup({layout:s.listLayout,entries:[{binding:3,resource:{buffer:this.params,size:16}},{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:topology},{binding:2,resource:{buffer:changes}}]})};
    pass.setPipeline(s.listed!);pass.setBindGroup(0,s.list.group);
@@ -305,7 +311,7 @@ override umDispatchX:u32=65535u;
    if(s.topology!==topology.buffer){s.topology=topology.buffer;s.group=this.device.createBindGroup({layout:s.layout,entries:[{binding:3,resource:{buffer:this.params,size:16}},{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:topology}]});}
    pass.setPipeline(s.pipeline);pass.setBindGroup(0,s.group!);
   }
-  pass.dispatchWorkgroups(x,Math.ceil(groups/x));pass.end();
+  pass.dispatchWorkgroups(x,ceilDiv(groups,x));pass.end();
  }
  destroy():void{this.coarse?.record.destroy();this.bodies.destroy();this.builtBodies?.destroy();}
 }
@@ -325,9 +331,9 @@ fn umVertexBuried(p:vec3i)->bool{
  let base=p-vec3i(1);
  for(var k=0u;k<8u;k++){
   let cell=base+vec3i(umCorner(k,2u));if(!umSolidValid(cell)){continue;}
-  let t=umTileAt(vec3u(cell)/4u);var open=0.0;
-  if(umTileWidth(t)==4u){open=umTileOpen(t);}else{open=umCellOpen(cell);}
-  if(open>1e-5){return false;}
+  let t=umTileAt(vec3u(cell)/4u);
+  if(umTileWidth(t)==4u){if(umTileOpen(t)>1e-5){return false;}}
+  else if(umCellIsOpen(cell)){return false;}
  }
  return true;
 }`;
@@ -347,6 +353,7 @@ fn umSolidEnabled()->bool{return false;}
 fn umSolidValid(p:vec3i)->bool{return all(p>=vec3i(0))&&all(p<vec3i(UM_D));}
 fn umSolidVoxel(p:vec3i)->bool{return false;}
 fn umCellOpen(p:vec3i)->f32{return select(0.0,1.0,umSolidValid(p));}
+fn umCellIsOpen(p:vec3i)->bool{return umSolidValid(p);}
 fn umCellInsideSolid(p:vec3i)->bool{return false;}
 fn umFaceOpen(id:vec3i,axis:u32)->f32{return 1.0;}
 fn umPressureFaceV(id:vec3i,axis:u32)->f32{return 1.0;}
@@ -471,6 +478,19 @@ fn umCellOpen(p:vec3i)->f32{
  if(umSolidTileClear(p)){return 1.0;}
  if(umSolidVoxel(p)){return 0.0;}
  return clamp((1.0-umCellBodyFraction(p))*(1.0-umCellTerrainFraction(p)),0.0,1.0);
+}
+// The exact >1e-5 predicate, cached by the solid record builder. Consumers
+// of the coarse record run after its rebuild at the frame head (also after
+// voxel/terrain edits and body motion). The builder and stages without a
+// record keep the full geometric evaluation; fractional queries still use
+// umCellOpen. An out-of-domain cell is closed in either form.
+fn umCellIsOpen(p:vec3i)->bool{
+ ${coarse!==undefined&&gated?`if(!umSolidValid(p)){return false;}
+ if(!umSolidEnabled()){return true;}
+ let q=vec3u(p);let c=q>>vec3u(2u);let d=umSolidDimensions()>>vec3u(2u);
+ let l=q&vec3u(3u);let lane=l.x+4u*(l.y+4u*l.z);
+ let mask=umSolidOpenCells(c.x+d.x*(c.y+d.y*c.z));
+ return (select(mask.x,mask.y,lane>=32u)&(1u<<(lane&31u)))!=0u;`:"return umCellOpen(p)>1e-5;"}
 }
 // cellInsideSolid: voxel, terrain or a body at the centre -- the CM11a p_min=0 rows.
 fn umCellInsideSolid(p:vec3i)->bool{

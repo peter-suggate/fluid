@@ -10,6 +10,11 @@ import { uniformMixedChangedTilesWGSL } from "./uniform-mixed-layout-builder";
 
 /** Workgroups of the changed-tile geometry launch at most (grid-stride). */
 const CHANGED_GRID=4096;
+/** ceil(jobs/per) in whole steps: a fractional quotient is a heap number until its caller is optimized. */
+const ceilDiv=(jobs:number,per:number):number=>{const up=jobs+per-1;return (up-up%per)/per;};
+const GEOMETRY_PASS:GPUComputePassDescriptor={label:"Uniform mixed geometric fill"};
+/** encode()'s options when none are given: a full launch of the simulation geometry. */
+const NO_OPTIONS:{readonly pressure?:boolean;readonly changed?:GPUBuffer;readonly metric?:boolean}={};
 
 /** The native eight-probe / planar-exact fill rule on mixed owners. Target
  * fractions are intensive, phi is physical, and no fine cell is expanded.
@@ -252,7 +257,7 @@ var<workgroup> gcJobs:vec2u;
    * changed: the changed tiles (UniformMixedGenerationBuffers.changes) of the
    * generation the ownership adopted since the last encode: evaluate only
    * their neighbourhoods (see the class comment for the caller's precondition). */
-  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,options:{pressure?:boolean;changed?:GPUBuffer;metric?:boolean}={}):void{
+  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,options:{pressure?:boolean;changed?:GPUBuffer;metric?:boolean}=NO_OPTIONS):void{
     if(!this.pipeline)throw new Error("Mixed surface geometry is not initialized");
     if(options.metric&&(!options.pressure||!this.metricPipeline))throw new Error("Metric pressure geometry requires a current distance field and pressure outputs");
     if(options.pressure&&options.changed)throw new Error("Mixed geometry writes pressure outputs only in a full launch");
@@ -260,24 +265,24 @@ var<workgroup> gcJobs:vec2u;
     const revision=this.ownership.revision;
     if(options.changed&&this.encodedRevision!==revision-1)throw new Error(`Mixed geometry's changed launch needs exactly one adoption since its last encode (revision ${this.encodedRevision} -> ${revision})`);
     this.encodedRevision=revision;
-    const variant=(p:GPUComputePipeline)=>uniformDetailPick(this.solid?.select(p)??p);
     if(options.changed){
       encoder.clearBuffer(this.changes,0,16);
       if(this.listGroup?.changes!==options.changed)this.listGroup={changes:options.changed,group:uniformDetailGroup(this.device,{layout:this.listResources,entries:[{binding:0,resource:{buffer:options.changed}}]})};
     }
-    const pass=encoder.beginComputePass({label:"Uniform mixed geometric fill"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
+    const pass=encoder.beginComputePass(GEOMETRY_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
     if(options.changed){
-      const [compact,changed]=this.changedPipelines,tiles=this.ownership.capacity.tiles,groups=Math.ceil(tiles/64),x=this.ownership.dispatchX;
+      const compact=this.changedPipelines[0]!,changed=this.changedPipelines[1]!,tiles=this.ownership.capacity.tiles,groups=ceilDiv(tiles,64),x=this.ownership.dispatchX;
       pass.setBindGroup(this.solid?3:2,this.listGroup!.group.group);
-      pass.setPipeline(variant(compact!));pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
-      pass.setPipeline(variant(changed!));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
+      pass.setPipeline(this.variant(compact));pass.dispatchWorkgroups(Math.min(groups,x),ceilDiv(groups,x));
+      pass.setPipeline(this.variant(changed));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
     }
-    else this.ownership.dispatchAllCounted(pass,variant(options.metric?this.metricPipeline!:options.pressure?this.pressurePipeline!:this.pipeline));
+    else this.ownership.dispatchAllCounted(pass,this.variant(options.metric?this.metricPipeline!:options.pressure?this.pressurePipeline!:this.pipeline));
     // Every live owner, after a changed launch too: the mirror may have been
     // remapped in tiles this launch did not evaluate.
     const mirror=this.mirrorGroups.get(group);
     if(mirror){pass.setBindGroup(1,mirror.group);this.ownership.dispatchAllCounted(pass,uniformDetailPick(this.mirrorPipeline!));}
     pass.end();
   }
+  private variant(p:GPUComputePipeline):GPUComputePipeline{return uniformDetailPick(this.solid?.select(p)??p);}
   destroy():void{this.changes.destroy();}
 }

@@ -49,12 +49,17 @@ const NB_VOLUME_RATE_LIMIT=4;
  * at rest must be asked for nothing, or the divergence moves its waterline
  * and wakes the adaptive surface. */
 const NB_VOLUME_DEAD_BAND=0.01;
+const VOLUME_PASS:GPUComputePassDescriptor={label:"Uniform mixed global surface volume"},BUDGET_PASS:GPUComputePassDescriptor={label:"NB scalar volume sources and outflow"};
+/** ceil(jobs/per) in whole steps: a fractional quotient is a heap number until its caller is optimized. */
+const ceilDiv=(jobs:number,per:number):number=>{const up=jobs+per-1;return (up-up%per)/per;};
 export class UniformMixedSurfaceVolume {
  /** NB budget: target, initialized, cumulative outflow, last normal shift,
   * volume before correction, initial volume, last measured volume, target,
   * then the gauge's volume control rate in 1/s. */
  readonly budget?:GPUBuffer;
  private readonly budgetParams?:GPUBuffer;
+ /** beginStep's parameter words: dt, added cells, open top, control rate. */
+ private readonly budgetWords=new Float32Array(4);
  private budgetCaptured=false;
  get allocatedBytes():number{return this.scalarTarget?48:0;}
  /** Bytes of bind()'s scratch at that many h tiles. The sections the lattice
@@ -587,19 +592,22 @@ ${shared(uniformMixedVertexSamplingSource("",false))}
   if(!Number.isInteger(rounds)||rounds<1)throw new Error(`Mixed surface constraint needs a positive whole round count, not ${rounds}`);
   if(this.pipelines.size!==((this.resolved?12:11)+(this.scalarTarget?5:0)))throw new Error("Mixed surface constraint is not initialized");
   const applyGroup=this.applyGroups.get(group);if(!applyGroup)throw new Error("Mixed surface constraint group was not bound by this stage");
-  const pass=encoder.beginComputePass({label:"Uniform mixed global surface volume"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
+  const pass=encoder.beginComputePass(VOLUME_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
+  if(capture){this.run(pass,"clearBand");this.run(pass,"measureInitial");this.run(pass,"reduce");this.run(pass,capture==="gauge"?"gauge":"capture");pass.end();return;}
+  this.run(pass,"clearBand");this.run(pass,"seed");for(let i=0;i<4;i++)this.run(pass,i%2?"dilate1":"dilate0");this.run(pass,"grow");this.run(pass,"measureGrow");this.run(pass,"metric");if(this.resolved)this.run(pass,"resolveScale");
+  for(let i=0;i<rounds;i++){this.run(pass,"measure");this.run(pass,"reduce");this.run(pass,"solve");}
+  if(apply){pass.setBindGroup(1,applyGroup.group);this.run(pass,"apply");}pass.end();
+ }
+ /** One entry's launch in encode()'s pass. */
+ private run(pass:GPUComputePassEncoder,entry:string):void{
   // The apply modules hold no solid library: only the constraint's own pipelines have twins.
-  const run=(entry:string)=>{const own=this.pipelines.get(entry)!;const pipeline=uniformDetailPick(entry==="apply"?own:this.solid?.select(own)??own);pass.setPipeline(pipeline);
-   if(entry==="solve"||entry==="capture"||entry==="gauge")pass.dispatchWorkgroups(1);
-   else if(entry==="reduce")this.ownership.dispatchCounted(pass,pipeline,this.chunks);
-   else if(entry==="resolveScale")this.ownership.dispatchFusedCounted(pass,pipeline);
-   else if(entry==="grow"||entry==="measureGrow")this.ownership.dispatchCounted(pass,pipeline,this.pages);
-   else if(entry==="clearBand"){const groups=Math.ceil(this.tiles/64);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));}
-   else this.ownership.dispatchAllCounted(pass,pipeline);};
-  if(capture){run("clearBand");run("measureInitial");run("reduce");run(capture==="gauge"?"gauge":"capture");pass.end();return;}
-  run("clearBand");run("seed");for(let i=0;i<4;i++)run(`dilate${i%2}`);run("grow");run("measureGrow");run("metric");if(this.resolved)run("resolveScale");
-  for(let i=0;i<rounds;i++){run("measure");run("reduce");run("solve");}
-  if(apply){pass.setBindGroup(1,applyGroup.group);run("apply");}pass.end();
+  const own=this.pipelines.get(entry)!;const pipeline=uniformDetailPick(entry==="apply"?own:this.solid?.select(own)??own);pass.setPipeline(pipeline);
+  if(entry==="solve"||entry==="capture"||entry==="gauge")pass.dispatchWorkgroups(1);
+  else if(entry==="reduce")this.ownership.dispatchCounted(pass,pipeline,this.chunks);
+  else if(entry==="resolveScale")this.ownership.dispatchFusedCounted(pass,pipeline);
+  else if(entry==="grow"||entry==="measureGrow")this.ownership.dispatchCounted(pass,pipeline,this.pages);
+  else if(entry==="clearBand"){const groups=ceilDiv(this.tiles,64);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),ceilDiv(groups,this.ownership.dispatchX));}
+  else this.ownership.dispatchAllCounted(pass,pipeline);
  }
  /** Capture the initialized surface once; thereafter only explicit sources
   * and boundary outflow change the target. No CPU readback feeds correction.
@@ -610,15 +618,17 @@ ${shared(uniformMixedVertexSamplingSource("",false))}
   if(!this.scalarTarget)throw new Error("Scalar budget is only available for NB-FLIP");
   if(!this.budgetCaptured){this.encode(encoder,group,1,true);this.budgetCaptured=true;}
   if(!openTop&&addedCells===0&&controlRate===0)return;
-  this.device.queue.writeBuffer(this.budgetParams!,0,new Float32Array([dt,addedCells,+openTop,controlRate]));
+  const words=this.budgetWords;words[0]=dt;words[1]=addedCells;words[2]=+openTop;words[3]=controlRate;
+  this.device.queue.writeBuffer(this.budgetParams!,0,words);
   if(controlRate>0)this.encode(encoder,group,1,"gauge");
   if(!openTop&&addedCells===0)return;
-  const pass=encoder.beginComputePass({label:"NB scalar volume sources and outflow"});
+  const pass=encoder.beginComputePass(BUDGET_PASS);
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
-  const run=(entry:string,n:number)=>{const own=this.pipelines.get(entry)!;pass.setPipeline(uniformDetailPick(this.solid?.select(own)??own));pass.dispatchWorkgroups(n);};
-  if(openTop)run("outflow",Math.ceil(this.ownership.capacity.lattice.dimensions[0]*this.ownership.capacity.lattice.dimensions[2]/64));
-  run("updateBudget",1);pass.end();
+  if(openTop)this.launch(pass,"outflow",ceilDiv(this.ownership.capacity.lattice.dimensions[0]*this.ownership.capacity.lattice.dimensions[2],64));
+  this.launch(pass,"updateBudget",1);pass.end();
  }
+ /** One fixed-width entry in beginStep()'s pass. */
+ private launch(pass:GPUComputePassEncoder,entry:string,n:number):void{const own=this.pipelines.get(entry)!;pass.setPipeline(uniformDetailPick(this.solid?.select(own)??own));pass.dispatchWorkgroups(n);}
  destroy():void{this.budget?.destroy();this.budgetParams?.destroy();}
 
 }

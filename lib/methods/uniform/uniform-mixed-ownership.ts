@@ -182,15 +182,16 @@ export class UniformMixedOwnership {
     const fine=words[0]!,coarse=words[1]!,seamFine=words[4]!,seamCoarse=words[5]!;
     const small=edit?2*UNIFORM_MIXED_FUSED_REGULAR_TILES:(fine<=UNIFORM_MIXED_FUSED_REGULAR_TILES?fine:0)+(coarse<=UNIFORM_MIXED_FUSED_REGULAR_TILES?coarse:0);
     const pages=edit?uniformMixedPageCount(this.capacity.lattice):words[7]!;
-    const counts:Record<WorkKind,number>={fine:fine+tiles,coarse:coarse+tiles,all:fine+tiles+Math.max(Math.ceil(coarse/64),pages),
-      regularCoarse:Math.ceil((words[6]!+(edit?.reach??0))/64),fused:seamFine+seamCoarse+small+reach,hanging:seamFine+seamCoarse+reach,
-      merged:fine+seamCoarse+Math.ceil(words[6]!/64)+reach,coarseMerged:seamCoarse+Math.ceil(words[6]!/64)+reach,
-      sharpen:Math.ceil((fine*64+coarse)/192)+seamCoarse+reach,
-      fineAndSeams:fine+seamCoarse+reach,seamFine:seamFine+reach,seamCoarse:seamCoarse+reach,
-      seams:seamFine+seamCoarse+Math.ceil(words[6]!/64)+reach};
-    for(const kind of Object.keys(counts) as WorkKind[])
-      this.work[kind]=uniformBufferedWork(this.work[kind]??1,counts[kind],this.capacity.tiles,reserve);
+    // Ceilings in integer steps: a fractional intermediate is a heap number until the call is optimized.
+    const regular=(words[6]!+63)>>>6,coarseGroups=(coarse+63)>>>6,sharpen=fine*64+coarse+191;
+    this.observe("fine",fine+tiles,reserve);this.observe("coarse",coarse+tiles,reserve);this.observe("all",fine+tiles+(coarseGroups>pages?coarseGroups:pages),reserve);
+    this.observe("regularCoarse",(words[6]!+(edit?edit.reach:0)+63)>>>6,reserve);this.observe("fused",seamFine+seamCoarse+small+reach,reserve);this.observe("hanging",seamFine+seamCoarse+reach,reserve);
+    this.observe("merged",fine+seamCoarse+regular+reach,reserve);this.observe("coarseMerged",seamCoarse+regular+reach,reserve);
+    this.observe("sharpen",(sharpen-sharpen%192)/192+seamCoarse+reach,reserve);
+    this.observe("fineAndSeams",fine+seamCoarse+reach,reserve);this.observe("seamFine",seamFine+reach,reserve);this.observe("seamCoarse",seamCoarse+reach,reserve);
+    this.observe("seams",seamFine+seamCoarse+regular+reach,reserve);
   }
+  private observe(kind:WorkKind,count:number,reserve:number):void{this.work[kind]=uniformBufferedWork(this.work[kind]??1,count,this.capacity.tiles,reserve);}
   /** No evidence of the layout to come: every launch at its ceiling. */
   forgetWork():void{for(const kind of Object.keys(this.work) as WorkKind[])delete this.work[kind];}
   encodeWorkReceipt(encoder:GPUCommandEncoder,target:GPUBuffer,offset:number):void{
@@ -392,9 +393,14 @@ export class UniformMixedOwnership {
   acquireFrame():()=>void {
     if(this.frameHeld)throw new Error("Ownership already belongs to an active frame");
     if(this.overCapacity)throw new Error(`Uniform mixed ownership holds a generation over its h-tile capacity (the all-h seed, or one a smaller capacity left behind); no frame runs on more than ${this.capacity.fineTiles} h tiles`);
-    this.frameHeld=true;let released=false;
-    return ()=>{if(!released){released=true;this.frameHeld=false;}};
+    this.frameHeld=true;const hold=this.frameHolds[this.frameHold=(this.frameHold+1)%this.frameHolds.length]!;hold.released=false;
+    return hold.release;
   }
+  /** acquireFrame's releases, built once and handed out in turn: each releases
+   * its own hold once, so a release kept from one of the last frames cannot
+   * drop a later frame's hold. */
+  private readonly frameHolds=[0,1,2,3].map(()=>{const hold={released:true,release:()=>{if(!hold.released){hold.released=true;this.frameHeld=false;}}};return hold;});
+  private frameHold=0;
 
   /** One workgroup covers 64 h owners or 64 4h tiles. */
   dispatch(pass: GPUComputePassEncoder, pipelines: readonly GPUComputePipeline[]): void {

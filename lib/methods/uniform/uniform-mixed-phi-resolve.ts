@@ -6,6 +6,8 @@ import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopo
 import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedChangedTilesWGSL } from "./uniform-mixed-layout-builder";
 
+const RESOLVE_PASS: GPUComputePassDescriptor = { label: "Uniform mixed phi resolve" };
+
 /** Writes umVertexValue into every unstored texel of the tiles with a mixed
  * stencil, in place. Readers compiled with the resolved vertex sampler then
  * interpolate eight fine texels at seams instead of searching authorities per
@@ -104,7 +106,7 @@ ${uniformCompiledVertexResolveWGSL("umResolveLattice","umVertexWeight","umVertex
     // there are no hanging h values to materialize.
     if(this.ownership.capacity.fineTiles===0)return;
     if (!this.pipeline || !this.listed) throw new Error("Mixed phi resolve is not initialized");
-    const pass = encoder.beginComputePass({ label: "Uniform mixed phi resolve" });
+    const pass = encoder.beginComputePass(RESOLVE_PASS);
     pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1,group.group);
     if (changes) {
       if (this.listGroup?.changes !== changes) this.listGroup = { changes, group: uniformDetailGroup(this.device,{ layout: this.listResources, entries: [{ binding: 0, resource: { buffer: changes } }] }) };

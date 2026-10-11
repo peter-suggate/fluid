@@ -67,8 +67,16 @@ const COARSE_SOLVE_LANES=1024,COARSE_SOLVE_SLOTS=4096;
  * the `2 coarseSweeps` launches are 5 to 12 microseconds each on the GPU and
  * 7 on the host, so they only win well past the register path's reach. */
 const COARSE_WIDE_SLOTS=8192;
+/** The band's passes, described once: the encode path constructs nothing. */
+/** ceil(count/per) of whole numbers in whole-number steps: a fractional
+ * quotient is a heap number wherever the caller is not yet optimized. */
+const groupsOf=(count:number,per:number):number=>{const padded=count+per-1;return (padded-padded%per)/per;};
+const PREPARE_PASS:GPUComputePassDescriptor={label:"Uniform pressure band list and rows"};
+const SOLVE_PASS:GPUComputePassDescriptor={label:"Uniform pressure band solve"};
+const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform pressure band projection"};
 /** Band rows are field-major over CAP*64 rows: rhs, diagonal, face kinds,
- * the six face coefficients, u* per face, with static solids the CM11a V
+ * the six face coefficients, u* per face (init replaces Neumann entries
+ * with the transferred 4h velocity), with static solids the CM11a V
  * per face, then the row's start pressure (the iterate is the correction to
  * it). A slot's 64 rows (and iterate values) are colour-major: each
  * red-black half sweep reads 32 contiguous rows per field. */
@@ -147,10 +155,18 @@ export class UniformPressureBand {
  private rows!:GPUBuffer;
  private coarse!:GPUBuffer;
  private solve!:GPUBuffer;
- private workSlots:number;
+ private workSlots=1;
+ /** Each slot-list stride's launch width at workSlots (see dispatch), kept
+  * with it: every launch of a frame reads one. */
+ private cellGroups=1;private slotGroups=1;private middleGroups=1;private coarseGroups=1;
+ private budget(slots:number):void{
+  this.workSlots=slots;
+  this.cellGroups=Math.min(groupsOf(slots,CELL_BLOCK),CELL_GROUPS);this.slotGroups=Math.min(slots,SLOT_GROUPS);
+  this.middleGroups=Math.min(groupsOf(slots,8),MIDDLE_GROUPS);this.coarseGroups=Math.min(groupsOf(slots,64),COARSE_GROUPS);
+ }
  /** Fixed-lag evidence, applied once per encoded frame by the frame owner.
   * A smaller budget never limits admission, storage or solver iterations. */
- observeWork(tiles:number,reserve=0):void{this.workSlots=uniformBufferedWork(this.workSlots,tiles,this.capacity,reserve);}
+ observeWork(tiles:number,reserve=0):void{this.budget(uniformBufferedWork(this.workSlots,tiles,this.capacity,reserve));}
  /** Band tiles one frame can hold (fields.capacity). More is a fatal receipt
   * (the sticky bandCapacity failure), never a fallback. The shaders read it
   * from the params (BandParams.capacity), so resize compiles nothing. */
@@ -179,6 +195,8 @@ export class UniformPressureBand {
  /** Tile list words of index: every tile. */
  private readonly listSlots:number;
  private readonly rowFields:number;
+ /** Each cycle's restriction launch (it writes its own history word). */
+ private readonly restricts:readonly string[];
  constructor(private readonly device:GPUDevice,private readonly simulation:UniformMixedOwnership,private readonly pressure:UniformMixedOwnership,private fields:UniformPressureBandFields,
   readonly schedule:UniformPressureBandSchedule=UNIFORM_PRESSURE_BAND_SCHEDULE,
   /** Static solids, with the all-4h record (its cut-tile flags). */
@@ -189,6 +207,7 @@ export class UniformPressureBand {
   if(schedule.cycles<1||schedule.cycles>=HISTORY)throw new Error(`Pressure band cycles must be 1..${HISTORY-1}`);
   if(schedule.middleSweeps<1)throw new Error("The pressure band's 2h level needs a sweep: its first red half sweep carries the restriction and the prolongation");
   this.rowFields=solid?SOLID_ROW_FIELDS:ROW_FIELDS;
+  this.restricts=Array.from({length:schedule.cycles},(_,k)=>`restrict@${k}`);
   this.listSlots=tiles;
   this.index=device.createBuffer({label:"Uniform pressure band tiles",size:(HEADER+this.listSlots+tiles+Math.ceil(tiles/256))*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   const texture=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}});
@@ -202,12 +221,11 @@ export class UniformPressureBand {
    prep:[params,buffer(2),buffer(3,"read-only-storage"),texture(4),texture(6),texture(7),buffer(8,"read-only-storage"),buffer(9),buffer(10)],
    init:[params,buffer(2),buffer(9),buffer(10),texture(11),buffer(12,"read-only-storage"),buffer(13,"read-only-storage"),buffer(14,"read-only-storage")],
    solver,
-   project:[...solver,texture(15),{binding:16,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},buffer(17)],
-   present:[params,buffer(2),buffer(9,"read-only-storage"),buffer(10),buffer(21)],
+   project:[...solver,texture(15),{binding:16,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},buffer(17),buffer(21)],
   };
   for(const [name,list] of Object.entries(entries))this.layouts.set(name,uniformDetailBindLayout(device,{label:`Uniform pressure band ${name}`,entries:list}));
   this.allocate();
-  this.workSlots=Math.max(1,Math.min(this.capacity,layout.fineTiles.length));
+  this.budget(Math.max(1,Math.min(this.capacity,layout.fineTiles.length)));
  }
  /** Bytes of the capacity-sized buffers at `capacity` band tiles. */
  bytesAt(capacity:number):{rows:number;aggregates:number;iterate:number}{
@@ -245,20 +263,19 @@ export class UniformPressureBand {
    prep:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),4:f.correction,6:f.vertexPhi,7:f.forced.velocity,8:{buffer:f.forced.negative,size:4*faces},9:{buffer:this.rows},10:{buffer:this.solve}},
    init:{...P,2:{buffer:this.index},9:{buffer:this.rows},10:{buffer:this.solve},11:f.velocity,12:scalars(f.coarsePressure,coarse),13:scalars(f.coarsePhi??f.phi,coarse),14:pressure.presentation},
    solver:solverResources,
-   project:{...solverResources,15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces}},
-   present:{...P,2:{buffer:this.index},9:{buffer:this.rows},10:{buffer:this.solve},21:{buffer:f.presentation.buffer}},
+   project:{...solverResources,15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces},21:{buffer:f.presentation.buffer}},
   };
   if(f.presentation.buffer.size<4*(f.presentation.word+64*this.capacity))throw new Error("The stage grids cannot hold the pressure band");
   for(const [name,map] of Object.entries(resources))this.groups.set(name,uniformDetailGroup(device,{label:`Uniform pressure band ${name}`,layout:this.layouts.get(name)!,
    entries:Object.entries(map).map(([binding,resource])=>({binding:+binding,resource}))}));
-  this.launches.clear();this.boundPass=undefined;this.boundGroup=undefined;
+  this.bindLaunches();this.boundPass=undefined;this.boundGroup=undefined;
  }
  /** Between frames, after the simulation ownership's h-tile capacity (and
   * with it the views sized by it) or the band's own changed: reallocate
   * and rebind. */
  resize(fields:Pick<UniformPressureBandFields,"phi"|"presentation"|"capacity">):void{
   this.fields={...this.fields,...fields};this.allocate();
-  this.workSlots=Math.max(1,Math.min(this.workSlots,this.capacity));
+  this.budget(Math.max(1,Math.min(this.workSlots,this.capacity)));
  }
  async initialize():Promise<void>{
   const layout=this.simulation.layout,S=!!this.solid,schedule=this.schedule;
@@ -401,6 +418,9 @@ fn bOff(cell:u32,p:vec3i,kinds:u32)->f32{
 // The wall halo follows its row: the native Neumann ghost, clamped at 0 of
 // the total pressure. The halo holds its value less the row's start.
 fn bFollowHalo(cell:u32,p:vec3i,kinds:u32,value:f32){
+ // K_WALL is 010 in each three-bit face field. Most rows have no wall:
+ // test all six fields together before entering the halo update loop.
+ if(((kinds>>1u)&~kinds&~(kinds>>2u)&0x9249u)==0u){return;}
  for(var f=0u;f<6u;f++){
   if(bFaceKind(kinds,f)!=K_WALL){continue;}
   let axis=f/2u;let sign=bSign(f);
@@ -421,14 +441,22 @@ fn bCellNear(s:u32,l:vec3u,f:u32)->u32{
  if(slot==0u){return 0u;}
  return (slot-1u)*64u+bRow(vec3u(m))+1u;
 }
-// bOff and bResidual with the neighbour slots from bNear.
+// Neighbours change colour (bit 5 of the local row). Their remaining row
+// offsets are fixed, except x's packed parity. Only a tile-boundary face
+// needs a neighbour slot load. Emit six faces in the original sum order.
 fn bOffNear(cell:u32,s:u32,l:vec3u,p:vec3i,kinds:u32)->f32{
- var off=0.0;
- for(var f=0u;f<6u;f++){
-  let axis=f/2u;let sign=bSign(f);let kind=bFaceKind(kinds,f);
-  if(kind==K_BAND){var w=params.solve[1u+axis];if(!bUnit(kinds,f)){w=bCoefficient(cell,f);}off+=w*solve[bCellNear(s,l,f)-1u];}
-  else if(kind==K_WALL){off+=bCoefficient(cell,f)*solve[bHalo(p,axis,sign)];}
- }
+ var off=0.0;let own=cell&~63u;let across=(cell&63u)^32u;
+ ${Array.from({length:6},(_,f)=>{
+  const axis=f>>1,positive=(f&1)!==0,component=["x","y","z"][axis];
+  const delta=axis===0?(positive?"i32(l.x&1u)":"-i32(1u-(l.x&1u))"):String((positive?1:-1)*(axis===1?2:8));
+  const wrap=(positive?-1:1)*(axis===0?1:axis===1?6:24);
+  return `{let kind=bFaceKind(kinds,${f}u);
+  if(kind==K_BAND){
+   var neighbor=own+u32(i32(across)+${delta});
+   if(l.${component}==${positive?3:0}u){let slot=bNearSlot(s,${f}u);neighbor=0xffffffffu;if(slot!=0u){neighbor=(slot-1u)*64u+u32(i32(across)+${wrap});}}
+   var w=params.solve[${axis+1}u];if(!bUnit(kinds,${f}u)){w=bCoefficient(cell,${f}u);}off+=w*solve[neighbor];
+  }else if(kind==K_WALL){off+=bCoefficient(cell,${f}u)*solve[bHalo(p,${axis}u,${positive?1:-1})];}}`;
+ }).join("\n")}
  return off;
 }
 fn bResidualNear(cell:u32,s:u32,l:vec3u,p:vec3i,kinds:u32)->f32{
@@ -513,7 +541,7 @@ var<workgroup> member:atomic<u32>;
 // shallow film inherits the coarse projection's velocity and bypasses the
 // fine air/solid boundary conditions entirely.
 fn bSurfaceCell(q:vec3i)->bool{
- ${S?"if(umCellOpen(q)<=1e-5){return false;}":""}
+ ${S?"if(!umCellIsOpen(q)){return false;}":""}
  for(var k=0u;k<8u;k++){if(textureLoad(vertexPhi,q+vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u)),0).x<0.0){return true;}}
  return false;
 }
@@ -603,7 +631,7 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
  let N=bN();
  for(var s=group.x;s<bCount();s+=groups.x){
   let p=vec3i(bTile(s)*4u+bLocal(lane));let cell=s*64u+bRow(bLocal(lane));
-  let own=bPhiH(p);let liquid=bWet(own,1.0);${S?"let shut=umCellOpen(p)<=1e-5;":""}
+  let own=bPhiH(p);let liquid=bWet(own,1.0);${S?"let shut=!umCellIsOpen(p);":""}
   var kinds=select(0u,0x80000000u,liquid)${S?"|select(0u,0x40000000u,umCellInsideSolid(p))|select(0u,0x20000000u,shut)":""};var diagonal=0.0;var divergence=0.0;
   ${S?`// Native divergenceAtWithCapacity: V u + (V_i - V) u_s, u_s the moving wall's.
   let bodies=liquid&&umBodyCount()>0u;let capacity=select(0.0,umCellOpen(p),bodies);`:""}
@@ -624,7 +652,7 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
     // free-surface face, a shoreline cell under a slope took flux from the
     // air above it at a theta its own column's phi never changed: nothing
     // restored it, and the column's surface sank a micron in 20 steps.
-    if(kind!=K_NEUMANN){sealed=(liquid&&shut&&!n.wet)||(!liquid&&n.wet&&umCellOpen(q)<=1e-5);}`:""}
+    if(kind!=K_NEUMANN){sealed=(liquid&&shut&&!n.wet)||(!liquid&&n.wet&&!umCellIsOpen(q));}`:""}
    }
    ${S?`// CM11a: V scales the coefficient and the flux. A Neumann face's flux is
    // V times the transferred 4h face (init), the root's own flux through it:
@@ -744,7 +772,14 @@ fn bCoarseCarry(b:vec3i,w:vec3f)->BCarry{
  for(var s=group.x;s<bCount();s+=groups.x){
   let p=vec3i(bTile(s)*4u+bLocal(lane));let cell=s*64u+bRow(bLocal(lane));
   let kinds=bKinds(cell);
-  if(!bLiquid(kinds)){solve[cell]=0.0;rows[B_BASE*bN()+cell]=0.0;continue;}
+  // Air rows skip the RHS loop but still keep their Neumann velocities.
+  if(!bLiquid(kinds)){
+   if(((kinds>>2u)&~kinds&~(kinds>>1u)&0x9249u)!=0u){for(var f=0u;f<6u;f++){
+    if(bFaceKind(kinds,f)==K_NEUMANN){let axis=f/2u;var a=p;if(bSign(f)<0){a[axis]-=1;}
+     rows[(9u+f)*bN()+cell]=textureLoad(velocity,a,0)[axis];}
+   }}
+   solve[cell]=0.0;rows[B_BASE*bN()+cell]=0.0;continue;
+  }
   // Trilinear 4h pressure at the h centre. Where an air or a closed owner
   // is in the stencil the liquid-weighted mean is the pressure at the
   // liquid owners' mean depth, not this cell's: it is carried to the cell's
@@ -789,7 +824,8 @@ fn bCoarseCarry(b:vec3i,w:vec3f)->BCarry{
   var rhs=bRhs(cell);
   for(var f=0u;f<6u;f++){
    let axis=f/2u;let sign=bSign(f);
-   if(bFaceKind(kinds,f)==K_NEUMANN){var a=p;if(sign<0){a[axis]-=1;}rhs-=params.policy.x*f32(sign)*${S?"bVolume(cell,f)*":""}textureLoad(velocity,a,0)[axis]/(params.hDt[axis]*params.hDt.w);}
+   if(bFaceKind(kinds,f)==K_NEUMANN){var a=p;if(sign<0){a[axis]-=1;}
+    let kept=textureLoad(velocity,a,0)[axis];rows[(9u+f)*bN()+cell]=kept;rhs-=params.policy.x*f32(sign)*${S?"bVolume(cell,f)*":""}kept/(params.hDt[axis]*params.hDt.w);}
   }
   rows[cell]=rhs;bFollowHalo(cell,p,kinds,0.0);
  }
@@ -1035,11 +1071,12 @@ var<workgroup> bMeasureCount:u32;
 @group(1) @binding(15) var field:texture_3d<f32>;
 @group(1) @binding(16) var output:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(17) var<storage,read_write> boundary:array<f32>;
-// umProject on one face of band cell 'cell' at p; 'kept' is the transferred
-// 4h value, which a Neumann face keeps.
-fn bFace(cell:u32,p:vec3i,f:u32,kept:f32)->f32{
+@group(1) @binding(21) var<storage,read_write> presented:array<f32>;
+// umProject on one face of band cell 'cell' at p. Init retained transferred
+// 4h Neumann velocity in its otherwise unused forced-face row.
+fn bFace(cell:u32,p:vec3i,f:u32)->f32{
  let kinds=bKinds(cell);let kind=bFaceKind(kinds,f);
- if(kind==K_NEUMANN){return kept;}
+ if(kind==K_NEUMANN){return bForced(cell,f);}
  let axis=f/2u;let sign=bSign(f);let h=params.hDt[axis];let liquid=bLiquid(kinds);
  // A closed face moves with its wall (pressureFaceData's u_s; zero when static).
  ${S?"if(kind==K_CLOSED){var low=p;if(sign<0){low[axis]-=1;}return umSolidFaceVelocity(low,axis);}":""}
@@ -1059,8 +1096,8 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  if(sign>0){
   // Native embedded/wall contact where open and closed cells meet, on the
   // separating side's pressure.
-  var q=p;q[axis]+=1;let own=umCellOpen(p)>1e-5;
-  if(own==(umCellOpen(q)>1e-5)||volume<=1e-6){return false;}
+  var q=p;q[axis]+=1;let own=umCellIsOpen(p);
+  if(own==umCellIsOpen(q)||volume<=1e-6){return false;}
   var pressure=0.0;
   if(q[axis]>=i32(UM_D[axis])){pressure=select(0.0,solve[bHalo(p,axis,sign)]+bBase(cell),bLiquid(bKinds(cell))&&!(axis==1u&&params.policy.y>0.5));}
   else if(own){let b=bCellAt(q);if(b!=0u&&bLiquid(bKinds(b-1u))){pressure=solve[b-1u]+bBase(b-1u);}}
@@ -1068,7 +1105,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   // Separation is relative to the wall's own motion (native wall[axis]).
   return pressure<=0.0&&select(1.0,-1.0,own)*(value-umSolidFaceVelocity(p,axis))*params.hDt.w>1e-4*params.hDt[axis];
  }
- if(umCellOpen(p)<=1e-5||volume<=1e-6){return false;}`:""}
+ if(!umCellIsOpen(p)||volume<=1e-6){return false;}`:""}
  if(bFaceKind(bKinds(cell),f)!=K_WALL){return false;}
  let pressure=select(0.0,solve[bHalo(p,axis,sign)]+bBase(cell),bLiquid(bKinds(cell)));
  return pressure<=0.0&&-f32(sign)*value*params.hDt.w>1e-4*params.hDt[axis];
@@ -1078,12 +1115,14 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   let origin=vec3i(bTile(s)*4u);
   if(lane<64u){
    // A band cell's own texel: its three positive faces and wall releases.
-   let p=origin+vec3i(bLocal(lane));let cell=s*64u+bRow(bLocal(lane));var texel=textureLoad(field,p,0);var released=0u;
+   let p=origin+vec3i(bLocal(lane));let cell=s*64u+bRow(bLocal(lane));var texel=vec4f(0.0);var released=0u;
+   // Pressure publication uses the same row and lane as its projected cell.
+   presented[params.capacity.w+s*64u+lane]=bBase(cell)+solve[cell];
    for(var axis=0u;axis<3u;axis++){
-    let value=bFace(cell,p,2u*axis+1u,texel[axis]);texel[axis]=value;
+    let value=bFace(cell,p,2u*axis+1u);texel[axis]=value;
     if(bReleased(cell,p,2u*axis+1u,value)){released|=1u<<axis;}
     if(p[axis]==0){
-     let low=bFace(cell,p,2u*axis,0.0);boundary[umNegativeBoundaryIndex(vec3u(p),axis)]=low;
+     let low=bFace(cell,p,2u*axis);boundary[umNegativeBoundaryIndex(vec3u(p),axis)]=low;
      if(bReleased(cell,p,2u*axis,low)){released|=1u<<(axis+3u);}
     }
    }
@@ -1098,34 +1137,32 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    for(var a=0u;a<axis;a++){var r=q;r[a]+=1;if(bCellAt(r)!=0u){first=false;}}
    if(!first){continue;}
    var texel=textureLoad(field,q,0);
-   for(var a=0u;a<3u;a++){var r=q;r[a]+=1;let b=bCellAt(r);if(b!=0u){texel[a]=bFace(b-1u,r,2u*a,texel[a]);}}
+   for(var a=0u;a<3u;a++){var r=q;r[a]+=1;let b=bCellAt(r);if(b!=0u){texel[a]=bFace(b-1u,r,2u*a);}}
    textureStore(output,q,texel);
   }
  }
 }`,
-   // The band projection's reads: each band tile's texels and the texel
-   // layer below it, instead of the whole velocity field.
+   // Only non-band texels below the band need retained components: each
+   // band cell projects entirely from its rows. Match project's unique
+   // seam writer so the copy never reads or writes the full band interior.
    copy:header+indexed(false)+/* wgsl */`
 @group(1) @binding(22) var velocity:texture_3d<f32>;
 @group(1) @binding(23) var copied:texture_storage_3d<rgba32float,write>;
 @compute @workgroup_size(128) fn main(${slots}){
  for(var s=group.x;s<bCount();s+=groups.x){
+  if(lane<64u){continue;}
   let origin=vec3i(bTile(s)*4u);var q=origin+vec3i(bLocal(lane));
   if(lane>=64u){
    if(lane>=112u){continue;}
    let axis=(lane-64u)/16u;let k=(lane-64u)%16u;var l=vec3i(0);
    l[axis]=-1;l[(axis+1u)%3u]=i32(k%4u);l[(axis+2u)%3u]=i32(k/4u);q=origin+l;
-   if(q[axis]<0){continue;}
+   if(q[axis]<0||bCellAt(q)!=0u){continue;}
+   var first=true;
+   for(var a=0u;a<axis;a++){var r=q;r[a]+=1;if(bCellAt(r)!=0u){first=false;}}
+   if(!first){continue;}
   }
   textureStore(copied,q,textureLoad(velocity,q,0));
  }
-}`,
-   present:header+indexed(false)+rows+/* wgsl */`
-@group(1) @binding(10) var<storage,read_write> solve:array<f32>;
-@group(1) @binding(21) var<storage,read_write> presented:array<f32>;
-// The live band pressures (start plus correction) into the stage grids' band section.
-@compute @workgroup_size(64) fn main(${slots}){
- for(var s=group.x;s<bCount();s+=groups.x){let cell=s*64u+bRow(bLocal(lane));presented[params.capacity.w+s*64u+lane]=bBase(cell)+solve[cell];}
 }`,
   };
   const entryOf=(name:string)=>`band${name[0]!.toUpperCase()}${name.slice(1)}`;
@@ -1150,21 +1187,26 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    await Promise.all((variants[name]??[["",{}]]).map(async([suffix,constants])=>this.pipelines.set(name+suffix,await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.simulation,{layout:pipelineLayout,
     compute:{module,entryPoint:entryOf(name),constants:{umDispatchX:this.simulation.dispatchX,...constants,...s}}}),{solidsOnly:constants.bSettle===1,entry:name+suffix}))));
   }));
+  this.bindLaunches();
  }
- /** Pipeline and group 1 of each launch name, resolved on first use. */
+ /** Pipeline and group 1 of each compiled launch name, resolved by
+  * initialize() and again by allocate() (its groups are new): an encode
+  * only looks them up. */
  private readonly launches=new Map<string,{pipeline:GPUComputePipeline;group:UniformDetailGroup}>();
+ private bindLaunches():void{
+  this.launches.clear();
+  for(const [name,pipeline] of this.pipelines)this.launches.set(name,{pipeline,group:this.groups.get(this.layoutOf(name))!});
+ }
  /** The pass the band's static groups were last bound in, and its group 1. */
  private boundPass?:GPUComputePassEncoder;
  private boundGroup?:UniformDetailGroup;
- private layoutOf(name:string):string{const base=name.replace(/([01PDUF]|@\d+)$/,"");if(base==="rebase")return "init";if(base.startsWith("list"))return "list";return ["list","copy","prep","init","project","present"].includes(base)?base:"solver";}
+ private layoutOf(name:string):string{const base=name.replace(/([01PDUF]|@\d+)$/,"");if(base==="rebase")return "init";if(base.startsWith("list"))return "list";return ["list","copy","prep","init","project"].includes(base)?base:"solver";}
  /** launch: a fixed group count, the simulation's h tiles (one group per
   * tile of its buffered evidence), or a slot-list stride (one 32-lane group
   * per slot colour, one group per slot, per 8 slots, per 64 slots) capped by
   * the buffered workload estimate and the saturation cap. */
  private dispatch(pass:GPUComputePassEncoder,name:string,launch:number|"tiles"|"cells"|"slots"|"middle"|"coarse"):void{
-  let bound=this.launches.get(name);
-  if(!bound){const pipeline=this.pipelines.get(name);if(!pipeline)throw new Error("Pressure band is not initialized");
-   bound={pipeline,group:this.groups.get(this.layoutOf(name))!};this.launches.set(name,bound);}
+  const bound=this.launches.get(name);if(!bound)throw new Error("Pressure band is not initialized");
   // Groups 0 and 2 are the same for every band launch: bind them once per
   // pass, and group 1 only when the launch's layout changes.
   if(this.boundPass!==pass){this.boundPass=pass;this.boundGroup=undefined;pass.setBindGroup(0,this.simulation.bindGroup);if(this.solid)pass.setBindGroup(2,this.solid.coarse!.bindGroup);}
@@ -1172,11 +1214,11 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   if(this.boundGroup!==bound.group){this.boundGroup=bound.group;pass.setBindGroup(1,bound.group.group);}
   if(launch==="tiles"){this.simulation.dispatchBuffered(pass,pipeline,"fine",LIST_GROUPS);return;}
   pass.setPipeline(uniformDetailPick(pipeline));
-  const c=this.workSlots;
-  pass.dispatchWorkgroups(typeof launch==="number"?launch:launch==="cells"?Math.min(Math.ceil(c/CELL_BLOCK),CELL_GROUPS):launch==="slots"?Math.min(c,SLOT_GROUPS):launch==="middle"?Math.min(Math.ceil(c/8),MIDDLE_GROUPS):Math.min(Math.ceil(c/64),COARSE_GROUPS));
+  pass.dispatchWorkgroups(typeof launch==="number"?launch:launch==="cells"?this.cellGroups:launch==="slots"?this.slotGroups:launch==="middle"?this.middleGroups:this.coarseGroups);
  }
- private sweep(pass:GPUComputePassEncoder,name:string,launch:"cells"|"middle"|"coarse",count:number):void{
-  for(let i=0;i<count;i++){this.dispatch(pass,`${name}0`,launch);this.dispatch(pass,`${name}1`,launch);}
+ /** `count` red-black sweeps: each colour's launch, colour 0 first. */
+ private sweep(pass:GPUComputePassEncoder,colour0:string,colour1:string,launch:"cells"|"middle"|"coarse",count:number):void{
+  for(let i=0;i<count;i++){this.dispatch(pass,colour0,launch);this.dispatch(pass,colour1,launch);}
  }
  /** The ownership holds no h tile (capacity 0, known to the host): the band
   * has no tile, and its launches (each a few microseconds empty) are not
@@ -1188,9 +1230,9 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  encodePrepare(encoder:GPUCommandEncoder):void{
   encoder.clearBuffer(this.index,0,4*HEADER);encoder.clearBuffer(this.index,this.slotMapOffset);
   if(this.empty)return;
-  const pass=encoder.beginComputePass({label:"Uniform pressure band list and rows"});
+  const pass=encoder.beginComputePass(PREPARE_PASS);
   this.dispatch(pass,"list","tiles");
-  if(this.spatialOrder){const groups=Math.ceil(this.simulation.capacity.tiles/256);this.dispatch(pass,"listPrefix",groups);this.dispatch(pass,"listOffsets",1);this.dispatch(pass,"listScatter",groups);}
+  if(this.spatialOrder){const groups=groupsOf(this.simulation.capacity.tiles,256);this.dispatch(pass,"listPrefix",groups);this.dispatch(pass,"listOffsets",1);this.dispatch(pass,"listScatter",groups);}
   this.dispatch(pass,"prep","slots");this.dispatch(pass,"middleBake","middle");this.dispatch(pass,"coarseBake","coarse");pass.end();
  }
  /** After the 4h projection reaches simulation ownership: start from the 4h
@@ -1199,24 +1241,23 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   * always determines the complete work, including after sudden growth. */
  encodeSolve(encoder:GPUCommandEncoder):void{
   if(this.empty)return;
-  const s=this.schedule;const pass=encoder.beginComputePass({label:"Uniform pressure band solve"});
-  const fine=()=>this.sweep(pass,"sweep","cells",s.fineSweeps);
+  const s=this.schedule;const pass=encoder.beginComputePass(SOLVE_PASS);
   const wide=this.workSlots>COARSE_WIDE_SLOTS;
   this.dispatch(pass,"init","slots");this.dispatch(pass,"rebase","slots");
   // Shut rows exist only beside a solid.
   if(this.solid?.present){this.dispatch(pass,"sweepS0","cells");this.dispatch(pass,"sweepS1","cells");}
   for(let cycle=0;cycle<s.cycles;cycle++){
-   fine();
-   this.dispatch(pass,`restrict@${cycle}`,"slots");
-   this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps-1);
+   this.sweep(pass,"sweep0","sweep1","cells",s.fineSweeps);
+   this.dispatch(pass,this.restricts[cycle]!,"slots");
+   this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep0","middleSweep1","middle",s.middleSweeps-1);
    this.dispatch(pass,"middleRestrict","middle");
-   if(wide)this.sweep(pass,"coarseSweep","coarse",s.coarseSweeps);else this.dispatch(pass,"coarseSolve",1);
-   this.dispatch(pass,"middleSweepP","middle");this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps-1);
-   this.dispatch(pass,"middleProlong","slots");fine();
+   if(wide)this.sweep(pass,"coarseSweep0","coarseSweep1","coarse",s.coarseSweeps);else this.dispatch(pass,"coarseSolve",1);
+   this.dispatch(pass,"middleSweepP","middle");this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep0","middleSweep1","middle",s.middleSweeps-1);
+   this.dispatch(pass,"middleProlong","slots");this.sweep(pass,"sweep0","sweep1","cells",s.fineSweeps);
   }
   this.dispatch(pass,"measure","slots");
   pass.end();
-  const project=encoder.beginComputePass({label:"Uniform pressure band projection"});this.dispatch(project,"copy","slots");this.dispatch(project,"project","slots");this.dispatch(project,"present","slots");project.end();
+  const project=encoder.beginComputePass(PROJECT_PASS);this.dispatch(project,"copy","slots");this.dispatch(project,"project","slots");project.end();
  }
  /** The eight header words, for the frame's receipt. */
  encodeReceipt(encoder:GPUCommandEncoder,target:GPUBuffer,offset:number):void{encoder.copyBufferToBuffer(this.index,0,target,offset,32);}

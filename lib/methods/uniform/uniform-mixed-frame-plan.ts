@@ -7,6 +7,15 @@ import {UNIFORM_STAGE_CERTIFICATE} from "./uniform-stage-grids";
 
 /** Owner entries: one lane per owner of every tier, GPU-counted. */
 const counted:readonly string[]=["seed","localSpeed"];
+/** The entries of the support census and of the certificate, in launch order. */
+const SUPPORT_ENTRIES:readonly string[]=["seed","dilate0","dilate1","dilate2"];
+const CERTIFICATE_ENTRIES:readonly string[]=["localSpeed","spread0","spread1","spread2","prefix0","prefix1","prefix2","certify"];
+const PLAN_PASS:GPUComputePassDescriptor={label:"Uniform shared frame plan"},SPEED_PASS:GPUComputePassDescriptor={label:"Uniform shared frame speed"},CERTIFICATE_PASS:GPUComputePassDescriptor={label:"Uniform local speed certificate"};
+/** The support policy of an encode given none. */
+const DEFAULT_POLICY={fineReach:2,shellReach:1,twoLevel:true,shellOnly:true};
+/** One launch of a plan pass: an owner entry's GPU-counted launch, or a
+ * per-tile (prefix: per tile line) entry's grid, fixed with the lattice. */
+interface PlanLaunch{readonly pipeline:GPUComputePipeline;readonly counted:boolean;readonly x:number;readonly y:number}
 
 /** Start-of-frame support census, independent of simulation ownership. The
  * native fine sampling reach is two tiles; extension gets one additional tile.
@@ -21,6 +30,15 @@ export class UniformMixedFramePlan {
   private readonly extendedResources:GPUBindGroupLayout;
   private readonly extendedGroup:UniformDetailGroup;
   private readonly pipelines=new Map<string,GPUComputePipeline>();
+  private supportRevision=-1;
+  /** The last encoded policy's words (fine reach, shell reach, mode, 0): none yet. */
+  private readonly supportSettings:number[]=[-1,-1,-1,-1];
+  /** The parameter words of encode (policy) and encodeCertificate (step), and
+   * each pass's launches: built at the first encode and replayed. */
+  private policyWords?:Uint32Array<ArrayBuffer>;
+  private stepWords?:Float32Array<ArrayBuffer>;
+  private launches?:{readonly support:readonly PlanLaunch[];readonly certificate:readonly PlanLaunch[]};
+  private certificateView?:{readonly buffer:GPUBuffer;readonly offset:number};
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,velocity:GPUTexture,negative:GPUBuffer,
     /** The extended field every characteristic samples, valid at encodeCertificate. */
     extended:GPUTexture,extendedNegative:GPUBuffer,directionalCertificate=false,private readonly surfaceOnly=false){
@@ -41,6 +59,7 @@ export class UniformMixedFramePlan {
     const module=uniformDetailModule(this.device,{label:"Uniform mixed frame plan",code:uniformMixedCountedEntriesWGSL(topology+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var phi:texture_3d<f32>;
+override planSpeedOnly:bool=false;
 struct PlanPolicy {settings:vec4u,step:vec4f}
 @group(1) @binding(2) var<uniform> policy:PlanPolicy;
 @group(1) @binding(3) var velocity:texture_3d<f32>;
@@ -110,12 +129,13 @@ var<workgroup> seeded:array<atomic<u32>,64>;
 var<workgroup> seedSpeed:atomic<u32>;
 @compute @workgroup_size(64) fn seed(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  let owner=umResidentAllOwner(gid);let slot=lane-owner.lane;
- atomicStore(&seeded[lane],0u);if(lane==0u){atomicStore(&seedSpeed,0u);}workgroupBarrier();
+ if(!planSpeedOnly){atomicStore(&seeded[lane],0u);}if(lane==0u){atomicStore(&seedSpeed,0u);}workgroupBarrier();
  if(owner.width!=0u){
   let width=owner.width;let unit=umTileMaximumWidth(owner.tile)==1u;let origin=umOrigin(owner);
   var speed=umPositiveFaceSpeed(unit,origin);
   for(var axis=0u;axis<3u;axis++){if(origin[axis]==0u){speed=max(speed,abs(negative[umNegativeIndex(origin,axis)]));}}
   atomicMax(&seedSpeed,bitcast<u32>(speed));
+  if(!planSpeedOnly){
   // A 4h owner's origin and corners are its tile's (umVertexValue of a
   // tile corner is its load): the base blocks.
   var occupied=false;
@@ -131,9 +151,10 @@ var<workgroup> seedSpeed:atomic<u32>;
    }
   }
   if(occupied){atomicOr(&seeded[slot],3u);}
+  }
  }
  workgroupBarrier();
- if(owner.width!=0u&&owner.lane==0u){atomicStore(&umSupport[owner.tile],atomicLoad(&seeded[slot]));}
+ if(!planSpeedOnly&&owner.width!=0u&&owner.lane==0u){atomicStore(&umSupport[owner.tile],atomicLoad(&seeded[slot]));}
  if(lane==0u){atomicMax(&umSupport[4u*UM_TILES],atomicLoad(&seedSpeed));}
 }
 ${[0,1,2].map(axis=>/* wgsl */`
@@ -245,39 +266,70 @@ var<workgroup> certifyBases:array<u32,2>;
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.extendedResources]});
     await Promise.all(["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","prefix0","prefix1","prefix2","certify"].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:entryPoint==="seed"?UNIFORM_MIXED_COUNTED.residentAll:UNIFORM_MIXED_COUNTED.all}:{})}}}));}));
+    this.pipelines.set("speed",await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"seed",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll,planSpeedOnly:1}}}));
   }
-  encode(encoder:GPUCommandEncoder,policy={fineReach:2,shellReach:1,twoLevel:true,shellOnly:true}):void{
-    if(this.pipelines.size!==12)throw new Error("Mixed frame plan is not initialized");
-    this.device.queue.writeBuffer(this.params,0,new Uint32Array([policy.fineReach,policy.shellReach,!policy.twoLevel?3:!policy.shellOnly?2:0,0]));
+  encode(encoder:GPUCommandEncoder,policy=DEFAULT_POLICY):void{
+    if(this.pipelines.size!==13)throw new Error("Mixed frame plan is not initialized");
+    const s=this.supportSettings,words=this.policyWords??=new Uint32Array(4);
+    s[0]=policy.fineReach;s[1]=policy.shellReach;s[2]=!policy.twoLevel?3:!policy.shellOnly?2:0;s[3]=0;
+    words[0]=s[0];words[1]=s[1];words[2]=s[2];words[3]=0;
+    this.supportRevision=this.ownership.revision;
+    this.device.queue.writeBuffer(this.params,0,words);
     encoder.clearBuffer(this.ownership.support,this.ownership.capacity.tiles*16,64);
     // Seed flags: absent pages' tiles keep this zero (the seed skips them).
     encoder.clearBuffer(this.ownership.support,0,this.ownership.capacity.tiles*4);
-    const pass=encoder.beginComputePass({label:"Uniform shared frame plan"});
+    const pass=encoder.beginComputePass(PLAN_PASS);
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);pass.setBindGroup(2,this.extendedGroup.group);
-    this.dispatch(pass,["seed","dilate0","dilate1","dilate2"]);
+    this.dispatch(pass,this.launchesOf().support);
     pass.end();
+  }
+  /** Refresh only velocity-derived speed after a full surface-only plan.
+   * The caller must preserve phi between the two encodes. Changed ownership
+   * or support policy takes the full path, as do plans that also read volume. */
+  encodeSpeed(encoder:GPUCommandEncoder,policy=DEFAULT_POLICY):void{
+    const s=this.supportSettings;
+    if(!this.surfaceOnly||this.supportRevision!==this.ownership.revision||policy.fineReach!==s[0]||policy.shellReach!==s[1]||(!policy.twoLevel?3:!policy.shellOnly?2:0)!==s[2]){this.encode(encoder,policy);return;}
+    encoder.clearBuffer(this.ownership.support,this.ownership.capacity.tiles*16,64);
+    const pass=encoder.beginComputePass(SPEED_PASS);
+    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);pass.setBindGroup(2,this.extendedGroup.group);
+    this.ownership.dispatchAllCounted(pass,this.pipelines.get("speed")!);pass.end();
   }
   /** Fine-tile certificate from the extended field. Encode after extension
    * and before any certified/merged consumer (surface, momentum). */
   /** Each tile's certificate word after encodeCertificate (speeds[T, 2T)):
    * signed reach and, for h tiles, the class (UNIFORM_STAGE_CERTIFICATE). */
-  get certificate():{readonly buffer:GPUBuffer;readonly offset:number}{return {buffer:this.ownership.speeds,offset:4*this.ownership.capacity.tiles};}
+  get certificate():{readonly buffer:GPUBuffer;readonly offset:number}{return this.certificateView??={buffer:this.ownership.speeds,offset:4*this.ownership.capacity.tiles};}
   encodeCertificate(encoder:GPUCommandEncoder,dt:number):void{
     // Only the certificate reads dt: support and extension are dt-free.
-    this.device.queue.writeBuffer(this.params,16,new Float32Array([dt,0,0,0]));
-    const pass=encoder.beginComputePass({label:"Uniform local speed certificate"});
+    const step=this.stepWords??=new Float32Array(4);step[0]=dt;
+    this.device.queue.writeBuffer(this.params,16,step);
+    const pass=encoder.beginComputePass(CERTIFICATE_PASS);
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);pass.setBindGroup(2,this.extendedGroup.group);
     // Certified consumers read the list counts themselves (umCertifiedJobCount).
-    this.dispatch(pass,["localSpeed","spread0","spread1","spread2","prefix0","prefix1","prefix2","certify"]);
+    this.dispatch(pass,this.launchesOf().certificate);
     pass.end();
   }
-  private dispatch(pass:GPUComputePassEncoder,entries:readonly string[]):void{
-    for(const entry of entries){
-      if(counted.includes(entry)){this.ownership.dispatchAllCounted(pass,this.pipelines.get(entry)!);continue;}
+  private dispatch(pass:GPUComputePassEncoder,launches:readonly PlanLaunch[]):void{
+    for(let i=0;i<launches.length;i++){
+      const launch=launches[i]!;
+      if(launch.counted){this.ownership.dispatchAllCounted(pass,launch.pipeline);continue;}
+      pass.setPipeline(uniformDetailPick(launch.pipeline));pass.dispatchWorkgroups(launch.x,launch.y);
+    }
+  }
+  /** The lattice, its tiles and the dispatch stride are the ownership's for
+   * life, and the pipelines initialize()'s: every grid is known once. The
+   * build is its own function: one holding a closure allocates that
+   * closure's context at every entry, taken or not. */
+  private launchesOf():NonNullable<UniformMixedFramePlan["launches"]>{return this.launches??=this.buildLaunches();}
+  private buildLaunches():NonNullable<UniformMixedFramePlan["launches"]>{
+    const of=(entry:string):PlanLaunch=>{
+      const pipeline=this.pipelines.get(entry)!;
+      if(counted.includes(entry))return {pipeline,counted:true,x:0,y:0};
       const t=this.ownership.capacity.tileDimensions,line=/^prefix(\d)$/.exec(entry);
       const groups=Math.ceil((line?t[(+line[1]!+1)%3]!*t[(+line[1]!+2)%3]!:this.ownership.capacity.tiles)/64);
-      pass.setPipeline(uniformDetailPick(this.pipelines.get(entry)!));pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));
-    }
+      return {pipeline,counted:false,x:Math.min(groups,this.ownership.dispatchX),y:Math.ceil(groups/this.ownership.dispatchX)};
+    };
+    return {support:SUPPORT_ENTRIES.map(of),certificate:CERTIFICATE_ENTRIES.map(of)};
   }
   destroy():void{this.params.destroy();}
 }

@@ -233,6 +233,8 @@ const BATCH=4;
 type TransferKind="cell"|"vertex"|"face";
 
 /** The ring kernels of one launch: up to BATCH fields of one format. */
+/** The ring's pass descriptors, built once. */
+const RING_ENTER_PASS:GPUComputePassDescriptor={label:"Uniform detail ring enter"},RING_SHARE_PASS:GPUComputePassDescriptor={label:"Uniform detail ring share"};
 interface RingBatch{readonly handles:readonly GPUTexture[];readonly layout:GPUBindGroupLayout;readonly enter:GPUComputePipeline;readonly poison?:GPUComputePipeline;readonly poisonAll?:GPUComputePipeline}
 interface DomainKernels{
 
@@ -328,6 +330,9 @@ export class UniformDetailStorage{
   * axes: the host's bound on the h tiles, with the detail ring around it.
   * The lattice's range on an axis that does not wrap. */
  private box:readonly number[];
+ /** setBox's words for the queue (which copies them), and window's request. */
+ private readonly boxWords=new Uint32Array(6);
+ private readonly boxRequest=[0,0,0,0,0,0];
  private get windowed():boolean{const c=this.cells,d=this.layout.dims;return c[0]!<d[0]!||c[1]!<d[1]!||c[2]!<d[2]!;}
 
  /** The last texel of a tile box (inclusive) on an axis: its top tile's.
@@ -344,15 +349,18 @@ export class UniformDetailStorage{
  }
  private setBox(box:readonly number[]):void{
   const T=this.layout.tiles,n=this.layout.dims;
-  this.box=[0,1,2].map(a=>this.cells[a]!<n[a]!?box[a]!:0).concat([0,1,2].map(a=>this.cells[a]!<n[a]!?box[a+3]!:T[a]!-1));
-  if(this.state)this.device.queue.writeBuffer(this.state,4*this.words.total,Uint32Array.from(this.box));
+  // In place (a window every frame builds nothing): each entry reads only its own request.
+  const held=this.box as number[];
+  for(let a=0;a<3;a++){const wrapped=this.cells[a]!<n[a]!;held[a]=wrapped?box[a]!:0;held[a+3]=wrapped?box[a+3]!:T[a]!-1;}
+  if(this.state){this.boxWords.set(held);this.device.queue.writeBuffer(this.state,4*this.words.total,this.boxWords);}
  }
  /** Dynamic detail keeps lattice-sized h storage; only ring membership varies. */
  window(_tiles?:readonly number[]):void{
 
   this.cells=this.layout.dims;
-  const T=this.layout.tiles;
-  this.setBox([0,0,0,T[0]-1,T[1]-1,T[2]-1]);
+  const T=this.layout.tiles,request=this.boxRequest;
+  request[0]=0;request[1]=0;request[2]=0;request[3]=T[0]-1;request[4]=T[1]-1;request[5]=T[2]-1;
+  this.setBox(request);
  }
  private allocate(label:string,kind:UniformDetailClass,format:GPUTextureFormat,resident=this.resident):GPUTexture{
   const extent=this.extent(kind,resident);
@@ -374,7 +382,7 @@ export class UniformDetailStorage{
   const d=this.layout.dims,field:Field={storage:this,kind,logical:kind==="vertex"?[d[0]+1,d[1]+1,d[2]+1]:d,handle};
   fields.set(handle,field);fields.set(physical,field);
   this.handles.push(handle);this.physicals.set(handle,physical);if(pin)this.pinned.add(handle);
-  this.bases.set(handle,physical);
+  this.bases.set(handle,physical);this.resized();
   return handle;
  }
  /** Domain: every field's base block. It lives at every capacity and holds
@@ -426,6 +434,7 @@ export class UniformDetailStorage{
  stub(texture:GPUTexture):GPUTexture{
 
   const handle=fields.get(texture)!.handle;let stub=this.stubs.get(handle);
+  if(!stub)this.resized();
   if(!stub)this.stubs.set(handle,stub=this.device.createTexture({label:`${handle.label} stub`,size:[1,1,1],dimension:"3d",format:handle.format,usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING}));
   return stub;
  }
@@ -463,14 +472,23 @@ export class UniformDetailStorage{
   * in a later receipt: every patch gets a slot. */
  reserveAll():void{this.expected=undefined;}
  get allocatedBytes():number{
-  return this.textures().reduce((n,t)=>n+t.width*t.height*t.depthOrArrayLayers*(t.format==="rgba32float"?16:4),0)+(this.state?.size??0)+(this.ringDimensions?.size??0)
+  return this.bytes??=this.textures().reduce((n,t)=>n+t.width*t.height*t.depthOrArrayLayers*(t.format==="rgba32float"?16:4),0)+(this.state?.size??0)+(this.ringDimensions?.size??0)
    +(0);
  }
+ /** allocatedBytes, summed once per set of textures: createField, stub,
+  * adoptBase, admit and commitRetire are what change the set (resized). */
+ private bytes?:number;
+ /** Bumped with every change of the textures allocatedBytes sums: a reader
+  * that holds the total compares this and reads again. */
+ allocationRevision=0;
+ private resized():void{this.bytes=undefined;this.allocationRevision++;}
  /** Resident patches: the host directory's while it is current, else the
   * last frame receipt's. */
  get residentPatches():number{
 
-  return this.mirrored||!this.receipt?this.directory.reduce((n,e)=>n+(e?1:0),0):this.receipt.resident;
+  if(!this.mirrored&&this.receipt)return this.receipt.resident;
+  let n=0;for(let i=0;i<this.directory.length;i++)if(this.directory[i])n++;
+  return n;
  }
  /** The table every attached ownership carries (mode 0: raw fields). */
  table():Uint32Array<ArrayBuffer>{
@@ -684,7 +702,7 @@ export class UniformDetailStorage{
   if(base.format!=="r32float"||base.width!==e[0]||base.height!==e[1]||base.depthOrArrayLayers!==e[2]||(base.usage&need)!==need)
    throw new Error(`Uniform detail storage: an adopted vertex base is an r32float ${e.join("x")} texture with storage, sampled and both copy usages`);
   const own=this.physicals.get(handle)!;
-  this.physicals.set(handle,base);this.bases.set(handle,base);this.adopted.set(handle,base);own.destroy();this.rebind();
+  this.physicals.set(handle,base);this.bases.set(handle,base);this.adopted.set(handle,base);own.destroy();this.rebind();this.resized();
  }
  /** The textures of a generation the storage owns (an adopted base is its caller's). */
  private owned(textures:Iterable<GPUTexture>):GPUTexture[]{const kept=new Set(this.adopted.values());return [...textures].filter(t=>!kept.has(t));}
@@ -734,7 +752,7 @@ export class UniformDetailStorage{
    const base=this.bases.get(handle)!,field=fields.get(handle)!,after=this.allocate(handle.label,field.kind,base.format as GPUTextureFormat,true);
    this.physicals.set(handle,after);fields.set(after,field);registerUniformDetailBase(after,base);
   }
-  this.resident=true;this.directory[0]=entry([0,0,0]);this.writeState();this.publishTable();this.rebind();
+  this.resident=true;this.directory[0]=entry([0,0,0]);this.writeState();this.publishTable();this.rebind();this.resized();
   // QA: a fresh h generation is poison throughout (the first layout's uploads fill it instead).
 
  }
@@ -746,31 +764,33 @@ export class UniformDetailStorage{
   return others[0]!;
  }
  /** One launch per batch, a lane per tile: the fields' base blocks and h textures, the held and target topologies. */
- private encodeRing(encoder:GPUCommandEncoder,target:GPUBuffer,pick:(b:RingBatch)=>GPUComputePipeline|undefined,label:string):void{
+ private encodeRing(encoder:GPUCommandEncoder,target:GPUBuffer):void{
   const ring=this.kernelsOfDomain().ring,held=this.simulation!.presentation.buffer;
   if(!ring)throw new Error("Uniform detail storage: no ring kernels (the storage is not prepared)");
   const first=this.physicals.get(ring.batches[0]!.handles[0]!)!;let bound=this.ringGroups.get(target);
-  if(!bound||bound.key!==first){
-   const other=this.other().presentation.buffer;
-   bound={key:first,groups:ring.batches.map((b,n)=>this.device.createBindGroup({label:"Uniform detail ring",layout:b.layout,entries:[
-    ...b.handles.flatMap((h,i)=>[{binding:i,resource:this.bases.get(h)!.createView()},{binding:BATCH+i,resource:this.physicals.get(h)!.createView()}]),
-    {binding:2*BATCH,resource:{buffer:held}},{binding:2*BATCH+1,resource:{buffer:target}},{binding:2*BATCH+4,resource:{buffer:this.ringDimensions!}},...(n===0?[{binding:2*BATCH+2,resource:{buffer:other}},{binding:2*BATCH+3,resource:{buffer:this.state!}}]:[])]}))};
-   this.ringGroups.set(target,bound);
-  }
-  const tiles=this.layout.tiles[0]*this.layout.tiles[1]*this.layout.tiles[2],pass=encoder.beginComputePass({label});
-  ring.batches.forEach((b,n)=>{const p=pick(b);if(!p)throw new Error(`Uniform detail storage: ${label} is not compiled`);pass.setPipeline(p);pass.setBindGroup(0,bound!.groups[n]!);pass.dispatchWorkgroups(Math.ceil(tiles/64));});
+  if(!bound||bound.key!==first)bound=this.bindRing(ring,first,held,target);
+  const tiles=this.layout.tiles[0]*this.layout.tiles[1]*this.layout.tiles[2],groups=(tiles+63)>>>6,pass=encoder.beginComputePass(RING_ENTER_PASS);
+  for(let n=0;n<ring.batches.length;n++){const p=ring.batches[n]!.enter;if(!p)throw new Error("Uniform detail storage: Uniform detail ring enter is not compiled");pass.setPipeline(p);pass.setBindGroup(0,bound.groups[n]!);pass.dispatchWorkgroups(groups);}
   pass.end();
  }
 
+ /** encodeRing's groups over the fields' textures now (apart from it: a closure there would cost every encode a context). */
+ private bindRing(ring:NonNullable<DomainKernels["ring"]>,first:GPUTexture,held:GPUBuffer,target:GPUBuffer){
+  const other=this.other().presentation.buffer;
+  const bound={key:first,groups:ring.batches.map((b,n)=>this.device.createBindGroup({label:"Uniform detail ring",layout:b.layout,entries:[
+   ...b.handles.flatMap((h,i)=>[{binding:i,resource:this.bases.get(h)!.createView()},{binding:BATCH+i,resource:this.physicals.get(h)!.createView()}]),
+   {binding:2*BATCH,resource:{buffer:held}},{binding:2*BATCH+1,resource:{buffer:target}},{binding:2*BATCH+4,resource:{buffer:this.ringDimensions!}},...(n===0?[{binding:2*BATCH+2,resource:{buffer:other}},{binding:2*BATCH+3,resource:{buffer:this.state!}}]:[])]}))};
+  this.ringGroups.set(target,bound);return bound;
+ }
  private poisonTarget?:GPUBuffer;
 
  encodeSettle(encoder:GPUCommandEncoder,share:boolean):void{
 
   if(share){
    const ring=this.kernelsOfDomain().ring!,tiles=this.layout.tiles[0]*this.layout.tiles[1]*this.layout.tiles[2];
-   const pass=encoder.beginComputePass({label:"Uniform detail ring share"});pass.setPipeline(ring.share);
+   const pass=encoder.beginComputePass(RING_SHARE_PASS);pass.setPipeline(ring.share);
    pass.setBindGroup(0,this.shareGroup??=this.device.createBindGroup({label:"Uniform detail ring share",layout:ring.shareLayout,entries:[{binding:2,resource:{buffer:this.ringDimensions!}},{binding:0,resource:{buffer:this.simulation!.presentation.buffer}},{binding:1,resource:{buffer:this.other().presentation.buffer}}]}));
-   pass.dispatchWorkgroups(Math.ceil(tiles/64));pass.end();
+   pass.dispatchWorkgroups((tiles+63)>>>6);pass.end();
   }
 
  }
@@ -789,7 +809,7 @@ export class UniformDetailStorage{
   if(!this.retired)return;
   this.retired=false;this.retiring=false;const old:GPUTexture[]=[];
   for(const h of this.following){old.push(this.physicals.get(h)!);this.physicals.set(h,this.bases.get(h)!);}
-  this.resident=false;this.directory[0]=0;this.writeState();this.publishTable();this.rebind();this.release(old);
+  this.resident=false;this.directory[0]=0;this.writeState();this.publishTable();this.rebind();this.resized();this.release(old);
  }
  /** The bases from the h generation, canonical texel for canonical texel:
   * after kernels that store through no twin (the dense t=0 authority and
@@ -928,7 +948,7 @@ ${fill}}
   * generation (target: its tile words, one per tile from word 0) beside the
   * resident ones, fill them under the directory the fields were written
   * with, then publish the union directory. */
- encodeAdmit(encoder:GPUCommandEncoder,target:GPUBuffer):void{if(this.resident)this.encodeRing(encoder,target,b=>b.enter,"Uniform detail ring enter");}
+ encodeAdmit(encoder:GPUCommandEncoder,target:GPUBuffer):void{if(this.resident)this.encodeRing(encoder,target);}
  /** After the remap and its phi resolve, in their encoder: restrict the
   * patches the last encodeAdmit found unneeded into the base, free their
   * slots and publish the directory without them. */
@@ -943,7 +963,7 @@ ${fill}}
 
   if(words[D.fatal]!&WINDOW_FATAL)throw new Error(`Uniform detail storage: a relayout put a detail-ring tile outside the h store's window (tiles ${this.box.slice(0,3)} to ${this.box.slice(3)}, store ${this.cells} cells): the host's bound on the h tiles did not hold`);
   if(words[D.fatal])throw new Error(`Uniform detail storage needs ${words[D.demand]} patch slots; capacity is ${words[D.capacity]}`);
-  this.receipt={capacity:words[D.capacity]!,resident:words[D.resident]!,peak:words[D.peak]!};
+  const r=this.receipt??={capacity:0,resident:0,peak:0};r.capacity=words[D.capacity]!;r.resident=words[D.resident]!;r.peak=words[D.peak]!;
  }
  /** Refresh the host directory from the GPU (diagnostics and readbacks). */
 
