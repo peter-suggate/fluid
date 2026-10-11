@@ -34,7 +34,13 @@ export const narrowBandFlipValues=(values:MethodParamValues={})=>({
 const params:SimulationMethod["params"]=[
  ...narrowBandControlParams,
  {kind:"number",key:"fineGridPadding",label:"Fine-grid padding",default:1,tier:"fine",update:"runtime",min:0,max:4,step:1,digits:0,unit:"h",hint:"Extra h cells around swept surface crossings. The particle band stays 4h wide."},
- ...UNIFORM_GEOMETRIC_PARAMS.filter(p=>!Object.hasOwn(fixed,p.key)).map(p=>Object.hasOwn(narrowBandAdaptiveDetail,p.key)?{...p,default:narrowBandAdaptiveDetail[p.key]} as typeof p:p),
+ ...UNIFORM_GEOMETRIC_PARAMS.filter(p=>!Object.hasOwn(fixed,p.key)).map(p=>Object.hasOwn(narrowBandAdaptiveDetail,p.key)?{...p,default:narrowBandAdaptiveDetail[p.key]} as typeof p:p)
+  // One sweep: the particles carry the velocity, and what reads the extension
+  // (their own taps and the surface advect) stays within a cell of liquid; the
+  // hierarchy fill covers the rest. Each sweep is 1.4 ms of a figure-9 frame,
+  // and the take ends at the same volume with one as with two (1.08% and
+  // 1.07% at 1/60 s, 1.02% and 1.05% at 1/30 s).
+  .map(p=>p.key==="extensionFrontSweeps"&&p.kind==="number"?{...p,default:1}:p),
 ];
 const point = "simulation.narrow-band-flip.algorithms";
 const choices = params.filter(p => p.kind === "select");
