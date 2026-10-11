@@ -41,7 +41,7 @@ export interface UniformMixedSurfaceFields {
   volume: GPUTexture;
   negative: GPUBuffer;
   departures: GPUTexture;
-  /** h.xyz, dt; flags (bit 0 openTop, bit 1 preserve, bit 2 coarse travel cadence), cubic, drain, loop bound (=4). */
+  /** h.xyz, dt; flags (bit 0 openTop, bit 1 preserve, bit 2 coarse travel cadence), cubic (1: every vertex, 2: 4h vertices only), drain, loop bound (=4). */
   params: GPUBuffer;
   /** One temporary surface-evidence word per tile, six wall words (plus two
    * pad), then with solids two words per tile (closed, clear); dead before transport. */
@@ -456,7 +456,7 @@ fn umAdvected(p:vec3f,width:u32)->f32{
  ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){return umLoadVertex(vec3u(p));}
  let end=umSurfaceTrace(p);let walk=umWalk(p,end);let q=walk.q;`:"let q=umTrace(p);"}let cell=umVertexCell(q);var value=cell.value;umRecordTravel(p,q,width);
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- if(params.flags.y!=0u&&abs(value)<2.0*h){value=umCubicPhi(q,cell);}
+ if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){value=umCubicPhi(q,cell);}
  ${this.narrowBand?(this.solid?"value=umWallContact(p,value,width);if(walk.hit){value=umEmbeddedAir(p,end,value);}value=umReleasedWalls(p,value);":"value=umReleasedWalls(p,umWallContact(p,value,width));"):this.solid?/* wgsl */`value=umWallContact(p,value,width);
  if(!clear){value=umEmbeddedContact(p,value);}if(walk.hit){value=umEmbeddedAir(p,end,value);}
  value=umReleasedWalls(p,value);`:"value=umReleasedWalls(p,umWallContact(p,value,width));"}
@@ -520,7 +520,7 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  if(!defer){let walk=umWalk(p,umSurfaceTrace(p));defer=walk.hit;let q=walk.q;if(!defer){`:"{let q=umTrace(p);"}
   let cell=umVertexCell(q);value=cell.value;
   let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
-  if(params.flags.y!=0u&&abs(value)<2.0*h){value=umCubicPhi(q,cell);}
+  if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){value=umCubicPhi(q,cell);}
   defer=defer||umReleasedMayChange(p,value);
   ${this.narrowBand?"":"if(params.flags.z!=0u){value=umDrain(q,value,width);}"}value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
   if(!defer){umRecordTravel(p,q,width);}

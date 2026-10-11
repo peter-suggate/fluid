@@ -1,4 +1,4 @@
-import { narrowBandControlParams, narrowBandControlValues } from "./uniform-narrow-band-controls";
+import { NARROW_BAND_FINE_ADVECTION, narrowBandControlParams, narrowBandControlValues } from "./uniform-narrow-band-controls";
 import type { MethodParamValues, SimulationMethod } from "../../core/method-contract";
 import { UNIFORM_GEOMETRIC_PARAMS } from "./uniform-geometric-parameters";
 import { composeFeatures } from "../../framework/composition";
@@ -28,11 +28,13 @@ export const narrowBandFlipValues=(values:MethodParamValues={})=>({
  fineGridPadding:Math.max(0,Math.min(4,Number.isFinite(Number(values.fineGridPadding))?Number(values.fineGridPadding):1)),
  adaptiveSurface:"on",
  coarseParticleMode:"off",
+ phiFineAdvection:values.phiFineAdvection==="trilinear"?"trilinear":"cubic",
 });
 // Derive the renderer lifetime key from this method's own schema; inheriting
 // Uniform Geometric's list misses NB-specific live controls.
 const params:SimulationMethod["params"]=[
  ...narrowBandControlParams,
+ NARROW_BAND_FINE_ADVECTION,
  {kind:"number",key:"fineGridPadding",label:"Fine-grid padding",default:1,tier:"fine",update:"runtime",min:0,max:4,step:1,digits:0,unit:"h",hint:"Extra h cells around swept surface crossings. The particle band stays 4h wide."},
  ...UNIFORM_GEOMETRIC_PARAMS.filter(p=>!Object.hasOwn(fixed,p.key)).map(p=>Object.hasOwn(narrowBandAdaptiveDetail,p.key)?{...p,default:narrowBandAdaptiveDetail[p.key]} as typeof p:p)
   // One sweep: the particles carry the velocity, and what reads the extension
@@ -74,6 +76,6 @@ export const uniformNarrowBandMethod:SimulationMethod={
  appDefaults:{timeStep:"sixtieth",...narrowBandAdaptiveDetail,...fixed,fineGridPadding:1,coarseParticleMode:"off"},
  normalizeValues:narrowBandFlipValues,
  createSolverAsync:(device,scene,quality,values,loads,progress,signal)=>WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
-  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandFlip:true,narrowBandAdaptiveSurface:true,narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandCoarseParticles:false,retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
+  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandFlip:true,phiFineTrilinear:values.phiFineAdvection==="trilinear",narrowBandAdaptiveSurface:true,narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandCoarseParticles:false,retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
  pipelineGraph:async()=> (await import("./uniform-narrow-band-pipeline")).UNIFORM_NARROW_BAND_PIPELINE,
 };

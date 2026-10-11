@@ -1,4 +1,4 @@
-import type { MethodParamValues, NumberParamSpec } from "../../core/method-contract";
+import type { MethodParamValues, NumberParamSpec, SelectParamSpec } from "../../core/method-contract";
 
 export const NARROW_BAND_ACTIVITY_CONTROLS = [
  {key:"adaptiveBudgetPercent",label:"Adaptive budget",unit:"%",min:0,max:100,step:1,digits:0,default:50,
@@ -14,4 +14,8 @@ export const narrowBandControlValues = (values:MethodParamValues={}) => Object.f
  const raw=Number(values[c.key]);
  return [c.key,Number.isFinite(raw)?Math.min(c.max,Math.max(c.min,raw)):c.default];
 })) as Record<(typeof controls)[number]["key"],number>;
+/** The level-set advect at h vertices. The particles carry the surface there and the advected one is blended in wherever heat is below 1. */
+export const NARROW_BAND_FINE_ADVECTION:SelectParamSpec={kind:"select",key:"phiFineAdvection",label:"h-tile phi advection",default:"cubic",tier:"fine",update:"runtime",
+  options:[{value:"cubic",label:"Cubic"},{value:"trilinear",label:"Trilinear"}],
+  hint:"Trilinear moves the level set at h vertices with eight taps in place of the cubic's 64, 1 to 3 ms of a figure-9 frame; 4h vertices keep the cubic. Curved surfaces that the particles do not fully carry shrink a little more each step: the figure-9 take then holds 5 to 9% fewer particles. No effect with cubic phi advection off."};
 export const narrowBandControlParams:readonly NumberParamSpec[]=controls.map(c=>({...c,kind:"number",tier:"coarse",update:"runtime",dedicated:true}));

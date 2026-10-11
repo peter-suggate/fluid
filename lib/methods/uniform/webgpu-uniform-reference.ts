@@ -107,6 +107,8 @@ export interface WebGPUUniformReferenceOptions {
   narrowBandVolumeControlSeconds?: number;
   narrowBandCoarseParticles?: boolean;
   narrowBandFinePadding?: number;
+  /** NB-FLIP: the advected phi of h vertices is trilinear (4h vertices keep phiCubicAdvection). */
+  phiFineTrilinear?: boolean;
   /** Independent dense vertex level set and conservative cell volume, advanced
    * only by the mixed-ownership frame. */
   geometricVolume?: boolean;
@@ -403,6 +405,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private narrowBandVolumeControlSeconds: number;
 
   private narrowBandFinePadding: number;
+  private phiFineTrilinear: boolean;
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
   get narrowBandFlipInfo(){
     const stage=this.mixedFrame?.narrowBandFlip;if(!stage)return undefined;
@@ -739,6 +742,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.narrowBandVolumeControlSeconds = Math.max(0,Math.min(2,options.narrowBandVolumeControlSeconds??0.1));
 
     this.narrowBandFinePadding = options.narrowBandFinePadding ?? 1;
+    this.phiFineTrilinear = options.phiFineTrilinear === true;
     this.twoLevelVelocity = true;
     this.phiCubicAdvection = options.phiCubicAdvection !== false;
     this.phiDrain = options.phiDrain !== false;
@@ -2402,6 +2406,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     };
     this.mixedFrame?.narrowBandFlip?.setAdaptive(this.detail.policy==="dynamic");
     this.narrowBandFinePadding=finite("fineGridPadding",this.narrowBandFinePadding,0,4);
+    if(values.phiFineAdvection!==undefined)this.phiFineTrilinear=values.phiFineAdvection==="trilinear";
     this.narrowBandAdaptiveBudgetPercent=finite("adaptiveBudgetPercent",this.narrowBandAdaptiveBudgetPercent,0,100);
     this.narrowBandAdaptiveFadeSeconds=finite("adaptiveFadeSeconds",this.narrowBandAdaptiveFadeSeconds,0.05,2);
     this.narrowBandVolumeControlSeconds=finite("volumeControlSeconds",this.narrowBandVolumeControlSeconds,0,2);
@@ -2893,7 +2898,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           this.mixedParameterScenes[slot]=this.sceneRevision;
           p.gravity=this.scene.fluid.gravity_m_s2.y;p.density=this.scene.fluid.density_kg_m3;p.viscosity=this.scene.fluid.dynamicViscosity_Pa_s;p.surfaceTension=this.scene.fluid.surfaceTension_N_m;
         }
-        p.openTop=this.scene.container.top==="open";p.noSlip=this.scene.container.fluidWallMode==="no-slip";p.cubic=this.phiCubicAdvection;p.drain=this.phiDrain;p.preserve=this.phiPreserveSurface;p.pressureTolerance=this.pressureMultigrid.residualTolerance;p.redistance=true;p.extensionSweeps=this.velocityExtrapolator.frontPasses;
+        p.openTop=this.scene.container.top==="open";p.noSlip=this.scene.container.fluidWallMode==="no-slip";p.cubic=this.phiCubicAdvection;p.fineTrilinear=this.phiFineTrilinear;p.drain=this.phiDrain;p.preserve=this.phiPreserveSurface;p.pressureTolerance=this.pressureMultigrid.residualTolerance;p.redistance=true;p.extensionSweeps=this.velocityExtrapolator.frontPasses;
         // Impacts raise pressure demand faster than a plan two frames old
         // follows. One additional reserve covers long-dam frame 79's third
         // cycle under a 4h surface, and the dam 128^3 all-fine far-wall
