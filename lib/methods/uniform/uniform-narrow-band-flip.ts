@@ -65,8 +65,6 @@ export class UniformNarrowBandFlip {
  private particleDispatchPipeline!:GPUComputePipeline;
  private particleDispatchGroup!:GPUBindGroup;
  readonly surfaceSource:{contourVertexPhi:true;vertexPhi:GPUTexture;openFraction:GPUTexture;cellSize_m:readonly [number,number,number]};
- /** The nodal metric bank, valid after redistance until reconstruction reuses it. */
- readonly pressureDistance:{readonly buffer:GPUBuffer;readonly first:number;readonly reach:number};
  count=0;
  reseedClipped=0;
  /** Positive distances in h cells, before union and on the accepted surface.
@@ -151,7 +149,6 @@ export class UniformNarrowBandFlip {
   this.particles=[buffer("particles A",this.capacity*48),buffer("particles B",this.capacity*48)];
   this.particleDispatch=device.createBuffer({label:"Narrow-band FLIP live particle dispatch",size:12,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT});
   this.state=buffer("receipt",48);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+ownership.capacity.tiles*(36+(activitySupported?4*NARROW_BAND_ACTIVITY_WORDS_PER_TILE:0))+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*32);this.params=buffer("parameters",48,true);
-  {const tiles=cells/64,first=2*cells+2*tiles;this.pressureDistance={buffer:this.bins,first,reach:first+vertices+cells+4+2*tiles};}
   this.order=new UniformNarrowBandOrder(device,ownership.capacity.lattice.dimensions,this.particles,this.bins,this.next,this.state);
   this.refinementParams=buffer("refinement prediction",32,true);
   this.cache=cache??new UniformMixedMomentumCache(device,ownership);
@@ -563,31 +560,10 @@ ${subgroups?/* wgsl */`
 fn seedShell(lattice:vec3f)->vec4f{
  var q=lattice;var d=particleDepth(q);
  for(var i=0u;i<4u;i++){
-  if(d+NB_SEED_DEPTH<=1e-3){break;}
-  var g=vec3f(0);var curvature=0.0;
-  for(var axis=0u;axis<3u;axis++){
-   var delta=vec3f(0);delta[axis]=0.5;var low=q-delta;var high=q+delta;
-   // The metric field inside a voxel is not a liquid distance. Continue
-   // the open side's derivative instead of pushing seeds into the wall.
-   if(!nbSurfaceSegmentOpen(q,low)){low=q;}
-   if(!nbSurfaceSegmentOpen(q,high)){high=q;}
-   let below=particleDepth(low);let above=particleDepth(high);
-   g[axis]=(above-below)/max(high[axis]-low[axis],1e-6);
-   if(low[axis]<q[axis]&&high[axis]>q[axis]){curvature+=abs(above+below-2.0*d);}
-  }
+  let rise=d+NB_SEED_DEPTH;if(rise<=1e-3){break;}
+  let g=vec3f(particleDepth(q+vec3f(0.5,0,0))-particleDepth(q-vec3f(0.5,0,0)),particleDepth(q+vec3f(0,0.5,0))-particleDepth(q-vec3f(0,0.5,0)),particleDepth(q+vec3f(0,0,0.5))-particleDepth(q-vec3f(0,0,0.5)));
   let g2=dot(g,g);if(g2<1e-8){break;}
-  let normal=g*inverseSqrt(g2);
-  // The chord fit assumes a plane on the quarter-cell lattice. Preserve
-  // the sphere fit on curved interfaces (notably small moving drops), with
-  // a continuous transition above the metric field's rounding noise.
-  let planar=1.0-smoothstep(1e-4,1e-3,curvature);
-  let rise=d+mix(NB_SEED_DEPTH,nbPlanarSeedDepth(q,d,normal),planar);
-  if(rise<=1e-3){break;}
-  let next=clamp(q-min(rise,0.5)*normal,vec3f(0.01),vec3f(UM_D)-0.01);
-  // A sphere that cannot reach its fitted depth would protrude above the
-  // authored surface (especially in sub-cell films over voxel ledges).
-  // Leave that unresolved film to the level set instead of adding liquid.
-  if(!nbSurfaceSegmentOpen(q,next)){return vec4f(-1,0,0,1);}
+  let next=clamp(q-min(rise,0.5)*g*inverseSqrt(g2),vec3f(0.01),vec3f(UM_D)-0.01);
   let depth=particleDepth(next);if(depth>=d){break;}
   q=next;d=depth;
  }

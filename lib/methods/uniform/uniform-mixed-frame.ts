@@ -364,7 +364,7 @@ export class UniformMixedFrame {
  /** Byte offset in an ownership's support of its sticky detail violation word. */
  private readonly violationByte:number;
  /** encodeGeometry's options, set in place by each caller that passes any. */
- private readonly geometryOptions:{pressure:boolean;changed:GPUBuffer|undefined;metric:boolean}={pressure:false,changed:undefined,metric:false};
+ private readonly geometryOptions:{pressure:boolean;changed:GPUBuffer|undefined}={pressure:false,changed:undefined};
  /** layout: the generation the t=0 fields are in (all h; the first
   * updateLayout remaps from it). capacity: the h tiles the owner-indexed
   * buffers hold until a layout reserves its own, independent of that seed. */
@@ -437,7 +437,7 @@ export class UniformMixedFrame {
   this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,true,true,true);
   this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid,true,true);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
-  this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,true,true,true,this.narrowBandFlip.pressureDistance);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.volume);
+  this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,true,true,true);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.volume);
 
   // Retain the projected h velocity detail: restricting all momentum to 4h
   // removes the long-dam toe even when total liquid volume is conserved.
@@ -875,7 +875,7 @@ export class UniformMixedFrame {
    }
 
    // Nothing below writes phi before the split reads the pressure geometry.
-   {const options=this.geometryOptions;options.pressure=true;options.metric=!kick&&p.redistance!==false;options.changed=undefined;this.encodeGeometry(encoder,options);}this.geometryCurrent=true;
+   {const options=this.geometryOptions;options.pressure=true;options.changed=undefined;this.encodeGeometry(encoder,options);}this.geometryCurrent=true;
    trace?.phase(encoder,V.gather);
 
    // A kick forces the stored field where it stands.
@@ -1237,7 +1237,7 @@ export class UniformMixedFrame {
   this.solid?.encodeSimulation(encoder,this.ownership.presentation,this.solidWidthsStale?undefined:changes);this.solidWidthsStale=false;
   if(this.solid)trace?.phase(encoder,V.solids);
   this.recordStageGrid(encoder,this.ownership.presentation.buffer,"transport");
-  {const options=this.geometryOptions;options.pressure=false;options.metric=false;options.changed=solidsMoved?undefined:changes;this.plan.encode(encoder,p.supportPolicy);this.encodeGeometry(encoder,options);}
+  {const options=this.geometryOptions;options.pressure=false;options.changed=solidsMoved?undefined:changes;this.plan.encode(encoder,p.supportPolicy);this.encodeGeometry(encoder,options);}
   this.authority.encode(encoder,this.authorityGroup,false);
   trace?.phase(encoder,V.support);
  }
