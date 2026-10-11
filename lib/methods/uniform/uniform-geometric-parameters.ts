@@ -27,8 +27,8 @@ const omitted = new Set(["gammaDiffusion", "gammaDiffusionIterations", "sharpeni
 const retired = new Set(["sharpeningStrength", "velocityTransport", "liquidOnlyVelocityAdvection"]);
 const params: MethodParamSpec[] = UNIFORM_PARAMS.filter(p => !omitted.has(p.key) && !retired.has(p.key)).map(p => {
   // Two sweeps: the front only needs to carry the band one cell per step, and the
-  // hierarchy fill covers what it does not reach (docs/benchmarks/uniform-extension-front-sweeps-2026-09-19.md
-  // measured eight within 0.01 cell of sixteen; Peter set two 2026-09-19). The paper method keeps sixteen.
+  // hierarchy fill covers what it does not reach (eight measured within 0.01 cell of
+  // sixteen; Peter set two 2026-09-19). The paper method keeps sixteen.
   if (p.key === "extensionFrontSweeps" && p.kind === "number") return { ...p, default: 2 };
   if (p.key === "densitySharpening" && p.kind === "select") return { ...p,
     label: "Volume sharpening", options: [{ value: "on", label: "On" }, { value: "off", label: "Off" }],
