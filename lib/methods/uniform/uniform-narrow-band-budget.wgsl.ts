@@ -1,8 +1,8 @@
 import { UNIFORM_STAGE_IMPORTANCE as I } from "./uniform-stage-grids";
 
 export const NARROW_BAND_BUDGET_ENTRIES=["activityRank","activityCutoff","activityTies","activityTiePrefix","activityAdmit"] as const;
-/** Rank keys: 256 pooled scores, twice (a tile the last census admitted ranks above every other). */
-const KEYS=512;
+/** Rank keys: a tile's top criterion score. */
+const KEYS=256;
 /** Then a rank word and a flight word per tile, and a tie count per 64 tiles. */
 export const narrowBandBudgetWords=(tiles:number)=>KEYS+3+tiles+Math.ceil(tiles/64)+tiles;
 
@@ -11,22 +11,9 @@ export const narrowBandBudgetWords=(tiles:number)=>KEYS+3+tiles+Math.ceil(tiles/
  * serial. Exactly floor(candidate count * percent / 100) seeds survive,
  * including when every score saturates. Physical support is added later.
  *
- * What an admitted tile costs is its support collar: the samples seeded in it
- * hold the tiles around it at h for the retirement time. So the rank is the
- * collar's, not the tile's: the scores of the requesting tiles among its 27,
- * summed. Ranked by its own score the admitted half was scattered through the
- * requesting tiles and a third of it changed every census (NB-FLIP letters,
- * 60 Hz, 2.4 s: 2 of 2931 admitted tiles had all their neighbours admitted),
- * so the collars of a few censuses covered every requesting tile and the
- * budget released none. For the same reason a tile the last census admitted
- * outranks every tile it did not: detail stays where it is while it is still
- * asked for, and new requests take what the budget has left.
- *
- * That rule is about tiles, and source liquid in flight has none of its own:
- * every tile it asks from is a new request, and what the budget has left goes
- * to the best collar anywhere. Letter B of the NB-FLIP letters (60 Hz, 50%)
- * asked for 140 tiles a census on its way down, all for its shape, and was
- * admitted 56, 25, 10 and then 4 of them; its samples lost the surface a
+ * Source liquid in flight asks for a new set of tiles every census, all for
+ * its shape. Letter B of the NB-FLIP letters (60 Hz, 50%) asked for 140
+ * tiles a census on its way down and was admitted 56, 25, 10 and then 4 of them; its samples lost the surface a
  * quarter second after the drop and it landed 2.6% short of its volume with
  * its lower edge on 4h tiles. So that liquid is outside the budget, as the
  * source that makes it is. A tile is in flight while its liquid came from a
@@ -39,9 +26,7 @@ export const narrowBandBudgetWords=(tiles:number)=>KEYS+3+tiles+Math.ceil(tiles/
  * tile. */
 export const narrowBandBudgetWGSL=/* wgsl */`
 const NB_BUDGET_KEYS=${KEYS}u;
-// A tile's rank word between censuses: whether the last one admitted it.
 const NB_BUDGET_NONE=0xffffffffu;
-const NB_BUDGET_KEPT=0xfffffffeu;
 // Within a census: a requesting tile in flight, which is not ranked.
 const NB_BUDGET_FLIGHT=0xfffffffdu;
 // A tile's flight word: the last census's pair in bits 0..1, this census's
@@ -102,14 +87,7 @@ fn nbBudgetScore(w0:u32,w1:u32)->u32{
  atomicOr(&census[nbBudgetFlight(t)],(select(0u,NB_FLIGHT,flight)|select(0u,NB_LIQUID,nbBudgetLiquid(own)))<<8u);
  if((own&${I.required}u)!=0u&&flight){rank=NB_BUDGET_FLIGHT;}
  else if((own&${I.required}u)!=0u){
-  var pooled=0u;
-  for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
-   let q=p+vec3i(x,y,z);if(any(q<vec3i(0))||any(q>=vec3i(UM_T))){continue;}
-   let n=umTileAt(vec3u(q));let w1=atomicLoad(&census[importanceIndex(n,1u)]);
-   if((w1&${I.required}u)!=0u){pooled+=nbBudgetScore(atomicLoad(&census[importanceIndex(n,0u)]),w1);}
-  }}}
-  // Sixteen saturated requesting tiles in the collar saturate the key.
-  let key=min(255u,pooled>>4u)+select(0u,256u,atomicLoad(&census[nbBudgetRank(t)])==NB_BUDGET_KEPT);
+  let key=nbBudgetScore(atomicLoad(&census[importanceIndex(t,0u)]),own);
   rank=key<<8u;atomicAdd(&census[nbBudgetHist(key)],1u);
  }
  atomicStore(&census[nbBudgetRank(t)],rank);
@@ -152,14 +130,12 @@ var<workgroup> nbTies:array<u32,64>;
  var w1=atomicLoad(&census[importanceIndex(t,1u)]);
  let rank=atomicLoad(&census[nbBudgetRank(t)]);
  atomicStore(&census[nbBudgetFlight(t)],(atomicLoad(&census[nbBudgetFlight(t)])>>8u)&3u);
- // Admitted outside the budget; where it lands it is detail already there.
- if(rank==NB_BUDGET_FLIGHT){atomicStore(&census[nbBudgetRank(t)],NB_BUDGET_KEPT);}
- else if(rank!=0xffffffffu){
+ // In flight: admitted outside the budget.
+ if(rank!=NB_BUDGET_FLIGHT&&rank!=NB_BUDGET_NONE){
   let score=rank>>8u;let cutoff=atomicLoad(&census[nbBudgetState(0u)]);
   let tie=atomicLoad(&census[nbBudgetChunk(t/64u)])+(rank&255u);
   let keep=score>cutoff||(score==cutoff&&tie<atomicLoad(&census[nbBudgetState(1u)]));
   if(!keep){w1=(w1&~${I.required|I.held}u)|${I.dropped}u;atomicStore(&census[importanceIndex(t,1u)],w1);atomicStore(&census[holdIndex(t)],0u);}
-  atomicStore(&census[nbBudgetRank(t)],select(NB_BUDGET_NONE,NB_BUDGET_KEPT,keep));
  }
  publishImportance(t,w1);
 }

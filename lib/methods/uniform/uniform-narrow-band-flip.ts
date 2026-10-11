@@ -435,12 +435,7 @@ ${narrowBandTraceWGSL("sampleVelocity")}
   if(umCellOpen(vec3i(q))<0.5){source[i].position.x=-1.0;return;}
   let ballistic=p.before.w==1.0||!gridSupported(q);p.before.w=max(p.before.w,select(0.0,1.0,ballistic));
   if(nbAdaptive()){
-   // A coupled sample has the heat of the tile it is in: the census's, cooled
-   // over the retirement time and spread one tile (activitySpread). Carried
-   // with the liquid instead, it held every tile that liquid reached in that
-   // time at h, whatever the census admitted there. A ballistic sample has
-   // no tile's support to lose and keeps its own.
-   p.position.w=max(nbTargetHeat(q),select(0.0,p.position.w,ballistic));
+   p.position.w=max(nbTargetHeat(q),max(0.0,p.position.w-select(nbCooling()*params.hDt.w,0.0,ballistic)));
    if(p.position.w<=0.0){source[i].position.x=-1.0;return;}
   }
   // Uniform stores velocity half a step ahead of position. Ballistic drift
