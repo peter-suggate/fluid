@@ -16,6 +16,8 @@ export interface UniformPressureBandSchedule {
  middleSweeps:number;
  /** Red-black sweeps of the per-tile 4h level. */
  coarseSweeps:number;
+ /** Their over-relaxation (1: Gauss-Seidel). */
+ coarseRelaxation:number;
  /** Each aggregate level's inter-aggregate couplings (and the diagonal share
   * they carry) are scaled by this: piecewise-constant aggregation is twice too
   * stiff for smooth modes (0.5 would recover the rediscretised interior
@@ -27,7 +29,7 @@ export interface UniformPressureBandSchedule {
  coarseScale:number;
 
 }
-export const UNIFORM_PRESSURE_BAND_SCHEDULE:UniformPressureBandSchedule={cycles:4,fineSweeps:3,middleSweeps:2,coarseSweeps:16,coarseScale:0.6};
+export const UNIFORM_PRESSURE_BAND_SCHEDULE:UniformPressureBandSchedule={cycles:4,fineSweeps:3,middleSweeps:2,coarseSweeps:8,coarseRelaxation:1.4,coarseScale:0.6};
 
 /** Workgroups of the tile classification pass at most: a grid-stride launch
  * over the simulation's h tile worklist, as wide as the ownership's buffered
@@ -980,7 +982,7 @@ fn bCorrectionAt(s:u32)->f32{if(s<SHARED){return bCorrection[s];}return coarse[b
      let j=lane+k*L;
      if(diagonal[k]<=0.0||select(j>=red,j<black,c==1u)){continue;}
      var off=0.0;for(var f=0u;f<6u;f++){let m=(near[3u*k+f/2u]>>(16u*(f&1u)))&0xffffu;if(m!=0u){var w=weight[f];if(k!=0u){w=coarse[bC(3u+f,j)];}off+=w*bCorrection[m-1u];}}
-     bCorrection[slot[k]]=(residual[k]+off)/diagonal[k];
+     let old=bCorrection[slot[k]];bCorrection[slot[k]]=old+${schedule.coarseRelaxation}*((residual[k]+off)/diagonal[k]-old);
     }
     workgroupBarrier();
    }
@@ -997,7 +999,7 @@ fn bCorrectionAt(s:u32)->f32{if(s<SHARED){return bCorrection[s];}return coarse[b
    let first=select(0u,black,colour==1u);let last=select(red,n,colour==1u);
    for(var j=first+lane;j<last;j+=L){
     var off=0.0;for(var f=0u;f<6u;f++){let m=bitcast<u32>(coarse[bC(17u+f,j)]);if(m!=0u){off+=coarse[bC(3u+f,j)]*bCorrectionAt(m-1u);}}
-    let next=(coarse[bC(16u,j)]+off)/coarse[bC(2u,j)];let s=bitcast<u32>(coarse[bC(15u,j)]);
+    let s=bitcast<u32>(coarse[bC(15u,j)]);let old=bCorrectionAt(s);let next=old+${schedule.coarseRelaxation}*((coarse[bC(16u,j)]+off)/coarse[bC(2u,j)]-old);
     if(s<SHARED){bCorrection[s]=next;}else{coarse[bC(0u,s)]=next;}
    }
    // Corrections past SHARED live in storage: only then must the phase's
@@ -1018,7 +1020,7 @@ override bColour:u32=0u;
  for(var j=first+group.x*64u+lane;j<last;j+=groups.x*64u){
   var off=0.0;for(var f=0u;f<6u;f++){let m=bitcast<u32>(coarse[bC(17u+f,j)]);if(m!=0u){off+=coarse[bC(3u+f,j)]*coarse[bC(0u,m-1u)];}}
   let s=bitcast<u32>(coarse[bC(15u,j)]);
-  coarse[bC(0u,s)]=(coarse[bC(1u,s)]+off)/coarse[bC(2u,j)];
+  let old=coarse[bC(0u,s)];coarse[bC(0u,s)]=old+${schedule.coarseRelaxation}*((coarse[bC(1u,s)]+off)/coarse[bC(2u,j)]-old);
  }
 }`,
    middleProlong:band+/* wgsl */`
