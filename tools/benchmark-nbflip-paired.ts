@@ -12,7 +12,7 @@ import { cpus, release, totalmem } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
+import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import type { uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 
@@ -24,6 +24,8 @@ assert.ok(Number.isInteger(steps) && Number.isInteger(from) && from > 0 && steps
 const roots = [option("baseline"), option("candidate")]; assert.ok(roots.every(Boolean));
 const sceneId = option("scene") ?? "nbflip-figure-9-teaser";
 const out = option("out") ?? "artifacts/nbflip-ui-perf"; mkdirSync(out, { recursive: true });
+// The Dawn binding's own polling garbage would put a collection in one arm's frame or the other's.
+paceDawnEventPolling();
 const errors: string[] = [], solvers: WebGPUUniformReferenceSolver[] = [];
 const rows: { frame: number; baseline_ms: number; candidate_ms: number; saved_ms: number; first: string; state: unknown[] }[] = [];
 const snapshots: Record<string, unknown>[] = [];

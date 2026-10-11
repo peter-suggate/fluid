@@ -119,9 +119,16 @@ var<workgroup> nbTies:array<u32,64>;
  if(t<UM_TILES&&tie!=0u){atomicStore(&census[nbBudgetRank(t)],rank|(nbTies[lane]-1u));}
  if(lane==63u){atomicStore(&census[nbBudgetChunk(chunk)],nbTies[lane]);}
 }
-@compute @workgroup_size(1) fn activityTiePrefix(){
- var sum=0u;
- for(var c=0u;c<(UM_TILES+63u)/64u;c++){
+// A lane per block of chunks: each sums its own, then starts it at the blocks
+// before. One lane over every chunk was 0.57 ms of each figure-9 census.
+var<workgroup> nbTieBlocks:array<u32,64>;
+@compute @workgroup_size(64) fn activityTiePrefix(@builtin(local_invocation_index) lane:u32){
+ let chunks=(UM_TILES+63u)/64u;let block=(chunks+63u)/64u;
+ let first=min(lane*block,chunks);let last=min(first+block,chunks);
+ var own=0u;for(var c=first;c<last;c++){own+=atomicLoad(&census[nbBudgetChunk(c)]);}
+ nbTieBlocks[lane]=own;workgroupBarrier();
+ var sum=0u;for(var k=0u;k<lane;k++){sum+=nbTieBlocks[k];}
+ for(var c=first;c<last;c++){
   let n=atomicLoad(&census[nbBudgetChunk(c)]);atomicStore(&census[nbBudgetChunk(c)],sum);sum+=n;
  }
 }

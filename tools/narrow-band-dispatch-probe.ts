@@ -17,7 +17,7 @@ export class NarrowBandDispatchProbe {
     const encoder=target.createCommandEncoder(d);
     return new Proxy(encoder,{get:(e,k)=>{
      if(k==="beginComputePass")return (descriptor?:GPUComputePassDescriptor)=>{
-      if(!this.enabled||!['Uniform mixed extension','Uniform pressure band solve','Narrow-band FLIP resample and seed','Narrow-band FLIP surface reconstruction','Narrow-band FLIP crossing search','Narrow-band FLIP redistance','Narrow-band FLIP transfer','Narrow-band FLIP snapshot','Narrow-band FLIP update'].includes(descriptor?.label??""))return e.beginComputePass(descriptor);
+      if(!this.enabled||!['Uniform mixed extension','Uniform pressure band solve','Narrow-band FLIP resample and seed','Narrow-band FLIP surface reconstruction','Narrow-band FLIP crossing search','Narrow-band FLIP redistance','Narrow-band FLIP transfer','Narrow-band FLIP snapshot','Narrow-band FLIP update','Uniform dynamic ownership census','Uniform shared frame plan','Uniform local speed certificate','Uniform mixed layout build','Uniform mixed remap','Uniform pressure band list and rows','Uniform mixed surface advect','Uniform mixed momentum','Uniform mixed extension slot snapshot','Uniform mixed geometric fill','Uniform mixed pressure V-cycle','Uniform mixed pressure Full-cycle'].includes(descriptor?.label??""))return e.beginComputePass(descriptor);
       let pipeline:GPUComputePipeline|undefined;
       const bindings=new Map<number,unknown[]>();
       const dispatch=(kind:"dispatchWorkgroups"|"dispatchWorkgroupsIndirect",args:unknown[])=>{
