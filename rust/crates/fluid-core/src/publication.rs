@@ -47,6 +47,8 @@ pub enum PlaneId {
     UniformLowY = 71,
     UniformReleased = 72,
     UniformTiles = 73,
+    /// Six floats a sample: position in cells, velocity, depth, ballistic.
+    UniformParticles = 74,
     GraphJson = 100,
     SceneJson = 101,
 }

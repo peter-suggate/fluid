@@ -184,3 +184,7 @@ export function resolveUniformGeometricValues(values: MethodParamValues = {}): M
     return [spec.key, value];
   }));
 }
+/** The defaults restricted to the native contract, for the 2D scene runner. */
+export const UNIFORM_GEOMETRIC_NATIVE_VALUES: Readonly<MethodParamValues> = Object.freeze(
+  Object.fromEntries(UNIFORM_GEOMETRIC_NATIVE_PARAMS.map(p => [p.key, resolveUniformGeometricValues()[p.key]!])),
+);

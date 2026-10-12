@@ -445,6 +445,27 @@ impl Hierarchy {
 }
 
 impl Extension {
+    /// A grid every cell of which is worked at its own spacing: no tile
+    /// table, no coarse sampler. `values` is the grid's own field.
+    pub(crate) fn dense(g: &Grid) -> Self {
+        let cd = g.dims.map(|n| n.div_ceil(4));
+        Self {
+            dims: g.dims,
+            cd,
+            h: g.h,
+            two_level: TwoLevel {
+                enabled: false,
+                fine_reach: FINE_REACH,
+                shell_reach: SHELL_REACH,
+                transport_tiles: false,
+                transport_w: -1,
+            },
+            values: g.velocity.clone(),
+            classes: vec![7; cd[0] * cd[1]],
+            coarse: Vec::new(),
+            solid_free: g.capacity.iter().all(|&c| c == 1.0) && g.rigid_faces.is_none(),
+        }
+    }
     /// Fresh-state convenience: the persistent transport field starts at zero.
     pub fn build(g: &Grid, o: &UniformGeometricOptions, dt: f32) -> Self {
         Self::build_with(

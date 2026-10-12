@@ -358,6 +358,21 @@ impl Plug {
 
     /// The plug arm of uvSourcePhi at trace position p (lattice units).
     pub fn phi(&self, p: [f32; 2], phi: f32) -> f32 {
+        self.reach(p, phi, 0.0)
+    }
+
+    /// The plug with the cell behind the outlet held liquid too. A method
+    /// whose liquid is its surface cannot place a sweep thinner than a cell:
+    /// no vertex need fall inside it. The held cell leaves at the nozzle's
+    /// velocity, so what refills it each step is the sweep.
+    pub fn stream_phi(&self, p: [f32; 2], phi: f32) -> f32 {
+        let magnitude = length(self.velocity).max(1e-6);
+        let cell = (self.velocity[0].abs() * self.h[0] + self.velocity[1].abs() * self.h[1])
+            / magnitude;
+        self.reach(p, phi, cell)
+    }
+
+    fn reach(&self, p: [f32; 2], phi: f32, behind: f32) -> f32 {
         let speed = self.speed();
         if speed <= 1e-6 {
             return phi;
@@ -371,7 +386,7 @@ impl Plug {
             delta[0] - axial * direction[0],
             delta[1] - axial * direction[1],
         ]) - self.radius)
-            .max((-axial).max(axial - speed * self.dt));
+            .max((-behind - axial).max(axial - speed * self.dt));
         phi.min(plug)
     }
 

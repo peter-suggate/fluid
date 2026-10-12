@@ -62,3 +62,5 @@ pub use types::*;
 pub mod adaptive_sdf;
 
 pub mod uniform_geometric;
+
+pub mod narrow_band_flip;

@@ -60,16 +60,20 @@ pub struct World {
     pub gamma: Vec<f32>,
     /// Persistent GPU intermediates: the packed extension field (stale outside
     /// SHELL) and the advected-phi scratch (stale outside the window).
-    packed: Vec<[f32; 2]>,
-    advected: Vec<f32>,
+    pub(crate) packed: Vec<[f32; 2]>,
+    pub(crate) advected: Vec<f32>,
     /// Transport scratch: live receivers, their departures, the gathered V.
     cells: Vec<u32>,
     departures: Vec<[f32; 2]>,
     gathered: Vec<f32>,
-    pub(super) gravity: [f32; 2],
-    pub(super) rho: f32,
-    viscosity: f32,
+    pub(crate) gravity: [f32; 2],
+    pub(crate) rho: f32,
+    pub(crate) viscosity: f32,
     sigma: f32,
+    /// Divergence every liquid row is asked for over its open share, in 1/s
+    /// (Kim et al. 2007): narrow-band FLIP's volume control. Uniform Geometric
+    /// leaves it zero.
+    pub(crate) volume_rate: f32,
 }
 impl World {
     pub fn from_grid(
@@ -149,6 +153,7 @@ impl World {
             rho,
             viscosity,
             sigma,
+            volume_rate: 0.0,
             receipt: Receipt::default(),
             advected_phi_audit: None,
             pressure_demand: None,
@@ -461,6 +466,32 @@ impl World {
         std::mem::swap(&mut self.grid.velocity, &mut next);
         observe("velocityAdvected", &self.grid);
         std::mem::swap(&mut self.grid.velocity, &mut next);
+        self.force(e, nozzle, dt, &mut next);
+        std::mem::swap(&mut self.grid.velocity, &mut next);
+        self.pressure.scratch.velocity = next;
+    }
+    /// The body forces alone, onto the stored field.
+    pub(crate) fn force_velocity(
+        &mut self,
+        e: &Extension,
+        nozzle: Option<&super::inflow::Velocity>,
+        dt: f32,
+    ) {
+        let mut next = std::mem::take(&mut self.pressure.scratch.velocity);
+        next.clone_from(&self.grid.velocity);
+        self.force(e, nozzle, dt, &mut next);
+        std::mem::swap(&mut self.grid.velocity, &mut next);
+        self.pressure.scratch.velocity = next;
+    }
+    /// reference.wgsl applyVelocityForces onto `next`; viscosity reads the
+    /// stored field.
+    fn force(
+        &self,
+        e: &Extension,
+        nozzle: Option<&super::inflow::Velocity>,
+        dt: f32,
+        next: &mut [[f32; 2]],
+    ) {
         let g = &self.grid;
         let molecular = self.viscosity / self.rho;
         let sigma_over_rho = self.sigma / self.rho;
@@ -518,10 +549,8 @@ impl World {
                 *v = nozzle.apply_swept(p, *v);
             }
         });
-        std::mem::swap(&mut self.grid.velocity, &mut next);
-        self.pressure.scratch.velocity = next;
     }
-    pub(super) fn project(
+    pub(crate) fn project(
         &mut self,
         e: &Extension,
         nozzle: Option<&super::inflow::Velocity>,
@@ -554,6 +583,7 @@ impl World {
         };
         self.receipt.balance_rate = rate;
         let check_solid = g.rigid_speeds.is_some();
+        let warm = self.pressure.warm;
         let fine = &mut self.pressure.levels[0];
         let interior = |a: usize, v: usize| v > 0 && v < dims[a] - 1;
         for y in 0..dims[1] {
@@ -573,10 +603,12 @@ impl World {
                         open <= 1e-5 || g.rigid_centres.as_ref().is_some_and(|v| v[j]);
                     fine.minimum[i] = if inside_solid { 0.0 } else { FREE };
                     if phi < 0.0 {
-                        rhs = self.rho
-                            * (divergence(g, p, check_solid, open)
-                                - volume_correction(g, &s.target, j, open, phi, rate, dt))
-                            / dt;
+                        let mut correction =
+                            volume_correction(g, &s.target, j, open, phi, rate, dt);
+                        if self.volume_rate != 0.0 {
+                            correction += self.volume_rate * open;
+                        }
+                        rhs = self.rho * (divergence(g, p, check_solid, open) - correction) / dt;
                     }
                 } else {
                     let open_top = g.open_top && y == dims[1] - 1 && interior(0, x);
@@ -597,7 +629,9 @@ impl World {
                     }
                 }
                 fine.rhs[i] = -rhs;
-                fine.p[i] = 0.0;
+                if !warm {
+                    fine.p[i] = 0.0;
+                }
             }
         }
         let budget = self

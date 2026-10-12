@@ -4,8 +4,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { spawnSync } from "node:child_process";
 import { createMassConservingFigure9DamBreak } from "../../lib/core/paper-scenarios";
-import { uniformLabSeed, UNIFORM_LAB_VALUES } from "../../lib/physics-wasm/uniform-controller";
-const request = { ...uniformLabSeed(createMassConservingFigure9DamBreak()), options: UNIFORM_LAB_VALUES, dt: 1 / 30, frames: 180 };
+import { uniformLabSeed } from "../../lib/physics-wasm/uniform-controller";
+import { UNIFORM_GEOMETRIC_NATIVE_VALUES } from "../../lib/methods/uniform/uniform-geometric-parameters";
+const request = { ...uniformLabSeed(createMassConservingFigure9DamBreak()), options: UNIFORM_GEOMETRIC_NATIVE_VALUES, dt: 1 / 30, frames: 180 };
 const build = spawnSync("cargo", ["build", "--release", "--manifest-path", "rust/Cargo.toml", "-p", "fluid-core", "--example", "uniform_geometric_scene", "--example", "uniform_geometric_pressure"], { stdio: "inherit" });
 assert.equal(build.status, 0);
 const frozen = spawnSync("rust/target/release/examples/uniform_geometric_pressure", [], {

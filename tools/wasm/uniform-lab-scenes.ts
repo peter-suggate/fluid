@@ -1,7 +1,7 @@
 import "../../lib/methods";
 /** Real owned-world + worker protocol + UI decoder scene acceptance; no mock physics. */
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { addFluidBall } from "../../lib/core/editor-fluid-volume";
 import {
   createSceneQueryLayerCache,
@@ -15,9 +15,12 @@ import { sceneDocument } from "../../lib/core/scene-definition";
 import {
   UniformLabController,
   uniformLabSeed,
+  UNIFORM_LAB_METHOD,
   UNIFORM_LAB_VALUES,
+  UNIFORM_PARTICLE_STRIDE,
+  type UniformView,
 } from "../../lib/physics-wasm/uniform-controller";
-import { UNIFORM_GEOMETRIC_DEFAULTS, UNIFORM_GEOMETRIC_NATIVE_PARAMS } from "../../lib/methods/uniform/uniform-geometric-parameters";
+import { NARROW_BAND_FINE_ADVECTION, NARROW_BAND_VOLUME_CONTROL } from "../../lib/methods/uniform/uniform-narrow-band-controls";
 import { PhysicsWasmWorkerRuntime } from "../../lib/physics-wasm/worker-runtime";
 import type { WorkerPort } from "../../lib/physics-wasm/client";
 import type {
@@ -25,20 +28,34 @@ import type {
   PhysicsWorkerRequest,
 } from "../../lib/physics-wasm/protocol";
 import type { FluidWasmModule } from "../../lib/physics-wasm/module";
-for (const key of ["totalSurfaceVolume","surfaceDeficitBalancing"] as const) {
-  assert.equal(uniformLabQuery.read(new URLSearchParams())[key],true,`${key} defaults on, as in 3D`);
-  const query=new URLSearchParams();
-  uniformLabQuery.write(query,{...uniformLabQuery.read(query),[key]:false});
-  assert.equal(query.get(key),"0");
-  assert.equal(uniformLabQuery.read(query)[key],false);
+{
+  const defaults = uniformLabQuery.read(new URLSearchParams());
+  assert.equal(defaults.volumeControlSeconds, NARROW_BAND_VOLUME_CONTROL.default, "volume control defaults as in 3D");
+  assert.equal(defaults.phiFineAdvection, NARROW_BAND_FINE_ADVECTION.default, "level-set advection defaults as in 3D");
+  assert.equal(defaults.dt, 1 / 60, "the lab steps at the 3D method's default");
+  const legacy = new URLSearchParams("method=uniform-volume&totalSurfaceVolume=0&phiDrain=1");
+  assert.equal(uniformLabQuery.read(legacy).volumeControlSeconds, NARROW_BAND_VOLUME_CONTROL.default, "a Uniform Geometric link opens the method's defaults");
 }
-const summaries: unknown[] = [];
+assert.equal(UNIFORM_LAB_VALUES.volumeControlSeconds, NARROW_BAND_VOLUME_CONTROL.default);
+assert.equal(UNIFORM_LAB_VALUES.phiFineAdvection, NARROW_BAND_FINE_ADVECTION.default);
+interface Receipt {
+  volume: number; budget: number; controlRate: number; injectedVolume: number; outflowVolume: number;
+  particles: number; reseedClipped: number; maxSpeed: number;
+  census: { outside: number; unsupported: number; deep: number };
+  pressure: { cycles: number; residual: number };
+}
+const receiptOf = (view: UniformView) => view.receipt.narrowBandFlip as Receipt;
+const total = (field: Float32Array) => field.reduce((a, b) => a + b, 0);
+function assertFinite(view: UniformView, label: string) {
+  for (const field of [view.volume, view.phi, view.velocity, view.pressure, view.particles])
+    assert.ok(field.every(Number.isFinite), `${label}: finite fields`);
+}
 const baseline = new Map<string, unknown>();
-assert.deepEqual(
-  UNIFORM_LAB_VALUES,
-  Object.fromEntries(UNIFORM_GEOMETRIC_NATIVE_PARAMS.map((p) => [p.key, UNIFORM_GEOMETRIC_DEFAULTS[p.key]])),
-  "the lab runs the 3D defaults",
-);
+/** How far a scene's liquid may stray from its budget at either step: at any
+ * frame, and after two seconds. The 24x16 slab splashes to 19% and settles
+ * to 5%; the dam breaks stay within 6%. */
+const VOLUME_PEAK = 0.2;
+const VOLUME_SETTLED = 0.05;
 for (const artifact of ["scalar", "simd"] as const) {
   const root = new URL(
     `../../public/wasm/fluid-wasm/${artifact}/`,
@@ -107,16 +124,26 @@ for (const artifact of ["scalar", "simd"] as const) {
         assert.equal(sceneryView.capacity[i], 0, "scenery capacity survives advance");
         assert.equal(sceneryView.volume[i], 0, "water cannot enter scenery");
       }
-      assert.ok(sceneryView.volume.every(Number.isFinite));
+      assertFinite(sceneryView, "scenery");
+      for (let k = 0; k < sceneryView.particles.length; k += UNIFORM_PARTICLE_STRIDE) {
+        const cell = Math.floor(sceneryView.particles[k]!) + sceneryView.nx * Math.floor(sceneryView.particles[k + 1]!);
+        assert.ok(sceneryView.capacity[cell]! > 0, "no sample rests inside scenery");
+      }
     }
-    const balancedScene = sceneDocument(findSceneDefinition("coarse-first-pool-impact-half")!);
-    let balancedView = await controller.load(balancedScene);
-    assert.equal(balancedView.receipt.surfaceDeficitBalancing, true, "on by default, as in 3D");
-    balancedView = await controller.advance(1 / 30);
-    assert.ok(balancedView.velocity.every(Number.isFinite));
-    const baselineView = await controller.load(balancedScene, { totalSurfaceVolume: true, surfaceDeficitBalancing: false });
-    assert.equal(baselineView.receipt.surfaceDeficitBalancing, false, "the viewer's opt-out reaches the solver");
-    assert.equal(baselineView.revision.frame, 0);
+    // The viewer's two controls reach the solver. The samples decide the
+    // surface wherever they cover it, so the advection choice first shows
+    // once the front thins: at frame 40 here.
+    const controls = sceneDocument(findSceneDefinition("water-box-dam-break")!);
+    const advected: number[][] = [];
+    for (const phiFineAdvection of ["cubic", "trilinear"] as const) {
+      let view = await controller.load(controls, { volumeControlSeconds: 0, phiFineAdvection });
+      for (let frame = 0; frame < 60; frame++) {
+        view = await controller.advance(1 / 60);
+        assert.equal(receiptOf(view).controlRate, 0, "0 turns volume control off");
+      }
+      advected.push([...view.phi]);
+    }
+    assert.notDeepEqual(advected[0], advected[1], "the level-set advection choice is the solver's");
     for (const sceneId of [
       "water-box-dam-break",
       "minimal-power-dam-break-32",
@@ -124,100 +151,92 @@ for (const artifact of ["scalar", "simd"] as const) {
     ]) {
       const scene = sceneDocument(findSceneDefinition(sceneId)!);
       const seed = uniformLabSeed(scene);
-      const initial = await controller.load(scene);
-      assert.equal(initial.revision.frame, 0);
-      assert.deepEqual([...initial.volume], [...new Float32Array(seed.volume)]);
-      assert.deepEqual([...initial.phi], [...new Float32Array(seed.phi)]);
-      assert.equal(initial.receipt.method, "uniform-volume");
-      const initialMass = initial.volume.reduce((a, b) => a + b, 0);
-      let view = initial,
-        dust = 0;
-      const costs: number[] = [];
-      for (let frame = 1; frame <= 60; frame++) {
-        const start = performance.now();
-        view = await controller.advance(1 / 30);
-        costs.push(performance.now() - start);
-        assert.equal(view.revision.frame, frame);
-        assert.equal(view.revision.runEpoch, initial.revision.runEpoch);
-        for (const field of [
-          view.volume,
-          view.phi,
-          view.velocity,
-          view.pressure,
-        ])
-          assert.ok(
-            field.every(Number.isFinite),
-            `${sceneId} ${frame}: finite fields`,
-          );
-        const receipt = view.receipt.uniform as {
-          transport: { dustVolume: number };
-          sharpeningDust: number;
-        };
-        dust += receipt.transport.dustVolume + receipt.sharpeningDust;
-      }
-      const finalMass = view.volume.reduce((a, b) => a + b, 0);
-      assert.ok(
-        Math.abs(finalMass + dust - initialMass) <
-          1e-5 * Math.max(1, initialMass),
-        `${sceneId}: conservative V with reported dust`,
-      );
-      const final = {
-        volume: [...view.volume],
-        phi: [...view.phi],
-        velocity: [...view.velocity],
-        pressure: [...view.pressure],
-        released: [...view.released],
-        tiles: [...view.tiles],
-      };
-      if (artifact === "scalar") baseline.set(sceneId, final);
-      else
-        assert.deepEqual(
-          final,
-          baseline.get(sceneId),
-          `${sceneId}: scalar/SIMD owned-world parity`,
+      // Volume is read at both steps over the same simulated time.
+      for (const [dt, frames] of [[1 / 30, 60], [1 / 60, 120]] as const) {
+        const initial = await controller.load(scene);
+        assert.equal(initial.revision.frame, 0);
+        assert.deepEqual([...initial.capacity], [...new Float32Array(seed.capacity)]);
+        assert.equal(initial.receipt.method, UNIFORM_LAB_METHOD);
+        assert.equal(initial.particles.length, receiptOf(initial).particles * UNIFORM_PARTICLE_STRIDE);
+        assert.ok(receiptOf(initial).particles > 0, `${sceneId}: the band is seeded`);
+        const budget = receiptOf(initial).budget;
+        assert.ok(Math.abs(total(initial.volume) - budget) < 1e-3 * budget, `${sceneId}: the budget is the liquid loaded`);
+        let view = initial, gap = 0, fastest = 0, outflow = 0;
+        const costs: number[] = [];
+        for (let frame = 1; frame <= frames; frame++) {
+          const start = performance.now();
+          view = await controller.advance(dt);
+          costs.push(performance.now() - start);
+          assert.equal(view.revision.frame, frame);
+          assert.equal(view.revision.runEpoch, initial.revision.runEpoch);
+          assertFinite(view, `${sceneId} ${frame}`);
+          const receipt = receiptOf(view);
+          assert.ok(receipt.particles > 0, `${sceneId} ${frame}: the band keeps its samples`);
+          outflow += receipt.outflowVolume;
+          assert.ok(Math.abs(receipt.budget + outflow - budget) < 1e-3 * budget, `${sceneId} ${frame}: the budget moves only by outflow`);
+          gap = Math.max(gap, Math.abs(receipt.volume - receipt.budget) / receipt.budget);
+          fastest = Math.max(fastest, receipt.maxSpeed);
+        }
+        const receipt = receiptOf(view);
+        assert.ok(fastest > 0.05, `${sceneId}: the liquid moves`);
+        assert.ok(gap < VOLUME_PEAK, `${sceneId} at 1/${Math.round(1 / dt)} s: volume strays ${(100 * gap).toFixed(2)}% from its budget`);
+        assert.ok(
+          Math.abs(receipt.volume - receipt.budget) < VOLUME_SETTLED * receipt.budget,
+          `${sceneId} at 1/${Math.round(1 / dt)} s: volume ends ${(100 * (receipt.volume - receipt.budget) / receipt.budget).toFixed(2)}% from its budget`,
         );
-      const reset = await controller.load(scene);
-      assert.equal(reset.revision.frame, 0);
-      assert.ok(reset.revision.runEpoch > initial.revision.runEpoch);
-      assert.deepEqual(reset.volume, initial.volume);
-      assert.deepEqual(reset.phi, initial.phi);
-      const stepped = await controller.advance(1 / 30);
-      assert.equal(stepped.revision.frame, 1);
-      assert.deepEqual(
-        reset.volume,
-        initial.volume,
-        "publication stays owned after the slot is recycled",
-      );
-      costs.sort((a, b) => a - b);
-      const summary = {
-        artifact,
-        scene: sceneId,
-        frames: 60,
-        dimensions: [view.nx, view.ny],
-        initialMass,
-        finalMass,
-        dust,
-        medianMs: costs[30],
-        p95Ms: costs[57],
-      };
-      summaries.push(summary);
-      console.log(JSON.stringify(summary));
-    }
-    for (const totalSurfaceVolume of [true, false]) {
-      const scene = sceneDocument(findSceneDefinition("water-box-dam-break")!);
-      let view = await controller.load(scene, { totalSurfaceVolume, surfaceDeficitBalancing: true });
-      assert.equal(view.receipt.totalSurfaceVolume, totalSurfaceVolume);
-      for (let frame=0; frame<12; frame++) view=await controller.advance(1/30);
-      const receipt=view.receipt.uniform as {contourArea:number; volume:number};
-      if (totalSurfaceVolume) assert.ok(Math.abs(receipt.contourArea-receipt.volume)<0.03);
-      const fields={volume:[...view.volume], phi:[...view.phi], velocity:[...view.velocity]};
-      const key=`tsv-${totalSurfaceVolume}`;
-      if (artifact==="scalar") baseline.set(key,fields);
-      else assert.deepEqual(fields,baseline.get(key), `${key}: scalar/SIMD parity`);
+        const final = {
+          volume: [...view.volume],
+          phi: [...view.phi],
+          velocity: [...view.velocity],
+          pressure: [...view.pressure],
+          particles: [...view.particles],
+          tiles: [...view.tiles],
+        };
+        const key = `${sceneId}@${frames}`;
+        if (artifact === "scalar") baseline.set(key, final);
+        else
+          assert.deepEqual(
+            final,
+            baseline.get(key),
+            `${key}: scalar/SIMD owned-world parity`,
+          );
+        const reset = await controller.load(scene);
+        assert.equal(reset.revision.frame, 0);
+        assert.ok(reset.revision.runEpoch > initial.revision.runEpoch);
+        assert.deepEqual(reset.volume, initial.volume);
+        assert.deepEqual(reset.phi, initial.phi);
+        assert.deepEqual(reset.particles, initial.particles);
+        const stepped = await controller.advance(dt);
+        assert.equal(stepped.revision.frame, 1);
+        assert.deepEqual(
+          reset.volume,
+          initial.volume,
+          "publication stays owned after the slot is recycled",
+        );
+        costs.sort((a, b) => a - b);
+        console.log(JSON.stringify({
+          artifact,
+          scene: sceneId,
+          dt: `1/${Math.round(1 / dt)}`,
+          frames,
+          dimensions: [view.nx, view.ny],
+          budget: receipt.budget,
+          volume: receipt.volume,
+          finalGapPercent: 100 * (receipt.volume - receipt.budget) / receipt.budget,
+          maxGapPercent: 100 * gap,
+          outflow,
+          particles: receipt.particles,
+          ballistic: receipt.census.unsupported,
+          reseedClipped: receipt.reseedClipped,
+          fastest,
+          medianMs: costs[costs.length >> 1],
+          p95Ms: costs[Math.floor(0.95 * costs.length)],
+        }));
+      }
     }
     const scene = sceneDocument(findSceneDefinition("water-box-dam-break")!);
     let edited = await controller.load(scene);
-    const before = edited.volume.reduce((a, b) => a + b, 0);
+    const before = total(edited.volume);
     edited = await controller.injectLiquid([0.8, 0.6], 0.1);
     assert.equal(
       edited.revision.frame,
@@ -230,7 +249,11 @@ for (const artifact of ["scalar", "simd"] as const) {
       Number(edited.receipt.injectedVolume) > 0,
       "source adds liquid in the next advance",
     );
-    assert.ok(edited.volume.reduce((a, b) => a + b, 0) > before);
+    assert.ok(total(edited.volume) > before);
+    assert.ok(
+      Math.abs(receiptOf(edited).budget - before - Number(edited.receipt.injectedVolume)) < 1e-3 * before,
+      "dropped liquid joins the budget",
+    );
     const body = {
       ...createBodyDescription("sphere", 0, scene.container.height_m),
       position_m: { x: 0.35, y: 0.6, z: 0 },
@@ -264,16 +287,7 @@ for (const artifact of ["scalar", "simd"] as const) {
     );
     for (let frame = 0; frame < 30; frame++) {
       edited = await controller.advance(1 / 60);
-      for (const field of [
-        edited.volume,
-        edited.phi,
-        edited.velocity,
-        edited.pressure,
-      ])
-        assert.ok(
-          field.every(Number.isFinite),
-          "live body scene remains finite",
-        );
+      assertFinite(edited, "live body scene");
     }
     pose = (
       edited.receipt.rigidBodies as {
@@ -287,6 +301,7 @@ for (const artifact of ["scalar", "simd"] as const) {
       volume: [...edited.volume],
       phi: [...edited.phi],
       velocity: [...edited.velocity],
+      particles: [...edited.particles],
       bodies: edited.receipt.rigidBodies,
     };
     if (artifact === "scalar") baseline.set("live-tools", live);
@@ -296,19 +311,15 @@ for (const artifact of ["scalar", "simd"] as const) {
         baseline.get("live-tools"),
         "live tools scalar/SIMD parity",
       );
-    summaries.push({
+    console.log(JSON.stringify({
       artifact,
       scene: "live-liquid-and-rigid-tools",
       frames: 36,
       bodyY: pose.position_m.y,
       injectedVolume: edited.receipt.injectedVolume,
-      liquidVolume: edited.volume.reduce((a, b) => a + b, 0),
-      volumeChange:
-        edited.volume.reduce((a, b) => a + b, 0) -
-        before -
-        Number(edited.receipt.injectedVolume),
-    });
-    console.log(JSON.stringify(summaries.at(-1)));
+      liquidVolume: total(edited.volume),
+      budget: receiptOf(edited).budget,
+    }));
     edited = await controller.removeRigidBody(body.id);
     assert.deepEqual(edited.receipt.rigidBodies, []);
     assert.deepEqual(
@@ -339,14 +350,12 @@ for (const artifact of ["scalar", "simd"] as const) {
       }).map(([k, v]) => [k, v]),
     );
     const ui = {
-      totalSurfaceVolume: false,
-      surfaceDeficitBalancing: false,
-      phiCubicAdvection: true,
-      phiDrain: true,
+      volumeControlSeconds: 0.5,
+      phiFineAdvection: "trilinear" as const,
       sliceDepth_m: -0.15,
       sceneId: "water-box-dam-break",
       dt: 1 / 60,
-      layers: visualLayers(["pressure", "grid"]),
+      layers: visualLayers(["pressure", "particles", "grid"]),
       sliceView: { x: 0.4, y: 0.6, zoom: 2 },
     };
     uniformLabQuery.write(params, ui);
@@ -361,12 +370,12 @@ for (const artifact of ["scalar", "simd"] as const) {
     const restoredView = await controller.load(restored);
     assert.deepEqual(restoredView.volume, authoredView.volume);
     assert.deepEqual(restoredView.phi, authoredView.phi);
+    assert.deepEqual(restoredView.particles, authoredView.particles);
     assert.deepEqual(
       restoredView.receipt.rigidBodies,
       authoredView.receipt.rigidBodies,
     );
     await controller.advance(ui.dt);
-    summaries.push({ artifact, scene: "authored-tool-url-reload", frames: 1 });
 
     // A submerged light disk must rise in a quiet pool with planar mass.
     const pool = {
@@ -374,6 +383,21 @@ for (const artifact of ["scalar", "simd"] as const) {
       container: { ...scene.container, fillFraction: 0.8 },
       fluid: { ...scene.fluid, initialCondition: "tank-fill" as const },
     };
+    // The pool rests under the box's lid at either step: its top rows are
+    // where a coarse pressure level can lose its free surface.
+    for (const [dt, frames] of [[1 / 30, 60], [1 / 60, 120]] as const) {
+      let view = await controller.load(pool);
+      let fastest = 0;
+      for (let frame = 0; frame < frames; frame++) {
+        view = await controller.advance(dt);
+        fastest = Math.max(fastest, receiptOf(view).maxSpeed);
+      }
+      const receipt = receiptOf(view);
+      const gap = (receipt.volume - receipt.budget) / receipt.budget;
+      console.log(JSON.stringify({ artifact, scene: "resting-pool-under-lid", dt: `1/${Math.round(1 / dt)}`, gapPercent: 100 * gap, fastest, residual: receipt.pressure.residual }));
+      assert.ok(Math.abs(gap) < 0.015, `resting pool at 1/${Math.round(1 / dt)} s: volume ${(100 * gap).toFixed(2)}% from its budget`);
+      assert.ok(fastest < 0.02, `resting pool at 1/${Math.round(1 / dt)} s: moves at ${fastest} m/s`);
+    }
     await controller.load(pool);
     const floating = {
       ...body,
@@ -390,12 +414,7 @@ for (const artifact of ["scalar", "simd"] as const) {
       floatingPose.position_m.y > 0.31,
       `submerged light disk rises: ${floatingPose.position_m.y}`,
     );
-    summaries.push({
-      artifact,
-      scene: "planar-rigid-buoyancy",
-      frames: 30,
-      bodyY: floatingPose.position_m.y,
-    });
+    console.log(JSON.stringify({ artifact, scene: "planar-rigid-buoyancy", frames: 30, bodyY: floatingPose.position_m.y }));
     edited = await controller.load(scene);
     for (const [index, shape] of (
       ["sphere", "box", "capsule", "cylinder", "cup"] as const
@@ -423,16 +442,7 @@ for (const artifact of ["scalar", "simd"] as const) {
     for (let frame = 0; frame < 15; frame++)
       edited = await controller.advance(1 / 120);
     assert.equal((edited.receipt.rigidBodies as unknown[]).length, 5);
-    for (const field of [
-      edited.volume,
-      edited.phi,
-      edited.velocity,
-      edited.pressure,
-    ])
-      assert.ok(
-        field.every(Number.isFinite),
-        "all shared rigid shapes remain finite",
-      );
+    assertFinite(edited, "all shared rigid shapes");
     const shapes = {
       volume: [...edited.volume],
       phi: [...edited.phi],
@@ -440,18 +450,7 @@ for (const artifact of ["scalar", "simd"] as const) {
     };
     if (artifact === "scalar") baseline.set("rigid-shapes", shapes);
     else assert.deepEqual(shapes, baseline.get("rigid-shapes"));
-    summaries.push({
-      artifact,
-      scene: "shared-rigid-shape-roster",
-      frames: 15,
-      shapes: 5,
-    });
   } finally {
     await controller.destroy();
   }
 }
-writeFileSync(
-  "docs/research/uniform-geometric-2d-2026-09-20/ui-scene-acceptance.json",
-  JSON.stringify({ profile: UNIFORM_LAB_VALUES, scenes: summaries }, null, 2) +
-    "\n",
-);

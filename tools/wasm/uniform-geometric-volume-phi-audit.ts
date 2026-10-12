@@ -7,10 +7,8 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { createSparseCM12ComplexityScene } from "../../lib/core/scenes";
-import {
-  uniformLabSeed,
-  UNIFORM_LAB_VALUES,
-} from "../../lib/physics-wasm/uniform-controller";
+import { uniformLabSeed } from "../../lib/physics-wasm/uniform-controller";
+import { UNIFORM_GEOMETRIC_NATIVE_VALUES } from "../../lib/methods/uniform/uniform-geometric-parameters";
 
 const args = new Map(
   process.argv.slice(2).map((a): [string, string] => {
@@ -70,7 +68,7 @@ assert.equal(build.status, 0);
 for (const arm of selected) {
   const request = {
     ...seed,
-    options: { ...UNIFORM_LAB_VALUES, totalSurfaceVolume: "off", ...arm.options },
+    options: { ...UNIFORM_GEOMETRIC_NATIVE_VALUES, totalSurfaceVolume: "off", ...arm.options },
     dt: arm.dt,
     frames: Math.round(seconds / arm.dt),
     auditStages: true,

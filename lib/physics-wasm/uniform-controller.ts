@@ -14,31 +14,41 @@ import {
   uniformInitialVolume,
   uniformVolumeInitialPhi,
 } from "../methods/uniform/uniform-volume-initial";
-import { resolveUniformGeometricValues, UNIFORM_GEOMETRIC_NATIVE_PARAMS } from "../methods/uniform/uniform-geometric-parameters";
+import { resolveUniformGeometricValues } from "../methods/uniform/uniform-geometric-parameters";
+import { NARROW_BAND_FINE_ADVECTION, narrowBandControlValues } from "../methods/uniform/uniform-narrow-band-controls";
 import { scenerySliceFraction, uniformLabSlice } from "./scenery-slice";
 
-const NATIVE_KEYS = new Set(UNIFORM_GEOMETRIC_NATIVE_PARAMS.map((p) => p.key));
-/** The 3D defaults restricted to the native contract; 2D runs the same algorithm. */
-export const UNIFORM_LAB_VALUES = Object.freeze(
-  Object.fromEntries(Object.entries(resolveUniformGeometricValues()).filter(([key]) => NATIVE_KEYS.has(key))),
-);
-/** The two surface-volume stages the lab lets a viewer switch off. */
-export interface UniformLabSurface {
-  readonly totalSurfaceVolume: boolean;
-  readonly surfaceDeficitBalancing: boolean;
-  readonly phiCubicAdvection?: boolean;
-  readonly phiDrain?: boolean;
-}
+export const UNIFORM_LAB_METHOD = "uniform-narrow-band-flip";
+const shared = resolveUniformGeometricValues();
+/** The 3D method's values the native port takes (NarrowBandFlipOptions):
+ * its fixed pressure schedule, its one extension sweep, its join padding and
+ * its volume control. 2D runs the fixed particle band on the mixed 4h/h frame. */
+export const UNIFORM_LAB_VALUES = Object.freeze({
+  rigidCoupling: shared.rigidCoupling as string,
+  pressureResidualTolerance: shared.pressureResidualTolerance as number,
+  extensionFrontSweeps: 1,
+  pressureFullCycles: 3,
+  pressureVCycles: 4,
+  pressureSweeps: 6,
+  fineGridPadding: 1,
+  phiFineAdvection: NARROW_BAND_FINE_ADVECTION.default as "cubic" | "trilinear",
+  volumeControlSeconds: narrowBandControlValues().volumeControlSeconds,
+});
+/** The method controls the lab lets a viewer change. */
+export type UniformLabControls = Pick<typeof UNIFORM_LAB_VALUES, "phiFineAdvection" | "volumeControlSeconds">;
 
 export function uniformLabSceneLimitation(
   scene: SceneDescription,
 ): string | undefined {
   const [nx, ny] = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   if (nx < 2 || ny < 2 || nx * ny > 4_194_304)
-    return "This scene exceeds the Uniform 2D grid budget.";
+    return "This scene exceeds the 2D grid budget.";
+  if (nx % 4 !== 0 || ny % 4 !== 0 || nx < 8 || ny < 8)
+    return "Narrow-band FLIP needs a lattice of whole 4h tiles, at least two a side.";
   return undefined;
 }
-/** XY slice with scenery baked into the static fluid capacity. */
+/** XY slice with scenery baked into the static fluid capacity. `volume` is
+ * the Uniform Geometric scene runner's V; narrow-band FLIP takes the rest. */
 export function uniformLabSeed(scene: SceneDescription, sliceDepth_m?: number) {
   const limitation = uniformLabSceneLimitation(scene);
   if (limitation) throw new Error(limitation);
@@ -75,6 +85,9 @@ export function uniformLabSeed(scene: SceneDescription, sliceDepth_m?: number) {
   };
 }
 
+/** Floats a published sample holds: position in cells, velocity in m/s,
+ * depth in cells (negative inside), ballistic. */
+export const UNIFORM_PARTICLE_STRIDE = 6;
 export interface UniformView {
   readonly revision: PhysicsRevision;
   readonly nx: number;
@@ -89,14 +102,20 @@ export interface UniformView {
   readonly lowY: Float32Array;
   readonly released: Uint8Array;
   readonly tiles: Uint8Array;
+  readonly particles: Float32Array;
   readonly receipt: Readonly<Record<string, unknown>>;
+}
+function particles(plane: Float32Array<ArrayBuffer>) {
+  if (plane.length % UNIFORM_PARTICLE_STRIDE !== 0)
+    throw new Error("Invalid narrow-band FLIP particle plane");
+  return plane;
 }
 export function createUniformView(source: PhysicsPublication): UniformView {
   const publication = decodePhysicsPublication(source);
   try {
     const m = publication.metadata;
-    if (m.method !== "uniform-volume")
-      throw new Error("Expected Uniform Geometric publication");
+    if (m.method !== UNIFORM_LAB_METHOD)
+      throw new Error("Expected narrow-band FLIP publication");
     const dims = m.dimensions as number[],
       spacing = m.cellSize as number[];
     if (
@@ -111,10 +130,10 @@ export function createUniformView(source: PhysicsPublication): UniformView {
     const [nx, ny] = dims as [number, number];
     const f32 = (
       id: (typeof PhysicsPlane)[keyof typeof PhysicsPlane],
-      count: number,
+      count?: number,
     ) => {
       const p = publication.plane(id);
-      if (!(p instanceof Float32Array) || p.length !== count)
+      if (!(p instanceof Float32Array) || (count !== undefined && p.length !== count))
         throw new Error(`Invalid uniform plane ${id}`);
       return p.slice();
     };
@@ -144,6 +163,7 @@ export function createUniformView(source: PhysicsPublication): UniformView {
       lowY: f32(PhysicsPlane.UniformLowY, nx),
       released: u8(PhysicsPlane.UniformReleased, nx * ny),
       tiles: u8(PhysicsPlane.UniformTiles),
+      particles: particles(f32(PhysicsPlane.UniformParticles)),
       receipt: m.receipt as Record<string, unknown>,
     };
   } finally {
@@ -160,18 +180,15 @@ export class UniformLabController {
       }),
     );
   }
-  async load(scene: SceneDescription, surface: UniformLabSurface = { totalSurfaceVolume: true, surfaceDeficitBalancing: true }, sliceDepth_m?: number) {
+  async load(scene: SceneDescription, controls: Partial<UniformLabControls> = {}, sliceDepth_m?: number) {
+    // The method's liquid is its surface: the seed's cell volumes stay behind.
+    const uniformSeed: Partial<ReturnType<typeof uniformLabSeed>> = uniformLabSeed(scene, sliceDepth_m);
+    delete uniformSeed.volume;
     await this.client.load(scene, {
-      method: "uniform-volume",
+      method: UNIFORM_LAB_METHOD,
       dimension: 2,
-      methodValues: {
-        ...UNIFORM_LAB_VALUES,
-        totalSurfaceVolume: surface.totalSurfaceVolume ? "on" : "off",
-        surfaceDeficitBalancing: surface.surfaceDeficitBalancing ? "on" : "off",
-        phiCubicAdvection: surface.phiCubicAdvection === false ? "off" : "on",
-        phiDrain: surface.phiDrain === false ? "off" : "on",
-      },
-      uniformSeed: uniformLabSeed(scene, sliceDepth_m),
+      methodValues: { ...UNIFORM_LAB_VALUES, ...controls },
+      uniformSeed,
     });
     return createUniformView(await this.client.snapshot());
   }
@@ -207,7 +224,7 @@ export class UniformLabController {
   private async command(command: unknown) {
     const publication = await this.client.applyCommand(command, 0xffffffff);
     if (!("bytes" in publication))
-      throw new Error("Uniform edit did not publish fields");
+      throw new Error("Narrow-band FLIP edit did not publish fields");
     return createUniformView(publication as PhysicsPublication);
   }
   destroy() {

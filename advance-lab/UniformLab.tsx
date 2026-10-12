@@ -1,5 +1,8 @@
 "use client";
-import { VISUAL_LAYERS, scalarLayerPaint, layerOpacity, type VisualLayerState } from "../lib/core/visual-layers";
+import {
+  VISUAL_LAYERS, LAYER_PALETTE, LAYER_PARTICLE_SPEED_SCALE, scalarLayerPaint, layerOpacity,
+  particleLayerShown, toggleVisualLayer, type VisualLayerState,
+} from "../lib/core/visual-layers";
 import { VisualLayerRows } from "../lib/features/field-view/layers-ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
@@ -37,14 +40,16 @@ import { findSceneDefinition } from "../lib/core/scenes";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
 import { uniformLabSlice } from "../lib/physics-wasm/scenery-slice";
-import { UNIFORM_VOLUME_PIPELINE } from "../lib/methods/uniform/uniform-volume-pipeline";
 import { UNIFORM_GEOMETRIC_PARAMS } from "../lib/methods/uniform/uniform-geometric-parameters";
+import { NARROW_BAND_FINE_ADVECTION, NARROW_BAND_VOLUME_CONTROL } from "../lib/methods/uniform/uniform-narrow-band-controls";
 import {
   UniformLabController,
   UNIFORM_LAB_VALUES,
+  UNIFORM_PARTICLE_STRIDE,
   uniformLabSceneLimitation,
   type UniformView,
 } from "../lib/physics-wasm/uniform-controller";
+import { NARROW_BAND_LAB_STAGES } from "./narrow-band-stages";
 import {
   advanceRdfTriangles,
   clippedScalarTriangle,
@@ -52,8 +57,19 @@ import {
 import base from "./AdvanceLab.module.css";
 import css from "./UniformLab.module.css";
 
-const stages = UNIFORM_VOLUME_PIPELINE.stages;
+const stages = NARROW_BAND_LAB_STAGES;
 const STAGE_OPTIONS = stages.map((s) => ({ value: s.id, label: s.label }));
+/** The method's own parameter schema, for the values a stage reads. */
+const PARAMS = [
+  ...UNIFORM_GEOMETRIC_PARAMS,
+  NARROW_BAND_FINE_ADVECTION,
+  { ...NARROW_BAND_VOLUME_CONTROL, kind: "number" as const },
+];
+// In the plane the eight-tap advect is four taps.
+const ADVECTION_OPTIONS = [
+  { value: "cubic" as const, label: "Cubic" },
+  { value: "trilinear" as const, label: "Bilinear" },
+];
 const STEP_OPTIONS = STEP_SIZES.map((step) => ({ value: String(step.dt), label: step.label }));
 interface Camera {
   zoom: number;
@@ -93,6 +109,54 @@ function bodyDistance(body: RigidBodyState, x: number, y: number) {
     }),
   );
 }
+const PARTICLE_SHADES = 12;
+/** The band's samples on the 3D layer's speed ramp; a ballistic one is a ring. */
+function drawParticles(
+  g: CanvasRenderingContext2D,
+  v: UniformView,
+  alpha: number,
+  pixelsPerCell: number,
+) {
+  const samples = v.particles,
+    count = samples.length / UNIFORM_PARTICLE_STRIDE;
+  // A quarter-cell lattice's dot, never under a pixel and a half across.
+  const radius = Math.max(0.12, 0.75 / pixelsPerCell);
+  const mix = (a: readonly number[], b: readonly number[], t: number) =>
+    a.map((value, i) => Math.round(value + (b[i]! - value) * t)).join(",");
+  const shade = new Uint8Array(count);
+  for (let i = 0; i < count; i++) {
+    const at = UNIFORM_PARTICLE_STRIDE * i;
+    shade[i] = Math.min(PARTICLE_SHADES, Math.floor(
+      (Math.hypot(samples[at + 2]!, samples[at + 3]!) / LAYER_PARTICLE_SPEED_SCALE) * PARTICLE_SHADES,
+    ));
+  }
+  g.save();
+  g.globalAlpha = alpha;
+  g.lineWidth = 0.4 * radius;
+  for (let k = 0; k <= PARTICLE_SHADES; k++) {
+    const t = (2 * k) / PARTICLE_SHADES;
+    const colour = `rgb(${t < 1
+      ? mix(LAYER_PALETTE.particleSlow, LAYER_PALETTE.particleMid, t)
+      : mix(LAYER_PALETTE.particleMid, LAYER_PALETTE.particleFast, t - 1)})`;
+    for (const ballistic of [0, 1]) {
+      g.beginPath();
+      for (let i = 0; i < count; i++) {
+        const at = UNIFORM_PARTICLE_STRIDE * i;
+        if (shade[i] !== k || samples[at + 5] !== ballistic) continue;
+        g.moveTo(samples[at]! + radius, samples[at + 1]!);
+        g.arc(samples[at]!, samples[at + 1]!, radius, 0, 2 * Math.PI);
+      }
+      if (ballistic) {
+        g.strokeStyle = colour;
+        g.stroke();
+      } else {
+        g.fillStyle = colour;
+        g.fill();
+      }
+    }
+  }
+  g.restore();
+}
 function draw(
   canvas: HTMLCanvasElement,
   v: UniformView,
@@ -129,8 +193,12 @@ function draw(
   for (const layer of VISUAL_LAYERS) {
     if (!layers.visible || !layers.enabled.includes(layer.id)) continue;
     const lens = layer.id;
-    // Pages, the mixed frame's detail importance and particles have no 2D record here.
-    if (lens === "pages" || lens === "importance" || lens === "particles") continue;
+    // Pages and the mixed frame's detail importance have no 2D record here.
+    if (lens === "pages" || lens === "importance") continue;
+    if (lens === "particles") {
+      drawParticles(g, v, layerOpacity(layers, lens), Math.min(sx, sy));
+      continue;
+    }
     if (lens === "grid" || lens === "window") {
       g.save(); g.globalAlpha = layerOpacity(layers, lens);
       g.strokeStyle = layer.color; g.lineWidth = (lens === "window" ? 2 : 1) / Math.max(sx, sy);
@@ -298,7 +366,7 @@ export function UniformLab() {
 }
 function UniformRun({ session }: { session: PaneSession }) {
   const [store] = useState(() => createUniformLabStore(location.search));
-  const { sceneId, dt, layers, totalSurfaceVolume, surfaceDeficitBalancing, phiCubicAdvection, phiDrain, sliceDepth_m, sliceView: camera } = useStore(store);
+  const { sceneId, dt, layers, volumeControlSeconds, phiFineAdvection, sliceDepth_m, sliceView: camera } = useStore(store);
   const scene = useStore(session.scene, (state) => state.scene);
   const nz = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER)[2];
   const slice = uniformLabSlice(scene, nz, sliceDepth_m);
@@ -377,7 +445,7 @@ function UniformRun({ session }: { session: PaneSession }) {
           return;
         }
         controller.current = owner;
-        const initial = await owner.load(scene, { totalSurfaceVolume, surfaceDeficitBalancing, phiCubicAdvection, phiDrain }, sliceDepth_m);
+        const initial = await owner.load(scene, { volumeControlSeconds, phiFineAdvection }, sliceDepth_m);
         if (alive) {
           setView(initial);
           setLoading(false);
@@ -395,7 +463,7 @@ function UniformRun({ session }: { session: PaneSession }) {
       if (controller.current === owner) controller.current = undefined;
       if (owner) void owner.destroy().catch(() => {});
     };
-  }, [sceneId, totalSurfaceVolume, surfaceDeficitBalancing, phiCubicAdvection, phiDrain, sliceDepth_m, restart, session.scene]);
+  }, [sceneId, volumeControlSeconds, phiFineAdvection, sliceDepth_m, restart, session.scene]);
   const edit = (
     operation: (owner: UniformLabController) => Promise<UniformView>,
   ) => {
@@ -497,35 +565,30 @@ function UniformRun({ session }: { session: PaneSession }) {
     store.setState({ sceneId, sliceView: fit });
   };
   const stage = stages.find((s) => s.id === stageId)!;
-  const keys = new Set(
-    (stage.controls ?? []).flatMap((c) => ("param" in c ? [c.param] : [])),
-  );
   const values: Readonly<Record<string, unknown>> = {
     ...UNIFORM_LAB_VALUES,
-    totalSurfaceVolume: totalSurfaceVolume ? "on" : "off",
-    surfaceDeficitBalancing: surfaceDeficitBalancing ? "on" : "off",
-    phiCubicAdvection: phiCubicAdvection ? "on" : "off",
-    phiDrain: phiDrain ? "on" : "off",
+    volumeControlSeconds,
+    phiFineAdvection,
   };
-  const parameters = UNIFORM_GEOMETRIC_PARAMS.filter(
-    (p) => keys.has(p.key) && p.key in values,
-  );
-  const total = view?.volume.reduce((a, b) => a + b, 0) ?? 0,
-    initial =
-      Number(view?.receipt.initialVolume ?? 0) +
-      Number(view?.receipt.injectedVolume ?? 0);
-  const surfaceStats = view?.receipt.uniform as { contourArea?: number; contourL1?: number } | undefined;
-  const pressure = (
-    view?.receipt.uniform as
-      | {
-          pressure?: {
-            residual?: number;
-            cycles?: number;
-            converged?: boolean;
-          };
-        }
-      | undefined
-  )?.pressure;
+  const parameters = stage.params.flatMap((key) => {
+    const spec = PARAMS.find((p) => p.key === key);
+    return spec ? [spec] : [];
+  });
+  const receipt = view?.receipt.narrowBandFlip as
+    | {
+        volume: number;
+        budget: number;
+        controlRate: number;
+        outflowVolume: number;
+        particles: number;
+        reseedClipped: number;
+        census: { outside: number; unsupported: number; deep: number };
+        pressure: { residual: number; cycles: number; converged: boolean };
+        band: { tiles: number; rows: number; residual: number; cycles: number; converged: boolean };
+        tiles: number;
+        fineTiles: number;
+      }
+    | undefined;
   const coordinates = (
     element: HTMLCanvasElement,
     clientX: number,
@@ -623,15 +686,15 @@ function UniformRun({ session }: { session: PaneSession }) {
         </output>
       </header>
       <div className={css.layout}>
-        <section className={css.viewport} aria-label="Uniform simulation">
+        <section className={css.viewport} aria-label="Narrow-band FLIP simulation">
           <div className={css.tools}>
-            <DockedToolstrip ariaLabel="Visual layers"><VisualLayerRows hidden={["pages", "importance", "particles"]} state={layers} onChange={layers => store.setState({ layers })} /></DockedToolstrip>
+            <DockedToolstrip ariaLabel="Visual layers"><VisualLayerRows hidden={["pages", "importance"]} state={layers} onChange={layers => store.setState({ layers })} /></DockedToolstrip>
             <button onClick={() => setCamera(fit)}>Fit</button>
           </div>
           <canvas
             ref={canvas}
             tabIndex={0}
-            aria-label="Uniform Geometric 2D fluid"
+            aria-label="Narrow-band FLIP 2D fluid"
             onContextMenu={(e) => {
               e.preventDefault();
               if (mode !== "interact") return;
@@ -920,7 +983,7 @@ function UniformRun({ session }: { session: PaneSession }) {
           />
           {loading && (
             <div className={css.message} role="status">
-              Loading Uniform Geometric…
+              Loading narrow-band FLIP…
             </div>
           )}
           {error && (
@@ -937,8 +1000,8 @@ function UniformRun({ session }: { session: PaneSession }) {
           </footer>
         </section>
         <aside className={css.sidebar}>
-          <h1>Uniform Geometric</h1>
-          <p className={css.muted}>Shared 3D defaults · whole-domain solve</p>
+          <h1>Narrow-band FLIP</h1>
+          <p className={css.muted}>3D method defaults · fixed particle band · one resolution</p>
           <label>
             Slice depth (m)
             <NumberInput ariaLabel="Slice depth (m)"
@@ -953,70 +1016,87 @@ function UniformRun({ session }: { session: PaneSession }) {
               }} />
           </label>
           <p className={css.muted}>Changing depth restarts the run. Scenery blocks water; rigid bodies and the nozzle retain their XY projection.</p>
-          <div className={css.option}>
-            <Switch
-              ariaLabel="Total surface volume"
-              label="Total surface volume"
-              checked={totalSurfaceVolume}
+          <label>
+            {NARROW_BAND_VOLUME_CONTROL.label} ({NARROW_BAND_VOLUME_CONTROL.unit})
+            <NumberInput ariaLabel={NARROW_BAND_VOLUME_CONTROL.label}
+              hint={NARROW_BAND_VOLUME_CONTROL.hint}
+              min={NARROW_BAND_VOLUME_CONTROL.min} max={NARROW_BAND_VOLUME_CONTROL.max}
+              step={NARROW_BAND_VOLUME_CONTROL.step} digits={NARROW_BAND_VOLUME_CONTROL.digits}
+              value={volumeControlSeconds}
               disabled={loading}
-              onChange={(checked) => {
+              onChange={(value) => {
                 setPlaying(false);
                 beginLoad();
-                store.setState({ totalSurfaceVolume: checked });
-              }}
-            />
-          </div>
+                store.setState({ volumeControlSeconds: value });
+              }} />
+          </label>
+          <label>
+            Level-set advection
+            <Select ariaLabel="Level-set advection"
+              value={phiFineAdvection}
+              options={ADVECTION_OPTIONS}
+              disabled={loading}
+              onChange={(value) => {
+                setPlaying(false);
+                beginLoad();
+                store.setState({ phiFineAdvection: value });
+              }} />
+          </label>
           <p className={css.muted}>
-            Shifts the surface along its normals, at most one cell per step, to match total V.
+            Both are the 3D method&rsquo;s controls; changing either resets and pauses the scene.
           </p>
           <div className={css.option}>
             <Switch
-              ariaLabel="Surface-deficit balancing"
-              label="Surface-deficit balancing"
-              checked={surfaceDeficitBalancing}
-              disabled={loading}
-              onChange={(checked) => {
-                setPlaying(false);
-                beginLoad();
-                store.setState({ surfaceDeficitBalancing: checked });
-              }}
+              ariaLabel="Particles"
+              label="Particles"
+              hint="The band's velocity samples, coloured by speed. A ring is a ballistic sample: no liquid cell supports it."
+              checked={particleLayerShown(layers)}
+              onChange={() => store.setState({ layers: toggleVisualLayer(layers, "particles") })}
             />
           </div>
-          <p className={css.muted}>
-            Preserves overfill expansion and balances it with contraction in underfilled liquid to reduce persistent sloshing.
-            {" "}Both are on in 3D; changing either resets and pauses the scene.
-          </p>
-          {(["phiCubicAdvection", "phiDrain"] as const).map((key) => {
-            const spec = UNIFORM_GEOMETRIC_PARAMS.find((p) => p.key === key)!;
-            return <div className={css.option} key={key}>
-              <Switch ariaLabel={spec.label} label={spec.label} checked={store.getState()[key]}
-                disabled={loading} onChange={(checked) => {
-                  setPlaying(false);
-                  beginLoad();
-                  store.setState({ [key]: checked });
-                }} />
-            </div>;
-          })}
           <Facts className={css.facts} items={[
             {
               label: "Liquid area",
-              value: `${view ? (total * view.cellSize[0] * view.cellSize[1]).toFixed(5) : "—"} m²`,
-            },
-            { label: "Volume change", value: `${initial ? ((total / initial - 1) * 100).toFixed(5) : "0"}%` },
-            {
-              label: "Surface / V area",
-              value: <span data-testid="uniform-surface-ratio">{view?.revision.frame && total ? ((surfaceStats?.contourArea ?? 0) / total * 100).toFixed(2) + "%" : "—"}</span>,
+              value: `${view && receipt ? (receipt.volume * view.cellSize[0] * view.cellSize[1]).toFixed(5) : "—"} m²`,
             },
             {
-              label: "V/phi mismatch",
-              hint: "Sum of cellwise absolute V minus surface occupancy, divided by total V.",
-              value: view?.revision.frame && total ? ((surfaceStats?.contourL1 ?? 0) / total * 100).toFixed(2) + "%" : "—",
+              label: "Volume vs budget",
+              hint: "The liquid the surface holds against its budget: the start, plus sources, less outflow through an open top.",
+              value: <span data-testid="uniform-volume-gap">{receipt?.budget ? `${((receipt.volume / receipt.budget - 1) * 100).toFixed(3)}%` : "—"}</span>,
             },
-            { label: "Pressure residual", value: view?.revision.frame ? pressure?.residual?.toExponential(2) : "—" },
             {
-              label: "Pressure cycles",
+              label: "Volume control",
+              hint: "Divergence asked of every liquid cell this step. Positive adds liquid.",
+              value: view?.revision.frame && receipt ? `${receipt.controlRate.toFixed(4)} /s` : "—",
+            },
+            {
+              label: "Particles",
+              value: receipt ? `${receipt.particles.toLocaleString()} · ${receipt.census.unsupported.toLocaleString()} ballistic` : "—",
+            },
+            ...(receipt?.reseedClipped
+              ? [{ label: "Seeds deferred", hint: "New samples the full pool could not store.", value: receipt.reseedClipped.toLocaleString() }]
+              : []),
+            {
+              label: "Tiles at h",
+              hint: "Tiles of 4 by 4 cells run at h this step, of all tiles. The rest are one 4h cell each.",
+              value: receipt ? `${receipt.fineTiles.toLocaleString()} of ${receipt.tiles.toLocaleString()}` : "—",
+            },
+            { label: "4h pressure residual", value: view?.revision.frame ? receipt?.pressure.residual.toExponential(2) : "—" },
+            {
+              label: "4h pressure cycles",
               value: view?.revision.frame
-                ? `${pressure?.cycles ?? 0} · ${pressure?.converged ? "converged" : "budget reached"}`
+                ? `${receipt?.pressure.cycles ?? 0} · ${receipt?.pressure.converged ? "converged" : "budget reached"}`
+                : "—",
+            },
+            {
+              label: "h band residual",
+              hint: "Largest divergence the h band solve left, over its rows.",
+              value: view?.revision.frame && receipt ? `${receipt.band.residual.toExponential(2)} /s · ${receipt.band.rows.toLocaleString()} rows` : "—",
+            },
+            {
+              label: "h band cycles",
+              value: view?.revision.frame
+                ? `${receipt?.band.cycles ?? 0} · ${receipt?.band.converged ? "converged" : "budget reached"}`
                 : "—",
             },
           ]} />
@@ -1028,26 +1108,28 @@ function UniformRun({ session }: { session: PaneSession }) {
           )}
           <h2>Completed frame</h2>
           <p className={css.muted}>
-            Field views show the last completed advance. Stage descriptions and
-            defaults are shared with 3D.
+            Field views show the last completed advance. The stages are the 2D
+            port&rsquo;s own; their defaults are the 3D method&rsquo;s.
           </p>
           <Choice
             className={css.stages}
-            ariaLabel="Uniform stages"
+            ariaLabel="Narrow-band FLIP stages"
             value={stageId}
             options={STAGE_OPTIONS}
             onChange={setStageId}
           />
           <details open key={stageId}>
             <summary>{stage.label}</summary>
-            <p>{stage.tip.summary}</p>
+            <p>{stage.summary}</p>
             {parameters.length > 0 && (
               <Facts className={css.facts} items={parameters.map((p) => ({
                 label: p.label,
                 hint: p.hint,
-                value: p.kind === "select"
-                  ? p.options.find((o) => o.value === values[p.key])?.label
-                  : `${values[p.key]} ${p.unit ?? ""}`,
+                value: p.key === NARROW_BAND_FINE_ADVECTION.key
+                  ? ADVECTION_OPTIONS.find((o) => o.value === values[p.key])?.label
+                  : p.kind === "select"
+                    ? p.options.find((o) => o.value === values[p.key])?.label
+                    : `${values[p.key]} ${p.unit ?? ""}`,
               }))} />
             )}
           </details>
@@ -1059,7 +1141,7 @@ function UniformRun({ session }: { session: PaneSession }) {
               </h2>
               <Facts className={css.facts} items={[
                 {
-                  label: "V / capacity",
+                  label: "Occupancy / capacity",
                   value: `${view.volume[probe]!.toFixed(5)} / ${view.capacity[probe]!.toFixed(3)}`,
                 },
                 { label: "Pressure", value: `${view.pressure[probe]!.toPrecision(5)} Pa` },
@@ -1073,8 +1155,7 @@ function UniformRun({ session }: { session: PaneSession }) {
           )}
           {layers.visible && layers.enabled.includes("tiles") && (
             <p>
-              Blue: fine · green: extension shell · amber: transport · grey:
-              coarse air
+              Blue: h tile with pressure rows · green: h tile without · grey: 4h tile
             </p>
           )}
         </aside>

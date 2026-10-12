@@ -7,16 +7,16 @@ import { Select } from "../components/ui";
 import { labMethodFromSearch, type LabMethod as Method } from "./lab-method";
 import { replaceLocationSearch } from "../lib/core/query-state-sync";
 import css from "./Lab.module.css";
-const Uniform = dynamic(
+const NarrowBand = dynamic(
   () => import("./UniformLab").then((m) => m.UniformLab),
-  { ssr: false, loading: () => <p>Loading Uniform Geometric…</p> },
+  { ssr: false, loading: () => <p>Loading narrow-band FLIP…</p> },
 );
 const Adaptive = dynamic(
   () => import("./AdvanceLab").then((m) => m.AdvanceLab),
   { ssr: false, loading: () => <p>Loading Adaptive Geometric…</p> },
 );
 const METHOD_OPTIONS: readonly { readonly value: Method; readonly label: string }[] = [
-  { value: "uniform-volume", label: "Uniform Geometric" },
+  { value: "uniform-narrow-band-flip", label: "Narrow-band FLIP" },
   { value: "adaptive-volume", label: "Adaptive Geometric" },
 ];
 export function Lab() {
@@ -41,7 +41,7 @@ export function Lab() {
           2D advance{" "}
           <Select
             ariaLabel="Method"
-            value={method ?? "uniform-volume"}
+            value={method ?? "uniform-narrow-band-flip"}
             options={METHOD_OPTIONS}
             onChange={select}
           />
@@ -49,8 +49,8 @@ export function Lab() {
         <ThemeSwitch />
       </header>
       <div className={css.body}>
-        {method === "uniform-volume" ? (
-          <Uniform />
+        {method === "uniform-narrow-band-flip" ? (
+          <NarrowBand />
         ) : method === "adaptive-volume" ? (
           <Adaptive />
         ) : (

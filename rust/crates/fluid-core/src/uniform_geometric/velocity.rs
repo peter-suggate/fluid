@@ -40,8 +40,9 @@ fn trace_solid(g: &Grid, p: [f32; 2]) -> bool {
     solid_voxel(g, cell)
 }
 
-// reference.wgsl departurePoint then clipDepartureAtSolid.
-fn departure(g: &Grid, e: &Extension, start: [f32; 2], dt: f32) -> [f32; 2] {
+// reference.wgsl departurePoint then clipDepartureAtSolid. `width` is the
+// traced face's own spacing in cells: its substeps keep to 1.5 of it.
+pub(crate) fn departure(g: &Grid, e: &Extension, start: [f32; 2], dt: f32, width: f32) -> [f32; 2] {
     let mut q = start;
     let mut remaining = dt.abs();
     let direction = if dt >= 0.0 { 1.0 } else { -1.0 };
@@ -51,7 +52,7 @@ fn departure(g: &Grid, e: &Extension, start: [f32; 2], dt: f32) -> [f32; 2] {
         }
         let v = e.sample(q);
         let rate = (v[0].abs() / g.h[0]).max(v[1].abs() / g.h[1]);
-        let step = remaining.min(1.5 / rate.max(1e-6));
+        let step = remaining.min(1.5 * width / rate.max(1e-6));
         let signed_step = direction * step;
         let mid = clamp(
             g,
@@ -115,7 +116,7 @@ pub fn advect(g: &Grid, e: &Extension, dt: f32, out: &mut Vec<[f32; 2]>) {
         out[i] = std::array::from_fn(|a| {
             let mut start = p.map(|v| v as f32 + 0.5);
             start[a] += 0.5;
-            let v = e.sample(departure(g, e, start, dt))[a];
+            let v = e.sample(departure(g, e, start, dt, 1.0))[a];
             // Keep an old velocity directed away from a positive wall.
             if p[a] == g.dims[a] as i32 - 1 && !(a == 1 && g.open_top) {
                 v.min(g.velocity[i][a])

@@ -8,6 +8,7 @@ import { PhysicsWasmWorkerRuntime } from "../../lib/physics-wasm/worker-runtime"
 import type { WorkerPort } from "../../lib/physics-wasm/client";
 import type { PhysicsWorkerRequest, PhysicsWorkerResponse } from "../../lib/physics-wasm/protocol";
 import type { FluidWasmModule } from "../../lib/physics-wasm/module";
+interface Receipt { volume: number; budget: number; injectedVolume: number; outflowVolume: number; particles: number }
 const baseline = new Map<string, unknown>();
 for (const artifact of ["scalar", "simd"] as const) {
   const root = new URL(
@@ -68,17 +69,15 @@ for (const artifact of ["scalar", "simd"] as const) {
       }
       assert.equal(uniformLabSceneLimitation(scene), undefined);
       let view = await controller.load(scene);
-      const mass = view.volume.reduce((a, b) => a + b, 0);
-      let dust = 0;
+      const loaded = Number(view.receipt.initialVolume);
+      let outflow = 0;
       for (let frame = 0; frame < 30; frame++) {
         view = await controller.advance(1 / 60);
-        for (const field of [view.volume, view.phi, view.velocity, view.pressure]) {
+        for (const field of [view.volume, view.phi, view.velocity, view.pressure, view.particles]) {
           assert.ok(field.every(Number.isFinite), `${id}: finite frame ${frame}`);
         }
-        const receipt = view.receipt.uniform as {
-          injectedVolume: number; sharpeningDust: number; transport: { dustVolume: number };
-        };
-        dust += receipt.sharpeningDust + receipt.transport.dustVolume;
+        const receipt = view.receipt.narrowBandFlip as Receipt;
+        outflow += receipt.outflowVolume;
         if (id === "water-box-dam-break" && (frame < 2 || frame > 12)) {
           assert.equal(receipt.injectedVolume, 0, "source respects start and end times");
         }
@@ -86,10 +85,13 @@ for (const artifact of ["scalar", "simd"] as const) {
       const injected = Number(view.receipt.injectedVolume);
       assert.ok(injected > 0, `${id}: source emits water`);
       assert.ok(view.velocity.some(v => Math.abs(v) > 0.01), `${id}: water moves`);
-      const finalMass = view.volume.reduce((a, b) => a + b, 0);
-      assert.ok(Math.abs(finalMass + dust - mass - injected) < 1e-4 * Math.max(1, finalMass),
-        `${id}: accounts for source mass: ${finalMass + dust - mass - injected}`);
-      const fields = { volume: [...view.volume], phi: [...view.phi], velocity: [...view.velocity] };
+      const receipt = view.receipt.narrowBandFlip as Receipt;
+      assert.ok(receipt.particles > 0, `${id}: source liquid gets its band`);
+      // The surface, not a transported volume, holds the liquid: it is the budget that accounts for the source.
+      assert.ok(Math.abs(receipt.budget + outflow - loaded - injected) < 1e-4 * Math.max(1, receipt.budget),
+        `${id}: accounts for source volume: ${receipt.budget + outflow - loaded - injected}`);
+      const finalVolume = view.volume.reduce((a, b) => a + b, 0);
+      const fields = { volume: [...view.volume], phi: [...view.phi], velocity: [...view.velocity], particles: [...view.particles] };
       if (artifact === "scalar") baseline.set(id, fields);
       else assert.deepEqual(fields, baseline.get(id), `${id}: scalar/SIMD parity`);
       const reset = await controller.load(scene);
@@ -100,7 +102,7 @@ for (const artifact of ["scalar", "simd"] as const) {
       await controller.load(withoutSource);
       const noSource = await controller.advance(1 / 60);
       assert.equal(noSource.receipt.injectedVolume, 0, "loading another scene clears inflow");
-      console.log(JSON.stringify({ artifact, scene: id, frames: 30, injected, finalMass }));
+      console.log(JSON.stringify({ artifact, scene: id, frames: 30, injected, outflow, budget: receipt.budget, volume: finalVolume, particles: receipt.particles }));
     }
   } finally {
     await controller.destroy();

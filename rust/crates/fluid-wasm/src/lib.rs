@@ -24,7 +24,7 @@ pub struct FluidWorld {
 }
 enum OwnedWorld {
     Slice(fluid_core::world::World),
-    Uniform(fluid_core::uniform_geometric::session::Session),
+    Uniform(fluid_core::narrow_band_flip::session::Session),
     Volume(fluid_core::world3d::World3d),
 }
 #[wasm_bindgen]
@@ -32,13 +32,13 @@ impl FluidWorld {
     pub fn from_scene(scene_json: &str, options_json: &str) -> Result<FluidWorld, JsValue> {
         let scene: serde_json::Value = decode(scene_json)?;
         let options: serde_json::Value = decode(options_json)?;
-        if options.get("method").and_then(serde_json::Value::as_str) == Some("uniform-volume") {
-            if options.get("dimension").and_then(serde_json::Value::as_u64) != Some(2) { return Err(error("Uniform Rust currently requires dimension 2")); }
-            let seed=serde_json::from_value(options.get("uniformSeed").cloned().ok_or_else(||error("uniform initial fields are required"))?).map_err(error)?;
-            let values=serde_json::from_value(options.get("methodValues").cloned().ok_or_else(||error("resolved uniform defaults are required"))?).map_err(error)?;
+        if options.get("method").and_then(serde_json::Value::as_str) == Some(fluid_core::narrow_band_flip::session::METHOD) {
+            if options.get("dimension").and_then(serde_json::Value::as_u64) != Some(2) { return Err(error("Narrow-band FLIP Rust requires dimension 2")); }
+            let seed=serde_json::from_value(options.get("uniformSeed").cloned().ok_or_else(||error("narrow-band FLIP initial fields are required"))?).map_err(error)?;
+            let values=serde_json::from_value(options.get("methodValues").cloned().ok_or_else(||error("resolved narrow-band FLIP values are required"))?).map_err(error)?;
             let epoch=options.get("runEpoch").and_then(serde_json::Value::as_u64).and_then(|v|u32::try_from(v).ok()).ok_or_else(||error("invalid run epoch"))?;
             let sequence=options.get("commandSequence").and_then(serde_json::Value::as_u64).and_then(|v|u32::try_from(v).ok()).ok_or_else(||error("invalid command sequence"))?;
-            return Ok(Self{inner:OwnedWorld::Uniform(fluid_core::uniform_geometric::session::Session::new(seed,serde_json::from_value(scene).map_err(error)?,values,epoch,sequence).map_err(error)?)});
+            return Ok(Self{inner:OwnedWorld::Uniform(fluid_core::narrow_band_flip::session::Session::new(seed,serde_json::from_value(scene).map_err(error)?,values,epoch,sequence).map_err(error)?)});
         }
         if options.get("dimension").and_then(serde_json::Value::as_u64) == Some(3) {
             let mut world_options: fluid_core::world::WorldOptions =

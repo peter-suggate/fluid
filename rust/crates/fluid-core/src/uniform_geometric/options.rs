@@ -14,6 +14,7 @@ pub const UNIFORM_CM11A_RECOVERY_BATCHES: usize = 8;
 pub const UNIFORM_CM11A_RECOVERY_REDUCTION: f32 = 0.1_f32;
 pub const UNIFORM_CM11A_RECOVERY_SWEEPS: usize = 8;
 pub const UNIFORM_CM11A_V_CYCLES: usize = 4;
+pub const UNIFORM_PRESSURE_RELATIVE_REDUCTION: f32 = 0.1_f32;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -95,7 +96,7 @@ impl UniformGeometricOptions {
             ));
         }
         if !self.pressure_full_cycles.is_finite()
-            || !((0_f32)..=(5_f32)).contains(&self.pressure_full_cycles)
+            || !((0_f32)..=(8_f32)).contains(&self.pressure_full_cycles)
             || self.pressure_full_cycles.fract() != 0.0
         {
             return Err(ValidationError(

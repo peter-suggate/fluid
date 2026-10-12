@@ -8,6 +8,7 @@ use super::options::{
     UNIFORM_CM11A_COARSE_SWEEP_CAP, UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET,
     UNIFORM_CM11A_PHI_PRESERVATION_LEVELS, UNIFORM_CM11A_RECOVERY_BATCHES,
     UNIFORM_CM11A_RECOVERY_REDUCTION, UNIFORM_CM11A_RECOVERY_SWEEPS,
+    UNIFORM_PRESSURE_RELATIVE_REDUCTION,
 };
 use crate::types::ValidationError;
 pub const FREE: f32 = -3.402823e38;
@@ -183,7 +184,8 @@ impl Level {
     // mg.wgsl mgDownsampleTopology: raw coarse phi and dual volumes from this
     // level's raw fields. `destination` is the coarse level index. Counts are
     // over eight depth-doubled corners, and Metal divides by reciprocal.
-    fn downsample(&self, coarse: &mut Self, destination: usize) {
+    // `preserve` keeps a mixed cell air on every level (see keep_surface).
+    fn downsample(&self, coarse: &mut Self, destination: usize, preserve: bool) {
         for i in 0..coarse.p.len() {
             let c = coarse.children[i].map(|j| j as usize);
             let t = c.map(|j| self.topology[j]);
@@ -203,7 +205,9 @@ impl Level {
             let positives = count(positive);
             let mixed =
                 positives > 0.0 && count(std::array::from_fn(|k| open[k] && phi[k] < 0.0)) > 0.0;
-            coarse.phi[i] = if mixed && destination <= UNIFORM_CM11A_PHI_PRESERVATION_LEVELS {
+            coarse.phi[i] = if mixed
+                && (preserve || destination <= UNIFORM_CM11A_PHI_PRESERVATION_LEVELS)
+            {
                 corner_sum(pick(positive)) * (1.0 / positives)
             } else {
                 phi_sum / 8.0
@@ -215,6 +219,14 @@ impl Level {
                 (t[2][2] + t[3][2]) * 0.5,
             ];
         }
+    }
+    /// Whether the raw level holds an open air cell: a free surface to anchor
+    /// its pressure.
+    fn surfaced(&self) -> bool {
+        self.phi
+            .iter()
+            .zip(&self.topology)
+            .any(|(&phi, t)| phi >= 0.0 && t[0] > 1e-5)
     }
     // mg.wgsl mgExtrapolatePhiOneCell.
     fn continue_phi(&mut self) {
@@ -240,6 +252,18 @@ impl Level {
                 if weight > 0.0 {
                     self.phi[i] = sum4(terms) / weight.max(1e-9);
                 }
+            }
+        }
+    }
+    /// The last solve's pressure as this one's start, on the rows this step
+    /// has and within their bounds.
+    fn carry(&mut self, last: &mut Vec<f32>) {
+        last.clone_from(&self.p);
+        self.p.fill(0.0);
+        for row in self.rows.iter().flatten() {
+            let i = row.i as usize;
+            if row.d > 0.0 {
+                self.p[i] = last[i].max(self.minimum[i]);
             }
         }
     }
@@ -498,6 +522,17 @@ pub(super) struct Scratch {
 pub struct Pressure {
     pub levels: Vec<Level>,
     pub receipt: PressureReceipt,
+    /// Averaging can turn the last air cell of a coarse level liquid: under a
+    /// closed lid that level is then a pure Neumann problem, its solve hits
+    /// the sweep cap and the cycle is rejected. With this set, such a level
+    /// is rebuilt with its mixed cells kept air. Off, the pyramid is the
+    /// GPU's, bit for bit.
+    pub(crate) keep_surface: bool,
+    /// The mixed frame's root: each solve starts from the last one's pressure
+    /// and is accepted as UniformMixedPressureAcceptance accepts it, at the
+    /// tolerance and a tenfold reduction of the residual it started with, so
+    /// the start is never the answer.
+    pub(crate) warm: bool,
     pub(super) scratch: Scratch,
     // Per-solve fields kept between steps: the finest Full-Cycle correction,
     // the pre-cycle iterate, the best iterate and the finest bounds.
@@ -564,6 +599,8 @@ impl Pressure {
         Ok(Self {
             levels,
             receipt: PressureReceipt::default(),
+            keep_surface: false,
+            warm: false,
             scratch: Scratch::default(),
             correction: Vec::new(),
             backup: Vec::new(),
@@ -772,12 +809,19 @@ impl Pressure {
         let count = self.levels.len();
         for l in 0..count - 1 {
             let (fine, coarse) = self.levels.split_at_mut(l + 1);
-            fine[l].downsample(&mut coarse[0], l + 1);
+            fine[l].downsample(&mut coarse[0], l + 1, false);
+            if self.keep_surface && !open_top && fine[l].surfaced() && !coarse[0].surfaced() {
+                fine[l].downsample(&mut coarse[0], l + 1, true);
+            }
         }
-        for level in &mut self.levels {
+        for (l, level) in self.levels.iter_mut().enumerate() {
             level.continue_phi();
             level.bake(open_top);
-            level.p.fill(0.0);
+            if l == 0 && self.warm {
+                level.carry(&mut self.best);
+            } else {
+                level.p.fill(0.0);
+            }
         }
         let rhs = std::mem::take(&mut self.levels[0].rhs);
         let mut correction = std::mem::take(&mut self.correction);
@@ -843,9 +887,15 @@ impl Pressure {
                 break;
             }
             self.receipt.residual = best_residual;
-            if o.pressure_residual_tolerance > 0.0
-                && self.receipt.residual <= o.pressure_residual_tolerance
-            {
+            let bound = if self.warm {
+                o.pressure_residual_tolerance.min(
+                    (UNIFORM_PRESSURE_RELATIVE_REDUCTION * self.receipt.initial_residual)
+                        .max(UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE),
+                )
+            } else {
+                o.pressure_residual_tolerance
+            };
+            if o.pressure_residual_tolerance > 0.0 && self.receipt.residual <= bound {
                 self.receipt.converged = true;
                 break;
             }
