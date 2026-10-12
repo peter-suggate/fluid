@@ -70,10 +70,12 @@ fn dmcLoad(c:u32,voxel:u32,size:f32){
   // Compare published field gradients instead. Smooth patches keep their
   // interpolated normals; corners with >~37 degrees of disagreement retain
   // the geometric triangle normal. Absent air normals contribute nothing.
+  // Two gradients facing opposite ways are the two faces of a wall thinner
+  // than its cells, not a crease; each polygon tests the normals it takes.
   if(sceneIdentitySolid(material)&&sceneIdentityHasNormal(material)){
     let gradient=sceneIdentityNormal(material);
     dmcNormals[c]=gradient;
-    for(var j=0u;j<dmcGradientCount;j+=1u){if(dot(gradient,dmcGradients[j])<0.8){dmcSharp=1u;}}
+    for(var j=0u;j<dmcGradientCount;j+=1u){if(abs(dot(gradient,dmcGradients[j]))<0.8){dmcSharp=1u;}}
     dmcGradients[dmcGradientCount]=gradient;dmcGradientCount+=1u;
   }
   if(dmcValues[c]<0.){dmcSigns|=1u<<c;dmcIdentity=material;}
@@ -127,7 +129,7 @@ fn dmcEmit(origin:vec3f,scale:u32,depth:u32,mixed:bool){
       else{dmcConnect(&adjacency,edges[0],edges[3],face,signs);dmcConnect(&adjacency,edges[1],edges[2],face,signs);}
     }
   }
-  let faceBase=0xc0000000u|(dmcSharp<<29u)|meshPackFace(0u,0u,depth);
+  let faceBase=0xc0000000u|meshPackFace(0u,0u,depth);
   var visited=0u;
   for(var seed=0u;seed<12u;seed+=1u){
     if((crossingMask&(1u<<seed))==0u||(visited&(1u<<seed))!=0u){continue;}
@@ -151,6 +153,18 @@ fn dmcEmit(origin:vec3f,scale:u32,depth:u32,mixed:bool){
       if(!duplicate){packed[size]=word;shading[size]=normals[edge];faceMasks[size]=faceMask;polygon[size]=origin+vec3f(word)*s/256.;size+=1u;}
     }
     if(size<3u){continue;}
+    // A leaf that a wall thinner than two cells runs through is the solid end
+    // of both its faces and publishes one normal. Turn each vertex's to the
+    // polygon's own facing, its winding; those that then disagree are a crease.
+    var facing=vec3f(0);
+    for(var j=1u;j+1u<size;j+=1u){facing+=cross(polygon[j]-polygon[0],polygon[j+1u]-polygon[0]);}
+    var sharp=dmcSharp;
+    for(var j=0u;j<size;j+=1u){
+      if(dot(shading[j],facing)<0.){shading[j]=-shading[j];}
+      for(var k=0u;k<j;k+=1u){
+        if(dot(shading[j],shading[j])>0.&&dot(shading[k],shading[k])>0.&&dot(shading[j],shading[k])<0.8){sharp=1u;}
+      }
+    }
     // Use n-2 triangles unless the fan would introduce a diagonal lying on
     // a shared cube face; those cases get an interior fan instead.
     var interior=false;
@@ -162,7 +176,7 @@ fn dmcEmit(origin:vec3f,scale:u32,depth:u32,mixed:bool){
       let q=packed[qi];let r=packed[ri];
       if(all(p==q)||all(q==r)||all(r==p)){continue;}
       meshAppend(vec3u(origin)|(vec3u(dmcNormalWord(pn),dmcNormalWord(shading[qi]),dmcNormalWord(shading[ri]))<<vec3u(16u)),vec3u(dmcLow(p),dmcLow(q),dmcLow(r)),
-        faceBase|(dmcHigh(p)<<11u)|(dmcHigh(q)<<17u)|(dmcHigh(r)<<23u),dmcIdentity);
+        faceBase|(sharp<<29u)|(dmcHigh(p)<<11u)|(dmcHigh(q)<<17u)|(dmcHigh(r)<<23u),dmcIdentity);
     }
   }
 }
