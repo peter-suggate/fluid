@@ -24,6 +24,8 @@ const wideVertices=(d:readonly number[])=>d.reduce((n,v)=>n*(v/4+1),1);
 export const uniformMixedSurfaceHeldWord=(d:readonly number[])=>surfaceClaimWords(d)+wideVertices(d);
 /** Workgroups of 256 lanes wallReach spends on one plane: its cells. */
 const wallReachGroups=(d:readonly number[])=>Math.ceil(Math.max(d[0]!*d[1]!,d[1]!*d[2]!,d[2]!*d[0]!)/256);
+/** Per second: the NB-FLIP surface vertices' fourth-difference weight (umVertexSmoothing). */
+export const UNIFORM_MIXED_VERTEX_SMOOTHING_PER_S=0.5;
 /** encode()'s pass descriptors by entry, and its per-axis evidence pipeline keys. */
 const SURFACE_PASS:Readonly<Record<"advect"|"redistance"|"traceCells",GPUComputePassDescriptor>>={advect:{label:"Uniform mixed surface advect"},redistance:{label:"Uniform mixed surface redistance"},traceCells:{label:"Uniform mixed surface traceCells"}};
 const DEFERRED_PASS:GPUComputePassDescriptor={label:"Uniform mixed surface advect deferred"};
@@ -452,9 +454,42 @@ fn umRecordTravel(p:vec3f,q:vec3f,width:u32){
  if(width>1u){let i=umTravelIndex(vec3u(p));atomicStore(&umClaims[i],bitcast<u32>(bitcast<f32>(atomicLoad(&umClaims[i]))+length(p-q)/f32(width)));}
  else if(all(vec3u(p)%4u==vec3u(0))){atomicStore(&umClaims[umTravelIndex(vec3u(p))],0u);atomicStore(&umClaims[umHeldIndex(vec3u(p))],0u);}
 }
+${this.narrowBand?/* wgsl */`${this.solid?`// Every cell at vertex q is open (an h vertex), or its tile is clear of solids.
+fn umSmoothOpen(q:vec3i,w:i32)->bool{
+ if(umSolidClear(q)){return true;}
+ if(w!=1){return false;}
+ for(var k=0u;k<8u;k++){let cell=q-vec3i(1)+vec3i(umCorner(k,2u));if(!umSolidValid(cell)||!umCellIsOpen(cell)){return false;}}
+ return true;
+}`:""}
+// Phi is vertex state and both its couplings are means: a centre's phi is the
+// mean of its eight vertices, and a vertex moves with the faces around its
+// foot. A vertex pattern alternating along x or z has no pressure and no
+// advection, and nothing removed it: the outline of a disturbance stood in a
+// 4h surface for good, and stripes grew in an h one. The fourth difference
+// along the two horizontal axes, at the vertex's own width, damps that
+// pattern and leaves a cubic alone: a step takes 16 eps of an alternating
+// pattern and eps (2 pi/n)^4 of a wave n vertices long. An axis is skipped at
+// a domain wall and where the vertex or a tap is not open liquid state.
+fn umVertexSmoothing(vertex:vec3u,width:u32)->f32{
+ let eps=min(${UNIFORM_MIXED_VERTEX_SMOOTHING_PER_S.toExponential(8)}*params.hDt.w,0.03125);if(!(eps>0.0)){return 0.0;}
+ let w=i32(width);let c=umSampleVertex(vec3f(vertex));if(!(abs(c)<2.0*f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z)))){return 0.0;}
+ ${this.solid?"if(!umSmoothOpen(vec3i(vertex),w)){return 0.0;}":""}
+ var sum=0.0;
+ for(var axis=0u;axis<3u;axis+=2u){
+  if(i32(vertex[axis])<2*w||i32(vertex[axis])+2*w>i32(UM_D[axis])){continue;}
+  var part=6.0*c;var valid=true;
+  for(var k=0u;k<4u;k++){
+   var q=vec3i(vertex);q[axis]+=select(w,2*w,(k&2u)!=0u)*select(-1,1,(k&1u)!=0u);
+   ${this.solid?"if(!umSmoothOpen(q,w)){valid=false;}":""}
+   part+=select(-4.0,1.0,(k&2u)!=0u)*umSampleVertex(vec3f(q));
+  }
+  if(valid){sum+=part;}
+ }
+ return -eps*sum;
+}`:"fn umVertexSmoothing(vertex:vec3u,width:u32)->f32{return 0.0;}"}
 fn umAdvected(p:vec3f,width:u32)->f32{
  ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){return umLoadVertex(vec3u(p));}
- let end=umSurfaceTrace(p);let walk=umWalk(p,end);let q=walk.q;`:"let q=umTrace(p);"}let cell=umVertexCell(q);var value=cell.value;umRecordTravel(p,q,width);
+ let end=umVertexTrace(p,width);let walk=umWalk(p,end);let q=walk.q;`:"let q=umVertexTrace(p,width);"}let cell=umVertexCell(q);var value=cell.value;umRecordTravel(p,q,width);
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){value=umCubicPhi(q,cell);}
  ${this.narrowBand?(this.solid?"value=umWallContact(p,value,width);if(walk.hit){value=umEmbeddedAir(p,end,value);}value=umReleasedWalls(p,value);":"value=umReleasedWalls(p,umWallContact(p,value,width));"):this.solid?/* wgsl */`value=umWallContact(p,value,width);
@@ -517,7 +552,7 @@ fn umAdvectStore(vertex:vec3u,width:u32){
 `}
  // A hit is evaluated by advectDeferred. Its first-pass phi and source
  // samples are discarded, and travel is recorded only by that later pass.
- if(!defer){let walk=umWalk(p,umSurfaceTrace(p));defer=walk.hit;let q=walk.q;if(!defer){`:"{let q=umTrace(p);"}
+ if(!defer){let walk=umWalk(p,umVertexTrace(p,width));defer=walk.hit;let q=walk.q;if(!defer){`:"{let q=umVertexTrace(p,width);"}
   let cell=umVertexCell(q);value=cell.value;
   let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
   if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){value=umCubicPhi(q,cell);}
@@ -526,7 +561,7 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   if(!defer){umRecordTravel(p,q,width);}
  ${this.solid?"}":""}
  }
- if(!defer){textureStore(outputPhi,vec3i(vertex),vec4f(value));return;}
+ if(!defer){textureStore(outputPhi,vec3i(vertex),vec4f(value+umVertexSmoothing(vertex,width)));return;}
  // Each canonical vertex is stored once: the list holds at most every vertex.
  let i=atomicAdd(&deferred.header[0],1u);
  deferred.data[i]=vertex.x|(vertex.y<<10u)|(vertex.z<<20u)|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);
@@ -540,7 +575,8 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   let word=deferred.data[i];let code=word>>30u;
   if((code==3u)!=umRegularFine){continue;}
   let vertex=vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);
-  textureStore(outputPhi,vec3i(vertex),vec4f(umAdvected(vec3f(vertex),select(1u<<code,1u,code==3u))));
+  let width=select(1u<<code,1u,code==3u);
+  textureStore(outputPhi,vec3i(vertex),vec4f(umAdvected(vec3f(vertex),width)+umVertexSmoothing(vertex,width)));
  }
 }
 // Canonical vertices of the non-ambient domain walls, each on the first
@@ -589,6 +625,26 @@ fn umSampleClosed(q:vec3f)->bool{
  if(umTileWidth(t)==4u){return umTileOpen(t)<=1e-5;}
  return !umCellIsOpen(c);
 }`:""}
+// The departure of a level-set vertex. Phi-only (narrow band): a vertex within
+// two of its own cells of the surface is carried by the surface, displaced as
+// its foot on the zero set is. The preserved vertices beside the surface keep
+// their advected values (umPreserved; a held wide vertex), so nothing restores
+// a distance there: carried by the velocity at their own depth, any steady
+// shear under a still surface moved their values and not the zero between
+// them, and the pressure rows, which read the surface off those values, saw a
+// rise as a dip and filled it (uniform-trough-settled-tank: the wet vertex
+// 0.93 h under the surface 2e-2 h off its distance in 240 steps).
+fn umVertexTrace(p:vec3f,width:u32)->vec3f{
+ ${this.narrowBand?/* wgsl */`let w=f32(width);let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+ let value=umSampleVertex(p)/h;
+ if(!(abs(value)<2.0*w)){return umSurfaceTrace(p);}
+ let g=umSurfaceGradient(p,w)/h;let g2=dot(g,g);
+ if(g2<1e-6){return umSurfaceTrace(p);}
+ var offset=-value*g/g2;let reach=length(offset);if(reach>2.0*w){offset*=2.0*w/reach;}
+ let foot=clamp(p+offset,vec3f(0),vec3f(UM_D));
+ ${this.solid?"if(!umOpenAt(foot)){return umSurfaceTrace(p);}":""}
+ return clamp(p+(umSurfaceTrace(foot)-foot),vec3f(0),vec3f(UM_D));`:"return umSurfaceTrace(p);"}
+}
 fn umSurfaceGradient(p:vec3f,width:f32)->vec3f{
  var g=vec3f(0);var lowValue=0.0;
  for(var k=0u;k<6u;k++){

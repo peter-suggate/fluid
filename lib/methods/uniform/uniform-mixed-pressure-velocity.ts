@@ -9,13 +9,18 @@ import { uniformMixedPressureSurfaceWGSL } from "./uniform-mixed-pressure-surfac
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
 import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryLoop, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { UNIFORM_MIXED_ROOT_TILE_WORDS, uniformMixedRootMaskWords, uniformMixedRootTopologyBytes } from "./uniform-mixed-pressure-authority";
 
 interface CommonFields {
  velocity:GPUTexture;
  negative:GPUBufferBinding;
+ /** Each owner's phi; coarse mode appends uniformMixedRootMaskWords. */
  phi:GPUBufferBinding;
  /** h.xyz, dt; density, openTop, unused, dust threshold. */
  params:GPUBuffer;
+ /** Coarse (band) mode: this solve's root topology, written by the pressure
+  * authority (uniformMixedRootTopologyBytes); the projection's V. */
+ rootTopology?:GPUBufferBinding;
 }
 export interface UniformMixedPressureRhsFields extends CommonFields {
  /** Native geometric excess/deficit divergence, already in inverse seconds. */
@@ -48,7 +53,9 @@ const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure proje
  * topology instead: a cut face (either tile cut) takes the flux of its 16 h
  * faces, sum(V_h u_h), so the 4h divergence is the exact sum of the h ones and
  * the band's pure-Neumann components stay compatible; a closed owner is a
- * p_min=0 row. The caller builds one authoritative pressure phi. No field owns
+ * p_min=0 row. The sum and the face's V are over the h faces the liquid's rows
+ * hold (the authority's root topology): the rest lie in air a wall parts from
+ * the liquid, or on a wall whose owner is air. The caller builds one authoritative pressure phi. No field owns
  * another simulation; all buffers/textures are borrowed from the native host.
  * Both launches stride the owners of the resident pages (residentAll): an
  * absent page is certified far air (V=0, phi at least 16h), whose RHS, bound
@@ -74,7 +81,12 @@ export class UniformMixedPressureVelocity {
   const topology=coarse?[texture(8),storage(9)]:solid?[{binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"rgba32float" as const,viewDimension:"3d" as const}}]:[];
   this.rhsLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,texture(4),storage(5),storage(6),storage(7),...topology]});
   this.projectLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,storage(4),texture(7),
-   {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),...(solid&&!coarse?[texture(11)]:[]),...(rounding?[storage(12)]:[])]});
+   {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),...(solid&&!coarse?[texture(11)]:[]),...(rounding?[storage(12)]:[]),...(coarse?[storage(13)]:[])]});
+ }
+ private rootTopology(f:CommonFields):GPUBufferBinding{
+  const t=f.rootTopology,size=uniformMixedRootTopologyBytes(this.ownership.layout);
+  if(!t||(t.size??t.buffer.size-(t.offset??0))<size)throw new Error("Coarse mixed pressure coupling needs the solve's root topology");
+  return {buffer:t.buffer,offset:t.offset??0,size};
  }
  private scalar(view:GPUBufferBinding,count:number):GPUBufferBinding{
   const offset=view.offset??0,size=4*count;
@@ -85,7 +97,7 @@ export class UniformMixedPressureVelocity {
   const d=this.ownership.layout.lattice.dimensions;
   if(f.velocity.format!=="rgba32float"||uniformDetailExtent(f.velocity).some((v,a)=>v!==d[a]))throw new Error("Mixed pressure requires native MAC extent");
   return [{binding:0,resource:f.velocity},{binding:1,resource:this.scalar(f.negative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
-   {binding:2,resource:this.scalar(f.phi,this.ownership.layout.cellCount)},{binding:3,resource:{buffer:f.params,size:32}}];
+   {binding:2,resource:this.scalar(f.phi,this.ownership.layout.cellCount+(this.coarse?uniformMixedRootMaskWords(this.ownership.layout):0))},{binding:3,resource:{buffer:f.params,size:32}}];
  }
  private topology(t:GPUTexture|undefined):GPUTexture|undefined{
   if(!!t!==(!!this.solid&&!this.coarse))throw new Error("Mixed solid topology binding does not match stage mode");
@@ -108,7 +120,8 @@ export class UniformMixedPressureVelocity {
    {binding:7,resource:f.volume},{binding:8,resource:f.output},
    {binding:9,resource:this.scalar(f.outputNegative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
    ...(this.sourceParams?[{binding:10,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
-   ...(this.topology(f.topology)?[{binding:11,resource:f.topology!}]:[]),...(this.rounding?[{binding:12,resource:{buffer:this.rounding}}]:[])]});
+   ...(this.topology(f.topology)?[{binding:11,resource:f.topology!}]:[]),...(this.rounding?[{binding:12,resource:{buffer:this.rounding}}]:[]),
+   ...(this.coarse?[{binding:13,resource:this.rootTopology(f)}]:[])]});
  }
  async initialize():Promise<void>{
   const ownership=this.ownership,h=ownership.layout.lattice.cellSize_m;
@@ -149,17 +162,27 @@ fn umPressure(o:UMOwner)->f32{return pressures[o.index];}
 fn umPressureSlope(o:UMOwner)->vec3f{return vec3f(0);}
 ${this.coarse?`@group(1) @binding(8) var fineVelocity:texture_3d<f32>;
 @group(1) @binding(9) var<storage,read_write> fineNegative:array<f32>;
+const UM_ROOT_MASKS=${ownership.layout.cellCount}u;
 // Either tile of a 4h face cut: its flux is the sum of its 16 h faces'.
 fn umCoarseCut(o:UMOwner,axis:u32,sign:i32)->bool{
  let t=vec3i(umOrigin(o)/4u);if(umSolidCut(umTileAt(vec3u(t)))){return true;}
  var n=t;n[axis]+=sign;if(n[axis]<0||n[axis]>=i32(UM_T[axis])){return false;}
  return umSolidCut(umTileAt(vec3u(n)));
 }
-// sum(V_h u_h) over the h faces of one 4h face, from the h forced field,
+// The h faces of a 4h face that the liquid's rows hold: bit u+4v of its low
+// tile's mask, after the owners' phi. A domain wall holds them all.
+fn umCutMask(o:UMOwner,axis:u32,sign:i32)->u32{
+ var t=vec3i(umOrigin(o)/4u);if(sign<0){t[axis]-=1;}
+ if(t[axis]<0||t[axis]+1>=i32(UM_T[axis])){return 0xffffu;}
+ return u32(phi[UM_ROOT_MASKS+${UNIFORM_MIXED_ROOT_TILE_WORDS}u*umTileAt(vec3u(t))+axis]);
+}
+// sum(V_h u_h) over those h faces of one 4h face, from the h forced field,
 // plus each face's moving-wall term.
 fn umCutFlux(o:UMOwner,axis:u32,sign:i32)->f32{
  let origin=vec3i(umOrigin(o));let a=(axis+1u)%3u;let b=(axis+2u)%3u;var sum=0.0;
+ let mask=umCutMask(o,axis,sign);
  for(var j=0;j<4;j++){for(var i=0;i<4;i++){
+  if(((mask>>u32(i+4*j))&1u)==0u){continue;}
   var c=origin;c[a]+=i;c[b]+=j;c[axis]+=select(-1,3,sign>0);
   var u=0.0;
   if(c[axis]<0){u=fineNegative[umNegativeBoundaryIndex(vec3u(max(c,vec3i(0))),axis)];}else{u=textureLoad(fineVelocity,c,0)[axis];}
@@ -248,11 +271,12 @@ ${this.sourceParams?uniformMixedSourceWGSL(10):""}
 // The all-4h root has no seams: every reconstruction slope is zero.
 fn umPressureSlope(o:UMOwner)->vec3f{return vec3f(0);}
 ${uniformMixedPressureReconstructionSource(true,undefined,"umPressureDelta(owner,face.neighbor)")}
-${this.coarse?`// The record V of a 4h face: its low owner's V+, or the wall halo's.
+${this.coarse?`@group(1) @binding(13) var<storage,read_write> rootTopology:array<vec4f>;
+// The root V of a 4h face: its low owner's V+, or the wall halo's.
 fn umProjectV(o:UMOwner,face:UMFace)->f32{
  if(face.neighbor.width==0u){return umSolidCoarse(umBoundaryIndex(o,face.axis,face.sign)).x;}
  var low=o;if(face.sign<0){low=face.neighbor;}
- return umSolidCoarse(low.index)[face.axis+1u];
+ return rootTopology[low.index][face.axis+1u];
 }`:this.solid?`@group(1) @binding(11) var topology:texture_3d<f32>;
 // Face V of a fine owner's face (seams and coarse faces are solid-free).
 fn umProjectV(o:UMOwner,face:UMFace)->f32{

@@ -125,6 +125,11 @@ export interface UniformPressureBandFields {
  /** Band tiles one frame can hold (1..tiles). Absent: capacityOf at the
   * simulation ownership's h-tile capacity. */
  capacity?:number;
+ /** The caller's storage for the rows, at least rowBytes(capacity). The rows
+  * live from encodePrepare to encodeSolve and every prepare assembles them
+  * anew, so outside that span the buffer is the caller's to overwrite: the
+  * frame lends its stage scratch. Absent: the band allocates its own. */
+ rows?:GPUBuffer;
 }
 
 /** The h pressure band of the two-stage solve: the global solve runs on
@@ -149,12 +154,14 @@ export interface UniformPressureBandFields {
  * a band tile: its liquid row is the root's cut owner (record Omega and V),
  * which needs no h band. Header word 3 is reserved (zero). */
 export class UniformPressureBand {
- get allocatedBytes():number{return this.index.size+this.rows.size+this.coarse.size+this.solve.size;}
+ get allocatedBytes():number{return this.index.size+(this.ownRows?.size??0)+this.coarse.size+this.solve.size;}
  /** Header (see HEADER), then the tile list and a per-tile slot+1 map. It is
   * tile-scaled metadata (the list holds every tile, whatever the band's
   * capacity), so the buffer and its word offsets never change. */
  readonly index:GPUBuffer;
  private rows!:GPUBuffer;
+ /** The rows the band allocated itself (fields.rows absent). */
+ private ownRows?:GPUBuffer;
  private coarse!:GPUBuffer;
  private solve!:GPUBuffer;
  private workSlots=1;
@@ -229,10 +236,12 @@ export class UniformPressureBand {
   this.allocate();
   this.budget(Math.max(1,Math.min(this.capacity,layout.fineTiles.length)));
  }
+ /** Bytes of the rows at `capacity` band tiles, with or without solids. */
+ static rowBytes(capacity:number,solid:boolean):number{return 4*(solid?SOLID_ROW_FIELDS:ROW_FIELDS)*64*capacity;}
  /** Bytes of the capacity-sized buffers at `capacity` band tiles. */
  bytesAt(capacity:number):{rows:number;aggregates:number;iterate:number}{
   const d=this.simulation.capacity.lattice.dimensions,halo=2*(d[0]!*d[1]!+d[0]!*d[2]!+d[1]!*d[2]!);
-  return {rows:4*this.rowFields*64*capacity,aggregates:4*(8*MIDDLE_FIELDS+COARSE_FIELDS)*capacity,iterate:4*(64*capacity+halo)};
+  return {rows:UniformPressureBand.rowBytes(capacity,!!this.solid),aggregates:4*(8*MIDDLE_FIELDS+COARSE_FIELDS)*capacity,iterate:4*(64*capacity+halo)};
  }
  /** The capacity-sized buffers (rows, aggregates, iterate) and every group,
   * at fields.capacity. No band buffer carries a frame's state into the next
@@ -246,9 +255,12 @@ export class UniformPressureBand {
   const limit=device.limits.maxStorageBufferBindingSize;
   if(bytes.rows>limit)throw new Error(`Pressure band rows (${bytes.rows} bytes) exceed the storage binding limit ${limit}`);
   // The frames encoded on the old buffers are submitted: destroy applies after them.
-  for(const b of [this.rows,this.coarse,this.solve])b?.destroy();
+  for(const b of [this.ownRows,this.coarse,this.solve])b?.destroy();
   this.slots=capacity;
-  this.rows=device.createBuffer({label:"Uniform pressure band rows",size:bytes.rows,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+  const lent=this.fields.rows;
+  if(lent&&lent.size<bytes.rows)throw new Error(`Pressure band rows (${bytes.rows} bytes) exceed the ${lent.size} bytes lent to them`);
+  this.ownRows=lent?undefined:device.createBuffer({label:"Uniform pressure band rows",size:bytes.rows,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+  this.rows=lent??this.ownRows!;
   this.coarse=device.createBuffer({label:"Uniform pressure band aggregates",size:bytes.aggregates,usage:GPUBufferUsage.STORAGE});
   this.solve=device.createBuffer({label:"Uniform pressure band iterate",size:bytes.iterate,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   // BandParams.capacity: slots, rows per field, 2h aggregates per field, presentation offset.
@@ -258,12 +270,13 @@ export class UniformPressureBand {
    const offset=view.offset??0;if((view.size??view.buffer.size-offset)<4*count)throw new Error("Pressure band field view is too small");return {buffer:view.buffer,offset,size:4*count};
   };
   const pressure=this.pressure,coarse=pressure.capacity.tiles;
-  const P={0:{buffer:f.params,size:64}},solverResources={...P,2:{buffer:this.index},9:{buffer:this.rows},10:{buffer:this.solve},18:{buffer:this.coarse}};
+  const rowsView={buffer:this.rows,size:bytes.rows};
+  const P={0:{buffer:f.params,size:64}},solverResources={...P,2:{buffer:this.index},9:rowsView,10:{buffer:this.solve},18:{buffer:this.coarse}};
   const resources:Record<string,Record<number,GPUBindingResource>>={
    list:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),6:f.vertexPhi},
    copy:{...P,2:{buffer:this.index},22:f.velocity,23:f.copy},
-   prep:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),4:f.correction,6:f.vertexPhi,7:f.forced.velocity,8:{buffer:f.forced.negative,size:4*faces},9:{buffer:this.rows},10:{buffer:this.solve}},
-   init:{...P,2:{buffer:this.index},9:{buffer:this.rows},10:{buffer:this.solve},11:f.velocity,12:scalars(f.coarsePressure,coarse),13:scalars(f.coarsePhi??f.phi,coarse),14:pressure.presentation},
+   prep:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),4:f.correction,6:f.vertexPhi,7:f.forced.velocity,8:{buffer:f.forced.negative,size:4*faces},9:rowsView,10:{buffer:this.solve}},
+   init:{...P,2:{buffer:this.index},9:rowsView,10:{buffer:this.solve},11:f.velocity,12:scalars(f.coarsePressure,coarse),13:scalars(f.coarsePhi??f.phi,coarse),14:pressure.presentation},
    solver:solverResources,
    project:{...solverResources,15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces},21:{buffer:f.presentation.buffer}},
   };
@@ -275,7 +288,7 @@ export class UniformPressureBand {
  /** Between frames, after the simulation ownership's h-tile capacity (and
   * with it the views sized by it) or the band's own changed: reallocate
   * and rebind. */
- resize(fields:Pick<UniformPressureBandFields,"phi"|"presentation"|"capacity">):void{
+ resize(fields:Pick<UniformPressureBandFields,"phi"|"presentation"|"capacity"|"rows">):void{
   this.fields={...this.fields,...fields};this.allocate();
   this.budget(Math.max(1,Math.min(this.workSlots,this.capacity)));
  }
@@ -354,6 +367,19 @@ fn bWet(phi:f32,width:f32)->bool{return ${uniformMixedPressureLiquidWGSL("phi","
 // umPressureSurfaceTheta; umPressureTheta of a classified pair.
 fn bTheta(liquidPhi:f32,airPhi:f32)->f32{return ${uniformMixedSurfaceThetaWGSL("liquidPhi","airPhi")};}
 fn bPairTheta(a:f32,wetA:bool,b:f32,wetB:bool)->f32{if(wetA==wetB){return 1.0;}if(wetA){return bTheta(a,b);}return bTheta(b,a);}
+// Theta of a liquid/air pair of h centres whose phi is the vertex field's:
+// the zero crossing of that field between them. It is linear from each centre
+// to the face's (the mean of the face's four vertices), not from centre to
+// centre: fine redistance leaves the interface vertices their advected
+// magnitudes, so the slope across the surface is not the slope beyond it. On
+// the two centres alone a resting tank's h surface 6e-3 h high read 1e-3 h
+// low, and the band filled the rise (uniform-trough-settled-tank).
+fn bFaceTheta(face:f32,a:f32,wetA:bool,b:f32,wetB:bool)->f32{
+ if(wetA==wetB){return 1.0;}
+ let liquid=select(b,a,wetA);let air=select(a,b,wetA);
+ if(face>0.0){return clamp(0.5*liquid/(liquid-face),${UNIFORM_MIXED_THETA_MIN},${(1/UNIFORM_MIXED_THETA_MIN).toFixed(1)});}
+ return clamp(0.5+0.5*face/min(face-air,-1e-30),${UNIFORM_MIXED_THETA_MIN},${(1/UNIFORM_MIXED_THETA_MIN).toFixed(1)});
+}
 `;
   // The h solve uses the simulation's actual interface. The 4h solve supplies
   // boundary flux and an initial pressure, not a veto on h air: relabelling
@@ -364,6 +390,11 @@ fn bPairTheta(a:f32,wetA:bool,b:f32,wetB:bool)->f32{if(wetA==wetB){return 1.0;}i
 @group(1) @binding(6) var vertexPhi:texture_3d<f32>;
 fn bCentrePhi(q:vec3i)->f32{
  var s=0.0;for(var k=0u;k<8u;k++){s+=textureLoad(vertexPhi,q+vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u)),0).x;}return 0.125*s;
+}
+// The vertex field at the centre of cell p's face: the mean of its four vertices.
+fn bFacePhi(p:vec3i,axis:u32,sign:i32)->f32{
+ var o=p;if(sign>0){o[axis]+=1;}let u=(axis+1u)%3u;let v=(axis+2u)%3u;
+ var s=0.0;for(var k=0u;k<4u;k++){var c=o;c[u]+=i32(k&1u);c[v]+=i32(k>>1u);s+=textureLoad(vertexPhi,c,0).x;}return 0.25*s;
 }
 // The simulation's h tile worklist.
 fn bHTile(j:u32)->u32{return umTopology[UM_TILES+j];}
@@ -638,9 +669,15 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
     else{kind=K_WALL;coefficient=0.5/(h*h);fraction=0.5;}
    }else{
     let n=bNeighbour(q);
-    if(bCellAt(q)!=0u){kind=K_BAND;coefficient=1.0/(h*h*bPairTheta(own,liquid,n.phi,n.wet));}
+    // A closed cell's phi continues its neighbours': no vertex field of its own.
+    var theta=1.0;
+    if(liquid!=n.wet){
+     if(${S?"shut||!umCellIsOpen(q)":"false"}){theta=bPairTheta(own,liquid,n.phi,n.wet);}
+     else{theta=bFaceTheta(bFacePhi(p,axis,sign),own,liquid,n.phi,n.wet);}
+    }
+    if(bCellAt(q)!=0u){kind=K_BAND;coefficient=1.0/(h*h*theta);}
     else if(n.neumann){kind=K_NEUMANN;}
-    else{coefficient=1.0/(h*h*bPairTheta(own,liquid,n.phi,n.wet));}
+    else{coefficient=1.0/(h*h*theta);}
     ${S?`// A shut row is liquid by the phi its open neighbours continue into it: it
     // has no surface of its own. Its face to an air row is closed. Left as a
     // free-surface face, a shoreline cell under a slope took flux from the
@@ -1257,5 +1294,5 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  static readonly historyWord=HISTORY_WORD;
  /** The header word the frame's verdict closes the band with. */
  static readonly closedWord=CLOSED_WORD;
- destroy():void{for(const b of [this.index,this.rows,this.coarse,this.solve])b.destroy();}
+ destroy():void{for(const b of [this.index,this.ownRows,this.coarse,this.solve])b?.destroy();}
 }

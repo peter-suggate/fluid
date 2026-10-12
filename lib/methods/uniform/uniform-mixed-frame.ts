@@ -1,3 +1,4 @@
+import { settleGPUInitialization } from "../../core/gpu-initialization";
 import { UniformNarrowBandFlip } from "./uniform-narrow-band-flip";
 import {UNIFORM_MIXED_OVERFLOW_FINE,uniformMixedDetailViolationWord} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedHangingBytes} from "./uniform-mixed-velocity-sampling.wgsl";
@@ -23,7 +24,7 @@ import {UniformMixedSurfaceGeometry} from "./uniform-mixed-surface-geometry";
 import {UNIFORM_WORK_RELAYOUT_RESERVE,type UniformWorkEdit} from "./uniform-buffered-work";
 import {UniformMixedMomentum,UNIFORM_MIXED_MOMENTUM_LIMITS} from "./uniform-mixed-momentum";
 import {UniformMixedForces} from "./uniform-mixed-forces";
-import {UniformMixedPressureAuthority} from "./uniform-mixed-pressure-authority";
+import {UniformMixedPressureAuthority,uniformMixedRootMaskWords,uniformMixedRootTopologyBytes} from "./uniform-mixed-pressure-authority";
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 import {UniformMixedPressureVelocity} from "./uniform-mixed-pressure-velocity";
 import {UniformMixedPressureCycles,type UniformMixedPressureCycleLevel} from "./uniform-mixed-pressure-cycles";
@@ -137,6 +138,12 @@ const FRAME_ENCODER:GPUCommandEncoderDescriptor={label:"Uniform owner-driven fra
 const AUTHORITY_WORDS=new Float32Array([0,-1,0,0]);
 /** Frames whose receipts may be unchecked at once: the host's frames-ahead cap. */
 export const UNIFORM_MIXED_RECEIPT_RING=2;
+/** QA only (probes, before they build a solver): the pressure band keeps its
+ * rows in a buffer of its own, so a probe that captures and replays the
+ * band reads them after the frame. In production they are in the stage
+ * scratch, which the closing extension overwrites (UniformMixedFrame.stageScratch). */
+let qaBandRows=false;
+export function setUniformMixedBandRowsRetainedForQA(retained=true):void{qaBandRows=retained;}
 /** Rigid bodies this frame (the solid library reads their GPU state):
  * their cut cells move, so the all-4h record, cut widths and geometry are
  * rebuilt and entered cells displaced at the head. couple, when coupling is
@@ -293,7 +300,12 @@ export class UniformMixedFrame {
  private readonly momentumGroup:UniformDetailGroup;
  private forceGroup!:UniformDetailGroup;
  /** The scratch every non-pressure stage overlaps from offset 0, none of
-  * whose contents survives its stage: stageBytesAt the h-tile capacity. */
+  * whose contents survives its stage: stageBytesAt the h-tile capacity. The
+  * pressure band's rows overlap it too. They live from the band's prepare
+  * to its solve, and no stage runs between: forces is the last before the
+  * prepare, the closing extension the first after the solve, and each
+  * writes what it reads. Rows in a buffer of their own held 5632 bytes an h
+  * tile beside this one's 3931 (2.4 and 1.7 GiB on a 384x192x384 lattice). */
  private stageScratch:GPUBuffer;
  private readonly coarseCache:GPUTexture;
  private authorityGroup:UniformDetailGroup;
@@ -416,12 +428,13 @@ export class UniformMixedFrame {
   // band's start. Only the first follows the h-tile capacity.
   const phiUsage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST;
   this.authorityPhi=buffer("Uniform mixed pressure phi",4*o.capacity.owners,phiUsage);
-  const rootPhi:GPUBufferBinding={buffer:buffer("Uniform mixed root pressure phi",4*coarseLayout.cellCount,phiUsage)};
+  const rootPhi:GPUBufferBinding={buffer:buffer("Uniform mixed root pressure phi",4*(coarseLayout.cellCount+(solid?.coarse?uniformMixedRootMaskWords(coarseLayout):0)),phiUsage)};
   // Pressure's all-4h root keeps the mixed rows; the native hierarchy
   // solves its correction from its n/4 level.
-  // With solids, the root's topology is the static all-4h solid record,
-  // read in place: rebuilt only when the solids change, never copied.
-  if(solid?.coarse)this.solidTopology={buffer:solid.coarse.record,size:16*solid.coarse.count};
+  // With solids, the root's topology is the split authority's of each solve:
+  // the static all-4h solid record, its cut faces held to the liquid's rows.
+  const rootTopology:GPUBufferBinding|undefined=solid?.coarse?{buffer:buffer("Uniform mixed root topology",uniformMixedRootTopologyBytes(coarseLayout),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC)}:undefined;
+  if(rootTopology)this.solidTopology={buffer:rootTopology.buffer,size:rootTopology.buffer.size};
   {const r=memory.root;
    this.levels=[{ownership:new UniformMixedOwnership(device,coarseLayout,false,0),pressure:view(r.pressure),rhs:[view(r.rhs[0]),view(r.rhs[1])],minimum:[view(r.minimum[0]),view(r.minimum[1])],phi:rootPhi,frozen:view(r.frozen),residual:view(r.residual),
     topology:f.solid?{buffer:this.solidTopology!}:undefined}];}
@@ -448,7 +461,8 @@ export class UniformMixedFrame {
   // Viscosity reads exact MAC sites from the momentum fill (the extended
   // velocity): h sites in the unit texture, 4h sites in the coarse cache.
   this.forces=new UniformMixedForces(device,o,true,f.sourceParams,solid,true);
-  this.stageScratch=buffer("Uniform mixed stage scratch",this.stageBytesAt(o.capacity.fineTiles),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);this.bindStage();
+  this.stageBandTiles=this.bandTilesAt(o.capacity.fineTiles,capacity.liquidBand);
+  this.stageScratch=buffer(qaBandRows?"Uniform mixed stage scratch":"Uniform mixed stage scratch and pressure band rows",this.stageBytesAt(o.capacity.fineTiles,this.stageBandTiles),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);this.bindStage();
   this.authority=new UniformMixedPressureAuthority(device,o,solid,false,false,true);this.authorityGroup=this.bindAuthority();
   // Pressure couples the all-4h owners through the static coarse record.
   this.cycles=new UniformMixedPressureCycles(device,root,view(memory.backup),f.pressure,f.uniformGroup,openTop);
@@ -458,7 +472,7 @@ export class UniformMixedFrame {
   // leaves in simulation ownership in the scratch pair.
   const fine=coarseSolid?{velocity:f.velocityScratch,negative:f.negativeScratch}:undefined;
   const bindProjection=(input:{velocity:GPUTexture;negative:GPUBuffer},output:{velocity:GPUTexture;negative:GPUBuffer},volume:GPUTexture,fine?:{velocity:GPUTexture;negative:GPUBuffer})=>{
-   const common={velocity:input.velocity,negative:{buffer:input.negative},phi:root.phi!,params:this.params.projection};
+   const common={velocity:input.velocity,negative:{buffer:input.negative},phi:root.phi!,params:this.params.projection,rootTopology};
    return [this.projection.bindRhs({...common,correction:f.correction,rhs:root.rhs[0],minimum:root.minimum![0]!,pressure:root.pressure,fine}),
     this.projection.bindProjection({...common,pressure:root.pressure,volume,output:output.velocity,outputNegative:{buffer:output.negative}})] as const;
   };
@@ -471,7 +485,7 @@ export class UniformMixedFrame {
    const transfer=new UniformMixedOwnershipTransfer(device,o,p,solid);
    const present=(label:string,bytes:number)=>buffer(`Uniform presented ${label}`,bytes,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
    // The record holds any band this frame builds: a larger one is fatal.
-   const n=layout.tiles.length;this.stageBandTiles=this.bandTilesAt(o.capacity.fineTiles,capacity.liquidBand);
+   const n=layout.tiles.length;
    // Presented pressure and phi hold the live all-4h words only (level 0
    // keeps the simulation layout's capacity).
    this.stageBandWord=p.layout.cellCount;this.stageGridWord=this.stageBandWord+uniformStageBandWords(n,this.stageBandTiles);
@@ -481,24 +495,28 @@ export class UniformMixedFrame {
     toPressure:transfer.bind({volume:f.volume,velocity:f.velocityScratch,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,negative:f.negative},this.status),
     toSimulation:transfer.bind({volume:f.volume,velocity:f.velocityScratch,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,negative:f.negative},this.status),
     authority,authorityGroup:authority.bind({centerPhi:g.centerPhi,volume:f.volumeScratch,targetFill:g.target,phi:root.phi!,phase:f.phase,correction:f.correction,scratch:root.frozen,params:this.params.authority,
-     fine:coarseSolid?{phi:f.phi}:undefined,simulation:{buffer:o.presentation.buffer,size:4*o.capacity.tiles}})};
+     fine:coarseSolid?{phi:f.phi,topology:rootTopology!}:undefined,simulation:{buffer:o.presentation.buffer,size:4*o.capacity.tiles}})};
   }
   this.bandParams=uniform("pressure band",64);
   this.surfaceBand=new UniformPressureSurfaceBand(device,o,f.phi);
   this.band=new UniformPressureBand(device,o,p,{phi:{buffer:this.authorityPhi},coarsePhi:root.phi!,correction:f.correction,vertexPhi:f.phi,
    forced:{velocity:f.velocityScratch,negative:f.negativeScratch},velocity:f.velocity,negative:f.negative,copy:f.velocityScratch,
-   coarsePressure:root.pressure,params:this.bandParams,presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+layout.tiles.length},capacity:this.stageBandTiles},undefined,solid);
+   coarsePressure:root.pressure,params:this.bandParams,presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+layout.tiles.length},capacity:this.stageBandTiles,rows:this.bandRows},undefined,solid);
   if(this.band.capacity!==this.stageBandTiles)throw new Error("The stage grids' band section must match the band capacity");
   this.acceptance=new UniformMixedPressureAcceptance(device,p);
   this.acceptanceGroup=this.acceptance.bind({residual:root.residual,state:this.state,params:this.params.acceptance});
  }
- /** The stage scratch at `fineTiles` h tiles: the largest of its consumers,
-  * each of which checks the buffer against its own need when it binds. */
- private stageBytesAt(fineTiles:number):number{
+ /** The stage scratch at `fineTiles` h tiles and `bandTiles` band tiles: the
+  * largest of its consumers, each of which checks the buffer against its
+  * own need when it binds. */
+ private stageBytesAt(fineTiles:number,bandTiles:number):number{
   const n=this.ownership.capacity.tiles;
   return Math.ceil(Math.max(this.extension.scratchBytesAt(fineTiles),this.surface.scratchBytes,
-   this.surfaceVolume?.scratchBytesAt(fineTiles)??0,UniformMixedForces.normalBytes(63*fineTiles+n))/256)*256;
+   this.surfaceVolume?.scratchBytesAt(fineTiles)??0,UniformMixedForces.normalBytes(63*fineTiles+n),
+   qaBandRows?0:UniformPressureBand.rowBytes(bandTiles,!!this.solid))/256)*256;
  }
+ /** The band's rows: the stage scratch (QA: undefined, the band's own buffer). */
+ private get bandRows():GPUBuffer|undefined{return qaBandRows?undefined:this.stageScratch;}
  /** Every group over the stage scratch (reserveFine binds them again). */
  private bindStage():void{
   this.narrowBandFlip.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity,hanging:this.hanging});
@@ -539,8 +557,8 @@ export class UniformMixedFrame {
   * `bandTiles` band tiles: label and bytes. Each is one storage binding. */
  private capacityBuffers(fineTiles:number,bandTiles:number):[string,number][]{
   const n=this.ownership.capacity.tiles,owners=63*fineTiles+n,band=this.band.bytesAt(bandTiles);
-  return [["stage scratch",this.stageBytesAt(fineTiles)],["velocity tap cache",uniformMixedHangingBytes(n,fineTiles)],["pressure phi",4*owners],
-   ["pressure band rows",band.rows],["pressure band aggregates",band.aggregates],["pressure band iterate",band.iterate],
+  return [[qaBandRows?"stage scratch":"stage scratch and pressure band rows",this.stageBytesAt(fineTiles,bandTiles)],["velocity tap cache",uniformMixedHangingBytes(n,fineTiles)],["pressure phi",4*owners],
+   ...(qaBandRows?[["pressure band rows",band.rows] as [string,number]]:[]),["pressure band aggregates",band.aggregates],["pressure band iterate",band.iterate],
    ["presented pressure phi",4*(this.stageBandWord+uniformStageBandWords(n,bandTiles)+uniformStageGridWords(n))]];
  }
  /** QA: the capacity never changes (uniformMixedFixedFineCapacity). */
@@ -592,9 +610,11 @@ export class UniformMixedFrame {
   if(owners){
    o.reserveFine(r.fineTiles,exact&&!!this.relayout);
    this.authorityPhi=replace(this.authorityPhi,4*o.capacity.owners);
-   this.stageScratch=replace(this.stageScratch,this.stageBytesAt(r.fineTiles));
-   this.authorityGroup=this.bindAuthority();this.bindStage();
+   this.authorityGroup=this.bindAuthority();
   }
+  // The band's rows are in the stage scratch: either capacity sizes it.
+  const stageBytes=this.stageBytesAt(r.fineTiles,r.bandTiles);
+  if(owners||stageBytes!==this.stageScratch.size){this.stageScratch=replace(this.stageScratch,stageBytes);this.bindStage();}
   if(band){
    // The record ends the buffer (readers find it from the length), so the band section in front of it moves it.
    const old=this.presentation.phi.buffer,from=this.stageGridWord,grids=uniformStageGridWords(n);
@@ -605,7 +625,7 @@ export class UniformMixedFrame {
    this.device.queue.submit([e.finish()]);this.device.queue.writeBuffer(next,4*(this.stageGridWord+4),Uint32Array.of(r.bandTiles));
    this.presentation.phi={buffer:next};
   }
-  this.band.resize({phi:{buffer:this.authorityPhi},presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+n},capacity:r.bandTiles});
+  this.band.resize({phi:{buffer:this.authorityPhi},presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+n},capacity:r.bandTiles,rows:this.bandRows});
   for(const b of retired)b.destroy();
   return undefined;
  }
@@ -616,7 +636,7 @@ export class UniformMixedFrame {
   const root=this.pressureOwnership;
   this.pressureSchedule=new UniformMixedPressureSchedule(this.device,this.schedule,this.state,
    {fine:root.support,supportWord:9*root.layout.tiles.length+24,status:this.status,band:this.band.index,bandClosedWord:UniformPressureBand.closedWord,acceptance:this.params.acceptance});
-  await Promise.all([this.solid,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band,this.narrowBandFlip]
+  await settleGPUInitialization([this.solid,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band,this.narrowBandFlip]
    .map(stage=>stage?.initialize()).concat(this.fields.detail?.prepare(this.ownership)));
   this.ready=true;
  }

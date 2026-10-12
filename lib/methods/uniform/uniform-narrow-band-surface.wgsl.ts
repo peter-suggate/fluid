@@ -62,7 +62,21 @@ fn particleSurfaceFinish(q:vec3i,bulk:f32,nearest2:f32)->f32{
  // An empty gather has no particle surface to blend; never erode a cold
  // or newly activated region before its surface samples exist.
  if(nbAdaptive()&&nearest2>=4.0){return nbSourcePhi(vec3f(q),bulk);}
- let particle=min(bulk+1.0,sqrt(nearest2)-NB_SURFACE_RADIUS);
+ // The nearest sample bounds the surface between its own sphere and the plane
+ // of a seeded shell (samples NB_SEED_DEPTH down, the lattice's h/4 offsets to
+ // the side): a level set between the two stands. Read as the sphere alone, a
+ // resting bath's surface fell 0.04h in its hot tiles and rose 0.006h in their
+ // collar, a head the band's pressure solve turned into flow.
+ let sphere=sqrt(nearest2)-NB_SURFACE_RADIUS;let shell=sqrt(max(nearest2-0.125,0.0))-NB_SEED_DEPTH;
+ var excess=bulk-clamp(bulk,min(sphere,shell),max(sphere,shell));
+ // A sample within the lattice's own spacing: seeded liquid, as deep as its
+ // sphere at least. How much deeper the samples do not measure.
+ if(nearest2<=0.25){excess=max(bulk-sphere,0.0);}
+ // The spheres ripple NB_SURFACE_RADIUS-NB_SEED_DEPTH over a flat shell: the
+ // samples say nothing finer. The collar adds and does not erase, and without
+ // this slack it made surface of every sample's jitter.
+ let ripple=NB_SURFACE_RADIUS-NB_SEED_DEPTH;
+ let particle=min(bulk+1.0,bulk-excess*smoothstep(0.5*ripple,ripple,abs(excess)));
  // A transported particle may add liquid throughout its sphere support.
  // Erasure needs the complete seeded footprint, inside the overlap collar.
  let theta=select(nbTheta(vec3f(q)),nbSurfaceTheta(vec3f(q)),particle>bulk);
@@ -137,17 +151,25 @@ fn nbCachedSurfaceNearest(q:vec3i)->f32{
 `;
 
 /** Each fine tile prepares its face blend once, sharing the 5³ metric vertices.
- * The expired scatter cursors fit six words per fine cell at sparse layouts. */
+ * The expired scatter cursors fit six words per fine cell at sparse layouts:
+ * a face's theta and its samples' own heat over the collar's (nbTheta and
+ * nbSurfaceTheta, sixteen bits each), then its expected weight. */
 export function narrowBandTransferPropertiesSource(subgroups=false):string{return /* wgsl */`
 fn nbTransferPropertiesFit()->bool{return 416u*umCounts.x<=NB_CELLS;}
 var<workgroup> nbTransferDepth:array<f32,125>;
 var<workgroup> nbTransferActive:array<u32,64>;
 var<workgroup> nbTransferHeat:array<f32,27>;
-fn nbTransferTheta(local:vec3f)->f32{
- if(!nbAdaptive()){return 1.0;}
- let q=local/4.0+0.5;let base=vec3u(floor(q));let f=fract(q);var theta=0.0;
- for(var k=0u;k<8u;k++){let bit=umCorner(k,2u);let at=base+bit;let w=select(1.0-f,f,bit!=vec3u(0));theta+=w.x*w.y*w.z*nbTransferHeat[at.x+3u*(at.y+3u*at.z)];}
- return clamp(theta,0.0,1.0);
+// Negative for cold air, which nbSurfaceTheta leaves out.
+var<workgroup> nbTransferHot:array<f32,27>;
+fn nbTransferTheta(local:vec3f)->vec2f{
+ if(!nbAdaptive()){return vec2f(1.0);}
+ let q=local/4.0+0.5;let base=vec3u(floor(q));let f=fract(q);var theta=0.0;var hot=0.0;var covered=0.0;
+ for(var k=0u;k<8u;k++){
+  let bit=umCorner(k,2u);let at=base+bit;let w=select(1.0-f,f,bit!=vec3u(0));let share=w.x*w.y*w.z;let tile=at.x+3u*(at.y+3u*at.z);
+  theta+=share*nbTransferHeat[tile];
+  if(nbTransferHot[tile]>=0.0){covered+=share;hot+=share*nbTransferHot[tile];}
+ }
+ return clamp(vec2f(theta,hot/max(covered,1e-20)),vec2f(0.0),vec2f(1.0));
 }
 @compute @workgroup_size(64) fn transferProperties(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32${subgroups?",@builtin(subgroup_invocation_id) subgroupLane:u32":""}){
  if(!nbTransferPropertiesFit()){return;}
@@ -156,11 +178,13 @@ fn nbTransferTheta(local:vec3f)->f32{
  if(lane<27u&&nbAdaptive()){
   let t=vec3u(clamp(vec3i(umTileCoord(owner.tile))+vec3i(umCorner(lane,3u))-1,vec3i(0),vec3i(UM_T)-1));
   nbTransferHeat[lane]=clamp(bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_THETA+umTileAt(t)])),0.0,1.0);
+  let own=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_SURFACE_HEAT+umTileAt(t)]));
+  nbTransferHot[lane]=select(clamp(own-1.0,0.0,1.0),-1.0,own<=0.0&&bandPhi(4.0*vec3f(t)+2.0)>=0.0);
  }
  workgroupBarrier();
- let local=umCorner(lane,4u);let cell=origin+local;let at=NB_CELLS+6u*(64u*group.x+lane);var needed=false;var properties:array<vec2f,3>;
+ let local=umCorner(lane,4u);let cell=origin+local;let at=NB_CELLS+6u*(64u*group.x+lane);var needed=false;var properties:array<vec3f,3>;
  for(var axis=0u;axis<3u;axis++){
-  var near=0.0;var expected=1.0;var low=local;low[axis]+=1u;
+  var near=vec2f(0.0);var expected=1.0;var low=local;low[axis]+=1u;
   if(cell[axis]+1u<UM_D[axis]&&(nbBandReach(origin+low)&1u)!=0u){
    var depth=0.0;
    // The positive MAC face has fraction zero along its normal. Preserve the
@@ -168,8 +192,8 @@ fn nbTransferTheta(local:vec3f)->f32{
    for(var k=0u;k<8u;k++){let bit=umCorner(k,2u);if(bit[axis]!=0u){continue;}let q=low+bit;depth+=0.25*nbTransferDepth[q.x+5u*(q.y+5u*q.z)];}
    if(depth<=1.5&&depth>=-2.0){var q=vec3f(local)+0.5;q[axis]+=0.5;near=nbTransferTheta(q);expected=max(1.0,8.0*clamp(0.5-depth,0.0,1.0));}
   }
-  needed=needed||near>0.0;
-  properties[axis]=vec2f(near,expected);
+  needed=needed||near.x>0.0;
+  properties[axis]=vec3f(near,expected);
  }
  nbTransferActive[lane]=u32(needed);workgroupBarrier();
  let neededPair=(nbTransferActive[lane&~1u]|nbTransferActive[lane|1u])!=0u;
@@ -181,7 +205,7 @@ fn nbTransferTheta(local:vec3f)->f32{
  if(emit){atomicStore(&bins[NB_CELLS+384u*umCounts.x+first+rank],32u*group.x+lane/2u);}`:`
  if(emit){let slot=atomicAdd(&state[9],1u);atomicStore(&bins[NB_CELLS+384u*umCounts.x+slot],32u*group.x+lane/2u);}`}
  if(!neededPair){textureStore(output,vec3i(cell),textureLoad(velocity,vec3i(cell),0));return;}
- for(var axis=0u;axis<3u;axis++){atomicStore(&bins[at+2u*axis],bitcast<u32>(properties[axis].x));atomicStore(&bins[at+2u*axis+1u],bitcast<u32>(properties[axis].y));}
+ for(var axis=0u;axis<3u;axis++){atomicStore(&bins[at+2u*axis],pack2x16unorm(properties[axis].xy));atomicStore(&bins[at+2u*axis+1u],bitcast<u32>(properties[axis].z));}
 }
 `;}
 export const narrowBandTransferPropertiesWGSL=narrowBandTransferPropertiesSource();
@@ -196,6 +220,7 @@ var<workgroup> nbMass:array<vec3f,64>;
 var<workgroup> nbMomentumNext:array<vec3f,64>;
 var<workgroup> nbMassNext:array<vec3f,64>;
 var<workgroup> nbBlend:array<f32,24>;
+var<workgroup> nbHot:array<f32,24>;
 var<workgroup> nbExpected:array<f32,24>;
 var<workgroup> nbRuns:array<vec2u,128>;
 @compute @workgroup_size(${subgroups?32:64}) fn transfer(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) ${subgroups?"localLane:u32,@builtin(subgroup_invocation_id) subgroupLane:u32":"lane:u32"}){
@@ -211,15 +236,15 @@ var<workgroup> nbRuns:array<vec2u,128>;
  let team=lane/16u;let member=lane%16u;let centre=vec3f(origin)+0.5;
  if(member<6u){
   let axis=member%3u;let o=select(origin,nextOrigin,member>=3u);let width=select(owner.width,next.width,member>=3u);
-  var near=0.0;var expected=1.0;
+  var near=vec2f(0.0);var expected=1.0;
   ${prepared?`if(nbTransferPropertiesFit()){
    let at=NB_CELLS+6u*(first+u32(member>=3u))+2u*axis;
-   near=select(0.0,bitcast<f32>(atomicLoad(&bins[at])),valid);expected=bitcast<f32>(atomicLoad(&bins[at+1u]));
+   near=select(vec2f(0.0),unpack2x16unorm(atomicLoad(&bins[at])),valid);expected=bitcast<f32>(atomicLoad(&bins[at+1u]));
   }else `:""}if(width==1u&&o[axis]+1u<UM_D[axis]){
    var q=vec3f(o)+0.5;q[axis]+=0.5;let depth=particleDepth(q);
-   if(depth<=1.5&&depth>=-2.0){near=nbTheta(q);expected=max(1.0,8.0*clamp(0.5-depth,0.0,1.0));}
+   if(depth<=1.5&&depth>=-2.0){near=vec2f(nbTheta(q),nbSurfaceTheta(q));expected=max(1.0,8.0*clamp(0.5-depth,0.0,1.0));}
   }
-  nbBlend[6u*team+member]=near;nbExpected[6u*team+member]=expected;
+  nbBlend[6u*team+member]=near.x;nbHot[6u*team+member]=near.y;nbExpected[6u*team+member]=expected;
  }
  workgroupBarrier();
  let blend=vec3f(nbBlend[6u*team],nbBlend[6u*team+1u],nbBlend[6u*team+2u]);
@@ -274,14 +299,14 @@ var<workgroup> nbRuns:array<vec2u,128>;
  if(valid&&member==0u&&owner.width==1u){
   let original=textureLoad(velocity,vec3i(origin),0);let mass=total;
   var transition=blend;
-  if(nbAdaptive()){for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+a]),1.0,blend[a]);}}
+  if(nbAdaptive()){for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+a]),1.0,nbHot[6u*team+a]);}}
   let value=mix(original.xyz,momentum/max(mass,vec3f(1e-30)),select(vec3f(0),transition,mass>=vec3f(1e-5)));
   textureStore(output,vec3i(origin),vec4f(value,original.w));
  }
  if(valid&&member==0u&&next.width==1u){
   let original=textureLoad(velocity,vec3i(nextOrigin),0);let mass=totalNext;
   var transition=nextBlend;
-  if(nbAdaptive()){for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+3u+a]),1.0,nextBlend[a]);}}
+  if(nbAdaptive()){for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+3u+a]),1.0,nbHot[6u*team+3u+a]);}}
   let value=mix(original.xyz,momentumNext/max(mass,vec3f(1e-30)),select(vec3f(0),transition,mass>=vec3f(1e-5)));
   textureStore(output,vec3i(nextOrigin),vec4f(value,original.w));
  }

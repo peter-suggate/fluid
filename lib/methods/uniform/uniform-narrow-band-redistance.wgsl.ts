@@ -105,7 +105,11 @@ fn nbBuildDistance(p:vec3u,tile:u32){
   if(abs(initial)>1e-8){
    var nearest=NB_NO_SURFACE;
    if((atomicLoad(&bins[NB_BAND_REACH+tile])&1u)!=0u){nearest=atomicLoad(&bins[NB_DEPTH_B+cellIndex(vec3i(min(p,UM_D-1u)))]);}
-   var distance=max(abs(value),6.0);
+   // With no crossing cell within five of the vertex's, the nearest box is
+   // five cells off or more: the level set stands, no nearer than that. Six
+   // lifted the air five cells over a resting surface, and with it the 4h
+   // owner whose phi sets the surface's pressure theta.
+   var distance=max(abs(value),5.0);
    if(nearest!=NB_NO_SURFACE){distance=nbSurfaceDistance(vec3f(p),nearest);}
    // Cell-centre proximity alone can select the wrong interface beside a
    // tiny ripple. Also trace the local phi gradient across cell boundaries;
@@ -113,6 +117,9 @@ fn nbBuildDistance(p:vec3u,tile:u32){
    if(abs(value)<4.5){
     var q=vec3f(p);
     for(var iteration=0u;iteration<5u;iteration++){
+     // A solid's phi is not the liquid's: traced into a wall, the vertices on
+     // it found the wall for a surface, and no samples were seeded beside it.
+     if(umCellOpen(vec3i(min(vec3u(floor(q)),UM_D-1u)))<0.5){break;}
      let sample=nbPhiGradient(q);let f=sample.w;if(abs(f)<1e-5){distance=min(distance,length(q-vec3f(p)));break;}
      let g=sample.xyz;
      let g2=dot(g,g);if(g2<1e-8){break;}

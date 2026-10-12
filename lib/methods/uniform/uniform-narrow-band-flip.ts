@@ -435,7 +435,11 @@ ${narrowBandTraceWGSL("sampleVelocity")}
   if(umCellOpen(vec3i(q))<0.5){source[i].position.x=-1.0;return;}
   let ballistic=p.before.w==1.0||!gridSupported(q);p.before.w=max(p.before.w,select(0.0,1.0,ballistic));
   if(nbAdaptive()){
-   p.position.w=max(nbTargetHeat(q),max(0.0,p.position.w-select(nbCooling()*params.hDt.w,0.0,ballistic)));
+   // A sample takes erasure heat (over 1) at the step's end (update), with its
+   // tile's new collar seeded: a collar tile the census triggered eroded the
+   // unseeded tiles beside it that same step.
+   let tileHeat=nbTargetHeat(q);
+   p.position.w=max(select(min(tileHeat,1.0),tileHeat,p.position.w>1.0),max(0.0,p.position.w-select(nbCooling()*params.hDt.w,0.0,ballistic)));
    if(p.position.w<=0.0){source[i].position.x=-1.0;return;}
   }
   // Uniform stores velocity half a step ahead of position. Ballistic drift
@@ -481,7 +485,13 @@ ${narrowBandTraceWGSL("sampleVelocity")}
   // reads every slot, drops the ones marked here (a negative x) and takes
   // each cell's count from the bins. Nothing gathers before it.
   // A trajectory can cross from h into a coarse owner during this step.
-  p.position=vec4f(q,p.position.w);source[i]=p;
+  // Erasure heat stays with the tile that has it. A hot tile's collar is
+  // seeded; a collar's own neighbours need not be, and a grid-supported
+  // sample that carried its heat into the collar eroded the unseeded liquid
+  // beside it. Spray keeps its heat: nothing else erases what it leaves.
+  var heat=p.position.w;
+  if(nbAdaptive()&&!ballistic){let arrived=nbTargetHeat(q);if(arrived>0.0){heat=min(heat,max(arrived,1.0));}}
+  p.position=vec4f(q,heat);source[i]=p;
   atomicAdd(&bins[nbOrder(vec3u(q))],1u);${this.order.sparse?"atomicAdd(&bins[NB_COVERAGE+umTileAt(vec3u(q)/4u)],1u);":""}
 }
 // End-of-step sampling uses the reconstructed surface and projected velocity.
@@ -552,11 +562,22 @@ ${subgroups?/* wgsl */`
 // Fit the outer lattice to the sphere reconstruction's nodal interface.
 // Keep tangential quarter-cell positions: their known offset determines the
 // seed depth and preserves a resting plane without any volume correction.
+// The depth's slope along one axis over a cell, from the side that is open
+// where a wall is half a cell off: the metric inside a solid is not the
+// liquid's, and a slope through it leans the shell off every stepped wall.
+fn seedSlope(q:vec3f,d:f32,axis:u32)->f32{
+ var e=vec3f(0);e[axis]=0.5;
+ let low=umCellOpen(vec3i(floor(q-e)))>=0.5;let high=umCellOpen(vec3i(floor(q+e)))>=0.5;
+ if(low&&high){return particleDepth(q+e)-particleDepth(q-e);}
+ if(high){return 2.0*(particleDepth(q+e)-d);}
+ if(low){return 2.0*(d-particleDepth(q-e));}
+ return 0.0;
+}
 fn seedShell(lattice:vec3f)->vec4f{
  var q=lattice;var d=particleDepth(q);
  for(var i=0u;i<4u;i++){
   let rise=d+NB_SEED_DEPTH;if(rise<=1e-3){break;}
-  let g=vec3f(particleDepth(q+vec3f(0.5,0,0))-particleDepth(q-vec3f(0.5,0,0)),particleDepth(q+vec3f(0,0.5,0))-particleDepth(q-vec3f(0,0.5,0)),particleDepth(q+vec3f(0,0,0.5))-particleDepth(q-vec3f(0,0,0.5)));
+  let g=vec3f(seedSlope(q,d,0u),seedSlope(q,d,1u),seedSlope(q,d,2u));
   let g2=dot(g,g);if(g2<1e-8){break;}
   let next=clamp(q-min(rise,0.5)*g*inverseSqrt(g2),vec3f(0.01),vec3f(UM_D)-0.01);
   let depth=particleDepth(next);if(depth>=d){break;}
@@ -754,6 +775,7 @@ var<workgroup> nbSeam:array<vec2f,64>;
   }
   if(!all(abs(v)<vec3f(1e10))){atomicStore(&state[3],2u);return;}
   particles[i].velocity=vec4f(v,particleDepth(particles[i].position.xyz));
+  if(nbAdaptive()){particles[i].position.w=max(particles[i].position.w,nbTargetHeat(particles[i].position.xyz));}
   // Retain accepted grid motion for next frame's residency prediction.
   // FLIP residual velocity transfers momentum, but does not trace positions.
   particles[i].before=vec4f(pic,select(0.0,1.0,mode==1.0));

@@ -111,14 +111,17 @@ fn bulkDepth(p:vec3f)->f32{
  let c=clamp(vec3i(floor(p)),vec3i(0),vec3i(UM_D)-1);
  if((nbBandReach(vec3u(c))&1u)==0u){return min(phiValue,-8.0);}
  let nearest=atomicLoad(&bins[NB_DEPTH_B+cellIndex(c)]);
- if(nearest==NB_NO_SURFACE){return min(phiValue,-8.0);}
+ // No crossing cell within five of this one: its box is five cells off or
+ // more, six only from below. A deeper bound sank the resting bath's phi
+ // from seven cells down, under the 4h owners that read it.
+ if(nearest==NB_NO_SURFACE){return min(phiValue,-5.0);}
  let low=vec3f(nbCell(nearest));let delta=max(max(low-p,p-(low+1.0)),vec3f(0));
  return min(phiValue,-length(delta));
 }
 // Bank A is the nodal metric field redistance leaves on the reached tiles.
 // Particle membership does not depend on the resolution of simulation owners.
-// Past the reach the level set stands in, held at least six cells away as
-// the metric field holds a vertex with no crossing near it.
+// Past the reach (two tiles from any crossing) the level set stands in, held
+// at least six cells away.
 fn nbVertexIndex(p:vec3u)->u32{return p.x+(UM_D.x+1u)*(p.y+(UM_D.y+1u)*p.z);}
 fn particleDepth(p:vec3f)->f32{
  let q=clamp(p,vec3f(0),vec3f(UM_D));let c=min(vec3u(floor(q)),UM_D-1u);let f=q-vec3f(c);

@@ -49,10 +49,11 @@ fn nbTransferBlend(q:vec3f,depth:f32,mass:f32)->f32{
  if(!nbAdaptive()){return 1.0;}
  // Eight samples per h cell. Fill the missing particle weight with the
  // advected grid velocity during handoff. Fully hot regions recover the
- // fixed-band transfer exactly; cooling regions progressively use coverage.
+ // fixed-band transfer exactly; the collar and cooling regions use coverage.
+ // The collar is support: its samples stop at an unseeded tile, and a face
+ // past that edge gathers a sliver of them from one side.
  let expected=max(1.0,8.0*clamp(0.5-depth,0.0,1.0));
- let theta=nbTheta(q);
- return theta*mix(min(1.0,mass/expected),1.0,theta);
+ return nbTheta(q)*mix(min(1.0,mass/expected),1.0,nbSurfaceTheta(q));
 }
 @compute @workgroup_size(64) fn activity(@builtin(global_invocation_id) gid:vec3u){
  for(var t=gid.x;t<NB_BAND_TILES;t+=65536u){
