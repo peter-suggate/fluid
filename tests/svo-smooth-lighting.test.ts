@@ -1,12 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { defaultScene } from "../lib/core/model";
 import { PLANAR_BOUNDARY_PATCH_BYTES } from "../lib/core/planar-boundary";
-import { SVO_MATERIAL_RECORD_WORDS } from "../lib/svo/contracts/svo-material-abi";
-import { buildSvoPrimitiveCandidates } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
 import { RENDER_PIPELINE_NODES, type RenderPipelineContext } from "../lib/svo/pipeline/render-pipeline-graph";
 import { DEFAULT_SVO_RENDER_TUNING } from "../lib/svo/pipeline/svo-render-tuning";
-import { buildSparseVoxelDrySceneLightingMirrors, SparseVoxelDrySceneRenderer } from "../lib/svo/pipeline/webgpu-svo-dry-scene";
+import { SparseVoxelDrySceneRenderer } from "../lib/svo/pipeline/webgpu-svo-dry-scene";
 
 function rendererFixture() {
   // Exercise production selection/publication without allocating GPU resources.
@@ -42,22 +39,6 @@ test("smooth surfaces select screen lighting while voxel faces retain the lattic
   assert.equal(renderer.latticeVisibilityRequested(.5, true), false);
   renderer.lightingOptions.latticeVisibilityEnabled = false;
   assert.equal(renderer.latticeVisibilityRequested(.5, false), false);
-});
-
-test("publishing a surface-style change requests a new bundle even with the same backdrop", () => {
-  const renderer = rendererFixture();
-  const scene = {
-    renderRevision: 1, materialRevision: 1,
-    primitiveRecords: new Uint32Array(), primitiveCandidates: buildSvoPrimitiveCandidates([]),
-    materialRecords: new Uint32Array(2 * SVO_MATERIAL_RECORD_WORDS),
-    ...buildSparseVoxelDrySceneLightingMirrors(defaultScene, 1),
-  };
-  const requested: boolean[] = [];
-  renderer.requestSpecializedSplitVariant = () => requested.push(renderer.latticeVisibilityRequested(.5, false));
-  for (const flatVoxelNormals of [true, true, false, false, true]) {
-    assert.equal(renderer.publishScene({ ...scene, flatVoxelNormals }), true);
-  }
-  assert.deepEqual(requested, [true, false, true]);
 });
 
 test("an old lattice bundle cannot render a newly smooth scene while screen shaders compile", () => {

@@ -1,5 +1,6 @@
 import { getMethod, defaultMethodId } from "../method-registry";
 import type { PaneSession } from "../session/session";
+import { sameSolidPatchList } from "../solid-patch-list";
 import { useShellStore } from "../stores/shell-store";
 import type { TracePinRequest } from "../stores/ui-store";
 import {
@@ -111,11 +112,12 @@ function applyLayers(
   changed: readonly string[],
   exactScene?: { readonly presetId: string; readonly scene: PaneScene },
   adopt: CompareAdoptions = {},
+  documentMoved = false,
 ): void {
   const search = `?${desired.toString()}`;
   /** The document this pane held before the write, once the write moved it. */
   let replaced: PaneScene | undefined;
-  if (changed.some(isDocumentKey)) {
+  if (documentMoved || changed.some(isDocumentKey)) {
     const previous = session.scene.getState().scene;
     if (exactScene) session.scene.getState().setScene(exactScene.scene, exactScene.presetId);
     else {
@@ -231,18 +233,31 @@ export function startCompareSync(
    * two happen to disagree.
    */
   let lastB = new URLSearchParams();
+  /**
+   * The authored solids of pane A as the mirror last offered them to B.
+   *
+   * Voxel edits ride no query key, so the key diff below cannot see one. They
+   * are offered when *A's list moved*, by the same rule as `lastB`: a pane B
+   * that refused an edit keeps its own document, and must not be handed the
+   * same one again on every later pass.
+   */
+  let lastSolidsA: PaneScene["solidVoxels"] | undefined;
 
   const mirrorAtoB = () => {
     const state = store.getState();
     const searchA = paneSearch(a, layerA);
     const desired = withDiff(searchA, state.diff);
     const changed = changedKeys(desired, paneSearch(b, layerB));
-    if (changed.length === 0) return;
     const sceneA = a.scene.getState();
     const forked = Object.keys(state.diff).some(isDocumentKey);
+    const solidsA = sceneA.scene.solidVoxels;
+    const solidsMoved = !forked && solidsA !== lastSolidsA
+      && !sameSolidPatchList(solidsA, b.scene.getState().scene.solidVoxels);
+    lastSolidsA = solidsA;
+    if (changed.length === 0 && !solidsMoved) return;
     applyLayers(b, desired, changed,
       forked ? undefined : { presetId: sceneA.presetId, scene: sceneA.scene },
-      adopt);
+      adopt, solidsMoved);
   };
 
   const reconcileFromB = () => {

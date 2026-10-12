@@ -1,6 +1,8 @@
 import type { SceneDescription, Vec3 } from "./model";
 import {
-  mortonEncode3D,
+  SPARSE_BRICK_NUMBER_MORTON_BITS,
+  mortonNumber3D,
+  mortonNumberCoordinate,
   type SparseBrickCoordinate,
   type SparseBrickSize,
 } from "../svo/features/construction/sparse-brick-octree";
@@ -95,18 +97,20 @@ function positiveInteger(value: number, label: string): number {
   return value;
 }
 
-function coordinateKey(value: SparseBrickCoordinate): string {
-  return `${value.x},${value.y},${value.z}`;
+/** An ascending run of Morton keys with its repeats dropped. */
+function uniqueAscending(keys: Float64Array): Float64Array {
+  let count = 0;
+  for (let index = 0; index < keys.length; index += 1) {
+    if (count === 0 || keys[index] !== keys[count - 1]) keys[count++] = keys[index]!;
+  }
+  return keys.subarray(0, count);
 }
 
-function canonicalCoordinates(values: Iterable<SparseBrickCoordinate>): SparseBrickCoordinate[] {
-  const unique = new Map<string, SparseBrickCoordinate>();
-  for (const value of values) unique.set(coordinateKey(value), value);
-  return [...unique.values()].sort((a, b) => {
-    const ma = mortonEncode3D(a.x, a.y, a.z);
-    const mb = mortonEncode3D(b.x, b.y, b.z);
-    return ma < mb ? -1 : ma > mb ? 1 : 0;
-  });
+/** The coordinates a run of Morton keys denotes, in the run's order. */
+function coordinatesOf(keys: Float64Array): SparseBrickCoordinate[] {
+  const coordinates: SparseBrickCoordinate[] = new Array(keys.length);
+  for (let index = 0; index < keys.length; index += 1) coordinates[index] = mortonNumberCoordinate(keys[index]!);
+  return coordinates;
 }
 
 function validateProxy(proxy: SparseSceneWorldAabb, index: number): void {
@@ -139,35 +143,54 @@ function worldRangeOnSolverLattice(
   return { min, maxExclusive };
 }
 
+/** The inclusive-exclusive brick box a cell range occupies on the scene lattice. */
+function brickBox(
+  range: SparseSceneCellRange,
+  sceneLatticeMinimum: readonly [number, number, number],
+  brickSize: SparseBrickSize,
+): { min: MutableTriple; maxExclusive: MutableTriple } {
+  return {
+    min: range.min.map((value, axis) => Math.floor((value - sceneLatticeMinimum[axis]) / brickSize)) as MutableTriple,
+    maxExclusive: range.maxExclusive.map((value, axis) => Math.ceil((value - sceneLatticeMinimum[axis]) / brickSize)) as MutableTriple,
+  };
+}
+
+/**
+ * The bricks a cell range claims, as ascending Morton keys.
+ *
+ * Keys are numbers (`mortonNumber3D`) and a claim is a sorted `Float64Array`:
+ * a box's bricks are distinct by construction, so canonical order is one
+ * native sort, and the union of every proxy's claim is a sort of their
+ * concatenation rather than a string per brick.
+ */
 function enumerateBricks(
   range: SparseSceneCellRange,
   sceneLatticeMinimum: readonly [number, number, number],
   brickSize: SparseBrickSize,
   coverage: SparseSceneProxyCoverage,
   surfaceShellCells: number,
-): SparseBrickCoordinate[] {
+): Float64Array {
   const sceneMin = range.min.map((value, axis) => value - sceneLatticeMinimum[axis]) as MutableTriple;
   const sceneMax = range.maxExclusive.map((value, axis) => value - sceneLatticeMinimum[axis]) as MutableTriple;
-  const brickMin = sceneMin.map((value) => Math.floor(value / brickSize)) as MutableTriple;
-  const brickMax = sceneMax.map((value) => Math.ceil(value / brickSize)) as MutableTriple;
+  const { min: brickMin, maxExclusive: brickMax } = brickBox(range, sceneLatticeMinimum, brickSize);
   const innerMin = sceneMin.map((value) => value + surfaceShellCells) as MutableTriple;
   const innerMax = sceneMax.map((value) => value - surfaceShellCells) as MutableTriple;
-  const hasInterior = innerMin.every((value, axis) => value < innerMax[axis]);
-  const result: SparseBrickCoordinate[] = [];
+  const shell = coverage === "surface-shell" && innerMin.every((value, axis) => value < innerMax[axis]);
+  const keys = new Float64Array(Math.max(0, brickMax[0] - brickMin[0]) * Math.max(0, brickMax[1] - brickMin[1])
+    * Math.max(0, brickMax[2] - brickMin[2]));
+  let count = 0;
   for (let z = brickMin[2]; z < brickMax[2]; z += 1) {
+    const insideZ = z * brickSize >= innerMin[2] && z * brickSize + brickSize <= innerMax[2];
     for (let y = brickMin[1]; y < brickMax[1]; y += 1) {
+      const insideY = insideZ && y * brickSize >= innerMin[1] && y * brickSize + brickSize <= innerMax[1];
       for (let x = brickMin[0]; x < brickMax[0]; x += 1) {
-        if (coverage === "surface-shell" && hasInterior) {
-          const brickCellMin = [x * brickSize, y * brickSize, z * brickSize];
-          const brickCellMax = brickCellMin.map((value) => value + brickSize);
-          const whollyInside = brickCellMin.every((value, axis) => value >= innerMin[axis] && brickCellMax[axis] <= innerMax[axis]);
-          if (whollyInside) continue;
-        }
-        result.push({ x, y, z });
+        // A shell drops the bricks wholly inside the proxy's interior.
+        if (shell && insideY && x * brickSize >= innerMin[0] && x * brickSize + brickSize <= innerMax[0]) continue;
+        keys[count++] = mortonNumber3D(x, y, z);
       }
     }
   }
-  return canonicalCoordinates(result);
+  return keys.subarray(0, count).sort();
 }
 
 /**
@@ -238,24 +261,47 @@ export function planSparseSceneDomain(
   // The lattice above is derived from `dimensions` regardless, so dropping the
   // claim moves no address: the same brick coordinate still names the same
   // cells, the container simply stops being a reason for a brick to exist.
-  const solverBrickCoordinates = solverClaim === "none"
-    ? [] : enumerateBricks(solverRange, latticeMinimum, brickSize, "volume", 0);
-  const solverKeys = new Set(solverBrickCoordinates.map(coordinateKey));
-  const proxyBrickRanges = proxyRanges.map(range => ({
-    min: range.min.map((v, a) => Math.floor((v - latticeMinimum[a]) / brickSize)) as MutableTriple,
-    maxExclusive: range.maxExclusive.map((v, a) => Math.ceil((v - latticeMinimum[a]) / brickSize)) as MutableTriple,
-  }));
-  const proxyBrickCoordinates = options.enumerateProxyBricks === false ? [] : proxyRanges.map((range, index) => enumerateBricks(
+  // Every brick the lattice can name has a number for a Morton key.
+  if (brickDimensions.some((value) => value > 2 ** SPARSE_BRICK_NUMBER_MORTON_BITS)) {
+    throw new RangeError(`Sparse scene domain of ${brickDimensions.join(" x ")} bricks exceeds 2^${SPARSE_BRICK_NUMBER_MORTON_BITS} an axis`);
+  }
+  const solverKeys = solverClaim === "none"
+    ? new Float64Array(0) : enumerateBricks(solverRange, latticeMinimum, brickSize, "volume", 0);
+  const solverBox = brickBox(solverRange, latticeMinimum, brickSize);
+  const proxyBrickRanges = proxyRanges.map(range => brickBox(range, latticeMinimum, brickSize));
+  const proxyKeys = options.enumerateProxyBricks === false ? [] : proxyRanges.map((range, index) => enumerateBricks(
     range,
     latticeMinimum,
     brickSize,
     proxies[index].coverage ?? defaultCoverage,
     surfaceShellCells,
   ));
-  const environmentBrickCoordinates = canonicalCoordinates(
-    proxyBrickCoordinates.flat().filter((coordinate) => !solverKeys.has(coordinateKey(coordinate))),
-  );
-  const coordinates = canonicalCoordinates([...solverBrickCoordinates, ...environmentBrickCoordinates]);
+  // The union of the proxies' claims, less every brick the solver's box holds.
+  const claimed = new Float64Array(proxyKeys.reduce((total, keys) => total + keys.length, 0));
+  let claimedCount = 0;
+  for (const keys of proxyKeys) { claimed.set(keys, claimedCount); claimedCount += keys.length; }
+  const union = uniqueAscending(claimed.sort());
+  let environmentCount = 0;
+  const environmentKeys = new Float64Array(union.length);
+  const environmentBrickCoordinates: SparseBrickCoordinate[] = [];
+  for (let index = 0; index < union.length; index += 1) {
+    const coordinate = mortonNumberCoordinate(union[index]!);
+    if (solverClaim !== "none"
+      && coordinate.x >= solverBox.min[0] && coordinate.x < solverBox.maxExclusive[0]
+      && coordinate.y >= solverBox.min[1] && coordinate.y < solverBox.maxExclusive[1]
+      && coordinate.z >= solverBox.min[2] && coordinate.z < solverBox.maxExclusive[2]) continue;
+    environmentKeys[environmentCount++] = union[index]!;
+    environmentBrickCoordinates.push(coordinate);
+  }
+  // Two ascending, disjoint runs as one: the whole claim in canonical order.
+  const allKeys = new Float64Array(solverKeys.length + environmentCount);
+  for (let i = 0, j = 0, count = 0; count < allKeys.length; count += 1) {
+    allKeys[count] = j >= environmentCount || (i < solverKeys.length && solverKeys[i]! < environmentKeys[j]!)
+      ? solverKeys[i++]! : environmentKeys[j++]!;
+  }
+  const solverBrickCoordinates = coordinatesOf(solverKeys);
+  const proxyBrickCoordinates = proxyKeys.map(coordinatesOf);
+  const coordinates = coordinatesOf(allKeys);
   const solverBounds_m: SparseSceneWorldBounds = {
     min: { x: solverOrigin[0], y: solverOrigin[1], z: solverOrigin[2] },
     max: {

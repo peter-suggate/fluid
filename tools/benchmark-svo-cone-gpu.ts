@@ -3,7 +3,7 @@
  * A/B GPU benchmark for the cone-traced node-mip lighting marcher
  * (`createSvoDryConeMarcherWGSL`). Compiles the baseline and optimized marcher
  * variants from the same builder in one process, proves bit-identical
- * per-ray results (transmittance bits, valid, step count) plus morton/find
+ * per-ray results (transmittance bits, valid, step count) plus page-find
  * probe parity, then times the variants with interleaved generic GPU traces.
  *
  * Rerun: node --import tsx tools/benchmark-svo-cone-gpu.ts
@@ -43,9 +43,7 @@ function positiveInteger(value: string, label: string): number {
 
 const VARIANTS = [
   { name: "baseline", options: {} },
-  { name: "morton", options: { branchlessMorton: true } },
-  { name: "morton+ranged", options: { branchlessMorton: true, rangedDirectorySearch: true } },
-  { name: "full", options: { branchlessMorton: true, rangedDirectorySearch: true, emptySpaceElision: true } },
+  { name: "elision", options: { emptySpaceElision: true } },
 ] as const satisfies ReadonlyArray<{ name: string; options: SvoDryConeMarcherOptions }>;
 type VariantName = (typeof VARIANTS)[number]["name"];
 
@@ -136,30 +134,34 @@ function harnessShader(options: SvoDryConeMarcherOptions): string {
   let marcher = createSvoDryConeMarcherWGSL(options);
   // Non-semantic instrumentation for the fetch/search histogram.
   const fetchAnchor = "let local=virtualVoxel-";
-  const searchAnchor = "let middle=low+(high-low)/2u;";
+  const searchAnchor = "return svoNodeMipPageHashFind(nodeMipPageTable,level,coordinate);";
   assert.ok(marcher.includes(fetchAnchor) && marcher.includes(searchAnchor), "instrumentation anchors missing");
   marcher = marcher.replace(fetchAnchor, "benchFetches+=1u;let local=virtualVoxel-");
-  marcher = marcher.replace(searchAnchor, "benchSearchIterations+=1u;let middle=low+(high-low)/2u;");
+  marcher = marcher.replace(searchAnchor, `benchPageLookups+=1u;${searchAnchor}`);
   return /* wgsl */ `
 ${svoNodeMipSamplingWGSL}
 struct BenchMapping{worldOrigin:vec3f,pad0:u32,cellSize:vec3f,pad1:u32}
-// nodeMipAtlas is here only for its w lane, the opacity level floor the marcher
-// clamps against. This benchmark's synthetic pyramid is seeded entirely at
-// level 0, so the lane is zero and the clamp is the identity.
-struct DryParams{mapping:BenchMapping,nodeMip:vec4u,nodeMipAtlas:vec4u,nodeMipLevelStart:array<vec4u,3>}
-struct RayResult{transmittanceBits:u32,valid:u32,steps:u32,fetches:u32,searchIterations:u32,pad0:u32,pad1:u32,pad2:u32}
-struct ProbeResult{mortonLow:u32,mortonHigh:u32,findResult:u32,pad:u32}
+// nodeMipAtlas.xyz is the atlas in texels, from which a slot's page origin is
+// derived; w is the opacity level floor the marcher clamps against. This
+// benchmark's synthetic pyramid is seeded entirely at level 0, so that lane is
+// zero and the clamp is the identity. nodeMipOrigin is the world position of
+// the pyramid's first texel, which this fixture puts at the origin, and
+// tuningCounts0.y is the cone step budget, held at the marcher's ceiling.
+struct DryParams{mapping:BenchMapping,nodeMip:vec4u,nodeMipAtlas:vec4u,nodeMipOrigin:vec4f,tuningCounts0:vec4u}
+struct RayResult{transmittanceBits:u32,valid:u32,steps:u32,fetches:u32,pageLookups:u32,pad0:u32,pad1:u32,pad2:u32}
+struct ProbeResult{findResult:u32,level:u32,pad0:u32,pad1:u32}
 @group(0) @binding(0) var<storage,read_write> rayResults:array<RayResult>;
 @group(0) @binding(1) var<storage,read_write> probeResults:array<ProbeResult>;
 @group(0) @binding(8) var<storage,read> publicationState:array<u32>;
 @group(0) @binding(9) var<uniform> dry:DryParams;
 @group(0) @binding(16) var nodeMipAtlas:texture_3d<f32>;
 @group(0) @binding(17) var nodeMipSampler:sampler;
-@group(0) @binding(18) var nodeMipDirectory:texture_2d<u32>;
+@group(0) @binding(20) var nodeMipPageTable:texture_2d<u32>;
 @group(0) @binding(26) var nodeMipPageValidity:texture_2d<u32>;
 var<private> dryMipSteps:u32;
 var<private> benchFetches:u32;
-var<private> benchSearchIterations:u32;
+var<private> benchPageLookups:u32;
+fn dryPublicationWord(index:u32)->u32{return publicationState[index];}
 ${marcher}
 fn benchHash(seed:u32)->u32{var value=seed;value^=value>>16u;value*=0x7feb352du;value^=value>>15u;value*=0x846ca68bu;value^=value>>16u;return value;}
 @compute @workgroup_size(64)
@@ -176,9 +178,9 @@ fn benchmarkMain(@builtin(global_invocation_id) gid:vec3u){
   else if(px%16u==7u){direction=normalize(vec3f(1.0,.0004,.0002));}
   let aperture=select(select(select(.065,.15,gid.x%4u==1u),.35,gid.x%4u==2u),.6,gid.x%4u==3u);
   let maximumDistance=select(select(3.0,8.0,gid.x%3u==1u),22.0,gid.x%3u==2u);
-  dryMipSteps=0u;benchFetches=0u;benchSearchIterations=0u;
+  dryMipSteps=0u;benchFetches=0u;benchPageLookups=0u;
   let cone=dryConeVisibility(origin,direction,aperture,maximumDistance,vec3f(0.0),false);
-  rayResults[gid.x]=RayResult(bitcast<u32>(cone.transmittance),cone.valid,dryMipSteps,benchFetches,benchSearchIterations,0u,0u,0u);
+  rayResults[gid.x]=RayResult(bitcast<u32>(cone.transmittance),cone.valid,dryMipSteps,benchFetches,benchPageLookups,0u,0u,0u);
 }
 @compute @workgroup_size(64)
 fn probeMain(@builtin(global_invocation_id) gid:vec3u){
@@ -191,8 +193,7 @@ fn probeMain(@builtin(global_invocation_id) gid:vec3u){
   if(gid.x%17u==0u){coordinate=vec3u(0x7ffu,0x800u,0x3ffu);}
   if(gid.x%17u==1u){coordinate=vec3u(0x400u,0x1fffffu,0x801u);}
   let level=gid.x%7u;
-  let morton=dryNodeMipMorton(coordinate);
-  probeResults[gid.x]=ProbeResult(morton.x,morton.y,dryNodeMipFind(level,coordinate),0u);
+  probeResults[gid.x]=ProbeResult(dryNodeMipFind(level,coordinate),level,0u,0u);
 }`;
 }
 
@@ -236,18 +237,15 @@ device.queue.writeTexture({ texture: pageValidity }, pageValidityWords,
   { bytesPerRow: pageValidityWords.byteLength }, [pageValidityWords.length, 1]);
 const pageValidityView = pageValidity.createView();
 
-const levelStart = new Uint32Array(12);
-for (const page of plan.pages) if (page.key.level < 11) levelStart[page.key.level + 1] += 1;
-for (let boundary = 1; boundary < levelStart.length; boundary += 1) levelStart[boundary] += levelStart[boundary - 1];
-const paramWords = new Uint32Array(28);
+const paramWords = new Uint32Array(24);
 const paramFloats = new Float32Array(paramWords.buffer);
 paramFloats.set([0, 0, 0], 0);
 paramFloats.set([CELL, CELL, CELL], 4);
 paramWords.set([GENERATION, plan.pages.length, LEVELS, 1], 8);
-// xyz unused here (the benchmark resolves page origins through the directory);
-// w is the opacity level floor, and this pyramid has a page at level zero.
-paramWords.set([0, 0, 0, 0], 12);
-paramWords.set(levelStart, 16);
+// xyz is the atlas in texels (a page's origin follows from its slot); w is the
+// opacity level floor, and this pyramid has a page at level zero.
+paramWords.set([...plan.atlas.texels, 0], 12);
+paramWords.set([0, 48, 0, 0], 20);
 const paramsBuffer = device.createBuffer({ size: paramWords.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 device.queue.writeBuffer(paramsBuffer, 0, paramWords);
 const publicationBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -276,7 +274,7 @@ for (const variant of VARIANTS) {
       { binding: 9, resource: { buffer: paramsBuffer } },
       { binding: 16, resource: visible.view },
       { binding: 17, resource: visible.sampler },
-      { binding: 18, resource: visible.directoryView },
+      { binding: 20, resource: visible.pageTableView },
       { binding: 26, resource: pageValidityView },
     ],
   });
@@ -324,7 +322,7 @@ for (const variant of VARIANTS) {
   const rays = rayOutputs.get(variant.name)!;
   let firstDivergence = -1;
   for (let ray = 0; ray < rayCount && firstDivergence < 0; ray += 1) {
-    // Lanes 0..2: transmittance bits, valid, step count. Fetch/search counters may differ.
+    // Lanes 0..2: transmittance bits, valid, step count. Fetch/lookup counters may differ.
     if (rays[ray * 8] !== baselineRays[ray * 8] || rays[ray * 8 + 1] !== baselineRays[ray * 8 + 1]
       || rays[ray * 8 + 2] !== baselineRays[ray * 8 + 2]) firstDivergence = ray;
   }
@@ -337,17 +335,17 @@ for (const variant of VARIANTS) {
   for (let word = 0; word < rayCount * 4 && probeDivergence < 0; word += 1) {
     if (probes[word] !== baselineProbes[word]) probeDivergence = word;
   }
-  assert.equal(probeDivergence, -1, `${variant.name} morton/find probe word ${probeDivergence} diverged`);
+  assert.equal(probeDivergence, -1, `${variant.name} page-find probe word ${probeDivergence} diverged`);
 }
 
-function histogram(rays: Uint32Array): { steps: number; fetches: number; searchIterations: number; stepHistogram: number[] } {
-  let steps = 0, fetches = 0, searchIterations = 0;
+function histogram(rays: Uint32Array): { steps: number; fetches: number; pageLookups: number; stepHistogram: number[] } {
+  let steps = 0, fetches = 0, pageLookups = 0;
   const stepHistogram = new Array(7).fill(0);
   for (let ray = 0; ray < rayCount; ray += 1) {
-    steps += rays[ray * 8 + 2]; fetches += rays[ray * 8 + 3]; searchIterations += rays[ray * 8 + 4];
+    steps += rays[ray * 8 + 2]; fetches += rays[ray * 8 + 3]; pageLookups += rays[ray * 8 + 4];
     stepHistogram[Math.min(6, rays[ray * 8 + 2] >> 3)] += 1;
   }
-  return { steps, fetches, searchIterations, stepHistogram };
+  return { steps, fetches, pageLookups, stepHistogram };
 }
 
 // ---------------------------------------------------------------------------

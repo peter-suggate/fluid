@@ -89,8 +89,39 @@ export interface WallProfile {
  * face, against a smoothstep that has neither at any setting.
  */
 export function wallProfile_m(profile: WallProfile, rise_m: number, d: number): number {
+  wallProfileTangents(profile, rise_m);
+  if (d <= 0) return rise_m;
+  const footCentreD = tangents[TANGENT_FOOT_CENTRE_D]!;
+  if (d >= footCentreD) return 0;
+  const crest = tangents[TANGENT_CREST]!, crestD = tangents[TANGENT_CREST_D]!;
+  if (d <= crestD) return tangents[TANGENT_CREST_CENTRE_Y]! + Math.sqrt(Math.max(0, crest * crest - d * d));
+  if (d >= tangents[TANGENT_FOOT_D]!) {
+    const foot = tangents[TANGENT_FOOT]!, dx = d - footCentreD;
+    return foot - Math.sqrt(Math.max(0, foot * foot - dx * dx));
+  }
+  return tangents[TANGENT_CREST_Y]! - (d - crestD) / tangents[TANGENT_TAN]!;
+}
+
+/**
+ * The tangent points of one profile at one rise, left in `tangents`.
+ *
+ * The one copy of the tangent-point algebra: the height reads it and so does
+ * the reach. A typed array rather than a returned record or module variables,
+ * because a bake asks once a sample and either of those allocates per number.
+ * The batter's three functions are held for the last batter asked for, which
+ * over a bake is the only one.
+ */
+const TANGENT_BATTER = 0, TANGENT_COS = 1, TANGENT_SIN = 2, TANGENT_TAN = 3;
+const TANGENT_CREST = 4, TANGENT_FOOT = 5, TANGENT_CREST_CENTRE_Y = 6, TANGENT_CREST_D = 7, TANGENT_CREST_Y = 8;
+const TANGENT_FOOT_D = 9, TANGENT_FOOT_CENTRE_D = 10;
+const tangents = new Float64Array(11).fill(Number.NaN, TANGENT_BATTER, TANGENT_BATTER + 1);
+function wallProfileTangents(profile: WallProfile, rise_m: number): void {
   const batter = Math.max(0.02, profile.batter_rad);
-  const cos = Math.cos(batter), sin = Math.sin(batter), tan = Math.tan(batter);
+  if (batter !== tangents[TANGENT_BATTER]) {
+    tangents[TANGENT_BATTER] = batter;
+    tangents[TANGENT_COS] = Math.cos(batter); tangents[TANGENT_SIN] = Math.sin(batter); tangents[TANGENT_TAN] = Math.tan(batter);
+  }
+  const cos = tangents[TANGENT_COS]!, sin = tangents[TANGENT_SIN]!, tan = tangents[TANGENT_TAN]!;
   // The two arcs eat into the rise by `r(1 - sin)` each; whatever is left is the
   // straight face. Radii too fat for the rise are shared down rather than
   // rejected, so a short wall degrades to two tangent arcs and no flat face.
@@ -99,30 +130,83 @@ export function wallProfile_m(profile: WallProfile, rise_m: number, d: number): 
   const crest = profile.crestRadius_m * fit;
   const foot = profile.footRadius_m * fit;
   const crestCentreY = rise_m - crest;
-  const crestTangent = { d: crest * cos, y: crestCentreY + crest * sin };
+  const crestD = crest * cos, crestY = crestCentreY + crest * sin;
   const footTangentY = foot * (1 - sin);
-  const footTangentD = crestTangent.d + (crestTangent.y - footTangentY) * tan;
-  const footCentreD = footTangentD + foot * cos;
-  if (d <= 0) return rise_m;
-  if (d >= footCentreD) return 0;
-  if (d <= crestTangent.d) return crestCentreY + Math.sqrt(Math.max(0, crest * crest - d * d));
-  if (d >= footTangentD) {
-    const dx = d - footCentreD;
-    return foot - Math.sqrt(Math.max(0, foot * foot - dx * dx));
-  }
-  return crestTangent.y - (d - crestTangent.d) / tan;
+  const footD = crestD + (crestY - footTangentY) * tan;
+  tangents[TANGENT_CREST] = crest; tangents[TANGENT_FOOT] = foot;
+  tangents[TANGENT_CREST_CENTRE_Y] = crestCentreY; tangents[TANGENT_CREST_D] = crestD; tangents[TANGENT_CREST_Y] = crestY;
+  tangents[TANGENT_FOOT_D] = footD; tangents[TANGENT_FOOT_CENTRE_D] = footD + foot * cos;
 }
 
-/** How far out a wall profile reaches from its crest line, in metres. */
-export function wallProfileRun_m(profile: WallProfile, rise_m: number): number {
-  let run = 0;
-  // Walked rather than solved: the tangent-point algebra is already in the
-  // profile and a second copy of it here is a second chance to disagree.
-  while (run < 4 * rise_m + profile.crestRadius_m + profile.footRadius_m) {
-    if (wallProfile_m(profile, rise_m, run) <= 0) return run;
-    run += 0.0005;
+/** The reach is read at stations half a millimetre apart, summed outward from the crest line. */
+const WALL_PROFILE_STATION_M = 0.0005;
+/** 128 m of stations: far past any wall a heightfield can carry. */
+const WALL_PROFILE_STATION_LIMIT = 1 << 18;
+let wallProfileStations = new Float64Array(0);
+let wallProfileStationCount = 0;
+
+/** The first station at or past `distance` (past it alone when `strict`), no later than `last`. */
+function wallProfileStation(distance: number, strict: boolean, last: number): number {
+  let low = 0, high = last;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    const station = wallProfileStations[middle];
+    if (strict ? station > distance : station >= distance) high = middle;
+    else low = middle + 1;
   }
-  return run;
+  return low;
+}
+
+/** The first station of `[first, end)` where the profile has reached the ground, or `end`. */
+function wallProfileGroundStation(profile: WallProfile, rise_m: number, first: number, end: number): number {
+  if (first >= end || wallProfile_m(profile, rise_m, wallProfileStations[end - 1]) > 0) return end;
+  let low = first, high = end - 1;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (wallProfile_m(profile, rise_m, wallProfileStations[middle]) <= 0) high = middle;
+    else low = middle + 1;
+  }
+  return low;
+}
+
+/**
+ * How far out a wall profile reaches from its crest line, in metres: the first
+ * station where the profile is on the ground, or the first past four rises and
+ * both radii if it never is.
+ *
+ * Read from the profile rather than solved beside it, so the two cannot
+ * disagree, but not by walking it. The height never rises outward within the
+ * roll, within the face or within the fillet, and it is zero from the fillet's
+ * centre on, so each of the three is asked at its last station and searched
+ * only if that one is on the ground.
+ */
+export function wallProfileRun_m(profile: WallProfile, rise_m: number): number {
+  const limit = 4 * rise_m + profile.crestRadius_m + profile.footRadius_m;
+  if (!(limit > 0) || wallProfile_m(profile, rise_m, 0) <= 0) return 0;
+  while (wallProfileStationCount === 0 || wallProfileStations[wallProfileStationCount - 1] < limit) {
+    if (wallProfileStationCount === wallProfileStations.length) {
+      if (wallProfileStationCount >= WALL_PROFILE_STATION_LIMIT) {
+        throw new RangeError(`Wall profile reach ${limit} m is past the ${WALL_PROFILE_STATION_LIMIT * WALL_PROFILE_STATION_M} m a profile is read over`);
+      }
+      const grown = new Float64Array(Math.max(4096, 2 * wallProfileStationCount));
+      grown.set(wallProfileStations);
+      wallProfileStations = grown;
+    }
+    // Summed, not multiplied: a station is where a walk from the crest line stands.
+    wallProfileStations[wallProfileStationCount] = wallProfileStationCount === 0 ? 0
+      : wallProfileStations[wallProfileStationCount - 1] + WALL_PROFILE_STATION_M;
+    wallProfileStationCount += 1;
+  }
+  const last = wallProfileStation(limit, false, wallProfileStationCount - 1);
+  wallProfileTangents(profile, rise_m);
+  // Station zero is the crest line itself, which the test above has answered.
+  const ground = Math.max(1, wallProfileStation(tangents[TANGENT_FOOT_CENTRE_D]!, false, last));
+  const crestEnd = Math.min(ground, Math.max(1, wallProfileStation(tangents[TANGENT_CREST_D]!, true, last)));
+  const faceEnd = Math.min(ground, Math.max(crestEnd, wallProfileStation(tangents[TANGENT_FOOT_D]!, false, last)));
+  let station = wallProfileGroundStation(profile, rise_m, 1, crestEnd);
+  if (station === crestEnd) station = wallProfileGroundStation(profile, rise_m, crestEnd, faceEnd);
+  if (station === faceEnd) station = wallProfileGroundStation(profile, rise_m, faceEnd, ground);
+  return wallProfileStations[station];
 }
 
 export interface PondVesselTerrace {
@@ -832,11 +916,49 @@ function pondVesselPlanIndex(
     planIndexCache.set(curve, queries);
     return undefined;
   }
-  const index = buildPondVesselPlanIndex(curve);
+  // The index is built by the queries that will read it, a few cells each:
+  // whole, it is milliseconds inside whichever query came sixty-fourth, and
+  // that query may be one of a turn that was promised to be short. Until the
+  // last cell is in, the scan answers, and it answers the same.
+  let build = planIndexBuilds.get(curve);
+  if (!build) planIndexBuilds.set(curve, build = beginPondVesselPlanIndex(curve));
+  const index = advancePondVesselPlanIndex(build, POND_VESSEL_PLAN_INDEX_CELLS_PER_QUERY);
+  if (!index) return undefined;
+  planIndexBuilds.delete(curve);
   planIndexCache.set(curve, index);
   lastPlanCurve = curve;
   return lastPlanIndex = index;
 }
+
+/** Cells a query adds to an index under construction: about ten of its own scans. */
+const POND_VESSEL_PLAN_INDEX_CELLS_PER_QUERY = 16;
+
+/** An index part built: the grid's cells up to `cell`, and what the rest need. */
+interface PondVesselPlanIndexBuild {
+  readonly points: Float64Array;
+  readonly count: number;
+  readonly minZ: number;
+  readonly maxZ: number;
+  readonly gridOriginX: number;
+  readonly gridOriginZ: number;
+  readonly pitch: number;
+  readonly gridNx: number;
+  readonly gridNz: number;
+  readonly cellStart: Int32Array;
+  /** The cells' segments so far, in a table that doubles when it fills. */
+  cellItems: Int32Array;
+  cellItemCount: number;
+  readonly segMinX: Float64Array;
+  readonly segMaxX: Float64Array;
+  readonly segMinZ: Float64Array;
+  readonly segMaxZ: Float64Array;
+  /** Each segment's lower bound for the cell in hand. */
+  readonly gapSquared: Float64Array;
+  /** The next cell to build, and the segment that set the last one's bound. */
+  cell: number;
+  nearest: number;
+}
+const planIndexBuilds = new WeakMap<object, PondVesselPlanIndexBuild>();
 
 /**
  * The containment argument, which is the whole of why the index is exact.
@@ -867,6 +989,13 @@ function pondVesselPlanIndex(
 export function buildPondVesselPlanIndex(
   curve: readonly (readonly [number, number])[],
 ): PondVesselPlanIndex {
+  return advancePondVesselPlanIndex(beginPondVesselPlanIndex(curve), Infinity)!;
+}
+
+/** The index with no cell built: the polyline flattened, the grid laid out. */
+function beginPondVesselPlanIndex(
+  curve: readonly (readonly [number, number])[],
+): PondVesselPlanIndexBuild {
   const count = curve.length;
   const points = new Float64Array(2 * count);
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
@@ -889,6 +1018,36 @@ export function buildPondVesselPlanIndex(
   const boxX = spanX + 2 * margin, boxZ = spanZ + 2 * margin;
   const pitch = Math.sqrt(boxX * boxZ / POND_VESSEL_PLAN_INDEX_CELLS);
   const gridNx = Math.max(1, Math.ceil(boxX / pitch)), gridNz = Math.max(1, Math.ceil(boxZ / pitch));
+
+  // Segment bounding boxes, for the lower bound. Hoisted so the cell loop is
+  // one pass over flat arrays rather than a repeated min/max of the polyline.
+  const segMinX = new Float64Array(count), segMaxX = new Float64Array(count);
+  const segMinZ = new Float64Array(count), segMaxZ = new Float64Array(count);
+  for (let segment = 0; segment < count; segment += 1) {
+    const next = segment + 1 < count ? segment + 1 : 0;
+    const ax = points[2 * segment], az = points[2 * segment + 1];
+    const bx = points[2 * next], bz = points[2 * next + 1];
+    segMinX[segment] = Math.min(ax, bx); segMaxX[segment] = Math.max(ax, bx);
+    segMinZ[segment] = Math.min(az, bz); segMaxZ[segment] = Math.max(az, bz);
+  }
+  return {
+    points, count, minZ, maxZ, gridOriginX, gridOriginZ, pitch, gridNx, gridNz,
+    cellStart: new Int32Array(gridNx * gridNz + 1),
+    cellItems: new Int32Array(Math.max(count, 16 * gridNx * gridNz)), cellItemCount: 0,
+    segMinX, segMaxX, segMinZ, segMaxZ, gapSquared: new Float64Array(count),
+    cell: 0, nearest: 0,
+  };
+}
+
+/**
+ * Build up to `cells` more cells of an index, in the grid's own order. The
+ * index once the last is in, and nothing before: it is the same tables however
+ * the cells were shared out, because a cell's are a function of the cell.
+ */
+function advancePondVesselPlanIndex(build: PondVesselPlanIndexBuild, cells: number): PondVesselPlanIndex | undefined {
+  const { points, count, minZ, maxZ, gridOriginX, gridOriginZ, pitch, gridNx, gridNz } = build;
+  const { cellStart, segMinX, segMaxX, segMinZ, segMaxZ, gapSquared } = build;
+  let cellItems = build.cellItems, cellItemCount = build.cellItemCount;
   /**
    * Slack on the cell's own extent, and the reason it is needed at all.
    *
@@ -901,47 +1060,54 @@ export function buildPondVesselPlanIndex(
    * here — it can only admit candidates, never drop one.
    */
   const cellSlack = pitch * 1e-6;
-
-  const cellStart = new Int32Array(gridNx * gridNz + 1);
-  const cellItems: number[] = [];
-  // Segment bounding boxes, for the lower bound. Hoisted so the cell loop is
-  // one pass over flat arrays rather than a repeated min/max of the polyline.
-  const segMinX = new Float64Array(count), segMaxX = new Float64Array(count);
-  const segMinZ = new Float64Array(count), segMaxZ = new Float64Array(count);
-  for (let segment = 0; segment < count; segment += 1) {
-    const next = segment + 1 < count ? segment + 1 : 0;
-    const ax = points[2 * segment], az = points[2 * segment + 1];
-    const bx = points[2 * next], bz = points[2 * next + 1];
-    segMinX[segment] = Math.min(ax, bx); segMaxX[segment] = Math.max(ax, bx);
-    segMinZ[segment] = Math.min(az, bz); segMaxZ[segment] = Math.max(az, bz);
-  }
-
-  for (let cellZ = 0; cellZ < gridNz; cellZ += 1) {
+  const end = Math.min(gridNx * gridNz, build.cell + cells);
+  // The segment that set the last cell's `bound`: the neighbour's is nearly
+  // this cell's, and starting from it is what lets the lower bounds turn most
+  // of the polyline away.
+  let nearest = build.nearest;
+  for (let cell = build.cell; cell < end; cell += 1) {
+    const cellX = cell % gridNx, cellZ = (cell - cellX) / gridNx;
     const z0 = gridOriginZ + cellZ * pitch - cellSlack, z1 = z0 + pitch + 2 * cellSlack;
-    for (let cellX = 0; cellX < gridNx; cellX += 1) {
-      const x0 = gridOriginX + cellX * pitch - cellSlack, x1 = x0 + pitch + 2 * cellSlack;
-      let bound = Infinity;
-      for (let segment = 0; segment < count; segment += 1) {
-        const next = segment + 1 < count ? segment + 1 : 0;
-        const ax = points[2 * segment], az = points[2 * segment + 1];
-        const bx = points[2 * next], bz = points[2 * next + 1];
-        const corner = Math.max(
-          segmentDistanceSquared(x0, z0, ax, az, bx, bz),
-          segmentDistanceSquared(x1, z0, ax, az, bx, bz),
-          segmentDistanceSquared(x0, z1, ax, az, bx, bz),
-          segmentDistanceSquared(x1, z1, ax, az, bx, bz));
-        if (corner < bound) bound = corner;
-      }
-      const admit = bound * POND_VESSEL_PLAN_INDEX_SLACK;
-      cellStart[cellX + gridNx * cellZ] = cellItems.length;
-      for (let segment = 0; segment < count; segment += 1) {
-        const gapX = Math.max(0, Math.max(segMinX[segment] - x1, x0 - segMaxX[segment]));
-        const gapZ = Math.max(0, Math.max(segMinZ[segment] - z1, z0 - segMaxZ[segment]));
-        if (gapX * gapX + gapZ * gapZ <= admit) cellItems.push(segment);
-      }
+    const x0 = gridOriginX + cellX * pitch - cellSlack, x1 = x0 + pitch + 2 * cellSlack;
+    for (let segment = 0; segment < count; segment += 1) {
+      const gapX = Math.max(0, Math.max(segMinX[segment] - x1, x0 - segMaxX[segment]));
+      const gapZ = Math.max(0, Math.max(segMinZ[segment] - z1, z0 - segMaxZ[segment]));
+      gapSquared[segment] = gapX * gapX + gapZ * gapZ;
+    }
+    // `bound` is a minimum, so it is the same number over any subset that
+    // keeps its argmin, and a segment whose lower bound already exceeds it is
+    // not the argmin: its farthest corner is at least half a cell further
+    // than its nearest point, which no rounding closes.
+    let bound = Infinity;
+    for (let visit = -1; visit < count; visit += 1) {
+      const segment = visit < 0 ? nearest : visit;
+      if (gapSquared[segment] > bound) continue;
+      const next = segment + 1 < count ? segment + 1 : 0;
+      const ax = points[2 * segment], az = points[2 * segment + 1];
+      const bx = points[2 * next], bz = points[2 * next + 1];
+      const corner = Math.max(
+        segmentDistanceSquared(x0, z0, ax, az, bx, bz),
+        segmentDistanceSquared(x1, z0, ax, az, bx, bz),
+        segmentDistanceSquared(x0, z1, ax, az, bx, bz),
+        segmentDistanceSquared(x1, z1, ax, az, bx, bz));
+      if (corner < bound) { bound = corner; nearest = segment; }
+    }
+    const admit = bound * POND_VESSEL_PLAN_INDEX_SLACK;
+    cellStart[cell] = cellItemCount;
+    if (cellItemCount + count > cellItems.length) {
+      const grown = new Int32Array(2 * cellItems.length);
+      grown.set(cellItems);
+      cellItems = build.cellItems = grown;
+    }
+    for (let segment = 0; segment < count; segment += 1) {
+      if (gapSquared[segment] <= admit) cellItems[cellItemCount++] = segment;
     }
   }
-  cellStart[gridNx * gridNz] = cellItems.length;
+  build.cell = end;
+  build.nearest = nearest;
+  build.cellItemCount = cellItemCount;
+  if (end < gridNx * gridNz) return undefined;
+  cellStart[gridNx * gridNz] = cellItemCount;
 
   // One band per two segments: dense enough that a band holds the two or three
   // segments a horizontal line actually meets, cheap enough to build.
@@ -970,7 +1136,7 @@ export function buildPondVesselPlanIndex(
   return {
     points, count,
     gridOriginX, gridOriginZ, gridInversePitch: 1 / pitch, gridNx, gridNz,
-    cellStart, cellItems: Int32Array.from(cellItems),
+    cellStart, cellItems: cellItems.slice(0, cellItemCount),
     bandOriginZ: minZ, bandInversePitch, bandCount,
     bandStart, bandItems: Int32Array.from(bandItems),
   };
@@ -986,8 +1152,8 @@ function periodicSpline(values: readonly number[], turn: number): number {
   const count = values.length;
   const position = ((turn % 1) + 1) % 1 * count;
   const index = Math.floor(position), t = position - index, t2 = t * t, t3 = t2 * t;
-  const at = (offset: number) => values[((index + offset) % count + count) % count];
-  const a = at(-1), b = at(0), c = at(1), d = at(2);
+  const a = values[((index - 1) % count + count) % count], b = values[(index % count + count) % count];
+  const c = values[((index + 1) % count + count) % count], d = values[((index + 2) % count + count) % count];
   return .5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (3 * b - 3 * c + d - a) * t3);
 }
 
@@ -999,9 +1165,11 @@ function relief(x: number, z: number, seed: number): number {
     const cx = Math.floor(px), cz = Math.floor(pz);
     const fx = px - cx, fz = pz - cz;
     const sx = fx * fx * (3 - 2 * fx), sz = fz * fz * (3 - 2 * fz);
-    const corner = (i: number, j: number) => hashSigned(seed + 0x9e37 * octave + 73_856_093 * (cx + i) + 19_349_663 * (cz + j));
-    const lower = corner(0, 0) * (1 - sx) + corner(1, 0) * sx;
-    const upper = corner(0, 1) * (1 - sx) + corner(1, 1) * sx;
+    const base = seed + 0x9e37 * octave;
+    const lower = hashSigned(base + 73_856_093 * cx + 19_349_663 * cz) * (1 - sx)
+      + hashSigned(base + 73_856_093 * (cx + 1) + 19_349_663 * cz) * sx;
+    const upper = hashSigned(base + 73_856_093 * cx + 19_349_663 * (cz + 1)) * (1 - sx)
+      + hashSigned(base + 73_856_093 * (cx + 1) + 19_349_663 * (cz + 1)) * sx;
     total += amplitude * (lower * (1 - sz) + upper * sz);
     weight += amplitude;
     amplitude *= .45;

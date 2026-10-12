@@ -3,9 +3,10 @@
 import { useEffect, useLayoutEffect, useMemo } from "react";
 import { simulation } from "../lib/core/simulation/controller";
 import { startQueryStateSync } from "../lib/core/url-state";
-import { startSceneAutosave } from "../lib/core/scene-autosave";
+import { browserSceneAutosaveDatabase, startSceneAutosave } from "../lib/core/scene-autosave";
 import { browserSceneLibraryStorage } from "../lib/core/scene-library";
 import { defaultSession } from "../lib/core/session/session";
+import { startVoxelIndexPreparation } from "../lib/core/voxel-editor/voxel-index";
 import { EditorHostProvider } from "../lib/core/session/host-context";
 import { studioEditorHost } from "../lib/core/simulation/editor-host";
 import { SessionProvider, useSession } from "../lib/core/session/session-context";
@@ -43,7 +44,11 @@ export function FluidLab() {
   }, [session]);
   // After the URL has hydrated the document, so the first autosave records the
   // scene the reader actually arrived on rather than the default preset.
-  useEffect(() => startSceneAutosave({ storage: browserSceneLibraryStorage() }, session), [session]);
+  useEffect(() => startSceneAutosave({
+    database: browserSceneAutosaveDatabase(), storage: browserSceneLibraryStorage(),
+  }, session), [session]);
+  // The editor's index of the solids, built before the first pointer move asks for it.
+  useEffect(() => startVoxelIndexPreparation(session.scene), [session]);
 
   useEffect(() => {
     let frame = 0;

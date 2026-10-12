@@ -1,8 +1,10 @@
-import { terrainWorldContainer } from "./terrain";
+import { terrainContentStamp, terrainWorldContainer } from "./terrain";
 import type { EnvironmentId } from "./environments";
 import { environmentIndex } from "./environments";
 import type { SceneDescription, Vec3 } from "./model";
+import { classifySceneryChange } from "./scenery-construction-key";
 import { expandSceneryGraph, type ScenerySpan } from "./scenery-expand";
+import type { SceneryGraph, SceneryPalette } from "./scenery-graph";
 import { sceneryGraphForEnvironment } from "./scenery-presets";
 import {
   aabb,
@@ -103,12 +105,118 @@ export function buildEnvironmentProxyCatalog(scene: SceneDescription, environmen
   if (cached) return cached;
   const context = environmentSceneryContext(scene, environmentId, options);
   const graph = scene.scenery ?? sceneryGraphForEnvironment(scene, environmentId);
-  const b = new ProxyBuilder(environmentId);
-  const { shell, spans } = expandSceneryGraph(b, graph, context);
-  return retainCatalog(scene, environmentId, options, {
+  const names = Object.keys(graph.palettes);
+  // One expansion says both what the set looks like and which palette entry
+  // each colour is: it runs under the probe tints, and the document's own are
+  // multiplied in afterwards.
+  let b = new ProxyBuilder(environmentId);
+  let expansion = expandSceneryGraph(b, names.length > 0 ? { ...graph, palettes: environmentPaletteProbes(names) } : graph, context);
+  const resolved = names.length > 0 ? resolvePaletteProbes(expansion.shell.primitives, b.props, graph, names) : undefined;
+  let shell = expansion.shell, primitives: readonly EnvironmentProxyPrimitive[] = b.props;
+  if (resolved) {
+    shell = { ...shell, primitives: resolved.shell };
+    primitives = resolved.primitives;
+  } else if (names.length > 0) {
+    // A colour no palette entry describes: the set is expanded as it is drawn.
+    b = new ProxyBuilder(environmentId);
+    expansion = expandSceneryGraph(b, graph, context);
+    shell = expansion.shell; primitives = b.props;
+  }
+  const catalog = retainCatalog(scene, environmentId, options, {
     environmentId, environmentIndex: environmentIndex(environmentId),
-    scale_m: context.s, floorY_m: context.floorY_m, shell, primitives: b.props, spans,
+    scale_m: context.s, floorY_m: context.floorY_m, shell, primitives, spans: expansion.spans,
   });
+  if (resolved) catalogPaletteSources.set(catalog, resolved.sources);
+  return catalog;
+}
+
+/**
+ * A catalog's colours, as the palette entries they were resolved from.
+ *
+ * Indexed by publication position, shell faces first. `palette` is an index
+ * into `names`, or -1 for a colour the document wrote out; `value` is the
+ * position on that palette's ramp. A tint edit recolours the positions naming
+ * the palette and reads nothing else.
+ */
+export interface EnvironmentCatalogPaletteSources {
+  readonly names: string[];
+  readonly palette: Int16Array;
+  readonly value: Float64Array;
+}
+
+const catalogPaletteSources = new WeakMap<EnvironmentProxyCatalog, EnvironmentCatalogPaletteSources>();
+
+/** The palette entries a catalog's colours came from. Absent when one of them is nothing a palette entry describes. */
+export function environmentCatalogPaletteSources(catalog: EnvironmentProxyCatalog): EnvironmentCatalogPaletteSources | undefined {
+  return catalogPaletteSources.get(catalog);
+}
+
+/** Say where the colours of a catalog derived from another by recolouring came from. */
+export function holdEnvironmentCatalogPaletteSources(catalog: EnvironmentProxyCatalog, sources: EnvironmentCatalogPaletteSources): void {
+  catalogPaletteSources.set(catalog, sources);
+}
+
+/**
+ * Tints no authored colour can be mistaken for, in exact powers of two.
+ *
+ * Expanding a node under these leaves every palette colour as
+ * `[v·2^40, v·2^(60+k), v·2^-40]`: `v` and `k` come back exactly, and a
+ * literal passes through untouched. A colour that is neither — one the
+ * expansion clamped or mixed after resolving it — is caught by its magnitude.
+ */
+const PROBE_RED = 2 ** 40, PROBE_BLUE = 2 ** -40;
+const authoredMagnitude = (value: number): boolean => value === 0 || (Math.abs(value) > 2 ** -30 && Math.abs(value) < 2 ** 30);
+
+/** The probe tint of each named palette, in the order that numbers them. */
+export function environmentPaletteProbes(names: readonly string[]): Record<string, SceneryPalette> {
+  const probes: Record<string, SceneryPalette> = {};
+  names.forEach((name, index) => { probes[name] = { tint: [PROBE_RED, 2 ** (60 + index), PROBE_BLUE] }; });
+  return probes;
+}
+
+/** The palette index a probe colour names, -1 for a literal, undefined when it is neither. */
+export function environmentPaletteProbeSource(color: readonly [number, number, number], paletteCount: number): number | undefined {
+  if (authoredMagnitude(color[0]) && authoredMagnitude(color[1]) && authoredMagnitude(color[2])) return -1;
+  const index = Math.log2(color[1] / color[0]) - 20;
+  return Number.isInteger(index) && index >= 0 && index < paletteCount
+    && color[1] === color[0] * 2 ** (20 + index) && color[2] === color[0] * 2 ** -80 ? index : undefined;
+}
+
+/** Where on its palette's ramp a probe colour sits. */
+export function environmentPaletteProbeValue(color: readonly [number, number, number]): number {
+  return color[0] / PROBE_RED;
+}
+
+/**
+ * The primitives of a probe expansion under the graph's own tints, and the
+ * palette entry each colour was. Undefined when a colour is neither a literal
+ * nor a palette entry.
+ */
+function resolvePaletteProbes(
+  shellProbes: readonly EnvironmentProxyShell["primitives"][number][],
+  propProbes: readonly EnvironmentProxyPrimitive[],
+  graph: SceneryGraph,
+  names: string[],
+): { shell: EnvironmentProxyShell["primitives"]; primitives: readonly EnvironmentProxyPrimitive[]; sources: EnvironmentCatalogPaletteSources } | undefined {
+  const shellCount = shellProbes.length;
+  const palette = new Int16Array(shellCount + propProbes.length);
+  const value = new Float64Array(palette.length);
+  const resolve = <T extends EnvironmentProxyPrimitive>(probes: readonly T[], first: number): T[] | undefined => {
+    const out = new Array<T>(probes.length);
+    for (let index = 0; index < probes.length; index += 1) {
+      const probe = probes[index]!;
+      const source = environmentPaletteProbeSource(probe.material.colorLinear, names.length);
+      if (source === undefined) return undefined;
+      palette[first + index] = source;
+      if (source < 0) { out[index] = probe; continue; }
+      const v = environmentPaletteProbeValue(probe.material.colorLinear), tint = graph.palettes[names[source]!]!.tint;
+      value[first + index] = v;
+      out[index] = { ...probe, material: { ...probe.material, colorLinear: [v * tint[0], v * tint[1], v * tint[2]] } };
+    }
+    return out;
+  };
+  const shell = resolve(shellProbes, 0), primitives = shell && resolve(propProbes, shellCount);
+  return shell && primitives ? { shell, primitives, sources: { names, palette, value } } : undefined;
 }
 
 /**
@@ -146,7 +254,7 @@ export function reuseEnvironmentProxyCatalog(source: SceneDescription, target: S
   const catalog = cachedEnvironmentProxyCatalog(source);
   if (!catalog || source.environment !== target.environment
     || catalogFingerprint(source, catalog.environmentId, {}) !== catalogFingerprint(target, catalog.environmentId, {})
-    || (source.scenery !== target.scenery && JSON.stringify(source.scenery) !== JSON.stringify(target.scenery))) return;
+    || classifySceneryChange(source.scenery, target.scenery).kind !== "same") return;
   adoptEnvironmentProxyCatalog(target, catalog);
 }
 
@@ -162,9 +270,14 @@ function catalogFingerprint(scene: SceneDescription, environmentId: EnvironmentI
   // made the option's own documented use ("a bench that renders one scene at
   // four resolutions without rebuilding it") return the first resolution four
   // times.
+  //
+  // The ground is named by its content stamp, which is kept per terrain object.
+  // It was the terrain serialized whole: every sample of a sculpted grid, built
+  // and hashed again on each lookup, which an accepted voxel edit makes several
+  // of while leaving the ground alone.
   return `${environmentId}|${options.shellThickness_m ?? "scene"}|${c.width_m}:${c.height_m}:${c.depth_m}`
     + `|${scene.voxelDomain.finestCellSize_m}|${options.detailCellSize_m ?? scene.voxelDomain.detailCellSize_m ?? "cell"}`
-    + `|${JSON.stringify(scene.terrain ?? null)}`;
+    + `|${terrainContentStamp(scene.terrain)}`;
 }
 
 function cachedCatalog(scene: SceneDescription, environmentId: EnvironmentId, options: EnvironmentProxyCatalogOptions): EnvironmentProxyCatalog | undefined {

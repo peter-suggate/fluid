@@ -1,4 +1,5 @@
 import { fluidBodyEntity, fluidPlayActions } from "./editor-fluid-body";
+import type { VoxelClipboard } from "./voxel-editor/verb";
 import { sceneDocumentActions } from "./editor-scene-document";
 import { voxelSculptActions } from "./editor-voxel-tool-actions";
 import { inflowEntity } from "./editor-inflow";
@@ -98,7 +99,7 @@ export const EDITOR_ENTITIES: readonly EditorEntityDefinition[] = Object.freeze(
   tankEntity,
   // Last, and pickless. A voxel region is a box drawn *around* things that are
   // themselves the pick targets, so it never competes for a ray; it is here to
-  // be found by id, to describe itself, and to offer its one verb.
+  // be found by id, to describe itself, and to offer the region verbs.
   voxelRegionEntity,
   // Pickless too: the sun has no surface. The ring's Light wedge selects it.
   sunEntity,
@@ -116,6 +117,7 @@ export function editorEntityContext(session: EditorCatalogSession = defaultCatal
     scene: displaySceneSnapshot(session.scene, session.sceneDraft),
     methodId: session.method?.getState().methodId,
     voxelRegion: session.ui.getState().voxelRegion,
+    voxelClipboard: session.ui.getState().voxelClipboard,
     // One definition of "a ray can hit something", shared with the viewport:
     // the capability gate, not a second reading of the renderer's status enum.
     pickingAvailable: resourceInteractionGates(
@@ -286,10 +288,10 @@ export function sceneActionsAt(
   // click landed on. Up when the caller has no better answer — the room's
   // fallback point is a floor.
   normal: Vec3 = { x: 0, y: 1, z: 0 },
-  options: { readonly placement?: boolean; readonly methodId?: string } = {},
+  options: { readonly placement?: boolean; readonly methodId?: string; readonly voxelClipboard?: VoxelClipboard } = {},
 ): readonly EditorAction[] {
   const placement = options.placement !== false
-    ? [...fluidPlayActions(scene, point_m, normal, options.methodId), ...voxelSculptActions(scene, options.methodId),
+    ? [...fluidPlayActions(scene, point_m, normal, options.methodId), ...voxelSculptActions(scene, options.methodId, options.voxelClipboard),
       lightWedge(point_m, normal)]
     : [];
   return [...placement, sceneWedge(scene), sceneInstrumentWedge(scene), compareWedge()];

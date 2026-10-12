@@ -1,7 +1,8 @@
 import type { EditorAction, EditorActionIcon, EditorActionTone } from "./editor-action";
 import type { SceneDescription } from "./model";
-import { adjustableControl } from "./voxel-editor/plugin";
+import { adjustableControl, type ToolControl } from "./voxel-editor/plugin";
 import { voxelTools } from "./voxel-editor/registry";
+import type { VoxelClipboard } from "./voxel-editor/verb";
 
 /**
  * The sculpt tools, arranged for the surfaces that offer them.
@@ -12,9 +13,9 @@ import { voxelTools } from "./voxel-editor/registry";
  * dispatched on: each entry's effect carries the id back to the one performer.
  *
  * Two surfaces compose from here: the scene's ring draws the groups as wedges
- * (`voxelSculptActions`), and the EDIT rail stands the solid tools down the
- * viewport's left edge (`voxelToolRail`) — the same groups, the same
- * availability, one composition. A tool that does not apply right now is drawn
+ * (`voxelSculptActions`), and the EDIT rail stands the brushes and the
+ * selection tools down the viewport's left edge (`voxelToolRail`) — the same
+ * groups, the same availability, one composition. A tool that does not apply right now is drawn
  * with its own reason as the hint — never omitted — so the reason ("Choose
  * Sparse CM12 to edit solids while water runs") teaches the way in rather than
  * hiding it.
@@ -28,21 +29,21 @@ const GROUP_FACES: Record<string, {
   /** Stands on the EDIT rail. Water shapes do not: to a reader they are water, and the Drop-water row owns them. */
   readonly rail?: boolean;
 }> = {
-  Construct: {
+  Brush: {
     rail: true,
-    id: "sculpt-build",
-    label: "Build",
+    id: "sculpt-brush",
+    label: "Brushes",
     icon: "solid",
     tone: "body",
-    hint: "Sculpt solid voxels: brush, box, sphere and wall strokes",
+    hint: "Attach, erase or paint solid voxels: voxel, face, box, line, center and pattern brushes",
   },
-  Subtract: {
+  Select: {
     rail: true,
-    id: "sculpt-carve",
-    label: "Carve",
-    icon: "erase",
-    tone: "body",
-    hint: "Cut into solids: carve, cut, drill and channel strokes",
+    id: "sculpt-select",
+    label: "Select voxels",
+    icon: "region",
+    tone: "region",
+    hint: "Select solid voxels: a box by marquee, or a whole connected piece by wand",
   },
   Fluid: {
     id: "sculpt-water",
@@ -74,9 +75,11 @@ export interface VoxelToolGroup {
   readonly tools: readonly VoxelToolEntry[];
 }
 
+/** `clipboard` is what the editor last copied: a tool that stamps it cannot run without one. */
 export function voxelToolGroups(
   scene: SceneDescription,
   methodId: string | undefined,
+  clipboard?: VoxelClipboard,
 ): readonly VoxelToolGroup[] {
   const groups = [...new Set(voxelTools.tools.map((tool) => tool.ui.group))];
   return groups.map((group) => {
@@ -88,7 +91,7 @@ export function voxelToolGroups(
       tools: voxelTools.tools
         .filter((tool) => tool.ui.group === group)
         .map((tool) => {
-          const unavailable = tool.unavailable({ scene, methodId: methodId ?? "" });
+          const unavailable = tool.unavailable({ scene, methodId: methodId ?? "", clipboard });
           return {
             id: tool.id,
             label: tool.ui.label,
@@ -117,9 +120,10 @@ export interface VoxelRailTool extends VoxelToolEntry {
 export function voxelToolRail(
   scene: SceneDescription,
   methodId: string | undefined,
+  clipboard?: VoxelClipboard,
 ): readonly (Omit<VoxelToolGroup, "tools"> & { readonly tools: readonly VoxelRailTool[] })[] {
   let place = 0;
-  return voxelToolGroups(scene, methodId)
+  return voxelToolGroups(scene, methodId, clipboard)
     .filter((group) => GROUP_FACES[group.group]?.rail)
     .map((group) => ({ ...group, tools: group.tools.map((tool) => {
       place += 1;
@@ -143,32 +147,63 @@ export function voxelRailKeyForTool(toolId: string): string | undefined {
 }
 
 /**
+ * The controls the rail draws once, above its tools, rather than on each
+ * tool's line: every `surface: "rail"` control a rail tool lists, by first
+ * appearance. They are shared by declaration, so one value stands for all.
+ */
+export const VOXEL_RAIL_CONTROLS: readonly ToolControl[] = [...new Set(RAIL_TOOL_IDS
+  .flatMap((id) => voxelTools.get(id)!.ui.controls.filter((control) => control.surface === "rail")))];
+
+/**
+ * The controls whose keys are live while this tool is armed: its own, and the
+ * rail's while it stands there. The rail's switch is in view under every rail
+ * tool, so its letters answer under every one of them — a selection tool
+ * included — rather than only under the tools that read it.
+ */
+export function voxelToolKeyControls(toolId: string | undefined): readonly ToolControl[] {
+  const tool = voxelTools.get(toolId);
+  if (!tool) return [];
+  const rail = RAIL_TOOL_IDS.includes(tool.id)
+    ? VOXEL_RAIL_CONTROLS.filter((control) => !tool.ui.controls.includes(control)) : [];
+  return [...tool.ui.controls, ...rail];
+}
+
+/**
  * One line saying what the hand can do while a tool is armed, most used first.
  *
- * Composed from the tool's own declaration — which numbers its brackets step —
- * so the line cannot promise a key the gesture host would not take. Its
- * toggles are not repeated: each already shows its letter on the tool's line.
- * The camera clauses are the host's and constant.
+ * Composed from the tool's own declaration — which choice its letters switch,
+ * what Alt does to it, which numbers its brackets step — so the line cannot
+ * promise a key the gesture host would not take. Its toggles are not repeated:
+ * each already shows its letter on the tool's line. The camera clauses are the
+ * host's and constant.
  */
 export function voxelToolLegend(toolId: string | undefined): string | undefined {
   const tool = voxelTools.get(toolId);
   if (!tool) return undefined;
   const name = (control: { readonly label: string }) => control.label.split(" · ")[0]!.toLowerCase();
   const first = adjustableControl(tool, false), second = adjustableControl(tool, true);
+  const switches = voxelToolKeyControls(tool.id).flatMap((control) => {
+    if (control.kind !== "choice") return [];
+    const keys = control.options.flatMap((option) => option.shortcut ? [option.shortcut.toUpperCase()] : []);
+    return keys.length > 0 ? [`${keys.join(" ")} ${name(control)}`] : [];
+  });
   return [
-    "⌥ opposite",
+    ...switches,
+    // In the tool's own words, limits included: under paint the modifier samples, and its line says so.
+    tool.ui.opposite && `⌥ ${tool.ui.opposite}`,
     first && `[ ] ${name(first)}`,
     second && second !== first && `⇧[ ] ${name(second)}`,
     "space-drag orbits",
-    "right-click cancels",
+    "right-click cancels the stroke, then puts the tool away",
   ].filter(Boolean).join(" · ");
 }
 
 export function voxelSculptActions(
   scene: SceneDescription,
   methodId: string | undefined,
+  clipboard?: VoxelClipboard,
 ): readonly EditorAction[] {
-  return voxelToolGroups(scene, methodId).map((group) => ({
+  return voxelToolGroups(scene, methodId, clipboard).map((group) => ({
     id: group.id,
     label: group.label,
     icon: group.icon,

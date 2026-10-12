@@ -64,8 +64,6 @@ import { SCENE_ENVIRONMENT_OWNER_BASE } from "../lib/core/webgpu-rigid-body";
 import { getScenePreset } from "../lib/core/scenes";
 import { SVO_CLUSTER_ARENA_BLOCK, packSvoClusterArena } from "../lib/svo/features/construction/svo-cluster-arena";
 import {
-  growSvoNodeMipAddressPlan,
-  pagesOutsideSvoNodeMipAddressPlan,
   planSvoNodeMipAddresses,
   svoNodeMipDomainBasePages,
   svoNodeMipDomainPyramidPageCount,
@@ -179,24 +177,31 @@ const totalPlan = planSvoNodeMipAddresses({
   levelCount: heroLevels, addressCapacity: 134_217_728,
 });
 record("address-plan-total", totalPlan.total && totalPlan.plan.complete
-  && pagesOutsideSvoNodeMipAddressPlan(totalPlan, svoNodeMipDomainBasePages(heroBasePages)).length === 0,
-  `a ${heroBasePages.join("x")} page domain plans totally at ${totalPlan.plan.pages.length}/${heroDomainPages} pages`
-  + ` (${totalPlan.reservePages} beyond the ${totalPlan.plan.pages.length - totalPlan.reservePages} occupied);`
+  && totalPlan.measureGrowth(svoNodeMipDomainBasePages(heroBasePages)).newPages === 0,
+  `a ${heroBasePages.join("x")} page domain plans totally at ${totalPlan.residentPageCount}/${heroDomainPages} pages`
+  + ` (${totalPlan.reservePages} beyond the ${totalPlan.residentPageCount - totalPlan.reservePages} occupied);`
   + " no edit can activate a page outside it",
-  { total: totalPlan.total, pages: totalPlan.plan.pages.length }, heroDomainPages);
+  { total: totalPlan.total, pages: totalPlan.residentPageCount }, heroDomainPages);
 
 const starved = planSvoNodeMipAddresses({
   occupiedBasePages: occupiedSubset, basePageDimensions: heroBasePages, levelCount: heroLevels,
   addressCapacity: 134_217_728, maximumReserveBytes: 40 * 72_000,
 });
-const starvedMissing = pagesOutsideSvoNodeMipAddressPlan(starved, svoNodeMipDomainBasePages(heroBasePages));
-const grown = growSvoNodeMipAddressPlan(starved, starvedMissing.slice(0, 3));
-const refused = growSvoNodeMipAddressPlan(starved, starvedMissing);
-const growthSound = !starved.total && grown !== undefined && grown.plan.plan.complete
-  && grown.addedBasePages.length === 3 && grown.rebuildRequired
-  && grown.plan.atlasPages.join(",") === starved.atlasPages.join(",")
-  && grown.plan.pageCapacity === starved.pageCapacity
-  && refused === undefined;
+const starvedMissing = svoNodeMipDomainBasePages(heroBasePages)
+  .filter(([x, y, z]) => starved.find(0, x, y, z) < 0);
+const starvedShape = `${starved.atlasPages.join(",")}/${starved.pageCapacity}`;
+const starvedSlots = starved.slotPages.slice();
+const starvedResident = starved.residentPageCount;
+// Measured before anything grows: the whole request is refused, and a refusal
+// leaves the plan as it was.
+const refusal = starved.measureGrowth(starvedMissing);
+const growth = starved.grow(starvedMissing.slice(0, 3));
+const growthSound = !starved.total && !refusal.fits && starved.plan.complete
+  && growth.newPages >= 3 && starved.residentPageCount === starvedResident + growth.newPages
+  && starvedMissing.slice(0, 3).every(([x, y, z]) => starved.find(0, x, y, z) >= 0)
+  && `${starved.atlasPages.join(",")}/${starved.pageCapacity}` === starvedShape
+  // Slots are append-only: every page resident before the growth is where it was.
+  && starvedSlots.every((word, index) => word === 0 || starved.slotPages[index] === word);
 record("address-plan-growth", growthSound,
   growthSound
     ? `a starved plan (${starved.pageCapacity} pages, ${starved.reservePages} reserved) grows in place without moving its`

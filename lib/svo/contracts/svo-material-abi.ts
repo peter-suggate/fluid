@@ -159,12 +159,23 @@ function nonNegative(value: number, label: string): number {
 
 function color(value: LinearRgb, label: string, bounded = true): [number, number, number] {
   if (value.length !== 3) throw new RangeError(`${label} must contain three channels`);
-  return value.map((channel, index) => bounded
-    ? unit(channel, `${label}[${index}]`)
-    : nonNegative(channel, `${label}[${index}]`)) as [number, number, number];
+  for (let index = 0; index < 3; index += 1) {
+    const channel = value[index];
+    // Named only once it is wrong: a table is thousands of colours, and a
+    // label built for each was most of what packing one cost.
+    if (!(channel >= 0) || !(channel <= (bounded ? 1 : Number.MAX_VALUE))) {
+      if (bounded) unit(channel, `${label}[${index}]`);
+      else nonNegative(channel, `${label}[${index}]`);
+    }
+  }
+  return [value[0], value[1], value[2]];
 }
 
+/** Records this module made canonical: frozen, so one handed back is not checked again. */
+const canonicalRecords = new WeakSet<SvoMaterialRecord>();
+
 export function canonicalSvoMaterialRecord(input: SvoMaterialRecord): SvoMaterialRecord {
+  if (canonicalRecords.has(input)) return input;
   if (!Number.isSafeInteger(input.materialId) || input.materialId < 0 || input.materialId > 0xffff) {
     throw new RangeError("SVO material ID must be an unsigned 16-bit integer");
   }
@@ -179,7 +190,7 @@ export function canonicalSvoMaterialRecord(input: SvoMaterialRecord): SvoMateria
   if (ior < 1 || ior > 4) throw new RangeError("SVO material IOR must be from one to four");
   const anisotropy = finite(input.scatteringAnisotropy, "SVO material scattering anisotropy");
   if (anisotropy <= -1 || anisotropy >= 1) throw new RangeError("SVO material scattering anisotropy must be strictly between -1 and 1");
-  return Object.freeze({
+  const record = Object.freeze({
     ...input,
     baseColorLinear: color(input.baseColorLinear, "SVO material base color"),
     opacity: unit(input.opacity, "SVO material opacity"),
@@ -194,6 +205,8 @@ export function canonicalSvoMaterialRecord(input: SvoMaterialRecord): SvoMateria
     scatteringColorLinear: color(input.scatteringColorLinear, "SVO material scattering color"),
     scatteringAnisotropy: anisotropy,
   });
+  canonicalRecords.add(record);
+  return record;
 }
 
 /**
@@ -302,19 +315,96 @@ export function packSvoMaterialTable(records: readonly SvoMaterialRecord[]): Uin
     ids.add(record.materialId);
     maximumId = Math.max(maximumId, record.materialId);
   }
-  const buffer = new ArrayBuffer((maximumId + 1) * SVO_MATERIAL_RECORD_STRIDE_BYTES);
-  const words = new Uint32Array(buffer);
-  const floats = new Float32Array(buffer);
-  for (const record of canonical) {
-    const offset = record.materialId * SVO_MATERIAL_RECORD_WORDS;
-    floats.set([...record.baseColorLinear, record.opacity], offset);
-    floats.set([...record.emissiveLinear, record.roughness], offset + 4);
-    floats.set([record.metallic, record.specularWeight, record.indexOfRefraction, record.transmission], offset + 8);
-    floats.set([...record.absorption_mInv, record.scattering_mInv], offset + 12);
-    floats.set([...record.scatteringColorLinear, record.scatteringAnisotropy], offset + 16);
-    words.set([record.materialId, record.revision, record.materialFunctionId, record.flags], offset + 20);
-  }
+  const words = new Uint32Array((maximumId + 1) * SVO_MATERIAL_RECORD_WORDS);
+  for (const record of canonical) writeCanonicalSvoMaterialRecord(words, record);
   return words;
+}
+
+function writeCanonicalSvoMaterialRecord(words: Uint32Array, record: SvoMaterialRecord): void {
+  const floats = new Float32Array(words.buffer, words.byteOffset, words.length);
+  const offset = record.materialId * SVO_MATERIAL_RECORD_WORDS;
+  floats.set([...record.baseColorLinear, record.opacity], offset);
+  floats.set([...record.emissiveLinear, record.roughness], offset + 4);
+  floats.set([record.metallic, record.specularWeight, record.indexOfRefraction, record.transmission], offset + 8);
+  floats.set([...record.absorption_mInv, record.scattering_mInv], offset + 12);
+  floats.set([...record.scatteringColorLinear, record.scatteringAnisotropy], offset + 16);
+  words.set([record.materialId, record.revision, record.materialFunctionId, record.flags], offset + 20);
+}
+
+/**
+ * Overwrite one record of a packed table in place, at the slot its ID names.
+ *
+ * The table is direct-index, so a material that changed is one stride of words
+ * and nothing around it moves — which is what lets an appearance edit be a
+ * byte-range write rather than a new table.
+ */
+export function writeSvoMaterialRecord(table: Uint32Array, input: SvoMaterialRecord): void {
+  const record = canonicalSvoMaterialRecord(input);
+  if (record.materialId === 0) throw new RangeError("SVO material slot zero is reserved for empty space");
+  if ((record.materialId + 1) * SVO_MATERIAL_RECORD_WORDS > table.length) {
+    throw new RangeError(`SVO material ID ${record.materialId} exceeds the packed table`);
+  }
+  writeCanonicalSvoMaterialRecord(table, record);
+}
+
+/** An environment record's twenty float words: only the first eight vary between materials. */
+const environmentRecordFloats = new Float32Array(20);
+environmentRecordFloats.set([0, 1, 1.5, 0], 8);
+const environmentRecordWords = new Uint32Array(environmentRecordFloats.buffer);
+
+/**
+ * Overwrite one authored-environment material's record in place: the words
+ * `writeSvoMaterialRecord(table, svoMaterialFromEnvironmentProxyMaterial(...))`
+ * writes, without the record between them. A tint reaches thousands of
+ * surfaces at once, and this is what each of them costs.
+ */
+export function writeSvoEnvironmentMaterialRecord(
+  table: Uint32Array,
+  materialId: number,
+  material: EnvironmentProxyMaterial,
+  revision: number,
+  materialFunctionId: number,
+): void {
+  const color = material.colorLinear, emission = material.emission, roughness = material.roughness;
+  if (!Number.isSafeInteger(materialId) || materialId <= 0 || materialId > 0xffff
+    || (materialId + 1) * SVO_MATERIAL_RECORD_WORDS > table.length
+    || !Number.isSafeInteger(revision) || revision < 0 || revision > 0xffff_ffff
+    || !Number.isSafeInteger(materialFunctionId) || materialFunctionId < 0 || materialFunctionId > 0xffff_ffff
+    || color.length !== 3 || !(roughness >= 0 && roughness <= 1)
+    || !(color[0] >= 0 && color[0] <= 1) || !(color[1] >= 0 && color[1] <= 1) || !(color[2] >= 0 && color[2] <= 1)
+    || !(color[0] * emission >= 0 && color[0] * emission <= Number.MAX_VALUE)
+    || !(color[1] * emission >= 0 && color[1] * emission <= Number.MAX_VALUE)
+    || !(color[2] * emission >= 0 && color[2] * emission <= Number.MAX_VALUE)) {
+    // The record path names what is wrong with it.
+    writeSvoMaterialRecord(table, svoMaterialFromEnvironmentProxyMaterial(materialId, material, revision, materialFunctionId));
+    return;
+  }
+  const offset = materialId * SVO_MATERIAL_RECORD_WORDS;
+  environmentRecordFloats.set(color, 0);
+  environmentRecordFloats[3] = 1;
+  environmentRecordFloats[4] = color[0] * emission;
+  environmentRecordFloats[5] = color[1] * emission;
+  environmentRecordFloats[6] = color[2] * emission;
+  environmentRecordFloats[7] = Math.max(0.04, roughness);
+  table.set(environmentRecordWords, offset);
+  table[offset + 20] = materialId;
+  table[offset + 21] = revision;
+  table[offset + 22] = materialFunctionId;
+  table[offset + 23] = SVO_MATERIAL_FLAGS.opaque;
+}
+
+/**
+ * Overwrite the closure one record of a packed table selects, and nothing else
+ * of it: the word a scene's surface model decides for every material at once.
+ */
+export function writeSvoMaterialFunctionId(table: Uint32Array, materialId: number, materialFunctionId: number): void {
+  if (!Number.isSafeInteger(materialId) || materialId <= 0 || (materialId + 1) * SVO_MATERIAL_RECORD_WORDS > table.length) {
+    throw new RangeError(`SVO material ID ${materialId} exceeds the packed table`);
+  }
+  if (!Number.isSafeInteger(materialFunctionId) || materialFunctionId < 0 || materialFunctionId > 0xffff_ffff) {
+    throw new RangeError("SVO material function ID must be an unsigned 32-bit integer");
+  }
+  table[materialId * SVO_MATERIAL_RECORD_WORDS + 22] = materialFunctionId;
 }
 
 export function unpackSvoMaterialRecord(table: Uint32Array, materialId: number): SvoMaterialRecord {

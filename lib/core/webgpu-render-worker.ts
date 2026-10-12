@@ -3,10 +3,12 @@
 // Composition root: installs the simulation methods this worker's renderer
 // looks up by id. Nothing else in the worker imports the method package.
 import "../methods/index";
-import { cachedEnvironmentProxyCatalog, reuseEnvironmentProxyCatalog } from "./voxel-environments";
+import { cachedEnvironmentProxyCatalog, reuseEnvironmentProxyCatalog, type EnvironmentProxyCatalog } from "./voxel-environments";
+import { documentDelta } from "./document-delta";
+import { successorEnvironmentCatalog } from "../svo/features/scene-publication/scene-environment-catalog";
 import { FluidLabRenderer } from "./webgpu-renderer";
 import { reuseSolidWorld } from "./solid-world";
-import { createWorkerSolidEditAcceptance } from "./voxel-editor/worker-solid-edit-acceptance";
+import { createWorkerSolidEditAcceptance, SolidEditBaseMismatchError, SolidEditReferenceError } from "./voxel-editor/worker-solid-edit-acceptance";
 import { webGPUPlatformResourcePlugin } from "./webgpu-platform-resource";
 import { markSceneRevision, type SceneDescription } from "./model";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
@@ -19,6 +21,8 @@ import type {
 const scope = self as DedicatedWorkerGlobalScope;
 
 let needsSceneryCatalog = true;
+/** The catalog the window holds: the last one sent, whole or as changes. */
+let sentSceneryCatalog: EnvironmentProxyCatalog | undefined;
 
 /**
  * Structural levers the browser cannot otherwise reach.
@@ -94,10 +98,13 @@ const failure = (requestId: number, error: unknown) => post({
 const solidEditAcceptance = createWorkerSolidEditAcceptance({
   readScene: () => renderScene,
   writeScene: (scene) => { renderScene = scene; },
-  accept: async (scene, stillCurrent) => {
+  accept: (scene) => {
     if (!renderer) throw new Error("WebGPU worker has no canvas");
-    await renderer.acceptLiveSolidEdit(scene, stillCurrent);
+    renderer.acceptLiveSolidEdit(scene);
   },
+  preview: (scene) => renderer !== undefined && renderScene !== undefined
+    && renderer.previewLiveSolidEdit(scene, renderScene.document),
+  restore: (scene) => renderer?.restoreLiveSolidEditPreview(scene),
 });
 
 scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest>) => {
@@ -122,29 +129,68 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
   if (message.type === "initialize") {
     void runtime.initialize().then(() => post({ type: "initialized", requestId: message.requestId }))
       .catch((error) => failure(message.requestId, error));
-  } else if (message.type === "validate-solid-edit") {
-    void (async () => {
+  } else if (message.type === "extend-solid-edit" || message.type === "truncate-solid-edit"
+    || message.type === "validate-solid-edit") {
+    // Answered before the next message is read: the order edits arrive in is
+    // the order they are accepted in, each over the document the last one left.
     try {
-      await solidEditAcceptance.accept(message);
+      if (message.type === "extend-solid-edit") solidEditAcceptance.extend(message);
+      else if (message.type === "truncate-solid-edit") solidEditAcceptance.truncate(message);
+      else solidEditAcceptance.replace(message);
       post({ type: "solid-edit-validated", requestId: message.requestId });
-    } catch (error) { failure(message.requestId, error); }
-    })();
+    } catch (error) {
+      failure(message.requestId, error);
+      // Every later edit would be authored against the same absent document.
+      if (error instanceof SolidEditBaseMismatchError || error instanceof SolidEditReferenceError) {
+        runtime.stopAfterFailure(`GPU runtime stopped: ${error.message}`);
+      }
+    }
+  } else if (message.type === "preview-solid-edit") {
+    let staged = false;
+    try { staged = solidEditAcceptance.preview(message); }
+    catch (error) { runtime.stopAfterFailure(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped"); }
+    post({ type: "solid-edit-previewed", previewId: message.previewId, staged });
   } else if (message.type === "set-render-scene") {
     needsSceneryCatalog = message.needsSceneryCatalog !== false;
     // Uniform-only document clones share the already resident terrain image.
     if (renderScene) { reuseSolidWorld(renderScene.document, message.scene); reuseEnvironmentProxyCatalog(renderScene.document, message.scene); }
-    if (solidEditAcceptance.preparedScene) reuseSolidWorld(solidEditAcceptance.preparedScene, message.scene);
+    solidEditAcceptance.replaced(message.scene);
     renderScene = {
       revision: message.revision,
       document: markSceneRevision(message.scene),
       terrainContentStamp: message.terrainContentStamp,
     };
     runtime.setRenderSceneTerrainContentStamp(message.terrainContentStamp);
+  } else if (message.type === "update-render-scene") {
+    needsSceneryCatalog = message.needsSceneryCatalog !== false;
+    try {
+      const document = solidEditAcceptance.update(message);
+      // The parts the changes do not name are the objects the last document
+      // held, which is what everything keyed on a part's identity relies on.
+      // No changes at all is that document, renamed in place as an adoption is.
+      if (document === renderScene!.document) renderScene!.revision = message.revision;
+      else {
+        // The same scenery object is the same expansion wherever the frame it is placed in is too,
+        // and one that only recoloured it is that expansion with the changed primitives replaced.
+        successorEnvironmentCatalog(renderScene!.document, document);
+        renderScene = {
+          revision: message.revision,
+          document: markSceneRevision(document),
+          terrainContentStamp: message.terrainContentStamp ?? renderScene!.terrainContentStamp,
+        };
+        runtime.setRenderSceneTerrainContentStamp(renderScene.terrainContentStamp);
+      }
+    } catch (error) {
+      // Every later update would be changes over the same absent document.
+      runtime.stopAfterFailure(`GPU runtime stopped: ${error instanceof Error ? error.message : String(error)}`);
+    }
   } else if (message.type === "adopt-render-scene") {
     // The accepted document is already `renderScene`; a draw naming any other
     // revision fails loudly below rather than presenting the wrong scene.
+    // Renamed in place: the document has not changed, so a stroke already being
+    // accepted over it is still being accepted over the current scene.
     if (renderScene && renderScene.document === solidEditAcceptance.acceptedDocument) {
-      renderScene = { ...renderScene, revision: message.revision };
+      renderScene.revision = message.revision;
     }
   } else if (message.type === "draw") {
     void (async () => {
@@ -170,7 +216,13 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       }
       const catalog = cachedEnvironmentProxyCatalog(renderScene.document);
       if (catalog && needsSceneryCatalog) {
-        post({ type: "scenery-catalog", sceneRevision: renderScene.revision, catalog });
+        // Over the catalog the window was last sent: nothing when this is that
+        // one, its changed parts when it is a later expansion of the same set.
+        const changes = !sentSceneryCatalog ? undefined
+          : catalog === sentSceneryCatalog ? [] : documentDelta(sentSceneryCatalog, catalog);
+        post(changes ? { type: "scenery-catalog-changes", sceneRevision: renderScene.revision, entries: changes }
+          : { type: "scenery-catalog", sceneRevision: renderScene.revision, catalog });
+        sentSceneryCatalog = catalog;
         needsSceneryCatalog = false;
       }
       post({ type: "frame", frameId: message.frameId, metrics, snapshot: snapshot(runtime) });

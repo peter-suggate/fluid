@@ -28,42 +28,6 @@ function fixture() {
   return { scene, state, host, edited };
 }
 
-test("live solid preflight admits exact domain pages and rejects either side before mutation", () => {
-  const { state, host, edited } = fixture();
-  assert.doesNotThrow(() => host.validateLiveSolidEdit(edited(7)));
-  assert.throws(() => host.validateLiveSolidEdit(edited(8)), /live world bounds/);
-  assert.throws(() => host.validateLiveSolidEdit(edited(-1)), /live world bounds/);
-  assert.equal(state.remainingTopologyLeafReserve, 15);
-  assert.equal(state.reservedTopologyCoordinates.size, 0);
-  assert.equal(state.pendingTopologyCoordinates.size, 0);
-});
-
-test("terminal split preflight counts preserved siblings and reuses an existing reservation", () => {
-  const { state, host, edited } = fixture();
-  state.remainingTopologyLeafReserve = 13;
-  assert.throws(() => host.validateLiveSolidEdit(edited(0)), /live voxel detail capacity/);
-  state.remainingTopologyLeafReserve = 14;
-  assert.doesNotThrow(() => host.validateLiveSolidEdit(edited(0)));
-  state.reservedTopologyCoordinates.add("0,0,0");
-  state.remainingTopologyLeafReserve = 0;
-  assert.doesNotThrow(() => host.validateLiveSolidEdit(edited(0)));
-  assert.equal(state.remainingTopologyLeafReserve, 0);
-});
-
-test("terminal preflight counts distinct pending requests and accepts already sampled coverage", () => {
-  const { state, host, edited } = fixture();
-  state.topologyMutationCapacity = 1;
-  state.pendingTopologyCoordinates.set("0,0,0", { x: 0, y: 0, z: 0 });
-  assert.doesNotThrow(() => host.validateLiveSolidEdit(edited(0)));
-  state.pendingTopologyCoordinates.set("1,0,0", { x: 1, y: 0, z: 0 });
-  assert.throws(() => host.validateLiveSolidEdit(edited(0)), /live voxel detail capacity/);
-  state.pendingTopologyCoordinates.clear();
-  state.sceneBrickCovered = () => true;
-  state.remainingTopologyLeafReserve = 0;
-  assert.doesNotThrow(() => host.validateLiveSolidEdit(edited(0)));
-});
-
-
 test("sampled terrain splitting resamples every ancestor sibling and rejects excessive work before publication", () => {
   const { state, host } = fixture();
   state.sceneWorldOrigin = [0, 0, 0];

@@ -7,6 +7,7 @@ import {
   solidVoxelShellForScene,
 } from "./scene-lattice";
 import { applyInitialFluidLayout, initialFluidLayout } from "./initial-fluid-layout";
+import { solidPatchKinds } from "./solid-patch/registry";
 
 /**
  * Scaling a scene by factors of two.
@@ -100,8 +101,12 @@ export function sceneAtFinestCellSize(
   const high = (index: number) => Math.ceil(index * cells - 1e-9);
   const authoredEdits = solidVoxelEditsForScene(next).map((patch) => {
     const [x0, y0, z0] = patch.minimum, [x1, y1, z1] = patch.maximumExclusive;
-    return { ...patch, minimum: [low(x0), low(y0), low(z0)] as const,
-      maximumExclusive: [high(x1), high(y1), high(z1)] as const };
+    const minimum = [low(x0), low(y0), low(z0)] as const;
+    const maximumExclusive = [high(x1), high(y1), high(z1)] as const;
+    // A kind that carries cells has to resample them onto the new box.
+    const kind = solidPatchKinds.get(patch);
+    return kind.resized ? kind.resized(patch, minimum, maximumExclusive)
+      : { ...patch, minimum, maximumExclusive };
   });
   next.voxelDomain.finestCellSize_m = finestCellSize_m;
   next.solidVoxels = [...solidVoxelShellForScene(next), ...authoredEdits];
@@ -288,11 +293,35 @@ function scaledScene(scene: SceneDescription, axis: SceneScaleAxis, factor: Scen
   return repairSceneForContainer(next);
 }
 
+type SceneLattice = Pick<SceneDescription, "container" | "voxelDomain">;
+
+/**
+ * The container and the cell one step lands on, without the scene it produces.
+ *
+ * A lattice is read from exactly these two — `sceneLatticeDimensions` takes
+ * nothing else — and `scaledScene` writes them by this arithmetic and no other:
+ * the repairs that follow it move a fill fraction and the contents, never an
+ * extent or the cell. So whether a step is available is four multiplications,
+ * where building the candidate to ask it was a clone of the whole document,
+ * its scenery and every patch, four times per summary.
+ */
+function scaledLattice(scene: SceneLattice, axis: SceneScaleAxis, factor: SceneScaleFactor): SceneLattice {
+  if (axis === "detail") {
+    return { container: scene.container,
+      voxelDomain: { ...scene.voxelDomain, finestCellSize_m: scene.voxelDomain.finestCellSize_m / factor } };
+  }
+  return {
+    container: { ...scene.container, width_m: scene.container.width_m * factor,
+      height_m: scene.container.height_m * factor, depth_m: scene.container.depth_m * factor },
+    voxelDomain: { ...scene.voxelDomain, finestCellSize_m: scene.voxelDomain.finestCellSize_m * factor },
+  };
+}
+
 /** Why a step is refused, or undefined when it is available. */
 function blockedReason(
-  scene: SceneDescription,
+  scene: SceneLattice,
   axis: SceneScaleAxis,
-  candidate: SceneDescription,
+  candidate: SceneLattice,
 ): string | undefined {
   const dimensions = sceneLatticeDimensions(candidate);
   if (axis === "world") {
@@ -328,16 +357,17 @@ export function scaleScene(
   axis: SceneScaleAxis,
   factor: SceneScaleFactor,
 ): SceneDescription | undefined {
-  const candidate = scaledScene(scene, axis, factor);
-  return blockedReason(scene, axis, candidate) ? undefined : candidate;
+  // Refused from the lattice alone, before the document is cloned for nothing.
+  if (blockedReason(scene, axis, scaledLattice(scene, axis, factor))) return undefined;
+  return scaledScene(scene, axis, factor);
 }
 
-export function sceneScaleSummary(scene: SceneDescription): SceneScaleSummary {
+export function sceneScaleSummary(scene: SceneLattice): SceneScaleSummary {
   const dimensions = sceneLatticeDimensions(scene);
   const options: SceneScaleOption[] = [];
   for (const axis of ["world", "detail"] as const) {
     for (const factor of [0.5, 2] as const) {
-      const candidate = scaledScene(scene, axis, factor);
+      const candidate = scaledLattice(scene, axis, factor);
       const blocked = blockedReason(scene, axis, candidate);
       options.push({
         axis,

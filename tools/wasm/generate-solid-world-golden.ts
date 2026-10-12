@@ -4,7 +4,7 @@ import type { SceneDescription } from "../../lib/core/model";
 import { sceneDocument } from "../../lib/core/scene-definition";
 import { sceneLatticeDimensions } from "../../lib/core/scene-lattice";
 import { SCENE_CATALOG } from "../../lib/core/scenes";
-import { fluidSolidWorldForScene } from "../../lib/core/solid-world";
+import { fluidSolidWorldForScene, materializedSolidWorldPages } from "../../lib/core/solid-world";
 
 const target=resolve(import.meta.dirname,"../../rust/core/testdata/solid-world-golden.json");
 const definition=(id:string)=>{const d=SCENE_CATALOG.find(v=>v.id===id);if(!d)throw new Error(id);return d};
@@ -26,7 +26,7 @@ const scenery=base();scenery.sceneId="solid-world-scenery-transforms";scenery.sc
   ]},
   {kind:"box",id:"rotated-excluded",tags:["fluid-collider"],place:{position:{x:-.2,y:.1,z:0},units:"metres",orientation:{w:.9238795325,x:0,y:.3826834324,z:0}},halfSize:{x:.2,y:.05,z:.1},material:{palette:"x",value:.2}},
 ]};
-function freeze(scene:SceneDescription){const world=fluidSolidWorldForScene(scene);return{scene,dimensions:sceneLatticeDimensions(scene),pages:world.pages.map(p=>({coordinate:p.coordinate,solidFraction:Array.from(p.solidFraction),signedDistanceQ8:Array.from(p.signedDistanceQ8),materialId:Array.from(p.materialId)})),regions:world.regions??[]}}
+function freeze(scene:SceneDescription){const world=fluidSolidWorldForScene(scene);return{scene,dimensions:sceneLatticeDimensions(scene),pages:materializedSolidWorldPages(world).map(p=>({coordinate:p.coordinate,solidFraction:Array.from(p.solidFraction),signedDistanceQ8:Array.from(p.signedDistanceQ8),materialId:Array.from(p.materialId)})),regions:world.regions??[]}}
 const hero=sceneDocument(definition("hero-garden-hose"));hero.sceneId="solid-world-production-pond-coarse";
 hero.voxelDomain={...hero.voxelDomain,finestCellSize_m:.4};hero.solidVoxels=[];
 hero.scenery={palettes:{x:{tint:[1,1,1]}},nodes:[{kind:"terrain-shell",id:"shell",materialModel:"garden-terrain"}]};

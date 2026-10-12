@@ -1,5 +1,7 @@
 import type { SceneDescription } from "./model";
 import { sceneCellSizes_m, sceneLatticeDimensions } from "./scene-lattice-dimensions";
+import { createSolidPatchRowBuffer, solidFractionOccupies } from "./solid-patch/kind";
+import { solidPatchKinds } from "./solid-patch/registry";
 import type { SolidWorldVoxelPatch } from "./solid-world";
 import { bathVoxelBoxes } from "./voxel-bath";
 
@@ -45,14 +47,31 @@ export function vesselCutawayPatches(
   const margin = [M, 0, M] as const;
   const strideY = nx, strideZ = nx * ny;
   const kind = new Uint8Array(n);
+  // Coverage first, composed patch by patch as the bake composes it, so a
+  // round or block patch is the cells it covers and not its box; then what
+  // that leaves solid, by the rule the solver uses.
+  const row = createSolidPatchRowBuffer(nx);
   for (const patch of patches) {
-    const value = patch.operation === "fill" ? SOLID : INTERIOR;
+    // A paint makes nothing solid and empties nothing.
+    if (patch.operation === "paint") continue;
+    const fill = patch.operation === "fill";
+    const rasterizer = solidPatchKinds.get(patch).rasterizer(patch);
     const from = patch.minimum.map((v, axis) => Math.max(0, v + margin[axis]!));
     const to = patch.maximumExclusive.map((v, axis) => Math.min([nx, ny, nz][axis]!, v + margin[axis]!));
+    const count = to[0]! - from[0]!;
+    if (count <= 0) continue;
     for (let z = from[2]!; z < to[2]!; z++) for (let y = from[1]!; y < to[1]!; y++) {
-      kind.fill(value, from[0]! + strideY * y + strideZ * z, Math.max(from[0]!, to[0]!) + strideY * y + strideZ * z);
+      const result = rasterizer.row(y - margin[1], z - margin[2], from[0]! - margin[0], to[0]! - margin[0], row);
+      if (result === "empty") continue;
+      const at = from[0]! + strideY * y + strideZ * z;
+      if (result === "full") { kind.fill(fill ? 255 : 0, at, at + count); continue; }
+      for (let index = 0; index < count; index++) {
+        const covered = row.coverage[index]!;
+        kind[at + index] = fill ? Math.max(kind[at + index]!, covered) : Math.min(kind[at + index]!, 255 - covered);
+      }
     }
   }
+  for (let index = 0; index < n; index++) kind[index] = solidFractionOccupies(kind[index]!) ? SOLID : INTERIOR;
 
   // Where water drains: flood back from the lattice's open sides, sideways and up.
   const queue = new Int32Array(n);

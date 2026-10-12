@@ -1,6 +1,5 @@
 import { layerOpacity, legacyVisualLayers, particleLayerShown, particleView, sliceLayersShown, withParticleDisplay, type ParticleDisplay, type VisualLayerState } from "./visual-layers";
 import { authoredFluidGeometryKey } from "./authored-fluid-edit";
-import { publishOpaqueSurfaceCapability } from "../svo/features/shading/deferred-specialization";
 import { validateLiveFluidEdit, type LiveFluidEdit, type LiveFluidEditResult } from "./live-fluid-edit";
 import type { SolverDetailFocus } from "./solver-detail";
 import type { FluidSurfaceRenderMode } from "../features/surface-display/definition";
@@ -27,7 +26,7 @@ import { RasterWaterPipeline, type WaterRenderDiagnostics, type WaterSurfacePres
 import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
 import type { ScenePresentationMode } from "./scene-definition";
 import { sceneHasTerrain, terrainContentStamp } from "./terrain";
-import { solidVoxelPatchesKey } from "./solid-world";
+import { solidVoxelPatchesKey, solidWorldContentStamp } from "./solid-world";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import { cameraTanHalfFov, viewportAspect, viewportRayForPixel } from "./webgpu-camera";
 import {
@@ -45,13 +44,10 @@ import {
 } from "./visualization-registry";
 import { containerDecorationSpace, DecorationBuilder } from "./visualization-decorations";
 import { buildVesselOutlineGeometry, sceneVesselPresentation } from "./vessel-outline";
-import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "../svo/pipeline/webgpu-svo-dry-scene";
+import { canConsumeSparseVoxelLighting, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "../svo/pipeline/webgpu-svo-dry-scene";
 import { SVO_DRY_SCENE_REVERSED_Z_NEAR_M } from "../svo/features/shading/program";
+import { svoRenderScenePublication, type SvoRenderScenePublication } from "../svo/features/scene-publication/svo-render-scene-publication";
 import {
-  buildSvoScenePrimitives,
-} from "../svo/features/scene-publication/svo-scene-primitives";
-import {
-  buildSvoPrimitiveCandidates,
   createSvoPrimitiveCandidateRefitPlan,
   refitSvoPrimitiveCandidatesIncremental,
   svoPrimitiveCandidateBounds,
@@ -60,13 +56,6 @@ import {
 import { packSvoPrimitiveRecords, SVO_PRIMITIVE_RECORD_WORDS, type SvoPrimitiveDescriptor } from "../svo/contracts/svo-primitive-abi";
 import { swayedPrimitiveDescriptor, type EnvironmentProxySway } from "./scenery-sway";
 import { sceneryConstructionKey } from "./scenery-construction-key";
-import {
-  buildDefaultSvoMaterialRecords,
-  packSvoMaterialTable,
-  svoMaterialFromEnvironmentProxyMaterial,
-  svoMaterialFunctionIdForEnvironmentProxy,
-} from "../svo/contracts/svo-material-abi";
-import { sceneSvoGroundPlane, sceneTerrainSurfaceModel } from "../svo/features/materials/svo-terrain-material";
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
   resolveSvoPrimaryTraversal,
@@ -113,6 +102,7 @@ import {
 } from "./render-frame-stages";
 import type { ResourcePluginDefinition } from "./resource-readiness";
 import {
+  gpuCompilationManagerFor,
   invalidateGPUCompilationManager,
   managedGPUDevice,
 } from "./gpu-compilation-manager";
@@ -825,6 +815,8 @@ export class FluidLabRenderer {
   private svoDryScenePipeline?: SparseVoxelDrySceneRenderer;
   private svoDrySceneSource?: SparseVoxelSceneRenderSource;
   private svoDrySceneData?: SparseVoxelDrySceneData;
+  /** The document `svoDrySceneData` was published from, and the parts it was assembled from. */
+  private renderPublication?: SvoRenderScenePublication;
   /** Live render publication identity; deliberately independent of solver identity. */
   private renderSceneKey = "";
   private renderSceneStamp = 0;
@@ -1597,7 +1589,7 @@ export class FluidLabRenderer {
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
     if (this.disposed) return;
     if (!adapter) {
-      this.onStatus({ state: "unavailable", label: "No compatible GPU adapter was found", resource: webGPUPlatformResourcePlugin });
+      this.onStatus({ state: "unavailable", label: "The browser did not provide a WebGPU adapter; no scene resources were allocated. If WebGPU worked earlier, check the browser GPU diagnostics for a GPU reset or blocked access.", resource: webGPUPlatformResourcePlugin });
       return;
     }
     progress("Requesting GPU device",1);
@@ -1623,6 +1615,13 @@ export class FluidLabRenderer {
     });
     void device.lost.then((info) => {
       if (this.disposed || this.device !== device || this.deviceLost) return;
+      const compilation = gpuCompilationManagerFor(device).snapshot();
+      const pendingBatches = this.gpuPendingBatches;
+      const duringCompilation = compilation.state === "compiling" && compilation.progress
+        ? ` while compiling ${compilation.progress.label}` : "";
+      console.error("GPU device lost", { reason: info.reason, message: info.message,
+        compilation, pendingBatches, initializingScene: Boolean(this.gpuFluidPending),
+        allocatedSolverBytes: this.gpuFluid?.info.allocatedBytes });
       invalidateGPUCompilationManager(device, info.message || info.reason);
       this.deviceLost = true;
       const fluid = this.gpuFluid;
@@ -1647,8 +1646,8 @@ export class FluidLabRenderer {
       try { sidecar?.destroy(); } catch { /* Resources may already be invalid after device loss. */ }
       // Breadcrumbs for hang diagnosis: the last known solver state narrows a
       // watchdog reset down to a stage without needing a reproduction.
-      if (fluid) console.error("GPU device lost mid-simulation", { reason: info.reason, message: info.message, submittedTime_s: fluid.info.submittedTime_s, completedTime_s: fluid.info.completedTime_s, pendingBatches: this.gpuPendingBatches, encodedSteps: fluid.info.encodedSteps, physicsTrace: fluid.info.physicsTrace });
-      this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}`, resource: webGPUPlatformResourcePlugin });
+      if (fluid) console.error("GPU device lost mid-simulation", { reason: info.reason, message: info.message, submittedTime_s: fluid.info.submittedTime_s, completedTime_s: fluid.info.completedTime_s, pendingBatches, encodedSteps: fluid.info.encodedSteps, physicsTrace: fluid.info.physicsTrace });
+      this.onStatus({ state: "lost", label: `GPU device lost${duringCompilation}: ${info.message || info.reason}`, resource: webGPUPlatformResourcePlugin });
       // Device loss is terminal. A new session requires an explicit reload.
     }).catch((error: unknown) => {
       if (!this.disposed) console.error("Unable to observe WebGPU device loss", error);
@@ -2115,36 +2114,86 @@ export class FluidLabRenderer {
     display.validateLiveSolidEdit(scene);
   }
 
-  private pendingLiveSolidEdit = false;
-
-  /** Complete the GPU wet-overlap proof and publish within the same continuation. */
-  /** After each solver's first presentation, build its remaining pipelines in the background. */
-  async acceptLiveSolidEdit(scene: SceneDescription, stillCurrent: () => boolean = () => true): Promise<void> {
-    if (this.pendingLiveSolidEdit) throw new Error("A solid edit is still being accepted.");
+  /**
+   * Take a solid edit in both consumers within this turn: the preflight, the
+   * solver's document, the display's staging. Throws the refusal with nothing
+   * changed. Nothing is awaited, so edits are accepted in the order they
+   * arrive and one that arrives while the last is being accepted cannot exist.
+   */
+  acceptLiveSolidEdit(scene: SceneDescription): void {
     this.validateLiveSolidEdit(scene);
-    this.pendingLiveSolidEdit = true;
-    try {
     const solver = this.gpuFluid, display = this.svoSceneSidecar ?? solver;
-    let committed = false;
-    if (planSceneRuntime(scene).fluidSolver) {
-      if (!stillCurrent()) throw new Error("Scene changed before submitting this solid edit.");
-      // The proof is an optional refinement; `applySceneUniforms` below is the acceptance.
-      committed = await solver?.prepareLiveSolidEdit?.(scene) === true;
-    }
-    if (!stillCurrent() || this.disposed || this.gpuFluid !== solver
-      || (this.svoSceneSidecar ?? this.gpuFluid) !== display
-      || (!committed && (this.simulationFault || this.runtimeFailure))) {
-      throw new Error("Scene changed while the solid edit was accepted; the newer scene remains active.");
-    }
-    // The atomic GPU edit and CPU solid cache are already accepted. Adopt the
-    // matching document/scalars; setSolidWorld on that same world is a no-op.
     if (planSceneRuntime(scene).fluidSolver) {
       solver!.applySceneUniforms!(scene);
       this.appliedSceneUniformKey = gpuSceneUniformKey(scene);
+    } else if (display === solver && !solver?.applySceneUniforms) {
+      // The renderer-owned source is staged below; the next frame's adoption of
+      // this document would be that same staging over again.
+      this.appliedSceneUniformKey = gpuSceneUniformKey(scene);
     }
-    display?.stageSceneUpdate?.(scene);
+    const previewed = this.liveSolidEditPreview;
+    this.liveSolidEditPreview = undefined;
+    // Released as it was last shown: the display already holds this content, and the preview is the edit.
+    if (previewed?.display !== display || previewed?.stamp !== solidWorldContentStamp(scene)) display?.stageSceneUpdate?.(scene);
     this.pausedPresentationRevision += 1;
-    } finally { this.pendingLiveSolidEdit = false; }
+  }
+
+  /** The proposal the display shows in place of the resident document `committed`, while a gesture is live. */
+  private liveSolidEditPreview?: {
+    display: GPUSolverInstance; committed: SceneDescription; scene: SceneDescription;
+    /** `solidWorldContentStamp` of the proposal. */
+    stamp: string;
+    /** `renderSceneStamp` when the proposal was last staged. */
+    publishedStamp: number;
+  };
+
+  /**
+   * Show a live gesture's proposal through the display alone: `scene` is the
+   * resident document `committed` with the gesture's patches appended, staged
+   * the way an accepted edit is. The solver stays on the committed document,
+   * and no document or history is written. False when it cannot be shown, with
+   * nothing changed; the gesture keeps its outline.
+   */
+  previewLiveSolidEdit(scene: SceneDescription, committed: SceneDescription): boolean {
+    if (this.gpuFluidPending || this.simulationFault || this.runtimeFailure) return false;
+    const display = this.svoSceneSidecar ?? this.gpuFluid;
+    if (!display?.stageSceneUpdate || !display.validateLiveSolidEdit) return false;
+    // A display that is also the fluid solver would hand the proposal to the simulation.
+    if (display === this.gpuFluid && planSceneRuntime(scene).fluidSolver) return false;
+    // A proposal past the display's capacity is refused when it is released, with the reason; here it is only not shown.
+    try { display.validateLiveSolidEdit(scene); } catch { return false; }
+    display.stageSceneUpdate(scene);
+    this.liveSolidEditPreview = { display, committed, scene, stamp: solidWorldContentStamp(scene), publishedStamp: this.renderSceneStamp };
+    this.pausedPresentationRevision += 1;
+    return true;
+  }
+
+  /** Put the display back on the resident document: the gesture was abandoned, or its edit was refused. */
+  restoreLiveSolidEditPreview(committed: SceneDescription): void {
+    const previewed = this.liveSolidEditPreview;
+    if (!previewed) return;
+    this.liveSolidEditPreview = undefined;
+    // A display built since starts from its own document.
+    if ((this.svoSceneSidecar ?? this.gpuFluid) !== previewed.display) return;
+    previewed.display.stageSceneUpdate!(committed);
+    this.pausedPresentationRevision += 1;
+  }
+
+  /**
+   * `publishRenderScene` stages the resident document whenever it is a new
+   * revision — the frame after an edit is accepted — and that replaces a
+   * proposal a newer gesture has staged since. Stage the proposal over it again.
+   */
+  private keepLiveSolidEditPreview(scene: SceneDescription): void {
+    const previewed = this.liveSolidEditPreview;
+    if (!previewed || previewed.publishedStamp === this.renderSceneStamp) return;
+    // Another document or another display: the proposal went with the one it was over.
+    if (previewed.committed !== scene || (this.svoSceneSidecar ?? this.gpuFluid) !== previewed.display) {
+      this.liveSolidEditPreview = undefined;
+      return;
+    }
+    previewed.display.stageSceneUpdate!(previewed.scene);
+    previewed.publishedStamp = this.renderSceneStamp;
   }
 
   setSimulationScene(scene: SceneDescription | undefined) {
@@ -2204,55 +2253,39 @@ export class FluidLabRenderer {
       return;
     }
     try {
-    const revision = this.renderSceneRevision >= 0xffff_fffe ? 1 : this.renderSceneRevision + 1;
-    const scenePrimitives = buildSvoScenePrimitives(scene);
-    const primitiveCandidates = scenePrimitives.primitiveCandidates
-      ?? buildSvoPrimitiveCandidates(scenePrimitives.descriptors as Parameters<typeof buildSvoPrimitiveCandidates>[0], {
-        skippedOwnerId: scenePrimitives.openShellOwnerId,
-      });
-    const terrainSurface = sceneTerrainSurfaceModel(scene);
-    const materialRecords = packSvoMaterialTable([
-      ...buildDefaultSvoMaterialRecords(revision, { terrainSurface }),
-      ...scenePrimitives.metadata.map((primitive) => svoMaterialFromEnvironmentProxyMaterial(
-        primitive.materialId,
-        primitive.material,
-        revision,
-        // The same word that chose the ground's closure chooses every prop's:
-        // a porcelain scene is one fired material throughout, not a porcelain
-        // floor with granite on it.
-        svoMaterialFunctionIdForEnvironmentProxy(primitive, terrainSurface),
-      )),
-    ]);
-    const lightingMirrors = buildSparseVoxelDrySceneLightingMirrors(scene, revision);
-    if (!lightingMirrors) {
+    // The publication this one follows, while the renderer still presents it
+    // from the same world. Its parts are what the next one is compared with.
+    const published = this.svoDrySceneData && this.svoDrySceneSource === source ? this.renderPublication : undefined;
+    const next = svoRenderScenePublication(scene, source.revision, published);
+    if (!next) {
       this.svoSourceAvailable = false;
       this.svoPublicationFailure = "lighting mirror construction failed";
       this.svoDrySceneData = undefined;
       this.svoDryScenePipeline?.setSource(undefined);
       return;
     }
-    const publication: SparseVoxelDrySceneData = {
-      renderRevision: revision,
-      primitiveRecords: scenePrimitives.packedRecords,
-      primitiveCandidates,
-      materialRecords,
-      opaqueSurfaceOnly: publishOpaqueSurfaceCapability(scene, materialRecords, scenePrimitives.packedRecords),
-      materialRevision: revision,
-      ownerBase: SCENE_ENVIRONMENT_OWNER_BASE,
-      skippedOwnerId: scenePrimitives.openShellOwnerId,
-      // An aggregate's packing does not fit in a 64-byte record, so the record
-      // carries a reference and the numbers live in the arena. Publication
-      // order assigns the references, so these arrive already in agreement
-      // with the records beside them.
-      clusterBlocks: scenePrimitives.clusterBlocks,
-      // The same door again, for the tape kind. A `field-program` record whose
-      // block never arrives resolves to zeroes, which the shader reads as "not
-      // resolved" and draws as nothing — the aggregate's failure one level up.
-      fieldProgramBlocks: scenePrimitives.fieldProgramBlocks,
-      ...lightingMirrors,
-      flatVoxelNormals: sceneUsesFlatVoxelNormals(scene),
-      groundPlane: sceneSvoGroundPlane(scene),
-    };
+    if (next.change === "none") {
+      // The document changed nothing the dry scene reads: the arenas, the
+      // revision and whatever was cached against it stand.
+      this.renderPublication = next;
+      this.renderSceneKey = sceneKey;
+      this.renderSceneStamp = stampedRevision ?? 0;
+      this.pausedPresentationRevision += 1;
+      return;
+    }
+    const revision = this.renderSceneRevision >= 0xffff_fffe ? 1 : this.renderSceneRevision + 1;
+    const scenePrimitives = next.primitives;
+    const primitiveCandidates = next.data.primitiveCandidates;
+    const materialRecords = next.data.materialRecords;
+    // Primitives that did not move keep the pose their sway has them in: the
+    // arena holds it, and the publication names the arrays the arena was last
+    // told about so that it is not asked to compare them.
+    const posed = published !== undefined && this.liveSceneAnimation !== undefined
+      && scenePrimitives.descriptors === published.primitives.descriptors
+      && primitiveCandidates === published.data.primitiveCandidates;
+    const publication: SparseVoxelDrySceneData = posed
+      ? { ...next.data, renderRevision: revision, primitiveRecords: this.svoDrySceneData!.primitiveRecords, primitiveCandidates: this.svoDrySceneData!.primitiveCandidates }
+      : { ...next.data, renderRevision: revision };
     this.svoMaterialsSupported = materialRecords.byteLength > 0;
     this.svoLightingSupported = canConsumeSparseVoxelLighting(publication);
     const supported = this.svoMaterialsSupported && this.svoLightingSupported;
@@ -2281,16 +2314,19 @@ export class FluidLabRenderer {
       this.svoDryScenePipeline.setSource(undefined);
       return;
     }
-    const sway = scenePrimitives.metadata.map(({ sway: authoredSway }) => authoredSway);
-    const swayIndices = sway.flatMap((value, index) => value ? [index] : []);
-    this.liveSceneAnimation = swayIndices.length ? {
-      rest: scenePrimitives.descriptors,
-      sway,
-      swayIndices,
-      current: [...scenePrimitives.descriptors],
-      records: new Uint32Array(scenePrimitives.packedRecords),
-      refitPlan: createSvoPrimitiveCandidateRefitPlan(primitiveCandidates),
-    } : undefined;
+    if (!posed) {
+      const sway = scenePrimitives.metadata.map(({ sway: authoredSway }) => authoredSway);
+      const swayIndices = sway.flatMap((value, index) => value ? [index] : []);
+      this.liveSceneAnimation = swayIndices.length ? {
+        rest: scenePrimitives.descriptors,
+        sway,
+        swayIndices,
+        current: [...scenePrimitives.descriptors],
+        records: new Uint32Array(scenePrimitives.packedRecords),
+        refitPlan: createSvoPrimitiveCandidateRefitPlan(primitiveCandidates),
+      } : undefined;
+    }
+    this.renderPublication = next;
     this.renderSceneRevision = revision;
     this.renderSceneKey = sceneKey;
     this.renderSceneStamp = stampedRevision ?? 0;
@@ -2409,7 +2445,7 @@ export class FluidLabRenderer {
     // instead. A method without applySceneUniforms would otherwise ignore the
     // edit outright, so it falls back to the rebuild it used to take.
     const sceneUniformKey = gpuSceneUniformKey(scene);
-    if (!this.pendingLiveSolidEdit && sceneUniformKey !== this.appliedSceneUniformKey) {
+    if (sceneUniformKey !== this.appliedSceneUniformKey) {
       if (this.gpuFluid.applySceneUniforms) {
         this.gpuFluid.applySceneUniforms(scene);
         this.refreshEditedTopology(this.gpuFluid);
@@ -2688,6 +2724,7 @@ export class FluidLabRenderer {
     // even build the publication inputs: their raster water consumes a retained
     // clear attachment instead.
     if (sparsePresentationRequired) this.publishRenderScene(scene, sparseSceneProducer);
+    if (this.liveSolidEditPreview) this.keepLiveSolidEditPreview(scene);
     // Advance authored motion before sampling the scene epoch used by a trace
     // request. The old order keyed the pre-animation scene and encoded against
     // the post-animation arena one frame later.

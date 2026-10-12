@@ -1520,6 +1520,7 @@ button.card[data-active] { border-color: var(--accent); }
 /* The tell that a wedge opens a second ring rather than doing something: a
    chevron at the rim, pointing the way the flick continues. Scoped past the
    plate rule above, which would otherwise fill it like a wedge. */
+.radial-swatch { stroke: var(--ink); stroke-opacity: 0.35; stroke-width: 1; pointer-events: none; }
 .radial-wedge > path.radial-more { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .radial-wedge[data-focused="true"] > path.radial-more { stroke: var(--accent-strong); }
 .radial-hub { fill: var(--ring-plate); stroke: var(--line-strong); }
@@ -2596,6 +2597,22 @@ button:hover .iso-water-side { fill-opacity: .26; }
 /* The digit of its place, in the mark's own corner: the rail is its own key legend. */
 .tool-rail-key > kbd { position: absolute; right: 2px; bottom: 1px; color: currentColor; font: 600 8px/1 var(--mono); opacity: .5; pointer-events: none; }
 .tool-rail-rule { width: 18px; height: 1px; margin: 3px 0; background: var(--line); }
+/* The operation switch: its marks share one outline and stand with nothing
+   between them, so three buttons read as one control with one of them down.
+   The lit mark is filled with its operation's own tone — the colour the
+   stroke's ghost is drawn in — and the armed tool keeps the accent to itself. */
+.tool-rail-switch { display: flex; flex-direction: column; border: 1px solid var(--line-strong); border-radius: 7px; }
+.tool-rail-switch .tool-rail-key { width: 28px; height: 26px; border-radius: 0; color: var(--tone); }
+.tool-rail-switch .tool-rail-slot:first-child .tool-rail-key { border-radius: 6px 6px 0 0; }
+.tool-rail-switch .tool-rail-slot:last-child .tool-rail-key { border-radius: 0 0 6px 6px; }
+.tool-rail-switch .tool-rail-slot + .tool-rail-slot { border-top: 1px solid var(--line); }
+/* Named through the slot so the first mark is not taken for the rail's own
+   first slot, the pointer, which is lit quietly. */
+.tool-rail-switch .tool-rail-slot .tool-rail-key[aria-pressed="true"] { border-color: var(--tone); background: var(--tone); color: var(--on-accent); }
+/* The armed tool does not read the switch: it still holds what the next brush
+   will do, so the lit mark keeps its tone as an outline and gives up the fill. */
+.tool-rail-switch[data-idle] .tool-rail-slot .tool-rail-key[aria-pressed="true"] { background: transparent; color: var(--tone); }
+@media (max-height: 560px) { .tool-rail-switch .tool-rail-key { width: 24px; height: 20px; } }
 .tool-rail-tip { position: absolute; left: calc(100% + 9px); top: 50%; z-index: 3; transform: translateY(-50%); display: grid; gap: 2px; width: max-content; max-width: 230px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); text-align: left; visibility: hidden; opacity: 0; pointer-events: none; }
 .tool-rail-key:hover + .tool-rail-tip, .tool-rail-key:focus-visible + .tool-rail-tip { visibility: visible; opacity: 1; }
 .tool-rail-tip strong { display: flex; align-items: center; gap: 7px; color: var(--ink); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
@@ -2608,8 +2625,24 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .tool-options-line { display: flex; align-items: center; gap: 10px; min-height: 22px; }
 .tool-options-line > strong { color: var(--accent-strong); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; white-space: nowrap; }
 .tool-option { display: flex; align-items: center; gap: 5px; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); white-space: nowrap; }
+/* A choice: one row of marks, one of them down. A material is its swatch alone,
+   so the chosen one is told by the ring the chip already draws. */
+.tool-choice { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.tool-choice-swatch { padding: 0 4px; }
+.tool-choice-swatch .ui-swatch { width: 12px; height: 12px; border-radius: 3px; }
 .tool-options-note { max-width: 340px; margin: 0 0 2px; color: var(--muted); font: var(--text-micro); }
 .tool-options-note.is-blocked { color: var(--amber); }
+/* A standing selection's verbs: the same card, a row to each group. It hangs
+   down from the Select mark instead of straddling it — that mark is the rail's
+   first, and a card of several rows centred on it would run off the top of a
+   short viewport. A verb that runs several ways is its name and a tight run of
+   marks, one a way. */
+.tool-options.selection-bar { top: 0; transform: none; }
+.selection-bar .tool-options-line { gap: 6px; }
+.selection-bar .tool-options-line > strong { min-width: 64px; }
+.selection-bar-ways { display: flex; align-items: center; gap: 2px; }
+.selection-bar-ways > span { display: flex; align-items: center; gap: 4px; margin-right: 3px; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); white-space: nowrap; }
+.selection-bar-ways .ui-button { min-width: 20px; padding: 0 5px; }
 .tool-rail-pending { position: absolute; left: 0; top: calc(100% + 6px); width: max-content; margin: 0; padding: 2px 8px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--overlay); color: var(--dim); font: var(--text-micro); backdrop-filter: var(--frost-chip); }
 /* A short viewport keeps every tool in reach by shrinking the marks, not by
    scrolling them: a scrolling rail would clip the line that hangs beside it. */

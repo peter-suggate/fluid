@@ -2,13 +2,7 @@
 export function svoCellContourFitWGSL(renderTerrain: boolean, solidWorld: boolean): string {
   const staticBound = renderTerrain ? /* wgsl */ `fn contourStaticMayOccupy(minimum:vec3f,maximum:vec3f)->bool{
   // Edits can replace the heightfield with exact voxel boxes. Keep their cubes.
-  let patches=min(atomicLoad(&maintenance[RT_BASE+7u]),RT_PATCH_CAPACITY);
-  for(var i=0u;i<patches;i+=1u){
-    let base=RT_PATCH_BASE+i*8u;
-    let low=vec3f(rtFloat(base),rtFloat(base+1u),rtFloat(base+2u));
-    let high=vec3f(rtFloat(base+4u),rtFloat(base+5u),rtFloat(base+6u));
-    if(all(maximum>=low)&&all(minimum<=high)){return true;}
-  }
+  if(rtEditMayOccupy(minimum,maximum)){return true;}
   let origin=vec2f(rtFloat(RT_BASE),rtFloat(RT_BASE+1u));
   let cell=max(vec2f(rtFloat(RT_BASE+2u),rtFloat(RT_BASE+3u)),vec2f(1e-8));
   // Limit the reconstructed field to its authored XZ domain.

@@ -19,6 +19,7 @@ import {
 } from "./svo-node-mip-page-hash";
 import {
   WebGpuLiveSvoDerivedPageState,
+  liveSvoDerivedPageValidityShape,
   type LiveSvoDerivedPageValidityBinding,
 } from "./webgpu-svo-live-derived-cache";
 
@@ -110,11 +111,14 @@ export interface WebGpuSvoNodeMipVisibleGeneration {
   texture: GPUTexture;
   view: GPUTextureView;
   sampler: GPUSampler;
-  directory: GPUBuffer;
-  /** Sampled uint directory avoids consuming an additional renderer storage binding. */
-  directoryTexture: GPUTexture;
-  directoryView: GPUTextureView;
-  /** `(level, page) -> slot + 1` hash; see `svo-node-mip-page-hash.ts`. The directory remains a fallback. */
+  /**
+   * Slot-ordered page list of an offline generation. The live pyramid has none:
+   * its slots are in no order, and every reader resolves a page through the hash.
+   */
+  directory?: GPUBuffer;
+  directoryTexture?: GPUTexture;
+  directoryView?: GPUTextureView;
+  /** `(level, page) -> slot + 1` hash; see `svo-node-mip-page-hash.ts`. How a page is found. */
   pageTableTexture: GPUTexture;
   pageTableView: GPUTextureView;
   pageTableShape: SvoNodeMipPageHashShape;
@@ -127,6 +131,9 @@ export interface WebGpuSvoNodeMipVisibleGeneration {
 }
 
 interface OwnedGeneration extends WebGpuSvoNodeMipVisibleGeneration {
+  directory: GPUBuffer;
+  directoryTexture: GPUTexture;
+  directoryView: GPUTextureView;
   /** Column/row wrap of the sampled directory; the shader rederives it from the width. */
   directoryShape: { columns: number; rows: number; texels: readonly [number, number] };
   pageTableWords: Uint32Array<ArrayBuffer>;
@@ -158,6 +165,27 @@ function writePageTable(device: GPUDevice, texture: GPUTexture, shape: SvoNodeMi
   device.queue.writeTexture({ texture }, words,
     { bytesPerRow: shape.width * SVO_NODE_MIP_PAGE_HASH.bytesPerEntry, rowsPerImage: shape.height },
     [shape.width, shape.height, 1]);
+}
+
+const INVALID_PAGE_WORD = new Uint32Array(1);
+
+/**
+ * Mark one slot's page unbuilt on the device.
+ *
+ * A slot handed to a new page still holds whatever was built into it last —
+ * another page's opacity when the slot was returned, certified-empty when it
+ * came from the reserve — and its validity word still vouches for that. Zero is
+ * "resident but not built", which is what the page is until the builder
+ * publishes it. One texel, because the builder writes every other word of this
+ * texture itself and a wider upload would overwrite its work.
+ */
+export function invalidateLiveSvoDerivedPage(
+  device: GPUDevice, validity: LiveSvoDerivedPageValidityBinding, slot: number,
+): void {
+  if (!Number.isSafeInteger(slot) || slot < 0 || slot >= validity.capacity) throw new RangeError("Derived page slot exceeds fixed capacity");
+  const { width } = liveSvoDerivedPageValidityShape(validity.capacity, device.limits?.maxTextureDimension2D ?? 2_048);
+  device.queue.writeTexture({ texture: validity.texture, origin: [slot % width, Math.floor(slot / width)] },
+    INVALID_PAGE_WORD, { bytesPerRow: 4 }, [1, 1]);
 }
 
 function createPageTableTexture(device: GPUDevice, shape: SvoNodeMipPageHashShape, label: string): GPUTexture {
@@ -411,14 +439,10 @@ export class WebGpuLiveSvoNodeMipPyramid {
   private readonly texture: GPUTexture;
   private readonly view: GPUTextureView;
   private readonly sampler: GPUSampler;
-  private readonly directory: GPUBuffer;
-  private readonly directoryTexture: GPUTexture;
-  private readonly directoryView: GPUTextureView;
-  private readonly directoryShape: { columns: number; rows: number; texels: readonly [number, number] };
   private readonly pageTableTexture: GPUTexture;
   private readonly pageTableView: GPUTextureView;
   private readonly pageTableShape: SvoNodeMipPageHashShape;
-  private directoryLayoutKey = "";
+  private readonly pageTableWidthShift: number;
   private pageTableReady = false;
   private plan?: SvoNodeMipPyramidPlan;
   private pendingPlan?: SvoNodeMipPyramidPlan;
@@ -439,51 +463,51 @@ export class WebGpuLiveSvoNodeMipPyramid {
     this.view = this.texture.createView({ dimension: "3d" });
     this.sampler = device.createSampler({ label: `${label} sampler`, addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge",
       addressModeW: "clamp-to-edge", ...WEBGPU_SVO_NODE_MIP_LAYOUT.sampler });
-    this.directory = device.createBuffer({ label: `${label} directory`, size: pageCapacity * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.directoryShape = webGpuSvoNodeMipDirectoryShape(pageCapacity, device.limits?.maxTextureDimension2D ?? 2_048);
-    this.directoryTexture = device.createTexture({ label: `${label} sampled directory`,
-      size: [...this.directoryShape.texels], format: WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTextureFormat,
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    this.directoryView = this.directoryTexture.createView();
     // Sized once from the address plan's capacity, which already holds the
-    // reserve every growth draws from, so no re-plan reallocates it.
+    // reserve every growth draws from, so no edit reallocates it.
     this.pageTableShape = svoNodeMipPageHashShape(pageCapacity, device.limits?.maxTextureDimension2D ?? 8_192);
+    this.pageTableWidthShift = Math.log2(this.pageTableShape.width);
     this.pageTableTexture = createPageTableTexture(device, this.pageTableShape, `${label} page table`);
     this.pageTableView = this.pageTableTexture.createView();
     this.pageState = new WebGpuLiveSvoDerivedPageState(device, pageCapacity, label);
     this.allocatedBytes = atlasTexels[0] * atlasTexels[1] * atlasTexels[2] * svoNodeMipOpacityChannels(this.format)
-      + pageCapacity * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage
-      + this.directoryShape.columns * this.directoryShape.rows * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage
       + this.pageTableShape.bytes + this.pageState.allocatedBytes;
   }
 
-  private uploadPlanLayout(plan: SvoNodeMipPyramidPlan): void {
-    const layoutKey = plan.pages.map((page) => `${page.key.level}:${page.key.coordinate.join(",")}:${page.slot}:${page.atlasTexelOrigin.join(",")}`).join(";");
-    if (layoutKey === this.directoryLayoutKey) return;
-    const directoryWords = new Uint32Array(this.directoryShape.columns * this.directoryShape.rows * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
-    // Directory generation is intentionally stable. Page-local validity is the
-    // live generation authority, so transform/material edits never rewrite the
-    // complete directory or direct table.
-    for (const page of plan.pages) directoryWords.set(packDirectoryEntry({ ...page, key: { ...page.key, generation: 1 } }), page.slot * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
-    this.device.queue.writeBuffer(this.directory, 0, directoryWords, 0, this.options.pageCapacity * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
-    this.device.queue.writeTexture({ texture: this.directoryTexture }, directoryWords,
-      { bytesPerRow: this.directoryShape.columns * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage, rowsPerImage: this.directoryShape.rows },
-      [...this.directoryShape.texels]);
-    const table = createWebGpuSvoNodeMipPageTable(plan, this.device.limits?.maxTextureDimension2D ?? 8_192, this.options.pageCapacity);
-    writePageTable(this.device, this.pageTableTexture, this.pageTableShape, table.words);
-    this.pageTableReady = true;
-    this.directoryLayoutKey = layoutKey;
-  }
-
-  /** Stage only page topology; a GPU builder owns payload and validity publication. */
+  /**
+   * Stage the plan's page table whole. Once, when the world is built: after
+   * that the plan changes in place and `writePageTableEntry` carries each
+   * change, so staging the same plan again uploads nothing. A GPU builder owns
+   * payload and validity publication.
+   */
   prepareGpuUpdate(plan: SvoNodeMipPyramidPlan): WebGpuLiveSvoNodeMipGpuTarget {
     this.assertAlive();
-    if (plan.pages.length > this.options.pageCapacity) throw new RangeError("Live node-mip page capacity exceeded");
+    if (plan.slotCapacity > this.options.pageCapacity) throw new RangeError("Live node-mip page capacity exceeded");
     if (plan.atlas.texels.some((value, axis) => value > this.options.atlasTexels[axis])) throw new RangeError("Live node-mip atlas capacity exceeded");
+    const table = plan.pageTable;
+    if (!table || table.capacity !== this.pageTableShape.capacity) {
+      throw new RangeError("Live node-mip pyramid needs a plan that keeps a page table of its own capacity");
+    }
+    if (plan !== this.plan && plan !== this.pendingPlan) {
+      writePageTable(this.device, this.pageTableTexture, this.pageTableShape, table.words);
+      this.pageTableReady = true;
+    }
     this.pendingPlan = plan;
-    this.uploadPlanLayout(plan);
     return this.gpuTarget();
+  }
+
+  /** Rewrite one entry of the page table from the plan's copy: what adding or removing a page costs here. */
+  writePageTableEntry(entry: number): void {
+    this.assertAlive();
+    const table = (this.plan ?? this.pendingPlan)?.pageTable;
+    if (!table || !Number.isSafeInteger(entry) || entry < 0 || entry >= table.capacity) {
+      throw new RangeError("Live node-mip page table entry is outside the staged plan's table");
+    }
+    const word = entry * SVO_NODE_MIP_PAGE_HASH.wordsPerEntry;
+    this.device.queue.writeTexture(
+      { texture: this.pageTableTexture, origin: [entry & (this.pageTableShape.width - 1), entry >>> this.pageTableWidthShift] },
+      table.words.subarray(word, word + SVO_NODE_MIP_PAGE_HASH.wordsPerEntry),
+      { bytesPerRow: SVO_NODE_MIP_PAGE_HASH.bytesPerEntry }, [1, 1, 1]);
   }
 
   /** Called after GPU build commands are encoded; page-validity writes remain the publication authority. */
@@ -503,7 +527,6 @@ export class WebGpuLiveSvoNodeMipPyramid {
     if (!this.plan) return undefined;
     return { generation: this.plan.generation, plan: this.plan, format: this.format,
       texture: this.texture, view: this.view, sampler: this.sampler,
-      directory: this.directory, directoryTexture: this.directoryTexture, directoryView: this.directoryView,
       pageTableTexture: this.pageTableTexture, pageTableView: this.pageTableView, pageTableShape: this.pageTableShape,
       pageTableReady: this.pageTableReady, pageTableBytes: this.pageTableShape.bytes,
       pageValidity: this.pageState.validity };
@@ -511,7 +534,7 @@ export class WebGpuLiveSvoNodeMipPyramid {
 
   destroy(): void {
     if (this.destroyed) return;
-    this.texture.destroy(); this.directory.destroy(); this.directoryTexture.destroy(); this.pageTableTexture.destroy(); this.pageState.destroy();
+    this.texture.destroy(); this.pageTableTexture.destroy(); this.pageState.destroy();
     this.destroyed = true;
   }
 

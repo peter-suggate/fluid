@@ -1,6 +1,5 @@
 import { terrainWorldContainer } from "../../../core/terrain";
 import type { SceneDescription } from "../../../core/model";
-import { solidWorldVoxelPatchBounds_m } from "../../../core/solid-world";
 import { buildPondVesselPlanIndex, pondVesselPlanCurve, pondVesselFloorDishReach, POND_VESSEL_FLOOR_DISH, type WallProfile } from "../../../core/voxel-scenery/pond-vessel";
 import type { SvoRenderTerrainField } from "./svo-render-solid-field";
 
@@ -140,7 +139,6 @@ export async function buildSvoRenderTerrainGpu(device:GPUDevice,scene:SceneDescr
     const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(output,0,receipt,0,size);device.queue.submit([encoder.finish()]);await receipt.mapAsync(GPUMapMode.READ);check();
     const heights_m=new Float32Array(receipt.getMappedRange().slice(0));receipt.unmap();
     const container=terrainWorldContainer(scene);
-    return {origin_m:[-container.width_m/2,-container.depth_m/2],cellSize_m:[cellSize[0],cellSize[2]],dimensions:[program.nx,program.nz],heights_m,materialId,
-      patches:scene.solidVoxels.map(p=>{const b=solidWorldVoxelPatchBounds_m(scene,p);return {operation:p.operation,minimum_m:b.minimum,maximum_m:b.maximum,materialId:p.materialId??1};})};
+    return {origin_m:[-container.width_m/2,-container.depth_m/2],cellSize_m:[cellSize[0],cellSize[2]],dimensions:[program.nx,program.nz],heights_m,materialId};
   }finally{for(const b of owned)b.destroy();}
 }

@@ -1,16 +1,16 @@
 import { createVoxelToolRegistry } from "./plugin";
-import { pushPullTool } from "./plugins/push-pull";
-import { buildTool } from "./plugins/build";
-import { carveTool } from "./plugins/carve";
+import { voxelBrushTool } from "./plugins/voxel";
+import { faceTool } from "./plugins/face";
 import { boxTool } from "./plugins/box";
-import { cutTool } from "./plugins/cut";
-import { sphereTool } from "./plugins/sphere";
-import { drillTool } from "./plugins/drill";
-import { wallTool } from "./plugins/wall";
-import { channelTool } from "./plugins/channel";
+import { lineTool } from "./plugins/line";
+import { centerTool } from "./plugins/center";
+import { patternTool } from "./plugins/pattern";
+
+import { marqueeTool } from "./plugins/marquee";
+import { wandTool } from "./plugins/wand";
 
 import { fluidBallTool } from "./plugins/fluid-ball";
 import { fluidCubeTool } from "./plugins/fluid-cube";
 import { fluidTorusTool } from "./plugins/fluid-torus";
 
-export const voxelTools = createVoxelToolRegistry([pushPullTool, buildTool, carveTool, boxTool, cutTool, sphereTool, drillTool, wallTool, channelTool, fluidBallTool, fluidCubeTool, fluidTorusTool]);
+export const voxelTools = createVoxelToolRegistry([voxelBrushTool, faceTool, boxTool, lineTool, centerTool, patternTool, marqueeTool, wandTool, fluidBallTool, fluidCubeTool, fluidTorusTool]);

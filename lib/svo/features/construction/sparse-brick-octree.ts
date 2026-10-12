@@ -1311,6 +1311,46 @@ export function mortonEncode3D(x: number, y: number, z: number): bigint {
     | (spreadBits3(integerCoordinate(z, "z")) << 2n);
 }
 
+/**
+ * The deepest tree whose Morton keys are exact in a double: 3 x 17 = 51 bits.
+ *
+ * Seventeen levels of 8^3 bricks is a million voxels an axis, far past what
+ * any device addresses. Within it a key is an ordinary number: a parent is
+ * `Math.floor(key / 8)`, a child `key * 8 + octant`, a level's keys sort as a
+ * `Float64Array`, and a planner over millions of bricks allocates no BigInt.
+ */
+export const SPARSE_BRICK_NUMBER_MORTON_BITS = 17;
+
+/**
+ * `mortonEncode3D` as a number, for coordinates below 2^17 (unchecked: the
+ * caller has validated them against its own depth).
+ */
+export function mortonNumber3D(x: number, y: number, z: number): number {
+  const low = spreadTenBits(x) | (spreadTenBits(y) << 1) | (spreadTenBits(z) << 2);
+  const high = spreadTenBits(x >>> 10) | (spreadTenBits(y >>> 10) << 1) | (spreadTenBits(z >>> 10) << 2);
+  return high * 0x4000_0000 + low;
+}
+
+/** The coordinate a `mortonNumber3D` key denotes. */
+export function mortonNumberCoordinate(key: number): SparseBrickCoordinate {
+  const high = Math.floor(key / 0x4000_0000), low = key - high * 0x4000_0000;
+  return {
+    x: compactEveryThirdBit(low) + compactEveryThirdBit(high) * 1024,
+    y: compactEveryThirdBit(low >>> 1) + compactEveryThirdBit(high >>> 1) * 1024,
+    z: compactEveryThirdBit(low >>> 2) + compactEveryThirdBit(high >>> 2) * 1024,
+  };
+}
+
+/** Bits 0, 3, 6, ... 27 of a 30-bit integer, packed into bits 0..9. */
+function compactEveryThirdBit(value: number): number {
+  let v = value & 0x0924_9249;
+  v = (v ^ (v >>> 2)) & 0x030c_30c3;
+  v = (v ^ (v >>> 4)) & 0x0300_f00f;
+  v = (v ^ (v >>> 8)) & 0x0300_00ff;
+  v = (v ^ (v >>> 16)) & 0x0000_03ff;
+  return v;
+}
+
 export function mortonDecode3D(key: bigint): SparseBrickCoordinate {
   if (key < 0n || key >= 1n << 63n) throw new RangeError("Morton key must be an unsigned 63-bit integer");
   const values = [0, 0, 0];
@@ -1466,6 +1506,8 @@ export interface PackedSparseBrickPlan {
   counts: Uint32Array<ArrayBuffer>;
 }
 
+const MAXIMUM_NUMBER_MORTON = BigInt(Number.MAX_SAFE_INTEGER);
+
 function splitMorton(key: bigint): [number, number] {
   return [Number(key & 0xffffffffn) >>> 0, Number((key >> 32n) & 0xffffffffn) >>> 0];
 }
@@ -1473,11 +1515,19 @@ function splitMorton(key: bigint): [number, number] {
 export function packSparseBrickPlan(plan: SparseBrickPlan, generation = 0): PackedSparseBrickPlan {
   const nodeWords = new Uint32Array(plan.nodes.length * 8);
   for (const node of plan.nodes) {
-    const [low, high] = splitMorton(node.morton);
-    const lifecycle = node.leafIndex === SPARSE_BRICK_INVALID_INDEX ? 0 : SVO_BRICK_LIFECYCLE.activeBit;
-    nodeWords.set([
-      low, high, node.level, node.childMask, node.firstChild, node.childCount, node.leafIndex, lifecycle,
-    ], node.index * 8);
+    const base = node.index * 8;
+    // A key the planner formed as a number splits without a BigInt.
+    if (node.morton <= MAXIMUM_NUMBER_MORTON) {
+      const key = Number(node.morton), high = Math.floor(key / 0x1_0000_0000);
+      nodeWords[base] = key - high * 0x1_0000_0000; nodeWords[base + 1] = high;
+    } else {
+      const [low, high] = splitMorton(node.morton);
+      nodeWords[base] = low; nodeWords[base + 1] = high;
+    }
+    nodeWords[base + 2] = node.level; nodeWords[base + 3] = node.childMask;
+    nodeWords[base + 4] = node.firstChild; nodeWords[base + 5] = node.childCount;
+    nodeWords[base + 6] = node.leafIndex;
+    nodeWords[base + 7] = node.leafIndex === SPARSE_BRICK_INVALID_INDEX ? 0 : SVO_BRICK_LIFECYCLE.activeBit;
   }
   const leafWords = new Uint32Array(plan.leaves.length * 4);
   for (const leaf of plan.leaves) {
@@ -1487,9 +1537,9 @@ export function packSparseBrickPlan(plan: SparseBrickPlan, generation = 0): Pack
         && leaf.terminalIndex === SPARSE_BRICK_INVALID_INDEX)) {
       throw new RangeError(`Sparse brick leaf ${leaf.index} has an invalid terminal record`);
     }
-    leafWords.set([
-      leaf.nodeIndex, leaf.voxelOffset, leaf.terminalKind, leaf.terminalIndex,
-    ], leaf.index * 4);
+    const base = leaf.index * 4;
+    leafWords[base] = leaf.nodeIndex; leafWords[base + 1] = leaf.voxelOffset;
+    leafWords[base + 2] = leaf.terminalKind; leafWords[base + 3] = leaf.terminalIndex;
   }
   const topology = new Uint32Array(nodeWords.length + leafWords.length);
   topology.set(nodeWords); topology.set(leafWords, nodeWords.length);

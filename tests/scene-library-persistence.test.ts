@@ -66,21 +66,6 @@ test("quota rejection reports failure and preserves every byte of previous libra
   assert.equal(saveSceneToLibrary(undefined, "No storage", defaultScene, "fixture", { savedAt_ms: 3 }).persisted, false);
 });
 
-test("autosave retries unchanged document after failed quota write", async () => {
-  await import("../lib/methods");
-  const { createSceneAutosave } = await import("../lib/core/scene-autosave");
-  const fixture = quotaStorage(1);
-  const autosave = createSceneAutosave({ storage: fixture.storage });
-  const working = { scene: defaultScene, presetId: "fixture" };
-  autosave.request(working); autosave.flush();
-  assert.equal(readSceneLibrary(fixture.storage).length, 0);
-  fixture.setQuota(Infinity);
-  autosave.request(working); autosave.flush();
-  assert.equal(readSceneLibrary(fixture.storage)[0]?.id, SCENE_AUTOSAVE_ENTRY_ID);
-  autosave.cancel();
-});
-
-
 test("renaming and deleting a pooled save preserve its sibling and Continue document", async () => {
   await import("../lib/methods");
   const { sceneResume } = await import("../lib/core/scene-autosave");

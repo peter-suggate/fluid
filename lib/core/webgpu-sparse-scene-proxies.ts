@@ -2,7 +2,7 @@ import { svoDualMarchingCubesCachedFitWGSL } from "../svo/features/meshing/dual-
 import { svoDualContouringFitWGSL } from "../svo/features/meshing/dual-contouring";
 import { svoRenderTerrainSamplingWGSL } from "../svo/features/construction/svo-render-terrain-sampling";
 import { svoCellContourFitWGSL } from "../svo/features/construction/svo-cell-contour-fit";
-import { LIVE_TERRAIN_PATCH_RESERVE, packTerrainOverlay, terrainOverlayPatches } from "./live-terrain-overlay";
+import { TerrainEditPages } from "./live-terrain-overlay";
 import {
   SPARSE_BRICK_INVALID_INDEX,
   SPARSE_BRICK_NO_OWNER,
@@ -36,15 +36,20 @@ import {
   SVO_FIELD_PROGRAM_BLOCK_WORDS,
   type SvoFieldProgram,
 } from "../svo/features/scene-publication/svo-field-program";
+import { PublishedWords } from "../svo/features/scene-publication/svo-table-upload";
 import { svoProceduralNoiseWGSL } from "../svo/features/materials/svo-procedural-material";
 import { cupWallThickness_m } from "./scene-shape";
-import type { SolidWorld } from "./solid-world";
+import { materializedSolidWorldPages, type SolidWorld } from "./solid-world";
 import {
+  WEBGPU_SOLID_WORLD_DISPLAY_BUDGET_BYTES,
   WEBGPU_SOLID_WORLD_ENTRY_WORDS,
   WEBGPU_SOLID_WORLD_FRACTION_WORDS,
   WEBGPU_SOLID_WORLD_PHYSICS_PAGE_WORDS,
+  WEBGPU_SOLID_WORLD_RENDER_PAGE_WORDS,
+  WebgpuSolidWorldPageWriter,
   createWebgpuSolidWorldPageLayout,
-  writeWebgpuSolidWorldPages,
+  planWebgpuSolidWorldDisplayPageCapacity,
+  webgpuSolidWorldDomainPageCount,
   type WebgpuSolidWorldPageLayout,
 } from "./webgpu-solid-world-pages";
 
@@ -493,6 +498,12 @@ export interface SparseSceneProxyVoxelizerOptions {
     cellSize_m: SparseSceneVector3;
   }>;
   /**
+   * The continuous solid the SolidWorld voxels were rasterized from, as WGSL
+   * `fn swAuthoredDistance(world:vec3f)->f32` in metres, negative inside. A
+   * fitted surface follows it wherever the voxels are still its rasterization.
+   */
+  solidSurface?: string;
+  /**
    * Renderer-owned height samples at the SVO lattice. They refine presentation
    * without changing the canonical SolidWorld consumed by physics.
    */
@@ -502,12 +513,6 @@ export interface SparseSceneProxyVoxelizerOptions {
     dimensions: readonly [number, number];
     heights_m: Float32Array<ArrayBuffer>;
     materialId: number;
-    patches: readonly {
-      operation: "fill" | "clear";
-      minimum_m: readonly [number, number, number];
-      maximum_m: readonly [number, number, number];
-      materialId: number;
-    }[];
   }>;
   /** Maximum topology level. */
   finestLevel?: number;
@@ -619,17 +624,8 @@ export const SPARSE_SCENE_MAINTENANCE_STATE_WORDS = Object.freeze({
   chunkBegin: 6,
   /** One past the last dirty brick this frame's chunk repairs. */
   chunkEnd: 7,
-  binDispatch: 8,
-  rebuildDispatch: 11,
-  finalizeDispatch: 14,
-  /**
-   * One workgroup a dirty brick, for the banded leaf encoder. Zero on `dense`.
-   *
-   * Placed *contiguously* after the other three, because all four indirect
-   * argument triples are copied to the dispatch buffer in one
-   * `copyBufferToBuffer` whose offsets are differences from `binDispatch`.
-   */
-  bandDispatch: 17,
+  // Words 8-19 are unused: the chunk passes are dispatched directly at the
+  // planned chunk size and stop at `chunkEnd` themselves.
   /** Dirty bricks already repaired by earlier chunks of this revision. */
   chunkCursor: 20,
   /**
@@ -641,8 +637,23 @@ export const SPARSE_SCENE_MAINTENANCE_STATE_WORDS = Object.freeze({
    * the opacity pyramid". A lane cannot ask for headroom it cannot see.
    */
   maximumBrickCandidates: 21,
+  /** Words a new revision clears; the journal cursor after them outlives every revision. */
+  revisionWordCount: 22,
+  /**
+   * Leaves finalized since the arena was created, modulo 2^32: the write cursor
+   * of the dirty journal. Entry `k` is word `SPARSE_SCENE_DIRTY_JOURNAL_RECORD_WORD`
+   * of dirty brick record `k % dirtyBrickCapacity`. Unlike the dirty brick list,
+   * which describes one revision and is rewritten by the next, the journal is a
+   * ring every finalized leaf is appended to, so a consumer with its own cursor
+   * takes exactly the bricks repaired since it last looked, across any number of
+   * revisions and chunk frames, and laps only after a whole capacity of them.
+   */
+  journalWriteCursor: 22,
   wordCount: 24,
 } as const);
+
+/** Word of a dirty brick record that holds the journal entry sharing its slot. */
+export const SPARSE_SCENE_DIRTY_JOURNAL_RECORD_WORD = 3;
 
 /**
  * Flags carried in the spare `cell.w` lane of the parameter block.
@@ -917,6 +928,57 @@ export interface SparseSceneRegionCellPlan {
    * many budgeted frames a publication needs without reading anything back.
    */
   readonly cellCount: number;
+  /**
+   * Distinct cells the regions cover. Regions overlap (a publication carries a
+   * before and an after bound for everything that moved, and neighbouring pages
+   * share their apron cells), so the sum counts most cells several times; the
+   * union is the same strict bound on dirty leaves without the repeats, and is
+   * what the frame plan divides by the brick budget. Equal to `cellCount` when
+   * the regions are too large or too far apart to enumerate.
+   */
+  readonly unionCellCount: number;
+}
+
+/** Summed region cells above which the union is not enumerated and the sum stands as the bound. */
+const SPARSE_SCENE_REGION_UNION_CELL_LIMIT = 1 << 21;
+/** Cells of the regions' common bounding box above which the union is not enumerated. */
+const SPARSE_SCENE_REGION_UNION_BOX_LIMIT = 1 << 24;
+
+/** Distinct cells among the packed region boxes, by marking them in their common bounding box. */
+function sparseSceneRegionUnionCells(words: Uint32Array, regionCount: number, cellCount: number): number {
+  if (cellCount === 0 || cellCount > SPARSE_SCENE_REGION_UNION_CELL_LIMIT) return cellCount;
+  const low = [Infinity, Infinity, Infinity];
+  const high = [-Infinity, -Infinity, -Infinity];
+  for (let region = 0; region < regionCount; region += 1) {
+    const base = region * SPARSE_SCENE_REGION_CELL_WORDS;
+    if (words[base + 7] === 0) continue;
+    for (let axis = 0; axis < 3; axis += 1) {
+      low[axis] = Math.min(low[axis]!, words[base + axis]!);
+      high[axis] = Math.max(high[axis]!, words[base + axis]! + words[base + 3 + axis]!);
+    }
+  }
+  const extent = [high[0]! - low[0]!, high[1]! - low[1]!, high[2]! - low[2]!];
+  const volume = extent[0]! * extent[1]! * extent[2]!;
+  if (volume > SPARSE_SCENE_REGION_UNION_BOX_LIMIT) return cellCount;
+  const marked = new Uint32Array(Math.ceil(volume / 32));
+  let union = 0;
+  for (let region = 0; region < regionCount; region += 1) {
+    const base = region * SPARSE_SCENE_REGION_CELL_WORDS;
+    if (words[base + 7] === 0) continue;
+    const x0 = words[base]! - low[0]!, y0 = words[base + 1]! - low[1]!, z0 = words[base + 2]! - low[2]!;
+    for (let z = z0; z < z0 + words[base + 5]!; z += 1) {
+      for (let y = y0; y < y0 + words[base + 4]!; y += 1) {
+        const row = (z * extent[1]! + y) * extent[0]!;
+        for (let x = x0; x < x0 + words[base + 3]!; x += 1) {
+          const bit = row + x;
+          const mask = 1 << (bit & 31);
+          const word = marked[bit >>> 5]!;
+          if ((word & mask) === 0) { marked[bit >>> 5] = word | mask; union += 1; }
+        }
+      }
+    }
+  }
+  return union;
 }
 
 /**
@@ -955,7 +1017,7 @@ export function planSparseSceneRegionCells(
     words[base + 7] = cells;
     prefix += cells;
   });
-  return { words, cellCount: prefix };
+  return { words, cellCount: prefix, unionCellCount: sparseSceneRegionUnionCells(words, regions.length, prefix) };
 }
 
 /** A coarse uniform grid over the authored records, plus the records too large to sit in it. */
@@ -1468,8 +1530,8 @@ interface RenderTerrainShaderLayout {
   readonly heightsBaseWords: number;
   readonly width: number;
   readonly depth: number;
-  readonly patchBaseWords: number;
-  readonly patchCapacity: number;
+  /** The image of authored pages drawn over the ground. Its authored lane says which cells are whose. */
+  readonly editPages: WebgpuSolidWorldPageLayout;
 }
 
 export function renderTerrainProxyWGSL(layout?: RenderTerrainShaderLayout): string {
@@ -1481,14 +1543,278 @@ const RT_BASE:u32=${layout.baseWords}u;
 const RT_HEIGHTS:u32=${layout.heightsBaseWords}u;
 const RT_WIDTH:i32=${layout.width};
 const RT_DEPTH:i32=${layout.depth};
-const RT_PATCH_BASE:u32=${layout.patchBaseWords}u;
-const RT_PATCH_CAPACITY:u32=${layout.patchCapacity}u;
 fn rtFloat(word:u32)->f32{return bitcast<f32>(atomicLoad(&maintenance[word]));}
 fn rtHeight(q:vec2i)->f32{
   let at=clamp(q,vec2i(0),vec2i(RT_WIDTH-1,RT_DEPTH-1));
   return rtFloat(RT_HEIGHTS+u32(at.x+RT_WIDTH*at.y));
 }
 ${svoRenderTerrainSamplingWGSL}
+// Authored edits are drawn from the sparse voxel pages laid over this ground
+// (live-terrain-overlay.ts). A page cell whose authored bit is set is the
+// page's; every other cell, in a page or out of one, is the ground's.
+const RT_EDIT_AUTHORED:u32=${WEBGPU_SOLID_WORLD_RENDER_PAGE_WORDS}u;
+fn rtEditPageCount()->u32{return atomicLoad(&maintenance[SW_BASE+7u]);}
+// One cell of the loaded page window: x is one where an edit authored the
+// cell, and y is then the page's fraction of it.
+fn rtEditCell(q:vec3i)->vec2f{
+  if(swWindowCached){
+    let l=vec3u(q-swTileLow);let cached=swTileCells[l.x+8u*(l.y+8u*l.z)];
+    if((cached&256u)==0u){return vec2f(0.0);}
+    return vec2f(1.0,f32(cached&255u)/255.0);
+  }
+  let upper=q>=swWindowSplit;
+  let page=swWindowPages[select(0u,1u,upper.x)|select(0u,2u,upper.y)|select(0u,4u,upper.z)];
+  if(page==INVALID_INDEX){return vec2f(0.0);}
+  let local=vec3u(q&vec3i(7));let index=local.x+8u*(local.y+8u*local.z);
+  let at=SW_BASE+SW_PAGE_BASE+page*SW_PAGE_WORDS;
+  if(((atomicLoad(&maintenance[at+RT_EDIT_AUTHORED+(index>>5u)])>>(index&31u))&1u)==0u){return vec2f(0.0);}
+  let word=atomicLoad(&maintenance[at+(index>>2u)]);
+  return vec2f(1.0,f32((word>>(8u*(index&3u)))&255u)/255.0);
+}
+// The ground's height over a point, or far below where the heightfield has no column.
+fn rtEditGround(xz:vec2f)->f32{
+  let origin=vec2f(rtFloat(RT_BASE),rtFloat(RT_BASE+1u));
+  let pitch=max(vec2f(rtFloat(RT_BASE+2u),rtFloat(RT_BASE+3u)),vec2f(1e-8));
+  let q=vec2i(floor((xz-origin)/pitch));
+  if(any(q<vec2i(0))||q.x>=RT_WIDTH||q.y>=RT_DEPTH){return -1e20;}
+  return rtSurface(xz).x;
+}
+// The ground's height in cells over each column of the tile's block
+// (swTileLoad), read once a tile. Every lane calls it before the barrier.
+var<workgroup> rtTileGround:array<f32,64>;
+fn rtTileLoad(lane:u32){
+  if(!swTileActive){return;}
+  let cell=max(swCell(),vec3f(1e-8));let origin=swOrigin();
+  let column=swTileLow.xz+vec2i(i32(lane%8u),i32(lane/8u));
+  rtTileGround[lane]=(rtEditGround(origin.xz+(vec2f(column)+vec2f(0.5))*cell.xz)-origin.y)/cell.y;
+}
+// A fitted tile that stands clear of every surface is not fitted. Far above
+// the ground under it and the cells beside it, or far beneath it, with no
+// edit page cell, primitive or backdrop in reach, every sample of the tile has
+// one sign and so has every cell that shares a dual edge with it: no edge
+// crosses, and nothing reads such a fit but its sign. The lanes bound the
+// ground between them ahead of the barrier (rtFarLoad), and the tile then
+// takes the ground's own sample for its fit (rtFarTile).
+const RT_FAR_CELLS:f32=4.0;
+const RT_FAR_BIAS:f32=1048576.0;
+// The highest ground and the lowest, in sixteenths of a cell from the tile's
+// floor, each rounded away from the tile; zero until a lane has written.
+var<workgroup> rtFarHigh:atomic<u32>;
+var<workgroup> rtFarLow:atomic<u32>;
+// Set where a lane could not bound the ground.
+var<workgroup> rtFarVoid:atomic<u32>;
+// Every lane calls this ahead of the barrier. \`world\` is the tile's low
+// corner and \`extent\` one of its cells.
+fn rtFarLoad(world:vec3f,extent:vec3f,lane:u32,enabled:bool){
+  if(!enabled){return;}
+  let origin=vec2f(rtFloat(RT_BASE),rtFloat(RT_BASE+1u));
+  let pitch=vec2f(rtFloat(RT_BASE+2u),rtFloat(RT_BASE+3u));
+  let high=origin+pitch*vec2f(f32(RT_WIDTH),f32(RT_DEPTH));
+  // The tile and a cell beside it, an eighth of each side to a lane.
+  let low=world.xz-1.01*extent.xz;let span=6.02*extent.xz;
+  // Well inside the heightfield, where its edge is no nearer than its ground.
+  let reach=(RT_FAR_CELLS+1.0)*max(extent.x,max(extent.y,extent.z));
+  if(any(low<origin+vec2f(reach))||any(low+span>high-vec2f(reach))){atomicStore(&rtFarVoid,1u);return;}
+  let corner=low+span*vec2f(f32(lane%8u),f32(lane/8u))/8.0;
+  let range=rtSurfaceRange(corner,corner+span/8.0);
+  if(range.x<-1e19||range.y>1e19){atomicStore(&rtFarVoid,1u);return;}
+  let step=max(extent.y,1e-8)/16.0;
+  atomicMax(&rtFarHigh,u32(clamp(ceil((range.y-world.y)/step)+RT_FAR_BIAS,1.0,2.0*RT_FAR_BIAS)));
+  atomicMax(&rtFarLow,u32(clamp(ceil((world.y-range.x)/step)+RT_FAR_BIAS,1.0,2.0*RT_FAR_BIAS)));
+}
+// One for a tile in clear air, minus one for a tile in the ground, zero for a
+// tile to fit.
+fn rtFarTile(extent:vec3f)->i32{
+  if(atomicLoad(&rtFarVoid)!=0u){return 0;}
+  let high=atomicLoad(&rtFarHigh);let low=atomicLoad(&rtFarLow);
+  if(high==0u||low==0u){return 0;}
+  let step=max(extent.y,1e-8)/16.0;
+  let reach=RT_FAR_CELLS*max(extent.x,max(extent.y,extent.z));
+  if((RT_FAR_BIAS-f32(high))*step>=reach){return 1;}
+  if((RT_FAR_BIAS-f32(low))*step-4.0*extent.y>=reach){return -1;}
+  return 0;
+}
+// The last stencil summed, kept for a gradient's probes. They stand a
+// thousandth of a cell from a point already summed and move on one axis, so
+// the sums over the other two are that point's own and only one axis's four
+// weights are new. A probe past a cell's edge reads its neighbour's cubic,
+// which meets this one in value, slope and curvature there.
+var<private> rtMemoBase:vec3i;
+var<private> rtMemoT:vec3f;
+// 0 nothing held, 1 a stencil with no authored cell, 2 the sums below, 3 a
+// block of one authored value, its field in the first of them.
+var<private> rtMemoState:u32;
+// Authored weight, the ground's share and the share as drawn, by cell along
+// one axis and summed over the other two.
+var<private> rtMemoX:array<vec3f,4>;
+var<private> rtMemoY:array<vec3f,4>;
+var<private> rtMemoZ:array<vec3f,4>;
+fn rtSplineWeights(t:f32)->vec4f{let u=1.0-t;
+  return vec4f(u*u*u,3.0*t*t*t-6.0*t*t+4.0,-3.0*t*t*t+3.0*t*t+3.0*t+1.0,t*t*t)/6.0;}
+// The ground's field with the authored cells in reach laid over it. The
+// page arm's field is K(0.5-s), s the cubic B-spline of its fractions and K
+// four thirds of a cell. Here the same spline is taken of the cells as drawn:
+// an authored cell gives its page fraction and any other the ground's share of
+// it, the column height through the cell. With w the spline weight on authored
+// cells and g the spline of the ground's shares alone,
+//   field = (1-w)(A' - K(0.5-g)) + K(0.5-s)
+// where A' is the analytic field saturated at the spline's plateau. All
+// authored (w=1) it is the page arm's field exactly; where the authored cells
+// hold what the ground would (s=g) it is the ground's, blended by w with its
+// own spline; and with no authored cell in reach the analytic field is
+// returned untouched, not recomputed.
+fn rtEditedField(world:vec3f,analytic:f32)->f32{
+  if(rtEditPageCount()==0u){return analytic;}
+  let cell=max(swCell(),vec3f(1e-8));let origin=swOrigin();
+  let p=(world-origin)/cell-vec3f(0.5);
+  // Authored weight, the ground's share, the share as drawn.
+  var sums=vec3f(0.0);var held=false;
+  if(rtMemoState!=0u){
+    let t=p-vec3f(rtMemoBase);let same=t==rtMemoT;let near=abs(t-rtMemoT)<vec3f(0.004);
+    var axis=3u;
+    if(same.y&&same.z&&near.x){axis=0u;}
+    else if(same.x&&same.z&&near.y){axis=1u;}
+    else if(same.x&&same.y&&near.z){axis=2u;}
+    if(axis<3u){
+      if(rtMemoState==1u){return analytic;}
+      if(rtMemoState==3u){return rtMemoX[0].x;}
+      let w=rtSplineWeights(t[axis]);
+      if(axis==0u){sums=w.x*rtMemoX[0]+w.y*rtMemoX[1]+w.z*rtMemoX[2]+w.w*rtMemoX[3];}
+      else if(axis==1u){sums=w.x*rtMemoY[0]+w.y*rtMemoY[1]+w.z*rtMemoY[2]+w.w*rtMemoY[3];}
+      else{sums=w.x*rtMemoZ[0]+w.y*rtMemoZ[1]+w.z*rtMemoZ[2]+w.w*rtMemoZ[3];}
+      held=true;
+    }
+  }
+  if(!held){
+    let base=vec3i(floor(p));let t=p-vec3f(base);
+    rtMemoBase=base;rtMemoT=t;rtMemoState=1u;
+    swWindowLoad(base-vec3i(1),base+vec3i(2));
+    if(!swWindowOccupied){return analytic;}
+    let wx=rtSplineWeights(t.x);let wy=rtSplineWeights(t.y);let wz=rtSplineWeights(t.z);
+    var sx:array<vec3f,4>;var sy:array<vec3f,4>;var sz:array<vec3f,4>;
+    var taken=array<u32,2>(0u,0u);
+    if(swWindowCached){
+      let tile=atomicLoad(&swTileSolid);
+      // No cell of the tile's block is authored, so none of this stencil is.
+      if((tile&2u)==0u){return analytic;}
+      // Every cell of the block is authored and they hold one value, so the
+      // spline is that value and the field the page arm's plateau, K(0.5-s).
+      if((tile&12u)!=12u){
+        let plateau=min(cell.x,min(cell.y,cell.z))*(4.0/3.0)*select(0.5,-0.5,(tile&4u)==0u);
+        rtMemoX[0]=vec3f(plateau);rtMemoState=3u;
+        return plateau;
+      }
+      // The same of this stencil's own cells, sixteen rows of four.
+      let l=vec3u(base-vec3i(1)-swTileLow);
+      var any=0u;var whole=0xfu;var empty=0xfu;
+      for(var k=0u;k<4u;k+=1u){for(var j=0u;j<4u;j+=1u){
+        let row=swTileRows[l.y+j+8u*(l.z+k)]>>l.x;
+        any|=row;whole&=row>>8u;empty&=row>>16u;
+      }}
+      if((any&0xfu)==0u){return analytic;}
+      if((whole&0xfu)==0xfu||(empty&0xfu)==0xfu){
+        let plateau=min(cell.x,min(cell.y,cell.z))*(4.0/3.0)*select(0.5,-0.5,(whole&0xfu)==0xfu);
+        rtMemoX[0]=vec3f(plateau);rtMemoState=3u;
+        return plateau;
+      }
+      let along=wx.x+wx.y+wx.z+wx.w;
+      for(var k=0u;k<4u;k+=1u){for(var j=0u;j<4u;j+=1u){
+        let row=swTileRows[l.y+j+8u*(l.z+k)]>>l.x;let authored=row&0xfu;
+        if(authored==0u){continue;}
+        taken[k>>1u]|=authored<<(4u*(j+4u*(k&1u)));
+        let across=wy[j]*wz[k];
+        // Four whole cells take the row's weight together.
+        if(((row>>8u)&0xfu)==0xfu){
+          let term=vec3f(1.0,0.0,1.0);
+          for(var i=0u;i<4u;i+=1u){sx[i]+=across*term;}
+          sy[j]+=along*wz[k]*term;sz[k]+=along*wy[j]*term;
+          continue;
+        }
+        for(var i=0u;i<4u;i+=1u){
+          if(((authored>>i)&1u)==0u){continue;}
+          let term=vec3f(1.0,0.0,f32(swTileCells[l.x+i+8u*(l.y+j+8u*(l.z+k))]&255u)/255.0);
+          sx[i]+=across*term;sy[j]+=wx[i]*wz[k]*term;sz[k]+=wx[i]*wy[j]*term;
+        }
+      }}
+    }else{
+      for(var k=0;k<4;k+=1){for(var j=0;j<4;j+=1){for(var i=0;i<4;i+=1){
+        let tap=rtEditCell(base+vec3i(i,j,k)-vec3i(1));
+        if(tap.x<=0.0){continue;}
+        let term=vec3f(1.0,0.0,tap.y);
+        sx[i]+=wy[j]*wz[k]*term;sy[j]+=wx[i]*wz[k]*term;sz[k]+=wx[i]*wy[j]*term;
+        let bit=u32(i+4*(j+4*k));taken[bit>>5u]|=1u<<(bit&31u);
+      }}}
+    }
+    if((taken[0]|taken[1])==0u){return analytic;}
+    // With every tap authored the ground has no weight left to be given.
+    let grounded=(taken[0]&taken[1])!=0xffffffffu;
+    for(var k=0;grounded&&k<4;k+=1){for(var i=0;i<4;i+=1){
+      let column=base+vec3i(i,0,k)-vec3i(1);
+      var height=0.0;
+      if(swWindowCached){let l=vec2u(column.xz-swTileLow.xz);height=rtTileGround[l.x+8u*l.y];}
+      else{height=(rtEditGround(origin.xz+(vec2f(column.xz)+vec2f(0.5))*cell.xz)-origin.y)/cell.y;}
+      for(var j=0;j<4;j+=1){
+        let share=clamp(height-f32(column.y+j),0.0,1.0);
+        if(share<=0.0){continue;}
+        let bit=u32(i+4*(j+4*k));
+        // An authored cell is drawn as its page's fraction, not the ground's share.
+        let term=vec3f(0.0,share,select(share,0.0,((taken[bit>>5u]>>(bit&31u))&1u)!=0u));
+        sx[i]+=wy[j]*wz[k]*term;sy[j]+=wx[i]*wz[k]*term;sz[k]+=wx[i]*wy[j]*term;
+      }
+    }}
+    rtMemoX=sx;rtMemoY=sy;rtMemoZ=sz;rtMemoState=2u;
+    sums=wx.x*sx[0]+wx.y*sx[1]+wx.z*sx[2]+wx.w*sx[3];
+  }
+  let authored=sums.x;let ground=sums.y;let voxels=sums.z;
+  if(authored<=0.0){return analytic;}
+  let scale=min(cell.x,min(cell.y,cell.z))*(4.0/3.0);
+  // Unit slope at the surface, level at the plateau: p(s)=s-(16/27)s^3 on [-3/4,3/4].
+  let s=clamp(analytic/scale,-0.75,0.75);let saturated=scale*(s-(16.0/27.0)*s*s*s);
+  let edited=(1.0-authored)*(saturated-scale*(0.5-ground))+scale*(0.5-voxels);
+  // Outside the heightfield the analytic field is a sentinel, not a distance.
+  if(analytic>1e19){return edited;}
+  // The saturated field leaves the analytic one away from the surface; a
+  // thirty-second of the weight in, the edited field has taken over.
+  return mix(analytic,edited,min(1.0,32.0*authored));
+}
+// A voxel centre's sample with the edits laid over the ground's own. An
+// authored cell is its page's whole sample; any other keeps the ground's and
+// takes from its page only a repainted material.
+fn rtEditedSample(world:vec3f,cellExtent:vec3f,ground:SolidWorldSample)->SolidWorldSample{
+  if(rtEditPageCount()==0u){return ground;}
+  let a=swAddress(vec3i(floor((world-swOrigin())/max(swCell(),vec3f(1e-8)))));
+  if(a.x==INVALID_INDEX){return ground;}
+  let at=SW_BASE+SW_PAGE_BASE+a.x*SW_PAGE_WORDS;
+  if(((atomicLoad(&maintenance[at+RT_EDIT_AUTHORED+(a.y>>5u)])>>(a.y&31u))&1u)!=0u){
+    return sampleSolidWorldPages(world,cellExtent);
+  }
+  let word=atomicLoad(&maintenance[at+${WEBGPU_SOLID_WORLD_PHYSICS_PAGE_WORDS}u+(a.y>>1u)]);
+  let painted=(word>>(16u*(a.y&1u)))&65535u;
+  if(ground.fraction>0.0&&painted!=0u){return SolidWorldSample(ground.fraction,ground.distance,painted,ground.normal);}
+  return ground;
+}
+// Whether an authored solid cell can reach the box: every cell it spans and
+// one either side. A span wider than a page window is answered by its pages.
+fn rtEditMayOccupy(minimum:vec3f,maximum:vec3f)->bool{
+  if(rtEditPageCount()==0u){return false;}
+  let cell=max(swCell(),vec3f(1e-8));let origin=swOrigin();
+  let lo=vec3i(floor((minimum-origin)/cell))-vec3i(1);let hi=vec3i(floor((maximum-origin)/cell))+vec3i(1);
+  if(all(hi-lo<vec3i(8))){
+    swWindowLoad(lo,hi);
+    if(!swWindowOccupied){return false;}
+    for(var z=lo.z;z<=hi.z;z+=1){for(var y=lo.y;y<=hi.y;y+=1){for(var x=lo.x;x<=hi.x;x+=1){
+      let tap=rtEditCell(vec3i(x,y,z));if(tap.x>0.0&&tap.y>0.0){return true;}
+    }}}
+    return false;
+  }
+  let a=vec3i(swFloorDiv8(lo.x),swFloorDiv8(lo.y),swFloorDiv8(lo.z));
+  let b=vec3i(swFloorDiv8(hi.x),swFloorDiv8(hi.y),swFloorDiv8(hi.z));
+  if(any(b-a>vec3i(3))){return true;}
+  for(var z=a.z;z<=b.z;z+=1){for(var y=a.y;y<=b.y;y+=1){for(var x=a.x;x<=b.x;x+=1){
+    if(swPageAt(vec3i(x,y,z))!=INVALID_INDEX){return true;}
+  }}}
+  return false;
+}
 fn sampleRenderTerrain(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
   let origin=vec2f(rtFloat(RT_BASE),rtFloat(RT_BASE+1u));
   let cell=max(vec2f(rtFloat(RT_BASE+2u),rtFloat(RT_BASE+3u)),vec2f(1e-8));
@@ -1506,25 +1832,8 @@ fn sampleRenderTerrain(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
     if(world.y-0.5*cellExtent.y>=range.y){fraction=0.0;}
     material=atomicLoad(&maintenance[RT_BASE+6u]);
   }
-  // Authored overlay bounds may extend past the terrain heightfield's XZ domain.
-  let patchCount=min(atomicLoad(&maintenance[RT_BASE+7u]),RT_PATCH_CAPACITY);
-  for(var index=0u;index<patchCount;index+=1u){
-    let base=RT_PATCH_BASE+index*8u;
-    let minimum=vec3f(rtFloat(base),rtFloat(base+1u),rtFloat(base+2u));
-    let maximum=vec3f(rtFloat(base+4u),rtFloat(base+5u),rtFloat(base+6u));
-    if(all(world>=minimum)&&all(world<maximum)){
-      if(atomicLoad(&maintenance[base+3u])==0u){
-        fraction=0.0;distance=1e20;material=0u;normal=vec3f(0.0);
-      }else{
-        let face=min(world-minimum,maximum-world);var axis=0u;
-        if(face.y<face.x){axis=1u;}if(face.z<face[axis]){axis=2u;}
-        normal=vec3f(0.0);normal[axis]=select(-1.0,1.0,
-          world[axis]>=0.5*(minimum[axis]+maximum[axis]));
-        fraction=1.0;distance=-face[axis];material=atomicLoad(&maintenance[base+7u]);
-      }
-    }
-  }
-  return SolidWorldSample(fraction,distance,material,normal);
+  // Authored pages may extend past the terrain heightfield's XZ domain.
+  return rtEditedSample(world,cellExtent,SolidWorldSample(fraction,distance,material,normal));
 }`;
 }
 
@@ -1535,11 +1844,14 @@ export function solidWorldProxyWGSL(
   layout?: WebgpuSolidWorldPageLayout,
   renderTerrainLayout?: RenderTerrainShaderLayout,
   backdropDetail?: string,
+  solidSurface?: string,
+  /** Where a page keeps its authored bits, for a page image that has them. */
+  authoredWords?: number,
 ): string {
   // A backdrop's stored detail rings (backdrop-detail.ts) are unioned into
   // every static-solid sample; they lie outside the set's footprint, so the
   // union never changes a voxel the set owns.
-  if (backdropDetail) return solidWorldProxyWGSL(layout, renderTerrainLayout)
+  if (backdropDetail) return solidWorldProxyWGSL(layout, renderTerrainLayout, undefined, solidSurface)
     .replace("fn sampleSolidWorld(", "fn sampleSolidWorldBase(") + /* wgsl */ `
 ${backdropDetail}
 fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
@@ -1548,8 +1860,11 @@ fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
   let detail=sampleBackdropDetail(world,cellExtent);
   if(detail.fraction>base.fraction){return detail;}
   return base;}`;
-  if (renderTerrainLayout) return /* wgsl */ `
-struct SolidWorldSample{fraction:f32,distance:f32,material:u32,normal:vec3f}
+  // A terrain scene carries the page image too, for its authored edits. The
+  // one shader holds both and is never rebuilt for an edit.
+  if (renderTerrainLayout) return solidWorldProxyWGSL(renderTerrainLayout.editPages, undefined, undefined, undefined,
+    WEBGPU_SOLID_WORLD_RENDER_PAGE_WORDS)
+    .replace("fn sampleSolidWorld(", "fn sampleSolidWorldPages(") + /* wgsl */ `
 ${renderTerrainProxyWGSL(renderTerrainLayout)}
 fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
   return sampleRenderTerrain(world,cellExtent);}`;
@@ -1628,7 +1943,58 @@ fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{let cell=max
 var<private> swWindowPages:array<u32,8>;
 var<private> swWindowSplit:vec3i;
 var<private> swWindowOccupied:bool;
+// A fitted 4³-cell tile's stencils all fall in one 8³ block of page cells.
+// Its lanes read the block once (swTileLoad) and every window inside it is
+// answered from workgroup memory: a cell's fraction in the low byte and its
+// authored bit above. swTileSolid holds which of the two any cell has (1 a
+// fraction, 2 the bit), and whether any cell is other than authored and whole
+// (4) or other than authored and empty (8).
+var<workgroup> swTileCells:array<u32,512>;
+var<workgroup> swTileSolid:atomic<u32>;
+// The block again by row along x, a bit a cell: the authored cells in the low
+// byte, those of them that are whole in the next and those empty in the third.
+var<workgroup> swTileRows:array<u32,64>;
+var<private> swTileLow:vec3i;
+var<private> swTileActive:bool;
+var<private> swWindowCached:bool;
+// Every lane of the workgroup calls this, ahead of a workgroup barrier.
+// \`world\` is the tile's low corner and \`extent\` one of its cells.
+fn swTileLoad(world:vec3f,extent:vec3f,lane:u32,enabled:bool){
+  let cell=max(swCell(),vec3f(1e-8));let origin=swOrigin();
+  // A gradient's step past the tile either side.
+  let margin=max(extent*0.002,vec3f(2e-6));
+  let low=vec3i(floor((world-margin-origin)/cell-vec3f(0.5)))-vec3i(1);
+  let high=vec3i(floor((world+4.0*extent+margin-origin)/cell-vec3f(0.5)))+vec3i(2);
+  swTileLow=low;
+  swTileActive=enabled&&all(high-low<vec3i(8))&&atomicLoad(&maintenance[SW_BASE+7u])!=0u;
+  if(swTileActive){
+    // A lane holds one row along x, which crosses a page at most once.
+    let row=low+vec3i(0,i32(lane%8u),i32(lane/8u));
+    var page=INVALID_INDEX;var held=vec3i(0);var solid=0u;var every=0x1ffu;var rows=0u;
+    for(var x=0;x<8;x+=1){
+      let q=row+vec3i(x,0,0);
+      let pageQ=vec3i(swFloorDiv8(q.x),swFloorDiv8(q.y),swFloorDiv8(q.z));
+      if(x==0||pageQ.x!=held.x){page=swPageAt(pageQ);held=pageQ;}
+      var word=0u;
+      if(page!=INVALID_INDEX){
+        let local=vec3u(q-pageQ*8);let index=local.x+8u*(local.y+8u*local.z);
+        let at=SW_BASE+SW_PAGE_BASE+page*SW_PAGE_WORDS;
+        word=(atomicLoad(&maintenance[at+(index>>2u)])>>(8u*(index&3u)))&255u;${authoredWords === undefined ? "" : `
+        word|=((atomicLoad(&maintenance[at+${authoredWords}u+(index>>5u)])>>(index&31u))&1u)<<8u;`}
+      }
+      swTileCells[u32(x)+8u*lane]=word;solid|=word;every&=word;
+      rows|=(select(0u,1u,(word&256u)!=0u)|select(0u,256u,word==0x1ffu)|select(0u,65536u,word==256u))<<u32(x);
+    }
+    swTileRows[lane]=rows;
+    let flags=select(0u,1u,(solid&255u)!=0u)|select(0u,2u,(solid&256u)!=0u)
+      |select(0u,4u,every!=0x1ffu)|select(0u,8u,solid!=256u);
+    if(flags!=0u){atomicOr(&swTileSolid,flags);}
+  }
+}
+${solidSurface ?? ""}
 fn swWindowLoad(lo:vec3i,hi:vec3i){
+  swWindowCached=swTileActive&&all(lo>=swTileLow)&&all(hi<swTileLow+vec3i(8));
+  if(swWindowCached){swWindowOccupied=(atomicLoad(&swTileSolid)&3u)!=0u;return;}
   let a=vec3i(swFloorDiv8(lo.x),swFloorDiv8(lo.y),swFloorDiv8(lo.z));
   let b=vec3i(swFloorDiv8(hi.x),swFloorDiv8(hi.y),swFloorDiv8(hi.z));
   swWindowSplit=b*8;swWindowOccupied=false;
@@ -1641,6 +2007,7 @@ fn swWindowLoad(lo:vec3i,hi:vec3i){
   }
 }
 fn swWindowFraction(q:vec3i)->f32{
+  if(swWindowCached){let l=vec3u(q-swTileLow);return f32(swTileCells[l.x+8u*(l.y+8u*l.z)]&255u)/255.0;}
   let upper=q>=swWindowSplit;
   let page=swWindowPages[select(0u,1u,upper.x)|select(0u,2u,upper.y)|select(0u,4u,upper.z)];
   if(page==INVALID_INDEX){return 0.0;}
@@ -1648,10 +2015,59 @@ fn swWindowFraction(q:vec3i)->f32{
   let word=atomicLoad(&maintenance[SW_BASE+SW_PAGE_BASE+page*SW_PAGE_WORDS+(index>>2u)]);
   return f32((word>>(8u*(index&3u)))&255u)/255.0;
 }
+${solidSurface ? `// How far the loaded window's voxels have left the authored solid's own
+// rasterization around the lattice point base+t: zero where the eight nearest
+// are still what its centre samples give, one at a voxel cut away or added
+// since. Binary voxels hold a slope only in the spacing of their steps; the
+// solid they were sampled from holds it everywhere.
+fn swWindowDeparture(base:vec3i,t:vec3f,cell:vec3f)->f32{
+  // A centre this near the surface rasterizes either way.
+  let slack=0.02*min(cell.x,min(cell.y,cell.z));
+  var departed=0.0;
+  for(var c=0u;c<8u;c+=1u){
+    let corner=vec3i(vec3u(c&1u,(c>>1u)&1u,(c>>2u)&1u));
+    let authored=swAuthoredDistance(swOrigin()+(vec3f(base+corner)+vec3f(0.5))*cell);
+    if(abs(authored)>slack&&(swWindowFraction(base+corner)>=0.5)!=(authored<0.0)){
+      let weight=mix(vec3f(1.0)-t,t,vec3f(corner));departed+=weight.x*weight.y*weight.z;
+    }
+  }
+  return min(1.0,2.0*departed);
+}
+fn swAuthoredDeparture(world:vec3f)->f32{
+  let cell=max(swCell(),vec3f(1e-8));
+  let p=(world-swOrigin())/cell-vec3f(0.5);let base=vec3i(floor(p));
+  swWindowLoad(base,base+vec3i(1));
+  return swWindowDeparture(base,p-vec3f(base),cell);
+}
+fn swAuthoredGradient(world:vec3f,e:f32)->vec3f{
+  return vec3f(swAuthoredDistance(world+vec3f(e,0.0,0.0))-swAuthoredDistance(world-vec3f(e,0.0,0.0)),
+    swAuthoredDistance(world+vec3f(0.0,e,0.0))-swAuthoredDistance(world-vec3f(0.0,e,0.0)),
+    swAuthoredDistance(world+vec3f(0.0,0.0,e))-swAuthoredDistance(world-vec3f(0.0,0.0,e)))/(2.0*e);
+}
+// The authored solid's normal at the face nearest a point in it or on it,
+// facing either way through a wall. Midway through a wall the field creases,
+// and a difference taken across the crease is of both faces at once: they
+// cancel, and it falls short of the unit slope either has alone. The steepest
+// of four gradients about the point is then one face's own.
+fn swAuthoredNormal(world:vec3f)->vec3f{
+  let cell=max(swCell(),vec3f(1e-8));let h=min(cell.x,min(cell.y,cell.z));
+  var gradient=swAuthoredGradient(world,0.01*h);
+  if(dot(gradient,gradient)<0.8){
+    // A tetrahedron's corners: no one plane passes near all four.
+    for(var c=0u;c<4u;c+=1u){
+      let corner=vec3f(select(-1.0,1.0,c<2u),select(-1.0,1.0,(c&1u)==0u),select(-1.0,1.0,c==0u||c==3u));
+      let probe=swAuthoredGradient(world+0.05*h*corner,0.01*h);
+      if(dot(probe,probe)>dot(gradient,gradient)){gradient=probe;}
+    }
+  }
+  if(dot(gradient,gradient)<1e-12){return vec3f(0.0);}
+  return normalize(gradient);
+}` : ""}
 // The cubic B-spline of the fractions, as a field with unit slope across a
 // flat voxel face: its zero set is that face exactly, and a staircase's
 // corners round into one closed surface. No solid within the stencil returns
-// the shared positive sentinel, so other sources keep their own exterior.
+// the shared positive sentinel, so other sources keep their own exterior.${solidSurface ? `
+// Where the voxels are still the authored solid's, the field is that solid's.` : ""}
 fn swSmoothField(world:vec3f)->f32{
   let cell=max(swCell(),vec3f(1e-8));
   let p=(world-swOrigin())/cell-vec3f(0.5);let base=vec3i(floor(p));let t=p-vec3f(base);let u=vec3f(1.0)-t;
@@ -1664,7 +2080,8 @@ fn swSmoothField(world:vec3f)->f32{
     solid+=weights[i].x*weights[j].y*weights[k].z*swWindowFraction(base+vec3i(i,j,k)-vec3i(1));
   }}}
   if(solid<=0.0){return 1e20;}
-  return (0.5-solid)*min(cell.x,min(cell.y,cell.z))*(4.0/3.0);
+  let voxels=(0.5-solid)*min(cell.x,min(cell.y,cell.z))*(4.0/3.0);
+  return ${solidSurface ? "mix(swAuthoredDistance(world),voxels,swWindowDeparture(base,t,cell))" : "voxels"};
 }
 // The plateau swSmoothField reaches deep inside a solid.
 fn swSmoothFieldLimit()->f32{let cell=swCell();return min(cell.x,min(cell.y,cell.z))*(2.0/3.0);}
@@ -1713,6 +2130,7 @@ export function sparseSceneProxyVoxelizationShaderFor(
   dualOffsetWords = 0,
   dualMarchingCubes = false,
   backdropDetail?: string,
+  solidSurface?: string,
 ): string {
   const dry = profile === "dry";
   const format = dry ? sceneGeometryFormat : "f32x2";
@@ -1817,7 +2235,7 @@ ${SVO_GBUFFER_NORMAL_OCT8_WGSL}
 ${sparseBrickSceneIdentityWordCodecWGSL()}
 ${bandedCodec}
 ${bandedEncoder}
-${solidWorldProxyWGSL(solidWorldLayout, renderTerrainLayout, backdropDetail)}
+${solidWorldProxyWGSL(solidWorldLayout, renderTerrainLayout, backdropDetail, solidSurface)}
 
 const BRICK_ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;
 const BRICK_DIRTY:u32=${SVO_BRICK_LIFECYCLE.dirtyBit}u;
@@ -2154,7 +2572,14 @@ var<private> dmcCandidatesCached:bool;
 fn dmcCandidateIndex(dirty:u32,i:u32)->u32{
   if(dmcCandidatesCached){return dmcCandidateIndices[i];}
   return atomicLoad(&maintenance[candidateOffset()+dirty*candidatesPerBrick()+i]);
-}` : ""}
+}
+// The point whose candidates were last all read, and which of them came
+// within a quarter cell of the field there. A gradient's probes stand a
+// thousandth of a cell from that point, where no other candidate can have
+// become the nearest: none of these fields closes a quarter cell in that step.
+var<private> dcNearHeld:bool;
+var<private> dcNearAt:vec3f;
+var<private> dcNearMask:array<u32,2>;` : ""}
 fn dcField(world:vec3f,dirty:u32,count:u32)->f32{
   var value=1e20;
   ${renderTerrainLayout ? `let origin=vec2f(rtFloat(RT_BASE),rtFloat(RT_BASE+1u));let pitch=vec2f(rtFloat(RT_BASE+2u),rtFloat(RT_BASE+3u));
@@ -2164,18 +2589,25 @@ fn dcField(world:vec3f,dirty:u32,count:u32)->f32{
   let q=abs(world.xz-(origin+half))-half;
   let lateral=length(max(q,vec2f(0)))+min(max(q.x,q.y),0.);
   value=max(world.y-rtSurface(clamp(world.xz,origin,high)).x,lateral);` : `if(all(world.xz>=origin)&&all(world.xz<=origin+pitch*vec2f(f32(RT_WIDTH),f32(RT_DEPTH)))){value=world.y-rtSurface(world.xz).x;}` }
-  for(var i=0u;i<min(atomicLoad(&maintenance[RT_BASE+7u]),RT_PATCH_CAPACITY);i+=1u){
-    let at=RT_PATCH_BASE+i*8u;let lo=vec3f(rtFloat(at),rtFloat(at+1u),rtFloat(at+2u));let hi=vec3f(rtFloat(at+4u),rtFloat(at+5u),rtFloat(at+6u));
-    let d=boxDistance(world-.5*(lo+hi),.5*(hi-lo));
-    if(atomicLoad(&maintenance[at+3u])==0u){value=max(value,-d);}else{value=min(value,d);}
-  }` : solidWorldLayout ? `// Page voxels are binary. Their own nearest-face distance is no field: it
-  // has a sentinel exterior and a seam on every interior face, which fits to
-  // terraces with gaps between them.
+  // Authored cells in reach take the field to their pages'; with none it is returned as it came.
+  value=rtEditedField(world,value);` : solidWorldLayout ? `// A page voxel's own stored distance is no field: it has a sentinel exterior
+  // and, across a box's cells, a seam on every interior face, which fits to
+  // terraces with gaps between them. The fractions are one: whole for a box
+  // and the covered share along a round patch's surface.
   value=swSmoothField(world);` : ""}
   ${backdropDetail ? `// The backdrop is fitted from its continuous ground and scatter, never
   // from the voxel occupancy those became.
   value=min(value,backdropDetailField(world,.25*min(params.cell.x,params.cell.z)));` : ""}
-  for(var i=0u;i<count;i+=1u){let p=primitives[${dualMarchingCubes ? "dmcCandidateIndex(dirty,i)" : "atomicLoad(&maintenance[candidateOffset()+dirty*candidatesPerBrick()+i])"}];value=min(value,primitiveDistance(p,world));}
+  ${dualMarchingCubes ? `let finest=min(params.cell.x,min(params.cell.y,params.cell.z));
+  let stepped=dcNearHeld&&all(abs(world-dcNearAt)<=vec3f(0.0025*finest));
+  var near=array<u32,2>(0u,0u);
+  for(var i=0u;i<count;i+=1u){
+    if(stepped&&((dcNearMask[i>>5u]>>(i&31u))&1u)==0u){continue;}
+    let d=primitiveDistance(primitives[dmcCandidateIndex(dirty,i)],world);
+    if(i<64u&&d<=value+0.25*finest){near[i>>5u]|=1u<<(i&31u);}
+    value=min(value,d);
+  }
+  if(!stepped){dcNearMask=near;dcNearAt=world;dcNearHeld=count<=64u;}` : `for(var i=0u;i<count;i+=1u){let p=primitives[atomicLoad(&maintenance[candidateOffset()+dirty*candidatesPerBrick()+i])];value=min(value,primitiveDistance(p,world));}`}
   return value;
 }
 ${dualMarchingCubes ? svoDualMarchingCubesCachedFitWGSL : svoDualContouringFitWGSL}
@@ -2257,16 +2689,6 @@ fn linearIndex64(gid:vec3u,groups:vec3u)->u32{
 fn linearIndex256(gid:vec3u,groups:vec3u)->u32{
   return gid.x+gid.y*groups.x*256u+gid.z*groups.x*groups.y*256u;
 }
-fn writeDispatch(offset:u32,workItems:u32,workgroupSize:u32){
-  let blocks=(workItems+workgroupSize-1u)/workgroupSize;
-  let x=min(blocks,65535u);
-  var y=1u;
-  if(x>0u){y=(blocks+x-1u)/x;}
-  atomicStore(&maintenance[offset],x);
-  atomicStore(&maintenance[offset+1u],y);
-  atomicStore(&maintenance[offset+2u],1u);
-}
-
 /** The header every invalidation entry point publishes before it does anything else. */
 fn storeRequestedRevision(){
   atomicStore(&maintenance[stateOffset()+2u],sceneRevision());
@@ -2289,7 +2711,7 @@ fn markDirtyBrick(leafIndex:u32){
   atomicStore(&maintenance[record],leafIndex);
   atomicStore(&maintenance[record+1u],0u);
   atomicStore(&maintenance[record+2u],0u);
-  atomicStore(&maintenance[record+3u],0u);
+  // Word 3 is the dirty journal's entry for this slot and outlives the revision.
 }
 
 /**
@@ -2305,6 +2727,8 @@ fn invalidateDirtyBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_w
   let leafIndex=linearIndex64(gid,groups);
   if(leafIndex>=controlLoad(1u)){return;}
   if(leafIndex==0u){storeRequestedRevision();}
+  // A retired leaf slot keeps its place in the table and names no node.
+  if(topologyLoad(controlLoad(16u)+leafIndex*4u)>=controlLoad(0u)){return;}
   let brickBounds=leafBounds(leafIndex);
   var affected=false;
   for(var regionIndex=0u;regionIndex<dirtyRegionCount();regionIndex+=1u){
@@ -2362,19 +2786,8 @@ fn prepareMaintenanceDispatch(){
   atomicStore(&maintenance[stateOffset()+CHUNK_END],end);
   atomicStore(&maintenance[stateOffset()+CHUNK_CURSOR],end);
   let chunk=end-cursor;
-  if((maintenanceFlags()&INDEXED_BINNING)!=0u){
-    // One workgroup per dirty brick: the brick's candidates are whatever sits in
-    // its one grid cell plus the global list, and neither length is known here.
-    writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.binDispatch}u,chunk,1u);
-  }else{
-    writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.binDispatch}u,chunk*primitiveCount(),256u);
-  }
-  let brickSize=controlLoad(11u);
-  writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.rebuildDispatch}u,chunk*brickSize*brickSize*brickSize,${dual && dualMarchingCubes ? 64 : 256}u);
-  writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.finalizeDispatch}u,chunk,64u);
-  // One workgroup a dirty brick: the banded encoder's reductions are whole-leaf,
-  // so a leaf cannot be split across workgroups.
-  writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.bandDispatch}u,chunk,1u);${bandedAllocatorReset}
+  // The chunk passes are dispatched directly at the host's planned chunk size,
+  // a strict upper bound on \`chunk\`; each thread stops at CHUNK_END.${bandedAllocatorReset}
   // Only invalidation has run at this point, so the mask can only be carrying
   // DIRTY_BRICK_OVERFLOW here; it is spelled the same way as the two later
   // stores so the completion rule has exactly one form in this shader.
@@ -2505,9 +2918,21 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   ${dual && dualMarchingCubes ? `let fitCandidateCount=min(atomicLoad(&maintenance[record+1u]),candidatesPerBrick());
   dmcCandidatesCached=fitActive&&tiled&&fitCandidateCount<=64u;
   if(dmcCandidatesCached&&lane<fitCandidateCount){dmcCandidateIndices[lane]=atomicLoad(&maintenance[candidateOffset()+dirtyIndex*candidatesPerBrick()+lane]);}
+  let tileWorld=params.worldOrigin.xyz+vec3f((brick*brickSize+tileBase)*scale)*params.cell.xyz;${solidWorldLayout || renderTerrainLayout ? `
+  swTileLoad(tileWorld,cellExtent,lane,fitActive&&tiled);` : ""}${renderTerrainLayout ? `
+  rtTileLoad(lane);
+  rtFarLoad(tileWorld,cellExtent,lane,fitActive&&tiled);` : ""}
   workgroupBarrier();
-  let tileWorld=params.worldOrigin.xyz+vec3f((brick*brickSize+tileBase)*scale)*params.cell.xyz;
-  dmcCacheSamples(tileWorld,cellExtent,dirtyIndex,fitCandidateCount,lane,fitActive&&tiled);
+  var far=0;${renderTerrainLayout ? `
+  // Nothing but the ground can reach the tile: no primitive, and no page cell
+  // in the block its stencils read.
+  if(fitActive&&tiled&&fitCandidateCount==0u
+    &&(rtEditPageCount()==0u||(swTileActive&&(atomicLoad(&swTileSolid)&3u)==0u))){far=rtFarTile(cellExtent);}${backdropDetail ? `
+  // Nor the backdrop, which is no nearer than its footprint's edge.
+  let farEdge=(RT_FAR_CELLS+1.0)*max(cellExtent.x,max(cellExtent.y,cellExtent.z))+4.25*min(params.cell.x,params.cell.z);
+  if(any(tileWorld.xz-backdropFootprintMinimum()<vec2f(farEdge))
+    ||any(backdropFootprintMaximum()-tileWorld.xz-4.0*cellExtent.xz<vec2f(farEdge))){far=0;}` : ""}` : ""}
+  dmcCacheSamples(tileWorld,cellExtent,dirtyIndex,fitCandidateCount,lane,fitActive&&tiled&&far==0);
   if(!fitActive){return;}` : ""}
   let cellRadius = 0.5 * length(cellExtent);
   var bestDistance = 1e20;
@@ -2565,7 +2990,12 @@ ${contours ? `  var contourCode=fitSceneContour(world,cellExtent,bestNormal,prim
   // Clear all occupancy consumers together, including identity and band masks.
   if(contourCode==255u){primitiveFraction=0.0;contourCode=0u;}` : ""}
 ${dual && dualMarchingCubes ? `
-  let fitted=dmcFit(world-.5*cellExtent,cellExtent,dirtyIndex,candidateCount);
+  // A tile clear of every surface takes the ground's sample at the cell's
+  // centre: its sign is the whole of what a fit there says.
+  let farLimit=min(cellExtent.x,min(cellExtent.y,cellExtent.z));
+  var fitted=DmcFit(vec3f(.5),select(min(staticSolid.distance,-farLimit),max(staticSolid.distance,farLimit),far>0),
+    select(vec3f(0,1,0),staticSolid.normal,dot(staticSolid.normal,staticSolid.normal)>0.));
+  if(far==0){fitted=dmcFit(world-.5*cellExtent,cellExtent,dirtyIndex,candidateCount);}
   let dcAt=${dualOffsetWords}u+output*4u;
   let point=(world-.5*cellExtent+fitted.point*cellExtent-params.worldOrigin.xyz)/params.cell.xyz;
   atomicStore(&maintenance[dcAt],bitcast<u32>(point.x));atomicStore(&maintenance[dcAt+1u],bitcast<u32>(point.y));atomicStore(&maintenance[dcAt+2u],bitcast<u32>(point.z));
@@ -2574,13 +3004,21 @@ ${dual && dualMarchingCubes ? `
   if(fitted.value<0.&&primitiveFraction<=0.){bestMaterial=backdropTerrainMaterial();}` : ""}
   ${pageSolids ? `// The smoothed page field fills concave corners with cells no voxel claims.
   if(fitted.value<0.&&primitiveFraction<=0.){let near=swNearestMaterial(world);if(near!=0u){bestMaterial=near;}}` : ""}
+  ${renderTerrainLayout ? `// So does an edit's field where it meets the ground. Only an edit page can answer.
+  if(fitted.value<0.&&primitiveFraction<=0.&&rtEditPageCount()!=0u){let near=swNearestMaterial(world);if(near!=0u){bestMaterial=near;}}` : ""}
   if(fitted.value<0.){primitiveFraction=max(primitiveFraction,1.0/255.0);}
   if(primitiveFraction>0.){bestNormal=fitted.normal;}
   ${pageSolids ? `// A page surface shades from the wide normal. Only the cells a dual edge can
   // cross need one: off the field's interior plateau and within two cells.
+  let fittedWorld=world-.5*cellExtent+fitted.point*cellExtent;
+  ${solidSurface ? `// Where an authored solid's voxels still stand, the surface and its normal
+  // are that solid's own. The fitted point of a leaf inside a wall lies on the
+  // field's crease, where the fit's gradient is no face's.
+  let authoredLeaf=primitiveFraction>0.&&bestPrimitive==INVALID_INDEX&&swAuthoredDeparture(fittedWorld)<=0.;
+  if(authoredLeaf){let own=swAuthoredNormal(fittedWorld);if(dot(own,own)>0.){bestNormal=own;}}` : ""}
   if(primitiveFraction>0.&&bestPrimitive==INVALID_INDEX&&abs(fitted.value)<.99*swSmoothFieldLimit()
-    &&fitted.value>-2.*max(cellExtent.x,max(cellExtent.y,cellExtent.z))){
-    let wide=swSmoothNormal(world-.5*cellExtent+fitted.point*cellExtent);
+    &&fitted.value>-2.*max(cellExtent.x,max(cellExtent.y,cellExtent.z))${solidSurface ? "&&!authoredLeaf" : ""}){
+    let wide=swSmoothNormal(fittedWorld);
     // Between two solids a cell or two apart the blur has no direction.
     if(dot(wide,fitted.normal)>0.){bestNormal=wide;}
   }` : ""}
@@ -2676,6 +3114,10 @@ fn finalizeDirtyBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_wor
   topologyStore(nodeIndex*8u+${SVO_BRICK_CONTOUR.nodeWord}u,
     (topologyLoad(nodeIndex*8u+${SVO_BRICK_CONTOUR.nodeWord}u)&0xffu)
     |(contour<<${SVO_BRICK_CONTOUR.shift}u));
+  // The leaf is current again: append it to the dirty journal, which every
+  // consumer of repaired bricks reads with its own cursor.
+  let journalIndex=atomicAdd(&maintenance[stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.journalWriteCursor}u],1u);
+  atomicStore(&maintenance[dirtyBrickOffset()+(journalIndex%max(dirtyBrickCapacity(),1u))*4u+${SPARSE_SCENE_DIRTY_JOURNAL_RECORD_WORD}u],leafIndex);
   if(chunkSlot==0u&&lastChunk&&(atomicLoad(&maintenance[stateOffset()+1u])&INCOMPLETE_OVERFLOW)==0u){
     atomicStore(&maintenance[stateOffset()+3u],sceneRevision());
   }
@@ -3014,6 +3456,21 @@ export interface SparseSceneMaintenanceBinding {
   stateOffsetBytes: number;
   dirtyBrickOffsetBytes: number;
   dirtyBrickCapacity: number;
+  /**
+   * The dirty journal: a ring of every leaf the voxelizer has finalized, in
+   * `buffer`. The write cursor at `cursorOffsetBytes` counts appends modulo
+   * 2^32 and is never reset; entry `k` is the word at `recordOffsetBytes +
+   * (k % capacity) * recordStrideWords * 4`. A consumer keeps its own cursor,
+   * takes `[cursor, write)` whenever it likes, and must treat `write - cursor >
+   * capacity` (or a wrapped write cursor) as having been lapped.
+   */
+  journal?: { cursorOffsetBytes: number; recordOffsetBytes: number; recordStrideWords: number; capacity: number };
+  /**
+   * Maintenance frames the voxelizer has encoded. A consumer that compares it
+   * with the value it last saw knows, on the host and in the same frame, that
+   * the journal may have grown — without a readback.
+   */
+  readonly activity?: number;
   surfaceVertexOffsetBytes?: number;
   surfaceVertexKind?: "dual-contouring" | "dual-marching-cubes";
 }
@@ -3034,6 +3491,57 @@ export interface SparseSceneMaintenanceTimestamps {
   baseIndex: number;
 }
 
+/**
+ * Pages reserved for a scene drawn from SolidWorld pages.
+ *
+ * The image is allocated once and never grows, so it is sized here to what an
+ * edit session can need rather than to what the scene starts with: every page
+ * the declared brick domain touches, up to the display budget
+ * (`WEBGPU_SOLID_WORLD_DISPLAY_BUDGET_BYTES`). The record index is where this
+ * class is told that domain, so a page image without one cannot be sized.
+ */
+function solidWorldDisplayPageCapacity(options: SparseSceneProxyVoxelizerOptions,
+  worldOrigin: SparseSceneVector3, builtPageCount: number): number {
+  const lattice = options.solidWorldLattice, index = options.recordIndex;
+  if (!lattice) throw new RangeError("A SolidWorld GPU image needs its physical lattice");
+  if (!index) {
+    throw new RangeError("A SolidWorld display image is sized to the editable domain, "
+      + "which the record index declares; this voxelizer was given none");
+  }
+  const maximum = [0, 1, 2].map((axis) =>
+    worldOrigin[axis]! + index.dimensions[axis]! * index.cellExtent_m[axis]!) as [number, number, number];
+  return planWebgpuSolidWorldDisplayPageCapacity({
+    builtPageCount,
+    domainPageCount: webgpuSolidWorldDomainPageCount(lattice, worldOrigin, maximum),
+    includesMaterial: true,
+  });
+}
+
+/**
+ * Pages reserved for a terrain scene's authored edits.
+ *
+ * The ground is drawn from the heightfield, so the image holds only pages an
+ * edit shaped or repainted. It is sized once, to every page of the declared
+ * brick domain up to the display budget, less whatever of that budget the
+ * arena's storage binding cannot hold; an edit past it is refused at preflight.
+ */
+function terrainEditPageBudget(options: SparseSceneProxyVoxelizerOptions,
+  worldOrigin: SparseSceneVector3, builtPageCount: number, availableBytes: number):
+  { readonly pageCapacity: number; readonly maximumBytes: number } {
+  const lattice = options.solidWorldLattice, index = options.recordIndex;
+  const maximumBytes = availableBytes > 0
+    ? Math.min(WEBGPU_SOLID_WORLD_DISPLAY_BUDGET_BYTES, availableBytes) : WEBGPU_SOLID_WORLD_DISPLAY_BUDGET_BYTES;
+  // Without a lattice there are no pages to draw; the shader still needs an image to name.
+  if (!lattice) return { pageCapacity: 1, maximumBytes };
+  const maximum = index ? [0, 1, 2].map((axis) =>
+    worldOrigin[axis]! + index.dimensions[axis]! * index.cellExtent_m[axis]!) as [number, number, number] : undefined;
+  return { maximumBytes, pageCapacity: planWebgpuSolidWorldDisplayPageCapacity({
+    builtPageCount,
+    domainPageCount: maximum ? webgpuSolidWorldDomainPageCount(lattice, worldOrigin, maximum) : Number.MAX_SAFE_INTEGER,
+    includesMaterial: true, includesAuthored: true, budgetBytes: maximumBytes,
+  }) };
+}
+
 /** Fixed-capacity, render-revision-driven maintenance of live scene geometry. */
 export class SparseSceneProxyVoxelizer {
   primitiveCount = 0;
@@ -3047,18 +3555,19 @@ export class SparseSceneProxyVoxelizer {
   private readonly clusterCapacity: number;
   private readonly fieldProgramCapacity: number;
   private readonly solidWorldLayout?: WebgpuSolidWorldPageLayout;
-  private uploadedSolidWorld?: SolidWorld;
+  /** The page image on the device, whichever arm draws it: every page, or a terrain scene's edits. */
+  private readonly solidWorldPages?: WebgpuSolidWorldPageWriter;
+  /** A terrain scene's choice of pages to draw over its ground. */
+  private readonly terrainEdits?: TerrainEditPages;
   private readonly renderTerrainLayout?: Readonly<{
     baseWords: number;
     heightsBaseWords: number;
     totalWords: number;
     width: number;
     depth: number;
-    patchBaseWords: number;
-    patchCapacity: number;
+    editPages: WebgpuSolidWorldPageLayout;
   }>;
   private readonly maintenanceArena: GPUBuffer;
-  private readonly maintenanceDispatch: GPUBuffer;
   private readonly paramsBuffer: GPUBuffer;
   private invalidatePipeline!: GPUComputePipeline;
   private indexedInvalidatePipeline?: GPUComputePipeline;
@@ -3092,17 +3601,36 @@ export class SparseSceneProxyVoxelizer {
    * Frames of chunked repair still owed for the pending revision.
    *
    * Planned on the CPU from a strict upper bound on the dirty brick count (the
-   * dirty regions' brick-cell volume), never from a readback. Over-planning
-   * costs an empty frame whose indirect dispatches are all zero; under-planning
-   * would stop encoding before the last chunk stored `completedRevision`, and a
-   * publication that never completes is the black slab.
+   * distinct brick cells the dirty regions cover), never from a readback.
+   * Over-planning costs an empty frame whose threads all stop at `chunkEnd`;
+   * under-planning would stop encoding before the last chunk stored
+   * `completedRevision`, and a publication that never completes is the black slab.
    */
   private chunksRemaining = 0;
   private plannedChunks = 0;
+  /** Dirty bricks one chunk frame can hold: the same bound, capped by the budget. Sizes the chunk passes' direct dispatches. */
+  private plannedChunkBricks = 1;
+  /** Maintenance frames encoded so far; see `SparseSceneMaintenanceBinding.activity`. */
+  private encodedFrames = 0;
   private indexedInvalidation = false;
   private lastRegionCellCount = 0;
   private lastGlobalRecordCount = 0;
   private lastGridItemCount = 0;
+  /**
+   * The primitive list last published and its sampling bounds. Every record
+   * table is a function of that list alone, so the same array published again
+   * is already in them, and a different one is diffed against these copies.
+   */
+  private publishedPrimitives?: readonly SparseScenePrimitive[];
+  private publishedBounds: readonly SparseSceneAxisAlignedBounds[] = [];
+  private readonly publishedRecords = new PublishedWords();
+  private readonly publishedClusters = new PublishedWords();
+  private readonly publishedFieldPrograms = new PublishedWords();
+  private readonly publishedPrimitiveBounds = new PublishedWords();
+  private readonly publishedGridOffsets = new PublishedWords();
+  private readonly publishedGridItems = new PublishedWords();
+  private readonly publishedGlobalRecords = new PublishedWords();
+  private readonly publishedCellRanges = new PublishedWords();
 
   constructor(
     device: GPUDevice,
@@ -3177,27 +3705,45 @@ export class SparseSceneProxyVoxelizer {
     if (options.solidWorld && !options.solidWorldLattice) {
       throw new RangeError("A SolidWorld GPU image needs its physical lattice");
     }
-    // The terrain shader samples its heightfield and ordered edit overlay only
-    // (solidWorldProxyWGSL). Do not reserve or upload an unused voxel copy of
-    // every cell below that surface: it scales cubically with physics detail.
+    // The terrain shader samples its heightfield and the pages of its authored
+    // edits only (solidWorldProxyWGSL). Do not reserve or upload an unused voxel
+    // copy of every cell below that surface: it scales cubically with physics detail.
     this.solidWorldLayout = options.solidWorld && !options.renderTerrain ? createWebgpuSolidWorldPageLayout({
       baseWords: solidWorldBaseWords,
-      authoredPageCount: Math.max(256, options.solidWorld.pages.length),
+      // No heightfield to sample: this image holds the ground as pages too.
+      authoredPageCount: materializedSolidWorldPages(options.solidWorld).length,
+      pageCapacity: solidWorldDisplayPageCapacity(options, worldOrigin,
+        materializedSolidWorldPages(options.solidWorld).length),
       includesMaterial: true,
     }) : undefined;
-    this.uploadedSolidWorld = options.solidWorld;
+    if (options.solidSurface && !this.solidWorldLayout) {
+      throw new RangeError("An authored solid surface needs the SolidWorld voxels it was rasterized to");
+    }
     const renderTerrainBaseWords = this.solidWorldLayout?.totalWords ?? solidWorldBaseWords;
-    this.renderTerrainLayout = options.renderTerrain ? Object.freeze({
-      baseWords: renderTerrainBaseWords,
-      heightsBaseWords: renderTerrainBaseWords + 8,
-      patchBaseWords: renderTerrainBaseWords + 8 + options.renderTerrain.heights_m.length,
-      patchCapacity: options.renderTerrain.patches.length + LIVE_TERRAIN_PATCH_RESERVE,
-      totalWords: checkedArenaWords(renderTerrainBaseWords + 8
-        + options.renderTerrain.heights_m.length
-        + (options.renderTerrain.patches.length + LIVE_TERRAIN_PATCH_RESERVE) * 8, "Render terrain field"),
-      width: options.renderTerrain.dimensions[0],
-      depth: options.renderTerrain.dimensions[1],
-    }) : undefined;
+    const fitWords = (options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? tree.voxelCapacity * 4 : 0;
+    if (options.renderTerrain) {
+      this.terrainEdits = options.solidWorldLattice
+        ? new TerrainEditPages(options.renderTerrain, options.solidWorldLattice) : undefined;
+      const builtEditPages = options.solidWorld && this.terrainEdits
+        ? this.terrainEdits.select(options.solidWorld).length : 0;
+      const editPagesBaseWords = checkedArenaWords(renderTerrainBaseWords + 8
+        + options.renderTerrain.heights_m.length, "Render terrain field");
+      // The page image follows the heightfield and is fixed here for the session.
+      const budget = terrainEditPageBudget(options, worldOrigin, builtEditPages,
+        device.limits.maxStorageBufferBindingSize - 4 * (editPagesBaseWords + fitWords));
+      const editPages = createWebgpuSolidWorldPageLayout({
+        baseWords: editPagesBaseWords, authoredPageCount: builtEditPages, pageCapacity: budget.pageCapacity,
+        includesMaterial: true, includesAuthored: true, maximumBytes: budget.maximumBytes,
+      });
+      this.renderTerrainLayout = Object.freeze({
+        baseWords: renderTerrainBaseWords,
+        heightsBaseWords: renderTerrainBaseWords + 8,
+        editPages,
+        totalWords: checkedArenaWords(editPages.totalWords, "Render terrain edit pages"),
+        width: options.renderTerrain.dimensions[0],
+        depth: options.renderTerrain.dimensions[1],
+      });
+    }
     const baseArenaWords = checkedArenaWords(
       this.renderTerrainLayout?.totalWords
         ?? this.solidWorldLayout?.totalWords ?? solidWorldBaseWords,
@@ -3206,8 +3752,7 @@ export class SparseSceneProxyVoxelizer {
     const arenaWords = baseArenaWords + ((options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? tree.voxelCapacity * 4 : 0);
     if(arenaWords * 4 > device.limits.maxStorageBufferBindingSize) throw new RangeError("Meshing construction arena exceeds GPU storage limit; reduce render grid resolution");
     this.brickBudget = nonNegativeInteger(options.bricksPerFrameBudget ?? 0, "Bricks per frame budget");
-    const maintenanceDispatchBytes = 4 * 3 * 4;
-    this.allocatedBytes = primitiveBytes + arenaWords * 4 + maintenanceDispatchBytes + 128;
+    this.allocatedBytes = primitiveBytes + arenaWords * 4 + 128;
     const label = options.label ?? "Sparse scene proxies";
     this.label = label;
     this.primitiveBuffer = device.createBuffer({
@@ -3220,9 +3765,14 @@ export class SparseSceneProxyVoxelizer {
       label: `${label} fixed maintenance arena`, size: arenaWords * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
-    if (this.solidWorldLayout && options.solidWorld && options.solidWorldLattice) {
-      writeWebgpuSolidWorldPages(device.queue, this.maintenanceArena,
-        this.solidWorldLayout, options.solidWorld, [0, 0, 0], options.solidWorldLattice);
+    const pageLayout = this.renderTerrainLayout?.editPages ?? this.solidWorldLayout;
+    if (pageLayout && options.solidWorldLattice) {
+      this.solidWorldPages = new WebgpuSolidWorldPageWriter(device.queue, this.maintenanceArena,
+        pageLayout, [0, 0, 0], options.solidWorldLattice);
+      if (options.solidWorld) {
+        this.solidWorldPages.write(this.terrainEdits?.select(options.solidWorld)
+          ?? materializedSolidWorldPages(options.solidWorld));
+      }
     }
     if (this.renderTerrainLayout && options.renderTerrain) {
       const header = new ArrayBuffer(8 * Uint32Array.BYTES_PER_ELEMENT);
@@ -3230,22 +3780,13 @@ export class SparseSceneProxyVoxelizer {
       floats.set([options.renderTerrain.origin_m[0], options.renderTerrain.origin_m[1],
         options.renderTerrain.cellSize_m[0], options.renderTerrain.cellSize_m[1]], 0);
       words.set([options.renderTerrain.dimensions[0], options.renderTerrain.dimensions[1],
-        options.renderTerrain.materialId, options.renderTerrain.patches.length], 4);
+        options.renderTerrain.materialId, 0], 4);
       device.queue.writeBuffer(this.maintenanceArena,
         this.renderTerrainLayout.baseWords * 4, header);
       device.queue.writeBuffer(this.maintenanceArena,
         this.renderTerrainLayout.heightsBaseWords * 4,
         options.renderTerrain.heights_m);
-      if (options.renderTerrain.patches.length > 0) {
-        const patchData = packTerrainOverlay(options.renderTerrain.patches, this.renderTerrainLayout.patchCapacity);
-        device.queue.writeBuffer(this.maintenanceArena,
-          this.renderTerrainLayout.patchBaseWords * 4, patchData);
-      }
     }
-    this.maintenanceDispatch = device.createBuffer({
-      label: `${label} maintenance dispatch arguments`, size: maintenanceDispatchBytes,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
-    });
     this.paramsBuffer = device.createBuffer({
       label: `${label} parameters`, size: 128,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -3271,11 +3812,19 @@ export class SparseSceneProxyVoxelizer {
         { binding: 4, resource: { buffer: this.paramsBuffer } },
       ],
     });
+    const activity = () => this.encodedFrames;
     this.maintenanceBinding = Object.freeze({
       buffer: this.maintenanceArena,
       stateOffsetBytes: this.stateOffsetWords * 4,
       dirtyBrickOffsetBytes: this.dirtyBrickOffsetWords * 4,
       dirtyBrickCapacity,
+      journal: Object.freeze({
+        cursorOffsetBytes: (this.stateOffsetWords + SPARSE_SCENE_MAINTENANCE_STATE_WORDS.journalWriteCursor) * 4,
+        recordOffsetBytes: (this.dirtyBrickOffsetWords + SPARSE_SCENE_DIRTY_JOURNAL_RECORD_WORD) * 4,
+        recordStrideWords: 4,
+        capacity: dirtyBrickCapacity,
+      }),
+      get activity() { return activity(); },
       surfaceVertexOffsetBytes: this.dualOffsetWords ? this.dualOffsetWords*4 : undefined,
       surfaceVertexKind: this.dualOffsetWords ? (this.options.surfaceDualMarchingCubes ? "dual-marching-cubes" : "dual-contouring") : undefined,
     });
@@ -3289,7 +3838,7 @@ export class SparseSceneProxyVoxelizer {
         this.tree.payloadProfile, this.tree.sceneGeometryFormat,
         this.tree.leafPayloadMode, this.solidWorldLayout,
         this.renderTerrainLayout, this.options.surfaceContours === true, this.dualOffsetWords, this.options.surfaceDualMarchingCubes === true,
-        this.options.backdropDetail),
+        this.options.backdropDetail, this.options.solidSurface),
     });
     const pipeline = (entryPoint: string, stage: string) => this.device.createComputePipelineAsync({
       label: `${this.label} ${stage} pipeline`, layout: this.pipelineLayout,
@@ -3321,42 +3870,25 @@ export class SparseSceneProxyVoxelizer {
 
   /** Replace the canonical static-solid image without allocating a host mirror. */
   validateSolidWorld(world: SolidWorld): void {
-    if (this.renderTerrainLayout) {
-      if (world.patches.length > this.renderTerrainLayout.patchCapacity) {
-        throw new RangeError(`Live terrain edit capacity reached (${this.renderTerrainLayout.patchCapacity} patches). Undo or open a new scene.`);
-      }
-      return;
-    }
-    if (!this.solidWorldLayout || world.pages.length > this.solidWorldLayout.pageCapacity) {
-      throw new Error("Live display capacity reached; remove some voxels before adding more.");
+    // A terrain scene draws only the pages its edits shaped; any other draws them all.
+    const pages = this.renderTerrainLayout ? this.terrainEdits?.select(world).length ?? 0
+      : materializedSolidWorldPages(world).length;
+    const pageCapacity = this.solidWorldPages?.layout.pageCapacity ?? 0;
+    if (pages > pageCapacity) {
+      throw new Error(`Live display capacity reached: the edit needs ${pages} solid pages `
+        + `and this scene reserved ${pageCapacity} when it was built. Remove some voxels before adding more.`);
     }
   }
 
   setSolidWorld(world: SolidWorld): void {
-    const layout = this.solidWorldLayout;
-    const lattice = this.options.solidWorldLattice;
-    if ((!layout && !this.renderTerrainLayout) || !lattice) {
-      if (world.pages.length > 0) throw new Error("This voxelizer has no SolidWorld capacity");
+    const pages = this.solidWorldPages;
+    if (!pages) {
+      if (world.pages.length > 0 || world.ground) throw new Error("This voxelizer has no SolidWorld capacity");
       return;
     }
     this.validateSolidWorld(world);
-    if (layout) {
-      const clear = this.device.createCommandEncoder({ label: "Clear SVO SolidWorld image" });
-      clear.clearBuffer(this.maintenanceArena, 4 * (layout.baseWords + layout.directoryBaseWords),
-        4 * (layout.pageBaseWords - layout.directoryBaseWords));
-      this.device.queue.submit([clear.finish()]);
-      writeWebgpuSolidWorldPages(this.device.queue, this.maintenanceArena,
-        layout, world, [0, 0, 0], lattice, this.uploadedSolidWorld);
-    }
-    if (this.renderTerrainLayout) {
-      const overlay = packTerrainOverlay(terrainOverlayPatches(world, lattice), this.renderTerrainLayout.patchCapacity);
-      if (overlay.byteLength) this.device.queue.writeBuffer(this.maintenanceArena,
-        this.renderTerrainLayout.patchBaseWords * 4, overlay);
-      // Publish count after payload; Undo hides stale tail records without rebaking heights.
-      this.device.queue.writeBuffer(this.maintenanceArena,
-        (this.renderTerrainLayout.baseWords + 7) * 4, new Uint32Array([world.patches.length]));
-    }
-    this.uploadedSolidWorld = world;
+    // Pages keep their slots, so only what the edit changed is written.
+    pages.write(this.terrainEdits?.select(world) ?? materializedSolidWorldPages(world));
   }
 
   /** What the last publication asked of the record index, for lanes that measure it. */
@@ -3386,19 +3918,22 @@ export class SparseSceneProxyVoxelizer {
     if (publication.primitives.length > this.options.primitiveCapacity) throw new RangeError("Live scene primitive capacity exceeded");
     if (publication.dirtyRegions.length === 0) throw new RangeError("A scene publication must cover its old/new dirty bounds");
     if (publication.dirtyRegions.length > this.options.dirtyRegionCapacity) throw new RangeError("Live scene dirty-region capacity exceeded");
-    const packed = packSparseScenePrimitives(publication.primitives);
-    // Republished whole with every revision. A record names its block by slot,
-    // and slots are publication order over the aggregate subsequence, so one
-    // added or removed aggregate renumbers every block after it — writing only
-    // the changed ones would leave the rest naming their predecessors' shapes.
-    const aggregates = sparseSceneClusterPackings(publication.primitives).length;
+    // A revision that only moved the solid world carries the list already
+    // published, and none of the tables packed from it is packed or sent.
+    const listed = publication.primitives !== this.publishedPrimitives;
+    const packed = listed ? packSparseScenePrimitives(publication.primitives) : undefined;
+    // Packed whole and diffed. A record names its block by slot, and slots are
+    // publication order over the aggregate subsequence, so one added or removed
+    // aggregate renumbers every block after it — the diff sends those and
+    // leaves the blocks before it alone.
+    const aggregates = listed ? sparseSceneClusterPackings(publication.primitives).length : 0;
     if (aggregates > this.clusterCapacity) {
       throw new RangeError(`Live scene publishes ${aggregates} aggregates but the fixed arena holds ${this.clusterCapacity}`);
     }
     const clusterArena = aggregates > 0
       ? packSparseSceneClusterArena(publication.primitives, this.clusterCapacity)
       : undefined;
-    const tapes = sparseSceneFieldPrograms(publication.primitives).length;
+    const tapes = listed ? sparseSceneFieldPrograms(publication.primitives).length : 0;
     if (tapes > this.fieldProgramCapacity) {
       throw new RangeError(`Live scene publishes ${tapes} field programs but the fixed arena holds ${this.fieldProgramCapacity}`);
     }
@@ -3412,16 +3947,19 @@ export class SparseSceneProxyVoxelizer {
       minimum:bounds.minimum.map(v=>v-halo) as unknown as SparseSceneVector3,
       maximum:bounds.maximum.map(v=>v+halo) as unknown as SparseSceneVector3,
     });
-    const bounds = publication.primitives.map(p=>samplingBounds(sparseScenePrimitiveBounds(p)));
+    const bounds = listed ? publication.primitives.map(p=>samplingBounds(sparseScenePrimitiveBounds(p))) : this.publishedBounds;
     // A fitted page surface reads voxels up to the wide normal's reach away,
     // so an edit invalidates every cell whose fit or normal it can move.
+    // An edit laid over terrain moves the field as far as its spline reaches: two voxels.
     const pageReach=this.dualOffsetWords&&this.solidWorldLayout&&!this.renderTerrainLayout&&this.options.solidWorldLattice
-      ? SOLID_WORLD_PAGE_SMOOTH_REACH_CELLS*Math.max(...this.options.solidWorldLattice.cellSize_m) : 0;
+      ? SOLID_WORLD_PAGE_SMOOTH_REACH_CELLS*Math.max(...this.options.solidWorldLattice.cellSize_m)
+      : this.dualOffsetWords&&this.terrainEdits&&this.options.solidWorldLattice
+        ? 2*Math.max(...this.options.solidWorldLattice.cellSize_m) : 0;
     const dirtyRegions=publication.dirtyRegions.map(samplingBounds).map(region=>pageReach===0 ? region : ({
       minimum:region.minimum.map(v=>v-pageReach) as unknown as SparseSceneVector3,
       maximum:region.maximum.map(v=>v+pageReach) as unknown as SparseSceneVector3,
     }));
-    const primitiveBounds = packBounds(bounds);
+    const primitiveBounds = listed ? packBounds(bounds) : undefined;
     const dirtyBounds = packBounds(dirtyRegions);
     const worldOrigin = (this.options.worldOrigin ?? [0, 0, 0]) as SparseSceneVector3;
     // The dirty regions' brick-cell volume is a strict upper bound on the leaves
@@ -3432,10 +3970,11 @@ export class SparseSceneProxyVoxelizer {
       dirtyRegions, worldOrigin, this.options.cellSize, this.tree.brickSize, this.options.finestLevel,
     );
     const upperBoundDirtyBricks = Math.min(
-      this.options.dirtyBrickCapacity, regionCells?.cellCount ?? this.options.dirtyBrickCapacity,
+      this.options.dirtyBrickCapacity, regionCells?.unionCellCount ?? this.options.dirtyBrickCapacity,
     );
     const budgeted = (publication.budgeted ?? true) && this.brickBudget > 0;
     this.plannedChunks = budgeted ? Math.max(1, Math.ceil(upperBoundDirtyBricks / this.brickBudget)) : 1;
+    this.plannedChunkBricks = Math.max(1, budgeted ? Math.min(this.brickBudget, upperBoundDirtyBricks) : upperBoundDirtyBricks);
     // Only worth descending per cell when there are fewer cells than the leaf
     // scan would touch anyway; a region covering more of the lattice than the
     // tree has leaves is exactly what the unindexed path is still here for.
@@ -3443,14 +3982,17 @@ export class SparseSceneProxyVoxelizer {
     this.indexedInvalidation = index !== undefined && regionCells !== undefined
       && regionCells.cellCount <= 8 * this.options.dirtyBrickCapacity;
     this.lastRegionCellCount = regionCells?.cellCount ?? 0;
-    if (packed.byteLength > 0) this.device.queue.writeBuffer(this.primitiveBuffer, 0, packed);
-    if (clusterArena) this.device.queue.writeBuffer(this.maintenanceArena, this.clusterOffsetWords * 4, clusterArena);
+    const queue = this.device.queue;
+    if (packed) this.publishedRecords.publish(queue, this.primitiveBuffer, 0, packed);
+    if (clusterArena) this.publishedClusters.publish(queue, this.maintenanceArena, this.clusterOffsetWords * 4, clusterArena);
     if (fieldProgramArena) {
-      this.device.queue.writeBuffer(this.maintenanceArena, this.fieldProgramOffsetWords * 4, fieldProgramArena);
+      this.publishedFieldPrograms.publish(queue, this.maintenanceArena, this.fieldProgramOffsetWords * 4, fieldProgramArena);
     }
-    if (primitiveBounds.byteLength > 0) this.device.queue.writeBuffer(this.maintenanceArena, this.primitiveBoundsOffsetWords * 4, primitiveBounds);
-    this.device.queue.writeBuffer(this.maintenanceArena, this.dirtyRegionOffsetWords * 4, dirtyBounds);
-    if (index && regionCells) this.writeRecordIndex(index, bounds, regionCells, worldOrigin);
+    if (primitiveBounds) this.publishedPrimitiveBounds.publish(queue, this.maintenanceArena, this.primitiveBoundsOffsetWords * 4, primitiveBounds);
+    queue.writeBuffer(this.maintenanceArena, this.dirtyRegionOffsetWords * 4, dirtyBounds);
+    if (index && regionCells) this.writeRecordIndex(index, listed ? bounds : undefined, regionCells, worldOrigin);
+    this.publishedPrimitives = publication.primitives;
+    this.publishedBounds = bounds;
     const parameterData = new ArrayBuffer(128);
     const floats = new Float32Array(parameterData);
     const uints = new Uint32Array(parameterData);
@@ -3484,19 +4026,27 @@ export class SparseSceneProxyVoxelizer {
     this.pending = true;
   }
 
-  /** Header, dirty-region cell boxes, coarse record grid, and the oversized records' list. */
+  /**
+   * Header, dirty-region cell boxes, coarse record grid, and the oversized records' list.
+   *
+   * The grid and the list are planned from the records' bounds, and are
+   * written only when those are handed over: without them the index already
+   * holds this list, and only the header and the region cells move.
+   */
   private writeRecordIndex(
     index: SparseSceneRecordIndexOptions,
-    bounds: readonly SparseSceneAxisAlignedBounds[],
+    bounds: readonly SparseSceneAxisAlignedBounds[] | undefined,
     regionCells: SparseSceneRegionCellPlan,
     worldOrigin: SparseSceneVector3,
   ): void {
-    const grid = planSparseSceneRecordGrid(bounds, worldOrigin, index, this.gridItemCapacity);
-    if (grid.globalRecords.length > this.globalRecordCapacity) {
-      throw new RangeError("Live scene record index cannot hold every unlocalized record");
+    const grid = bounds && planSparseSceneRecordGrid(bounds, worldOrigin, index, this.gridItemCapacity);
+    if (grid) {
+      if (grid.globalRecords.length > this.globalRecordCapacity) {
+        throw new RangeError("Live scene record index cannot hold every unlocalized record");
+      }
+      this.lastGridItemCount = grid.items.length;
+      this.lastGlobalRecordCount = grid.globalRecords.length;
     }
-    this.lastGridItemCount = grid.items.length;
-    this.lastGlobalRecordCount = grid.globalRecords.length;
     // The header and the region cells are contiguous, so they ride one write.
     const header = new Uint32Array(new ArrayBuffer(
       (SPARSE_SCENE_INDEX_HEADER.wordCount + regionCells.words.length) * 4));
@@ -3504,7 +4054,7 @@ export class SparseSceneProxyVoxelizer {
     header[SPARSE_SCENE_INDEX_HEADER.gridDimensionX] = index.dimensions[0];
     header[SPARSE_SCENE_INDEX_HEADER.gridDimensionY] = index.dimensions[1];
     header[SPARSE_SCENE_INDEX_HEADER.gridDimensionZ] = index.dimensions[2];
-    header[SPARSE_SCENE_INDEX_HEADER.globalRecordCount] = grid.globalRecords.length;
+    header[SPARSE_SCENE_INDEX_HEADER.globalRecordCount] = this.lastGlobalRecordCount;
     header[SPARSE_SCENE_INDEX_HEADER.invalidationCellCount] = regionCells.cellCount;
     header[SPARSE_SCENE_INDEX_HEADER.gridItemCapacity] = this.gridItemCapacity;
     headerFloats.set(index.cellExtent_m, SPARSE_SCENE_INDEX_HEADER.gridExtentX);
@@ -3512,18 +4062,16 @@ export class SparseSceneProxyVoxelizer {
     this.device.queue.writeBuffer(this.maintenanceArena, this.indexHeaderOffsetWords * 4, header);
     const gridOffsetsOffsetWords = this.regionCellOffsetWords
       + this.options.dirtyRegionCapacity * SPARSE_SCENE_REGION_CELL_WORDS + this.options.dirtyBrickCapacity;
+    if (!grid) return;
+    const queue = this.device.queue, arena = this.maintenanceArena;
     const globalRecordsOffsetWords = gridOffsetsOffsetWords + grid.offsets.length + this.gridItemCapacity;
-    this.device.queue.writeBuffer(this.maintenanceArena, gridOffsetsOffsetWords * 4, grid.offsets);
-    if (grid.items.length > 0) {
-      this.device.queue.writeBuffer(this.maintenanceArena, (gridOffsetsOffsetWords + grid.offsets.length) * 4, grid.items);
-    }
-    if (grid.globalRecords.length > 0) {
-      this.device.queue.writeBuffer(this.maintenanceArena, globalRecordsOffsetWords * 4, grid.globalRecords);
-    }
-    if (grid.cellRanges.length > 0) {
-      this.device.queue.writeBuffer(this.maintenanceArena,
-        (globalRecordsOffsetWords + this.globalRecordCapacity) * 4, grid.cellRanges);
-    }
+    // Each table is bounded by a count published beside it, so the words a
+    // shorter one clears past its end are never read.
+    this.publishedGridOffsets.publish(queue, arena, gridOffsetsOffsetWords * 4, grid.offsets);
+    this.publishedGridItems.publish(queue, arena, (gridOffsetsOffsetWords + grid.offsets.length) * 4, grid.items);
+    this.publishedGlobalRecords.publish(queue, arena, globalRecordsOffsetWords * 4, grid.globalRecords);
+    this.publishedCellRanges.publish(queue, arena,
+      (globalRecordsOffsetWords + this.globalRecordCapacity) * 4, grid.cellRanges);
   }
 
   /**
@@ -3541,7 +4089,8 @@ export class SparseSceneProxyVoxelizer {
     const fresh = this.pending;
     if (!fresh && this.chunksRemaining <= 0) return false;
     if (fresh) {
-      encoder.clearBuffer(this.maintenanceArena, this.stateOffsetWords * 4, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.wordCount * 4);
+      // The journal cursor past these words belongs to every revision.
+      encoder.clearBuffer(this.maintenanceArena, this.stateOffsetWords * 4, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.revisionWordCount * 4);
       this.chunksRemaining = this.plannedChunks;
     }
     const stageWrites = (stage: (typeof SPARSE_SCENE_MAINTENANCE_STAGES)[number]): GPUComputePassTimestampWrites | undefined => {
@@ -3564,40 +4113,28 @@ export class SparseSceneProxyVoxelizer {
       if (indexed) run("invalidate", "Invalidate live scene dirty bricks", indexed, Math.max(1, this.lastRegionCellCount), 64);
       else run("invalidate", "Invalidate live scene dirty bricks", this.invalidatePipeline, this.tree.leafCapacity, 64);
     }
-    run("prepare", "Prepare live scene maintenance dispatches", this.preparePipeline, 1, 1);
-    encoder.copyBufferToBuffer(
-      this.maintenanceArena,
-      (this.stateOffsetWords + SPARSE_SCENE_MAINTENANCE_STATE_WORDS.binDispatch) * 4,
-      this.maintenanceDispatch,
-      0,
-      4 * 3 * 4,
-    );
-    const runIndirect = (
-      stage: (typeof SPARSE_SCENE_MAINTENANCE_STAGES)[number],
-      label: string, pipeline: GPUComputePipeline, stateWord: number,
-    ) => {
-      const pass = encoder.beginComputePass({ label, timestampWrites: stageWrites(stage) });
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, this.bindGroup);
-      pass.dispatchWorkgroupsIndirect(
-        this.maintenanceDispatch,
-        (stateWord - SPARSE_SCENE_MAINTENANCE_STATE_WORDS.binDispatch) * 4,
-      );
-      pass.end();
-    };
-    runIndirect("bin", "Bin live scene primitives into dirty bricks",
-      this.indexedBinPipeline ?? this.binPipeline, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.binDispatch);
-    runIndirect("rebuild", "Rebuild live scene dirty brick payloads", this.rebuildPipeline, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.rebuildDispatch);
+    run("prepare", "Prepare live scene maintenance chunk", this.preparePipeline, 1, 1);
+    // Fixed direct dispatches over the dirty brick list. The planned chunk size
+    // bounds how many bricks the GPU can hand this frame, and every thread
+    // reads the chunk's real end from the state block, so no dispatch size is
+    // ever read back or launched from a GPU-written argument.
+    const bricks = this.plannedChunkBricks;
+    // One workgroup per dirty brick when indexed: the brick's candidates are
+    // whatever sits in its one grid cell plus the global list.
+    if (this.indexedBinPipeline) run("bin", "Bin live scene primitives into dirty bricks", this.indexedBinPipeline, bricks, 1);
+    else run("bin", "Bin live scene primitives into dirty bricks", this.binPipeline, bricks * this.primitiveCount, 256);
+    run("rebuild", "Rebuild live scene dirty brick payloads", this.rebuildPipeline,
+      bricks * this.tree.brickSize ** 3,
+      this.dualOffsetWords && this.tree.payloadProfile === "dry" && this.options.surfaceDualMarchingCubes ? 64 : 256);
     // After the dense rebuild, because it reads the lane that pass just wrote, and
     // before finalization, so the occupancy summary and the banded bytes describe
-    // the same revision.
-    if (this.bandPipeline) {
-      runIndirect("band", "Encode banded leaf payloads", this.bandPipeline,
-        SPARSE_SCENE_MAINTENANCE_STATE_WORDS.bandDispatch);
-    }
-    runIndirect("finalize", "Finalize live scene dirty bricks", this.finalizePipeline, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.finalizeDispatch);
+    // the same revision. One workgroup a dirty brick: the banded encoder's
+    // reductions are whole-leaf, so a leaf cannot be split across workgroups.
+    if (this.bandPipeline) run("band", "Encode banded leaf payloads", this.bandPipeline, bricks, 1);
+    run("finalize", "Finalize live scene dirty bricks", this.finalizePipeline, bricks, 64);
     this.pending = false;
     this.chunksRemaining -= 1;
+    this.encodedFrames += 1;
     return true;
   }
 
@@ -3606,7 +4143,6 @@ export class SparseSceneProxyVoxelizer {
     this.destroyed = true;
     this.primitiveBuffer.destroy();
     this.maintenanceArena.destroy();
-    this.maintenanceDispatch.destroy();
     this.paramsBuffer.destroy();
   }
 }

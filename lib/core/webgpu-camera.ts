@@ -168,17 +168,33 @@ export function projectToViewport(
   width: number,
   height: number,
 ): ViewportProjection {
+  return viewportProjector(camera, width, height)(position_m);
+}
+
+/**
+ * {@link projectToViewport} for many points through one view: the camera basis
+ * is resolved once here rather than once per point, which is most of what a
+ * projection costs and all of what an outline of a hundred boxes repeats.
+ */
+export function viewportProjector(
+  camera: CameraState,
+  width: number,
+  height: number,
+): (position_m: Vec3) => ViewportProjection {
   const basis = cameraBasis(camera);
-  const relative = sub(position_m, basis.position);
-  const depth_m = dot(relative, basis.forward);
   const aspect = viewportAspect(width, height);
-  const inFront = depth_m > 1e-6, tanHalfFov = cameraTanHalfFov(camera);
-  const ndcX = inFront ? dot(relative, basis.right) / (depth_m * aspect * tanHalfFov) : Number.POSITIVE_INFINITY;
-  const ndcY = inFront ? dot(relative, basis.up) / (depth_m * tanHalfFov) : Number.POSITIVE_INFINITY;
-  return {
-    leftFraction: 0.5 * (ndcX + 1),
-    topFraction: 0.5 * (1 - ndcY),
-    visible: inFront && Math.abs(ndcX) <= 1 && Math.abs(ndcY) <= 1,
-    depth_m,
+  const tanHalfFov = cameraTanHalfFov(camera);
+  return (position_m) => {
+    const relative = sub(position_m, basis.position);
+    const depth_m = dot(relative, basis.forward);
+    const inFront = depth_m > 1e-6;
+    const ndcX = inFront ? dot(relative, basis.right) / (depth_m * aspect * tanHalfFov) : Number.POSITIVE_INFINITY;
+    const ndcY = inFront ? dot(relative, basis.up) / (depth_m * tanHalfFov) : Number.POSITIVE_INFINITY;
+    return {
+      leftFraction: 0.5 * (ndcX + 1),
+      topFraction: 0.5 * (1 - ndcY),
+      visible: inFront && Math.abs(ndcX) <= 1 && Math.abs(ndcY) <= 1,
+      depth_m,
+    };
   };
 }

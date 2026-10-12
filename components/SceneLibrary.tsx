@@ -18,7 +18,9 @@ import {
   type SceneSection,
 } from "../lib/core/scene-cards";
 import type { SceneCard } from "../lib/core/scene-definition";
-import { sceneResume } from "../lib/core/scene-autosave";
+import {
+  browserSceneAutosaveDatabase, readStoredSceneAutosave, sceneResume, withStoredSceneAutosave,
+} from "../lib/core/scene-autosave";
 import {
   browserSceneLibraryStorage,
   deleteSceneFromLibrary,
@@ -428,7 +430,11 @@ export function SceneLibrary() {
   const setSearch = useShellStore((state) => state.setLibrarySearch);
   const session = useSession();
   const presetId = session.scene((state) => state.presetId);
-  const [entries, setEntries] = useState<SceneLibraryEntry[]>([]);
+  const [saved, setEntries] = useState<SceneLibraryEntry[]>([]);
+  // The working document is kept apart from the saved rows, in a store that
+  // answers later than they do; a rename or a delete re-reads only the rows.
+  const [autosaved, setAutosaved] = useState<SceneLibraryEntry | undefined>();
+  const entries = useMemo(() => withStoredSceneAutosave(saved, autosaved), [saved, autosaved]);
   const [recents, setRecents] = useState<RecentSceneOpen[]>([]);
   const [edit, setEdit] = useState<SceneCardEdit | undefined>();
   const searchRef = useRef<HTMLInputElement | null>(null);
@@ -444,6 +450,8 @@ export function SceneLibrary() {
       setEntries(readSceneLibrary(browserSceneLibraryStorage()));
       setRecents(readSceneRecents(browserSceneLibraryStorage()));
     });
+    void readStoredSceneAutosave({ database: browserSceneAutosaveDatabase(), storage: browserSceneLibraryStorage() })
+      .then((stored) => { if (active) setAutosaved(stored); });
     return () => { active = false; };
   }, []);
 

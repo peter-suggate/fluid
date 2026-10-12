@@ -8,7 +8,9 @@ import { toggleCompareMode } from "./compare/compare-mode";
 import { editorGestureForShortcut } from "./editor-gesture-catalog";
 import { editorEntityContext, findEntity } from "./editor-entity-catalog";
 import { sceneInstrumentForShortcut } from "./scene-instruments";
+import { performEditorAction } from "./editor-action-runtime";
 import { voxelRailToolForKey } from "./editor-voxel-tool-actions";
+import { voxelRegionVerbForKey } from "./editor-voxel-region";
 import type { PaneSession } from "./session/session";
 import { useSession } from "./session/session-context";
 import { simulation } from "./simulation/controller";
@@ -56,6 +58,27 @@ export function useEditorShortcuts(focused?: PaneSession): void {
         simulation.redo(session.id);
         return;
       }
+      // The voxel selection's verbs, by the chords the registry declares for
+      // them: nothing here names a verb or a key. They answer while a voxel
+      // selection stands — and, for the ones that need none (select all,
+      // paste), anywhere in EDIT. A verb that does not apply still takes its
+      // key and says why. Asked at three points below, because its chords sit
+      // at three depths of this handler: ⌘C, ⌘X, ⌘V and ⌘A before the
+      // accelerators are waved through, Escape inside the order modes are left
+      // in, and the bare keys ahead of the entity route.
+      const runVerbKey = (): boolean => {
+        if (ui.viewportMode !== "interact" || ui.carry || ui.radialMenu) return false;
+        // A key some panel already took — the scene chooser walking its grid on the arrows — is not also a nudge.
+        if (event.defaultPrevented) return false;
+        // With page text selected an accelerator is the browser's: the reader is copying a figure off a readout.
+        if (accelerator && window.getSelection()?.isCollapsed === false) return false;
+        const binding = voxelRegionVerbForKey(event, ui.selection?.kind === "voxel-region");
+        if (!binding) return false;
+        event.preventDefault();
+        performEditorAction({ kind: "voxel-verb", verbId: binding.verb.id, variantId: binding.variant?.id }, session);
+        return true;
+      };
+      if (accelerator && runVerbKey()) return;
       if (accelerator || event.altKey) return;
 
       // The split. A host key rather than a pane key — it is about how many
@@ -118,6 +141,10 @@ export function useEditorShortcuts(focused?: PaneSession): void {
         }
         if (ui.sceneOverlay) { ui.setSceneOverlay(null); return; }
         if (ui.axisConstraint) { ui.setAxisConstraint(undefined); return; }
+        // A standing voxel selection is put down by its own verb, and before
+        // the tool that made it is put away: what a selecting tool is holding
+        // is inside the tool, and modes are left from the inside out.
+        if (runVerbKey()) return;
         // An armed sculpt tool is a mode inside EDIT like any other, so Escape
         // puts it away before it reaches the mode itself. A stroke in flight
         // never gets this far: the gesture host takes that Escape for the stroke.
@@ -133,6 +160,11 @@ export function useEditorShortcuts(focused?: PaneSession): void {
         ui.select(undefined);
         return;
       }
+      // A standing voxel selection takes the bare keys its verbs declare —
+      // Delete clears it, the arrows and the page keys move it — ahead of the
+      // entity route below, which it does not use: a solid edit is committed
+      // the way a stroke is, not as a re-seeded scene.
+      if (runVerbKey()) return;
       // Delete asks the selected entity for the scene without it. Entities that
       // cannot be removed — the tank, the water body — simply do not offer one,
       // so the key falls through rather than being denied by a list here.

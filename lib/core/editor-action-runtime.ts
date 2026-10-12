@@ -12,6 +12,8 @@ import { serializeScene } from "./model";
 import { enableWaterLockReason } from "./scene-fluid-readiness";
 import { simulation } from "./simulation/controller";
 import { resolveSession, type PaneSession } from "./session/session";
+import { runVoxelRegionVerb } from "./voxel-editor/verb-runtime";
+import { voxelRegionVerbs } from "./voxel-editor/verbs/registry";
 
 /**
  * Where a declared action becomes something that happened.
@@ -116,6 +118,17 @@ export function performEditorAction(
       // mode away": arming a sculpt tool from a wedge is the same state change
       // the old shelf's chooser made.
       ui.setVoxelTool(effect.toolId);
+      return;
+    }
+    case "voxel-verb": {
+      // The one effect that finishes later: its commit waits on the renderer's
+      // preflight, exactly as a released stroke's does. This function stays
+      // synchronous — the edit is in flight behind `voxelStrokePending`, and a
+      // refusal arrives as the notice a refused stroke would raise.
+      const verb = voxelRegionVerbs.get(effect.verbId);
+      if (!verb) throw new Error(`Unknown voxel verb: ${effect.verbId}`);
+      void runVoxelRegionVerb(verb, session, simulation.liveSolidEditAcceptance(session.id), effect.variantId)
+        .catch((error) => session.runtime.getState().setNotice(error instanceof Error ? error.message : String(error), "warn"));
       return;
     }
     case "scene-document": {

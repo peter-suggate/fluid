@@ -15,6 +15,7 @@ import type { EnvironmentProxyPrimitive } from "../../../core/voxel-environments
 import {
   SOLID_WORLD_BRICK_CELLS,
   sampleSolidWorld,
+  materializedSolidWorldPages,
   solidWorldForScene,
   type SolidWorld,
 } from "../../../core/solid-world";
@@ -157,7 +158,7 @@ function solidWorldDestinationPages(scene: SceneDescription, world: SolidWorld,
     -0.5 * scene.container.depth_m];
   const destinationPageSize = domain.cellSize_m.map((value) => value
     * SVO_NODE_MIP_LAYOUT.interiorSize) as Triple;
-  for (const page of world.pages) {
+  for (const page of materializedSolidWorldPages(world)) {
     if (!page.solidFraction.some((fraction, voxel) => fraction > 0
       && page.materialId[voxel] !== VOXEL_MATERIAL_IDS.container)) continue;
     const minimum = page.coordinate.map((value, axis) => sourceOrigin[axis]!

@@ -4,10 +4,12 @@ import { cloneScene, type SceneDescription } from "../model";
 /**
  * Undo/redo over whole scene documents.
  *
- * The scene description is the single source of truth and is small plain JSON,
- * so a snapshot per edit is cheaper and far more robust than an inverse-command
- * log — every authoring path (viewport gizmos, roster buttons, preset loads,
- * imports) becomes undoable without writing an inverse for each.
+ * The scene description is the single source of truth and, its solid patch list
+ * aside, is small plain JSON, so a snapshot per edit is cheaper and far more
+ * robust than an inverse-command log — every authoring path (viewport gizmos,
+ * roster buttons, preset loads, imports) becomes undoable without writing an
+ * inverse for each. The patch list is shared between snapshots rather than
+ * copied; see `historySceneCopy`.
  *
  * Entries record the document *before* an edit. Undo therefore pops the most
  * recent snapshot and pushes the live document onto the redo stack.
@@ -47,8 +49,44 @@ interface EditorHistoryStore {
   clear: () => void;
 }
 
+/**
+ * A copy of a document that history can hold, or hand back to the store: every
+ * field cloned but the solid patch list, the terrain and the scenery graph,
+ * which are shared.
+ *
+ * The patch list is never written in place. A stroke makes a new array over
+ * the same patches, so the entries either side of it can hold those patches
+ * once between them. On a sculpted scene the list is nearly the whole
+ * document, and cloning it per entry kept sixty-four copies of every patch.
+ *
+ * The terrain is not written in place either. A sculpt replaces the grid and
+ * its samples (`applyTerrainBrush`), an edit to the described ground replaces
+ * the description, and the one writer of `baseHeight_m` and `grid`, the scale
+ * repair (`repairSceneForContainer`), writes only the deep copy `cloneScene`
+ * has just made for it. A sculpted ground is megabytes of samples, cloned here
+ * twice per gesture and held once per entry; shared, every entry either side
+ * of an edit that left the ground alone holds the one object, and whatever is
+ * keyed by that object (its content stamp, its derived grid) is found again
+ * after an undo.
+ *
+ * The scenery graph is the same case and, on a dressed scene, the larger one:
+ * megabytes of nodes that a voxel gesture never touches. Every scenery edit
+ * goes through `withSceneryNode`, `withSceneryNodes` or `withoutSceneryNode`,
+ * which make a new graph, a new node list and a new node; expansion reads the
+ * graph and writes nothing; and the expanded catalog is already kept per graph
+ * object (`voxel-environments`), which only holds while the graph is never
+ * written.
+ */
+export function historySceneCopy(scene: SceneDescription): SceneDescription {
+  // Emptied and nulled where they stand, so each keeps its place among the fields.
+  const copy = cloneScene({ ...scene, solidVoxels: [], ...(scene.terrain && { terrain: null }),
+    ...(scene.scenery && { scenery: null }) } as unknown as SceneDescription);
+  return { ...copy, solidVoxels: scene.solidVoxels, ...(scene.terrain && { terrain: scene.terrain }),
+    ...(scene.scenery && { scenery: scene.scenery }) };
+}
+
 function owned(snapshot: EditorHistorySnapshot): EditorHistorySnapshot {
-  return { label: snapshot.label, scene: cloneScene(snapshot.scene), presetId: snapshot.presetId };
+  return { label: snapshot.label, scene: historySceneCopy(snapshot.scene), presetId: snapshot.presetId };
 }
 
 export const createEditorHistoryStore = () => create<EditorHistoryStore>((set, get) => ({

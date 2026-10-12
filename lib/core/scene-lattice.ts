@@ -1,4 +1,5 @@
 import type { SceneDescription } from "./model";
+import { SOLID_PATCH_BOX_KIND, solidPatchKindId } from "./solid-patch/kind";
 import { boxSolidVoxelShell, sphericalSolidVoxelShell,
   type SolidWorldVoxelPatch } from "./solid-world";
 export {
@@ -47,6 +48,8 @@ export function solidVoxelEditsForScene(
     shellCounts.set(signature, (shellCounts.get(signature) ?? 0) + 1);
   }
   return scene.solidVoxels.filter((patch) => {
+    // The shell is whole boxes: a round or block edit over the same box is the author's.
+    if (solidPatchKindId(patch) !== SOLID_PATCH_BOX_KIND) return true;
     const signature = key(patch);
     const remaining = shellCounts.get(signature) ?? 0;
     if (remaining === 0) return true;

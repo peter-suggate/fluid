@@ -1,5 +1,5 @@
 import { assertDualGridAttachmentFits } from "../meshing/dual-grid-capacity";
-import { terrainFieldStamp, terrainOverlayPatches } from "../../../core/live-terrain-overlay";
+import { TerrainEditPages, terrainEditSurfacePages, terrainFieldStamp } from "../../../core/live-terrain-overlay";
 import type { RigidBodyDescription, SceneDescription } from "../../../core/model";
 import type { RenderFrameSeam } from "../../../core/render-frame-stages";
 import { svoSceneLighting } from "../lighting-visibility/svo-dry-scene-lighting";
@@ -23,17 +23,24 @@ import {
   buildDefaultSvoMaterialRecords,
   packSvoMaterialTable,
   SVO_MATERIAL_RECORD_STRIDE_BYTES,
+  SVO_MATERIAL_RECORD_WORDS,
   svoMaterialFunctionIdForEnvironmentProxy,
   svoMaterialFromEnvironmentProxyMaterial,
+  writeSvoEnvironmentMaterialRecord,
+  writeSvoMaterialFunctionId,
+  writeSvoMaterialRecord,
 } from "../../contracts/svo-material-abi";
+import { successorEnvironmentCatalog } from "../scene-publication/scene-environment-catalog";
+import { uploadChangedWords } from "../scene-publication/svo-table-upload";
 import { sceneTerrainSurfaceModel, type SvoTerrainSurfaceModel } from "../materials/svo-terrain-material";
 import { sceneCellSizes_m } from "../../../core/scene-lattice";
-import { solidWorldChangeBounds } from "../../../core/solid-world-change-bounds";
+import { solidWorldChangeBounds, type SolidWorldChangeBounds } from "../../../core/solid-world-change-bounds";
 import {
   SOLID_WORLD_BRICK_CELLS,
   SOLID_WORLD_TERRAIN_MATERIAL_ID,
   solidWorldContentStamp,
   solidWorldForScene,
+  solidWorldPageCoordinates,
   type SolidWorld,
 } from "../../../core/solid-world";
 import {
@@ -45,6 +52,7 @@ import {
   octreeLiveSceneLeafPayloadMode,
   octreeLiveSceneSceneGeometryFormat,
   packSparseBrickPlan,
+  resolveSparseBrickPayloadLayout,
   sparseBrickPayloadProfileForOwnership,
   type SparseBrickCoordinate,
   type SparseBrickPlan,
@@ -54,6 +62,8 @@ import {
   type SparseBrickLeafPayloadMode,
   type SparseBrickSize
 } from "./sparse-brick-octree";
+import { liveTopologyMutationRecords, planLiveTopologyLeafReserve } from "./svo-live-topology-reserve";
+import { WEBGPU_SOLID_WORLD_DISPLAY_BUDGET_BYTES } from "../../../core/webgpu-solid-world-pages";
 import { planAdaptiveSparseBrickOctreeSteps } from "../../../core/adaptive-sparse-brick-plan";
 import {
   createSvoEnvironmentRefinement,
@@ -70,7 +80,7 @@ import {
 import { svoPrimitiveForRigidBody, type SvoPrimitiveDescriptor } from "../../contracts/svo-primitive-abi";
 import {
   buildSvoRenderTerrainFieldSteps,
-  createSvoRenderPatchRefinement,
+  createSvoRenderEditPageRefinement,
   createSvoRenderTerrainRefinement,
 } from "../scene-publication/svo-render-solid-field";
 import { planSvoWideFanoutSteps } from "./svo-wide-fanout";
@@ -84,13 +94,15 @@ import {
   type SvoNodeMipCoordinate,
 } from "../radiance/svo-node-mip-pyramid";
 import {
-  growSvoNodeMipAddressPlan,
-  pagesOutsideSvoNodeMipAddressPlan,
+  SVO_NODE_MIP_ADDRESS_PLAN,
   planSvoNodeMipAddressesSteps,
+  svoNodeMipLevelPageDimensions,
   type SvoNodeMipAddressPlan,
+  type SvoNodeMipAddressPlanGrowth,
 } from "../radiance/svo-node-mip-address-plan";
 import {
   WebGpuLiveSvoNodeMipPyramid,
+  invalidateLiveSvoDerivedPage,
   webGpuSvoNodeMipMaximumPages,
 } from "../radiance/webgpu-svo-node-mip-pyramid";
 import { SVO_NODE_MIP_MAXIMUM_LEVELS, svoNodeMipPageHashShape } from "../radiance/svo-node-mip-page-hash";
@@ -103,16 +115,18 @@ import {
 } from "../radiance/webgpu-svo-live-derived-builder";
 import { WebGpuSvoBrickOccupancyBuilder } from "./webgpu-svo-brick-occupancy";
 import {
+  SPARSE_BRICK_TOPOLOGY_MUTATION,
+  SparseBrickTopologyMirror,
   WebGpuSparseBrickTopologyMutator,
-  packSparseBrickTopologyMutationWorklist,
+  compareSparseBrickMorton,
   sparseBrickTopologyMutationNodeReserve,
-  planSparseBrickTopologyLeafReservation,
 } from "../../../core/webgpu-sparse-brick-topology-mutation";
 import { assertSvoBrickRasterNodeAddressable } from "../primary-visibility/webgpu-svo-brick-raster";
 import { planSparseSceneDomain } from "../../../core/sparse-scene-domain";
 import { SCENE_ENVIRONMENT_OWNER_BASE } from "../../../core/webgpu-rigid-body";
+import { BATH_SOLID_DISTANCE_WGSL } from "../../../core/voxel-bath";
 import { VOXEL_MATERIAL_IDS, materialIdForRigidShape, packVoxelDebugMaterialTable } from "../../../core/voxel-scene";
-import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyPrimitive } from "../../../core/voxel-environments";
+import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyCatalog, type EnvironmentProxyPrimitive } from "../../../core/voxel-environments";
 import {
   SparseSceneProxyVoxelizer,
   SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW,
@@ -143,7 +157,7 @@ import {
 } from "../../../core/cooperative-build";
 import { PassBroker } from "../../../core/webgpu-pass-broker";
 import { backdropSeamForScene, compileBackdropField } from "../backdrop/backdrop-field";
-import { BACKDROP_CONTENT_CEILING_HEADER_WORDS, BACKDROP_CONTENT_CEILING_TILE_CELLS, BACKDROP_CONTENT_CEILING_TILES, BACKDROP_TERRAIN_HEADER_WORDS, BACKDROP_TERRAIN_TABLE, createBackdropContentCeiling, packBackdropTerrainTable, packContentCeilingTable, planBackdropTiles, raiseBackdropContentCeiling, type BackdropContentCeiling } from "../backdrop/backdrop-terrain-tiles";
+import { BACKDROP_CONTENT_CEILING_HEADER_WORDS, BACKDROP_CONTENT_CEILING_TILE_CELLS, BACKDROP_CONTENT_CEILING_TILES, BACKDROP_TERRAIN_HEADER_WORDS, BACKDROP_TERRAIN_TABLE, createBackdropContentCeiling, packBackdropTerrainTable, packContentCeilingTable, planBackdropTileLayout, planBackdropTilesSteps, raiseBackdropContentCeiling, raiseBackdropContentCeilingOver, type BackdropContentCeiling } from "../backdrop/backdrop-terrain-tiles";
 import {
   BACKDROP_DETAIL_DUAL_APRON_BRICKS,
   backdropDetailCentreLattice,
@@ -161,8 +175,9 @@ import {
   buildSvoSolidWorldPlanarBoundaryCatalog,
   createSvoPlanarLeafClassifier,
   svoPlanarResidualEnvironmentPrimitives,
-  svoPlanarResidualSolidWorld,
   svoPlanarSolidWorldBlockers,
+  svoRenderResidual,
+  type SvoRenderResidual,
 } from "../scene-publication/svo-planar-boundary";
 
 export interface OctreeSparseBrickWorldOptions {
@@ -258,7 +273,10 @@ export interface OctreeSparseBrickWorldOptions {
   includeWholeDomainPressureSupport?: boolean;
   /** Retain a dry wall tile only when liquid is within reach; see the residency option. */
   fluidGatedBoundarySupport?: boolean;
-  /** Lifetime budget of previously absent scene bricks that may be activated in-place. */
+  /**
+   * Leaves reserved for scene bricks activated in place: the floor of a display
+   * world's reserve, and the whole reserve of a world the solver owns.
+   */
   sceneMutationBrickCapacity?: number;
   /**
    * Build the compact hierarchy and the wide-fanout snapshot.
@@ -519,6 +537,9 @@ export function planOctreeLiveSceneRecordIndex(
     bricksPerCell,
   };
 }
+/** The one pass a lighting frame encodes. A constant, so a frame allocates no descriptor. */
+const LIVE_DERIVED_LIGHTING_PASS: GPUComputePassDescriptor = Object.freeze({ label: "Maintain live SVO derived lighting" });
+
 /**
  * Dirty bricks one encoded frame repairs, before the environment overrides it.
  *
@@ -664,6 +685,12 @@ export function octreeLiveSceneBrickClaim(
   return raw;
 }
 
+/**
+ * Leaves a world reserves for live edits where no budget decides it: all of a
+ * solver-owned world's reserve, and the least a display world is given when the
+ * budget or the device buys it less. No publication is capped by it: the
+ * mutation worklist holds every brick the reserve can come to be asked for.
+ */
 export const OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY = 4_096;
 /**
  * Aggregate parameter blocks one live publication may carry.
@@ -693,20 +720,49 @@ export const OCTREE_LIVE_SCENE_FIELD_PROGRAM_CAPACITY = SPARSE_SCENE_FIELD_PROGR
 export const OCTREE_LIVE_SCENE_MATERIAL_CAPACITY = ENVIRONMENT_VOXEL_MATERIAL_BASE + OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY;
 
 interface LiveScenePrimitiveState {
-  readonly signature: string;
   readonly bounds: SparseSceneAxisAlignedBounds;
 }
 
 interface LiveScenePrimitiveEntry {
   readonly key: string;
   readonly primitive: SparseScenePrimitive;
-  readonly materialSignature: string;
 }
 
 function brickCoordinateKey({ x, y, z }: SparseBrickCoordinate): string { return `${x},${y},${z}`; }
 
-function liveScenePrimitiveSignature(primitive: SparseScenePrimitive): string {
-  return JSON.stringify(primitive);
+/** Structural equality of two authored values, with nothing serialized. */
+function sameSceneValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return a !== a && b !== b;
+  if (Array.isArray(a) || ArrayBuffer.isView(a)) {
+    const left = a as ArrayLike<unknown>, right = b as ArrayLike<unknown>;
+    if (Array.isArray(a) !== Array.isArray(b) || left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) if (!sameSceneValue(left[index], right[index])) return false;
+    return true;
+  }
+  if (Array.isArray(b) || ArrayBuffer.isView(b)) return false;
+  const left = a as Record<string, unknown>, right = b as Record<string, unknown>;
+  for (const key in left) if (!sameSceneValue(left[key], right[key])) return false;
+  for (const key in right) if (left[key] === undefined && right[key] !== undefined) return false;
+  return true;
+}
+
+/**
+ * Whether two authored primitives are the same solid at the same owner: every
+ * field but the material, which reaches a table and never a voxel.
+ */
+function sameAuthoredGeometry(a: EnvironmentProxyPrimitive, b: EnvironmentProxyPrimitive): boolean {
+  const left = a as unknown as Record<string, unknown>, right = b as unknown as Record<string, unknown>;
+  for (const key in left) if (key !== "material" && !sameSceneValue(left[key], right[key])) return false;
+  for (const key in right) if (key !== "material" && left[key] === undefined && right[key] !== undefined) return false;
+  return true;
+}
+
+/** The bodies a live scene voxelizes, as one comparable value. */
+function staticRigidBodiesStamp(bodies: SceneDescription["rigidBodies"]): string {
+  return bodies.some((body) => body.motion === "static")
+    ? JSON.stringify(bodies.map((body, ownerId) => body.motion === "static" ? sparseScenePrimitiveForRigidBody(body, ownerId) : 0))
+    : "";
 }
 
 function sparseScenePrimitiveForRigidBody(body: RigidBodyDescription, ownerId: number): SparseScenePrimitive {
@@ -733,32 +789,6 @@ function sparseScenePrimitiveForRigidBody(body: RigidBodyDescription, ownerId: n
   return { kind: "cylinder", center, radius: body.dimensions_m.x, halfHeight: body.dimensions_m.y / 2, orientation, materialId, ownerId };
 }
 
-/** Geometry inputs whose bounds and exact records are baked into macro leaves. */
-function planarBoundaryTopologyStamp(
-  scene: SceneDescription,
-  environmentPrimitives: readonly EnvironmentProxyPrimitive[],
-): string {
-  return JSON.stringify({
-    // Terrain heights stay immutable; ordered voxel overlays are live mutable data.
-    terrainSolidWorld: terrainFieldStamp(scene),
-    environment: environmentPrimitives.map((primitive) => ({
-      key: primitive.key,
-      ownerIndex: primitive.ownerIndex,
-      kind: primitive.kind,
-      tags: primitive.tags,
-      sway: "sway" in primitive ? primitive.sway : undefined,
-      geometry: sparseScenePrimitiveForProxy(primitive, {
-        materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
-        ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
-      }),
-    })),
-    staticRigidBodies: scene.rigidBodies.flatMap((body, ownerId) =>
-      body.motion === "static"
-        ? [sparseScenePrimitiveForRigidBody(body, ownerId)]
-        : []),
-  });
-}
-
 /**
  * Page-level topology claims for the canonical SolidWorld image.
  *
@@ -766,20 +796,39 @@ function planarBoundaryTopologyStamp(
  * voxels or boxes. The live GPU voxelizer samples the same fraction/SDF page
  * image used by physics; this list only ensures those samples have destination
  * SVO bricks.
+ *
+ * A run of pages stacked in one column is claimed as one box: the ground is
+ * such a run under every column, so a garden is a few thousand tall boxes
+ * rather than tens of thousands of pages. A run's top is the top page's own
+ * sum, so the box ends on the very number its last page would have, and every
+ * consumer reads the bounds as a union — the bricks they touch, whether one
+ * overlaps a node — which a run and its pages share.
  */
 function solidWorldPageBounds(scene: SceneDescription,
   world: SolidWorld): SparseSceneAxisAlignedBounds[] {
   const cell = sceneCellSizes_m(scene);
   const origin = [-0.5 * scene.container.width_m, 0,
     -0.5 * scene.container.depth_m] as const;
-  return world.pages.map((page) => {
-    const minimum = page.coordinate.map((value, axis) => origin[axis]!
-      + value * SOLID_WORLD_BRICK_CELLS * cell[axis]!) as
-      [number, number, number];
-    const maximum = minimum.map((value, axis) => value
-      + SOLID_WORLD_BRICK_CELLS * cell[axis]!) as [number, number, number];
-    return { minimum, maximum };
-  });
+  const edge = [SOLID_WORLD_BRICK_CELLS * cell[0], SOLID_WORLD_BRICK_CELLS * cell[1],
+    SOLID_WORLD_BRICK_CELLS * cell[2]] as const;
+  const bounds: SparseSceneAxisAlignedBounds[] = [];
+  // Pages arrive ascending in (z, y, x), so the run open under an x is its
+  // column's while z holds; one that is not is closed by the mismatch.
+  const open = new Map<number, { z: number; next: number; maximum: [number, number, number] }>();
+  for (const [x, y, z] of solidWorldPageCoordinates(world)) {
+    const run = open.get(x);
+    if (run && run.z === z && run.next === y) {
+      run.maximum[1] = origin[1] + y * edge[1] + edge[1];
+      run.next = y + 1;
+      continue;
+    }
+    const minimum: [number, number, number] = [origin[0] + x * edge[0], origin[1] + y * edge[1],
+      origin[2] + z * edge[2]];
+    const maximum: [number, number, number] = [minimum[0] + edge[0], minimum[1] + edge[1], minimum[2] + edge[2]];
+    bounds.push({ minimum, maximum });
+    open.set(x, { z, next: y + 1, maximum });
+  }
+  return bounds;
 }
 
 function coalesceDirtyRegions(
@@ -829,25 +878,61 @@ export function* liveSceneBrickCoordinatesForRegionsSteps(
   brickSize: number,
   brickDimensions: readonly [number, number, number],
 ): Generator<unknown, SparseBrickCoordinate[], undefined> {
-  const coordinates = new Map<string, SparseBrickCoordinate>();
+  // A brick's index in the lattice names it; first sight keeps its place.
+  if (!Number.isSafeInteger(brickDimensions[0] * brickDimensions[1] * brickDimensions[2])) {
+    throw new RangeError(`Brick lattice ${brickDimensions.join("x")} has more bricks than an index can name`);
+  }
+  const coordinates = new Map<number, SparseBrickCoordinate>();
+  // Doubles, not integers: an unbounded or empty bound must stay what it is.
+  const range = new Float64Array(6);
   let visited = 0;
   for (const region of regions) {
-    const minimum = region.minimum.map((value, axis) => Math.floor(
-      (value - worldOrigin[axis]) / (cellSize[axis] * brickSize),
-    ));
-    const maximum = region.maximum.map((value, axis) => Math.floor(
-      (value - worldOrigin[axis]) / (cellSize[axis] * brickSize),
-    ));
-    for (let z = Math.max(0, minimum[2]); z <= Math.min(brickDimensions[2] - 1, maximum[2]); z += 1) {
-      for (let y = Math.max(0, minimum[1]); y <= Math.min(brickDimensions[1] - 1, maximum[1]); y += 1) {
-        for (let x = Math.max(0, minimum[0]); x <= Math.min(brickDimensions[0] - 1, maximum[0]); x += 1) {
-          coordinates.set(`${x},${y},${z}`, { x, y, z });
-          if ((visited += 1) % BRICK_SELECTION_YIELD_BATCH === 0) yield;
-        }
-      }
+    regionBrickRange(region, worldOrigin, cellSize, brickSize, brickDimensions, range);
+    for (let z = range[2]!; z <= range[5]!; z += 1) {
+      visited += claimBrickSlab(coordinates, brickDimensions, range, z);
+      if (visited >= BRICK_SELECTION_YIELD_BATCH) { visited = 0; yield; }
     }
   }
   return [...coordinates.values()];
+}
+
+/**
+ * The bricks a bound touches, as `[x0, y0, z0, x1, y1, z1]` inside the lattice.
+ *
+ * This and the slab below are plain functions because a generator's own body
+ * is never optimised: a loop written in one runs several times slower and
+ * boxes every number it forms.
+ */
+function regionBrickRange(
+  region: SparseSceneAxisAlignedBounds,
+  worldOrigin: readonly [number, number, number],
+  cellSize: readonly [number, number, number],
+  brickSize: number,
+  brickDimensions: readonly [number, number, number],
+  range: Float64Array,
+): void {
+  for (let axis = 0; axis < 3; axis += 1) {
+    range[axis] = Math.max(0, Math.floor((region.minimum[axis]! - worldOrigin[axis]!) / (cellSize[axis]! * brickSize)));
+    range[axis + 3] = Math.min(brickDimensions[axis]! - 1,
+      Math.floor((region.maximum[axis]! - worldOrigin[axis]!) / (cellSize[axis]! * brickSize)));
+  }
+}
+
+/** Claim one z slab of a brick range; returns how many bricks it visited. */
+function claimBrickSlab(
+  coordinates: Map<number, SparseBrickCoordinate>,
+  brickDimensions: readonly [number, number, number],
+  range: Float64Array,
+  z: number,
+): number {
+  const x0 = range[0]!, y0 = range[1]!, x1 = range[3]!, y1 = range[4]!;
+  for (let y = y0; y <= y1; y += 1) {
+    for (let x = x0; x <= x1; x += 1) {
+      const index = (z * brickDimensions[1] + y) * brickDimensions[0] + x;
+      if (!coordinates.has(index)) coordinates.set(index, { x, y, z });
+    }
+  }
+  return y1 < y0 || x1 < x0 ? 0 : (y1 - y0 + 1) * (x1 - x0 + 1);
 }
 
 /**
@@ -995,6 +1080,54 @@ export function liveSceneMissingBrickCoordinates(
     .filter((coordinate) => !isCovered(coordinate));
 }
 
+/** Visit every brick of every `[x0, y0, z0, x1, y1, z1]` span, a brick once for each span that holds it. */
+function eachSpanBrick(spans: Int32Array, visit: (x: number, y: number, z: number) => void): void {
+  for (let base = 0; base < spans.length; base += 6) {
+    for (let z = spans[base + 2]!; z <= spans[base + 5]!; z += 1) {
+      for (let y = spans[base + 1]!; y <= spans[base + 4]!; y += 1) {
+        for (let x = spans[base]!; x <= spans[base + 3]!; x += 1) visit(x, y, z);
+      }
+    }
+  }
+}
+
+/**
+ * Whether a solid world holds, in the lattice box `[low, high)`, anything the
+ * display draws from a leaf. Off terrain that is a solid cell. Over terrain
+ * the ground is drawn without leaves, so it is a cell an edit shaped that is
+ * solid, or that the ground would have filled: a dig. A region is a whole box
+ * of solid.
+ */
+function solidWorldHoldsContent(world: SolidWorld, low: readonly number[], high: readonly number[]): boolean {
+  for (const region of world.regions ?? []) {
+    if (region.minimum.every((value, axis) => value < high[axis]!)
+      && region.maximumExclusive.every((value, axis) => value > low[axis]!)) return true;
+  }
+  const B = SOLID_WORLD_BRICK_CELLS, ground = world.ground;
+  for (let pz = Math.floor(low[2]! / B); pz * B < high[2]!; pz += 1) {
+    for (let py = Math.floor(low[1]! / B); py * B < high[1]!; py += 1) {
+      for (let px = Math.floor(low[0]! / B); px * B < high[0]!; px += 1) {
+        const index = world.directory.lookup([px, py, pz]);
+        const page = index === undefined ? undefined : world.pages[index];
+        const authored = page?.authored;
+        if (!page || (ground && !authored)) continue;
+        const x1 = Math.min(high[0]! - px * B, B), y1 = Math.min(high[1]! - py * B, B), z1 = Math.min(high[2]! - pz * B, B);
+        for (let z = Math.max(low[2]! - pz * B, 0); z < z1; z += 1) {
+          for (let y = Math.max(low[1]! - py * B, 0); y < y1; y += 1) {
+            for (let x = Math.max(low[0]! - px * B, 0); x < x1; x += 1) {
+              const cell = x + B * (y + B * z);
+              if (!ground) { if (page.solidFraction[cell]! > 0) return true; continue; }
+              if ((authored![cell >> 3]! & (1 << (cell & 7))) === 0) continue;
+              if (page.solidFraction[cell]! > 0 || py * B + y < ground.solidCells(px * B + x, pz * B + z)) return true;
+            }
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
 export function liveSvoDenseFinestPages(dimensions: readonly [number, number, number]): SvoNodeMipCoordinate[] {
   const pages: SvoNodeMipCoordinate[] = [];
   for (let z = 0; z < dimensions[2]; z += 1) for (let y = 0; y < dimensions[1]; y += 1) for (let x = 0; x < dimensions[0]; x += 1) {
@@ -1085,6 +1218,39 @@ export function buildOctreeSvoPbrMaterialPublication(
   });
 }
 
+/**
+ * The table `buildOctreeSvoPbrMaterialPublication` packs, written into a table
+ * already sized for the arena, without the publication around it: a staged
+ * document needs the words and not their content hash. Returns the record count.
+ */
+function writeOctreeSvoPbrMaterialTable(
+  table: Uint32Array,
+  environmentPrimitives: readonly EnvironmentProxyPrimitive[],
+  surfaceModel: SvoTerrainSurfaceModel,
+): number {
+  table.fill(0);
+  let count = 0;
+  for (const record of buildDefaultSvoMaterialRecords(OCTREE_SVO_PBR_MATERIAL_REVISION, { terrainSurface: surfaceModel })) {
+    writeSvoMaterialRecord(table, record);
+    count = Math.max(count, record.materialId + 1);
+  }
+  for (const primitive of environmentPrimitives) {
+    if (!Number.isSafeInteger(primitive.ownerIndex) || primitive.ownerIndex < 0) {
+      throw new RangeError(`Environment material owner index for ${primitive.key} must be a non-negative safe integer`);
+    }
+    const materialId = ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex;
+    if (materialId >= OCTREE_LIVE_SCENE_MATERIAL_CAPACITY) {
+      throw new RangeError(`Live scene needs material ${materialId} but the fixed arena holds ${OCTREE_LIVE_SCENE_MATERIAL_CAPACITY}`);
+    }
+    // A written record names its own slot in its ID word.
+    if (table[materialId * SVO_MATERIAL_RECORD_WORDS + 20] !== 0) throw new RangeError(`Duplicate SVO material ID ${materialId}`);
+    writeSvoEnvironmentMaterialRecord(table, materialId, primitive.material, OCTREE_SVO_PBR_MATERIAL_REVISION,
+      svoMaterialFunctionIdForEnvironmentProxy(primitive, surfaceModel));
+    count = Math.max(count, materialId + 1);
+  }
+  return count;
+}
+
 export interface OctreeSvoLightPublicationData {
   records: readonly SvoLightRecord[];
   packedRecords: Uint32Array<ArrayBuffer>;
@@ -1159,6 +1325,9 @@ export const OCTREE_SPARSE_BRICK_SCENE_VALID_FIELDS =
   | SPARSE_VOXEL_VALID_FIELDS.sceneGeometry
   | SPARSE_VOXEL_VALID_FIELDS.materialOwner;
 
+/** The scene maintenance revision `finalizeScene` last published. */
+const STRUCTURAL_PUBLISHED_SCENE_REVISION_WORD = SPARSE_VOXEL_PUBLICATION_STATE.publishedSceneRevision;
+
 function structuralPublicationFinalizeShader(sceneMaintenanceStateOffsetWords = 0) { return /* wgsl */ `
 @group(0) @binding(0) var<storage, read_write> state: array<u32>;
 @group(0) @binding(1) var<storage, read> sceneMaintenance: array<u32>;
@@ -1196,6 +1365,12 @@ fn finalizeScene() {
   if (requested == 0u || completed != requested
     || (overflow & ${SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW}u) != 0u
     || topologyMutation[3] != 0u) { return; }
+  // A revision is published once, by the frame whose chunk completes it. The
+  // chunk frames before it advance a cursor and publish nothing; a frame
+  // planned past the last chunk finds the revision already published. Scene
+  // revisions strictly increase, so the word never matches a later one.
+  if (state[${STRUCTURAL_PUBLISHED_SCENE_REVISION_WORD}u] == completed) { return; }
+  state[${STRUCTURAL_PUBLISHED_SCENE_REVISION_WORD}u] = completed;
   if (topologyMutation[0] != 0u) { state[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}] += 1u; }
   state[${SPARSE_VOXEL_PUBLICATION_STATE.sceneGeometryRevision}] += 1u;
   // Scene publication adds its independently-owned lane; it must never clear
@@ -1261,36 +1436,87 @@ export class OctreeSparseBrickWorld {
    */
   private liveDerivedAddressPlan?: SvoNodeMipAddressPlan;
   private liveDerivedAddressPlanValid = true;
-  private liveDerivedFeedbackPhase = 0;
-  private liveDerivedFeedbackFramesRemaining = 0;
+  /** What the last edit that added bricks asked of the plan; see `growLiveDerivedAddressPlan`. */
+  private liveDerivedLastGrowth?: SvoNodeMipAddressPlanGrowth;
+  /**
+   * Lighting frames still owed. The queue, its cursors and the feedback
+   * windows live on the GPU and are never read back, so the host only counts:
+   * frames certain to drain what was journaled, then the feedback window.
+   */
+  private liveDerivedFramesRemaining = 0;
+  /** How many of those may still change opacity, and so republish the pyramid. */
+  private liveDerivedDrainFramesRemaining = 0;
+  /** Leaves journaled since the queue was last certain to be empty; an upper bound. */
+  private liveDerivedSeedBound = 0;
+  /** Leaves one voxelizer frame can journal at most. */
+  private liveDerivedChunkSeedBound = 0;
+  /** The voxelizer's frame count when lighting last looked. */
+  private liveDerivedSceneActivity = 0;
+  /** The lights or the sky moved: the next lighting frame opens the window everywhere. */
+  private liveDerivedRelight = false;
   private liveDerivedInitial = true;
+  /**
+   * The published pyramid alternates between these two identical objects,
+   * because its identity is the renderer's signal that opacity changed and
+   * nothing in it is. No object is made for a publication.
+   */
+  private liveDerivedPyramidTwins?: [NonNullable<SparseVoxelSceneRenderSource["nodeMipPyramid"]>, NonNullable<SparseVoxelSceneRenderSource["nodeMipPyramid"]>];
+  /** The one radiance source this world ever publishes; withdrawn and restored, never remade. */
+  private liveDerivedRadianceSource?: SparseVoxelSceneRenderSource["tetrahedralRadiance"];
   private radianceEnabled = true;
   /** The scene's one word about what its surfaces are made of; see the ABI. */
   private surfaceModel!: SvoTerrainSurfaceModel;
   private solidWorld!: SolidWorld;
   private renderSolidWorld!: SolidWorld;
-  private renderResidualMemo?: { readonly world: SolidWorld; readonly residual: SolidWorld };
+  /** The residual `renderSolidWorld` came from: what the next stroke's residual extends. */
+  private renderResidual?: SvoRenderResidual;
+  /** The last pair of snapshots compared, so validating and staging one edit compares once. */
+  private solidChangeMemo?: { readonly previous: SolidWorld; readonly next: SolidWorld;
+    readonly changes: SolidWorldChangeBounds };
   private solidWorldStamp = "";
   private terrainFieldStamp = "";
   /** Catalog expansion input, retained exactly for subsequent live publications. */
   private environmentDetailCellSize_m = 0;
-  /** Non-empty only when immutable planar terminals make geometry structural. */
-  private planarTopologyStamp = "";
+  /**
+   * Set only when immutable planar terminals make authored geometry structural:
+   * the terrain field, every authored primitive's shape and the static bodies
+   * are then baked into macro leaves, and a document that moves one is refused.
+   */
+  private planarTerminalsBaked = false;
   private liveScenePrimitiveStates = new Map<string, LiveScenePrimitiveState>();
   private liveScenePrimitives = new Map<string, LiveScenePrimitiveEntry>();
+  /** `liveScenePrimitives` in publication order, replaced only when one of them is. */
+  private liveScenePrimitiveList: readonly SparseScenePrimitive[] = [];
   /**
-   * Which finest bricks a leaf already covers, stored *at each leaf's own level*.
-   *
-   * This used to be the expansion: every leaf enumerated every finest brick in
-   * its extent, so the set was the claim's volume rather than its leaf count —
-   * on `hero-garden-hose` at environment refinement depth 3 that is 4.4 M
-   * strings against 222 690 leaves, several hundred megabytes of host heap in
-   * the one place a scene this fine has none to spare. A brick is covered iff
-   * one of its ancestors is here, which is at most `finestLevel + 1` lookups
-   * and is asked only about the bricks an *edit* touches.
+   * The document the live primitives were last listed from. Staging it again
+   * does nothing; a keyed primitive update clears it, so the next document is
+   * listed whole.
    */
-  private readonly coveredSceneBrickNodes = new Set<string>();
-  private readonly planarSceneBrickNodes = new Set<string>();
+  private stagedScene?: SceneDescription;
+  /** The last document staged, whose parts the next one is compared with. */
+  private stagedDocument?: SceneDescription;
+  private stagedCatalog?: EnvironmentProxyCatalog;
+  /** The staged catalog's primitives, shell faces first: the order the material table indexes. */
+  private stagedAuthored: readonly EnvironmentProxyPrimitive[] = [];
+  private stagedStaticBodies = "";
+  /**
+   * Host copies of the appearance tables, which an edit is diffed against.
+   * `pbrMaterialStaging` is the table being written; it equals the published
+   * copy between stages.
+   */
+  private pbrMaterialRecords = new Uint32Array(0);
+  private pbrMaterialStaging = new Uint32Array(0);
+  private materialEmissionRecords = new Uint32Array(0);
+  private lightRecords = new Uint32Array(0);
+  private environmentLightingRecords = new Uint32Array(0);
+  /**
+   * The host's exact copy of the live tree's links and its allocator: which
+   * finest bricks a leaf covers, which leaves and nodes are free, and the
+   * records that take the GPU's tree to the current one. Every question an
+   * edit asks of the tree is answered here, by a walk from the root, and
+   * nothing is read back.
+   */
+  private topologyMirror!: SparseBrickTopologyMirror;
   private readonly sampledTerrainNodes = new Map<string, SparseSceneAxisAlignedBounds>();
   /** The stored backdrop rings' box, voxelized by the initial publication. */
   private backdropDetailBounds?: SparseSceneAxisAlignedBounds;
@@ -1298,12 +1524,18 @@ export class OctreeSparseBrickWorld {
   private backdropContentCeiling?: BackdropContentCeiling;
   /** The ceiling section's word index within the terrain table. */
   private backdropContentCeilingWord = 0;
-  private readonly reservedTopologyCoordinates = new Set<string>();
-  private remainingTopologyLeafReserve = 0;
-  private readonly reservedTopologySplits = new Set<string>();
-  private readonly pendingTopologyCoordinates = new Map<string, SparseBrickCoordinate>();
+  /**
+   * Finest bricks an edit activated, by coordinate key. Each holds something
+   * of the staged document: the publication that leaves one holding nothing
+   * takes its leaf back.
+   */
+  private readonly releasableTopologyBricks = new Map<string, SparseBrickCoordinate>();
+  /** The solid lattice's corner and cell, which place a solid world's pages in the scene. */
+  private solidLatticeOrigin!: readonly [number, number, number];
+  private solidLatticeCell!: readonly [number, number, number];
   private pendingScenePublication?: SparseScenePublication;
-  private pendingTopologyMutation = false;
+  /** Records in the staged topology batch; none when the GPU's tree is the host's. */
+  private pendingTopologyRecords = 0;
   private sceneRevision = 0;
   private topologyPublished = false;
   private pipelineInitialization?: Promise<void>;
@@ -1468,7 +1700,7 @@ export class OctreeSparseBrickWorld {
     const backdropDetailLattice_m = backdropDetailRings > 0
       ? backdropDetailCentreLattice(backdropCell_m, backdropDetailRings, brickSize) : undefined;
     const backdropDetailDomain = backdropField && backdropDetailRings > 0 ? backdropDetailWorldBounds(backdropField,
-      backdropDetailFromPlan(backdropField, planBackdropTiles(backdropField, {
+      backdropDetailFromPlan(backdropField, planBackdropTileLayout(backdropField, {
         origin_m: [-0.5 * scene.container.width_m, 0, -0.5 * scene.container.depth_m],
         cellSize_m: backdropCell_m, firstLevel: backdropDetailRings,
       // A dual-grid plan also claims an apron brick past the outer square.
@@ -1502,7 +1734,12 @@ export class OctreeSparseBrickWorld {
             z: Math.max(backdropDetailDomain.max.z, authoredWorldBounds?.max.z ?? -Infinity) },
         } : authoredWorldBounds,
         solverClaim: "none",
-        enumerateProxyBricks: !(options.selectPrimitiveBricksGpu && options.sceneSolids?.length && octreeLiveSceneBrickClaim() === "reachable" && (dryWorld || rendererOnly)),
+        // Per-proxy bricks are read below by the unrefined voxel claim alone.
+        // A refined or function-fitted world rasterises the same bounds on
+        // its own lattice, the device's selection takes the ranges, and the
+        // tree's depth follows from the lattice's dimensions.
+        enumerateProxyBricks: refinementDepth === 0 && !options.surfaceDualMarchingCubes
+          && !(options.selectPrimitiveBricksGpu && options.sceneSolids?.length && octreeLiveSceneBrickClaim() === "reachable" && (dryWorld || rendererOnly)),
       }
     );
     this.solverGridOriginCells = sceneDomain.solverGridOriginCells;
@@ -1572,23 +1809,9 @@ export class OctreeSparseBrickWorld {
       initialSolidWorld.patches, planarCatalog.sources.length,
       { promoteEditablePatches: false });
     const planarSources = [...planarCatalog.sources];
-    const residualSolidWorld = svoPlanarResidualSolidWorld(initialSolidWorld,
-      solidPlanarCatalog, scene);
+    this.renderResidual = svoRenderResidual(scene, initialSolidWorld);
+    const residualSolidWorld = this.renderResidual.residual;
     this.renderSolidWorld = residualSolidWorld;
-    this.renderResidualMemo = { world: initialSolidWorld, residual: residualSolidWorld };
-    // The refined terrain field carries its own ordered copy of the document's
-    // voxel edits. It has to be the residual's list, as every live republish
-    // already is (`setSolidWorld`), or a terrain scene draws the tank shell
-    // that the page image has just left out.
-    if (renderTerrain && residualSolidWorld !== initialSolidWorld) {
-      renderTerrain = {
-        ...renderTerrain,
-        patches: terrainOverlayPatches(residualSolidWorld, {
-          origin_m: [-0.5 * scene.container.width_m, 0, -0.5 * scene.container.depth_m],
-          cellSize_m: sceneCellSizes_m(scene),
-        }),
-      };
-    }
     const terrainRefinement = renderTerrain
       ? createSvoRenderTerrainRefinement({
         field: renderTerrain,
@@ -1600,9 +1823,19 @@ export class OctreeSparseBrickWorld {
         maximumDepth,
       })
       : undefined;
-    const solidPatchRefinement = renderTerrain && renderTerrain.patches.length > 0
-      ? createSvoRenderPatchRefinement({
-        patches: renderTerrain.patches,
+    // A terrain scene draws its edits from the residual's pages, as every live
+    // republish does (`setSolidWorld`): refine where their surfaces can lie.
+    const editPageLattice = {
+      origin_m: [-0.5 * scene.container.width_m, 0, -0.5 * scene.container.depth_m] as const,
+      cellSize_m: sceneCellSizes_m(scene),
+    };
+    const editSurfacePages = renderTerrain
+      ? terrainEditSurfacePages(new TerrainEditPages(renderTerrain, editPageLattice).select(residualSolidWorld))
+      : [];
+    const solidPatchRefinement = editSurfacePages.length > 0
+      ? createSvoRenderEditPageRefinement({
+        pages: editSurfacePages,
+        lattice: editPageLattice,
         worldOrigin_m: worldOrigin,
         nodeEdge_m,
         maximumDepth,
@@ -1817,7 +2050,7 @@ export class OctreeSparseBrickWorld {
     if (backdropField && Math.abs(sceneDomain.cellSize_m[0] - backdropCell_m) > 1e-12) {
       throw new RangeError("Backdrop detail lattice does not match the scene domain's cell");
     }
-    const backdropTilePlan = backdropField ? planBackdropTiles(backdropField, {
+    const backdropTilePlan = backdropField ? yield* planBackdropTilesSteps(backdropField, {
       origin_m: worldOrigin, cellSize_m: sceneDomain.cellSize_m[0],
       firstLevel: backdropDetailRings, centreLattice_m: backdropDetailLattice_m,
     }) : undefined;
@@ -1830,7 +2063,6 @@ export class OctreeSparseBrickWorld {
       solverLevel: maximumDepth - refinementDepth,
       dualGrid: options.surfaceDualMarchingCubes === true,
     }) : undefined;
-    const backdropDetailNodes = new Set<string>();
     if (backdropField && backdropDetail) {
       const box = backdropDetailWorldBounds(backdropField, backdropDetail, options.surfaceDualMarchingCubes
         ? BACKDROP_DETAIL_DUAL_APRON_BRICKS * backdropDetailLattice_m! : 0);
@@ -1898,11 +2130,10 @@ export class OctreeSparseBrickWorld {
               > OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET
             : environmentCoarsening?.refineEnvironmentLeaf(level, coordinate) ?? false))),
       classifyEnvironmentLeaf: (options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? undefined : planarLeafClassifier,
-      classifySupplementalNode: backdropDetailClassifier ? (level, coordinate) => {
-        const verdict = backdropDetailClassifier.classify(level, coordinate);
-        if (verdict === 1) backdropDetailNodes.add(`${level}:${brickCoordinateKey(coordinate)}`);
-        return verdict;
-      } : undefined,
+      // The stored ring leaves come back marked (`supplementalLeaf`), and the
+      // classifier's name lets a rebuild over the same set take them as found.
+      classifySupplementalNode: backdropDetailClassifier?.classify,
+      supplementalContentKey: backdropDetailClassifier?.contentKey,
     });
     // Every node-mip page lies under a leaf, so the leaf boxes bound the
     // content each column can hold (see `BackdropContentCeiling`). Built for
@@ -1911,11 +2142,13 @@ export class OctreeSparseBrickWorld {
       const worldEdge = refinedBrickDimensions.map((count, axis) => count * refinedBrickEdge[axis]!);
       const ceiling = createBackdropContentCeiling([worldOrigin[0], worldOrigin[2]], [worldEdge[0]!, worldEdge[2]!]);
       const planarTops = new Map(planarLeafOptions.sources.map((source) => [source.sourceIndex, source.bounds_m.maximum[1]]));
-      for (const leaf of plan.leaves) {
+      // In a function of its own, as every loop over the leaves below is: this
+      // is a generator, and a generator's own body is never optimised.
+      const raiseOverLeaves = (): void => { for (const leaf of plan.leaves) {
         const node = plan.nodes[leaf.nodeIndex]!;
         const scale = 2 ** (maximumDepth - node.level);
-        const coordinate = [node.coordinate.x, node.coordinate.y, node.coordinate.z];
-        const maximum = coordinate.map((value, axis) => worldOrigin[axis]! + (value + 1) * refinedBrickEdge[axis]! * scale);
+        const { x, y, z } = node.coordinate;
+        let top = worldOrigin[1] + (y + 1) * refinedBrickEdge[1] * scale;
         // A planar terminal holds its one source and nothing else, so its
         // content stops at that source's top, not at the leaf box's: a coarse
         // floor leaf is most of a metre of empty air over the floor. One of
@@ -1923,11 +2156,13 @@ export class OctreeSparseBrickWorld {
         const planarTop = leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.planarBoundary
           ? planarTops.get(leaf.terminalIndex) : undefined;
         if (planarTop !== undefined) {
-          maximum[1] = Math.min(maximum[1]!, planarTop + refinedBrickEdge[1]! * scale / brickSize);
+          top = Math.min(top, planarTop + refinedBrickEdge[1] * scale / brickSize);
         }
-        raiseBackdropContentCeiling(ceiling,
-          coordinate.map((value, axis) => worldOrigin[axis]! + value * refinedBrickEdge[axis]! * scale), maximum);
-      }
+        raiseBackdropContentCeilingOver(ceiling,
+          worldOrigin[0] + x * refinedBrickEdge[0] * scale, worldOrigin[2] + z * refinedBrickEdge[2] * scale,
+          worldOrigin[0] + (x + 1) * refinedBrickEdge[0] * scale, worldOrigin[2] + (z + 1) * refinedBrickEdge[2] * scale, top);
+      } };
+      raiseOverLeaves();
       this.backdropContentCeiling = ceiling;
     }
     // The backdrop's level-0 voxels continue the set's own terrain lattice
@@ -1939,21 +2174,36 @@ export class OctreeSparseBrickWorld {
     reportStage("Pack the octree and allocate its arenas");
     yield;
     let coveredLeaves = 0;
-    for (const leaf of plan.leaves) {
+    // Planned terminals an edit may split: the analytic ones, and the sampled
+    // terrain a split resamples.
+    const splittableTerminalLeaves = new Set<number>();
+    let finestSplittableTerminals = 0;
+    let voxelTerminalLeaves = 0, planarTerminalLeaves = 0;
+    const coverLeaves = (first: number, end: number): void => { for (let index = first; index < end; index += 1) {
+      const leaf = plan.leaves[index]!;
       const node = plan.nodes[leaf.nodeIndex];
-      const key = `${node.level}:${brickCoordinateKey(node.coordinate)}`;
-      this.coveredSceneBrickNodes.add(key);
-      if (leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.planarBoundary) this.planarSceneBrickNodes.add(key);
+      if (leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.voxels) voxelTerminalLeaves += 1;
+      if (leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.planarBoundary) {
+        planarTerminalLeaves += 1;
+        splittableTerminalLeaves.add(leaf.index);
+        if (node.level === maximumDepth) finestSplittableTerminals += 1;
+      }
       // Stored backdrop rings are neither resampled terrain nor split on edit.
-      if (scene.terrain && node.level < maximumDepth && leaf.terminalKind === 0 && !backdropDetailNodes.has(key)) {
+      if (scene.terrain && node.level < maximumDepth && leaf.terminalKind === 0
+        && plan.supplementalLeaf[index] === 0) {
+        const key = `${node.level}:${brickCoordinateKey(node.coordinate)}`;
         const edge = renderCellSize.map(value => value * brickSize * 2 ** (maximumDepth - node.level));
         this.sampledTerrainNodes.set(key, {
           minimum: edge.map((value, axis) => worldOrigin[axis]! + [node.coordinate.x, node.coordinate.y, node.coordinate.z][axis]! * value) as [number, number, number],
           maximum: edge.map((value, axis) => worldOrigin[axis]! + ([node.coordinate.x, node.coordinate.y, node.coordinate.z][axis]! + 1) * value) as [number, number, number],
         });
-        this.planarSceneBrickNodes.add(key); // Shared terminal split ledger, including sampled terrain.
+        splittableTerminalLeaves.add(leaf.index);
       }
-      if ((coveredLeaves += 1) % 4096 === 0) yield;
+    } };
+    while (coveredLeaves < plan.leaves.length) {
+      const end = Math.min(plan.leaves.length, coveredLeaves + 4096);
+      coverLeaves(coveredLeaves, end);
+      if ((coveredLeaves = end) % 4096 === 0) yield;
     }
     const packed = packSparseBrickPlan(plan, 1);
     yield;
@@ -1962,17 +2212,9 @@ export class OctreeSparseBrickWorld {
     if (!Number.isSafeInteger(requestedMutationCapacity) || requestedMutationCapacity < 1) {
       throw new RangeError("Live scene mutation brick capacity must be a positive safe integer");
     }
-    this.topologyMutationCapacity = Math.min(sceneBrickVolume, requestedMutationCapacity);
-    this.remainingTopologyLeafReserve = this.topologyMutationCapacity;
-    const nodeCapacity = Math.max(1, plan.nodes.length
-      + sparseBrickTopologyMutationNodeReserve(maximumDepth, this.topologyMutationCapacity));
-    const leafCapacity = Math.max(1, plan.leaves.length + this.topologyMutationCapacity);
-    // The loud half of the brick raster's node-index ceiling, at the one point
-    // where the count first exists. Capacity rather than the planned count on
-    // purpose: topology mutation can reach every reserved node, so a world that
-    // *could* grow past the mask is already broken, and finding that out at the
-    // publication that crosses it is finding out from a scene with holes in it.
-    assertSvoBrickRasterNodeAddressable(nodeCapacity, "the live sparse-brick world");
+    // The floor of the reserve. What a whole session may add is decided below,
+    // once the payload this world stores a leaf in is known.
+    const minimumTopologyLeafReserve = Math.min(sceneBrickVolume, requestedMutationCapacity);
     // A renderer-only sidecar never receives solver writes even when the scene
     // document contains water. It can therefore use the same compact lanes as
     // a solverless world. The actual solver-owned octree still forces `full`.
@@ -1991,6 +2233,69 @@ export class OctreeSparseBrickWorld {
       ?? (leafPayloadMode === "dense" && this.backdropContentCeiling ? packContentCeilingTable(this.backdropContentCeiling) : undefined);
     if (terrainTable) this.backdropContentCeilingWord = terrainTable[BACKDROP_TERRAIN_TABLE.ceilingWord]!;
     else this.backdropContentCeiling = undefined;
+    // The display reserves what its whole declared domain can come to need, up
+    // to a byte budget: the leaves, and with them the lighting pages that many
+    // bricks of built surface are lit from, so that the two run out together.
+    // A world the solver owns stores seven times the payload a leaf and takes
+    // no live edits of its own, so it keeps the floor.
+    const plannedFinestLeaves = ((): number => {
+      let finest = 0;
+      for (const leaf of plan.leaves) if (plan.nodes[leaf.nodeIndex].level === maximumDepth) finest += 1;
+      return finest;
+    })();
+    const derivedReserveBasePages = liveSvoBasePageDimensions(refinedBrickDimensions, brickSize);
+    const derivedReserveLevels = sparseSceneOctreeMaximumDepth(derivedReserveBasePages, []) + 1;
+    const derivedReserveFloor = derivedReserveLevels <= SVO_NODE_MIP_MAXIMUM_LEVELS
+      ? svoOpacityLevelFloor({ levelCount: derivedReserveLevels, cellSize_m: Math.max(...renderCellSize) }) : 0;
+    const dualGrid = options.surfaceDualContouring === true || options.surfaceDualMarchingCubes === true;
+    const topologyReserve = payloadProfile === "dry" ? planLiveTopologyLeafReserve({
+      brickDimensions: refinedBrickDimensions, maximumDepth,
+      minimumLeaves: minimumTopologyLeafReserve,
+      plannedNodes: plan.nodes.length, plannedLeaves: plan.leaves.length, plannedFinestLeaves,
+      splittableTerminals: splittableTerminalLeaves.size, finestSplittableTerminals,
+      payloadBytes: (leaves) => resolveSparseBrickPayloadLayout(payloadProfile,
+        leaves * brickSize ** 3 + (leafPayloadMode === "dense"
+          ? Math.max(terrainTable?.length ?? 0, BACKDROP_TERRAIN_HEADER_WORDS) : 0),
+        sceneGeometryFormat, { leafPayloadMode, voxelsPerLeaf: brickSize ** 3,
+          retainDenseLanes: leafPayloadMode === "banded" ? SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES : undefined,
+        }).totalBytes,
+      storageLimitBytes: Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize),
+      candidatesPerBrick: OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
+      dualGridVoxelsPerLeaf: dualGrid ? brickSize ** 3 : 0,
+      maintenanceFixedBytes: WEBGPU_SOLID_WORLD_DISPLAY_BUDGET_BYTES,
+      derived: derivedReserveLevels <= SVO_NODE_MIP_MAXIMUM_LEVELS ? {
+        levelPages: svoNodeMipLevelPageDimensions(derivedReserveBasePages, derivedReserveLevels)
+          .slice(derivedReserveFloor).map(pages => pages[0] * pages[1] * pages[2]),
+        // Eight-cell pages: a four-cell brick is an eighth of one, and so is a
+        // page of the level below the floor.
+        occupiedBasePages: Math.ceil(plannedFinestLeaves * brickSize ** 3
+          / SVO_NODE_MIP_LAYOUT.interiorSize ** 3 / 8 ** derivedReserveFloor),
+        bytesPerPage: SVO_NODE_MIP_ADDRESS_PLAN.reservedBytesPerPage,
+      } : undefined,
+    }) : undefined;
+    const topologyLeafReserve = topologyReserve?.leaves ?? minimumTopologyLeafReserve;
+    // Every record one batch can come to hold, so that one stroke may spend
+    // the whole reserve and take as much back. Nothing else is sized by it.
+    this.topologyMutationCapacity = Math.max(1, topologyReserve?.mutationRecords
+      ?? liveTopologyMutationRecords(topologyLeafReserve, maximumDepth, finestSplittableTerminals));
+    // Absent on a world the solver owns, which keeps the address plan's own reserve.
+    const derivedReserveBytes = topologyReserve
+      && topologyReserve.derivedPages * SVO_NODE_MIP_ADDRESS_PLAN.reservedBytesPerPage;
+    const nodeCapacity = Math.max(1, plan.nodes.length
+      + sparseBrickTopologyMutationNodeReserve(maximumDepth, topologyLeafReserve));
+    const leafCapacity = Math.max(1, plan.leaves.length + topologyLeafReserve);
+    this.topologyMirror = new SparseBrickTopologyMirror({
+      maximumDepth, nodeCapacity, leafCapacity, recordCapacity: this.topologyMutationCapacity,
+      plan, splittable: leaf => splittableTerminalLeaves.has(leaf),
+    });
+    this.solidLatticeOrigin = [-0.5 * scene.container.width_m, 0, -0.5 * scene.container.depth_m];
+    this.solidLatticeCell = sceneCellSizes_m(scene);
+    // The loud half of the brick raster's node-index ceiling, at the one point
+    // where the count first exists. Capacity rather than the planned count on
+    // purpose: topology mutation can reach every reserved node, so a world that
+    // *could* grow past the mask is already broken, and finding that out at the
+    // publication that crosses it is finding out from a scene with holes in it.
+    assertSvoBrickRasterNodeAddressable(nodeCapacity, "the live sparse-brick world");
     this.tree = new SparseBrickOctreeGPU(device, {
       brickSize, nodeCapacity, leafCapacity, label: "Octree unified live sparse-brick world",
       // The terrain table's header is always there on a dense world, zeroed
@@ -2021,9 +2326,11 @@ export class OctreeSparseBrickWorld {
     yield;
     this.topologyMutationWorklist = device.createBuffer({
       label: "Live sparse scene topology mutation worklist",
-      size: (8 + this.topologyMutationCapacity * 4) * Uint32Array.BYTES_PER_ELEMENT,
+      size: (SPARSE_BRICK_TOPOLOGY_MUTATION.headerWords
+        + this.topologyMutationCapacity * SPARSE_BRICK_TOPOLOGY_MUTATION.recordWords) * Uint32Array.BYTES_PER_ELEMENT,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
+    this.topologyMutator.bind(this.tree, { buffer: this.topologyMutationWorklist, capacity: this.topologyMutationCapacity });
     // Both of the next two are for binding 5 alone, which no shipping traversal
     // populates — see `derivedTraversalStructures`. Skipped unless a lane that
     // actually selects compact/wide/hybrid asks for them.
@@ -2055,28 +2362,41 @@ export class OctreeSparseBrickWorld {
     yield;
     const solverOriginBricks = this.solverGridOriginCells.map((value) => value / brickSize);
     if (solverOriginBricks.some((value) => !Number.isInteger(value))) throw new Error("Shared sparse scene origin must align to the fluid brick lattice");
-    const leafByCoordinate = new Map<string, number>();
-    let indexedLeaves = 0;
-    for (const leaf of plan.leaves) {
-      const node = plan.nodes[leaf.nodeIndex];
-      if (node.level === solverLevel) leafByCoordinate.set(`${leaf.coordinate.x},${leaf.coordinate.y},${leaf.coordinate.z}`, leaf.index);
-      if ((indexedLeaves += 1) % 4096 === 0) yield;
-    }
     const localBrickDimensions = dimensions.map((value) => Math.ceil(value / brickSize)) as [number, number, number];
     const leafIndices = new Uint32Array(localBrickDimensions[0] * localBrickDimensions[1] * localBrickDimensions[2]);
-    let mappedBrick = 0;
-    for (let z = 0; z < localBrickDimensions[2]; z += 1) for (let y = 0; y < localBrickDimensions[1]; y += 1) for (let x = 0; x < localBrickDimensions[0]; x += 1) {
-      const key = `${solverOriginBricks[0] + x},${solverOriginBricks[1] + y},${solverOriginBricks[2] + z}`;
-      const leafIndex = leafByCoordinate.get(key);
-      // A dry scene publishes no solver bricks at all — whether because it spent
-      // its depth on the environment or because it never claimed the container —
-      // so there is no leaf to name and nothing that will ever read this table:
-      // the fluid frame path is not reached when `systems.fluid` is false.
-      // Anywhere the solver *is* present, a missing leaf is still a hard error —
-      // that is the statement that solver bricks are never coarsened.
-      if (leafIndex === undefined && plannedSolverBricks.length > 0) throw new Error(`Fluid brick ${key} has no finest scene leaf`);
-      leafIndices[mappedBrick++] = leafIndex ?? 0;
-      if (mappedBrick % 4096 === 0) yield;
+    // A solver-level leaf inside the solver's box writes its own slot: the
+    // brick's place in the box is its coordinate less the box's origin.
+    const leafNamed = new Uint8Array(leafIndices.length);
+    let indexedLeaves = 0;
+    const nameLeaves = (first: number, end: number): void => { for (let index = first; index < end; index += 1) {
+      const leaf = plan.leaves[index]!;
+      const node = plan.nodes[leaf.nodeIndex];
+      if (node.level === solverLevel) {
+        const x = leaf.coordinate.x - solverOriginBricks[0], y = leaf.coordinate.y - solverOriginBricks[1];
+        const z = leaf.coordinate.z - solverOriginBricks[2];
+        if (x >= 0 && y >= 0 && z >= 0 && x < localBrickDimensions[0] && y < localBrickDimensions[1] && z < localBrickDimensions[2]) {
+          const brick = x + localBrickDimensions[0] * (y + localBrickDimensions[1] * z);
+          leafIndices[brick] = leaf.index;
+          leafNamed[brick] = 1;
+        }
+      }
+    } };
+    while (indexedLeaves < plan.leaves.length) {
+      const end = Math.min(plan.leaves.length, indexedLeaves + 4096);
+      nameLeaves(indexedLeaves, end);
+      if ((indexedLeaves = end) % 4096 === 0) yield;
+    }
+    // A dry scene publishes no solver bricks at all — whether because it spent
+    // its depth on the environment or because it never claimed the container —
+    // so there is no leaf to name and nothing that will ever read this table:
+    // the fluid frame path is not reached when `systems.fluid` is false.
+    // Anywhere the solver *is* present, a missing leaf is still a hard error —
+    // that is the statement that solver bricks are never coarsened.
+    const unnamedBrick = plannedSolverBricks.length > 0 ? leafNamed.indexOf(0) : -1;
+    if (unnamedBrick >= 0) {
+      const x = unnamedBrick % localBrickDimensions[0], y = Math.floor(unnamedBrick / localBrickDimensions[0]) % localBrickDimensions[1];
+      const z = Math.floor(unnamedBrick / (localBrickDimensions[0] * localBrickDimensions[1]));
+      throw new Error(`Fluid brick ${solverOriginBricks[0] + x},${solverOriginBricks[1] + y},${solverOriginBricks[2] + z} has no finest scene leaf`);
     }
     this.residency = new GPUFluidBrickResidency(device, dimensions, sceneDomain.cellSize_m, {
       brickSize, haloCells: options.haloCells ?? 2, retireAfterFrames: 3, leafIndices, leafCapacity: this.tree.leafCapacity,
@@ -2184,6 +2504,7 @@ export class OctreeSparseBrickWorld {
           -0.5 * scene.container.depth_m],
         cellSize_m: sceneCellSizes_m(scene),
       },
+      solidSurface: scene.solidSurface && BATH_SOLID_DISTANCE_WGSL,
       renderTerrain,
       backdropDetail: backdropDetail && backdropTerrainTable
         ? backdropDetailVoxelizerWGSL(backdropTerrainTable, backdropDetail, options.surfaceDualMarchingCubes === true) : undefined,
@@ -2272,6 +2593,9 @@ export class OctreeSparseBrickWorld {
           levelCount: liveDerivedLevelCount,
           addressCapacity: maximumDerivedPages,
           generation: 1,
+          // The pages the leaf reserve was priced with, so that the two refuse
+          // together and a reserve that covers the domain plans totally.
+          maximumReserveBytes: derivedReserveBytes,
           // Anchors the radiance floor to a world size, so refining the leaf
           // raises the floor with it and the radiance atlas stops moving.
           cellSize_m: Math.max(...this.cellSize),
@@ -2289,7 +2613,7 @@ export class OctreeSparseBrickWorld {
           capacity: maximumDerivedPages,
         };
         const atlasFits = mipPlan.atlas.texels.every((value) => value <= device.limits.maxTextureDimension3D);
-        if (!mipPlan.complete || !atlasFits || mipPlan.pages.length === 0) {
+        if (!mipPlan.complete || !atlasFits || mipPlan.residentPageCount === 0) {
           throw new RangeError("Live SVO derived-page capacity cannot cover the declared editable domain");
         }
         // The page table is a hash sized from the address plan's page capacity
@@ -2333,6 +2657,14 @@ export class OctreeSparseBrickWorld {
         const nodeTarget = nodeMipPyramid.prepareGpuUpdate(mipPlan);
         const radianceTarget = tetrahedralRadiance.prepareGpuUpdate(mipPlan, addressPlan.radianceSlotOffset);
         const sceneMaintenance = this.proxyVoxelizer.maintenanceBinding;
+        const sceneJournal = sceneMaintenance.journal;
+        if (!sceneJournal) throw new Error("Live derived lighting needs the voxelizer's dirty journal");
+        // A budgeted chunk journals at most its budget; an unbudgeted world can
+        // journal every brick it holds in one frame.
+        const sceneBrickBudget = octreeLiveSceneBrickBudget();
+        this.liveDerivedChunkSeedBound = sceneBrickBudget > 0
+          ? Math.min(sceneBrickBudget, sceneMaintenance.dirtyBrickCapacity) : sceneMaintenance.dirtyBrickCapacity;
+        const liveDerivedRadianceFeedback = options.radianceFeedback ?? LIVE_SVO_RADIANCE_FEEDBACK.enabledByDefault;
         const liveDerivedGenerationSource = {
           buffer: this.structuralPublicationState,
           offsetBytes: this.tree.structuralPublicationOffsetBytes
@@ -2341,15 +2673,21 @@ export class OctreeSparseBrickWorld {
         liveDerivedPlanner = new WebGpuLiveSvoDerivedWorklistPlanner(device, {
           tree: this.tree,
           nodeMips: nodeTarget,
-          dirtyLeafSources: [
-            {
-              buffer: sceneMaintenance.buffer,
-              countOffsetBytes: sceneMaintenance.stateOffsetBytes
-                + SPARSE_SCENE_MAINTENANCE_STATE_WORDS.dirtyBrickCount * 4,
-              recordOffsetBytes: sceneMaintenance.dirtyBrickOffsetBytes,
-              capacity: sceneMaintenance.dirtyBrickCapacity,
-              recordStrideWords: 4,
-            },
+          // The voxelizer's journal, taken with the planner's own cursor: a leaf
+          // is lit once however many chunk frames its revision takes, where
+          // the revision's dirty list was planned whole on every one of them.
+          sceneJournal: {
+            buffer: sceneMaintenance.buffer,
+            writeCursorOffsetBytes: sceneJournal.cursorOffsetBytes,
+            recordOffsetBytes: sceneJournal.recordOffsetBytes,
+            recordStrideWords: sceneJournal.recordStrideWords,
+            capacity: sceneJournal.capacity,
+            requestedRevisionOffsetBytes: sceneMaintenance.stateOffsetBytes
+              + SPARSE_SCENE_MAINTENANCE_STATE_WORDS.requestedRevision * 4,
+            completedRevisionOffsetBytes: sceneMaintenance.stateOffsetBytes
+              + SPARSE_SCENE_MAINTENANCE_STATE_WORDS.completedRevision * 4,
+          },
+          stepLeafSources: [
             {
               buffer: this.residency.worklist,
               countOffsetBytes: SPARSE_VOXEL_FLUID_RESIDENCY_WORKLIST_WORDS.activeCount * 4,
@@ -2365,6 +2703,8 @@ export class OctreeSparseBrickWorld {
               recordStrideWords: residencyLayout.entryStrideBytes / 4,
             },
           ],
+          radiance: radianceTarget,
+          radianceFeedback: liveDerivedRadianceFeedback,
           generationSource: liveDerivedGenerationSource,
           levelCount: liveDerivedLevelCount,
           finestLevel: plan.maximumDepth,
@@ -2390,7 +2730,8 @@ export class OctreeSparseBrickWorld {
           environmentLighting: this.environmentLightingBuffer,
           lights: this.lightBuffer,
           lightCount: lights.count,
-          worklists: liveDerivedPlanner.worklists,
+          batch: liveDerivedPlanner.batch,
+          levelCount: liveDerivedLevelCount,
           generationSource: liveDerivedGenerationSource,
           // Every addressable slot, not just the occupied ones: the empty
           // certification has to reach a reserved slot before a grown plan can
@@ -2399,7 +2740,7 @@ export class OctreeSparseBrickWorld {
           finestLevel: plan.maximumDepth,
           worldOrigin_m: this.sceneWorldOrigin,
           cellSize_m: this.cellSize,
-          radianceFeedback: options.radianceFeedback ?? LIVE_SVO_RADIANCE_FEEDBACK.enabledByDefault,
+          radianceFeedback: liveDerivedRadianceFeedback,
           radianceFloorLevel: addressPlan.radianceFloorLevel,
           // The radiance scratch was sized like the opacity scratch — one 16 kB
           // staging page per level-zero page, as much memory as the atlas it
@@ -2430,7 +2771,7 @@ export class OctreeSparseBrickWorld {
             detail: error instanceof Error ? error.message : String(error),
           };
         }
-        console.warn("[svo] live derived lighting unavailable; exact visibility will be used", error);
+        console.error("[svo] live derived lighting unavailable; exact visibility will be used", error);
       }
     }
     this.liveDerivedAddressPlanValid = derivedLighting.state === "ready";
@@ -2446,15 +2787,9 @@ export class OctreeSparseBrickWorld {
       entryStrideBytes: residencyLayout.entryStrideBytes,
       capacity: this.residency.capacity,
     };
-    const terminalCounts = {
-      voxel: plan.leaves.filter((leaf) =>
-        leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.voxels).length,
-      planarBoundary: plan.leaves.filter((leaf) =>
-        leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.planarBoundary).length,
-    };
-    if (planarSources.length > 0 || renderTerrain) {
-      this.planarTopologyStamp = planarBoundaryTopologyStamp(scene, environmentPrimitives);
-    }
+    // Counted where the leaves were walked for cover.
+    const terminalCounts = { voxel: voxelTerminalLeaves, planarBoundary: planarTerminalLeaves };
+    this.planarTerminalsBaked = planarSources.length > 0 || renderTerrain !== undefined;
     const structural: SparseVoxelStructuralRenderSource = {
       structure: { buffer: this.tree.structure, size: this.tree.structure.size },
       structureOffsetsWords: {
@@ -2682,7 +3017,7 @@ export class OctreeSparseBrickWorld {
    * old size while their authored centres move with the enlarged tank.
    */
   rescaleRenderDomain(scene: SceneDescription): void {
-    if (this.planarTopologyStamp) {
+    if (this.planarTerminalsBaked) {
       throw new Error("A sparse world with planar terminals must be rebuilt to rescale its render domain");
     }
     const structural = this.sceneSource.structural;
@@ -2713,20 +3048,25 @@ export class OctreeSparseBrickWorld {
    * dirty coverage includes every superseded old/new bound.
    */
   /**
-   * The render copy of one published solid snapshot: canonical shell left out.
+   * The render copy of one solid snapshot: canonical shell left out, never an
+   * editable patch promoted to an immutable planar terminal.
    *
-   * Kept per snapshot because an edit asks twice — once to be validated, once
-   * to be staged — and on a terrain scene the answer is a terrain bake.
+   * An edit asks twice — once to be validated, once to be staged — and the
+   * residual is kept per snapshot, so the second answer is the first. A stroke's
+   * residual is the published one extended, not the document replayed.
    */
-  private renderResidualFor(scene: SceneDescription, world: SolidWorld): SolidWorld {
-    if (this.renderResidualMemo?.world === world) return this.renderResidualMemo.residual;
-    // Never promote editable voxel patches into immutable planar terminals;
-    // the catalogue is consulted here for the shell it excludes and no more.
-    const residual = svoPlanarResidualSolidWorld(world,
-      buildSvoSolidWorldPlanarBoundaryCatalog(scene, world.patches, 0,
-        { promoteEditablePatches: false }), scene);
-    this.renderResidualMemo = { world, residual };
-    return residual;
+  private renderResidualFor(scene: SceneDescription, world: SolidWorld): SvoRenderResidual {
+    return svoRenderResidual(scene, world, this.renderResidual);
+  }
+
+  /** What changed between two snapshots, compared once per pair. */
+  private solidChangesBetween(scene: SceneDescription, previous: SolidWorld, next: SolidWorld,
+    sameTerrain: boolean): SolidWorldChangeBounds {
+    const memo = this.solidChangeMemo;
+    if (memo?.previous === previous && memo.next === next) return memo.changes;
+    const changes = solidWorldChangeBounds(scene, previous, next, { sameTerrain });
+    this.solidChangeMemo = { previous, next, changes };
+    return changes;
   }
 
   validateLiveSolidEdit(scene: SceneDescription): void {
@@ -2737,8 +3077,10 @@ export class OctreeSparseBrickWorld {
     const world = solidWorldForScene(scene);
     // Capacity is the display's, so it is asked of what the display is sent:
     // the residual, not the physical world with its shell still on.
-    this.proxyVoxelizer.validateSolidWorld(this.renderResidualFor(scene, world));
-    const changes = solidWorldChangeBounds(scene, this.solidWorld, world);
+    this.proxyVoxelizer.validateSolidWorld(this.renderResidualFor(scene, world).residual);
+    // The ground was just shown to be this world's own, so an appended stroke
+    // is compared over its own pages.
+    const changes = this.solidChangesBetween(scene, this.solidWorld, world, true);
     const bounds = scene.terrain ? changes.dirtyBounds : changes.addedBounds;
     for (const bound of bounds) {
       if (bound.minimum.some((value, axis) => value < this.sceneWorldOrigin[axis]! - 1e-6)
@@ -2747,11 +3089,26 @@ export class OctreeSparseBrickWorld {
         throw new RangeError("Edit exceeds this scene's live world bounds. Use a scene with a larger authored domain.");
       }
     }
-    this.assertLiveTopologyCapacity(bounds);
+    this.assertLiveTopologyCapacity(bounds, [world, this.renderResidualFor(scene, world).residual]);
   }
 
+  /**
+   * Bring the world up to a document, at a cost set by what separates it from
+   * the last one staged.
+   *
+   * The same document is nothing. A document whose solids and authored shapes
+   * stand where they stood, but whose materials, ground model or lights moved,
+   * is byte-range writes into the tables shading already reads: no region is
+   * dirtied and no revision is minted. Only a solid that moved produces a
+   * revision, and it produces exactly one.
+   *
+   * Returns whether anything the GPU holds changed.
+   */
   stageSceneUpdate(scene: SceneDescription): boolean {
     if (this.destroyed) throw new Error("Cannot update a destroyed sparse-brick world");
+    // Accepting an edit and drawing its first frame hand over the same
+    // document, and the second has nothing to add.
+    if (scene === this.stagedScene) return false;
     const initialPublication = this.sceneRevision === 0;
     const previousSolidWorld = this.solidWorld;
     const nextSolidWorldStamp = solidWorldContentStamp(scene);
@@ -2760,33 +3117,120 @@ export class OctreeSparseBrickWorld {
       || solidWorldStampChanged;
     const nextSolidWorld = solidWorldStampChanged
       ? solidWorldForScene(scene) : previousSolidWorld;
+    // Staging, unlike validation, is also handed scenes whose ground has moved
+    // while their rebuild is in flight; only the same ground makes a stroke's
+    // own pages the whole comparison.
+    const groundMoved = !initialPublication && terrainFieldStamp(scene) !== this.terrainFieldStamp;
+    const sameTerrain = solidWorldChanged && !initialPublication && !groundMoved;
     const changes = solidWorldChanged && !initialPublication
-      ? solidWorldChangeBounds(scene, previousSolidWorld, nextSolidWorld)
+      ? this.solidChangesBetween(scene, previousSolidWorld, nextSolidWorld, sameTerrain)
       : { dirtyBounds: [], addedBounds: [] };
     const nextSolidBounds = initialPublication ? solidWorldPageBounds(scene, nextSolidWorld) : scene.terrain ? changes.dirtyBounds : changes.addedBounds;
     const dirtySolidBounds = initialPublication ? nextSolidBounds : changes.dirtyBounds;
-    const catalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default", {
-      detailCellSize_m: this.environmentDetailCellSize_m || undefined,
-    });
-    const authored = environmentProxyPrimitives(catalog, true);
+    // The catalog of a document that only recoloured its predecessor shares
+    // every untouched primitive with it, so what moved is found by identity and
+    // the rest is not read.
+    const catalog = successorEnvironmentCatalog(this.stagedDocument, scene, this.environmentDetailCellSize_m || undefined);
+    const authored = catalog === this.stagedCatalog ? this.stagedAuthored : environmentProxyPrimitives(catalog, true);
+    const stagedAuthored = this.stagedAuthored;
+    let authoredMoved = authored.length !== stagedAuthored.length;
+    const recoloured: EnvironmentProxyPrimitive[] = [];
+    if (!authoredMoved && authored !== stagedAuthored) {
+      for (let index = 0; index < authored.length; index += 1) {
+        const next = authored[index]!, previous = stagedAuthored[index]!;
+        if (next === previous) continue;
+        if (!sameAuthoredGeometry(previous, next)) { authoredMoved = true; break; }
+        if (!sameSceneValue(previous.material, next.material)) recoloured.push(next);
+      }
+    }
+    const staticBodies = scene.rigidBodies === this.stagedDocument?.rigidBodies
+      ? this.stagedStaticBodies : staticRigidBodiesStamp(scene.rigidBodies);
+    const primitivesMoved = authoredMoved || staticBodies !== this.stagedStaticBodies;
+    // A keyed update left the live list ahead of its document, and the next
+    // document is the authority again.
+    const relist = primitivesMoved || this.stagedScene === undefined;
+    const nextRenderResidual = solidWorldChanged
+      ? this.renderResidualFor(scene, nextSolidWorld) : this.renderResidual;
+    const nextResidualSolidWorld = nextRenderResidual?.residual ?? this.renderSolidWorld;
+    // A cut reveals the rest of that shell slab; Undo hides the whole slab
+    // again. Invalidate the presentation delta, not just the edited cells.
+    const renderChanges = solidWorldChanged && !initialPublication
+      ? this.solidChangesBetween(scene, this.renderSolidWorld, nextResidualSolidWorld, sameTerrain)
+      : { dirtyBounds: [], addedBounds: [] };
+    if (!initialPublication && this.planarTerminalsBaked && (primitivesMoved || groundMoved)) {
+      throw new Error("Authored geometry affecting planar terminals requires a sparse-world rebuild");
+    }
+    const dirtyRegions: SparseSceneAxisAlignedBounds[] = [
+      ...(initialPublication ? authored.map((primitive) => ({
+        minimum: [primitive.aabb_m.min.x, primitive.aabb_m.min.y,
+          primitive.aabb_m.min.z] as const,
+        maximum: [primitive.aabb_m.max.x, primitive.aabb_m.max.y,
+          primitive.aabb_m.max.z] as const,
+      })) : []),
+      ...dirtySolidBounds,
+      ...renderChanges.dirtyBounds,
+      ...(initialPublication && this.backdropDetailBounds ? [this.backdropDetailBounds] : []),
+    ];
+    const newBounds: SparseSceneAxisAlignedBounds[] = [...nextSolidBounds,
+      ...renderChanges.addedBounds];
+    const listed = relist ? this.listLivePrimitives(scene, authored, dirtyRegions, newBounds) : undefined;
+    if (relist && ENVIRONMENT_VOXEL_MATERIAL_BASE + authored.length > OCTREE_LIVE_SCENE_MATERIAL_CAPACITY) {
+      throw new RangeError(`Live scene needs ${ENVIRONMENT_VOXEL_MATERIAL_BASE + authored.length} materials but the fixed arena holds ${OCTREE_LIVE_SCENE_MATERIAL_CAPACITY}`);
+    }
+    // The bricks the publication activates, found while pricing them. A
+    // relisted document's primitives are not the live ones yet, so its bricks
+    // are found again once they are.
+    let admitted: SparseBrickCoordinate[] | undefined;
+    if (dirtyRegions.length > 0) {
+      if (!initialPublication) {
+        const missing = this.assertLiveTopologyCapacity(newBounds, [nextSolidWorld, nextResidualSolidWorld]);
+        if (!listed) admitted = missing;
+      }
+      if (solidWorldChanged && !initialPublication) {
+        this.proxyVoxelizer.setSolidWorld(nextResidualSolidWorld);
+      }
+      this.solidWorld = nextSolidWorld;
+      this.renderSolidWorld = nextResidualSolidWorld;
+      this.renderResidual = nextRenderResidual;
+      this.solidWorldStamp = nextSolidWorldStamp;
+    }
+    if (listed) {
+      this.liveScenePrimitiveStates = listed.states;
+      this.liveScenePrimitives = listed.primitives;
+      if (listed.changed) this.liveScenePrimitiveList = [...listed.primitives.values()].map(({ primitive }) => primitive);
+    }
+    const tablesWritten = this.stageAppearanceTables(scene, authored, recoloured, relist);
+    this.stagedScene = scene;
+    this.stagedDocument = scene;
+    this.stagedCatalog = catalog;
+    this.stagedAuthored = authored;
+    this.stagedStaticBodies = staticBodies;
+    if (dirtyRegions.length === 0) return tablesWritten;
+    // Regions an unpublished revision still owes ride on this one. They are
+    // read only here, where there is something new to publish with them: a
+    // document that changes nothing leaves the pending revision as it stands.
+    const pending = this.pendingScenePublication?.dirtyRegions;
+    this.stagePrimitivePublication(this.advanceSceneRevision(),
+      pending ? [...pending, ...dirtyRegions] : dirtyRegions, newBounds, initialPublication, admitted);
+    return true;
+  }
+
+  /**
+   * The live primitives a document lists, with the bounds of every one that
+   * differs from what is listed now pushed onto `dirtyRegions` and `newBounds`.
+   */
+  private listLivePrimitives(
+    scene: SceneDescription,
+    authored: readonly EnvironmentProxyPrimitive[],
+    dirtyRegions: SparseSceneAxisAlignedBounds[],
+    newBounds: SparseSceneAxisAlignedBounds[],
+  ): { primitives: Map<string, LiveScenePrimitiveEntry>; states: Map<string, LiveScenePrimitiveState>; changed: boolean } {
     const planarCatalog = buildSvoPlanarBoundaryCatalog(authored, primitive => ({
       materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
       ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
     }));
     const residualAuthored = svoPlanarResidualEnvironmentPrimitives(authored, planarCatalog);
-    const nextResidualSolidWorld = solidWorldChanged
-      ? this.renderResidualFor(scene, nextSolidWorld)
-      : this.renderSolidWorld;
-    // A cut reveals the rest of that shell slab; Undo hides the whole slab
-    // again. Invalidate the presentation delta, not just the edited cells.
-    const renderChanges = solidWorldChanged && !initialPublication
-      ? solidWorldChangeBounds(scene, this.renderSolidWorld, nextResidualSolidWorld)
-      : { dirtyBounds: [], addedBounds: [] };
-    if (!initialPublication && this.planarTopologyStamp
-      && planarBoundaryTopologyStamp(scene, authored) !== this.planarTopologyStamp) {
-      throw new Error("Authored geometry affecting planar terminals requires a sparse-world rebuild");
-    }
-    const liveEntries = [
+    const liveEntries: LiveScenePrimitiveEntry[] = [
       // Only the bodies that cannot move. A dynamic body is solver-owned: the
       // GPU advances its pose every step while the document keeps the authored
       // drop point, so a voxel copy staged from `scene.rigidBodies` freezes at
@@ -2804,7 +3248,6 @@ export class OctreeSparseBrickWorld {
       ...scene.rigidBodies.flatMap((body, ownerId) => body.motion === "static" ? [{
         key: `rigid:${body.id}`,
         primitive: sparseScenePrimitiveForRigidBody(body, ownerId),
-        materialSignature: body.shape,
       }] : []),
       // The exact planar catalogue remains globally visible after a terminal
       // splits. Sampling those planes again would duplicate and dilate floors.
@@ -2814,76 +3257,144 @@ export class OctreeSparseBrickWorld {
           materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
           ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
         }),
-        materialSignature: JSON.stringify(primitive.material),
       })),
     ];
     if (liveEntries.length > OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY) {
       throw new RangeError(`Live scene needs ${liveEntries.length} primitives but the fixed arena holds ${OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY}`);
     }
-    const nextPrimitives = new Map<string, LiveScenePrimitiveEntry>();
-    const nextStates = new Map<string, LiveScenePrimitiveState>();
-    const dirtyRegions: SparseSceneAxisAlignedBounds[] = [
-      ...(this.pendingScenePublication?.dirtyRegions ?? []),
-      ...(initialPublication ? authored.map((primitive) => ({
-        minimum: [primitive.aabb_m.min.x, primitive.aabb_m.min.y,
-          primitive.aabb_m.min.z] as const,
-        maximum: [primitive.aabb_m.max.x, primitive.aabb_m.max.y,
-          primitive.aabb_m.max.z] as const,
-      })) : []),
-      ...dirtySolidBounds,
-      ...renderChanges.dirtyBounds,
-      ...(initialPublication && this.backdropDetailBounds ? [this.backdropDetailBounds] : []),
-    ];
-    const newBounds: SparseSceneAxisAlignedBounds[] = [...nextSolidBounds,
-      ...renderChanges.addedBounds];
+    const primitives = new Map<string, LiveScenePrimitiveEntry>();
+    const states = new Map<string, LiveScenePrimitiveState>();
+    const listedKeys = this.liveScenePrimitives.keys();
+    let changed = liveEntries.length !== this.liveScenePrimitives.size;
     for (const entry of liveEntries) {
-      const live = entry.primitive;
-      nextPrimitives.set(entry.key, entry);
-      const state = { signature: `${liveScenePrimitiveSignature(live)}:${entry.materialSignature}`, bounds: sparseScenePrimitiveBounds(live) };
-      nextStates.set(entry.key, state);
-      const previous = this.liveScenePrimitiveStates.get(entry.key);
-      if (!previous || previous.signature !== state.signature) {
-        if (previous) dirtyRegions.push(previous.bounds);
-        dirtyRegions.push(state.bounds); newBounds.push(state.bounds);
+      primitives.set(entry.key, entry);
+      // The same key in the same place is the same record slot downstream.
+      if (listedKeys.next().value !== entry.key) changed = true;
+      const previous = this.liveScenePrimitives.get(entry.key);
+      const previousState = this.liveScenePrimitiveStates.get(entry.key);
+      if (previous && previousState && sameSceneValue(previous.primitive, entry.primitive)) {
+        primitives.set(entry.key, previous);
+        states.set(entry.key, previousState);
+        continue;
       }
+      const state = { bounds: sparseScenePrimitiveBounds(entry.primitive) };
+      states.set(entry.key, state);
+      if (previousState) dirtyRegions.push(previousState.bounds);
+      dirtyRegions.push(state.bounds); newBounds.push(state.bounds);
+      changed = true;
     }
     for (const [key, previous] of this.liveScenePrimitiveStates) {
-      if (!nextStates.has(key)) dirtyRegions.push(previous.bounds);
+      if (!states.has(key)) dirtyRegions.push(previous.bounds);
     }
-    if (dirtyRegions.length === 0) return false;
-    if (!initialPublication) this.assertLiveTopologyCapacity(newBounds);
-    if (solidWorldChanged && !initialPublication) {
-      this.proxyVoxelizer.setSolidWorld(nextResidualSolidWorld);
+    return { primitives, states, changed };
+  }
+
+  /**
+   * Bring the tables shading reads up to a document: the PBR table and the
+   * emission column the live radiance builder takes from it, the authored
+   * lights and the environment record.
+   *
+   * Every record keeps the slot its owner index names and the revision the
+   * table was built at, so a recoloured surface is its own stride of words and
+   * the words either side of it are not sent. Returns whether any were.
+   *
+   * These are the tables derived lighting gathers from, so a write restarts
+   * the radiance feedback window: lighting converges on the new values over
+   * the bricks already built, and no brick is voxelized again.
+   */
+  private stageAppearanceTables(
+    scene: SceneDescription,
+    authored: readonly EnvironmentProxyPrimitive[],
+    recoloured: readonly EnvironmentProxyPrimitive[],
+    relist: boolean,
+  ): boolean {
+    const queue = this.device.queue;
+    const initial = this.pbrMaterialRecords.length === 0;
+    const surfaceModel = sceneTerrainSurfaceModel(scene);
+    const staged = this.stagedDocument;
+    let written = 0;
+    if (initial) {
+      // What construction uploaded, which the first document is diffed against.
+      this.pbrMaterialRecords = new Uint32Array(OCTREE_LIVE_SCENE_MATERIAL_CAPACITY * SVO_MATERIAL_RECORD_WORDS);
+      const count = writeOctreeSvoPbrMaterialTable(this.pbrMaterialRecords, authored, this.surfaceModel);
+      this.pbrMaterialStaging = this.pbrMaterialRecords.slice();
+      const emission = packLiveSvoMaterialEmission(this.pbrMaterialRecords, count);
+      this.materialEmissionRecords = new Uint32Array(emission.buffer);
     }
-    this.solidWorld = nextSolidWorld;
-    this.renderSolidWorld = nextResidualSolidWorld;
-    this.solidWorldStamp = nextSolidWorldStamp;
-    this.liveScenePrimitiveStates = nextStates;
-    this.liveScenePrimitives = nextPrimitives;
-    const revision = this.advanceSceneRevision();
-    const pbrMaterials = buildOctreeSvoPbrMaterialPublication(
-      OCTREE_SVO_PBR_MATERIAL_REVISION + revision,
-      authored,
-      this.surfaceModel,
-    );
-    if (pbrMaterials.count > OCTREE_LIVE_SCENE_MATERIAL_CAPACITY) {
-      throw new RangeError(`Live scene needs ${pbrMaterials.count} materials but the fixed arena holds ${OCTREE_LIVE_SCENE_MATERIAL_CAPACITY}`);
+    // The run of records to compare, in material IDs.
+    let first = Infinity, end = 0;
+    if (relist) {
+      const count = writeOctreeSvoPbrMaterialTable(this.pbrMaterialStaging, authored, surfaceModel);
+      first = 0; end = OCTREE_LIVE_SCENE_MATERIAL_CAPACITY;
+      this.surfaceModel = surfaceModel;
+      const source = (this as unknown as { sceneSource?: SparseVoxelSceneRenderSource }).sceneSource;
+      if (source?.pbrMaterials && source.pbrMaterials.count !== count) {
+        source.pbrMaterials = { ...source.pbrMaterials, count };
+        source.materialCount = count;
+      }
+    } else {
+      if (surfaceModel !== this.surfaceModel) {
+        // The model chooses closures and nothing else: the built-in records
+        // it reaches, and one word of every authored primitive's.
+        for (const record of buildDefaultSvoMaterialRecords(OCTREE_SVO_PBR_MATERIAL_REVISION, { terrainSurface: surfaceModel })) {
+          writeSvoMaterialRecord(this.pbrMaterialStaging, record);
+        }
+        first = 0;
+        for (const primitive of authored) {
+          const materialId = ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex;
+          writeSvoMaterialFunctionId(this.pbrMaterialStaging, materialId, svoMaterialFunctionIdForEnvironmentProxy(primitive, surfaceModel));
+          end = Math.max(end, materialId + 1);
+        }
+        end = Math.max(end, ENVIRONMENT_VOXEL_MATERIAL_BASE);
+        this.surfaceModel = surfaceModel;
+      }
+      for (const primitive of recoloured) {
+        const materialId = ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex;
+        writeSvoEnvironmentMaterialRecord(this.pbrMaterialStaging, materialId, primitive.material,
+          OCTREE_SVO_PBR_MATERIAL_REVISION, svoMaterialFunctionIdForEnvironmentProxy(primitive, surfaceModel));
+        first = Math.min(first, materialId); end = Math.max(end, materialId + 1);
+      }
     }
-    this.device.queue.writeBuffer(this.pbrMaterialBuffer, 0, pbrMaterials.packedRecords);
-    this.device.queue.writeBuffer(this.materialEmissionBuffer, 0,
-      packLiveSvoMaterialEmission(pbrMaterials.packedRecords, pbrMaterials.count));
-    const publishedSource = (this as unknown as { sceneSource?: SparseVoxelSceneRenderSource }).sceneSource;
-    if (publishedSource) {
-      publishedSource.pbrMaterials = {
-        binding: { buffer: this.pbrMaterialBuffer, size: this.pbrMaterialBuffer.size },
-        count: pbrMaterials.count,
-        strideBytes: pbrMaterials.strideBytes,
-        revision: pbrMaterials.revision,
-      };
-      publishedSource.materialCount = pbrMaterials.count;
+    if (end > first) {
+      const from = first * SVO_MATERIAL_RECORD_WORDS, to = end * SVO_MATERIAL_RECORD_WORDS;
+      const wrote = uploadChangedWords(queue, this.pbrMaterialBuffer, from * 4,
+        this.pbrMaterialRecords.subarray(from, to), this.pbrMaterialStaging.subarray(from, to));
+      if (wrote > 0) {
+        // The emission column is words 4..6 of each record, one vec4 a material.
+        const emission = new Uint32Array((end - first) * 4);
+        for (let material = first; material < end; material += 1) {
+          const record = material * SVO_MATERIAL_RECORD_WORDS + 4;
+          emission.set(this.pbrMaterialStaging.subarray(record, record + 3), (material - first) * 4);
+        }
+        written += wrote + uploadChangedWords(queue, this.materialEmissionBuffer, first * 16,
+          this.materialEmissionRecords.subarray(first * 4, end * 4), emission);
+      }
     }
-    this.stagePrimitivePublication(revision, dirtyRegions, newBounds, initialPublication);
-    return true;
+    // A light is the sun the document names or an emitting primitive, so only
+    // a document that moved one of those is asked for its lights again.
+    const lightingMoved = initial || relist || scene.lighting !== staged?.lighting
+      || scene.environment !== staged?.environment || scene.systems !== staged?.systems;
+    if (lightingMoved || recoloured.length > 0) {
+      // Fixtures are read from the document's own catalog, which a world drawn
+      // at a finer detail cell has not derived yet.
+      successorEnvironmentCatalog(staged, scene);
+      const lights = buildOctreeSvoLightPublication(scene).packedRecords;
+      if (initial) this.lightRecords = lights.slice();
+      // The table and the builder's light count are sized at construction; a
+      // lamp lit or put out changes the count and is not carried here.
+      else if (lights.length === this.lightRecords.length) {
+        written += uploadChangedWords(queue, this.lightBuffer, 0, this.lightRecords, lights);
+      }
+    }
+    if (lightingMoved) {
+      const environment = buildOctreeSvoEnvironmentLightingPublication(scene).packedRecords;
+      if (initial) this.environmentLightingRecords = environment.slice();
+      else written += uploadChangedWords(queue, this.environmentLightingBuffer, 0, this.environmentLightingRecords, environment);
+    }
+    // Light that moved changes every floor page's radiance and no page's
+    // opacity: the next lighting frame opens the feedback window everywhere.
+    if (written > 0) this.liveDerivedRelight = true;
+    return written > 0;
   }
 
   /** Allocation-free keyed motion/content updates shared by renderer-only and fluid worlds. */
@@ -2900,14 +3411,16 @@ export class OctreeSparseBrickWorld {
       const previousEntry = this.liveScenePrimitives.get(update.key);
       const previousState = this.liveScenePrimitiveStates.get(update.key);
       if (!previousEntry || !previousState) throw new RangeError(`Unknown live primitive key ${update.key}`);
-      const signature = `${liveScenePrimitiveSignature(update.primitive)}:${previousEntry.materialSignature}`;
-      if (signature === previousState.signature) continue;
+      if (sameSceneValue(previousEntry.primitive, update.primitive)) continue;
       const bounds = sparseScenePrimitiveBounds(update.primitive);
       dirtyRegions.push(previousState.bounds, bounds); newBounds.push(bounds); changed = true;
       this.liveScenePrimitives.set(update.key, { ...previousEntry, primitive: update.primitive });
-      this.liveScenePrimitiveStates.set(update.key, { signature, bounds });
+      this.liveScenePrimitiveStates.set(update.key, { bounds });
     }
     if (!changed) return false;
+    this.liveScenePrimitiveList = [...this.liveScenePrimitives.values()].map(({ primitive }) => primitive);
+    // The list no longer matches any document, so the next one is listed whole.
+    this.stagedScene = undefined;
     const revision = this.advanceSceneRevision();
     this.stagePrimitivePublication(revision, dirtyRegions, newBounds, false);
     return true;
@@ -2918,7 +3431,15 @@ export class OctreeSparseBrickWorld {
     return this.sceneRevision;
   }
 
-  /** Reserve enough existing arena space for every accepted terminal split. */
+  /**
+   * The sampled terrain terminals an edit splits, whole, so that every sibling
+   * the split preserves is voxelized again.
+   *
+   * Only a world built with sampled terrain terminals has any, which a smooth
+   * world never is. The 4,096 is a bound on one publication's work, not on any
+   * arena: the bricks walked here on the host, then the bricks of the split
+   * terminals the voxelizer samples again. A second stroke starts a new count.
+   */
   private terrainResamplingBounds(bounds: readonly SparseSceneAxisAlignedBounds[]): SparseSceneAxisAlignedBounds[] {
     const result: SparseSceneAxisAlignedBounds[] = [];
     if (!this.sampledTerrainNodes?.size) return result;
@@ -2926,7 +3447,7 @@ export class OctreeSparseBrickWorld {
     for (const bound of bounds) {
       touched += bound.minimum.reduce((volume, value, axis) => volume
         * (Math.ceil((bound.maximum[axis]! - value) / (this.cellSize[axis]! * this.brickSize)) + 2), 1);
-      if (touched > 4096) throw new RangeError("Terrain edit exceeds the bounded 4096-brick resampling budget.");
+      if (touched > 4096) throw new RangeError("Terrain edit exceeds the bounded 4096-brick resampling budget. Release and continue in a second stroke.");
     }
     const coordinates = liveSceneMissingBrickCoordinates(bounds, this.sceneWorldOrigin,
       this.cellSize, this.brickSize, this.sceneBrickDimensions, () => false);
@@ -2941,26 +3462,68 @@ export class OctreeSparseBrickWorld {
       ancestors.add(key);
       budget += ancestor.minimum.reduce((volume, value, axis) => volume
         * Math.ceil((ancestor.maximum[axis]! - value) / (this.cellSize[axis]! * this.brickSize)), 1);
-      if (budget > 4096) throw new RangeError("Terrain edit exceeds the bounded 4096-brick resampling budget.");
+      if (budget > 4096) throw new RangeError("Terrain edit exceeds the bounded 4096-brick resampling budget. Release and continue in a second stroke.");
       result.push(ancestor);
     }
     return result;
   }
 
-  private assertLiveTopologyCapacity(bounds: readonly SparseSceneAxisAlignedBounds[]): void {
+  /**
+   * Refuse an edit the reserve cannot hold, before anything is taken.
+   *
+   * `worlds` are the solid worlds of the document being asked about: the
+   * staged ones when the document is already staged, the proposal's own when
+   * it is only being validated.
+   *
+   * Returns the bricks the edit activates, which it had to find to price them.
+   */
+  private assertLiveTopologyCapacity(
+    bounds: readonly SparseSceneAxisAlignedBounds[],
+    worlds: readonly SolidWorld[] = [this.solidWorld, this.renderSolidWorld],
+  ): SparseBrickCoordinate[] {
     this.terrainResamplingBounds(bounds);
-    const missing = liveSceneMissingBrickCoordinates(bounds, this.sceneWorldOrigin,
-      this.cellSize, this.brickSize, this.sceneBrickDimensions,
-      coordinate => this.sceneBrickCovered(coordinate));
-    const newCoordinates = missing.filter(coordinate =>
-      !this.reservedTopologyCoordinates.has(brickCoordinateKey(coordinate)));
-    const pending = new Set([...this.pendingTopologyCoordinates.keys(),
-      ...missing.map(brickCoordinateKey)]);
-    if (pending.size > this.topologyMutationCapacity
-      || planSparseBrickTopologyLeafReservation(this.finestLevel, newCoordinates,
-        this.planarSceneBrickNodes, this.reservedTopologySplits).leaves > this.remainingTopologyLeafReserve) {
-      throw new RangeError("Edit exceeds the reserved live voxel detail capacity. Save and reopen the scene to prepare more detail.");
+    const missing = this.liveBricksToActivate(bounds, worlds);
+    // Net demand, from the host's own tree: what the new bricks take, against
+    // what is free and what the publication takes back before it activates.
+    // The second is counted only by an edit that needs it.
+    const demand = this.topologyMirror.demand(missing);
+    const free = this.topologyMirror.freeLeaves;
+    const reclaimed = demand.leaves <= free ? 0 : this.reclaimableTopologyBricks(worlds);
+    if (demand.leaves > free + reclaimed) {
+      throw new RangeError(`Edit exceeds the reserved live voxel detail capacity: its ${missing.length} new bricks `
+        + `need ${demand.leaves} leaves and this scene has ${free + reclaimed} left. `
+        + "Erase or undo detail to free some, or save and reopen the scene to prepare more.");
     }
+    // The node arena holds a block for every ancestor of every reserved leaf,
+    // so it cannot run out first; a tree that says otherwise is not the tree
+    // the reserve was priced for.
+    if (demand.blocks > this.topologyMirror.freeBlocks + this.finestLevel * reclaimed) {
+      throw new RangeError(`Edit exceeds the reserved live voxel detail capacity: its new bricks need ${demand.blocks} `
+        + `node blocks and this scene has ${this.topologyMirror.freeBlocks} left.`);
+    }
+    // The worklist holds a batch that spends the whole reserve and takes as
+    // much back, so only batches no frame has taken up yet can crowd it. A
+    // brick taken back writes nine records at most.
+    const records = this.topologyMirror.pendingRecords + demand.records + 9 * this.releasableTopologyBricks.size;
+    if (records > this.topologyMutationCapacity) {
+      throw new RangeError(`Edit exceeds the reserved live voxel detail capacity: ${records} topology records are waiting `
+        + `on one publication, which carries ${this.topologyMutationCapacity}. Release and continue in a second stroke.`);
+    }
+    // Lighting pages are reserved with the leaves, but by the page: bricks
+    // scattered one to a parent can run out of pages with leaves to spare.
+    const growth = this.planLiveDerivedGrowth(missing.map(coordinate => this.liveDerivedBasePage(coordinate)));
+    if (growth && !growth.fits) {
+      throw new RangeError(`Edit exceeds the reserved live voxel detail capacity: its new bricks need lighting pages the `
+        + `scene did not reserve (${growth.refusal}). Save and reopen the scene to prepare more detail.`);
+    }
+    return missing;
+  }
+
+  /** The finest node-mip page a brick is lit from. */
+  private liveDerivedBasePage(coordinate: SparseBrickCoordinate): SvoNodeMipCoordinate {
+    const pagesPerBrick = this.brickSize / SVO_NODE_MIP_LAYOUT.interiorSize;
+    return [Math.floor(coordinate.x * pagesPerBrick), Math.floor(coordinate.y * pagesPerBrick),
+      Math.floor(coordinate.z * pagesPerBrick)];
   }
 
   private stagePrimitivePublication(
@@ -2968,11 +3531,14 @@ export class OctreeSparseBrickWorld {
     dirtyRegions: readonly SparseSceneAxisAlignedBounds[],
     newBounds: readonly SparseSceneAxisAlignedBounds[],
     initialPublication: boolean,
+    admitted?: readonly SparseBrickCoordinate[],
   ): void {
-    if (!initialPublication) this.assertLiveTopologyCapacity(newBounds);
+    const missing = initialPublication ? [] : admitted ?? this.assertLiveTopologyCapacity(newBounds);
     const coalescedDirty = coalesceDirtyRegions([...dirtyRegions, ...(!initialPublication ? this.terrainResamplingBounds(newBounds) : [])], initialPublication ? 1 : OCTREE_LIVE_SCENE_DIRTY_REGION_CAPACITY);
     this.pendingScenePublication = {
-      primitives: [...this.liveScenePrimitives.values()].map(({ primitive }) => primitive),
+      // The same array until a primitive in it changes, which is how the
+      // voxelizer knows its record tables already hold this list.
+      primitives: this.liveScenePrimitiveList,
       dirtyRegions: coalescedDirty,
       revision,
       // The publication that brings a scene into existence is never budgeted.
@@ -2986,39 +3552,38 @@ export class OctreeSparseBrickWorld {
     };
     if (!initialPublication) {
       this.raiseBackdropContentCeiling(newBounds);
+      // Take back first, so the leaves, nodes and lighting pages this document
+      // gives up are the first it takes.
+      this.releaseUnclaimedTopologyBricks(coalescedDirty);
       const activatedPages: SvoNodeMipCoordinate[] = [];
-      const coordinates = liveSceneMissingBrickCoordinates(
-        newBounds, this.sceneWorldOrigin, this.cellSize, this.brickSize,
-        this.sceneBrickDimensions, (coordinate) => this.sceneBrickCovered(coordinate),
-      );
-      const reservation = planSparseBrickTopologyLeafReservation(this.finestLevel,
-        coordinates.filter(coordinate => !this.reservedTopologyCoordinates.has(brickCoordinateKey(coordinate))),
-        this.planarSceneBrickNodes, this.reservedTopologySplits);
-      this.remainingTopologyLeafReserve -= reservation.leaves;
-      for (const key of reservation.splits) this.reservedTopologySplits.add(key);
+      // Ascending Morton order, and release descending: slots are taken and
+      // returned as a stack, so an edit taken back returns its own. What was
+      // just taken back held nothing of this document, so the bricks priced
+      // above are still the ones to take.
+      const coordinates = [...missing].sort(compareSparseBrickMorton);
       for (const coordinate of coordinates) {
-        const key = brickCoordinateKey(coordinate);
-        if (!this.reservedTopologyCoordinates.has(key)) {
-          this.reservedTopologyCoordinates.add(key);
+        this.topologyMirror.activate(coordinate);
+        // A brick under a split terminal is the terminal's own leaf and stays.
+        if (this.topologyMirror.releasable(coordinate)) {
+          this.releasableTopologyBricks.set(brickCoordinateKey(coordinate), coordinate);
         }
-        this.pendingTopologyCoordinates.set(brickCoordinateKey(coordinate), coordinate);
         activatedPages.push([coordinate.x, coordinate.y, coordinate.z]
           .map((value) => Math.floor(value * this.brickSize / SVO_NODE_MIP_LAYOUT.interiorSize)) as unknown as SvoNodeMipCoordinate);
       }
       this.growLiveDerivedAddressPlan(activatedPages);
     }
-    if (this.pendingTopologyCoordinates.size === 0) {
-      this.device.queue.writeBuffer(this.topologyMutationWorklist, 0, new Uint32Array(8));
-      this.pendingTopologyMutation = false;
+    if (!this.topologyMirror.hasPendingRecords) {
+      this.device.queue.writeBuffer(this.topologyMutationWorklist, 0,
+        new Uint32Array(SPARSE_BRICK_TOPOLOGY_MUTATION.headerWords));
+      this.pendingTopologyRecords = 0;
       return;
     }
-    const requested = [...this.pendingTopologyCoordinates.values()];
-    const packed = packSparseBrickTopologyMutationWorklist(
-      requested.slice(0, this.topologyMutationCapacity), revision, this.topologyMutationCapacity,
-    );
-    packed[0] = requested.length;
+    // The whole batch that takes the GPU's tree to the host's, whatever was
+    // staged since the last frame: the preflight admitted no more than the
+    // worklist holds, and the packer throws rather than leave a record behind.
+    const packed = this.topologyMirror.pack(revision);
     this.device.queue.writeBuffer(this.topologyMutationWorklist, 0, packed);
-    this.pendingTopologyMutation = true;
+    this.pendingTopologyRecords = packed[SPARSE_BRICK_TOPOLOGY_MUTATION.countWord]!;
     // Only a topology-changing transaction invalidates topology-keyed wide,
     // compact, and renderer caches. Covered primitive motion leaves it stable.
     this.sceneSource.revision = revision;
@@ -3051,78 +3616,293 @@ export class OctreeSparseBrickWorld {
   }
 
   /**
-   * Extend the derived address plan to cover pages this edit activated.
-   *
-   * The predecessor of this method set `liveDerivedAddressPlanValid = false`
-   * and nulled the pyramid and the radiance atlas, which drops cone visibility
-   * onto exact traversal at roughly 15x the frame cost, and reported it only in
-   * a status string. Incremental voxelization activates pages continuously, so
-   * that path fires by construction — it had to stop being the answer.
-   *
-   * A total plan (the ordinary authored room, including the hero garden) never
-   * reaches the growth branch: every page of the domain already has a slot.
-   * A reserved plan re-plans into its reserve, which renumbers physical slots
-   * and therefore costs one full rebuild — hence `liveDerivedInitial`.
-   *
-   * Withdrawal survives only as the last resort, and now says so out loud.
-   */
-  /**
-   * Whether some leaf already covers this finest brick.
-   *
-   * Ancestor lookup rather than membership, because coverage is stored at each
-   * leaf's own level: a brick under a coarse leaf is covered by that leaf, and
-   * nothing had to enumerate the `8^p` bricks between them.
+   * Whether some leaf already covers this finest brick: a walk from the root
+   * of the host's tree. Analytic coverage cannot store authored voxel detail,
+   * so a brick under a terminal an edit can split is not covered.
    */
   private sceneBrickCovered(coordinate: SparseBrickCoordinate): boolean {
-    for (let level = this.finestLevel; level >= 0; level -= 1) {
-      const shift = this.finestLevel - level;
-      const key = `${level}:${coordinate.x >>> shift},${coordinate.y >>> shift},${coordinate.z >>> shift}`;
-      // Analytic coverage cannot store authored voxel detail. Split it into
-      // sampled targets while retaining analytic siblings in the mutator.
-      if (this.coveredSceneBrickNodes.has(key) && !this.planarSceneBrickNodes.has(key)) return true;
+    return this.topologyMirror.covered(coordinate);
+  }
+
+  /**
+   * Whether anything still needs a leaf at this finest brick. A leaf's voxels
+   * are a function of the scene within one cell of its box, which is as far as
+   * the voxelizer samples for the dual grid, so the brick is weighed with that
+   * rim: a brick with nothing in it voxelizes empty and meshes to nothing,
+   * while one whose neighbour's surface comes within a cell of its face keeps
+   * the leaf that surface is stitched to. The dual grid emits a cell only where
+   * all eight of its voxels are in leaves, so that brick is needed on every
+   * side, and it is the same test that gives a brick its leaf and takes it
+   * back: the edit leaves are a function of the document, not of its history.
+   *
+   * What claims it is a live primitive whose bounds reach it, or the solid
+   * world. Off terrain that is a solid cell. Over terrain the ground is drawn
+   * without leaves, so it is a cell an edit shaped that is solid, or that the
+   * ground would have filled.
+   */
+  private liveBrickClaimed(
+    coordinate: SparseBrickCoordinate,
+    primitives: readonly SparseSceneAxisAlignedBounds[],
+    worlds: readonly SolidWorld[] = [this.solidWorld, this.renderSolidWorld],
+  ): boolean {
+    if (this.liveBrickReaches(coordinate, primitives)) return true;
+    const brick = [coordinate.x, coordinate.y, coordinate.z];
+    const low = [0, 0, 0], high = [0, 0, 0];
+    for (let axis = 0; axis < 3; axis += 1) {
+      const edge = this.brickSize * this.cellSize[axis]!;
+      const minimum = this.sceneWorldOrigin[axis]! + brick[axis]! * edge - this.cellSize[axis]!;
+      const maximum = minimum + edge + 2 * this.cellSize[axis]!;
+      low[axis] = Math.floor((minimum - this.solidLatticeOrigin[axis]!) / this.solidLatticeCell[axis]! + 1e-6);
+      high[axis] = Math.ceil((maximum - this.solidLatticeOrigin[axis]!) / this.solidLatticeCell[axis]! - 1e-6);
+    }
+    for (let index = 0; index < worlds.length; index += 1) {
+      if (worlds.indexOf(worlds[index]!) === index && solidWorldHoldsContent(worlds[index]!, low, high)) return true;
     }
     return false;
   }
 
-  private growLiveDerivedAddressPlan(activatedPages: readonly SvoNodeMipCoordinate[]): void {
-    if (activatedPages.length === 0 || !this.liveDerivedAddressPlanValid) return;
-    const current = this.liveDerivedAddressPlan;
-    if (!current || !this.nodeMipPyramid || !this.tetrahedralRadiance || !this.liveDerivedPlanner) return;
-    const outside = pagesOutsideSvoNodeMipAddressPlan(current, activatedPages);
-    if (outside.length === 0) return;
-    const grown = growSvoNodeMipAddressPlan(current, outside);
-    if (grown) {
-      this.liveDerivedAddressPlan = grown.plan;
-      this.nodeMipPyramid.prepareGpuUpdate(grown.plan.plan);
-      this.tetrahedralRadiance.prepareGpuUpdate(grown.plan.plan, grown.plan.radianceSlotOffset);
-      this.nodeMipPyramid.acceptGpuUpdate(grown.plan.plan.generation);
-      this.tetrahedralRadiance.acceptGpuUpdate(grown.plan.plan.generation);
-      this.liveDerivedPlanner.configurePlan(this.nodeMipPyramid.gpuTarget());
-      // Renumbered slots move where the radiance atlas begins; the builder holds
-      // that offset in a uniform written once at construction.
-      this.liveDerivedBuilder?.configureRadianceSlotOffset(grown.plan.radianceSlotOffset);
-      // Slots renumbered, so every page's atlas content now belongs to some
-      // other page. The next maintenance certifies the whole capacity empty and
-      // rebuilds from every live leaf, which is the same work the first
-      // publication does and is bounded by the same worklists.
-      if (grown.rebuildRequired) this.liveDerivedInitial = true;
-      return;
+  /**
+   * The finest bricks these bounds reach that have no leaf and hold something
+   * of the document `worlds` belong to. Reached as a leaf is claimed, rim and
+   * all, so that the brick beside new content gets the leaf its surface is
+   * stitched through; a box's corner brick that holds nothing takes none.
+   */
+  private liveBricksToActivate(
+    bounds: readonly SparseSceneAxisAlignedBounds[],
+    worlds: readonly SolidWorld[] = [this.solidWorld, this.renderSolidWorld],
+  ): SparseBrickCoordinate[] {
+    const { spans } = this.liveBrickSpans(bounds);
+    const [width, height] = this.sceneBrickDimensions;
+    const seen = new Set<number>();
+    const missing: SparseBrickCoordinate[] = [];
+    eachSpanBrick(spans, (x, y, z) => {
+      const index = x + width * (y + height * z);
+      if (seen.has(index)) return;
+      seen.add(index);
+      const coordinate = { x, y, z };
+      if (!this.sceneBrickCovered(coordinate)) missing.push(coordinate);
+    });
+    const primitives = this.livePrimitiveBoundsNear(missing);
+    return missing.filter(coordinate => this.liveBrickClaimed(coordinate, primitives, worlds));
+  }
+
+  /**
+   * Each region as the span of finest bricks whose rimmed box it reaches,
+   * `[x0, y0, z0, x1, y1, z1]` a region, and how many bricks the spans hold.
+   */
+  private liveBrickSpans(regions: readonly SparseSceneAxisAlignedBounds[]): { spans: Int32Array; volume: number } {
+    const spans = new Int32Array(regions.length * 6);
+    let volume = 0;
+    for (let index = 0; index < regions.length; index += 1) {
+      const { minimum, maximum } = regions[index]!;
+      let cells = 1;
+      for (let axis = 0; axis < 3; axis += 1) {
+        const cell = this.cellSize[axis]!, edge = this.brickSize * cell, origin = this.sceneWorldOrigin[axis]!;
+        const low = Math.max(0, Math.floor((minimum[axis]! - cell - origin) / edge - 1e-6));
+        const high = Math.min(this.sceneBrickDimensions[axis]! - 1, Math.floor((maximum[axis]! + cell - origin) / edge + 1e-6));
+        spans[index * 6 + axis] = low;
+        spans[index * 6 + 3 + axis] = high;
+        cells *= Math.max(0, high - low + 1);
+      }
+      volume += cells;
     }
-    this.liveDerivedAddressPlanValid = false;
-    const detail = `Scene edit activated derived page ${outside[0].join(",")} outside the sparse address plan's`
-      + ` ${current.pageCapacity}-page capacity (${current.reservePages} reserved); exact visibility is active`;
-    this.sceneSource.derivedLighting = {
-      state: "unavailable",
-      reason: "address-plan-invalidated",
-      detail,
-      requiredPages: current.domainPyramidPageCount,
-      capacity: this.sceneSource.derivedLighting?.capacity ?? webGpuSvoNodeMipMaximumPages(this.device),
-    };
-    this.sceneSource.nodeMipPyramid = undefined;
-    this.sceneSource.tetrahedralRadiance = undefined;
-    // The cheapest withdrawal path used to have no console output at all. It is
-    // a ~15x frame-time cliff; it gets the same warning the other one has.
-    console.warn(`[svo] live derived address plan exhausted; exact visibility will be used — ${detail}`);
+    return { spans, volume };
+  }
+
+  /**
+   * The live primitives' bounds that reach the box around these bricks: the
+   * only ones that can claim any of them, found once for the whole set.
+   */
+  private livePrimitiveBoundsNear(bricks: Iterable<SparseBrickCoordinate>): SparseSceneAxisAlignedBounds[] {
+    const low = [Infinity, Infinity, Infinity], high = [-Infinity, -Infinity, -Infinity];
+    for (const { x, y, z } of bricks) {
+      if (x < low[0]!) low[0] = x;
+      if (y < low[1]!) low[1] = y;
+      if (z < low[2]!) low[2] = z;
+      if (x > high[0]!) high[0] = x;
+      if (y > high[1]!) high[1] = y;
+      if (z > high[2]!) high[2] = z;
+    }
+    const near: SparseSceneAxisAlignedBounds[] = [];
+    if (low[0] === Infinity) return near;
+    for (let axis = 0; axis < 3; axis += 1) {
+      const edge = this.brickSize * this.cellSize[axis]!;
+      low[axis] = this.sceneWorldOrigin[axis]! + low[axis]! * edge - this.cellSize[axis]!;
+      high[axis] = this.sceneWorldOrigin[axis]! + (high[axis]! + 1) * edge + this.cellSize[axis]!;
+    }
+    for (const { bounds } of this.liveScenePrimitiveStates.values()) {
+      const { minimum, maximum } = bounds;
+      if (minimum[0] <= high[0]! && minimum[1] <= high[1]! && minimum[2] <= high[2]!
+        && maximum[0] >= low[0]! && maximum[1] >= low[1]! && maximum[2] >= low[2]!) near.push(bounds);
+    }
+    return near;
+  }
+
+  /** Whether a finest brick's box, with its one-cell rim, reaches any of the regions. */
+  private liveBrickReaches(coordinate: SparseBrickCoordinate, regions: readonly SparseSceneAxisAlignedBounds[]): boolean {
+    const origin = this.sceneWorldOrigin, cell = this.cellSize, size = this.brickSize;
+    const x0 = origin[0] + coordinate.x * size * cell[0] - cell[0], x1 = x0 + (size + 2) * cell[0];
+    const y0 = origin[1] + coordinate.y * size * cell[1] - cell[1], y1 = y0 + (size + 2) * cell[1];
+    const z0 = origin[2] + coordinate.z * size * cell[2] - cell[2], z1 = z0 + (size + 2) * cell[2];
+    for (let index = 0; index < regions.length; index += 1) {
+      const { minimum, maximum } = regions[index]!;
+      if (x0 <= maximum[0] && x1 >= minimum[0] && y0 <= maximum[1] && y1 >= minimum[1]
+        && z0 <= maximum[2] && z1 >= minimum[2]) return true;
+    }
+    return false;
+  }
+
+  /**
+   * How many edit-activated bricks hold nothing of the document `worlds`
+   * belong to: the leaves staging that document takes back before it takes any.
+   */
+  private reclaimableTopologyBricks(worlds: readonly SolidWorld[]): number {
+    const primitives = this.livePrimitiveBoundsNear(this.releasableTopologyBricks.values());
+    let bricks = 0;
+    for (const coordinate of this.releasableTopologyBricks.values()) {
+      if (!this.liveBrickClaimed(coordinate, primitives, worlds)) bricks += 1;
+    }
+    return bricks;
+  }
+
+  /**
+   * Take the edit-activated bricks the staged document no longer claims out
+   * of the tree: each leaf back to the free list, each node left with nothing
+   * beneath it after it, and the lighting pages they were lit from back to
+   * their reserve. Everything that can change a brick's claim lies in a dirty
+   * region, so only the bricks those reach are weighed. Descending Morton
+   * order, the reverse of activation, so that an edit taken back whole returns
+   * exactly the slots it took.
+   *
+   * The leaf goes in the publication that empties it, not after: a ray skips a
+   * leaf slot the moment it is retired or handed to another brick, the mesh
+   * drops what it held for the slot's old brick, and the voxelizer writes a
+   * reused slot before anything reads its voxels.
+   */
+  private releaseUnclaimedTopologyBricks(regions: readonly SparseSceneAxisAlignedBounds[]): void {
+    const bricks = this.releasableTopologyBricks;
+    if (bricks.size === 0 || regions.length === 0) return;
+    const { spans, volume } = this.liveBrickSpans(regions);
+    // Whichever is least work: the regions' bricks looked up among the edit's
+    // bricks, those looked up among the regions' bricks, or each of them
+    // tested against a few large regions.
+    const reached: SparseBrickCoordinate[] = [];
+    const [width, height] = this.sceneBrickDimensions;
+    if (volume < bricks.size) {
+      const seen = new Set<string>();
+      eachSpanBrick(spans, (x, y, z) => {
+        const key = `${x},${y},${z}`, coordinate = bricks.get(key);
+        if (coordinate && !seen.has(key)) { seen.add(key); reached.push(coordinate); }
+      });
+    } else if (volume < bricks.size * regions.length) {
+      const cells = new Set<number>();
+      eachSpanBrick(spans, (x, y, z) => { cells.add(x + width * (y + height * z)); });
+      for (const coordinate of bricks.values()) {
+        if (cells.has(coordinate.x + width * (coordinate.y + height * coordinate.z))) reached.push(coordinate);
+      }
+    } else {
+      for (const coordinate of bricks.values()) {
+        for (let base = 0; base < spans.length; base += 6) {
+          if (coordinate.x >= spans[base]! && coordinate.x <= spans[base + 3]! && coordinate.y >= spans[base + 1]!
+            && coordinate.y <= spans[base + 4]! && coordinate.z >= spans[base + 2]! && coordinate.z <= spans[base + 5]!) {
+            reached.push(coordinate);
+            break;
+          }
+        }
+      }
+    }
+    const primitives = this.livePrimitiveBoundsNear(reached);
+    const unclaimed = reached.filter(coordinate => !this.liveBrickClaimed(coordinate, primitives))
+      .sort(compareSparseBrickMorton);
+    const released: SparseBrickCoordinate[] = [];
+    for (let index = unclaimed.length - 1; index >= 0; index -= 1) {
+      const coordinate = unclaimed[index]!;
+      if (!this.topologyMirror.release(coordinate)) continue;
+      this.releasableTopologyBricks.delete(brickCoordinateKey(coordinate));
+      released.push(coordinate);
+    }
+    // After every leaf is out of the host's tree: a lighting page goes back
+    // only when no brick under it is still covered.
+    this.releaseLiveDerivedPages(released);
+  }
+
+  /**
+   * What the pages an edit activates ask of the derived address plan: how many
+   * lighting pages they add, and whether the reserve holds them. Nothing when
+   * there is no plan to ask.
+   *
+   * Counted from those pages and the levels above them, so the preflight that
+   * refuses an edit and the publication that applies it can each ask.
+   */
+  private planLiveDerivedGrowth(activatedPages: readonly SvoNodeMipCoordinate[]): SvoNodeMipAddressPlanGrowth | undefined {
+    if (activatedPages.length === 0 || !this.liveDerivedAddressPlanValid) return undefined;
+    const current = this.liveDerivedAddressPlan;
+    if (!current || !this.nodeMipPyramid || !this.tetrahedralRadiance || !this.liveDerivedPlanner) return undefined;
+    return current.measureGrowth(activatedPages);
+  }
+
+  /**
+   * Address the lighting pages this edit activated.
+   *
+   * Each new page takes a free slot and one entry of the page hash, and those
+   * entries are all that is uploaded: no resident page moves, so nothing
+   * already built is owed again. The new pages are built by the next
+   * maintenance, which reaches them the way it reaches any dirty page — the
+   * planner walks every dirty leaf up through the hash, and the brick that
+   * brought these pages is dirty.
+   *
+   * It cannot fail here. `assertLiveTopologyCapacity` asks the same growth of
+   * the same pages before anything is reserved, and refuses the edit there.
+   */
+  private growLiveDerivedAddressPlan(activatedPages: readonly SvoNodeMipCoordinate[]): void {
+    if (!this.planLiveDerivedGrowth(activatedPages)) return;
+    this.liveDerivedLastGrowth = this.liveDerivedAddressPlan!.grow(activatedPages);
+    this.uploadLiveDerivedAddressChanges();
+  }
+
+  /**
+   * Return the lighting pages of bricks an edit erased, so the reserve they
+   * came from can be spent again.
+   *
+   * Under an opacity floor one page lights several bricks, so a brick's page is
+   * returned only once every brick it lights is uncovered: the caller must have
+   * already dropped these bricks from the covered set.
+   */
+  releaseLiveDerivedPages(coordinates: readonly SparseBrickCoordinate[]): number {
+    const plan = this.liveDerivedAddressPlan;
+    if (!plan || !this.liveDerivedAddressPlanValid || !this.nodeMipPyramid || coordinates.length === 0) return 0;
+    const pagesPerBrick = this.brickSize / SVO_NODE_MIP_LAYOUT.interiorSize;
+    const bricksPerFloorPage = Math.max(1, Math.round(2 ** plan.opacityFloorLevel / pagesPerBrick));
+    const vacated: SvoNodeMipCoordinate[] = [];
+    for (const coordinate of coordinates) {
+      const first = { x: coordinate.x - coordinate.x % bricksPerFloorPage, y: coordinate.y - coordinate.y % bricksPerFloorPage,
+        z: coordinate.z - coordinate.z % bricksPerFloorPage };
+      let occupied = false;
+      for (let z = 0; z < bricksPerFloorPage && !occupied; z += 1) {
+        for (let y = 0; y < bricksPerFloorPage && !occupied; y += 1) {
+          for (let x = 0; x < bricksPerFloorPage && !occupied; x += 1) {
+            occupied = this.sceneBrickCovered({ x: first.x + x, y: first.y + y, z: first.z + z });
+          }
+        }
+      }
+      if (!occupied) vacated.push(this.liveDerivedBasePage(coordinate));
+    }
+    const released = plan.release(vacated);
+    this.uploadLiveDerivedAddressChanges();
+    return released;
+  }
+
+  /** Carry the address plan's pending changes to the device: one texel per changed hash entry and per new page. */
+  private uploadLiveDerivedAddressChanges(): void {
+    const plan = this.liveDerivedAddressPlan!;
+    const nodeMips = this.nodeMipPyramid!;
+    const radianceValidity = this.tetrahedralRadiance?.pageState.validity;
+    plan.drainChanges(
+      entry => nodeMips.writePageTableEntry(entry),
+      slot => {
+        invalidateLiveSvoDerivedPage(this.device, nodeMips.pageState.validity, slot);
+        if (radianceValidity && slot >= plan.radianceSlotOffset) invalidateLiveSvoDerivedPage(this.device, radianceValidity, slot);
+      });
   }
 
   /**
@@ -3165,6 +3945,10 @@ export class OctreeSparseBrickWorld {
     domainPyramidPages: number;
     basePages: number;
     domainBasePages: number;
+    /** Lighting pages an edit may still add; returned pages count again. */
+    remainingReservePages: number;
+    /** What the last edit that added bricks cost: pages it added, and pages on its chains the builder owes. */
+    lastGrowth?: { newPages: number; chainPages: number };
   } | undefined {
     const plan = this.liveDerivedAddressPlan;
     if (!plan) return undefined;
@@ -3172,11 +3956,14 @@ export class OctreeSparseBrickWorld {
       valid: this.liveDerivedAddressPlanValid,
       total: plan.total,
       pageCapacity: plan.pageCapacity,
-      activePages: plan.plan.pages.length,
+      activePages: plan.residentPageCount,
       reservePages: plan.reservePages,
       domainPyramidPages: plan.domainPyramidPageCount,
-      basePages: plan.basePageKeys.size,
+      basePages: plan.seedPageCount,
       domainBasePages: plan.domainBasePageCount,
+      remainingReservePages: plan.remainingReservePages,
+      lastGrowth: this.liveDerivedLastGrowth && {
+        newPages: this.liveDerivedLastGrowth.newPages, chainPages: this.liveDerivedLastGrowth.chainPages },
     };
   }
 
@@ -3200,27 +3987,15 @@ export class OctreeSparseBrickWorld {
       this.topologyPublished = true;
       encoded = true;
     }
-    if (this.pendingTopologyMutation) {
+    if (this.pendingTopologyRecords > 0) {
+      // Two fixed dispatches scatter the staged records, however many bricks
+      // they activate or retire. The host's tree is the GPU's from here.
       this.topologyMutator.encode(encoder, this.tree, {
         buffer: this.topologyMutationWorklist,
         capacity: this.topologyMutationCapacity,
-      }, {
-        maximumDepth: this.finestLevel,
-        brickDimensions: this.sceneBrickDimensions,
-        generation: this.sceneRevision,
-        maximumRequests: this.topologyMutationCapacity,
-        resampleSampledTerminals: this.sampledTerrainNodes.size > 0,
-      });
-      if (this.pendingTopologyCoordinates.size <= this.topologyMutationCapacity) {
-        // Mutation only ever adds *finest* bricks, so these enter at the finest
-        // level whatever level the leaves around them sit at.
-        for (const [key] of this.pendingTopologyCoordinates) {
-          this.coveredSceneBrickNodes.add(`${this.finestLevel}:${key}`);
-          this.planarSceneBrickNodes.delete(`${this.finestLevel}:${key}`);
-        }
-      }
-      this.pendingTopologyCoordinates.clear();
-      this.pendingTopologyMutation = false;
+      }, { generation: this.sceneRevision, recordCount: this.pendingTopologyRecords });
+      this.topologyMirror.commit();
+      this.pendingTopologyRecords = 0;
       encoded = true;
     }
     // Publish and mutate are the topology half: they change which bricks exist.
@@ -3231,28 +4006,21 @@ export class OctreeSparseBrickWorld {
       this.pendingScenePublication = undefined;
     }
     encoded = this.proxyVoxelizer.encodeMaintenance(encoder) || encoded;
-    // Diffuse feedback continues for a bounded convergence window after the
-    // last source revision. A static room normally reaches this branch after
-    // its first publication; stopping immediately freezes phase 0 and exposes
-    // its quarter-leaf pattern, while running forever makes a complex hero
-    // scene visibly breathe and spends GPU time after convergence.
-    if (!encoded && !deferDerived && this.liveDerivedInitial && this.liveDerivedAddressPlanValid
-      && this.liveDerivedPlanner && this.liveDerivedBuilder) {
-      seam?.("world-proxy-voxelize");
-      this.encodeLiveDerivedMaintenance(encoder, seam);
-      return true;
-    }
     if (!encoded) {
       // The settled path, and the one the render panel spends most of its life
       // reporting: nothing was voxelized this frame. Both remaining seams still
       // close, over nothing, so the manifest can say "reached, encoded no pass"
       // — which is a zero, and is what stops a silent row from inheriting the
       // source band's whole fence-partitioned wall.
+      //
+      // Lighting may still be owed: the queue drains and diffuse feedback
+      // converges over the frames after the last revision, and then stops —
+      // running forever makes a complex hero scene visibly breathe.
       seam?.("world-proxy-voxelize");
+      if (!deferDerived) return this.encodeLiveDerivedMaintenance(encoder, seam);
       seam?.("world-derived-lighting");
-      const fed = !deferDerived && this.encodeLiveRadianceFeedback(encoder);
       seam?.("world-radiance-feedback");
-      return fed;
+      return false;
     }
     const broker = new PassBroker(encoder);
     const finalizer = broker.compute({ label: "Finalize live sparse voxel scene publication" });
@@ -3272,54 +4040,119 @@ export class OctreeSparseBrickWorld {
   setRadianceEnabled(enabled: boolean): void {
     if (enabled === this.radianceEnabled) return;
     this.radianceEnabled = enabled;
+    // Withdrawn here and restored by the rebuild's frame: the same object both
+    // times, so only the withdrawal and the return rebind anything.
+    this.liveDerivedRadianceSource ??= this.sceneSource.tetrahedralRadiance;
     this.sceneSource.tetrahedralRadiance = undefined;
-    this.liveDerivedFeedbackFramesRemaining = 0;
+    // The feedback window goes with the radiance; what opacity is owed stays.
+    this.liveDerivedFramesRemaining = this.liveDerivedDrainFramesRemaining;
     if (enabled) this.liveDerivedInitial = true;
   }
 
+  /**
+   * One lighting frame, if one is owed. Returns whether it encoded anything.
+   *
+   * Every lighting frame is the same fixed set of direct dispatches in one
+   * pass: the planner takes what the voxelizer journaled since it last looked,
+   * then `roundsPerFrame` rounds each build at most the frame's remaining
+   * allowance from the queue. What is queued, how far each cursor has moved and
+   * which pages are inside a feedback window are GPU state the host never
+   * reads; it counts frames from bounds it already holds.
+   *
+   * `physics` is the solver's step: its residency lists are seeded as well, and
+   * rewritten every step, so they are taken only here.
+   */
   private encodeLiveDerivedMaintenance(
     encoder: GPUCommandEncoder,
     seam?: RenderFrameSeam<"world">,
-  ): void {
-    if (!this.liveDerivedAddressPlanValid || !this.liveDerivedPlanner || !this.liveDerivedBuilder) {
+    physics = false,
+  ): boolean {
+    const planner = this.liveDerivedPlanner;
+    const builder = this.liveDerivedBuilder;
+    if (!this.liveDerivedAddressPlanValid || !planner || !builder) {
       seam?.("world-derived-lighting");
       seam?.("world-radiance-feedback");
-      return;
-    }
-    const initializeEmpty = this.liveDerivedInitial;
-    if (initializeEmpty) this.liveDerivedPlanner.encodeInitial(encoder);
-    else this.liveDerivedPlanner.encode(encoder);
-    this.liveDerivedBuilder.encode(encoder, initializeEmpty, this.radianceEnabled);
-    this.liveDerivedFeedbackFramesRemaining = this.radianceEnabled && this.liveDerivedBuilder.radianceFeedbackEnabled
-      ? LIVE_SVO_RADIANCE_FEEDBACK.settleFrameCount : 0;
-    seam?.("world-derived-lighting");
-    this.encodeLiveRadianceFeedback(encoder);
-    seam?.("world-radiance-feedback");
-    this.liveDerivedInitial = false;
-    const nodeMip = this.nodeMipPyramid?.visibleGeneration();
-    const radiance = this.radianceEnabled ? this.tetrahedralRadiance?.visibleGeneration() : undefined;
-    this.sceneSource.nodeMipPyramid = nodeMip && {
-      ...nodeMip,
-      worldOrigin_m: this.sceneWorldOrigin,
-      worldExtent_m: this.sceneBrickDimensions.map((bricks, axis) => bricks * this.brickSize * this.cellSize[axis]) as [number, number, number],
-    };
-    this.sceneSource.tetrahedralRadiance = radiance;
-  }
-
-  private encodeLiveRadianceFeedback(encoder: GPUCommandEncoder): boolean {
-    if (!this.radianceEnabled || this.liveDerivedFeedbackFramesRemaining <= 0 || !this.liveDerivedAddressPlanValid
-      || !this.liveDerivedPlanner || !this.liveDerivedBuilder?.radianceFeedbackEnabled) {
       return false;
     }
-    this.liveDerivedPlanner.encodeRadianceFeedback(
-      encoder,
-      this.liveDerivedFeedbackPhase,
-      LIVE_SVO_RADIANCE_FEEDBACK.phaseCount,
-    );
-    this.liveDerivedBuilder.encodeRadianceFeedback(encoder);
-    this.liveDerivedFeedbackPhase = (this.liveDerivedFeedbackPhase + 1) % LIVE_SVO_RADIANCE_FEEDBACK.phaseCount;
-    this.liveDerivedFeedbackFramesRemaining -= 1;
+    const radiance = this.radianceEnabled;
+    const settleFrames = radiance && builder.radianceFeedbackEnabled ? LIVE_SVO_RADIANCE_FEEDBACK.settleFrameCount : 0;
+    const initial = this.liveDerivedInitial;
+    const activity = this.proxyVoxelizer.maintenanceBinding.activity ?? 0;
+    if (initial) {
+      // A first build lights every leaf and drains its own queue in one frame,
+      // so nothing journaled before it is owed. The window counts it.
+      this.liveDerivedSceneActivity = activity;
+      this.liveDerivedSeedBound = 0;
+      this.liveDerivedDrainFramesRemaining = 1;
+      this.liveDerivedFramesRemaining = Math.max(1, settleFrames);
+    } else {
+      if (activity !== this.liveDerivedSceneActivity) {
+        // The voxelizer ran since lighting last looked. Each of its frames
+        // journaled at most a chunk, and no more leaves than the revision's
+        // dirty regions cover; the window restarts behind the drain.
+        const regionCells = this.proxyVoxelizer.indexStatus.regionCells;
+        const chunk = regionCells > 0 ? Math.min(regionCells, this.liveDerivedChunkSeedBound) : this.liveDerivedChunkSeedBound;
+        this.liveDerivedSeedBound += (activity - this.liveDerivedSceneActivity) * chunk;
+        this.liveDerivedSceneActivity = activity;
+        this.planLiveDerivedFrames(planner.drainFrames(this.liveDerivedSeedBound), settleFrames);
+      }
+      if (physics) this.planLiveDerivedFrames(planner.stepDrainFrames(this.liveDerivedSeedBound), settleFrames);
+      if (this.liveDerivedRelight) this.planLiveDerivedFrames(0, settleFrames);
+    }
+    if (this.liveDerivedFramesRemaining <= 0) {
+      seam?.("world-derived-lighting");
+      seam?.("world-radiance-feedback");
+      return false;
+    }
+    const mode = initial ? (radiance ? "initial" : "initial-opacity")
+      : !radiance ? "dirty-opacity" : this.liveDerivedRelight ? "relight" : "dirty";
+    if (initial) planner.encodeReset(encoder);
+    const pass = encoder.beginComputePass(LIVE_DERIVED_LIGHTING_PASS);
+    if (initial) builder.encodeCertifyEmpty(pass);
+    planner.encodeFrame(pass, mode, physics);
+    const rounds = initial ? planner.initialRounds : planner.roundsPerFrame;
+    for (let round = 0; round < rounds; round += 1) {
+      planner.encodeRound(pass);
+      builder.encodeRound(pass, radiance);
+    }
+    pass.end();
+    // The gather is a dispatch of every round now, not a pass after the build,
+    // so the feedback seam closes over nothing and the lighting row carries it.
+    seam?.("world-derived-lighting");
+    seam?.("world-radiance-feedback");
+    this.liveDerivedInitial = false;
+    this.liveDerivedRelight = false;
+    this.liveDerivedFramesRemaining -= 1;
+    if (this.liveDerivedDrainFramesRemaining > 0) {
+      this.liveDerivedDrainFramesRemaining -= 1;
+      if (this.liveDerivedDrainFramesRemaining === 0) this.liveDerivedSeedBound = 0;
+      this.republishLiveDerivedOpacity();
+    }
+    if (radiance && !this.sceneSource.tetrahedralRadiance) {
+      this.sceneSource.tetrahedralRadiance = this.liveDerivedRadianceSource ??= this.tetrahedralRadiance?.visibleGeneration();
+    }
     return true;
+  }
+
+  /** Owe at least `drain` frames that may change opacity, and `settle` more behind them. */
+  private planLiveDerivedFrames(drain: number, settle: number): void {
+    this.liveDerivedDrainFramesRemaining = Math.max(this.liveDerivedDrainFramesRemaining, drain);
+    this.liveDerivedFramesRemaining = Math.max(this.liveDerivedFramesRemaining, this.liveDerivedDrainFramesRemaining + settle);
+  }
+
+  /**
+   * Tell the renderer opacity may have changed, without making anything: the
+   * published pyramid swaps with its twin. A pyramid someone else published
+   * since — a re-seed moves its metres — is paired afresh.
+   */
+  private republishLiveDerivedOpacity(): void {
+    const published = this.sceneSource.nodeMipPyramid;
+    if (!published) return;
+    let twins = this.liveDerivedPyramidTwins;
+    if (!twins || (published !== twins[0] && published !== twins[1])) {
+      twins = this.liveDerivedPyramidTwins = [published, { ...published }];
+    }
+    this.sceneSource.nodeMipPyramid = published === twins[0] ? twins[1] : twins[0];
   }
 
   encode(encoder: GPUCommandEncoder, fields: OctreeSparseBrickDenseFields, dt_s = 0): void {
@@ -3346,7 +4179,7 @@ export class OctreeSparseBrickWorld {
     finalizer.setBindGroup(0, this.structuralFinalizeBindGroup);
     finalizer.dispatchWorkgroups(1);
     finalizerBroker.fence("live sparse physics publication finalized");
-    this.encodeLiveDerivedMaintenance(encoder);
+    this.encodeLiveDerivedMaintenance(encoder, undefined, true);
   }
 
   readResidencyStats(): Promise<FluidBrickResidencyStats> { return this.residency.readStats(); }

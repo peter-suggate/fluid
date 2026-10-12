@@ -294,10 +294,6 @@ export const SVO_DRY_SCENE_REQUIRED_VALID_FIELDS =
 
 /** Feature toggles for the cone-traced node-mip marcher. Production enables every optimization. */
 export interface SvoDryConeMarcherOptions {
-  /** Branchless Morton bit-spread encode instead of the 21-iteration reference loop. */
-  branchlessMorton?: boolean;
-  /** Restrict the directory binary search to the queried level's contiguous row range. */
-  rangedDirectorySearch?: boolean;
   /** Substitute provably zero coverage without fetching when inside a certified empty region. */
   emptySpaceElision?: boolean;
   /**
@@ -312,8 +308,6 @@ export interface SvoDryConeMarcherOptions {
    * surface normal and skip it, so contact darkening keeps its exact cost.
    */
   fluidCoverage?: boolean;
-  /** Resolve a virtual page with one r32uint texture load before directory fallback. */
-  directPageTable?: boolean;
   /**
    * Floor each cone sample's footprint at the stored voxel there
    * (`backdropStoredVoxelWidth`, from the backdrop terrain library the host
@@ -332,62 +326,17 @@ export interface SvoDryConeMarcherOptions {
 
 
 /**
- * Morton/find/`dryNodeMipAt`/`dryConeVisibility` marcher block shared by the
+ * Find/`dryNodeMipAt`/`dryConeVisibility` marcher block shared by the
  * production dry shader and the A/B cone benchmark. Every variant is bit-exact:
  * optimizations may only change how a value is computed, never the value.
  * Requires bindings/declarations named `dry` (DryParams), `publicationState`,
- * `nodeMipAtlas`, `nodeMipSampler`, `nodeMipDirectory`, `nodeMipPageTable`,
+ * `nodeMipAtlas`, `nodeMipSampler`, `nodeMipPageTable`,
  * `nodeMipPageValidity`, and the `svoNodeMipSamplingWGSL` library.
  */
 export function createSvoDryConeMarcherWGSL(options: SvoDryConeMarcherOptions = {}): string {
-  const morton = options.branchlessMorton
-    ? /* wgsl */ `fn dryNodeMipSpreadMortonBits(value:vec3u)->vec3u{
-  var spread=value;
-  spread=(spread|(spread<<vec3u(16u)))&vec3u(0xff0000ffu);
-  spread=(spread|(spread<<vec3u(8u)))&vec3u(0x0f00f00fu);
-  spread=(spread|(spread<<vec3u(4u)))&vec3u(0xc30c30c3u);
-  spread=(spread|(spread<<vec3u(2u)))&vec3u(0x49249249u);
-  return spread;
-}
-fn dryNodeMipMorton(coordinate:vec3u)->vec2u{
-  let masked=coordinate&vec3u(0x1fffffu);
-  let low=dryNodeMipSpreadMortonBits(vec3u(masked.x&0x7ffu,masked.y&0x7ffu,masked.z&0x3ffu));
-  let high=dryNodeMipSpreadMortonBits(vec3u(masked.x>>11u,masked.y>>11u,masked.z>>10u));
-  return vec2u(low.x|(low.y<<1u)|(low.z<<2u),(high.x<<1u)|(high.y<<2u)|high.z);
-}`
-    : /* wgsl */ `fn dryNodeMipMorton(coordinate:vec3u)->vec2u{
-  var result=vec2u(0u);for(var bit=0u;bit<21u;bit+=1u){for(var axis=0u;axis<3u;axis+=1u){let outputBit=bit*3u+axis;let value=(coordinate[axis]>>bit)&1u;if(outputBit<32u){result.x|=value<<outputBit;}else{result.y|=value<<(outputBit-32u);}}}return result;
-}`;
-  // Directory rows are sorted by (level, morton), so each level occupies one
-  // contiguous run; a lower_bound over that run equals the full-range result.
-  // Constant vector indexing only: a dynamically indexed uniform array trips a
-  // slow-path Tint/Metal transform that taxes the whole fragment shader.
-  const levelStart = options.rangedDirectorySearch
-    ? /* wgsl */ `fn dryNodeMipLevelStart(level:u32)->u32{
-  let clamped=min(level,11u);
-  let word=select(select(dry.nodeMipLevelStart[0],dry.nodeMipLevelStart[1],clamped>=4u),dry.nodeMipLevelStart[2],clamped>=8u);
-  let lane=clamped&3u;
-  return select(select(select(word.x,word.y,lane==1u),word.z,lane==2u),word.w,lane==3u);
-}
-`
-    : "";
-  const searchRange = options.rangedDirectorySearch
-    ? /* wgsl */ `var low=dryNodeMipLevelStart(level);var high=select(dry.nodeMip.y,dryNodeMipLevelStart(level+1u),level<11u);`
-    : /* wgsl */ `var low=0u;var high=dry.nodeMip.y;`;
-  // The page table is an occupancy-sized hash keyed by (level, page), so it has
-  // no per-level slabs and no span-sized extent; see svo-node-mip-page-hash.ts.
-  const directPageTable = options.directPageTable ? /* wgsl */ `${svoNodeMipPageHashWGSL}
-fn dryNodeMipDirectFind(level:u32,coordinate:vec3u)->u32{
-  if(dry.nodeMipDirect.w==0u||level>=dry.nodeMip.z){return 0xffffffffu;}
-  return svoNodeMipPageHashFind(nodeMipPageTable,level,coordinate);
-}
-` : "";
-  const directFind = options.directPageTable
-    ? /* wgsl */ `if(dry.nodeMipDirect.w!=0u){return dryNodeMipDirectFind(level,coordinate);}`
-    : "";
-  const pageOrigin = options.directPageTable
-    ? /* wgsl */ `if(dry.nodeMipDirect.w!=0u){let physical=u32(SVO_NODE_MIP_PHYSICAL_SIZE);let atlasPages=max(dry.nodeMipAtlas.xyz/vec3u(physical),vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));*pageCache=DryNodeMipPageCache(pageCoordinate,level,atlasPage*physical,dry.nodeMip.x,1u,pageIndex,0u);}else{let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);*pageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u,pageIndex,0u);}`
-    : /* wgsl */ `let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);*pageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u,pageIndex,0u);`;
+  // A page's slot fixes where it sits in the atlas, so the hash's answer is the
+  // whole address: nothing is read to learn an origin, and slots need no order.
+  const pageOrigin = /* wgsl */ `let physical=u32(SVO_NODE_MIP_PHYSICAL_SIZE);let atlasPages=max(dry.nodeMipAtlas.xyz/vec3u(physical),vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));*pageCache=DryNodeMipPageCache(pageCoordinate,level,atlasPage*physical,dry.nodeMip.x,1u,pageIndex,0u);`;
   const zeroRegion = options.emptySpaceElision
     ? /* wgsl */ `struct DryConeZeroRegion{minimum:vec3f,maximum:vec3f,valid:u32}
 fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNodeMipPageCache>)->DryConeZeroRegion{
@@ -561,14 +510,19 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
   return /* wgsl */ `${liveSvoDerivedPageValidityWGSL}
 struct DryNodeMipLookup{sample:SvoNodeMipSample,valid:u32}
 struct DryNodeMipPageCache{coordinate:vec3u,level:u32,pageOrigin:vec3u,generation:u32,resident:u32,pageIndex:u32,blackRadiance:u32}
-${morton}
-fn dryNodeMipCompare(entry:SvoNodeMipDirectoryEntry,level:u32,morton:vec2u)->i32{
-  if(entry.level<level){return -1;}if(entry.level>level){return 1;}if(entry.mortonHigh<morton.y){return -1;}if(entry.mortonHigh>morton.y){return 1;}if(entry.mortonLow<morton.x){return -1;}if(entry.mortonLow>morton.x){return 1;}return 0;
-}
-${directPageTable}${levelStart}fn dryNodeMipFind(level:u32,coordinate:vec3u)->u32{
-  if(level>=dry.nodeMip.z||dry.nodeMip.y==0u){return 0xffffffffu;}${directFind}let morton=dryNodeMipMorton(coordinate);${searchRange}
-  for(var iteration=0u;iteration<24u&&low<high;iteration+=1u){let middle=low+(high-low)/2u;let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,middle);let comparison=dryNodeMipCompare(entry,level,morton);if(comparison<0){low=middle+1u;}else{high=middle;}}
-  if(low>=dry.nodeMip.y){return 0xffffffffu;}let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,low);if(entry.generation!=dry.nodeMip.x||dryNodeMipCompare(entry,level,morton)!=0){return 0xffffffffu;}return low;
+// What \`resident\` holds. A page the plan does not hold reads zero. A page it
+// holds is either built, or awaiting build: resident with a zero validity word,
+// which is how a new page is born and how an edited one waits for its rebuild.
+const DRY_NODE_MIP_PAGE_ABSENT:u32=0u;const DRY_NODE_MIP_PAGE_BUILT:u32=1u;const DRY_NODE_MIP_PAGE_AWAITING_BUILD:u32=2u;
+/** Nonzero once this invocation has read through a page awaiting build. */
+var<private> dryNodeMipAwaitingBuild:u32=0u;
+${svoNodeMipPageHashWGSL}
+// The page table is an occupancy-sized hash keyed by (level, page): the one way
+// a page is found. A page added by an edit is one new entry of it, and a slot
+// means nothing by its position; see svo-node-mip-page-hash.ts.
+fn dryNodeMipFind(level:u32,coordinate:vec3u)->u32{
+  if(level>=dry.nodeMip.z||dry.nodeMip.y==0u){return 0xffffffffu;}
+  return svoNodeMipPageHashFind(nodeMipPageTable,level,coordinate);
 }
 fn dryNodeMipReady()->bool{let generationReady=dry.nodeMip.w==${SVO_DRY_NODE_MIP_PUBLICATION_MODE.pageValidity}u||dry.nodeMip.x==dryPublicationWord(2u);return dry.nodeMip.w!=0u&&dry.nodeMip.x!=0u&&generationReady&&dry.nodeMip.y>0u&&dry.nodeMip.z>0u;}
 fn dryNodeMipPageValid(pageIndex:u32)->bool{
@@ -588,11 +542,14 @@ fn dryNodeMipAt(position_m:vec3f,lodIn:f32,pageCache:ptr<function,DryNodeMipPage
     if(pageIndex!=0xffffffffu){${pageOrigin}}
     // Validity is read once per page switch, not once per sample: it cannot
     // change during a pass, and a cone takes several samples per page.
-    // resident: 0 not resident (reads zero), 1 resident, 2 resident but invalid.
-    if((*pageCache).resident!=0u&&!dryNodeMipPageValid((*pageCache).pageIndex)){(*pageCache).resident=2u;}
+    if((*pageCache).resident!=DRY_NODE_MIP_PAGE_ABSENT&&!dryNodeMipPageValid((*pageCache).pageIndex)){(*pageCache).resident=DRY_NODE_MIP_PAGE_AWAITING_BUILD;}
   }
-  if((*pageCache).resident==0u){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}
-  if((*pageCache).resident==2u){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),0u);}
+  if((*pageCache).resident==DRY_NODE_MIP_PAGE_ABSENT){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}
+  // Awaiting build: the page's voxels are presented and its lighting is queued.
+  // It reads as open space — a valid answer, so the surface keeps its direct
+  // light unshadowed instead of failing closed to black — and the invocation
+  // remembers it crossed one, so nothing that outlives the frame stores the result.
+  if((*pageCache).resident==DRY_NODE_MIP_PAGE_AWAITING_BUILD){dryNodeMipAwaitingBuild=1u;return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}
   let local=virtualVoxel-vec3f(pageCoordinate)*f32(SVO_NODE_MIP_INTERIOR_SIZE)-vec3f(.5);return DryNodeMipLookup(svoNodeMipSamplePage(nodeMipAtlas,nodeMipSampler,(*pageCache).pageOrigin,local),1u);
 }
 ${zeroRegion}${coneStruct}
@@ -2660,11 +2617,15 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
   let page=dryVoxelLightPages[pageIndex];let baseLevel=page.w;
   let worldVoxel=page.xyz*${SVO_NODE_MIP_LAYOUT.interiorSize}u+local;
   let position=dry.nodeMipOrigin.xyz+(vec3f(worldVoxel)+vec3f(.5))*dry.mapping.cellSize*exp2(f32(baseLevel));let normal=dryVoxelLightUnpackNormal(entry.y);
+  dryNodeMipAwaitingBuild=0u;
   var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let coverage=dryNodeMipAt(position,f32(baseLevel),&pageCache);
   if(coverage.valid==0u||(coverage.sample.solidMaximum>.85&&coverage.sample.solidMean<.08)){dryVoxelLightReject(pageIndex,local);return;}
   let light=dryLighting.lights[0];if(dryLighting.metadata.x==0u||light.identity.x!=SVO_LIGHT_DIRECTIONAL||light.identity.w!=dryLighting.metadata.y){return;}
   let sample=dryLightSample(light,0u,position);var visibility=0.0;
   if(sample.valid!=0u&&dot(normal,sample.towardLight)>0.0){let maximumDistance=directionalLightSceneExitDistance(position,sample.towardLight);let ray=dryBiasedVisibilityRayUnit(position,normal,sample.towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);let cell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let escape=max(cell,dryStoredVoxelWidthAt(position))*dry.tuningRays1.z;let coneMaximum=max(0.0,ray.tMax_m-escape*dot(normal,sample.towardLight));let cone=dryConeVisibility(ray.origin_m+normal*escape,sample.towardLight,dry.tuningRays1.y,coneMaximum,normal,false);if(cone.valid==0u){dryVoxelLightReject(pageIndex,local);return;}visibility=cone.transmittance;}
+  // Visibility traced through a page awaiting build is this frame's answer
+  // only: store nothing, and the voxel is demanded again until its cone is built.
+  if(dryNodeMipAwaitingBuild!=0u){return;}
   let atlasPages=max(dryVoxelLight.atlasPages.xyz,vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));
   let atlas=atlasPage*${SVO_NODE_MIP_LAYOUT.physicalSize}u+vec3u(${SVO_NODE_MIP_LAYOUT.apron}u)+local;let packed=u32(round(clamp(visibility,0.0,1.0)*65534.0))+1u;
   textureStore(dryVoxelLightCacheWrite,vec3i(atlas),vec4u(packed,((dryVoxelLight.control.z&0xffffu)<<16u)|(entry.y&0xffffu),0u,0u));atomicAdd(&dryVoxelLightQueue.populated,1u);
@@ -4040,9 +4001,10 @@ fn dryWorldGiFrameRay(coordinate:vec2u,dimensions:vec2u)->mat2x3f{
   let bodyAware=influence.bodyMask!=0u;let bodyNamespace=select(0x4f1bbcdcu,influence.signature,bodyAware);
   let key=dryWorldGiKey(position,opaque.normal,bodyNamespace);let cached=dryWorldGiFind(key);
   if(cached.hit!=0u){textureStore(dryWorldGiOutput,coordinate,vec4f(cached.value.radiance,cached.value.visibility));return;}
-  dryWorldGiIgnoreRigidBodies=select(1u,0u,bodyAware);dryWorldGiBodyMask=influence.bodyMask;dryPrepassGiState=0u;
+  dryWorldGiIgnoreRigidBodies=select(1u,0u,bodyAware);dryWorldGiBodyMask=influence.bodyMask;dryPrepassGiState=0u;dryNodeMipAwaitingBuild=0u;
   let value=dryGlobalIlluminationFaced(position,opaque.normal,dryGeometricNormal(opaque),select(DRY_OWNER_NONE,ignoredBodyOwner,bodyAware));
-  if(value.valid==0u){atomicAdd(&dryWorldGiFrame.invalidGiPages,1u);}else{dryWorldGiInsert(key,cached.claimSlot,cached.claimState,value);}
+  // A gather that crossed a page awaiting build is shown this frame and not kept.
+  if(value.valid==0u){atomicAdd(&dryWorldGiFrame.invalidGiPages,1u);}else if(dryNodeMipAwaitingBuild==0u){dryWorldGiInsert(key,cached.claimSlot,cached.claimState,value);}
   textureStore(dryWorldGiOutput,coordinate,vec4f(value.radiance,select(-1.0,value.visibility,value.valid!=0u)));
 }
 ` : "";
@@ -4086,7 +4048,7 @@ struct DryParams {
   nodeMipAtlas:vec4u,
   // x: derived generation; y: canonical source generation; z: pages; w: descriptors.
   wideFanout:vec4u,
-  // Twelve per-level directory row starts (count of pages with level < i) as three vec4u.
+  // Unread, and zero: the row starts of the sorted directory the page hash replaced.
   nodeMipLevelStart:array<vec4u,3>,
   // xyz: world-space origin of the node-mip lattice.
   nodeMipOrigin:vec4f,
@@ -4102,7 +4064,7 @@ struct DryParams {
   tuningRays0:vec4f,
   // AO aperture, shadow aperture, normal escape, emitter clearance.
   tuningRays1:vec4f,
-  // w: the nodeMipPageTable hash is published; w=0 retains sorted-directory fallback.
+  // x: nodeMipPageTable entries; w: the hash is published, which the voxel-light cache waits on.
   nodeMipDirect:vec4u,
   // Fluid coverage texel box copied from the fill: xyz (dimensions - minimum),
   // then xyz (maximum + 1); all zero means no box.
@@ -4273,10 +4235,12 @@ var<private> dryDerivedPageFailure:u32=0u;
 ${canonicalTraversalWGSL}${screenSpaceTraversalWGSL}${lodDescentWGSL}${lodUniformWGSL}${screenSpacePrimaryProxyWGSL}${tieredComputeResolveDeclarationsWGSL}
 ${wideTraversalWGSL}${compactTraversalWGSL}${brickOccupancyHelpersWGSL}
 ${liveLeafLifecycleWGSL}
-${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, directPageTable: true, storedVoxelFloor: backdropHooks, contentCeilingClip: backdropTerrain })}
+${createSvoDryConeMarcherWGSL({ storedVoxelFloor: backdropHooks, contentCeilingClip: backdropTerrain })}
 var<private> dryGiPageCache:DryNodeMipPageCache;
 /** The ancestor page a sub-floor radiance sample redirects to; coarser, so it changes far less often. */
 var<private> dryGiRadiancePageCache:DryNodeMipPageCache;
+/** The built ancestor standing in for a radiance page that is awaiting build. */
+var<private> dryGiRadianceAncestorCache:DryNodeMipPageCache;
 fn dryTetraRadianceReady()->bool{return dry.tetrahedralRadiance.y!=0u&&dry.tetrahedralRadiance.x==dry.nodeMip.x&&dryNodeMipReady();}
 fn dryTetraRadiancePageValid(pageIndex:u32)->bool{
   let dimensions=textureDimensions(tetraRadiancePageValidity);return svoDerivedPageValidityResident(dimensions,pageIndex)&&textureLoad(tetraRadiancePageValidity,svoDerivedPageValidityTexel(dimensions,pageIndex),0).x!=0u;
@@ -4300,7 +4264,7 @@ fn dryNodeMipSceneExitDistance(position:vec3f,direction:vec3f)->f32{
  * quantised by the fine page's rounding.
  */
 fn dryTetraRadianceLevelFloor()->u32{return min(dry.tetrahedralRadiance.z,dry.nodeMip.z-1u);}
-/** 2: page unusable, 1: certified black, 0: sample it. Resolved once per page, never per tap. */
+/** 2: awaiting build, 1: certified black, 0: sample it. Resolved once per page, never per tap. */
 fn dryTetraRadianceState(pageIndex:u32)->u32{
   if(!dryTetraRadiancePageValid(pageIndex)){return 2u;}
   if(pageIndex<dry.tetrahedralRadiance.w){return 1u;}
@@ -4321,14 +4285,16 @@ fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceCo
   if(dryGiPageCache.generation!=dry.nodeMip.x||dryGiPageCache.level!=level||any(dryGiPageCache.coordinate!=pageCoordinate)){
     dryGiPageCache=DryNodeMipPageCache(pageCoordinate,level,vec3u(0u),dry.nodeMip.x,0u,0xffffffffu,0u);let pageIndex=dryNodeMipFind(level,pageCoordinate);
     if(pageIndex!=0xffffffffu){
-      if(!dryNodeMipPageValid(pageIndex)){return SvoTetraRadianceConeSourceSample(0.0,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),0u,0u);}
+      // A page awaiting build is left out of the cache, so every tap of it reads
+      // what an absent page reads: open space, and no radiance to be missing.
+      if(!dryNodeMipPageValid(pageIndex)){dryNodeMipAwaitingBuild=1u;}
+      else{
       var black=2u;if(dryTetraRadiancePageValid(pageIndex)){black=textureLoad(tetraRadianceBlackPages,vec2u(pageIndex,0u),0).x;}
-      if(dry.nodeMipDirect.w!=0u){let physical=u32(SVO_NODE_MIP_PHYSICAL_SIZE);let atlasPages=max(dry.nodeMipAtlas.xyz/vec3u(physical),vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));dryGiPageCache=DryNodeMipPageCache(pageCoordinate,level,atlasPage*physical,dry.nodeMip.x,1u,pageIndex,black);}
-      else{let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);dryGiPageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u,pageIndex,black);}
+      let physical=u32(SVO_NODE_MIP_PHYSICAL_SIZE);let atlasPages=max(dry.nodeMipAtlas.xyz/vec3u(physical),vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));dryGiPageCache=DryNodeMipPageCache(pageCoordinate,level,atlasPage*physical,dry.nodeMip.x,1u,pageIndex,black);
+      }
     }
   }
   if(dryGiPageCache.resident==0u){return SvoTetraRadianceConeSourceSample(0.0,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,1u);}
-  if(!dryNodeMipPageValid(dryGiPageCache.pageIndex)){return SvoTetraRadianceConeSourceSample(0.0,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),0u,0u);}
   let local=virtualVoxel-vec3f(pageCoordinate)*f32(SVO_NODE_MIP_INTERIOR_SIZE)-vec3f(.5);
   let opacity=svoNodeMipSamplePage(nodeMipAtlas,nodeMipSampler,dryGiPageCache.pageOrigin,local);
   if(!dryTetraRadianceReady()){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,0u);}
@@ -4349,7 +4315,31 @@ fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceCo
     radianceIndex=dryGiRadiancePageCache.pageIndex;radianceState=dryGiRadiancePageCache.blackRadiance;
     radianceLocal=radianceVoxel-vec3f(radiancePage)*f32(SVO_NODE_MIP_INTERIOR_SIZE)-vec3f(.5);
   }
-  if(radianceState==2u){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,0u);}
+  if(radianceState==2u){
+    // Radiance awaiting build under built opacity. The nearest coarser ancestor
+    // whose radiance is built stands in: the same light, a level or more
+    // blurrier, so the page sharpens when its own build lands instead of
+    // appearing out of black. Resolved once per page, like the page itself.
+    dryNodeMipAwaitingBuild=1u;
+    let awaitedPage=select(pageCoordinate,dryGiRadiancePageCache.coordinate,radianceLevel!=level);
+    if(dryGiRadianceAncestorCache.generation!=dry.nodeMip.x||dryGiRadianceAncestorCache.level!=radianceLevel||any(dryGiRadianceAncestorCache.coordinate!=awaitedPage)){
+      // \`resident\` here is the ancestor's level plus one: zero while none is built.
+      dryGiRadianceAncestorCache=DryNodeMipPageCache(awaitedPage,radianceLevel,vec3u(0u),dry.nodeMip.x,0u,0xffffffffu,1u);
+      var ancestorPage=awaitedPage;
+      for(var ancestorLevel=radianceLevel+1u;ancestorLevel<dry.nodeMip.z;ancestorLevel+=1u){
+        ancestorPage=ancestorPage>>vec3u(1u);let ancestor=dryNodeMipFind(ancestorLevel,ancestorPage);
+        if(ancestor==0xffffffffu){break;}
+        let ancestorState=dryTetraRadianceState(ancestor);
+        if(ancestorState!=2u){dryGiRadianceAncestorCache=DryNodeMipPageCache(awaitedPage,radianceLevel,dryTetraRadiancePageOrigin(ancestor),dry.nodeMip.x,ancestorLevel+1u,ancestor,ancestorState);break;}
+      }
+    }
+    if(dryGiRadianceAncestorCache.resident==0u||dryGiRadianceAncestorCache.blackRadiance==1u){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,1u);}
+    let ancestorLevel=dryGiRadianceAncestorCache.resident-1u;
+    let ancestorVoxel=(query.position_m-dry.nodeMipOrigin.xyz)/(dry.mapping.cellSize*exp2(f32(ancestorLevel)));
+    let ancestorLocal=ancestorVoxel-vec3f(awaitedPage>>vec3u(ancestorLevel-radianceLevel))*f32(SVO_NODE_MIP_INTERIOR_SIZE)-vec3f(.5);
+    let ancestorUv=svoNodeMipAtlasUv(dryGiRadianceAncestorCache.pageOrigin,ancestorLocal,textureDimensions(tetraRadianceLobe0));
+    return SvoTetraRadianceConeSourceSample(opacity.solidMean,svoTetraSample(tetraRadianceLobe0,tetraRadianceLobe1,tetraRadianceLobe2,tetraRadianceLobe3,nodeMipSampler,ancestorUv),1u,1u);
+  }
   if(radianceState==1u){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,1u);}
   let radianceOrigin=select(dryTetraRadiancePageOrigin(radianceIndex),dryGiRadiancePageCache.pageOrigin,radianceLevel!=level);
   let uv=svoNodeMipAtlasUv(radianceOrigin,radianceLocal,textureDimensions(tetraRadianceLobe0));

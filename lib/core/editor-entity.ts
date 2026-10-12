@@ -3,6 +3,7 @@ import { constrainedAxes, EDITOR_AXES, type AxisConstraint, type EditorAxis } fr
 import { GIZMO_AXIS_DIRECTIONS, gizmoHandleLength_m } from "./editor-gizmo";
 import type { EditorSelection, EditorSelectionKind } from "./editor-tools";
 import type { VoxelSelectionRegion } from "./editor-voxel-region";
+import type { VoxelClipboard } from "./voxel-editor/verb";
 import { add, scale, sub } from "./math";
 import { quaternionInverseRotate, quaternionRotate } from "./rigid-body";
 import type { CameraState, Quaternion, SceneDescription, Vec3 } from "./model";
@@ -640,6 +641,12 @@ export interface EditorEntityContext {
    * able to describe it. See `editor-voxel-region.ts`.
    */
   readonly voxelRegion?: VoxelSelectionRegion;
+  /**
+   * The voxels last copied out of a region, when there are any. Runtime state
+   * like the region itself: a verb that pastes has to be able to say whether
+   * it can.
+   */
+  readonly voxelClipboard?: VoxelClipboard;
   /**
    * The pressure cell the last frame's trace described, when the `C` instrument
    * is running.

@@ -105,7 +105,7 @@ export function createUniformMixedLayoutFromWidths(lattice: RefinementRegionLatt
  * never meet solid in a 4h owner or in an interface (seam) tile. The box
  * shell lives in the mask's halo; domain walls are owned by every width. */
 export function uniformMixedSolidTiles(dimensions: Triple, mask: Uint32Array, maskHeaderWords: number,
-  terrainCells?: Float32Array): { forced: Uint8Array; coupled: Uint8Array; cutCells: number } {
+  terrainCells?: Float32Array): UniformMixedSolidTiles {
   const [nx, ny, nz] = dimensions, t = dimensions.map(n => n / 4) as unknown as Triple;
   if (dimensions.some(n => !Number.isSafeInteger(n) || n % 4 !== 0)) throw new Error("Solid promotion requires dimensions divisible by four");
   const sx = nx + 2, sy = ny + 2, sz = nz + 2;
@@ -139,13 +139,114 @@ export function uniformMixedSolidTiles(dimensions: Triple, mask: Uint32Array, ma
           for (let tx = Math.max(0, (x - 1) >> 2); tx <= Math.min(t[0] - 1, (x + 1) >> 2); tx++) coupled[tx + t[0] * (ty + t[1] * tz)] = 1;
     }
   }
-  const forced = new Uint8Array(coupled.length);
+  const forced = new Uint8Array(coupled.length);let coupledTiles = 0;
   for (let tz = 0; tz < t[2]; tz++) for (let ty = 0; ty < t[1]; ty++) for (let tx = 0; tx < t[0]; tx++) {
     if (!coupled[tx + t[0] * (ty + t[1] * tz)]) continue;
+    coupledTiles++;
     for (let z = Math.max(0, tz - 1); z <= Math.min(t[2] - 1, tz + 1); z++) for (let y = Math.max(0, ty - 1); y <= Math.min(t[1] - 1, ty + 1); y++)
       for (let x = Math.max(0, tx - 1); x <= Math.min(t[0] - 1, tx + 1); x++) forced[x + t[0] * (y + t[1] * z)] = 1;
   }
-  return { forced, coupled, cutCells };
+  return { forced, coupled, cutCells, coupledTiles };
+}
+
+/** Solid promotion of one mask: uniformMixedSolidTiles' result. */
+export interface UniformMixedSolidTiles {
+  forced: Uint8Array;
+  coupled: Uint8Array;
+  cutCells: number;
+  /** Tiles set in `coupled`. */
+  coupledTiles: number;
+}
+
+/** A solid mask edit as the tile lattice sees it (uniformMixedSolidEdit). */
+export interface UniformMixedSolidEdit {
+  /** Every tile within one cell (26-neighbourhood) of a voxel whose bit
+   * changed, halo voxels included, each once: the tiles whose coupling the
+   * edit can have moved. */
+  tiles: number[];
+  /** Interior cells that became solid, less those that stopped being solid. */
+  cutCells: number;
+}
+
+/** The tiles a mask edit touched: `mask` against `previous` (the mask before
+ * the edit) over the edit's dirty words. `touched` is the caller's scratch,
+ * one byte per tile and zero on entry; it holds one for each tile returned. */
+export function uniformMixedSolidEdit(dimensions: Triple, mask: Uint32Array, previous: Uint32Array, maskHeaderWords: number,
+  dirty: { firstWord: number; wordCount: number }, touched: Uint8Array): UniformMixedSolidEdit {
+  const [nx, ny, nz] = dimensions, t = dimensions.map(n => n / 4) as unknown as Triple;
+  const sx = nx + 2, sy = ny + 2;
+  if (touched.length !== t[0] * t[1] * t[2]) throw new Error("Solid edit scratch does not match the tile lattice");
+  const tiles: number[] = [];let cutCells = 0;
+  for (let w = Math.max(maskHeaderWords, dirty.firstWord); w < dirty.firstWord + dirty.wordCount; w++) {
+    const now = mask[w]!;let bits = (now ^ previous[w]!) >>> 0;
+    while (bits) {
+      const bit = 31 - Math.clz32(bits & -bits);bits = (bits & (bits - 1)) >>> 0;
+      const index = (w - maskHeaderWords) * 32 + bit, x = index % sx - 1, y = Math.floor(index / sx) % sy - 1, z = Math.floor(index / (sx * sy)) - 1;
+      // The promotion counts interior cells: the shell lives in the halo.
+      if (x >= 0 && y >= 0 && z >= 0 && x < nx && y < ny && z < nz) cutCells += now >>> bit & 1 ? 1 : -1;
+      for (let tz = Math.max(0, (z - 1) >> 2); tz <= Math.min(t[2] - 1, (z + 1) >> 2); tz++)
+        for (let ty = Math.max(0, (y - 1) >> 2); ty <= Math.min(t[1] - 1, (y + 1) >> 2); ty++)
+          for (let tx = Math.max(0, (x - 1) >> 2); tx <= Math.min(t[0] - 1, (x + 1) >> 2); tx++) {
+            const key = tx + t[0] * (ty + t[1] * tz);
+            if (!touched[key]) { touched[key] = 1;tiles.push(key); }
+          }
+    }
+  }
+  return { tiles, cutCells };
+}
+
+/** uniformMixedSolidTiles of an edited mask, from the result `held` for the
+ * mask before the edit and the tiles the edit touched: the same arrays the
+ * lattice scan returns, at the cost of the edit. A tile's coupling follows
+ * the cells within one cell of it, so only a touched tile's can have moved;
+ * `forced` is the 26-neighbourhood of `coupled`, so only the tiles around a
+ * tile whose coupling moved can have. `terrainCells` must be the heights
+ * `held` was scanned with. New arrays: `held` is left as it was. */
+export function uniformMixedSolidTilesAfterEdit(held: UniformMixedSolidTiles, dimensions: Triple, mask: Uint32Array,
+  maskHeaderWords: number, edit: UniformMixedSolidEdit, terrainCells?: Float32Array): UniformMixedSolidTiles {
+  const [nx, ny, nz] = dimensions, t = dimensions.map(n => n / 4) as unknown as Triple;
+  const sx = nx + 2, sy = ny + 2, count = t[0] * t[1] * t[2];
+  if (mask[1] !== sx || mask[2] !== sy || mask[3] !== nz + 2) throw new Error("Solid promotion mask does not match the lattice");
+  if (held.coupled.length !== count || held.forced.length !== count) throw new Error("Held solid promotion does not match the tile lattice");
+  if (terrainCells && terrainCells.length !== nx * nz) throw new Error("Solid promotion terrain does not match the lattice");
+  const coupled = held.coupled.slice(), forced = held.forced.slice();let coupledTiles = held.coupledTiles;
+  const uncoupled: number[] = [];
+  for (const key of edit.tiles) {
+    const tx = key % t[0], ty = Math.floor(key / t[0]) % t[1], tz = Math.floor(key / (t[0] * t[1]));
+    // The cells within one cell of the tile, inside the lattice.
+    const x0 = Math.max(0, 4 * tx - 1), x1 = Math.min(nx - 1, 4 * tx + 4), y0 = Math.max(0, 4 * ty - 1), y1 = Math.min(ny - 1, 4 * ty + 4);
+    const z0 = Math.max(0, 4 * tz - 1), z1 = Math.min(nz - 1, 4 * tz + 4);
+    let cut = 0;
+    // A row of at most six voxels is a run of bits in one mask word or two.
+    for (let z = z0; z <= z1 && !cut; z++) for (let y = y0; y <= y1 && !cut; y++) {
+      const row = sx * ((y + 1) + sy * (z + 1)) + 1, first = row + x0, last = row + x1, low = first >>> 5, high = last >>> 5;
+      cut = low === high ? mask[maskHeaderWords + low]! >>> (first & 31) & ((1 << (last - first + 1)) - 1)
+        : mask[maskHeaderWords + low]! >>> (first & 31) | mask[maskHeaderWords + high]! & ((2 << (last & 31)) - 1);
+    }
+    if (terrainCells) for (let z = z0; z <= z1 && !cut; z++) for (let x = x0; x <= x1 && !cut; x++) {
+      const height = terrainCells[x + nx * z]!;
+      // Cells 0..top of the column are cut: it couples the tiles up to (top+1)>>2.
+      if (height > 0 && ty <= (Math.min(ny - 1, Math.ceil(height) - 1) + 1) >> 2) cut = 1;
+    }
+    const now = cut ? 1 : 0;
+    if (now === coupled[key]) continue;
+    coupled[key] = now;coupledTiles += now ? 1 : -1;
+    if (!now) { uncoupled.push(key);continue; }
+    for (let z = Math.max(0, tz - 1); z <= Math.min(t[2] - 1, tz + 1); z++) for (let y = Math.max(0, ty - 1); y <= Math.min(t[1] - 1, ty + 1); y++)
+      for (let x = Math.max(0, tx - 1); x <= Math.min(t[0] - 1, tx + 1); x++) forced[x + t[0] * (y + t[1] * z)] = 1;
+  }
+  // A tile that stopped being coupled leaves its neighbours forced only by another coupled tile.
+  for (const key of uncoupled) {
+    const tx = key % t[0], ty = Math.floor(key / t[0]) % t[1], tz = Math.floor(key / (t[0] * t[1]));
+    for (let z = Math.max(0, tz - 1); z <= Math.min(t[2] - 1, tz + 1); z++) for (let y = Math.max(0, ty - 1); y <= Math.min(t[1] - 1, ty + 1); y++)
+      for (let x = Math.max(0, tx - 1); x <= Math.min(t[0] - 1, tx + 1); x++) {
+        let near = 0;
+        for (let k = Math.max(0, z - 1); k <= Math.min(t[2] - 1, z + 1) && !near; k++) for (let j = Math.max(0, y - 1); j <= Math.min(t[1] - 1, y + 1) && !near; j++)
+          for (let i = Math.max(0, x - 1); i <= Math.min(t[0] - 1, x + 1) && !near; i++) near = coupled[i + t[0] * (j + t[1] * k)]!;
+        forced[x + t[0] * (y + t[1] * z)] = near;
+      }
+  }
+  return { forced, coupled, cutCells: held.cutCells + edit.cutCells, coupledTiles };
 }
 
 /** Liquid-conditional solid promotion (the census's solidActive and

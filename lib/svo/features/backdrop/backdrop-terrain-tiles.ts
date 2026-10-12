@@ -51,11 +51,17 @@
  *
  * No DOM or GPU imports: the table and the strings are built in the render worker.
  */
+import { completeCooperativeBuild } from "../../../core/cooperative-build";
+import { createContentMemo } from "../../../core/content-memo";
 import {
   BACKDROP_WAVE_STRIDE,
+  backdropFieldContentKey,
+  backdropFieldCurvatureBound,
   backdropFieldHeight,
-  backdropTaylorHeightBounds,
+  backdropHeightBounds,
+  createBackdropGridSampler,
   type BackdropField,
+  type BackdropGridSampler,
 } from "./backdrop-field";
 
 /** Tiles per axis per level; the central half of level l > 0 is level l - 1. */
@@ -168,11 +174,15 @@ function columnTop(field: BackdropField, anchor: number, cell: number, x: number
   return anchor + Math.floor((backdropFieldHeight(field, x, z) - anchor) / cell + 0.5) * cell;
 }
 
+/** Where the clipmap sits on the lattice: all a consumer of the rings' geometry needs. */
+export type BackdropTileLayout = Pick<BackdropTilePlan,
+  "centre" | "halfWidth0_m" | "cellSize0_m" | "anchor_m" | "columnsPerTile" | "levels">;
+
 /**
- * The clipmap for a compiled field on the set's lattice: layout, exact per-tile
- * column-top bounds and per-level maxima. Pure and deterministic.
+ * The clipmap's layout alone — centre, level-0 square, anchor and level count —
+ * with no column evaluated. The detail rings' geometry reads only this.
  */
-export function planBackdropTiles(field: BackdropField, lattice: BackdropTerrainLattice): BackdropTilePlan {
+export function planBackdropTileLayout(field: BackdropField, lattice: BackdropTerrainLattice): BackdropTileLayout {
   const h0 = lattice.cellSize_m;
   if (!(h0 > 0) || !Number.isFinite(h0) || !lattice.origin_m.every(Number.isFinite)) {
     throw new RangeError("Backdrop terrain lattice must have a finite origin and a positive cell");
@@ -200,47 +210,131 @@ export function planBackdropTiles(field: BackdropField, lattice: BackdropTerrain
   if (levels > BACKDROP_TILE_MAXIMUM_LEVELS) {
     throw new RangeError(`Backdrop terrain needs ${levels} tile levels to reach ${needed.toFixed(0)} m; the table holds ${BACKDROP_TILE_MAXIMUM_LEVELS}`);
   }
+  return { centre, halfWidth0_m, cellSize0_m: h0, anchor_m, columnsPerTile, levels };
+}
+
+/**
+ * A column top within this fraction of a cell of a rounding boundary is
+ * re-evaluated directly, so the separable evaluation's rounding (a few ulps of
+ * a phase of thousands of radians, far below this) never moves a top.
+ */
+const COLUMN_TOP_ROUNDING_GUARD = 1e-6;
+
+const tilePlans = createContentMemo<BackdropTilePlan>();
+
+/**
+ * The clipmap for a compiled field on the set's lattice: layout, exact per-tile
+ * column-top bounds and per-level maxima. Pure and deterministic, and so kept
+ * by the content it was derived from: a rebuild on the same field and lattice
+ * takes the plan it already has, which a holder therefore never writes to.
+ */
+export function planBackdropTiles(field: BackdropField, lattice: BackdropTerrainLattice): BackdropTilePlan {
+  return completeCooperativeBuild(planBackdropTilesSteps(field, lattice));
+}
+
+/**
+ * The same plan, offered as slices (one per row of tiles).
+ *
+ * Each column is evaluated once, height and gradient together, from the
+ * level's grid sampler (`createBackdropGridSampler`): the height gives the
+ * column's top and, with the gradient, the continuous ground's bound over the
+ * column's square — a second-order Taylor bound about the column centre,
+ * `h(p) <= h(c) + g.(p - c) + K |p - c|^2 / 2`, whose linear part peaks at a
+ * corner (`(|gx| + |gz|) cell / 2`), with `K` the curvature bound at the
+ * tile's nearest footprint distance, intersected with the envelope bound of
+ * `backdropHeightBounds`.
+ */
+export function* planBackdropTilesSteps(field: BackdropField, lattice: BackdropTerrainLattice): Generator<unknown, BackdropTilePlan, undefined> {
+  const layout = planBackdropTileLayout(field, lattice);
+  const firstLevel = lattice.firstLevel ?? 0;
+  const memoKey = JSON.stringify([backdropFieldContentKey(field), lattice.origin_m, lattice.cellSize_m, firstLevel, lattice.centreLattice_m ?? null]);
+  const known = tilePlans.get(memoKey);
+  if (known) return known;
+  const { centre, anchor_m, columnsPerTile, levels } = layout;
+  const h0 = layout.cellSize0_m;
+  const [fMinX, fMinZ, fMaxX, fMaxZ] = field.seam.footprint_m;
+  const quarter = BACKDROP_TILES_PER_AXIS / 2;
   const N = BACKDROP_TILES_PER_AXIS, n = columnsPerTile;
   const tiles = new Float64Array(levels * BACKDROP_TILES_PER_LEVEL * 3);
   const smoothBounds = new Float64Array(levels * BACKDROP_TILES_PER_LEVEL * 2);
   const levelMaximum = new Float64Array(levels);
-  let running = Number.NEGATIVE_INFINITY, smoothRunning = Number.NEGATIVE_INFINITY, smoothExcessCells = 0;
-  for (let level = 0; level < levels; level += 1) {
-    const cell = h0 * 2 ** level;
-    for (let j = 0; j < N; j += 1) for (let i = 0; i < N; i += 1) {
+  const xs = new Float64Array(N * n), zs = new Float64Array(N * n);
+  const heights = new Float64Array(n), gradientX = new Float64Array(n), gradientZ = new Float64Array(n);
+  // The highest column top and the highest continuous ground so far.
+  const running = new Float64Array(2).fill(Number.NEGATIVE_INFINITY);
+  let smoothExcessCells = 0;
+  // One row of a level's tiles. A plain function: a generator's own body is
+  // never optimised, so the columns are not walked in this one's.
+  const planTileRow = (level: number, j: number, cell: number, sampler: BackdropGridSampler | undefined): void => {
+    for (let i = 0; i < N; i += 1) {
       const base = ((level * N + j) * N + i) * 3;
       tiles[base] = Number.POSITIVE_INFINITY; tiles[base + 1] = Number.NEGATIVE_INFINITY; tiles[base + 2] = 0;
       // The central half of a ring is the finer level's.
       if (level > 0 && i >= N / 4 && i < N - N / 4 && j >= N / 4 && j < N - N / 4) continue;
-      // Stored as octree voxels, not walked.
-      if (level < firstLevel) continue;
+      if (!sampler) continue;
+      const minX = centre[0] + (i - quarter) * n * cell, minZ = centre[1] + (j - quarter) * n * cell;
+      const maxX = minX + n * cell, maxZ = minZ + n * cell;
+      const nearest = Math.hypot(Math.max(fMinX - maxX, 0, minX - fMaxX), Math.max(fMinZ - maxZ, 0, minZ - fMaxZ));
+      const K = backdropFieldCurvatureBound(field, nearest);
+      const sx = (maxX - minX) / n, sz = (maxZ - minZ) / n;
+      const quadratic = 0.125 * K * (sx * sx + sz * sz);
       let low = Number.POSITIVE_INFINITY, high = Number.NEGATIVE_INFINITY, overlaps = 0;
-      for (let b = 0; b < n; b += 1) for (let a = 0; a < n; a += 1) {
-        const x = centre[0] + ((i - quarter) * n + a + 0.5) * cell;
-        const z = centre[1] + ((j - quarter) * n + b + 0.5) * cell;
-        if (insideFootprint(field, x, z)) { overlaps = 1; continue; }
-        const top = columnTop(field, anchor_m, cell, x, z);
-        low = Math.min(low, top); high = Math.max(high, top);
+      let groundLow = Number.POSITIVE_INFINITY, groundHigh = Number.NEGATIVE_INFINITY;
+      for (let b = 0; b < n; b += 1) {
+        const zIndex = j * n + b, z = zs[zIndex]!;
+        sampler.heightsAndGradients(zIndex, i * n, n, heights, gradientX, gradientZ);
+        for (let a = 0; a < n; a += 1) {
+          const x = xs[i * n + a]!, height = heights[a]!;
+          const margin = 0.5 * (Math.abs(gradientX[a]!) * sx + Math.abs(gradientZ[a]!) * sz) + quadratic;
+          groundLow = Math.min(groundLow, height - margin); groundHigh = Math.max(groundHigh, height + margin);
+          // `insideFootprint`, on the hoisted rectangle.
+          if (x > fMinX && x < fMaxX && z > fMinZ && z < fMaxZ) { overlaps = 1; continue; }
+          const steps = (height - anchor_m) / cell + 0.5, whole = Math.floor(steps), fraction = steps - whole;
+          const top = fraction < COLUMN_TOP_ROUNDING_GUARD || fraction > 1 - COLUMN_TOP_ROUNDING_GUARD
+            ? columnTop(field, anchor_m, cell, x, z) : anchor_m + whole * cell;
+          low = Math.min(low, top); high = Math.max(high, top);
+        }
       }
       tiles[base + 2] = overlaps;
       if (!(low <= high)) continue;
       if (!Number.isFinite(low) || !Number.isFinite(high)) throw new RangeError(`Backdrop tile ${level}/${i},${j} has invalid bounds`);
       tiles[base] = low; tiles[base + 1] = high;
-      const minX = centre[0] + (i - quarter) * n * cell, minZ = centre[1] + (j - quarter) * n * cell;
-      const [groundLow, groundHigh] = backdropTaylorHeightBounds(field, minX, minZ, minX + n * cell, minZ + n * cell, n);
+      const [envelopeLow, envelopeHigh] = backdropHeightBounds(field, minX, minZ, maxX, maxZ);
+      groundLow = Math.max(groundLow, envelopeLow); groundHigh = Math.min(groundHigh, envelopeHigh);
       // Packed as 16-bit fractions of the column interval widened by two cells.
       if (groundLow < low - 2 * cell || groundHigh > high + 2 * cell) {
         throw new RangeError(`Backdrop tile ${level}/${i},${j} ground leaves its column interval by more than two cells`);
       }
       smoothBounds[base / 3 * 2] = groundLow; smoothBounds[base / 3 * 2 + 1] = groundHigh;
-      smoothRunning = Math.max(smoothRunning, groundHigh);
-      running = Math.max(running, high);
+      running[1] = Math.max(running[1]!, groundHigh);
+      running[0] = Math.max(running[0]!, high);
     }
-    levelMaximum[level] = running;
-    if (Number.isFinite(running)) smoothExcessCells = Math.max(smoothExcessCells, (smoothRunning - running) / cell);
+  };
+  // A walked level's columns: the same centres on both axes.
+  const levelColumns = (cell: number): void => {
+    for (let column = 0; column < N * n; column += 1) {
+      xs[column] = centre[0] + (column - quarter * n + 0.5) * cell;
+      zs[column] = centre[1] + (column - quarter * n + 0.5) * cell;
+    }
+  };
+  for (let level = 0; level < levels; level += 1) {
+    const cell = h0 * 2 ** level;
+    // Stored as octree voxels, not walked: every tile of the level is empty.
+    const walked = level >= firstLevel;
+    let sampler: BackdropGridSampler | undefined;
+    if (walked) {
+      levelColumns(cell);
+      sampler = createBackdropGridSampler(field, xs, zs);
+    }
+    for (let j = 0; j < N; j += 1) {
+      planTileRow(level, j, cell, sampler);
+      if (walked) yield;
+    }
+    levelMaximum[level] = running[0]!;
+    if (Number.isFinite(running[0]!)) smoothExcessCells = Math.max(smoothExcessCells, (running[1]! - running[0]!) / cell);
   }
-  if (!Number.isFinite(running)) throw new RangeError("Backdrop terrain has no columns outside the footprint");
-  return { centre, halfWidth0_m, cellSize0_m: h0, anchor_m, columnsPerTile, levels, tiles, smoothBounds, smoothExcessCells, levelMaximum, highest_m: running };
+  if (!Number.isFinite(running[0]!)) throw new RangeError("Backdrop terrain has no columns outside the footprint");
+  return tilePlans.set(memoKey, { ...layout, tiles, smoothBounds, smoothExcessCells, levelMaximum, highest_m: running[0]! });
 }
 
 /** Content-ceiling columns per axis over the world's xz square. */
@@ -306,24 +400,34 @@ export function createBackdropContentCeiling(corner_m: readonly [number, number]
  */
 export function raiseBackdropContentCeiling(ceiling: BackdropContentCeiling,
   minimum: readonly number[], maximum: readonly number[]): readonly [number, number] | undefined {
-  const top = maximum[1]!;
+  const rows = raiseBackdropContentCeilingOver(ceiling, minimum[0]!, minimum[2]!, maximum[0]!, maximum[2]!, maximum[1]!);
+  return rows < 0 ? undefined : [Math.floor(rows / ceiling.cells), rows % ceiling.cells];
+}
+
+/**
+ * The same raise from the box's own numbers, for the build's pass over every
+ * planned leaf. Returns the touched rows as `first * cells + last`, or -1.
+ */
+export function raiseBackdropContentCeilingOver(ceiling: BackdropContentCeiling,
+  minimumX: number, minimumZ: number, maximumX: number, maximumZ: number, top: number): number {
   if (!Number.isFinite(top)) throw new RangeError("Content ceiling box top is not finite");
-  const n = ceiling.cells;
-  const column = (value: number, axis: 0 | 1) => Math.floor((value - ceiling.corner_m[axis]) / ceiling.cell_m);
-  const x0 = Math.max(column(minimum[0]!, 0) - 1, 0), x1 = Math.min(column(maximum[0]!, 0) + 1, n - 1);
-  const z0 = Math.max(column(minimum[2]!, 1) - 1, 0), z1 = Math.min(column(maximum[2]!, 1) + 1, n - 1);
-  if (x0 > x1 || z0 > z1) return undefined;
+  const n = ceiling.cells, cell = ceiling.cell_m, cornerX = ceiling.corner_m[0], cornerZ = ceiling.corner_m[1];
+  const x0 = Math.max(Math.floor((minimumX - cornerX) / cell) - 1, 0), x1 = Math.min(Math.floor((maximumX - cornerX) / cell) + 1, n - 1);
+  const z0 = Math.max(Math.floor((minimumZ - cornerZ) / cell) - 1, 0), z1 = Math.min(Math.floor((maximumZ - cornerZ) / cell) + 1, n - 1);
+  if (x0 > x1 || z0 > z1) return -1;
   // Rounded up an f32 step so the stored value can only loosen the bound.
   const raised = Math.fround(top + (1e-6 + 2 ** -22 * Math.abs(top)));
-  for (let z = z0; z <= z1; z += 1) for (let x = x0; x <= x1; x += 1) {
-    const index = z * n + x;
-    if (ceiling.tops[index]! < raised) ceiling.tops[index] = raised;
-    const tile = Math.floor(z / BACKDROP_CONTENT_CEILING_TILE_CELLS) * BACKDROP_CONTENT_CEILING_TILES
-      + Math.floor(x / BACKDROP_CONTENT_CEILING_TILE_CELLS);
-    if (ceiling.tiles[tile]! < raised) ceiling.tiles[tile] = raised;
+  const { tops, tiles } = ceiling;
+  for (let z = z0; z <= z1; z += 1) {
+    const row = z * n, tileRow = Math.floor(z / BACKDROP_CONTENT_CEILING_TILE_CELLS) * BACKDROP_CONTENT_CEILING_TILES;
+    for (let x = x0; x <= x1; x += 1) {
+      if (tops[row + x]! < raised) tops[row + x] = raised;
+      const tile = tileRow + Math.floor(x / BACKDROP_CONTENT_CEILING_TILE_CELLS);
+      if (tiles[tile]! < raised) tiles[tile] = raised;
+    }
   }
   ceiling.highest_m = Math.max(ceiling.highest_m, raised);
-  return [z0, z1];
+  return z0 * n + z1;
 }
 
 /** The ceiling section's words (header, then the columns row by row, then the tiles row by row). */

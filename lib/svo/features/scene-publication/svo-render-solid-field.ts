@@ -1,6 +1,7 @@
+import { createContentMemo } from "../../../core/content-memo";
 import type { SceneDescription } from "../../../core/model";
-import { solidWorldVoxelPatchBounds_m } from "../../../core/solid-world";
-import { terrainHeightAt, terrainWorldContainer } from "../../../core/terrain";
+import type { SolidWorldCoordinate } from "../../../core/solid-world";
+import { terrainColumnHeightsForLatticeSteps, terrainContentStamp, terrainWorldContainer } from "../../../core/terrain";
 import type { SparseBrickCoordinate } from "../construction/sparse-brick-octree";
 
 /**
@@ -13,19 +14,17 @@ export interface SvoRenderTerrainField {
   readonly dimensions: readonly [number, number];
   readonly heights_m: Float32Array<ArrayBuffer>;
   readonly materialId: number;
-  /** Ordered metre-space projection of canonical SolidWorld edits. */
-  readonly patches: readonly SvoRenderSolidPatch[];
 }
 
-export interface SvoRenderSolidPatch {
-  readonly operation: "fill" | "clear";
-  readonly minimum_m: readonly [number, number, number];
-  readonly maximum_m: readonly [number, number, number];
-  readonly materialId: number;
-}
-
-/** Rows per cooperative offer; comfortably below one frame on the depth-3 garden. */
-const TERRAIN_ROWS_PER_OFFER = 8;
+/**
+ * The fields of the last few (terrain, footprint, cell) a world was built on.
+ *
+ * A field is a function of the terrain's content, the footprint it covers and
+ * the cell it is sampled on, and of nothing else in the scene, so a rebuild
+ * that changed none of them takes the samples it already has. Shared between
+ * builds: no holder writes to `heights_m`.
+ */
+const terrainFields = createContentMemo<SvoRenderTerrainField>(2);
 
 export function* buildSvoRenderTerrainFieldSteps(
   scene: Pick<SceneDescription, "container" | "terrain" | "voxelDomain" | "solidVoxels">,
@@ -38,32 +37,25 @@ export function* buildSvoRenderTerrainFieldSteps(
   const nz = Math.max(1, Math.round(terrainContainer.depth_m / cellSize_m[2]));
   const originX = -0.5 * terrainContainer.width_m;
   const originZ = -0.5 * terrainContainer.depth_m;
-  const heights_m = new Float32Array(new ArrayBuffer(nx * nz * Float32Array.BYTES_PER_ELEMENT));
-  for (let z = 0; z < nz; z += 1) {
-    const worldZ = originZ + (z + 0.5) * cellSize_m[2];
-    for (let x = 0; x < nx; x += 1) {
-      const worldX = originX + (x + 0.5) * cellSize_m[0];
-      heights_m[x + nx * z] = Math.min(terrainContainer.height_m,
-        Math.max(0, terrainHeightAt(scene.terrain, worldX, worldZ)));
-    }
-    if ((z + 1) % TERRAIN_ROWS_PER_OFFER === 0) yield;
-  }
-  return {
+  const key = JSON.stringify([terrainContentStamp(scene.terrain), terrainContainer.width_m,
+    terrainContainer.height_m, terrainContainer.depth_m, cellSize_m[0], cellSize_m[2], materialId]);
+  const held = terrainFields.get(key);
+  if (held) return held;
+  // The column bake every lattice shares: one height per cell centre, clamped
+  // to the footprint's height, from the description's own nodes where a sweep
+  // this size pays for deriving them.
+  const heights_m = yield* terrainColumnHeightsForLatticeSteps(scene.terrain, {
+    originX_m: originX, originZ_m: originZ,
+    cellX_m: cellSize_m[0], cellZ_m: cellSize_m[2],
+    nx, nz, maximumHeight_m: terrainContainer.height_m,
+  });
+  return terrainFields.set(key, {
     origin_m: [originX, originZ],
     cellSize_m: [cellSize_m[0], cellSize_m[2]],
     dimensions: [nx, nz],
     heights_m,
     materialId,
-    patches: scene.solidVoxels.map((patch) => {
-      const bounds = solidWorldVoxelPatchBounds_m(scene, patch);
-      return {
-        operation: patch.operation,
-        minimum_m: bounds.minimum,
-        maximum_m: bounds.maximum,
-        materialId: patch.materialId ?? 1,
-      };
-    }),
-  };
+  });
 }
 
 interface TerrainRangeLevel {
@@ -144,31 +136,61 @@ export function createSvoRenderTerrainRefinement(options: {
   };
 }
 
-/** Refine the boundary, rather than the volume, of ordered SolidWorld edits. */
-export function createSvoRenderPatchRefinement(options: {
-  readonly patches: readonly SvoRenderSolidPatch[];
+/**
+ * Refine around the pages an authored surface can cross
+ * (`terrainEditSurfacePages`), rather than through the volume of a fill or of
+ * a dig. A node is refined when a surface page lies within a voxel of it.
+ *
+ * The pages are kept as a pyramid of occupied page coordinates, so a node of
+ * any size is answered by at most eight lookups at the level its span fits.
+ */
+export function createSvoRenderEditPageRefinement(options: {
+  readonly pages: readonly SolidWorldCoordinate[];
+  /** The solid lattice the pages are addressed on. */
+  readonly lattice: { readonly origin_m: readonly [number, number, number]; readonly cellSize_m: readonly [number, number, number] };
   readonly worldOrigin_m: readonly [number, number, number];
   readonly nodeEdge_m: readonly (readonly number[])[];
   readonly maximumDepth: number;
 }): { refineEnvironmentLeaf(level: number, coordinate: SparseBrickCoordinate): boolean } {
+  const PAGE_CELLS = 8, LEVELS = 16, BIAS = 0x8000, SPAN = 0x1_0000;
+  const key = (x: number, y: number, z: number): number => (x + BIAS) + SPAN * ((y + BIAS) + SPAN * (z + BIAS));
+  const occupied: Set<number>[] = Array.from({ length: LEVELS + 1 }, () => new Set<number>());
+  for (const [x, y, z] of options.pages) {
+    if (Math.max(Math.abs(x), Math.abs(y), Math.abs(z)) >= BIAS) {
+      throw new RangeError(`Terrain edit page ${x},${y},${z} is outside the addressable lattice`);
+    }
+    for (let level = 0; level <= LEVELS; level += 1) occupied[level]!.add(key(x >> level, y >> level, z >> level));
+  }
+  const { lattice } = options;
   return {
     refineEnvironmentLeaf(level, coordinate) {
       if (level >= options.maximumDepth) return false;
       const edge = options.nodeEdge_m[level];
       if (!edge) return false;
-      const minimum = [
-        options.worldOrigin_m[0] + coordinate.x * edge[0]!,
-        options.worldOrigin_m[1] + coordinate.y * edge[1]!,
-        options.worldOrigin_m[2] + coordinate.z * edge[2]!,
-      ];
-      const maximum = minimum.map((value, axis) => value + edge[axis]!);
-      return options.patches.some((patch) => {
-        const lo = patch.minimum_m, hi = patch.maximum_m;
-        if (maximum.some((value, axis) => value < lo[axis]!)
-          || minimum.some((value, axis) => value > hi[axis]!)) return false;
-        return lo.some((plane, axis) => plane >= minimum[axis]! && plane <= maximum[axis]!)
-          || hi.some((plane, axis) => plane >= minimum[axis]! && plane <= maximum[axis]!);
-      });
+      const node = [coordinate.x, coordinate.y, coordinate.z];
+      const low = [0, 0, 0], high = [0, 0, 0];
+      let span = 1;
+      for (let axis = 0; axis < 3; axis += 1) {
+        const minimum = options.worldOrigin_m[axis]! + node[axis]! * edge[axis]!;
+        const page = PAGE_CELLS * lattice.cellSize_m[axis]!;
+        // One voxel either side: the reach of a face the node only touches.
+        low[axis] = Math.floor((minimum - lattice.origin_m[axis]!) / page - 1 / PAGE_CELLS);
+        high[axis] = Math.floor((minimum + edge[axis]! - lattice.origin_m[axis]!) / page + 1 / PAGE_CELLS);
+        if (high[axis]! < -BIAS || low[axis]! >= BIAS) return false;
+        low[axis] = Math.max(-BIAS, low[axis]!); high[axis] = Math.min(BIAS - 1, high[axis]!);
+        span = Math.max(span, high[axis]! - low[axis]! + 1);
+      }
+      // At the level whose cells are at least the span, the range covers two an axis.
+      const pyramid = Math.min(LEVELS, Math.ceil(Math.log2(span)));
+      const cells = occupied[pyramid]!;
+      for (let z = low[2]! >> pyramid; z <= high[2]! >> pyramid; z += 1) {
+        for (let y = low[1]! >> pyramid; y <= high[1]! >> pyramid; y += 1) {
+          for (let x = low[0]! >> pyramid; x <= high[0]! >> pyramid; x += 1) {
+            if (cells.has(key(x, y, z))) return true;
+          }
+        }
+      }
+      return false;
     },
   };
 }

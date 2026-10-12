@@ -187,10 +187,13 @@ fn dmcEmitMixed(vertex:vec3f,scale:u32,depth:u32,largest:f32){
   dmcEmit(max(vertex-vec3f(largest),vec3f(0)),scale,depth,true);
 }
 fn meshDmcExtract(base:vec3u,scale:u32,depth:u32,local:u32,n:u32){
-  if(local>=n){return;}
+  if(local>=n*n){return;}
+  // One row of cells a job. A thread walks its job alone, so a batch of a few
+  // bricks takes as long as its longest job however many threads stand idle.
+  let row=local%n;let slab=local/n;
   let s=f32(scale);let span=f32(n*scale);
   // Uniform dual grids have contiguous payloads within a brick. Resolve the
-  // eight incident bricks once per slice instead of walking the tree eight
+  // eight incident bricks once per row instead of walking the tree eight
   // times for each cell. Only an octant whose brick is not this brick's size
   // is looked up on its own.
   var bricks:array<MeshRegion,8>;
@@ -201,12 +204,12 @@ fn meshDmcExtract(base:vec3u,scale:u32,depth:u32,local:u32,n:u32){
   if(own.voxel==SVO_INVALID||own.size!=s){return;}
   // Vertices at a cell's minimum corner: this cell holds the highest octant,
   // so it owns the dual cell unless a finer leaf is present.
-  for(var y=0u;y<n;y+=1u){for(var x=0u;x<n;x+=1u){
-    let vertex=vec3f(base+vec3u(x,y,local)*scale);
+  for(var x=0u;x<n;x+=1u){
+    let vertex=vec3f(base+vec3u(x,row,slab)*scale);
     if(any(vertex<vec3f(s))){continue;}
     dmcReset();var valid=true;var largest=s;
     for(var c=0u;c<8u;c+=1u){
-      let q=vec3i(vec3u(x,y,local))+vec3i(dmcCorner(c))-vec3i(1);
+      let q=vec3i(vec3u(x,row,slab))+vec3i(dmcCorner(c))-vec3i(1);
       let upper=q>=vec3i(0);
       var region=bricks[select(0u,1u,upper.x)|select(0u,2u,upper.y)|select(0u,4u,upper.z)];
       if(region.voxel!=SVO_INVALID&&region.size==s){
@@ -221,7 +224,7 @@ fn meshDmcExtract(base:vec3u,scale:u32,depth:u32,local:u32,n:u32){
     }
     if(!valid){continue;}
     if(largest>s){dmcEmitMixed(vertex,scale,depth,largest);}else{dmcEmit(vertex-vec3f(s),scale,depth,false);}
-  }}
+  }
   // Vertices on this brick's maximum faces. The cell beyond is another
   // brick's; this brick owns the dual cell only where every higher octant is a
   // coarser leaf, which needs the brick diagonally beyond the vertex to be one.
@@ -231,9 +234,10 @@ fn meshDmcExtract(base:vec3u,scale:u32,depth:u32,local:u32,n:u32){
     plus[c]=region.voxel!=SVO_INVALID&&region.size>s;graded=graded||plus[c];
   }
   if(!graded){return;}
-  let layers=select(1u,2u,local+1u==n);
-  for(var layer=0u;layer<layers;layer+=1u){for(var y=0u;y<=n;y+=1u){for(var x=0u;x<=n;x+=1u){
-    let v=vec3u(x,y,local+layer);
+  // The last slab also takes the face beyond it, and the last row the row beyond.
+  let layers=select(1u,2u,slab+1u==n);let rows=select(1u,2u,row+1u==n);
+  for(var layer=0u;layer<layers;layer+=1u){for(var y=row;y<row+rows;y+=1u){for(var x=0u;x<=n;x+=1u){
+    let v=vec3u(x,y,slab+layer);
     let beyond=select(0u,1u,v.x==n)|select(0u,2u,v.y==n)|select(0u,4u,v.z==n);
     if(beyond==0u||!plus[beyond]){continue;}
     let owner=7u&~beyond;let vertex=vec3f(base+v*scale);

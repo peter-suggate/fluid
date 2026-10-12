@@ -5,13 +5,16 @@ import {
 } from "../../../core/planar-boundary";
 import type { EnvironmentBoxProxy, EnvironmentProxyPrimitive } from "../../../core/voxel-environments";
 import type { SceneDescription } from "../../../core/model";
-import { solidVoxelShellForScene } from "../../../core/scene-lattice";
+import { sceneLatticeDimensions, solidVoxelShellForScene } from "../../../core/scene-lattice";
+import { appendedSolidPatches } from "../../../core/solid-patch-list";
+import { terrainContentStamp } from "../../../core/terrain";
 import { vesselCutawayPatches } from "../../../core/vessel-cutaway";
 import {
   createSolidWorld,
   planarBoundaryForSolidWorldVoxelPatch,
   solidWorldVoxelPatchBounds_m,
   terrainSolidWorldWithPatches,
+  withSolidWorldPatches,
   type SolidWorld,
   type SolidWorldVoxelPatch,
 } from "../../../core/solid-world";
@@ -88,6 +91,95 @@ export function svoPlanarResidualSolidWorld(
   return scene?.terrain
     ? terrainSolidWorldWithPatches(scene, patches)
     : createSolidWorld(patches);
+}
+
+/**
+ * One published solid snapshot's render residual, with what the next snapshot
+ * needs to extend it instead of replaying the document.
+ */
+export interface SvoRenderResidual {
+  /** The canonical snapshot this was taken from. */
+  readonly world: SolidWorld;
+  /** What is drawn: `world` without its hidden shell and with the cutaway cut. */
+  readonly residual: SolidWorld;
+  /** `residual` before the cutaway; the image a later stroke is laid over. */
+  readonly drawn: SolidWorld;
+  readonly shell: CanonicalShellSources;
+  readonly excluded: ReadonlySet<number>;
+  readonly groundKey: string;
+  readonly cutawayKey: string;
+}
+
+/** Everything but the patches that the drawn image is composed from. */
+const residualGroundKey = (scene: SceneDescription): string =>
+  `${terrainContentStamp(scene.terrain)}:${scene.container.width_m}:${scene.container.height_m}:`
+  + `${scene.container.depth_m}:${sceneLatticeDimensions(scene).join(":")}:`
+  + `${scene.container.shape ?? "box"}:${scene.container.top ?? "open"}`;
+
+/**
+ * Residuals by the snapshot they were taken from, for exactly as long as
+ * something else holds that snapshot. An edit asks for its residual twice, to
+ * be validated and to be staged; and undo and redo return to snapshots history
+ * still holds, so they take those residuals back rather than replay a document.
+ */
+const residualBySnapshot = new WeakMap<SolidWorld, SvoRenderResidual>();
+
+/**
+ * The render residual of `world`, the snapshot `scene` publishes.
+ *
+ * `previous` is the residual of the snapshot published before it. A stroke
+ * appends patches, and the residual of an appended document is the previous
+ * drawn image with the stroke laid over it: the edit costs its own pages, where
+ * replaying the document costs every patch ever authored and, on a terrain
+ * scene, a bake of the ground. Pages the stroke leaves alone keep their
+ * identity, which is what lets the display upload only the ones that moved.
+ *
+ * The document is replayed when there is nothing to extend: a first
+ * publication, an undo or a branch, different ground, or an edit that changes
+ * which shell faces are hidden — the first cut into a wall reveals the whole
+ * slab. A scene's cutaway is a flood of the drawn solids and is taken afresh
+ * either way.
+ */
+export function svoRenderResidual(
+  scene: SceneDescription,
+  world: SolidWorld,
+  previous?: SvoRenderResidual,
+): SvoRenderResidual {
+  const groundKey = residualGroundKey(scene);
+  const eye = scene.cutaway?.eye_m;
+  const cutawayKey = eye ? `${eye.x}:${eye.y}:${eye.z}` : "";
+  const known = residualBySnapshot.get(world);
+  if (known && known.groundKey === groundKey && known.cutawayKey === cutawayKey) return known;
+  const appended = previous && previous.groundKey === groundKey
+    ? appendedSolidPatches(previous.world.patches, world.patches) : undefined;
+  const shell = canonicalShellSources(scene, world.patches, appended ? previous!.shell : undefined);
+  const excluded = canonicalShellPatches(shell).hidden;
+  const firstAppended = world.patches.length - (appended?.length ?? 0);
+  let drawn: SolidWorld;
+  if (excluded.size === 0) {
+    drawn = world;
+  } else if (appended && sameHiddenBefore(previous!.excluded, excluded, firstAppended)) {
+    drawn = withSolidWorldPatches(previous!.drawn,
+      appended.filter((_, index) => !excluded.has(firstAppended + index)));
+  } else {
+    const patches = world.patches.filter((_, patchIndex) => !excluded.has(patchIndex));
+    drawn = scene.terrain ? terrainSolidWorldWithPatches(scene, patches) : createSolidWorld(patches);
+  }
+  const cutaway = vesselCutawayPatches(scene, drawn.patches);
+  const residual: SvoRenderResidual = { world, residual: withSolidWorldPatches(drawn, cutaway),
+    drawn, shell, excluded, groundKey, cutawayKey };
+  residualBySnapshot.set(world, residual);
+  return residual;
+}
+
+/** Whether both snapshots hide the same patches among the first `count`. */
+function sameHiddenBefore(previous: ReadonlySet<number>, next: ReadonlySet<number>,
+  count: number): boolean {
+  let nextBefore = 0;
+  for (const patchIndex of next) if (patchIndex < count) nextBefore += 1;
+  if (nextBefore !== previous.size) return false;
+  for (const patchIndex of previous) if (!next.has(patchIndex)) return false;
+  return true;
 }
 
 /** Bounds of visible solid geometry, retaining analytic owners as well as voxels. */
@@ -200,6 +292,112 @@ export function buildSvoPlanarBoundaryCatalog(
   return { sources, patchIndexByOwner };
 }
 
+/** A shell slab is a whole-cell box; a patch of any other kind is never one. */
+const shellPatchSignature = (patch: SolidWorldVoxelPatch): string =>
+  `${patch.operation}:${patch.kind ?? "box"}:${patch.materialId ?? 1}:`
+  + `${patch.minimum.join(",")}:${patch.maximumExclusive.join(",")}`;
+
+const overlapsVolume = (left: SolidWorldVoxelPatch, right: SolidWorldVoxelPatch): boolean =>
+  left.maximumExclusive[0] > right.minimum[0]
+    && left.minimum[0] < right.maximumExclusive[0]
+    && left.maximumExclusive[1] > right.minimum[1]
+    && left.minimum[1] < right.maximumExclusive[1]
+    && left.maximumExclusive[2] > right.minimum[2]
+    && left.minimum[2] < right.maximumExclusive[2];
+
+/**
+ * Where a document keeps its canonical tank shell, and which of those slabs an
+ * edit has cut.
+ *
+ * Both answers only ever move one way as patches are appended: a slab is the
+ * first document patch equal to it, and a slab once cut stays cut. So the
+ * record for a longer document is the shorter one's continued over the new
+ * patches, and a stroke pays for itself rather than for the document.
+ */
+export interface CanonicalShellSources {
+  /** The shell `solidVoxelShellForScene` authors for this lattice. */
+  readonly expected: readonly SolidWorldVoxelPatch[];
+  /** Per expected slab, the first document patch that is it, or -1. */
+  readonly source: Int32Array;
+  /** Per expected slab, whether a clear overlaps it. */
+  readonly cut: Uint8Array;
+  /** Expected slabs the document has not supplied yet, by signature. */
+  readonly unmatched: ReadonlyMap<string, readonly number[]>;
+  readonly anyClear: boolean;
+  /** A sphere's shell is hidden whole or not at all. */
+  readonly atomic: boolean;
+  /** How many document patches this record has read. */
+  readonly patchCount: number;
+}
+
+/** `previous` must describe a prefix of `patches` on the same lattice. */
+function canonicalShellSources(
+  scene: SceneDescription,
+  patches: readonly SolidWorldVoxelPatch[],
+  previous?: CanonicalShellSources,
+): CanonicalShellSources {
+  const expected = previous?.expected ?? solidVoxelShellForScene(scene);
+  const source = previous ? previous.source.slice() : new Int32Array(expected.length).fill(-1);
+  const cut = previous ? previous.cut.slice() : new Uint8Array(expected.length);
+  let unmatched: ReadonlyMap<string, readonly number[]>;
+  if (previous) unmatched = previous.unmatched;
+  else {
+    const bySignature = new Map<string, number[]>();
+    expected.forEach((slab, slabIndex) => {
+      const signature = shellPatchSignature(slab);
+      const slabs = bySignature.get(signature);
+      if (slabs) slabs.push(slabIndex); else bySignature.set(signature, [slabIndex]);
+    });
+    unmatched = bySignature;
+  }
+  let anyClear = previous?.anyClear ?? false;
+  for (let patchIndex = previous?.patchCount ?? 0; patchIndex < patches.length; patchIndex += 1) {
+    const patch = patches[patchIndex]!;
+    const slabs = unmatched.size > 0 ? unmatched.get(shellPatchSignature(patch)) : undefined;
+    if (slabs) {
+      for (const slabIndex of slabs) source[slabIndex] = patchIndex;
+      // The previous record keeps its own map; only a snapshot that finds a slab pays for a copy.
+      const remaining = new Map(unmatched);
+      remaining.delete(shellPatchSignature(patch));
+      unmatched = remaining;
+    }
+    if (patch.operation !== "clear") continue;
+    anyClear = true;
+    for (let slabIndex = 0; slabIndex < expected.length; slabIndex += 1) {
+      if (cut[slabIndex] === 0 && overlapsVolume(patch, expected[slabIndex]!)) cut[slabIndex] = 1;
+    }
+  }
+  return { expected, source, cut, unmatched, anyClear,
+    atomic: scene.container.shape === "sphere", patchCount: patches.length };
+}
+
+/**
+ * The document patches that are canonical shell, and the ones presentation
+ * hides. `candidates` is the list being published, when it is not the document
+ * the record was read from: a slab counts only where both hold it.
+ */
+function canonicalShellPatches(
+  shell: CanonicalShellSources,
+  candidates?: readonly SolidWorldVoxelPatch[],
+): { canonical: Set<number>; hidden: Set<number> } {
+  const canonical = new Set<number>(), uncut = new Set<number>();
+  shell.expected.forEach((slab, slabIndex) => {
+    const patchIndex = shell.source[slabIndex]!;
+    if (patchIndex < 0) return;
+    const candidate = candidates?.[patchIndex];
+    if (candidates && (!candidate
+      || shellPatchSignature(candidate) !== shellPatchSignature(slab))) return;
+    canonical.add(patchIndex);
+    if (shell.cut[slabIndex] === 0) uncut.add(patchIndex);
+  });
+  // A canonical sphere is replaced as one atomic presentation source.
+  // Any clear edit makes the substitution ineligible so the exact edited
+  // voxel surface remains visible.
+  const atomicallyHidden = shell.atomic && canonical.size === shell.expected.length
+    && !shell.anyClear;
+  return { canonical, hidden: atomicallyHidden ? canonical : uncut };
+}
+
 /** Compile accepted SolidWorld edit boxes into a caller's compact record range. */
 export function buildSvoSolidWorldPlanarBoundaryCatalog(
   scene: SceneDescription,
@@ -212,49 +410,11 @@ export function buildSvoSolidWorldPlanarBoundaryCatalog(
   }
   const sources: SvoPlanarBoundarySource[] = [];
   const patchIndexByPatch = new Map<number, number>();
-  const sameCoordinate = (left: SolidWorldVoxelPatch["minimum"],
-    right: SolidWorldVoxelPatch["minimum"]) => left.every((value, axis) =>
-    value === right[axis]);
-  const samePatch = (authored: SolidWorldVoxelPatch | undefined,
-    candidate: SolidWorldVoxelPatch | undefined) => authored !== undefined
-      && candidate !== undefined
-      && authored.operation === candidate.operation
-      && (authored.materialId ?? 1) === (candidate.materialId ?? 1)
-      && sameCoordinate(authored.minimum, candidate.minimum)
-      && sameCoordinate(authored.maximumExclusive, candidate.maximumExclusive);
-  const overlapsVolume = (left: SolidWorldVoxelPatch, right: SolidWorldVoxelPatch) =>
-    left.maximumExclusive[0] > right.minimum[0]
-      && left.minimum[0] < right.maximumExclusive[0]
-      && left.maximumExclusive[1] > right.minimum[1]
-      && left.minimum[1] < right.maximumExclusive[1]
-      && left.maximumExclusive[2] > right.minimum[2]
-      && left.minimum[2] < right.maximumExclusive[2];
   // Canonical shell fills remain voxels for physics. Presentation may omit an
   // unedited fill in favour of the vessel outline, but it must never promote a
   // shell slab into the explicit embedded-plane catalogue.
-  const canonicalTankShellSources = new Set<number>();
-  const uncutCanonicalTankShellSources = new Set<number>();
-  const expectedTankShell = solidVoxelShellForScene(scene);
-  expectedTankShell.forEach((expected) => {
-    const sourceIndex = scene.solidVoxels.findIndex((authored) =>
-      samePatch(authored, expected));
-    const authored = scene.solidVoxels[sourceIndex];
-    const candidate = patches[sourceIndex];
-    if (samePatch(authored, expected) && samePatch(candidate, expected)) {
-      canonicalTankShellSources.add(sourceIndex);
-      const cut = scene.solidVoxels.some((patch) =>
-        patch.operation === "clear" && overlapsVolume(patch, expected));
-      if (!cut) uncutCanonicalTankShellSources.add(sourceIndex);
-    }
-  });
-  // A canonical sphere is replaced as one atomic presentation source.
-  // Any clear edit makes the substitution ineligible so the exact edited
-  // voxel surface remains visible.
-  const canonicalTankShell = (scene.container.shape === "sphere"
-    && canonicalTankShellSources.size === expectedTankShell.length
-    && !scene.solidVoxels.some(({ operation }) => operation === "clear"))
-    ? canonicalTankShellSources
-    : uncutCanonicalTankShellSources;
+  const { canonical: canonicalTankShellSources, hidden: canonicalTankShell } =
+    canonicalShellPatches(canonicalShellSources(scene, scene.solidVoxels), patches);
   // Tank glass is retired. Keep the canonical shell as physical SolidWorld
   // authority, but remove every unedited wall from the render residual. The
   // vessel outline supplies the visual cue.

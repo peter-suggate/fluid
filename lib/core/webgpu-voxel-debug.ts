@@ -53,6 +53,8 @@ export const SPARSE_VOXEL_PUBLICATION_STATE = Object.freeze({
   dynamicSolidRevision: 4,
   coarseFluidRevision: 5,
   fineFluidRevision: 6,
+  /** The scene maintenance revision the producer last published, so each is published once. */
+  publishedSceneRevision: 7,
 } as const);
 
 /** Bit values stored in SPARSE_VOXEL_PUBLICATION_STATE.validFields. */
@@ -255,6 +257,10 @@ export interface SparseVoxelStructuralRenderSource {
     dirtyBrickCapacity: number;
     surfaceVertexOffsetBytes?: number;
     surfaceVertexKind?: "dual-contouring" | "dual-marching-cubes";
+    /** The dirty journal every finalized leaf is appended to; see `SparseSceneMaintenanceBinding.journal`. */
+    journal?: Readonly<{ cursorOffsetBytes: number; recordOffsetBytes: number; recordStrideWords: number; capacity: number }>;
+    /** Maintenance frames encoded so far; see `SparseSceneMaintenanceBinding.activity`. */
+    readonly activity?: number;
   }>;
   capacities: Readonly<{ nodes: number; leaves: number; voxels: number }>;
   /** Accepted initial topology census; runtime fluid growth adds voxel terminals. */
@@ -340,7 +346,7 @@ export interface SparseVoxelSceneRenderSource {
    */
   derivedLighting?: Readonly<{
     state: "ready" | "unavailable";
-    reason?: "capacity" | "address-plan-invalidated" | "unsupported-level-count" | "initialization-failed";
+    reason?: "capacity" | "unsupported-level-count" | "initialization-failed";
     detail?: string;
     requiredPages: number;
     capacity: number;

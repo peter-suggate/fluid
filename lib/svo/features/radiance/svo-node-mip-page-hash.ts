@@ -154,17 +154,96 @@ export function findSvoNodeMipPageHash(
   level: number,
   coordinate: readonly [number, number, number],
 ): number | undefined {
-  const [x, y, z] = coordinate;
+  const slot = findSvoNodeMipPageHashSlot(words, shape.capacity, level, coordinate[0], coordinate[1], coordinate[2]);
+  return slot < 0 ? undefined : slot;
+}
+
+/** The same lookup on scalars: the slot, or -1. What an edit asks per page, so it allocates nothing. */
+export function findSvoNodeMipPageHashSlot(
+  words: Uint32Array, capacity: number, level: number, x: number, y: number, z: number,
+): number {
   const key0 = (x | (level << SVO_NODE_MIP_PAGE_HASH.coordinateBits)) >>> 0;
-  const mask = shape.capacity - 1;
+  const mask = capacity - 1;
   let index = svoNodeMipPageHashHome(level, x, y, z) & mask;
   for (let probe = 0; probe < SVO_NODE_MIP_PAGE_HASH.maximumProbes; probe += 1) {
     const base = index * SVO_NODE_MIP_PAGE_HASH.wordsPerEntry;
-    if (words[base + 3] === 0) return undefined;
+    if (words[base + 3] === 0) return -1;
     if (words[base] === key0 && words[base + 1] === y && words[base + 2] === z) return words[base + 3] - 1;
     index = (index + 1) & mask;
   }
-  return undefined;
+  return -1;
+}
+
+/**
+ * Add one page to a table in place and return the entry it was written to —
+ * the only texel an insertion changes, which is what makes adding a page cost
+ * one page. Throws on a duplicate key and on a probe sequence past
+ * `maximumProbes`, which the shader's loop would not follow.
+ */
+export function insertSvoNodeMipPageHash(
+  words: Uint32Array, capacity: number, level: number, x: number, y: number, z: number, slot: number,
+): number {
+  const key0 = (x | (level << SVO_NODE_MIP_PAGE_HASH.coordinateBits)) >>> 0;
+  const mask = capacity - 1;
+  let index = svoNodeMipPageHashHome(level, x, y, z) & mask;
+  for (let probe = 0; probe < SVO_NODE_MIP_PAGE_HASH.maximumProbes && probe < capacity; probe += 1) {
+    const base = index * SVO_NODE_MIP_PAGE_HASH.wordsPerEntry;
+    if (words[base + 3] === 0) {
+      words[base] = key0; words[base + 1] = y; words[base + 2] = z; words[base + 3] = slot + 1;
+      return index;
+    }
+    if (words[base] === key0 && words[base + 1] === y && words[base + 2] === z) {
+      throw new RangeError(`Node-mip page hash received duplicate page ${level}:${x},${y},${z}`);
+    }
+    index = (index + 1) & mask;
+  }
+  throw new RangeError(`Node-mip page hash probe sequence exceeds ${SVO_NODE_MIP_PAGE_HASH.maximumProbes} inserting ${level}:${x},${y},${z} into ${capacity} entries`);
+}
+
+/**
+ * Remove one page in place and return its slot, or -1 when the table does not
+ * hold it.
+ *
+ * Deletion closes the gap instead of leaving a tombstone: every later entry of
+ * the run whose home is at or before the gap moves back into it. A lookup
+ * therefore still ends at the first empty entry, which is what
+ * `svoNodeMipPageHashFind` assumes, and a table that is erased from and added to
+ * for ever keeps the probe lengths of one that was built once. A move only
+ * shortens an entry's probe sequence, so the `maximumProbes` bound survives.
+ * `touched` is told every entry whose texel changed.
+ */
+export function removeSvoNodeMipPageHash(
+  words: Uint32Array, capacity: number, level: number, x: number, y: number, z: number,
+  touched: (entry: number) => void,
+): number {
+  const key0 = (x | (level << SVO_NODE_MIP_PAGE_HASH.coordinateBits)) >>> 0;
+  const mask = capacity - 1;
+  const stride = SVO_NODE_MIP_PAGE_HASH.wordsPerEntry;
+  let gap = svoNodeMipPageHashHome(level, x, y, z) & mask;
+  let slot = -1;
+  for (let probe = 0; probe < SVO_NODE_MIP_PAGE_HASH.maximumProbes; probe += 1) {
+    const base = gap * stride;
+    if (words[base + 3] === 0) return -1;
+    if (words[base] === key0 && words[base + 1] === y && words[base + 2] === z) { slot = words[base + 3] - 1; break; }
+    gap = (gap + 1) & mask;
+  }
+  if (slot < 0) return -1;
+  // Ends at the first empty entry, or back at the gap when the table is full.
+  for (let next = (gap + 1) & mask; next !== gap; next = (next + 1) & mask) {
+    const base = next * stride;
+    if (words[base + 3] === 0) break;
+    const word0 = words[base];
+    const home = svoNodeMipPageHashHome(word0 >>> SVO_NODE_MIP_PAGE_HASH.coordinateBits,
+      word0 & (2 ** SVO_NODE_MIP_PAGE_HASH.coordinateBits - 1), words[base + 1], words[base + 2]) & mask;
+    // The entry may move back only if its home is not inside (gap, next].
+    if (((next - home) & mask) < ((next - gap) & mask)) continue;
+    words.copyWithin(gap * stride, base, base + stride);
+    touched(gap);
+    gap = next;
+  }
+  words.fill(0, gap * stride, gap * stride + stride);
+  touched(gap);
+  return slot;
 }
 
 /**

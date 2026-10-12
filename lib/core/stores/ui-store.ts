@@ -9,6 +9,8 @@ import { bodySelection, selectedBodyIdOf, type EditorSelection } from "../editor
 import type { AxisConstraint } from "../editor-axis-constraint";
 import { DEFAULT_VIEWPORT_MODE, type ViewportMode } from "../editor-viewport-mode";
 import { VOXEL_REGION_SELECTION, type VoxelSelectionRegion } from "../editor-voxel-region";
+import { voxelTools } from "../voxel-editor/registry";
+import type { VoxelClipboard } from "../voxel-editor/verb";
 import type { PlacementDimensions } from "../editor-placement";
 import { DEFAULT_REGION_DRAFT, type RegionDraft } from "../refinement-regions";
 import { defaultCamera, type CameraState, type RigidShape } from "../model";
@@ -132,6 +134,11 @@ interface UIStore {
   /** Includes the final asynchronous preflight after pointer release. */
   voxelStrokePending: boolean;
   voxelToolId?: string;
+  /**
+   * Every tool and verb control's chosen value, by owner then control id. The
+   * owner is a tool's id, `shared` for what the whole editor holds (material,
+   * mirror planes), or `verb:<id>` — see `controlValueOwner` in the plugin contract.
+   */
   voxelToolValues: Record<string, Record<string, number>>;
   setVoxelTool: (id: string | undefined) => void;
   setVoxelToolValue: (id: string, key: string, value: number) => void;
@@ -178,8 +185,19 @@ interface UIStore {
    * be saved, must not enter the undo history, and must not re-seed the solver
    * just by existing. `select` clears it whenever the selection moves off it, so
    * a stale box can never outlive the thing it was about.
+   *
+   * A box, and optionally a mask of which of its cells — what a tool that
+   * selects a connected piece hands back. The mask is a typed array and this
+   * store is never serialized, which is the only reason it may live here.
    */
   voxelRegion?: VoxelSelectionRegion;
+  /**
+   * The voxels last copied off a selection. Editor state like the selection it
+   * came from — not document data, never saved — and it outlives that
+   * selection, which is the point of a clipboard.
+   */
+  voxelClipboard?: VoxelClipboard;
+  setVoxelClipboard: (clipboard: VoxelClipboard | undefined) => void;
   /** The body bound to the cursor, or undefined when both hands are free. */
   carry?: CarrySession;
   /** The contextual ring, or undefined when it is closed. */
@@ -342,7 +360,15 @@ export const createUIStore = () => create<UIStore>((set) => ({
   voxelStrokePending: false,
   voxelToolId: undefined,
   voxelToolValues: {},
-  setVoxelTool: (voxelToolId) => set({ voxelToolId, viewportMode: "interact", armedGesture: undefined, selection: undefined }),
+  // Arming a tool puts down whatever else the pointer held — an armed gesture,
+  // a selected thing and its handles — except a voxel selection. The brushes
+  // work beside one and the selection tools exist to make one, so a selection
+  // that went whenever the hand changed tools could be neither built nor used.
+  // An id the registry does not know arms nothing, rather than a tool no host can find.
+  setVoxelTool: (id) => set((state) => ({
+    voxelToolId: voxelTools.get(id)?.id, viewportMode: "interact", armedGesture: undefined,
+    selection: state.selection?.kind === "voxel-region" ? state.selection : undefined,
+  })),
   setVoxelToolValue: (id, key, value) => set((state) => ({ voxelToolValues: {
     ...state.voxelToolValues, [id]: { ...state.voxelToolValues[id], [key]: value },
   } })),
@@ -353,6 +379,8 @@ export const createUIStore = () => create<UIStore>((set) => ({
   selection: undefined,
   selectedBodyId: undefined,
   voxelRegion: undefined,
+  voxelClipboard: undefined,
+  setVoxelClipboard: (voxelClipboard) => set({ voxelClipboard }),
   carry: undefined,
   radialMenu: undefined,
   selectionControlsOpen: false,

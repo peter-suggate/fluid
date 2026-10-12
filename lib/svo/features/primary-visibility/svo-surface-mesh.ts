@@ -1,24 +1,28 @@
 import { svoDualMarchingCubesMeshWGSL, svoVoxelMeshWGSL, svoContourMeshWGSL, svoDualContouringMeshWGSL } from "../meshing/plugins";
 import { svoCellContourWGSL } from "../construction/svo-cell-contour";
-import { SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW, SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../../../core/webgpu-sparse-scene-proxies";
+import { SPARSE_SCENE_DIRTY_JOURNAL_RECORD_WORD, SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../../../core/webgpu-sparse-scene-proxies";
 import type { WorkProgress } from "../../../core/work-progress";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lighting-visibility/svo-screen-space-termination";
 
 /**
  * Cached opaque voxel boundary quads. All coordinates are on the accepted
  * finest-cell lattice, so adjacent bricks produce identical shared vertices.
- * The GPU publication header is also the indirect draw/dispatch buffer.
+ * The GPU publication header is also the indirect draw buffer.
  *
- * Every brick owns one contiguous quad range in a bump-allocated arena, and a
- * per-leaf table records that range with the brick's address key. A scene
- * publication re-extracts only the bricks the voxelizer's maintenance pass
- * marked dirty (plus every brick whose slot key changed), freeing each old
- * range in place while the rest of the mesh keeps drawing. A whole-mesh
- * rebuild (first build, an unreliable dirty list, or compaction of the holes
- * those frees leave) extracts into a second arena while the first is still
- * drawn, then flips. While any build is pending, quads inside the dirty
- * boxes are culled and the pixels whose rays cross those boxes are traced,
- * so the edited region is exact and everything else stays rasterized.
+ * Every brick owns one contiguous quad range in a single arena, and a
+ * per-leaf table records that range with the brick's address key. The mesh
+ * reads the voxelizer's dirty journal with its own cursor: every leaf the
+ * voxelizer finalizes is re-extracted, together with the bricks that touch
+ * it, however many revisions or chunk frames produced those entries and
+ * whether or not an earlier build is still running. A brick whose new range
+ * has the size class of its old one is rewritten in place; otherwise the old
+ * range goes to its class's free stack and the new one is popped from its
+ * own, so the arena reaches a steady state under edits instead of filling
+ * with holes. Only a first build, a meshing style change or a lapped journal
+ * extracts the whole scene, in place, with nothing drawn meanwhile. While a
+ * build is pending, quads inside the boxes of the finalized bricks it still
+ * owes are culled and the pixels whose rays cross those boxes are traced, so
+ * an edit is exact the frame after its voxels land.
  */
 export interface SvoSurfaceMeshStatus {
   state: "pending" | "ready" | "blocked";
@@ -27,20 +31,40 @@ export interface SvoSurfaceMeshStatus {
   lodBricks?: readonly number[];
   detail?: string;
   requiredQuads?: number;
-  /** Quads currently owned by live bricks in the drawn arena. */
+  /** Quads currently owned by live bricks in the arena. */
   liveQuads?: number;
   capacityQuads?: number;
   allocatedBytes?: number;
   maximumBytes?: number;
+  /** Builds started since the builder was reset, of either kind. */
   builds?: number;
   requirementComplete?: boolean;
   completedBricks?: number;
   totalBricks?: number;
-  /** The drawn arena holds a complete mesh: a pending build updates it in place or beside it. */
+  /** The arena holds a complete mesh: a pending build updates it in place. */
   drawn?: boolean;
   buildPhase?: "extracting" | "capacity" | "complete";
-  buildKind?: "incremental" | "initial" | "replacement";
-  restartReason?: "initial" | "topology" | "geometry" | "publication" | "compaction";
+  /** Kind of the build now running; absent while idle. */
+  buildKind?: "incremental" | "initial";
+  restartReason?: "initial" | "topology" | "geometry" | "publication" | "journal";
+  /** Kind of the build that last completed. */
+  lastBuildKind?: "incremental" | "initial";
+  /** Bricks the build that last completed extracted: its dirty bricks and the bricks touching them. */
+  lastBuildBricks?: number;
+  /** Builds completed by re-extracting journaled bricks into the drawn arena. */
+  incrementalBuilds?: number;
+  /** Builds completed by extracting every brick with nothing drawn. */
+  wholeBuilds?: number;
+  /** Bricks extracted by every build so far, modulo 2^32. */
+  rebuiltBricks?: number;
+  /** Journal entries the mesh has consumed, modulo 2^32. */
+  journalCursor?: number;
+  /** Arena buffers the host has created for this pipeline, the first included. */
+  arenaAllocations?: number;
+  /** Times the host has rebuilt the mesh bind groups. */
+  arenaRebinds?: number;
+  /** The arena is at its final size: an overflow from here is a failure, not a growth. */
+  reserveFrozen?: boolean;
   fallbackReason?: "budget" | "smooth" | "inside-solid" | "publication" | "extraction";
 }
 
@@ -78,7 +102,7 @@ export function surfaceMeshProgress(status?: SvoSurfaceMeshStatus): WorkProgress
   const reason = status.restartReason === "topology" ? "Topology changed; re-extracting the affected bricks."
     : status.restartReason === "geometry" ? "Geometry changed; re-extracting the affected bricks."
     : status.restartReason === "publication" ? "Source publication changed; rebuilding the current scene."
-    : status.restartReason === "compaction" ? "Compacting freed quad storage; rebuilding beside the drawn mesh." : undefined;
+    : status.restartReason === "journal" ? "More bricks changed than the dirty journal holds; rebuilding the current scene." : undefined;
   return {
     label: status.state === "ready" ? "Mesh ready"
       : status.state === "blocked" ? "Raster unavailable"
@@ -98,23 +122,81 @@ export function surfaceMeshProgress(status?: SvoSurfaceMeshStatus): WorkProgress
 }
 
 export const SVO_SURFACE_MESH_BYTES = 64 * 1024 * 1024;
+/** First build grows on GPU overflow and earns its edit reserve on completion.
+ * Small scenes need not allocate the historical 64 MiB arena up front. */
+export const SVO_SURFACE_MESH_INITIAL_BYTES = 16 * 1024 * 1024;
 export const SVO_SURFACE_MESH_QUAD_BYTES = 32;
 export const SVO_SURFACE_MESH_HEADER_BYTES = 64;
 /** First 64 bytes retain the public draw/diagnostic ABI; tail is builder state. */
-export const SVO_SURFACE_MESH_STATE_BYTES = 224;
-/** Smallest arena a replacement build is given; a compaction never shrinks below it. */
+export const SVO_SURFACE_MESH_STATE_BYTES = 272;
+/** Historical arena size used to preserve the edit-reserve contract. */
 export const SVO_SURFACE_MESH_MINIMUM_QUADS = SVO_SURFACE_MESH_BYTES / SVO_SURFACE_MESH_QUAD_BYTES;
-/** Dirty box slots; the last always holds the union of the others, so a build masks up to 63 boxes individually and a longer dirty list collapses to the union alone. */
+/**
+ * Quads kept free past a whole build's cursor for the edits that follow it:
+ * half the mesh again, and never less than 16 MiB of quads.
+ * The arena is sized to this once, when the whole build completes, and is
+ * never resized by an edit.
+ */
+export function surfaceMeshReserveQuads(cursorQuads: number): number {
+  return Math.max(Math.ceil(Math.max(0, cursorQuads) / 2), SVO_SURFACE_MESH_MINIMUM_QUADS / 4);
+}
+/** Dirty box slots; the last always holds the union of the others, so a build masks up to 63 boxes individually and a longer dirty set collapses to the union alone. */
 export const SVO_SURFACE_MESH_BOX_CAPACITY = 64;
 export const SVO_SURFACE_MESH_BOX_INDIVIDUAL_CAPACITY = SVO_SURFACE_MESH_BOX_CAPACITY - 1;
 export const SVO_SURFACE_MESH_BOX_UNION_SLOT = SVO_SURFACE_MESH_BOX_CAPACITY - 1;
 /** Words of one dirty box record: minimum xyz, pad, maximum xyz, pad. */
 export const SVO_SURFACE_MESH_BOX_WORDS = 8;
-/** Words per leaf: base, count | depth << 27, key x/y, selected LOD, history valid, previous threshold, previous cap. */
-export const SVO_SURFACE_MESH_TABLE_WORDS = 8;
+/** Pending worklist entries the dirty box pass sweeps; past it the union grown at claim time stands for them all. */
+export const SVO_SURFACE_MESH_BOX_SWEEP_ENTRIES = 4096;
+/**
+ * Words per leaf: base, count | (depth + 1) << 27 (zero while the slot holds
+ * no brick), key x/y, selected LOD, history valid, previous threshold,
+ * previous cap, worklist claim (0 unlisted, 1 listed as touching a dirty
+ * brick, 2 listed as dirty).
+ */
+export const SVO_SURFACE_MESH_TABLE_WORDS = 9;
 /** Words per worklist entry scratch: pending count, emitted count, previous base, previous count word. */
 export const SVO_SURFACE_MESH_SCRATCH_WORDS = 4;
 export const SVO_SURFACE_MESH_COUNT_MASK = 0x07ff_ffff;
+/**
+ * Range size classes with a free stack. Class 0 is the empty range; class
+ * `c > 0` holds `(4 + (c - 1) % 4) << ((c - 1) >> 2)` quads, four classes an
+ * octave from 4 quads up, so a range is at most a quarter larger than the
+ * quads in it. A range's class is always the class of its brick's quad count,
+ * which is why the table needs no capacity word.
+ */
+export const SVO_SURFACE_MESH_CLASS_COUNT = 64;
+/** Free ranges one class's stack holds; a range freed past it is left as a hole. */
+export const SVO_SURFACE_MESH_CLASS_STACK_CAPACITY = 1024;
+/** Journal entries one presentation ingests: twice the voxelizer's default brick budget. */
+export const SVO_SURFACE_MESH_INGEST_ENTRIES = 4096;
+/** Workgroups of the ingest pass; its threads stride over (entry, direction) pairs. */
+export const SVO_SURFACE_MESH_INGEST_GROUPS = 256;
+
+/** Size class of a range holding `count` quads. */
+export function surfaceMeshRangeClass(count: number): number {
+  if (count <= 0) return 0;
+  const quads = Math.max(count, 4);
+  const octave = 31 - Math.clz32(quads);
+  const step = (1 << octave) >>> 2;
+  return (octave - 2) * 4 + Math.ceil((quads - (1 << octave)) / step) + 1;
+}
+
+/** Quads a range of `rangeClass` holds. */
+export function surfaceMeshClassCapacity(rangeClass: number): number {
+  if (rangeClass <= 0) return 0;
+  return (4 + ((rangeClass - 1) & 3)) * 2 ** ((rangeClass - 1) >>> 2);
+}
+
+/**
+ * Extraction jobs per brick, an upper bound over the meshing styles a shader
+ * variant can run: dual marching cubes extracts one row of cells a job, the
+ * voxel mesh one face plane a job plus one job per coarse level.
+ */
+export function surfaceMeshJobsPerBrick(brickSize: number, dualMarchingCubes: boolean): number {
+  const size = Math.max(1, Math.floor(brickSize));
+  return dualMarchingCubes ? size * size : 6 * size + 31 - Math.clz32(size);
+}
 
 /**
  * Word map of the mesh state buffer. Words 0-15 are the public header the
@@ -127,71 +209,96 @@ export const SVO_SURFACE_MESH_STATE = Object.freeze({
   drawInstanceCount: 1,
   drawFirstVertex: 2,
   drawFirstInstance: 3,
-  /** Quads allocated in the drawn arena, holes included: the cull iterates this many. */
+  /** Quads allocated in the arena, free ranges included: the cull iterates this many. */
   frontCursor: 4,
-  /** Bit 0: the target arena overflowed this batch. Bit 1: extraction exceeded a bound. */
+  /** Bit 0: the arena overflowed this batch. Bit 1: extraction exceeded a bound. */
   errorFlags: 5,
   topologyRevision: 6,
   geometryRevision: 7,
-  /** Count/emit dispatch during a batch; cull dispatch after publication. */
-  extractDispatch: 8,
+  /** Arena quads the cull considers, stored by publication: the cursor while the mesh is drawable, else zero. Words 9 and 10 are spare. */
+  cullQuads: 8,
   building: 11,
   builds: 12,
-  /** The drawn arena holds a complete mesh. */
+  /** The arena holds a complete mesh. */
   usable: 13,
   processedBricks: 14,
   /** 1: camera inside a solid voxel. 2: smooth reconstruction selected. */
   withheld: 15,
   checkpoint: 16,
   overflowLength: 17,
+  /** Bricks appended to the worklist since the build began; the list is a ring over the leaf capacity. */
   worklistCount: 18,
   restartReason: 19,
-  allocateDispatch: 20,
-  markDispatch: 23,
-  /** Arena slot (0/1) that is drawn. */
+  /** Journal entries consumed, modulo 2^32. */
+  journalCursor: 20,
+  /** Journal span the ingest pass of this presentation reads. */
+  ingestBegin: 21,
+  ingestEnd: 22,
+  /** Bricks the build that last completed extracted. */
+  lastBuildBricks: 23,
+  incrementalBuilds: 24,
+  wholeBuilds: 25,
+  /** Always zero: there is one arena. Kept for the readers of the draw header. */
   front: 26,
-  /** 0 idle, 1 incremental into the front, 2 initial into the front, 3 replacement into the back. */
+  /** 0 idle, 1 incremental into the drawn arena, 2 whole with nothing drawn. */
   mode: 27,
-  backCursor: 28,
+  /** Mode of the build that last completed. */
+  lastBuildMode: 28,
   liveQuads: 29,
-  /** Bit 0 needBack, bit 1 markPending, bit 2 boxesPending, bit 3 started (back acquired). */
+  /** Bit 0 markAll, bit 2 scanned, bit 3 scheduled. */
   flags: 30,
-  wantedBackQuads: 31,
+  /** host: threads of the count and emit dispatches. */
+  hostExtractThreads: 31,
   /** host: bricks one batch extracts. */
   bricksPerBatch: 32,
+  /** The voxelizer's completed revision when the mesh last looked. */
   consumedMaintenanceRevision: 33,
   boxCount: 34,
-  liveTarget: 35,
+  /** Bricks extracted by every build so far, modulo 2^32. */
+  rebuiltBricks: 35,
   batchBegin: 36,
   batchEnd: 37,
-  /** host: 1 when a maintenance dirty list is bound. */
+  /** host: 1 when a maintenance arena with a dirty journal is bound. */
   hostMaintenance: 38,
   /** host: leaf slots the range table covers. */
   hostLeafCapacity: 39,
-  /** host: generation of the back arena binding, bumped on every allocation. */
-  hostBackGeneration: 40,
-  backGenerationConsumed: 41,
-  batchPending: 42,
   /** host: word offset of the maintenance state block in the bound maintenance buffer. */
   hostMaintenanceStateWords: 43,
-  /** host: word offset of the dirty brick records in the bound maintenance buffer. */
+  /** host: word offset of the dirty brick records, whose journal words the mesh reads. */
   hostMaintenanceRecordsWords: 44,
-  /** host: dirty brick records the maintenance buffer can hold. */
+  /** host: dirty brick records, and so journal entries, the maintenance buffer holds. */
   hostMaintenanceCapacity: 45,
   contourMode: 46,
   /** Word offset in low 31 bits; high bit tags function-graph (DMC) records. */
   hostSurfaceVertices: 47,
   lodBricks: 48,
-  wordCount: 56,
+  /**
+   * Two boxes of six words (the complement of the minimum xyz, then the maximum
+   * xyz, in finest cells, so zeroed words are an empty box) over the bricks
+   * claimed for extraction, one per parity of the build that extracts them.
+   * The shadow maps redraw inside them and empty the one whose build is over
+   * (`svo-raster-ao.ts`).
+   */
+  shadowBoxes: 56,
+  wordCount: 68,
 } as const);
 
-export const SVO_SURFACE_MESH_FLAGS = Object.freeze({ needBack: 1, markPending: 2, boxesPending: 4, started: 8 } as const);
-export const SVO_SURFACE_MESH_MODE = Object.freeze({ idle: 0, incremental: 1, initial: 2, replacement: 3 } as const);
-export const SVO_SURFACE_MESH_RESTART_REASONS = Object.freeze(["publication", "initial", "topology", "geometry", "publication", "compaction"] as const);
+/**
+ * `markAll`: the next leaf scan lists every current brick and clears the rest
+ * of the table. `scanned`: that scan has run. `scheduled`: this
+ * presentation's batch was scheduled, so publication may apply it.
+ */
+export const SVO_SURFACE_MESH_FLAGS = Object.freeze({ markAll: 1, scanned: 4, scheduled: 8 } as const);
+export const SVO_SURFACE_MESH_MODE = Object.freeze({ idle: 0, incremental: 1, initial: 2 } as const);
+export const SVO_SURFACE_MESH_RESTART_REASONS = Object.freeze(["publication", "initial", "topology", "geometry", "publication", "journal"] as const);
 
-/** Words of the work buffer before the per-leaf table: the dirty box records. */
-export const SVO_SURFACE_MESH_WORK_TABLE_OFFSET_WORDS = SVO_SURFACE_MESH_BOX_CAPACITY * SVO_SURFACE_MESH_BOX_WORDS;
-/** Work buffer size for `leafCapacity` slots: boxes, range table, scratch, worklist. */
+/** Words of the class free stacks: a count and `SVO_SURFACE_MESH_CLASS_STACK_CAPACITY` range bases each. */
+export const SVO_SURFACE_MESH_WORK_STACK_OFFSET_WORDS = SVO_SURFACE_MESH_BOX_CAPACITY * SVO_SURFACE_MESH_BOX_WORDS;
+export const SVO_SURFACE_MESH_STACK_WORDS = SVO_SURFACE_MESH_CLASS_STACK_CAPACITY + 1;
+/** Words of the work buffer before the per-leaf table: the dirty box records and the class free stacks. */
+export const SVO_SURFACE_MESH_WORK_TABLE_OFFSET_WORDS = SVO_SURFACE_MESH_WORK_STACK_OFFSET_WORDS
+  + SVO_SURFACE_MESH_CLASS_COUNT * SVO_SURFACE_MESH_STACK_WORDS;
+/** Work buffer size for `leafCapacity` slots: boxes, free stacks, range table, scratch, worklist. */
 export function surfaceMeshWorkBytes(leafCapacity: number): number {
   const slots = Math.max(1, Math.floor(leafCapacity));
   return (SVO_SURFACE_MESH_WORK_TABLE_OFFSET_WORDS + slots * (SVO_SURFACE_MESH_TABLE_WORDS + SVO_SURFACE_MESH_SCRATCH_WORDS + 1)) * 4;
@@ -204,13 +311,13 @@ export function surfaceMeshWorkBytes(leafCapacity: number): number {
  */
 export const SVO_SURFACE_MESH_BUILD_BRICKS_INITIAL = 512;
 /**
- * Ceiling while the drawn mesh stays visible: a replacement or incremental
- * build shares the frame with the rasterized scene, so it is paced to keep
- * the frame interactive rather than to finish soonest.
+ * Ceiling while the drawn mesh stays visible: an incremental build shares the
+ * frame with the rasterized scene, so it is paced to keep the frame
+ * interactive rather than to finish soonest.
  */
 export const SVO_SURFACE_MESH_BUILD_BRICKS_DRAWN_MAXIMUM = 2048;
 /**
- * Ceiling while nothing is drawn: every presentation of an initial build also
+ * Ceiling while nothing is drawn: every presentation of a whole build also
  * traces the whole scene at full resolution as its fallback, and on a large
  * scene that trace outweighs the extraction, so the build races to finish.
  */
@@ -239,49 +346,44 @@ export function surfaceMeshBuildPresentations(bricks: number, drawn: boolean): n
 /** What the host must do after reading one state receipt. */
 export interface SvoSurfaceMeshReceipt {
   status: SvoSurfaceMeshStatus;
-  /** Arena slot the GPU now draws. */
-  front: 0 | 1;
   building: boolean;
   mode: number;
-  /** The GPU is waiting for a back arena of at least this many bytes. */
-  needBackBytes?: number;
-  /** The target arena overflowed at this quad capacity and waits for a larger binding. */
-  grow?: { slot: 0 | 1; overflowQuads: number };
+  /** The arena holds a complete mesh, whether or not it is withheld from the frame. */
+  usable: boolean;
+  /** The arena overflowed at this quad capacity and the build waits for a larger binding. */
+  grow?: { overflowQuads: number };
 }
 
 /**
  * Interpret a state receipt. Pure so the host's decisions are testable
- * without a device: `arenaBytes` are the two arena slots as bound when the
- * receipt's frame was encoded.
+ * without a device: `arenaBytes` is the arena as bound when the receipt's
+ * frame was encoded, and `growable` is whether the host may still enlarge it
+ * (it may during a whole build and until that build's reserve is in place;
+ * an edit never enlarges it).
  */
-export function interpretSurfaceMeshState(words: ArrayLike<number>, context: { arenaBytes: readonly [number, number]; maximumBytes: number }): SvoSurfaceMeshReceipt {
+export function interpretSurfaceMeshState(words: ArrayLike<number>, context: { arenaBytes: number; maximumBytes: number; growable: boolean }): SvoSurfaceMeshReceipt {
   const W = SVO_SURFACE_MESH_STATE;
   const word = (index: number) => words[index] ?? 0;
-  const front = (word(W.front) & 1) as 0 | 1;
   const mode = word(W.mode);
   const building = word(W.building) !== 0;
-  const targetSlot = mode === SVO_SURFACE_MESH_MODE.replacement ? ((1 - front) as 0 | 1) : front;
-  const flags = word(W.flags);
   const usable = word(W.usable) !== 0;
   const errors = word(W.errorFlags);
   const overflowed = building && (errors & 1) !== 0;
   const extractionFailed = (errors & 2) !== 0;
   const withheld = word(W.withheld);
-  const allocatedBytes = context.arenaBytes[front];
-  const targetBytes = context.arenaBytes[targetSlot];
-  const needBack = building && mode === SVO_SURFACE_MESH_MODE.replacement && (flags & SVO_SURFACE_MESH_FLAGS.needBack) !== 0
-    && (flags & SVO_SURFACE_MESH_FLAGS.started) === 0;
-  const wantedBackBytes = Math.max(word(W.wantedBackQuads), SVO_SURFACE_MESH_MINIMUM_QUADS) * SVO_SURFACE_MESH_QUAD_BYTES;
+  const allocatedBytes = context.arenaBytes;
   // A grow the host already answered is one the GPU has not yet observed.
-  const grow = overflowed && targetBytes / SVO_SURFACE_MESH_QUAD_BYTES <= word(W.overflowLength);
-  const canGrow = grow && targetBytes < context.maximumBytes && !extractionFailed;
-  const budgetBlocked = grow && targetBytes >= context.maximumBytes;
+  const grow = overflowed && allocatedBytes / SVO_SURFACE_MESH_QUAD_BYTES <= word(W.overflowLength);
+  const canGrow = grow && context.growable && allocatedBytes < context.maximumBytes && !extractionFailed;
+  const budgetBlocked = grow && !canGrow && !extractionFailed;
   const fallback = !usable || withheld !== 0 || extractionFailed || budgetBlocked;
   const reason: NonNullable<SvoSurfaceMeshStatus["fallbackReason"]> = withheld === 2 ? "smooth"
     : withheld === 1 ? "inside-solid" : extractionFailed ? "extraction" : budgetBlocked ? "budget" : "publication";
   const pending = building && !extractionFailed && !budgetBlocked;
   const completedBricks = word(W.processedBricks);
   const totalBricks = word(W.worklistCount);
+  const kind = (value: number) => value === SVO_SURFACE_MESH_MODE.incremental ? "incremental" as const
+    : value === SVO_SURFACE_MESH_MODE.initial ? "initial" as const : undefined;
   const status: SvoSurfaceMeshStatus = {
     state: pending ? "pending" : fallback ? "blocked" : "ready",
     lodBricks: Array.from({ length: 4 }, (_, level) => word(W.lodBricks + level)),
@@ -289,26 +391,30 @@ export function interpretSurfaceMeshState(words: ArrayLike<number>, context: { a
     capacityQuads: allocatedBytes / SVO_SURFACE_MESH_QUAD_BYTES, allocatedBytes, maximumBytes: context.maximumBytes,
     builds: word(W.builds), requirementComplete: !building && !extractionFailed, completedBricks, totalBricks,
     drawn: usable && withheld === 0 && !extractionFailed,
-    buildPhase: building ? (overflowed || needBack ? "capacity" : "extracting") : "complete",
-    buildKind: mode === SVO_SURFACE_MESH_MODE.incremental ? "incremental" : mode === SVO_SURFACE_MESH_MODE.initial ? "initial"
-      : mode === SVO_SURFACE_MESH_MODE.replacement ? "replacement" : undefined,
+    buildPhase: building ? (overflowed ? "capacity" : "extracting") : "complete",
+    buildKind: building ? kind(mode) : undefined,
     restartReason: SVO_SURFACE_MESH_RESTART_REASONS[word(W.restartReason)] ?? "publication",
+    lastBuildKind: kind(word(W.lastBuildMode)), lastBuildBricks: word(W.lastBuildBricks),
+    incrementalBuilds: word(W.incrementalBuilds), wholeBuilds: word(W.wholeBuilds),
+    rebuiltBricks: word(W.rebuiltBricks), journalCursor: word(W.journalCursor),
+    reserveFrozen: !context.growable,
   };
   if (pending) {
-    status.detail = overflowed || needBack ? "Mesh storage growing; completed bricks are retained."
+    status.detail = overflowed ? "Mesh storage growing; completed bricks are retained."
       : usable ? `Updating mesh: ${completedBricks.toLocaleString()} / ${totalBricks.toLocaleString()} bricks re-extracted; the cached mesh stays drawn and edited regions are traced.`
         : `Building mesh: ${completedBricks.toLocaleString()} / ${totalBricks.toLocaleString()} bricks processed; current voxels remain visible through exact traversal.`;
   } else if (fallback) {
     status.fallbackReason = reason;
     status.detail = reason === "smooth" ? "Raster requires voxel-flat surfaces; current SVO traversal remains visible."
       : reason === "inside-solid" ? "Camera is inside a solid voxel; current SVO traversal remains visible."
-      : reason === "budget" ? "Surface mesh exceeds the allocation limit; current SVO traversal remains visible."
+      : reason === "budget" ? (context.growable
+        ? "Surface mesh exceeds the allocation limit; current SVO traversal remains visible."
+        : "An edit needs more surface mesh storage than was reserved when the scene was built; edited regions remain traced.")
       : reason === "extraction" ? "Surface extraction exceeded its subdivision limit; current SVO traversal remains visible."
       : "Waiting for a complete voxel publication; exact planes remain visible.";
   }
-  const receipt: SvoSurfaceMeshReceipt = { status, front, building, mode };
-  if (needBack) receipt.needBackBytes = wantedBackBytes;
-  if (canGrow) receipt.grow = { slot: targetSlot, overflowQuads: word(W.overflowLength) };
+  const receipt: SvoSurfaceMeshReceipt = { status, building, mode, usable };
+  if (canGrow) receipt.grow = { overflowQuads: word(W.overflowLength) };
   return receipt;
 }
 
@@ -329,8 +435,8 @@ struct SurfaceQuad { origin:vec3u, identity:u32, extent:vec3u, face:u32 }
 // face bits 11-28, which a dual cell spanning leaves of two sizes needs.
 ${contours ? svoCellContourWGSL : ""}
 fn meshContoursEnabled()->bool{return ${contours ? "dry.meshFilterNormals.w>0.5&&dry.meshFilterNormals.w<2.0" : "false"};}
-// Inflation is baked into each triangle record so the old front stays valid
-// while replacement geometry is built with a new setting.
+// Inflation is baked into each triangle record, so a record is drawn the way
+// it was extracted whatever the setting is now.
 fn meshInflationCode()->u32{return ${contours ? "u32(round(clamp(dry.meshFilterNormals.w-1.0,0.0,0.5)*100.0))" : "0u"};}
 fn meshRecordInflation(quad:SurfaceQuad)->f32{return f32((quad.face>>11u)&63u)/100.0;}
 ${contours ? `fn meshTrianglePoint(quad:SurfaceQuad,index:u32)->vec3f{
@@ -358,17 +464,15 @@ fn meshContourCode(voxel:u32)->u32{
   return 0u;
 }
 @group(${group}) @binding(30) var<storage,read_write> meshState:array<atomic<u32>>;
-@group(${group}) @binding(32) var<storage,read_write> meshArena0:array<SurfaceQuad>;
-@group(${group}) @binding(38) var<storage,read_write> meshArena1:array<SurfaceQuad>;
+@group(${group}) @binding(32) var<storage,read_write> meshArena:array<SurfaceQuad>;
 @group(${group}) @binding(34) var<storage,read_write> meshVisibleOutput:array<u32>;
-// Dirty boxes, per-leaf quad ranges, per-entry scratch and the brick worklist.
+// Dirty boxes, class free stacks, per-leaf quad ranges, per-entry scratch and the brick worklist.
 @group(${group}) @binding(40) var<storage,read_write> meshWork:array<atomic<u32>>;
-// The voxelizer's maintenance arena: its state block (dirty brick count,
-// overflow flags, requested and completed revisions) and dirty brick records
-// sit at the word offsets the host stamps into the state buffer.
+// The voxelizer's maintenance arena: its state block (completed revision and
+// the dirty journal's write cursor) and the dirty brick records that carry
+// the journal entries sit at the word offsets the host stamps into the state.
 @group(${group}) @binding(41) var<storage,read> meshMaintenance:array<u32>;
-@group(${group}) @binding(31) var<storage,read> meshQuads0:array<SurfaceQuad>;
-@group(${group}) @binding(37) var<storage,read> meshQuads1:array<SurfaceQuad>;
+@group(${group}) @binding(31) var<storage,read> meshQuads:array<SurfaceQuad>;
 @group(${group}) @binding(33) var<storage,read> meshHeader:array<u32>;
 @group(${group}) @binding(35) var<storage,read> meshVisible:array<u32>;
 @group(${group}) @binding(42) var<storage,read> meshWorkRead:array<u32>;
@@ -377,14 +481,21 @@ const MESH_BOX_CAPACITY:u32=${SVO_SURFACE_MESH_BOX_CAPACITY}u;
 const MESH_BOX_INDIVIDUAL:u32=${SVO_SURFACE_MESH_BOX_INDIVIDUAL_CAPACITY}u;
 const MESH_BOX_UNION:u32=${SVO_SURFACE_MESH_BOX_UNION_SLOT}u;
 const MESH_BOX_WORDS:u32=${SVO_SURFACE_MESH_BOX_WORDS}u;
+const MESH_BOX_SWEEP:u32=${SVO_SURFACE_MESH_BOX_SWEEP_ENTRIES}u;
+const MESH_STACK_OFFSET:u32=${SVO_SURFACE_MESH_WORK_STACK_OFFSET_WORDS}u;
+const MESH_STACK_WORDS:u32=${SVO_SURFACE_MESH_STACK_WORDS}u;
+const MESH_STACK_CAPACITY:u32=${SVO_SURFACE_MESH_CLASS_STACK_CAPACITY}u;
+const MESH_CLASS_COUNT:u32=${SVO_SURFACE_MESH_CLASS_COUNT}u;
 const MESH_TABLE_OFFSET:u32=${SVO_SURFACE_MESH_WORK_TABLE_OFFSET_WORDS}u;
 const MESH_COUNT_MASK:u32=${SVO_SURFACE_MESH_COUNT_MASK}u;
-const MESH_MINIMUM_QUADS:u32=${SVO_SURFACE_MESH_MINIMUM_QUADS}u;
-const MESH_MAINTENANCE_INCOMPLETE:u32=${SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW}u;
-const MESH_MAINTENANCE_DIRTY_COUNT:u32=${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.dirtyBrickCount}u;
-const MESH_MAINTENANCE_OVERFLOW:u32=${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.overflowFlags}u;
-const MESH_MAINTENANCE_REQUESTED:u32=${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.requestedRevision}u;
 const MESH_MAINTENANCE_COMPLETED:u32=${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.completedRevision}u;
+const MESH_MAINTENANCE_JOURNAL_WRITE:u32=${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.journalWriteCursor}u;
+const MESH_JOURNAL_RECORD_WORD:u32=${SPARSE_SCENE_DIRTY_JOURNAL_RECORD_WORD}u;
+const MESH_INGEST_ENTRIES:u32=${SVO_SURFACE_MESH_INGEST_ENTRIES}u;
+const MESH_INGEST_THREADS:u32=${SVO_SURFACE_MESH_INGEST_GROUPS * 64}u;
+const MESH_CLAIM_WORD:u32=8u;
+const MESH_CLAIM_TOUCHING:u32=1u;
+const MESH_CLAIM_DIRTY:u32=2u;
 const MESH_NO_ENTRY:u32=0xffffffffu;
 
 fn meshQuadFace(word:u32)->u32{return word&7u;}
@@ -395,7 +506,7 @@ fn meshQuadDead(quad:SurfaceQuad)->bool{return all(quad.extent==vec3u(0u));}
 // Levels a brick can offer: the voxel boundary plus one per halving of the
 // brick edge down to a single cell.
 fn meshLevelCount()->u32{return countTrailingZeros(max(dry.mapping.brickSize,1u))+1u;}
-fn meshJobsPerBrick()->u32{${contours ? "if(meshDmcEnabled()){return dry.mapping.brickSize;}" : ""}return ${contours ? "6u*dry.mapping.brickSize+select(meshLevelCount()-1u,0u,meshContoursEnabled()||meshDcEnabled())" : "6u*dry.mapping.brickSize+meshLevelCount()-1u"};}
+fn meshJobsPerBrick()->u32{${contours ? "if(meshDmcEnabled()){return dry.mapping.brickSize*dry.mapping.brickSize;}" : ""}return ${contours ? "6u*dry.mapping.brickSize+select(meshLevelCount()-1u,0u,meshContoursEnabled()||meshDcEnabled())" : "6u*dry.mapping.brickSize+meshLevelCount()-1u"};}
 // Filtered-detail threshold in live pixels; zero is the exact voxel mesh.
 // Authored at the screen-space contract's reference height so it stays angular.
 fn dryMeshLodPixels()->f32{
@@ -409,39 +520,75 @@ fn meshMergeIdentity(identity:u32)->u32{return sceneIdentityMaterial(identity)|(
 
 fn meshLeafCapacity()->u32{return atomicLoad(&meshState[${W.hostLeafCapacity}]);}
 fn meshTableAt(leaf:u32)->u32{return MESH_TABLE_OFFSET+leaf*${SVO_SURFACE_MESH_TABLE_WORDS}u;}
-fn meshScratchAt(entry:u32)->u32{return MESH_TABLE_OFFSET+meshLeafCapacity()*${SVO_SURFACE_MESH_TABLE_WORDS}u+entry*${SVO_SURFACE_MESH_SCRATCH_WORDS}u;}
-fn meshListAt(entry:u32)->u32{return MESH_TABLE_OFFSET+meshLeafCapacity()*${SVO_SURFACE_MESH_TABLE_WORDS + SVO_SURFACE_MESH_SCRATCH_WORDS}u+entry;}
-fn meshFront()->u32{return atomicLoad(&meshState[${W.front}])&1u;}
-fn meshTargetArena()->u32{
-  let front=meshFront();
-  return select(front,1u-front,atomicLoad(&meshState[${W.mode}])==${M.replacement}u);
-}
-fn meshCursorWord(arena:u32)->u32{return select(${W.backCursor}u,${W.frontCursor}u,arena==meshFront());}
-fn meshArenaLength(arena:u32)->u32{if(arena==0u){return arrayLength(&meshArena0);}return arrayLength(&meshArena1);}
-fn meshArenaStore(arena:u32,index:u32,quad:SurfaceQuad){if(arena==0u){meshArena0[index]=quad;}else{meshArena1[index]=quad;}}
-fn meshArenaLoad(arena:u32,index:u32)->SurfaceQuad{if(arena==0u){return meshArena0[index];}return meshArena1[index];}
-fn meshDrawnQuad(index:u32)->SurfaceQuad{if((meshHeader[${W.front}]&1u)==0u){return meshQuads0[index];}return meshQuads1[index];}
+// The worklist and its scratch are rings over the leaf capacity: an entry
+// number counts appends since the build began.
+fn meshEntrySlot(entry:u32)->u32{return entry%max(meshLeafCapacity(),1u);}
+fn meshScratchAt(slot:u32)->u32{return MESH_TABLE_OFFSET+meshLeafCapacity()*${SVO_SURFACE_MESH_TABLE_WORDS}u+slot*${SVO_SURFACE_MESH_SCRATCH_WORDS}u;}
+fn meshListAt(slot:u32)->u32{return MESH_TABLE_OFFSET+meshLeafCapacity()*${SVO_SURFACE_MESH_TABLE_WORDS + SVO_SURFACE_MESH_SCRATCH_WORDS}u+slot;}
+fn meshStackAt(rangeClass:u32)->u32{return MESH_STACK_OFFSET+rangeClass*MESH_STACK_WORDS;}
+fn meshDrawnQuad(index:u32)->SurfaceQuad{return meshQuads[index];}
 
-// A leaf slot holds a drawable brick: a voxel terminal whose node links back
-// to it and whose lifecycle is current. Dirty or relocating bricks are skipped
-// and picked up again by the publication that completes them.
-fn meshLeafCurrent(leaf:u32)->bool{
+// Size class of a range of \`count\` quads and the quads a class holds: four
+// classes an octave from 4 quads up. A brick's range always has the class of
+// its quad count, so equal classes mean the brick is rewritten where it is.
+fn meshRangeClass(count:u32)->u32{
+  if(count==0u){return 0u;}
+  let quads=max(count,4u);
+  let octave=31u-countLeadingZeros(quads);
+  let step=(1u<<octave)>>2u;
+  return (octave-2u)*4u+(quads-(1u<<octave)+step-1u)/step+1u;
+}
+fn meshClassCapacity(rangeClass:u32)->u32{
+  if(rangeClass==0u){return 0u;}
+  return (4u+((rangeClass-1u)&3u))<<((rangeClass-1u)>>2u);
+}
+// Free stacks are popped only by the allocate pass and pushed only by the
+// emit pass, so each pass sees one kind of concurrent access: a pop that
+// finds the stack empty, or a push that finds it full, undoes its own step.
+fn meshPopRange(rangeClass:u32)->u32{
+  if(rangeClass==0u||rangeClass>=MESH_CLASS_COUNT){return MESH_NO_ENTRY;}
+  let stack=meshStackAt(rangeClass);
+  let held=atomicSub(&meshWork[stack],1u);
+  if(held==0u||held>MESH_STACK_CAPACITY){atomicAdd(&meshWork[stack],1u);return MESH_NO_ENTRY;}
+  return atomicLoad(&meshWork[stack+held]);
+}
+fn meshPushRange(rangeClass:u32,base:u32){
+  if(rangeClass==0u||rangeClass>=MESH_CLASS_COUNT){return;}
+  let stack=meshStackAt(rangeClass);
+  let held=atomicAdd(&meshWork[stack],1u);
+  if(held>=MESH_STACK_CAPACITY){atomicSub(&meshWork[stack],1u);return;}
+  atomicStore(&meshWork[stack+1u+held],base);
+}
+
+// A leaf slot is linked while a voxel terminal's node points back at it, and
+// current while that brick's lifecycle is too. A linked brick that is not
+// current is being repaired: the voxelizer journals it when it finishes.
+fn meshLeafLinked(leaf:u32)->bool{
   if(leaf>=svoControlLoad(1u)){return false;}
   let topology=svoLeafLoad(leaf).topology;
   if(topology.x>=svoControlLoad(0u)||topology.z!=0u){return false;}
-  let node=svoNodeLoad(topology.x);
-  return node.links.z==leaf&&svoBrickLifecycleCurrent(svoBrickLifecycleDecode(node.links.w));
+  return svoNodeLoad(topology.x).links.z==leaf;
+}
+fn meshLeafCurrent(leaf:u32)->bool{
+  if(!meshLeafLinked(leaf)){return false;}
+  return svoBrickLifecycleCurrent(svoBrickLifecycleDecode(svoNodeLoad(svoLeafLoad(leaf).topology.x).links.w));
 }
 struct MeshBrickBox { minimum:vec3u, maximum:vec3u }
+fn meshAddressBox(keyX:u32,keyY:u32,depth:u32)->MeshBrickBox{
+  let size=(1u<<(dry.mapping.maximumDepth-min(depth,dry.mapping.maximumDepth)))*dry.mapping.brickSize;
+  let base=svoDecodeMorton(keyX,keyY,depth)*size;
+  return MeshBrickBox(base,base+vec3u(size));
+}
 // Closed lattice box of a leaf's brick, so bricks that only share a face still overlap.
 fn meshLeafBox(leaf:u32)->MeshBrickBox{
   let node=svoNodeLoad(svoLeafLoad(leaf).topology.x);
-  let size=(1u<<(dry.mapping.maximumDepth-node.address.z))*dry.mapping.brickSize;
-  let base=svoDecodeMorton(node.address.x,node.address.y,node.address.z)*size;
-  return MeshBrickBox(base,base+vec3u(size));
+  return meshAddressBox(node.address.x,node.address.y,node.address.z);
 }
-fn meshBoxOverlaps(a:MeshBrickBox,bMinimum:vec3u,bMaximum:vec3u)->bool{
-  return all(a.minimum<=bMaximum)&&all(a.maximum>=bMinimum);
+// The box a dirty brick masks. Dual-grid faces depend on cells across both
+// face and diagonal neighbours, so their mask reaches one cell past the brick.
+fn meshMaskBox(box:MeshBrickBox)->MeshBrickBox{
+  if(!meshDcEnabled()){return box;}
+  return MeshBrickBox(box.minimum-min(box.minimum,vec3u(1u)),box.maximum+vec3u(1u));
 }
 fn meshBoxMinimum(box:u32)->vec3u{
   let base=box*MESH_BOX_WORDS;
@@ -451,22 +598,12 @@ fn meshBoxMaximum(box:u32)->vec3u{
   let base=box*MESH_BOX_WORDS+4u;
   return vec3u(atomicLoad(&meshWork[base]),atomicLoad(&meshWork[base+1u]),atomicLoad(&meshWork[base+2u]));
 }
-fn meshMaskActive()->bool{
-  return atomicLoad(&meshState[${W.building}])!=0u&&atomicLoad(&meshState[${W.boxCount}])!=0u;
+fn meshBoxStore(box:u32,minimum:vec3u,maximum:vec3u){
+  let base=box*MESH_BOX_WORDS;
+  atomicStore(&meshWork[base],minimum.x);atomicStore(&meshWork[base+1u],minimum.y);atomicStore(&meshWork[base+2u],minimum.z);
+  atomicStore(&meshWork[base+4u],maximum.x);atomicStore(&meshWork[base+5u],maximum.y);atomicStore(&meshWork[base+6u],maximum.z);
 }
-// Whether a brick touches any dirty box: such a brick's faces against the
-// dirty brick may have changed, so it is re-extracted with it.
-fn meshBoxesOverlap(box:MeshBrickBox)->bool{
-  let unionMinimum=meshBoxMinimum(MESH_BOX_UNION);let unionMaximum=meshBoxMaximum(MESH_BOX_UNION);
-  if(any(unionMinimum>unionMaximum)||!meshBoxOverlaps(box,unionMinimum,unionMaximum)){return false;}
-  let count=min(atomicLoad(&meshState[${W.boxCount}]),MESH_BOX_INDIVIDUAL);
-  for(var i=0u;i<count;i+=1u){
-    let minimum=meshBoxMinimum(i);let maximum=meshBoxMaximum(i);
-    if(any(minimum>maximum)){continue;}
-    if(meshBoxOverlaps(box,minimum,maximum)){return true;}
-  }
-  return false;
-}
+fn meshMaskActive()->bool{return atomicLoad(&meshState[${W.boxCount}])!=0u;}
 // Whether a quad lies wholly inside a dirty box. Only such quads yield to the
 // trace: every ray that could hit one touches the box and is traced, while a
 // quad that merely touches a box keeps drawing, its untouched part being
@@ -613,7 +750,6 @@ fn meshFaceIdentity(payload:u32,cell:vec3u,level:u32,n:u32,face:u32)->u32 {
 // phase and the brick's worklist entry through the shared emitters.
 var<private> meshPhase:u32;
 var<private> meshEntry:u32;
-var<private> meshEmitArena:u32;
 var<private> meshEmitBase:u32;
 var<private> meshEmitCount:u32;
 fn meshAppend(origin:vec3u,extent:vec3u,packedFace:u32,identity:u32){
@@ -622,7 +758,7 @@ fn meshAppend(origin:vec3u,extent:vec3u,packedFace:u32,identity:u32){
   // The two phases traverse the same published voxels; a mismatch is an
   // extraction fault, reported rather than written past the brick's range.
   if(slot>=meshEmitCount){atomicOr(&meshState[${W.errorFlags}],2u);return;}
-  meshArenaStore(meshEmitArena,meshEmitBase+slot,SurfaceQuad(origin,identity,extent,packedFace));
+  meshArena[meshEmitBase+slot]=SurfaceQuad(origin,identity,extent,packedFace);
 }
 ${contours ? svoContourMeshWGSL : ""}
 ${svoVoxelMeshWGSL(W.errorFlags, contours)}
@@ -641,37 +777,140 @@ fn meshExtractJob(leafIndex:u32,local:u32){
   }` : ""}
   meshVoxelExtractJob(leafIndex,local);
 }
-fn meshStoreDispatch(word:u32,groups:u32){
-  atomicStore(&meshState[word],min(groups,65535u));
-  atomicStore(&meshState[word+1u],max(1u,(groups+65534u)/65535u));
-  atomicStore(&meshState[word+2u],1u);
-}
-fn meshClearDispatch(word:u32){
-  atomicStore(&meshState[word],0u);atomicStore(&meshState[word+1u],1u);atomicStore(&meshState[word+2u],1u);
-}
 fn meshMaintenanceBound()->bool{return atomicLoad(&meshState[${W.hostMaintenance}])!=0u;}
 fn meshMaintenanceWord(index:u32)->u32{
   let at=atomicLoad(&meshState[${W.hostMaintenanceStateWords}])+index;
   if(at>=arrayLength(&meshMaintenance)){return 0u;}
   return meshMaintenance[at];
 }
-fn meshMaintenanceDirtyCount()->u32{
-  return min(meshMaintenanceWord(MESH_MAINTENANCE_DIRTY_COUNT),atomicLoad(&meshState[${W.hostMaintenanceCapacity}]));
+fn meshJournalWrite()->u32{
+  if(!meshMaintenanceBound()){return 0u;}
+  return meshMaintenanceWord(MESH_MAINTENANCE_JOURNAL_WRITE);
 }
-fn meshMaintenanceDirtyLeaf(index:u32)->u32{
-  let at=atomicLoad(&meshState[${W.hostMaintenanceRecordsWords}])+index*4u;
+// Leaf of journal entry \`entry\`: the journal is a ring over the dirty brick records.
+fn meshJournalLeaf(entry:u32)->u32{
+  let capacity=max(atomicLoad(&meshState[${W.hostMaintenanceCapacity}]),1u);
+  let at=atomicLoad(&meshState[${W.hostMaintenanceRecordsWords}])+(entry%capacity)*4u+MESH_JOURNAL_RECORD_WORD;
   if(at>=arrayLength(&meshMaintenance)){return MESH_NO_ENTRY;}
   return meshMaintenance[at];
 }
+// Where the shadow maps must redraw: every brick claimed for the build that
+// extracts it. A claim made between builds belongs to the next one.
+fn meshShadowGrow(box:MeshBrickBox){
+  let build=atomicLoad(&meshState[${W.builds}])+select(1u,0u,atomicLoad(&meshState[${W.building}])!=0u);
+  let base=${W.shadowBoxes}u+(build&1u)*6u;
+  for(var axis=0u;axis<3u;axis+=1u){
+    atomicMax(&meshState[base+axis],~box.minimum[axis]);atomicMax(&meshState[base+3u+axis],box.maximum[axis]);
+  }
+}
+fn meshUnionReset(){meshBoxStore(MESH_BOX_UNION,vec3u(0xffffffffu),vec3u(0u));}
+fn meshUnionGrow(box:MeshBrickBox){
+  let base=MESH_BOX_UNION*MESH_BOX_WORDS;
+  for(var axis=0u;axis<3u;axis+=1u){
+    atomicMin(&meshWork[base+axis],box.minimum[axis]);atomicMax(&meshWork[base+4u+axis],box.maximum[axis]);
+  }
+}
+// The brick a leaf slot's table entry was last extracted for, if any, and
+// whether that is the brick the slot addresses now.
+struct MeshHeld { held:bool, same:bool, box:MeshBrickBox }
+fn meshHeld(leaf:u32)->MeshHeld{
+  let table=meshTableAt(leaf);
+  let countWord=atomicLoad(&meshWork[table+1u]);
+  let keyX=atomicLoad(&meshWork[table+2u]);let keyY=atomicLoad(&meshWork[table+3u]);
+  let tag=countWord>>27u;
+  let held=tag!=0u;
+  var same=false;
+  if(held&&meshLeafLinked(leaf)){
+    let node=svoNodeLoad(svoLeafLoad(leaf).topology.x);
+    same=keyX==node.address.x&&keyY==node.address.y&&tag==node.address.z+1u;
+  }
+  return MeshHeld(held,same,meshAddressBox(keyX,keyY,tag-min(tag,1u)));
+}
+fn meshAppendWork(leaf:u32){
+  atomicStore(&meshWork[meshTableAt(leaf)+5u],0u);
+  let slot=meshEntrySlot(atomicAdd(&meshState[${W.worklistCount}],1u));
+  atomicStore(&meshWork[meshListAt(slot)],leaf);
+  let scratch=meshScratchAt(slot);
+  atomicStore(&meshWork[scratch],0u);atomicStore(&meshWork[scratch+1u],0u);
+}
+// List a brick for extraction once. The claim is held from here until the
+// brick's batch is emitted, so however many journal entries and neighbours
+// name a brick, the worklist holds it once and never more bricks than slots.
+fn meshClaim(leaf:u32,claim:u32){
+  if(atomicMax(&meshWork[meshTableAt(leaf)+MESH_CLAIM_WORD],claim)==0u){meshAppendWork(leaf);}
+}
+// A brick whose voxels changed, or whose slot was freed or re-keyed: list it
+// and grow the mask over where it is and where its held quads are. A brick
+// still being repaired where it was is left to its journal entry.
+fn meshClaimDirty(leaf:u32){
+  let linked=meshLeafLinked(leaf);let current=meshLeafCurrent(leaf);
+  let held=meshHeld(leaf);
+  let moved=held.held&&!held.same;
+  if(linked&&!current&&!moved){return;}
+  meshClaim(leaf,MESH_CLAIM_DIRTY);
+  if(current){let box=meshMaskBox(meshLeafBox(leaf));meshUnionGrow(box);meshShadowGrow(box);}
+  if(moved){let box=meshMaskBox(held.box);meshUnionGrow(box);meshShadowGrow(box);}
+}
+fn meshClaimTouching(leaf:u32){
+  if(meshLeafCurrent(leaf)){meshClaim(leaf,MESH_CLAIM_TOUCHING);}
+}
+// Whether a child octant of the brick-sized region one step along
+// \`direction\` touches the brick it was stepped from: towards +axis the
+// region's low half does, towards -axis its high half.
+fn meshOctantTouches(octant:u32,direction:vec3i)->bool{
+  let bits=vec3i(i32(octant&1u),i32((octant>>1u)&1u),i32((octant>>2u)&1u));
+  return all((direction==vec3i(0))|(bits==select(vec3i(0),vec3i(1),direction<vec3i(0))));
+}
+// List every current brick that touches \`leaf\` across the face, edge or
+// corner \`direction\` names. The region beside the brick is either inside a
+// brick at least as large, or empty, or subdivided, in which case only the
+// descendants along the shared boundary are walked.
+fn meshClaimNeighbours(leaf:u32,direction:vec3i){
+  let node=svoNodeLoad(svoLeafLoad(leaf).topology.x);
+  let depth=min(node.address.z,dry.mapping.maximumDepth);
+  let coordinate=vec3i(svoDecodeMorton(node.address.x,node.address.y,depth))+direction;
+  if(any(coordinate<vec3i(0))||any(coordinate>=vec3i(i32(1u<<depth)))){return;}
+  let beside=vec3u(coordinate);
+  var index=0u;
+  for(var level=0u;level<depth;level+=1u){
+    if(index>=svoControlLoad(0u)){return;}
+    let at=svoNodeLoad(index);
+    if(at.links.z!=SVO_INVALID){meshClaimTouching(at.links.z);return;}
+    let shifted=beside>>vec3u(depth-level-1u);
+    let octant=(shifted.x&1u)|((shifted.y&1u)<<1u)|((shifted.z&1u)<<2u);
+    let mask=at.address.w&255u;let bit=1u<<octant;
+    if((mask&bit)==0u){return;}
+    index=at.links.x+countOneBits(mask&(bit-1u));
+  }
+  var nodes:array<u32,16>;var next:array<u32,16>;
+  var top=0i;nodes[0]=index;next[0]=0u;
+  for(var step=0u;step<8192u&&top>=0;step+=1u){
+    let current=nodes[top];
+    if(current>=svoControlLoad(0u)){top-=1;continue;}
+    let at=svoNodeLoad(current);
+    if(at.links.z!=SVO_INVALID){meshClaimTouching(at.links.z);top-=1;continue;}
+    let mask=at.address.w&255u;
+    var octant=next[top];
+    while(octant<8u&&(!meshOctantTouches(octant,direction)||(mask&(1u<<octant))==0u)){octant+=1u;}
+    if(octant>=8u){top-=1;continue;}
+    // A subtree deeper than the walk's stack is a fault, never a silent miss.
+    if(top>=15){atomicOr(&meshState[${W.errorFlags}],2u);return;}
+    next[top]=octant+1u;
+    top+=1;nodes[top]=at.links.x+countOneBits(mask&((1u<<octant)-1u));next[top]=0u;
+  }
+  if(top>=0){atomicOr(&meshState[${W.errorFlags}],2u);}
+}
 
-// Once per batch: notice a new publication, choose how to answer it, and
-// wait for storage the host still has to provide. Every decision is GPU
-// resident so a stale host receipt can never restart or skip a build.
+// Once per presentation: notice what the voxelizer has finalized, start or
+// join the build that answers it, and hand the ingest pass its journal span.
+// Every decision is GPU resident so a stale host receipt can never restart
+// or skip a build.
 @compute @workgroup_size(1)
 fn surfaceMeshPrepare(){
   for(var level=0u;level<8u;level+=1u){atomicStore(&meshState[${W.lodBricks}u+level],0u);}
   atomicStore(&meshState[${W.drawVertexCount}],4u);
-  meshClearDispatch(${W.extractDispatch}u);meshClearDispatch(${W.allocateDispatch}u);meshClearDispatch(${W.markDispatch}u);
+  atomicStore(&meshState[${W.cullQuads}],0u);
+  atomicStore(&meshState[${W.ingestBegin}],0u);atomicStore(&meshState[${W.ingestEnd}],0u);
   // Smooth raster surfaces use the dual-grid attachment. Publication and
   // attachment checks below keep extraction on the matching geometry generation.
   let attachment=atomicLoad(&meshState[${W.hostSurfaceVertices}]);
@@ -680,332 +919,309 @@ fn surfaceMeshPrepare(){
   if(!valid){
     atomicStore(&meshState[${W.usable}],0u);atomicStore(&meshState[${W.drawInstanceCount}],0u);
     atomicStore(&meshState[${W.building}],0u);atomicStore(&meshState[${W.errorFlags}],0u);atomicStore(&meshState[${W.mode}],0u);
+    atomicStore(&meshState[${W.flags}],0u);
     return;
   }
   let p=(uniforms.cameraPosition.xyz-dry.mapping.worldOrigin)/dry.mapping.cellSize;
   atomicStore(&meshState[${W.withheld}],select(0u,1u,meshPointSolid(p)));
-  var mode=atomicLoad(&meshState[${W.mode}]);
   var building=atomicLoad(&meshState[${W.building}])!=0u;
-  var flags=atomicLoad(&meshState[${W.flags}]);
+  var flags=atomicLoad(&meshState[${W.flags}])&~${F.scheduled}u;
+  // The leaf scan a flag asked for ran with the last presentation's selection.
+  if((flags&${F.scanned}u)!=0u){flags=0u;}
+  let bound=meshMaintenanceBound();
+  let write=meshJournalWrite();
+  var cursor=atomicLoad(&meshState[${W.journalCursor}]);
+  // The journal is a ring: a consumer more than its capacity behind, or
+  // behind a wrapped write cursor, has lost entries and extracts everything.
+  let lapped=bound&&(write<cursor||write-cursor>atomicLoad(&meshState[${W.hostMaintenanceCapacity}]));
   let topologyChanged=atomicLoad(&meshState[${W.topologyRevision}])!=dryPublicationWord(2u);
   let contourChanged=atomicLoad(&meshState[${W.contourMode}])!=bitcast<u32>(dry.meshFilterNormals.w);
   let geometryChanged=atomicLoad(&meshState[${W.geometryRevision}])!=dryPublicationWord(3u);
   let usable=atomicLoad(&meshState[${W.usable}])!=0u;
   let first=atomicLoad(&meshState[${W.builds}])==0u||(!usable&&!building);
-  // Freed ranges leave holes the cull still walks; once they outnumber the
-  // live quads, rebuild beside the drawn mesh into a compact arena.
-  let live=atomicLoad(&meshState[${W.liveQuads}]);
-  let holes=atomicLoad(&meshState[${W.frontCursor}])-min(live,atomicLoad(&meshState[${W.frontCursor}]));
-  let compact=!building&&usable&&!first&&!topologyChanged&&!geometryChanged&&holes>live+65536u;
-  if(topologyChanged||geometryChanged||first||compact||contourChanged){
-    atomicStore(&meshState[${W.contourMode}],bitcast<u32>(dry.meshFilterNormals.w));
-    atomicStore(&meshState[${W.topologyRevision}],dryPublicationWord(2u));
-    atomicStore(&meshState[${W.geometryRevision}],dryPublicationWord(3u));
-    atomicAdd(&meshState[${W.builds}],1u);
-    atomicStore(&meshState[${W.errorFlags}],0u);
+  atomicStore(&meshState[${W.contourMode}],bitcast<u32>(dry.meshFilterNormals.w));
+  atomicStore(&meshState[${W.topologyRevision}],dryPublicationWord(2u));
+  atomicStore(&meshState[${W.geometryRevision}],dryPublicationWord(3u));
+  if(bound){atomicStore(&meshState[${W.consumedMaintenanceRevision}],meshMaintenanceWord(MESH_MAINTENANCE_COMPLETED));}
+  if(first||contourChanged||lapped||(!bound&&(topologyChanged||geometryChanged))){
+    // A whole build, in place: nothing is drawn, every range is void, and the
+    // leaf scan lists every current brick. The journal entries up to here
+    // describe bricks that scan will list anyway.
     var reason=4u;
-    if(first){reason=1u;}else if(compact){reason=5u;}else if(topologyChanged){reason=2u;}else{reason=3u;}
-    var next=${M.replacement}u;
-    var reliable=false;
-    if(first){
-      next=${M.initial}u;
-      atomicStore(&meshState[${W.frontCursor}],0u);atomicStore(&meshState[${W.liveQuads}],0u);atomicStore(&meshState[${W.usable}],0u);
-    }else if(!compact&&!contourChanged&&meshMaintenanceBound()){
-      // The dirty list describes exactly one completed maintenance revision.
-      // It is trusted only when that revision is the next one after the last
-      // consumed, is complete, and no newer request has begun rewriting it.
-      let requested=meshMaintenanceWord(MESH_MAINTENANCE_REQUESTED);let completed=meshMaintenanceWord(MESH_MAINTENANCE_COMPLETED);
-      let overflow=meshMaintenanceWord(MESH_MAINTENANCE_OVERFLOW);
-      reliable=requested==completed&&completed==atomicLoad(&meshState[${W.consumedMaintenanceRevision}])+1u
-        &&(overflow&MESH_MAINTENANCE_INCOMPLETE)==0u;
-      // An incremental answer joins a running incremental build; it never
-      // joins a replacement build, whose completed bricks would be stale.
-      if(reliable&&mode!=${M.replacement}u){next=${M.incremental}u;}
-    }
-    // Any publication the mesh answers consumes the revision the list holds,
-    // so the next list is judged against it whether or not this one was used.
-    if(meshMaintenanceBound()){atomicStore(&meshState[${W.consumedMaintenanceRevision}],meshMaintenanceWord(MESH_MAINTENANCE_COMPLETED));}
-    if(reliable){flags|=${F.boxesPending}u;}else{atomicStore(&meshState[${W.boxCount}],0u);}
-    // A publication that lands during an incremental build restarts the
-    // worklist from a fresh mark, so no slot is listed twice; its dirty boxes
-    // stay, so bricks the earlier publication still owed are re-marked.
+    if(first){reason=1u;}else if(lapped){reason=5u;}else if(contourChanged){reason=4u;}else if(topologyChanged){reason=2u;}else{reason=3u;}
+    cursor=write;atomicStore(&meshState[${W.journalCursor}],write);
+    atomicStore(&meshState[${W.frontCursor}],0u);atomicStore(&meshState[${W.liveQuads}],0u);atomicStore(&meshState[${W.usable}],0u);
     atomicStore(&meshState[${W.worklistCount}],0u);atomicStore(&meshState[${W.processedBricks}],0u);
-    if(next==${M.replacement}u){
-      atomicStore(&meshState[${W.backCursor}],0u);atomicStore(&meshState[${W.liveTarget}],0u);
-      // Sized for the live mesh with a quarter's headroom; overflow grows it.
-      atomicStore(&meshState[${W.wantedBackQuads}],max(live+live/4u+65536u,MESH_MINIMUM_QUADS));
-      flags&=~${F.started}u;
-    }
-    if(next==${M.initial}u){atomicStore(&meshState[${W.liveTarget}],0u);}
-    atomicStore(&meshState[${W.mode}],next);atomicStore(&meshState[${W.building}],1u);
+    atomicStore(&meshState[${W.errorFlags}],0u);atomicStore(&meshState[${W.overflowLength}],0u);
+    atomicStore(&meshState[${W.boxCount}],0u);meshUnionReset();
+    for(var rangeClass=0u;rangeClass<MESH_CLASS_COUNT;rangeClass+=1u){atomicStore(&meshWork[meshStackAt(rangeClass)],0u);}
+    atomicAdd(&meshState[${W.builds}],1u);
+    atomicStore(&meshState[${W.mode}],${M.initial}u);atomicStore(&meshState[${W.building}],1u);
     atomicStore(&meshState[${W.restartReason}],reason);
-    flags|=${F.markPending}u;
-    mode=next;building=true;
+    flags=${F.markAll}u;building=true;
+  }else if(!building&&(write!=cursor||atomicLoad(&meshState[${W.worklistCount}])!=atomicLoad(&meshState[${W.processedBricks}]))){
+    // Bricks were finalized, or the last selection listed slots a topology
+    // change freed or re-keyed. The worklist keeps what selection listed.
+    atomicAdd(&meshState[${W.builds}],1u);
+    atomicStore(&meshState[${W.mode}],${M.incremental}u);atomicStore(&meshState[${W.building}],1u);
+    atomicStore(&meshState[${W.restartReason}],select(3u,2u,write==cursor));
+    building=true;
   }
-  if(!building){atomicStore(&meshState[${W.flags}],flags);return;}
-  // A replacement build needs a back arena the host has bound since the last
-  // flip. The generation the host stamps is consumed only by a flip, so a
-  // restart before the flip keeps the arena it already has; an arena smaller
-  // than wanted is not refused, it overflows and grows like any other.
-  if(mode==${M.replacement}u&&(flags&${F.started}u)==0u){
-    let generation=atomicLoad(&meshState[${W.hostBackGeneration}]);
-    if(generation!=atomicLoad(&meshState[${W.backGenerationConsumed}])){
-      flags|=${F.started}u;flags&=~${F.needBack}u;
-    }else{
-      flags|=${F.needBack}u;atomicStore(&meshState[${W.flags}],flags);return;
-    }
-  }
-  // The host copies the retained prefix into a larger arena. Resume only when
-  // that larger binding is actually visible; stale receipts never clear GPU
-  // error state or move the cursor.
-  if((atomicLoad(&meshState[${W.errorFlags}])&1u)!=0u){
-    if(meshArenaLength(meshTargetArena())>atomicLoad(&meshState[${W.overflowLength}])){atomicAnd(&meshState[${W.errorFlags}],~1u);}
-    else{atomicStore(&meshState[${W.flags}],flags);return;}
-  }
-  // The mark stays pending until the schedule pass that follows it has run,
-  // so a presentation that encodes no build passes cannot complete a build
-  // over an empty worklist.
-  if((flags&${F.markPending}u)!=0u){meshStoreDispatch(${W.markDispatch}u,(meshLeafCapacity()+63u)/64u);}
   atomicStore(&meshState[${W.flags}],flags);
+  if(!building){return;}
+  // The host answers an overflow with a larger binding only while it may
+  // still size the arena; the batch resumes when that binding is visible.
+  if((atomicLoad(&meshState[${W.errorFlags}])&1u)!=0u&&arrayLength(&meshArena)>atomicLoad(&meshState[${W.overflowLength}])){
+    atomicAnd(&meshState[${W.errorFlags}],~1u);
+  }
+  atomicStore(&meshState[${W.ingestBegin}],cursor);
+  atomicStore(&meshState[${W.ingestEnd}],cursor+min(write-cursor,MESH_INGEST_ENTRIES));
 }
-// Dirty boxes of the maintenance revision being answered: one closed lattice
-// box per dirty brick while they fit, else their union. Runs as one workgroup
-// so the union can be reduced with workgroup-uniform barriers.
-var<workgroup> meshBoxUnionMinimum:array<atomic<u32>,3>;
-var<workgroup> meshBoxUnionMaximum:array<atomic<u32>,3>;
+// Mark from the journal: one item per (entry, direction), the centre
+// direction listing the finalized brick itself and the other 26 the bricks
+// that touch it. Work is proportional to the bricks finalized, never to the
+// leaf capacity. A fixed direct dispatch strides over the items.
 @compute @workgroup_size(64)
-fn surfaceMeshBoxes(@builtin(local_invocation_index) lane:u32){
-  let pending=(atomicLoad(&meshState[${W.flags}])&${F.boxesPending}u)!=0u&&meshMaintenanceBound();
-  var count=0u;
-  if(pending){count=meshMaintenanceDirtyCount();}
-  if(lane<3u){atomicStore(&meshBoxUnionMinimum[lane],0xffffffffu);atomicStore(&meshBoxUnionMaximum[lane],0u);}
-  workgroupBarrier();
-  var previous=0u;
-  if(pending){previous=atomicLoad(&meshState[${W.boxCount}]);}
-  // A publication that lands during an incremental build appends its boxes
-  // to the ones that build still owes.
-  let joining=pending&&previous>0u&&atomicLoad(&meshState[${W.mode}])==${M.incremental}u;
-  let base=select(0u,min(previous,MESH_BOX_INDIVIDUAL),joining);
-  let individual=pending&&base+count<=MESH_BOX_INDIVIDUAL;
-  if(pending){
-    for(var i=lane;i<count;i+=64u){
-      let leaf=meshMaintenanceDirtyLeaf(i);
-      var minimum=vec3u(0xffffffffu);var maximum=vec3u(0u);
-      if(leaf!=MESH_NO_ENTRY&&meshLeafCurrent(leaf)){let box=meshLeafBox(leaf);minimum=box.minimum;maximum=box.maximum;
-        // DC faces depend on cells across both face and diagonal neighbours.
-        // Include the complete two-cell face footprint during replacement.
-        if(meshDcEnabled()){minimum-=min(minimum,vec3u(1u));maximum+=vec3u(1u);}
-      }
-      if(individual){
-        let out=(base+i)*MESH_BOX_WORDS;
-        atomicStore(&meshWork[out],minimum.x);atomicStore(&meshWork[out+1u],minimum.y);atomicStore(&meshWork[out+2u],minimum.z);
-        atomicStore(&meshWork[out+4u],maximum.x);atomicStore(&meshWork[out+5u],maximum.y);atomicStore(&meshWork[out+6u],maximum.z);
-      }
-      for(var axis=0u;axis<3u;axis+=1u){atomicMin(&meshBoxUnionMinimum[axis],minimum[axis]);atomicMax(&meshBoxUnionMaximum[axis],maximum[axis]);}
-    }
-    // The boxes already owed join the union either way.
-    if(joining&&lane==0u){
-      let minimum=meshBoxMinimum(MESH_BOX_UNION);let maximum=meshBoxMaximum(MESH_BOX_UNION);
-      for(var axis=0u;axis<3u;axis+=1u){atomicMin(&meshBoxUnionMinimum[axis],minimum[axis]);atomicMax(&meshBoxUnionMaximum[axis],maximum[axis]);}
-    }
-  }
-  workgroupBarrier();
-  if(lane==0u&&pending){
-    var unionMinimum=vec3u(0u);var unionMaximum=vec3u(0u);
-    for(var axis=0u;axis<3u;axis+=1u){unionMinimum[axis]=atomicLoad(&meshBoxUnionMinimum[axis]);unionMaximum[axis]=atomicLoad(&meshBoxUnionMaximum[axis]);}
-    let out=MESH_BOX_UNION*MESH_BOX_WORDS;
-    atomicStore(&meshWork[out],unionMinimum.x);atomicStore(&meshWork[out+1u],unionMinimum.y);atomicStore(&meshWork[out+2u],unionMinimum.z);
-    atomicStore(&meshWork[out+4u],unionMaximum.x);atomicStore(&meshWork[out+5u],unionMaximum.y);atomicStore(&meshWork[out+6u],unionMaximum.z);
-    if(individual){atomicStore(&meshState[${W.boxCount}],base+count);}
-    else{
-      // Too many boxes to list: the union alone stands for them all.
-      atomicStore(&meshWork[0],unionMinimum.x);atomicStore(&meshWork[1],unionMinimum.y);atomicStore(&meshWork[2],unionMinimum.z);
-      atomicStore(&meshWork[4],unionMaximum.x);atomicStore(&meshWork[5],unionMaximum.y);atomicStore(&meshWork[6],unionMaximum.z);
-      atomicStore(&meshState[${W.boxCount}],1u);
-    }
-    atomicAnd(&meshState[${W.flags}],~${F.boxesPending}u);
+fn surfaceMeshIngest(@builtin(global_invocation_id) id:vec3u){
+  let begin=atomicLoad(&meshState[${W.ingestBegin}]);
+  let count=atomicLoad(&meshState[${W.ingestEnd}])-begin;
+  // The pass that reads the entries commits the cursor, so a presentation
+  // that encodes no ingest leaves them for the next.
+  if(id.x==0u&&count!=0u){atomicStore(&meshState[${W.journalCursor}],begin+count);}
+  if(id.x>=MESH_INGEST_THREADS){return;}
+  let items=count*27u;
+  for(var item=id.x;item<items;item+=MESH_INGEST_THREADS){
+    let leaf=meshJournalLeaf(begin+item/27u);
+    if(leaf>=meshLeafCapacity()){continue;}
+    let direction=item%27u;
+    if(direction==13u){meshClaimDirty(leaf);continue;}
+    if(!meshLeafCurrent(leaf)){continue;}
+    meshClaimNeighbours(leaf,vec3i(i32(direction%3u),i32((direction/3u)%3u),i32(direction/9u))-vec3i(1));
   }
 }
-fn meshAppendWork(leaf:u32){
-  atomicStore(&meshWork[meshTableAt(leaf)+5u],0u);
-  let index=atomicAdd(&meshState[${W.worklistCount}],1u);
-  if(index>=meshLeafCapacity()){return;}
-  atomicStore(&meshWork[meshListAt(index)],leaf);
-  let scratch=meshScratchAt(index);
-  atomicStore(&meshWork[scratch],0u);atomicStore(&meshWork[scratch+1u],0u);
-}
-// One thread per leaf slot: decide which bricks this build extracts. A whole
-// build takes every current brick and clears the table entries of the rest.
-// An incremental build takes the bricks whose slot key changed, the bricks
-// that vanished (to free their ranges) and the bricks touching a dirty box.
-@compute @workgroup_size(64)
-fn surfaceMeshMark(@builtin(global_invocation_id) id:vec3u){
-  let slot=id.x+id.y*65535u*64u;
-  if(slot>=meshLeafCapacity()){return;}
-  let table=meshTableAt(slot);
-  let countWord=atomicLoad(&meshWork[table+1u]);
-  let keyX=atomicLoad(&meshWork[table+2u]);let keyY=atomicLoad(&meshWork[table+3u]);
-  let held=countWord!=0u||keyX!=0u||keyY!=0u;
-  let current=meshLeafCurrent(slot);
-  if(atomicLoad(&meshState[${W.mode}])!=${M.incremental}u){
-    if(current){meshAppendWork(slot);}
-    else if(held){
-      atomicStore(&meshWork[table],0u);atomicStore(&meshWork[table+1u],0u);atomicStore(&meshWork[table+2u],0u);atomicStore(&meshWork[table+3u],0u);
-    }
-    return;
-  }
-  if(!current){if(held){meshAppendWork(slot);}return;}
-  let node=svoNodeLoad(svoLeafLoad(slot).topology.x);
-  let sameKey=held&&keyX==node.address.x&&keyY==node.address.y&&(countWord>>27u)==node.address.z;
-  if(!sameKey||meshBoxesOverlap(meshLeafBox(slot))){meshAppendWork(slot);}
-}
-// Once per batch, after marking: the batch's brick span and its dispatches.
+// Once per presentation, after ingestion: the batch's brick span.
 @compute @workgroup_size(1)
 fn surfaceMeshSchedule(){
-  meshClearDispatch(${W.extractDispatch}u);meshClearDispatch(${W.allocateDispatch}u);
   atomicStore(&meshState[${W.batchBegin}],0u);atomicStore(&meshState[${W.batchEnd}],0u);
-  atomicStore(&meshState[${W.batchPending}],0u);
   if(atomicLoad(&meshState[${W.building}])==0u){return;}
-  let flags=atomicLoad(&meshState[${W.flags}]);
-  if(atomicLoad(&meshState[${W.mode}])==${M.replacement}u&&(flags&${F.started}u)==0u){return;}
   if((atomicLoad(&meshState[${W.errorFlags}])&1u)!=0u){return;}
-  // Past every wait the mark pass has just run over the whole table.
-  atomicAnd(&meshState[${W.flags}],~${F.markPending}u);
   let begin=atomicLoad(&meshState[${W.processedBricks}]);
-  let total=min(atomicLoad(&meshState[${W.worklistCount}]),meshLeafCapacity());
-  let end=min(total,begin+max(atomicLoad(&meshState[${W.bricksPerBatch}]),1u));
+  let end=begin+min(atomicLoad(&meshState[${W.worklistCount}])-begin,max(atomicLoad(&meshState[${W.bricksPerBatch}]),1u));
   atomicStore(&meshState[${W.batchBegin}],begin);atomicStore(&meshState[${W.batchEnd}],end);
-  let arena=meshTargetArena();
-  atomicStore(&meshState[${W.checkpoint}],atomicLoad(&meshState[meshCursorWord(arena)]));
-  let jobs=(end-begin)*meshJobsPerBrick();
-  meshStoreDispatch(${W.extractDispatch}u,(jobs+63u)/64u);
-  meshStoreDispatch(${W.allocateDispatch}u,(end-begin+63u)/64u);
+  atomicStore(&meshState[${W.checkpoint}],atomicLoad(&meshState[${W.frontCursor}]));
+  atomicOr(&meshState[${W.flags}],${F.scheduled}u);
 }
-fn meshBatchJob(job:u32)->vec2u{
-  let begin=atomicLoad(&meshState[${W.batchBegin}]);
-  let entry=begin+job/meshJobsPerBrick();
-  if(entry>=atomicLoad(&meshState[${W.batchEnd}])){return vec2u(MESH_NO_ENTRY,0u);}
-  return vec2u(entry,job%meshJobsPerBrick());
-}
+// Count and emit are fixed direct dispatches of the thread count the host
+// stamps; a thread strides over the batch's (brick, job) pairs.
+fn meshExtractThreads()->u32{return max(atomicLoad(&meshState[${W.hostExtractThreads}]),64u);}
 // Count phase: size every brick of the batch.
 @compute @workgroup_size(64)
 fn surfaceMeshCount(@builtin(global_invocation_id) id:vec3u){
-  let job=meshBatchJob(id.x+id.y*65535u*64u);
-  if(job.x==MESH_NO_ENTRY){return;}
-  let leaf=atomicLoad(&meshWork[meshListAt(job.x)]);
-  if(!meshLeafCurrent(leaf)){return;}
-  meshPhase=0u;meshEntry=job.x;
-  meshExtractJob(leaf,job.y);
+  let threads=meshExtractThreads();
+  if(id.x>=threads){return;}
+  let begin=atomicLoad(&meshState[${W.batchBegin}]);
+  let jobsPerBrick=meshJobsPerBrick();
+  let jobs=(atomicLoad(&meshState[${W.batchEnd}])-begin)*jobsPerBrick;
+  for(var job=id.x;job<jobs;job+=threads){
+    let slot=meshEntrySlot(begin+job/jobsPerBrick);
+    let leaf=atomicLoad(&meshWork[meshListAt(slot)]);
+    if(!meshLeafCurrent(leaf)){continue;}
+    meshPhase=0u;meshEntry=slot;
+    meshExtractJob(leaf,job%jobsPerBrick);
+  }
 }
-// Allocate phase, one thread per batch brick: free the brick's old range in
-// the drawn arena, reserve its new range in the target arena and record it.
+// Allocate phase, one thread per batch brick: reserve the brick's new range
+// and record it. A range of the old one's size class is the old one, to be
+// rewritten in place; otherwise it comes from its class's free stack, or
+// from the end of the arena when that stack is empty.
 @compute @workgroup_size(64)
 fn surfaceMeshAllocate(@builtin(global_invocation_id) id:vec3u){
-  let entry=atomicLoad(&meshState[${W.batchBegin}])+id.x+id.y*65535u*64u;
-  if(entry>=atomicLoad(&meshState[${W.batchEnd}])){return;}
-  let leaf=atomicLoad(&meshWork[meshListAt(entry)]);
-  let scratch=meshScratchAt(entry);
-  let pending=atomicExchange(&meshWork[scratch],0u);
+  let entry=atomicLoad(&meshState[${W.batchBegin}])+id.x;
+  if(id.x>=atomicLoad(&meshState[${W.batchEnd}])-atomicLoad(&meshState[${W.batchBegin}])){return;}
+  let slot=meshEntrySlot(entry);
+  let leaf=atomicLoad(&meshWork[meshListAt(slot)]);
+  let scratch=meshScratchAt(slot);
+  let pending=atomicExchange(&meshWork[scratch],0u)&MESH_COUNT_MASK;
   atomicStore(&meshWork[scratch+1u],0u);
   let table=meshTableAt(leaf);
-  let mode=atomicLoad(&meshState[${W.mode}]);
   // The previous range is remembered for the emit pass, which frees it, and
   // for an overflow rollback, which gives it back untouched.
-  atomicStore(&meshWork[scratch+2u],atomicLoad(&meshWork[table]));
-  atomicStore(&meshWork[scratch+3u],atomicLoad(&meshWork[table+1u]));
-  if(mode==${M.incremental}u){
-    let oldCount=atomicLoad(&meshWork[table+1u])&MESH_COUNT_MASK;
-    atomicSub(&meshState[${W.liveQuads}],min(oldCount,atomicLoad(&meshState[${W.liveQuads}])));
+  let oldBase=atomicLoad(&meshWork[table]);let oldWord=atomicLoad(&meshWork[table+1u]);
+  atomicStore(&meshWork[scratch+2u],oldBase);atomicStore(&meshWork[scratch+3u],oldWord);
+  let current=meshLeafCurrent(leaf);
+  // Queued for repair again since it was listed: its quads stay as they are
+  // and the voxelizer journals it when the repair lands. A slot re-keyed to a
+  // brick under repair gives up the quads of the brick it used to address.
+  let held=meshHeld(leaf);
+  if(!current&&meshLeafLinked(leaf)&&(!held.held||held.same)){atomicStore(&meshWork[scratch+2u],MESH_NO_ENTRY);return;}
+  var keyX=0u;var keyY=0u;var tag=0u;
+  if(current){let node=svoNodeLoad(svoLeafLoad(leaf).topology.x);keyX=node.address.x;keyY=node.address.y;tag=node.address.z+1u;}
+  let oldCount=oldWord&MESH_COUNT_MASK;
+  let rangeClass=meshRangeClass(pending);
+  var base=oldBase;
+  if(rangeClass!=meshRangeClass(oldCount)){
+    base=meshPopRange(rangeClass);
+    if(rangeClass==0u){base=0u;}
+    else if(base==MESH_NO_ENTRY){
+      let capacity=meshClassCapacity(rangeClass);
+      base=atomicAdd(&meshState[${W.frontCursor}],capacity);
+      if(base+capacity>arrayLength(&meshArena)){atomicOr(&meshState[${W.errorFlags}],1u);}
+    }
   }
-  var keyX=0u;var keyY=0u;var depth=0u;
-  if(meshLeafCurrent(leaf)){let node=svoNodeLoad(svoLeafLoad(leaf).topology.x);keyX=node.address.x;keyY=node.address.y;depth=node.address.z;}
-  let arena=meshTargetArena();
-  let base=atomicAdd(&meshState[meshCursorWord(arena)],pending);
-  if(base+pending>meshArenaLength(arena)){atomicOr(&meshState[${W.errorFlags}],1u);}
-  atomicStore(&meshWork[table],base);atomicStore(&meshWork[table+1u],(pending&MESH_COUNT_MASK)|(depth<<27u));
+  atomicStore(&meshWork[table],base);atomicStore(&meshWork[table+1u],pending|(tag<<27u));
   atomicStore(&meshWork[table+2u],keyX);atomicStore(&meshWork[table+3u],keyY);
-  atomicAdd(&meshState[${W.batchPending}],pending);
-  if(mode==${M.incremental}u){atomicAdd(&meshState[${W.liveQuads}],pending);}
-  else{atomicAdd(&meshState[${W.liveTarget}],pending);}
+  atomicAdd(&meshState[${W.liveQuads}],pending);atomicSub(&meshState[${W.liveQuads}],oldCount);
 }
 // Emit phase: the same traversal as the count phase, writing into the
 // brick's reserved range. It runs only once the whole batch has its ranges,
-// so it is also where a brick's previous range is freed: an overflowing
-// batch never reaches it, and the drawn mesh keeps every brick until its
-// replacement is written in the same presentation.
+// so it is also where a brick's previous range is freed and its claim
+// released: an overflowing batch never reaches it, and the drawn mesh keeps
+// every brick until its replacement is written in the same presentation.
 @compute @workgroup_size(64)
 fn surfaceMeshEmit(@builtin(global_invocation_id) id:vec3u){
   if((atomicLoad(&meshState[${W.errorFlags}])&1u)!=0u){return;}
-  let job=meshBatchJob(id.x+id.y*65535u*64u);
-  if(job.x==MESH_NO_ENTRY){return;}
-  let leaf=atomicLoad(&meshWork[meshListAt(job.x)]);
-  if(job.y==0u&&atomicLoad(&meshState[${W.mode}])==${M.incremental}u){
-    let scratch=meshScratchAt(job.x);
+  let threads=meshExtractThreads();
+  if(id.x>=threads){return;}
+  let begin=atomicLoad(&meshState[${W.batchBegin}]);
+  let jobsPerBrick=meshJobsPerBrick();
+  let jobs=(atomicLoad(&meshState[${W.batchEnd}])-begin)*jobsPerBrick;
+  let dead=SurfaceQuad(vec3u(0u),0u,vec3u(0u),0u);
+  let length=arrayLength(&meshArena);
+  for(var job=id.x;job<jobs;job+=threads){
+    let slot=meshEntrySlot(begin+job/jobsPerBrick);let local=job%jobsPerBrick;
+    let leaf=atomicLoad(&meshWork[meshListAt(slot)]);
+    let table=meshTableAt(leaf);let scratch=meshScratchAt(slot);
     let oldBase=atomicLoad(&meshWork[scratch+2u]);
-    let oldCount=atomicLoad(&meshWork[scratch+3u])&MESH_COUNT_MASK;
-    let front=meshFront();let length=meshArenaLength(front);
-    let dead=SurfaceQuad(vec3u(0u),0u,vec3u(0u),0u);
-    for(var i=0u;i<oldCount;i+=1u){if(oldBase+i<length){meshArenaStore(front,oldBase+i,dead);}}
+    if(local==0u){atomicStore(&meshWork[table+MESH_CLAIM_WORD],0u);}
+    if(oldBase==MESH_NO_ENTRY){continue;}
+    let base=atomicLoad(&meshWork[table]);let count=atomicLoad(&meshWork[table+1u])&MESH_COUNT_MASK;
+    if(local==0u){
+      let oldCount=atomicLoad(&meshWork[scratch+3u])&MESH_COUNT_MASK;
+      let rangeClass=meshRangeClass(count);let oldClass=meshRangeClass(oldCount);
+      if(oldClass!=rangeClass){
+        for(var i=0u;i<oldCount;i+=1u){if(oldBase+i<length){meshArena[oldBase+i]=dead;}}
+        meshPushRange(oldClass,oldBase);
+      }
+      // Every slot of the range past the quads written below is dead, whether
+      // it held the brick's earlier quads or whatever the arena held before.
+      let capacity=max(meshClassCapacity(rangeClass),select(0u,oldCount,oldClass==rangeClass));
+      for(var i=count;i<capacity;i+=1u){if(base+i<length){meshArena[base+i]=dead;}}
+    }
+    if(!meshLeafCurrent(leaf)){continue;}
+    meshPhase=1u;meshEntry=slot;
+    meshEmitBase=base;meshEmitCount=count;
+    meshExtractJob(leaf,local);
   }
-  if(!meshLeafCurrent(leaf)){return;}
-  let table=meshTableAt(leaf);
-  meshPhase=1u;meshEntry=job.x;meshEmitArena=meshTargetArena();
-  meshEmitBase=atomicLoad(&meshWork[table]);meshEmitCount=atomicLoad(&meshWork[table+1u])&MESH_COUNT_MASK;
-  meshExtractJob(leaf,job.y);
 }
 @compute @workgroup_size(1)
 fn surfaceMeshPublish(){
-  let building=atomicLoad(&meshState[${W.building}])!=0u;
-  let scheduled=atomicLoad(&meshState[${W.batchEnd}])>atomicLoad(&meshState[${W.batchBegin}]);
-  let mode=atomicLoad(&meshState[${W.mode}]);
   let flags=atomicLoad(&meshState[${W.flags}]);
-  let waiting=(mode==${M.replacement}u&&(flags&${F.started}u)==0u)||(flags&${F.markPending}u)!=0u
-    ||((atomicLoad(&meshState[${W.errorFlags}])&1u)!=0u&&!scheduled);
-  if(building&&!waiting&&(scheduled||atomicLoad(&meshState[${W.worklistCount}])==0u)){
-    let arena=meshTargetArena();
-    if((atomicLoad(&meshState[${W.errorFlags}])&1u)!=0u){
-      // An overflowing batch is rolled back whole to its checkpoint; every
-      // brick before it keeps its range and every brick in it gets its
-      // previous range back. Retry after the arena grows.
-      atomicStore(&meshState[meshCursorWord(arena)],atomicLoad(&meshState[${W.checkpoint}]));
-      atomicStore(&meshState[${W.overflowLength}],meshArenaLength(arena));
-      let batch=atomicLoad(&meshState[${W.batchPending}]);
-      if(mode==${M.incremental}u){
-        atomicSub(&meshState[${W.liveQuads}],min(batch,atomicLoad(&meshState[${W.liveQuads}])));
-        for(var entry=atomicLoad(&meshState[${W.batchBegin}]);entry<atomicLoad(&meshState[${W.batchEnd}]);entry+=1u){
-          let leaf=atomicLoad(&meshWork[meshListAt(entry)]);let scratch=meshScratchAt(entry);let table=meshTableAt(leaf);
+  atomicAnd(&meshState[${W.flags}],~${F.scheduled}u);
+  if(atomicLoad(&meshState[${W.building}])!=0u){
+    let begin=atomicLoad(&meshState[${W.batchBegin}]);let end=atomicLoad(&meshState[${W.batchEnd}]);
+    if((flags&${F.scheduled}u)!=0u){
+      if((atomicLoad(&meshState[${W.errorFlags}])&1u)!=0u){
+        // An overflowing batch is rolled back whole to its checkpoint: every
+        // brick in it gets its previous range back and keeps its claim.
+        atomicStore(&meshState[${W.frontCursor}],atomicLoad(&meshState[${W.checkpoint}]));
+        atomicStore(&meshState[${W.overflowLength}],arrayLength(&meshArena));
+        for(var entry=begin;entry!=end;entry+=1u){
+          let slot=meshEntrySlot(entry);
+          let leaf=atomicLoad(&meshWork[meshListAt(slot)]);let scratch=meshScratchAt(slot);let table=meshTableAt(leaf);
+          if(atomicLoad(&meshWork[scratch+2u])==MESH_NO_ENTRY){continue;}
           let previousCount=atomicLoad(&meshWork[scratch+3u]);
-          atomicStore(&meshWork[table],atomicLoad(&meshWork[scratch+2u]));atomicStore(&meshWork[table+1u],previousCount);
+          atomicSub(&meshState[${W.liveQuads}],atomicLoad(&meshWork[table+1u])&MESH_COUNT_MASK);
           atomicAdd(&meshState[${W.liveQuads}],previousCount&MESH_COUNT_MASK);
+          atomicStore(&meshWork[table],atomicLoad(&meshWork[scratch+2u]));atomicStore(&meshWork[table+1u],previousCount);
         }
+      }else{
+        atomicStore(&meshState[${W.processedBricks}],end);
+        atomicAdd(&meshState[${W.rebuiltBricks}],end-begin);
       }
-      else{atomicSub(&meshState[${W.liveTarget}],min(batch,atomicLoad(&meshState[${W.liveTarget}])));}
-    }else{
-      let processed=atomicLoad(&meshState[${W.batchEnd}]);
-      atomicStore(&meshState[${W.processedBricks}],processed);
-      if(processed>=min(atomicLoad(&meshState[${W.worklistCount}]),meshLeafCapacity())){
-        if(mode==${M.replacement}u){
-          let front=meshFront();
-          atomicStore(&meshState[${W.front}],1u-front);
-          atomicStore(&meshState[${W.frontCursor}],atomicLoad(&meshState[${W.backCursor}]));
-          atomicStore(&meshState[${W.backCursor}],0u);
-          atomicStore(&meshState[${W.backGenerationConsumed}],atomicLoad(&meshState[${W.hostBackGeneration}]));
-          atomicAnd(&meshState[${W.flags}],~${F.started}u);
-        }
-        if(mode!=${M.incremental}u){atomicStore(&meshState[${W.liveQuads}],atomicLoad(&meshState[${W.liveTarget}]));}
-        atomicStore(&meshState[${W.usable}],1u);
-        atomicStore(&meshState[${W.building}],0u);atomicStore(&meshState[${W.mode}],0u);
-        atomicStore(&meshState[${W.boxCount}],0u);
-      }
+    }
+    // The build is complete when the journal is consumed, no leaf scan is
+    // owed and every listed brick has been extracted. A brick finalized
+    // while it ran joined it; nothing restarted.
+    let waiting=(flags&${F.markAll}u)!=0u||(atomicLoad(&meshState[${W.errorFlags}])&1u)!=0u;
+    let processed=atomicLoad(&meshState[${W.processedBricks}]);
+    if(!waiting&&meshJournalWrite()==atomicLoad(&meshState[${W.journalCursor}])
+      &&processed==atomicLoad(&meshState[${W.worklistCount}])){
+      let mode=atomicLoad(&meshState[${W.mode}]);
+      atomicStore(&meshState[${W.lastBuildMode}],mode);atomicStore(&meshState[${W.lastBuildBricks}],processed);
+      atomicAdd(&meshState[select(${W.wholeBuilds}u,${W.incrementalBuilds}u,mode==${M.incremental}u)],1u);
+      atomicStore(&meshState[${W.usable}],1u);
+      atomicStore(&meshState[${W.building}],0u);atomicStore(&meshState[${W.mode}],0u);
+      atomicStore(&meshState[${W.worklistCount}],0u);atomicStore(&meshState[${W.processedBricks}],0u);
+      atomicStore(&meshState[${W.boxCount}],0u);meshUnionReset();
     }
   }
   let usable=atomicLoad(&meshState[${W.usable}])!=0u&&atomicLoad(&meshState[${W.withheld}])==0u&&(atomicLoad(&meshState[${W.errorFlags}])&2u)==0u;
   let quads=select(0u,atomicLoad(&meshState[${W.frontCursor}]),usable);
   atomicStore(&meshState[${W.drawInstanceCount}],${culling ? "0u" : "quads"});
-  meshStoreDispatch(${W.extractDispatch}u,(quads+63u)/64u);
+  atomicStore(&meshState[${W.cullQuads}],quads);
+}
+// Dirty boxes of the build's pending bricks, recomputed every presentation
+// after publication: one closed lattice box per finalized brick the mesh has
+// not yet re-extracted while they fit, else their union. A brick leaves the
+// mask in the presentation that emits it. Runs as one workgroup so the union
+// can be reduced with workgroup-uniform barriers.
+var<workgroup> meshBoxUnionMinimum:array<atomic<u32>,3>;
+var<workgroup> meshBoxUnionMaximum:array<atomic<u32>,3>;
+var<workgroup> meshBoxSlots:atomic<u32>;
+fn meshBoxRecord(box:MeshBrickBox){
+  let slot=atomicAdd(&meshBoxSlots,1u);
+  if(slot<MESH_BOX_INDIVIDUAL){meshBoxStore(slot,box.minimum,box.maximum);}
+  for(var axis=0u;axis<3u;axis+=1u){atomicMin(&meshBoxUnionMinimum[axis],box.minimum[axis]);atomicMax(&meshBoxUnionMaximum[axis],box.maximum[axis]);}
+}
+@compute @workgroup_size(64)
+fn surfaceMeshBoxes(@builtin(local_invocation_index) lane:u32){
+  // Only a drawn mesh is masked; a whole build traces everything. Bricks the
+  // selection just listed are masked before the build that extracts them starts.
+  let masking=atomicLoad(&meshState[${W.usable}])!=0u;
+  let begin=atomicLoad(&meshState[${W.processedBricks}]);
+  let pending=atomicLoad(&meshState[${W.worklistCount}])-begin;
+  let sweep=masking&&pending<=MESH_BOX_SWEEP;
+  if(lane<3u){atomicStore(&meshBoxUnionMinimum[lane],0xffffffffu);atomicStore(&meshBoxUnionMaximum[lane],0u);}
+  if(lane==0u){atomicStore(&meshBoxSlots,0u);}
+  workgroupBarrier();
+  if(sweep){
+    for(var i=lane;i<pending;i+=64u){
+      let leaf=atomicLoad(&meshWork[meshListAt(meshEntrySlot(begin+i))]);
+      if(atomicLoad(&meshWork[meshTableAt(leaf)+MESH_CLAIM_WORD])!=MESH_CLAIM_DIRTY){continue;}
+      if(meshLeafCurrent(leaf)){meshBoxRecord(meshMaskBox(meshLeafBox(leaf)));}
+      let held=meshHeld(leaf);
+      if(held.held&&!held.same){meshBoxRecord(meshMaskBox(held.box));}
+    }
+  }
+  workgroupBarrier();
+  if(lane!=0u){return;}
+  if(!masking){atomicStore(&meshState[${W.boxCount}],0u);return;}
+  // Finalized bricks the ingest pass has not reached are not listed yet, so
+  // until it catches up the whole frame is traced.
+  if(meshJournalWrite()!=atomicLoad(&meshState[${W.journalCursor}])){
+    meshBoxStore(MESH_BOX_UNION,vec3u(0u),vec3u(0xffffffffu));
+    meshBoxStore(0u,vec3u(0u),vec3u(0xffffffffu));
+    atomicStore(&meshState[${W.boxCount}],1u);return;
+  }
+  if(sweep){
+    var unionMinimum=vec3u(0u);var unionMaximum=vec3u(0u);
+    for(var axis=0u;axis<3u;axis+=1u){unionMinimum[axis]=atomicLoad(&meshBoxUnionMinimum[axis]);unionMaximum[axis]=atomicLoad(&meshBoxUnionMaximum[axis]);}
+    meshBoxStore(MESH_BOX_UNION,unionMinimum,unionMaximum);
+    let slots=atomicLoad(&meshBoxSlots);
+    if(slots<=MESH_BOX_INDIVIDUAL){atomicStore(&meshState[${W.boxCount}],slots);return;}
+  }
+  // Too many boxes to list, or too many pending bricks to sweep: the union
+  // alone stands for them all. Unswept, it is the union grown as bricks were
+  // claimed, which covers every pending brick.
+  meshBoxStore(0u,meshBoxMinimum(MESH_BOX_UNION),meshBoxMaximum(MESH_BOX_UNION));
+  atomicStore(&meshState[${W.boxCount}],1u);
 }
 // Which of a brick's levels this camera draws. Selection has one writer per
-// leaf, before culling, so all quads use the same hysteresis history.
+// leaf, before culling, so all quads use the same hysteresis history. It is
+// also the one pass that visits every leaf slot each presentation, so the
+// leaf scans ride on it: a whole build lists every current brick and voids
+// the rest of the table, and every presentation lists the slots a topology
+// change freed or re-keyed, which no journal entry names.
 fn meshCellFootprint(base:vec3u,brickLattice:u32)->f32{
   let camera=dryRasterPrimaryCamera();
   let half=vec3f(f32(brickLattice))*dry.mapping.cellSize*0.5;
@@ -1029,9 +1245,22 @@ fn meshSelectLevel(footprint:f32,threshold:f32,maximum:u32,previous:u32,valid:bo
 @compute @workgroup_size(64)
 fn surfaceMeshSelect(@builtin(global_invocation_id) id:vec3u){
   let leaf=id.x+id.y*65535u*64u;
+  let flags=atomicLoad(&meshState[${W.flags}]);
+  if(leaf==0u&&(flags&${F.markAll}u)!=0u){atomicOr(&meshState[${W.flags}],${F.scanned}u);}
   if(leaf>=meshLeafCapacity()){return;}
   let table=meshTableAt(leaf);
-  if(!meshLeafCurrent(leaf)){atomicStore(&meshWork[table+5u],0u);return;}
+  let current=meshLeafCurrent(leaf);
+  if((flags&${F.markAll}u)!=0u){
+    atomicStore(&meshWork[table],0u);atomicStore(&meshWork[table+1u],0u);atomicStore(&meshWork[table+2u],0u);atomicStore(&meshWork[table+3u],0u);
+    atomicStore(&meshWork[table+MESH_CLAIM_WORD],select(0u,MESH_CLAIM_TOUCHING,current));
+    if(current){meshAppendWork(leaf);}
+  }else if(atomicLoad(&meshWork[table+MESH_CLAIM_WORD])!=MESH_CLAIM_DIRTY){
+    // A slot whose table no longer describes the brick it addresses was freed
+    // or re-keyed by a topology change, which no journal entry names.
+    let held=meshHeld(leaf);
+    if((current&&!held.same)||(!current&&held.held)){meshClaimDirty(leaf);}
+  }
+  if(!current){atomicStore(&meshWork[table+5u],0u);return;}
   let box=meshLeafBox(leaf);let threshold=dryMeshLodPixels();
   let maximum=min(meshLevelCount()-1u,u32(dry.meshFilter.z));
   let valid=atomicLoad(&meshWork[table+5u])!=0u
@@ -1087,7 +1316,7 @@ fn meshQuadSelectedRead(quad:SurfaceQuad)->bool{
 // background so the edited region is exact before its bricks are re-extracted.
 fn meshQuadVisible(index:u32)->bool{
   if(index>=atomicLoad(&meshState[${W.frontCursor}])){return false;}
-  let quad=meshArenaLoad(meshFront(),index);
+  let quad=meshArena[index];
   if(meshQuadDead(quad)){return false;}
   if(!meshQuadSelected(quad)){return false;}
   // A dual triangle's vertices may lie up to four cells from its origin, so
@@ -1130,8 +1359,10 @@ var<workgroup> meshCullBase:u32;
 fn surfaceMeshCull(@builtin(global_invocation_id) id:vec3u,@builtin(local_invocation_index) lane:u32){
   if(lane==0u){atomicStore(&meshCullCount,0u);}
   workgroupBarrier();
+  // A fixed direct dispatch over the arena's capacity: threads past the quads
+  // publication made drawable have nothing to test.
   let index=id.x+id.y*65535u*64u;
-  let visible=meshQuadVisible(index);
+  let visible=index<atomicLoad(&meshState[${W.cullQuads}])&&meshQuadVisible(index);
   var rank=0u;if(visible){rank=atomicAdd(&meshCullCount,1u);}
   workgroupBarrier();
   if(lane==0u){
@@ -1256,13 +1487,14 @@ fn meshRayCrossesDirtyBox(origin:vec3f,direction:vec3f)->bool{
   // Exact planes are independent of the cached voxel mesh. Without a drawable
   // mesh, traverse the current published SVO so edits appear immediately and
   // unaffected room geometry remains visible. While a build updates a drawn
-  // mesh, only the pixels whose rays cross its dirty boxes are traced; the
-  // cull withholds the cached quads inside those boxes. This uses the same
-  // voxel authority, never the preceding mesh or an analytic approximation.
+  // mesh, only the pixels whose rays cross the boxes of the finalized bricks
+  // it still owes are traced; the cull withholds the cached quads inside
+  // those boxes. This uses the same voxel authority, never the preceding
+  // mesh or an analytic approximation.
   hit=dryPlanarCatalogHit(camera[0],rd,0.0,DRY_MISS);
   var producer=SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND;
   let undrawn=meshHeader[${W.usable}]==0u||meshHeader[${W.withheld}]!=0u||(meshHeader[${W.errorFlags}]&2u)!=0u;
-  let masked=!undrawn&&meshHeader[${W.building}]!=0u&&meshHeader[${W.boxCount}]!=0u&&meshRayCrossesDirtyBox(camera[0],rd);
+  let masked=!undrawn&&meshHeader[${W.boxCount}]!=0u&&meshRayCrossesDirtyBox(camera[0],rd);
   if(undrawn||masked){
     let current=traceStatic(camera[0],rd);
     if(current.t<hit.t){hit=current;producer=SVO_GBUFFER_PRODUCER_BRICK;}

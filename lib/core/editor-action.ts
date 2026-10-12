@@ -156,6 +156,17 @@ export type EditorActionEffect =
    */
   | { readonly kind: "voxel-tool"; readonly toolId: string }
   /**
+   * Run one of the voxel editor's selection verbs on the standing voxel region.
+   *
+   * The id is the verb plugin's own, for the reason `voxel-tool` carries a
+   * tool's: the surfaces that offer verbs compose them from the registry. It
+   * carries no patches and no scene — the verb is run when it is chosen,
+   * against the document as it then stands, and committed the way a stroke is.
+   * `variantId` names one of the verb's declared ways of running: the axis a
+   * Flip wedge was for, the material a Paint wedge was.
+   */
+  | { readonly kind: "voxel-verb"; readonly verbId: string; readonly variantId?: string }
+  /**
    * One of the scene document's own verbs: what used to be a persistent Scene
    * popover, now reached from the scene's ring and from the container strip
    * while the tank is selected. Save writes the library entry under the
@@ -263,6 +274,8 @@ export interface EditorAction {
    * component.
    */
   readonly iconPath?: string;
+  /** A CSS colour drawn in place of the picture, when the wedge *is* a colour: a palette entry. */
+  readonly swatch?: string;
   readonly tone: EditorActionTone;
   /**
    * False renders the wedge visible but unselectable — the same bargain

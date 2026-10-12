@@ -62,12 +62,21 @@ export interface BackdropField {
  * generated in.
  */
 export function backdropHash(a: number, b = 0, c = 0, d = 0, e = 0): number {
+  // One fold per word, written out: the scatter planner hashes four times per
+  // grid cell, and a word list would be an array per call.
   let h = 0x9e37_79b9 ^ Math.imul(a | 0, 0x85eb_ca6b);
-  for (const word of [b, c, d, e]) {
-    h = Math.imul(h ^ (h >>> 16), 0x85eb_ca6b);
-    h = Math.imul(h ^ (h >>> 13), 0xc2b2_ae35);
-    h ^= (h >>> 16) ^ Math.imul(word | 0, 0x27d4_eb2f);
-  }
+  h = Math.imul(h ^ (h >>> 16), 0x85eb_ca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2_ae35);
+  h ^= (h >>> 16) ^ Math.imul(b | 0, 0x27d4_eb2f);
+  h = Math.imul(h ^ (h >>> 16), 0x85eb_ca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2_ae35);
+  h ^= (h >>> 16) ^ Math.imul(c | 0, 0x27d4_eb2f);
+  h = Math.imul(h ^ (h >>> 16), 0x85eb_ca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2_ae35);
+  h ^= (h >>> 16) ^ Math.imul(d | 0, 0x27d4_eb2f);
+  h = Math.imul(h ^ (h >>> 16), 0x85eb_ca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2_ae35);
+  h ^= (h >>> 16) ^ Math.imul(e | 0, 0x27d4_eb2f);
   h = Math.imul(h ^ (h >>> 16), 0x85eb_ca6b);
   h = Math.imul(h ^ (h >>> 13), 0xc2b2_ae35);
   return (h ^ (h >>> 16)) >>> 0;
@@ -145,15 +154,6 @@ export function compileBackdropField(description: BackdropDescription, seam: Bac
   };
 }
 
-/** The ramp and valley envelopes at footprint distance `d`. */
-function envelopes(field: BackdropField, d: number): readonly [number, number] {
-  const { hills, outerRadius_m } = field.description;
-  return [
-    smoothstep(hills.flatRing_m, hills.flatRing_m + hills.rampWidth_m, d),
-    smoothstep(hills.flatRing_m, outerRadius_m, d),
-  ];
-}
-
 /** Normalised wave sum n in [-1, 1]. */
 export function backdropWaveSum(field: BackdropField, x: number, z: number): number {
   const waves = field.waves;
@@ -185,6 +185,122 @@ export function backdropHeightFromWaveSum(field: BackdropField, d: number, waveS
   return field.seam.height_m + ramp * (hills.valleyRise_m * valley + hills.amplitude_m * (0.5 + 0.5 * waveSum));
 }
 
+/**
+ * Everything a compiled field's heights depend on, as one string: what a table
+ * derived from the field is memoised on (`content-memo.ts`).
+ */
+export function backdropFieldContentKey(field: BackdropField): string {
+  return JSON.stringify([field.description, field.seam.height_m, field.seam.footprint_m]);
+}
+
+/**
+ * The field over a grid of columns `(xs[i], zs[j])`, evaluated separably, a
+ * run of one row at a time.
+ *
+ * A wave's phase `k (dx x + dz z) + phi` is a sum of an x term and a z term,
+ * so over a grid `sin(A + B) = sin A cos B + cos A sin B` needs the sines and
+ * cosines of each axis once per row or column of the grid rather than once per
+ * column and wave. The x table carries the wave's amplitude and the z table
+ * its phase offset; along a row the z factors are constants, and each wave is
+ * one pass over the run.
+ *
+ * Equal to the direct evaluation to within rounding (a few ulps of the phase).
+ * The footprint distance and the envelopes are formed exactly as the direct
+ * evaluation forms them, so only the wave sum differs: a caller that rounds
+ * the height to a lattice re-evaluates directly when the value is within that
+ * of a rounding boundary.
+ */
+export interface BackdropGridSampler {
+  /** `backdropFieldHeight(field, xs[first + i], zs[zIndex])` into `heights[i]`, for `count` columns. */
+  heights(zIndex: number, first: number, count: number, heights: Float64Array): void;
+  /** `backdropFieldHeightAndGradient` over the same run: `[h, dh/dx, dh/dz]` into the three arrays. */
+  heightsAndGradients(zIndex: number, first: number, count: number,
+    heights: Float64Array, gradientX: Float64Array, gradientZ: Float64Array): void;
+}
+
+export function createBackdropGridSampler(field: BackdropField, xs: Float64Array, zs: Float64Array): BackdropGridSampler {
+  const waves = field.waves, count = field.waveCount;
+  // Wave-major, so a wave's pass along a row reads one contiguous run.
+  const table = (positions: Float64Array, axis: 0 | 1): readonly [Float64Array, Float64Array] => {
+    const sin = new Float64Array(positions.length * count), cos = new Float64Array(positions.length * count);
+    for (let wave = 0; wave < count; wave += 1) {
+      const base = wave * BACKDROP_WAVE_STRIDE;
+      const k = waves[base + 2]!, direction = waves[base + axis]!;
+      const scale = axis === 0 ? waves[base + 4]! : 1, offset = axis === 0 ? 0 : waves[base + 3]!;
+      for (let index = 0; index < positions.length; index += 1) {
+        const phase = k * (direction * positions[index]!) + offset;
+        sin[wave * positions.length + index] = scale * Math.sin(phase);
+        cos[wave * positions.length + index] = scale * Math.cos(phase);
+      }
+    }
+    return [sin, cos];
+  };
+  const [xSin, xCos] = table(xs, 0), [zSin, zCos] = table(zs, 1);
+  const xCount = xs.length, zCount = zs.length;
+  const sums = new Float64Array(xCount), slopesX = new Float64Array(xCount), slopesZ = new Float64Array(xCount);
+  const minX = field.seam.footprint_m[0], minZ = field.seam.footprint_m[1];
+  const maxX = field.seam.footprint_m[2], maxZ = field.seam.footprint_m[3];
+  const seam = field.seam.height_m;
+  const { hills, outerRadius_m } = field.description;
+  const flatRing = hills.flatRing_m, rampWidth = hills.rampWidth_m, span = outerRadius_m - flatRing;
+  const valleyRise = hills.valleyRise_m, amplitude = hills.amplitude_m;
+  // `smoothstep(edge0, edge1, d)` as `backdropHeightFromWaveSum` forms it.
+  const rampEdge = flatRing + rampWidth - flatRing, valleyEdge = outerRadius_m - flatRing;
+  return {
+    heights(zIndex, first, runLength, heights) {
+      sums.fill(0, 0, runLength);
+      for (let wave = 0; wave < count; wave += 1) {
+        const sb = zSin[wave * zCount + zIndex]!, cb = zCos[wave * zCount + zIndex]!, base = wave * xCount + first;
+        for (let i = 0; i < runLength; i += 1) sums[i]! += xSin[base + i]! * cb + xCos[base + i]! * sb;
+      }
+      const z = zs[zIndex]!, dz = Math.max(minZ - z, 0, z - maxZ), dz2 = dz * dz;
+      for (let i = 0; i < runLength; i += 1) {
+        const x = xs[first + i]!, dx = Math.max(minX - x, 0, x - maxX);
+        const d = Math.sqrt(dx * dx + dz2);
+        if (d <= flatRing) { heights[i] = seam; continue; }
+        const tr = Math.min(1, Math.max(0, (d - flatRing) / rampEdge)), ramp = tr * tr * (3 - 2 * tr);
+        if (ramp === 0) { heights[i] = seam; continue; }
+        const tv = Math.min(1, Math.max(0, (d - flatRing) / valleyEdge)), valley = tv * tv * (3 - 2 * tv);
+        heights[i] = seam + ramp * (valleyRise * valley + amplitude * (0.5 + 0.5 * sums[i]!));
+      }
+    },
+    heightsAndGradients(zIndex, first, runLength, heights, gradientX, gradientZ) {
+      sums.fill(0, 0, runLength); slopesX.fill(0, 0, runLength); slopesZ.fill(0, 0, runLength);
+      for (let wave = 0; wave < count; wave += 1) {
+        const sb = zSin[wave * zCount + zIndex]!, cb = zCos[wave * zCount + zIndex]!, base = wave * xCount + first;
+        const kx = waves[wave * BACKDROP_WAVE_STRIDE + 2]! * waves[wave * BACKDROP_WAVE_STRIDE]!;
+        const kz = waves[wave * BACKDROP_WAVE_STRIDE + 2]! * waves[wave * BACKDROP_WAVE_STRIDE + 1]!;
+        for (let i = 0; i < runLength; i += 1) {
+          const sa = xSin[base + i]!, ca = xCos[base + i]!;
+          sums[i]! += sa * cb + ca * sb;
+          const c = ca * cb - sa * sb;
+          slopesX[i]! += c * kx; slopesZ[i]! += c * kz;
+        }
+      }
+      const z = zs[zIndex]!, dz = Math.max(minZ - z, 0, z - maxZ), dz2 = dz * dz;
+      const oz = z - Math.min(Math.max(z, minZ), maxZ);
+      for (let i = 0; i < runLength; i += 1) {
+        const x = xs[first + i]!, dx = Math.max(minX - x, 0, x - maxX);
+        const d = Math.sqrt(dx * dx + dz2);
+        if (d <= flatRing) { heights[i] = seam; gradientX[i] = 0; gradientZ[i] = 0; continue; }
+        const n = sums[i]!;
+        const tr = Math.min(1, Math.max(0, (d - flatRing) / rampWidth));
+        const ramp = tr * tr * (3 - 2 * tr), rampSlope = 6 * tr * (1 - tr) / rampWidth;
+        const tv = Math.min(1, Math.max(0, (d - flatRing) / span));
+        const valley = tv * tv * (3 - 2 * tv), valleySlope = 6 * tv * (1 - tv) / span;
+        const body = valleyRise * valley + amplitude * (0.5 + 0.5 * n);
+        const radial = rampSlope * body + ramp * valleyRise * valleySlope;
+        // The height by `backdropHeightFromWaveSum`'s own expression.
+        const th = Math.min(1, Math.max(0, (d - flatRing) / rampEdge)), rampHeight = th * th * (3 - 2 * th);
+        const tw = Math.min(1, Math.max(0, (d - flatRing) / valleyEdge)), valleyHeight = tw * tw * (3 - 2 * tw);
+        heights[i] = rampHeight === 0 ? seam : seam + rampHeight * (valleyRise * valleyHeight + amplitude * (0.5 + 0.5 * n));
+        gradientX[i] = radial * (x - Math.min(Math.max(x, minX), maxX)) / d + ramp * 0.5 * amplitude * slopesX[i]!;
+        gradientZ[i] = radial * oz / d + ramp * 0.5 * amplitude * slopesZ[i]!;
+      }
+    },
+  };
+}
+
 const compiledByDescription = new WeakMap<BackdropDescription, Map<string, BackdropField>>();
 
 /**
@@ -213,26 +329,38 @@ export function backdropHeightBounds(
   field: BackdropField,
   minX: number, minZ: number, maxX: number, maxZ: number,
 ): readonly [number, number] {
+  const bounds = new Float64Array(2);
+  backdropHeightBoundsInto(field, minX, minZ, maxX, maxZ, bounds);
+  return [bounds[0]!, bounds[1]!];
+}
+
+/** The same bounds written to `bounds[0]` and `bounds[1]`, for a caller that asks per octree node. */
+export function backdropHeightBoundsInto(
+  field: BackdropField,
+  minX: number, minZ: number, maxX: number, maxZ: number,
+  bounds: Float64Array,
+): void {
   const [fMinX, fMinZ, fMaxX, fMaxZ] = field.seam.footprint_m;
   // Nearest distance between the box and the footprint rectangle, and the
   // farthest (a corner, since distance to a convex set is convex).
   const gapX = Math.max(fMinX - maxX, 0, minX - fMaxX);
   const gapZ = Math.max(fMinZ - maxZ, 0, minZ - fMaxZ);
   const dNear = Math.hypot(gapX, gapZ);
-  let dFar = 0;
-  for (const x of [minX, maxX]) for (const z of [minZ, maxZ]) dFar = Math.max(dFar, backdropFootprintDistance(field.seam, x, z));
-  const [rampNear, valleyNear] = envelopes(field, dNear);
-  const [rampFar, valleyFar] = envelopes(field, dFar);
-  const { hills } = field.description;
+  const dFar = Math.max(0,
+    backdropFootprintDistance(field.seam, minX, minZ), backdropFootprintDistance(field.seam, minX, maxZ),
+    backdropFootprintDistance(field.seam, maxX, minZ), backdropFootprintDistance(field.seam, maxX, maxZ));
+  const { hills, outerRadius_m } = field.description;
+  const rampEdge = hills.flatRing_m + hills.rampWidth_m;
+  const rampNear = smoothstep(hills.flatRing_m, rampEdge, dNear), valleyNear = smoothstep(hills.flatRing_m, outerRadius_m, dNear);
+  const rampFar = smoothstep(hills.flatRing_m, rampEdge, dFar), valleyFar = smoothstep(hills.flatRing_m, outerRadius_m, dFar);
   const seam = field.seam.height_m;
-  let low = seam + rampNear * hills.valleyRise_m * valleyNear;
-  let high = seam + rampFar * (hills.valleyRise_m * valleyFar + hills.amplitude_m);
+  const low = seam + rampNear * hills.valleyRise_m * valleyNear;
+  const high = seam + rampFar * (hills.valleyRise_m * valleyFar + hills.amplitude_m);
   const cx = 0.5 * (minX + maxX), cz = 0.5 * (minZ + maxZ);
   const reach = field.lipschitz * 0.5 * Math.hypot(maxX - minX, maxZ - minZ);
   const centre = backdropFieldHeight(field, cx, cz);
-  low = Math.max(low, centre - reach);
-  high = Math.min(high, centre + reach);
-  return [low, high];
+  bounds[0] = Math.max(low, centre - reach);
+  bounds[1] = Math.min(high, centre + reach);
 }
 
 /**
@@ -293,41 +421,6 @@ export function backdropFieldHeightAndGradient(field: BackdropField, x: number, 
   return [field.seam.height_m + ramp * body,
     radial * gdx + ramp * 0.5 * hills.amplitude_m * gx,
     radial * gdz + ramp * 0.5 * hills.amplitude_m * gz];
-}
-
-/**
- * Conservative `[min, max, slope, curvature]` of the ground over a horizontal
- * rectangle: the height range, an upper bound on `|grad h|` and the local
- * second-derivative bound `K` the other three were derived with.
- *
- * A second-order Taylor bound about the centre of each of `subdivisions^2`
- * sub-rectangles: `h(p) <= h(c) + g.(p - c) + K |p - c|^2 / 2`, whose linear
- * part peaks at a corner (`(|gx| sx + |gz| sz) / 2`), with `K` the local
- * curvature bound (`backdropFieldCurvatureBound` at the rectangle's nearest
- * footprint distance). The slope is `|g(c)| + K r`. Intersected with the
- * envelope bound of `backdropHeightBounds`. Against the Lipschitz margin this
- * replaces, the slack over a backdrop leaf falls from about 1.4 leaf edges to
- * 0.07 at two subdivisions (hero hills, 6 px leaves).
- */
-export function backdropTaylorHeightBounds(
-  field: BackdropField,
-  minX: number, minZ: number, maxX: number, maxZ: number,
-  subdivisions = 2,
-): readonly [number, number, number, number] {
-  const [fMinX, fMinZ, fMaxX, fMaxZ] = field.seam.footprint_m;
-  const nearest = Math.hypot(Math.max(fMinX - maxX, 0, minX - fMaxX), Math.max(fMinZ - maxZ, 0, minZ - fMaxZ));
-  const K = backdropFieldCurvatureBound(field, nearest);
-  const sx = (maxX - minX) / subdivisions, sz = (maxZ - minZ) / subdivisions;
-  const quadratic = 0.125 * K * (sx * sx + sz * sz), reach = 0.5 * Math.hypot(sx, sz) * K;
-  let low = Number.POSITIVE_INFINITY, high = Number.NEGATIVE_INFINITY, slope = 0;
-  for (let j = 0; j < subdivisions; j += 1) for (let i = 0; i < subdivisions; i += 1) {
-    const [h, gx, gz] = backdropFieldHeightAndGradient(field, minX + (i + 0.5) * sx, minZ + (j + 0.5) * sz);
-    const margin = 0.5 * (Math.abs(gx) * sx + Math.abs(gz) * sz) + quadratic;
-    low = Math.min(low, h - margin); high = Math.max(high, h + margin);
-    slope = Math.max(slope, Math.hypot(gx, gz) + reach);
-  }
-  const [envelopeLow, envelopeHigh] = backdropHeightBounds(field, minX, minZ, maxX, maxZ);
-  return [Math.max(low, envelopeLow), Math.min(high, envelopeHigh), Math.min(slope, field.lipschitz), K];
 }
 
 /**

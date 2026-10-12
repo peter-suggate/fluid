@@ -204,6 +204,62 @@ export function sampleProceduralTerrain(procedural: TerrainProcedural, x: number
   return Math.max(0, tz === 0 ? lower : lower * (1 - tz) + row(z0 + 1) * tz);
 }
 
+/** Past this much weight on the other nodes a query is a real interpolation, and is evaluated as one. */
+const PROCEDURAL_NODE_WEIGHT_LIMIT = 1e-9;
+
+/**
+ * The f32 a column lattice stores for a point:
+ * `Math.fround(Math.min(maximumHeight_m, sampleProceduralTerrain(...)))`, bit
+ * for bit, and usually from one generator evaluation instead of four.
+ *
+ * A column centre sits on a generator node by the alignment rule, but only to
+ * within the rounding of its own arithmetic: on the hero pond 307 of 576
+ * columns miss in x by 2e-13 of a node and 346 of 384 rows do in z, and each
+ * miss doubles the evaluations to carry a weight that cannot reach the stored
+ * f32. Every node is clamped to `[0, container.height_m]`, so the interpolant
+ * lies within `height * (weight in x + weight in z)` of the node the query sits
+ * on. When both ends of that interval round to one f32 the other three nodes
+ * cannot change the answer and are not evaluated; when they do not (a height
+ * at an f32 rounding boundary, about one column in four thousand, or a height
+ * of zero) the full interpolation runs.
+ */
+function proceduralColumnHeight(procedural: TerrainProcedural, x: number, z: number, maximumHeight_m: number): number {
+  const materialized = derivedGridByDescription.get(procedural);
+  if (materialized) return Math.fround(Math.min(maximumHeight_m, sampleTerrainGrid(materialized, x, z)));
+  if (procedural.kind === "pond-vessel") {
+    const { spec, container, spacing_m } = procedural;
+    const nx = Math.max(MIN_TERRAIN_GRID_SIZE, Math.ceil(container.width_m / spacing_m) + 1);
+    const nz = Math.max(MIN_TERRAIN_GRID_SIZE, Math.ceil(container.depth_m / spacing_m) + 1);
+    const originX = -.5 * container.width_m, originZ = -.5 * container.depth_m;
+    const fx = Math.min(nx - 1, Math.max(0, (x - originX) / spacing_m));
+    const fz = Math.min(nz - 1, Math.max(0, (z - originZ) / spacing_m));
+    const i = Math.round(fx), j = Math.round(fz);
+    const weight = Math.abs(fx - i) + Math.abs(fz - j);
+    if (weight < PROCEDURAL_NODE_WEIGHT_LIMIT) {
+      const node = Math.min(container.height_m, Math.max(0, pondVesselHeightAt(spec, proceduralPlanCurve(procedural),
+        originX + i * spacing_m, originZ + j * spacing_m)));
+      // Twice the bound, and room for the interpolation's own rounding.
+      const slack = container.height_m * (2 * weight + 1e-12);
+      const low = Math.fround(Math.min(maximumHeight_m, Math.max(0, node - slack)));
+      if (low === Math.fround(Math.min(maximumHeight_m, node + slack))) return low;
+    }
+  }
+  return Math.fround(Math.min(maximumHeight_m, sampleProceduralTerrain(procedural, x, z)));
+}
+
+/**
+ * One column's ground height as a column lattice stores it: the f32 of
+ * `terrainHeightAt` clamped to `maximumHeight_m`.
+ *
+ * `terrainColumnHeightsForLattice` is this over a whole lattice. A consumer
+ * that reads a few columns asks here, and holds the same numbers.
+ */
+export function terrainColumnHeightAt(terrain: TerrainDescription | undefined, x: number, z: number,
+  maximumHeight_m: number): number {
+  if (terrain?.procedural && !terrain.grid) return proceduralColumnHeight(terrain.procedural, x, z, maximumHeight_m);
+  return Math.fround(Math.min(maximumHeight_m, terrainHeightAt(terrain, x, z)));
+}
+
 export function terrainSampleGrid(terrain: TerrainDescription | undefined): TerrainGrid | undefined {
   if (!terrain) return undefined;
   if (terrain.grid) return terrain.grid;
@@ -287,8 +343,41 @@ function gridHeightsFold(heights_m: readonly number[]) {
   return result;
 }
 
+/**
+ * The stamp last computed for a terrain object, with the fields it was read
+ * from. A document's terrain is replaced rather than written, and every edit
+ * that leaves the ground alone carries the same object forward, so a stamp
+ * that is read on every accepted edit and every published scene is computed
+ * once per ground. The fields are checked on each read because the scale
+ * repair (`repairSceneForContainer`) does assign `baseHeight_m` and `grid` on
+ * a document it has just cloned: a stamp taken before that must not survive it.
+ */
+const terrainStamps = new WeakMap<TerrainDescription, {
+  readonly baseHeight_m: number;
+  readonly features: readonly TerrainFeature[];
+  readonly featureCount: number;
+  readonly grid: TerrainGrid | undefined;
+  readonly heights_m: readonly number[] | undefined;
+  readonly sampleCount: number;
+  readonly procedural: TerrainProcedural | undefined;
+  readonly stamp: string;
+}>();
+
 export function terrainContentStamp(terrain: TerrainDescription | undefined): string {
   if (!terrain) return "terrain-v1:none";
+  const held = terrainStamps.get(terrain);
+  if (held && Object.is(held.baseHeight_m, terrain.baseHeight_m) && held.features === terrain.features
+    && held.featureCount === terrain.features.length && held.grid === terrain.grid
+    && held.heights_m === terrain.grid?.heights_m && held.sampleCount === (terrain.grid?.heights_m.length ?? 0)
+    && held.procedural === terrain.procedural) return held.stamp;
+  const stamp = computeTerrainContentStamp(terrain);
+  terrainStamps.set(terrain, { baseHeight_m: terrain.baseHeight_m, features: terrain.features,
+    featureCount: terrain.features.length, grid: terrain.grid, heights_m: terrain.grid?.heights_m,
+    sampleCount: terrain.grid?.heights_m.length ?? 0, procedural: terrain.procedural, stamp });
+  return stamp;
+}
+
+function computeTerrainContentStamp(terrain: TerrainDescription): string {
   let low = 0x811c_9dc5, high = 0x9e37_79b9;
   const fold = (word: number) => {
     low = Math.imul(low ^ word, 0x0100_0193) >>> 0;
@@ -602,8 +691,10 @@ export function* terrainColumnHeightsForLatticeSteps(
   // grid to find out how big it would have been.
   const grid = terrain.grid ?? terrainDerivedGridForBulkSampling(terrain, nx * nz);
   const procedural = terrain.procedural;
+  // Below the crossover a described ground answers a column from the one node
+  // it sits on wherever that is provably the stored f32.
   const heightAt = grid ? (x: number, z: number) => sampleTerrainGrid(grid, x, z)
-    : procedural ? (x: number, z: number) => sampleProceduralTerrain(procedural, x, z)
+    : procedural ? (x: number, z: number) => proceduralColumnHeight(procedural, x, z, maximumHeight_m)
       : (x: number, z: number) => describedTerrainHeightAt(terrain, x, z);
   // Rows per yield offer, chosen so a batch is well inside a frame even on the
   // widest domain this bake sees: 1536 columns a row at depth 3, at about

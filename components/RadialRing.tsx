@@ -381,7 +381,9 @@ export function RadialRing({ menu, onChoose, onClose }: RadialRingProps) {
             onClick={() => choose(action, index)}
           >
             <path d={wedgePath(from, to)} />
-            {(action.icon || action.iconPath) && <EditorActionIconMark name={action.icon} path={action.iconPath} x={iconX} y={iconY} />}
+            {action.swatch !== undefined
+              ? <rect className="radial-swatch" x={iconX - 8} y={iconY - 8} width={16} height={16} rx={3} fill={action.swatch} />
+              : (action.icon || action.iconPath) && <EditorActionIconMark name={action.icon} path={action.iconPath} x={iconX} y={iconY} />}
             <text className="radial-label" x={labelX} y={labelY}>{action.label}</text>
             {(action.children?.length ?? 0) > 0 && <path
               className="radial-more"

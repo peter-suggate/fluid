@@ -194,7 +194,7 @@ const healthyFixture = {
   tetrahedralRadiance: { generation: 3, plan: { complete: true } },
 };
 const withdrawnFixtures: ReadonlyArray<readonly [string, Parameters<typeof derivedLightingHealthy>[0]]> = [
-  ["status says unavailable (:1492 address-plan-invalidated, :975 capacity)",
+  ["status says unavailable (capacity)",
     { ...healthyFixture, derivedLighting: { state: "unavailable" } }],
   ["pyramid nulled (:1070 initialization-failed catch)", { tetrahedralRadiance: healthyFixture.tetrahedralRadiance }],
   ["radiance nulled alongside it", { nodeMipPyramid: healthyFixture.nodeMipPyramid }],

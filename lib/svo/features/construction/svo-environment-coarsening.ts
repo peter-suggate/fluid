@@ -69,7 +69,9 @@ import { sceneCellSizes_m } from "../../../core/scene-lattice";
 import {
   SOLID_WORLD_BRICK_CELLS,
   SOLID_WORLD_TERRAIN_MATERIAL_ID,
+  solidWorldPageOrder,
   type SolidWorld,
+  type SolidWorldCoordinate,
 } from "../../../core/solid-world";
 import { SPARSE_BRICK_GPU_LAYOUT, type SparseBrickCoordinate } from "./sparse-brick-octree";
 import { isSvoPlanarBoundaryProxy } from "../scene-publication/svo-planar-boundary";
@@ -179,36 +181,73 @@ export function solidWorldTerrainSurfaceCoarseningRegions(
   world: SolidWorld,
 ): SvoEnvironmentCoarseningRegion[] {
   if (!scene.terrain) return [];
+  const B = SOLID_WORLD_BRICK_CELLS, ground = world.ground;
   const cell = sceneCellSizes_m(scene);
   const origin = [-0.5 * scene.container.width_m, 0,
     -0.5 * scene.container.depth_m] as const;
-  return world.pages.flatMap((page) => {
+  const written = (coordinate: SolidWorldCoordinate) => {
+    const index = world.directory.lookup(coordinate);
+    return index === undefined ? undefined : world.pages[index];
+  };
+  const exposedPages: SolidWorldCoordinate[] = [];
+  // A page a patch wrote is read as cells. The page over it is another written
+  // page or the ground, and the ground is asked for the one cell.
+  for (const page of world.pages) {
     let exposed = false;
     for (let local = 0; local < page.materialId.length && !exposed; local += 1) {
       if (page.materialId[local] !== SOLID_WORLD_TERRAIN_MATERIAL_ID
         || page.solidFraction[local] === 0) continue;
-      const y = Math.floor(local / SOLID_WORLD_BRICK_CELLS)
-        % SOLID_WORLD_BRICK_CELLS;
-      if (y + 1 < SOLID_WORLD_BRICK_CELLS) {
-        exposed = page.solidFraction[local + SOLID_WORLD_BRICK_CELLS] === 0;
+      const y = Math.floor(local / B) % B;
+      if (y + 1 < B) {
+        exposed = page.solidFraction[local + B] === 0;
         continue;
       }
-      const x = local % SOLID_WORLD_BRICK_CELLS;
-      const z = Math.floor(local / (SOLID_WORLD_BRICK_CELLS ** 2));
-      const abovePage = world.directory.lookup([
-        page.coordinate[0], page.coordinate[1] + 1, page.coordinate[2],
-      ]);
-      exposed = abovePage === undefined
-        || world.pages[abovePage]!.solidFraction[
-          x + SOLID_WORLD_BRICK_CELLS * (SOLID_WORLD_BRICK_CELLS * z)
-        ] === 0;
+      const x = local % B;
+      const z = Math.floor(local / (B ** 2));
+      const [px, py, pz] = page.coordinate;
+      const above = written([px, py + 1, pz]);
+      exposed = above ? above.solidFraction[x + B * (B * z)] === 0
+        : !ground || ground.fraction(B * px + x, B * (py + 1), B * pz + z) === 0;
     }
-    if (!exposed) return [];
-    const pageMinimum = page.coordinate.map((value, axis) => origin[axis]!
+    if (exposed) exposedPages.push(page.coordinate);
+  }
+  // Ground no patch wrote is exposed where a column ends, in the page holding
+  // the column's top cell, and under a written page that left the cell over it
+  // empty. One height per column answers both, and no page of ground is made.
+  if (ground) {
+    const px0 = Math.floor(ground.minimum[0] / B), px1 = Math.floor((ground.maximumExclusive[0] - 1) / B);
+    const pz0 = Math.floor(ground.minimum[2] / B), pz1 = Math.floor((ground.maximumExclusive[2] - 1) / B);
+    const dug = new Set<string>(), tops = new Set<number>();
+    for (const page of world.pages) {
+      const [px, py, pz] = page.coordinate;
+      if (py < 1 || written([px, py - 1, pz])) continue;
+      under: for (let z = 0; z < B; z += 1) for (let x = 0; x < B; x += 1) {
+        if (page.solidFraction[x + B * B * z] !== 0 || ground.solidCells(B * px + x, B * pz + z) < B * py) continue;
+        dug.add(`${px},${py - 1},${pz}`);
+        exposedPages.push([px, py - 1, pz]);
+        break under;
+      }
+    }
+    for (let pz = pz0; pz <= pz1; pz += 1) for (let px = px0; px <= px1; px += 1) {
+      tops.clear();
+      for (let z = B * pz; z < B * pz + B; z += 1) for (let x = B * px; x < B * px + B; x += 1) {
+        const cells = ground.solidCells(x, z);
+        if (cells === 0) continue;
+        const py = (cells - 1) >> 3;
+        // A column that ends on a page boundary under a written page is the case above.
+        if (tops.has(py) || written([px, py, pz]) || (cells % B === 0 && written([px, py + 1, pz]))) continue;
+        tops.add(py);
+      }
+      for (const py of tops) if (!dug.has(`${px},${py},${pz}`)) exposedPages.push([px, py, pz]);
+    }
+    exposedPages.sort(solidWorldPageOrder);
+  }
+  return exposedPages.map((coordinate) => {
+    const pageMinimum = coordinate.map((value, axis) => origin[axis]!
       + value * SOLID_WORLD_BRICK_CELLS * cell[axis]!) as [number, number, number];
     const pageMaximum = pageMinimum.map((value, axis) => value
       + SOLID_WORLD_BRICK_CELLS * cell[axis]!) as [number, number, number];
-    return [{
+    return {
       // These are refinement hints, not conservative geometry bounds. Keep
       // them inside their source page so inclusive overlap does not also pin
       // every face-touching neighbour.
@@ -217,7 +256,7 @@ export function solidWorldTerrainSurfaceCoarseningRegions(
       maximum_m: pageMaximum.map((value, axis) =>
         value - 0.25 * cell[axis]!) as [number, number, number],
       feature_m: 0,
-    }];
+    };
   });
 }
 

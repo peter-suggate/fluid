@@ -46,7 +46,11 @@ export const LIVE_SVO_DERIVED_WORKLIST = Object.freeze({
   generationWord: 1,
   levelWord: 2,
   recordOffsetWord: 3,
-  dispatchIndirectOffsetBytes: 16,
+  /** Words 4-7 name the queue ring the batch was taken from; see `prepareRound`. */
+  ringRecordsWord: 4,
+  ringHeadWord: 5,
+  ringCapacityWord: 6,
+  ringKindWord: 7,
   headerWords: 8,
   recordWords: 12,
   destinationSlotWord: 0,
@@ -69,7 +73,7 @@ export const LIVE_SVO_DERIVED_WORKLIST = Object.freeze({
   /**
    * A child slot that names a *leaf* rather than a page.
    *
-   * `emitPage` resolves an absent child page once, at plan time, into the
+   * `writeRecord` resolves an absent child page once, at plan time, into the
    * deepest active leaf covering it — which, because a page is emitted for
    * every leaf at that leaf's own level, is always a leaf whose extent contains
    * the whole child page. The reduction then samples that leaf's voxels
@@ -90,12 +94,12 @@ export const LIVE_SVO_RADIANCE_FEEDBACK = Object.freeze({
    * mid-rotation now perturbs a 5 cm irradiance sample rather than a voxel.
    */
   enabledByDefault: true,
-  phaseCount: 4,
   /**
    * At the 0.85 transport ceiling, 24 rotations bound the unpropagated fixed-
    * point residual below 2.1% (0.85^24). Static scenes then go exactly idle.
    */
   settleCycleCount: 24,
+  /** Frames a window stays open however few rotations the budget let it run. */
   settleFrameCount: 96,
   directionCount: 4,
   distanceCells: [2.5, 6, 18, 54] as const,
@@ -104,17 +108,45 @@ export const LIVE_SVO_RADIANCE_FEEDBACK = Object.freeze({
 } as const);
 
 /**
- * One fixed GPU-authored worklist per virtual mip level. Records must be unique
- * by destination slot. Level zero supplies its virtual page coordinate and
- * resolves the deepest active leaf per texel; parent records supply eight child
- * slots in xyz-bit order. Dispatch args cover count * 10^3 threads.
+ * The fixed work of one lighting frame, and of one round inside it.
+ *
+ * Lighting is a queue the GPU owns: the planner appends pages to per-level
+ * rings, and every frame runs the same dispatches over whatever the rings hold.
+ * Nothing here is sized by an edit, no dispatch is indirect, and the host never
+ * reads a count back — it only knows upper bounds, and plans frames from them.
+ *
+ * `pagesPerFrame` is the voxelizer's brick budget, deliberately: a frame of
+ * voxelization repairs at most that many bricks, a brick owns at most one seed
+ * page, and so the seeds of the chunk that has just landed are always built in
+ * the frame they land in. It is also the size of one batch, so a round either
+ * spends the frame's allowance or empties the ring it is on.
  */
-export interface LiveSvoDerivedGpuWorklist {
+export const LIVE_SVO_DERIVED_BUDGET = Object.freeze({
+  pagesPerFrame: 2_048,
+  /** `populate`, `selectFeedback`: 32 workgroups of 64, grid-striding their list. */
+  plannerWorkgroups: 32,
+  plannerThreads: 32 * 64,
+  /** Build, gather and copy: 64 workgroups of 256, grid-striding the batch's texels. */
+  buildWorkgroups: 64,
+  buildThreads: 64 * 256,
+  /**
+   * Floor pages a rebuilt page's light can reach in one bounce: the gather's
+   * farthest step (`distanceCells`, in floor texels) over a page's interior.
+   */
+  feedbackReachPages: Math.ceil(54 / SVO_NODE_MIP_LAYOUT.interiorSize),
+} as const);
+
+/**
+ * The one batch a round builds: a header, then `capacity` records.
+ *
+ * Records may repeat no destination slot. Level zero supplies its virtual page
+ * coordinate and resolves the deepest active leaf per texel; parent records
+ * supply eight child slots in xyz-bit order. A record whose slot is `invalidIndex`
+ * is one the planner declined to resolve, and builds nothing.
+ */
+export interface LiveSvoDerivedGpuBatch {
   buffer: GPUBuffer;
   capacity: number;
-  bindingOffsetBytes?: number;
-  bindingSizeBytes?: number;
-  indirectOffsetBytes?: number;
 }
 
 export interface WebGpuLiveSvoDerivedBuilderOptions {
@@ -130,7 +162,10 @@ export interface WebGpuLiveSvoDerivedBuilderOptions {
   /** Bounded authored light table; the first four records feed diffuse transport. */
   lights?: GPUBuffer;
   lightCount?: number;
-  worklists: readonly LiveSvoDerivedGpuWorklist[];
+  /** The planner's batch; every round builds what it holds. */
+  batch: LiveSvoDerivedGpuBatch;
+  /** Virtual mip levels the page table covers. */
+  levelCount: number;
   /** GPU publication generation used to certify newly allocated empty pages. */
   generationSource: LiveSvoDerivedGenerationSource;
   /** Number of address-plan slots resident in the fixed atlas. */
@@ -141,17 +176,15 @@ export interface WebGpuLiveSvoDerivedBuilderOptions {
   cellSize_m?: readonly [number, number, number];
   /** Previous-frame radiance feedback. Enabled when both optional lighting buffers are supplied. */
   radianceFeedback?: boolean;
-  /** Optional compact scratch page grid; defaults to the smallest grid that fits the largest level worklist. */
+  /** Optional compact scratch page grid; defaults to the smallest grid that fits one batch. */
   scratchAtlasPages?: readonly [number, number, number];
   /** Finest level that owns a radiance page. See `SVO_RADIANCE_LEVEL_FLOOR`. */
   radianceFloorLevel?: number;
   /**
-   * Worklist depth the deepest *radiance* level can reach.
+   * Pages the deepest *radiance* level can hold.
    *
-   * The radiance scratch used to be sized like the opacity scratch, which meant
-   * one 16 kB page per level-zero page — as much memory as the whole radiance
-   * atlas, spent on a staging buffer. Above the floor a level holds hundreds of
-   * pages, not tens of thousands, and this is what says so.
+   * A batch of radiance pages can be no deeper than this, so where it is
+   * smaller than a batch the radiance scratch is sized by it instead.
    */
   radianceScratchCapacity?: number;
   label?: string;
@@ -166,6 +199,30 @@ export interface LiveSvoDirtyLeafSource {
   recordStrideWords: number;
 }
 
+/**
+ * A ring of every leaf whose voxels have been rewritten, appended as each lands.
+ *
+ * Unlike a {@link LiveSvoDirtyLeafSource}, which is a list its owner rewrites,
+ * a journal is consumed by position: the planner keeps its own cursor on the
+ * GPU and takes `[cursor, write)` once, so a leaf is lit when its chunk
+ * finishes and never again for the chunks that follow it.
+ */
+export interface LiveSvoDirtyLeafJournal {
+  buffer: GPUBuffer;
+  /** Appends so far, modulo 2^32; never reset. */
+  writeCursorOffsetBytes: number;
+  /** Entry `k` is the leaf index at `recordOffsetBytes + (k % capacity) * recordStrideWords * 4`. */
+  recordOffsetBytes: number;
+  recordStrideWords: number;
+  capacity: number;
+  /**
+   * The revision being voxelized and the last one finished. While they differ
+   * more leaves are still to come, and pages above the ones just written wait.
+   */
+  requestedRevisionOffsetBytes: number;
+  completedRevisionOffsetBytes: number;
+}
+
 /** One nonzero, monotonically increasing generation shared by every dirty lane. */
 export interface LiveSvoDerivedGenerationSource {
   buffer: GPUBuffer;
@@ -175,8 +232,14 @@ export interface LiveSvoDerivedGenerationSource {
 export interface WebGpuLiveSvoDerivedWorklistPlannerOptions {
   tree: SparseBrickOctreeGPU;
   nodeMips: WebGpuLiveSvoNodeMipGpuTarget;
-  /** Scene, fluid, and topology dirty lanes are unioned before any page build. */
-  dirtyLeafSources: readonly LiveSvoDirtyLeafSource[];
+  /** Leaves the scene voxelizer has rewritten; consumed once, in the frame they land. */
+  sceneJournal: LiveSvoDirtyLeafJournal;
+  /** Lists a solver step rewrites whole; consumed on the frames that step. */
+  stepLeafSources: readonly LiveSvoDirtyLeafSource[];
+  /** Supplies the radiance validity words and the first slot of the radiance pool. */
+  radiance: WebGpuLiveSvoTetrahedralRadianceGpuTarget;
+  /** Whether the builder gathers; without it no feedback rotation is ever started. */
+  radianceFeedback: boolean;
   generationSource: LiveSvoDerivedGenerationSource;
   levelCount: number;
   finestLevel: number;
@@ -310,7 +373,7 @@ export function liveSvoLeafPage(options: {
  * or above the floor is *identical* to the unfloored plan — the only difference
  * is that the levels beneath it are gone. Zero is the shipped behaviour.
  *
- * The GPU worklist needs no matching parameter: `emitPage` asks the direct page
+ * The GPU worklist needs no matching parameter: `seedPage` asks the direct page
  * table for a slot, a floored plan gives levels below the floor a zero-depth
  * slab, and the lookup answers `INVALID`. The page coordinate it carries is
  * halved per level from the seed either way, so the first level that *does*
@@ -366,31 +429,134 @@ export function* liveSvoPlanBasePagesSteps(
 }
 
 /**
- * `Params` below: 3 vec4u, then per-level section offsets and capacities, each
+ * `Params` below: 5 vec4u, then per-level section offsets and capacities, each
  * `SVO_NODE_MIP_MAXIMUM_LEVELS` words packed four to a vec4u. Stated once so the
  * host write and the struct cannot drift apart.
  */
 const LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS = Math.ceil(SVO_NODE_MIP_MAXIMUM_LEVELS / 4);
-export const LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES = (4 * 3 + 2 * 4 * LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS) * 4;
+export const LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES = (4 * 5 + 2 * 4 * LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS) * 4;
+
+/**
+ * The lighting queue's words. One buffer: a state block, a header per ring,
+ * then each ring's records — one slot a record.
+ *
+ * Every level owns two rings. Its *seed* ring holds pages whose own voxels
+ * changed, and is drained in the frame they are appended. Its *ancestor* ring
+ * holds pages one of whose children was rebuilt, and waits while a revision is
+ * still being voxelized, so a page above a 27-chunk edit is reduced once, after
+ * the last chunk, instead of 27 times.
+ */
+export const LIVE_SVO_DERIVED_QUEUE = Object.freeze({
+  /** Lighting frames encoded since the queue was reset. */
+  clockWord: 0,
+  /** Feedback rotations started. */
+  cycleWord: 1,
+  /** `[begin, end)` of the journal this frame consumes; `cursor` is where the next begins. */
+  journalBeginWord: 2,
+  journalEndWord: 3,
+  journalCursorWord: 4,
+  /** Nonzero while no revision is being voxelized. */
+  settledWord: 5,
+  /** The value a seed page is stamped with: one marking as "awaiting build" per revision. */
+  revisionWord: 6,
+  /** The ring the sweep is on, and how much of it this visit may still take. */
+  sweepRingWord: 7,
+  sweepRemainingWord: 8,
+  /** Pages this frame may still build. */
+  allowanceWord: 9,
+  /** Nonzero on a frame that starts a feedback rotation. */
+  fireWord: 10,
+  /** Latest clock any page's feedback window ends at. */
+  windowClockWord: 11,
+  /** The scene-wide window a relight opens: the clock and the rotation it ends at. */
+  globalClockWord: 12,
+  globalCycleWord: 13,
+  /**
+   * Faults, as bits: a page was dropped because both of its level's rings were
+   * full; the journal lapped the cursor; a page went to its level's other ring.
+   * Never read on the frame path.
+   */
+  overflowWord: 14,
+  ringOverflowFault: 1,
+  journalLapFault: 2,
+  ringCrowdedFault: 4,
+  /** Pages handed to a batch since reset; a probe's counter. */
+  builtWord: 15,
+  generationWord: 16,
+  frameFlagsWord: 17,
+  /** Nonzero on a frame whose journal range was overwritten before it was read. */
+  lappedWord: 18,
+  /** The clock the last rotation started at, and the frames one is allowed to finish in. */
+  fireClockWord: 19,
+  marginWord: 20,
+  /** Latest rotation any page's feedback window ends at: no rotation starts once none could select a page. */
+  windowCycleWord: 21,
+  stateWords: 32,
+  ringHeaderWords: 4,
+  ringTailWord: 0,
+  ringHeadWord: 1,
+  /** Words a slot keeps: flags, revision stamp, window clock, window rotation, level + 1, page xyz. */
+  slotWords: 8,
+  slotFlagsWord: 0,
+  slotRevisionWord: 1,
+  slotWindowClockWord: 2,
+  slotWindowCycleWord: 3,
+  slotLevelWord: 4,
+  slotPageWord: 5,
+  queuedFlag: 1,
+  windowFlag: 2,
+  seedRing: 0,
+  ancestorRing: 1,
+  /** `Params.domain.w`. */
+  listMode: 0,
+  allLeavesMode: 1,
+  journalMode: 2,
+  /** `Params.frame.z`. */
+  globalWindowFlag: 1,
+  skipJournalFlag: 2,
+  noFeedbackFlag: 4,
+  /** Build ancestors although a revision is still landing; a first build owes every page. */
+  openAncestorsFlag: 8,
+} as const);
+
+const QUEUE = LIVE_SVO_DERIVED_QUEUE;
 
 export const liveSvoDerivedWorklistWGSL = /* wgsl */ `
-// \`capacities\` is per level, because the arena's sections are: a level holds at
-// most its own grid's pages, so laying every section out at the deepest level's
-// depth spent 48 B a record on capacity the coarse levels can never reach.
+${liveSvoDerivedPageValidityWGSL}
+// \`capacities\` is per level, because the queue's rings are: a level holds at
+// most its own grid's pages, so a ring that deep can never refuse an append.
 // vec4u rather than array<u32,N> so the element alignment is unambiguously
 // legal in the uniform address space. The page table is a hash keyed by level,
 // so no per-level table offsets are needed and the level count is bounded only
 // by these two arrays.
-struct Params{source:vec4u,domain:vec4u,limits:vec4u,sections:array<vec4u,${LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS}>,capacities:array<vec4u,${LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS}>}
+//   source   x count or journal write-cursor word, y generation word, z first record word, w record stride
+//   domain   x finest tree level, y level count, z radiance floor level, w source mode
+//   limits   x source capacity, y slot capacity, z window frames, w window rotations
+//   frame    x pages this frame may build, y batch capacity, z frame flags, w feedback reach in pages
+//   scene    x requested-revision word, y completed-revision word, z first radiance slot, w frames a rotation is assumed to take at worst
+struct Params{source:vec4u,domain:vec4u,limits:vec4u,frame:vec4u,scene:vec4u,sections:array<vec4u,${LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS}>,capacities:array<vec4u,${LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS}>}
 @group(0) @binding(0) var<storage,read> source:array<u32>;
 @group(0) @binding(1) var<storage,read> control:array<u32>;
 @group(0) @binding(2) var<storage,read> topology:array<u32>;
 @group(0) @binding(3) var pageTable:texture_2d<u32>;
-@group(0) @binding(4) var<storage,read_write> claims:array<atomic<u32>>;
-@group(0) @binding(5) var<storage,read_write> output:array<atomic<u32>>;
+@group(0) @binding(4) var<storage,read_write> slots:array<atomic<u32>>;
+@group(0) @binding(5) var<storage,read_write> queue:array<atomic<u32>>;
 @group(0) @binding(6) var<uniform> params:Params;
 @group(0) @binding(7) var<storage,read> generationState:array<u32>;
+@group(0) @binding(8) var<storage,read_write> batch:array<u32>;
+@group(0) @binding(9) var opacityValidity:texture_storage_2d<r32uint,write>;
+@group(0) @binding(10) var radianceValidity:texture_storage_2d<r32uint,write>;
 const INVALID:u32=0xffffffffu;const ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;const RECORD_WORDS:u32=${LIVE_SVO_DERIVED_WORKLIST.recordWords}u;
+const HEADER_WORDS:u32=${LIVE_SVO_DERIVED_WORKLIST.headerWords}u;const PLANNER_THREADS:u32=${LIVE_SVO_DERIVED_BUDGET.plannerThreads}u;
+const Q_CLOCK:u32=${QUEUE.clockWord}u;const Q_CYCLE:u32=${QUEUE.cycleWord}u;const Q_JOURNAL_BEGIN:u32=${QUEUE.journalBeginWord}u;const Q_JOURNAL_END:u32=${QUEUE.journalEndWord}u;
+const Q_JOURNAL_CURSOR:u32=${QUEUE.journalCursorWord}u;const Q_SETTLED:u32=${QUEUE.settledWord}u;const Q_REVISION:u32=${QUEUE.revisionWord}u;const Q_SWEEP_RING:u32=${QUEUE.sweepRingWord}u;
+const Q_SWEEP_REMAINING:u32=${QUEUE.sweepRemainingWord}u;const Q_ALLOWANCE:u32=${QUEUE.allowanceWord}u;const Q_FIRE:u32=${QUEUE.fireWord}u;const Q_WINDOW_CLOCK:u32=${QUEUE.windowClockWord}u;
+const Q_GLOBAL_CLOCK:u32=${QUEUE.globalClockWord}u;const Q_GLOBAL_CYCLE:u32=${QUEUE.globalCycleWord}u;const Q_OVERFLOW:u32=${QUEUE.overflowWord}u;const Q_BUILT:u32=${QUEUE.builtWord}u;
+const Q_GENERATION:u32=${QUEUE.generationWord}u;const Q_FRAME_FLAGS:u32=${QUEUE.frameFlagsWord}u;const Q_LAPPED:u32=${QUEUE.lappedWord}u;const Q_FIRE_CLOCK:u32=${QUEUE.fireClockWord}u;const Q_MARGIN:u32=${QUEUE.marginWord}u;const Q_WINDOW_CYCLE:u32=${QUEUE.windowCycleWord}u;const Q_RINGS:u32=${QUEUE.stateWords}u;const RING_WORDS:u32=${QUEUE.ringHeaderWords}u;
+const SLOT_WORDS:u32=${QUEUE.slotWords}u;const QUEUED:u32=${QUEUE.queuedFlag}u;const WINDOW:u32=${QUEUE.windowFlag}u;
+const SEED_RING:u32=${QUEUE.seedRing}u;const ANCESTOR_RING:u32=${QUEUE.ancestorRing}u;
+const MODE_ALL_LEAVES:u32=${QUEUE.allLeavesMode}u;const MODE_JOURNAL:u32=${QUEUE.journalMode}u;
+const GLOBAL_WINDOW:u32=${QUEUE.globalWindowFlag}u;const SKIP_JOURNAL:u32=${QUEUE.skipJournalFlag}u;const NO_FEEDBACK:u32=${QUEUE.noFeedbackFlag}u;const OPEN_ANCESTORS:u32=${QUEUE.openAncestorsFlag}u;
 fn levelCapacity(level:u32)->u32{return params.capacities[level/4u][level%4u];}
 fn levelSection(level:u32)->u32{return params.sections[level/4u][level%4u];}
 ${svoNodeMipPageHashWGSL}
@@ -400,11 +566,84 @@ fn tableSlot(level:u32,p:vec3u)->u32{if(level>=params.domain.y){return INVALID;}
 fn deepestLeaf(globalCell:vec3u)->u32{let brickSize=control[11];if(brickSize==0u||control[0]==0u){return INVALID;}let brick=globalCell/brickSize;var node=0u;var selected=INVALID;
  for(var level=0u;level<=params.domain.x&&node<control[0];level+=1u){let nodeBase=node*8u;let leaf=topology[nodeBase+6u];if(leaf<control[1]&&(topology[nodeBase+7u]&ACTIVE)!=0u){selected=leaf;}if(level==params.domain.x){break;}let bit=params.domain.x-level-1u;let octant=((brick.x>>bit)&1u)|(((brick.y>>bit)&1u)<<1u)|(((brick.z>>bit)&1u)<<2u);let mask=topology[nodeBase+3u]&0xffu;if((mask&(1u<<octant))==0u){break;}node=topology[nodeBase+4u]+countOneBits(mask&((1u<<octant)-1u));}
  return selected;}
-fn emitPage(level:u32,page:vec3u,generation:u32){let slot=tableSlot(level,page);if(slot==INVALID||slot>=arrayLength(&claims)){return;}if(atomicExchange(&claims[slot],generation)==generation){return;}
- let section=levelSection(level);let recordIndex=atomicAdd(&output[section],1u);if(recordIndex>=levelCapacity(level)){return;}let record=section+${LIVE_SVO_DERIVED_WORKLIST.headerWords}u+recordIndex*RECORD_WORDS;atomicStore(&output[record],slot);
+fn ringHeader(level:u32,kind:u32)->u32{return Q_RINGS+(level*2u+kind)*RING_WORDS;}
+fn ringRecords(level:u32,kind:u32)->u32{return levelSection(level)+kind*levelCapacity(level);}
+fn ringPending(header:u32)->u32{return atomicLoad(&queue[header+${QUEUE.ringTailWord}u])-atomicLoad(&queue[header+${QUEUE.ringHeadWord}u]);}
+// Append one page to its level's ring, once however many threads ask. The
+// QUEUED bit is the whole of the deduplication: a page already waiting is not
+// appended again, and \`resolve\` clears the bit as it takes the page, so work that
+// arrives after that is a new append and a new build. The key is written
+// unconditionally because a slot can change hands between frames, and the page
+// built is always the one the hash names now. A ring is as deep as its level, so
+// an append is only ever refused when stale slots crowd a full level.
+fn appendRing(slot:u32,level:u32,kind:u32)->bool{
+ let header=ringHeader(level,kind);let capacity=levelCapacity(level);let position=atomicAdd(&queue[header+${QUEUE.ringTailWord}u],1u);
+ if(position-atomicLoad(&queue[header+${QUEUE.ringHeadWord}u])>=capacity){atomicSub(&queue[header+${QUEUE.ringTailWord}u],1u);return false;}
+ atomicStore(&queue[ringRecords(level,kind)+position%capacity],slot);return true;
+}
+fn enqueue(slot:u32,level:u32,page:vec3u,kind:u32,flags:u32)->bool{
+ let base=slot*SLOT_WORDS;
+ atomicStore(&slots[base+${QUEUE.slotLevelWord}u],level+1u);atomicStore(&slots[base+${QUEUE.slotPageWord}u],page.x);atomicStore(&slots[base+${QUEUE.slotPageWord + 1}u],page.y);atomicStore(&slots[base+${QUEUE.slotPageWord + 2}u],page.z);
+ if((atomicOr(&slots[base],flags)&QUEUED)!=0u){return false;}
+ if(appendRing(slot,level,kind)){return true;}
+ // Crowded out by slots released while they waited. The level's other ring
+ // takes the page — early for an ancestor, late for a seed, never lost.
+ if(appendRing(slot,level,1u-kind)){atomicOr(&queue[Q_OVERFLOW],${QUEUE.ringCrowdedFault}u);return true;}
+ atomicAnd(&slots[base],~QUEUED);atomicOr(&queue[Q_OVERFLOW],${QUEUE.ringOverflowFault}u);return false;
+}
+// "Awaiting build": resident, and holding nothing a cone may read. Radiance
+// validity exists only for slots of the radiance pool.
+fn markAwaiting(slot:u32){
+ textureStore(opacityValidity,svoDerivedPageValidityTexel(textureDimensions(opacityValidity),slot),vec4u(0u));
+ if(slot>=params.scene.z){textureStore(radianceValidity,svoDerivedPageValidityTexel(textureDimensions(radianceValidity),slot),vec4u(0u));}
+}
+// The page a leaf's voxels are published in: the first level at or above its
+// own that the plan holds a page at. Everything above it is reached by
+// \`resolve\`, which queues a page's parent as it builds the page — so a parent is
+// always built after the child that changed it, whatever order work arrives in.
+fn seedPage(firstLevel:u32,firstPage:vec3u,mode:u32,revision:u32){
+ var page=firstPage;
+ for(var level=firstLevel;level<params.domain.y;level+=1u){
+  let slot=tableSlot(level,page);
+  if(slot!=INVALID&&slot<params.limits.y){
+   let won=enqueue(slot,level,page,SEED_RING,select(QUEUED,QUEUED|WINDOW,level==params.domain.z));
+   // A page whose voxels a revision rewrote is awaiting from the frame they
+   // land until it is rebuilt — marked once per revision, so a page several
+   // chunks touch does not blink between them.
+   if(mode==MODE_JOURNAL){if(atomicExchange(&slots[slot*SLOT_WORDS+${QUEUE.slotRevisionWord}u],revision)!=revision){markAwaiting(slot);}}
+   else if(mode==MODE_ALL_LEAVES&&won){markAwaiting(slot);}
+   return;}
+  page>>=vec3u(1u);}
+}
+fn seedLeaf(leaf:u32,mode:u32,revision:u32){
+ // A retired leaf's slot names no node until it is reused; it seeds nothing.
+ if(leaf>=control[1]){return;}let leafBase=control[16]+leaf*4u;let node=topology[leafBase];if(node>=control[0]){return;}let nodeBase=node*8u;let leafLevel=topology[nodeBase+2u];if(leafLevel>params.domain.x){return;}let scale=1u<<(params.domain.x-leafLevel);let brickOrigin=morton(topology[nodeBase],topology[nodeBase+1u],leafLevel)*scale;let cellMinimum=brickOrigin*control[11];
+${COARSE_LEAF_PAGES === "extent" ? /* wgsl */ ` let cellMaximum=(brickOrigin+vec3u(scale))*control[11];let firstPage=cellMinimum/${SVO_NODE_MIP_LAYOUT.interiorSize}u;let lastPage=(cellMaximum-vec3u(1u))/${SVO_NODE_MIP_LAYOUT.interiorSize}u;
+ for(var z=firstPage.z;z<=lastPage.z;z+=1u){for(var y=firstPage.y;y<=lastPage.y;y+=1u){for(var x=firstPage.x;x<=lastPage.x;x+=1u){seedPage(0u,vec3u(x,y,z),mode,revision);}}}` : /* wgsl */ ` // One page per leaf, at the level whose texels are its voxels — the CPU mirror
+ // is \`liveSvoLeafPage\`. Expanding a coarse leaf across its extent published the
+ // same brickSize^3 values once per finest brick it covered, which is what made
+ // the pyramid scale with claim volume instead of with surface area.
+ let cells=scale*control[11];var seedLevel=0u;
+ if(cells>=${SVO_NODE_MIP_LAYOUT.interiorSize}u){seedLevel=firstTrailingBit(cells)-${Math.log2(SVO_NODE_MIP_LAYOUT.interiorSize)}u;}
+ seedPage(seedLevel,cellMinimum/(${SVO_NODE_MIP_LAYOUT.interiorSize}u<<seedLevel),mode,revision);`}
+}
+// A rebuilt floor page changes what every page within one gather's reach
+// receives, and nothing farther in the first bounce. Each of those pages keeps
+// its own window, so feedback runs over the neighbourhood of the edit and stops.
+fn stampWindows(page:vec3u){
+ let clockEnd=atomicLoad(&queue[Q_CLOCK])+params.limits.z;let cycleEnd=atomicLoad(&queue[Q_CYCLE])+params.limits.w;
+ atomicMax(&queue[Q_WINDOW_CLOCK],clockEnd);atomicMax(&queue[Q_WINDOW_CYCLE],cycleEnd);
+ let reach=vec3u(params.frame.w);let lowest=max(page,reach)-reach;let highest=page+reach;let floorLevel=params.domain.z;
+ for(var z=lowest.z;z<=highest.z;z+=1u){for(var y=lowest.y;y<=highest.y;y+=1u){for(var x=lowest.x;x<=highest.x;x+=1u){
+  let neighbour=vec3u(x,y,z);let slot=tableSlot(floorLevel,neighbour);if(slot==INVALID||slot>=params.limits.y){continue;}
+  let base=slot*SLOT_WORDS;
+  atomicStore(&slots[base+${QUEUE.slotLevelWord}u],floorLevel+1u);atomicStore(&slots[base+${QUEUE.slotPageWord}u],x);atomicStore(&slots[base+${QUEUE.slotPageWord + 1}u],y);atomicStore(&slots[base+${QUEUE.slotPageWord + 2}u],z);
+  atomicMax(&slots[base+${QUEUE.slotWindowClockWord}u],clockEnd);atomicMax(&slots[base+${QUEUE.slotWindowCycleWord}u],cycleEnd);}}}
+}
+fn writeRecord(record:u32,slot:u32,level:u32,page:vec3u){batch[record]=slot;
  // One layout at every level now: slot, page coordinate, eight children.
- atomicStore(&output[record+1u],page.x);atomicStore(&output[record+2u],page.y);atomicStore(&output[record+3u],page.z);
- if(level==0u){for(var octant=0u;octant<8u;octant+=1u){let bit=vec3u(octant&1u,(octant>>1u)&1u,(octant>>2u)&1u);atomicStore(&output[record+4u+octant],deepestLeaf(page*${SVO_NODE_MIP_LAYOUT.interiorSize}u+bit*4u));}}
+ batch[record+1u]=page.x;batch[record+2u]=page.y;batch[record+3u]=page.z;
+ if(level==0u){for(var octant=0u;octant<8u;octant+=1u){let bit=vec3u(octant&1u,(octant>>1u)&1u,(octant>>2u)&1u);batch[record+4u+octant]=deepestLeaf(page*${SVO_NODE_MIP_LAYOUT.interiorSize}u+bit*4u);}}
  else{
   // An absent child page is resolved here, once, rather than read as zero in
   // the reduction: a leaf that publishes at its own coarse level leaves every
@@ -418,21 +657,132 @@ fn emitPage(level:u32,page:vec3u,generation:u32){let slot=tableSlot(level,page);
     let centre=(childPage*${SVO_NODE_MIP_LAYOUT.interiorSize}u+vec3u(${SVO_NODE_MIP_LAYOUT.interiorSize / 2}u))*childScale;
     let leaf=deepestLeaf(centre);
     if(leaf!=INVALID){slotOrLeaf=${LIVE_SVO_DERIVED_WORKLIST.leafSlotTag}u|leaf;}}
-   atomicStore(&output[record+${LIVE_SVO_DERIVED_WORKLIST.childSlotWord}u+child],slotOrLeaf);}}
+   batch[record+${LIVE_SVO_DERIVED_WORKLIST.childSlotWord}u+child]=slotOrLeaf;}}
 }
-@compute @workgroup_size(64) fn populate(@builtin(global_invocation_id) gid:vec3u){let dirty=gid.x;let allLive=params.limits.w!=0u;let partitioned=params.limits.w==2u;let count=select(min(source[params.source.x],params.limits.x),min(control[1],params.limits.x),allLive);if(dirty>=count||(partitioned&&dirty%max(params.source.w,1u)!=params.source.z)){return;}let generation=generationState[params.source.y];if(generation==0u){return;}
- var leaf=dirty;if(!allLive){leaf=source[params.source.z+dirty*params.source.w];}if(leaf>=control[1]){return;}let leafBase=control[16]+leaf*4u;let node=topology[leafBase];let nodeBase=node*8u;let leafLevel=topology[nodeBase+2u];if(leafLevel>params.domain.x){return;}let scale=1u<<(params.domain.x-leafLevel);let brickOrigin=morton(topology[nodeBase],topology[nodeBase+1u],leafLevel)*scale;let cellMinimum=brickOrigin*control[11];
-${COARSE_LEAF_PAGES === "extent" ? /* wgsl */ ` let cellMaximum=(brickOrigin+vec3u(scale))*control[11];let firstPage=cellMinimum/${SVO_NODE_MIP_LAYOUT.interiorSize}u;let lastPage=(cellMaximum-vec3u(1u))/${SVO_NODE_MIP_LAYOUT.interiorSize}u;
- for(var z=firstPage.z;z<=lastPage.z;z+=1u){for(var y=firstPage.y;y<=lastPage.y;y+=1u){for(var x=firstPage.x;x<=lastPage.x;x+=1u){var page=vec3u(x,y,z);for(var level=0u;level<params.domain.y;level+=1u){emitPage(level,page,generation);page>>=vec3u(1u);}}}}` : /* wgsl */ ` // One page per leaf, at the level whose texels are its voxels — the CPU mirror
- // is \`liveSvoLeafPage\`. Expanding a coarse leaf across its extent published the
- // same brickSize^3 values once per finest brick it covered, which is what made
- // the pyramid scale with claim volume instead of with surface area.
- let cells=scale*control[11];var seedLevel=0u;
- if(cells>=${SVO_NODE_MIP_LAYOUT.interiorSize}u){seedLevel=firstTrailingBit(cells)-${Math.log2(SVO_NODE_MIP_LAYOUT.interiorSize)}u;}
- var page=cellMinimum/(${SVO_NODE_MIP_LAYOUT.interiorSize}u<<seedLevel);
- for(var level=seedLevel;level<params.domain.y;level+=1u){emitPage(level,page,generation);page>>=vec3u(1u);}`}
+// First dispatch of a lighting frame, one thread. Latches everything the rest
+// of the frame agrees on — the journal range to consume, whether a revision is
+// still landing, the allowance — and decides whether a feedback rotation starts.
+@compute @workgroup_size(1) fn prepareFrame(){
+ let clock=atomicLoad(&queue[Q_CLOCK])+1u;atomicStore(&queue[Q_CLOCK],clock);
+ let generation=generationState[params.source.y];atomicStore(&queue[Q_GENERATION],generation);
+ let flags=params.frame.z;atomicStore(&queue[Q_FRAME_FLAGS],flags);
+ let requested=source[params.scene.x];let settled=requested==source[params.scene.y];
+ let wasSettled=atomicLoad(&queue[Q_SETTLED])!=0u;
+ atomicStore(&queue[Q_SETTLED],select(0u,1u,settled));atomicStore(&queue[Q_REVISION],requested+1u);
+ // The journal is taken exactly once: the cursor moves past whatever this frame
+ // will consume. An initial build lights every leaf, so it skips what is there.
+ let write=source[params.source.x];var begin=atomicLoad(&queue[Q_JOURNAL_CURSOR]);var end=begin;var lapped=0u;
+ if(generation!=0u){end=write;if((flags&SKIP_JOURNAL)!=0u){begin=write;}
+  // More leaves were finalized since the last frame than the journal holds (or
+  // its cursor went backwards): the range is gone, so every leaf is dirty.
+  if(end-begin>params.limits.x){lapped=1u;atomicOr(&queue[Q_OVERFLOW],${QUEUE.journalLapFault}u);}
+  atomicStore(&queue[Q_JOURNAL_CURSOR],write);}
+ atomicStore(&queue[Q_JOURNAL_BEGIN],begin);atomicStore(&queue[Q_JOURNAL_END],end);atomicStore(&queue[Q_LAPPED],lapped);
+ // Fresh seeds, or a revision that has just finished, restart the sweep at the
+ // finest level so every level is reduced after the one beneath it.
+ if(end!=begin||(settled&&!wasSettled)){atomicStore(&queue[Q_SWEEP_RING],0u);atomicStore(&queue[Q_SWEEP_REMAINING],0u);}
+ // Positions only ever grow; fold them back so they never reach 2^32.
+ var pending=0u;
+ for(var ring=0u;ring<params.domain.y*2u;ring+=1u){
+  let header=Q_RINGS+ring*RING_WORDS;let capacity=levelCapacity(ring/2u);let head=atomicLoad(&queue[header+${QUEUE.ringHeadWord}u]);
+  if(head>=capacity){let folded=(head/capacity)*capacity;atomicStore(&queue[header+${QUEUE.ringHeadWord}u],head-folded);atomicStore(&queue[header+${QUEUE.ringTailWord}u],atomicLoad(&queue[header+${QUEUE.ringTailWord}u])-folded);}
+  pending+=ringPending(header);}
+ // Feedback waits for the build: a rotation starts only when no revision is
+ // landing and less than one frame of building is still queued. It must also
+ // be able to finish inside its window, which is all the frames the host has
+ // promised: a rotation is given as long as the last one took, and the worst
+ // case when there is no last one to go by.
+ let cycle=atomicLoad(&queue[Q_CYCLE]);var fire=0u;
+ let lastFire=atomicLoad(&queue[Q_FIRE_CLOCK]);var margin=params.scene.w;if(lastFire!=0u){margin=min(clock-lastFire,margin);}margin+=1u;
+ if(settled&&generation!=0u&&pending<params.frame.x&&(flags&NO_FEEDBACK)==0u
+  &&((clock+margin<atomicLoad(&queue[Q_WINDOW_CLOCK])&&cycle<atomicLoad(&queue[Q_WINDOW_CYCLE]))||(clock+margin<atomicLoad(&queue[Q_GLOBAL_CLOCK])&&cycle<atomicLoad(&queue[Q_GLOBAL_CYCLE])))){
+  fire=1u;atomicStore(&queue[Q_CYCLE],cycle+1u);atomicStore(&queue[Q_FIRE_CLOCK],clock);atomicStore(&queue[Q_MARGIN],margin);}
+ atomicStore(&queue[Q_FIRE],fire);
+ // A relight, or the first build, opens the window over every floor page.
+ if((flags&GLOBAL_WINDOW)!=0u&&generation!=0u){atomicStore(&queue[Q_GLOBAL_CLOCK],clock+params.limits.z);atomicStore(&queue[Q_GLOBAL_CYCLE],atomicLoad(&queue[Q_CYCLE])+params.limits.w);}
+ atomicStore(&queue[Q_ALLOWANCE],params.frame.x);
 }
-@compute @workgroup_size(1) fn finalize(@builtin(global_invocation_id) gid:vec3u){let level=gid.x;if(level>=params.domain.y){return;}let section=levelSection(level);let count=min(atomicLoad(&output[section]),levelCapacity(level));atomicStore(&output[section+1u],generationState[params.source.y]);atomicStore(&output[section+2u],level);atomicStore(&output[section+3u],${LIVE_SVO_DERIVED_WORKLIST.headerWords}u);let groups=(count*${SVO_NODE_MIP_LAYOUT.physicalSize ** 3}u+255u)/256u;let x=min(groups,65535u);atomicStore(&output[section+4u],x);atomicStore(&output[section+5u],select(0u,(groups+x-1u)/x,x>0u));atomicStore(&output[section+6u],1u);}
+// One feedback rotation: every floor page whose window is open, queued once.
+// A page's parents follow from \`resolve\` like any other build's.
+@compute @workgroup_size(64) fn selectFeedback(@builtin(global_invocation_id) gid:vec3u){
+ if(atomicLoad(&queue[Q_FIRE])==0u){return;}
+ let clock=atomicLoad(&queue[Q_CLOCK])+atomicLoad(&queue[Q_MARGIN]);let cycle=atomicLoad(&queue[Q_CYCLE])-1u;let floorLevel=params.domain.z;
+ let everywhere=clock<atomicLoad(&queue[Q_GLOBAL_CLOCK])&&cycle<atomicLoad(&queue[Q_GLOBAL_CYCLE]);
+ for(var slot=gid.x;slot<params.limits.y;slot+=PLANNER_THREADS){
+  let base=slot*SLOT_WORDS;if(atomicLoad(&slots[base+${QUEUE.slotLevelWord}u])!=floorLevel+1u){continue;}
+  if(!everywhere&&!(clock<atomicLoad(&slots[base+${QUEUE.slotWindowClockWord}u])&&cycle<atomicLoad(&slots[base+${QUEUE.slotWindowCycleWord}u]))){continue;}
+  let page=vec3u(atomicLoad(&slots[base+${QUEUE.slotPageWord}u]),atomicLoad(&slots[base+${QUEUE.slotPageWord + 1}u]),atomicLoad(&slots[base+${QUEUE.slotPageWord + 2}u]));
+  // The slot may have been given to another page since its window was stamped.
+  if(tableSlot(floorLevel,page)!=slot){continue;}
+  enqueue(slot,floorLevel,page,ANCESTOR_RING,QUEUED);}
+}
+// Seeds: the leaves a source names, each to the page its voxels are published in.
+@compute @workgroup_size(64) fn populate(@builtin(global_invocation_id) gid:vec3u){
+ if(atomicLoad(&queue[Q_GENERATION])==0u){return;}
+ let mode=params.domain.w;let revision=atomicLoad(&queue[Q_REVISION]);var begin=0u;var count=0u;
+ // A lapped journal no longer names what changed, so the frame seeds every leaf instead.
+ let everyLeaf=mode==MODE_ALL_LEAVES||(mode==MODE_JOURNAL&&atomicLoad(&queue[Q_LAPPED])!=0u);
+ if(everyLeaf){count=control[1];}
+ else if(mode==MODE_JOURNAL){begin=atomicLoad(&queue[Q_JOURNAL_BEGIN]);count=atomicLoad(&queue[Q_JOURNAL_END])-begin;}
+ else{count=min(source[params.source.x],params.limits.x);}
+ for(var index=gid.x;index<count;index+=PLANNER_THREADS){
+  var leaf=index;
+  if(!everyLeaf){
+   if(mode==MODE_JOURNAL){leaf=source[params.source.z+((begin+index)%params.limits.x)*params.source.w];}
+   else{leaf=source[params.source.z+index*params.source.w];}}
+  seedLeaf(leaf,mode,revision);}
+}
+// One thread per round: choose the ring this round builds from, and how much.
+//
+// The sweep climbs from the finest level. A ring is visited with a quota — what
+// it held on arrival — so pages a solver keeps appending cannot hold the sweep
+// on one level. Seed rings are always open; ancestor rings open once the
+// revision has landed. Because a batch is as large as a frame's allowance, a
+// round either spends the allowance or finishes its ring.
+@compute @workgroup_size(1) fn prepareRound(){
+ let generation=atomicLoad(&queue[Q_GENERATION]);
+ batch[${LIVE_SVO_DERIVED_WORKLIST.countWord}u]=0u;batch[${LIVE_SVO_DERIVED_WORKLIST.generationWord}u]=generation;batch[${LIVE_SVO_DERIVED_WORKLIST.recordOffsetWord}u]=HEADER_WORDS;
+ let allowance=atomicLoad(&queue[Q_ALLOWANCE]);if(generation==0u||allowance==0u){return;}
+ let settled=atomicLoad(&queue[Q_SETTLED])!=0u||(atomicLoad(&queue[Q_FRAME_FLAGS])&OPEN_ANCESTORS)!=0u;let ringCount=params.domain.y*2u;
+ var ring=atomicLoad(&queue[Q_SWEEP_RING])%ringCount;var remaining=atomicLoad(&queue[Q_SWEEP_REMAINING]);
+ if((ring&1u)==ANCESTOR_RING&&!settled){remaining=0u;}
+ remaining=min(remaining,ringPending(Q_RINGS+ring*RING_WORDS));
+ if(remaining==0u){
+  for(var step=0u;step<ringCount;step+=1u){
+   let candidate=(ring+step)%ringCount;if((candidate&1u)==ANCESTOR_RING&&!settled){continue;}
+   let pending=ringPending(Q_RINGS+candidate*RING_WORDS);if(pending>0u){ring=candidate;remaining=pending;break;}}
+  if(remaining==0u){atomicStore(&queue[Q_SWEEP_REMAINING],0u);return;}}
+ let level=ring/2u;let kind=ring&1u;let header=Q_RINGS+ring*RING_WORDS;let head=atomicLoad(&queue[header+${QUEUE.ringHeadWord}u]);
+ let take=min(min(remaining,allowance),params.frame.y);
+ batch[${LIVE_SVO_DERIVED_WORKLIST.countWord}u]=take;batch[${LIVE_SVO_DERIVED_WORKLIST.levelWord}u]=level;
+ batch[${LIVE_SVO_DERIVED_WORKLIST.ringRecordsWord}u]=ringRecords(level,kind);batch[${LIVE_SVO_DERIVED_WORKLIST.ringHeadWord}u]=head;
+ batch[${LIVE_SVO_DERIVED_WORKLIST.ringCapacityWord}u]=levelCapacity(level);batch[${LIVE_SVO_DERIVED_WORKLIST.ringKindWord}u]=kind;
+ atomicStore(&queue[header+${QUEUE.ringHeadWord}u],head+take);remaining-=take;
+ atomicStore(&queue[Q_SWEEP_REMAINING],remaining);atomicStore(&queue[Q_SWEEP_RING],select(ring,(ring+1u)%ringCount,remaining==0u));
+ atomicStore(&queue[Q_ALLOWANCE],allowance-take);atomicStore(&queue[Q_BUILT],atomicLoad(&queue[Q_BUILT])+take);
+}
+// One thread per record of the batch: turn a queued slot into a build record.
+@compute @workgroup_size(64) fn resolve(@builtin(global_invocation_id) gid:vec3u){
+ let index=gid.x;if(index>=min(batch[${LIVE_SVO_DERIVED_WORKLIST.countWord}u],params.frame.y)){return;}
+ let record=batch[${LIVE_SVO_DERIVED_WORKLIST.recordOffsetWord}u]+index*RECORD_WORDS;batch[record]=INVALID;
+ let level=batch[${LIVE_SVO_DERIVED_WORKLIST.levelWord}u];
+ let slot=atomicLoad(&queue[batch[${LIVE_SVO_DERIVED_WORKLIST.ringRecordsWord}u]+(batch[${LIVE_SVO_DERIVED_WORKLIST.ringHeadWord}u]+index)%batch[${LIVE_SVO_DERIVED_WORKLIST.ringCapacityWord}u]]);
+ if(slot>=params.limits.y){return;}
+ let base=slot*SLOT_WORDS;let flags=atomicAnd(&slots[base],~(QUEUED|WINDOW));if((flags&QUEUED)==0u){return;}
+ let keyLevel=atomicLoad(&slots[base+${QUEUE.slotLevelWord}u]);if(keyLevel==0u||keyLevel>params.domain.y){return;}
+ let page=vec3u(atomicLoad(&slots[base+${QUEUE.slotPageWord}u]),atomicLoad(&slots[base+${QUEUE.slotPageWord + 1}u]),atomicLoad(&slots[base+${QUEUE.slotPageWord + 2}u]));
+ // A slot is revalidated against the hash before anything is built into it:
+ // released and given to another page while it waited, it is either that
+ // page's build now, or — at another level — queued again where it belongs.
+ // The seed ring, because it may be a new page nothing else will light first.
+ if(tableSlot(keyLevel-1u,page)!=slot){return;}
+ if(keyLevel-1u!=level){enqueue(slot,keyLevel-1u,page,SEED_RING,flags&(QUEUED|WINDOW));return;}
+ if(level==params.domain.z&&(flags&WINDOW)!=0u&&(atomicLoad(&queue[Q_FRAME_FLAGS])&GLOBAL_WINDOW)==0u){stampWindows(page);}
+ if(level+1u<params.domain.y){
+  let parent=page>>vec3u(1u);let parentSlot=tableSlot(level+1u,parent);
+  if(parentSlot!=INVALID&&parentSlot<params.limits.y){enqueue(parentSlot,level+1u,parent,ANCESTOR_RING,select(QUEUED,QUEUED|WINDOW,level+1u==params.domain.z));}}
+ writeRecord(record,slot,level,page);
+}
 `;
 
 /**
@@ -684,7 +1034,7 @@ function derivedOpacityLanes(format: GPUTextureFormat) {
  * `radianceAtlas` is `xyz` = the radiance atlas page grid, `w` = the slot the
  * atlas begins at. `radianceScratch` is `xyz` = the compact radiance scratch
  * grid, `w` = the radiance floor level. Both atlases are addressed by the *same*
- * slot number the opacity pyramid uses — page validity, the claims buffer and
+ * slot number the opacity pyramid uses — page validity, the lighting queue and
  * the black-page certificate all stay in that one index space — so the only
  * thing the floor changes is where a slot lands physically, and whether it
  * lands anywhere at all.
@@ -785,8 +1135,8 @@ const TETRA0:vec3f=vec3f(.577350269,.577350269,.577350269);
 const TETRA1:vec3f=vec3f(.577350269,-.577350269,-.577350269);
 const TETRA2:vec3f=vec3f(-.577350269,.577350269,-.577350269);
 const TETRA3:vec3f=vec3f(-.577350269,-.577350269,.577350269);
+const BUILD_THREADS:u32=${LIVE_SVO_DERIVED_BUDGET.buildThreads}u;
 
-fn linearIndex(gid:vec3u,groups:vec3u)->u32{return gid.x+gid.y*groups.x*256u+gid.z*groups.x*groups.y*256u;}
 fn finestLevel()->u32{return params.scratchAtlasPages.w;}
 ${lane.codec}
 ${liveSvoRadianceAddressingWGSL}
@@ -894,12 +1244,12 @@ fn radianceBaseNormal(record:u32,childBase:u32,local:vec3u,leaf:u32,sampleLocal:
   return vec3f(0.,1.,0.);
 }
 
-@compute @workgroup_size(256)
-fn buildPages(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
-  let index=linearIndex(gid,groups);let texels=PHYSICAL*PHYSICAL*PHYSICAL;
-  let recordIndex=index/texels;let count=min(worklist[0],params.limits.x);if(recordIndex>=count){return;}
+fn buildTexel(index:u32){
+  let texels=PHYSICAL*PHYSICAL*PHYSICAL;let recordIndex=index/texels;
   let physical=physicalCoordinate(index-recordIndex*texels);let local=interiorCoordinate(physical);
   let record=worklist[3]+recordIndex*RECORD_WORDS;let destination=scratchOrigin(recordIndex)+physical;
+  // A record the planner declined to resolve builds nothing, and certifies nothing.
+  if(worklist[record]==INVALID){if(all(physical==vec3u(0u))){scratchValidity[recordIndex]=0u;}return;}
   let radianceDestination=radianceScratchOrigin(recordIndex)+physical;
   let level=worklist[2];let floorLevel=radianceFloorLevel();
   if(level==0u){
@@ -945,6 +1295,13 @@ fn buildPages(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) 
     r2=emitted*mean.x*max(0.,dot(normal,TETRA2));r3=emitted*mean.x*max(0.,dot(normal,TETRA3));
   }
   writeRadiance(radianceDestination,r0,r1,r2,r3);
+}
+// A fixed dispatch: every thread strides the batch's texels, and the batch's
+// count — read here, never by the host — is what bounds the work.
+@compute @workgroup_size(256)
+fn buildPages(@builtin(global_invocation_id) gid:vec3u){
+  let total=min(worklist[0],params.limits.x)*PHYSICAL*PHYSICAL*PHYSICAL;
+  for(var index=gid.x;index<total;index+=BUILD_THREADS){buildTexel(index);}
 }`;
 }
 
@@ -952,11 +1309,17 @@ fn buildPages(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) 
 export const liveSvoDerivedBuildWGSL = liveSvoDerivedBuildWGSLFor("full");
 
 /**
- * A deliberately low-rate Jacobi-style diffuse solve. Base pages read the
+ * A deliberately low-rate Jacobi-style diffuse solve. Floor pages read the
  * previous complete radiance atlas and write emission + reflected incident
- * light into compact scratch; parent pages then reduce the newly published
- * children. The recurrence replaces, rather than adds to, previous radiance,
- * so energy cannot grow merely because more frames have elapsed.
+ * light into compact scratch; their parents are ordinary builds, reduced from
+ * the newly published children. The recurrence replaces, rather than adds to,
+ * previous radiance, so energy cannot grow merely because more frames have
+ * elapsed.
+ *
+ * It runs inside every round, after the batch's opacity has been published and
+ * before its radiance is, and does nothing unless the batch is the radiance
+ * floor. So a floor page's first build already holds one bounce, and a feedback
+ * rotation is the same build queued again.
  */
 export function liveSvoRadianceFeedbackWGSLFor(
   profile: SparseBrickPayloadProfileName = "full",
@@ -1000,13 +1363,12 @@ struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOf
 @group(0) @binding(13) var<storage,read> environment:array<SvoEnvironmentLightingRecord>;
 @group(0) @binding(14) var opacityValidity:texture_2d<u32>;
 @group(0) @binding(15) var radianceValidity:texture_2d<u32>;
-@group(0) @binding(16) var<storage,read_write> scratchValidity:array<u32>;
 @group(0) @binding(17) var<storage,read> lights:array<SvoLightRecord>;
 @group(0) @binding(18) var atlasSampler:sampler;
 
 const INVALID:u32=0xffffffffu;const PHYSICAL:u32=${SVO_NODE_MIP_LAYOUT.physicalSize}u;const INTERIOR:u32=${SVO_NODE_MIP_LAYOUT.interiorSize}u;
 const RECORD_WORDS:u32=${LIVE_SVO_DERIVED_WORKLIST.recordWords}u;const ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;const PI:f32=3.141592653589793;
-fn linearIndex(gid:vec3u,groups:vec3u)->u32{return gid.x+gid.y*groups.x*256u+gid.z*groups.x*groups.y*256u;}
+const BUILD_THREADS:u32=${LIVE_SVO_DERIVED_BUDGET.buildThreads}u;
 fn finestLevel()->u32{return params.scratchAtlasPages.w;}
 ${lane.codec}
 ${liveSvoRadianceAddressingWGSL}
@@ -1036,7 +1398,14 @@ struct SceneSample{coverage:f32,radiance:SvoTetraRadiance,valid:u32}
 // Callers must pass a level at or above the radiance floor; below it there is no
 // radiance page to gather from, and the opacity there is finer than this solve
 // resolves anyway.
-fn sceneSample(positionIn:vec3f,level:u32)->SceneSample{if(any(positionIn<vec3f(0.0))){return SceneSample(0.,SvoTetraRadiance(vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.)),1u);}let scale=exp2(f32(level));let levelVoxel=positionIn/scale;let pageFloor=floor(levelVoxel/f32(INTERIOR));if(any(pageFloor<vec3f(0.0))||any(pageFloor>=vec3f(2097152.0))){return SceneSample(0.,SvoTetraRadiance(vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.)),1u);}let page=vec3u(pageFloor);let slot=tableSlot(level,page);if(slot==INVALID||!radianceSlotResident(slot)){return SceneSample(0.,SvoTetraRadiance(vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.)),1u);}let opacityDimensions=textureDimensions(opacityValidity);let radianceDimensions=textureDimensions(radianceValidity);if(textureLoad(opacityValidity,svoDerivedPageValidityTexel(opacityDimensions,slot),0).x==0u||textureLoad(radianceValidity,svoDerivedPageValidityTexel(radianceDimensions,slot),0).x==0u){return SceneSample(0.,SvoTetraRadiance(vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.)),0u);}let interiorTexel=clamp(levelVoxel-vec3f(page)*f32(INTERIOR)-vec3f(.5),vec3f(${INTERIOR_CLAMP_LOW}),vec3f(f32(INTERIOR)-${INTERIOR_CLAMP_HIGH}));let opacityUv=(vec3f(slotOrigin(slot))+vec3f(f32(${APRON}u)+.5)+interiorTexel)/vec3f(textureDimensions(opacitySource));let radianceUv=(vec3f(radianceSlotOrigin(slot))+vec3f(f32(${APRON}u)+.5)+interiorTexel)/vec3f(textureDimensions(radianceSource0));return SceneSample(textureSampleLevel(opacitySource,atlasSampler,opacityUv,0.0).x,SvoTetraRadiance(textureSampleLevel(radianceSource0,atlasSampler,radianceUv,0.0).rgb,textureSampleLevel(radianceSource1,atlasSampler,radianceUv,0.0).rgb,textureSampleLevel(radianceSource2,atlasSampler,radianceUv,0.0).rgb,textureSampleLevel(radianceSource3,atlasSampler,radianceUv,0.0).rgb),1u);}
+//
+// A page awaiting its build holds nothing a gather may read, and is treated
+// like a page that is not there: it neither occludes nor emits. The one case
+// worth separating is a page whose opacity is built and whose radiance is not —
+// it occludes, and contributes no light yet. Either way the gather goes on;
+// a page that reads its neighbour too early is inside that neighbour's window
+// and is gathered again once it is built.
+fn sceneSample(positionIn:vec3f,level:u32)->SceneSample{if(any(positionIn<vec3f(0.0))){return SceneSample(0.,SvoTetraRadiance(vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.)),1u);}let scale=exp2(f32(level));let levelVoxel=positionIn/scale;let pageFloor=floor(levelVoxel/f32(INTERIOR));if(any(pageFloor<vec3f(0.0))||any(pageFloor>=vec3f(2097152.0))){return SceneSample(0.,SvoTetraRadiance(vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.)),1u);}let page=vec3u(pageFloor);let slot=tableSlot(level,page);if(slot==INVALID||!radianceSlotResident(slot)){return SceneSample(0.,SvoTetraRadiance(vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.)),1u);}let opacityDimensions=textureDimensions(opacityValidity);let radianceDimensions=textureDimensions(radianceValidity);if(textureLoad(opacityValidity,svoDerivedPageValidityTexel(opacityDimensions,slot),0).x==0u){return SceneSample(0.,SvoTetraRadiance(vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.)),1u);}let radianceBuilt=textureLoad(radianceValidity,svoDerivedPageValidityTexel(radianceDimensions,slot),0).x!=0u;let interiorTexel=clamp(levelVoxel-vec3f(page)*f32(INTERIOR)-vec3f(.5),vec3f(${INTERIOR_CLAMP_LOW}),vec3f(f32(INTERIOR)-${INTERIOR_CLAMP_HIGH}));let opacityUv=(vec3f(slotOrigin(slot))+vec3f(f32(${APRON}u)+.5)+interiorTexel)/vec3f(textureDimensions(opacitySource));let radianceUv=(vec3f(radianceSlotOrigin(slot))+vec3f(f32(${APRON}u)+.5)+interiorTexel)/vec3f(textureDimensions(radianceSource0));if(!radianceBuilt){return SceneSample(textureSampleLevel(opacitySource,atlasSampler,opacityUv,0.0).x,SvoTetraRadiance(vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.)),1u);}return SceneSample(textureSampleLevel(opacitySource,atlasSampler,opacityUv,0.0).x,SvoTetraRadiance(textureSampleLevel(radianceSource0,atlasSampler,radianceUv,0.0).rgb,textureSampleLevel(radianceSource1,atlasSampler,radianceUv,0.0).rgb,textureSampleLevel(radianceSource2,atlasSampler,radianceUv,0.0).rgb,textureSampleLevel(radianceSource3,atlasSampler,radianceUv,0.0).rgb),1u);}
 fn hemisphereDirection(normal:vec3f,index:u32)->vec3f{var basis=svoTetraDirection0();if(index==1u){basis=svoTetraDirection1();}else if(index==2u){basis=svoTetraDirection2();}else if(index==3u){basis=svoTetraDirection3();}basis=select(-basis,basis,dot(basis,normal)>=0.0);return normalize(normal*.45+basis);}
 // The four gather steps are expressed in *receiver* widths, not in finest
 // voxels: the base of the radiance chain is now a floor-level texel spanning
@@ -1046,12 +1415,10 @@ fn hemisphereDirection(normal:vec3f,index:u32)->vec3f{var basis=svoTetraDirectio
 // exactly what it was when the chain was based at the leaf.
 fn incidentAlong(origin:vec3f,normal:vec3f,index:u32)->vec3f{let direction=hemisphereDirection(normal,index);var transmittance=1.0;var incident=vec3f(0.0);
  let floorLevel=radianceFloorLevel();let floorScale=exp2(f32(floorLevel));
- for(var step=0u;step<4u;step+=1u){var distance=2.5;if(step==1u){distance=6.0;}else if(step==2u){distance=18.0;}else if(step==3u){distance=54.0;}let level=min(step+floorLevel,params.direct.x-1u);let sample=sceneSample(origin+direction*distance*floorScale,level);if(sample.valid==0u){return vec3f(0.0);}let coverage=clamp(sample.coverage,0.0,1.0);incident+=transmittance*svoTetraRadianceAlong(sample.radiance,-direction);transmittance*=1.0-coverage;if(transmittance<=0.01){break;}}
+ for(var step=0u;step<4u;step+=1u){var distance=2.5;if(step==1u){distance=6.0;}else if(step==2u){distance=18.0;}else if(step==3u){distance=54.0;}let level=min(step+floorLevel,params.direct.x-1u);let sample=sceneSample(origin+direction*distance*floorScale,level);let coverage=clamp(sample.coverage,0.0,1.0);incident+=transmittance*svoTetraRadianceAlong(sample.radiance,-direction);transmittance*=1.0-coverage;if(transmittance<=0.01){break;}}
  return incident+transmittance*svoEnvironmentDiffuseIrradiance(environment[0],normal)/PI;}
-fn directVisibility(originCells:vec3f,towardLight:vec3f,maximumDistance_m:f32${directOcclusion.parameter})->f32{${directOcclusion.guard}let cellScale=max(params.mappingCellSize.x,max(params.mappingCellSize.y,params.mappingCellSize.z))*exp2(f32(radianceFloorLevel()));var transmittance=1.0;for(var step=0u;step<4u;step+=1u){var distance_m=cellScale*2.5;if(step==1u){distance_m=cellScale*6.0;}else if(step==2u){distance_m=cellScale*18.0;}else if(step==3u){distance_m=cellScale*54.0;}if(maximumDistance_m>0.0){distance_m=min(distance_m,maximumDistance_m*.9);}let position=originCells+towardLight*distance_m/params.mappingCellSize.xyz;let sample=sceneSample(position,min(step+radianceFloorLevel(),params.direct.x-1u));if(sample.valid==0u){return 0.0;}transmittance*=1.0-clamp(sample.coverage,0.0,1.0);}return clamp(transmittance,0.0,1.0);}
+fn directVisibility(originCells:vec3f,towardLight:vec3f,maximumDistance_m:f32${directOcclusion.parameter})->f32{${directOcclusion.guard}let cellScale=max(params.mappingCellSize.x,max(params.mappingCellSize.y,params.mappingCellSize.z))*exp2(f32(radianceFloorLevel()));var transmittance=1.0;for(var step=0u;step<4u;step+=1u){var distance_m=cellScale*2.5;if(step==1u){distance_m=cellScale*6.0;}else if(step==2u){distance_m=cellScale*18.0;}else if(step==3u){distance_m=cellScale*54.0;}if(maximumDistance_m>0.0){distance_m=min(distance_m,maximumDistance_m*.9);}let position=originCells+towardLight*distance_m/params.mappingCellSize.xyz;let sample=sceneSample(position,min(step+radianceFloorLevel(),params.direct.x-1u));transmittance*=1.0-clamp(sample.coverage,0.0,1.0);}return clamp(transmittance,0.0,1.0);}
 fn directIncident(worldPosition:vec3f,originCells:vec3f,normal:vec3f${directOcclusion.parameter})->vec3f{var result=vec3f(0.0);let count=min(min(params.direct.w,arrayLength(&lights)),4u);for(var index=0u;index<4u;index+=1u){if(index>=count){break;}let light=lights[index];let base=svoLightRadiance(light);var toward=light.directionCone.xyz;var maximumDistance_m=0.0;var attenuation=1.0;if(light.identity.x!=SVO_LIGHT_DIRECTIONAL){let offset=light.positionRange.xyz-worldPosition;let distanceSquared=dot(offset,offset);if(distanceSquared<=1e-10||(light.positionRange.w>0.0&&distanceSquared>=light.positionRange.w*light.positionRange.w)){continue;}maximumDistance_m=sqrt(distanceSquared);toward=offset/maximumDistance_m;let rangeFade=select(1.0,pow(clamp(1.0-maximumDistance_m/max(light.positionRange.w,1e-6),0.0,1.0),2.0),light.positionRange.w>0.0);attenuation=rangeFade/max(1.0,distanceSquared);if(light.identity.x==SVO_LIGHT_SPHERE_AREA){let area=4.0*PI*light.shape.x*light.shape.x;attenuation=rangeFade*area/max(area,distanceSquared);}else if(light.identity.x==SVO_LIGHT_RECTANGLE_AREA){let area=4.0*light.axisUWidth.w*light.axisVHeight.w;attenuation=rangeFade*max(dot(normalize(light.directionCone.xyz),-toward),0.0)*area/max(area,distanceSquared);}else if(light.identity.x==SVO_LIGHT_SPOT){attenuation*=svoLightConeFalloff(light,toward);}}let cosine=max(dot(normal,toward),0.0);if(cosine>0.0&&directVisibility(originCells,toward,maximumDistance_m${directOcclusion.forward})>0.0){result+=base*(attenuation*cosine/PI);}}return result;}
-fn childRadiance(record:u32,local:vec3u,sampleIndex:u32,lobe:u32)->vec3f{let bit=vec3u(sampleIndex&1u,(sampleIndex>>1u)&1u,(sampleIndex>>2u)&1u);let fine=local*2u+bit;let octant=(fine.x/INTERIOR)|((fine.y/INTERIOR)<<1u)|((fine.z/INTERIOR)<<2u);let child=worklist[record+${LIVE_SVO_DERIVED_WORKLIST.childSlotWord}u+octant];if(child==INVALID||!radianceSlotResident(child)){return vec3f(0.);}let coordinate=vec3i(radianceSlotOrigin(child)+(fine%INTERIOR)+${APRON}u);if(lobe==0u){return textureLoad(radianceSource0,coordinate,0).rgb;}if(lobe==1u){return textureLoad(radianceSource1,coordinate,0).rgb;}if(lobe==2u){return textureLoad(radianceSource2,coordinate,0).rgb;}return textureLoad(radianceSource3,coordinate,0).rgb;}
-fn childrenReady(record:u32)->bool{for(var childIndex=0u;childIndex<8u;childIndex+=1u){let child=worklist[record+${LIVE_SVO_DERIVED_WORKLIST.childSlotWord}u+childIndex];if(child!=INVALID&&textureLoad(radianceValidity,svoDerivedPageValidityTexel(textureDimensions(radianceValidity),child),0).x==0u){return false;}}return true;}
 /**
  * Outward normal at the scale of one floor-level texel, from its own opacity page.
  *
@@ -1071,12 +1438,11 @@ fn pageGradientNormal(pageOrigin:vec3u,center:vec3u)->vec3f{
   textureLoad(opacitySource,vec3i(pageOrigin+vec3u(center.x,center.y,hi.z)),0).x-textureLoad(opacitySource,vec3i(pageOrigin+vec3u(center.x,center.y,lo.z)),0).x);
  if(dot(gradient,gradient)<=1e-8){return vec3f(0.);}
  return -normalize(gradient);}
-@compute @workgroup_size(256) fn feedbackPages(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){let index=linearIndex(gid,groups);let texels=PHYSICAL*PHYSICAL*PHYSICAL;let recordIndex=index/texels;let count=min(worklist[0],params.limits.x);if(recordIndex>=count){return;}let physical=physicalCoordinate(index-recordIndex*texels);let local=interiorCoordinate(physical);let record=worklist[3]+recordIndex*RECORD_WORDS;let level=worklist[2];let floorLevel=radianceFloorLevel();let destination=radianceScratchOrigin(recordIndex)+physical;
- // Below the floor a page carries no radiance at all. It still certifies itself
- // valid so its parents are never blocked waiting for a page that will not come.
- if(level<floorLevel){if(all(physical==vec3u(0u))){scratchValidity[recordIndex]=worklist[1];}return;}
- if(level>floorLevel){if(all(physical==vec3u(0u))){scratchValidity[recordIndex]=select(0u,worklist[1],childrenReady(record));}var r0=vec3f(0.);var r1=vec3f(0.);var r2=vec3f(0.);var r3=vec3f(0.);for(var child=0u;child<8u;child+=1u){r0+=childRadiance(record,local,child,0u)/8.;r1+=childRadiance(record,local,child,1u)/8.;r2+=childRadiance(record,local,child,2u)/8.;r3+=childRadiance(record,local,child,3u)/8.;}writeRadiance(destination,r0,r1,r2,r3);return;}
- if(all(physical==vec3u(0u))){scratchValidity[recordIndex]=worklist[1];}let slot=worklist[record];let pageOrigin=slotOrigin(slot);let center=local+vec3u(${APRON}u);let coverage=textureLoad(opacitySource,vec3i(pageOrigin+center),0).x;let page=vec3u(worklist[record+1u],worklist[record+2u],worklist[record+3u]);
+fn feedbackTexel(index:u32){let texels=PHYSICAL*PHYSICAL*PHYSICAL;let recordIndex=index/texels;let physical=physicalCoordinate(index-recordIndex*texels);let local=interiorCoordinate(physical);let record=worklist[3]+recordIndex*RECORD_WORDS;let level=worklist[2];let destination=radianceScratchOrigin(recordIndex)+physical;
+ // The page's own opacity was published by this round's copy, so it is read
+ // where every other gather will read it. A record the planner declined to
+ // resolve names no slot.
+ let slot=worklist[record];if(slot==INVALID){return;}let pageOrigin=slotOrigin(slot);let center=local+vec3u(${APRON}u);let coverage=textureLoad(opacitySource,vec3i(pageOrigin+center),0).x;let page=vec3u(worklist[record+1u],worklist[record+2u],worklist[record+3u]);
  // At the floor level one texel spans 2^level cells, so the eight per-octant
  // leaves a base record carries no longer address it; the material comes from a
  // descent at the texel's own centre cell instead.
@@ -1085,6 +1451,12 @@ fn pageGradientNormal(pageOrigin:vec3u,center:vec3u)->vec3f{
  if(level>0u){leaf=deepestLeaf(globalCell);}
  if(coverage<=0.0||leaf>=control[1]){writeRadiance(destination,vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.));return;}let sampleLocal=leafLocal(globalCell,leaf);
  let voxel=leafVoxel(leaf,sampleLocal);let dynamicIdentity=${lane.dynamicIdentity};let sceneIdentity=sceneIdentityAt(voxel);let dynamicCoverage=${lane.dynamicCoverage};let sceneCoverage=${lane.sceneCoverage};let materialIndex=select(dynamicIdentity&0xffffu,sceneIdentity&0xffffu,sceneCoverage>=dynamicCoverage&&sceneCoverage>0.);if(materialIndex>=arrayLength(&materials)){writeRadiance(destination,vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.));return;}let material=materials[materialIndex];let fineNormal=safeNormal(leaf,sampleLocal);let coarseNormal=pageGradientNormal(pageOrigin,center);let normal=select(fineNormal,coarseNormal,level>0u&&dot(coarseNormal,coarseNormal)>0.5);let originCells=vec3f(globalCell)+vec3f(.5)+normal*${marchOffsetCells};let transportAlbedo=clamp(material.baseColorOpacity.rgb*(1.0-clamp(material.surface.x,0.0,1.0)),vec3f(0.0),vec3f(${LIVE_SVO_RADIANCE_FEEDBACK.maximumTransportAlbedo}));var incident=vec3f(0.0);for(var direction=0u;direction<${LIVE_SVO_RADIANCE_FEEDBACK.directionCount}u;direction+=1u){incident+=incidentAlong(originCells,normal,direction)/f32(${LIVE_SVO_RADIANCE_FEEDBACK.directionCount});}let worldPosition=params.mappingOrigin.xyz+(vec3f(globalCell)+vec3f(.5))*params.mappingCellSize.xyz;incident+=directIncident(worldPosition,originCells,normal${directOcclusion.receiver});let outgoing=max(material.emissiveRoughness.rgb,vec3f(0.0))+transportAlbedo*incident;writeRadiance(destination,outgoing*coverage*max(0.,dot(normal,svoTetraDirection0())),outgoing*coverage*max(0.,dot(normal,svoTetraDirection1())),outgoing*coverage*max(0.,dot(normal,svoTetraDirection2())),outgoing*coverage*max(0.,dot(normal,svoTetraDirection3())));
+}
+// The same fixed dispatch as the build. Only a batch of floor pages gathers.
+@compute @workgroup_size(256) fn feedbackPages(@builtin(global_invocation_id) gid:vec3u){
+ if(worklist[2]!=radianceFloorLevel()){return;}
+ let total=min(worklist[0],params.limits.x)*PHYSICAL*PHYSICAL*PHYSICAL;
+ for(var index=gid.x;index<total;index+=BUILD_THREADS){feedbackTexel(index);}
 }`;
 }
 
@@ -1102,33 +1474,43 @@ struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOf
 @group(0) @binding(1) var opacityScratch:texture_3d<f32>;
 @group(0) @binding(2) var opacityDestination:texture_storage_3d<${opacityFormat},write>;
 @group(0) @binding(3) var radianceScratch:texture_3d<f32>;
-@group(0) @binding(4) var radianceDestination:texture_storage_3d<${radianceFormat},write>;
+// Two lobes a dispatch: a stage may write four storage textures, and the
+// second pair shares its dispatch with the validity word that publishes the page.
+@group(0) @binding(4) var radianceDestinationA:texture_storage_3d<${radianceFormat},write>;
 @group(0) @binding(5) var opacityValidity:texture_storage_2d<r32uint,write>;
 @group(0) @binding(6) var radianceValidity:texture_storage_2d<r32uint,write>;
 @group(0) @binding(7) var<uniform> params:Params;
 @group(0) @binding(8) var<storage,read> scratchValidity:array<u32>;
+@group(0) @binding(9) var radianceDestinationB:texture_storage_3d<${radianceFormat},write>;
 const PHYSICAL:u32=${SVO_NODE_MIP_LAYOUT.physicalSize}u;const RECORD_WORDS:u32=${LIVE_SVO_DERIVED_WORKLIST.recordWords}u;
-fn linearIndex(gid:vec3u,groups:vec3u)->u32{return gid.x+gid.y*groups.x*256u+gid.z*groups.x*groups.y*256u;}
+const INVALID:u32=0xffffffffu;const BUILD_THREADS:u32=${LIVE_SVO_DERIVED_BUDGET.buildThreads}u;
 ${liveSvoRadianceAddressingWGSL}
 fn targetOrigin(slot:u32)->vec3u{let p=params.targetAtlasPages.xyz;return vec3u(slot%p.x,(slot/p.x)%p.y,slot/(p.x*p.y))*PHYSICAL;}
 fn scratchOrigin(slot:u32)->vec3u{let p=params.scratchAtlasPages.xyz;return vec3u(slot%p.x,(slot/p.x)%p.y,slot/(p.x*p.y))*PHYSICAL;}
 fn physical(index:u32)->vec3u{return vec3u(index%PHYSICAL,(index/PHYSICAL)%PHYSICAL,index/(PHYSICAL*PHYSICAL));}
-@compute @workgroup_size(256) fn invalidatePages(@builtin(global_invocation_id) gid:vec3u){let i=gid.x;let count=min(worklist[0],params.limits.x);if(i>=count){return;}let record=worklist[3]+i*RECORD_WORDS;let slot=worklist[record];textureStore(opacityValidity,svoDerivedPageValidityTexel(textureDimensions(opacityValidity),slot),vec4u(0u));textureStore(radianceValidity,svoDerivedPageValidityTexel(textureDimensions(radianceValidity),slot),vec4u(0u));}
-@compute @workgroup_size(256) fn copyOpacity(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- let index=linearIndex(gid,groups);let texels=PHYSICAL*PHYSICAL*PHYSICAL;let recordIndex=index/texels;let count=min(worklist[0],params.limits.x);if(recordIndex>=count){return;}
- let local=physical(index-recordIndex*texels);let record=worklist[3]+recordIndex*RECORD_WORDS;let slot=worklist[record];let source=vec3i(scratchOrigin(recordIndex)+local);let destination=vec3i(targetOrigin(slot)+local);
- textureStore(opacityDestination,destination,textureLoad(opacityScratch,source,0));if(all(local==vec3u(0u))&&scratchValidity[recordIndex]!=0u){textureStore(opacityValidity,svoDerivedPageValidityTexel(textureDimensions(opacityValidity),slot),vec4u(scratchValidity[recordIndex]));}}
-fn copyRadianceLobe(gid:vec3u,groups:vec3u,lobe:u32){let index=linearIndex(gid,groups);let texels=PHYSICAL*PHYSICAL*PHYSICAL;let recordIndex=index/texels;let count=min(worklist[0],params.limits.x);if(recordIndex>=count){return;}
- let local=physical(index-recordIndex*texels);let record=worklist[3]+recordIndex*RECORD_WORDS;let slot=worklist[record];let scratch=radianceScratchOrigin(recordIndex)+local+vec3u(0u,0u,lobe*radianceLobeDepth());
- // Below the floor there is no radiance page to publish, but the level still
- // certifies itself valid: an absent page and a black page answer every cone
- // identically, and a page that never goes valid stalls its parents forever.
- if(radianceSlotResident(slot)){textureStore(radianceDestination,vec3i(radianceSlotOrigin(slot)+local),textureLoad(radianceScratch,vec3i(scratch),0));}
- if(lobe==3u&&all(local==vec3u(0u))&&scratchValidity[recordIndex]!=0u){textureStore(radianceValidity,svoDerivedPageValidityTexel(textureDimensions(radianceValidity),slot),vec4u(scratchValidity[recordIndex]));}}
-@compute @workgroup_size(256) fn copyRadiance0(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){copyRadianceLobe(gid,groups,0u);}
-@compute @workgroup_size(256) fn copyRadiance1(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){copyRadianceLobe(gid,groups,1u);}
-@compute @workgroup_size(256) fn copyRadiance2(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){copyRadianceLobe(gid,groups,2u);}
-@compute @workgroup_size(256) fn copyRadiance3(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){copyRadianceLobe(gid,groups,3u);}`;
+fn batchTexels()->u32{return min(worklist[0],params.limits.x)*PHYSICAL*PHYSICAL*PHYSICAL;}
+// Publishing the validity word is what ends a page's "awaiting build": it is
+// written with the page's last texels, and only when its children were ready.
+@compute @workgroup_size(256) fn copyOpacity(@builtin(global_invocation_id) gid:vec3u){
+ let total=batchTexels();let texels=PHYSICAL*PHYSICAL*PHYSICAL;
+ for(var index=gid.x;index<total;index+=BUILD_THREADS){
+  let recordIndex=index/texels;let local=physical(index-recordIndex*texels);let record=worklist[3]+recordIndex*RECORD_WORDS;let slot=worklist[record];if(slot==INVALID){continue;}
+  let source=vec3i(scratchOrigin(recordIndex)+local);let destination=vec3i(targetOrigin(slot)+local);
+  textureStore(opacityDestination,destination,textureLoad(opacityScratch,source,0));if(all(local==vec3u(0u))&&scratchValidity[recordIndex]!=0u){textureStore(opacityValidity,svoDerivedPageValidityTexel(textureDimensions(opacityValidity),slot),vec4u(scratchValidity[recordIndex]));}}}
+fn copyRadianceLobes(thread:u32,firstLobe:u32){
+ let total=batchTexels();let texels=PHYSICAL*PHYSICAL*PHYSICAL;
+ for(var index=thread;index<total;index+=BUILD_THREADS){
+  let recordIndex=index/texels;let local=physical(index-recordIndex*texels);let record=worklist[3]+recordIndex*RECORD_WORDS;let slot=worklist[record];if(slot==INVALID){continue;}
+  let scratch=radianceScratchOrigin(recordIndex)+local+vec3u(0u,0u,firstLobe*radianceLobeDepth());
+  // Below the floor there is no radiance page to publish, but the level still
+  // certifies itself valid: an absent page and a black page answer every cone
+  // identically, and a page that never goes valid stalls its parents forever.
+  if(radianceSlotResident(slot)){let destination=vec3i(radianceSlotOrigin(slot)+local);
+   textureStore(radianceDestinationA,destination,textureLoad(radianceScratch,vec3i(scratch),0));
+   textureStore(radianceDestinationB,destination,textureLoad(radianceScratch,vec3i(scratch+vec3u(0u,0u,radianceLobeDepth())),0));}
+  if(firstLobe==2u&&all(local==vec3u(0u))&&scratchValidity[recordIndex]!=0u){textureStore(radianceValidity,svoDerivedPageValidityTexel(textureDimensions(radianceValidity),slot),vec4u(scratchValidity[recordIndex]));}}}
+@compute @workgroup_size(256) fn copyRadianceLow(@builtin(global_invocation_id) gid:vec3u){copyRadianceLobes(gid.x,0u);}
+@compute @workgroup_size(256) fn copyRadianceHigh(@builtin(global_invocation_id) gid:vec3u){copyRadianceLobes(gid.x,2u);}`;
 }
 
 /** The `rgba16float` expansion. Byte-identical to the pre-format-choice shader. */
@@ -1154,18 +1536,17 @@ struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOf
   textureStore(radianceValidity,svoDerivedPageValidityTexel(textureDimensions(radianceValidity),slot),vec4u(generation));
 }`;
 
-interface LevelBindings { worklist: LiveSvoDerivedGpuWorklist; invalidate: GPUBindGroup; build: GPUBindGroup; opacityBuild: GPUBindGroup; feedback?: GPUBindGroup; opacityCopy: GPUBindGroup; radianceCopy: readonly GPUBindGroup[] }
+/** One pipeline and the one bind group it is ever dispatched with. */
+interface LiveSvoDerivedStage { pipeline: GPUComputePipeline; bindGroup: GPUBindGroup }
 
 interface LiveSvoDerivedBuilderPipelineState {
-  emptyInitializationPipeline: GPUComputePipeline;
-  emptyInitializationBindGroup: GPUBindGroup;
-  buildPipeline: GPUComputePipeline;
-  opacityBuildPipeline: GPUComputePipeline;
-  feedbackPipeline?: GPUComputePipeline;
-  invalidatePipeline: GPUComputePipeline;
-  opacityCopyPipeline: GPUComputePipeline;
-  radianceCopyPipelines: readonly GPUComputePipeline[];
-  levels: readonly LevelBindings[];
+  emptyInitialization: LiveSvoDerivedStage;
+  build: LiveSvoDerivedStage;
+  opacityBuild: LiveSvoDerivedStage;
+  feedback?: LiveSvoDerivedStage;
+  opacityCopy: LiveSvoDerivedStage;
+  /** Lobes 0-1, then lobes 2-3 with the page's validity. */
+  radianceCopy: readonly [LiveSvoDerivedStage, LiveSvoDerivedStage];
 }
 
 function compactScratchAtlasPages(capacity: number, maximumTextureDimension3D: number): readonly [number, number, number] {
@@ -1180,7 +1561,12 @@ function compactScratchAtlasPages(capacity: number, maximumTextureDimension3D: n
   return [x, y, Math.ceil(capacity / (x * y))];
 }
 
-/** GPU-only incremental builder; work is exactly bounded by GPU worklist counts. */
+/**
+ * GPU-only incremental builder: builds whatever batch the planner has prepared.
+ *
+ * Every dispatch is direct and the same size on every frame; the batch's count,
+ * read in the shader, is what bounds the work.
+ */
 export class WebGpuLiveSvoDerivedBuilder {
   readonly allocatedBytes: number;
   readonly scratchAtlasPages: readonly [number, number, number];
@@ -1204,14 +1590,16 @@ export class WebGpuLiveSvoDerivedBuilder {
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, private readonly options: WebGpuLiveSvoDerivedBuilderOptions) {
-    // The two atlases share a *slot* index space — page validity, the claims
-    // buffer and every worklist record name one slot for both — but no longer a
+    // The two atlases share a *slot* index space — page validity, the lighting
+    // queue and every build record name one slot for both — but no longer a
     // shape: the radiance floor gives radiance far fewer physical pages.
     if (options.nodeMips.pageCapacity !== options.radiance.pageCapacity) throw new Error("Live opacity and radiance page capacities must match");
     if (options.nodeMips.atlasPages.reduce((product, value) => product * value, 1) < options.nodeMips.pageCapacity) {
       throw new RangeError("Live derived target atlas does not contain its declared page capacity");
     }
-    if (options.worklists.length < 1) throw new RangeError("At least one live derived worklist is required");
+    if (!Number.isInteger(options.levelCount) || options.levelCount < 1 || options.levelCount > SVO_NODE_MIP_MAXIMUM_LEVELS) {
+      throw new RangeError(`Live derived level count must be in [1, ${SVO_NODE_MIP_MAXIMUM_LEVELS}]`);
+    }
     if (!Number.isSafeInteger(options.plannedPageCount) || options.plannedPageCount < 1
       || options.plannedPageCount > options.nodeMips.pageCapacity) {
       throw new RangeError("Live derived planned page count must fit the target page atlas");
@@ -1236,9 +1624,12 @@ export class WebGpuLiveSvoDerivedBuilder {
       || (options.cellSize_m ?? [1, 1, 1]).some((value) => !Number.isFinite(value) || value <= 0)) {
       throw new RangeError("Live SVO feedback mapping must have a finite origin and positive cell size");
     }
-    const scratchCapacity = Math.max(...options.worklists.map(({ capacity }) => capacity));
+    // Scratch holds one batch, not one level: the largest level of a wide world
+    // is tens of thousands of pages, and staging them all at once is what made
+    // this the largest allocation in the lighting path.
+    const scratchCapacity = options.batch.capacity;
     if (!Number.isSafeInteger(scratchCapacity) || scratchCapacity < 1 || scratchCapacity > options.nodeMips.pageCapacity) {
-      throw new RangeError("Live derived worklist capacity must fit the target page atlas");
+      throw new RangeError("Live derived batch capacity must fit the target page atlas");
     }
     const maximumTextureDimension3D = Number(device.limits?.maxTextureDimension3D) || 2_048;
     this.scratchAtlasPages = options.scratchAtlasPages ?? compactScratchAtlasPages(scratchCapacity, maximumTextureDimension3D);
@@ -1247,15 +1638,15 @@ export class WebGpuLiveSvoDerivedBuilder {
       || this.scratchAtlasPages[0] * SVO_NODE_MIP_LAYOUT.physicalSize > maximumTextureDimension3D
       || this.scratchAtlasPages[1] * SVO_NODE_MIP_LAYOUT.physicalSize > maximumTextureDimension3D
       || this.scratchAtlasPages[2] * SVO_NODE_MIP_LAYOUT.physicalSize * 4 > maximumTextureDimension3D) {
-      throw new RangeError("Live derived scratch atlas cannot contain the bounded worklist on this device");
+      throw new RangeError("Live derived scratch atlas cannot contain one batch on this device");
     }
     const label = options.label ?? "Live SVO derived content";
     this.radianceFormat = options.radiance.format ?? LIVE_SVO_RADIANCE_STORAGE.fallbackFormat;
     this.opacityFormat = options.nodeMips.format ?? SVO_NODE_MIP_OPACITY_STORAGE.wideFormat;
     this.radianceFloorLevel = options.radianceFloorLevel ?? 0;
     if (!Number.isSafeInteger(this.radianceFloorLevel) || this.radianceFloorLevel < 0
-      || this.radianceFloorLevel >= options.worklists.length) {
-      throw new RangeError("Live derived radiance floor must be a level the worklists cover");
+      || this.radianceFloorLevel >= options.levelCount) {
+      throw new RangeError("Live derived radiance floor must be a level the page table covers");
     }
     const radianceScratchCapacity = Math.max(1, Math.min(scratchCapacity, options.radianceScratchCapacity ?? scratchCapacity));
     this.radianceScratchAtlasPages = compactScratchAtlasPages(radianceScratchCapacity, maximumTextureDimension3D);
@@ -1267,15 +1658,16 @@ export class WebGpuLiveSvoDerivedBuilder {
       dimension: "3d", format: this.radianceFormat, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
     this.scratchValidity = device.createBuffer({ label: `${label} scratch page validity`, size: scratchCapacity * 4,
       usage: GPUBufferUsage.STORAGE });
-    // The banded lane bases ride at the end of both parameter blocks, so
-    // `configureRadianceSlotOffset`'s two hard-coded write offsets — and every
-    // other field's — stay exactly where they were.
+    // The banded lane bases ride at the end of both parameter blocks, so every
+    // other field stays exactly where it was.
     const bandedLanes = options.tree.bandedLaneWordOffsets.slice(0, 4);
     this.params = device.createBuffer({ label: `${label} parameters`, size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.params, 0, new Uint32Array([
       ...options.nodeMips.atlasPages, 0,
       ...this.scratchAtlasPages, options.finestLevel,
-      options.nodeMips.pageCapacity, SVO_NODE_MIP_LAYOUT.physicalSize,
+      // `limits.x` bounds the records a dispatch will touch: the batch, which
+      // is also exactly what the scratch can hold.
+      scratchCapacity, SVO_NODE_MIP_LAYOUT.physicalSize,
       options.generationSource.offsetBytes / 4, options.plannedPageCount,
       options.tree.velocityOffsetBytes / 4, options.tree.materialOwnerOffsetBytes / 4,
       options.tree.sceneGeometryOffsetBytes / 4, options.tree.scenePayloadLanes.materialOwnerWords,
@@ -1292,13 +1684,13 @@ export class WebGpuLiveSvoDerivedBuilder {
       const feedbackData = new ArrayBuffer(208), feedbackWords = new Uint32Array(feedbackData), feedbackFloats = new Float32Array(feedbackData);
       feedbackWords.set([...options.nodeMips.atlasPages, 0], 0);
       feedbackWords.set([...this.scratchAtlasPages, options.finestLevel], 4);
-      feedbackWords.set([options.nodeMips.pageCapacity, SVO_NODE_MIP_LAYOUT.physicalSize,
+      feedbackWords.set([scratchCapacity, SVO_NODE_MIP_LAYOUT.physicalSize,
         options.generationSource.offsetBytes / 4, options.plannedPageCount], 8);
       feedbackWords.set([options.tree.velocityOffsetBytes / 4, options.tree.materialOwnerOffsetBytes / 4,
         options.tree.sceneGeometryOffsetBytes / 4, options.tree.scenePayloadLanes.materialOwnerWords], 12);
       // Words 20-31 held the dense table's twelve level slabs; the page hash
       // carries its own shape, so they are reserved zeros.
-      feedbackWords.set([options.worklists.length, 0, 0, options.lightCount ?? 0], 16);
+      feedbackWords.set([options.levelCount, 0, 0, options.lightCount ?? 0], 16);
       feedbackFloats.set([...(options.worldOrigin_m ?? [0, 0, 0]), 0], 32);
       feedbackFloats.set([...(options.cellSize_m ?? [1, 1, 1]), 0], 36);
       feedbackWords.set([...options.radiance.atlasPages, options.radiance.slotOffset ?? 0], 40);
@@ -1311,20 +1703,6 @@ export class WebGpuLiveSvoDerivedBuilder {
     this.allocatedBytes = texelCount * svoNodeMipOpacityChannels(this.opacityFormat)
       + radianceTexelCount * 4 * liveSvoRadianceBytesPerTexel(this.radianceFormat)
       + scratchCapacity * 4 + this.params.size + (this.feedbackParams?.size ?? 0);
-  }
-
-  /**
-   * Re-point the radiance atlas after a plan growth renumbered its slots.
-   *
-   * Growth keeps the atlas shape — it was sized for the domain — but changes how
-   * many slots fall below the radiance floor, and therefore where the atlas
-   * starts. Nothing else in the parameter block moves.
-   */
-  configureRadianceSlotOffset(slotOffset: number): void {
-    if (this.destroyed) return;
-    if (!Number.isSafeInteger(slotOffset) || slotOffset < 0) throw new RangeError("Live radiance slot offset must be a non-negative integer");
-    this.device.queue.writeBuffer(this.params, 64 + 12, new Uint32Array([slotOffset]));
-    if (this.feedbackParams) this.device.queue.writeBuffer(this.feedbackParams, 160 + 12, new Uint32Array([slotOffset]));
   }
 
   async initializePipelines(): Promise<void> {
@@ -1380,16 +1758,15 @@ export class WebGpuLiveSvoDerivedBuilder {
     const emptyInitializationModule = device.createShaderModule({
       label: `${label} valid-empty initialization shader`, code: liveSvoDerivedEmptyInitializationWGSL,
     });
-    const [emptyInitializationPipeline, buildPipeline, feedbackPipeline, invalidatePipeline, opacityCopyPipeline, radianceCopyPipelines] = await Promise.all([
+    const [emptyInitializationPipeline, buildPipeline, feedbackPipeline, opacityCopyPipeline, radianceCopyPipelines] = await Promise.all([
       device.createComputePipelineAsync({ label: `${label} valid-empty initialization pipeline`, layout: "auto",
         compute: { module: emptyInitializationModule, entryPoint: "initializeValidEmptyPages" } }),
       device.createComputePipelineAsync({ label: `${label} build pipeline`, layout: "auto", compute: { module: buildModule, entryPoint: "buildPages" } }),
       feedbackModule ? device.createComputePipelineAsync({ label: `${label} radiance feedback pipeline`, layout: "auto",
         compute: { module: feedbackModule, entryPoint: "feedbackPages" } }) : Promise.resolve(undefined),
-      device.createComputePipelineAsync({ label: `${label} invalidate pipeline`, layout: "auto", compute: { module: copyModule, entryPoint: "invalidatePages" } }),
       device.createComputePipelineAsync({ label: `${label} opacity copy pipeline`, layout: "auto", compute: { module: copyModule, entryPoint: "copyOpacity" } }),
-      Promise.all([0, 1, 2, 3].map((lobe) => device.createComputePipelineAsync({ label: `${label} radiance copy ${lobe} pipeline`,
-        layout: "auto", compute: { module: copyModule, entryPoint: `copyRadiance${lobe}` } }))),
+      Promise.all(["Low", "High"].map((pair) => device.createComputePipelineAsync({ label: `${label} radiance copy ${pair.toLowerCase()} lobes pipeline`,
+        layout: "auto", compute: { module: copyModule, entryPoint: `copyRadiance${pair}` } }))),
     ]);
     const opacityBuildPipeline = await device.createComputePipelineAsync({
       label: `${label} opacity-only pipeline`, layout: "auto",
@@ -1410,111 +1787,88 @@ export class WebGpuLiveSvoDerivedBuilder {
     const targetRadianceViews = options.radiance.textures.map((texture) => texture.createView({ dimension: "3d" }));
     const materialPbr = options.materialPbr, environmentLighting = options.environmentLighting, lights = options.lights;
     const feedbackParams = this.feedbackParams, feedbackSampler = this.feedbackSampler;
-    const levels = options.worklists.map((worklist) => ({ worklist,
-      invalidate: device.createBindGroup({ layout: invalidatePipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: worklist.buffer, offset: worklist.bindingOffsetBytes ?? 0, size: worklist.bindingSizeBytes } },
-        { binding: 5, resource: options.nodeMips.pageValidity.view }, { binding: 6, resource: options.radiance.pageValidity.view },
-        { binding: 7, resource: { buffer: this.params } },
-      ] }),
-      build: device.createBindGroup({ layout: buildPipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } }, { binding: 1, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } },
-        { binding: 2, resource: { buffer: options.tree.payload } }, { binding: 3, resource: { buffer: worklist.buffer, offset: worklist.bindingOffsetBytes ?? 0, size: worklist.bindingSizeBytes } },
-        { binding: 4, resource: { buffer: options.materialEmission } }, { binding: 5, resource: options.nodeMips.texture.createView({ dimension: "3d" }) },
-        { binding: 6, resource: this.opacityScratch.createView({ dimension: "3d" }) },
-        ...targetRadianceViews.map((resource, index) => ({ binding: 7 + index, resource })),
-        { binding: 11, resource: radianceScratchView }, { binding: 12, resource: { buffer: this.params } },
-        { binding: 13, resource: options.nodeMips.pageValidity.view }, { binding: 14, resource: options.radiance.pageValidity.view },
-        { binding: 15, resource: { buffer: this.scratchValidity } },
-      ] }),
-      opacityBuild: device.createBindGroup({ layout: opacityBuildPipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } }, { binding: 1, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } },
-        { binding: 2, resource: { buffer: options.tree.payload } }, { binding: 3, resource: { buffer: worklist.buffer, offset: worklist.bindingOffsetBytes ?? 0, size: worklist.bindingSizeBytes } },
-        { binding: 4, resource: { buffer: options.materialEmission } }, { binding: 5, resource: options.nodeMips.texture.createView({ dimension: "3d" }) },
-        { binding: 6, resource: this.opacityScratch.createView({ dimension: "3d" }) },
-        ...targetRadianceViews.map((resource, index) => ({ binding: 7 + index, resource })),
-        { binding: 11, resource: radianceScratchView }, { binding: 12, resource: { buffer: this.params } },
-        { binding: 13, resource: options.nodeMips.pageValidity.view }, { binding: 14, resource: options.radiance.pageValidity.view },
-        { binding: 15, resource: { buffer: this.scratchValidity } },
-      ] }),
-      feedback: feedbackPipeline && materialPbr && environmentLighting && lights && feedbackParams && feedbackSampler
-        ? device.createBindGroup({ layout: feedbackPipeline.getBindGroupLayout(0), entries: [
-          { binding: 0, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } },
-          { binding: 1, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } },
-          { binding: 2, resource: { buffer: options.tree.payload } },
-          { binding: 3, resource: { buffer: worklist.buffer, offset: worklist.bindingOffsetBytes ?? 0, size: worklist.bindingSizeBytes } },
-          { binding: 4, resource: options.nodeMips.texture.createView({ dimension: "3d" }) },
-          ...targetRadianceViews.map((resource, index) => ({ binding: 5 + index, resource })),
-          { binding: 9, resource: radianceScratchView }, { binding: 10, resource: { buffer: feedbackParams } },
-          { binding: 11, resource: options.nodeMips.pageTableTexture.createView() },
-          { binding: 12, resource: { buffer: materialPbr } }, { binding: 13, resource: { buffer: environmentLighting } },
-          { binding: 14, resource: options.nodeMips.pageValidity.view }, { binding: 15, resource: options.radiance.pageValidity.view },
-          { binding: 16, resource: { buffer: this.scratchValidity } }, { binding: 17, resource: { buffer: lights } },
-          { binding: 18, resource: feedbackSampler },
-        ] }) : undefined,
-      opacityCopy: device.createBindGroup({ layout: opacityCopyPipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: worklist.buffer, offset: worklist.bindingOffsetBytes ?? 0, size: worklist.bindingSizeBytes } }, { binding: 1, resource: this.opacityScratch.createView({ dimension: "3d" }) },
-        { binding: 2, resource: options.nodeMips.texture.createView({ dimension: "3d" }) },
-        { binding: 5, resource: options.nodeMips.pageValidity.view }, { binding: 7, resource: { buffer: this.params } },
-        { binding: 8, resource: { buffer: this.scratchValidity } },
-      ] }),
-      radianceCopy: radianceCopyPipelines.map((pipeline, lobe) => device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: worklist.buffer, offset: worklist.bindingOffsetBytes ?? 0, size: worklist.bindingSizeBytes } }, { binding: 3, resource: radianceScratchView },
-        { binding: 4, resource: targetRadianceViews[lobe] }, { binding: 6, resource: options.radiance.pageValidity.view },
+    // One batch, so one bind group a pipeline: nothing is per level any more.
+    const batch = { buffer: options.batch.buffer };
+    const buildBindGroup = (pipeline: GPUComputePipeline) => device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } }, { binding: 1, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } },
+      { binding: 2, resource: { buffer: options.tree.payload } }, { binding: 3, resource: batch },
+      { binding: 4, resource: { buffer: options.materialEmission } }, { binding: 5, resource: options.nodeMips.texture.createView({ dimension: "3d" }) },
+      { binding: 6, resource: this.opacityScratch.createView({ dimension: "3d" }) },
+      ...targetRadianceViews.map((resource, index) => ({ binding: 7 + index, resource })),
+      { binding: 11, resource: radianceScratchView }, { binding: 12, resource: { buffer: this.params } },
+      { binding: 13, resource: options.nodeMips.pageValidity.view }, { binding: 14, resource: options.radiance.pageValidity.view },
+      { binding: 15, resource: { buffer: this.scratchValidity } },
+    ] });
+    const feedback = feedbackPipeline && materialPbr && environmentLighting && lights && feedbackParams && feedbackSampler
+      ? { pipeline: feedbackPipeline, bindGroup: device.createBindGroup({ layout: feedbackPipeline.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } },
+        { binding: 1, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } },
+        { binding: 2, resource: { buffer: options.tree.payload } },
+        { binding: 3, resource: batch },
+        { binding: 4, resource: options.nodeMips.texture.createView({ dimension: "3d" }) },
+        ...targetRadianceViews.map((resource, index) => ({ binding: 5 + index, resource })),
+        { binding: 9, resource: radianceScratchView }, { binding: 10, resource: { buffer: feedbackParams } },
+        { binding: 11, resource: options.nodeMips.pageTableTexture.createView() },
+        { binding: 12, resource: { buffer: materialPbr } }, { binding: 13, resource: { buffer: environmentLighting } },
+        { binding: 14, resource: options.nodeMips.pageValidity.view }, { binding: 15, resource: options.radiance.pageValidity.view },
+        { binding: 17, resource: { buffer: lights } },
+        { binding: 18, resource: feedbackSampler },
+      ] }) } : undefined;
+    const opacityCopy = { pipeline: opacityCopyPipeline, bindGroup: device.createBindGroup({ layout: opacityCopyPipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: batch }, { binding: 1, resource: this.opacityScratch.createView({ dimension: "3d" }) },
+      { binding: 2, resource: options.nodeMips.texture.createView({ dimension: "3d" }) },
+      { binding: 5, resource: options.nodeMips.pageValidity.view }, { binding: 7, resource: { buffer: this.params } },
+      { binding: 8, resource: { buffer: this.scratchValidity } },
+    ] }) };
+    const radianceCopyStage = (pair: number): LiveSvoDerivedStage => ({ pipeline: radianceCopyPipelines[pair],
+      bindGroup: device.createBindGroup({ layout: radianceCopyPipelines[pair].getBindGroupLayout(0), entries: [
+        { binding: 0, resource: batch }, { binding: 3, resource: radianceScratchView },
+        { binding: 4, resource: targetRadianceViews[pair * 2] }, { binding: 6, resource: options.radiance.pageValidity.view },
         { binding: 7, resource: { buffer: this.params } }, { binding: 8, resource: { buffer: this.scratchValidity } },
-      ] })),
-    }));
-    return { emptyInitializationPipeline, emptyInitializationBindGroup, buildPipeline, opacityBuildPipeline, feedbackPipeline, invalidatePipeline,
-      opacityCopyPipeline, radianceCopyPipelines, levels };
+        { binding: 9, resource: targetRadianceViews[pair * 2 + 1] },
+      ] }) });
+    return {
+      emptyInitialization: { pipeline: emptyInitializationPipeline, bindGroup: emptyInitializationBindGroup },
+      build: { pipeline: buildPipeline, bindGroup: buildBindGroup(buildPipeline) },
+      opacityBuild: { pipeline: opacityBuildPipeline, bindGroup: buildBindGroup(opacityBuildPipeline) },
+      feedback, opacityCopy, radianceCopy: [radianceCopyStage(0), radianceCopyStage(1)],
+    };
   }
 
-  encode(encoder: GPUCommandEncoder, initializeEmpty = false, includeRadiance = true): void {
+  /**
+   * First build only: certify every address-resident page as empty, so a page
+   * the build never reaches answers a cone as the air it is.
+   */
+  encodeCertifyEmpty(pass: GPUComputePassEncoder): void {
     if (this.destroyed) return;
     const state = this.pipelineState;
     if (!state) throw new Error("Live SVO derived builder pipelines are not initialized");
-    if (initializeEmpty) {
-      const pass = encoder.beginComputePass({ label: "Certify live SVO address pages as empty" });
-      pass.setPipeline(state.emptyInitializationPipeline); pass.setBindGroup(0, state.emptyInitializationBindGroup);
-      pass.dispatchWorkgroups(Math.ceil(this.plannedPageCount / 256)); pass.end();
-    }
-    // All affected pages fail closed before any level is rebuilt.
-    for (const level of state.levels) {
-      const pass = encoder.beginComputePass({ label: "Invalidate live SVO derived pages" });
-      pass.setPipeline(state.invalidatePipeline); pass.setBindGroup(0, level.invalidate);
-      pass.dispatchWorkgroups(Math.ceil(level.worklist.capacity / 256)); pass.end();
-    }
-    // Finest-to-coarsest order is the caller's worklist order. Each copy pass
-    // makes complete children visible before the next parent build begins.
-    for (const level of state.levels) {
-      const indirect = level.worklist.indirectOffsetBytes ?? (level.worklist.bindingOffsetBytes ?? 0) + LIVE_SVO_DERIVED_WORKLIST.dispatchIndirectOffsetBytes;
-      const build = encoder.beginComputePass({ label: "Build live SVO derived pages" });
-      build.setPipeline(includeRadiance ? state.buildPipeline : state.opacityBuildPipeline); build.setBindGroup(0, includeRadiance ? level.build : level.opacityBuild); build.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); build.end();
-      const opacity = encoder.beginComputePass({ label: "Publish live SVO opacity pages" });
-      opacity.setPipeline(state.opacityCopyPipeline); opacity.setBindGroup(0, level.opacityCopy); opacity.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); opacity.end();
-      if (includeRadiance) state.radianceCopyPipelines.forEach((pipeline, lobe) => {
-        const radiance = encoder.beginComputePass({ label: `Publish live SVO radiance lobe ${lobe}` });
-        radiance.setPipeline(pipeline); radiance.setBindGroup(0, level.radianceCopy[lobe]);
-        radiance.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); radiance.end();
-      });
-    }
+    pass.setPipeline(state.emptyInitialization.pipeline); pass.setBindGroup(0, state.emptyInitialization.bindGroup);
+    pass.dispatchWorkgroups(Math.ceil(this.plannedPageCount / 256));
   }
 
-  /** Publish one GPU-compacted phase of previous-frame diffuse feedback. */
-  encodeRadianceFeedback(encoder: GPUCommandEncoder): void {
-    if (this.destroyed || !this.radianceFeedbackEnabled) return;
+  /**
+   * Build the batch the planner has just resolved, and publish it.
+   *
+   * Opacity is published before the gather so a floor page reads its own new
+   * coverage from the atlas; radiance and its validity word are published
+   * last. Each dispatch is its own usage scope, so the scratch a dispatch
+   * writes is the scratch the next one samples.
+   */
+  encodeRound(pass: GPUComputePassEncoder, includeRadiance = true): void {
+    if (this.destroyed) return;
     const state = this.pipelineState;
-    if (!state?.feedbackPipeline) throw new Error("Live SVO radiance feedback pipeline is not initialized");
-    for (const level of state.levels) {
-      if (!level.feedback) continue;
-      const indirect = level.worklist.indirectOffsetBytes
-        ?? (level.worklist.bindingOffsetBytes ?? 0) + LIVE_SVO_DERIVED_WORKLIST.dispatchIndirectOffsetBytes;
-      const feedback = encoder.beginComputePass({ label: "Feed back live SVO diffuse radiance" });
-      feedback.setPipeline(state.feedbackPipeline); feedback.setBindGroup(0, level.feedback);
-      feedback.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); feedback.end();
-      state.radianceCopyPipelines.forEach((pipeline, lobe) => {
-        const radiance = encoder.beginComputePass({ label: `Publish feedback SVO radiance lobe ${lobe}` });
-        radiance.setPipeline(pipeline); radiance.setBindGroup(0, level.radianceCopy[lobe]);
-        radiance.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); radiance.end();
-      });
+    if (!state) throw new Error("Live SVO derived builder pipelines are not initialized");
+    const groups = LIVE_SVO_DERIVED_BUDGET.buildWorkgroups;
+    const build = includeRadiance ? state.build : state.opacityBuild;
+    pass.setPipeline(build.pipeline); pass.setBindGroup(0, build.bindGroup); pass.dispatchWorkgroups(groups);
+    pass.setPipeline(state.opacityCopy.pipeline); pass.setBindGroup(0, state.opacityCopy.bindGroup); pass.dispatchWorkgroups(groups);
+    if (!includeRadiance) return;
+    if (state.feedback) {
+      pass.setPipeline(state.feedback.pipeline); pass.setBindGroup(0, state.feedback.bindGroup); pass.dispatchWorkgroups(groups);
+    }
+    for (const copy of state.radianceCopy) {
+      pass.setPipeline(copy.pipeline); pass.setBindGroup(0, copy.bindGroup); pass.dispatchWorkgroups(groups);
     }
   }
 
@@ -1524,34 +1878,64 @@ export class WebGpuLiveSvoDerivedBuilder {
   }
 }
 
-function align256(value: number): number { return Math.ceil(value / 256) * 256; }
+/**
+ * What a lighting frame is for. Each is a parameter block written once at
+ * build, so choosing one costs a bind group and no upload.
+ *
+ * - `dirty`: consume the journal and whatever is queued.
+ * - `initial`: the queue has just been reset; light every leaf, unbudgeted,
+ *   and open the feedback window over the whole scene.
+ * - `relight`: `dirty`, and open the window over the whole scene — the lights
+ *   or the environment changed, so every floor page's gather is stale.
+ * - `dirty-opacity`, `initial-opacity`: the same with radiance switched off,
+ *   which starts no feedback rotation.
+ */
+export type LiveSvoDerivedFrameMode = "dirty" | "initial" | "relight" | "dirty-opacity" | "initial-opacity";
 
-interface LiveSvoDerivedPlannerSourceAllocation {
-  source: LiveSvoDirtyLeafSource;
-  capacity: number;
-  params: GPUBuffer;
-}
+const LIVE_SVO_DERIVED_FRAME_MODES: readonly LiveSvoDerivedFrameMode[] = ["dirty", "initial", "relight", "dirty-opacity", "initial-opacity"];
+const LIVE_SVO_DERIVED_UNBUDGETED = 0xffff_ffff;
 
 interface LiveSvoDerivedPlannerPipelineState {
+  prepareFramePipeline: GPUComputePipeline;
+  prepareFrame: Record<LiveSvoDerivedFrameMode, GPUBindGroup>;
+  selectFeedback: LiveSvoDerivedStage;
   populatePipeline: GPUComputePipeline;
-  finalizePipeline: GPUComputePipeline;
-  sources: readonly { capacity: number; bindGroup: GPUBindGroup }[];
-  initial: { capacity: number; bindGroup: GPUBindGroup };
-  feedback: { capacity: number; bindGroup: GPUBindGroup };
-  finalizeBindGroup: GPUBindGroup;
+  journal: GPUBindGroup;
+  allLeaves: GPUBindGroup;
+  stepSources: readonly GPUBindGroup[];
+  prepareRound: LiveSvoDerivedStage;
+  resolve: LiveSvoDerivedStage;
 }
 
-/** GPU compaction/deduplication from a unified dirty-leaf stream into level worklists. */
+/**
+ * The lighting queue: which pages are owed a build, and which a round builds.
+ *
+ * All of it lives on the GPU. Dirty leaves become queued pages (`populate`), a
+ * built page queues its parent (`resolve`), and a cursor per ring advances by
+ * at most a frame's allowance. The host encodes the same dispatches every
+ * lighting frame and learns nothing back; it decides only how many frames to
+ * encode, from bounds it already holds.
+ */
 export class WebGpuLiveSvoDerivedWorklistPlanner {
-  readonly worklists: readonly LiveSvoDerivedGpuWorklist[];
+  /** The batch every round resolves into; the builder binds it once. */
+  readonly batch: LiveSvoDerivedGpuBatch;
   readonly allocatedBytes: number;
-  private readonly arena: GPUBuffer;
-  private readonly claims: GPUBuffer;
-  private readonly sources: readonly LiveSvoDerivedPlannerSourceAllocation[];
-  private readonly initial: LiveSvoDerivedPlannerSourceAllocation;
-  private readonly feedback: LiveSvoDerivedPlannerSourceAllocation;
-  private readonly sectionOffsetsBytes: readonly number[];
+  /**
+   * Rounds a budgeted frame runs. A round moves the sweep one ring, and the
+   * chain above a single page is one ring a level, so this many rounds carry a
+   * one-voxel edit from its seed to the root in the frame it lands.
+   */
+  readonly roundsPerFrame: number;
+  /** Rounds that drain a first build whatever it holds: every ring, a batch at a time. */
+  readonly initialRounds: number;
+  private readonly queue: GPUBuffer;
+  private readonly slots: GPUBuffer;
+  private readonly frameParams: Record<LiveSvoDerivedFrameMode, GPUBuffer>;
+  private readonly allLeavesParams: GPUBuffer;
+  private readonly stepParams: readonly GPUBuffer[];
+  private readonly queueHeaderBytes: number;
   private readonly pageCapacityByLevel: readonly number[];
+  private readonly stepLeafCapacity: number;
   private pipelineState?: LiveSvoDerivedPlannerPipelineState;
   private pipelineInitialization?: Promise<void>;
   private destroyed = false;
@@ -1567,47 +1951,106 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
     if (capacities.length !== options.levelCount) throw new RangeError("Live derived per-level capacities must name every level");
     if (capacities.some((capacity) => !Number.isInteger(capacity) || capacity < 1)) throw new RangeError("Live derived per-level capacity must be positive");
     this.pageCapacityByLevel = capacities;
-    if (options.dirtyLeafSources.length < 1) throw new RangeError("At least one live dirty-leaf source is required");
-    for (const source of options.dirtyLeafSources) {
+    const journal = options.sceneJournal;
+    for (const source of [journal, ...options.stepLeafSources]) {
       if (!Number.isInteger(source.recordStrideWords) || source.recordStrideWords < 1) throw new RangeError("Dirty leaf stride must be positive");
       if (!Number.isInteger(source.capacity) || source.capacity < 1) throw new RangeError("Dirty leaf capacity must be positive");
-      if ([source.countOffsetBytes, source.recordOffsetBytes].some((offset) => !Number.isInteger(offset) || offset < 0 || offset % 4 !== 0)) {
-        throw new RangeError("Dirty leaf offsets must be nonnegative u32-aligned byte offsets");
-      }
     }
-    if (!Number.isInteger(options.generationSource.offsetBytes) || options.generationSource.offsetBytes < 0 || options.generationSource.offsetBytes % 4 !== 0) {
-      throw new RangeError("Derived generation offset must be a nonnegative u32-aligned byte offset");
+    const offsets = [journal.writeCursorOffsetBytes, journal.recordOffsetBytes, journal.requestedRevisionOffsetBytes,
+      journal.completedRevisionOffsetBytes, options.generationSource.offsetBytes,
+      ...options.stepLeafSources.flatMap((source) => [source.countOffsetBytes, source.recordOffsetBytes])];
+    if (offsets.some((offset) => !Number.isInteger(offset) || offset < 0 || offset % 4 !== 0)) {
+      throw new RangeError("Live derived source offsets must be nonnegative u32-aligned byte offsets");
     }
-    // Sections are laid out by prefix sum over the per-level depths, each still
-    // 256-aligned so `bindingOffsetBytes` stays a legal storage-buffer offset.
-    // Only this line ever assumed a uniform stride; `sectionOffsetsBytes` was
-    // already an array and every consumer reads it by index.
-    const sectionBytes = capacities.map((capacity) =>
-      align256((LIVE_SVO_DERIVED_WORKLIST.headerWords + capacity * LIVE_SVO_DERIVED_WORKLIST.recordWords) * 4));
-    const sectionOffsetsBytes: number[] = [];
-    let arenaBytes = 0;
-    for (const bytes of sectionBytes) { sectionOffsetsBytes.push(arenaBytes); arenaBytes += bytes; }
-    this.sectionOffsetsBytes = sectionOffsetsBytes;
+    const levelCount = options.levelCount;
+    // One buffer: the state block, a header per ring, then each level's two
+    // rings back to back. A record is one slot, so the whole queue is a few
+    // megabytes where the per-level worklists it replaces were 48 B a page.
+    const sectionOffsetWords: number[] = [];
+    let queueWords = QUEUE.stateWords + QUEUE.ringHeaderWords * 2 * levelCount;
+    this.queueHeaderBytes = queueWords * 4;
+    for (const capacity of capacities) { sectionOffsetWords.push(queueWords); queueWords += capacity * 2; }
+    const batchCapacity = Math.min(LIVE_SVO_DERIVED_BUDGET.pagesPerFrame, Math.max(...capacities));
+    const batchBytes = (LIVE_SVO_DERIVED_WORKLIST.headerWords + batchCapacity * LIVE_SVO_DERIVED_WORKLIST.recordWords) * 4;
     const label = options.label ?? "Live SVO derived worklists";
-    this.arena = device.createBuffer({ label: `${label} arena`, size: arenaBytes,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
-    this.claims = device.createBuffer({ label: `${label} slot generation claims`, size: options.nodeMips.pageCapacity * 4,
+    // COPY_SRC for probes only: the fault and built words are never read on the frame path.
+    this.queue = device.createBuffer({ label: `${label} queue`, size: queueWords * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.slots = device.createBuffer({ label: `${label} slot states`, size: options.nodeMips.pageCapacity * QUEUE.slotWords * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.worklists = this.sectionOffsetsBytes.map((offset, level) => ({ buffer: this.arena, capacity: capacities[level],
-      bindingOffsetBytes: offset, bindingSizeBytes: sectionBytes[level], indirectOffsetBytes: offset + LIVE_SVO_DERIVED_WORKLIST.dispatchIndirectOffsetBytes }));
-    const createSource = (source: LiveSvoDirtyLeafSource, suffix: string) => {
+    this.batch = { capacity: batchCapacity,
+      buffer: device.createBuffer({ label: `${label} batch`, size: batchBytes, usage: GPUBufferUsage.STORAGE }) };
+    this.roundsPerFrame = levelCount + 2;
+    this.initialRounds = capacities.reduce((rounds, capacity) => rounds + Math.ceil(capacity / batchCapacity) + 1, 0);
+    this.stepLeafCapacity = options.stepLeafSources.reduce((total, source) => total + source.capacity, 0);
+    // Every parameter block is written here, once. Nothing about a frame —
+    // not its mode, not a feedback phase — is uploaded while the world runs.
+    const settle = options.radianceFeedback
+      ? [LIVE_SVO_RADIANCE_FEEDBACK.settleFrameCount, LIVE_SVO_RADIANCE_FEEDBACK.settleCycleCount] : [0, 0];
+    // A rotation over every floor page and everything above it, at capacity:
+    // what a rotation is assumed to take until one has been timed. Half the
+    // window at most, so a relight of the largest world still starts.
+    const floorLevel = Math.min(options.radianceFloorLevel ?? 0, levelCount - 1);
+    const rotationFrames = Math.min(LIVE_SVO_RADIANCE_FEEDBACK.settleFrameCount >> 1,
+      this.framesToBuild(capacities.slice(floorLevel).reduce((pages, capacity) => pages + capacity, 0)));
+    const createParams = (suffix: string, source: readonly number[], capacity: number, mode: number, allowance: number, flags: number) => {
       const params = device.createBuffer({ label: `${label} ${suffix} parameters`, size: LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      return { source, capacity: source.capacity, params };
+      const words = new Uint32Array(LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES / 4);
+      words.set([source[0], options.generationSource.offsetBytes / 4, source[1], source[2]], 0);
+      words.set([options.finestLevel, levelCount, options.radianceFloorLevel ?? 0, mode], 4);
+      words.set([capacity, options.nodeMips.pageCapacity, settle[0], settle[1]], 8);
+      words.set([allowance, batchCapacity, flags, LIVE_SVO_DERIVED_BUDGET.feedbackReachPages], 12);
+      words.set([journal.requestedRevisionOffsetBytes / 4, journal.completedRevisionOffsetBytes / 4, options.radiance.slotOffset ?? 0, rotationFrames], 16);
+      words.set(sectionOffsetWords, 20);
+      words.set(capacities, 20 + 4 * LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS);
+      device.queue.writeBuffer(params, 0, words);
+      return params;
     };
-    this.sources = options.dirtyLeafSources.map((source, index) => createSource(source, `source ${index}`));
-    const initialSource: LiveSvoDirtyLeafSource = { buffer: options.tree.control, countOffsetBytes: 0, recordOffsetBytes: 0,
-      capacity: options.tree.leafCapacity, recordStrideWords: 1 };
-    this.initial = createSource(initialSource, "initial all-leaves");
-    this.feedback = createSource(initialSource, "temporal feedback leaves");
-    this.configurePlan(options.nodeMips, options.finestLevel, options.levelCount);
-    this.allocatedBytes = arenaBytes + options.nodeMips.pageCapacity * 4
-      + LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES * (this.sources.length + 2);
+    const journalSource = [journal.writeCursorOffsetBytes / 4, journal.recordOffsetBytes / 4, journal.recordStrideWords];
+    const frame = (mode: LiveSvoDerivedFrameMode, allowance: number, flags: number) =>
+      createParams(`${mode} frame`, journalSource, journal.capacity, QUEUE.journalMode, allowance, flags);
+    const budget = LIVE_SVO_DERIVED_BUDGET.pagesPerFrame;
+    this.frameParams = {
+      dirty: frame("dirty", budget, 0),
+      initial: frame("initial", LIVE_SVO_DERIVED_UNBUDGETED, QUEUE.globalWindowFlag | QUEUE.skipJournalFlag | QUEUE.openAncestorsFlag),
+      relight: frame("relight", budget, QUEUE.globalWindowFlag),
+      "dirty-opacity": frame("dirty-opacity", budget, QUEUE.noFeedbackFlag),
+      "initial-opacity": frame("initial-opacity", LIVE_SVO_DERIVED_UNBUDGETED, QUEUE.skipJournalFlag | QUEUE.noFeedbackFlag | QUEUE.openAncestorsFlag),
+    };
+    this.allLeavesParams = createParams("all-leaves", [0, 0, 1], options.tree.leafCapacity, QUEUE.allLeavesMode, budget, 0);
+    this.stepParams = options.stepLeafSources.map((source, index) => createParams(`step source ${index}`,
+      [source.countOffsetBytes / 4, source.recordOffsetBytes / 4, source.recordStrideWords], source.capacity, QUEUE.listMode, budget, 0));
+    this.allocatedBytes = queueWords * 4 + this.slots.size + batchBytes
+      + LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES * (LIVE_SVO_DERIVED_FRAME_MODES.length + 1 + this.stepParams.length);
   }
+
+  /**
+   * Frames that are certain to build `pages` queued pages and everything they
+   * queue in turn. A frame either spends its allowance or runs out of rounds,
+   * and a round that does not spend the allowance finishes a ring; the sweep
+   * passes each ring at most twice before nothing is left — once from where it
+   * stood, once from the bottom.
+   */
+  private framesToBuild(pages: number): number {
+    return Math.ceil(pages / LIVE_SVO_DERIVED_BUDGET.pagesPerFrame)
+      + Math.ceil(4 * this.pageCapacityByLevel.length / this.roundsPerFrame) + 1;
+  }
+
+  /**
+   * Lighting frames that are certain to drain the queue once `seedLeaves` more
+   * leaves have been journaled, with nothing read back. A leaf seeds one page;
+   * a level holds no more pages than its capacity and no more than one a seed;
+   * and a page is built at most twice before the queue is empty — where the
+   * sweep stood when its seed arrived, and again after the level beneath it.
+   */
+  drainFrames(seedLeaves: number): number {
+    let pages = seedLeaves;
+    for (const capacity of this.pageCapacityByLevel) pages += 2 * Math.min(seedLeaves, capacity);
+    return this.framesToBuild(pages);
+  }
+
+  /** {@link drainFrames} for one solver step's lists at their fullest, on top of `seedLeaves` already journaled. */
+  stepDrainFrames(seedLeaves: number): number { return this.drainFrames(seedLeaves + this.stepLeafCapacity); }
 
   async initializePipelines(): Promise<void> {
     if (this.pipelineState) return;
@@ -1630,107 +2073,96 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
     const { device, options } = this;
     const label = options.label ?? "Live SVO derived worklists";
     const plannerModule = device.createShaderModule({ label: `${label} shader`, code: liveSvoDerivedWorklistWGSL });
-    const [populatePipeline, finalizePipeline] = await Promise.all([
-      device.createComputePipelineAsync({ label: `${label} populate pipeline`, layout: "auto",
-        compute: { module: plannerModule, entryPoint: "populate" } }),
-      device.createComputePipelineAsync({ label: `${label} finalize pipeline`, layout: "auto",
-        compute: { module: plannerModule, entryPoint: "finalize" } }),
+    const entry = (entryPoint: string) => device.createComputePipelineAsync({ label: `${label} ${entryPoint} pipeline`, layout: "auto",
+      compute: { module: plannerModule, entryPoint } });
+    const [prepareFramePipeline, selectFeedbackPipeline, populatePipeline, prepareRoundPipeline, resolvePipeline] = await Promise.all([
+      entry("prepareFrame"), entry("selectFeedback"), entry("populate"), entry("prepareRound"), entry("resolve"),
     ]);
     if (this.destroyed) throw new Error("Live SVO derived worklist planner was destroyed during pipeline initialization");
-    const bindSource = ({ source, capacity, params }: LiveSvoDerivedPlannerSourceAllocation) => ({ capacity,
-      bindGroup: device.createBindGroup({ layout: populatePipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: source.buffer } },
-        { binding: 1, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } },
-        { binding: 2, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } },
-        { binding: 3, resource: options.nodeMips.pageTableTexture.createView() },
-        { binding: 4, resource: { buffer: this.claims } }, { binding: 5, resource: { buffer: this.arena } },
-        { binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: options.generationSource.buffer } },
-      ] }),
-    });
-    const sources = this.sources.map(bindSource);
-    const initial = bindSource(this.initial);
-    const feedback = bindSource(this.feedback);
-    const finalizeBindGroup = device.createBindGroup({ layout: finalizePipeline.getBindGroupLayout(0), entries: [
-      { binding: 5, resource: { buffer: this.arena } }, { binding: 6, resource: { buffer: this.sources[0].params } },
-      { binding: 7, resource: { buffer: options.generationSource.buffer } },
-    ] });
-    return { populatePipeline, finalizePipeline, sources, initial, feedback, finalizeBindGroup };
-  }
-
-  configurePlan(target: WebGpuLiveSvoNodeMipGpuTarget, finestLevel = this.options.finestLevel, levelCount = this.options.levelCount): void {
-    if (!Number.isInteger(finestLevel) || finestLevel < 0) throw new RangeError("Live derived finest level must be nonnegative");
-    if (!Number.isInteger(levelCount) || levelCount < 1 || levelCount > this.options.levelCount) {
-      throw new RangeError("Configured live derived levels must fit the fixed planner allocation");
-    }
-    const write = (params: GPUBuffer, source: LiveSvoDirtyLeafSource, allLiveMode: 0 | 1 | 2, phase = 0, phaseCount = 1) => {
-      const words = new Uint32Array(LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES / 4);
-      words.set([source.countOffsetBytes / 4, this.options.generationSource.offsetBytes / 4,
-        allLiveMode === 2 ? phase : source.recordOffsetBytes / 4,
-        allLiveMode === 2 ? phaseCount : source.recordStrideWords], 0);
-      words.set([finestLevel, levelCount, 0, 0], 4);
-      // `limits.z` carried `target.pageCapacity`, which no entry point ever read;
-      // it now names the radiance floor level, which `emitPage` does read.
-      // `limits.y` is the deepest section's depth; the bound both entry points
-      // test against is `capacities[level]`, because the sections differ.
-      words.set([source.capacity, Math.max(...this.pageCapacityByLevel),
-        this.options.radianceFloorLevel ?? 0, allLiveMode], 8);
-      words.set(this.sectionOffsetsBytes.map((offset) => offset / 4), 12);
-      words.set(this.pageCapacityByLevel, 12 + 4 * LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS);
-      this.device.queue.writeBuffer(params, 0, words);
+    // A pipeline's automatic layout holds only the bindings its entry point
+    // reaches, so each group below lists exactly those and no others.
+    const control = { binding: 1, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } };
+    const topology = { binding: 2, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } };
+    const pageTable = { binding: 3, resource: options.nodeMips.pageTableTexture.createView() };
+    const slots = { binding: 4, resource: { buffer: this.slots } };
+    const queue = { binding: 5, resource: { buffer: this.queue } };
+    const params = (buffer: GPUBuffer) => ({ binding: 6, resource: { buffer } });
+    const batch = { binding: 8, resource: { buffer: this.batch.buffer } };
+    const journalBuffer = { binding: 0, resource: { buffer: options.sceneJournal.buffer } };
+    const prepareFrameGroup = (mode: LiveSvoDerivedFrameMode) => device.createBindGroup({
+      layout: prepareFramePipeline.getBindGroupLayout(0), entries: [
+        journalBuffer, queue, params(this.frameParams[mode]), { binding: 7, resource: { buffer: options.generationSource.buffer } },
+      ] });
+    const populateGroup = (source: GPUBuffer, sourceParams: GPUBuffer) => device.createBindGroup({
+      layout: populatePipeline.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: source } }, control, topology, pageTable, slots, queue, params(sourceParams),
+        { binding: 9, resource: options.nodeMips.pageValidity.view }, { binding: 10, resource: options.radiance.pageValidity.view },
+      ] });
+    return {
+      prepareFramePipeline,
+      prepareFrame: {
+        dirty: prepareFrameGroup("dirty"), initial: prepareFrameGroup("initial"), relight: prepareFrameGroup("relight"),
+        "dirty-opacity": prepareFrameGroup("dirty-opacity"), "initial-opacity": prepareFrameGroup("initial-opacity"),
+      },
+      selectFeedback: { pipeline: selectFeedbackPipeline, bindGroup: device.createBindGroup({
+        layout: selectFeedbackPipeline.getBindGroupLayout(0), entries: [pageTable, slots, queue, params(this.frameParams.dirty)] }) },
+      populatePipeline,
+      journal: populateGroup(options.sceneJournal.buffer, this.frameParams.dirty),
+      allLeaves: populateGroup(options.tree.control, this.allLeavesParams),
+      stepSources: options.stepLeafSources.map((source, index) => populateGroup(source.buffer, this.stepParams[index])),
+      prepareRound: { pipeline: prepareRoundPipeline, bindGroup: device.createBindGroup({
+        layout: prepareRoundPipeline.getBindGroupLayout(0), entries: [queue, params(this.frameParams.dirty), batch] }) },
+      resolve: { pipeline: resolvePipeline, bindGroup: device.createBindGroup({
+        layout: resolvePipeline.getBindGroupLayout(0), entries: [control, topology, pageTable, slots, queue, params(this.frameParams.dirty), batch] }) },
     };
-    this.options.dirtyLeafSources.forEach((source, index) => write(this.sources[index].params, source, 0));
-    write(this.initial.params, { buffer: this.options.tree.control, countOffsetBytes: 0, recordOffsetBytes: 0,
-      capacity: this.options.tree.leafCapacity, recordStrideWords: 1 }, 1);
-    write(this.feedback.params, { buffer: this.options.tree.control, countOffsetBytes: 0, recordOffsetBytes: 0,
-      capacity: this.options.tree.leafCapacity, recordStrideWords: 1 }, 2);
   }
 
-  /** Compacts all supplied scene/fluid/topology streams into one deduplicated hierarchy. */
-  encode(encoder: GPUCommandEncoder): void {
-    this.encodeSources(encoder, "dirty");
+  /**
+   * Forget everything queued. The frame that follows must be an initial one,
+   * which lights every leaf and so owes nothing to what was waiting.
+   */
+  encodeReset(encoder: GPUCommandEncoder): void {
+    if (this.destroyed) return;
+    encoder.clearBuffer(this.queue, 0, this.queueHeaderBytes);
+    encoder.clearBuffer(this.slots);
   }
 
-  /** First publication: unions every currently live tree leaf with all supplied dirty streams entirely on GPU. */
-  encodeInitial(encoder: GPUCommandEncoder): void {
-    this.encodeSources(encoder, "initial");
-  }
-
-  /** Compact one rotating subset of all live leaves for temporal GI feedback. */
-  encodeRadianceFeedback(encoder: GPUCommandEncoder, phase: number, phaseCount = LIVE_SVO_RADIANCE_FEEDBACK.phaseCount): void {
-    if (!Number.isSafeInteger(phaseCount) || phaseCount < 1 || !Number.isSafeInteger(phase) || phase < 0 || phase >= phaseCount) {
-      throw new RangeError("Live SVO feedback phase must fit its positive phase count");
-    }
-    this.configurePlan(this.options.nodeMips, this.options.finestLevel, this.options.levelCount);
-    const words = new Uint32Array([0, this.options.generationSource.offsetBytes / 4, phase, phaseCount]);
-    this.device.queue.writeBuffer(this.feedback.params, 0, words);
-    this.encodeSources(encoder, "feedback");
-  }
-
-  private encodeSources(encoder: GPUCommandEncoder, sourceMode: "dirty" | "initial" | "feedback"): void {
+  /**
+   * Open a lighting frame: latch its state, start a feedback rotation if one is
+   * due, and queue the pages whose voxels changed. `stepSources` adds the
+   * lists a solver step has just rewritten.
+   */
+  encodeFrame(pass: GPUComputePassEncoder, mode: LiveSvoDerivedFrameMode, stepSources: boolean): void {
     if (this.destroyed) return;
     const state = this.pipelineState;
     if (!state) throw new Error("Live SVO derived worklist planner pipelines are not initialized");
-    encoder.clearBuffer(this.claims);
-    for (const offset of this.sectionOffsetsBytes) encoder.clearBuffer(this.arena, offset, LIVE_SVO_DERIVED_WORKLIST.headerWords * 4);
-    const populate = encoder.beginComputePass({ label: "Populate live SVO derived worklists" });
-    populate.setPipeline(state.populatePipeline);
-    if (sourceMode === "initial") {
-      populate.setBindGroup(0, state.initial.bindGroup); populate.dispatchWorkgroups(Math.ceil(state.initial.capacity / 64));
+    const groups = LIVE_SVO_DERIVED_BUDGET.plannerWorkgroups;
+    pass.setPipeline(state.prepareFramePipeline); pass.setBindGroup(0, state.prepareFrame[mode]); pass.dispatchWorkgroups(1);
+    pass.setPipeline(state.selectFeedback.pipeline); pass.setBindGroup(0, state.selectFeedback.bindGroup); pass.dispatchWorkgroups(groups);
+    pass.setPipeline(state.populatePipeline);
+    if (mode === "initial" || mode === "initial-opacity") {
+      pass.setBindGroup(0, state.allLeaves); pass.dispatchWorkgroups(groups);
+      return;
     }
-    if (sourceMode === "feedback") {
-      populate.setBindGroup(0, state.feedback.bindGroup); populate.dispatchWorkgroups(Math.ceil(state.feedback.capacity / 64));
-    } else {
-      for (const source of state.sources) {
-        populate.setBindGroup(0, source.bindGroup); populate.dispatchWorkgroups(Math.ceil(source.capacity / 64));
-      }
-    }
-    populate.end();
-    const finalize = encoder.beginComputePass({ label: "Finalize live SVO derived worklists" });
-    finalize.setPipeline(state.finalizePipeline); finalize.setBindGroup(0, state.finalizeBindGroup); finalize.dispatchWorkgroups(this.options.levelCount); finalize.end();
+    pass.setBindGroup(0, state.journal); pass.dispatchWorkgroups(groups);
+    if (!stepSources) return;
+    for (const source of state.stepSources) { pass.setBindGroup(0, source); pass.dispatchWorkgroups(groups); }
+  }
+
+  /** Take the next batch from the queue and resolve it into build records. */
+  encodeRound(pass: GPUComputePassEncoder): void {
+    if (this.destroyed) return;
+    const state = this.pipelineState;
+    if (!state) throw new Error("Live SVO derived worklist planner pipelines are not initialized");
+    pass.setPipeline(state.prepareRound.pipeline); pass.setBindGroup(0, state.prepareRound.bindGroup); pass.dispatchWorkgroups(1);
+    pass.setPipeline(state.resolve.pipeline); pass.setBindGroup(0, state.resolve.bindGroup);
+    pass.dispatchWorkgroups(Math.ceil(this.batch.capacity / 64));
   }
 
   destroy(): void {
     if (this.destroyed) return;
-    this.arena.destroy(); this.claims.destroy(); this.sources.forEach(({ params }) => params.destroy()); this.initial.params.destroy(); this.feedback.params.destroy(); this.destroyed = true;
+    this.queue.destroy(); this.slots.destroy(); this.batch.buffer.destroy();
+    for (const mode of LIVE_SVO_DERIVED_FRAME_MODES) this.frameParams[mode].destroy();
+    this.allLeavesParams.destroy(); this.stepParams.forEach((params) => params.destroy()); this.destroyed = true;
   }
 }

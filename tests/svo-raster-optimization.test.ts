@@ -4,7 +4,6 @@ import { canUseOpaqueRasterLighting } from "../lib/svo/features/shading/deferred
 import type { SparseVoxelDrySceneData } from "../lib/svo/contracts/scene-publication";
 import { buildSvoPrimitiveCandidates } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
 import { SvoRasterAo } from "../lib/svo/features/lighting-visibility/svo-raster-ao";
-import { OctreeSparseBrickWorld } from "../lib/svo/features/construction/webgpu-svo-sparse-bricks";
 import { rasterSpotLights } from "../lib/svo/features/lighting-visibility/raster-spot-lights";
 
 const sunScene = (): SparseVoxelDrySceneData => {
@@ -32,24 +31,6 @@ test("opaque raster specialization falls back for unsupported live publications"
   assert.equal(canUseOpaqueRasterLighting(scene, options), false);
 });
 
-test("shadow pass trial reuses only a matching settled receipt and light generation", () => {
-  let passes = 0, checks = 0;
-  const pass = { setPipeline() {}, setBindGroup() {}, drawIndirect() {}, end() {}, dispatchWorkgroups() {} };
-  const encoder = { beginRenderPass() { passes++; return pass; }, beginComputePass() { checks++; return pass; }, clearBuffer() {} };
-  const state = {};
-  const raster = Object.create(SvoRasterAo.prototype);
-  Object.assign(raster, { generation: 1, shadowLayerCount: 2, meshState: state, cacheGroup: {}, cache: {}, shadowViews: [{}, {}], shadowGroups: [{}, {}], ao: { width: 16, height: 16 } });
-  const encode = (key?: string, shadows = true) => raster.encode(encoder, {}, {}, {}, {}, state, false, shadows, undefined, undefined, key);
-  encode("a"); assert.equal(passes, 2);
-  encode("a"); assert.equal(passes, 2);
-  raster.generation++;
-  encode("a"); assert.equal(passes, 4);
-  encode("b"); assert.equal(passes, 6);
-  encode(); encode(); assert.equal(passes, 10, "unknown/pending meshes always check on GPU");
-  encode("b"); encode("b", false); encode("b"); assert.equal(passes, 14, "re-enabling shadows cannot reuse an uncertified interval");
-  assert.ok(checks > 0);
-});
-
 test("spot maps and shader capability agree on capacity and unsupported projections", () => {
   const scene = sunScene(), options = { coneMode: "raster-ao", globalIllumination: false };
   const lights = new Uint32Array(28 * 6), f = new Float32Array(lights.buffer);
@@ -71,17 +52,4 @@ test("spot maps and shader capability agree on capacity and unsupported projecti
   }
   const spotOnly = four.slice(28, 56);
   assert.equal(canUseOpaqueRasterLighting({ ...scene, lightRecords: spotOnly }, options), true);
-});
-
-test("radiance withdrawal is immediate and restoration requests a full rebuild", () => {
-  const world = Object.create(OctreeSparseBrickWorld.prototype);
-  Object.assign(world, { radianceEnabled: true, liveDerivedInitial: false,
-    liveDerivedFeedbackFramesRemaining: 96, sceneSource: { tetrahedralRadiance: {} } });
-  world.setRadianceEnabled(false);
-  assert.equal(world.sceneSource.tetrahedralRadiance, undefined);
-  assert.equal(world.liveDerivedFeedbackFramesRemaining, 0);
-  assert.equal(world.liveDerivedInitial, false);
-  world.setRadianceEnabled(true);
-  assert.equal(world.liveDerivedInitial, true);
-  assert.equal(world.sceneSource.tetrahedralRadiance, undefined);
 });

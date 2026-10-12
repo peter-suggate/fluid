@@ -110,13 +110,18 @@ export function readSceneLibrary(storage: SceneLibraryStorage | undefined): Scen
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     const entries = decodeLibrary(parsed);
-    return entries.filter(isEntry)
-      .map((entry) => entry.methodProfile === undefined
-        ? entry : { ...entry, methodProfile: migratedMethodProfile(entry.methodProfile) })
+    return entries.flatMap((entry) => sceneLibraryEntry(entry) ?? [])
       .sort((a, b) => b.savedAt_ms - a.savedAt_ms);
   } catch {
     return [];
   }
+}
+
+/** One stored row as an entry, or nothing when it is not one. Shared with the autosave, which keeps its row elsewhere. */
+export function sceneLibraryEntry(value: unknown): SceneLibraryEntry | undefined {
+  if (!isEntry(value)) return undefined;
+  return value.methodProfile === undefined
+    ? value : { ...value, methodProfile: migratedMethodProfile(value.methodProfile) };
 }
 
 /** Legacy arrays remain readable. Pooling keeps an explicit save and its

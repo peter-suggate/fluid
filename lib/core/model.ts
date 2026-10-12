@@ -5,6 +5,7 @@ import { liquidExtrusionBounds, liquidExtrusionRefusal, type LiquidExtrusion } f
 import { validateRefinementRegions } from "./refinement-regions";
 import { validateTerrain, type TerrainDescription } from "./terrain";
 import type { SolidWorldVoxelPatch } from "./solid-world";
+import { validateSolidPatch } from "./solid-patch/compose";
 import type { EnvironmentId } from "./environments";
 import { validateSceneryGraph, type SceneryGraph } from "./scenery-graph";
 import { validateBackdrop, type BackdropDescription } from "./backdrop";
@@ -74,6 +75,12 @@ export interface SceneDescription {
    * liquid inside shows. The solver keeps every voxel. See `vesselCutawayPatches`.
    */
   cutaway?: { eye_m: Vec3 };
+  /**
+   * Presentation only: the continuous solid `solidVoxels` were rasterized
+   * from. The drawn surface is fitted from it wherever those voxels still
+   * stand, in place of the staircase they became. The solver keeps every voxel.
+   */
+  solidSurface?: { kind: "bath" };
   /** Optional image-free lighting grade consumed by the SVO renderer. */
   lighting?: {
     /** Scene-linear directional key. Omitted fields retain the environment defaults. */
@@ -549,6 +556,7 @@ export function validateScene(scene: SceneDescription): string[] {
     errors.push("Container vessel must be 'outline' or 'none'");
   }
   if (c?.shape !== undefined && c.shape !== "box" && c.shape !== "sphere") errors.push("Container shape must be 'box' or 'sphere'");
+  if (scene.solidSurface !== undefined && scene.solidSurface.kind !== "bath") errors.push("Solid surface kind must be 'bath'");
   if (c?.shape === "sphere" && c.top !== "closed") errors.push("A spherical container must be closed");
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
@@ -745,7 +753,8 @@ export function validateScene(scene: SceneDescription): string[] {
   if (c) errors.push(...validateRefinementRegions(scene.fluid?.refinementRegions, c));
   if (!Array.isArray(scene.solidVoxels)) errors.push("Solid voxels must be an array");
   else for (const [index, patch] of scene.solidVoxels.entries()) {
-      if (patch.operation !== "fill" && patch.operation !== "clear") {
+      const before = errors.length;
+      if (patch.operation !== "fill" && patch.operation !== "clear" && patch.operation !== "paint") {
         errors.push(`Solid voxel patch ${index} has an unsupported operation`);
       }
       if (!patch.minimum?.every(Number.isSafeInteger)
@@ -756,6 +765,11 @@ export function validateScene(scene: SceneDescription): string[] {
       if (patch.materialId !== undefined && (!Number.isSafeInteger(patch.materialId)
         || patch.materialId < 1 || patch.materialId > 0xffff)) {
         errors.push(`Solid voxel patch ${index} material must fit non-zero u16`);
+      }
+      if (errors.length > before) continue;
+      // What the bake itself will refuse: an unknown kind, or a kind's own malformed fields.
+      try { validateSolidPatch(patch); } catch (error) {
+        errors.push(`Solid voxel patch ${index} is invalid: ${error instanceof Error ? error.message : String(error)}`);
       }
   }
   if (scene.terrain && c) errors.push(...validateTerrain(scene.terrain, c));

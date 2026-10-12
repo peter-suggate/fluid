@@ -348,8 +348,6 @@ export interface GPUSolverInstance {
   applySceneUniforms?(scene: SceneDescription): void;
   /** Preflight live voxel edits without mutating or waiting on the GPU. */
   validateLiveSolidEdit?(scene: SceneDescription): void;
-  /** True means GPU geometry is committed; subsequent frame faults must not reject document adoption. */
-  prepareLiveSolidEdit?(scene: SceneDescription): Promise<boolean>;
   /** Publish edited refinement bounds without advancing simulation time. */
   refreshSceneTopology?(): Promise<void>;
   /**

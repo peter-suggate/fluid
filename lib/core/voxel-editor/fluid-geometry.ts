@@ -9,6 +9,8 @@ export const fluidSizeControl: ToolControl = { id: "size", label: "Diameter · v
 export const fluidHeightControl: ToolControl = { id: "height", label: "Height above floor · voxels", short: "H", adjust: "secondary", min: 0, max: 128, step: 1, initial: 2 };
 export const fluidRemoveControl: ToolControl = { id: "remove", kind: "toggle", label: "Remove water", short: "Remove", shortcut: "x", min: 0, max: 1, step: 1, initial: 0 };
 export const fluidTubeControl: ToolControl = { id: "thickness", label: "Tube thickness · voxels", short: "T", min: 1, max: 10, step: 1, initial: 2 };
+/** What the "do the opposite" modifier does to a water shape, for a legend: a drop removes, a removal drops. */
+export const FLUID_OPPOSITE = "opposite";
 
 /** Start above the initial pool when there is room, while keeping the entire drop in the tank. */
 export function fluidToolDefaults(scene: SceneDescription, values: ToolValues, shape: LiveFluidEdit["shape"]): ToolValues {

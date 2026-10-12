@@ -1,10 +1,11 @@
+import { gpuInitializationDevice } from "../../core/gpu-initialization-device";
 import {UniformMixedDiagnostics} from "./uniform-mixed-diagnostics";
 import { UNIFORM_MIXED_RECEIPT_RING, UniformMixedFrame, type UniformMixedFrameBodies, type UniformMixedFrameParameters, type UniformMixedFrameReceipt, type UniformMixedFrameRelayout, type UniformMixedFrameTrace } from "./uniform-mixed-frame";
 import { uniformMixedFixedFineCapacity } from "./uniform-mixed-ownership";
 import { uniformDetailCapacityRule } from "./uniform-detail-policy";
 import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
-import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedLiquidSolidPromotion, uniformMixedSolidTiles } from "./uniform-mixed-layout";
+import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit } from "./uniform-mixed-layout";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailCoarseSurface, uniformDetailHeldDistance, uniformDetailImportance, uniformDetailRequests, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
 import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
 import { UniformDetailPlanner, UniformDetailRequestTiles, uniformDetailTileBounds, type UniformDetailPlan } from "./uniform-detail-planner";
@@ -51,7 +52,7 @@ import {
   type GPURigidLoad,
   type GPUVelocityTransport,
 } from "../../core/webgpu-eulerian";
-import { GPUInitializationTaskRunner, type GPUInitializationTask } from "../../core/gpu-initialization";
+import { GPUInitializationTaskRunner, settleGPUInitialization, type GPUInitializationTask } from "../../core/gpu-initialization";
 import type {
   GPUSolverInstance,
   GPUInitializationReporter,
@@ -246,6 +247,26 @@ function uniformSolidMaskEmpty(mask: SolidOccupancyMask): boolean {
       const bits = (0xffffffff >>> (31 - high + low)) << low;
       if ((words[SOLID_OCCUPANCY_MASK_HEADER_WORDS + word]! & bits) !== 0) return false;
     }
+  }
+  return true;
+}
+
+/**
+ * The two documents hold the very same object in every field but their solid
+ * patch list: a voxel stroke's document over the one it extends.
+ *
+ * Identity, not content. A stroke is composed as `{ ...base, solidVoxels }`,
+ * so it answers true there for the price of a pointer per field, and every
+ * memo the solver keys by a field's identity (refinement regions, the drop
+ * schedule) still names its field afterwards. A document that crossed a
+ * structured clone, or had any other field replaced, shares nothing and
+ * answers false, which costs it only the full adoption it took before.
+ */
+function uniformSceneDiffersInSolidsAlone(scene: SceneDescription, running: SceneDescription): boolean {
+  const fields = Object.keys(scene) as (keyof SceneDescription)[];
+  if (fields.length !== Object.keys(running).length) return false;
+  for (const field of fields) {
+    if (field !== "solidVoxels" && (!Object.hasOwn(running, field) || scene[field] !== running[field])) return false;
   }
   return true;
 }
@@ -1148,6 +1169,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     onProgress: GPUInitializationReporter,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<WebGPUUniformReferenceSolver> {
+    const scope = gpuInitializationDevice(device, signal);
+    device = scope.device;
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
     let solver: WebGPUUniformReferenceSolver | undefined;
     try {
@@ -1155,9 +1178,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         solver = new WebGPUUniformReferenceSolver(device, scene, quality, onRigidLoads, { ...options, deferPipelineCompilation: true });
       } }]);
       await runner.run(solver!.initializationTasks(signal));
-      await runner.run([{id:"uniform.mixed",phase:"solver-pipelines",label:"Prepare shared mixed ownership",run:()=>solver!.initializeMixedFrame()}]);
+      await runner.run([{id:"uniform.mixed",phase:"solver-pipelines",label:"Prepare shared mixed ownership",run:async(_signal,report)=>{
+        const unsubscribe=gpuCompilationManagerFor(device).subscribe(snapshot=>{
+          if(snapshot.progress&&!signal.aborted)report?.(`${snapshot.progress.label}: ${snapshot.progress.current ?? "compiling"} (${snapshot.queued} queued)`);
+        });
+        try { await solver!.initializeMixedFrame(); } finally { unsubscribe(); }
+      }}]);
+      scope.commit();
       return solver!;
     } catch (error) {
+      scope.rollback();
       solver?.destroy();
       throw error;
     }
@@ -1296,7 +1326,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // One concurrent compile: serial stages left a first load waiting on
     // each uncached pipeline in turn.
     const dynamic=this.mixedDynamic,builder=this.mixedBuilder,mixedBodies=this.mixedBodies;
-    await Promise.all([this.mixedFrame.initialize(),this.mixedDiagnostics.initialize(),
+    await settleGPUInitialization([this.mixedFrame.initialize(),this.mixedDiagnostics.initialize(),
       dynamic.initialize(),builder.initialize(),mixedBodies.initialize()]);
     this.mixedFrame.setLayoutViews(this.layoutViews);
     this.mixedAccountedBytes=this.mixedFrame.allocatedBytes;this.watchMixedAllocation();
@@ -2032,38 +2062,51 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * requested, and cut 4h owners otherwise. */
   private editMixedSolids(dirty:{firstWord:number;wordCount:number}):void{
     const frame=this.mixedFrame!,words=this.solidMask.words,previous=this.mixedSolidWords!;
-    const {dimensions}=refinementRegionLattice(this.scene);
-    const [nx,ny,nz]=dimensions,n=dimensions.map(d=>d/4) as [number,number,number];
-    const sx=nx+2,sy=ny+2,touched=new Uint8Array(n[0]*n[1]*n[2]);
-    const header=SOLID_OCCUPANCY_MASK_HEADER_WORDS;
-    for(let w=Math.max(header,dirty.firstWord);w<dirty.firstWord+dirty.wordCount;w++){
-      let bits=(words[w]!^previous[w]!)>>>0;
-      while(bits){
-        const bit=31-Math.clz32(bits&-bits);bits=(bits&(bits-1))>>>0;
-        const index=(w-header)*32+bit,x=index%sx-1,y=Math.floor(index/sx)%sy-1,z=Math.floor(index/(sx*sy))-1;
-        for(let tz=Math.max(0,(z-1)>>2);tz<=Math.min(n[2]-1,(z+1)>>2);tz++)
-          for(let ty=Math.max(0,(y-1)>>2);ty<=Math.min(n[1]-1,(y+1)>>2);ty++)
-            for(let tx=Math.max(0,(x-1)>>2);tx<=Math.min(n[0]-1,(x+1)>>2);tx++)touched[tx+n[0]*(ty+n[1]*tz)]=1;
+    const dimensions=refinementRegionLattice(this.scene).dimensions as [number,number,number];
+    const n=dimensions.map(d=>d/4) as [number,number,number];
+    const touched=this.mixedSolidTouched??=new Uint8Array(n[0]*n[1]*n[2]);
+    const edit=uniformMixedSolidEdit(dimensions,words,previous,SOLID_OCCUPANCY_MASK_HEADER_WORDS,dirty,touched);
+    try{
+      previous.set(words.subarray(dirty.firstWord,dirty.firstWord+dirty.wordCount),dirty.firstWord);
+      // The promotion held for the mask before this edit (the caller has
+      // stamped the edited one) follows it by the touched tiles. A first
+      // build or another terrain is the lattice scan (mixedSolidPromotion).
+      const terrain=sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined,promotion=this.mixedSolidTiles;
+      if(promotion&&promotion.stamp===this.mixedSolidMaskStamp-1&&promotion.terrain===terrain){
+        const solid=uniformMixedSolidTilesAfterEdit(promotion.tiles,dimensions,words,SOLID_OCCUPANCY_MASK_HEADER_WORDS,edit,terrain);
+        this.mixedSolidTiles={stamp:this.mixedSolidMaskStamp,terrain,tiles:{...solid,any:solid.coupledTiles>0}};
       }
-    }
-    previous.set(words.subarray(dirty.firstWord,dirty.firstWord+dirty.wordCount),dirty.firstWord);
-    if(this.mixedGpuLayout&&this.detail.policy==="dynamic"){
-      const solid=this.mixedSolidPromotion();
-      // Refresh the builder statics and census solid mask now: the next census reads them.
-      this.refreshMixedBuilderStatics(solid);
-      const promoted=uniformMixedLiquidSolidPromotion(n,solid.coupled,touched),held=this.mixedEditJoin;
-      const join=touched.map((b,t)=>b|promoted[t]!|(held?held.tiles[t]!:0));
-      this.mixedDynamic!.join(join);this.mixedEditJoin={tiles:join};
-    }else if(this.detail.policy!=="dynamic"&&true){
-      // Requests only: nothing else asks for a new solid's tiles when solid
-      // contact is off, and a dry promotion skips them when it is on. The
-      // join holds them at h for the build that displaces (syncMixedLayout
-      // counts them into the capacity before it).
-      const promoted=uniformMixedLiquidSolidPromotion(n,this.mixedSolidPromotion().coupled,touched),held=this.mixedEditJoin;
-      const join=touched.map((b,t)=>b|promoted[t]!|(held?held.tiles[t]!:0));
-      this.mixedDynamic!.join(join);this.mixedEditJoin={tiles:join};
-    }
+      if(this.mixedGpuLayout&&this.detail.policy==="dynamic"){
+        const solid=this.mixedSolidPromotion();
+        // Refresh the builder statics and census solid mask now: the next census reads them.
+        this.refreshMixedBuilderStatics(solid);
+        this.joinMixedEdit(n,solid.coupled,edit.tiles);
+      }else if(this.detail.policy!=="dynamic"&&true){
+        // Requests only: nothing else asks for a new solid's tiles when solid
+        // contact is off, and a dry promotion skips them when it is on. The
+        // join holds them at h for the build that displaces (syncMixedLayout
+        // counts them into the capacity before it).
+        this.joinMixedEdit(n,this.mixedSolidPromotion().coupled,edit.tiles);
+      }
+    }finally{for(const t of edit.tiles)touched[t]=0;}
     frame.editSolids();
+  }
+  /** One byte per tile, zero between edits: the tiles of the edit being applied (editMixedSolids). */
+  private mixedSolidTouched?:Uint8Array;
+  /** The edit's join: its touched tiles and, liquid-conditional promotion's
+   * rule with those as the liquid (uniformMixedLiquidSolidPromotion), the 26
+   * neighbours of each that is solid-coupled, over the tiles a join already
+   * holds. Walked from the touched tiles: the edit's cost, not the lattice's. */
+  private joinMixedEdit(n:readonly [number,number,number],coupled:Uint8Array,tiles:readonly number[]):void{
+    const held=this.mixedEditJoin,join=held?held.tiles.slice():new Uint8Array(n[0]*n[1]*n[2]);
+    for(const t of tiles){
+      join[t]=1;
+      if(!coupled[t])continue;
+      const tx=t%n[0],ty=Math.floor(t/n[0])%n[1],tz=Math.floor(t/(n[0]*n[1]));
+      for(let z=Math.max(0,tz-1);z<=Math.min(n[2]-1,tz+1);z++)for(let y=Math.max(0,ty-1);y<=Math.min(n[1]-1,ty+1);y++)
+        for(let x=Math.max(0,tx-1);x<=Math.min(n[0]-1,tx+1);x++)join[x+n[0]*(y+n[1]*z)]=1;
+    }
+    this.mixedDynamic!.join(join);this.mixedEditJoin={tiles:join};
   }
   /** Static h tiles: the detail plan's admitted tiles (Fine regions, focus).
    * Solid promotion is liquid-conditional, in the census band
@@ -3074,6 +3117,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   applySceneUniforms(scene: SceneDescription): void {
+    // A stroke that moves no solid cell (a paint, a fill over what is already
+    // solid) hands over a document that differs from the running one in its
+    // patch list alone, and nothing here is derived from that list but the
+    // occupancy mask. The mask answers for itself without being written, and
+    // the document is then taken up with the frame, the layout, the boundary
+    // and every cache left exactly as they are. A scene already waiting on the
+    // frame in flight is applied first, so nothing overtakes it here.
+    if (scene !== this.scene && !this.deferredFrameScene && uniformSceneDiffersInSolidsAlone(scene, this.scene)
+      && this.solidMask.adoptIfUnchanged(solidWorldForScene(scene))) {
+      // The layout stays synced to the document it was synced to.
+      if (this.mixedSynced?.scene === this.scene) this.mixedSynced.scene = scene;
+      this.scene = scene;
+      return;
+    }
     this.mixedFrame?.invalidateExtension();
     this.appliedRuntimeValues = undefined;
     if (this.mixedFrameInFlight) { this.deferredFrameScene = scene; return; }
@@ -3088,12 +3145,21 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (dirty) this.device.queue.writeBuffer(this.activeScratch,
       (this.solidVoxelScratchOffsetWords + dirty.firstWord) * 4, this.solidMask.words.buffer as ArrayBuffer,
       dirty.firstWord * 4, dirty.wordCount * 4);
-    this.inflowBoundary = scene.fluid.inflow
-      ? createInflowGridBoundary(scene.fluid.inflow, scene.container, [this.executionInfo.nx, this.executionInfo.ny, this.executionInfo.nz])
-      : undefined;
+    // The plug is a walk over a whole face of the lattice and a function of
+    // the nozzle and the container alone. A voxel edit carries both objects
+    // forward, and then the plug it would rebuild is the one already held.
+    const inflow = scene.fluid.inflow, plug = this.inflowBoundaryOf;
+    if (!plug || plug.inflow !== inflow || plug.container !== scene.container) {
+      this.inflowBoundary = inflow
+        ? createInflowGridBoundary(inflow, scene.container, [this.executionInfo.nx, this.executionInfo.ny, this.executionInfo.nz])
+        : undefined;
+      this.inflowBoundaryOf = { inflow, container: scene.container };
+    }
     this.pressureMultigrid.setDepthSymmetry(scene.container.depthBoundary === "symmetry");
     this.activeRegionRescanPending = true;
   }
+  /** The nozzle and container objects `inflowBoundary` was last built from here. */
+  private inflowBoundaryOf?: { inflow: SceneDescription["fluid"]["inflow"]; container: SceneDescription["container"] };
 
   syncRigidBodies(bodies: readonly RigidBodyState[]): void {
     this.mixedFrame?.invalidateExtension();

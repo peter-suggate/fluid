@@ -27,9 +27,11 @@ import { sceneOverrideClearPlan } from "../scene-overrides";
 import { SCENE_STARTERS } from "../empty-scene";
 import { useShellStore } from "../stores/shell-store";
 import { defaultSession, type PaneId, type PaneSession } from "../session/session";
-import type { EditorHistorySnapshot } from "../stores/history-store";
+import { historySceneCopy, type EditorHistorySnapshot } from "../stores/history-store";
 import type { GPUQuality } from "../gpu-quality";
 import { takesLiveSolidEdits, type MethodParamValue } from "../method-contract";
+import { sameSolidPatchList } from "../solid-patch-list";
+import { solidEditQueue } from "../voxel-editor/solid-edit-queue";
 import { emptyPerformanceReport } from "../stores/diagnostics-store";
 import {
   gpuPhysicsPerformanceActivityFrameId,
@@ -114,6 +116,16 @@ interface PaneRuntime {
   /** Document captured when a direct-manipulation gesture opened. */
   pendingEdit?: { label: string; snapshot: EditorHistorySnapshot };
   acceptLiveSolidEdit?: (next: SceneDescription, base: SceneDescription) => Promise<void>;
+  /**
+   * The newest document the compare mirror handed this pane whose solids it has
+   * still to check. One slot, because the mirror hands over whole documents: a
+   * later one replaces an earlier one rather than following it.
+   */
+  mirroredSolidEdit?: { scene: SceneDescription; presetId: string };
+  /** The mirrored document being checked now; the mirror offering it again is not a second edit. */
+  mirroredSolidEditInFlight?: SceneDescription;
+  /** Ends the wait for a busy pane to come free with a mirrored document owing. */
+  mirroredSolidEditWatch?: () => void;
   /** This pane's report cadence — two panes must not throttle each other. */
   lastPerformanceReportAt_ms: number;
   lastPerformanceReportContext: string;
@@ -198,6 +210,39 @@ export function sharedStepNumerics(
 ): SceneDescription["numerics"] {
   const sharedStep_s = clampSharedStepSize(step_s);
   return { ...numerics, fixedDt_s: sharedStep_s, maxDt_s: sharedStep_s };
+}
+
+/**
+ * The live document each snapshot was copied from.
+ *
+ * A snapshot is a copy, so nothing in it but the patch list can be compared to
+ * a later document by identity. The document it was taken from can: store
+ * documents are replaced and never written, so a field the later document
+ * still holds as the same object has not changed.
+ */
+const snapshotDocuments = new WeakMap<EditorHistorySnapshot, SceneDescription>();
+
+/**
+ * Whether `committed` differs from the document `snapshot` was taken from:
+ * what comparing the canonical text of the two answers, without writing either
+ * out when the edit was to the voxels alone.
+ *
+ * A voxel gesture appends strokes, and a patch list of another length is
+ * another document whatever else it holds. A gesture that wrote nothing leaves
+ * the very document it began on, or one that holds the same object in every
+ * field. Only what neither settles (a field replaced, a patch list rewritten
+ * at the same length) is compared whole.
+ */
+function documentChangedSince(snapshot: EditorHistorySnapshot, committed: SceneDescription): boolean {
+  if (committed.solidVoxels.length !== snapshot.scene.solidVoxels.length) return true;
+  const source = snapshotDocuments.get(snapshot);
+  if (source) {
+    if (committed === source) return false;
+    const fields = Object.keys(committed) as (keyof SceneDescription)[];
+    if (fields.length === Object.keys(source).length
+      && fields.every((field) => Object.hasOwn(source, field) && committed[field] === source[field])) return false;
+  }
+  return canonicalScene(committed) !== canonicalScene(snapshot.scene);
 }
 
 /**
@@ -366,7 +411,12 @@ class SimulationController {
     // that must not drop the roster mid-carry. A pane handed a different realm
     // is a different document and starts with an empty one.
     if (this.paneSessions.get(paneId) !== session) {
-      this.paneRuntimes.set(paneId, createPaneRuntime());
+      // The acceptance seam is the viewport's, not the document's, and the
+      // viewport registers it before its host attaches the realm: an effect
+      // runs in the child first. It is carried over, or the pane could never
+      // check a solid edit again.
+      const acceptLiveSolidEdit = this.paneRuntimes.get(paneId)?.acceptLiveSolidEdit;
+      this.paneRuntimes.set(paneId, { ...createPaneRuntime(), acceptLiveSolidEdit });
       this.paneSessions.set(paneId, session);
       this.refreshSharedPaneStep();
     }
@@ -1116,10 +1166,15 @@ class SimulationController {
 
   // ---- authoring: draft/commit, history ----------------------------------
 
-  /** The live document, cloned so history never aliases store state. */
+  /**
+   * The live document, cloned so history never aliases store state. Its solid
+   * patch list is the exception: it is shared, as every history copy shares it.
+   */
   private documentSnapshot(label: string, paneId: PaneId = PRIMARY_PANE_ID): EditorHistorySnapshot {
     const sceneStore = this.session(paneId).scene.getState();
-    return { label, scene: cloneScene(sceneStore.scene), presetId: sceneStore.presetId };
+    const snapshot = { label, scene: historySceneCopy(sceneStore.scene), presetId: sceneStore.presetId };
+    snapshotDocuments.set(snapshot, sceneStore.scene);
+    return snapshot;
   }
 
   /**
@@ -1168,8 +1223,7 @@ class SimulationController {
     if (patch) sceneStore.patchScene(patch);
     if (!pending) return false;
     const committed = this.session(paneId).scene.getState().scene;
-    const changed = canonicalScene(committed) !== canonicalScene(pending.snapshot.scene);
-    if (!changed) return false;
+    if (!documentChangedSince(pending.snapshot, committed)) return false;
     this.session(paneId).history.getState().record(pending.snapshot);
     if (options.reseed && sceneEditRequiresReset(pending.snapshot.scene, committed, this.session(paneId).method.getState().methodId)) {
       // reset() re-selects the first body; an editor gesture must keep the
@@ -1223,30 +1277,23 @@ class SimulationController {
     if (committed === previous) return false;
     const session = this.session(paneId);
     if (takesLiveSolidEdits(session.method.getState().methodId)
-      && JSON.stringify(previous.solidVoxels) !== JSON.stringify(committed.solidVoxels)
+      && !sameSolidPatchList(previous.solidVoxels, committed.solidVoxels)
       && !sceneEditRequiresReset(previous, committed, session.method.getState().methodId)) {
       // Compare mirroring writes the store first. Restore the accepted document
       // synchronously, before a draw can bypass this pane's own water proof.
       const presetId = session.scene.getState().presetId;
       session.scene.getState().setScene(previous, presetId);
-      const accept = this.runtime(paneId).acceptLiveSolidEdit;
-      if (session.ui.getState().voxelStrokePending || !accept) {
-        session.runtime.getState().setNotice("Mirrored voxel edit needs a ready, idle scene.", "warn");
-        return false;
-      }
-      session.ui.setState({ voxelStrokePending: true });
-      void (async () => {
-        try {
-          await accept(committed, previous);
-          if (session.scene.getState().scene !== previous) throw new Error("Scene changed while accepting the mirrored edit.");
-          session.scene.getState().setScene(committed, presetId);
-          this.adoptRigidBodies(committed, paneId);
-        } catch (error) {
-          session.runtime.getState().setNotice(error instanceof Error ? error.message : "Mirrored voxel edit rejected.", "warn");
-        } finally { session.ui.setState({ voxelStrokePending: false }); }
-      })();
+      // From here the pane owes this document until its solids are checked,
+      // however busy it is now. The newest replaces whatever was still waiting.
+      const paneRuntime = this.runtime(paneId);
+      paneRuntime.mirroredSolidEdit = paneRuntime.mirroredSolidEditInFlight === committed
+        ? undefined : { scene: committed, presetId };
+      this.submitMirroredSolidEdit(paneId);
       return true;
     }
+    // The pane now runs the document it was just handed, which is newer than
+    // anything it still owed.
+    this.runtime(paneId).mirroredSolidEdit = undefined;
     if (sceneEditRequiresReset(previous, committed, this.session(paneId).method.getState().methodId)) {
       // Same care `commitEdit` takes: reset() re-selects the first body, and a
       // mirrored edit must not steal the selection out of the receiving pane.
@@ -1264,12 +1311,57 @@ class SimulationController {
     return true;
   }
 
+  /**
+   * Check the mirrored document a pane owes, once the pane can check it.
+   *
+   * A pane that is mid-stroke, mid-undo or still without a renderer keeps the
+   * document it has accepted and goes on owing the mirrored one. It is checked
+   * the moment the pane comes free: a mirrored edit is never lost to arriving
+   * at a bad time, which is how two panes ended up showing different scenes
+   * behind a notice that had already faded.
+   *
+   * A refusal is different. It is this pane's own water proof speaking, so the
+   * pane stays on the document it accepted and says that it did.
+   */
+  private submitMirroredSolidEdit(paneId: PaneId) {
+    const session = this.session(paneId), paneRuntime = this.runtime(paneId);
+    const owed = paneRuntime.mirroredSolidEdit;
+    const accept = paneRuntime.acceptLiveSolidEdit;
+    // Without a renderer there is nothing to ask; registering one comes back here.
+    if (!owed || !accept) return;
+    if (session.ui.getState().voxelStrokePending) {
+      paneRuntime.mirroredSolidEditWatch ??= session.ui.subscribe((ui) => {
+        if (ui.voxelStrokePending) return;
+        paneRuntime.mirroredSolidEditWatch?.();
+        paneRuntime.mirroredSolidEditWatch = undefined;
+        if (this.paneRuntimes.get(paneId) === paneRuntime) this.submitMirroredSolidEdit(paneId);
+      });
+      return;
+    }
+    paneRuntime.mirroredSolidEdit = undefined;
+    const base = session.scene.getState().scene;
+    if (base === owed.scene) return;
+    paneRuntime.mirroredSolidEditInFlight = owed.scene;
+    // The pane's edit queue holds `voxelStrokePending` up while this is in
+    // flight; its lowering the flag is what submits a document that arrived
+    // meanwhile.
+    void solidEditQueue(session).submit({ base, next: owed.scene, commit: () => {
+      session.scene.getState().setScene(owed.scene, owed.presetId);
+      this.adoptRigidBodies(owed.scene, paneId);
+    } }, accept).catch((error: unknown) => {
+      const reason = error instanceof Error ? error.message : "the edit was rejected.";
+      session.runtime.getState().setNotice(`This pane did not take the mirrored voxel edit: ${reason}`, "warn");
+    }).finally(() => {
+      if (paneRuntime.mirroredSolidEditInFlight === owed.scene) paneRuntime.mirroredSolidEditInFlight = undefined;
+    });
+  }
+
   /** Abandon a gesture without recording it; runtime preview state is kept. */
   cancelEdit(paneId: PaneId = PRIMARY_PANE_ID) { this.runtime(paneId).pendingEdit = undefined; }
 
   private applyHistorySnapshot(entry: EditorHistorySnapshot, verb: string, paneId: PaneId = PRIMARY_PANE_ID) {
     const current = this.session(paneId).scene.getState().scene;
-    const next = cloneScene(entry.scene);
+    const next = historySceneCopy(entry.scene);
     const voxelOnly = sceneEqualExcept(current, next, ["solidVoxels"]);
     // The backdrop is render-only document data (no solver reads it), so an
     // undo that touches only it, the scenery, the lights, or any mix keeps the
@@ -1288,9 +1380,24 @@ class SimulationController {
 
   /** Register the viewport's atomic GPU acceptance seam for history edits. */
   registerLiveSolidEditAcceptance(paneId: PaneId, accept: (next: SceneDescription, base: SceneDescription) => Promise<void>): () => void {
-    const runtime = this.runtime(paneId);
-    runtime.acceptLiveSolidEdit = accept;
-    return () => { if (runtime.acceptLiveSolidEdit === accept) runtime.acceptLiveSolidEdit = undefined; };
+    this.runtime(paneId).acceptLiveSolidEdit = accept;
+    // A document mirrored before the viewport mounted is checked now.
+    this.submitMirroredSolidEdit(paneId);
+    // Looked up again on the way out: attaching a realm replaces the runtime
+    // this was registered on and carries the seam across.
+    return () => {
+      const runtime = this.paneRuntimes.get(paneId);
+      if (runtime?.acceptLiveSolidEdit === accept) runtime.acceptLiveSolidEdit = undefined;
+    };
+  }
+
+  /**
+   * The registered acceptance seam, for a solid edit proposed away from the
+   * canvas (a selection verb): the same preflight a stroke is committed through.
+   * Absent until the viewport has a renderer to ask.
+   */
+  liveSolidEditAcceptance(paneId: PaneId = PRIMARY_PANE_ID): ((next: SceneDescription, base: SceneDescription) => Promise<void>) | undefined {
+    return this.runtime(paneId).acceptLiveSolidEdit;
   }
 
   private moveHistory(direction: "undo" | "redo", paneId: PaneId): boolean {
@@ -1301,27 +1408,30 @@ class SimulationController {
     const entry = stack[stack.length - 1];
     if (!entry) { session.runtime.getState().setNotice(`Nothing to ${direction}`); return false; }
     const current = session.scene.getState().scene;
-    const next = cloneScene(entry.scene);
+    // The store gets its own document back, over the patches the entry holds.
+    const next = historySceneCopy(entry.scene);
     const voxelOnly = sceneEqualExcept(current, next, ["solidVoxels"]);
-    const solidChanged = JSON.stringify(current.solidVoxels) !== JSON.stringify(next.solidVoxels);
+    const solidChanged = !sameSolidPatchList(current.solidVoxels, next.solidVoxels);
     const verb = direction === "undo" ? "Undid" : "Redid";
     this.runtime(paneId).pendingEdit = undefined;
     if (voxelOnly && solidChanged && takesLiveSolidEdits(session.method.getState().methodId)) {
       const accept = this.runtime(paneId).acceptLiveSolidEdit;
       if (!accept) { session.runtime.getState().setNotice("Wait for the scene to be ready before changing voxel history.", "warn"); return false; }
-      session.ui.setState({ voxelStrokePending: true });
+      // The standing document over the patches the entry holds: every other
+      // field is the very object the runtime already has, so what crosses to it
+      // is what the move changes — the patch count an undo goes back to, the
+      // patches a redo appends — and never the document.
+      const target: SceneDescription = { ...current, solidVoxels: entry.scene.solidVoxels };
       session.runtime.getState().setNotice(`Checking ${direction} against the current water…`);
-      void (async () => {
-        try {
-          await accept(next, current);
-          if (session.scene.getState().scene !== current) throw new Error("Scene changed while accepting history.");
-          session.history.getState()[direction](this.documentSnapshot("", paneId));
-          session.scene.getState().setScene(next, entry.presetId);
-          session.runtime.getState().setNotice(entry.label ? `${verb} ${entry.label}` : `${verb} last edit`);
-        } catch (error) {
-          session.runtime.getState().setNotice(error instanceof Error ? error.message : `Could not ${direction} this edit.`, "warn");
-        } finally { session.ui.setState({ voxelStrokePending: false }); }
-      })();
+      // Through the pane's edit queue, which holds `voxelStrokePending` up
+      // meanwhile and writes the move only if the document is still this one.
+      void solidEditQueue(session).submit({ base: current, next: target, commit: () => {
+        session.history.getState()[direction](this.documentSnapshot("", paneId));
+        session.scene.getState().setScene(target, entry.presetId);
+        session.runtime.getState().setNotice(entry.label ? `${verb} ${entry.label}` : `${verb} last edit`);
+      } }, accept).catch((error: unknown) => {
+        session.runtime.getState().setNotice(error instanceof Error ? error.message : `Could not ${direction} this edit.`, "warn");
+      });
       return true;
     }
     session.history.getState()[direction](this.documentSnapshot("", paneId));

@@ -433,18 +433,16 @@ export class WebGpuLiveSvoTetrahedralRadiance {
   }
 
   /**
-   * Stage a plan. `slotOffset` moves with a re-plan, because renumbered slots
-   * change how many of them fall below the radiance floor; the atlas shape does
-   * not, because it was sized for the domain rather than for one plan.
+   * Stage a plan. Its slots at or above `slotOffset` are this atlas's pages, and
+   * the offset is the one the atlas was built with: the plan fixes where its
+   * radiance pool starts, so no edit moves it.
    */
   prepareGpuUpdate(plan: SvoNodeMipPyramidPlan, slotOffset = this.slotOffset): WebGpuLiveSvoTetrahedralRadianceGpuTarget {
     this.assertAlive();
-    if (plan.pages.length > this.options.pageCapacity) throw new RangeError("Live radiance page capacity exceeded");
-    if (!Number.isSafeInteger(slotOffset) || slotOffset < 0
-      || plan.pages.length - slotOffset > this.atlasPageCapacity) {
+    if (plan.slotCapacity > this.options.pageCapacity) throw new RangeError("Live radiance page capacity exceeded");
+    if (slotOffset !== this.slotOffset || plan.slotCapacity - slotOffset > this.atlasPageCapacity) {
       throw new RangeError("Live radiance atlas cannot hold the plan's pages above the radiance floor");
     }
-    this.slotOffset = slotOffset;
     this.pendingPlan = plan;
     return this.gpuTarget();
   }

@@ -1,5 +1,6 @@
 import type { SceneDescription } from "./model";
 import { sceneLatticeDimensions, solidVoxelShellForScene } from "./scene-lattice";
+import { SOLID_PATCH_BOX_KIND, solidPatchKindId } from "./solid-patch/kind";
 import { solidWorldVoxelPatchBounds_m, type SolidWorldVoxelPatch } from "./solid-world";
 import {
   containerDecorationSpace,
@@ -89,6 +90,8 @@ export function buildVesselOutlineGeometry(
       left.every((value, axis) => value === right[axis]);
     const sameFill = (left: SolidWorldVoxelPatch, right: SolidWorldVoxelPatch) =>
       left.operation === "fill"
+        // A round or block fill over a wall's exact box is not the wall.
+        && solidPatchKindId(left) === SOLID_PATCH_BOX_KIND
         && (left.materialId ?? 1) === (right.materialId ?? 1)
         && sameCoordinate(left.minimum, right.minimum)
         && sameCoordinate(left.maximumExclusive, right.maximumExclusive);
@@ -128,6 +131,7 @@ export function buildVesselOutlineGeometry(
     const completeCanonicalShell = expected.every((patch, index) => {
       const authored = scene.solidVoxels[index];
       return authored?.operation === patch.operation
+        && solidPatchKindId(authored) === solidPatchKindId(patch)
         && sameCoordinate(authored.minimum, patch.minimum)
         && sameCoordinate(authored.maximumExclusive, patch.maximumExclusive);
     }) && !scene.solidVoxels.some(({ operation }) => operation === "clear");

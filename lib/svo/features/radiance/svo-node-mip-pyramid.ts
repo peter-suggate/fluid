@@ -208,17 +208,6 @@ export function svoRadianceLevelFloor(options: {
   return Math.max(0, Math.min(levelCount - 1, anchored));
 }
 
-/** Slots a plan hands to levels below the floor; the radiance atlas starts after them. */
-export function svoNodeMipRadianceSlotOffset(plan: SvoNodeMipPyramidPlan, radianceFloorLevel: number): number {
-  // Slots are handed out in level-major order, so every page below the floor
-  // occupies a contiguous prefix and the radiance atlas is the suffix shifted
-  // down by its length. Counting is exact rather than derived from the domain,
-  // because a reserved (non-total) plan holds fewer fine pages than the domain.
-  let offset = 0;
-  for (const page of plan.pages) if (page.key.level < radianceFloorLevel) offset += 1;
-  return offset;
-}
-
 /**
  * Where the *opacity* pyramid stops following the leaf down.
  *
@@ -338,10 +327,27 @@ export interface SvoNodeMipPagePlan {
 
 export interface SvoNodeMipPyramidPlan {
   generation: number;
+  /**
+   * Every resident page as an object. A live plan materialises this on demand
+   * and again after each change, so it is for tools and oracles; anything on a
+   * build or edit path reads the counts and `slotPages` below.
+   */
   pages: readonly SvoNodeMipPagePlan[];
   atlas: SvoNodeMipAtlasShape;
   requestedPageCount: number;
   residentPageCount: number;
+  /** One past the largest slot a page may hold. Slots are not dense in a live plan. */
+  slotCapacity: number;
+  /** Levels with a resident page: `finestLevel` up to `levelCount - 1`. */
+  levelCount: number;
+  finestLevel: number;
+  /** `x, y, z, level` of the page in each slot, `slotCapacity` quads; zero where the slot is free. */
+  slotPages?: Uint32Array<ArrayBuffer>;
+  /**
+   * The page hash a live plan keeps current as pages come and go, exactly as the
+   * device holds it: `capacity` entries of four words. See `svo-node-mip-page-hash.ts`.
+   */
+  pageTable?: { capacity: number; words: Uint32Array<ArrayBuffer> };
   overflowPageCount: number;
   pagePayloadBytes: number;
   /** Physical atlas allocation, including unused slots introduced by its 3D shape. */
@@ -597,6 +603,9 @@ export function* planSvoNodeMipPyramidSteps(
       capacity: atlasPages[0] * atlasPages[1] * atlasPages[2],
     },
     requestedPageCount, residentPageCount,
+    slotCapacity: residentPageCount,
+    levelCount: pages.reduce((count, page) => Math.max(count, page.key.level + 1), 1),
+    finestLevel: pages.reduce((level, page) => Math.min(level, page.key.level), pages.length > 0 ? options.levelCount - 1 : 0),
     overflowPageCount: requestedPageCount - residentPageCount,
     pagePayloadBytes, atlasBytes, directoryBytes,
     allocatedBytes: atlasBytes + directoryBytes,

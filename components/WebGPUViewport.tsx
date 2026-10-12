@@ -67,13 +67,10 @@ import { editorBodyPoses, editorEntityContext, findEntity, sceneActionsAt, surfa
 import { gestureForPress, probeClaimsPress } from "../lib/core/editor-gesture-catalog";
 import {
   projectSolidVoxelClearRegion,
-  solidVoxelClearPreview,
-  solidVoxelWorldBox,
   type PickedSolidVoxel,
   type SolidVoxelClearRegion,
 } from "../lib/core/editor-solid-voxel";
-import { voxelDragAnchor, voxelRegionBox, voxelRegionExtent } from "../lib/core/editor-voxel-region";
-import { solidWorldForScene, type SolidWorld } from "../lib/core/solid-world";
+import { voxelDragAnchor, voxelRegionHighlight, voxelRegionSweepHighlight } from "../lib/core/editor-voxel-region";
 import {
   advanceCarryPlane,
   carryOrientation,
@@ -655,7 +652,6 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // against a pre-drag document. See `editor-voxel-region.ts`.
     | { id: number; action: "solid-voxel-region"; anchor: PickedSolidVoxel;
       region: SolidVoxelClearRegion;
-      baseWorld: SolidWorld;
       downX: number; downY: number; selectOnClick?: EditorSelection }
     // A rubber band on a horizontal plane through the press. `anchor` is the
     // corner the box is grown from, and `regionId` is claimed at the press so
@@ -791,21 +787,20 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     : [];
   /**
    * What the highlight layer holds: the sweep while one is running, and the
-   * standing selection once it has been released.
+   * standing selection once it has been released. A selection that stands
+   * under a sweep is still drawn, quietly, beneath it.
    *
-   * The same shape either way, which is the point — a region is a box over
-   * solids, and a selected one differs from a live one only by whether the
-   * pointer is still down. The standing form deliberately draws the box alone
-   * and not the cells inside it: enumerating them costs a solid-world walk per
-   * render, and the count is already on the flyout that opens beside it.
+   * The standing form is the selection's own shape (`voxelRegionHighlight`): a
+   * box for a box, the outline of its cells for a masked one. A box does not
+   * light the solids inside it: enumerating them costs a solid-world walk per
+   * document, and the count is already on the bar that opens beside it.
+   * Held per document and region, because the camera re-renders this every
+   * frame of an orbit and an outline is a few thousand points.
    */
-  const heldHighlight = voxelSweep
-    ?? (voxelRegion && selection?.kind === "voxel-region"
-      ? {
-        highlight: { kind: "box", box: voxelRegionBox(scene, voxelRegion) } as EditorHighlight,
-        caption: `${voxelRegionExtent(voxelRegion).join(" × ")} VOXELS`,
-      }
-      : null);
+  const standingRegion = voxelRegion && selection?.kind === "voxel-region" ? voxelRegion : undefined;
+  const standingHighlight = useMemo(() => standingRegion ? voxelRegionHighlight(scene, standingRegion) : null,
+    [scene, standingRegion]);
+  const heldHighlight = voxelSweep ?? standingHighlight;
   const hoverProjection = hoverTarget ? projectToViewport(hoverTarget.point_m, camera, viewportSize.width, viewportSize.height) : undefined;
   // The corner every panel about the container hangs off: the rightmost visible
   // top one, which is the corner that keeps a panel off the water it describes
@@ -1751,34 +1746,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     return sample.brickKey;
   };
 
-  /**
-   * Preview one swept box against the immutable pointer-down world.
-   *
-   * The region box comes first in `boxes` because the caption anchors to
-   * `boxes[0]`, and the count belongs to the whole sweep rather than to
-   * whichever cell happened to be listed first.
-   */
-  const previewSolidVoxelRegion = (
-    region: SolidVoxelClearRegion,
-    baseWorld: SolidWorld,
-  ): void => {
-    const committed = session.scene.getState().scene;
-    const preview = solidVoxelClearPreview(committed, region, baseWorld);
-    setVoxelSweep({
-      highlight: {
-        kind: "boxes",
-        boxes: [
-          voxelRegionBox(committed, region),
-          ...preview.coordinates.map((coordinate) => solidVoxelWorldBox(committed, coordinate)),
-        ],
-        truncated: preview.truncated,
-      },
-      // What is *solid* inside the box, not the box's own volume: a sweep
-      // across a wall covers a slab that is mostly air, and the number the
-      // verb will act on is the only honest one to show while aiming.
-      caption: `${preview.affectedCount} SOLID VOXEL${preview.affectedCount === 1 ? "" : "S"}`
-        + (preview.truncated ? " · 512 SHOWN" : ""),
-    });
+  /** Preview one swept region against the committed scene's voxels: the shape and the count `voxelRegionSweepHighlight` gives. */
+  const previewSolidVoxelRegion = (region: SolidVoxelClearRegion): void => {
+    setVoxelSweep(voxelRegionSweepHighlight(session.scene.getState().scene, region));
   };
 
   /**
@@ -1811,7 +1781,6 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       action: "solid-voxel-region",
       anchor,
       region,
-      baseWorld: solidWorldForScene(committed),
       downX: event.clientX,
       downY: event.clientY,
       // Carried from the press rather than re-resolved on release: the scene may
@@ -1819,7 +1788,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // at when the button went down.
       selectOnClick: target.selection,
     };
-    previewSolidVoxelRegion(region, pointerRef.current.baseWorld);
+    previewSolidVoxelRegion(region);
     return true;
   };
 
@@ -2125,12 +2094,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     if (!renderer) throw new Error("Wait for the fluid simulation to be ready.");
     const result = await renderer.editFluid(action.edit);
     if (!result.accepted) throw new Error(result.reason ?? "Fluid edit was rejected.");
-  });
+  }, (patches, base) => rendererRef.current?.previewLiveSolidEdit(patches, base));
 
   const pointerDown = async (event: React.PointerEvent<HTMLCanvasElement>) => {
-    // An armed sculpt tool answers first: it takes the press, or hands it to
-    // the camera — Shift, the middle button, a held Space, or a press on the
-    // empty room — or, with nothing armed, has no opinion at all.
+    // An armed sculpt tool answers first: it takes the press — the secondary
+    // button included, which abandons its stroke and then puts it away — or
+    // hands it to the camera — Shift, the middle button, a held Space, or a
+    // press on the empty room — or, with nothing armed, has no opinion at all.
     const voxelClaim = voxelGesture.down(event);
     if (voxelClaim === true) {
       setHoverTarget(null); publishHoverHighlight(null);
@@ -2441,7 +2411,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         value === active.region.minimum[axis])
         && region.maximumExclusive.every((value, axis) =>
           value === active.region.maximumExclusive[axis]))) return;
-      previewSolidVoxelRegion(region, active.baseWorld);
+      previewSolidVoxelRegion(region);
       pointerRef.current = { ...active, region };
       return;
     }
@@ -2810,6 +2780,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // A sweep is about the region it is making, not about the cell it started
       // on, so it carries its own tone rather than inheriting the anchor's.
       held={heldHighlight ? { ...heldHighlight, tone: voxelSweep?.tone ?? "region" } : undefined}
+      // A tool's ghost does not replace the selection it is working beside.
+      standing={voxelSweep && standingHighlight ? standingHighlight : undefined}
       camera={camera}
       width={viewportSize.width}
       height={viewportSize.height}

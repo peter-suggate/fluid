@@ -5,6 +5,14 @@ import type { SvoGroundPlane } from "../features/materials/svo-terrain-material"
 export interface SparseVoxelDrySceneData {
   /** Monotonic renderer publication, independent of the solver generation. */
   renderRevision: number;
+  /**
+   * Advances when a solid in the scene moved: the solid world, an authored
+   * shape or a voxelized body. A publication carrying the revision already
+   * published changed only what shading reads from tables, and leaves the mesh,
+   * the pick target and cached light visibility standing. Omission is read as
+   * a move, which is every publisher that does not classify its changes.
+   */
+  voxelGeometryRevision?: number;
   /** Packed `SvoPrimitiveRecord` values in dense live-scene publication order. */
   primitiveRecords: Uint32Array<ArrayBuffer>;
   /** Required exact secondary-ray acceleration for the same primitive records. */

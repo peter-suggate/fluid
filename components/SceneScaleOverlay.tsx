@@ -59,8 +59,8 @@ export function SceneScaleOverlay() {
   // while the buttons scale the reservoir — which a seed-authored scene like the
   // twin dams simply does not have, so they disable rather than reshape a body
   // that is not there. Each body's own handles still resize it in the scene.
-  // Scale availability constructs four candidate scenes. Camera/status updates
-  // must neither repeat that work nor run it for an invisible overlay.
+  // The body box and the water volume walk the document's fluid. Camera/status
+  // updates must neither repeat that work nor run it for an invisible overlay.
   const measurements = useMemo(() => shapeMode ? {
     summary: sceneScaleSummary(scene),
     body: fluidBodyBox(scene),

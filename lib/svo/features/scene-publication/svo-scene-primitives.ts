@@ -27,6 +27,7 @@ import {
   type EnvironmentProxyMaterial,
   type EnvironmentProxyPrimitive,
 } from "../../../core/voxel-environments";
+import { environmentCatalogRecolouredFrom } from "./scene-environment-catalog";
 import { ENVIRONMENT_VOXEL_MATERIAL_BASE, type SparseSceneSolidReach } from "../construction/webgpu-svo-sparse-bricks";
 // The arena layout an aggregate's word-13 reference points into. Imported
 // rather than restated because a reference that does not name the region the
@@ -278,14 +279,28 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
   if (!Number.isFinite(coverageCellSize_m) || coverageCellSize_m < 0) {
     throw new RangeError("SVO scene primitive coverage cell size must be finite and non-negative");
   }
-  const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
-    environmentId: catalog.environmentId,
-    coverageCellSize_m,
-    primitives,
-  }));
+  // A catalog is immutable, so the build made from one is the build for it:
+  // asked again, nothing is serialized to find that out.
+  const optionsKey = `${includeShell}|${maximumPrimitives}|${coverageCellSize_m}`;
+  let held = catalogBuilds.get(catalog);
+  if (!held) catalogBuilds.set(catalog, held = new Map());
+  const build = held.get(optionsKey);
+  if (build) return build;
+  const predecessor = environmentCatalogRecolouredFrom(catalog);
+  const base = predecessor && catalogBuilds.get(predecessor)?.get(optionsKey);
+  if (predecessor && base) {
+    const recoloured = recolouredScenePrimitives(base, environmentProxyPrimitives(predecessor, includeShell), primitives,
+      catalog.environmentId, coverageCellSize_m);
+    held.set(optionsKey, recoloured);
+    return recoloured;
+  }
+  const contentRevision = scenePrimitiveContentRevision(catalog.environmentId, coverageCellSize_m, primitives);
   const cacheKey = `svo-scene-primitives-v${SVO_SCENE_PRIMITIVE_VERSION}:${catalog.environmentId}:${contentRevision}`;
   const cached = cachedSvoPublication(scenePrimitiveCache, cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    held.set(optionsKey, cached);
+    return cached;
+  }
 
   const descriptors: SvoPrimitiveDescriptor[] = [];
   const metadata: SvoEnvironmentPrimitiveMetadata[] = [];
@@ -361,7 +376,7 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     : undefined;
 
   const packedRecords = packSvoPrimitiveRecords(descriptors);
-  return internSvoPublication(scenePrimitiveCache, cacheKey, {
+  const interned = internSvoPublication(scenePrimitiveCache, cacheKey, {
     environmentId: catalog.environmentId,
     descriptors,
     packedRecords,
@@ -378,6 +393,77 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     contentRevision,
     cacheKey,
   });
+  held.set(optionsKey, interned);
+  return interned;
+}
+
+/** Builds by the catalog they were made from, then by the options that shaped them. */
+const catalogBuilds = new WeakMap<EnvironmentProxyCatalog, Map<string, SvoScenePrimitiveBuild>>();
+
+function scenePrimitiveContentRevision(
+  environmentId: EnvironmentId,
+  coverageCellSize_m: number,
+  primitives: readonly EnvironmentProxyPrimitive[],
+): string {
+  return hashSvoPublication(new Uint32Array(), JSON.stringify({ environmentId, coverageCellSize_m, primitives }));
+}
+
+/**
+ * The build of a catalog that differs from `base`'s only in materials.
+ *
+ * A record carries a material's slot, never its colour, so the records, the
+ * aggregate and tape blocks and the candidate index are `base`'s own arrays,
+ * and a consumer comparing by identity sees that no geometry moved. Only the
+ * metadata of the recoloured primitives is new; every other entry is shared.
+ * The content hash covers the materials and nothing downstream of a
+ * publication reads it, so it is taken when asked for rather than here.
+ */
+function recolouredScenePrimitives(
+  base: SvoScenePrimitiveBuild,
+  basePrimitives: readonly EnvironmentProxyPrimitive[],
+  primitives: readonly EnvironmentProxyPrimitive[],
+  environmentId: EnvironmentId,
+  coverageCellSize_m: number,
+): SvoScenePrimitiveBuild {
+  if (primitives.length !== basePrimitives.length || primitives.length !== base.metadata.length) {
+    throw new Error("A recoloured environment catalog must hold the primitives of the catalog it came from");
+  }
+  let metadata: SvoEnvironmentPrimitiveMetadata[] | undefined;
+  for (let index = 0; index < primitives.length; index += 1) {
+    const primitive = primitives[index]!;
+    if (primitive === basePrimitives[index]) continue;
+    metadata ??= [...base.metadata];
+    metadata[index] = {
+      ...base.metadata[index]!,
+      material: {
+        colorLinear: [...primitive.material.colorLinear],
+        emission: primitive.material.emission,
+        roughness: primitive.material.roughness,
+      },
+    };
+  }
+  if (!metadata) return base;
+  let contentRevision: string | undefined;
+  const revision = () => contentRevision ??= scenePrimitiveContentRevision(environmentId, coverageCellSize_m, primitives);
+  // Field by field: `base` may be a recoloured build itself, and spreading it
+  // would take the hash it has so far not been asked for.
+  return {
+    environmentId: base.environmentId,
+    descriptors: base.descriptors,
+    packedRecords: base.packedRecords,
+    clusterPackings: base.clusterPackings,
+    clusterBlocks: base.clusterBlocks,
+    fieldPrograms: base.fieldPrograms,
+    fieldProgramBlocks: base.fieldProgramBlocks,
+    primitiveCandidates: base.primitiveCandidates,
+    primitiveIndexByOwnerId: base.primitiveIndexByOwnerId,
+    primitiveIndexByMaterialId: base.primitiveIndexByMaterialId,
+    skipOwnerIds: base.skipOwnerIds,
+    openShellOwnerId: base.openShellOwnerId,
+    metadata,
+    get contentRevision() { return revision(); },
+    get cacheKey() { return `svo-scene-primitives-v${SVO_SCENE_PRIMITIVE_VERSION}:${environmentId}:${revision()}`; },
+  };
 }
 
 /**

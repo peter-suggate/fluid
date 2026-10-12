@@ -27,9 +27,19 @@ import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib
 import type { SceneDescription } from "../lib/core/model";
 import { getScenePreset } from "../lib/core/scenes";
 import { planSparseSceneDomain } from "../lib/core/sparse-scene-domain";
-import { SPARSE_BRICK_GPU_LAYOUT } from "../lib/svo/features/construction/sparse-brick-octree";
-import { planSvoNodeMipPyramid, svoOpacityLevelFloor } from "../lib/svo/features/radiance/svo-node-mip-pyramid";
-import { planSvoNodeMipAddresses, svoNodeMipLevelPageDimensions } from "../lib/svo/features/radiance/svo-node-mip-address-plan";
+import {
+  SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES,
+  SPARSE_BRICK_GPU_LAYOUT,
+  octreeLiveSceneLeafPayloadMode,
+  octreeLiveSceneSceneGeometryFormat,
+  resolveSparseBrickPayloadLayout,
+} from "../lib/svo/features/construction/sparse-brick-octree";
+import { planLiveTopologyLeafReserve } from "../lib/svo/features/construction/svo-live-topology-reserve";
+import { BACKDROP_TERRAIN_HEADER_WORDS } from "../lib/svo/features/backdrop/backdrop-terrain-tiles";
+import { sparseBrickTopologyMutationNodeReserve } from "../lib/core/webgpu-sparse-brick-topology-mutation";
+import { WEBGPU_SOLID_WORLD_DISPLAY_BUDGET_BYTES } from "../lib/core/webgpu-solid-world-pages";
+import { SVO_NODE_MIP_LAYOUT, planSvoNodeMipPyramid, svoOpacityLevelFloor } from "../lib/svo/features/radiance/svo-node-mip-pyramid";
+import { SVO_NODE_MIP_ADDRESS_PLAN, planSvoNodeMipAddresses, svoNodeMipLevelPageDimensions } from "../lib/svo/features/radiance/svo-node-mip-address-plan";
 import { SVO_NODE_MIP_MAXIMUM_LEVELS } from "../lib/svo/features/radiance/svo-node-mip-page-hash";
 import { createWebGpuSvoNodeMipPageTable, webGpuSvoNodeMipMaximumPages } from "../lib/svo/features/radiance/webgpu-svo-node-mip-pyramid";
 import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo/contracts/svo-primitive-abi";
@@ -220,39 +230,78 @@ function sweep(cellSize_m: number, sceneFactory: () => SceneDescription = defaul
   result.leaves = plan.leaves.length;
   result.planVoxels = plan.voxelCount;
 
-  const sceneBrickVolume = domain.brickDimensions.reduce((product, value) => product * value, 1);
-  const mutationCapacity = Math.min(sceneBrickVolume, OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY);
-  const leafCapacity = plan.leaves.length + mutationCapacity;
+  // The node-mip pyramid's shape, which the live reserve is priced with.
+  const basePageDimensions = liveSvoBasePageDimensions(domain.brickDimensions, brickSize);
+  const levelCount = sparseSceneOctreeMaximumDepth(basePageDimensions, []) + 1;
+  result.mipLevelCount = levelCount;
+  const cellEdge_m = Math.max(...dimensions.map((cells, axis) => [scene.container.width_m, scene.container.height_m,
+    scene.container.depth_m][axis] / cells));
+  const opacityFloorLevel = svoOpacityLevelFloor({ levelCount, cellSize_m: cellEdge_m });
+  const levelGrids = svoNodeMipLevelPageDimensions(basePageDimensions, Math.min(levelCount, 32));
+
+  // The display world's live reserve, from the plan it asks itself: the dry
+  // payload it stores a leaf in, and the dual grid's fitted samples unless
+  // FLUID_SVO_CAPACITY_SURFACE=cubes prices the world that draws cubes. This
+  // plan runs no planar classifier, so the only terminals it can count as
+  // splittable are a cube world's coarse terrain leaves.
+  const dualGrid = process.env.FLUID_SVO_CAPACITY_SURFACE !== "cubes";
+  const sceneGeometryFormat = octreeLiveSceneSceneGeometryFormat();
+  const leafPayloadMode = octreeLiveSceneLeafPayloadMode();
+  const payloadLayout = (leaves: number) => resolveSparseBrickPayloadLayout("dry",
+    leaves * brickSize ** 3 + (leafPayloadMode === "dense" ? BACKDROP_TERRAIN_HEADER_WORDS : 0),
+    sceneGeometryFormat, { leafPayloadMode, voxelsPerLeaf: brickSize ** 3,
+      retainDenseLanes: leafPayloadMode === "banded" ? SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES : undefined });
+  const plannedFinestLeaves = plan.leaves.filter((leaf) => plan.nodes[leaf.nodeIndex].level === maximumDepth).length;
+  const reserve = planLiveTopologyLeafReserve({
+    brickDimensions: domain.brickDimensions, maximumDepth,
+    minimumLeaves: Math.min(domain.brickDimensions.reduce((product, value) => product * value, 1),
+      OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY),
+    plannedNodes: plan.nodes.length, plannedLeaves: plan.leaves.length, plannedFinestLeaves,
+    splittableTerminals: !dualGrid && scene.terrain ? plan.leaves.length - plannedFinestLeaves : 0,
+    finestSplittableTerminals: 0,
+    payloadBytes: (leaves) => payloadLayout(leaves).totalBytes,
+    storageLimitBytes: Math.min(M1_MAX_LIMITS.maxBufferSize, M1_MAX_LIMITS.maxStorageBufferBindingSize),
+    candidatesPerBrick: OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
+    dualGridVoxelsPerLeaf: dualGrid ? brickSize ** 3 : 0,
+    maintenanceFixedBytes: WEBGPU_SOLID_WORLD_DISPLAY_BUDGET_BYTES,
+    derived: levelCount <= SVO_NODE_MIP_MAXIMUM_LEVELS ? {
+      levelPages: levelGrids.slice(opacityFloorLevel).map((grid) => grid[0] * grid[1] * grid[2]),
+      occupiedBasePages: Math.ceil(plannedFinestLeaves * brickSize ** 3
+        / SVO_NODE_MIP_LAYOUT.interiorSize ** 3 / 8 ** opacityFloorLevel),
+      bytesPerPage: SVO_NODE_MIP_ADDRESS_PLAN.reservedBytesPerPage,
+    } : undefined,
+  });
+  result.reserveLeaves = reserve.leaves;
+  result.reserveDomainLeaves = reserve.domainLeaves;
+  result.reserveBytesPerLeaf = reserve.bytesPerLeaf;
+  result.reserveDerivedPages = reserve.derivedPages;
+  result.reserveMiB = mib(reserve.bytes);
+  const leafCapacity = plan.leaves.length + reserve.leaves;
+  const nodeCapacity = plan.nodes.length + sparseBrickTopologyMutationNodeReserve(maximumDepth, reserve.leaves);
   const voxelCapacity = leafCapacity * brickSize ** 3;
   result.voxelCapacity = voxelCapacity;
 
   // SparseBrickOctreeGPU's two arenas, exactly as its constructor sizes them.
   const g = SPARSE_BRICK_GPU_LAYOUT;
-  const payloadBytes = voxelCapacity * (2 * g.geometryStrideBytes + g.velocityStrideBytes + 2 * g.materialOwnerStrideBytes);
-  const structureBytes = g.topologyOffsetBytes + plan.nodes.length * g.nodeStrideBytes + leafCapacity * g.leafStrideBytes;
+  const payload = payloadLayout(leafCapacity);
+  const payloadBytes = payload.totalBytes;
+  const structureBytes = g.topologyOffsetBytes + nodeCapacity * g.nodeStrideBytes + leafCapacity * g.leafStrideBytes;
   // The CPU staging buffers OctreeSparseBrickWorld uploads the initial plan through.
   const sourceBytes = plan.voxelCount * (g.geometryStrideBytes + g.velocityStrideBytes + g.materialOwnerStrideBytes);
   // WebGPULiveSvoScene's dense fluid-field textures, allocated for a dry scene too.
   const denseTextureBytes = dimensions[0] * dimensions[1] * dimensions[2] * (4 + 16);
+  const largestLaneBytes = Math.max(...Object.values(payload.lanes).map((lane) => lane.bytes));
   result.payloadMiB = mib(payloadBytes);
   result.structureMiB = mib(structureBytes);
   result.sourceMiB = mib(sourceBytes);
   result.denseTextureMiB = mib(denseTextureBytes);
   result.totalMiB = mib(payloadBytes + structureBytes + sourceBytes + denseTextureBytes);
   result.payloadOverBufferLimit = payloadBytes > M1_MAX_LIMITS.maxBufferSize;
-  result.largestBindingMiB = mib(voxelCapacity * g.geometryStrideBytes);
-  result.bindingOverLimit = voxelCapacity * g.geometryStrideBytes > M1_MAX_LIMITS.maxStorageBufferBindingSize;
+  result.largestBindingMiB = mib(largestLaneBytes);
+  result.bindingOverLimit = largestLaneBytes > M1_MAX_LIMITS.maxStorageBufferBindingSize;
 
-  // The node-mip pyramid, whose withdrawal is silent and costs the whole frame.
-  const basePageDimensions = liveSvoBasePageDimensions(domain.brickDimensions, brickSize);
-  const levelCount = sparseSceneOctreeMaximumDepth(basePageDimensions, []) + 1;
-  result.mipLevelCount = levelCount;
   // What the retired dense direct page table would have cost: one r32uint per
   // page of the domain grid from the opacity floor up, whatever is occupied.
-  const cellEdge_m = Math.max(...dimensions.map((cells, axis) => [scene.container.width_m, scene.container.height_m,
-    scene.container.depth_m][axis] / cells));
-  const opacityFloorLevel = svoOpacityLevelFloor({ levelCount, cellSize_m: cellEdge_m });
-  const levelGrids = svoNodeMipLevelPageDimensions(basePageDimensions, Math.min(levelCount, 32));
   const floorGrid = levelGrids[Math.min(opacityFloorLevel, levelGrids.length - 1)];
   result.denseDirectTableMiB = mib(4 * floorGrid[0] * floorGrid[1]
     * levelGrids.reduce((depth, grid, level) => depth + (level < opacityFloorLevel ? 0 : grid[2]), 0));
@@ -269,6 +318,7 @@ function sweep(cellSize_m: number, sceneFactory: () => SceneDescription = defaul
       levelCount,
       addressCapacity: webGpuSvoNodeMipMaximumPages({ limits: M1_MAX_LIMITS } as never),
       generation: 1,
+      maximumReserveBytes: reserve.derivedPages * SVO_NODE_MIP_ADDRESS_PLAN.reservedBytesPerPage,
       cellSize_m: cellEdge_m,
       opacityFloorLevel,
     });
@@ -389,19 +439,19 @@ function auditRow(recordMultiplier: number, cellSize_m: number) {
   // audit says "fits" about a configuration that cannot be allocated.
   //
   //   * `maxBufferSize` bounds one **allocation**. The octree payload is a
-  //     single buffer holding all five per-voxel lanes end to end, so that is
-  //     the limit it answers to.
+  //     single buffer holding its per-voxel lanes end to end, so that is the
+  //     limit it answers to.
   //   * `maxStorageBufferBindingSize` bounds one **binding**. The lanes inside
-  //     the payload are bound as separate sub-ranges, so the geometry lane —
-  //     the widest of them at 16 B/voxel — is the one that hits this ceiling.
+  //     the payload are bound as separate sub-ranges, so the widest of them is
+  //     the one that hits this ceiling.
   //
   // On this adapter both are 4,294,967,295 B, which is why the distinction
   // costs nothing here and would cost the whole verdict on hardware where they
   // differ (they commonly do; 128 MiB and 256 MiB binding limits are ordinary).
   const allocations = ([
-    { name: "octree payload buffer (56 B/voxel over five lanes)", bytes: Math.round(Number(octree.payloadMiB ?? 0) * 1024 ** 2), limit: "buffer" },
+    { name: "octree payload buffer (the display's dry lanes)", bytes: Math.round(Number(octree.payloadMiB ?? 0) * 1024 ** 2), limit: "buffer" },
     { name: "shared coverage candidate arena", bytes: view.coverageArenaBytes, limit: "binding" },
-    { name: "octree geometry lane (16 B/voxel)", bytes: Math.round(Number(octree.largestBindingMiB ?? 0) * 1024 ** 2), limit: "binding" },
+    { name: "octree payload's widest lane", bytes: Math.round(Number(octree.largestBindingMiB ?? 0) * 1024 ** 2), limit: "binding" },
     { name: "octree CPU staging source", bytes: Math.round(Number(octree.sourceMiB ?? 0) * 1024 ** 2), limit: "buffer" },
     { name: "brick raster instances", bytes: brickRasterBytes, limit: "binding" },
     { name: "primitive candidate arena", bytes: candidateArenaBytes, limit: "binding" },

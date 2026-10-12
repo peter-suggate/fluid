@@ -1,200 +1,382 @@
 import type { EditorRay } from "../editor-entity";
-import { containerShellContains, pickSolidVoxel, solidVoxelWorldBox } from "../editor-solid-voxel";
+import { containerShellContains, solidVoxelWorldBox } from "../editor-solid-voxel";
 import { takesLiveSolidEdits } from "../method-contract";
 import { sceneCellSizes_m } from "../scene-lattice";
+import type { EditorHighlight } from "../editor-target";
+import type { SceneDescription, Vec3 } from "../model";
+import { decodeVoxelBlock, encodeVoxelBlock } from "../solid-patch/block";
+import { SOLID_PATCH_BLOCK_KIND, SOLID_PATCH_CYLINDER_KIND, SOLID_PATCH_ELLIPSOID_KIND,
+  solidPatchKindId } from "../solid-patch/kind";
 import type { SolidWorldCoordinate as Cell, SolidWorldVoxelPatch as Patch } from "../solid-world";
-import type { ToolContext, ToolControl, ToolGesture, ToolUpdate } from "./plugin";
+import { DEFAULT_VOXEL_MATERIAL_ID } from "../voxel-palette";
+import { depthControl, materialControl, operationControl, shellControl, toolMirrorAxes, toolOperation } from "./controls";
+import { toolReader, type ToolContext, type ToolGesture, type ToolUpdate, type VoxelToolPlugin } from "./plugin";
+import { flipBlock } from "./voxel-grid";
 
-export const sizeControl: ToolControl = { id: "size", label: "Width · voxels", short: "W", adjust: "primary", min: 1, max: 64, step: 1, initial: 1 };
-export const depthControl: ToolControl = { id: "depth", label: "Depth · voxels", short: "D", adjust: "secondary", min: 1, max: 128, step: 1, initial: 1 };
-export const shellControl: ToolControl = { id: "shell", kind: "toggle", label: "Edit tank walls", short: "Walls", shortcut: "w", min: 0, max: 1, step: 1, initial: 0 };
-export const mirrorControl: ToolControl = { id: "mirror", kind: "toggle", label: "Mirror X", short: "Mirror", shortcut: "m", min: 0, max: 1, step: 1, initial: 0 };
 /**
  * Limits are checked before accepting an update, never silently truncated.
- * A box is one patch applied a page at a time, so its voxel count is cheap; the
- * bound that matters is the runtime's page capacity, which release preflights.
+ *
+ * A stamped shape is one patch whatever its size — a box, or the ellipsoid or
+ * cylinder inscribed in one — so the two bounds are about different costs. The
+ * patch count bounds the *document*: every stamp of a stroke is a record that
+ * is saved, cloned and replayed by each bake. The voxel count bounds the *bake*:
+ * a patch is composed over the cells of its box, so the work a stroke asks for
+ * is the summed volume of its patches' bounds, overlaps included. The runtime's
+ * page capacity is a third bound, and release preflights it.
  */
 export const MAX_STROKE_VOXELS = 128 ** 3;
 export const MAX_STROKE_PATCHES = 4096;
 /** Outlines drawn for an unreleased stroke; the rest are implied by its bounds. */
 const MAX_PREVIEW_BOXES = 96;
+/** A curved outline is tens of segments where a box is twelve, so fewer are drawn. */
+const MAX_PREVIEW_CURVES = 12;
 export function interpolateCells(a: Cell, b: Cell): Cell[] {
   const steps = Math.max(...a.map((v, i) => Math.abs(v - b[i]!)));
   if (steps > 1024) throw new Error("Stroke span exceeds 1,024 voxels; use shorter strokes.");
   return Array.from({ length: steps + 1 }, (_, i) => a.map((v, axis) =>
     Math.round(v + (b[axis]! - v) * (steps ? i / steps : 0))) as unknown as Cell);
 }
-export function mirrorPatchX(patch: Patch, centreX: number): Patch {
-  return { ...patch,
-    minimum: [centreX - patch.maximumExclusive[0], patch.minimum[1], patch.minimum[2]],
-    maximumExclusive: [centreX - patch.minimum[0], patch.maximumExclusive[1], patch.maximumExclusive[2]] };
+/**
+ * The flipped payloads of the block patches last mirrored. A stamp that
+ * follows the pointer mirrors the same block at every sample, and flipping one
+ * is a decode, a pass over its cells and an encode.
+ */
+const flippedPayloads: { readonly payload: string; readonly axis: number; readonly flipped: string }[] = [];
+function flippedPayload(patch: Patch, axis: 0 | 1 | 2): string {
+  const known = flippedPayloads.find((entry) => entry.axis === axis && entry.payload === patch.payload);
+  if (known) return known.flipped;
+  const size = patch.minimum.map((v, a) => patch.maximumExclusive[a]! - v) as unknown as Cell;
+  const flipped = encodeVoxelBlock(flipBlock(decodeVoxelBlock(patch.payload!, size), axis));
+  if (flippedPayloads.length === 16) flippedPayloads.shift();
+  flippedPayloads.push({ payload: patch.payload!, axis, flipped });
+  return flipped;
+}
+/**
+ * A patch's image in the plane `2 x = centre` across one axis.
+ *
+ * A box, and the ellipsoid or cylinder inscribed in one, are symmetric about
+ * every axis plane, so only their box moves: kind and axis are unchanged by any
+ * reflection. A block's cells are not, so its payload is flipped along the
+ * axis as well.
+ */
+export function mirrorPatch(patch: Patch, axis: 0 | 1 | 2, centre: number): Patch {
+  const minimum = [...patch.minimum], maximumExclusive = [...patch.maximumExclusive];
+  minimum[axis] = centre - patch.maximumExclusive[axis];
+  maximumExclusive[axis] = centre - patch.minimum[axis];
+  return { ...patch, minimum: minimum as unknown as Cell, maximumExclusive: maximumExclusive as unknown as Cell,
+    ...(solidPatchKindId(patch) === SOLID_PATCH_BLOCK_KIND ? { payload: flippedPayload(patch, axis) } : {}) };
+}
+export const mirrorPatchX = (patch: Patch, centreX: number): Patch => mirrorPatch(patch, 0, centreX);
+/** Where each axis' mirror plane stands, as the `centre` of `mirrorPatch`: the container's middle. */
+export function mirrorCentres(scene: SceneDescription): readonly [number, number, number] {
+  const cell = sceneCellSizes_m(scene);
+  return [Math.round(scene.container.width_m / cell[0]), Math.round(scene.container.height_m / cell[1]),
+    Math.round(scene.container.depth_m / cell[2])];
+}
+/**
+ * A proposal and its images under the mirror planes that are on: each patch,
+ * then up to seven reflections of it. A symmetric shape standing across a
+ * plane is its own image there and is not written twice; a block is never
+ * assumed to be, because its cells need not be symmetric though its box is.
+ */
+export function mirroredPatches(context: Pick<ToolContext, "scene" | "values">, patches: readonly Patch[]): Patch[] {
+  const centres = mirrorCentres(context.scene);
+  let images = [...patches];
+  for (const axis of toolMirrorAxes(context.values)) {
+    images = images.flatMap((patch) => {
+      const image = mirrorPatch(patch, axis, centres[axis]);
+      return image.minimum[axis] === patch.minimum[axis] && solidPatchKindId(patch) !== SOLID_PATCH_BLOCK_KIND
+        ? [patch] : [patch, image];
+    });
+  }
+  return images;
+}
+/**
+ * Refuse a proposal past either stroke bound, before it is shown: more patches
+ * than one stroke may record, or more voxels under their boxes than one bake
+ * should be asked to compose.
+ */
+export function assertStrokeCaps(patches: readonly Patch[],
+  message = "Stroke is full; release and start another stroke."): void {
+  let voxels = 0;
+  for (const patch of patches) {
+    voxels += patch.minimum.reduce((volume, v, a) => volume * (patch.maximumExclusive[a]! - v), 1);
+  }
+  if (patches.length > MAX_STROKE_PATCHES || voxels > MAX_STROKE_VOXELS) throw new Error(message);
 }
 export type Shape = "box" | "sphere" | "cylinder";
-export function shapePatches(minimum: Cell, maximumExclusive: Cell, operation: Patch["operation"], shape: Shape, normalAxis: number = 1): Patch[] {
-  const patch = (min: Cell, max: Cell): Patch => ({ operation, minimum: min, maximumExclusive: max,
-    ...(operation === "fill" ? { materialId: 2 } : {}) });
+export interface ShapeOptions {
+  /** The material a fill or a paint writes. Defaults to the palette's default. */
+  readonly materialId?: number;
+  /** Wall thickness in voxels of a hollow shape; absent or 0 is solid. Only an attached shape can be hollow. */
+  readonly hollow?: number;
+}
+/**
+ * One stamped shape as patches: one, or two when it is hollow.
+ *
+ * The box is the patch's bounds and the kind says what stands inside it, so a
+ * sphere costs the same record as a cube. A hollow shape is its outer shape
+ * filled and the same shape, `hollow` voxels smaller on every side, cleared out
+ * of it — in that order, which is why the pair is returned together.
+ */
+export function shapePatches(minimum: Cell, maximumExclusive: Cell, operation: Patch["operation"], shape: Shape,
+  normalAxis: number = 1, options: ShapeOptions = {}): Patch[] {
+  const materialId = options.materialId ?? DEFAULT_VOXEL_MATERIAL_ID;
+  const kind = shape === "sphere" ? { kind: SOLID_PATCH_ELLIPSOID_KIND }
+    : shape === "cylinder" ? { kind: SOLID_PATCH_CYLINDER_KIND, axis: normalAxis as 0 | 1 | 2 } : {};
+  const patch = (min: Cell, max: Cell, apply: Patch["operation"]): Patch => ({ operation: apply, minimum: min,
+    maximumExclusive: max, ...(apply === "clear" ? {} : { materialId }), ...kind });
   const extent = minimum.map((v, axis) => maximumExclusive[axis]! - v);
   if (extent.some((v) => v < 1 || !Number.isSafeInteger(v))
     || extent.reduce((a, b) => a * b, 1) > MAX_STROKE_VOXELS) {
     throw new Error(`Use a smaller region (at most ${MAX_STROKE_VOXELS.toLocaleString()} voxels).`);
   }
-  if (shape === "box") return [patch(minimum, maximumExclusive)];
-  const result: Patch[] = [];
-  const centre = minimum.map((v, axis) => (v + maximumExclusive[axis]!) / 2);
-  for (let z = minimum[2]; z < maximumExclusive[2]; z++) {
-    for (let y = minimum[1]; y < maximumExclusive[1]; y++) {
-      let first: number | undefined;
-      let last = 0;
-      for (let x = minimum[0]; x < maximumExclusive[0]; x++) {
-        const q = [x, y, z].map((v, axis) => (v + 0.5 - centre[axis]!) / (extent[axis]! / 2));
-        if (q.reduce((sum, v, a) => sum + (shape === "cylinder" && a === normalAxis ? 0 : v * v), 0) <= 1) {
-          first ??= x; last = x + 1;
-        }
-      }
-      if (first !== undefined) result.push(patch([first, y, z], [last, y + 1, z + 1]));
-    }
+  if (shape === "cylinder" && normalAxis !== 0 && normalAxis !== 1 && normalAxis !== 2) {
+    throw new Error(`A cylinder needs an axis of 0, 1 or 2, not ${normalAxis}.`);
   }
-  return result;
+  const outer = patch(minimum, maximumExclusive, operation);
+  const wall = options.hollow ?? 0;
+  if (wall === 0) return [outer];
+  if (operation !== "fill") throw new Error("Only an attached shape can be hollow.");
+  if (!Number.isSafeInteger(wall) || wall < 0) throw new Error(`A hollow shape needs a whole wall thickness, not ${wall}.`);
+  // Walls that meet leave nothing to clear: the shape is solid.
+  if (extent.some((v) => v <= 2 * wall)) return [outer];
+  return [outer, patch(minimum.map((v) => v + wall) as unknown as Cell,
+    maximumExclusive.map((v) => v - wall) as unknown as Cell, "clear")];
 }
 
-/** A stable face plane prevents the current stroke from chasing its own surface. */
-export function beginShapeGesture(context: ToolContext, authored: Patch["operation"],
-  mode: "brush" | "box" | "stamp" | "line", shape: Shape = "box"): ToolGesture | undefined {
-  const { scene, values, ray } = context;
-  const operation: Patch["operation"] = context.invert ? (authored === "fill" ? "clear" : "fill") : authored;
-  const cell = sceneCellSizes_m(scene);
-  const origin = [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2];
-  const hit = pickSolidVoxel(scene, ray, undefined, {
-    rejectBudgetExhaustion: true,
-    skip: (coordinate) => values.shell !== 1 && coordinate[1] >= 0
-      && containerShellContains(scene, coordinate),
-  });
-  const axis = hit?.faceAxis ?? 1;
-  const sign = hit?.faceSign ?? 1;
-  // With nothing under the press the stroke stands on the ground plane.
-  const plane = hit ? origin[axis]! + (hit.coordinate[axis] + (sign > 0 ? 1 : 0)) * cell[axis]! : 0;
-  const project = (input: EditorRay): Cell | undefined => {
-    const o = [input.origin.x, input.origin.y, input.origin.z];
-    const d = [input.direction.x, input.direction.y, input.direction.z];
-    if (Math.abs(d[axis]!) < 1e-8) return undefined;
-    const t = (plane - o[axis]!) / d[axis]!;
-    if (!(t > 0)) return undefined;
-    const q = o.map((v, a) => Math.floor((v + t * d[a]! - origin[a]!) / cell[a]!));
-    q[axis] = hit ? hit.coordinate[axis] + (operation === "fill" ? sign : 0) : 0;
-    return q.every((v) => Number.isSafeInteger(v) && Math.abs(v) < 1_000_000) ? q as unknown as Cell : undefined;
-  };
-  const start = project(ray);
-  if (!start) return undefined;
-  let last = start;
-  const accumulated = new Map<string, Patch>();
-  const size = values.size ?? 1;
-  const depth = values.depth ?? size;
-  const mirrorCentre = Math.round(scene.container.width_m / cell[0]);
-  const stamp = (at: Cell) => {
-    const min = at.map((v, a) => a === axis ? v - (sign < 0 ? depth - 1 : 0) : v - Math.floor((size - 1) / 2));
-    const max = min.map((v, a) => v + (a === axis ? depth : size));
-    // Erasing extends INTO the picked face, adding extends OUT from it.
-    if (operation === "clear" && hit) {
-      min[axis] = at[axis] - (sign > 0 ? depth - 1 : 0);
-      max[axis] = min[axis]! + depth;
-    }
-    return shapePatches(min as unknown as Cell, max as unknown as Cell, operation, shape, axis);
-  };
-  return { surface: hit !== undefined, update(input): ToolUpdate | undefined {
-    const end = project(input);
-    if (!end) return undefined;
-    let patches: Patch[];
-    if (mode === "box") {
-      const base = stamp(start)[0]!;
-      const endBox = stamp(end)[0]!;
-      patches = shapePatches(base.minimum.map((v, a) => Math.min(v, endBox.minimum[a]!)) as unknown as Cell,
-        base.maximumExclusive.map((v, a) => Math.max(v, endBox.maximumExclusive[a]!)) as unknown as Cell,
-        operation, shape, axis);
-    } else if (mode === "stamp") patches = stamp(end);
-    else {
-      const next = new Map(mode === "brush" ? accumulated : []);
-      for (const at of interpolateCells(mode === "brush" ? last : start, end)) {
-        for (const p of stamp(at)) next.set(JSON.stringify(p), p);
-      }
-      patches = [...next.values()];
-    }
-    if (values.mirror) patches = patches.flatMap((p) => [p, mirrorPatchX(p, mirrorCentre)]);
-    patches = [...new Map(patches.map((p) => [JSON.stringify(p), p])).values()];
-    const work = patches.reduce((sum, p) => sum + p.minimum.reduce((n, v, a) => n * (p.maximumExclusive[a]! - v), 1), 0);
-    if (patches.length > MAX_STROKE_PATCHES || work > MAX_STROKE_VOXELS) throw new Error("Stroke is full; release and start another stroke.");
-    if (mode === "brush") {
-      accumulated.clear();
-      // Retain the accepted stroke; mirrored stamps are deduplicated above.
-      for (const p of patches) accumulated.set(JSON.stringify(p), p);
-    }
-    last = end;
-    const minimum = [0, 1, 2].map((a) => Math.min(...patches.map((p) => p.minimum[a]!))) as unknown as Cell;
-    const maximum = [0, 1, 2].map((a) => Math.max(...patches.map((p) => p.maximumExclusive[a]!)) - 1) as unknown as Cell;
-    const worldBox = (lo: Cell, hi: Cell) => ({ min: solidVoxelWorldBox(scene, lo).min, max: solidVoxelWorldBox(scene, hi).max });
-    const bounds = worldBox(minimum, maximum);
-    // Nothing is voxelized until release, so the outline is the whole preview:
-    // the stroke's bounds first (it anchors the caption), then its newest pieces.
-    const members = patches.slice(-MAX_PREVIEW_BOXES).map((p) =>
-      worldBox(p.minimum, p.maximumExclusive.map((v) => v - 1) as unknown as Cell));
-    return { patches, highlight: patches.length === 1 ? { kind: "box", box: bounds }
-      : { kind: "boxes", boxes: [bounds, ...members], truncated: patches.length > MAX_PREVIEW_BOXES },
-      caption: `${operation === "fill" ? "BUILD" : "CARVE"} · ${minimum.map((v, a) => maximum[a]! - v + 1).join(" × ")}` };
-  } };
-}
-
+const worldBox = (scene: SceneDescription, patch: Pick<Patch, "minimum" | "maximumExclusive">) => ({
+  min: solidVoxelWorldBox(scene, patch.minimum).min,
+  max: solidVoxelWorldBox(scene, patch.maximumExclusive.map((v) => v - 1) as unknown as Cell).max,
+});
 /**
- * Push/pull: drag a footprint across a face, let go, then move the bare pointer
- * along the face normal — outward builds, inward carves — and click to commit.
- *
- * Depth is the one dimension a single drag on a plane cannot express, which is
- * why every other tool here takes it as a typed number. Splitting the gesture
- * at the release gives it a drag of its own. The extrusion is measured where
- * the pointer ray passes closest to the normal through the footprint's centre,
- * so it follows the cursor from any view except straight down that normal.
+ * A curved patch as wire loops: the ellipsoid's three great ellipses, or the
+ * cylinder's two rims and four of its rulings. Sampled from the same inscribed
+ * shape the bake evaluates, so the ghost is the solid that release will write.
  */
-export function beginPushPullGesture(context: ToolContext): ToolGesture | undefined {
-  const { scene, values, ray } = context;
-  const cell = sceneCellSizes_m(scene);
-  const origin = [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2];
-  const hit = pickSolidVoxel(scene, ray, undefined, {
-    rejectBudgetExhaustion: true,
-    skip: (coordinate) => values.shell !== 1 && coordinate[1] >= 0
-      && containerShellContains(scene, coordinate),
+function curveOutline(scene: SceneDescription, patch: Patch): Vec3[][] {
+  const box = worldBox(scene, patch);
+  const lo = [box.min.x, box.min.y, box.min.z], hi = [box.max.x, box.max.y, box.max.z];
+  const centre = lo.map((v, a) => (v + hi[a]!) / 2), radius = lo.map((v, a) => (hi[a]! - v) / 2);
+  const point = (q: readonly number[]): Vec3 => ({ x: q[0]!, y: q[1]!, z: q[2]! });
+  /** The ellipse in the plane normal to `normal`, at `offset` along it from the centre. */
+  const loop = (normal: number, offset: number): Vec3[] => Array.from({ length: 33 }, (_, i) => {
+    const angle = 2 * Math.PI * i / 32, u = (normal + 1) % 3, v = (normal + 2) % 3;
+    const q = [...centre];
+    q[normal] = centre[normal]! + offset;
+    q[u] = centre[u]! + radius[u]! * Math.cos(angle);
+    q[v] = centre[v]! + radius[v]! * Math.sin(angle);
+    return point(q);
   });
-  const axis = hit?.faceAxis ?? 1;
-  const sign = hit?.faceSign ?? 1;
-  // The layer of cells the face belongs to; empty space stands on the ground plane.
-  const surface = hit ? hit.coordinate[axis] : -1;
-  const plane = origin[axis]! + (surface + (sign > 0 ? 1 : 0)) * cell[axis]!;
-  const project = (input: EditorRay): number[] | undefined => {
-    const o = [input.origin.x, input.origin.y, input.origin.z];
-    const d = [input.direction.x, input.direction.y, input.direction.z];
-    if (Math.abs(d[axis]!) < 1e-8) return undefined;
-    const t = (plane - o[axis]!) / d[axis]!;
-    if (!(t > 0)) return undefined;
-    const q = o.map((v, a) => Math.floor((v + t * d[a]! - origin[a]!) / cell[a]!));
-    return q.every((v) => Number.isSafeInteger(v) && Math.abs(v) < 1_000_000) ? q : undefined;
+  if (solidPatchKindId(patch) === SOLID_PATCH_ELLIPSOID_KIND) return [loop(0, 0), loop(1, 0), loop(2, 0)];
+  const axis = patch.axis ?? 1, u = (axis + 1) % 3, v = (axis + 2) % 3;
+  const rulings = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([su, sv]) => [-1, 1].map((end) => {
+    const q = [...centre];
+    q[axis] = centre[axis]! + end * radius[axis]!;
+    q[u] = centre[u]! + su! * radius[u]!;
+    q[v] = centre[v]! + sv! * radius[v]!;
+    return point(q);
+  }));
+  return [loop(axis, -radius[axis]!), loop(axis, radius[axis]!), ...rulings];
+}
+/**
+ * What an unreleased stroke draws. Nothing is voxelized until release, so the
+ * outline is the whole preview: the stroke's bounds first (it anchors the
+ * caption), then its newest pieces — boxes as boxes, and a curved piece as the
+ * curve it is, because its bounding box would promise a cube.
+ */
+export function strokeHighlight(scene: SceneDescription, patches: readonly Patch[]): EditorHighlight {
+  const bounds = worldBox(scene, {
+    minimum: [0, 1, 2].map((a) => Math.min(...patches.map((p) => p.minimum[a]!))) as unknown as Cell,
+    maximumExclusive: [0, 1, 2].map((a) => Math.max(...patches.map((p) => p.maximumExclusive[a]!))) as unknown as Cell,
+  });
+  const curved = (patch: Patch) => {
+    const kind = solidPatchKindId(patch);
+    return kind === SOLID_PATCH_ELLIPSOID_KIND || kind === SOLID_PATCH_CYLINDER_KIND;
   };
-  const start = project(ray);
-  if (!start) return undefined;
-  let lo = start, hi = start, extruding = false, depth = 0;
-  const mirrorCentre = Math.round(scene.container.width_m / cell[0]);
-  const limit = depthControl.max;
-  const measure = (input: EditorRay): number | undefined => {
-    const centre = [0, 1, 2].map((a) => a === axis ? plane : origin[a]! + (lo[a]! + hi[a]! + 1) / 2 * cell[a]!);
-    const o = [input.origin.x, input.origin.y, input.origin.z];
-    const d = [input.direction.x, input.direction.y, input.direction.z];
-    const w = centre.map((v, a) => v - o[a]!);
-    const dd = d.reduce((sum, v) => sum + v * v, 0), dn = d[axis]! * sign;
-    const denominator = dd - dn * dn;
-    // Looking straight down the normal, the pointer says nothing about depth.
-    if (!(denominator > 1e-6 * dd)) return undefined;
-    const dw = d.reduce((sum, v, a) => sum + v * w[a]!, 0), nw = w[axis]! * sign;
-    const along_m = (dn * dw - dd * nw) / denominator;
-    return Math.max(-limit, Math.min(limit, Math.round(along_m / cell[axis]!)));
-  };
+  if (!patches.some(curved)) {
+    return patches.length === 1 ? { kind: "box", box: bounds }
+      : { kind: "boxes", boxes: [bounds, ...patches.slice(-MAX_PREVIEW_BOXES).map((p) => worldBox(scene, p))],
+        truncated: patches.length > MAX_PREVIEW_BOXES };
+  }
+  const corner = (box: { min: Vec3; max: Vec3 }, i: number): Vec3 =>
+    ({ x: i & 1 ? box.max.x : box.min.x, y: i & 2 ? box.max.y : box.min.y, z: i & 4 ? box.max.z : box.min.z });
+  // A box among curves is drawn as its edges, since one highlight is one kind.
+  const boxEdges = (box: { min: Vec3; max: Vec3 }): Vec3[][] => [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3],
+    [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]].map(([a, b]) => [corner(box, a!), corner(box, b!)]);
+  // The corner a box highlight hangs its caption on, so the caption does not jump between kinds.
+  return { kind: "paths", anchor_m: { x: bounds.min.x, y: bounds.max.y, z: bounds.max.z },
+    paths: patches.slice(-MAX_PREVIEW_CURVES).flatMap((p) => curved(p) ? curveOutline(scene, p) : boxEdges(worldBox(scene, p))) };
+}
+
+/** A face a stroke can stand on: a solid cell, and which of its six sides the ray met. */
+export interface ToolSurface {
+  /** The solid cell — or, where nothing was under the ray, the cell under the ground plane there. */
+  readonly coordinate: Cell;
+  readonly faceAxis: 0 | 1 | 2;
+  readonly faceSign: -1 | 1;
+  /** False when the ray met nothing and the surface is the ground plane. */
+  readonly picked: boolean;
+}
+const worldOrigin = (scene: SceneDescription): readonly [number, number, number] =>
+  [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2];
+/**
+ * Where a ray meets the plane of a surface's face, in cells and fractions of
+ * one. Undefined when the ray runs along the plane or away from it.
+ */
+export function facePoint(scene: SceneDescription, surface: Pick<ToolSurface, "coordinate" | "faceAxis" | "faceSign">,
+  ray: EditorRay): number[] | undefined {
+  const cell = sceneCellSizes_m(scene), origin = worldOrigin(scene), axis = surface.faceAxis;
+  const plane = surface.coordinate[axis] + (surface.faceSign > 0 ? 1 : 0);
+  const o = [ray.origin.x, ray.origin.y, ray.origin.z];
+  const d = [ray.direction.x, ray.direction.y, ray.direction.z];
+  if (Math.abs(d[axis]!) < 1e-8) return undefined;
+  const t = (origin[axis] + plane * cell[axis] - o[axis]!) / d[axis]!;
+  if (!(t > 0)) return undefined;
+  const q = o.map((v, a) => (v + t * d[a]! - origin[a]!) / cell[a]!);
+  q[axis] = plane;
+  return q.every((v) => Number.isFinite(v) && Math.abs(v) < 1_000_000) ? q : undefined;
+}
+/** The cell of a surface's own layer under that point. */
+export function faceCell(scene: SceneDescription, surface: Pick<ToolSurface, "coordinate" | "faceAxis" | "faceSign">,
+  ray: EditorRay): Cell | undefined {
+  const point = facePoint(scene, surface, ray);
+  return point && point.map((v, a) => a === surface.faceAxis ? surface.coordinate[a]! : Math.floor(v)) as unknown as Cell;
+}
+/**
+ * Whether a tool's ray passes through a cell as if it were not there: the
+ * tank's own walls, unless the shared walls switch is on.
+ *
+ * A surface reached that way may stand flush against the wall it was reached
+ * through, so whoever asks what is in front of it has to ask with this too.
+ */
+export function toolPassesThrough(context: Pick<ToolContext, "scene" | "values">, coordinate: Cell): boolean {
+  return context.values[shellControl.id] !== 1 && coordinate[1] >= 0
+    && containerShellContains(context.scene, coordinate);
+}
+/**
+ * What a ray lands on: the first solid cell along it, read from the scene the
+ * gesture began on — so a stroke never chases the surface it is itself
+ * proposing — and, where it meets nothing, the ground plane.
+ *
+ * The tank's own walls are passed through unless the shared walls switch is
+ * on; the floor is always a surface. `press` is the sample a gesture begins
+ * on: a ray too long to walk is refused there, and merely lands on nothing at
+ * a later sample, which a drag that swings past the horizon produces freely.
+ */
+export function toolSurface(context: Pick<ToolContext, "scene" | "values">, ray: EditorRay,
+  press = true): ToolSurface | undefined {
+  const { scene } = context;
+  const hit = toolReader(context).pick(ray, {
+    rejectBudgetExhaustion: press,
+    skip: (coordinate) => toolPassesThrough(context, coordinate),
+  });
+  if (hit) return { coordinate: hit.coordinate, faceAxis: hit.faceAxis, faceSign: hit.faceSign, picked: true };
+  const ground = { coordinate: [0, -1, 0], faceAxis: 1, faceSign: 1 } as const;
+  const coordinate = faceCell(scene, ground, ray);
+  return coordinate && { ...ground, coordinate, picked: false };
+}
+/**
+ * What the "do the opposite" modifier samples while the hand paints: the
+ * palette material of the voxel under the pointer, and the ghost that says so.
+ *
+ * Undefined when the tool is not painting, lists no material to set, or the
+ * pointer is on nothing the palette holds — the press is then the tool's own.
+ */
+export function sampledMaterial(plugin: VoxelToolPlugin, context: Pick<ToolContext, "scene" | "values">, ray: EditorRay):
+  { readonly materialId: number; readonly preview: ToolUpdate } | undefined {
+  const { controls } = plugin.ui;
+  if (!controls.includes(materialControl) || !controls.includes(operationControl)
+    || toolOperation(context.values) !== "paint") return undefined;
+  const surface = toolSurface(context, ray, false);
+  if (!surface?.picked) return undefined;
+  const materialId = toolReader(context).material(surface.coordinate);
+  const entry = materialControl.options.find((option) => option.value === materialId);
+  if (!entry) return undefined;
+  const cell = { minimum: surface.coordinate, maximumExclusive: surface.coordinate.map((v) => v + 1) as unknown as Cell };
+  return { materialId, preview: { patches: [], tone: "prop", highlight: boxHighlight(context.scene, cell),
+    caption: `PICK MATERIAL · ${entry.label.toUpperCase()}` } };
+}
+/**
+ * How far along a surface's outward normal a ray points, in whole layers:
+ * measured where the ray passes closest to the normal through `through`, a
+ * point of the face as `facePoint` gives it. Positive is out of the solid.
+ * Undefined looking straight down the normal, where the pointer says nothing
+ * about depth.
+ *
+ * `through` is where the hand last touched the face, not the middle of what it
+ * drew there: the ray that put it there then measures exactly zero, so a click
+ * that does not move is a depth of nothing from any angle.
+ */
+export function normalTravel(scene: SceneDescription, surface: Pick<ToolSurface, "coordinate" | "faceAxis" | "faceSign">,
+  through: readonly number[], ray: EditorRay, limit: number): number | undefined {
+  const cell = sceneCellSizes_m(scene), origin = worldOrigin(scene), axis = surface.faceAxis, sign = surface.faceSign;
+  const plane = origin[axis] + (surface.coordinate[axis] + (sign > 0 ? 1 : 0)) * cell[axis];
+  const centre = [0, 1, 2].map((a) => a === axis ? plane : origin[a]! + through[a]! * cell[a]!);
+  const o = [ray.origin.x, ray.origin.y, ray.origin.z];
+  const d = [ray.direction.x, ray.direction.y, ray.direction.z];
+  const w = centre.map((v, a) => v - o[a]!);
+  const dd = d.reduce((sum, v) => sum + v * v, 0), dn = d[axis]! * sign;
+  const denominator = dd - dn * dn;
+  if (!(denominator > 1e-6 * dd)) return undefined;
+  const dw = d.reduce((sum, v, a) => sum + v * w[a]!, 0), nw = w[axis]! * sign;
+  const along_m = (dn * dw - dd * nw) / denominator;
+  return Math.max(-limit, Math.min(limit, Math.round(along_m / cell[axis])));
+}
+/**
+ * The box `layers` deep that stands on a face over a tangential span of cells
+ * (`lo` and `hi` inclusive): out from the solid, or back into it starting at
+ * the face's own layer.
+ */
+export function faceBox(surface: Pick<ToolSurface, "coordinate" | "faceAxis" | "faceSign">, lo: readonly number[],
+  hi: readonly number[], layers: number, outward: boolean): { readonly minimum: Cell; readonly maximumExclusive: Cell } {
+  const axis = surface.faceAxis, sign = surface.faceSign, layer = surface.coordinate[axis];
+  // Outward layers start beyond the face; inward layers start at it.
+  const from = outward ? layer + sign : layer;
+  const near = outward === sign > 0 ? from : from - (layers - 1);
+  return { minimum: lo.map((v, a) => a === axis ? near : v) as unknown as Cell,
+    maximumExclusive: hi.map((v, a) => a === axis ? near + layers : v + 1) as unknown as Cell };
+}
+/** A patch list's bounds as the " × "-joined size a caption states. */
+export function patchesSize(patches: readonly Pick<Patch, "minimum" | "maximumExclusive">[]): string {
+  return [0, 1, 2].map((a) => Math.max(...patches.map((p) => p.maximumExclusive[a]!))
+    - Math.min(...patches.map((p) => p.minimum[a]!))).join(" × ");
+}
+
+/** A drag's footprint on a face and how far it has since been pulled or pushed. */
+export interface Footprint {
+  readonly surface: ToolSurface;
+  /** The dragged span of the face's layer, inclusive at both corners. */
+  readonly lo: readonly number[];
+  readonly hi: readonly number[];
+  /** Layers along the outward normal: positive pulled out, negative pushed in, 0 at the face. */
+  readonly depth: number;
+  /** False while the footprint is still being dragged. */
+  readonly extruding: boolean;
+}
+/**
+ * The two-phase gesture: drag a footprint across a face, let go, then move the
+ * bare pointer along the face normal and click to commit.
+ *
+ * Depth is the one dimension a single drag on a plane cannot express. Splitting
+ * the gesture at the release gives it a drag of its own: it is measured along
+ * the normal through the point of the face where the drag let go, so it starts
+ * at nothing and follows the cursor from any view except straight down that
+ * normal.
+ *
+ * What a footprint and a depth *mean* — a box built or cut, a box selected —
+ * is the caller's `propose`; this owns only the hand.
+ */
+export function beginFootprintGesture(context: ToolContext,
+  propose: (footprint: Footprint) => ToolUpdate): ToolGesture | undefined {
+  const { scene, ray } = context;
+  const surface = toolSurface(context, ray);
+  const start = surface && faceCell(scene, surface, ray);
+  let released = surface && facePoint(scene, surface, ray);
+  if (!surface || !start || !released) return undefined;
+  let lo: readonly number[] = start, hi: readonly number[] = start, extruding = false, depth = 0;
   return {
-    surface: hit !== undefined,
+    surface: surface.picked,
     advance() {
       if (extruding) return false;
       extruding = true;
@@ -202,28 +384,18 @@ export function beginPushPullGesture(context: ToolContext): ToolGesture | undefi
     },
     update(input): ToolUpdate | undefined {
       if (!extruding) {
-        const end = project(input);
+        const end = faceCell(scene, surface, input);
         if (!end) return undefined;
+        released = facePoint(scene, surface, input)!;
         lo = start.map((v, a) => Math.min(v, end[a]!)); hi = start.map((v, a) => Math.max(v, end[a]!));
-      } else depth = measure(input) ?? depth;
-      const build = depth >= 0;
-      const layers = Math.max(1, Math.abs(depth));
-      // Outward layers start beyond the face; inward layers start at it.
-      const from = build ? surface + sign : surface;
-      const near = build === sign > 0 ? from : from - (layers - 1);
-      const minimum = lo.map((v, a) => a === axis ? near : v) as unknown as Cell;
-      const maximumExclusive = hi.map((v, a) => a === axis ? near + layers : v + 1) as unknown as Cell;
-      let patches = extruding && depth === 0 ? []
-        : shapePatches(minimum, maximumExclusive, build ? "fill" : "clear", "box", axis);
-      if (values.mirror) patches = patches.flatMap((p) => [p, mirrorPatchX(p, mirrorCentre)]);
-      const last = maximumExclusive.map((v) => v - 1) as unknown as Cell;
-      const size = minimum.map((v, a) => a === axis ? (extruding ? Math.abs(depth) : 0) : maximumExclusive[a]! - v);
-      return { patches: extruding ? patches : [], tone: build ? undefined : "region",
-        highlight: { kind: "box", box: { min: solidVoxelWorldBox(scene, minimum).min, max: solidVoxelWorldBox(scene, last).max } },
-        caption: !extruding ? `FOOTPRINT · ${size.filter((_, a) => a !== axis).join(" × ")} · release, then pull or push`
-          : `${depth === 0 ? "PULL OR PUSH" : build ? "PULL" : "PUSH"} · ${size.join(" × ")} · click to commit` };
+      } else depth = normalTravel(scene, surface, released!, input, depthControl.max) ?? depth;
+      return propose({ surface, lo, hi, depth, extruding });
     },
   };
+}
+/** The outline of one box of cells. */
+export function boxHighlight(scene: SceneDescription, box: Pick<Patch, "minimum" | "maximumExclusive">): EditorHighlight {
+  return { kind: "box", box: worldBox(scene, box) };
 }
 
 /** The declaration is shared by this family, but each plugin owns its availability. */

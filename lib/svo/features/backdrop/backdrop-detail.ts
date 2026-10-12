@@ -33,16 +33,20 @@
  * No DOM or GPU imports.
  */
 import { BACKDROP_SHRUB_REACH, BACKDROP_SHRUB_RISE, backdropShrubWGSL } from "./backdrop-shrub";
+import { createContentMemo } from "../../../core/content-memo";
 import {
+  backdropFieldContentKey,
   backdropFieldHeight,
   backdropHash,
   backdropHeightBounds,
+  backdropHeightBoundsInto,
+  createBackdropGridSampler,
   type BackdropField,
 } from "./backdrop-field";
 import {
   BACKDROP_TERRAIN_TABLE,
   backdropTerrainWGSL,
-  type BackdropTilePlan,
+  type BackdropTileLayout,
 } from "./backdrop-terrain-tiles";
 
 /**
@@ -94,7 +98,7 @@ export interface BackdropDetail {
   seed: number;
 }
 
-export function backdropDetailFromPlan(field: BackdropField, plan: BackdropTilePlan, rings: number, refinedRings = 0): BackdropDetail {
+export function backdropDetailFromPlan(field: BackdropField, plan: BackdropTileLayout, rings: number, refinedRings = 0): BackdropDetail {
   if (!Number.isInteger(rings) || rings < 1) throw new RangeError("Backdrop detail needs at least one ring");
   if (!Number.isInteger(refinedRings) || refinedRings < 0 || refinedRings > rings) {
     throw new RangeError(`Backdrop refined rings must be an integer from 0 to ${rings}`);
@@ -264,6 +268,23 @@ export interface BackdropDetailCensus {
   classified: number;
 }
 
+/** Bricks per axis of one block of leaf-level column spans. */
+const SPAN_BLOCK_BRICKS = 16;
+/** Blocks per axis a span key can name: brick coordinates below 2^17. */
+const SPAN_BLOCK_KEY_STRIDE = 2 ** 13;
+/**
+ * A column top within this fraction of a cell of a rounding boundary is
+ * evaluated directly, so the grid sampler's rounding never moves a top.
+ */
+const COLUMN_TOP_ROUNDING_GUARD = 1e-6;
+
+/**
+ * Span blocks per level, kept by the content they were derived from (the
+ * field, the rings, the tree's origin and edges): a rebuild that moved none of
+ * them classifies from the spans it already has.
+ */
+const spanBlocks = createContentMemo<Map<number, Float64Array>[]>(2);
+
 /** The planner's supplemental classifier, plus a running census of what it admitted. */
 export function createBackdropDetailClassifier(options: BackdropDetailClassifierOptions) {
   const { field, detail, worldOrigin_m, nodeEdge_m, solverLevel } = options;
@@ -281,24 +302,111 @@ export function createBackdropDetailClassifier(options: BackdropDetailClassifier
   if (detail.refinedRings > 0 && nodeEdge_m[solverLevel + 1] === undefined) {
     throw new RangeError("Refined backdrop rings need a level below the scene cell; the tree has none");
   }
-  const spans = new Map<string, readonly [number, number]>();
-  const columnSpan = (minX: number, maxX: number, minZ: number, maxZ: number, cell: number): readonly [number, number] => {
-    let lowest = Number.POSITIVE_INFINITY, highest = Number.NEGATIVE_INFINITY;
-    const i0 = Math.floor((minX - cx) / cell + 1e-9) - 1, i1 = Math.ceil((maxX - cx) / cell - 1e-9);
-    const j0 = Math.floor((minZ - cz) / cell + 1e-9) - 1, j1 = Math.ceil((maxZ - cz) / cell - 1e-9);
-    for (let j = j0; j <= j1; j += 1) for (let i = i0; i <= i1; i += 1) {
-      const x = cx + (i + 0.5) * cell, z = cz + (j + 0.5) * cell;
-      if (insideFootprint(detail, x, z)) continue;
-      if (Math.max(Math.abs(x - cx), Math.abs(z - cz)) >= W) continue;
-      const top = detail.anchor_m + Math.floor((backdropFieldHeight(field, x, z) - detail.anchor_m) / cell + 0.5) * cell;
-      lowest = Math.min(lowest, top); highest = Math.max(highest, top);
+  // Leaf-level column spans, a block of bricks at a time: a column of nodes
+  // shares one span, and neighbouring bricks share nine in ten of the columns
+  // and nearly every scatter cell a span reads.
+  const blocksKey = JSON.stringify([backdropFieldContentKey(field), detail, worldOrigin_m, nodeEdge_m.map((edge) => edge[0]), W]);
+  const blocks = spanBlocks.get(blocksKey) ?? spanBlocks.set(blocksKey, nodeEdge_m.map(() => new Map<number, Float64Array>()));
+  // Everything a verdict is answered from, for a planner that keeps descents.
+  const contentKey = JSON.stringify([blocksKey, nodeEdge_m, solverLevel, dualGrid]);
+  const buildSpanBlock = (level: number, blockX: number, blockZ: number): Float64Array => {
+    const e = nodeEdge_m[level]![0]!, cell = e / 8, B = SPAN_BLOCK_BRICKS;
+    // Per brick, the column window `columnSpan` walked: one column either side.
+    const firstColumn = new Int32Array(2 * B), lastColumn = new Int32Array(2 * B);
+    const brickMinimum = new Float64Array(2 * B);
+    for (let axis = 0; axis < 2; axis += 1) for (let brick = 0; brick < B; brick += 1) {
+      const minimum = worldOrigin_m[axis * 2]! + ((axis === 0 ? blockX : blockZ) * B + brick) * e, maximum = minimum + e;
+      const centre = axis === 0 ? cx : cz;
+      brickMinimum[axis * B + brick] = minimum;
+      firstColumn[axis * B + brick] = Math.floor((minimum - centre) / cell + 1e-9) - 1;
+      lastColumn[axis * B + brick] = Math.ceil((maximum - centre) / cell - 1e-9);
     }
-    for (const item of backdropScatterItemsIn(field, detail, minX - cell, minZ - cell, maxX + cell, maxZ + cell, 1e-3)) {
-      highest = Math.max(highest, item.top);
-      lowest = Math.min(lowest, item.seat);
+    const i0 = firstColumn[0]!, i1 = lastColumn[B - 1]!, j0 = firstColumn[B]!, j1 = lastColumn[2 * B - 1]!;
+    const columnsX = i1 - i0 + 1, columnsZ = j1 - j0 + 1;
+    const xs = new Float64Array(columnsX), zs = new Float64Array(columnsZ);
+    for (let i = 0; i < columnsX; i += 1) xs[i] = cx + (i0 + i + 0.5) * cell;
+    for (let j = 0; j < columnsZ; j += 1) zs[j] = cz + (j0 + j + 0.5) * cell;
+    const sampler = createBackdropGridSampler(field, xs, zs);
+    // Per column row, each brick's lowest and highest top over its window.
+    const rowLow = new Float64Array(columnsZ * B).fill(Number.POSITIVE_INFINITY);
+    const rowHigh = new Float64Array(columnsZ * B).fill(Number.NEGATIVE_INFINITY);
+    const tops = new Float64Array(columnsX);
+    for (let j = 0; j < columnsZ; j += 1) {
+      const z = zs[j]!;
+      sampler.heights(j, 0, columnsX, tops);
+      for (let i = 0; i < columnsX; i += 1) {
+        const x = xs[i]!;
+        if ((x > fMinX && x < fMaxX && z > fMinZ && z < fMaxZ) || Math.max(Math.abs(x - cx), Math.abs(z - cz)) >= W) {
+          tops[i] = Number.NaN;
+          continue;
+        }
+        const steps = (tops[i]! - detail.anchor_m) / cell + 0.5, whole = Math.floor(steps), fraction = steps - whole;
+        // Within rounding of a lattice boundary the direct evaluation decides.
+        tops[i] = fraction < COLUMN_TOP_ROUNDING_GUARD || fraction > 1 - COLUMN_TOP_ROUNDING_GUARD
+          ? detail.anchor_m + Math.floor((backdropFieldHeight(field, x, z) - detail.anchor_m) / cell + 0.5) * cell
+          : detail.anchor_m + whole * cell;
+      }
+      for (let brick = 0; brick < B; brick += 1) {
+        let low = Number.POSITIVE_INFINITY, high = Number.NEGATIVE_INFINITY;
+        for (let i = firstColumn[brick]! - i0; i <= lastColumn[brick]! - i0; i += 1) {
+          const top = tops[i]!;
+          if (top < low) low = top;
+          if (top > high) high = top;
+        }
+        rowLow[j * B + brick] = low; rowHigh[j * B + brick] = high;
+      }
     }
-    return [lowest, highest];
+    // `[lowest, highest]` per brick, row-major.
+    const block = new Float64Array(2 * B * B);
+    for (let brickZ = 0; brickZ < B; brickZ += 1) for (let brickX = 0; brickX < B; brickX += 1) {
+      let low = Number.POSITIVE_INFINITY, high = Number.NEGATIVE_INFINITY;
+      for (let j = firstColumn[B + brickZ]! - j0; j <= lastColumn[B + brickZ]! - j0; j += 1) {
+        low = Math.min(low, rowLow[j * B + brickX]!); high = Math.max(high, rowHigh[j * B + brickX]!);
+      }
+      block[2 * (brickZ * B + brickX)] = low; block[2 * (brickZ * B + brickX) + 1] = high;
+    }
+    // The scatter items each brick's span reaches (`backdropScatterItemsIn`
+    // over the brick and a column's margin), each grid cell asked once.
+    const minX = brickMinimum[0]! - cell, maxX = brickMinimum[B - 1]! + e + cell;
+    const minZ = brickMinimum[B]! - cell, maxZ = brickMinimum[2 * B - 1]! + e + cell;
+    for (let classIndex = 0; classIndex < BACKDROP_SCATTER_CLASSES.length; classIndex += 1) {
+      const entry = BACKDROP_SCATTER_CLASSES[classIndex]!;
+      const margin = SCATTER_REACH[entry.shape] * entry.radius_m[1];
+      const g = entry.grid_m;
+      for (let qz = Math.floor((minZ - margin) / g); qz <= Math.floor((maxZ + margin) / g); qz += 1) {
+        for (let qx = Math.floor((minX - margin) / g); qx <= Math.floor((maxX + margin) / g); qx += 1) {
+          const item = backdropScatterItem(field, detail, classIndex, qx, qz, 1e-3);
+          if (!item) continue;
+          for (let brickZ = 0; brickZ < B; brickZ += 1) {
+            const lowZ = brickMinimum[B + brickZ]! - cell, highZ = brickMinimum[B + brickZ]! + e + cell;
+            if (qz < Math.floor((lowZ - margin) / g) || qz > Math.floor((highZ + margin) / g)
+              || item.z + item.reach < lowZ || item.z - item.reach > highZ) continue;
+            for (let brickX = 0; brickX < B; brickX += 1) {
+              const lowX = brickMinimum[brickX]! - cell, highX = brickMinimum[brickX]! + e + cell;
+              if (qx < Math.floor((lowX - margin) / g) || qx > Math.floor((highX + margin) / g)
+                || item.x + item.reach < lowX || item.x - item.reach > highX) continue;
+              const at = 2 * (brickZ * B + brickX);
+              block[at] = Math.min(block[at]!, item.seat); block[at + 1] = Math.max(block[at + 1]!, item.top);
+            }
+          }
+        }
+      }
+    }
+    return block;
   };
+  let lastLevel = -1, lastKey = -1, lastBlock: Float64Array | undefined;
+  const spanBlock = (level: number, x: number, z: number): Float64Array => {
+    const blockX = Math.floor(x / SPAN_BLOCK_BRICKS), blockZ = Math.floor(z / SPAN_BLOCK_BRICKS);
+    const key = blockZ * SPAN_BLOCK_KEY_STRIDE + blockX;
+    if (level === lastLevel && key === lastKey) return lastBlock!;
+    if (blockX >= SPAN_BLOCK_KEY_STRIDE || blockX < 0 || blockZ < 0) throw new RangeError(`Backdrop detail brick ${x},${z} is outside the addressable lattice`);
+    let block = blocks[level]!.get(key);
+    if (!block) { block = buildSpanBlock(level, blockX, blockZ); blocks[level]!.set(key, block); }
+    lastLevel = level; lastKey = key; lastBlock = block;
+    return block;
+  };
+  const boundsLevel = new Int32Array(2).fill(-1), boundsX = new Float64Array(2), boundsZ = new Float64Array(2);
+  const boundsLow = new Float64Array(2), boundsHigh = new Float64Array(2), bounds = new Float64Array(2);
   const classify = (level: number, coordinate: { x: number; y: number; z: number }): 0 | 1 | 2 => {
     census.classified += 1;
     const e = nodeEdge_m[level]![0]!;
@@ -312,20 +420,27 @@ export function createBackdropDetailClassifier(options: BackdropDetailClassifier
     const target = solverLevel - ring + (ring < detail.refinedRings ? 1 : 0);
     if (level < target) {
       const pad = e / 8;
-      const [low, high] = backdropHeightBounds(field, minX - pad, minZ - pad, maxX + pad, maxZ + pad);
+      // The bounds are the column's: the planner asks a node's children in
+      // pairs one above the other, and the second takes the first's.
+      const held = coordinate.x & 1;
+      if (boundsLevel[held] !== level || boundsX[held] !== coordinate.x || boundsZ[held] !== coordinate.z) {
+        backdropHeightBoundsInto(field, minX - pad, minZ - pad, maxX + pad, maxZ + pad, bounds);
+        boundsLevel[held] = level; boundsX[held] = coordinate.x; boundsZ[held] = coordinate.z;
+        boundsLow[held] = bounds[0]!; boundsHigh[held] = bounds[1]!;
+      }
+      const low = boundsLow[held]!, high = boundsHigh[held]!;
       const top = Math.max(high, detail.anchor_m) + pad + BACKDROP_SCATTER_MAXIMUM_RISE_M;
       const bottom = Math.min(low, detail.anchor_m) - pad;
       return top > minY && bottom < maxY ? BACKDROP_DETAIL_SPLIT : BACKDROP_DETAIL_EMPTY;
     }
     // A leaf-level node: exact column tops over the brick and a one-column
-    // margin (a solid brick beside a lower column holds a riser face). The
-    // span depends only on the node's xz footprint, so a column of nodes
-    // shares one evaluation.
+    // margin (a solid brick beside a lower column holds a riser face), plus
+    // the scatter that reaches it. The span depends only on the node's xz
+    // footprint, so a column of nodes shares one evaluation.
     const cell = e / 8;
-    const spanKey = `${level}:${coordinate.x}:${coordinate.z}`;
-    let span = spans.get(spanKey);
-    if (!span) { span = columnSpan(minX, maxX, minZ, maxZ, cell); spans.set(spanKey, span); }
-    const [lowest, highest] = span;
+    const block = spanBlock(level, coordinate.x, coordinate.z);
+    const slot = 2 * ((coordinate.z % SPAN_BLOCK_BRICKS) * SPAN_BLOCK_BRICKS + coordinate.x % SPAN_BLOCK_BRICKS);
+    const lowest = block[slot]!, highest = block[slot + 1]!;
     if (!(lowest <= highest)) return BACKDROP_DETAIL_EMPTY;
     if (dualGrid) {
       // The continuous ground lies within a cell of the column tops bounding
@@ -350,7 +465,7 @@ export function createBackdropDetailClassifier(options: BackdropDetailClassifier
     }
     return BACKDROP_DETAIL_EMPTY;
   };
-  return { classify, census };
+  return { classify, census, contentKey };
 }
 
 // ---------------------------------------------------------------------------

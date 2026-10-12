@@ -3,17 +3,15 @@ import test from "node:test";
 import type { EditorEntityContext } from "../lib/core/editor-entity";
 import type { EditorAction } from "../lib/core/editor-action";
 import { targetActionsAt, targetAtRay } from "../lib/core/editor-probe-catalog";
-import { projectSolidVoxelClearRegion, withSolidVoxelClearRegion } from "../lib/core/editor-solid-voxel";
+import { projectSolidVoxelClearRegion } from "../lib/core/editor-solid-voxel";
 import {
   voxelDragAnchor,
   voxelRegionContains,
-  voxelRegionEntity,
   voxelRegionExtent,
   VOXEL_REGION_SELECTION,
 } from "../lib/core/editor-voxel-region";
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/core/model";
 import { sceneCellSizes_m } from "../lib/core/scene-lattice";
-import { sampleSolidWorld, solidWorldForScene } from "../lib/core/solid-world";
 
 function context(
   scene: SceneDescription,
@@ -82,44 +80,6 @@ test("a bare tank wall yields an anchor on the layer that lines it", () => {
   const [, , hz] = sceneCellSizes_m(scene);
   const last = Math.floor(c.depth_m / hz) - 1;
   assert.equal(anchor.coordinate[2], last, "the cell inside the +Z wall, not the one past it");
-});
-
-// The whole point of the change: the release makes a selection, and the verb
-// that edits the document lives on it. This asserts the verb still produces the
-// exact patch the armed CLEAR SOLIDS tool used to write on release.
-test("the region's Clear verb writes the same patch the armed tool wrote", () => {
-  const { scene } = slabScene();
-  const region = { minimum: [3, 4, 2], maximumExclusive: [4, 8, 6] } as const;
-  const [action, ...rest] = voxelRegionEntity.actions!(context(scene, region), {
-    point_m: { x: 0, y: 0, z: 0 }, normal: { x: 0, y: 0, z: 0 },
-    selection: VOXEL_REGION_SELECTION,
-  });
-  assert.equal(rest.length, 0, "one verb, so the ring is not padded with variants");
-  assert.ok(action);
-  assert.equal(action.id, "clear-solids");
-  const effect = action.effect;
-  assert.ok(effect?.kind === "scene");
-  assert.equal(effect.reseed, true,
-    "solids are in the solver's seed key, so the run must restart from a defined t=0");
-  const written = effect.scene.solidVoxels;
-  assert.deepEqual(written, withSolidVoxelClearRegion(scene.solidVoxels ?? [], region));
-  const cleared = solidWorldForScene({ ...scene, solidVoxels: written });
-  assert.equal(sampleSolidWorld(cleared, [3, 6, 4]).solidFraction, 0);
-  assert.equal(sampleSolidWorld(cleared, [4, 6, 4]).solidFraction, 1);
-
-  // The Delete key and the flyout button go through `remove`, which must be the
-  // same edit — two routes to one verb, not two verbs that drift apart.
-  const entity = voxelRegionEntity.find!(context(scene, region), VOXEL_REGION_SELECTION.id);
-  assert.deepEqual(entity?.remove?.().solidVoxels, written);
-});
-
-test("Clear is withheld when the swept box holds no solids at all", () => {
-  const { scene } = slabScene();
-  const empty = { minimum: [40, 40, 40], maximumExclusive: [42, 42, 42] } as const;
-  assert.deepEqual(voxelRegionEntity.actions!(context(scene, empty), {
-    point_m: { x: 0, y: 0, z: 0 }, normal: { x: 0, y: 0, z: 0 },
-    selection: VOXEL_REGION_SELECTION,
-  }), []);
 });
 
 // How the region's ring is reached at all: a region has no surface of its own,
