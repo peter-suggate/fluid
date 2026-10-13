@@ -1,5 +1,6 @@
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import {uniformKeyGroups} from "./uniform-lattice-address";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
@@ -23,8 +24,11 @@ interface PlanLaunch{readonly pipeline:GPUComputePipeline;readonly counted:boole
  * A source/edit must be applied before this census, just as in the native host.
  * This is sampling/extension support, not permission to skip transported mass. */
 export class UniformMixedFramePlan {
-  readonly allocatedBytes=32;
+  readonly allocatedBytes:number;
   private readonly params:GPUBuffer;
+  /** umCoarseTilesIn's summed table: one word per tile of the box, at its
+   * box index (uniformBoxTileIndex), whatever is stored there. */
+  private readonly coarse:GPUBuffer;
   private readonly resources:GPUBindGroupLayout;
   private readonly group:UniformDetailGroup;
   private readonly extendedResources:GPUBindGroupLayout;
@@ -44,11 +48,13 @@ export class UniformMixedFramePlan {
     extended:GPUTexture,extendedNegative:GPUBuffer,directionalCertificate=false,private readonly surfaceOnly=false){
     if(!directionalCertificate)throw new Error("The mixed frame plan certifies signed per-axis reach only");
     this.params=device.createBuffer({label:"Uniform shared support policy",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    this.coarse=device.createBuffer({label:"Uniform frame plan summed 4h tiles",size:4*ownership.capacity.address.boxTiles,usage:GPUBufferUsage.STORAGE});
+    this.allocatedBytes=32+4*ownership.capacity.address.boxTiles;
     this.resources=uniformDetailBindLayout(device,{entries:[...[0,1,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
     this.group=uniformDetailGroup(device,{layout:this.resources,entries:[...[volume,phi].map((t,binding)=>({binding,resource:t})),{binding:2,resource:{buffer:this.params}},{binding:3,resource:velocity},{binding:4,resource:{buffer:negative}}]});
     this.extendedResources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
-      {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
-    this.extendedGroup=uniformDetailGroup(device,{layout:this.extendedResources,entries:[{binding:0,resource:extended},{binding:1,resource:{buffer:extendedNegative}},{binding:2,resource:{buffer:ownership.speeds}}]});
+      {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},...[2,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))]});
+    this.extendedGroup=uniformDetailGroup(device,{layout:this.extendedResources,entries:[{binding:0,resource:extended},{binding:1,resource:{buffer:extendedNegative}},{binding:2,resource:{buffer:ownership.speeds}},{binding:3,resource:{buffer:this.coarse}}]});
   }
   async initialize():Promise<void>{
     const h=this.ownership.capacity.lattice.cellSize_m;
@@ -67,14 +73,21 @@ struct PlanPolicy {settings:vec4u,step:vec4f}
 @group(2) @binding(0) var extended:texture_3d<f32>;
 @group(2) @binding(1) var<storage,read> extendedNegative:array<f32>;
 @group(2) @binding(2) var<storage,read_write> speeds:array<u32>;
+@group(2) @binding(3) var<storage,read_write> coarse:array<u32>;
+// Two index spaces. umSupport and speeds hold a word per tile KEY: a lane
+// indexes them by its own tile's key, and a neighbour's word by umTileKey of
+// the neighbour's coordinate, skipped where umKeyStored refuses it. coarse
+// holds a word per tile of the BOX at umBoxTileIndex of the coordinate
+// (UM_BOX_TILE_COUNT words), all written by every certificate.
+// A tile with nothing stored is skipped, never read. An AIR tile holds the
+// AIR image: no support flag, zero faces, a 4h tile word. So it adds nothing
+// to a dilation or to a reach maximum (zero faces give umReach(0), the least
+// any stored tile's word holds, the lane's own among them), and it is a 4h
+// tile to the count in coarse (umBoxCoarse). A SOLID tile and a coordinate
+// outside the box add nothing to any of the three.
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner: the base block (UNIFORM_DETAIL_4H_LOAD).
 fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
-fn umNegativeIndex(origin:vec3u,axis:u32)->u32{
- if(axis==0u){return origin.y+UM_D.y*origin.z;}
- if(axis==1u){return UM_D.y*UM_D.z+origin.x+UM_D.x*origin.z;}
- return UM_D.y*UM_D.z+UM_D.x*UM_D.z+origin.x+UM_D.x*origin.y;
-}
 // Tiles, in Chebyshev tile distance, that any characteristic of this frame
 // can reach, including cubic taps, wall continuation and the Newton search.
 fn umCertificateRadius(speed:f32)->u32{
@@ -133,7 +146,8 @@ var<workgroup> seedSpeed:atomic<u32>;
  if(owner.width!=0u){
   let width=owner.width;let unit=umTileMaximumWidth(owner.tile)==1u;let origin=umOrigin(owner);
   var speed=umPositiveFaceSpeed(unit,origin);
-  for(var axis=0u;axis<3u;axis++){if(origin[axis]==0u){speed=max(speed,abs(negative[umNegativeIndex(origin,axis)]));}}
+  let low=umLowOpen(vec3i(origin));
+  for(var axis=0u;axis<3u;axis++){if(low[axis]){speed=max(speed,abs(negative[umLowFaceIndex(origin,axis)]));}}
   atomicMax(&seedSpeed,bitcast<u32>(speed));
   if(!planSpeedOnly){
   // A 4h owner's origin and corners are its tile's (umVertexValue of a
@@ -159,19 +173,20 @@ var<workgroup> seedSpeed:atomic<u32>;
 }
 ${[0,1,2].map(axis=>/* wgsl */`
 @compute @workgroup_size(64) fn dilate${axis}(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
+ let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
  let p=vec3i(umTileCoord(tile));var flags=0u;
  let reach=i32(policy.settings.x+policy.settings.y);
  for(var delta=-reach;delta<=reach;delta++){
-  var q=p;q[${axis}]+=delta;if(any(q<vec3i(0))||any(q>=vec3i(UM_T))){continue;}
-  let source=atomicLoad(&umSupport[${axis}u*UM_TILES+umTileAt(vec3u(q))]);
+  var q=p;q[${axis}]+=delta;let k=umTileKey(q);if(!umKeyStored(k)){continue;}
+  let source=atomicLoad(&umSupport[${axis}u*UM_TILES+k]);
   flags|=source&select(2u,3u,abs(delta)<=i32(policy.settings.x));
  }
  atomicStore(&umSupport[${axis+1}u*UM_TILES+tile],flags|policy.settings.z);
 }`).join("\n")}
 // Each tile's signed reach (umPackReach) from the extended canonical faces it
-// owns, zero included. Owner lanes as in seed.
-fn umSignedFaceExtent(unit:bool,origin:vec3u,axis:u32)->vec2f{
+// owns, zero included; low: the owner stores its low face along axis
+// (umLowOpen). Owner lanes as in seed.
+fn umSignedFaceExtent(unit:bool,origin:vec3u,axis:u32,low:bool)->vec2f{
  var lo=0.0;var hi=0.0;
  if(unit){let v=textureLoad(extended,vec3i(origin),0)[axis];lo=min(lo,v);hi=max(hi,v);}
  else{
@@ -179,7 +194,7 @@ fn umSignedFaceExtent(unit:bool,origin:vec3u,axis:u32)->vec2f{
   if(first.width==4u){let v=${UNIFORM_DETAIL_4H_LOAD}textureLoad(extended,first.anchor,0)[axis];lo=min(lo,v);hi=max(hi,v);}
   else{for(var part=0u;part<first.count;part++){let v=textureLoad(extended,umFacePatch(first,part).anchor,0)[axis];lo=min(lo,v);hi=max(hi,v);}}
  }
- if(origin[axis]==0u){let v=extendedNegative[umNegativeIndex(origin,axis)];lo=min(lo,v);hi=max(hi,v);}
+ if(low){let v=extendedNegative[umLowFaceIndex(origin,axis)];lo=min(lo,v);hi=max(hi,v);}
  return vec2f(lo,hi);
 }
 var<workgroup> tileReach:array<atomic<u32>,384>;
@@ -189,8 +204,9 @@ var<workgroup> tileReach:array<atomic<u32>,384>;
  workgroupBarrier();
  if(owner.width!=0u){
   let origin=umOrigin(owner);let unit=umTileMaximumWidth(owner.tile)==1u;let scale=policy.step.x/umSceneMinimumSpacing();
+  let low=umLowOpen(vec3i(origin));
   for(var axis=0u;axis<3u;axis++){
-   let e=umSignedFaceExtent(unit,origin,axis);
+   let e=umSignedFaceExtent(unit,origin,axis,low[axis]);
    // NaN fails both comparisons: it saturates.
    let finite=abs(e.x)<=3.402823e38&&abs(e.y)<=3.402823e38;
    atomicMax(&tileReach[64u*axis+slot],select(UM_REACH_SATURATED,umReach(-e.x*scale),finite));
@@ -205,33 +221,49 @@ var<workgroup> tileReach:array<atomic<u32>,384>;
  }
 }
 // Separable box maximum over the global reach: a characteristic from tile t
-// never leaves that box, so its speed is bounded by the box maximum.
+// never leaves that box, so its speed is bounded by the box maximum. A value
+// travels to a tile through two corner tiles of that box, and an unstored one
+// carries nothing: the maximum is whole at an h tile while its box is stored,
+// which the residency certificate gives every h tile out to its own radius
+// (UM_RESIDENCY+2, zero where every page is resident). A reach past that
+// radius sets the sticky closure bit (2): the next census fails the build.
 ${[0,1,2].map(axis=>/* wgsl */`
 @compute @workgroup_size(64) fn spread${axis}(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
+ let tile=gid.x+umDispatchX*64u*gid.y;
+ let reach=i32(umCertificateRadius(bitcast<f32>(atomicLoad(&umSupport[4u*UM_TILES]))));${axis===0?`
+ if(tile==0u){let closure=atomicLoad(&umSupport[UM_RESIDENCY+2u]);if(closure!=0u&&u32(reach)>closure){atomicOr(&umSupport[UM_RESIDENCY+1u],2u);}}`:""}
+ if(!umTileLive(tile)){return;}
  let base=${axis===1?"UM_TILES":"0u"};let into=${axis===1?"0u":"UM_TILES"};
- let reach=i32(umCertificateRadius(bitcast<f32>(atomicLoad(&umSupport[4u*UM_TILES]))));
  let p=vec3i(umTileCoord(tile));var plus=vec3u(0);var minus=vec3u(0);
- for(var q=max(p.${"xyz"[axis]}-reach,0);q<=min(p.${"xyz"[axis]}+reach,i32(UM_T.${"xyz"[axis]})-1);q++){
-  var r=p;r.${"xyz"[axis]}=q;let value=speeds[base+umTileAt(vec3u(r))];
+ let first=umTileNear(p-vec3i(reach));let last=umTileNear(p+vec3i(reach));
+ for(var q=first.${"xyz"[axis]};q<=last.${"xyz"[axis]};q++){
+  var r=p;r.${"xyz"[axis]}=q;let k=umTileKey(r);if(!umKeyStored(k)){continue;}let value=speeds[base+k];
   plus=max(plus,umReachPlus(value));minus=max(minus,umReachMinus(value));
  }
  speeds[into+tile]=umPackReach(plus,minus);
 }`).join("\n")}
-// Summed-volume table of the 4h tiles in speeds[0,T), which is dead after
-// spread2: inclusive prefix counts along x, then y, then z, in place, one lane
-// per tile line.
+// What a tile of the box counts in coarse, the one place the table reads a
+// per-key word: 1 where the tile is stored at 4h or is AIR, 0 where it is
+// stored at h or is SOLID.
+fn umBoxCoarse(p:vec3u)->u32{
+ let k=umTileKey(vec3i(p));if(!umKeyStored(k)){return select(0u,1u,umTileKind(vec3i(p))==UM_AIR);}
+ return select(0u,1u,umTileWidth(k)!=1u);
+}
+// Summed-volume table of umBoxCoarse over the box, in coarse: inclusive
+// prefix counts along x, then y, then z, in place, one lane per tile line of
+// the box.
 ${[0,1,2].map(axis=>/* wgsl */`
 @compute @workgroup_size(64) fn prefix${axis}(@builtin(global_invocation_id) gid:vec3u){
- let line=gid.x+umDispatchX*64u*gid.y;if(line>=UM_T.${"xyz"[(axis+1)%3]}*UM_T.${"xyz"[(axis+2)%3]}){return;}
- var p=vec3u(0);p.${"xyz"[(axis+1)%3]}=line%UM_T.${"xyz"[(axis+1)%3]};p.${"xyz"[(axis+2)%3]}=line/UM_T.${"xyz"[(axis+1)%3]};var sum=0u;
- for(var i=0u;i<UM_T.${"xyz"[axis]};i++){p.${"xyz"[axis]}=i;let t=umTileAt(p);sum+=${axis===0?"select(0u,1u,umTileWidth(t)!=1u)":"speeds[t]"};speeds[t]=sum;}
+ let line=gid.x+umDispatchX*64u*gid.y;if(line>=UM_BOX_TILES.${"xyz"[(axis+1)%3]}*UM_BOX_TILES.${"xyz"[(axis+2)%3]}){return;}
+ var p=vec3u(0);p.${"xyz"[(axis+1)%3]}=line%UM_BOX_TILES.${"xyz"[(axis+1)%3]};p.${"xyz"[(axis+2)%3]}=line/UM_BOX_TILES.${"xyz"[(axis+1)%3]};var sum=0u;
+ for(var i=0u;i<UM_BOX_TILES.${"xyz"[axis]};i++){p.${"xyz"[axis]}=i;let t=umBoxTileIndex(p);sum+=${axis===0?"umBoxCoarse(p)":"coarse[t]"};coarse[t]=sum;}
 }`).join("\n")}
-fn umPrefix(p:vec3i)->u32{if(any(p<vec3i(0))){return 0u;}return speeds[umTileAt(vec3u(p))];}
-// 4h tiles in the inclusive tile box [low,high] clipped to the lattice (which
-// holds the tile itself). Wrapping u32 arithmetic is exact: the count fits.
+fn umPrefix(p:vec3i)->u32{if(any(p<vec3i(0))){return 0u;}return coarse[umBoxTileIndex(vec3u(p))];}
+// Tiles that umBoxCoarse counts in the inclusive tile box [low,high] clipped
+// to the box (which holds the tile itself). Wrapping u32 arithmetic is exact:
+// the count fits.
 fn umCoarseTilesIn(low:vec3i,high:vec3i)->u32{
- let a=max(low,vec3i(0))-vec3i(1);let b=min(high,vec3i(UM_T)-vec3i(1));
+ let a=max(low,vec3i(0))-vec3i(1);let b=min(high,vec3i(UM_BOX_TILES)-vec3i(1));
  return umPrefix(b)-umPrefix(vec3i(a.x,b.y,b.z))-umPrefix(vec3i(b.x,a.y,b.z))-umPrefix(vec3i(b.x,b.y,a.z))
   +umPrefix(vec3i(a.x,a.y,b.z))+umPrefix(vec3i(a.x,b.y,a.z))+umPrefix(vec3i(b.x,a.y,a.z))-umPrefix(a);
 }
@@ -239,12 +271,13 @@ fn umCoarseTilesIn(low:vec3i,high:vec3i)->u32{
 var<workgroup> certifyCounts:array<atomic<u32>,2>;
 var<workgroup> certifyBases:array<u32,2>;
 @compute @workgroup_size(64) fn certify(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=gid.x+umDispatchX*64u*gid.y;let fine=tile<UM_TILES&&umTileWidth(min(tile,UM_TILES-1u))==1u;
+ let tile=gid.x+umDispatchX*64u*gid.y;let fine=umTileLive(tile)&&umTileWidth(min(tile,UM_TILES-1u))==1u;
  if(lane<2u){atomicStore(&certifyCounts[lane],0u);}workgroupBarrier();
  // Every characteristic from this tile stays in its signed reach box: the
  // spread reach bounds the extended velocities of the global-reach box around
- // it (localSpeed + spread). With no 4h tile in the box every tap is a unit
- // face and the regular sampler is the general one.
+ // it (localSpeed + spread). With no 4h tile in the box (an AIR tile is one:
+ // umBoxCoarse) every tap is a unit face and the regular sampler is the
+ // general one.
  var list=1u;var local=0u;
  if(fine){
   let reach=speeds[UM_TILES+tile];let plus=umReachPlus(reach);let minus=umReachMinus(reach);
@@ -326,10 +359,10 @@ var<workgroup> certifyBases:array<u32,2>;
       const pipeline=this.pipelines.get(entry)!;
       if(counted.includes(entry))return {pipeline,counted:true,x:0,y:0};
       const t=this.ownership.capacity.tileDimensions,line=/^prefix(\d)$/.exec(entry);
-      const groups=Math.ceil((line?t[(+line[1]!+1)%3]!*t[(+line[1]!+2)%3]!:this.ownership.capacity.tiles)/64);
-      return {pipeline,counted:false,x:Math.min(groups,this.ownership.dispatchX),y:Math.ceil(groups/this.ownership.dispatchX)};
+      const [x,y]=uniformKeyGroups(line?t[(+line[1]!+1)%3]!*t[(+line[1]!+2)%3]!:this.ownership.capacity.tiles,64,this.ownership.dispatchX,[0,0]);
+      return {pipeline,counted:false,x,y};
     };
     return {support:SUPPORT_ENTRIES.map(of),certificate:CERTIFICATE_ENTRIES.map(of)};
   }
-  destroy():void{this.params.destroy();}
+  destroy():void{this.params.destroy();this.coarse.destroy();}
 }

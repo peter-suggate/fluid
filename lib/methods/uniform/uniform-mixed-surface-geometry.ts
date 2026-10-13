@@ -50,7 +50,7 @@ export class UniformMixedSurfaceGeometry {
   private pressurePipeline?:GPUComputePipeline;
   private readonly changedPipelines:GPUComputePipeline[]=[];
   private readonly resources:GPUBindGroupLayout;
-  private readonly mirrorResources?:GPUBindGroupLayout;
+  private readonly mirrorResources:GPUBindGroupLayout;
   private mirrorPipeline?:GPUComputePipeline;
   private readonly mirrorGroups=new WeakMap<UniformDetailGroup,UniformDetailGroup>();
   /** [h count, 4h count, 2 unused, the marked h tiles, the marked 4h tiles]. */
@@ -60,39 +60,36 @@ export class UniformMixedSurfaceGeometry {
   private listGroup?:{readonly changes:GPUBuffer;readonly group:UniformDetailGroup};
   /** ownership.revision at the last encode. */
   private encodedRevision?:number;
-  /** resolved: phi's hanging texels hold umVertexValue (UniformMixedPhiResolve).
-   * pressure: bind() also takes the all-4h pressure target and centre phi.
-   * mirror: bind() also takes a second field for the fill (a caller whose
-   * volume is that measurement): every launch then copies each live owner's
-   * target into it in the same pass, where the caller copied the whole field. */
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly resolved=false,private readonly pressure=false,private readonly mirror=false){
+  /** phi's hanging texels hold umVertexValue (UniformMixedPhiResolve). bind()
+   * also takes the all-4h pressure target and centre phi, and a second field
+   * for the fill (the caller's volume is that measurement): every launch
+   * copies each live owner's target into it in the same pass. */
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid){
     const tiles=ownership.capacity.tiles;
     this.changes=device.createBuffer({label:"Uniform mixed geometry changed tiles",size:4*(4+2*tiles),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     this.listResources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
     this.allocatedBytes=this.changes.size;
     this.resources=uniformDetailBindLayout(device,{entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
-      ...[1,2,...(pressure?[3,4]:[])].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"r32float" as const,viewDimension:"3d" as const}})),
+      ...[1,2,3,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"r32float" as const,viewDimension:"3d" as const}})),
       {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
     ]});
-    if(mirror)this.mirrorResources=uniformDetailBindLayout(device,{entries:[
+    this.mirrorResources=uniformDetailBindLayout(device,{entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
     ]});
   }
-  bind(phi:GPUTexture,targetFill:GPUTexture,centerPhi:GPUTexture,pressure?:{target:GPUTexture;centerPhi:GPUTexture},mirror?:GPUTexture):UniformDetailGroup{
-    const d=this.ownership.capacity.lattice.dimensions;
-    if(!!pressure!==this.pressure)throw new Error(`Mixed geometry was built ${this.pressure?"with":"without"} pressure outputs`);
-    if(!!mirror!==this.mirror)throw new Error(`Mixed geometry was built ${this.mirror?"with":"without"} a mirrored fill`);
-    const outputs=[targetFill,centerPhi,...(pressure?[pressure.target,pressure.centerPhi]:[]),...(mirror?[mirror]:[])];
+  bind(phi:GPUTexture,targetFill:GPUTexture,centerPhi:GPUTexture,pressure:{target:GPUTexture;centerPhi:GPUTexture},mirror:GPUTexture):UniformDetailGroup{
+    const address=this.ownership.capacity.address;
+    const outputs=[targetFill,centerPhi,pressure.target,pressure.centerPhi,mirror];
     for(const [i,t] of [phi,...outputs].entries())
-      if(t.format!=="r32float"||uniformDetailExtent(t).some((n,a)=>n!==d[a]!+(i===0?1:0)))throw new Error("Mixed geometry requires native cell and vertex fields");
+      if(t.format!=="r32float"||uniformDetailExtent(t).some((n,a)=>n!==(i===0?address.vertexBox:address.cells)[a]))throw new Error("Mixed geometry requires native cell and vertex fields");
     if(new Set(outputs).size!==outputs.length)throw new Error("Mixed geometry outputs must be disjoint");
     const group=uniformDetailGroup(this.device,{layout:this.resources,entries:[
-      ...[phi,targetFill,centerPhi,...(pressure?[pressure.target,pressure.centerPhi]:[])].map((t,binding)=>({binding,resource:t})),
+      ...[phi,targetFill,centerPhi,pressure.target,pressure.centerPhi].map((t,binding)=>({binding,resource:t})),
       {binding:5,resource:{buffer:this.changes}},
     ]});
-    if(mirror)this.mirrorGroups.set(group,uniformDetailGroup(this.device,{layout:this.mirrorResources!,entries:[{binding:0,resource:targetFill},{binding:1,resource:mirror}]}));
+    this.mirrorGroups.set(group,uniformDetailGroup(this.device,{layout:this.mirrorResources,entries:[{binding:0,resource:targetFill},{binding:1,resource:mirror}]}));
     return group;
   }
   async initialize():Promise<void>{
@@ -102,15 +99,15 @@ export class UniformMixedSurfaceGeometry {
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var targetFill:texture_storage_3d<r32float,write>;
 @group(1) @binding(2) var centerPhi:texture_storage_3d<r32float,write>;
-${this.pressure?`@group(1) @binding(3) var pressureTarget:texture_storage_3d<r32float,write>;
-@group(1) @binding(4) var pressureCenterPhi:texture_storage_3d<r32float,write>;`:""}
+@group(1) @binding(3) var pressureTarget:texture_storage_3d<r32float,write>;
+@group(1) @binding(4) var pressureCenterPhi:texture_storage_3d<r32float,write>;
 @group(1) @binding(5) var<storage,read_write> changes:array<atomic<u32>>;
 override geometryPressure:bool=false;
 const GC_FINE:u32=4u;const GC_COARSE:u32=4u+UM_TILES;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner: the base block (UNIFORM_DETAIL_4H_LOAD).
 fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
-${uniformMixedVertexSamplingSource("",this.resolved,undefined,"umLoadCorner")}
+${uniformMixedVertexSamplingSource("",true,undefined,"umLoadCorner")}
 ${geometricPlaneBoxWGSL}
 fn uvCorner(k:u32)->vec3i{return vec3i(umCorner(k,2u));}
 fn d4Sum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
@@ -160,19 +157,19 @@ fn gcEvaluate(owner:UMOwner,vertices:array<f32,8>,open:f32,terms:bool)->vec2f{
 fn gcOwner(owner:UMOwner,terms:bool){
  let origin=umOrigin(owner);
  var vertices:array<f32,8>;
- // Resolved: an owner's corners are width-aligned vertices of its tile
- // closure. Their tile's stencil holds the owner, so it is unit or mixed (a
- // unit owner) or the corner is 4-aligned (a 4h owner): umVertexValue is this
- // load, without its one or two stencil loads per corner.
+ // An owner's corners are width-aligned vertices of its tile closure. Their
+ // tile's stencil holds the owner, so it is unit or mixed (a unit owner) or
+ // the corner is 4-aligned (a 4h owner): the resolved field's umVertexValue
+ // is this load, without its one or two stencil loads per corner.
  if(owner.width==4u){for(var j=0u;j<8u;j++){vertices[j]=umLoadCorner(origin+vec3u(uvCorner(j))*4u);}}
- else{for(var j=0u;j<8u;j++){vertices[j]=${this.resolved?"umLoadVertex":"umVertexValue"}(origin+vec3u(uvCorner(j))*owner.width);}}
+ else{for(var j=0u;j<8u;j++){vertices[j]=umLoadVertex(origin+vec3u(uvCorner(j))*owner.width);}}
  var open=1.0;if(owner.width==4u){open=umTileOpen(owner.tile);}
  let value=gcEvaluate(owner,vertices,open,false);
  // Native uvTarget scales by the open fraction; a 4h owner's fill is already
  // over its tile's open cells.
  textureStore(targetFill,vec3i(origin),vec4f(value.x*select(1.0,umCellOpen(vec3i(origin)),owner.width==1u)));
  textureStore(centerPhi,vec3i(origin),vec4f(value.y));
- ${this.pressure?`if(geometryPressure&&owner.lane==0u){
+ if(geometryPressure&&owner.lane==0u){
   var coarse=value;
   if(owner.width!=4u){
    // The tile's all-4h owner: its eight tile corners, stored vertices.
@@ -181,12 +178,12 @@ fn gcOwner(owner:UMOwner,terms:bool){
    coarse=gcEvaluate(tileOwner,corners,umTileOpen(owner.tile),terms);
   }
   textureStore(pressureTarget,vec3i(origin),vec4f(coarse.x));textureStore(pressureCenterPhi,vec3i(origin),vec4f(coarse.y));
- }`:""}
+ }
 }
 @compute @workgroup_size(64) fn geometry(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(gid);
- ${this.pressure?"if(geometryPressure){gcShare(owner);workgroupBarrier();}":""}
- if(owner.width==0u){return;}gcOwner(owner,${this.pressure?"geometryPressure":"false"});
+ if(geometryPressure){gcShare(owner);workgroupBarrier();}
+ if(owner.width==0u){return;}gcOwner(owner,geometryPressure);
 }
 // Changed tiles: the adopted generation's dilated list (each tile once),
 // split by width. One lane per entry over a grid of the list's bound.
@@ -215,19 +212,17 @@ var<workgroup> gcJobs:vec2u;
     const layout=this.device.createPipelineLayout({bindGroupLayouts:groups}),listed=this.device.createPipelineLayout({bindGroupLayouts:[...groups,this.listResources]});
     const create=(entryPoint:string,constants:Record<string,number>={},pipelineLayout=layout)=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout:pipelineLayout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants,...s}}}),{entry:entryPoint});
     const all={umCountedJobs:UNIFORM_MIXED_COUNTED.all};
-    [this.pipeline,this.pressurePipeline]=await Promise.all([create("geometry",all),this.pressure?create("geometry",{...all,geometryPressure:1}):undefined]);
-    if(this.mirror){
-      // Every live owner's texel, as a launch above wrote it.
-      const mirror=uniformDetailModule(this.device,{label:"Uniform mixed geometric fill mirror",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+    [this.pipeline,this.pressurePipeline]=await Promise.all([create("geometry",all),create("geometry",{...all,geometryPressure:1})]);
+    // Every live owner's texel, as a launch above wrote it.
+    const mirror=uniformDetailModule(this.device,{label:"Uniform mixed geometric fill mirror",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var outputVolume:texture_storage_3d<r32float,write>;
 @compute @workgroup_size(64) fn mirror(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(gid);if(owner.width==0u){return;}
  let origin=vec3i(umOrigin(owner));textureStore(outputVolume,origin,vec4f(textureLoad(volume,origin,0).x));
 }`,["mirror"])});
-      const mirrorErrors=(await mirror.getCompilationInfo()).messages.filter(m=>m.type==="error");if(mirrorErrors.length)throw new Error(mirrorErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-      this.mirrorPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.mirrorResources!]}),compute:{module:mirror,entryPoint:"mirror",constants:{umDispatchX:this.ownership.dispatchX,...all}}});
-    }
+    const mirrorErrors=(await mirror.getCompilationInfo()).messages.filter(m=>m.type==="error");if(mirrorErrors.length)throw new Error(mirrorErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+    this.mirrorPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.mirrorResources]}),compute:{module:mirror,entryPoint:"mirror",constants:{umDispatchX:this.ownership.dispatchX,...all}}});
     // The changed launch follows a GPU relayout's changed tiles (Dynamic).
     this.changedPipelines.push(...await Promise.all([create("compactChanged",{},listed),create("geometryChanged",{},layout)]));
   }
@@ -236,9 +231,8 @@ var<workgroup> gcJobs:vec2u;
    * generation the ownership adopted since the last encode: evaluate only
    * their neighbourhoods (see the class comment for the caller's precondition). */
   encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,options:{pressure?:boolean;changed?:GPUBuffer}=NO_OPTIONS):void{
-    if(!this.pipeline)throw new Error("Mixed surface geometry is not initialized");
+    if(!this.pipeline||!this.pressurePipeline||!this.mirrorPipeline)throw new Error("Mixed surface geometry is not initialized");
     if(options.pressure&&options.changed)throw new Error("Mixed geometry writes pressure outputs only in a full launch");
-    if(options.pressure&&!this.pressurePipeline)throw new Error("Mixed geometry was built without pressure outputs");
     const revision=this.ownership.revision;
     if(options.changed&&this.encodedRevision!==revision-1)throw new Error(`Mixed geometry's changed launch needs exactly one adoption since its last encode (revision ${this.encodedRevision} -> ${revision})`);
     this.encodedRevision=revision;
@@ -253,11 +247,11 @@ var<workgroup> gcJobs:vec2u;
       pass.setPipeline(this.variant(compact));pass.dispatchWorkgroups(Math.min(groups,x),ceilDiv(groups,x));
       pass.setPipeline(this.variant(changed));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
     }
-    else this.ownership.dispatchAllCounted(pass,this.variant(options.pressure?this.pressurePipeline!:this.pipeline));
+    else this.ownership.dispatchAllCounted(pass,this.variant(options.pressure?this.pressurePipeline:this.pipeline));
     // Every live owner, after a changed launch too: the mirror may have been
     // remapped in tiles this launch did not evaluate.
-    const mirror=this.mirrorGroups.get(group);
-    if(mirror){pass.setBindGroup(1,mirror.group);this.ownership.dispatchAllCounted(pass,uniformDetailPick(this.mirrorPipeline!));}
+    const mirror=this.mirrorGroups.get(group);if(!mirror)throw new Error("Mixed geometry group was not bound by this stage");
+    pass.setBindGroup(1,mirror.group);this.ownership.dispatchAllCounted(pass,uniformDetailPick(this.mirrorPipeline));
     pass.end();
   }
   private variant(p:GPUComputePipeline):GPUComputePipeline{return uniformDetailPick(this.solid?.select(p)??p);}

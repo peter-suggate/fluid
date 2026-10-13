@@ -43,7 +43,7 @@ export class UniformMixedPhiResolve {
   }
 
   bind(field: GPUTexture): UniformDetailGroup {
-    const size = this.ownership.capacity.lattice.dimensions.map(n => n + 1);
+    const size = this.ownership.capacity.address.vertexBox;
     if (field.format !== "r32float" || uniformDetailExtent(field).some((n, a) => n !== size[a]))
       throw new Error("Mixed phi resolve requires a native vertex phi field");
     return uniformDetailGroup(this.device,{ layout: this.resources, entries: [{ binding: 0, resource: field }] });
@@ -76,7 +76,7 @@ var<workgroup> umResolveLattice:array<f32,27>;
 ${job}
  // Incident c=0 serves only the aligned local-zero vertex, never written
  // here, so its lattice slot 0 is not needed.
- if(valid&&lane>=9u&&lane<35u){let v=(base+vec3i(umCorner(lane-8u,3u))-vec3i(1))*4;if(all(v>=vec3i(0))){umResolveLattice[lane-8u]=umLoadVertex(vec3u(v));}}
+ if(valid&&lane>=9u&&lane<35u){let v=(base+vec3i(umCorner(lane-8u,3u))-vec3i(1))*4;if(umVertexPresent(v)){umResolveLattice[lane-8u]=umLoadVertex(vec3u(v));}}
  workgroupBarrier();
  if(!valid){return;}
 ${uniformCompiledVertexResolveWGSL("umResolveLattice","umVertexWeight","umVertexSum8")}

@@ -1,4 +1,6 @@
-/** CM11a topology and coefficient setup for the coarse mixed pressure continuation. */
+/** CM11a topology and coefficient setup for the coarse mixed pressure
+ * continuation: a whole module, whose group 0 is the solver's params uniform
+ * and the shared scratch arena. */
 export { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE } from "./pressure-policy";
 export const uniformPressureInPlaceSmootherWGSL = /* wgsl */ `
 var<workgroup> mgTileLive:atomic<u32>;
@@ -9,7 +11,7 @@ var<workgroup> mgTileConstrained:atomic<u32>;
 fn mgBuildSmoothTiles(@builtin(global_invocation_id) gid:vec3u,
  @builtin(workgroup_id) tile:vec3u,@builtin(local_invocation_index) lane:u32){
   if(mgBakedLiquid(vec3i(gid))){atomicStore(&mgTileLive,1u);}
-  if(MG_CYCLE_TILES&&mgValid(vec3i(gid),mg.levelDims.xyz)&&textureLoad(mgMinimumIn,vec3i(gid),0).x> -3.0e38){atomicOr(&mgTileConstrained,select(1u,2u,mgInterior(vec3i(gid),mg.levelDims.xyz)));}
+  if(mgValid(vec3i(gid),mg.levelDims.xyz)&&textureLoad(mgMinimumIn,vec3i(gid),0).x> -3.0e38){atomicStore(&mgTileConstrained,1u);}
   let live=workgroupUniformLoad(&mgTileLive);
   let d=(mg.levelDims.xyz+vec3u(3))/4u;
   let index=tile.x+d.x*(tile.y+d.y*tile.z);
@@ -17,17 +19,11 @@ fn mgBuildSmoothTiles(@builtin(global_invocation_id) gid:vec3u,
     let slot=atomicAdd(&mgCycleDispatch[0],1u);
     atomicStore(&mgCycleDispatch[4u+slot],index);
   }
-
-
-  if(MG_CYCLE_TILES){
-    let constrained=workgroupUniformLoad(&mgTileConstrained);
-    if(lane==0u){atomicStore(&mgCycleDispatch[4u+d.x*d.y*d.z+index],select(0u,1u,live!=0u)|select(0u,2u,constrained!=0u)|select(0u,4u,(constrained&2u)!=0u));}
-  }
+  let constrained=workgroupUniformLoad(&mgTileConstrained);
+  if(lane==0u){atomicStore(&mgCycleDispatch[4u+d.x*d.y*d.z+index],select(0u,1u,live!=0u)|select(0u,2u,constrained!=0u));}
 }
 
 @group(1) @binding(19) var<storage,read_write> mgCycleTiles:array<atomic<u32>>;
-
-override MG_HALO_ENTRIES:bool=false;
 
 @compute @workgroup_size(64)
 fn mgBuildCycleTiles(@builtin(global_invocation_id) gid:vec3u){
@@ -44,22 +40,20 @@ fn mgBuildCycleTiles(@builtin(global_invocation_id) gid:vec3u){
     if((atomicLoad(&mgCycleDispatch[4u+n+j])&1u)!=0u){near=true;}
   }
   if(!near&&(own&2u)==0u){return;}
-  if(MG_HALO_ENTRIES&&!near&&(own&4u)==0u){
-    for(var a=0u;a<3u;a+=1u){
-      if(t[a]==0){let slot=atomicAdd(&mgCycleTiles[4u+n],1u);atomicStore(&mgCycleTiles[5u+n+slot],8u*at+2u*a);}
-      if(t[a]==i32(d[a])-1){let slot=atomicAdd(&mgCycleTiles[4u+n],1u);atomicStore(&mgCycleTiles[5u+n+slot],8u*at+2u*a+1u);}
-    }
-    return;
-  }
   let slot=atomicAdd(&mgCycleTiles[0],1u);
   atomicStore(&mgCycleTiles[4u+slot],at);
 }
-
-override MG_ROW_SEGMENT:u32=8u;
-
-override MG_VISIT_LANES:u32=256u;
 `;
 export const uniformPressureMultigridWGSL = /* wgsl */ `
+// The leading fields of the solver's params uniform; boundary.w > 0.5 is an open top.
+struct Params {
+  dimsDt: vec4f, cellGravity: vec4f, container: vec4f, physical: vec4f, boundary: vec4f,
+}
+
+@group(0) @binding(6) var<uniform> params: Params;
+
+@group(0) @binding(35) var<storage,read_write> uniformScratch: array<u32>;
+
 struct UniformMGParams {
   fineDims: vec4u,
   levelDims: vec4u,
@@ -80,29 +74,9 @@ struct UniformMGParams {
 
 @group(1) @binding(11) var mgMinimumIn: texture_3d<f32>;
 
-struct UniformCoarseRow {
-  p: f32, low: f32, rhs: f32, phi: f32,
-  minimum: f32, residual: f32, state: u32, padding: u32,
-  topology: vec4f,
-}
-
-struct UniformPressureState {
-  convergence: array<atomic<u32>,28>,
-  rows: array<UniformCoarseRow>,
-}
-
-@group(1) @binding(13) var<storage,read_write> mgState: UniformPressureState;
-
 @group(1) @binding(14) var mgCoefficientsIn: texture_3d<f32>;
 
 @group(1) @binding(15) var mgCoefficientsOut: texture_storage_3d<rgba32float,write>;
-
-fn mgSkipCycle()->bool{
-  if(mg.levelDims.w==0u){return false;}
-  if(atomicLoad(&mgState.convergence[16])!=0u){return true;}
-  let recovery=atomicLoad(&mgState.convergence[22])!=0u;
-  return select(recovery,!recovery,mg.levelDims.w==2u);
-}
 
 @group(1) @binding(18) var<storage,read_write> mgCycleDispatch:array<atomic<u32>>;
 
@@ -124,20 +98,8 @@ fn mgD4Sum8Vec4(value:array<vec4f,8>)->vec4f{
   return y0+y1;
 }
 
-fn mgActiveId(gid:vec3u)->vec3i{
-
-
-  if(pressureWindowLattice()){return vec3i(gid);}
-
-
-
-
-  let base=16u+10u*mg.fineDims.w;
-  let packed=activeRegion[base+9u];
-  if((packed&0x40000000u)!=0u&&any(gid>=vec3u(
-    packed&1023u,(packed>>10u)&1023u,(packed>>20u)&1023u))){return vec3i(-1);}
-  return vec3i(gid)+vec3i(vec3u(activeRegion[base],activeRegion[base+1u],activeRegion[base+2u]));
-}
+// There is no window and no level origin: the launch id is the cell.
+fn mgActiveId(gid:vec3u)->vec3i{return vec3i(gid);}
 
 fn mgFineChild(coarse:vec3i,o:vec3i)->vec3i{
   let finePhysical=vec3i(mg.levelDims.xyz)-vec3i(2);
@@ -150,26 +112,16 @@ fn mgTopology(p:vec3i)->vec4f{return textureLoad(mgVolumeIn,mgClamp(p,mg.levelDi
 
 fn mgPhi(p:vec3i)->f32{return textureLoad(mgPhiIn,mgClamp(p,mg.levelDims.xyz),0).x;}
 
-fn mgLiquidPhi(phi:f32)->bool{
-  if(MG_MIXED_SURFACE_THETA){return (phi< -0.001*min(mg.spacing.x,min(mg.spacing.y,mg.spacing.z)));}
-  return phi<0.0;
-}
+fn mgLiquidPhi(phi:f32)->bool{return phi< -0.001*min(mg.spacing.x,min(mg.spacing.y,mg.spacing.z));}
 
 fn mgLiquid(p:vec3i)->bool{return mgValid(p,mg.levelDims.xyz)&&mgLiquidPhi(mgPhi(p));}
-
-fn mgInterior(p:vec3i,d:vec3u)->bool{return all(p>=vec3i(1))&&all(p<vec3i(d)-vec3i(1));}
 
 fn mgFaceV(id:vec3i,neighbor:vec3i,axis:u32)->f32{
   let positive=neighbor[axis]>id[axis];
   return select(mgTopology(neighbor)[axis+1u],mgTopology(id)[axis+1u],positive);
 }
 
-const MG_MIXED_SURFACE_THETA:bool=false;
-
-fn mgSurfaceTheta(liquidPhi:f32,airPhi:f32)->f32{
-  if(MG_MIXED_SURFACE_THETA){return clamp(-liquidPhi/max(airPhi-liquidPhi,1e-30),0.001,1000.0);}
-  return cm12GhostFluidTheta(liquidPhi,airPhi,1e-9);
-}
+fn mgSurfaceTheta(liquidPhi:f32,airPhi:f32)->f32{return clamp(-liquidPhi/max(airPhi-liquidPhi,1e-30),0.001,1000.0);}
 
 fn mgTheta(liquidCell:vec3i,airCell:vec3i)->f32{
   let a=mgPhi(liquidCell);let b=mgPhi(airCell);
@@ -204,10 +156,6 @@ fn mgBakedLiquid(p:vec3i)->bool{
   return mgValid(p,mg.levelDims.xyz)&&(u32(textureLoad(mgCoefficientsIn,p,0).w)&1u)!=0u;
 }
 
-override MG_CYCLE_TILES:bool=true;
-
-override MG_REUSE_FINEST_AUTHORITY:bool=true;
-
 fn mgAverageSubmerged(c:vec3i)->bool{
   if(!mgValid(c,mg.coarseDims.xyz)){return true;}
   var terms:array<f32,8>;var count=0.0;
@@ -227,7 +175,6 @@ fn mgAirVanishes(c:vec3i)->bool{
 
 @compute @workgroup_size(4,4,4)
 fn mgDownsampleTopology(@builtin(global_invocation_id) gid:vec3u){
-  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}
   var topologyTerms:array<vec4f,8>;var phiTerms:array<f32,8>;var openTerms:array<f32,8>;var openFlags:array<f32,8>;
   var positiveTerms:array<f32,8>;var positiveFlags:array<f32,8>;var negativeFlags:array<f32,8>;
@@ -284,7 +231,6 @@ fn mgDownsampleTopology(@builtin(global_invocation_id) gid:vec3u){
 
 @compute @workgroup_size(4,4,4)
 fn mgExtrapolatePhiOneCell(@builtin(global_invocation_id) gid:vec3u){
-  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   
   if(mgTopology(id).x>1e-5){textureStore(mgPhiOut,id,vec4f(mgPhi(id)));return;}
@@ -295,18 +241,15 @@ fn mgExtrapolatePhiOneCell(@builtin(global_invocation_id) gid:vec3u){
   textureStore(mgPhiOut,id,vec4f(select(mgPhi(id),sum/max(weight,1e-9),weight>0.0)));
 }
 
-override MG_MASK_FIRST:bool=true;
-
 @compute @workgroup_size(4,4,4)
 fn mgBakeCoefficients(@builtin(global_invocation_id) gid:vec3u){
-  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   var mask=select(0u,1u,mgLiquid(id));
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   for(var n=0u;n<6u;n+=1u){if(mgLiquid(id+e[n])){mask|=2u<<n;}}
 
 
-  if(MG_MASK_FIRST&&mask==0u){textureStore(mgCoefficientsOut,id,vec4f(0.0));return;}
+  if(mask==0u){textureStore(mgCoefficientsOut,id,vec4f(0.0));return;}
   let coefficients=vec3f(
     mgCoefficientRaw(id,id+vec3i(1,0,0),0u),
     mgCoefficientRaw(id,id+vec3i(0,1,0),1u),

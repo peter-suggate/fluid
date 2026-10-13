@@ -1,5 +1,4 @@
-/** Particle geometry enters the canonical simulation phi before pressure.
- * The optional dense publication uses the same reconstruction, at h vertices. */
+/** Particle geometry enters the canonical simulation phi before pressure. */
 export const NARROW_BAND_SURFACE_RADIUS=0.875;
 // A quarter-cell lattice has two tangential offsets of h/4 at a vertex.
 export const NARROW_BAND_SEED_DEPTH=Math.sqrt(NARROW_BAND_SURFACE_RADIUS**2-0.125);
@@ -13,8 +12,8 @@ export const narrowBandParticleSurfaceWGSL=/* wgsl */`
 const NB_SURFACE_RADIUS=${NARROW_BAND_SURFACE_RADIUS};
 const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
 fn particleSurfaceBulk(q:vec3i)->vec2f{
- if(nbAdaptive()&&nbTheta(vec3f(q))<=0.0){return vec2f(bandPhi(vec3f(q)),0.0);}
- let bulk=bulkDepth(vec3f(q));let tile=umTileAt(min(vec3u(q)/4u,UM_T-1u));
+ if(nbTheta(vec3f(q))<=0.0){return vec2f(bandPhi(vec3f(q)),0.0);}
+ let bulk=bulkDepth(vec3f(q));let tile=umTileAt(vec3u(umTileNear(vec3i(vec3u(q)/4u))));
  // Deeper than this the shrunk level set wins the union whatever the samples
  // are; nothing bounds how far into the air they may carry the surface.
  let gather=atomicLoad(&bins[NB_SURFACE_TILES+tile])!=0u&&bulk>-2.0&&nbTheta(vec3f(q))>0.0;
@@ -24,7 +23,7 @@ fn particleSurfaceBulk(q:vec3i)->vec2f{
 fn particleSurfaceGather(q:vec3i,member:u32,stride:u32)->f32{
  let x=vec3f(q);var nearest2=4.0;
  for(var bin=member;bin<64u;bin+=stride){
-  let cell=q-2+vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u));if(any(cell<vec3i(0))||any(cell>=vec3i(UM_D))){continue;}
+  let cell=q-2+vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u));if(!umCellPresent(cell)){continue;}
   let run=nbCellRun(cell);
   for(var index=run.x;index<run.y;index++){let offset=x-nbPosition(index);nearest2=min(nearest2,dot(offset,offset));}
  }
@@ -40,8 +39,8 @@ fn particleSurfaceNearest(q:vec3i)->f32{
  // Split only at a tile boundary, keeping the original z/y/x visit order.
  for(var row=0u;row<4u;row++){
   let y=q.y-1+i32(row%2u);let z=q.z-1+i32(row/2u);
-  if(y<0||z<0||y>=i32(UM_D.y)||z>=i32(UM_D.z)){continue;}
-  var start=max(q.x-1,0);let last=min(q.x,i32(UM_D.x)-1);
+  var start=umCellNear(vec3i(q.x-1,y,z)).x;let last=umCellNear(vec3i(q.x,y,z)).x;
+  if(!umCellPresent(vec3i(start,y,z))){continue;}
   while(start<=last){
    let end=min(last,start|3);let run=nbRun(vec3i(start,y,z),vec3i(end,y,z));
    for(var index=run.x;index<run.y;index++){let offset=x-nbPosition(index);nearest2=min(nearest2,dot(offset,offset));}
@@ -52,7 +51,7 @@ fn particleSurfaceNearest(q:vec3i)->f32{
  for(var bin=0u;bin<64u;bin++){
   let o=vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u))-2;
   let gap=max(o,-o-1);if(all(gap==vec3i(0))||f32(dot(gap,gap))>=nearest2){continue;}
-  let cell=q+o;if(any(cell<vec3i(0))||any(cell>=vec3i(UM_D))){continue;}
+  let cell=q+o;if(!umCellPresent(cell)){continue;}
   let run=nbCellRun(cell);
   for(var index=run.x;index<run.y;index++){let offset=x-nbPosition(index);nearest2=min(nearest2,dot(offset,offset));}
  }
@@ -61,7 +60,7 @@ fn particleSurfaceNearest(q:vec3i)->f32{
 fn particleSurfaceFinish(q:vec3i,bulk:f32,nearest2:f32)->f32{
  // An empty gather has no particle surface to blend; never erode a cold
  // or newly activated region before its surface samples exist.
- if(nbAdaptive()&&nearest2>=4.0){return nbSourcePhi(vec3f(q),bulk);}
+ if(nearest2>=4.0){return nbSourcePhi(vec3f(q),bulk);}
  // The nearest sample bounds the surface between its own sphere and the plane
  // of a seeded shell (samples NB_SEED_DEPTH down, the lattice's h/4 offsets to
  // the side): a level set between the two stands. Read as the sphere alone, a
@@ -106,9 +105,10 @@ export const narrowBandTiledSurfaceWGSL=/* wgsl */`
 export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+
  narrowBandTiledSurfaceWGSL.replace("particleSurfaceNearest(q)","nbCachedSurfaceNearest(q)")+/* wgsl */`
 // The compact motion arena is dead until classify, after reconstruction.
-fn nbSurfaceCells()->u32{return NB_CELLS+4u*arrayLength(&particles);}
+fn nbSurfaceCells()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}
 @compute @workgroup_size(64) fn surfaceCells(@builtin(global_invocation_id) gid:vec3u){
- for(var cell=gid.x;cell<NB_CELLS;cell+=65536u){
+ for(var cell=gid.x;cell<UM_CELL_KEYS;cell+=65536u){
+  if(!umTileLive(cell/64u)){continue;}
   if(nbSparseBins&&atomicLoad(&bins[NB_COVERAGE+cell/64u])==0u){continue;}
   if(atomicLoad(&bins[cell])==0u){continue;}
   let slot=atomicAdd(&bins[NB_BAND+3u],1u);links[nbSurfaceCells()+slot]=cell;
@@ -117,35 +117,28 @@ fn nbSurfaceCells()->u32{return NB_CELLS+4u*arrayLength(&particles);}
 @compute @workgroup_size(64) fn surfaceSplat(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let cell=links[nbSurfaceCells()+group.x];let c=4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u);
  let q=vec3i(c)+vec3i(umCorner(lane,4u))-1;
- if(any(q<vec3i(0))||any(q>vec3i(UM_D))){return;}
+ if(!umVertexPresent(q)){return;}
  let start=links[cell];let end=start+atomicLoad(&bins[cell]);var nearest2=4.0;
  for(var i=start;i<end;i++){let d=vec3f(q)-nbPosition(i);nearest2=min(nearest2,dot(d,d));}
  // Positive float bit order: complement reverses it; zero is the empty key.
- if(nearest2<4.0){atomicMax(&bins[NB_DEPTH_A+nbVertexIndex(vec3u(q))],~bitcast<u32>(nearest2));}
+ if(nearest2<4.0){atomicMax(&bins[NB_DEPTH_A+umVertexAt(vec3u(q))],~bitcast<u32>(nearest2));}
 }
 fn nbCachedSurfaceNearest(q:vec3i)->f32{
- let key=atomicLoad(&bins[NB_DEPTH_A+nbVertexIndex(vec3u(q))]);
+ let key=atomicLoad(&bins[NB_DEPTH_A+umVertexAt(vec3u(q))]);
  if(key==0u){return 4.0;}return bitcast<f32>(~key);
 }
 @compute @workgroup_size(64) fn couple(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(vec3u(umCounts.x*64u+gid.x,0,0));if(owner.width!=4u){return;}
  let origin=umOrigin(owner);let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
+ // A low corner is this tile's to write only where nothing is stored below it.
+ let low=umLowOpen(vec3i(origin));
  for(var k=0u;k<8u;k++){
   let corner=umCorner(k,2u);let q=origin+4u*corner;
-  if(regular){if(!all((corner!=vec3u(0))|(origin==vec3u(0)))){continue;}}
+  if(regular){if(!all((corner!=vec3u(0))|low)){continue;}}
   else if(umVertexAuthority(q).index!=owner.index){continue;}
   let bulk=particleSurfaceBulk(vec3i(q));var value=bulk.x;
   if(bulk.y>0.0){value=particleSurfaceFinish(vec3i(q),bulk.x,nbCachedSurfaceNearest(vec3i(q)));}
   textureStore(outputPhi,vec3i(q),vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
- }
-}
-@compute @workgroup_size(64) fn surface(@builtin(global_invocation_id) gid:vec3u){
- let dims=UM_D+1u;let count=dims.x*dims.y*dims.z;
- for(var i=gid.x;i<count;i+=65536u){
-  let q=vec3i(vec3u(i%dims.x,(i/dims.x)%dims.y,i/(dims.x*dims.y)));
-  // Publication only; do not erode a second time after coupling.
-  textureStore(surfacePhi,q,vec4f(bandPhi(vec3f(q))*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
-  if(all(q<vec3i(UM_D))){textureStore(surfaceOpen,q,vec4f(umCellOpen(q)));}
  }
 }
 `;
@@ -154,15 +147,14 @@ fn nbCachedSurfaceNearest(q:vec3i)->f32{
  * The expired scatter cursors fit six words per fine cell at sparse layouts:
  * a face's theta and its samples' own heat over the collar's (nbTheta and
  * nbSurfaceTheta, sixteen bits each), then its expected weight. */
-export function narrowBandTransferPropertiesSource(subgroups=false):string{return /* wgsl */`
-fn nbTransferPropertiesFit()->bool{return 416u*umCounts.x<=NB_CELLS;}
+export function narrowBandTransferPropertiesSource(subgroups:boolean):string{return /* wgsl */`
+fn nbTransferPropertiesFit()->bool{return 416u*umCounts.x<=UM_CELL_KEYS;}
 var<workgroup> nbTransferDepth:array<f32,125>;
 var<workgroup> nbTransferActive:array<u32,64>;
 var<workgroup> nbTransferHeat:array<f32,27>;
 // Negative for cold air, which nbSurfaceTheta leaves out.
 var<workgroup> nbTransferHot:array<f32,27>;
 fn nbTransferTheta(local:vec3f)->vec2f{
- if(!nbAdaptive()){return vec2f(1.0);}
  let q=local/4.0+0.5;let base=vec3u(floor(q));let f=fract(q);var theta=0.0;var hot=0.0;var covered=0.0;
  for(var k=0u;k<8u;k++){
   let bit=umCorner(k,2u);let at=base+bit;let w=select(1.0-f,f,bit!=vec3u(0));let share=w.x*w.y*w.z;let tile=at.x+3u*(at.y+3u*at.z);
@@ -174,18 +166,18 @@ fn nbTransferTheta(local:vec3f)->vec2f{
 @compute @workgroup_size(64) fn transferProperties(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32${subgroups?",@builtin(subgroup_invocation_id) subgroupLane:u32":""}){
  if(!nbTransferPropertiesFit()){return;}
  let owner=umAllOwner(vec3u(group.x*64u,0u,0u));let origin=4u*umTileCoord(owner.tile);
- for(var k=lane;k<125u;k+=64u){let q=origin+umCorner(k,5u);nbTransferDepth[k]=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+nbVertexIndex(q)]));}
- if(lane<27u&&nbAdaptive()){
-  let t=vec3u(clamp(vec3i(umTileCoord(owner.tile))+vec3i(umCorner(lane,3u))-1,vec3i(0),vec3i(UM_T)-1));
+ for(var k=lane;k<125u;k+=64u){let q=origin+umCorner(k,5u);nbTransferDepth[k]=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(q)]));}
+ if(lane<27u){
+  let t=vec3u(umTileNear(vec3i(umTileCoord(owner.tile))+vec3i(umCorner(lane,3u))-1));
   nbTransferHeat[lane]=clamp(bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_THETA+umTileAt(t)])),0.0,1.0);
   let own=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_SURFACE_HEAT+umTileAt(t)]));
   nbTransferHot[lane]=select(clamp(own-1.0,0.0,1.0),-1.0,own<=0.0&&bandPhi(4.0*vec3f(t)+2.0)>=0.0);
  }
  workgroupBarrier();
- let local=umCorner(lane,4u);let cell=origin+local;let at=NB_CELLS+6u*(64u*group.x+lane);var needed=false;var properties:array<vec3f,3>;
+ let local=umCorner(lane,4u);let cell=origin+local;let at=UM_CELL_KEYS+6u*(64u*group.x+lane);var needed=false;var properties:array<vec3f,3>;
  for(var axis=0u;axis<3u;axis++){
   var near=vec2f(0.0);var expected=1.0;var low=local;low[axis]+=1u;
-  if(cell[axis]+1u<UM_D[axis]&&(nbBandReach(origin+low)&1u)!=0u){
+  if(umCellPresent(vec3i(origin+low))&&(nbBandReach(origin+low)&1u)!=0u){
    var depth=0.0;
    // The positive MAC face has fraction zero along its normal. Preserve the
    // eight-corner accumulation order while skipping its four zero terms.
@@ -202,19 +194,17 @@ fn nbTransferTheta(local:vec3f)->vec2f{
  // without relying on a mapping between local and subgroup lane indices.
  let rank=subgroupExclusiveAdd(u32(emit));let count=subgroupAdd(u32(emit));var first=0u;
  if(subgroupLane==0u&&count!=0u){first=atomicAdd(&state[9],count);}first=subgroupBroadcastFirst(first);
- if(emit){atomicStore(&bins[NB_CELLS+384u*umCounts.x+first+rank],32u*group.x+lane/2u);}`:`
- if(emit){let slot=atomicAdd(&state[9],1u);atomicStore(&bins[NB_CELLS+384u*umCounts.x+slot],32u*group.x+lane/2u);}`}
+ if(emit){atomicStore(&bins[UM_CELL_KEYS+384u*umCounts.x+first+rank],32u*group.x+lane/2u);}`:`
+ if(emit){let slot=atomicAdd(&state[9],1u);atomicStore(&bins[UM_CELL_KEYS+384u*umCounts.x+slot],32u*group.x+lane/2u);}`}
  if(!neededPair){textureStore(output,vec3i(cell),textureLoad(velocity,vec3i(cell),0));return;}
  for(var axis=0u;axis<3u;axis++){atomicStore(&bins[at+2u*axis],pack2x16unorm(properties[axis].xy));atomicStore(&bins[at+2u*axis+1u],bitcast<u32>(properties[axis].z));}
 }
 `;}
-export const narrowBandTransferPropertiesWGSL=narrowBandTransferPropertiesSource();
-
 /** Adjacent fine cells share their particle reads. Each sixteen-lane team
  * gathers the union of two neighboring x cells' quadratic MAC supports and
  * accumulates both results in registers. Spatial order makes each x row at
  * most two runs, without a per-bin particle limit. */
-export function narrowBandFineTransferSource(subgroups=false,prepared=false):string{return /* wgsl */`
+export function narrowBandFineTransferSource(subgroups:boolean):string{return /* wgsl */`
 var<workgroup> nbMomentum:array<vec3f,64>;
 var<workgroup> nbMass:array<vec3f,64>;
 var<workgroup> nbMomentumNext:array<vec3f,64>;
@@ -230,17 +220,17 @@ var<workgroup> nbRuns:array<vec2u,128>;
  let lane=subgroupLane;
  `:""}
  let pair=(gid.x/${subgroups?32:64}u)*${subgroups?2:4}u+lane/16u;var first=2u*pair;var valid=true;
- ${prepared?`if(nbTransferPropertiesFit()){valid=pair<atomicLoad(&state[9]);first=2u*atomicLoad(&bins[NB_CELLS+384u*umCounts.x+pair]);}`:""}
+ if(nbTransferPropertiesFit()){valid=pair<atomicLoad(&state[9]);first=2u*atomicLoad(&bins[UM_CELL_KEYS+384u*umCounts.x+pair]);}
  let owner=umAllOwner(vec3u(first,0,0));let origin=umOrigin(owner);
  let next=umAllOwner(vec3u(first+1u,0,0));let nextOrigin=umOrigin(next);
  let team=lane/16u;let member=lane%16u;let centre=vec3f(origin)+0.5;
  if(member<6u){
   let axis=member%3u;let o=select(origin,nextOrigin,member>=3u);let width=select(owner.width,next.width,member>=3u);
   var near=vec2f(0.0);var expected=1.0;
-  ${prepared?`if(nbTransferPropertiesFit()){
-   let at=NB_CELLS+6u*(first+u32(member>=3u))+2u*axis;
+  if(nbTransferPropertiesFit()){
+   let at=UM_CELL_KEYS+6u*(first+u32(member>=3u))+2u*axis;
    near=select(vec2f(0.0),unpack2x16unorm(atomicLoad(&bins[at])),valid);expected=bitcast<f32>(atomicLoad(&bins[at+1u]));
-  }else `:""}if(width==1u&&o[axis]+1u<UM_D[axis]){
+  }else if(width==1u&&umAcrossKind(vec3i(o),axis,1)==UM_RESIDENT){
    var q=vec3f(o)+0.5;q[axis]+=0.5;let depth=particleDepth(q);
    if(depth<=1.5&&depth>=-2.0){near=vec2f(nbTheta(q),nbSurfaceTheta(q));expected=max(1.0,8.0*clamp(0.5-depth,0.0,1.0));}
   }
@@ -253,9 +243,9 @@ var<workgroup> nbRuns:array<vec2u,128>;
  if(gather){
   let low=vec3i(origin)-1;let row=member;
   let y=low.y+i32(row%4u);let z=low.z+i32(row/4u);var runs=array<vec2u,2>();
-  if(row<15u&&y>=0&&y<i32(UM_D.y)&&z>=0&&z<i32(UM_D.z)){
-   let last=min(low.x+select(4,3,row%4u==3u||row>=12u),i32(UM_D.x)-1);
-   var x=max(low.x,0);
+  var x=umCellNear(vec3i(low.x,y,z)).x;
+  if(row<15u&&umCellPresent(vec3i(x,y,z))){
+   let last=umCellNear(vec3i(low.x+select(4,3,row%4u==3u||row>=12u),y,z)).x;
    for(var part=0u;x<=last;part++){let stop=min(last,x|3);runs[part]=nbRun(vec3i(x,y,z),vec3i(stop,y,z));x=stop+1;}
   }
   nbRuns[32u*team+2u*row]=runs[0];nbRuns[32u*team+2u*row+1u]=runs[1];
@@ -299,14 +289,14 @@ var<workgroup> nbRuns:array<vec2u,128>;
  if(valid&&member==0u&&owner.width==1u){
   let original=textureLoad(velocity,vec3i(origin),0);let mass=total;
   var transition=blend;
-  if(nbAdaptive()){for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+a]),1.0,nbHot[6u*team+a]);}}
+  for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+a]),1.0,nbHot[6u*team+a]);}
   let value=mix(original.xyz,momentum/max(mass,vec3f(1e-30)),select(vec3f(0),transition,mass>=vec3f(1e-5)));
   textureStore(output,vec3i(origin),vec4f(value,original.w));
  }
  if(valid&&member==0u&&next.width==1u){
   let original=textureLoad(velocity,vec3i(nextOrigin),0);let mass=totalNext;
   var transition=nextBlend;
-  if(nbAdaptive()){for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+3u+a]),1.0,nbHot[6u*team+3u+a]);}}
+  for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+3u+a]),1.0,nbHot[6u*team+3u+a]);}
   let value=mix(original.xyz,momentumNext/max(mass,vec3f(1e-30)),select(vec3f(0),transition,mass>=vec3f(1e-5)));
   textureStore(output,vec3i(nextOrigin),vec4f(value,original.w));
  }
@@ -314,5 +304,3 @@ var<workgroup> nbRuns:array<vec2u,128>;
 `;
 
 }
-/** Portable reference variant; small subgroups also use its shared tree. */
-export const narrowBandFineTransferWGSL=narrowBandFineTransferSource();

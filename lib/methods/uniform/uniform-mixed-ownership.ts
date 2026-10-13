@@ -4,6 +4,7 @@ import type { RefinementRegionLattice } from "../../core/refinement-regions";
 import { UNIFORM_MIXED_FUSED_REGULAR_TILES, uniformMixedPageCount, uniformMixedResidencyWord, uniformMixedSupportWords } from "./uniform-mixed-topology.wgsl";
 import { uniformDetailPick, uniformDetailSupportWords, uniformDetailTableWords } from "./uniform-detail-fields";
 import { uniformBufferedWork, type UniformWorkEdit } from "./uniform-buffered-work";
+import type { UniformLatticeAddress } from "./uniform-lattice-address";
 
 /** Counts copied into the existing frame receipt: tier counts (4 words),
  * seam counts (2), regular coarse owners, resident pages. */
@@ -27,15 +28,20 @@ function deriveOwnership(layout:UniformMixedLayout,dispatchX:number):OwnershipDe
   const cached=derivations.get(layout);
   if(cached&&cached.dispatchX===dispatchX)return cached;
   const writes:[OwnershipUploadTarget,number,Uint32Array<ArrayBuffer>][]=[];
-  const words=new Uint32Array(layout.metadataBytes/4);let offset=0;
-  for(const part of [layout.tiles,layout.fineTiles,layout.coarseTiles,layout.stencils,layout.blendMasks]){words.set(part,offset);offset+=part.length;}
+  // n tile words (by key), the h then the 4h list from n, two stencil words a key from 2n, a blend mask a key from 4n.
+  const words=new Uint32Array(layout.metadataBytes/4),keys=layout.tiles.length;
+  words.set(layout.tiles,0);words.set(layout.fineTiles,keys);words.set(layout.coarseTiles,keys+layout.fineTiles.length);
+  words.set(layout.stencils,2*keys);words.set(layout.blendMasks,4*keys);
   writes.push(["topology",0,words]);
   // A uniform loop bound prevents explosive Metal sampler unrolling.
   // umCounts: h tiles, 4h tiles, an unused word, the loop bound.
-  writes.push(["counts",0,new Uint32Array([layout.fineTiles.length,layout.coarseTiles.length,0,8])]);
-  // Standalone stages conservatively visit everything until a frame census.
-  writes.push(["support",0,new Uint32Array(layout.tiles.length*4).fill(3)]);
-  const n=layout.tiles.length;
+  writes.push(["counts",0,new Uint32Array([layout.fineTiles.length,layout.boxOwners??layout.coarseTiles.length,0,8])]);
+  // Standalone stages conservatively visit everything until a frame census. The keys of the AIR and the SOLID block
+  // hold no tile and no census writes them: unsupported in every plane, so a stage that resolves an unstored tile
+  // to them (umTileAt) reads no slot of theirs.
+  const n=layout.tiles.length,planes=new Uint32Array(4*n).fill(3);
+  for(let plane=0;plane<4;plane++){planes.fill(0,plane*n,plane*n+512);planes.fill(0,(plane+1)*n-512,(plane+1)*n);}
+  writes.push(["support",0,planes]);
   // 4n: the certificate header (speed, regular and general h counts; every
   // h tile is general until the frame plan certifies).
   const header=new Uint32Array(16);header[2]=layout.fineTiles.length;
@@ -95,27 +101,21 @@ export async function compileMixedTiers(compile:(width:1|4)=>Promise<GPUComputeP
  * frames, by the host (UniformMixedOwnership.reserveFine). */
 export interface UniformMixedCapacity{
   readonly lattice:RefinementRegionLattice;
+  /** Key spaces and texture extents of the lattice. */
+  readonly address:UniformLatticeAddress;
   readonly tileDimensions:readonly [number,number,number];
-  /** Tiles of the lattice (UM_TILES). */
+  /** Tile keys of the lattice (UM_TILES): the extent of every per-tile table. Its tiles are address.boxTiles. */
   readonly tiles:number;
   readonly metadataBytes:number;
   /** Preallocated hanging tap cache slots (umHangingSlots()). */
   readonly hangingSlots:number;
-  /** h tiles the owner-indexed storage holds (C <= tiles): the host's
-   * allocation, never a GPU count. A generation with more is fatal. */
+  /** h tiles the owner-indexed storage holds (C <= address.boxTiles): the
+   * host's allocation, never a GPU count. A generation with more is fatal. */
   readonly fineTiles:number;
-  /** Owners at that capacity: 63*fineTiles+tiles (an h tile is 64 owners
-   * in place of one). */
+  /** Owners at that capacity: 63*fineTiles+address.boxTiles (an h tile is
+   * 64 owners in place of one). */
   readonly owners:number;
 }
-let qaFineCapacity:number|undefined;
-/** QA only (probes and lanes, before they build a solver): a fixed h-tile
- * capacity for every later solver, so owner-indexed buffers are exercised
- * below the lattice. Production never calls it. */
-export function setUniformMixedFineCapacityForQA(tiles?:number):void{qaFineCapacity=tiles;}
-/** The QA capacity on a lattice of `tiles` tiles: fixed, never reserved
- * again. Undefined in production: the solver reserves from its layouts. */
-export function uniformMixedFixedFineCapacity(tiles:number):number|undefined{return qaFineCapacity===undefined?undefined:Math.max(0,Math.min(tiles,Math.floor(qaFineCapacity)));}
 
 /** The GPU buffers of one built generation (UniformMixedLayoutBuilder.
  * generation): topology, support, hanging slot table and the 16-byte counts.
@@ -161,6 +161,8 @@ export class UniformMixedOwnership {
   private seamCounts=[0,0];
   private held:UniformMixedCapacity;
   get capacity():UniformMixedCapacity{return this.held;}
+  /** Where the topology holds the page table and block records, in words: a page pool's mirror (UniformPagePool.initialize). */
+  get pageMirror():{readonly buffer:GPUBuffer;readonly offset:number}{return {buffer:this.topology,offset:this.held.metadataBytes/4};}
   /** Bumped by reserveFine: whoever holds a value or a buffer sized by the
    * h-tile capacity compares it and follows. */
   capacityRevision=0;
@@ -216,11 +218,11 @@ export class UniformMixedOwnership {
    * construction layout is exempt from it: it only seeds a remap (the t=0
    * fields are h data), and no frame can be acquired on it while it is
    * over capacity. */
-  constructor(private readonly device: GPUDevice, layout: UniformMixedLayout, private readonly sampled = true, fineTiles = layout.tiles.length) {
+  constructor(private readonly device: GPUDevice, layout: UniformMixedLayout, private readonly sampled = true, fineTiles = layout.address.boxTiles) {
     this.currentLayout = layout;
-    const n=layout.tiles.length;
-    if(!Number.isInteger(fineTiles)||fineTiles<0||fineTiles>n)throw new Error(`Uniform mixed ownership cannot hold ${fineTiles} h tiles of ${n}`);
-    this.held={lattice:layout.lattice,tileDimensions:layout.tileDimensions,tiles:n,metadataBytes:layout.metadataBytes,hangingSlots:uniformMixedHangingSlotCapacity(n,fineTiles),fineTiles,owners:63*fineTiles+n};
+    const address=layout.address,n=address.tileKeys;
+    if(!Number.isInteger(fineTiles)||fineTiles<0||fineTiles>address.boxTiles)throw new Error(`Uniform mixed ownership cannot hold ${fineTiles} h tiles of ${address.boxTiles}`);
+    this.held={lattice:layout.lattice,address,tileDimensions:address.tiles,tiles:n,metadataBytes:layout.metadataBytes,hangingSlots:uniformMixedHangingSlotCapacity(n,fineTiles),fineTiles,owners:63*fineTiles+address.boxTiles};
     this.dispatchX = device.limits.maxComputeWorkgroupsPerDimension;
     this.bindLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -228,16 +230,23 @@ export class UniformMixedOwnership {
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
     this.hangingLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
-    // The detail-storage table follows the tile words (UM_DETAIL): zero (raw
-    // fields) until a UniformDetailStorage writes it (writeDetail).
-    this.topology = device.createBuffer({ label: "Uniform mixed owners and tier worklists", size: layout.metadataBytes+4*uniformDetailTableWords(layout.lattice.dimensions),
+    // The tail after the tile words: the page table and block records
+    // (UM_PAGE_TABLE, UM_BLOCK_RECORD), written here with the address's seed
+    // and left alone by every generation (copyGeneration stops at the tile
+    // words): `pages` is where a page pool mirrors them. Then the
+    // detail-storage table, zero (raw fields) until a UniformDetailStorage
+    // writes it (writeDetail).
+    const pages=address.seed.tail;
+    this.detailBytes=layout.metadataBytes+pages.byteLength;
+    this.topology = device.createBuffer({ label: "Uniform mixed owners and tier worklists", size: this.detailBytes+4*uniformDetailTableWords(layout.lattice.dimensions),
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE });
     this.presentation={buffer:this.topology,size:this.topology.size};
-    // The tail's last word locates the table (lib/core/uniform-detail-abi.ts).
-    device.queue.writeBuffer(this.topology,this.topology.size-4,Uint32Array.of(layout.metadataBytes/4));
+    device.queue.writeBuffer(this.topology,layout.metadataBytes,pages);
+    // The tail's last word locates the detail table (lib/core/uniform-detail-abi.ts).
+    device.queue.writeBuffer(this.topology,this.topology.size-4,Uint32Array.of(this.detailBytes/4));
     this.counts = device.createBuffer({ label: "Uniform mixed work counts and scene geometry", size: 48,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC | GPUBufferUsage.UNIFORM });
-    device.queue.writeBuffer(this.counts, 16, new Uint32Array([...layout.lattice.dimensions, n]));
+    device.queue.writeBuffer(this.counts, 16, new Uint32Array([...address.cells, n]));
     device.queue.writeBuffer(this.counts, 32, new Float32Array([...layout.lattice.cellSize_m, Math.min(...layout.lattice.cellSize_m)]));
     // 9n+24: the mixed pressure schedule's slot gate (umSlotClosed), zero
     // except on a pressure level inside a closed slot. Builders stop at 9n+24.
@@ -283,8 +292,8 @@ export class UniformMixedOwnership {
    * generation, and every one built since, fits `fineTiles`. */
   reserveFine(fineTiles:number,confirmed=false):void{
     if(this.frameHeld)throw new Error("Ownership is immutable during an active frame");
-    const n=this.held.tiles,before=this.held.fineTiles;
-    if(!Number.isInteger(fineTiles)||fineTiles<0||fineTiles>n)throw new Error(`Uniform mixed ownership cannot hold ${fineTiles} h tiles of ${n}`);
+    const n=this.held.tiles,before=this.held.fineTiles,most=this.held.address.boxTiles;
+    if(!Number.isInteger(fineTiles)||fineTiles<0||fineTiles>most)throw new Error(`Uniform mixed ownership cannot hold ${fineTiles} h tiles of ${most}`);
     if(fineTiles===before)return;
     if(this.hanging){
       const bytes=uniformMixedHangingBytes(n,fineTiles);
@@ -298,7 +307,7 @@ export class UniformMixedOwnership {
         this.hangingGroupCurrent=this.device.createBindGroup({layout:this.hangingLayout,entries:[{binding:0,resource:{buffer:next}}]});
       }
     }
-    this.held={...this.held,hangingSlots:uniformMixedHangingSlotCapacity(n,fineTiles),fineTiles,owners:63*fineTiles+n};
+    this.held={...this.held,hangingSlots:uniformMixedHangingSlotCapacity(n,fineTiles),fineTiles,owners:63*fineTiles+most};
     // A GPU-adopted generation's h tiles reach the host as receipts: growth keeps it, a smaller capacity needs one.
     this.overCapacity=this.mirrorCurrent?this.currentLayout.fineTiles.length>fineTiles:this.overCapacity||(fineTiles<before&&!confirmed);
     this.capacityRevision++;
@@ -311,6 +320,7 @@ export class UniformMixedOwnership {
       || layout.lattice.cellSize_m.some((n,a)=>n!==prior.cellSize_m[a])
       || (["x","y","z"] as const).some(a=>layout.lattice.origin_m[a]!==prior.origin_m[a]))
       throw new Error("Live ownership edits cannot change the simulation lattice");
+    if(layout.address!==this.capacity.address)throw new Error("Uniform mixed ownership: a layout of another lattice address (the solver builds one and every layout carries it)");
     const derived=deriveOwnership(layout,this.dispatchX);
     for(const [target,offset,data] of derived.writes)this.device.queue.writeBuffer(this[target],offset,data);
     this.seamCounts=derived.seamCounts;
@@ -327,19 +337,21 @@ export class UniformMixedOwnership {
    * checks that exactly one adoption intervened. */
   revision=0;
 
-  /** The detail-storage table (uniform-detail-fields.ts), past the tile
-   * words: queue-ordered, so it takes effect for work submitted after it. */
+  /** Byte offset of the detail-storage table in the topology buffer. */
+  private readonly detailBytes:number;
+  /** The detail-storage table (uniform-detail-fields.ts), past the page
+   * table and block records: queue-ordered, so it takes effect for work submitted after it. */
   writeDetail(words:Uint32Array<ArrayBuffer>):void{
     if(this.frameHeld)throw new Error("Ownership is immutable during an active frame");
-    if(this.capacity.metadataBytes+words.byteLength>this.topology.size-4)throw new Error("Uniform detail table exceeds the topology tail");
-    this.device.queue.writeBuffer(this.topology,this.capacity.metadataBytes,words);
+    if(this.detailBytes+words.byteLength>this.topology.size-4)throw new Error("Uniform detail table exceeds the topology tail");
+    this.device.queue.writeBuffer(this.topology,this.detailBytes,words);
   }
   /** The same table's words from a GPU buffer, ordered inside an encoder
    * (the detail directory a relayout changed, ahead of the passes that
    * address fields through it). */
   encodeDetail(encoder:GPUCommandEncoder,source:GPUBuffer,sourceOffset:number,word:number,words:number):void{
-    if(this.capacity.metadataBytes+4*(word+words)>this.topology.size-4)throw new Error("Uniform detail table exceeds the topology tail");
-    encoder.copyBufferToBuffer(source,sourceOffset,this.topology,this.capacity.metadataBytes+4*word,4*words);
+    if(this.detailBytes+4*(word+words)>this.topology.size-4)throw new Error("Uniform detail table exceeds the topology tail");
+    encoder.copyBufferToBuffer(source,sourceOffset,this.topology,this.detailBytes+4*word,4*words);
   }
   /** Every page resident again (between frames): a frame with no census
    * that frame must not skip a page an earlier census certified. */

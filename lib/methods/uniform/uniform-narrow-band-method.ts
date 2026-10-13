@@ -54,7 +54,7 @@ const resolveComposition = (values: MethodParamValues = {}) => composeFeatures({
 export const uniformNarrowBandMethod:SimulationMethod={
  backend: "webgpu",
  detail: "Activity-driven h detail over a 4h Eulerian base, with narrow-band FLIP surface particles and live rigid coupling.",
- pressureMapping: "Three full pressure cycles, four V-cycles, and six pre/post smoothing sweeps.",
+ pressureMapping: "Three full pressure cycles and four V-cycles.",
  composition: resolveComposition(),
  resolveComposition,
  migrateOverrides: migrateUniformDetailOverrides,
@@ -70,12 +70,12 @@ export const uniformNarrowBandMethod:SimulationMethod={
  provides:["fluid-authority","water-presentation"],blocks:"transport",
  phaseCopy:{planning:"Resolving narrow-band FLIP capabilities.",allocation:"Allocating fluid textures and buffers.","solver-pipelines":"Compiling narrow-band transport and pressure programs.",warmup:"Uploading and fencing the initial fluid state.",attach:"Attaching the warmed fluid solver."}},
  // The geometric method's layers, plus the band's velocity samples as spheres.
- capabilities:{adoptsRigidRosterShape:true,visualLayers:{hidden:["pages","window","release"]}},
+ capabilities:{adoptsRigidRosterShape:true,visualLayers:{hidden:["window","release"]}},
  params,
  runtimeParamKeys:params.filter(p=>p.update==="runtime").map(p=>p.key),
  appDefaults:{timeStep:"sixtieth",...narrowBandAdaptiveDetail,...fixed,fineGridPadding:1,coarseParticleMode:"off"},
  normalizeValues:narrowBandFlipValues,
  createSolverAsync:(device,scene,quality,values,loads,progress,signal)=>WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
-  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandFlip:true,phiFineTrilinear:values.phiFineAdvection==="trilinear",narrowBandAdaptiveSurface:true,narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandCoarseParticles:false,retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
+  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),phiFineTrilinear:values.phiFineAdvection==="trilinear",narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
  pipelineGraph:async()=> (await import("./uniform-narrow-band-pipeline")).UNIFORM_NARROW_BAND_PIPELINE,
 };

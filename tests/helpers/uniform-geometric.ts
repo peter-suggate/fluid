@@ -6,6 +6,7 @@ import {resolveMethodValues, type MethodParamValues} from "../../lib/core/method
 import type {SceneDescription} from "../../lib/core/model";
 import {createProcessRetainedDawnGPU} from "../../lib/harness/node-dawn-provider";
 import {uniformNarrowBandMethod} from "../../lib/methods/uniform/uniform-narrow-band-method";
+import {uniformTileKey, type UniformLatticeAddress} from "../../lib/methods/uniform/uniform-lattice-address";
 import type {WebGPUUniformReferenceSolver} from "../../lib/methods/uniform/webgpu-uniform-reference";
 import {uniformMixedSolidWGSL, type UniformMixedSolid} from "../../lib/methods/uniform/uniform-mixed-solid.wgsl";
 import {readMixedTexture,readMixedTileWords} from "./uniform-mixed-native-fields";
@@ -40,8 +41,10 @@ export async function readUniformFields(device:GPUDevice,solver:WebGPUUniformRef
  await solver.awaitFrameCompletion();
  const [volume,tiles,phi,pressure]=await Promise.all([readMixedTexture(device,solver.volumeTexture),readMixedTileWords(device,solver),
   readMixedTexture(device,solver.vertexPhiTexture!),readMixedTexture(device,solver.gridPressureTexture)]);
- const {nx,ny,nz}=solver.info,tx=nx/4,ty=ny/4;
- const widthAt=(x:number,y:number,z:number)=>(tiles[(x>>2)+tx*((y>>2)+ty*(z>>2))]!&0x80000000)?1:4;
+ // Tile words are by tile key: a tile nothing stores reads a word of block 0, a 4h tile of owner 0.
+ const {nx,ny,nz}=solver.info,address=(solver as unknown as {address:UniformLatticeAddress}).address;
+ const wordAt=(x:number,y:number,z:number)=>tiles[uniformTileKey(address,x>>2,y>>2,z>>2)]!;
+ const widthAt=(x:number,y:number,z:number)=>(wordAt(x,y,z)&0x80000000)?1:4;
  const density=new Float32Array(nx*ny*nz);
  for(let z=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){
   const w=widthAt(x,y,z);density[x+nx*(y+ny*z)]=volume[x-x%w+nx*(y-y%w+ny*(z-z%w))]!;
@@ -51,7 +54,7 @@ export async function readUniformFields(device:GPUDevice,solver:WebGPUUniformRef
   for(let k=0;k<8;k++){
    const c=[x-(k&1),y-((k>>1)&1),z-((k>>2)&1)];
    if(c.some((v,a)=>v<0||v>=[nx,ny,nz][a]!))continue;
-   const t=(c[0]!>>2)+tx*((c[1]!>>2)+ty*(c[2]!>>2)),word=tiles[t]!;
+   const word=wordAt(c[0]!,c[1]!,c[2]!);
    if(!(word&0x80000000)&&(word&0x3fffffff)<best){best=word&0x3fffffff;origin=c.map(v=>v-v%4) as [number,number,number];}
   }
   const at=(a:number,b:number,c:number)=>phi[a+(nx+1)*(b+(ny+1)*c)]!;

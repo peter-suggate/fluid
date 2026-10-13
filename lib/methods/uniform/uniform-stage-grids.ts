@@ -122,8 +122,8 @@ export function uniformStageGridHeader(tiles: number, bandTiles: number, views =
 const STAGE_GRID_HEADER = new Uint32Array(8);
 
 /** Readers over `buffer: array<u32>`, which ends with the record. Needs the
- * presentation topology helpers (umTileCount, umTileAt, umDimensions,
- * UMOwner) of uniform-mixed-presentation.wgsl. */
+ * presentation topology helpers (umTileCount, umTileAt, umCellPresent,
+ * umTilePresent, UMOwner) of uniform-mixed-presentation.wgsl. */
 export function uniformStageGridsWGSL(buffer: string): string { return /* wgsl */ `
 const UM_STAGE_TRANSPORT:u32=0u;
 const UM_STAGE_PRESSURE:u32=1u;
@@ -146,13 +146,13 @@ fn umStageBandSlot(base:u32,tile:u32)->u32{
 }
 // Band h pressure index + 1 of fine cell p, or 0 outside the band.
 fn umStageBandCell(base:u32,p:vec3i)->u32{
- if(base==0xffffffffu||any(p<vec3i(0))||any(p>=vec3i(umDimensions()))){return 0u;}
+ if(base==0xffffffffu||!umCellPresent(p)){return 0u;}
  let q=vec3u(p);let slot=umStageBandSlot(base,umTileAt(q/4u));if(slot==0u){return 0u;}
  let l=q%4u;return (slot-1u)*64u+l.x+4u*(l.y+4u*l.z)+1u;
 }
 fn umStageBandPressure(base:u32,cell:u32)->f32{return bitcast<f32>(${buffer}[base-64u*${buffer}[base+4u]+cell]);}
 fn umStageTileWidth(base:u32,stage:u32,tile:vec3i)->u32{
- if(base==0xffffffffu||any(tile<vec3i(0))||any(vec3u(tile)>=umDimensions()/4u)){return 0u;}
+ if(base==0xffffffffu||!umTilePresent(tile)){return 0u;}
  let t=umTileAt(vec3u(tile));
  if(stage==UM_STAGE_PRESSURE&&umStageBandSlot(base,t)!=0u){return 1u;}
  return umWordWidth(umStageTileWord(base,stage,t));
@@ -160,7 +160,7 @@ fn umStageTileWidth(base:u32,stage:u32,tile:vec3i)->u32{
 // The owner a stage computed fine cell p on. Pressure in an h band tile is
 // the band's h cell (index = band pressure index), not the 4h owner.
 fn umStageOwner(base:u32,stage:u32,p:vec3i)->UMOwner{
- if(base==0xffffffffu||any(p<vec3i(0))||any(p>=vec3i(umDimensions()))){return UMOwner();}
+ if(base==0xffffffffu||!umCellPresent(p)){return UMOwner();}
  let q=vec3u(p);let tile=umTileAt(q/4u);
  if(stage==UM_STAGE_PRESSURE){let band=umStageBandCell(base,p);if(band!=0u){let l=q%4u;return UMOwner(tile,l.x+4u*(l.y+4u*l.z),1u,band-1u);}}
  let word=umStageTileWord(base,stage,tile);
@@ -175,7 +175,7 @@ fn umStageViewWord(base:u32,section:u32,tile:u32)->u32{
 }
 // Width (1 or 4) of tile at the frame's start, before its head relayout; 0 when not recorded.
 fn umStagePreviousWidth(base:u32,tile:vec3i)->u32{
- if((umStageViews(base)&${UNIFORM_STAGE_VIEWS.previous}u)==0u||any(tile<vec3i(0))||any(vec3u(tile)>=umDimensions()/4u)){return 0u;}
+ if((umStageViews(base)&${UNIFORM_STAGE_VIEWS.previous}u)==0u||!umTilePresent(tile)){return 0u;}
  return umWordWidth(umStageViewWord(base,0u,umTileAt(vec3u(tile))));
 }
 // The head census's band reason (UNIFORM_STAGE_REASON); 0xffffffff when not recorded.

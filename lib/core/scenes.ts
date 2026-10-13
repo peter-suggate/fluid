@@ -9,6 +9,11 @@ import {
   createNbflipDam, createNbflipLetters, createNbflipPour, createNbflipSimpleDam, createNbflipTeaser, createNbflipWaves,
   nbflipDamCamera, nbflipLettersCamera, nbflipPourCamera, nbflipSimpleDamCamera, nbflipTeaserCamera, nbflipWavesCamera,
 } from "./nbflip-paper-scenes";
+import {
+  NBFLIP_SLIDE_GRID, NBFLIP_SLIDE_LONG_BENDS, NBFLIP_SLIDE_LONG_GRID, NBFLIP_SLIDE_LONG_SCENE_ID, NBFLIP_SLIDE_LONG_STREAM_SECONDS,
+  NBFLIP_SLIDE_SCENE_ID, NBFLIP_SLIDE_STREAM_SECONDS, NBFLIP_SLIDE_TURNS,
+  createNbflipWaterSlide, createNbflipWaterSlideLong, nbflipWaterSlideCamera, nbflipWaterSlideLongCamera,
+} from "./nbflip-water-slide-scene";
 import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12Scene, createCm12Figure7_256 } from "./cm12-paper-scenes";
 import { createThinDropletLadderScene, createThinSheetLadderScene, createThinWallFilmScene } from "./thin-liquid-scenes";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
@@ -1840,6 +1845,30 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     methodProfile: NBFLIP_METHOD_PROFILE,
     build: createNbflipSimpleDam,
     camera: nbflipSimpleDamCamera(),
+  }),
+  // Not a paper scene: the same closed box and method, with liquid that starts
+  // as nothing and grows. See lib/core/nbflip-water-slide-scene.ts.
+  defineScene({
+    id: NBFLIP_SLIDE_SCENE_ID,
+    name: "NB-FLIP · Water Slide",
+    blurb: `A hose runs for ${NBFLIP_SLIDE_STREAM_SECONDS} seconds down a voxel slide that winds inward for ${NBFLIP_SLIDE_TURNS} turns and spills into a pool at its centre, where the water comes to rest. The box starts empty: ${NBFLIP_SLIDE_GRID.join("×")} cells at 2 cm.`,
+    audience: "explore",
+    shelf: "Tanks",
+    environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: createNbflipWaterSlide,
+    camera: nbflipWaterSlideCamera(),
+  }),
+  defineScene({
+    id: NBFLIP_SLIDE_LONG_SCENE_ID,
+    name: "NB-FLIP · Long Water Slide",
+    blurb: `A hose runs for ${NBFLIP_SLIDE_LONG_STREAM_SECONDS} seconds down a voxel flume that snakes through ${NBFLIP_SLIDE_LONG_BENDS} alternating bends and winds once around a pool, where the water comes to rest. The box starts empty and stays mostly air: ${NBFLIP_SLIDE_LONG_GRID.join("×")} cells at 2 cm.`,
+    audience: "explore",
+    shelf: "Tanks",
+    environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: createNbflipWaterSlideLong,
+    camera: nbflipWaterSlideLongCamera(),
   }),
   defineScene({
     id: "cm12-figure-7-256",

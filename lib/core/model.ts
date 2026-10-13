@@ -278,6 +278,14 @@ export interface SceneDescription {
      * split around a newly drawn box.
      */
     refinementRegions?: FluidRefinementRegion[];
+    /**
+     * Uniform: the page pool at scene build (lattice pages of 32 cells an
+     * axis). blocks: storage blocks, two of them holding no page (default:
+     * one per page of the box and those two). permute: a number that fixes a
+     * shuffle of the pages' blocks. air: pages of the box seeded as air, with
+     * no storage, by page coordinate.
+     */
+    pagePool?: { blocks?: number; permute?: number; air?: [number, number, number][] };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };

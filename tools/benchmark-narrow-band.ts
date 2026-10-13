@@ -44,6 +44,9 @@ const values={...method.appDefaults,timeStep:'scene',fineGridPadding,adaptiveBud
 const scene=structuredClone(sceneDocument(getSceneDefinition(sceneId)));
 scene.numerics={...scene.numerics,fixedDt_s:dt,maxDt_s:dt};
 if(process.argv.includes("--no-gravity"))scene.fluid.gravity_m_s2={x:0,y:0,z:0};
+// --page-pool={"blocks":24,"permute":7,"air":[[1,0,0]]}: the scene's page pool record, the one way a page set other than the whole box reaches the solver.
+const pagePool=process.argv.find(a=>a.startsWith("--page-pool="))?.slice(12);
+if(pagePool)scene.fluid.pagePool=JSON.parse(pagePool);
 let device:GPUDevice|undefined,profile:GPUPassProfile|undefined,solver:WebGPUUniformReferenceSolver|undefined;
 let volumeProbe:Awaited<ReturnType<typeof narrowBandVolumeProbe>>|undefined;
 const rows:unknown[]=[];const errors:string[]=[];
@@ -78,7 +81,8 @@ try {
  const final=await solver.readStats();assert.deepEqual(errors,[]);
  let activityCensus:Record<string,number>|undefined;
  if(process.argv.includes("--activity-census")){
-  const info=solver.info,tiles=info.nx*info.ny*info.nz/64;
+  // Two importance words per tile key; a key with no tile holds zeros.
+  const tiles=(solver as unknown as {address:{tileKeys:number}}).address.tileKeys;
   const source=(solver as unknown as {mixedDynamic:{importance:{buffer:GPUBuffer;offset:number}}}).mixedDynamic.importance;
   const read=device.createBuffer({size:tiles*8,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(source.buffer,source.offset,read,0,tiles*8);device.queue.submit([encoder.finish()]);

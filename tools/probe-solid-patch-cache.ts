@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { SCENE_SHAPES_BY_CODE } from "../lib/core/scene-shape";
+import { UNIFORM_PAGE_TABLE_WORDS,uniformLatticeAddressWGSL } from "../lib/methods/uniform/uniform-lattice-address";
 import { createUniformMixedLayout } from "../lib/methods/uniform/uniform-mixed-layout";
 import { UniformMixedSolid,uniformMixedSolidWGSL } from "../lib/methods/uniform/uniform-mixed-solid.wgsl";
 
@@ -29,9 +30,16 @@ const read=device.createBuffer({size:output.size,usage:GPUBufferUsage.MAP_READ|G
 const words=new Float32Array(68);words.set([...dims,1/60]);words.set([1,1,1,9.8],4);words.set([...dims,0],8);
 const layout=createUniformMixedLayout({dimensions:dims,cellSize_m:[1,1,1],origin_m:{x:-8,y:0,z:-4}},[],4);
 const solid=new UniformMixedSolid(device,{params,scratch,terrain,bodies,coupledTiles:0,cutMapOffsetWords:cutWord,paramsWritten:()=>true},layout);
+// A topology of the layout's address: its tile words, then the page table and block words.
+const address=layout.address,keys=address.tileKeys,topology=device.createBuffer({size:20*keys+address.seed.tail.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+device.queue.writeBuffer(topology,0,layout.tiles);device.queue.writeBuffer(topology,20*keys,address.seed.tail);
 try{
  await solid.initialize();
  const module=device.createShaderModule({label:"Cached solid predicate parity",code:`const UM_D:vec3u=vec3u(${dims.join("u,")}u);
+@group(1) @binding(1) var<storage,read> topology:array<u32>;
+fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return topology[${5*keys}u+(e.x|(e.y<<6u)|(e.z<<12u))];}
+fn umBlockWord(b:u32)->u32{return topology[${5*keys+UNIFORM_PAGE_TABLE_WORDS}u+b];}
+${uniformLatticeAddressWGSL({cells:"UM_D",tiles:"(UM_D/4u)",constant:true,paged:{blocks:`${address.blocks}u`,whole:address.whole}})}
 ${uniformMixedSolidWGSL(0,solid.coarse!.count)}
 @group(1) @binding(0) var<storage,read_write> result:array<array<u32,8>>;
 @compute @workgroup_size(64) fn check(@builtin(global_invocation_id) id:vec3u){
@@ -41,7 +49,7 @@ ${uniformMixedSolidWGSL(0,solid.coarse!.count)}
  for(var axis=0u;axis<3u;axis++){
   result[id.x][2u+2u*axis]=0u;result[id.x][3u+2u*axis]=0u;
   if(!umSolidValid(q)||q[axis]%4!=3){continue;}
-  let c=vec3u(q)/4u;let t=c.x+(UM_D.x/4u)*(c.y+(UM_D.y/4u)*c.z);
+  let t=umTileAt(vec3u(q)/4u);
   result[id.x][2u+2u*axis]=bitcast<u32>(umPressureFaceV(q,axis));
   var cached=umPressureFaceV(q,axis);if(umSolidEnabled()){cached=umPatchFaceV(t,q,axis);}
   result[id.x][3u+2u*axis]=bitcast<u32>(cached);
@@ -49,7 +57,7 @@ ${uniformMixedSolidWGSL(0,solid.coarse!.count)}
 }`});
  const messages=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");assert.deepEqual(messages,[]);
  const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"check"}});
- const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(1),entries:[{binding:0,resource:{buffer:output}}]});
+ const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(1),entries:[{binding:0,resource:{buffer:output}},{binding:1,resource:{buffer:topology}}]});
  // Auto-layout includes only the resources reached by these two helpers.
  const resourceMap:Record<number,GPUBindingResource>={0:{buffer:params,size:272},1:{buffer:scratch},2:terrain.createView(),3:{buffer:solid.coarse!.record},4:{buffer:(solid as unknown as {bodies:GPUBuffer}).bodies}};
  const solids=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:Object.entries(resourceMap).map(([binding,resource])=>({binding:+binding,resource}))});
@@ -57,7 +65,7 @@ ${uniformMixedSolidWGSL(0,solid.coarse!.count)}
  const run=async(name:string,bodyOnly=false)=>{
   device.queue.writeBuffer(params,0,words);device.queue.writeBuffer(bodies,0,bodyWords);
   if(!bodyOnly){device.queue.writeBuffer(scratch,0,mask);device.queue.writeTexture({texture:terrain},heights,{bytesPerRow:4*dims[0]},[dims[0],dims[2]]);}
-  solid.invalidate(bodyOnly);const e=device.createCommandEncoder();solid.encodeBodies(e);solid.encodeCoarse(e);
+  solid.invalidate(bodyOnly);const e=device.createCommandEncoder();solid.encodeBodies(e);solid.encodeCoarse(e,{buffer:topology});
   const p=e.beginComputePass();p.setPipeline(pipeline);p.setBindGroup(0,solids);p.setBindGroup(1,group);p.dispatchWorkgroups(Math.ceil(cells/64));p.end();e.copyBufferToBuffer(output,0,read,0,output.size);device.queue.submit([e.finish()]);
   await read.mapAsync(GPUMapMode.READ);const bits=new Uint32Array(read.getMappedRange()),fractions=new Float32Array(bits.buffer);let mismatches=0,open=0,partial=0,patches=0;
   for(let i=0;i<cells;i++){

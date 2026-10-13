@@ -207,9 +207,10 @@ export interface OctreeTechniqueDebugSource {
  *
  * With `mixedOwnership` the fields, and the solver's other h fields
  * (`volumeTexture`, `surfaceFieldTexture`, `velocityTexture`), may be packed:
- * a 4h base block plus an atlas of resident h patches, so neither a texture's
- * extent nor its texel coordinates are the lattice. The ownership buffer ends
- * with the detail table that maps a logical texel (uniform-detail-abi.ts). A
+ * a 4h base block with an h store beside it that holds the texels of h tiles
+ * only, so a texture's extent is not the lattice and a texel is addressed
+ * through the lattice address functions. The ownership buffer ends with the
+ * detail table that names the placement (uniform-detail-abi.ts). A
  * consumer then
  *   - binds `mixedOwnership`, includes `uniformDetailRuntimeWGSL` (directly or
  *     through `uniformMixedPresentationWGSL`) and calls `udrInit()` first in
@@ -243,10 +244,10 @@ export interface DenseLevelSetVolumeConsumerSource {
   readonly vertexPhi: GPUTexture;
   /** Contour this dense nodal field instead of the solver's cell-volume publication. */
   readonly contourVertexPhi?: boolean;
-  /** The 4h vertex base: a (t+1)^3 r32float whose texel g is phi at lattice
-   * vertex 4g (t = lattice / 4 per axis), current for every tile corner at
-   * each published revision and never folded into an atlas, so its extent is
-   * the lattice under every placement. Present with `mixedOwnership`: a
+  /** The 4h vertex base: an r32float holding phi at lattice vertex 4g at
+   * texel `umWideVertexTexel(g)` (a 9^3 block per page: its extent is not
+   * the lattice), current for every tile corner at each published revision.
+   * Present with `mixedOwnership`: a
    * consumer loads a 4h owner's corners from it and an h tile's vertices
    * (its corners included) from the detail field
    * (`uniformMixedPresentationWGSL`). */

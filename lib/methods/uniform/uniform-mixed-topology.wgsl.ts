@@ -1,15 +1,10 @@
 import { uniformCompiledTopologyWGSL } from "./uniform-compiled-topology";
-import { uniformMidpointTraceWGSL } from "./uniform-midpoint-trace.wgsl";
-import { uniformMixedVelocitySamplingWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedFacesWGSL } from "./uniform-mixed-faces.wgsl";
+import { UNIFORM_PAGE_TABLE_WORDS, uniformLatticeAddressWGSL, uniformLatticeBox } from "./uniform-lattice-address";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 
 /** Regular tiers with at most this many tiles join the fused interface launch. */
 export const UNIFORM_MIXED_FUSED_REGULAR_TILES=64;
-/** A regular 4h tier with at most this many owners (256 groups) is
- * launch-bound: they ride another launch as packed lanes (umRegularCoarseOwner)
- * instead of a width-specialized launch of their own. */
-export const UNIFORM_MIXED_PACKED_REGULAR_OWNERS=16384;
 /** umCountedJobs: GPU-counted launches (uniformMixedCertifiedEntriesWGSL
  * entries striding a fixed grid, ownership.dispatch*Counted). Each count
  * mirrors the entry's owner lookup, so no host membership sizes the launch.
@@ -58,7 +53,10 @@ export const uniformMixedDetailViolationWord=(tiles:number,lattice:{readonly dim
 /** Support words an ownership of `tiles` tiles on `lattice` allocates. */
 export const uniformMixedSupportWords=(tiles:number,lattice:{readonly dimensions:readonly number[]})=>uniformMixedDetailViolationWord(tiles,lattice)+4;
 
-/** One packed topology buffer: tile records, h/4h worklists, then frozen stencil masks.
+/** One packed topology buffer: tile records, h/4h worklists, then frozen stencil masks,
+ * then the page table and the block words (UM_PAGE_TABLE, UM_BLOCK_RECORD):
+ * the ownership writes the address's seed there and the page pool keeps it
+ * as a mirror of its own; no generation changes them.
  * Ownership and tracing share this ABI. Two tiers: 0 = h (width 1, 64 owners
  * per tile), 1 = 4h (width 4, one owner per tile). umCounts = (h tiles, 4h
  * tiles, 0, 8). A 64-lane group visits one h tile or 64 coarse tiles; coarse dispatch never
@@ -67,9 +65,16 @@ export const uniformMixedSupportWords=(tiles:number,lattice:{readonly dimensions
 /** The lattice and tile count a topology shader is specialized for: an
  * ownership's fixed capacity (or a layout, whose tiles are the same lattice). */
 export type UniformMixedTopologyShape = { readonly lattice: UniformMixedLayout["lattice"]; readonly tiles: number | { readonly length: number } };
-export function uniformMixedTopologyWGSL(shape: UniformMixedTopologyShape, group: number, prefix = ""): string {
+/** pagesOf: the namespace of another topology instance of the same lattice
+ * in the module, whose buffer holds the page table this one reads: an
+ * instance bound to a generation's tile words alone (the layout builder's)
+ * names the live ownership's. */
+export function uniformMixedTopologyWGSL(shape: UniformMixedTopologyShape, group: number, prefix = "", pagesOf?: string): string {
   const layout = { lattice: shape.lattice, tiles: { length: typeof shape.tiles === "number" ? shape.tiles : shape.tiles.length } };
   if (prefix && !/^[a-zA-Z][a-zA-Z0-9]*$/.test(prefix)) throw new Error("Invalid mixed topology namespace");
+  if (pagesOf !== undefined && (prefix || !/^[a-zA-Z][a-zA-Z0-9]*$/.test(pagesOf))) throw new Error("Invalid mixed topology page table namespace");
+  const whole = uniformLatticeBox(layout.lattice.dimensions).whole;
+  if (layout.tiles.length % 512 !== 0) throw new Error(`A mixed topology of ${layout.lattice.dimensions.join("x")} has 512 tile keys a block, not ${layout.tiles.length} in all`);
   const source = /* wgsl */ `
 @group(${group}) @binding(0) var<storage,read> umTopology:array<u32>;
 @group(${group}) @binding(1) var<uniform> umCounts:vec4u;
@@ -100,9 +105,8 @@ const UM_OVERFLOW_HANGING:u32=${UNIFORM_MIXED_OVERFLOW_HANGING}u;
 // Residency (uniformMixedResidencyWord): pages of 4³ tiles, flags, list.
 const UM_PD:vec3u=(UM_T+vec3u(3u))/4u;const UM_PAGES:u32=UM_PD.x*UM_PD.y*UM_PD.z;
 const UM_RESIDENCY:u32=9u*UM_TILES+28u;
-// Detail storage (uniform-detail-fields.ts): its table follows the 4 words
-// per tile in umTopology; its violation bits follow the residency region.
-const UM_DETAIL:u32=4u*UM_TILES;
+// Detail storage (uniform-detail-fields.ts): its violation bits follow the
+// residency region.
 const UM_DETAIL_VIOLATION:u32=UM_RESIDENCY+4u+2u*UM_PAGES;
 fn umResidentPageCount()->u32{return umSupport[UM_RESIDENCY];}
 fn umPageOfTile(t:u32)->u32{let c=umTileCoord(t)/4u;return c.x+UM_PD.x*(c.y+UM_PD.y*c.z);}
@@ -122,11 +126,17 @@ fn umSlotClosed()->bool{return umSupport[9u*UM_TILES+24u]!=0u;}
 fn umTileStencil(t:u32)->vec2u{return vec2u(umTopology[2u*UM_TILES+2u*t],umTopology[2u*UM_TILES+2u*t+1u]);}
 fn umTileMaximumWidth(t:u32)->u32{return umTileStencil(t).x>>27u;}
 fn umTileMinimumWidth(t:u32)->u32{return umTileStencil(t).y>>27u;}
-// The detail ring (UNIFORM_MIXED_DETAIL_RING): an h tile within three tiles.
-fn umTileMirrored(t:u32)->bool{return (umTopology[2u*UM_TILES+2u*t+1u]&1u)!=0u;}
-fn umTileAt(p:vec3u)->u32{return p.x+UM_T.x*(p.y+UM_T.y*p.z);}
-fn umTileCoord(t:u32)->vec3u{return vec3u(t%UM_T.x,(t/UM_T.x)%UM_T.y,t/(UM_T.x*UM_T.y));}
 fn umCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}
+// The page table (a word per page of a 64³ window, by x | y<<6 | z<<12 of
+// the page coordinate) and the block records follow the tile words.
+const UM_PAGE_TABLE:u32=5u*UM_TILES;
+const UM_BLOCK_RECORD:u32=UM_PAGE_TABLE+${UNIFORM_PAGE_TABLE_WORDS}u;
+${pagesOf === undefined ? /* wgsl */ `fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return umTopology[UM_PAGE_TABLE+(e.x|(e.y<<6u)|(e.z<<12u))];}
+fn umBlockWord(b:u32)->u32{return umTopology[UM_BLOCK_RECORD+b];}` : /* wgsl */ `fn umPageWord(page:vec3i)->u32{return ${pagesOf}umPageWord(page);}
+fn umBlockWord(b:u32)->u32{return ${pagesOf}umBlockWord(b);}`}
+// Lattice addressing (uniform-lattice-address.ts) over UM_D and UM_T: its
+// paged bodies, whose tile key count is UM_TILES.
+${uniformLatticeAddressWGSL({ cells: "UM_D", tiles: "UM_T", constant: true, paged: { blocks: "(UM_TILES/512u)", whole } })}
 ${uniformCompiledTopologyWGSL}
 struct UMOwner {tile:u32,lane:u32,width:u32,index:u32}
 fn umAllOwner(gid:vec3u)->UMOwner {
@@ -143,7 +153,8 @@ fn umResidentAllOwner(gid:vec3u)->UMOwner {
  let slot=gid.x+umDispatchX*64u*gid.y;let fine=umCounts.x*64u;
  if(slot<fine){let tile=umTopology[UM_TILES+slot/64u];let lane=slot%64u;return UMOwner(tile,lane,1u,(umTopology[tile]&0x3fffffffu)+lane);}
  let tile=umResidentPageTile((slot-fine)/64u,slot%64u);
- if(tile>=UM_TILES){return UMOwner();}
+ // A certified page with nothing stored (its tile resolves to a sentinel block's key) holds no owner.
+ if(!umTileLive(tile)){return UMOwner();}
  if(umTileWidth(tile)!=4u){return UMOwner();}
  return UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
 }
@@ -189,11 +200,6 @@ fn umOwner(gid:vec3u)->UMOwner {
 // its runtime width, so a single launch replaces the tiny per-tier launches.
 fn umFusedRegularTier(tier:u32)->bool{
  let count=umCounts[tier];return count>umSupport[7u*UM_TILES+16u+tier]&&count<=${UNIFORM_MIXED_FUSED_REGULAR_TILES}u;
-}
-// Not a small fused tier: see UNIFORM_MIXED_PACKED_REGULAR_OWNERS.
-fn umPackedRegularTier(tier:u32)->bool{
- let owners=(umCounts[tier]-umSupport[7u*UM_TILES+16u+tier])*(64u>>(6u*tier));
- return !umFusedRegularTier(tier)&&owners<=${UNIFORM_MIXED_PACKED_REGULAR_OWNERS}u;
 }
 fn umFusedOwner(group:vec3u,lane:u32,regular:bool)->UMOwner {
  let header=7u*UM_TILES+16u;var job=group.x+umDispatchX*group.y;
@@ -294,10 +300,10 @@ ${uniformMixedFacesWGSL}
 /** Rewrites each named compute entry of `source` into a fixed grid-stride
  * launch over its jobs (umLaunchJobCount): the entry's body runs once per job
  * as if it were workgroup (job,0,0) of a one-row launch, so every owner lookup
- * keeps its meaning. Compile the entries with umCertifiedJobs
- * (ownership.dispatchCertified) or umCountedJobs (UNIFORM_MIXED_COUNTED,
- * ownership.dispatch*Counted) set; any grid is correct. Owner-slot modes
- * assume 64-lane entries. The job count is workgroup-uniform, so bodies may
+ * keeps its meaning. Compile
+ * the entries with umCertifiedJobs (ownership.dispatchCertified) or
+ * umCountedJobs (UNIFORM_MIXED_COUNTED, ownership.dispatch*Counted) set; any
+ * grid is correct. Owner-slot modes assume 64-lane entries. The job count is workgroup-uniform, so bodies may
  * keep their barriers. count: the WGSL expression of the job count, for a
  * list the ownership does not hold (a GPU-compacted list read by the module
  * itself, e.g. uniformMixedChangedTilesWGSL's umDilatedCount()); size the
@@ -336,26 +342,3 @@ var<workgroup> ${entry}Jobs:u32;
 }
 /** The same rewrite, named for GPU-counted launches (umCountedJobs). */
 export const uniformMixedCountedEntriesWGSL=uniformMixedCertifiedEntriesWGSL;
-
-/** Appended after native storage specialization, for certified boxes
- * without interior solids. Canonical mixed MAC input is bound as transportIn without a halo.
- * RK2 is shared with native; interior-solid collision walking is unnecessary.
- */
-export function uniformMixedNativeTraceWGSL(layout: UniformMixedTopologyShape): string {
-  return uniformMixedTopologyWGSL(layout, 1) + /* wgsl */ `
-fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32 {
- if(anchor[axis]<0){return boundaryVelocityIn[boundaryFaceIndex(max(anchor,vec3i(0)),axis)];}
- return textureLoad(transportIn,anchor,0)[axis];
-}
-${uniformMixedVelocitySamplingWGSL}
-fn umTraceMixed(p:vec3f,dt:f32)->vec3f {
-${uniformMidpointTraceWGSL("umSampleVelocity")}
- return end;
-}
-@compute @workgroup_size(64) fn uvMixedTrace(@builtin(global_invocation_id) gid:vec3u){
- let o=umOwner(gid);if(o.width==0u){return;}
- let origin=umOrigin(o);let p=vec3f(origin)+vec3f(0.5*f32(o.width));
- textureStore(velocityOut,vec3i(origin),vec4f(umTraceMixed(p,params.dimsDt.w),f32(o.width)));
-}
-`;
-}

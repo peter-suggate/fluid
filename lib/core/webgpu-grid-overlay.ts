@@ -259,7 +259,8 @@ fn levelSetSample(cell: vec3i) -> f32 {
 
 fn densitySample(cell: vec3i) -> f32 {
   if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
-    let o=umOwnerAt(clamp(cell,vec3i(0),vec3i(umDimensions())-1));return udrLoadCell(densityField,densityBase,vec3i(umOrigin(o))).x;
+    // The cell's owner's value (udrLoadCell: an h cell's texel, a 4h tile's); zero where nothing is stored.
+    return udrLoadCell(densityField,densityBase,cell).x;
   }
   let dims = vec3i(u.gridInfo.xyz);
 
@@ -313,18 +314,16 @@ fn isOpticalCube(cell: vec3i, dims: vec3i) -> bool {
 // cell = top endpoint dof, the rest = bottom dof) so the displayed field is
 // the one the projection actually controls.
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
- if(anchor[axis]>=0){return udrLoadFace(velocityField,velocityBase,anchor)[axis];}
+ if(!umFaceLow(anchor,axis)){return udrLoadFace(velocityField,velocityBase,anchor)[axis];}
  if(layers.control.z<=0.0){return 0.0;}
- let q=vec3u(max(anchor,vec3i(0)));let dims=umDimensions();var index=q.y+dims.y*q.z;
- if(axis==1u){index=dims.y*dims.z+q.x+dims.x*q.z;}
- if(axis==2u){index=dims.y*dims.z+dims.x*dims.z+q.x+dims.x*q.y;}
- return bitcast<f32>(viewRecords[u32(layers.control.z)+index]);
+ return bitcast<f32>(viewRecords[u32(layers.control.z)+umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)]);
 }
 ${uniformMixedPresentationVelocityWGSL()}
 fn velocitySample(cell: vec3i) -> vec3f {
   // Mixed ownership: the velocity at the represented cell's centre.
   if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
-   let owner=umOwnerAt(cell);return umSampleVelocity(vec3f(umOrigin(owner))+vec3f(0.5*f32(max(owner.width,1u))));
+   let owner=umOwnerAt(cell);if(owner.width==0u){return vec3f(0.0);}
+   return umSampleVelocity(vec3f(umOrigin(owner))+vec3f(0.5*f32(owner.width)));
   }
   let dims = vec3i(u.gridInfo.xyz);
 
@@ -335,10 +334,7 @@ fn velocitySample(cell: vec3i) -> vec3f {
       var neighbor=q;neighbor[axis]-=1;
       if(q[axis]>0){negative[axis]=textureLoad(velocityField,neighbor,0)[axis];}
       else if(layers.control.z>0.0){
-        var index=q.y+dims.y*q.z;
-        if(axis==1u){index=dims.y*dims.z+q.x+dims.x*q.z;}
-        if(axis==2u){index=dims.y*dims.z+dims.x*dims.z+q.x+dims.x*q.y;}
-        negative[axis]=bitcast<f32>(viewRecords[u32(layers.control.z)+u32(index)]);
+        negative[axis]=bitcast<f32>(viewRecords[u32(layers.control.z)+umLowFaceIndex(vec3u(q),axis)]);
       }
     }
     return (positive+negative)*0.5;
@@ -413,9 +409,9 @@ fn representedCell(cell: vec3i, dims: vec3i, fineOrigin:vec3i,
   var lower = cell;
   var upper = cell + vec3i(1);
   if (sliceLsvP.global.x == 2u && umPresentationEnabled()) {
+    // A cell with nothing stored has no owner: it represents itself.
     let owner = umOwnerAt(cell);
-    lower = vec3i(umOrigin(owner));
-    upper = lower + vec3i(i32(max(owner.width, 1u)));
+    if (owner.width != 0u) { lower = vec3i(umOrigin(owner)); upper = lower + vec3i(i32(owner.width)); }
   } else if (adaptiveGrid) {
     var owner=vec4i(0,0,0,1);
     owner=adaptiveCellOriginScale(adaptiveCellKey(cell,dims));
@@ -593,13 +589,17 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   // lives on, and everything transported on the live bulk ownership the
   // fields are stored in. Everywhere else the represented cell is the fine cell.
   let mixedLattice = sliceLsvP.global.x == 2u && umPresentationEnabled();
+  // A cell of a page the live page table gives no block (AIR or SOLID) has
+  // no lattice and no field: only the pages layer draws there.
+  let unstored = mixedLattice && !umCellPresent(cell);
+  if (unstored && fieldMode != 27) { return GridSample(vec3f(0.0), 0.0, 0.0, false); }
   let stage = select(0xffffffffu, umStageBase(), mixedLattice);
   let pressureGrid = mixedLattice && stage != 0xffffffffu && fieldMode == 5;
   let hGrid = mixedLattice && fieldMode == 3;
   let planePoint = samplePosition + vec2f(f32(fineOrigin[firstPlaneAxis]), f32(fineOrigin[secondPlaneAxis]));
   var latticeFraction = fract(samplePosition);
   var latticeWidth = 1.0;
-  if (mixedLattice && !hGrid) {
+  if (mixedLattice && !hGrid && !unstored) {
     var owner = umOwnerAt(cell);
     if (pressureGrid) { owner = umStageOwner(stage, UM_STAGE_PRESSURE, cell); }
     let ownerOrigin = vec3f(umOrigin(owner));
@@ -640,7 +640,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       for (var side = 0u; side < 2u; side++) {
         var neighbor = tile;
         neighbor[worldAxis] += select(-1, 1, side == 1u);
-        if (any(neighbor < vec3i(0)) || any(neighbor >= vec3i(umTileDimensions()))) { continue; }
+        if (!umTilePresent(neighbor)) { continue; }
         var neighborWidth = umTileWidth(umTileAt(vec3u(neighbor)));
         if (pressureGrid) { neighborWidth = umStageTileWidth(stage, tileStage, neighbor); }
         if (neighborWidth == width) { continue; }
@@ -892,14 +892,19 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       let q=vec3u(max(cell,vec3i(0)))/edge;
       if(any(q>=pd)){return GridSample(vec3f(0),0.0,0.0,false);}
       let page=q.x+pd.x*(q.y+pd.y*q.z);
+      // The record's flag: the pool holds a block for the page (rewritten by
+      // every commit, copied here every frame). A page without one draws
+      // nothing where it is AIR and a flat grey where the live page table
+      // says SOLID.
       let live=viewRecords[base+8u+page]!=0u;
-      if(!live){return GridSample(vec3f(0),0.0,0.0,false);}
+      let solidPage=!live&&unstored&&umCellKind(cell)==UM_SOLID;
+      if(!live&&!solidPage){return GridSample(vec3f(0),0.0,0.0,false);}
       // Activity grids can use a different edge from the residency catalogue.
       let transport=pageActivityAt(cell,u32(layers.pageActivity.x));
       let work=pageActivityAt(cell,u32(layers.pageActivity.y));
-      fill=sceneColor(select(vec3f(0.58,0.46,0.76),
-        select(vec3f(0.95,0.61,0.16),vec3f(0.12,0.78,0.65),transport),transport||work));
-      alpha=select(0.08,0.42,transport||work);sampleDot=0.0;lineStrength=0.0;
+      fill=sceneColor(select(select(vec3f(0.58,0.46,0.76),
+        select(vec3f(0.95,0.61,0.16),vec3f(0.12,0.78,0.65),transport),transport||work),vec3f(0.36,0.38,0.42),solidPage));
+      alpha=select(select(0.08,0.42,transport||work),0.5,solidPage);sampleDot=0.0;lineStrength=0.0;
       let pageFraction=fract(samplePosition/f32(edge));
       let pageDistance=min(min(pageFraction.x,1.0-pageFraction.x)*f32(edge)/derivative.x,
         min(pageFraction.y,1.0-pageFraction.y)*f32(edge)/derivative.y);
@@ -1038,7 +1043,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     if(fieldMode==28){fill=vec3f(0.0);alpha=0.0;}
     var importanceRecorded=false;
     if((fieldMode==22||fieldMode==28)&&mixedLattice){
-      let t=umTileAt(vec3u(clamp(cell,vec3i(0),vec3i(umDimensions())-vec3i(1)))/4u);
+      let t=umTileAt(vec3u(umCellNear(cell))/4u);
       // The tile's screen hatch (0 none, 1 hatched, 2 cross-hatched) and inset
       // outline. Both layers mark through the one hatch site below: Metal
       // compiles every inlined copy.

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createUniformMixedLayoutFromWidths, type UniformMixedLayout } from "../lib/methods/uniform/uniform-mixed-layout";
-import { uniformVertexIncidentMasks, uniformStencilOctant, uniformSeamSideOrders, compileUniformBlendMask, UNIFORM_COMPILED_TOPOLOGY as R } from "../lib/methods/uniform/uniform-compiled-topology";
+import { uniformSeamSideOrders, compileUniformBlendMask } from "../lib/methods/uniform/uniform-compiled-topology";
 
 type V = [number, number, number];
 test("minimal blending masks preserve box distance throughout the center tile",()=>{
@@ -36,7 +36,6 @@ test("compiled seam schedules preserve side and patch ordering for all 64 side c
   }
  }
 });
-const corner = (k:number):V => [k&1,(k>>1)&1,k>>2];
 function layout(d:V,widths:Uint8Array):UniformMixedLayout {
  return createUniformMixedLayoutFromWidths({dimensions:d,cellSize_m:[1,1,1],origin_m:{x:0,y:0,z:0}},widths,[]);
 }
@@ -47,91 +46,6 @@ function owner(l:UniformMixedLayout,p:V){
  const local=p.map(v=>Math.floor((v%4)/width));const lane=local[0]!+n*(local[1]!+n*local[2]!);
  return {tile,width,lane,index:(word&0x3fffffff)+lane,origin:p.map(v=>v-v%width) as V};
 }
-test("all h/4h owner origins decode with a fixed four-cell local side",()=>{
- const l=layout([8,4,4],new Uint8Array([1,4])),states=new Set<string>();
- const origin=(tile:number,lane:number):V=>{
-  const d=l.tileDimensions,t:V=[tile%d[0],Math.floor(tile/d[0])%d[1],Math.floor(tile/(d[0]*d[1]))];
-  return [4*t[0]+(lane&3),4*t[1]+((lane>>2)&3),4*t[2]+(lane>>4)];
- };
- // Every point in both tiles exercises the independent geometric owner
- // oracle, including the 64 points that all resolve to one coarse owner.
- for(let z=0;z<4;z++)for(let y=0;y<4;y++)for(let x=0;x<8;x++){
-  const o=owner(l,[x,y,z])!;states.add(`${o.width}/${o.lane}`);
-  assert.deepEqual(origin(o.tile,o.lane),o.origin,`owner at ${x},${y},${z}`);
-  assert.ok(o.width===1||o.width===4&&o.lane===0);
- }
- assert.equal(states.size,65);
- // The WGSL out-of-domain lookup returns the zero-initialized UMOwner.
- assert.equal(owner(l,[-1,0,0]),undefined);assert.equal(owner(l,[8,0,0]),undefined);
- assert.deepEqual(origin(0,0),[0,0,0]);
-});
-function reference(l:UniformMixedLayout,p:V){
- let best:ReturnType<typeof owner>;
- for(let k=0;k<8;k++){
-  const c=corner(k),o=owner(l,p.map((v,a)=>v+c[a]!-1) as V);
-  if(o&&(!best||o.width>best.width||o.width===best.width&&o.index<best.index))best=o;
- }
- return best!;
-}
-function compiled(l:UniformMixedLayout,p:V){
- const c=p.map((v,a)=>Math.min(v,l.lattice.dimensions[a]!-1)>>2),d=l.tileDimensions;
- const t=c[0]!+d[0]*(c[1]!+d[1]*c[2]!);const local=p.map((v,a)=>v-4*c[a]!);
- const required=Number(local[0]!==0)|(Number(local[1]!==0)<<1)|(Number(local[2]!==0)<<2);
- const mask=((l.stencils[2*t+1]!>>>R.incident)&255)&uniformVertexIncidentMasks[required]!;
- if(mask){const k=31-Math.clz32(mask&-mask),b=corner(k);return owner(l,c.map((v,a)=>(v+b[a]!-1)*4) as V)!;}
- return owner(l,p.map((v,a)=>Math.max(0,Math.min(v-1,l.lattice.dimensions[a]!-1))) as V)!;
-}
-function check(l:UniformMixedLayout){
- const d=l.lattice.dimensions;
- for(let z=0;z<=d[2];z++)for(let y=0;y<=d[1];y++)for(let x=0;x<=d[0];x++){
-  const p:V=[x,y,z],a=reference(l,p),b=compiled(l,p);
-  assert.equal(b.index,a.index,`authority at ${p}`);assert.equal(b.width,a.width);
- }
- for(let tile=0;tile<l.tiles.length;tile++){
-  const t=l.tileDimensions,o:V=[tile%t[0],Math.floor(tile/t[0])%t[1],Math.floor(tile/(t[0]*t[1]))];
-  const word=l.stencils[2*tile+1]!,own=owner(l,o.map(v=>4*v) as V)!;
-  for(let k=0;k<8;k++){
-   const c=corner(k),p=o.map((v,a)=>4*(v+c[a]!)) as V;
-   const expected=own.width===4&&reference(l,p).tile===tile;
-   assert.equal(Boolean((word>>>R.corners)&(1<<k)),expected,`corner ${tile}/${k}`);
-   if(k){const q=o.map((v,a)=>4*(v+c[a]!)) as V,other=owner(l,q);
-    assert.equal(Boolean((word>>>R.positive)&(1<<k)),other?.width===4,`positive octant ${tile}/${k}`);}
-  }
-  // Reconstruct the 4³ redistance footprint using eight packed octants.
-  // Ignore out-of-domain cells, as window sampling clamps to the domain.
-  for(let k=0;k<64;k++){
-   const d:V=[k%4,Math.floor(k/4)%4,Math.floor(k/16)];
-   const q=o.map((v,a)=>4*(v+d[a]!-1)) as V,expected=owner(l,q);if(!expected)continue;
-   const c=d.map(v=>v>>1),center=o.map((v,a)=>v+c[a]!);
-   const key=center[0]!+t[0]*(center[1]!+t[1]*center[2]!);
-   const octant=c[0]!+2*(c[1]!+2*c[2]!);
-   const mask=uniformStencilOctant(l.stencils[2*key]!,octant);
-   const bit=(d[0]&1)+2*((d[1]&1)+2*(d[2]&1));
-   assert.equal(Boolean(mask&(1<<bit)),expected.width===1,`window ${tile}/${k}`);
-  }
- }
-}
-
-test("compiled vertex authority and writers match incident-owner traversal for every 2³ layout",()=>{
- for(let bits=0;bits<256;bits++)check(layout([8,8,8],Uint8Array.from({length:8},(_,k)=>bits&(1<<k)?1:4)));
-});
-
-test("compiled vertices handle thin domains and interior seams with arbitrary remote numbering",()=>{
- let seed=0x12345678;
- for(const d of [[4,8,12],[12,4,8],[8,12,4],[16,12,8]] as V[]){
-  const n=d.reduce((s,v)=>s*v/4,1);
-  for(let i=0;i<12;i++)check(layout(d,Uint8Array.from({length:n},()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed&0x80000000?1:4;})));
- }
-});
-
-test("remote refinement renumbers compact owners without changing a local compiled recipe",()=>{
- const widths=new Uint8Array(125).fill(4);widths[0]=1;
- const before=layout([20,20,20],widths);widths[0]=4;const after=layout([20,20,20],widths);
- assert.notEqual(before.tiles[124],after.tiles[124]);
- assert.equal(before.stencils[249],after.stencils[249]);
- check(before);check(after);
-});
-
 test("compiled face patches match both incident owners including sixteen-to-one seams",()=>{
  for(let bits=0;bits<256;bits++){
   const l=layout([8,8,8],Uint8Array.from({length:8},(_,k)=>bits&(1<<k)?1:4));

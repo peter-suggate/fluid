@@ -39,11 +39,13 @@ fn sliceLevelSetPhi(positionFine:vec3f)->vec2f{
 fn sliceVolumeFill(cell:vec3i)->vec2f{
 if(sliceLsvP.global.x==2u){
     if(any(cell<vec3i(0))||any(cell>=vec3i(udrCellDims(densityField)))){return vec2f(0);}
-    // A mixed owner's V is over its own capacity; the fields may be packed.
-    var address=cell;var capacity=1.0;
-    if(umPresentationEnabled()){address=vec3i(umOrigin(umOwnerAt(cell)));}
+    // A mixed owner's V is over its own capacity, at the texel udrLoadCell
+    // resolves the cell to (an h cell's, a 4h tile's); the fields may be
+    // packed. A cell with nothing stored has no V.
+    var capacity=1.0;
+    if(umPresentationEnabled()){if(!umCellPresent(cell)){return vec2f(0);}}
     else{capacity=textureLoad(sliceDenseOpen,cell,0).x;}
-    let volume=udrLoadCell(densityField,densityBase,address).x;
+    let volume=udrLoadCell(densityField,densityBase,cell).x;
     let valid=capacity>0.0&&sliceLsvFinite(volume)&&volume>=-1e-6;
     return vec2f(max(volume,0.0)/max(capacity,1e-20),select(0.0,1.0,valid));
   }

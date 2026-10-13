@@ -14,6 +14,7 @@ import {
 
 const PAGE_LEGEND = [
   { color: "#1fc7a6", label: "Transport" }, { color: "#f29c29", label: "Sharpen only" }, { color: "#9475c2", label: "Resident" },
+  { color: "#5c616b", label: "Solid" },
 ] as const;
 
 interface VisualLayerRowsProps {
@@ -118,7 +119,7 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
   >
     {planeControls}
   </ToolstripRow>
-  {shown("pages") && legend("Domain page states", "Last-step volume work. Resident pages may also support pressure and the interface. Absent pages are hidden.", PAGE_LEGEND)}
+  {shown("pages") && legend("Domain page states", "Last-step volume work. Resident pages may also support pressure and the interface. AIR pages (nothing stored) are hidden.", PAGE_LEGEND)}
   {shown("tiles") && legend("Mixed Uniform tile reasons", "Why each h tile is h (the frame head's census), and which velocity sampler it took.", MIXED_TILE_LEGEND)}
   {shown("importance") && legend("Mixed Uniform detail importance", "The frame head census's detail importance. Every score is its measure over its threshold: 1 triggers.", importanceLegend(importanceView(state)))}
   </>;

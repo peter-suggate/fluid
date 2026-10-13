@@ -26,10 +26,11 @@ export class UniformMixedMomentumCache {
   private readonly slotResources?:GPUBindGroupLayout;
   private readonly slotGroups=new WeakSet<UniformDetailGroup>();
   private readonly resources:GPUBindGroupLayout;
-  /** Workgroups of the cache launch: the 4h halo texture, fixed by the lattice. */
+  /** Workgroups of the cache launch: the 4h halo texture, the box in tiles
+   * plus one tile each side (UM_TILE_HALO_TEXTURE). */
   private readonly groups:readonly [number,number,number];
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership){
-    const d=ownership.capacity.lattice.dimensions;this.groups=[Math.ceil((d[0]!/4+2)/4),Math.ceil((d[1]!/4+2)/4),Math.ceil((d[2]!/4+2)/4)];
+    const halo=ownership.capacity.address.tileHaloTexture;this.groups=[Math.ceil(halo[0]/4),Math.ceil(halo[1]/4),Math.ceil(halo[2]/4)];
     const entries:GPUBindGroupLayoutEntry[]=[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -38,9 +39,9 @@ export class UniformMixedMomentumCache {
     if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
   }
   bind(f:UniformMixedMomentumCacheFields):UniformDetailGroup{
-    const d=this.ownership.capacity.lattice.dimensions;
+    const d=this.ownership.capacity.address.cells,halo=this.ownership.capacity.address.tileHaloTexture;
     for(const [i,t] of [f.extended,f.coarseExtended].entries())
-      if(uniformDetailExtent(t).some((n,a)=>n!==(i===0?d[a]:d[a]!/4+2))||t.format!=="rgba32float")throw new Error("Mixed momentum cache requires native inputs and 4h halo outputs");
+      if(uniformDetailExtent(t).some((n,a)=>n!==(i===0?d:halo)[a])||t.format!=="rgba32float")throw new Error("Mixed momentum cache requires native inputs and 4h halo outputs");
     if(f.slots&&!this.slotResources)throw new Error("Slot snapshot is unsupported");
     const group=uniformDetailGroup(this.device,{layout:f.slots?this.slotResources!:this.resources,entries:[
       {binding:0,resource:f.extended},
@@ -59,26 +60,29 @@ export class UniformMixedMomentumCache {
 ${uniformMixedFaceAddressWGSL}
 ${slots?uniformMixedExtensionSnapshotWGSL(1,3):""}
 fn umCacheExtended(anchor:vec3i,axis:u32)->f32 {
- if(anchor[axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(anchor,vec3i(0))),axis)];}
+ if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)];}
  return ${slots?"ueSnapshotFace(anchor,axis)":"textureLoad(extended,anchor,0)[axis]"};
 }
+// One lane per texel of the halo texture (umTileHaloTexel of tile id): the
+// box in tiles and one tile around it; a tile below the box holds its +face,
+// the low plane.
 @compute @workgroup_size(4,4,4) fn cache(@builtin(global_invocation_id) gid:vec3u){
- if(any(gid>=UM_T+vec3u(2))){return;}let id=vec3i(gid)-vec3i(1);
+ let box=vec3i(UM_BOX_TILES);if(any(gid>=UM_TILE_HALO_TEXTURE)){return;}let id=vec3i(gid)-vec3i(1);
  var e=vec4f(0);
  for(var axis=0u;axis<3u;axis++){
   let u=(axis+1u)%3u;let v=(axis+2u)%3u;
-  if(id[axis]< -1||id[axis]>=i32(UM_T[axis])||id[u]<0||id[u]>=i32(UM_T[u])||id[v]<0||id[v]>=i32(UM_T[v])){continue;}
+  if(id[axis]< -1||id[axis]>=box[axis]||id[u]<0||id[u]>=box[u]||id[v]<0||id[v]>=box[v]){continue;}
   var anchor=id*4;anchor[axis]+=3;
   var owner=umOwnerAt(anchor);var sign=1;
   if(owner.width==0u){var next=anchor;next[axis]+=1;owner=umOwnerAt(next);sign=-1;}
   let width=umFace(owner,axis,sign,0u).width;let side=4u/width;var value=0.0;
   // A whole 4h face is its tile's +face anchor: the base block.
-  if(width==4u&&anchor[axis]>=0){e[axis]=${slots?"ueSnapshotKnown(anchor,axis,4u)":`${UNIFORM_DETAIL_4H_LOAD}textureLoad(extended,anchor,0)[axis]`};continue;}
+  if(width==4u&&!umFaceLow(anchor,axis)){e[axis]=${slots?"ueSnapshotKnown(anchor,axis,4u)":`${UNIFORM_DETAIL_4H_LOAD}textureLoad(extended,anchor,0)[axis]`};continue;}
   for(var y=0u;y<side;y++){for(var x=0u;x<side;x++){
    var q=anchor;q[u]+=i32(x*width);q[v]+=i32(y*width);value+=umCacheExtended(q,axis);
   }}e[axis]=value/f32(side*side);
  }
- textureStore(coarseExtended,vec3i(gid),e);
+ textureStore(coarseExtended,umTileHaloTexel(id),e);
 }`});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const pipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,slots?this.slotResources!:this.resources]}),compute:{module,entryPoint:"cache"}});
@@ -105,7 +109,8 @@ export interface UniformMixedHangingTapFields {
  * sampler and store it in ownership.hangingGroup. Valid from this encode until
  * velocity/negative/coarse inputs change (forces); the frame orders that. */
 export class UniformMixedHangingTaps {
-  readonly allocatedBytes:number;
+  /** The taps are detail fields: their bytes are the storage's. */
+  readonly allocatedBytes=0;
   /** The unit interpolant's taps as one native MAC texel per cell: each unit
    * tile's stored faces and each slotted tile's fine taps, written with the
    * slots. A sample with nonzero fine weight has every tap in a unit or a
@@ -121,7 +126,7 @@ export class UniformMixedHangingTaps {
   /** detail: the solver's detail storage. The taps are read atlas-only (no
    * tile outside resident patches is ever a hanging tap), but the texture is
    * face-class: the remap borrows it as the census extension's face scratch. */
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly detail?:UniformDetailStorage){
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly detail:UniformDetailStorage){
     const entries:GPUBindGroupLayoutEntry[]=[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -130,20 +135,17 @@ export class UniformMixedHangingTaps {
     ];this.resources=uniformDetailBindLayout(device,{entries});
     if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
     this.unitVelocity=this.createTaps("Uniform mixed unit velocity taps");
-    // A detail field's bytes are its storage's.
-    const t=this.unitVelocity;this.allocatedBytes=detail?0:16*t.width*t.height*t.depthOrArrayLayers;
   }
   /** Another texture this fill can write: the unit taps of a second field,
    * kept beside unitVelocity (the caller destroys it). */
   createTaps(label:string):GPUTexture{
-    const [x,y,z]=this.ownership.capacity.lattice.dimensions;
-    return this.detail?this.detail.createField(label,"atlas","rgba32float"):this.device.createTexture({label,size:[x!,y!,z!],dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING});
+    return this.detail.createField(label,"atlas","rgba32float");
   }
   /** output: a createTaps texture to fill in place of unitVelocity. */
   bind(f:UniformMixedHangingTapFields,output=this.unitVelocity):UniformDetailGroup{
-    const d=this.ownership.capacity.lattice.dimensions;
+    const d=this.ownership.capacity.address.cells,halo=this.ownership.capacity.address.tileHaloTexture;
     for(const [i,t] of [f.extended,f.coarse].entries())
-      if(uniformDetailExtent(t).some((n,a)=>n!==(i===0?d[a]:d[a]!/4+2))||t.format!=="rgba32float")throw new Error("Hanging taps require native velocity and the 4h sampling cache");
+      if(uniformDetailExtent(t).some((n,a)=>n!==(i===0?d:halo)[a])||t.format!=="rgba32float")throw new Error("Hanging taps require native velocity and the 4h sampling cache");
     if(f.slots&&!this.slotResources)throw new Error("Slot snapshot is unsupported");
     const group=uniformDetailGroup(this.device,{layout:f.slots?this.slotResources!:this.resources,entries:[
       {binding:0,resource:f.extended},{binding:1,resource:{buffer:f.negative}},{binding:2,resource:f.coarse},
@@ -165,10 +167,11 @@ export class UniformMixedHangingTaps {
 ${uniformMixedFaceAddressWGSL}
 ${slots?uniformMixedExtensionSnapshotWGSL(1,4):""}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
- if(anchor[axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(anchor,vec3i(0))),axis)];}
+ if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)];}
  return ${slots?"ueSnapshotFace(anchor,axis)":"textureLoad(extended,anchor,0)[axis]"};
 }
-fn umLoadCoarseFace(index:vec3i,axis:u32)->f32{return textureLoad(coarse,index+vec3i(1),0)[axis];}
+// The 4h cache keeps a one-tile halo for the low planes (umTileHaloTexel).
+fn umLoadCoarseFace(index:vec3i,axis:u32)->f32{return textureLoad(coarse,umTileHaloTexel(index),0)[axis];}
 ${uniformMixedHangingTapWGSL(2)+uniformCompiledVelocityTapWGSL}
 // Tile-local lanes: 0..191 fine taps (stored to unitVelocity below),
 // 192..239 fine negative boundary plane taps (for tiles on that plane).
@@ -180,7 +183,7 @@ fn umHangingFill(slot:u32,tile:u32,lane:u32){
   unitTaps[lane]=value;
  }else if(lane<${192+UNIFORM_MIXED_HANGING_TAPS}u){
   let offset=lane-192u;let axis=offset/16u;let cell=offset%16u;
-  if(umTileCoord(tile)[axis]!=0u){return;}
+  if(!umLowOpen(vec3i(4u*umTileCoord(tile)))[axis]){return;}
   var local=vec3u(0);local[(axis+1u)%3u]=cell%4u;local[(axis+2u)%3u]=cell/4u;
   umHanging[umHangingPlaneAddress(slot,local,axis)]=bitcast<u32>(umCompiledVelocityTap(tile,local,axis,true));
  }
@@ -193,7 +196,7 @@ fn umCoarseSlots()->vec2u{let header=7u*UM_TILES+16u;let fine=umSupport[header];
  let units=umUnitJobs();
  if(group.x<units){
   let k=4u*group.x+lane/64u;
-  if(k<umCounts.x){let cell=vec3i(umTileCoord(umTopology[UM_TILES+k])*4u+umCorner(lane%64u,4u));textureStore(unitVelocity,cell,textureLoad(extended,cell,0));}
+  if(k<umCounts.x){let tile=umTopology[UM_TILES+k];let cell=vec3i(umTileCoord(tile)*4u+umCorner(lane%64u,4u));textureStore(unitVelocity,cell,textureLoad(extended,cell,0));}
  }else{
   let slot=umCoarseSlots().x+group.x-units;let tile=umHanging[UM_TILES+slot];
   if(tile!=UM_NO_SLOT){umHangingFill(slot,tile,lane);}

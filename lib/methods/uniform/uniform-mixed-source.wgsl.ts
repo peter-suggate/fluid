@@ -15,7 +15,7 @@ struct UMSourceParams {
  hostStages:array<vec4f,6>,${uniformExtrusionParamsWGSL}
 }
 @group(1) @binding(${binding}) var<uniform> umSourceParams:UMSourceParams;
-fn inflowGridDims()->vec3i{return vec3i(UM_D);}
+fn inflowGridDims()->vec3i{return vec3i(UM_BOX);}
 fn traceWorld(p:vec3f)->vec3f{return vec3f(-0.5*params.container.x,0.0,-0.5*params.container.z)+p*params.cellGravity.xyz;}
 ${inflowBoundaryWGSL}
 ${uniformDropSourceWGSL}

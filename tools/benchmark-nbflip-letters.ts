@@ -9,8 +9,7 @@
  *   times are not the benchmark's; pass timestamps are unaffected.
  * --out=DIR writes somewhere other than docs/verification.
  * --set=key=value overrides one method value over the scene's profile, whose
- *   coverage is the method's default (dynamic, surface tiles at h);
- *   --set=detailPolicy=full is the published grid everywhere. Repeatable.
+ *   coverage is dynamic (surface tiles at h). Repeatable.
  * --from=N averages the summary over frames N.. only (rows keep every frame).
  * --plain takes no pass timestamps: wall is then the frame time the app pays,
  *   without the per-pass timestamp writes and the encoder proxy that reads them.
@@ -110,6 +109,8 @@ assert.match(name,/^[a-z0-9-]+$/);
 const PROJECTION=/pressure|projection/i;
 const definition=getSceneDefinition(NBFLIP_LETTERS_SCENE_ID),scene=structuredClone(sceneDocument(definition)),dt=stepInterval;
 if(option("dt"))scene.numerics={...scene.numerics,fixedDt_s:dt,maxDt_s:dt};
+// --page-pool={"blocks":210,"permute":7}: the scene's page pool record, the one way a page set other than the whole box reaches the solver.
+if(option("page-pool"))scene.fluid.pagePool=JSON.parse(option("page-pool")!);
 assert.equal(definition.methodProfile?.methodId,uniformNarrowBandMethod.id);
 // The values the app resolves for this scene: the method's app defaults under the scene's own overrides.
 const sets=Object.fromEntries(process.argv.filter(a=>a.startsWith("--set=")).map(a=>{const [key,...value]=a.slice(6).split("=");const text=value.join("=");return [key!,text!==""&&Number.isFinite(Number(text))?Number(text):text==="true"?true:text==="false"?false:text];}));
@@ -145,21 +146,7 @@ try {
  const dispatchProbe=probeDispatch?new NarrowBandDispatchProbe(profile.device):undefined;
  const transferProbe=probeTransfer?new NarrowBandTransferProbe(dispatchProbe?.device??profile.device):undefined;
  const selected=transferProbe?.device??dispatchProbe?.device??(plain?raw:profile.device);
- const spatialDevice=process.argv.includes("--spatial-grid")?new Proxy(selected,{get:(target,key)=>{
-  if(key==="createShaderModule")return (d:GPUShaderModuleDescriptor)=>{
-   if(d.label!=="Uniform mixed layout builder")return target.createShaderModule(d);
-   const helper=`fn spatialTile(i:u32)->u32{
- if(any((T%vec3u(4u))!=vec3u(0u))){return i;}
- let block=i/64u;let b=vec3u(block%(T.x/4u),(block/(T.x/4u))%(T.y/4u),block/((T.x/4u)*(T.y/4u)));
- let k=i%64u;let l=vec3u((k&1u)|((k>>2u)&2u),((k>>1u)&1u)|((k>>3u)&2u),((k>>2u)&1u)|((k>>4u)&2u));
- return key(4u*b+l);
-}`;
-   let changed=0;const code=d.code.replace(/let t=group.x\*(\d+)u\+lane;/g,(_,block)=>{changed++;return `let t=spatialTile(group.x*${block}u+lane);`;})+helper;
-   assert.equal(changed,2);return target.createShaderModule({...d,code});
-  };
-  const v=Reflect.get(target,key,target);return typeof v==="function"?v.bind(target):v;
- }}):selected;
- device=managedGPUDevice(spatialDevice,{requireWorkerRealm:false});
+ device=managedGPUDevice(selected,{requireWorkerRealm:false});
  device.addEventListener('uncapturederror',e=>{e.preventDefault();errors.push(e.error.message);console.error(e.error.message);});
  const built=performance.now();
  solver=await uniformNarrowBandMethod.createSolverAsync!(device,scene,definition.methodProfile!.quality,values,undefined,()=>{}) as WebGPUUniformReferenceSolver;
@@ -176,12 +163,12 @@ try {
     else if(name==="dispatchWorkgroups"||name==="dispatchWorkgroupsIndirect"){const l=`dispatches ${passLabels.get(this as object)}`;(calls[l]??={n:0,ms:0}).n++;}
     return r;};
   }};
-  const e=spatialDevice.createCommandEncoder(),pass=e.beginComputePass();
+  const e=selected.createCommandEncoder(),pass=e.beginComputePass();
   wrap(Object.getPrototypeOf(pass),"pass",["setPipeline","setBindGroup","dispatchWorkgroups","dispatchWorkgroupsIndirect","end"]);
   wrap(Object.getPrototypeOf(e),"encoder",["beginComputePass","beginRenderPass","copyBufferToBuffer","copyTextureToTexture","copyBufferToTexture","copyTextureToBuffer","clearBuffer","finish","resolveQuerySet"]);
   pass.end();e.finish();
-  wrap(Object.getPrototypeOf(spatialDevice.queue),"queue",["writeBuffer","writeTexture","submit","onSubmittedWorkDone"]);
-  wrap(Object.getPrototypeOf(spatialDevice),"device",["createBindGroup","createBuffer","createTexture","createCommandEncoder","createComputePipeline","createShaderModule"]);
+  wrap(Object.getPrototypeOf(selected.queue),"queue",["writeBuffer","writeTexture","submit","onSubmittedWorkDone"]);
+  wrap(Object.getPrototypeOf(selected),"device",["createBindGroup","createBuffer","createTexture","createCommandEncoder","createComputePipeline","createShaderModule"]);
  }
  let probeFrame=0,tracedSample=0;
  // A stand-in for the app's presentation: nothing in it reads or writes a simulation resource.

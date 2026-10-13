@@ -13,6 +13,7 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { uniformDetailField, type UniformDetailGroup } from "../lib/methods/uniform/uniform-detail-fields";
+import { NARROW_BAND_PARTICLE_GRID } from "../lib/methods/uniform/uniform-narrow-band-order";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import { GPUPassProfile } from "./gpu-pass-profile";
 
@@ -302,7 +303,7 @@ override capture:bool=false;
     if (!split) flip.snapshot(encoder);
     else {
      flip.cache.encode(encoder, flip.cacheGroups.snapshot); flip.encodeStageTaps(encoder);
-     const pass = encoder.beginComputePass({ label: "Materialized snapshot sample" }); flip.encodeParticleWork(encoder, pass);
+     const pass = encoder.beginComputePass({ label: "Materialized snapshot sample" });
      flip.dispatchBatch(encoder, ["snapshot"], undefined, "snapshot", pass); pass.end();
     }
     return;
@@ -312,16 +313,14 @@ override capture:bool=false;
    pass.setBindGroup(0, ownership.bindGroup); pass.setBindGroup(1, pairOld[activeSweeps % 2]!.group); pass.setPipeline(ext.companionRestrict);
    pass.dispatchWorkgroups(...ownership.capacity.tileDimensions.map((n: number) => Math.ceil(n / 4)) as [number, number, number]); ext.hierarchy.encode(pass, false); pass.end();
    let sample = split ? undefined : encoder.beginComputePass({ label: "Direct old extension cache taps and snapshot" });
-   if (sample) flip.encodeParticleWork(encoder, sample);
    for (const name of finalizeAll ? ["fine", "coarse", "cache", "taps", "snapshot"] : staged ? ["fine", "cache", "taps", "snapshot"] : ["cache", "taps", "snapshot"]) {
     sample ??= encoder.beginComputePass({ label: `Direct snapshot ${name}` });
-    if (split && name === "snapshot") flip.encodeParticleWork(encoder, sample);
     const variant = variants.get(name)!; sample.setBindGroup(0, ownership.bindGroup); sample.setBindGroup(1, variant.group); sample.setBindGroup(2, name === "taps" || name === "fine" || name === "coarse" ? ownership.hangingGroup : emptyGroup); sample.setBindGroup(3, dsGroups[activeSweeps % 2]!); sample.setPipeline(variant.pipeline);
     if (name === "cache") sample.dispatchWorkgroups(...ownership.capacity.lattice.dimensions.map((n: number) => Math.ceil((n / 4 + 2) / 4)) as [number, number, number]);
     else if (name === "fine") { if (ownership.capacity.fineTiles > 0) sample.dispatchWorkgroups(Math.min(65535, ownership.capacity.fineTiles)); }
     else if (name === "coarse") { const groups = Math.ceil(3 * ownership.capacity.tiles / 64); sample.dispatchWorkgroups(Math.min(65535, groups), Math.ceil(groups / 65535)); }
     else if (name === "taps") { if (ownership.capacity.fineTiles > 0) ownership.dispatchCounted(sample, variant.pipeline, ownership.capacity.tiles, "fineAndSeams"); }
-    else sample.dispatchWorkgroupsIndirect(flip.particleDispatch, 0);
+    else sample.dispatchWorkgroups(NARROW_BAND_PARTICLE_GRID);
     if (split) { sample.end(); sample = undefined; }
    }
    sample?.end();

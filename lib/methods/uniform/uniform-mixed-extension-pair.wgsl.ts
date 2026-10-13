@@ -102,7 +102,7 @@ export function pairedExtensionSource(source:string,retained=false):string{
  let finish=source;
  const replaceFinish=(from:string,to:string)=>{finish=replaceExact(finish,from,to);};
  replaceFinish("return stateIn[umSlot(p,axis,1u)].x;","return ueFinishState(umSlot(p,axis,1u)).x;");
- replaceFinish("let state=stateIn[umSlot(clamp(anchor,vec3i(-1),vec3i(UM_D)-vec3i(1)),axis,width)];","let state=ueFinishState(umSlot(clamp(anchor,vec3i(-1),vec3i(UM_D)-vec3i(1)),axis,width));");
+ replaceFinish("let state=stateIn[umSlot(umFaceAnchorNear(anchor),axis,width)];","let state=ueFinishState(umSlot(umFaceAnchorNear(anchor),axis,width));");
  replaceFinish("let slot=stateIn[select(UE_COARSE+component*UE_TILES+tile,ueUnitSlotIn(word,upper,local,component),patchWidth==1u)];","let slot=ueFinishState(select(UE_COARSE+component*UE_TILES+tile,ueUnitSlotIn(word,upper,local,component),patchWidth==1u));");
  replaceFinish("stateIn[ueOwnSlot(owner,axis)],(umTileSupport(owner.tile)&2u)!=0u)","ueFinishState(ueOwnSlot(owner,axis)),(umTileSupport(owner.tile)&2u)!=0u)");
  return finish+swept.slice(source.length)+`
@@ -113,7 +113,7 @@ fn ueFinishState(slot:u32)->vec2f{
  let state=stateIn[slot];if(ueCompanionValues){return vec2f(pairIn[slot],state.y);}return state;
 }
 fn pairPhysical(face:UMFace)->f32{
- if(face.anchor[face.axis]<0){return companionNegative[umNegativeBoundaryIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
+ if(umFaceLow(face.anchor,face.axis)){return companionNegative[umLowFaceIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
  return textureLoad(departure,face.anchor,0)[face.axis];
 }
 fn pair_ueSeedStore(slot:u32,value:UEPair){
@@ -131,11 +131,11 @@ const retainedCanonicalWGSL=/* wgsl */`
 fn retainedStore(slot:u32,value:f32){pairIn[slot]=value;pairOut[slot]=value;}
 @compute @workgroup_size(64) fn retainFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  for(var job=group.x;job<umCounts.x;job+=groups.x){
-  let origin=umTileCoord(umTopology[UM_TILES+job])*4u+umCorner(lane,4u);let owner=umOwnerAt(vec3i(origin));
-  let value=textureLoad(physical,vec3i(origin),0).xyz;
+  let tile=umTopology[UM_TILES+job];let origin=umTileCoord(tile)*4u+umCorner(lane,4u);let owner=umOwnerAt(vec3i(origin));
+  let value=textureLoad(physical,vec3i(origin),0).xyz;let low=umLowOpen(vec3i(origin));
   for(var axis=0u;axis<3u;axis++){
    retainedStore(ueOwnSlot(owner,axis),value[axis]);
-   if(origin[axis]==0u){let face=umUnitExtensionFace(owner,axis,-1);retainedStore(umSlot(face.anchor,axis,1u),umPhysical(face));}
+   if(low[axis]){let face=umUnitExtensionFace(owner,axis,-1);retainedStore(umSlot(face.anchor,axis,1u),umPhysical(face));}
   }
  }
 }
@@ -147,17 +147,17 @@ fn retainedStore(slot:u32,value:f32){pairIn[slot]=value;pairOut[slot]=value;}
  for(var job=group.x;job<packs+seams;job+=groups.x){
   if(job<packs){
    let index=64u*job+lane;if(index>=regular){continue;}
-   let tile=umSupport[8u*UM_TILES+24u+index];let origin=umTileCoord(tile)*4u;
+   let tile=umSupport[8u*UM_TILES+24u+index];let origin=umTileCoord(tile)*4u;let low=umLowOpen(vec3i(origin));
    for(var axis=0u;axis<3u;axis++){
     var anchor=vec3i(origin);anchor[axis]+=3;
     let face=UMFace(UMOwner(),anchor,4u,1u,axis,1);
     retainedStore(umSlot(anchor,axis,4u),umPhysical(face));
-    if(origin[axis]==0u){anchor=vec3i(origin);anchor[axis]=-1;let wall=UMFace(UMOwner(),anchor,4u,1u,axis,-1);retainedStore(umSlot(anchor,axis,4u),umPhysical(wall));}
+    if(low[axis]){anchor=vec3i(origin);anchor[axis]=-1;let wall=UMFace(UMOwner(),anchor,4u,1u,axis,-1);retainedStore(umSlot(anchor,axis,4u),umPhysical(wall));}
    }
   }else{
    let tile=umSupport[header+4u+fine+job-packs];let origin=umTileCoord(tile)*4u;let owner=umOwnerAt(vec3i(origin));
    if(lane<48u){let axis=lane/16u;let face=umFace(owner,axis,1,lane%16u);if(face.width!=0u){retainedStore(umSlot(face.anchor,axis,face.width),umPhysical(face));}}
-   else if(lane<51u){let axis=lane-48u;if(origin[axis]==0u){let face=umFace(owner,axis,-1,0u);retainedStore(umSlot(face.anchor,axis,face.width),umPhysical(face));}}
+   else if(lane<51u){let axis=lane-48u;if(umLowOpen(vec3i(origin))[axis]){let face=umFace(owner,axis,-1,0u);retainedStore(umSlot(face.anchor,axis,face.width),umPhysical(face));}}
   }
  }
 }
@@ -170,7 +170,8 @@ export function pairedSnapshotSource(source:string,retained=false):string{
  if(retained)source=replaceExact(source,"return textureLoad(physical,face.anchor,0)[face.axis];","return pairIn[umSlot(face.anchor,face.axis,face.width)];");
  let fine=functionSource(source,"uePublishFine");
  fine=replaceExact(fine,"fn uePublishFine(","fn ueSnapshotFineOwner(");
- fine=replaceExact(fine,"if(origin[axis]==0u){let face=umUnitExtensionFace(owner,axis,-1);boundary[umNegativeBoundaryIndex(origin,axis)]=umPhysical(face);}","");
+ fine=replaceExact(fine,"let low=umLowOpen(vec3i(origin));","");
+ fine=replaceExact(fine,"if(low[axis]){let face=umUnitExtensionFace(owner,axis,-1);boundary[umLowFaceIndex(origin,axis)]=umPhysical(face);}","");
  fine=replaceExact(fine,"value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);","ueSnapshotStore(owner,value);",2);
  // This module only publishes fine taps; their atlas-only accessor must not
  // mirror unused 4h texels into a base field.
@@ -183,7 +184,7 @@ fn ueSnapshotStore(owner:UMOwner,value:vec4f){
 ${fine}
 @compute @workgroup_size(64) fn snapshotFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  for(var job=group.x;job<umCounts.x;job+=groups.x){
-  let cell=vec3i(umTileCoord(umTopology[UM_TILES+job])*4u+umCorner(lane,4u));
+  let tile=umTopology[UM_TILES+job];let cell=vec3i(umTileCoord(tile)*4u+umCorner(lane,4u));
   ueSnapshotFineOwner(umOwnerAt(cell),lane);workgroupBarrier();
  }
 }
@@ -249,7 +250,7 @@ export function replayedPublicationSource(source:string):string{
  const fine=originalFine.slice(0,start)+/* wgsl */`
  // Values are the only per-cell data needed after old publication saved the
  // nearest-source selection. Preserve the same clamped 27-cell neighborhood.
- if(lane<27u){let p=vec3i(umTileCoord(farTile))+vec3i(umCorner(lane,3u))-vec3i(1);if(all(p>=vec3i(0))&&all(p<vec3i(UM_T))){farState[lane]=publicationLoad(p);}}
+ if(lane<27u){let p=vec3i(umTileCoord(farTile))+vec3i(umCorner(lane,3u))-vec3i(1);if(umTilePresent(p)){farState[lane]=publicationLoad(p);}}
  workgroupBarrier();
  for(var axis=0u;axis<3u;axis++){
   if((needsFar&(1u<<axis))==0u){continue;}

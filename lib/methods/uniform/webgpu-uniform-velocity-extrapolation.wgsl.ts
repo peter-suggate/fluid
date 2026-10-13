@@ -3,105 +3,23 @@ export const uniformVelocityExtrapolationShader = /* wgsl */ `
 struct Params {
   dimsDt: vec4f,
   cellGravity: vec4f,
-  container: vec4f,
-  physical: vec4f,
-  boundary: vec4f,
-  inflowPositionRadius: vec4f,
-  inflowVelocityLength: vec4f,
-  inflowTiming: vec4f,
-  tuning: vec4f,
-  drop: vec4f,
-  dropExtent: vec4f,
-
-
-
-  twoLevel: vec4f,
 }
 
-struct FrontParams {
-  sourceParity: u32,
-  targetParity: u32,
-  hierarchySourceUsesBaseDims: u32,
-  hierarchyTargetUsesBaseDims: u32,
-  activeLevel: u32,
-  _padding0: u32,
-  _padding1: u32,
-  _padding2: u32,
-}
+@group(0) @binding(0) var<uniform> params: Params;
 
-@group(0) @binding(1) var densityIn: texture_3d<f32>;
+@group(0) @binding(1) var primaryIn: texture_3d<f32>;
 
-@group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(2) var secondaryIn: texture_3d<f32>;
 
-@group(0) @binding(3) var primaryIn: texture_3d<f32>;
+@group(0) @binding(3) var primaryOut: texture_storage_3d<rgba32float, write>;
 
-@group(0) @binding(4) var secondaryIn: texture_3d<f32>;
+@group(0) @binding(4) var sourceOrigins: texture_3d<u32>;
 
-@group(0) @binding(5) var primaryOut: texture_storage_3d<rgba32float, write>;
+@group(0) @binding(5) var existingOrigins: texture_3d<u32>;
 
-@group(0) @binding(7) var<uniform> frontParams: FrontParams;
+@group(0) @binding(6) var outputOrigins: texture_storage_3d<rgba32uint, write>;
 
-@group(0) @binding(8) var faceOpenIn: texture_3d<f32>;
-
-@group(0) @binding(12) var<storage, read_write> tileScratch: array<u32>;
-
-@group(0) @binding(13) var sourceOrigins: texture_3d<u32>;
-
-@group(0) @binding(14) var existingOrigins: texture_3d<u32>;
-
-@group(0) @binding(15) var outputOrigins: texture_storage_3d<rgba32uint, write>;
-
-override FRONT_RECEIPTS:bool=false;
-
-override CACHE_FINE_HIERARCHY:bool=false;
-
-var<workgroup> hierarchyValues:array<vec4f,64>;
-
-var<workgroup> hierarchyLower:array<vec4u,64>;
-
-var<workgroup> hierarchyUpper:array<vec4u,64>;
-
-var<workgroup> hierarchyCacheBase:vec3i;
-
-fn hierarchyCacheIndex(q:vec3i)->u32{let p=vec3u(q-hierarchyCacheBase);return p.x+4u*(p.y+4u*p.z);}
-
-fn hierarchyInput(q:vec3i)->vec4f{
-  if(CACHE_FINE_HIERARCHY){return hierarchyValues[hierarchyCacheIndex(q)];}
-  return textureLoad(primaryIn,q,0);
-}
-
-fn hierarchyOrigin(q:vec3i,sd:vec3i,upper:bool)->vec4u{
-  if(CACHE_FINE_HIERARCHY){let i=hierarchyCacheIndex(q);return select(hierarchyLower[i],hierarchyUpper[i],upper);}
-  return textureLoad(sourceOrigins,q+select(vec3i(0),vec3i(0,0,sd.z),upper),0);
-}
-
-override FRONT_INITIAL_SWEEP:bool=false;
-
-override COMPACT_SHELL: bool = false;
-
-override REUSE_CONVERGED_DISTANCE: bool = false;
-
-override SOURCE_AWARE_HIERARCHY: bool = false;
-
-override SHELL_HIERARCHY: bool = false;
-
-fn baseDims() -> vec3i { return vec3i(textureDimensions(densityIn)); }
-
-fn tileDims() -> vec3i { return vec3i(textureDimensions(faceOpenIn)); }
-
-fn coarseDims() -> vec3i { return (tileDims() + vec3i(3)) / 4; }
-
-fn coarseIndex(t: vec3i) -> u32 { let c = coarseDims(); return u32(t.x + c.x * (t.y + c.y * t.z)); }
-
-fn tileTableBase() -> u32 { let d = tileDims(); return u32(d.x * d.y * d.z); }
-
-fn tiledExtension() -> bool { return params.twoLevel.y > 0.5; }
-
-fn shellAt(p: vec3i) -> bool {
-  if (!tiledExtension()) { return true; }
-  let cell = clamp(p, vec3i(0), tileDims() - vec3i(1));
-  return (tileScratch[tileTableBase() + 4u * coarseIndex(cell / 4) + 3u] & 2u) != 0u;
-}
+fn baseDims() -> vec3i { return vec3i(params.dimsDt.xyz); }
 
 fn inBounds(p: vec3i, d: vec3i) -> bool {
   return all(p >= vec3i(0)) && all(p < d);
@@ -117,20 +35,6 @@ fn bitFor(component: u32) -> u32 { return 1u << component; }
 
 fn componentKnown(state: vec4f, component: u32) -> bool {
   return (u32(round(state.w)) & bitFor(component)) != 0u;
-}
-
-fn hierarchySourceDims() -> vec3i {
-  return select(vec3i(textureDimensions(primaryIn)), baseDims(),
-    frontParams.hierarchySourceUsesBaseDims != 0u);
-}
-
-fn hierarchyTargetDims() -> vec3i {
-  return select(vec3i(textureDimensions(primaryOut)), baseDims(),
-    frontParams.hierarchyTargetUsesBaseDims != 0u);
-}
-
-fn sourceKnownAt(q: vec3i) -> bool {
-  return frontParams.hierarchySourceUsesBaseDims == 0u || shellAt(q);
 }
 
 struct NearestSample { value: f32, weight: f32, lower: u32, upper: u32 }
@@ -154,8 +58,6 @@ fn nearestHierarchySample(p: vec3i, sd: vec3i, td: vec3i, component: u32, footpr
   var sourcePosition = (vec3f(p)+vec3f(0.5))*vec3f(sd)/vec3f(td)-vec3f(0.5);
   sourcePosition[component] = f32(p[component]+1)*f32(sd[component])/f32(td[component])-1.0;
   let lower = select(vec3i(floor(sourcePosition)), 2*p, footprint);
-
-
   let spacing=params.cellGravity.xyz;let h=spacing/min(spacing.x,min(spacing.y,spacing.z));
   var best = 1e30;
   var distances: array<f32,8>;
@@ -163,26 +65,20 @@ fn nearestHierarchySample(p: vec3i, sd: vec3i, td: vec3i, component: u32, footpr
   var values: array<f32,8>;
   for(var k=0u;k<8u;k++){
     let q = clamp(lower + vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)),vec3i(0),sd-vec3i(1));
-    let state = hierarchyInput(q);
+    let state = textureLoad(primaryIn,q,0);
     distances[k] = 1e30;
     let offset=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
     let fraction=fract(sourcePosition);
     let weights=select(vec3f(1.0)-fraction,fraction,offset==vec3i(1));
-
-    if ((!footprint && any(weights<=vec3f(0.0))) || !componentKnown(state,component) || !sourceKnownAt(q)) { continue; }
-    var lower: u32;var upper:u32;
-    if (frontParams.hierarchySourceUsesBaseDims != 0u) {
-      let d = baseDims();lower = u32(q.x+d.x*(q.y+d.y*q.z))+1u;upper=lower;
-    } else {
-      lower=hierarchyOrigin(q,sd,false)[component];
-      upper=hierarchyOrigin(q,sd,true)[component];
-    }
-    if (lower == 0u) { continue; }
-    let lo=faceLocation(originalFace(lower),baseDims(),component);
-    let hi=faceLocation(originalFace(upper),baseDims(),component);
+    if ((!footprint && any(weights<=vec3f(0.0))) || !componentKnown(state,component)) { continue; }
+    let first=textureLoad(sourceOrigins,q,0)[component];
+    if (first == 0u) { continue; }
+    let last=textureLoad(sourceOrigins,q+vec3i(0,0,sd.z),0)[component];
+    let lo=faceLocation(originalFace(first),baseDims(),component);
+    let hi=faceLocation(originalFace(last),baseDims(),component);
     let delta=(location-clamp(location,lo,hi))*h;
     let distance=(delta.x*delta.x+delta.z*delta.z)+delta.y*delta.y;
-    distances[k]=distance;lowers[k]=lower;uppers[k]=upper;values[k]=state[component];
+    distances[k]=distance;lowers[k]=first;uppers[k]=last;values[k]=state[component];
     best=min(best,distance);
   }
   var contributions:array<vec2f,8>;
@@ -213,7 +109,7 @@ fn mixedHierarchyEntry(sample:NearestSample)->vec4u{
 @compute @workgroup_size(192)
 fn mixedRestrictKnownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   let component=lane/64u;let cell=lane%64u;let p=mixedHierarchyCell(wid,cell);
-  let sd=hierarchySourceDims();let td=hierarchyTargetDims();let inside=inBounds(p,td);
+  let sd=vec3i(textureDimensions(primaryIn));let td=vec3i(textureDimensions(primaryOut));let inside=inBounds(p,td);
   var entry=vec4u(0u);
   if(inside){
     var result=nearestHierarchySample(p,sd,td,component,false);
@@ -232,7 +128,7 @@ fn mixedRestrictKnownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_in
 @compute @workgroup_size(192)
 fn mixedProlongUnknownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   let component=lane/64u;let cell=lane%64u;let p=mixedHierarchyCell(wid,cell);
-  let sd=hierarchySourceDims();let td=hierarchyTargetDims();let inside=inBounds(p,td);
+  let sd=vec3i(textureDimensions(primaryIn));let td=vec3i(textureDimensions(primaryOut));let inside=inBounds(p,td);
   var entry=vec4u(0u);var existing=vec4f(0.0);
   if(inside){
     existing=textureLoad(secondaryIn,p,0);
@@ -257,7 +153,7 @@ fn mixedProlongUnknownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_i
 @compute @workgroup_size(192)
 fn mixedReplayUnknownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
  let component=lane/64u;let cell=lane%64u;let p=mixedHierarchyCell(wid,cell);
- let sd=hierarchySourceDims();let td=hierarchyTargetDims();let inside=inBounds(p,td);var value=0.0;var mask=0u;
+ let sd=vec3i(textureDimensions(primaryIn));let td=vec3i(textureDimensions(primaryOut));let inside=inBounds(p,td);var value=0.0;var mask=0u;
  if(inside){
   let existing=textureLoad(secondaryIn,p,0);value=existing[component];mask=u32(round(existing.w));
   if(!componentKnown(existing,component)){

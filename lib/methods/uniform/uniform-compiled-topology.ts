@@ -100,7 +100,7 @@ fn umCoarseIncident(t:u32,local:vec3u)->u32{
 // Window tile offsets -1..+2 are eight 2³ octants. Their widths already
 // exist in eight neighboring 3³ stencils: no per-tile word reads or atomics.
 fn umWindowFineOctant(tile:vec3u,octant:u32)->u32{
- let c=umCorner(octant,2u);let center=tile+c;if(any(center>=UM_T)){return 0u;}
+ let c=umCorner(octant,2u);let center=tile+c;if(!umTilePresent(vec3i(center))){return 0u;}
  let m=umTileStencil(umTileAt(center)).x>>(c.x+3u*c.y+9u*c.z);
  return ${negative.map((mask,k)=>`(((m>>${Math.log2(mask)}u)&1u)<<${k}u)`).join("|")};
 }

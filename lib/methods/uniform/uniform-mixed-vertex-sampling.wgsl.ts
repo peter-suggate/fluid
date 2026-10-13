@@ -20,6 +20,9 @@
  * It also skips umVertexValue's incident-tile walk in a tile whose whole
  * stencil is 4h: no incident tile stores a vertex off the tile corners
  * there, which is all the walk can conclude, so the result is unchanged.
+ * Such a consumer samples anywhere in the box: where nothing is stored (its
+ * umOwnerAt gives no owner) a sample is the corner of the point's tile as
+ * the page table resolves it, far air.
  * Without it every site calls umLoadVertex and the text is unchanged.
  * corner: the loader of a tile corner (a 4-aligned vertex), for a consumer
  * whose field keeps those in a second home (a detail field's base block,
@@ -35,7 +38,8 @@ export const uniformMixedVertexSamplingSource = (cacheLookup = "", resolved = fa
   }`;
  // The general sample. A resolved consumer returns from its own block
  // before it, so that text is left out there (Tint: unreachable code).
- const general = ` let owner=umOwnerAt(min(vec3i(floor(q)),vec3i(UM_D)-vec3i(1)));
+ const general = ` let owner=umOwnerAt(umCellNear(vec3i(floor(q))));${split ? `
+ if(owner.width==0u){return ${coarse}(vec3u(umCellNear(vec3i(floor(q)))));}` : ""}
  let origin=umOrigin(owner);let t=(q-vec3f(origin))/f32(owner.width);var values:array<f32,8>;
  let regular=owner.width>=umTileMaximumWidth(owner.tile);
  if(regular){
@@ -48,7 +52,7 @@ export const uniformMixedVertexSamplingSource = (cacheLookup = "", resolved = fa
  // A narrower-than-stencil unit owner's corners lie in tiles whose stencils
  // hold it: mixed (resolved) or uniformly fine (stored).
  if(${resolved}&&owner.width==1u){
-  let base=min(vec3u(floor(q)),UM_D-vec3u(1));let f=q-vec3f(base);
+  let base=vec3u(umCellNear(vec3i(floor(q))));let f=q-vec3f(base);
   for(var k=0u;k<8u;k++){let corner=umCorner(k,2u);let w=select(vec3f(1)-f,f,corner!=vec3u(0));values[k]=umLoadVertex(base+corner)*w.x*w.y*w.z;}
   return umVertexSum8(values);
  }
@@ -63,15 +67,15 @@ export const uniformMixedVertexSamplingSource = (cacheLookup = "", resolved = fa
  return /* wgsl */ `
 fn umVertexSum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
 fn umVertexAuthority(p:vec3u)->UMOwner {
- if(umRegularFine){return umOwnerAt(clamp(vec3i(p)-vec3i(1),vec3i(0),vec3i(UM_D)-vec3i(1)));}
- let cell=min(p,UM_D-vec3u(1));let tile=umTileAt(cell/4u);let local=p-(cell/4u)*4u;
+ if(umRegularFine){return umOwnerAt(umCellNear(vec3i(p)-vec3i(1)));}
+ let cell=vec3u(umCellNear(vec3i(p)));let tile=umTileAt(cell/4u);let local=p-(cell/4u)*4u;
  let incident=umCoarseIncident(tile,local);
  if(incident!=0u){
   let at=vec3i(cell/4u)+vec3i(umCorner(firstTrailingBit(incident),2u))-vec3i(1);
   return umOwnerAt(at*4);
  }
  // No coarse incident tile: the first fine owner is the lower incident cell.
- return umOwnerAt(clamp(vec3i(p)-vec3i(1),vec3i(0),vec3i(UM_D)-vec3i(1)));
+ return umOwnerAt(umCellNear(vec3i(p)-vec3i(1)));
 }
 fn umVertexIsCanonical(p:vec3u,owner:UMOwner)->bool {
  return all((p-umOrigin(owner))%owner.width==vec3u(0));
@@ -96,7 +100,7 @@ fn umVertexValue(p:vec3u)->f32 {
  if(umRegularFine){return umLoadVertex(p);}
  // Only tiles incident to a tile plane can disagree about coincidence.
  // Avoid constructing eight full owners for ordinary stored vertices.
- let tile=umTileAt(min(p,UM_D-vec3u(1))/4u);
+ let tile=umTileAt(vec3u(umCellNear(vec3i(p)))/4u);
  if(umTileMaximumWidth(tile)==1u){return ${fine}(p);}
  ${corner ? `if(all(p%4u==vec3u(0))){return ${corner}(p);}` : ""}
  // Every owner incident to p lies in its tile's stencil. A uniform stencil
@@ -111,7 +115,7 @@ fn umVertexValue(p:vec3u)->f32 {
   let back=umCorner(k,2u);
   if(any((back!=vec3u(0))&(local!=vec3u(0)))){continue;}
   let tile=vec3i(p/4u)-vec3i(back);
-  if(any(tile<vec3i(0))||any(tile>=vec3i(UM_T))){continue;}
+  if(!umTilePresent(tile)){continue;}
   let width=umTileWidth(umTileAt(vec3u(tile)));
   if(any(p%width!=vec3u(0))){stored=false;break;}
  }
@@ -127,9 +131,9 @@ fn umVertexValue(p:vec3u)->f32 {
  return umVertexSum8(values);
 }
 fn umSampleVertex(p:vec3f)->f32 {
- let q=clamp(p,vec3f(0),vec3f(UM_D));
+ let q=umPointNear(p);
  if(umRegularFine){
-  let base=min(vec3u(floor(q)),UM_D-vec3u(1));let f=q-vec3f(base);var taps:array<f32,8>;
+  let base=vec3u(umCellNear(vec3i(floor(q))));let f=q-vec3f(base);var taps:array<f32,8>;
   for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){let corner=umCorner(k,2u);let w=select(vec3f(1)-f,f,corner!=vec3u(0));taps[k]=umLoadVertex(base+corner)*w.x*w.y*w.z;}
   return umVertexSum8(taps);
  }
@@ -137,7 +141,7 @@ fn umSampleVertex(p:vec3f)->f32 {
  // closure, each stored (uniform or unit stencil) or resolved (mixed). The
  // tile width is the owner width; eight independent loads, no authority.
  {
-  let cell=vec3u(min(vec3i(floor(q)),vec3i(UM_D)-vec3i(1)));let width=umTileWidth(umTileAt(cell/4u));
+  let cell=vec3u(umCellNear(vec3i(floor(q))));let width=umTileWidth(umTileAt(cell/4u));
   let origin=(cell/width)*width;let t=(q-vec3f(origin))/f32(width);var values:array<f32,8>;
   ${(taps => corner ? `if(width==4u){${taps(corner)}}else{${taps("umLoadVertex")}}` : taps("umLoadVertex"))((load: string) => `for(var k=0u;k<8u;k++){
    let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));

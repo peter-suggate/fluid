@@ -2,14 +2,10 @@ import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailField, unifo
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 
-/** Texel extent of the 4h vertex base of a lattice: one texel per tile corner. */
-export function uniformCoarseVertexPhiSize(dimensions: readonly number[]): [number, number, number] {
-  return [dimensions[0]! / 4 + 1, dimensions[1]! / 4 + 1, dimensions[2]! / 4 + 1];
-}
-
-/** The 4h vertex base of the level set: texel g is phi at lattice vertex 4g,
- * a (t+1)^3 r32float on its own (never folded into an atlas), so a consumer
- * outside the solver loads a tile corner with one textureLoad under every
+/** The 4h vertex base of the level set: phi at lattice vertex 4g at texel
+ * umWideVertexTexel(g), a 4h vertex texture (a 9³ block per page) on its
+ * own, so a consumer outside the solver loads a tile corner with one
+ * textureLoad at that texel under every
  * field placement and binds no h-sized texture while no tile is at h.
  * Base-currency rule of the vertex class: the base is current for every tile
  * corner at each published revision. A tile corner is a stored vertex under
@@ -27,13 +23,15 @@ export class UniformCoarseVertexPhi {
   private readonly resources: GPUBindGroupLayout;
   private readonly group: UniformDetailGroup;
   private readonly size: [number, number, number];
+  /** The box's tile corners on each axis: the publish launch. */
+  private readonly corners: readonly [number, number, number];
   private pipeline?: GPUComputePipeline;
 
   constructor(private readonly device: GPUDevice, private readonly ownership: UniformMixedOwnership, private readonly phi: GPUTexture) {
-    const d = ownership.capacity.lattice.dimensions;
-    if (d.some(n => n % 4 !== 0)) throw new Error("The 4h vertex base needs a lattice of whole tiles");
-    if (phi.format !== "r32float" || uniformDetailExtent(phi).some((n, a) => n !== d[a]! + 1)) throw new Error("The 4h vertex base publishes the h vertex phi field");
-    this.size = uniformCoarseVertexPhiSize(d);
+    const address = ownership.capacity.address;
+    if (phi.format !== "r32float" || uniformDetailExtent(phi).some((n, a) => n !== address.vertexBox[a])) throw new Error("The 4h vertex base publishes the h vertex phi field");
+    this.size = [address.wideVertexTexture[0], address.wideVertexTexture[1], address.wideVertexTexture[2]];
+    this.corners = address.wideVertexBox;
     this.texture = device.createTexture({ label: "Uniform Geometric 4h vertex phi base", size: this.size, dimension: "3d", format: "r32float",
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
     this.allocatedBytes = 4 * this.size[0] * this.size[1] * this.size[2];
@@ -53,8 +51,8 @@ export class UniformCoarseVertexPhi {
 @group(1) @binding(1) var coarseOut:texture_storage_3d<r32float,write>;
 // One lane per tile corner g in [0, t]^3.
 @compute @workgroup_size(4,4,4) fn publishCoarseVertexPhi(@builtin(global_invocation_id) g:vec3u){
- if(any(g>UM_T)){return;}
- textureStore(coarseOut,vec3i(g),vec4f(textureLoad(vertexPhi,vec3i(4u*g),0).x,0.0,0.0,0.0));
+ if(!umWideVertexPresent(vec3i(g))){return;}
+ textureStore(coarseOut,umWideVertexTexel(vec3i(g)),vec4f(textureLoad(vertexPhi,vec3i(4u*g),0).x,0.0,0.0,0.0));
 }`;
   }
 
@@ -76,13 +74,13 @@ export class UniformCoarseVertexPhi {
     return !!storage && (storage.baseOf(this.phi) ?? storage.physical(this.phi)) === this.texture;
   }
 
-  /** One launch: ceil((t+1)/4)^3 workgroups; none while the base is the field's own. */
+  /** One launch over the box's tile corners; none while the base is the field's own. */
   encode(encoder: GPUCommandEncoder): void {
     if (!this.pipeline) throw new Error("The 4h vertex phi base is not initialized");
     if (this.adopted) return;
     const pass = encoder.beginComputePass({ label: "Uniform publish 4h vertex phi base" });
     pass.setPipeline(uniformDetailPick(this.pipeline)); pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, this.group.group);
-    pass.dispatchWorkgroups(Math.ceil(this.size[0] / 4), Math.ceil(this.size[1] / 4), Math.ceil(this.size[2] / 4));
+    pass.dispatchWorkgroups(Math.ceil(this.corners[0] / 4), Math.ceil(this.corners[1] / 4), Math.ceil(this.corners[2] / 4));
     pass.end();
   }
 

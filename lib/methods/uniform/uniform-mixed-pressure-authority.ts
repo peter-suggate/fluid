@@ -151,12 +151,12 @@ export class UniformMixedPressureAuthority {
  }
  bind(f:UniformMixedPressureAuthorityFields):UniformDetailGroup{
   if((f.scratch.size??f.scratch.buffer.size-(f.scratch.offset??0))<this.scratchBytes)throw new Error("Mixed pressure authority scratch is too small");
-  const d=this.ownership.capacity.lattice.dimensions;
-  for(const t of [f.centerPhi,f.volume,f.targetFill,f.phase,f.correction])if(t.format!=="r32float"||uniformDetailExtent(t).some((v,a)=>v!==d[a]))throw new Error("Mixed pressure authority requires native scalar fields");
+  const address=this.ownership.capacity.address;
+  for(const t of [f.centerPhi,f.volume,f.targetFill,f.phase,f.correction])if(t.format!=="r32float"||uniformDetailExtent(t).some((v,a)=>v!==address.cells[a]))throw new Error("Mixed pressure authority requires native scalar fields");
   if([f.centerPhi,f.volume,f.targetFill].some(t=>t===f.phase||t===f.correction)||f.phase===f.correction)throw new Error("Mixed pressure authority outputs must be disjoint");
   if(!!f.fine!==this.coarse)throw new Error("Coarse mixed pressure authority needs the h simulation vertex phi, and only it");
   if(!!f.simulation!==this.resident)throw new Error("Resident mixed pressure authority needs the simulation's tile words, and only it");
-  if(f.fine&&(f.fine.phi.format!=="r32float"||uniformDetailExtent(f.fine.phi).some((v,a)=>v!==d[a]!+1)))throw new Error("Coarse mixed pressure authority requires the native h vertex phi");
+  if(f.fine&&(f.fine.phi.format!=="r32float"||uniformDetailExtent(f.fine.phi).some((v,a)=>v!==address.vertexBox[a])))throw new Error("Coarse mixed pressure authority requires the native h vertex phi");
   const topologyBytes=uniformMixedRootTopologyBytes(this.ownership.layout);
   if(f.fine&&(f.fine.topology.size??f.fine.topology.buffer.size-(f.fine.topology.offset??0))<topologyBytes)throw new Error("Coarse mixed pressure authority's root topology is too small");
   return uniformDetailGroup(this.device,{layout:this.resources,entries:[
@@ -338,8 +338,10 @@ fn umWetTile(t:u32){
  let o=UMOwner(t,0u,4u,umTopology[t]&0x3fffffffu);let c=umTileCoord(t);
  var topology=umSolidCoarse(o.index);var masks=vec3f(65535.0);
  for(var axis=0u;axis<3u;axis++){
-  if(c[axis]+1u>=UM_T[axis]){continue;}
-  var q=c;q[axis]+=1u;let n=umTileAt(q);
+  var q=c;q[axis]+=1u;
+  // A box tile with nothing stored across the face: the V the flux reads (umUnstoredV), 1 into AIR and 0 into SOLID.
+  if(!umTilePresent(vec3i(q))){if(umTileInBox(vec3i(q))){topology[axis+1u]=select(0.0,1.0,umTileKind(vec3i(q))==UM_AIR);}continue;}
+  let n=umTileAt(q);
   if(!umSolidCut(t)&&!umSolidCut(n)){continue;}
   let face=umWetFace(t,n,vec3i(4u*c),axis);topology[axis+1u]=face.x;masks[axis]=face.y;
  }
@@ -349,7 +351,7 @@ fn umWetTile(t:u32){
  ${uniformMixedPressureBoundaryLoop("rootTopology[halo]=umSolidCoarse(halo);")}
 }
 @compute @workgroup_size(64) fn wet(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
- for(var t=64u*group.x+l;t<UM_TILES;t+=64u*groups.x){umWetTile(t);}
+ for(var t=64u*group.x+l;t<UM_TILES;t+=64u*groups.x){if(umTileLive(t)){umWetTile(t);}}
 }`:""}
 fn umAuthority(o:UMOwner,v:f32)->f32{
  ${this.coarse?`let cap=umCapacity(o);if(cap>1e-5){return umOpenOwnerPhi(o,v,cap);}
@@ -357,7 +359,7 @@ fn umAuthority(o:UMOwner,v:f32)->f32{
  var terms:array<f32,6>;var weights:array<f32,6>;
  for(var i=0u;i<6u;i++){
   terms[i]=0.0;weights[i]=0.0;var q=vec3i(umOrigin(o));q[i/2u]+=select(-i32(o.width),i32(o.width),(i&1u)!=0u);
-  if(any(q<vec3i(0))||any(q>=vec3i(UM_D))){continue;}
+  if(!umCellPresent(q)){continue;}
   let n=umOwnerAt(q);let open=umCapacity(n);if(n.width==0u||open<=1e-5){continue;}
   let phi=umOpenOwnerPhi(n,${this.surfaceOnly?"0.0":"umNeighbourVolume(n)"},open);if(phi<0.0){terms[i]=open*phi;weights[i]=open;}
  }
@@ -447,7 +449,8 @@ ${this.resident?`// One group per page: the 4h owners of an absent page take the
 // build's phi (V=0 there).
 @compute @workgroup_size(64) fn absent(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) l:u32){
  let page=group.x;if(page>=UM_PAGES||umPageResident(page)){return;}
- let tile=umPageTile(page,l);if(tile>=UM_TILES||umTileWidth(tile)!=4u){return;}
+ // A tile with nothing stored is no key's owner: its row is UniformMixedRootOwners'.
+ let tile=umPageTile(page,l);if(!umTileLive(tile)||umTileWidth(tile)!=4u){return;}
  let o=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);phi[o.index]=umAuthority(o,0.0);
 }`:""}
 `,counted)});

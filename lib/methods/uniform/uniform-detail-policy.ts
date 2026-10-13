@@ -28,9 +28,8 @@ export const UNIFORM_DETAIL_DECLARED_POLICY: UniformDetailPolicyMode = "dynamic"
  * What the shape criterion measures on an h tile against the trilinear phi of
  * its eight 4h corners, and so what `detailShapeTolerance` (in h) bounds:
  * - "value": the largest |phi − trilinear| over the tile's h vertices within
- *   2h of the surface, with held corners read as distances
- *   (uniformDetailHeldDistance). It counts a wrong distance beside a surface
- *   that is in the right place.
+ *   2h of the surface. It counts a wrong distance beside a surface that is in
+ *   the right place.
  * - "displacement": how far the surface itself moves at 4h. At every zero
  *   crossing of the tile's h edges, the distance to the corners' zero set
  *   (|trilinear| over its gradient, the stored corner values: those are the
@@ -91,32 +90,19 @@ export const UNIFORM_DETAIL_RANGES = Object.freeze({
  * It grows, between frames, to (1 + headroom) need + floorTiles as soon as
  * (1 + grow) need would not fit: a build defers only when its need outruns
  * (1 + grow) times the last receipt's, which is two or three frames old.
- * hold: C never returns, and keeps the host's bound whatever the receipts
- * count (Dynamic every tile, a request its host count). A change of C
- * re-creates every buffer it sizes and binds every group again, 4 to 7 ms of
- * host time in the frame it lands on (NB-FLIP letters, 256x192x128), so the
- * storage the attach already had to hold is kept: memory for a frame time no
- * capacity event interrupts. Without hold it returns when the peak of the
- * last windowBuilds receipts, held the same way, is under C / returnRatio,
- * and none of them grew it. */
+ * C never returns, and keeps the host's bound whatever the receipts count
+ * (Dynamic every tile, a request its host count). A change of C re-creates
+ * every buffer it sizes and binds every group again, 4 to 7 ms of host time
+ * in the frame it lands on (NB-FLIP letters, 256x192x128), so the storage
+ * the attach already had to hold is kept: memory for a frame time no
+ * capacity event interrupts. windowBuilds: the receipts the rule keeps. */
 export interface UniformDetailCapacityRule {
   readonly grow: number;
   readonly headroom: number;
   readonly floorTiles: number;
   readonly windowBuilds: number;
-  readonly returnRatio: number;
-  readonly hold: boolean;
 }
-/** QA only (probes, before they build a solver). hold: false follows the
- * receipts down again. double: a growth is at least twice the held capacity.
- * grow < 0: growth only after a deferred build. lagFrames: a receipt is used
- * this many frames late. */
-export interface UniformDetailCapacityRuleForQA extends UniformDetailCapacityRule { readonly double: boolean; readonly lagFrames: number }
-let qaCapacityRule: Partial<UniformDetailCapacityRuleForQA> | undefined;
-export function setUniformDetailCapacityRuleForQA(rule?: Partial<UniformDetailCapacityRuleForQA>): void { qaCapacityRule = rule; }
-export function uniformDetailCapacityRule(): UniformDetailCapacityRuleForQA {
-  return { ...UNIFORM_DETAIL_POLICY.capacity, double: false, lagFrames: 0, ...qaCapacityRule };
-}
+export function uniformDetailCapacityRule(): UniformDetailCapacityRule { return UNIFORM_DETAIL_POLICY.capacity; }
 
 /** Starting constants of the planner and pool. */
 export interface UniformDetailPolicy {
@@ -155,7 +141,7 @@ export const UNIFORM_DETAIL_POLICY: UniformDetailPolicy = Object.freeze({
   retireSteps: 8,
   churnFraction: 0.05,
   poolGrowth: 2,
-  capacity: Object.freeze({ grow: 0.5, headroom: 1, floorTiles: 256, windowBuilds: 30, returnRatio: 1.5, hold: true }),
+  capacity: Object.freeze({ grow: 0.5, headroom: 1, floorTiles: 256, windowBuilds: 30 }),
   strainThreshold: 0.1,
   curvatureThreshold: 0.5,
   contactHorizonSteps: 2,
@@ -298,22 +284,6 @@ export function uniformDetailImportance(settings: UniformDetailSettings, tiles: 
   };
 }
 export type UniformDetailImportance = ReturnType<typeof uniformDetailImportance>;
-/** Whether a surface tile may run at 4h. Requested holds one wherever no Fine
- * region covers it; Dynamic unless shape at tolerance 0 holds every one at h.
- * Such a surface rebuilds its 4h distance by travel, not every step: the
- * per-step rebuild is a linear instability of a resting 4h surface (a flat
- * all-4h pond at a fractional waterline grew 25% a step from float noise to
- * 1 m/s in 60 steps; uniform-coarse-solid-rest-dawn). */
-export function uniformDetailCoarseSurface(settings: UniformDetailSettings): boolean {
-  return settings.policy === "requested" || (settings.policy === "dynamic" && !(settings.criteria.shape && settings.shapeTolerance === 0));
-}
-/** Whether the census' shape criterion measures 4h value error (Dynamic,
- * shape at a tolerance above 0, the "value" metric): redistance then
- * publishes, for the wide vertices the travel gate holds, what a rebuild
- * would have changed. The "displacement" metric reads the stored corners. */
-export function uniformDetailHeldDistance(settings: UniformDetailSettings): boolean {
-  return settings.policy === "dynamic" && settings.criteria.shape && settings.shapeTolerance > 0 && settings.shapeMetric === "value";
-}
 /** Whether static solids run on cut 4h owners: Requested with no solid-contact
  * request. Dynamic's census and Full keep their solid tiles at h (the h band
  * has no cut Neumann face yet), and bodies are h in every policy. */

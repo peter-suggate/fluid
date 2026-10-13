@@ -3,11 +3,12 @@
  * from width and plane alignment, then retain the original geometric tie,
  * distance tie and ordered value reduction. No owner/face discovery. */
 export const uniformCompiledExtensionNeighborWGSL = /* wgsl */ `
-// Canonical positive patches have integer anchors: a normal -1 names the
-// zero domain plane; transverse anchors always name in-domain patch centers.
+// Canonical positive patches have integer anchors: a stored cell, or the
+// cell below a low face (umFaceLow) of a stored cell.
 fn ueRequestInside(anchor:vec3i,component:u32)->bool{
- var lower=vec3i(0);lower[component]=-1;
- return all(anchor>=lower)&&all(anchor<vec3i(UM_D));
+ if(umCellPresent(anchor)){return true;}
+ var above=anchor;above[component]+=1;
+ return umFaceLow(anchor,component)&&umCellPresent(above);
 }
 // The caller supplies a positive patch and an in-domain request. Its two
 // incident tiles fit the owner's 3-cubed stencil, except the high tile of a
@@ -49,7 +50,7 @@ fn ueCompiledNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)
  }else{
   // A unit request inside a 4h cell sees its two bounding faces. Each
   // bounding face is either one coarse patch or the h patch at this column.
-  let tile=min(vec3u(point),UM_D-vec3u(1))/4u;let origin=vec3i(tile*4u);
+  let tile=vec3u(umCellNear(vec3i(point)))/4u;let origin=vec3i(tile*4u);
   let fine=umFineFaceSides(umTileAt(tile));
   ${[0,1].map(side=>`{
    let code=2u*component+1u-${side}u;let patchWidth=select(4,1,(fine&(1u<<code))!=0u);

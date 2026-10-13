@@ -30,6 +30,12 @@ export interface UniformMixedForceFields {
 }
 
 const FORCES_PASS:GPUComputePassDescriptor={label:"Uniform mixed body forces"};
+/** A dispatch generator's text with its one `anchor` replaced. */
+function patched(source:string,anchor:string,replacement:string):string{
+  const at=source.indexOf(anchor);
+  if(at<0||source.indexOf(anchor,at+1)>=0)throw new Error(`Mixed forces dispatch patch needs exactly one "${anchor}"`);
+  return source.slice(0,at)+replacement+source.slice(at+anchor.length);
+}
 
 /** Apply native force terms once, after SL or MacCormack resampling. The
  * certified domain has no interior solids. Capillarity uses the same seam
@@ -66,18 +72,18 @@ export class UniformMixedForces {
   bind(f: UniformMixedForceFields): UniformDetailGroup {
     if(this.cachedGeometry&&!f.centerPhi)throw new Error("Mixed forces require current center phi for cached geometry");
     if(this.cachedCurvature!==!!f.curvature||this.cachedCurvature!==!!f.normals)throw new Error("Mixed force curvature scratch must match the pipeline");
-    const d=this.ownership.capacity.lattice.dimensions,coarse=f.coarseVelocity,unit=f.unitVelocity;
-    if(coarse.format!=="rgba32float"||uniformDetailExtent(coarse).some((n,a)=>n!==d[a]!/4+2))throw new Error("Mixed force viscosity requires the 4h velocity cache");
+    const address=this.ownership.capacity.address,d=address.cells,coarse=f.coarseVelocity,unit=f.unitVelocity;
+    if(coarse.format!=="rgba32float"||uniformDetailExtent(coarse).some((n,a)=>n!==address.tileHaloTexture[a]))throw new Error("Mixed force viscosity requires the 4h velocity cache");
     if(f.curvature&&(f.curvature.format!=="r32float"||uniformDetailExtent(f.curvature).some((n,a)=>n!==d[a])||[f.phi,f.volume,f.centerPhi].includes(f.curvature)))throw new Error("Mixed force curvature requires disjoint native scalar scratch");
     const normalBytes=UniformMixedForces.normalBytes(this.ownership.capacity.owners);
     if(f.normals&&(f.normals.size??f.normals.buffer.size-(f.normals.offset??0))<normalBytes)throw new Error("Mixed force normal scratch is too small");
     if(unit.format!=="rgba32float"||uniformDetailExtent(unit).some((n,a)=>n!==d[a]))throw new Error("Mixed force viscosity requires resolved h velocity taps");
     for(const [i,t] of [f.advected,f.phi,f.volume,f.output].entries()){
-      if(uniformDetailExtent(t).some((n,a)=>n!==d[a]!+(i===1?1:0)) || t.format!==(i===1||i===2?"r32float":"rgba32float"))
+      if(uniformDetailExtent(t).some((n,a)=>n!==(i===1?address.vertexBox:d)[a]) || t.format!==(i===1||i===2?"r32float":"rgba32float"))
         throw new Error("Mixed forces require native cell and vertex fields");
     }
     if(f.output===f.advected||f.output===unit||f.negative===f.outputNegative)throw new Error("Mixed force output must be disjoint");
-    const bytes=4*(d[0]*d[1]+d[0]*d[2]+d[1]*d[2]);
+    const bytes=4*address.lowFaceKeys;
     if(f.negative.size<bytes||f.outputNegative.size<bytes)throw new Error("Mixed forces require negative boundary planes");
     return uniformDetailGroup(this.device,{layout:this.resources,entries:[
       ...[f.advected,f.phi,f.volume].map((t,i)=>({binding:i+1,resource:t})),
@@ -174,14 +180,13 @@ ${uniformMixedPressureReconstructionSource(false,"umForceSample(owner,neighbor)"
 // Viscosity reads the frame's extended-velocity snapshot at exact MAC sites
 // of the face's own width (the ungraded layout has widths 1 and 4 only): an
 // h site is one UniformMixedHangingTaps.unitVelocity texel, a 4h site one
-// UniformMixedMomentumCache texel (halo +1). Every h site lies within one
-// cell of a unit owner, so its tile is a unit or slotted seam tile, whose
-// texels the hanging fill wrote. A site past the domain clamps to the edge
-// site, negated under no-slip.
+// UniformMixedMomentumCache texel (umTileHaloTexel). Every h site lies within
+// one cell of a unit owner, so its tile is a unit or slotted seam tile, whose
+// texels the hanging fill wrote. A site with no stored cell (umCellNear) or
+// tile (umTileNear) clamps to the nearest stored site, negated under no-slip.
 fn umViscositySite(site:vec3i,axis:u32,width:u32)->f32 {
- let at=clamp(site,vec3i(0),vec3i(UM_D/width)-vec3i(1));
- var value=0.0;
- if(width==1u){value=textureLoad(unitVelocity,at,0)[axis];}else{value=textureLoad(coarseVelocity,at+vec3i(1),0)[axis];}
+ var at=site;var value=0.0;
+ if(width==1u){at=umCellNear(site);value=textureLoad(unitVelocity,at,0)[axis];}else{at=umTileNear(site);value=textureLoad(coarseVelocity,umTileHaloTexel(at),0)[axis];}
  return select(value,-value,force.controls.x>0.5&&any(site!=at));
 }
 fn umLaplacian(face:UMFace)->f32 {
@@ -196,7 +201,7 @@ fn umLaplacian(face:UMFace)->f32 {
  return (terms.x+terms.y)+terms.z;
 }
 fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32 {
- if(face.anchor[face.axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
+ if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
  var value=0.0;if(face.width==4u){value=${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(advected,face.anchor,0)[face.axis];}else{value=textureLoad(advected,face.anchor,0)[face.axis];}let dt=force.hDt.w;
  let occupancy=umOccupancy(owner);let neighborOccupancy=umOccupancy(face.neighbor);
  if(occupancy>0.0&&force.physical.z>0.0){value+=dt*(force.physical.z/force.physical.y)*umLaplacian(face);}
@@ -215,12 +220,13 @@ fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32 {
  return value;
 }
 fn umViscosityVector(site:vec3i)->vec3f{
- let at=clamp(site,vec3i(0),vec3i(UM_D)-1);let value=textureLoad(unitVelocity,at,0).xyz;
+ let at=umCellNear(site);let value=textureLoad(unitVelocity,at,0).xyz;
  return select(value,-value,force.controls.x>0.5&&any(site!=at));
 }
 @compute @workgroup_size(64) fn forcesFine(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(gid);if(owner.width!=1u){return;}let origin=umOrigin(owner);let at=vec3i(origin);
- for(var axis=0u;axis<3u;axis++){if(origin[axis]==0u){boundary[umNegativeBoundaryIndex(origin,axis)]=negative[umNegativeBoundaryIndex(origin,axis)];}}
+ let low=umLowOpen(at);
+ for(var axis=0u;axis<3u;axis++){if(low[axis]){let i=umLowFaceIndex(origin,axis);boundary[i]=negative[i];}}
  if(!umVectorViscosity||force.physical.w>0.0${this.sourceParams?"||umSourceinflowStrength()>0.0":""}){
   var value=vec3f(0);for(var axis=0u;axis<3u;axis++){value[axis]=umForcedVelocity(owner,umFace(owner,axis,1,0u));}
   textureStore(output,at,vec4f(value,0));return;
@@ -235,10 +241,11 @@ fn umViscosityVector(site:vec3i)->vec3f{
  if(occupancy>1e-5||umOccupancy(neighbor)>1e-5||umCoarseMass(neighbor)){value.y+=force.hDt.w*force.physical.x;}
  textureStore(output,at,vec4f(value,0));
 }
-${uniformMixedFaceDispatchWGSL("forcesRegular","umForcedVelocity(owner,face)").replace(" let origin=umOrigin(owner);",` let origin=umOrigin(owner);
+${patched(uniformMixedFaceDispatchWGSL("forcesRegular","umForcedVelocity(owner,face)"),"let origin=umOrigin(owner);",`let origin=umOrigin(owner);
  if(umRegularFine){
+  let low=umLowOpen(vec3i(origin));
   for(var axis=0u;axis<3u;axis++){
-   if(origin[axis]==0u){let face=umFace(owner,axis,-1,0u);boundary[umNegativeBoundaryIndex(origin,axis)]=umForcedVelocity(owner,face);}
+   if(low[axis]){let face=umFace(owner,axis,-1,0u);boundary[umLowFaceIndex(origin,axis)]=umForcedVelocity(owner,face);}
   }
   textureStore(output,vec3i(origin),vec4f(umForcedVelocity(owner,umFace(owner,0u,1,0u)),umForcedVelocity(owner,umFace(owner,1u,1,0u)),umForcedVelocity(owner,umFace(owner,2u,1,0u)),0));
   return;
@@ -260,8 +267,8 @@ fn umForcedVelocityFar(owner:UMOwner,face:UMFace,far:bool)->f32 {
  if(!far){return umForcedVelocity(owner,face);}
  return 0.0;
 }
-${uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocityFar(owner,face,far)",false,"","umForcesRegularCoarseOwner").replace(" let origin=umOrigin(owner);"," let origin=umOrigin(owner);let far=umFarAirOwner(owner);")}
-${uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)").replace("if(firstOwner.width!=0u)","if(firstOwner.width>1u)")}
+${patched(uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocityFar(owner,face,far)",false,"","umForcesRegularCoarseOwner"),"let origin=umOrigin(owner);","let origin=umOrigin(owner);let far=umFarAirOwner(owner);")}
+${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)"),"if(firstOwner.width!=0u)","if(firstOwner.width>1u)")}
 `,["forcesFine","forcesRegular","forcesRegularCoarse","forces",...(this.cachedCurvature?["cacheNormals","cacheCurvature"]:[])])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});

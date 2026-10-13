@@ -1,4 +1,5 @@
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import {uniformKeyGroups} from "./uniform-lattice-address";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
@@ -36,9 +37,14 @@ export class UniformMixedBodies {
  private tilesGroup?:{tiles:GPUBuffer;group:UniformDetailGroup};
  private couplePipeline?:GPUComputePipeline;
  private tilesPipeline?:GPUComputePipeline;
+ /** Workgroups of markTiles: one lane per tile key. */
+ private readonly tileGroups:[number,number];
+ /** encodeTiles' horizon words: one array for every write. */
+ private readonly horizon=new Float32Array(4);
  readonly allocatedBytes=16;
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly fields:UniformMixedBodyFields){
   const texture={sampleType:"unfilterable-float" as const,viewDimension:"3d" as const};
+  this.tileGroups=uniformKeyGroups(ownership.capacity.address.tileKeys,64,ownership.dispatchX,[0,0]);
   this.coupleLayout=uniformDetailBindLayout(device,{label:"Uniform mixed rigid coupling",entries:[
    {binding:0,visibility:GPUShaderStage.COMPUTE,texture},{binding:1,visibility:GPUShaderStage.COMPUTE,texture},
    {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
@@ -100,13 +106,13 @@ fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
  atomicAdd(&rigidExchange[base+7u],i32(round(displaced*ambient.x*10000.0)));atomicAdd(&rigidExchange[base+8u],i32(round(displaced*ambient.y*10000.0)));atomicAdd(&rigidExchange[base+9u],i32(round(displaced*ambient.z*10000.0)));
 }
 @compute @workgroup_size(64) fn markTiles(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
+ let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
  let h=umSolidParams.cellGravity.xyz;let t=vec3f(umTileCoord(tile));
  let low=vec3f(-0.5*umSolidParams.container.x,0.0,-0.5*umSolidParams.container.z)+4.0*t*h;let high=low+4.0*h;
  for(var i=0u;i<umBodyCount();i++){
   let b=umSolidBodies[i];let centre=b.positionShape.xyz;
   let reach=max(b.dimensions.w,0.0)+length(b.linearVelocity.xyz)*bodyHorizon.x+max(h.x,max(h.y,h.z));
-  if(distance(clamp(centre,low,high),centre)<=reach){atomicOr(&bodyTiles[tile/32u],1u<<(tile%32u));return;}
+  if(distance(clamp(centre,low,high),centre)<=reach){let box=umBoxTileIndex(umTileCoord(tile));atomicOr(&bodyTiles[box/32u],1u<<(box%32u));return;}
  }
 }
 `,["couple"])});
@@ -130,12 +136,11 @@ fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
  encodeTiles(encoder:GPUCommandEncoder,tiles:GPUBuffer,horizon:number):void{
   if(!this.tilesPipeline)throw new Error("Mixed rigid bodies are not initialized");
   if(!Number.isFinite(horizon)||horizon<0)throw new Error(`Mixed rigid body tile horizon must be finite and non-negative: ${horizon}`);
-  this.device.queue.writeBuffer(this.params,0,new Float32Array([horizon,0,0,0]));
+  this.horizon[0]=horizon;this.device.queue.writeBuffer(this.params,0,this.horizon);
   if(this.tilesGroup?.tiles!==tiles)this.tilesGroup={tiles,group:uniformDetailGroup(this.device,{layout:this.tilesLayout,entries:[{binding:3,resource:{buffer:tiles}},{binding:4,resource:{buffer:this.params}}]})};
-  const groups=Math.ceil(this.ownership.capacity.tiles/64),x=this.ownership.dispatchX;
   const pass=encoder.beginComputePass({label:"Uniform mixed rigid body tiles"});
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.tilesGroup.group.group);pass.setBindGroup(2,this.solid.bindGroup);
-  pass.setPipeline(this.tilesPipeline);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));pass.end();
+  pass.setPipeline(this.tilesPipeline);pass.dispatchWorkgroups(this.tileGroups[0],this.tileGroups[1]);pass.end();
  }
  destroy():void{this.params.destroy();}
 }

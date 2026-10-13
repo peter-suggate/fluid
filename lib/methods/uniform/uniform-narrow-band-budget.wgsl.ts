@@ -34,7 +34,7 @@ const NB_BUDGET_FLIGHT=0xfffffffdu;
 // neighbour reads the low pair while the tile's own lane sets the high.
 const NB_FLIGHT=1u;
 const NB_LIQUID=2u;
-fn nbBudgetOn()->bool{return nbBudgetSupported&&policy.activity.x<100u;}
+fn nbBudgetOn()->bool{return policy.activity.x<100u;}
 fn nbBudgetHist(b:u32)->u32{return holdIndex(UM_TILES)+b;}
 fn nbBudgetState(k:u32)->u32{return nbBudgetHist(NB_BUDGET_KEYS)+k;}
 fn nbBudgetRank(t:u32)->u32{return nbBudgetState(3u)+t;}
@@ -53,8 +53,11 @@ fn nbBudgetReach(t:u32)->i32{
  }
  return 1+i32(min(travel,12.0)/4.0);
 }
-// Liquid on a solid or a wall of the domain has landed.
-fn nbBudgetGrounded(p:vec3i)->bool{return umSolidTile(vec3u(p))||any(p==vec3i(0))||any(p+vec3i(1)==vec3i(UM_T));}
+// Liquid on a solid, or on a tile with no stored tile below or above it on an axis, has landed.
+fn nbBudgetGrounded(p:vec3i)->bool{
+ if(umSolidTile(vec3u(p))||any(umTileLowOpen(p))){return true;}
+ return umTileKind(p+vec3i(1,0,0))!=UM_RESIDENT||umTileKind(p+vec3i(0,1,0))!=UM_RESIDENT||umTileKind(p+vec3i(0,0,1))!=UM_RESIDENT;
+}
 fn nbBudgetInFlight(t:u32,p:vec3i,w1:u32)->bool{
  if(umSourceTile(p)){return true;}
  if(!nbBudgetLiquid(w1)||nbBudgetGrounded(p)){return false;}
@@ -63,7 +66,7 @@ fn nbBudgetInFlight(t:u32,p:vec3i,w1:u32)->bool{
  let reach=select(nbBudgetReach(t),1,(own&3u)!=0u);
  var flying=0u;var resident=0u;
  for(var z=-reach;z<=reach;z++){for(var y=-reach;y<=reach;y++){for(var x=-reach;x<=reach;x++){
-  let q=p+vec3i(x,y,z);if(all(q==p)||any(q<vec3i(0))||any(q>=vec3i(UM_T))){continue;}
+  let q=p+vec3i(x,y,z);if(all(q==p)||!umTilePresent(q)){continue;}
   let flight=atomicLoad(&census[nbBudgetFlight(umTileAt(vec3u(q)))]);
   flying+=flight&NB_FLIGHT;resident+=u32(nbBudgetResident(flight));
  }}}
@@ -80,7 +83,7 @@ fn nbBudgetScore(w0:u32,w1:u32)->u32{
 }
 // After importance: every tile's words are final, and this pass writes none.
 @compute @workgroup_size(64) fn activityRank(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x+umDispatchX*64u*gid.y;if(t>=UM_TILES){return;}
+ let t=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(t)){return;}
  var rank=NB_BUDGET_NONE;
  let own=atomicLoad(&census[importanceIndex(t,1u)]);let p=vec3i(umTileCoord(t));
  let flight=nbBudgetInFlight(t,p,own);
@@ -108,15 +111,16 @@ fn nbBudgetScore(w0:u32,w1:u32)->u32{
 var<workgroup> nbTies:array<u32,64>;
 @compute @workgroup_size(64) fn activityTies(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let chunk=group.x+umDispatchX*group.y;let t=64u*chunk+lane;
+ // Every chunk of the key range stores its count: the prefix reads them all.
  if(64u*chunk>=UM_TILES){return;}
- var rank=0xffffffffu;if(t<UM_TILES){rank=atomicLoad(&census[nbBudgetRank(t)]);}
+ var rank=0xffffffffu;if(umTileLive(t)){rank=atomicLoad(&census[nbBudgetRank(t)]);}
  let tie=u32(rank!=0xffffffffu&&(rank>>8u)==atomicLoad(&census[nbBudgetState(0u)]));
  nbTies[lane]=tie;workgroupBarrier();
  for(var stride=1u;stride<64u;stride*=2u){
   var add=0u;if(lane>=stride){add=nbTies[lane-stride];}workgroupBarrier();
   nbTies[lane]+=add;workgroupBarrier();
  }
- if(t<UM_TILES&&tie!=0u){atomicStore(&census[nbBudgetRank(t)],rank|(nbTies[lane]-1u));}
+ if(umTileLive(t)&&tie!=0u){atomicStore(&census[nbBudgetRank(t)],rank|(nbTies[lane]-1u));}
  if(lane==63u){atomicStore(&census[nbBudgetChunk(chunk)],nbTies[lane]);}
 }
 // A lane per block of chunks: each sums its own, then starts it at the blocks
@@ -133,7 +137,7 @@ var<workgroup> nbTieBlocks:array<u32,64>;
  }
 }
 @compute @workgroup_size(64) fn activityAdmit(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x+umDispatchX*64u*gid.y;if(t>=UM_TILES){return;}
+ let t=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(t)){return;}
  var w1=atomicLoad(&census[importanceIndex(t,1u)]);
  let rank=atomicLoad(&census[nbBudgetRank(t)]);
  atomicStore(&census[nbBudgetFlight(t)],(atomicLoad(&census[nbBudgetFlight(t)])>>8u)&3u);

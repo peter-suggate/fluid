@@ -2,11 +2,6 @@
  * RGBA texel can contain patches from several axes; one owner packs them all.
  * Callers bind output (RGBA texture) and boundary (negative face buffer). */
 export const uniformMixedFaceAddressWGSL = /* wgsl */ `
-fn umNegativeBoundaryIndex(p:vec3u,axis:u32)->u32 {
- if(axis==0u){return p.y+UM_D.y*p.z;}
- if(axis==1u){return UM_D.y*UM_D.z+p.x+UM_D.x*p.z;}
- return UM_D.y*UM_D.z+UM_D.x*UM_D.z+p.x+UM_D.x*p.y;
-}
 fn umPositiveFaceAtAnchor(owner:UMOwner,axis:u32,anchor:vec3i)->UMFace {
  let origin=vec3i(umOrigin(owner));let local=anchor-origin;
  if(owner.width==1u){if(all(local==vec3i(0))){return umFace(owner,axis,1,0u);}return UMFace();}
@@ -24,9 +19,10 @@ export function uniformMixedFaceDispatchWGSL(entry: string, evaluate: string, al
 @compute @workgroup_size(64) fn ${entry}(@builtin(global_invocation_id) gid:vec3u){
  let owner=${owner ?? (allWidths ? "umAllOwner" : "umOwner")}(gid);if(owner.width==0u){return;}
  let origin=umOrigin(owner);
- for(var axis=0u;axis<3u;axis++){
-  if(origin[axis]==0u){let face=umFace(owner,axis,-1,0u);boundary[umNegativeBoundaryIndex(origin,axis)]=${evaluate};}
- }
+ {let low=umLowOpen(vec3i(origin));
+  for(var axis=0u;axis<3u;axis++){
+   if(low[axis]){let face=umFace(owner,axis,-1,0u);boundary[umLowFaceIndex(origin,axis)]=${evaluate};}
+  }}
  // Unit owners pack their three positive components at the same anchor.
  // Visit that anchor once without cloning the (large) evaluator call graph.
  for(var axis=0u;axis<select(3u,1u,owner.width==1u);axis++){
@@ -62,7 +58,7 @@ export const uniformMixedFarAirWGSL = (inflow = "false") => /* wgsl */ `
 fn umFarAirOwner(owner:UMOwner)->bool{
  if(${inflow}){return false;}
  let p=vec3i(umTileCoord(owner.tile));
- let a=vec3u(max(p-vec3i(2),vec3i(0))/4);let b=vec3u(min(p+vec3i(2),vec3i(UM_T)-vec3i(1))/4);
+ let a=vec3u(umTileNear(p-vec3i(2))/4);let b=vec3u(umTileNear(p+vec3i(2))/4);
  for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){if(umPageResident(x+UM_PD.x*(y+UM_PD.y*z))){return false;}}}}
  return true;
 }`;
@@ -104,8 +100,8 @@ var<workgroup> ${entry}Components:array<vec2f,192>;
    let tile=umSupport[header+4u+umSupport[header]+index];
    owner=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
    let origin=umOrigin(owner);
-   if(part==0u&&origin[faceAxis]==0u){
-    let face=umFace(owner,faceAxis,-1,0u);${boundary("umNegativeBoundaryIndex(origin,faceAxis)")}
+   if(part==0u&&umLowOpen(vec3i(origin))[faceAxis]){
+    let face=umFace(owner,faceAxis,-1,0u);${boundary("umLowFaceIndex(origin,faceAxis)")}
    }
    let face=umFace(owner,faceAxis,1,part);
    if(face.width!=0u){anchor=face.anchor;result=vec2f(${evaluate},1);}
@@ -115,18 +111,18 @@ var<workgroup> ${entry}Components:array<vec2f,192>;
   if(firstOwner.width!=0u${skipPacked?`&&!(packed&&${skipPacked}(firstOwner))`:""}){
    var negative=false;var positive=UMFace();
    if(packed){
-    let origin=umOrigin(owner);negative=origin[axis]==0u;
+    let origin=umOrigin(owner);negative=umLowOpen(vec3i(origin))[axis];
     positive=umFace(owner,axis,1,0u);anchor=positive.anchor;
    }else{
     // Merged launches (umCellWidth 1, 64 slots per job) carry a runtime width.
     let width=select(umCellWidth,firstOwner.width,umMergedTiles);let q=local/width;let side=4u/width;
     owner.lane=q.x+side*(q.y+side*q.z);owner.index+=owner.lane;
     anchor=vec3i(umTileCoord(owner.tile)*4u+local);
-    let origin=umOrigin(owner);negative=origin[axis]==0u&&all(vec3u(anchor)==origin);
+    let origin=umOrigin(owner);negative=all(vec3u(anchor)==origin)&&umLowOpen(vec3i(origin))[axis];
     positive=umPositiveFaceAtAnchor(owner,axis,anchor);
    }
    if(negative){
-    let face=umFace(owner,axis,-1,0u);${boundary("umNegativeBoundaryIndex(umOrigin(owner),axis)")}
+    let face=umFace(owner,axis,-1,0u);${boundary("umLowFaceIndex(umOrigin(owner),axis)")}
    }
    let face=positive;
    if(face.width!=0u){result=vec2f(${evaluate},1);}

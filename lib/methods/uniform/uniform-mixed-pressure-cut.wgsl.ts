@@ -70,7 +70,7 @@ fn pcFitTile(t:u32,validTile:bool,l:u32){
  for(var start=64u*group.x;start<UM_TILES;start+=64u*groups.x){
   if(l==0u){atomicStore(&pcWorkCount,0u);}
   workgroupBarrier();
-  if(l<64u){let t=start+l;if(t<UM_TILES&&(umSolidCut(t)||(pcHeld&&umSolidFineTile(t)))){
+  if(l<64u){let t=start+l;if(umTileLive(t)&&(umSolidCut(t)||(pcHeld&&umSolidFineTile(t)))){
   let open=umSolidOpenCells(t);
   if(!umSolidCut(t)){pcHeldFit(t);}
   else if(all(open==vec2u(0u))){balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(2.0*UM_HMIN,0.0);}

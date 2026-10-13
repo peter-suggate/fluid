@@ -11,6 +11,7 @@ import {uniformVolumeTargetWGSL} from "./uniform-volume.wgsl";
 import {geometricPlaneBoxWGSL} from "../../core/geometric-plane-box.wgsl";
 import {UNIFORM_MIXED_RELAYOUT_RECEIPT,uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 import {uniformBufferedWork} from "./uniform-buffered-work";
+import {uniformKeyGroups} from "./uniform-lattice-address";
 
 interface Fields{volume:GPUTexture;velocity:GPUTexture;phi:GPUTexture;negative:GPUBuffer}
 /** Workgroups of each remap launch (see applyGpu). */
@@ -53,6 +54,8 @@ export class UniformMixedRemap {
  private statusGroup:UniformDetailGroup;
  /** Tiles in the lattice: the worklist's capacity. */
  private readonly tiles:number;
+ /** The list launch's grid (one lane per tile). */
+ private readonly listGrid:[number,number]=[0,0];
  /** markListed's group 2: the worklist, a generation's changed tiles
   * (UniformMixedGenerationBuffers.changes) and its builder's relayout
   * receipt, bound per changes buffer. */
@@ -61,7 +64,8 @@ export class UniformMixedRemap {
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,input:Fields,scratch:Fields,private readonly solid?:UniformMixedSolid,private readonly surfaceOnly=false){
   this.worklist=device.createBuffer({label:"Uniform mixed remap worklist",size:(4+ownership.capacity.tiles)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.tiles=ownership.capacity.tiles;
-  if(this.tiles>0x04000000)throw new Error("Remap worklist entries pack a tile index below 2^26");
+  // A worklist entry is a tile key in 26 bits below six flags: 131,072 pages of 512 tiles.
+  if(this.tiles>0x04000000)throw new Error(`Remap worklist entries pack a tile key in 26 bits: ${this.tiles} tile keys exceed 67108864 (131,072 pages of 512)`);
   this.resources=uniformDetailBindLayout(device,{entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -194,9 +198,9 @@ export class UniformMixedRemap {
   // before the live ownership adopts the target and reused by the publish.
   // Either launch is one lane per tile, the list's bound.
   if(!copy){
-   const groups=(this.tiles+63)>>>6;
+   const groups=uniformKeyGroups(this.tiles,64,x,this.listGrid);
    pass.setBindGroup(2,(listed??this.groups[0]).group);pass.setBindGroup(3,this.statusGroup.group);pass.setPipeline(uniformDetailPick(this.pipelines.get(listed?"markListed":"markChanged")!));
-   pass.dispatchWorkgroups(Math.min(groups,x),ceilDiv(groups,x));
+   pass.dispatchWorkgroups(groups[0],groups[1]);
   }
   if(solid)pass.setBindGroup(3,solid.tileGroup);
   // The extension leaves the scratch velocity before the velocity remap
@@ -338,7 +342,7 @@ ${uniformMixedFrameStatusWGSL(1,6,"read")}
 fn tBits(texel:vec4f)->u32{return u32(round(texel.w));}
 // The simulation tile at tile coordinate c across the tile's positive face
 // on axis a is h: that 4h face holds sixteen simulation patches.
-fn tSplit(c:vec3u,a:u32)->bool{var q=c;q[a]+=1u;return q[a]<UM_T[a]&&umTileWidth(umTileAt(q))==1u;}
+fn tSplit(c:vec3u,a:u32)->bool{var q=c;q[a]+=1u;return umTilePresent(vec3i(q))&&umTileWidth(umTileAt(q))==1u;}
 // Job j of the simulation ownership's h and 4h tile lists.
 fn tFineTile(j:u32)->u32{return umTopology[UM_TILES+j];}
 // A 4h tile, one lane: the origin volume texel, the three positive-face
@@ -351,10 +355,10 @@ fn tCoarseToPressure(tile:u32){
  textureStore(outputVolume,origin,vec4f(${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,origin,0).x));
  var texels:array<vec4f,3>;
  for(var a=0u;a<3u;a++){var anchor=origin;anchor[a]+=3;texels[a]=${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,anchor,0);}
- var negativeBits=0u;
+ var negativeBits=0u;let lowOpen=umLowOpen(origin);
  for(var b=0u;b<3u;b++){
-  if(c[b]!=0u){continue;}
-  let index=umNegativeBoundaryIndex(base,b);
+  if(!lowOpen[b]){continue;}
+  let index=umLowFaceIndex(base,b);
   negativeBits|=((tBits(texels[b])>>(b+3u))&1u)<<(b+3u);
   boundary[index]=negative[index];
  }
@@ -377,7 +381,7 @@ fn tCoarseToPressure(tile:u32){
    face=vec2f(value,0.0);
   }
   var packed=vec4f(0);packed[a]=face.x;
-  packed.w=f32(select(0u,u32(face.y)<<a,c[a]+1u==UM_T[a])|negativeBits);
+  packed.w=f32(select(0u,u32(face.y)<<a,umAcrossKind(origin,a,4)!=UM_RESIDENT)|negativeBits);
   textureStore(output,anchor,packed);
  }
 }
@@ -406,13 +410,13 @@ fn tMean(wall:bool,a:u32,cut:bool)->vec2f{
 fn tFineToPressure(tile:u32,lane:u32){
  let c=umTileCoord(tile);let local=umCorner(lane,4u);let base=c*4u;let cell=vec3i(base+local);
  tVolume[lane]=textureLoad(volume,cell,0).x;let texel=textureLoad(velocity,cell,0);let bits=tBits(texel);
- let cut=${cut("tile")};
+ let cut=${cut("tile")};let lowOpen=umLowOpen(vec3i(base));
  for(var a=0u;a<3u;a++){
   var weight=1.0;if(cut&&local[a]==3u){weight=${patchV("tile","cell","a")};}
   tPositive[lane+64u*a]=vec3f(texel[a],f32((bits>>a)&1u),weight);
-  if(c[a]==0u&&local[a]==0u){
+  if(lowOpen[a]&&local[a]==0u){
    var wall=1.0;if(cut){var outside=cell;outside[a]-=1;wall=umPressureFaceV(outside,a);}
-   tNegative[lane+64u*a]=vec3f(negative[umNegativeBoundaryIndex(vec3u(cell),a)],f32((bits>>(a+3u))&1u),wall);
+   tNegative[lane+64u*a]=vec3f(negative[umLowFaceIndex(vec3u(cell),a)],f32((bits>>(a+3u))&1u),wall);
   }
  }
  workgroupBarrier();
@@ -426,23 +430,23 @@ fn tFineToPressure(tile:u32,lane:u32){
  // packs), then its positive face on axis a.
  var negativeBits=0u;
  for(var b=0u;b<3u;b++){
-  if(c[b]!=0u){continue;}
+  if(!lowOpen[b]){continue;}
   let wall=tMean(true,b,cut);
   negativeBits|=u32(wall.y)<<(b+3u);
-  if(b==lane){boundary[umNegativeBoundaryIndex(base,b)]=wall.x;}
+  if(b==lane){boundary[umLowFaceIndex(base,b)]=wall.x;}
  }
  let a=lane;var anchor=vec3i(base);anchor[a]+=3;let face=tMean(false,a,cut);
  var packed=vec4f(0);packed[a]=face.x;
- packed.w=f32(select(0u,u32(face.y)<<a,c[a]+1u==UM_T[a])|negativeBits);
+ packed.w=f32(select(0u,u32(face.y)<<a,umAcrossKind(vec3i(base),a,4)!=UM_RESIDENT)|negativeBits);
  textureStore(output,anchor,packed);
 }
 // The 4h tiles of resident page job g, one lane each (residentPages).
-fn tResidentCoarseTile(g:vec3u,lane:u32)->u32{let tile=umResidentPageTile(g.x,lane);if(tile>=UM_TILES||umTileWidth(tile)!=4u){return UM_TILES;}return tile;}
+fn tResidentCoarseTile(g:vec3u,lane:u32)->u32{let tile=umResidentPageTile(g.x,lane);if(!umTileLive(tile)||umTileWidth(tile)!=4u){return UM_TILES;}return tile;}
 @compute @workgroup_size(64) fn toPressureCoarse(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=tResidentCoarseTile(g,lane);if(tile<UM_TILES){tCoarseToPressure(tile);}
+ let tile=tResidentCoarseTile(g,lane);if(umTileLive(tile)){tCoarseToPressure(tile);}
 }
 @compute @workgroup_size(64) fn toPressureFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var job=group.x;job<umCounts.x;job+=groups.x){tFineToPressure(tFineTile(job),lane);workgroupBarrier();}
+ for(var job=group.x;job<umCounts.x;job+=groups.x){let tile=tFineTile(job);tFineToPressure(tile,lane);workgroupBarrier();}
 }
 // A 4h tile, one lane: its non-split positive faces copied at their anchors,
 // split ones written at their plane cells, and its negative walls. Both
@@ -450,10 +454,10 @@ fn tResidentCoarseTile(g:vec3u,lane:u32)->u32{let tile=umResidentPageTile(g.x,la
 // only (an owner's and its negative neighbour's): the base block.
 fn tCoarseToSimulation(tile:u32){
  let c=umTileCoord(tile);let base=c*4u;let origin=vec3i(base);
- var low=vec3f(0);var high=vec3f(0);var negativeBits=0u;var splits=0u;
+ var low=vec3f(0);var high=vec3f(0);var negativeBits=0u;var splits=0u;let lowOpen=umLowOpen(origin);
  for(var a=0u;a<3u;a++){
   var anchor=origin;anchor[a]+=3;let texel=${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,anchor,0);high[a]=texel[a];
-  if(c[a]==0u){low[a]=negative[umNegativeBoundaryIndex(base,a)];negativeBits|=tBits(texel)&(1u<<(a+3u));boundary[umNegativeBoundaryIndex(base,a)]=low[a];}
+  if(lowOpen[a]){low[a]=negative[umLowFaceIndex(base,a)];negativeBits|=tBits(texel)&(1u<<(a+3u));boundary[umLowFaceIndex(base,a)]=low[a];}
   else{var below=origin;below[a]-=1;low[a]=${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,below,0)[a];}
   if(tSplit(c,a)){splits|=1u<<a;}else{textureStore(output,anchor,texel);}
  }
@@ -473,29 +477,30 @@ fn tCoarseToSimulation(tile:u32){
 // faces on its axis at its plane.
 fn tFineToSimulation(tile:u32,lane:u32){
  let c=umTileCoord(tile);let local=umCorner(lane,4u);let base=c*4u;let origin=vec3i(base);let cell=vec3i(base+local);
- var low=vec3f(0);var high=vec3f(0);var positiveBits=0u;var negativeBits=0u;
+ var low=vec3f(0);var high=vec3f(0);var positiveBits=0u;var negativeBits=0u;let lowOpen=umLowOpen(origin);
  for(var a=0u;a<3u;a++){
   var anchor=origin;anchor[a]+=3;let texel=${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,anchor,0);let bits=tBits(texel);high[a]=texel[a];
-  if(c[a]+1u==UM_T[a]){positiveBits|=bits&(1u<<a);}
-  if(c[a]==0u){low[a]=negative[umNegativeBoundaryIndex(base,a)];negativeBits|=bits&(1u<<(a+3u));}
+  // Only the cells on the tile's positive plane read the bit.
+  if(local[a]==3u&&umAcrossKind(origin,a,4)!=UM_RESIDENT){positiveBits|=bits&(1u<<a);}
+  if(lowOpen[a]){low[a]=negative[umLowFaceIndex(base,a)];negativeBits|=bits&(1u<<(a+3u));}
   else{var below=origin;below[a]-=1;low[a]=${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,below,0)[a];}
  }
  var packed=vec4f(0);var bits=0u;
  for(var a=0u;a<3u;a++){
   packed[a]=mix(low[a],high[a],f32(local[a]+1u)/4.0);
   if(local[a]==3u){bits|=positiveBits&(1u<<a);}
-  if(local[a]==0u&&c[a]==0u){boundary[umNegativeBoundaryIndex(vec3u(cell),a)]=mix(low[a],high[a],0.0);bits|=negativeBits&(1u<<(a+3u));}
+  if(local[a]==0u&&lowOpen[a]){boundary[umLowFaceIndex(vec3u(cell),a)]=mix(low[a],high[a],0.0);bits|=negativeBits&(1u<<(a+3u));}
  }
  packed.w=f32(bits);textureStore(output,cell,packed);
 }
 // A latched frame failure (the verdict withheld the projection) transfers nothing back.
 @compute @workgroup_size(64) fn toSimulationCoarse(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umFrameFailed()){return;}
- let tile=tResidentCoarseTile(g,lane);if(tile<UM_TILES){tCoarseToSimulation(tile);}
+ let tile=tResidentCoarseTile(g,lane);if(umTileLive(tile)){tCoarseToSimulation(tile);}
 }
 @compute @workgroup_size(64) fn toSimulationFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umFrameFailed()){return;}
- for(var job=group.x;job<umCounts.x;job+=groups.x){tFineToSimulation(tFineTile(job),lane);}
+ for(var job=group.x;job<umCounts.x;job+=groups.x){let tile=tFineTile(job);tFineToSimulation(tile,lane);}
 }
 `,["toPressureCoarse","toSimulationCoarse"]);
 }
@@ -509,7 +514,8 @@ fn tFineToSimulation(tile:u32,lane:u32){
  * in place on the live fields. NB only remaps phi; geometry regenerates V. */
 type RemapPart="list"|"faces"|"cells";
 function uniformMixedRemapWGSL(layout:UniformMixedLayout,part:RemapPart,solid?:UniformMixedSolid,surfaceOnly=false):string{
- const topology=uniformMixedTopologyWGSL(layout,0,"old")+uniformMixedTopologyWGSL(layout,1);
+ // The target may be a builder's tile words alone: its page table is the live ownership's.
+ const topology=uniformMixedTopologyWGSL(layout,0,"old")+uniformMixedTopologyWGSL(layout,1,"","old");
  // A statically cut tile's h faces are weighted by their V.
  const cut=(tile:string)=>solid?.coarse?`umSolidEnabled()&&umSolidStaticCut(${tile})`:"false";
  if(part==="list")return topology+/* wgsl */`
@@ -533,7 +539,7 @@ const REMAP_FATAL_CAPACITY:u32=${UNIFORM_MIXED_OVERFLOW_HANGING|UNIFORM_MIXED_OV
 // (LISTED_VERTICES).
 // A frame that already failed lists nothing: its fields stay as they were.
 @compute @workgroup_size(64) fn markChanged(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
+ let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
  if(umFrameFailed()){return;}
  markTile(tile);
 }
@@ -554,10 +560,10 @@ const RECEIPT_GENERATION:u32=${UNIFORM_MIXED_RELAYOUT_RECEIPT.generation}u;
   atomicStore(&umStatus[${UNIFORM_MIXED_STATUS.currentGeneration}u],receipt[RECEIPT_GENERATION]);
  }
  if(fatal!=0u||umFrameFailed()||i>=umDilatedCount()){return;}
- markTile(umDilatedTile(i));
+ let tile=umDilatedTile(i);markTile(tile);
 }
 fn refinedAt(c:vec3u,d:vec3u)->bool{
- let q=c+d;if(any(q>=UM_T)){return false;}
+ let q=c+d;if(!umTilePresent(vec3i(q))){return false;}
  let t=umTileAt(q);return umTileWidth(t)<oldumTileWidth(t);
 }
 fn markTile(tile:u32){
@@ -574,8 +580,8 @@ fn markTile(tile:u32){
   // neighbour that refined sets both.)
   if(!faces&&vertices==0u){return;}
  }
- let p=vec3i(umTileCoord(tile));
- for(var z=max(p.z-1,0);z<=min(p.z+1,i32(UM_T.z)-1);z++){for(var y=max(p.y-1,0);y<=min(p.y+1,i32(UM_T.y)-1);y++){for(var x=max(p.x-1,0);x<=min(p.x+1,i32(UM_T.x)-1);x++){
+ let p=vec3i(umTileCoord(tile));let lo=umTileNear(p-vec3i(1));let hi=umTileNear(p+vec3i(1));
+ for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
   let q=umTileAt(vec3u(vec3i(x,y,z)));
   if(select(umTileWidth(q)!=oldumTileWidth(q),umTileWidth(q)<oldumTileWidth(q),fine)){atomicStore(&worklist[4u+atomicAdd(&worklist[3],1u)],tile|flags|vertices);return;}
  }}}
@@ -593,7 +599,7 @@ fn listedFlags(tile:u32)->u32{
  let c=umTileCoord(tile);
  for(var a=0u;a<3u;a++){
   var q=c;q[a]+=1u;
-  if(q[a]<UM_T[a]){let t=umTileAt(q);if(umTileWidth(t)!=oldumTileWidth(t)){flags|=1u<<(27u+a);}}
+  if(umTilePresent(vec3i(q))){let t=umTileAt(q);if(umTileWidth(t)!=oldumTileWidth(t)){flags|=1u<<(27u+a);}}
  }
  return flags;
 }
@@ -626,7 +632,7 @@ fn listedJobCount(lane:u32)->u32 {
 }
 ${uniformMixedFaceAddressWGSL}
 fn oldFaceValue(f:oldUMFace)->f32{
- if(f.anchor[f.axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(f.anchor,vec3i(0))),f.axis)];}
+ if(umFaceLow(f.anchor,f.axis)){return negative[umLowFaceIndex(vec3u(max(f.anchor,vec3i(0))),f.axis)];}
  return textureLoad(velocity,f.anchor,0)[f.axis];
 }
 fn oldPatch(o:oldUMOwner,p:vec3u,axis:u32,sign:i32)->oldUMFace{
@@ -669,7 +675,7 @@ fn remapReleased(f:UMFace)->bool {
  }}return true;
 }
 fn copyFace(f:UMFace)->f32{
- if(f.anchor[f.axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(f.anchor,vec3i(0))),f.axis)];}
+ if(umFaceLow(f.anchor,f.axis)){return negative[umLowFaceIndex(vec3u(max(f.anchor,vec3i(0))),f.axis)];}
  return ${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(velocity,f.anchor,0)[f.axis];
 }
 var<workgroup> tileFaces:array<vec2f,192>;
@@ -702,10 +708,11 @@ fn remapTileFaces(group:vec3u,lane:u32,remap:bool){
  let anchor=vec3i(umTileCoord(tile)*4u+umCorner(cellLane,4u));
  let texel=remapFaceTexel(entry,umCorner(cellLane,4u));
  let owner=umOwnerAt(anchor);let origin=umOrigin(owner);let cut=remap&&${cut("tile")};
- if((entry&(1u<<31u))!=0u&&origin[axis]==0u&&all(vec3u(anchor)==origin)){
+ let low=umLowOpen(vec3i(origin))[axis];
+ if((entry&(1u<<31u))!=0u&&low&&all(vec3u(anchor)==origin)){
   let face=umFace(owner,axis,-1,0u);
   var value=0.0;if(remap){value=remapFace(face,cut);}else{value=copyFace(face);}
-  boundary[umNegativeBoundaryIndex(origin,axis)]=value;
+  boundary[umLowFaceIndex(origin,axis)]=value;
  }
  let face=umPositiveFaceAtAnchor(owner,axis,anchor);
  let plane=i32(origin[axis]+owner.width)-1;
@@ -729,7 +736,7 @@ fn remapTileFaces(group:vec3u,lane:u32,remap:bool){
    if(remapReleased(face)){bits|=2u<<axis;}
   }else{value=copyFace(face);}
  }
- if(texel&&remap&&origin[axis]==0u&&remapReleased(umFace(owner,axis,-1,0u))){bits|=2u<<(axis+3u);}
+ if(texel&&remap&&low&&remapReleased(umFace(owner,axis,-1,0u))){bits|=2u<<(axis+3u);}
  tileFaces[lane]=vec2f(value,f32(bits));
  workgroupBarrier();
  if(axis!=0u||!texel){return;}
@@ -793,8 +800,9 @@ fn oldBuried(p:vec3i)->bool{
  let base=p-vec3i(1);
  for(var k=0u;k<8u;k++){
   let cell=base+vec3i(umCorner(k,2u));if(!umSolidValid(cell)){continue;}
-  let t=umTileAt(vec3u(cell)/4u);
-  if(oldumTileWidth(t)==4u){if(umTileOpen(t)>1e-5){return false;}}
+  let tile=cell>>vec3u(2u);let t=umTileKey(tile);
+  if(!umKeyStored(t)){if(umTileOpenAt(tile)>1e-5){return false;}}
+  else if(oldumTileWidth(t)==4u){if(umTileOpen(t)>1e-5){return false;}}
   else if(umCellIsOpen(cell)){return false;}
  }
  return true;
@@ -805,7 +813,7 @@ fn planeTile(t:u32)->bool{return umTileWidth(t)==4u&&oldumTileWidth(t)!=4u&&umTi
 fn planeWriter(p:vec3i)->u32{
  let base=p/4-vec3i(1);var writer=UM_UNLISTED;
  for(var k=0u;k<8u;k++){
-  let c=base+vec3i(umCorner(k,2u));if(any(c<vec3i(0))||any(c>=vec3i(UM_T))){continue;}
+  let c=base+vec3i(umCorner(k,2u));if(!umTilePresent(c)){continue;}
   let t=umTileAt(vec3u(c));if(planeTile(t)){writer=min(writer,t);}
  }
  return writer;
@@ -855,7 +863,7 @@ fn planeCrossing(c:PlaneCell)->bool{
  return below&&above;
 }
 fn planeOldFine(t:vec3i)->bool{
- if(any(t<vec3i(0))||any(t>=vec3i(UM_T))){return false;}
+ if(!umTilePresent(t)){return false;}
  let tile=umTileAt(vec3u(t));return oldumTileWidth(tile)!=4u&&umTileOpen(tile)>1e-5;
 }
 // The sums are split over the workgroup: lane i takes tile i of the corner's

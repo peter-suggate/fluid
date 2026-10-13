@@ -267,7 +267,7 @@ struct IndirectArgs {
 @group(0) @binding(5) var<storage, read_write> activeCubes: array<vec2u>;
 @group(0) @binding(6) var<storage, read_write> globalCubeValues: array<vec4f>;
 @group(0) @binding(13) var denseVertexPhi: texture_3d<f32>;
-// Uniform Geometric: the 4h vertex base ((t+1)^3, texel g = phi at vertex 4g).
+// Uniform Geometric: the 4h vertex base (phi at vertex 4g at umWideVertexTexel(g)).
 // The mixed samplers load a 4h owner's corners from it and an h tile's
 // vertices from denseVertexPhi, the detail field (a 1^3 placeholder while
 // the solver holds no h-tile capacity: no h tile exists then).
@@ -429,12 +429,11 @@ fn uniformNormalCube(base: vec3i) {
     let r = vec3u(min(g0 + vec3i(umCorner(k, 2u)), g1) - home + vec3i(1));
     if (((stencil.x >> (r.x + 3u * (r.y + 3u * r.z))) & 1u) != 0u) { coarse = false; }
   }
-  let t = vec3i(umTileDimensions());
   // Opaque bound: 27 loads, not 27 unrolled load sites.
   for (var k = 0u; k < min(arrayLength(&umTopology), 27u); k += 1u) {
     let c = vec3i(umCorner(k, 3u));
     if (any(c > g1 - g0 + vec3i(1))) { continue; }
-    normalBase[k] = textureLoad(coarseVertexPhi, min(g0 + c, t), 0).x;
+    normalBase[k] = textureLoad(coarseVertexPhi, umWideVertexTexel(umWideVertexNear(g0 + c)), 0).x;
   }
   normalBaseLow = g0; normalBaseHigh = g1;
   normalCube = select(3u, 2u, coarse);
@@ -500,7 +499,7 @@ fn uniformNormalWide(q: vec3i) -> bool {
 // umVertexValue at a tile corner: the stencil of the tile the corner opens
 // decides the field (all h: the detail field; otherwise the base).
 fn uniformCornerValue(q: vec3i) -> f32 {
-  let tile = umTileAt(vec3u(min(q, vec3i(umDimensions()) - vec3i(1))) / 4u);
+  let tile = umTileAt(vec3u(umCellNear(q)) / 4u);
   if (umTileMaximumWidth(tile) == 1u) { return umLoadFineVertex(vec3u(q)); }
   return umLoadCoarseVertex(vec3u(q));
 }
@@ -798,7 +797,9 @@ fn extractMain(@builtin(global_invocation_id) gid: vec3u) {
 //     term of the interpolation is non-positive, so every corner is at least
 //     0.5 (sign-exact) and no cube crosses.
 // A NaN fails both tests. A tile outside the lattice holds only clamped or
-// halo cells; the floor is clamped, not a halo.
+// halo cells; the floor is clamped, not a halo. A tile of the lattice with
+// nothing stored (an AIR or SOLID page) reads the image the page table
+// resolves it to: a 4h tile word and far-air corners, so it is air.
 fn uniformWindowQuiet(g: vec3u) -> bool {
   if (!umPresentationEnabled()) { return false; }
   let t = umTileDimensions();
@@ -806,7 +807,7 @@ fn uniformWindowQuiet(g: vec3u) -> bool {
   let low = vec3i(g) - vec3i(1);
   for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
     let tile = low + vec3i(umCorner(k, 2u));
-    if (any(tile < vec3i(0)) || any(tile >= vec3i(t))) { continue; }
+    if (!umTileInBox(tile)) { continue; }
     if (umTileWidth(umTileAt(vec3u(tile))) != 4u) { return false; }
   }
   let margin = 1e-6 * u.container.y / u.gridInfo.y;
@@ -814,8 +815,8 @@ fn uniformWindowQuiet(g: vec3u) -> bool {
   var liquid = g.x > 0u && g.z > 0u && all(g < t);
   // Opaque bound (27): a literal lets Metal unroll the loads.
   for (var k = 0u; k < min(arrayLength(&umTopology), 27u); k += 1u) {
-    let vertex = clamp(low + vec3i(umCorner(k, 3u)), vec3i(0), vec3i(t));
-    let phi = textureLoad(coarseVertexPhi, vertex, 0).x;
+    let vertex = umWideVertexNear(low + vec3i(umCorner(k, 3u)));
+    let phi = textureLoad(coarseVertexPhi, umWideVertexTexel(vertex), 0).x;
     air = air && phi > margin;
     liquid = liquid && phi <= 0.0;
   }
@@ -889,12 +890,12 @@ fn uniformWindowHeader(slot: u32) -> vec4u {
   let t = vec3i(umTileDimensions());
   if (any(4 * t != vec3i(u.gridInfo.xyz))) { return vec4u(window, 0u, 0u, 0u); }
   let g = vec3i(vec3u(window & 1023u, (window >> 10u) & 1023u, window >> 20u));
-  let home = min(g, t - vec3i(1));
+  let home = umTileNear(g);
   let word = umTopology[2u * umTileCount() + 2u * umTileAt(vec3u(home))];
   var fine = 0u; var allFine = true; var anyFine = false;
   for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
     let tile = g - vec3i(1) + vec3i(umCorner(k, 2u));
-    if (any(tile < vec3i(0)) || any(tile >= t)) { continue; }
+    if (!umTileInBox(tile)) { continue; }
     if ((umTopology[2u * umTileCount() + 2u * umTileAt(vec3u(tile))] >> 27u) == 1u) { fine |= 1u << k; } else { allFine = false; }
     let r = vec3u(tile - home + vec3i(1));
     if (((word >> (r.x + 3u * (r.y + 3u * r.z))) & 1u) != 0u) { anyFine = true; }
@@ -902,9 +903,10 @@ fn uniformWindowHeader(slot: u32) -> vec4u {
   return vec4u(window, word, fine, select(select(2u, 3u, anyFine), 1u, allFine));
 }
 // The in-domain tiles whose closure holds vertex q of the window: x, whether
-// one is h; y, one that is 4h (its index plus one), or zero. The tiles as
-// uniformNormalWide's mask of the home stencil; any 4h one serves (the
-// interpolant of a shared face or edge is the same from either side).
+// one is h; y, one that is 4h (its place in the home stencil plus one), or
+// zero. The tiles as uniformNormalWide's mask of the home stencil; any 4h
+// one serves (the interpolant of a shared face or edge is the same from
+// either side), a tile with nothing stored among them (the AIR image).
 fn uniformWindowIncident(q: vec3i) -> vec2u {
   let t = vec3i(umTileDimensions());
   let a = q / 4;
@@ -915,10 +917,7 @@ fn uniformWindowIncident(q: vec3i) -> vec2u {
   let mask = rows * ((m.z & 1u) | ((m.z & 2u) << 8u) | ((m.z & 4u) << 16u));
   let wide = ~normalFine & mask;
   var incident = vec2u(select(0u, 1u, (normalFine & mask) != 0u), 0u);
-  if (wide != 0u) {
-    let i = firstTrailingBit(wide);
-    incident.y = umTileAt(vec3u(normalHome + vec3i(vec3u(i % 3u, (i / 3u) % 3u, i / 9u)) - vec3i(1))) + 1u;
-  }
+  if (wide != 0u) { incident.y = firstTrailingBit(wide) + 1u; }
   return incident;
 }
 // One base slot for each of the first 27 lanes: the tile corners g-1..g+1.
@@ -926,12 +925,13 @@ fn uniformWindowIncident(q: vec3i) -> vec2u {
 fn uniformWindowBaseValues(g: vec3i, lane: u32) -> u32 {
   if (lane >= 27u) { return 0u; }
   let corner = g - vec3i(1) + vec3i(umCorner(lane, 3u));
-  if (any(corner < vec3i(0)) || any(corner > vec3i(umTileDimensions()))) { return 0u; }
-  let phi = textureLoad(coarseVertexPhi, corner, 0).x;
+  if (any(umWideVertexNear(corner) != corner)) { return 0u; }
+  let phi = textureLoad(coarseVertexPhi, umWideVertexTexel(corner), 0).x;
   windowBase[lane] = phi;
   return uniformWindowSign(phi);
 }
-// umVertexFrom4 of the 4h tile at q, its corners read from the window's base
+// umVertexFrom4 of the 4h tile at q (place: its place in the home stencil,
+// uniformWindowIncident's), its corners read from the window's base
 // (the same texels, loaded once a window rather than eight times a vertex)
 // and its eight terms formed as two vectors: slots 0..3 and 4..7 of
 // umVertexFrom4's values, weight (x*y)*z as there; a zero weight contributes
@@ -939,8 +939,8 @@ fn uniformWindowBaseValues(g: vec3i, lane: u32) -> u32 {
 // weight lies in g-1..g+1: the tile's closure holds q, so a corner at g+2
 // belongs to a tile opening at q's plane and weighs nothing; its step
 // rereads the slot before it.
-fn uniformWindowFrom4(q: vec3i, g: vec3i, tile: u32) -> f32 {
-  let a = vec3i(umTileCoord(tile));
+fn uniformWindowFrom4(q: vec3i, g: vec3i, place: u32) -> f32 {
+  let a = normalHome + vec3i(vec3u(place % 3u, (place / 3u) % 3u, place / 9u)) - vec3i(1);
   let f = vec3f(q - 4 * a) / 4.0;
   let r = vec3u(a - g + vec3i(1));
   let s = select(vec3u(1u, 3u, 9u), vec3u(0u), r == vec3u(2u));
@@ -967,13 +967,12 @@ fn uniformWindowFrom4(q: vec3i, g: vec3i, tile: u32) -> f32 {
 // own). A vertex no h tile holds is read by no h cell and stays unwritten.
 // Returns the lane's sign bits.
 fn uniformWindowVertices(g: vec3i, scan: u32, lane: u32) -> u32 {
-  let t = vec3i(umTileDimensions());
   var signs = 0u;
   if (scan == 1u) {
     for (var m = 0u; m < 4u; m += 1u) {
       let slot = 4u * lane + m;
       let q = 4 * g - vec3i(1) + vec3i(umCorner(slot, 6u));
-      if (slot < 216u && all(q >= vec3i(0)) && all(q <= 4 * t)) {
+      if (slot < 216u && all(umVertexNear(q) == q)) {
         let phi = umLoadFineVertex(vec3u(q));
         windowVertex[slot] = phi; signs |= uniformWindowSign(phi);
       }
@@ -983,7 +982,7 @@ fn uniformWindowVertices(g: vec3i, scan: u32, lane: u32) -> u32 {
       let slot = 4u * lane + m;
       if (slot >= 216u) { break; }
       let q = 4 * g - vec3i(1) + vec3i(umCorner(slot, 6u));
-      if (any(q < vec3i(0)) || any(q > 4 * t)) { continue; }
+      if (any(umVertexNear(q) != q)) { continue; }
       let incident = uniformWindowIncident(q);
       if (incident.x == 0u) { continue; }
       var phi = 0.0;
@@ -1066,7 +1065,7 @@ fn extractWindowsMain(@builtin(workgroup_id) group: vec3u, @builtin(num_workgrou
     let header = workgroupUniformLoad(&windowHeader);
     let g = vec3i(vec3u(header.x & 1023u, (header.x >> 10u) & 1023u, header.x >> 20u));
     var signs = 0u;
-    if (header.w != 0u) { normalHome = min(g, vec3i(umTileDimensions()) - vec3i(1)); normalFine = header.y; }
+    if (header.w != 0u) { normalHome = umTileNear(g); normalFine = header.y; }
     if (header.w > 1u) { signs = uniformWindowBaseValues(g, index); }
     // A mixed window's interpolated vertices read the base just loaded.
     if (header.w == 3u) { workgroupBarrier(); }

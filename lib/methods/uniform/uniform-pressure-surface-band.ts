@@ -17,9 +17,9 @@ export class UniformPressureSurfaceBand {
  private readonly group:UniformDetailGroup;
  private readonly pipelines:GPUComputePipeline[]=[];
  constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,phi:GPUTexture){
-  const layout=ownership.layout,d=layout.lattice.dimensions;
-  if(phi.format!=='r32float'||uniformDetailExtent(phi).some((n,a)=>n!==d[a]!+1))throw new Error('Pressure surface band requires the full h vertex field');
-  const buffer=device.createBuffer({label:'Uniform independent pressure surface band',size:Math.ceil(layout.tiles.length/32)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  const address=ownership.capacity.address;
+  if(phi.format!=='r32float'||uniformDetailExtent(phi).some((n,a)=>n!==address.vertexBox[a]))throw new Error('Pressure surface band requires the full h vertex field');
+  const buffer=device.createBuffer({label:'Uniform independent pressure surface band',size:Math.ceil(address.tileKeys/32)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.band={buffer,wordOffset:0};this.allocatedBytes=buffer.size;
   this.resources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:'unfilterable-float',viewDimension:'3d'}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
   this.group=uniformDetailGroup(device,{layout:this.resources,entries:[{binding:0,resource:phi},{binding:1,resource:{buffer}}]});

@@ -6,9 +6,10 @@
  * and is the mixed frame's own buffer (UniformMixedFrame.stageBytesAt). */
 import { planUniformCM11aHierarchy } from "./pressure-plan";
 import { rewritePressureTextureCalls } from "./uniform-pressure-pages";
+import type { UniformLatticeAddress } from "./uniform-lattice-address";
 
 /** The native level the mixed continuation starts from (n/4): the levels
- * above it are never dispatched. */
+ * above it hold no fields. */
 export const UNIFORM_MIXED_CONTINUATION_LEVEL = 2;
 /** Allocation-free layout; different resolutions can share backing when their
  * stages are serialized. No field in this layout is persistent simulation state. */
@@ -21,51 +22,29 @@ export class UniformScratchLayout {
   readonly sharpenBaseWords: number;
   readonly conditioningBytes: number;
   private readonly offsets = new Map<string, number>();
-  constructor(readonly dims: readonly [number,number,number], edgeBytes: number, retainDiagnostics=false, rootBytes=0) {
-    if (!dims.every(d => Number.isSafeInteger(d) && d > 0))
-      throw new RangeError("Uniform scratch dimensions must be positive safe integers");
+  constructor(readonly address: UniformLatticeAddress, edgeBytes: number, retainDiagnostics=false, rootBytes=0) {
     if (!Number.isSafeInteger(edgeBytes) || edgeBytes < 0 || edgeBytes % 4 !== 0)
       throw new RangeError("Uniform scratch edge bytes must be a nonnegative multiple of four");
-    const tiles=dims.reduce((n,d)=>n*Math.ceil(d/4),1);
+    const dims=address.cells,tiles=address.tileKeys;
     this.sharpenBaseWords=Math.ceil((6*tiles+3)/4)*4;
     // The tile stages' prefix; balance/page records remain beyond it. No
     // per-cell plane: Geometric advances only through the mixed frame, whose
     // pressure phi and solid deposits are its own owner-capacity buffers.
     this.conditioningBytes=Math.ceil((this.sharpenBaseWords+8+tiles)/4)*16;
-    const words = dims.reduce((n,d) => n*(d+2),1)*4;
-    ["FIM values A","FIM values B","FIM distances A","FIM distances B"].forEach((name,i) =>
-      this.offsets.set(`Uniform Sec. 3.3 ${name}`,i*words));
-    // Resolve reads and writes only its own cell. With buffer storage the
-    // canonical resolved values can safely overwrite the A input in place.
-    this.offsets.set("Uniform Sec. 3.3 resolved FIM values",0);
     if (!Number.isSafeInteger(rootBytes) || rootBytes < 0)
       throw new RangeError("Uniform scratch root bytes must be a nonnegative safe integer");
     // The dense receiver-stencil bytes of the lattice: reported, not allocated.
     this.edgeBytes=edgeBytes;
     this.rootOffset=0;this.rootBytes=Math.ceil(rootBytes/256)*256;
-    // The mixed continuation never dispatches the two finest native levels:
-    // their fields keep an offset only so they allocate as 1^3 placeholders
-    // (UniformTexturePages.createTexture), and occupy no extent.
-    for(const name of ["V A","pressure B","rhs B","residual A","p-min B","phi A","phi B","rhs A","p-min A","coefficients"])
-      this.offsets.set(`Uniform CM11a L0 ${name}`,0);
-    this.offsets.set("Uniform CM11a Full-Cycle p_tmp",0);
-    this.offsets.set("Uniform CM11a accepted pressure",0);
     let pressureWords=(this.rootOffset+this.rootBytes)/4;
-    planUniformCM11aHierarchy(dims).levelDimensions.slice(1).forEach((d,index)=>{
-      const cells=d.reduce((n,x)=>n*(x+2),1),live=index+1>=UNIFORM_MIXED_CONTINUATION_LEVEL;
+    planUniformCM11aHierarchy(dims).levelDimensions.slice(UNIFORM_MIXED_CONTINUATION_LEVEL).forEach((d,index)=>{
+      const cells=d.reduce((n,x)=>n*(x+2),1),level=index+UNIFORM_MIXED_CONTINUATION_LEVEL;
       for(const [name,count] of Object.entries({"pressure A":1,"pressure B":1,"rhs A":1,"rhs B":1,
         "phi A":1,"phi B":1,"V A":4,"residual A":1,"p-min A":1,"p-min B":1,"coefficients":4})){
-        if(!live){this.offsets.set(`Uniform CM11a L${index+1} ${name}`,0);continue;}
         pressureWords=Math.ceil(pressureWords/4)*4;
-        this.offsets.set(`Uniform CM11a L${index+1} ${name}`,pressureWords);pressureWords+=cells*count;
+        this.offsets.set(`Uniform CM11a L${level} ${name}`,pressureWords);pressureWords+=cells*count;
       }
     });
-    // The legacy FIM fields keep offsets only so they allocate as 1^3
-    // placeholders: the mixed frame dispatches none of them, so they set no
-    // part of the arena's extent.
-    this.offsets.set("Uniform Sec. 3.3 resolved FIM distances",2*words);
-    this.offsets.set("Total surface volume corrected phi",0);
-    if(retainDiagnostics)this.offsets.delete("Uniform Sec. 3.3 resolved FIM distances");
     this.byteLength=pressureWords*4;
     if (!Number.isSafeInteger(this.byteLength))
       throw new RangeError("Uniform scratch layout exceeds safe integer addressing");
@@ -79,9 +58,9 @@ export class UniformScratchLayout {
 export class UniformScratchArena extends UniformScratchLayout {
   readonly buffer: GPUBuffer;
   private readonly ownsBuffer: boolean;
-  constructor(device: GPUDevice, dims: readonly [number,number,number], edgeBytes: number,
+  constructor(device: GPUDevice, address: UniformLatticeAddress, edgeBytes: number,
     retainDiagnostics=false, backing?: GPUBuffer, rootBytes=0) {
-    super(dims, edgeBytes, retainDiagnostics, rootBytes);
+    super(address, edgeBytes, retainDiagnostics, rootBytes);
     const usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST;
     if (backing && (backing.size < this.byteLength || (backing.usage & usage) !== usage))
       throw new RangeError("Shared uniform scratch backing has insufficient capacity or usage");
@@ -123,44 +102,6 @@ export function uniformPressureScratchShader(source:string):string {
       helpers+=`fn ${name}Store(p:vec3i,value:vec4f){${code}textureStore(${name},p,value);}\n`;
     }
   }
-  let result=source.replace('  control: vec4u,','  control: vec4u,\n  fieldDims: array<vec4u,17>,');
-  // read_write textures use a two-argument textureLoad. Normalize it for the
-  // existing call rewriter before replacing the accesses with buffer helpers.
-  result=result.replace(/textureLoad\(mgPressureRW,\s*([^,()]+)\)/g,'textureLoad(mgPressureRW,$1,0)');
-  result=result.replaceAll('textureBarrier();','storageBarrier();textureBarrier();');
+  const result=source.replace('  control: vec4u,','  control: vec4u,\n  fieldDims: array<vec4u,17>,');
   return rewritePressureTextureCalls(result,fields)+helpers;
-}
-
-/** The same 40-byte stencil rows in the shared arena. Donor accumulation
- * binds a disjoint range as atomics; ordinary field accesses remain f32 loads. */
-export function uniformVolumeScratchShader(source:string,sharpenBaseWords:number,conditioningBytes:number):string {
-  // Once decoding finishes, no pass needs the exact limbs again until the
-  // next clear. Store each rounded sum in its own low limb, in place.
-  let result=source.replaceAll("atomicStore(&sharpenDeposits[i],bitcast<i32>(uvDonorSum(i)))",
-      "atomicStore(&rigidExchange[uvDecodedAt(i)],bitcast<i32>(uvDonorSum(i)))")
-    .replace("if(atomicLoad(&sharpenDeposits[i])==0){uvEdges", "if(atomicLoad(&rigidExchange[uvDecodedAt(i)])==0){uvEdges")
-    .replace("let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));", "let sum=bitcast<f32>(atomicLoad(&rigidExchange[uvDecodedAt(donor)]));")
-    .replace("fn uvDecodedBits(i:u32)->u32{return bitcast<u32>(atomicLoad(&sharpenDeposits[i]));}", "fn uvDecodedBits(i:u32)->u32{return bitcast<u32>(atomicLoad(&rigidExchange[uvDecodedAt(i)]));}")
-    .replace("fn uvStoreDecoded(i:u32,bits:i32){atomicStore(&sharpenDeposits[i],bits);}", "fn uvStoreDecoded(i:u32,bits:i32){atomicStore(&rigidExchange[uvDecodedAt(i)],bits);}")
-    .replace("fn uvCoarseBase()->u32{return cellCount();}","fn uvCoarseBase()->u32{return 0u;}")
-    .replace("return cellCount()+4u*uvCoarseCount()+plane*uvCoarseCount();", "return 4u*uvCoarseCount()+plane*uvCoarseCount();")
-    .replaceAll('2u*cellCount()+UV_SHARPEN',`${sharpenBaseWords}u+UV_SHARPEN`)
-    .replace('fn uvBalanceBase()->u32{return 3u*cellCount();}',`fn uvBalanceBase()->u32{return ${conditioningBytes/4}u;}`)
-    .replace(/@group\(0\) @binding\(33\) var<storage,read_write> uvEdges:array<UVEdges>;/,'');
-  const weight=/uvEdges\[([^\]]+)\]\.weight\[([^\]]+)\]/g;
-  result=result.replace(/uvEdges\[([^\]]+)\]\.weight\[([^\]]+)\](\/=|=(?!=))([^;]+);/g,
-    (_m,i,k,op,value)=>`uvSetWeight(${i},${k},${op==='/='?`uvWeight(${i},${k})/(${value})`:value});`);
-  result=result.replace(/uvEdges\[([^\]]+)\]\.base(\|=|&=|=(?!=))([^;]+);/g,
-    (_m,i,op,value)=>`uvSetBase(${i},${op==='='?value:`uvBase(${i})${op[0]}(${value})`});`);
-  result=result.replace(weight,(_m,i,k)=>`uvWeight(${i},${k})`)
-    .replace(/uvEdges\[([^\]]+)\]\.base/g,(_m,i)=>`uvBase(${i})`);
-  return result+`
-// Planar members within a padded 64-cell brick: adjacent SIMD lanes now
-// load adjacent words instead of a 40-byte stride. Same 10 words per cell.
-fn uvEdgeWord(i:u32,k:u32)->u32{return ${"(i/64u)*640u+k*64u+i%64u"};}
-fn uvBase(i:u32)->u32{return uniformScratch[uvEdgeWord(i,0u)];}
-fn uvSetBase(i:u32,value:u32){uniformScratch[uvEdgeWord(i,0u)]=value;}
-fn uvWeight(i:u32,k:u32)->f32{return bitcast<f32>(uniformScratch[uvEdgeWord(i,1u+k)]);}
-fn uvSetWeight(i:u32,k:u32,value:f32){uniformScratch[uvEdgeWord(i,1u+k)]=bitcast<u32>(value);}
-`;
 }

@@ -8,9 +8,9 @@ const UM_D=vec3u(${x}u,32u,16u);const UM_T=UM_D/4u;
 const UM_TILES:u32=${x * 32 * 16 / 64}u;
 const UM_PD:vec3u=(UM_T+vec3u(3u))/4u;
 const UM_PAGES:u32=UM_PD.x*UM_PD.y*UM_PD.z;
-const UM_DETAIL:u32=4u*UM_TILES;
+const UM_RESIDENCY:u32=9u*UM_TILES+28u;
 const UM_H=vec3f(${h},${h},${h});
-fn sample()->f32{return f32(UM_D.x+UM_DETAIL+UM_PAGES+umCounts.x)*UM_H.x;}
+fn sample()->f32{return f32(UM_D.x+UM_RESIDENCY+UM_PAGES+umCounts.x)*UM_H.x;}
 `;
 
 test("integer dimensions specialize addressing while physical spacing stays reusable", () => {
@@ -23,7 +23,7 @@ test("integer dimensions specialize addressing while physical spacing stays reus
   assert.match(small, /fn UM_TILES\(\)->u32\{return 256u;\}/);
   assert.match(large, /fn UM_TILES\(\)->u32\{return 512u;\}/);
   assert.match(small, /return umCounts.spacing.xyz/);
-  assert.match(small, /fn UM_DETAIL\(\)->u32\{return 4u\*UM_TILES\(\);\}/);
+  assert.match(small, /fn UM_RESIDENCY\(\)->u32\{return 9u\*UM_TILES\(\)\+28u;\}/);
   assert.match(small, /UM_PAGES\(\)\+umCounts.work.x/);
 });
 

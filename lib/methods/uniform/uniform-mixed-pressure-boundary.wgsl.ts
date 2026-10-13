@@ -10,46 +10,29 @@ export function uniformMixedPressureStorage(layout:UniformMixedLayout){
   let storage=pressureStorage.get(layout);
   if(!storage){
     const width=layout.tiles.reduce((width,word)=>Math.min(width,mixedCellWidth(word)),4);
-    const d=layout.lattice.dimensions.map(n=>n/width);
+    const d=layout.address.cells.map(n=>n/width);
     storage={width, count:layout.cellCount+2*(d[0]!*d[1]!+d[0]!*d[2]!+d[1]!*d[2]!)};pressureStorage.set(layout,storage);
   }
   return storage;
 }
 
-/** With `solid`, the caller defines umPressureWallV(o,axis,sign): the wall's
- * dual-cell V (native 0.5*open, or 0.5*(1+open) at the atmosphere). */
-export function uniformMixedPressureBoundaryWGSL(layout:UniformMixedLayout,openTop:boolean,surface:boolean,solid=false):string{
- return /* wgsl */ `
-${uniformMixedPressureBoundaryIndexWGSL(layout)}
-fn umBoundaryOpen(axis:u32,sign:i32)->bool{return ${openTop ? "axis==1u&&sign>0" : "false"};}
-fn umBoundaryCoefficient(o:UMOwner,axis:u32,sign:i32)->f32 {
- ${surface ? "if(!umPressureLiquid(o)){return 0.0;}" : ""}
- let distance=f32(o.width)*UM_H[axis];var fraction=0.5;var theta=1.0;
- if(umBoundaryOpen(axis,sign)){
-  fraction=1.0;
-  ${surface ? "theta=umPressureSurfaceTheta(umPressurePhi(o),0.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)));" : ""}
- }
- ${solid ? "fraction=umPressureWallV(o,axis,sign);if(fraction<=1e-6){return 0.0;}" : ""}
- return fraction/(distance*distance*theta);
-}
-fn umBoundaryCoreTerms(o:UMOwner,face:UMFace)->vec2f {
- let weight=umBoundaryCoefficient(o,face.axis,face.sign);
- var p=0.0;if(!umBoundaryOpen(face.axis,face.sign)){p=pressures[umBoundaryIndex(o,face.axis,face.sign)];}
- return vec2f(weight,weight*p);
-}
-`;
-}
-
 /** One invocation owns each halo patch as well as its adjacent physical row.
- * Smoothing schedules the halo on the opposite parity to that physical row. */
+ * Smoothing schedules the halo on the opposite parity to that physical row.
+ * The body runs for every face of owner `o` with no stored cell across it:
+ * `halo` is the face's slot and `kind` what lies across it, UM_SOLID (a wall)
+ * or UM_AIR (an opening, whose slot is a row nothing couples to). A face into
+ * a cell of the box with nothing stored has no slot: that cell's tile is a
+ * row of the box (UniformMixedRootOwners), AIR open and SOLID closed. */
 export function uniformMixedPressureBoundaryLoop(body:string,prefix=""):string{return (/* wgsl */ `
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
-  let origin=umOrigin(o);let sign=select(-1,1,side==1u);
-  if((side==0u&&origin[axis]!=0u)||(side==1u&&origin[axis]+o.width!=UM_D[axis])){continue;}
+  let sign=select(-1,1,side==1u);
+  let kind=umAcrossKind(vec3i(umOrigin(o)),axis,select(-1,i32(o.width),side==1u));if(kind==UM_RESIDENT){continue;}
+  // Only a face of the box has a slot: a cell of the box with nothing stored is a row of its own.
+  var across=vec3i(umOrigin(o));across[axis]+=select(-1,i32(o.width),side==1u);if(umCellInBox(across)){continue;}
   let halo=umBoundaryIndex(o,axis,sign);
   __BODY__
  }}
-`).replace(/\b(UM_D|umOrigin|umBoundaryIndex)\b/g,name=>prefix+name).replace("__BODY__",body);}
+`).replace(/\b(umAcrossKind|umCellInBox|UM_RESIDENT|umOrigin|umBoundaryIndex)\b/g,name=>prefix+name).replace("__BODY__",body);}
 
 /** Namespaced indexing is shared by restriction, correction bounds and rows. */
 export function uniformMixedPressureBoundaryIndexWGSL(layout:UniformMixedLayout,prefix=""):string {
@@ -59,11 +42,11 @@ export function uniformMixedPressureBoundaryIndexWGSL(layout:UniformMixedLayout,
 fn umBoundaryIndex(o:UMOwner,axis:u32,sign:i32)->u32 {
  let width=select(4u,1u,umCounts.x>0u);
  let cells=umCounts.x*64u+umCounts.y;
- let p=umOrigin(o)/width;let d=UM_D/width;let side=select(0u,1u,sign>0);
+ let p=umOrigin(o)/width;let d=UM_BOX/width;let side=select(0u,1u,sign>0);
  if(axis==0u){return cells+side*d.y*d.z+p.y+d.y*p.z;}
  if(axis==1u){return cells+2u*d.y*d.z+side*d.x*d.z+p.x+d.x*p.z;}
  return cells+2u*(d.y*d.z+d.x*d.z)+side*d.x*d.y+p.x+d.x*p.y;
 }
 `;
- return source.replace(/\b(UMOwner|UM_D|umOrigin|umBoundaryIndex|umCounts)\b/g,name=>prefix+name);
+ return source.replace(/\b(UMOwner|UM_BOX|umOrigin|umBoundaryIndex|umCounts)\b/g,name=>prefix+name);
 }

@@ -2,6 +2,7 @@ import {uniformRuntimeConstantsWGSL} from "./uniform-scene-constants";
 import { uniformCompileStencilWGSL } from "./uniform-compiled-topology";
 import {UNIFORM_MIXED_OVERFLOW_FINE,UNIFORM_MIXED_OVERFLOW_HANGING} from "./uniform-mixed-topology.wgsl";
 import type {UniformMixedGenerationBuffers,UniformMixedOwnership} from "./uniform-mixed-ownership";
+import {UNIFORM_PAGE_TABLE_WORDS,uniformLatticeAddressWGSL} from "./uniform-lattice-address";
 
 const BLOCK=256;
 /** Work header: the cleared counters [0, CLEARED), then umCounts at COUNTS
@@ -68,7 +69,8 @@ export const UNIFORM_MIXED_RELAYOUT_RECEIPT={census:0,changed:20,tiers:21,seams:
  * bit means the built generation must not be adopted or advanced on.
  * hangingCapacity (= UNIFORM_MIXED_OVERFLOW_HANGING): seam tiles exceed the
  * preallocated hanging tap cache (ownership.capacity.hangingSlots); slots
- * past it are left unslotted. tierSum: h + 4h tiles != tiles. tileWords: a
+ * past it are left unslotted. tierSum: h + 4h tiles != the tiles of the
+ * blocks that hold a page (counted from the block words). tileWords: a
  * tile word, owner index or worklist entry disagrees with the receipt counts
  * (the host's cellCount check). residency: the band producer's residency
  * audit found liquid or near-surface phi in a page the last frame skipped as
@@ -100,7 +102,10 @@ interface Level {
  * them; the receipt is the GPU's to consume (diagnostics copy it). */
 export class UniformMixedLayoutBuilder {
  readonly allocatedBytes:number;
+ /** Tile keys. */
  private readonly tiles:number;
+ /** Tiles of the box: the extent of the static masks' box indices. */
+ private readonly boxTiles:number;
  private readonly blocks:number;
  private readonly statics:GPUBuffer;
  private readonly resources:GPUBindGroupLayout;
@@ -127,11 +132,13 @@ export class UniformMixedLayoutBuilder {
  /** ownership: the simulation ownership the built generation replaces. */
  constructor(private readonly device:GPUDevice,band:UniformMixedBandBits,ownership:UniformMixedOwnership){
   const n=ownership.capacity.tiles;
-  this.tiles=n;this.blocks=Math.ceil(n/BLOCK);
-  if(this.blocks>device.limits.maxComputeWorkgroupsPerDimension)throw new Error("Mixed layout builder tile count exceeds one dispatch dimension");
+  this.tiles=n;this.boxTiles=ownership.capacity.address.boxTiles;this.blocks=Math.ceil(n/BLOCK);
+  // The per-tile launches are one dimension of 64-lane groups, and the verify ticket counts them in 16 bits: 8,191 pages of 512 tiles at 65,535 groups.
+  const groups=Math.ceil(n/64),most=Math.min(0xffff,device.limits.maxComputeWorkgroupsPerDimension);
+  if(groups>most)throw new Error(`Mixed layout builder launches ${groups} groups of 64 tile keys in one dimension, above ${most}: ${n} tile keys exceed ${64*most} (${Math.floor(most/8)} pages of 512)`);
   const storage=(label:string,words:number)=>device.createBuffer({label,size:words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   // Static fine words, then static coarse words (coarse-only regions mask the band).
-  this.statics=storage("Uniform layout builder static masks",2*Math.ceil(n/32));
+  this.statics=storage("Uniform layout builder static masks",2*Math.ceil(this.boxTiles/32));
   const R=UNIFORM_MIXED_RELAYOUT_RECEIPT;
   if(band.headerWords!==undefined){
    if(!Number.isSafeInteger(band.headerWords)||band.headerWords<0||band.headerWords>R.changed-R.census)throw new Error(`Band header of ${band.headerWords} words does not fit the relayout receipt`);
@@ -147,13 +154,13 @@ export class UniformMixedLayoutBuilder {
   const support=storage("Uniform layout builder support",9*n+24);
   const slots=storage("Uniform layout builder slots",2*n);
   const work=device.createBuffer({label:"Uniform layout builder work",size:uniformMixedChangedTilesWords(n).words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-  const params=device.createBuffer({label:"Uniform layout builder params",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  const params=device.createBuffer({label:"Uniform layout builder params",size:48,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   // Hanging capacity: the ownership's preallocated tap cache.
   // Residency audit word, or none. h-tile capacity: the owner-indexed buffers'.
   // Admission capacity: none (setAdmission).
-  const lattice=ownership.capacity.lattice;
-  device.queue.writeBuffer(params,0,new Uint32Array([band.wordOffset,ownership.capacity.hangingSlots,band.auditWord??0xffffffff,ownership.capacity.fineTiles,0xffffffff,...lattice.dimensions.map(d=>d/4)]));
-  device.queue.writeBuffer(work,COUNTS*4+16,new Uint32Array([...lattice.dimensions,n]));
+  const lattice=ownership.capacity.lattice,address=ownership.capacity.address;
+  device.queue.writeBuffer(params,0,new Uint32Array([band.wordOffset,ownership.capacity.hangingSlots,band.auditWord??0xffffffff,ownership.capacity.fineTiles,0xffffffff,...address.tiles,n]));
+  device.queue.writeBuffer(work,COUNTS*4+16,new Uint32Array([...address.cells,n]));
   device.queue.writeBuffer(work,COUNTS*4+32,new Float32Array([...lattice.cellSize_m,Math.min(...lattice.cellSize_m)]));
   const status=device.createBuffer({label:"Uniform layout builder relayout receipt",size:R.words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   // Standalone stages visit everything until a frame census: support[0,4n) = 3.
@@ -169,16 +176,15 @@ export class UniformMixedLayoutBuilder {
   this.allocatedBytes=bytes;
  }
  async initialize():Promise<void>{
-  const lattice=this.level.current.capacity.lattice,n=this.tiles,x=this.level.current.dispatchX;
-  const T=lattice.dimensions.map(d=>d/4);
+  const n=this.tiles,x=this.level.current.dispatchX;
+  const T=this.level.current.capacity.address.tiles;
   const flags=RECEIPT,totals=RECEIPT+n,lists=uniformMixedChangedTilesWords(n);
   const R=UNIFORM_MIXED_RELAYOUT_RECEIPT,F=UNIFORM_MIXED_RELAYOUT_FATAL;
-  if(Math.ceil(n/64)>0xffff)throw new Error(`Mixed layout builder verifies ${Math.ceil(n/64)} groups, above the 16-bit ticket`);
   const module=this.device.createShaderModule({label:"Uniform mixed layout builder",code:uniformRuntimeConstantsWGSL(/* wgsl */`
 @group(0) @binding(0) var<storage,read> band:array<u32>;
 @group(0) @binding(1) var<storage,read> statics:array<u32>;
 @group(0) @binding(2) var<storage,read> current:array<u32>;
-struct Params {bandOffset:u32,hangingCapacity:u32,audit:u32,fineCapacity:u32,admitCapacity:u32,tileX:u32,tileY:u32,tileZ:u32}
+struct Params {bandOffset:u32,hangingCapacity:u32,audit:u32,fineCapacity:u32,admitCapacity:u32,tileX:u32,tileY:u32,tileZ:u32,tileKeys:u32}
 @group(0) @binding(3) var<uniform> params:Params;
 @group(0) @binding(4) var<storage,read_write> work:array<atomic<u32>>;
 @group(0) @binding(5) var<storage,read_write> topology:array<u32>;
@@ -194,19 +200,26 @@ const N:u32=${n}u;const T=vec3u(${T.map(v=>`${v}u`).join(",")});const X:u32=${x}
 const BLOCKS:u32=${this.blocks}u;const INF:u32=0xffffffffu;
 const FLAGS:u32=${flags}u;const TOTALS:u32=${totals}u;const COUNTS:u32=${COUNTS}u;
 const CHANGED:u32=${lists.changedList}u;const DILATED:u32=${lists.dilatedList}u;const DILATED_COUNT:u32=${lists.dilatedCount}u;
-fn coord(t:u32)->vec3u{return vec3u(t%T.x,(t/T.x)%T.y,t/(T.x*T.y));}
-fn key(p:vec3u)->u32{return p.x+T.x*(p.y+T.y*p.z);}
-fn inside(q:vec3i)->bool{return all(q>=vec3i(0))&&all(q<vec3i(T));}
-const WORDS:u32=${Math.ceil(n/32)}u;
-fn fineAt(t:u32)->bool{return ((((band[params.bandOffset+t/32u]&~statics[WORDS+t/32u])|statics[t/32u])>>(t%32u))&1u)!=0u;}
+// The page table and block records the live ownership holds after its tile words.
+fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return current[5u*N+(e.x|(e.y<<6u)|(e.z<<12u))];}
+fn umBlockWord(b:u32)->u32{return current[5u*N+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
+${uniformLatticeAddressWGSL({cells:"(4u*T)",tiles:"T",constant:true,paged:{blocks:"(N/512u)",whole:false}})}
+const WORDS:u32=${Math.ceil(this.boxTiles/32)}u;
+// The band is a bit per tile key; the static masks are the host's, a bit per
+// box index, fine words then coarse words WORDS on.
+fn fineAt(t:u32)->bool{
+ let b=umBoxTileIndex(umTileCoord(t));let banded=(band[params.bandOffset+t/32u]>>(t%32u))&1u;
+ let fine=(statics[b/32u]>>(b%32u))&1u;let coarse=(statics[WORDS+b/32u]>>(b%32u))&1u;
+ return ((banded&~coarse)|fine)!=0u;
+}
 fn wordWidth(word:u32)->u32{return select(4u,1u,(word&0x80000000u)!=0u);}
 fn widthAt(t:u32)->u32{return atomicLoad(&work[FLAGS+t])&7u;}
 // Width: h for the band and static tiles, else 4h (ungraded). Staged as a
 // plain word in the tile-word plane, which scatter overwrites, so classify's
 // 27 neighbour reads are plain loads.
 @compute @workgroup_size(64) fn widths(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x;if(t>=N){return;}
- if(t==0u){atomicStore(&work[8u],N);}
+ let t=gid.x;if(t==0u){atomicStore(&work[8u],N);}
+ if(!umTileLive(t)){return;}
  let w=select(4u,1u,fineAt(t));
  topology[t]=w;
  if(w==1u){atomicAdd(&work[NEED],1u);}
@@ -219,19 +232,19 @@ fn widthAt(t:u32)->u32{return atomicLoad(&work[FLAGS+t])&7u;}
 // receipt carries the need; the host grows the capacity between frames.
 @compute @workgroup_size(64) fn admit(@builtin(global_invocation_id) gid:vec3u){
  if(atomicLoad(&work[NEED])<=params.admitCapacity){return;}
- let t=gid.x;if(t>=N){return;}
+ let t=gid.x;if(t==0u){atomicStore(&work[0],0u);}
+ if(!umTileLive(t)){return;}
  topology[t]=wordWidth(current[t]);
- if(t==0u){atomicStore(&work[0],0u);}
 }
 // The dilated list: each changed tile's 3x3x3 neighbourhood, deduplicated by
 // flag bit 16 (classify rewrote the flags; every later reader masks the
 // width and regular bits).
 @compute @workgroup_size(64) fn dilate(@builtin(global_invocation_id) gid:vec3u){
  let i=gid.x;if(i>=atomicLoad(&work[0])){return;}
- let p=vec3i(coord(atomicLoad(&work[CHANGED+i])));
+ let t=atomicLoad(&work[CHANGED+i]);let p=vec3i(umTileCoord(t));
  for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
-  let q=p+vec3i(x,y,z);if(!inside(q)){continue;}
-  let s=key(vec3u(q));
+  let q=p+vec3i(x,y,z);if(!umTilePresent(q)){continue;}
+  let s=umTileAt(vec3u(q));
   if((atomicOr(&work[FLAGS+s],16u)&16u)==0u){atomicStore(&work[DILATED+atomicAdd(&work[DILATED_COUNT],1u)],s);}
  }}}
 }
@@ -248,32 +261,34 @@ ${uniformCompileStencilWGSL}
  if(lane<${CATEGORIES}u){atomicStore(&blockTotals[lane],0u);}
  workgroupBarrier();
  let t=group.x*${BLOCK}u+lane;
- if(t<N){
-  let w=topology[t];let p=vec3i(coord(t));
+ if(umTileLive(t)){
+  let w=topology[t];let p=vec3i(umTileCoord(t));
   var maximum=w;var minimum=w;var fine=0u;var valid=0u;
   for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
-   let q=p+vec3i(x,y,z);if(!inside(q)){continue;}
+   let q=p+vec3i(x,y,z);if(!umTilePresent(q)){continue;}
    valid|=1u<<u32((x+1)+3*((y+1)+3*(z+1)));
-   let v=topology[key(vec3u(q))];maximum=max(maximum,v);minimum=min(minimum,v);
+   let v=topology[umTileAt(vec3u(q))];maximum=max(maximum,v);minimum=min(minimum,v);
    if(v==1u){fine|=1u<<u32((x+1)+3*((y+1)+3*(z+1)));}
   }}}
   var farPositive=0u;
-  for(var axis=0u;axis<3u;axis++){var q=p;q[axis]+=2;if(inside(q)&&topology[key(vec3u(q))]==1u){farPositive|=1u<<axis;}}
+  for(var axis=0u;axis<3u;axis++){var q=p;q[axis]+=2;if(umTilePresent(q)&&topology[umTileAt(vec3u(q))]==1u){farPositive|=1u<<axis;}}
   topology[2u*N+2u*t]=fine|(maximum<<27u);topology[2u*N+2u*t+1u]=(minimum<<27u)|(farPositive<<24u)|umCompileStencil(fine,valid);
   topology[4u*N+t]=umCompileBlendMask(fine);
   let regular=maximum==minimum;
   atomicStore(&work[FLAGS+t],w|select(0u,8u,regular));
   let c=categories(w,regular);
-  for(var k=0u;k<4u;k++){if(k!=1u&&c[k]!=0u){atomicAdd(&blockTotals[k],1u);}}
+  for(var k=0u;k<4u;k++){if(c[k]!=0u){atomicAdd(&blockTotals[k],1u);}}
  }
  workgroupBarrier();
- // 4h tiles are the block's other tiles; regular 4h ones its non-seam 4h.
- if(lane==0u){let c1=min(N-group.x*${BLOCK}u,${BLOCK}u)-atomicLoad(&blockTotals[0]);atomicStore(&blockTotals[1],c1);atomicStore(&blockTotals[4],c1-atomicLoad(&blockTotals[3]));}
+ // Regular 4h tiles are the block's non-seam 4h: a key that holds no tile counts nowhere.
+ if(lane==0u){atomicStore(&blockTotals[4],atomicLoad(&blockTotals[1])-atomicLoad(&blockTotals[3]));}
  workgroupBarrier();
  if(lane<${CATEGORIES}u){atomicStore(&work[TOTALS+group.x*${CATEGORIES}u+lane],atomicLoad(&blockTotals[lane]));}
 }
 var<workgroup> partial:array<u32,${BLOCK}>;
+var<workgroup> held:array<u32,${BLOCK}>;
 var<workgroup> grand:array<u32,${CATEGORIES}>;
+var<workgroup> stored:atomic<u32>;
 // Inclusive Hillis-Steele scan of partial[]; every lane must call it.
 fn scanPartial(lane:u32){
  for(var offset=1u;offset<${BLOCK}u;offset*=2u){
@@ -281,10 +296,27 @@ fn scanPartial(lane:u32){
   workgroupBarrier();partial[lane]+=v;workgroupBarrier();
  }
 }
+// The same scan of partial[] and held[] together.
+fn scanPartialHeld(lane:u32){
+ for(var offset=1u;offset<${BLOCK}u;offset*=2u){
+  var v=0u;var u=0u;if(lane>=offset){v=partial[lane-offset];u=held[lane-offset];}
+  workgroupBarrier();partial[lane]+=v;held[lane]+=u;workgroupBarrier();
+ }
+}
 // Exclusive block offsets per category, grand totals, and the headers.
 @compute @workgroup_size(${BLOCK}) fn scan(@builtin(local_invocation_index) lane:u32){
 ${this.headerWords?`// The band producer's receipt header, carried into this build's receipt.
  if(lane<${this.headerWords}u){atomicStore(&status[${R.census}u+lane],band[lane]);}`:""}
+ // The stored tiles: a block that holds a page has that page's tiles of the box.
+ if(lane==0u){atomicStore(&stored,0u);}
+ workgroupBarrier();
+ var tiles=0u;
+ for(var b=lane;b<UM_BLOCKS;b+=${BLOCK}u){
+  if(umBlockWord(b)==UM_FREE){continue;}
+  let low=8u*umBlockPage(b);if(any(low>=T)){continue;}
+  let e=min(vec3u(8u),T-low);tiles+=e.x*e.y*e.z;
+ }
+ atomicAdd(&stored,tiles);
  let per=(BLOCKS+${BLOCK-1}u)/${BLOCK}u;let first=min(BLOCKS,lane*per);let last=min(BLOCKS,first+per);
  for(var k=0u;k<${CATEGORIES}u;k++){
   var local=0u;for(var b=first;b<last;b++){local+=atomicLoad(&work[TOTALS+b*${CATEGORIES}u+k]);}
@@ -316,7 +348,7 @@ ${this.headerWords?`// The band producer's receipt header, carried into this bui
   for(var i=R_SEAMS+2u;i<R_COUNTS;i++){atomicStore(&status[i],0u);}
   atomicStore(&status[R_NEED],atomicLoad(&work[NEED]));atomicStore(&status[R_ADMIT],params.admitCapacity);
   atomicStore(&status[R_COUNTS],f);atomicStore(&status[R_COUNTS+1u],c);atomicStore(&status[R_COUNTS+2u],0u);atomicStore(&status[R_COUNTS+3u],8u);
-  if(f+c!=N){atomicOr(&status[R_FATAL],FATAL_TIER_SUM);}
+  if(f+c!=atomicLoad(&stored)){atomicOr(&status[R_FATAL],FATAL_TIER_SUM);}
   if(grand[2]+grand[3]>params.hangingCapacity){atomicOr(&status[R_FATAL],FATAL_HANGING);}
   // Known before scatter writes a tile word: every owner-indexed buffer
   // is sized for at most this many h tiles. A need over an admission
@@ -327,21 +359,24 @@ ${this.headerWords?`// The band producer's receipt header, carried into this bui
 }
 // Owner numbering, worklists and the hanging slot table, in tile key order.
 @compute @workgroup_size(${BLOCK}) fn scatter(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let t=group.x*${BLOCK}u+lane;let valid=t<N;
+ let t=group.x*${BLOCK}u+lane;let valid=umTileLive(t);
  var w=0u;var regular=false;
  if(valid){let f=atomicLoad(&work[FLAGS+t]);w=f&7u;regular=(f&8u)!=0u;}
  let c=categories(w,regular);
  // One scan of h, seam h and seam 4h packed in 10-bit fields (a block sums
- // at most ${BLOCK}); the valid tiles below a valid lane are its lane, so its
- // 4h rank is lane minus its h rank and its regular rank that minus its seam 4h.
- partial[lane]=c[0]|(c[2]<<10u)|(c[3]<<20u);workgroupBarrier();scanPartial(lane);
+ // at most ${BLOCK}), and one of the keys that hold a tile: a tile's 4h rank
+ // is the tiles below it minus its h rank, its regular rank that minus its
+ // seam 4h.
+ partial[lane]=c[0]|(c[2]<<10u)|(c[3]<<20u);held[lane]=u32(valid);workgroupBarrier();scanPartialHeld(lane);
+ let seamF=atomicLoad(&work[3]);let seamC=atomicLoad(&work[4]);
+ // A slot no seam tile takes names no tile: t is a slot here, whatever its key holds.
+ if(t>=min(seamF+seamC,params.hangingCapacity)){slots[N+t]=INF;}
  if(!valid){return;}
  let packed=partial[lane];var rank:array<u32,${CATEGORIES}>;
  rank[0]=(packed&1023u)-c[0];rank[2]=((packed>>10u)&1023u)-c[2];rank[3]=(packed>>20u)-c[3];
- rank[1]=lane-rank[0];rank[4]=rank[1]-rank[3];
+ rank[1]=held[lane]-1u-rank[0];rank[4]=rank[1]-rank[3];
  for(var k=0u;k<${CATEGORIES}u;k++){rank[k]+=atomicLoad(&work[TOTALS+group.x*${CATEGORIES}u+k]);}
  let f=atomicLoad(&work[1]);
- let seamF=atomicLoad(&work[3]);let seamC=atomicLoad(&work[4]);
  var slot=INF;
  // Slots past the preallocated cache stay unslotted (scan raised the fatal bit).
  if(w==1u){
@@ -354,17 +389,16 @@ ${this.headerWords?`// The band producer's receipt header, carried into this bui
  if(slot>=params.hangingCapacity){slot=INF;}
  slots[t]=slot;
  if(slot!=INF){slots[N+slot]=t;}
- if(t>=min(seamF+seamC,params.hangingCapacity)){slots[N+t]=INF;}
 }
 // The detail ring (UNIFORM_MIXED_DETAIL_RING): bit 0 of the second stencil
 // word, an h tile within three tiles, from classify's 27-bit h masks of the
 // tiles two apart. Each lane writes its own word.
 @compute @workgroup_size(64) fn mirror(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x;if(t>=N){return;}
- let p=vec3i(coord(t));var near=false;
+ let t=gid.x;if(!umTileLive(t)){return;}
+ let p=vec3i(umTileCoord(t));var near=false;
  for(var z=-2;z<=2;z+=2){for(var y=-2;y<=2;y+=2){for(var x=-2;x<=2;x+=2){
-  let q=p+vec3i(x,y,z);if(!inside(q)){continue;}
-  near=near||(topology[2u*N+2u*key(vec3u(q))]&0x7ffffffu)!=0u;
+  let q=p+vec3i(x,y,z);if(!umTilePresent(q)){continue;}
+  near=near||(topology[2u*N+2u*umTileAt(vec3u(q))]&0x7ffffffu)!=0u;
  }}}
  if(near){topology[2u*N+2u*t+1u]|=1u;}
 }
@@ -377,7 +411,7 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
  if(lane==0u){atomicStore(&groupBad,0u);}
  workgroupBarrier();
  let t=gid.x;
- if(t<N){
+ if(umTileLive(t)){
   let word=topology[t];let f=atomicLoad(&work[1]);let c=atomicLoad(&work[2]);var ok=wordWidth(word)==widthAt(t)&&(word&0x40000000u)==0u;
   if((word&0x80000000u)!=0u){let base=word&0x3fffffffu;let rank=base/64u;ok=ok&&base%64u==0u&&rank<f&&topology[N+rank]==t;}
   else{ok=ok&&word>=64u*f&&word-64u*f<c&&topology[N+f+word-64u*f]==t;}
@@ -398,13 +432,13 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
  else if(atomicLoad(&status[R_CHANGED])!=0u){atomicAdd(&status[R_GENERATION],1u);}
 }
 `,{
- N:{type:"u32",value:"params.tileX*params.tileY*params.tileZ"},
+ N:{type:"u32",value:"params.tileKeys"},
  T:{type:"vec3u",value:"vec3u(params.tileX,params.tileY,params.tileZ)"},
  BLOCKS:{type:"u32",value:"(N+255u)/256u"},
  TOTALS:{type:"u32",value:"76u+N"},
  CHANGED:{type:"u32",value:"76u+N+5u*BLOCKS"},
  DILATED:{type:"u32",value:"CHANGED+N"},
- WORDS:{type:"u32",value:"(N+31u)/32u"},
+ WORDS:{type:"u32",value:"(params.tileX*params.tileY*params.tileZ+31u)/32u"},
  VERIFY_GROUPS:{type:"u32",value:"(N+63u)/64u"},
  })});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
@@ -412,13 +446,14 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.resources]});
   await Promise.all(["widths","admit","classify","mirror","dilate","scan","scatter","verifyWords"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint}}));}));
  }
- /** Static fine tiles (fine-only regions), one byte per tile. coarse: tiles a coarse-only
+ /** Static fine tiles (fine-only regions), one byte per tile by box index
+  * (uniformBoxTileIndex). coarse: tiles a coarse-only
   * region holds at 4h; band bits there are dropped. Liquid-conditional solid
   * promotion arrives in the band bits, so the host leaves every tile a solid
   * could promote out of `coarse`. A tile in both masks is fine. */
  setStatic(fine:Uint8Array,coarse?:Uint8Array):void{
-  if(fine.length!==this.tiles||(coarse&&coarse.length!==this.tiles))throw new Error("Static masks do not match the tile lattice");
-  const count=Math.ceil(this.tiles/32),words=new Uint32Array(2*count);
+  if(fine.length!==this.boxTiles||(coarse&&coarse.length!==this.boxTiles))throw new Error("Static masks do not match the tile lattice");
+  const count=Math.ceil(this.boxTiles/32),words=new Uint32Array(2*count);
   for(let t=0;t<fine.length;t++){if(fine[t])words[t>>5]!|=1<<(t&31);if(coarse?.[t])words[count+(t>>5)]!|=1<<(t&31);}
   this.device.queue.writeBuffer(this.statics,0,words);
   this.staticWords=words;this.staticReady=true;
@@ -426,12 +461,12 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
  /** The words setStatic wrote, kept so an edit moves them by tiles. */
  private staticWords?:Uint32Array<ArrayBuffer>;
  /** setStatic for a fine mask that differs from the one held at `tiles` at
-  * most (a tile may repeat, or not have changed): the words those tiles are
+  * most (box indices; a tile may repeat, or not have changed): the words those tiles are
   * in are rewritten, as runs joined across short gaps, so the buffer holds
   * what setStatic(fine) with the same coarse mask would have written. */
  editStatic(tiles:readonly number[],fine:Uint8Array):void{
   const words=this.staticWords;
-  if(!words||fine.length!==this.tiles)throw new Error("A static mask edit needs a static mask of the tile lattice");
+  if(!words||fine.length!==this.boxTiles)throw new Error("A static mask edit needs a static mask of the tile lattice");
   const dirty:number[]=[];
   for(const t of tiles){const w=t>>5,bit=1<<(t&31),before=words[w]!,after=(fine[t]?before|bit:before&~bit)>>>0;if(after!==before){words[w]=after;dirty.push(w);}}
   dirty.sort((a,b)=>a-b);

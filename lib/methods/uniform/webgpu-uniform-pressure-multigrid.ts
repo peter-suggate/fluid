@@ -1,45 +1,17 @@
 import { UNIFORM_MIXED_CONTINUATION_LEVEL as MIXED_CONTINUATION_LEVEL, uniformPressureScratchShader } from "./uniform-scratch-arena";
 import type { UniformTexturePages } from "./uniform-texture-pages";
-import {uniformPressurePageExtent,uniformPressurePageWorkgroups,uniformPressurePagedShader,uniformPressurePageAddressWGSL} from "./uniform-pressure-pages";
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
 import { uniformPressureInPlaceSmootherWGSL, uniformPressureMultigridWGSL } from "./webgpu-uniform-pressure-multigrid.wgsl";
 
 import {
-  UNIFORM_CM11A_RECOVERY_BATCHES, UNIFORM_CM11A_RECOVERY_SWEEPS, UNIFORM_CM11A_PHI_PRESERVATION_LEVELS,
-  UNIFORM_CM11A_COARSE_SWEEP_CAP, DEFAULT_UNIFORM_CM11A_SCHEDULE,
+  UNIFORM_CM11A_PHI_PRESERVATION_LEVELS,
   UNIFORM_PRESSURE_RESIDUAL_TOLERANCE,
   type UniformCM11aSchedule,
 } from "./pressure-policy";
 export * from "./pressure-policy";
 export * from "./pressure-plan";
-import { UNIFORM_CM11A_COARSE_ROW_BYTES, UNIFORM_CM11A_COARSE_HEADER_BYTES } from "./uniform-coarse-solver.wgsl";
 import { planUniformCM11aHierarchy, type UniformCM11aLevelSize } from "./pressure-plan";
 
-/**
- * Profiling-only: append ` L<level>` to each multigrid compute-pass label.
- *
- * Every smoother/residual/restrict/prolong dispatch normally carries the same
- * per-kernel label at every level, so an external profiler (xctrace) and the
- * in-process pass-timestamp audit both collapse all levels into one bucket.
- * Reading the flag once at module scope keeps the encode path free of an
- * environment lookup, and leaving the flag unset reproduces the previous label
- * byte-for-byte.
- */
-const BATCH_PASSES = true;
-const FUSE_VISITS = true;
-/**
- * The recovery finish is always encoded and almost never runs (0 of 450 steps
- * across mini64, fig7 and the garden, 2026-09-21): 128 finest-level launches
- * whose every thread reads the gate and returns, ~18 us each at 128^3. "lagged"
- * launches them per row while the last observed step needed no recovery;
- * "force" does so unconditionally (measurement only).
- */
-const ROW_SEGMENT = Math.max(1, Number((typeof process !== "undefined"
-  ? process.env?.FLUID_UNIFORM_ROW_SEGMENT : undefined) ?? 8));
-const ROW_SWEEP = ((typeof process !== "undefined"
-  ? process.env?.FLUID_UNIFORM_ROW_SWEEP : undefined) ?? "lagged");
-const FUSED_VISIT_LANES = Math.max(1, Number((typeof process !== "undefined"
-  ? process.env?.FLUID_UNIFORM_FUSED_VISIT_LANES : undefined) ?? 1024));
 /**
  * Largest level (halo included) whose smoothing visit runs as one workgroup.
  * Measured on an M1 Max: 10^3 and below win (-2.6% mini64, -1.4% fig7 128^3);
@@ -48,61 +20,17 @@ const FUSED_VISIT_LANES = Math.max(1, Number((typeof process !== "undefined"
  */
 const FUSED_VISIT_MAX_CELLS = Math.max(0, Number((typeof process !== "undefined"
   ? process.env?.FLUID_UNIFORM_FUSED_VISIT_CELLS : undefined) ?? 1000));
-/** Measure the fine residual from the finest cycle list instead of densely. */
-const MEASURE_TILES = true;
-const SEED_FUSE = true;
-/** Wall tiles enter the finest cycle list as halo-face entries; see the WGSL. */
-const WALL_HALO = true;
-/** Upper bound on a list operator's direct launch (64-lane workgroups). */
-const MG_TILE_GRID = 1024;
-const MG_LEVEL_LABELS = typeof process !== "undefined"
-  && process.env?.FLUID_UNIFORM_MG_LEVEL_LABELS === "1";
 
 const ENTRY_POINTS = [
-  "mgBuildFinestTopology", "mgBuildFinestRhs", "mgDownsampleTopology", "mgExtrapolatePhiOneCell",
-  "mgBakeCoefficients", "mgBuildSmoothTiles", "mgBuildSmoothTilesSeeded", "mgSmoothTilesInPlace",
-  "mgSmoothTilesJacobi",
-  "mgBuildCycleTiles", "mgResidualTiles", "mgProlongateAddTiles", "mgProlongateAssignTiles",
-  "mgCopyPressureTiles", "mgShiftMinimumTiles", "mgAddPressureTiles",
-  "mgSaveAcceptedTiles", "mgRestoreRejectedTiles", "mgMeasureFineResidualTiles",
-  "mgResidual", "mgRestrictResidual", "mgProlongateAdd", "mgProlongateAssign",
-  "mgTransition", "mgDownsampleMinimum", "mgSmoothColour", "mgSmoothColourInPlace", "mgSmoothRowInPlace", "mgSmoothVisitInPlace", "mgSmoothVisitLocalInPlace", "mgSaveAcceptedQuiet", "mgRestoreRejectedQuiet",
-  "mgCopyPressure", "mgClearPressure", "mgClearMinimum",
-  "mgPublishCycleDispatch", "mgShiftMinimum", "mgAddPressure", "mgSolveCoarsest", "mgMeasureFineResidual", "mgCheckCycleConvergence", "mgSaveAccepted", "mgRestoreRejected", "mgFinishSafety",
-  "mgSmoothTilesJacobiCycle",
+  "mgDownsampleTopology", "mgExtrapolatePhiOneCell", "mgBakeCoefficients", "mgBuildSmoothTiles", "mgBuildCycleTiles",
 ] as const;
 type EntryPoint = typeof ENTRY_POINTS[number];
 
 const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.freeze({
-  mgBuildFinestTopology: [0, 6, 8], mgBuildFinestRhs: [0, 2, 4, 5, 7, 12],
   mgDownsampleTopology: [0, 5, 6, 7, 8], mgExtrapolatePhiOneCell: [0, 5, 6, 7],
   mgBakeCoefficients: [0, 5, 7, 15],
-  mgBuildSmoothTiles: [0, 11, 14, 18], mgBuildSmoothTilesSeeded: [0, 10, 11, 12, 14, 18],
-  mgSmoothTilesInPlace: [0, 3, 11, 13, 14, 16, 18],
-  mgSmoothTilesJacobi: [0, 1, 2, 3, 11, 13, 14, 18],
+  mgBuildSmoothTiles: [0, 11, 14, 18],
   mgBuildCycleTiles: [0, 18, 19],
-  mgResidualTiles: [0, 1, 3, 10, 14, 18], mgProlongateAddTiles: [0, 1, 2, 9, 18],
-  mgProlongateAssignTiles: [0, 1, 2, 18], mgCopyPressureTiles: [0, 1, 2, 18],
-  mgShiftMinimumTiles: [0, 1, 11, 12, 18], mgAddPressureTiles: [0, 1, 2, 9, 18],
-  mgSaveAcceptedTiles: [0, 1, 2, 18], mgRestoreRejectedTiles: [0, 2, 9, 18],
-  mgMeasureFineResidualTiles: [0, 1, 3, 11, 13, 14, 17, 18],
-  mgResidual: [0, 1, 3, 10, 14], mgRestrictResidual: [0, 4, 9],
-  mgProlongateAdd: [0, 1, 2, 9], mgProlongateAssign: [0, 1, 2],
-  mgTransition: [0, 1, 2, 3, 4, 11, 12, 14], mgDownsampleMinimum: [0, 11, 12],
-  mgSmoothColour: [0, 1, 2, 3, 11, 13, 14],
-  mgSmoothColourInPlace: [0, 3, 11, 13, 14, 16],
-  mgSmoothRowInPlace: [0, 3, 11, 13, 14, 16],
-  mgSmoothVisitInPlace: [0, 3, 11, 13, 14, 16],
-  mgSmoothVisitLocalInPlace: [0, 3, 11, 13, 14, 16],
-  mgCopyPressure: [0, 1, 2], mgClearPressure: [0, 2], mgClearMinimum: [0, 12],
-  mgShiftMinimum: [0, 1, 11, 12], mgAddPressure: [0, 1, 2, 9],
-  mgSolveCoarsest: [0, 1, 2, 3, 5, 7, 11, 13, 17],
-  mgMeasureFineResidual: [0, 1, 3, 11, 13, 14, 17],
-  mgCheckCycleConvergence: [0, 17],
-  mgPublishCycleDispatch: [0, 18],
-  mgSaveAccepted: [0, 1, 2], mgRestoreRejected: [0, 2, 9],
-  mgSaveAcceptedQuiet: [0, 1, 2], mgRestoreRejectedQuiet: [0, 2, 9], mgFinishSafety: [0],
-  mgSmoothTilesJacobiCycle: [0, 1, 2, 3, 11, 13, 14, 18],
 });
 
 /**
@@ -110,27 +38,8 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
  * test thousands of times and rebuilding the sets and filtered lists inside it
  * was a measurable share of a re-plan.
  */
-/**
- * The per-cycle operators that run from the cycle work list. Each is the dense
- * kernel of the same name reached from a compacted 4^3-tile list instead of
- * the whole level, with the arithmetic shared verbatim in the WGSL.
- */
-const CYCLE_TILE_ENTRIES: ReadonlySet<EntryPoint> = new Set<EntryPoint>([
-  "mgBuildCycleTiles", "mgResidualTiles", "mgProlongateAddTiles", "mgProlongateAssignTiles",
-  "mgCopyPressureTiles", "mgShiftMinimumTiles", "mgAddPressureTiles",
-  "mgSaveAcceptedTiles", "mgRestoreRejectedTiles", "mgMeasureFineResidualTiles",
-]);
-
-/**
- * The list entries a mixed continuation adds to its caller's entry set: its
- * first level's per-cycle operators run from that level's cycle list.
- */
-/** The mixed continuation's entry level: the native n/4 lattice. */
-
-const CONTINUATION_TILE_ENTRIES: ReadonlySet<string> = new Set<string>(["mgBuildCycleTiles"]);
-
-const SAMPLED_BINDINGS: readonly number[] = [1, 3, 5, 7, 9, 11, 14];
-const WRITABLE_BINDINGS: readonly number[] = [2, 4, 6, 8, 10, 12, 15, 16];
+const SAMPLED_BINDINGS: readonly number[] = [5, 7, 11, 14];
+const WRITABLE_BINDINGS: readonly number[] = [6, 8, 15];
 const entryBindingsWhere = (keep: readonly number[]): Readonly<Record<EntryPoint, readonly number[]>> =>
   Object.freeze(Object.fromEntries((Object.entries(ENTRY_BINDINGS) as [EntryPoint, readonly number[]][])
     .map(([entry, bindings]) => [entry, Object.freeze(bindings.filter((b) => keep.includes(b)))]))) as
@@ -152,64 +61,11 @@ export interface UniformPressureMultigridLevel {
   readonly coefficients: GPUTexture;
 }
 
-/**
- * The cycle-schedule group a planned dispatch belongs to, so a trace seam can
- * split the fixed CM11a schedule into its meaningful sections without timing
- * ~2000 hierarchy passes individually: the topology/RHS pyramid setup, the
- * three Full-Cycles, the four V-Cycles, and the parity copy + fine-residual
- * measure that close the solve.
- */
-export type UniformCM11aPlanStage = "setup" | "full-cycle" | "v-cycle" | "finish";
-
 interface PlannedDispatch {
   readonly pipeline: GPUComputePipeline;
   readonly group: GPUBindGroup;
   readonly entryPoint: EntryPoint;
-  readonly stage: UniformCM11aPlanStage;
   readonly workgroups: readonly [number, number, number];
-  readonly activeLevel: number;
-  readonly residualCheckpoint: boolean;
-  readonly cycleGate: number;
-  /** Which work list binding 18 carries. */
-  readonly tileList?: "liquid" | "cycle";
-  /** Workgroups of a list-driven operator's fixed direct launch: it walks
-   * the list grid-stride from the live count binding 18 carries. */
-  readonly tileGrid?: number;
-  /**
-   * A dense setup pass that exists only because the finest per-cycle
-   * operators run from the cycle list. It seeds the far field the list skips;
-   * an arm without the list has no such pass and needs none.
-   */
-  cycleSetup?: boolean;
-  /**
-   * The same update launched one thread per row instead of one per cell. It is
-   * several times slower when the gate is open and costs a launch floor rather
-   * than a lattice of early-outs when it is closed; values are identical.
-   */
-  quiet?: { readonly pipeline: GPUComputePipeline; readonly workgroups: readonly [number, number, number] };
-  readonly coarsestCapture?: {
-    readonly invocation: number;
-    readonly dimensions: readonly [number, number, number];
-    readonly pressure: GPUTexture; readonly rhs: GPUTexture; readonly minimum: GPUTexture;
-    readonly phi: GPUTexture; readonly topology: GPUTexture;
-  };
-}
-
-export interface UniformCM11aCoarsestCapture {
-  readonly dimensions: readonly [number, number, number];
-  readonly pressure: readonly number[]; readonly rhs: readonly number[];
-  readonly minimum: readonly number[]; readonly phi: readonly number[];
-  /** Flat rgba tuples: cell V followed by positive x/y/z dual volumes. */
-  readonly topology: readonly number[];
-}
-
-interface CoarsestCaptureBuffers {
-  readonly invocation: number;
-  readonly dimensions: readonly [number, number, number];
-  readonly byteLength: number;
-  readonly bytesPerRow: number;
-  readonly pressure: GPUBuffer; readonly rhs: GPUBuffer; readonly minimum: GPUBuffer;
-  readonly phi: GPUBuffer; readonly topology: GPUBuffer;
 }
 
 interface GroupResources {
@@ -220,114 +76,35 @@ interface GroupResources {
   residualIn: GPUTexture; residualOut: GPUTexture;
   minimumIn: GPUTexture; minimumOut: GPUTexture;
   coefficientsIn: GPUTexture; coefficientsOut: GPUTexture;
-  /** The in-place smoother's one pressure texture; unset everywhere else. */
-  pressureRW?: GPUTexture;
 }
 
 /**
- * Uniform implementation of CM11a Algorithms 1--3 with paged or dense backing. The shader source
- * passed to initialize must be the authoritative uniform shader followed by
- * {@link uniformPressureMultigridWGSL}; this lets mgBuildFinest call exactly
- * the same solid, free-surface, divergence, and volume-correction helpers as
- * projection instead of maintaining a second discretization.
+ * The 4h-and-below CM11a hierarchy the mixed pressure solve borrows: its levels,
+ * the per-solve setup kernels (topology pyramid, phi continuation, baked
+ * coefficients, tile lists), their module and their bind groups.
  */
-/**
- * Everything a CM11a instance compiles that does not depend on its dimensions.
- *
- * Bind-group layouts are built from a fixed binding table and the pipelines
- * from a fixed entry-point list, so two instances of different capacity share
- * both. That is what makes a re-plan synchronous and cheap: a new instance is
- * textures, param buffers, bind groups and a plan, with nothing to compile and
- * nothing to await.
- */
-export interface UniformPressureMultigridPrograms {
-  readonly simultaneousSmoothing?: boolean;
-  readonly pagedStorage: boolean;
-  readonly module: GPUShaderModule;
-  readonly groupLayouts: Readonly<Record<string, GPUBindGroupLayout>>;
-  readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
-}
-
 export class WebGPUUniformPressureMultigrid {
-  readonly levels: readonly UniformPressureMultigridLevel[];
-  private readonly smoothTileBuffers: GPUBuffer[] = [];
-  /**
-   * Liquid (+) one tile, plus every constrained tile, per level. The sweeps
-   * keep the tighter liquid list; everything else in a cycle runs from this.
-   */
-  private readonly cycleTileBuffers: GPUBuffer[] = [];
-  private readonly tileCounts: number[] = [];
-  private smoothTileInputLayout?: GPUBindGroupLayout;
-  private smoothTileInputGroup?: GPUBindGroup;
-  /** Tile lists are sparse: a level holds one only where a plan lists it. */
-  private get tileSmoothing(): boolean { return this.inPlaceSmoothing && this.tileCounts.length > 0; }
-  private get cycleTiling(): boolean { return this.tileSmoothing && this.cycleTiles; }
-  private cycleTiles = false;
-  private cycleEntry(entry: EntryPoint): boolean { return CYCLE_TILE_ENTRIES.has(entry); }
-  /** Whether the finest cycle list carries wall-halo entries (Jacobi sweeps only). */
-  private get haloEntries(): boolean { return WALL_HALO && this.cycleTiling && this.simultaneousSmoothing && !this.continuationOnly; }
+  /** The continuation's levels, its 4h root first. */
+  private readonly levels: readonly UniformPressureMultigridLevel[];
+  /** Levels of the whole hierarchy: the continuation's and the two finer ones it never visits. */
+  readonly levelCount: number;
+  /** The published grid pressure: one texel no kernel writes. */
+  readonly pressureTexture: GPUTexture;
+  /** The root's liquid tiles, then one classification word per tile. */
+  private readonly smoothTiles?: GPUBuffer;
+  /** The root's liquid (+) one tile, plus every constrained tile: the caller's cycles run from this. */
+  private readonly cycleTiles?: GPUBuffer;
+  private readonly rootTiles: number;
+  private readonly smoothTileInputLayout?: GPUBindGroupLayout;
+  private readonly smoothTileInputGroup?: GPUBindGroup;
 
-  private tileEntry(entry: EntryPoint): boolean {
-    return entry === "mgBuildSmoothTiles" || entry === "mgBuildSmoothTilesSeeded"
-      || entry === "mgSmoothTilesInPlace" || entry === "mgSmoothTilesJacobi" || entry === "mgSmoothTilesJacobiCycle"
-      || this.cycleEntry(entry);
-  }
-  /**
-   * Workgroups of a list operator's direct launch: the level's list capacity
-   * (tiles, plus the cycle list's wall-halo jobs at four entries each), capped
-   * at MG_TILE_GRID. Each workgroup walks the list grid-stride from the live
-   * count, so an empty list costs one launch of early exits.
-   */
-  private tileGrid(level: number, list: "liquid" | "cycle"): number {
-    const tiles = this.tileCounts[level]!, [tx, ty, tz] = this.levels[level]!.dimensions.map(n => Math.ceil(n / 4)) as [number, number, number];
-    // A mixed continuation's cycle list has no halo entries (it lists every
-    // bounded tile whole, wall halo included, as its dense cycle would visit
-    // them); its launches are sized to the list's bound.
-    if (list === "cycle" && this.continuationOnly) return Math.max(1, tiles);
-    const halo = list === "cycle" && WALL_HALO ? Math.ceil(2 * (tx * ty + ty * tz + tx * tz) / 4) : 0;
-    return Math.max(1, Math.min(MG_TILE_GRID, tiles + halo));
-  }
-  /** GPU-produced counts for stage profiling; never read back for scheduling. */
-  get smoothingWorkSource(): readonly {buffer:GPUBuffer; capacity:number; list:"liquid"|"cycle"; level:number}[] {
-    return [...this.smoothTileBuffers.flatMap((buffer,level)=>[{buffer,capacity:this.tileCounts[level]!,list:"liquid" as const,level}]),
-      ...this.cycleTileBuffers.flatMap((buffer,level)=>[{buffer,capacity:this.tileCounts[level]!,list:"cycle" as const,level}])];
-  }
-  get shaderFragment():string {
-    return this.baseShaderFragment.replace("const MG_SIMULTANEOUS:bool=false;",
-      `const MG_SIMULTANEOUS:bool=${this.simultaneousSmoothing};`);
-  }
-  private get baseShaderFragment():string {
-    if(this.pagedStorage) return uniformPressurePagedShader(uniformPressureMultigridWGSL,this.logicalPageDispatch);
-    // Without an active-region dispatch buffer there is no window and no level
-    // origin: the host seeds every level record at zero with no clip extent and
-    // the GPU finalize that would move them never runs. Every thread of every
-    // level kernel was still reading five storage words to add that zero.
-    const multigrid=uniformPressureMultigridWGSL;
-    const smoother=this.inPlaceCapable?uniformPressureInPlaceSmootherWGSL:"";
-    if(!this.activeDispatch){
-      const dynamic="fn mgActiveId(gid:vec3u)->vec3i{";
-      if(!uniformPressureMultigridWGSL.includes(dynamic)) throw new Error("mgActiveId specialisation lost its anchor");
-      const source=multigrid.replace(dynamic,`${dynamic}\n  if(true){return vec3i(gid);}`)+smoother;
-      return this.scratchFields?uniformPressureScratchShader(source):source;
-    }
-    return this.scratchFields?uniformPressureScratchShader(multigrid+smoother):multigrid+smoother;
+  private tileEntry(entry: EntryPoint): boolean { return entry === "mgBuildSmoothTiles" || entry === "mgBuildCycleTiles"; }
+  private get shaderSource():string {
+    return uniformPressureScratchShader(uniformPressureMultigridWGSL+(this.inPlaceCapable?uniformPressureInPlaceSmootherWGSL:""));
   }
   private readonly logicalDimensions = new Map<GPUTexture,readonly [number,number,number]>();
-  private pressurePublication?: GPUTexture;
-  private pressurePublicationPipeline?: GPUComputePipeline;
-  private pressurePublicationGroup?: GPUBindGroup;
-  private pageCapturePipeline?: GPUComputePipeline;
-  private readonly pageCaptureBuffers:GPUBuffer[]=[];
-  private readonly pageCaptureOperations=new Map<GPUTexture,{group:GPUBindGroup;staging:GPUBuffer;target:GPUBuffer}>();
-  readonly diagnostics: GPUBuffer;
-  /** Diagnostic-only setup snapshots; no simulation stage reads these. */
-  readonly setupRhsSnapshot?: readonly [GPUTexture, GPUTexture];
-  private readonly toleranceBuffer: GPUBuffer;
-  private readonly cycleDispatch: GPUBuffer;
+  private readonly arena: GPUBuffer;
   readonly allocatedBytes: number;
-  /** CM11a Algorithm 3 p_tmp; no V-cycle scratch dispatch may alias it. */
-  private readonly fullCycleBackup: GPUTexture;
-  private readonly acceptedPressure: GPUTexture;
   private readonly spacing: readonly [number, number, number];
   /** Finest physical lattice, the reference every level's spacing scales from. */
   private readonly finestSize!: UniformCM11aLevelSize;
@@ -350,91 +127,46 @@ export class WebGPUUniformPressureMultigrid {
   /** Stable per-texture ids, so a bind group's resources have a cache key. */
   private readonly textureIds = new Map<GPUTexture, number>();
   private pipelines?: Readonly<Record<EntryPoint, GPUComputePipeline>>;
-  private shaderModule?: GPUShaderModule;
-  private plan?: readonly PlannedDispatch[];
-  /** A deferred build in progress; see `advancePlan`. */
-  private planSteps?: Generator<void, PlannedDispatch[], void>;
-  /**
-   * Plan index after each complete cycle, `[setupEnd, afterCycle1, ...]`, so
-   * entry `k` is where a budget of `k` cycles stops encoding. Every cycle ends
-   * on its checkpoint, which canonicalizes finest pressure into parity A, and
-   * the finish dispatches are bound to parity A — so truncating here is the
-   * only place the encoded prefix can be cut without rebuilding bind groups.
-   */
-  private cycleBoundaries?: readonly number[];
-  /** First plan index of the always-encoded finish section. */
-  private finishStart = 0;
-  private finalStart = 0;
   private activeResidualTolerance = 0;
-  private coarsestCaptureBuffers?: CoarsestCaptureBuffers;
-  private windowLevelGroups?: readonly (readonly [number, number, number])[];
-  private windowLattice = false;
   private isDestroyed = false;
   private readonly inPlaceCapable: boolean;
-  /** Lanes of the fused smoothing visit: as wide as one workgroup may be. */
-  private readonly visitLanes: number;
   private inPlaceSmoothing: boolean;
 
   constructor(private readonly device: GPUDevice,
     dimensions: readonly [number, number, number],
     spacing: readonly [number, number, number],
-    private readonly schedule: UniformCM11aSchedule = DEFAULT_UNIFORM_CM11A_SCHEDULE,
-    private readonly activeDispatch?: GPUBuffer,
-    programs?: UniformPressureMultigridPrograms,
-    /**
-     * Allocate the lattice but leave the plan to `advancePlan`. A prewarm
-     * builds the capacity the window is about to need across several frames,
-     * so the step that switches only swaps an instance that is already ready.
-     */
-    deferPlan = false,
-    referenceDimension: 2 | 3 = 3,
-    private readonly gpuCycleDispatch = false,
-    private readonly pagedStorage = false,
-    /** QA attribution: atlas storage with exact logical launches. */
-    private readonly logicalPageDispatch = false,
-    /**
-     * Smooth each colour in place over half the lattice. The caller vouches
-     * that the scene has no depth symmetry; the full-lattice and dense-storage
-     * conditions are checked here.
-     */
-    inPlaceSmoothing = false, private readonly scratchFields?: UniformTexturePages, compactSmoothing = true, private readonly reuseFinestAuthority = true, private readonly maskFirst = true, private readonly simultaneousSmoothing = programs?.simultaneousSmoothing ?? false,
-    private readonly adaptiveSolve = false,
-    /**
-     * The main shader's params uniform. The list-driven measure scales its norm
-     * by dt/rho, and the full group 0 would exceed the storage-buffer budget.
-     */
-    mainParams?: GPUBuffer) {
-    this.inPlaceCapable = inPlaceSmoothing && !activeDispatch && !pagedStorage && programs === undefined;
+    schedule: UniformCM11aSchedule,
+    /** List the root's tiles for the caller's cycles. The caller vouches
+     * that the scene has no depth symmetry. */
+    inPlaceSmoothing: boolean, private readonly scratchFields: UniformTexturePages,
+    /** The main shader's params uniform, for the tile kernels' minimal group 0. */
+    mainParams: GPUBuffer) {
+    this.inPlaceCapable = inPlaceSmoothing;
     this.inPlaceSmoothing = this.inPlaceCapable;
-    this.visitLanes = Math.min(FUSED_VISIT_LANES, device.limits.maxComputeInvocationsPerWorkgroup,
-      device.limits.maxComputeWorkgroupSizeX);
+    if (!scratchFields.scratch) throw new Error("The CM11a hierarchy needs the shared scratch arena");
+    this.arena = scratchFields.scratch.buffer;
     const hierarchy = planUniformCM11aHierarchy(
-      dimensions as readonly [number, number, number], referenceDimension);
+      dimensions as readonly [number, number, number], 3);
     if (hierarchy.rejection) throw new RangeError(hierarchy.rejection);
     if (!spacing.every((value) => Number.isFinite(value) && value > 0)) {
       throw new RangeError("CM11a grid spacing must be positive and finite");
     }
-    const coarseScratchBytes = hierarchy.coarsestCells * UNIFORM_CM11A_COARSE_ROW_BYTES;
-    const stateBytes = UNIFORM_CM11A_COARSE_HEADER_BYTES + coarseScratchBytes;
-    if (stateBytes > Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize)) {
-      throw new RangeError(`CM11a coarse grid ${hierarchy.levelDimensions.at(-1)!.join("x")} needs ${coarseScratchBytes} scratch bytes, exceeding device buffer limits`);
-    }
     this.spacing = spacing;
-    const { levelCount } = hierarchy;
+    this.levelCount = hierarchy.levelCount;
     this.finestSize = hierarchy.levelDimensions[0]!;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
-    let allocatedBytes = 120;
+    let allocatedBytes = 0;
     const texture = (label: string, format: GPUTextureFormat,
       size: readonly [number, number, number]) => {
-      const extent=this.pagedStorage?uniformPressurePageExtent(size):size;
-      const result = (this.scratchFields ?? device).createTexture({ label, size: [...extent], dimension: "3d", format, usage });
+      const result = scratchFields.createTexture({ label, size: [...size], dimension: "3d", format, usage });
       this.logicalDimensions.set(result,size);
-      allocatedBytes += extent[0] * extent[1] * extent[2] * (format === "rgba32float" ? 16 : 4);
+      allocatedBytes += size[0] * size[1] * size[2] * (format === "rgba32float" ? 16 : 4);
       return result;
     };
+    this.pressureTexture = texture("Uniform CM11a L0 pressure A", "r32float", [1, 1, 1]);
     const levels: UniformPressureMultigridLevel[] = [];
-    for (let index = 0; index < levelCount; index += 1) {
+    for (let index = MIXED_CONTINUATION_LEVEL; index < this.levelCount; index += 1) {
       const physicalSize = hierarchy.levelDimensions[index]!;
       const size: readonly [number, number, number] = [physicalSize[0] + 2, physicalSize[1] + 2, physicalSize[2] + 2];
       const pair = (field: string, format: GPUTextureFormat = "r32float"): TexturePair => [
@@ -448,284 +180,103 @@ export class WebGPUUniformPressureMultigrid {
         const value = texture(`Uniform CM11a L${index} ${field} A`, format, size);
         return [value, value];
       };
-      // The shared arena serves only the mixed continuation, which never
-      // touches the finest level: its pressure A, the one finest field the
-      // arena does not hold, is a placeholder (see initialize).
-      const pressure: TexturePair = index === 0 && scratchFields
-        ? [texture("Uniform CM11a L0 pressure A", "r32float", [1, 1, 1]), texture("Uniform CM11a L0 pressure B", "r32float", size)] : pair("pressure");
-      levels.push(Object.freeze({ dimensions: size, pressure, rhs: pair("rhs"),
+      levels.push(Object.freeze({ dimensions: size, pressure: pair("pressure"), rhs: pair("rhs"),
         phi: pair("phi"), volume: single("V", "rgba32float"), residual: single("residual"),
         minimum: pair("p-min"), coefficients: texture(`Uniform CM11a L${index} coefficients`, "rgba32float", size) }));
     }
     this.levels = Object.freeze(levels);
 
-    if(this.inPlaceCapable && !this.gpuCycleDispatch && compactSmoothing) {
-      const cycleTiles=true;this.cycleTiles=cycleTiles;
-      // A plan lists only levels past the fused visit, and cycles from its
-      // first level's list: the finest, or the mixed continuation's (the
-      // shared arena serves only the continuation).
-      const first=scratchFields?MIXED_CONTINUATION_LEVEL:0;
-      for(const [index,level] of levels.entries()){
-        const count=level.dimensions.reduce((n,d)=>n*Math.ceil(d/4),1);
-        this.tileCounts.push(count);
-        if(index<first||level.dimensions.reduce((n,d)=>n*d,1)<=FUSED_VISIT_MAX_CELLS)continue;
+    const root = levels[0];
+    this.rootTiles = root ? root.dimensions.reduce((n,d)=>n*Math.ceil(d/4),1) : 0;
+    if(this.inPlaceCapable) {
+      // Only a root past the fused visit is listed.
+      if(root&&root.dimensions.reduce((n,d)=>n*d,1)>FUSED_VISIT_MAX_CELLS){
+        const listUsage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST;
         // The liquid list is followed by one classification word per tile, so
         // the dilation pass can read a tile's neighbours without rescanning
         // their cells.
-        const buffer=device.createBuffer({label:"Uniform pressure liquid tile list",size:16+4*count*(cycleTiles?2:1),
-          usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-        this.smoothTileBuffers[index]=buffer;allocatedBytes+=buffer.size;
-        if(cycleTiles&&index===first){
-          // With wall-halo entries: their count, then at most one per halo
-          // face of every boundary tile.
-          const tiles=level.dimensions.map(n=>Math.ceil(n/4));
-          const halo=WALL_HALO?4+8*(tiles[0]!*tiles[1]!+tiles[1]!*tiles[2]!+tiles[0]!*tiles[2]!):0;
-          const cycle=device.createBuffer({label:"Uniform pressure cycle tile list",size:16+4*count+halo,
-            usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-          this.cycleTileBuffers[index]=cycle;allocatedBytes+=cycle.size;
-        }
+        this.smoothTiles=device.createBuffer({label:"Uniform pressure liquid tile list",size:16+8*this.rootTiles,usage:listUsage});
+        this.cycleTiles=device.createBuffer({label:"Uniform pressure cycle tile list",size:16+4*this.rootTiles,usage:listUsage});
+        allocatedBytes+=this.smoothTiles.size+this.cycleTiles.size;
       }
-      // These kernels need only pressure fields and, for shared storage, the
-      // arena. A minimal group 0 keeps the extra work list within device limits.
-      // The list-driven measure also reads the main params uniform (binding 6).
-      if(cycleTiles&&MEASURE_TILES&&!mainParams)throw new Error("List-driven residual measure needs the main params uniform");
-      const measureParams=cycleTiles&&MEASURE_TILES?mainParams:undefined;
+      // The tile kernels read only the arena and the main params uniform: a
+      // minimal group 0 keeps their work lists within device limits.
       this.smoothTileInputLayout=device.createBindGroupLayout({entries:[
-        ...(scratchFields?.scratch ? [{binding:35,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}] : []),
-        ...(measureParams ? [{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}] : [])]});
+        {binding:35,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+        {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}}]});
       this.smoothTileInputGroup=device.createBindGroup({layout:this.smoothTileInputLayout,entries:[
-        ...(scratchFields?.scratch ? [{binding:35,resource:{buffer:scratchFields.scratch.buffer}}] : []),
-        ...(measureParams ? [{binding:6,resource:{buffer:measureParams}}] : [])]});
+        {binding:35,resource:{buffer:this.arena}},{binding:6,resource:{buffer:mainParams}}]});
     }
-    // Three banks: immutable launch geometry, normal cycles, recovery cycles.
-    // The final record in each bank is the single-workgroup coarse solve.
-    const records = levels.length + 1;
-    const cycleWords = new Uint32Array(records * 9);
-    levels.forEach((level, index) => cycleWords.set(this.pagedStorage && !this.logicalPageDispatch?uniformPressurePageWorkgroups(level.dimensions):level.dimensions.map(n => Math.ceil(n / 4)), index * 3));
-    cycleWords.set([1, 1, 1], levels.length * 3);
-    this.cycleDispatch = device.createBuffer({label: "Uniform GPU pressure cycle dispatch", size: cycleWords.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST});
-    device.queue.writeBuffer(this.cycleDispatch, 0, cycleWords);
-    allocatedBytes += cycleWords.byteLength;
-    if(this.pagedStorage){
-      const size=levels[0]!.dimensions;
-      this.pressurePublication=device.createTexture({label:"Uniform pressure presentation adapter",size:[...size],dimension:"3d",format:"r32float",usage});
-      allocatedBytes+=size[0]*size[1]*size[2]*4;
-    }
-    this.fullCycleBackup = texture("Uniform CM11a Full-Cycle p_tmp", "r32float", levels[0]!.dimensions);
-    this.acceptedPressure = texture("Uniform CM11a accepted pressure", "r32float", levels[0]!.dimensions);
-    this.diagnostics = device.createBuffer({ label: "Uniform CM11a convergence status", size: stateBytes,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    this.toleranceBuffer = device.createBuffer({ label: "Pressure residual tolerance", size: 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE });
     this.setResidualTolerance(schedule.residualTolerance ?? UNIFORM_PRESSURE_RESIDUAL_TOLERANCE);
-    allocatedBytes += stateBytes - 104;
     this.allocatedBytes = allocatedBytes;
     const textureBinding = { sampleType: "unfilterable-float", viewDimension: "3d" } as const;
-    const scalarStorage = { access: "write-only", format: "r32float", viewDimension: "3d" } as const;
+    const vectorStorage = { access: "write-only", format: "rgba32float", viewDimension: "3d" } as const;
     const allEntries: GPUBindGroupLayoutEntry[] = [
       { binding: 18, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 19, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 17, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-      ...[1, 3, 5, 7, 9, 11].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, texture: textureBinding })),
-      ...[2, 4, 6, 10, 12].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, storageTexture: scalarStorage })),
-      { binding: 8, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
-      { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      ...[5, 7, 11].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, texture: textureBinding })),
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
+      { binding: 8, visibility: GPUShaderStage.COMPUTE, storageTexture: vectorStorage },
       { binding: 14, visibility: GPUShaderStage.COMPUTE, texture: textureBinding },
-      { binding: 15, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
-      { binding: 16, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "read-write", format: "r32float", viewDimension: "3d" } },
+      { binding: 15, visibility: GPUShaderStage.COMPUTE, storageTexture: vectorStorage },
     ];
-    this.groupLayouts = (programs?.groupLayouts as Record<EntryPoint, GPUBindGroupLayout> | undefined)
-      ?? Object.freeze(Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [entryPoint,
-        device.createBindGroupLayout({ label: `Uniform CM11a hierarchy layout - ${entryPoint}`,
-          entries: allEntries.filter(({ binding }) => (binding === 13 || ENTRY_BINDINGS[entryPoint].includes(binding))) }),
-      ])) as Record<EntryPoint, GPUBindGroupLayout>);
-    // Given another instance's compiled programs this one is ready here, with
-    // no await anywhere: a re-plan happens inside a single step.
-    if (programs) {
-      if(programs.pagedStorage!==this.pagedStorage)throw new Error("Cannot reuse pressure programs across field layouts");
-      this.shaderModule = programs.module;
-      this.pipelines = programs.pipelines as Readonly<Record<EntryPoint, GPUComputePipeline>>;
-      if (deferPlan) this.planSteps = this.buildPlanSteps();
-      else this.plan = Object.freeze(this.buildPlan());
-    }
+    this.groupLayouts = Object.freeze(Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [entryPoint,
+      device.createBindGroupLayout({ label: `Uniform CM11a hierarchy layout - ${entryPoint}`,
+        entries: allEntries.filter(({ binding }) => ENTRY_BINDINGS[entryPoint].includes(binding)) }),
+    ])) as Record<EntryPoint, GPUBindGroupLayout>);
   }
 
-  /**
-   * The compiled, dimension-independent half of this instance, for handing to
-   * a sibling planned on a different capacity. Undefined until initialized.
-   */
-  get programs(): UniformPressureMultigridPrograms | undefined {
-    // Paged instances own dimension-specific publication resources; only the
-    // legacy window backend supports synchronous program reuse.
-    if (this.pagedStorage || !this.shaderModule || !this.pipelines) return undefined;
-    return { module: this.shaderModule, groupLayouts: this.groupLayouts, pipelines: this.pipelines, pagedStorage: this.pagedStorage, simultaneousSmoothing: this.simultaneousSmoothing };
-  }
+  setResidualTolerance(value: number): void { this.activeResidualTolerance = Number.isFinite(value) ? Math.max(0, value) : 0; }
 
-  setResidualTolerance(value: number): void {
-    const tolerance = Number.isFinite(value) ? Math.max(0, value) : 0;
-    this.activeResidualTolerance = tolerance;
-    this.device.queue.writeBuffer(this.toleranceBuffer, 0, new Float32Array([tolerance, this.adaptiveSolve && tolerance > 0 ? 1 : 0,
-      0.1, tolerance * 0.1]));
-  }
-
-  /**
-   * The tolerance the GPU gate is currently comparing against. Zero disables
-   * the early exit entirely, which is also the only state in which a cycle
-   * count carries no information about how many cycles the solve needed.
-   */
+  /** The pressure residual tolerance, which the solver hands the mixed pressure solve. */
   get residualTolerance(): number { return this.activeResidualTolerance; }
 
-  get pressureTexture(): GPUTexture { return this.pressurePublication??this.levels[0]!.pressure[0]; }
-
-  /**
-   * Per-level group counts the host chose for this step, or undefined to keep
-   * taking them from the GPU's indirect records.
-   *
-   * The level ORIGIN still comes from `activeRegion` inside the shader, so
-   * this only replaces the launch size -- and only ever with a count that is
-   * at most the dense one the plan already carries. The plan itself is
-   * untouched: the same dispatches are encoded in the same order, so the
-   * encoded pass count cannot move with the window.
-   */
-  setWindowLevelGroups(groups?: readonly (readonly [number, number, number])[]): void {
-    this.windowLevelGroups = groups;
-  }
-
-  /**
-   * Whether this instance IS the window.
-   *
-   * A lattice planned on the window covers exactly the cells it owns, so every
-   * dispatch is the plan's own dense count, direct, with no origin to add and
-   * no level record to consult. The encoded pass count is the same either way.
-   */
-  setWindowLattice(active: boolean): void { this.windowLattice = active; }
-
-  /** True once `destroy` has run; an evicted instance must not be adopted. */
-  get destroyed(): boolean { return this.isDestroyed; }
-
-  /**
-   * The in-place smoother's colouring must separate all six neighbours, which
-   * it does not under depth symmetry. A live edit that introduces it falls back
-   * to the ping-pong smoother; the plan is rebuilt once, on that edit.
-   */
+  /** The root's tile lists are built only without depth symmetry: a
+   * continuation prepared after a live edit introduces it has no cycle list. */
   setDepthSymmetry(symmetric: boolean): void {
     const next = this.inPlaceCapable && !symmetric;
     if (next === this.inPlaceSmoothing) return;
     this.inPlaceSmoothing = next;
-    if (this.pipelines) this.plan = Object.freeze(this.buildPlan());
   }
 
-  /** Physical (halo-free) dimensions used to seed the shared active ABI. */
-  get levelPhysicalDimensions(): readonly UniformCM11aLevelSize[] {
-    return this.levels.map((level) => [level.dimensions[0] - 2,
-      level.dimensions[1] - 2, level.dimensions[2] - 2] as const);
-  }
-
-  private continuationOnly = false;
+  /** The setup kernels' group 0 is the caller's, bar the tile kernels': of it
+   * they read the params uniform (binding 6) and the arena (binding 35). */
   async initialize(input: { readonly uniformBindGroupLayout: GPUBindGroupLayout;
-    readonly shaderSource: string; readonly signal?: AbortSignal;
-    /** Mixed continuation: compile only the entries its plan dispatches. */
-    readonly entryPoints?: readonly string[] }): Promise<void> {
+    readonly signal?: AbortSignal }): Promise<void> {
     this.assertLive(); if (this.pipelines) return;
-    this.continuationOnly = input.entryPoints !== undefined;
-    if (this.scratchFields && !this.continuationOnly) throw new Error("The CM11a shared scratch arena serves only the mixed continuation");
     const compiler = gpuCompilationManagerFor(this.device);
     const shaderModule = compiler.createShaderModule({ label: "Uniform CM11a pressure hierarchy",
-      code: input.shaderSource });
-    this.shaderModule = shaderModule;
-    const emptyUniformLayout = this.device.createBindGroupLayout({entries: []});
+      code: this.shaderSource });
     const entries = await Promise.all(ENTRY_POINTS.filter((entryPoint) =>
-      (!/InPlace$|Quiet$/.test(entryPoint) || this.inPlaceCapable) && (!this.tileEntry(entryPoint) || this.tileSmoothing)
-      && (!this.cycleEntry(entryPoint) || this.cycleTiling)
-      && (entryPoint !== "mgMeasureFineResidualTiles" || MEASURE_TILES)
-      && (entryPoint !== "mgBuildSmoothTilesSeeded" || (SEED_FUSE && this.cycleTiling))
-      && (entryPoint !== "mgSmoothTilesJacobiCycle" || this.haloEntries)
-      && (!input.entryPoints || input.entryPoints.includes(entryPoint)
-        || (this.cycleTiling && CONTINUATION_TILE_ENTRIES.has(entryPoint)))).map(async (entryPoint) => [entryPoint,
+      !this.tileEntry(entryPoint) || this.inPlaceSmoothing).map(async (entryPoint) => [entryPoint,
       await compiler.compileComputePipeline({ label: `Uniform CM11a - ${entryPoint}`,
         layout: this.device.createPipelineLayout({ label: `Uniform CM11a layout - ${entryPoint}`,
-          bindGroupLayouts: [this.tileEntry(entryPoint) ? this.smoothTileInputLayout! : entryPoint === "mgPublishCycleDispatch" ? emptyUniformLayout : input.uniformBindGroupLayout, this.groupLayouts[entryPoint]] }),
-        compute: { module: shaderModule, entryPoint,
-          ...(entryPoint === "mgBakeCoefficients" ? {constants:{MG_MASK_FIRST:Number(this.maskFirst)}} : {}),
-          ...(entryPoint === "mgBuildSmoothTiles" ? {constants:{MG_CYCLE_TILES:Number(this.cycleTiling)}} : {}),
-          ...(entryPoint === "mgBuildCycleTiles" && WALL_HALO ? {constants:{MG_HALO_ENTRIES:Number(this.haloEntries)}} : {}),
-          ...(entryPoint === "mgBuildSmoothTilesSeeded" ? {constants:{MG_CYCLE_TILES:Number(this.cycleTiling)}} : {}),
-          ...(entryPoint === "mgBuildFinestRhs" ? {constants:{MG_REUSE_FINEST_AUTHORITY:Number(this.reuseFinestAuthority)}} : {}),
-          ...(/^(mgSmoothVisitInPlace|mgSmoothVisitLocalInPlace)$/.test(entryPoint) ? { constants: { MG_VISIT_LANES: this.visitLanes } } : {}),
-          ...(entryPoint === "mgSmoothRowInPlace" || /Quiet$/.test(entryPoint)
-            ? { constants: { MG_ROW_SEGMENT: ROW_SEGMENT } } : {}) } },
+          bindGroupLayouts: [this.tileEntry(entryPoint) ? this.smoothTileInputLayout! : input.uniformBindGroupLayout, this.groupLayouts[entryPoint]] }),
+        compute: { module: shaderModule, entryPoint } },
         { priority: "visible", signal: input.signal })] as const));
     this.pipelines = Object.freeze(Object.fromEntries(entries) as Record<EntryPoint, GPUComputePipeline>);
-    this.plan = Object.freeze(this.buildPlan());
-    if(this.pagedStorage){
-      const dims=this.levels[0]!.dimensions;
-      const module=compiler.createShaderModule({label:"Uniform paged pressure publication",code:`
-        @group(0) @binding(0) var input:texture_3d<f32>;
-        @group(0) @binding(1) var output:texture_storage_3d<r32float,write>;
-        ${uniformPressurePageAddressWGSL}
-        @compute @workgroup_size(4,4,4) fn publish(@builtin(global_invocation_id)g:vec3u){
-          let d=vec3u(${dims.join("u,")}u);if(any(g>=d)){return;}
-          textureStore(output,vec3i(g),textureLoad(input,mgPageAddress(vec3i(g),d,textureDimensions(input)),0));
-        }`});
-      this.pressurePublicationPipeline=await compiler.compileComputePipeline({label:"Uniform pressure page publication",layout:"auto",compute:{module,entryPoint:"publish"}},{priority:"visible",signal:input.signal});
-      this.pressurePublicationGroup=this.device.createBindGroup({layout:this.pressurePublicationPipeline.getBindGroupLayout(0),entries:[
-        {binding:0,resource:this.levels[0]!.pressure[0].createView()},
-        {binding:1,resource:this.pressurePublication!.createView()},
-      ]});
-      const captureModule=compiler.createShaderModule({label:"Uniform pressure page capture",code:`
-        struct Capture {dims:vec4u,packing:vec4u}
-        @group(0) @binding(0) var input:texture_3d<f32>;
-        @group(0) @binding(1) var<storage,read_write> output:array<f32>;
-        @group(0) @binding(2) var<uniform> capture:Capture;
-        ${uniformPressurePageAddressWGSL}
-        @compute @workgroup_size(64) fn captureField(@builtin(global_invocation_id)g:vec3u){
-          let d=capture.dims.xyz;let i=g.x;if(i>=d.x*d.y*d.z){return;}
-          let q=vec3u(i%d.x,(i/d.x)%d.y,i/(d.x*d.y));
-          let v=textureLoad(input,mgPageAddress(vec3i(q),d,textureDimensions(input)),0);
-          let offset=(q.z*d.y+q.y)*capture.packing.x+q.x*capture.dims.w;
-          for(var component=0u;component<capture.dims.w;component++){output[offset+component]=v[component];}
-        }`});
-      this.pageCapturePipeline=await compiler.compileComputePipeline({label:"Uniform pressure page capture",layout:"auto",compute:{module:captureModule,entryPoint:"captureField"}},{priority:"background",signal:input.signal});
-    }
   }
 
-  /**
-   * Encode the configured Full-Cycle/V-Cycle schedule, or its first
-   * `cycleBudget` cycles.
-   *
-   * Truncation drops the tail cycles from the command stream entirely: fewer
-   * `beginComputePass` calls, fewer dispatches, less CPU encode. The setup
-   * pyramid and the finish section are always encoded. The GPU-side
-   * `mgSkipCycle` gate is untouched and remains the inner stop, so a step that
-   * converges inside its budget still exits early.
-   */
   /** Borrow the existing 4h-and-below hierarchy for a mixed correction.
    * Setup/dispatch parameters are prepared once. The caller must serialize
    * it with native solves and populate every input, including the halo. */
   prepareMixedContinuation() {
-    this.assertLive();const level=MIXED_CONTINUATION_LEVEL;
-    if (!this.pipelines || !Number.isInteger(level) || level < 1 || level >= this.levels.length
-      || this.pagedStorage || this.windowLattice
-      || this.levels[level]!.dimensions.some((d,a)=>d-2!==this.finestSize[a]!/4))
+    this.assertLive();const root=this.levels[0];
+    if (!this.pipelines || !root || root.dimensions.some((d,a)=>d-2!==this.finestSize[a]!/4))
       throw new Error("Mixed continuation requires the full-domain native 4h hierarchy");
     // The setup alone: the caller runs the traversal itself (see levels).
-    const setup = (() => {
-      const steps=this.buildPlanSteps(level);
-      for (;;) {const next=steps.next();if(next.done)return next.value;}
-    })();
+    const setup=this.buildSetup();
     // Per dispatch, built once: its own pass's descriptor (no shared pass)
     // and whether its group 0 is the tile lists' (see encodeSetup).
     const setupPasses:GPUComputePassDescriptor[]=setup.map(d=>({label:`Uniform mixed continuation ${d.entryPoint}`}));
     const setupTiled=setup.map(d=>this.tileEntry(d.entryPoint));
-    const root=this.levels[level]!;
-    const listed=this.cycleListed(level,level);
+    const listed=this.listed;
     const field=(texture:GPUTexture)=>{
-      const metadata=this.scratchFields?.scratchMetadata(texture)??0;
+      const metadata=this.scratchFields.scratchMetadata(texture);
       const dimensions=this.logicalDimensions.get(texture)!;
       const buffer:GPUBufferBinding|undefined=(metadata&0x80000000)!==0?{
-        buffer:this.scratchFields!.scratch!.buffer,offset:(metadata&0x7ffffffc)*4,
+        buffer:this.arena,offset:(metadata&0x7ffffffc)*4,
         size:dimensions.reduce((n,d)=>n*d,1)*(texture.format==="rgba32float"?16:4),
       }:undefined;
       return {texture,buffer,dimensions};
@@ -733,11 +284,11 @@ export class WebGPUUniformPressureMultigrid {
     return {
       pressure:field(root.pressure[0]),rhs:field(root.rhs[0]),minimum:field(root.minimum[0]),
       phi:field(root.phi[0]),topology:field(root.volume[0]),
-      /** Every level from the entry one down, for a caller that runs the
+      /** Every level from the root down, for a caller that runs the
        * traversal itself: both parities of the pressure, the V-cycle and
        * Full-Cycle RHS and bound, and the baked coefficients (+x, +y, +z,
        * then the liquid mask of the row and its six neighbours). */
-      levels:this.levels.slice(level).map(l=>({dimensions:l.dimensions,
+      levels:this.levels.map(l=>({dimensions:l.dimensions,
         pressure:[field(l.pressure[0]),field(l.pressure[1])] as const,rhs:[field(l.rhs[0]),field(l.rhs[1])] as const,
         minimum:[field(l.minimum[0]),field(l.minimum[1])] as const,coefficients:field(l.coefficients)})),
       /** With a cycle list: the far-field seeds the caller writes every solve
@@ -746,20 +297,17 @@ export class WebGPUUniformPressureMultigrid {
        * word 0 and tile indices of the (dims+3)/4 lattice from word 4, built
        * by the setup from the seeded bound and the baked liquid. */
       cycle:listed?{pressure:field(root.pressure[1]),
-        list:this.cycleTileBuffers[level]!,tiles:this.tileCounts[level]!}:undefined,
+        list:this.cycleTiles!,tiles:this.rootTiles}:undefined,
       /** The per-solve setup: the topology pyramid, the baked coefficients
-       * and the entry level's lists (it clears those lists alone: the outer
+       * and the root's lists (it clears those lists alone: the outer
        * mixed solve owns diagnostics and acceptance). `shared` batches every
        * dispatch into its open pass, ending it only for the list clears. */
       encodeSetup:(encoder:GPUCommandEncoder,uniformGroup:GPUBindGroup,
         shared?:{readonly pass:GPUComputePassEncoder;readonly commands:GPUCommandEncoder})=>{
         this.assertLive();
-        for(let i=level;i<this.levels.length;i++){
-          if(this.smoothTileBuffers[i])(shared?shared.commands:encoder).clearBuffer(this.smoothTileBuffers[i]!,0,4);
-        }
         if(listed){
-          const cycle=this.cycleTileBuffers[level]!;(shared?shared.commands:encoder).clearBuffer(cycle,0,4);
-          if(WALL_HALO)(shared?shared.commands:encoder).clearBuffer(cycle,16+4*this.tileCounts[level]!,4);
+          const commands=shared?shared.commands:encoder;
+          commands.clearBuffer(this.smoothTiles!,0,4);commands.clearBuffer(this.cycleTiles!,0,4);
         }
         // A shared pass keeps its pipeline and groups between dispatches:
         // rebind only what changes (each call is host encode and submit work).
@@ -771,232 +319,11 @@ export class WebGPUUniformPressureMultigrid {
           if(pipeline!==dispatch.pipeline){pipeline=dispatch.pipeline;pass.setPipeline(dispatch.pipeline);}
           if(bound1!==dispatch.group){bound1=dispatch.group;pass.setBindGroup(1,dispatch.group);}
           if(bound0!==group0){bound0=group0;pass.setBindGroup(0,group0);}
-          if(dispatch.tileGrid!==undefined)pass.dispatchWorkgroups(dispatch.tileGrid);
-          else pass.dispatchWorkgroups(dispatch.workgroups[0],dispatch.workgroups[1],dispatch.workgroups[2]);
+          pass.dispatchWorkgroups(dispatch.workgroups[0],dispatch.workgroups[1],dispatch.workgroups[2]);
           if(!shared)pass.end();
         }
       },
     };
-  }
-
-  encode(
-    encoder: GPUCommandEncoder,
-    uniformGroup: GPUBindGroup,
-    boundary?: (stage: UniformCM11aPlanStage) => void,
-    cycleBudget?: number,
-    /** The last observed step entered recovery; launch its sweeps per cell. */
-    recoveryExpected = true,
-    selection?: { start: number; end: number; initialize: boolean; publish: boolean },
-  ): void {
-    this.assertLive(); if (!this.plan) throw new Error("Uniform CM11a hierarchy is not initialized");
-    if (!selection || selection.initialize) {
-      encoder.clearBuffer(this.diagnostics, 0, 112);
-      this.smoothTileBuffers.forEach(buffer=>encoder.clearBuffer(buffer,0,4));
-      this.cycleTileBuffers.forEach(buffer=>encoder.clearBuffer(buffer,0,4));
-      if(WALL_HALO) this.cycleTileBuffers.forEach((buffer,level)=>encoder.clearBuffer(buffer,16+4*this.tileCounts[level]!,4));
-    }
-    const prefixEnd = this.cycleBoundaries?.[this.clampCycleBudget(cycleBudget)] ?? this.plan.length;
-    let openStage: UniformCM11aPlanStage | undefined;
-    // A WebGPU usage scope is one dispatch, not one compute pass, so a storage
-    // write here and a sampled read of the same texture in the next dispatch
-    // may share a pass (2000-dispatch ping-pong probe, validation on, 2026-09-21).
-    // Dawn already merges adjacent passes into one Metal encoder, so this saves
-    // no GPU time; it removes the per-pass begin/end and the rebinding of the
-    // 29-entry group 0 on the CPU. Profiling lanes keep one labelled pass per
-    // dispatch so external traces stay attributable per kernel.
-    const batch = BATCH_PASSES && !MG_LEVEL_LABELS;
-    let shared: GPUComputePassEncoder | undefined, sharedHasGroup0 = false;
-    const closeShared = () => { shared?.end(); shared = undefined; sharedHasGroup0 = false; };
-    for (let index = selection?.start ?? 0; index < (selection?.end ?? this.plan.length); index += 1) {
-      const dispatch = this.plan[index]!;
-      if (openStage !== undefined && dispatch.stage !== openStage) {
-        closeShared();
-        if (openStage === "setup" && this.setupRhsSnapshot) {
-          for (let slot = 0; slot < 2; slot++) encoder.copyTextureToTexture(
-            { texture: this.levels[0]!.rhs[slot]! }, { texture: this.setupRhsSnapshot[slot]! },
-            this.levels[0]!.dimensions);
-        }
-        boundary?.(openStage);
-      }
-      openStage = dispatch.stage;
-      // A truncated cycle encodes nothing at all. Its stage seam is still
-      // reported above, in order, so the advance's phase partition keeps all
-      // four sections and a section with no passes reads as zero-length
-      // instead of vanishing from the trace.
-      if (!selection && index >= prefixEnd && index < this.finishStart) continue;
-      if (dispatch.residualCheckpoint) {
-        closeShared();
-        encoder.clearBuffer(this.diagnostics, 60, 4);
-      }
-      const pass = shared ?? encoder.beginComputePass({ label: batch ? "Uniform CM11a pressure cycle" : MG_LEVEL_LABELS
-        ? `Uniform CM11a ${dispatch.entryPoint} L${dispatch.activeLevel}`
-        : `Uniform CM11a ${dispatch.entryPoint}` });
-      if (batch) shared = pass;
-      const quiet = (ROW_SWEEP === "force" || !recoveryExpected) && !this.gpuCycleDispatch
-        && !this.windowLattice && !this.activeDispatch ? dispatch.quiet : undefined;
-      pass.setPipeline(quiet?.pipeline ?? dispatch.pipeline); pass.setBindGroup(1, dispatch.group);
-      if(this.tileEntry(dispatch.entryPoint)){
-        pass.setBindGroup(0,this.smoothTileInputGroup!);sharedHasGroup0=false;
-      } else if (dispatch.entryPoint !== "mgPublishCycleDispatch" && !sharedHasGroup0) {
-        pass.setBindGroup(0, uniformGroup); sharedHasGroup0 = batch;
-      }
-      if(dispatch.tileGrid !== undefined){
-        pass.dispatchWorkgroups(dispatch.tileGrid);
-      } else if (this.gpuCycleDispatch && dispatch.cycleGate !== 0) {
-        const record = dispatch.entryPoint === "mgSolveCoarsest" ? this.levels.length : dispatch.activeLevel;
-        pass.dispatchWorkgroupsIndirect(this.cycleDispatch,
-          (dispatch.cycleGate * (this.levels.length + 1) + record) * 12);
-      } else if (this.windowLattice) {
-        pass.dispatchWorkgroups(...dispatch.workgroups);
-      } else if (this.activeDispatch && dispatch.entryPoint !== "mgSolveCoarsest" && dispatch.entryPoint !== "mgCheckCycleConvergence" && dispatch.entryPoint !== "mgFinishSafety") {
-        const chosen = this.windowLevelGroups?.[dispatch.activeLevel];
-        if (chosen) {
-          pass.dispatchWorkgroups(Math.min(chosen[0], dispatch.workgroups[0]),
-            Math.min(chosen[1], dispatch.workgroups[1]), Math.min(chosen[2], dispatch.workgroups[2]));
-        } else {
-          const indirectOffset = (16 + dispatch.activeLevel * 10 + 3) * 4;
-          pass.dispatchWorkgroupsIndirect(this.activeDispatch, indirectOffset);
-        }
-      } else {
-        pass.dispatchWorkgroups(...(quiet?.workgroups ?? dispatch.workgroups));
-      }
-      if (!batch) pass.end();
-      // This kernel's layout carries no group 0; rebind for whatever follows.
-      else if (dispatch.entryPoint === "mgPublishCycleDispatch") sharedHasGroup0 = false;
-      if (dispatch.coarsestCapture && this.coarsestCaptureBuffers
-        && dispatch.coarsestCapture.invocation === this.coarsestCaptureBuffers.invocation) {
-        closeShared();
-        const capture = dispatch.coarsestCapture, buffers = this.coarsestCaptureBuffers;
-        const destination = (buffer: GPUBuffer) => ({ buffer, bytesPerRow: buffers.bytesPerRow,
-          rowsPerImage: capture.dimensions[1] });
-        if(this.pagedStorage){
-          for(const field of [capture.pressure,capture.rhs,capture.minimum,capture.phi,capture.topology]){
-            const operation=this.pageCaptureOperations.get(field)!;
-            const pass=encoder.beginComputePass({label:"Capture logical pressure page field"});
-            pass.setPipeline(this.pageCapturePipeline!);pass.setBindGroup(0,operation.group);
-            pass.dispatchWorkgroups(Math.ceil(capture.dimensions.reduce((n,d)=>n*d,1)/64));pass.end();
-            encoder.copyBufferToBuffer(operation.staging,0,operation.target,0,buffers.byteLength);
-          }
-        }else{
-          for(const name of ["pressure","rhs","minimum","phi","topology"] as const){
-            const field=capture[name];
-            const texture=this.scratchFields?.snapshotTexture(field) ?? field;
-            this.scratchFields?.encodeSnapshot(encoder,field);
-            encoder.copyTextureToBuffer({texture},destination(buffers[name]),capture.dimensions);
-          }
-        }
-      }
-    }
-    closeShared();
-    if(this.pressurePublicationPipeline && (!selection || selection.publish)){
-      const pass=encoder.beginComputePass({label:"Publish paged pressure for projection"});
-      pass.setPipeline(this.pressurePublicationPipeline);pass.setBindGroup(0,this.pressurePublicationGroup!);
-      pass.dispatchWorkgroups(...this.levels[0]!.dimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);pass.end();
-    }
-    if (openStage !== undefined) boundary?.(openStage);
-  }
-
-  /** Encode only a dependency-complete piece of the same prebuilt solve. */
-  encodeAdaptiveChunk(encoder: GPUCommandEncoder, group: GPUBindGroup,
-    chunk: number | "recovery" | "finish",
-    boundary?: (stage: UniformCM11aPlanStage) => void): number {
-    if (!this.cycleBoundaries) throw new Error("Pressure plan is not initialized");
-    const start = chunk === "recovery" ? this.finishStart : chunk === "finish" ? this.finalStart
-      : chunk === 0 ? 0 : this.cycleBoundaries[chunk]!;
-    const end = chunk === "recovery" ? this.finalStart : chunk === "finish" ? this.plan!.length
-      : this.cycleBoundaries[chunk + 1] ?? this.cycleBoundaries[0]!;
-    this.encode(encoder, group, boundary, undefined, true,
-      { start, end, initialize: chunk === 0, publish: chunk === "finish" });
-    return end - start + Number(chunk === "finish" && this.pagedStorage);
-  }
-
-  get levelCount(): number { return this.levels.length; }
-
-  /** Cycles the built plan carries: Full-Cycles plus V-Cycles. */
-  get cycleCount(): number { return Math.max(0, (this.cycleBoundaries?.length ?? 1) - 1); }
-
-  /** Compute passes the whole plan encodes. Undefined until `initialize`. */
-  get planPassCount(): number | undefined { return this.plan ? this.plan.length+Number(this.pagedStorage) : undefined; }
-
-  /** Compute passes a given cycle budget encodes, setup and finish included. */
-  encodedPassCount(cycleBudget?: number): number | undefined {
-    if (!this.plan || !this.cycleBoundaries) return undefined;
-    return this.cycleBoundaries[this.clampCycleBudget(cycleBudget)]!
-      + (this.plan.length - this.finishStart) + Number(this.pagedStorage);
-  }
-
-  private clampCycleBudget(cycleBudget?: number): number {
-    const total = this.cycleCount;
-    if (cycleBudget === undefined || !Number.isFinite(cycleBudget)) return total;
-    return Math.min(total, Math.max(0, Math.floor(cycleBudget)));
-  }
-
-  /** Compute passes per advance in each cycle-schedule group, from the plan
-   * actually built for this grid. Undefined until `initialize` resolves. */
-  get planStageCounts(): Readonly<Record<UniformCM11aPlanStage, number>> | undefined {
-    if (!this.plan) return undefined;
-    const counts: Record<UniformCM11aPlanStage, number> = {
-      setup: 0, "full-cycle": 0, "v-cycle": 0, finish: 0,
-    };
-    for (const dispatch of this.plan) counts[dispatch.stage] += 1;
-    counts.finish+=Number(this.pagedStorage);
-    return counts;
-  }
-
-  /** Opt-in diagnostic capture of one coarsest solve invocation. It does not alter the solve. */
-  enableCoarsestCapture(invocation = 1): void {
-    this.assertLive(); if (this.coarsestCaptureBuffers) return;
-    if (!Number.isSafeInteger(invocation) || invocation < 1) {
-      throw new RangeError("CM11a coarsest capture invocation must be a positive integer");
-    }
-    const dimensions = this.levels.at(-1)!.dimensions;
-    const bytesPerRow = Math.ceil(dimensions[0] * 16 / 256) * 256;
-    const byteLength = bytesPerRow * dimensions[1] * dimensions[2];
-    const buffer = (label: string) => this.device.createBuffer({ label, size: byteLength,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    this.coarsestCaptureBuffers = { invocation, dimensions, byteLength, bytesPerRow,
-      pressure: buffer("Uniform CM11a capture pressure"), rhs: buffer("Uniform CM11a capture rhs"),
-      minimum: buffer("Uniform CM11a capture p-min"), phi: buffer("Uniform CM11a capture phi"),
-      topology: buffer("Uniform CM11a capture topology") };
-    if(this.pagedStorage){
-      const capture=this.plan?.find(d=>d.coarsestCapture?.invocation===invocation)?.coarsestCapture;
-      if(!capture||!this.pageCapturePipeline)throw new Error("Paged pressure capture requires an initialized invocation");
-      const target=this.coarsestCaptureBuffers;
-      for(const name of ["pressure","rhs","minimum","phi","topology"] as const){
-        const staging=this.device.createBuffer({label:`Page capture ${name}`,size:byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
-        const params=this.device.createBuffer({label:"Page capture geometry",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-        this.device.queue.writeBuffer(params,0,new Uint32Array([...dimensions,name==="topology"?4:1,bytesPerRow/4,0,0,0]));
-        const group=this.device.createBindGroup({layout:this.pageCapturePipeline.getBindGroupLayout(0),entries:[
-          {binding:0,resource:capture[name].createView()},{binding:1,resource:{buffer:staging}},{binding:2,resource:{buffer:params}},
-        ]});
-        this.pageCaptureBuffers.push(staging,params);
-        this.pageCaptureOperations.set(capture[name],{group,staging,target:target[name]});
-      }
-    }
-  }
-
-  async readCoarsestCapture(): Promise<UniformCM11aCoarsestCapture | undefined> {
-    const capture = this.coarsestCaptureBuffers; if (!capture) return undefined;
-    await this.device.queue.onSubmittedWorkDone();
-    const buffers = [capture.pressure, capture.rhs, capture.minimum, capture.phi, capture.topology];
-    await Promise.all(buffers.map((buffer) => buffer.mapAsync(GPUMapMode.READ)));
-    try {
-      const [dx, dy, dz] = capture.dimensions;
-      const unpack = (buffer: GPUBuffer, components: number) => {
-        const bytes = new Uint8Array(buffer.getMappedRange()); const values: number[] = [];
-        for (let z = 0; z < dz; z += 1) for (let y = 0; y < dy; y += 1) {
-          const row = new Float32Array(bytes.buffer, bytes.byteOffset + capture.bytesPerRow * (y + dy * z), capture.bytesPerRow / 4);
-          for (let x = 0; x < dx; x += 1) for (let c = 0; c < components; c += 1) {
-            values.push(row[components * x + c]!);
-          }
-        }
-        return values;
-      };
-      return Object.freeze({ dimensions: capture.dimensions,
-        pressure: unpack(capture.pressure, 1), rhs: unpack(capture.rhs, 1),
-        minimum: unpack(capture.minimum, 1), phi: unpack(capture.phi, 1),
-        topology: unpack(capture.topology, 4) });
-    } finally { for (const buffer of buffers) buffer.unmap(); }
   }
 
   /** One view per texture; the plan asks for the same handful thousands of times. */
@@ -1012,45 +339,17 @@ export class WebGPUUniformPressureMultigrid {
     return id;
   }
 
-  /**
-   * Walk the schedule, yielding at every cycle boundary.
-   *
-   * A capacity change rebuilds this, and on the whole domain that is thousands
-   * of dispatches: too much for one frame. Every cycle is a natural pause --
-   * the walk's only state between them is the ping-pong parities and the
-   * boundary list -- so a prewarm can spend a millisecond or two a frame here
-   * and have the instance ready before the window needs it.
-   */
-  /**
-   * Whether a level's per-cycle operators run from its cycle list: the finest
-   * of a native solve, or the first level of a mixed continuation, whose
-   * caller seeds that level's far field (pressure, RHS, residual scratch and
-   * bound) every solve and builds the list from those seeds.
-   */
-  private cycleListed(level: number, continuationLevel?: number): boolean {
-    return this.cycleTiling && level === (continuationLevel ?? 0)
-      && (continuationLevel === undefined || this.continuationOnly)
-      && this.levels[level]!.dimensions.reduce((n, d) => n * d, 1) > FUSED_VISIT_MAX_CELLS;
-  }
-  private *buildPlanSteps(continuationLevel?: number): Generator<void, PlannedDispatch[], void> {
-    const firstLevel = continuationLevel ?? 0;
+  /** Whether the continuation's root runs its per-cycle operators from its
+   * cycle list: the caller seeds the root's far field every solve and the
+   * setup builds the list from those seeds. */
+  private get listed(): boolean { return this.inPlaceSmoothing && this.cycleTiles !== undefined; }
+  private buildSetup(): PlannedDispatch[] {
     const result: PlannedDispatch[] = [];
-    // The schedule group each emit lands in; reassigned as the plan walks its
-    // fixed sections so every dispatch self-reports where it sits.
-    let planStage: UniformCM11aPlanStage = "setup";
-    let recovering = false;
     const p = new Array(this.levels.length).fill(0);
     const phi = new Array(this.levels.length).fill(0); const min = new Array(this.levels.length).fill(0);
-    const originalRhs = this.levels[firstLevel]!.rhs[0];
     const emit = (entryPoint: EntryPoint, sourceIndex: number, destinationIndex = sourceIndex,
       overrides: Partial<GroupResources> = {}, control: readonly [number, number, number, number] = [0, 0, 0, 0],
-      dispatchDimensions = this.levels[destinationIndex]!.dimensions,
-      /**
-       * Which work list binding 18 carries. The list is always the
-       * DESTINATION level's: prolongation is planned coarse-to-fine and
-       * writes the fine lattice it is listed against.
-       */
-      tiles?: "liquid" | "cycle") => {
+      dispatchDimensions = this.levels[destinationIndex]!.dimensions) => {
       const source = this.levels[sourceIndex]!, destination = this.levels[destinationIndex]!;
       const defaults: GroupResources = {
         pressureIn: source.pressure[p[sourceIndex]!]!, pressureOut: destination.pressure[p[destinationIndex]! ^ 1]!,
@@ -1071,7 +370,6 @@ export class WebGPUUniformPressureMultigrid {
       texturesByBinding[9] = resources.residualIn; texturesByBinding[10] = resources.residualOut;
       texturesByBinding[11] = resources.minimumIn; texturesByBinding[12] = resources.minimumOut;
       texturesByBinding[14] = resources.coefficientsIn; texturesByBinding[15] = resources.coefficientsOut;
-      texturesByBinding[16] = resources.pressureRW;
       for (const sampledBinding of ENTRY_SAMPLED[entryPoint]) {
         const texture = texturesByBinding[sampledBinding];
         for (const writableBinding of ENTRY_WRITABLE[entryPoint]) {
@@ -1080,19 +378,17 @@ export class WebGPUUniformPressureMultigrid {
           }
         }
       }
-      const paperM = this.levels.length;
-      const paperDestination = paperM - destinationIndex;
+      const paperM = this.levelCount;
+      const paperDestination = paperM - MIXED_CONTINUATION_LEVEL - destinationIndex;
       const [params, paramsKey] = this.parameterBuffer(source.dimensions, destination.dimensions,
-        destinationIndex,
+        MIXED_CONTINUATION_LEVEL + destinationIndex,
         [control[0] || paperDestination, control[1] || paperM - UNIFORM_CM11A_PHI_PRESERVATION_LEVELS,
-          control[2], control[3]], recovering ? 2 : (planStage === "full-cycle" || planStage === "v-cycle" ? 1 : 0),texturesByBinding);
+          control[2], control[3]], texturesByBinding);
       // Only the bindings this entry point declares reach the group, so the
       // key is that filtered list -- two entry points that read the same
       // texture through different bindings must not share a group.
       const bindings = ENTRY_BINDINGS[entryPoint];
-      const tileBuffer = tiles === "cycle" ? this.cycleTileBuffers[destinationIndex]
-        : tiles === "liquid" ? this.smoothTileBuffers[destinationIndex] : undefined;
-      let groupKey = `${entryPoint}|${paramsKey}|${tiles ?? ""}${tiles ? destinationIndex : ""}`;
+      let groupKey = `${entryPoint}|${paramsKey}`;
       for (const binding of bindings) {
         const texture = texturesByBinding[binding];
         if (texture !== undefined) groupKey += `|${binding}:${this.textureId(texture)}`;
@@ -1100,362 +396,69 @@ export class WebGPUUniformPressureMultigrid {
       let group = this.groupCache.get(groupKey);
       if (!group) {
         const allEntries: GPUBindGroupEntry[] = [
-          { binding: 18, resource: { buffer: tileBuffer ?? this.cycleDispatch } },
-          { binding: 19, resource: { buffer: this.cycleTileBuffers[destinationIndex] ?? this.cycleDispatch } },
-          { binding: 17, resource: { buffer: this.toleranceBuffer } },
+          ...(this.tileEntry(entryPoint) ? [{ binding: 18, resource: { buffer: this.smoothTiles! } },
+            { binding: 19, resource: { buffer: this.cycleTiles! } }] : []),
           { binding: 0, resource: { buffer: params } },
-          { binding: 1, resource: this.viewOf(resources.pressureIn) }, { binding: 2, resource: this.viewOf(resources.pressureOut) },
-          { binding: 3, resource: this.viewOf(resources.rhsIn) }, { binding: 4, resource: this.viewOf(resources.rhsOut) },
           { binding: 5, resource: this.viewOf(resources.phiIn) }, { binding: 6, resource: this.viewOf(resources.phiOut) },
           { binding: 7, resource: this.viewOf(resources.volumeIn) }, { binding: 8, resource: this.viewOf(resources.volumeOut) },
-          { binding: 9, resource: this.viewOf(resources.residualIn) }, { binding: 10, resource: this.viewOf(resources.residualOut) },
-          { binding: 11, resource: this.viewOf(resources.minimumIn) }, { binding: 12, resource: this.viewOf(resources.minimumOut) },
-          { binding: 13, resource: { buffer: this.diagnostics } },
+          { binding: 11, resource: this.viewOf(resources.minimumIn) },
           { binding: 14, resource: this.viewOf(resources.coefficientsIn) },
           { binding: 15, resource: this.viewOf(resources.coefficientsOut) },
-          ...(resources.pressureRW ? [{ binding: 16, resource: this.viewOf(resources.pressureRW) }] : []),
         ];
         group = this.device.createBindGroup({ label: `Uniform CM11a bindings - ${entryPoint}`,
           layout: this.groupLayouts[entryPoint],
-          entries: allEntries.filter(({ binding }) => (binding === 13 || bindings.includes(binding))) });
+          entries: allEntries.filter(({ binding }) => bindings.includes(binding)) });
         this.groupCache.set(groupKey, group);
         this.ownedGroups.push(group);
       }
       const pipeline = this.pipelines![entryPoint];
       if (!pipeline) throw new Error(`CM11a ${entryPoint} is not compiled for this hierarchy`);
-      result.push({ pipeline, group,
-        entryPoint, stage: planStage,
-        activeLevel: destinationIndex,
-        cycleGate: !["mgPublishCycleDispatch", "mgCheckCycleConvergence", "mgSaveAccepted", "mgRestoreRejected", "mgFinishSafety"].includes(entryPoint)
-          ? (recovering ? 2 : (planStage === "full-cycle" || planStage === "v-cycle" ? 1 : 0)) : 0,
-        residualCheckpoint: (entryPoint === "mgMeasureFineResidual" || entryPoint === "mgMeasureFineResidualTiles") && control[2] === 1,
-        ...(tiles ? { tileList: tiles } : {}),
-        // The builders keep their planned launch; every operator walks the
-        // list grid-stride from a fixed launch sized by the level's capacity.
-        ...(tiles && entryPoint !== "mgBuildSmoothTiles" && entryPoint !== "mgBuildSmoothTilesSeeded"
-          && entryPoint !== "mgBuildCycleTiles"
-          ? { tileGrid: this.tileGrid(destinationIndex, tiles) } : {}),
-        workgroups: this.pagedStorage && !this.logicalPageDispatch && dispatchDimensions.some(n=>n>1)
-          ? uniformPressurePageWorkgroups(dispatchDimensions)
-          : [Math.ceil(dispatchDimensions[0] / 4), Math.ceil(dispatchDimensions[1] / 4), Math.ceil(dispatchDimensions[2] / 4)],
-        ...(entryPoint === "mgSolveCoarsest" ? { coarsestCapture: {
-          invocation: control[2],
-          dimensions: source.dimensions, pressure: resources.pressureOut, rhs: resources.rhsIn,
-          minimum: resources.minimumIn, phi: resources.phiIn, topology: resources.volumeIn,
-        } } : {}),
-      });
+      result.push({ pipeline, group, entryPoint,
+        workgroups: [Math.ceil(dispatchDimensions[0] / 4), Math.ceil(dispatchDimensions[1] / 4), Math.ceil(dispatchDimensions[2] / 4)] });
     };
-    const flipPressure = (level: number) => { p[level] ^= 1; };
-    const flipMinimum = (level: number) => { min[level] ^= 1; };
-    /**
-     * Whether this level's per-cycle operators run from the cycle work list.
-     *
-     * Only the finest. It carries 8x the cells of L1 and 4096x the coarsest,
-     * and it is the only level whose skipped far field is provably dead: a
-     * coarse restriction, minimum downsample or trilinear tap reads children
-     * of ITS level, so a coarse level compacted the same way would need the
-     * next-finer one defined everywhere anyway. L1 and below stay dense.
-     */
-    const cycleList = (level: number): "cycle" | undefined =>
-      // The finish section keeps its dense row kernels. They are gated off
-      // whenever the solve was accepted, which is nearly always, so a list
-      // would only add 8x8 indirect launches that return immediately -- and
-      // every one of them is a commit, whose dense form is what keeps the
-      // accepted-pressure field defined everywhere for a dense restore.
-      // A mixed continuation lists its first level instead: the mixed root
-      // seeds that level's far field every solve (see cycleListed).
-      this.cycleListed(level, continuationLevel) && !recovering ? "cycle" : undefined;
-    /** A per-cycle operator, from the work list wherever the level has one. */
-    const emitOperator = (entryPoint: EntryPoint, sourceIndex: number, destinationIndex = sourceIndex,
-      overrides: Partial<GroupResources> = {}, control: readonly [number, number, number, number] = [0, 0, 0, 0]) => {
-      const list = cycleList(destinationIndex);
-      emit(list ? `${entryPoint}Tiles` as EntryPoint : entryPoint, sourceIndex, destinationIndex,
-        overrides, control, this.levels[destinationIndex]!.dimensions, list);
-    };
-    const emitSetup = (entryPoint: "mgBuildFinestTopology" | "mgExtrapolatePhiOneCell" | "mgBakeCoefficients" | "mgBuildFinestRhs",
+    const emitSetup = (entryPoint: "mgExtrapolatePhiOneCell" | "mgBakeCoefficients",
       level: number, overrides: Partial<GroupResources>) => emit(entryPoint, level, level, overrides);
-    if (continuationLevel === undefined) {
-    emitSetup("mgBuildFinestTopology", 0, { phiOut: this.levels[0]!.phi[0],
-      volumeOut: this.levels[0]!.volume[0] });
-    emitSetup("mgBuildFinestRhs", 0, { pressureOut: this.levels[0]!.pressure[0],
-      rhsOut: originalRhs, minimumOut: this.levels[0]!.minimum[0] });
-    }
     // CM11a Algorithm 1 builds the complete raw phi/V pyramid first. Phi
     // continuation is a separate per-level operation and must never feed the
     // next coarsening step.
-    // A mixed continuation's finest level is its root, and the sign-aware
-    // levels (control.y) are counted from level 0: every coarsening of the
-    // root averages. Its first coarsening (control.z, that level's paper
-    // number) keeps the air that averaging would erase (mgAirVanishes).
-    const keepAir: readonly [number, number, number, number] = continuationLevel === undefined ? [0, 0, 0, 0]
-      : [0, 0, this.levels.length - continuationLevel - 1, 0];
-    for (let level = firstLevel; level + 1 < this.levels.length; level += 1) {
+    // The sign-aware levels (control.y) are counted from the hierarchy's
+    // level 0: every coarsening of the root averages. Its first coarsening
+    // (control.z, that level's paper number) keeps the air that averaging
+    // would erase (mgAirVanishes).
+    const keepAir: readonly [number, number, number, number] = [0, 0, this.levels.length - 1, 0];
+    for (let level = 0; level + 1 < this.levels.length; level += 1) {
       emit("mgDownsampleTopology", level, level + 1, {
         phiIn: this.levels[level]!.phi[0], phiOut: this.levels[level + 1]!.phi[0],
         volumeOut: this.levels[level + 1]!.volume[0] }, keepAir);
     }
-    for (let level = firstLevel; level < this.levels.length; level += 1) {
+    for (let level = 0; level < this.levels.length; level += 1) {
       emitSetup("mgExtrapolatePhiOneCell", level,
         { phiIn: this.levels[level]!.phi[0], phiOut: this.levels[level]!.phi[1] });
       phi[level] = 1;
       emitSetup("mgBakeCoefficients", level, {
         phiIn: this.levels[level]!.phi[1], coefficientsOut: this.levels[level]!.coefficients,
       });
-      if(this.tileSmoothing && this.levels[level]!.dimensions.reduce((n,d)=>n*d,1)>FUSED_VISIT_MAX_CELLS
-        && (continuationLevel===undefined || level===firstLevel)){
-        // The finest level's far-field seeds (below) ride on its classifier.
-        const seeded=SEED_FUSE&&level===0&&cycleList(0)!==undefined;
-        emit(seeded?"mgBuildSmoothTilesSeeded":"mgBuildSmoothTiles",level,level,seeded?{
-          residualOut:this.levels[0]!.residual[0],minimumOut:this.levels[0]!.minimum[1] }:{},[0,0,0,0],undefined,"liquid");
-        if(cycleList(level)){
-          // One thread per tile, reading the 27 classification words its
-          // neighbourhood wrote. Coefficients are immutable for the solve, so
-          // both lists are built once and shared by every cycle.
-          const tiles=this.tileCounts[level]!;
-          emit("mgBuildCycleTiles",level,level,{},[0,0,0,0],[4*Math.ceil(tiles/64),1,1],"liquid");
-        }
+      if(level===0&&this.listed){
+        emit("mgBuildSmoothTiles",0);
+        // One thread per tile, reading the 27 classification words its
+        // neighbourhood wrote. Coefficients are immutable for the solve, so
+        // both lists are built once and shared by every cycle.
+        emit("mgBuildCycleTiles",0,0,{},[0,0,0,0],[4*Math.ceil(this.rootTiles/64),1,1]);
       }
     }
-    // Every per-cycle write outside the cycle list is missing, so the fields
-    // a DENSE pass still reads over the far field are seeded once per solve,
-    // to exactly what the dense operators would have left there.
-    //
-    // p_min's other parity: mgShiftMinimum writes p_min - p, and outside the
-    // list p is the zero mgBuildFinestRhs stored and p_min is -FLT_MAX, so
-    // -FLT_MAX IS that value. The dense L1 minimum downsamples read it at
-    // every child.
-    //
-    // The Full-Cycle's finest residual: mgRestrictResidual averages all eight
-    // children unmasked, and a Full-Cycle restricts its correction rhs
-    // straight to the coarsest solve without recomputing a residual on the
-    // way, so a coarse row over the far field must see the zero mgResidual
-    // writes at air rows. A tile that has left the list since the last solve
-    // would otherwise hand that chain its stale residual. (A V-cycle's
-    // descent, mgTransition, computes every child's residual itself.)
-    //
-    // These run after the bake, not beside mgBuildFinestRhs: the shared
-    // scratch arena lays the finest V over pressure B, rhs B, residual A and
-    // p-min B, and V is only dead once the coefficients are baked.
-    if (cycleList(0) && !(SEED_FUSE && this.tileSmoothing
-      && this.levels[0]!.dimensions.reduce((n,d)=>n*d,1)>FUSED_VISIT_MAX_CELLS)) {
-      emit("mgClearMinimum", 0, 0, { minimumOut: this.levels[0]!.minimum[1] });
-      emit("mgClearPressure", 0, 0, { pressureOut: this.levels[0]!.residual[0] });
-      for (const seed of result.slice(-2)) seed.cycleSetup = true;
-    }
-    // CM11a summarizes PRBGS as two colour passes plus a projection, but the
-    // smoother projects at write time on both its update and pass-through
-    // paths, so each sweep exits already-projected and the third pass is gone.
-    const sweep = (level: number, rhs: GPUTexture, quietRows = false, tiles?: "liquid" | "cycle") => {
-      for (let colour = 0; colour < 2; colour += 1) {
-        if (this.simultaneousSmoothing) {
-          emit(tiles ? (tiles === "cycle" && this.haloEntries ? "mgSmoothTilesJacobiCycle" : "mgSmoothTilesJacobi") : "mgSmoothColour", level, level,
-            { rhsIn: rhs }, [0, 0, colour, 0], this.levels[level]!.dimensions, tiles);
-          flipPressure(level);
-        } else if (this.inPlaceSmoothing) {
-          // Two ping-pong flips are the identity, so leaving the parity alone
-          // keeps every later dispatch bound exactly as it was.
-          const [nx, ny, nz] = this.levels[level]!.dimensions;
-          emit(tiles ? "mgSmoothTilesInPlace" : "mgSmoothColourInPlace", level, level,
-            { rhsIn: rhs, pressureRW: this.levels[level]!.pressure[p[level]!]! }, [0, 0, colour, 0],
-            [Math.ceil(nx / 2), ny, nz], tiles);
-          // Same bindings, equivalent layout: the group serves either pipeline.
-          if (quietRows && this.inPlaceSmoothing && !tiles) result[result.length - 1]!.quiet = { pipeline: this.pipelines!.mgSmoothRowInPlace,
-            workgroups: [Math.ceil(Math.ceil(nx / 2) / ROW_SEGMENT / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)] };
-        } else {
-          emit("mgSmoothColour", level, level, { rhsIn: rhs }, [0, 0, colour, 0]); flipPressure(level);
-        }
-      }
-    };
-    // A visit's sweeps run back to back with nothing between them, so on a
-    // level small enough for one workgroup they are one dispatch.
-    const smooth = (level: number, rhs: GPUTexture, sweeps: number) => {
-      const [nx, ny, nz] = this.levels[level]!.dimensions;
-      // Indirect cycle dispatch sizes every launch from the level's tile record.
-      if (this.inPlaceSmoothing && FUSE_VISITS && !this.gpuCycleDispatch && sweeps > 0
-        && nx * ny * nz <= FUSED_VISIT_MAX_CELLS
-        && (!this.simultaneousSmoothing || nx * ny * nz <= 4096)) {
-        const entry = this.simultaneousSmoothing && nx * ny * nz <= this.visitLanes
-          ? "mgSmoothVisitLocalInPlace" : "mgSmoothVisitInPlace";
-        emit(entry, level, level,
-          { rhsIn: rhs, pressureRW: this.levels[level]!.pressure[p[level]!]! }, [0, 0, sweeps, 0], [1, 1, 1]);
-      } else for (let i = 0; i < sweeps; i += 1) {
-        // Prolongation may leave air below its constraint, and the first sweep
-        // of a visit is what projects it back. Only a CONSTRAINED row can be
-        // below its minimum -- unconstrained air carries p_min = -FLT_MAX --
-        // and the cycle list holds every constrained tile, so running that
-        // sweep from it is exactly the dense sweep restricted to the rows the
-        // dense one could move. With fixed minima, later sweeps cannot change
-        // air again: only tiles containing liquid need revisiting.
-        const tiled = this.tileSmoothing && nx*ny*nz>FUSED_VISIT_MAX_CELLS;
-        sweep(level,rhs,false,!tiled?undefined:i>0?"liquid":cycleList(level));
-      }
-    };
-    let coarseInvocation = 0;
-    const coarseSolve = (rhs: GPUTexture) => {
-      const level = this.levels.length - 1;
-      coarseInvocation += 1;
-      emit("mgSolveCoarsest", level, level, { rhsIn: rhs },
-        [0, 0, coarseInvocation, UNIFORM_CM11A_COARSE_SWEEP_CAP], [1, 1, 1]);
-      flipPressure(level);
-    };
-    const vCycle = (level: number, rhs: GPUTexture): void => {
-      if (level === this.levels.length - 1) { coarseSolve(rhs); return; }
-      smooth(level, rhs, this.schedule.preSweeps);
-      // Residual, restriction, zero coarse correction and the coarse bound
-      // (bound-active residuals must not enter an unconstrained coarse solve).
-      emit("mgTransition", level, level + 1, { rhsIn: rhs, rhsOut: this.levels[level + 1]!.rhs[0] });
-      flipPressure(level + 1); flipMinimum(level + 1);
-      vCycle(level + 1, this.levels[level + 1]!.rhs[0]);
-      emitOperator("mgProlongateAdd", level + 1, level, { residualIn: this.levels[level]!.pressure[p[level]] }); flipPressure(level);
-      smooth(level, rhs, this.schedule.postSweeps);
-    };
-    // A mixed continuation is this setup alone: its caller supplies the entry
-    // level's phi, topology, RHS, bound and zero correction and traverses
-    // the levels itself.
-    if (continuationLevel !== undefined) return result;
-    const fullCycle = () => {
-      // Algorithm 3 requires p_tmp to survive every nested V-cycle. Both
-      // finest residual[0] and rhs[1] are selected as residual scratch by
-      // vCycle(), so the backup must have dedicated storage.
-      const backup = this.fullCycleBackup;
-      emitOperator("mgCopyPressure", 0, 0, { pressureOut: backup });
-      emitOperator("mgShiftMinimum", 0); flipMinimum(0);
-      emitOperator("mgResidual", 0, 0, { rhsIn: originalRhs, residualOut: this.levels[0]!.residual[0] });
-      const correctionRhs: GPUTexture[] = [this.levels[0]!.residual[0]];
-      for (let level = 0; level + 1 < this.levels.length; level += 1) {
-        const nextRhs = this.levels[level + 1]!.rhs[1]; correctionRhs.push(nextRhs);
-        emit("mgRestrictResidual", level, level + 1, { residualIn: correctionRhs[level]!, rhsOut: nextRhs });
-        emit("mgDownsampleMinimum", level, level + 1); flipMinimum(level + 1);
-      }
-      const coarse = this.levels.length - 1; emit("mgClearPressure", coarse); flipPressure(coarse);
-      coarseSolve(correctionRhs[coarse]!);
-      for (let level = coarse - 1; level >= 0; level -= 1) {
-        emitOperator("mgProlongateAssign", level + 1, level); flipPressure(level);
-        vCycle(level, correctionRhs[level]!);
-      }
-      emitOperator("mgAddPressure", 0, 0, { residualIn: backup }); flipPressure(0);
-      min[0] = 0;
-    };
-    /**
-     * The fine residual norm, from the cycle list wherever the finest level
-     * has one: outside it pressure is the zero the setup stored and no row is
-     * liquid, and every contribution is an order-free atomicMax.
-     */
-    const measureTiles = MEASURE_TILES;
-    const emitMeasure = (overrides: Partial<GroupResources>, control: readonly [number, number, number, number] = [0, 0, 0, 0]) => {
-      const list = measureTiles ? cycleList(0) : undefined;
-      emit(list ? "mgMeasureFineResidualTiles" : "mgMeasureFineResidual", 0, 0, overrides, control,
-        this.levels[0]!.dimensions, list);
-    };
-    const checkpoint = () => {
-      // Canonicalize before deciding to stop. All later cycle writes are gated,
-      // so the final projection always sees the last completed cycle in A.
-      if (p[0] !== 0) {
-        emitOperator("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0;
-      }
-      emitMeasure({ rhsIn: originalRhs }, [0, 0, 1, 0]);
-      emit("mgCheckCycleConvergence", 0, 0, {}, [0, 0, recovering ? 4 : planStage === "full-cycle" ? 2 : 3, 0], [1, 1, 1]);
-      // These commits run even when the decision has just stopped the solver.
-      // Dedicated storage cannot alias Full-Cycle or V-cycle scratch.
-      const [nx, ny, nz] = this.levels[0]!.dimensions;
-      const quietCommit = (pipeline: GPUComputePipeline) => {
-        if (recovering && this.inPlaceSmoothing && ROW_SWEEP !== "off" && !cycleList(0)) result[result.length - 1]!.quiet = { pipeline,
-          workgroups: [Math.ceil(nx / ROW_SEGMENT / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)] };
-      };
-      emitOperator("mgSaveAccepted", 0, 0, { pressureOut: this.acceptedPressure });
-      quietCommit(this.pipelines!.mgSaveAcceptedQuiet);
-      emitOperator("mgRestoreRejected", 0, 0, { pressureOut: this.levels[0]!.pressure[0], residualIn: this.acceptedPressure });
-      quietCommit(this.pipelines!.mgRestoreRejectedQuiet);
-      if (this.gpuCycleDispatch) emit("mgPublishCycleDispatch", 0, 0, {}, [0, 0, this.levels.length + 1, 0], [1, 1, 1]);
-    };
-    // Where a lagged budget may cut. Entry 0 is the end of setup; entry k is
-    // the end of cycle k, which is always a checkpoint.
-    emitMeasure({ rhsIn: originalRhs }, [0, 0, 1, 0]);
-    emit("mgCheckCycleConvergence", 0, 0, {}, [0, 0, 0, 0], [1, 1, 1]);
-    // Dense: the finish section restores from this field with a dense kernel,
-    // so its far field has to hold the zero the finest pressure carries there
-    // rather than whatever the last solve's list left.
-    emit("mgCopyPressure", 0, 0, { pressureOut: this.acceptedPressure });
-    if (this.gpuCycleDispatch) emit("mgPublishCycleDispatch", 0, 0, {}, [0, 0, this.levels.length + 1, 0], [1, 1, 1]);
-    const cycleBoundaries: number[] = [result.length];
-    // Checkpoints canonicalize fine pressure; coarser scratch is rebuilt by
-    // each cycle. The host can skip remaining V-cycles after stalled progress.
-    for (let cycle = 0; this.adaptiveSolve && cycle < this.schedule.vCycles; cycle += 1) {
-      planStage = "v-cycle";
-      vCycle(0, originalRhs); checkpoint(); cycleBoundaries.push(result.length);
-      yield;
-    }
-    planStage = "full-cycle";
-    for (let cycle = 0; cycle < this.schedule.fullCycles; cycle += 1) {
-      fullCycle(); checkpoint(); cycleBoundaries.push(result.length);
-      yield;
-    }
-    planStage = "v-cycle";
-    for (let cycle = this.adaptiveSolve ? this.schedule.vCycles : 0; cycle < this.schedule.vCycles; cycle += 1) {
-      vCycle(0, originalRhs); checkpoint(); cycleBoundaries.push(result.length);
-      yield;
-    }
-    planStage = "finish";
-    this.cycleBoundaries = Object.freeze(cycleBoundaries);
-    this.finishStart = result.length;
-    recovering = true;
-    for (let batch = 0; batch < UNIFORM_CM11A_RECOVERY_BATCHES; batch += 1) {
-      for (let i = 0; i < UNIFORM_CM11A_RECOVERY_SWEEPS; i += 1) sweep(0, originalRhs, ROW_SWEEP !== "off", cycleList(0));
-      checkpoint();
-    }
-    recovering = false;
-    this.finalStart = result.length;
-    emitOperator("mgRestoreRejected", 0, 0, { pressureOut: this.levels[0]!.pressure[0], residualIn: this.acceptedPressure }, [0, 0, 0, 1]);
-    emit("mgFinishSafety", 0, 0, {}, [0, 0, 0, 0], [1, 1, 1]);
-    if (p[0] !== 0) { emitOperator("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0; }
-    emitMeasure({
-      pressureIn: this.levels[0]!.pressure[0], rhsIn: originalRhs,
-      phiIn: this.levels[0]!.phi[phi[0]], volumeIn: this.levels[0]!.volume[0],
-      minimumIn: this.levels[0]!.minimum[min[0]],
-    });
     return result;
   }
 
-  private buildPlan(): PlannedDispatch[] {
-    // Continuation-only hierarchies never encode a native finest-level solve.
-    if (this.continuationOnly) return [];
-    const steps = this.buildPlanSteps();
-    for (;;) { const next = steps.next(); if (next.done) return next.value; }
-  }
-
   /**
-   * Spend up to `budgetMs` on a deferred plan, and report whether it is ready.
-   *
-   * A budget of zero still advances one cycle, so a caller cannot livelock the
-   * build by asking for nothing. Ready instances answer true without work.
-   */
-  advancePlan(budgetMs: number): boolean {
-    if (this.plan) return true;
-    if (!this.pipelines) return false;
-    this.planSteps ??= this.buildPlanSteps();
-    const started = typeof performance !== "undefined" ? performance.now() : 0;
-    for (;;) {
-      const next = this.planSteps.next();
-      if (next.done) {
-        this.plan = Object.freeze(next.value); this.planSteps = undefined; return true;
-      }
-      if ((typeof performance !== "undefined" ? performance.now() : 0) - started >= budgetMs) return false;
-    }
-  }
-
-  /** Whether this instance is still being built a cycle at a time. */
-  get planPending(): boolean { return this.plan === undefined && this.planSteps !== undefined; }
-
-  /**
-   * The 80 uniform bytes a dispatch reads, and a key for them. Dimensions,
-   * level and control repeat across every cycle, so a plan of thousands needs
-   * only a few dozen distinct buffers.
+   * The uniform bytes a dispatch reads, and a key for them. Dimensions,
+   * level and control repeat across the setup, so it needs only a few
+   * distinct buffers.
    */
   private parameterBuffer(level: readonly [number, number, number], coarse: readonly [number, number, number],
     activeLevel: number, control: readonly [number, number, number, number],
-    gated: number, texturesByBinding: readonly (GPUTexture|undefined)[]): [GPUBuffer, string] {
-    const bytes = new ArrayBuffer(this.scratchFields?352:this.pagedStorage?336:80); const u = new Uint32Array(bytes); const f = new Float32Array(bytes);
-    u.set(this.levels[0]!.dimensions, 0); u.set(level, 4); u.set(coarse, 8);
+    texturesByBinding: readonly (GPUTexture|undefined)[]): [GPUBuffer, string] {
+    const bytes = new ArrayBuffer(352); const u = new Uint32Array(bytes); const f = new Float32Array(bytes);
+    u.set(this.finestSize.map((n) => n + 2), 0); u.set(level, 4); u.set(coarse, 8);
     // Each axis has coarsened by however many times *it* was halved, which is
     // no longer one shared 2**levelIndex once a hierarchy is semi-coarsened.
     // Reading the factor back off the lattice keeps the two in step by
@@ -1464,12 +467,10 @@ export class WebGPUUniformPressureMultigrid {
       value * (this.finestSize[axis]! / (level[axis]! - 2))), 12);
     u.set(control, 16);
     u[3] = activeLevel;
-    u[7] = gated;
-    if(this.pagedStorage||this.scratchFields)texturesByBinding.forEach((texture,binding)=>{
-      if(texture){u.set(this.logicalDimensions.get(texture)!,20+4*binding);u[23+4*binding]=this.scratchFields?.scratchMetadata(texture)??0;}
+    texturesByBinding.forEach((texture,binding)=>{
+      if(texture){u.set(this.logicalDimensions.get(texture)!,20+4*binding);u[23+4*binding]=this.scratchFields.scratchMetadata(texture);}
     });
-    const dimensionsKey=this.pagedStorage||this.scratchFields?Array.from(u.subarray(20)).join(","):"";
-    const key = `${dimensionsKey}|${level.join(",")}|${coarse.join(",")}|${activeLevel}|${control.join(",")}|${gated}`;
+    const key = `${Array.from(u.subarray(20)).join(",")}|${level.join(",")}|${coarse.join(",")}|${activeLevel}|${control.join(",")}`;
     const cached = this.paramCache.get(key);
     if (cached) return [cached, key];
     const buffer = this.device.createBuffer({ label: "Uniform CM11a dispatch parameters", size: bytes.byteLength,
@@ -1480,26 +481,16 @@ export class WebGPUUniformPressureMultigrid {
   }
 
   destroy(): void { if (this.isDestroyed) return; this.isDestroyed = true;
+    this.pressureTexture.destroy();
     for (const level of this.levels) for (const pair of [level.pressure, level.rhs, level.phi,
       level.volume, level.residual, level.minimum]) {
       for (const texture of new Set(pair)) texture.destroy();
     }
     for (const level of this.levels) level.coefficients.destroy();
-    for(const buffer of this.pageCaptureBuffers)buffer.destroy();
-    for(const texture of this.setupRhsSnapshot ?? [])texture.destroy();
-    this.pressurePublication?.destroy();
-    this.cycleDispatch.destroy();
-    for(const buffers of [this.smoothTileBuffers,this.cycleTileBuffers])buffers.forEach(buffer=>buffer.destroy());
-    this.fullCycleBackup.destroy();
-    this.acceptedPressure.destroy();
-    this.toleranceBuffer.destroy();
-    for (const buffer of this.ownedParams) buffer.destroy(); this.diagnostics.destroy();
-    if (this.coarsestCaptureBuffers) for (const buffer of [this.coarsestCaptureBuffers.pressure,
-      this.coarsestCaptureBuffers.rhs, this.coarsestCaptureBuffers.minimum,
-      this.coarsestCaptureBuffers.phi, this.coarsestCaptureBuffers.topology]) buffer.destroy();
-    this.ownedParams.length = 0; this.ownedGroups.length = 0; this.plan = undefined; this.pipelines = undefined;
+    this.smoothTiles?.destroy(); this.cycleTiles?.destroy();
+    for (const buffer of this.ownedParams) buffer.destroy();
+    this.ownedParams.length = 0; this.ownedGroups.length = 0; this.pipelines = undefined;
     this.viewCache.clear(); this.paramCache.clear(); this.groupCache.clear(); this.textureIds.clear();
-    this.planSteps = undefined;
   }
   private assertLive(): void { if (this.isDestroyed) throw new Error("Uniform CM11a hierarchy is destroyed"); }
 }

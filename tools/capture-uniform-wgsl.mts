@@ -4,6 +4,7 @@
 // dispatched, and parses every module with naga. Run it before any Dawn run
 // after a WGSL edit: a parse error costs nothing here.
 // Usage: node --import tsx tools/capture-uniform-wgsl.mts [scene] [outDir]
+//   env PAGE_POOL=<json> (the scene's page pool record, e.g. {"blocks":24,"permute":7});
 //   env FRAMES=n (frames to encode; the mock's zero readbacks stop after frame 1's encode,
 //   reported as "did not converge ... 0 cycles" — expected).
 // Naga quirks that Dawn accepts: "already in scope", "read-write storage textures prior to MSL 1.2".
@@ -36,7 +37,11 @@ const buffer=(d:GPUBufferDescriptor)=>{const bytes=new ArrayBuffer(Math.max(d.si
 const texture=(d:GPUTextureDescriptor)=>{const s=d.size as number[]|{width:number;height?:number;depthOrArrayLayers?:number};
  const [w,h=1,z=1]=Array.isArray(s)?s:[s.width,s.height,s.depthOrArrayLayers];
  return obj({width:w,height:h,depthOrArrayLayers:z,format:d.format,dimension:d.dimension??"2d",usage:d.usage,mipLevelCount:d.mipLevelCount??1,sampleCount:1,label:d.label,createView:()=>obj(),destroy(){}});};
-const limits=new Proxy({} as Record<string,number>,{get:(_t,p)=>p==="minUniformBufferOffsetAlignment"?256:typeof p==="string"&&/Count|Size|Dimension|Bindings|Groups|Attributes|Buffers|Components|Invocations|Layers|PerStage|PerPipeline|PerBindGroup/.test(p)?2**30:2**30});
+// Limits that size shader text take a real adapter's values (Metal), so the
+// captured modules are the ones a device compiles; the rest are unbounded.
+const realLimits:Record<string,number>={minUniformBufferOffsetAlignment:256,maxComputeWorkgroupStorageSize:32768,maxComputeInvocationsPerWorkgroup:1024,
+ maxComputeWorkgroupsPerDimension:65535,maxStorageBuffersPerShaderStage:10,maxStorageTexturesPerShaderStage:8,maxTextureDimension3D:2048};
+const limits=new Proxy({} as Record<string,number>,{get:(_t,p)=>typeof p==="string"&&p in realLimits?realLimits[p]:2**30});
 const device:any=obj({
  limits,features:new Set(["timestamp-query","float32-filterable","shader-f16"]),lost:new Promise(()=>{}),
  createBuffer:buffer,createTexture:texture,
@@ -48,6 +53,7 @@ const device:any=obj({
  popErrorScope:async()=>null,queue:obj({onSubmittedWorkDone:async()=>{}}),
 });
 const scene=structuredClone(sceneDocument(getSceneDefinition(sceneId)));scene.fluid.refinementRegions=[];
+if(process.env.PAGE_POOL)scene.fluid.pagePool=JSON.parse(process.env.PAGE_POOL);
 const t0=performance.now();
 if(process.env.METHOD&&process.env.METHOD!=="narrow-band")throw new Error(`Unknown METHOD ${process.env.METHOD}`);
 const method=uniformNarrowBandMethod;

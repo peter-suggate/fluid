@@ -63,7 +63,7 @@ export const NBFLIP_METHOD_PROFILE: MethodProfile = {
  * the box then stands on the floor in the middle of it, and everything
  * outside the box is solid.
  */
-function nbflipDomain(
+export function nbflipDomain(
   sceneId: string, grid: readonly [number, number, number], cellSize_m: number, frames: number, poolCells: number,
   lattice: readonly [number, number, number] = grid, dt = 1 / NBFLIP_FRAME_RATE_HZ, gravity_m_s2 = GRAVITY_M_S2,
 ): SceneDescription {
@@ -138,7 +138,7 @@ function liquidBox(grid: readonly [number, number, number], cellSize_m: number, 
 }
 
 /** A point given in cells from the domain's minimum corner. */
-const cellPoint = (grid: readonly [number, number, number], cellSize_m: number, cells: readonly [number, number, number]) =>
+export const cellPoint = (grid: readonly [number, number, number], cellSize_m: number, cells: readonly [number, number, number]) =>
   ({ x: (cells[0] - grid[0] / 2) * cellSize_m, y: cells[1] * cellSize_m, z: (cells[2] - grid[2] / 2) * cellSize_m });
 
 /** mantaflow's `initDomain(boundaryWidth=0)`: the outermost layer of cells, on all six sides, is wall. */

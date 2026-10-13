@@ -10,7 +10,7 @@ export const narrowBandRedistanceWGSL=/* wgsl */`
 // borrow that bank for eight exact normalized corners per crossing cell.
 // Transfer properties may overwrite it later; the next metric rebuilds it.
 override nbCachedGeometry:bool=true;
-fn nbGeometryCapacity()->u32{return (NB_CELLS-1u)/8u;}
+fn nbGeometryCapacity()->u32{return (UM_CELL_KEYS-1u)/8u;}
 fn nbGeometryRank(mask:vec2u,lane:u32)->u32{
  let word=lane>>5u;let below=(1u<<(lane&31u))-1u;
  return select(0u,countOneBits(mask.x),word!=0u)+countOneBits(mask[word]&below);
@@ -22,7 +22,7 @@ var<workgroup> nbGeometryMask:vec2u;
  if(lane==0u){
   nbGeometryMask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*tile]),atomicLoad(&bins[NB_BAND_MASK+2u*tile+1u]));
   let count=countOneBits(nbGeometryMask.x)+countOneBits(nbGeometryMask.y);
-  nbGeometryBase=atomicAdd(&bins[NB_CELLS],count);
+  nbGeometryBase=atomicAdd(&bins[UM_CELL_KEYS],count);
   // The candidate list has been consumed by depthSeeds; use it as a map.
   atomicStore(&bins[NB_BAND_CANDIDATES+tile],nbGeometryBase);
  }
@@ -33,7 +33,7 @@ var<workgroup> nbGeometryMask:vec2u;
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  for(var k=0u;k<8u;k++){
   let value=umVertexValue(p+umCorner(k,2u))/h;
-  atomicStore(&bins[NB_CELLS+1u+8u*slot+k],bitcast<u32>(value));
+  atomicStore(&bins[UM_CELL_KEYS+1u+8u*slot+k],bitcast<u32>(value));
  }
 }
 fn nbTrilinear(v:array<f32,8>,q:vec3f)->vec4f{
@@ -46,7 +46,7 @@ fn nbTrilinear(v:array<f32,8>,q:vec3f)->vec4f{
 // Differentiate the represented trilinear field directly. A gradient needs
 // its eight corners, rather than six additional interpolated phi queries.
 fn nbPhiGradient(p:vec3f)->vec4f{
- let q=clamp(p,vec3f(0),vec3f(UM_D));let c=min(vec3u(floor(q)),UM_D-1u);
+ let q=umPointNear(p);let c=vec3u(umCellNear(vec3i(floor(q))));
  let width=umTileWidth(umTileAt(c/4u));let origin=(c/width)*width;
  let f=(q-vec3f(origin))/f32(width);var v:array<f32,8>;var terms:array<f32,8>;
  for(var k=0u;k<8u;k++){
@@ -59,7 +59,7 @@ fn nbPhiGradient(p:vec3f)->vec4f{
  return vec4f(nbTrilinear(v,f).xyz/(h*f32(width)),value/h);
 }
 fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
- let base=nbCell(cell);let origin=vec3f(base);var v:array<f32,8>;
+ let base=umCellCoord(cell);let origin=vec3f(base);var v:array<f32,8>;
  // The cell's corners are lattice vertices: among h tiles each is one load.
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  var slot=nbGeometryCapacity();
@@ -71,7 +71,7 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
   }
  }
  if(slot<nbGeometryCapacity()){
-  for(var k=0u;k<8u;k++){v[k]=bitcast<f32>(atomicLoad(&bins[NB_CELLS+1u+8u*slot+k]));}
+  for(var k=0u;k<8u;k++){v[k]=bitcast<f32>(atomicLoad(&bins[UM_CELL_KEYS+1u+8u*slot+k]));}
  }else{
   for(var k=0u;k<8u;k++){v[k]=umVertexValue(base+umCorner(k,2u))/h;}
  }
@@ -104,7 +104,7 @@ fn nbBuildDistance(p:vec3u,tile:u32){
   var value=initial/h;
   if(abs(initial)>1e-8){
    var nearest=NB_NO_SURFACE;
-   if((atomicLoad(&bins[NB_BAND_REACH+tile])&1u)!=0u){nearest=atomicLoad(&bins[NB_DEPTH_B+cellIndex(vec3i(min(p,UM_D-1u)))]);}
+   if((atomicLoad(&bins[NB_BAND_REACH+tile])&1u)!=0u){nearest=atomicLoad(&bins[NB_DEPTH_B+umCellAt(vec3u(umCellNear(vec3i(p))))]);}
    // With no crossing cell within five of the vertex's, the nearest box is
    // five cells off or more: the level set stands, no nearer than that. Six
    // lifted the air five cells over a resting surface, and with it the 4h
@@ -119,16 +119,16 @@ fn nbBuildDistance(p:vec3u,tile:u32){
     for(var iteration=0u;iteration<5u;iteration++){
      // A solid's phi is not the liquid's: traced into a wall, the vertices on
      // it found the wall for a surface, and no samples were seeded beside it.
-     if(umCellOpen(vec3i(min(vec3u(floor(q)),UM_D-1u)))<0.5){break;}
+     if(umCellOpen(umCellNear(vec3i(floor(q))))<0.5){break;}
      let sample=nbPhiGradient(q);let f=sample.w;if(abs(f)<1e-5){distance=min(distance,length(q-vec3f(p)));break;}
      let g=sample.xyz;
      let g2=dot(g,g);if(g2<1e-8){break;}
-     q=clamp(q-clamp(f/sqrt(g2),-1.5,1.5)*g*inverseSqrt(g2),vec3f(0),vec3f(UM_D));
+     q=umPointNear(q-clamp(f/sqrt(g2),-1.5,1.5)*g*inverseSqrt(g2));
     }
    }
    value=sign(initial)*max(distance,1e-8/h);
   }
-  atomicStore(&bins[NB_DEPTH_A+nbVertexIndex(p)],bitcast<u32>(value));
+  atomicStore(&bins[NB_DEPTH_A+umVertexAt(p)],bitcast<u32>(value));
  }
 }
 // The 64 interior vertices use every lane. Only a last-domain tile has
@@ -161,7 +161,7 @@ fn nbInterfaceVertex(p:vec3u)->bool{
  }
  for(var k=0u;k<8u;k++){
   let c=vec3i(p)-vec3i(umCorner(k,2u));
-  if(any(c<vec3i(0))||any(c>=vec3i(UM_D))){continue;}
+  if(!umCellPresent(c)){continue;}
   if(nbBandCrossing(vec3u(c))){return true;}
  }
  return false;
@@ -171,12 +171,12 @@ fn nbRedistanceVertex(p:vec3u,width:u32){
  // Before retiring adjacent h owners, recover the metric coarse samples.
  // Particle sphere unions preserve their fine zero set but distort interior
  // magnitudes; inheriting those magnitudes as a 4h chord moves a flat surface.
- let retiring=nbAdaptive()&&width==4u&&nbSurfaceTheta(vec3f(p))<=0.0&&umTileMinimumWidth(umTileAt(min(p,UM_D-1u)/4u))==1u;
+ let retiring=width==4u&&nbSurfaceTheta(vec3f(p))<=0.0&&umTileMinimumWidth(umTileAt(vec3u(umCellNear(vec3i(p)))/4u))==1u;
  let normalize=(width==1u&&!nbInterfaceVertex(p))||retiring;
  // The metric replacement needs no sample of the old field. Keep its exact
  // multiply, and read phi only where the reconstructed value is consumed.
- if(normalize&&(nbBandReach(min(p,UM_D-1u))&2u)!=0u){
-  let value=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+nbVertexIndex(p)]))*h;
+ if(normalize&&(nbBandReach(vec3u(umCellNear(vec3i(p))))&2u)!=0u){
+  let value=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(p)]))*h;
   textureStore(outputPhi,vec3i(p),vec4f(value));return;
  }
  // Coarse/interface samples retain their reconstructed values. Past reach,
@@ -211,8 +211,8 @@ fn nbRedistanceVertex(p:vec3u,width:u32){
    let corner=umCorner(k,2u);let p=origin+corner*4u;
    if(regular){if(!all((corner!=vec3u(0))|(origin==vec3u(0)))){continue;}}
    else{if(umVertexAuthority(p).index!=owner.index){continue;}}
-   let c=min(p,UM_D-1u);
-   if(!nbAdaptive()||umTileMinimumWidth(umTileAt(c/4u))!=1u||(nbBandReach(c)&2u)==0u){continue;}
+   let c=vec3u(umCellNear(vec3i(p)));
+   if(umTileMinimumWidth(umTileAt(c/4u))!=1u||(nbBandReach(c)&2u)==0u){continue;}
    nbBuildDistance(p,nbBandTile(c));
   }
  }

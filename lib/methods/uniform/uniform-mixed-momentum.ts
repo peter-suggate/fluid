@@ -39,7 +39,7 @@ const uniformMixedMomentumUnitWGSL = uniformCachedMomentumSamplingWGSL + /* wgsl
 // umMomentum through the unit sampler (umUnitEscaped when it cannot).
 fn umUnitMomentum(owner:UMOwner,face:UMFace)->f32 {
  if(umCullAir&&!umPredictionCellLive(owner)&&!umPredictionCellLive(face.neighbor)){return 0.0;}
- if(face.anchor[face.axis]<0||umClosedPositive(face)){return umOriginalMomentum(face);}
+ if(umFaceLow(face.anchor,face.axis)||umClosedPositive(face)){return umOriginalMomentum(face);}
  if(umDropFace(face)){return 0.0;}
  let departure=umUnitDeparture(umFaceCenter(face),momentum.hDt.w,momentum.hDt.xyz);
  if(umUnitEscaped){return 0.0;}
@@ -58,7 +58,7 @@ var<workgroup> umUnitEscapes:array<atomic<u32>,2>;
  var value=0.0;umUnitEscaped=false;
  if(owner.width!=0u){
   let origin=umOrigin(owner);
-  if(origin[axis]==0u){boundary[umNegativeBoundaryIndex(origin,axis)]=umUnitMomentum(owner,umFace(owner,axis,-1,0u));}
+  if(umLowOpen(vec3i(origin))[axis]){boundary[umLowFaceIndex(origin,axis)]=umUnitMomentum(owner,umFace(owner,axis,-1,0u));}
   value=umUnitMomentum(owner,umFace(owner,axis,1,0u));
   if(umUnitEscaped){atomicOr(&umUnitEscapes[cell/32u],1u<<(cell%32u));}
  }
@@ -182,16 +182,16 @@ export class UniformMixedMomentum {
     if(this.cullAir&&!fields.centerPhi)throw new Error("Prediction culling requires current center phi");
     if(this.hanging!==(fields.unitVelocity!==undefined))throw new Error("Mixed momentum hanging taps require their unit velocity texture");
     const textures = [fields.extended, fields.physical, fields.phase, fields.volume];
-    const d = this.ownership.capacity.lattice.dimensions;
+    const address = this.ownership.capacity.address, d = address.cells;
     for (const [i, texture] of [...textures, fields.output].entries()) {
       if (uniformDetailExtent(texture).some((n, a) => n !== d[a])
         || texture.format !== (i === 2 || i === 3 ? "r32float" : "rgba32float")) throw new Error("Mixed momentum requires native-sized canonical fields");
     }
     for(const t of [fields.coarseExtended])
-      if(t.format!=="rgba32float"||uniformDetailExtent(t).some((n,a)=>n!==d[a]!/4+2))throw new Error("Mixed momentum requires a current 4h sampling cache");
+      if(t.format!=="rgba32float"||uniformDetailExtent(t).some((n,a)=>n!==address.tileHaloTexture[a]))throw new Error("Mixed momentum requires a current 4h sampling cache");
     if (textures.includes(fields.output) || fields.negative === fields.outputNegative) throw new Error("Mixed momentum output must be disjoint from its inputs");
     for (const buffer of [fields.negative, fields.outputNegative])
-      if (buffer.size < 4 * (d[0] * d[1] + d[0] * d[2] + d[1] * d[2])) throw new Error("Mixed momentum requires complete negative boundary planes");
+      if (buffer.size < 4 * address.lowFaceKeys) throw new Error("Mixed momentum requires complete negative boundary planes");
     return uniformDetailGroup(this.device,{ layout: this.resources, entries: [
       ...textures.map((texture, binding) => ({ binding, resource: texture })),
       { binding: 6, resource: { buffer: fields.negative } },
@@ -223,29 +223,29 @@ ${this.hanging?"@group(1) @binding(16) var unitVelocity:texture_3d<f32>;":""}
 override umCullAir:bool=false;
 ${this.sourceParams?uniformMixedSourceWGSL(17)+uniformMixedFarAirWGSL("umSourceinflowStrength()>0.0"):""}
 ${uniformMixedFaceAddressWGSL}
+// The 4h cache keeps a one-tile halo for the low planes (umTileHaloTexel).
 fn umLoadCoarseFace(index:vec3i,axis:u32)->f32 {
- return textureLoad(coarseExtended,index+vec3i(1),0)[axis];
+ return textureLoad(coarseExtended,umTileHaloTexel(index),0)[axis];
 }
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32 {
- if(anchor[axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(anchor,vec3i(0))),axis)];}return textureLoad(extended,anchor,0)[axis];
+ if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)];}return textureLoad(extended,anchor,0)[axis];
 }
 ${uniformMixedVelocitySamplingSource(false,true,"extended",this.hanging?2:undefined,this.hanging?"unitVelocity":undefined)}
 fn umClampMomentum(p:vec3f)->vec3f {
- var q=p;q.x=clamp(q.x,0.0,f32(UM_D.x));q.z=clamp(q.z,0.0,f32(UM_D.z));q.y=max(q.y,0.0);
- if(momentum.flags.x==0u){q.y=min(q.y,f32(UM_D.y));}return q;
+ var q=umPointNear(p);if(momentum.flags.x!=0u){q.y=max(p.y,0.0);}return q;
 }
 fn umMomentumDeparture(position:vec3f,dt:f32,h:vec3f)->vec3f {
-${uniformVelocityDepartureWGSL("umSampleVelocity", "umClampMomentum", "select(f32(umOwnerAt(clamp(vec3i(floor(point)),vec3i(0),vec3i(UM_D)-vec3i(1))).width),1.0,umRegularFine)", "32")}
+${uniformVelocityDepartureWGSL("umSampleVelocity", "umClampMomentum", "select(f32(umOwnerAt(umCellNear(vec3i(floor(point)))).width),1.0,umRegularFine)", "32")}
 }
 fn umOriginalMomentum(face:UMFace)->f32 {
- if(face.anchor[face.axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
+ if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
  // A 4h-wide patch's anchor is canonical: the base block where the h store
  // keeps only the ring (UNIFORM_DETAIL_RING_4H_LOAD).
  if(face.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(physical,face.anchor,0)[face.axis];}
  return textureLoad(physical,face.anchor,0)[face.axis];
 }
 fn umClosedPositive(face:UMFace)->bool {
- return face.anchor[face.axis]==i32(UM_D[face.axis])-1 && !(face.axis==1u && momentum.flags.x!=0u);
+ return umAcrossKind(face.anchor,face.axis,1)==UM_SOLID;
 }
 fn umAdvectedMomentum(face:UMFace,dt:f32)->f32 {
  return umSampleVelocityComponent(umMomentumDeparture(umFaceCenter(face),dt,momentum.hDt.xyz),face.axis);
@@ -274,7 +274,7 @@ fn umMomentum(owner:UMOwner,face:UMFace)->f32 {
  // contact inequality alone releases it. A positive wall that also took an
  // advected away-velocity (min) released where its negative mirror could
  // not, so a D4-symmetric flow drifted off its symmetry at the walls.
- if(face.anchor[face.axis]<0||umClosedPositive(face)){return umOriginalMomentum(face);}
+ if(umFaceLow(face.anchor,face.axis)||umClosedPositive(face)){return umOriginalMomentum(face);}
  if(umDropFace(face)){return 0.0;}
  return umAdvectedMomentum(face,momentum.hDt.w);
 }
@@ -296,7 +296,7 @@ var<workgroup> umMomentumComponents:array<f32,192>;
  var value=0.0;
  if(owner.width!=0u){
   let origin=umOrigin(owner);
-  if(origin[axis]==0u){boundary[umNegativeBoundaryIndex(origin,axis)]=umMomentum(owner,umRegularMomentumFace(owner,axis,-1));}
+  if(umLowOpen(vec3i(origin))[axis]){boundary[umLowFaceIndex(origin,axis)]=umMomentum(owner,umRegularMomentumFace(owner,axis,-1));}
   value=umMomentum(owner,umRegularMomentumFace(owner,axis,1));
  }
  umMomentumComponents[lane]=value;workgroupBarrier();

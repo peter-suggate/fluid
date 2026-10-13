@@ -113,7 +113,8 @@ export interface UniformPressureBandFields {
  velocity:GPUTexture;negative:GPUBuffer;copy:GPUTexture;
  /** Accepted 4h pressure, indexed by the all-4h pressure ownership. */
  coarsePressure:GPUBufferBinding;
- /** h.xyz, dt; density, openTop, dt/density, min h; the residual target
+ /** h.xyz, dt; density, openTop (not read: the kinds hold it), dt/density,
+  * min h; the residual target
   * (1/s, the h-equivalent pressure tolerance), then 1/h^2 per axis (f32):
   * a face whose coefficient is exactly that is flagged, and its sweeps skip
   * the coefficient load. Then four u32 the band writes itself: its slot
@@ -210,7 +211,7 @@ export class UniformPressureBand {
   readonly schedule:UniformPressureBandSchedule=UNIFORM_PRESSURE_BAND_SCHEDULE,
   /** Static solids, with the all-4h record (its cut-tile flags). */
   private readonly solid?:UniformMixedSolid,readonly spatialOrder=true){
-  const layout=simulation.layout,tiles=layout.tiles.length;
+  const layout=simulation.layout,tiles=simulation.capacity.address.tileKeys;
   if(pressure.layout.tiles.some(word=>(word&0xc0000000)!==0))throw new Error("The pressure band's global stage must be all-4h");
   if(solid&&!solid.coarse)throw new Error("The solid pressure band needs the all-4h solid record");
   if(schedule.cycles<1||schedule.cycles>=HISTORY)throw new Error(`Pressure band cycles must be 1..${HISTORY-1}`);
@@ -228,7 +229,7 @@ export class UniformPressureBand {
    list:[params,buffer(2),buffer(3,"read-only-storage"),texture(6)],
    copy:[params,buffer(2),texture(22),{binding:23,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}}],
    prep:[params,buffer(2),buffer(3,"read-only-storage"),texture(4),texture(6),texture(7),buffer(8,"read-only-storage"),buffer(9),buffer(10)],
-   init:[params,buffer(2),buffer(9),buffer(10),texture(11),buffer(12,"read-only-storage"),buffer(13,"read-only-storage"),buffer(14,"read-only-storage")],
+   init:[params,buffer(2),buffer(9),buffer(10),texture(11),buffer(12,"read-only-storage"),buffer(13,"read-only-storage")],
    solver,
    project:[...solver,texture(15),{binding:16,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},buffer(17),buffer(21)],
   };
@@ -240,7 +241,7 @@ export class UniformPressureBand {
  static rowBytes(capacity:number,solid:boolean):number{return 4*(solid?SOLID_ROW_FIELDS:ROW_FIELDS)*64*capacity;}
  /** Bytes of the capacity-sized buffers at `capacity` band tiles. */
  bytesAt(capacity:number):{rows:number;aggregates:number;iterate:number}{
-  const d=this.simulation.capacity.lattice.dimensions,halo=2*(d[0]!*d[1]!+d[0]!*d[2]!+d[1]!*d[2]!);
+  const d=this.simulation.capacity.address.cells,halo=2*(d[0]*d[1]+d[0]*d[2]+d[1]*d[2]);
   return {rows:UniformPressureBand.rowBytes(capacity,!!this.solid),aggregates:4*(8*MIDDLE_FIELDS+COARSE_FIELDS)*capacity,iterate:4*(64*capacity+halo)};
  }
  /** The capacity-sized buffers (rows, aggregates, iterate) and every group,
@@ -248,7 +249,7 @@ export class UniformPressureBand {
   * (each solve lists, assembles and starts anew), so a new capacity is a
   * reallocation and a rebind, no copy. */
  private allocate():void{
-  const device=this.device,c=this.simulation.capacity,d=c.lattice.dimensions;
+  const device=this.device,c=this.simulation.capacity;
   const capacity=this.fields.capacity??UniformPressureBand.capacityOf(c.tiles,c.fineTiles);
   if(!Number.isInteger(capacity)||capacity<1||capacity>c.tiles)throw new Error(`The pressure band cannot hold ${capacity} of ${c.tiles} tiles`);
   const rows=capacity*64,bytes=this.bytesAt(capacity);
@@ -265,18 +266,18 @@ export class UniformPressureBand {
   this.solve=device.createBuffer({label:"Uniform pressure band iterate",size:bytes.iterate,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   // BandParams.capacity: slots, rows per field, 2h aggregates per field, presentation offset.
   device.queue.writeBuffer(this.fields.params,48,new Uint32Array([capacity,rows,8*capacity,this.fields.presentation.word]));
-  const f=this.fields,cells=c.owners,faces=d[0]!*d[1]!+d[0]!*d[2]!+d[1]!*d[2]!;
+  const f=this.fields,cells=c.owners,faces=c.address.lowFaceKeys;
   const scalars=(view:GPUBufferBinding,count:number):GPUBufferBinding=>{
    const offset=view.offset??0;if((view.size??view.buffer.size-offset)<4*count)throw new Error("Pressure band field view is too small");return {buffer:view.buffer,offset,size:4*count};
   };
-  const pressure=this.pressure,coarse=pressure.capacity.tiles;
+  const pressure=this.pressure,coarse=pressure.capacity.owners;
   const rowsView={buffer:this.rows,size:bytes.rows};
   const P={0:{buffer:f.params,size:64}},solverResources={...P,2:{buffer:this.index},9:rowsView,10:{buffer:this.solve},18:{buffer:this.coarse}};
   const resources:Record<string,Record<number,GPUBindingResource>>={
    list:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),6:f.vertexPhi},
    copy:{...P,2:{buffer:this.index},22:f.velocity,23:f.copy},
    prep:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),4:f.correction,6:f.vertexPhi,7:f.forced.velocity,8:{buffer:f.forced.negative,size:4*faces},9:rowsView,10:{buffer:this.solve}},
-   init:{...P,2:{buffer:this.index},9:rowsView,10:{buffer:this.solve},11:f.velocity,12:scalars(f.coarsePressure,coarse),13:scalars(f.coarsePhi??f.phi,coarse),14:pressure.presentation},
+   init:{...P,2:{buffer:this.index},9:rowsView,10:{buffer:this.solve},11:f.velocity,12:scalars(f.coarsePressure,coarse),13:scalars(f.coarsePhi??f.phi,coarse)},
    solver:solverResources,
    project:{...solverResources,15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces},21:{buffer:f.presentation.buffer}},
   };
@@ -325,12 +326,13 @@ fn bInside(kinds:u32)->bool{return (kinds&0x40000000u)!=0u;}
 // continues its open neighbours and is not its own depth.
 fn bShut(kinds:u32)->bool{return (kinds&0x20000000u)!=0u;}
 fn bSign(f:u32)->i32{return select(-1,1,(f&1u)==1u);}
-// The native one-cell wall halo at h, after every band cell.
+// The native one-cell wall halo at h, after every band cell: the six faces
+// of the box.
 fn bHalo(p:vec3i,axis:u32,sign:i32)->u32{
  let q=vec3u(p);let side=select(0u,1u,sign>0);var slot=0u;
- if(axis==0u){slot=side*UM_D.y*UM_D.z+q.y+UM_D.y*q.z;}
- else if(axis==1u){slot=2u*UM_D.y*UM_D.z+side*UM_D.x*UM_D.z+q.x+UM_D.x*q.z;}
- else{slot=2u*(UM_D.y*UM_D.z+UM_D.x*UM_D.z)+side*UM_D.x*UM_D.y+q.x+UM_D.x*q.y;}
+ if(axis==0u){slot=side*UM_BOX.y*UM_BOX.z+q.y+UM_BOX.y*q.z;}
+ else if(axis==1u){slot=2u*UM_BOX.y*UM_BOX.z+side*UM_BOX.x*UM_BOX.z+q.x+UM_BOX.x*q.z;}
+ else{slot=2u*(UM_BOX.y*UM_BOX.z+UM_BOX.x*UM_BOX.z)+side*UM_BOX.x*UM_BOX.y+q.x+UM_BOX.x*q.y;}
  return bN()+slot;
 }
 `;
@@ -351,10 +353,10 @@ fn bConverged()->bool{return bConvergedBefore(${schedule.cycles}u);}
 fn bLive()->u32{return select(bCount(),0u,bConverged());}
 fn bTile(s:u32)->vec3u{return umTileCoord(bIndex(LIST+s));}
 // Slot + 1 of the band tile at tile coordinate c, 0 outside the band.
-fn bSlotAt(c:vec3i)->u32{if(any(c<vec3i(0))||any(c>=vec3i(UM_T))){return 0u;}return bIndex(SLOTS+umTileAt(vec3u(c)));}
+fn bSlotAt(c:vec3i)->u32{if(!umTilePresent(c)){return 0u;}return bIndex(SLOTS+umTileAt(vec3u(c)));}
 // Band cell index + 1 at an h position, 0 outside the band.
 fn bCellAt(q:vec3i)->u32{
- if(any(q<vec3i(0))||any(q>=vec3i(UM_D))){return 0u;}
+ if(!umCellPresent(q)){return 0u;}
  let u=vec3u(q);let slot=bIndex(SLOTS+umTileAt(u/4u));if(slot==0u){return 0u;}
  return (slot-1u)*64u+bRow(u%4u)+1u;
 }
@@ -506,7 +508,7 @@ fn bC(k:u32,s:u32)->u32{return 9u*params.capacity.z+k*bCap()+s;}
 // The 2h aggregate + 1 across face f of aggregate c, 0 outside the band.
 fn bMiddleNeighbour(c:u32,f:u32)->u32{
  let s=c/8u;let axis=f/2u;var g=vec3i(bTile(s)*2u+bMiddleLocal(c%8u));g[axis]+=bSign(f);
- if(g[axis]<0||g[axis]>=2*i32(UM_T[axis])){return 0u;}
+ if(!umTilePresent(g>>vec3u(1u))){return 0u;}
  let slot=bSlotAt(g/2);if(slot==0u){return 0u;}
  let l=vec3u(g%2);return (slot-1u)*8u+l.x+2u*l.y+4u*l.z+1u;
 }
@@ -588,25 +590,17 @@ var<workgroup> member:atomic<u32>;
    listPrefix:header+indexed(true)+/* wgsl */`
 const B_BLOCKS=(UM_TILES+255u)/256u;
 const B_TOTALS=SLOTS+UM_TILES;
-fn bSpatialTile(i:u32)->u32{
- if(any((UM_T%vec3u(4u))!=vec3u(0u))){return i;}
- // WGSL validates constant divisors even in the branch skipped above.
- // Small grids use linear order, but must still compile this tiled path.
- let blocks=max(UM_T/4u,vec3u(1u));
- let block=i/64u;let b=vec3u(block%blocks.x,(block/blocks.x)%blocks.y,block/(blocks.x*blocks.y));
- let k=i%64u;let l=vec3u((k&1u)|((k>>2u)&2u),((k>>1u)&1u)|((k>>3u)&2u),((k>>2u)&1u)|((k>>4u)&2u));
- return umTileAt(4u*b+l);
-}
+// The list is in tile key order: a member's rank among the members below it.
 var<workgroup> prefix:array<u32,256>;
 @compute @workgroup_size(256) fn main(${slots}){
  let i=256u*group.x+lane;var count=0u;
- if(i<UM_TILES){count=atomicLoad(&index[SLOTS+bSpatialTile(i)]);}
+ if(i<UM_TILES){count=atomicLoad(&index[SLOTS+i]);}
  prefix[lane]=count;workgroupBarrier();
  for(var stride=1u;stride<256u;stride*=2u){
   var add=0u;if(lane>=stride){add=prefix[lane-stride];}
   workgroupBarrier();prefix[lane]+=add;workgroupBarrier();
  }
- if(i<UM_TILES){atomicStore(&index[SLOTS+bSpatialTile(i)],select(0u,prefix[lane],count!=0u));}
+ if(i<UM_TILES){atomicStore(&index[SLOTS+i],select(0u,prefix[lane],count!=0u));}
  if(lane==255u){atomicStore(&index[B_TOTALS+group.x],prefix[lane]);}
 }`,
    listOffsets:header+indexed(true)+/* wgsl */`
@@ -627,16 +621,10 @@ var<workgroup> prefix:array<u32,256>;
 }`,
    listScatter:header+indexed(true)+/* wgsl */`
 const B_TOTALS=SLOTS+UM_TILES;
-fn bSpatialRank(t:vec3u)->u32{
- if(any((UM_T%vec3u(4u))!=vec3u(0u))){return umTileAt(t);}
- let b=t/4u;let l=t%4u;
- let k=(l.x&1u)|((l.y&1u)<<1u)|((l.z&1u)<<2u)|((l.x&2u)<<2u)|((l.y&2u)<<3u)|((l.z&2u)<<4u);
- return 64u*(b.x+(UM_T.x/4u)*(b.y+(UM_T.y/4u)*b.z))+k;
-}
 @compute @workgroup_size(256) fn main(${slots}){
- let t=256u*group.x+lane;if(t>=UM_TILES){return;}
+ let t=256u*group.x+lane;if(!umTileLive(t)){return;}
  let local=atomicLoad(&index[SLOTS+t]);if(local==0u){return;}
- let slot=atomicLoad(&index[B_TOTALS+bSpatialRank(umTileCoord(t))/256u])+local-1u;
+ let slot=atomicLoad(&index[B_TOTALS+t/256u])+local-1u;
  if(slot<bCap()){atomicStore(&index[LIST+slot],t);atomicStore(&index[SLOTS+t],slot+1u);}else{atomicStore(&index[SLOTS+t],0u);}
 }`,
    prep:header+indexed(false)+theta+surface+/* wgsl */`
@@ -648,12 +636,12 @@ fn bSpatialRank(t:vec3u)->u32{
 @group(1) @binding(8) var<storage,read> negative:array<f32>;
 fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
  var a=p;if(sign<0){a[axis]-=1;}
- if(a[axis]<0){return negative[umNegativeBoundaryIndex(vec3u(p),axis)];}
+ if(umFaceLow(a,axis)){return negative[umLowFaceIndex(vec3u(p),axis)];}
  return textureLoad(velocity,a,0)[axis];
 }
 // Row assembly, baked once per solve.
 @compute @workgroup_size(64) fn main(${slots}){
- let N=bN();
+ let N=bN();let l=bLocal(lane);
  for(var s=group.x;s<bCount();s+=groups.x){
   let p=vec3i(bTile(s)*4u+bLocal(lane));let cell=s*64u+bRow(bLocal(lane));
   let own=bPhiH(p);let liquid=bWet(own,1.0);${S?"let shut=!umCellIsOpen(p);":""}
@@ -664,8 +652,11 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
    let axis=f/2u;let sign=bSign(f);let h=params.hDt[axis];var q=p;q[axis]+=sign;
    let forced=bForcedField(p,axis,sign);var kind=K_GHOST;var coefficient=0.0;var fraction=1.0;
    ${S?"var low=p;if(sign<0){low[axis]-=1;}let volume=umPressureFaceV(low,axis);var sealed=false;":""}
-   if(q[axis]<0||q[axis]>=i32(UM_D[axis])){
-    if(axis==1u&&sign>0&&params.policy.y>0.5){kind=K_OPEN;coefficient=1.0/(h*h*bTheta(own,0.5*params.policy.w));}
+   // What lies across the face. A band tile's cells are stored: only a face
+   // out of the tile asks.
+   var across=UM_RESIDENT;if(l[axis]==select(0u,3u,sign>0)){across=umCellKind(q);}
+   if(across!=UM_RESIDENT){
+    if(across==UM_AIR){kind=K_OPEN;coefficient=1.0/(h*h*bTheta(own,0.5*params.policy.w));}
     else{kind=K_WALL;coefficient=0.5/(h*h);fraction=0.5;}
    }else{
     let n=bNeighbour(q);
@@ -758,18 +749,20 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
 @group(1) @binding(11) var velocity:texture_3d<f32>;
 @group(1) @binding(12) var<storage,read> coarsePressure:array<f32>;
 @group(1) @binding(13) var<storage,read> coarsePhi:array<f32>;
-@group(1) @binding(14) var<storage,read> coarseTopology:array<u32>;
+// The root's owner of a box tile is its box index, whatever is stored there:
+// a tile with nothing stored is a row too (far air, UniformMixedRootOwners),
+// and no tile key is its own.
 // (pressure, phi) of a liquid 4h owner, weight 1; zero for an air one and
 // for a closed one (its phi continues its liquid neighbours; it has no row).
 fn bCoarse(c:vec3i)->vec3f{
- let t=umTileAt(vec3u(clamp(c,vec3i(0),vec3i(UM_T)-vec3i(1))));let i=coarseTopology[t]&0x3fffffffu;
- return select(vec3f(0.0),vec3f(coarsePressure[i],coarsePhi[i],1.0),bWet(coarsePhi[i],4.0)&&umTileOpen(t)>1e-5);
+ let q=umTileNear(c);let i=umBoxTileIndex(vec3u(q));
+ return select(vec3f(0.0),vec3f(coarsePressure[i],coarsePhi[i],1.0),bWet(coarsePhi[i],4.0)&&umTileOpenAt(q)>1e-5);
 }
 // A 4h owner as (pressure, liquid, air): bCoarse's liquid owner, and an open
 // one that is not liquid; a closed one is neither.
 fn bCoarseKind(c:vec3i)->vec3f{
- let t=umTileAt(vec3u(clamp(c,vec3i(0),vec3i(UM_T)-vec3i(1))));let i=coarseTopology[t]&0x3fffffffu;
- let open=umTileOpen(t)>1e-5;let wet=bWet(coarsePhi[i],4.0);
+ let q=umTileNear(c);let i=umBoxTileIndex(vec3u(q));
+ let open=umTileOpenAt(q)>1e-5;let wet=bWet(coarsePhi[i],4.0);
  return vec3f(select(0.0,coarsePressure[i],open&&wet),f32(open&&wet),f32(open&&!wet));
 }
 // What a row missing owners from its stencil b, b+1 (weights w) is carried
@@ -782,7 +775,7 @@ fn bCoarseKind(c:vec3i)->vec3f{
 // above b and their weight. air: the air owners' weight.
 struct BCarry {rise:vec2f,height:vec2f,air:f32}
 fn bCoarseCarry(b:vec3i,w:vec3f)->BCarry{
- var carry:BCarry;let top=i32(UM_T.y)-1;
+ var carry:BCarry;let top=i32(UM_BOX_TILES.y)-1;
  for(var k=0u;k<4u;k++){
   let bit=vec2u(k&1u,k>>1u);let sides=select(1.0-w.xz,w.xz,bit==vec2u(1u));let side=sides.x*sides.y;
   let c=b+vec3i(i32(bit.x),0,i32(bit.y));let y0=clamp(c.y,0,top);let y1=clamp(c.y+1,0,top);
@@ -1127,8 +1120,10 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   // separating side's pressure.
   var q=p;q[axis]+=1;let own=umCellIsOpen(p);
   if(own==umCellIsOpen(q)||volume<=1e-6){return false;}
-  var pressure=0.0;
-  if(q[axis]>=i32(UM_D[axis])){pressure=select(0.0,solve[bHalo(p,axis,sign)]+bBase(cell),bLiquid(bKinds(cell))&&!(axis==1u&&params.policy.y>0.5));}
+  // Nothing stored across the face: row assembly baked what lies there, a
+  // wall (its halo's pressure) or an opening (the ambient 0).
+  var pressure=0.0;let kind=bFaceKind(bKinds(cell),f);
+  if(kind==K_WALL||kind==K_OPEN){pressure=select(0.0,solve[bHalo(p,axis,sign)]+bBase(cell),bLiquid(bKinds(cell))&&kind==K_WALL);}
   else if(own){let b=bCellAt(q);if(b!=0u&&bLiquid(bKinds(b-1u))){pressure=solve[b-1u]+bBase(b-1u);}}
   else if(bLiquid(bKinds(cell))){pressure=solve[cell]+bBase(cell);}
   // Separation is relative to the wall's own motion (native wall[axis]).
@@ -1146,12 +1141,12 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    // A band cell's own texel: its three positive faces and wall releases.
    let p=origin+vec3i(bLocal(lane));let cell=s*64u+bRow(bLocal(lane));var texel=vec4f(0.0);var released=0u;
    // Pressure publication uses the same row and lane as its projected cell.
-   presented[params.capacity.w+s*64u+lane]=bBase(cell)+solve[cell];
+   presented[params.capacity.w+s*64u+lane]=bBase(cell)+solve[cell];let lowOpen=umLowOpen(p);
    for(var axis=0u;axis<3u;axis++){
     let value=bFace(cell,p,2u*axis+1u);texel[axis]=value;
     if(bReleased(cell,p,2u*axis+1u,value)){released|=1u<<axis;}
-    if(p[axis]==0){
-     let low=bFace(cell,p,2u*axis);boundary[umNegativeBoundaryIndex(vec3u(p),axis)]=low;
+    if(lowOpen[axis]){
+     let low=bFace(cell,p,2u*axis);boundary[umLowFaceIndex(vec3u(p),axis)]=low;
      if(bReleased(cell,p,2u*axis,low)){released|=1u<<(axis+3u);}
     }
    }
@@ -1161,7 +1156,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    // components. The first band tile along x, then y, then z writes it.
    let axis=(lane-64u)/16u;let k=(lane-64u)%16u;var l=vec3i(0);
    l[axis]=-1;l[(axis+1u)%3u]=i32(k%4u);l[(axis+2u)%3u]=i32(k/4u);let q=origin+l;
-   if(q[axis]<0||bCellAt(q)!=0u){continue;}
+   if(!umCellPresent(q)||bCellAt(q)!=0u){continue;}
    var first=true;
    for(var a=0u;a<axis;a++){var r=q;r[a]+=1;if(bCellAt(r)!=0u){first=false;}}
    if(!first){continue;}
@@ -1185,7 +1180,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    if(lane>=112u){continue;}
    let axis=(lane-64u)/16u;let k=(lane-64u)%16u;var l=vec3i(0);
    l[axis]=-1;l[(axis+1u)%3u]=i32(k%4u);l[(axis+2u)%3u]=i32(k/4u);q=origin+l;
-   if(q[axis]<0||bCellAt(q)!=0u){continue;}
+   if(!umCellPresent(q)||bCellAt(q)!=0u){continue;}
    var first=true;
    for(var a=0u;a<axis;a++){var r=q;r[a]+=1;if(bCellAt(r)!=0u){first=false;}}
    if(!first){continue;}

@@ -1,8 +1,18 @@
 import { ParticleBinScan } from "./particle-bin-scan";
+import { UNIFORM_PAGE_TABLE_WORDS, uniformKeyGroups, uniformLatticeAddressWGSL, type UniformLatticeAddress } from "./uniform-lattice-address";
 
 /** The stage's pass descriptors: begun every frame, built once. */
-const PREPARE_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP clear occupied bins"},COUNT_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP spatial tile counts"};
+const PREPARE_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP clear occupied bins"};
 const PREFIX_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP occupied cell offsets"},PACK_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP order pack"};
+/** Workgroups of every launch over the live samples, one row. A kernel reads
+ * the count on the GPU and strides the launch through it, 64 samples a group
+ * a turn, so any width is complete at any count up to the capacity. This one
+ * is the ownership's counted launches' (262,144 lanes): enough to fill the
+ * GPU, few enough that a launch with little live stays cheap. Letters, the
+ * five passes that hold these launches, against a group a sample block: 1.28
+ * ms for 1.30 under half a million samples (most groups idle), 5.62 for 5.58
+ * over 1.25 million (five turns a group; the snapshot alone 0.85 for 0.74). */
+export const NARROW_BAND_PARTICLE_GRID=4096;
 
 /** Reorder the live particles by cell without a bucket limit or another
  * particle allocation. The expired source epoch becomes the sorted output.
@@ -20,41 +30,45 @@ export class UniformNarrowBandOrder {
  private readonly enabled:GPUBuffer;
  private readonly dimensions:GPUBuffer;
  private readonly tileOffsets?:GPUBuffer;
- private readonly spatialCounts?:GPUBuffer;
- private spatialPipeline?:GPUComputePipeline;
  private preparePipeline!:GPUComputePipeline;
  private prefixPipeline!:GPUComputePipeline;
  private scan!:ParticleBinScan;
  private pipeline!:GPUComputePipeline;
  private groups!:readonly [GPUBindGroup,GPUBindGroup];
- /** Cells of the lattice: every launch width here is a fixed fraction of it. */
+ /** Cell keys of the lattice: the bins' first two banks. */
  private readonly cells:number;
- /** The per-tile launches' grid and the tile count's groups: the lattice's, for life. */
- private readonly tileGroups:readonly [number,number];
- private readonly countGroups:number;
- get allocatedBytes():number{return this.enabled.size+this.dimensions.size+(this.spatialCounts?.size??0)+(this.tileOffsets?.size??0)+(this.scan?.allocatedBytes??0);}
- /** The optional policy override lets small fixtures exercise both paths. */
- constructor(private readonly device:GPUDevice,private readonly dims:readonly number[],private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer,readonly sparse=dims.reduce((n,v)=>n*v,1)>=4_194_304,readonly spatialOrder=sparse&&dims.every(n=>n%16===0)){
-  this.cells=dims.reduce((n,v)=>n*v,1);{const tiles=this.cells/64;this.tileGroups=[Math.min(tiles,65535),Math.ceil(tiles/65535)];this.countGroups=Math.ceil(this.cells/4096);}
+ /** The per-tile launches' grid: the lattice's, for life. */
+ private readonly tileGroups:[number,number]=[0,0];
+ get allocatedBytes():number{return this.enabled.size+this.dimensions.size+(this.tileOffsets?.size??0)+(this.scan?.allocatedBytes??0);}
+ /** topology: the simulation ownership's, whose tail holds the pages. The
+  * optional policy override lets small fixtures exercise both paths. */
+ constructor(private readonly device:GPUDevice,private readonly address:UniformLatticeAddress,private readonly topology:GPUBuffer,private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer,readonly sparse=address.cellKeys>=4_194_304){
+  this.cells=address.cellKeys;uniformKeyGroups(address.tileKeys,1,65535,this.tileGroups);
   // Shared APIC scan's activation record: no failure and an active step.
   // This immutable record makes our sort unconditional, including bootstrap.
   this.dimensions=device.createBuffer({label:"FLIP spatial order dimensions",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-  device.queue.writeBuffer(this.dimensions,0,new Uint32Array([...dims,0]));
+  device.queue.writeBuffer(this.dimensions,0,new Uint32Array([...address.cells,address.blocks]));
   this.enabled=device.createBuffer({label:"FLIP spatial order scan activation",size:88,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-  if(this.sparse)this.tileOffsets=device.createBuffer({label:"FLIP tile offsets",size:dims.reduce((n,v)=>n*v,1)/16,usage:GPUBufferUsage.STORAGE});
-  if(spatialOrder)this.spatialCounts=device.createBuffer({label:"FLIP spatial tile counts",size:dims.reduce((n,v)=>n*v,1)/16,usage:GPUBufferUsage.STORAGE});
+  if(this.sparse)this.tileOffsets=device.createBuffer({label:"FLIP tile offsets",size:4*address.tileKeys,usage:GPUBufferUsage.STORAGE});
   const activation=new Float32Array(22);activation[21]=1;device.queue.writeBuffer(this.enabled,0,activation);
  }
  async initialize():Promise<void>{
-  const cells=this.dims.reduce((n,v)=>n*v,1);
+  const cells=this.address.cellKeys,tiles=this.address.tileKeys;
   // Extra tile counting pays for itself only on large domains. The dense
   // path retains the original scan and clears, without tile storage/atomics.
-  this.scan=await ParticleBinScan.create(this.device,this.sparse?cells/64:cells,
-   this.spatialCounts??{buffer:this.bins,offset:this.sparse?8*cells:0,size:this.sparse?cells/16:4*cells},
+  this.scan=await ParticleBinScan.create(this.device,this.sparse?tiles:cells,
+   {buffer:this.bins,offset:this.sparse?8*cells:0,size:this.sparse?4*tiles:4*cells},
    this.sparse?this.tileOffsets!:{buffer:this.links,offset:0,size:4*cells},this.enabled);
   const module=this.device.createShaderModule({label:"FLIP spatial order",code:/* wgsl */`
 struct Particle{position:vec4f,velocity:vec4f,before:vec4f}
 @group(0) @binding(7) var<uniform> orderDimensions:vec4u;
+// The box and the blocks are this module's uniform, the pages the
+// topology's tail: the address functions read them.
+@group(0) @binding(6) var<storage,read> orderTopology:array<u32>;
+fn orderTiles()->u32{return 512u*orderDimensions.w;}
+fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return orderTopology[5u*orderTiles()+(e.x|(e.y<<6u)|(e.z<<12u))];}
+fn umBlockWord(b:u32)->u32{return orderTopology[5u*orderTiles()+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
+${uniformLatticeAddressWGSL({cells:"orderDimensions.xyz",tiles:"(orderDimensions.xyz/4u)",constant:false,paged:{blocks:"orderDimensions.w",whole:this.address.whole}})}
 @group(0) @binding(0) var<storage,read> input:array<Particle>;
 @group(0) @binding(1) var<storage,read_write> output:array<Particle>;
 // Each cell's count, then its scatter cursor.
@@ -64,91 +78,82 @@ struct Particle{position:vec4f,velocity:vec4f,before:vec4f}
 // The receipt: [0] the input's slots, [1] the live samples packed.
 @group(0) @binding(4) var<storage,read_write> state:array<u32>;
 ${this.sparse?"@group(0) @binding(5) var<storage,read> tileOffsets:array<u32>;":""}
-${this.spatialOrder?`@group(0) @binding(6) var<storage,read_write> spatialCounts:array<u32>;
-fn spatialRank(tile:u32)->u32{
- let dims=(orderDimensions.xyz/4u);
- let t=vec3u(tile%dims.x,(tile/dims.x)%dims.y,tile/(dims.x*dims.y));let b=t/4u;let l=t%4u;
- let k=(l.x&1u)|((l.y&1u)<<1u)|((l.z&1u)<<2u)|((l.x&2u)<<2u)|((l.y&2u)<<3u)|((l.z&2u)<<4u);
- return 64u*(b.x+(dims.x/4u)*(b.y+(dims.y/4u)*b.z))+k;
-}
-@compute @workgroup_size(64) fn countTiles(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x;if(tile<orderTiles()){spatialCounts[spatialRank(tile)]=atomicLoad(&bins[2u*orderCells()+tile]);}
-}`:""}
-fn orderCells()->u32{let d=orderDimensions.xyz;return d.x*d.y*d.z;}
-fn orderTiles()->u32{return orderCells()/64u;}
 ${this.sparse?/* wgsl */`
 var<workgroup> prefix:array<u32,64>;
 var<workgroup> tilePopulation:u32;
 // Only tiles populated by the previous move contain cell counts to clear.
+// Every tile key is visited, one a page holds or not: the scan sums them all.
 @compute @workgroup_size(64) fn prepare(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let tile=group.x+65535u*group.y;if(tile>=orderTiles()){return;}
- let live=atomicLoad(&bins[2u*orderCells()+tile]);
- if(live!=0u){atomicStore(&bins[64u*tile+lane],0u);atomicStore(&bins[orderCells()+64u*tile+lane],0u);}
+ let live=atomicLoad(&bins[2u*UM_CELL_KEYS()+tile]);
+ if(live!=0u){atomicStore(&bins[64u*tile+lane],0u);atomicStore(&bins[UM_CELL_KEYS()+64u*tile+lane],0u);}
  workgroupBarrier();
- if(lane==0u){atomicStore(&bins[2u*orderCells()+tile],0u);}
+ if(lane==0u){atomicStore(&bins[2u*UM_CELL_KEYS()+tile],0u);}
 }
 @compute @workgroup_size(64) fn prefixTile(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=group.x+65535u*group.y;if(tile>=orderTiles()){return;}
- if(lane==0u){tilePopulation=atomicLoad(&bins[2u*orderCells()+tile]);}
+ let tile=group.x+65535u*group.y;if(!umTileLive(tile)){return;}
+ if(lane==0u){tilePopulation=atomicLoad(&bins[2u*UM_CELL_KEYS()+tile]);}
  if(workgroupUniformLoad(&tilePopulation)==0u){return;}
  let cell=64u*tile+lane;let count=atomicLoad(&bins[cell]);prefix[lane]=count;workgroupBarrier();
  for(var stride=1u;stride<64u;stride*=2u){
   var add=0u;if(lane>=stride){add=prefix[lane-stride];}
   workgroupBarrier();prefix[lane]+=add;workgroupBarrier();
  }
- links[cell]=tileOffsets[${this.spatialOrder?"spatialRank(tile)":"tile"}]+prefix[lane]-count;
- atomicStore(&bins[orderCells()+cell],0u);
+ links[cell]=tileOffsets[tile]+prefix[lane]-count;
+ atomicStore(&bins[UM_CELL_KEYS()+cell],0u);
 }
 `:""}
+// The key of a stored cell, or 0xffffffff: a sample whose cell holds no
+// storage (its arrival was fatal) is in no count and joins no run.
+fn orderCellKey(c:vec3u)->u32{
+ let t=umTileKey(vec3i(c>>vec3u(2u)));if(!umKeyStored(t)){return 0xffffffffu;}
+ return 64u*t+((c.x&3u)|((c.y&3u)<<2u)|((c.z&3u)<<4u));
+}
 var<workgroup> packKeys:array<u32,64>;
 var<workgroup> packStarts:array<u32,64>;
 var<workgroup> packCount:u32;
 @compute @workgroup_size(64) fn pack(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- let dims=orderDimensions.xyz;let tiles=dims/4u;
  let job=group.x+groups.x*group.y;
  if(lane==0u){packCount=min(state[0],arrayLength(&input));}
  let count=workgroupUniformLoad(&packCount);
- if(job==0u&&lane==0u){state[1]=${this.sparse?`tileOffsets[orderTiles()-1u]+${this.spatialOrder?"spatialCounts[orderTiles()-1u]":"atomicLoad(&bins[2u*orderCells()+orderTiles()-1u])"}`:"links[orderCells()-1u]+atomicLoad(&bins[orderCells()-1u])"};}
+ if(job==0u&&lane==0u){state[1]=${this.sparse?"tileOffsets[orderTiles()-1u]+atomicLoad(&bins[2u*UM_CELL_KEYS()+orderTiles()-1u])":"links[UM_CELL_KEYS()-1u]+atomicLoad(&bins[UM_CELL_KEYS()-1u])"};}
  for(var base=64u*job;base<count;base+=64u*groups.x*groups.y){
   let i=base+lane;var p=Particle();var key=0xffffffffu;
   if(i<count){p=input[i];if(p.position.x>=0.0){
-   let c=vec3u(p.position.xyz);let t=c/4u;let l=c%4u;
-   key=64u*(t.x+tiles.x*(t.y+tiles.y*t.z))+l.x+4u*l.y+16u*l.z;
+   key=orderCellKey(vec3u(p.position.xyz));
   }}
   packKeys[lane]=key;workgroupBarrier();
   if(key!=0xffffffffu&&(lane==0u||packKeys[lane-1u]!=key)){
    var end=lane+1u;while(end<64u&&packKeys[end]==key){end++;}
-   packStarts[lane]=links[key]+atomicAdd(&bins[orderCells()+key],end-lane);
+   packStarts[lane]=links[key]+atomicAdd(&bins[UM_CELL_KEYS()+key],end-lane);
   }
   workgroupBarrier();
   if(key!=0xffffffffu){
    var first=lane;while(first>0u&&packKeys[first-1u]==key){first--;}
    let next=packStarts[first]+lane-first;output[next]=p;
-   let a=orderCells()+4u*next;let position=bitcast<vec4u>(p.position);
+   let a=UM_CELL_KEYS()+4u*next;let position=bitcast<vec4u>(p.position);
    links[a]=position.x;links[a+1u]=position.y;links[a+2u]=position.z;links[a+3u]=position.w;
   }
   workgroupBarrier();
  }
 }
 `});
-  const layout=this.device.createBindGroupLayout({entries:[{binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},...(this.spatialOrder?[0,1,2,3,4,5,6]:this.sparse?[0,1,2,3,4,5]:[0,1,2,3,4]).map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0||binding===5?"read-only-storage" as const:"storage" as const}}))]});
+  const layout=this.device.createBindGroupLayout({entries:[{binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},...(this.sparse?[0,1,2,3,4,6,5]:[0,1,2,3,4,6]).map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0||binding>=5?"read-only-storage" as const:"storage" as const}}))]});
   const pipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[layout]});
   [this.pipeline,this.preparePipeline,this.prefixPipeline]=await Promise.all((this.sparse?["pack","prepare","prefixTile"]:["pack"]).map(entryPoint=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
-  if(this.spatialOrder)this.spatialPipeline=await this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint:"countTiles"}});
-  this.groups=[0,1].map(parity=>this.device.createBindGroup({layout,entries:[{binding:7,resource:{buffer:this.dimensions}},...[this.particles[1-parity]!,this.particles[parity]!,this.bins,this.links,this.state,...(this.sparse?[this.tileOffsets!]:[]),...(this.spatialOrder?[this.spatialCounts!]:[])].map((buffer,binding)=>({binding,resource:{buffer}}))]})) as [GPUBindGroup,GPUBindGroup];
+  this.groups=[0,1].map(parity=>this.device.createBindGroup({layout,entries:[{binding:7,resource:{buffer:this.dimensions}},{binding:6,resource:{buffer:this.topology}},...[this.particles[1-parity]!,this.particles[parity]!,this.bins,this.links,this.state,...(this.sparse?[this.tileOffsets!]:[])].map((buffer,binding)=>({binding,resource:{buffer}}))]})) as [GPUBindGroup,GPUBindGroup];
  }
  prepare(encoder:GPUCommandEncoder,parity:number):void{
   if(!this.sparse){encoder.clearBuffer(this.bins,0,this.cells*8);return;}
   const pass=encoder.beginComputePass(PREPARE_PASS);pass.setPipeline(this.preparePipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(this.tileGroups[0],this.tileGroups[1]);pass.end();
  }
  /** Dense scan for small domains; occupied-tile cell scans for large ones. */
- encode(encoder:GPUCommandEncoder,parity:number,work?:GPUBuffer):void{
-  if(this.spatialOrder){const pass=encoder.beginComputePass(COUNT_PASS);pass.setPipeline(this.spatialPipeline!);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(this.countGroups);pass.end();}
+ encode(encoder:GPUCommandEncoder,parity:number):void{
   this.scan.encode(encoder);
   if(this.sparse){
    const prefix=encoder.beginComputePass(PREFIX_PASS);prefix.setPipeline(this.prefixPipeline);prefix.setBindGroup(0,this.groups[parity]!);prefix.dispatchWorkgroups(this.tileGroups[0],this.tileGroups[1]);prefix.end();
   }
-  const pass=encoder.beginComputePass(PACK_PASS);pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.groups[parity]!);if(work)pass.dispatchWorkgroupsIndirect(work,0);else pass.dispatchWorkgroups(1024);pass.end();
+  const pass=encoder.beginComputePass(PACK_PASS);pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(NARROW_BAND_PARTICLE_GRID);pass.end();
  }
- destroy():void{this.scan?.destroy();this.enabled.destroy();this.dimensions.destroy();this.tileOffsets?.destroy();this.spatialCounts?.destroy();}
+ destroy():void{this.scan?.destroy();this.enabled.destroy();this.dimensions.destroy();this.tileOffsets?.destroy();}
 }

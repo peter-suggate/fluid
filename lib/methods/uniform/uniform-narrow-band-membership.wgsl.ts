@@ -9,26 +9,26 @@
  * distances (bank A) on the tiles within three; particle membership samples
  * that field independently of h/4h ownership. Outside the reach nothing is
  * stored: a reader there has the level set alone, no nearer than six cells. */
-import { narrowBandLocalNearestWGSL, narrowBandNearestWGSL } from "./uniform-narrow-band-nearest.wgsl";
+import { narrowBandNearestWGSL } from "./uniform-narrow-band-nearest.wgsl";
 
-export function narrowBandMembershipSource(sharedNearest=true):string{return /* wgsl */`
-const NB_DEPTH_A:u32=NB_SURFACE_TILES+UM_T.x*UM_T.y*UM_T.z;
-const NB_DEPTH_B:u32=NB_DEPTH_A+(UM_D.x+1u)*(UM_D.y+1u)*(UM_D.z+1u);
+export const narrowBandMembershipWGSL=/* wgsl */`
+const NB_DEPTH_A:u32=NB_SURFACE_TILES+UM_TILES;
+// Bank A holds a word a vertex key, or the two packed nearest banks (16 words a tile key each) where those are longer.
+const NB_DEPTH_B:u32=NB_DEPTH_A+max(UM_VERTEX_KEYS,UM_CELL_KEYS/2u);
 const NB_NO_SURFACE:u32=0xffffffffu;
 // Tile banks of the search, rebuilt with it: three list counts (candidates,
 // search, distance), a crossing mask of two words a tile (bit x+4y+16z), the
 // reach (1: within two tiles of a crossing, 2: within three), the lists.
 // The fourth count and list are the transfer's: its 4h owners with a gather.
-const NB_BAND_TILES:u32=UM_T.x*UM_T.y*UM_T.z;
-const NB_BAND:u32=NB_DEPTH_B+UM_D.x*UM_D.y*UM_D.z;
+const NB_BAND_TILES:u32=UM_TILES;
+const NB_BAND:u32=NB_DEPTH_B+UM_CELL_KEYS;
 const NB_BAND_MASK:u32=NB_BAND+4u;
 const NB_BAND_REACH:u32=NB_BAND_MASK+2u*NB_BAND_TILES;
 const NB_BAND_CANDIDATES:u32=NB_BAND_REACH+NB_BAND_TILES;
 const NB_BAND_SEARCH:u32=NB_BAND_CANDIDATES+NB_BAND_TILES;
 const NB_BAND_DISTANCE:u32=NB_BAND_SEARCH+NB_BAND_TILES;
 const NB_BAND_SEAM:u32=NB_BAND_DISTANCE+NB_BAND_TILES;
-fn nbCell(i:u32)->vec3u{return vec3u(i%UM_D.x,(i/UM_D.x)%UM_D.y,i/(UM_D.x*UM_D.y));}
-fn nbBandTile(c:vec3u)->u32{let t=c/4u;return t.x+UM_T.x*(t.y+UM_T.y*t.z);}
+fn nbBandTile(c:vec3u)->u32{return umTileAt(c/4u);}
 fn nbBandReach(c:vec3u)->u32{return atomicLoad(&bins[NB_BAND_REACH+nbBandTile(c)]);}
 fn nbBandCrossing(c:vec3u)->bool{
  let l=c&vec3u(3u);
@@ -39,7 +39,7 @@ fn nbBandCrossing(c:vec3u)->bool{
 // Fine vertices and 4-aligned coarse corners have one nonzero weight; other
 // coarse lattice vertices retain the sampler's complete ordered D4 sum.
 fn nbCrossingVertex(p:vec3u)->f32{
- let cell=min(p,UM_D-vec3u(1u));let width=umTileWidth(umTileAt(cell/4u));
+ let cell=vec3u(umCellNear(vec3i(p)));let width=umTileWidth(umTileAt(cell/4u));
  if(width==1u){return umLoadVertex(p);}
  if(all((p&vec3u(3u))==vec3u(0u))){return umLoadCorner(p);}
  return umSampleVertex(vec3f(p));
@@ -49,10 +49,11 @@ fn nbCrossingVertex(p:vec3u)->f32{
 // be stored h vertices, so it is listed with the h tiles and decided there.
 @compute @workgroup_size(64) fn depthTiles(@builtin(global_invocation_id) gid:vec3u){
  for(var t=gid.x;t<NB_BAND_TILES;t+=65536u){
+  if(!umTileLive(t)){continue;}
   // Pure 4h Eulerian surfaces neither reconstruct particles nor redistance
   // h vertices. Search only where fine geometry or live/activating samples
   // need it; the existing reach dilation supplies the inner overlap collar.
-  if(nbAdaptive()&&umTileMinimumWidth(t)==4u&&atomicLoad(&bins[NB_SURFACE_TILES+t])==0u&&bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+t]))<=0.0){continue;}
+  if(umTileMinimumWidth(t)==4u&&atomicLoad(&bins[NB_SURFACE_TILES+t])==0u&&bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+t]))<=0.0){continue;}
   var candidate=true;
   if(umTileMinimumWidth(t)==4u){
    let origin=4u*umTileCoord(t);var low=3.0e38;var high=-3.0e38;
@@ -82,12 +83,13 @@ var<workgroup> nbBandMask:array<atomic<u32>,2>;
  if(lane<2u){atomicStore(&bins[NB_BAND_MASK+2u*tile+lane],mask[lane]);}
  for(var k=lane;k<343u;k+=128u){
   let o=vec3i(umCorner(k,7u))-3;let t=vec3i(coord)+o;
-  if(any(t<vec3i(0))||any(t>=vec3i(UM_T))){continue;}
-  atomicOr(&bins[NB_BAND_REACH+u32(t.x)+UM_T.x*(u32(t.y)+UM_T.y*u32(t.z))],select(3u,2u,any(abs(o)>vec3i(2))));
+  if(!umTilePresent(t)){continue;}
+  atomicOr(&bins[NB_BAND_REACH+umTileAt(vec3u(t))],select(3u,2u,any(abs(o)>vec3i(2))));
  }
 }
 @compute @workgroup_size(64) fn depthLists(@builtin(global_invocation_id) gid:vec3u){
  for(var t=gid.x;t<NB_BAND_TILES;t+=65536u){
+  if(!umTileLive(t)){continue;}
   let reach=atomicLoad(&bins[NB_BAND_REACH+t]);
   if((reach&1u)!=0u){let slot=atomicAdd(&bins[NB_BAND+1u],1u);atomicStore(&bins[NB_BAND_SEARCH+slot],t);}
   if((reach&2u)!=0u){let slot=atomicAdd(&bins[NB_BAND+2u],1u);atomicStore(&bins[NB_BAND_DISTANCE+slot],t);}
@@ -96,43 +98,40 @@ var<workgroup> nbBandMask:array<atomic<u32>,2>;
 // The crossings of one x row, 14 cells from five below the tile: its own
 // four and five either side, read from the masks of the five tiles across.
 fn nbBandRow(coord:vec3u,y:i32,z:i32)->u32{
- if(y<0||z<0||y>=i32(UM_D.y)||z>=i32(UM_D.z)){return 0u;}
+ if(!umCellPresent(vec3i(4*i32(coord.x),y,z))){return 0u;}
  let shift=4u*(u32(y)&3u)+16u*(u32(z)&1u);let word=(u32(z)&3u)>>1u;var bits=0u;
  for(var o=-2;o<=2;o++){
-  let x=i32(coord.x)+o;if(x<0||x>=i32(UM_T.x)){continue;}
-  let nibble=(atomicLoad(&bins[NB_BAND_MASK+2u*(u32(x)+UM_T.x*(u32(y)/4u+UM_T.y*(u32(z)/4u)))+word])>>shift)&15u;
+  let t=vec3i(i32(coord.x)+o,y>>2u,z>>2u);if(!umTilePresent(t)){continue;}
+  let nibble=(atomicLoad(&bins[NB_BAND_MASK+2u*umTileAt(vec3u(t))+word])>>shift)&15u;
   if(o==-2){bits|=nibble>>3u;}else{bits|=nibble<<u32(4*o+5);}
  }
  return bits&0x3fffu;
 }
-${sharedNearest?narrowBandNearestWGSL:narrowBandLocalNearestWGSL}
+${narrowBandNearestWGSL}
 fn bulkDepth(p:vec3f)->f32{
  let phiValue=bandPhi(p);if(phiValue>=0.0){return phiValue;}
- let c=clamp(vec3i(floor(p)),vec3i(0),vec3i(UM_D)-1);
+ let c=umCellNear(vec3i(floor(p)));
  if((nbBandReach(vec3u(c))&1u)==0u){return min(phiValue,-8.0);}
- let nearest=atomicLoad(&bins[NB_DEPTH_B+cellIndex(c)]);
+ let nearest=atomicLoad(&bins[NB_DEPTH_B+umCellAt(vec3u(c))]);
  // No crossing cell within five of this one: its box is five cells off or
  // more, six only from below. A deeper bound sank the resting bath's phi
  // from seven cells down, under the 4h owners that read it.
  if(nearest==NB_NO_SURFACE){return min(phiValue,-5.0);}
- let low=vec3f(nbCell(nearest));let delta=max(max(low-p,p-(low+1.0)),vec3f(0));
+ let low=vec3f(umCellCoord(nearest));let delta=max(max(low-p,p-(low+1.0)),vec3f(0));
  return min(phiValue,-length(delta));
 }
 // Bank A is the nodal metric field redistance leaves on the reached tiles.
 // Particle membership does not depend on the resolution of simulation owners.
 // Past the reach (two tiles from any crossing) the level set stands in, held
 // at least six cells away.
-fn nbVertexIndex(p:vec3u)->u32{return p.x+(UM_D.x+1u)*(p.y+(UM_D.y+1u)*p.z);}
 fn particleDepth(p:vec3f)->f32{
- let q=clamp(p,vec3f(0),vec3f(UM_D));let c=min(vec3u(floor(q)),UM_D-1u);let f=q-vec3f(c);
+ let q=umPointNear(p);let c=vec3u(umCellNear(vec3i(floor(q))));let f=q-vec3f(c);
  if((nbBandReach(c)&1u)==0u){let far=bandPhi(q);return select(max(far,6.0),min(far,-6.0),far<0.0);}
  var value=0.0;
  for(var k=0u;k<8u;k++){
   let corner=umCorner(k,2u);let w=select(1.0-f,f,corner!=vec3u(0));
-  value+=w.x*w.y*w.z*bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+nbVertexIndex(c+corner)]));
+  value+=w.x*w.y*w.z*bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(c+corner)]));
  }
  return value;
 }
-`;}
-
-export const narrowBandMembershipWGSL=narrowBandMembershipSource();
+`;

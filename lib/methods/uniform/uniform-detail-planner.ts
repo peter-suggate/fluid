@@ -19,6 +19,7 @@
 import type { RefinementRegionLattice } from "../../core/refinement-regions";
 import { UNIFORM_DETAIL_POLICY, type UniformDetailPolicy } from "./uniform-detail-policy";
 import type { DetailBounds, DetailRequest, DetailRequestSource, DetailSuppression } from "./uniform-detail-requests";
+import { uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeBox, uniformTileInBox, type UniformLatticeBox } from "./uniform-lattice-address";
 
 type Triple = readonly [number, number, number];
 type AutomaticSource = "focus" | "activity";
@@ -110,6 +111,8 @@ export class UniformDetailPlanner {
   readonly tilesPerPatch: number;
   readonly patchDimensions: Triple;
   readonly domainPatches: number;
+  private readonly address: UniformLatticeBox;
+  private readonly coord: [number, number, number] = [0, 0, 0];
   private members: Uint8Array;
   private sources: Uint8Array;
   private low: Uint8Array;
@@ -119,8 +122,9 @@ export class UniformDetailPlanner {
   constructor(readonly lattice: RefinementRegionLattice, readonly policy: UniformDetailPolicy = UNIFORM_DETAIL_POLICY) {
     if (lattice.dimensions.some(n => !Number.isSafeInteger(n) || n < 4 || n % 4 !== 0)) throw new Error("Detail planning requires dimensions divisible by four");
     if (policy.patchCells !== 16 && policy.patchCells !== 32) throw new Error(`Detail patches are 16³ or 32³ h cells, not ${policy.patchCells}`);
-    this.tileDimensions = lattice.dimensions.map(n => n / 4) as unknown as Triple;
-    this.tiles = this.tileDimensions[0] * this.tileDimensions[1] * this.tileDimensions[2];
+    this.address = uniformLatticeBox(lattice.dimensions);
+    this.tileDimensions = this.address.tiles;
+    this.tiles = this.address.boxTiles;
     this.tilesPerPatch = policy.patchCells / 4;
     this.patchDimensions = this.tileDimensions.map(n => Math.ceil(n / this.tilesPerPatch)) as unknown as Triple;
     this.domainPatches = this.patchDimensions[0] * this.patchDimensions[1] * this.patchDimensions[2];
@@ -130,19 +134,19 @@ export class UniformDetailPlanner {
   get settled(): boolean { return this.counting === 0; }
   get automaticTiles(): number { let n = 0; for (const m of this.members) n += m; return n; }
   patchKeyOfTile(t: number): number {
-    const [tx, ty] = this.tileDimensions, x = t % tx, y = Math.floor(t / tx) % ty, z = Math.floor(t / (tx * ty)), p = this.tilesPerPatch;
+    const [x, y, z] = uniformBoxTileCoord(this.address, t, this.coord), p = this.tilesPerPatch;
     return Math.floor(x / p) + this.patchDimensions[0] * (Math.floor(y / p) + this.patchDimensions[1] * Math.floor(z / p));
   }
-  /** Tile keys a world box covers, ascending. */
+  /** Box tile indices a world box covers, ascending. */
   tilesOf(bounds: DetailBounds): number[] {
     const box = uniformDetailTileBounds(this.lattice, bounds);if (!box) return [];
-    const [tx, ty] = this.tileDimensions, out: number[] = [];
-    for (let z = box.min[2]; z < box.max[2]; z++) for (let y = box.min[1]; y < box.max[1]; y++) for (let x = box.min[0]; x < box.max[0]; x++) out.push(x + tx * (y + ty * z));
+    const address = this.address, out: number[] = [];
+    for (let z = box.min[2]; z < box.max[2]; z++) for (let y = box.min[1]; y < box.max[1]; y++) for (let x = box.min[0]; x < box.max[0]; x++) out.push(uniformBoxTileIndex(address, x, y, z));
     return out;
   }
 
   plan(input: UniformDetailPlanInput): UniformDetailPlan {
-    const n = this.tiles, policy = this.policy, [tx, ty, tz] = this.tileDimensions, radius = Math.max(0, Math.round(policy.supportRadiusTiles));
+    const n = this.tiles, policy = this.policy, address = this.address, coord = this.coord, radius = Math.max(0, Math.round(policy.supportRadiusTiles));
     const capacity = Math.max(0, Math.floor(input.capacityPatches ?? this.domainPatches));
     const budgetTiles = Math.floor(Math.min(100, Math.max(0, input.budgetPercent)) / 100 * n);
     const churnLimit = Math.max(1, Math.ceil(policy.churnFraction * this.domainPatches));
@@ -151,10 +155,11 @@ export class UniformDetailPlanner {
     const cover = new Uint32Array(n), patchCount = new Uint32Array(this.domainPatches);
     let closure = 0, resident = 0;
     const visit = (t: number, delta: 1 | -1) => {
-      const x = t % tx, y = Math.floor(t / tx) % ty, z = Math.floor(t / (tx * ty));
-      for (let k = Math.max(0, z - radius); k <= Math.min(tz - 1, z + radius); k++) for (let j = Math.max(0, y - radius); j <= Math.min(ty - 1, y + radius); j++)
-        for (let i = Math.max(0, x - radius); i <= Math.min(tx - 1, x + radius); i++) {
-          const q = i + tx * (j + ty * k), p = patchOf[q]!;
+      const [x, y, z] = uniformBoxTileCoord(address, t, coord);
+      for (let k = z - radius; k <= z + radius; k++) for (let j = y - radius; j <= y + radius; j++)
+        for (let i = x - radius; i <= x + radius; i++) {
+          if (!uniformTileInBox(address, i, j, k)) continue;
+          const q = uniformBoxTileIndex(address, i, j, k), p = patchOf[q]!;
           if (delta > 0) { if (cover[q]++ === 0) { closure++; if (patchCount[p]++ === 0) resident++; } }
           else if (--cover[q] === 0) { closure--; if (--patchCount[p] === 0) resident--; }
         }
@@ -178,7 +183,7 @@ export class UniformDetailPlanner {
     const suppressed = new Uint8Array(n);
     for (const s of input.suppressions ?? []) for (const t of this.tilesOf(s.bounds_m)) suppressed[t] = 1;
     const candidate = new Uint8Array(n), retain = new Uint8Array(n), priority = new Float64Array(n).fill(-Infinity), score = new Float64Array(n);
-    const centre = (t: number, a: number) => this.lattice.origin_m[(["x", "y", "z"] as const)[a]!] + (([t % tx, Math.floor(t / tx) % ty, Math.floor(t / (tx * ty))][a]! + 0.5) * 4) * this.lattice.cellSize_m[a]!;
+    const centre = (t: number, a: number) => this.lattice.origin_m[(["x", "y", "z"] as const)[a]!] + ((uniformBoxTileCoord(address, t, coord)[a]! + 0.5) * 4) * this.lattice.cellSize_m[a]!;
     for (const request of input.requests) {
       if (MANUAL.has(request.source)) continue;
       const bit = UNIFORM_DETAIL_REASON[request.source];if (!(enabled & bit)) continue;
@@ -282,6 +287,8 @@ export class UniformDetailRequestTiles {
   private readonly radius: number;
   private readonly tilesPerPatch: number;
   private readonly patchDimensions: Triple;
+  private readonly address: UniformLatticeBox;
+  private readonly coord: [number, number, number] = [0, 0, 0];
   private boxes = new Map<string, { source: ManualSource; min: Triple; max: Triple; count: number }>();
   private admitted = 0;
   private closure = 0;
@@ -289,19 +296,21 @@ export class UniformDetailRequestTiles {
   private held: Record<ManualSource, number> = { region: 0, full: 0 };
   constructor(readonly lattice: RefinementRegionLattice, readonly policy: UniformDetailPolicy = UNIFORM_DETAIL_POLICY) {
     if (lattice.dimensions.some(n => !Number.isSafeInteger(n) || n < 4 || n % 4 !== 0)) throw new Error("Detail planning requires dimensions divisible by four");
-    this.tileDimensions = lattice.dimensions.map(n => n / 4) as unknown as Triple;
-    this.tiles = this.tileDimensions[0] * this.tileDimensions[1] * this.tileDimensions[2];
+    this.address = uniformLatticeBox(lattice.dimensions);
+    this.tileDimensions = this.address.tiles;
+    this.tiles = this.address.boxTiles;
     this.tilesPerPatch = policy.patchCells / 4;this.radius = Math.max(0, Math.round(policy.supportRadiusTiles));
     this.patchDimensions = this.tileDimensions.map(n => Math.ceil(n / this.tilesPerPatch)) as unknown as Triple;
     this.fine = new Uint8Array(this.tiles);this.reasons = new Uint8Array(this.tiles);this.cover = new Uint16Array(this.tiles);
     this.patchCount = new Uint32Array(this.patchDimensions[0] * this.patchDimensions[1] * this.patchDimensions[2]);
   }
   private visit(t: number, delta: 1 | -1): void {
-    const [tx, ty, tz] = this.tileDimensions, r = this.radius, p = this.tilesPerPatch, [px, py] = this.patchDimensions, cover = this.cover, patchCount = this.patchCount;
-    const x = t % tx, y = Math.floor(t / tx) % ty, z = Math.floor(t / (tx * ty));
-    for (let k = Math.max(0, z - r); k <= Math.min(tz - 1, z + r); k++) for (let j = Math.max(0, y - r); j <= Math.min(ty - 1, y + r); j++)
-      for (let i = Math.max(0, x - r); i <= Math.min(tx - 1, x + r); i++) {
-        const q = i + tx * (j + ty * k), patch = Math.floor(i / p) + px * (Math.floor(j / p) + py * Math.floor(k / p));
+    const address = this.address, r = this.radius, p = this.tilesPerPatch, [px, py] = this.patchDimensions, cover = this.cover, patchCount = this.patchCount;
+    const [x, y, z] = uniformBoxTileCoord(address, t, this.coord);
+    for (let k = z - r; k <= z + r; k++) for (let j = y - r; j <= y + r; j++)
+      for (let i = x - r; i <= x + r; i++) {
+        if (!uniformTileInBox(address, i, j, k)) continue;
+        const q = uniformBoxTileIndex(address, i, j, k), patch = Math.floor(i / p) + px * (Math.floor(j / p) + py * Math.floor(k / p));
         if (delta > 0) { if (cover[q]!++ === 0) { this.closure++; if (patchCount[patch]!++ === 0) this.resident++; } }
         else if (--cover[q]! === 0) { this.closure--; if (--patchCount[patch]! === 0) this.resident--; }
       }
@@ -312,7 +321,7 @@ export class UniformDetailRequestTiles {
    * hold never flips. */
   set(requests: readonly DetailRequest[]): { entered: number[]; left: number[] } {
     if (requests.length > 0xffff) throw new Error(`Detail requests: ${requests.length} boxes exceed the per-tile hold count`);
-    const next: typeof this.boxes = new Map(), entered: number[] = [], left: number[] = [], [tx, ty] = this.tileDimensions, fine = this.fine, reasons = this.reasons;
+    const next: typeof this.boxes = new Map(), entered: number[] = [], left: number[] = [], address = this.address, fine = this.fine, reasons = this.reasons;
     for (const request of requests) {
       if (!MANUAL.has(request.source)) throw new Error(`Detail request ${request.id} is not a manual request`);
       const box = uniformDetailTileBounds(this.lattice, request.bounds_m);if (!box) continue;
@@ -320,7 +329,7 @@ export class UniformDetailRequestTiles {
       if (same) same.count++; else next.set(key, { source: request.source as ManualSource, min: box.min, max: box.max, count: 1 });
     }
     const each = (b: { min: Triple; max: Triple }, f: (t: number) => void) => {
-      for (let z = b.min[2]; z < b.max[2]; z++) for (let y = b.min[1]; y < b.max[1]; y++) for (let x = b.min[0]; x < b.max[0]; x++) f(x + tx * (y + ty * z));
+      for (let z = b.min[2]; z < b.max[2]; z++) for (let y = b.min[1]; y < b.max[1]; y++) for (let x = b.min[0]; x < b.max[0]; x++) f(uniformBoxTileIndex(address, x, y, z));
     };
     for (const [key, b] of next) {
       const add = b.count - (this.boxes.get(key)?.count ?? 0);if (add <= 0) continue;

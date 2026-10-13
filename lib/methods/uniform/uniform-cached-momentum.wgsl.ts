@@ -6,7 +6,7 @@ var<private> umUnitWidth:f32;
 var<private> umUnitFineWeight:f32;
 fn umUnitInterpolant(p:vec3f,axis:u32)->f32 {
  var offset=vec3f(0.5);offset[axis]=1.0;var lower=vec3f(0.0);lower[axis]=-1.0;
- let q=clamp(p-offset,lower,vec3f(UM_D)-vec3f(1.0));
+ let q=clamp(p-offset,lower,vec3f(UM_BOX)-vec3f(1.0));
  let base=vec3i(floor(q));let fraction=fract(q);var terms:array<f32,8>;
  for(var k=0u;k<8u;k++){
   let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
@@ -14,11 +14,12 @@ fn umUnitInterpolant(p:vec3f,axis:u32)->f32 {
  }
  return umVelocityLerp8(terms,fraction);
 }
-// 0 native fine stencil, 1 prepared blend, 2 negative-plane escape.
+// 0 native fine stencil, 1 prepared blend, 2 negative-plane escape: a fine
+// sample within a cell of the box's plane 0 taps the negative planes.
 fn umUnitSampleKind(p:vec3f,axis:u32)->u32 {
  if(umFineStencilSample(p)){umUnitWidth=1.0;umUnitFineWeight=1.0;return 0u;}
- let q=clamp(p,vec3f(0),vec3f(UM_D));
- let tile=umTileAt(vec3u(clamp(vec3i(floor(q/4.0)),vec3i(0),vec3i(UM_T)-1)));
+ let q=umPointNear(p);
+ let tile=umTileAt(vec3u(umTileNear(vec3i(floor(q/4.0)))));
  umUnitWidth=f32(umTileWidth(tile));umUnitFineWeight=umVelocitySamplingWeights(p);
  let low=select(p[min(axis,2u)]<1.0,any(p<vec3f(1.0)),axis>=3u);
  return select(1u,2u,umUnitFineWeight>0.0&&low);

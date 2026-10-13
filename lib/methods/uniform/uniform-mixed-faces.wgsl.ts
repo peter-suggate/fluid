@@ -15,7 +15,7 @@ struct UMFace {
  sign:i32,
 }
 fn umOwnerAt(p:vec3i)->UMOwner {
- if(any(p<vec3i(0))||any(p>=vec3i(UM_D))){return UMOwner();}
+ if(!umCellPresent(p)){return UMOwner();}
  let q=vec3u(p);let tile=umTileAt(q/4u);let width=umTileWidth(tile);
  let local=(q%4u)/width;let n=4u/width;let lane=local.x+n*(local.y+n*local.z);
  return UMOwner(tile,lane,width,(umTopology[tile]&0x3fffffffu)+lane);
@@ -27,9 +27,9 @@ fn umFaceFirst(owner:UMOwner,axis:u32,sign:i32)->UMFace {
  let origin=vec3i(umOrigin(owner));var probe=origin;
  probe[axis]+=select(-1,i32(owner.width),sign>0);
  var neighbor=UMOwner();
- if(all(probe>=vec3i(0))&&all(probe<vec3i(UM_D))){
+ if(umCellPresent(probe)){
   // Fine interior faces never leave their tile or need another tile word.
-  if(owner.width==1u&&all(vec3u(probe)/4u==umTileCoord(owner.tile))){
+  if(owner.width==1u&&all(vec3u(probe)/4u==vec3u(origin)/4u)){
    let stride=select(select(16,4,axis==1u),1,axis==0u);
    neighbor=UMOwner(owner.tile,u32(i32(owner.lane)+sign*stride),1u,u32(i32(owner.index)+sign*stride));
   }else{neighbor=umOwnerAt(probe);}
