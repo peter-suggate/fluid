@@ -69,6 +69,8 @@ export interface WaterOpticsAuthoring {
   readonly scatter?: LinearRgb;
   readonly indexOfRefraction?: number;
   readonly fresnelF0?: number;
+  /** Perceptual GGX roughness for the direct surface highlight, independent of mesh pitch. */
+  readonly roughness?: number;
   /**
    * How much of the refracted caustic modulation reaches the receiver, in
    * [0, 1]. Zero skips the caustic pass entirely for this scene.
@@ -81,11 +83,15 @@ export interface ResolvedWaterOptics {
   readonly scatter: [number, number, number];
   readonly indexOfRefraction: number;
   readonly fresnelF0: number;
+  readonly roughness: number;
   readonly causticStrength: number;
 }
 
-/** Default caustic strength: the map is consumed at full modulation. */
-export const WATER_CAUSTIC_DEFAULT_STRENGTH = 1;
+/** Default caustic strength: blend in a quarter of the map's modulation. */
+export const WATER_CAUSTIC_DEFAULT_STRENGTH = 0.25;
+export const WATER_ROUGHNESS_DEFAULT = 0.12;
+/** Finite-width raster highlight: zero roughness would require a delta reflection. */
+export const WATER_ROUGHNESS_MIN = 0.04;
 
 function opticalChannels(value: LinearRgb | undefined, fallback: LinearRgb): [number, number, number] {
   if (!value || value.length !== 3) return [...fallback] as [number, number, number];
@@ -114,6 +120,7 @@ export function resolveWaterOptics(authored?: WaterOpticsAuthoring): ResolvedWat
     // composite's exit refraction total-internal-reflects on nearly every ray.
     indexOfRefraction: opticalScalar(authored?.indexOfRefraction, WATER_OPTICS.indexOfRefraction, 1, 2),
     fresnelF0: opticalScalar(authored?.fresnelF0, WATER_OPTICS.fresnelF0, 0, 1),
+    roughness: opticalScalar(authored?.roughness, WATER_ROUGHNESS_DEFAULT, WATER_ROUGHNESS_MIN, 1),
     causticStrength: opticalScalar(authored?.causticStrength, WATER_CAUSTIC_DEFAULT_STRENGTH, 0, 1),
   };
 }
@@ -155,14 +162,14 @@ export function resolveWaterKeyLight(directional?: {
 }
 
 /**
- * Seven vec4 lanes shared by the water composite and the caustic projection.
+ * Eight vec4 lanes shared by the water composite and the caustic projection.
  *
  * Lanes 0-3 are the scene's medium and key; lanes 4-5 describe the caustic
  * receiver, which the renderer resamples from `scene.terrain`; lane 6 is the
- * final display grade. They live in one buffer because all are per-scene facts
- * consumed by the same compositor, and a second uniform binding buys nothing.
+ * final display grade; lane 7 carries surface roughness. They live in one
+ * buffer because all are per-scene facts consumed by the same compositor.
  */
-export const WATER_SCENE_OPTICS_LANES = 7;
+export const WATER_SCENE_OPTICS_LANES = 8;
 export const WATER_SCENE_OPTICS_FLOATS = 4 * WATER_SCENE_OPTICS_LANES;
 export const WATER_SCENE_OPTICS_BYTES = 4 * WATER_SCENE_OPTICS_FLOATS;
 /** Where the pipeline's own receiver description starts, in floats. */
@@ -192,6 +199,7 @@ export function packWaterSceneOptics(
     // gains as authored. Widening the block would have moved every lane offset
     // in two shaders for one float.
     grade.exposure, SCENE_TONE_CURVE_CODES[grade.toneCurve], grade.whiteBalance[0], grade.whiteBalance[2],
+    optics.roughness, 0, 0, 0,
   ]);
 }
 
@@ -216,6 +224,7 @@ struct WaterSceneOptics {
   receiverOriginSpacing: vec4f,
   receiverSize: vec4f,
   displayGrade: vec4f,
+  surface: vec4f,
 }
 @group(${group}) @binding(${opticsBinding}) var<uniform> waterScene: WaterSceneOptics;
 @group(${group}) @binding(${receiverBinding}) var waterReceiver: texture_2d<f32>;
@@ -223,6 +232,7 @@ fn waterAbsorption() -> vec3f { return max(waterScene.absorptionIor.xyz, vec3f(0
 fn waterIndexOfRefraction() -> f32 { return max(waterScene.absorptionIor.w, 1.0); }
 fn waterScatter() -> vec3f { return max(waterScene.scatterFresnel.xyz, vec3f(0.0)); }
 fn waterFresnelF0() -> f32 { return clamp(waterScene.scatterFresnel.w, 0.0, 1.0); }
+fn waterRoughness() -> f32 { return clamp(waterScene.surface.x, ${WATER_ROUGHNESS_MIN}, 1.0); }
 fn waterKeyAuthored() -> bool { return waterScene.keyDirectionAuthored.w > 0.5; }
 fn waterAuthoredKeyDirection() -> vec3f { return normalize(waterScene.keyDirectionAuthored.xyz); }
 fn waterKeyRadiance() -> vec3f { return max(waterScene.keyRadianceCaustic.xyz, vec3f(0.0)); }
@@ -719,6 +729,29 @@ fn unifiedSmithGgxVisibility(nDotV: f32, nDotL: f32, roughness: f32) -> f32 {
 fn unifiedSpecularLobe(normal: vec3f, towardViewer: vec3f, towardLight: vec3f, exponent: f32) -> f32 {
   let reflected = reflect(-normalize(towardViewer), normalize(normal));
   return pow(max(dot(reflected, normalize(towardLight)), 0.0), max(exponent, 1.0));
+}
+
+// GGX dielectric BRDF times the incident cosine. Evaluated per pixel from the
+// interpolated optical normal; roughness is a material property, never cell size.
+fn unifiedWaterSpecular(normal: vec3f, towardViewer: vec3f, towardLight: vec3f, roughness: f32, f0: f32) -> f32 {
+  let n = normalize(normal);
+  let v = normalize(towardViewer);
+  let l = normalize(towardLight);
+  let nDotV = dot(n, v);
+  let nDotL = dot(n, l);
+  if (nDotV <= 0.0 || nDotL <= 0.0) { return 0.0; }
+  let h = normalize(v + l);
+  let nDotH = clamp(dot(n, h), 0.0, 1.0);
+  let r = clamp(roughness, ${WATER_ROUGHNESS_MIN}, 1.0);
+  let alpha = r * r;
+  let alphaSquared = alpha * alpha;
+  // |n x h|² avoids cancellation in 1 - (n.h)² near a sharp peak. The
+  // generic D helper's 1e-6 denominator floor would flatten this water lobe.
+  let crossNH = cross(n, h);
+  let denominator = dot(crossNH, crossNH) + alphaSquared * nDotH * nDotH;
+  let distribution = alphaSquared / (UNIFIED_PI * denominator * denominator);
+  let fresnel = unifiedDielectricFresnel(clamp(dot(v, h), 0.0, 1.0), f0);
+  return fresnel * distribution * unifiedSmithGgxVisibility(nDotV, nDotL, r) * nDotL;
 }
 
 fn shadeUnifiedSurface(material: UnifiedLightingMaterial, input: UnifiedLightingInput) -> vec3f {

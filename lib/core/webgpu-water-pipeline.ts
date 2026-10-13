@@ -1679,7 +1679,7 @@ fn compositeRearWater(textureUV:vec2f,dryColor:vec3f)->vec3f{
   let refracted=unifiedAbsorbingTransmission(transmitted,waterAbsorption(),waterScatter(),thickness);
   let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);let ssr=safeSample(sceneTexture,project(front.xyz+reflectedDir*.8));reflected=mix(reflected,ssr.rgb,select(0.0,.32,ssr.a>0.0&&ssr.a<60000.0));
   let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,waterFresnelF0());var water=mix(refracted,reflected,fresnel);if(tir){water=mix(water,environmentLight(outgoing),.88);}
-  water+=waterKeyColor()*unifiedSpecularLobe(n,-rd,waterKeyDirection(),180.0)*1.4;
+  water+=waterKeyColor()*unifiedWaterSpecular(n,-rd,waterKeyDirection(),waterRoughness(),waterFresnelF0());
   water+=vec3f(.018,.10,.085)*waterTintScale()*(1.0-exp(-thickness*2.4));water+=vec3f(.08,.18,.15)*waterTintScale()*pow(1.0-cosine,3.0)*.15;
   // The augmented wall value tends continuously to zero, but a rasterized
   // Fresnel lobe does not: its last covered pixel is still fully reflective.
@@ -1763,7 +1763,7 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
   let ssrUV=project(front.xyz+reflectedDir*.8);let ssr=safeSample(sceneTexture,ssrUV);reflected=mix(reflected,ssr.rgb,select(0.0,.32,ssr.a>0.0&&ssr.a<60000.0));
   let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,waterFresnelF0());var water=mix(refracted,reflected,fresnel);
   if(tir){water=mix(water,environmentLight(outgoing),.88);}
-  water+=waterKeyColor()*unifiedSpecularLobe(n,-rd,waterKeyDirection(),180.0)*1.4;
+  water+=waterKeyColor()*unifiedWaterSpecular(n,-rd,waterKeyDirection(),waterRoughness(),waterFresnelF0());
   // Thin forward-scattering highlight at silhouettes, plus a restrained
   // turquoise body tint that grows only with actual optical thickness.
   water+=vec3f(.018,.10,.085)*waterTintScale()*(1.0-exp(-thickness*2.4));water+=vec3f(.08,.18,.15)*waterTintScale()*pow(1.0-cosine,3.0)*.15;

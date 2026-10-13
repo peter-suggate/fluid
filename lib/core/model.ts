@@ -10,6 +10,7 @@ import type { EnvironmentId } from "./environments";
 import { validateSceneryGraph, type SceneryGraph } from "./scenery-graph";
 import { validateBackdrop, type BackdropDescription } from "./backdrop";
 import type { DisplayGradeAuthoring, WaterOpticsAuthoring } from "./webgpu-lighting";
+import { WATER_ROUGHNESS_MIN } from "./webgpu-lighting";
 
 export type { BackdropDescription } from "./backdrop";
 
@@ -613,6 +614,9 @@ export function validateScene(scene: SceneDescription): string[] {
     }
     for (const [value, label] of [[optics.fresnelF0, "Fresnel F0"], [optics.causticStrength, "caustic strength"]] as const) {
       if (value !== undefined && (!Number.isFinite(value) || value < 0 || value > 1)) errors.push(`Water ${label} must lie in [0, 1]`);
+    }
+    if (optics.roughness !== undefined && (!Number.isFinite(optics.roughness) || optics.roughness < WATER_ROUGHNESS_MIN || optics.roughness > 1)) {
+      errors.push(`Water roughness must lie in [${WATER_ROUGHNESS_MIN}, 1]`);
     }
   }
   const initialVelocity = scene.fluid?.initialVelocity_m_s;

@@ -53,6 +53,7 @@ const sceneQueryPaths = [
   "fluid.density_kg_m3",
   "fluid.dynamicViscosity_Pa_s",
   "fluid.surfaceTension_N_m",
+  "fluid.optics",
   ...GRAVITY_QUERY_PATHS,
   "fluid.initialCondition",
   "fluid.initialHeightField",
@@ -497,7 +498,7 @@ export function parseQueryState(search: string): QueryState {
   for (const path of sceneQueryPaths) {
     const raw = query.get(`scene.${path}`);
     if (raw === null) continue;
-    if (raw === deletedValue && (path === "fluid.inflow" || path === "surfaceStyle")) {
+    if (raw === deletedValue && (path === "fluid.inflow" || path === "fluid.optics" || path === "surfaceStyle")) {
       setAtPath(patched, path, undefined);
       continue;
     }
