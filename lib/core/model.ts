@@ -147,7 +147,9 @@ export interface SceneDescription {
      * the plane y = 0, solid below; everywhere above it, beside the container
      * as over it, is air, so liquid leaves the container on every side and the
      * fluid solver claims pages wherever it goes. An open world has an open top,
-     * a box shape, closed depth faces, no terrain and no procedural boundary.
+     * a box shape, closed depth faces, no terrain and no procedural boundary,
+     * and its initial liquid keeps four cells from the container's sides and
+     * top (UNIFORM_OPEN_WORLD_LIQUID_MARGIN; the solver refuses it otherwise).
      */
     walls?: "none";
   };

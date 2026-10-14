@@ -712,6 +712,24 @@ export function uniformPagePoolBlocksForMemory(memory_MiB: number): number {
   return blocks;
 }
 
+/** Cells an open world's initial liquid keeps from its container's sides
+ * and top: one 4h tile. Only the box's pages are seeded, so a vertex on its
+ * faces lies in a page that is claimed later, as air: liquid laid against a
+ * face would lose its outer layer of cells at the first step. */
+export const UNIFORM_OPEN_WORLD_LIQUID_MARGIN = 4;
+/** Refuses an open world whose initial liquid (its wet cells, `low` to
+ * `high` exclusive, in box cells) comes within the margin of the box's
+ * sides or top. */
+export function uniformOpenWorldLiquidCheck(cells: readonly [number, number, number],
+  low: readonly number[], high: readonly number[]): void {
+  const m = UNIFORM_OPEN_WORLD_LIQUID_MARGIN;
+  if (!low.every((v, k) => v <= high[k]!)) return;
+  const near = [0, 1, 2].filter(k => (k !== 1 && low[k]! < m) || high[k]! > cells[k]! - m);
+  if (near.length) throw new RangeError(`An open world's initial liquid (cells ${low.join(",")} to ${high.join(",")}) `
+    + `reaches within ${m} cells of its container's ${near.map(k => "xyz"[k]).join(", ")} faces (${cells.join("x")} cells): `
+    + `grow the container or move the liquid in`);
+}
+
 /** Host-side addressing of the lattice: the box, the page pool's seed, key
  * spaces and texture extents. Built once per scene (the solver) and handed
  * to every other owner. The table and block words are the seed's: they name

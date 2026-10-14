@@ -129,12 +129,8 @@ function boxUnionVertexPhi(scene: SceneDescription, dimensions: readonly [number
   const first = (axis: number, lo: number) => sliced(axis) ? Number(lo > sliceZ!) : Math.max(0, Math.ceil(lo));
   const last = (axis: number, hi: number) => sliced(axis) ? Number(hi >= sliceZ!)-1 : Math.min(cells[axis]!, Math.floor(hi));
   const cell = [0, 0, 0];
-  // Past a container's faces lie its walls, and the face of a box laid on one
-  // is no surface. An open world's container has none: past its sides and its
-  // top is air (the face is the liquid's surface), and below it the ground.
-  const world = c.walls === "none";
   const free = (a: number, beyond: number, b: number, ib: number, d: number, id: number) => {
-    if (beyond < 0 || beyond >= cells[a]!) return world && (a !== 1 || beyond >= 0);
+    if (beyond < 0 || beyond >= cells[a]!) return false;
     for (const cd of sliced(d) ? [Math.floor(sliceZ!)] : [id-1, id]) for (const cb of sliced(b) ? [Math.floor(sliceZ!)] : [ib-1, ib]) {
       if (cb<0 || cd<0 || cb>=cells[b]! || cd>=cells[d]!) continue;
       cell[a] = beyond; cell[b] = cb; cell[d] = cd;

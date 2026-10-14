@@ -15,7 +15,7 @@ import { UniformMixedLayoutBuilder, UNIFORM_MIXED_RELAYOUT_RECEIPT, uniformMixed
 import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, uniformMixedTileWord, type UniformMixedDynamicPolicy } from "./uniform-mixed-dynamic";
 import { fluidRegionLattice, refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
-import { uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformOpenWorldLiquidCheck, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
 import { UniformTexturePages } from "./uniform-texture-pages";
 import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_PIN_MARGIN, uniformPagePoolDropAhead, uniformPagePoolResidency, uniformPagePoolSourcePages, type UniformPagePoolCellBox, type UniformPagePoolResidency } from "./uniform-page-pool";
 import { uniformDensityPostProcessingEnabled } from "./uniform-options";
@@ -639,6 +639,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const residency = this.pageResidency = uniformPagePoolResidency([nx, ny, nz], scene.fluid.pagePool,
       uniformPageSources(scene, this.inflowBoundary, Math.max(this.fixedStep_s ?? 0, scene.numerics.maxDt_s)), this.detail.policy === "dynamic",
       () => (this.initialVolume = uniformLatticeInitialVolume(scene)).volume, boxPage);
+    if (scene.container.walls === "none") {
+      const seed = this.initialVolume ??= uniformLatticeInitialVolume(scene);
+      uniformOpenWorldLiquidCheck([nx, ny, nz], seed.wetMinimum, seed.wetMaximum);
+    }
     // The frame is the page table's window: outside the box it is SOLID, but
     // for the column above an open top, which is AIR and claimable, and but in
     // an open world, where every page above the floor is (uniformLatticeAddress).

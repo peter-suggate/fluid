@@ -5,8 +5,9 @@ import { cellPoint, nbflipDomain } from "./nbflip-paper-scenes";
  * A column of water released on open ground: the open world's probe.
  *
  * The container has no walls (`container.walls: "none"`). It is only where
- * the water starts, a column two pages wide, two deep and one high, on the
- * plane y = 0 that is the whole world's ground. When it is released it
+ * the water starts: two pages wide, two deep and one high, on the plane
+ * y = 0 that is the whole world's ground, holding a column of water
+ * `MARGIN` cells in from its sides. When the column is released it
  * slumps and spreads on every side, and the narrow-band FLIP solver claims
  * pages wherever it goes: past the container in x and z, and above it where
  * it splashes. Nothing holds it but the ground.
@@ -25,21 +26,23 @@ export const NBFLIP_OPEN_GROUND_GRID = [64, 32, 64] as const;
 export const NBFLIP_OPEN_GROUND_CELL_SIZE_M = 0.25;
 /** The water column's height in cells. */
 export const NBFLIP_OPEN_GROUND_COLUMN = 16;
+/** Cells between the column and the container's sides (UNIFORM_OPEN_WORLD_LIQUID_MARGIN or more). */
+export const NBFLIP_OPEN_GROUND_MARGIN = 8;
 export const NBFLIP_OPEN_GROUND_STEP_HZ = 60;
 export const NBFLIP_OPEN_GROUND_SECONDS = 6;
 /** The page pool's budget. */
 export const NBFLIP_OPEN_GROUND_MEMORY_MIB = 1280;
 
 export function createNbflipOpenGround(stepHz = NBFLIP_OPEN_GROUND_STEP_HZ): SceneDescription {
-  const grid = NBFLIP_OPEN_GROUND_GRID, h = NBFLIP_OPEN_GROUND_CELL_SIZE_M;
+  const grid = NBFLIP_OPEN_GROUND_GRID, h = NBFLIP_OPEN_GROUND_CELL_SIZE_M, m = NBFLIP_OPEN_GROUND_MARGIN;
   const scene = nbflipDomain(NBFLIP_OPEN_GROUND_SCENE_ID, grid, h, NBFLIP_OPEN_GROUND_SECONDS * stepHz, 0, grid, 1 / stepHz);
   scene.solidVoxels = [];
   scene.container = { ...scene.container, top: "open", walls: "none", vessel: "none", fillFraction: 0 };
   scene.fluid.initialVelocity_m_s = { x: 0, y: 0, z: 0 };
   scene.fluid.initialLiquidVolumes = [{
     shape: "box",
-    min_m: cellPoint(grid, h, [0, 0, 0]),
-    max_m: cellPoint(grid, h, [grid[0], NBFLIP_OPEN_GROUND_COLUMN, grid[2]]),
+    min_m: cellPoint(grid, h, [m, 0, m]),
+    max_m: cellPoint(grid, h, [grid[0] - m, NBFLIP_OPEN_GROUND_COLUMN, grid[2] - m]),
   }];
   scene.fluid.pagePool = { memory_MiB: NBFLIP_OPEN_GROUND_MEMORY_MIB };
   return scene;

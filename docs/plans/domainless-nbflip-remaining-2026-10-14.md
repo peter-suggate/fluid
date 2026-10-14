@@ -480,8 +480,40 @@ is just an authored solid.
     letters 12 steps liquid 1,224,968 (exact); trough 40 steps liquid
     31,895 and 31,840 (two runs), no fatal, 24 pages resident at step 1
     (16 box + 8 above the walls), pool 26 blocks. Unit suite 832 of 832.
-- **Phase 2, solids where pages are claimed and a world with no box:** next.
-- **Phase 3, renderer window list (K9) and the re-keyed pool record:** after.
+- **Phase 2, a world with no box: gate passed.**
+  - `container.walls: "none"` declares an open world. Its container is only
+    where the liquid starts: the box sits on the window's floor in its middle
+    (`sceneFluidBoxPage`, page `[floor((64-px)/2), 0, floor((64-pz)/2)]`;
+    every other scene keeps page 0). Outside the box the table is AIR below
+    window page y 56 and SOLID in the wrap (56..63), so the ground is the
+    plane y = 0. GPU coordinates are window cells; host address helpers take
+    and return box cells. `params.tuning.xyz` carries the box's low cell.
+  - Validation refuses terrain, a procedural boundary, depth symmetry and a
+    non-box shape in an open world. The solver refuses initial liquid within
+    four cells (`UNIFORM_OPEN_WORLD_LIQUID_MARGIN`) of the container's sides
+    or top: only the box's pages are seeded, so a vertex on its faces is in a
+    page claimed later as air, and liquid laid against a face lost its outer
+    layer at step 1 (measured: 10% of a column filling the box).
+  - The pool of an open world is sized by `pagePool.memory_MiB` (default
+    1,024 MiB) at `UNIFORM_PAGE_BLOCK_MiB` = 10 MiB a block (water slide 40
+    to 80 blocks: 592 to 979 MiB). The solid mask's fold visits only
+    candidate pages, not the whole window.
+  - Demo: `nbflip-open-ground`, a 48 x 16 x 48 column (h 0.25 m) in a
+    2x1x2-page container, 1,280 MiB (126 pages).
+  - Gate: demo at 1/60 s, 120 steps, two runs: 4 box pages then 32 resident
+    at step 1, peak 62 and 69, no fatal; liquid 36,870 at step 1 against
+    36,864, then within -1.3% to +4.6% while it spreads as a sheet about a
+    cell thick, ending +3.0% and +3.1%. At 1/30 s, 60 steps, two runs: peak
+    77, ending -0.01% and -0.07%, swing up to +4.6%. Tank 30 steps 3,072 and
+    3,584 (exact); letters 12 steps 1,224,968 (exact); trough 40 steps
+    31,897, no fatal. Unit suite 833 of 834; the failing test checked the
+    old exhausted message and was deleted.
+  - Not done: start-of-run host arrays (initial liquid, gamma, terrain, the
+    CPU solid tile scan) are still box-sized, so they cover the seed extent
+    and not the window. The renderer's box-shaped address copy reads wrong
+    for a box off page 0 (phase 3).
+- **Phase 3, renderer window list (K9) and the re-keyed pool record:**
+  handed to other agents.
 
 ### Trough liquid total (measured 14 October, evening)
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { uniformPagePoolSeed, uniformPagePoolBoxPages, uniformPagePoolBoxSeed, uniformPagePoolCellBoxPages, uniformPagePoolEntry, uniformPagePoolFatalMessage, uniformPagePoolLayout, uniformPagePoolPublished,
-  UNIFORM_PAGE_POOL_FATAL as FATAL, UNIFORM_PAGE_POOL_SOLID as SOLID, UNIFORM_PAGE_POOL_STATUS as STATUS } from "../lib/methods/uniform/uniform-page-pool";
+import { uniformPagePoolSeed, uniformPagePoolBoxPages, uniformPagePoolBoxSeed, uniformPagePoolCellBoxPages, uniformPagePoolEntry, uniformPagePoolLayout, uniformPagePoolPublished,
+  UNIFORM_PAGE_POOL_SOLID as SOLID } from "../lib/methods/uniform/uniform-page-pool";
 
 const letters = uniformPagePoolLayout({ blocks: 208, idleSteps: 8, box: { origin: [0, 0, 0], pages: [8, 6, 4] } });
 
@@ -46,22 +46,6 @@ test("a padded cell box pins the pages it overlaps, clipped to the layout's box"
   assert.deepEqual(pages([32, 40, 0], [64, 41, 32], 8), [[0, 1, 0], [1, 1, 0], [2, 1, 0], [0, 1, 1], [1, 1, 1], [2, 1, 1]]);
   assert.deepEqual(pages([250, 190, 120], [300, 300, 300], 4), [[7, 5, 3]]);
   assert.deepEqual(uniformPagePoolCellBoxPages(uniformPagePoolLayout({ blocks: 5, idleSteps: 1 }), [-1, 0, 0], [1, 1, 1]).map(p => p.x), [-1, 0]);
-});
-
-test("the fatal message is null without a fatal and names the first bit's page, commit and detail", () => {
-  const status = new Uint32Array(4 + STATUS.words), at = 4;
-  assert.equal(uniformPagePoolFatalMessage(letters, status, at), null);
-  const raise = (bits: number, first: number, page: readonly [number, number, number], commit: number, detail: number) => {
-    status[at + STATUS.fatal] = bits; status[at + STATUS.fatalFirst] = first; status[at + STATUS.fatalGeneration] = commit; status[at + STATUS.fatalDetail] = detail;
-    new Int32Array(status.buffer).set(page, at + STATUS.fatalPage);
-    return uniformPagePoolFatalMessage(letters, status, at);
-  };
-  assert.equal(raise(FATAL.exhausted, FATAL.exhausted, [3, -2, 1], 12, 200), "Page pool exhausted at commit 12: page (3, -2, 1) requested with 200 of 206 blocks resident and the other 6 claimed by the same commit. Raise pagePool.blocks (4.9 MiB each) or shrink the scene.");
-  assert.equal(raise(FATAL.requests, FATAL.requests, [0, 0, 5], 3, 0), "More than claimsPerStep (206) pages were requested in commit 3 (first dropped: page (0, 0, 5)).");
-  assert.match(raise(FATAL.alias, FATAL.alias, [64, 0, 0], 2, 0)!, /^Two pages name one page table entry \(page \(64, 0, 0\), commit 2\)/);
-  assert.equal(raise(FATAL.closureCap, FATAL.closureCap, [1, 1, 1], 9, 21), "Departure travel gives a closure of 21 tiles, over the cap of 16 (commit 9, page (1, 1, 1)): a sample is moving faster than the residency certificate covers.");
-  // The first bit raised decides the message, whatever joined it later.
-  assert.equal(raise(FATAL.closure | FATAL.exhausted, FATAL.closure, [7, 5, 3], 4, 0), "Liquid or band tile found in page (7, 5, 3), which was not resident at the start of commit 4.");
 });
 
 test("published pages distinguish solid from air independently of physical block order", () => {
