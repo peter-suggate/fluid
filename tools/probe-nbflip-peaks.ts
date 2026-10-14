@@ -50,7 +50,7 @@ try{
  device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
  device.addEventListener('uncapturederror',e=>{e.preventDefault();errors.push(e.error.message);console.error(e.error.message);});
  solver=await method.createSolverAsync!(device,scene,'balanced',{...method.appDefaults,timeStep:'scene'},undefined,()=>{}) as WebGPUUniformReferenceSolver;
- const frame=(solver as unknown as {mixedFrame:{pagePool:UniformPagePool;fields:{residency:{live:boolean}};ownership:{capacity:{fineTiles:number;owners:number;address:{boxTiles:number}}};stageBandTiles:number;capacityBuffers(fineTiles:number,bandTiles:number):[string,number][]}}).mixedFrame;
+ const frame=(solver as unknown as {mixedFrame:{pagePool:UniformPagePool;fields:{residency:{live:boolean}};ownership:{capacity:{fineTiles:number;owners:number;address:{boxTiles:number}}};stageBandTiles:number;capacityBuffers(fineTiles:number,bandTiles:number):[string,number][];requestNarrowBandVolumeProbe():void}}).mixedFrame;
  const {pagePool:pool,fields:{residency},ownership}=frame;
  const l=pool.layout,status=new Uint32Array(S.words);read=device.createBuffer({label:"Peak probe pool status",size:4*S.words,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
  console.log(`${sceneId}: box ${l.box.pages.join("x")} = ${l.box.count} pages (${ownership.capacity.address.boxTiles} tiles), pool of ${l.blocks} blocks (${l.slots} pages), ${residency.live?"live":"static"}, seeded ${pool.seeded.state[S.resident]} resident, ${pool.pinned} pinned, h capacity ${ownership.capacity.fineTiles} tiles (${ownership.capacity.owners} owners), allocated ${(solver.info.allocatedBytes/1048576).toFixed(1)} MiB, dt ${dt}`);
@@ -61,6 +61,8 @@ try{
  const residents:number[]=[],fines:number[]=[];
  for(let step=1;step<=steps;step++){
   let thrown:string|undefined;
+  // The printed steps' liquid is phi's volume, measured by this step.
+  if(step%every===0||step<=3)frame.requestNarrowBandVolumeProbe();
   try{solver.advanceTo(step*dt,[]);await solver.awaitFrameCompletion();}catch(e){const cause=(e as Error).cause;thrown=`${(e as Error).message}${cause instanceof Error?`: ${cause.message}`:""}`;}
   const encoder=device.createCommandEncoder();pool.encodeReceipt(encoder,read,0);device.queue.submit([encoder.finish()]);
   await read.mapAsync(GPUMapMode.READ);status.set(new Uint32Array(read.getMappedRange()));read.unmap();
@@ -72,7 +74,7 @@ try{
   if(fine>finePeak){finePeak=fine;fineStep=step;}
   if(step%every===0||step<=3||fatal||failure){
    const stats=failure?undefined:await solver.readStats();
-   console.log(`step ${step} resident ${resident} free ${free} requests ${status[S.requests]} h tiles ${fine} particles ${solver.narrowBandFlipInfo?.particles??0} liquid ${Math.round(stats?.volumeCellSum??NaN)} drift ${(stats?.volumeDrift??NaN).toFixed(4)} fatal ${fatal??"none"}`);
+   console.log(`step ${step} resident ${resident} free ${free} requests ${status[S.requests]} h tiles ${fine} particles ${solver.narrowBandFlipInfo?.particles??0} liquid ${Math.round(stats?.volumeCellSum??NaN)} drift ${(stats?.volumeDrift??NaN).toFixed(4)} fill ${(stats?.rawVolumeDrift??NaN).toFixed(4)} fatal ${fatal??"none"}`);
   }
   if(failure||fatal){if(failure)console.log(`solver: ${failure}`);process.exitCode=1;break;}
   assert.ok(Math.abs((solver.info.completedTime_s??0)-step*dt)<1e-8,"complete exactly one requested clock step");

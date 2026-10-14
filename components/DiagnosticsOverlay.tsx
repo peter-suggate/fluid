@@ -11,6 +11,7 @@ import { resolvedMethodValues } from "../lib/core/stores/method-store";
 function telemetrySourceLabel(source?: string) {
   return ({
     "dense-volume": "dense GPU volume field",
+    "narrow-band-phi": "narrow-band phi measure (last probed step)",
     "initial-condition": "analytic t=0 condition",
     unavailable: "unavailable — no authoritative field published",
   } as Record<string, string>)[source ?? ""] ?? "source pending";

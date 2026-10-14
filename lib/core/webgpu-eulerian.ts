@@ -106,7 +106,7 @@ export interface GPUEulerianInfo {
   representedVolumeCellSum?: number;
   representedVolumeDrift?: number;
   /** GPU field which supplied the displayed physical volume. */
-  volumeTelemetrySource?: "dense-volume" | "initial-condition" | "unavailable";
+  volumeTelemetrySource?: "dense-volume" | "narrow-band-phi" | "initial-condition" | "unavailable";
   front_m?: number;
   /** GPU field which supplied the displayed dam-front location. */
   frontTelemetrySource?: "dense-volume" | "initial-condition" | "unavailable";

@@ -2636,17 +2636,23 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         if(budget){encoder.copyBufferToBuffer(budget,0,this.statsReadback,40,36);this.mixedFrame.requestNarrowBandVolumeProbe();}
         this.device.queue.submit([encoder.finish()]);
         await this.statsReadback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(this.statsReadback.getMappedRange(),0,budget?19:10).slice();
-        if(budget){const b=new Float32Array(words.buffer,40,9);if(b[1]!>0)Object.assign(this.executionInfo,{
+        // The liquid's volume is the budget's measurement of phi, from the
+        // last step that took it (this read requests the next). The V
+        // texture is the pressure fill: an uncut, non-planar owner's is an
+        // eight-probe vote, an eighth of the owner per probe, so on a 4h
+        // surface its sum strays from phi's volume by percents.
+        let measured:number|undefined;
+        if(budget){const b=new Float32Array(words.buffer,40,9);if(b[1]!>0){if(b[4]!>0)measured=b[4]!;Object.assign(this.executionInfo,{
           narrowBandVolumeControlRate_per_s:this.narrowBandVolumeControlSeconds>0?b[8]:0,
           narrowBandTargetVolume_cells:b[0],narrowBandOutflowVolume_cells:b[2],
           narrowBandVolumeShift_cells:b[3]!/Math.min(...this.mixedFrame.ownership.capacity.lattice.cellSize_m),
           narrowBandVolumeBeforeCorrection_cells:b[4],narrowBandInitialVolume_cells:b[5],
-          narrowBandVolumeBudgetDrift:(words[3]!/2048-b[0]!)/Math.max(1,b[0]!),
-        });}
-        const represented=words[0]!/2048,volume=words[3]!/2048,reference=Math.max(1,this.referenceVolumeCells);
+          narrowBandVolumeBudgetDrift:((measured??words[3]!/2048)-b[0]!)/Math.max(1,b[0]!),
+        });}}
+        const represented=words[0]!/2048,fill=words[3]!/2048,volume=measured??fill,reference=Math.max(1,this.referenceVolumeCells);
         Object.assign(this.executionInfo,{representedVolumeCellSum:represented,volumeCellSum:volume,
-          representedVolumeDrift:(represented-reference)/reference,rawVolumeDrift:(volume-reference)/reference,volumeDrift:(volume-reference)/reference,
-          volumeTelemetrySource:"dense-volume",frontTelemetrySource:"dense-volume",
+          representedVolumeDrift:(represented-reference)/reference,rawVolumeDrift:(fill-reference)/reference,volumeDrift:(volume-reference)/reference,
+          volumeTelemetrySource:measured===undefined?"dense-volume":"narrow-band-phi",frontTelemetrySource:"dense-volume",
           front_m:this.frame.origin_m[0]+words[1]!*this.frame.cellSize_m[0],
           maxSpeed_m_s:new Float32Array(words.buffer)[2],uniformTwoLevelVelocity:this.twoLevelEnabled,
           uniformTwoLevelFineReach:UNIFORM_TWO_LEVEL_FINE_REACH,uniformTwoLevelShellReach:this.twoLevelShellReach,
