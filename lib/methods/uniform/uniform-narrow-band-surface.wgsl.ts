@@ -185,7 +185,7 @@ fn nbTransferTheta(local:vec3f)->vec2f{
  * gathers the union of two neighboring x cells' quadratic MAC supports and
  * accumulates both results in registers. Spatial order makes each x row at
  * most two runs, without a per-bin particle limit. */
-export function narrowBandFineTransferSource(subgroups:boolean):string{return /* wgsl */`
+export function narrowBandFineTransferSource(subgroups:boolean,apic=false):string{return /* wgsl */`
 var<workgroup> nbMomentum:array<vec3f,64>;
 var<workgroup> nbMass:array<vec3f,64>;
 var<workgroup> nbMomentumNext:array<vec3f,64>;
@@ -245,10 +245,13 @@ var<workgroup> nbRuns:array<vec2u,128>;
     let d=centre-nbPosition(i);let f=d+0.5;
     let wc=vec3f(weight(d.x),weight(d.y),weight(d.z));let wf=vec3f(weight(f.x),weight(f.y),weight(f.z));
     let w=vec3f(wf.x*wc.y*wc.z,wc.x*wf.y*wc.z,wc.x*wc.y*wf.z);
-    total+=w;momentum+=w*motion.xyz;
+    ${apic?`let p=particles[i];
+    let u=motion.xyz+vec3f(dot(p.cx.xyz,d+vec3f(0.5,0,0)),dot(p.cy.xyz,d+vec3f(0,0.5,0)),dot(p.cz.xyz,d+vec3f(0,0,0.5)));
+    let un=u+vec3f(p.cx.x,p.cy.x,p.cz.x);`:"let u=motion.xyz;let un=motion.xyz;"}
+    total+=w;momentum+=w*u;
     let xc=weight(d.x+1.0);let xf=weight(f.x+1.0);
     let wn=vec3f(xf*wc.y*wc.z,xc*wf.y*wc.z,xc*wc.y*wf.z);
-    totalNext+=wn;momentumNext+=wn*motion.xyz;
+    totalNext+=wn;momentumNext+=wn*un;
    }
   }
  }

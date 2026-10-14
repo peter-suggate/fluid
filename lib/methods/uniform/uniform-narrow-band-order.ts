@@ -1,3 +1,4 @@
+import { narrowBandParticleWGSL } from "./uniform-narrow-band-apic.wgsl";
 import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { ParticleBinScan } from "./particle-bin-scan";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformKeyGroups, uniformLatticeAddressWGSL, type UniformLatticeAddress } from "./uniform-lattice-address";
@@ -43,7 +44,7 @@ export class UniformNarrowBandOrder {
  get allocatedBytes():number{return this.enabled.size+this.dimensions.size+(this.tileOffsets?.size??0)+(this.scan?.allocatedBytes??0);}
  /** topology: the simulation ownership's, whose tail holds the pages. The
   * optional policy override lets small fixtures exercise both paths. */
- constructor(private readonly device:GPUDevice,private readonly address:UniformLatticeAddress,private readonly topology:GPUBuffer,private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer,readonly sparse=address.cellKeys>=4_194_304){
+ constructor(private readonly device:GPUDevice,private readonly address:UniformLatticeAddress,private readonly topology:GPUBuffer,private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer,readonly sparse=address.cellKeys>=4_194_304,private readonly apic=false){
   this.cells=address.cellKeys;uniformKeyGroups(address.tileKeys,1,65535,this.tileGroups);
   // Shared APIC scan's activation record: no failure and an active step.
   // This immutable record makes our sort unconditional, including bootstrap.
@@ -61,7 +62,7 @@ export class UniformNarrowBandOrder {
    {buffer:this.bins,offset:this.sparse?8*cells:0,size:this.sparse?4*tiles:4*cells},
    this.sparse?this.tileOffsets!:{buffer:this.links,offset:0,size:4*cells},this.enabled);
   const module=this.device.createShaderModule({label:"FLIP spatial order",code:/* wgsl */`
-struct Particle{position:vec4f,velocity:vec4f,before:vec4f}
+${narrowBandParticleWGSL(this.apic)}
 @group(0) @binding(7) var<uniform> orderDimensions:vec4u;
 // The box and the blocks are this module's uniform, the pages the
 // topology's tail: the address functions read them.

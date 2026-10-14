@@ -1,3 +1,4 @@
+import { narrowBandParticleWGSL } from "../lib/methods/uniform/uniform-narrow-band-apic.wgsl";
 /** Diagnostic: replace materialized old extension face reads in the unchanged
  * FLIP cache/tap/snapshot kernels with direct slot/hierarchy resolution. */
 import assert from "node:assert/strict";
@@ -220,7 +221,7 @@ async function run(): Promise<void> {
   const countRead = allocate(8, true); let e = raw.createCommandEncoder(); e.copyBufferToBuffer(flip.state, 0, countRead, 0, 8); raw.queue.submit([e.finish()]);
   await countRead.mapAsync(GPUMapMode.READ); const counts = new Uint32Array(countRead.getMappedRange().slice(0)); countRead.unmap();
   const count = counts[0]!; assert.ok(count > 0); raw.queue.writeBuffer(flip.state, 4, new Uint32Array([count]));
-  const original = allocate(count * 48), reference = allocate(count * 16), stats = allocate(16), readStats = allocate(16, true);
+  const original = allocate(count * 4 * flip.particleStride), reference = allocate(count * 16), stats = allocate(16), readStats = allocate(16, true);
   e = raw.createCommandEncoder(); e.copyBufferToBuffer(particles, 0, original, 0, original.size); raw.queue.submit([e.finish()]);
   const sweeps = Number(option("sweeps") ?? values.extensionFrontSweeps ?? 2), companion = allocate(ext.companionBytesAt(ownership.capacity.fineTiles));
   const common = { phase: f.phase, output: f.velocityScratch, outputNegative: f.negativeScratch, scratch: { buffer: frame.stageScratch }, params: frame.params.extension };
@@ -279,13 +280,13 @@ async function run(): Promise<void> {
    if (finalizeAll && name === "taps") variants.set("coarse", { group: bound, pipeline: await raw.createComputePipelineAsync({ ...descriptor, layout: variantLayout, compute: { ...descriptor.compute, module, entryPoint: "directCoarseSlots" } }) });
   }
   const compareModule = raw.createShaderModule({ code: `
-struct Particle{position:vec4f,velocity:vec4f,before:vec4u}
+${narrowBandParticleWGSL(flip.transferMode==="apic")}
 @group(0) @binding(0) var<storage,read> particles:array<Particle>;
 @group(0) @binding(1) var<storage,read_write> reference:array<vec4u>;
 @group(0) @binding(2) var<storage,read_write> result:array<atomic<u32>>;
 override capture:bool=false;
 @compute @workgroup_size(256) fn main(@builtin(global_invocation_id) gid:vec3u){
- let i=gid.x;if(i>=arrayLength(&reference)){return;}let value=particles[i].before;
+ let i=gid.x;if(i>=arrayLength(&reference)){return;}let value=bitcast<vec4u>(particles[i].before);
  if(capture){reference[i]=value;return;}for(var c=0u;c<4u;c++){if(value[c]!=reference[i][c]){
   atomicAdd(&result[0],1u);atomicMin(&result[1],i);
   let a=value[c];let b=reference[i][c];let oa=select(a|0x80000000u,~a,(a&0x80000000u)!=0u);let ob=select(b|0x80000000u,~b,(b&0x80000000u)!=0u);

@@ -1,3 +1,4 @@
+import { uniformTerrainSamplingWGSL } from "./uniform-terrain-sampling.wgsl";
 /** Embedded solids for fine mixed owners: the paged voxel mask
  * (SolidOccupancyMask's image, the host's active scratch, with the bed-slope lane in it), the terrain
  * heightfield and the GPU-resident rigid bodies (WebGPURigidBodySystem's
@@ -640,31 +641,9 @@ fn umBedSlope(p:vec3i)->vec2f{
  return vec2f(vec2i(bitcast<i32>(entry<<24u)>>24u,bitcast<i32>(entry<<16u)>>24u))/${UNIFORM_SOLID_BED_SLOPE_UNITS}.0;
 }
 fn umSolidHasTerrain()->bool{return umSolidParams.frame.w>0.5;}
-// Terrain columns by lattice column: the box's in a closed scene, the whole
-// window's in an open world (UniformOpenWorldTerrain), whose ground runs on
-// past the box. A read past the texture takes its edge column.
-fn umSolidTerrainHigh()->vec2f{return vec2f(textureDimensions(umSolidTerrain))-vec2f(1);}
-fn umSolidTerrainHeight(x:i32,z:i32)->f32{
- let d=vec2i(textureDimensions(umSolidTerrain));let f=32*umFramePage();let world=vec2i(x,z)+f.xz;
- if(umAnalyticTerrain.ground.w>0.5&&(any(world<vec2i(0))||any(world>=d))){
-  let at=umAnalyticTerrain.frame.xy+(vec2f(world)+0.5)*umAnalyticTerrain.frame.zw;
-  return owHeight(at.x,at.y)-f32(f.y);
- }
- return textureLoad(umSolidTerrain,clamp(world,vec2i(0),d-1),0).x-f32(f.y);
-}
+${uniformTerrainSamplingWGSL}
 ${geometricPlaneBoxWGSL.replaceAll("geometric", "umTerrain")}
 ${uniformSolidBoundaryWGSL}
-// One continuous height and normal for contact and pressure geometry.
-fn umTerrainSurface(q:vec3f)->vec3f{
- let offset=32.0*vec2f(umFramePage().xz);let high=umSolidTerrainHigh()-offset;
- let p=select(clamp(q.xz-vec2f(0.5),-offset,high),q.xz-vec2f(0.5),umAnalyticTerrain.ground.w>0.5);let a=vec2i(floor(p));let f=fract(p);
- var heights:array<f32,4>;for(var k=0u;k<4u;k++){heights[k]=umSolidTerrainHeight(a.x+i32(k&1u),a.y+i32(k>>1u));}
- let h00=heights[0];let h10=heights[1];let h01=heights[2];let h11=heights[3];
- let height=mix(mix(h00,h10,f.x),mix(h01,h11,f.x),f.y);
- let slope=vec2f(mix(h10-h00,h11-h01,f.y),mix(h01-h00,h11-h10,f.x));
- let interior=((q.xz>=vec2f(0.5)-offset)&(q.xz<=high+vec2f(0.5)))|vec2<bool>(umAnalyticTerrain.ground.w>0.5);
- return vec3f(height,select(vec2f(0),slope,interior));
-}
 // Integrate four local planes. Exact on a planar heightfield; subdivision
 // resolves the column-centre patch boundaries instead of quantizing a face
 // aperture to quarters. Zero normal width evaluates a face's area fraction.

@@ -223,7 +223,7 @@ function uniformMixedPressureTarget(p:{pressureTolerance:number}):number{
  * byteBudget: bytes the capacity-sized buffers and the detail fields may hold at once, a
  * reservation's old and new together; absent, only the device's buffer and
  * binding limits refuse one. */
-export interface UniformMixedFrameCapacity{fineTiles:number;liquidBand:boolean;byteBudget?:number}
+export interface UniformMixedFrameCapacity{fineTiles:number;liquidBand:boolean;byteBudget?:number;particleTransfer?:"flip"|"apic"}
 
 export class UniformMixedFrame {
  readonly ownership:UniformMixedOwnership;
@@ -431,7 +431,7 @@ export class UniformMixedFrame {
     acceptance:new Float32Array([0,0,UNIFORM_PRESSURE_RELATIVE_REDUCTION,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE]),band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])])};}
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o);
-  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool);
+  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer);
   this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocity,f.negative,f.velocityScratch,f.negativeScratch,true,true);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
   // The census extension crosses a relayout in these instead of being
@@ -909,6 +909,9 @@ export class UniformMixedFrame {
     this.phiResolve.encode(encoder,this.phiResolveGroups.phi);
    }
    if(p.redistance!==false){if(this.narrowBandFlip.retire(encoder))this.phiResolve.encode(encoder,this.phiResolveGroups.phi);this.narrowBandFlip.redistance(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}
+   // Retire buried phantom surfaces and stale near-air distances only outside
+   // the physical support collar. Resolve shared vertices before all readers.
+   this.narrowBandFlip.clearAir(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);
    trace?.phase(encoder,V.phi);encoder=this.flush(encoder,trace);
 
    trace?.phase(encoder,V.coupling);

@@ -26,6 +26,7 @@ export const narrowBandAdaptiveDetail:MethodParamValues={...narrowBandFixedDetai
 export const narrowBandFlipValues=(values:MethodParamValues={})=>({
  ...resolveUniformGeometricValues({...narrowBandAdaptiveDetail,...values}),...narrowBandControlValues(values),...fixed,
  fineGridPadding:Math.max(0,Math.min(4,Number.isFinite(Number(values.fineGridPadding))?Number(values.fineGridPadding):1)),
+ particleTransfer:values.particleTransfer==="flip"?"flip":"apic",
  adaptiveSurface:"on",
  coarseParticleMode:"off",
  phiFineAdvection:values.phiFineAdvection==="trilinear"?"trilinear":"cubic",
@@ -34,6 +35,7 @@ export const narrowBandFlipValues=(values:MethodParamValues={})=>({
 // Uniform Geometric's list misses NB-specific live controls.
 const params:SimulationMethod["params"]=[
  ...narrowBandControlParams,
+ {kind:"select",key:"particleTransfer",label:"Particle transfer",default:"apic",tier:"coarse",update:"solver",options:[{value:"flip",label:"FLIP (95%)"},{value:"apic",label:"APIC (experimental)"}],hint:"APIC replaces residual FLIP velocities with quadratic affine transfers, following Sato 2018. Restarts the solver."},
  NARROW_BAND_FINE_ADVECTION,
  {kind:"number",key:"fineGridPadding",label:"Fine-grid padding",default:1,tier:"fine",update:"runtime",min:0,max:4,step:1,digits:0,unit:"h",hint:"Extra h cells around swept surface crossings. The particle band stays 4h wide."},
  ...UNIFORM_GEOMETRIC_PARAMS.filter(p=>!Object.hasOwn(fixed,p.key)).map(p=>Object.hasOwn(narrowBandAdaptiveDetail,p.key)?{...p,default:narrowBandAdaptiveDetail[p.key]} as typeof p:p)
@@ -73,9 +75,9 @@ export const uniformNarrowBandMethod:SimulationMethod={
  capabilities:{adoptsRigidRosterShape:true,visualLayers:{hidden:["window","release"]}},
  params,
  runtimeParamKeys:params.filter(p=>p.update==="runtime").map(p=>p.key),
- appDefaults:{timeStep:"sixtieth",...narrowBandAdaptiveDetail,...fixed,fineGridPadding:1,coarseParticleMode:"off"},
+ appDefaults:{particleTransfer:"apic",timeStep:"sixtieth",...narrowBandAdaptiveDetail,...fixed,fineGridPadding:1,coarseParticleMode:"off"},
  normalizeValues:narrowBandFlipValues,
  createSolverAsync:(device,scene,quality,values,loads,progress,signal)=>WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
-  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),phiFineTrilinear:values.phiFineAdvection==="trilinear",narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
+  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="flip"?"flip":"apic",phiFineTrilinear:values.phiFineAdvection==="trilinear",narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
  pipelineGraph:async()=> (await import("./uniform-narrow-band-pipeline")).UNIFORM_NARROW_BAND_PIPELINE,
 };

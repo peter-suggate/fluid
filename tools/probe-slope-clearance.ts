@@ -1,9 +1,12 @@
+import { createNbflipVolumeProbe } from "./probe-nbflip-volume";
 import { bakeProceduralSolid } from "../lib/core/procedural-solid";
 /**
  * Finite-release baseline, with the production bed-gradient bake enabled.
  * Run with the browser simulation stopped:
  * WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/probe-slope-clearance.ts
  * Optional positional step rate: 30 or 60 (default). Reports every 0.5 s.
+ * APIC: FLUID_CLEARANCE_VALUES='{"particleTransfer":"apic"}'. Extend with FLUID_CLEARANCE_STEPS=720.
+ * Reports particle RMS/peak speed and disagreement with the grid used for advection.
  * Pins the four pages for valid diagnostic field readback, as probe-ramp-residue does.
  * Exit 1 means residue, >1% volume drift, or a solver failure; it is a target,
  * not an assertion that the current solver already clears this scene.
@@ -15,7 +18,7 @@ import {
 import {
   NBFLIP_SLOPE_CLEARANCE_INITIAL_CELLS, createNbflipSlopeClearance, nbflipSlopeClearanceTransitSeconds, nbflipSlopeClearanceBed,
 } from "../lib/core/nbflip-slope-clearance-scene";
-import { advanceUniform, createUniformSolver, readUniformFields, withUniformDevice } from "../tests/helpers/uniform-geometric";
+import { advanceUniform, createUniformSolver, withUniformDevice } from "../tests/helpers/uniform-geometric";
 import { gpuCompilationManagerFor } from "../lib/core/gpu-compilation-manager";
 import { uniformDetailField } from "../lib/methods/uniform/uniform-detail-fields";
 
@@ -42,16 +45,19 @@ async function readPrefix(device: GPUDevice, buffer: GPUBuffer, bytes: number): 
 
 await withUniformDevice("slope clearance", async device => {
   console.log(JSON.stringify({ scene: scene.sceneId, hz, target_s: scene.duration_s,
+    values:JSON.parse(process.env.FLUID_CLEARANCE_VALUES ?? "{}"), subgroups:device.features.has("subgroups"),
     reference_transit_s: nbflipSlopeClearanceTransitSeconds(), initial_cells: NBFLIP_SLOPE_CLEARANCE_INITIAL_CELLS }));
   const began = performance.now();
   const progress = setInterval(() => console.log(JSON.stringify({ initializing_s: (performance.now() - began) / 1000,
     compilation: gpuCompilationManagerFor(device).snapshot() })), 15000);
   const solver = await createUniformSolver(device, scene, JSON.parse(process.env.FLUID_CLEARANCE_VALUES ?? "{}"))
     .finally(() => clearInterval(progress));
+  const volumeProbe=await createNbflipVolumeProbe(device,solver);
   try {
     const frame = (solver as unknown as { mixedFrame: {
+      requestNarrowBandVolumeProbe():void;
       pagePool: { pin(pages: { x: number; y: number; z: number }[]): void };
-      narrowBandFlip: { state: GPUBuffer; activeParticles: GPUBuffer };
+      narrowBandFlip: { state: GPUBuffer; activeParticles: GPUBuffer; particleSource: {strideFloats:number} };
     } }).mixedFrame;
     frame.pagePool.pin(Array.from({ length: nx / 32 }, (_, x) => ({ x, y: 0, z: 0 })));
     // Approximate per-stage ledger, for locating growth, not for acceptance.
@@ -82,7 +88,10 @@ await withUniformDevice("slope clearance", async device => {
     const every = Number(process.env.FLUID_CLEARANCE_EVERY ?? hz / 2);
     for (let step = 0; step <= steps; step++) {
       stageName = "head";
-      if (step > 0) await advanceUniform(solver, step / hz);
+      if (step > 0) {
+        if(step % every === 0 || step === steps) frame.requestNarrowBandVolumeProbe();
+        await advanceUniform(solver, step / hz);
+      }
       for (const stage of stages.splice(0)) {
         const phi = await stage.done(); let approximate = 0;
         const at = (x: number, y: number, z: number) => phi[x + (nx + 1) * (y + (ny + 1) * z)]!;
@@ -96,34 +105,45 @@ await withUniformDevice("slope clearance", async device => {
         console.log(JSON.stringify({ step, stage: stage.name, approximate_cells: approximate }));
       }
       if (step % every !== 0 && step !== steps) continue;
-      const fields = await readUniformFields(device, solver);
-      // Expanded owner averages already include solid capacity. Applying the
-      // binary voxel mask again discards liquid in continuous cut cells.
+      const volume = await volumeProbe.read();
+      // Each owner contributes its phi volume at its origin, including solid capacity.
+      // The ramp/pit boundary aligns with 4h owners.
       let ramp = 0, pit = 0;
       for (let z = 0; z < nz; z++) for (let x = 0; x < nx; x++) {
         for (let y = 0; y < ny; y++) {
-          const density = fields.density[x + nx * (y + ny * z)]!;
+          const density = volume[x + nx * (y + ny * z)]!;
           if (!Number.isFinite(density) || density < 0) throw new Error(`Invalid density at ${x},${y},${z}: ${density}`);
           if (x < NBFLIP_RAMP_LENGTH) ramp += density; else pit += density;
         }
       }
       const state = await readPrefix(device, frame.narrowBandFlip.state, 4);
       const count = new Uint32Array(state.buffer)[0]!;
-      const particles = await readPrefix(device, frame.narrowBandFlip.activeParticles, 48 * count);
-      let rampSamples = 0;
-      let positionX = 0, velocityX = 0, ballistic = 0;
+      const stride = frame.narrowBandFlip.particleSource.strideFloats;
+      const particles = await readPrefix(device, frame.narrowBandFlip.activeParticles, 4 * stride * count);
+      let rampSamples = 0, uphillEdgeSamples = 0;
+      const edgeRecords:number[][]=[];
+      let positionX = 0, velocityX = 0, ballistic = 0, speed2 = 0, peak = 0, residual2 = 0, coupled = 0, affine2 = 0;
       for (let i = 0; i < count; i++) {
-        const x = particles[12 * i]!;
-        positionX += x; velocityX += particles[12 * i + 4]!;
-        ballistic += +(particles[12 * i + 11] === 1);
+        const record=particles.subarray(stride*i,stride*(i+1));
+        if(!record.every(Number.isFinite))throw new Error(`Nonfinite particle ${i}`);
+        if(stride===24)for(let row=0;row<3;row++)for(let a=0;a<3;a++)affine2+=0.25*record[12+4*row+a]!**2;
+        const x = particles[stride * i]!;
+        if(x>=0 && x<0.5){uphillEdgeSamples++;if(edgeRecords.length<16)edgeRecords.push(Array.from(record.subarray(0,12)));}
+        positionX += x; velocityX += particles[stride * i + 4]!;
+        ballistic += +(particles[stride * i + 11] === 1);
+        const v = particles.subarray(stride*i+4,stride*i+7);
+        const s2 = v.reduce((sum,c)=>sum+c*c,0); speed2 += s2; peak = Math.max(peak,Math.sqrt(s2));
+        if(particles[stride*i+11] !== 1){coupled++;for(let a=0;a<3;a++)residual2 += (v[a]!-particles[stride*i+8+a]!)**2;}
         if (x >= 0 && x < NBFLIP_RAMP_LENGTH) rampSamples++;
       }
       const total = ramp + pit;
       const stats = await solver.readStats();
-      if (Math.abs(total-stats.volumeCellSum!) > 2e-5*Math.max(1,total))
+      if (step > 0 && Math.abs(total-stats.volumeCellSum!) > 2e-5*Math.max(1,total))
         throw new Error(`Volume readback disagrees with GPU accounting: ${total} vs ${stats.volumeCellSum}`);
       if (step === 0) {
-        initial = total;
+        // At t=0 the budget is the initialized geometric fill; subsequent stats
+        // and this probe measure the tetrahedral phi surface. Keep that seed reference.
+        initial = stats.volumeCellSum!;
         if (!(initial > 0)) throw new Error("The release contains no liquid");
       }
       const drift = (total - initial) / initial;
@@ -135,12 +155,16 @@ await withUniformDevice("slope clearance", async device => {
         pit_cells: pit, total_cells: total, volume_drift: drift, seed_error: seedError,
         stats_cells: stats.volumeCellSum, stats_drift: stats.volumeDrift, speed_m_s: stats.maxSpeed_m_s,
         budget_cells: stats.narrowBandTargetVolume_cells, control_per_s: stats.narrowBandVolumeControlRate_per_s,
-        samples: count, mean_x: positionX / Math.max(1, count), mean_u: velocityX / Math.max(1, count), ballistic,
-        ramp_samples: rampSamples, clear, cleared_since_s: clearedSince }));
+        particle_rms_m_s: Math.sqrt(speed2/Math.max(1,count)), particle_max_m_s: peak,
+        particle_grid_rms_m_s: Math.sqrt(residual2/Math.max(1,coupled)),
+        affine_rms_m_s: stride===24?Math.sqrt(affine2/Math.max(1,count)):null,
+        transfer: solver.narrowBandFlipInfo?.transfer ?? "flip", samples: count, mean_x: positionX / Math.max(1, count), mean_u: velocityX / Math.max(1, count), ballistic,
+        ramp_samples: rampSamples, uphill_edge_samples: uphillEdgeSamples,
+        ...(process.env.FLUID_CLEARANCE_EDGE_SAMPLES && step===steps ? {uphill_edge_records:edgeRecords} : {}), clear, cleared_since_s: clearedSince }));
     }
     passed &&= steps >= scene.duration_s * hz;
     console.log(JSON.stringify({ passed, target_s: scene.duration_s, cleared_since_s: clearedSince,
       criterion: "Zero slope volume and samples, with seed error and total volume drift each at most 1%." }));
     if (!passed) process.exitCode = 1;
-  } finally { solver.destroy(); }
-});
+  } finally { volumeProbe.destroy(); solver.destroy(); }
+},process.env.FLUID_CLEARANCE_SUBGROUPS ? ["subgroups"] : []);

@@ -25,7 +25,7 @@ test("NB runtime tuning keeps the renderer's attached solver and never starts in
  Object.assign(renderer,{device:{},gpuFluid:solver,gpuFluidKey:key,topologyFreezeSolver:solver,topologyFrozen:false,
   beginGPUFluidInitialization(){assert.fail("A budget/retirement edit rebuilt the attached solver");},
  });
- const liveEdits:MethodParamValues[]=[{adaptiveBudgetPercent:0},{adaptiveBudgetPercent:100},{adaptiveFadeSeconds:0.05},{adaptiveFadeSeconds:2},{fineGridPadding:2}];
+ const liveEdits:MethodParamValues[]=[{adaptiveBudgetPercent:0},{adaptiveBudgetPercent:100},{adaptiveFadeSeconds:0.05},{adaptiveFadeSeconds:2},{fineGridPadding:2},{sparseParticleLifetime:0},{sparseParticleLifetime:10}];
  for(const edit of liveEdits){
   const next={...config,values:{...values,...edit}};
   assert.equal(access.currentGPUFluid(defaultScene,next,"full-scene"),solver);
@@ -54,4 +54,11 @@ test("narrow-band FLIP pins its application modes and preserves runtime tuning",
  assert.equal(tuned.detailShapeTolerance,0.75);assert.equal(tuned.detailStrain,"off");
  const options=uniformGeometricSolverOptions(values);
  assert.equal("sharpeningSweeps" in options,false);assert.equal(options.pressureCycleBudget,"lagged");
+});
+
+test("sparse particle lifetime defaults, clamps and applies without rebuilding",()=>{
+ const method=getMethod("uniform-narrow-band-flip");
+ const value=(sparseParticleLifetime?:number)=>resolveMethodValues(method,"balanced",sparseParticleLifetime===undefined?{}:{sparseParticleLifetime}).sparseParticleLifetime;
+ assert.equal(value(),2);assert.equal(value(-1),0);assert.equal(value(100),10);assert.equal(value(0.3),0.3);
+ assert.equal(methodConfigurationImpact(method,"balanced",{},{sparseParticleLifetime:0.3}),"live");
 });

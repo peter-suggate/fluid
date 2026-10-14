@@ -117,7 +117,7 @@ await withUniformDevice("ramp residue probe", async device => {
     }
     const solver = await createUniformSolver(device, scene);
     const frame = (solver as unknown as { mixedFrame: {
-      pagePool: { pin(pages: { x: number; y: number; z: number }[]): void }; narrowBandFlip: { activeParticles: GPUBuffer; state: GPUBuffer };
+      pagePool: { pin(pages: { x: number; y: number; z: number }[]): void }; narrowBandFlip: { activeParticles: GPUBuffer; state: GPUBuffer; particleStride: number };
       receipts: readonly { frame: number; words: Uint32Array; floats: Float32Array }[];
       levels: readonly { residual: GPUBufferBinding; phi: GPUBufferBinding; pressure: GPUBufferBinding; minimum: readonly GPUBufferBinding[] }[];
     } }).mixedFrame;
@@ -159,12 +159,13 @@ await withUniformDevice("ramp residue probe", async device => {
         if (step % every !== 0 && step !== steps) continue;
         const stats = await solver.readStats(), time = step * dt;
         const count = new Uint32Array((await readMixedBuffer(device, frame.narrowBandFlip.state)).buffer)[0]!;
-        const particles = await readPrefix(device, frame.narrowBandFlip.activeParticles, 48 * count);
+        const stride = frame.narrowBandFlip.particleStride;
+        const particles = await readPrefix(device, frame.narrowBandFlip.activeParticles, 4 * stride * count);
         let rampSamples = 0, rampBallistic = 0;
         for (let i = 0; i < count; i++) {
-          const x = particles[12 * i]!;
+          const x = particles[stride * i]!;
           if (!(x >= 0) || x >= RAMP) continue;
-          rampSamples++; if (particles[12 * i + 11] === 1) rampBallistic++;
+          rampSamples++; if (particles[stride * i + 11] === 1) rampBallistic++;
         }
         let ramp: number | undefined, pit: number | undefined, tread: number[] | undefined;
         if (!live) {

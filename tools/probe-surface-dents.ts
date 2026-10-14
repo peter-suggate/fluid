@@ -393,10 +393,10 @@ try {
     const end = analyse(`step ${step}`, last, print);
     if (ledger && print) { let sum = 0; for (let i = 0; i < volume.length; i++) sum += volume[i]!; console.log(`LEDGER step ${step}: the volume field holds ${sum.toFixed(0)} cells, ${solver!.narrowBandFlipInfo?.particles ?? 0} samples`); }
     if (foot && print && address) {
-      const nb = (frame as unknown as { narrowBandFlip: { activeParticles: GPUBuffer; bins: GPUBuffer; activityWord: number; tiles: number } }).narrowBandFlip, T = nb.tiles;
+      const nb = (frame as unknown as { narrowBandFlip: { activeParticles: GPUBuffer; particleStride: number; bins: GPUBuffer; activityWord: number; tiles: number } }).narrowBandFlip, T = nb.tiles;
       const [[Z], [x0, x1], [y0, y1]] = foot as [number[], number[], number[]], cell = dt / H, count = solver!.narrowBandFlipInfo?.particles ?? 0;
       // Heat, target, activated, theta and surface heat, a word a tile key each.
-      const [heatWords, sampleWords] = await Promise.all([censusWords({ buffer: nb.bins, offset: 4 * (nb.activityWord + 2 * T) }, 5 * T), censusWords({ buffer: nb.activeParticles, offset: 0 }, 12 * Math.max(1, count))]);
+      const [heatWords, sampleWords] = await Promise.all([censusWords({ buffer: nb.bins, offset: 4 * (nb.activityWord + 2 * T) }, 5 * T), censusWords({ buffer: nb.activeParticles, offset: 0 }, nb.particleStride * Math.max(1, count))]);
       const heat = new Float32Array(heatWords.buffer), samples = new Float32Array(sampleWords.buffer), key = (x: number, y: number, z: number) => lattice!.uniformTileKey(address, x, y, z);
       const tx = Array.from({ length: (x1! >> 2) - (x0! >> 2) + 1 }, (_, k) => (x0! >> 2) + k);
       const tileTable = (title: string, text: (t: number) => string) => {
@@ -407,7 +407,7 @@ try {
       tileTable("target heat", t => heat[T + t]!.toFixed(1)); tileTable("theta (the samples' support heat)", t => heat[3 * T + t]!.toFixed(1)); tileTable("surface heat (the samples' own)", t => heat[4 * T + t]!.toFixed(1));
       const w = x1! - x0! + 1, hgt = y1! - y0! + 1, all = new Uint16Array(w * hgt), outer = new Uint16Array(w * hgt), rows = Array.from({ length: hgt }, () => [] as number[]);
       for (let i = 0; i < count; i++) {
-        const o = 12 * i, x = Math.floor(samples[o]!), y = Math.floor(samples[o + 1]!);
+        const o = nb.particleStride * i, x = Math.floor(samples[o]!), y = Math.floor(samples[o + 1]!);
         if (Math.floor(samples[o + 2]!) !== Z || x < x0! || x > x1! || y < y0! || y > y1!) continue;
         all[x - x0! + w * (y - y0!)]!++; if (samples[o + 7]! > -1) outer[x - x0! + w * (y - y0!)]!++; rows[y - y0!]!.push(i);
       }
@@ -422,7 +422,7 @@ try {
         let front = -1; for (let x = x1!; x >= x0!; x--) if (fraction(x, y) >= 0.5) { front = x; break; }
         let farthest = -1, n = 0, out = 0, hot = 0, own = 0, grid = 0, square = 0;
         for (const i of rows[y - y0!]!) {
-          const o = 12 * i, x = samples[o]!; farthest = Math.max(farthest, x);
+          const o = nb.particleStride * i, x = samples[o]!; farthest = Math.max(farthest, x);
           if (x < front - 3 || x >= front + 1) continue;
           n++; if (samples[o + 7]! > -1) out++; hot += samples[o + 3]!; own += samples[o + 4]! * cell; grid += samples[o + 8]! * cell;
           square += ((samples[o + 4]! - samples[o + 8]!) ** 2 + (samples[o + 5]! - samples[o + 9]!) ** 2 + (samples[o + 6]! - samples[o + 10]!) ** 2) * cell * cell;

@@ -30,14 +30,14 @@ await withUniformDevice('NB inflow probe',async device=>{
    await advanceUniform(solver,frame*dt);
    if(frame%every!==0&&frame!==steps)continue;
    const fields=await readUniformFields(device,solver);
-   const band=(solver as unknown as {mixedFrame:{narrowBandFlip:{activeParticles:GPUBuffer}}}).mixedFrame.narrowBandFlip;
+   const band=(solver as unknown as {mixedFrame:{narrowBandFlip:{activeParticles:GPUBuffer;particleStride:number}}}).mixedFrame.narrowBandFlip;
    const particles=await readMixedBuffer(device,band.activeParticles),info=solver.narrowBandFlipInfo!;
    const bins=Array.from({length:8},()=>({n:0,u:0,v:0,min:Infinity,max:-Infinity}));
    for(let i=0;i<info.particles;i++){
-    const d=[0,1,2].map(a=>particles[12*i+a]!-origin[a]!);const axial=d.reduce((n,v,a)=>n+v*dir[a]!,0);
+    const d=[0,1,2].map(a=>particles[band.particleStride*i+a]!-origin[a]!);const axial=d.reduce((n,v,a)=>n+v*dir[a]!,0);
     const radial=Math.hypot(...d.map((v,a)=>v-axial*dir[a]!));
     if(axial<0||axial>=32||radial>15)continue;
-    const b=bins[Math.floor(axial/4)]!;b.n++;b.u+=particles[12*i+4]!/h;b.v+=particles[12*i+5]!/h;b.min=Math.min(b.min,particles[12*i+4]!/h);b.max=Math.max(b.max,particles[12*i+4]!/h);
+    const b=bins[Math.floor(axial/4)]!;b.n++;b.u+=particles[band.particleStride*i+4]!/h;b.v+=particles[band.particleStride*i+5]!/h;b.min=Math.min(b.min,particles[band.particleStride*i+4]!/h);b.max=Math.max(b.max,particles[band.particleStride*i+4]!/h);
    }
    const slices:number[]=[];for(let y=100;y<=240;y++)for(let x=0;x<=128;x++)slices.push(fields.vertex(x,y,64)/h);
    core??=slices.flatMap((value,i)=>value < -2&&100+Math.floor(i/129)>=170&&100+Math.floor(i/129)<=220?[i]:[]);

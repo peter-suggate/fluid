@@ -1,3 +1,4 @@
+import { narrowBandParticleWGSL } from "../lib/methods/uniform/uniform-narrow-band-apic.wgsl";
 /** Inclusive replay of raw-canonical retention versus the whole old RGBA copy. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -101,7 +102,7 @@ async function run():Promise<void>{
   await countRead.mapAsync(GPUMapMode.READ);const count=new Uint32Array(countRead.getMappedRange())[0]!;countRead.unmap();assert.ok(count>0);raw.queue.writeBuffer(flip.state,4,new Uint32Array([count]));
   const companion=allocate(ext.companionBytesAt(ownership.capacity.fineTiles)),slots=ext.companionBindings(companion) as GPUBufferBinding[];
   const stateBytes=ext.scratchBytesAt(ownership.capacity.fineTiles)/2,heldState=coarseAfter?allocate(stateBytes):undefined;
-  const heldSlots=allocate(slots[0]!.size!),slotStats=allocate(16),slotRead=allocate(16,true),original=allocate(count*48),particleReference=allocate(count*16),particleStats=allocate(16),particleRead=allocate(16,true);
+  const heldSlots=allocate(slots[0]!.size!),slotStats=allocate(16),slotRead=allocate(16,true),original=allocate(count*4*flip.particleStride),particleReference=allocate(count*16),particleStats=allocate(16),particleRead=allocate(16,true);
   const common={phase:f.phase,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:{buffer:frame.stageScratch},params:frame.params.extension};
   const companionField={scratch:companion,physical:f.departure,negative:f.negativeDeparture};
   const current=ext.bind({...common,physical:f.velocity,negative:f.negative,companion:companionField});
@@ -111,13 +112,13 @@ async function run():Promise<void>{
   const proofSlots=slots.map((resource,epoch)=>raw.createBindGroup({layout:proofSlotsLayout,entries:[{binding:2,resource},...(coarseAfter?[{binding:0,resource:{buffer:frame.stageScratch,offset:epoch*stateBytes,size:stateBytes}}]:[])]}));
   const proofGroup=raw.createBindGroup({layout:compareLayout,entries:[{binding:0,resource:{buffer:heldSlots}},{binding:1,resource:{buffer:slotStats}},...(heldState?[{binding:2,resource:{buffer:heldState}}]:[])]});
   const particleModule=raw.createShaderModule({code:`
-struct Particle{position:vec4f,velocity:vec4f,before:vec4u}
+${narrowBandParticleWGSL(flip.transferMode==="apic")}
 @group(0) @binding(0) var<storage,read> particles:array<Particle>;
 @group(0) @binding(1) var<storage,read_write> expected:array<vec4u>;
 @group(0) @binding(2) var<storage,read_write> stats:array<atomic<u32>>;
 override capture:bool=false;
 @compute @workgroup_size(256) fn main(@builtin(global_invocation_id) gid:vec3u){
- let i=gid.x;if(i>=arrayLength(&expected)){return;}let value=particles[i].before;
+ let i=gid.x;if(i>=arrayLength(&expected)){return;}let value=bitcast<vec4u>(particles[i].before);
  if(capture){expected[i]=value;return;}for(var axis=0u;axis<4u;axis++){if(value[axis]!=expected[i][axis]){atomicAdd(&stats[0],1u);atomicMin(&stats[1],i);}}
 }`});
   const particlePipelines=await Promise.all([true,false].map(capture=>raw.createComputePipelineAsync({layout:"auto",compute:{module:particleModule,entryPoint:"main",constants:{capture:+capture}}})));

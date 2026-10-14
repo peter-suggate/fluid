@@ -800,7 +800,10 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
     if (!(Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(z) && x >= 0 && y >= 0 && z >= 0 && x < px && y < py && z < pz)) throw new RangeError(`Uniform page pool: AIR page (${x}, ${y}, ${z}) is outside the box of ${px}x${py}x${pz} pages`);
     return x + px * (y + py * z);
   }));
-  const pool = { table: UNIFORM_PAGE_WINDOW, blocks, idleSteps: 8, worldPolicy: world ? 3 : openTop ? 2 : 1, box: { origin: boxPage, pages: box.pages } };
+  // The census certifies the next frame's full travel and stencil support.
+  // An unrequested page is disposable at this commit; the allocator still
+  // quarantines its block until the following commit before reuse.
+  const pool = { table: UNIFORM_PAGE_WINDOW, blocks, idleSteps: 1, worldPolicy: world ? 3 : openTop ? 2 : 1, box: { origin: boxPage, pages: box.pages } };
   const floor = UNIFORM_PAGE_WINDOW - UNIFORM_FRAME_FLOOR_PAGES;
   const seed = uniformPagePoolBoxSeed(uniformPagePoolLayout(pool), {
     permute: scene.permute, resident: (x, y, z) => !air.has(x + px * (y + py * z)),

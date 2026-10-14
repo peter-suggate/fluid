@@ -284,16 +284,17 @@ try {
   // box reaches it (the support alone, + travel, + padding, + both).
   let predicted:{full:Uint8Array;noPad:Uint8Array;noTravel:Uint8Array;bare:Uint8Array;ends:Uint8Array;faces:Uint8Array;point:Uint8Array;point2:Uint8Array;samples:Record<string,number>}|undefined;
   if(recordMarks){
-   const nb=(solver as unknown as {mixedFrame:{narrowBandFlip:{activeParticles:GPUBuffer;state:GPUBuffer;bins:GPUBuffer}}}).mixedFrame.narrowBandFlip;
+   const nb=(solver as unknown as {mixedFrame:{narrowBandFlip:{activeParticles:GPUBuffer;state:GPUBuffer;bins:GPUBuffer;particleStride:number}}}).mixedFrame.narrowBandFlip;
+   const stride=nb.particleStride;
    const dims=ownership.capacity.lattice.dimensions as [number,number,number],cells=dims[0]*dims[1]*dims[2];
    const bank=2*cells+2*tiles+(dims[0]+1)*(dims[1]+1)*(dims[2]+1),bankWords=cells+4+3*tiles;
    const readState=gpu.createBuffer({size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
    const readBank=gpu.createBuffer({size:4*bankWords,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
    let e=gpu.createCommandEncoder();e.copyBufferToBuffer(nb.state,0,readState,0,16);e.copyBufferToBuffer(nb.bins,4*bank,readBank,0,4*bankWords);gpu.queue.submit([e.finish()]);
-   await readState.mapAsync(GPUMapMode.READ);const live=Math.min(new Uint32Array(readState.getMappedRange())[0]!,nb.activeParticles.size/48);readState.unmap();readState.destroy();
+   await readState.mapAsync(GPUMapMode.READ);const live=Math.min(new Uint32Array(readState.getMappedRange())[0]!,nb.activeParticles.size/(4*stride));readState.unmap();readState.destroy();
    await readBank.mapAsync(GPUMapMode.READ);const nearestBank=new Uint32Array(readBank.getMappedRange().slice(0));readBank.unmap();readBank.destroy();
-   const readSamples=gpu.createBuffer({size:48*live,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-   e=gpu.createCommandEncoder();e.copyBufferToBuffer(nb.activeParticles,0,readSamples,0,48*live);gpu.queue.submit([e.finish()]);
+   const readSamples=gpu.createBuffer({size:4*stride*live,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+   e=gpu.createCommandEncoder();e.copyBufferToBuffer(nb.activeParticles,0,readSamples,0,4*stride*live);gpu.queue.submit([e.finish()]);
    await readSamples.mapAsync(GPUMapMode.READ);const sample=new Float32Array(readSamples.getMappedRange().slice(0));readSamples.unmap();readSamples.destroy();
    const cell=(solver as unknown as {mixedFrame:{ownership:{capacity:{lattice:{cellSize_m:readonly number[]}}}}}).mixedFrame.ownership.capacity.lattice.cellSize_m;
    const T=[tx,ty,tz],radius=0.875,padding=1;
@@ -301,7 +302,7 @@ try {
    const variants:[Uint8Array,number,number][]=[[predicted.full,1,padding],[predicted.noPad,1,0],[predicted.noTravel,0,padding],[predicted.bare,0,0]];
    const lo=[0,0,0],hi=[0,0,0],low=[0,0,0],high=[0,0,0],travel=[0,0,0];
    for(let i=0;i<live;i++){
-    const o=12*i,depth=sample[o+7]!,flag=sample[o+11]!;
+    const o=stride*i,depth=sample[o+7]!,flag=sample[o+11]!;
     if(depth<-1){predicted.samples.deep!++;continue;}if(flag===1){predicted.samples.ballistic!++;continue;}
     const c=[0,1,2].map(a=>Math.min(dims[a]!-1,Math.max(0,Math.floor(sample[o+a]!))));
     const tile=(c[0]!>>2)+tx*((c[1]!>>2)+ty*(c[2]!>>2));
