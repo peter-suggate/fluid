@@ -16,7 +16,7 @@ const GEOMETRY_PASS:GPUComputePassDescriptor={label:"Uniform mixed geometric fil
 /** encode()'s options when none are given: a full launch of the simulation geometry. */
 const NO_OPTIONS:{readonly pressure?:boolean;readonly changed?:GPUBuffer}={};
 
-/** The native eight-probe / planar-exact fill rule on mixed owners. Target
+/** The planar-exact fill rule on mixed owners (corner tetrahedra elsewhere). Target
  * fractions are intensive, phi is physical, and no fine cell is expanded.
  * Subsequent pressure authority and conditioning consume these same values.
  *
