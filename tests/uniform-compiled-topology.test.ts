@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createUniformMixedLayoutFromWidths, type UniformMixedLayout } from "../lib/methods/uniform/uniform-mixed-layout";
 import { uniformSeamSideOrders, compileUniformBlendMask } from "../lib/methods/uniform/uniform-compiled-topology";
 
 type V = [number, number, number];
@@ -33,38 +32,6 @@ test("compiled seam schedules preserve side and patch ordering for all 64 side c
    const onFine=q<16*fine,ordinal=onFine?Math.floor(q/16):q-15*fine;
    const actual=ordinal>=6?undefined:{side:(uniformSeamSideOrders[sides]!>>>(3*ordinal))&7,part:onFine?q%16:0};
    assert.deepEqual(actual,sequence[q],`side mask ${sides}, lane ${q}`);
-  }
- }
-});
-function layout(d:V,widths:Uint8Array):UniformMixedLayout {
- return createUniformMixedLayoutFromWidths({dimensions:d,cellSize_m:[1,1,1],origin_m:{x:0,y:0,z:0}},widths,[]);
-}
-function owner(l:UniformMixedLayout,p:V){
- if(p.some((v,a)=>v<0||v>=l.lattice.dimensions[a]!))return undefined;
- const t=p.map(v=>v>>2),d=l.tileDimensions,tile=t[0]!+d[0]*(t[1]!+d[1]*t[2]!);
- const word=l.tiles[tile]!,width=(word>>>31)?1:4,n=4/width;
- const local=p.map(v=>Math.floor((v%4)/width));const lane=local[0]!+n*(local[1]!+n*local[2]!);
- return {tile,width,lane,index:(word&0x3fffffff)+lane,origin:p.map(v=>v-v%width) as V};
-}
-test("compiled face patches match both incident owners including sixteen-to-one seams",()=>{
- for(let bits=0;bits<256;bits++){
-  const l=layout([8,8,8],Uint8Array.from({length:8},(_,k)=>bits&(1<<k)?1:4));
-  for(let z=0;z<8;z++)for(let y=0;y<8;y++)for(let x=0;x<8;x++){
-   const a=owner(l,[x,y,z])!;if(a.origin.some((v,i)=>v!==[x,y,z][i]))continue;
-   for(let axis=0;axis<3;axis++)for(const sign of [-1,1]){
-    const probe=[...a.origin] as V;probe[axis]!+=sign>0?a.width:-1;
-    const first=owner(l,probe),width=Math.min(a.width,first?.width??a.width),side=a.width/width;
-    for(let part=0;part<side*side;part++){
-     const u=(axis+1)%3,v=(axis+2)%3,q=[...probe] as V;q[u]!+=(part%side)*width;q[v]!+=Math.floor(part/side)*width;
-     const b=owner(l,q);if(!b){assert.equal(part,0);continue;}
-     const offset=part%side*[1,4,16][u]!+Math.floor(part/side)*[1,4,16][v]!;
-     assert.equal(first!.index+offset,b.index);assert.equal(first!.lane+offset,b.lane);
-     // The neighbor's reciprocal patch has the same normal plane and area.
-     const plane=a.origin[axis]!+(sign>0?a.width:0);
-     assert.equal(plane,b.origin[axis]!+(sign<0?b.width:0));
-     assert.equal(Math.min(a.width,b.width),width);
-    }
-   }
   }
  }
 });

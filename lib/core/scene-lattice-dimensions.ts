@@ -29,6 +29,34 @@ export function sceneLatticeDimensions(
   ];
 }
 
+/** A fluid solver stores its fields in pages this many cells on an edge. */
+export const LATTICE_PAGE_CELLS = 32;
+
+/** Cells of air a fluid lattice holds above an open top, before rounding to pages. */
+export const LATTICE_OPEN_TOP_HEADROOM_CELLS = 64;
+
+/**
+ * Cells of the lattice a fluid solver allocates and addresses for the scene:
+ * the container's cells rounded up to whole pages on every axis, and under an
+ * open top the headroom above it (LATTICE_OPEN_TOP_HEADROOM_CELLS).
+ *
+ * The container stays what was authored. The lattice's cell (0,0,0) is the
+ * container's, and so are its cell size and its origin; the cells it adds lie
+ * past the container's high faces, solid across a closed wall and air above an
+ * open top (`solidVoxelPaddingForLattice`). The lattice itself is a closed
+ * box: liquid that leaves an open top rises between walls to a ceiling at the
+ * lattice's top. A closed container that is already whole pages is its own
+ * lattice.
+ */
+export function sceneFluidLatticeDimensions(
+  scene: Pick<SceneDescription, "container" | "voxelDomain">,
+  maximumDimension = DEFAULT_MAXIMUM_LATTICE_DIMENSION,
+): readonly [number, number, number] {
+  const whole = (cells: number) => Math.ceil(cells / LATTICE_PAGE_CELLS) * LATTICE_PAGE_CELLS;
+  const [nx, ny, nz] = sceneLatticeDimensions(scene, maximumDimension);
+  return [whole(nx), whole(ny + (scene.container.top === "open" ? LATTICE_OPEN_TOP_HEADROOM_CELLS : 0)), whole(nz)];
+}
+
 /** Finest cell size actually realized on each axis after lattice rounding. */
 export function sceneCellSizes_m(
   scene: Pick<SceneDescription, "container" | "voxelDomain">,

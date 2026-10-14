@@ -11,53 +11,21 @@ export const narrowBandParticleSurfaceWGSL=/* wgsl */`
 // phi' as it is; liquid a source adds this step joins after the union.
 const NB_SURFACE_RADIUS=${NARROW_BAND_SURFACE_RADIUS};
 const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
-fn particleSurfaceBulk(q:vec3i)->vec2f{
- if(nbTheta(vec3f(q))<=0.0){return vec2f(bandPhi(vec3f(q)),0.0);}
- let bulk=bulkDepth(vec3f(q));let tile=umTileAt(vec3u(umTileNear(vec3i(vec3u(q)/4u))));
+// q: a vertex of the tile of key own and first cell origin, its upper
+// faces with it. The cell and the tiles it is read in are held in the tile's
+// page where a wall lies across a face.
+fn particleSurfaceBulk(own:u32,origin:vec3i,q:vec3i)->vec2f{
+ let home=origin>>vec3u(2u);
+ if(nbThetaFrom(home,vec3f(q))<=0.0){return vec2f(bandPhi(vec3f(q)),0.0);}
+ let c=vec3u(umCellNearFromPage(own>>9u,origin>>vec3u(5u),q));
+ let bulk=bulkDepth(c,vec3f(q));let tile=umTileAt(c/4u);
  // Deeper than this the shrunk level set wins the union whatever the samples
  // are; nothing bounds how far into the air they may carry the surface.
- let gather=atomicLoad(&bins[NB_SURFACE_TILES+tile])!=0u&&bulk>-2.0&&nbTheta(vec3f(q))>0.0;
+ let gather=atomicLoad(&bins[NB_SURFACE_TILES+tile])!=0u&&bulk>-2.0&&nbThetaFrom(home,vec3f(q))>0.0;
  return vec2f(bulk,select(0.0,1.0,gather));
 }
-// Squared distance to the nearest sample within 2h; 4 when there is none.
-fn particleSurfaceGather(q:vec3i,member:u32,stride:u32)->f32{
- let x=vec3f(q);var nearest2=4.0;
- for(var bin=member;bin<64u;bin+=stride){
-  let cell=q-2+vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u));if(!umCellPresent(cell)){continue;}
-  let run=nbCellRun(cell);
-  for(var index=run.x;index<run.y;index++){let offset=x-nbPosition(index);nearest2=min(nearest2,dot(offset,offset));}
- }
- return nearest2;
-}
-// The same minimum, nearest cells first. A sample in one of the eight cells
-// at the vertex is within sqrt(3); a cell whose box is no nearer than the
-// best sample so far cannot improve on it and is not read. In the band the
-// eight cells settle it, 64 samples in place of the 512 of the whole 4-cube.
-fn particleSurfaceNearest(q:vec3i)->f32{
- let x=vec3f(q);var nearest2=4.0;
- // The eight incident cells are four x rows in sorted particle storage.
- // Split only at a tile boundary, keeping the original z/y/x visit order.
- for(var row=0u;row<4u;row++){
-  let y=q.y-1+i32(row%2u);let z=q.z-1+i32(row/2u);
-  var start=umCellNear(vec3i(q.x-1,y,z)).x;let last=umCellNear(vec3i(q.x,y,z)).x;
-  if(!umCellPresent(vec3i(start,y,z))){continue;}
-  while(start<=last){
-   let end=min(last,start|3);let run=nbRun(vec3i(start,y,z),vec3i(end,y,z));
-   for(var index=run.x;index<run.y;index++){let offset=x-nbPosition(index);nearest2=min(nearest2,dot(offset,offset));}
-   start=end+1;
-  }
- }
- if(nearest2<=1.0){return nearest2;}
- for(var bin=0u;bin<64u;bin++){
-  let o=vec3i(i32(bin%4u),i32((bin/4u)%4u),i32(bin/16u))-2;
-  let gap=max(o,-o-1);if(all(gap==vec3i(0))||f32(dot(gap,gap))>=nearest2){continue;}
-  let cell=q+o;if(!umCellPresent(cell)){continue;}
-  let run=nbCellRun(cell);
-  for(var index=run.x;index<run.y;index++){let offset=x-nbPosition(index);nearest2=min(nearest2,dot(offset,offset));}
- }
- return nearest2;
-}
-fn particleSurfaceFinish(q:vec3i,bulk:f32,nearest2:f32)->f32{
+// home: the tile q is reached from.
+fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32)->f32{
  // An empty gather has no particle surface to blend; never erode a cold
  // or newly activated region before its surface samples exist.
  if(nearest2>=4.0){return nbSourcePhi(vec3f(q),bulk);}
@@ -78,32 +46,28 @@ fn particleSurfaceFinish(q:vec3i,bulk:f32,nearest2:f32)->f32{
  let particle=min(bulk+1.0,bulk-excess*smoothstep(0.5*ripple,ripple,abs(excess)));
  // A transported particle may add liquid throughout its sphere support.
  // Erasure needs the complete seeded footprint, inside the overlap collar.
- let theta=select(nbTheta(vec3f(q)),nbSurfaceTheta(vec3f(q)),particle>bulk);
+ let theta=select(nbThetaFrom(home,vec3f(q)),nbSurfaceThetaFrom(home,vec3f(q)),particle>bulk);
  return nbSourcePhi(vec3f(q),mix(bulk,particle,theta));
 }
-fn particleSurface(q:vec3i)->f32{
- let bulk=particleSurfaceBulk(q);if(bulk.y==0.0){return bulk.x;}
- return particleSurfaceFinish(q,bulk.x,particleSurfaceGather(q,0u,1u));
-}
 `;
-/** A fine tile's canonical vertices, one lane each. */
+/** A fine tile's canonical vertices, one lane each: a low one is the tile's
+ * only where nothing is stored below it. */
 export const narrowBandTiledSurfaceWGSL=/* wgsl */`
 @compute @workgroup_size(128) fn coupleFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  if(lane>=125u){return;}
  let owner=umAllOwner(vec3u(group.x*64u,0,0));let origin=vec3i(umTileCoord(owner.tile)*4u);
  let local=vec3u(lane%5u,(lane/5u)%5u,lane/25u);let q=origin+vec3i(local);
- if(umTileMaximumWidth(owner.tile)==1u&&umTileMinimumWidth(owner.tile)==1u){if(!all((local>vec3u(0))|(origin==vec3i(0)))){return;}}
+ if(umTileMaximumWidth(owner.tile)==1u&&umTileMinimumWidth(owner.tile)==1u){if(any(local==vec3u(0))&&!all((local>vec3u(0))|umLowOpen(origin))){return;}}
  else{let authority=umVertexAuthority(vec3u(q));if(authority.width!=1u||authority.tile!=owner.tile){return;}}
- let bulk=particleSurfaceBulk(q);var value=bulk.x;
- if(bulk.y>0.0){value=particleSurfaceFinish(q,bulk.x,particleSurfaceNearest(q));}
+ let bulk=particleSurfaceBulk(owner.tile,origin,q);var value=bulk.x;
+ if(bulk.y>0.0){value=particleSurfaceFinish(origin>>vec3u(2u),q,bulk.x,nbCachedSurfaceNearest(q));}
  textureStore(outputPhi,q,vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
 }
 `;
 
 /** Reconstruction first scatters occupied-cell distances into the expired
  * metric bank, then each canonical vertex reads one nearest-distance word. */
-export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+
- narrowBandTiledSurfaceWGSL.replace("particleSurfaceNearest(q)","nbCachedSurfaceNearest(q)")+/* wgsl */`
+export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiledSurfaceWGSL+/* wgsl */`
 // The compact motion arena is dead until classify, after reconstruction.
 fn nbSurfaceCells()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}
 @compute @workgroup_size(64) fn surfaceCells(@builtin(global_invocation_id) gid:vec3u){
@@ -136,8 +100,8 @@ fn nbCachedSurfaceNearest(q:vec3i)->f32{
   let corner=umCorner(k,2u);let q=origin+4u*corner;
   if(regular){if(!all((corner!=vec3u(0))|low)){continue;}}
   else if(umVertexAuthority(q).index!=owner.index){continue;}
-  let bulk=particleSurfaceBulk(vec3i(q));var value=bulk.x;
-  if(bulk.y>0.0){value=particleSurfaceFinish(vec3i(q),bulk.x,nbCachedSurfaceNearest(vec3i(q)));}
+  let bulk=particleSurfaceBulk(owner.tile,vec3i(origin),vec3i(q));var value=bulk.x;
+  if(bulk.y>0.0){value=particleSurfaceFinish(vec3i(origin>>vec3u(2u)),vec3i(q),bulk.x,nbCachedSurfaceNearest(vec3i(q)));}
   textureStore(outputPhi,vec3i(q),vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
  }
 }
@@ -168,7 +132,7 @@ fn nbTransferTheta(local:vec3f)->vec2f{
  let owner=umAllOwner(vec3u(group.x*64u,0u,0u));let origin=4u*umTileCoord(owner.tile);
  for(var k=lane;k<125u;k+=64u){let q=origin+umCorner(k,5u);nbTransferDepth[k]=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(q)]));}
  if(lane<27u){
-  let t=vec3u(umTileNear(vec3i(umTileCoord(owner.tile))+vec3i(umCorner(lane,3u))-1));
+  let coord=vec3i(origin>>vec3u(2u));let t=vec3u(umTileNearFromPage(owner.tile>>9u,coord>>vec3u(3u),coord+vec3i(umCorner(lane,3u))-1));
   nbTransferHeat[lane]=clamp(bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_THETA+umTileAt(t)])),0.0,1.0);
   let own=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_SURFACE_HEAT+umTileAt(t)]));
   nbTransferHot[lane]=select(clamp(own-1.0,0.0,1.0),-1.0,own<=0.0&&bandPhi(4.0*vec3f(t)+2.0)>=0.0);
@@ -243,9 +207,9 @@ var<workgroup> nbRuns:array<vec2u,128>;
  if(gather){
   let low=vec3i(origin)-1;let row=member;
   let y=low.y+i32(row%4u);let z=low.z+i32(row/4u);var runs=array<vec2u,2>();
-  var x=umCellNear(vec3i(low.x,y,z)).x;
+  let page=vec3i(origin>>vec3u(5u));var x=umCellNearFromPage(owner.tile>>9u,page,vec3i(low.x,y,z)).x;
   if(row<15u&&umCellPresent(vec3i(x,y,z))){
-   let last=umCellNear(vec3i(low.x+select(4,3,row%4u==3u||row>=12u),y,z)).x;
+   let last=umCellNearFromPage(owner.tile>>9u,page,vec3i(low.x+select(4,3,row%4u==3u||row>=12u),y,z)).x;
    for(var part=0u;x<=last;part++){let stop=min(last,x|3);runs[part]=nbRun(vec3i(x,y,z),vec3i(stop,y,z));x=stop+1;}
   }
   nbRuns[32u*team+2u*row]=runs[0];nbRuns[32u*team+2u*row+1u]=runs[1];

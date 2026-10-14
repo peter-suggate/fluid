@@ -1,6 +1,6 @@
 import { uniformCompiledTopologyWGSL } from "./uniform-compiled-topology";
 import { uniformMixedFacesWGSL } from "./uniform-mixed-faces.wgsl";
-import { UNIFORM_PAGE_TABLE_WORDS, uniformLatticeAddressWGSL, uniformLatticeBox } from "./uniform-lattice-address";
+import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockFaceWGSL, uniformBlockNeighbourWGSL, uniformLatticeAddressWGSL } from "./uniform-lattice-address";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 
 /** Regular tiers with at most this many tiles join the fused interface launch. */
@@ -30,33 +30,36 @@ export const UNIFORM_MIXED_OVERFLOW_HANGING=1;
  * than the owner-indexed buffers hold (UniformMixedCapacity.fineTiles). */
 export const UNIFORM_MIXED_OVERFLOW_FINE=16;
 /** Residency certificate (docs: fig7-256 3x plan, S2): 16³-cell pages of 4³
- * tiles on dense storage. Support words from uniformMixedResidencyWord: the
- * resident page count, sticky closure-violation bits (in-frame readers or
- * them when they would read outside the closure; the next census turns them
- * into a builder fatal), the census's closure radius in tiles (diagnostic),
- * one reserved word, a flag per page (non-zero: resident), then the resident
- * pages in ascending order. update() makes every page resident; the census
- * (UniformMixedDynamicClassifier) rewrites them each frame. */
+ * tiles, eight a pool block: page 8·block + the octant of the block its
+ * tiles lie in (x | y<<1 | z<<2), so a page is 64 tile keys and a key's page
+ * is arithmetic on the key (uniform-mixed-residency.ts holds the host forms).
+ * Support words from uniformMixedResidencyWord: the resident page count,
+ * sticky closure-violation bits (in-frame readers or them when they would
+ * read outside the closure; the next census turns them into a builder
+ * fatal), the census's closure radius in tiles (diagnostic), one reserved
+ * word, a flag per page (non-zero: resident), then the resident pages in
+ * ascending order. The census (UniformMixedDynamicClassifier) rewrites them
+ * after each commit and never marks a page of block 0, of the last block or
+ * of a block that holds no page: under it a coordinate nothing stores is
+ * absent. update() sets every flag and lists the pages of every block that
+ * can hold one: a frame without a census skips nothing. */
 export const uniformMixedResidencyWord=(tiles:number)=>9*tiles+28;
-export const UNIFORM_MIXED_PAGE_TILES=4;
-export function uniformMixedPageDimensions(lattice:{readonly dimensions:readonly number[]}):[number,number,number]{
-  const p=lattice.dimensions.map(d=>Math.ceil(d/4/UNIFORM_MIXED_PAGE_TILES));return [p[0]!,p[1]!,p[2]!];
-}
-/** The product of uniformMixedPageDimensions, with no array made: frame
- * paths call it. */
-export const uniformMixedPageCount=(lattice:{readonly dimensions:readonly number[]})=>{
-  const d=lattice.dimensions;return Math.ceil(d[0]!/4/UNIFORM_MIXED_PAGE_TILES)*Math.ceil(d[1]!/4/UNIFORM_MIXED_PAGE_TILES)*Math.ceil(d[2]!/4/UNIFORM_MIXED_PAGE_TILES);
-};
+/** Residency pages of `tiles` tile keys: 64 keys a page. */
+export const uniformMixedPageCount=(tiles:number)=>tiles/64;
 /** Sticky detail-storage violation bits (uniform-detail-fields.ts): set by
  * a store a non-resident tile cannot hold; the frame receipt makes it fatal. */
-export const uniformMixedDetailViolationWord=(tiles:number,lattice:{readonly dimensions:readonly number[]})=>uniformMixedResidencyWord(tiles)+4+2*uniformMixedPageCount(lattice);
-/** Support words an ownership of `tiles` tiles on `lattice` allocates. */
-export const uniformMixedSupportWords=(tiles:number,lattice:{readonly dimensions:readonly number[]})=>uniformMixedDetailViolationWord(tiles,lattice)+4;
+export const uniformMixedDetailViolationWord=(tiles:number)=>uniformMixedResidencyWord(tiles)+4+2*uniformMixedPageCount(tiles);
+/** Support words an ownership of `tiles` tile keys allocates. */
+export const uniformMixedSupportWords=(tiles:number)=>uniformMixedDetailViolationWord(tiles)+4;
 
 /** One packed topology buffer: tile records, h/4h worklists, then frozen stencil masks,
  * then the page table and the block words (UM_PAGE_TABLE, UM_BLOCK_RECORD):
  * the ownership writes the address's seed there and the page pool keeps it
- * as a mirror of its own; no generation changes them.
+ * as a mirror of its own; no generation changes them. After the block words,
+ * the block neighbour rows, the wall-face count and the wall-face list
+ * (uniformBlockNeighbourLayout), seeded by the ownership and rebuilt after
+ * every page commit (UniformBlockNeighbours); a module that reads them asks
+ * for their names (uniformMixedTopologyNeighboursWGSL).
  * Ownership and tracing share this ABI. Two tiers: 0 = h (width 1, 64 owners
  * per tile), 1 = 4h (width 4, one owner per tile). umCounts = (h tiles, 4h
  * tiles, 0, 8). A 64-lane group visits one h tile or 64 coarse tiles; coarse dispatch never
@@ -73,7 +76,6 @@ export function uniformMixedTopologyWGSL(shape: UniformMixedTopologyShape, group
   const layout = { lattice: shape.lattice, tiles: { length: typeof shape.tiles === "number" ? shape.tiles : shape.tiles.length } };
   if (prefix && !/^[a-zA-Z][a-zA-Z0-9]*$/.test(prefix)) throw new Error("Invalid mixed topology namespace");
   if (pagesOf !== undefined && (prefix || !/^[a-zA-Z][a-zA-Z0-9]*$/.test(pagesOf))) throw new Error("Invalid mixed topology page table namespace");
-  const whole = uniformLatticeBox(layout.lattice.dimensions).whole;
   if (layout.tiles.length % 512 !== 0) throw new Error(`A mixed topology of ${layout.lattice.dimensions.join("x")} has 512 tile keys a block, not ${layout.tiles.length} in all`);
   const source = /* wgsl */ `
 @group(${group}) @binding(0) var<storage,read> umTopology:array<u32>;
@@ -102,20 +104,21 @@ override umFusedRegularGate:u32=0u;
 const UM_D=vec3u(${layout.lattice.dimensions.map(n => `${n}u`).join(',')});const UM_T=UM_D/4u;
 const UM_TILES:u32=${layout.tiles.length}u;
 const UM_OVERFLOW_HANGING:u32=${UNIFORM_MIXED_OVERFLOW_HANGING}u;
-// Residency (uniformMixedResidencyWord): pages of 4³ tiles, flags, list.
-const UM_PD:vec3u=(UM_T+vec3u(3u))/4u;const UM_PAGES:u32=UM_PD.x*UM_PD.y*UM_PD.z;
+// Residency (uniformMixedResidencyWord): pages of 4³ tiles, eight a block; flags, list.
+const UM_PAGES:u32=UM_TILES/64u;
 const UM_RESIDENCY:u32=9u*UM_TILES+28u;
 // Detail storage (uniform-detail-fields.ts): its violation bits follow the
 // residency region.
 const UM_DETAIL_VIOLATION:u32=UM_RESIDENCY+4u+2u*UM_PAGES;
 fn umResidentPageCount()->u32{return umSupport[UM_RESIDENCY];}
-fn umPageOfTile(t:u32)->u32{let c=umTileCoord(t)/4u;return c.x+UM_PD.x*(c.y+UM_PD.y*c.z);}
-fn umPageCoord(page:u32)->vec3u{return vec3u(page%UM_PD.x,(page/UM_PD.x)%UM_PD.y,page/(UM_PD.x*UM_PD.y));}
+fn umPageOfTile(t:u32)->u32{return 8u*(t>>9u)+(((t>>2u)&1u)|(((t>>5u)&1u)<<1u)|(((t>>8u)&1u)<<2u));}
+// A page's 16-cell page coordinate in the window.
+fn umPageCoord(page:u32)->vec3u{return 2u*umBlockPage(page>>3u)+vec3u(page&1u,(page>>1u)&1u,(page>>2u)&1u);}
 fn umPageResident(page:u32)->bool{return umSupport[UM_RESIDENCY+4u+page]!=0u;}
 fn umTileResident(t:u32)->bool{return umPageResident(umPageOfTile(t));}
 fn umResidentPage(job:u32)->u32{return umSupport[UM_RESIDENCY+4u+UM_PAGES+job];}
-// Tile lane of page, or UM_TILES past the lattice (a partial edge page).
-fn umPageTile(page:u32,lane:u32)->u32{let c=umPageCoord(page)*4u+umCorner(lane,4u);if(any(c>=UM_T)){return UM_TILES;}return umTileAt(c);}
+// Tile lane of page: a key of its block.
+fn umPageTile(page:u32,lane:u32)->u32{return 512u*(page>>3u)+umTileLocal(4u*vec3u(page&1u,(page>>1u)&1u,(page>>2u)&1u)+umCorner(lane,4u));}
 // Tile lane of resident page job (residentPages), or UM_TILES.
 fn umResidentPageTile(job:u32,lane:u32)->u32{if(job>=umResidentPageCount()){return UM_TILES;}return umPageTile(umResidentPage(job),lane);}
 fn umTileWidth(t:u32)->u32{return select(4u,1u,(umTopology[t]&0x80000000u)!=0u);}
@@ -136,7 +139,7 @@ fn umBlockWord(b:u32)->u32{return umTopology[UM_BLOCK_RECORD+b];}` : /* wgsl */ 
 fn umBlockWord(b:u32)->u32{return ${pagesOf}umBlockWord(b);}`}
 // Lattice addressing (uniform-lattice-address.ts) over UM_D and UM_T: its
 // paged bodies, whose tile key count is UM_TILES.
-${uniformLatticeAddressWGSL({ cells: "UM_D", tiles: "UM_T", constant: true, paged: { blocks: "(UM_TILES/512u)", whole } })}
+${uniformLatticeAddressWGSL({ cells: "UM_D", tiles: "UM_T", constant: true, paged: { blocks: "(UM_TILES/512u)" } })}
 ${uniformCompiledTopologyWGSL}
 struct UMOwner {tile:u32,lane:u32,width:u32,index:u32}
 fn umAllOwner(gid:vec3u)->UMOwner {
@@ -294,6 +297,37 @@ ${uniformMixedFacesWGSL}
 `;
   // Transfers read two ownership levels in one shader. Namespace their entire
   // ABI, retaining the same lookup implementation and buffer representation.
+  return prefix ? source.replace(/\b(?:um[A-Z]\w*|UM_\w+|UMOwner|UMFace)\b/g, name => prefix + name) : source;
+}
+
+/** The block neighbour rows and the block faces of a topology, for the
+ * module that asks: a module includes this after uniformMixedTopologyWGSL
+ * of the same prefix and pagesOf, and one that does not carries none of its
+ * text. UM_BLOCK_NEIGHBOURS and UM_WALL_FACES, the buffer's words where the
+ * rows (27 a block) and the wall-face count and list (6 b + f, ascending)
+ * follow the block records; umBlockNeighbourWord, umWallFaceCount and
+ * umWallFace over them; the kind-aware clamps over the rows
+ * (uniformBlockNeighbourWGSL); the block-face index families
+ * (uniformBlockFaceWGSL) and their extents, six planes a block:
+ * UM_FACE_TILE_KEYS, UM_FACE_CELL_KEYS, umFaceLevelKeys. With pagesOf, the
+ * rows are the named instance's, whose module includes its own. */
+export function uniformMixedTopologyNeighboursWGSL(prefix = "", pagesOf?: string): string {
+  if (prefix && !/^[a-zA-Z][a-zA-Z0-9]*$/.test(prefix)) throw new Error("Invalid mixed topology namespace");
+  if (pagesOf !== undefined && (prefix || !/^[a-zA-Z][a-zA-Z0-9]*$/.test(pagesOf))) throw new Error("Invalid mixed topology page table namespace");
+  const source = /* wgsl */ `
+const UM_BLOCK_NEIGHBOURS:u32=UM_BLOCK_RECORD+UM_BLOCKS;
+const UM_WALL_FACES:u32=UM_BLOCK_NEIGHBOURS+27u*UM_BLOCKS;
+${pagesOf === undefined ? /* wgsl */ `fn umBlockNeighbourWord(b:u32,i:u32)->u32{return umTopology[UM_BLOCK_NEIGHBOURS+27u*b+i];}
+fn umWallFaceCount()->u32{return umTopology[UM_WALL_FACES];}
+fn umWallFace(i:u32)->u32{return umTopology[UM_WALL_FACES+1u+i];}` : /* wgsl */ `fn umBlockNeighbourWord(b:u32,i:u32)->u32{return ${pagesOf}umBlockNeighbourWord(b,i);}
+fn umWallFaceCount()->u32{return ${pagesOf}umWallFaceCount();}
+fn umWallFace(i:u32)->u32{return ${pagesOf}umWallFace(i);}`}
+${uniformBlockNeighbourWGSL}
+${uniformBlockFaceWGSL}
+const UM_FACE_TILE_KEYS:u32=384u*UM_BLOCKS;const UM_FACE_CELL_KEYS:u32=6144u*UM_BLOCKS;
+fn umFaceLevelKeys(level:u32)->u32{let m=8u>>level;return 6u*m*m*UM_BLOCKS;}
+`;
+  // The names uniformMixedTopologyWGSL moves into a namespace.
   return prefix ? source.replace(/\b(?:um[A-Z]\w*|UM_\w+|UMOwner|UMFace)\b/g, name => prefix + name) : source;
 }
 

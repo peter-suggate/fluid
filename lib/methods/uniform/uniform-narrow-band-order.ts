@@ -68,7 +68,7 @@ struct Particle{position:vec4f,velocity:vec4f,before:vec4f}
 fn orderTiles()->u32{return 512u*orderDimensions.w;}
 fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return orderTopology[5u*orderTiles()+(e.x|(e.y<<6u)|(e.z<<12u))];}
 fn umBlockWord(b:u32)->u32{return orderTopology[5u*orderTiles()+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
-${uniformLatticeAddressWGSL({cells:"orderDimensions.xyz",tiles:"(orderDimensions.xyz/4u)",constant:false,paged:{blocks:"orderDimensions.w",whole:this.address.whole}})}
+${uniformLatticeAddressWGSL({cells:"orderDimensions.xyz",tiles:"(orderDimensions.xyz/4u)",constant:false,paged:{blocks:"orderDimensions.w"}})}
 @group(0) @binding(0) var<storage,read> input:array<Particle>;
 @group(0) @binding(1) var<storage,read_write> output:array<Particle>;
 // Each cell's count, then its scatter cursor.

@@ -1,1 +1,3 @@
-export { initialLiquidVertexPhi as uniformVolumeInitialPhi, initialLiquidCellVolumes as uniformInitialVolume } from "../../core/initial-liquid-lattice";
+export { initialLiquidVertexPhi as uniformVolumeInitialPhi, initialLiquidCellVolumes as uniformInitialVolume,
+  fluidLatticeVertexPhi as uniformLatticeInitialPhi, fluidLatticeCellVolumes as uniformLatticeInitialVolume,
+  fluidLatticeFarPhi as uniformLatticeFarPhi } from "../../core/initial-liquid-lattice";

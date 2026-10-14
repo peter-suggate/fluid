@@ -140,6 +140,204 @@ letters is taken up again only once behaviour is confirmed in the app.
     attributed. Two extension helpers (`restrictBand`, `umFarValue`) resolve
     unstored tiles without a presence test and are safe only through the
     support word.
+- **Step 7 design, 20:00.** Route: the 64³ page table stays as the window and
+  every box-shaped table is re-keyed to pool blocks or tile keys, so cost
+  follows the pool. A hashed directory is ruled out by the 21.25 to 27.96 ms
+  measurement above.
+  - Step 7 is not where the memory is. Letters holds 727 MB of box-shaped
+    GPU storage and 666 MB of it is one rule: capacity for h tiles is every
+    box tile, at 6,776 B each. In the tree: capacity follows the pool,
+    min(box tiles, 512 × claimable blocks), an exact bound because an h tile
+    exists only in a resident page; and scheduled drops are requested one
+    step ahead of their start, not pinned from t=0 (letters seeds 96 pages,
+    was 152).
+  - The capacity rule saves nothing yet. Letters' resident set reaches 192
+    of 192 pages because the residency closure reaches 5 to 16 tiles and
+    fills the box, while its h tiles peak at 7,227 to 7,547 of a capacity of
+    98,304. The saving arrives with a local residency reach (census chain by
+    block) or an authored pool smaller than the box. Not yet run on a pool
+    smaller than the box.
+  - Shared primitives are in the tree and read by nothing yet: a block
+    neighbour table (27 words a block) and wall-face list after the block
+    records in each topology tail, rebuilt in four fixed launches after every
+    page commit (`UniformBlockNeighbours`); kind-aware clamps
+    (`um*NearFrom`) that hold a coordinate only where a SOLID page lies
+    across the face; block face-plane index families. A module opts in with
+    `uniformMixedTopologyNeighboursWGSL`. 25,612 B a topology at 194 blocks;
+    one new shader module. Trough dam break unchanged with both patches:
+    47,282 / 62,381 / 87,094 / 114,071 particles at frames 10/20/30/40.
+  - The seed margin (56 cells) and `RESIDENCY_MARGIN_TILES` (5) stay. The
+    first is the certificate's reach written twice; the second is bounded by
+    the surface-volume reader chain.
+  - Decided by Peter: an AIR neighbour never clamps, so an open-top scene
+    keeps liquid that rises above the old top plane rather than deleting it;
+    a tank that is not a whole number of 32-cell pages is solid-padded to
+    one (below; first decided as a refusal); the
+    Requested and Full layout policies and the detail planner are deleted
+    with the box (narrow-band FLIP is the only installed method and it fixes
+    the Dynamic policy).
+  - Order: shared primitives (block neighbour table, kind-aware clamp, block
+    face planes, wall-face list); then census, extension, 4h cache, wall
+    reach, solid directory, particle clamps and renderer in parallel; then
+    the pressure root and multigrid levels by tile key; then delete the box
+    symbols and give the lattice an origin.
+  - Parallel round, state. Census tables by block: in the tree (per-block
+    tile bits and bound cubes replace the prefix tables and the cube
+    pyramid in the census and frame plan, 12.24 MiB less on letters and on
+    the long slide; trough 47,275 / 62,385 / 87,220 / 114,381, letters
+    979,680 particles and drift -0.0110 at step 40, long slide to step 200
+    with no fatal). Not done there: the join mask's plane 1 is an arbitrary
+    tile set from voxel edits, not regions, and wants a tile-key plane; the
+    residency words have about fifteen more consumers than listed (root
+    owners, pressure, remap, surface volume) and move as one change. A
+    local residency reach is not worth building: the host model of letters
+    peaks at 180 of 192 pages with one reach and 166 with a reach per seed
+    page, because the 5-tile margin alone rounds a seed to a cube three
+    pages a side. Solid directory: in the tree (the dense box mask is one
+    image: a 64³ page directory, 4,096 B page slots, the bed-slope lane and
+    a cut map by tile key; `umSolidVoxel` answers for every page; about
+    1 MiB more scratch a scene; both mask probes 0 mismatches, trough
+    47,682 / 64,336 / 88,841 / 116,830 with the root fix below). Particle
+    clamps: built, held until the padded tanks below land. Running:
+    residency words by block with their fifteen consumers, extension, 4h
+    cache, wall reach.
+- **Open: tanks that are not whole pages.** Refusing them (decided above) is
+  not landable as it stands: 72 of the 111 catalog rows with water are not
+  whole pages on every axis, the app default `water-box-dam-break`
+  (24×16×16) among them. Padding a tank to whole pages with solid voxels is
+  not the lattice wall either: every solid voxel is a cut cell that couples
+  the tiles within a cell of it and holds wet neighbours at h (the default
+  scene would hold 80 to 96 of its 96 tiles at h), and one padding voxel
+  turns on the solid gate (per-particle voxel walk, solid-aware surface
+  taps) for the 58 rows that run with it off; the pressure root's wall
+  slots and wall release, extension, momentum and redistance also tell a
+  box wall from a solid tile. **Decided by Peter (14 Oct): solid-pad scenes
+  that are not 32-aligned.** The container (authored extents: liquid
+  authoring, world origin, UI, vessel outline) and the lattice (what the
+  solver allocates) become two things; the lattice is the container rounded
+  up to whole pages on the high sides, the padding solid across closed
+  walls and air above an open top, through the existing solid path. A
+  padded scene behaves as a voxel bath does (wet tiles beside the padding at
+  h, the solid gate on); treating a whole solid tile's face as a wall, so
+  padding costs neither, is a later step if the cost matters. **In the
+  tree:** `sceneFluidLatticeDimensions`, `solidWorldForFluidLattice` (up to
+  three fill slabs past +x, past +z and above a closed top), the solver on
+  the lattice and the frame, outline and UI on the container; no solver
+  shader changed; the refusal of a non-whole lattice and the deletion of the
+  lift branches. All 111 wet catalog rows have a whole lattice; eleven rows
+  refused before now construct (`sphere-jet` runs). Measured: a padded
+  settled tank (`hydrostatic-power-two-level`, 16³ in 32³) holds 3,072 cells
+  for 30 steps with 172 tiles at h (two layers of padding tiles; none
+  unpadded); the default scene runs with 236 tiles at h at step 30 against
+  66; the hose tank's liquid matches its unpadded run (12,189 against 12,221
+  at step 40) with 727 h tiles against 518; the trough is in reference. A
+  tank symmetric in a padded axis is not treated symmetrically (lattice wall
+  low, voxel wall high), and four rows' high depth symmetry plane is a solid
+  wall. The picture of a padded scene has not been looked at.
+- **Pressure coarse levels keep enclosed air, in the tree.** A coarse level
+  whose cells average a thin air gap away had liquid rows and no
+  free-surface row, was singular, and the first cycle raised the residual
+  (the padded 16³ tank died at frame 0; a 32³ tank filled to 27 cells
+  diverges the same way in the host model). Every coarsening now keeps
+  enclosed air and classes a child as air by the liquid test, not by the
+  sign of phi. The host model says 8 of 92 scenes change, among them
+  `minimal-power-dam-break-64` and `high-resolution-dam-break`.
+- **Surface dents at h/4h seams, fixed in the tree (not from paging).** On
+  `high-resolution-dam-break` the column's free side faces carried dents one
+  tile tall along the edge of the h region. Where an h tile meets a 4h tile
+  and both 4h centres are in air, the root has no liquid row for either and
+  writes their shared face zero; the h pressure band took that zero as a
+  solved Neumann flux, a wall across the liquid, and turned the falling
+  liquid sideways along the seam. Present before paging too. Fix
+  (`bNeumann` in `uniform-pressure-band.ts`): such a face keeps the h
+  face's forced velocity. Measured with `tools/probe-surface-dents.ts`
+  (vertices of a side face more than 0.2 cells off their neighbours, steps
+  8/10/12): 125 / 566 / 616 before, 0 / 0 / 0 after, the all-h value; trough
+  and settled tank unchanged.
+- **Raised strips inside the dam break's top edges, fixed in the tree.** A
+  tile promoted beside the surface was handed its old 4h faces by
+  `oldFaceValue` in `uniform-mixed-remap.ts`, which read them from the h
+  texture; on a face between two air cells the h ring's copy of the
+  extension is stale (0.000 against −0.652 in the base block, measured at
+  the head of step 2), so the new h tile fell too slowly. The load now reads
+  the base block (the canonical-load mark `copyFace` already carries). Strip
+  height at step 12: +0.98 / +0.88 cells before, −0.38 / −0.16 after, all-h
+  reference −0.25 / −0.13 (one run per arm). Which kernel leaves the ring's
+  copy stale is not located.
+- **Open on the dam break.** (a) Terraces at the column's foot, 4 cells apart
+  in y, locked to the tile lattice: the front runs into tiles promoted at
+  that step's head, and the remap hands each h face its old 4h face value,
+  constant across the face, so neighbouring tile rows advect at speeds 0.7
+  to 1.0 cells a step apart. They enter in the advection, not the particle
+  reconstruction. In the tree: the remap rebuilds a 4h face handed to h
+  faces as a plane tilted toward the faces beside it (`remapSlope`, limited
+  to 4/3 of each one-sided difference, zero at walls; flux kept; the dynamic
+  census's `SAMPLE_REACH` goes 2.0 to 2.5). Terrace number at steps 5 / 6 /
+  8 / 9 / 12: 0.174 / 0.174 / 0.272 / 0.421 / 0.706 before, 0.130 / 0.101 /
+  0.139 / 0.276 / 0.693 after, all-h reference 0.062 / 0.077 / 0.115 /
+  0.150 / 0.202. Not closed: the extension's far value is blocky on h faces
+  (nearest coarse source, in the reference too), and the foot and sheet are
+  still 4h under the adaptive profile when the artifacts form. Both in
+  progress. (b) A residency fatal,
+  "closure of 17 tiles, over the cap of 16", at frames 16 to 23 in most runs
+  as the front meets the far wall: 68 cells a step, not a flow speed.
+  Predates today's fixes; under investigation. Liquid there dips 4 to 6 % at
+  steps 16 to 24 (dt 1/60 only, not swept).
+- Built and held: residency words by block (needs pool room for the air
+  pages above an open top), extension by block, wall reach by page kind,
+  particle clamps; stacked into one patch so an open top is open in every
+  consumer at once. On device the stack holds the settled padded tank
+  (liquid 3072, 172 h tiles), the drum (8,156 / 16,248 at steps 60 / 120),
+  the basin (0.0006 m/s) and letters, and stops the trough at step 1: a
+  page claimed above the open top has no pressure-root rows, which the stack
+  reports as a root fatal where today that liquid is silently deleted. It
+  lands with the root keyed by tile, not before. 4h cache by block: built,
+  correct on the trough, waiting on a clean frame-time comparison.
+- **Decided by Peter (14 Oct): scenes do not author an h-tile capacity.**
+  Capacity stays min(box tiles, 512 × claimable blocks), paid upfront.
+- **Gentle slopes, in the tree.** A film on a voxel staircase has a level bed
+  under a level surface, so nothing on the grid carries the fall of the ramp
+  the treads stand for. Fix: a bed-slope lane (two signed bytes a cell after
+  the solid mask, units 1/254, uphill, non-zero only on an open cell standing
+  on a solid top face) baked on the GPU from the voxels at build and per
+  edited region (`UniformBedSlopeBake`: nearest nosing and eight relaxation
+  passes, 108 fixed launches); a force `-g × slope` on the horizontal faces
+  of film cells, weighted out as liquid covers the cell above
+  (`umBedDrive`); and a particle that lands on a sloped bed keeps its
+  velocity along the bed plane. Scenes `nbflip-ramp-*`, probe
+  `tools/probe-ramp-residue.ts`. Measured on the ramp channel (7,238 cells
+  emitted): residue 698.8 cells without the term at 1/60 s; with it 0 at
+  1/60 s and 1.9 to 17.9 at 1/30 s. The lane is box-shaped today and is
+  re-keyed with the solid storage.
+- **The pressure root on a thin film over a cut 4h tile, fixed in the tree.** With no
+  slope term at all the ramp channel dies at frame 438 (1/60 s), "pressure
+  rejected a non-improving cycle"; the worst rows are 4h tiles (11,3,2..3),
+  the film on the tread whose tile has two open layers, at phi/4h -0.03 and
+  pressure -2.4e4. A cut tile is a liquid root row for any film depth (plane
+  fit read at the tile centre) but keeps an h face only where a film cell is
+  at least half a cell deep (`umWetFace`), so the rows lose their faces and
+  their free surface as the film thins. About one ramp run in four at 1/30 s
+  with the term hit it. Fix: toward an owner that is not a row, a row's open
+  h cells on the side its phi was fit through keep their faces
+  (`umWetSide`; the cut slot's second word records the sides), and with
+  liquid on neither side of a wall the fit is through the nearer side.
+  Measured: the term-off channel runs all 450 steps; with the term, residue
+  0 cells at 1/60 s and 5.9, 9.5 and 51.9 at 1/30 s; the basin stays at
+  rest (0.0006 m/s); the settled tank's drift at 120 steps goes from
+  -0.0025 to -0.0010. The trough dam break carries 2 to 3% more particles
+  from frame 20 (64,238 and 64,314 at frame 20 against 62,442; liquid and
+  drift unchanged), so its reference numbers move.
+- **Splash-phase frame time (cm12-figure-9, GPU ms a step, box addressing to
+  paged):** 5.69 to 6.91 with no particles, 39.75 to 68.89 at the splash
+  peak. 96% of the excess is in kernels whose only change is the page
+  address of each load: a paged vertex load costs 2.5 to 2.7 times a box
+  one, a cell load 1.1 to 1.2. The table read itself is 0 to 14% of that;
+  about 40% is control flow (stored test, skirt search, h/4h store branch)
+  and the rest per-tap arithmetic, so the remedy is to resolve a vertex
+  address once a tile workgroup, not once a load. In the tree so far: gather
+  loaders that resolve one address for a box of vertices (peak 62.39 to
+  58.59 summed over passes) and the coarse retirement test's tile word
+  before its heat sample (0.590 to 0.066 ms with no h tile).
 - **Scenes that show growth.** `nbflip-water-slide` is a spiral channel in a
   solid drum draining into a central pool (160×96×160, 60 L/s for 8 s);
   `nbflip-water-slide-long` is a serpentine over 512×96×128 where most pages

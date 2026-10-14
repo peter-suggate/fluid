@@ -15,18 +15,22 @@ const NB_ACTIVITY_NEW=NB_ACTIVITY_TARGET+NB_BAND_TILES;
 const NB_ACTIVITY_THETA=NB_ACTIVITY_NEW+NB_BAND_TILES;
 const NB_ACTIVITY_SURFACE_HEAT=NB_ACTIVITY_THETA+NB_BAND_TILES;
 fn nbCooling()->f32{return params.activity.x;}
+// p: a point of a stored cell (a filed sample's position, a cell's centre).
 fn nbTargetHeat(p:vec3f)->f32{
- let t=umTileAt(vec3u(umTileNear(vec3i(floor(p/4.0)))));
+ let t=umTileAt(vec3u(p/4.0));
  return bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+t]));
 }
 // Interpolate the heat raster, not a binary tile mask, at shared vertices
 // and MAC faces. Particle heat travels with the liquid through cold tiles.
 // Heat <= 1 is the seeded support collar, not authority to erase liquid.
 // Fade within that collar, before reaching its unseeded outer boundary.
-fn nbInterpolatedHeat(p:vec3f,surface:bool)->f32{
+// home: the tile p is reached from. A wall across a face of its page holds
+// the eight tiles in the page; AIR and a stored page are read where they lie.
+fn nbInterpolatedHeat(home:vec3i,p:vec3f,surface:bool)->f32{
  let q=p/4.0-0.5;let base=vec3i(floor(q));let f=fract(q);var theta=0.0;var coveredWeight=0.0;
+ let page=home>>vec3u(3u);let block=nbHomeBlock(page,base>>vec3u(3u),(base+1)>>vec3u(3u));
  for(var k=0u;k<8u;k++){
-  let bit=umCorner(k,2u);let c=umTileNear(base+vec3i(bit));let t=umTileAt(vec3u(c));
+  let bit=umCorner(k,2u);let c=umTileNearFromPage(block,page,base+vec3i(bit));let t=umTileAt(vec3u(c));
   let w=select(1.0-f,f,bit!=vec3u(0));
   let offset=select(NB_ACTIVITY_THETA,NB_ACTIVITY_SURFACE_HEAT,surface);
   let heat=bitcast<f32>(atomicLoad(&bins[offset+t]));
@@ -39,8 +43,12 @@ fn nbInterpolatedHeat(p:vec3f,surface:bool)->f32{
  }
  return clamp(theta/select(1.0,max(coveredWeight,1e-20),surface),0.0,1.0);
 }
-fn nbTheta(p:vec3f)->f32{return nbInterpolatedHeat(p,false);}
-fn nbSurfaceTheta(p:vec3f)->f32{return nbInterpolatedHeat(p,true);}
+// A point inside a cell of a page that is not SOLID is reached from its own
+// tile. A vertex, which may lie on a wall, names the tile that asks (From).
+fn nbTheta(p:vec3f)->f32{return nbInterpolatedHeat(vec3i(floor(p/4.0)),p,false);}
+fn nbSurfaceTheta(p:vec3f)->f32{return nbInterpolatedHeat(vec3i(floor(p/4.0)),p,true);}
+fn nbThetaFrom(home:vec3i,p:vec3f)->f32{return nbInterpolatedHeat(home,p,false);}
+fn nbSurfaceThetaFrom(home:vec3i,p:vec3f)->f32{return nbInterpolatedHeat(home,p,true);}
 fn nbTransferBlend(q:vec3f,depth:f32,mass:f32)->f32{
  // Eight samples per h cell. Fill the missing particle weight with the
  // advected grid velocity during handoff. Fully hot regions recover the

@@ -8,7 +8,7 @@ import { uniformSceneConstantsWGSL } from "./uniform-scene-constants";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformMixedDetailViolationWord, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
-import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockStored, uniformCellStored, uniformCellTexel, uniformEachTile, uniformLatticeAddressWGSL, uniformTileStored, uniformTileTexel, uniformVertexSlot, uniformVertexStored, uniformVertexTexel, uniformWideVertexTexel, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockStored, uniformCellStored, uniformCellTexel, uniformEachTile, uniformLatticeAddressWGSL, uniformLatticeRunWGSL, uniformTileStored, uniformTileTexel, uniformVertexSlot, uniformVertexStored, uniformVertexTexel, uniformWideVertexTexel, type UniformLatticeAddress } from "./uniform-lattice-address";
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
 import { UNIFORM_DETAIL_4H_LOAD, UNIFORM_DETAIL_BASED, UNIFORM_DETAIL_CANONICAL_LOAD, UNIFORM_DETAIL_FACE_COMPACT, UNIFORM_DETAIL_HEADER_WORDS, UNIFORM_DETAIL_PACKED, UNIFORM_DETAIL_RING_4H_LOAD, registerUniformDetailBase } from "../../core/uniform-detail-abi";
 
@@ -721,7 +721,7 @@ ${kernel("refresh","dst"," textureStore(dst,vec3i(g),textureLoad(src,ddFace(g),0
   // blocks); table: the topology whose tail holds the pages.
   const seam=(table:string)=>`fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return ${table}[5u*drCount()+(e.x|(e.y<<6u)|(e.z<<12u))];}
 fn umBlockWord(b:u32)->u32{return ${table}[5u*drCount()+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
-${uniformLatticeAddressWGSL({cells:"(4u*drDimensions.xyz)",tiles:"drDimensions.xyz",constant:false,paged:{blocks:"drDimensions.w",whole:this.layout.address.whole}})}`;
+${uniformLatticeAddressWGSL({cells:"(4u*drDimensions.xyz)",tiles:"drDimensions.xyz",constant:false,paged:{blocks:"drDimensions.w"}})}`;
   for(const format of ["rgba32float","r32float"] as const){const of=following.filter(h=>h.format===format);for(let i=0;i<of.length;i+=BATCH)sets.push(of.slice(i,i+BATCH));}
   const head=`@group(0) @binding(${2*BATCH}) var<storage,read> drHeldWords:array<u32>;
 @group(0) @binding(${2*BATCH+1}) var<storage,read> drNextWords:array<u32>;
@@ -922,7 +922,18 @@ function classify(name:string,type:string):UniformDetailClass|undefined{
  * raw load. A store to a base is range-checked here and dropped unless
  * canonical, with a violation bit (dense: silently, a lattice launch
  * deposits exactly the texels that are state). call: "()" where the
- * module's address extents are functions. */
+ * module's address extents are functions.
+ * Runs (vertex fields; emitted where the code calls them by name): a box of
+ * vertices q..q+n on every axis that one block holds (umVertexRun) is
+ * addressed by one table read. udRun_<field>(q,n) gives the bound texture's
+ * texel of q and, in w, the shift from a vertex's offset from q to its
+ * texel's offset (0 in an h store; 2 in a base, where q must be a tile
+ * corner and the texels are the tile corners at and below each vertex), or
+ * w < 0 where there is no run and each vertex is loaded as before.
+ * udTexel_<field>(a) loads the bound texture at such a texel.
+ * udLoad8_<field>(q,s) is udLoad_<field> of the eight vertices q + s{0,1}³,
+ * x fastest, by a run where there is one. udRun4_, udTexel4_, udLoad48_ are
+ * the same of the base twin a canonical load reads (udLoad4_). */
 function detailDomainWGSL(kinds:ReadonlyMap<string,{kind:UniformDetailClass;type:string}>,support:string|undefined,atomic:boolean,deposit:boolean,hOnly?:ReadonlySet<string>,twins?:ReadonlyMap<string,string>,based?:ReadonlySet<string>,
  /** The mixed kernels' ring: the topology namespaces of the fields a kernel
   * loads (pf, group 0) and stores (target: the remap's adopted generation,
@@ -932,6 +943,8 @@ function detailDomainWGSL(kinds:ReadonlyMap<string,{kind:UniformDetailClass;type
  either?:ReadonlySet<string>,
  /** Fields with a UNIFORM_DETAIL_GUARD_LOAD. */
  guards?:ReadonlySet<string>,
+ /** Run accessors the code calls, by name (udRun_phi, udLoad48_phi, ...). */
+ asked?:ReadonlySet<string>,
  call=""):string{
  const j="(((q&vec3i(3))+vec3i(1))>>vec3u(2u))";
  // ringed: a canonical store reaches the h texture only inside the ring.
@@ -990,6 +1003,14 @@ ${`fn udFace(q:vec3i,b:u32)->vec3i{let c=q>>vec3u(2u*b);let j=${j};return vec3i(
   size:`${pf}UM_VERTEX_TEXTURE${call}`,top:`vec3i(${pf}UM_BOX${call})`};
  if([...kinds.values()].some(k=>k.kind==="vertex"))out+=`fn udVertex(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexTexel(q);}return ${pf}umWideVertexTexel(q>>vec3u(2u));}
 fn udVertexStore(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexStoreTexel(q);}return ${pf}umWideVertexStoreTexel(q>>vec3u(2u));}
+`;
+ // udVertex of every vertex q..q+n by one table read: xyz udVertex(q,b), w the shift from an offset o to its texel's
+ // (udVertex(q+o,b) = xyz + (o >> w)); w < 0 where they are not one block's (or q is no tile corner of a base).
+ if(asked?.size)out+=uniformLatticeRunWGSL(pf);
+ if(asked&&[...asked].some(name=>name.startsWith("ud")))out+=`fn udVertexRun(q:vec3i,n:u32,b:u32)->vec4i{
+ if(b==0u){let s=${pf}umVertexRun(q,n);if(s.x==0u){return vec4i(-1);}return vec4i(${pf}umVertexRunTexel(s),0);}
+ let s=${pf}umWideVertexRun(q>>vec3u(2u),n>>2u);if(s.x==0u||!udAligned(q)){return vec4i(-1);}return vec4i(${pf}umWideVertexRunTexel(s),2);
+}
 `;
  const one=(name:string,kind:UniformDetailClass,type:string,sfx:string):string=>{
   let out="";
@@ -1066,6 +1087,22 @@ fn udVertexStore(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexStoreTexel(
  ${""}${watch&&kind!=="atlas"?`let v=textureLoad(${name},${stored("q")}${level});udWatch(q,${top},v.x${pass});return v;`:`return textureLoad(${name},${stored("q")}${level});`}
 }
 `;
+  // The run accessors the code calls: of the bound texture, and (4) of the base twin a canonical load reads. The
+  // eight-vertex load's second loop is udLoad_ (udLoad4_) of each vertex, unchanged.
+  for(const [four,texture,b,lv] of [["",name,extent,level],["4",twin,twin?based_(twin):"",",0"]] as const){
+   const run=`udRun${four}_${name}`,texel=`udTexel${four}_${name}`,eight=`udLoad${four}8_${name}`,corner="vec3i(k&1,(k>>1)&1,k>>2)";
+   if(!asked?.has(run)&&!asked?.has(texel)&&!asked?.has(eight))continue;
+   if(kind!=="vertex"||!texture||watch)throw new Error(`Uniform detail rewrite: ${name} has no run accessor ${four?"of a base twin":""}`);
+   if(asked.has(run))out+=`fn ${run}${sfx}(q:vec3i,n:u32)->vec4i{return udVertexRun(q,n,${b});}\n`;
+   if(asked.has(texel))out+=`fn ${texel}${sfx}(a:vec3i)->vec4f{return textureLoad(${texture},a${lv});}\n`;
+   if(asked.has(eight))out+=`fn ${eight}${sfx}(q:vec3i,s:u32)->array<f32,8>{
+ let b=${b};let g=udVertexRun(q,s,b);var v:array<f32,8>;
+ if(g.w>=0){let e=i32(s>>u32(g.w));for(var k=0;k<8;k++){v[k]=textureLoad(${texture},g.xyz+e*${corner}${lv}).x;}return v;}
+ for(var k=0;k<8;k++){v[k]=textureLoad(${texture},udVertex(q+i32(s)*${corner},b)${lv}).x;}
+ return v;
+}
+`;
+  }
   if(storage){
    const fail=(bits:number)=>deposit?"return;":`udViolation(${bits}u);return;`;
    const within=inside("q");
@@ -1197,6 +1234,13 @@ export function uniformDetailShader(code:string,device?:GPUDevice):string{
   const sites=false;
   const hOnly=new Set<string>(),based=new Set<string>(),either=new Set<string>();
   const calls=rewriteCalls(code,new Set(kinds.keys()),hOnly,undefined,based,undefined,either);
+  // The run accessors the code calls by name; one of the base twin makes its field based, as a canonical load does.
+  const asked=new Set<string>();
+  for(const [,accessor,four,field] of calls.matchAll(/\b(ud(?:Run|Texel)(4?)_(\w+))\(/g)){asked.add(accessor!);if(four)based.add(field!);}
+  for(const [,accessor,four,field] of calls.matchAll(/\b(udLoad(4?)8_(\w+))\(/g)){asked.add(accessor!);if(four)based.add(field!);}
+  for(const name of asked)if(kinds.get(name.slice(name.indexOf("_")+1))?.kind!=="vertex")throw new Error(`Uniform detail rewrite: ${name} is not a vertex field's accessor`);
+  // The seam's run forms read directly (a key run): the module carries them too.
+  if(/\bumVertexRun\(/.test(calls))asked.add("umVertexRun");
   // A canonical-or-h load of a sampled binding reads the base twin a canonical load does.
   for(const name of either){const field=kinds.get(name)!;if(field.kind==="atlas")throw new Error(`Uniform detail rewrite: ${name} is atlas-only and has no canonical texel`);if(!field.type.startsWith("texture_storage"))based.add(name);}
   // Every stored field binding but an atlas-only one (no canonical texel)
@@ -1213,7 +1257,7 @@ export function uniformDetailShader(code:string,device?:GPUDevice):string{
   for(const [name,{kind,type}] of kinds)if((based.has(name)||(kind!=="atlas"&&type.startsWith("texture_storage")))&&!twins.has(name))throw new Error(`Uniform detail rewrite: ${name} is not declared as @group(g) @binding(b) var, so its twin has no binding`);
   // A remap stores the fields of the generation it adopts: the unprefixed topology beside the one it leaves.
   const target=pf&&/var<storage,\s*read>\s*umTopology\s*:/.test(code)?"":pf;
-  return calls+declarations+detailDomainWGSL(kinds,`${pf}umSupport[${pf}UM_DETAIL_VIOLATION]`,atomic,false,hOnly,twins,based,{pf,target,sites},either,new Set([...kinds.keys()].filter(name=>calls.includes(`udLoadG_${name}(`))));
+  return calls+declarations+detailDomainWGSL(kinds,`${pf}umSupport[${pf}UM_DETAIL_VIOLATION]`,atomic,false,hOnly,twins,based,{pf,target,sites},either,new Set([...kinds.keys()].filter(name=>calls.includes(`udLoadG_${name}(`))),asked);
  }
 
 }
@@ -1227,7 +1271,7 @@ export function uniformDetailDenseShader(code:string,classes:Readonly<Record<str
  if(/fn\s+\w+\s*\([^)]*:\s*texture/.test(code))throw new Error("Uniform detail dense rewrite: a texture-typed function parameter bypasses the field accessors");
  for(const name of kinds.keys())if(new RegExp(`texture(?:Dimensions|SampleLevel)\\(\\s*${name}\\b`).test(code))throw new Error(`Uniform detail dense rewrite: ${name} is read past the accessors`);
  // The module's address extents are functions of its lattice.
- return rewriteCalls(code,new Set(kinds.keys()))+detailDomainWGSL(kinds,undefined,false,true,undefined,undefined,undefined,undefined,undefined,undefined,"()");
+ return rewriteCalls(code,new Set(kinds.keys()))+detailDomainWGSL(kinds,undefined,false,true,undefined,undefined,undefined,undefined,undefined,undefined,undefined,"()");
 }
 /** createShaderModule through the central rewrite. */
 export function uniformDetailModule(device:GPUDevice,descriptor:GPUShaderModuleDescriptor):GPUShaderModule{

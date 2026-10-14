@@ -14,6 +14,10 @@ import {
   NBFLIP_SLIDE_SCENE_ID, NBFLIP_SLIDE_STREAM_SECONDS, NBFLIP_SLIDE_TURNS,
   createNbflipWaterSlide, createNbflipWaterSlideLong, nbflipWaterSlideCamera, nbflipWaterSlideLongCamera,
 } from "./nbflip-water-slide-scene";
+import {
+  NBFLIP_RAMP_BASIN_LEVEL, NBFLIP_RAMP_DRAIN_SECONDS, NBFLIP_RAMP_GRID, NBFLIP_RAMP_LENGTH, NBFLIP_RAMP_VARIANTS,
+  createNbflipRamp, nbflipRampBed, nbflipRampCamera, nbflipRampSceneId, nbflipRampShape,
+} from "./nbflip-ramp-scene";
 import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12Scene, createCm12Figure7_256 } from "./cm12-paper-scenes";
 import { createThinDropletLadderScene, createThinSheetLadderScene, createThinWallFilmScene } from "./thin-liquid-scenes";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
@@ -1869,6 +1873,26 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     methodProfile: NBFLIP_METHOD_PROFILE,
     build: createNbflipWaterSlideLong,
     camera: nbflipWaterSlideLongCamera(),
+  }),
+  // The slide's slope on its own, as measured probes for what a gentle voxel
+  // ramp leaves behind. See lib/core/nbflip-ramp-scene.ts.
+  ...NBFLIP_RAMP_VARIANTS.map(variant => {
+    const { run, stream } = nbflipRampShape(variant), size = `${NBFLIP_RAMP_GRID.join("×")} cells at 2 cm`;
+    const drains = `What is still on the ramp ${NBFLIP_RAMP_DRAIN_SECONDS} seconds after the stream stops is residue`;
+    return defineScene({
+      id: nbflipRampSceneId(variant),
+      name: `NB-FLIP ramp · ${variant}`,
+      blurb: variant === "channel" ? `A stream runs for ${stream!.seconds} seconds down a walled voxel ramp falling one cell in ${run}, the water slide's slope, into a pit. ${drains}: a real ramp would be dry. ${size}.`
+        : variant === "staircase" ? `A stream runs for ${stream!.seconds} seconds down an open voxel ramp falling one cell in ${run}, into a pit. ${drains}: a real ramp would be dry. ${size}.`
+        : variant === "flat" ? `The staircase's stream on a level floor: the control. Nothing drains a level floor, so what it holds ${NBFLIP_RAMP_DRAIN_SECONDS} seconds after the stream stops must not change when a slope does. ${size}.`
+        : `The channel's treads dammed at their foot under still water, ${NBFLIP_RAMP_BASIN_LEVEL - nbflipRampBed(variant, 0)} cells over the top one and ${NBFLIP_RAMP_BASIN_LEVEL - nbflipRampBed(variant, NBFLIP_RAMP_LENGTH - 1)} over the lowest: the guard. It must stay still and level. ${size}.`,
+      audience: "validation",
+      shelf: "Thin liquid",
+      environment: "stage",
+      methodProfile: NBFLIP_METHOD_PROFILE,
+      build: () => createNbflipRamp(variant),
+      camera: nbflipRampCamera(),
+    });
   }),
   defineScene({
     id: "cm12-figure-7-256",

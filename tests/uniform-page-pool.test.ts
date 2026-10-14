@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { uniformPagePoolBoxPages, uniformPagePoolBoxSeed, uniformPagePoolCellBoxPages, uniformPagePoolCertificateWGSL, uniformPagePoolEntry, uniformPagePoolFatalMessage, uniformPagePoolLayout, uniformPagePoolPublished,
+import { uniformPagePoolBoxPages, uniformPagePoolBoxSeed, uniformPagePoolCellBoxPages, uniformPagePoolEntry, uniformPagePoolFatalMessage, uniformPagePoolLayout, uniformPagePoolPublished,
   UNIFORM_PAGE_POOL_FATAL as FATAL, UNIFORM_PAGE_POOL_SOLID as SOLID, UNIFORM_PAGE_POOL_STATUS as STATUS } from "../lib/methods/uniform/uniform-page-pool";
 
 const letters = uniformPagePoolLayout({ blocks: 208, idleSteps: 8, box: { origin: [0, 0, 0], pages: [8, 6, 4] } });
@@ -62,15 +62,4 @@ test("the fatal message is null without a fatal and names the first bit's page, 
   assert.equal(raise(FATAL.closureCap, FATAL.closureCap, [1, 1, 1], 9, 21), "Departure travel gives a closure of 21 tiles, over the cap of 16 (commit 9, page (1, 1, 1)): a sample is moving faster than the residency certificate covers.");
   // The first bit raised decides the message, whatever joined it later.
   assert.equal(raise(FATAL.closure | FATAL.exhausted, FATAL.closure, [7, 5, 3], 4, 0), "Liquid or band tile found in page (7, 5, 3), which was not resident at the start of commit 4.");
-});
-
-test("the certificate source names its accessors and omits the audit without a seeded accessor", () => {
-  const full = uniformPagePoolCertificateWGSL({ count: "umResidentPageCount", page: "pagePoolCoord", seeded: "pagePoolSeeded", reach: "umSupport[UM_RESIDENCY+2u]" });
-  assert.match(full, /fn upCertify\(lane:u32,width:u32\)/);
-  assert.match(full, /let count=umResidentPageCount\(\);let reach=umSupport\[UM_RESIDENCY\+2u\];/);
-  assert.match(full, /UP_BOX_ORIGIN\+\(vec3i\(pagePoolCoord\(i\)\)>>vec3u\(1u\)\)/);
-  assert.match(full, /if\(pagePoolSeeded\(i\)&&upBlockOf\(q\)==UP_NONE\)\{upFail\(UP_FATAL_CLOSURE,q\);\}/);
-  const plain = uniformPagePoolCertificateWGSL({ count: "n", page: "p", reach: "0u", name: "ask" });
-  assert.match(plain, /fn ask\(/);
-  assert.doesNotMatch(plain, /UP_FATAL_CLOSURE,/);
 });

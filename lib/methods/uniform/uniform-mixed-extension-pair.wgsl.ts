@@ -113,7 +113,7 @@ fn ueFinishState(slot:u32)->vec2f{
  let state=stateIn[slot];if(ueCompanionValues){return vec2f(pairIn[slot],state.y);}return state;
 }
 fn pairPhysical(face:UMFace)->f32{
- if(umFaceLow(face.anchor,face.axis)){return companionNegative[umLowFaceIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
+ if(umFaceLow(face.anchor,face.axis)){return companionNegative[umLowFaceIndex(ueLowCell(face.anchor,face.axis),face.axis)];}
  return textureLoad(departure,face.anchor,0)[face.axis];
 }
 fn pair_ueSeedStore(slot:u32,value:UEPair){
@@ -191,11 +191,12 @@ ${fine}
 fn ueSnapshotPublished(face:UMFace)->f32{
  if(umClosedWall(face)){return umPhysical(face);}
  let slot=umSlotState(face.anchor,face.axis,face.width);if(slot.y<0.5*UM_INF){return slot.x;}
- // A width-4 face centre has one nonzero far interpolation tap. Keep its
- // original +0 accumulation, validity mask and clamped boundary coordinate.
+ // A width-4 face centre has one nonzero far interpolation tap: its own
+ // tile's 4h cell, which holds nothing in a page that is not stored. Keep
+ // its original +0 accumulation and validity mask.
  if(face.width==4u){
-  let p=clamp(face.anchor/4,vec3i(0),ueFarTop(face.axis));let state=textureLoad(coarse,p,0);let lower=textureLoad(origins,p,0)[face.axis];
-  return select(0.0,0.0+state[face.axis],(u32(round(state.w))&(1u<<face.axis))!=0u&&lower!=0u);
+  let texel=umTileStoreTexel(face.anchor/4);var state=vec4f(0.0);if(texel.x>=0){state=textureLoad(coarse,texel,0);}
+  return select(0.0,0.0+state[face.axis],(u32(round(state.w))&(1u<<face.axis))!=0u);
  }
  return umFarValue(face);
 }
@@ -214,23 +215,22 @@ fn ueSnapshotPublished(face:UMFace)->f32{
 const retainedMaskWGSL=/* wgsl */`
 var<private> publicationSelection:u32;
 fn publicationRemember(face:UMFace,mask:u32){
- // Canonical positive slots are unique. The opposite epoch is dead after
+ // The taps a face's far value took. Canonical positive slots are unique. The opposite epoch is dead after
  // the final sweep; real extension distances are never negative.
  stateOut[umSlot(face.anchor,face.axis,face.width)]=vec2f(f32(mask),-1.0);
 }
 `;
 function rememberSnapshotSelection(source:string):string{
  let code=source;
- for(const name of ["umFarValue","umFarValueStaged","umFarValueUniform"]){
+ for(const name of ["umFarValue","umFarValueStaged"]){
   const original=functionSource(code,name);let body=original.replace("{","{publicationSelection=0u;");
-  const sum=name==="umFarValueUniform"?"sum+=value;count+=1.0;":"sum+=values[k];count+=1.0;";
-  body=replaceExact(body,sum,`publicationSelection|=1u<<k;${sum}`);code=code.replace(original,body);
+  body=replaceExact(body,"total+=weight;","total+=weight;publicationSelection|=1u<<k;");code=code.replace(original,body);
  }
  const originalFine=functionSource(code,"ueSnapshotFineOwner");
- const fine=replaceExact(originalFine,"else{value[axis]=umFarValueStaged(face);}","else{value[axis]=umFarValueStaged(face);}\n  publicationRemember(face,publicationSelection);");
+ const fine=replaceExact(originalFine,"value[axis]=umFarValueStaged(face);","value[axis]=umFarValueStaged(face);publicationRemember(face,publicationSelection);");
  code=code.replace(originalFine,fine);
  const originalCoarse=functionSource(code,"ueSnapshotPublished");let coarse=originalCoarse;
- const valid="(u32(round(state.w))&(1u<<face.axis))!=0u&&lower!=0u";
+ const valid="(u32(round(state.w))&(1u<<face.axis))!=0u";
  if(!coarse.includes(valid))throw new Error("Paired snapshot coarse validity changed");
  coarse=replaceExact(coarse,"return select(0.0,0.0+state[face.axis],"+valid+");",`publicationRemember(face,select(0u,1u,${valid}));return select(0.0,0.0+state[face.axis],${valid});`);
  coarse=replaceExact(coarse,"return umFarValue(face);","let value=umFarValue(face);publicationRemember(face,publicationSelection);return value;");
@@ -241,16 +241,16 @@ export function replayedPublicationSource(source:string):string{
  let code=source;
  const originalPublished=functionSource(code,"umPublished");code=code.replace(originalPublished,replaceExact(originalPublished,"return umFarValue(face);","return publicationReplay(face,false);"));
  const originalFine=functionSource(code,"uePublishFine");
- const stageMarker=" for(var item=lane;item<81u;item+=64u){";
- if(originalFine.split(stageMarker).length!==3)throw new Error("Paired publication far staging changed");
+ const stageMarker=" if(lane<27u){";
+ if(originalFine.split(stageMarker).length!==2)throw new Error("Paired publication far staging changed");
  const start=originalFine.indexOf(stageMarker);
  if(start<=0)throw new Error("Paired publication far staging changed");
  const store=[...originalFine.matchAll(/(?:udStore_output\s*\(|textureStore\s*\(\s*output\s*,)[^;]*;/g)];if(store.length!==2)throw new Error("Paired publication exits changed");
  const finalStart=originalFine.lastIndexOf(" value.w=");if(finalStart<=start)throw new Error("Paired publication final store changed");
  const fine=originalFine.slice(0,start)+/* wgsl */`
- // Values are the only per-cell data needed after old publication saved the
- // nearest-source selection. Preserve the same clamped 27-cell neighborhood.
- if(lane<27u){let p=vec3i(umTileCoord(farTile))+vec3i(umCorner(lane,3u))-vec3i(1);if(umTilePresent(p)){farState[lane]=publicationLoad(p);}}
+ // Values are the only per-cell data needed after old publication saved
+ // each face's known taps. Preserve the same 27-cell neighborhood.
+ if(lane<27u){let texel=umTileStoreTexel(vec3i(umTileCoord(farTile))+vec3i(umCorner(lane,3u))-vec3i(1));if(texel.x>=0){farState[lane]=textureLoad(coarse,texel,0);}}
  workgroupBarrier();
  for(var axis=0u;axis<3u;axis++){
   if((needsFar&(1u<<axis))==0u){continue;}
@@ -260,20 +260,22 @@ export function replayedPublicationSource(source:string):string{
  code=code.replace(originalFine,fine);
 
  return code+/* wgsl */`
-fn publicationLoad(p:vec3i)->vec4f{return textureLoad(coarse,p,0);}
+// A selected tap is a known cell, so its page is stored.
+fn publicationLoad(p:vec3i)->vec4f{return textureLoad(coarse,umTileStoreTexel(p),0);}
 fn publicationReplay(face:UMFace,staged:bool)->f32{
  let retained=stateOut[umSlot(face.anchor,face.axis,face.width)];
  // The explicit tag also keeps a safe original path for an uncached face.
  if(retained.y!=-1.0){return umFarValue(face);}
  let selected=u32(retained.x);let point=umFaceCenter(face);var q=point/4.0-vec3f(0.5);q[face.axis]-=0.5;
- let base=vec3i(floor(q));var sum=0.0;var count=0.0;
+ let base=vec3i(floor(q));let fraction=fract(q);var sum=0.0;var total=0.0;
  for(var k=0u;k<8u;k++){
   if((selected&(1u<<k))==0u){continue;}
-  let p=clamp(base+vec3i(umCorner(k,2u)),vec3i(0),ueFarTop(face.axis));
+  let bit=vec3i(umCorner(k,2u));let w=select(vec3f(1)-fraction,fraction,bit==vec3i(1));let weight=w.x*w.y*w.z;
+  let p=base+bit;
   var value:f32;if(staged){value=farState[umFarSlot(p)][face.axis];}else{value=publicationLoad(p)[face.axis];}
-  sum+=value;count+=1.0;
+  sum+=weight*value;total+=weight;
  }
- return select(0.0,sum/count,count>0.0);
+ return select(0.0,sum/total,total>0.0);
 }
 `;
 }

@@ -203,13 +203,15 @@ const CHANGED:u32=${lists.changedList}u;const DILATED:u32=${lists.dilatedList}u;
 // The page table and block records the live ownership holds after its tile words.
 fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return current[5u*N+(e.x|(e.y<<6u)|(e.z<<12u))];}
 fn umBlockWord(b:u32)->u32{return current[5u*N+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
-${uniformLatticeAddressWGSL({cells:"(4u*T)",tiles:"T",constant:true,paged:{blocks:"(N/512u)",whole:false}})}
+${uniformLatticeAddressWGSL({cells:"(4u*T)",tiles:"T",constant:true,paged:{blocks:"(N/512u)"}})}
 const WORDS:u32=${Math.ceil(this.boxTiles/32)}u;
 // The band is a bit per tile key; the static masks are the host's, a bit per
-// box index, fine words then coarse words WORDS on.
+// box index, fine words then coarse words WORDS on. A tile past the box has
+// the band's bit alone.
 fn fineAt(t:u32)->bool{
- let b=umBoxTileIndex(umTileCoord(t));let banded=(band[params.bandOffset+t/32u]>>(t%32u))&1u;
- let fine=(statics[b/32u]>>(b%32u))&1u;let coarse=(statics[WORDS+b/32u]>>(b%32u))&1u;
+ let c=umTileCoord(t);let banded=(band[params.bandOffset+t/32u]>>(t%32u))&1u;
+ if(!umTileInBox(vec3i(c))){return banded!=0u;}
+ let b=umBoxTileIndex(c);let fine=(statics[b/32u]>>(b%32u))&1u;let coarse=(statics[WORDS+b/32u]>>(b%32u))&1u;
  return ((banded&~coarse)|fine)!=0u;
 }
 fn wordWidth(word:u32)->u32{return select(4u,1u,(word&0x80000000u)!=0u);}
@@ -307,14 +309,13 @@ fn scanPartialHeld(lane:u32){
 @compute @workgroup_size(${BLOCK}) fn scan(@builtin(local_invocation_index) lane:u32){
 ${this.headerWords?`// The band producer's receipt header, carried into this build's receipt.
  if(lane<${this.headerWords}u){atomicStore(&status[${R.census}u+lane],band[lane]);}`:""}
- // The stored tiles: a block that holds a page has that page's tiles of the box.
+ // The stored tiles: 512 a block that holds a page, wherever the page lies.
  if(lane==0u){atomicStore(&stored,0u);}
  workgroupBarrier();
  var tiles=0u;
  for(var b=lane;b<UM_BLOCKS;b+=${BLOCK}u){
   if(umBlockWord(b)==UM_FREE){continue;}
-  let low=8u*umBlockPage(b);if(any(low>=T)){continue;}
-  let e=min(vec3u(8u),T-low);tiles+=e.x*e.y*e.z;
+  tiles+=512u;
  }
  atomicAdd(&stored,tiles);
  let per=(BLOCKS+${BLOCK-1}u)/${BLOCK}u;let first=min(BLOCKS,lane*per);let last=min(BLOCKS,first+per);
@@ -497,7 +498,8 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
   * reservation): a build over it keeps the generation it is against and
   * reports its need (UNIFORM_MIXED_RELAYOUT_RECEIPT.need), where without an
   * admission capacity it raises fineCapacity. undefined: none, a layout
-  * whose capacity is every tile. Queue-ordered: the next encode's build. */
+  * whose capacity is every tile the pool can store. Queue-ordered: the next
+  * encode's build. */
  setAdmission(tiles?:number):void{
   if(tiles!==undefined&&(!Number.isSafeInteger(tiles)||tiles<0||tiles>this.tiles))throw new Error(`Mixed layout builder admission capacity must be an integer in 0..${this.tiles}: ${tiles}`);
   this.admission=tiles;this.word[0]=tiles??0xffffffff;this.device.queue.writeBuffer(this.level.params,16,this.word);

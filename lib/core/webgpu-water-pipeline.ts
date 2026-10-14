@@ -402,7 +402,8 @@ fn uniformNormalCube(base: vec3i) {
   normalCube = 0u;
   if (!(uniformNormalGather || uniformCubeMemo) || !umPresentationEnabled() || u.gridInfo.w >= 1.5) { return; }
   let n = vec3i(umDimensions());
-  if (any(n != vec3i(u.gridInfo.xyz))) { return; }
+  // The frame's cells are the tank's, which the lattice holds from its low corner.
+  if (any(vec3i(u.gridInfo.xyz) > n)) { return; }
   normalCubeBase = base;
   let home = min(base, n - vec3i(1)) / 4;
   let stencil = umTileStencil(umTileAt(vec3u(home)));
@@ -561,7 +562,7 @@ fn uniformPhiNormal(lattice:vec3f, fallback:vec3f) -> vec3f {
   // The mixed lattice is the 4h base's; a raw nodal field's is its texture's.
   var vertexDimensions=textureDimensions(denseVertexPhi);
   if(umPresentationEnabled()){vertexDimensions=umDimensions()+vec3u(1u);}
-  if(u.gridInfo.w>=1.5 || any(vec3i(vertexDimensions)!=dimensions+vec3i(1))){return fallback;}
+  if(u.gridInfo.w>=1.5 || any(vec3i(vertexDimensions)<dimensions+vec3i(1))){return fallback;}
   // The x/z halo closes liquid against the tank. Those triangles are boundary
   // faces, not phi's free surface: its gradient can point upward while their
   // geometric normal must point into the wall. Retain the contour normal in
@@ -802,8 +803,9 @@ fn extractMain(@builtin(global_invocation_id) gid: vec3u) {
 // resolves it to: a 4h tile word and far-air corners, so it is air.
 fn uniformWindowQuiet(g: vec3u) -> bool {
   if (!umPresentationEnabled()) { return false; }
-  let t = umTileDimensions();
-  if (any(4u * t != vec3u(u.gridInfo.xyz))) { return false; }
+  // The tank's tiles: whole ones, among the lattice's.
+  let t = vec3u(u.gridInfo.xyz) / 4u;
+  if (any(4u * t != vec3u(u.gridInfo.xyz)) || any(t > umTileDimensions())) { return false; }
   let low = vec3i(g) - vec3i(1);
   for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
     let tile = low + vec3i(umCorner(k, 2u));
@@ -887,8 +889,8 @@ fn uniformWindowHeader(slot: u32) -> vec4u {
   if (slot >= min(atomicLoad(&surfaceWindows.count), arrayLength(&surfaceWindows.windows))) { return vec4u(WINDOW_NONE, 0u, 0u, 0u); }
   let window = surfaceWindows.windows[slot];
   if (!umPresentationEnabled()) { return vec4u(window, 0u, 0u, 0u); }
-  let t = vec3i(umTileDimensions());
-  if (any(4 * t != vec3i(u.gridInfo.xyz))) { return vec4u(window, 0u, 0u, 0u); }
+  let t = vec3i(u.gridInfo.xyz) / 4;
+  if (any(4 * t != vec3i(u.gridInfo.xyz)) || any(t > vec3i(umTileDimensions()))) { return vec4u(window, 0u, 0u, 0u); }
   let g = vec3i(vec3u(window & 1023u, (window >> 10u) & 1023u, window >> 20u));
   let home = umTileNear(g);
   let word = umTopology[2u * umTileCount() + 2u * umTileAt(vec3u(home))];
@@ -1076,7 +1078,7 @@ fn extractWindowsMain(@builtin(workgroup_id) group: vec3u, @builtin(num_workgrou
     if (header.w != 0u) {
       let signs = atomicLoad(&windowSigns);
       // Air, or liquid with no corner in the wall halo.
-      quiet = (signs & 1u) == 0u || ((signs & 2u) == 0u && g.x > 0 && g.z > 0 && all(g < vec3i(umTileDimensions())));
+      quiet = (signs & 1u) == 0u || ((signs & 2u) == 0u && g.x > 0 && g.z > 0 && all(4 * g < vec3i(u.gridInfo.xyz)));
     }
     if (header.w != 0u && !quiet) {
       if (header.w == 1u) { uniformWindowCellsFine(g, index); }
@@ -1549,7 +1551,7 @@ fn contactFluidValue(world:vec3f)->f32{
     // Uniform Geometric: the nodal level set itself, on the scale the
     // extraction contours (0.5 - phi / h, its 0.5 crossing at phi = 0). The
     // cell field is centre phi there, canonical only at owner origins.
-    return 0.5-umSampleVertex(uvw*vec3f(umDimensions()))/(u.container.y/max(u.gridInfo.y,1.0));
+    return 0.5-umSampleVertex(uvw*u.gridInfo.xyz)/(u.container.y/max(u.gridInfo.y,1.0));
   }
   let q=clamp(uvw*vec3f(dims)-vec3f(0.5),vec3f(0),vec3f(dims-vec3i(1)));let base=vec3i(floor(q));let f=fract(q);
   let c000=contactFieldCell(base);let c100=contactFieldCell(base+vec3i(1,0,0));let c010=contactFieldCell(base+vec3i(0,1,0));let c110=contactFieldCell(base+vec3i(1,1,0));

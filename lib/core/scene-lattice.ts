@@ -9,6 +9,8 @@ export {
   sceneCellSizes_m,
   sceneLatticeCellCount,
   sceneLatticeDimensions,
+  LATTICE_PAGE_CELLS,
+  sceneFluidLatticeDimensions,
 } from "./scene-lattice-dimensions";
 import { sceneLatticeDimensions } from "./scene-lattice-dimensions";
 

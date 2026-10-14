@@ -22,7 +22,7 @@
  * that lattice.
  */
 import type { FluidRefinementRegion, SceneDescription, Vec3 } from "./model";
-import { sceneCellSizes_m, sceneLatticeDimensions } from "./scene-lattice";
+import { sceneCellSizes_m, sceneFluidLatticeDimensions, sceneLatticeDimensions } from "./scene-lattice";
 
 /**
  * Regions carried per scene.
@@ -153,6 +153,16 @@ export function refinementRegionLattice(scene: SceneDescription): RefinementRegi
     cellSize_m: sceneCellSizes_m(scene),
     origin_m: { x: -0.5 * c.width_m, y: 0, z: -0.5 * c.depth_m },
   };
+}
+
+/**
+ * The region lattice as a fluid solver stores it: the same cell size and
+ * origin over the whole pages the container's cells round up to
+ * (`sceneFluidLatticeDimensions`). A region is still authored, snapped and
+ * measured against `refinementRegionLattice`, the container's own.
+ */
+export function fluidRegionLattice(scene: SceneDescription): RefinementRegionLattice {
+  return { ...refinementRegionLattice(scene), dimensions: sceneFluidLatticeDimensions(scene) };
 }
 
 /** A region's world box in cell coordinates, clamped to the lattice. */

@@ -23,24 +23,36 @@ function patchOnce(source:string,anchor:string,to:string):string{
  if(count!==1)throw new Error(`Mixed extension patch expected 1 occurrence of ${JSON.stringify(anchor)}, found ${count}`);
  return source.replace(anchor,()=>to);
 }
-/** umFarValue with its coarse state and source-bound loads supplied. */
-function farValueWGSL(name:string,state:string,lower:string,upper:string):string{
- return /* wgsl */`fn ${name}(face:UMFace)->f32{
+/** How the pyramid's origin textures hold a source bound. */
+export const uniformExtensionSourceBoundsWGSL=/* wgsl */`// A source bound is a cell of the page window, 11 bits an axis: x, y and the
+// low ten bits of z in the origin texel's component, the eleventh bit of z in
+// bit 24 + component of the texel's w. The component's mask bit in the value
+// texel says whether a bound is there. The pyramid's prolongation reads them.
+fn umSourceWord(p:vec3i)->u32{let q=vec3u(p);return q.x|(q.y<<11u)|((q.z&1023u)<<22u);}
+// The pyramid's 4h level holds block b's tiles at umBlockCoord(b) in the
+// block grid (umTileStoreTexel); a texel's upper source bounds lie this far
+// above its lower ones.
+const UE_UPPER_BOUNDS:vec3i=vec3i(0,0,i32(8u*UM_BLOCK_GRID.z));
+`;
+/** umFarValue: the trilinear combination of the known values among the
+ * eight 4h pyramid cells around a face. A cell of a page that is not stored
+ * holds nothing. */
+export function uniformExtensionFarValueWGSL(name:string):string{
+ return /* wgsl */`// A face no sweep reached. A 4h cell's value sits at its tile's +face centre:
+// the face takes the trilinear combination of the cells around its own
+// centre, over the taps that are known and renormalised by their weight, so
+// it stays between the least and the greatest of them. Zero with none.
+fn ${name}(face:UMFace)->f32{
  let point=umFaceCenter(face);var q=point/4.0-vec3f(0.5);q[face.axis]-=0.5;
- let base=vec3i(floor(q));let fraction=fract(q);var distances:array<f32,8>;var values:array<f32,8>;var best=UM_INF;
+ let base=vec3i(floor(q));let fraction=fract(q);var sum=0.0;var total=0.0;
  for(var k=0u;k<8u;k++){
-  distances[k]=UM_INF;let bit=vec3i(umCorner(k,2u));let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));if(any(weights<=vec3f(0))){continue;}
-  let p=clamp(base+bit,vec3i(0),ueFarTop(face.axis));let state=${state};
+  let bit=vec3i(umCorner(k,2u));let w=select(vec3f(1)-fraction,fraction,bit==vec3i(1));let weight=w.x*w.y*w.z;if(weight<=0.0){continue;}
+  let texel=umTileStoreTexel(base+bit);if(texel.x<0){continue;}
+  let state=textureLoad(coarse,texel,0);
   if((u32(round(state.w))&(1u<<face.axis))==0u){continue;}
-  let lower=${lower};let upper=${upper};if(lower==0u){continue;}
-  var lo=vec3f(umSourcePoint(lower))+vec3f(0.5);var hi=vec3f(umSourcePoint(upper))+vec3f(0.5);lo[face.axis]+=0.5;hi[face.axis]+=0.5;
-  let scale=h.xyz/min(h.x,min(h.y,h.z));let delta=(point-clamp(point,lo,hi))*scale;
-  let distance=(delta.x*delta.x+delta.z*delta.z)+delta.y*delta.y;
-  best=min(best,distance);distances[k]=distance;values[k]=state[face.axis];
+  sum+=weight*state[face.axis];total+=weight;
  }
- var sum=0.0;var count=0.0;
- for(var k=0u;k<8u;k++){if(distances[k]<0.5*UM_INF&&abs(distances[k]-best)<=1e-6*max(1.0,best)){sum+=values[k];count+=1.0;}}
- return select(0.0,sum/count,count>0.0);
+ return select(0.0,sum/total,total>0.0);
 }
 `;
 }
@@ -49,10 +61,9 @@ function farValueWGSL(name:string,state:string,lower:string,upper:string):string
  * layer, the negative domain-wall planes of each width, a two-word
  * finite-cell mask per tile (UE_FLAGS) and the no-patch slot. Then the unit
  * patches by fine-tile rank, 240 an h tile. See umSlot. */
-function extensionSlots(a:UniformLatticeAddress,fineTiles:number):number{
- // The low-face planes: per h face a low-face table's keys (UM_LOW_FACE_KEYS), per 4h face the planes of the pyramid's box (UM_BOX_TILES).
- const t=a.tiles;
- return 5*a.tileKeys+a.lowFaceKeys+t[1]*t[2]+t[0]*t[2]+t[0]*t[1]+1+240*fineTiles;
+export function extensionSlots(a:UniformLatticeAddress,fineTiles:number):number{
+ // The low-face planes: per h face a low-face table's keys (UM_LOW_FACE_KEYS), per 4h face three planes of 64 a block.
+ return 5*a.tileKeys+a.lowFaceKeys+192*a.blocks+1+240*fineTiles;
 }
 /** Seam 4h tiles per sweepSeams job (ueSweepCoarsePack). */
 const UE_PACK_TILES=2;
@@ -107,6 +118,8 @@ export class UniformMixedExtension {
   if(ownership.capacity.lattice.dimensions.some(n=>n%4!==0))throw new Error("Mixed extension requires a 4-aligned lattice");
   if(!directRestriction)throw new Error("Mixed extension restricts the face-plane anchors directly");
   this.address=ownership.capacity.address;
+  // The hierarchy's kernels read the page pool's tail of the ownership's buffer.
+  hierarchy.attach(ownership.presentation.buffer,ownership.pageMirror.offset);
   const entries:GPUBindGroupLayoutEntry[]=[
    ...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
    ...[4,5,9].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
@@ -176,13 +189,10 @@ const UM_INF=1e20;
 // A closed positive domain wall (the cell across the face is SOLID) is the
 // mirror of a negative wall plane: seeded every pass, never swept or
 // restricted, published as its physical value. The negative planes have no
-// coarse +face, so the far lookup never taps the positive wall layer of the
-// pyramid's box on its normal axis either. h.w: the top is open.
+// coarse +face, so the pyramid leaves the 4h cell behind a closed wall
+// unknown on the wall's axis too: no far lookup takes a value there.
 fn umClosedWall(face:UMFace)->bool{
  return face.sign>0&&umAcrossKind(face.anchor,face.axis,1)==UM_SOLID;
-}
-fn ueFarTop(axis:u32)->vec3i{
- var top=vec3i(UM_BOX_TILES)-vec3i(1);if(!(axis==1u&&h.w>0.5)){top[axis]=max(top[axis]-1,0);}return top;
 }
 // One (value, distance) slot per canonical patch and component. The sections
 // the lattice fixes come first. Width-4 patches (anchor/4 is their tile) sit
@@ -241,7 +251,7 @@ fn umSource(face:UMFace,owner:UMOwner)->bool{
  return face.neighbor.width!=0u&&textureLoad(phase,vec3i(umOrigin(face.neighbor)),0).x>0.5;
 }
 fn umPhysical(face:UMFace)->f32{
- if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
+ if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(ueLowCell(face.anchor,face.axis),face.axis)];}
  return textureLoad(physical,face.anchor,0)[face.axis];
 }
 struct UMNeighbor {value:f32,distance:f32,spacing:f32}
@@ -914,26 +924,29 @@ override ueSweepKind:u32=0u;
   workgroupBarrier();
  }
 }
-fn umSourceIndex(p:vec3i)->u32{return u32(p.x+i32(UM_D.x)*(p.y+i32(UM_D.y)*p.z))+1u;}
-fn umSourcePoint(i:u32)->vec3i{let at=i-1u;return vec3i(vec3u(at%UM_D.x,(at/UM_D.x)%UM_D.y,at/(UM_D.x*UM_D.y)));}
-// One lane per (tile, component) of a 4x4x4 tile block: component-major lane
-// order, so a SIMD group restricts one component.
+${uniformExtensionSourceBoundsWGSL}// One lane per (tile key, component), 64 keys a workgroup: component-major
+// lane order, so a SIMD group restricts one component. rbFlags: bit 0
+// restricted, bits 1 and 2 the lower and upper bounds' eleventh z bits.
 var<workgroup> rbValues:array<f32,192>;
 var<workgroup> rbLower:array<u32,192>;
 var<workgroup> rbUpper:array<u32,192>;
+var<workgroup> rbFlags:array<u32,192>;
 @compute @workgroup_size(64,3) fn restrictBand(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_id) id:vec3u){
- let gid=4u*group+vec3u(id.x%4u,(id.x/4u)%4u,id.x/16u);let component=id.y;let at=id.x+64u*component;
- let inside=all(gid<UM_T);let origin=vec3i(gid)*4;let tile=umTileAt(min(gid,UM_T-vec3u(1)));
+ // A key that holds no page (a free block, a sentinel) restricts and stores nothing.
+ let tile=64u*group.x+id.x;let component=id.y;let at=id.x+64u*component;
+ let inside=umBlockStored(tile>>9u)&&umTileLive(tile);let gid=umTileCoord(tile);let origin=vec3i(gid)*4;
  // Off the extension support every face keeps its seed distance, and a
  // source face needs a liquid owner, which the support dilates around: no
  // face here is finite, so the restriction is the empty one written below.
  // Every slot read below is anchored in this tile: a supported tile whose
  // final mask is empty restricts to the same empty state.
  let supported=inside&&any(ueMaskIn(tile)!=vec2u(0u));
- rbValues[at]=0.0;rbLower[at]=0u;rbUpper[at]=0u;
- if(supported&&!(gid[component]==UM_T[component]-1u&&!(component==1u&&h.w>0.5))){
+ rbValues[at]=0.0;rbLower[at]=0u;rbUpper[at]=0u;rbFlags[at]=0u;
+ // The tile's +face on a closed wall is seeded, never restricted (umClosedWall).
+ var top=origin;top[component]+=3;
+ if(supported&&!((gid[component]&7u)==7u&&umAcrossKind(top,component,1)==UM_SOLID)){
   var location=vec3f(origin)+vec3f(2);location[component]+=2.0;
-  var best=UM_INF;var sum=0.0;var count=0.0;var lo=vec3i(UM_D);var hi=vec3i(-1);
+  var best=UM_INF;var sum=0.0;var count=0.0;var lo=vec3i(2048);var hi=vec3i(-1);
   ${this.regularBulk?"let coarse=false;let patchWidth=1u;":`// A 4h tile's one owner has a single positive patch (width 4: only the
   // first plane anchor resolves to it) or sixteen unit patches at the plane
   // anchors; the fallback footprint holds no other patch. An h owner always
@@ -954,75 +967,56 @@ var<workgroup> rbUpper:array<u32,192>;
     ${this.regularBulk?"let o=umOwnerAt(p);let face=umPositiveFaceAtAnchor(o,component,p);if(face.width==0u){continue;}":"let face=UMFace(UMOwner(),p,patchWidth,select(1u,16u,coarse&&patchWidth==1u),component,1);"}
     ${this.regularBulk?"if(!umSource(face,o)){continue;}":"let slot=stateIn[select(UE_COARSE+component*UE_TILES+tile,ueUnitSlotIn(word,upper,local,component),patchWidth==1u)];if(slot.y>=0.5*UM_INF){continue;}"}
     let delta=(umFaceCenter(face)-location)*h.xyz;let distance=dot(delta,delta);let epsilon=1e-6*max(1.0,distance);
-    if(distance<best-epsilon){best=distance;sum=0.0;count=0.0;lo=vec3i(UM_D);hi=vec3i(-1);}
+    if(distance<best-epsilon){best=distance;sum=0.0;count=0.0;lo=vec3i(2048);hi=vec3i(-1);}
     if(abs(distance-best)<=epsilon){sum+=${this.regularBulk?"umPhysical(face)":"slot.x"};count+=1.0;
      // The whole tangential patch contributes its original support bounds.
      var end=face.anchor+vec3i(i32(face.width)-1);end[component]=face.anchor[component];lo=min(lo,face.anchor);hi=max(hi,end);}
    }
   }
-  if(count>0.0){rbValues[at]=sum/count;rbLower[at]=umSourceIndex(lo);rbUpper[at]=umSourceIndex(hi);}
+  if(count>0.0){rbValues[at]=sum/count;rbLower[at]=umSourceWord(lo);rbUpper[at]=umSourceWord(hi);rbFlags[at]=1u|((u32(lo.z)>>10u)<<1u)|((u32(hi.z)>>10u)<<2u);}
  }
  workgroupBarrier();
  if(component==0u&&inside){
   var values=vec4f(0);var lower=vec4u(0);var upper=vec4u(0);var mask=0u;
-  // A restricted component's lower source index is at least 1.
-  for(var c=0u;c<3u;c++){values[c]=rbValues[id.x+64u*c];lower[c]=rbLower[id.x+64u*c];upper[c]=rbUpper[id.x+64u*c];if(lower[c]!=0u){mask|=1u<<c;}}
-  values.w=f32(mask);textureStore(coarseOut,vec3i(gid),values);textureStore(originsOut,vec3i(gid),lower);textureStore(originsOut,vec3i(gid)+vec3i(0,0,i32(UM_T.z)),upper);
+  for(var c=0u;c<3u;c++){
+   let flags=rbFlags[id.x+64u*c];values[c]=rbValues[id.x+64u*c];lower[c]=rbLower[id.x+64u*c];upper[c]=rbUpper[id.x+64u*c];
+   mask|=(flags&1u)<<c;lower.w|=((flags>>1u)&1u)<<(24u+c);upper.w|=((flags>>2u)&1u)<<(24u+c);
+  }
+  let texel=(umBlockCoord(tile>>9u)<<vec3u(3u))|vec3i(umLocalTile(tile));
+  values.w=f32(mask);textureStore(coarseOut,texel,values);textureStore(originsOut,texel,lower);textureStore(originsOut,texel+UE_UPPER_BOUNDS,upper);
  }
 }
-${farValueWGSL("umFarValue","textureLoad(coarse,p,0)","textureLoad(origins,p,0)[face.axis]","textureLoad(origins,p+vec3i(0,0,i32(UM_T.z)),0)[face.axis]")}
+${uniformExtensionFarValueWGSL("umFarValue")}
 // An h publish job is one tile; every far tap of its faces is one of the 27
 // coarse cells around it, staged once in workgroup memory.
 var<workgroup> farTile:u32;
 var<workgroup> farState:array<vec4f,27>;
-// Per coarse cell and component: the source bound box, decoded once (lo.w
-// < 0 marks no bound for that component).
-var<workgroup> farLo:array<vec4f,81>;
-var<workgroup> farHi:array<vec3f,81>;
+// Per coarse cell: bit a set where component a is known. A cell of a page
+// that is not stored stages as unknown.
+var<workgroup> farKnown:array<u32,27>;
 fn umFarSlot(p:vec3i)->u32{let local=vec3u(p-vec3i(umTileCoord(farTile))+vec3i(1));return local.x+3u*(local.y+3u*local.z);}
-// The same selection with staged taps and source boxes decoded once per tile.
-fn umFarDistance(face:UMFace,point:vec3f,p:vec3i)->f32{
- let at=3u*umFarSlot(p)+face.axis;let lo=farLo[at];if(lo.w<0.0){return UM_INF;}
- let scale=h.xyz/min(h.x,min(h.y,h.z));let delta=(point-clamp(point,lo.xyz,farHi[at]))*scale;
- return (delta.x*delta.x+delta.z*delta.z)+delta.y*delta.y;
-}
+// umFarValue over the staged cells: the same taps, weights and order.
 fn umFarValueStaged(face:UMFace)->f32{
  let point=umFaceCenter(face);var q=point/4.0-vec3f(0.5);q[face.axis]-=0.5;
- let base=vec3i(floor(q));let fraction=fract(q);var best=UM_INF;
- // A constant bound unrolls into registers: each distance is evaluated once.
- var distances:array<f32,8>;var values:array<f32,8>;
+ let base=vec3i(floor(q));let fraction=fract(q);var sum=0.0;var total=0.0;
  for(var k=0u;k<8u;k++){
-  distances[k]=UM_INF;let bit=vec3i(umCorner(k,2u));let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));if(any(weights<=vec3f(0))){continue;}
-  let p=clamp(base+bit,vec3i(0),ueFarTop(face.axis));
-  distances[k]=umFarDistance(face,point,p);values[k]=farState[umFarSlot(p)][face.axis];best=min(best,distances[k]);
+  let bit=vec3i(umCorner(k,2u));let w=select(vec3f(1)-fraction,fraction,bit==vec3i(1));let weight=w.x*w.y*w.z;if(weight<=0.0){continue;}
+  let slot=umFarSlot(base+bit);if((farKnown[slot]&(1u<<face.axis))==0u){continue;}
+  sum+=weight*farState[slot][face.axis];total+=weight;
  }
- var sum=0.0;var count=0.0;
- for(var k=0u;k<8u;k++){if(distances[k]<0.5*UM_INF&&abs(distances[k]-best)<=1e-6*max(1.0,best)){sum+=values[k];count+=1.0;}}
- return select(0.0,sum/count,count>0.0);
+ return select(0.0,sum/total,total>0.0);
 }
-// Bit a set: the tile's in-domain staged cells differ in component a.
-var<workgroup> farMixed:atomic<u32>;
+// The components some face of the tile needs a far value for: gathered from
+// the lanes, then read by all of them.
+var<workgroup> farAsked:atomic<u32>;
 var<workgroup> farRequired:u32;
-// When every staged cell of a component holds one state, each tap umFarValueStaged
-// keeps has the same box and value: its distances are equal (all tie), or all
-// infinite. Its result is then this same k-ordered sum over the kept taps.
-fn umFarValueUniform(face:UMFace,value:f32,valid:bool)->f32{
- if(!valid){return 0.0;}
- let point=umFaceCenter(face);var q=point/4.0-vec3f(0.5);q[face.axis]-=0.5;let fraction=fract(q);
- var sum=0.0;var count=0.0;
- for(var k=0u;k<8u;k++){
-  let bit=vec3i(umCorner(k,2u));let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));if(any(weights<=vec3f(0))){continue;}
-  sum+=value;count+=1.0;
- }
- return select(0.0,sum/count,count>0.0);
-}
 fn umPublished(face:UMFace)->f32{
  if(umFaceLow(face.anchor,face.axis)||umClosedWall(face)){return umPhysical(face);}
  ${this.regularBulk?"if(umSource(face,umOwnerAt(face.anchor))){return umPhysical(face);}":"let slot=umSlotState(face.anchor,face.axis,face.width);if(slot.y<0.5*UM_INF){return slot.x;}"}
  return umFarValue(face);
 }
 fn uePublishFine(owner:UMOwner,lane:u32){
- if(lane==0u){farTile=select(UM_TILES,owner.tile,owner.width!=0u);atomicStore(&farMixed,0u);}
+ if(lane==0u){farTile=select(UM_TILES,owner.tile,owner.width!=0u);atomicStore(&farAsked,0u);}
  if(workgroupUniformLoad(&farTile)>=UM_TILES){return;}
  // Resolve seeded and wall faces before preparing the distant-source cache.
  // Many h tiles already have every component: they publish these exact
@@ -1035,44 +1029,19 @@ fn uePublishFine(owner:UMOwner,lane:u32){
   else if(slot.y<0.5*UM_INF){value[axis]=slot.x;}
   else{needsFar|=1u<<axis;}
  }
- if(needsFar!=0u){atomicOr(&farMixed,needsFar);}
+ if(needsFar!=0u){atomicOr(&farAsked,needsFar);}
  workgroupBarrier();
- if(lane==0u){farRequired=atomicLoad(&farMixed);atomicStore(&farMixed,0u);}
+ if(lane==0u){farRequired=atomicLoad(&farAsked);atomicStore(&farAsked,0u);}
  let required=workgroupUniformLoad(&farRequired);
  if(required==0u){value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);return;}
- for(var item=lane;item<81u;item+=64u){
-  let cell=item/3u;let axis=item%3u;
-  let p=vec3i(umTileCoord(farTile))+vec3i(umCorner(cell,3u))-vec3i(1);
-  if(umTilePresent(p)){
-   let state=textureLoad(coarse,p,0);if(axis==0u){farState[cell]=state;}
-   let lower=textureLoad(origins,p,0)[axis];let upper=textureLoad(origins,p+vec3i(0,0,i32(UM_T.z)),0)[axis];
-   var lo=vec3f(umSourcePoint(lower))+vec3f(0.5);var hi=vec3f(umSourcePoint(upper))+vec3f(0.5);lo[axis]+=0.5;hi[axis]+=0.5;
-   let valid=(u32(round(state.w))&(1u<<axis))!=0u&&lower!=0u;
-   farLo[item]=vec4f(lo,select(-1.0,1.0,valid));farHi[item]=hi;
-  }
+ if(lane<27u){
+  let texel=umTileStoreTexel(vec3i(umTileCoord(farTile))+vec3i(umCorner(lane,3u))-vec3i(1));farKnown[lane]=0u;
+  if(texel.x>=0){let state=textureLoad(coarse,texel,0);farState[lane]=state;farKnown[lane]=u32(round(state.w))&7u;}
  }
  workgroupBarrier();
- // Compare every in-domain staged cell with the tile's own (cell 13), bitwise.
- for(var item=lane;item<81u;item+=64u){
-  let cell=item/3u;let axis=item%3u;let reference=39u+axis;
-  let p=vec3i(umTileCoord(farTile))+vec3i(umCorner(cell,3u))-vec3i(1);
-  if(umTilePresent(p)){
-   let a=farLo[item];let b=farLo[reference];
-   var same=(a.w<0.0)==(b.w<0.0);
-   if(same&&b.w>=0.0){
-    same=all(bitcast<vec3u>(a.xyz)==bitcast<vec3u>(b.xyz))&&all(bitcast<vec3u>(farHi[item])==bitcast<vec3u>(farHi[reference]))
-     &&bitcast<u32>(farState[cell][axis])==bitcast<u32>(farState[13u][axis]);
-   }
-   if(!same){atomicOr(&farMixed,1u<<axis);}
-  }
- }
- workgroupBarrier();
- let mixed=atomicLoad(&farMixed);
  for(var axis=0u;axis<3u;axis++){
   if((needsFar&(1u<<axis))==0u){continue;}
-  let face=umUnitExtensionFace(owner,axis,1);
-  if((mixed&(1u<<axis))==0u){value[axis]=umFarValueUniform(face,farState[13u][axis],farLo[39u+axis].w>=0.0);}
-  else{value[axis]=umFarValueStaged(face);}
+  let face=umUnitExtensionFace(owner,axis,1);value[axis]=umFarValueStaged(face);
  }
  value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);
 }
@@ -1110,12 +1079,12 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
  // positive face, anchored at origin+3e_axis, and each of those texels holds
  // only that component (no other positive face shares the anchor). Its far
  // value (umFarValue) has one tap of positive weight: the face centre maps
- // to the owner's own coarse cell with zero fraction on every axis, so the
- // mean over the tied nearest taps is that cell's component when it is known
- // (mask bit and a source bound) and zero otherwise. The same values as the
+ // to the owner's own coarse cell with zero fraction on every axis, so it
+ // is that cell's component when it is known (its mask bit) and zero
+ // otherwise. The same values as the
  // general dispatch below, without the face search.
  if(ueRegularCoarseList){
-  let cell=vec3i(origin/4u);let state=textureLoad(coarse,cell,0);let lower=textureLoad(origins,cell,0);let mask=u32(round(state.w));
+  let cell=(umBlockCoord(owner.tile>>9u)<<vec3u(3u))|vec3i(umLocalTile(owner.tile));let state=textureLoad(coarse,cell,0);let mask=u32(round(state.w));
   let low=umLowOpen(vec3i(origin));
   for(var axis=0u;axis<3u;axis++){
    if(low[axis]){let i=umLowFaceIndex(origin,axis);boundary[i]=negative[i];}
@@ -1124,7 +1093,7 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
    // umClosedWall: a closed positive domain wall publishes its physical value.
    if(umAcrossKind(anchor,axis,1)==UM_SOLID){value[axis]=physicalAt[axis];}
    else if(slot.y<0.5*UM_INF){value[axis]=slot.x;}
-   else if((mask&(1u<<axis))!=0u&&lower[axis]!=0u){value[axis]=state[axis];}
+   else if((mask&(1u<<axis))!=0u){value[axis]=state[axis];}
    value.w=physicalAt.w;textureStore(output,anchor,value);
   }
   return;
@@ -1215,9 +1184,9 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
  finishSnapshot(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2):void{
   if(!this.snapshotPipelines)throw new Error("Slot snapshot is not initialized");
   if(!Number.isSafeInteger(sweeps)||sweeps<0)throw new Error("Invalid mixed extension sweep count");
-  const pass=encoder.beginComputePass(SNAPSHOT_PASS),p=this.snapshotPipelines,o=this.ownership,d=o.capacity.tileDimensions;
+  const pass=encoder.beginComputePass(SNAPSHOT_PASS),p=this.snapshotPipelines,o=this.ownership;
   pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,groups[sweeps%2]!.group);pass.setPipeline(uniformDetailPick(p.restrict));
-  pass.dispatchWorkgroups(ceilDiv(d[0]!,4),ceilDiv(d[1]!,4),ceilDiv(d[2]!,4));this.hierarchy.encode(pass,false);
+  pass.dispatchWorkgroups(8*this.address.blocks);this.hierarchy.encode(pass,false);
   pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,groups[sweeps%2]!.group);
   // The fine publisher grid-strides its live tile list; cap empty launch groups.
   if(o.capacity.fineTiles>0){pass.setPipeline(uniformDetailPick(p.fine));pass.dispatchWorkgroups(Math.min(8192,o.capacity.fineTiles));}
@@ -1242,8 +1211,9 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
  private encodeStage(pass:GPUComputePassEncoder,entry:string,group:UniformDetailGroup,mode:"pair"|"companion"|"current"|undefined,replayPublication:boolean):void{
   const o=this.ownership;pass.setBindGroup(1,group.group);
   if(entry==="restrictBand"){
-   const d=o.capacity.tileDimensions;pass.setPipeline(uniformDetailPick((mode==="companion"?this.companionRestrict:this.restrictPipeline)!));
-   pass.dispatchWorkgroups(ceilDiv(d[0]!,4),ceilDiv(d[1]!,4),ceilDiv(d[2]!,4));return;
+   // 64 tile keys a workgroup: every key of the pool, eight workgroups a block.
+   pass.setPipeline(uniformDetailPick((mode==="companion"?this.companionRestrict:this.restrictPipeline)!));
+   pass.dispatchWorkgroups(8*this.address.blocks);return;
   }
   const publication=replayPublication?this.replayPublishers:undefined;
   const regular=mode==="pair"?this.pairedRegular:mode==="companion"?this.companionRegular:publication?.regular??this.regularPipelines;

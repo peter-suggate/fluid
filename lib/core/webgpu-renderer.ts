@@ -2888,7 +2888,7 @@ export class FluidLabRenderer {
       // palette to the hierarchy that can actually exist in this solver.
       activeSvoDiagnostics.maximumTraversalDepth * 512 + activeSvoDiagnostics.maximumNodeVisits, scene.voxelDomain.finestCellSize_m, Math.min(bodies.length, 12), gpuInfo?.quadtreeMaximumFluidScale ?? 1,
       // Field mode: 1 = raw occupancy, 3 = uniform-layout level set.
-      gpuInfo?.nx ?? 1, gpuInfo?.ny ?? 1, gpuInfo?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "octree" ? 3 : 1) : 0,
+      gpuInfo?.tankCells?.[0] ?? gpuInfo?.nx ?? 1, gpuInfo?.tankCells?.[1] ?? gpuInfo?.ny ?? 1, gpuInfo?.tankCells?.[2] ?? gpuInfo?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "octree" ? 3 : 1) : 0,
       gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : gridOverlay?.axis === "y" ? 3 : gridOverlay?.axis === "volume" ? 4 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "octree" ? 1 : 0,
       (gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : gridOverlay?.mode === "resolution" && gpuInfo?.gridKind === "octree" ? 9 : gridOverlay?.mode === "density" ? 10 : gridOverlay?.mode === "volume-levelset" ? VOLUME_LEVELSET_OVERLAY_MODE_CODE : gridOverlay?.mode === "fine-tiles" ? FINE_TILES_OVERLAY_MODE_CODE : gridOverlay?.mode === "solve-window" ? SOLVE_WINDOW_OVERLAY_MODE_CODE : 0),
       environmentIndex(environmentId), gpuInfo?.lastDt_s ?? 0, gpuInfo?.maxSpeed_m_s ?? 0,
@@ -3071,7 +3071,7 @@ export class FluidLabRenderer {
     // is the source band; the water/SVO pipelines cross their own boundaries.
     const rasterResult = this.waterPipeline.encode(
       encoder, this.presentationTexture,
-      gpuInfo?.nx ?? 1, gpuInfo?.ny ?? 1, gpuInfo?.nz ?? 1,
+      gpuInfo?.tankCells?.[0] ?? gpuInfo?.nx ?? 1, gpuInfo?.tankCells?.[1] ?? gpuInfo?.ny ?? 1, gpuInfo?.tankCells?.[2] ?? gpuInfo?.nz ?? 1,
       gpuInfo?.surfaceRevision ?? gpuInfo?.encodedSteps ?? 0,
       sparsePresentationRequired ? drySceneReplacement : undefined,
       closeStage,

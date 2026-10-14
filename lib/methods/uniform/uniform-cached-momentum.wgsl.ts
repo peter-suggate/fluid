@@ -1,5 +1,7 @@
 /** Shared sampling of prepared h/4h velocity fields, retaining the local
- * owner width for characteristic substeps. Negative h planes escape. */
+ * owner width for characteristic substeps. Negative h planes escape. A
+ * sample resolves its tile once (umSampleTile): the tile's key classifies it
+ * and names the 4h cache block its three components read. */
 export const uniformCachedMomentumSamplingWGSL = /* wgsl */ `
 var<private> umUnitEscaped:bool;
 var<private> umUnitWidth:f32;
@@ -16,33 +18,31 @@ fn umUnitInterpolant(p:vec3f,axis:u32)->f32 {
 }
 // 0 native fine stencil, 1 prepared blend, 2 negative-plane escape: a fine
 // sample within a cell of the box's plane 0 taps the negative planes.
-fn umUnitSampleKind(p:vec3f,axis:u32)->u32 {
- if(umFineStencilSample(p)){umUnitWidth=1.0;umUnitFineWeight=1.0;return 0u;}
- let q=umPointNear(p);
- let tile=umTileAt(vec3u(umTileNear(vec3i(floor(q/4.0)))));
- umUnitWidth=f32(umTileWidth(tile));umUnitFineWeight=umVelocitySamplingWeights(p);
+fn umUnitSampleKind(p:vec3f,s:UMSampleTile,axis:u32)->u32 {
+ if(umFineStencilTile(s.key)){umUnitWidth=1.0;umUnitFineWeight=1.0;return 0u;}
+ umUnitWidth=f32(umTileWidth(s.key));umUnitFineWeight=umVelocitySamplingWeightsAt(s);
  let low=select(p[min(axis,2u)]<1.0,any(p<vec3f(1.0)),axis>=3u);
  return select(1u,2u,umUnitFineWeight>0.0&&low);
 }
-fn umUnitWeighted(p:vec3f,axis:u32,fine:f32)->f32 {
+fn umUnitWeighted(p:vec3f,home:UMCoarseHome,axis:u32,fine:f32)->f32 {
  var value=0.0;
  if(fine>0.0){value+=fine*umUnitInterpolant(p,axis);}
  let coarse=max(0.0,1.0-fine);
- if(coarse>0.0){value+=coarse*umSampleVelocity4(p,axis);}
+ if(coarse>0.0){value+=coarse*umSampleVelocity4In(home,axis);}
  return value;
 }
 fn umUnitSampleComponent(p:vec3f,axis:u32)->f32 {
- let kind=umUnitSampleKind(p,axis);
+ let s=umSampleTile(p);let kind=umUnitSampleKind(p,s,axis);
  if(kind==0u){return umSampleVelocityFine(p,axis);}
  if(kind==2u){umUnitEscaped=true;return 0.0;}
- return umUnitWeighted(p,axis,umUnitFineWeight);
+ return umUnitWeighted(p,umCoarseHome(p,s),axis,umUnitFineWeight);
 }
 fn umUnitSample(p:vec3f)->vec3f {
- let kind=umUnitSampleKind(p,3u);
+ let s=umSampleTile(p);let kind=umUnitSampleKind(p,s,3u);
  if(kind==0u){return vec3f(umSampleVelocityFine(p,0u),umSampleVelocityFine(p,1u),umSampleVelocityFine(p,2u));}
  if(kind==2u){umUnitEscaped=true;return vec3f(0);}
- let fine=umUnitFineWeight;
- return vec3f(umUnitWeighted(p,0u,fine),umUnitWeighted(p,1u,fine),umUnitWeighted(p,2u,fine));
+ let fine=umUnitFineWeight;let home=umCoarseHome(p,s);
+ return vec3f(umUnitWeighted(p,home,0u,fine),umUnitWeighted(p,home,1u,fine),umUnitWeighted(p,home,2u,fine));
 }
 fn umUnitDeparture(position:vec3f,dt:f32,h:vec3f)->vec3f {
   var point=position;var remaining=abs(dt);let direction=select(-1.0,1.0,dt>=0.0);

@@ -12,11 +12,11 @@ import type { UniformWorkEdit } from "./uniform-buffered-work";
 import type { SolverDetailFocus, SolverDetailInput } from "../../core/solver-detail";
 import { UniformMixedLayoutBuilder, UNIFORM_MIXED_RELAYOUT_RECEIPT } from "./uniform-mixed-layout-builder";
 import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, type UniformMixedDynamicPolicy } from "./uniform-mixed-dynamic";
-import { refinementRegionLattice } from "../../core/refinement-regions";
+import { fluidRegionLattice, refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
 import { uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
 import { UniformTexturePages } from "./uniform-texture-pages";
-import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_PIN_MARGIN, uniformPagePoolResidency, uniformPagePoolSourcePages, type UniformPagePoolCellBox, type UniformPagePoolResidency } from "./uniform-page-pool";
+import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_PIN_MARGIN, uniformPagePoolDropAhead, uniformPagePoolResidency, uniformPagePoolSourcePages, type UniformPagePoolCellBox, type UniformPagePoolResidency } from "./uniform-page-pool";
 import { uniformDensityPostProcessingEnabled } from "./uniform-options";
 export { uniformDensityPostProcessingEnabled } from "./uniform-options";
 import type { DenseLevelSetVolumeConsumerSource } from "../../core/levelset-consumer-abi";
@@ -26,7 +26,7 @@ import {
   UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE,
 } from "./uniform-volume.wgsl";
 import { createUniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
-import { uniformVolumeInitialPhi, uniformInitialVolume } from "./uniform-volume-initial";
+import { uniformLatticeFarPhi, uniformLatticeInitialPhi, uniformLatticeInitialVolume } from "./uniform-volume-initial";
 import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "../../core/inflow-boundary";
 import type { InitialLiquidSphere, SceneDescription, ScheduledLiquidDrop } from "../../core/model";
 import { liquidExtrusionBounds, liquidExtrusionEdges, liquidExtrusionVolume_m3, LIQUID_EXTRUSION_MAX_EDGES, type LiquidExtrusion } from "../../core/liquid-extrusion";
@@ -34,8 +34,9 @@ import { UNIFORM_PARAMS_BYTES, UNIFORM_PARAMS_HEAD_BYTES } from "./uniform-sourc
 import { planUniformHostAllocation } from "./uniform-host-allocation";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { UniformMixedBodies } from "./uniform-mixed-bodies";
+import { UniformBedSlopeBake } from "./uniform-bed-slope-bake";
 import { UniformPrescribedSolidMotion } from "./uniform-prescribed-solid-motion";
-import { sceneLatticeDimensions } from "../../core/scene-lattice";
+import { sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../../core/scene-lattice";
 import { planGPUAdvanceInto, type GPUAdvancePlan } from "../../core/tall-cell-diagnostics";
 import type { GPUQuality } from "../../core/gpu-quality";
 import { sceneHasTerrain } from "../../core/terrain";
@@ -75,8 +76,9 @@ import { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX
 export { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS } from "./parameters";
 import { uniformFixedAdvanceReady, uniformFixedStep_s } from "./uniform-paper";
 import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
-import { SOLID_OCCUPANCY_MASK_HEADER_WORDS, SolidOccupancyMask } from "../../core/solid-occupancy-mask";
-import { solidWorldForScene } from "../../core/solid-world";
+import { SolidOccupancyMask } from "../../core/solid-occupancy-mask";
+import { solidWorldForFluidLattice } from "../../core/solid-world";
+import { uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
 import { UniformDetailStorage, uniformDetailDenseShader, uniformDetailField, type UniformDetailClass } from "./uniform-detail-fields";
 
 
@@ -181,10 +183,11 @@ function uniformInjectedDrop(ball: InjectedLiquidBall): UniformLiquidDrop {
     : (4 / 3) * Math.PI * ball.radius_m ** 3 };
 }
 
-/** The cell boxes the scene's sources write liquid in: the nozzle's plug over
- * a step of `step_s`, and every scheduled drop's bounding ball. A live page
- * pool pins their pages. */
-function uniformPageSources(scene: SceneDescription, dims: readonly [number, number, number], plug: InflowGridBoundary | undefined, step_s: number): UniformPagePoolCellBox[] {
+/** The cell boxes the scene's sources write liquid in every step: the
+ * nozzle's plug over a step of `step_s`. A live page pool pins their pages.
+ * A drop, scheduled or injected, is not one: its pages are asked for around
+ * its own step (requestDropPages). */
+export function uniformPageSources(scene: SceneDescription, dims: readonly [number, number, number], plug: InflowGridBoundary | undefined, step_s: number): UniformPagePoolCellBox[] {
   const c = scene.container, size = [c.width_m, c.height_m, c.depth_m], low_m = [-0.5 * c.width_m, 0, -0.5 * c.depth_m];
   const box = (centre: readonly number[], end: readonly number[], radius_m: number): UniformPagePoolCellBox => ({
     low: [0, 1, 2].map(k => Math.floor((Math.min(centre[k]!, end[k]!) - radius_m - low_m[k]!) * dims[k]! / size[k]!)) as [number, number, number],
@@ -194,12 +197,15 @@ function uniformPageSources(scene: SceneDescription, dims: readonly [number, num
     const o = plug.outletCenter_m, d = plug.direction, reach = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z) * step_s;
     sources.push(box([o.x, o.y, o.z], [o.x + reach * d.x, o.y + reach * d.y, o.z + reach * d.z], inflow.radius_m));
   }
-  const cell_m = Math.min(size[0]! / dims[0], size[1]! / dims[1], size[2]! / dims[2]);
-  for (const { volume } of scene.fluid.scheduledDrops ?? []) {
-    const drop = uniformScheduledDrop(volume, cell_m), centre = [drop.centre_m.x, drop.centre_m.y, drop.centre_m.z];
-    sources.push(box(centre, centre, Math.max(drop.radius_m, drop.halfHeight_m ?? 0)));
-  }
   return sources;
+}
+
+/** The box page, on one axis, of the low (side < 0) or high face of a drop's
+ * bounding box of half-width `r_m` grown by UNIFORM_PAGE_POOL_PIN_MARGIN
+ * cells, kept inside the box's `pages`. */
+function uniformDropPage(centre_m: number, r_m: number, low_m: number, size_m: number, cells: number, pages: number, side: number): number {
+  const cell = side < 0 ? Math.floor((centre_m - r_m - low_m) * cells / size_m) - UNIFORM_PAGE_POOL_PIN_MARGIN : Math.ceil((centre_m + r_m - low_m) * cells / size_m) + UNIFORM_PAGE_POOL_PIN_MARGIN - 1;
+  return Math.min(Math.max(Math.floor(cell / UNIFORM_PAGE_POOL_EDGE), 0), pages - 1);
 }
 
 /** A scheduled volume in source form; `cell_m` sets how finely an outline's volume is measured. */
@@ -218,34 +224,6 @@ function uniformScheduledDrop(volume: InitialLiquidSphere | LiquidExtrusion, cel
     volume_m3: liquidExtrusionVolume_m3(volume, 0.25 * cell_m),
     outline, offset_m: volume.offset_m, halfDepth_m: volume.halfDepth_m, edgeRadius_m: volume.edgeRadius_m,
   };
-}
-
-/**
- * No cell of this lattice is covered by a static solid voxel.
- *
- * Only the lattice's own cells count. The mask also carries a one-cell halo,
- * and every box scene's container is compiled into that halo as a one-voxel
- * shell (solidVoxelShellForScene), so an OR over all its words refused the
- * certificate to every tank. No consumer can see the halo: cellOpenFraction
- * returns zero for any cell outside the lattice before it reads the mask, and
- * each E4 site either clamps into the lattice or skips invalid cells. The test
- * is one masked run of nx bits per interior (y, z) row. It is recomputed only
- * when `update` reports a dirty range -- a voxel stroke or a scene load --
- * never per step.
- */
-function uniformSolidMaskEmpty(mask: SolidOccupancyMask): boolean {
-  const words = mask.words;
-
-  const sx = words[1]!, sy = words[2]!, sz = words[3]!;
-  for (let z = 1; z < sz - 1; z += 1) for (let y = 1; y < sy - 1; y += 1) {
-    const first = sx * (y + sy * z) + 1, last = first + sx - 3;
-    for (let word = first >>> 5; word <= last >>> 5; word += 1) {
-      const low = Math.max(first, word << 5) & 31, high = Math.min(last, (word << 5) + 31) & 31;
-      const bits = (0xffffffff >>> (31 - high + low)) << low;
-      if ((words[SOLID_OCCUPANCY_MASK_HEADER_WORDS + word]! & bits) !== 0) return false;
-    }
-  }
-  return true;
 }
 
 /**
@@ -407,7 +385,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly initialDetailGroups: () => { authority: GPUBindGroup; publish: GPUBindGroup };
   private readonly shaderSource: string;
   private readonly groupDescriptors = new WeakMap<GPUBindGroup, GPUBindGroupDescriptor>();
-  private readonly pressureInputLayout: GPUBindGroupLayout;
   private readonly executionVolumeTexture: GPUTexture;
   get volumeTexture(): GPUTexture { return this.live(this.executionVolumeTexture); }
   get surfaceFieldTexture(): GPUTexture {
@@ -475,6 +452,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   get gridPressureOrigin(): readonly [number, number, number] { return [0, 0, 0]; }
   /** The page pool's published record: which box pages are stored, for the grid overlay's pages layer. */
   get volumePageSource() { return this.mixedFrame?.pagePool.volumePageSource; }
+  /** The bed-slope lane of the solid scratch (uniformSolidScratchLayout): `words` u32 from word `baseWord` of `buffer`. The bake writes it; a probe reads it back or zeroes it. */
+  get solidBedSlopeLane(): { buffer: GPUBuffer; baseWord: number; words: number } {
+    return { buffer: this.activeScratch, baseWord: this.solidBedSlopeBaseWord, words: this.solidBedSlopeWords };
+  }
   get physicsFieldsForQA(): {pressure:GPUTexture;gamma:GPUTexture;latticeOrigin:[number,number,number];latticeDimensions:[number,number,number]} {
     return { pressure: this.pressureMultigrid.pressureTexture, gamma: this.live(this.gammaA),
       latticeOrigin: [0, 0, 0],
@@ -510,13 +491,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly pressureMultigrid: WebGPUUniformPressureMultigrid;
   // Origin(3), capacity(3), mode(1).
   private readonly params: GPUBuffer;
-  private readonly solidCutMapOffsetWords: number;
+  private readonly solidBedSlopeBaseWord: number;
+  private readonly solidBedSlopeWords: number;
   private readonly reductions: GPUBuffer;
   private readonly conditioningScratch: GPUBuffer;
   /** The page table and block words the native kernels address through: a
    * mirror of the mixed frame's page pool, the seed's until then. */
   private readonly pages: GPUBuffer;
   private readonly activeScratch: GPUBuffer;
+  /** Writes the scratch's bed-slope lane from its voxel mask: whole at build, around an edit after it. */
+  private bedSlopeBake?: UniformBedSlopeBake;
   /** Distinct storage binding for the compile-time-disabled MacCormack audit.
    * WebGPU still validates writable binding aliasing even when the shader's
    * constant-false branch cannot execute. */
@@ -526,7 +510,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly mainLayout: GPUBindGroupLayout;
   private readonly mainPipelineLayout: GPUPipelineLayout;
   private readonly extrapolationAuthorityGroup: GPUBindGroup;
-  private readonly pressureMultigridGroup: GPUBindGroup;
   private readonly wallFilmResolveGroup: GPUBindGroup;
   private pipelines?: UniformReferencePipelines;
   private inflowBoundary?: InflowGridBoundary;
@@ -538,10 +521,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private pendingDrop?: InjectedLiquidBall;
   /** The drop this step adds: each census of the step asks the page pool for its pages. */
   private pageDrop?: UniformLiquidDrop;
+  /** The scheduled drop the next step adds (uniformPagePoolDropAhead): asked for with this step's, so its pages are stored when its own step's census runs. */
+  private pageDropAhead?: UniformLiquidDrop;
   /** The scene's stored set at build: which pages the address seeded and the pool pins. */
   private readonly pageResidency: UniformPagePoolResidency;
   /** The initial liquid the residency was computed from, held for the upload that follows it. */
-  private initialVolume?: ReturnType<typeof uniformInitialVolume>;
+  private initialVolume?: ReturnType<typeof uniformLatticeInitialVolume>;
+  /** The container's cells: what its extents are divided by for a cell's size. The lattice (executionInfo.nx, ny, nz) is these rounded up to whole pages. */
+  private readonly containerCells: readonly [number, number, number];
   /** The scene's scheduled drops in source form, built once per schedule. */
   private scheduledDrops?: { readonly schedule: readonly ScheduledLiquidDrop[]; readonly drops: readonly UniformLiquidDrop[] };
   private densityPostProcessing: boolean;
@@ -630,17 +617,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Metal skips its end-of-pass timestamp and the first sample retires
     // hardware tracing for this solver. Compile it long before the panel asks.
     void GPUStageTimestampRecorder.prepare(device);
-    const [nx, ny, nz] = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
+    const cells = this.containerCells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
+    // The lattice is the container's cells rounded up to whole pages; what it adds past the container's high faces is solid or air (solidWorldForFluidLattice).
+    const [nx, ny, nz] = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
     // Every stage addresses whole 4h tiles: a lattice that is not a multiple of four on each axis is refused here.
     // The one lattice address of the scene: its page pool's seed names what is stored, and every layout and stage is handed this object.
     this.inflowBoundary = scene.fluid.inflow
-      ? createInflowGridBoundary(scene.fluid.inflow, scene.container, [nx, ny, nz]) : undefined;
+      ? createInflowGridBoundary(scene.fluid.inflow, scene.container, cells) : undefined;
     this.detail = options.detail ?? uniformDetailSettings({});
     // The stored set at build (uniformPagePoolResidency): under the census of the Dynamic policy only the sources' pages are pinned.
     const residency = this.pageResidency = uniformPagePoolResidency([nx, ny, nz], scene.fluid.pagePool,
-      uniformPageSources(scene, [nx, ny, nz], this.inflowBoundary, Math.max(this.fixedStep_s ?? 0, scene.numerics.maxDt_s)), this.detail.policy === "dynamic",
-      () => (this.initialVolume = uniformInitialVolume(scene, [nx, ny, nz], true)).volume);
-    const address = this.address = uniformLatticeAddress([nx, ny, nz], scene.container.top === "open", { ...scene.fluid.pagePool, air: residency.air });
+      uniformPageSources(scene, cells, this.inflowBoundary, Math.max(this.fixedStep_s ?? 0, scene.numerics.maxDt_s)), this.detail.policy === "dynamic",
+      () => (this.initialVolume = uniformLatticeInitialVolume(scene)).volume);
+    // The lattice is a closed box: an open top is air in it above the container (sceneFluidLatticeDimensions), and no page is stored outside it.
+    const address = this.address = uniformLatticeAddress([nx, ny, nz], false, { ...scene.fluid.pagePool, air: residency.air });
     // The mixed-ownership frame owns every geometric advance, on native fields over the shared scratch arena.
     this.scratchArena = new UniformScratchArena(device, address, address.boxCells*UNIFORM_VOLUME_EDGE_BYTES,options.retainStageDiagnosticsForQA,undefined,uniformMixedPressureRootBytes(address));
     this.fieldPages = new UniformTexturePages(device, this.scratchArena);
@@ -663,8 +653,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // fine tile. The FIM's accurate band is two of the LARGEST cells, so on an
     // anisotropic lattice it spans 2*max(h)/min(h) of the smallest; the shell
     // must contain that too, measured from a seed tile's own boundary.
-    const spacing = [scene.container.width_m / nx, scene.container.height_m / ny,
-      scene.container.depth_m / nz];
+    const spacing = [scene.container.width_m / cells[0], scene.container.height_m / cells[1],
+      scene.container.depth_m / cells[2]];
     this.twoLevelShellReach = Math.max(1, Math.ceil(0.5 * Math.max(...spacing) / Math.min(...spacing)));
     const allocation = planUniformHostAllocation(address, "maccormack");
     this.executionNegativeBoundaryVelocityBytes = allocation.boundaryVelocityBytes;
@@ -676,8 +666,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Geometric h fields come from the detail storage, registered with the
     // page layer by their logical dims; their bytes are the storage's (refreshMixedAllocation).
     const detailStorage = this.detailStorage = new UniformDetailStorage(device, address);
-    // Vertex phi where nothing is stored: the initial level set's value far from liquid (initialLiquidVertexPhi).
-    const emptyPhi = Math.max(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
+    // Vertex phi where nothing is stored: the initial level set's value far from liquid (uniformLatticeInitialPhi).
+    const emptyPhi = uniformLatticeFarPhi(scene);
     const field = (label: string, kind: UniformDetailClass) =>
       this.fieldPages.adopt(detailStorage.createField(label, kind, kind === "face" ? "rgba32float" : "r32float", false, kind === "vertex" ? emptyPhi : 0), kind === "vertex" ? address.vertexBox : address.cells);
     const hVelocity = (label: string) => field(label, "face");
@@ -713,7 +703,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if (edgeBytes > device.limits.maxStorageBufferBindingSize || edgeBytes > device.limits.maxBufferSize)
         throw new Error(`Uniform Geometric receiver stencils require ${edgeBytes} bytes, exceeding the device limit`);
       this.executionDenseLevelSetVolumeSource = { vertexPhi: this.vertexPhiField, openFraction: this.gammaB,
-        cellSize_m: [scene.container.width_m/nx, scene.container.height_m/ny, scene.container.depth_m/nz] };
+        cellSize_m: [scene.container.width_m/cells[0], scene.container.height_m/cells[1], scene.container.depth_m/cells[2]] };
     }
     this.heightA = device.createTexture({ label: "Uniform reference column base", size: [nx, nz], format: "rg32float", usage });
     this.heightB = device.createTexture({ label: "Uniform reference column occupancy", size: [nx, nz], format: "rg32float", usage });
@@ -725,27 +715,33 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.transportB = this.fieldPages.createTexture({ label: "Uniform reference transport B", size: lazyMac ? [1,1,1] : allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
 
     this.params = device.createBuffer({ label: "Uniform reference parameters", size: UNIFORM_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-    this.solidMask = new SolidOccupancyMask([nx, ny, nz]);
-    this.solidMask.update(solidWorldForScene(scene));
-    this.solidVoxelsEmpty = uniformSolidMaskEmpty(this.solidMask);
-    const packedSolidVoxels = this.solidMask.words;
+    this.solidMask = new SolidOccupancyMask(uniformSolidMaskPages(address));
+    this.solidMask.update(solidWorldForFluidLattice(scene));
+    // No cell off the lattice's walls is solid: a tank's shell lies in wall pages and is not counted.
+    this.solidVoxelsEmpty = this.solidMask.empty;
     this.pages = device.createBuffer({ label: "Uniform reference page table", size: address.seed.tail.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.pages, 0, address.seed.tail);
-    // The packed solid voxel mask from word 0, then from the next 64-word
-    // boundary the mixed solid library's tile cut map, one word per tile by box
-    // index (UniformMixedSolidResources.cutMapOffsetWords); all cut until built.
-    // staticSolidVoxelOccupied, umSolidVoxel and umSolidTileClear hold the
-    // same two offsets.
-    this.solidCutMapOffsetWords = Math.ceil(packedSolidVoxels.length / 64) * 64;
+    // The solid mask's image whole (SolidOccupancyMask): the page directory,
+    // the bed-slope lane (two bytes a haloed cell, zero until the frame's bake
+    // writes it at its build: every bed level; see bedSlopeBake), the mixed
+    // solid library's tile cut map, one word per tile key and all cut until
+    // built, and the page slots. uniformSolidScratchLayout has the lane's and
+    // the cut map's offsets, as umBedSlope and umSolidCutMap derive them. Sized
+    // once; a voxel edit uploads the directory words and the slots it rewrote,
+    // so the lane keeps its place and its size.
+    const solidScratch = uniformSolidScratchLayout([nx, ny, nz]);
+    this.solidBedSlopeBaseWord = solidScratch.bedSlopeBaseWord;
+    this.solidBedSlopeWords = solidScratch.bedSlopeWords;
     this.activeScratch = device.createBuffer({
-      label: "Uniform reference solid voxel mask and tile cut map",
-      size: 4 * (this.solidCutMapOffsetWords + address.boxTiles),
+      label: "Uniform reference solid page mask, bed-slope lane and tile cut map",
+      size: this.solidMask.words.byteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(this.activeScratch, 0,
-      packedSolidVoxels.buffer as ArrayBuffer, packedSolidVoxels.byteOffset,
-      packedSolidVoxels.byteLength);
-    device.queue.writeBuffer(this.activeScratch, 4 * this.solidCutMapOffsetWords, new Uint32Array(address.boxTiles).fill(1));
+    // Around the lane: the buffer's zeros are the lane's until the bake, and
+    // the host's copy of those words is never touched.
+    const solidImage = this.solidMask.layout;
+    device.queue.writeBuffer(this.activeScratch, 0, this.solidMask.words, 0, solidImage.lane);
+    device.queue.writeBuffer(this.activeScratch, 4 * solidImage.cutMap, this.solidMask.words, solidImage.cutMap);
     const source = createUniformReferenceComputeShader();
     const fixedFields = new Map([
       [0,this.velocityA],[1,this.velocityB],[3,this.pressureB],[4,this.volumeA],[5,this.volumeB],
@@ -757,7 +753,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const nativeBindings = new Set([0,1,2,3,4,5,12,13,14,16,20,21,24,25,31,32]);
     this.shaderSource = this.fieldPages.shader(source,fixedFields,true,nativeBindings);
     this.conditioningScratch = device.createBuffer({ label: "Uniform reference compatibility scratch", size: this.scratchArena.conditioningBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(device, [nx, ny, nz], this.params);
+    this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(device, this.address, this.params);
     // Without a ceil(n/4) hierarchy level there is no 4h field to sample.
     if (!this.velocityExtrapolator.coarseVelocityTableAvailable) this.twoLevelTileCount = 0;
     if (this.twoLevelTileCount === 0) this.twoLevelVelocity = false;
@@ -777,7 +773,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     });
     this.rigidExchange = device.createBuffer({ label: "Uniform reference rigid exchange", size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.rigidSystem = new WebGPURigidBodySystem(device, scene, this.rigidExchange,
-      this.terrainTexture);
+      this.terrainTexture, [cells[0], cells[2]]);
     const initialRigidBodies = initializeRigidBodies(scene.rigidBodies);
     this.prescribedSolidMotion.sample(initialRigidBodies, 0);
     this.rigidSystem.syncBodies(initialRigidBodies);
@@ -818,15 +814,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     ];
     mainEntries.push(...this.fieldPages.layout([]));
     this.mainLayout = device.createBindGroupLayout({ entries: mainEntries });
-    this.pressureInputLayout = device.createBindGroupLayout({
-      entries: mainEntries.filter(e => e.binding !== 32 && e.binding !== 28),
-    });
-    this.pressureMultigrid = new WebGPUUniformPressureMultigrid(device, [nx, ny, nz], [
-      scene.container.width_m / nx,
-      scene.container.height_m / ny,
-      scene.container.depth_m / nz,
-    ], this.pressureSchedule,
-      scene.container.depthBoundary !== "symmetry", this.fieldPages, this.params);
+    this.pressureMultigrid = new WebGPUUniformPressureMultigrid(this.pressureSchedule,
+      scene.container.depthBoundary !== "symmetry", this.fieldPages);
     this.mainPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.mainLayout] });
     const sampler = device.createSampler({ minFilter: "linear", magFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
     let physicalViews = false;
@@ -837,8 +826,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       reversed = velocityIn, transport = this.transportA, surface = volumeIn,
       gammaRead = this.gammaA, gammaWrite = this.gammaB,
       boundaryRead = this.boundaryVelocityA, boundaryWrite = this.boundaryVelocityB,
-      velocityPhase = volumeIn, reversePhi = false, pressureOnly = false) => this.createPageAwareGroup({
-        layout: pressureOnly ? this.pressureInputLayout : this.mainLayout, entries: ([
+      velocityPhase = volumeIn, reversePhi = false) => this.createPageAwareGroup({
+        layout: this.mainLayout, entries: ([
           ...([
             { binding: 31, resource: view((reversePhi ? this.vertexPhiScratch! : this.vertexPhiField!)) },
             { binding: 32, resource: view((reversePhi ? this.vertexPhiField! : this.vertexPhiScratch!)) },
@@ -859,16 +848,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           { binding: 28, resource: { buffer: this.macCormackAuditBinding } },
           { binding: 29, resource: { buffer: this.pages } },
           { binding: 30, resource: { buffer: this.activeScratch } },
-        ] as GPUBindGroupEntry[]).filter(e => !pressureOnly || (e.binding !== 32 && e.binding !== 28)),
+        ] as GPUBindGroupEntry[]),
       });
-    // Pressure setup and projection never read the reverse-advection slot, so
-    // under Geometric it carries this advance's V_face authority instead.
-    const sharedFaceOpen = this.velocityD;
     this.extrapolationAuthorityGroup = group(
       this.velocityA, this.velocityD, this.pressureA, this.pressureB,
       this.volumeA, this.surfaceA, this.heightB, this.heightA,
     );
-    this.pressureMultigridGroup = group(this.velocityB, this.velocityA, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityB, sharedFaceOpen, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityB, this.boundaryVelocityA, this.volumeB, false, true);
     this.wallFilmResolveGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.surfaceB, this.heightB, this.heightA);
     // Packed detail storage: the two t=0 kernels' groups over the fields'
     // physical textures, built at each use (the atlas may have grown).
@@ -888,14 +873,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // which that plan does not include. Scratch backing is reconciled below.
     const hostAuxiliaryBytes = this.velocityExtrapolator.scratchBytes - count*4 + nx*nz*20;
     this.executionInfo = {
-      nx, ny, nz, storedNy: ny, cellCount: count, equivalentUniformCells: count,
+      nx, ny, nz, tankCells: cells, storedNy: ny, cellCount: count, equivalentUniformCells: count,
       compressionRatio: 1, activeCompressionRatio: 1, activeSampleCount: count,
       regularLayers: ny, maximumNeighborDelta: 0, gridKind: "uniform",
-      cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
+      cellSize_m: Math.min(scene.container.width_m / cells[0], scene.container.height_m / cells[1], scene.container.depth_m / cells[2]),
       pressureIterations: 0, pressureSolver: `CM11a LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post ${"projected Jacobi; V-first adaptive"})`,
       allocatedBytes: allocation.allocatedBytes - (count*8-8) - (allocation.conditioningBytes-this.scratchArena.conditioningBytes) - (lazyMac ? count*16+(nx+2)*(ny+2)*(nz+2)*16-32 : 0) - ((nx+2)*(ny+2)*(nz+2)*16-16+allocation.boundaryVelocityBytes-16) + 8 + this.pressureMultigrid.allocatedBytes
         + (8 * address.vertexKeys + 12)
-        + this.pages.size + packedSolidVoxels.byteLength
+        + this.pages.size + this.solidMask.words.byteLength
         + hostAuxiliaryBytes + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
@@ -1039,7 +1024,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedSolidPromotion(){
     const terrain=sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined,held=this.mixedSolidTiles;
     if(held&&held.stamp===this.mixedSolidMaskStamp&&held.terrain===terrain)return held.tiles;
-    const solid=uniformMixedSolidTiles(refinementRegionLattice(this.scene).dimensions as [number,number,number],this.solidMask.words,SOLID_OCCUPANCY_MASK_HEADER_WORDS,terrain);
+    const solid=uniformMixedSolidTiles(fluidRegionLattice(this.scene).dimensions as [number,number,number],this.solidMask,terrain);
     const tiles={...solid,any:solid.coupled.some(c=>c!==0)};
     this.mixedSolidTiles={stamp:this.mixedSolidMaskStamp,terrain,tiles};
     return tiles;
@@ -1048,40 +1033,52 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private async initializeMixedFrame():Promise<void>{
     this.assertMixedOptions();
     if(!this.vertexPhiField||!this.vertexPhiScratch)throw new Error("Mixed Uniform requires the shared native field arena");
-    const fine=createUniformMixedLayout(refinementRegionLattice(this.scene),[],1,undefined,this.address);
+    const fine=createUniformMixedLayout(fluidRegionLattice(this.scene),[],1,undefined,this.address);
     const promotion=this.mixedSolidPromotion();
-    this.mixedSolidWords=this.solidMask.words.slice();
     const detail=this.detailStorage!;
     const pressureGeometry={target:detail.createField("Uniform mixed pressure surface target","cell","r32float",true),centerPhi:detail.createField("Uniform mixed pressure centre phi","cell","r32float",true)};
     this.mixedPressureGeometry=pressureGeometry;
     // Host layouts (Requested, Full) reserve their own h tiles, starting from
-    // none; Dynamic holds every tile until its census is bounded. No byte
-    // budget is passed: WebGPU reports no device memory, so only the
-    // device's buffer limits refuse a reservation (UniformMixedFrameCapacity).
-    const tiles=this.address.boxTiles,gpuLayout=this.detail.policy==="dynamic";
+    // none; Dynamic holds every tile its page pool can store
+    // (address.poolTiles), paid here for the run: no generation has more h
+    // tiles than that, so its capacity never moves. No byte budget is
+    // passed: WebGPU reports no device memory, so only the device's buffer
+    // limits refuse a reservation (UniformMixedFrameCapacity).
+    const tiles=this.address.poolTiles,gpuLayout=this.detail.policy==="dynamic";
     const solids=!this.solidVoxelsEmpty||sceneHasTerrain(this.scene),bodies=this.scene.rigidBodies.length;
     this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?tiles:0,liquidBand:gpuLayout},{
       arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
       phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,
-      pressure:this.pressureMultigrid.prepareMixedContinuation(),extension:this.velocityExtrapolator.prepareMixedContinuation(),uniformGroup:this.pressureMultigridGroup,sourceParams:this.params,
+      pressure:this.pressureMultigrid.prepareMixedContinuation(),extension:this.velocityExtrapolator.prepareMixedContinuation(),sourceParams:this.params,
       // Live edits and rigid bodies share the pipelines built at setup.
-      solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.reduce((n,c)=>n+c,0),cutMapOffsetWords:this.solidCutMapOffsetWords,paramsWritten:()=>this.paramsWritten},
+      solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.reduce((n,c)=>n+c,0),paramsWritten:()=>this.paramsWritten},
       pressureGeometry,detail,pages:{buffer:this.pages,offset:0},residency:this.pageResidency,
-    },this.scene.container.top==="open",this.pressureSchedule);
+    },this.address.openTop,this.pressureSchedule);
     this.mixedFrame.solid!.present=solids||bodies>0;
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
     // The scene uniform: the census marks this frame's drop and inflow plug band on the GPU.
     this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles);
-    this.mixedFrame.registerPageOwner(this.mixedDynamic);
+    this.mixedFrame.registerPageOwner(this.mixedDynamic);this.mixedFrame.registerCertificate(this.mixedDynamic);
     this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership);
     this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange});
+    // The frame's forces and its samples read the bed-slope lane; the bake is
+    // its only writer. Built with the frame whether or not the scene has a
+    // voxel yet: an edit may add the first.
+    const bedSlopeBake=new UniformBedSlopeBake(this.device,this.activeScratch,{size:[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz],laneBaseWord:this.solidBedSlopeBaseWord});
     // One concurrent compile: serial stages left a first load waiting on
     // each uncached pipeline in turn.
     const dynamic=this.mixedDynamic,builder=this.mixedBuilder,mixedBodies=this.mixedBodies;
     await settleGPUInitialization([this.mixedFrame.initialize(),this.mixedDiagnostics.initialize(),
-      dynamic.initialize(),builder.initialize(),mixedBodies.initialize()]);
+      dynamic.initialize(),builder.initialize(),mixedBodies.initialize(),bedSlopeBake.initialize()]);
+    // The lane of the mask the scratch holds, before the first frame reads
+    // it. An edit taken up while the pipelines compiled is in that mask; one
+    // from here on re-bakes around itself (applySceneUniforms).
+    const bedSlope=this.device.createCommandEncoder({label:"Uniform bed-slope bake"});
+    bedSlopeBake.encode(bedSlope);this.device.queue.submit([bedSlope.finish()]);
+    this.bedSlopeBake=bedSlopeBake;
+    this.executionInfo.allocatedBytes+=bedSlopeBake.scratchBytes;
     this.mixedFrame.setLayoutViews(this.layoutViews);
     this.mixedAccountedBytes=this.mixedFrame.allocatedBytes;this.watchMixedAllocation();
     this.executionInfo.allocatedBytes+=this.mixedAccountedBytes+this.mixedDynamic.allocatedBytes+this.mixedBuilder.allocatedBytes+(this.mixedBodies?.allocatedBytes??0);
@@ -1208,7 +1205,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * Dynamic's start (Coarse regions at 4h, solid contact at h). Returns the
    * frame's refusal, with nothing changed. */
   private hostMixedLayout(mask?:Uint8Array):string|undefined{
-    const started=performance.now(),lattice=refinementRegionLattice(this.scene),regions=this.scene.fluid.refinementRegions??[];
+    const started=performance.now(),lattice=fluidRegionLattice(this.scene),regions=this.scene.fluid.refinementRegions??[];
     let layout;
     if(mask){
       const snapped=regions.flatMap(r=>{const box=uniformDetailTileBounds(lattice,{min:r.min_m,max:r.max_m});return box?[{id:r.id,...box}]:[];});
@@ -1242,7 +1239,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * under another solid mask or contact setting. True: a tile or the solid
    * mask moved, so the layout a build would give did. */
   private setMixedRequest(input:NonNullable<WebGPUUniformReferenceSolver["mixedRequest"]>["input"]):boolean{
-    let request=this.mixedRequest;const lattice=refinementRegionLattice(this.scene),held=request?.tiles.lattice;
+    let request=this.mixedRequest;const lattice=fluidRegionLattice(this.scene),held=request?.tiles.lattice;
     // Another lattice names other tiles: its request starts empty.
     if(!request||!held||JSON.stringify(held)!==JSON.stringify(lattice)){const tiles=new UniformDetailRequestTiles(lattice);request=this.mixedRequest={tiles,mask:new Uint8Array(tiles.tiles),count:0,input:{requests:[]},moved:[]};}
     const {mask,tiles,moved}=request,{entered,left}=tiles.set(input.requests),forced=input.solid?.forced,solids=forced!==request.input.solid?.forced;
@@ -1285,9 +1282,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           const refusal=this.hostMixedLayout();if(refusal)throw new Error(`Uniform simulation detail: ${refusal}`);
           this.publishDetail(this.planDetail());
         }
-        // Every tile at the attach: frame 1's head runs on the all-h start,
-        // and a census's first build may ask for any tile. The receipts
-        // return what it does not use.
+        // Every tile the pool can store at the attach: frame 1's head runs
+        // on the all-h start, and a census's build may ask for any stored
+        // tile.
         frame.setRelayout(this.mixedRelayout());this.watchMixedAllocation();
         this.mixedGpuLayout=true;this.mixedCensus=true;this.mixedRequest=undefined;this.resetMixedCapacity();
         this.mixedBuilderStaticKey=undefined;this.mixedBuilderStaticOf=undefined;this.mixedRegionKey="";this.mixedRefusedKey="";this.mixedLive=false;this.mixedSynced=undefined;this.mixedEditJoin=undefined;
@@ -1303,8 +1300,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const swept=bodies.length?this.mixedBodyTiles(bodies,dt):undefined,joined=this.mixedEditJoin?.tiles;
       let extra=this.mixedStaticsAdded?.tiles??0;
       if(swept||joined)for(let t=0;t<tiles;t++)if(swept?.[t]||joined?.[t])extra++;
-      // A census with nowhere to grow has no generation to fall back to.
-      const refusal=this.followMixedCapacity(tiles,extra,true,true);
+      // The bound is the capacity the attach reserved, every tile the pool
+      // can store: nothing grows here. A census has no generation to fall
+      // back to.
+      const refusal=this.followMixedCapacity(this.address.poolTiles,extra,true,true);
       if(refusal)throw new Error(`Uniform simulation detail: ${refusal}`);
       return true;
     }
@@ -1459,14 +1458,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * tiles newly planned), held above what the receipts count. live: the
    * liquid moves the need (a census), so the capacity keeps the rule's
    * headroom over the last receipt (UniformDetailCapacityRule). Growth is
-   * between frames (reserveFine). The rule holds what it reserved: the
-   * capacity never returns.
+   * between frames (reserveFine) and stops at address.poolTiles: a build
+   * marks h only where a tile is stored, so none asks for more. Dynamic's
+   * attach reserves that much, so under it nothing here grows. The rule
+   * holds what it reserved: the capacity never returns.
    * Returns the device's refusal of a growth, with nothing changed. */
   private followMixedCapacity(bound:number,extra:number,live:boolean,liquidBand:boolean):string|undefined{
-    const frame=this.mixedFrame!,rule=this.mixedCapacityRule,T=this.address.boxTiles,held=frame.ownership.capacity.fineTiles;
+    const frame=this.mixedFrame!,rule=this.mixedCapacityRule,T=this.address.poolTiles,held=frame.ownership.capacity.fineTiles;
     const needs=this.mixedNeeds,last=Math.max(needs.length?needs[needs.length-1]!:0,this.mixedDeferredNeed);
     // What must fit now, and what a growth reserves.
-    const must=Math.max(bound,this.mixedDeferredNeed,live?Math.min(T,this.grownMixedTiles(last)+extra):0);
+    const must=Math.max(Math.min(T,bound),this.mixedDeferredNeed,live?Math.min(T,this.grownMixedTiles(last)+extra):0);
     if(must>held){
       const want=Math.max(must,live?Math.min(T,Math.min(T,this.roomedMixedTiles(last)+extra)+rule.floorTiles):0);
       this.watchMixedAllocation();
@@ -1481,7 +1482,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.admitMixed(admission,!live&&!liquidBand&&bound<=admission);
     return undefined;
   }
-  /** The builder's admission capacity. A capacity of every tile admits anything: no admit launch.
+  /** The builder's admission capacity. A capacity of every tile the pool can store admits anything: no admit launch.
    * fits: it holds everything a host-counted request asks, so the build under it moves no tile (a zero edit). */
   /** ceil((1 + grow) need) and ceil((1 + headroom) need) of the capacity rule,
    * each kept for the need it last answered: the product is a heap number
@@ -1497,7 +1498,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedGrownNeed=-1;private mixedGrown=0;private mixedRoomedNeed=-1;private mixedRoomed=0;
   private admitMixed(tiles?:number,fits=false):void{
     const frame=this.mixedFrame!,capacity=frame.ownership.capacity;
-    if(tiles!==this.mixedReserved){this.mixedBuilder!.setAdmission(tiles===undefined||tiles>=capacity.address.boxTiles?undefined:tiles);this.mixedReserved=tiles;this.staleMixed(fits?{tiles:0,reach:0}:undefined);}
+    if(tiles!==this.mixedReserved){this.mixedBuilder!.setAdmission(tiles===undefined||tiles>=capacity.address.poolTiles?undefined:tiles);this.mixedReserved=tiles;this.staleMixed(fits?{tiles:0,reach:0}:undefined);}
     this.publishMixedCapacity();
   }
   private publishMixedCapacity():void{
@@ -1510,9 +1511,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Plan detail for the current policy, regions and latest focus at the
    * accepted step, and commit it (the planner's automatic state advances). */
   private planDetail():UniformDetailPlan{
-    const lattice=refinementRegionLattice(this.scene),planner=this.detailPlanner??=new UniformDetailPlanner(lattice);
+    const lattice=fluidRegionLattice(this.scene),planner=this.detailPlanner??=new UniformDetailPlanner(lattice);
     const focus=this.detailFocusPending,step=this.detailAcceptedStep;
-    const set=buildUniformDetailRequests({settings:this.detail,regions:this.scene.fluid.refinementRegions??[],domain:uniformDetailDomain(lattice),acceptedStep:step,focus});
+    const set=buildUniformDetailRequests({settings:this.detail,regions:this.scene.fluid.refinementRegions??[],domain:uniformDetailDomain(refinementRegionLattice(this.scene)),acceptedStep:step,focus});
     const plan=planner.plan({requests:set.requests,suppressions:set.suppressions,automaticSources:set.automaticSources,acceptedStep:step,budgetPercent:this.detail.budgetPercent});
     planner.commit(plan);
     const suppressed=new Uint8Array(planner.tiles);
@@ -1610,14 +1611,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(applied){this.mixedCensusSceneRevision=this.sceneRevision;gravity[0]=g.x;gravity[1]=g.y;gravity[2]=g.z;}
       const policy=this.mixedCensusPolicy??={dt,steps:1,gravity,reach:this.detail.marginTiles,hysteresis:0,
         surfaceTolerance:importance.shapeTolerance,fastTravel:0,importance,
-        boundaryTravel:importance.impactTravel,closedWalls:this.scene.container.top==="open"?0b101111:0b111111,up:Math.sign(-g.y),
+        boundaryTravel:importance.impactTravel,up:Math.sign(-g.y),
         fullTolerance:UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE,emptyTolerance:Math.max(0,1e-6),reasons:views};
-      policy.dt=dt;policy.reach=this.detail.marginTiles;policy.closedWalls=this.scene.container.top==="open"?0b101111:0b111111;policy.reasons=views;
+      policy.dt=dt;policy.reach=this.detail.marginTiles;policy.reasons=views;
       if(applied)policy.up=Math.sign(-g.y);
       if(policy.importance!==importance){policy.importance=importance;policy.surfaceTolerance=importance.shapeTolerance;policy.boundaryTravel=importance.impactTravel;}
       dynamic.encode(encoder,policy,false);
-      // The census listed its certificate's pages: the commit stores them, and this step's drop's, before any stage of the generation reads a block.
+      // The census listed its certificate's pages: the commit stores them, this step's drop's and the next step's scheduled drop's, before any stage of the generation reads a block.
       if(this.pageDrop)this.requestDropPages(this.pageDrop);
+      if(this.pageDropAhead)this.requestDropPages(this.pageDropAhead);
       this.mixedFrame!.encodePageCommit(encoder);
       this.mixedFrame?.narrowBandFlip?.activity(encoder,dynamic.importance,dt,this.narrowBandAdaptiveFadeSeconds);
       builder.encode(encoder);
@@ -1716,9 +1718,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }
     return tiles;
   }
-  /** The solid mask as the mixed frame last saw it, to find the tiles a live edit touched. */
-  private mixedSolidWords?:Uint32Array;
-  /** A live voxel edit on the mixed path. The frame's solid kernels read the
+  /** A live voxel edit on the mixed path, as the tiles the mask reported
+   * while it folded the edit (uniformMixedSolidEdit). The frame's solid kernels read the
    * host mask directly; here every tile within one cell of a changed voxel
    * (and the solid-coupled tiles around it, liquid-conditional promotion's
    * rule) joins the next census's band (a GPU join), which the frame head
@@ -1726,19 +1727,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * layout takes the edit through its request instead (the caller's
    * syncMixedLayout): the solid mask of the next census, when contact is
    * requested, and cut 4h owners otherwise. */
-  private editMixedSolids(dirty:{firstWord:number;wordCount:number}):void{
-    const frame=this.mixedFrame!,words=this.solidMask.words,previous=this.mixedSolidWords!;
-    const dimensions=refinementRegionLattice(this.scene).dimensions as [number,number,number];
-    const touched=this.mixedSolidTouched??=new Uint8Array(this.address.boxTiles);
-    const edit=uniformMixedSolidEdit(dimensions,words,previous,SOLID_OCCUPANCY_MASK_HEADER_WORDS,dirty,touched);
+  private editMixedSolids(edit:ReturnType<typeof uniformMixedSolidEdit>):void{
+    const frame=this.mixedFrame!,touched=this.mixedSolidTouched!;
+    const dimensions=fluidRegionLattice(this.scene).dimensions as [number,number,number];
     try{
-      previous.set(words.subarray(dirty.firstWord,dirty.firstWord+dirty.wordCount),dirty.firstWord);
       // The promotion held for the mask before this edit (the caller has
       // stamped the edited one) follows it by the touched tiles. A first
       // build or another terrain is the lattice scan (mixedSolidPromotion).
       const terrain=sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined,promotion=this.mixedSolidTiles;
       if(promotion&&promotion.stamp===this.mixedSolidMaskStamp-1&&promotion.terrain===terrain){
-        const solid=uniformMixedSolidTilesAfterEdit(promotion.tiles,dimensions,words,SOLID_OCCUPANCY_MASK_HEADER_WORDS,edit,terrain);
+        const solid=uniformMixedSolidTilesAfterEdit(promotion.tiles,dimensions,this.solidMask,edit,terrain);
         this.mixedSolidTiles={stamp:this.mixedSolidMaskStamp,terrain,tiles:{...solid,any:solid.coupledTiles>0}};
       }
       if(this.mixedGpuLayout&&this.detail.policy==="dynamic"){
@@ -1866,14 +1864,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     tasks.push({
       id: multigridReadyId,
       phase: "solver-pipelines",
-      label: "Compile CM11a LCP multigrid programs",
-      run: async () => {
-        await this.pressureMultigrid.initialize({
-          uniformBindGroupLayout: this.pressureInputLayout,
-          signal,
-        });
-        this.publishUniformPipelineFacts();
-      },
+      label: "Publish the uniform pipeline's facts",
+      run: () => { this.publishUniformPipelineFacts(); },
     });
     tasks.push({ id: "uniform.surface.initial", phase: "upload", label: "Reconstruct smooth t=0 surface", dependencies: [pipelineReadyId, extrapolationReadyId, multigridReadyId], run: () => { this.executionInfo.allocatedBytes += this.fieldPages.allocationOverheadBytes; if (!packed) this.encodeInitialPresentationSurface(); } });
     tasks.push({ id: "uniform.warmup", phase: "warmup", label: "Fence uniform t=0 uploads", dependencies: ["uniform.surface.initial"], run: async () => { await this.device.queue.onSubmittedWorkDone(); } });
@@ -1929,9 +1921,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       f[0] = this.executionInfo.nx;
       f[1] = this.executionInfo.ny;
       f[2] = this.executionInfo.nz;
-      f[4] = width / this.executionInfo.nx;
-      f[5] = height / this.executionInfo.ny;
-      f[6] = depth / this.executionInfo.nz;
+      f[4] = width / this.containerCells[0];
+      f[5] = height / this.containerCells[1];
+      f[6] = depth / this.containerCells[2];
       f[7] = this.scene.fluid.gravity_m_s2.y;
       f[8] = width;
       f[9] = height;
@@ -1947,7 +1939,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       f[25] = inflow?.velocity_m_s.y ?? 0;
       f[26] = inflow?.velocity_m_s.z ?? 0;
       f[27] = this.inflowBoundary?.apertureScale ?? 0;
-      f[30] = c.fillFraction * this.executionInfo.ny;
+      f[30] = c.fillFraction * this.containerCells[1];
     }
     f[3] = dt;
     f[11] = sceneHasTerrain(this.scene) ? 1 : 0;
@@ -1958,7 +1950,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     f[15] = 0;
     f[17] = c.fluidWallMode === "no-slip" ? 1 : 0;
     f[18] = activeBodyCount;
-    f[19] = c.top === "open" ? 1 : 0;
+    f[19] = this.address.openTop ? 1 : 0;
     f[28] = inflowStrength;
     f[29] = volumeCells;
     f[31] = 4;
@@ -2022,15 +2014,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (drop?.outline) this.device.queue.writeBuffer(this.params, UNIFORM_PARAMS_HEAD_BYTES + 16, drop.outline);
   }
 
-  /** Queue the pool pages a drop's bounding box touches (grown as a pinned source's is) for the next page commit. */
+  /** Queue the pool pages a drop's bounding box touches (grown as a pinned source's is) for the next page commit. Allocates nothing. */
   private requestDropPages(drop: UniformLiquidDrop): void {
-    const pool = this.mixedFrame!.pagePool, c = this.scene.container, info = this.executionInfo, E = UNIFORM_PAGE_POOL_EDGE, pad = UNIFORM_PAGE_POOL_PIN_MARGIN;
+    const pool = this.mixedFrame!.pagePool, c = this.scene.container, cells = this.containerCells;
     const r = Math.max(drop.radius_m, drop.halfHeight_m ?? 0), last = pool.layout.box.pages;
-    const page = (centre_m: number, low_m: number, size_m: number, cells: number, pages: number, side: number) =>
-      Math.min(Math.max(Math.floor((side < 0 ? Math.floor((centre_m - r - low_m) * cells / size_m) - pad : Math.ceil((centre_m + r - low_m) * cells / size_m) + pad - 1) / E), 0), pages - 1);
-    const x0 = page(drop.centre_m.x, -0.5 * c.width_m, c.width_m, info.nx, last[0], -1), x1 = page(drop.centre_m.x, -0.5 * c.width_m, c.width_m, info.nx, last[0], 1);
-    const y0 = page(drop.centre_m.y, 0, c.height_m, info.ny, last[1], -1), y1 = page(drop.centre_m.y, 0, c.height_m, info.ny, last[1], 1);
-    const z0 = page(drop.centre_m.z, -0.5 * c.depth_m, c.depth_m, info.nz, last[2], -1), z1 = page(drop.centre_m.z, -0.5 * c.depth_m, c.depth_m, info.nz, last[2], 1);
+    const x0 = uniformDropPage(drop.centre_m.x, r, -0.5 * c.width_m, c.width_m, cells[0], last[0], -1), x1 = uniformDropPage(drop.centre_m.x, r, -0.5 * c.width_m, c.width_m, cells[0], last[0], 1);
+    const y0 = uniformDropPage(drop.centre_m.y, r, 0, c.height_m, cells[1], last[1], -1), y1 = uniformDropPage(drop.centre_m.y, r, 0, c.height_m, cells[1], last[1], 1);
+    const z0 = uniformDropPage(drop.centre_m.z, r, -0.5 * c.depth_m, c.depth_m, cells[2], last[2], -1), z1 = uniformDropPage(drop.centre_m.z, r, -0.5 * c.depth_m, c.depth_m, cells[2], last[2], 1);
     for (let z = z0; z <= z1; z++) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) pool.request(x, y, z);
   }
 
@@ -2042,7 +2032,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const schedule = this.scene.fluid.scheduledDrops;
     if (!schedule) return undefined;
     if (this.scheduledDrops?.schedule !== schedule) {
-      const c = this.scene.container, { nx, ny, nz } = this.executionInfo;
+      const c = this.scene.container, [nx, ny, nz] = this.containerCells;
       const cell_m = Math.min(c.width_m / nx, c.height_m / ny, c.depth_m / nz);
       this.scheduledDrops = { schedule, drops: schedule.map(({ volume }) => uniformScheduledDrop(volume, cell_m)) };
     }
@@ -2085,7 +2075,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (edit.operation !== "add" || edit.shape !== "ball") {
       return { accepted: false, reason: "This fluid method adds water as balls only; choose Sparse Geometric to remove water or drop other shapes." };
     }
-    const { width_m, height_m, depth_m } = this.scene.container, { nx, ny, nz } = this.executionInfo;
+    const { width_m, height_m, depth_m } = this.scene.container, [nx, ny, nz] = this.containerCells;
     const refusal = liveFluidEditRefusal(edit, { origin_m: [-width_m / 2, 0, -depth_m / 2],
       cellSize_m: [width_m / nx, height_m / ny, depth_m / nz], dimensions: [nx, ny, nz] });
     if (refusal) return { accepted: false, reason: refusal };
@@ -2190,12 +2180,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private initializeVolumeAndTerrain(): void {
     const { nx, ny, nz } = this.executionInfo;
     const c = this.scene.container;
-    const {volume,terrain,initial,dam} = this.initialVolume ?? uniformInitialVolume(this.scene,[nx,ny,nz],true);
+    const {volume,terrain,initial,dam} = this.initialVolume ?? uniformLatticeInitialVolume(this.scene);
     this.initialVolume = undefined;
-    const cellHeight = c.height_m / ny;
+    const cellHeight = c.height_m / this.containerCells[1];
     if (this.vertexPhiField && this.vertexPhiScratch) {
       // Cut 4h solid owners read their plane at corners the h rule buries.
-      const phi = uniformVolumeInitialPhi(this.scene, [nx, ny, nz], undefined, uniformDetailCoarseSolids(this.detail));
+      const phi = uniformLatticeInitialPhi(this.scene, uniformDetailCoarseSolids(this.detail));
       this.upload3DF32(this.vertexPhiField, phi);
       this.upload3DF32(this.vertexPhiScratch, phi);
     }
@@ -2408,7 +2398,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const strength = inflow ? averageInflowStrength(inflow, stepEnd_s - dt, stepEnd_s) : 0;
     if (this.inflowBoundary && strength > 0) {
       const cellVolume = c.width_m * c.height_m * c.depth_m
-        / (this.executionInfo.nx * this.executionInfo.ny * this.executionInfo.nz);
+        / (this.containerCells[0] * this.containerCells[1] * this.containerCells[2]);
       volumeCells += this.inflowBoundary.flowRate_m3_s * strength * dt / cellVolume; this.referenceVolumeCells = volumeCells;
     }
     // The drop is consumed by this step and only this step, so the lane is
@@ -2423,9 +2413,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const drop = scheduled ?? (this.pendingDrop ? uniformInjectedDrop(this.pendingDrop) : undefined);
     if (!scheduled) this.pendingDrop = undefined;
     this.pageDrop = drop;
+    // The scheduled drop the next step adds: its pages are asked for a step
+    // early, so the census of its own step finds them stored.
+    const schedule = this.scene.fluid.scheduledDrops, ahead = schedule ? uniformPagePoolDropAhead(schedule, stepEnd_s, dt, fixedStep_s ?? this.scene.numerics.maxDt_s) : -1;
+    this.pageDropAhead = ahead < 0 ? undefined : this.scheduledDrops!.drops[ahead];
     if (drop) {
       const cellVolume = c.width_m * c.height_m * c.depth_m
-        / (this.executionInfo.nx * this.executionInfo.ny * this.executionInfo.nz);
+        / (this.containerCells[0] * this.containerCells[1] * this.containerCells[2]);
       volumeCells += drop.volume_m3 / cellVolume; this.referenceVolumeCells = volumeCells;
     }
     this.executionInfo.referenceLiquidVolume_cells = volumeCells;
@@ -2446,8 +2440,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // the frame encodes them, inside advance below: each is one function.
       // The cell's volume and height follow the scene alone.
       if(this.mixedStepSceneRevision!==this.sceneRevision){
-        this.mixedStepSceneRevision=this.sceneRevision;this.mixedStepCellHeight=c.height_m/this.executionInfo.ny;
-        this.mixedStepCellVolume=c.width_m*c.height_m*c.depth_m/(this.executionInfo.nx*this.executionInfo.ny*this.executionInfo.nz);
+        this.mixedStepSceneRevision=this.sceneRevision;this.mixedStepCellHeight=c.height_m/this.containerCells[1];
+        this.mixedStepCellVolume=c.width_m*c.height_m*c.depth_m/(this.containerCells[0]*this.containerCells[1]*this.containerCells[2]);
       }
       this.mixedStepDt=dt;
       this.mixedDynamic?.setBodies(bodyCount?this.markMixedBodies:undefined);
@@ -2468,7 +2462,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           this.mixedParameterScenes[slot]=this.sceneRevision;
           p.gravity=this.scene.fluid.gravity_m_s2.y;p.density=this.scene.fluid.density_kg_m3;p.viscosity=this.scene.fluid.dynamicViscosity_Pa_s;p.surfaceTension=this.scene.fluid.surfaceTension_N_m;
         }
-        p.openTop=this.scene.container.top==="open";p.noSlip=this.scene.container.fluidWallMode==="no-slip";p.cubic=this.phiCubicAdvection;p.fineTrilinear=this.phiFineTrilinear;p.pressureTolerance=this.pressureMultigrid.residualTolerance;p.redistance=true;p.extensionSweeps=this.extensionSweeps;
+        p.openTop=this.address.openTop;p.noSlip=this.scene.container.fluidWallMode==="no-slip";p.cubic=this.phiCubicAdvection;p.fineTrilinear=this.phiFineTrilinear;p.pressureTolerance=this.pressureMultigrid.residualTolerance;p.redistance=true;p.extensionSweeps=this.extensionSweeps;
         // Impacts raise pressure demand faster than a plan two frames old
         // follows. One additional reserve covers long-dam frame 79's third
         // cycle under a 4h surface, and the dam 128^3 all-fine far-wall
@@ -2602,7 +2596,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         Object.assign(this.executionInfo,{representedVolumeCellSum:represented,volumeCellSum:volume,
           representedVolumeDrift:(represented-reference)/reference,rawVolumeDrift:(volume-reference)/reference,volumeDrift:(volume-reference)/reference,
           volumeTelemetrySource:"dense-volume",frontTelemetrySource:"dense-volume",
-          front_m:-this.scene.container.width_m/2+words[1]!*this.scene.container.width_m/this.executionInfo.nx,
+          front_m:-this.scene.container.width_m/2+words[1]!*this.scene.container.width_m/this.containerCells[0],
           maxSpeed_m_s:new Float32Array(words.buffer)[2],uniformTwoLevelVelocity:this.twoLevelEnabled,
           uniformTwoLevelFineReach:UNIFORM_TWO_LEVEL_FINE_REACH,uniformTwoLevelShellReach:this.twoLevelShellReach,
           uniformTwoLevelFineTiles:words[4],uniformTwoLevelShellTiles:words[5],uniformTwoLevelTilesTotal:this.address.boxTiles,
@@ -2617,7 +2611,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** A voxel stroke reaches this solver as solid-mask bits, so only a different lattice is refused. */
   validateLiveSolidEdit(scene: SceneDescription): void {
     const [nx, ny] = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
-    if (nx !== this.executionInfo.nx || ny !== this.executionInfo.ny) throw new Error("This voxel edit changes the fluid lattice; reset the scene to apply it.");
+    if (nx !== this.containerCells[0] || ny !== this.containerCells[1]) throw new Error("This voxel edit changes the fluid lattice; reset the scene to apply it.");
   }
 
   /** Fence paused remapping so the renderer invalidates its retained surface
@@ -2637,7 +2631,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // and every cache left exactly as they are. A scene already waiting on the
     // frame in flight is applied first, so nothing overtakes it here.
     if (scene !== this.scene && !this.deferredFrameScene && uniformSceneDiffersInSolidsAlone(scene, this.scene)
-      && this.solidMask.adoptIfUnchanged(solidWorldForScene(scene))) {
+      && this.solidMask.adoptIfUnchanged(solidWorldForFluidLattice(scene))) {
       // The layout stays synced to the document it was synced to.
       if (this.mixedSynced?.scene === this.scene) this.mixedSynced.scene = scene;
       this.scene = scene;
@@ -2647,27 +2641,41 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.appliedRuntimeValues = undefined;
     if (this.mixedFrameInFlight) { this.deferredFrameScene = scene; return; }
     this.scene = scene; this.sceneRevision++;
-    const dirty = this.solidMask.update(solidWorldForScene(scene));
-    if (dirty) { this.solidVoxelsEmpty = uniformSolidMaskEmpty(this.solidMask); this.mixedSolidMaskStamp++; }
+    // The mask tells the edit every cell it moves as it folds the scene in;
+    // the columns of those cells are the bed-slope lane's to bake again.
+    const edit = this.mixedFrame ? uniformMixedSolidEdit(refinementRegionLattice(scene).dimensions as [number, number, number],
+      this.mixedSolidTouched ??= new Uint8Array(this.address.boxTiles)) : undefined;
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    const dirty = this.solidMask.update(solidWorldForFluidLattice(scene), (x, y, z, solid) => {
+      edit?.cell(x, y, z, solid);
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z;
+    });
+    if (dirty) { this.solidVoxelsEmpty = this.solidMask.empty; this.mixedSolidMaskStamp++; }
     // Dynamic coarsening joins the edit's tiles on the GPU (the next head
     // adopts them); a requests-only layout takes the scene's request.
-    if (dirty && this.mixedFrame) this.editMixedSolids(dirty);
+    if (dirty && edit) this.editMixedSolids(edit);
     this.syncMixedLayout();
-    if (dirty) this.device.queue.writeBuffer(this.activeScratch,
-      dirty.firstWord * 4, this.solidMask.words.buffer as ArrayBuffer,
-      dirty.firstWord * 4, dirty.wordCount * 4);
+    // The directory words and the page slots the edit rewrote; the buffer is never resized.
+    if (dirty) for (const range of dirty) this.device.queue.writeBuffer(this.activeScratch, range.firstWord * 4, this.solidMask.words, range.firstWord, range.wordCount);
+    // The bed-slope lane again around the edit, from the mask just uploaded:
+    // one region bake to a submit.
+    if (dirty && this.bedSlopeBake && x1 >= x0) {
+      const encoder = this.device.createCommandEncoder({ label: "Uniform bed-slope re-bake" });
+      this.bedSlopeBake.encodeRegion(encoder, { minimum: [x0, -1, z0], maximumExclusive: [x1 + 1, this.executionInfo.ny + 1, z1 + 1] });
+      this.device.queue.submit([encoder.finish()]); this.bedSlopeBake.submitted();
+    }
     // The plug is a walk over a whole face of the lattice and a function of
     // the nozzle and the container alone. A voxel edit carries both objects
     // forward, and then the plug it would rebuild is the one already held.
     const inflow = scene.fluid.inflow, plug = this.inflowBoundaryOf;
     if (!plug || plug.inflow !== inflow || plug.container !== scene.container) {
       this.inflowBoundary = inflow
-        ? createInflowGridBoundary(inflow, scene.container, [this.executionInfo.nx, this.executionInfo.ny, this.executionInfo.nz])
+        ? createInflowGridBoundary(inflow, scene.container, this.containerCells)
         : undefined;
       this.inflowBoundaryOf = { inflow, container: scene.container };
       // A live page pool pins the sources' pages: they follow a nozzle that moved.
       if (this.pageResidency.live) this.mixedFrame?.pagePool.pin(uniformPagePoolSourcePages([this.executionInfo.nx, this.executionInfo.ny, this.executionInfo.nz],
-        uniformPageSources(scene, [this.executionInfo.nx, this.executionInfo.ny, this.executionInfo.nz], this.inflowBoundary, Math.max(this.fixedStep_s ?? 0, scene.numerics.maxDt_s))));
+        uniformPageSources(scene, this.containerCells, this.inflowBoundary, Math.max(this.fixedStep_s ?? 0, scene.numerics.maxDt_s))));
     }
     this.pressureMultigrid.setDepthSymmetry(scene.container.depthBoundary === "symmetry");
   }
@@ -2712,7 +2720,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.reductions.destroy();
     this.conditioningScratch.destroy();
     this.pages.destroy();
-    this.activeScratch.destroy();
+    this.activeScratch.destroy(); this.bedSlopeBake?.destroy();
     this.fieldPages.destroy();
     this.rigidSystem.destroy(); this.rigidExchange.destroy();
     this.statsReadback?.destroy();

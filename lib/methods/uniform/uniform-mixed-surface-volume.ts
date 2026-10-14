@@ -51,11 +51,9 @@ const NB_VOLUME_RATE_LIMIT=4;
  * at rest must be asked for nothing, or the divergence moves its waterline
  * and wakes the adaptive surface. */
 const NB_VOLUME_DEAD_BAND=0.01;
-const VOLUME_PASS:GPUComputePassDescriptor={label:"Uniform mixed global surface volume"},BUDGET_PASS:GPUComputePassDescriptor={label:"NB scalar volume sources and outflow"};
-/** ceil(jobs/per) in whole steps: a fractional quotient is a heap number until its caller is optimized. */
-const ceilDiv=(jobs:number,per:number):number=>{const up=jobs+per-1;return (up-up%per)/per;};
+const VOLUME_PASS:GPUComputePassDescriptor={label:"Uniform mixed global surface volume"},BUDGET_PASS:GPUComputePassDescriptor={label:"NB scalar volume sources"};
 export class UniformMixedSurfaceVolume {
- /** NB budget: target, initialized, cumulative outflow, last normal shift,
+ /** NB budget: target, initialized, a word no stage writes, last normal shift,
   * volume before correction, initial volume, last measured volume, target,
   * then the gauge's volume control rate in 1/s. */
  readonly budget:GPUBuffer;
@@ -77,9 +75,8 @@ export class UniformMixedSurfaceVolume {
  /** Residency pages: the bound of the page launches. */
  private readonly pages:number;
  private readonly address:UniformLatticeAddress;
- /** clearBand's dense launch, a lane a tile; outflow's, a lane a cell of the top array-edge plane. */
+ /** clearBand's dense launch, a lane a tile. */
  private readonly tileLaneGroups:[number,number]=[0,0];
- private readonly outflowGroups:number;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
  /** The caller runs UniformMixedPhiResolve on phi before encode: every owner
@@ -89,8 +86,8 @@ export class UniformMixedSurfaceVolume {
   const lattice=ownership.capacity.lattice;
   const address=this.address=ownership.capacity.address;
   this.vertices=address.vertexKeys;
-  this.tiles=ownership.capacity.tiles;this.pages=uniformMixedPageCount(lattice);
-  uniformKeyGroups(address.tileKeys,64,ownership.dispatchX,this.tileLaneGroups);this.outflowGroups=ceilDiv(address.cells[0]*address.cells[2],64);
+  this.tiles=ownership.capacity.tiles;this.pages=uniformMixedPageCount(this.tiles);
+  uniformKeyGroups(address.tileKeys,64,ownership.dispatchX,this.tileLaneGroups);
   // Partial rows: the residentAll launch's job bound (svJobs): every tile h,
   // plus a job per page. Rows sized to the tiles alone let an all-h layout's
   // page jobs write the chunk sums, and its extra chunk the Newton state.
@@ -99,19 +96,19 @@ export class UniformMixedSurfaceVolume {
   const scratch={binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}};
   this.budget=device.createBuffer({label:"NB scalar volume budget",size:4*NB_VOLUME_BUDGET_FLOATS,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.budgetParams=device.createBuffer({label:"NB volume budget parameters",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-  this.resources=uniformDetailBindLayout(device,{entries:[texture(0),texture(1),scratch,texture(4),{binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}},{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]});
+  this.resources=uniformDetailBindLayout(device,{entries:[texture(0),texture(1),scratch,{binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}},{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]});
  }
- /** The stage measures phi and volume and writes neither. velocity: the boundary velocity the outflow integrates. */
- bind(phi:GPUTexture,volume:GPUTexture,scratch:GPUBufferBinding,velocity:GPUTexture):UniformDetailGroup{
+ /** The stage measures phi and volume and writes neither. */
+ bind(phi:GPUTexture,volume:GPUTexture,scratch:GPUBufferBinding):UniformDetailGroup{
   const address=this.address;
   for(const [i,t] of [phi,volume].entries())if(t.format!=="r32float"||uniformDetailExtent(t).some((n,a)=>n!==(i===1?address.cells:address.vertexBox)[a]))throw new Error("Mixed surface constraint requires native vertex and cell fields");
   if((scratch.size??scratch.buffer.size-(scratch.offset??0))<this.scratchBytes)throw new Error("Mixed surface constraint needs sufficient scratch");
   const work={...scratch,size:this.scratchBytes};
-  return uniformDetailGroup(this.device,{layout:this.resources,entries:[{binding:0,resource:phi},{binding:1,resource:volume},{binding:3,resource:work},{binding:4,resource:velocity},{binding:5,resource:{buffer:this.budget}},{binding:6,resource:{buffer:this.budgetParams}}]});
+  return uniformDetailGroup(this.device,{layout:this.resources,entries:[{binding:0,resource:phi},{binding:1,resource:volume},{binding:3,resource:work},{binding:5,resource:{buffer:this.budget}},{binding:6,resource:{buffer:this.budgetParams}}]});
  }
  async initialize():Promise<void>{
   const topology=uniformMixedTopologyWGSL(this.ownership.capacity,0);
-  const sourceScale=uniformMixedVertexSamplingSource("",false).replace(/\bum(Vertex(?!(?:At|Coord|Present|Near|Texel)\b)\w*|SampleVertex|LoadVertex)\b/g,name=>name.replace("um","umScale"));
+  const sourceScale=uniformMixedVertexSamplingSource("",false,undefined,undefined,true).replace(/\bum(Vertex(?!(?:At|Coord|Present|Near|Texel)\b)\w*|SampleVertex|LoadVertex8?)\b/g,name=>name.replace("um","umScale"));
   // Owner entries stride every live owner (all), resolveScale every seam
   // tile (fused): GPU-counted fixed grids, sized by capacity alone.
   const module=uniformDetailModule(this.device,{label:"Uniform mixed surface volume",code:uniformMixedCountedEntriesWGSL(topology+/* wgsl */`
@@ -119,7 +116,6 @@ export class UniformMixedSurfaceVolume {
 @group(1) @binding(1) var volume:texture_3d<f32>;
 @group(1) @binding(3) var<storage,read_write> scratch:array<f32>;
 override parity:u32=0u;
-@group(1) @binding(4) var velocity:texture_3d<f32>;
 @group(1) @binding(5) var<storage,read_write> budget:array<f32>;
 @group(1) @binding(6) var<uniform> budgetParams:vec4f;
 override captureBudget:bool=false;override gaugeBudget:bool=false;
@@ -128,14 +124,17 @@ fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // base blocks (UNIFORM_DETAIL_4H_LOAD).
 fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
 fn umLoadVertexW(p:vec3u,width:u32)->f32{if(width==4u){return umLoadCorner(p);}return umLoadVertex(p);}
-${uniformMixedVertexSamplingSource("",true,undefined,"umLoadCorner")}
+// The same loads of the eight vertices p + s*umCorner(k,2u): one page-table read where one block holds them.
+fn umLoadVertex8(p:vec3u,s:u32)->array<f32,8>{return udLoad8_phi(vec3i(p),s);}
+fn umLoadCorner8(p:vec3u,s:u32)->array<f32,8>{return udLoad48_phi(vec3i(p),s);}
+fn umLoadVertexW8(p:vec3u,width:u32)->array<f32,8>{if(width==4u){return umLoadCorner8(p,4u);}return umLoadVertex8(p,width);}
+${uniformMixedVertexSamplingSource("",true,undefined,"umLoadCorner",true)}
 const UM_H=vec3f(${this.ownership.capacity.lattice.cellSize_m.join(",")});
 // The corner scales come first, a word a vertex (umVertexAt). Then the
 // partial rows, a job each: the tiles and the residency pages (UM_PAGES).
 // Band tiles, visited tiles, measured tiles.
 const SV_P:u32=UM_VERTEX_KEYS;
-const SV_PAGES:u32=((UM_D.x+15u)/16u)*((UM_D.y+15u)/16u)*((UM_D.z+15u)/16u);
-const SV_GROUPS:u32=UM_TILES+SV_PAGES;
+const SV_GROUPS:u32=UM_TILES+UM_PAGES;
 const SV_CHUNKS:u32=(SV_GROUPS+63u)/64u;
 const SV_R:u32=SV_P+4u*SV_GROUPS;const SV_S:u32=SV_R+4u*SV_CHUNKS;
 const SV_BAND:u32=SV_S+8u;const SV_VISIT:u32=SV_S+8u+UM_TILES;const SV_MEASURE:u32=SV_S+8u+2u*UM_TILES;
@@ -157,6 +156,13 @@ fn svAuthority(o:UMOwner,k:u32,low:vec3<bool>)->bool{
 fn svUnitAuthorityTile(p:vec3u)->u32{return umTileAt(vec3u(umCellNear(vec3i(p)-vec3i(1)))/4u);}
 fn svMeasured(t:u32)->bool{return scratch[SV_MEASURE+t]!=0.0;}
 fn umScaleLoadVertex(p:vec3u)->f32{return scratch[umVertexAt(p)];}
+// The same words of the eight vertices p + s*umCorner(k,2u): where one block holds them, its first key and fixed steps.
+fn umScaleLoadVertex8(p:vec3u,s:u32)->array<f32,8>{
+ var v:array<f32,8>;let run=umVertexRun(vec3i(p),s);
+ if(run.x!=0u){let first=umVertexRunAt(run);for(var k=0u;k<8u;k++){let c=umCorner(k,2u)*s;v[k]=scratch[first+c.x+33u*c.y+1089u*c.z];}return v;}
+ for(var k=0u;k<8u;k++){v[k]=scratch[umVertexAt(p+umCorner(k,2u)*s)];}
+ return v;
+}
 ${sourceScale}
 ${levelSetFillWGSL}
 ${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}${this.solid?uniformMixedVertexBuriedWGSL:""}
@@ -229,7 +235,7 @@ fn storePartial(l:u32,group:vec3u){
     let local=umCorner(o.lane,4u);
     for(var k=0u;k<8u;k++){let c=local+umCorner(k,2u);let v=seedScratch[c.x+5u*(c.y+5u*c.z)];low=min(low,v);high=max(high,v);}
    }else{
-    for(var k=0u;k<8u;k++){let v=umLoadVertexW(umOrigin(o)+umCorner(k,2u)*o.width,o.width);low=min(low,v);high=max(high,v);}
+    let c8=umLoadVertexW8(umOrigin(o),o.width);for(var k=0u;k<8u;k++){let v=c8[k];low=min(low,v);high=max(high,v);}
    }
    seeded=low<=0.0&&high>=0.0;inside=high<0.0;
   }
@@ -350,10 +356,10 @@ var<workgroup> metricBand:array<f32,125>;
  }}
  workgroupBarrier();
  let o=umResidentAllOwner(gid);if(o.width==0u||!svMeasured(o.tile)){return;}let unit=svUnit(o);
- // An h owner's corner lies on a wall along an axis with no cell stored
- // past it: below the owner at a low corner, above it at a high one.
+ // An owner's corner lies on a wall along an axis with no cell stored past
+ // it: below the owner at a low corner, above it at a high one.
  var low=vec3<bool>(false);var high=vec3<bool>(false);
- if(o.width==1u){let origin=vec3i(umOrigin(o));low=umLowOpen(origin);for(var a=0u;a<3u;a++){high[a]=umAcrossKind(origin,a,1)!=UM_RESIDENT;}}
+ {let origin=vec3i(umOrigin(o));low=umLowOpen(origin);for(var a=0u;a<3u;a++){high[a]=umAcrossKind(origin,a,i32(o.width))!=UM_RESIDENT;}}
  for(var k=0u;k<umCounts.w;k++){
   let p=umOrigin(o)+umCorner(k,2u)*o.width;
   if(unit){
@@ -385,7 +391,8 @@ var<workgroup> metricBand:array<f32,125>;
   for(var axis=0u;axis<3u;axis++){
    if(o.width==1u&&select(low[axis],high[axis],((k>>axis)&1u)!=0u)){continue;}
    ${this.solid?"if(o.width==1u&&!(openLow[axis]&&openHigh[axis])){continue;}":""}
-   var lo=p;var hi=p;lo[axis]=p[axis]-min(p[axis],o.width);hi[axis]=min(UM_BOX[axis],p[axis]+o.width);
+   let top=((k>>axis)&1u)!=0u;var lo=p;var hi=p;
+   if(top||!low[axis]){lo[axis]=p[axis]-o.width;}if(!top||!high[axis]){hi[axis]=p[axis]+o.width;}
    // A wide slope is one-sided at a buried end: phi there is not state.
    ${this.solid?"if(o.width!=1u){if(umVertexBuried(vec3i(lo))){lo=p;}if(umVertexBuried(vec3i(hi))){hi=p;}if(lo[axis]==hi[axis]){continue;}}":""}
    gradient[axis]=(umLoadVertexW(hi,o.width)-umLoadVertexW(lo,o.width))/(f32(hi[axis]-lo[axis])*UM_H[axis]);
@@ -425,7 +432,7 @@ ${uniformCompiledVertexResolveWGSL("svResolveLattice","umScaleVertexWeight","umS
   var raw:array<f32,8>;var scale:array<f32,8>;var low=1e30;var high=-1e30;
   let shift=scratch[SV_S];let step=scratch[(SV_S+4u)];
   // Every corner is a stored (or resolved) vertex: eight direct loads.
-  for(var k=0u;k<8u;k++){let vertex=origin+umCorner(k,2u)*o.width;raw[k]=umLoadVertexW(vertex,o.width);scale[k]=umScaleLoadVertex(vertex);}
+  raw=umLoadVertexW8(origin,o.width);scale=umScaleLoadVertex8(origin,o.width);
   if(!svVisited(o)){scale=array<f32,8>();}
   for(var k=0u;k<8u;k++){low=min(low,raw[k]-(shift+step)*scale[k]);high=max(high,raw[k]-shift*scale[k]);}
   // An owner inside or outside the surface at both shifts has a constant
@@ -509,32 +516,8 @@ var<workgroup> svReduceJobs:u32;
  }
  sums[l]=vec4f(amount,amount,0,0);storePartial(l,group);
 }
-// Boundary-only accounting. Integrate the top face's swept liquid column
-// with the frozen outward velocity, in h-cell volume units. Subdivide the
-// column geometrically for large steps; this does not advance the solver.
-@compute @workgroup_size(64) fn outflow(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) group:vec3u){
- let i=gid.x;var lost=0.0;
- if(i<UM_BOX.x*UM_BOX.z&&budgetParams.z>0.0&&umTileResident(umTileAt(vec3u(i%UM_BOX.x,UM_BOX.y-1u,i/UM_BOX.x)/4u))){
-  let c=vec3u(i%UM_BOX.x,UM_BOX.y-1u,i/UM_BOX.x);let o=umOwnerAt(vec3i(c));
-  let face=vec3i(umOrigin(o)+vec3u(0u,o.width-1u,0u));
-  var vy=0.0;if(o.width==4u){vy=${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,face,0).y;}else{vy=textureLoad(velocity,face,0).y;}
-  let speed=max(0.0,vy);
-  let travel=min(f32(UM_BOX.y),speed*budgetParams.x/UM_H.y);
-  for(var j=0u;f32(j)<travel;j++){
-   let depth=min(1.0,travel-f32(j));let y=f32(UM_BOX.y-j);var v:array<f32,8>;
-   for(var k=0u;k<8u;k++){let corner=umCorner(k,2u);v[k]=umSampleVertex(vec3f(f32(c.x+corner.x),y-depth+depth*f32(corner.y),f32(c.z+corner.z)));}
-   lost+=fill(v)*depth*umCellOpen(vec3i(vec3u(c.x,UM_BOX.y-1u-j,c.z)));
-  }
- }
- sums[l]=vec4f(lost,0,0,0);sumGroup(l);
- if(l==0u){scratch[SV_P+group.x]=sums[0].x;}
-}
-@compute @workgroup_size(64) fn updateBudget(@builtin(local_invocation_index) l:u32){
- var lost=0.0;
- if(budgetParams.z>0.0){for(var i=l;i<(UM_BOX.x*UM_BOX.z+63u)/64u;i+=64u){lost+=scratch[SV_P+i];}}
- sums[l]=vec4f(lost,0,0,0);sumGroup(l);
- if(l==0u){let out=min(budget[0],sums[0].x);budget[0]=max(0.0,budget[0]+budgetParams.y-out);budget[2]+=out;budget[3]=0.0;}
-}
+// The step's explicit sources, in h-cell volume units.
+@compute @workgroup_size(1) fn updateBudget(){budget[0]=max(0.0,budget[0]+budgetParams.y);budget[3]=0.0;}
 `,["seed","dilate","metric","measure","grow","measureGrow","measureInitial","resolveScale"])});
   const errors=(await module.getCompilationInfo()).messages.filter(e=>e.type==="error");if(errors.length)throw new Error(errors.map(e=>`${e.lineNum}: ${e.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
@@ -543,7 +526,7 @@ var<workgroup> svReduceJobs:u32;
   const create=(key:string,entryPoint:string,extra:Record<string,number>={})=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{...constants,...extra,...s}}})).then(p=>{this.pipelines.set(key,p);});
   await Promise.all([
    ...["clearBand","reduce","solve"].map(entry=>create(entry,entry)),
-   create("capture","solve",{captureBudget:1}),create("gauge","solve",{gaugeBudget:1}),create("measureInitial","measureInitial",resident),create("outflow","outflow"),create("updateBudget","updateBudget"),
+   create("capture","solve",{captureBudget:1}),create("gauge","solve",{gaugeBudget:1}),create("measureInitial","measureInitial",resident),create("updateBudget","updateBudget"),
    ...["seed","metric","measure"].map(entry=>create(entry,entry,resident)),
    create("resolveScale","resolveScale",{umCountedJobs:UNIFORM_MIXED_COUNTED.fused}),
    create("dilate0","dilate",{parity:0,...resident}),create("dilate1","dilate",{parity:1,...resident}),
@@ -555,7 +538,7 @@ var<workgroup> svReduceJobs:u32;
   * reduce, solve); a converged solve skips the rest's work. */
  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,rounds=2,capture:boolean|"gauge"=false):void{
   if(!Number.isInteger(rounds)||rounds<1)throw new Error(`Mixed surface constraint needs a positive whole round count, not ${rounds}`);
-  if(this.pipelines.size!==16)throw new Error("Mixed surface constraint is not initialized");
+  if(this.pipelines.size!==15)throw new Error("Mixed surface constraint is not initialized");
   const pass=encoder.beginComputePass(VOLUME_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
   if(capture){this.run(pass,"clearBand");this.run(pass,"measureInitial");this.run(pass,"reduce");this.run(pass,capture==="gauge"?"gauge":"capture");pass.end();return;}
   this.run(pass,"clearBand");this.run(pass,"seed");for(let i=0;i<4;i++)this.run(pass,i%2?"dilate1":"dilate0");this.run(pass,"grow");this.run(pass,"measureGrow");this.run(pass,"metric");this.run(pass,"resolveScale");
@@ -573,20 +556,20 @@ var<workgroup> svReduceJobs:u32;
   else this.ownership.dispatchAllCounted(pass,pipeline);
  }
  /** Capture the initialized surface once; thereafter only explicit sources
-  * and boundary outflow change the target. No CPU readback feeds correction.
-  * controlRate (1/s, zero for none) gauges the step's opening occupancy
-  * against the budget as it stood before this step's sources and outflow,
-  * and leaves the volume control rate in the budget. */
- beginStep(encoder:GPUCommandEncoder,group:UniformDetailGroup,dt:number,addedCells:number,openTop:boolean,controlRate=0):void{
+  * change the target: liquid that rises through an open top is stored like
+  * any other and stays in it. No CPU readback feeds correction. controlRate
+  * (1/s, zero for none) gauges the step's opening occupancy against the
+  * budget as it stood before this step's sources, and leaves the volume
+  * control rate in the budget. */
+ beginStep(encoder:GPUCommandEncoder,group:UniformDetailGroup,dt:number,addedCells:number,controlRate=0):void{
   if(!this.budgetCaptured){this.encode(encoder,group,1,true);this.budgetCaptured=true;}
-  if(!openTop&&addedCells===0&&controlRate===0)return;
-  const words=this.budgetWords;words[0]=dt;words[1]=addedCells;words[2]=+openTop;words[3]=controlRate;
+  if(addedCells===0&&controlRate===0)return;
+  const words=this.budgetWords;words[0]=dt;words[1]=addedCells;words[3]=controlRate;
   this.device.queue.writeBuffer(this.budgetParams,0,words);
   if(controlRate>0)this.encode(encoder,group,1,"gauge");
-  if(!openTop&&addedCells===0)return;
+  if(addedCells===0)return;
   const pass=encoder.beginComputePass(BUDGET_PASS);
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
-  if(openTop)this.launch(pass,"outflow",this.outflowGroups);
   this.launch(pass,"updateBudget",1);pass.end();
  }
  /** One fixed-width entry in beginStep()'s pass. */

@@ -316,7 +316,7 @@ override capture:bool=false;
    for (const name of finalizeAll ? ["fine", "coarse", "cache", "taps", "snapshot"] : staged ? ["fine", "cache", "taps", "snapshot"] : ["cache", "taps", "snapshot"]) {
     sample ??= encoder.beginComputePass({ label: `Direct snapshot ${name}` });
     const variant = variants.get(name)!; sample.setBindGroup(0, ownership.bindGroup); sample.setBindGroup(1, variant.group); sample.setBindGroup(2, name === "taps" || name === "fine" || name === "coarse" ? ownership.hangingGroup : emptyGroup); sample.setBindGroup(3, dsGroups[activeSweeps % 2]!); sample.setPipeline(variant.pipeline);
-    if (name === "cache") sample.dispatchWorkgroups(...ownership.capacity.lattice.dimensions.map((n: number) => Math.ceil((n / 4 + 2) / 4)) as [number, number, number]);
+    if (name === "cache") sample.dispatchWorkgroups(...(flip.cache.groups as [number, number, number]));
     else if (name === "fine") { if (ownership.capacity.fineTiles > 0) sample.dispatchWorkgroups(Math.min(65535, ownership.capacity.fineTiles)); }
     else if (name === "coarse") { const groups = Math.ceil(3 * ownership.capacity.tiles / 64); sample.dispatchWorkgroups(Math.min(65535, groups), Math.ceil(groups / 65535)); }
     else if (name === "taps") { if (ownership.capacity.fineTiles > 0) ownership.dispatchCounted(sample, variant.pipeline, ownership.capacity.tiles, "fineAndSeams"); }

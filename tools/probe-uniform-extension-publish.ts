@@ -29,15 +29,11 @@ export function originalPublication(code: string): string {
   const setup = code.indexOf(" // Resolve seeded and wall faces", start);
   const local = code.indexOf(" let origin=umOrigin(owner);", setup);
   const vote = code.indexOf(" if(needsFar!=0u)", local);
-  const staging = code.indexOf(" for(var item=lane;item<81u;item+=64u){", vote);
-  const mixed = code.indexOf(" let mixed=atomicLoad(&farMixed);", staging);
-  const loop = code.indexOf(" for(var axis=0u;axis<3u;axis++){", mixed);
+  const staging = code.indexOf(" if(lane<27u){", vote);
+  const loop = code.indexOf(" for(var axis=0u;axis<3u;axis++){", staging);
   const output = code.indexOf(" value.w=", loop);
-  assert.ok(start >= 0 && setup > start && local > setup && vote > local && staging > vote && mixed > staging && loop > mixed && output > loop, "Publication probe source must match the candidate");
-  const known = code.slice(local, vote).replace(";var needsFar=0u", "").replace(
-    "  else{needsFar|=1u<<axis;}",
-    "  else if((mixed&(1u<<axis))==0u){value[axis]=umFarValueUniform(face,farState[13u][axis],farLo[39u+axis].w>=0.0);}\n  else{value[axis]=umFarValueStaged(face);}",
-  );
+  assert.ok(start >= 0 && setup > start && local > setup && vote > local && staging > vote && loop > staging && output > loop, "Publication probe source must match the candidate");
+  const known = code.slice(local, vote).replace(";var needsFar=0u", "").replace("  else{needsFar|=1u<<axis;}", "  else{value[axis]=umFarValueStaged(face);}");
   assert.ok(!known.includes("needsFar"));
   const restored = (code.slice(0, setup) + code.slice(staging, loop) + known + code.slice(output)).replace("var<workgroup> farRequired:u32;\n", "");
   // The fixed eight-tap loop also removes dynamically indexed local arrays

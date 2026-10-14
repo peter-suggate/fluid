@@ -1,5 +1,5 @@
 import type { SceneDescription } from "./model";
-import { sceneCellSizes_m, sceneLatticeDimensions } from "./scene-lattice-dimensions";
+import { sceneCellSizes_m, sceneFluidLatticeDimensions, sceneLatticeDimensions } from "./scene-lattice-dimensions";
 import {
   PLANAR_BOUNDARY_MINIMUM_ASPECT_RATIO,
   type PlanarBoundaryPatch,
@@ -942,6 +942,56 @@ const sceneSolidWorldCache = new WeakMap<SceneDescription, {
  * identity (SolidOccupancyMask) sees the same world. Weak, so the memo never
  * outlives the world's own holders. */
 let latestSolidWorld: { readonly stamp: string; readonly world: WeakRef<SolidWorld> } | undefined;
+
+/**
+ * Solid over the cells a fluid lattice holds past its container's high faces.
+ *
+ * Ordinary filled slabs across the lattice and its one-cell halo, which is
+ * where the box shell authors a wall: past the +x face, past the +z face, and
+ * above a closed top. An open top gets no slab above it, so those cells are
+ * air between walls that rise to the lattice's top. None when the lattice is
+ * the container.
+ */
+export function solidVoxelPaddingForLattice(
+  cells: SolidWorldCoordinate,
+  lattice: SolidWorldCoordinate,
+  top: "open" | "closed",
+): readonly SolidWorldVoxelPatch[] {
+  const [cx, cy, cz] = cells, [nx, ny, nz] = lattice;
+  if (cells.some((n, axis) => !Number.isSafeInteger(n) || n <= 0 || n > lattice[axis]!)) {
+    throw new RangeError(`A fluid lattice of ${lattice.join("x")} cells does not hold a container of ${cells.join("x")}`);
+  }
+  const fill = (minimum: SolidWorldCoordinate): SolidWorldVoxelPatch =>
+    ({ operation: "fill", minimum, maximumExclusive: [nx + 1, ny + 1, nz + 1], materialId: 1 });
+  return [
+    ...(nx > cx ? [fill([cx, -1, -1])] : []),
+    ...(nz > cz ? [fill([-1, -1, cz])] : []),
+    ...(ny > cy && top === "closed" ? [fill([-1, cy, -1])] : []),
+  ];
+}
+
+/** The padded world of a scene's canonical world, by lattice: one composition a world. */
+const fluidLatticeSolidWorlds = new WeakMap<SolidWorld, { readonly key: string; readonly world: SolidWorld }>();
+
+/**
+ * The solid world a fluid solver reads: the scene's own, with the padding of
+ * its lattice filled (`solidVoxelPaddingForLattice`). It is the scene's world
+ * itself when the container is whole pages, and otherwise shares every page
+ * the padding does not write, so a consumer that folds worlds in by page
+ * identity pays for an edit what it paid before.
+ */
+export function solidWorldForFluidLattice(scene: SceneDescription): SolidWorld {
+  const world = solidWorldForScene(scene);
+  const cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
+  const lattice = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
+  const padding = solidVoxelPaddingForLattice(cells, lattice, scene.container.top);
+  if (padding.length === 0) return world;
+  const key = `${cells.join(":")}:${lattice.join(":")}:${scene.container.top}`, held = fluidLatticeSolidWorlds.get(world);
+  if (held?.key === key) return held.world;
+  const padded = applySolidWorldPatches(world, padding);
+  fluidLatticeSolidWorlds.set(world, { key, world: padded });
+  return padded;
+}
 
 export function solidWorldForScene(scene: SceneDescription): SolidWorld {
   const stamp = solidWorldContentStamp(scene);

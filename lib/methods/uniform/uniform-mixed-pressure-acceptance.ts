@@ -58,7 +58,7 @@ export class UniformMixedPressureAcceptance {
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership){
   this.resources=device.createBindGroupLayout({entries:[...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
    {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}}]});
-  this.pages=uniformMixedPageCount(ownership.capacity.lattice);
+  this.pages=uniformMixedPageCount(ownership.capacity.tiles);
  }
  bind(f:UniformMixedPressureAcceptanceFields):GPUBindGroup{
   const size=4*uniformMixedPressureStorage(this.ownership.layout).count;
@@ -75,7 +75,7 @@ export class UniformMixedPressureAcceptance {
 @group(1) @binding(0) var<storage,read_write> residual:array<f32>;
 @group(1) @binding(1) var<storage,read_write> state:array<atomic<u32>>;
 @group(1) @binding(2) var<uniform> params:vec4f;
-${uniformMixedPressureBoundaryIndexWGSL(l)}
+${uniformMixedPressureBoundaryIndexWGSL()}
 var<workgroup> maxima:array<u32,64>;
 @compute @workgroup_size(64) fn reduce(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  // A closed slot reduces nothing: no early return ahead of the barriers.

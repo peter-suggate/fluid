@@ -80,12 +80,6 @@ export interface Cm12Figure {
  * depth-uniform extrusion with symmetry faces. Those faces remove the third
  * derivative from the pressure problem instead of introducing two physical
  * separating walls that do not exist in the paper.
- *
- * It used to be numerical, and much larger. The pressure hierarchy coarsened
- * all three axes in lockstep, so a thin axis capped how far the wide ones could
- * coarsen and nothing below 64 would construct at all -- see
- * `planUniformCM11aHierarchy`, which now falls back to coarsening each axis on
- * its own schedule for exactly the lattices the lockstep rule refuses.
  */
 export const CM12_SLAB_DEPTH_CELLS = 8;
 

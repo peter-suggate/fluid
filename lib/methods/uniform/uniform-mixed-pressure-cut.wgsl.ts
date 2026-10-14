@@ -5,7 +5,14 @@
  * A wall no thicker than the tile leaves open cells on both of its sides, and
  * phi is not one field across it: the fit is through the liquid's side
  * (cutSide), or the bath's corner tiles, a sliver of deep liquid and the air
- * outside, fit to air and were a p=0 face at depth.
+ * outside, fit to air and were a p=0 face at depth. With liquid on neither
+ * side the fit is through the side nearer it, the one of the lower mean phi:
+ * an air owner's phi is then the continuation of the liquid's beside it,
+ * which is what that liquid's free-surface theta reads (through both sides
+ * the host model of a resting tank puts a row under a dry wall tile up to
+ * 6% of rho g 4h off hydrostatic). The slot's second word names the sides
+ * the fit is through, 1 the side cutSide grows and 2 the rest, for the
+ * root's wet faces (umWetSide).
  * Physics changes must also update the ordered cutTile reference in
  * uniform-mixed-pressure-authority.ts and its frozen comparison. */
 export const uniformMixedPressureCutWGSL=/* wgsl */`
@@ -35,8 +42,10 @@ fn pcFitTile(t:u32,validTile:bool,l:u32){
   if(lane<stride){pcFirst[l]+=pcFirst[l+stride];pcSecond[l]+=pcSecond[l+stride];pcThird[l]+=pcThird[l+stride];}
   workgroupBarrier();
  }
- // Liquid on one side alone: the fit is that side's.
- let sums=pcSecond[base];let keep=sums.z>0.0||sums.w<=0.0;let keepOther=sums.w>0.0||sums.z<=0.0;
+ // Liquid on one side alone: the fit is that side's. Liquid on neither: the
+ // side nearer it, by its mean phi.
+ let sums=pcSecond[base];let near=sums.x*pcThird[base].w<=sums.y*pcFirst[base].w;
+ let keep=sums.z>0.0||(sums.w<=0.0&&near);let keepOther=sums.w>0.0||(sums.z<=0.0&&!near);
  var moments=vec4f(0);var sum=0.0;
  if(keep){moments+=pcFirst[base];sum+=sums.x;}
  if(keepOther){moments+=pcThird[base];sum+=sums.y;lives|=others;}
@@ -62,7 +71,7 @@ fn pcFitTile(t:u32,validTile:bool,l:u32){
    let slope=vec3f(dot(moment,cross(c1,c2)),dot(c0,cross(moment,c2)),dot(c0,cross(c1,moment)))/dot(c0,cross(c1,c2));
    result=level-dot(slope,mean);
   }
-  balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(result,0.0);
+  balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(result,select(0.0,1.0,keep)+select(0.0,2.0,keepOther));
  }
  workgroupBarrier();
 }
@@ -100,6 +109,6 @@ fn pcFullFit(t:u32){
  // The fitted centre value is the same ordered phi mean as the serial fit.
  let origin=vec3i(4u*umTileCoord(t));var count=0.0;var total=0.0;
  for(var v=0u;v<125u;v++){count+=1.0;total+=textureLoad(vertexPhi,origin+vec3i(vec3u(v%5u,(v/5u)%5u,v/25u)),0).x;}
- balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(total/count,0.0);
+ balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(total/count,1.0);
 }
 `;

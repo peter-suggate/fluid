@@ -45,13 +45,13 @@ fn nbTrilinear(v:array<f32,8>,q:vec3f)->vec4f{
 }
 // Differentiate the represented trilinear field directly. A gradient needs
 // its eight corners, rather than six additional interpolated phi queries.
-fn nbPhiGradient(p:vec3f)->vec4f{
- let q=umPointNear(p);let c=vec3u(umCellNear(vec3i(floor(q))));
+// c: the cell q is read in, q a point of its closed extent.
+fn nbPhiGradient(c:vec3u,q:vec3f)->vec4f{
  let width=umTileWidth(umTileAt(c/4u));let origin=(c/width)*width;
  let f=(q-vec3f(origin))/f32(width);var v:array<f32,8>;var terms:array<f32,8>;
+ if(width==4u){v=umLoadCorner8(origin,4u);}else{v=umLoadVertex8(origin,width);}
  for(var k=0u;k<8u;k++){
-  let corner=umCorner(k,2u);let vertex=origin+corner*width;
-  if(width==4u){v[k]=umLoadCorner(vertex);}else{v[k]=umLoadVertex(vertex);}
+  let corner=umCorner(k,2u);
   let w=select(vec3f(1)-f,f,corner!=vec3u(0));terms[k]=v[k]*w.x*w.y*w.z;
  }
  let value=umVertexSum8(terms);
@@ -94,17 +94,18 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
  if(abs(nbTrilinear(v,q).w)<1e-4){distance=min(distance,length(p-origin-q));}
  return distance;
 }
-// A vertex is its cell's tile's; the upper domain faces go with the last
-// cell. The tiles within three of a crossing are written: a sample in a tile
-// within two reads only those.
-fn nbBuildDistance(p:vec3u,tile:u32){
+// A vertex is its cell's tile's; one on an upper face a wall lies across
+// goes with the last cell. c: that cell, of the tile of key tile. The tiles
+// within three of a crossing are written: a sample in a tile within two
+// reads only those.
+fn nbBuildDistance(p:vec3u,c:vec3u,tile:u32){
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  {
   let initial=umSampleVertex(vec3f(p));
   var value=initial/h;
   if(abs(initial)>1e-8){
    var nearest=NB_NO_SURFACE;
-   if((atomicLoad(&bins[NB_BAND_REACH+tile])&1u)!=0u){nearest=atomicLoad(&bins[NB_DEPTH_B+umCellAt(vec3u(umCellNear(vec3i(p))))]);}
+   if((atomicLoad(&bins[NB_BAND_REACH+tile])&1u)!=0u){nearest=atomicLoad(&bins[NB_DEPTH_B+umCellAt(c)]);}
    // With no crossing cell within five of the vertex's, the nearest box is
    // five cells off or more: the level set stands, no nearer than that. Six
    // lifted the air five cells over a resting surface, and with it the 4h
@@ -115,15 +116,17 @@ fn nbBuildDistance(p:vec3u,tile:u32){
    // tiny ripple. Also trace the local phi gradient across cell boundaries;
    // unlike a cell-clamped solve this reaches the surface above that vertex.
    if(abs(value)<4.5){
-    var q=vec3f(p);
+    // The trace moves a cell and a half at most a turn: its cell is asked
+    // again from the cell it has reached, and a wall holds both.
+    var q=vec3f(p);var cell=vec3i(c);
     for(var iteration=0u;iteration<5u;iteration++){
      // A solid's phi is not the liquid's: traced into a wall, the vertices on
      // it found the wall for a surface, and no samples were seeded beside it.
-     if(umCellOpen(umCellNear(vec3i(floor(q))))<0.5){break;}
-     let sample=nbPhiGradient(q);let f=sample.w;if(abs(f)<1e-5){distance=min(distance,length(q-vec3f(p)));break;}
+     if(umCellOpen(cell)<0.5){break;}
+     let sample=nbPhiGradient(vec3u(cell),q);let f=sample.w;if(abs(f)<1e-5){distance=min(distance,length(q-vec3f(p)));break;}
      let g=sample.xyz;
      let g2=dot(g,g);if(g2<1e-8){break;}
-     q=umPointNear(q-clamp(f/sqrt(g2),-1.5,1.5)*g*inverseSqrt(g2));
+     q=nbPointNear(cell,q-clamp(f/sqrt(g2),-1.5,1.5)*g*inverseSqrt(g2));cell=nbCellNear(cell,vec3i(floor(q)));
     }
    }
    value=sign(initial)*max(distance,1e-8/h);
@@ -131,16 +134,19 @@ fn nbBuildDistance(p:vec3u,tile:u32){
   atomicStore(&bins[NB_DEPTH_A+umVertexAt(p)],bitcast<u32>(value));
  }
 }
-// The 64 interior vertices use every lane. Only a last-domain tile has
-// additional high-face vertices; evaluate those once after the dense cube.
+// The 64 interior vertices use every lane. A tile on a high face of its page
+// has the vertices of that face too where a wall lies across it: their cell
+// is held in the tile. Evaluate those once after the dense cube.
 @compute @workgroup_size(64) fn buildDistance(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let tile=atomicLoad(&bins[NB_BAND_DISTANCE+group.x]);let origin=4u*umTileCoord(tile);
- nbBuildDistance(origin+umCorner(lane,4u),tile);
- if(any(origin+4u==UM_D)){
+ let inner=origin+umCorner(lane,4u);nbBuildDistance(inner,inner,tile);
+ if(any(((origin+4u)&vec3u(31u))==vec3u(0u))){
   for(var k=lane;k<125u;k+=64u){
    let local=umCorner(k,5u);let p=origin+local;
-   if(!any(local==vec3u(4u))||any((local==vec3u(4u))&(p<UM_D))){continue;}
-   nbBuildDistance(p,tile);
+   if(!any(local==vec3u(4u))){continue;}
+   let c=vec3u(umCellNearFromPage(tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
+   if(any((local==vec3u(4u))&(c==p))){continue;}
+   nbBuildDistance(p,c,tile);
   }
  }
 }
@@ -166,16 +172,21 @@ fn nbInterfaceVertex(p:vec3u)->bool{
  }
  return false;
 }
-fn nbRedistanceVertex(p:vec3u,width:u32){
+// p: a vertex of the tile of key own and first cell origin; c: its cell,
+// held in the tile's page where a wall lies across an upper face.
+fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
+ let c=vec3u(umCellNearFromPage(own>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  // Before retiring adjacent h owners, recover the metric coarse samples.
  // Particle sphere unions preserve their fine zero set but distort interior
  // magnitudes; inheriting those magnitudes as a 4h chord moves a flat surface.
- let retiring=width==4u&&nbSurfaceTheta(vec3f(p))<=0.0&&umTileMinimumWidth(umTileAt(vec3u(umCellNear(vec3i(p)))/4u))==1u;
+ // The tile test is one stencil word; the heat test samples eight tiles' heat and, under each cold one, the
+ // field's eight vertices. Only a vertex whose tile has an h neighbour can retire, so that test goes first.
+ let retiring=width==4u&&umTileMinimumWidth(umTileAt(c/4u))==1u&&nbSurfaceThetaFrom(vec3i(origin>>vec3u(2u)),vec3f(p))<=0.0;
  let normalize=(width==1u&&!nbInterfaceVertex(p))||retiring;
  // The metric replacement needs no sample of the old field. Keep its exact
  // multiply, and read phi only where the reconstructed value is consumed.
- if(normalize&&(nbBandReach(vec3u(umCellNear(vec3i(p))))&2u)!=0u){
+ if(normalize&&(nbBandReach(c)&2u)!=0u){
   let value=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(p)]))*h;
   textureStore(outputPhi,vec3i(p),vec4f(value));return;
  }
@@ -194,9 +205,10 @@ fn nbRedistanceVertex(p:vec3u,width:u32){
  if(lane>=125u){return;}
  let local=vec3u(lane%5u,(lane/5u)%5u,lane/25u);let p=origin+local;
  let regular=umTileMaximumWidth(owner.tile)==1u&&umTileMinimumWidth(owner.tile)==1u;
- if(regular){if(!all((local>vec3u(0))|(origin==vec3u(0)))){return;}}
+ // A low vertex is this tile's only where nothing is stored below it.
+ if(regular){if(any(local==vec3u(0))&&!all((local>vec3u(0))|umLowOpen(vec3i(origin)))){return;}}
  else{let a=umVertexAuthority(p);if(a.width!=1u||a.tile!=owner.tile){return;}}
- nbRedistanceVertex(p,1u);
+ nbRedistanceVertex(owner.tile,origin,p,1u);
 }
 // The metric of the coarse corners retirement can normalize, where
 // redistanceCoarse reads it: one writer each. Every corner beside an h owner
@@ -207,13 +219,15 @@ fn nbRedistanceVertex(p:vec3u,width:u32){
  for(var i=gid.x;i<umCounts.y;i+=65536u){
   let owner=umAllOwner(vec3u(umCounts.x*64u+i,0u,0u));let origin=umOrigin(owner);
   let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
+  // A low corner is this tile's only where nothing is stored below it.
+  var low=vec3<bool>(false);if(regular){low=umLowOpen(vec3i(origin));}
   for(var k=0u;k<8u;k++){
    let corner=umCorner(k,2u);let p=origin+corner*4u;
-   if(regular){if(!all((corner!=vec3u(0))|(origin==vec3u(0)))){continue;}}
+   if(regular){if(!all((corner!=vec3u(0))|low)){continue;}}
    else{if(umVertexAuthority(p).index!=owner.index){continue;}}
-   let c=vec3u(umCellNear(vec3i(p)));
+   let c=vec3u(umCellNearFromPage(owner.tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
    if(umTileMinimumWidth(umTileAt(c/4u))!=1u||(nbBandReach(c)&2u)==0u){continue;}
-   nbBuildDistance(p,nbBandTile(c));
+   nbBuildDistance(p,c,nbBandTile(c));
   }
  }
 }
@@ -221,11 +235,13 @@ fn nbRedistanceVertex(p:vec3u,width:u32){
  for(var i=gid.x;i<umCounts.y;i+=65536u){
   let owner=umAllOwner(vec3u(umCounts.x*64u+i,0u,0u));let origin=umOrigin(owner);
   let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
+  // A low corner is this tile's only where nothing is stored below it.
+  var low=vec3<bool>(false);if(regular){low=umLowOpen(vec3i(origin));}
   for(var k=0u;k<8u;k++){
    let corner=umCorner(k,2u);let p=origin+corner*4u;
-   if(regular){if(!all((corner!=vec3u(0))|(origin==vec3u(0)))){continue;}}
+   if(regular){if(!all((corner!=vec3u(0))|low)){continue;}}
    else{if(umVertexAuthority(p).index!=owner.index){continue;}}
-   nbRedistanceVertex(p,4u);
+   nbRedistanceVertex(owner.tile,origin,p,4u);
   }
  }
 }

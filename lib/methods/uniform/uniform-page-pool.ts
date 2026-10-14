@@ -86,8 +86,7 @@
  *            ((q>>b)<<1 | 1) of the page asked for there this step, 0 unasked
  * Word offsets: uniformPagePoolLayout(options).work.
  *
- * A step: consumer kernels call upRequest / upKeep (uniformPagePoolWGSL), or
- * upCertify over a residency certificate (uniformPagePoolCertificateWGSL), the
+ * A step: consumer kernels call upRequest / upKeep (uniformPagePoolWGSL), the
  * host queues request(x,y,z), then encodeCommit, which asks for the host
  * commands and the pinned pages itself. A request toward a SOLID
  * entry does nothing; one for a resident page keeps it. Otherwise each axis
@@ -128,8 +127,9 @@ export const UNIFORM_PAGE_POOL_STATUS={generation:0,resident:1,claimed:2,free:3,
  * alias: a request's entry is held by, or was asked for in the same step
  * for, a page with another coordinate. requests: more distinct requests in a
  * step than the list holds (requestCapacity); the surplus was dropped.
- * closureCap: upCertify was given a reach over closureCap and asked for
- * nothing. closure: upCertify met a seeded certificate page whose pool page
+ * closureCap: a residency certificate's request (rsAsk,
+ * uniform-mixed-residency.ts) was given a reach over closureCap and asked
+ * for nothing. closure: it met a page seeded by the liquid whose pool page
  * was not resident before the commit (it is asked for all the same). */
 export const UNIFORM_PAGE_POOL_FATAL={exhausted:1,alias:2,requests:4,closureCap:8,closure:16} as const;
 /** Record states; sentinel: block 0 and the last block, which never change state. */
@@ -154,11 +154,11 @@ export interface UniformPagePoolOptions {
  readonly hostCapacity?:number;
  /** Pages pin() may hold (default 64). */
  readonly pinCapacity?:number;
- /** The largest reach upCertify accepts, in the unit its caller's reach is in (default 16: tiles). */
+ /** The largest reach a residency certificate's request accepts (UP_CLOSURE_CAP), in tiles (default 16). */
  readonly closureCap?:number;
- /** The scene's box. With it the pool publishes the overlay's page record
-  * and upCertify offsets the certificate's pages by the origin; without it
-  * the origin is the window origin and nothing is published. */
+ /** The scene's box: what a box seed fills (uniformPagePoolBoxSeed) and a
+  * source's pages are clipped to (uniformPagePoolCellBoxPages). With it the
+  * pool publishes the overlay's page record; no kernel reads it. */
  readonly box?:UniformPagePoolBox;
 }
 export type UniformPagePoolLayout=ReturnType<typeof uniformPagePoolLayout>;
@@ -314,8 +314,8 @@ export function uniformPagePoolPublished(seed:UniformPagePoolSeed,layout:Uniform
  return record;
 }
 /** The pages that overlap the cell box [low, high) grown by `pad` cells an
- * axis, clipped to the layout's box when it has one: what a source or drop
- * box pins. Cells are window cells (page*32 + local). */
+ * axis, clipped to the layout's box when it has one: what a source box
+ * pins. Cells are window cells (page*32 + local). */
 export function uniformPagePoolCellBoxPages(layout:UniformPagePoolLayout,low:readonly [number,number,number],high:readonly [number,number,number],pad=0):{x:number;y:number;z:number}[]{
  return cellBoxPages(layout.box,low,high,pad);
 }
@@ -333,10 +333,30 @@ function cellBoxPages(box:UniformPagePoolLayout["box"],low:readonly number[],hig
  * 16-cell pages. A page the first commit asks for past it is claimed like
  * any other. */
 export const UNIFORM_PAGE_POOL_SEED_MARGIN=56;
-/** Cells a pinned source box is grown by: one tile. The census marks a
- * source's tiles band where they are stored, so the certificate asks for
- * their closure itself. */
+/** Cells a pinned source box, or a requested drop's, is grown by: one tile.
+ * The census marks a source's tiles band where they are stored, so the
+ * certificate asks for their closure itself. */
 export const UNIFORM_PAGE_POOL_PIN_MARGIN=4;
+/** The scheduled drop whose pages a step asks the pool for one step early:
+ * its index in `schedule`, or -1. The step ends at `end_s` after `dt_s`;
+ * `longest_s` is the longest step the solver takes. The drop is the earliest
+ * one after this step (its own takes those up to end_s, with the slack of
+ * the solver's due test) and within a longest step of its end. The step
+ * that adds a drop takes no other, so the step before a drop's always
+ * names it: its pages are stored by that commit, and the census of the
+ * drop's own step, which runs before its commit, finds the drop's tiles
+ * stored and marks them band (UNIFORM_PAGE_POOL_PIN_MARGIN). A drop of the
+ * first step has no step before it: the kick's commit stores its pages
+ * ahead of the first frame's census. Allocates nothing. */
+export function uniformPagePoolDropAhead(schedule:readonly {readonly time_s:number}[],end_s:number,dt_s:number,longest_s:number):number{
+ const slack=1e-6,after=end_s+slack*dt_s,until=end_s+(1+slack)*longest_s;
+ let ahead=-1,first=Infinity;
+ for(let index=0;index<schedule.length;index++){
+  const time_s=schedule[index]!.time_s;
+  if(time_s>after&&time_s<=until&&time_s<first){first=time_s;ahead=index;}
+ }
+ return ahead;
+}
 /** A box of lattice cells, [low, high). */
 export interface UniformPagePoolCellBox {readonly low:readonly [number,number,number];readonly high:readonly [number,number,number]}
 /** A scene's stored set at build (uniformPagePoolResidency). */
@@ -352,12 +372,14 @@ export interface UniformPagePoolResidency {
 }
 /** The one rule for a scene's stored set, from its box in cells, its page
  * pool record (SceneDescription.fluid.pagePool), its sources' cell boxes
- * (the inflow plug, every scheduled drop) and whether a census runs every
- * step (follows).
+ * (what writes liquid every step: the inflow plug) and whether a census
+ * runs every step (follows).
  * Live: a census. The pinned pages are then the sources' alone (grown by
  * UNIFORM_PAGE_POOL_PIN_MARGIN): every other page retires when no request
- * keeps it and is claimed again when one arrives. Otherwise every resident
- * page is pinned.
+ * keeps it and is claimed again when one arrives. A drop is not a source:
+ * its pages are requested around its own step (uniformPagePoolDropAhead)
+ * and retire like any other once its liquid has left them. Otherwise every
+ * resident page is pinned.
  * Resident at build: the box less record.air where the record lists one;
  * otherwise, live, the pages within UNIFORM_PAGE_POOL_SEED_MARGIN cells of a
  * wet cell of the initial liquid and the pinned; otherwise every box page.
@@ -450,12 +472,6 @@ fn upNewBlock(i:u32)->u32{return upState[UP_AT_NEW+i];}
 fn upNewPage(i:u32)->vec3i{return upPageOf(upNewBlock(i));}
 fn upFatal()->u32{return upState[5u];}
 `;
-/** Readers of the layout's box, by box page index x + pages.x*(y + pages.y*z). */
-const BOX_READERS=/* wgsl */`
-fn upBoxPage(i:u32)->vec3i{return UP_BOX_ORIGIN+vec3i(vec3u(i%UP_BOX_PAGES.x,(i/UP_BOX_PAGES.x)%UP_BOX_PAGES.y,i/(UP_BOX_PAGES.x*UP_BOX_PAGES.y)));}
-// The box index of page q, or UP_NONE outside the box.
-fn upBoxIndex(q:vec3i)->u32{let c=vec3u(q-UP_BOX_ORIGIN);if(any(c>=UP_BOX_PAGES)){return UP_NONE;}return c.x+UP_BOX_PAGES.x*(c.y+UP_BOX_PAGES.y*c.z);}
-`;
 const REQUESTERS=/* wgsl */`
 // The resident block is in use this step: the next commit resets its idle count. Nothing for a sentinel or UP_NONE.
 fn upKeep(block:u32){if(block<UP_BLOCKS){atomicStore(&upWork[UP_WORK_KEEP+block],1u);}}
@@ -496,70 +512,30 @@ fn upRequest(q:vec3i){
 }
 `;
 function source(l:UniformPagePoolLayout,group:number,state:number,work:number|undefined,access:"read"|"read_write"):string{
- const F=UNIFORM_PAGE_POOL_FATAL,K=UNIFORM_PAGE_POOL_KIND,box=l.box;
+ const F=UNIFORM_PAGE_POOL_FATAL,K=UNIFORM_PAGE_POOL_KIND;
  return /* wgsl */`
 const UP_EDGE:u32=${UNIFORM_PAGE_POOL_EDGE}u;const UP_BLOCKS:u32=${l.blocks}u;const UP_SOLID_BLOCK:u32=${l.solidBlock}u;const UP_TABLE:u32=${l.table}u;const UP_NONE:u32=0xffffffffu;
 const UP_AIR_WORD:u32=0u;const UP_SOLID_WORD:u32=0xffffffffu;const UP_FREE:u32=0xffffffffu;
 const UP_RESIDENT:u32=${K.resident}u;const UP_AIR:u32=${K.air}u;const UP_SOLID:u32=${K.solid}u;
 const UP_TABLE_BITS:u32=${l.tableBits}u;const UP_REQUESTS:u32=${l.requests}u;const UP_CLOSURE_CAP:u32=${l.closureCap}u;
-const UP_BOX_ORIGIN:vec3i=vec3i(${box.origin.join(",")});const UP_BOX_PAGES:vec3u=vec3u(${box.pages.map(n=>`${n}u`).join(",")});const UP_BOX_COUNT:u32=${box.count}u;
 const UP_AT_TABLE:u32=${l.state.table}u;const UP_AT_BLOCKS:u32=${l.state.blocks}u;const UP_AT_RECORDS:u32=${l.state.records}u;const UP_AT_RESIDENT:u32=${l.state.resident}u;const UP_AT_NEW:u32=${l.state.claimed}u;
 const UP_WORK_LIST:u32=${l.work.list}u;const UP_WORK_KEEP:u32=${l.work.keep}u;const UP_WORK_CLAIMS:u32=${l.work.claims}u;const UP_WORK_DETAIL:u32=${UNIFORM_PAGE_POOL_WORK.detail}u;
 const UP_FATAL_EXHAUSTED:u32=${F.exhausted}u;const UP_FATAL_ALIAS:u32=${F.alias}u;const UP_FATAL_REQUESTS:u32=${F.requests}u;const UP_FATAL_CLOSURE_CAP:u32=${F.closureCap}u;const UP_FATAL_CLOSURE:u32=${F.closure}u;
 @group(${group}) @binding(${state}) var<storage,${access}> upState:array<u32>;
-${READERS}${box.count?BOX_READERS:""}${work===undefined?"":`@group(${group}) @binding(${work}) var<storage,read_write> upWork:array<atomic<u32>>;
+${READERS}${work===undefined?"":`@group(${group}) @binding(${work}) var<storage,read_write> upWork:array<atomic<u32>>;
 ${REQUESTERS}`}`;
 }
 /** What a consumer includes to read the pool: the state buffer (read-only)
  * at @group(group) @binding(state), with constants UP_EDGE, UP_BLOCKS,
- * UP_SOLID_BLOCK, UP_TABLE, UP_NONE, UP_FREE, UP_CLOSURE_CAP, the box
- * UP_BOX_ORIGIN / UP_BOX_PAGES / UP_BOX_COUNT, the table words UP_AIR_WORD
+ * UP_SOLID_BLOCK, UP_TABLE, UP_NONE, UP_FREE, UP_CLOSURE_CAP, the table words UP_AIR_WORD
  * and UP_SOLID_WORD and the kinds UP_RESIDENT, UP_AIR and UP_SOLID, and
  * readers upKind, upWord, upBlockOf, upBlockWrapped, upStored, upPageOf,
  * upBlockWord / upWindowPage, upGeneration, upResidentCount /
- * upResidentBlock, upNewCount / upNewBlock / upNewPage and upFatal; with a
- * box, upBoxPage and upBoxIndex. With `work`, the work buffer (read_write) at
+ * upResidentBlock, upNewCount / upNewBlock / upNewPage and upFatal. With `work`, the work buffer (read_write) at
  * that binding of the same group, the requesters upRequest and upKeep, and
  * upFail / upFailWith with the bits UP_FATAL_*. */
 export function uniformPagePoolWGSL(layout:UniformPagePoolLayout,group:number,state:number,work?:number):string{
  return source(layout,group,state,work,"read");
-}
-/** The accessors of a residency certificate, as the names of WGSL functions
- * (and one expression) of the module that includes the result. */
-export interface UniformPagePoolCertificate {
- /** fn()->u32: the length of the compact list of resident certificate pages. */
- readonly count:string;
- /** fn(i:u32)->vec3u or vec3i: entry i's page coordinate in pages of 16 cells, relative to the box. */
- readonly page:string;
- /** fn(i:u32)->bool: entry i holds a seed (liquid, band or particles) and is not margin alone. Omitted: no closure audit. */
- readonly seeded?:string;
- /** A u32 expression: the certificate's reach this step, in the unit of closureCap. */
- readonly reach:string;
- /** The generated function's name (default upCertify). */
- readonly name?:string;
-}
-/** WGSL for a module that includes uniformPagePoolWGSL with `work`: a
- * function upCertify(lane, width) that asks for the pool page (32 cells,
- * UP_BOX_ORIGIN + (page >> 1)) of entries lane, lane+width, ... of the
- * certificate's list. Launched as a fixed grid with `width` its lane count
- * (any entry point, e.g. upCertify(gid.x, 64u*groups)), it asks for the
- * whole list whatever its length. A reach over UP_CLOSURE_CAP raises
- * closureCap with the reach as its detail and asks for nothing; a seeded
- * entry whose pool page is not resident yet raises closure and is asked for
- * all the same. Eight certificate pages of one pool page cost one request. */
-export function uniformPagePoolCertificateWGSL(certificate:UniformPagePoolCertificate):string{
- const {count,page,seeded,reach,name="upCertify"}=certificate;
- return /* wgsl */`
-fn ${name}(lane:u32,width:u32){
- let count=${count}();let reach=${reach};
- for(var i=lane;i<count;i+=width){
-  let q=UP_BOX_ORIGIN+(vec3i(${page}(i))>>vec3u(1u));
-  if(reach>UP_CLOSURE_CAP){upFailWith(UP_FATAL_CLOSURE_CAP,q,reach);return;}
-  ${seeded?`if(${seeded}(i)&&upBlockOf(q)==UP_NONE){upFail(UP_FATAL_CLOSURE,q);}`:""}
-  upRequest(q);
- }
-}
-`;
 }
 /** A buffer that carries the tail (layout.tail) at word `offset`: the commit
  * kernels bind it writable, the seed is uploaded to it. */
@@ -576,7 +552,7 @@ export class UniformPagePool {
  readonly state:GPUBuffer;
  /** Requests, keeps, the free ring and claim words (file header). */
  readonly work:GPUBuffer;
- /** The overlay's page record of the layout's box (file header); absent without a box. */
+ /** The overlay's page record, a word a block (file header); absent without a box. */
  readonly published?:GPUBuffer;
  /** `published` as the solver hands it out (GPUFluid.volumePageSource). */
  readonly volumePageSource?:GPUFluidVolumePageSource;
@@ -640,7 +616,7 @@ export class UniformPagePool {
   if(this.published)queue.writeBuffer(this.published,0,uniformPagePoolPublished(seed,l));
   for(const m of this.mirrors)queue.writeBuffer(m.buffer,4*m.offset,seed.tail);
  }
- /** Fix the pinned pages (source and drop boxes): every commit from now on
+ /** Fix the pinned pages (source boxes): every commit from now on
   * asks for each, exactly as upRequest asks, so a pinned page is claimed by
   * the next commit unless resident already and never retires. Replaces the
   * list; the pages are written to the work buffer here, once, and the
@@ -689,6 +665,9 @@ fn upAsk(a:u32){upRequest(vec3i(bitcast<i32>(atomicLoad(&upWork[a])),bitcast<i32
 }`),this.published?compile("Uniform page pool publish",/* wgsl */`${source(l,0,0,undefined,"read")}
 @group(0) @binding(1) var<storage,read_write> upPublished:array<u32>;
 // upPublish: one lane a box page, after upSlots: the resident count and each page's flag, from the new table.
+// The box is named here and nowhere else in the pool's kernels: the record is the overlay's.
+const UP_BOX_ORIGIN:vec3i=vec3i(${l.box.origin.join(",")});const UP_BOX_PAGES:vec3u=vec3u(${l.box.pages.map(n=>`${n}u`).join(",")});const UP_BOX_COUNT:u32=${l.box.count}u;
+fn upBoxPage(i:u32)->vec3i{return UP_BOX_ORIGIN+vec3i(vec3u(i%UP_BOX_PAGES.x,(i/UP_BOX_PAGES.x)%UP_BOX_PAGES.y,i/(UP_BOX_PAGES.x*UP_BOX_PAGES.y)));}
 @compute @workgroup_size(64) fn upPublish(@builtin(global_invocation_id) gid:vec3u){
  if(gid.x>=UP_BOX_COUNT){return;}
  if(gid.x==0u){upPublished[${UNIFORM_PAGE_POOL_PUBLISHED.resident}u]=upResidentCount();}

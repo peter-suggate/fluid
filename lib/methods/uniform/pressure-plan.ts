@@ -1,98 +1,53 @@
-/** Pure hierarchy planning, shared by method hosts and scene tools. */
-/** Preferred coarse-grid size for hierarchy planning, not a solver limit. */
-export const UNIFORM_CM11A_COARSEST_TARGET_CELLS = 256;
+/** The pressure root's correction levels, planned without a GPU. */
+import { uniformFaceLevelSlots } from "./uniform-lattice-address";
 
-/** Physical cells on each axis, halo excluded. */
-export type UniformCM11aLevelSize = readonly [number, number, number];
+/** The levels: 4h, 8h, 16h and 32h. Each is a partition of a page (8, 4, 2
+ * and 1 cells an axis), so a level's cells are rows of blocks and a pool of
+ * any shape has all four, the last a cell to a page and the coarsest. */
+export const UNIFORM_PRESSURE_PAGE_LEVELS = 4;
 
-/** What a dense CM11a hierarchy over `dimensions` would look like. */
-export interface UniformCM11aHierarchyPlan {
-  readonly levelCount: number;
-  /** Physical lattice of every level, finest first. */
-  readonly levelDimensions: readonly UniformCM11aLevelSize[];
-  /** Coarsest lattice cell count, including its one-cell halo. */
-  readonly coarsestCells: number;
-  /** True when each axis coarsens on its own schedule. */
-  readonly semiCoarsened: boolean;
-  /** Why the hierarchy is impossible, or `undefined` when it is buildable. */
-  readonly rejection?: string;
+/** A level's rows and its fields, as words of the scratch arena. The rows
+ * are the cells by block then local cell (x fastest), then the wall slots by
+ * block face (uniformFaceLevel): a slot to a cell of each face of a block,
+ * the unknown behind that face where a SOLID page lies across it. Level 0's
+ * row of a tile or of a slot is the mixed root's (its tile key, and the tile
+ * keys then uniformFaceTile). */
+export interface UniformPressureLevelWords {
+  /** Cells an axis of a page: 8 >> level. */
+  readonly side: number;
+  readonly cells: number;
+  readonly slots: number;
+  /** Both parities of the correction, a word a row. */
+  readonly pressure: readonly [number, number];
+  /** The V-cycle's RHS and bound, then a Full-Cycle's. */
+  readonly rhs: readonly [number, number];
+  readonly minimum: readonly [number, number];
+  /** Seven words a row: the coefficients of its -x, +x, -y, +y, -z and +z
+   * faces, then the liquid mask of the row and of those six neighbours. */
+  readonly coefficients: number;
+  /** A word a cell: phi as coarsened, then continued one cell into the closed cells. */
+  readonly phi: readonly [number, number];
+  /** Four words a cell: the open fraction and the +x, +y, +z face fractions. */
+  readonly topology: number;
+  /** A word a slot: the fraction of the wall face it lies behind (a low face's; a high face's is its cell's own). */
+  readonly wall: number;
 }
 
-const haloedCells = (size: UniformCM11aLevelSize): number =>
-  size.reduce((cells, value) => cells * (value + 2), 1);
+/** Rows of level `level` a block: 896, 160, 32 and 7. */
+export const uniformPressureLevelRows = (level: number): number => (8 >> level) ** 3 + uniformFaceLevelSlots(1, level);
 
-/**
- * The original hierarchy: halve all three axes together, stopping when the
- * thinnest reaches two cells. Returns undefined when it cannot be built.
- */
-function lockstepLevels(dimensions: UniformCM11aLevelSize, dimension: 2 | 3 = 3): UniformCM11aLevelSize[] | undefined {
-  const axes = dimension === 2 ? dimensions.slice(0, 2) : dimensions;
-  const minimum = Math.min(...axes);
-  if ((minimum & (minimum - 1)) !== 0) return undefined;
-  const levelCount = Math.floor(Math.log2(minimum));
-  const coarsening = 2 ** (levelCount - 1);
-  if (!axes.every((value) => value % coarsening === 0)) return undefined;
-  const levels: UniformCM11aLevelSize[] = [];
-  for (let index = 0; index < levelCount; index += 1) {
-    const step = 2 ** index;
-    levels.push([dimensions[0] / step, dimensions[1] / step, dimension === 2 ? 1 : dimensions[2] / step]);
+/** The levels of a pool of `blocks` blocks (its sentinels included: every
+ * block has its rows), laid from arena word `first`; end: the word after. */
+export function planUniformPressureLevels(blocks: number, first: number): { readonly levels: readonly UniformPressureLevelWords[]; readonly end: number } {
+  if (!Number.isSafeInteger(blocks) || blocks < 3 || !Number.isSafeInteger(first) || first < 0)
+    throw new RangeError(`Uniform pressure levels need a pool of at least three blocks at an arena word, not ${blocks} at ${first}`);
+  let cursor = first;
+  const take = (words: number): number => { const at = cursor; cursor += words; return at; };
+  const levels: UniformPressureLevelWords[] = [];
+  for (let level = 0; level < UNIFORM_PRESSURE_PAGE_LEVELS; level++) {
+    const side = 8 >> level, cells = side ** 3 * blocks, slots = uniformFaceLevelSlots(blocks, level), rows = cells + slots;
+    levels.push({ side, cells, slots, pressure: [take(rows), take(rows)], rhs: [take(rows), take(rows)], minimum: [take(rows), take(rows)],
+      coefficients: take(7 * rows), phi: [take(cells), take(cells)], topology: take(4 * cells), wall: take(slots) });
   }
-  return haloedCells(levels[levels.length - 1]!) <= UNIFORM_CM11A_COARSEST_TARGET_CELLS ? levels : undefined;
-}
-
-/**
- * Semi-coarsening: halve each axis on its own schedule, while it is even and
- * still above two cells. An axis that has bottomed out simply stops, and the
- * others keep going.
- */
-function semiCoarsenedLevels(dimensions: UniformCM11aLevelSize): UniformCM11aLevelSize[] {
-  const levels: UniformCM11aLevelSize[] = [dimensions];
-  for (;;) {
-    const previous = levels[levels.length - 1]!;
-    const next = previous.map((value) =>
-      value % 2 === 0 && value > 2 ? value / 2 : value) as unknown as UniformCM11aLevelSize;
-    if (next.every((value, axis) => value === previous[axis])) return levels;
-    levels.push(next);
-  }
-}
-
-/**
- * Whether a lattice can carry the dense hierarchy, without a GPU.
- *
- * This is a *constructor* precondition, not a scene-validity one: a scene can
- * satisfy every rule in `validateScene`, build, render its dry world and still
- * fail to load the instant the solver is created. Exposing it as arithmetic is
- * what lets the catalog be checked on the CPU.
- *
- * Two rules, tried in order, and the order is the whole point. The original
- * hierarchy coarsens all three axes in **lockstep** and stops when the thinnest
- * reaches two cells, so a thin axis caps how far the wide ones may coarsen: a
- * 128x128x8 lattice reaches only 32x32x2 and leaves 4624 coarsest cells for 256
- * lanes. Coarsening each axis on its own schedule reaches 2x2x2 instead --
- * fewer coarsest cells, not more, because the 256 lanes were never the real
- * limit. But semi-coarsening also builds a *different* hierarchy wherever both
- * rules apply, and the D4 folds downstream make that a change in rounding, so
- * the lockstep plan is preferred whenever it exists and semi-coarsening is
- * reached only by lattices that have no hierarchy at all today. Every scene
- * that loads now keeps the hierarchy, and the numbers, that it already has.
- * Odd terminal axes are retained too. The coarse solver uses strided storage
- * for every grid; the target above only preserves the hierarchy preference.
- */
-export function planUniformCM11aHierarchy(
-  dimensions: UniformCM11aLevelSize,
-  dimension: 2 | 3 = 3,
-): UniformCM11aHierarchyPlan {
-  const reject = (rejection: string): UniformCM11aHierarchyPlan =>
-    ({ levelCount: 0, levelDimensions: [], coarsestCells: 0, semiCoarsened: false, rejection });
-  if (!dimensions.every((value, axis) => Number.isSafeInteger(value) && (dimension === 2 && axis === 2 ? value === 1 : value >= 2))) {
-    return reject("CM11a dense hierarchy requires positive integral dimensions of at least two cells");
-  }
-  const lockstep = lockstepLevels(dimensions, dimension);
-  const levels = lockstep ?? semiCoarsenedLevels(dimensions);
-  const coarsestCells = haloedCells(levels[levels.length - 1]!);
-  const plan = {
-    levelCount: levels.length, levelDimensions: Object.freeze(levels),
-    coarsestCells, semiCoarsened: lockstep === undefined,
-  };
-  return plan;
+  return { levels, end: cursor };
 }

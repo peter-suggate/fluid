@@ -6,10 +6,10 @@ const UE_TILES:u32=UM_TILES;
 const UE_COARSE=0u;
 const UE_UNIT_WALL:u32=UE_COARSE+3u*UE_TILES;
 // The low-face planes: one slot per h face (a low-face table's keys), then
-// one per 4h face of the pyramid's box.
+// one per 4h face of each block's three low planes, 64 a plane.
 const UE_COARSE_WALL:u32=UE_UNIT_WALL+UM_LOW_FACE_KEYS;
 // Per tile finite-cell masks (ueMaskIn), two words per tile.
-const UE_FLAGS:u32=UE_COARSE_WALL+UM_BOX_TILES.y*UM_BOX_TILES.z+UM_BOX_TILES.x*UM_BOX_TILES.z+UM_BOX_TILES.x*UM_BOX_TILES.y;
+const UE_FLAGS:u32=UE_COARSE_WALL+192u*UM_BLOCKS;
 // The slot of a unit address that names no patch: never written, and read
 // only by loads issued ahead of the test that discards them.
 const UE_NONE:u32=UE_FLAGS+2u*UE_TILES;
@@ -33,15 +33,21 @@ fn ueUnitSlot(p:vec3u,axis:u32)->u32{
  if((word&0x80000000u)==0u&&l[axis]==3u){var above=t;above[axis]+=1u;if(umTilePresent(vec3i(above))){upper=ueTileWord(above);}}
  return ueUnitSlotIn(word,upper,l,axis);
 }
-fn ueCoarseWallIndex(t:vec3u,axis:u32)->u32{
- let e=UM_BOX_TILES;
- if(axis==0u){return t.y+e.y*t.z;}
- if(axis==1u){return e.y*e.z+t.x+e.x*t.z;}
- return e.y*e.z+e.x*e.z+t.x+e.x*t.y;
+// The cell above a low face: the stored cell whose block's low planes hold
+// the face.
+fn ueLowCell(anchor:vec3i,axis:u32)->vec3u{var above=max(anchor,vec3i(0));above[axis]=anchor[axis]+1;return vec3u(above);}
+// p: the cell above a 4h low face (ueLowCell). The face's tile in its
+// block's low plane on that axis.
+fn ueCoarseWallIndex(p:vec3u,axis:u32)->u32{
+ let t=(p>>vec3u(2u))&vec3u(7u);let uv=select(select(t.xy,t.xz,axis==1u),t.yz,axis==0u);
+ return (3u*umCellBlock(p)+axis)*64u+uv.x+8u*uv.y;
 }
 fn umSlot(anchor:vec3i,axis:u32,width:u32)->u32{
  let p=vec3u(max(anchor,vec3i(0)));
- if(umFaceLow(anchor,axis)){return select(UE_COARSE_WALL+ueCoarseWallIndex(p/4u,axis),UE_UNIT_WALL+umLowFaceIndex(p,axis),width==1u);}
+ if(umFaceLow(anchor,axis)){
+  let above=ueLowCell(anchor,axis);if(width==1u){return UE_UNIT_WALL+umLowFaceIndex(above,axis);}
+  return UE_COARSE_WALL+ueCoarseWallIndex(above,axis);
+ }
  if(width==1u){return ueUnitSlot(p,axis);}
  return UE_COARSE+axis*UE_TILES+umTileAt(p/4u);
 }
@@ -54,13 +60,13 @@ export function uniformMixedExtensionSnapshotWGSL(group:number,binding:number):s
 fn ueTileWord(tile:vec3u)->u32{return umTopology[umTileAt(tile)];}
 ${uniformMixedExtensionSlotWGSL}
 fn ueSnapshotKnown(anchor:vec3i,axis:u32,width:u32)->f32{
- if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)];}
+ if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(ueLowCell(anchor,axis),axis)];}
  if(!umCellPresent(anchor)||width==0u){return 0.0;}
  return ueSnapshotSlots[umSlot(anchor,axis,width)];
 }
 fn ueSnapshotUnit(anchor:vec3i,axis:u32)->f32{return ueSnapshotKnown(anchor,axis,1u);}
 fn ueSnapshotFace(anchor:vec3i,axis:u32)->f32{
- if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)];}
+ if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(ueLowCell(anchor,axis),axis)];}
  if(!umCellPresent(anchor)){return 0.0;}
  if(umTileWidth(umTileAt(vec3u(anchor)/4u))==1u){return ueSnapshotKnown(anchor,axis,1u);}
  let owner=umOwnerAt(anchor);let face=umPositiveFaceAtAnchor(owner,axis,anchor);

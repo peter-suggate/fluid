@@ -107,7 +107,10 @@ const GC_FINE:u32=4u;const GC_COARSE:u32=4u+UM_TILES;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner: the base block (UNIFORM_DETAIL_4H_LOAD).
 fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
-${uniformMixedVertexSamplingSource("",true,undefined,"umLoadCorner")}
+// The same loads of the eight vertices p + s*umCorner(k,2u): one page-table read where one block holds them.
+fn umLoadVertex8(p:vec3u,s:u32)->array<f32,8>{return udLoad8_phi(vec3i(p),s);}
+fn umLoadCorner8(p:vec3u,s:u32)->array<f32,8>{return udLoad48_phi(vec3i(p),s);}
+${uniformMixedVertexSamplingSource("",true,undefined,"umLoadCorner",true)}
 ${geometricPlaneBoxWGSL}
 fn uvCorner(k:u32)->vec3i{return vec3i(umCorner(k,2u));}
 fn d4Sum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
@@ -120,7 +123,7 @@ var<workgroup> gcTerms:array<f32,64>;
 fn gcShare(owner:UMOwner){
  if(owner.width!=1u||umTileOpen(owner.tile)>=0.99999){return;}
  let base=umTileCoord(owner.tile)*4u;var corners:array<f32,8>;
- for(var j=0u;j<8u;j++){corners[j]=umLoadCorner(base+vec3u(uvCorner(j))*4u);}
+ corners=umLoadCorner8(base,4u);
  // gcEvaluate's far air and deep liquid take no terms.
  var low=corners[0];var high=corners[0];var positive=true;var negative=true;
  for(var j=0u;j<8u;j++){let v=corners[j];low=min(low,v);high=max(high,v);positive=positive&&v>1e-20;negative=negative&&v< -1e-20;}
@@ -161,8 +164,8 @@ fn gcOwner(owner:UMOwner,terms:bool){
  // tile's stencil holds the owner, so it is unit or mixed (a unit owner) or
  // the corner is 4-aligned (a 4h owner): the resolved field's umVertexValue
  // is this load, without its one or two stencil loads per corner.
- if(owner.width==4u){for(var j=0u;j<8u;j++){vertices[j]=umLoadCorner(origin+vec3u(uvCorner(j))*4u);}}
- else{for(var j=0u;j<8u;j++){vertices[j]=umLoadVertex(origin+vec3u(uvCorner(j))*owner.width);}}
+ if(owner.width==4u){vertices=umLoadCorner8(origin,4u);}
+ else{vertices=umLoadVertex8(origin,owner.width);}
  var open=1.0;if(owner.width==4u){open=umTileOpen(owner.tile);}
  let value=gcEvaluate(owner,vertices,open,false);
  // Native uvTarget scales by the open fraction; a 4h owner's fill is already
@@ -174,7 +177,7 @@ fn gcOwner(owner:UMOwner,terms:bool){
   if(owner.width!=4u){
    // The tile's all-4h owner: its eight tile corners, stored vertices.
    let tileOwner=UMOwner(owner.tile,0u,4u,0u);var corners:array<f32,8>;
-   for(var j=0u;j<8u;j++){corners[j]=umLoadCorner(origin+vec3u(uvCorner(j))*4u);}
+   corners=umLoadCorner8(origin,4u);
    coarse=gcEvaluate(tileOwner,corners,umTileOpen(owner.tile),terms);
   }
   textureStore(pressureTarget,vec3i(origin),vec4f(coarse.x));textureStore(pressureCenterPhi,vec3i(origin),vec4f(coarse.y));

@@ -83,7 +83,7 @@ fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
  var total=vec3f(0.0);var weight=0.0;
  for(var n=0u;n<6u;n++){
   let axis=n/2u;var q=p;q[axis]+=select(-reach[axis],reach[axis],(n&1u)!=0u);
-  if(!umSolidValid(q)||umSolidVoxel(q)||umBodyAt(umSolidWorldCell(q))>=0||umCellInsideTerrain(q)){continue;}
+  if(umSolidVoxel(q)||umBodyAt(umSolidWorldCell(q))>=0||umCellInsideTerrain(q)){continue;}
   let o=umOwnerAt(q);if(o.width==0u){continue;}
   let wet=umBodyOwnerWet(o);total+=wet*umBodyOwnerVelocity(o);weight+=wet;
  }
@@ -107,12 +107,14 @@ fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
 }
 @compute @workgroup_size(64) fn markTiles(@builtin(global_invocation_id) gid:vec3u){
  let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
- let h=umSolidParams.cellGravity.xyz;let t=vec3f(umTileCoord(tile));
+ // bodyTiles is a bit per tile of the box: a tile past it has none.
+ let coord=umTileCoord(tile);if(!umTileInBox(vec3i(coord))){return;}
+ let h=umSolidParams.cellGravity.xyz;let t=vec3f(coord);
  let low=vec3f(-0.5*umSolidParams.container.x,0.0,-0.5*umSolidParams.container.z)+4.0*t*h;let high=low+4.0*h;
  for(var i=0u;i<umBodyCount();i++){
   let b=umSolidBodies[i];let centre=b.positionShape.xyz;
   let reach=max(b.dimensions.w,0.0)+length(b.linearVelocity.xyz)*bodyHorizon.x+max(h.x,max(h.y,h.z));
-  if(distance(clamp(centre,low,high),centre)<=reach){let box=umBoxTileIndex(umTileCoord(tile));atomicOr(&bodyTiles[box/32u],1u<<(box%32u));return;}
+  if(distance(clamp(centre,low,high),centre)<=reach){let box=umBoxTileIndex(coord);atomicOr(&bodyTiles[box/32u],1u<<(box%32u));return;}
  }
 }
 `,["couple"])});

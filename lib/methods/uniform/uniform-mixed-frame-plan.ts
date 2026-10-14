@@ -1,8 +1,9 @@
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import {UNIFORM_TILE_BITS_WORDS,uniformTileBitsWGSL} from "./uniform-block-tables";
 import {uniformKeyGroups} from "./uniform-lattice-address";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
-import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
+import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyNeighboursWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 import {UNIFORM_STAGE_CERTIFICATE} from "./uniform-stage-grids";
 
@@ -10,12 +11,12 @@ import {UNIFORM_STAGE_CERTIFICATE} from "./uniform-stage-grids";
 const counted:readonly string[]=["seed","localSpeed"];
 /** The entries of the support census and of the certificate, in launch order. */
 const SUPPORT_ENTRIES:readonly string[]=["seed","dilate0","dilate1","dilate2"];
-const CERTIFICATE_ENTRIES:readonly string[]=["localSpeed","spread0","spread1","spread2","prefix0","prefix1","prefix2","certify"];
+const CERTIFICATE_ENTRIES:readonly string[]=["localSpeed","spread0","spread1","spread2","coarseBits","coarseBlocks","certify"];
 const PLAN_PASS:GPUComputePassDescriptor={label:"Uniform shared frame plan"},SPEED_PASS:GPUComputePassDescriptor={label:"Uniform shared frame speed"},CERTIFICATE_PASS:GPUComputePassDescriptor={label:"Uniform local speed certificate"};
 /** The support policy of an encode given none. */
 const DEFAULT_POLICY={fineReach:2,shellReach:1,twoLevel:true,shellOnly:true};
 /** One launch of a plan pass: an owner entry's GPU-counted launch, or a
- * per-tile (prefix: per tile line) entry's grid, fixed with the lattice. */
+ * per-tile (coarseBlocks: per block) entry's grid, fixed with the pool. */
 interface PlanLaunch{readonly pipeline:GPUComputePipeline;readonly counted:boolean;readonly x:number;readonly y:number}
 
 /** Start-of-frame support census, independent of simulation ownership. The
@@ -26,8 +27,8 @@ interface PlanLaunch{readonly pipeline:GPUComputePipeline;readonly counted:boole
 export class UniformMixedFramePlan {
   readonly allocatedBytes:number;
   private readonly params:GPUBuffer;
-  /** umCoarseTilesIn's summed table: one word per tile of the box, at its
-   * box index (uniformBoxTileIndex), whatever is stored there. */
+  /** The 4h tile bits (uniformTileBitsWGSL): by block, a bit per tile key
+   * stored at 4h. */
   private readonly coarse:GPUBuffer;
   private readonly resources:GPUBindGroupLayout;
   private readonly group:UniformDetailGroup;
@@ -48,8 +49,8 @@ export class UniformMixedFramePlan {
     extended:GPUTexture,extendedNegative:GPUBuffer,directionalCertificate=false,private readonly surfaceOnly=false){
     if(!directionalCertificate)throw new Error("The mixed frame plan certifies signed per-axis reach only");
     this.params=device.createBuffer({label:"Uniform shared support policy",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-    this.coarse=device.createBuffer({label:"Uniform frame plan summed 4h tiles",size:4*ownership.capacity.address.boxTiles,usage:GPUBufferUsage.STORAGE});
-    this.allocatedBytes=32+4*ownership.capacity.address.boxTiles;
+    this.coarse=device.createBuffer({label:"Uniform frame plan 4h tile bits",size:4*UNIFORM_TILE_BITS_WORDS*ownership.capacity.address.blocks,usage:GPUBufferUsage.STORAGE});
+    this.allocatedBytes=32+this.coarse.size;
     this.resources=uniformDetailBindLayout(device,{entries:[...[0,1,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
     this.group=uniformDetailGroup(device,{layout:this.resources,entries:[...[volume,phi].map((t,binding)=>({binding,resource:t})),{binding:2,resource:{buffer:this.params}},{binding:3,resource:velocity},{binding:4,resource:{buffer:negative}}]});
     this.extendedResources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
@@ -59,7 +60,7 @@ export class UniformMixedFramePlan {
   async initialize():Promise<void>{
     const h=this.ownership.capacity.lattice.cellSize_m;
     // The generator reads the lattice and tile count only (fixed by capacity).
-    const topology=uniformMixedTopologyWGSL(this.ownership.capacity,0).replace('umSupport:array<u32>','umSupport:array<atomic<u32>>').replace(/umSupport\[([^\]]+)\]/g,'atomicLoad(&umSupport[$1])');
+    const topology=uniformMixedTopologyWGSL(this.ownership.capacity,0).replace('umSupport:array<u32>','umSupport:array<atomic<u32>>').replace(/umSupport\[([^\]]+)\]/g,'atomicLoad(&umSupport[$1])')+uniformMixedTopologyNeighboursWGSL();
     // seed and localSpeed stride the GPU-counted owners of every tier
     // (umAllOwner); the per-tile passes cover the lattice.
     const module=uniformDetailModule(this.device,{label:"Uniform mixed frame plan",code:uniformMixedCountedEntriesWGSL(topology+/* wgsl */`
@@ -74,20 +75,21 @@ struct PlanPolicy {settings:vec4u,step:vec4f}
 @group(2) @binding(1) var<storage,read> extendedNegative:array<f32>;
 @group(2) @binding(2) var<storage,read_write> speeds:array<u32>;
 @group(2) @binding(3) var<storage,read_write> coarse:array<u32>;
-// Two index spaces. umSupport and speeds hold a word per tile KEY: a lane
-// indexes them by its own tile's key, and a neighbour's word by umTileKey of
-// the neighbour's coordinate, skipped where umKeyStored refuses it. coarse
-// holds a word per tile of the BOX at umBoxTileIndex of the coordinate
-// (UM_BOX_TILE_COUNT words), all written by every certificate.
+// umSupport and speeds hold a word per tile KEY: a lane indexes them by its
+// own tile's key, and a neighbour's word by umTileKey of the neighbour's
+// coordinate, skipped where umKeyStored refuses it. coarse holds the 4h tile
+// bits by block (uniformTileBitsWGSL), all written by every certificate.
 // A tile with nothing stored is skipped, never read. An AIR tile holds the
 // AIR image: no support flag, zero faces, a 4h tile word. So it adds nothing
 // to a dilation or to a reach maximum (zero faces give umReach(0), the least
 // any stored tile's word holds, the lane's own among them), and it is a 4h
-// tile to the count in coarse (umBoxCoarse). A SOLID tile and a coordinate
-// outside the box add nothing to any of the three.
+// tile to the query on coarse (coarseAny). A SOLID tile adds nothing to any
+// of the three.
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner: the base block (UNIFORM_DETAIL_4H_LOAD).
 fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
+// The same loads of the eight tile corners p + s*umCorner(k,2u): one page-table read where one block holds them.
+fn umLoadCorner8(p:vec3u,s:u32)->array<f32,8>{return udLoad48_phi(vec3i(p),s);}
 // Tiles, in Chebyshev tile distance, that any characteristic of this frame
 // can reach, including cubic taps, wall continuation and the Newton search.
 fn umCertificateRadius(speed:f32)->u32{
@@ -155,7 +157,7 @@ var<workgroup> seedSpeed:atomic<u32>;
   var occupied=false;
   if(width==4u){
    ${this.surfaceOnly?"":`occupied=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(origin),0).x!=0.0;`}
-   for(var k=0u;k<8u;k++){occupied=occupied||umLoadCorner(origin+umCorner(k,2u)*4u)<(16.0*umSceneMaximumSpacing());}
+   let c8=umLoadCorner8(origin,4u);for(var k=0u;k<8u;k++){occupied=occupied||c8[k]<(16.0*umSceneMaximumSpacing());}
   }else{
    ${this.surfaceOnly?"":"occupied=textureLoad(volume,vec3i(origin),0).x!=0.0;"}
    for(var k=0u;k<8u;k++){
@@ -235,38 +237,18 @@ ${[0,1,2].map(axis=>/* wgsl */`
  if(!umTileLive(tile)){return;}
  let base=${axis===1?"UM_TILES":"0u"};let into=${axis===1?"0u":"UM_TILES"};
  let p=vec3i(umTileCoord(tile));var plus=vec3u(0);var minus=vec3u(0);
- let first=umTileNear(p-vec3i(reach));let last=umTileNear(p+vec3i(reach));
+ // Held to the window, never to a box of the scene's: a tile nothing stores is skipped.
+ let first=clamp(p-vec3i(reach),vec3i(0),vec3i(511));let last=clamp(p+vec3i(reach),vec3i(0),vec3i(511));
  for(var q=first.${"xyz"[axis]};q<=last.${"xyz"[axis]};q++){
   var r=p;r.${"xyz"[axis]}=q;let k=umTileKey(r);if(!umKeyStored(k)){continue;}let value=speeds[base+k];
   plus=max(plus,umReachPlus(value));minus=max(minus,umReachMinus(value));
  }
  speeds[into+tile]=umPackReach(plus,minus);
 }`).join("\n")}
-// What a tile of the box counts in coarse, the one place the table reads a
-// per-key word: 1 where the tile is stored at 4h or is AIR, 0 where it is
-// stored at h or is SOLID.
-fn umBoxCoarse(p:vec3u)->u32{
- let k=umTileKey(vec3i(p));if(!umKeyStored(k)){return select(0u,1u,umTileKind(vec3i(p))==UM_AIR);}
- return select(0u,1u,umTileWidth(k)!=1u);
-}
-// Summed-volume table of umBoxCoarse over the box, in coarse: inclusive
-// prefix counts along x, then y, then z, in place, one lane per tile line of
-// the box.
-${[0,1,2].map(axis=>/* wgsl */`
-@compute @workgroup_size(64) fn prefix${axis}(@builtin(global_invocation_id) gid:vec3u){
- let line=gid.x+umDispatchX*64u*gid.y;if(line>=UM_BOX_TILES.${"xyz"[(axis+1)%3]}*UM_BOX_TILES.${"xyz"[(axis+2)%3]}){return;}
- var p=vec3u(0);p.${"xyz"[(axis+1)%3]}=line%UM_BOX_TILES.${"xyz"[(axis+1)%3]};p.${"xyz"[(axis+2)%3]}=line/UM_BOX_TILES.${"xyz"[(axis+1)%3]};var sum=0u;
- for(var i=0u;i<UM_BOX_TILES.${"xyz"[axis]};i++){p.${"xyz"[axis]}=i;let t=umBoxTileIndex(p);sum+=${axis===0?"umBoxCoarse(p)":"coarse[t]"};coarse[t]=sum;}
-}`).join("\n")}
-fn umPrefix(p:vec3i)->u32{if(any(p<vec3i(0))){return 0u;}return coarse[umBoxTileIndex(vec3u(p))];}
-// Tiles that umBoxCoarse counts in the inclusive tile box [low,high] clipped
-// to the box (which holds the tile itself). Wrapping u32 arithmetic is exact:
-// the count fits.
-fn umCoarseTilesIn(low:vec3i,high:vec3i)->u32{
- let a=max(low,vec3i(0))-vec3i(1);let b=min(high,vec3i(UM_BOX_TILES)-vec3i(1));
- return umPrefix(b)-umPrefix(vec3i(a.x,b.y,b.z))-umPrefix(vec3i(b.x,a.y,b.z))-umPrefix(vec3i(b.x,b.y,a.z))
-  +umPrefix(vec3i(a.x,a.y,b.z))+umPrefix(vec3i(a.x,b.y,a.z))+umPrefix(vec3i(b.x,a.y,a.z))-umPrefix(a);
-}
+// The 4h tile bits: a stored tile at 4h. An AIR page is 4h throughout
+// (coarseAny); a SOLID page holds none. Past 64 pages a box is answered as
+// holding one: no tile with so long a reach is certified regular.
+${uniformTileBitsWGSL({name:"coarse",word:(b,i)=>`coarse[${UNIFORM_TILE_BITS_WORDS}u*${b}+${i}]`,store:(b,i,v)=>`coarse[${UNIFORM_TILE_BITS_WORDS}u*${b}+${i}]=${v};`,flag:t=>`umTileWidth(${t})!=1u`,air:true})}
 // Appends aggregate per workgroup: one global atomic per list, not per tile.
 var<workgroup> certifyCounts:array<atomic<u32>,2>;
 var<workgroup> certifyBases:array<u32,2>;
@@ -276,14 +258,14 @@ var<workgroup> certifyBases:array<u32,2>;
  // Every characteristic from this tile stays in its signed reach box: the
  // spread reach bounds the extended velocities of the global-reach box around
  // it (localSpeed + spread). With no 4h tile in the box (an AIR tile is one:
- // umBoxCoarse) every tap is a unit face and the regular sampler is the
+ // coarseAny) every tap is a unit face and the regular sampler is the
  // general one.
  var list=1u;var local=0u;
  if(fine){
   let reach=speeds[UM_TILES+tile];let plus=umReachPlus(reach);let minus=umReachMinus(reach);
   let bounded=all(plus<vec3u(UM_REACH_SATURATED))&&all(minus<vec3u(UM_REACH_SATURATED));
   let p=vec3i(umTileCoord(tile));
-  let regular=bounded&&umCoarseTilesIn(p-vec3i(minus),p+vec3i(plus))==0u;
+  let regular=bounded&&!coarseAny(tile>>9u,p-vec3i(minus),p+vec3i(plus));
   list=select(2u,1u,regular);local=atomicAdd(&certifyCounts[list-1u],1u);
   // The class for the tiles layer, in the reach word's two spare bits (no
   // reader masks them in: umReachPlus/Minus take bits 0..29).
@@ -298,11 +280,11 @@ var<workgroup> certifyBases:array<u32,2>;
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.extendedResources]});
-    await Promise.all(["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","prefix0","prefix1","prefix2","certify"].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:entryPoint==="seed"?UNIFORM_MIXED_COUNTED.residentAll:UNIFORM_MIXED_COUNTED.all}:{})}}}));}));
+    await Promise.all(["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","coarseBits","coarseBlocks","certify"].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:entryPoint==="seed"?UNIFORM_MIXED_COUNTED.residentAll:UNIFORM_MIXED_COUNTED.all}:{})}}}));}));
     this.pipelines.set("speed",await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"seed",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll,planSpeedOnly:1}}}));
   }
   encode(encoder:GPUCommandEncoder,policy=DEFAULT_POLICY):void{
-    if(this.pipelines.size!==13)throw new Error("Mixed frame plan is not initialized");
+    if(this.pipelines.size!==12)throw new Error("Mixed frame plan is not initialized");
     const s=this.supportSettings,words=this.policyWords??=new Uint32Array(4);
     s[0]=policy.fineReach;s[1]=policy.shellReach;s[2]=!policy.twoLevel?3:!policy.shellOnly?2:0;s[3]=0;
     words[0]=s[0];words[1]=s[1];words[2]=s[2];words[3]=0;
@@ -358,8 +340,9 @@ var<workgroup> certifyBases:array<u32,2>;
     const of=(entry:string):PlanLaunch=>{
       const pipeline=this.pipelines.get(entry)!;
       if(counted.includes(entry))return {pipeline,counted:true,x:0,y:0};
-      const t=this.ownership.capacity.tileDimensions,line=/^prefix(\d)$/.exec(entry);
-      const [x,y]=uniformKeyGroups(line?t[(+line[1]!+1)%3]!*t[(+line[1]!+2)%3]!:this.ownership.capacity.tiles,64,this.ownership.dispatchX,[0,0]);
+      // coarseBlocks: a lane per block. The rest: a lane per tile key.
+      if(entry==="coarseBlocks")return {pipeline,counted:false,x:Math.ceil(this.ownership.capacity.address.blocks/64),y:1};
+      const [x,y]=uniformKeyGroups(this.ownership.capacity.tiles,64,this.ownership.dispatchX,[0,0]);
       return {pipeline,counted:false,x,y};
     };
     return {support:SUPPORT_ENTRIES.map(of),certificate:CERTIFICATE_ENTRIES.map(of)};

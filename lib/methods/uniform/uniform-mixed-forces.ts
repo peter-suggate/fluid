@@ -2,7 +2,9 @@ import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, unif
 import {UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_PARAMS_BYTES,uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
+import { uniformCoarseCacheExtent, uniformCoarseCacheWGSL } from "./uniform-coarse-velocity-cache";
 import { UNIFORM_MIXED_COUNTED, UNIFORM_MIXED_FUSED_GATE, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { uniformMixedSolidHoldWGSL } from "./uniform-mixed-walls.wgsl";
 import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
@@ -73,7 +75,7 @@ export class UniformMixedForces {
     if(this.cachedGeometry&&!f.centerPhi)throw new Error("Mixed forces require current center phi for cached geometry");
     if(this.cachedCurvature!==!!f.curvature||this.cachedCurvature!==!!f.normals)throw new Error("Mixed force curvature scratch must match the pipeline");
     const address=this.ownership.capacity.address,d=address.cells,coarse=f.coarseVelocity,unit=f.unitVelocity;
-    if(coarse.format!=="rgba32float"||uniformDetailExtent(coarse).some((n,a)=>n!==address.tileHaloTexture[a]))throw new Error("Mixed force viscosity requires the 4h velocity cache");
+    if(coarse.format!=="rgba32float"||uniformDetailExtent(coarse).some((n,a)=>n!==uniformCoarseCacheExtent(address)[a]))throw new Error("Mixed force viscosity requires the 4h velocity cache");
     if(f.curvature&&(f.curvature.format!=="r32float"||uniformDetailExtent(f.curvature).some((n,a)=>n!==d[a])||[f.phi,f.volume,f.centerPhi].includes(f.curvature)))throw new Error("Mixed force curvature requires disjoint native scalar scratch");
     const normalBytes=UniformMixedForces.normalBytes(this.ownership.capacity.owners);
     if(f.normals&&(f.normals.size??f.normals.buffer.size-(f.normals.offset??0))<normalBytes)throw new Error("Mixed force normal scratch is too small");
@@ -180,25 +182,64 @@ ${uniformMixedPressureReconstructionSource(false,"umForceSample(owner,neighbor)"
 // Viscosity reads the frame's extended-velocity snapshot at exact MAC sites
 // of the face's own width (the ungraded layout has widths 1 and 4 only): an
 // h site is one UniformMixedHangingTaps.unitVelocity texel, a 4h site one
-// UniformMixedMomentumCache texel (umTileHaloTexel). Every h site lies within
+// UniformMixedMomentumCache texel, at an offset (home) from the cache block of
+// the face's own tile: its seven sites lie in that tile's page or one tile
+// past it, in the block's halo. Every h site lies within
 // one cell of a unit owner, so its tile is a unit or slotted seam tile, whose
-// texels the hanging fill wrote. A site with no stored cell (umCellNear) or
-// tile (umTileNear) clamps to the nearest stored site, negated under no-slip.
-fn umViscositySite(site:vec3i,axis:u32,width:u32)->f32 {
+// texels the hanging fill wrote. A site in a SOLID page is a wall's: it reads
+// the nearest site out of that page (umCellHeld, umTileHeld), negated under
+// no-slip. A site in an AIR page reads what the field holds there.
+${uniformMixedSolidHoldWGSL}
+${uniformCoarseCacheWGSL}fn umViscositySite(site:vec3i,axis:u32,width:u32,home:vec3i)->f32 {
  var at=site;var value=0.0;
- if(width==1u){at=umCellNear(site);value=textureLoad(unitVelocity,at,0)[axis];}else{at=umTileNear(site);value=textureLoad(coarseVelocity,umTileHaloTexel(at),0)[axis];}
+ if(width==1u){at=umCellHeld(site);value=textureLoad(unitVelocity,at,0)[axis];}else{at=umTileHeld(site);value=textureLoad(coarseVelocity,at+home,0)[axis];}
  return select(value,-value,force.controls.x>0.5&&any(site!=at));
 }
 fn umLaplacian(face:UMFace)->f32 {
  // A width-w face's anchor is its positive cell's last fine texel along the
  // axis and first transversely: anchor/w is that cell's width-w index.
  let site=face.anchor/vec3i(i32(face.width));let width=f32(face.width);
- let center=umViscositySite(site,face.axis,face.width);var terms=vec3f(0);
+ var home=vec3i(0);
+ if(face.width==4u){let page=umTileNear(site)>>vec3u(3u);home=umCoarseOrigin(umBlockOf(page))-(page<<vec3u(3u));}
+ let center=umViscositySite(site,face.axis,face.width,home);var terms=vec3f(0);
  for(var axis=0u;axis<3u;axis++){
   var delta=vec3i(0);delta[axis]=1;
-  terms[axis]=(umViscositySite(site+delta,face.axis,face.width)-2.0*center+umViscositySite(site-delta,face.axis,face.width))/(UM_H[axis]*UM_H[axis]*width*width);
+  terms[axis]=(umViscositySite(site+delta,face.axis,face.width,home)-2.0*center+umViscositySite(site-delta,face.axis,face.width,home))/(UM_H[axis]*UM_H[axis]*width*width);
  }
  return (terms.x+terms.y)+terms.z;
+}
+// The bed-slope term. A film on a voxel tread has a level bed under a level
+// surface, so nothing on the grid carries the fall of the ramp the treads
+// stand for: what is missing is -g times the bed's gradient (umBedSlope),
+// along the tread. It belongs to an h cell that holds its column's liquid
+// alone. It comes in over the cell's first quarter of depth, so a cell the
+// film has just reached does not jump, and goes out as the surface climbs
+// from the cell's top to the centre of the cell above: a cell under liquid
+// has none, and a pool standing on the treads stays still.
+fn umBedDrive(owner:UMOwner)->vec2f {
+ if(owner.width!=1u){return vec2f(0);}
+ let at=vec3i(umOrigin(owner));let slope=umBedSlope(at);
+ if(all(slope==vec2f(0))){return vec2f(0);}
+ let depth=clamp(16.0*umOccupancy(owner)-6.0,0.0,1.0);
+ if(depth<=0.0){return vec2f(0);}
+ let above=umOwnerAt(at+vec3i(0,1,0));var cover=1.0;
+ if(above.width!=0u&&!umOwnerClosed(above)){cover=clamp(4.0-8.0*umOccupancy(above),0.0,1.0);}
+ return slope*UM_H.y/UM_H.xz*(depth*cover);
+}
+// A face takes the larger of its two cells' terms, as it takes gravity from
+// either, and their sum where they oppose: its value is the same whichever
+// cell computes it, and a film cell's two faces along a tread carry the same
+// term up to the film's edge.
+fn umBedFaceDrive(own:vec2f,neighbor:UMOwner,axis:u32)->f32 {
+ let part=axis>>1u;let a=own[part];let b=umBedDrive(neighbor)[part];
+ return max(max(a,b),0.0)+min(min(a,b),0.0);
+}
+// The same for an h cell's own +x and +z faces. Only a cell with a bed slope
+// has a term, so the neighbour is looked up only where it has one.
+fn umBedOwnFaceDrive(owner:UMOwner,own:vec2f,at:vec3i,axis:u32)->f32 {
+ var next=at;next[axis]+=1;
+ if(all(umBedSlope(next)==vec2f(0))){return own[axis>>1u];}
+ return umBedFaceDrive(own,umFace(owner,axis,1,0u).neighbor,axis);
 }
 fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32 {
  if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
@@ -206,6 +247,7 @@ fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32 {
  let occupancy=umOccupancy(owner);let neighborOccupancy=umOccupancy(face.neighbor);
  if(occupancy>0.0&&force.physical.z>0.0){value+=dt*(force.physical.z/force.physical.y)*umLaplacian(face);}
  if(face.axis==1u&&(occupancy>1e-5||neighborOccupancy>1e-5||umCoarseMass(owner)||umCoarseMass(face.neighbor))){value+=dt*force.physical.x;}
+ if(face.axis!=1u){value+=dt*force.physical.x*umBedFaceDrive(umBedDrive(owner),face.neighbor,face.axis);}
  if(force.physical.w>0.0&&face.neighbor.width!=0u&&!umOwnerClosed(owner)&&!umOwnerClosed(face.neighbor)){
   let gradient=umReconstructedPressureGradient(owner,face);
   if(gradient!=0.0){value+=dt*(force.physical.w/force.physical.y)*0.5*(umForceCurvature(owner)+umForceCurvature(face.neighbor))*gradient;}
@@ -220,7 +262,7 @@ fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32 {
  return value;
 }
 fn umViscosityVector(site:vec3i)->vec3f{
- let at=umCellNear(site);let value=textureLoad(unitVelocity,at,0).xyz;
+ let at=umCellHeld(site);let value=textureLoad(unitVelocity,at,0).xyz;
  return select(value,-value,force.controls.x>0.5&&any(site!=at));
 }
 @compute @workgroup_size(64) fn forcesFine(@builtin(global_invocation_id) gid:vec3u){
@@ -239,6 +281,9 @@ fn umViscosityVector(site:vec3i)->vec3f{
  }
  let neighbor=umFace(owner,1u,1,0u).neighbor;
  if(occupancy>1e-5||umOccupancy(neighbor)>1e-5||umCoarseMass(neighbor)){value.y+=force.hDt.w*force.physical.x;}
+ let bed=umBedDrive(owner);
+ value.x+=force.hDt.w*force.physical.x*umBedOwnFaceDrive(owner,bed,at,0u);
+ value.z+=force.hDt.w*force.physical.x*umBedOwnFaceDrive(owner,bed,at,2u);
  textureStore(output,at,vec4f(value,0));
 }
 ${patched(uniformMixedFaceDispatchWGSL("forcesRegular","umForcedVelocity(owner,face)"),"let origin=umOrigin(owner);",`let origin=umOrigin(owner);

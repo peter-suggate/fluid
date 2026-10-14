@@ -11,7 +11,9 @@ import {UniformMixedOwnershipTransfer,UniformMixedRemap} from "./uniform-mixed-r
 import {UniformMixedPhiResolve} from "./uniform-mixed-phi-resolve";
 import {UniformCoarseVertexPhi} from "./uniform-coarse-vertex-phi";
 import {uniformMixedAllCoarseLayout} from "./uniform-mixed-layout";
-import {UNIFORM_MIXED_ROOT_FATAL,UNIFORM_MIXED_ROOT_FATAL_MESSAGE,UniformMixedRootOwners} from "./uniform-mixed-root-owners";
+import {UNIFORM_MIXED_ROOT_FATAL,UNIFORM_MIXED_ROOT_FATAL_MESSAGE,UNIFORM_MIXED_ROOT_UNREACHED,UNIFORM_MIXED_ROOT_UNREACHED_MESSAGE,UniformMixedRootOwners} from "./uniform-mixed-root-owners";
+import {UniformBlockNeighbours} from "./uniform-block-neighbours";
+import {UNIFORM_RESIDENCY_PAGE_REACH} from "./uniform-mixed-residency";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
 import type {UniformScratchArena} from "./uniform-scratch-arena";
 import type {WebGPUUniformPressureMultigrid} from "./webgpu-uniform-pressure-multigrid";
@@ -19,6 +21,7 @@ import type {WebGPUUniformVelocityExtrapolator} from "./webgpu-uniform-velocity-
 import {UNIFORM_WORK_RECEIPT_WORDS,UniformMixedOwnership,type UniformMixedGenerationBuffers} from "./uniform-mixed-ownership";
 import {UniformMixedExtension} from "./uniform-mixed-extension";
 import {UniformMixedHangingTaps, UniformMixedMomentumCache} from "./uniform-mixed-momentum-cache";
+import {uniformCoarseCacheExtent} from "./uniform-coarse-velocity-cache";
 import {UniformMixedSurface} from "./uniform-mixed-surface";
 import {NB_VOLUME_RATE_FLOAT,UniformMixedSurfaceVolume} from "./uniform-mixed-surface-volume";
 import {UniformMixedSurfaceGeometry} from "./uniform-mixed-surface-geometry";
@@ -59,7 +62,6 @@ export interface UniformMixedFrameFields {
  phase:GPUTexture;centerPhi:GPUTexture;target:GPUTexture;correction:GPUTexture;
  pressure:ReturnType<WebGPUUniformPressureMultigrid["prepareMixedContinuation"]>;
  extension:ReturnType<WebGPUUniformVelocityExtrapolator["prepareMixedContinuation"]>;
- uniformGroup:GPUBindGroup;
  sourceParams:GPUBuffer;
  /** Voxel/terrain/vessel solids and rigid bodies: live voxel edits arrive
   * through editSolids(), bodies through advance(). The host must keep every
@@ -216,8 +218,8 @@ function uniformMixedPressureTarget(p:{pressureTolerance:number}):number{
  * fineTiles: h tiles the owner-indexed buffers hold (UniformMixedCapacity).
  * liquidBand: the pressure band keeps its liquid bound
  * (UniformPressureBand.capacityOf): a GPU relayout whose capacity is every
- * tile. Otherwise (host layouts, and a GPU relayout under a reserved
- * capacity) every reserved h tile may be a band tile.
+ * tile the pool can store. Otherwise (host layouts, and a GPU relayout under
+ * a reserved capacity) every reserved h tile may be a band tile.
  * byteBudget: bytes the capacity-sized buffers and the detail fields may hold at once, a
  * reservation's old and new together; absent, only the device's buffer and
  * binding limits refuse one. */
@@ -263,8 +265,15 @@ export class UniformMixedFrame {
  private pageInitialise?:UniformPageInitialise;
  /** The pressure root's owners, rebuilt from the page table every step ahead of its first reader. */
  private readonly rootOwners:UniformMixedRootOwners;
+ /** The block neighbour rows and wall faces of both topologies' tails, rebuilt from the page table straight after every commit. */
+ private readonly blockNeighbours:UniformBlockNeighbours;
  /** Owners of per-key words outside the frame (the census), after the frame's own in the page initialise's order. */
  private readonly pageOwners:UniformPageInitBlocks[]=[];
+ /** The census's residency certificate (registerCertificate). */
+ private certificate?:{encodeResidency(encoder:GPUCommandEncoder):void};
+ /** The owner of the residency certificate: every commit is followed by its
+  * mark through the new page table, before anything reads a residency flag. */
+ registerCertificate(certificate:{encodeResidency(encoder:GPUCommandEncoder):void}):void{this.certificate=certificate;}
  /** Before initialize: an owner whose words a claimed block's keys must take anew, launched after every commit. */
  registerPageOwner(owner:UniformPageInitBlocks):void{if(this.pageInitialise)throw new Error("The page initialise is built: register its owners before the frame initializes");this.pageOwners.push(owner);}
  /** The remap's extension walls: a low-face buffer of the frame's own. */
@@ -407,11 +416,12 @@ export class UniformMixedFrame {
   this.initialPlan={vCycles:schedule.vCycles,fullCycles:schedule.fullCycles};
   this.receipts=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},(_,i)=>this.receiptSlot(buffer(`Uniform pressure receipt and mass accounting ${i}`,TRACE_RECEIPT,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ)));
   this.reductions=buffer("Uniform dust accounting",48,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC);
-  const caches=Array.from({length:1},(_,i)=>{const t=device.createTexture({label:`Uniform 4h sampling cache ${i}`,size:f.arena.address.tileHaloTexture,dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});this.owned.push(t);return t;});
+  const caches=Array.from({length:1},(_,i)=>{const t=device.createTexture({label:`Uniform 4h sampling cache ${i}`,size:uniformCoarseCacheExtent(f.arena.address),dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});this.owned.push(t);return t;});
   const coarseLayout=uniformMixedAllCoarseLayout(layout);
   // A static pool takes any reach: every page it could ask for is pinned.
-  {const pages=layout.address.pool.box.pages,count=pages[0]*pages[1]*pages[2];
-   this.pagePool=new UniformPagePool(device,{...layout.address.pool,pinCapacity:count,hostCapacity:count,...(f.residency.live?{}:{closureCap:0xffffffff})});this.pagePool.seed(layout.address.seed);this.pagePool.pin(f.residency.pins);}
+  // Host commands and pins take the pool's fixed capacities: a step that
+  // asks for more drop pages, or a scene that pins more, is refused there.
+  this.pagePool=new UniformPagePool(device,{...layout.address.pool,closureCap:f.residency.live?4*UNIFORM_RESIDENCY_PAGE_REACH:0xffffffff});this.pagePool.seed(layout.address.seed);this.pagePool.pin(f.residency.pins);
   const solid=this.solid=new UniformMixedSolid(device,f.solid,coarseLayout,this.pagePool);
   this.coarseCache=caches[0]!;
   const o=this.ownership=new UniformMixedOwnership(device,layout,true,capacity.fineTiles);
@@ -419,7 +429,7 @@ export class UniformMixedFrame {
    this.words={frame:new Uint32Array(1),extension:new Float32Array([...h,0]),surface:new Float32Array([...h,0]),surfaceFlags:new Uint32Array([0,0,0,4]),
     momentum:new Float32Array([...h,0]),momentumFlags:new Uint32Array([0,0,0,UNIFORM_MIXED_MOMENTUM_LIMITS]),forces:new Float32Array([...h,0,0,0,0,0,0,0,0,0]),projection:new Float32Array([...h,0,0,0,0,0]),
     acceptance:new Float32Array([0,0,UNIFORM_PRESSURE_RELATIVE_REDUCTION,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE]),band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])])};}
-  this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles,o.capacity.lattice);
+  this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o);
   this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool);
   this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocity,f.negative,f.velocityScratch,f.negativeScratch,true,true);
@@ -435,9 +445,8 @@ export class UniformMixedFrame {
   this.coarsePhi=new UniformCoarseVertexPhi(device,o,f.phi);
   // Domain placement: the published base is the phi field's own base block.
   if(f.detail?.layout.domain)f.detail.adoptBase(f.phi,this.coarsePhi.texture);
-  // The arena, low to high: the root, the native levels.
-  const native=Math.min(...[f.pressure.pressure,f.pressure.rhs,f.pressure.minimum,f.pressure.phi,f.pressure.topology].map(v=>v.buffer!.offset??0));
-  if(f.arena.rootOffset+f.arena.rootBytes>native)throw new Error("The mixed pressure root overlaps the native continuation fields");
+  // The arena, low to high: the root, the levels its correction is solved on.
+  if(f.arena.rootOffset+f.arena.rootBytes>4*f.arena.levels[0]!.pressure[0])throw new Error("The mixed pressure root overlaps its correction's levels");
   const memory=planUniformMixedPressureMemory(coarseLayout,f.arena.address,f.arena.rootOffset,f.arena.rootBytes);
   const view=(r:{offset:number;size:number}):GPUBufferBinding=>({buffer:f.arena.buffer,...r});
   // Pressure phi, twice: the simulation authority's (simulation owners, at
@@ -447,8 +456,8 @@ export class UniformMixedFrame {
   const phiUsage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST;
   this.authorityPhi=buffer("Uniform mixed pressure phi",4*o.capacity.owners,phiUsage);
   const rootPhi:GPUBufferBinding={buffer:buffer("Uniform mixed root pressure phi",4*(coarseLayout.cellCount+(solid?.coarse?uniformMixedRootMaskWords(coarseLayout):0)),phiUsage)};
-  // Pressure's all-4h root keeps the mixed rows; the native hierarchy
-  // solves its correction from its n/4 level.
+  // Pressure's all-4h root keeps the mixed rows; its correction is solved
+  // on the levels below it (4h to 32h, rows of blocks as the root is).
   // With solids, the root's topology is the split authority's of each solve:
   // the static all-4h solid record, its cut faces held to the liquid's rows.
   const rootTopology:GPUBufferBinding|undefined=solid?.coarse?{buffer:buffer("Uniform mixed root topology",uniformMixedRootTopologyBytes(coarseLayout),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC)}:undefined;
@@ -458,6 +467,7 @@ export class UniformMixedFrame {
     topology:f.solid?{buffer:this.solidTopology!}:undefined}];}
   const root=this.levels[0]!,p=root.ownership;
   this.rootOwners=new UniformMixedRootOwners(device,p,root.phi!,this.solidTopology);
+  this.blockNeighbours=new UniformBlockNeighbours(device,layout.address.blocks,[o.pageMirror,p.pageMirror]);
   this.frameOwnerships.push(o);for(const level of this.levels)if(!this.frameOwnerships.includes(level.ownership))this.frameOwnerships.push(level.ownership);
   if(f.detail){f.detail.attach(o);f.detail.attach(p);}
   // The h near-surface extension carries the advancing level-set toe.
@@ -484,7 +494,7 @@ export class UniformMixedFrame {
   this.stageScratch=buffer(qaBandRows?"Uniform mixed stage scratch":"Uniform mixed stage scratch and pressure band rows",this.stageBytesAt(o.capacity.fineTiles,this.stageBandTiles),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);this.bindStage();
   this.authority=new UniformMixedPressureAuthority(device,o,solid,false,false,true);this.authorityGroup=this.bindAuthority();
   // Pressure couples the all-4h owners through the static coarse record.
-  this.cycles=new UniformMixedPressureCycles(device,root,view(memory.backup),f.pressure,f.uniformGroup,openTop);
+  this.cycles=new UniformMixedPressureCycles(device,root,view(memory.backup),f.pressure);
   const coarseSolid=!!solid;
   this.projection=new UniformMixedPressureVelocity(device,p,f.sourceParams,solid,coarseSolid,this.cycles.rounding);
   // A cut 4h face's flux sums its h faces of the forced field, which the split
@@ -557,7 +567,7 @@ export class UniformMixedFrame {
    });
   }
   this.surfaceGroup=this.surface.bind({narrowBandState:this.narrowBandFlip.state,unitVelocity:this.hanging.unitVelocity,velocity:f.velocityScratch,coarseVelocity:this.coarseCache,negative:f.negativeScratch,params:this.params.surface,evidence:stage,phi:f.phi,outputPhi:f.phiScratch});
-  if(this.surfaceVolume)this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,f.target,stage,f.velocityScratch);
+  if(this.surfaceVolume)this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,f.target,stage);
   // NB-FLIP's transfer leaves the advected field in the stored velocity (a
   // kick forces that field where it stands), under momentum's walls.
   this.forceGroup=this.forces.bind({unitVelocity:this.hanging.unitVelocity,advected:f.velocity,phi:f.phi,volume:f.volume,centerPhi:f.centerPhi,coarseVelocity:this.coarseCache,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.forces,curvature:f.phase,normals:stage});
@@ -586,8 +596,8 @@ export class UniformMixedFrame {
   * to it. exact: `need` itself, the caller's own rule (a relayout's
   * capacity follows its receipts). */
  fineReservation(need:number,liquidBand=this.liquidBand,exact=false):{fineTiles:number;bandTiles:number;bytes:number;refusal?:string}{
-  const c=this.ownership.capacity,n=c.address.boxTiles,held=c.fineTiles,limits=this.device.limits,g=UNIFORM_DETAIL_POLICY.poolGrowth;
-  if(!Number.isInteger(need)||need<0||need>n)throw new Error(`A mixed frame of ${n} tiles cannot reserve ${need} h tiles`);
+  const c=this.ownership.capacity,n=c.address.poolTiles,held=c.fineTiles,limits=this.device.limits,g=UNIFORM_DETAIL_POLICY.poolGrowth;
+  if(!Number.isInteger(need)||need<0||need>n)throw new Error(`A mixed frame whose page pool stores at most ${n} tiles cannot reserve ${need} h tiles`);
   const total=(list:[string,number][])=>list.reduce((sum,[,bytes])=>sum+bytes,0);
   // The detail fields' textures count beside the buffers; a reservation that replaces them
   // (a domain placement crossing zero) holds both generations across the transfer.
@@ -656,7 +666,7 @@ export class UniformMixedFrame {
   const pageInitialise=this.pageInitialise=new UniformPageInitialise(this.device,this.pagePool,this.fields.detail!,{near:16*Math.max(...this.ownership.capacity.lattice.cellSize_m),
    lowFaces:[{buffer:this.fields.negative},{buffer:this.fields.negativeScratch},{buffer:this.fields.negativeDeparture},{buffer:this.extensionWalls}],owners:[tileWords,this.narrowBandFlip,...this.pageOwners]});
   await settleGPUInitialization([this.solid,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band,this.narrowBandFlip]
-   .map(stage=>stage?.initialize()).concat(this.fields.detail?.prepare(this.ownership),this.pagePool.initialize([this.ownership.pageMirror,root.pageMirror,this.fields.pages]),tileWords.initialize(),pageInitialise.initialize(),this.rootOwners.initialize()));
+   .map(stage=>stage?.initialize()).concat(this.fields.detail?.prepare(this.ownership),this.pagePool.initialize([this.ownership.pageMirror,root.pageMirror,this.fields.pages]),tileWords.initialize(),pageInitialise.initialize(),this.rootOwners.initialize(),this.blockNeighbours.initialize()));
   this.ready=true;
  }
  /** The last advance's extension key (write), once there has been one, and
@@ -877,7 +887,7 @@ export class UniformMixedFrame {
    {
     // write holds p's control time in the key.
     const seconds=this.key.volumeControlSeconds??0,control=seconds>0?1/seconds:0;
-    this.surfaceVolume!.beginStep(encoder,this.surfaceVolumeGroup,dt,p.addedVolumeCells??0,p.openTop,control);
+    this.surfaceVolume!.beginStep(encoder,this.surfaceVolumeGroup,dt,p.addedVolumeCells??0,control);
     // The gauge's rate reaches the authorities' parameters on the GPU: this
     // frame's host write left that word zero, and no readback sets it.
     if(control>0)encoder.copyBufferToBuffer(this.surfaceVolume!.budget!,4*NB_VOLUME_RATE_FLOAT,this.params.authority,8,4);
@@ -951,7 +961,7 @@ export class UniformMixedFrame {
    this.phaseKeyed=!bodies;this.band.encodePrepare(encoder);
    const split=this.split;
    split.transfer.encodeToPressure(encoder,split.toPressure);
-   // The root's owners for the pages stored now, and the rows of the box tiles with nothing stored: after the transfer's copy of the certificate, ahead of every root reader.
+   // The root's owners for the blocks held now, and the sentinel and free blocks' rows: after the transfer's copy of the certificate, ahead of every root reader.
    this.rootOwners.encode(encoder);
    split.authority.encode(encoder,split.authorityGroup);
    // Warm start: the root iterate begins at the last frame's presented
@@ -1085,6 +1095,7 @@ export class UniformMixedFrame {
    const failure=describeUniformMixedFrameStatus(slot.status);
    // A detail-storage violation explains every later failure.
    if(mapped[DETAIL_RECEIPT/4+1]!&UNIFORM_MIXED_ROOT_FATAL)throw new Error(`${UNIFORM_MIXED_ROOT_FATAL_MESSAGE}${failure?`; ${failure}`:""}`);
+   if(mapped[DETAIL_RECEIPT/4+1]!&UNIFORM_MIXED_ROOT_UNREACHED)throw new Error(`${UNIFORM_MIXED_ROOT_UNREACHED_MESSAGE}${failure?`; ${failure}`:""}`);
    const detail=mapped[DETAIL_RECEIPT/4]!|mapped[DETAIL_RECEIPT/4+1]!;
    if(detail)throw this.detailViolation(detail,mapped[DETAIL_RECEIPT/4]!,mapped[DETAIL_RECEIPT/4+1]!,failure);
    if(failure)throw new Error(`${failure}${mapped[30]===UNIFORM_MIXED_FAILURE.layoutCapacity&&mapped[33]!&UNIFORM_MIXED_OVERFLOW_FINE?`; the layout holds ${mapped[WORK_RECEIPT/4]} h tiles, capacity ${this.ownership.capacity.fineTiles}`:""}; projection withheld${""}`);
@@ -1191,8 +1202,9 @@ export class UniformMixedFrame {
   * describe the host layout it replaced. */
  private workEpoch=0;
  /** reserved: the h tiles the relayout starts with storage for (a request's
-  * host count, or the capacity already held); absent, every tile, with the
-  * band at its liquid bound (a census's first build may ask any tile).
+  * host count, or the capacity already held); absent, every tile the pool
+  * can store, with the band at its liquid bound (a census's first build may
+  * ask any stored tile).
   * After that the capacity follows the build receipts: the builder defers a
   * build over its admission and the host moves the storage between frames
   * (reserveFine). The caller asks fineReservation first: a refusal here
@@ -1203,12 +1215,12 @@ export class UniformMixedFrame {
  setRelayout(relayout?:UniformMixedFrameRelayout,reserved?:number,counted=false):void{
   if(this.busy)throw new Error("The mixed relayout cannot change during an advance");
   // A census's first build has no receipt to size from: storage for every
-  // tile, the band at its liquid bound, unless the host reserved for its
-  // requests. Detached, host layouts reserve their own again (the next
-  // updateLayout).
+  // tile the pool can store, the band at its liquid bound, unless the host
+  // reserved for its requests. Detached, host layouts reserve their own
+  // again (the next updateLayout).
   if(relayout){
-   const refusal=reserved===undefined?this.reserveFine(this.ownership.capacity.address.boxTiles,true):this.reserveFine(reserved,false);
-   if(refusal)throw new Error(`A GPU relayout holds ${reserved===undefined?"every tile":`${reserved} tiles`} at h: ${refusal}`);
+   const refusal=reserved===undefined?this.reserveFine(this.ownership.capacity.address.poolTiles,true):this.reserveFine(reserved,false);
+   if(refusal)throw new Error(`A GPU relayout holds ${reserved===undefined?"every tile the pool can store":`${reserved} tiles`} at h: ${refusal}`);
   }else{this.liquidBand=false;if(this.censused){this.ownership.resetResidency();this.censused=false;}}
   this.relayout=relayout;this.relayoutAdopted=relayout?.adopted?.bind(relayout);
   // The census may admit any tile in its first frame and its counts reach
@@ -1241,15 +1253,23 @@ export class UniformMixedFrame {
   * the census bounds each tile's departures over all its owners' faces of
   * that extension on both sides of the relayout (it joins the trace's
   * sampled flow with zero), and the remap writes each changed face as a
-  * convex combination of old faces of owners in the same tile (remapFace
-  * averages remapSample, which interpolates two old faces); an unlisted
-  * tile's faces are the identity. So the remapped extension stays inside
-  * the census bounds the generation was built for, and no second extension
-  * runs before advection. */
+  * convex combination of old faces of owners in the same tile and, where a
+  * 4h face is handed to h faces, of the tile beside it on either tangential
+  * axis: remapFace averages remapSample, which interpolates two old faces,
+  * each tilted toward the nearer face beside it on its plane by at most
+  * half their difference (remapSlope). An unlisted tile's faces are the
+  * identity. The census's sampled flow takes the bounds of those tiles
+  * (SAMPLE_REACH), so the remapped extension stays inside the census bounds
+  * the generation was built for, and no second extension runs before
+  * advection. */
  /** The page commit of a census, for the relayout's encode to place straight
   * after it: the census's requests become claims, the idle retire, and the
-  * topologies' tails name the new stored set before any reader of it. */
- encodePageCommit(encoder:GPUCommandEncoder):void{this.pagePool.encodeCommit(encoder);this.encodeNewBlocks(encoder);}
+  * topologies' tails name the new stored set before any reader of it. The
+  * census's residency certificate is marked over that set at once. */
+ encodePageCommit(encoder:GPUCommandEncoder):void{
+  if(!this.certificate)throw new Error("Uniform mixed frame: a page commit with no residency certificate registered (registerCertificate)");
+  this.pagePool.encodeCommit(encoder);this.certificate.encodeResidency(encoder);this.blockNeighbours.encode(encoder);this.encodeNewBlocks(encoder);
+ }
  /** Every owner's build of the blocks the last commit claimed, in the commit's
   * encoder: the fields' AIR image and the per-key owners' (page initialise),
   * then the solid record over it. */

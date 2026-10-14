@@ -7,7 +7,7 @@
  * The scene is one box of cells from the origin. A tile is 4³ cells; a
  * vertex lattice has one more plane per axis than its cells; a 4h vertex
  * lattice has one more plane per axis than the tiles. The box is also a set
- * of pages (32³ cells, 8³ tiles), a partial last page among them. A page is
+ * of pages (32³ cells, 8³ tiles), a whole number of them on every axis. A page is
  * RESIDENT (stored), AIR or SOLID, and the page table says which: a page of
  * the box may be any of the three, a page outside it is AIR or SOLID.
  *
@@ -33,9 +33,8 @@
  * Keys are block-major. A tile key is 512 x its page's block + its index in
  * the page, x | y<<3 | z<<6; a cell key is 64 x its tile's key + its index
  * in the tile, x | y<<2 | z<<4. Every block has its 512 tile keys, so the
- * key space has holes: the two blocks with no page, the free blocks, and a
- * partial page's tiles past the box. Live says which keys hold a tile or
- * cell. A vertex key is 33³ x its block + its texel's index in the block, x
+ * key space has holes: the two blocks with no page and the free blocks. Live
+ * says which keys hold a tile or cell. A vertex key is 33³ x its block + its texel's index in the block, x
  * fastest; a low-face table has three 32 x 32 planes a block.
  *
  * Two index spaces, never mixed: a key addresses storage shared by every
@@ -47,7 +46,7 @@
  *
  * WGSL names (uniformLatticeAddressWGSL), one set for every module:
  *  tiles         umTileAt umTileCoord umTilePresent umTileInBox umTileNear umTileLive
- *                umTileTexel umTileStoreTexel umTileKey umKeyStored umTileHaloTexel
+ *                umTileTexel umTileStoreTexel umTileKey umKeyStored
  *  cells         umCellAt umCellCoord umCellPresent umCellInBox umCellNear umCellTexel
  *                umCellStoreTexel umCellLive umCellRowAt umPointNear umPointNearIn
  *                umPointPresent
@@ -57,20 +56,43 @@
  *                umVertexTexel umVertexStoreTexel
  *  4h vertices   umWideVertexPresent umWideVertexNear umWideVertexSlot
  *                umWideVertexTexel umWideVertexStoreTexel
+ *  runs          umVertexRun umVertexRunTexel umVertexRunAt umWideVertexRun
+ *                umWideVertexRunTexel (uniformLatticeRunWGSL: only where read)
  *  kinds         UM_RESIDENT UM_AIR UM_SOLID umCellKind umTileKind umAcrossKind
  *                umPointKind umLowOpen umTileLowOpen
  *  low faces     umFaceLow umFaceAnchorNear umLowFaceIndex UM_LOW_FACE_KEYS umCellBlock
  *  dense extents UM_TILES UM_CELL_KEYS UM_VERTEX_KEYS
  *  texture sizes UM_CELL_TEXTURE UM_VERTEX_TEXTURE UM_TILE_TEXTURE
- *                UM_WIDE_VERTEX_TEXTURE UM_TILE_HALO_TEXTURE
+ *                UM_WIDE_VERTEX_TEXTURE
  *  static box    UM_BOX UM_BOX_TILES UM_BOX_TILE_COUNT umBoxTileIndex umBoxTileCoord
+ * Beside them, for a module whose buffer holds the block neighbour rows
+ * (uniformBlockNeighbourWGSL, uniformBlockFaceWGSL):
+ *  neighbours    UM_SOLID_WORD umBlockNeighbourIndex umBlockNeighbour umBlockHeld
+ *  kind clamps   umCellNearFrom umTileNearFrom umVertexNearFrom umWideVertexNearFrom
+ *                umPointNearFrom and their FromPage forms
+ *  block faces   umFaceTile umFaceCell umFaceLevel
  * A module whose extent is a constant expression reads the extents as
  * consts; one whose extent is a runtime expression calls them as functions
  * of the same name, as uniformSceneConstantsWGSL spells its constants.
  *
  * Each tile, cell and kind lookup reads the table word of its coordinate's
  * page and answers from that word alone, so a lookup is workgroup-uniform
- * wherever its argument is, and a key's coordinate reads its block's word. */
+ * wherever its argument is, and a key's coordinate reads its block's word.
+ *
+ * A run is a box of vertices v..v+n on every axis that one block holds in
+ * its high corners, so one table read addresses them all: each vertex's
+ * texel (and key) is v's plus its offset from v. With l = v & 31 (v & 7 on
+ * the 4h lattice, in tile units) there is a run exactly where, on every
+ * axis, l >= 1 and l + n <= 32 (8), 0 <= v and v + n <= the box, and either
+ * the page of cell v is stored or l + n < 32 (8). Proof against the slot
+ * rule: the vertex v+o, 0 <= o <= n, has its own page from the cell
+ * v+o-1, which is in the box (v+o-1 <= box-1), and in v's
+ * page since 0 <= l+o-1 <= 31; its local there is l+o, in 1..32. Where that
+ * page is stored the slot rule returns exactly (l+o, its block). Where it is
+ * not, the rule searches a neighbour's skirt only for a vertex on a page
+ * face, (v+o) & 31 == 0, which here means l+o == 32: excluded, so the rule
+ * returns (l+o, the page's own word) and a Texel or At form reads block 0 or
+ * the last block there. No vertex of a run is clamped: 0 <= v+o <= box. */
 
 import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_FREE, UNIFORM_PAGE_POOL_KIND, uniformPagePoolBoxSeed, uniformPagePoolLayout, type UniformPagePoolSeed } from "./uniform-page-pool";
 
@@ -85,10 +107,8 @@ export interface UniformLatticeAddressSource {
   readonly tiles: string;
   /** The expressions are constant expressions. */
   readonly constant: boolean;
-  /** blocks: u32 expression, the pool's blocks (UM_BLOCKS).
-   * whole: every axis of the box is known to be a multiple of
-   * UNIFORM_PAGE_CELLS. */
-  readonly paged: { readonly blocks: string; readonly whole: boolean };
+  /** blocks: u32 expression, the pool's blocks (UM_BLOCKS). */
+  readonly paged: { readonly blocks: string };
 }
 
 /** A page: 32³ cells, 8³ tiles. The page table and block records are the
@@ -111,13 +131,10 @@ export function uniformLatticeAddressWGSL(source: UniformLatticeAddressSource): 
   const extent = (name: string, type: string, lets: string, value: string) => source.constant
     ? `const ${name}:${type}=${value};` : `fn ${name}()->${type}{${lets}return ${value};}`;
   // An extent this function emits, read where it is a const or a function.
-  const pages = source.constant ? "UM_PAGE_BOX" : "UM_PAGE_BOX()", blocks = source.constant ? "UM_BLOCKS" : "UM_BLOCKS()";
+  const blocks = source.constant ? "UM_BLOCKS" : "UM_BLOCKS()";
   const bits = source.constant ? "UM_BLOCK_BITS" : "UM_BLOCK_BITS()", grid = source.constant ? "UM_BLOCK_GRID" : "UM_BLOCK_GRID()";
   // The tile key count: UM_TILES.
   const keys = `512u*${blocks}`;
-  // A partial last page is resident; its cells and tiles past the box take
-  // the page beyond it (SOLID, or AIR above an open top).
-  const whole = source.paged.whole, cell = (p: string) => whole ? p : `umCellLift(${p})`, tile = (p: string) => whole ? p : `umTileLift(${p})`;
   const pagedBodies = /* wgsl */ `
 // Pages. A page's table word (umPageWord) is its block where it is stored, 0
 // where it is AIR and 0xffffffff where it is SOLID; every coordinate lookup
@@ -134,8 +151,7 @@ const UM_FREE:u32=0xffffffffu;
 fn umBlockStored(b:u32)->bool{return b-1u<${blocks}-2u;}
 fn umBlockOf(page:vec3i)->u32{return min(umPageWord(page),${blocks}-1u);}
 fn umBlockPage(b:u32)->vec3u{let r=umBlockWord(b);return vec3u(r&63u,(r>>6u)&63u,(r>>12u)&63u);}
-${whole ? "" : /* wgsl */ `fn umCellLift(p:vec3i)->vec3i{${D}return select(p,vec3i(${pages}<<vec3u(5u)),p>=vec3i(${d}));}
-fn umTileLift(p:vec3i)->vec3i{${T}return select(p,vec3i(${pages}<<vec3u(3u)),p>=vec3i(${t}));}`}
+
 // Tiles. Present: stored. Near: the nearest coordinate of the box. Live: the
 // key holds a tile (its block holds a page, and the tile lies in the box).
 // Texel: where a tile-resolution texture stores the tile of min(vec3u(p),
@@ -146,19 +162,19 @@ fn umTileLift(p:vec3i)->vec3i{${T}return select(p,vec3i(${pages}<<vec3u(3u)),p>=
 // block 0 or of the last block where nothing is stored. Key: umTileAt of a
 // stored tile, a key umKeyStored refuses of any other; the one form to ask
 // of a coordinate whose own state is wanted.
-fn umTilePresent(p:vec3i)->bool{return umBlockStored(umPageWord(${tile("p")}>>vec3u(3u)));}
+fn umTilePresent(p:vec3i)->bool{return umBlockStored(umPageWord(p>>vec3u(3u)));}
 fn umTileNear(p:vec3i)->vec3i{${T}return clamp(p,vec3i(0),vec3i(${t})-vec3i(1));}
 fn umTileAt(p:vec3u)->u32{return 512u*umBlockOf(vec3i(p>>vec3u(3u)))+umTileLocal(p);}
 fn umTileCoord(k:u32)->vec3u{return (umBlockPage(k>>9u)<<vec3u(3u))|umLocalTile(k);}
-fn umTileLive(k:u32)->bool{${whole ? "" : T}return k<${keys}&&umBlockWord(k>>9u)!=UM_FREE${whole ? "" : `&&all(umTileCoord(k)<${t})`};}
+fn umTileLive(k:u32)->bool{return k<${keys}&&umBlockWord(k>>9u)!=UM_FREE;}
 fn umTileTexel(p:vec3i)->vec3i{${T}let q=vec3i(min(vec3u(p),${t}-vec3u(1u)));return (umBlockCoord(umBlockOf(q>>vec3u(3u)))<<vec3u(3u))|(q&vec3i(7));}
-fn umTileStoreTexel(p:vec3i)->vec3i{let b=umPageWord(${tile("p")}>>vec3u(3u));if(!umBlockStored(b)){return vec3i(-1);}return (umBlockCoord(b)<<vec3u(3u))|(p&vec3i(7));}
-fn umTileKey(p:vec3i)->u32{let b=umPageWord(${tile("p")}>>vec3u(3u));if(!umBlockStored(b)){return ${keys};}return 512u*b+umTileLocal(vec3u(p));}
+fn umTileStoreTexel(p:vec3i)->vec3i{let b=umPageWord(p>>vec3u(3u));if(!umBlockStored(b)){return vec3i(-1);}return (umBlockCoord(b)<<vec3u(3u))|(p&vec3i(7));}
+fn umTileKey(p:vec3i)->u32{let b=umPageWord(p>>vec3u(3u));if(!umBlockStored(b)){return ${keys};}return 512u*b+umTileLocal(vec3u(p));}
 // Cells. umPointNear clamps a position in cell units to the box.
-fn umCellPresent(p:vec3i)->bool{return umBlockStored(umPageWord(${cell("p")}>>vec3u(5u)));}
+fn umCellPresent(p:vec3i)->bool{return umBlockStored(umPageWord(p>>vec3u(5u)));}
 fn umCellNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(0),vec3i(${d})-vec3i(1));}
 fn umCellTexel(p:vec3i)->vec3i{${D}let q=vec3i(min(vec3u(p),${d}-vec3u(1u)));return (umBlockCoord(umBlockOf(q>>vec3u(5u)))<<vec3u(5u))|(q&vec3i(31));}
-fn umCellStoreTexel(p:vec3i)->vec3i{let b=umPageWord(${cell("p")}>>vec3u(5u));if(!umBlockStored(b)){return vec3i(-1);}return (umBlockCoord(b)<<vec3u(5u))|(p&vec3i(31));}
+fn umCellStoreTexel(p:vec3i)->vec3i{let b=umPageWord(p>>vec3u(5u));if(!umBlockStored(b)){return vec3i(-1);}return (umBlockCoord(b)<<vec3u(5u))|(p&vec3i(31));}
 // The block of a cell of the box.
 fn umCellBlock(p:vec3u)->u32{return umBlockOf(vec3i(p>>vec3u(5u)));}
 // Vertices of the h lattice: one more plane per axis than the cells. A page
@@ -173,7 +189,7 @@ fn umCellBlock(p:vec3u)->u32{return umBlockOf(vec3i(p>>vec3u(5u)));}
 // stored page touches it. StoreTexel: that texel of a stored vertex,
 // negative of any other (a store there is dropped).
 fn umVertexSlot(v:vec3i)->vec4u{
- let c=${cell("(v-vec3i(1))")};let page=c>>vec3u(5u);let own=vec3u(c&vec3i(31))+vec3u(1u);
+ let c=(v-vec3i(1));let page=c>>vec3u(5u);let own=vec3u(c&vec3i(31))+vec3u(1u);
  let b=umPageWord(page);if(umBlockStored(b)){return vec4u(own,b);}
  let plane=(v&vec3i(31))==vec3i(0);
  for(var k=1u;k<8u;k++){
@@ -189,7 +205,7 @@ fn umVertexTexel(p:vec3i)->vec3i{${D}let s=umVertexSlot(vec3i(min(vec3u(p),${d})
 fn umVertexStoreTexel(p:vec3i)->vec3i{let s=umVertexSlot(p);if(!umBlockStored(s.w)){return vec3i(-1);}let c=umBlockCoord(s.w);return (c<<vec3u(5u))+c+vec3i(s.xyz);}
 // Vertices of the 4h lattice (tile corners), in tile units: 9³ blocks.
 fn umWideVertexSlot(v:vec3i)->vec4u{
- let c=${tile("(v-vec3i(1))")};let page=c>>vec3u(3u);let own=vec3u(c&vec3i(7))+vec3u(1u);
+ let c=(v-vec3i(1));let page=c>>vec3u(3u);let own=vec3u(c&vec3i(7))+vec3u(1u);
  let b=umPageWord(page);if(umBlockStored(b)){return vec4u(own,b);}
  let plane=(v&vec3i(7))==vec3i(0);
  for(var k=1u;k<8u;k++){
@@ -205,8 +221,8 @@ fn umWideVertexTexel(p:vec3i)->vec3i{${T}let s=umWideVertexSlot(vec3i(min(vec3u(
 fn umWideVertexStoreTexel(p:vec3i)->vec3i{let s=umWideVertexSlot(p);if(!umBlockStored(s.w)){return vec3i(-1);}let c=umBlockCoord(s.w);return (c<<vec3u(3u))+c+vec3i(s.xyz);}
 // Kinds: what a page holds, from the table (an open top is its AIR words).
 fn umPageKind(page:vec3i)->u32{let w=umPageWord(page);return select(select(UM_RESIDENT,UM_SOLID,w>=${blocks}-1u),UM_AIR,w==0u);}
-fn umCellKind(p:vec3i)->u32{return umPageKind(${cell("p")}>>vec3u(5u));}
-fn umTileKind(p:vec3i)->u32{return umPageKind(${tile("p")}>>vec3u(3u));}
+fn umCellKind(p:vec3i)->u32{return umPageKind(p>>vec3u(5u));}
+fn umTileKind(p:vec3i)->u32{return umPageKind(p>>vec3u(3u));}
 // Axes on which nothing is stored below origin (a cell, or a tile in tile
 // units): only an origin on a page's low face asks the table.
 fn umLowOpen(origin:vec3i)->vec3<bool>{var m=vec3<bool>(false);
@@ -238,13 +254,11 @@ fn umLocalTile(k:u32)->vec3u{return vec3u(k&7u,(k>>3u)&7u,(k>>6u)&7u);}
 ${extent("UM_CELL_KEYS", "u32", "", `32768u*${blocks}`)}
 ${extent("UM_VERTEX_KEYS", "u32", "", `35937u*${blocks}`)}
 // The sizes of the 3D textures the texel functions address: a block of the
-// grid is 32 cells, 8 tiles, 33 vertices or 9 4h vertices on an axis; and the
-// box's tiles with a one-tile halo (umTileHaloTexel).
+// grid is 32 cells, 8 tiles, 33 vertices or 9 4h vertices on an axis.
 ${extent("UM_CELL_TEXTURE", "vec3u", "", `32u*${grid}`)}
 ${extent("UM_VERTEX_TEXTURE", "vec3u", "", `33u*${grid}`)}
 ${extent("UM_TILE_TEXTURE", "vec3u", "", `8u*${grid}`)}
 ${extent("UM_WIDE_VERTEX_TEXTURE", "vec3u", "", `9u*${grid}`)}
-${extent("UM_TILE_HALO_TEXTURE", "vec3u", T, `${t}+vec3u(2u)`)}
 // The static resident box in cells and tiles: the extent of storage an
 // algorithm shapes as one box of its own (never of a shared table or field).
 ${extent("UM_BOX", "vec3u", D, d)}
@@ -260,7 +274,6 @@ fn umCellInBox(p:vec3i)->bool{${D}return all(p>=vec3i(0))&&all(p<vec3i(${d}));}
 const UM_RESIDENT:u32=0u;const UM_AIR:u32=1u;const UM_SOLID:u32=2u;
 ${pagedBodies}
 fn umKeyStored(k:u32)->bool{return k<${keys};}
-fn umTileHaloTexel(p:vec3i)->vec3i{return p+vec3i(1);}
 // A cell's key is its tile's key then its index in the tile, x fastest.
 fn umCellAt(p:vec3u)->u32{return 64u*umTileAt(p>>vec3u(2u))+((p.x&3u)|((p.y&3u)<<2u)|((p.z&3u)<<4u));}
 fn umCellCoord(k:u32)->vec3u{return (umTileCoord(k>>6u)<<vec3u(2u))|vec3u(k&3u,(k>>2u)&3u,(k>>4u)&3u);}
@@ -297,6 +310,168 @@ fn umWideVertexNear(q:vec3i)->vec3i{${T}return clamp(q,vec3i(0),vec3i(${t}));}
 `;
 }
 
+/** Block neighbours: what lies around each block, by block.
+ *
+ * A row of 27 words a block follows the block records wherever a topology
+ * holds the page table (uniformBlockNeighbourLayout): word (dx+1) + 3 (dy+1)
+ * + 9 (dz+1) of block b's row is the table word of the page at b's page + d,
+ * so a stored page's block, 0 (AIR) or 0xffffffff (SOLID); word 13 is b's
+ * own. A page outside the 64³ window is SOLID: a row never wraps. A block
+ * that holds no page has one word throughout: 0 for a free block and for
+ * block 0, 0xffffffff for the last block, so min(word 13, blocks - 1) is the
+ * block itself exactly where the block is stored or a sentinel. After the
+ * rows, one word counts the wall faces and a list names them: 6 b + f for
+ * every face f = 2 axis + side of a stored block b whose neighbour across it
+ * is SOLID, ascending. A list entry past the count is stale. The rows and
+ * the list are rewritten whole from the table after every page commit
+ * (UniformBlockNeighbours), and seeded with the table.
+ *
+ * The including module declares umBlockNeighbourWord(b:u32,i:u32)->u32 over
+ * the buffer that holds the rows for it, and includes this after
+ * uniformLatticeAddressWGSL.
+ *
+ * The kind-aware clamps answer "the nearest coordinate a tap from this page
+ * may read": NearFrom(home, p) holds p inside home's page on an axis only
+ * where a SOLID page lies across that face. AIR never holds, and neither
+ * does a stored page: the coordinate is returned as it is, in the
+ * neighbour. home is a stored block (a kernel's own); p lies in home's page
+ * or in one of the 26 around it (a farther reach asks again from the page it
+ * has reached). The FromPage forms take home's page from a caller that
+ * holds it and read no block record.
+ *
+ * Diagonals. p leaves home on up to three axes; d is the step, -1, 0 or 1
+ * an axis. First each leaving axis alone: it is held where the face
+ * neighbour across it (home + d[axis] on that axis only) is SOLID. Then the
+ * axes left loose, together: if two or more remain and the page they lead to
+ * (an edge or corner neighbour) is SOLID, every leaving axis is held and the
+ * result stays in home. The answer does not depend on an order of axes, and
+ * never lies in a SOLID page. Where every page outside a box is SOLID it is
+ * the box clamp (umCellNear, umTileNear, umVertexNear, umPointNear) on every
+ * closed wall. */
+export const uniformBlockNeighbourWGSL = /* wgsl */ `
+const UM_SOLID_WORD:u32=0xffffffffu;
+fn umBlockNeighbourIndex(d:vec3i)->u32{return u32(d.x+3*d.y+9*d.z+13);}
+// The table word of the page d pages (-1, 0 or 1 an axis) from block b's.
+fn umBlockNeighbour(b:u32,d:vec3i)->u32{return umBlockNeighbourWord(b,umBlockNeighbourIndex(d));}
+// The axes of step d a wall holds (the diagonal rule above).
+fn umBlockHeld(home:u32,d:vec3i)->vec3<bool>{
+ var held=vec3<bool>(false);var loose=0u;
+ for(var a=0u;a<3u;a++){
+  if(d[a]==0){continue;}
+  var e=vec3i(0);e[a]=d[a];held[a]=umBlockNeighbour(home,e)==UM_SOLID_WORD;
+  if(!held[a]){loose++;}
+ }
+ if(loose>=2u&&umBlockNeighbour(home,select(d,vec3i(0),held))==UM_SOLID_WORD){return d!=vec3i(0);}
+ return held;
+}
+// p held inside [low, high], home's page in p's units, on the axes a wall holds.
+fn umSpanNearFrom(home:u32,low:vec3i,high:vec3i,p:vec3i)->vec3i{
+ let d=vec3i(p>high)-vec3i(p<low);if(all(d==vec3i(0))){return p;}
+ return select(p,clamp(p,low,high),umBlockHeld(home,d));
+}
+// Cells and tiles: a page's 32 cells or 8 tiles an axis. Vertices and 4h
+// vertices: its 33 or 9 planes, both faces of the page its own. Points: a
+// position in cell units, the page's closed extent.
+fn umCellNearFromPage(home:u32,page:vec3i,p:vec3i)->vec3i{let low=page<<vec3u(5u);return umSpanNearFrom(home,low,low+vec3i(31),p);}
+fn umTileNearFromPage(home:u32,page:vec3i,p:vec3i)->vec3i{let low=page<<vec3u(3u);return umSpanNearFrom(home,low,low+vec3i(7),p);}
+fn umVertexNearFromPage(home:u32,page:vec3i,p:vec3i)->vec3i{let low=page<<vec3u(5u);return umSpanNearFrom(home,low,low+vec3i(32),p);}
+fn umWideVertexNearFromPage(home:u32,page:vec3i,q:vec3i)->vec3i{let low=page<<vec3u(3u);return umSpanNearFrom(home,low,low+vec3i(8),q);}
+fn umPointNearFromPage(home:u32,page:vec3i,p:vec3f)->vec3f{
+ let low=vec3f(page<<vec3u(5u));let high=low+vec3f(32.0);
+ let d=vec3i(p>high)-vec3i(p<low);if(all(d==vec3i(0))){return p;}
+ return select(p,clamp(p,low,high),umBlockHeld(home,d));
+}
+fn umCellNearFrom(home:u32,p:vec3i)->vec3i{return umCellNearFromPage(home,vec3i(umBlockPage(home)),p);}
+fn umTileNearFrom(home:u32,p:vec3i)->vec3i{return umTileNearFromPage(home,vec3i(umBlockPage(home)),p);}
+fn umVertexNearFrom(home:u32,p:vec3i)->vec3i{return umVertexNearFromPage(home,vec3i(umBlockPage(home)),p);}
+fn umWideVertexNearFrom(home:u32,q:vec3i)->vec3i{return umWideVertexNearFromPage(home,vec3i(umBlockPage(home)),q);}
+fn umPointNearFrom(home:u32,p:vec3f)->vec3f{return umPointNearFromPage(home,vec3i(umBlockPage(home)),p);}
+`;
+
+/** Block faces: one index family for what lives on the six faces of a
+ * block's page. Face f = 2 axis + side (side 1 the high face); the plane's
+ * coordinates are the page-local coordinates on u = (axis + 1) % 3 and
+ * v = (axis + 2) % 3, u fastest, and the coordinate along axis is not read.
+ * Every block has its six planes, a sentinel and a free block included, so
+ * an index is 6 b + f planes in, at a tile (8 x 8 a plane), a cell (32 x 32)
+ * or a tile of level L of the pressure root (m = 8 >> L an axis, level 0 the
+ * tiles). The low-face table's umLowFaceIndex is another family: three
+ * planes a block, in its own plane order. Arithmetic alone: no table is
+ * read. */
+export const uniformBlockFaceWGSL = /* wgsl */ `
+fn umFaceUV(f:u32,l:vec3u)->vec2u{let axis=f>>1u;return vec2u(l[(axis+1u)%3u],l[(axis+2u)%3u]);}
+fn umFaceTile(b:u32,f:u32,t:vec3u)->u32{let uv=umFaceUV(f,t&vec3u(7u));return (6u*b+f)*64u+uv.x+8u*uv.y;}
+fn umFaceCell(b:u32,f:u32,c:vec3u)->u32{let uv=umFaceUV(f,c&vec3u(31u));return (6u*b+f)*1024u+uv.x+32u*uv.y;}
+fn umFaceLevel(b:u32,f:u32,level:u32,l:vec3u)->u32{let m=8u>>level;let uv=umFaceUV(f,l&vec3u(m-1u));return (6u*b+f)*m*m+uv.x+m*uv.y;}
+`;
+
+/** Where the block neighbour rows, the wall-face count and the wall-face
+ * list lie, in words from the page table's first word (a page pool mirror's
+ * offset): after the table and the block records. words: what they add to
+ * the tail, 33 a block and the count. */
+export function uniformBlockNeighbourLayout(blocks: number): { readonly rows: number; readonly wallCount: number; readonly walls: number; readonly words: number; readonly end: number } {
+  const rows = UNIFORM_PAGE_TABLE_WORDS + blocks, wallCount = rows + 27 * blocks;
+  return { rows, wallCount, walls: wallCount + 1, words: 33 * blocks + 1, end: wallCount + 1 + 6 * blocks };
+}
+/** The rows, the count and the list for a page table and its block records
+ * (records.length blocks): what UniformBlockNeighbours writes, on the host. */
+export function uniformBlockNeighbourWords(table: ArrayLike<number>, records: ArrayLike<number>): Uint32Array<ArrayBuffer> {
+  const blocks = records.length, words = new Uint32Array(33 * blocks + 1), w = UNIFORM_PAGE_WINDOW;
+  let walls = 0;
+  for (let b = 0; b < blocks; b++) {
+    const r = records[b]!, row = 27 * b;
+    if (r === UNIFORM_PAGE_POOL_FREE) { if (b === blocks - 1) words.fill(0xffffffff, row, row + 27); continue; }
+    const x = r & 63, y = (r >>> 6) & 63, z = (r >>> 12) & 63;
+    for (let i = 0; i < 27; i++) {
+      const qx = x + i % 3 - 1, qy = y + Math.floor(i / 3) % 3 - 1, qz = z + Math.floor(i / 9) - 1;
+      words[row + i] = qx < 0 || qy < 0 || qz < 0 || qx >= w || qy >= w || qz >= w ? 0xffffffff : table[qx | (qy << 6) | (qz << 12)]!;
+    }
+    if (b === 0 || b === blocks - 1) continue;
+    for (let f = 0; f < 6; f++) if (words[row + uniformBlockFaceNeighbour(f)] === 0xffffffff) words[27 * blocks + 1 + walls++] = 6 * b + f;
+  }
+  words[27 * blocks] = walls;
+  return words;
+}
+/** The row word across face f = 2 axis + side: 13 - or + 1, 3, 9. */
+export function uniformBlockFaceNeighbour(face: number): number { return 13 + ((face & 1) ? 1 : -1) * 3 ** (face >> 1); }
+/** umBlockHeld on the host, over rows (27 words a block), written to out. */
+export function uniformBlockHeld(rows: ArrayLike<number>, home: number, d: readonly number[], out: [boolean, boolean, boolean]): [boolean, boolean, boolean] {
+  const stride = [1, 3, 9], row = 27 * home;
+  let loose = 0, landing = 13;
+  for (let a = 0; a < 3; a++) {
+    out[a] = d[a] !== 0 && rows[row + 13 + d[a]! * stride[a]!] === 0xffffffff;
+    if (d[a] !== 0 && !out[a]) { loose++; landing += d[a]! * stride[a]!; }
+  }
+  if (loose >= 2 && rows[row + landing] === 0xffffffff) for (let a = 0; a < 3; a++) out[a] = d[a] !== 0;
+  return out;
+}
+/** The span of a page a NearFrom form holds a coordinate in: its first
+ * coordinate is page << bits, its last that + last. */
+export const UNIFORM_NEAR_SPAN = { cell: { bits: 5, last: 31 }, tile: { bits: 3, last: 7 }, vertex: { bits: 5, last: 32 }, wideVertex: { bits: 3, last: 8 }, point: { bits: 5, last: 32 } } as const;
+const held: [boolean, boolean, boolean] = [false, false, false], step: [number, number, number] = [0, 0, 0];
+/** um{Cell,Tile,Vertex,WideVertex,Point}NearFromPage on the host: p held in
+ * home's page (page, in pages) on the axes a wall holds, written to out. */
+export function uniformNearFrom(rows: ArrayLike<number>, home: number, page: readonly number[], span: { readonly bits: number; readonly last: number }, p: readonly number[], out: [number, number, number]): [number, number, number] {
+  for (let a = 0; a < 3; a++) { const low = page[a]! << span.bits; step[a] = p[a]! > low + span.last ? 1 : p[a]! < low ? -1 : 0; }
+  uniformBlockHeld(rows, home, step, held);
+  for (let a = 0; a < 3; a++) { const low = page[a]! << span.bits; out[a] = held[a] ? Math.min(Math.max(p[a]!, low), low + span.last) : p[a]!; }
+  return out;
+}
+/** Slots of the block-face families: a tile plane is 64, a cell plane 1024,
+ * a plane of root level L (8 >> L)², six planes a block. */
+export const uniformFaceTileSlots = (blocks: number): number => 384 * blocks;
+export const uniformFaceCellSlots = (blocks: number): number => 6144 * blocks;
+export const uniformFaceLevelSlots = (blocks: number, level: number): number => 6 * (8 >> level) ** 2 * blocks;
+const faceIndex = (block: number, face: number, m: number, x: number, y: number, z: number): number => {
+  const axis = face >> 1, u = axis === 0 ? y : axis === 1 ? z : x, v = axis === 0 ? z : axis === 1 ? x : y;
+  return (6 * block + face) * m * m + (u & (m - 1)) + m * (v & (m - 1));
+};
+/** The slot of tile (x, y, z) on face f of block b (umFaceTile), of a cell
+ * (umFaceCell) and of a tile of root level L (umFaceLevel). */
+export function uniformFaceTile(block: number, face: number, x: number, y: number, z: number): number { return faceIndex(block, face, 8, x, y, z); }
+export function uniformFaceCell(block: number, face: number, x: number, y: number, z: number): number { return faceIndex(block, face, 32, x, y, z); }
+export function uniformFaceLevel(block: number, face: number, level: number, x: number, y: number, z: number): number { return faceIndex(block, face, 8 >> level, x, y, z); }
+
 /** The scene's box alone: extents and box indices. What a mask author, a
  * box-shaped table and an extent check need; it names no block, no key and
  * no texture of blocks. */
@@ -311,24 +486,44 @@ export interface UniformLatticeBox {
    * and of a launch over them. Never a texture's size. */
   readonly vertexBox: Extent;
   readonly wideVertexBox: Extent;
-  /** The size of a tile-resolution texture with a one-tile halo (umTileHaloTexel). */
-  readonly tileHaloTexture: Extent;
-  /** The box in pages (a partial last page counts), UM_PAGE_BOX. */
+  /** The box in pages, UM_PAGE_BOX: a whole number on every axis. */
   readonly pages: Extent;
-  /** Every axis of the box is a whole number of pages. */
-  readonly whole: boolean;
 }
 
+/** The run forms (the header's last paragraph), over the seam's own functions so that a module carries them only
+ * where it reads a run (uniform-detail-fields.ts emits them for a module that calls one); `prefix` is the
+ * includer's name prefix. A run's slot is the slot of v where the vertices v..v+n on every axis are one block's high
+ * corners (each then at v's texel and key plus its offset from v), as a Texel form resolves it; vec4u(0), no slot,
+ * where they are not: ask each. */
+export function uniformLatticeRunWGSL(prefix = ""): string {
+  const run = (name: string, bits: number, inBox: string) => `fn ${prefix}um${name}Run(v:vec3i,n:u32)->vec4u{
+ let l=vec3u(v)&vec3u(${(1 << bits) - 1}u);let page=v>>vec3u(${bits}u);
+ if(any(l==vec3u(0u))||any(l+n>vec3u(${1 << bits}u))||!${prefix}${inBox}(v+vec3i(i32(n)-1))){return vec4u(0u);}
+ let b=${prefix}umPageWord(page);
+ if(${prefix}umBlockStored(b)){return vec4u(l,b);}
+ if(any(l+n==vec3u(${1 << bits}u))){return vec4u(0u);}
+ return vec4u(l,${prefix}umBlockOf(page));
+}
+fn ${prefix}um${name}RunTexel(s:vec4u)->vec3i{let c=${prefix}umBlockCoord(s.w);return (c<<vec3u(${bits}u))+c+vec3i(s.xyz);}
+`;
+  return `${run("Vertex", 5, "umCellInBox")}fn ${prefix}umVertexRunAt(s:vec4u)->u32{return 35937u*s.w+s.x+33u*(s.y+33u*s.z);}
+${run("WideVertex", 3, "umTileInBox")}`;
+}
+
+/** A lattice is a whole number of pages on every axis: its walls, its floor
+ * and its top are page faces. A scene's lattice is its container's cells
+ * rounded up to one (sceneFluidLatticeDimensions), so any other box is a
+ * caller's error and is refused here. */
 export function uniformLatticeBox(cells: readonly number[]): UniformLatticeBox {
-  if (cells.length !== 3 || cells.some(n => !Number.isSafeInteger(n) || n < 4 || n % 4 !== 0)) throw new RangeError(`Uniform lattice dimensions must be positive multiples of four: ${cells.join("x")}`);
+  if (cells.length !== 3 || cells.some(n => !Number.isSafeInteger(n) || n < UNIFORM_PAGE_CELLS || n % UNIFORM_PAGE_CELLS !== 0)) throw new RangeError(`Uniform lattice ${cells.join("x")} is refused: a lattice is a whole number of ${UNIFORM_PAGE_CELLS}-cell pages on every axis, so each dimension must be a positive multiple of ${UNIFORM_PAGE_CELLS} cells`);
   const box: Extent = [cells[0]!, cells[1]!, cells[2]!], tiles: Extent = [box[0] / 4, box[1] / 4, box[2] / 4];
-  const pages: Extent = [Math.ceil(box[0] / UNIFORM_PAGE_CELLS), Math.ceil(box[1] / UNIFORM_PAGE_CELLS), Math.ceil(box[2] / UNIFORM_PAGE_CELLS)];
+  const pages: Extent = [box[0] / UNIFORM_PAGE_CELLS, box[1] / UNIFORM_PAGE_CELLS, box[2] / UNIFORM_PAGE_CELLS];
   // The table entry past the box on each axis, and the one a coordinate of -1 wraps to, must not be a box page.
   if (pages.some(n => n > UNIFORM_PAGE_WINDOW - 2)) throw new RangeError(`Uniform lattice ${box.join("x")} exceeds ${UNIFORM_PAGE_WINDOW - 2} pages of ${UNIFORM_PAGE_CELLS} cells on an axis`);
   return {
     cells: box, tiles, boxTiles: tiles[0] * tiles[1] * tiles[2], boxCells: box[0] * box[1] * box[2],
     vertexBox: [box[0] + 1, box[1] + 1, box[2] + 1], wideVertexBox: [tiles[0] + 1, tiles[1] + 1, tiles[2] + 1],
-    tileHaloTexture: [tiles[0] + 2, tiles[1] + 2, tiles[2] + 2], pages, whole: box.every(n => n % UNIFORM_PAGE_CELLS === 0),
+    pages,
   };
 }
 
@@ -376,15 +571,22 @@ export interface UniformLatticeAddress extends UniformLatticeBox {
   readonly seed: UniformPagePoolSeed;
   /** Stored tiles: the box's tiles of the resident pages. */
   readonly liveTiles: number;
+  /** The most tiles any commit of the pool can leave stored: 512 for each
+   * block that can hold a page (neither sentinel does), and never more than
+   * the box's. An h tile is a stored tile, so this bounds every layout's h
+   * tiles: the h-tile capacity of a layout the GPU builds. */
+  readonly poolTiles: number;
   /** The pages above the box are AIR (SOLID otherwise, as every other page outside it). */
   readonly openTop: boolean;
 }
 
 /** openTop: the scene's top is open. Under it the lower half of the window's
  * entries past the box on y is AIR and the upper half stays SOLID: a
- * coordinate below the box wraps there. */
+ * coordinate below the box wraps there. The pool's default then holds a
+ * block more a column of pages: the layer above the box that the residency
+ * closure asks for when the liquid nears the top. */
 export function uniformLatticeAddress(cells: readonly number[], openTop = false, scene: UniformPagePoolScene = {}): UniformLatticeAddress {
-  const box = uniformLatticeBox(cells), [px, py, pz] = box.pages, blocks = scene.blocks ?? px * py * pz + 2;
+  const box = uniformLatticeBox(cells), [px, py, pz] = box.pages, blocks = scene.blocks ?? px * py * pz + 2 + (openTop ? px * pz : 0);
   const blockBits = Math.min(Math.floor(blocks / 8), 1) + Math.min(Math.floor(blocks / 64), 1) + Math.min(Math.floor(blocks / 512), 1);
   const blockGrid: Extent = [1 << blockBits, 1 << blockBits, Math.ceil(blocks / 4 ** blockBits)];
   // 33 texels of a vertex texture per block: 62 blocks stay inside a 2048-texel 3D texture.
@@ -401,14 +603,14 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
   let liveTiles = 0;
   for (let b = 1; b < blocks - 1; b++) {
     const r = seed.blocks[b]!;
-    if (r !== UNIFORM_PAGE_POOL_FREE) liveTiles += Math.min(8, box.tiles[0] - 8 * (r & 63)) * Math.min(8, box.tiles[1] - 8 * ((r >>> 6) & 63)) * Math.min(8, box.tiles[2] - 8 * ((r >>> 12) & 63));
+    if (r !== UNIFORM_PAGE_POOL_FREE) liveTiles += 512;
   }
   return {
     ...box, tileKeys: 512 * blocks, cellKeys: 32768 * blocks, vertexKeys: 35937 * blocks,
     cellTexture: [32 * blockGrid[0], 32 * blockGrid[1], 32 * blockGrid[2]], vertexTexture: [33 * blockGrid[0], 33 * blockGrid[1], 33 * blockGrid[2]],
     tileTexture: [8 * blockGrid[0], 8 * blockGrid[1], 8 * blockGrid[2]], faceBaseTexture: [8 * blockGrid[0], 8 * blockGrid[1], 32 * blockGrid[2]],
     wideVertexTexture: [9 * blockGrid[0], 9 * blockGrid[1], 9 * blockGrid[2]], lowFaceKeys: 3072 * blocks,
-    blocks, blockBits, blockGrid, pool, seed, liveTiles, openTop,
+    blocks, blockBits, blockGrid, pool, seed, liveTiles, poolTiles: Math.min(box.boxTiles, 512 * (blocks - 2)), openTop,
   };
 }
 
@@ -423,14 +625,12 @@ export function uniformPageKind(a: UniformLatticeAddress, x: number, y: number, 
   const w = uniformPageWord(a, x, y, z);
   return w === 0 ? UNIFORM_KIND.air : w >= a.blocks - 1 ? UNIFORM_KIND.solid : UNIFORM_KIND.resident;
 }
-// A coordinate of a partial page past the box takes the page beyond it.
-const lift = (p: number, extent: number, pages: number, bits: number) => p >= extent ? pages << bits : p;
 /** The kind of a cell (umCellKind) and of a tile (umTileKind). */
 export function uniformCellKind(a: UniformLatticeAddress, x: number, y: number, z: number): number {
-  return uniformPageKind(a, lift(x, a.cells[0], a.pages[0], 5) >> 5, lift(y, a.cells[1], a.pages[1], 5) >> 5, lift(z, a.cells[2], a.pages[2], 5) >> 5);
+  return uniformPageKind(a, x >> 5, y >> 5, z >> 5);
 }
 export function uniformTileKind(a: UniformLatticeAddress, x: number, y: number, z: number): number {
-  return uniformPageKind(a, lift(x, a.tiles[0], a.pages[0], 3) >> 3, lift(y, a.tiles[1], a.pages[1], 3) >> 3, lift(z, a.tiles[2], a.pages[2], 3) >> 3);
+  return uniformPageKind(a, x >> 3, y >> 3, z >> 3);
 }
 /** Where a cell, face or tile texture stores a block's page, in blocks (umBlockCoord), written to out. */
 export function uniformBlockCoord(a: UniformLatticeAddress, block: number, out: [number, number, number]): [number, number, number] {
@@ -454,8 +654,7 @@ export function uniformTileTexel(a: UniformLatticeAddress, x: number, y: number,
  * units), written to out: local x, y, z and block. The block is no stored one where no
  * stored page touches the vertex. */
 export function uniformVertexSlot(a: UniformLatticeAddress, x: number, y: number, z: number, bits: 5 | 3, out: [number, number, number, number]): [number, number, number, number] {
-  const mask = (1 << bits) - 1, e = bits === 5 ? a.cells : a.tiles;
-  const cx = lift(x - 1, e[0], a.pages[0], bits), cy = lift(y - 1, e[1], a.pages[1], bits), cz = lift(z - 1, e[2], a.pages[2], bits);
+  const mask = (1 << bits) - 1, cx = x - 1, cy = y - 1, cz = z - 1;
   const qx = cx >> bits, qy = cy >> bits, qz = cz >> bits, ox = (cx & mask) + 1, oy = (cy & mask) + 1, oz = (cz & mask) + 1, own = uniformPageWord(a, qx, qy, qz);
   out[0] = ox; out[1] = oy; out[2] = oz; out[3] = own;
   if (uniformBlockStored(a, own)) return out;
@@ -488,12 +687,12 @@ export function uniformVertexStored(a: UniformLatticeAddress, x: number, y: numb
 /** Calls visit for every stored tile, in ascending key order: block by
  * block, then z, y, x inside the page. */
 export function uniformEachTile(a: UniformLatticeAddress, visit: (key: number, x: number, y: number, z: number) => void): void {
-  const [tx, ty, tz] = a.tiles, e = UNIFORM_PAGE_TILES;
+  const e = UNIFORM_PAGE_TILES;
   for (let b = 1; b < a.blocks - 1; b++) {
     const r = a.seed.blocks[b]!;
     if (r === UNIFORM_PAGE_POOL_FREE) continue;
     const x0 = (r & 63) << 3, y0 = ((r >>> 6) & 63) << 3, z0 = ((r >>> 12) & 63) << 3, base = 512 * b;
-    for (let z = z0; z < Math.min(z0 + e, tz); z++) for (let y = y0; y < Math.min(y0 + e, ty); y++) for (let x = x0; x < Math.min(x0 + e, tx); x++)
+    for (let z = z0; z < z0 + e; z++) for (let y = y0; y < y0 + e; y++) for (let x = x0; x < x0 + e; x++)
       visit(base + ((x & 7) | ((y & 7) << 3) | ((z & 7) << 6)), x, y, z);
   }
 }
@@ -516,12 +715,11 @@ export function uniformLowFaceIndex(a: UniformLatticeAddress, x: number, y: numb
 // Scalar forms: frame paths call these without allocating.
 /** The key of a tile of the box (umTileAt): of a tile with nothing stored, a key of block 0. */
 export function uniformTileKey(a: UniformLatticeAddress, x: number, y: number, z: number): number { return 512 * uniformPageBlock(a, x >> 3, y >> 3, z >> 3) + ((x & 7) | ((y & 7) << 3) | ((z & 7) << 6)); }
-/** The key holds a tile (umTileLive): its block holds a page, and the tile lies in the box. */
+/** The key holds a tile (umTileLive): its block holds a page. */
 export function uniformTileLive(a: UniformLatticeAddress, key: number): boolean {
   const b = Math.floor(key / 512);
   if (b < 0 || b >= a.blocks) return false;
-  const r = a.seed.blocks[b]!;
-  return r !== UNIFORM_PAGE_POOL_FREE && ((r & 63) << 3 | (key & 7)) < a.tiles[0] && (((r >>> 6) & 63) << 3 | ((key >> 3) & 7)) < a.tiles[1] && (((r >>> 12) & 63) << 3 | ((key >> 6) & 7)) < a.tiles[2];
+  return a.seed.blocks[b] !== UNIFORM_PAGE_POOL_FREE;
 }
 /** A tile's index in the box (umBoxTileIndex) and the tile of an index,
  * written to out: what the host's per-tile words and box-shaped tables are

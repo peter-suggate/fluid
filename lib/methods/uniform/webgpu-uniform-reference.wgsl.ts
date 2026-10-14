@@ -1,3 +1,4 @@
+import { solidOccupancyMaskWGSL } from "../../core/solid-occupancy-mask";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformLatticeAddressWGSL } from "./uniform-lattice-address";
 
 /** The two dense t=0 passes needed by narrow-band FLIP. */
@@ -118,7 +119,7 @@ struct RigidBody {
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
 fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return umPages[e.x|(e.y<<6u)|(e.z<<12u)];}
 fn umBlockWord(b:u32)->u32{return umPages[${UNIFORM_PAGE_TABLE_WORDS}u+b];}
-${uniformLatticeAddressWGSL({cells:"vec3u(dims())",tiles:"(vec3u(dims())/4u)",constant:false,paged:{blocks:`(arrayLength(&umPages)-${UNIFORM_PAGE_TABLE_WORDS}u)`,whole:false}})}
+${uniformLatticeAddressWGSL({cells:"vec3u(dims())",tiles:"(vec3u(dims())/4u)",constant:false,paged:{blocks:`(arrayLength(&umPages)-${UNIFORM_PAGE_TABLE_WORDS}u)`}})}
 
 fn activeWindowOrigin()->vec3u{return vec3u(0u);}
 
@@ -136,15 +137,11 @@ fn activeId(gid:vec3u)->vec3i{
 
 
 
-// The packed solid voxel mask opens activeScratch: four header words, then a
-// bit per cell of the lattice plus a one-cell halo.
-fn staticSolidVoxelOccupied(p:vec3i)->bool{
-  let shape=vec3i(params.dimsDt.xyz)+vec3i(2);
-  let q=p+vec3i(1);
-  if(any(q<vec3i(0))||any(q>=shape)){return false;}
-  let index=u32(q.x+shape.x*(q.y+shape.y*q.z));
-  return (activeScratch[4u+(index>>5u)]&(1u<<(index&31u)))!=0u;
-}
+// The solid mask's image opens activeScratch (SolidOccupancyMask): a
+// directory word a page of the window, then the mixed solid library's
+// bed-slope lane and tile cut map (uniformSolidScratchLayout) and the page
+// slots the directory names. A page the lattice walls off is solid throughout.
+${solidOccupancyMaskWGSL("activeScratch", "staticSolidPage", "staticSolidVoxelOccupied")}
 
 fn d4Sum6(value:array<f32,6>)->f32{return ((value[0]+value[1])+(value[4]+value[5]))+(value[2]+value[3]);}
 

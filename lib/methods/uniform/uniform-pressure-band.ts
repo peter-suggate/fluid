@@ -1,7 +1,8 @@
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import { uniformBufferedWork } from "./uniform-buffered-work";
+import {uniformBlockFaceWGSL,uniformFaceCellSlots} from "./uniform-lattice-address";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
-import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
+import {uniformMixedTopologyNeighboursWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedFaceAddressWGSL} from "./uniform-mixed-face-dispatch.wgsl";
 import {UNIFORM_MIXED_THETA_MIN,uniformMixedPressureLiquidWGSL,uniformMixedSurfaceThetaWGSL} from "./uniform-mixed-pressure-surface.wgsl";
 import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
@@ -198,7 +199,7 @@ export class UniformPressureBand {
  private readonly layouts=new Map<string,GPUBindGroupLayout>();
  private readonly groups=new Map<string,UniformDetailGroup>();
  private readonly pipelines=new Map<string,GPUComputePipeline>();
- /** The h pressure iterate, the correction to each row's start (the rows' last field): 64 cells per band slot, then the wall halo. */
+ /** The h pressure iterate, the correction to each row's start (the rows' last field): 64 cells per band slot, then the wall halo: a slot a cell of each face of each block (bHalo). */
  get iterate():GPUBuffer{return this.solve;}
  /** Byte offset in index of the per-tile slot+1 map. */
  get slotMapOffset():number{return 4*(HEADER+this.listSlots);}
@@ -241,7 +242,7 @@ export class UniformPressureBand {
  static rowBytes(capacity:number,solid:boolean):number{return 4*(solid?SOLID_ROW_FIELDS:ROW_FIELDS)*64*capacity;}
  /** Bytes of the capacity-sized buffers at `capacity` band tiles. */
  bytesAt(capacity:number):{rows:number;aggregates:number;iterate:number}{
-  const d=this.simulation.capacity.address.cells,halo=2*(d[0]*d[1]+d[0]*d[2]+d[1]*d[2]);
+  const halo=uniformFaceCellSlots(this.simulation.capacity.address.blocks);
   return {rows:UniformPressureBand.rowBytes(capacity,!!this.solid),aggregates:4*(8*MIDDLE_FIELDS+COARSE_FIELDS)*capacity,iterate:4*(64*capacity+halo)};
  }
  /** The capacity-sized buffers (rows, aggregates, iterate) and every group,
@@ -326,15 +327,6 @@ fn bInside(kinds:u32)->bool{return (kinds&0x40000000u)!=0u;}
 // continues its open neighbours and is not its own depth.
 fn bShut(kinds:u32)->bool{return (kinds&0x20000000u)!=0u;}
 fn bSign(f:u32)->i32{return select(-1,1,(f&1u)==1u);}
-// The native one-cell wall halo at h, after every band cell: the six faces
-// of the box.
-fn bHalo(p:vec3i,axis:u32,sign:i32)->u32{
- let q=vec3u(p);let side=select(0u,1u,sign>0);var slot=0u;
- if(axis==0u){slot=side*UM_BOX.y*UM_BOX.z+q.y+UM_BOX.y*q.z;}
- else if(axis==1u){slot=2u*UM_BOX.y*UM_BOX.z+side*UM_BOX.x*UM_BOX.z+q.x+UM_BOX.x*q.z;}
- else{slot=2u*(UM_BOX.y*UM_BOX.z+UM_BOX.x*UM_BOX.z)+side*UM_BOX.x*UM_BOX.y+q.x+UM_BOX.x*q.y;}
- return bN()+slot;
-}
 `;
   const indexed=(atomic:boolean)=>/* wgsl */`
 @group(1) @binding(0) var<uniform> params:BandParams;
@@ -391,7 +383,7 @@ fn bFaceTheta(face:f32,a:f32,wetA:bool,b:f32,wetB:bool)->f32{
 @group(1) @binding(3) var<storage,read> phi:array<f32>;
 @group(1) @binding(6) var vertexPhi:texture_3d<f32>;
 fn bCentrePhi(q:vec3i)->f32{
- var s=0.0;for(var k=0u;k<8u;k++){s+=textureLoad(vertexPhi,q+vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u)),0).x;}return 0.125*s;
+ let c8=udLoad8_vertexPhi(q,1u);var s=0.0;for(var k=0u;k<8u;k++){s+=c8[k];}return 0.125*s;
 }
 // The vertex field at the centre of cell p's face: the mean of its four vertices.
 fn bFacePhi(p:vec3i,axis:u32,sign:i32)->f32{
@@ -407,10 +399,10 @@ fn bPhiH(q:vec3i)->f32{return phi[umOwnerAt(q).index];}
 // Face classification of row assembly. An h neighbour's band phi decides.
 // Inside a coarse owner the neighbour is liquid no band row resolves where
 // that owner is liquid or the h centre there is: the face is Neumann, its
-// flux the transferred 4h face. The 4h solve owns that flux whatever the two
-// 4h phases are: projected (liquid beside liquid, or ghost fluid beside
-// air), kept (beside detached mass) or zero (the supported layer of two air
-// owners, which the extension moves with the liquid under it). An air h
+// flux the transferred 4h face. The 4h solve owns that flux where either 4h
+// owner is a liquid row: projected (liquid beside liquid, or ghost fluid
+// beside air). Between two owners that are not it solved none, and the face
+// keeps its forced velocity (init's bNeumann). An air h
 // centre inside a coarse air owner is the free surface: Dirichlet at that
 // centre's phi (a Neumann face there closed the band's lid under a calm 4h
 // surface tile's rim owners). Dirichlet at the coarse centre's phi for a wet
@@ -438,8 +430,16 @@ ${S?"fn bVolume(c:u32,f:u32)->f32{return rows[(15u+f)*bN()+c];}":""}
 const B_BASE:u32=${S?21:15}u;
 fn bBase(c:u32)->f32{return rows[B_BASE*bN()+c];}
 `,rows=rowsOf(false);
-  const solve=/* wgsl */`
+  // The iterate and its wall halo, over the block faces. walls: the module
+  // also holds a stencil at a wall, and takes the faces with the block
+  // neighbour rows.
+  const solveOf=(walls:boolean)=>(walls?uniformMixedTopologyNeighboursWGSL():uniformBlockFaceWGSL)+/* wgsl */`
 @group(1) @binding(10) var<storage,read_write> solve:array<f32>;
+// The native one-cell wall halo at h, after every band cell: a slot a cell
+// of each of the six faces of each block (umFaceCell). A wall face is a face
+// of its row's own block with a SOLID page across, so every wall face has a
+// slot and no two share one, wherever the block's page lies.
+fn bHalo(p:vec3i,axis:u32,sign:i32)->u32{let q=vec3u(p);return bN()+umFaceCell(umCellBlock(q),2u*axis+select(0u,1u,sign>0),q);}
 // Off-diagonal sum of an h row: band neighbours and the wall halo.
 fn bOff(cell:u32,p:vec3i,kinds:u32)->f32{
  var off=0.0;
@@ -498,7 +498,7 @@ fn bResidualNear(cell:u32,s:u32,l:vec3u,p:vec3i,kinds:u32)->f32{
  let r=bRhs(cell)+bOffNear(cell,s,l,p,kinds)-bDiagonal(cell)*solve[cell];
  return select(r,max(r,0.0),bInside(kinds)&&solve[cell]+bBase(cell)<=0.0);
 }
-`;
+`,solve=solveOf(false);
   const aggregates=/* wgsl */`
 @group(1) @binding(18) var<storage,read_write> coarse:array<f32>;
 // 2h aggregate a (0..8) of slot s is cell 8s+a; field k at k*M. The per-tile
@@ -745,23 +745,28 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
   for(var f=0u;f<6u;f++){coarse[bC(3u+f,j)]=couple[f];coarse[bC(17u+f,j)]=bitcast<f32>(near[f]);}
  }
 }`,
-   init:header+indexed(false)+rowsOf(true)+solve+aggregates+wet+/* wgsl */`
+   init:header+indexed(false)+rowsOf(true)+solveOf(true)+aggregates+wet+/* wgsl */`
 @group(1) @binding(11) var velocity:texture_3d<f32>;
 @group(1) @binding(12) var<storage,read> coarsePressure:array<f32>;
 @group(1) @binding(13) var<storage,read> coarsePhi:array<f32>;
-// The root's owner of a box tile is its box index, whatever is stored there:
-// a tile with nothing stored is a row too (far air, UniformMixedRootOwners),
-// and no tile key is its own.
-// (pressure, phi) of a liquid 4h owner, weight 1; zero for an air one and
-// for a closed one (its phi continues its liquid neighbours; it has no row).
-fn bCoarse(c:vec3i)->vec3f{
- let q=umTileNear(c);let i=umBoxTileIndex(vec3u(q));
+// The 4h owner a stencil of a row of block home (its page: page) reads at
+// tile c: c itself, stored or not, but the nearest tile of the row's page on
+// an axis where a SOLID page lies across that face (umTileNearFromPage): past
+// a wall the owner beside it stands again, and an AIR page is air.
+fn bCoarseAt(home:u32,page:vec3i,c:vec3i)->vec3i{return umTileNearFromPage(home,page,c);}
+// The root's owner of a tile is its key; a tile with nothing stored reads
+// block 0's row (far air at zero pressure, UniformMixedRootOwners).
+// (pressure, phi) of a liquid 4h owner at tile q, weight 1; zero for an air
+// one and for a closed one (its phi continues its liquid neighbours; it has
+// no row).
+fn bCoarse(q:vec3i)->vec3f{
+ let i=umTileAt(vec3u(q));
  return select(vec3f(0.0),vec3f(coarsePressure[i],coarsePhi[i],1.0),bWet(coarsePhi[i],4.0)&&umTileOpenAt(q)>1e-5);
 }
 // A 4h owner as (pressure, liquid, air): bCoarse's liquid owner, and an open
 // one that is not liquid; a closed one is neither.
-fn bCoarseKind(c:vec3i)->vec3f{
- let q=umTileNear(c);let i=umBoxTileIndex(vec3u(q));
+fn bCoarseKind(q:vec3i)->vec3f{
+ let i=umTileAt(vec3u(q));
  let open=umTileOpenAt(q)>1e-5;let wet=bWet(coarsePhi[i],4.0);
  return vec3f(select(0.0,coarsePressure[i],open&&wet),f32(open&&wet),f32(open&&!wet));
 }
@@ -769,38 +774,56 @@ fn bCoarseKind(c:vec3i)->vec3f{
 // by. rise: the 4h pressure's vertical difference per 4h spacing and its
 // weight. Each of the four columns gives its two owners' difference where
 // both are liquid, and where one is (the other closed, or the same owner
-// past the lattice) that owner's against the liquid owner beyond it, one
-// more load; a column with neither gives none; columns weigh as their
-// liquid owners do in the mean. height: the liquid owners' weighted height
-// above b and their weight. air: the air owners' weight.
+// past a wall) that owner's against the liquid owner beyond it, one more
+// load; a column with neither gives none; columns weigh as their liquid
+// owners do in the mean. height: the liquid owners' weighted height above b
+// and their weight. air: the air owners' weight.
 struct BCarry {rise:vec2f,height:vec2f,air:f32}
-fn bCoarseCarry(b:vec3i,w:vec3f)->BCarry{
- var carry:BCarry;let top=i32(UM_BOX_TILES.y)-1;
+fn bCoarseCarry(home:u32,page:vec3i,b:vec3i,w:vec3f)->BCarry{
+ var carry:BCarry;
  for(var k=0u;k<4u;k++){
   let bit=vec2u(k&1u,k>>1u);let sides=select(1.0-w.xz,w.xz,bit==vec2u(1u));let side=sides.x*sides.y;
-  let c=b+vec3i(i32(bit.x),0,i32(bit.y));let y0=clamp(c.y,0,top);let y1=clamp(c.y+1,0,top);
-  let low=bCoarseKind(vec3i(c.x,y0,c.z));var high=low;if(y1!=y0){high=bCoarseKind(vec3i(c.x,y1,c.z));}
+  let c=b+vec3i(i32(bit.x),0,i32(bit.y));
+  let t0=bCoarseAt(home,page,c);let t1=bCoarseAt(home,page,c+vec3i(0,1,0));let y0=t0.y;let y1=t1.y;
+  let low=bCoarseKind(t0);var high=low;if(y1!=y0){high=bCoarseKind(t1);}
   let lower=side*(1.0-w.y);let upper=side*w.y;let liquid=lower*low.y+upper*high.y;
   carry.air+=lower*low.z+upper*high.z;
   carry.height+=vec2f(lower*low.y*f32(y0-b.y)+upper*high.y*f32(y1-b.y),liquid);
   if(y1!=y0&&low.y>0.0&&high.y>0.0){carry.rise+=liquid*vec2f(high.x-low.x,1.0);continue;}
-  var own=low;var at=y0;var beyond=select(y0-1,y0+1,y0==0);
+  // One owner for both (a wall holds the other): the owner beyond it is on
+  // the side away from that wall.
+  var own=low;var at=y0;var beyond=select(y0-1,y0+1,y0!=c.y);
   if(y1!=y0){if(high.y>0.0){own=high;at=y1;beyond=y1+1;}else{beyond=y0-1;}}
-  if(own.y==0.0||beyond<0||beyond>top){continue;}
-  let other=bCoarseKind(vec3i(c.x,beyond,c.z));
+  if(own.y==0.0){continue;}
+  // No owner beyond a wall.
+  let t2=bCoarseAt(home,page,vec3i(c.x,beyond,c.z));if(t2.y!=beyond){continue;}
+  let other=bCoarseKind(t2);
   if(other.y>0.0){carry.rise+=liquid*vec2f((other.x-own.x)*f32(beyond-at),1.0);}
  }
  return carry;
 }
+// The velocity of Neumann face f of band cell 'cell' at p: the transferred 4h
+// face, the flux the root solved through it. Where neither 4h owner at the
+// face is a liquid row the root solved none: its pressure is zero on both
+// sides, and umProject writes the face zero unless detached mass is beside
+// it, a wall across the liquid the two owners hold beside their centres.
+// There the h face keeps its forced velocity, which the root's zero pressure
+// gradient across it leaves as it is. Both cells of a Neumann face are
+// stored, so each owner is its own tile's.
+fn bNeumann(cell:u32,p:vec3i,f:u32)->f32{
+ let axis=f/2u;var q=p;q[axis]+=bSign(f);
+ if(bCoarseKind(p>>vec3u(2u)).y==0.0&&bCoarseKind(q>>vec3u(2u)).y==0.0){return bForced(cell,f);}
+ var a=p;if(bSign(f)<0){a[axis]-=1;}
+ return textureLoad(velocity,a,0)[axis];
+}
 @compute @workgroup_size(64) fn main(${slots}){
  for(var s=group.x;s<bCount();s+=groups.x){
-  let p=vec3i(bTile(s)*4u+bLocal(lane));let cell=s*64u+bRow(bLocal(lane));
+  let key=bIndex(LIST+s);let p=vec3i(umTileCoord(key)*4u+bLocal(lane));let cell=s*64u+bRow(bLocal(lane));
   let kinds=bKinds(cell);
   // Air rows skip the RHS loop but still keep their Neumann velocities.
   if(!bLiquid(kinds)){
    if(((kinds>>2u)&~kinds&~(kinds>>1u)&0x9249u)!=0u){for(var f=0u;f<6u;f++){
-    if(bFaceKind(kinds,f)==K_NEUMANN){let axis=f/2u;var a=p;if(bSign(f)<0){a[axis]-=1;}
-     rows[(9u+f)*bN()+cell]=textureLoad(velocity,a,0)[axis];}
+    if(bFaceKind(kinds,f)==K_NEUMANN){rows[(9u+f)*bN()+cell]=bNeumann(cell,p,f);}
    }}
    solve[cell]=0.0;rows[B_BASE*bN()+cell]=0.0;continue;
   }
@@ -824,15 +847,17 @@ fn bCoarseCarry(b:vec3i,w:vec3f)->BCarry{
   // mean's sign and the range the ratio has. A row with neither an air
   // owner nor a liquid owner over or under any of its own keeps the ratio.
   let y=(vec3f(p)+0.5)/4.0-0.5;let b=vec3i(floor(y));let w=y-floor(y);var sum=vec3f(0.0);
+  // The row's block and page: its stencil stops at their walls (bCoarseAt).
+  let home=key>>9u;let page=p>>vec3u(5u);
   for(var k=0u;k<8u;k++){
    let bit=vec3u(k&1u,(k>>1u)&1u,k>>2u);let weights=select(1.0-w,w,bit==vec3u(1u));
-   sum+=weights.x*weights.y*weights.z*bCoarse(b+vec3i(bit));
+   sum+=weights.x*weights.y*weights.z*bCoarse(bCoarseAt(home,page,b+vec3i(bit)));
   }
   // prep left the row's phi in the iterate.
   var start=0.0;
   if(sum.z>=0.99999){start=sum.x/sum.z;}
   else if(sum.z>0.0){
-   let carry=bCoarseCarry(b,w);
+   let carry=bCoarseCarry(home,page,b,w);
    if(carry.air>0.0||carry.rise.y==0.0){start=sum.x/sum.z*clamp(solve[cell]*sum.z/min(sum.y,-1e-30),0.0,${(1/UNIFORM_MIXED_THETA_MIN).toFixed(1)});}
    else{
     let mean=sum.x/sum.z;let bound=${(1/UNIFORM_MIXED_THETA_MIN).toFixed(1)}*mean;
@@ -846,8 +871,8 @@ fn bCoarseCarry(b:vec3i,w:vec3f)->BCarry{
   var rhs=bRhs(cell);
   for(var f=0u;f<6u;f++){
    let axis=f/2u;let sign=bSign(f);
-   if(bFaceKind(kinds,f)==K_NEUMANN){var a=p;if(sign<0){a[axis]-=1;}
-    let kept=textureLoad(velocity,a,0)[axis];rows[(9u+f)*bN()+cell]=kept;rhs-=params.policy.x*f32(sign)*${S?"bVolume(cell,f)*":""}kept/(params.hDt[axis]*params.hDt.w);}
+   if(bFaceKind(kinds,f)==K_NEUMANN){
+    let kept=bNeumann(cell,p,f);rows[(9u+f)*bN()+cell]=kept;rhs-=params.policy.x*f32(sign)*${S?"bVolume(cell,f)*":""}kept/(params.hDt[axis]*params.hDt.w);}
   }
   rows[cell]=rhs;bFollowHalo(cell,p,kinds,0.0);
  }

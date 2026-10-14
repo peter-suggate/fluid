@@ -1,16 +1,12 @@
 /** Shared f32 backing of the pressure solve: the mixed pressure root, then
- * the native CM11a levels the mixed continuation solves on. Both are fixed
- * by the lattice. Persistent/published textures remain ordinary textures.
+ * the levels its correction is solved on. Both follow the page pool: rows a
+ * block. Persistent/published textures remain ordinary textures.
  *
  * The scratch the non-pressure stages overlap follows the h-tile capacity
  * and is the mixed frame's own buffer (UniformMixedFrame.stageBytesAt). */
-import { planUniformCM11aHierarchy } from "./pressure-plan";
-import { rewritePressureTextureCalls } from "./uniform-pressure-pages";
+import { planUniformPressureLevels, type UniformPressureLevelWords } from "./pressure-plan";
 import type { UniformLatticeAddress } from "./uniform-lattice-address";
 
-/** The native level the mixed continuation starts from (n/4): the levels
- * above it hold no fields. */
-export const UNIFORM_MIXED_CONTINUATION_LEVEL = 2;
 /** Allocation-free layout; different resolutions can share backing when their
  * stages are serialized. No field in this layout is persistent simulation state. */
 export class UniformScratchLayout {
@@ -21,11 +17,12 @@ export class UniformScratchLayout {
   readonly edgeBytes: number;
   readonly sharpenBaseWords: number;
   readonly conditioningBytes: number;
-  private readonly offsets = new Map<string, number>();
+  /** The correction's levels, 4h first: arena words (planUniformPressureLevels). */
+  readonly levels: readonly UniformPressureLevelWords[];
   constructor(readonly address: UniformLatticeAddress, edgeBytes: number, retainDiagnostics=false, rootBytes=0) {
     if (!Number.isSafeInteger(edgeBytes) || edgeBytes < 0 || edgeBytes % 4 !== 0)
       throw new RangeError("Uniform scratch edge bytes must be a nonnegative multiple of four");
-    const dims=address.cells,tiles=address.tileKeys;
+    const tiles=address.tileKeys;
     this.sharpenBaseWords=Math.ceil((6*tiles+3)/4)*4;
     // The tile stages' prefix; balance/page records remain beyond it. No
     // per-cell plane: Geometric advances only through the mixed frame, whose
@@ -36,20 +33,15 @@ export class UniformScratchLayout {
     // The dense receiver-stencil bytes of the lattice: reported, not allocated.
     this.edgeBytes=edgeBytes;
     this.rootOffset=0;this.rootBytes=Math.ceil(rootBytes/256)*256;
-    let pressureWords=(this.rootOffset+this.rootBytes)/4;
-    planUniformCM11aHierarchy(dims).levelDimensions.slice(UNIFORM_MIXED_CONTINUATION_LEVEL).forEach((d,index)=>{
-      const cells=d.reduce((n,x)=>n*(x+2),1),level=index+UNIFORM_MIXED_CONTINUATION_LEVEL;
-      for(const [name,count] of Object.entries({"pressure A":1,"pressure B":1,"rhs A":1,"rhs B":1,
-        "phi A":1,"phi B":1,"V A":4,"residual A":1,"p-min A":1,"p-min B":1,"coefficients":4})){
-        pressureWords=Math.ceil(pressureWords/4)*4;
-        this.offsets.set(`Uniform CM11a L${level} ${name}`,pressureWords);pressureWords+=cells*count;
-      }
-    });
-    this.byteLength=pressureWords*4;
+    const plan=planUniformPressureLevels(address.blocks,(this.rootOffset+this.rootBytes)/4);
+    this.levels=plan.levels;this.byteLength=plan.end*4;
     if (!Number.isSafeInteger(this.byteLength))
       throw new RangeError("Uniform scratch layout exceeds safe integer addressing");
   }
-  offset(label:string):number|undefined{return this.offsets.get(label);}
+  /** Where a texture of this label lies in the arena: nowhere, since the
+   * arena's fields are rows of blocks and none is a texture's. What
+   * UniformTexturePages asks of every texture it creates. */
+  offset(_label:string):number|undefined{return undefined;}
 }
 
 /** A layout plus owned or borrowed backing. Borrowed views are valid only while
@@ -84,24 +76,4 @@ export function uniformScratchAccessWGSL(name:string, metadata:string, type:stri
   return type.startsWith('texture_storage')
     ? `if((${metadata}.w&0x80000000u)!=0u){if(${guard}){return;}${address}${assignment(0)}if(count==4u){${[1,2,3].map(assignment).join('')}}return;}`
     : `if((${metadata}.w&0x80000000u)!=0u){if(${guard}){return ${vector}(0);}${address}if(count==1u){return ${vector}(${load(0)},0,0,1);}return ${vector}(${[0,1,2,3].map(load).join(',')});}`;
-}
-
-export function uniformPressureScratchShader(source:string):string {
-  const declarations=[...source.matchAll(/@group\(1\) @binding\((\d+)\) var (mg\w+): (texture[^;]+);/g)];
-  const fields=new Map(declarations.map(m=>[m[2]!,{binding:Number(m[1]),type:m[3]!}]));
-  let helpers='';
-  for(const [name,{binding,type}] of fields){
-    const metadata=`mg.fieldDims[${binding}]`;
-    const readWrite=type.includes('read_write');
-    if(!type.startsWith('texture_storage')||readWrite){
-      const code=uniformScratchAccessWGSL(name,metadata,'texture_3d<f32>',false,[7,8,14,15].includes(binding)?4:1);
-      helpers+=`fn ${name}Load(p:vec3i)->vec4f{${code}return textureLoad(${name},p${readWrite?'':',0'});}\n`;
-    }
-    if(type.startsWith('texture_storage')){
-      const code=uniformScratchAccessWGSL(name,metadata,type,false,[7,8,14,15].includes(binding)?4:1);
-      helpers+=`fn ${name}Store(p:vec3i,value:vec4f){${code}textureStore(${name},p,value);}\n`;
-    }
-  }
-  const result=source.replace('  control: vec4u,','  control: vec4u,\n  fieldDims: array<vec4u,17>,');
-  return rewritePressureTextureCalls(result,fields)+helpers;
 }

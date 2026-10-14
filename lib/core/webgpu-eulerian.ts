@@ -49,6 +49,13 @@ export interface GPUEulerianInfo {
   nx: number;
   ny: number;
   nz: number;
+  /**
+   * The cells of the lattice that lie in the tank, counted from the lattice's
+   * low corner, when the solver's lattice (nx, ny, nz) runs past the tank's
+   * high faces. A frame contours and slices these, at the tank's extents over
+   * them a cell; absent, the lattice is the tank's.
+   */
+  tankCells?: readonly [number, number, number];
   storedNy: number;
   cellCount: number;
   equivalentUniformCells: number;

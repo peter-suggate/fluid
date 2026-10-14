@@ -21,8 +21,8 @@
  * with free holes; and a half box with AIR above it under random requests
  * and keeps, checked against a host model of the resident set.
  * Live allocation inside a box, each scenario against a host model of its
- * script: a residency certificate (pages of 16 cells, a count and a reach
- * behind accessors) asked through upCertify on a grid shorter than its list.
+ * script: a list of 16-cell pages of the box with a reach, each asked for by
+ * its 32-cell page (the probe's own upCertify) on a grid shorter than the list.
  * The letters box kept whole for twenty commits; a block of seeds walking a
  * path through a box four times the pool, claiming ahead, retiring behind
  * after idleSteps (3, then 1), reusing blocks and reclaiming pages, from an
@@ -42,7 +42,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
-import { UniformPagePool,uniformPagePoolBoxSeed,uniformPagePoolCertificateWGSL,uniformPagePoolFatalMessage,uniformPagePoolLayout,uniformPagePoolPublished,uniformPagePoolSeed,uniformPagePoolWGSL,
+import { UniformPagePool,uniformPagePoolBoxSeed,uniformPagePoolFatalMessage,uniformPagePoolLayout,uniformPagePoolPublished,uniformPagePoolSeed,uniformPagePoolWGSL,
  UNIFORM_PAGE_POOL_BLOCK as BLOCK,UNIFORM_PAGE_POOL_FATAL as FATAL,UNIFORM_PAGE_POOL_FREE as FREE,UNIFORM_PAGE_POOL_KIND as KIND,UNIFORM_PAGE_POOL_NONE as NONE,UNIFORM_PAGE_POOL_PUBLISHED as PUBLISHED,
  UNIFORM_PAGE_POOL_RECORD as RECORD,UNIFORM_PAGE_POOL_SOLID as SOLID,UNIFORM_PAGE_POOL_STATUS as STATUS,UNIFORM_PAGE_POOL_WORK as WORK,
  type UniformPagePoolBoxSeedOptions,type UniformPagePoolOptions,type UniformPagePoolSeedPage } from "../lib/methods/uniform/uniform-page-pool";
@@ -138,14 +138,21 @@ async function harness(options:UniformPagePoolOptions,setup:Setup={}){
  if(asks>0u){let a=4u+4u*(gid.x%asks);upRequest(vec3i(script[a],script[a+1u],script[a+2u]));}
  if(keeps>0u){upKeep(u32(script[${SCRIPT_KEEPS}u+gid.x%keeps]));}
 }
-// The certificate as an owner module holds it: a count, a compact list and a reach, read through accessors.
+// A certificate's list: a count, 16-cell pages relative to the box, a seeded flag each, and a reach.
 fn certCount()->u32{return u32(script[3]);}
 fn certPage(i:u32)->vec3i{let a=${SCRIPT_CERT+1}u+4u*i;return vec3i(script[a],script[a+1u],script[a+2u]);}
 fn certSeeded(i:u32)->bool{return script[${SCRIPT_CERT+4}u+4u*i]!=0;}
-${uniformPagePoolCertificateWGSL({count:"certCount",page:"certPage",seeded:"certSeeded",reach:`u32(script[${SCRIPT_CERT}u])`})}
-// The same source without the audit and over an unsigned coordinate; never launched.
-fn certPageUnsigned(i:u32)->vec3u{return vec3u(certPage(i));}
-${uniformPagePoolCertificateWGSL({count:"certCount",page:"certPageUnsigned",reach:"0u",name:"upCertifyPlain"})}
+// Entries lane, lane+width, ... ask for their 32-cell pages. A reach over the cap asks for nothing; a seeded
+// entry whose page is not resident yet raises closure and is asked for all the same.
+fn upCertify(lane:u32,width:u32){
+ let count=certCount();let reach=u32(script[${SCRIPT_CERT}u]);
+ for(var i=lane;i<count;i+=width){
+  let q=vec3i(${l.box.origin.join(",")})+(certPage(i)>>vec3u(1u));
+  if(reach>UP_CLOSURE_CAP){upFailWith(UP_FATAL_CLOSURE_CAP,q,reach);return;}
+  if(certSeeded(i)&&upBlockOf(q)==UP_NONE){upFail(UP_FATAL_CLOSURE,q);}
+  upRequest(q);
+ }
+}
 // A fixed grid shorter than the list: each lane strides it.
 @compute @workgroup_size(64) fn certify(@builtin(global_invocation_id) gid:vec3u){upCertify(gid.x,${64*CERT_GROUPS}u);}
 @compute @workgroup_size(1) fn look(){
@@ -157,8 +164,6 @@ ${uniformPagePoolCertificateWGSL({count:"certCount",page:"certPageUnsigned",reac
   if(any(upWindowPage(upBlockWord(block))!=(q&vec3i(i32(UP_TABLE)-1)))){bad+=1u;}
  }
  for(var i=0u;i<upNewCount();i++){let block=upNewBlock(i);if(!upStored(block)||upBlockOf(upPageOf(block))!=block||upBlockOf(upNewPage(i))!=block){bad+=1u;}}
- ${l.box.count?`for(var i=0u;i<UP_BOX_COUNT;i++){if(upBoxIndex(upBoxPage(i))!=i){bad+=1u;}}
- if(upBoxIndex(UP_BOX_ORIGIN-vec3i(1,0,0))!=UP_NONE||upBoxIndex(UP_BOX_ORIGIN+vec3i(UP_BOX_PAGES))!=UP_NONE||upBoxIndex(UP_BOX_ORIGIN+vec3i(0,i32(UP_BOX_PAGES.y),0))!=UP_NONE){bad+=1u;}`:""}
  if(upBlockWord(0u)!=UP_FREE||upBlockWord(UP_SOLID_BLOCK)!=UP_FREE||upStored(0u)||upStored(UP_SOLID_BLOCK)||upStored(UP_NONE)){bad+=1u;}
  seen[4]=bad;seen[5]=UP_EDGE;seen[6]=UP_BLOCKS;seen[7]=UP_TABLE;
  let looks=u32(script[2]);
@@ -547,7 +552,7 @@ for(let round=0;round<rounds;round++){
  h.destroy();
 }
 
-// Live allocation inside a box: a residency certificate (pages of 16 cells, a count, a reach) asks through upCertify,
+// Live allocation inside a box: a list of 16-cell pages with a reach asks through the probe's upCertify,
 // pinned pages are asked for by every commit, and the published record follows the table. Each scenario is checked
 // against a host model of the same script: the resident pages and their idle counts after every commit.
 type Triple=readonly [number,number,number];

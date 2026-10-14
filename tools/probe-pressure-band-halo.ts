@@ -31,6 +31,7 @@ import type { UniformPressureBandFields } from "../lib/methods/uniform/uniform-p
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import { GPUPassProfile } from "./gpu-pass-profile";
 import { pressureNeumannCache } from "./pressure-neumann-cache";
+import { setUniformMixedBandRowsRetainedForQA } from "../lib/methods/uniform/uniform-mixed-frame";
 
 function withoutHaloGuard(code:string):string{
  const guard=" if(((kinds>>1u)&~kinds&~(kinds>>2u)&0x9249u)==0u){return;}";
@@ -84,7 +85,7 @@ function rowAssemblySource(code:string):string{
   const start=code.indexOf("fn umPressureFaceV(id:vec3i,axis:u32)->f32{");
   assert.ok(start>=0);
   const prefix=code.slice(0,start),body=code.slice(start);
-  const needle="if(umSolidValid(id)&&umSolidTileClear(id)){return 1.0;}";
+  const needle="if(umSolidFaceClear(id,neighbor,axis)){return 1.0;}";
   assert.equal(body.split(needle).length,2);
   code=prefix+body.replace(needle,needle+`
  if(umSolidValid(id)&&(u32(id[axis])&3u)==3u){
@@ -209,6 +210,8 @@ try{
  const raw=await adapter.requestDevice({requiredFeatures:["timestamp-query",...(adapter.features.has("subgroups")?["subgroups" as const]:[])],requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
  profile=new GPUPassProfile(raw);const variants=new Variants(profile.device);device=managedGPUDevice(variants.device,{requireWorkerRealm:false});
  device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
+ // The records below capture and replay the rows: keep them out of the stage scratch.
+ setUniformMixedBandRowsRetainedForQA();
  solver=await method.createSolverAsync!(device,scene,quality,values,undefined,()=>{}) as WebGPUUniformReferenceSolver;
  const band=(solver as unknown as {mixedFrame:{band:Band}}).mixedFrame.band;
  const allocate=(size:number,read=false)=>{const b=raw.createBuffer({size,usage:GPUBufferUsage.COPY_DST|(read?GPUBufferUsage.MAP_READ:GPUBufferUsage.COPY_SRC)});buffers.add(b);return b;};

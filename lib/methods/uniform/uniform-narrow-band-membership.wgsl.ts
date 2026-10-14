@@ -34,12 +34,13 @@ fn nbBandCrossing(c:vec3u)->bool{
  let l=c&vec3u(3u);
  return ((atomicLoad(&bins[NB_BAND_MASK+2u*nbBandTile(c)+(l.z>>1u)])>>(l.x+4u*l.y+16u*(l.z&1u)))&1u)!=0u;
 }
-// Crossing scans visit integer vertices in the closed domain. Use the
-// positive-side sampling owner, clamped to the last cell on upper faces.
+// Crossing scans visit the integer vertices of a tile (key tile, first
+// cell origin), its upper faces with them. Use the positive-side sampling
+// owner, held in the tile where a wall lies across an upper face.
 // Fine vertices and 4-aligned coarse corners have one nonzero weight; other
 // coarse lattice vertices retain the sampler's complete ordered D4 sum.
-fn nbCrossingVertex(p:vec3u)->f32{
- let cell=vec3u(umCellNear(vec3i(p)));let width=umTileWidth(umTileAt(cell/4u));
+fn nbCrossingVertex(tile:u32,origin:vec3u,p:vec3u)->f32{
+ let cell=vec3u(umCellNearFromPage(tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));let width=umTileWidth(umTileAt(cell/4u));
  if(width==1u){return umLoadVertex(p);}
  if(all((p&vec3u(3u))==vec3u(0u))){return umLoadCorner(p);}
  return umSampleVertex(vec3f(p));
@@ -57,7 +58,7 @@ fn nbCrossingVertex(p:vec3u)->f32{
   var candidate=true;
   if(umTileMinimumWidth(t)==4u){
    let origin=4u*umTileCoord(t);var low=3.0e38;var high=-3.0e38;
-   for(var k=0u;k<8u;k++){let value=nbCrossingVertex(origin+4u*umCorner(k,2u));low=min(low,value);high=max(high,value);}
+   for(var k=0u;k<8u;k++){let value=nbCrossingVertex(t,origin,origin+4u*umCorner(k,2u));low=min(low,value);high=max(high,value);}
    candidate=low<=0.0&&high>=0.0;
   }
   if(candidate){let slot=atomicAdd(&bins[NB_BAND],1u);atomicStore(&bins[NB_BAND_CANDIDATES+slot],t);}
@@ -67,7 +68,7 @@ var<workgroup> nbBandVertices:array<f32,125>;
 var<workgroup> nbBandMask:array<atomic<u32>,2>;
 @compute @workgroup_size(128) fn depthSeeds(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let tile=atomicLoad(&bins[NB_BAND_CANDIDATES+group.x]);let coord=umTileCoord(tile);let origin=4u*coord;
- if(lane<125u){nbBandVertices[lane]=nbCrossingVertex(origin+umCorner(lane,5u));}
+ if(lane<125u){nbBandVertices[lane]=nbCrossingVertex(tile,origin,origin+umCorner(lane,5u));}
  if(lane<2u){atomicStore(&nbBandMask[lane],0u);}
  workgroupBarrier();
  if(lane<64u){
@@ -108,11 +109,11 @@ fn nbBandRow(coord:vec3u,y:i32,z:i32)->u32{
  return bits&0x3fffu;
 }
 ${narrowBandNearestWGSL}
-fn bulkDepth(p:vec3f)->f32{
+// c: the cell p is read in, the caller's clamp of it.
+fn bulkDepth(c:vec3u,p:vec3f)->f32{
  let phiValue=bandPhi(p);if(phiValue>=0.0){return phiValue;}
- let c=umCellNear(vec3i(floor(p)));
- if((nbBandReach(vec3u(c))&1u)==0u){return min(phiValue,-8.0);}
- let nearest=atomicLoad(&bins[NB_DEPTH_B+umCellAt(vec3u(c))]);
+ if((nbBandReach(c)&1u)==0u){return min(phiValue,-8.0);}
+ let nearest=atomicLoad(&bins[NB_DEPTH_B+umCellAt(c)]);
  // No crossing cell within five of this one: its box is five cells off or
  // more, six only from below. A deeper bound sank the resting bath's phi
  // from seven cells down, under the 4h owners that read it.
@@ -123,14 +124,21 @@ fn bulkDepth(p:vec3f)->f32{
 // Bank A is the nodal metric field redistance leaves on the reached tiles.
 // Particle membership does not depend on the resolution of simulation owners.
 // Past the reach (two tiles from any crossing) the level set stands in, held
-// at least six cells away.
+// at least six cells away. p: a point of a cell of a page that is not SOLID
+// (a sample's position, a point of a stored cell, the centre of a stored
+// face), read in that cell.
 fn particleDepth(p:vec3f)->f32{
- let q=umPointNear(p);let c=vec3u(umCellNear(vec3i(floor(q))));let f=q-vec3f(c);
- if((nbBandReach(c)&1u)==0u){let far=bandPhi(q);return select(max(far,6.0),min(far,-6.0),far<0.0);}
+ let c=vec3u(p);let f=p-vec3f(c);
+ if((nbBandReach(c)&1u)==0u){let far=bandPhi(p);return select(max(far,6.0),min(far,-6.0),far<0.0);}
  var value=0.0;
+ // The eight vertex keys: where one block holds them (umVertexRun) the first's plus 1, 33 and 1089 a step, by one
+ // page-table read; else umVertexAt of each.
+ var keys:array<u32,8>;let run=umVertexRun(vec3i(c),1u);
+ if(run.x!=0u){let first=umVertexRunAt(run);for(var k=0u;k<8u;k++){let corner=umCorner(k,2u);keys[k]=first+corner.x+33u*corner.y+1089u*corner.z;}}
+ else{for(var k=0u;k<8u;k++){keys[k]=umVertexAt(c+umCorner(k,2u));}}
  for(var k=0u;k<8u;k++){
   let corner=umCorner(k,2u);let w=select(1.0-f,f,corner!=vec3u(0));
-  value+=w.x*w.y*w.z*bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(c+corner)]));
+  value+=w.x*w.y*w.z*bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+keys[k]]));
  }
  return value;
 }

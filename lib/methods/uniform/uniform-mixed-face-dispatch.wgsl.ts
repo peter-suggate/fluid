@@ -49,7 +49,8 @@ export function uniformMixedFaceDispatchWGSL(entry: string, evaluate: string, al
  * every patch and component of a coarse owner through one expensive sampler.
  * Dispatch with tileGroups=true; the owner/worklist ABI itself is unchanged. */
 /** Certified far air (uniformMixedResidencyWord): every tile within two
- * tiles of the owner's lies in an absent page, so the owner, every
+ * tiles of the owner's lies in an absent page (one nothing stores is
+ * absent), so the owner, every
  * neighbour and every owner their pressure slopes read are far air (V=0,
  * corner and so centre phi at least 16h, audited by the next census).
  * `inflow` is WGSL true when an inflow may reach any face this frame. The
@@ -58,8 +59,14 @@ export const uniformMixedFarAirWGSL = (inflow = "false") => /* wgsl */ `
 fn umFarAirOwner(owner:UMOwner)->bool{
  if(${inflow}){return false;}
  let p=vec3i(umTileCoord(owner.tile));
- let a=vec3u(umTileNear(p-vec3i(2))/4);let b=vec3u(umTileNear(p+vec3i(2))/4);
- for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){if(umPageResident(x+UM_PD.x*(y+UM_PD.y*z))){return false;}}}}
+ let a=(p-vec3i(2))>>vec3u(2u);let b=(p+vec3i(2))>>vec3u(2u);let home=p>>vec3u(3u);
+ for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
+  // A page of the owner's own block needs no table word; one nothing
+  // stores is a page of block 0 or of the last block, never resident.
+  let q=vec3i(x,y,z);let o=vec3u(q)&vec3u(1u);
+  var block=owner.tile>>9u;if(any((q>>vec3u(1u))!=home)){block=umBlockOf(q>>vec3u(1u));}
+  if(umPageResident(8u*block+(o.x|(o.y<<1u)|(o.z<<2u)))){return false;}
+ }}}
  return true;
 }`;
 

@@ -4,16 +4,18 @@ import { narrowBandRedistanceWGSL } from "./uniform-narrow-band-redistance.wgsl"
 import { narrowBandMembershipWGSL } from "./uniform-narrow-band-membership.wgsl";
 import { narrowBandNearestEntries } from "./uniform-narrow-band-nearest.wgsl";
 import { NARROW_BAND_TRACE_LIMIT, narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
+import { narrowBandNearWGSL } from "./uniform-narrow-band-near.wgsl";
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
 import { NARROW_BAND_PARTICLE_GRID, UniformNarrowBandOrder } from "./uniform-narrow-band-order";
 import { NARROW_BAND_SURFACE_RADIUS, narrowBandSurfaceWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
 import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailGroup } from "./uniform-detail-fields";
 import { uniformMixedTopologyWGSL, uniformMixedCertifiedEntriesWGSL } from "./uniform-mixed-topology.wgsl";
-import { UNIFORM_PAGE_TABLE_WORDS, uniformKeyGroups, uniformLatticeAddressWGSL, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { UNIFORM_PAGE_TABLE_WORDS, UNIFORM_PAGE_WINDOW, uniformBlockNeighbourWGSL, uniformKeyGroups, uniformLatticeAddressWGSL, type UniformLatticeAddress } from "./uniform-lattice-address";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
+import { uniformCoarseCacheExtent } from "./uniform-coarse-velocity-cache";
 import { uniformMixedSolidWGSL, uniformMixedSolidPipeline, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { UniformMixedMomentumCache, type UniformMixedHangingTaps } from "./uniform-mixed-momentum-cache";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
@@ -150,7 +152,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.state=buffer("receipt",48);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+address.tileKeys*(36+4*NARROW_BAND_ACTIVITY_WORDS_PER_TILE)+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*32);this.params=buffer("parameters",48,true);
   this.order=new UniformNarrowBandOrder(device,address,ownership.presentation.buffer,this.particles,this.bins,this.next,this.state);
   this.refinementParams=buffer("refinement prediction",48,true);device.queue.writeBuffer(this.refinementParams,32,new Uint32Array([address.blocks,0,0,0]));
-  const size=address.cells.map(n=>n/4+2);
+  const size=uniformCoarseCacheExtent(address);
   this.coarseVelocity=device.createTexture({label:"Narrow-band FLIP stage sampling cache",size,dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
   this.baseAllocatedBytes=this.capacity*132+(3*cells+vertices)*4+address.tileKeys*(32+4*NARROW_BAND_ACTIVITY_WORDS_PER_TILE)+144+size.reduce((n,v)=>n*v,16);
   if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotSnapshotResources=uniformDetailBindLayout(device,{entries:[
@@ -235,30 +237,34 @@ fn nbRefineCells()->vec3u{return vec3u(p.dimsDt.xyz);}
 fn nbRefineTiles()->u32{return 512u*p.blocks.x;}
 fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return nbRefineTopology[5u*nbRefineTiles()+(e.x|(e.y<<6u)|(e.z<<12u))];}
 fn umBlockWord(b:u32)->u32{return nbRefineTopology[5u*nbRefineTiles()+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
-${uniformLatticeAddressWGSL({cells:"nbRefineCells()",tiles:"(nbRefineCells()/4u)",constant:false,paged:{blocks:"p.blocks.x",whole:this.address.whole}})}
-struct Box{low:vec3u,high:vec3u}
+${uniformLatticeAddressWGSL({cells:"nbRefineCells()",tiles:"(nbRefineCells()/4u)",constant:false,paged:{blocks:"p.blocks.x"}})}
+// The swept tiles of a sample, and its own tile's key.
+struct Box{low:vec3i,high:vec3i,home:u32}
 fn sweptSurface(sample:Particle)->Box{
  let start=sample.position.xyz;let motion=select(sample.before.xyz,sample.velocity.xyz,sample.before.w>0.5);
  let travel=p.dimsDt.w*motion/p.h.xyz;
- let c=vec3u(umCellNear(vec3i(floor(start))));
+ // A live sample lies in a stored cell: its tile's key is one table read, and its cell's key follows from it.
+ let c=vec3u(start);let home=umTileAt(c/4u);
  let bank=2u*UM_CELL_KEYS()+2u*nbRefineTiles()+max(UM_VERTEX_KEYS(),UM_CELL_KEYS()/2u);
  // The nearest-crossing bank holds a tile only within two tiles of a crossing (its reach bit).
- let reach=bins[bank+UM_CELL_KEYS()+4u+2u*nbRefineTiles()+umTileAt(c/4u)];
- var nearest=0xffffffffu;if((reach&1u)!=0u){nearest=bins[bank+umCellAt(c)];}
+ let reach=bins[bank+UM_CELL_KEYS()+4u+2u*nbRefineTiles()+home];
+ var nearest=0xffffffffu;if((reach&1u)!=0u){nearest=bins[bank+64u*home+((c.x&3u)|((c.y&3u)<<2u)|((c.z&3u)<<4u))];}
  var low=start-${NARROW_BAND_SURFACE_RADIUS};var high=start+${NARROW_BAND_SURFACE_RADIUS};
  // Interior samples request the actual crossing cell, not their 4h collar.
  // Escaped samples still request their own swept support for reconstruction.
  if(sample.velocity.w<=0.0&&nearest!=0xffffffffu){
   low=vec3f(umCellCoord(nearest));high=low+1.0;
  }
- let lo=vec3u(umTileNear(vec3i(floor((low+min(travel,vec3f(0))-p.h.w)/4.0))));
- let hi=vec3u(umTileNear(vec3i(floor((high+max(travel,vec3f(0))+p.h.w-1e-5)/4.0))));
- return Box(lo,max(lo,hi));
+ // No wall clamps the box: a tile that holds no storage has no key and takes
+ // no mark (refine). It is kept in the page table's window, which the keys wrap.
+ let lo=clamp(vec3i(floor((low+min(travel,vec3f(0))-p.h.w)/4.0)),vec3i(0),vec3i(${8*UNIFORM_PAGE_WINDOW-1}));
+ let hi=clamp(vec3i(floor((high+max(travel,vec3f(0))+p.h.w-1e-5)/4.0)),vec3i(0),vec3i(${8*UNIFORM_PAGE_WINDOW-1}));
+ return Box(lo,max(lo,hi),home);
 }
 @compute @workgroup_size(64) fn refine(@builtin(global_invocation_id) gid:vec3u){
  for(var i=gid.x;i<min(count[0],arrayLength(&samples));i+=65536u){
   let sample=samples[i];if(sample.velocity.w < -1.0||sample.before.w==1.0){continue;}
-  let box=sweptSurface(sample);
+  let box=sweptSurface(sample);let page=vec3i(vec3u(sample.position.xyz)>>vec3u(5u));
   // Resampling preserves neighboring survivors; the seed tail is unsorted.
   // A superset sweep can mark for both, regardless of their order.
   if(i+1u<min(count[0],arrayLength(&samples))){
@@ -266,7 +272,10 @@ fn sweptSurface(sample:Particle)->Box{
    if(other.velocity.w>=-1.0&&other.before.w!=1.0){let b=sweptSurface(other);if(all(b.low<=box.low)&&all(b.high>=box.high)){continue;}}
   }
   for(var z=box.low.z;z<=box.high.z;z++){for(var y=box.low.y;y<=box.high.y;y++){for(var x=box.low.x;x<=box.high.x;x++){
-   let tile=umBoxTileIndex(vec3u(x,y,z));atomicOr(&joins[tile/32u],1u<<(tile%32u));
+   // A bit a tile key. A tile of the sample's page shares its block; another asks the table.
+   let t=vec3i(x,y,z);var tile=(box.home&~511u)|umTileLocal(vec3u(t));
+   if(any((t>>vec3u(3u))!=page)){tile=umTileKey(t);if(!umKeyStored(tile)){continue;}}
+   atomicOr(&joins[tile/32u],1u<<(tile%32u));
   }}}
  }
 }`});
@@ -326,14 +335,16 @@ const NB_SURFACE_TILES:u32=NB_COVERAGE+UM_TILES;
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
-${uniformMixedVertexSamplingSource("",true,undefined,"umLoadCorner")}
+// The same loads of the eight vertices p + s*umCorner(k,2u): one page-table read where one block holds them.
+fn umLoadVertex8(p:vec3u,s:u32)->array<f32,8>{return udLoad8_phi(vec3i(p),s);}
+fn umLoadCorner8(p:vec3u,s:u32)->array<f32,8>{return udLoad48_phi(vec3i(p),s);}
+${uniformMixedVertexSamplingSource("",true,undefined,"umLoadCorner",true)}
 ${slots?uniformMixedExtensionSnapshotWGSL(1,17):""}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)];}
  return ${slots?"ueSnapshotFace(anchor,axis)":"textureLoad(velocity,anchor,0)[axis]"};
 }
-fn umLoadCoarseFace(index:vec3i,axis:u32)->f32{return textureLoad(coarseVelocity,umTileHaloTexel(index),0)[axis];}
-${uniformMixedVelocitySamplingSource(false,true,"velocity",undefined,unitTaps?"unitVelocity":undefined,slots?"ueSnapshotUnit":undefined)}
+${uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",undefined,unitTaps?"unitVelocity":undefined,slots?"ueSnapshotUnit":undefined)}
 ${uniformMixedSolidWGSL(2,this.solid.coarse?.count)}
 ${uniformMixedSourceWGSL(16)}
 fn sampleVelocity(p:vec3f)->vec3f{
@@ -343,6 +354,11 @@ fn bandPhi(p:vec3f)->f32{
  let value=umSampleVertex(p);
  return value/min(params.hDt.x,min(params.hDt.y,params.hDt.z));
 }
+// The block neighbour rows follow the block records in the topology: the
+// kind-aware clamps read them.
+fn umBlockNeighbourWord(b:u32,i:u32)->u32{return umTopology[UM_BLOCK_RECORD+UM_BLOCKS+27u*b+i];}
+${uniformBlockNeighbourWGSL}
+${narrowBandNearWGSL}
 ${narrowBandMembershipWGSL}
 ${narrowBandRedistanceWGSL}
 ${narrowBandActivityWGSL}
@@ -351,10 +367,11 @@ ${narrowBandActivityWGSL}
 // no resolved cell at all, so the grid cannot evolve its momentum.
 fn gridSupported(p:vec3f)->bool{
  let base=vec3i(floor(p-0.5));let fraction=fract(p-0.5);
+ let page=vec3i(floor(p))>>vec3u(5u);let home=nbHomeBlock(page,base>>vec3u(5u),(base+1)>>vec3u(5u));
  for(var k=0u;k<8u;k++){
   let bit=umCorner(k,2u);let w=select(vec3f(1)-fraction,fraction,bit!=vec3u(0));
   if(w.x*w.y*w.z<=1e-6){continue;}
-  let c=umCellNear(base+vec3i(bit));let owner=umOwnerAt(c);
+  let c=umCellNearFromPage(home,page,base+vec3i(bit));let owner=umOwnerAt(c);
   if(textureLoad(phase,vec3i(umOrigin(owner)),0).x>0.5){return true;}
  }
  return false;
@@ -391,8 +408,9 @@ fn store(p:Particle,mandatory:bool){
 // violation, which the next census makes fatal.
 fn nbUnmarked(t:vec3i){if(umTileKind(t)==UM_AIR){umSupport[UM_RESIDENCY+1u]=1u;}}
 fn markSurfaceTiles(position:vec3f,heat:f32){
- {let tile=umTileKey(umTileNear(vec3i(vec3u(position)/4u)));if(umKeyStored(tile)){atomicMax(&bins[NB_ACTIVITY_SURFACE_HEAT+tile],bitcast<u32>(max(heat,0.0)));}}
- let lo=umTileNear(vec3i(floor((position-2.0)/4.0)));let hi=umTileNear(vec3i(floor((position+2.0)/4.0)));
+ let home=vec3i(vec3u(position)/4u);
+ {let tile=umTileKey(home);if(umKeyStored(tile)){atomicMax(&bins[NB_ACTIVITY_SURFACE_HEAT+tile],bitcast<u32>(max(heat,0.0)));}}
+ let lo=nbTileNear(home,vec3i(floor((position-2.0)/4.0)));let hi=nbTileNear(home,vec3i(floor((position+2.0)/4.0)));
  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
   let tile=umTileKey(vec3i(x,y,z));if(!umKeyStored(tile)){nbUnmarked(vec3i(x,y,z));continue;}
   atomicStore(&bins[NB_SURFACE_TILES+tile],1u);
@@ -415,14 +433,17 @@ var<workgroup> nbMarkedPopulation:u32;
  if(lane==0u){atomicStore(&nbMarkedMask,0u);atomicStore(&nbOwnHeat,0u);}
  if(lane<27u){atomicStore(&nbMarkedHeat[lane],0u);}workgroupBarrier();
  let local=umCorner(lane,4u);let coord=vec3i(umTileCoord(tile));let c=4u*vec3u(coord)+local;
- let low=umTileNear(coord+vec3i(local/2u)-1);let high=umTileNear(coord+vec3i(local/2u));
+ // A cell's samples reach the tile below it or the one above, by its half of
+ // the tile: the wall across a page face holds that reach in the tile.
+ let reachLow=coord+vec3i(local/2u)-1;let reachHigh=coord+vec3i(local/2u);
+ let low=umTileNearFromPage(tile>>9u,coord>>vec3u(3u),reachLow);let high=umTileNearFromPage(tile>>9u,coord>>vec3u(3u),reachHigh);
  let order=first+lane;let start=links[order];let stop=start+atomicLoad(&bins[order]);
  var heat=0.0;var live=false;
  for(var i=start;i<stop;i++){
   let a=UM_CELL_KEYS+4u*i;let q=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));let h=max(0.0,bitcast<f32>(links[a+3u]));
   // Preserve the original floating-point boundary decisions exactly.
-  let lo=umTileNear(vec3i(floor((q-2.0)/4.0)));let hi=umTileNear(vec3i(floor((q+2.0)/4.0)));
-  if(any(lo!=low)||any(hi!=high)){markSurfaceTiles(q,h);continue;}
+  let lo=vec3i(floor((q-2.0)/4.0));let hi=vec3i(floor((q+2.0)/4.0));
+  if(any(lo!=reachLow)||any(hi!=reachHigh)){markSurfaceTiles(q,h);continue;}
   live=true;heat=max(heat,h);
  }
  if(live){
@@ -470,9 +491,9 @@ fn nbAdvect(i:u32){
     if(s>0u){speed=sampleVelocity(q)/params.hDt.xyz;}
     let span=nbTraceSpan(q,base,speed,steps-s);end=span.xyz;units=u32(span.w);
    }
-   // An end past storage over air (an open top, in its clamped column) leaves.
-   let endpoint=umPointNearIn(end,0.01);
-   if(any(endpoint!=end)&&umPointKind(vec3f(endpoint.x,end.y,endpoint.z))==UM_AIR){q=end;break;}
+   // A SOLID page across a face of the page the span starts in stops the
+   // end 0.01 cell inside that face. An AIR page or a stored one does not.
+   let endpoint=nbPointNearIn(vec3i(floor(q)),end,0.01);
    // With no embedded solids the segment stays inside the convex container
    // after endpoint clamping. There are no voxel crossings to test; retaining
    // the RK3 endpoint also avoids accumulating rounded collision increments.
@@ -481,24 +502,34 @@ fn nbAdvect(i:u32){
    if(walk>256u){atomicStore(&state[3],1u);break;}
    // A voxel face stops a particle as a container wall does: the crossing
    // axis ends at the face and loses its velocity, the others carry on.
-   let stride=travel/f32(walk);
+   // A floor is the exception where its tread stands for a sloped bed
+   // (umBedSlope): the sample then loses its velocity along that bed's
+   // normal, and so keeps the part of its fall that runs down the slope. It
+   // gains nothing along an axis a wall has stopped, so it rests in a corner.
+   let stride=travel/f32(walk);var landed=false;var floorCell=vec3i(0);var free=vec3f(1);
    for(var j=1u;j<=walk;j++){
     for(var axis=0u;axis<3u;axis++){
      var point=q;point[axis]+=stride[axis];
      if(umCellOpen(vec3i(point))<0.5){
-      let cell=floor(q[axis]);point[axis]=select(cell+0.01,cell+0.99,stride[axis]>0.0);p.velocity[axis]=0.0;
+      let cell=floor(q[axis]);point[axis]=select(cell+0.01,cell+0.99,stride[axis]>0.0);
+      if(axis==1u&&stride.y<0.0){landed=true;floorCell=vec3i(q);}else{p.velocity[axis]=0.0;free[axis]=0.0;}
      }
      q=point;
+    }
+   }
+   if(landed){
+    let slope=umBedSlope(floorCell)*params.hDt.y/params.hDt.xz;
+    if(all(slope==vec2f(0))){p.velocity.y=0.0;}else{
+     let normal=normalize(vec3f(-slope.x,1.0,-slope.y));
+     p.velocity=vec4f((p.velocity.xyz-dot(p.velocity.xyz,normal)*normal)*free,p.velocity.w);
     }
    }
    }
    for(var axis=0u;axis<3u;axis++){if(endpoint[axis]!=end[axis]){p.velocity[axis]=0.0;}}
   }
-  // Past the box (an open top) the sample leaves. In a page of the box that
-  // holds no storage it is fatal: it keeps its end, in no cell's count, and
-  // the order that follows files it in no run.
+  // A sample that ends in a page that holds no storage is fatal: it keeps
+  // its end, in no cell's count, and the order that follows files it in no run.
   if(!umPointPresent(q)){
-   if(!umCellInBox(vec3i(floor(q)))){source[i].position.x=-1.0;return;}
    nbArrived(q);p.position=vec4f(q,p.position.w);source[i]=p;return;
   }
   // The sample moves where it is stored: the spatial order that follows
@@ -609,7 +640,7 @@ fn seedShell(lattice:vec3f)->vec4f{
   let rise=d+NB_SEED_DEPTH;if(rise<=1e-3){break;}
   let g=vec3f(seedSlope(q,d,0u),seedSlope(q,d,1u),seedSlope(q,d,2u));
   let g2=dot(g,g);if(g2<1e-8){break;}
-  let next=umPointNearIn(q-min(rise,0.5)*g*inverseSqrt(g2),0.01);
+  let next=nbPointNearIn(vec3i(floor(q)),q-min(rise,0.5)*g*inverseSqrt(g2),0.01);
   let depth=particleDepth(next);if(depth>=d){break;}
   q=next;d=depth;
  }
@@ -630,7 +661,7 @@ fn seedSite(c:vec3u,k:u32,initial:bool,activated:bool)->vec4f{
   if(distance<=-NB_SURFACE_RADIUS){return vec4f(q,distance);}
   let shell=seedShell(q);let p=shell.xyz;
   if(shell.w>0.0||umCellOpen(vec3i(p))<0.5){return vec4f(-1,0,0,0);}
-  // The shell stays in the box: a sample fitted into a page with no storage is the arrival fatal, and is not made.
+  // A sample fitted into a page with no storage is the arrival fatal, and is not made.
   if(!umPointPresent(p)){nbArrived(p);return vec4f(-1,0,0,0);}
   // A shell sample can land in another cell, whose own seeding decision
   // does not see it: no count changes here, whatever the dispatch order.
@@ -732,7 +763,7 @@ fn transferFace(face:UMFace)->f32{
  let q=umFaceCenter(face);let depth=particleDepth(q);let blend=select(0.0,1.0,depth>=-2.0);
  if(blend==0.0||depth>1.5){return original;}
  // Cells starting exactly at q+1.5 have zero kernel weight throughout.
- let width=1.0;let lo=umCellNear(vec3i(floor(q-1.5*width)));let hi=umCellNear(vec3i(ceil(q+1.5*width))-1);
+ let width=1.0;let home=vec3i(floor(q));let lo=nbCellNear(home,vec3i(floor(q-1.5*width)));let hi=nbCellNear(home,vec3i(ceil(q+1.5*width))-1);
  var momentum=0.0;var total=0.0;
  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
   let run=nbCellRun(vec3i(x,y,z));
@@ -755,7 +786,7 @@ ${narrowBandFineTransferSource(subgroups)}
  let owner=umAllOwner(vec3u(umCounts.x*64u+gid.x,0,0));if(owner.width==0u){return;}
  let origin=umOrigin(owner);var far=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
  for(var axis=0u;axis<3u;axis++){
-  var c=origin+2u;c[axis]+=2u;c=vec3u(umCellNear(vec3i(c)));far=far&&(nbBandReach(c)&1u)==0u;
+  var c=origin+2u;c[axis]+=2u;c=vec3u(umCellNearFromPage(owner.tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(c)));far=far&&(nbBandReach(c)&1u)==0u;
  }
  if(!far){atomicStore(&bins[NB_BAND_SEAM+atomicAdd(&bins[NB_BAND+3u],1u)],owner.tile);return;}
  for(var axis=0u;axis<3u;axis++){
@@ -937,15 +968,17 @@ ${narrowBandSurfaceWGSL}
  }
  /** Called only for enabled automatic refinement. Explicit Requested/Full
   * layouts keep their authored semantics; particle lifetime is independent. */
- refine(encoder:GPUCommandEncoder,target:{buffer:GPUBuffer;wordOffset:number},dt:number,padding=1):void{
+ refine(encoder:GPUCommandEncoder,target:{buffer:GPUBuffer;wordOffset:number;words?:number},dt:number,padding=1):void{
   const lattice=this.ownership.capacity.lattice;
   const w=this.refinementWords,d=this.address.cells,h=lattice.cellSize_m;
   w[0]=d[0]!;w[1]=d[1]!;w[2]=d[2]!;w[3]=dt;w[4]=h[0]!;w[5]=h[1]!;w[6]=h[2]!;w[7]=padding;
   this.device.queue.writeBuffer(this.refinementParams,0,w);
   // One group per particle bank: the bank alternates every step, the census's target does not.
-  const particles=this.activeParticles,size=4*Math.ceil(this.address.boxTiles/32);
+  const particles=this.activeParticles,size=4*Math.ceil(this.address.tileKeys/32);
   let held=this.refinementGroups[this.parity];
   if(held?.particles!==particles||held.target!==target.buffer||held.wordOffset!==target.wordOffset||held.size!==size){
+   // The marks are a bit a tile key: a plane of any other length is read by another index.
+   if(target.words!==size/4)throw new Error(`The refinement join plane holds ${target.words??"an unstated number of"} words; a bit per tile key needs ${size/4}.`);
    held=this.refinementGroups[this.parity]={particles,target:target.buffer,wordOffset:target.wordOffset,size,group:this.device.createBindGroup({layout:this.refinementLayout!,entries:[
     {binding:0,resource:{buffer:particles}},{binding:1,resource:{buffer:this.state}},
     {binding:2,resource:{buffer:target.buffer,offset:target.wordOffset*4,size}},

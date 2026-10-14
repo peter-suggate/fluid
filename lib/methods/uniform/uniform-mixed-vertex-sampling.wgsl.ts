@@ -28,13 +28,22 @@
  * whose field keeps those in a second home (a detail field's base block,
  * UNIFORM_DETAIL_4H_LOAD). A site that reads a 4h owner's corners calls it,
  * and a sample branches once on the owner's width, outside its taps. The
- * values are umLoadVertex's; only the texture read differs. */
+ * values are umLoadVertex's; only the texture read differs.
+ * gather: the consumer also provides, for each loader it names, that loader
+ * of eight vertices at once, `<loader>8(p:vec3u,s:u32)->array<f32,8>`: the
+ * loader's value at p + s*umCorner(k,2u), k = 0..7 (a detail field's
+ * udLoad8_, which addresses the eight by one page-table read where one block
+ * holds them). A regular sample's taps then come from one call. The values,
+ * the weights and the sum are unchanged; without it the text is unchanged. */
 export interface UniformMixedVertexLoaders { readonly fine: string; readonly coarse: string }
-export const uniformMixedVertexSamplingSource = (cacheLookup = "", resolved = false, split?: UniformMixedVertexLoaders, corner?: string) => {
+export const uniformMixedVertexSamplingSource = (cacheLookup = "", resolved = false, split?: UniformMixedVertexLoaders, corner?: string, gather = false) => {
  const fine = split?.fine ?? "umLoadVertex", coarse = split?.coarse ?? corner ?? "umLoadVertex";
- const regularTaps = (load: string) => `for(var k=0u;k<8u;k++){
+ // The eight taps of a regular sample: the loader at each (tap), after the eight at once where the consumer gathers (all).
+ const all = (load: string, origin: string, width: string) => gather ? `let c8=${load}8(${origin},${width});` : "";
+ const tap = (load: string, origin: string, width: string) => gather ? "c8[k]" : `${load}(${origin}+corner*${width})`;
+ const regularTaps = (load: string) => `${all(load, "origin", "owner.width")}for(var k=0u;k<8u;k++){
    let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));
-   values[k]=${load}(origin+corner*owner.width)*w.x*w.y*w.z;
+   values[k]=${tap(load, "origin", "owner.width")}*w.x*w.y*w.z;
   }`;
  // The general sample. A resolved consumer returns from its own block
  // before it, so that text is left out there (Tint: unreachable code).
@@ -134,7 +143,7 @@ fn umSampleVertex(p:vec3f)->f32 {
  let q=umPointNear(p);
  if(umRegularFine){
   let base=vec3u(umCellNear(vec3i(floor(q))));let f=q-vec3f(base);var taps:array<f32,8>;
-  for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){let corner=umCorner(k,2u);let w=select(vec3f(1)-f,f,corner!=vec3u(0));taps[k]=umLoadVertex(base+corner)*w.x*w.y*w.z;}
+  ${all("umLoadVertex", "base", "1u")}for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){let corner=umCorner(k,2u);let w=select(vec3f(1)-f,f,corner!=vec3u(0));taps[k]=${gather ? "c8[k]" : "umLoadVertex(base+corner)"}*w.x*w.y*w.z;}
   return umVertexSum8(taps);
  }
  ${resolved?`// Resolved: the owner's corners are width-aligned vertices of its tile
@@ -143,9 +152,9 @@ fn umSampleVertex(p:vec3f)->f32 {
  {
   let cell=vec3u(umCellNear(vec3i(floor(q))));let width=umTileWidth(umTileAt(cell/4u));
   let origin=(cell/width)*width;let t=(q-vec3f(origin))/f32(width);var values:array<f32,8>;
-  ${(taps => corner ? `if(width==4u){${taps(corner)}}else{${taps("umLoadVertex")}}` : taps("umLoadVertex"))((load: string) => `for(var k=0u;k<8u;k++){
+  ${(taps => corner ? `if(width==4u){${taps(corner)}}else{${taps("umLoadVertex")}}` : taps("umLoadVertex"))((load: string) => `${all(load, "origin", "width")}for(var k=0u;k<8u;k++){
    let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));
-   values[k]=${load}(origin+corner*width)*w.x*w.y*w.z;
+   values[k]=${tap(load, "origin", "width")}*w.x*w.y*w.z;
   }`)}
   return umVertexSum8(values);
  }`:general}

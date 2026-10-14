@@ -155,7 +155,8 @@ const rigidTerrainBindingWGSL = /* wgsl */ `
 `;
 const rigidTerrainContactWGSL = /* wgsl */ `
 fn terrainPlane(position: vec3f) -> vec4f {
-  let dims=vec2i(textureDimensions(terrainHeights));
+  // The texture's columns that span the container: all of them, unless the solver's lattice runs past it.
+  let dims=vec2i(params.terrain.zw);
   let fx=(position.x/params.container.x+.5)*f32(dims.x); let fz=(position.z/params.container.z+.5)*f32(dims.y);
   let cell=clamp(vec2i(floor(vec2f(fx,fz))),vec2i(0),dims-vec2i(1));
   let xm=max(0,cell.x-1);let xp=min(dims.x-1,cell.x+1);let zm=max(0,cell.y-1);let zp=min(dims.y-1,cell.y+1);
@@ -592,7 +593,9 @@ export class WebGPURigidBodySystem {
   // into a running bodyless scene used to reach `encode` with no pipeline at
   // all. Both callers passed their own defer flag through and it named nothing.
   constructor(private readonly device: GPUDevice, private scene: SceneDescription,
-    readonly exchangeBuffer: GPUBuffer, private readonly terrainTexture?: GPUTexture) {
+    readonly exchangeBuffer: GPUBuffer, private readonly terrainTexture?: GPUTexture,
+    /** The terrain texture's columns (x, z) that span the container, counted from its low corner; the whole texture when omitted. */
+    private readonly terrainColumns?: readonly [number, number]) {
     this.pipelinesDeferred = true;
     this.stateBuffer = device.createBuffer({ label: "GPU authoritative rigid-body state", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.renderBuffer = device.createBuffer({ label: "GPU rigid-body render records", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
@@ -901,7 +904,7 @@ export class WebGPURigidBodySystem {
   encode(encoder: GPUCommandEncoder, dt_s: number, cellVolume_m3: number, snapshotCount = 1, cellHeight_m = 1) {
     const c=this.scene.container,g=this.scene.fluid.gravity_m_s2;
     const solid=this.solidWorldCollisionSource;
-    this.device.queue.writeBuffer(this.paramsBuffer,0,new Float32Array([dt_s,this.scene.fluid.density_kg_m3,this.bodyCount,Math.max(1,snapshotCount),g.x,g.y,g.z,0,c.width_m,c.height_m,c.depth_m,this.terrainTexture&&sceneHasTerrain(this.scene)?1:0,cellHeight_m,c.top === "closed"?1:0,0,0,cellVolume_m3,.9,.5,Math.max(cellHeight_m,1e-6),...(solid?.origin_m??[0,0,0]),solid?1:0,...(solid?.cellSize_m??[1,1,1]),0]));
+    this.device.queue.writeBuffer(this.paramsBuffer,0,new Float32Array([dt_s,this.scene.fluid.density_kg_m3,this.bodyCount,Math.max(1,snapshotCount),g.x,g.y,g.z,0,c.width_m,c.height_m,c.depth_m,this.terrainTexture&&sceneHasTerrain(this.scene)?1:0,cellHeight_m,c.top === "closed"?1:0,this.terrainColumns?.[0]??this.terrainTexture?.width??1,this.terrainColumns?.[1]??this.terrainTexture?.height??1,cellVolume_m3,.9,.5,Math.max(cellHeight_m,1e-6),...(solid?.origin_m??[0,0,0]),solid?1:0,...(solid?.cellSize_m??[1,1,1]),0]));
     const pass=encoder.beginComputePass({label:"GPU resident rigid-body integration and contacts"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.bindGroup);pass.dispatchWorkgroups(1);pass.end();
   }
 

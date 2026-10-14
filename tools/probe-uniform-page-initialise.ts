@@ -1,6 +1,6 @@
 /** Dawn proof of page initialise (lib/methods/uniform/uniform-page-initialise.ts)
- * on a real page pool and a real detail storage of a 96x48x64 lattice (12
- * pages, one axis partial; 14 blocks in a 2x2x4 grid): nine fields of every
+ * on a real page pool and a real detail storage of a 96x64x64 lattice (12
+ * pages; 14 blocks in a 2x2x4 grid): nine fields of every
  * class (a per-tile field, an atlas field, a vertex field with an adopted
  * base), two low-face buffers and two
  * topology-shaped buffers that are also the pool's mirrors.
@@ -35,7 +35,7 @@ device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.e
 
 const NAN=0x7fc0beef,DEAD=0xdeadbeef,EMPTY=6.5,NEAR=1.6;
 const F=new Float32Array(1),U=new Uint32Array(F.buffer),bitsOf=(v:number)=>{F[0]=v;return U[0]!;};
-const dims:[number,number,number]=[96,48,64];
+const dims:[number,number,number]=[96,64,64];
 const storage=new UniformDetailStorage(device,uniformLatticeAddress(dims)),a=storage.layout.address,G=a.blockGrid,bits=a.blockBits;
 const field=(label:string,kind:"cell"|"face"|"vertex"|"atlas",perTile=false)=>storage.createField(label,kind,kind==="face"||kind==="atlas"?"rgba32float":"r32float",perTile,kind==="vertex"?EMPTY:0);
 const velocityA=field("velocity A","face"),velocityB=field("velocity B","face"),taps=field("unit taps","atlas"),volumeA=field("volume A","cell");

@@ -3,10 +3,10 @@ import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
 /** Smallest ghost-fluid theta of the mixed pressure rows; see umPressureTheta. */
 export const UNIFORM_MIXED_THETA_MIN = 1e-3;
 /** The mixed pressure rows' surface rule, for the kernels that restate it on
- * their own storage (root cycles, the h band, the native continuation, the
- * authority's phase). A centre is liquid only deeper than
- * UNIFORM_MIXED_THETA_MIN of its own spacing; a shallower one is air whose
- * phi may be slightly negative. `spacing` is that centre spacing in metres. */
+ * their own storage (root cycles, the h band, the authority's phase). A
+ * centre is liquid only deeper than UNIFORM_MIXED_THETA_MIN of its own
+ * spacing; a shallower one is air whose phi may be slightly negative.
+ * `spacing` is that centre spacing in metres. */
 export const uniformMixedPressureLiquidWGSL = (phi: string, spacing: string) => `(${phi}< -${UNIFORM_MIXED_THETA_MIN}*${spacing})`;
 /** Ghost-fluid theta of a liquid/air centre pair from their signed phi: the
  * linear zero crossing, past the air centre (theta > 1) when that centre is

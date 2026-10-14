@@ -40,7 +40,7 @@ const texture=(d:GPUTextureDescriptor)=>{const s=d.size as number[]|{width:numbe
 // Limits that size shader text take a real adapter's values (Metal), so the
 // captured modules are the ones a device compiles; the rest are unbounded.
 const realLimits:Record<string,number>={minUniformBufferOffsetAlignment:256,maxComputeWorkgroupStorageSize:32768,maxComputeInvocationsPerWorkgroup:1024,
- maxComputeWorkgroupsPerDimension:65535,maxStorageBuffersPerShaderStage:10,maxStorageTexturesPerShaderStage:8,maxTextureDimension3D:2048};
+ maxComputeWorkgroupsPerDimension:65535,maxStorageBuffersPerShaderStage:10,maxStorageTexturesPerShaderStage:8,maxTextureDimension3D:2048,minStorageBufferOffsetAlignment:256};
 const limits=new Proxy({} as Record<string,number>,{get:(_t,p)=>typeof p==="string"&&p in realLimits?realLimits[p]:2**30});
 const device:any=obj({
  limits,features:new Set(["timestamp-query","float32-filterable","shader-f16"]),lost:new Promise(()=>{}),

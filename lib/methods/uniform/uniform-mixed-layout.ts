@@ -1,5 +1,6 @@
 import { compileUniformStencil, compileUniformBlendMask } from "./uniform-compiled-topology";
 import type { FluidRefinementRegion } from "../../core/model";
+import { SOLID_MASK_EMPTY, SOLID_MASK_FULL, solidOccupancyMaskPage, type SolidOccupancyMask } from "../../core/solid-occupancy-mask";
 import { refinementRegionCellBounds, type RefinementRegionLattice } from "../../core/refinement-regions";
 import { uniformBoxTileCoord, uniformBoxTileIndex, uniformCellInBox, uniformEachTile, uniformLatticeAddress, uniformLatticeBox, uniformTileInBox, uniformTileKey, uniformTileStored, type UniformLatticeAddress } from "./uniform-lattice-address";
 
@@ -31,11 +32,11 @@ export interface UniformMixedLayout {
   readonly stencils: Uint32Array<ArrayBuffer>;
   /** Minimal fine-neighbor boxes for the exact velocity blending distance. */
   readonly blendMasks: Uint32Array<ArrayBuffer>;
-  /** Owners: 64 an h tile and one a 4h tile; in a layout with no h tile the
-   * box's tiles, an owner index being a box index there. */
+  /** Owners: 64 an h tile and one a 4h tile; in the pressure root's shape the
+   * tile keys, an owner index being a tile key there. */
   readonly cellCount: number;
   /** The pressure root's shape (uniformMixedAllCoarseLayout): its owners are
-   * the box's tiles, numbered by box index on the GPU every step
+   * the tile keys, each key its own owner, written on the GPU every step
    * (UniformMixedRootOwners). The tile, list and stencil words here are zero
    * and name no tile; umCounts.y is this number, the rows before the wall
    * slots. */
@@ -121,28 +122,30 @@ export function createUniformMixedLayoutFromWidths(lattice: RefinementRegionLatt
  * a cell within one cell (26-neighbourhood) of a cut cell is solid-coupled;
  * those and their 26 neighbour tiles are forced to h. Fine-owner stencils of
  * one cell (faces, dual cells, phi contact, pressure continuation) therefore
- * never meet solid in a 4h owner or in an interface (seam) tile. The box
- * shell lives in the mask's halo; domain walls are owned by every width.
+ * never meet solid in a 4h owner or in an interface (seam) tile. A page
+ * the lattice walls off cuts nothing; domain walls are owned by every width.
  * The masks returned hold a byte per tile by box index. */
-export function uniformMixedSolidTiles(dimensions: Triple, mask: Uint32Array, maskHeaderWords: number,
+export function uniformMixedSolidTiles(dimensions: Triple, mask: SolidOccupancyMask,
   terrainCells?: Float32Array): UniformMixedSolidTiles {
   if (dimensions.some(n => !Number.isSafeInteger(n) || n % 4 !== 0)) throw new Error("Solid promotion requires dimensions divisible by four");
-  const address = uniformLatticeBox(dimensions), [nx, ny, nz] = dimensions;
-  const sx = nx + 2, sy = ny + 2, sz = nz + 2;
-  if (mask[1] !== sx || mask[2] !== sy || mask[3] !== sz) throw new Error("Solid promotion mask does not match the lattice");
+  const address = uniformLatticeBox(dimensions), [nx, ny, nz] = dimensions, words = mask.words;
   const coupled = new Uint8Array(address.boxTiles);let cutCells = 0;
   const mark = (x: number, y: number, z: number) => {
     cutCells++;
     for (let tz = (z - 1) >> 2; tz <= (z + 1) >> 2; tz++) for (let ty = (y - 1) >> 2; ty <= (y + 1) >> 2; ty++)
       for (let tx = (x - 1) >> 2; tx <= (x + 1) >> 2; tx++) if (uniformTileInBox(address, tx, ty, tz)) coupled[uniformBoxTileIndex(address, tx, ty, tz)] = 1;
   };
-  for (let word = 0; word < mask.length - maskHeaderWords; word++) {
-    let bits = mask[maskHeaderWords + word]!;
-    while (bits) {
-      const bit = 31 - Math.clz32(bits & -bits);bits &= bits - 1;
-      const index = word * 32 + bit, qx = index % sx, qy = Math.floor(index / sx) % sy, qz = Math.floor(index / (sx * sy));
-      const x = qx - 1, y = qy - 1, z = qz - 1;
-      if (uniformCellInBox(address, x, y, z)) mark(x, y, z);
+  // The box's pages: a full page is every cell of it, a slot is a word a row along x (bit x of word y + 32 z).
+  for (let pz = 0; pz < address.pages[2]; pz++) for (let py = 0; py < address.pages[1]; py++) for (let px = 0; px < address.pages[0]; px++) {
+    const code = solidOccupancyMaskPage(words, 32 * px, 32 * py, 32 * pz) & 0xffff;
+    if (code === SOLID_MASK_EMPTY) continue;
+    for (let row = 0; row < 1024; row++) {
+      let bits = code >= SOLID_MASK_FULL ? 0xffffffff : words[(code << 10) + row]!;
+      while (bits) {
+        const bit = 31 - Math.clz32(bits & -bits);bits = (bits & (bits - 1)) >>> 0;
+        const x = 32 * px + bit, y = 32 * py + (row & 31), z = 32 * pz + (row >> 5);
+        if (uniformCellInBox(address, x, y, z)) mark(x, y, z);
+      }
     }
   }
   if (terrainCells) {
@@ -181,39 +184,34 @@ export interface UniformMixedSolidTiles {
 /** A solid mask edit as the tile lattice sees it (uniformMixedSolidEdit). */
 export interface UniformMixedSolidEdit {
   /** Every tile within one cell (26-neighbourhood) of a voxel whose bit
-   * changed, halo voxels included, each once, by box index: the tiles whose
-   * coupling the edit can have moved. */
+   * changed, a voxel beside the box included, each once, by box index: the
+   * tiles whose coupling the edit can have moved. */
   tiles: number[];
   /** Interior cells that became solid, less those that stopped being solid. */
   cutCells: number;
+  /** Take a cell whose bit moved: what SolidOccupancyMask.update tells of an edit. */
+  readonly cell: (x: number, y: number, z: number, solid: boolean) => void;
 }
 
-/** The tiles a mask edit touched: `mask` against `previous` (the mask before
- * the edit) over the edit's dirty words. `touched` is the caller's scratch,
- * one byte per tile by box index and zero on entry; it holds one for each
- * tile returned. */
-export function uniformMixedSolidEdit(dimensions: Triple, mask: Uint32Array, previous: Uint32Array, maskHeaderWords: number,
-  dirty: { firstWord: number; wordCount: number }, touched: Uint8Array): UniformMixedSolidEdit {
-  const address = uniformLatticeBox(dimensions), [nx, ny] = dimensions;
-  const sx = nx + 2, sy = ny + 2;
+/** The tiles a mask edit touches, gathered from the cells the mask reports
+ * as it folds the edit (cell). `touched` is the caller's scratch, one byte
+ * per tile by box index and zero on entry; it holds one for each tile
+ * gathered. */
+export function uniformMixedSolidEdit(dimensions: Triple, touched: Uint8Array): UniformMixedSolidEdit {
+  const address = uniformLatticeBox(dimensions);
   if (touched.length !== address.boxTiles) throw new Error("Solid edit scratch does not match the tile lattice");
-  const tiles: number[] = [];let cutCells = 0;
-  for (let w = Math.max(maskHeaderWords, dirty.firstWord); w < dirty.firstWord + dirty.wordCount; w++) {
-    const now = mask[w]!;let bits = (now ^ previous[w]!) >>> 0;
-    while (bits) {
-      const bit = 31 - Math.clz32(bits & -bits);bits = (bits & (bits - 1)) >>> 0;
-      const index = (w - maskHeaderWords) * 32 + bit, x = index % sx - 1, y = Math.floor(index / sx) % sy - 1, z = Math.floor(index / (sx * sy)) - 1;
-      // The promotion counts interior cells: the shell lives in the halo.
-      if (uniformCellInBox(address, x, y, z)) cutCells += now >>> bit & 1 ? 1 : -1;
-      for (let tz = (z - 1) >> 2; tz <= (z + 1) >> 2; tz++) for (let ty = (y - 1) >> 2; ty <= (y + 1) >> 2; ty++)
-        for (let tx = (x - 1) >> 2; tx <= (x + 1) >> 2; tx++) {
-          if (!uniformTileInBox(address, tx, ty, tz)) continue;
-          const key = uniformBoxTileIndex(address, tx, ty, tz);
-          if (!touched[key]) { touched[key] = 1;tiles.push(key); }
-        }
-    }
-  }
-  return { tiles, cutCells };
+  const tiles: number[] = [];
+  const edit: UniformMixedSolidEdit = { tiles, cutCells: 0, cell(x, y, z, solid) {
+    // The promotion counts interior cells.
+    if (uniformCellInBox(address, x, y, z)) edit.cutCells += solid ? 1 : -1;
+    for (let tz = (z - 1) >> 2; tz <= (z + 1) >> 2; tz++) for (let ty = (y - 1) >> 2; ty <= (y + 1) >> 2; ty++)
+      for (let tx = (x - 1) >> 2; tx <= (x + 1) >> 2; tx++) {
+        if (!uniformTileInBox(address, tx, ty, tz)) continue;
+        const key = uniformBoxTileIndex(address, tx, ty, tz);
+        if (!touched[key]) { touched[key] = 1;tiles.push(key); }
+      }
+  } };
+  return edit;
 }
 
 /** uniformMixedSolidTiles of an edited mask, from the result `held` for the
@@ -223,11 +221,10 @@ export function uniformMixedSolidEdit(dimensions: Triple, mask: Uint32Array, pre
  * `forced` is the 26-neighbourhood of `coupled`, so only the tiles around a
  * tile whose coupling moved can have. `terrainCells` must be the heights
  * `held` was scanned with. New arrays: `held` is left as it was. */
-export function uniformMixedSolidTilesAfterEdit(held: UniformMixedSolidTiles, dimensions: Triple, mask: Uint32Array,
-  maskHeaderWords: number, edit: UniformMixedSolidEdit, terrainCells?: Float32Array): UniformMixedSolidTiles {
+export function uniformMixedSolidTilesAfterEdit(held: UniformMixedSolidTiles, dimensions: Triple, mask: SolidOccupancyMask,
+  edit: UniformMixedSolidEdit, terrainCells?: Float32Array): UniformMixedSolidTiles {
   const address = uniformLatticeBox(dimensions), [nx, ny, nz] = dimensions, p: [number, number, number] = [0, 0, 0];
-  const sx = nx + 2, sy = ny + 2, count = address.boxTiles;
-  if (mask[1] !== sx || mask[2] !== sy || mask[3] !== nz + 2) throw new Error("Solid promotion mask does not match the lattice");
+  const count = address.boxTiles;
   if (held.coupled.length !== count || held.forced.length !== count) throw new Error("Held solid promotion does not match the tile lattice");
   if (terrainCells && terrainCells.length !== nx * nz) throw new Error("Solid promotion terrain does not match the lattice");
   const coupled = held.coupled.slice(), forced = held.forced.slice();let coupledTiles = held.coupledTiles;
@@ -239,12 +236,8 @@ export function uniformMixedSolidTilesAfterEdit(held: UniformMixedSolidTiles, di
     const x0 = Math.max(0, 4 * tx - 1), x1 = Math.min(nx - 1, 4 * tx + 4), y0 = Math.max(0, 4 * ty - 1), y1 = Math.min(ny - 1, 4 * ty + 4);
     const z0 = Math.max(0, 4 * tz - 1), z1 = Math.min(nz - 1, 4 * tz + 4);
     let cut = 0;
-    // A row of at most six voxels is a run of bits in one mask word or two.
-    for (let z = z0; z <= z1 && !cut; z++) for (let y = y0; y <= y1 && !cut; y++) {
-      const row = sx * ((y + 1) + sy * (z + 1)) + 1, first = row + x0, last = row + x1, low = first >>> 5, high = last >>> 5;
-      cut = low === high ? mask[maskHeaderWords + low]! >>> (first & 31) & ((1 << (last - first + 1)) - 1)
-        : mask[maskHeaderWords + low]! >>> (first & 31) | mask[maskHeaderWords + high]! & ((2 << (last & 31)) - 1);
-    }
+    for (let z = z0; z <= z1 && !cut; z++) for (let y = y0; y <= y1 && !cut; y++)
+      for (let x = x0; x <= x1 && !cut; x++) if (mask.solid(x, y, z)) cut = 1;
     if (terrainCells) for (let z = z0; z <= z1 && !cut; z++) for (let x = x0; x <= x1 && !cut; x++) {
       const height = terrainCells[x + nx * z]!;
       // Cells 0..top of the column are cut: it couples the tiles up to (top+1)>>2.
@@ -283,15 +276,15 @@ export function assertUniformMixedSolidPromotion(layout: UniformMixedLayout, for
 }
 
 /** The all-4h shape on the same lattice: the pressure root's ownership. Only
- * what the page set cannot change is here (the lattice, its address, the
- * box's rows): which key holds which owner, and each key's stencil, follow
+ * what the page set cannot change is here (the lattice, its address, a row a
+ * tile key): which key holds a tile, and each key's stencil, follow
  * the page table and are built on the GPU every step (UniformMixedRootOwners).
  * No host array names a tile. */
 export function uniformMixedAllCoarseLayout(layout: UniformMixedLayout): UniformMixedLayout {
   const address = layout.address, count = address.tileKeys;
   return { lattice: layout.lattice, address, tileDimensions: address.tiles, tiles: new Uint32Array(count), stencils: new Uint32Array(2 * count),
-    blendMasks: new Uint32Array(count), fineTiles: new Uint32Array(0), coarseTiles: new Uint32Array(0), cellCount: address.boxTiles,
-    boxOwners: address.boxTiles, metadataBytes: count * 20, regions: layout.regions };
+    blendMasks: new Uint32Array(count), fineTiles: new Uint32Array(0), coarseTiles: new Uint32Array(0), cellCount: count,
+    boxOwners: count, metadataBytes: count * 20, regions: layout.regions };
 }
 
 /** widths: a byte per tile by box index; a tile with nothing stored takes no

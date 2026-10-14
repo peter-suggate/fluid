@@ -1,8 +1,10 @@
 import { uniformCachedMomentumSamplingWGSL } from "./uniform-cached-momentum.wgsl";
+import { uniformCoarseCacheExtent } from "./uniform-coarse-velocity-cache";
 import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { uniformMixedSolidHoldPointWGSL } from "./uniform-mixed-walls.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-source.wgsl";
@@ -21,9 +23,9 @@ export interface UniformMixedMomentumFields {
   outputNegative: GPUBuffer;
   /** UniformMixedHangingTaps.unitVelocity of `extended`; with hanging taps only. */
   unitVelocity?: GPUTexture;
-  /** h.xyz, dt; openTop, 0, 0, fixed limits (u32 flags). Only openTop is
-   * read; the layout matches the other mixed stages' parameter blocks, and
-   * fixed limits must be UNIFORM_MIXED_MOMENTUM_LIMITS. */
+  /** h.xyz, dt; four u32 flags, the last the fixed limits. None is read; the
+   * layout matches the other mixed stages' parameter blocks, and fixed
+   * limits must be UNIFORM_MIXED_MOMENTUM_LIMITS. */
   params: GPUBuffer;
 }
 
@@ -188,7 +190,7 @@ export class UniformMixedMomentum {
         || texture.format !== (i === 2 || i === 3 ? "r32float" : "rgba32float")) throw new Error("Mixed momentum requires native-sized canonical fields");
     }
     for(const t of [fields.coarseExtended])
-      if(t.format!=="rgba32float"||uniformDetailExtent(t).some((n,a)=>n!==address.tileHaloTexture[a]))throw new Error("Mixed momentum requires a current 4h sampling cache");
+      if(t.format!=="rgba32float"||uniformDetailExtent(t).some((n,a)=>n!==uniformCoarseCacheExtent(address)[a]))throw new Error("Mixed momentum requires a current 4h sampling cache");
     if (textures.includes(fields.output) || fields.negative === fields.outputNegative) throw new Error("Mixed momentum output must be disjoint from its inputs");
     for (const buffer of [fields.negative, fields.outputNegative])
       if (buffer.size < 4 * address.lowFaceKeys) throw new Error("Mixed momentum requires complete negative boundary planes");
@@ -223,17 +225,14 @@ ${this.hanging?"@group(1) @binding(16) var unitVelocity:texture_3d<f32>;":""}
 override umCullAir:bool=false;
 ${this.sourceParams?uniformMixedSourceWGSL(17)+uniformMixedFarAirWGSL("umSourceinflowStrength()>0.0"):""}
 ${uniformMixedFaceAddressWGSL}
-// The 4h cache keeps a one-tile halo for the low planes (umTileHaloTexel).
-fn umLoadCoarseFace(index:vec3i,axis:u32)->f32 {
- return textureLoad(coarseExtended,umTileHaloTexel(index),0)[axis];
-}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32 {
  if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)];}return textureLoad(extended,anchor,0)[axis];
 }
-${uniformMixedVelocitySamplingSource(false,true,"extended",this.hanging?2:undefined,this.hanging?"unitVelocity":undefined)}
-fn umClampMomentum(p:vec3f)->vec3f {
- var q=umPointNear(p);if(momentum.flags.x!=0u){q.y=max(p.y,0.0);}return q;
-}
+${uniformMixedVelocitySamplingSource(false,"coarseExtended","extended",this.hanging?2:undefined,this.hanging?"unitVelocity":undefined)}
+${uniformMixedSolidHoldPointWGSL}
+// A departure stops at a wall, a face with a SOLID page across it, and
+// nowhere else: it runs on into an AIR page.
+fn umClampMomentum(p:vec3f)->vec3f {return umPointHeld(p);}
 fn umMomentumDeparture(position:vec3f,dt:f32,h:vec3f)->vec3f {
 ${uniformVelocityDepartureWGSL("umSampleVelocity", "umClampMomentum", "select(f32(umOwnerAt(umCellNear(vec3i(floor(point)))).width),1.0,umRegularFine)", "32")}
 }

@@ -267,7 +267,7 @@ export class UniformMixedOwnershipTransfer {
  constructor(private readonly device:GPUDevice,readonly simulation:UniformMixedOwnership,readonly pressure:UniformMixedOwnership,private readonly solid?:UniformMixedSolid){
   if(simulation.layout.tiles.length!==pressure.layout.tiles.length)throw new Error("Ownership transfer requires one tile lattice");
   const tiles=simulation.layout.tiles.length;
-  this.fineGroups=Math.max(1,Math.min(TRANSFER_GRID,tiles));this.pages=uniformMixedPageCount(simulation.capacity.lattice);
+  this.fineGroups=Math.max(1,Math.min(TRANSFER_GRID,tiles));this.pages=uniformMixedPageCount(simulation.capacity.tiles);
   if(pressure.layout.tiles.some(word=>(word&0xc0000000)!==0))throw new Error("Ownership transfer targets the all-4h pressure ownership");
   this.resources=uniformDetailBindLayout(device,{entries:[
    ...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
@@ -631,19 +631,121 @@ fn listedJobCount(lane:u32)->u32 {
  return workgroupUniformLoad(&listedJobs);
 }
 ${uniformMixedFaceAddressWGSL}
+// A face of the old frame, whichever width owned it. A 4h owner's anchor is
+// a canonical texel and is read from the base block, which holds it at every
+// capacity. The h texture holds it only in the detail ring, and the
+// extension's copy there is not its base's value on a face between two air
+// cells: a tile promoted beside the surface would be interpolated from it.
 fn oldFaceValue(f:oldUMFace)->f32{
  if(umFaceLow(f.anchor,f.axis)){return negative[umLowFaceIndex(vec3u(max(f.anchor,vec3i(0))),f.axis)];}
- return textureLoad(velocity,f.anchor,0)[f.axis];
+ return ${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(velocity,f.anchor,0)[f.axis];
 }
 fn oldPatch(o:oldUMOwner,p:vec3u,axis:u32,sign:i32)->oldUMFace{
  let first=oldumFace(o,axis,sign,0u);let local=p-oldumOrigin(o);let u=(axis+1u)%3u;let v=(axis+2u)%3u;
  return oldumFace(o,axis,sign,local[u]/first.width+(o.width/first.width)*(local[v]/first.width));
 }
-// One footprint cell of a face on plane p[axis] (anchor[axis] = plane).
+// A wide face of a 4h tile handed to sixteen h faces is not one value across
+// the tile: it is rebuilt as a plane through the face's own value, tilted
+// along each tangential axis toward the faces beside it on the same plane.
+// The sixteen offsets sum to zero, so the patches still sum to sixteen times
+// the old face and every plane of the tile carries the flux it carried; the
+// tile's net divergence is the old owner's. One value a tile left the trace
+// a step of the old tile rows in the velocity, which a front crossing the
+// tile in the same step printed into the surface.
+// The slope is the centred difference of the two faces beside, held to
+// REMAP_SLOPE_LIMIT of each one-sided difference and to zero where they
+// disagree in sign. At 4/3 the outermost patch (1.5 cells out) moves by at
+// most half the difference to the nearer face on each tangential axis, so a
+// patch is a convex combination of its own face and the nearer face beside
+// it on each axis, both directions together: the bound the census relies on
+// (SAMPLE_REACH in the dynamic census). Twice the difference, the monotone
+// limit of one direction, leaves that hull at the tile's corners. A linear
+// field is rebuilt exactly; the limit engages where one difference is over
+// 5/3 of the other.
+const REMAP_SLOPE_LIMIT:f32=4.0/3.0;
+// Per axis: the low face's slopes along the two tangential axes, then the
+// high face's, in the face's units per cell. Zero for an h tile, for a face
+// already split into unit patches and for a face a solid cuts.
+var<workgroup> tileSlopes:array<f32,12>;
+// Lane (axis, beside, footprint cell): one unit face of the tile beside
+// (-u, +u, -v, +v) on the plane of this tile's low face (xy) and high face
+// (zw), as value and whether it supplies one.
+var<workgroup> tileBeside:array<vec4f,192>;
+// Whether the tile's own low and high faces are open at each footprint cell.
+var<workgroup> tileOpenFaces:array<vec2f,48>;
+// The old face at cell q on the side sign of its owner, whichever width
+// owned it: a 4h face gives its one value at each footprint cell, sixteen h
+// faces theirs, so their sum over the footprint is the face's mean. None
+// where the lattice ends or no page is stored on either side of the face,
+// and none on a face a solid touches: the flow slips along a wall, so the tangential derivative of a
+// face's normal velocity carries no information across it, and the
+// one-sided difference in its place would put the largest value at the wall,
+// outside every face it was built from.
+fn remapBesideFace(q:vec3i,axis:u32,sign:i32)->vec2f{
+ if(!umCellPresent(q)){return vec2f(0);}
+ let o=oldumOwnerAt(q);if(o.width==0u){return vec2f(0);}
+ var id=q;if(sign<0){id[axis]-=1;}
+ if(!umCellPresent(id)||umPressureFaceV(id,axis)<1.0){return vec2f(0);}
+ return vec2f(oldFaceValue(oldPatch(o,vec3u(q),axis,sign)),1.0);
+}
+// The lane's unit faces beside the tile, when its old owner is 4h and the
+// entry remaps faces on this axis: every face of a tile whose own width
+// changed, the high face alone of one listed for its +axis neighbour.
+fn remapBeside(entry:u32,lane:u32){
+ let tile=entry&LISTED_TILE;let axis=lane/64u;let cell=lane%64u;
+ let own=(entry&(1u<<31u))!=0u;
+ var beside=vec4f(0);var open=vec2f(0);
+ if(oldumTileWidth(tile)==4u&&(own||(entry&(1u<<(27u+axis)))!=0u)){
+  let k=cell/16u;let d=(axis+1u+k/2u)%3u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
+  var q=vec3i(umTileCoord(tile)*4u);q[u]+=i32(cell%4u);q[v]+=i32((cell/4u)%4u);
+  var low=q;var high=q;high[axis]+=3;
+  if(k==0u){
+   var id=low;id[axis]-=1;
+   open=vec2f(select(0.0,1.0,own&&umCellPresent(id)&&umPressureFaceV(id,axis)>=1.0),select(0.0,1.0,umPressureFaceV(high,axis)>=1.0));
+  }
+  let step=select(-4,4,(k&1u)!=0u);low[d]+=step;high[d]+=step;
+  if(own){beside=vec4f(remapBesideFace(low,axis,-1),0.0,0.0);}
+  beside=vec4f(beside.xy,remapBesideFace(high,axis,1));
+ }
+ tileBeside[lane]=beside;
+ if(cell<16u){tileOpenFaces[16u*axis+cell]=open;}
+}
+// Lane (axis, side, tangential axis) of the first four cells: one slope.
+fn remapSlope(entry:u32,lane:u32){
+ let cell=lane%64u;if(cell>=4u){return;}
+ let tile=entry&LISTED_TILE;let axis=lane/64u;let high=cell>=2u;let k=cell%2u;
+ var slope=0.0;
+ let o=oldumOwnerAt(vec3i(umTileCoord(tile)*4u));
+ if(o.width==4u){
+  let first=oldumFace(o,axis,select(-1,1,high),0u);
+  var open=0.0;var below=vec2f(0);var above=vec2f(0);
+  for(var i=0u;i<16u;i++){
+   let a=tileBeside[64u*axis+32u*k+i];let b=tileBeside[64u*axis+32u*k+16u+i];let c=tileOpenFaces[16u*axis+i];
+   open+=select(c.x,c.y,high);below+=select(a.xy,a.zw,high);above+=select(b.xy,b.zw,high);
+  }
+  if(first.width==4u&&open==16.0){
+   let value=oldFaceValue(first);
+   // Differences across four cells; a missing side has none.
+   let lower=select(0.0,value-below.x/16.0,below.y==16.0);
+   let upper=select(0.0,above.x/16.0-value,above.y==16.0);
+   if(lower*upper>0.0){slope=sign(lower)*min(abs(lower+upper)/8.0,REMAP_SLOPE_LIMIT*min(abs(lower),abs(upper))/4.0);}
+  }
+ }
+ tileSlopes[4u*axis+cell]=slope;
+}
+// One footprint cell of a face on plane p[axis] (anchor[axis] = plane), for
+// a cell p of the job's tile: the old owner's two faces on the axis, each at
+// p's place across it (remapSlope), interpolated at the plane.
 fn remapSample(p:vec3u,plane:i32,axis:u32)->f32{
  let o=oldumOwnerAt(vec3i(p));let origin=oldumOrigin(o);
  let t=f32(plane+1-i32(origin[axis]))/f32(o.width);
- return mix(oldFaceValue(oldPatch(o,p,axis,-1)),oldFaceValue(oldPatch(o,p,axis,1)),t);
+ var low=oldFaceValue(oldPatch(o,p,axis,-1));var high=oldFaceValue(oldPatch(o,p,axis,1));
+ if(o.width==4u){
+  let across=vec2f(f32(p[(axis+1u)%3u]-origin[(axis+1u)%3u]),f32(p[(axis+2u)%3u]-origin[(axis+2u)%3u]))-vec2f(1.5);
+  low+=dot(vec2f(tileSlopes[4u*axis],tileSlopes[4u*axis+1u]),across);
+  high+=dot(vec2f(tileSlopes[4u*axis+2u],tileSlopes[4u*axis+3u]),across);
+ }
+ return mix(low,high,t);
 }
 // A face wider than the faces it replaces is their mean, weighted by each
 // one's V on a cut tile: the coarse face then carries sum(V u)/sum(V), the
@@ -704,6 +806,11 @@ fn remapFaceTexel(entry:u32,local:vec3u)->bool{
 const LISTED_FACES:u32=0x80000000u|(7u<<27u);
 fn remapTileFaces(group:vec3u,lane:u32,remap:bool){
  let entry=listed(group,lane);if(entry==UM_UNLISTED||(entry&LISTED_FACES)==0u){return;}
+ // The slopes of the tile's old faces, before any lane samples them.
+ if(remap){remapBeside(entry,lane);}
+ workgroupBarrier();
+ if(remap){remapSlope(entry,lane);}
+ workgroupBarrier();
  let tile=entry&LISTED_TILE;let cellLane=lane%64u;let axis=lane/64u;
  let anchor=vec3i(umTileCoord(tile)*4u+umCorner(cellLane,4u));
  let texel=remapFaceTexel(entry,umCorner(cellLane,4u));
