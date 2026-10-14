@@ -949,8 +949,8 @@ let latestSolidWorld: { readonly stamp: string; readonly world: WeakRef<SolidWor
  * Ordinary filled slabs across the lattice and its one-cell halo, which is
  * where the box shell authors a wall: past the +x face, past the +z face, and
  * above a closed top. An open top gets no slab above it, so those cells are
- * air between walls that rise to the lattice's top. None when the lattice is
- * the container.
+ * air between walls that rise to the lattice's top, and no slab reaches above
+ * that top. None when the lattice is the container.
  */
 export function solidVoxelPaddingForLattice(
   cells: SolidWorldCoordinate,
@@ -961,8 +961,9 @@ export function solidVoxelPaddingForLattice(
   if (cells.some((n, axis) => !Number.isSafeInteger(n) || n <= 0 || n > lattice[axis]!)) {
     throw new RangeError(`A fluid lattice of ${lattice.join("x")} cells does not hold a container of ${cells.join("x")}`);
   }
+  // Under an open top the slabs stop at the lattice's top: above it is the world's air, outside the lattice.
   const fill = (minimum: SolidWorldCoordinate): SolidWorldVoxelPatch =>
-    ({ operation: "fill", minimum, maximumExclusive: [nx + 1, ny + 1, nz + 1], materialId: 1 });
+    ({ operation: "fill", minimum, maximumExclusive: [nx + 1, top === "open" ? ny : ny + 1, nz + 1], materialId: 1 });
   return [
     ...(nx > cx ? [fill([cx, -1, -1])] : []),
     ...(nz > cz ? [fill([-1, -1, cz])] : []),

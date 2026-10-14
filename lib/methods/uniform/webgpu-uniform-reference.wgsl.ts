@@ -14,7 +14,7 @@ fn cm12GhostFluidTheta(liquidPhi:f32,airPhi:f32,denominatorEpsilon:f32)->f32{
 struct Params {
   dimsDt: vec4f,
   cellGravity: vec4f,
-  container: vec4f,
+  frame: vec4f,
   physical: vec4f,
   boundary: vec4f,
   inflowPositionRadius: vec4f,
@@ -151,9 +151,9 @@ fn d4Sum8(value:array<f32,8>)->f32{
   return y0+y1;
 }
 
-fn worldCell(id:vec3i)->vec3f{let h=params.cellGravity.xyz;return vec3f(-0.5*params.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*params.container.z+(f32(id.z)+0.5)*h.z);}
+fn worldCell(id:vec3i)->vec3f{let h=params.cellGravity.xyz;return vec3f(params.frame.x+(f32(id.x)+0.5)*h.x,params.frame.y+(f32(id.y)+0.5)*h.y,params.frame.z+(f32(id.z)+0.5)*h.z);}
 
-fn hasTerrain()->bool{return params.container.w>0.5;}
+fn hasTerrain()->bool{return params.frame.w>0.5;}
 
 fn depthSymmetry()->bool{return params.tuning.w>0.5;}
 
@@ -294,8 +294,8 @@ fn rigidVelocityAt(bodyIndex:i32,world:vec3f)->vec3f{
 
 fn staticSolidVoxelAtWorld(world:vec3f)->bool{
   let h=params.cellGravity.xyz;
-  let p=vec3i(floor(vec3f((world.x+0.5*params.container.x)/h.x,
-    world.y/h.y,(world.z+0.5*params.container.z)/h.z)));
+  let p=vec3i(floor(vec3f((world.x-params.frame.x)/h.x,
+    (world.y-params.frame.y)/h.y,(world.z-params.frame.z)/h.z)));
   return staticSolidVoxelOccupied(p);
 }
 
@@ -317,8 +317,8 @@ fn bodySolidFractionAt(p:vec3i)->f32{
 fn worldInsideTerrain(world:vec3f)->bool{
   if(!hasTerrain()){return false;}
   let h=params.cellGravity.xyz;
-  let x=clamp(i32(floor((world.x+0.5*params.container.x)/h.x)),0,dims().x-1);
-  let z=clamp(i32(floor((world.z+0.5*params.container.z)/h.z)),0,dims().z-1);
+  let x=clamp(i32(floor((world.x-params.frame.x)/h.x)),0,dims().x-1);
+  let z=clamp(i32(floor((world.z-params.frame.z)/h.z)),0,dims().z-1);
   return world.y<terrainHeightCells(x,z)*h.y;
 }
 

@@ -155,7 +155,7 @@ fn umLoadCorner8(p:vec3u,s:u32)->array<f32,8>{return udLoad48_phi(vec3i(p),s);}
 fn umLoadWallTexel(anchor:vec3i,width:u32)->vec4f{if(width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(velocity,anchor,0);}return textureLoad(velocity,anchor,0);}
 ${uniformMixedVertexSamplingSource("",true,undefined,"umLoadCorner",true)}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
- if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)];}
+ if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(umLowFaceAbove(anchor,axis),axis)];}
  return textureLoad(velocity,anchor,0)[axis];
 }
 @group(1) @binding(11) var unitVelocity:texture_3d<f32>;
@@ -221,7 +221,7 @@ fn umFluidFace(face:vec3i,axis:u32)->f32{
  return 0.0;
 }
 fn umContactReleased(face:vec3i,axis:u32)->bool{
- var cell=face;var bit=axis;if(umFaceLow(face,axis)){cell[axis]=0;bit+=3u;}
+ var cell=face;var bit=axis;if(umFaceLow(face,axis)){cell[axis]+=1;bit+=3u;}
  if(!umSolidValid(cell)){return false;}
  return (u32(round(textureLoad(velocity,cell,0).w))&(1u<<bit))!=0u;
 }

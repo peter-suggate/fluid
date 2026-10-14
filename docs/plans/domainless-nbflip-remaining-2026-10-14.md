@@ -156,10 +156,8 @@ module), `pipes/swift/mtlc` (time Metal's backend on Metal source) and
   step 40, +3.3 % at step 60, +5.3 % at step 120. The first 40 steps match
   the runs before headroom, so it is not the headroom. It needs a run at
   1/30 s beside this one before it is called a volume gain.
-- **Decision for Peter:** this is an interim. The alternatives are a named
-  stop when liquid reaches the lattice top, an outflow there, or true growth
-  above the box (item 6 then item 6's open boundary). Say if 64 cells or the
-  ceiling is the wrong choice.
+- Superseded by item 8, phase 1: the headroom is deleted and the column
+  above an open top is AIR outside the box, claimed as liquid reaches it.
 
 ### 2. Land the renderer window list: paused
 
@@ -403,6 +401,40 @@ module), `pipes/swift/mtlc` (time Metal's backend on Metal source) and
   60 before).
 - Padding cost: a padded scene holds two layers of padding tiles at h. If it
   matters, treat a whole solid tile's face as a wall.
+
+### 8. Open-ended worlds (Z2, one agent, 14 October)
+
+Goal: liquid may go anywhere; pages are claimed wherever it goes; the tank
+is just an authored solid.
+
+- **Phase 1, frame and AIR outside: gate passed.**
+  - The frame is the page table's 64-page window, the box's low corner at
+    page 0 (`sceneFluidFrame` in `scene-lattice-dimensions.ts`; the solver's
+    world-to-cell and the GPU's `params.frame` lanes read its origin, not the
+    container's corner). Lattice coordinates stay non-negative inside the
+    window: the kernels' ~600 unsigned conversions and the particles'
+    `x = -1` dead mark make negative lattice coordinates a bad trade. Pool
+    records keep each page's full signed coordinate as before.
+  - Edge fatal (`UNIFORM_PAGE_POOL_FATAL.edge`): a residency request past
+    the window on any axis toward a page that is not SOLID. A SOLID entry
+    there is the wall it always was, so closed scenes never raise it.
+  - Low faces: `umFaceLow` is "the anchor is on a SOLID page's high plane",
+    not "coordinate below 0"; readers take the cell above
+    (`umLowFaceAbove`). Identical for every existing scene. Compile cost
+    measured standalone: advectOwners 3.02 s (2.71 s with the old
+    predicate), advectDeferred 3.59 s.
+  - Open tops: `LATTICE_OPEN_TOP_HEADROOM_CELLS` is deleted. The column of
+    pages above an open top's box is AIR in the table, claimable, up to the
+    frame's top; the walls rise to the frame's top. Not beside the walls:
+    ground beside a wall under a splash is a SOLID page with stored pages
+    across two axes, which the pressure root refuses
+    (`UNIFORM_MIXED_ROOT_UNREACHED`); measured on the trough at step 1.
+  - Gate: settled tank 30 steps liquid 3,072, particles 3,584 (exact);
+    letters 12 steps liquid 1,224,968 (exact); trough 40 steps liquid
+    31,895 and 31,840 (two runs), no fatal, 24 pages resident at step 1
+    (16 box + 8 above the walls), pool 26 blocks. Unit suite 832 of 832.
+- **Phase 2, solids where pages are claimed and a world with no box:** next.
+- **Phase 3, renderer window list (K9) and the re-keyed pool record:** after.
 
 ### Trough liquid total (measured 14 October, evening)
 

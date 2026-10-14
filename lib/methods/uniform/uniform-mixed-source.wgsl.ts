@@ -10,14 +10,14 @@ export {UNIFORM_PARAMS_BYTES} from "./uniform-source.wgsl";
 export function uniformMixedSourceWGSL(binding:number):string{
  const code=/* wgsl */`
 struct UMSourceParams {
- dimsDt:vec4f,cellGravity:vec4f,container:vec4f,physical:vec4f,boundary:vec4f,
+ dimsDt:vec4f,cellGravity:vec4f,frame:vec4f,physical:vec4f,boundary:vec4f,
  inflowPositionRadius:vec4f,inflowVelocityLength:vec4f,inflowTiming:vec4f,tuning:vec4f,drop:vec4f,dropExtent:vec4f,
  hostStages:array<vec4f,6>,${uniformExtrusionParamsWGSL}
 }
 @group(1) @binding(${binding}) var<uniform> umSourceParams:UMSourceParams;
 // The nozzle face clamps into the scene's lattice (the params' dims), not an address extent.
 fn inflowGridDims()->vec3i{return vec3i(params.dimsDt.xyz);}
-fn traceWorld(p:vec3f)->vec3f{return vec3f(-0.5*params.container.x,0.0,-0.5*params.container.z)+p*params.cellGravity.xyz;}
+fn traceWorld(p:vec3f)->vec3f{return params.frame.xyz+p*params.cellGravity.xyz;}
 ${inflowBoundaryWGSL}
 ${uniformDropSourceWGSL}
 ${uniformSourcePhiWGSL}

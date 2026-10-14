@@ -316,7 +316,7 @@ fn isOpticalCube(cell: vec3i, dims: vec3i) -> bool {
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  if(!umFaceLow(anchor,axis)){return udrLoadFace(velocityField,velocityBase,anchor)[axis];}
  if(layers.control.z<=0.0){return 0.0;}
- return bitcast<f32>(viewRecords[u32(layers.control.z)+umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)]);
+ return bitcast<f32>(viewRecords[u32(layers.control.z)+umLowFaceIndex(umLowFaceAbove(anchor,axis),axis)]);
 }
 ${uniformMixedPresentationVelocityWGSL()}
 fn velocitySample(cell: vec3i) -> vec3f {

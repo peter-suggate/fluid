@@ -12,10 +12,10 @@ import { inflowStrength } from "./initial-fluid";
 export const inflowBoundaryWGSL = /* wgsl */ `
 fn inflowStrength()->f32{return clamp(params.inflowTiming.x,0.0,1.0);}
 fn inflowAxis()->u32{let v=abs(params.inflowVelocityLength.xyz);if(v.y>v.x&&v.y>=v.z){return 1u;}if(v.z>v.x){return 2u;}return 0u;}
-fn inflowFaceIndex(axis:u32)->i32{let h=params.cellGravity.xyz;let minimum=vec3f(-0.5*params.container.x,0.0,-0.5*params.container.z);let d=inflowGridDims();return clamp(i32(round((params.inflowPositionRadius[axis]-minimum[axis])/h[axis]))-1,0,d[axis]-2);}
+fn inflowFaceIndex(axis:u32)->i32{let h=params.cellGravity.xyz;let minimum=params.frame.xyz;let d=inflowGridDims();return clamp(i32(round((params.inflowPositionRadius[axis]-minimum[axis])/h[axis]))-1,0,d[axis]-2);}
 fn inflowReceiverIndex(axis:u32)->i32{let face=inflowFaceIndex(axis);return select(face,face+1,params.inflowVelocityLength[axis]>=0.0);}
 fn inflowApertureFraction(q:vec3i)->f32{
-  let velocity=params.inflowVelocityLength.xyz;let speed=length(velocity);if(speed<=1e-6){return 0.0;}let direction=velocity/speed;let axis=inflowAxis();let h=params.cellGravity.xyz;let minimum=vec3f(-0.5*params.container.x,0.0,-0.5*params.container.z);let face=inflowFaceIndex(axis);var tangentA=0u;var tangentB=1u;if(axis==0u){tangentA=1u;tangentB=2u;}else if(axis==1u){tangentA=0u;tangentB=2u;}
+  let velocity=params.inflowVelocityLength.xyz;let speed=length(velocity);if(speed<=1e-6){return 0.0;}let direction=velocity/speed;let axis=inflowAxis();let h=params.cellGravity.xyz;let minimum=params.frame.xyz;let face=inflowFaceIndex(axis);var tangentA=0u;var tangentB=1u;if(axis==0u){tangentA=1u;tangentB=2u;}else if(axis==1u){tangentA=0u;tangentB=2u;}
   var point=vec3f(0.0);point[axis]=minimum[axis]+f32(face+1)*h[axis];point[tangentA]=minimum[tangentA]+(f32(q[tangentA])+0.5)*h[tangentA];point[tangentB]=minimum[tangentB]+(f32(q[tangentB])+0.5)*h[tangentB];let relative=point-params.inflowPositionRadius.xyz;let axial=dot(relative,direction);let radialDistance=length(relative-axial*direction);let edgeWidth=max(0.5*length(vec2f(h[tangentA],h[tangentB])),1e-6);let coverage=clamp(0.5+0.5*(params.inflowPositionRadius.w-radialDistance)/edgeWidth,0.0,1.0);return coverage*coverage*(3.0-2.0*coverage);
 }
 fn isInflowBoundaryFace(q:vec3i,axis:u32)->bool{
@@ -39,7 +39,7 @@ fn inflowSweptPlugSource(q:vec3i,dt:f32)->f32{
   let strength=inflowStrength();let velocity=params.inflowVelocityLength.xyz;let speed=length(velocity)*strength;
   if(speed<=1e-6||dt<=0.0){return 0.0;}
   let direction=velocity/max(length(velocity),1e-6);let h=params.cellGravity.xyz;
-  let minimum=vec3f(-0.5*params.container.x,0.0,-0.5*params.container.z);
+  let minimum=params.frame.xyz;
   let centre=minimum+(vec3f(q)+vec3f(0.5))*h;
   let relative=centre-params.inflowPositionRadius.xyz;
   let axial=dot(relative,direction);let halfAxial=0.5*dot(abs(direction),h);

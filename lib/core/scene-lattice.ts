@@ -11,6 +11,9 @@ export {
   sceneLatticeDimensions,
   LATTICE_PAGE_CELLS,
   sceneFluidLatticeDimensions,
+  sceneFluidFrame,
+  fluidFrameCell,
+  type SceneFluidFrame,
 } from "./scene-lattice-dimensions";
 import { sceneLatticeDimensions } from "./scene-lattice-dimensions";
 

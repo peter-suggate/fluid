@@ -60,7 +60,7 @@
  *                umWideVertexRunTexel (uniformLatticeRunWGSL: only where read)
  *  kinds         UM_RESIDENT UM_AIR UM_SOLID umCellKind umTileKind umAcrossKind
  *                umPointKind umLowOpen umTileLowOpen
- *  low faces     umFaceLow umFaceAnchorNear umLowFaceIndex UM_LOW_FACE_KEYS umCellBlock
+ *  low faces     umFaceLow umLowFaceAbove umFaceAnchorNear umLowFaceIndex UM_LOW_FACE_KEYS umCellBlock
  *  dense extents UM_TILES UM_CELL_KEYS UM_VERTEX_KEYS
  *  texture sizes UM_CELL_TEXTURE UM_VERTEX_TEXTURE UM_TILE_TEXTURE
  *                UM_WIDE_VERTEX_TEXTURE
@@ -322,13 +322,16 @@ fn umPointPresent(p:vec3f)->bool{return umCellPresent(vec3i(floor(p)));}
 fn umPointKind(p:vec3f)->u32{return umCellKind(vec3i(floor(p)));}
 // The kind of the cell step cells from p along axis.
 fn umAcrossKind(p:vec3i,axis:u32,step:i32)->u32{var q=p;q[axis]+=step;return umCellKind(q);}
-// Low faces: the face above anchor along axis has no stored cell below it,
-// so its value lives in a low-face table at umLowFaceIndex of the cell above
-// it, which lies on its page's low plane along axis (p[axis] is not read):
-// three 32x32 planes a block.${boxed(` umFaceAnchorNear: the nearest anchor of a face
+// Low faces: the face above anchor along axis has a SOLID page below it
+// (anchor on its page's high plane along axis, in a SOLID page), so its value
+// lives in a low-face table at umLowFaceIndex of the cell above it, which
+// lies on its page's low plane along axis (p[axis] is not read): three 32x32
+// planes a block. A face over an AIR page is not one: AIR is ambient.${boxed(` umFaceAnchorNear: the nearest anchor of a face
 // with a stored cell above it.`)}
 ${extent("UM_LOW_FACE_KEYS", "u32", "", `3072u*${blocks}`)}
-fn umFaceLow(anchor:vec3i,axis:u32)->bool{return anchor[axis]<0;}
+fn umFaceLow(anchor:vec3i,axis:u32)->bool{return (anchor[axis]&31)==31&&umCellKind(anchor)==UM_SOLID;}
+// The cell above a low face's anchor along axis: the stored cell whose entry umLowFaceIndex reads.
+fn umLowFaceAbove(anchor:vec3i,axis:u32)->vec3u{var q=anchor;q[axis]+=1;return vec3u(q);}
 ${boxed(`fn umFaceAnchorNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(-1),vec3i(${d})-vec3i(1));}
 `)}fn umLowFaceIndex(p:vec3u,axis:u32)->u32{
  let l=p&vec3u(31u);let uv=select(select(l.xy,l.xz,axis==1u),l.yz,axis==0u);
@@ -727,18 +730,30 @@ export interface UniformLatticeAddress extends UniformLatticeBox {
   readonly liveTiles: number;
   /** The most tiles any commit of the pool can leave stored: 512 for each
    * block that can hold a page (neither sentinel does), and never more than
-   * the box's. An h tile is a stored tile, so this bounds every layout's h
-   * tiles: the h-tile capacity of a layout the GPU builds. */
+   * the pages that can be stored: the box's and an open top's AIR column. An
+   * h tile is a stored tile, so this bounds every layout's h tiles: the
+   * h-tile capacity of a layout the GPU builds. */
   readonly poolTiles: number;
-  /** The pages above the box are AIR (SOLID otherwise, as every other page outside it). */
+  /** The column of pages above the box's top is AIR (SOLID otherwise, as every other page outside the box). */
   readonly openTop: boolean;
 }
 
-/** openTop: the scene's top is open. Under it the lower half of the window's
- * entries past the box on y is AIR and the upper half stays SOLID: a
- * coordinate below the box wraps there. The pool's default then holds a
- * block more a column of pages: the layer above the box that the residency
- * closure asks for when the liquid nears the top. */
+/** Window pages below the frame's floor: the entries a coordinate below the
+ * box wraps to on y, SOLID under an open top as under a closed one. */
+export const UNIFORM_FRAME_FLOOR_PAGES = 8;
+
+/** The frame is the page table's window: pages 0..63 an axis, the box's
+ * low corner at page 0. Outside the box every entry is SOLID, except under
+ * an open top (openTop): there the column of entries above the box's top is
+ * AIR, up to the UNIFORM_FRAME_FLOOR_PAGES the window keeps SOLID below the
+ * floor. A splash claims pages above the walls' height between walls that
+ * rise to the frame's top, and liquid that reaches the frame's top is the
+ * page pool's edge fatal. Not beside the walls: a SOLID page with stored
+ * pages across faces of two axes (ground beside a wall, under a splash) is
+ * an edge the pressure root's tiled levels do not solve
+ * (UNIFORM_MIXED_ROOT_UNREACHED). The pool's default then holds a block more
+ * for each page of the layer above the box, which the residency closure
+ * asks for when the liquid nears the top. */
 export function uniformLatticeAddress(cells: readonly number[], openTop = false, scene: UniformPagePoolScene = {}): UniformLatticeAddress {
   const box = uniformLatticeBox(cells), [px, py, pz] = box.pages, blocks = scene.blocks ?? px * py * pz + 2 + (openTop ? px * pz : 0);
   const blockBits = Math.min(Math.floor(blocks / 8), 1) + Math.min(Math.floor(blocks / 64), 1) + Math.min(Math.floor(blocks / 512), 1);
@@ -752,7 +767,7 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
   const pool = { table: UNIFORM_PAGE_WINDOW, blocks, idleSteps: 8, box: { origin: [0, 0, 0] as Extent, pages: box.pages } };
   const seed = uniformPagePoolBoxSeed(uniformPagePoolLayout(pool), {
     permute: scene.permute, resident: (x, y, z) => !air.has(x + px * (y + py * z)),
-    outside: (x, y, z) => openTop && x < px && z < pz && y >= py && y < ((py + UNIFORM_PAGE_WINDOW) >> 1) ? UNIFORM_KIND.air : UNIFORM_KIND.solid,
+    outside: (x, y, z) => openTop && x < px && z < pz && y >= py && y < UNIFORM_PAGE_WINDOW - UNIFORM_FRAME_FLOOR_PAGES ? UNIFORM_KIND.air : UNIFORM_KIND.solid,
   });
   let liveTiles = 0;
   for (let b = 1; b < blocks - 1; b++) {
@@ -764,7 +779,7 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
     cellTexture: [32 * blockGrid[0], 32 * blockGrid[1], 32 * blockGrid[2]], vertexTexture: [33 * blockGrid[0], 33 * blockGrid[1], 33 * blockGrid[2]],
     tileTexture: [8 * blockGrid[0], 8 * blockGrid[1], 8 * blockGrid[2]], faceBaseTexture: [8 * blockGrid[0], 8 * blockGrid[1], 32 * blockGrid[2]],
     wideVertexTexture: [9 * blockGrid[0], 9 * blockGrid[1], 9 * blockGrid[2]], lowFaceKeys: 3072 * blocks,
-    blocks, blockBits, blockGrid, pool, seed, liveTiles, poolTiles: Math.min(box.boxTiles, 512 * (blocks - 2)), openTop,
+    blocks, blockBits, blockGrid, pool, seed, liveTiles, poolTiles: 512 * Math.min(px * py * pz + (openTop ? px * pz * (UNIFORM_PAGE_WINDOW - UNIFORM_FRAME_FLOOR_PAGES - py) : 0), blocks - 2), openTop,
   };
 }
 

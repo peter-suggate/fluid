@@ -638,7 +638,7 @@ ${uniformMixedFaceAddressWGSL}
 // extension's copy there is not its base's value on a face between two air
 // cells: a tile promoted beside the surface would be interpolated from it.
 fn oldFaceValue(f:oldUMFace)->f32{
- if(umFaceLow(f.anchor,f.axis)){return negative[umLowFaceIndex(vec3u(max(f.anchor,vec3i(0))),f.axis)];}
+ if(umFaceLow(f.anchor,f.axis)){return negative[umLowFaceIndex(umLowFaceAbove(f.anchor,f.axis),f.axis)];}
  return ${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(velocity,f.anchor,0)[f.axis];
 }
 fn oldPatch(o:oldUMOwner,p:vec3u,axis:u32,sign:i32)->oldUMFace{
@@ -778,7 +778,7 @@ fn remapReleased(f:UMFace)->bool {
  }}return true;
 }
 fn copyFace(f:UMFace)->f32{
- if(umFaceLow(f.anchor,f.axis)){return negative[umLowFaceIndex(vec3u(max(f.anchor,vec3i(0))),f.axis)];}
+ if(umFaceLow(f.anchor,f.axis)){return negative[umLowFaceIndex(umLowFaceAbove(f.anchor,f.axis),f.axis)];}
  return ${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(velocity,f.anchor,0)[f.axis];
 }
 var<workgroup> tileFaces:array<vec2f,192>;

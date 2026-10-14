@@ -93,6 +93,7 @@ export function uniformResidencyRequests(pages: UniformResidencyPages, seeds: Ar
     const word = seeds[page]!;
     if (!word) continue;
     seedBox(uniformResidencyPageCoord(pages, page, s), word, box);
+    // Past the frame (window pages 0..63) nothing is asked: the kernel raises the edge fatal there unless the entry is SOLID.
     const a = [0, 1, 2].map(k => Math.max(box[k]! - d, 0) >> 3), b = [0, 1, 2].map(k => Math.min(box[3 + k]! + d, 511) >> 3);
     for (let z = a[2]!; z <= b[2]!; z++) for (let y = a[1]!; y <= b[1]!; y++) for (let x = a[0]!; x <= b[0]!; x++) ask(x, y, z);
   }
@@ -147,15 +148,22 @@ fn rsSeedBox(s:vec3i,word:u32)->RSBox{
  * of its seed box, at most RS_REACH pages' tiles away. Returns false, having
  * raised closureCap with r as its detail and asked nothing, where r is over
  * UP_CLOSURE_CAP. A seed of the liquid's whose own page the pool does not
- * hold raises closure and is asked for all the same. */
+ * hold raises closure and is asked for all the same. A page past the frame
+ * (the window's pages 0..63 an axis) is never asked for: a SOLID entry there
+ * is a wall, and any other raises the edge fatal. */
 export const uniformResidencyRequestWGSL = /* wgsl */ `
 fn rsAsk(page:u32,word:u32,r:u32)->bool{
  let own=vec3i(umBlockPage(page>>3u));
  if(r>UP_CLOSURE_CAP){upFailWith(UP_FATAL_CLOSURE_CAP,own,r);return false;}
  if((word&${UNIFORM_RESIDENCY_LIQUID}u)!=0u&&upBlockOf(own)==UP_NONE){upFail(UP_FATAL_CLOSURE,own);}
  let box=rsSeedBox(vec3i(umPageCoord(page)),word);let d=vec3i(i32(min(r,4u*RS_REACH)));
- let a=max(box.lo-d,vec3i(0))>>vec3u(3u);let b=min(box.hi+d,vec3i(511))>>vec3u(3u);
- for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){upRequest(vec3i(x,y,z));}}}
+ let a=(box.lo-d)>>vec3u(3u);let b=(box.hi+d)>>vec3u(3u);
+ for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
+  let q=vec3i(x,y,z);
+  // Past the frame: a SOLID entry is the wall it always was; anything else is the frame's edge.
+  if(any(q<vec3i(0))||any(q>vec3i(i32(UP_TABLE)-1))){if(upKind(q)!=UP_SOLID){upFail(UP_FATAL_EDGE,q);}continue;}
+  upRequest(q);
+ }}}
  return true;
 }`;
 /** rsResident(page, r), for a module that includes a topology and

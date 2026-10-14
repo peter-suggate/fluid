@@ -110,7 +110,7 @@ fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
  // bodyTiles is a bit per tile key (the census's body words).
  let coord=umTileCoord(tile);
  let h=umSolidParams.cellGravity.xyz;let t=vec3f(coord);
- let low=vec3f(-0.5*umSolidParams.container.x,0.0,-0.5*umSolidParams.container.z)+4.0*t*h;let high=low+4.0*h;
+ let low=umSolidParams.frame.xyz+4.0*t*h;let high=low+4.0*h;
  for(var i=0u;i<umBodyCount();i++){
   let b=umSolidBodies[i];let centre=b.positionShape.xyz;
   let reach=max(b.dimensions.w,0.0)+length(b.linearVelocity.xyz)*bodyHorizon.x+max(h.x,max(h.y,h.z));

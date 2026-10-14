@@ -341,7 +341,7 @@ fn umLoadCorner8(p:vec3u,s:u32)->array<f32,8>{return udLoad48_phi(vec3i(p),s);}
 ${uniformMixedVertexSamplingSource("",true,undefined,"umLoadCorner",true)}
 ${slots?uniformMixedExtensionSnapshotWGSL(1,17):""}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
- if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)];}
+ if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(umLowFaceAbove(anchor,axis),axis)];}
  return ${slots?"ueSnapshotFace(anchor,axis)":"textureLoad(velocity,anchor,0)[axis]"};
 }
 ${uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",undefined,unitTaps?"unitVelocity":undefined,slots?"ueSnapshotUnit":undefined)}

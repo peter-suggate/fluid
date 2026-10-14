@@ -521,7 +521,7 @@ fn umTileSupported(t:u32)->bool{return false;}
 `;
  return /* wgsl */ `
 struct UMSolidParams {
- dimsDt:vec4f,cellGravity:vec4f,container:vec4f,physical:vec4f,boundary:vec4f,
+ dimsDt:vec4f,cellGravity:vec4f,frame:vec4f,physical:vec4f,boundary:vec4f,
  inflowA:vec4f,inflowB:vec4f,inflowC:vec4f,tuning:vec4f,drop:vec4f,dropExtent:vec4f,
  twoLevel:vec4f,agreement:vec4f,lean:vec4f,splash:vec4f,splashB:vec4f,cleanup:vec4f,
 }
@@ -616,12 +616,12 @@ fn umBedSlope(p:vec3i)->vec2f{
  let entry=umSolidScratch[umBedSlopeBase()+(index>>1u)]>>(16u*(index&1u));
  return vec2f(vec2i(bitcast<i32>(entry<<24u)>>24u,bitcast<i32>(entry<<16u)>>24u))/${UNIFORM_SOLID_BED_SLOPE_UNITS}.0;
 }
-fn umSolidHasTerrain()->bool{return umSolidParams.container.w>0.5;}
+fn umSolidHasTerrain()->bool{return umSolidParams.frame.w>0.5;}
 fn umSolidTerrainHeight(x:i32,z:i32)->f32{let d=vec3i(umSolidDimensions());return textureLoad(umSolidTerrain,vec2i(clamp(x,0,d.x-1),clamp(z,0,d.z-1)),0).x;}
 fn umCellInsideTerrain(p:vec3i)->bool{if(!umSolidHasTerrain()){return false;}return f32(p.y)+0.5<umSolidTerrainHeight(p.x,p.z);}
 fn umCellTerrainFraction(p:vec3i)->f32{if(!umSolidHasTerrain()){return 0.0;}return clamp(umSolidTerrainHeight(p.x,p.z)-f32(p.y),0.0,1.0);}
 fn umSolidWorldCell(id:vec3i)->vec3f{let h=umSolidParams.cellGravity.xyz;
- return vec3f(-0.5*umSolidParams.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*umSolidParams.container.z+(f32(id.z)+0.5)*h.z);}
+ return vec3f(umSolidParams.frame.x+(f32(id.x)+0.5)*h.x,umSolidParams.frame.y+(f32(id.y)+0.5)*h.y,umSolidParams.frame.z+(f32(id.z)+0.5)*h.z);}
 // The tile cut map (UniformMixedSolid, after the bed-slope lane in the mask
 // image): one word per tile key, zero when no h cell of the tile or its
 // one-cell ring has open < 1 -- every cell and face sample a helper takes for
@@ -703,18 +703,18 @@ fn umCellInsideSolid(p:vec3i)->bool{
 }
 fn umSolidFaceWorld(id:vec3i,axis:u32)->vec3f{var world=umSolidWorldCell(id);world[axis]+=0.5*umSolidParams.cellGravity.xyz[axis];return world;}
 fn umSolidTraceWorld(p:vec3f)->vec3f{let h=umSolidParams.cellGravity.xyz;
- return vec3f(-0.5*umSolidParams.container.x+p.x*h.x,p.y*h.y,-0.5*umSolidParams.container.z+p.z*h.z);}
+ return vec3f(umSolidParams.frame.x+p.x*h.x,umSolidParams.frame.y+p.y*h.y,umSolidParams.frame.z+p.z*h.z);}
 fn umSolidVoxelAtWorld(world:vec3f)->bool{
  let h=umSolidParams.cellGravity.xyz;
- let p=vec3i(floor(vec3f((world.x+0.5*umSolidParams.container.x)/h.x,world.y/h.y,(world.z+0.5*umSolidParams.container.z)/h.z)));
+ let p=vec3i(floor(vec3f((world.x-umSolidParams.frame.x)/h.x,(world.y-umSolidParams.frame.y)/h.y,(world.z-umSolidParams.frame.z)/h.z)));
  return umSolidVoxel(p);
 }
 fn umSolidTerrainAtWorld(world:vec3f)->bool{
  if(!umSolidHasTerrain()){return false;}
  let h=umSolidParams.cellGravity.xyz;let d=vec3i(umSolidDimensions());
- let x=clamp(i32(floor((world.x+0.5*umSolidParams.container.x)/h.x)),0,d.x-1);
- let z=clamp(i32(floor((world.z+0.5*umSolidParams.container.z)/h.z)),0,d.z-1);
- return world.y<umSolidTerrainHeight(x,z)*h.y;
+ let x=clamp(i32(floor((world.x-umSolidParams.frame.x)/h.x)),0,d.x-1);
+ let z=clamp(i32(floor((world.z-umSolidParams.frame.z)/h.z)),0,d.z-1);
+ return world.y-umSolidParams.frame.y<umSolidTerrainHeight(x,z)*h.y;
 }
 fn umSolidAtWorld(world:vec3f)->bool{return umSolidVoxelAtWorld(world)||umSolidTerrainAtWorld(world)||umBodyAt(world)>=0;}
 // insideAnyTraceSolid for a lattice-coordinate point: voxels and bodies

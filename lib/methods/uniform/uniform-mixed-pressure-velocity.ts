@@ -152,7 +152,7 @@ fn umFaceAcross(face:UMFace)->vec3i{var q=face.anchor;if(face.sign>0){q[face.axi
 // breaks the dam's monotone acceptance at the far-wall impact).
 fn umWallHeld(o:UMOwner)->bool{return umPressurePhi(o)< -f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z));}
 fn umFaceVelocity(face:UMFace)->f32 {
- if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
+ if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(umLowFaceAbove(face.anchor,face.axis),face.axis)];}
  // A 4h-wide patch's anchor is canonical: the base block.
  if(face.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(velocity,face.anchor,0)[face.axis];}
  return textureLoad(velocity,face.anchor,0)[face.axis];
@@ -191,7 +191,7 @@ fn umCutFlux(o:UMOwner,axis:u32,sign:i32)->f32{
   if(((mask>>u32(i+4*j))&1u)==0u){continue;}
   var c=origin;c[a]+=i;c[b]+=j;c[axis]+=select(-1,3,sign>0);
   var u=0.0;
-  if(umFaceLow(c,axis)){u=fineNegative[umLowFaceIndex(vec3u(max(c,vec3i(0))),axis)];}else{u=textureLoad(fineVelocity,c,0)[axis];}
+  if(umFaceLow(c,axis)){u=fineNegative[umLowFaceIndex(umLowFaceAbove(c,axis),axis)];}else{u=textureLoad(fineVelocity,c,0)[axis];}
   // Every in-domain patch lies on a tile's positive plane, including the
   // negative face owned by its neighbour. Reuse its exact cached fraction;
   // uncached fractions fall back inside umPatchFaceV. Negative domain walls

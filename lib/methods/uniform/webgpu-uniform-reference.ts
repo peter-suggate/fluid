@@ -36,7 +36,7 @@ import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../.
 import { UniformMixedBodies } from "./uniform-mixed-bodies";
 import { UniformBedSlopeBake } from "./uniform-bed-slope-bake";
 import { UniformPrescribedSolidMotion } from "./uniform-prescribed-solid-motion";
-import { sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../../core/scene-lattice";
+import { fluidFrameCell, sceneFluidFrame, sceneFluidLatticeDimensions, sceneLatticeDimensions, type SceneFluidFrame } from "../../core/scene-lattice";
 import { planGPUAdvanceInto, type GPUAdvancePlan } from "../../core/tall-cell-diagnostics";
 import type { GPUQuality } from "../../core/gpu-quality";
 import { sceneHasTerrain } from "../../core/terrain";
@@ -187,11 +187,11 @@ function uniformInjectedDrop(ball: InjectedLiquidBall): UniformLiquidDrop {
  * nozzle's plug over a step of `step_s`. A live page pool pins their pages.
  * A drop, scheduled or injected, is not one: its pages are asked for around
  * its own step (requestDropPages). */
-export function uniformPageSources(scene: SceneDescription, dims: readonly [number, number, number], plug: InflowGridBoundary | undefined, step_s: number): UniformPagePoolCellBox[] {
-  const c = scene.container, size = [c.width_m, c.height_m, c.depth_m], low_m = [-0.5 * c.width_m, 0, -0.5 * c.depth_m];
+export function uniformPageSources(scene: SceneDescription, plug: InflowGridBoundary | undefined, step_s: number): UniformPagePoolCellBox[] {
+  const frame = sceneFluidFrame(scene);
   const box = (centre: readonly number[], end: readonly number[], radius_m: number): UniformPagePoolCellBox => ({
-    low: [0, 1, 2].map(k => Math.floor((Math.min(centre[k]!, end[k]!) - radius_m - low_m[k]!) * dims[k]! / size[k]!)) as [number, number, number],
-    high: [0, 1, 2].map(k => Math.ceil((Math.max(centre[k]!, end[k]!) + radius_m - low_m[k]!) * dims[k]! / size[k]!)) as [number, number, number] });
+    low: [0, 1, 2].map(k => Math.floor(fluidFrameCell(frame, k, Math.min(centre[k]!, end[k]!) - radius_m))) as [number, number, number],
+    high: [0, 1, 2].map(k => Math.ceil(fluidFrameCell(frame, k, Math.max(centre[k]!, end[k]!) + radius_m))) as [number, number, number] });
   const sources: UniformPagePoolCellBox[] = [], inflow = scene.fluid.inflow;
   if (inflow && plug) {
     const o = plug.outletCenter_m, d = plug.direction, reach = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z) * step_s;
@@ -529,6 +529,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private initialVolume?: ReturnType<typeof uniformLatticeInitialVolume>;
   /** The container's cells: what its extents are divided by for a cell's size. The lattice (executionInfo.nx, ny, nz) is these rounded up to whole pages. */
   private readonly containerCells: readonly [number, number, number];
+  /** The scene's fluid frame (sceneFluidFrame), memoised by scene document. */
+  private frameOf?: { readonly scene: SceneDescription; readonly frame: SceneFluidFrame };
+  private get frame(): SceneFluidFrame {
+    if (this.frameOf?.scene !== this.scene) this.frameOf = { scene: this.scene, frame: sceneFluidFrame(this.scene) };
+    return this.frameOf.frame;
+  }
   /** The scene's scheduled drops in source form, built once per schedule. */
   private scheduledDrops?: { readonly schedule: readonly ScheduledLiquidDrop[]; readonly drops: readonly UniformLiquidDrop[] };
   private densityPostProcessing: boolean;
@@ -627,10 +633,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.detail = options.detail ?? uniformDetailSettings({});
     // The stored set at build (uniformPagePoolResidency): under the census of the Dynamic policy only the sources' pages are pinned.
     const residency = this.pageResidency = uniformPagePoolResidency([nx, ny, nz], scene.fluid.pagePool,
-      uniformPageSources(scene, cells, this.inflowBoundary, Math.max(this.fixedStep_s ?? 0, scene.numerics.maxDt_s)), this.detail.policy === "dynamic",
+      uniformPageSources(scene, this.inflowBoundary, Math.max(this.fixedStep_s ?? 0, scene.numerics.maxDt_s)), this.detail.policy === "dynamic",
       () => (this.initialVolume = uniformLatticeInitialVolume(scene)).volume);
-    // The lattice is a closed box: an open top is air in it above the container (sceneFluidLatticeDimensions), and no page is stored outside it.
-    const address = this.address = uniformLatticeAddress([nx, ny, nz], false, { ...scene.fluid.pagePool, air: residency.air });
+    // The frame is the page table's window, the box at its origin: outside the box it is SOLID, but for the column above an open top, which is AIR and claimable (uniformLatticeAddress).
+    const address = this.address = uniformLatticeAddress([nx, ny, nz], scene.container.top === "open", { ...scene.fluid.pagePool, air: residency.air });
     // The mixed-ownership frame owns every geometric advance, on native fields over the shared scratch arena.
     this.scratchArena = new UniformScratchArena(device, address, address.boxCells*UNIFORM_VOLUME_EDGE_BYTES,options.retainStageDiagnosticsForQA,undefined,uniformMixedPressureRootBytes(address));
     this.fieldPages = new UniformTexturePages(device, this.scratchArena);
@@ -1938,9 +1944,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       f[5] = height / this.containerCells[1];
       f[6] = depth / this.containerCells[2];
       f[7] = this.scene.fluid.gravity_m_s2.y;
-      f[8] = width;
-      f[9] = height;
-      f[10] = depth;
+      // The frame's origin: the world position of lattice cell (0,0,0)'s low corner.
+      const origin_m = this.frame.origin_m;
+      f[8] = origin_m[0];
+      f[9] = origin_m[1];
+      f[10] = origin_m[2];
       f[12] = this.scene.fluid.density_kg_m3;
       f[13] = this.scene.fluid.dynamicViscosity_Pa_s;
       f[16] = this.scene.fluid.surfaceTension_N_m;
@@ -2029,11 +2037,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   /** Queue the pool pages a drop's bounding box touches (grown as a pinned source's is) for the next page commit. Allocates nothing. */
   private requestDropPages(drop: UniformLiquidDrop): void {
-    const pool = this.mixedFrame!.pagePool, c = this.scene.container, cells = this.containerCells;
+    const pool = this.mixedFrame!.pagePool, f = this.frame, o = f.origin_m, s = f.size_m, cells = f.cells;
     const r = Math.max(drop.radius_m, drop.halfHeight_m ?? 0), last = pool.layout.box.pages;
-    const x0 = uniformDropPage(drop.centre_m.x, r, -0.5 * c.width_m, c.width_m, cells[0], last[0], -1), x1 = uniformDropPage(drop.centre_m.x, r, -0.5 * c.width_m, c.width_m, cells[0], last[0], 1);
-    const y0 = uniformDropPage(drop.centre_m.y, r, 0, c.height_m, cells[1], last[1], -1), y1 = uniformDropPage(drop.centre_m.y, r, 0, c.height_m, cells[1], last[1], 1);
-    const z0 = uniformDropPage(drop.centre_m.z, r, -0.5 * c.depth_m, c.depth_m, cells[2], last[2], -1), z1 = uniformDropPage(drop.centre_m.z, r, -0.5 * c.depth_m, c.depth_m, cells[2], last[2], 1);
+    const x0 = uniformDropPage(drop.centre_m.x, r, o[0], s[0], cells[0], last[0], -1), x1 = uniformDropPage(drop.centre_m.x, r, o[0], s[0], cells[0], last[0], 1);
+    const y0 = uniformDropPage(drop.centre_m.y, r, o[1], s[1], cells[1], last[1], -1), y1 = uniformDropPage(drop.centre_m.y, r, o[1], s[1], cells[1], last[1], 1);
+    const z0 = uniformDropPage(drop.centre_m.z, r, o[2], s[2], cells[2], last[2], -1), z1 = uniformDropPage(drop.centre_m.z, r, o[2], s[2], cells[2], last[2], 1);
     for (let z = z0; z <= z1; z++) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) pool.request(x, y, z);
   }
 
@@ -2088,9 +2096,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (edit.operation !== "add" || edit.shape !== "ball") {
       return { accepted: false, reason: "This fluid method adds water as balls only; choose Sparse Geometric to remove water or drop other shapes." };
     }
-    const { width_m, height_m, depth_m } = this.scene.container, [nx, ny, nz] = this.containerCells;
-    const refusal = liveFluidEditRefusal(edit, { origin_m: [-width_m / 2, 0, -depth_m / 2],
-      cellSize_m: [width_m / nx, height_m / ny, depth_m / nz], dimensions: [nx, ny, nz] });
+    const frame = this.frame;
+    const refusal = liveFluidEditRefusal(edit, { origin_m: frame.origin_m, cellSize_m: frame.cellSize_m, dimensions: frame.cells });
     if (refusal) return { accepted: false, reason: refusal };
     if (this.pendingDrop) return { accepted: false, reason: "The previous drop lands when the clock next runs; run the simulation first." };
     this.injectLiquidBall({ centre_m: edit.center_m, radius_m: edit.radius_m });
@@ -2609,7 +2616,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         Object.assign(this.executionInfo,{representedVolumeCellSum:represented,volumeCellSum:volume,
           representedVolumeDrift:(represented-reference)/reference,rawVolumeDrift:(volume-reference)/reference,volumeDrift:(volume-reference)/reference,
           volumeTelemetrySource:"dense-volume",frontTelemetrySource:"dense-volume",
-          front_m:-this.scene.container.width_m/2+words[1]!*this.scene.container.width_m/this.containerCells[0],
+          front_m:this.frame.origin_m[0]+words[1]!*this.frame.cellSize_m[0],
           maxSpeed_m_s:new Float32Array(words.buffer)[2],uniformTwoLevelVelocity:this.twoLevelEnabled,
           uniformTwoLevelFineReach:UNIFORM_TWO_LEVEL_FINE_REACH,uniformTwoLevelShellReach:this.twoLevelShellReach,
           uniformTwoLevelFineTiles:words[4],uniformTwoLevelShellTiles:words[5],uniformTwoLevelTilesTotal:this.address.boxTiles,
@@ -2688,7 +2695,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.inflowBoundaryOf = { inflow, container: scene.container };
       // A live page pool pins the sources' pages: they follow a nozzle that moved.
       if (this.pageResidency.live) this.mixedFrame?.pagePool.pin(uniformPagePoolSourcePages([this.executionInfo.nx, this.executionInfo.ny, this.executionInfo.nz],
-        uniformPageSources(scene, this.containerCells, this.inflowBoundary, Math.max(this.fixedStep_s ?? 0, scene.numerics.maxDt_s))));
+        uniformPageSources(scene, this.inflowBoundary, Math.max(this.fixedStep_s ?? 0, scene.numerics.maxDt_s))));
     }
     this.pressureMultigrid.setDepthSymmetry(scene.container.depthBoundary === "symmetry");
   }

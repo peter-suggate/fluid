@@ -130,8 +130,11 @@ export const UNIFORM_PAGE_POOL_STATUS={generation:0,resident:1,claimed:2,free:3,
  * closureCap: a residency certificate's request (rsAsk,
  * uniform-mixed-residency.ts) was given a reach over closureCap and asked
  * for nothing. closure: it met a page seeded by the liquid whose pool page
- * was not resident before the commit (it is asked for all the same). */
-export const UNIFORM_PAGE_POOL_FATAL={exhausted:1,alias:2,requests:4,closureCap:8,closure:16} as const;
+ * was not resident before the commit (it is asked for all the same). edge:
+ * a certificate reached past the frame (window pages 0..table-1 an axis)
+ * toward a page that is not SOLID: the liquid has reached the edge of the
+ * world's frame, and the page is not asked for. */
+export const UNIFORM_PAGE_POOL_FATAL={exhausted:1,alias:2,requests:4,closureCap:8,closure:16,edge:32} as const;
 /** Record states; sentinel: block 0 and the last block, which never change state. */
 export const UNIFORM_PAGE_POOL_BLOCK={free:0,resident:1,pending:2,sentinel:3} as const;
 export const UNIFORM_PAGE_POOL_RECORD={page:0,state:3,generation:4,idle:5,words:RECORD} as const;
@@ -441,6 +444,7 @@ export function uniformPagePoolFatalMessage(layout:UniformPagePoolLayout,status:
   case F.alias:return `Two pages name one page table entry (${page}, commit ${commit}): the resident set is wider than the table's ${layout.table} pages, or an allocator bug.`;
   case F.closureCap:return `Departure travel gives a closure of ${detail} tiles, over the cap of ${layout.closureCap} (commit ${commit}, ${page}): a sample is moving faster than the residency certificate covers.`;
   case F.closure:return `Liquid or band tile found in ${page}, which was not resident at the start of commit ${commit}.`;
+  case F.edge:return `Liquid reached the edge of the fluid frame at ${page} (commit ${commit}): the frame holds window pages 0..${layout.table-1} an axis, and a page past them would alias one inside. Author the scene with more room around its liquid.`;
   default:return `Page pool fatal bits ${status[offset+S.fatal]} (first ${first}) at commit ${commit}, ${page}.`;
  }
 }
@@ -520,7 +524,7 @@ const UP_RESIDENT:u32=${K.resident}u;const UP_AIR:u32=${K.air}u;const UP_SOLID:u
 const UP_TABLE_BITS:u32=${l.tableBits}u;const UP_REQUESTS:u32=${l.requests}u;const UP_CLOSURE_CAP:u32=${l.closureCap}u;
 const UP_AT_TABLE:u32=${l.state.table}u;const UP_AT_BLOCKS:u32=${l.state.blocks}u;const UP_AT_RECORDS:u32=${l.state.records}u;const UP_AT_RESIDENT:u32=${l.state.resident}u;const UP_AT_NEW:u32=${l.state.claimed}u;
 const UP_WORK_LIST:u32=${l.work.list}u;const UP_WORK_KEEP:u32=${l.work.keep}u;const UP_WORK_CLAIMS:u32=${l.work.claims}u;const UP_WORK_DETAIL:u32=${UNIFORM_PAGE_POOL_WORK.detail}u;
-const UP_FATAL_EXHAUSTED:u32=${F.exhausted}u;const UP_FATAL_ALIAS:u32=${F.alias}u;const UP_FATAL_REQUESTS:u32=${F.requests}u;const UP_FATAL_CLOSURE_CAP:u32=${F.closureCap}u;const UP_FATAL_CLOSURE:u32=${F.closure}u;
+const UP_FATAL_EXHAUSTED:u32=${F.exhausted}u;const UP_FATAL_ALIAS:u32=${F.alias}u;const UP_FATAL_REQUESTS:u32=${F.requests}u;const UP_FATAL_CLOSURE_CAP:u32=${F.closureCap}u;const UP_FATAL_CLOSURE:u32=${F.closure}u;const UP_FATAL_EDGE:u32=${F.edge}u;
 @group(${group}) @binding(${state}) var<storage,${access}> upState:array<u32>;
 ${READERS}${work===undefined?"":`@group(${group}) @binding(${work}) var<storage,read_write> upWork:array<atomic<u32>>;
 ${REQUESTERS}`}`;

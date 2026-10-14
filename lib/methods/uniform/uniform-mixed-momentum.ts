@@ -229,7 +229,7 @@ override umCullAir:bool=false;
 ${this.sourceParams?uniformMixedSourceWGSL(17)+uniformMixedFarAirWGSL("umSourceinflowStrength()>0.0"):""}
 ${uniformMixedFaceAddressWGSL}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32 {
- if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)];}return textureLoad(extended,anchor,0)[axis];
+ if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(umLowFaceAbove(anchor,axis),axis)];}return textureLoad(extended,anchor,0)[axis];
 }
 ${uniformMixedVelocitySamplingSource(false,"coarseExtended","extended",this.hanging?2:undefined,this.hanging?"unitVelocity":undefined)}
 // A departure stops at a wall, a face with a SOLID page across it, and
@@ -239,7 +239,7 @@ fn umMomentumDeparture(position:vec3f,dt:f32,h:vec3f)->vec3f {
 ${uniformVelocityDepartureWGSL("umSampleVelocity", "umClampMomentum", "select(f32(umOwnerAt(umBoundedCell(point,umHold)).width),1.0,umRegularFine)", "32")}
 }
 fn umOriginalMomentum(face:UMFace)->f32 {
- if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
+ if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(umLowFaceAbove(face.anchor,face.axis),face.axis)];}
  // A 4h-wide patch's anchor is canonical: the base block where the h store
  // keeps only the ring (UNIFORM_DETAIL_RING_4H_LOAD).
  if(face.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(physical,face.anchor,0)[face.axis];}

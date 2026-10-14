@@ -53,7 +53,7 @@ fn dropDistance(point:vec3f,ceiling:f32)->f32{
 fn dropSource(q:vec3i)->f32{
   if(params.drop.w<=0.0){return 0.0;}
   let h=params.cellGravity.xyz;
-  let minimum=vec3f(-0.5*params.container.x,0.0,-0.5*params.container.z);
+  let minimum=params.frame.xyz;
   var covered=0.0;
   for(var sample=0u;sample<8u;sample+=1u){
     let offset=vec3f(f32(sample&1u),f32((sample>>1u)&1u),f32((sample>>2u)&1u))*0.5+vec3f(0.25);

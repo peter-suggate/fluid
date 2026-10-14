@@ -32,21 +32,17 @@ export function sceneLatticeDimensions(
 /** A fluid solver stores its fields in pages this many cells on an edge. */
 export const LATTICE_PAGE_CELLS = 32;
 
-/** Cells of air a fluid lattice holds above an open top, before rounding to pages. */
-export const LATTICE_OPEN_TOP_HEADROOM_CELLS = 64;
-
 /**
  * Cells of the lattice a fluid solver allocates and addresses for the scene:
- * the container's cells rounded up to whole pages on every axis, and under an
- * open top the headroom above it (LATTICE_OPEN_TOP_HEADROOM_CELLS).
+ * the container's cells rounded up to whole pages on every axis.
  *
  * The container stays what was authored. The lattice's cell (0,0,0) is the
  * container's, and so are its cell size and its origin; the cells it adds lie
  * past the container's high faces, solid across a closed wall and air above an
- * open top (`solidVoxelPaddingForLattice`). The lattice itself is a closed
- * box: liquid that leaves an open top rises between walls to a ceiling at the
- * lattice's top. A closed container that is already whole pages is its own
- * lattice.
+ * open top (`solidVoxelPaddingForLattice`). Outside the lattice the page table
+ * holds the rest of the world: solid ground below an open top's brim and air
+ * above it, so liquid that leaves an open top claims pages above the box. A
+ * closed container that is already whole pages is its own lattice.
  */
 export function sceneFluidLatticeDimensions(
   scene: Pick<SceneDescription, "container" | "voxelDomain">,
@@ -54,7 +50,35 @@ export function sceneFluidLatticeDimensions(
 ): readonly [number, number, number] {
   const whole = (cells: number) => Math.ceil(cells / LATTICE_PAGE_CELLS) * LATTICE_PAGE_CELLS;
   const [nx, ny, nz] = sceneLatticeDimensions(scene, maximumDimension);
-  return [whole(nx), whole(ny + (scene.container.top === "open" ? LATTICE_OPEN_TOP_HEADROOM_CELLS : 0)), whole(nz)];
+  return [whole(nx), whole(ny), whole(nz)];
+}
+
+/**
+ * Where a fluid solver's lattice sits in the world: its frame. A lattice
+ * coordinate in cells is `(world - origin_m) * cells / size_m` on each axis,
+ * and a world position `origin_m + cell * size_m / cells`. The container
+ * fixes the cell size (its extent over its cells); the origin is the world
+ * position of lattice cell (0,0,0)'s low corner, the container's low corner
+ * for every scene the container bounds.
+ */
+export interface SceneFluidFrame {
+  readonly origin_m: readonly [number, number, number];
+  /** The extent and the cells a cell's size is measured over: size_m / cells. */
+  readonly size_m: readonly [number, number, number];
+  readonly cells: readonly [number, number, number];
+  readonly cellSize_m: readonly [number, number, number];
+}
+
+export function sceneFluidFrame(scene: Pick<SceneDescription, "container" | "voxelDomain">): SceneFluidFrame {
+  const c = scene.container, cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
+  const size_m = [c.width_m, c.height_m, c.depth_m] as const;
+  return { origin_m: [-0.5 * c.width_m, 0, -0.5 * c.depth_m], size_m, cells,
+    cellSize_m: [size_m[0] / cells[0], size_m[1] / cells[1], size_m[2] / cells[2]] };
+}
+
+/** A world coordinate on one axis in lattice cells (unfloored). */
+export function fluidFrameCell(frame: SceneFluidFrame, axis: number, world_m: number): number {
+  return (world_m - frame.origin_m[axis]!) * frame.cells[axis]! / frame.size_m[axis]!;
 }
 
 /** Finest cell size actually realized on each axis after lattice rounding. */
