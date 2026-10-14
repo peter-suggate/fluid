@@ -520,22 +520,26 @@ fn umBoundedCell(p:vec3f,b:umBounds)->vec3i{return vec3i(clamp(floor(p),b.lo,b.h
 // its widest reach, and every interpolant and tap of that sample reads it.
 // Unset it is no wall.
 var<private> umHold:umBounds=umBounds(vec3f(-1e9),vec3f(1e9));
-// The cells of a vertex off SOLID pages, of one page word behind one branch:
-// the cell above (cell p), or below on its page-face axes where that cell's
-// page is SOLID (a far wall); the cell below (p - 1), or above on its
-// page-face axes where that one's page is SOLID (a low wall). Each is a cell
-// incident to p; on a closed box, umCellNear(p) and umCellNear(p - 1) but
-// at a wall's page edge, where it may step off an inner page face too.
-fn umVertexCellAbove(p:vec3i)->vec3i{
- let on=(p&vec3i(31))==vec3i(0);
- if(!any(on)||umCellKind(p)!=UM_SOLID){return p;}
- return p-vec3i(on);
-}
-fn umVertexCellBelow(p:vec3i)->vec3i{
- let on=(p&vec3i(31))==vec3i(0);let c=p-vec3i(1);
+// Prefer the cell above/below a vertex. If it is SOLID, search incident
+// pages by changing only axes on page faces. Moving every face axis at once
+// crosses the opposite wall at mixed low/high corners and needlessly crosses
+// an internal page seam beside a wall. The first non-solid incident cell
+// preserves the preferred side on every axis that does not need changing.
+fn umVertexIncidentCell(p:vec3i,below:bool)->vec3i{
+ let on=(p&vec3i(31))==vec3i(0);let c=p-select(vec3i(0),vec3i(1),below);
  if(!any(on)||umCellKind(c)!=UM_SOLID){return c;}
- return c+vec3i(on);
+ let faces=u32(on.x)|(u32(on.y)<<1u)|(u32(on.z)<<2u);
+ for(var mask=1u;mask<8u;mask++){
+  if((mask&faces)!=mask){continue;}
+  let step=vec3i(vec3u(mask&1u,(mask>>1u)&1u,mask>>2u));
+  let q=c+select(-step,step,below);
+  if(umCellKind(q)!=UM_SOLID){return q;}
+ }
+ return c;
 }
+fn umVertexCellAbove(p:vec3i)->vec3i{return umVertexIncidentCell(p,false);}
+fn umVertexCellBelow(p:vec3i)->vec3i{return umVertexIncidentCell(p,true);}
+
 `;
 
 /** Block faces: one index family for what lives on the six faces of a
