@@ -1,4 +1,5 @@
 import { publishOpaqueSurfaceCapability } from "../lib/svo/features/shading/deferred-specialization";
+import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import type { SparseVoxelDrySceneData } from "../lib/svo/contracts/scene-publication";
 /**
  * The parts of a headless SVO dry-frame run that must not be written twice.
@@ -157,7 +158,7 @@ export async function createDawnRenderDevice(options: DawnRenderDeviceOptions = 
     "timestamp-query was required but the adapter cannot provide it; no wall-time fallback was selected");
   assert.ok(!options.requireShaderF16 || adapter.features.has("shader-f16"),
     "shader-f16 was required but Dawn does not advertise it");
-  const device = await adapter.requestDevice({
+  const device = managedGPUDevice(await adapter.requestDevice({
     label: options.label,
     requiredFeatures: [
       ...(timestampsSupported ? ["timestamp-query" as GPUFeatureName] : []),
@@ -168,7 +169,7 @@ export async function createDawnRenderDevice(options: DawnRenderDeviceOptions = 
       ...(adapter.features.has("texture-formats-tier1") ? ["texture-formats-tier1" as GPUFeatureName] : []),
     ],
     requiredLimits: requiredFluidDeviceLimits(adapter.limits),
-  });
+  }), { requireWorkerRealm: false });
   const validationErrors: string[] = [];
   device.addEventListener("uncapturederror", (event) =>
     validationErrors.push((event as GPUUncapturedErrorEvent).error.message));

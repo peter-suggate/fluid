@@ -1,3 +1,4 @@
+import { gpuCompilationManagerFor } from "../../../core/gpu-compilation-manager";
 import type { SvoPlanarLeafClassifierOptions } from "../scene-publication/svo-planar-boundary";
 import { SPARSE_BRICK_VOXEL_TERMINAL, SPARSE_BRICK_LEAF_TERMINAL, type SparseBrickCoordinate } from "./sparse-brick-octree";
 import type { SparseBrickEnvironmentClassification } from "../../../core/adaptive-sparse-brick-plan";
@@ -57,16 +58,15 @@ fn classify(@builtin(global_invocation_id) id:vec3u){
   results[id.x]=vec2u(select(0u,1u,residual||candidates>params.limit||coarseningClaims>params.limit||featureSplit),select(selected,0xffffffffu,blocked));
 }
 `;
-const cache=new WeakMap<GPUDevice,Promise<GPUComputePipeline>>();
-function pipeline(device:GPUDevice){
-  let pending=cache.get(device);
-  if(!pending){pending=(async()=>{
-    const module=device.createShaderModule({label:"GPU adaptive node classification",code:svoNodeClassificationWGSL});
-    const info=await module.getCompilationInfo();const errors=info.messages.filter(m=>m.type==="error");
-    if(errors.length)throw new Error(errors.map(m=>m.message).join("\n"));
-    return device.createComputePipelineAsync({label:"GPU adaptive node classification",layout:"auto",compute:{module,entryPoint:"classify"}});
-  })();cache.set(device,pending);void pending.catch(()=>cache.delete(device));}
-  return pending;
+async function pipeline(device: GPUDevice) {
+  const bundle = await gpuCompilationManagerFor(device).acquire({
+    id: "svo-node-classification", revision: 1,
+    modules: { shader: { label: "GPU adaptive node classification", source: svoNodeClassificationWGSL } },
+    compute: { classify: { label: "GPU adaptive node classification", layout: "auto",
+      compute: { module: "shader", entryPoint: "classify" } } },
+    render: {},
+  });
+  return bundle.compute.classify;
 }
 
 export async function classifySvoNodesGpu(device:GPUDevice,input:SvoNodeClassificationInput,signal?:AbortSignal):Promise<SparseBrickEnvironmentClassification[]> {

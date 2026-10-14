@@ -1,11 +1,12 @@
 /**
  * The worker-owned authority for WGSL module and WebGPU pipeline compilation.
  *
- * Production resource owners consume `GPUCompilationService`; they never need
- * the raw `GPUDevice` methods that can compile synchronously.  The manager is
- * deliberately useful before that cut-over is complete, so existing pipeline
- * families can migrate one manifest at a time.
+ * Manifests and managed GPUDevice calls share the same descriptor caches and
+ * bounded queue. Compilation resources live until device retirement, across
+ * scene teardown; buffers, textures and bind groups remain scene-owned.
  */
+
+import { GPUCompilationDescriptorKeys, normalizedBindGroupLayout, snapshotGPUDescriptor } from "./gpu-compilation-descriptors";
 
 export type GPUCompilationPriority = "critical" | "visible" | "background";
 
@@ -83,15 +84,34 @@ export interface GPUCompilationSnapshot {
   readonly generation: number;
   readonly queued: number;
   readonly active: number;
+  /** Manifest bundles retained for compatibility with existing progress UI. */
   readonly cached: number;
+  readonly cacheStats: GPUCompilationCacheStats;
   readonly progress?: GPUCompilationProgress;
   readonly invalidationReason?: string;
+}
+
+export interface GPUCompilationCacheStats {
+  readonly modules: number;
+  readonly bindGroupLayouts: number;
+  readonly pipelineLayouts: number;
+  readonly pipelines: number;
+  readonly moduleHits: number;
+  readonly layoutHits: number;
+  readonly pipelineHits: number;
+  readonly inFlightHits: number;
+  readonly compilationAttempts: number;
+  /** Sum of native pipeline call durations, excluding queue wait. Concurrent
+   * compilations overlap, so this is not elapsed scene startup time. */
+  readonly compilationMilliseconds: number;
 }
 
 export type GPUCompilationSnapshotListener = (snapshot: GPUCompilationSnapshot) => void;
 
 export interface GPUCompilationService {
   createShaderModule(descriptor: GPUShaderModuleDescriptor): GPUShaderModule;
+  createBindGroupLayout(descriptor: GPUBindGroupLayoutDescriptor): GPUBindGroupLayout;
+  createPipelineLayout(descriptor: GPUPipelineLayoutDescriptor): GPUPipelineLayout;
 
   compileComputePipeline(
     descriptor: GPUComputePipelineDescriptor,
@@ -119,7 +139,7 @@ export interface GPUCompilationService {
 }
 
 export interface GPUCompilationManagerOptions {
-  /** Driver compilation is bounded; production uses two concurrent jobs. */
+  /** Driver compilation is bounded; production uses three concurrent jobs. */
   readonly maximumConcurrentBundles?: number;
   /** Production defaults to fail-closed outside a WorkerGlobalScope. */
   readonly requireWorkerRealm?: boolean;
@@ -134,31 +154,25 @@ export class GPUCompilationInvalidatedError extends Error {
   }
 }
 
+type Pipeline = GPUComputePipeline | GPURenderPipeline;
+type PipelineDescriptor = GPUComputePipelineDescriptor | GPURenderPipelineDescriptor;
 interface CompilationJob {
-  readonly kind: "manifest";
-  readonly sequence: number;
-  priority: GPUCompilationPriority;
-  readonly manifest: AnyGPUCompilationManifest;
-  resolve(bundle: CompiledGPUCompilationBundle<AnyGPUCompilationManifest>): void;
-  reject(error: unknown): void;
-}
-
-interface DirectCompilationJob<Pipeline extends GPUComputePipeline | GPURenderPipeline> {
   readonly kind: "compute" | "render";
   readonly sequence: number;
   priority: GPUCompilationPriority;
   readonly key: string;
   readonly label: string;
-  readonly descriptor: Pipeline extends GPUComputePipeline
-    ? GPUComputePipelineDescriptor
-    : GPURenderPipelineDescriptor;
+  readonly descriptor: PipelineDescriptor;
+  readonly promise: Promise<Pipeline>;
+  consumers: number;
+  started: boolean;
   resolve(pipeline: Pipeline): void;
   reject(error: unknown): void;
 }
-
-type QueuedCompilationJob = CompilationJob
-  | DirectCompilationJob<GPUComputePipeline>
-  | DirectCompilationJob<GPURenderPipeline>;
+interface BundleRequest {
+  priority: GPUCompilationPriority;
+  readonly jobs: Set<CompilationJob>;
+}
 
 const PRIORITY_ORDER: Readonly<Record<GPUCompilationPriority, number>> = {
   critical: 0,
@@ -227,13 +241,46 @@ export class GPUCompilationManager implements GPUCompilationService {
   private readonly listeners = new Set<GPUCompilationSnapshotListener>();
   private readonly cache = new Map<string, CompiledGPUCompilationBundle<AnyGPUCompilationManifest>>();
   private readonly inFlight = new Map<string, Promise<CompiledGPUCompilationBundle<AnyGPUCompilationManifest>>>();
-  private readonly queuedByKey = new Map<string, CompilationJob>();
-  private readonly queue: QueuedCompilationJob[] = [];
+  private readonly bundleRequests = new Map<string, BundleRequest>();
+  private readonly queue: CompilationJob[] = [];
+  private readonly keys = new GPUCompilationDescriptorKeys();
+  private readonly modules = new Map<string, GPUShaderModule>();
+  private readonly bindGroupLayouts = new Map<string, GPUBindGroupLayout>();
+  private readonly pipelineLayouts = new Map<string, GPUPipelineLayout>();
+  private readonly pipelines = new Map<string, Pipeline>();
+  private readonly pipelineJobs = new Map<string, CompilationJob>();
+  private moduleHits = 0;
+  private layoutHits = 0;
+  private pipelineHits = 0;
+  private inFlightHits = 0;
+  private compilationAttempts = 0;
+  private compilationMilliseconds = 0;
   private active = 0;
   private sequence = 0;
   private pumpScheduled = false;
   private invalidationReason?: string;
   private progress?: GPUCompilationProgress;
+  private readonly abortListeners = new Map<AbortSignal, { callbacks: Set<() => void>; listener: () => void }>();
+
+  private onAbort(signal: AbortSignal, callback: () => void): () => void {
+    let entry = this.abortListeners.get(signal);
+    if (!entry) {
+      const callbacks = new Set<() => void>();
+      const listener = () => { for (const cancel of callbacks) cancel(); };
+      entry = { callbacks, listener };
+      this.abortListeners.set(signal, entry);
+      signal.addEventListener("abort", listener, { once: true });
+    }
+    entry.callbacks.add(callback);
+    const current = entry;
+    return () => {
+      current.callbacks.delete(callback);
+      if (current.callbacks.size === 0) {
+        signal.removeEventListener("abort", current.listener);
+        this.abortListeners.delete(signal);
+      }
+    };
+  }
 
   constructor(
     device: GPUDevice,
@@ -250,11 +297,40 @@ export class GPUCompilationManager implements GPUCompilationService {
     }
     this.maximumConcurrentBundles = maximumConcurrentBundles;
     this.generation = options.generation ?? 1;
+    void device.lost?.then(info => this.invalidate(info.message || info.reason));
   }
 
   createShaderModule(descriptor: GPUShaderModuleDescriptor): GPUShaderModule {
     this.assertCurrentGeneration();
-    return this.#device.createShaderModule(descriptor);
+    const saved = snapshotGPUDescriptor(descriptor);
+    const key = this.keys.key(saved);
+    const cached = this.modules.get(key);
+    if (cached) { this.moduleHits++; return cached; }
+    const module = this.#device.createShaderModule(saved);
+    this.modules.set(key, module);
+    return module;
+  }
+
+  createBindGroupLayout(descriptor: GPUBindGroupLayoutDescriptor): GPUBindGroupLayout {
+    this.assertCurrentGeneration();
+    const saved = normalizedBindGroupLayout(snapshotGPUDescriptor(descriptor));
+    const key = this.keys.key(saved);
+    const cached = this.bindGroupLayouts.get(key);
+    if (cached) { this.layoutHits++; return cached; }
+    const layout = this.#device.createBindGroupLayout(saved);
+    this.bindGroupLayouts.set(key, layout);
+    return layout;
+  }
+
+  createPipelineLayout(descriptor: GPUPipelineLayoutDescriptor): GPUPipelineLayout {
+    this.assertCurrentGeneration();
+    const saved = snapshotGPUDescriptor({ immediateSize: 0, ...descriptor });
+    const key = this.keys.key(saved);
+    const cached = this.pipelineLayouts.get(key);
+    if (cached) { this.layoutHits++; return cached; }
+    const layout = this.#device.createPipelineLayout(saved);
+    this.pipelineLayouts.set(key, layout);
+    return layout;
   }
 
   compileComputePipeline(
@@ -289,33 +365,30 @@ export class GPUCompilationManager implements GPUCompilationService {
     }
     let shared = this.inFlight.get(key);
     if (!shared) {
-      shared = new Promise<CompiledGPUCompilationBundle<AnyGPUCompilationManifest>>((resolve, reject) => {
-        const job: CompilationJob = {
-          kind: "manifest",
-          sequence: this.sequence++,
-          priority: options.priority ?? "visible",
-          manifest,
-          resolve,
-          reject,
-        };
-        this.queue.push(job);
-        this.queuedByKey.set(key, job);
-        this.sortQueue();
-        this.schedulePump();
-        this.emit();
+      const request: BundleRequest = { priority: options.priority ?? "visible", jobs: new Set() };
+      this.bundleRequests.set(key, request);
+      // Bundles compose ordinary cached jobs; they never occupy a scheduler
+      // slot while waiting for one of those jobs (including another bundle's).
+      shared = Promise.resolve().then(() => this.compile(manifest, request)).then(bundle => {
+        this.assertCurrentGeneration();
+        this.cache.set(key, bundle);
+        return bundle;
       });
       this.inFlight.set(key, shared);
-      void shared.then(
-        () => { this.inFlight.delete(key); },
-        () => { this.inFlight.delete(key); },
-      );
-    } else {
-      const queued = this.queuedByKey.get(key);
-      const requestedPriority = options.priority ?? "visible";
-      if (queued && PRIORITY_ORDER[requestedPriority] < PRIORITY_ORDER[queued.priority]) {
-        queued.priority = requestedPriority;
-        this.sortQueue();
+      const finish = () => {
+        this.inFlight.delete(key);
+        this.bundleRequests.delete(key);
+        if (this.progress?.key === key) this.progress = undefined;
         this.emit();
+      };
+      void shared.then(finish, finish);
+      this.emit();
+    } else {
+      const request = this.bundleRequests.get(key)!;
+      const priority = options.priority ?? "visible";
+      if (PRIORITY_ORDER[priority] < PRIORITY_ORDER[request.priority]) {
+        request.priority = priority;
+        for (const job of request.jobs) this.promote(job, priority);
       }
     }
     return this.forCaller(
@@ -334,22 +407,30 @@ export class GPUCompilationManager implements GPUCompilationService {
     return Object.freeze({
       state: this.invalidationReason
         ? "invalidated"
-        : this.active > 0 || this.queue.length > 0 ? "compiling" : "idle",
+        : this.active > 0 || this.queue.length > 0 || this.inFlight.size > 0 ? "compiling" : "idle",
       generation: this.generation,
       queued: this.queue.length,
       active: this.active,
       cached: this.cache.size,
+      cacheStats: Object.freeze({
+        modules: this.modules.size, bindGroupLayouts: this.bindGroupLayouts.size,
+        pipelineLayouts: this.pipelineLayouts.size, pipelines: this.pipelines.size,
+        moduleHits: this.moduleHits, layoutHits: this.layoutHits,
+        pipelineHits: this.pipelineHits, inFlightHits: this.inFlightHits,
+        compilationAttempts: this.compilationAttempts,
+        compilationMilliseconds: this.compilationMilliseconds,
+      }),
       ...(this.progress ? { progress: this.progress } : {}),
       ...(this.invalidationReason ? { invalidationReason: this.invalidationReason } : {}),
     });
   }
 
   whenIdle(): Promise<void> {
-    if (this.active === 0 && this.queue.length === 0) return Promise.resolve();
+    if (this.active === 0 && this.queue.length === 0 && this.inFlight.size === 0) return Promise.resolve();
     return new Promise<void>((resolve) => {
       let unsubscribe = () => {};
       unsubscribe = this.subscribe((snapshot) => {
-        if (snapshot.active !== 0 || snapshot.queued !== 0) return;
+        if (snapshot.active !== 0 || snapshot.queued !== 0 || this.inFlight.size !== 0) return;
         unsubscribe();resolve();
       });
     });
@@ -366,9 +447,13 @@ export class GPUCompilationManager implements GPUCompilationService {
     if (this.invalidationReason) return;
     this.invalidationReason = reason;
     this.cache.clear();
+    this.modules.clear();
+    this.bindGroupLayouts.clear();
+    this.pipelineLayouts.clear();
+    this.pipelines.clear();
     this.progress = undefined;
     for (const job of this.queue.splice(0)) {
-      if (job.kind === "manifest") this.queuedByKey.delete(manifestKey(job.manifest));
+      this.pipelineJobs.delete(job.key);
       job.reject(new GPUCompilationInvalidatedError(reason));
     }
     this.emit();
@@ -379,14 +464,14 @@ export class GPUCompilationManager implements GPUCompilationService {
     if (signal.aborted) return Promise.reject(abortError());
     return new Promise<T>((resolve, reject) => {
       const aborted = () => reject(abortError());
-      signal.addEventListener("abort", aborted, { once: true });
+      const unsubscribe = this.onAbort(signal, aborted);
       void shared.then(
         (value) => {
-          signal.removeEventListener("abort", aborted);
+          unsubscribe();
           if (!signal.aborted) resolve(value);
         },
         (error) => {
-          signal.removeEventListener("abort", aborted);
+          unsubscribe();
           if (!signal.aborted) reject(error);
         },
       );
@@ -412,81 +497,113 @@ export class GPUCompilationManager implements GPUCompilationService {
     if (this.invalidationReason) return;
     while (this.active < this.maximumConcurrentBundles && this.queue.length > 0) {
       const job = this.queue.shift()!;
-      if (job.kind === "manifest") this.queuedByKey.delete(manifestKey(job.manifest));
+      job.started = true;
       this.active += 1;
       void this.run(job);
     }
     this.emit();
   }
 
-  private async run(job: QueuedCompilationJob): Promise<void> {
-    const key = job.kind === "manifest" ? manifestKey(job.manifest) : job.key;
+  private async run(job: CompilationJob): Promise<void> {
+    const started = performance.now();
+    this.compilationAttempts++;
     try {
-      if (job.kind === "manifest") {
-        const bundle = await this.compile(job.manifest);
-        if (this.invalidationReason) throw new GPUCompilationInvalidatedError(this.invalidationReason);
-        const published = this.cache.get(key) ?? bundle;
-        this.cache.set(key, published);
-        job.resolve(published);
-      } else {
-        this.progress = Object.freeze({
-          key,
-          label: job.label,
-          completed: 0,
-          total: 1,
-          current: `${job.kind === "compute" ? "Compile compute" : "Compile render"} pipeline`,
-        });
-        this.emit();
-        const pipeline = job.kind === "compute"
-          ? await this.#device.createComputePipelineAsync(
-            job.descriptor as GPUComputePipelineDescriptor)
-          : await this.#device.createRenderPipelineAsync(
-            job.descriptor as GPURenderPipelineDescriptor);
-        this.assertCurrentGeneration();
-        job.resolve(pipeline as never);
-      }
+      this.progress = Object.freeze({ key: job.key, label: job.label,
+        completed: 0, total: 1, current: `Compile ${job.kind} pipeline` });
+      this.emit();
+      this.assertCurrentGeneration();
+      const pipeline = job.kind === "compute"
+        ? await this.#device.createComputePipelineAsync(job.descriptor as GPUComputePipelineDescriptor)
+        : await this.#device.createRenderPipelineAsync(job.descriptor as GPURenderPipelineDescriptor);
+      this.assertCurrentGeneration();
+      this.pipelines.set(job.key, pipeline);
+      job.resolve(pipeline);
     } catch (error) {
       job.reject(error);
     } finally {
+      this.compilationMilliseconds += performance.now() - started;
+      this.pipelineJobs.delete(job.key);
       this.active -= 1;
-      if (this.progress?.key === key) this.progress = undefined;
+      if (this.progress?.key === job.key) this.progress = undefined;
       this.emit();
       this.pump();
     }
   }
 
-  private enqueueDirect<Pipeline extends GPUComputePipeline | GPURenderPipeline>(
-    kind: Pipeline extends GPUComputePipeline ? "compute" : "render",
-    descriptor: Pipeline extends GPUComputePipeline
-      ? GPUComputePipelineDescriptor
-      : GPURenderPipelineDescriptor,
+  private promote(job: CompilationJob, priority: GPUCompilationPriority): void {
+    if (PRIORITY_ORDER[priority] >= PRIORITY_ORDER[job.priority]) return;
+    job.priority = priority;
+    this.sortQueue();
+    this.emit();
+  }
+
+  private enqueueDirect<T extends Pipeline>(
+    kind: "compute" | "render",
+    descriptor: PipelineDescriptor,
     options: GPUCompilationRequestOptions,
-  ): Promise<Pipeline> {
+    bundle?: BundleRequest,
+  ): Promise<T> {
     if (options.signal?.aborted) return Promise.reject(abortError());
-    if (this.invalidationReason) {
-      return Promise.reject(new GPUCompilationInvalidatedError(this.invalidationReason));
+    if (this.invalidationReason) return Promise.reject(new GPUCompilationInvalidatedError(this.invalidationReason));
+    // Consume iterables and copy mutable dictionaries now, as WebGPU does at
+    // the API boundary, rather than when a scheduler slot becomes available.
+    const saved = snapshotGPUDescriptor(descriptor);
+    const key = `${kind}:${this.keys.key(saved)}`;
+    const cached = this.pipelines.get(key);
+    if (cached) {
+      this.pipelineHits++;
+      return this.forCaller(Promise.resolve(cached as T), options.signal);
     }
-    const key = `direct:${this.sequence}`;
-    const shared = new Promise<Pipeline>((resolve, reject) => {
-      this.queue.push({
-        kind,
-        sequence: this.sequence++,
-        priority: options.priority ?? "visible",
-        key,
-        label: descriptor.label ?? `${kind} pipeline`,
-        descriptor,
-        resolve,
-        reject,
-      } as QueuedCompilationJob);
+    let job = this.pipelineJobs.get(key);
+    if (job) {
+      this.inFlightHits++;
+      this.promote(job, options.priority ?? "visible");
+    } else {
+      let resolve!: (pipeline: Pipeline) => void;
+      let reject!: (error: unknown) => void;
+      const promise = new Promise<Pipeline>((accept, fail) => { resolve = accept; reject = fail; });
+      job = { kind, sequence: this.sequence++, priority: options.priority ?? "visible", key,
+        label: saved.label ?? `${kind} pipeline`, descriptor: saved, promise,
+        consumers: 0, started: false, resolve, reject };
+      this.pipelineJobs.set(key, job);
+      this.queue.push(job);
       this.sortQueue();
       this.schedulePump();
-      this.emit();
+    }
+    bundle?.jobs.add(job);
+    const result = this.consume(job, options.signal) as Promise<T>;
+    this.emit();
+    return result;
+  }
+
+  private consume(job: CompilationJob, signal?: AbortSignal): Promise<Pipeline> {
+    if (signal?.aborted) return Promise.reject(abortError());
+    job.consumers++;
+    return new Promise<Pipeline>((resolve, reject) => {
+      let cancelled = false;
+      const unsubscribe = signal ? this.onAbort(signal, () => {
+        cancelled = true;
+        job.consumers--;
+        if (job.started) return; // Drain native work before this caller cleans up.
+        reject(abortError());
+        if (job.consumers !== 0) return;
+        const index = this.queue.indexOf(job);
+        if (index < 0) return;
+        this.queue.splice(index, 1);
+        this.pipelineJobs.delete(job.key);
+        job.reject(abortError());
+        this.emit();
+      }) : undefined;
+      void job.promise.then(
+        pipeline => { if (cancelled) reject(abortError()); else resolve(pipeline); },
+        error => reject(cancelled ? abortError() : error),
+      ).finally(() => { unsubscribe?.(); });
     });
-    return this.forCaller(shared, options.signal);
   }
 
   private async compile(
     manifest: AnyGPUCompilationManifest,
+    request: BundleRequest,
   ): Promise<CompiledGPUCompilationBundle<AnyGPUCompilationManifest>> {
     const key = manifestKey(manifest);
     const label = manifest.label ?? manifest.id;
@@ -507,7 +624,7 @@ export class GPUCompilationManager implements GPUCompilationService {
       this.assertCurrentGeneration();
       report(`Create shader module: ${name}`);
       const { source, ...descriptor } = definition;
-      modules[name] = this.#device.createShaderModule({
+      modules[name] = this.createShaderModule({
         ...descriptor,
         code: typeof source === "function" ? source() : source,
       });
@@ -519,10 +636,10 @@ export class GPUCompilationManager implements GPUCompilationService {
       report(`Compile compute pipeline: ${name}`);
       const { compute: stage, ...descriptor } = definition;
       const { module, ...programmableStage } = stage;
-      compute[name] = await this.#device.createComputePipelineAsync({
+      compute[name] = await this.enqueueDirect<GPUComputePipeline>("compute", {
         ...descriptor,
         compute: { ...programmableStage, module: modules[module]! },
-      });
+      }, { priority: request.priority }, request);
       completed += 1;
       report();
     }
@@ -534,11 +651,11 @@ export class GPUCompilationManager implements GPUCompilationService {
       const fragmentState = fragment
         ? (({ module, ...state }) => ({ ...state, module: modules[module]! }))(fragment)
         : undefined;
-      render[name] = await this.#device.createRenderPipelineAsync({
+      render[name] = await this.enqueueDirect<GPURenderPipeline>("render", {
         ...descriptor,
         vertex: { ...vertexState, module: modules[vertexModule]! },
         ...(fragmentState ? { fragment: fragmentState } : {}),
-      });
+      }, { priority: request.priority }, request);
       completed += 1;
       report();
     }
@@ -567,6 +684,11 @@ export class GPUCompilationManager implements GPUCompilationService {
 
 const managerByDevice = new WeakMap<GPUDevice, GPUCompilationManager>();
 const managedDeviceByRawDevice = new WeakMap<GPUDevice, GPUDevice>();
+
+/** Scoped allocation capabilities still share the device's single scheduler. */
+export function aliasGPUCompilationDevice(device: GPUDevice, alias: GPUDevice): void {
+  managerByDevice.set(alias, gpuCompilationManagerFor(device));
+}
 
 function defaultGPUCompilationConcurrency():number{
   // This is intentionally not the old Promise-all fanout: the manager remains
@@ -614,7 +736,8 @@ export function managedGPUDevice(
 ): GPUDevice {
   const existing = managedDeviceByRawDevice.get(rawDevice);
   if (existing) return existing;
-  const manager = new GPUCompilationManager(rawDevice, {...options,maximumConcurrentBundles:options.maximumConcurrentBundles??defaultGPUCompilationConcurrency()});
+  const manager = managerByDevice.get(rawDevice) ?? new GPUCompilationManager(rawDevice,
+    { ...options, maximumConcurrentBundles: options.maximumConcurrentBundles ?? defaultGPUCompilationConcurrency() });
   // One bound method per property for the device's life: the frame path reads
   // createCommandEncoder and the like every frame and must not allocate.
   const methods = new Map<string | symbol, unknown>();
@@ -622,11 +745,21 @@ export function managedGPUDevice(
     throw new Error(`${property} is disabled; acquire the pipeline through GPUCompilationManager`);
   };
   methods.set("createShaderModule", (descriptor: GPUShaderModuleDescriptor) => manager.createShaderModule(descriptor));
+  methods.set("createBindGroupLayout", (descriptor: GPUBindGroupLayoutDescriptor) => manager.createBindGroupLayout(descriptor));
+  methods.set("createPipelineLayout", (descriptor: GPUPipelineLayoutDescriptor) => manager.createPipelineLayout(descriptor));
+  methods.set("destroy", () => { manager.invalidate("device destroyed"); rawDevice.destroy(); });
   methods.set("createComputePipelineAsync", (descriptor: GPUComputePipelineDescriptor) => manager.compileComputePipeline(descriptor));
   methods.set("createRenderPipelineAsync", (descriptor: GPURenderPipelineDescriptor) => manager.compileRenderPipeline(descriptor));
   methods.set("createComputePipeline", disabled("createComputePipeline"));
   methods.set("createRenderPipeline", disabled("createRenderPipeline"));
   const managed = new Proxy(rawDevice, {
+    // Harness instrumentation can decorate this capability without replacing
+    // the native method the manager calls (which would recurse into itself).
+    set(target, property, value) {
+      if (typeof value === "function") { methods.set(property, value); return true; }
+      methods.delete(property);
+      return Reflect.set(target, property, value, target);
+    },
     get(target, property) {
       const method = methods.get(property);
       if (method) return method;
@@ -640,6 +773,7 @@ export function managedGPUDevice(
   managerByDevice.set(rawDevice, manager);
   managerByDevice.set(managed, manager);
   managedDeviceByRawDevice.set(rawDevice, managed);
+  managedDeviceByRawDevice.set(managed, managed);
   return managed;
 }
 

@@ -1,3 +1,4 @@
+import { gpuCompilationManagerFor } from "../../../core/gpu-compilation-manager";
 import { mortonEncode3D } from "../construction/sparse-brick-octree";
 import type { SparseBrickProxyOccupancy } from "../../../core/adaptive-sparse-brick-plan";
 import type { SvoScenePrimitiveBuild } from "../scene-publication/svo-scene-primitives";
@@ -111,26 +112,22 @@ fn reduce(@builtin(global_invocation_id) id:vec3u){
 }
 `;
 
-const pipelines = new WeakMap<GPUDevice, Promise<{claim:GPUComputePipeline;reach:GPUComputePipeline;reduce:GPUComputePipeline}>>();
-function programs(device: GPUDevice) {
-  let pending = pipelines.get(device);
-  if (!pending) {
-    pending = (async () => {
-      const module = device.createShaderModule({label:"GPU sparse brick selection",code:svoGpuBrickSelectionWGSL});
-      const info = await module.getCompilationInfo();
-      const errors = info.messages.filter(m=>m.type==="error");
-      if (errors.length) throw new Error(errors.map(m=>m.message).join("\n"));
-      const entries: GPUBindGroupLayoutEntry[] = Array.from({length:7},(_,binding)=>({binding,visibility:GPUShaderStage.COMPUTE,
-        buffer:{type:binding===0?"uniform":binding>=5?"storage":"read-only-storage"}}));
-      const layout=device.createPipelineLayout({bindGroupLayouts:[device.createBindGroupLayout({entries})]});
-      const [claim,reach,reduce]=await Promise.all(["claim","reach","reduce"].map(entryPoint=>device.createComputePipelineAsync({
-        label:`GPU sparse brick ${entryPoint}`,layout,compute:{module,entryPoint}})));
-      return {claim,reach,reduce};
-    })();
-    pipelines.set(device,pending);
-    void pending.catch(()=>pipelines.delete(device));
-  }
-  return pending;
+async function programs(device: GPUDevice) {
+  const compiler = gpuCompilationManagerFor(device);
+  const entries: GPUBindGroupLayoutEntry[] = Array.from({length:7},(_,binding)=>({binding,visibility:GPUShaderStage.COMPUTE,
+    buffer:{type:binding===0?"uniform":binding>=5?"storage":"read-only-storage"}}));
+  const layout = compiler.createPipelineLayout({ bindGroupLayouts: [compiler.createBindGroupLayout({ entries })] });
+  const bundle = await compiler.acquire({
+    id: "svo-brick-selection", revision: 1,
+    modules: { shader: { label: "GPU sparse brick selection", source: svoGpuBrickSelectionWGSL } },
+    compute: {
+      claim: { label: "GPU sparse brick claim", layout, compute: { module: "shader", entryPoint: "claim" } },
+      reach: { label: "GPU sparse brick reach", layout, compute: { module: "shader", entryPoint: "reach" } },
+      reduce: { label: "GPU sparse brick reduce", layout, compute: { module: "shader", entryPoint: "reduce" } },
+    },
+    render: {},
+  });
+  return bundle.compute;
 }
 
 /** GPU claim and exact solid reach. CPU receives a compact bitmap solely to
