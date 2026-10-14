@@ -1,5 +1,5 @@
 import { NARROW_BAND_TRACE_LIMIT, narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
-import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailClass, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_PARAMS_BYTES,uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
@@ -101,8 +101,7 @@ export class UniformMixedSurface {
     const a=this.address;
     for(const [i,t] of [f.phi,f.outputPhi,f.velocity,f.coarseVelocity].entries()){
       // The 4h velocity cache is keyed by block.
-      const size=i<2?a.vertexBox:i===3?uniformCoarseCacheExtent(a):a.cells;
-      if(t.format!==(i>=2?"rgba32float":"r32float") || uniformDetailExtent(t).some((n,a)=>n!==size[a]))
+      if(t.format!==(i>=2?"rgba32float":"r32float") || (i===3?uniformDetailExtent(t).some((n,k)=>n!==uniformCoarseCacheExtent(a)[k]):uniformDetailClass(t)!==(i<2?"vertex":"face")))
         throw new Error("Mixed surface requires native vertex/cell fields and a 4h velocity cache");
     }
     if(f.phi===f.outputPhi)throw new Error("Mixed surface outputs overlap inputs");
@@ -162,23 +161,6 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
 @group(1) @binding(11) var unitVelocity:texture_3d<f32>;
 ${velocitySampling}
 ${narrowBandTraceWGSL("umSampleVelocity")}
-// The cell a point (in cell units) is read from: the one it lies in. A point
-// on a page face, edge or corner lies in every page that meets there: where
-// the high side's is not stored the cell is that of the first stored one of
-// the others (the low side on x first), so a point on a wall, or on the face
-// of an AIR page, is read from the stored page it bounds. The page table is
-// read only for a point on a page face.
-fn umPointCell(p:vec3f)->vec3i{
- let c=vec3i(floor(p));let on=((c&vec3i(31))==vec3i(0))&(p==vec3f(c));
- if(!any(on)||umCellKind(c)==UM_RESIDENT){return c;}
- let faces=u32(on.x)|(u32(on.y)<<1u)|(u32(on.z)<<2u);
- for(var low=1u;low<8u;low++){
-  if((low&faces)!=low){continue;}
-  let q=c-vec3i(vec3u(low&1u,(low>>1u)&1u,low>>2u));
-  if(umCellKind(q)==UM_RESIDENT){return q;}
- }
- return c;
-}
 // p as a tap reaches it from the page: held inside it on an axis only where
 // a SOLID page lies across that face (umPointNearFromPage). An AIR page
 // never holds. p lies in the page or one of the 26 around it.
@@ -187,14 +169,28 @@ fn umPointFromPage(page:vec3i,p:vec3f)->vec3f{
  return umPointNearFromPage(umBlockOf(page),page,p);
 }
 fn umPointFrom(home:vec3f,p:vec3f)->vec3f{return umPointFromPage(umPointCell(home)>>vec3u(5u),p);}
+// nbTraceSpan's steps, every stage's sample at one call site: stage 0 the
+// field at q (k1; the first sets the substeps), 1 one base substep ahead
+// (k2), 2 the third point, after which the step ends.
 fn umSurfaceTrace(p:vec3f)->vec3f{
- var k1=umSampleVelocity(p)/params.hDt.xyz;
- let steps=nbTraceSteps(k1,params.hDt.w);
- if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&nbState[3],1u);return p;}
- var q=p;let base=-params.hDt.w/f32(steps);var units=1u;
- for(var i=0u;i<steps;i+=units){
-  if(i>0u){k1=umSampleVelocity(q)/params.hDt.xyz;}let span=nbTraceSpan(q,base,k1,steps-i);
-  units=u32(span.w);q=umPointFrom(q,span.xyz);
+ let h=params.hDt.xyz;
+ var q=p;var x=p;var steps=1u;var i=0u;var base=0.0;var stage=0u;var k1=vec3f(0.0);var k2=vec3f(0.0);var two=false;
+ for(var n=0u;n<${3*NARROW_BAND_TRACE_LIMIT+3}u;n++){
+  let k=umSampleVelocity(x)/h;
+  if(stage==0u){
+   k1=k;
+   if(i==0u){
+    steps=nbTraceSteps(k1,params.hDt.w);
+    if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&nbState[3],1u);return p;}
+    base=-params.hDt.w/f32(steps);
+   }
+   x=q+base*k1;stage=1u;continue;
+  }
+  if(stage==1u){k2=k;two=nbTraceTwo(base,k1,k2,steps-i);x=nbTraceThird(q,base,k1,k2,two);stage=2u;continue;}
+  let span=nbTraceEnd(q,base,k1,k2,k,two);
+  i+=u32(span.w);q=umPointFrom(q,span.xyz);
+  if(i>=steps){break;}
+  x=q;stage=0u;
  }
  return q;
 }
@@ -552,25 +548,31 @@ fn umSampleClosed(q:vec3f)->bool{
 // those values, saw a rise as a dip and filled it
 // (uniform-trough-settled-tank: the wet vertex 0.93 h under the surface
 // 2e-2 h off its distance in 240 steps).
+// One trace (one call site of umSurfaceTrace): of the foot where it has one,
+// else of p.
 fn umVertexTrace(p:vec3f,width:u32)->vec3f{
  let w=f32(width);let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  let value=umSampleVertex(p)/h;
- if(!(abs(value)<2.0*w)){return umSurfaceTrace(p);}
- let g=umSurfaceGradient(p,w)/h;let g2=dot(g,g);
- if(g2<1e-6){return umSurfaceTrace(p);}
- var offset=-value*g/g2;let reach=length(offset);if(reach>2.0*w){offset*=2.0*w/reach;}
- let foot=umPointFrom(p,p+offset);
- ${this.solid?"if(!umOpenAt(foot)){return umSurfaceTrace(p);}":""}
+ var foot=p;var footed=false;
+ if(abs(value)<2.0*w){
+  let g=umSurfaceGradient(p,w)/h;let g2=dot(g,g);
+  if(g2>=1e-6){
+   var offset=-value*g/g2;let reach=length(offset);if(reach>2.0*w){offset*=2.0*w/reach;}
+   foot=umPointFrom(p,p+offset);footed=true;
+   ${this.solid?"if(!umOpenAt(foot)){foot=p;footed=false;}":""}
+  }
+ }
+ let end=umSurfaceTrace(foot);if(!footed){return end;}
  // The foot's displacement, applied at p: within two widths of where the foot's trace ended, and reached from there.
- let end=umSurfaceTrace(foot);return umPointFrom(end,p+(end-foot));
+ return umPointFrom(end,p+(end-foot));
 }
 fn umSurfaceGradient(p:vec3f,width:f32)->vec3f{
  var g=vec3f(0);var lowValue=0.0;let page=umPointCell(p)>>vec3u(5u);
  for(var k=0u;k<6u;k++){
   let axis=k/2u;var delta=vec3f(0);delta[axis]=0.25*width;
   var low=umPointFromPage(page,p-delta);var high=umPointFromPage(page,p+delta);
-  // A wide slope is one-sided beside a closed owner.
-  ${this.solid?"if(width>1.0){if(umSampleClosed(low)){low=p;}if(umSampleClosed(high)){high=p;}}":""}
+  // A wide slope is one-sided beside a closed owner (one umSampleClosed site).
+  ${this.solid?"if(width>1.0){for(var s=0u;s<2u;s++){let q=select(low,high,s==1u);if(umSampleClosed(q)){if(s==0u){low=p;}else{high=p;}}}}":""}
   let value=umSampleVertex(select(low,high,(k&1u)!=0u));
   if((k&1u)==0u){lowValue=value;}else{g[axis]=(value-lowValue)/max(high[axis]-low[axis],1e-6);}
  }return g;
@@ -697,20 +699,19 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
  let owner=umOwner(gid);if(owner.width==0u){return;}
  let origin=umOrigin(owner);let regular=umRegularFine||(umTileMaximumWidth(owner.tile)==owner.width&&umTileMinimumWidth(owner.tile)==owner.width);
  let low=umLowOpen(vec3i(origin));
- // Every regular interior owner writes exactly its positive corner. Keep the
- // expensive characteristic evaluation out of the eight-corner loop;
- // only owners touching a negative domain wall own additional vertices.
- if(regular){
-  let vertex=origin+vec3u(owner.width);
-  umAdvectStore(vertex,owner.width);
-  if(!any(low)){return;}
- }
- for(var k=0u;k<umCounts.w;k++){
-  if(regular&&k==7u){continue;}
-  let corner=umCorner(k,2u);let vertex=origin+corner*owner.width;
-  var owned=false;
-  if(regular){owned=all((corner!=vec3u(0))|low);}
-  else{owned=umVertexAuthority(vertex).index==owner.index;}
+ // Every regular interior owner writes exactly its positive corner, first;
+ // only owners touching a negative domain wall own additional vertices. One
+ // umAdvectStore call site (Metal inlines every call): j==0 is the regular
+ // positive corner, j>0 corner j-1.
+ for(var j=select(1u,0u,regular);j<=umCounts.w;j++){
+  if(j==1u&&regular&&!any(low)){return;}
+  var vertex=origin+vec3u(owner.width);var owned=j==0u;
+  if(j>0u){
+   let k=j-1u;if(regular&&k==7u){continue;}
+   let corner=umCorner(k,2u);vertex=origin+corner*owner.width;
+   if(regular){owned=all((corner!=vec3u(0))|low);}
+   else{owned=umVertexAuthority(vertex).index==owner.index;}
+  }
   if(owned){umAdvectStore(vertex,owner.width);}
  }
 }

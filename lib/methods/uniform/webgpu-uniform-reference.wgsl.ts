@@ -119,7 +119,7 @@ struct RigidBody {
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
 fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return umPages[e.x|(e.y<<6u)|(e.z<<12u)];}
 fn umBlockWord(b:u32)->u32{return umPages[${UNIFORM_PAGE_TABLE_WORDS}u+b];}
-${uniformLatticeAddressWGSL({cells:"vec3u(dims())",tiles:"(vec3u(dims())/4u)",constant:false,paged:{blocks:`(arrayLength(&umPages)-${UNIFORM_PAGE_TABLE_WORDS}u)`}})}
+${uniformLatticeAddressWGSL({constant:false,paged:{blocks:`(arrayLength(&umPages)-${UNIFORM_PAGE_TABLE_WORDS}u)`}})}
 
 fn activeWindowOrigin()->vec3u{return vec3u(0u);}
 
@@ -190,7 +190,7 @@ fn pressureSurfacePhi(p:vec3i)->f32{
 
 
 
-  return uvPhi(vec3f(umCellNear(p))+vec3f(0.5));
+  return uvPhi(vec3f(clamp(p,vec3i(0),dims()-vec3i(1)))+vec3f(0.5));
 }
 
 fn pressurePhi(p:vec3i)->f32{
@@ -396,8 +396,9 @@ fn faceWorld(id:vec3i,axis:u32)->vec3f{
 fn uvCorner(i:u32)->vec3i{return vec3i(i32(i&1u),i32((i>>1u)&1u),i32((i>>2u)&1u));}
 
 fn uvPhi(position:vec3f)->f32{
-  let p=umPointNear(position);
-  let base=umCellNear(vec3i(floor(p)));let f=p-vec3f(base);
+  // uvPhiIn is the dense lattice's own texture: its extent holds the point.
+  let p=clamp(position,vec3f(0.0),vec3f(dims()));
+  let base=clamp(vec3i(floor(p)),vec3i(0),dims()-vec3i(1));let f=p-vec3f(base);
   var values:array<f32,8>;
   for(var i=0u;i<8u;i++){let o=uvCorner(i);let w=select(vec3f(1)-f,f,o==vec3i(1));
     values[i]=textureLoad(uvPhiIn,base+o,0).x*w.x*w.y*w.z;}

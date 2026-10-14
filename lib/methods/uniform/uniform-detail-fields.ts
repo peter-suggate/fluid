@@ -200,13 +200,16 @@ export function uniformDetailBindLayout(device:GPUDevice,descriptor:GPUBindGroup
 export function uniformDetailExtent(texture:GPUTexture):[number,number,number]{
  const field=fields.get(texture);return field?[...field.logical]:[texture.width,texture.height,texture.depthOrArrayLayers];
 }
+/** The class a field was created as (createField), by its handle or by any
+ * texture that holds it; undefined of a texture that is no detail field. */
+export function uniformDetailClass(texture:GPUTexture):UniformDetailClass|undefined{return fields.get(texture)?.kind;}
 
 /** Live storages per device: the rewrite finds a shader's layout by its
- * lattice (UM_D). Two live layouts on one lattice and device are ambiguous. */
+ * tile key count (UM_TILES). Two live layouts of one count on a device are ambiguous. */
 const live=new WeakMap<GPUDevice,Set<UniformDetailStorage>>();
-function liveLayout(device:GPUDevice,dims:readonly number[]):UniformDetailLayout|undefined{
- const found=[...live.get(device)??[]].filter(s=>s.layout.dims.every((n,a)=>n===dims[a]));
- if(found.some(s=>s.signature!==found[0]!.signature))throw new Error(`Uniform detail storage: two live layouts on lattice ${dims}`);
+function liveLayout(device:GPUDevice,tiles:number):UniformDetailLayout|undefined{
+ const found=[...live.get(device)??[]].filter(s=>s.layout.address.tileKeys===tiles);
+ if(found.some(s=>s.signature!==found[0]!.signature))throw new Error(`Uniform detail storage: two live layouts of ${tiles} tile keys`);
  return found[0]?.layout;
 }
 
@@ -247,11 +250,11 @@ export class UniformDetailStorage{
  private readonly ringDimensions:GPUBuffer;
  /** address: the solver's lattice address. */
  constructor(private readonly device:GPUDevice,address:UniformLatticeAddress){
-  const domain:UniformDetailDomain={checked:false,compactFaces:true,unpinned:false},dims=address.cells;
+  const domain:UniformDetailDomain={checked:false,compactFaces:true,unpinned:false};
   this.layout=domainLayout(address,domain);
   const l=this.layout;
   this.signature=`${l.placement}:${l.patchEdge}:${l.layer}::domain:${domain.checked}:${domain.compactFaces}:${!!domain.unpinned}:${!!domain.poison}:${!!domain.survey}:${!!domain.untwinned}:${!!domain.unwrapped}`;
-  let set=live.get(device);if(!set)live.set(device,set=new Set());set.add(this);liveLayout(device,dims);
+  let set=live.get(device);if(!set)live.set(device,set=new Set());set.add(this);liveLayout(device,l.address.tileKeys);
   this.ringDimensions=device.createBuffer({label:"Uniform detail ring dimensions",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.ringDimensions,0,new Uint32Array([...l.tiles,l.address.blocks]));
  }
 
@@ -721,7 +724,7 @@ ${kernel("refresh","dst"," textureStore(dst,vec3i(g),textureLoad(src,ddFace(g),0
   // blocks); table: the topology whose tail holds the pages.
   const seam=(table:string)=>`fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return ${table}[5u*drCount()+(e.x|(e.y<<6u)|(e.z<<12u))];}
 fn umBlockWord(b:u32)->u32{return ${table}[5u*drCount()+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
-${uniformLatticeAddressWGSL({cells:"(4u*drDimensions.xyz)",tiles:"drDimensions.xyz",constant:false,paged:{blocks:"drDimensions.w"}})}`;
+${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"drDimensions.w"}})}`;
   for(const format of ["rgba32float","r32float"] as const){const of=following.filter(h=>h.format===format);for(let i=0;i<of.length;i+=BATCH)sets.push(of.slice(i,i+BATCH));}
   const head=`@group(0) @binding(${2*BATCH}) var<storage,read> drHeldWords:array<u32>;
 @group(0) @binding(${2*BATCH+1}) var<storage,read> drNextWords:array<u32>;
@@ -953,8 +956,8 @@ function detailDomainWGSL(kinds:ReadonlyMap<string,{kind:UniformDetailClass;type
  const site=sites?",site:u32":"",pass=sites?",site":"";
  let ringCode="";
  if(ring){
-  // A texel's home tile: the nearest tile to q >> 2, every class (q in the lattice).
-  const fn=(name:string,p:string)=>`fn ${name}(q:vec3i)->bool{let t=vec3u(${p}umTileNear(q>>vec3u(2u)));return (${p}umTopology[2u*${p}UM_TILES+2u*${p}umTileAt(t)+1u]&1u)!=0u;}\n`;
+  // A texel's home tile q >> 2, every class: a tile with nothing stored is outside the ring.
+  const fn=(name:string,p:string)=>`fn ${name}(q:vec3i)->bool{let k=${p}umTileKey(q>>vec3u(2u));if(!${p}umKeyStored(k)){return false;}return (${p}umTopology[2u*${p}UM_TILES+2u*k+1u]&1u)!=0u;}\n`;
   ringCode+=fn("udRingStore",ring.target);
   // A remap loads fields of the generation it leaves and of the one it adopts (whose entering tiles are seeded).
   ringCode+=ring.target===ring.pf?"fn udRingLoad(q:vec3i)->bool{return udRingStore(q);}\n":fn("udRingHeld",ring.pf)+"fn udRingLoad(q:vec3i)->bool{return udRingHeld(q)||udRingStore(q);}\n";
@@ -962,8 +965,8 @@ function detailDomainWGSL(kinds:ReadonlyMap<string,{kind:UniformDetailClass;type
  if(watch){
   const word=`${ring!.pf}umSupport[${ring!.pf}UM_DETAIL_VIOLATION+4u+site]`,R=UNIFORM_DETAIL_RING_SITE;
   const mark=!sites?"":atomic?`if((atomicLoad(&${word})&bits)!=bits){atomicOr(&${word},bits);}`:`if((${word}&bits)!=bits){${word}=${word}|bits;}`;
-  ringCode+=`fn udWatch(q:vec3i,top:vec3i,v:f32${site}){
- var bits=${R.ran}u;if(!udRingLoad(clamp(q,vec3i(0),top))){bits|=${R.outside}u;}${""}
+  ringCode+=`fn udWatch(q:vec3i,v:f32${site}){
+ var bits=${R.ran}u;if(!udRingLoad(q)){bits|=${R.outside}u;}${""}
  ${mark}${`if((bits&${R.outside}u)!=0u){udViolation(${UNIFORM_DETAIL_RING_VIOLATION}u);}if((bits&${R.poison}u)!=0u){udViolation(${UNIFORM_DETAIL_POISON_VIOLATION}u);}`}
 }
 fn udWatchStore(${sites?"site:u32":""}){
@@ -983,24 +986,24 @@ ${`fn udFace(q:vec3i,b:u32)->vec3i{let c=q>>vec3u(2u*b);let j=${j};return vec3i(
  /** The address functions of a field's class. load: the texel of a logical
   * coordinate in the h store (b "0u") or in the texture b tells (0 the h
   * store, 1 a base block); store: the same of a stored coordinate, negative
-  * of any other; present, near: the coordinate is stored, the nearest
-  * stored one; size: the h store's extent; top: the last stored coordinate. */
- interface DetailAddress{load(v:string,b:string):string;store(v:string,b:string):string;present(v:string):string;near(v:string):string;readonly size:string;readonly top:string}
+  * of any other; present: the coordinate is stored; size: the h store's
+  * extent. No box: a coordinate resolves through the page table. */
+ interface DetailAddress{load(v:string,b:string):string;store(v:string,b:string):string;present(v:string):string;readonly size:string}
  const pf=ring?.pf??"",H="0u";
  // A cell or face field: its h store is a cell texture, its base a tile texture (a face base stacks four texels per tile
  // along z). A base block's texel is a map of the h store's.
  const cellAddress=(face:boolean):DetailAddress=>{
   const base=(texel:string,b:string)=>b===H?texel:face?`udFace(${texel},${b})`:`(${texel}>>vec3u(2u*${b}))`;
-  return {load:(v,b)=>base(`${pf}umCellTexel(${v})`,b),store:(v,b)=>base(`${pf}umCellStoreTexel(${v})`,b),present:v=>`${pf}umCellPresent(${v})`,near:v=>`${pf}umCellNear(${v})`,
-   size:`${pf}UM_CELL_TEXTURE${call}`,top:`(vec3i(${pf}UM_BOX${call})-vec3i(1))`};
+  return {load:(v,b)=>base(`${pf}umCellTexel(${v})`,b),store:(v,b)=>base(`${pf}umCellStoreTexel(${v})`,b),present:v=>`${pf}umCellPresent(${v})`,
+   size:`${pf}UM_CELL_TEXTURE${call}`};
  };
  // A vertex field: a block of its h store holds a page's vertices, 33 on an axis; a block of its base the page's tile
  // corners, 9 on an axis. Each has its address function: neither texel is a map of the other.
  const vertexAddress:DetailAddress={
   load:(v,b)=>b===H?`${pf}umVertexTexel(${v})`:b==="1u"?`${pf}umWideVertexTexel((${v})>>vec3u(2u))`:`udVertex(${v},${b})`,
   store:(v,b)=>b===H?`${pf}umVertexStoreTexel(${v})`:b==="1u"?`${pf}umWideVertexStoreTexel((${v})>>vec3u(2u))`:`udVertexStore(${v},${b})`,
-  present:v=>`${pf}umVertexPresent(${v})`,near:v=>`${pf}umVertexNear(${v})`,
-  size:`${pf}UM_VERTEX_TEXTURE${call}`,top:`vec3i(${pf}UM_BOX${call})`};
+  present:v=>`${pf}umVertexPresent(${v})`,
+  size:`${pf}UM_VERTEX_TEXTURE${call}`};
  if([...kinds.values()].some(k=>k.kind==="vertex"))out+=`fn udVertex(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexTexel(q);}return ${pf}umWideVertexTexel(q>>vec3u(2u));}
 fn udVertexStore(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexStoreTexel(q);}return ${pf}umWideVertexStoreTexel(q>>vec3u(2u));}
 `;
@@ -1016,15 +1019,14 @@ fn udVertexStore(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexStoreTexel(
   let out="";
   const storage=type.startsWith("texture_storage"),level=storage?"":",0";
   // An atlas-only name binds a face field.
-  const A=kind==="vertex"?vertexAddress:cellAddress(kind==="face"),top=A.top;
+  const A=kind==="vertex"?vertexAddress:cellAddress(kind==="face");
   const inside=(v:string)=>A.present(v),outside=(v:string)=>`!${A.present(v)}`;
   // A base block is narrower than the h store.
   const based_=(t:string)=>`u32(textureDimensions(${t}).x<${A.size}.x)`,extent=based_(name);
   const mode=`let b=${extent};`;
   const canonical=(v:string)=>kind==="face"?`udFaceCanonical(${v})`:`udAligned(${v})`;
-  const clamped=(v:string)=>A.near(v);
-  // The bound texture's texel of a load at v. A face base's map does not commute with a clamp: its load is of the nearest stored coordinate.
-  const at=(v:string)=>A.load(kind==="face"?clamped(v):v,"b");
+  // The bound texture's texel of a load at v.
+  const at=(v:string)=>A.load(v,"b");
   // The h store's texel of a load at v, and the bound texture's by b (the raw load).
   const stored=(v:string)=>A.load(v,H);
   const raw=(v:string)=>A.load(v,"b");
@@ -1034,15 +1036,15 @@ fn udVertexStore(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexStoreTexel(
   const home=(v:string)=>A.load(v,"1u");
   // A stored field's twin is its other home (the base beside an h texture,
   // the h texture beside a base, a 1³ stand-in while there is one home):
-  // a canonical v's texel there, by the bound texture's b.
-  const twin=twins?.get(name),other=(v:string)=>A.load(v,"(1u-b)");
+  // a canonical stored v's texel there, by the bound texture's b.
+  const twin=twins?.get(name),other=(v:string)=>A.store(v,"(1u-b)");
   if(!storage||type.includes("read_write")){
    const check="";
    const load=`textureLoad(${name},${at("q")}${level})`;
    out+=`fn udLoad_${name}${sfx}(q:vec3i${site})->vec4f{
  ${mode}
  ${check}${kind==="atlas"?`return select(textureLoad(${name},${stored("q")}${level}),vec4f(0.0),b!=0u);`
-   :watch?`let v=${load};if(b==0u){udWatch(q,${top},v.x${pass});}return v;`:`return ${load};`}
+   :watch?`let v=${load};if(b==0u){udWatch(q,v.x${pass});}return v;`:`return ${load};`}
 }
 `;
   }
@@ -1075,16 +1077,16 @@ fn udVertexStore(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexStoreTexel(
   // sampled twin at every capacity (b by its extent, as any load's: a
   // texture that is not a field binds itself there).
   if(based?.has(name)){
-   const c=clamped("q"),b=based_(twin!);
+   const b=based_(twin!);
    const both=watch&&kind!=="atlas";
    out+=`fn udLoad4_${name}${sfx}(q:vec3i${site})->vec4f{
  let b=${b};
- ${""}${both?`let v=textureLoad(${twin},${raw(kind==="face"?c:"q")},0);if(b!=0u&&${extent}==0u){udWatchHomes(${c},v,textureLoad(${name},${stored("q")},0)${pass});}return v;`:`return textureLoad(${twin},${raw(kind==="face"?c:"q")},0);`}
+ ${""}${both?`let v=textureLoad(${twin},${raw("q")},0);if(b!=0u&&${extent}==0u){udWatchHomes(q,v,textureLoad(${name},${stored("q")},0)${pass});}return v;`:`return textureLoad(${twin},${raw("q")},0);`}
 }
 `;
   }
   if(hOnly?.has(name))out+=`fn udLoadH_${name}${sfx}(q:vec3i${site})->vec4f{
- ${""}${watch&&kind!=="atlas"?`let v=textureLoad(${name},${stored("q")}${level});udWatch(q,${top},v.x${pass});return v;`:`return textureLoad(${name},${stored("q")}${level});`}
+ ${""}${watch&&kind!=="atlas"?`let v=textureLoad(${name},${stored("q")}${level});udWatch(q,v.x${pass});return v;`:`return textureLoad(${name},${stored("q")}${level});`}
 }
 `;
   // The run accessors the code calls: of the bound texture, and (4) of the base twin a canonical load reads. The
@@ -1223,9 +1225,9 @@ export function uniformDetailShader(code:string,device?:GPUDevice):string{
  if(/fn\s+\w+\s*\([^)]*:\s*texture/.test(code))throw new Error("Uniform detail rewrite: a texture-typed function parameter bypasses the field accessors");
  for(const name of kinds.keys())if(new RegExp(`textureDimensions\\(\\s*${name}\\b`).test(code))throw new Error(`Uniform detail rewrite: textureDimensions(${name}) is not the logical lattice`);
  const atomic=new RegExp(`var<storage,\\s*read_write>\\s*${pf}umSupport\\s*:\\s*array<atomic<u32>>`).test(code);
- const dims=/const UM_D=vec3u\((\d+)u,(\d+)u,(\d+)u\)/.exec(code);
- if(!dims)throw new Error("Uniform detail rewrite: no mixed lattice constant");
- const layout=device?liveLayout(device,dims.slice(1).map(Number)):undefined;
+ const keys=new RegExp(`const ${pf}UM_TILES:u32=(\\d+)u;`).exec(code);
+ if(!keys)throw new Error("Uniform detail rewrite: no mixed tile key count");
+ const layout=device?liveLayout(device,Number(keys[1])):undefined;
  if(!layout)return code;
  {
   // Survey and poison runs number every load and store but the canonical (base) loads.

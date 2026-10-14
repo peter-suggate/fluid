@@ -26,7 +26,7 @@ import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockNeighbourLayout, uniformBlockNeighbourWords, uniformLatticeAddress, uniformLatticeAddressWGSL } from "../lib/methods/uniform/uniform-lattice-address";
 import {
-  uniformMixedSolidHoldPointWGSL, uniformMixedSolidHoldWGSL, uniformMixedWallAheadWGSL, uniformMixedWallFaceWGSL, uniformMixedWallVertexWGSL,
+  uniformMixedSolidHoldWGSL, uniformMixedWallAheadWGSL, uniformMixedWallFaceWGSL, uniformMixedWallVertexWGSL,
   uniformPointHeld, uniformSpanHeld, uniformWallAhead, uniformWallBlock, uniformWallFaceTile, uniformWallFaceVertex, uniformWallPlane, uniformWallWithin,
 } from "../lib/methods/uniform/uniform-mixed-walls.wgsl";
 import { UNIFORM_PAGE_POOL_KIND as KIND, uniformPagePoolLayout, uniformPagePoolSeed, type UniformPagePoolSeedPage } from "../lib/methods/uniform/uniform-page-pool";
@@ -64,7 +64,6 @@ ${uniformMixedWallVertexWGSL}
 ${uniformMixedWallFaceWGSL}
 ${uniformMixedWallAheadWGSL}
 ${uniformMixedSolidHoldWGSL}
-${uniformMixedSolidHoldPointWGSL}
 @group(1) @binding(0) var<storage,read> script:array<i32>;
 @group(1) @binding(1) var<storage,read_write> result:array<u32>;
 @compute @workgroup_size(64) fn evaluate(@builtin(global_invocation_id) gid:vec3u){

@@ -102,7 +102,7 @@ export function pairedExtensionSource(source:string,retained=false):string{
  let finish=source;
  const replaceFinish=(from:string,to:string)=>{finish=replaceExact(finish,from,to);};
  replaceFinish("return stateIn[umSlot(p,axis,1u)].x;","return ueFinishState(umSlot(p,axis,1u)).x;");
- replaceFinish("let state=stateIn[umSlot(umFaceAnchorNear(anchor),axis,width)];","let state=ueFinishState(umSlot(umFaceAnchorNear(anchor),axis,width));");
+ replaceFinish("let state=stateIn[umSlot(anchor,axis,width)];","let state=ueFinishState(umSlot(anchor,axis,width));");
  replaceFinish("let slot=stateIn[select(UE_COARSE+component*UE_TILES+tile,ueUnitSlotIn(word,upper,local,component),patchWidth==1u)];","let slot=ueFinishState(select(UE_COARSE+component*UE_TILES+tile,ueUnitSlotIn(word,upper,local,component),patchWidth==1u));");
  replaceFinish("stateIn[ueOwnSlot(owner,axis)],(umTileSupport(owner.tile)&2u)!=0u)","ueFinishState(ueOwnSlot(owner,axis)),(umTileSupport(owner.tile)&2u)!=0u)");
  return finish+swept.slice(source.length)+`

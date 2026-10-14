@@ -64,7 +64,27 @@
  * at 4h each criterion's scores, and the requests the budget kept and
  * dropped (by the tile's width, by whether it lies under the column as it
  * stood, and by its top criterion); then the slab's tiles one by one. A
- * score is over its threshold: 1 triggers. */
+ * score is over its threshold: 1 triggers.
+ * --foot=<z>/<x0>-<x1>/<y0>-<y1> (cells) prints, at every printed read, the
+ * slab one cell thick at z: each tile's width, target heat, the samples'
+ * support heat (theta) and their own (surface heat, over 1 is authority to
+ * erase) and whether it was activated this step; then per cell the liquid
+ * fraction, the samples and the samples of the outer layer (depth over -1);
+ * then per cell row the front (the last cell at least half liquid), the
+ * farthest sample, and over the four cells behind the front the samples, the
+ * outer ones, their mean heat, their own x velocity and the grid's (cells a
+ * step) and the rms of the difference.
+ * --ledger prints, for every stage capture and every printed read, the
+ * liquid the phi holds in cells (a cell's share is 0.5 less the mean of its
+ * eight vertices' phi in cells, held in 0 to 1): the total, the part within
+ * 16 cells of the far walls, the part under y = 2, the cells partly full, and
+ * the total by 8-cell bands of x, y and z.
+ * A variant's `_flags` key is not a method value: it sets experiment bits
+ * the probe patches into the sample kernels of every arm (1: samples take
+ * the grid velocity, no FLIP part; 2: the outer layer is replenished at every
+ * step; 4: an activated tile's outer layer is not seeded; 8: the collar's
+ * samples erase as a hot tile's do; 16: the outer layer seeds on a 4h owner
+ * too; 32: the collar takes its neighbour's full heat). */
 import { pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
@@ -103,6 +123,28 @@ const spectra = process.argv.includes("--spectra");
 // What the head census scored: --criteria=17-31/0-3/10 is tiles x 17..31, y 0..3 at z 10.
 const criteria = option("criteria")?.split("/").map(part => part.split("-").map(Number));
 const CRITERIA = ["shape", "thin", "strain", "rotation", "impact", "approach"], REASONS = ["skipped", "traced", "crossing", "closure", "travel", "join", "source", "solid", "bulk"];
+// The samples and the heat on a slab one cell thick: --foot=40/84-127/0-27 is z 40, x 84..127, y 0..27.
+const foot = option("foot")?.split("/").map(part => part.split("-").map(Number));
+// The liquid each stage's phi holds.
+const ledger = process.argv.includes("--ledger");
+// Experiment bits read from a spare parameter word (activity.y), patched into the sample kernels: each [old, new, modules it must be found in at least].
+const FLAG = "u32(params.activity.y)";
+const PATCHES: [string, string][] = [
+  ["v=mix(pic,flip,params.settings.x);", `v=mix(pic,flip,select(params.settings.x,0.0,(${FLAG}&1u)!=0u));`],
+  ["if(!initial&&!activated&&distance>-1.0&&nbSourcePhi(q,1.0)>=0.0){return vec4f(-1,0,0,0);}", `if(!initial&&!activated&&distance>-1.0&&nbSourcePhi(q,1.0)>=0.0&&(${FLAG}&2u)==0u){return vec4f(-1,0,0,0);}`],
+  [",activated);if(site.x<0.0)", `,activated&&(${FLAG}&4u)==0u);if(site.x<0.0)`],
+  ["nbSurfaceThetaFrom(home,vec3f(q)),particle>bulk);", `nbSurfaceThetaFrom(home,vec3f(q)),particle>bulk&&(${FLAG}&8u)==0u);`],
+  ["if(distance>-1.0&&umOwnerAt(vec3i(c)).width!=1u){", `if(distance>-1.0&&umOwnerAt(vec3i(c)).width!=1u&&(${FLAG}&16u)==0u){`],
+  ["value*select(0.5,1.0,x==0&&y==0&&z==0)", `value*select(select(0.5,1.0,(${FLAG}&32u)!=0u||((${FLAG}&64u)!=0u&&max(abs(x),max(abs(y),abs(z)))<=1)),1.0,x==0&&y==0&&z==0)`],
+  ["var heat=0.0;\n  for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){\n   let q=p+vec3i(x,y,z);if(!umTilePresent(q)){continue;}", `var heat=0.0;\n  let wide=i32((${FLAG}&64u)!=0u);for(var z=-1-wide;z<=1+wide;z++){for(var y=-1-wide;y<=1+wide;y++){for(var x=-1-wide;x<=1+wide;x++){\n   let q=p+vec3i(x,y,z);if(!umTilePresent(q)){continue;}`],
+];
+// Experiment bits compiled into an arm's own kernels (the module has no spare word): each [bit, old, new].
+const COMPILED: [number, string, string][] = [
+  [128, "if(!(abs(value)<2.0*w)){return umSurfaceTrace(p);}", "if(!(abs(value)<max(2.0*w,8.0))){return umSurfaceTrace(p);}"],
+  [128, "if(reach>2.0*w){offset*=2.0*w/reach;}", "if(reach>max(2.0*w,8.0)){offset*=max(2.0*w,8.0)/reach;}"],
+];
+let armFlags = 0;
+const patched = PATCHES.map(() => 0), compiled = COMPILED.map(() => 0), flagged = variants.some(v => v._flags);
 const scene = structuredClone(sceneDocument(getSceneDefinition(sceneId)));
 scene.numerics = { ...scene.numerics, fixedDt_s: dt, maxDt_s: dt };
 
@@ -114,12 +156,31 @@ const errors: string[] = [];
 try {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href); Object.assign(globalThis, dawn.globals);
   const adapter = await createProcessRetainedDawnGPU(dawn, ["backend=metal"]).requestAdapter(); assert.ok(adapter);
-  device = managedGPUDevice(await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) }), { requireWorkerRealm: false });
+  const raw = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+  // With experiment bits asked for, every arm runs the same patched kernels: bit clear is the kernel as it stands.
+  const source = !flagged ? raw : new Proxy(raw, { get: (target, key) => {
+    if (key === "createShaderModule") return (d: GPUShaderModuleDescriptor) => {
+      let code = d.code; PATCHES.forEach(([from, to], k) => { const parts = code.split(from); if (parts.length > 1) { patched[k]! += parts.length - 1; code = parts.join(to); } });
+      COMPILED.forEach(([bit, from, to], k) => { const parts = code.split(from); if ((armFlags & bit) && parts.length > 1) { compiled[k]! += parts.length - 1; code = parts.join(to); } });
+      return target.createShaderModule({ ...d, code });
+    };
+    const value = Reflect.get(target, key, target); return typeof value === "function" ? value.bind(target) : value;
+  } });
+  device = managedGPUDevice(source, { requireWorkerRealm: false });
   device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); console.error(e.error.message); });
-  for (const variant of variants) {
+  for (const { _flags: flags = 0, ...variant } of variants) {
   const started = performance.now();
-  if (variants.length > 1 || Object.keys(variant).length) console.log(`VARIANT ${JSON.stringify(variant)}`);
+  if (variants.length > 1 || Object.keys(variant).length || flags) console.log(`VARIANT ${JSON.stringify({ ...variant, _flags: flags })}`);
+  armFlags = Number(flags); compiled.fill(0);
   solver = await method.createSolverAsync!(device, scene, "balanced", { ...method.appDefaults, timeStep: "scene", ...variant }, undefined, () => {}) as WebGPUUniformReferenceSolver;
+  if (flagged) {
+    assert.ok(patched.every(n => n > 0), `experiment patches found ${patched.join(",")} times`);
+    assert.ok(COMPILED.every(([bit], k) => !(armFlags & bit) || compiled[k]! > 0), `compiled experiment patches found ${compiled.join(",")} times`);
+    // The head's activity writes its parameter words every step; the bits follow it into the spare one.
+    const nb = (solver as unknown as { mixedFrame: { narrowBandFlip: { activity: (...a: unknown[]) => void; params: GPUBuffer } } }).mixedFrame.narrowBandFlip, activity = nb.activity.bind(nb), word = Float32Array.of(Number(flags));
+    nb.activity = (...a) => { activity(...a); device!.queue.writeBuffer(nb.params, 36, word); };
+    device.queue.writeBuffer(nb.params, 36, word);
+  }
   const { nx, ny, nz } = solver.info, H = scene.container.width_m / nx;
   const address = lattice ? (solver as unknown as { address: UniformLatticeAddress }).address : undefined;
   const frame = (solver as unknown as { mixedFrame: { pagePool: { state: GPUBuffer; layout: { state: { words: number } } }; ownership: { capacity: { fineTiles: number } } } }).mixedFrame;
@@ -181,6 +242,18 @@ try {
     const logical = new Float32Array((nx + 1) * (ny + 1) * (nz + 1));
     for (let z = 0; z <= nz; z++) for (let y = 0; y <= ny; y++) for (let x = 0; x <= nx; x++) logical[x + (nx + 1) * (y + (ny + 1) * z)] = vertex(x, y, z);
     const at = (p: readonly number[]) => logical[p[0]! + (nx + 1) * (p[1]! + (ny + 1) * p[2]!)]!;
+    if (ledger && print) {
+      let total = 0, far = 0, low = 0, partial = 0; const bands = [new Float64Array(nx >> 3), new Float64Array(ny >> 3), new Float64Array(nz >> 3)], W = nx + 1, S = W * (ny + 1);
+      for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+        if (!stored(x, y, z)) continue;
+        const i = x + W * y + S * z, mean = (logical[i]! + logical[i + 1]! + logical[i + W]! + logical[i + W + 1]! + logical[i + S]! + logical[i + S + 1]! + logical[i + S + W]! + logical[i + S + W + 1]!) / (8 * H);
+        const share = Math.min(1, Math.max(0, 0.5 - mean)); if (share <= 0) continue;
+        total += share; if (share < 1) partial++; if (x >= nx - 16 || z >= nz - 16) far += share; if (y < 2) low += share;
+        bands[0]![x >> 3]! += share; bands[1]![y >> 3]! += share; bands[2]![z >> 3]! += share;
+      }
+      console.log(`LEDGER ${label}: liquid ${total.toFixed(0)} cells, by the far walls ${far.toFixed(0)}, under y 2 ${low.toFixed(0)}, cells partly full ${partial}`);
+      "xyz".split("").forEach((a, k) => console.log(`LEDGER ${label} by ${a}: ${Array.from(bands[k]!, v => v.toFixed(0)).join(" ")}`));
+    }
     /** The outermost crossing along `axis` at every vertex of the other two axes (u: the lower, v: the higher); NaN: none. */
     const crossing = (axis: number): Map2 => {
       const n = [nx, ny, nz], u = axis === 0 ? 1 : 0, v = axis === 2 ? 1 : 2, w = n[u]! + 1, h = n[v]! + 1, out = new Float32Array(w * h).fill(NaN), p = [0, 0, 0];
@@ -318,6 +391,45 @@ try {
     return { lookup, picks };
     };
     const end = analyse(`step ${step}`, last, print);
+    if (ledger && print) { let sum = 0; for (let i = 0; i < volume.length; i++) sum += volume[i]!; console.log(`LEDGER step ${step}: the volume field holds ${sum.toFixed(0)} cells, ${solver!.narrowBandFlipInfo?.particles ?? 0} samples`); }
+    if (foot && print && address) {
+      const nb = (frame as unknown as { narrowBandFlip: { activeParticles: GPUBuffer; bins: GPUBuffer; activityWord: number; tiles: number } }).narrowBandFlip, T = nb.tiles;
+      const [[Z], [x0, x1], [y0, y1]] = foot as [number[], number[], number[]], cell = dt / H, count = solver!.narrowBandFlipInfo?.particles ?? 0;
+      // Heat, target, activated, theta and surface heat, a word a tile key each.
+      const [heatWords, sampleWords] = await Promise.all([censusWords({ buffer: nb.bins, offset: 4 * (nb.activityWord + 2 * T) }, 5 * T), censusWords({ buffer: nb.activeParticles, offset: 0 }, 12 * Math.max(1, count))]);
+      const heat = new Float32Array(heatWords.buffer), samples = new Float32Array(sampleWords.buffer), key = (x: number, y: number, z: number) => lattice!.uniformTileKey(address, x, y, z);
+      const tx = Array.from({ length: (x1! >> 2) - (x0! >> 2) + 1 }, (_, k) => (x0! >> 2) + k);
+      const tileTable = (title: string, text: (t: number) => string) => {
+        console.log(`  foot step ${step} tile z ${Z! >> 2}: ${title}, columns tile x = ${tx[0]}..${tx[tx.length - 1]}`);
+        for (let y = y1! >> 2; y >= y0! >> 2; y--) console.log(`   y ${String(y).padStart(2)} ${tx.map(x => (stored(4 * x, 4 * y, Z!) ? text(key(x, y, Z! >> 2)) : "_").padStart(4)).join(" ")}`);
+      };
+      tileTable("width, * activated this step", t => `${(tiles[t]! & 0x80000000) ? "h" : "C"}${heatWords[2 * T + t] ? "*" : ""}`);
+      tileTable("target heat", t => heat[T + t]!.toFixed(1)); tileTable("theta (the samples' support heat)", t => heat[3 * T + t]!.toFixed(1)); tileTable("surface heat (the samples' own)", t => heat[4 * T + t]!.toFixed(1));
+      const w = x1! - x0! + 1, hgt = y1! - y0! + 1, all = new Uint16Array(w * hgt), outer = new Uint16Array(w * hgt), rows = Array.from({ length: hgt }, () => [] as number[]);
+      for (let i = 0; i < count; i++) {
+        const o = 12 * i, x = Math.floor(samples[o]!), y = Math.floor(samples[o + 1]!);
+        if (Math.floor(samples[o + 2]!) !== Z || x < x0! || x > x1! || y < y0! || y > y1!) continue;
+        all[x - x0! + w * (y - y0!)]!++; if (samples[o + 7]! > -1) outer[x - x0! + w * (y - y0!)]!++; rows[y - y0!]!.push(i);
+      }
+      const digit = (n: number) => n === 0 ? "." : n < 10 ? String(n) : "+", fraction = (x: number, y: number) => volume[x + nx * (y + ny * Z!)]!;
+      for (const [title, char] of [["liquid fraction (' ' under 0.02, - under 0.5, = under 0.98, # full)", (x: number, y: number) => { const f = fraction(x, y); return f < 0.02 ? " " : f < 0.5 ? "-" : f < 0.98 ? "=" : "#"; }],
+        ["samples a cell", (x: number, y: number) => digit(all[x - x0! + w * (y - y0!)]!)], ["samples of the outer layer a cell", (x: number, y: number) => digit(outer[x - x0! + w * (y - y0!)]!)]] as const) {
+        console.log(`  foot step ${step} z ${Z}: ${title}, columns x = ${x0}..${x1}`);
+        for (let y = y1!; y >= y0!; y--) console.log(`   y ${String(y).padStart(3)} ${Array.from({ length: w }, (_, k) => char(x0! + k, y)).join("")}`);
+      }
+      console.log(`  foot step ${step} z ${Z}: per row the front, the farthest sample, then over the four cells behind the front: samples, outer samples, mean heat, mean own vx, mean grid vx (cells a step), rms |own - grid|`);
+      for (let y = y1!; y >= y0!; y--) {
+        let front = -1; for (let x = x1!; x >= x0!; x--) if (fraction(x, y) >= 0.5) { front = x; break; }
+        let farthest = -1, n = 0, out = 0, hot = 0, own = 0, grid = 0, square = 0;
+        for (const i of rows[y - y0!]!) {
+          const o = 12 * i, x = samples[o]!; farthest = Math.max(farthest, x);
+          if (x < front - 3 || x >= front + 1) continue;
+          n++; if (samples[o + 7]! > -1) out++; hot += samples[o + 3]!; own += samples[o + 4]! * cell; grid += samples[o + 8]! * cell;
+          square += ((samples[o + 4]! - samples[o + 8]!) ** 2 + (samples[o + 5]! - samples[o + 9]!) ** 2 + (samples[o + 6]! - samples[o + 10]!) ** 2) * cell * cell;
+        }
+        console.log(`   y ${String(y).padStart(3)} front ${String(front).padStart(4)} farthest ${farthest.toFixed(2).padStart(7)} samples ${String(n).padStart(3)} outer ${String(out).padStart(3)} heat ${(hot / Math.max(1, n)).toFixed(2)} own ${(own / Math.max(1, n)).toFixed(2).padStart(6)} grid ${(grid / Math.max(1, n)).toFixed(2).padStart(6)} rms ${Math.sqrt(square / Math.max(1, n)).toFixed(3)}`);
+      }
+    }
     if (criteria && print && address && step > 0) {
       // The census's words per tile key: two importance words, the hold, the budget's histogram, state (cutoff, ties, allowed) and rank; the band reasons.
       const census = (solver as unknown as { mixedDynamic: Record<"importance" | "reasons", { buffer: GPUBuffer; offset: number }> }).mixedDynamic, T = tiles.length;
@@ -372,7 +484,7 @@ try {
     }
     if (stages.length) {
       // Stage by stage: the same numbers on the field each stage left, then the end's worst entries followed through the stages.
-      const results = stages.map((stage, k) => { const quiet = console.log; console.log = (...a: unknown[]) => { if (/^(DENTS|LINE)/.test(String(a[0]))) quiet(`STAGE ${stage.name} ${a[0]}`); }; try { return analyse(`step ${step} ${stage.name}`, staged[k]!, true); } finally { console.log = quiet; } });
+      const results = stages.map((stage, k) => { const quiet = console.log; console.log = (...a: unknown[]) => { if (/^(DENTS|LINE|LEDGER)/.test(String(a[0]))) quiet(`STAGE ${stage.name} ${a[0]}`); }; try { return analyse(`step ${step} ${stage.name}`, staged[k]!, true); } finally { console.log = quiet; } });
       for (const pick of end.picks) console.log(`  follow ${pick.face} (${pick.i},${pick.j}) step ${step}: ${stages.map((stage, k) => { const q = results[k]!.lookup(pick.face, pick.i, pick.j); return `${stage.name} ${q.m.toFixed(3)}/${q.r.toFixed(3)}`; }).join("  ")}  end ${(() => { const q = end.lookup(pick.face, pick.i, pick.j); return `${q.m.toFixed(3)}/${q.r.toFixed(3)}`; })()}`);
     }
     } finally { address?.seed.state.set(built!); }

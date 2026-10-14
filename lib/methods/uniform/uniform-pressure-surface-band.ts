@@ -1,4 +1,4 @@
-import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailClass, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type {UniformMixedBandBits} from './uniform-mixed-layout-builder';
 import type {UniformMixedOwnership} from './uniform-mixed-ownership';
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from './uniform-mixed-topology.wgsl';
@@ -18,7 +18,7 @@ export class UniformPressureSurfaceBand {
  private readonly pipelines:GPUComputePipeline[]=[];
  constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,phi:GPUTexture){
   const address=ownership.capacity.address;
-  if(phi.format!=='r32float'||uniformDetailExtent(phi).some((n,a)=>n!==address.vertexBox[a]))throw new Error('Pressure surface band requires the full h vertex field');
+  if(phi.format!=='r32float'||uniformDetailClass(phi)!=='vertex')throw new Error('Pressure surface band requires the full h vertex field');
   const buffer=device.createBuffer({label:'Uniform independent pressure surface band',size:Math.ceil(address.tileKeys/32)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.band={buffer,wordOffset:0};this.allocatedBytes=buffer.size;
   this.resources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:'unfilterable-float',viewDimension:'3d'}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});

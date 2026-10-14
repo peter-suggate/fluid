@@ -47,8 +47,8 @@ export const uniformMixedVertexSamplingSource = (cacheLookup = "", resolved = fa
   }`;
  // The general sample. A resolved consumer returns from its own block
  // before it, so that text is left out there (Tint: unreachable code).
- const general = ` let owner=umOwnerAt(umCellNear(vec3i(floor(q))));${split ? `
- if(owner.width==0u){return ${coarse}(vec3u(umCellNear(vec3i(floor(q)))));}` : ""}
+ const general = ` let owner=umOwnerAt(umBoundedCell(q,b));${split ? `
+ if(owner.width==0u){return ${coarse}(vec3u(umBoundedCell(q,b)));}` : ""}
  let origin=umOrigin(owner);let t=(q-vec3f(origin))/f32(owner.width);var values:array<f32,8>;
  let regular=owner.width>=umTileMaximumWidth(owner.tile);
  if(regular){
@@ -61,7 +61,7 @@ export const uniformMixedVertexSamplingSource = (cacheLookup = "", resolved = fa
  // A narrower-than-stencil unit owner's corners lie in tiles whose stencils
  // hold it: mixed (resolved) or uniformly fine (stored).
  if(${resolved}&&owner.width==1u){
-  let base=vec3u(umCellNear(vec3i(floor(q))));let f=q-vec3f(base);
+  let base=vec3u(umBoundedCell(q,b));let f=q-vec3f(base);
   for(var k=0u;k<8u;k++){let corner=umCorner(k,2u);let w=select(vec3f(1)-f,f,corner!=vec3u(0));values[k]=umLoadVertex(base+corner)*w.x*w.y*w.z;}
   return umVertexSum8(values);
  }
@@ -76,15 +76,17 @@ export const uniformMixedVertexSamplingSource = (cacheLookup = "", resolved = fa
  return /* wgsl */ `
 fn umVertexSum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
 fn umVertexAuthority(p:vec3u)->UMOwner {
- if(umRegularFine){return umOwnerAt(umCellNear(vec3i(p)-vec3i(1)));}
- let cell=vec3u(umCellNear(vec3i(p)));let tile=umTileAt(cell/4u);let local=p-(cell/4u)*4u;
+ // The cell below p (the one above, at a low wall) and the one above (below, at a far wall).
+ let below=umVertexCellBelow(vec3i(p));
+ if(umRegularFine){return umOwnerAt(below);}
+ let cell=vec3u(umVertexCellAbove(vec3i(p)));let tile=umTileAt(cell/4u);let local=p-(cell/4u)*4u;
  let incident=umCoarseIncident(tile,local);
  if(incident!=0u){
   let at=vec3i(cell/4u)+vec3i(umCorner(firstTrailingBit(incident),2u))-vec3i(1);
   return umOwnerAt(at*4);
  }
  // No coarse incident tile: the first fine owner is the lower incident cell.
- return umOwnerAt(umCellNear(vec3i(p)-vec3i(1)));
+ return umOwnerAt(below);
 }
 fn umVertexIsCanonical(p:vec3u,owner:UMOwner)->bool {
  return all((p-umOrigin(owner))%owner.width==vec3u(0));
@@ -109,7 +111,7 @@ fn umVertexValue(p:vec3u)->f32 {
  if(umRegularFine){return umLoadVertex(p);}
  // Only tiles incident to a tile plane can disagree about coincidence.
  // Avoid constructing eight full owners for ordinary stored vertices.
- let tile=umTileAt(vec3u(umCellNear(vec3i(p)))/4u);
+ let tile=umTileAt(vec3u(umVertexCellAbove(vec3i(p)))/4u);
  if(umTileMaximumWidth(tile)==1u){return ${fine}(p);}
  ${corner ? `if(all(p%4u==vec3u(0))){return ${corner}(p);}` : ""}
  // Every owner incident to p lies in its tile's stencil. A uniform stencil
@@ -140,9 +142,9 @@ fn umVertexValue(p:vec3u)->f32 {
  return umVertexSum8(values);
 }
 fn umSampleVertex(p:vec3f)->f32 {
- let q=umPointNear(p);
+ let b=umPointBounds(p,1.0);let q=clamp(p,b.lo,b.hi);
  if(umRegularFine){
-  let base=vec3u(umCellNear(vec3i(floor(q))));let f=q-vec3f(base);var taps:array<f32,8>;
+  let base=vec3u(umBoundedCell(q,b));let f=q-vec3f(base);var taps:array<f32,8>;
   ${all("umLoadVertex", "base", "1u")}for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){let corner=umCorner(k,2u);let w=select(vec3f(1)-f,f,corner!=vec3u(0));taps[k]=${gather ? "c8[k]" : "umLoadVertex(base+corner)"}*w.x*w.y*w.z;}
   return umVertexSum8(taps);
  }
@@ -150,7 +152,7 @@ fn umSampleVertex(p:vec3f)->f32 {
  // closure, each stored (uniform or unit stencil) or resolved (mixed). The
  // tile width is the owner width; eight independent loads, no authority.
  {
-  let cell=vec3u(umCellNear(vec3i(floor(q))));let width=umTileWidth(umTileAt(cell/4u));
+  let cell=vec3u(umBoundedCell(q,b));let width=umTileWidth(umTileAt(cell/4u));
   let origin=(cell/width)*width;let t=(q-vec3f(origin))/f32(width);var values:array<f32,8>;
   ${(taps => corner ? `if(width==4u){${taps(corner)}}else{${taps("umLoadVertex")}}` : taps("umLoadVertex"))((load: string) => `${all(load, "origin", "width")}for(var k=0u;k<8u;k++){
    let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));

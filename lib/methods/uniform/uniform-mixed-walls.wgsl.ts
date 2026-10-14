@@ -127,28 +127,6 @@ fn umCellHeld(p:vec3i)->vec3i{return umSpanHeld(p,5u);}
 fn umTileHeld(p:vec3i)->vec3i{return umSpanHeld(p,3u);}
 `;
 
-/** A position held out of SOLID pages. */
-export const uniformMixedSolidHoldPointWGSL = /* wgsl */ `
-// umSpanHeld of a position in cell units: a point in a SOLID page (its
-// cell's) moves back onto the page's nearer face, by the same choice of
-// axes. A point on a wall's plane stays.
-fn umPointHeld(p:vec3f)->vec3f{
- let page=vec3i(floor(p))>>vec3u(5u);if(umPageKind(page)!=UM_SOLID){return p;}
- let low=vec3f(page<<vec3u(5u));let l=p-low;
- let up=l>=vec3f(16.0);let d=select(vec3i(-1),vec3i(1),up);
- let out=low+select(vec3f(0.0),vec3f(32.0),up);let depth=select(l,vec3f(32.0)-l,up);
- var best=3u;
- for(var a=0u;a<3u;a++){
-  var e=vec3i(0);e[a]=d[a];
-  if(umPageKind(page+e)!=UM_SOLID&&(best==3u||depth[a]<depth[best])){best=a;}
- }
- if(best<3u){var q=p;q[best]=out[best];return q;}
- for(var a=0u;a<3u;a++){var e=d;e[a]=0;if(umPageKind(page+e)!=UM_SOLID){var q=out;q[a]=p[a];return q;}}
- if(umPageKind(page+d)!=UM_SOLID){return out;}
- return p;
-}
-`;
-
 type Vec3 = [number, number, number];
 type Blocks4 = [number, number, number, number];
 const pageWord = (table: ArrayLike<number>, x: number, y: number, z: number): number => table[(x & 63) | ((y & 63) << 6) | ((z & 63) << 12)]!;

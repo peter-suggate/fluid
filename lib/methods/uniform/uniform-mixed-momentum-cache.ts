@@ -1,5 +1,5 @@
 import { uniformMixedExtensionSnapshotWGSL } from "./uniform-mixed-extension-slots.wgsl";
-import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailStorage, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailClass, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailStorage, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import { uniformCoarseCacheExtent, uniformCoarseCacheGroups, uniformCoarseCacheWGSL } from "./uniform-coarse-velocity-cache";
 import { uniformCompiledVelocityTapWGSL } from "./uniform-compiled-velocity-taps.wgsl";
@@ -42,9 +42,9 @@ export class UniformMixedMomentumCache {
     if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
   }
   bind(f:UniformMixedMomentumCacheFields):UniformDetailGroup{
-    const d=this.ownership.capacity.address.cells,blocks=uniformCoarseCacheExtent(this.ownership.capacity.address);
+    const blocks=uniformCoarseCacheExtent(this.ownership.capacity.address);
     for(const [i,t] of [f.extended,f.coarseExtended].entries())
-      if(uniformDetailExtent(t).some((n,a)=>n!==(i===0?d:blocks)[a])||t.format!=="rgba32float")throw new Error("Mixed momentum cache requires native inputs and a 4h output of 10 texels a block");
+      if((i===0?uniformDetailClass(t)!=="face":uniformDetailExtent(t).some((n,a)=>n!==blocks[a]))||t.format!=="rgba32float")throw new Error("Mixed momentum cache requires native inputs and a 4h output of 10 texels a block");
     if(f.slots&&!this.slotResources)throw new Error("Slot snapshot is unsupported");
     const group=uniformDetailGroup(this.device,{layout:f.slots?this.slotResources!:this.resources,entries:[
       {binding:0,resource:f.extended},
@@ -163,9 +163,9 @@ export class UniformMixedHangingTaps {
   }
   /** output: a createTaps texture to fill in place of unitVelocity. */
   bind(f:UniformMixedHangingTapFields,output=this.unitVelocity):UniformDetailGroup{
-    const d=this.ownership.capacity.address.cells,blocks=uniformCoarseCacheExtent(this.ownership.capacity.address);
+    const blocks=uniformCoarseCacheExtent(this.ownership.capacity.address);
     for(const [i,t] of [f.extended,f.coarse].entries())
-      if(uniformDetailExtent(t).some((n,a)=>n!==(i===0?d:blocks)[a])||t.format!=="rgba32float")throw new Error("Hanging taps require native velocity and the 4h sampling cache");
+      if((i===0?uniformDetailClass(t)!=="face":uniformDetailExtent(t).some((n,a)=>n!==blocks[a]))||t.format!=="rgba32float")throw new Error("Hanging taps require native velocity and the 4h sampling cache");
     if(f.slots&&!this.slotResources)throw new Error("Slot snapshot is unsupported");
     const group=uniformDetailGroup(this.device,{layout:f.slots?this.slotResources!:this.resources,entries:[
       {binding:0,resource:f.extended},{binding:1,resource:{buffer:f.negative}},{binding:2,resource:f.coarse},

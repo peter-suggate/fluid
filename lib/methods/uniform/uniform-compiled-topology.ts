@@ -118,7 +118,12 @@ fn umFineFaceSides(t:u32)->u32{
 export function uniformCompiledVertexResolveWGSL(lattice: string, weight: string, sum: string): string {
   return /* wgsl */ `
  let local=umCorner(lane,5u);let p=vec3u(base)*4u+local;
- if(any((local==vec3u(4u))&(p!=UM_D))||all(p%4u==vec3u(0))){return;}
+ if(all(p%4u==vec3u(0))){return;}
+ // A vertex on the tile's high planes is the tile across's (its local 0)
+ // wherever a tile across them, face, edge or corner, is stored.
+ {let high=u32(local.x==4u)|(u32(local.y==4u)<<1u)|(u32(local.z==4u)<<2u);var across=false;
+  for(var s=1u;s<8u;s++){if((s&high)==s&&umKeyStored(umTileKey(base+vec3i(vec3u(s&1u,(s>>1u)&1u,s>>2u))))){across=true;}}
+  if(across){return;}}
  let incident=umCoarseIncident(tile,local);if(incident==0u){return;}
  let at=umCorner(firstTrailingBit(incident),2u);
  let t=vec3f(local+(vec3u(1)-at)*4u)/4.0;var values:array<f32,8>;

@@ -50,6 +50,41 @@ export interface UniformMixedBandBits {readonly buffer:GPUBuffer;readonly wordOf
  /** The producer's residency audit word (UNIFORM_MIXED_RESIDENCY_AUDIT): non-zero raises the residency fatal. */
  readonly auditWord?:number}
 
+/** An authored region as a box of tiles of the 512-tile window: min inclusive,
+ * max exclusive. fine: its tiles are h whatever the band holds. coarse: the
+ * band holds none of its tiles that no fine region holds, but for the ones a
+ * solid promotes (the census's decide and solidPromote). */
+export interface UniformMixedRegion {readonly min:readonly [number,number,number];readonly max:readonly [number,number,number];readonly kind:"fine"|"coarse"}
+export const UNIFORM_MIXED_REGION_LIMIT=32;
+/** The region table the builder and the census hold: the count and three
+ * spare words, then eight words a region (min x, y, z; max x, y, z; kind, 1
+ * fine or 2 coarse; spare). */
+export const UNIFORM_MIXED_REGION_TABLE_WORDS=4+8*UNIFORM_MIXED_REGION_LIMIT;
+export function uniformMixedRegionTable(regions:readonly UniformMixedRegion[]):Uint32Array<ArrayBuffer>{
+ if(regions.length>UNIFORM_MIXED_REGION_LIMIT)throw new RangeError(`Uniform mixed regions: ${regions.length} authored, the region table holds ${UNIFORM_MIXED_REGION_LIMIT}`);
+ const table=new Uint32Array(UNIFORM_MIXED_REGION_TABLE_WORDS);table[0]=regions.length;
+ regions.forEach((r,i)=>{
+  const kind=r.kind==="fine"?1:r.kind==="coarse"?2:0;
+  if(!kind||r.min.length!==3||r.max.length!==3||[0,1,2].some(a=>!Number.isInteger(r.min[a])||!Number.isInteger(r.max[a])||r.min[a]!<0||r.max[a]!>512||r.min[a]!>=r.max[a]!))
+   throw new RangeError(`Uniform mixed regions: region ${i} (${String(r.kind)}, ${r.min.join(",")} to ${r.max.join(",")}) is not a fine or coarse box of tiles of the 512-tile window`);
+  table.set([r.min[0],r.min[1],r.min[2],r.max[0],r.max[1],r.max[2],kind,0],4+8*i);
+ });
+ return table;
+}
+/** fn name(c:vec3u)->u32 over a region table whose word i is word(i): bit 0
+ * where a fine region holds tile c, bit 1 where a coarse one does. An empty
+ * table costs its count word. */
+export function uniformMixedRegionWGSL(name:string,word:(index:string)=>string):string{
+ return /* wgsl */`fn ${name}(c:vec3u)->u32{
+ var kinds=0u;let n=${word("0u")};
+ for(var i=0u;i<n;i++){
+  let e=4u+8u*i;
+  if(all(c>=vec3u(${word("e")},${word("e+1u")},${word("e+2u")}))&&all(c<vec3u(${word("e+3u")},${word("e+4u")},${word("e+5u")}))){kinds|=${word("e+6u")};}
+ }
+ return kinds;
+}`;
+}
+
 /** Word offsets of the builder's compact relayout receipt
  * (UniformMixedLayoutBuilder.receipt): what a frame receipt copies instead
  * of the tile words. census: the census header (20 words, see
@@ -91,10 +126,10 @@ interface Level {
 }
 
 /** GPU ownership builder for dynamic coarsening (docs/plans/uniform-dynamic-coarsening.md,
- * phase 4). From the band bits and a static fine mask (solids and fine-only
- * regions), it writes exactly the buffers UniformMixedOwnership.update
- * uploads for the ungraded h/4h createUniformMixedLayout(lattice, regions,
- * 4, static ∪ band). Every launch is a fixed grid over the lattice's tiles;
+ * phase 4). From the band bits and the fine regions of its region table, it
+ * writes exactly the buffers UniformMixedOwnership.update uploads for the
+ * ungraded h/4h createUniformMixedLayout(lattice, regions, 4, fine ∪ band).
+ * Every launch is a fixed grid over the lattice's tiles;
  * the receipt checks (tier sum, tile words, hanging capacity) run on the GPU
  * into sticky fatal bits of a compact receipt (UNIFORM_MIXED_RELAYOUT_RECEIPT)
  * with a GPU generation counter. There is no host mirror: the frame head
@@ -104,9 +139,8 @@ export class UniformMixedLayoutBuilder {
  readonly allocatedBytes:number;
  /** Tile keys. */
  private readonly tiles:number;
- /** Tiles of the box: the extent of the static masks' box indices. */
- private readonly boxTiles:number;
  private readonly blocks:number;
+ /** The region table (uniformMixedRegionTable). */
  private readonly statics:GPUBuffer;
  private readonly resources:GPUBindGroupLayout;
  private readonly level:Level;
@@ -132,13 +166,12 @@ export class UniformMixedLayoutBuilder {
  /** ownership: the simulation ownership the built generation replaces. */
  constructor(private readonly device:GPUDevice,band:UniformMixedBandBits,ownership:UniformMixedOwnership){
   const n=ownership.capacity.tiles;
-  this.tiles=n;this.boxTiles=ownership.capacity.address.boxTiles;this.blocks=Math.ceil(n/BLOCK);
+  this.tiles=n;this.blocks=Math.ceil(n/BLOCK);
   // The per-tile launches are one dimension of 64-lane groups, and the verify ticket counts them in 16 bits: 8,191 pages of 512 tiles at 65,535 groups.
   const groups=Math.ceil(n/64),most=Math.min(0xffff,device.limits.maxComputeWorkgroupsPerDimension);
   if(groups>most)throw new Error(`Mixed layout builder launches ${groups} groups of 64 tile keys in one dimension, above ${most}: ${n} tile keys exceed ${64*most} (${Math.floor(most/8)} pages of 512)`);
   const storage=(label:string,words:number)=>device.createBuffer({label,size:words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-  // Static fine words, then static coarse words (coarse-only regions mask the band).
-  this.statics=storage("Uniform layout builder static masks",2*Math.ceil(this.boxTiles/32));
+  this.statics=storage("Uniform layout builder region table",UNIFORM_MIXED_REGION_TABLE_WORDS);
   const R=UNIFORM_MIXED_RELAYOUT_RECEIPT;
   if(band.headerWords!==undefined){
    if(!Number.isSafeInteger(band.headerWords)||band.headerWords<0||band.headerWords>R.changed-R.census)throw new Error(`Band header of ${band.headerWords} words does not fit the relayout receipt`);
@@ -154,13 +187,13 @@ export class UniformMixedLayoutBuilder {
   const support=storage("Uniform layout builder support",9*n+24);
   const slots=storage("Uniform layout builder slots",2*n);
   const work=device.createBuffer({label:"Uniform layout builder work",size:uniformMixedChangedTilesWords(n).words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-  const params=device.createBuffer({label:"Uniform layout builder params",size:48,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  const params=device.createBuffer({label:"Uniform layout builder params",size:24,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   // Hanging capacity: the ownership's preallocated tap cache.
   // Residency audit word, or none. h-tile capacity: the owner-indexed buffers'.
   // Admission capacity: none (setAdmission).
-  const lattice=ownership.capacity.lattice,address=ownership.capacity.address;
-  device.queue.writeBuffer(params,0,new Uint32Array([band.wordOffset,ownership.capacity.hangingSlots,band.auditWord??0xffffffff,ownership.capacity.fineTiles,0xffffffff,...address.tiles,n]));
-  device.queue.writeBuffer(work,COUNTS*4+16,new Uint32Array([...address.cells,n]));
+  const lattice=ownership.capacity.lattice;
+  device.queue.writeBuffer(params,0,new Uint32Array([band.wordOffset,ownership.capacity.hangingSlots,band.auditWord??0xffffffff,ownership.capacity.fineTiles,0xffffffff,n]));
+  device.queue.writeBuffer(work,COUNTS*4+28,new Uint32Array([n]));
   device.queue.writeBuffer(work,COUNTS*4+32,new Float32Array([...lattice.cellSize_m,Math.min(...lattice.cellSize_m)]));
   const status=device.createBuffer({label:"Uniform layout builder relayout receipt",size:R.words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   // Standalone stages visit everything until a frame census: support[0,4n) = 3.
@@ -177,14 +210,13 @@ export class UniformMixedLayoutBuilder {
  }
  async initialize():Promise<void>{
   const n=this.tiles,x=this.level.current.dispatchX;
-  const T=this.level.current.capacity.address.tiles;
   const flags=RECEIPT,totals=RECEIPT+n,lists=uniformMixedChangedTilesWords(n);
   const R=UNIFORM_MIXED_RELAYOUT_RECEIPT,F=UNIFORM_MIXED_RELAYOUT_FATAL;
   const module=this.device.createShaderModule({label:"Uniform mixed layout builder",code:uniformRuntimeConstantsWGSL(/* wgsl */`
 @group(0) @binding(0) var<storage,read> band:array<u32>;
 @group(0) @binding(1) var<storage,read> statics:array<u32>;
 @group(0) @binding(2) var<storage,read> current:array<u32>;
-struct Params {bandOffset:u32,hangingCapacity:u32,audit:u32,fineCapacity:u32,admitCapacity:u32,tileX:u32,tileY:u32,tileZ:u32,tileKeys:u32}
+struct Params {bandOffset:u32,hangingCapacity:u32,audit:u32,fineCapacity:u32,admitCapacity:u32,tileKeys:u32}
 @group(0) @binding(3) var<uniform> params:Params;
 @group(0) @binding(4) var<storage,read_write> work:array<atomic<u32>>;
 @group(0) @binding(5) var<storage,read_write> topology:array<u32>;
@@ -196,23 +228,20 @@ const R_CHANGED:u32=${R.changed}u;const R_TIERS:u32=${R.tiers}u;const R_SEAMS:u3
 const R_NEED:u32=${R.need}u;const R_ADMIT:u32=${R.admit}u;const NEED:u32=${NEED}u;
 const R_GENERATION:u32=${R.generation}u;const R_BUILDS:u32=${R.builds}u;const R_FATAL:u32=${R.fatal}u;const R_FATAL_BUILD:u32=${R.fatalBuild}u;
 const FATAL_TIER_SUM:u32=${F.tierSum}u;const FATAL_TILE_WORDS:u32=${F.tileWords}u;const FATAL_HANGING:u32=${F.hangingCapacity}u;const FATAL_RESIDENCY:u32=${F.residency}u;const FATAL_OWNERS:u32=${F.fineCapacity}u;
-const N:u32=${n}u;const T=vec3u(${T.map(v=>`${v}u`).join(",")});const X:u32=${x}u;
+const N:u32=${n}u;const X:u32=${x}u;
 const BLOCKS:u32=${this.blocks}u;const INF:u32=0xffffffffu;
 const FLAGS:u32=${flags}u;const TOTALS:u32=${totals}u;const COUNTS:u32=${COUNTS}u;
 const CHANGED:u32=${lists.changedList}u;const DILATED:u32=${lists.dilatedList}u;const DILATED_COUNT:u32=${lists.dilatedCount}u;
 // The page table and block records the live ownership holds after its tile words.
 fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return current[5u*N+(e.x|(e.y<<6u)|(e.z<<12u))];}
 fn umBlockWord(b:u32)->u32{return current[5u*N+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
-${uniformLatticeAddressWGSL({cells:"(4u*T)",tiles:"T",constant:true,paged:{blocks:"(N/512u)"}})}
-const WORDS:u32=${Math.ceil(this.boxTiles/32)}u;
-// The band is a bit per tile key; the static masks are the host's, a bit per
-// box index, fine words then coarse words WORDS on. A tile past the box has
-// the band's bit alone.
+${uniformLatticeAddressWGSL({constant:true,paged:{blocks:"(N/512u)"}})}
+${uniformMixedRegionWGSL("regionsAt",i=>`statics[${i}]`)}
+// The band is a bit per tile key, and holds no tile of a coarse region but a
+// solid's (the census's decide). A tile of a fine region is h without it.
 fn fineAt(t:u32)->bool{
- let c=umTileCoord(t);let banded=(band[params.bandOffset+t/32u]>>(t%32u))&1u;
- if(!umTileInBox(vec3i(c))){return banded!=0u;}
- let b=umBoxTileIndex(c);let fine=(statics[b/32u]>>(b%32u))&1u;let coarse=(statics[WORDS+b/32u]>>(b%32u))&1u;
- return ((banded&~coarse)|fine)!=0u;
+ if(((band[params.bandOffset+t/32u]>>(t%32u))&1u)!=0u){return true;}
+ return (regionsAt(umTileCoord(t))&1u)!=0u;
 }
 fn wordWidth(word:u32)->u32{return select(4u,1u,(word&0x80000000u)!=0u);}
 fn widthAt(t:u32)->u32{return atomicLoad(&work[FLAGS+t])&7u;}
@@ -434,12 +463,10 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
 }
 `,{
  N:{type:"u32",value:"params.tileKeys"},
- T:{type:"vec3u",value:"vec3u(params.tileX,params.tileY,params.tileZ)"},
  BLOCKS:{type:"u32",value:"(N+255u)/256u"},
  TOTALS:{type:"u32",value:"76u+N"},
  CHANGED:{type:"u32",value:"76u+N+5u*BLOCKS"},
  DILATED:{type:"u32",value:"CHANGED+N"},
- WORDS:{type:"u32",value:"(params.tileX*params.tileY*params.tileZ+31u)/32u"},
  VERIFY_GROUPS:{type:"u32",value:"(N+63u)/64u"},
  })});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
@@ -447,34 +474,13 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.resources]});
   await Promise.all(["widths","admit","classify","mirror","dilate","scan","scatter","verifyWords"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint}}));}));
  }
- /** Static fine tiles (fine-only regions), one byte per tile by box index
-  * (uniformBoxTileIndex). coarse: tiles a coarse-only
-  * region holds at 4h; band bits there are dropped. Liquid-conditional solid
-  * promotion arrives in the band bits, so the host leaves every tile a solid
-  * could promote out of `coarse`. A tile in both masks is fine. */
- setStatic(fine:Uint8Array,coarse?:Uint8Array):void{
-  if(fine.length!==this.boxTiles||(coarse&&coarse.length!==this.boxTiles))throw new Error("Static masks do not match the tile lattice");
-  const count=Math.ceil(this.boxTiles/32),words=new Uint32Array(2*count);
-  for(let t=0;t<fine.length;t++){if(fine[t])words[t>>5]!|=1<<(t&31);if(coarse?.[t])words[count+(t>>5)]!|=1<<(t&31);}
-  this.device.queue.writeBuffer(this.statics,0,words);
-  this.staticWords=words;this.staticReady=true;
- }
- /** The words setStatic wrote, kept so an edit moves them by tiles. */
- private staticWords?:Uint32Array<ArrayBuffer>;
- /** setStatic for a fine mask that differs from the one held at `tiles` at
-  * most (box indices; a tile may repeat, or not have changed): the words those tiles are
-  * in are rewritten, as runs joined across short gaps, so the buffer holds
-  * what setStatic(fine) with the same coarse mask would have written. */
- editStatic(tiles:readonly number[],fine:Uint8Array):void{
-  const words=this.staticWords;
-  if(!words||fine.length!==this.boxTiles)throw new Error("A static mask edit needs a static mask of the tile lattice");
-  const dirty:number[]=[];
-  for(const t of tiles){const w=t>>5,bit=1<<(t&31),before=words[w]!,after=(fine[t]?before|bit:before&~bit)>>>0;if(after!==before){words[w]=after;dirty.push(w);}}
-  dirty.sort((a,b)=>a-b);
-  for(let i=0;i<dirty.length;){
-   let j=i;while(j+1<dirty.length&&dirty[j+1]!-dirty[j]!<=64)j++;
-   this.device.queue.writeBuffer(this.statics,4*dirty[i]!,words,dirty[i]!,dirty[j]!-dirty[i]!+1);i=j+1;
-  }
+ /** The authored regions (uniformMixedRegionTable), the table the census
+  * holds too (UniformMixedDynamicClassifier.setRegions): a build makes every
+  * tile of a fine region h. Queue-ordered: the next encode's build. */
+ setRegions(table:Uint32Array<ArrayBuffer>):void{
+  if(table.length!==UNIFORM_MIXED_REGION_TABLE_WORDS||table[0]!>UNIFORM_MIXED_REGION_LIMIT)throw new Error(`Mixed layout builder region table has ${table.length} words and ${table[0]} regions, expected ${UNIFORM_MIXED_REGION_TABLE_WORDS} words and at most ${UNIFORM_MIXED_REGION_LIMIT} regions`);
+  this.device.queue.writeBuffer(this.statics,0,table);
+  this.staticReady=true;
  }
  /** Seam tiles a built generation may slot in the hanging tap cache; more
   * raises UNIFORM_MIXED_RELAYOUT_FATAL.hangingCapacity. Default and upper
@@ -518,7 +524,7 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
   * the generation to compare against; encodeClear must precede it. */
  encode(encoder:GPUCommandEncoder):void{
   if(this.pipelines.size!==8)throw new Error("Mixed layout builder is not initialized");
-  if(!this.staticReady)throw new Error("Mixed layout builder has no static fine mask");
+  if(!this.staticReady)throw new Error("Mixed layout builder has no region table");
   if(!this.cleared)throw new Error("Mixed layout builder encoded without encodeClear");
   this.cleared=false;
   const groups64=(this.tiles+63)>>>6;

@@ -1,4 +1,4 @@
-import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailClass, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_PARAMS_BYTES,uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
@@ -74,14 +74,14 @@ export class UniformMixedForces {
   bind(f: UniformMixedForceFields): UniformDetailGroup {
     if(this.cachedGeometry&&!f.centerPhi)throw new Error("Mixed forces require current center phi for cached geometry");
     if(this.cachedCurvature!==!!f.curvature||this.cachedCurvature!==!!f.normals)throw new Error("Mixed force curvature scratch must match the pipeline");
-    const address=this.ownership.capacity.address,d=address.cells,coarse=f.coarseVelocity,unit=f.unitVelocity;
+    const address=this.ownership.capacity.address,coarse=f.coarseVelocity,unit=f.unitVelocity;
     if(coarse.format!=="rgba32float"||uniformDetailExtent(coarse).some((n,a)=>n!==uniformCoarseCacheExtent(address)[a]))throw new Error("Mixed force viscosity requires the 4h velocity cache");
-    if(f.curvature&&(f.curvature.format!=="r32float"||uniformDetailExtent(f.curvature).some((n,a)=>n!==d[a])||[f.phi,f.volume,f.centerPhi].includes(f.curvature)))throw new Error("Mixed force curvature requires disjoint native scalar scratch");
+    if(f.curvature&&(f.curvature.format!=="r32float"||uniformDetailClass(f.curvature)!=="cell"||[f.phi,f.volume,f.centerPhi].includes(f.curvature)))throw new Error("Mixed force curvature requires disjoint native scalar scratch");
     const normalBytes=UniformMixedForces.normalBytes(this.ownership.capacity.owners);
     if(f.normals&&(f.normals.size??f.normals.buffer.size-(f.normals.offset??0))<normalBytes)throw new Error("Mixed force normal scratch is too small");
-    if(unit.format!=="rgba32float"||uniformDetailExtent(unit).some((n,a)=>n!==d[a]))throw new Error("Mixed force viscosity requires resolved h velocity taps");
+    if(unit.format!=="rgba32float"||uniformDetailClass(unit)!=="face")throw new Error("Mixed force viscosity requires resolved h velocity taps");
     for(const [i,t] of [f.advected,f.phi,f.volume,f.output].entries()){
-      if(uniformDetailExtent(t).some((n,a)=>n!==(i===1?address.vertexBox:d)[a]) || t.format!==(i===1||i===2?"r32float":"rgba32float"))
+      if(uniformDetailClass(t)!==(i===1?"vertex":i===2?"cell":"face") || t.format!==(i===1||i===2?"r32float":"rgba32float"))
         throw new Error("Mixed forces require native cell and vertex fields");
     }
     if(f.output===f.advected||f.output===unit||f.negative===f.outputNegative)throw new Error("Mixed force output must be disjoint");
@@ -200,7 +200,7 @@ fn umLaplacian(face:UMFace)->f32 {
  // axis and first transversely: anchor/w is that cell's width-w index.
  let site=face.anchor/vec3i(i32(face.width));let width=f32(face.width);
  var home=vec3i(0);
- if(face.width==4u){let page=umTileNear(site)>>vec3u(3u);home=umCoarseOrigin(umBlockOf(page))-(page<<vec3u(3u));}
+ if(face.width==4u){let page=max(site,vec3i(0))>>vec3u(3u);home=umCoarseOrigin(umBlockOf(page))-(page<<vec3u(3u));}
  let center=umViscositySite(site,face.axis,face.width,home);var terms=vec3f(0);
  for(var axis=0u;axis<3u;axis++){
   var delta=vec3i(0);delta[axis]=1;

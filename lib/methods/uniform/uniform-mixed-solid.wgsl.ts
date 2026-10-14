@@ -42,13 +42,12 @@ const pagedTopologyWords=(layout:UniformMixedLayout):number=>5*layout.tiles.leng
  * records in the tail of the topology the kernel binds as `name`, after its
  * five words a tile key (UM_PAGE_TABLE, UM_BLOCK_RECORD). */
 function solidRecordAddressWGSL(layout:UniformMixedLayout,name:string):string{
- const cells=layout.lattice.dimensions,keys=layout.tiles.length,table=5*keys;
+ const keys=layout.tiles.length,table=5*keys;
  const paged={blocks:`${keys/512}u`};
  return /* wgsl */`
-const UM_D=vec3u(${cells.map(n=>`${n}u`).join(",")});const UM_T=UM_D/4u;
 fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(${UNIFORM_PAGE_WINDOW-1}u);return ${name}[${table}u+(e.x|(e.y<<6u)|(e.z<<12u))];}
 fn umBlockWord(b:u32)->u32{return ${name}[${table+UNIFORM_PAGE_TABLE_WORDS}u+b];}
-${uniformLatticeAddressWGSL({cells:"UM_D",tiles:"UM_T",constant:true,paged})}`;
+${uniformLatticeAddressWGSL({constant:true,paged})}`;
 }
 
 /** Units of a bed-slope byte: 127 is half a cell of rise in a cell of run. */
@@ -492,7 +491,7 @@ fn umVertexBuried(p:vec3i)->bool{
 }`;
 
 /** Requires the lattice address (umTileKey, umKeyStored, umTilePresent).
- * `group` undefined emits inert stubs with the same ABI, over UM_D.
+ * `group` undefined emits inert stubs with the same ABI: a cell is valid off a SOLID page.
  * `coarse` (the record's owner/halo count) binds the all-4h record: the
  * group is then UniformMixedSolid.coarse.bindLayout, and umSolidCoarse(i),
  * umSolidCut(tile) (cut and simulated at h), umSolidStaticCut(tile),
@@ -505,7 +504,7 @@ fn umVertexBuried(p:vec3i)->bool{
 export function uniformMixedSolidWGSL(group?:number,coarse?:number,gated=true,writable=false):string{
  if(group===undefined)return /* wgsl */ `
 fn umSolidEnabled()->bool{return false;}
-fn umSolidValid(p:vec3i)->bool{return all(p>=vec3i(0))&&all(p<vec3i(UM_D));}
+fn umSolidValid(p:vec3i)->bool{return umCellKind(p)!=UM_SOLID;}
 fn umSolidVoxel(p:vec3i)->bool{return false;}
 fn umBedSlope(p:vec3i)->vec2f{return vec2f(0);}
 fn umCellOpen(p:vec3i)->f32{return select(0.0,1.0,umSolidValid(p));}

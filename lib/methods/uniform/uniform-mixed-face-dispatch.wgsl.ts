@@ -75,7 +75,7 @@ fn umFarAirOwner(owner:UMOwner)->bool{
 export function uniformMixedFaceTileDispatchWGSL(entry: string, evaluate: string, stored?: string, skipPacked?: string): string {
   // stored: a WGSL fn(f32)->bool that gates each store on its first value.
   const store = (write: string, value: string) => stored ? `if(${stored}((${value}).x)){${write}}` : write;
-  const boundary = (index: string) => stored ? `let value=${evaluate};if(${stored}(value)){boundary[${index}]=value;}` : `boundary[${index}]=${evaluate};`;
+  const boundary = (index: string) => stored ? `if(${stored}(value)){boundary[${index}]=value;}` : `boundary[${index}]=value;`;
   return /* wgsl */ `
 var<workgroup> ${entry}Components:array<vec2f,192>;
 @compute @workgroup_size(192) fn ${entry}(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -101,6 +101,9 @@ var<workgroup> ${entry}Components:array<vec2f,192>;
  let packed=umMergedTiles&&!umFusedJobs&&tileJob>=umMergedTileJobs();
  let slot=lane/48u;let part=(lane%48u)/3u;let faceAxis=lane%3u;
  var owner=UMOwner();var anchor=vec3i(0);var result=vec2f(0);
+ // The faces this lane evaluates: a low boundary face (low, at lowIndex) and
+ // a positive one (high), each by the one evaluation below.
+ var low=false;var lowFace=UMFace();var lowIndex=0u;var high=false;var highFace=UMFace();
  if(quad){
   let index=4u*(job-seamFour)+slot;
   if(index<fours){
@@ -108,10 +111,10 @@ var<workgroup> ${entry}Components:array<vec2f,192>;
    owner=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
    let origin=umOrigin(owner);
    if(part==0u&&umLowOpen(vec3i(origin))[faceAxis]){
-    let face=umFace(owner,faceAxis,-1,0u);${boundary("umLowFaceIndex(origin,faceAxis)")}
+    low=true;lowFace=umFace(owner,faceAxis,-1,0u);lowIndex=umLowFaceIndex(origin,faceAxis);
    }
    let face=umFace(owner,faceAxis,1,part);
-   if(face.width!=0u){anchor=face.anchor;result=vec2f(${evaluate},1);}
+   if(face.width!=0u){anchor=face.anchor;high=true;highFace=face;}
   }
  }else{
   let firstOwner=umOwner(vec3u(select(tileJob*cells,tileJob*64u+cell,packed),0,0));owner=firstOwner;
@@ -129,11 +132,17 @@ var<workgroup> ${entry}Components:array<vec2f,192>;
     positive=umPositiveFaceAtAnchor(owner,axis,anchor);
    }
    if(negative){
-    let face=umFace(owner,axis,-1,0u);${boundary("umLowFaceIndex(umOrigin(owner),axis)")}
+    low=true;lowFace=umFace(owner,axis,-1,0u);lowIndex=umLowFaceIndex(umOrigin(owner),axis);
    }
-   let face=positive;
-   if(face.width!=0u){result=vec2f(${evaluate},1);}
+   if(positive.width!=0u){high=true;highFace=positive;}
   }
+ }
+ // One evaluation site (Metal inlines every call: an evaluation written
+ // twice is compiled twice): the low face first, then the positive one.
+ for(var k=0u;k<2u;k++){
+  if((k==0u&&!low)||(k==1u&&!high)){continue;}
+  var face=highFace;if(k==0u){face=lowFace;}let value=${evaluate};
+  if(k==0u){${boundary("lowIndex")}}else{result=vec2f(value,1);}
  }
  ${entry}Components[lane]=result;workgroupBarrier();
  if(quad){

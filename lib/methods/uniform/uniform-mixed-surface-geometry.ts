@@ -1,4 +1,4 @@
-import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailClass, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
@@ -83,7 +83,7 @@ export class UniformMixedSurfaceGeometry {
     const address=this.ownership.capacity.address;
     const outputs=[targetFill,centerPhi,pressure.target,pressure.centerPhi,mirror];
     for(const [i,t] of [phi,...outputs].entries())
-      if(t.format!=="r32float"||uniformDetailExtent(t).some((n,a)=>n!==(i===0?address.vertexBox:address.cells)[a]))throw new Error("Mixed geometry requires native cell and vertex fields");
+      if(t.format!=="r32float"||uniformDetailClass(t)!==(i===0?"vertex":"cell"))throw new Error("Mixed geometry requires native cell and vertex fields");
     if(new Set(outputs).size!==outputs.length)throw new Error("Mixed geometry outputs must be disjoint");
     const group=uniformDetailGroup(this.device,{layout:this.resources,entries:[
       ...[phi,targetFill,centerPhi,pressure.target,pressure.centerPhi].map((t,binding)=>({binding,resource:t})),

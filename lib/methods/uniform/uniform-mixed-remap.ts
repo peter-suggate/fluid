@@ -580,9 +580,10 @@ fn markTile(tile:u32){
   // neighbour that refined sets both.)
   if(!faces&&vertices==0u){return;}
  }
- let p=vec3i(umTileCoord(tile));let lo=umTileNear(p-vec3i(1));let hi=umTileNear(p+vec3i(1));
- for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
-  let q=umTileAt(vec3u(vec3i(x,y,z)));
+ // The 27 tiles around it; one in no stored page has no width to change.
+ let p=vec3i(umTileCoord(tile));
+ for(var z=p.z-1;z<=p.z+1;z++){for(var y=p.y-1;y<=p.y+1;y++){for(var x=p.x-1;x<=p.x+1;x++){
+  let q=umTileKey(vec3i(x,y,z));if(!umKeyStored(q)){continue;}
   if(select(umTileWidth(q)!=oldumTileWidth(q),umTileWidth(q)<oldumTileWidth(q),fine)){atomicStore(&worklist[4u+atomicAdd(&worklist[3],1u)],tile|flags|vertices);return;}
  }}}
 }

@@ -1,4 +1,4 @@
-import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailField, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailClass, uniformDetailField, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 
@@ -29,7 +29,7 @@ export class UniformCoarseVertexPhi {
 
   constructor(private readonly device: GPUDevice, private readonly ownership: UniformMixedOwnership, private readonly phi: GPUTexture) {
     const address = ownership.capacity.address;
-    if (phi.format !== "r32float" || uniformDetailExtent(phi).some((n, a) => n !== address.vertexBox[a])) throw new Error("The 4h vertex base publishes the h vertex phi field");
+    if (phi.format !== "r32float" || uniformDetailClass(phi) !== "vertex") throw new Error("The 4h vertex base publishes the h vertex phi field");
     this.size = [address.wideVertexTexture[0], address.wideVertexTexture[1], address.wideVertexTexture[2]];
     this.corners = address.wideVertexBox;
     this.texture = device.createTexture({ label: "Uniform Geometric 4h vertex phi base", size: this.size, dimension: "3d", format: "r32float",

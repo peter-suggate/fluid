@@ -1,5 +1,5 @@
 import { uniformCompiledVertexResolveWGSL } from "./uniform-compiled-topology";
-import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailClass, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedPageCount,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
@@ -101,14 +101,14 @@ export class UniformMixedSurfaceVolume {
  /** The stage measures phi and volume and writes neither. */
  bind(phi:GPUTexture,volume:GPUTexture,scratch:GPUBufferBinding):UniformDetailGroup{
   const address=this.address;
-  for(const [i,t] of [phi,volume].entries())if(t.format!=="r32float"||uniformDetailExtent(t).some((n,a)=>n!==(i===1?address.cells:address.vertexBox)[a]))throw new Error("Mixed surface constraint requires native vertex and cell fields");
+  for(const [i,t] of [phi,volume].entries())if(t.format!=="r32float"||uniformDetailClass(t)!==(i===1?"cell":"vertex"))throw new Error("Mixed surface constraint requires native vertex and cell fields");
   if((scratch.size??scratch.buffer.size-(scratch.offset??0))<this.scratchBytes)throw new Error("Mixed surface constraint needs sufficient scratch");
   const work={...scratch,size:this.scratchBytes};
   return uniformDetailGroup(this.device,{layout:this.resources,entries:[{binding:0,resource:phi},{binding:1,resource:volume},{binding:3,resource:work},{binding:5,resource:{buffer:this.budget}},{binding:6,resource:{buffer:this.budgetParams}}]});
  }
  async initialize():Promise<void>{
   const topology=uniformMixedTopologyWGSL(this.ownership.capacity,0);
-  const sourceScale=uniformMixedVertexSamplingSource("",false,undefined,undefined,true).replace(/\bum(Vertex(?!(?:At|Coord|Present|Near|Texel)\b)\w*|SampleVertex|LoadVertex8?)\b/g,name=>name.replace("um","umScale"));
+  const sourceScale=uniformMixedVertexSamplingSource("",false,undefined,undefined,true).replace(/\bum(Vertex(?!(?:At|Coord|Present|Near|Texel|CellAbove|CellBelow)\b)\w*|SampleVertex|LoadVertex8?)\b/g,name=>name.replace("um","umScale"));
   // Owner entries stride every live owner (all), resolveScale every seam
   // tile (fused): GPU-counted fixed grids, sized by capacity alone.
   const module=uniformDetailModule(this.device,{label:"Uniform mixed surface volume",code:uniformMixedCountedEntriesWGSL(topology+/* wgsl */`
@@ -153,7 +153,7 @@ fn svAuthority(o:UMOwner,k:u32,low:vec3<bool>)->bool{
  return umVertexAuthority(umOrigin(o)+corner*o.width).index==o.index;
 }
 // Tile of a unit-stencil owner's corner authority, clamp(p-1)'s owner.
-fn svUnitAuthorityTile(p:vec3u)->u32{return umTileAt(vec3u(umCellNear(vec3i(p)-vec3i(1)))/4u);}
+fn svUnitAuthorityTile(p:vec3u)->u32{return umTileAt(vec3u(umVertexCellBelow(vec3i(p)))/4u);}
 fn svMeasured(t:u32)->bool{return scratch[SV_MEASURE+t]!=0.0;}
 fn umScaleLoadVertex(p:vec3u)->f32{return scratch[umVertexAt(p)];}
 // The same words of the eight vertices p + s*umCorner(k,2u): where one block holds them, its first key and fixed steps.
@@ -295,9 +295,12 @@ fn svNearBand(t:u32,k:u32)->bool{
  scratch[SV_MEASURE+t]=measured;
  // Closure: every owner a measured tile's passes read lies within one tile.
  if(measured!=0.0){
-  let centre=vec3i(umTileCoord(t));let a=umTileNear(centre-vec3i(1));let b=umTileNear(centre+vec3i(1));
+  // A tile of a SOLID page holds no owner and passes.
+  let centre=vec3i(umTileCoord(t));
   var inside=true;
-  for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){inside=inside&&umTileResident(umTileAt(vec3u(vec3i(x,y,z))));}}}
+  for(var z=centre.z-1;z<=centre.z+1;z++){for(var y=centre.y-1;y<=centre.y+1;y++){for(var x=centre.x-1;x<=centre.x+1;x++){
+   let q=vec3i(x,y,z);inside=inside&&(umTileKind(q)==UM_SOLID||umTileResident(umTileAt(vec3u(q))));
+  }}}
   if(!inside){umSupport[UM_RESIDENCY+1u]=1u;}
  }
 }

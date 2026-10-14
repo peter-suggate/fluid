@@ -101,7 +101,6 @@ override umCertifiedJobs:u32=0u;
 // GPU-counted launches (UNIFORM_MIXED_COUNTED); 0 leaves umCertifiedJobs in charge.
 override umCountedJobs:u32=0u;
 override umFusedRegularGate:u32=0u;
-const UM_D=vec3u(${layout.lattice.dimensions.map(n => `${n}u`).join(',')});const UM_T=UM_D/4u;
 const UM_TILES:u32=${layout.tiles.length}u;
 const UM_OVERFLOW_HANGING:u32=${UNIFORM_MIXED_OVERFLOW_HANGING}u;
 // Residency (uniformMixedResidencyWord): pages of 4³ tiles, eight a block; flags, list.
@@ -137,9 +136,9 @@ const UM_BLOCK_RECORD:u32=UM_PAGE_TABLE+${UNIFORM_PAGE_TABLE_WORDS}u;
 ${pagesOf === undefined ? /* wgsl */ `fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return umTopology[UM_PAGE_TABLE+(e.x|(e.y<<6u)|(e.z<<12u))];}
 fn umBlockWord(b:u32)->u32{return umTopology[UM_BLOCK_RECORD+b];}` : /* wgsl */ `fn umPageWord(page:vec3i)->u32{return ${pagesOf}umPageWord(page);}
 fn umBlockWord(b:u32)->u32{return ${pagesOf}umBlockWord(b);}`}
-// Lattice addressing (uniform-lattice-address.ts) over UM_D and UM_T: its
-// paged bodies, whose tile key count is UM_TILES.
-${uniformLatticeAddressWGSL({ cells: "UM_D", tiles: "UM_T", constant: true, paged: { blocks: "(UM_TILES/512u)" } })}
+// Lattice addressing (uniform-lattice-address.ts): its paged bodies, whose
+// tile key count is UM_TILES. No box: a coordinate resolves through the page table.
+${uniformLatticeAddressWGSL({ constant: true, paged: { blocks: "(UM_TILES/512u)" } })}
 ${uniformCompiledTopologyWGSL}
 struct UMOwner {tile:u32,lane:u32,width:u32,index:u32}
 fn umAllOwner(gid:vec3u)->UMOwner {

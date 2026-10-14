@@ -6,12 +6,12 @@ import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit } from "./uniform-mixed-layout";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailImportance, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
-import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, type DetailRequest } from "./uniform-detail-requests";
+import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
 import { UniformDetailPlanner, UniformDetailRequestTiles, uniformDetailTileBounds, type UniformDetailPlan } from "./uniform-detail-planner";
 import type { UniformWorkEdit } from "./uniform-buffered-work";
 import type { SolverDetailFocus, SolverDetailInput } from "../../core/solver-detail";
-import { UniformMixedLayoutBuilder, UNIFORM_MIXED_RELAYOUT_RECEIPT } from "./uniform-mixed-layout-builder";
-import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, type UniformMixedDynamicPolicy } from "./uniform-mixed-dynamic";
+import { UniformMixedLayoutBuilder, UNIFORM_MIXED_RELAYOUT_RECEIPT, uniformMixedRegionTable, type UniformMixedRegion } from "./uniform-mixed-layout-builder";
+import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, uniformMixedTileWord, type UniformMixedDynamicPolicy } from "./uniform-mixed-dynamic";
 import { fluidRegionLattice, refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
 import { uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
@@ -1059,7 +1059,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedFrame.solid!.present=solids||bodies>0;
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
     // The scene uniform: the census marks this frame's drop and inflow plug band on the GPU.
-    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles);
+    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles,this.address.pages[0]*this.address.pages[1]*this.address.pages[2]);
     this.mixedFrame.registerPageOwner(this.mixedDynamic);this.mixedFrame.registerCertificate(this.mixedDynamic);
     this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership);
     this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange});
@@ -1429,7 +1429,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           // Deferred with the edit: its displacement ran on the tiles that were
           // already h. The join and the displacement are made again for the
           // build the grown capacity admits.
-          join.build=undefined;this.mixedDynamic!.join(join.tiles);this.mixedFrame!.editSolids();
+          join.build=undefined;this.mixedDynamic!.join(this.mixedTileWords(join.tiles));this.mixedFrame!.editSolids();
         }else{this.mixedEditJoin=undefined;this.staleMixed();released=true;}
       }
       if(this.mixedStaticsAdded&&r.build>=this.mixedStaticsAdded.build)this.mixedStaticsAdded=undefined;
@@ -1770,32 +1770,45 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       for(let z=tz-1;z<=tz+1;z++)for(let y=ty-1;y<=ty+1;y++)
         for(let x=tx-1;x<=tx+1;x++)if(uniformTileInBox(a,x,y,z))join[uniformBoxTileIndex(a,x,y,z)]=1;
     }
-    this.mixedDynamic!.join(join);this.mixedEditJoin={tiles:join};
+    this.mixedDynamic!.join(this.mixedTileWords(join));this.mixedEditJoin={tiles:join};
   }
-  /** Static h tiles: the detail plan's admitted tiles (Fine regions, focus).
-   * Solid promotion is liquid-conditional, in the census band
-   * (solidActive/solidPromote). Static 4h tiles: Coarse regions outside the
-   * plan, which mask the census band except where a solid could be promoted. */
+  /** The set tiles of a box-shaped tile mask as tile words of the window (uniformMixedTileWord). */
+  private mixedTileWords(mask:Uint8Array):number[]{
+    const a=this.address,p=this.mixedEditTile,words:number[]=[];
+    for(let t=0;t<mask.length;t++)if(mask[t]){uniformBoxTileCoord(a,t,p);words.push(uniformMixedTileWord(p[0],p[1],p[2]));}
+    return words;
+  }
+  /** The scene's Fine and Coarse regions as the builder's and the census's region table. */
+  private mixedRegionTable():Uint32Array<ArrayBuffer>{
+    const lattice=fluidRegionLattice(this.scene),regions:UniformMixedRegion[]=[];
+    for(const r of this.scene.fluid.refinementRegions??[]){
+      const tier=uniformRegionDetailTier(r),box=uniformDetailTileBounds(lattice,{min:r.min_m,max:r.max_m});
+      if(box&&(tier==="fine"||tier==="coarse"))regions.push({min:box.min,max:box.max,kind:tier});
+    }
+    return uniformMixedRegionTable(regions);
+  }
+  /** Static h tiles: the Fine regions' (the region table). Solid promotion
+   * is liquid-conditional, in the census band (solidActive/solidPromote). A
+   * Coarse region outside every Fine one holds no band tile but those a
+   * solid promotes (the census's decide). */
   private refreshMixedBuilderStatics(solid:ReturnType<WebGPUUniformReferenceSolver["mixedSolidPromotion"]>):void{
-    const plan=this.planDetail(),suppressed=this.detailSuppressed!;
-    this.mixedBuilder!.setStatic(plan.fine,Uint8Array.from(suppressed,(s,t)=>s&&!plan.fine[t]&&!solid.forced[t]?1:0));
-    this.mixedDynamic!.setStatic(plan.fine);this.mixedDynamic!.setSolid(solid.coupled);
+    const plan=this.planDetail(),table=this.mixedRegionTable();
+    this.mixedBuilder!.setRegions(table);this.mixedDynamic!.setRegions(table);this.mixedDynamic!.setSolid(this.mixedTileWords(solid.coupled));
     this.mixedStaticsOf=undefined;this.mixedSolidSet=solid.coupled;
     this.holdDetailStaticKey();
     this.publishDetail(plan);
   }
-  /** A requests-only relayout's statics: the request's h tiles, no 4h mask (no
-   * automatic source to mask), and the census's solid mask only when solid
-   * contact is requested. Masks that already mirror this request are moved
-   * by its tiles (the words holding them); a solid mask the census holds is
-   * not written again. */
+  /** A requests-only relayout's statics: the scene's region table (a
+   * Requested or Full policy's request tiles are no longer static h tiles:
+   * the table holds boxes, not a mask), and the census's solid mask only when
+   * solid contact is requested; a solid mask the census holds is not written
+   * again. */
   private refreshRequestStatics(request:NonNullable<WebGPUUniformReferenceSolver["mixedRequest"]>):void{
     const builder=this.mixedBuilder!,dynamic=this.mixedDynamic!,fine=request.tiles.fine;
-    if(this.mixedStaticsOf===request.tiles){builder.editStatic(request.moved,fine);dynamic.editStatic(request.moved,fine);}
-    else{builder.setStatic(fine);dynamic.setStatic(fine);this.mixedStaticsOf=request.tiles;}
+    if(this.mixedStaticsOf!==request.tiles){const table=this.mixedRegionTable();builder.setRegions(table);dynamic.setRegions(table);this.mixedStaticsOf=request.tiles;}
     request.moved.length=0;
     const coupled=request.coupled??(this.mixedNoSolid?.length===fine.length?this.mixedNoSolid:this.mixedNoSolid=new Uint8Array(fine.length));
-    if(coupled!==this.mixedSolidSet){dynamic.setSolid(coupled);this.mixedSolidSet=coupled;}
+    if(coupled!==this.mixedSolidSet){dynamic.setSolid(this.mixedTileWords(coupled));this.mixedSolidSet=coupled;}
     this.holdDetailStaticKey();
   }
   /** A frame's encode or receipt failed: fatal for the solver. */

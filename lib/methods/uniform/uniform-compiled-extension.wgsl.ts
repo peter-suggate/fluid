@@ -50,7 +50,7 @@ fn ueCompiledNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)
  }else{
   // A unit request inside a 4h cell sees its two bounding faces. Each
   // bounding face is either one coarse patch or the h patch at this column.
-  let tile=vec3u(umCellNear(vec3i(point)))/4u;let origin=vec3i(tile*4u);
+  let tile=vec3u(vec3i(point))/4u;let origin=vec3i(tile*4u);
   let fine=umFineFaceSides(umTileAt(tile));
   ${[0,1].map(side=>`{
    let code=2u*component+1u-${side}u;let patchWidth=select(4,1,(fine&(1u<<code))!=0u);

@@ -1,5 +1,5 @@
 import { uniformCompiledVertexResolveWGSL } from "./uniform-compiled-topology";
-import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailClass, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_DETAIL_GUARD_LOAD } from "../../core/uniform-detail-abi";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
@@ -43,8 +43,7 @@ export class UniformMixedPhiResolve {
   }
 
   bind(field: GPUTexture): UniformDetailGroup {
-    const size = this.ownership.capacity.address.vertexBox;
-    if (field.format !== "r32float" || uniformDetailExtent(field).some((n, a) => n !== size[a]))
+    if (field.format !== "r32float" || uniformDetailClass(field) !== "vertex")
       throw new Error("Mixed phi resolve requires a native vertex phi field");
     return uniformDetailGroup(this.device,{ layout: this.resources, entries: [{ binding: 0, resource: field }] });
   }

@@ -1,4 +1,4 @@
-import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailClass, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_PARAMS_BYTES,uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import {UNIFORM_DETAIL_CANONICAL_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import { uniformMixedDetachedMassWGSL } from "./uniform-mixed-detached-mass.wgsl";
@@ -95,13 +95,13 @@ export class UniformMixedPressureVelocity {
  }
  private common(f:CommonFields):GPUBindGroupEntry[]{
   const address=this.ownership.capacity.address;
-  if(f.velocity.format!=="rgba32float"||uniformDetailExtent(f.velocity).some((v,a)=>v!==address.cells[a]))throw new Error("Mixed pressure requires native MAC extent");
+  if(f.velocity.format!=="rgba32float"||uniformDetailClass(f.velocity)!=="face")throw new Error("Mixed pressure requires native MAC extent");
   return [{binding:0,resource:f.velocity},{binding:1,resource:this.scalar(f.negative,address.lowFaceKeys)},
    {binding:2,resource:this.scalar(f.phi,this.ownership.layout.cellCount+(this.coarse?uniformMixedRootMaskWords(this.ownership.layout):0))},{binding:3,resource:{buffer:f.params,size:32}}];
  }
  private topology(t:GPUTexture|undefined):GPUTexture|undefined{
   if(!!t!==(!!this.solid&&!this.coarse))throw new Error("Mixed solid topology binding does not match stage mode");
-  if(t&&(t.format!=="rgba32float"||uniformDetailExtent(t).some((v,a)=>v!==this.ownership.capacity.address.cells[a])))throw new Error("Mixed solid topology requires the native lattice extent");
+  if(t&&(t.format!=="rgba32float"||uniformDetailClass(t)!=="face"))throw new Error("Mixed solid topology requires the native lattice extent");
   return t;
  }
  bindRhs(f:UniformMixedPressureRhsFields):UniformDetailGroup{

@@ -65,12 +65,23 @@
  *  texture sizes UM_CELL_TEXTURE UM_VERTEX_TEXTURE UM_TILE_TEXTURE
  *                UM_WIDE_VERTEX_TEXTURE
  *  static box    UM_BOX UM_BOX_TILES UM_BOX_TILE_COUNT umBoxTileIndex umBoxTileCoord
+ * The static box, the InBox tests, UM_PAGE_BOX, umFaceAnchorNear and the Near
+ * and NearIn forms above are a module's only where its source names a box;
+ * its Texel forms then hold their coordinate in it. Only the renderer's
+ * presentation module names one; no solver module does, so a solver load at
+ * a coordinate off the stored pages reads the AIR or SOLID block.
  * Beside them, for a module whose buffer holds the block neighbour rows
  * (uniformBlockNeighbourWGSL, uniformBlockFaceWGSL):
  *  neighbours    UM_SOLID_WORD umBlockNeighbourIndex umBlockNeighbour umBlockHeld
  *  kind clamps   umCellNearFrom umTileNearFrom umVertexNearFrom umWideVertexNearFrom
- *                umPointNearFrom and their FromPage forms
+ *                umPointNearFrom, their FromPage forms, and the home forms
+ *                umCellNearAt umTileNearAt umVertexNearAt umWideVertexNearAt
+ *                umPointNearAt
  *  block faces   umFaceTile umFaceCell umFaceLevel
+ * and, of the page table alone, in every module:
+ *  read cells    umPointCell
+ *  holds         umPointHeld umPointBounds umBoundedCell umHold
+ *                umVertexCellAbove umVertexCellBelow
  * A module whose extent is a constant expression reads the extents as
  * consts; one whose extent is a runtime expression calls them as functions
  * of the same name, as uniformSceneConstantsWGSL spells its constants.
@@ -83,16 +94,16 @@
  * its high corners, so one table read addresses them all: each vertex's
  * texel (and key) is v's plus its offset from v. With l = v & 31 (v & 7 on
  * the 4h lattice, in tile units) there is a run exactly where, on every
- * axis, l >= 1 and l + n <= 32 (8), 0 <= v and v + n <= the box, and either
- * the page of cell v is stored or l + n < 32 (8). Proof against the slot
- * rule: the vertex v+o, 0 <= o <= n, has its own page from the cell
- * v+o-1, which is in the box (v+o-1 <= box-1), and in v's
+ * axis, l >= 1 and l + n <= 32 (8), and either the page of cell v is
+ * stored or l + n < 32 (8). Proof against the slot rule: the vertex v+o,
+ * 0 <= o <= n, has its own page from the cell v+o-1, which is in v's
  * page since 0 <= l+o-1 <= 31; its local there is l+o, in 1..32. Where that
  * page is stored the slot rule returns exactly (l+o, its block). Where it is
  * not, the rule searches a neighbour's skirt only for a vertex on a page
  * face, (v+o) & 31 == 0, which here means l+o == 32: excluded, so the rule
  * returns (l+o, the page's own word) and a Texel or At form reads block 0 or
- * the last block there. No vertex of a run is clamped: 0 <= v+o <= box. */
+ * the last block there. A run is for a module without a box (every solver
+ * module): its Texel forms hold no coordinate in a box. */
 
 import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_FREE, UNIFORM_PAGE_POOL_KIND, uniformPagePoolBoxSeed, uniformPagePoolLayout, type UniformPagePoolSeed } from "./uniform-page-pool";
 
@@ -101,10 +112,16 @@ type Extent = readonly [number, number, number];
 /** The including module declares umPageWord(page:vec3i)->u32 and
  * umBlockWord(b:u32)->u32 over the buffer that holds the page table for it. */
 export interface UniformLatticeAddressSource {
-  /** vec3u expression: the box in cells. */
-  readonly cells: string;
-  /** vec3u expression: the box in tiles. */
-  readonly tiles: string;
+  /** vec3u expressions, the box in cells and in tiles, of a module that
+   * names a box: it gets the static box, the InBox tests and the box clamps
+   * (umTileNear, umCellNear, umVertexNear, umWideVertexNear, umPointNear,
+   * umPointNearIn, umFaceAnchorNear, UM_PAGE_BOX), and its Texel forms hold
+   * their coordinate in the box. Without it none of those is emitted and a
+   * Texel form resolves any coordinate through the page table. */
+  readonly box?: { readonly cells: string; readonly tiles: string };
+  /** box.cells and box.tiles, spelled beside the other fields: both or neither, and never with box. */
+  readonly cells?: string;
+  readonly tiles?: string;
   /** The expressions are constant expressions. */
   readonly constant: boolean;
   /** blocks: u32 expression, the pool's blocks (UM_BLOCKS). */
@@ -125,9 +142,17 @@ export const UNIFORM_PAGE_TABLE_WORDS = UNIFORM_PAGE_WINDOW ** 3;
 export const UNIFORM_KIND = UNIFORM_PAGE_POOL_KIND;
 
 export function uniformLatticeAddressWGSL(source: UniformLatticeAddressSource): string {
+  if ((source.cells === undefined) !== (source.tiles === undefined) || (source.box && source.cells !== undefined)) throw new Error("Uniform lattice address source: a box is box, or cells and tiles together");
+  const box = source.box ?? (source.cells !== undefined && source.tiles !== undefined ? { cells: source.cells, tiles: source.tiles } : undefined);
   // A runtime extent is evaluated once per function.
-  const d = source.constant ? source.cells : "d", t = source.constant ? source.tiles : "t";
-  const D = source.constant ? "" : `let d=${source.cells};`, T = source.constant ? "" : `let t=${source.tiles};`;
+  const d = !box || source.constant ? box?.cells : "d", t = !box || source.constant ? box?.tiles : "t";
+  const D = !box || source.constant ? "" : `let d=${box.cells};`, T = !box || source.constant ? "" : `let t=${box.tiles};`;
+  // Text of a module that names a box alone.
+  const boxed = (text: string) => box ? text : "";
+  // The coordinate a Texel form resolves: p held in the box, or p.
+  const [tileLet, tileQ] = box ? [`${T}let q=vec3i(min(vec3u(p),${t}-vec3u(1u)));`, "q"] : ["", "p"];
+  const [cellLet, cellQ] = box ? [`${D}let q=vec3i(min(vec3u(p),${d}-vec3u(1u)));`, "q"] : ["", "p"];
+  const vertexQ = box ? `vec3i(min(vec3u(p),${d}))` : "p", wideQ = box ? `vec3i(min(vec3u(p),${t}))` : "p";
   const extent = (name: string, type: string, lets: string, value: string) => source.constant
     ? `const ${name}:${type}=${value};` : `fn ${name}()->${type}{${lets}return ${value};}`;
   // An extent this function emits, read where it is a const or a function.
@@ -152,7 +177,7 @@ fn umBlockStored(b:u32)->bool{return b-1u<${blocks}-2u;}
 fn umBlockOf(page:vec3i)->u32{return min(umPageWord(page),${blocks}-1u);}
 fn umBlockPage(b:u32)->vec3u{let r=umBlockWord(b);return vec3u(r&63u,(r>>6u)&63u,(r>>12u)&63u);}
 
-// Tiles. Present: stored. Near: the nearest coordinate of the box. Live: the
+${box ? `// Tiles. Present: stored. Near: the nearest coordinate of the box. Live: the
 // key holds a tile (its block holds a page, and the tile lies in the box).
 // Texel: where a tile-resolution texture stores the tile of min(vec3u(p),
 // box - 1): a coordinate past the box reads the box's edge, one below it the
@@ -161,21 +186,27 @@ fn umBlockPage(b:u32)->vec3u{let r=umBlockWord(b);return vec3u(r&63u,(r>>6u)&63u
 // (a store there is dropped). At: the key of a tile of the box, a key of
 // block 0 or of the last block where nothing is stored. Key: umTileAt of a
 // stored tile, a key umKeyStored refuses of any other; the one form to ask
-// of a coordinate whose own state is wanted.
+// of a coordinate whose own state is wanted.` : `// Tiles. Present: stored. Live: the key holds a tile (its block holds a
+// page). Texel: where a tile-resolution texture stores tile p: a tile with
+// nothing stored reads its page's block 0 or last block. StoreTexel: that
+// texel of a stored tile, negative of any other (a store there is dropped).
+// At: the key of a tile, a key of block 0 or of the last block where nothing
+// is stored. Key: umTileAt of a stored tile, a key umKeyStored refuses of
+// any other; the one form to ask of a coordinate whose own state is wanted.`}
 fn umTilePresent(p:vec3i)->bool{return umBlockStored(umPageWord(p>>vec3u(3u)));}
-fn umTileNear(p:vec3i)->vec3i{${T}return clamp(p,vec3i(0),vec3i(${t})-vec3i(1));}
-fn umTileAt(p:vec3u)->u32{return 512u*umBlockOf(vec3i(p>>vec3u(3u)))+umTileLocal(p);}
+${boxed(`fn umTileNear(p:vec3i)->vec3i{${T}return clamp(p,vec3i(0),vec3i(${t})-vec3i(1));}
+`)}fn umTileAt(p:vec3u)->u32{return 512u*umBlockOf(vec3i(p>>vec3u(3u)))+umTileLocal(p);}
 fn umTileCoord(k:u32)->vec3u{return (umBlockPage(k>>9u)<<vec3u(3u))|umLocalTile(k);}
 fn umTileLive(k:u32)->bool{return k<${keys}&&umBlockWord(k>>9u)!=UM_FREE;}
-fn umTileTexel(p:vec3i)->vec3i{${T}let q=vec3i(min(vec3u(p),${t}-vec3u(1u)));return (umBlockCoord(umBlockOf(q>>vec3u(3u)))<<vec3u(3u))|(q&vec3i(7));}
+fn umTileTexel(p:vec3i)->vec3i{${tileLet}return (umBlockCoord(umBlockOf(${tileQ}>>vec3u(3u)))<<vec3u(3u))|(${tileQ}&vec3i(7));}
 fn umTileStoreTexel(p:vec3i)->vec3i{let b=umPageWord(p>>vec3u(3u));if(!umBlockStored(b)){return vec3i(-1);}return (umBlockCoord(b)<<vec3u(3u))|(p&vec3i(7));}
 fn umTileKey(p:vec3i)->u32{let b=umPageWord(p>>vec3u(3u));if(!umBlockStored(b)){return ${keys};}return 512u*b+umTileLocal(vec3u(p));}
-// Cells. umPointNear clamps a position in cell units to the box.
+// Cells.${boxed(" umPointNear clamps a position in cell units to the box.")}
 fn umCellPresent(p:vec3i)->bool{return umBlockStored(umPageWord(p>>vec3u(5u)));}
-fn umCellNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(0),vec3i(${d})-vec3i(1));}
-fn umCellTexel(p:vec3i)->vec3i{${D}let q=vec3i(min(vec3u(p),${d}-vec3u(1u)));return (umBlockCoord(umBlockOf(q>>vec3u(5u)))<<vec3u(5u))|(q&vec3i(31));}
+${boxed(`fn umCellNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(0),vec3i(${d})-vec3i(1));}
+`)}fn umCellTexel(p:vec3i)->vec3i{${cellLet}return (umBlockCoord(umBlockOf(${cellQ}>>vec3u(5u)))<<vec3u(5u))|(${cellQ}&vec3i(31));}
 fn umCellStoreTexel(p:vec3i)->vec3i{let b=umPageWord(p>>vec3u(5u));if(!umBlockStored(b)){return vec3i(-1);}return (umBlockCoord(b)<<vec3u(5u))|(p&vec3i(31));}
-// The block of a cell of the box.
+// The block of a cell${boxed(" of the box")}.
 fn umCellBlock(p:vec3u)->u32{return umBlockOf(vec3i(p>>vec3u(5u)));}
 // Vertices of the h lattice: one more plane per axis than the cells. A page
 // stores the high corners of its cells (local 1..32 of its 33³ block) and a
@@ -184,10 +215,13 @@ fn umCellBlock(p:vec3u)->u32{return umBlockOf(vec3i(p>>vec3u(5u)));}
 // touches the vertex, stepping up from its own page over the axes on which
 // it lies on a page face, holds it in its skirt. Slot: (local, block); the
 // block is its own page's word where no stored page touches the vertex.
-// Present: stored. Texel: where a vertex texture stores the vertex of
+${box ? `// Present: stored. Texel: where a vertex texture stores the vertex of
 // min(vec3u(p), box), in its own page's block 0 or last block where no
 // stored page touches it. StoreTexel: that texel of a stored vertex,
-// negative of any other (a store there is dropped).
+// negative of any other (a store there is dropped).` : `// Present: stored. Texel: where a vertex texture stores vertex p, in its
+// own page's block 0 or last block where no stored page touches it.
+// StoreTexel: that texel of a stored vertex, negative of any other (a store
+// there is dropped).`}
 fn umVertexSlot(v:vec3i)->vec4u{
  let c=(v-vec3i(1));let page=c>>vec3u(5u);let own=vec3u(c&vec3i(31))+vec3u(1u);
  let b=umPageWord(page);if(umBlockStored(b)){return vec4u(own,b);}
@@ -201,7 +235,7 @@ fn umVertexSlot(v:vec3i)->vec4u{
  return vec4u(own,b);
 }
 fn umVertexPresent(p:vec3i)->bool{return umBlockStored(umVertexSlot(p).w);}
-fn umVertexTexel(p:vec3i)->vec3i{${D}let s=umVertexSlot(vec3i(min(vec3u(p),${d})));let c=umBlockCoord(min(s.w,${blocks}-1u));return (c<<vec3u(5u))+c+vec3i(s.xyz);}
+fn umVertexTexel(p:vec3i)->vec3i{${D}let s=umVertexSlot(${vertexQ});let c=umBlockCoord(min(s.w,${blocks}-1u));return (c<<vec3u(5u))+c+vec3i(s.xyz);}
 fn umVertexStoreTexel(p:vec3i)->vec3i{let s=umVertexSlot(p);if(!umBlockStored(s.w)){return vec3i(-1);}let c=umBlockCoord(s.w);return (c<<vec3u(5u))+c+vec3i(s.xyz);}
 // Vertices of the 4h lattice (tile corners), in tile units: 9³ blocks.
 fn umWideVertexSlot(v:vec3i)->vec4u{
@@ -217,7 +251,7 @@ fn umWideVertexSlot(v:vec3i)->vec4u{
  return vec4u(own,b);
 }
 fn umWideVertexPresent(p:vec3i)->bool{return umBlockStored(umWideVertexSlot(p).w);}
-fn umWideVertexTexel(p:vec3i)->vec3i{${T}let s=umWideVertexSlot(vec3i(min(vec3u(p),${t})));let c=umBlockCoord(min(s.w,${blocks}-1u));return (c<<vec3u(3u))+c+vec3i(s.xyz);}
+fn umWideVertexTexel(p:vec3i)->vec3i{${T}let s=umWideVertexSlot(${wideQ});let c=umBlockCoord(min(s.w,${blocks}-1u));return (c<<vec3u(3u))+c+vec3i(s.xyz);}
 fn umWideVertexStoreTexel(p:vec3i)->vec3i{let s=umWideVertexSlot(p);if(!umBlockStored(s.w)){return vec3i(-1);}let c=umBlockCoord(s.w);return (c<<vec3u(3u))+c+vec3i(s.xyz);}
 // Kinds: what a page holds, from the table (an open top is its AIR words).
 fn umPageKind(page:vec3i)->u32{let w=umPageWord(page);return select(select(UM_RESIDENT,UM_SOLID,w>=${blocks}-1u),UM_AIR,w==0u);}
@@ -233,9 +267,9 @@ fn umTileLowOpen(origin:vec3i)->vec3<bool>{var m=vec3<bool>(false);
  return m;}
 `;
   return /* wgsl */ `
-// The box in pages (a partial last page counts) and the pool's blocks: block
+${box ? `// The box in pages (a partial last page counts) and the pool's blocks: block
 // 0 and the last hold no page.
-${extent("UM_PAGE_BOX", "vec3u", D, `(${d}+vec3u(31u))/32u`)}
+${extent("UM_PAGE_BOX", "vec3u", D, `(${d}+vec3u(31u))/32u`)}` : "// The pool's blocks: block 0 and the last hold no page."}
 ${extent("UM_BLOCKS", "u32", "", source.paged.blocks)}
 // The block grid: where a cell, face or tile texture stores each block's
 // page, block b at umBlockCoord(b) blocks from the texture's origin. x and y
@@ -259,10 +293,10 @@ ${extent("UM_CELL_TEXTURE", "vec3u", "", `32u*${grid}`)}
 ${extent("UM_VERTEX_TEXTURE", "vec3u", "", `33u*${grid}`)}
 ${extent("UM_TILE_TEXTURE", "vec3u", "", `8u*${grid}`)}
 ${extent("UM_WIDE_VERTEX_TEXTURE", "vec3u", "", `9u*${grid}`)}
-// The static resident box in cells and tiles: the extent of storage an
+${boxed(`// The static resident box in cells and tiles: the extent of storage an
 // algorithm shapes as one box of its own (never of a shared table or field).
-${extent("UM_BOX", "vec3u", D, d)}
-${extent("UM_BOX_TILES", "vec3u", T, t)}
+${extent("UM_BOX", "vec3u", D, `${d}`)}
+${extent("UM_BOX_TILES", "vec3u", T, `${t}`)}
 ${extent("UM_BOX_TILE_COUNT", "u32", T, `${t}.x*${t}.y*${t}.z`)}
 // A tile's index in that box, and the tile of an index: what box-shaped
 // storage and the host's per-tile words are indexed by. Never a tile key.
@@ -271,7 +305,7 @@ fn umBoxTileCoord(i:u32)->vec3u{${T}return vec3u(i%${t}.x,(i/${t}.x)%${t}.y,i/($
 // Inside the box, whatever is stored there.
 fn umTileInBox(p:vec3i)->bool{${T}return all(p>=vec3i(0))&&all(p<vec3i(${t}));}
 fn umCellInBox(p:vec3i)->bool{${D}return all(p>=vec3i(0))&&all(p<vec3i(${d}));}
-const UM_RESIDENT:u32=0u;const UM_AIR:u32=1u;const UM_SOLID:u32=2u;
+`)}const UM_RESIDENT:u32=0u;const UM_AIR:u32=1u;const UM_SOLID:u32=2u;
 ${pagedBodies}
 fn umKeyStored(k:u32)->bool{return k<${keys};}
 // A cell's key is its tile's key then its index in the tile, x fastest.
@@ -280,10 +314,10 @@ fn umCellCoord(k:u32)->vec3u{return (umTileCoord(k>>6u)<<vec3u(2u))|vec3u(k&3u,(
 fn umCellLive(k:u32)->bool{return umTileLive(k>>6u);}
 // Keys of the four cells from p along x (p.x a multiple of four).
 fn umCellRowAt(p:vec3u)->vec4u{let k=umCellAt(p);return vec4u(k,k+1u,k+2u,k+3u);}
-fn umPointNear(p:vec3f)->vec3f{${D}return clamp(p,vec3f(0.0),vec3f(${d}));}
+${boxed(`fn umPointNear(p:vec3f)->vec3f{${D}return clamp(p,vec3f(0.0),vec3f(${d}));}
 // umPointNear kept inset cell units inside the stored box.
 fn umPointNearIn(p:vec3f,inset:f32)->vec3f{${D}return clamp(p,vec3f(inset),vec3f(${d})-vec3f(inset));}
-// A position in cell units: its cell is stored; the kind of its cell.
+`)}// A position in cell units: its cell is stored; the kind of its cell.
 fn umPointPresent(p:vec3f)->bool{return umCellPresent(vec3i(floor(p)));}
 fn umPointKind(p:vec3f)->u32{return umCellKind(vec3i(floor(p)));}
 // The kind of the cell step cells from p along axis.
@@ -291,23 +325,23 @@ fn umAcrossKind(p:vec3i,axis:u32,step:i32)->u32{var q=p;q[axis]+=step;return umC
 // Low faces: the face above anchor along axis has no stored cell below it,
 // so its value lives in a low-face table at umLowFaceIndex of the cell above
 // it, which lies on its page's low plane along axis (p[axis] is not read):
-// three 32x32 planes a block. umFaceAnchorNear: the nearest anchor of a face
-// with a stored cell above it.
+// three 32x32 planes a block.${boxed(` umFaceAnchorNear: the nearest anchor of a face
+// with a stored cell above it.`)}
 ${extent("UM_LOW_FACE_KEYS", "u32", "", `3072u*${blocks}`)}
 fn umFaceLow(anchor:vec3i,axis:u32)->bool{return anchor[axis]<0;}
-fn umFaceAnchorNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(-1),vec3i(${d})-vec3i(1));}
-fn umLowFaceIndex(p:vec3u,axis:u32)->u32{
+${boxed(`fn umFaceAnchorNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(-1),vec3i(${d})-vec3i(1));}
+`)}fn umLowFaceIndex(p:vec3u,axis:u32)->u32{
  let l=p&vec3u(31u);let uv=select(select(l.xy,l.xz,axis==1u),l.yz,axis==0u);
  return ((umCellBlock(p)*3u+axis)<<10u)|uv.x|(uv.y<<5u);
 }
 // A stored h vertex's key: its block, then its texel in the block, x
-// fastest; and the vertex of a key a stored vertex has. Near: the nearest
-// vertex of the box.
+// fastest; and the vertex of a key a stored vertex has.${boxed(` Near: the nearest
+// vertex of the box.`)}
 fn umVertexAt(p:vec3u)->u32{let s=umVertexSlot(vec3i(p));return 35937u*min(s.w,${blocks}-1u)+s.x+33u*(s.y+33u*s.z);}
 fn umVertexCoord(k:u32)->vec3u{let l=k%35937u;return (umBlockPage(k/35937u)<<vec3u(5u))+vec3u(l%33u,(l/33u)%33u,l/1089u);}
-fn umVertexNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(0),vec3i(${d}));}
+${boxed(`fn umVertexNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(0),vec3i(${d}));}
 fn umWideVertexNear(q:vec3i)->vec3i{${T}return clamp(q,vec3i(0),vec3i(${t}));}
-`;
+`)}${uniformPointCellWGSL}`;
 }
 
 /** Block neighbours: what lies around each block, by block.
@@ -337,7 +371,10 @@ fn umWideVertexNear(q:vec3i)->vec3i{${T}return clamp(q,vec3i(0),vec3i(${t}));}
  * neighbour. home is a stored block (a kernel's own); p lies in home's page
  * or in one of the 26 around it (a farther reach asks again from the page it
  * has reached). The FromPage forms take home's page from a caller that
- * holds it and read no block record.
+ * holds it and read no block record. The At forms take home as a coordinate
+ * of the page and read nothing for a p inside it; a home in an AIR page
+ * holds nothing (block 0's row is AIR throughout) and one in a SOLID page
+ * holds every leaving axis (the last block's row is SOLID throughout).
  *
  * Diagonals. p leaves home on up to three axes; d is the step, -1, 0 or 1
  * an axis. First each leaving axis alone: it is held where the face
@@ -386,6 +423,119 @@ fn umTileNearFrom(home:u32,p:vec3i)->vec3i{return umTileNearFromPage(home,vec3i(
 fn umVertexNearFrom(home:u32,p:vec3i)->vec3i{return umVertexNearFromPage(home,vec3i(umBlockPage(home)),p);}
 fn umWideVertexNearFrom(home:u32,q:vec3i)->vec3i{return umWideVertexNearFromPage(home,vec3i(umBlockPage(home)),q);}
 fn umPointNearFrom(home:u32,p:vec3f)->vec3f{return umPointNearFromPage(home,vec3i(umBlockPage(home)),p);}
+// Home forms: home is any cell (tile, of the two in tile units) of the
+// reader's own page, whatever that page holds. A coordinate of that page is
+// returned before any table word is read; one that leaves it reads the
+// page's word and its block's row.
+fn umCellNearAt(home:vec3i,p:vec3i)->vec3i{
+ let page=home>>vec3u(5u);let low=page<<vec3u(5u);
+ if(all(p>=low)&&all(p<=low+vec3i(31))){return p;}
+ return umSpanNearFrom(umBlockOf(page),low,low+vec3i(31),p);
+}
+fn umTileNearAt(home:vec3i,p:vec3i)->vec3i{
+ let page=home>>vec3u(3u);let low=page<<vec3u(3u);
+ if(all(p>=low)&&all(p<=low+vec3i(7))){return p;}
+ return umSpanNearFrom(umBlockOf(page),low,low+vec3i(7),p);
+}
+fn umVertexNearAt(home:vec3i,p:vec3i)->vec3i{
+ let page=home>>vec3u(5u);let low=page<<vec3u(5u);
+ if(all(p>=low)&&all(p<=low+vec3i(32))){return p;}
+ return umSpanNearFrom(umBlockOf(page),low,low+vec3i(32),p);
+}
+fn umWideVertexNearAt(home:vec3i,q:vec3i)->vec3i{
+ let page=home>>vec3u(3u);let low=page<<vec3u(3u);
+ if(all(q>=low)&&all(q<=low+vec3i(8))){return q;}
+ return umSpanNearFrom(umBlockOf(page),low,low+vec3i(8),q);
+}
+fn umPointNearAt(home:vec3i,p:vec3f)->vec3f{
+ let page=home>>vec3u(5u);let low=vec3f(page<<vec3u(5u));
+ if(all(p>=low)&&all(p<=low+vec3f(32.0))){return p;}
+ return umPointNearFromPage(umBlockOf(page),page,p);
+}
+`;
+
+/** The cell a position or a vertex is read from, of the page table alone
+ * (umCellKind): every uniformLatticeAddressWGSL text ends with it. */
+const uniformPointCellWGSL = /* wgsl */ `
+// The cell a point (in cell units) is read from: the one it lies in. A point
+// on a page face, edge or corner lies in every page that meets there: where
+// the high side's is not stored the cell is that of the first stored one of
+// the others (the low side on x first), so a point on a wall, or on the face
+// of an AIR page, is read from the stored page it bounds. The page table is
+// read only for a point on a page face.
+fn umPointCell(p:vec3f)->vec3i{
+ let c=vec3i(floor(p));let on=((c&vec3i(31))==vec3i(0))&(p==vec3f(c));
+ if(!any(on)||umCellKind(c)==UM_RESIDENT){return c;}
+ let faces=u32(on.x)|(u32(on.y)<<1u)|(u32(on.z)<<2u);
+ for(var low=1u;low<8u;low++){
+  if((low&faces)!=low){continue;}
+  let q=c-vec3i(vec3u(low&1u,(low>>1u)&1u,low>>2u));
+  if(umCellKind(q)==UM_RESIDENT){return q;}
+ }
+ return c;
+}
+// A position held out of SOLID pages: a point in a SOLID page (its cell's)
+// moves back onto the page's nearer face, by umSpanHeld's choice of axes
+// (uniformMixedSolidHoldWGSL). A point on a wall's plane stays.
+fn umPointHeld(p:vec3f)->vec3f{
+ let page=vec3i(floor(p))>>vec3u(5u);if(umPageKind(page)!=UM_SOLID){return p;}
+ let low=vec3f(page<<vec3u(5u));let l=p-low;
+ let up=l>=vec3f(16.0);let d=select(vec3i(-1),vec3i(1),up);
+ let out=low+select(vec3f(0.0),vec3f(32.0),up);let depth=select(l,vec3f(32.0)-l,up);
+ var best=3u;
+ for(var a=0u;a<3u;a++){
+  var e=vec3i(0);e[a]=d[a];
+  if(umPageKind(page+e)!=UM_SOLID&&(best==3u||depth[a]<depth[best])){best=a;}
+ }
+ if(best<3u){var q=p;q[best]=out[best];return q;}
+ for(var a=0u;a<3u;a++){var e=d;e[a]=0;if(umPageKind(page+e)!=UM_SOLID){var q=out;q[a]=p[a];return q;}}
+ if(umPageKind(page+d)!=UM_SOLID){return out;}
+ return p;
+}
+// The walls around a sample point: lo and hi bound, on each axis, the
+// stored or AIR span the point's taps may read, at the face of a SOLID page
+// beside the point's page (the page of floor(p); where that page is SOLID,
+// p on or just past its face, at that face on the side the point came
+// from), and are -1e9 / 1e9 where none is. A sampler clamps its tap base
+// to them as it did to the box: on a closed box they are 0 and the box. A
+// point further than margin cells from every face of its page reads no
+// table word and has no walls (a point deep in a SOLID page is a caller's
+// error). Loop-free: seven page words, behind one branch.
+struct umBounds {lo:vec3f,hi:vec3f}
+fn umPointBounds(p:vec3f,margin:f32)->umBounds{
+ var b=umBounds(vec3f(-1e9),vec3f(1e9));
+ let c=vec3i(floor(p));let page=c>>vec3u(5u);let low=vec3f(page<<vec3u(5u));let l=p-low;
+ if(all(l>=vec3f(margin))&&all(l<vec3f(32.0-margin))){return b;}
+ let high=low+vec3f(32.0);
+ let solidBelow=vec3<bool>(umPageKind(page-vec3i(1,0,0))==UM_SOLID,umPageKind(page-vec3i(0,1,0))==UM_SOLID,umPageKind(page-vec3i(0,0,1))==UM_SOLID);
+ let solidAbove=vec3<bool>(umPageKind(page+vec3i(1,0,0))==UM_SOLID,umPageKind(page+vec3i(0,1,0))==UM_SOLID,umPageKind(page+vec3i(0,0,1))==UM_SOLID);
+ if(umPageKind(page)!=UM_SOLID){b.lo=select(b.lo,low,solidBelow);b.hi=select(b.hi,high,solidAbove);return b;}
+ let below=!solidBelow&(solidAbove|(l<vec3f(16.0)));
+ b.hi=select(b.hi,low,below);b.lo=select(b.lo,high,!solidAbove&!below);return b;
+}
+// The cell of a point held to its walls: on a wall's plane the cell inside.
+fn umBoundedCell(p:vec3f,b:umBounds)->vec3i{return vec3i(clamp(floor(p),b.lo,b.hi-vec3f(1.0)));}
+// The walls of the sample point being taken: a sampler's entry (a velocity
+// sample's umSampleTile, umSampleVelocity) sets it once, with the margin of
+// its widest reach, and every interpolant and tap of that sample reads it.
+// Unset it is no wall.
+var<private> umHold:umBounds=umBounds(vec3f(-1e9),vec3f(1e9));
+// The cells of a vertex off SOLID pages, of one page word behind one branch:
+// the cell above (cell p), or below on its page-face axes where that cell's
+// page is SOLID (a far wall); the cell below (p - 1), or above on its
+// page-face axes where that one's page is SOLID (a low wall). Each is a cell
+// incident to p; on a closed box, umCellNear(p) and umCellNear(p - 1) but
+// at a wall's page edge, where it may step off an inner page face too.
+fn umVertexCellAbove(p:vec3i)->vec3i{
+ let on=(p&vec3i(31))==vec3i(0);
+ if(!any(on)||umCellKind(p)!=UM_SOLID){return p;}
+ return p-vec3i(on);
+}
+fn umVertexCellBelow(p:vec3i)->vec3i{
+ let on=(p&vec3i(31))==vec3i(0);let c=p-vec3i(1);
+ if(!any(on)||umCellKind(c)!=UM_SOLID){return c;}
+ return c+vec3i(on);
+}
 `;
 
 /** Block faces: one index family for what lives on the six faces of a
@@ -496,9 +646,9 @@ export interface UniformLatticeBox {
  * corners (each then at v's texel and key plus its offset from v), as a Texel form resolves it; vec4u(0), no slot,
  * where they are not: ask each. */
 export function uniformLatticeRunWGSL(prefix = ""): string {
-  const run = (name: string, bits: number, inBox: string) => `fn ${prefix}um${name}Run(v:vec3i,n:u32)->vec4u{
- let l=vec3u(v)&vec3u(${(1 << bits) - 1}u);let page=v>>vec3u(${bits}u);
- if(any(l==vec3u(0u))||any(l+n>vec3u(${1 << bits}u))||!${prefix}${inBox}(v+vec3i(i32(n)-1))){return vec4u(0u);}
+  const run = (name: string, bits: number) => `fn ${prefix}um${name}Run(v:vec3i,n:u32)->vec4u{
+ let l=vec3u(v&vec3i(${(1 << bits) - 1}));let page=v>>vec3u(${bits}u);
+ if(any(l==vec3u(0u))||any(l+n>vec3u(${1 << bits}u))){return vec4u(0u);}
  let b=${prefix}umPageWord(page);
  if(${prefix}umBlockStored(b)){return vec4u(l,b);}
  if(any(l+n==vec3u(${1 << bits}u))){return vec4u(0u);}
@@ -506,8 +656,8 @@ export function uniformLatticeRunWGSL(prefix = ""): string {
 }
 fn ${prefix}um${name}RunTexel(s:vec4u)->vec3i{let c=${prefix}umBlockCoord(s.w);return (c<<vec3u(${bits}u))+c+vec3i(s.xyz);}
 `;
-  return `${run("Vertex", 5, "umCellInBox")}fn ${prefix}umVertexRunAt(s:vec4u)->u32{return 35937u*s.w+s.x+33u*(s.y+33u*s.z);}
-${run("WideVertex", 3, "umTileInBox")}`;
+  return `${run("Vertex", 5)}fn ${prefix}umVertexRunAt(s:vec4u)->u32{return 35937u*s.w+s.x+33u*(s.y+33u*s.z);}
+${run("WideVertex", 3)}`;
 }
 
 /** A lattice is a whole number of pages on every axis: its walls, its floor

@@ -1,10 +1,9 @@
 import { uniformCachedMomentumSamplingWGSL } from "./uniform-cached-momentum.wgsl";
 import { uniformCoarseCacheExtent } from "./uniform-coarse-velocity-cache";
-import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailClass, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
-import { uniformMixedSolidHoldPointWGSL } from "./uniform-mixed-walls.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-source.wgsl";
@@ -60,8 +59,12 @@ var<workgroup> umUnitEscapes:array<atomic<u32>,2>;
  var value=0.0;umUnitEscaped=false;
  if(owner.width!=0u){
   let origin=umOrigin(owner);
-  if(umLowOpen(vec3i(origin))[axis]){boundary[umLowFaceIndex(origin,axis)]=umUnitMomentum(owner,umFace(owner,axis,-1,0u));}
-  value=umUnitMomentum(owner,umFace(owner,axis,1,0u));
+  // One umUnitMomentum site: the low boundary face where it is open, then the positive one.
+  let low=umLowOpen(vec3i(origin))[axis];
+  for(var sign=select(1,-1,low);sign<=1;sign+=2){
+   let v=umUnitMomentum(owner,umFace(owner,axis,sign,0u));
+   if(sign<0){boundary[umLowFaceIndex(origin,axis)]=v;}else{value=v;}
+  }
   if(umUnitEscaped){atomicOr(&umUnitEscapes[cell/32u],1u<<(cell%32u));}
  }
  umUnitComponents[lane]=value;workgroupBarrier();
@@ -184,9 +187,9 @@ export class UniformMixedMomentum {
     if(this.cullAir&&!fields.centerPhi)throw new Error("Prediction culling requires current center phi");
     if(this.hanging!==(fields.unitVelocity!==undefined))throw new Error("Mixed momentum hanging taps require their unit velocity texture");
     const textures = [fields.extended, fields.physical, fields.phase, fields.volume];
-    const address = this.ownership.capacity.address, d = address.cells;
+    const address = this.ownership.capacity.address;
     for (const [i, texture] of [...textures, fields.output].entries()) {
-      if (uniformDetailExtent(texture).some((n, a) => n !== d[a])
+      if (uniformDetailClass(texture) !== (i === 2 || i === 3 ? "cell" : "face")
         || texture.format !== (i === 2 || i === 3 ? "r32float" : "rgba32float")) throw new Error("Mixed momentum requires native-sized canonical fields");
     }
     for(const t of [fields.coarseExtended])
@@ -229,12 +232,11 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32 {
  if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(vec3u(max(anchor,vec3i(0))),axis)];}return textureLoad(extended,anchor,0)[axis];
 }
 ${uniformMixedVelocitySamplingSource(false,"coarseExtended","extended",this.hanging?2:undefined,this.hanging?"unitVelocity":undefined)}
-${uniformMixedSolidHoldPointWGSL}
 // A departure stops at a wall, a face with a SOLID page across it, and
 // nowhere else: it runs on into an AIR page.
 fn umClampMomentum(p:vec3f)->vec3f {return umPointHeld(p);}
 fn umMomentumDeparture(position:vec3f,dt:f32,h:vec3f)->vec3f {
-${uniformVelocityDepartureWGSL("umSampleVelocity", "umClampMomentum", "select(f32(umOwnerAt(umCellNear(vec3i(floor(point)))).width),1.0,umRegularFine)", "32")}
+${uniformVelocityDepartureWGSL("umSampleVelocity", "umClampMomentum", "select(f32(umOwnerAt(umBoundedCell(point,umHold)).width),1.0,umRegularFine)", "32")}
 }
 fn umOriginalMomentum(face:UMFace)->f32 {
  if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
@@ -295,8 +297,12 @@ var<workgroup> umMomentumComponents:array<f32,192>;
  var value=0.0;
  if(owner.width!=0u){
   let origin=umOrigin(owner);
-  if(umLowOpen(vec3i(origin))[axis]){boundary[umLowFaceIndex(origin,axis)]=umMomentum(owner,umRegularMomentumFace(owner,axis,-1));}
-  value=umMomentum(owner,umRegularMomentumFace(owner,axis,1));
+  // One umMomentum site: the low boundary face where it is open, then the positive one.
+  let low=umLowOpen(vec3i(origin))[axis];
+  for(var sign=select(1,-1,low);sign<=1;sign+=2){
+   let v=umMomentum(owner,umRegularMomentumFace(owner,axis,sign));
+   if(sign<0){boundary[umLowFaceIndex(origin,axis)]=v;}else{value=v;}
+  }
  }
  umMomentumComponents[lane]=value;workgroupBarrier();
  if(lane<64u&&owner.width!=0u){textureStore(output,vec3i(umOrigin(owner)),vec4f(umMomentumComponents[cell],umMomentumComponents[cell+64u],umMomentumComponents[cell+128u],0));}

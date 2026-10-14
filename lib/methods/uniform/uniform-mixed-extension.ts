@@ -1,7 +1,7 @@
 import { uniformMixedExtensionSlotWGSL } from "./uniform-mixed-extension-slots.wgsl";
 import { uniformCompiledExtensionNeighborWGSL } from "./uniform-compiled-extension.wgsl";
 import { pairedExtensionSource, pairedSnapshotSource, replayedPublicationSource } from "./uniform-mixed-extension-pair.wgsl";
-import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailClass, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformLatticeAddress } from "./uniform-lattice-address";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import type { WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
@@ -140,8 +140,7 @@ export class UniformMixedExtension {
   }
  }
  bind(f:Fields):readonly [UniformDetailGroup,UniformDetailGroup]{
-  const d=this.address.cells;
-  for(const [i,t] of [f.physical,f.phase,f.output].entries())if(t.format!==(i===1?"r32float":"rgba32float")||uniformDetailExtent(t).some((n,a)=>n!==d[a]))throw new Error("Mixed extension requires native canonical fields");
+  for(const [i,t] of [f.physical,f.phase,f.output].entries())if(t.format!==(i===1?"r32float":"rgba32float")||uniformDetailClass(t)!==(i===1?"cell":"face"))throw new Error("Mixed extension requires native canonical fields");
   if(f.physical===f.output||f.negative===f.outputNegative)throw new Error("Mixed extension outputs must be disjoint");
   const size=this.slotBytesAt(this.ownership.capacity.fineTiles),offset=f.scratch.offset??0;
   if((f.scratch.size??f.scratch.buffer.size-offset)<2*size)throw new Error("Mixed extension scratch is too small");
@@ -234,15 +233,19 @@ fn ueTileWord(t:vec3u)->u32{
 
 // The shared sampler source needs this symbol; no entry of this module samples.
 fn umLoadMixedFace(p:vec3i,axis:u32)->f32{return stateIn[umSlot(p,axis,1u)].x;}
-// A slot is written only by the owner holding its (clamped) anchor cell. Off
-// the extension support no pass writes it: its seed would be distance INF (a
-// source face needs a liquid owner, which the support dilates around), and a
-// value beside an infinite distance is never consumed. A slot is read only as
-// the patch of that width at that anchor, which its owner writes every pass.
+// A slot is written only by the owner holding its anchor cell (a low face's:
+// the cell above it), wherever that cell is stored: the slot and its support
+// word are that cell's own. Off the extension support no pass writes it: its
+// seed would be distance INF (a source face needs a liquid owner, which the
+// support dilates around), and a value beside an infinite distance is never
+// consumed. A slot is read only as the patch of that width at that anchor,
+// which its owner writes every pass. The arrays are the frame's stage
+// scratch: a slot no pass of this extension wrote holds another stage's
+// words.
 fn umSlotState(anchor:vec3i,axis:u32,width:u32)->vec2f{
- let tile=umTileAt(vec3u(umCellNear(anchor))/4u);
+ let tile=umTileAt(vec3u(max(anchor,vec3i(0)))/4u);
  // The support word loads beside the slot's address (a unit slot's tile word).
- let state=stateIn[umSlot(umFaceAnchorNear(anchor),axis,width)];
+ let state=stateIn[umSlot(anchor,axis,width)];
  return select(vec2f(0.0,UM_INF),state,(umTileSupport(tile)&2u)!=0u);
 }
 ${uniformMixedVelocitySamplingSource()}
@@ -256,16 +259,21 @@ fn umPhysical(face:UMFace)->f32{
 }
 struct UMNeighbor {value:f32,distance:f32,spacing:f32}
 fn umNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)->UMNeighbor{
- if(any(umPointNear(point)!=point)){return UMNeighbor(0,UM_INF,1);}
- let tile=umTileAt(vec3u(umCellNear(vec3i(point)))/4u);
+ // The request names the patch anchored below its plane: one with no
+ // stored cell at its anchor, nor above a low face's, reaches nothing.
+ var offset=vec3f(0.5*f32(width));offset[component]=1.0;
+ let anchor=vec3i(round(point-offset));
+ if(!ueRequestInside(anchor,component)){return UMNeighbor(0,UM_INF,1);}
+ // The tile above the plane, or the anchor's where nothing is stored above.
+ var upper=vec3i(point);if(!umCellPresent(upper)){upper=anchor;}
+ let tile=umTileAt(vec3u(upper)/4u);
  // Both direct cases read the width-w patch slot below the plane (w is 1 on
  // the all-h stencil path). Its anchor needs no topology, so the support and
  // width words issue beside the slot's address instead of behind its value.
- var offset=vec3f(0.5*f32(width));offset[component]=1.0;
  // The first case below always reads a unit patch (every cell of an all-h
  // stencil, and so the one below the plane, is h); the second reads the
  // width-w patch. Both issue here, before the topology words resolve.
- let anchor=vec3i(round(point-offset));let unit=umSlotState(anchor,component,1u);
+ let unit=umSlotState(anchor,component,1u);
  var direct=unit;if(width!=1u){direct=umSlotState(anchor,component,width);}
  // A unit request whose plane is interior to a unit tile has unit cells on
  // both sides: the case below with lowWidth = highWidth = 1, one load.
@@ -279,8 +287,8 @@ fn umNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)->UMNeig
  // exactly it.
  var below=vec3i(floor(point));let plane=i32(round(point[component]));below[component]=plane-1;
  var above=below;above[component]=plane;
- let lowWidth=select(0u,umTileWidth(umTileAt(vec3u(umCellNear(below))/4u)),umCellPresent(below));
- let highWidth=select(0u,umTileWidth(umTileAt(vec3u(umCellNear(above))/4u)),umCellPresent(above));
+ let lowWidth=select(0u,umTileWidth(umTileAt(vec3u(max(below,vec3i(0)))/4u)),umCellPresent(below));
+ let highWidth=select(0u,umTileWidth(umTileAt(vec3u(max(above,vec3i(0)))/4u)),umCellPresent(above));
  if(select((lowWidth==width&&(highWidth==0u||highWidth>=width))||(highWidth==width&&lowWidth>width),highWidth==width,lowWidth==0u)){
   // The point is center ± width along step only: the spacing is exactly
   // width*h, as on the fast path above. sqrt(dot) can land an ulp above it,
@@ -295,7 +303,9 @@ fn umNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)->UMNeig
  // tangential axes: every tied cell's face is a candidate. Ties are resolved
  // by value, never by order: floor() (and a strict first-wins compare) takes
  // the +side (-side) cell of a tie, and a mirror maps it to the other side.
- let owner=umOwnerAt(umCellNear(vec3i(floor(point))));
+ // Read only where the plane is interior to this owner, which then holds
+ // the cell above it.
+ let owner=umOwnerAt(vec3i(floor(point)));
  let u=(component+1u)%3u;let v=(component+2u)%3u;
  var faces:array<UMFace,4>;var n=0u;
  if(site.interior){
@@ -397,10 +407,11 @@ fn umSeedWall(face:UMFace,owner:UMOwner)->bool{
  return source;
 }
 // Per tile, in the slot array a pass wrote: a 64-bit mask of the tile's
-// cells holding the (clamped) anchor of a finite slot, as four exact 16-bit
-// floats in two words (UE_FLAGS+2 tile). Only supported tiles' masks are
-// current (ueMaskIn gates on support). Masks only grow: a pass's mask is its
-// input mask or'ed with the anchors of the finite slots it wrote.
+// cells holding the anchor of a finite slot (a low face's: the cell above
+// it), as four exact 16-bit floats in two words (UE_FLAGS+2 tile). Only
+// supported tiles' masks are current (ueMaskIn gates on support). Masks only
+// grow: a pass's mask is its input mask or'ed with the anchors of the finite
+// slots it wrote.
 // The last float also carries the tile's open bit (65536): the seed left a
 // positive patch that is not a source. A seed is a source (distance 0, which
 // no sweep changes) or INF, so a tile without the bit stores nothing in any
@@ -408,7 +419,7 @@ fn umSeedWall(face:UMFace,owner:UMOwner)->bool{
 // at this word (ueOpen). The sweeps' tile work is the tiles holding a patch
 // still to reach, not every tile of liquid.
 fn ueBit(anchor:vec3i)->vec2u{
- let l=vec3u(umCellNear(anchor))%4u;let b=l.x+4u*(l.y+4u*l.z);
+ let l=vec3u(max(anchor,vec3i(0)))%4u;let b=l.x+4u*(l.y+4u*l.z);
  return select(vec2u(1u<<(b&31u),0u),vec2u(0u,1u<<(b&31u)),b>=32u);
 }
 fn ueMaskIn(tile:u32)->vec2u{
@@ -530,38 +541,34 @@ fn ueStage(owner:UMOwner,lane:u32,seed:bool,fine:bool)->bool{
 // read is finite (otherwise it returns old).
 // Every slot a request reads is anchored in the cells tested here:
 // - old: the face's anchor.
-// - request point P = centre +- width e_step inside the lattice, q its
-//   (clamped) anchor round(P - offset), Tq the tile of q (in the job's 3x3x3:
-//   q is within one width of the face's anchor, whose tile is the job's or,
-//   for a 4h owner's patch, whose +axis neighbour is staged).
+// - request anchor A = the face's anchor +- width e_step (the patch below the
+//   plane of the point centre +- width e_step), where ueRequestInside admits
+//   it; q its cell (the cell above a low face), Tq the tile of q (in the
+//   job's 3x3x3: q is within one width of the face's anchor, whose tile is
+//   the job's or, for a 4h owner's patch, whose +axis neighbour is staged).
 // - width 1, Tq unit: the unit slot at q only (lowWidth is 1: the direct
 //   case; a domain-wall patch at q[axis] = -1 is attributed to q).
 // - width 1, Tq 4h: the unit slot at q, and the site owner O (the 4h owner
 //   of Tq) patches covering q: its +axis patch in Tq's top layer at q's
 //   columns (unit patches) or at O's origin columns (a width-4 patch), and
-//   when P's plane is strictly inside O (plane % 4 != 0) its -axis patch in
+//   when A's plane is strictly inside O (plane % 4 != 0) its -axis patch in
 //   the layer below O at the same columns (a domain wall: layer 0 of Tq);
 //   at plane 0 the site is O's -axis domain-wall patch (layer 0 of Tq).
-// - width 4: P is a 4h-aligned patch centre; every direct, site and tied
+// - width 4: A is a 4h-aligned patch; every direct, site and tied
 //   candidate lies in Tq (never interior: its plane is a multiple of four).
 fn ueFaceLive(anchor:vec3i,axis:u32,width:u32)->bool{
- var live=ueCellFinite(umCellNear(anchor));
- var center=vec3f(anchor)+vec3f(0.5*f32(width));center[axis]=f32(anchor[axis]+1);
+ var live=ueCellFinite(max(anchor,vec3i(0)));
  for(var n=0u;n<6u;n++){
-  var point=center;point[n/2u]+=select(-f32(width),f32(width),(n&1u)!=0u);
-  if(any(umPointNear(point)!=point)){continue;}
-  live=live||ueRequestLive(point,axis,width);
+  var request=anchor;request[n/2u]+=select(-i32(width),i32(width),(n&1u)!=0u);
+  if(!ueRequestInside(request,axis)){continue;}
+  live=live||ueRequestAnchorLive(request,axis,width);
  }
  return live;
 }
-// One request of ueFaceLive (P inside the lattice): whether a slot it may
+// One request (ueRequestInside admits its anchor): whether a slot it may
 // read is finite.
-fn ueRequestLive(point:vec3f,axis:u32,width:u32)->bool{
- var offset=vec3f(0.5*f32(width));offset[axis]=1.0;
- return ueRequestAnchorLive(vec3i(round(point-offset)),axis,width);
-}
 fn ueRequestAnchorLive(anchor:vec3i,axis:u32,width:u32)->bool{
- let q=umCellNear(anchor);let t=q/4;
+ let q=max(anchor,vec3i(0));let t=q/4;
  if(width!=1u){return any(ueMasks[ueStaged(t)]!=vec2u(0u));}
  if(ueStagedWidth(ueStaged(t))==1u){return ueCellFinite(q);}
  let o=4*t;var top=q;top[axis]=o[axis]+3;var corner=o;corner[axis]=o[axis]+3;
@@ -598,7 +605,6 @@ fn ueRequestPoint(center:vec3f,width:u32,n:u32)->vec3f{
  if((n&1u)==0u){return center-delta;}
  return center+delta;
 }
-fn ueOutside(point:vec3f)->bool{return any(umPointNear(point)!=point);}
 ${uniformCompiledExtensionNeighborWGSL}
 // Immutable request geometry comes from the layout recipe; liveness still
 // comes from this sweep's staged masks. Classify and consume in one loop,

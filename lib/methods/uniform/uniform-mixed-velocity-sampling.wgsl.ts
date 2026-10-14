@@ -78,7 +78,9 @@ return (hangingGroup !== undefined ? uniformMixedHangingTapWGSL(hangingGroup) : 
 struct UMVelocitySite {face:UMFace,width:u32,interior:bool}
 fn umVelocitySite(p:vec3f,axis:u32)->UMVelocitySite {
  var q=vec3i(floor(p));
- let plane=i32(round(p[axis]));q[axis]=plane-1;q=umCellNear(q);
+ // The cell below the face plane; at a low wall plane (face anchor -1) the
+ // cell above it.
+ let plane=i32(round(p[axis]));q[axis]=plane-1;q=max(q,vec3i(0));
  let owner=umOwnerAt(q);let origin=vec3i(umOrigin(owner));
  if(plane>origin[axis]&&plane<origin[axis]+i32(owner.width)){
   return UMVelocitySite(UMFace(),owner.width,true);
@@ -100,8 +102,9 @@ fn umVelocityLerp8(v:array<${type},8>,f:vec3f)->${type}{
 // fine sampler below, with a constant bound, as all-fine Uniform samples.
 // Every tap cell of this unit interpolant lies in a unit tile: each tap is
 // then its stored unit face (umVelocityTap1's first case).
-fn umUnitTaps(base:vec3i)->bool {
- let low=vec3u(umCellNear(base))/4u;let high=vec3u(umCellNear(base+vec3i(1)))/4u;
+// q: the tap base held to the sample's walls; a tap of zero fraction is the low one.
+fn umUnitTaps(q:vec3f)->bool {
+ let low=vec3u(max(vec3i(floor(q)),vec3i(0)))/4u;let high=vec3u(vec3i(ceil(q)))/4u;
  for(var k=0u;k<8u;k++){
   let tile=select(low,high,vec3<bool>((k&1u)!=0u,(k&2u)!=0u,(k&4u)!=0u));
   if(umTileWidth(umTileAt(tile))!=1u){return false;}
@@ -109,11 +112,12 @@ fn umUnitTaps(base:vec3i)->bool {
  return true;
 }
 fn umSampleVelocityFine(p:vec3f,axis:u32)->${type} {
- var offset=vec3f(0.5);offset[axis]=1.0;var lower=vec3f(0.0);lower[axis]=-1.0;
- let q=clamp(p-offset,lower,vec3f(UM_BOX)-vec3f(1.0));
+ var offset=vec3f(0.5);offset[axis]=1.0;
+ let b=umHold;var lower=b.lo;lower[axis]-=1.0;
+ let q=clamp(p-offset,lower,b.hi-vec3f(1.0));
  let base=vec3i(floor(q));let fraction=fract(q);var terms:array<${type},8>;
  ${regularTexture&&!payload?`// Interior samples need no per-tap boundary branch or transverse clamp: a
- // tap beyond the clamped upper edge has exactly zero interpolation weight.
+ // tap beyond the held upper edge has exactly zero interpolation weight.
  // Every tap is a stored face of an h tile (UNIFORM_DETAIL_H_LOAD).
  if(!umFaceLow(base,axis)){
   for(var k=0u;k<8u;k++){
@@ -126,20 +130,23 @@ fn umSampleVelocityFine(p:vec3f,axis:u32)->${type} {
  for(var k=0u;k<8u;k++){
   let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
   let weights=select(vec3f(1.0)-fraction,fraction,bit==vec3i(1));let weight=weights.x*weights.y*weights.z;
-  var anchor=umCellNear(base+bit);anchor[axis]=(base+bit)[axis];
-  terms[k]=select(${zero},umLoadMixedFace(anchor,axis),weight>0.0);
+  terms[k]=${zero};if(weight>0.0){terms[k]=umLoadMixedFace(base+bit,axis);}
  }
  return umVelocityLerp8(terms,fraction);
 }
 ` + [4,1].map(width => {
   if (width === 4 && coarseCache !== undefined) return uniformCoarseCacheWGSL + /* wgsl */ `
-// One resolution a sample: the tile of p held to the box and its key choose
+// One resolution a sample: the tile of p held off SOLID pages and its key choose
 // the interpolants, and the key's block is the sample's 4h cache block.
+// umSampleTile is a sample's entry: it sets the sample's walls (umHold), to
+// the 8-cell reach of a 4h tap. umSampleTileHeld resolves a point of the
+// same sample (a fine tap's coarse value) within them.
 struct UMSampleTile {q:vec3f,tile:vec3i,key:u32}
-fn umSampleTile(p:vec3f)->UMSampleTile {
- let q=umPointNear(p);let tile=umTileNear(vec3i(floor(q/4.0)));
+fn umSampleTileHeld(p:vec3f)->UMSampleTile {
+ let q=clamp(p,umHold.lo,umHold.hi);let tile=umBoundedCell(q,umHold)>>vec3u(2u);
  return UMSampleTile(q,tile,umTileAt(vec3u(tile)));
 }
+fn umSampleTile(p:vec3f)->UMSampleTile {umHold=umPointBounds(p,8.0);return umSampleTileHeld(p);}
 // local: p in tiles from the low corner of the tile's page; origin: the
 // texel of that corner's tile in the page's cache block.
 struct UMCoarseHome {local:vec3f,origin:vec3i}
@@ -160,7 +167,7 @@ fn umSampleVelocity4In(home:UMCoarseHome,axis:u32)->f32 {
  return umVelocityLerp8(terms,fraction);
 }
 // A fine tap's coarse value: the tap's own point resolves its block.
-fn umSampleVelocity4(p:vec3f,axis:u32)->f32 {return umSampleVelocity4In(umCoarseHome(p,umSampleTile(p)),axis);}
+fn umSampleVelocity4(p:vec3f,axis:u32)->f32 {return umSampleVelocity4In(umCoarseHome(p,umSampleTileHeld(p)),axis);}
 `;
   const coarser = width===4 ? "" : "return umSampleVelocity4(p,axis);";
   const restriction = width===1 ? "return umLoadMixedFace(site.face.anchor,axis);" : /* wgsl */ `
@@ -174,11 +181,12 @@ fn umSampleVelocity4(p:vec3f,axis:u32)->f32 {return umSampleVelocity4In(umCoarse
  return sum/${width*width}.0;`;
   return /* wgsl */ `
 fn umVelocityTap${width}(index:vec3i,axis:u32)->${type} {
- ${width===1?`if(umRegularFine){var anchor=umCellNear(index);anchor[axis]=index[axis];return umLoadMixedFace(anchor,axis);}`:""}
+ ${width===1?`if(umRegularFine){return umLoadMixedFace(index,axis);}`:""}
  var p=(vec3f(index)+vec3f(0.5))*${width}.0;p[axis]=f32(index[axis]+1)*${width}.0;
  ${width === 1 ? `// A fine owner stores its positive unit patch directly. This local
  // stencil shortcut applies in every layout, including beside a coarser tile.
- let anchor=umCellNear(index);let tile=umTileAt(vec3u(anchor)/4u);let tileWidth=umTileWidth(tile);
+ // index is a held tap: a cell, or on axis a face anchor of -1 at a low wall.
+ let anchor=max(index,vec3i(0));let tile=umTileAt(vec3u(anchor)/4u);let tileWidth=umTileWidth(tile);
  if(tileWidth==1u){
   var faceAnchor=anchor;faceAnchor[axis]=index[axis];
   return umLoadMixedFace(faceAnchor,axis);
@@ -196,12 +204,14 @@ fn umVelocityTap${width}(index:vec3i,axis:u32)->${type} {
  ${restriction}
 }
 fn umSampleVelocity${width}(p:vec3f,axis:u32)->${type} {
- var offset=vec3f(0.5);offset[axis]=1.0;var lower=vec3f(0.0);lower[axis]=-1.0;
- let q=clamp(p/${width}.0-offset,lower,vec3f(${width===4?"UM_BOX_TILES":"UM_BOX"})-vec3f(1.0));
+ var offset=vec3f(0.5);offset[axis]=1.0;
+ // The sample's walls (umHold) reach the 8 cells a 4h tap may.
+ let b=umHold;var lower=b.lo/${width}.0;lower[axis]-=1.0;
+ let q=clamp(p/${width}.0-offset,lower,b.hi/${width}.0-vec3f(1.0));
  let base=vec3i(floor(q));let fraction=fract(q);var terms:array<${type},8>;
  ${width===1&&regularTexture&&!payload?`// A certified unit stencil uses native scalar loads. Interior samples need
  // no owner resolution, per-tap boundary branch or transverse clamp. A tap
- // beyond the clamped upper edge has exactly zero interpolation weight.
+ // beyond the held upper edge has exactly zero interpolation weight.
  // Certified: every tap is a stored face of an h tile (UNIFORM_DETAIL_H_LOAD).
  if(umRegularFine&&!umFaceLow(base,axis)){
   for(var k=0u;k<8u;k++){
@@ -220,15 +230,15 @@ fn umSampleVelocity${width}(p:vec3f,axis:u32)->${type} {
   }
   return umVelocityLerp8(terms,fraction);
  }`:""}
- ${width===1?`let regularFine=umRegularFine||umTileMaximumWidth(umTileAt(vec3u(umCellNear(vec3i(floor(p))))/4u))==1u;
+ ${width===1?`let regularFine=umRegularFine||umTileMaximumWidth(umTileAt(vec3u(umBoundedCell(p,b))/4u))==1u;
  // Every tap of a sample whose tile stencil is all unit width is a stored
  // unit face: the same eight weighted loads as below, with a constant bound.
- if(!umRegularFine&&(regularFine||umUnitTaps(base))){return umSampleVelocityFine(p,axis);}`:""}
+ if(!umRegularFine&&(regularFine||umUnitTaps(q))){return umSampleVelocityFine(p,axis);}`:""}
  for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){
   let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
   let weights=select(vec3f(1.0)-fraction,fraction,bit==vec3i(1));let weight=weights.x*weights.y*weights.z;
   terms[k]=${zero};if(weight>0.0){
-   ${width===1?`if(regularFine){var anchor=umCellNear(base+bit);anchor[axis]=(base+bit)[axis];terms[k]=umLoadMixedFace(anchor,axis);}else`:""}
+   ${width===1?`if(regularFine){terms[k]=umLoadMixedFace(base+bit,axis);}else`:""}
    {terms[k]=umVelocityTap${width}(base+bit,axis);}
   }
  }
@@ -245,11 +255,14 @@ fn umVelocitySamplingWeightsAt(s:UMSampleTile)->f32 {
  let q=s.q;let tile=s.tile;
  ${blend("s.key")}
 }
+// One call site of each interpolant (Metal inlines every call: a sampler
+// called twice is compiled twice). umRegularFine takes one interpolant
+// whole: the h one wherever it has weight.
 fn umSampleVelocityWeightedIn(p:vec3f,home:UMCoarseHome,axis:u32,fine:f32)->f32 {
- if(umRegularFine){if(fine>0.0){return umSampleVelocity1(p,axis);}return umSampleVelocity4In(home,axis);}
+ let f=select(fine,select(0.0,1.0,fine>0.0),umRegularFine);
  var value=0.0;
- if(fine>0.0){value+=fine*umSampleVelocity1(p,axis);}
- let coarse=max(0.0,1.0-fine);
+ if(f>0.0){value+=f*umSampleVelocity1(p,axis);}
+ let coarse=max(0.0,1.0-f);
  if(coarse>0.0){value+=coarse*umSampleVelocity4In(home,axis);}
  return value;
 }
@@ -259,16 +272,23 @@ fn umFineStencilTile(key:u32)->bool {return (umTileSupport(key)&1u)!=0u&&umTileM
 ${unitTexture?`// A fine owner has unit interpolation weight; its seam taps are cached too.
 fn umCachedFineTile(key:u32)->bool {return (umTileSupport(key)&1u)!=0u&&umTileWidth(key)==1u;}
 `:""}
-fn umSampleVelocityComponent(p:vec3f,axis:u32)->f32 {
- let s=umSampleTile(p);
- if(!umRegularFine&&${fineTile}(s.key)){return ${fineSample}(p,axis);}
- return umSampleVelocityWeightedIn(p,umCoarseHome(p,s),axis,umVelocitySamplingWeightsAt(s));
+// A fine tile's sample is its h interpolant whole: weight 1 through the one
+// call of umSampleVelocityWeightedIn${unitTexture?"":", or umSampleVelocityFine's own call"}.
+fn umSampleVelocityAxis(p:vec3f,s:UMSampleTile,fineTile:bool,weights:f32,axis:u32)->f32 {
+ ${unitTexture?"":"if(fineTile){return umSampleVelocityFine(p,axis);}\n "}return umSampleVelocityWeightedIn(p,umCoarseHome(p,s),axis,weights);
 }
+fn umSampleVelocityComponent(p:vec3f,axis:u32)->f32 {
+ let s=umSampleTile(p);let fineTile=!umRegularFine&&${fineTile}(s.key);
+ var weights=1.0;if(!fineTile){weights=umVelocitySamplingWeightsAt(s);}
+ return umSampleVelocityAxis(p,s,fineTile,weights,axis);
+}
+// The three components in one loop: one call of the axis sample.
 fn umSampleVelocity(p:vec3f)->vec3f {
- let s=umSampleTile(p);
- if(!umRegularFine&&${fineTile}(s.key)){return vec3f(${fineSample}(p,0u),${fineSample}(p,1u),${fineSample}(p,2u));}
- let weights=umVelocitySamplingWeightsAt(s);let home=umCoarseHome(p,s);
- return vec3f(umSampleVelocityWeightedIn(p,home,0u,weights),umSampleVelocityWeightedIn(p,home,1u,weights),umSampleVelocityWeightedIn(p,home,2u,weights));
+ let s=umSampleTile(p);let fineTile=!umRegularFine&&${fineTile}(s.key);
+ var weights=1.0;if(!fineTile){weights=umVelocitySamplingWeightsAt(s);}
+ var v=vec3f(0.0);
+ for(var a=0u;a<3u;a++){v[a]=umSampleVelocityAxis(p,s,fineTile,weights,a);}
+ return v;
 }
 ` : /* wgsl */ `
 // A continuous interpolation support band around finer tiles avoids changing
@@ -276,43 +296,51 @@ fn umSampleVelocity(p:vec3f)->vec3f {
 // ownership or introduce simulated fine cells in a coarse region.
 // The weight is the h interpolant's share; the 4h interpolant takes the rest.
 fn umVelocitySamplingWeights(p:vec3f)->f32 {
- let q=umPointNear(p);
- let tile=umTileNear(vec3i(floor(q/4.0)));
- 
+ let b=umHold;let q=clamp(p,b.lo,b.hi);
+ let tile=umBoundedCell(q,b)>>vec3u(2u);
  ${blend("umTileAt(vec3u(tile))")}
 }
+// One call site of each interpolant (Metal inlines every call). umRegularFine
+// takes one interpolant whole: the h one wherever it has weight.
 fn umSampleVelocityWeighted(p:vec3f,axis:u32,fine:f32)->${type} {
- if(umRegularFine){if(fine>0.0){return umSampleVelocity1(p,axis);}return umSampleVelocity4(p,axis);}
+ let f=select(fine,select(0.0,1.0,fine>0.0),umRegularFine);
  var value=${zero};
- if(fine>0.0){value+=fine*umSampleVelocity1(p,axis);}
- let coarse=max(0.0,1.0-fine);
+ if(f>0.0){value+=f*umSampleVelocity1(p,axis);}
+ let coarse=max(0.0,1.0-f);
  if(coarse>0.0){value+=coarse*umSampleVelocity4(p,axis);}
  return value;
 }
 // A sample whose weights are (1,0) and whose fine taps are all stored unit
 // faces: exactly umSampleVelocityWeighted's value, classified once.
 fn umFineStencilSample(p:vec3f)->bool {
- let q=umPointNear(p);
- let tile=umTileAt(vec3u(umTileNear(vec3i(floor(q/4.0)))));
+ let tile=umTileAt(vec3u(umBoundedCell(p,umHold))/4u);
  return umTileMaximumWidth(tile)==1u;
 }
 ${unitTexture&&!payload?`// A fine owner has unit interpolation weight; its seam taps are cached too.
 fn umCachedFineSample(p:vec3f)->bool {
- let q=umPointNear(p);
- let tile=umTileAt(vec3u(umTileNear(vec3i(floor(q/4.0)))));
+ let tile=umTileAt(vec3u(umBoundedCell(p,umHold))/4u);
  return umTileWidth(tile)==1u;
 }
 `:""}
-fn umSampleVelocityComponent(p:vec3f,axis:u32)->${type} {
- if(!umRegularFine&&${unitTexture&&!payload?"umCachedFineSample":"umFineStencilSample"}(p)){return ${unitTexture&&!payload?"umSampleVelocity1":"umSampleVelocityFine"}(p,axis);}
- return umSampleVelocityWeighted(p,axis,umVelocitySamplingWeights(p));
+// A fine sample is its h interpolant whole: weight 1 through the one call of
+// umSampleVelocityWeighted${unitTexture&&!payload?"":", or umSampleVelocityFine's own call"}.
+fn umSampleVelocityAxis(p:vec3f,fineSample:bool,weights:f32,axis:u32)->${type} {
+ ${unitTexture&&!payload?"":"if(fineSample){return umSampleVelocityFine(p,axis);}\n "}return umSampleVelocityWeighted(p,axis,weights);
 }
+fn umSampleVelocityComponent(p:vec3f,axis:u32)->${type} {
+ umHold=umPointBounds(p,8.0);
+ let fineSample=!umRegularFine&&${unitTexture&&!payload?"umCachedFineSample":"umFineStencilSample"}(p);
+ var weights=1.0;if(!fineSample){weights=umVelocitySamplingWeights(p);}
+ return umSampleVelocityAxis(p,fineSample,weights,axis);
+}
+// The three components in one loop: one call of the axis sample.
 fn umSampleVelocity(p:vec3f)->vec3f {
- if(!umRegularFine&&${unitTexture&&!payload?"umCachedFineSample":"umFineStencilSample"}(p)){
-  return vec3f(${unitTexture&&!payload?"umSampleVelocity1":"umSampleVelocityFine"}(p,0u)${payload ? ".x" : ""},${unitTexture&&!payload?"umSampleVelocity1":"umSampleVelocityFine"}(p,1u)${payload ? ".x" : ""},${unitTexture&&!payload?"umSampleVelocity1":"umSampleVelocityFine"}(p,2u)${payload ? ".x" : ""});
- }
- let weights=umVelocitySamplingWeights(p);
- return vec3f(umSampleVelocityWeighted(p,0u,weights)${payload ? ".x" : ""},umSampleVelocityWeighted(p,1u,weights)${payload ? ".x" : ""},umSampleVelocityWeighted(p,2u,weights)${payload ? ".x" : ""});
+ umHold=umPointBounds(p,8.0);
+ let fineSample=!umRegularFine&&${unitTexture&&!payload?"umCachedFineSample":"umFineStencilSample"}(p);
+ var weights=1.0;if(!fineSample){weights=umVelocitySamplingWeights(p);}
+ var v=vec3f(0.0);
+ for(var a=0u;a<3u;a++){v[a]=umSampleVelocityAxis(p,fineSample,weights,a)${payload ? ".x" : ""};}
+ return v;
 }
 `);
 

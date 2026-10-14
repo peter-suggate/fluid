@@ -17,12 +17,27 @@ fn nbTraceSteps(speed:vec3f,dt:f32)->u32{return max(1u,u32(ceil(dt*max(abs(speed
 // rule over two and the end stage of Shu and Osher's over one. Two need the
 // step to stay within two cells at the local speed and that sample to differ
 // from k1 by less than an eighth of a cell of travel over the step.
+// Its parts, for a caller that takes every sample of a trace at one call
+// site (Metal inlines each call of the field: two calls compile it twice):
+// whether the step spans two, the third stage's point, and the end.
+fn nbTraceTwo(base:f32,k1:vec3f,k2:vec3f,most:u32)->bool{
+ let turn=abs(k2-k1);
+ return most>=2u&&2.0*abs(base)*max(abs(k1.x),max(abs(k1.y),abs(k1.z)))<=2.001
+  &&2.0*abs(base)*max(turn.x,max(turn.y,turn.z))<=${NARROW_BAND_TRACE_BEND};
+}
+fn nbTraceThird(p:vec3f,base:f32,k1:vec3f,k2:vec3f,two:bool)->vec3f{return select(p+0.25*base*(k1+k2),p+2.0*base*(2.0*k2-k1),two);}
+fn nbTraceEnd(p:vec3f,base:f32,k1:vec3f,k2:vec3f,k3:vec3f,two:bool)->vec4f{
+ return select(vec4f(p+base*(k1+k2+4.0*k3)/6.0,1.0),vec4f(p+base*(k1+4.0*k2+k3)/3.0,2.0),two);
+}
+// The second and third stages in one loop: one call of the field.
 fn nbTraceSpan(p:vec3f,base:f32,k1:vec3f,most:u32)->vec4f{
  let h=params.hDt.xyz;
- let k2=${sample}(p+base*k1)/h;let turn=abs(k2-k1);
- let two=most>=2u&&2.0*abs(base)*max(abs(k1.x),max(abs(k1.y),abs(k1.z)))<=2.001
-  &&2.0*abs(base)*max(turn.x,max(turn.y,turn.z))<=${NARROW_BAND_TRACE_BEND};
- let k3=${sample}(select(p+0.25*base*(k1+k2),p+2.0*base*(2.0*k2-k1),two))/h;
- return select(vec4f(p+base*(k1+k2+4.0*k3)/6.0,1.0),vec4f(p+base*(k1+4.0*k2+k3)/3.0,2.0),two);
+ var x=p+base*k1;var k2=vec3f(0.0);var two=false;
+ for(var stage=0u;stage<2u;stage++){
+  let k=${sample}(x)/h;
+  if(stage==1u){return nbTraceEnd(p,base,k1,k2,k,two);}
+  k2=k;two=nbTraceTwo(base,k1,k2,most);x=nbTraceThird(p,base,k1,k2,two);
+ }
+ return vec4f(p,1.0);
 }
 `;}

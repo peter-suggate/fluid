@@ -9,7 +9,10 @@ picture is right.
 
 ## Where things stand
 
-Nothing since commit `30f892b9` is committed. In the working tree, checked
+Committed as `26c9efb9` on 14 October (everything through the trilinear far
+value and the open-top headroom), then, at the Z1 gate, the box deletion and
+the pipeline compile fix (commit after `26c9efb9`; Peter: commit at each
+passing gate without asking). The other session's edits stay out of both. Checked
 (type-check clean, unit suite green, app responds):
 
 - Page-keyed primitives, the census, the solid page directory.
@@ -95,6 +98,22 @@ waited. From here:
    lands the same hour. Follow-ups go on this list, not into the package.
 
 ## Order of work
+
+### 0. Pipeline build speed (first, 14 October)
+
+Peter: "make pipelines fast". The letters build takes 255 s on HEAD and
+1,320 s on the Z1 tree. The time is Apple's Metal backend, not Tint and
+not robustness (advect alone: 94 s, 91 s without robustness). The cause is
+inlining fan-out of the velocity sampler. `umSampleVelocity` inlines
+`umSampleVelocity1` 9 times (3 axes × the weighted path's two call sites
+plus one). Advect's 4 traces × 2 samples bring that to 144 copies; momentum
+repeats the pattern ×4. Marking only `umSampleVelocity1` noinline in the
+dumped Metal source takes advect from 98 s to 3.1 s. The fix: one call site
+per heavy function (loops over axes, traces and stages), and the same for
+Z1's holds. Target: no pipeline over about 5 s, and a letters build under a
+minute. Tools in the scratchpad: `pipes/one.mjs` (compile or dump one
+module), `pipes/swift/mtlc` (time Metal's backend on Metal source) and
+`pipes/callgraph.py` (inlined copies per function).
 
 ### 1. Land the step-7 bundle (stack + pressure root): done
 
@@ -187,17 +206,31 @@ waited. From here:
   front crossing more than a tile a step. "Shape tolerance 0" is not the
   fix: the 3 October decision was to allow 4h at the surface and fix what
   it exposes.
-- **A 32-cell component of the run-out sheet** (0.166 default, 0.160
-  all-h reference, of sheet roughness 0.303 and 0.195 at step 12). Pages
-  are 32 cells, so this may be a seam at page faces or only the sheet's
-  shape folded on that period. Next agent (5B) settles it against the tree
-  before paging, then takes the liquid loss below by a stage-by-stage
-  ledger.
+  **14 October, 5A: not fixed, cause narrowed.** Thirteen sample-kernel
+  experiments (FLIP part off, outer layer every step or never, collar
+  erasing, collar hot, a hot ring with a collar beyond it, phi carried by
+  its foot out to 8 cells) leave the default at 0.47 to 1.43 against 0.63;
+  the reference is 0.23. Ruled out on its own: FLIP noise, the outer layer,
+  collar-versus-hot authority, the air extension in the phi advect. Left:
+  the reference's samples are seeded at rest and carried, the default's are
+  seeded mid-flow from a phi the advect has roughened and then hold that
+  shape. Evidence and table: `$S/reports/solo-dambreak.md`.
+- **A 32-cell component of the run-out sheet: not paging** (14 October).
+  The tree before paging gives the same (locked32 0.156 against 0.160,
+  sheet rms 0.047 to 0.137 between steps 8 and 9 against 0.044 to 0.136).
+  The metric folds each 32-cell window's residual after a quadratic fit, so
+  the sheet's own large-scale shape reads as "locked" (its period-16 bin is
+  0.173 of 0.195).
 - **Liquid dips 4 to 6 %** around steps 16 to 24 at 1/60 s. It grows with
   the time step (0.85 %, 2.3 % and 3.2 % at 0.24 s for 1/120, 1/60 and
-  1/30 s) and the solver before paging lost the same (7.5 % at step 24). It
-  starts in the step the wall impact begins. It does not pass through the
-  few faces that trip the fatal; where the liquid goes is not found yet.
+  1/30 s) and the solver before paging lost the same (7.5 % at step 24).
+  **Found 14 October: the phi advect stage, a scheme limit.** A ledger by
+  stage at steps 12 to 14 loses 2,034, 5,012 and 6,511 cells in the advect
+  and nothing in any other stage (reconstruction gives 5 to 7 % back); the
+  all-h reference loses the same, and its samples fall with it, so it is
+  not an accounting gap. Semi-Lagrangian phi advection is not
+  conservative: the stream within one step's travel (six cells) of the wall
+  is compressed out at the impact. Two remedies, for Peter, below.
 
 ### 3b. Continuous particle contact and slope clearance
 
@@ -277,9 +310,74 @@ waited. From here:
   A is written and checked on the CPU in a scratch tree; C and E were
   stopped part-way. The single agent brings A over and does the rest in
   the order A, C, B, D, E with F, G.
+- **14 October, evening: A to G are in the repository.** What changed from
+  the design:
+  - Every address text ends with the page-table forms (no module includes
+    them by name): `umPointCell`; `umPointBounds(p, margin)` (a sample's
+    walls: per axis the nearest SOLID page face within the margin, from at
+    most seven page words behind an early-out for a point deep in its page);
+    `umBoundedCell`; `umHold`, a private holding a sample's walls, set once
+    at a sampler's entry and read by every tap; `umVertexCellAbove` and
+    `umVertexCellBelow` (one page word behind a page-face branch); and
+    `umPointHeld`. The surface module's own copy of `umPointCell` is
+    deleted. The scratch tree's per-tap holds (`umVertexAuthorityCell`,
+    `umVertexHeldCell`, `umTapHeld`) did not land.
+  - B does not use the design's `…NearAt` forms: most includers of the
+    sampling libraries carry no block neighbour rows. A sample's walls are
+    resolved once (`umPointBounds`) and the taps are clamped to them; at an
+    AIR page nothing holds, as before. A zero-weight far tap is no longer
+    loaded in the general fine sampler.
+  - D: risk 3 is decided as "a tile resolves a vertex on its high planes
+    unless a tile across them (face, edge or corner) is stored". The host
+    field checks compare the field's class (`uniformDetailClass`); the 4h
+    cache checks keep their block extent (not a box). Forces' 4h home and
+    the remap and surface-volume 27-tile loops follow the design.
+  - E and F: the builder's static masks are a 32-entry region table
+    (`uniformMixedRegionTable`, `setRegions`); the solid and join planes are
+    written by tile key (`uniformMixedTileWord`, a host tile plane read by
+    `umHostSolid`/`umHostJoined`). The request path's static tiles go
+    through the region table too; under narrow-band FLIP that path is dead.
+  - G: no solver module names a box. The topology, solid record, root
+    owners, particle order, NB-FLIP refine, detail ring and dense reference
+    modules build their address without one, so every Texel form resolves
+    a coordinate through the page table (off the stored pages: the AIR or
+    SOLID block). The detail rewriter finds a shader's layout by its tile
+    key count (`UM_TILES`) instead of `UM_D`; `udRingStore` reads the tile
+    key and answers false off the stored tiles; the face loads' box clamp is
+    gone; the run forms lost their box term; the solid stub's
+    `umSolidValid` is "not on a SOLID page"; the dense reference clamps its
+    own texture's extent. Only the renderer's presentation module still
+    names a box (by design, item 2). The host's t=0 build arrays
+    (`uniformBoxTileIndex` and friends) stay box-shaped, as planned.
+  - Pipeline compile time (found while landing B): Metal inlines every
+    call, and the velocity sampler had 144 inlined copies in `advect`. Each
+    heavy sampler now has one call site (loops over axes, faces, stages and
+    sides; no work added). The letters build went from 255 s to 45.5 s (the
+    last pipeline; no pipeline over 6.2 s while three compile at once, the
+    slowest 2.4 to 3.5 s alone). The NB-FLIP seed kernels got the same
+    treatment (a compile-only, bit-identical edit in the particle file:
+    seedInitial 9.2 s to 2.4 s alone).
 - Gate, once, at the end: settled tank (exact), trough, water slide,
   letters, each also with the SOLID sentinel block poisoned to 1e30 so that
   a load the old clamp was silently holding shows up as a loud failure.
+- **Gate run 14 October, evening (A to G in the repository):** settled tank
+  liquid 3,072 and particles 3,584 at every printed step (exact); trough
+  particles 47,672 / 64,094 / 88,981 / 115,975 and liquid 31,072 / 31,347 /
+  31,702 / 31,879 at steps 10 to 40; letters step 12 liquid 1,224,968,
+  86,483 particles; every run `fatal none`, `errors []`. Water slide step
+  60: liquid 7,988, 66 pages, 2,003 h tiles, 82,262 particles. That is
+  outside the old range (8,160 to 8,200, 54 to 57 pages), but the slide is
+  no longer the scene those numbers were taken on: the other session has
+  since replaced its voxel steps with a procedural solid (continuous floor;
+  `nbflip-water-slide-scene.ts`, edited 16:33), and the h tiles differ from
+  step 1 (246 against 244). Not separated from this item's changes on the
+  device; the slide needs new reference numbers from that session.
+- Tripwire (scratch edit, reverted): every detail field's SOLID sentinel
+  block filled with 1e30 at creation. Trough step 40: particles 115,591,
+  liquid 31,878; slide step 60: liquid 7,991, 72 pages; no fatal, no error,
+  both within run-to-run range of the clean runs. Only detail fields were
+  poisoned (the textures made through the detail storage), not the other
+  block-addressed buffers. Unit suite: 820 pass, 0 fail; no test deleted.
 - Stays box-shaped after this, on purpose: the published pool record (the
   other session's overlay reads it), the renderer's copy of the address
   (item 2), and the host's t=0 build arrays.
@@ -306,20 +404,42 @@ waited. From here:
 - Padding cost: a padded scene holds two layers of padding tiles at h. If it
   matters, treat a whole solid tile's face as a wall.
 
+### Trough liquid total (measured 14 October, evening)
+
+- `uniform-trough-dam-break`, 2 s simulated, two repeats an arm. At 1/60 s
+  the liquid total is +0.7 / +2.3 / +3.7 to +4.0 / +2.7 to +3.0 / +6.0 to
+  +6.5 / +5.2 % at 1/3, 2/3, 1, 4/3, 5/3 and 2 s (repeats agree to 0.4 %).
+  At 1/30 s: +0.8 / +1.0 / +2.5 to +2.9 / +3.1 to +3.3 / -1.6 to -0.4 /
+  +0.5 to +2.2 %, swinging 1 to 3 % between prints five steps apart.
+- The gain follows the number of steps more than the simulated time, so a
+  stage adds liquid (or the count misreads) per step. The 1/30 swings are
+  too fast for the flow, which points at the count as at least part of it.
+  No stage ledger was run and nothing was changed.
+
 ## Waiting on Peter
 
-- **Commit.** Everything above is uncommitted. Say when to checkpoint.
-- **Unit test files added this session** (about ten, before I re-read the
-  test rule): keep or remove before the next commit.
-- **`uniform-pressure-compilation.test.ts`** is deleted by the bundle only
-  because its fixture is box-shaped. It checked "no compile during encode"
-  and "shader text independent of geometry". Say if you want it rebuilt.
+- **Trough liquid gain** (above): say whether to run the per-stage ledger
+  (1/60 s, steps 40 to 60, with an independent recount of the same state).
+- **Water slide reference numbers**: the other session's procedural slide
+  replaced the voxel one; the old gate range (8,160 to 8,200 liquid, 54 to
+  57 pages at step 60) no longer applies. Today: 7,988 / 7,991 liquid, 66 /
+  72 pages.
 - **The second screenshot** (water slide with two grid planes in the air)
   arrived with no text. If it was meant for this session, say what to look
   at.
-- **Open tops** (item 1c): 64 cells of headroom under a ceiling, as an
-  interim. Say if you want a stop, an outflow or true growth instead.
 - **Renderer window list** (item 2): resume or leave.
+- **Dam-break foot terrace** (item 3): only tolerance 0 is clean so far, at
+  +76 % h tiles and 2.4 times the samples at step 12. Say whether the front
+  is worth that, or whether to try a seeding rule (untested: seed the whole
+  surface at t=0 under the default criteria, to show whether sample age
+  alone decides). No more dam-break work until then.
+- Decided 14 October 16:40: step sizes are never limited (realtime), so
+  the impact loss's step-limit remedy is dead and the volume-source remedy
+  waits to be asked for; open tops keep the 64-cell headroom and true
+  growth or outflow is not built (lattice origin and growth out of scope);
+  unit tests get no effort (the ten added files were deleted, the
+  pressure-compilation test is not rebuilt); commits happen at each passing
+  gate without asking.
 
 ## Small things noted, not scheduled
 

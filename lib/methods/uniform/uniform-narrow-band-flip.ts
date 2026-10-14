@@ -237,7 +237,7 @@ fn nbRefineCells()->vec3u{return vec3u(p.dimsDt.xyz);}
 fn nbRefineTiles()->u32{return 512u*p.blocks.x;}
 fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return nbRefineTopology[5u*nbRefineTiles()+(e.x|(e.y<<6u)|(e.z<<12u))];}
 fn umBlockWord(b:u32)->u32{return nbRefineTopology[5u*nbRefineTiles()+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
-${uniformLatticeAddressWGSL({cells:"nbRefineCells()",tiles:"(nbRefineCells()/4u)",constant:false,paged:{blocks:"p.blocks.x"}})}
+${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"p.blocks.x"}})}
 // The swept tiles of a sample, and its own tile's key.
 struct Box{low:vec3i,high:vec3i,home:u32}
 fn sweptSurface(sample:Particle)->Box{
@@ -626,19 +626,24 @@ ${subgroups?/* wgsl */`
 // The depth's slope along one axis over a cell, from the side that is open
 // where a wall is half a cell off: the metric inside a solid is not the
 // liquid's, and a slope through it leans the shell off every stepped wall.
+// Each axis's two sides are one loop and the gradient one loop over the
+// axes: Metal inlines every call, and the depth read written once is
+// compiled once.
 fn seedSlope(q:vec3f,d:f32,axis:u32)->f32{
  var e=vec3f(0);e[axis]=0.5;
- let low=umCellOpen(vec3i(floor(q-e)))>=0.5;let high=umCellOpen(vec3i(floor(q+e)))>=0.5;
- if(low&&high){return particleDepth(q+e)-particleDepth(q-e);}
- if(high){return 2.0*(particleDepth(q+e)-d);}
- if(low){return 2.0*(d-particleDepth(q-e));}
- return 0.0;
+ var open=array<bool,2>(false,false);var depth=array<f32,2>(d,d);
+ for(var s=0u;s<2u;s++){
+  let x=q+select(-e,e,s==1u);open[s]=umCellOpen(vec3i(floor(x)))>=0.5;
+  if(open[s]){depth[s]=particleDepth(x);}
+ }
+ let span=select(2.0,1.0,open[0]&&open[1]);
+ return select(0.0,span*(depth[1]-depth[0]),open[0]||open[1]);
 }
 fn seedShell(lattice:vec3f)->vec4f{
  var q=lattice;var d=particleDepth(q);
  for(var i=0u;i<4u;i++){
   let rise=d+NB_SEED_DEPTH;if(rise<=1e-3){break;}
-  let g=vec3f(seedSlope(q,d,0u),seedSlope(q,d,1u),seedSlope(q,d,2u));
+  var g=vec3f(0);for(var a=0u;a<3u;a++){g[a]=seedSlope(q,d,a);}
   let g2=dot(g,g);if(g2<1e-8){break;}
   let next=nbPointNearIn(vec3i(floor(q)),q-min(rise,0.5)*g*inverseSqrt(g2),0.01);
   let depth=particleDepth(next);if(depth>=d){break;}
@@ -665,7 +670,8 @@ fn seedSite(c:vec3u,k:u32,initial:bool,activated:bool)->vec4f{
   if(!umPointPresent(p)){nbArrived(p);return vec4f(-1,0,0,0);}
   // A shell sample can land in another cell, whose own seeding decision
   // does not see it: no count changes here, whatever the dispatch order.
-  return vec4f(p,particleDepth(p));
+  // The shell's depth is the depth at its point.
+  return shell;
 }
 fn seedCell(c:vec3u,initial:bool){
  // No tile past the reach is within six cells of the surface.

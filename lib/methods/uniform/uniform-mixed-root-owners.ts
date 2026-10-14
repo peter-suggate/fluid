@@ -121,7 +121,7 @@ const float = (x: number) => Number.isInteger(x) ? x.toFixed(1) : String(x);
 
 /** The kernels. record: the root record (a vec4 a row) is bound, at binding 3. */
 export function uniformMixedRootOwnersWGSL(address: UniformLatticeAddress, lattice: { readonly dimensions: readonly number[]; readonly cellSize_m: readonly number[] }, record: boolean): string {
-  const n = address.tileKeys, cells = lattice.dimensions, table = 5 * n;
+  const n = address.tileKeys, table = 5 * n;
   const paged = { blocks: `${n / 512}u` };
   const far = UNIFORM_MIXED_ROOT_FAR_CELLS * Math.max(...lattice.cellSize_m);
   return /* wgsl */ `
@@ -134,10 +134,9 @@ const RO_FAR:f32=${float(far)};
 @group(0) @binding(1) var<storage,read_write> roSupport:array<atomic<u32>>;
 @group(0) @binding(2) var<storage,read_write> roPhi:array<f32>;
 ${record ? "@group(0) @binding(3) var<storage,read_write> roRecord:array<vec4f>;" : ""}
-const UM_D=vec3u(${cells.map(c => `${c}u`).join(",")});const UM_T=UM_D/4u;
 fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(${UNIFORM_PAGE_WINDOW - 1}u);return roTopology[${table}u+(e.x|(e.y<<6u)|(e.z<<12u))];}
 fn umBlockWord(b:u32)->u32{return roTopology[${table + UNIFORM_PAGE_TABLE_WORDS}u+b];}
-${uniformLatticeAddressWGSL({ cells: "UM_D", tiles: "UM_T", constant: true, paged })}
+${uniformLatticeAddressWGSL({ constant: true, paged })}
 ${uniformCompileStencilWGSL}
 @compute @workgroup_size(64) fn roKeys(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) launched:vec3u){
  let k=gid.x+64u*launched.x*gid.y;if(k>=RO_KEYS){return;}

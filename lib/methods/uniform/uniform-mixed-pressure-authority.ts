@@ -1,4 +1,4 @@
-import { uniformDetailBindLayout, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailClass, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import { uniformMixedPressureCutWGSL } from "./uniform-mixed-pressure-cut.wgsl";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
@@ -159,11 +159,11 @@ export class UniformMixedPressureAuthority {
  bind(f:UniformMixedPressureAuthorityFields):UniformDetailGroup{
   if((f.scratch.size??f.scratch.buffer.size-(f.scratch.offset??0))<this.scratchBytes)throw new Error("Mixed pressure authority scratch is too small");
   const address=this.ownership.capacity.address;
-  for(const t of [f.centerPhi,f.volume,f.targetFill,f.phase,f.correction])if(t.format!=="r32float"||uniformDetailExtent(t).some((v,a)=>v!==address.cells[a]))throw new Error("Mixed pressure authority requires native scalar fields");
+  for(const t of [f.centerPhi,f.volume,f.targetFill,f.phase,f.correction])if(t.format!=="r32float"||uniformDetailClass(t)!=="cell")throw new Error("Mixed pressure authority requires native scalar fields");
   if([f.centerPhi,f.volume,f.targetFill].some(t=>t===f.phase||t===f.correction)||f.phase===f.correction)throw new Error("Mixed pressure authority outputs must be disjoint");
   if(!!f.fine!==this.coarse)throw new Error("Coarse mixed pressure authority needs the h simulation vertex phi, and only it");
   if(!!f.simulation!==this.resident)throw new Error("Resident mixed pressure authority needs the simulation's tile words, and only it");
-  if(f.fine&&(f.fine.phi.format!=="r32float"||uniformDetailExtent(f.fine.phi).some((v,a)=>v!==address.vertexBox[a])))throw new Error("Coarse mixed pressure authority requires the native h vertex phi");
+  if(f.fine&&(f.fine.phi.format!=="r32float"||uniformDetailClass(f.fine.phi)!=="vertex"))throw new Error("Coarse mixed pressure authority requires the native h vertex phi");
   const topologyBytes=uniformMixedRootTopologyBytes(this.ownership.layout);
   if(f.fine&&(f.fine.topology.size??f.fine.topology.buffer.size-(f.fine.topology.offset??0))<topologyBytes)throw new Error("Coarse mixed pressure authority's root topology is too small");
   return uniformDetailGroup(this.device,{layout:this.resources,entries:[

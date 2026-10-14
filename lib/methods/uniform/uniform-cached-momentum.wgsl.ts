@@ -7,8 +7,9 @@ var<private> umUnitEscaped:bool;
 var<private> umUnitWidth:f32;
 var<private> umUnitFineWeight:f32;
 fn umUnitInterpolant(p:vec3f,axis:u32)->f32 {
- var offset=vec3f(0.5);offset[axis]=1.0;var lower=vec3f(0.0);lower[axis]=-1.0;
- let q=clamp(p-offset,lower,vec3f(UM_BOX)-vec3f(1.0));
+ var offset=vec3f(0.5);offset[axis]=1.0;
+ let b=umHold;var lower=b.lo;lower[axis]-=1.0;
+ let q=clamp(p-offset,lower,b.hi-vec3f(1.0));
  let base=vec3i(floor(q));let fraction=fract(q);var terms:array<f32,8>;
  for(var k=0u;k<8u;k++){
   let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
@@ -37,23 +38,30 @@ fn umUnitSampleComponent(p:vec3f,axis:u32)->f32 {
  if(kind==2u){umUnitEscaped=true;return 0.0;}
  return umUnitWeighted(p,umCoarseHome(p,s),axis,umUnitFineWeight);
 }
+// The three components in one loop, each interpolant at one call site
+// (Metal inlines every call: one written three times compiles three times).
 fn umUnitSample(p:vec3f)->vec3f {
  let s=umSampleTile(p);let kind=umUnitSampleKind(p,s,3u);
- if(kind==0u){return vec3f(umSampleVelocityFine(p,0u),umSampleVelocityFine(p,1u),umSampleVelocityFine(p,2u));}
  if(kind==2u){umUnitEscaped=true;return vec3f(0);}
- let fine=umUnitFineWeight;let home=umCoarseHome(p,s);
- return vec3f(umUnitWeighted(p,home,0u,fine),umUnitWeighted(p,home,1u,fine),umUnitWeighted(p,home,2u,fine));
+ let fine=umUnitFineWeight;let home=umCoarseHome(p,s);var v=vec3f(0.0);
+ for(var a=0u;a<3u;a++){
+  if(kind==0u){v[a]=umSampleVelocityFine(p,a);}else{v[a]=umUnitWeighted(p,home,a,fine);}
+ }
+ return v;
 }
+// Each substep's two samples (the start, then the midpoint) at one call site.
 fn umUnitDeparture(position:vec3f,dt:f32,h:vec3f)->vec3f {
   var point=position;var remaining=abs(dt);let direction=select(-1.0,1.0,dt>=0.0);
-  for(var step=0;step<32;step+=1){
-    if(remaining<=1e-7){break;}
-    let first=umUnitSample(point);if(umUnitEscaped){break;}
-    let rate=max(abs(first.x)/h.x,max(abs(first.y)/h.y,abs(first.z)/h.z))/umUnitWidth;
-    let stepSeconds=min(remaining,1.5/max(rate,1e-6));let signedStep=direction*stepSeconds;
-    let midpoint=umClampMomentum(point-0.5*first*signedStep/h);
-    let second=umUnitSample(midpoint);if(umUnitEscaped){break;}
-    point=umClampMomentum(point-second*signedStep/h);remaining-=stepSeconds;
+  var at=position;var mid=false;var stepSeconds=0.0;var signedStep=0.0;
+  for(var stage=0;stage<64;stage+=1){
+    if(!mid&&remaining<=1e-7){break;}
+    let sampled=umUnitSample(at);if(umUnitEscaped){break;}
+    if(!mid){
+      let rate=max(abs(sampled.x)/h.x,max(abs(sampled.y)/h.y,abs(sampled.z)/h.z))/umUnitWidth;
+      stepSeconds=min(remaining,1.5/max(rate,1e-6));signedStep=direction*stepSeconds;
+      at=umClampMomentum(point-0.5*sampled*signedStep/h);mid=true;continue;
+    }
+    point=umClampMomentum(point-sampled*signedStep/h);remaining-=stepSeconds;at=point;mid=false;
   }
   return point;
 }
