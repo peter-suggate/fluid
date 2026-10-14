@@ -391,8 +391,8 @@ fn umSmoothOpen(q:vec3i,w:i32)->bool{
 // along the two horizontal axes, at the vertex's own width, damps that
 // pattern and leaves a cubic alone: a step takes 16 eps of an alternating
 // pattern and eps (2 pi/n)^4 of a wave n vertices long. An axis is skipped
-// where a wall lies before its far tap and where the vertex or a tap is not
-// open liquid state.
+// where a wall lies before its far tap, where the vertex or a tap is not
+// open liquid state, and where a tap is not a distance from the vertex.
 fn umVertexSmoothing(vertex:vec3u,width:u32)->f32{
  let eps=min(${UNIFORM_MIXED_VERTEX_SMOOTHING_PER_S.toExponential(8)}*params.hDt.w,0.03125);if(!(eps>0.0)){return 0.0;}
  let w=i32(width);let c=umSampleVertex(vec3f(vertex));if(!(abs(c)<2.0*f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z)))){return 0.0;}
@@ -402,9 +402,15 @@ fn umVertexSmoothing(vertex:vec3u,width:u32)->f32{
   if(umWallWithin(vec3i(vertex),axis,2*w)){continue;}
   var part=6.0*c;var valid=true;
   for(var k=0u;k<4u;k++){
-   var q=vec3i(vertex);q[axis]+=select(w,2*w,(k&2u)!=0u)*select(-1,1,(k&1u)!=0u);
+   let span=select(w,2*w,(k&2u)!=0u);
+   var q=vec3i(vertex);q[axis]+=span*select(-1,1,(k&1u)!=0u);
    ${this.solid?"if(!umSmoothOpen(q,w)){valid=false;}":""}
-   part+=select(-4.0,1.0,(k&2u)!=0u)*umSampleVertex(vec3f(q));
+   let s=umSampleVertex(vec3f(q));
+   // A tap further from the vertex's value than its span allows is no
+   // distance: past the band, far air holds a marker. Its fourth difference
+   // drew the air beside the band onto the liquid every step.
+   if(abs(s-c)>1.5*f32(span)*params.hDt[axis]){valid=false;}
+   part+=select(-4.0,1.0,(k&2u)!=0u)*s;
   }
   if(valid){sum+=part;}
  }

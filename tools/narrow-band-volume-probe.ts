@@ -1,30 +1,35 @@
-/** Read-only per-stage tetrahedral surface-volume probe. No target correction. */
+/** Read-only per-stage tetrahedral surface-volume probe. No target correction.
+ * Each stage's field is read where it is resolved: phi at the move, the
+ * advected scratch at reconstruction, phi before and after redistance. */
 import {levelSetFillWGSL} from '../lib/core/level-set-fill.wgsl';
-import {UNIFORM_DETAIL_CANONICAL_LOAD} from '../lib/core/uniform-detail-abi';
+import {UNIFORM_DETAIL_4H_LOAD} from '../lib/core/uniform-detail-abi';
 import {uniformDetailBindLayout,uniformDetailModule,uniformDetailGroup} from '../lib/methods/uniform/uniform-detail-fields';
 import {uniformMixedTopologyWGSL,uniformMixedCountedEntriesWGSL,UNIFORM_MIXED_COUNTED} from '../lib/methods/uniform/uniform-mixed-topology.wgsl';
-import {uniformMixedVertexSamplingSource} from '../lib/methods/uniform/uniform-mixed-vertex-sampling.wgsl';
 import type {UniformMixedFrame} from '../lib/methods/uniform/uniform-mixed-frame';
 import type {WebGPUUniformReferenceSolver} from '../lib/methods/uniform/webgpu-uniform-reference';
-export async function narrowBandVolumeProbe(device:GPUDevice,solver:WebGPUUniformReferenceSolver){
+export async function narrowBandVolumeProbe(_device:GPUDevice,solver:WebGPUUniformReferenceSolver){
+ // The solver's own device: the detail rewrite finds the live field layout by
+ // device, and without it the loads read the physical texture unaddressed.
+ const device=(solver as unknown as {device:GPUDevice}).device;
  const frame=(solver as unknown as {mixedFrame:Pick<UniformMixedFrame,"ownership"|"narrowBandFlip">&{fields:{phi:GPUTexture;phiScratch:GPUTexture}}}).mixedFrame;
  const o=frame.ownership,stage=frame.narrowBandFlip!;
  const totals=device.createBuffer({size:1024,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
  const read=device.createBuffer({size:1024,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
  const resources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:'unfilterable-float',viewDimension:'3d'}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
- const groups=[frame.fields.phi,frame.fields.phi,frame.fields.phiScratch,frame.fields.phi].map((t,i)=>uniformDetailGroup(device,{layout:resources,entries:[{binding:0,resource:t},{binding:1,resource:{buffer:totals,offset:i*256,size:4}}]}));
+ const groups=[frame.fields.phi,frame.fields.phiScratch,frame.fields.phi,frame.fields.phi].map((t,i)=>uniformDetailGroup(device,{layout:resources,entries:[{binding:0,resource:t},{binding:1,resource:{buffer:totals,offset:i*256,size:4}}]}));
  const module=uniformDetailModule(device,{label:'NB surface volume probe',code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(o.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read_write> total:array<atomic<u32>>;
-fn umLoadVertex(p:vec3u)->f32{return ${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(phi,vec3i(p),0).x;}
-${uniformMixedVertexSamplingSource('',false)}
+fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
+// A 4h owner's corners are tile corners: the base block's.
+fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
 ${levelSetFillWGSL}
 var<workgroup> values:array<u32,64>;
 @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  let owner=umAllOwner(gid);var value=0u;
  if(owner.width!=0u){
   var v:array<f32,8>;let origin=umOrigin(owner);
-  for(var k=0u;k<8u;k++){v[k]=umSampleVertex(vec3f(origin+umCorner(k,2u)*owner.width));}
+  for(var k=0u;k<8u;k++){let q=origin+umCorner(k,2u)*owner.width;v[k]=select(umLoadVertex(q),umLoadCorner(q),owner.width==4u);}
   value=u32(fill(v)*f32(owner.width*owner.width*owner.width)*2048.0+0.5);
  }
  values[lane]=value;workgroupBarrier();
