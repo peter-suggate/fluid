@@ -2,6 +2,7 @@ import type { WebGPUUniformPressureMultigrid } from "./webgpu-uniform-pressure-m
 import { uniformPressureHierarchyWGSL } from "./webgpu-uniform-pressure-multigrid.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformBufferedWork } from "./uniform-buffered-work";
+import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockFaceWGSL } from "./uniform-lattice-address";
 import { mixedCellWidth } from "./uniform-mixed-layout";
 import { uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
@@ -355,11 +356,9 @@ ${uniformBlockFaceWGSL}
 // the window, a record a block (its page, or all ones where it holds none),
 // then the block neighbour table, 27 words a block. A table word is a stored
 // block, 0 (AIR) or a word past the stored blocks (SOLID).
-fn umPageAt(page:vec3i)->u32{
- if(any(page<vec3i(0))||any(page>vec3i(63))){return UM_NONE;}
- return umTopology[${pages}+u32(page.x|(page.y<<6u)|(page.z<<12u))];
-}
-fn umBlockPage(b:u32)->vec3i{let r=umTopology[${records}+b];return vec3i(vec3u(r&63u,(r>>6u)&63u,(r>>12u)&63u));}
+${uniformWindowAddressWGSL("umTopology",pages,"UM_BLOCKS")}
+fn umPageAt(page:vec3i)->u32{return umPageWord(page);}
+fn umBlockPage(b:u32)->vec3i{let r=umBlockWord(b);return vec3i(vec3u(r&63u,(r>>6u)&63u,(r>>12u)&63u));}
 // The block holds a page: neither sentinel, nor free.
 fn umStored(b:u32)->bool{return b-1u<UM_BLOCKS-2u&&umTopology[${records}+b]!=UM_NONE;}
 // The table word of the page at block b's page + d, d within one page.

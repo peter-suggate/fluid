@@ -135,14 +135,14 @@ fn udrFine(tile:vec3u)->bool{return (${table}[umTileAt(tile)]&0x80000000u)!=0u;}
 fn udrStore(t:texture_3d<f32>,base:texture_3d<f32>)->bool{return any(textureDimensions(t)!=textureDimensions(base));}
 fn udrLoadCell(t:texture_3d<f32>,base:texture_3d<f32>,q:vec3i)->vec4f{
  if(!udrPacked()){return textureLoad(t,q,0);}
- let p=vec3u(umCellNear(q));let tile=p>>vec3u(2u);
+ let p=vec3u(q);let tile=p>>vec3u(2u);
  if(udrFine(tile)&&udrStore(t,base)){return textureLoad(t,umCellTexel(vec3i(p)),0);}
  return textureLoad(base,umTileTexel(vec3i(tile)),0);
 }
 // A 4h tile holds its origin texel and its three +face anchors; another face of it loads zero.
 fn udrLoadFace(t:texture_3d<f32>,base:texture_3d<f32>,q:vec3i)->vec4f{
  if(!udrPacked()){return textureLoad(t,q,0);}
- let p=vec3u(umCellNear(q));let tile=p>>vec3u(2u);
+ let p=vec3u(q);let tile=p>>vec3u(2u);
  if(udrFine(tile)&&udrStore(t,base)){return textureLoad(t,umCellTexel(vec3i(p)),0);}
  let j=select(vec3u(0u),vec3u(1u),(p&vec3u(3u))==vec3u(3u));
  if(j.x+j.y+j.z>1u){return vec4f(0.0);}

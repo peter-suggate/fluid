@@ -35,7 +35,7 @@ fn ueUnitSlot(p:vec3u,axis:u32)->u32{
 }
 // The cell above a low face: the stored cell whose block's low planes hold
 // the face.
-fn ueLowCell(anchor:vec3i,axis:u32)->vec3u{var above=max(anchor,vec3i(0));above[axis]=anchor[axis]+1;return vec3u(above);}
+fn ueLowCell(anchor:vec3i,axis:u32)->vec3u{var above=max(anchor,umWallLow());above[axis]=anchor[axis]+1;return vec3u(above);}
 // p: the cell above a 4h low face (ueLowCell). The face's tile in its
 // block's low plane on that axis.
 fn ueCoarseWallIndex(p:vec3u,axis:u32)->u32{
@@ -43,7 +43,7 @@ fn ueCoarseWallIndex(p:vec3u,axis:u32)->u32{
  return (3u*umCellBlock(p)+axis)*64u+uv.x+8u*uv.y;
 }
 fn umSlot(anchor:vec3i,axis:u32,width:u32)->u32{
- let p=vec3u(max(anchor,vec3i(0)));
+ let p=vec3u(max(anchor,umWallLow()));
  if(umFaceLow(anchor,axis)){
   let above=ueLowCell(anchor,axis);if(width==1u){return UE_UNIT_WALL+umLowFaceIndex(above,axis);}
   return UE_COARSE_WALL+ueCoarseWallIndex(above,axis);

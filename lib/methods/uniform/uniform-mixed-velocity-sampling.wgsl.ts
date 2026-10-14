@@ -80,7 +80,7 @@ fn umVelocitySite(p:vec3f,axis:u32)->UMVelocitySite {
  var q=vec3i(floor(p));
  // The cell below the face plane; at a low wall plane (face anchor -1) the
  // cell above it.
- let plane=i32(round(p[axis]));q[axis]=plane-1;q=max(q,vec3i(0));
+ let plane=i32(round(p[axis]));q[axis]=plane-1;q=max(q,umWallLow());
  let owner=umOwnerAt(q);let origin=vec3i(umOrigin(owner));
  if(plane>origin[axis]&&plane<origin[axis]+i32(owner.width)){
   return UMVelocitySite(UMFace(),owner.width,true);
@@ -186,14 +186,14 @@ fn umVelocityTap${width}(index:vec3i,axis:u32)->${type} {
  ${width === 1 ? `// A fine owner stores its positive unit patch directly. This local
  // stencil shortcut applies in every layout, including beside a coarser tile.
  // index is a held tap: a cell, or on axis a face anchor of -1 at a low wall.
- let anchor=max(index,vec3i(0));let tile=umTileAt(vec3u(anchor)/4u);let tileWidth=umTileWidth(tile);
+ let wall=umWallLow();let anchor=max(index,wall);let tile=umTileAt(vec3u(anchor)/4u);let tileWidth=umTileWidth(tile);
  if(tileWidth==1u){
   var faceAnchor=anchor;faceAnchor[axis]=index[axis];
   return umLoadMixedFace(faceAnchor,axis);
  }${hangingGroup !== undefined ? `
  // A slotted tile's memoized taps: in-domain in the unit texture, the
- // negative boundary plane (index[axis]==-1) in its record.
- {var plane=index;if(plane[axis]==-1){plane[axis]=0;}
+ // negative boundary plane (index[axis]==umWallLow()[axis]-1) in its record.
+ {var plane=index;if(plane[axis]==wall[axis]-1){plane[axis]=wall[axis];}
   if(all(plane==anchor)){let slot=umHanging[tile];if(slot!=UM_NO_SLOT){
    if(umFaceLow(index,axis)){return bitcast<f32>(umHanging[umHangingPlaneAddress(slot,vec3u(anchor%4),axis)]);}
    return textureLoad(${unitTexture},index,0)[axis];

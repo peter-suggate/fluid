@@ -180,6 +180,7 @@ export class WebGPURenderWorkerClient {
   private stopped = false;
   private failed = false;
   private runtimeUnavailable?: string;
+  private lastRuntimeStatus?: GPUStatus;
   /** One fixed translation keeps an activity's start time stable across progress messages. */
   private workerClockOffset_ms?: number;
   private readonly requests = new Map<number, { kind: WebGPURenderWorkerRequest["type"]; resolve(value: unknown): void; reject(error: Error): void }>();
@@ -573,11 +574,21 @@ export class WebGPURenderWorkerClient {
             + (this.workerClockOffset_ms ??= performance.now() - message.workerNow_ms) }
         : message.status;
       if (status.state === "unavailable" || status.state === "lost" || status.state === "blocked") {
+        // Worker console entries disappear when terminal cleanup terminates
+        // it. Keep the failure and its last progress milestone in the page.
+        console.error("WebGPU runtime failed", JSON.stringify({
+          state: status.state, label: status.label,
+          previousState: this.lastRuntimeStatus?.state,
+          previousLabel: this.lastRuntimeStatus?.label,
+          completedPresentations: this.snapshot.completedPresentationCount,
+          presentationResolution: this.snapshot.presentationResolution,
+        }));
         this.runtimeUnavailable = status.label;
         // The worker may still need to drain/destroy GPU resources. Reject
         // authoring requests now without interrupting that shutdown handshake.
         this.rejectAll(new Error(status.label), true);
       }
+      this.lastRuntimeStatus = status;
       this.callbacks.onStatus(status);
     }
     else if (message.type === "gpu-info") this.callbacks.onGPUInfo?.(message.info);

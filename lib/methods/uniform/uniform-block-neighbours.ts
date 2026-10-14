@@ -1,3 +1,4 @@
+import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { UNIFORM_PAGE_TABLE_WORDS, UNIFORM_PAGE_WINDOW, uniformBlockNeighbourLayout } from "./uniform-lattice-address";
 import type { UniformPagePoolMirror } from "./uniform-page-pool";
 
@@ -33,16 +34,16 @@ export function uniformBlockNeighboursWGSL(blocks: number, table: number): strin
 const BN_BLOCKS:u32=${blocks}u;const BN_TABLE:u32=${table}u;
 const BN_RECORD:u32=${table + UNIFORM_PAGE_TABLE_WORDS}u;const BN_ROWS:u32=${table + l.rows}u;const BN_WALL_COUNT:u32=${table + l.wallCount}u;const BN_WALLS:u32=${table + l.walls}u;
 const BN_FREE:u32=0xffffffffu;const BN_SOLID:u32=0xffffffffu;
+${uniformWindowAddressWGSL("bnTail","BN_TABLE","BN_BLOCKS")}
 @compute @workgroup_size(64) fn bnRows(@builtin(global_invocation_id) gid:vec3u){
  let b=gid.x;if(b>=BN_BLOCKS){return;}
- let record=bnTail[BN_RECORD+b];let row=BN_ROWS+27u*b;
+ let record=umBlockWord(b);let row=BN_ROWS+27u*b;
  // No page: AIR all round, or SOLID for the block that stands for it.
  if(record==BN_FREE){let word=select(0u,BN_SOLID,b==BN_BLOCKS-1u);for(var i=0u;i<27u;i++){bnTail[row+i]=word;}return;}
  let page=vec3i(vec3u(record&63u,(record>>6u)&63u,(record>>12u)&63u));
  for(var i=0u;i<27u;i++){
   let q=page+vec3i(vec3u(i%3u,(i/3u)%3u,i/9u))-vec3i(1);
-  var word=BN_SOLID;
-  if(all(q>=vec3i(0))&&all(q<vec3i(${w}))){let e=vec3u(q);word=bnTail[BN_TABLE+(e.x|(e.y<<6u)|(e.z<<12u))];}
+  let word=umPageWord(q);
   bnTail[row+i]=word;
  }
 }

@@ -18,11 +18,11 @@ fn umUnitInterpolant(p:vec3f,axis:u32)->f32 {
  return umVelocityLerp8(terms,fraction);
 }
 // 0 native fine stencil, 1 prepared blend, 2 negative-plane escape: a fine
-// sample within a cell of the box's plane 0 taps the negative planes.
+// sample within a cell of a low wall plane (umWallLow) taps the negative planes.
 fn umUnitSampleKind(p:vec3f,s:UMSampleTile,axis:u32)->u32 {
  if(umFineStencilTile(s.key)){umUnitWidth=1.0;umUnitFineWeight=1.0;return 0u;}
  umUnitWidth=f32(umTileWidth(s.key));umUnitFineWeight=umVelocitySamplingWeightsAt(s);
- let low=select(p[min(axis,2u)]<1.0,any(p<vec3f(1.0)),axis>=3u);
+ let wall=vec3f(umWallLow())+vec3f(1.0);let low=select(p[min(axis,2u)]<wall[min(axis,2u)],any(p<wall),axis>=3u);
  return select(1u,2u,umUnitFineWeight>0.0&&low);
 }
 fn umUnitWeighted(p:vec3f,home:UMCoarseHome,axis:u32,fine:f32)->f32 {

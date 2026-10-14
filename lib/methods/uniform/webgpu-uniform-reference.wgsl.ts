@@ -1,3 +1,4 @@
+import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { solidOccupancyMaskWGSL } from "../../core/solid-occupancy-mask";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformLatticeAddressWGSL } from "./uniform-lattice-address";
 
@@ -117,13 +118,13 @@ struct RigidBody {
 
 
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
-fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return umPages[e.x|(e.y<<6u)|(e.z<<12u)];}
-fn umBlockWord(b:u32)->u32{return umPages[${UNIFORM_PAGE_TABLE_WORDS}u+b];}
+${uniformWindowAddressWGSL("umPages","0u",`(arrayLength(&umPages)-${UNIFORM_PAGE_TABLE_WORDS}u)`)}
 ${uniformLatticeAddressWGSL({constant:false,paged:{blocks:`(arrayLength(&umPages)-${UNIFORM_PAGE_TABLE_WORDS}u)`}})}
 
 // The box: its low cell in the lattice (tuning.xyz, zero but in an open
 // world) and its cells. A launch over the box runs gid from zero.
-fn activeWindowOrigin()->vec3u{return vec3u(params.tuning.xyz);}
+// Signed: a window shift toward +F puts the box below lattice zero.
+fn activeWindowOrigin()->vec3i{return vec3i(params.tuning.xyz);}
 
 fn activeWindowExtent()->vec3u{
   return vec3u(dims());
@@ -132,7 +133,7 @@ fn activeWindowExtent()->vec3u{
 fn activeId(gid:vec3u)->vec3i{
 
   if(any(gid>=activeWindowExtent())){return vec3i(-1);}
-  return vec3i(activeWindowOrigin()+gid);
+  return activeWindowOrigin()+vec3i(gid);
 
 }
 
@@ -143,7 +144,7 @@ fn activeId(gid:vec3u)->vec3i{
 // directory word a page of the window, then the mixed solid library's
 // bed-slope lane and tile cut map (uniformSolidScratchLayout) and the page
 // slots the directory names. A page the lattice walls off is solid throughout.
-${solidOccupancyMaskWGSL("activeScratch", "staticSolidPage", "staticSolidVoxelOccupied")}
+${solidOccupancyMaskWGSL("activeScratch", "staticSolidPage", "staticSolidVoxelOccupied", true)}
 
 fn d4Sum6(value:array<f32,6>)->f32{return ((value[0]+value[1])+(value[4]+value[5]))+(value[2]+value[3]);}
 
@@ -159,7 +160,7 @@ fn hasTerrain()->bool{return params.frame.w>0.5;}
 
 fn depthSymmetry()->bool{return params.tuning.w>0.5;}
 
-fn terrainHeightCells(x:i32,z:i32)->f32{let d=vec2i(textureDimensions(terrainIn));return textureLoad(terrainIn,vec2i(clamp(x,0,d.x-1),clamp(z,0,d.y-1)),0).x;}
+fn terrainHeightCells(x:i32,z:i32)->f32{let d=vec2i(textureDimensions(terrainIn));let f=32*umFramePage();return textureLoad(terrainIn,clamp(vec2i(x,z)+f.xz,vec2i(0),d-1),0).x-f32(f.y);}
 
 fn cellTerrainFraction(p:vec3i)->f32{if(!hasTerrain()){return 0.0;}return clamp(terrainHeightCells(p.x,p.z)-f32(p.y),0.0,1.0);}
 
@@ -321,7 +322,7 @@ fn worldInsideTerrain(world:vec3f)->bool{
   let h=params.cellGravity.xyz;
   let x=i32(floor((world.x-params.frame.x)/h.x));
   let z=i32(floor((world.z-params.frame.z)/h.z));
-  return world.y<terrainHeightCells(x,z)*h.y;
+  return world.y<params.frame.y+terrainHeightCells(x,z)*h.y;
 }
 
 fn solidVelocitySample(world:vec3f,velocityPoint:vec3f)->vec4f{

@@ -9,7 +9,7 @@ import { buildEnvironmentProxyCatalog } from "../lib/core/voxel-environments";
 import { VOXEL_MATERIAL_IDS } from "../lib/core/voxel-scene";
 import { sweptFlumeDistance, sweptFlumeSurfaceErrors } from "../lib/core/swept-flume-surface";
 import {
-  NBFLIP_THEME_PARK_GRID, NBFLIP_THEME_PARK_LENGTH, NBFLIP_THEME_PARK_POOL, NBFLIP_THEME_PARK_SCENE_ID,
+  NBFLIP_THEME_PARK_HALF_WIDTH, NBFLIP_THEME_PARK_GRID, NBFLIP_THEME_PARK_LENGTH, NBFLIP_THEME_PARK_POOL, NBFLIP_THEME_PARK_SCENE_ID,
   nbflipThemeParkCentreline,
 } from "../lib/core/nbflip-theme-park-slide-scene";
 
@@ -49,13 +49,14 @@ test("the entire theme park course has a solid bed, an open water corridor and c
   for (let distance = 10; distance < NBFLIP_THEME_PARK_LENGTH - 1; distance += 0.5) {
     const [x, z, heading, floor] = nbflipThemeParkCentreline(distance);
     assert.ok(floor <= previous, `uphill at ${distance}`); previous = floor;
-    for (const across of [-8, -4, 0, 4, 8]) {
+    for (const across of [-14, -8, 0, 8, 14]) {
       const px = x - across * Math.sin(heading), pz = z + across * Math.cos(heading);
-      assert.equal(occupied(px, floor - 2, pz), 1, `missing bed at ${distance}, across ${across}`);
-      assert.equal(occupied(px, floor + 3, pz), 0, `blocked channel at ${distance}, across ${across}`);
+      const bed = distance >= NBFLIP_THEME_PARK_LENGTH - 24 ? floor : floor + NBFLIP_THEME_PARK_HALF_WIDTH - Math.sqrt(NBFLIP_THEME_PARK_HALF_WIDTH ** 2 - across ** 2);
+      assert.equal(occupied(px, bed - 3, pz), 1, `missing bed at ${distance}, across ${across}`);
+      assert.equal(occupied(px, bed + 3, pz), 0, `blocked channel at ${distance}, across ${across}`);
     }
-    if (distance < NBFLIP_THEME_PARK_LENGTH - 21) for (const across of [-12, 12]) {
-      assert.equal(occupied(x - across * Math.sin(heading), floor + 6, z + across * Math.cos(heading)), 1,
+    if (distance < NBFLIP_THEME_PARK_LENGTH - 21) for (const across of [-18, 18]) {
+      assert.equal(occupied(x - across * Math.sin(heading), floor + 24, z + across * Math.cos(heading)), 1,
         `missing wall at ${distance}, across ${across}`);
     }
   }
@@ -109,7 +110,7 @@ test("physical pages cover the full wet course and pool with an eight-cell migra
   };
   for (let distance = 0; distance <= NBFLIP_THEME_PARK_LENGTH; distance++) {
     const [x, z, , floor] = nbflipThemeParkCentreline(distance);
-    include([x - 14, floor, z - 14], [x + 14, floor + 32, z + 14]);
+    include([x - 20, floor, z - 20], [x + 20, floor + 40, z + 20]);
   }
   const pool = NBFLIP_THEME_PARK_POOL;
   include([pool.minX, pool.floor, pool.minZ], [pool.maxX, pool.rim, pool.maxZ]);
@@ -153,7 +154,7 @@ test("the flume's continuous surface has open channels and consistent curved wal
     if (d >= p.wallEnd) continue;
     for (const side of [-1, 1]) {
       const normal = [-Math.sin(a) * side, 0, Math.cos(a) * side];
-      const q = [x + normal[0]! * (surface.halfWidth + surface.wallThickness), floor + .3,
+      const q = [x + normal[0]! * (surface.halfWidth + surface.wallThickness), floor + .45,
         z + normal[2]! * (surface.halfWidth + surface.wallThickness)];
       assert.ok(Math.abs(sample(q)) < 1e-9, "wall lies on the authored curve");
       const e = 1e-5;
@@ -166,5 +167,34 @@ test("the flume's continuous surface has open channels and consistent curved wal
   // The floor and wall are one shell: no zero-distance internal seam along
   // their join, which otherwise appears as a dark horizontal crack.
   const p = surface.pieces[2]!, x = p.x + p.length * .5, floor = p.top - p.fall * .5;
-  assert.ok(sample([x, floor, p.z + surface.halfWidth + surface.wallThickness * .5]) < -.02);
+  assert.ok(sample([x, floor + surface.halfWidth, p.z + surface.halfWidth + surface.wallThickness * .5]) < -.02);
+});
+
+
+test("round flume has a semicircular bed and higher outside bend lips", () => {
+  const surface = scene.solidSurface;
+  assert.equal(surface?.kind, "swept-flume");
+  if (surface?.kind !== "swept-flume") return;
+  assert.equal(surface.crossSection, "semicircular");
+  const r = surface.halfWidth;
+  const isolated = { ...surface, boxes: [], pieces: [{ x: 0, z: 0, heading: 0, curvature: 0,
+    length: 2, top: 1, fall: 0, wallEnd: 2, hood: false }] };
+  for (const angle of [-1.4, -.9, -.4, 0, .4, .9, 1.4]) {
+    const across = r * Math.sin(angle), y = 1 + r - r * Math.cos(angle);
+    assert.ok(Math.abs(sweptFlumeDistance(isolated, 1, y, across)) < 1e-9, "inner bed is a circle");
+    assert.ok(sweptFlumeDistance(isolated, 1, y + .02, across) > 0, "water lies above the bowl");
+    assert.ok(sweptFlumeDistance(isolated, 1, y - .02, across) < 0, "shell supports the bowl");
+  }
+  const p = surface.pieces[0]!, d = p.length / 2, a = p.heading + p.curvature * d;
+  const x = p.x + (Math.sin(a) - Math.sin(p.heading)) / p.curvature;
+  const z = p.z + (Math.cos(p.heading) - Math.cos(a)) / p.curvature;
+  const y = p.top - p.fall / 2 + surface.wallHeight + .06;
+  for (const side of [-1, 1]) {
+    const across: number = side * (r + surface.wallThickness / 2);
+    const value = sweptFlumeDistance(surface, x - across * Math.sin(a), y, z + across * Math.cos(a));
+    assert.equal(value < 0, side < 0, "only the outside wall rises above the standard lip");
+    const cx: number = (x - across * Math.sin(a)) / .02 + nx / 2;
+    const cz: number = (z + across * Math.cos(a)) / .02 + nz / 2;
+    assert.equal(occupied(cx, y / .02, cz), side < 0 ? 1 : 0, "collider matches the raised lip");
+  }
 });

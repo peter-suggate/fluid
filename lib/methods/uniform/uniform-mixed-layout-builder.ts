@@ -1,3 +1,4 @@
+import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import {uniformRuntimeConstantsWGSL} from "./uniform-scene-constants";
 import { uniformCompileStencilWGSL } from "./uniform-compiled-topology";
 import {UNIFORM_MIXED_OVERFLOW_FINE,UNIFORM_MIXED_OVERFLOW_HANGING} from "./uniform-mixed-topology.wgsl";
@@ -75,11 +76,12 @@ export function uniformMixedRegionTable(regions:readonly UniformMixedRegion[]):U
  * where a fine region holds tile c, bit 1 where a coarse one does. An empty
  * table costs its count word. */
 export function uniformMixedRegionWGSL(name:string,word:(index:string)=>string):string{
- return /* wgsl */`fn ${name}(c:vec3u)->u32{
+ return /* wgsl */`fn ${name}(local:vec3u)->u32{
+ let c=vec3i(local)+8*umFramePage();
  var kinds=0u;let n=${word("0u")};
  for(var i=0u;i<n;i++){
   let e=4u+8u*i;
-  if(all(c>=vec3u(${word("e")},${word("e+1u")},${word("e+2u")}))&&all(c<vec3u(${word("e+3u")},${word("e+4u")},${word("e+5u")}))){kinds|=${word("e+6u")};}
+  if(all(c>=bitcast<vec3i>(vec3u(${word("e")},${word("e+1u")},${word("e+2u")})))&&all(c<bitcast<vec3i>(vec3u(${word("e+3u")},${word("e+4u")},${word("e+5u")})))){kinds|=${word("e+6u")};}
  }
  return kinds;
 }`;
@@ -233,8 +235,7 @@ const BLOCKS:u32=${this.blocks}u;const INF:u32=0xffffffffu;
 const FLAGS:u32=${flags}u;const TOTALS:u32=${totals}u;const COUNTS:u32=${COUNTS}u;
 const CHANGED:u32=${lists.changedList}u;const DILATED:u32=${lists.dilatedList}u;const DILATED_COUNT:u32=${lists.dilatedCount}u;
 // The page table and block records the live ownership holds after its tile words.
-fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return current[5u*N+(e.x|(e.y<<6u)|(e.z<<12u))];}
-fn umBlockWord(b:u32)->u32{return current[5u*N+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
+${uniformWindowAddressWGSL("current","5u*N","(N/512u)")}
 ${uniformLatticeAddressWGSL({constant:true,paged:{blocks:"(N/512u)"}})}
 ${uniformMixedRegionWGSL("regionsAt",i=>`statics[${i}]`)}
 // The band is a bit per tile key, and holds no tile of a coarse region but a

@@ -92,8 +92,11 @@ export function isPaneId(value: unknown): value is PaneId {
 export async function shutdownBrowserGPUSession(
   renderer: { shutdown(): Promise<void> },
   releaseCurrentLease?: () => void,
+  previousShutdown?: Promise<void>,
 ): Promise<void> {
-  await renderer.shutdown();
+  // A replacement may itself unmount before its predecessor has drained.
+  // Propagate that barrier so a third viewport cannot start a second device.
+  await Promise.all([renderer.shutdown(), previousShutdown]);
   releaseCurrentLease?.();
 }
 

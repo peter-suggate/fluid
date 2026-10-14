@@ -54,8 +54,16 @@ export const SOLVE_WINDOW_BOX_WORD = 7;
 export const SOLVE_WINDOW_HOST_GROUPS_WORD = 228;
 export const SOLVE_WINDOW_RECORD_WORDS = SOLVE_WINDOW_HOST_GROUPS_WORD + 3;
 
-/** Domain page presentation: eight header words (edge in fine cells, page
- * dimensions XYZ, total resident count, signed page origin XYZ), then one
- * state per logical page in x-fastest order: 0 air, 1 resident, 2 solid.
- * Missing source means this solver does not publish pages. */
-export type GPUFluidVolumePageSource = GPUFluidViewRecords;
+/** Pool-block page records (32-word header, four words per block), followed
+ * in the overlay's combined buffer by the page directory and its 32-word
+ * moving-window header. Published page coordinates (record words 0..2) and
+ * the resident bounds (header words 20..22, 24..26) are signed *world* pages,
+ * equal to the allocator's own records and unchanged by a window shift. A
+ * reader takes the lattice page as world - F, with F the directory header's
+ * words 0..2 from the same copy; the directory slot of a world page is
+ * world & (edge - 1). Optional frame is the live solver params prefix (grid,
+ * cell size, live lattice origin), so metres = origin + h * 32 * (world - F). */
+export interface GPUFluidVolumePageSource extends GPUFluidViewRecords {
+  readonly directory: GPUBufferBinding;
+  readonly frame?: GPUBufferBinding;
+}

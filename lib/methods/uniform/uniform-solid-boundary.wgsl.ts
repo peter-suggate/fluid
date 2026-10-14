@@ -11,7 +11,7 @@ fn umBoundaryBase()->u32{
 fn umBoundaryRecord(p:vec3i)->u32{
  if(!umSolidValid(p)){return 0u;}
  let base=umBoundaryBase();if(base==0u){return 0u;}
- let b=p>>vec3u(3);let mask=umSolidScratch[base];
+ let b=(p+32*umFramePage())>>vec3u(3);let mask=umSolidScratch[base];
  var slot=((u32(b.x)*73856093u)^(u32(b.y)*19349663u)^(u32(b.z)*83492791u))&mask;
  for(var probe=0u;probe<=mask;probe++){
   let at=base+4u+4u*slot;let r=umSolidScratch[at+3u];if(r==0u){return 0u;}

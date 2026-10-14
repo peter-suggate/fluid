@@ -60,7 +60,8 @@ function hostTilePlane(tiles:ArrayLike<number>,pages:number,what:string):Uint32A
 }
 /** WGSL: fn <name>(c:vec3i)->bool, tile c's bit in the host tile plane at
  * word `offset` of `buffer`; a tile outside the window has none. */
-const hostPlaneWGSL=(name:string,buffer:string,offset:string)=>/* wgsl */`fn ${name}(c:vec3i)->bool{
+const hostPlaneWGSL=(name:string,buffer:string,offset:string)=>/* wgsl */`fn ${name}(local:vec3i)->bool{
+ let c=local+8*umFramePage();
  if(any(c<vec3i(0))||any(c>vec3i(511))||${buffer}[${offset}]==0u){return false;}
  let page=vec3u(c)>>vec3u(3u);let e=page.x|(page.y<<6u)|(page.z<<12u);
  let d=${buffer}[${offset}+1u+(e>>4u)];let bit=e&15u;
@@ -1328,7 +1329,7 @@ ${uniformResidencyRequestWGSL}
  for(var t=gid.x;t<UM_TILES;t+=${64*tileGroups}u){
   if(!umTileLive(t)||pageParticles[${this.particles.offset}u+t]==0u){continue;}
   let c=vec3i(umTileCoord(t));let low=max(c-reach,vec3i(0))>>vec3u(3u);let high=min(c+reach,vec3i(511))>>vec3u(3u);
-  for(var z=low.z;z<=high.z;z++){for(var y=low.y;y<=high.y;y++){for(var x=low.x;x<=high.x;x++){upRequest(vec3i(x,y,z));}}}
+  for(var z=low.z;z<=high.z;z++){for(var y=low.y;y<=high.y;y++){for(var x=low.x;x<=high.x;x++){upRequest(vec3i(x,y,z)+upFramePage());}}}
  }
 }
 `});

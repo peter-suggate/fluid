@@ -1,3 +1,4 @@
+import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import {uniformMixedFacesWGSL} from "./uniform-mixed-faces.wgsl";
 import {uniformCompiledTopologyWGSL} from "./uniform-compiled-topology";
 import {uniformMixedVelocitySamplingWGSL} from "./uniform-mixed-velocity-sampling.wgsl";
@@ -16,7 +17,7 @@ function uniformMixedPresentationLoops(source:string):string{
 /** The lattice address of a presentation module: the lattice, the blocks
  * and the pages are the bound topology's (umPageWord, umBlockWord), so
  * every extent is a function of it. */
-const PRESENTATION_ADDRESS=uniformLatticeAddressWGSL({cells:"umDimensions()",tiles:"umTileDimensions()",constant:false,paged:{blocks:"udrBlocks"}});
+const PRESENTATION_ADDRESS=uniformLatticeAddressWGSL({constant:false,paged:{blocks:"udrBlocks"}});
 /** The compiled topology on the bound lattice. */
 const PRESENTATION_COMPILED=uniformCompiledTopologyWGSL.replace(/\bUM_TILES\b/g,"umTileCount()");
 /** The extents that address declares as functions, which simulation text reads as constants of the same name. */
@@ -62,8 +63,7 @@ fn umTileDimensions()->vec3u{return udrTileDims;}
 // The tile key count (UM_TILES), and the pages: the table and the block
 // words follow the topology's five words a tile key.
 fn umTileCount()->u32{return 512u*udrBlocks;}
-fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return umTopology[5u*umTileCount()+(e.x|(e.y<<6u)|(e.z<<12u))];}
-fn umBlockWord(b:u32)->u32{return umTopology[5u*umTileCount()+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
+${uniformWindowAddressWGSL("umTopology","5u*umTileCount()","(umTileCount()/512u)")}
 // The samplers' eight-tap loop bound, opaque to the compiler. A literal 8u
 // lets Metal unroll every nested reconstruction at every call site; the
 // grid overlay, which samples from many sites, then never finishes compiling.

@@ -15,8 +15,8 @@
  * (UniformMixedFrame.pagePool): the census asks for its residency
  * certificate's pages and one commit follows every census.
  *
- * Two buffers, both created once, and a third (published) when the layout
- * names a box.
+ * Three buffers, all created once: state, work and the published block record.
+ * Publication is independent of whether the scene names a seed box.
  *
  * state (UniformPagePool.state; consumers bind it read-only, array<u32>):
  *   [0,16)   status (UNIFORM_PAGE_POOL_STATUS), rewritten by every commit:
@@ -37,7 +37,9 @@
  *            13..15 reserved
  *   table    [16, 16+table^3): entry x | y<<b | z<<2b (b = log2 table) of the
  *            masked page coordinate; 0 AIR, 0xffffffff SOLID, else the block
- *   blocks   one word per block, straight after the table: the window page
+ *   window   32 runtime words after the directory: F, revision, delta, fatal,
+ *            boundary counter, world policy/box and the disabled probe command
+ *   blocks   one word per block, after the runtime header: the world page residue
  *            x | y<<6 | z<<12 (each coordinate & (table-1)) of the page a
  *            resident block holds; 0xffffffff for a free or quarantined block
  *            and for the two sentinels
@@ -52,13 +54,14 @@
  *            never in it and whoever seeds the pool initialises their blocks.
  * Word offsets: uniformPagePoolLayout(options).state.
  *
- * published (UniformPagePool.published, only with options.box; the grid
- * overlay's page record, GPUFluidVolumePageSource): eight header words
- * [32, box pages x, y, z, status.resident, signed box origin x, y, z], then one word per box
- * page at x + pages.x*(y + pages.y*z), 0 for AIR, 1 for resident, 2 for SOLID. The seed writes it and upPublish, the last launch of
- * every commit, rewrites the count and the flags from the table.
+ * published: 32 header words [edge, blocks, table edge, directory offset,
+ * resident count, record stride=4, version=2, reserved, 12 frame lanes,
+ * signed world resident bounds at words 20..22 / 24..26, padding], then one record [signed world page x,y,z, state] per pool block:
+ * the allocator's own record, frame invariant (a reader subtracts the directory header's F for lattice pages). State is 1 for
+ * resident, 0 otherwise; SOLID remains a directory state (2 in the overlay).
+ * The overlay copies the directory only while visible, after these records.
  *
- * The table and the block words (layout.tail.words, in that order) are the
+ * The directory, runtime header and block words (layout.tail.words) are the
  * tail a reader of another buffer needs. initialize(mirrors) takes up to
  * UNIFORM_PAGE_POOL_MIRRORS buffers and a word offset in each: the seed
  * uploads the tail there and the commit kernels store every table and block
@@ -107,6 +110,8 @@
  * aliased or overflowed request is simply not resident, and a certificate
  * over the cap asks for nothing. The bits are sticky and the first raised
  * keeps its page; uniformPagePoolFatalMessage reads them from the receipt. */
+import { uniformMovingWindowDecisionWGSL } from "./uniform-moving-window";
+import { UNIFORM_WINDOW_HEADER_WORDS, uniformWindowDerivedWords, uniformWindowWorldWGSL } from "./uniform-window-address";
 import type { GPUFluidVolumePageSource } from "../../core/method-view-records";
 
 const RECORD=8;
@@ -139,13 +144,15 @@ export const UNIFORM_PAGE_POOL_BLOCK={free:0,resident:1,pending:2,sentinel:3} as
 export const UNIFORM_PAGE_POOL_RECORD={page:0,state:3,generation:4,idle:5,words:RECORD} as const;
 export const UNIFORM_PAGE_POOL_WORK={requests:0,host:1,flags:2,first:3,firstPage:4,pops:7,head:8,detail:9,pins:10,words:16} as const;
 /** The published record (file header): header words and the offset of the flags. */
-export const UNIFORM_PAGE_POOL_PUBLISHED={edge:0,pages:1,resident:4,origin:5,flags:8} as const;
+export const UNIFORM_PAGE_POOL_PUBLISHED={edge:0,blocks:1,table:2,directory:3,resident:4,stride:5,version:6,frame:8,low:20,high:24,records:32,recordWords:4} as const;
 
 /** The scene's bounding box in pages: its low corner and its extent. */
 export interface UniformPagePoolBox {readonly origin:readonly [number,number,number];readonly pages:readonly [number,number,number]}
 export interface UniformPagePoolOptions {
  /** Page table edge in pages, a power of two up to 64 (default 64): the virtual window is table*32 cells an axis. */
  readonly table?:number;
+ /** Runtime world classification: 1 closed tank, 2 open top, 3 open ground. */
+ readonly worldPolicy?:number;
  /** Storage blocks, the two sentinels included (NB); any integer from 3. blocks-2 pages can be resident. */
  readonly blocks:number;
  /** A resident page is retired by the idleSteps-th commit in a row that finds it unkept (the commit that claims it does not count). */
@@ -181,17 +188,18 @@ export function uniformPagePoolLayout(options:UniformPagePoolOptions){
  if(options.box&&!(origin.every(int32)&&extent.every(n=>Number.isSafeInteger(n)&&n>=1&&n<=table)))throw new RangeError(`Uniform page pool box must have a 32-bit integer origin and 1..${table} pages an axis: origin ${origin}, pages ${extent}`);
  const boxPages=extent[0]*extent[1]*extent[2];
  let ringCapacity=1;while(ringCapacity<slots)ringCapacity*=2;
- const entries=table**3,tableAt=UNIFORM_PAGE_POOL_STATUS.words,blockWords=tableAt+entries,records=blockWords+blocks,resident=records+RECORD*blocks,claimed=resident+slots;
+ const entries=table**3,tableAt=UNIFORM_PAGE_POOL_STATUS.words,blockWords=tableAt+entries+UNIFORM_WINDOW_HEADER_WORDS,records=blockWords+blocks,resident=records+RECORD*blocks,claimed=resident+slots;
  const hostList=UNIFORM_PAGE_POOL_WORK.words,pinList=hostList+4*host,list=pinList+4*pins,keep=list+4*requests,ring=keep+blocks,claims=ring+ringCapacity;
  return {table,tableBits:Math.log2(table),entries,blocks,slots,solidBlock:blocks-1,ringCapacity,idleSteps,requests,host,pins,closureCap,
   /** The box (origin and extent in pages) and its page count; count 0: no box. */
   box:{origin,pages:extent,count:boxPages},
-  state:{table:tableAt,blocks:blockWords,records,resident,claimed,words:claimed+slots},
+  state:{table:tableAt,window:tableAt+entries,blocks:blockWords,records,resident,claimed,words:claimed+slots},
   /** Word offsets inside the tail, wherever it lies: state.table in the state buffer, a mirror's offset in a mirror. */
-  tail:{table:0,blocks:entries,words:entries+blocks},
-  work:{hostList,pins:pinList,list,keep,ring,claims,words:claims+3*entries},
-  /** The published record: the flags follow the header; words 0: nothing is published. */
-  published:{flags:UNIFORM_PAGE_POOL_PUBLISHED.flags,words:boxPages?UNIFORM_PAGE_POOL_PUBLISHED.flags+boxPages:0}} as const;
+  tail:{table:0,window:entries,blocks:entries+UNIFORM_WINDOW_HEADER_WORDS,words:entries+UNIFORM_WINDOW_HEADER_WORDS+blocks},
+  worldPolicy:options.worldPolicy??0,
+  work:{hostList,pins:pinList,list,keep,ring,claims,bounds:claims+3*entries,words:claims+3*entries+8},
+  /** One coordinate/state record per block, independent of the seed box. */
+  published:{records:UNIFORM_PAGE_POOL_PUBLISHED.records,words:UNIFORM_PAGE_POOL_PUBLISHED.records+4*blocks}} as const;
 }
 
 /** A page of a seed: its signed page coordinate and the block that holds it. */
@@ -236,6 +244,7 @@ export function uniformPagePoolSeed(layout:UniformPagePoolLayout,pages:readonly 
  const state=new Uint32Array(l.state.words),signed=new Int32Array(state.buffer),ring=new Uint32Array(l.ringCapacity);
  const table=state.subarray(l.state.table,l.state.table+l.entries),blocks=state.subarray(l.state.blocks,l.state.blocks+l.blocks);
  const record=(block:number)=>l.state.records+RECORD*block,held=(block:number)=>{const r=record(block);return `(${signed[r]}, ${signed[r+1]}, ${signed[r+2]})`;};
+ state[l.state.window+12]=l.worldPolicy;state.set(l.box.origin,l.state.window+13);state.set(l.box.pages,l.state.window+16);state.set(uniformWindowDerivedWords(l.worldPolicy,l.box.origin,l.box.pages),l.state.window+24);
  blocks.fill(UNIFORM_PAGE_POOL_FREE);state[record(0)+R.state]=state[record(l.solidBlock)+R.state]=B.sentinel;
  pages.forEach(({x,y,z,block},i)=>{
   const name=()=>`Uniform page pool seed page ${i} (${x}, ${y}, ${z})`;
@@ -301,18 +310,21 @@ export function uniformPagePoolBoxSeed(layout:UniformPagePoolLayout,options:Unif
  const inside=(x:number,y:number,z:number)=>((x-origin[0])&mask)<pages[0]&&((y-origin[1])&mask)<pages[1]&&((z-origin[2])&mask)<pages[2];
  return uniformPagePoolSeed(layout,uniformPagePoolBoxPages(layout,options),(x,y,z)=>inside(x,y,z)?K.air:outside?outside(x,y,z):K.solid);
 }
-/** The published record of a seeded pool (file header) for a layout's box
- * (default: the seed's own), layout.published.words words. */
+/** Overlay publication of the pool's block records, including signed pages. */
 export function uniformPagePoolPublished(seed:UniformPagePoolSeed,layout:UniformPagePoolLayout=seed.layout):Uint32Array<ArrayBuffer>{
- const l=layout,{origin,pages:[px,py,pz]}=l.box,P=UNIFORM_PAGE_POOL_PUBLISHED,record=new Uint32Array(l.published.words),signed=new Int32Array(seed.state.buffer,seed.state.byteOffset,seed.state.length);
- if(!record.length)return record;
- record[P.edge]=UNIFORM_PAGE_POOL_EDGE;record[P.pages]=px;record[P.pages+1]=py;record[P.pages+2]=pz;record[P.resident]=seed.resident.length;record.set(origin,P.origin);
- for(let z=0,i=P.flags;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++,i++){
-  const qx=origin[0]+x,qy=origin[1]+y,qz=origin[2]+z,block=seed.table[uniformPagePoolEntry(l,qx,qy,qz)]!;
-  if(block===UNIFORM_PAGE_POOL_SOLID){record[i]=2;continue;}
-  if(block===UNIFORM_PAGE_POOL_AIR)continue;
-  const r=l.state.records+RECORD*block;
-  if(signed[r]===qx&&signed[r+1]===qy&&signed[r+2]===qz)record[i]=1;
+ const l=layout,P=UNIFORM_PAGE_POOL_PUBLISHED,record=new Uint32Array(l.published.words);
+ record[P.edge]=UNIFORM_PAGE_POOL_EDGE;record[P.blocks]=l.blocks;record[P.table]=l.table;
+ record[P.directory]=l.published.words;record[P.resident]=seed.resident.length;
+ record[P.stride]=4;record[P.version]=2;
+ const signed=new Int32Array(record.buffer);signed.set([2147483647,2147483647,2147483647],P.low);signed.set([-2147483647,-2147483647,-2147483647],P.high);
+ for(const b of seed.resident){
+  const r=l.state.records+RECORD*b;
+  for(let a=0;a<3;a++){const q=seed.state[r+a]!|0;signed[P.low+a]=Math.min(signed[P.low+a]!,q);signed[P.high+a]=Math.max(signed[P.high+a]!,q+1);}
+ }
+ for(let b=0;b<l.blocks;b++){
+  const r=l.state.records+RECORD*b,o=P.records+4*b;
+  record.set(seed.state.subarray(r,r+3),o);
+  record[o+3]=seed.state[r+3]===UNIFORM_PAGE_POOL_BLOCK.resident?1:0;
  }
  return record;
 }
@@ -446,7 +458,7 @@ export function uniformPagePoolFatalMessage(layout:UniformPagePoolLayout,status:
   case F.alias:return `Two pages name one page table entry (${page}, commit ${commit}): the resident set is wider than the table's ${layout.table} pages, or an allocator bug.`;
   case F.closureCap:return `Departure travel gives a closure of ${detail} tiles, over the cap of ${layout.closureCap} (commit ${commit}, ${page}): a sample is moving faster than the residency certificate covers.`;
   case F.closure:return `Liquid or band tile found in ${page}, which was not resident at the start of commit ${commit}.`;
-  case F.edge:return `Liquid reached the edge of the fluid frame at ${page} (commit ${commit}): the frame holds window pages 0..${layout.table-1} an axis, and a page past them would alias one inside. Author the scene with more room around its liquid.`;
+  case F.edge:return `Liquid exceeds the moving fluid frame at ${page} (commit ${commit}): residents and requests must fit ${layout.table-4} pages per axis with the window margin; an invalid forced shift or signed coordinate overflow also raises this fatal.`;
   default:return `Page pool fatal bits ${status[offset+S.fatal]} (first ${first}) at commit ${commit}, ${page}.`;
  }
 }
@@ -454,7 +466,11 @@ export function uniformPagePoolFatalMessage(layout:UniformPagePoolLayout,status:
 const READERS=/* wgsl */`
 fn upEntry(q:vec3i)->u32{let m=vec3u(q)&vec3u(UP_TABLE-1u);return m.x|(m.y<<UP_TABLE_BITS)|(m.z<<(2u*UP_TABLE_BITS));}
 // The word at q's entry: UP_AIR_WORD, UP_SOLID_WORD or the block resident there (q's own unless a page a table apart holds the entry).
-fn upWord(q:vec3i)->u32{return upState[UP_AT_TABLE+upEntry(q)];}
+fn upWord(q:vec3i)->u32{
+ let raw=upState[UP_AT_TABLE+upEntry(q)];if(upPolicy()==0u){return raw;}
+ if(upWorldSolid(q)){return UP_SOLID_WORD;}
+ return select(raw,UP_AIR_WORD,raw==UP_SOLID_WORD);
+}
 // A block with a page slot: neither sentinel.
 fn upStored(block:u32)->bool{return block-1u<UP_SOLID_BLOCK-1u;}
 // UP_RESIDENT, UP_AIR or UP_SOLID: what q's entry is, without the coordinate check.
@@ -466,7 +482,7 @@ fn upBlockWrapped(q:vec3i)->u32{return min(upWord(q),UP_SOLID_BLOCK);}
 fn upBlockOf(q:vec3i)->u32{let block=upWord(q);if(!upStored(block)){return UP_NONE;}return select(UP_NONE,block,all(upPageOf(block)==q));}
 // The block's word: the window page of the page it holds (upWindowPage), or UP_FREE.
 fn upBlockWord(block:u32)->u32{return upState[UP_AT_BLOCKS+block];}
-fn upWindowPage(word:u32)->vec3i{return vec3i(vec3u(word&63u,(word>>6u)&63u,(word>>12u)&63u));}
+fn upWindowPage(word:u32)->vec3i{return vec3i((vec3u(word&63u,(word>>6u)&63u,(word>>12u)&63u)-bitcast<vec3u>(upFramePage()))&vec3u(63u));}
 fn upGeneration()->u32{return upState[0u];}
 fn upResidentCount()->u32{return upState[1u];}
 fn upResidentBlock(i:u32)->u32{return upState[UP_AT_RESIDENT+i];}
@@ -475,7 +491,7 @@ fn upResidentBlock(i:u32)->u32{return upState[UP_AT_RESIDENT+i];}
 // in the new list (it is empty until the first commit claims).
 fn upNewCount()->u32{return upState[2u];}
 fn upNewBlock(i:u32)->u32{return upState[UP_AT_NEW+i];}
-fn upNewPage(i:u32)->vec3i{return upPageOf(upNewBlock(i));}
+fn upNewPage(i:u32)->vec3i{return upPageOf(upNewBlock(i))-upFramePage();}
 fn upFatal()->u32{return upState[5u];}
 `;
 const REQUESTERS=/* wgsl */`
@@ -501,15 +517,22 @@ fn upClaimWord(at:u32,tag:u32)->u32{
 // Ask for page q to be resident after the next commit, from any number of
 // invocations at once: nothing toward a SOLID entry, a resident page is
 // kept, an absent one listed once.
+fn upInclude(q:vec3i){
+ if(upPolicy()==0u){return;}
+ let key=bitcast<vec3u>(q)^vec3u(0x80000000u);
+ for(var a=0u;a<3u;a++){atomicMin(&upWork[UP_WORK_BOUNDS+a],key[a]);atomicMax(&upWork[UP_WORK_BOUNDS+3u+a],key[a]);}
+ atomicOr(&upWork[UP_WORK_BOUNDS+6u],1u);
+}
 fn upRequest(q:vec3i){
- let e=upEntry(q);let held=upState[UP_AT_TABLE+e];
+ let e=upEntry(q);let held=upWord(q);
  if(held==UP_SOLID_WORD){return;}
+ upInclude(q);
  if(held!=UP_AIR_WORD&&all(upPageOf(held)==q)){upKeep(held);return;}
  let tag=(vec3u(q>>vec3u(UP_TABLE_BITS))<<vec3u(1u))|vec3u(1u);
  let c=UP_WORK_CLAIMS+3u*e;
- let x=upClaimWord(c,tag.x);if(x==2u){upFail(UP_FATAL_ALIAS,q);return;}
+ let x=upClaimWord(c,tag.x);if(x==2u){upFail(select(UP_FATAL_ALIAS,UP_FATAL_EDGE,upPolicy()!=0u),q);return;}
  let y=upClaimWord(c+1u,tag.y);let z=upClaimWord(c+2u,tag.z);
- if(y==2u||z==2u){upFail(UP_FATAL_ALIAS,q);}
+ if(y==2u||z==2u){upFail(select(UP_FATAL_ALIAS,UP_FATAL_EDGE,upPolicy()!=0u),q);}
  if(x!=1u){return;}
  let i=atomicAdd(&upWork[0u],1u);
  if(i>=UP_REQUESTS){upFail(UP_FATAL_REQUESTS,q);return;}
@@ -524,10 +547,12 @@ const UP_EDGE:u32=${UNIFORM_PAGE_POOL_EDGE}u;const UP_BLOCKS:u32=${l.blocks}u;co
 const UP_AIR_WORD:u32=0u;const UP_SOLID_WORD:u32=0xffffffffu;const UP_FREE:u32=0xffffffffu;
 const UP_RESIDENT:u32=${K.resident}u;const UP_AIR:u32=${K.air}u;const UP_SOLID:u32=${K.solid}u;
 const UP_TABLE_BITS:u32=${l.tableBits}u;const UP_REQUESTS:u32=${l.requests}u;const UP_CLOSURE_CAP:u32=${l.closureCap}u;
+const UP_AT_WINDOW:u32=${l.state.window}u;const UP_WORK_BOUNDS:u32=${l.work.bounds}u;
 const UP_AT_TABLE:u32=${l.state.table}u;const UP_AT_BLOCKS:u32=${l.state.blocks}u;const UP_AT_RECORDS:u32=${l.state.records}u;const UP_AT_RESIDENT:u32=${l.state.resident}u;const UP_AT_NEW:u32=${l.state.claimed}u;
 const UP_WORK_LIST:u32=${l.work.list}u;const UP_WORK_KEEP:u32=${l.work.keep}u;const UP_WORK_CLAIMS:u32=${l.work.claims}u;const UP_WORK_DETAIL:u32=${UNIFORM_PAGE_POOL_WORK.detail}u;
 const UP_FATAL_EXHAUSTED:u32=${F.exhausted}u;const UP_FATAL_ALIAS:u32=${F.alias}u;const UP_FATAL_REQUESTS:u32=${F.requests}u;const UP_FATAL_CLOSURE_CAP:u32=${F.closureCap}u;const UP_FATAL_CLOSURE:u32=${F.closure}u;const UP_FATAL_EDGE:u32=${F.edge}u;
 @group(${group}) @binding(${state}) var<storage,${access}> upState:array<u32>;
+${uniformWindowWorldWGSL(i=>`upState[UP_AT_WINDOW+${i}]`,"up")}
 ${READERS}${work===undefined?"":`@group(${group}) @binding(${work}) var<storage,read_write> upWork:array<atomic<u32>>;
 ${REQUESTERS}`}`;
 }
@@ -577,6 +602,7 @@ export class UniformPagePool {
  private current:UniformPagePoolSeed;
  private mirrors:readonly UniformPagePoolMirror[]=[];
  private started=false;
+ private windowPipeline?:GPUComputePipeline;
  private hostPipeline?:GPUComputePipeline;
  private claimPipeline?:GPUComputePipeline;
  private slotsPipeline?:GPUComputePipeline;
@@ -596,12 +622,12 @@ export class UniformPagePool {
   this.work=device.createBuffer({label:"Uniform page pool work",size:4*l.work.words,usage});
   if(l.published.words){
    this.published=device.createBuffer({label:"Uniform page pool published pages",size:4*l.published.words,usage});
-   this.volumePageSource={records:{buffer:this.published}};
+   this.volumePageSource={records:{buffer:this.published},directory:{buffer:this.state,offset:4*l.state.table,size:4*(l.entries+UNIFORM_WINDOW_HEADER_WORDS)}};
   }
   this.allocatedBytes=this.state.size+this.work.size+(this.published?.size??0);
   this.host=new Int32Array(4*l.host);this.pins=new Int32Array(4*l.pins);
-  // Launch widths: the lists are strided when longer; the published record has a lane a box page.
-  this.hostGroups=Math.min(Math.ceil(Math.max(l.host,l.pins)/64),16);this.claimGroups=Math.min(Math.ceil(l.requests/64),16);this.publishGroups=Math.ceil(l.box.count/64);
+  // Publication visits blocks; the address-window directory is copied only by a visible overlay.
+  this.hostGroups=Math.min(Math.ceil(Math.max(l.host,l.pins)/64),16);this.claimGroups=Math.min(Math.ceil(l.requests/64),16);this.publishGroups=Math.ceil(l.blocks/64);
   this.current=uniformPagePoolSeed(l,[],()=>UNIFORM_PAGE_POOL_KIND.air);this.upload();
  }
  /** The host copy of the pool at generation 0: the last seed, or the empty pool. */
@@ -617,6 +643,7 @@ export class UniformPagePool {
  }
  private upload():void{
   const l=this.layout,seed=this.current,queue=this.device.queue,work=new Uint32Array(l.work.words);
+  work.fill(0xffffffff,l.work.bounds,l.work.bounds+3);
   work.set(seed.ring,l.work.ring);work[UNIFORM_PAGE_POOL_WORK.pins]=this.pinCount;work.set(new Uint32Array(this.pins.buffer,0,4*this.pinCount),l.work.pins);
   queue.writeBuffer(this.state,0,seed.state);queue.writeBuffer(this.work,0,work);
   if(this.published)queue.writeBuffer(this.published,0,uniformPagePoolPublished(seed,l));
@@ -642,10 +669,10 @@ export class UniformPagePool {
   * tail is written from the seed here and kept equal to the state's by the
   * commit kernels from then on; a mirror needs STORAGE and COPY_DST usage
   * and costs the commit one storage binding. */
- async initialize(mirrors:readonly UniformPagePoolMirror[]=[]):Promise<void>{
+ async initialize(mirrors:readonly UniformPagePoolMirror[]=[],frameParams?:GPUBuffer):Promise<void>{
   const device=this.device,l=this.layout,W=UNIFORM_PAGE_POOL_WORK,S=UNIFORM_PAGE_POOL_STATUS,R=UNIFORM_PAGE_POOL_RECORD,B=UNIFORM_PAGE_POOL_BLOCK;
   if(this.started)throw new Error("Uniform page pool is already initialized");
-  const most=Math.min(UNIFORM_PAGE_POOL_MIRRORS,device.limits.maxStorageBuffersPerShaderStage-2),needed=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST;
+  const most=Math.min(UNIFORM_PAGE_POOL_MIRRORS,device.limits.maxStorageBuffersPerShaderStage-2-(frameParams?1:0)),needed=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST;
   if(mirrors.length>most)throw new RangeError(`Uniform page pool takes ${most} mirrors at most: ${mirrors.length}`);
   mirrors.forEach((m,i)=>{
    if(!Number.isSafeInteger(m.offset)||m.offset<0||4*(m.offset+l.tail.words)>m.buffer.size)throw new RangeError(`Uniform page pool mirror ${i}: ${l.tail.words} words at word ${m.offset} do not fit its buffer of ${m.buffer.size} bytes`);
@@ -661,23 +688,39 @@ export class UniformPagePool {
    if(errors.length)throw new Error(`${label}\n${errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n")}`);
    return module;
   };
+  const windowBody=uniformMovingWindowDecisionWGSL.slice(uniformMovingWindowDecisionWGSL.indexOf("@compute"))
+   .replaceAll("mwState[","upState[UP_AT_WINDOW+").replaceAll("mwBounds[","upWork[UP_WORK_BOUNDS+")
+   .replaceAll("mwForce.boundary","upState[UP_AT_WINDOW+20u]")
+   .replaceAll("mwForce.x","bitcast<i32>(upState[UP_AT_WINDOW+21u])")
+   .replaceAll("mwForce.y","bitcast<i32>(upState[UP_AT_WINDOW+22u])")
+   .replaceAll("mwForce.z","bitcast<i32>(upState[UP_AT_WINDOW+23u])")
+   .replace("upState[UP_AT_WINDOW+20u]==upState[UP_AT_WINDOW+8u]+1u",frameParams?"upState[UP_AT_WINDOW+20u]==u32(bitcast<f32>(upParams[53u]))":"upState[UP_AT_WINDOW+20u]==upState[UP_AT_WINDOW+8u]+1u")
+   .replace("@compute @workgroup_size(1) fn mwDecide()", "fn upDecide()")
+   .replace("let old=", "if(upPolicy()==0u){return;}let old=")
+   // A finite tank already has walls on every side; only the probe moves it.
+   .replace("if(forced){", "if(upPolicy()==1u||(a==1u&&upPolicy()==3u&&lo==((upState[UP_AT_WINDOW+14u])^0x80000000u)&&hi>=old[a]&&hi-old[a]<62u)){next[a]=old[a];}if(forced){");
   const [hostModule,publishModule,commitModule]=await Promise.all([compile("Uniform page pool host commands",/* wgsl */`${source(l,0,0,1,"read")}
 fn upAsk(a:u32){upRequest(vec3i(bitcast<i32>(atomicLoad(&upWork[a])),bitcast<i32>(atomicLoad(&upWork[a+1u])),bitcast<i32>(atomicLoad(&upWork[a+2u]))));}
 // The host commands and the pinned pages ask as any consumer does, so they deduplicate with the kernels' requests.
 @compute @workgroup_size(64) fn upHost(@builtin(global_invocation_id) gid:vec3u){
+ for(var i=gid.x;i<upResidentCount();i+=${64*this.hostGroups}u){upInclude(upPageOf(upResidentBlock(i)));}
  let count=min(atomicLoad(&upWork[${W.host}u]),${l.host}u);let pins=min(atomicLoad(&upWork[${W.pins}u]),${l.pins}u);
  for(var i=gid.x;i<count;i+=${64*this.hostGroups}u){upAsk(${l.work.hostList}u+4u*i);}
  for(var i=gid.x;i<pins;i+=${64*this.hostGroups}u){upAsk(${l.work.pins}u+4u*i);}
 }`),this.published?compile("Uniform page pool publish",/* wgsl */`${source(l,0,0,undefined,"read")}
 @group(0) @binding(1) var<storage,read_write> upPublished:array<u32>;
-// upPublish: one lane a box page, after upSlots: the resident count and each page's flag, from the new table.
-// The box is named here and nowhere else in the pool's kernels: the record is the overlay's.
-const UP_BOX_ORIGIN:vec3i=vec3i(${l.box.origin.join(",")});const UP_BOX_PAGES:vec3u=vec3u(${l.box.pages.map(n=>`${n}u`).join(",")});const UP_BOX_COUNT:u32=${l.box.count}u;
-fn upBoxPage(i:u32)->vec3i{return UP_BOX_ORIGIN+vec3i(vec3u(i%UP_BOX_PAGES.x,(i/UP_BOX_PAGES.x)%UP_BOX_PAGES.y,i/(UP_BOX_PAGES.x*UP_BOX_PAGES.y)));}
+// One lane per block: the signed coordinate and current resident state.
 @compute @workgroup_size(64) fn upPublish(@builtin(global_invocation_id) gid:vec3u){
- if(gid.x>=UP_BOX_COUNT){return;}
- if(gid.x==0u){upPublished[${UNIFORM_PAGE_POOL_PUBLISHED.resident}u]=upResidentCount();}
- upPublished[${l.published.flags}u+gid.x]=select(select(0u,2u,upKind(upBoxPage(gid.x))==UP_SOLID),1u,upBlockOf(upBoxPage(gid.x))!=UP_NONE);
+ let b=gid.x;if(b>=UP_BLOCKS){return;}
+ if(b==0u){
+  let count=upResidentCount();upPublished[${UNIFORM_PAGE_POOL_PUBLISHED.resident}u]=count;
+  var low=vec3i(2147483647);var high=vec3i(-2147483647);
+  for(var i=0u;i<count;i++){let q=upPageOf(upResidentBlock(i));low=min(low,q);high=max(high,q+vec3i(1));}
+  for(var a=0u;a<3u;a++){upPublished[20u+a]=bitcast<u32>(low[a]);upPublished[24u+a]=bitcast<u32>(high[a]);}
+ }
+ let r=UP_AT_RECORDS+8u*b;let o=${l.published.records}u+4u*b;
+ let q=upPageOf(b);upPublished[o]=bitcast<u32>(q.x);upPublished[o+1u]=bitcast<u32>(q.y);upPublished[o+2u]=bitcast<u32>(q.z);
+ upPublished[o+3u]=select(0u,1u,upState[r+3u]==${UNIFORM_PAGE_POOL_BLOCK.resident}u);
 }`):undefined,compile("Uniform page pool commit",/* wgsl */`${source(l,0,0,1,"read_write")}
 ${this.mirrors.map((_,i)=>`@group(0) @binding(${2+i}) var<storage,read_write> upMirror${i}:array<u32>;`).join("\n")}
 const S_FREE:u32=${S.free}u;const S_PENDING:u32=${S.pending}u;const S_FATAL:u32=${S.fatal}u;
@@ -688,6 +731,19 @@ const IDLE_STEPS:u32=${l.idleSteps}u;const CLAIM_WIDTH:u32=${64*this.claimGroups
 // The only stores of table and block words: to the state and to every mirror.
 fn upPutEntry(i:u32,word:u32){upState[UP_AT_TABLE+i]=word;${puts(l.tail.table)}}
 fn upPutBlock(i:u32,word:u32){upState[UP_AT_BLOCKS+i]=word;${puts(l.tail.blocks)}}
+fn upPutWindow(i:u32,word:u32){upState[UP_AT_WINDOW+i]=word;${puts(l.tail.window)}}
+${frameParams?`@group(0) @binding(${2+this.mirrors.length}) var<storage,read_write> upParams:array<u32>;`:""}
+${windowBody}
+@compute @workgroup_size(1) fn upWindow(){
+ upDecide();
+ ${frameParams?`if(upState[UP_AT_WINDOW+20u]==u32(bitcast<f32>(upParams[53u]))){upState[UP_AT_WINDOW+20u]=0u;}`:""}
+ if(upState[UP_AT_WINDOW+7u]!=0u){upFail(UP_FATAL_EDGE,upFramePage());}
+ for(var i=0u;i<12u;i++){upPutWindow(i,upState[UP_AT_WINDOW+i]);}
+ ${frameParams?`for(var a=0u;a<3u;a++){
+  let d=f32(bitcast<i32>(upState[UP_AT_WINDOW+4u+a]))*32.0;
+  if(d!=0.0){upParams[8u+a]=bitcast<u32>(bitcast<f32>(upParams[8u+a])+d*bitcast<f32>(upParams[4u+a]));upParams[32u+a]=bitcast<u32>(bitcast<f32>(upParams[32u+a])-d);}
+ }`:""}
+}
 fn upBlockWordOf(q:vec3i)->u32{let m=vec3u(q)&vec3u(UP_TABLE-1u);return m.x|(m.y<<6u)|(m.z<<12u);}
 // upClaim: one block per listed request, popped off the ring head; the
 // blocks free or quarantined before this commit are all claimable. Each
@@ -704,8 +760,8 @@ fn upBlockWordOf(q:vec3i)->u32{let m=vec3u(q)&vec3u(UP_TABLE-1u);return m.x|(m.y
   let q=vec3i(bitcast<i32>(atomicLoad(&upWork[a])),bitcast<i32>(atomicLoad(&upWork[a+1u])),bitcast<i32>(atomicLoad(&upWork[a+2u])));
   let e=upEntry(q);let c=UP_WORK_CLAIMS+3u*e;
   atomicStore(&upWork[c],0u);atomicStore(&upWork[c+1u],0u);atomicStore(&upWork[c+2u],0u);
-  let held=upState[UP_AT_TABLE+e];
-  if(held==UP_SOLID_WORD){continue;}
+  let held=upWord(q);
+  if(held==UP_SOLID_WORD||atomicLoad(&upWork[2u])!=0u){continue;}
   if(held!=UP_AIR_WORD){if(any(upPageOf(held)!=q)){upFail(UP_FATAL_ALIAS,q);}continue;}
   let pop=atomicAdd(&upWork[W_POPS],1u);
   if(pop>=available){upFailWith(UP_FATAL_EXHAUSTED,q,upState[${S.resident}u]);continue;}
@@ -768,14 +824,15 @@ var<workgroup> upScan:array<vec2u,256>;
 }`)]);
   const binding=(at:number,type:GPUBufferBindingType):GPUBindGroupLayoutEntry=>({binding:at,visibility:GPUShaderStage.COMPUTE,buffer:{type}});
   const readerLayout=device.createBindGroupLayout({entries:[binding(0,"read-only-storage"),binding(1,"storage")]});
-  const writerLayout=device.createBindGroupLayout({entries:[binding(0,"storage"),binding(1,"storage"),...this.mirrors.map((_,i)=>binding(2+i,"storage"))]});
+  const writerLayout=device.createBindGroupLayout({entries:[binding(0,"storage"),binding(1,"storage"),...this.mirrors.map((_,i)=>binding(2+i,"storage")),...(frameParams?[binding(2+this.mirrors.length,"storage")]:[])]});
   const entries=[{binding:0,resource:{buffer:this.state}},{binding:1,resource:{buffer:this.work}}];
   this.reader=device.createBindGroup({layout:readerLayout,entries});
-  this.writer=device.createBindGroup({layout:writerLayout,entries:[...entries,...this.mirrors.map((m,i)=>({binding:2+i,resource:{buffer:m.buffer}}))]});
+  this.writer=device.createBindGroup({layout:writerLayout,entries:[...entries,...this.mirrors.map((m,i)=>({binding:2+i,resource:{buffer:m.buffer}})),...(frameParams?[{binding:2+this.mirrors.length,resource:{buffer:frameParams}}]:[])]});
   // The published record takes the work buffer's place beside the read-only state.
   if(this.published)this.publisher=device.createBindGroup({layout:readerLayout,entries:[entries[0]!,{binding:1,resource:{buffer:this.published}}]});
   const reading=device.createPipelineLayout({bindGroupLayouts:[readerLayout]}),writing=device.createPipelineLayout({bindGroupLayouts:[writerLayout]});
-  [this.hostPipeline,this.claimPipeline,this.slotsPipeline,this.publishPipeline]=await Promise.all([
+  [this.windowPipeline,this.hostPipeline,this.claimPipeline,this.slotsPipeline,this.publishPipeline]=await Promise.all([
+   device.createComputePipelineAsync({label:"Uniform page pool upWindow",layout:writing,compute:{module:commitModule,entryPoint:"upWindow"}}),
    device.createComputePipelineAsync({label:"Uniform page pool upHost",layout:reading,compute:{module:hostModule,entryPoint:"upHost"}}),
    device.createComputePipelineAsync({label:"Uniform page pool upClaim",layout:writing,compute:{module:commitModule,entryPoint:"upClaim"}}),
    device.createComputePipelineAsync({label:"Uniform page pool upSlots",layout:writing,compute:{module:commitModule,entryPoint:"upSlots"}}),
@@ -803,12 +860,14 @@ var<workgroup> upScan:array<vec2u,256>;
    this.device.queue.writeBuffer(this.work,4*this.layout.work.hostList,this.host,0,4*host);this.hostCount=0;
   }
   const pass=encoder.beginComputePass(UniformPagePool.PASS);
-  // upHost is launched only when the host queued a command or pinned a page: without one it could never act.
-  if(host||this.pinCount){pass.setPipeline(this.hostPipeline!);pass.setBindGroup(0,this.reader!);pass.dispatchWorkgroups(this.hostGroups);}
+  // Moving worlds also gather the signed coordinates of every old resident.
+  // This existing small launch carries the bounds; it never scans field cells.
+  if(host||this.pinCount||this.layout.worldPolicy){pass.setPipeline(this.hostPipeline!);pass.setBindGroup(0,this.reader!);pass.dispatchWorkgroups(this.hostGroups);}
   // The request list is complete here and no block is popped yet: a launch
   // over the list that settles a requested entry (to SOLID) belongs between
   // upHost and upClaim.
   pass.setBindGroup(0,this.writer!);
+  pass.setPipeline(this.windowPipeline!);pass.dispatchWorkgroups(1);
   pass.setPipeline(this.claimPipeline!);pass.dispatchWorkgroups(this.claimGroups);
   pass.setPipeline(this.slotsPipeline);pass.dispatchWorkgroups(1);
   if(this.publishPipeline){pass.setPipeline(this.publishPipeline);pass.setBindGroup(0,this.publisher!);pass.dispatchWorkgroups(this.publishGroups);}

@@ -30,8 +30,8 @@ for (const p of surface.pieces) for (let i = 0; i <= 16; i++) {
   const d = p.length * i / 16, a = p.heading + p.curvature * d;
   const x = p.x + (p.curvature ? (Math.sin(a) - Math.sin(p.heading)) / p.curvature : d * Math.cos(a));
   const z = p.z + (p.curvature ? (Math.cos(p.heading) - Math.cos(a)) / p.curvature : d * Math.sin(a));
-  for (const across of [-.3, -.24, 0, .24, .3]) {
-    points.push([x - across * Math.sin(a), p.top - p.fall * i / 16 + .3, z + across * Math.cos(a)]);
+  for (const across of [-.42, -.36, -.24, 0, .24, .36, .42]) for (const height of [-.04, .08, .32, .5, .72]) {
+    points.push([x - across * Math.sin(a), p.top - p.fall * i / 16 + height, z + across * Math.cos(a)]);
   }
 }
 const input = new Float32Array(points.flatMap(p => [...p, 0]));

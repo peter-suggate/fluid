@@ -200,7 +200,7 @@ fn umLaplacian(face:UMFace)->f32 {
  // axis and first transversely: anchor/w is that cell's width-w index.
  let site=face.anchor/vec3i(i32(face.width));let width=f32(face.width);
  var home=vec3i(0);
- if(face.width==4u){let page=max(site,vec3i(0))>>vec3u(3u);home=umCoarseOrigin(umBlockOf(page))-(page<<vec3u(3u));}
+ if(face.width==4u){let page=max(site,umWallLow()>>vec3u(2u))>>vec3u(3u);home=umCoarseOrigin(umBlockOf(page))-(page<<vec3u(3u));}
  let center=umViscositySite(site,face.axis,face.width,home);var terms=vec3f(0);
  for(var axis=0u;axis<3u;axis++){
   var delta=vec3i(0);delta[axis]=1;

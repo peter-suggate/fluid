@@ -4,17 +4,7 @@
 export const narrowBandTerrainContactWGSL = /* wgsl */ `
 // Height and its two derivatives from the same bilinear patch. Column samples
 // live at cell centres; interior planar inclines are reproduced exactly.
-fn nbTerrainSurface(q:vec3f)->vec3f{
- let high=umSolidTerrainHigh();
- let p=clamp(q.xz-vec2f(0.5),vec2f(0),high);
- let a=vec2i(floor(p));let f=fract(p);
- let h00=umSolidTerrainHeight(a.x,a.y);let h10=umSolidTerrainHeight(a.x+1,a.y);
- let h01=umSolidTerrainHeight(a.x,a.y+1);let h11=umSolidTerrainHeight(a.x+1,a.y+1);
- let height=mix(mix(h00,h10,f.x),mix(h01,h11,f.x),f.y);
- let slope=vec2f(mix(h10-h00,h11-h01,f.y),mix(h01-h00,h11-h10,f.x));
- let interior=(q.xz>=vec2f(0.5))&(q.xz<=high+vec2f(0.5));
- return vec3f(height,select(vec2f(0),slope,interior));
-}
+fn nbTerrainSurface(q:vec3f)->vec3f{return umTerrainSurface(q);}
 fn nbTerrainNormal(s:vec3f)->vec3f{
  let h=params.hDt.xyz;return normalize(vec3f(-s.y/h.x,1.0/h.y,-s.z/h.z));
 }

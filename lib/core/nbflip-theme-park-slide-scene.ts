@@ -16,9 +16,9 @@ export const NBFLIP_THEME_PARK_SCENE_ID = "nbflip-water-slide-theme-park";
 export const NBFLIP_THEME_PARK_GRID = [384, 256, 320] as const;
 export const NBFLIP_THEME_PARK_STREAM_SECONDS = 18;
 export const NBFLIP_THEME_PARK_FRAMES = 2700;
-export const NBFLIP_THEME_PARK_HALF_WIDTH = 10;
+export const NBFLIP_THEME_PARK_HALF_WIDTH = 16;
 export const NBFLIP_THEME_PARK_WALL = 32;
-const REACH = NBFLIP_THEME_PARK_HALF_WIDTH + 4, SLAB = 6;
+const REACH = NBFLIP_THEME_PARK_HALF_WIDTH + 4, SLAB = 4;
 const TOP = 212, HELIX_RADIUS = 72, TURN = 2 * Math.PI;
 const BACK = 6, STOP = 6, HOOD = 24, GAP = 20;
 const SILL = 32, LID = SILL + NBFLIP_THEME_PARK_WALL;
@@ -90,15 +90,23 @@ function flumeColumns(): Visit[][] {
         }
         visit.last = distance;
         const channel = across < NBFLIP_THEME_PARK_HALF_WIDTH;
+        const round = !hood;
+        const bowlRise = round ? NBFLIP_THEME_PARK_HALF_WIDTH - Math.sqrt(Math.max(0, NBFLIP_THEME_PARK_HALF_WIDTH ** 2 - Math.min(across, NBFLIP_THEME_PARK_HALF_WIDTH) ** 2)) : 0;
+        const outerRadius = NBFLIP_THEME_PARK_HALF_WIDTH + SLAB;
+        const base = round ? Math.floor(floor + NBFLIP_THEME_PARK_HALF_WIDTH - Math.sqrt(Math.max(0, outerRadius ** 2 - across ** 2))) : floor - SLAB;
+        const bed = Math.floor(floor + bowlRise);
+        const piece = COURSE.find(p => distance < p.from + p.length) ?? COURSE[COURSE.length - 1]!;
+        const signedAcross = cos * dz - sin * dx;
+        const sideRise = signedAcross * piece.curvature < 0 ? 8 * Math.sin(Math.PI * Math.max(0, Math.min(1, (distance - piece.from) / piece.length))) ** 2 : 0;
         if (channel) {
           if (across >= visit.nearest) continue;
-          visit.base = floor - SLAB; visit.floor = floor; visit.top = block || floor; visit.hood = hood;
+          visit.base = base; visit.floor = bed; visit.top = block || bed; visit.hood = hood;
         } else {
           if (visit.nearest < NBFLIP_THEME_PARK_HALF_WIDTH) continue;
-          visit.base = Math.min(visit.base, floor - SLAB);
-          visit.floor = Math.max(visit.floor, floor);
+          visit.base = visit.nearest === REACH ? base : Math.min(visit.base, base);
+          visit.floor = Math.max(visit.floor, bed);
           // Both sides open under the impact hood, venting into the pool.
-          const wall = distance >= length - GAP ? 0 : NBFLIP_THEME_PARK_WALL;
+          const wall = distance >= length - GAP ? 0 : NBFLIP_THEME_PARK_WALL + Math.floor(sideRise);
           visit.top = Math.max(visit.top, block || floor + wall); visit.hood ||= hood;
         }
         visit.nearest = Math.min(visit.nearest, across);
@@ -157,10 +165,10 @@ export function createNbflipThemeParkSlide(): SceneDescription {
   scene.scenery = themeParkScenery();
   scene.surfaceStyle = "smooth";
   // Continuous presentation follows exactly the course used for the collider.
-  // Only the sub-cell edge fillet and the stepped fall are reconstructed; the
-  // solver's course, clearance and capacity remain unchanged.
+  // The collider follows the same circular bowl and raised outer bend walls.
+  // Presentation reconstructs the sub-cell curvature and continuous descent.
   scene.solidSurface = {
-    kind: "swept-flume", halfWidth: NBFLIP_THEME_PARK_HALF_WIDTH * h,
+    kind: "swept-flume", crossSection: "semicircular", halfWidth: NBFLIP_THEME_PARK_HALF_WIDTH * h,
     wallThickness: (REACH - NBFLIP_THEME_PARK_HALF_WIDTH) * h,
     wallHeight: NBFLIP_THEME_PARK_WALL * h, slab: SLAB * h, edgeRadius: .012,
     back: BACK * h, stop: STOP * h, boxes: surfaceBoxes,
@@ -168,7 +176,7 @@ export function createNbflipThemeParkSlide(): SceneDescription {
       heading: p.heading, curvature: p.curvature / h, length: p.length * h,
       top: p.top * h, fall: p.fall * h,
       wallEnd: Math.max(0, Math.min(p.length, NBFLIP_THEME_PARK_LENGTH - GAP - p.from)) * h,
-      hood: i === COURSE.length - 1,
+      hood: i === COURSE.length - 1, sideRise: p.curvature ? 8 * h : 0,
     })),
   } satisfies SweptFlumeSurface;
   scene.lighting = {

@@ -151,7 +151,7 @@ interface GPUViewportLifecycle {
   /** Give an HMR/RSC replacement time to reclaim this GPU session. */
   readonly deferCleanup: () => void;
   /** Tear down immediately when the retained canvas really changes. */
-  readonly cleanupImmediately: () => void;
+  readonly cleanupImmediately: () => Promise<void>;
 }
 
 /**
@@ -904,8 +904,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       rendererRef.current = retainedLifecycle.renderer;
       return retainedLifecycle.deferCleanup;
     }
+    const previousShutdown = retainedLifecycle?.cleanupImmediately();
     if (retainedLifecycle) {
-      retainedLifecycle.cleanupImmediately();
       gpuLifecycleRef.current = null;
     }
     const diagnostics = session.diagnostics.getState();
@@ -1017,7 +1017,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       if (publishStatus) diagnostics.set({ gpuStatus: { state: "stopping", label: `${label} — stopping WebGPU and draining pending work`, resource: webGPUPlatformResourcePlugin } });
       const releasedLabel = label.includes("device released") ? label : `${label}; device released — safe to close this tab`;
       stopPromise = (async () => {
-        await shutdownBrowserGPUSession(renderer, releaseGPULease);
+        await shutdownBrowserGPUSession(renderer, releaseGPULease, previousShutdown);
         releaseGPULease = undefined;
         stopping = false;
         stopped = true;
@@ -1039,6 +1039,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       initializationStarted = true;
       window.removeEventListener(GPU_MANUAL_START_EVENT, manualStart);
       unsubscribeAutomaticStart();
+      if (previousShutdown) {
+        diagnostics.set({ gpuStatus: { state: "initializing", label: "Waiting for the previous WebGPU session to finish", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup", resource: webGPUPlatformResourcePlugin } });
+        await previousShutdown;
+        if (!alive || stopping || stopped) return;
+      }
       const lease = acquirePaneGPULease(paneId);
       if (lease.status !== "acquired") {
         initializationStarted = false;
@@ -1160,8 +1165,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     } else beginInitialization();
     let cleanupTimer: number | undefined;
     let cleanupCompleted = false;
-    const cleanupImmediately = () => {
-      if (cleanupCompleted) return;
+    const cleanupImmediately = (): Promise<void> => {
+      if (cleanupCompleted) return stopPromise!;
       cleanupCompleted = true;
       if (cleanupTimer !== undefined) window.clearTimeout(cleanupTimer);
       cleanupTimer = undefined;
@@ -1178,8 +1183,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       cancelAnimationFrame(frame);
       if (rendererRef.current === renderer) rendererRef.current = null;
       if (gpuLifecycleRef.current?.renderer === renderer) gpuLifecycleRef.current = null;
-      if (lifecycles.get(paneId)?.renderer === renderer) lifecycles.delete(paneId);
-      void stopGPU("WebGPU stopped during component cleanup", false);
+      // Keep the draining lifecycle discoverable by a replacement canvas. Its
+      // lease remains held until outstanding compilation and teardown finish.
+      const shutdown = stopGPU("WebGPU stopped during component cleanup", false);
+      void shutdown.then(() => {
+        if (lifecycles.get(paneId)?.renderer === renderer) lifecycles.delete(paneId);
+      });
+      return shutdown;
     };
     const lifecycle: GPUViewportLifecycle = {
       runtimeAbi: GPU_VIEWPORT_RUNTIME_ABI,

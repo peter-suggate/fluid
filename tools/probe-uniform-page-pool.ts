@@ -269,13 +269,16 @@ fn upCertify(lane:u32,width:u32){
    const word=state[l.state.table+entryOf(p)]!,got=[saw[8+3*i]!,saw[9+3*i]!,saw[10+3*i]!] as const;looked.set(key(p),got);
    assert.deepEqual(got,[resident.get(key(p))??NONE,Math.min(word,l.solidBlock),word===0?KIND.air:word===SOLID?KIND.solid:KIND.resident],`${at}: upBlockOf, upBlockWrapped, upKind of ${p}`);
   });
-  // The published record: the header, the resident count and one flag a box page, from this generation's table.
+  // The publication names each block, including pages beyond the seed box.
   const published=pool.published?copies[3+mirrors.length]!:new Uint32Array(0);
   if(pool.published){
-   const {origin,pages:[px,py,pz]}=l.box,flags:number[]=[];
-   for(let z=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++){const q=[origin[0]+x,origin[1]+y,origin[2]+z] as const;flags.push(resident.has(key(q))?1:state[l.state.table+entryOf(q)]===SOLID?2:0);}
-   assert.equal(differ(published,Uint32Array.from([32,px,py,pz,residents.length,...l.box.origin,...flags])),-1,`${at}: published record`);
-   assert.equal(PUBLISHED.flags,8);
+   assert.equal(published[PUBLISHED.resident],residents.length,at);
+   assert.equal(published[PUBLISHED.blocks],l.blocks,at);
+   for(let b=0;b<l.blocks;b++){
+    const r=l.state.records+8*b,o=PUBLISHED.records+4*b;
+    assert.deepEqual([...published.subarray(o,o+3)],[...state.subarray(r,r+3)],at);
+    assert.equal(published[o+3],state[r+3]===1?1:0,at);
+   }
   }
   // The fatal message is null exactly while no bit is set.
   const message=uniformPagePoolFatalMessage(l,receipt);assert.equal(message===null,state[STATUS.fatal]===0,at);
@@ -291,7 +294,7 @@ fn upCertify(lane:u32,width:u32){
  const poke=(mirror:number,word:number)=>device.queue.writeBuffer(mirrors[mirror]!.buffer,4*word,new Uint32Array([0x12345678]));
  const distinct=(pages:readonly Page[])=>assert.equal(new Set(pages.map(entryOf)).size,pages.length,"probe pages must not alias");
  /** Change one flag of the published record behind the pool's back: the next audit without a commit must reject it. */
- const smudge=(page:number)=>device.queue.writeBuffer(pool.published!,4*(l.published.flags+page),new Uint32Array([7]));
+ const smudge=(page:number)=>device.queue.writeBuffer(pool.published!,4*(l.published.records+4*page+3),new Uint32Array([7]));
  return {pool,seed,step,classify,poke,smudge,mirrors,distinct,entryOf,destroy:()=>{pool.destroy();script.destroy();seen.destroy();for(const b of reads)b.destroy();for(const m of mirrors)m.buffer.destroy();}};
 }
 const keys=(pages:readonly Page[])=>pages.map(key).sort();

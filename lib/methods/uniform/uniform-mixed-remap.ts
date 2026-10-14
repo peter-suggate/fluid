@@ -756,7 +756,7 @@ fn remapSample(p:vec3u,plane:i32,axis:u32)->f32{
 fn remapFace(f:UMFace,cut:bool)->f32{
  let axis=f.axis;let u=(axis+1u)%3u;let v=(axis+2u)%3u;var value=0.0;var weight=0.0;
  for(var y=0u;y<f.width;y++){for(var x=0u;x<f.width;x++){
-  var p=vec3u(max(f.anchor,vec3i(0)));p[u]+=x;p[v]+=y;var w=1.0;
+  var p=vec3u(max(f.anchor,umWallLow()));p[u]+=x;p[v]+=y;var w=1.0;
   if(cut&&f.width>1u){var low=vec3i(p);low[axis]=f.anchor[axis];w=umPressureFaceV(low,axis);}
   value+=w*remapSample(p,f.anchor[axis],axis);weight+=w;
  }}
@@ -771,7 +771,7 @@ fn remapReleased(f:UMFace)->bool {
  let axis=f.axis;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
  let bit=axis+select(0u,3u,f.sign<0);
  for(var y=0u;y<f.width;y++){for(var x=0u;x<f.width;x++){
-  var p=vec3u(max(f.anchor,vec3i(0)));p[u]+=x;p[v]+=y;
+  var p=vec3u(max(f.anchor,umWallLow()));p[u]+=x;p[v]+=y;
   let o=oldumOwnerAt(vec3i(p));var anchor=oldumOrigin(o);
   anchor[axis]+=o.width-1u;
   if((u32(round(textureLoad(velocity,vec3i(anchor),0).w))&(1u<<bit))==0u){return false;}

@@ -43,6 +43,8 @@ const residents = [];
 for (let z = 0; z < 4; z++) for (let y = 0; y < 3; y++) for (let x = -1; x < 4; x++) {
   if ((x === 0 || x === 1) && (y === 0 || z === 1)) residents.push({ x, y, z, block: residents.length + 1 });
 }
+residents.push({x:-2,y:1,z:1,block:residents.length+1});
+residents.push({x:4,y:1,z:2,block:residents.length+1});
 pool.seed(uniformPagePoolSeed(pool.layout, residents, (x, y) => x === 7 && y === 0 ? 2 : 1));
 pool.pin(residents);
 await pool.initialize();
@@ -76,11 +78,11 @@ assert.deepEqual((await render("3d-after-commit", volume)).pixels, b.pixels, "GP
 assert.equal((await render("hidden", { ...volume, visible: false })).visible, 0);
 assert.equal((await render("transparent", { ...volume, opacity: { pages: 0 } })).visible, 0);
 const empty = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-assert.equal((await render("missing", volume, { records: { buffer: empty } })).visible, 0);
+assert.equal((await render("missing", volume, { records: { buffer: empty }, directory: { buffer: empty } })).visible, 0);
 // The same coordinate must remain the same colour with a different view selection.
 assert.deepEqual((await render("slice-restored", slice)).pixels, a.pixels);
 assert.deepEqual(errors, []);
 overlay.destroy(); pool.destroy(); uniform.destroy(); bodies.destroy(); read.destroy(); target.destroy(); empty.destroy();
 textures.forEach(t => t.destroy());
 device.destroy();
-console.log("Domain pages GPU probe passed");
+console.log(`PASS domain pages: resident blocks ${residents.length}, slice pixels ${a.visible}, 3d pixels ${b.visible}, errors ${errors.length}`);

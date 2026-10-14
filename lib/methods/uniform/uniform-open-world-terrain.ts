@@ -23,7 +23,27 @@ import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT } fr
 
 /** The window's columns on each axis: FLUID_WINDOW_PAGES pages of LATTICE_PAGE_CELLS. */
 export const UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS = 2048;
-const PARAMS_BYTES = 32 + 32 * MAX_TERRAIN_FEATURES;
+export const UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES = 32 + 32 * MAX_TERRAIN_FEATURES;
+const PARAMS_BYTES = UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES;
+export function uniformOpenWorldTerrainSampleWGSL(params:string):string{return /* wgsl */ `// featureWeight: a smoothstep from the flat plateau to the elliptical rim.
+fn owFeatureWeight(i:u32,x:f32,z:f32)->f32{
+ let shape=${params}.features[2u*i];let kind=${params}.features[2u*i+1u];
+ let c=cos(kind.y);let s=sin(kind.y);let dx=x-shape.x;let dz=z-shape.y;
+ let d=length(vec2f((c*dx+s*dz)/shape.z,(-s*dx+c*dz)/shape.w));
+ if(d<=kind.z){return 1.0;}
+ if(d>=1.0){return 0.0;}
+ let t=1.0-(d-kind.z)/(1.0-kind.z);return t*t*(3.0-2.0*t);
+}
+fn owHeight(x:f32,z:f32)->f32{
+ var mounds=0.0;var carve=0.0;
+ for(var i=0u;i<u32(${params}.ground.z);i++){
+  let w=owFeatureWeight(i,x,z);let kind=${params}.features[2u*i+1u];
+  if(kind.w>0.5){mounds+=kind.x*w;}else{let a=kind.x*w;let a2=a*a;let a4=a2*a2;carve+=a4*a4;}
+ }
+ let cut=select(0.0,pow(carve,1.0/8.0),carve>0.0);
+ return max(0.0,${params}.ground.y+mounds-cut)/${params}.ground.x;
+}
+`;}
 
 function bakeWGSL(): string {
   if (TERRAIN_UNION_EXPONENT !== 8) throw new Error("The open world's terrain bake takes the basin union's eighth power as three squarings");
@@ -31,27 +51,13 @@ function bakeWGSL(): string {
 struct Params{frame:vec4f,ground:vec4f,features:array<vec4f,${2 * MAX_TERRAIN_FEATURES}>}
 @group(0) @binding(0) var<uniform> params:Params;
 @group(0) @binding(1) var columns:texture_storage_2d<r32float,write>;
-// featureWeight: a smoothstep from the flat plateau to the elliptical rim.
-fn owFeatureWeight(i:u32,x:f32,z:f32)->f32{
- let shape=params.features[2u*i];let kind=params.features[2u*i+1u];
- let c=cos(kind.y);let s=sin(kind.y);let dx=x-shape.x;let dz=z-shape.y;
- let d=length(vec2f((c*dx+s*dz)/shape.z,(-s*dx+c*dz)/shape.w));
- if(d<=kind.z){return 1.0;}
- if(d>=1.0){return 0.0;}
- let t=1.0-(d-kind.z)/(1.0-kind.z);return t*t*(3.0-2.0*t);
-}
+${uniformOpenWorldTerrainSampleWGSL("params")}
 // One column a lane: its height in cells at its centre, mounds summed and
 // basins merged by their p-norm.
 @compute @workgroup_size(8,8) fn bake(@builtin(global_invocation_id) g:vec3u){
  if(any(g.xy>=textureDimensions(columns))){return;}
  let x=params.frame.x+(f32(g.x)+0.5)*params.frame.z;let z=params.frame.y+(f32(g.y)+0.5)*params.frame.w;
- var mounds=0.0;var carve=0.0;
- for(var i=0u;i<u32(params.ground.z);i++){
-  let w=owFeatureWeight(i,x,z);let kind=params.features[2u*i+1u];
-  if(kind.w>0.5){mounds+=kind.x*w;}else{let a=kind.x*w;let a2=a*a;let a4=a2*a2;carve+=a4*a4;}
- }
- let cut=select(0.0,pow(carve,1.0/8.0),carve>0.0);
- textureStore(columns,vec2i(g.xy),vec4f(max(0.0,params.ground.y+mounds-cut)/params.ground.x,0.0,0.0,0.0));
+ textureStore(columns,vec2i(g.xy),vec4f(owHeight(x,z),0.0,0.0,0.0));
 }`;
 }
 
@@ -87,6 +93,8 @@ export interface UniformOpenWorldTerrainOptions {
 
 export class UniformOpenWorldTerrain {
   private readonly params: GPUBuffer;
+  /** Runtime analytic sampling outside the initial cached window. */
+  get sampleParams():GPUBuffer{return this.params;}
   private bakePipeline?: GPUComputePipeline;
   private markPipeline?: GPUComputePipeline;
   private bakeGroup?: GPUBindGroup;
@@ -129,7 +137,7 @@ export class UniformOpenWorldTerrain {
     if (terrain.grid || terrain.procedural) throw new Error("An open world's terrain is analytic: baseHeight_m and features");
     if (terrain.features.length > MAX_TERRAIN_FEATURES) throw new Error(`An open world's terrain holds at most ${MAX_TERRAIN_FEATURES} features`);
     const p = new Float32Array(PARAMS_BYTES / 4);
-    p.set([origin_m[0], origin_m[1], cell_m[0], cell_m[1], cellHeight_m, terrain.baseHeight_m, terrain.features.length, 0]);
+    p.set([origin_m[0], origin_m[1], cell_m[0], cell_m[1], cellHeight_m, terrain.baseHeight_m, terrain.features.length, 1]);
     terrain.features.forEach((f, i) => p.set([f.center_m.x, f.center_m.z, f.radius_m.x, f.radius_m.z,
       f.amount_m, f.rotation_rad ?? 0, f.flat ?? TERRAIN_DEFAULT_FLAT, f.kind === "mound" ? 1 : 0], 8 + 8 * i));
     this.device.queue.writeBuffer(this.params, 0, p);

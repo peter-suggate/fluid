@@ -233,6 +233,10 @@ export interface DenseLevelSetVolumeConsumerSource {
   /** Optional canonical h/4h ownership; no materialized fine expansion. Its
    * tail is the detail table of the packed fields. */
   readonly mixedOwnership?: GPUBufferBinding;
+  /** Page pool block count, including AIR and SOLID sentinels. */
+  readonly mixedBlocks?: number;
+  /** Solver params prefix: grid, cell size, current GPU frame origin (three vec4f). */
+  readonly mixedFrame?: GPUBufferBinding;
   /** Accepted pressure and its liquid authority, indexed by the pressure
    * owners the solve ran on. The phi binding ends with the frame's stage
    * grids (lib/methods/uniform/uniform-stage-grids.ts), which name them. */

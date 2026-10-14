@@ -243,7 +243,7 @@ fn umLoadMixedFace(p:vec3i,axis:u32)->f32{return stateIn[umSlot(p,axis,1u)].x;}
 // scratch: a slot no pass of this extension wrote holds another stage's
 // words.
 fn umSlotState(anchor:vec3i,axis:u32,width:u32)->vec2f{
- let tile=umTileAt(vec3u(max(anchor,vec3i(0)))/4u);
+ let tile=umTileAt(vec3u(max(anchor,umWallLow()))/4u);
  // The support word loads beside the slot's address (a unit slot's tile word).
  let state=stateIn[umSlot(anchor,axis,width)];
  return select(vec2f(0.0,UM_INF),state,(umTileSupport(tile)&2u)!=0u);
@@ -287,8 +287,9 @@ fn umNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)->UMNeig
  // exactly it.
  var below=vec3i(floor(point));let plane=i32(round(point[component]));below[component]=plane-1;
  var above=below;above[component]=plane;
- let lowWidth=select(0u,umTileWidth(umTileAt(vec3u(max(below,vec3i(0)))/4u)),umCellPresent(below));
- let highWidth=select(0u,umTileWidth(umTileAt(vec3u(max(above,vec3i(0)))/4u)),umCellPresent(above));
+ let wall=umWallLow();
+ let lowWidth=select(0u,umTileWidth(umTileAt(vec3u(max(below,wall))/4u)),umCellPresent(below));
+ let highWidth=select(0u,umTileWidth(umTileAt(vec3u(max(above,wall))/4u)),umCellPresent(above));
  if(select((lowWidth==width&&(highWidth==0u||highWidth>=width))||(highWidth==width&&lowWidth>width),highWidth==width,lowWidth==0u)){
   // The point is center ± width along step only: the spacing is exactly
   // width*h, as on the fast path above. sqrt(dot) can land an ulp above it,
@@ -419,7 +420,7 @@ fn umSeedWall(face:UMFace,owner:UMOwner)->bool{
 // at this word (ueOpen). The sweeps' tile work is the tiles holding a patch
 // still to reach, not every tile of liquid.
 fn ueBit(anchor:vec3i)->vec2u{
- let l=vec3u(max(anchor,vec3i(0)))%4u;let b=l.x+4u*(l.y+4u*l.z);
+ let l=vec3u(max(anchor,umWallLow()))%4u;let b=l.x+4u*(l.y+4u*l.z);
  return select(vec2u(1u<<(b&31u),0u),vec2u(0u,1u<<(b&31u)),b>=32u);
 }
 fn ueMaskIn(tile:u32)->vec2u{
@@ -557,7 +558,7 @@ fn ueStage(owner:UMOwner,lane:u32,seed:bool,fine:bool)->bool{
 // - width 4: A is a 4h-aligned patch; every direct, site and tied
 //   candidate lies in Tq (never interior: its plane is a multiple of four).
 fn ueFaceLive(anchor:vec3i,axis:u32,width:u32)->bool{
- var live=ueCellFinite(max(anchor,vec3i(0)));
+ var live=ueCellFinite(max(anchor,umWallLow()));
  for(var n=0u;n<6u;n++){
   var request=anchor;request[n/2u]+=select(-i32(width),i32(width),(n&1u)!=0u);
   if(!ueRequestInside(request,axis)){continue;}
@@ -568,7 +569,7 @@ fn ueFaceLive(anchor:vec3i,axis:u32,width:u32)->bool{
 // One request (ueRequestInside admits its anchor): whether a slot it may
 // read is finite.
 fn ueRequestAnchorLive(anchor:vec3i,axis:u32,width:u32)->bool{
- let q=max(anchor,vec3i(0));let t=q/4;
+ let q=max(anchor,umWallLow());let t=q/4;
  if(width!=1u){return any(ueMasks[ueStaged(t)]!=vec2u(0u));}
  if(ueStagedWidth(ueStaged(t))==1u){return ueCellFinite(q);}
  let o=4*t;var top=q;top[axis]=o[axis]+3;var corner=o;corner[axis]=o[axis]+3;

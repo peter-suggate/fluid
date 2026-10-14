@@ -117,6 +117,8 @@ export const FLUID_WINDOW_PAGES = 64;
  */
 export function sceneFluidBoxPage(scene: FluidBoxScene): readonly [number, number, number] {
   if (scene.container.walls !== "none") return [0, 0, 0];
+  const probe=scene.fluid.pagePool?.probeBoxPage;
+  if(probe){if(!probe.every(v=>Number.isInteger(v)&&v>=0&&v<64))throw new RangeError("Invalid probe window placement");return probe;}
   const [nx, , nz] = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   const centre = (cells: number) => Math.floor((FLUID_WINDOW_PAGES - cells / LATTICE_PAGE_CELLS) / 2);
   return [centre(nx), 0, centre(nz)];

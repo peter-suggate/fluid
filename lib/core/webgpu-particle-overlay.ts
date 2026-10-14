@@ -62,6 +62,8 @@ export interface GPUFluidParticleSource {
   readonly capacity: number;
   /** Metres per position unit. Positions are tank-local with a corner origin. */
   readonly positionScale_m: readonly [number, number, number];
+  /** Live solver prefix: dimensions, cell size, then GPU-owned world origin. */
+  readonly frame?: GPUBufferBinding;
   /** Sphere radius: a little under half the seed spacing. */
   readonly radius_m: number;
   /**
@@ -157,6 +159,8 @@ ${particleOverlayUniformsWGSL}
 @group(0) @binding(5) var waterRearFront:texture_2d<f32>;
 @group(0) @binding(6) var waterRearBack:texture_2d<f32>;
 @group(0) @binding(7) var waterFrontNormal:texture_2d<f32>;
+struct ParticleFrame{dims:vec4f,h:vec4f,origin:vec4f}
+@group(0) @binding(8) var<uniform> particleFrame:ParticleFrame;
 
 struct VertexOut {
   @builtin(position) position:vec4f,
@@ -247,7 +251,8 @@ fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
   if (!(particles[at+3u]>0.0)) { return output; }
   let local=vec3f(particles[at],particles[at+1u],particles[at+2u]);
   let velocity=vec3f(particles[at+4u],particles[at+5u],particles[at+6u]);
-  let world=local*overlay.scale.xyz+overlay.origin.xyz;
+  let origin=select(overlay.origin.xyz,particleFrame.origin.xyz,overlay.origin.w>0.5);
+  let world=local*overlay.scale.xyz+origin;
   let relative=world-overlay.cameraPosition.xyz;
   let view=vec3f(dot(relative,overlay.cameraRight.xyz),
     dot(relative,overlay.cameraUp.xyz),dot(relative,overlay.cameraForward.xyz));
@@ -477,6 +482,7 @@ export class ParticleOverlay {
         { binding: 5, visibility: GPUShaderStage.VERTEX, texture: interfaceTexture },
         { binding: 6, visibility: GPUShaderStage.VERTEX, texture: interfaceTexture },
         { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: interfaceTexture },
+        { binding: 8, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
       ],
     });
     this.compositeLayout = this.device.createBindGroupLayout({
@@ -523,6 +529,7 @@ export class ParticleOverlay {
   }
 
   setSource(source: GPUFluidParticleSource | undefined): void {
+    if(this.source?.frame?.buffer!==source?.frame?.buffer)this.bindGroups.clear();
     this.source = source;
   }
 
@@ -550,6 +557,7 @@ export class ParticleOverlay {
           { binding: 5, resource: water.rearFrontPosition },
           { binding: 6, resource: water.rearBackPosition },
           { binding: 7, resource: water.frontNormal },
+          { binding: 8, resource: this.source?.frame ?? { buffer: this.uniforms!, size: 48 } },
         ],
       });
       this.bindGroups.set(buffer, group);
@@ -609,7 +617,7 @@ export class ParticleOverlay {
     f.set([...camera.up, source.radius_m], 12);
     f.set([width, height, Math.max(1e-6, frame.depthNear_m), sceneDepth ? 1 : 0], 16);
     f.set([...source.positionScale_m, LAYER_PARTICLE_SPEED_SCALE], 20);
-    f.set([-0.5 * frame.container_m[0], 0, -0.5 * frame.container_m[2], 0], 24);
+    f.set([-0.5 * frame.container_m[0], 0, -0.5 * frame.container_m[2], source.frame ? 1 : 0], 24);
     f.set([frame.water ? simpleWaterMurkLength_m(frame.container_m) : 0, 0, 0, 0], 28);
     const gravity = frame.gravity_m_s2 ?? [0, 0, 0], pull = Math.hypot(...gravity) || 1;
     f.set([gravity[0] / pull, gravity[1] / pull, gravity[2] / pull, LAYER_PARTICLE_AGITATION_SCALE], 32);

@@ -576,10 +576,11 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   // before any field/ownership lookup so absent pages cannot alias a sentinel.
   if(fieldMode==27){
     if(!domainPagesValid()){return GridSample(vec3f(0),0.0,0.0,false);}
-    let state=domainPageAt(cell);
+    let pagePoint=(point-domainPageFrameOrigin())/domainPageCellSize();
+    let state=domainPageAt(vec3i(floor(pagePoint)));
     if(state==0u){return GridSample(vec3f(0),0.0,0.0,false);}
     let edge=f32(viewRecords[u32(layers.control.w)]);
-    let plane=samplePosition+vec2f(f32(fineOrigin[firstPlaneAxis]),f32(fineOrigin[secondPlaneAxis]));
+    let plane=vec2f(pagePoint[firstPlaneAxis],pagePoint[secondPlaneAxis]);
     let fraction=fract(plane/edge);
     let distances=min(fraction,1.0-fraction)*edge/derivative;
     let line=gridLinePaint(min(distances.x,distances.y),1.25);
@@ -1024,7 +1025,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     if(fieldMode==28){fill=vec3f(0.0);alpha=0.0;}
     var importanceRecorded=false;
     if((fieldMode==22||fieldMode==28)&&mixedLattice){
-      let t=umTileAt(vec3u(umCellNear(cell))/4u);
+      let t=umTileAt(vec3u(cell)>>vec3u(2u));
       // The tile's screen hatch (0 none, 1 hatched, 2 cross-hatched) and inset
       // outline. Both layers mark through the one hatch site below: Metal
       // compiles every inlined copy.
@@ -1587,7 +1588,8 @@ export class GridOverlayPipeline {
       const pageOffset = boundaryOffset + boundaryBytes;
       const pageBytes = pages ? (pages.records.size ?? pages.records.buffer.size - (pages.records.offset ?? 0)) : 0;
       values[3] = pages ? pageOffset / 4 : 0;
-      const bytes = pageOffset + pageBytes;
+      const directoryBytes = pages ? (pages.directory.size ?? pages.directory.buffer.size - (pages.directory.offset ?? 0)) : 0;
+      const bytes = pageOffset + pageBytes + directoryBytes;
       if (!this.layerRecords || this.layerRecords.size < bytes) {
         this.layerRecords?.destroy();
         this.layerRecords = this.device.createBuffer({ label: "Composed visual records", size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -1645,7 +1647,12 @@ export class GridOverlayPipeline {
     if (!this.pipeline || !this.bindGroup) return false;
     if (this.layerSources && this.layerRecords) {
       const { tiles, window, boundary, boundaryOffset, pages, pageOffset } = this.layerSources;
-      if (pages) encoder.copyBufferToBuffer(pages.records.buffer, pages.records.offset ?? 0, this.layerRecords, pageOffset, pages.records.size ?? pages.records.buffer.size - (pages.records.offset ?? 0));
+      if (pages) {
+        const bytes=pages.records.size ?? pages.records.buffer.size-(pages.records.offset ?? 0);
+        encoder.copyBufferToBuffer(pages.records.buffer,pages.records.offset ?? 0,this.layerRecords,pageOffset,bytes);
+        encoder.copyBufferToBuffer(pages.directory.buffer,pages.directory.offset ?? 0,this.layerRecords,pageOffset+bytes,pages.directory.size ?? pages.directory.buffer.size-(pages.directory.offset ?? 0));
+        if(pages.frame)encoder.copyBufferToBuffer(pages.frame.buffer,pages.frame.offset ?? 0,this.layerRecords,pageOffset+32,48);
+      }
       if (boundary) encoder.copyBufferToBuffer(boundary.buffer, boundary.offset ?? 0, this.layerRecords, boundaryOffset, boundary.size ?? boundary.buffer.size - (boundary.offset ?? 0));
       if (window) encoder.copyBufferToBuffer(window.records.buffer, window.records.offset ?? 0, this.layerRecords, 0, SOLVE_WINDOW_RECORD_WORDS * 4);
       if (tiles) encoder.copyBufferToBuffer(tiles.records.buffer, tiles.records.offset ?? 0, this.layerRecords, 1024, tiles.records.size ?? tiles.records.buffer.size - (tiles.records.offset ?? 0));

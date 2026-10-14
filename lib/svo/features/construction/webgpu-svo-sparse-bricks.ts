@@ -546,8 +546,8 @@ const LIVE_DERIVED_LIGHTING_PASS: GPUComputePassDescriptor = Object.freeze({ lab
  *
  * A brick is 512 voxels against up to 64 candidates, so this is the knob that
  * bounds a publication's worst frame. Publications converge over frames like the
- * light cache; the first publication of a scene is deliberately exempt, because
- * until it completes there is no scene generation at all to show.
+ * light cache. Renderer startup drains the first publication in fenced chunks
+ * before attaching it, so no consumer sees an incomplete scene generation.
  */
 export const OCTREE_LIVE_SCENE_VOXELIZATION_BRICK_BUDGET = 2_048;
 
@@ -3543,13 +3543,14 @@ export class OctreeSparseBrickWorld {
       primitives: this.liveScenePrimitiveList,
       dirtyRegions: coalescedDirty,
       revision,
-      // The publication that brings a scene into existence is never budgeted.
+      // A caller that encodes directly needs the first publication atomically.
       // Everything downstream reads a scene generation, and that generation only
       // advances when a revision completes; spreading the first one over frames
       // would leave every consumer reading zero, which is the state a black slab
       // across the container footprint is made of. Edits are a different case:
       // there is already a current generation to keep showing while the next
-      // converges.
+      // converges. initializeScenePublication instead drains budgeted chunks
+      // before exposing the world, keeping the same publication contract.
       budgeted: !initialPublication,
     };
     if (!initialPublication) {
@@ -3967,6 +3968,39 @@ export class OctreeSparseBrickWorld {
       lastGrowth: this.liveDerivedLastGrowth && {
         newPages: this.liveDerivedLastGrowth.newPages, chainPages: this.liveDerivedLastGrowth.chainPages },
     };
+  }
+
+  /** Voxelize a new renderer world before attachment, yielding the GPU between
+   * bounded chunks. A single initial rebuild can take seconds on large scenes
+   * and reset the browser GPU process even when the allocation fits. */
+  async initializeScenePublication(
+    signal?: AbortSignal,
+    progress?: (completed: number, total: number) => void,
+  ): Promise<void> {
+    const assertActive = () => {
+      if (signal?.aborted || this.destroyed) throw new DOMException("GPU initialization superseded", "AbortError");
+    };
+    assertActive();
+    if (!this.pendingScenePublication) return;
+    this.pendingScenePublication = { ...this.pendingScenePublication, budgeted: true };
+    let completed = 0;
+    do {
+      assertActive();
+      const encoder = this.device.createCommandEncoder({ label: "Initialize live scene voxelization chunk" });
+      // Derived lighting reads the complete first generation. Build it only
+      // after the last voxelization chunk has published that generation.
+      this.encodeSceneMaintenance(encoder, true);
+      this.device.queue.submit([encoder.finish()]);
+      await this.device.queue.onSubmittedWorkDone();
+      assertActive();
+      progress?.(++completed, this.proxyVoxelizer.budgetStatus.plannedChunks);
+    } while (this.proxyVoxelizer.budgetStatus.converging);
+    assertActive();
+    const encoder = this.device.createCommandEncoder({ label: "Initialize live scene derived lighting" });
+    this.encodeSceneMaintenance(encoder);
+    this.device.queue.submit([encoder.finish()]);
+    await this.device.queue.onSubmittedWorkDone();
+    assertActive();
   }
 
   /**

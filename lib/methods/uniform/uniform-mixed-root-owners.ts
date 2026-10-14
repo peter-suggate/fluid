@@ -1,3 +1,4 @@
+import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { compileUniformStencil, uniformCompileStencilWGSL } from "./uniform-compiled-topology";
 import {
   UNIFORM_KIND, UNIFORM_PAGE_TABLE_WORDS, UNIFORM_PAGE_WINDOW, uniformFaceTile, uniformFaceTileSlots, uniformLatticeAddressWGSL,
@@ -134,8 +135,7 @@ const RO_FAR:f32=${float(far)};
 @group(0) @binding(1) var<storage,read_write> roSupport:array<atomic<u32>>;
 @group(0) @binding(2) var<storage,read_write> roPhi:array<f32>;
 ${record ? "@group(0) @binding(3) var<storage,read_write> roRecord:array<vec4f>;" : ""}
-fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(${UNIFORM_PAGE_WINDOW - 1}u);return roTopology[${table}u+(e.x|(e.y<<6u)|(e.z<<12u))];}
-fn umBlockWord(b:u32)->u32{return roTopology[${table + UNIFORM_PAGE_TABLE_WORDS}u+b];}
+${uniformWindowAddressWGSL("roTopology",`${table}u`,"0u")}
 ${uniformLatticeAddressWGSL({ constant: true, paged })}
 ${uniformCompileStencilWGSL}
 @compute @workgroup_size(64) fn roKeys(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) launched:vec3u){

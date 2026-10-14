@@ -205,9 +205,9 @@ export function uniformPageSources(scene: SceneDescription, plug: InflowGridBoun
 /** The window page, on one axis, of the low (side < 0) or high face of a
  * drop's bounding box of half-width `r_m` grown by UNIFORM_PAGE_POOL_PIN_MARGIN
  * cells, kept inside the box: its `pages` from page `first`. */
-function uniformDropPage(centre_m: number, r_m: number, low_m: number, size_m: number, cells: number, first: number, pages: number, side: number): number {
+function uniformDropPage(centre_m: number, r_m: number, low_m: number, size_m: number, cells: number, first: number, pages: number, side: number, open=false): number {
   const cell = side < 0 ? Math.floor((centre_m - r_m - low_m) * cells / size_m) - UNIFORM_PAGE_POOL_PIN_MARGIN : Math.ceil((centre_m + r_m - low_m) * cells / size_m) + UNIFORM_PAGE_POOL_PIN_MARGIN - 1;
-  return Math.min(Math.max(Math.floor(cell / UNIFORM_PAGE_POOL_EDGE), first), first + pages - 1);
+  const page=Math.floor(cell / UNIFORM_PAGE_POOL_EDGE);return open?page:Math.min(Math.max(page, first), first + pages - 1);
 }
 
 /** A scheduled volume in source form; `cell_m` sets how finely an outline's volume is measured. */
@@ -452,8 +452,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   get gridVelocityBoundary(): GPUBufferBinding { return { buffer: this.boundaryVelocityA }; }
   get gridPressureTexture(): GPUTexture { return this.pressureMultigrid.pressureTexture; }
   get gridPressureOrigin(): readonly [number, number, number] { return [0, 0, 0]; }
-  /** The page pool's published record: which box pages are stored, for the grid overlay's pages layer. */
-  get volumePageSource() { return this.mixedFrame?.pagePool.volumePageSource; }
+  /** Stable pool publication plus the live GPU frame; no per-frame allocation. */
+  private mixedPageSource?: import("../../core/method-view-records").GPUFluidVolumePageSource;
+  get volumePageSource() { return this.mixedPageSource; }
   /** The bed-slope lane of the solid scratch (uniformSolidScratchLayout): `words` u32 from word `baseWord` of `buffer`. The bake writes it; a probe reads it back or zeroes it. */
   get solidBedSlopeLane(): { buffer: GPUBuffer; baseWord: number; words: number } {
     return { buffer: this.activeScratch, baseWord: this.solidBedSlopeBaseWord, words: this.solidBedSlopeWords };
@@ -733,7 +734,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.transportA = this.fieldPages.createTexture({ label: "Uniform reference transport A", size: [1,1,1], dimension: "3d", format: "rgba32float", usage: transportUsage });
     this.transportB = this.fieldPages.createTexture({ label: "Uniform reference transport B", size: lazyMac ? [1,1,1] : allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
 
-    this.params = device.createBuffer({ label: "Uniform reference parameters", size: UNIFORM_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.params = device.createBuffer({ label: "Uniform reference parameters", size: UNIFORM_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.solidMask = new SolidOccupancyMask(uniformSolidMaskPages(address));
     this.solidMask.update(solidWorldForFluidLattice(scene));
     // No cell off the lattice's walls is solid: a tank's shell lies in wall pages and is not counted.
@@ -1083,7 +1084,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,
       pressure:this.pressureMultigrid.prepareMixedContinuation(),extension:this.velocityExtrapolator.prepareMixedContinuation(),sourceParams:this.params,
       // Live edits and rigid bodies share the pipelines built at setup.
-      solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.reduce((n,c)=>n+c,0),paramsWritten:()=>this.paramsWritten},
+      solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,analyticTerrain:this.openWorldTerrain?.sampleParams,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.reduce((n,c)=>n+c,0),paramsWritten:()=>this.paramsWritten},
       pressureGeometry,detail,pages:{buffer:this.pages,offset:0},residency:this.pageResidency,
     },this.address.openTop,this.pressureSchedule);
     this.mixedFrame.solid!.present=solids||bodies>0;
@@ -1116,7 +1117,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedFrame.setLayoutViews(this.layoutViews);
     this.mixedAccountedBytes=this.mixedFrame.allocatedBytes;this.watchMixedAllocation();
     this.executionInfo.allocatedBytes+=this.mixedAccountedBytes+this.mixedDynamic.allocatedBytes+this.mixedBuilder.allocatedBytes+(this.mixedBodies?.allocatedBytes??0);
-    this.mixedSource={vertexPhi:this.vertexPhiField,coarseVertexPhi:this.mixedFrame.coarseVertexPhi,detailVertexPhi:this.mixedFrame.ownership.capacity.fineTiles>0?this.vertexPhiField:undefined,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedPressure:this.mixedFrame.presentation.pressure,mixedPressurePhi:this.mixedFrame.presentation.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support}};
+    this.mixedPageSource={...this.mixedFrame.pagePool.volumePageSource!,frame:{buffer:this.params,size:48}};
+    this.mixedSource={vertexPhi:this.vertexPhiField,coarseVertexPhi:this.mixedFrame.coarseVertexPhi,detailVertexPhi:this.mixedFrame.ownership.capacity.fineTiles>0?this.vertexPhiField:undefined,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedBlocks:this.address.blocks,mixedFrame:{buffer:this.params,size:48},mixedPressure:this.mixedFrame.presentation.pressure,mixedPressurePhi:this.mixedFrame.presentation.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support}};
     for(let i=0;i<UNIFORM_MIXED_RELAYOUT_READS;i++)this.mixedRelayoutReads.give(this.device.createBuffer({label:`Uniform mixed relayout receipt read ${i}`,size:UNIFORM_MIXED_RELAYOUT_RECEIPT.words*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}));
     this.executionInfo.allocatedBytes+=UNIFORM_MIXED_RELAYOUT_READS*UNIFORM_MIXED_RELAYOUT_RECEIPT.words*4;
     // The initial layout is the host's (authored regions, solids and bodies
@@ -1947,6 +1949,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   /** The parameter block has been written: the all-4h solid record may be built from it. */
   private paramsWritten = false;
+  private frameParamsSeeded = false;
+  private movingWindowStep = 0;
+  /** Probe-only, off by default: force a page shift at a numerical step. */
+  probeWindowShift(step:number,delta:readonly [number,number,number]):void{
+    if(!Number.isInteger(step)||step<1||!delta.every(v=>(v|0)===v))throw new RangeError("Invalid window probe shift");
+    const pool=this.mixedFrame!.pagePool;this.device.queue.writeBuffer(pool.state,4*(pool.layout.state.window+20),new Int32Array([step,...delta]));
+  }
   /** Counts applySceneUniforms: what is derived from the scene alone is derived once per count, not once per step. */
   private sceneRevision = 1;
   private paramsSceneRevision = 0;
@@ -2037,7 +2046,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     f[52] = this.solidVoxelsEmpty && !sceneHasTerrain(this.scene) && activeBodyCount === 0 ? 1 : 0;
     // lean.yzw and splash: retired census window, phi far-air arm, per-tile
     // reach and splash-survival lanes, always zero.
-    f[53] = 0;
+    f[53] = this.movingWindowStep;
     f[54] = 0;
     f[55] = 0;
     f[56] = 0;
@@ -2060,17 +2069,23 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     f[69] = drop?.offset_m ?? 0;
     f[70] = drop?.halfDepth_m ?? 0;
     f[71] = drop?.edgeRadius_m ?? 0;
-    this.device.queue.writeBuffer(this.params, 0, f);
+    if(!this.frameParamsSeeded){this.device.queue.writeBuffer(this.params,0,f);this.frameParamsSeeded=true;}
+    else{
+      // frame.xyz and tuning.xyz belong to the GPU after the initial seed.
+      this.device.queue.writeBuffer(this.params,0,f,0,8);
+      this.device.queue.writeBuffer(this.params,44,f,11,21);
+      this.device.queue.writeBuffer(this.params,140,f,35,37);
+    }
     if (drop?.outline) this.device.queue.writeBuffer(this.params, UNIFORM_PARAMS_HEAD_BYTES + 16, drop.outline);
   }
 
   /** Queue the pool pages a drop's bounding box touches (grown as a pinned source's is) for the next page commit. Allocates nothing. */
   private requestDropPages(drop: UniformLiquidDrop): void {
     const pool = this.mixedFrame!.pagePool, f = this.frame, o = f.origin_m, s = f.size_m, cells = f.cells;
-    const r = Math.max(drop.radius_m, drop.halfHeight_m ?? 0), last = pool.layout.box.pages, b = pool.layout.box.origin;
-    const x0 = uniformDropPage(drop.centre_m.x, r, o[0], s[0], cells[0], b[0], last[0], -1), x1 = uniformDropPage(drop.centre_m.x, r, o[0], s[0], cells[0], b[0], last[0], 1);
-    const y0 = uniformDropPage(drop.centre_m.y, r, o[1], s[1], cells[1], b[1], last[1], -1), y1 = uniformDropPage(drop.centre_m.y, r, o[1], s[1], cells[1], b[1], last[1], 1);
-    const z0 = uniformDropPage(drop.centre_m.z, r, o[2], s[2], cells[2], b[2], last[2], -1), z1 = uniformDropPage(drop.centre_m.z, r, o[2], s[2], cells[2], b[2], last[2], 1);
+    const r = Math.max(drop.radius_m, drop.halfHeight_m ?? 0), last = pool.layout.box.pages, b = pool.layout.box.origin, open=this.scene.container.walls==="none";
+    const x0 = uniformDropPage(drop.centre_m.x, r, o[0], s[0], cells[0], b[0], last[0], -1, open), x1 = uniformDropPage(drop.centre_m.x, r, o[0], s[0], cells[0], b[0], last[0], 1, open);
+    const y0 = uniformDropPage(drop.centre_m.y, r, o[1], s[1], cells[1], b[1], last[1], -1, open), y1 = uniformDropPage(drop.centre_m.y, r, o[1], s[1], cells[1], b[1], last[1], 1, open);
+    const z0 = uniformDropPage(drop.centre_m.z, r, o[2], s[2], cells[2], b[2], last[2], -1, open), z1 = uniformDropPage(drop.centre_m.z, r, o[2], s[2], cells[2], b[2], last[2], 1, open);
     for (let z = z0; z <= z1; z++) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) pool.request(x, y, z);
   }
 
@@ -2478,6 +2493,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // The layout's owner for this roster: the census follows the bodies' GPU poses.
       try{this.syncMixedLayout(activeBodies,dt,true);}catch(error){this.failMixedFrame(error);return true;}
     }
+    this.movingWindowStep++;
     this.writeParams(dt, activeBodies.length, strength, drop, volumeCells);
     if(this.mixedFrame){
       const frame=this.mixedFrame;
@@ -2631,11 +2647,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       try{
         const encoder=this.device.createCommandEncoder();this.mixedDiagnostics!.encode(encoder);
         encoder.copyBufferToBuffer(this.reductions,0,this.statsReadback,0,24);
+        encoder.copyBufferToBuffer(this.params,32,this.statsReadback,80,12);
         encoder.copyBufferToBuffer(this.mixedFrame.ownership.support,this.mixedFrame.ownership.capacity.tiles*16,this.statsReadback,24,16);
         const budget=this.mixedFrame.narrowBandVolumeBudget;
         if(budget){encoder.copyBufferToBuffer(budget,0,this.statsReadback,40,36);this.mixedFrame.requestNarrowBandVolumeProbe();}
         this.device.queue.submit([encoder.finish()]);
-        await this.statsReadback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(this.statsReadback.getMappedRange(),0,budget?19:10).slice();
+        await this.statsReadback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(this.statsReadback.getMappedRange(),0,23).slice();
         // The liquid's volume is the budget's measurement of phi, from the
         // last step that took it (this read requests the next). The V
         // texture is the pressure fill: an uncut, non-planar owner's is an
@@ -2653,7 +2670,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         Object.assign(this.executionInfo,{representedVolumeCellSum:represented,volumeCellSum:volume,
           representedVolumeDrift:(represented-reference)/reference,rawVolumeDrift:(fill-reference)/reference,volumeDrift:(volume-reference)/reference,
           volumeTelemetrySource:measured===undefined?"dense-volume":"narrow-band-phi",frontTelemetrySource:"dense-volume",
-          front_m:this.frame.origin_m[0]+words[1]!*this.frame.cellSize_m[0],
+          front_m:new Float32Array(words.buffer)[20]!+words[1]!*this.frame.cellSize_m[0],
           maxSpeed_m_s:new Float32Array(words.buffer)[2],uniformTwoLevelVelocity:this.twoLevelEnabled,
           uniformTwoLevelFineReach:UNIFORM_TWO_LEVEL_FINE_REACH,uniformTwoLevelShellReach:this.twoLevelShellReach,
           uniformTwoLevelFineTiles:words[4],uniformTwoLevelShellTiles:words[5],uniformTwoLevelTilesTotal:this.address.boxTiles,

@@ -310,7 +310,7 @@ export interface SceneDescription {
      * shuffle of the pages' blocks. air: pages of the box seeded as air, with
      * no storage, by page coordinate.
      */
-    pagePool?: { blocks?: number; memory_MiB?: number; permute?: number; air?: [number, number, number][] };
+    pagePool?: { blocks?: number; memory_MiB?: number; permute?: number; air?: [number, number, number][]; /** Oracle-only initial window placement, off by default. */ probeBoxPage?: [number,number,number] };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };

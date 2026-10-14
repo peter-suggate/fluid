@@ -1,4 +1,5 @@
 import { uniformMixedPresentationWGSL } from "../methods/uniform/uniform-mixed-presentation.wgsl";
+import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockNeighbourWGSL } from "../methods/uniform/uniform-lattice-address";
 import type { FluidSurfaceRenderMode } from "../features/surface-display/definition";
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
@@ -196,11 +197,18 @@ const EXTRACTION_ORDER_WORKGROUP = 256;
 export const EXTRACTION_WINDOW_WORKGROUPS = 4096;
 
 /** The dense classify launch: `full` scans every cube of the (n+1)^3 lattice;
- * `windows` lists the 4^3 cube windows the Uniform Geometric 4h vertex base
- * cannot prove empty and scans only those (collectWindowsMain,
- * extractWindowsMain). */
+ * `windows` lists the 4^3 cube windows of the stored pages that the Uniform
+ * Geometric 4h vertex base cannot prove empty and scans only those
+ * (collectWindowsMain, extractWindowsMain). */
 export type WaterSurfaceClassify = "full" | "windows";
 const WATER_SURFACE_CLASSIFY_ENTRY: Record<WaterSurfaceClassify, string> = { full: "extractMain", windows: "extractWindowsMain" };
+
+/** Window-list bound: the address window's full scan or 9^3 windows per
+ * storable block, whichever is smaller. Callers use the 2048-cell address
+ * window, never the authored seed box: pages may leave that box. */
+export function surfaceWindowCapacity(nx: number, ny: number, nz: number, blocks: number) {
+  return Math.min(Math.ceil((nx + 1) / 4) * Math.ceil((ny + 1) / 4) * Math.ceil((nz + 1) / 4), 729 * Math.max(blocks - 2, 0));
+}
 
 /** Vertex capacity from grid surface area (32 bytes per vertex, 64 MiB cap). */
 export function surfaceVertexCapacity(nx: number, ny: number, nz: number) {
@@ -219,7 +227,7 @@ export function activeCubeCapacity(maxVertices: number) {
 
 /** uniformPhiNormal's 27-sample accumulation around `center`: `sample` is the
  * statement that forms `phi` at the lattice vertex q, `head` declares q. */
-const uniformNormalLoopWGSL = (sample: string, head = "let q=clamp(center+vec3i(ox,oy,oz),vec3i(0),dimensions);") => `for(var oz=-1;oz<=1;oz+=1){for(var oy=-1;oy<=1;oy+=1){for(var ox=-1;ox<=1;ox+=1){
+const uniformNormalLoopWGSL = (sample: string, head = "let q=clamp(center+vec3i(ox,oy,oz),sampleLow,sampleHigh);") => `for(var oz=-1;oz<=1;oz+=1){for(var oy=-1;oy<=1;oy+=1){for(var ox=-1;ox<=1;ox+=1){
     ${head}
     let delta=vec3f(q)-x;
     let weight=exp(-0.5*dot(delta,delta)/(.85*.85));
@@ -262,6 +270,8 @@ struct IndirectArgs {
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var volume: texture_3d<f32>;
+struct SurfaceFrame { grid:vec4f, cell:vec4f, origin:vec4f }
+@group(0) @binding(17) var<uniform> surfaceFrame:SurfaceFrame;
 @group(0) @binding(3) var<storage, read_write> vertices: array<SurfaceVertex>;
 @group(0) @binding(4) var<storage, read_write> drawArgs: IndirectArgs;
 @group(0) @binding(5) var<storage, read_write> activeCubes: array<vec2u>;
@@ -273,6 +283,10 @@ struct IndirectArgs {
 // the solver holds no h-tile capacity: no h tile exists then).
 @group(0) @binding(15) var coarseVertexPhi: texture_3d<f32>;
 ${uniformMixedPresentationWGSL(14,"denseVertexPhi","coarseVertexPhi",undefined,SURFACE_EXTRACTION_VERTEX_CACHE)}
+// The block neighbour rows of the same topology, after its page table and
+// block records: the window list strides the blocks and asks them for walls.
+fn umBlockNeighbourWord(b:u32,i:u32)->u32{return umTopology[5u*umTileCount()+${UNIFORM_PAGE_TABLE_WORDS}u+udrBlocks+27u*b+i];}
+${uniformBlockNeighbourWGSL}
 override countOnly = false;
 ${marchingCubesLookupWGSL}
 
@@ -295,10 +309,10 @@ fn occupancyFromPhi(phi: f32) -> f32 {
 }
 
 fn fieldCell(cell: vec3i) -> f32 {
+  if(umPresentationEnabled()){return 0.5-umSampleVertex(vec3f(cell)+vec3f(0.5))/(u.container.y/u.gridInfo.y);}
   let dims = vec3i(u.gridInfo.xyz);
   if (any(cell < vec3i(0)) || any(cell >= dims)) { return 0.0; }
   let mode = u.gridInfo.w;
-  if(umPresentationEnabled()){return 0.5-umSampleVertex(vec3f(cell)+vec3f(0.5))/(u.container.y/u.gridInfo.y);}
   // Raw loads: a packed field always arrives with its mixed topology, which
   // took the branch above.
   if (mode < 1.5) {
@@ -326,7 +340,26 @@ fn presentationFieldCell(cell:vec3i)->f32{
   return fieldCell(cell);
 }
 
+// Cell-centred contour halo: SOLID closes side/high faces. A low y face
+// repeats the cell above it, preserving the solver's floor contact.
+fn uniformSurfaceCell(p:vec3i)->vec3i {
+  var cell=p-vec3i(1);
+  if(umFaceLow(cell,1u)){cell=vec3i(umLowFaceAbove(cell,1u));}
+  return cell;
+}
+fn uniformWindowInterior(g:vec3i)->bool {
+  for(var k=0u;k<umPresentationLoopBound();k++){
+    let tile=g-vec3i(1)+vec3i(umCorner(k,2u));
+    if(umPageKind(tile>>vec3u(3u))==UM_SOLID){return false;}
+  }
+  return true;
+}
 fn latticeValue(p: vec3i) -> f32 {
+  if(umPresentationEnabled()){
+    let cell=uniformSurfaceCell(p);
+    if(umCellKind(cell)==UM_SOLID){return 0.0;}
+    return presentationFieldCell(cell);
+  }
   let dims = vec3i(u.gridInfo.xyz);
   if (p.x <= 0 || p.z <= 0 || p.x >= dims.x + 1 || p.z >= dims.z + 1 || p.y >= dims.y + 1) { return 0.0; }
   let cell = vec3i(p.x - 1, max(p.y - 1, 0), p.z - 1);
@@ -334,6 +367,11 @@ fn latticeValue(p: vec3i) -> f32 {
 }
 
 fn latticeWorld(p: vec3f, dims:vec3f) -> vec3f {
+  if(umPresentationEnabled()){
+    let point=p-vec3f(0.5);
+    let walls=umPointBounds(point,1.0);
+    return surfaceFrame.origin.xyz+clamp(point,walls.lo,walls.hi)*surfaceFrame.cell.xyz;
+  }
   let local = clamp((p - vec3f(0.5)) / dims, vec3f(0.0), vec3f(1.0));
   return vec3f(-0.5 * u.container.x, 0.0, -0.5 * u.container.z) + local * u.container.xyz;
 }
@@ -397,15 +435,15 @@ var<private> normalBase: array<f32, 27>;
 var<private> normalBaseLow: vec3i;       // the base block's first and last tile
 var<private> normalBaseHigh: vec3i;
 var<private> normalHome: vec3i;
+var<private> normalWalls:umBounds;
 var<private> normalFine: u32;            // the home stencil: a bit per neighbour, set when h
 fn uniformNormalCube(base: vec3i) {
   normalCube = 0u;
   if (!(uniformNormalGather || uniformCubeMemo) || !umPresentationEnabled() || u.gridInfo.w >= 1.5) { return; }
-  let n = vec3i(umDimensions());
-  // The frame's cells are the tank's, which the lattice holds from its low corner.
-  if (any(vec3i(u.gridInfo.xyz) > n)) { return; }
+  normalWalls=umPointBounds(vec3f(base)-vec3f(0.5),4.0);
+  let lo=vec3i(normalWalls.lo);let n=vec3i(normalWalls.hi);
   normalCubeBase = base;
-  let home = min(base, n - vec3i(1)) / 4;
+  let home = umBoundedCell(vec3f(base),normalWalls) >> vec3u(2u);
   let stencil = umTileStencil(umTileAt(vec3u(home)));
   normalHome = home; normalFine = stencil.x;
   if ((stencil.x >> 27u) == 1u) { normalCube = 1u; return; }
@@ -414,17 +452,16 @@ fn uniformNormalCube(base: vec3i) {
   // no part in what the home tile's other neighbours are. A band of h tiles
   // has such a stencil at every tile of its rim.
   {
-    let t = vec3i(umTileDimensions());
-    let r0 = vec3u(max((max(base - vec3i(2), vec3i(0)) - vec3i(1)) >> vec3u(2u), vec3i(0)) - home + vec3i(1));
-    let r1 = vec3u(min(min(base + vec3i(2), n) >> vec3u(2u), t - vec3i(1)) - home + vec3i(1));
+    let r0 = vec3u((max(base - vec3i(3),lo) >> vec3u(2u)) - home + vec3i(1));
+    let r1 = vec3u((min(base + vec3i(2), n-vec3i(1)) >> vec3u(2u)) - home + vec3i(1));
     let m = ((vec3u(2u) << r1) - vec3u(1u)) & ~((vec3u(1u) << r0) - vec3u(1u));
     let rows = m.x * ((m.y & 1u) | ((m.y & 2u) << 2u) | ((m.y & 4u) << 4u));
     let mask = rows * ((m.z & 1u) | ((m.z & 2u) << 8u) | ((m.z & 4u) << 16u));
     if ((stencil.x & mask) == mask) { normalCube = 1u; return; }
   }
   // Tiles g0..g1 hold b-2..b+2 in their closure: one or two an axis.
-  let g0 = max(base - vec3i(2), vec3i(0)) / 4;
-  let g1 = (min(base + vec3i(2), n) + vec3i(3)) / 4 - vec3i(1);
+  let g0 = max(base - vec3i(2), lo) >> vec3u(2u);
+  let g1 = ((min(base + vec3i(2), n) + vec3i(3)) >> vec3u(2u)) - vec3i(1);
   var coarse = true;
   for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
     let r = vec3u(min(g0 + vec3i(umCorner(k, 2u)), g1) - home + vec3i(1));
@@ -434,7 +471,7 @@ fn uniformNormalCube(base: vec3i) {
   for (var k = 0u; k < min(arrayLength(&umTopology), 27u); k += 1u) {
     let c = vec3i(umCorner(k, 3u));
     if (any(c > g1 - g0 + vec3i(1))) { continue; }
-    normalBase[k] = textureLoad(coarseVertexPhi, umWideVertexTexel(umWideVertexNear(g0 + c)), 0).x;
+    normalBase[k] = textureLoad(coarseVertexPhi, umWideVertexTexel(clamp(g0+c,lo>>vec3u(2u),n>>vec3u(2u))), 0).x;
   }
   normalBaseLow = g0; normalBaseHigh = g1;
   normalCube = select(3u, 2u, coarse);
@@ -452,14 +489,13 @@ fn uniformStencilBox(low: vec3i, high: vec3i) -> u32 {
 // worklist and decides no value.
 fn uniformCubeMixed(base: vec3i, fine: u32) -> bool {
   if ((fine >> 27u) == 1u) { return false; }
-  let n = vec3i(umDimensions());
-  let t = vec3i(umTileDimensions());
-  let home = min(base, n - vec3i(1)) / 4;
-  let low = max(base - vec3i(2), vec3i(0));
-  let high = min(base + vec3i(2), n);
-  let around = uniformStencilBox(max((low - vec3i(1)) >> vec3u(2u), vec3i(0)) - home, min(high >> vec3u(2u), t - vec3i(1)) - home);
-  if ((fine & around) == around) { return false; }
-  return (fine & uniformStencilBox(low / 4 - home, (high + vec3i(3)) / 4 - vec3i(1) - home)) != 0u;
+  let walls=umPointBounds(vec3f(base)-vec3f(0.5),4.0);
+  let lo=vec3i(walls.lo);let hi=vec3i(walls.hi);
+  let home=umBoundedCell(vec3f(base),walls)>>vec3u(2u);
+  let low=max(base-vec3i(2),lo);let high=min(base+vec3i(2),hi);
+  let around=uniformStencilBox((max(low-vec3i(1),lo)>>vec3u(2u))-home,(min(high,hi-vec3i(1))>>vec3u(2u))-home);
+  if((fine&around)==around){return false;}
+  return (fine&uniformStencilBox((low>>vec3u(2u))-home,((high+vec3i(3))>>vec3u(2u))-vec3i(1)-home))!=0u;
 }
 // The trilinear interpolant of the base block's tile at q: umVertexFrom4.
 fn uniformNormalBase(q: vec3i) -> f32 {
@@ -487,11 +523,12 @@ fn uniformNormalBase(q: vec3i) -> f32 {
 // q's own tile (below the upper wall) and, on a tile plane, the one before
 // it. No loop: a mixed cube asks this of each of its samples.
 fn uniformNormalWide(q: vec3i) -> bool {
-  let t = vec3i(umTileDimensions());
-  let a = q / 4;
+  let t = vec3i(normalWalls.hi) >> vec3u(2u);
+  let low = vec3i(normalWalls.lo) >> vec3u(2u);
+  let a = q >> vec3u(2u);
   let r = vec3u(clamp(a - normalHome + vec3i(1), vec3i(0), vec3i(2)));
   let on = (q & vec3i(3)) == vec3i(0);
-  let m = select(vec3u(0u), vec3u(1u) << r, a < t) | select(vec3u(0u), (vec3u(1u) << r) >> vec3u(1u), on & (a > vec3i(0)));
+  let m = select(vec3u(0u), vec3u(1u) << r, a < t) | select(vec3u(0u), (vec3u(1u) << r) >> vec3u(1u), on & (a > low));
   let rows = m.x * ((m.y & 1u) | ((m.y & 2u) << 2u) | ((m.y & 4u) << 4u));
   let mask = rows * ((m.z & 1u) | ((m.z & 2u) << 8u) | ((m.z & 4u) << 16u));
   return (~normalFine & mask) != 0u;
@@ -500,7 +537,7 @@ fn uniformNormalWide(q: vec3i) -> bool {
 // umVertexValue at a tile corner: the stencil of the tile the corner opens
 // decides the field (all h: the detail field; otherwise the base).
 fn uniformCornerValue(q: vec3i) -> f32 {
-  let tile = umTileAt(vec3u(umCellNear(q)) / 4u);
+  let tile = umTileAt(vec3u(umVertexCellAbove(q)) >> vec3u(2u));
   if (umTileMaximumWidth(tile) == 1u) { return umLoadFineVertex(vec3u(q)); }
   return umLoadCoarseVertex(vec3u(q));
 }
@@ -559,17 +596,14 @@ fn uniformCubeVertex(p: vec3u) -> f32 {
 // crossing the same optical normal, including in the caustic projection.
 fn uniformPhiNormal(lattice:vec3f, fallback:vec3f) -> vec3f {
   let dimensions=vec3i(u.gridInfo.xyz);
-  // The mixed lattice is the 4h base's; a raw nodal field's is its texture's.
-  var vertexDimensions=textureDimensions(denseVertexPhi);
-  if(umPresentationEnabled()){vertexDimensions=umDimensions()+vec3u(1u);}
-  if(u.gridInfo.w>=1.5 || any(vec3i(vertexDimensions)<dimensions+vec3i(1))){return fallback;}
-  // The x/z halo closes liquid against the tank. Those triangles are boundary
-  // faces, not phi's free surface: its gradient can point upward while their
-  // geometric normal must point into the wall. Retain the contour normal in
-  // this half-cell closure strip and at the floor contact.
-  if(lattice.x<=1.0 || lattice.z<=1.0 || lattice.x>=f32(dimensions.x)
-    || lattice.z>=f32(dimensions.z) || lattice.y<=1.0){return fallback;}
+  let mixed=umPresentationEnabled();
+  if(u.gridInfo.w>=1.5 || (!mixed&&any(vec3i(textureDimensions(denseVertexPhi))<dimensions+vec3i(1)))){return fallback;}
   let x=lattice-vec3f(0.5);
+  var sampleLow=vec3i(0);var sampleHigh=dimensions;
+  if(mixed){
+    let walls=umPointBounds(x,4.0);sampleLow=vec3i(walls.lo);sampleHigh=vec3i(walls.hi);
+    if(any(x<=walls.lo+vec3f(0.5))||any(x>=walls.hi-vec3f(0.5))){return fallback;}
+  }else if(lattice.x<=1.0||lattice.z<=1.0||lattice.x>=f32(dimensions.x)||lattice.z>=f32(dimensions.z)||lattice.y<=1.0){return fallback;}
   let center=vec3i(round(x));
   // The cube's classification covers the stencil of every centre in b-1..b+1.
   let gather=select(0u,normalCube,uniformNormalGather&&all(abs(center-normalCubeBase)<=vec3i(1)));
@@ -712,7 +746,7 @@ fn classifyCubeValues(base: vec3i, scale: u32, value: ptr<function, array<f32, 8
 fn classifyCubeScaled(base: vec3i, scale: u32) {
   let fieldDims = vec3u(u.gridInfo.xyz);
   let cubeDims = fieldDims + vec3u(1);
-  if (any(base < vec3i(0)) || any(vec3u(base) >= cubeDims)) { return; }
+  if (!umPresentationEnabled() && (any(base < vec3i(0)) || any(vec3u(base) >= cubeDims))) { return; }
   var value = loadCubeCornersScaled(base, i32(scale));
   classifyCubeValues(base, scale, &value);
 }
@@ -797,27 +831,28 @@ fn extractMain(@builtin(global_invocation_id) gid: vec3u) {
 //   - all 27 at or below zero and no corner in the x/z/upper halo: every
 //     term of the interpolation is non-positive, so every corner is at least
 //     0.5 (sign-exact) and no cube crosses.
-// A NaN fails both tests. A tile outside the lattice holds only clamped or
-// halo cells; the floor is clamped, not a halo. A tile of the lattice with
-// nothing stored (an AIR or SOLID page) reads the image the page table
-// resolves it to: a 4h tile word and far-air corners, so it is air.
-fn uniformWindowQuiet(g: vec3u) -> bool {
-  if (!umPresentationEnabled()) { return false; }
-  // The tank's tiles: whole ones, among the lattice's.
-  let t = vec3u(u.gridInfo.xyz) / 4u;
-  if (any(4u * t != vec3u(u.gridInfo.xyz)) || any(t > umTileDimensions())) { return false; }
+// A NaN fails both tests. SOLID pages close the contour; an AIR page reads
+// its sentinel image (a 4h tile word and far-air corners). No seed-box bound
+// participates in classification.
+// b is the block that lists the window and page its page: the window's
+// tiles and vertices lie in that page or in the 26 around it, and its
+// vertices g-1..g+1 are held at the walls of that block.
+fn uniformWindowQuiet(b: u32, page: vec3i, g: vec3u) -> bool {
+  // Only SOLID pages close the contour; AIR and resident pages stay open.
   let low = vec3i(g) - vec3i(1);
   for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
     let tile = low + vec3i(umCorner(k, 2u));
-    if (!umTileInBox(tile)) { continue; }
+    if (umPageKind(tile >> vec3u(3u)) == UM_SOLID) { continue; }
     if (umTileWidth(umTileAt(vec3u(tile))) != 4u) { return false; }
   }
+  let first = umWideVertexNearFromPage(b, page, low);
+  let last = umWideVertexNearFromPage(b, page, low + vec3i(2));
   let margin = 1e-6 * u.container.y / u.gridInfo.y;
   var air = true;
-  var liquid = g.x > 0u && g.z > 0u && all(g < t);
+  var liquid = uniformWindowInterior(vec3i(g));
   // Opaque bound (27): a literal lets Metal unroll the loads.
   for (var k = 0u; k < min(arrayLength(&umTopology), 27u); k += 1u) {
-    let vertex = umWideVertexNear(low + vec3i(umCorner(k, 3u)));
+    let vertex = clamp(low + vec3i(umCorner(k, 3u)), first, last);
     let phi = textureLoad(coarseVertexPhi, umWideVertexTexel(vertex), 0).x;
     air = air && phi > margin;
     liquid = liquid && phi <= 0.0;
@@ -825,18 +860,58 @@ fn uniformWindowQuiet(g: vec3u) -> bool {
   return air || liquid;
 }
 
-// Two launches. The first runs one lane per window and lists the windows
-// that may hold surface; the second classifies only the listed windows'
-// cubes, so the scan is t^3 plus the surface rather than n^3.
+// Two launches. The first runs one lane per window of every stored page
+// and lists the windows that may hold surface; the second classifies only
+// the listed windows' cubes, so the scan is the stored tiles plus the
+// surface rather than n^3.
+//
+// A window is listed by one block, as its local window l in [0, 8]^3 of
+// that block's page Q: window 8Q + l, the word (block << 12) | l.x |
+// (l.y << 4) | (l.z << 8). The window's own page is its tile g's, g >> 3,
+// where it is local 0..7. A window on a page's low face (g & 7 == 0 on an
+// axis) also holds the last tiles of the page below: where its own page is
+// not stored, the first stored page stepping down from it over those axes,
+// in the order of the step's bits (x, then y, then z), lists it at local 8
+// on the axes stepped. So every window with a stored tile among its eight
+// is listed once, and a window with none is not: its tiles are AIR images
+// or lie across a wall, and it holds no surface.
 struct SurfaceWindows { count: atomic<u32>, windows: array<u32> }
 @group(0) @binding(16) var<storage, read_write> surfaceWindows: SurfaceWindows;
+// Whether stored block b lists the window at local l of its page.
+fn uniformWindowListed(b: u32, l: vec3u) -> bool {
+  let high = l == vec3u(8u);
+  if (!any(high)) { return true; }
+  let plane = (l & vec3u(7u)) == vec3u(0u);
+  let mine = u32(high.x) | (u32(high.y) << 1u) | (u32(high.z) << 2u);
+  for (var k = 0u; k < mine; k += 1u) {
+    let step = vec3<bool>((k & 1u) != 0u, (k & 2u) != 0u, (k & 4u) != 0u);
+    if (any(step & !plane)) { continue; }
+    if (umBlockStored(umBlockNeighbour(b, vec3i(high) - vec3i(step)))) { return false; }
+  }
+  return true;
+}
+// Eight workgroups a block that can hold a page, a 4^3 group of its page's
+// windows each: the block is the workgroup's. A lane is the window at its
+// local l in [0, 7]^3, and one whose l is 7 on an axis also the windows at
+// 8 there, where this block lists them.
 @compute @workgroup_size(4, 4, 4)
-fn collectWindowsMain(@builtin(global_invocation_id) gid: vec3u) {
+fn collectWindowsMain(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
   udrInit();
-  // ceil((n + 1) / 4) windows on an axis: t + 1 on a lattice of whole tiles.
-  if (any(gid >= (vec3u(u.gridInfo.xyz) + vec3u(4u)) / 4u) || uniformWindowQuiet(gid)) { return; }
-  let slot = atomicAdd(&surfaceWindows.count, 1u);
-  if (slot < arrayLength(&surfaceWindows.windows)) { surfaceWindows.windows[slot] = gid.x | (gid.y << 10u) | (gid.z << 20u); }
+  let b = 1u + (group.x >> 3u);
+  let record = umBlockWord(b);
+  if (record == UM_FREE) { return; }
+  let page = vec3i(vec3u(record & 63u, (record >> 6u) & 63u, (record >> 12u) & 63u));
+  let own = 4u * vec3u(group.x & 1u, (group.x >> 1u) & 1u, (group.x >> 2u) & 1u) + lane;
+  let last = own == vec3u(7u);
+  for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
+    let up = vec3<bool>((k & 1u) != 0u, (k & 2u) != 0u, (k & 4u) != 0u);
+    if (any(up & !last)) { continue; }
+    let l = select(own, vec3u(8u), up);
+    let g = vec3u(8 * page) + l;
+    if (!uniformWindowListed(b, l) || uniformWindowQuiet(b, page, g)) { continue; }
+    let slot = atomicAdd(&surfaceWindows.count, 1u);
+    if (slot < arrayLength(&surfaceWindows.windows)) { surfaceWindows.windows[slot] = (b << 12u) | l.x | (l.y << 4u) | (l.z << 8u); }
+  }
 }
 // A fixed launch of EXTRACTION_WINDOW_WORKGROUPS workgroups, each a
 // contiguous share of the list, a window at a time: its 64 lanes one cube
@@ -862,14 +937,22 @@ fn collectWindowsMain(@builtin(global_invocation_id) gid: vec3u) {
 // order. Both are exact; the first takes 0.13 ms off classify at 128^3 Full,
 // and either changes the worklist's order, which costs polygonise 0.2 ms at
 // partial detail: it is fastest behind this list.
-//   x: the window (WINDOW_NONE past the list)
-//   y: the stencil word of the home tile min(g, t-1): its neighbourhood
-//      holds every tile around the window's vertices
+// tiles:
+//   x: the list word (WINDOW_NONE past the list)
+//   y: the stencil word of the home tile: its neighbourhood holds every
+//      tile around the window's vertices
 //   z: a bit per tile g-1..g, set when its whole stencil is h
-//   w: 0 the reference per cube (no mixed lattice), 1 every tile of the
-//      window has an all-h stencil (every vertex is stored: direct loads),
-//      2 every tile is 4h (the base alone), 3 mixed
-var<workgroup> windowHeader: vec4u;
+//   w: 0 the reference per cube, 1 every
+//      tile of the window has an all-h stencil (every vertex is stored:
+//      direct loads), 2 every tile is 4h (the base alone), 3 mixed
+// g: the window, from its block's record. home: its home tile, the tile of
+// its block's page at or next below tile g on every axis: a stored tile.
+// Next below on an axis (the window is local 8 there), the home stencil
+// ends at tile g: uniformWindowIncident reads the tiles past it.
+// cube: the stencil word of the tile uniformNormalCube classes the window's
+// cubes by (uniformCubeMixed): tiles.y unless that tile is not the home.
+struct WindowHeader { tiles: vec4u, g: vec3i, block: u32, home: vec3i, cube: u32 }
+var<workgroup> windowHeader: WindowHeader;
 var<workgroup> windowRange: vec2u;
 var<workgroup> windowBase: array<f32, 27>;
 var<workgroup> windowVertex: array<f32, 216>;
@@ -885,50 +968,83 @@ fn uniformWindowSign(phi: f32) -> u32 {
   let margin = 1e-6 * u.container.y / u.gridInfo.y;
   return select(1u, 0u, phi > margin) | select(2u, 0u, phi <= 0.0);
 }
-fn uniformWindowHeader(slot: u32) -> vec4u {
-  if (slot >= min(atomicLoad(&surfaceWindows.count), arrayLength(&surfaceWindows.windows))) { return vec4u(WINDOW_NONE, 0u, 0u, 0u); }
+fn uniformWindowHeader(slot: u32) -> WindowHeader {
+  // Past the list: no window.
+  if (slot >= min(atomicLoad(&surfaceWindows.count), arrayLength(&surfaceWindows.windows))) { return WindowHeader(vec4u(WINDOW_NONE, 0u, 0u, 0u), vec3i(1 << 20u), 0u, vec3i(0), 0u); }
   let window = surfaceWindows.windows[slot];
-  if (!umPresentationEnabled()) { return vec4u(window, 0u, 0u, 0u); }
-  let t = vec3i(u.gridInfo.xyz) / 4;
-  if (any(4 * t != vec3i(u.gridInfo.xyz)) || any(t > vec3i(umTileDimensions()))) { return vec4u(window, 0u, 0u, 0u); }
-  let g = vec3i(vec3u(window & 1023u, (window >> 10u) & 1023u, window >> 20u));
-  let home = umTileNear(g);
-  let word = umTopology[2u * umTileCount() + 2u * umTileAt(vec3u(home))];
+  let b = window >> 12u;
+  let local = vec3i(vec3u(window & 15u, (window >> 4u) & 15u, (window >> 8u) & 15u));
+  let page = vec3i(umBlockPage(b));
+  let g = 8 * page + local;
+  let home = 8 * page + min(local, vec3i(7));
+  let word = umTopology[2u * umTileCount() + 2u * (512u * b + umTileLocal(vec3u(home)))];
+  let cubeHome = umBoundedCell(vec3f(4 * g), umPointBounds(vec3f(4 * g), 4.0)) >> vec3u(2u);
+  var cube = word;
+  if (any(cubeHome != home)) { cube = umTileStencil(umTileAt(vec3u(cubeHome))).x; }
   var fine = 0u; var allFine = true; var anyFine = false;
   for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
     let tile = g - vec3i(1) + vec3i(umCorner(k, 2u));
-    if (!umTileInBox(tile)) { continue; }
+    if (umPageKind(tile >> vec3u(3u)) == UM_SOLID) { continue; }
     if ((umTopology[2u * umTileCount() + 2u * umTileAt(vec3u(tile))] >> 27u) == 1u) { fine |= 1u << k; } else { allFine = false; }
     let r = vec3u(tile - home + vec3i(1));
     if (((word >> (r.x + 3u * (r.y + 3u * r.z))) & 1u) != 0u) { anyFine = true; }
   }
-  return vec4u(window, word, fine, select(select(2u, 3u, anyFine), 1u, allFine));
+  return WindowHeader(vec4u(window, word, fine, select(select(2u, 3u, anyFine), 1u, allFine)), g, b, home, cube);
 }
 // The in-domain tiles whose closure holds vertex q of the window: x, whether
 // one is h; y, one that is 4h (its place in the home stencil plus one), or
 // zero. The tiles as uniformNormalWide's mask of the home stencil; any 4h
 // one serves (the interpolant of a shared face or edge is the same from
 // either side), a tile with nothing stored among them (the AIR image).
+//
+// Where the home is the tile below the window's on an axis, the window's far
+// plane there (q = 4g + 4) opens a tile past the home stencil (far). The
+// stencil still holds the tile before the plane, so x is whether an h tile of
+// this window reads q, and y a 4h tile of the stencil. With every stencil
+// tile around q h, a 4h tile past the stencil makes q its interpolant
+// (uniformWindowFarWide).
 fn uniformWindowIncident(q: vec3i) -> vec2u {
-  let t = vec3i(umTileDimensions());
-  let a = q / 4;
-  let r = vec3u(clamp(a - normalHome + vec3i(1), vec3i(0), vec3i(2)));
+  let t=vec3i(normalWalls.hi)>>vec3u(2u);
+  let low=vec3i(normalWalls.lo)>>vec3u(2u);
+  let a = q >> vec3u(2u);
+  let d = clamp(a - normalHome + vec3i(1), vec3i(0), vec3i(3));
+  let far = d == vec3i(3);
+  let r = vec3u(d);
   let on = (q & vec3i(3)) == vec3i(0);
-  let m = select(vec3u(0u), vec3u(1u) << r, a < t) | select(vec3u(0u), (vec3u(1u) << r) >> vec3u(1u), on & (a > vec3i(0)));
+  let m = select(vec3u(0u), vec3u(1u) << r, (a < t) & !far) | select(vec3u(0u), (vec3u(1u) << r) >> vec3u(1u), on & (a > low));
   let rows = m.x * ((m.y & 1u) | ((m.y & 2u) << 2u) | ((m.y & 4u) << 4u));
   let mask = rows * ((m.z & 1u) | ((m.z & 2u) << 8u) | ((m.z & 4u) << 16u));
   let wide = ~normalFine & mask;
   var incident = vec2u(select(0u, 1u, (normalFine & mask) != 0u), 0u);
   if (wide != 0u) { incident.y = firstTrailingBit(wide) + 1u; }
+  else if (incident.x != 0u && any(far)) { incident.y = uniformWindowFarWide(a, far, on, t); }
   return incident;
 }
-// One base slot for each of the first 27 lanes: the tile corners g-1..g+1.
-// Returns the lane's sign bits.
-fn uniformWindowBaseValues(g: vec3i, lane: u32) -> u32 {
+// A vertex of tile a on a far plane, the tiles around it: one that is 4h and
+// lies past the home stencil (at a on a far axis). Its interpolant on the
+// plane is that of the tile across it, the same tile but before the plane on
+// the far axes, which the stencil holds: that tile's place plus one, or
+// zero where no such tile is 4h.
+fn uniformWindowFarWide(a: vec3i, far: vec3<bool>, on: vec3<bool>, t: vec3i) -> u32 {
+  for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
+    let at = umCorner(k, 2u) == vec3u(1u);
+    // On an axis, tile a (inside the lattice) or, on a tile plane, the one before it.
+    if (!any(at & far) || any(at & (a >= t)) || any(!at & !(on & (a > (vec3i(normalWalls.lo)>>vec3u(2u)))))) { continue; }
+    if (umTileWidth(umTileAt(vec3u(select(a - vec3i(1), a, at)))) != 4u) { continue; }
+    let r = vec3u(select(a - vec3i(1), a, at & !far) - normalHome + vec3i(1));
+    return r.x + 3u * (r.y + 3u * r.z) + 1u;
+  }
+  return 0u;
+}
+// One base slot for each of the first 27 lanes: the tile corners g-1..g+1,
+// one across a wall of the window's block held at the wall. Returns the
+// lane's sign bits.
+fn uniformWindowBaseValues(place: WindowHeader, lane: u32) -> u32 {
   if (lane >= 27u) { return 0u; }
+  let g = place.g;
   let corner = g - vec3i(1) + vec3i(umCorner(lane, 3u));
-  if (any(umWideVertexNear(corner) != corner)) { return 0u; }
-  let phi = textureLoad(coarseVertexPhi, umWideVertexTexel(corner), 0).x;
+  let local = vec3i(vec3u(place.tiles.x & 15u, (place.tiles.x >> 4u) & 15u, (place.tiles.x >> 8u) & 15u));
+  let phi = textureLoad(coarseVertexPhi, umWideVertexTexel(umWideVertexNearFromPage(place.block, (g - local) >> vec3u(3u), corner)), 0).x;
   windowBase[lane] = phi;
   return uniformWindowSign(phi);
 }
@@ -974,7 +1090,7 @@ fn uniformWindowVertices(g: vec3i, scan: u32, lane: u32) -> u32 {
     for (var m = 0u; m < 4u; m += 1u) {
       let slot = 4u * lane + m;
       let q = 4 * g - vec3i(1) + vec3i(umCorner(slot, 6u));
-      if (slot < 216u && all(umVertexNear(q) == q)) {
+      if (slot < 216u && umVertexPresent(q)) {
         let phi = umLoadFineVertex(vec3u(q));
         windowVertex[slot] = phi; signs |= uniformWindowSign(phi);
       }
@@ -984,7 +1100,7 @@ fn uniformWindowVertices(g: vec3i, scan: u32, lane: u32) -> u32 {
       let slot = 4u * lane + m;
       if (slot >= 216u) { break; }
       let q = 4 * g - vec3i(1) + vec3i(umCorner(slot, 6u));
-      if (any(umVertexNear(q) != q)) { continue; }
+      if (!umVertexPresent(q)) { continue; }
       let incident = uniformWindowIncident(q);
       if (incident.x == 0u) { continue; }
       var phi = 0.0;
@@ -999,15 +1115,15 @@ fn uniformWindowVertices(g: vec3i, scan: u32, lane: u32) -> u32 {
 // cell from its eight stored vertices in the regular sample's arithmetic at
 // a cell centre (every weight 1/8, as x*.5*.5*.5, summed as umVertexSum8).
 fn uniformWindowCellsFine(g: vec3i, lane: u32) {
-  let n = vec3i(u.gridInfo.xyz);
   for (var m = 0u; m < 2u; m += 1u) {
     let slot = 2u * lane + m;
     if (slot < 125u) {
       let p = 4 * g + vec3i(umCorner(slot, 5u));
       var value = 0.0;
       // latticeValue's wall halo.
-      if (!(p.x <= 0 || p.z <= 0 || p.x >= n.x + 1 || p.z >= n.z + 1 || p.y >= n.y + 1)) {
-        let d = vec3u(vec3i(p.x - 1, max(p.y - 1, 0), p.z - 1) - 4 * g + vec3i(1));
+      let cell = uniformSurfaceCell(p);
+      if (umCellKind(cell) != UM_SOLID) {
+        let d = vec3u(cell - 4 * g + vec3i(1));
         let i = d.x + 6u * (d.y + 6u * d.z);
         let low = vec4f(windowVertex[i], windowVertex[i + 1u], windowVertex[i + 6u], windowVertex[i + 7u]) * 0.5 * 0.5 * 0.5;
         let high = vec4f(windowVertex[i + 36u], windowVertex[i + 37u], windowVertex[i + 42u], windowVertex[i + 43u]) * 0.5 * 0.5 * 0.5;
@@ -1022,14 +1138,13 @@ fn uniformWindowCellsFine(g: vec3i, lane: u32) {
 // Two lattice values a lane: latticeValue(4g + slot), each cell by its kind
 // (uniformCellValue).
 fn uniformWindowCells(g: vec3i, header: vec4u, lane: u32) {
-  let n = vec3i(u.gridInfo.xyz);
   for (var m = 0u; m < min(arrayLength(&umTopology), 2u); m += 1u) {
     let slot = 2u * lane + m;
     if (slot >= 125u) { break; }
     let p = 4 * g + vec3i(umCorner(slot, 5u));
     // latticeValue's wall halo.
-    if (p.x <= 0 || p.z <= 0 || p.x >= n.x + 1 || p.z >= n.z + 1 || p.y >= n.y + 1) { windowCell[slot] = 0.0; continue; }
-    let cell = vec3i(p.x - 1, max(p.y - 1, 0), p.z - 1);
+    let cell = uniformSurfaceCell(p);
+    if (umCellKind(cell) == UM_SOLID) { windowCell[slot] = 0.0; continue; }
     let tile = cell / 4;
     let e = vec3u(tile - g + vec3i(1));
     var x: array<f32, 8>;
@@ -1064,11 +1179,12 @@ fn extractWindowsMain(@builtin(workgroup_id) group: vec3u, @builtin(num_workgrou
   let range = workgroupUniformLoad(&windowRange);
   for (var slot = range.x; slot < range.y; slot += 1u) {
     if (index == 0u) { atomicStore(&windowSigns, 0u); windowHeader = uniformWindowHeader(slot); }
-    let header = workgroupUniformLoad(&windowHeader);
-    let g = vec3i(vec3u(header.x & 1023u, (header.x >> 10u) & 1023u, header.x >> 20u));
+    let place = workgroupUniformLoad(&windowHeader);
+    let header = place.tiles;
+    let g = place.g;
     var signs = 0u;
-    if (header.w != 0u) { normalHome = umTileNear(g); normalFine = header.y; }
-    if (header.w > 1u) { signs = uniformWindowBaseValues(g, index); }
+    if (header.w != 0u) { normalHome = place.home; normalFine = header.y; normalWalls=umPointBounds(vec3f(4*place.home)+vec3f(2),6.0); }
+    if (header.w > 1u) { signs = uniformWindowBaseValues(place, index); }
     // A mixed window's interpolated vertices read the base just loaded.
     if (header.w == 3u) { workgroupBarrier(); }
     if (header.w == 1u || header.w == 3u) { signs |= uniformWindowVertices(g, header.w, index); }
@@ -1078,7 +1194,7 @@ fn extractWindowsMain(@builtin(workgroup_id) group: vec3u, @builtin(num_workgrou
     if (header.w != 0u) {
       let signs = atomicLoad(&windowSigns);
       // Air, or liquid with no corner in the wall halo.
-      quiet = (signs & 1u) == 0u || ((signs & 2u) == 0u && g.x > 0 && g.z > 0 && all(4 * g < vec3i(u.gridInfo.xyz)));
+      quiet = (signs & 1u) == 0u || ((signs & 2u) == 0u && uniformWindowInterior(g));
     }
     if (header.w != 0u && !quiet) {
       if (header.w == 1u) { uniformWindowCellsFine(g, index); }
@@ -1087,12 +1203,12 @@ fn extractWindowsMain(@builtin(workgroup_id) group: vec3u, @builtin(num_workgrou
     workgroupBarrier();
     let base = 4 * g + vec3i(lane);
     if (header.w == 0u) { classifyCube(base); }
-    else if (!quiet && all(vec3u(base) < vec3u(u.gridInfo.xyz) + vec3u(1u))) {
+    else if (!quiet) {
       // The cube's corners in marching-cubes order.
       let i = lane.x + 5u * (lane.y + 5u * lane.z);
       var value = array<f32, 8>(windowCell[i], windowCell[i + 1u], windowCell[i + 6u], windowCell[i + 5u],
         windowCell[i + 25u], windowCell[i + 26u], windowCell[i + 31u], windowCell[i + 30u]);
-      if (cubeHoldsSurface(&value)) { appendSurfaceCube(base, 1u, &value, uniformCubeMixed(base, header.y)); }
+      if (cubeHoldsSurface(&value)) { appendSurfaceCube(base, 1u, &value, uniformCubeMixed(base, place.cube)); }
     }
   }
 }
@@ -1475,6 +1591,8 @@ struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, c
 @group(0) @binding(18) var contactDetailPhi:texture_3d<f32>;
 @group(0) @binding(19) var contactCoarsePhi:texture_3d<f32>;
 ${uniformMixedPresentationWGSL(17,"contactDetailPhi","contactCoarsePhi","liquidTopology")}
+struct ContactFrame { grid:vec4f, cell:vec4f, origin:vec4f }
+@group(0) @binding(20) var<uniform> contactFrame:ContactFrame;
 ${waterSceneOpticsShaderLibrary(0, 15, 16)}
 ${cameraApertureShaderLibrary("u")}
 struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
@@ -1551,7 +1669,7 @@ fn contactFluidValue(world:vec3f)->f32{
     // Uniform Geometric: the nodal level set itself, on the scale the
     // extraction contours (0.5 - phi / h, its 0.5 crossing at phi = 0). The
     // cell field is centre phi there, canonical only at owner origins.
-    return 0.5-umSampleVertex(uvw*u.gridInfo.xyz)/(u.container.y/max(u.gridInfo.y,1.0));
+    return 0.5-umSampleVertex((world-contactFrame.origin.xyz)/contactFrame.cell.xyz)/(u.container.y/max(u.gridInfo.y,1.0));
   }
   let q=clamp(uvw*vec3f(dims)-vec3f(0.5),vec3f(0),vec3f(dims-vec3i(1)));let base=vec3i(floor(q));let f=fract(q);
   let c000=contactFieldCell(base);let c100=contactFieldCell(base+vec3i(1,0,0));let c010=contactFieldCell(base+vec3i(0,1,0));let c110=contactFieldCell(base+vec3i(1,1,0));
@@ -1862,6 +1980,9 @@ export class RasterWaterPipeline {
   private extractBindGroup?: GPUBindGroup;
   private denseNormalPhi?: GPUTexture;
   private mixedOwnership?: GPUBufferBinding;
+  /** Blocks of the bound mixed presentation's page pool; 0 with none bound. */
+  private mixedBlocks = 0;
+  private mixedFrame?: GPUBufferBinding;
   /** Uniform Geometric's 4h vertex base; with it the extraction binds no cell field. */
   private coarseVertexPhi?: GPUTexture;
   private levelSetSource?: DenseLevelSetVolumeConsumerSource;
@@ -1919,6 +2040,13 @@ export class RasterWaterPipeline {
   private fallbackSparseControl?: GPUBuffer;
   private surfaceDiagnosticReadback?: GPUBuffer;
   private surfaceDiagnosticPending = false;
+  /** Vertices the mesh held when the pending receipt was encoded. */
+  private surfaceDiagnosticCapacity = 0;
+  /** A receipt whose extraction asked for more vertices than the mesh holds
+   * (whole triangles were dropped): that count, and the capacity. The next
+   * encode throws. */
+  private meshOverflowVertices = 0;
+  private meshOverflowCapacity = 0;
   private surfaceDiagnosticCompletion?: Promise<WaterRenderDiagnostics | undefined>;
   private lastSurfaceDiagnostics?: WaterRenderDiagnostics;
   private lastSurfaceDiagnosticEncodeAt_ms = -Infinity;
@@ -2067,6 +2195,7 @@ export class RasterWaterPipeline {
       ,{ binding: 15, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
       // The tenth storage buffer of the stage: the ceiling browsers report here.
       ,{ binding: 16, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
+      ,{ binding: 17, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
     ] });
     this.prepareLayout = this.device.createBindGroupLayout({ label: "Water extraction prepare bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -2094,7 +2223,8 @@ export class RasterWaterPipeline {
       { binding: 15, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
       { binding: 17, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
-      ...[18,19].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" as const, viewDimension: "3d" as const } }))
+      ...[18,19].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" as const, viewDimension: "3d" as const } })),
+      { binding: 20, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } }
     ] });
     // Binding 3 is the caustic receiver the optics library declares and this
     // pass never reads. It stays in the layout because the library is included
@@ -2223,8 +2353,10 @@ export class RasterWaterPipeline {
     this.levelSetSource = source;
     const mixed = source?.mixedOwnership && source.coarseVertexPhi ? source : undefined;
     const detail = mixed ? mixed.detailVertexPhi : source?.vertexPhi, ownership = mixed?.mixedOwnership, coarse = mixed?.coarseVertexPhi;
-    if (!contourChanged && this.denseNormalPhi === detail && this.mixedOwnership === ownership && this.coarseVertexPhi === coarse) return false;
-    this.denseNormalPhi = detail; this.mixedOwnership = ownership; this.coarseVertexPhi = coarse;
+    const blocks = mixed?.mixedBlocks ?? 0;
+    if (mixed && (!(blocks > 2) || !mixed.mixedFrame)) throw new Error("Water surface: a mixed level-set source names no page pool blocks (mixedBlocks)");
+    if (!contourChanged && this.denseNormalPhi === detail && this.mixedOwnership === ownership && this.coarseVertexPhi === coarse && this.mixedBlocks === blocks && this.mixedFrame === mixed?.mixedFrame) return false;
+    this.denseNormalPhi = detail; this.mixedOwnership = ownership; this.coarseVertexPhi = coarse; this.mixedBlocks = blocks; this.mixedFrame = mixed?.mixedFrame;
     return true;
   }
 
@@ -2265,17 +2397,19 @@ export class RasterWaterPipeline {
   setSurfaceClassifyForQA(classify?: WaterSurfaceClassify) { this.surfaceClassifyForQA = classify; this.invalidateSurface(); }
 
   /** full: one workgroup per 4^3 cube bases of the (n+1)^3 lattice.
-   * windows: one lane per window lists it (the caller has zeroed the list's
-   * count word), a fixed launch shares the list out, a workgroup a window at
-   * a time, then one workgroup puts the mixed cubes last in the worklist. */
+   * windows: eight workgroups for each block of the page pool that can hold
+   * a page, one lane per window of its page, list the windows (the caller
+   * has zeroed the list's count word), a fixed launch shares the list out, a
+   * workgroup a window at a time, then one workgroup puts the mixed cubes
+   * last in the worklist. */
   private dispatchDenseClassify(pass: GPUComputePassEncoder, nx: number, ny: number, nz: number, classify: WaterSurfaceClassify, countOnly: boolean, classifier?: GPUComputePipeline) {
-    const windows = [Math.ceil((nx + 1) / 4), Math.ceil((ny + 1) / 4), Math.ceil((nz + 1) / 4)] as const;
     const pipeline = classifier ?? (countOnly ? this.countOnlyPipeline(classify)
       : classify === "windows" ? this.extractWindowsPipeline! : this.extractPipeline!);
-    if (classify !== "windows") { pass.setPipeline(pipeline); pass.dispatchWorkgroups(...windows); return; }
+    if (classify !== "windows") { pass.setPipeline(pipeline); pass.dispatchWorkgroups(Math.ceil((nx + 1) / 4), Math.ceil((ny + 1) / 4), Math.ceil((nz + 1) / 4)); return; }
+    if (!this.mixedOwnership || !this.coarseVertexPhi) throw new Error("Water surface: the window scan strides a page pool's blocks and needs the mixed presentation bound");
     pass.setPipeline(this.collectWindowsPipeline!);
-    pass.dispatchWorkgroups(Math.ceil(windows[0] / 4), Math.ceil(windows[1] / 4), Math.ceil(windows[2] / 4));
-    pass.setPipeline(pipeline); pass.dispatchWorkgroups(Math.min(EXTRACTION_WINDOW_WORKGROUPS, windows[0] * windows[1] * windows[2]));
+    pass.dispatchWorkgroups(8 * (this.mixedBlocks - 2));
+    pass.setPipeline(pipeline); pass.dispatchWorkgroups(Math.min(EXTRACTION_WINDOW_WORKGROUPS, surfaceWindowCapacity(2048, 2048, 2048, this.mixedBlocks)));
     if (!countOnly) { pass.setPipeline(this.orderWorklistPipeline!); pass.dispatchWorkgroups(1); }
   }
 
@@ -2398,6 +2532,7 @@ export class RasterWaterPipeline {
     this.surfaceDiagnosticReadback?.destroy();
     this.surfaceDiagnosticReadback = this.device.createBuffer({ label: "Water render diagnostics", size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     encoder.copyBufferToBuffer(this.indirectBuffer, 0, this.surfaceDiagnosticReadback, 0, 32);
+    this.surfaceDiagnosticCapacity = (this.vertexBuffer?.size ?? 0) / 32;
     this.surfaceDiagnosticPending = true;
     return true;
   }
@@ -2410,6 +2545,10 @@ export class RasterWaterPipeline {
     const completion = (submissionCompletion ?? this.device.queue.onSubmittedWorkDone()).then(async () => {
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
+      // The allocator counts every vertex polygonise asked for; past the
+      // whole triangles the mesh holds, it dropped the rest.
+      const capacity = this.surfaceDiagnosticCapacity;
+      if (words[5]! > capacity - capacity % 3 && !this.meshOverflowVertices) { this.meshOverflowVertices = words[5]!; this.meshOverflowCapacity = capacity; }
       const surfaceGeometrySource = waterSurfaceGeometrySource(words[0]);
       this.lastSurfaceDiagnostics = {
         vertexCount: words[0], activeCubeCount: words[4], vertexAllocator: words[5],
@@ -2447,10 +2586,23 @@ export class RasterWaterPipeline {
     return template;
   }
 
+  /** The window list: one word per window the bound page pool's blocks can
+   * list, after the count; one word, never written, where no pool is bound.
+   * Sized when the bound pool changes, never while one is held.
+   * Returns whether the buffer is a new one. */
+  private ensureSurfaceWindows(nx: number, ny: number, nz: number): boolean {
+    const words = Math.max(1, surfaceWindowCapacity(2048, 2048, 2048, this.mixedBlocks));
+    if (this.surfaceWindows?.size === 4 * (1 + words)) return false;
+    this.surfaceWindows?.destroy();
+    this.surfaceWindows = this.device.createBuffer({ label: "Water surface window list", size: 4 * (1 + words), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    return true;
+  }
+
   private ensureGeometry(nx: number, ny: number, nz: number) {
+    const windows = this.ensureSurfaceWindows(nx, ny, nz);
     const key = `${nx}x${ny}x${nz}`;
-    if (key === this.geometryKey) return;
-    this.vertexBuffer?.destroy(); this.indirectBuffer?.destroy(); this.indirectResetTemplate?.destroy(); this.activeCubeBuffer?.destroy();    this.surfaceWindows?.destroy();
+    if (key === this.geometryKey) { if (windows) this.rebuildBindGroups(); return; }
+    this.vertexBuffer?.destroy(); this.indirectBuffer?.destroy(); this.indirectResetTemplate?.destroy(); this.activeCubeBuffer?.destroy();
     // Surface area, not volume, controls the normal case.  The generous factor
     // also covers breaking sheets and entrained blobs while imposing a hard
     // 64 MiB ceiling on adversarial checkerboard fields.
@@ -2464,10 +2616,6 @@ export class RasterWaterPipeline {
     this.device.queue.writeBuffer(this.indirectBuffer, 28, new Uint32Array([0xffff_ffff]));
     this.indirectResetTemplate = this.createIndirectResetTemplate();
     this.activeCubeBuffer = this.device.createBuffer({ label: "Water surface cube worklist", size: activeCubeCapacity(maxVertices) * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    // One word per 4^3 cube window of a dense (n+1)^3 lattice, after the
-    // count.
-    const windowWords = Math.ceil((nx + 1) / 4) * Math.ceil((ny + 1) / 4) * Math.ceil((nz + 1) / 4);
-    this.surfaceWindows = this.device.createBuffer({ label: "Water surface window list", size: 4 * (1 + windowWords), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.geometryKey = key; this.extractedRevision = -1; this.surfaceExtractionReason = "geometry allocation changed"; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
   }
 
@@ -2552,7 +2700,8 @@ export class RasterWaterPipeline {
       { binding: 13, resource: (this.denseNormalPhi ?? (mixedSurface ? this.fallbackField : this.volume)).createView({ dimension: "3d" }) },
       { binding: 14, resource: this.mixedOwnership ?? { buffer: this.fallbackSparseControl, size: 4 } },
       { binding: 15, resource: (this.coarseVertexPhi ?? this.fallbackField).createView({ dimension: "3d" }) },
-      { binding: 16, resource: { buffer: this.surfaceWindows } }
+      { binding: 16, resource: { buffer: this.surfaceWindows } },
+      { binding: 17, resource: this.mixedFrame ?? { buffer: this.uniformBuffer, size: 48 } }
     ] });
     if (this.prepareLayout && this.indirectBuffer && this.activeCubeBuffer && this.polygoniseDispatchBuffer) this.prepareBindGroup = this.device.createBindGroup({ layout: this.prepareLayout, entries: [
       { binding: 0, resource: { buffer: this.indirectBuffer } }, { binding: 1, resource: { buffer: this.activeCubeBuffer } }, { binding: 2, resource: { buffer: this.polygoniseDispatchBuffer } }
@@ -2583,7 +2732,8 @@ export class RasterWaterPipeline {
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: sceneView }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: (mixedSurface ? this.fallbackField : contourField!).createView({ dimension: "3d" }) }, { binding: 10, resource: this.rearFrontPosition.createView() }, { binding: 11, resource: this.rearFrontNormal.createView() }, { binding: 12, resource: this.rearBackPosition.createView() }, { binding: 13, resource: this.rearBackNormal.createView() }, { binding: 14, resource: this.causticTexture.createView() }, { binding: 15, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 16, resource: this.causticReceiver.createView() },
       { binding: 17, resource: mixedSurface ? this.mixedOwnership! : { buffer: this.fallbackSparseControl, size: 4 } },
       { binding: 18, resource: ((mixedSurface ? this.denseNormalPhi : undefined) ?? this.fallbackField).createView({ dimension: "3d" }) },
-      { binding: 19, resource: (this.coarseVertexPhi ?? this.fallbackField).createView({ dimension: "3d" }) }
+      { binding: 19, resource: (this.coarseVertexPhi ?? this.fallbackField).createView({ dimension: "3d" }) },
+      { binding: 20, resource: this.mixedFrame ?? { buffer: this.uniformBuffer, size: 48 } }
     ] });
     this.compositeBindGroups.set(sceneView, bindGroup);
     return bindGroup;
@@ -2612,6 +2762,7 @@ export class RasterWaterPipeline {
     if (this.lastSurfaceDiagnostics) {
       this.surfaceSourceFrameCounts[this.lastSurfaceDiagnostics.surfaceGeometrySource] += 1;
     }
+    if (this.meshOverflowVertices) throw new Error(`Water surface: the mesh needs ${this.meshOverflowVertices} vertices, over its capacity of ${this.meshOverflowCapacity}; whole triangles were dropped`);
     this.ensureGeometry(nx, ny, nz);
     if (!this.extractPipeline || !this.extractWindowsPipeline || !this.orderWorklistPipeline
       || !this.collectWindowsPipeline || !this.preparePipeline || !this.polygonisePipeline

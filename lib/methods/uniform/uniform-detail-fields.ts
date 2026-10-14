@@ -1,3 +1,4 @@
+import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { uniformSceneConstantsWGSL } from "./uniform-scene-constants";
 /** Detail fields hold a tile-resolution base block and, when fine ownership
  * is reserved, an h store of every cell (a vertex field's: every vertex).
@@ -722,8 +723,7 @@ ${kernel("refresh","dst"," textureStore(dst,vec3i(g),textureLoad(src,ddFace(g),0
   const following=this.following,sets:GPUTexture[][]=[];
   // The ring kernels' lattice is their uniform's (the box in tiles, the
   // blocks); table: the topology whose tail holds the pages.
-  const seam=(table:string)=>`fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return ${table}[5u*drCount()+(e.x|(e.y<<6u)|(e.z<<12u))];}
-fn umBlockWord(b:u32)->u32{return ${table}[5u*drCount()+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
+  const seam=(table:string)=>`${uniformWindowAddressWGSL(`${table}`,"5u*drCount()","(drCount()/512u)")}
 ${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"drDimensions.w"}})}`;
   for(const format of ["rgba32float","r32float"] as const){const of=following.filter(h=>h.format===format);for(let i=0;i<of.length;i+=BATCH)sets.push(of.slice(i,i+BATCH));}
   const head=`@group(0) @binding(${2*BATCH}) var<storage,read> drHeldWords:array<u32>;

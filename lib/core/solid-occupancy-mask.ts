@@ -85,8 +85,13 @@ export function solidOccupancyMaskVoxel(words: ArrayLike<number>, x: number, y: 
  * its first word: `page(p)`, the directory word of the page of cell p, and
  * `voxel(p)`, whether the cell is solid.
  */
-export function solidOccupancyMaskWGSL(buffer: string, page: string, voxel: string): string {
-  return /* wgsl */ `fn ${page}(p:vec3i)->u32{let e=vec3u(p>>vec3u(5u))&vec3u(63u);return ${buffer}[e.x|(e.y<<6u)|(e.z<<12u)];}
+export function solidOccupancyMaskWGSL(buffer: string, page: string, voxel: string, moving = false): string {
+  return /* wgsl */ `fn ${page}(p:vec3i)->u32{
+ ${moving?`let world=(p>>vec3u(5u))+umFramePage();let e=bitcast<vec3u>(world)&vec3u(63u);let raw=${buffer}[e.x|(e.y<<6u)|(e.z<<12u)];
+ let kept=select(raw,0u,(raw==${SOLID_MASK_WALL}u)|any(bitcast<vec3u>(world)>vec3u(63u)));
+ return select(kept,${SOLID_MASK_WALL}u,umWorldSolid(world));`
+ :`let e=vec3u(p>>vec3u(5u))&vec3u(63u);return ${buffer}[e.x|(e.y<<6u)|(e.z<<12u)];`}
+}
 fn ${voxel}(p:vec3i)->bool{
  let code=${page}(p)&0xffffu;
  if(code==0u){return false;}

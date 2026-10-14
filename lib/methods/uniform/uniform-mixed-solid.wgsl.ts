@@ -13,6 +13,8 @@
  * liquid one full tile away from any cut cell a 4h owner holds (a dry cut
  * tile may run 4h, without solid terms). Band pressure's all-4h levels read
  * the static coarse record instead (see UniformMixedSolid.coarse). */
+import {UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES,uniformOpenWorldTerrainSampleWGSL} from "./uniform-open-world-terrain";
+import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 import {sceneShapeWgsl} from "../../core/scene-shape";
 import {SOLID_MASK_DIRECTORY_WORDS,SOLID_MASK_WALL,solidOccupancyMaskWGSL,type SolidOccupancyMaskPages} from "../../core/solid-occupancy-mask";
@@ -47,8 +49,7 @@ function solidRecordAddressWGSL(layout:UniformMixedLayout,name:string):string{
  const keys=layout.tiles.length,table=5*keys;
  const paged={blocks:`${keys/512}u`};
  return /* wgsl */`
-fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(${UNIFORM_PAGE_WINDOW-1}u);return ${name}[${table}u+(e.x|(e.y<<6u)|(e.z<<12u))];}
-fn umBlockWord(b:u32)->u32{return ${name}[${table+UNIFORM_PAGE_TABLE_WORDS}u+b];}
+${uniformWindowAddressWGSL(`${name}`,`${table}u`,`${keys/512}u`)}
 ${uniformLatticeAddressWGSL({constant:true,paged})}`;
 }
 
@@ -99,6 +100,7 @@ export function uniformSolidBedSlopeAt(lane:Uint32Array,index:number):[x:number,
 }
 
 export interface UniformMixedSolidResources {
+ analyticTerrain?:GPUBuffer;
  params:GPUBuffer;
  /** SolidOccupancyMask's image: the page directory, the tile cut map (a
   * word a tile key, all cut as the host uploads it; the record build
@@ -160,6 +162,8 @@ export class UniformMixedSolid {
  readonly coupledTiles:number;
  private readonly bodySource:GPUBuffer;
  private readonly bodies:GPUBuffer;
+ private readonly analyticTerrain:GPUBuffer;
+ private readonly ownsAnalyticTerrain:boolean;
  /** The all-4h record for band pressure (constructed with its all-4h layout). */
  readonly coarse?:UniformMixedSolidCoarse;
  /** build and the cut flags over the tile keys (in full, bodies-only), and
@@ -191,6 +195,8 @@ export class UniformMixedSolid {
   if(!Number.isSafeInteger(resources.coupledTiles)||resources.coupledTiles<0)throw new Error("Mixed solids require the host's coupled tile count");
   this.coupledTiles=resources.coupledTiles;this.maxGroups=device.limits.maxComputeWorkgroupsPerDimension;
   this.params=resources.params;
+  this.ownsAnalyticTerrain=!resources.analyticTerrain;
+  this.analyticTerrain=resources.analyticTerrain??device.createBuffer({label:"Inactive analytic terrain",size:UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES,usage:GPUBufferUsage.UNIFORM});
   if(coarseLayout&&!resources.paramsWritten)throw new Error("The coarse solid record requires the host's parameter-block write receipt");
   this.paramsWritten=resources.paramsWritten;
   this.bodySource=resources.bodies;
@@ -201,10 +207,11 @@ export class UniformMixedSolid {
    {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
    {binding:2,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"2d"}},
    {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
+   {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
   ];
   const resourcesOf=():GPUBindGroupEntry[]=>[
    {binding:0,resource:{buffer:resources.params,size:272}},{binding:1,resource:{buffer:resources.scratch}},
-   {binding:2,resource:resources.terrain.createView()},{binding:4,resource:{buffer:bodies}},
+   {binding:2,resource:resources.terrain.createView()},{binding:4,resource:{buffer:bodies}},{binding:5,resource:{buffer:this.analyticTerrain}},
   ];
   this.bindLayout=device.createBindGroupLayout({label:"Uniform mixed static solids",entries});
   this.bindGroup=device.createBindGroup({layout:this.bindLayout,entries:resourcesOf()});
@@ -237,7 +244,7 @@ export class UniformMixedSolid {
  present=true;
  /** Select the pipeline built during setup. Solids are a uniform flag. */
  select(pipeline:GPUComputePipeline):GPUComputePipeline{return uniformDetailPick(pipeline);}
- get allocatedBytes():number{return (this.coarse?.record.size??0)+this.bodies.size+(this.builtBodies?.size??0);}
+ get allocatedBytes():number{return (this.coarse?.record.size??0)+this.bodies.size+(this.builtBodies?.size??0)+(this.ownsAnalyticTerrain?this.analyticTerrain.size:0);}
  /** Mirror the rigid state into the library: at a frame's head, and after
   * the rigid integration for the census that follows it. */
  encodeBodies(encoder:GPUCommandEncoder):void{encoder.copyBufferToBuffer(this.bodySource,0,this.bodies,0,12*128);}
@@ -469,7 +476,7 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
   }
   pass.dispatchWorkgroups(x,ceilDiv(groups,x));pass.end();
  }
- destroy():void{this.coarse?.record.destroy();this.bodies.destroy();this.builtBodies?.destroy();}
+ destroy():void{this.coarse?.record.destroy();this.bodies.destroy();this.builtBodies?.destroy();if(this.ownsAnalyticTerrain)this.analyticTerrain.destroy();}
 }
 
 /** Build a stage pipeline during setup; all solid reads use the scene uniform. */
@@ -542,6 +549,9 @@ fn umSolidDimensions()->vec3u{return vec3u(umSolidParams.dimsDt.xyz);}
 fn umSolidBoxCell()->vec3i{return vec3i(umSolidParams.tuning.xyz);}
 @group(${group}) @binding(1) var<storage,${writable?"read_write":"read"}> umSolidScratch:array<u32>;
 @group(${group}) @binding(2) var umSolidTerrain:texture_2d<f32>;
+struct UMAnalyticTerrain{frame:vec4f,ground:vec4f,features:array<vec4f,${(UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES-32)/16}>}
+@group(${group}) @binding(5) var<uniform> umAnalyticTerrain:UMAnalyticTerrain;
+${uniformOpenWorldTerrainSampleWGSL("umAnalyticTerrain")}
 struct UMRigidBody {
  positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVelocity:vec4f,
  angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f,
@@ -609,7 +619,7 @@ fn umPatchFaceV(t:u32,id:vec3i,axis:u32)->f32{
 // the page of cell p, whatever page of the window that is and whether or not
 // a block stores it, and umSolidVoxel(p), its bit. A page the lattice walls
 // off (the page table's SOLID) reads solid throughout.
-${solidOccupancyMaskWGSL("umSolidScratch","umSolidPage","umSolidVoxel")}
+${solidOccupancyMaskWGSL("umSolidScratch","umSolidPage","umSolidVoxel",true)}
 // The cell is not in a page the lattice walls off: one directory word.
 fn umSolidValid(p:vec3i)->bool{return umSolidPage(p)!=${SOLID_MASK_WALL}u;}
 // The bed-slope lane, after the directory and by cell of the box and its
@@ -634,18 +644,25 @@ fn umSolidHasTerrain()->bool{return umSolidParams.frame.w>0.5;}
 // window's in an open world (UniformOpenWorldTerrain), whose ground runs on
 // past the box. A read past the texture takes its edge column.
 fn umSolidTerrainHigh()->vec2f{return vec2f(textureDimensions(umSolidTerrain))-vec2f(1);}
-fn umSolidTerrainHeight(x:i32,z:i32)->f32{let d=vec2i(textureDimensions(umSolidTerrain));return textureLoad(umSolidTerrain,vec2i(clamp(x,0,d.x-1),clamp(z,0,d.y-1)),0).x;}
+fn umSolidTerrainHeight(x:i32,z:i32)->f32{
+ let d=vec2i(textureDimensions(umSolidTerrain));let f=32*umFramePage();let world=vec2i(x,z)+f.xz;
+ if(umAnalyticTerrain.ground.w>0.5&&(any(world<vec2i(0))||any(world>=d))){
+  let at=umAnalyticTerrain.frame.xy+(vec2f(world)+0.5)*umAnalyticTerrain.frame.zw;
+  return owHeight(at.x,at.y)-f32(f.y);
+ }
+ return textureLoad(umSolidTerrain,clamp(world,vec2i(0),d-1),0).x-f32(f.y);
+}
 ${geometricPlaneBoxWGSL.replaceAll("geometric", "umTerrain")}
 ${uniformSolidBoundaryWGSL}
 // One continuous height and normal for contact and pressure geometry.
 fn umTerrainSurface(q:vec3f)->vec3f{
- let high=umSolidTerrainHigh();
- let p=clamp(q.xz-vec2f(0.5),vec2f(0),high);let a=vec2i(floor(p));let f=fract(p);
- let h00=umSolidTerrainHeight(a.x,a.y);let h10=umSolidTerrainHeight(a.x+1,a.y);
- let h01=umSolidTerrainHeight(a.x,a.y+1);let h11=umSolidTerrainHeight(a.x+1,a.y+1);
+ let offset=32.0*vec2f(umFramePage().xz);let high=umSolidTerrainHigh()-offset;
+ let p=select(clamp(q.xz-vec2f(0.5),-offset,high),q.xz-vec2f(0.5),umAnalyticTerrain.ground.w>0.5);let a=vec2i(floor(p));let f=fract(p);
+ var heights:array<f32,4>;for(var k=0u;k<4u;k++){heights[k]=umSolidTerrainHeight(a.x+i32(k&1u),a.y+i32(k>>1u));}
+ let h00=heights[0];let h10=heights[1];let h01=heights[2];let h11=heights[3];
  let height=mix(mix(h00,h10,f.x),mix(h01,h11,f.x),f.y);
  let slope=vec2f(mix(h10-h00,h11-h01,f.y),mix(h01-h00,h11-h10,f.x));
- let interior=(q.xz>=vec2f(0.5))&(q.xz<=high+vec2f(0.5));
+ let interior=((q.xz>=vec2f(0.5)-offset)&(q.xz<=high+vec2f(0.5)))|vec2<bool>(umAnalyticTerrain.ground.w>0.5);
  return vec3f(height,select(vec2f(0),slope,interior));
 }
 // Integrate four local planes. Exact on a planar heightfield; subdivision

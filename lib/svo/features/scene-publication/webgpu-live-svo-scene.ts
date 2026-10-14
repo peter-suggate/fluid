@@ -28,6 +28,7 @@ export const liveSvoSceneResourcePlugin: ResourcePluginDefinition = Object.freez
   blocks: "nothing",
   phaseCopy: {
     allocation: "Allocating fixed live-scene arenas.",
+    warmup: "Voxelizing scenery in bounded GPU batches before publication.",
   },
 });
 
@@ -113,15 +114,15 @@ function liveSvoSceneSolidReach(scene: SceneDescription): readonly SparseSceneSo
 const LIVE_SVO_SOLID_REACH_STAGE = "Resolve the scene's exact solids" as const;
 
 /**
- * Solid reach, the world's planning stages, then shader compilation.
+ * Solid reach, the world's planning stages, shader compilation and publication.
  *
  * Derived from the world's declared list rather than written beside it, so a
  * stage added there widens this bar instead of silently overflowing it.
  */
-const LIVE_SVO_BUILD_STAGE_COUNT = OCTREE_SPARSE_BRICK_WORLD_STAGES.length + 2;
+const LIVE_SVO_BUILD_STAGE_COUNT = OCTREE_SPARSE_BRICK_WORLD_STAGES.length + 3;
 
 export type LiveSvoSceneProgress = (progress: {
-  phase: "allocation";
+  phase: "allocation" | "warmup";
   taskId: string;
   label: string;
   completed: number;
@@ -375,8 +376,8 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
        * The build used to report `completed: 0` and then `completed: 1` with
        * everything expensive in between, which on a refined scene is minutes of
        * a bar that does not move. The stages are the world's own declared list
-       * plus the two this layer owns — the solid reach that precedes it and the
-       * shader compilation that follows — and they are reported as *started*,
+       * plus solid reach, shader compilation and initial publication. They
+       * are reported as *started*,
        * so the label always names work in flight.
        *
        * The rung is part of the label rather than the count. A ladder that
@@ -419,11 +420,18 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
           phase: "allocation",
           taskId: "live-svo.allocate",
           label: `Compile live scene programs${rung}`,
-          completed: total - 1,
+          completed: total - 2,
           total,
         });
         await source.world.initializePipelines();
         if (signal?.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
+        await source.world.initializeScenePublication(signal, (completed, chunks) => progress({
+          phase: "warmup",
+          taskId: "live-svo.publish",
+          label: `Voxelizing scenery${rung} · ${completed} / ${chunks} batches`,
+          completed: total - 1,
+          total,
+        }));
       } catch (error) {
         // Whatever was allocated before the throw is released before the next
         // rung, or a three-step ladder would hold four worlds at once.

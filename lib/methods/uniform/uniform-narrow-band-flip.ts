@@ -1,3 +1,4 @@
+import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { narrowBandSeedShellWGSL } from "./uniform-narrow-band-seed.wgsl";
 import { uniformMixedExtensionSnapshotWGSL } from "./uniform-mixed-extension-slots.wgsl";
 import { narrowBandActivityWGSL, NARROW_BAND_ACTIVITY_WORDS_PER_TILE } from "./uniform-narrow-band-activity.wgsl";
@@ -97,7 +98,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  get particleSource():GPUFluidParticleSource{
   const h=this.ownership.capacity.lattice.cellSize_m;
   return {buffer:this.activeParticles,strideFloats:12,capacity:this.capacity,positionScale_m:[h[0]!,h[1]!,h[2]!],
-   radius_m:0.22*Math.min(...h),liveCount:{buffer:this.state,byteOffset:0},
+   frame:{buffer:this.sourceParams,size:48},radius_m:0.22*Math.min(...h),liveCount:{buffer:this.state,byteOffset:0},
    grid:{velocityFloat:8,depthFloat:7,ballisticFloat:11,surfaceDepth:2}};
  }
  private readonly bins:GPUBuffer;
@@ -151,7 +152,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.capacity=Math.min(cells*8,Math.max(2_097_152,cells),Math.floor(device.limits.maxStorageBufferBindingSize/48));
   const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.particles=[buffer("particles A",this.capacity*48),buffer("particles B",this.capacity*48)];
-  this.state=buffer("receipt",48);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+address.tileKeys*(36+4*NARROW_BAND_ACTIVITY_WORDS_PER_TILE)+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*32);this.params=buffer("parameters",48,true);
+  this.state=buffer("receipt and particle frame",64);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+address.tileKeys*(36+4*NARROW_BAND_ACTIVITY_WORDS_PER_TILE)+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*32);this.params=buffer("parameters",48,true);
   this.order=new UniformNarrowBandOrder(device,address,ownership.presentation.buffer,this.particles,this.bins,this.next,this.state);
   this.refinementParams=buffer("refinement prediction",48,true);device.queue.writeBuffer(this.refinementParams,32,new Uint32Array([address.blocks,0,0,0]));
   const size=uniformCoarseCacheExtent(address);
@@ -237,8 +238,7 @@ struct Params{dimsDt:vec4f,h:vec4f,blocks:vec4u}
 @group(0) @binding(5) var<storage,read> nbRefineTopology:array<u32>;
 fn nbRefineCells()->vec3u{return vec3u(p.dimsDt.xyz);}
 fn nbRefineTiles()->u32{return 512u*p.blocks.x;}
-fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return nbRefineTopology[5u*nbRefineTiles()+(e.x|(e.y<<6u)|(e.z<<12u))];}
-fn umBlockWord(b:u32)->u32{return nbRefineTopology[5u*nbRefineTiles()+${UNIFORM_PAGE_TABLE_WORDS}u+b];}
+${uniformWindowAddressWGSL("nbRefineTopology","5u*nbRefineTiles()","p.blocks.x")}
 ${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"p.blocks.x"}})}
 // The swept tiles of a sample, and its own tile's key.
 struct Box{low:vec3i,high:vec3i,home:u32}
@@ -470,6 +470,8 @@ var<workgroup> nbMarkedPopulation:u32;
 ${narrowBandTraceWGSL("sampleVelocity")}
 fn nbAdvect(i:u32){
   var p=source[i];var q=p.position.xyz;
+  let held=bitcast<vec3i>(vec3u(atomicLoad(&state[12u]),atomicLoad(&state[13u]),atomicLoad(&state[14u])));
+  q-=32.0*vec3f(umFramePage()-held);
   // Solid collision, rather than grid ownership, limits particle motion.
   if(nbParticleBlocked(q)){source[i].position.x=-1.0;return;}
   let ballistic=p.before.w==1.0||!gridSupported(q);p.before.w=max(p.before.w,select(0.0,1.0,ballistic));
@@ -849,7 +851,7 @@ fn nbUpdate(i:u32){
  }
  atomicMax(&state[4],bitcast<u32>(outside));
 }
-@compute @workgroup_size(64) fn commitCount(@builtin(global_invocation_id) gid:vec3u){if(gid.x==0u){let n=min(atomicLoad(&state[1]),arrayLength(&particles));atomicStore(&state[0],n);atomicStore(&state[1],n);}}
+@compute @workgroup_size(64) fn commitCount(@builtin(global_invocation_id) gid:vec3u){if(gid.x==0u){let n=min(atomicLoad(&state[1]),arrayLength(&particles));atomicStore(&state[0],n);atomicStore(&state[1],n);let f=bitcast<vec3u>(umFramePage());for(var a=0u;a<3u;a++){atomicStore(&state[12u+a],f[a]);}}}
 ${narrowBandSurfaceWGSL}
 
 `,["resampleCount"],"(min(atomicLoad(&state[0]),arrayLength(&source))+63u)/64u");

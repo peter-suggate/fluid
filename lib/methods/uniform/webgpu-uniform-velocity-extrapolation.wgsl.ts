@@ -1,3 +1,4 @@
+import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockNeighbourLayout } from "./uniform-lattice-address";
 
 /** Sweeps of the 32h level over the pool's blocks (mixedSweepBlocks). A
@@ -40,6 +41,7 @@ const BLOCK_BITS:u32=${blockBits}u;
 const RECORDS:u32=${UNIFORM_PAGE_TABLE_WORDS}u;
 const ROWS:u32=${uniformBlockNeighbourLayout(blocks).rows}u;
 const FREE:u32=0xffffffffu;
+${uniformWindowAddressWGSL("pagePool","0u","BLOCKS")}
 
 fn blockStored(b:u32)->bool{return b-1u<BLOCKS-2u;}
 
@@ -75,7 +77,7 @@ struct LevelCell { held: bool, block: u32, page: vec3i, local: vec3i, edge: i32 
 // 64 cells a workgroup in block order; edge is the level's cells a block axis.
 fn levelCell(group:u32,cell:u32,edge:u32)->LevelCell{
   let k=firstTrailingBit(edge);let n=64u*group+cell;let b=n>>(3u*k);let l=n&((1u<<(3u*k))-1u);
-  let record=pagePool[RECORDS+min(b,BLOCKS-1u)];
+  let record=umBlockWord(min(b,BLOCKS-1u));
   return LevelCell(blockStored(b)&&record!=FREE,b,vec3i(vec3u(record&63u,(record>>6u)&63u,(record>>12u)&63u)),
     vec3i(vec3u(l&(edge-1u),(l>>k)&(edge-1u),l>>(2u*k))),i32(edge));
 }
