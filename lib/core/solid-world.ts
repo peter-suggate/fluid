@@ -985,7 +985,8 @@ export function solidWorldForFluidLattice(scene: SceneDescription): SolidWorld {
   const world = solidWorldForScene(scene);
   const cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   const lattice = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
-  const padding = solidVoxelPaddingForLattice(cells, lattice, scene.container.top);
+  // A container without walls pads nothing: past its high faces is the open world's air.
+  const padding = scene.container.walls === "none" ? [] : solidVoxelPaddingForLattice(cells, lattice, scene.container.top);
   if (padding.length === 0) return world;
   const key = `${cells.join(":")}:${lattice.join(":")}:${scene.container.top}`, held = fluidLatticeSolidWorlds.get(world);
   if (held?.key === key) return held.world;
@@ -1135,16 +1136,19 @@ export function sphericalSolidVoxelShell(
 export function sampleSolidWorld(
   world: SolidWorld,
   coordinate: SolidWorldCoordinate,
+  separateTerrain = false,
 ): { readonly solidFraction: number; readonly signedDistance_cells: number;
   readonly materialId: number } {
   const address = solidWorldPageAddress(coordinate);
   const pageIndex = world.directory.lookup(address.page);
-  const page = pageIndex === undefined ? undefined : world.pages[pageIndex]!;
+  let page = pageIndex === undefined ? undefined : world.pages[pageIndex]!;
+  if (separateTerrain && world.ground && page
+    && (!page.authored || !(page.authored[address.localIndex >>> 3]! & (1 << (address.localIndex & 7))))) page = undefined;
   let solidFraction = page?.solidFraction[address.localIndex] ?? 0;
   let signedDistanceQ8 = page?.signedDistanceQ8[address.localIndex] ?? 0x7fff;
   let materialId = page?.materialId[address.localIndex] ?? 0;
   let held = page !== undefined;
-  const ground = held ? undefined : world.ground;
+  const ground = held || separateTerrain ? undefined : world.ground;
   if (ground) {
     const x = coordinate[0], y = coordinate[1], z = coordinate[2];
     solidFraction = ground.fraction(x, y, z);

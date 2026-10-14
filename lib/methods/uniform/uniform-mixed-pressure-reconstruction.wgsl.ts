@@ -57,13 +57,13 @@ fn umPressureFaceCorrection(owner:UMOwner,face:UMFace)->f32 {
  if(face.neighbor.width==0u){return 0.0;}
 ${surface ? " if(umPressureLiquid(owner)!=umPressureLiquid(face.neighbor)){return umPressureGhostCorrection(owner,face);}" : ""}
  var correction=0.0;
- var offset=vec3f(0.0);
- if(owner.width>face.neighbor.width){
-  offset=(umFaceCenter(face)-vec3f(umOrigin(owner))-vec3f(0.5*f32(owner.width)))*UM_H;
-  offset[face.axis]=0.0;correction=-dot(umPressureSlope(owner),offset);
- }else if(owner.width<face.neighbor.width){
-  offset=(umFaceCenter(face)-vec3f(umOrigin(face.neighbor))-vec3f(0.5*f32(face.neighbor.width)))*UM_H;
-  offset[face.axis]=0.0;correction=dot(umPressureSlope(face.neighbor),offset);
+ if(owner.width!=face.neighbor.width){
+  // The coarser side owns the slope. One call site avoids duplicating its
+  // nested neighbour reconstruction in the native compiler.
+  var coarse=owner;if(owner.width<face.neighbor.width){coarse=face.neighbor;}
+  var offset=(umFaceCenter(face)-vec3f(umOrigin(coarse))-vec3f(0.5*f32(coarse.width)))*UM_H;
+  offset[face.axis]=0.0;correction=dot(umPressureSlope(coarse),offset);
+  if(owner.width>face.neighbor.width){correction=-correction;}
  }
  return f32(face.sign)*correction/(0.5*f32(owner.width+face.neighbor.width)*UM_H[face.axis]);
 }

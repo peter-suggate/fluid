@@ -1,3 +1,4 @@
+import { narrowBandSeedShellWGSL } from "./uniform-narrow-band-seed.wgsl";
 import { uniformMixedExtensionSnapshotWGSL } from "./uniform-mixed-extension-slots.wgsl";
 import { narrowBandActivityWGSL, NARROW_BAND_ACTIVITY_WORDS_PER_TILE } from "./uniform-narrow-band-activity.wgsl";
 import { narrowBandRedistanceWGSL } from "./uniform-narrow-band-redistance.wgsl";
@@ -5,6 +6,7 @@ import { narrowBandMembershipWGSL } from "./uniform-narrow-band-membership.wgsl"
 import { narrowBandNearestEntries } from "./uniform-narrow-band-nearest.wgsl";
 import { NARROW_BAND_TRACE_LIMIT, narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
 import { narrowBandNearWGSL } from "./uniform-narrow-band-near.wgsl";
+import { narrowBandTerrainContactWGSL } from "./uniform-particle-contact.wgsl";
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
 import { NARROW_BAND_PARTICLE_GRID, UniformNarrowBandOrder } from "./uniform-narrow-band-order";
 import { NARROW_BAND_SURFACE_RADIUS, narrowBandSurfaceWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
@@ -346,6 +348,7 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
 }
 ${uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",undefined,unitTaps?"unitVelocity":undefined,slots?"ueSnapshotUnit":undefined)}
 ${uniformMixedSolidWGSL(2,this.solid.coarse?.count)}
+${narrowBandTerrainContactWGSL}
 ${uniformMixedSourceWGSL(16)}
 fn sampleVelocity(p:vec3f)->vec3f{
  return umSampleVelocity(p);
@@ -468,7 +471,7 @@ ${narrowBandTraceWGSL("sampleVelocity")}
 fn nbAdvect(i:u32){
   var p=source[i];var q=p.position.xyz;
   // Solid collision, rather than grid ownership, limits particle motion.
-  if(umCellOpen(vec3i(q))<0.5){source[i].position.x=-1.0;return;}
+  if(nbParticleBlocked(q)){source[i].position.x=-1.0;return;}
   let ballistic=p.before.w==1.0||!gridSupported(q);p.before.w=max(p.before.w,select(0.0,1.0,ballistic));
   // A sample takes erasure heat (over 1) at the step's end (update), with its
   // tile's new collar seeded: a collar tile the census triggered eroded the
@@ -508,13 +511,24 @@ fn nbAdvect(i:u32){
    // gains nothing along an axis a wall has stopped, so it rests in a corner.
    let stride=travel/f32(walk);var landed=false;var floorCell=vec3i(0);var free=vec3f(1);
    for(var j=1u;j<=walk;j++){
+    let start=q;
     for(var axis=0u;axis<3u;axis++){
      var point=q;point[axis]+=stride[axis];
-     if(umCellOpen(vec3i(point))<0.5){
+     let blocked=select(umCellOpen(vec3i(point))<0.5,
+      nbVoxelBlocked(point)||umBodyAt(umSolidTraceWorld(point))>=0,umSolidHasTerrain()||umBoundaryRecord(vec3i(floor(point)))!=0u);
+     if(blocked){
       let cell=floor(q[axis]);point[axis]=select(cell+0.01,cell+0.99,stride[axis]>0.0);
       if(axis==1u&&stride.y<0.0){landed=true;floorCell=vec3i(q);}else{p.velocity[axis]=0.0;free[axis]=0.0;}
      }
      q=point;
+    }
+    let boundaryContact=nbProceduralContact(start,q,p.velocity.xyz);
+    if(!nbVoxelBlocked(boundaryContact.position)&&umBodyAt(umSolidTraceWorld(boundaryContact.position))<0){q=boundaryContact.position;p.velocity=vec4f(boundaryContact.velocity*free,p.velocity.w);}
+    if(umSolidHasTerrain()){
+     let contact=nbTerrainContact(start,q,p.velocity.xyz);
+     // A normal correction must not cross an authored voxel or a body.
+     if(!nbVoxelBlocked(contact.position)&&umBodyAt(umSolidTraceWorld(contact.position))<0){q=contact.position;}
+     p.velocity=vec4f(contact.velocity*free,p.velocity.w);
     }
    }
    if(landed){
@@ -623,37 +637,10 @@ ${subgroups?/* wgsl */`
 // Fit the outer lattice to the sphere reconstruction's nodal interface.
 // Keep tangential quarter-cell positions: their known offset determines the
 // seed depth and preserves a resting plane without any volume correction.
-// The depth's slope along one axis over a cell, from the side that is open
-// where a wall is half a cell off: the metric inside a solid is not the
-// liquid's, and a slope through it leans the shell off every stepped wall.
-// Each axis's two sides are one loop and the gradient one loop over the
-// axes: Metal inlines every call, and the depth read written once is
-// compiled once.
-fn seedSlope(q:vec3f,d:f32,axis:u32)->f32{
- var e=vec3f(0);e[axis]=0.5;
- var open=array<bool,2>(false,false);var depth=array<f32,2>(d,d);
- for(var s=0u;s<2u;s++){
-  let x=q+select(-e,e,s==1u);open[s]=umCellOpen(vec3i(floor(x)))>=0.5;
-  if(open[s]){depth[s]=particleDepth(x);}
- }
- let span=select(2.0,1.0,open[0]&&open[1]);
- return select(0.0,span*(depth[1]-depth[0]),open[0]||open[1]);
-}
-fn seedShell(lattice:vec3f)->vec4f{
- var q=lattice;var d=particleDepth(q);
- for(var i=0u;i<4u;i++){
-  let rise=d+NB_SEED_DEPTH;if(rise<=1e-3){break;}
-  var g=vec3f(0);for(var a=0u;a<3u;a++){g[a]=seedSlope(q,d,a);}
-  let g2=dot(g,g);if(g2<1e-8){break;}
-  let next=nbPointNearIn(vec3i(floor(q)),q-min(rise,0.5)*g*inverseSqrt(g2),0.01);
-  let depth=particleDepth(next);if(depth>=d){break;}
-  q=next;d=depth;
- }
- return vec4f(q,d);
-}
+${narrowBandSeedShellWGSL}
 fn seedSite(c:vec3u,k:u32,initial:bool,activated:bool)->vec4f{
   let q=vec3f(c)+0.25+0.5*vec3f(umCorner(k,2u));let distance=particleDepth(q);
-  if(distance>0.0||distance < -4.0){return vec4f(-1,0,0,0);}
+  if(distance>0.0||distance < -4.0||nbParticleBlocked(q)){return vec4f(-1,0,0,0);}
   // Paper Section 3.3: replenish only the inner [-R,-h] band. The outer
   // layer keeps its transported samples instead of being recreated; a change
   // of ownership or an uncovered tile cannot bootstrap one from the bulk
@@ -664,8 +651,8 @@ fn seedSite(c:vec3u,k:u32,initial:bool,activated:bool)->vec4f{
   // liquid. Its outer shell only seeds on resolved fine owners.
   if(distance>-1.0&&umOwnerAt(vec3i(c)).width!=1u){return vec4f(-1,0,0,0);}
   if(distance<=-NB_SURFACE_RADIUS){return vec4f(q,distance);}
-  let shell=seedShell(q);let p=shell.xyz;
-  if(shell.w>0.0||umCellOpen(vec3i(p))<0.5){return vec4f(-1,0,0,0);}
+  let shell=seedShell(q,distance);let p=shell.xyz;
+  if(shell.w>0.0||nbParticleBlocked(p)){return vec4f(-1,0,0,0);}
   // A sample fitted into a page with no storage is the arrival fatal, and is not made.
   if(!umPointPresent(p)){nbArrived(p);return vec4f(-1,0,0,0);}
   // A shell sample can land in another cell, whose own seeding decision
@@ -678,7 +665,7 @@ fn seedCell(c:vec3u,initial:bool){
  if((nbBandReach(c)&1u)==0u){return;}
  let heat=nbTargetHeat(vec3f(c)+0.5);if(heat<=0.0){return;}
  let count=atomicLoad(&bins[umCellAt(c)]);if(count>=8u){return;}
- if(umCellOpen(vec3i(c))<0.5){return;}
+ if(!nbParticleCellOpen(vec3i(c))){return;}
  let d=particleDepth(vec3f(c)+0.5);if(d>0.9||d < -4.5){return;}
  let activated=atomicLoad(&bins[NB_ACTIVITY_NEW+nbBandTile(c)])!=0u;
  var seeds:array<vec4f,8>;var seedCount=0u;
@@ -716,7 +703,7 @@ fn nbSourceCell(c:vec3u)->bool{return nbSourcePhi(vec3f(c)+0.5,1.0)<1.0;}
  let c=nbSeedCell(group,lane);
  if((nbBandReach(c)&1u)==0u){return;}
  let heat=nbTargetHeat(vec3f(c)+0.5);if(heat<=0.0){return;}
- if(atomicLoad(&bins[umCellAt(c)])>=8u||umCellOpen(vec3i(c))<0.5){return;}
+ if(atomicLoad(&bins[umCellAt(c)])>=8u||!nbParticleCellOpen(vec3i(c))){return;}
  let depth=particleDepth(vec3f(c)+0.5);if(depth>0.9||depth < -4.5){return;}
  let slot=atomicAdd(&bins[NB_BAND+3u],1u);
  links[slot]=umCellAt(c)|select(0u,0x80000000u,nbSourceCell(c));

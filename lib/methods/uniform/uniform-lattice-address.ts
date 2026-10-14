@@ -694,6 +694,22 @@ export interface UniformPagePoolScene {
   readonly permute?: number;
   /** Box pages seeded AIR, by box page coordinate; every other box page is resident. */
   readonly air?: readonly (readonly [number, number, number])[];
+  /** Instead of blocks: the memory budget the pool is sized from (uniformPagePoolBlocksForMemory). */
+  readonly memory_MiB?: number;
+}
+
+/** What a block of the pool costs, all fields and tables a page takes
+ * counted: the slope of the solver's allocation over its blocks, measured
+ * on the water slide (40 to 80 blocks: 592 to 979 MiB, 9.7 MiB a block) and
+ * rounded up. */
+export const UNIFORM_PAGE_BLOCK_MiB = 10;
+/** The budget of an open world that names none. */
+export const UNIFORM_OPEN_WORLD_MEMORY_MiB = 1024;
+/** The blocks a memory budget buys, the two that hold no page among them. */
+export function uniformPagePoolBlocksForMemory(memory_MiB: number): number {
+  const blocks = Math.floor(memory_MiB / UNIFORM_PAGE_BLOCK_MiB);
+  if (!(blocks >= 3)) throw new RangeError(`A page pool budget of ${memory_MiB} MiB buys ${blocks} blocks at ${UNIFORM_PAGE_BLOCK_MiB} MiB a block: a pool needs three`);
+  return blocks;
 }
 
 /** Host-side addressing of the lattice: the box, the page pool's seed, key
@@ -736,6 +752,12 @@ export interface UniformLatticeAddress extends UniformLatticeBox {
   readonly poolTiles: number;
   /** The column of pages above the box's top is AIR (SOLID otherwise, as every other page outside the box). */
   readonly openTop: boolean;
+  /** The box's low corner in the window, in pages (pool.box.origin). Every
+   * host form above takes and gives box coordinates: the box's low cell is
+   * (0,0,0) to the host, and lattice cell 32 boxPage to every shader. */
+  readonly boxPage: Extent;
+  /** An open world: outside the box every page above the floor is AIR, and below it SOLID. */
+  readonly world: boolean;
 }
 
 /** Window pages below the frame's floor: the entries a coordinate below the
@@ -743,7 +765,13 @@ export interface UniformLatticeAddress extends UniformLatticeBox {
 export const UNIFORM_FRAME_FLOOR_PAGES = 8;
 
 /** The frame is the page table's window: pages 0..63 an axis, the box's
- * low corner at page 0. Outside the box every entry is SOLID, except under
+ * low corner at page 0 (at `world.boxPage` in an open world). In an open
+ * world every entry outside the box is AIR, but for the
+ * UNIFORM_FRAME_FLOOR_PAGES below the floor, which are SOLID: the ground is
+ * the plane y = 0, and liquid spreads over it on every side until it reaches
+ * the window's edge (the page pool's edge fatal) or the pool runs out of
+ * blocks (its exhausted fatal), the pool sized from a memory budget.
+ * Otherwise every entry outside the box is SOLID, except under
  * an open top (openTop): there the column of entries above the box's top is
  * AIR, up to the UNIFORM_FRAME_FLOOR_PAGES the window keeps SOLID below the
  * floor. A splash claims pages above the walls' height between walls that
@@ -754,8 +782,15 @@ export const UNIFORM_FRAME_FLOOR_PAGES = 8;
  * (UNIFORM_MIXED_ROOT_UNREACHED). The pool's default then holds a block more
  * for each page of the layer above the box, which the residency closure
  * asks for when the liquid nears the top. */
-export function uniformLatticeAddress(cells: readonly number[], openTop = false, scene: UniformPagePoolScene = {}): UniformLatticeAddress {
-  const box = uniformLatticeBox(cells), [px, py, pz] = box.pages, blocks = scene.blocks ?? px * py * pz + 2 + (openTop ? px * pz : 0);
+export function uniformLatticeAddress(cells: readonly number[], openTop = false, scene: UniformPagePoolScene = {}, world?: { readonly boxPage: readonly number[] }): UniformLatticeAddress {
+  const box = uniformLatticeBox(cells), [px, py, pz] = box.pages;
+  if (world && !openTop) throw new RangeError("Uniform lattice: an open world has an open top");
+  const boxPage: Extent = world ? [world.boxPage[0]!, world.boxPage[1]!, world.boxPage[2]!] : [0, 0, 0];
+  // Every page the box covers lies in the window above its floor, and no coordinate of a box page wraps.
+  if (boxPage.some((o, axis) => !Number.isSafeInteger(o) || o < 0 || o + box.pages[axis]! > UNIFORM_PAGE_WINDOW - (axis === 1 ? UNIFORM_FRAME_FLOOR_PAGES : 1)))
+    throw new RangeError(`Uniform lattice: a box of ${box.pages.join("x")} pages at page ${boxPage.join(",")} does not lie inside the window`);
+  const blocks = scene.blocks ?? (scene.memory_MiB !== undefined ? uniformPagePoolBlocksForMemory(scene.memory_MiB)
+    : world ? uniformPagePoolBlocksForMemory(UNIFORM_OPEN_WORLD_MEMORY_MiB) : px * py * pz + 2 + (openTop ? px * pz : 0));
   const blockBits = Math.min(Math.floor(blocks / 8), 1) + Math.min(Math.floor(blocks / 64), 1) + Math.min(Math.floor(blocks / 512), 1);
   const blockGrid: Extent = [1 << blockBits, 1 << blockBits, Math.ceil(blocks / 4 ** blockBits)];
   // 33 texels of a vertex texture per block: 62 blocks stay inside a 2048-texel 3D texture.
@@ -764,10 +799,12 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
     if (!(Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(z) && x >= 0 && y >= 0 && z >= 0 && x < px && y < py && z < pz)) throw new RangeError(`Uniform page pool: AIR page (${x}, ${y}, ${z}) is outside the box of ${px}x${py}x${pz} pages`);
     return x + px * (y + py * z);
   }));
-  const pool = { table: UNIFORM_PAGE_WINDOW, blocks, idleSteps: 8, box: { origin: [0, 0, 0] as Extent, pages: box.pages } };
+  const pool = { table: UNIFORM_PAGE_WINDOW, blocks, idleSteps: 8, box: { origin: boxPage, pages: box.pages } };
+  const floor = UNIFORM_PAGE_WINDOW - UNIFORM_FRAME_FLOOR_PAGES;
   const seed = uniformPagePoolBoxSeed(uniformPagePoolLayout(pool), {
     permute: scene.permute, resident: (x, y, z) => !air.has(x + px * (y + py * z)),
-    outside: (x, y, z) => openTop && x < px && z < pz && y >= py && y < UNIFORM_PAGE_WINDOW - UNIFORM_FRAME_FLOOR_PAGES ? UNIFORM_KIND.air : UNIFORM_KIND.solid,
+    outside: (x, y, z) => world ? (y < floor ? UNIFORM_KIND.air : UNIFORM_KIND.solid)
+      : openTop && x < px && z < pz && y >= py && y < floor ? UNIFORM_KIND.air : UNIFORM_KIND.solid,
   });
   let liveTiles = 0;
   for (let b = 1; b < blocks - 1; b++) {
@@ -779,12 +816,16 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
     cellTexture: [32 * blockGrid[0], 32 * blockGrid[1], 32 * blockGrid[2]], vertexTexture: [33 * blockGrid[0], 33 * blockGrid[1], 33 * blockGrid[2]],
     tileTexture: [8 * blockGrid[0], 8 * blockGrid[1], 8 * blockGrid[2]], faceBaseTexture: [8 * blockGrid[0], 8 * blockGrid[1], 32 * blockGrid[2]],
     wideVertexTexture: [9 * blockGrid[0], 9 * blockGrid[1], 9 * blockGrid[2]], lowFaceKeys: 3072 * blocks,
-    blocks, blockBits, blockGrid, pool, seed, liveTiles, poolTiles: 512 * Math.min(px * py * pz + (openTop ? px * pz * (UNIFORM_PAGE_WINDOW - UNIFORM_FRAME_FLOOR_PAGES - py) : 0), blocks - 2), openTop,
+    blocks, blockBits, blockGrid, pool, seed, liveTiles,
+    poolTiles: 512 * (world ? blocks - 2 : Math.min(px * py * pz + (openTop ? px * pz * (floor - py) : 0), blocks - 2)), openTop, boxPage, world: !!world,
   };
 }
 
 /** A page's table word (umPageWord): its block, 0 (AIR) or 0xffffffff (SOLID). */
-export function uniformPageWord(a: UniformLatticeAddress, x: number, y: number, z: number): number { return a.seed.table[(x & 63) | ((y & 63) << 6) | ((z & 63) << 12)]!; }
+export function uniformPageWord(a: UniformLatticeAddress, x: number, y: number, z: number): number {
+  const o = a.boxPage;
+  return a.seed.table[((x + o[0]) & 63) | (((y + o[1]) & 63) << 6) | (((z + o[2]) & 63) << 12)]!;
+}
 /** The block a page resolves to (umBlockOf): its own where it is stored, block 0 where it is AIR, the last where it is SOLID. */
 export function uniformPageBlock(a: UniformLatticeAddress, x: number, y: number, z: number): number { return Math.min(uniformPageWord(a, x, y, z), a.blocks - 1); }
 /** The block holds a page's storage (umBlockStored): neither sentinel, nor past the pool. */
@@ -860,7 +901,7 @@ export function uniformEachTile(a: UniformLatticeAddress, visit: (key: number, x
   for (let b = 1; b < a.blocks - 1; b++) {
     const r = a.seed.blocks[b]!;
     if (r === UNIFORM_PAGE_POOL_FREE) continue;
-    const x0 = (r & 63) << 3, y0 = ((r >>> 6) & 63) << 3, z0 = ((r >>> 12) & 63) << 3, base = 512 * b;
+    const o = a.boxPage, x0 = ((r & 63) - o[0]) << 3, y0 = (((r >>> 6) & 63) - o[1]) << 3, z0 = (((r >>> 12) & 63) - o[2]) << 3, base = 512 * b;
     for (let z = z0; z < z0 + e; z++) for (let y = y0; y < y0 + e; y++) for (let x = x0; x < x0 + e; x++)
       visit(base + ((x & 7) | ((y & 7) << 3) | ((z & 7) << 6)), x, y, z);
   }
@@ -914,8 +955,8 @@ export function uniformVertexKey(a: UniformLatticeAddress, x: number, y: number,
 }
 /** The coordinate of a live tile key, written to out (umTileCoord). */
 export function uniformTileCoord(a: UniformLatticeAddress, key: number, out: [number, number, number]): [number, number, number] {
-  const r = a.seed.blocks[Math.floor(key / 512)]!;
-  out[0] = (r & 63) << 3 | (key & 7); out[1] = ((r >>> 6) & 63) << 3 | ((key >> 3) & 7); out[2] = ((r >>> 12) & 63) << 3 | ((key >> 6) & 7);
+  const r = a.seed.blocks[Math.floor(key / 512)]!, o = a.boxPage;
+  out[0] = ((r & 63) - o[0]) << 3 | (key & 7); out[1] = (((r >>> 6) & 63) - o[1]) << 3 | ((key >> 3) & 7); out[2] = (((r >>> 12) & 63) - o[2]) << 3 | ((key >> 6) & 7);
   return out;
 }
 /** The coordinate of a live cell key, written to out (umCellCoord). */

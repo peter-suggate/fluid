@@ -9,7 +9,7 @@
  * kernel, in the same integers: nosings in half cells, distances in 1/128
  * cell, heights in 1/4096 cell, gradients in 1/8192 cell a cell. */
 import assert from "node:assert/strict";
-import { createNbflipWaterSlide, createNbflipWaterSlideLong, nbflipSlideCentreline, nbflipSlideLongCentreline, NBFLIP_SLIDE_END_RAD, NBFLIP_SLIDE_LONG_LENGTH } from "../lib/core/nbflip-water-slide-scene";
+import { createNbflipWaterSlideVoxelReference, createNbflipWaterSlideLong, nbflipSlideCentreline, nbflipSlideLongCentreline, NBFLIP_SLIDE_END_RAD, NBFLIP_SLIDE_LONG_LENGTH } from "../lib/core/nbflip-water-slide-scene";
 import { SOLID_MASK_DIRECTORY_WORDS, SOLID_MASK_EMPTY, SOLID_MASK_WALL, SolidOccupancyMask, solidOccupancyMaskLayout, solidOccupancyMaskVoxel, type SolidOccupancyMaskLayout } from "../lib/core/solid-occupancy-mask";
 import { uniformLatticeAddress } from "../lib/methods/uniform/uniform-lattice-address";
 import { uniformSolidMaskPages, uniformSolidScratchLayout } from "../lib/methods/uniform/uniform-mixed-solid.wgsl";
@@ -297,7 +297,7 @@ const sceneMasks = new Map<string, Mask>();
 export function bedSlopeSceneMask(scene: "drum" | "long"): Mask {
   let mask = sceneMasks.get(scene);
   if (!mask) {
-    const size = scene === "drum" ? BED_SLOPE_DRUM : BED_SLOPE_LONG, made = scene === "drum" ? createNbflipWaterSlide() : createNbflipWaterSlideLong();
+    const size = scene === "drum" ? BED_SLOPE_DRUM : BED_SLOPE_LONG, made = scene === "drum" ? createNbflipWaterSlideVoxelReference() : createNbflipWaterSlideLong();
     const m = new SolidOccupancyMask(uniformSolidMaskPages(uniformLatticeAddress(size, made.container.top === "open")));
     m.update(fluidSolidWorldForScene(made));
     sceneMasks.set(scene, mask = maskOf(size, (x, y, z) => solidOccupancyMaskVoxel(m.words, x, y, z)));

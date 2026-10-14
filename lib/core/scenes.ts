@@ -22,6 +22,11 @@ import {
   NBFLIP_RAMP_BASIN_LEVEL, NBFLIP_RAMP_DRAIN_SECONDS, NBFLIP_RAMP_GRID, NBFLIP_RAMP_LENGTH, NBFLIP_RAMP_VARIANTS,
   createNbflipRamp, nbflipRampBed, nbflipRampCamera, nbflipRampSceneId, nbflipRampShape,
 } from "./nbflip-ramp-scene";
+import { NBFLIP_SLOPE_CLEARANCE_SCENE_ID, createNbflipSlopeClearance } from "./nbflip-slope-clearance-scene";
+import {
+  NBFLIP_OPEN_GROUND_CELL_SIZE_M, NBFLIP_OPEN_GROUND_COLUMN, NBFLIP_OPEN_GROUND_GRID, NBFLIP_OPEN_GROUND_MEMORY_MIB, NBFLIP_OPEN_GROUND_SCENE_ID,
+  createNbflipOpenGround, nbflipOpenGroundCamera,
+} from "./nbflip-open-ground-scene";
 import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12Scene, createCm12Figure7_256 } from "./cm12-paper-scenes";
 import { createThinDropletLadderScene, createThinSheetLadderScene, createThinWallFilmScene } from "./thin-liquid-scenes";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
@@ -1859,10 +1864,11 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: NBFLIP_SLIDE_SCENE_ID,
     name: "NB-FLIP · Water Slide",
-    blurb: `A hose runs for ${NBFLIP_SLIDE_STREAM_SECONDS} seconds down a voxel slide that winds inward for ${NBFLIP_SLIDE_TURNS} turns and spills into a pool at its centre, where the water comes to rest. The box starts empty: ${NBFLIP_SLIDE_GRID.join("×")} cells at 2 cm.`,
+    blurb: `A hose runs for ${NBFLIP_SLIDE_STREAM_SECONDS} seconds down a continuous slide that winds inward for ${NBFLIP_SLIDE_TURNS} turns and spills into a pool at its centre, where the water comes to rest. The box starts empty: ${NBFLIP_SLIDE_GRID.join("×")} cells at 2 cm.`,
     audience: "explore",
     shelf: "Tanks",
     environment: "stage",
+    containerShell: "authored",
     methodProfile: NBFLIP_METHOD_PROFILE,
     build: createNbflipWaterSlide,
     camera: nbflipWaterSlideCamera(),
@@ -1889,6 +1895,28 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: createNbflipThemeParkSlide,
     presentationMode: "full-scene",
     camera: nbflipThemeParkCamera(),
+  }),
+  defineScene({
+    id: NBFLIP_OPEN_GROUND_SCENE_ID,
+    name: "NB-FLIP · Open ground",
+    blurb: `A water column ${NBFLIP_OPEN_GROUND_COLUMN * NBFLIP_OPEN_GROUND_CELL_SIZE_M} m tall and ${NBFLIP_OPEN_GROUND_GRID[0] * NBFLIP_OPEN_GROUND_CELL_SIZE_M} m square released on open ground: no walls anywhere, so it floods out on every side and the solver claims pages wherever it goes. The page pool is a ${NBFLIP_OPEN_GROUND_MEMORY_MIB} MiB budget; running out of it is a named fatal. ${NBFLIP_OPEN_GROUND_GRID.join("×")} starting cells at ${NBFLIP_OPEN_GROUND_CELL_SIZE_M * 100} cm.`,
+    audience: "validation",
+    shelf: "Tanks",
+    environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: createNbflipOpenGround,
+    camera: nbflipOpenGroundCamera(),
+  }),
+  defineScene({
+    id: NBFLIP_SLOPE_CLEARANCE_SCENE_ID,
+    name: "NB-FLIP · Slope clearance",
+    blurb: "A small 3.072 L body is released from rest just above a continuous 1:16 incline and drains into a lower catch basin. Target: the entire slope dry within 6 simulated seconds, with the water retained below. A simple test of bed gradients and lingering residue; 128×32×32 cells at 2 cm.",
+    audience: "validation",
+    shelf: "Thin liquid",
+    environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: createNbflipSlopeClearance,
+    camera: nbflipRampCamera(),
   }),
   // The slide's slope on its own, as measured probes for what a gentle voxel
   // ramp leaves behind. See lib/core/nbflip-ramp-scene.ts.

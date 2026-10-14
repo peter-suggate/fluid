@@ -19,27 +19,35 @@ export function uniformMixedFaceDispatchWGSL(entry: string, evaluate: string, al
 @compute @workgroup_size(64) fn ${entry}(@builtin(global_invocation_id) gid:vec3u){
  let owner=${owner ?? (allWidths ? "umAllOwner" : "umOwner")}(gid);if(owner.width==0u){return;}
  let origin=umOrigin(owner);
- {let low=umLowOpen(vec3i(origin));
-  for(var axis=0u;axis<3u;axis++){
-   if(low[axis]){let face=umFace(owner,axis,-1,0u);boundary[umLowFaceIndex(origin,axis)]=${evaluate};}
-  }}
- // Unit owners pack their three positive components at the same anchor.
- // Visit that anchor once without cloning the (large) evaluator call graph.
- for(var axis=0u;axis<select(3u,1u,owner.width==1u);axis++){
-  let first=umFace(owner,axis,1,0u);
-  for(var part=0u;part<first.count;part++){
-   let ownedFace=umFacePatch(first,part);var earlier=false;
-   for(var other=0u;other<axis;other++){earlier=earlier||umPositiveFaceAtAnchor(owner,other,ownedFace.anchor).width!=0u;}
-   if(earlier){continue;}
-   var value=vec4f(0);
-   for(var other=0u;other<3u;other++){
-    let face=umPositiveFaceAtAnchor(owner,other,ownedFace.anchor);
-    if(face.width!=0u){value[other]=${evaluate};}
+ // Keep the boundary values for metadata (projection's release flags).
+ // Low and positive faces share one evaluator site: Metal otherwise clones
+ // the entire pressure/force sampler graph for each textual call.
+ let low=umLowOpen(vec3i(origin));var lowValues=vec3f(0);
+ for(var side=0u;side<2u;side++){
+  let negative=side==0u;
+  // Unit owners pack their three positive components at the same anchor.
+  for(var axis=0u;axis<select(3u,1u,!negative&&owner.width==1u);axis++){
+   if(negative&&!low[axis]){continue;}
+   let first=umFace(owner,axis,select(1,-1,negative),0u);
+   for(var part=0u;part<select(first.count,1u,negative);part++){
+    var ownedFace=first;if(!negative){ownedFace=umFacePatch(first,part);}
+    var earlier=false;
+    if(!negative){for(var other=0u;other<axis;other++){earlier=earlier||umPositiveFaceAtAnchor(owner,other,ownedFace.anchor).width!=0u;}}
+    if(earlier){continue;}
+    var value=vec4f(0);
+    for(var other=0u;other<select(3u,1u,negative);other++){
+     var face=first;if(!negative){face=umPositiveFaceAtAnchor(owner,other,ownedFace.anchor);}
+     if(negative||face.width!=0u){value[other]=${evaluate};}
+    }
+    if(negative){lowValues[axis]=value.x;boundary[umLowFaceIndex(origin,axis)]=value.x;}
+    else{
+     ${metadata}
+     textureStore(output,ownedFace.anchor,value);
+    }
    }
-   ${metadata}
-   textureStore(output,ownedFace.anchor,value);
   }
  }
+
 }`;
 }
 

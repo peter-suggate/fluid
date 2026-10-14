@@ -116,6 +116,20 @@ export const formatInitializationCensus = (
  * progress updates without paying one full animation frame per small shader. */
 const TASKS_PER_PAINT = 8;
 
+/** Resource owners may destroy a failed build as soon as this rejects. Wait
+ * for its siblings first, including continuations that allocate after await. */
+export async function settleGPUInitialization(work: readonly (Promise<unknown> | undefined)[]): Promise<void> {
+  let failed = false;
+  let failure: unknown;
+  await Promise.all(work.map(async task => {
+    try { await task; } catch (error) {
+      // Preserve the original failure rather than a sibling's later abort.
+      if (!failed) { failed = true; failure = error; }
+    }
+  }));
+  if (failed) throw failure;
+}
+
 export class GPUInitializationTaskRunner {
   private readonly registered = new Set<string>();
   private readonly completed = new Set<string>();
@@ -192,6 +206,7 @@ export class GPUInitializationTaskRunner {
       if (this.signal.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
       const taskStarted = initializationCensusEnabled ? performance.now() : 0;
       await task.run(this.signal, (label, completedWorkUnits) => this.reportTask(task, label, completedWorkUnits));
+      if (this.signal.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
       if (initializationCensusEnabled) {
         initializationCensus.push({ taskId: task.id, phase: task.phase,
           elapsed_ms: performance.now() - taskStarted });
@@ -226,7 +241,7 @@ export class GPUInitializationTaskRunner {
         total: this.total });
     };
     try {
-      await Promise.all(batch.map(async (task) => {
+      await settleGPUInitialization(batch.map(async (task) => {
         const units = Math.max(1, Math.floor(task.workUnits ?? 1));
         await task.run(this.signal, (label, done = 0) => {
           labels.set(task.id, label);

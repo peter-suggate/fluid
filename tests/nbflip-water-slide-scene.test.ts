@@ -7,14 +7,27 @@ import { parseScene, serializeScene, validateScene, type SceneDescription } from
 import { NBFLIP_LETTERS_GRID, NBFLIP_METHOD_PROFILE } from "../lib/core/nbflip-paper-scenes";
 import {
   NBFLIP_SLIDE_END_RAD, NBFLIP_SLIDE_GRID, NBFLIP_SLIDE_LONG_ARCS, NBFLIP_SLIDE_LONG_BENDS, NBFLIP_SLIDE_LONG_GRID, NBFLIP_SLIDE_LONG_LENGTH,
-  NBFLIP_SLIDE_LONG_SCENE_ID, NBFLIP_SLIDE_SCENE_ID, nbflipSlideCentreline, nbflipSlideLongCentreline,
+  NBFLIP_SLIDE_LONG_SCENE_ID, NBFLIP_SLIDE_SCENE_ID, nbflipSlideCentreline, nbflipSlideLongCentreline, nbflipSlideSolid,
 } from "../lib/core/nbflip-water-slide-scene";
 
 /** A slide's own solids, and the top of the lowest of them in each column of cells (the hood's lid hangs over it). */
 function slideColumns(scene: SceneDescription, grid: readonly [number, number, number]) {
   const [nx, ny, nz] = grid;
   const patches = scene.solidVoxels.filter(patch => patch.minimum.every((cell, axis) => cell >= 0 && patch.maximumExclusive[axis]! <= grid[axis]!));
-  const base = new Int32Array(nx * nz).fill(ny), top = new Int32Array(nx * nz);
+  if (scene.solidBoundary) {
+    const floorAt=(x:number,z:number)=>{
+      let inside=false;
+      for(let y=.125;y<ny;y+=.25){
+        const solid=nbflipSlideSolid([x,y,z])<0;
+        if(inside&&!solid){let low=y-.25,high=y;for(let k=0;k<24;k++){const m=(low+high)/2;if(nbflipSlideSolid([x,m,z])<0)low=m;else high=m;}return Math.round((low+high)/2*1e6)/1e6;}
+        inside=solid;
+      }
+      return 0;
+    };
+    const top=Float64Array.from({length:nx*nz},(_,i)=>floorAt(i%nx+.5,Math.floor(i/nx)+.5));
+    return {patches,top,topAt:floorAt};
+  }
+  const base = new Int32Array(nx * nz).fill(ny), top = new Float64Array(nx * nz);
   for (const { minimum, maximumExclusive } of patches) {
     for (let z = minimum[2]; z < maximumExclusive[2]; z++) for (let x = minimum[0]; x < maximumExclusive[0]; x++) {
       if (minimum[1] < base[x + nx * z]!) { base[x + nx * z] = minimum[1]; top[x + nx * z] = maximumExclusive[1]; }
@@ -67,7 +80,11 @@ test("the water slide is a closed NB-FLIP box of whole 32-cell pages that starts
 });
 
 test("the water slide stands clear of the box it is solved in", () => {
-  assertClearOfTheBox(drum, NBFLIP_SLIDE_GRID);
+  // Block payload bounds include empty padding; test occupied geometry.
+  for(let z=.5;z<NBFLIP_SLIDE_GRID[2];z++)for(let x=.5;x<nx;x++){
+    if(x<4||x>nx-4||z<4||z>NBFLIP_SLIDE_GRID[2]-4) assert.equal(topAt(x,z),0,`${x},${z}`);
+  }
+  assert.ok(Math.max(...top)<ny-4);
 });
 
 test("the water slide's channel only falls, between walls, to a hood that opens on the pool", () => {

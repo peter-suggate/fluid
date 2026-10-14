@@ -122,7 +122,7 @@ fn nbBuildDistance(p:vec3u,c:vec3u,tile:u32){
     for(var iteration=0u;iteration<5u;iteration++){
      // A solid's phi is not the liquid's: traced into a wall, the vertices on
      // it found the wall for a surface, and no samples were seeded beside it.
-     if(umCellOpen(cell)<0.5){break;}
+     if(umCellOpen(cell)<=1e-5){break;}
      let sample=nbPhiGradient(vec3u(cell),q);let f=sample.w;if(abs(f)<1e-5){distance=min(distance,length(q-vec3f(p)));break;}
      let g=sample.xyz;
      let g2=dot(g,g);if(g2<1e-8){break;}

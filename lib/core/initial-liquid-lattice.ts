@@ -1,3 +1,4 @@
+import { proceduralSolidField } from "./procedural-solid";
 import { initialHeightFieldHeight } from "./initial-height-field";
 import { damBreakSignedDistanceAtNode, initialFluidBrickSignedDistanceAtNode,
   initialLiquidVolumesSignedDistance, baseInitialLiquidFractionAtCell, damBreakBoxContains, initialLiquidFractionAtCell, sceneDamBreakBox,
@@ -78,13 +79,16 @@ function buriedVertices(closed: Uint8Array, dimensions: readonly [number, number
   return buried;
 }
 
-/** Cells the solid world closes, under the occupancy mask's rule (any solid fraction). */
+/** Authored voxels close whole cells; native terrain closes only its full cells. */
 function closedCells(scene: SceneDescription, dimensions: readonly [number, number, number]): Uint8Array {
   const [nx, ny, nz] = dimensions;
   const world = solidWorldForScene(scene);
+  const boundary = proceduralSolidField(scene);
+  const terrain = terrainColumnHeights(scene, nx, nz), hy = scene.container.height_m / ny;
   const closed = new Uint8Array(nx*ny*nz);
   for (let z=0; z<nz; z++) for (let y=0; y<ny; y++) for (let x=0; x<nx; x++)
-    closed[x+nx*(y+ny*z)] = sampleSolidWorld(world,[x,y,z]).solidFraction > 0 ? 1 : 0;
+    closed[x+nx*(y+ny*z)] = (boundary?.open([x,y,z]) ?? Number(sampleSolidWorld(world,[x,y,z],true).solidFraction === 0)) <= 1e-5
+      || Math.fround(terrain[x+nx*z]! / hy) >= y + 1 ? 1 : 0;
   return closed;
 }
 
@@ -125,8 +129,12 @@ function boxUnionVertexPhi(scene: SceneDescription, dimensions: readonly [number
   const first = (axis: number, lo: number) => sliced(axis) ? Number(lo > sliceZ!) : Math.max(0, Math.ceil(lo));
   const last = (axis: number, hi: number) => sliced(axis) ? Number(hi >= sliceZ!)-1 : Math.min(cells[axis]!, Math.floor(hi));
   const cell = [0, 0, 0];
+  // Past a container's faces lie its walls, and the face of a box laid on one
+  // is no surface. An open world's container has none: past its sides and its
+  // top is air (the face is the liquid's surface), and below it the ground.
+  const world = c.walls === "none";
   const free = (a: number, beyond: number, b: number, ib: number, d: number, id: number) => {
-    if (beyond < 0 || beyond >= cells[a]!) return false;
+    if (beyond < 0 || beyond >= cells[a]!) return world && (a !== 1 || beyond >= 0);
     for (const cd of sliced(d) ? [Math.floor(sliceZ!)] : [id-1, id]) for (const cb of sliced(b) ? [Math.floor(sliceZ!)] : [ib-1, ib]) {
       if (cb<0 || cd<0 || cb>=cells[b]! || cd>=cells[d]!) continue;
       cell[a] = beyond; cell[b] = cb; cell[d] = cd;
@@ -206,6 +214,7 @@ export function initialLiquidCellVolumes(scene: SceneDescription, dimensions: re
   const cellHeight=c.height_m/ny;
   const volume=new Float32Array(nx*ny*(sliceZ === undefined ? nz : 1));
   const solidWorld=solidWorldForScene(scene);
+  const boundary=geometric?proceduralSolidField(scene):undefined;
   const dam=sceneDamBreakBox(scene);
   let initial=0;
   const wetMinimum=[nx,ny,nz];
@@ -213,16 +222,13 @@ export function initialLiquidCellVolumes(scene: SceneDescription, dimensions: re
   for(let outputZ=0;outputZ<(sliceZ === undefined ? nz : 1);outputZ++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++) {
     const z=sliceZ ?? outputZ;
     const aboveGround=(y+0.5)*cellHeight>terrain[x+nx*z];
-    const solidFraction=sampleSolidWorld(solidWorld,[x,y,z]).solidFraction;
-    // The geometric solver's SolidOccupancyMask closes any cell touched by
-    // the static solid world, including fractional terrain voxels. Seeding
-    // their fractional remainder creates immobile liquid inside closed cells;
-    // the global surface-volume constraint then raises the free surface to
-    // represent that inaccessible mass. Use the same capacity as the solver.
-    const solidOpen=geometric ? Number(solidFraction===0) : 1-solidFraction;
+    const solidFraction=sampleSolidWorld(solidWorld,[x,y,z],geometric).solidFraction;
+    // Authored voxels retain whole-cell occupancy. Terrain is represented
+    // separately by the same fractional column capacity the GPU reads.
+    const solidOpen=boundary?.open([x,y,z]) ?? (geometric ? Number(solidFraction===0) : 1-solidFraction);
     const base=geometric?baseInitialLiquidFractionAtCell(scene,x,y,z,dimensions):scene.fluid.initialCondition==="dam-break"
       ?damBreakBoxContains(dam,(x+0.5)/nx,(y+0.5)/ny,(z+0.5)/nz):(y+0.5)/ny<=c.fillFraction;
-    const liquidFraction=aboveGround?initialLiquidFractionAtCell(scene,x,y,z,dimensions,base):0;
+    const liquidFraction=geometric||aboveGround?initialLiquidFractionAtCell(scene,x,y,z,dimensions,base):0;
     // Match the uploaded f32 terrain height in cell units. A sliver can round
     // to zero in SolidWorld's u8 mask while still reducing GPU cell capacity.
     // This matters more as a finely resolved pond exposes more shore cells.

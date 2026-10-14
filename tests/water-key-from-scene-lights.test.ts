@@ -46,27 +46,22 @@ test("a sunlit set keys its water off the authored directional, unchanged", () =
 });
 
 /**
- * The stage, where the gap this exists to close is measurable.
- *
- * The set's illumination is a practical held in the light table; the water's
- * rig is one key resolved from `lighting.directional`, which on this set is a
- * fill deliberately held down *because* the practical exists. Keyed off the
- * fill the water is lit at a fiftieth of the floor beneath it.
+ * The overhead practical still dominates at the water even with the brighter
+ * shared directional. The reducer must choose that arriving light rather than
+ * blindly using the directional record.
  */
-test("a spotlit stage keys its water off the practical, not the fill", () => {
+test("a spotlit stage keys its water off the stronger arriving practical", () => {
   for (const id of ["ocean-seiche", "water-box-dam-break"]) {
     const scene = getScenePreset(id).create();
     assert.equal(scene.environment, "stage", `${id} is expected to stand on the stage`);
     const { before, after } = waterKey(scene);
 
     assert.ok(
-      luminance(after.radianceLinear) > 25 * luminance(before.radianceLinear),
-      `${id}: the practical must dominate the fill it was held down against`,
+      luminance(after.radianceLinear) > luminance(before.radianceLinear),
+      `${id}: the stronger arriving practical must win over the directional`,
     );
     // The lamp hangs on the container's axis, so the key it supplies points
-    // straight up. The fill it replaces is a tenth off vertical, which is why
-    // the direction barely moves and the radiance moves by fifty-fold: the gap
-    // was never about where the light comes from.
+    // straight up, distinct from the directional arriving from the side.
     assert.ok(after.direction[1] > 0.99, `${id}: the key must arrive from the fixture overhead`);
   }
 });

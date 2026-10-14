@@ -273,8 +273,8 @@ fn upCertify(lane:u32,width:u32){
   const published=pool.published?copies[3+mirrors.length]!:new Uint32Array(0);
   if(pool.published){
    const {origin,pages:[px,py,pz]}=l.box,flags:number[]=[];
-   for(let z=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++)flags.push(+resident.has(key([origin[0]+x,origin[1]+y,origin[2]+z])));
-   assert.equal(differ(published,Uint32Array.from([32,px,py,pz,residents.length,0,0,0,...flags])),-1,`${at}: published record`);
+   for(let z=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++){const q=[origin[0]+x,origin[1]+y,origin[2]+z] as const;flags.push(resident.has(key(q))?1:state[l.state.table+entryOf(q)]===SOLID?2:0);}
+   assert.equal(differ(published,Uint32Array.from([32,px,py,pz,residents.length,...l.box.origin,...flags])),-1,`${at}: published record`);
    assert.equal(PUBLISHED.flags,8);
   }
   // The fatal message is null exactly while no bit is set.

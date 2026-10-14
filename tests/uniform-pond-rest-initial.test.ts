@@ -5,25 +5,26 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { sampleSolidWorld, solidWorldForScene } from "../lib/core/solid-world";
 import { uniformInitialVolume } from "../lib/methods/uniform/uniform-volume-initial";
 
-test("filled hero pond seeds no mass in cells closed by the static solid mask", () => {
+test("filled hero pond respects authored voxel occupancy and fractional terrain capacity", () => {
   const scene = sceneDocument(getSceneDefinition("hero-garden-hose-x10"));
   const h = scene.voxelDomain.finestCellSize_m;
   const dims = [scene.container.width_m, scene.container.height_m, scene.container.depth_m].map(v => Math.round(v / h)) as [number, number, number];
   const [nx, ny, nz] = dims;
   const world = solidWorldForScene(scene);
   const seed = uniformInitialVolume(scene, dims);
-  let fractionalCells = 0, liquid = 0;
+  let fractionalCells = 0, fractionalLiquid = 0, liquid = 0;
   for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
     const fraction = sampleSolidWorld(world, [x, y, z]).solidFraction;
     const volume = seed.volume[x + nx * (y + ny * z)]!;
-    if (fraction > 0) assert.equal(volume, 0, `closed cell ${x},${y},${z}`);
+    if (sampleSolidWorld(world, [x, y, z], true).solidFraction > 0) assert.equal(volume, 0, `authored solid cell ${x},${y},${z}`);
     const terrainOpen = Math.fround(1 - Math.max(0, Math.min(1,
       Math.fround(seed.terrain[x + nx * z]! / h) - y)));
     assert.ok(volume <= terrainOpen, `GPU terrain capacity at ${x},${y},${z}`);
-    if (fraction > 0 && fraction < 1) fractionalCells++;
+    if (fraction > 0 && fraction < 1) { fractionalCells++; fractionalLiquid += volume; }
     liquid += volume;
   }
   assert.ok(fractionalCells > 100, "exercise the curved fractional terrain boundary");
+  assert.ok(fractionalLiquid > 0, "keep accessible water in partially open terrain cells");
   assert.ok(liquid > 1000, "retain the filled pond");
   assert.ok(Math.abs(liquid - seed.initial) < 1e-3, "reference mass counts the same accessible water");
 });

@@ -357,7 +357,7 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
     }else `:""}if(face.width!=0u&&umRelease(owner,face,value[axis])){released|=1u<<axis;}
     }
     if(lowOpen[axis]){let low=umFace(owner,axis,-1,0u);
-     if(umRelease(owner,low,umProjectWithSource(owner,low))){released|=1u<<(axis+3u);}}
+     if(umRelease(owner,low,lowValues[axis])){released|=1u<<(axis+3u);}}
    }
    value.w=f32(released);`,"umProjectOwner")}
 `;

@@ -129,20 +129,19 @@ test("the scene authors its boundary and terrain in SolidWorld", () => {
  * What the rig has to be, rather than what it currently is.
  *
  * The numbers themselves are a look and were solved by measuring the frame, so
- * pinning them here would only make re-grading the scene a test edit. What must
- * not silently come back is the *shape* the stage base has and a landscape does
- * not: a key held down to a fill because a practical was doing the lighting, and
- * a hemisphere that is black in every direction.
+ * pinning them here would only make re-grading the scene a test edit. The
+ * landscape must retain its authored sun and pronounced sky-to-ground gradient
+ * when the shared stage lighting changes.
  */
-test("the hillside overrides every term of the stage's dark-room rig", () => {
+test("the hillside retains its authored daylight over the shared stage rig", () => {
   const scene = createTallCellsHillsideDamBreakScene();
   const lighting = svoSceneLighting({ ...scene, environment: "stage" });
   const stage = STUDIO_STAGE_DRY_SCENE_LIGHTING;
   const key = lighting.directional!;
   const environment = lighting.environment!;
 
-  assert.ok(key.intensity! >= 4 * stage.directional.intensity,
-    `a sun, not the stage's ${stage.directional.intensity} fill: got ${key.intensity}`);
+  assert.deepEqual(key, scene.lighting!.directional,
+    "the hillside's authored sun must survive changes to the shared stage key");
   assert.ok(key.direction![1] > 0.5 * Math.hypot(...key.direction!),
     "the sun must come from above, so the slope has a lit face and a shaded one");
   assert.ok(key.direction![0] < 0, "and from the side, so the slope is modelled rather than flat");
@@ -151,7 +150,7 @@ test("the hillside overrides every term of the stage's dark-room rig", () => {
     0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2];
   const sky = luminance(environment.upperRadianceLinear!);
   const ground = luminance(environment.lowerRadianceLinear!);
-  assert.ok(sky >= 10 * luminance(stage.environment.upperRadianceLinear),
+  assert.ok(sky > luminance(stage.environment.upperRadianceLinear),
     `the backdrop is a sky: got ${sky}`);
   assert.ok(sky > 3 * ground, "and it has a gradient in it: the sky must outrun the ground");
   assert.ok(environment.upperRadianceLinear![2] > environment.upperRadianceLinear![0],

@@ -1,6 +1,7 @@
+import { domainPagesWGSL, domainPages3DWGSL } from "./domain-pages.wgsl";
 import {uniformMixedPresentationVelocityWGSL} from "../methods/uniform/uniform-mixed-presentation.wgsl";
 import { UNIFORM_DETAIL_CRITERIA, UNIFORM_STAGE_CERTIFICATE, UNIFORM_STAGE_IMPORTANCE, UNIFORM_STAGE_VIEWS, uniformStageGridsWGSL } from "../methods/uniform/uniform-stage-grids";
-import { VISUAL_LAYERS, visualLayerPaintWGSL, importanceViewCode, layerOpacity, type VisualLayerState } from "./visual-layers";
+import { VISUAL_LAYERS, visualLayerPaintWGSL, importanceViewCode, layerOpacity, pageView, type VisualLayerState } from "./visual-layers";
 /**
  * Solver-grid cross-section rendered as an independent presentation layer.
  *
@@ -31,24 +32,16 @@ import {
 const LAYER_OPACITY_VEC4S = Math.ceil(VISUAL_LAYERS.length / 4);
 /** Float offsets in the layer uniform after the opacities. */
 const LAYER_PRESSURE_ORIGIN = 4 + 4 * LAYER_OPACITY_VEC4S;
-const LAYER_PAGE_ACTIVITY = LAYER_PRESSURE_ORIGIN + 4;
+/** x: opacity of the pages 3D view (zero in slice mode). */
+const LAYER_PAGE_VIEW = LAYER_PRESSURE_ORIGIN + 4;
 /** x: the importance layer's view, 0 = all criteria, else 1 + the criterion id. */
-const LAYER_IMPORTANCE = LAYER_PAGE_ACTIVITY + 4;
+const LAYER_IMPORTANCE = LAYER_PAGE_VIEW + 4;
 const LAYER_UNIFORM_FLOATS = LAYER_IMPORTANCE + 4;
 
 export const gridOverlayViewRecordsWGSL = /* wgsl */ `
 ${visualLayerPaintWGSL}
-struct LayerUniforms { control:vec4f, opacity:array<vec4f,${LAYER_OPACITY_VEC4S}>, pressureOrigin:vec4f, pageActivity:vec4f, importance:vec4f, }
+struct LayerUniforms { control:vec4f, opacity:array<vec4f,${LAYER_OPACITY_VEC4S}>, pressureOrigin:vec4f, pageView:vec4f, importance:vec4f, }
 @group(0) @binding(24) var<uniform> layers:LayerUniforms;
-fn pageActivityAt(cell:vec3i,base:u32)->bool {
-  if(base==0u || arrayLength(&viewRecords)<base+8u){return false;}
-  let edge=viewRecords[base];
-  if(edge==0u || any(cell<vec3i(0))){return false;}
-  let pd=vec3u(viewRecords[base+1u],viewRecords[base+2u],viewRecords[base+3u]);
-  let q=vec3u(cell)/edge;
-  if(any(q>=pd)){return false;}
-  return viewRecords[base+8u+q.x+pd.x*(q.y+pd.y*q.z)]!=0u;
-}
 var<private> layerMode:i32;
 var<private> recordComposition:bool;
 var<private> recordWindowPresent:bool;
@@ -141,6 +134,7 @@ ${cameraApertureShaderLibrary("u")}
 ${gridOverlayLevelSetVolumeWGSL}
 ${uniformStageGridsWGSL("pressurePhi")}
 ${gridOverlayViewRecordsWGSL}
+${domainPagesWGSL}
 struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
   var positions = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
@@ -578,6 +572,20 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   let pixelsPerCell = 1.0 / max(derivative.x, derivative.y);
   let adaptiveGrid = u.debug.z > 0.5;
   let fieldMode = select(i32(round(u.debug.w)),layerMode,layers.control.x>0.5);
+  // Pages describe allocation, even where no fine field exists. Read them
+  // before any field/ownership lookup so absent pages cannot alias a sentinel.
+  if(fieldMode==27){
+    if(!domainPagesValid()){return GridSample(vec3f(0),0.0,0.0,false);}
+    let state=domainPageAt(cell);
+    if(state==0u){return GridSample(vec3f(0),0.0,0.0,false);}
+    let edge=f32(viewRecords[u32(layers.control.w)]);
+    let plane=samplePosition+vec2f(f32(fineOrigin[firstPlaneAxis]),f32(fineOrigin[secondPlaneAxis]));
+    let fraction=fract(plane/edge);
+    let distances=min(fraction,1.0-fraction)*edge/derivative;
+    let line=gridLinePaint(min(distances.x,distances.y),1.25);
+    let color=domainPageColor(state);
+    return GridSample(sceneColor(mix(color*0.75,color,line)),mix(0.28,0.95,line),line,state==2u);
+  }
   // Structure is the one view whose subject is the lattice, so it holds its
   // lines further into the distance than the field views, where the grid is
   // only a reference frame and a bolder one would eat the content.
@@ -883,33 +891,6 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       // liquid colour scale. No density threshold is used to classify phi.
       excessHatch = select(0.0, sliceScreenHatch(samplePosition, derivative, footprint),
         volume.y > 0.0 && volume.x > FRACTION_OVERFULL);
-    } else if (fieldMode == 27) {
-      let base=u32(layers.control.w);
-      if(base==0u || arrayLength(&viewRecords)<base+8u){return GridSample(vec3f(0),0.0,0.0,false);}
-      let edge=viewRecords[base];
-      if(edge==0u){return GridSample(vec3f(0),0.0,0.0,false);}
-      let pd=vec3u(viewRecords[base+1u],viewRecords[base+2u],viewRecords[base+3u]);
-      let q=vec3u(max(cell,vec3i(0)))/edge;
-      if(any(q>=pd)){return GridSample(vec3f(0),0.0,0.0,false);}
-      let page=q.x+pd.x*(q.y+pd.y*q.z);
-      // The record's flag: the pool holds a block for the page (rewritten by
-      // every commit, copied here every frame). A page without one draws
-      // nothing where it is AIR and a flat grey where the live page table
-      // says SOLID.
-      let live=viewRecords[base+8u+page]!=0u;
-      let solidPage=!live&&unstored&&umCellKind(cell)==UM_SOLID;
-      if(!live&&!solidPage){return GridSample(vec3f(0),0.0,0.0,false);}
-      // Activity grids can use a different edge from the residency catalogue.
-      let transport=pageActivityAt(cell,u32(layers.pageActivity.x));
-      let work=pageActivityAt(cell,u32(layers.pageActivity.y));
-      fill=sceneColor(select(select(vec3f(0.58,0.46,0.76),
-        select(vec3f(0.95,0.61,0.16),vec3f(0.12,0.78,0.65),transport),transport||work),vec3f(0.36,0.38,0.42),solidPage));
-      alpha=select(select(0.08,0.42,transport||work),0.5,solidPage);sampleDot=0.0;lineStrength=0.0;
-      let pageFraction=fract(samplePosition/f32(edge));
-      let pageDistance=min(min(pageFraction.x,1.0-pageFraction.x)*f32(edge)/derivative.x,
-        min(pageFraction.y,1.0-pageFraction.y)*f32(edge)/derivative.y);
-      viewBoundary=gridLinePaint(pageDistance,1.5)*select(0.3,1.0,transport||work);
-      liquidContour=zeroContour;
     } else if (fieldMode == 22) {
       // One class per 4^3 tile, from the step just taken. Far air keeps only
       // the tile lattice: it is the part of the domain the view is about
@@ -1457,13 +1438,17 @@ fn volumeComposite(accumulated:vec4f,color:vec3f,alpha:f32)->vec4f {
   return vec4f(displayColor(overlay.color),
     max(overlay.alpha * select(SLICE_OPACITY, 0.94, i32(round(u.debug.w)) == 21), overlay.lattice * 0.92));
 }
+${domainPages3DWGSL}
 `;
 
 export class GridOverlayPipeline {
   private readonly layerUniform: GPUBuffer;
   private layerRecords?: GPUBuffer;
-  private layerSources?: { tiles?: GPUFluidViewRecords; window?: GPUFluidViewRecords; boundary?: GPUBufferBinding; boundaryOffset: number; pages?: GPUFluidVolumePageSource; pageOffset: number; transportOffset: number; workOffset: number };
+  private layerSources?: { tiles?: GPUFluidViewRecords; window?: GPUFluidViewRecords; boundary?: GPUBufferBinding; boundaryOffset: number; pages?: GPUFluidVolumePageSource; pageOffset: number };
   private pipeline?: GPURenderPipeline;
+  private pagesPipeline?: GPURenderPipeline;
+  private pagesBindGroup?: GPUBindGroup;
+  private pages3D = false;
   private bindGroup?: GPUBindGroup;
   private volume?: GPUTexture;
   private columnBases?: GPUTexture;
@@ -1524,6 +1509,17 @@ export class GridOverlayPipeline {
       },
       primitive: { topology: "triangle-list" }
     });
+    // The 3D entry point only needs the camera, allocation records and layer
+    // selection; it shares the existing overlay lifecycle and copied records.
+    this.pagesPipeline = await this.device.createRenderPipelineAsync({
+      label: "Domain pages 3D",
+      layout: "auto",
+      vertex: { module: shaderModule, entryPoint: "vertexMain" },
+      fragment: { module: shaderModule, entryPoint: "fragmentPages3D", targets: [{ format: this.targetFormat,
+        blend: { color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" } },
+      }] },
+      primitive: { topology: "triangle-list" },
+    });
     this.rebuildBindGroup();
   }
 
@@ -1569,6 +1565,7 @@ export class GridOverlayPipeline {
 
   setLayers(state: VisualLayerState | undefined, tiles?: GPUFluidViewRecords, window?: GPUFluidViewRecords, pressureOrigin?: readonly [number, number, number], boundary?: GPUBufferBinding, pages?: GPUFluidVolumePageSource) {
     const values = new Float32Array(LAYER_UNIFORM_FLOATS);
+    this.pages3D = Boolean(state?.visible && state.enabled.includes("pages") && pageView(state) === "3d" && pages);
     if (pressureOrigin) values.set(pressureOrigin, LAYER_PRESSURE_ORIGIN);
     if (state) {
       tiles = state.visible && state.enabled.includes("tiles") ? tiles : undefined;
@@ -1578,6 +1575,10 @@ export class GridOverlayPipeline {
       values[0] = 1; values[1] = window ? 1 : 0;
       // A layer without a slice mode (the particle spheres) is another pass's: zero here skips its plane pass.
       VISUAL_LAYERS.forEach((layer, i) => { values[4 + i] = layer.mode >= 0 && state.visible && state.enabled.includes(layer.id) ? layerOpacity(state, layer.id) : 0; });
+      if (this.pages3D) {
+        values[4 + VISUAL_LAYERS.findIndex(l => l.id === "pages")] = 0;
+        values[LAYER_PAGE_VIEW] = layerOpacity(state, "pages");
+      }
       values[LAYER_IMPORTANCE] = importanceViewCode(state);
       const tileBytes = tiles ? (tiles.records.size ?? tiles.records.buffer.size - (tiles.records.offset ?? 0)) : 0;
       const boundaryOffset = 1024 + tileBytes;
@@ -1586,25 +1587,26 @@ export class GridOverlayPipeline {
       const pageOffset = boundaryOffset + boundaryBytes;
       const pageBytes = pages ? (pages.records.size ?? pages.records.buffer.size - (pages.records.offset ?? 0)) : 0;
       values[3] = pages ? pageOffset / 4 : 0;
-      const transportOffset = pageOffset + pageBytes;
-      const transport = pages?.transportRecords, work = pages?.workRecords;
-      const transportBytes = transport ? (transport.size ?? transport.buffer.size - (transport.offset ?? 0)) : 0;
-      const workOffset = transportOffset + transportBytes;
-      const workBytes = work ? (work.size ?? work.buffer.size - (work.offset ?? 0)) : 0;
-      values[LAYER_PAGE_ACTIVITY] = transport ? transportOffset / 4 : 0;
-      values[LAYER_PAGE_ACTIVITY + 1] = work ? workOffset / 4 : 0;
-      const bytes = workOffset + workBytes;
+      const bytes = pageOffset + pageBytes;
       if (!this.layerRecords || this.layerRecords.size < bytes) {
         this.layerRecords?.destroy();
         this.layerRecords = this.device.createBuffer({ label: "Composed visual records", size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       }
-      this.layerSources = { tiles, window, boundary, boundaryOffset, pages, pageOffset, transportOffset, workOffset };
+      this.layerSources = { tiles, window, boundary, boundaryOffset, pages, pageOffset };
       this.setViewRecords({ records: { buffer: this.layerRecords } });
     } else this.layerSources = undefined;
     this.device.queue.writeBuffer(this.layerUniform, 0, values);
   }
 
   private rebuildBindGroup() {
+    if (this.pagesPipeline) this.pagesBindGroup = this.device.createBindGroup({
+      layout: this.pagesPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer } },
+        { binding: 23, resource: this.viewRecords?.records ?? { buffer: this.dummyStorage } },
+        { binding: 24, resource: { buffer: this.layerUniform } },
+      ],
+    });
     if (!this.pipeline || !this.volume || !this.columnBases || !this.adaptiveCells || !this.velocity || !this.pressureSamples || !this.divergence || !this.mappedPressure || !this.density) return;
     this.bindGroup = this.device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
@@ -1642,11 +1644,8 @@ export class GridOverlayPipeline {
   encode(encoder: GPUCommandEncoder, target: GPUTextureView): boolean {
     if (!this.pipeline || !this.bindGroup) return false;
     if (this.layerSources && this.layerRecords) {
-      const { tiles, window, boundary, boundaryOffset, pages, pageOffset, transportOffset, workOffset } = this.layerSources;
+      const { tiles, window, boundary, boundaryOffset, pages, pageOffset } = this.layerSources;
       if (pages) encoder.copyBufferToBuffer(pages.records.buffer, pages.records.offset ?? 0, this.layerRecords, pageOffset, pages.records.size ?? pages.records.buffer.size - (pages.records.offset ?? 0));
-      for (const [source, offset] of [[pages?.transportRecords, transportOffset], [pages?.workRecords, workOffset]] as const) {
-        if (source) encoder.copyBufferToBuffer(source.buffer, source.offset ?? 0, this.layerRecords, offset, source.size ?? source.buffer.size - (source.offset ?? 0));
-      }
       if (boundary) encoder.copyBufferToBuffer(boundary.buffer, boundary.offset ?? 0, this.layerRecords, boundaryOffset, boundary.size ?? boundary.buffer.size - (boundary.offset ?? 0));
       if (window) encoder.copyBufferToBuffer(window.records.buffer, window.records.offset ?? 0, this.layerRecords, 0, SOLVE_WINDOW_RECORD_WORDS * 4);
       if (tiles) encoder.copyBufferToBuffer(tiles.records.buffer, tiles.records.offset ?? 0, this.layerRecords, 1024, tiles.records.size ?? tiles.records.buffer.size - (tiles.records.offset ?? 0));
@@ -1655,6 +1654,11 @@ export class GridOverlayPipeline {
       label: "Solver grid overlay",
       colorAttachments: [{ view: target, loadOp: "load", storeOp: "store" }]
     });
+    if (this.pages3D && this.pagesPipeline && this.pagesBindGroup) {
+      pass.setPipeline(this.pagesPipeline);
+      pass.setBindGroup(0, this.pagesBindGroup);
+      pass.draw(3);
+    }
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.draw(3);

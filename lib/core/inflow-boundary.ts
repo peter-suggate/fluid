@@ -2,7 +2,8 @@ import type { FluidInflow, SceneDescription, Vec3 } from "./model";
 import { inflowStrength } from "./initial-fluid";
 
 /** Shared by the cubic and tall-cell shaders. Each shader supplies
- * inflowGridDims(), while Params supplies the common scene/grid fields.
+ * inflowGridDims(), while Params supplies the common scene/grid fields (the
+ * box's low cell in tuning.xyz: the nozzle face is kept in the box).
  *
  * The outlet is a one-sided open boundary embedded at the nozzle face. Its
  * virtual upstream reservoir contributes flux to the receiver without owning
@@ -12,7 +13,7 @@ import { inflowStrength } from "./initial-fluid";
 export const inflowBoundaryWGSL = /* wgsl */ `
 fn inflowStrength()->f32{return clamp(params.inflowTiming.x,0.0,1.0);}
 fn inflowAxis()->u32{let v=abs(params.inflowVelocityLength.xyz);if(v.y>v.x&&v.y>=v.z){return 1u;}if(v.z>v.x){return 2u;}return 0u;}
-fn inflowFaceIndex(axis:u32)->i32{let h=params.cellGravity.xyz;let minimum=params.frame.xyz;let d=inflowGridDims();return clamp(i32(round((params.inflowPositionRadius[axis]-minimum[axis])/h[axis]))-1,0,d[axis]-2);}
+fn inflowFaceIndex(axis:u32)->i32{let h=params.cellGravity.xyz;let minimum=params.frame.xyz;let d=inflowGridDims();let o=i32(params.tuning[axis]);return clamp(i32(round((params.inflowPositionRadius[axis]-minimum[axis])/h[axis]))-1,o,o+d[axis]-2);}
 fn inflowReceiverIndex(axis:u32)->i32{let face=inflowFaceIndex(axis);return select(face,face+1,params.inflowVelocityLength[axis]>=0.0);}
 fn inflowApertureFraction(q:vec3i)->f32{
   let velocity=params.inflowVelocityLength.xyz;let speed=length(velocity);if(speed<=1e-6){return 0.0;}let direction=velocity/speed;let axis=inflowAxis();let h=params.cellGravity.xyz;let minimum=params.frame.xyz;let face=inflowFaceIndex(axis);var tangentA=0u;var tangentB=1u;if(axis==0u){tangentA=1u;tangentB=2u;}else if(axis==1u){tangentA=0u;tangentB=2u;}

@@ -1,0 +1,86 @@
+/** Native GPU check of the real page overlay pipeline with signed origins,
+ * AIR/SOLID/resident pages, missing records and both presentation modes.
+ * Run: node --import tsx tools/probe-domain-pages.ts
+ * Optional PPM previews: FLUID_PAGE_PREVIEW=/tmp/domain-pages */
+import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
+import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
+import { GridOverlayPipeline } from "../lib/core/webgpu-grid-overlay";
+import { setPageView, visualLayers, type VisualLayerState } from "../lib/core/visual-layers";
+import { UniformPagePool, uniformPagePoolSeed } from "../lib/methods/uniform/uniform-page-pool";
+
+const dawn = await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href);
+Object.assign(globalThis, dawn.globals);
+const adapter = await createProcessRetainedDawnGPU(dawn, ["backend=metal"]).requestAdapter();
+assert.ok(adapter);
+const device = managedGPUDevice(await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: 10 } }), { requireWorkerRealm: false });
+const errors: string[] = [];
+device.addEventListener("uncapturederror", event => { event.preventDefault(); errors.push(event.error.message); console.error(event.error.message); });
+const width = 640, height = 480;
+const uniform = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+const bodies = device.createBuffer({ size: 12 * 64, usage: GPUBufferUsage.STORAGE });
+const values = new Float32Array(32);
+values.set([width, height, 0, 0]);
+values.set([6, 5, 7, 0.5], 4); values.set([0, 1.5, 0, 0], 8);
+values.set([4, 3, 4, 0], 12); values.set([128, 96, 128, 1], 20);
+values.set([1, 0.4, 0, 27], 24);
+device.queue.writeBuffer(uniform, 0, values);
+const textures: GPUTexture[] = [];
+function texture(format: GPUTextureFormat, dimension: GPUTextureDimension = "3d") {
+  const t = device.createTexture({ size: [2, 2, dimension === "3d" ? 2 : 1], dimension, format, usage: GPUTextureUsage.TEXTURE_BINDING });
+  textures.push(t); return t;
+}
+const f = texture("rgba32float"), ui = texture("rgba32uint"), columns = texture("rgba32float", "2d");
+const overlay = new GridOverlayPipeline(device, "rgba8unorm", uniform, bodies);
+console.log("Compiling overlay");
+await overlay.initialize();
+overlay.setVolume(f, columns, ui, f, ui, f, f, f);
+const pool = new UniformPagePool(device, { table: 8, blocks: 32, idleSteps: 2, box: { origin: [-1, 0, 0], pages: [5, 3, 4] } });
+const residents = [];
+for (let z = 0; z < 4; z++) for (let y = 0; y < 3; y++) for (let x = -1; x < 4; x++) {
+  if ((x === 0 || x === 1) && (y === 0 || z === 1)) residents.push({ x, y, z, block: residents.length + 1 });
+}
+pool.seed(uniformPagePoolSeed(pool.layout, residents, (x, y) => x === 7 && y === 0 ? 2 : 1));
+pool.pin(residents);
+await pool.initialize();
+const target = device.createTexture({ size: [width, height], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+const read = device.createBuffer({ size: width * height * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+async function render(name: string, state: VisualLayerState, source = pool.volumePageSource) {
+  overlay.setLayers(state, undefined, undefined, undefined, undefined, source);
+  const encoder = device.createCommandEncoder();
+  const clear = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 0] }] }); clear.end();
+  assert.ok(overlay.encode(encoder, target.createView()));
+  encoder.copyTextureToBuffer({ texture: target }, { buffer: read, bytesPerRow: width * 4 }, [width, height]);
+  device.queue.submit([encoder.finish()]);
+  await read.mapAsync(GPUMapMode.READ);
+  const pixels = new Uint8Array(read.getMappedRange()).slice(); read.unmap();
+  let visible = 0;
+  for (let i = 3; i < pixels.length; i += 4) if (pixels[i]! > 0) visible++;
+  console.log(`${name}: ${visible} visible pixels`);
+  if (process.env.FLUID_PAGE_PREVIEW && visible) {
+    const rgb = new Uint8Array(width * height * 3);
+    for (let i = 0; i < width * height; i++) rgb.set(pixels.subarray(i * 4, i * 4 + 3), i * 3);
+    writeFileSync(`${process.env.FLUID_PAGE_PREVIEW}-${name}.ppm`, Buffer.concat([Buffer.from(`P6\n${width} ${height}\n255\n`), rgb]));
+  }
+  return { visible, pixels };
+}
+const slice = visualLayers(["pages"]), volume = setPageView(slice, "3d");
+const a = await render("slice", slice), b = await render("3d", volume);
+assert.ok(a.visible > 1000 && b.visible > a.visible);
+const commit = device.createCommandEncoder();
+pool.encodeCommit(commit); device.queue.submit([commit.finish()]);
+assert.deepEqual((await render("3d-after-commit", volume)).pixels, b.pixels, "GPU publication preserves residency, solid pages and signed origin");
+assert.equal((await render("hidden", { ...volume, visible: false })).visible, 0);
+assert.equal((await render("transparent", { ...volume, opacity: { pages: 0 } })).visible, 0);
+const empty = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+assert.equal((await render("missing", volume, { records: { buffer: empty } })).visible, 0);
+// The same coordinate must remain the same colour with a different view selection.
+assert.deepEqual((await render("slice-restored", slice)).pixels, a.pixels);
+assert.deepEqual(errors, []);
+overlay.destroy(); pool.destroy(); uniform.destroy(); bodies.destroy(); read.destroy(); target.destroy(); empty.destroy();
+textures.forEach(t => t.destroy());
+device.destroy();
+console.log("Domain pages GPU probe passed");

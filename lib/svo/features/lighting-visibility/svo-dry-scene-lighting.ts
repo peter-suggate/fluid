@@ -86,52 +86,30 @@ export const PORCELAIN_GARDEN_DRY_SCENE_LIGHTING = Object.freeze({
 }) satisfies NonNullable<SceneDescription["lighting"]>;
 
 /**
- * The rig the stage is lit by, and the reason a base rig is a per-environment
- * choice rather than one constant.
+ * The shared stage rig makes the fluid and its enclosing geometry readable.
+ * A strong directional from above and to the side lights vertical walls.
+ * The overhead practical still supplies the concentrated pool of light.
  *
- * The `stage` environment is a dark stage under one overhead practical (see
- * `lib/core/studio-stage-scene.ts`), and a spot is only a spot against
- * something darker. Under the garden's fixed 2.0-scale warm hemisphere its lamp
- * is a faint warm patch on an already-lit floor and the pool of light has
- * nothing to be brighter than, so this set authors its own environment balance
- * and exposure.
- *
- * The directional is the term that had to come down furthest, and it is the one
- * the rig is least free with, because it is doing two jobs: it lights the dry
- * set *and* it is the water's only key — `resolveWaterKeyLight` reads
- * `lighting.directional` and the raster water pipeline never sees the light
- * table, so the spot does not exist as far as the surface is concerned.
- * Measured on the dry lane, the stage away from the pool tracks it almost
- * exactly: at 1.15 the floor sits at sRGB 114 and the pool is barely five times
- * brighter than the room it is meant to be carved out of; at 0.25 the floor is
- * 41 and the pool reads as light. So the key is a fill, aimed close enough to
- * the lamp's own axis that the highlight it puts on the water agrees with the
- * fixture the pool comes from — a key from where the visible lamp is not is the
- * one thing in this set that would read as a mistake.
- *
- * Exposure is a camera decision and this set is far darker than the one the
- * shared rig was solved on, so it takes its own. Half of what a spotlit stage
- * needs is simply not being pushed up the shoulder: at 0.9 both the pool and
- * the floor around it sat above the knee and the frame was one flat grey, and
- * the fix was a stop and a half of exposure rather than any change to the
- * lights. 0.55 is that solve opened back up by a third of a stop — the first
- * cut at 0.45 kept the pool honest but read as underexposed on the tanks.
+ * The renderer resolves the water's key from the strongest arriving scene
+ * light, including that practical; the directional is also its fallback when
+ * no fixture reaches it. Both consumers inherit this rig through svoSceneLighting.
+ * Environment radiance is zero: the directional and practical provide the
+ * lighting. Exposure stays at 0.55. Scenes can override any field independently.
  */
 export const STUDIO_STAGE_DRY_SCENE_LIGHTING = Object.freeze({
   directional: Object.freeze({
-    direction: Object.freeze([-0.22, 0.94, 0.26] as const),
+    direction: Object.freeze([-0.45, 0.82, 0.35] as const),
     colorLinear: Object.freeze([1, 0.96, 0.9] as const),
-    intensity: 0.25,
+    intensity: 3.0,
   }),
   environment: Object.freeze({
-    // A cold, very low fill. Not zero: the water is a dielectric and needs
-    // something to reflect at grazing angles, and a shadow with no bounce in it
-    // at all reads as a hole rather than as shadow.
+    // No sky fill. Keep the multipliers available for scenes that author their
+    // own environment palette over these defaults.
     diffuseScale: 1,
     specularScale: 0.5,
-    lowerRadianceLinear: Object.freeze([0.008, 0.010, 0.014] as const),
-    upperRadianceLinear: Object.freeze([0.016, 0.020, 0.028] as const),
-    accentRadianceLinear: Object.freeze([0.012, 0.015, 0.022] as const),
+    lowerRadianceLinear: Object.freeze([0, 0, 0] as const),
+    upperRadianceLinear: Object.freeze([0, 0, 0] as const),
+    accentRadianceLinear: Object.freeze([0, 0, 0] as const),
   }),
   grade: Object.freeze({
     toneCurve: "aces" as const,

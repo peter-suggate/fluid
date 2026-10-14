@@ -9,7 +9,7 @@ export const VISUAL_LAYERS = [
   { id: "pressure", requires: ["pressure"], label: "Pressure", color: "#7e9ee5", opacity: 0.65, mode: 5, description: "Signed pressure (blue positive, amber negative; full intensity at 10 kPa) on the exact cells the last solve ran on. Mixed Uniform draws each pressure cell at its own size: h cells (the two-stage h band re-solved over the 4h solve, with the band's own pressure) are tinted green, 4h cells untinted, with resolution seams in lilac. Tiles where the level set crosses zero are outlined in yellow; under dynamic coarsening every such tile should be green, so one held at 4h (a surface the head census missed) is outlined in magenta." },
   { id: "tiles", requires: ["tiles"], label: "Work tiles", color: "#3fae8f", opacity: 0.45, mode: 22, description: "Fine velocity tiles, extension shell, and transport reach where published. Mixed Uniform draws each tile's live h or 4h cells and colours every h tile by why it is h, the first rule the frame head's census fired: crossing, closure (shared vertices at dt = 0), travel within this frame's departure, source, host join, solid or body promotion, bulk importance (no surface, but an importance criterion requires it), or static (authored / host layout). 4h tiles the census traced without banding are tinted faintly; untinted 4h tiles were skipped by the O(1) reach test. Hatched h tiles take the general velocity sampler because a 4h tile lies inside their signed reach box (cross-hatched: reach saturated); unhatched h tiles are certified regular. A crossing tile held at 4h is magenta." },
   { id: "importance", requires: ["tiles"], label: "Detail importance", color: "#ee4a5a", opacity: 0.75, mode: 28, description: "Mixed Uniform under dynamic coarsening: the frame head census's detail importance of every tile holding liquid, h or 4h. Each criterion scores its measure over its threshold, so 1 triggers. All: each tile in its highest-scoring criterion's colour, faint below 1 and solid from 1; tiles the census requires at h for importance are outlined, hatched where only the hold still requires them, cross-hatched where a criterion triggered but the budget dropped the tile. One criterion: a heat map of its score, transparent at 0, its colour at 1 and warming toward white near 4, with triggered tiles outlined." },
-  { id: "pages", requires: ["pages"], label: "Domain pages", color: "#b39bea", opacity: 0.65, mode: 27, description: "Page states from the last step: teal = transport active; amber = sharpening only; faint purple = resident without volume work. AIR pages (nothing stored) are hidden; SOLID pages are grey. Residency can include pressure/interface support; authored pages currently remain allocated." },
+  { id: "pages", requires: ["pages"], label: "Domain pages", color: "#b39bea", opacity: 0.65, mode: 27, description: "Allocated domain pages in purple, solid pages in grey; air pages are hidden. Residency includes liquid, pressure and interface support, so an allocated page need not contain water. Choose a slice or transparent 3D boxes in the studio." },
   { id: "window", requires: ["window"], label: "Working window", color: "#5fb4e6", opacity: 0.8, mode: 23, description: "Actual dispatched window, seed box, launch slack and clipping. Dense scheduling uses the whole domain." },
   { id: "surface", requires: ["phi"], label: "Liquid surface · φ = 0", color: "#ef9f35", opacity: 0.9, mode: 24, description: "Reconstructed liquid and its zero level-set interface. Mixed Uniform colours the interface by the velocity that advected it: teal where all three components were h velocity (h bulk, or retained and extended projected h velocity), amber where the 4h bulk sampler moved it, blended where only some components were h." },
   // The one layer that is not a slice: mode -1 keeps it out of the plane pass
@@ -26,12 +26,15 @@ export type ImportanceView = "all" | UniformDetailCriterion;
 /** How the particle layer paints a sphere: opaque on the speed ramp, or
  * translucent with speed as its opacity and whiteness. */
 export type ParticleView = "speed" | "motion";
+export type PageView = "slice" | "3d";
 export interface VisualLayerState {
   enabled: VisualLayerId[];
   visible: boolean;
   opacity: Partial<Record<VisualLayerId, number>>;
   /** The importance layer's view; absent is "all" (the canonical default). */
   importance?: ImportanceView;
+  /** Domain pages presentation; absent is the slice view. */
+  pages?: PageView;
   /** The particle layer's view; absent is "speed" (the canonical default). */
   particles?: ParticleView;
 }
@@ -61,9 +64,15 @@ export function setParticleView(state: VisualLayerState, view: ParticleView): Vi
   if (view === "speed") delete next.particles;
   return next;
 }
-/** Whether a layer is sampled on the slice plane, as every layer but the particle spheres is. */
+export const pageView = (state: VisualLayerState): PageView => state.pages ?? "slice";
+export function setPageView(state: VisualLayerState, view: PageView): VisualLayerState {
+  const next: VisualLayerState = { ...state, pages: view };
+  if (view === "slice") delete next.pages;
+  return next;
+}
+/** Layers that support slices and appear in the field menu; pages can also draw in 3D. */
 export const isSliceLayer = (id: VisualLayerId): boolean => VISUAL_LAYERS.find(l => l.id === id)!.mode >= 0;
-/** The plane pass has something to draw. */
+/** The grid overlay has something to draw, including the pages 3D view. */
 export const sliceLayersShown = (state: VisualLayerState): boolean => state.visible && state.enabled.some(isSliceLayer);
 export const particleLayerShown = (state: VisualLayerState): boolean => state.visible && state.enabled.includes("particles");
 /** The liquid's own particle display: a setting beside the surface mode, not a layer the menu lists. */
@@ -105,6 +114,7 @@ export function readVisualLayers(raw: string | null, fallback = visualLayers()):
     }
     const criterion = UNIFORM_DETAIL_CRITERIA.find(c => c === value.importance);
     if (criterion) state.importance = criterion;
+    if (value.pages === "3d") state.pages = "3d";
     if (value.particles === "motion") state.particles = "motion";
     return state;
   } catch { return fallback; }

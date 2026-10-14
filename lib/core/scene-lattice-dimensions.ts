@@ -53,13 +53,31 @@ export function sceneFluidLatticeDimensions(
   return [whole(nx), whole(ny), whole(nz)];
 }
 
+/** Pages of the fluid solver's window on each axis: lattice coordinates run 0..64 pages. */
+export const FLUID_WINDOW_PAGES = 64;
+
+/**
+ * Where the container's lattice (the box) sits in the fluid solver's window,
+ * in pages: its low corner. A container with walls sits at the window's
+ * origin; one without (`container.walls: "none"`) sits on the floor in the
+ * middle of the window, so liquid that leaves it has the window's width to
+ * spread in on every side.
+ */
+export function sceneFluidBoxPage(scene: Pick<SceneDescription, "container" | "voxelDomain">): readonly [number, number, number] {
+  if (scene.container.walls !== "none") return [0, 0, 0];
+  const [nx, , nz] = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
+  const centre = (cells: number) => Math.floor((FLUID_WINDOW_PAGES - cells / LATTICE_PAGE_CELLS) / 2);
+  return [centre(nx), 0, centre(nz)];
+}
+
 /**
  * Where a fluid solver's lattice sits in the world: its frame. A lattice
  * coordinate in cells is `(world - origin_m) * cells / size_m` on each axis,
  * and a world position `origin_m + cell * size_m / cells`. The container
- * fixes the cell size (its extent over its cells); the origin is the world
- * position of lattice cell (0,0,0)'s low corner, the container's low corner
- * for every scene the container bounds.
+ * fixes the cell size (its extent over its cells). The origin is the world
+ * position of lattice cell (0,0,0)'s low corner: the container's low corner
+ * less the box's place in the window (`boxCell`, the container's low corner
+ * in lattice cells, zero for a container with walls).
  */
 export interface SceneFluidFrame {
   readonly origin_m: readonly [number, number, number];
@@ -67,13 +85,20 @@ export interface SceneFluidFrame {
   readonly size_m: readonly [number, number, number];
   readonly cells: readonly [number, number, number];
   readonly cellSize_m: readonly [number, number, number];
+  /** The container's low corner: in the world, and in lattice cells. */
+  readonly container_m: readonly [number, number, number];
+  readonly boxCell: readonly [number, number, number];
 }
 
 export function sceneFluidFrame(scene: Pick<SceneDescription, "container" | "voxelDomain">): SceneFluidFrame {
   const c = scene.container, cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   const size_m = [c.width_m, c.height_m, c.depth_m] as const;
-  return { origin_m: [-0.5 * c.width_m, 0, -0.5 * c.depth_m], size_m, cells,
-    cellSize_m: [size_m[0] / cells[0], size_m[1] / cells[1], size_m[2] / cells[2]] };
+  const cellSize_m = [size_m[0] / cells[0], size_m[1] / cells[1], size_m[2] / cells[2]] as const;
+  const container_m = [-0.5 * c.width_m, 0, -0.5 * c.depth_m] as const;
+  const page = sceneFluidBoxPage(scene);
+  const boxCell = [LATTICE_PAGE_CELLS * page[0], LATTICE_PAGE_CELLS * page[1], LATTICE_PAGE_CELLS * page[2]] as const;
+  return { origin_m: [container_m[0] - boxCell[0] * cellSize_m[0], container_m[1] - boxCell[1] * cellSize_m[1], container_m[2] - boxCell[2] * cellSize_m[2]],
+    size_m, cells, cellSize_m, container_m, boxCell };
 }
 
 /** A world coordinate on one axis in lattice cells (unfloored). */

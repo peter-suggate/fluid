@@ -244,13 +244,60 @@ module), `pipes/swift/mtlc` (time Metal's backend on Metal source) and
   volume and zero FLIP samples within six simulated seconds. The ideal
   frictionless transit is about 2.45 s; six seconds allows spreading and the
   drainage tail in this free-slip, zero-surface-tension model.
-- Retain the released water in the basin: seed error and total volume drift
-  each at most 1%. Do not delete residue, add a downhill impulse, or relax the
-  clearance criterion to make the test pass. Report the clearance time and
-  volume history; confirm at 60 and 30 Hz, with flat-floor and still-basin
-  controls. Run GPU gates serially.
-- Status: continuous scene geometry is authored; continuous contact and
-  measured clearance are not yet established. Work in progress in this chat.
+- Retain the released water in the basin. Peter clarified that modest volume
+  increase/loss is acceptable; the earlier 1% drift limit was an investigative
+  gate, not a required acceptance threshold. Report seed error, the complete
+  volume history and clearance time. Do not delete residue, add a downhill
+  impulse, or relax zero slope volume/samples to make the test pass. Confirm
+  at 60 and 30 Hz, with flat-floor and still-basin controls. Run GPU gates
+  serially.
+- Measurement before further solver changes: the frozen continuous-contact
+  candidate (before the additional terrain aperture/dual-volume experiment)
+  starts with 384 cell-volumes. After 30 steps at 60 Hz it has 803.396
+  (+109.2%). The same release over a flat fractional-height floor has
+  1030.830 (+168.4%); a grid-aligned flat floor has 854.857 (+122.6%). With
+  the original slope and zero gravity it has 378.205 (-1.51%). Inclined
+  geometry therefore cannot be the sole cause of the large volume growth.
+  These are half-second diagnostic controls, not clearance acceptance runs.
+- A stage ledger using the production volume integration rule locates the
+  slope candidate's cumulative changes over those 30 steps: advection
+  -744.790 cell-volumes, particle reconstruction +1164.175, retirement zero,
+  redistance +0.0109. The CPU reference agrees with GPU final volume within
+  0.000002 cell-volumes. At step 30, about 85% of reconstruction's added
+  volume lies within one cell above the bed. This establishes the stage and
+  location of the gain, not yet its complete causal mechanism. Raw ledgers
+  are `/tmp/fluid-clearance-contact-ledger.log` and
+  `/tmp/fluid-clearance-control-{flat,flat-integer,zero-gravity}.log`; the
+  isolated measurement copy is `/tmp/fluid-slope-measurement-20261014`.
+- Paper guidance for the next diagnosis:
+  - [Ferstl 2016, sections 3.2–3.3](../papers/narrow-band-flip-2026/ferstl-2016-nbflip/paper.txt)
+    lets the particle surface overrule the advected level set (Eq. 4), keeps
+    ordinary reseeding at least one cell inside the free surface, and
+    explicitly does not conserve mass exactly. Audit our surface coupling
+    and reseeding against these assumptions during impact and spreading.
+  - [Sato 2018, sections 3.2.2–3.2.4](../papers/narrow-band-flip-2026/sato-2018-exnbflip/paper.txt)
+    corrects near-surface particle spacing, updates velocity by the velocity
+    Jacobian times the position correction, discusses particle/grid surface
+    disagreement, and uses Ando et al. [ATW13] reconstruction for simulation.
+    This velocity gradient is distinct from the terrain gradient used for
+    contact. Sato also uses constant-sized particles: fixed size alone is
+    not evidence of a defect. Measure particle crowding, reseeding and
+    reconstruction together before selecting a correction. Neither paper
+    establishes residue-free drainage or justifies deleting attached fluid.
+- Peter subsequently asked to retain the solver changes and implement the
+  complete procedural-boundary path. Implementation and its contract are in
+  [procedural-solid-boundaries-2026-10-14.md](procedural-solid-boundaries-2026-10-14.md):
+  one implicit generator produces voxel fractions and sparse boundary samples;
+  the solver shares their gradients, contact surface and pressure geometry;
+  geometric edits invalidate touched boundary cells and undo restores them.
+  `nbflip-water-slide` now supplies a continuous floor, walls, hood and pit.
+- Status: type checking, current shader preflight, the latest 819-test suite
+  and the GPU boundary contract pass. An isolated 30-step fluid run completes
+  without a solver error but GPU volume rises from 384 to 1105.885 cells
+  (+187.99%) at 0.5 s. The previous reconstruction-growth investigation stays
+  open; neither residue-free clearance nor physical volume behavior is
+  established. The implementation and measurement limits are recorded in
+  the linked boundary document.
 
 ### 4. 4h cache by block
 

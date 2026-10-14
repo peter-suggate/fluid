@@ -121,10 +121,12 @@ fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return umPages[e.x|(
 fn umBlockWord(b:u32)->u32{return umPages[${UNIFORM_PAGE_TABLE_WORDS}u+b];}
 ${uniformLatticeAddressWGSL({constant:false,paged:{blocks:`(arrayLength(&umPages)-${UNIFORM_PAGE_TABLE_WORDS}u)`}})}
 
-fn activeWindowOrigin()->vec3u{return vec3u(0u);}
+// The box: its low cell in the lattice (tuning.xyz, zero but in an open
+// world) and its cells. A launch over the box runs gid from zero.
+fn activeWindowOrigin()->vec3u{return vec3u(params.tuning.xyz);}
 
 fn activeWindowExtent()->vec3u{
-  return vec3u(dims())-activeWindowOrigin();
+  return vec3u(dims());
 }
 
 fn activeId(gid:vec3u)->vec3i{
@@ -190,7 +192,7 @@ fn pressureSurfacePhi(p:vec3i)->f32{
 
 
 
-  return uvPhi(vec3f(clamp(p,vec3i(0),dims()-vec3i(1)))+vec3f(0.5));
+  let o=vec3i(activeWindowOrigin());return uvPhi(vec3f(clamp(p,o,o+dims()-vec3i(1)))+vec3f(0.5));
 }
 
 fn pressurePhi(p:vec3i)->f32{
@@ -385,7 +387,7 @@ fn storeExtrapolationAuthority(id:vec3i){if(!umCellPresent(id)){return;}
 }
 
 @compute @workgroup_size(4,4,4)
-fn buildDenseExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){storeExtrapolationAuthority(vec3i(gid));}
+fn buildDenseExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(id.x<0){return;}storeExtrapolationAuthority(id);}
 
 fn faceWorld(id:vec3i,axis:u32)->vec3f{
   var world=worldCell(id);world[axis]+=0.5*params.cellGravity.xyz[axis];return world;
@@ -396,9 +398,9 @@ fn faceWorld(id:vec3i,axis:u32)->vec3f{
 fn uvCorner(i:u32)->vec3i{return vec3i(i32(i&1u),i32((i>>1u)&1u),i32((i>>2u)&1u));}
 
 fn uvPhi(position:vec3f)->f32{
-  // uvPhiIn is the dense lattice's own texture: its extent holds the point.
-  let p=clamp(position,vec3f(0.0),vec3f(dims()));
-  let base=clamp(vec3i(floor(p)),vec3i(0),dims()-vec3i(1));let f=p-vec3f(base);
+  // uvPhiIn is the box's own field: the box holds the point.
+  let o=vec3f(activeWindowOrigin());let p=clamp(position,o,o+vec3f(dims()));
+  let base=clamp(vec3i(floor(p)),vec3i(o),vec3i(o)+dims()-vec3i(1));let f=p-vec3f(base);
   var values:array<f32,8>;
   for(var i=0u;i<8u;i++){let o=uvCorner(i);let w=select(vec3f(1)-f,f,o==vec3i(1));
     values[i]=textureLoad(uvPhiIn,base+o,0).x*w.x*w.y*w.z;}

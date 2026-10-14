@@ -106,6 +106,17 @@ export interface GPUCompilationCacheStats {
   readonly compilationMilliseconds: number;
 }
 
+export interface GPUCompilationTiming {
+  readonly label: string;
+  readonly kind: "compute" | "render";
+  /** Compute module, or the vertex module for a render pipeline. */
+  readonly module: string;
+  readonly entryPoint?: string;
+  /** Native call duration, excluding queue wait; driver cache hits still count. */
+  readonly milliseconds: number;
+  readonly succeeded: boolean;
+}
+
 export type GPUCompilationSnapshotListener = (snapshot: GPUCompilationSnapshot) => void;
 
 export interface GPUCompilationService {
@@ -133,6 +144,8 @@ export interface GPUCompilationService {
   ): CompiledGPUCompilationBundle<Manifest> | undefined;
 
   snapshot(): GPUCompilationSnapshot;
+  /** Completed native attempts, including failures; manager cache hits are excluded. */
+  compilationTimings(): readonly GPUCompilationTiming[];
   /** Resolve after every queued/in-flight driver compilation has settled. */
   whenIdle(): Promise<void>;
   subscribe(listener: GPUCompilationSnapshotListener): () => void;
@@ -255,6 +268,7 @@ export class GPUCompilationManager implements GPUCompilationService {
   private inFlightHits = 0;
   private compilationAttempts = 0;
   private compilationMilliseconds = 0;
+  private readonly timings: GPUCompilationTiming[] = [];
   private active = 0;
   private sequence = 0;
   private pumpScheduled = false;
@@ -436,6 +450,10 @@ export class GPUCompilationManager implements GPUCompilationService {
     });
   }
 
+  compilationTimings(): readonly GPUCompilationTiming[] {
+    return this.timings.slice();
+  }
+
   subscribe(listener: GPUCompilationSnapshotListener): () => void {
     this.listeners.add(listener);
     listener(this.snapshot());
@@ -506,6 +524,7 @@ export class GPUCompilationManager implements GPUCompilationService {
 
   private async run(job: CompilationJob): Promise<void> {
     const started = performance.now();
+    let succeeded = false;
     this.compilationAttempts++;
     try {
       this.progress = Object.freeze({ key: job.key, label: job.label,
@@ -517,11 +536,17 @@ export class GPUCompilationManager implements GPUCompilationService {
         : await this.#device.createRenderPipelineAsync(job.descriptor as GPURenderPipelineDescriptor);
       this.assertCurrentGeneration();
       this.pipelines.set(job.key, pipeline);
+      succeeded = true;
       job.resolve(pipeline);
     } catch (error) {
       job.reject(error);
     } finally {
-      this.compilationMilliseconds += performance.now() - started;
+      const milliseconds = performance.now() - started;
+      this.compilationMilliseconds += milliseconds;
+      const stage = job.kind === "compute" ? (job.descriptor as GPUComputePipelineDescriptor).compute
+        : (job.descriptor as GPURenderPipelineDescriptor).vertex;
+      this.timings.push(Object.freeze({ label: job.label, kind: job.kind,
+        module: stage.module.label, entryPoint: stage.entryPoint, milliseconds, succeeded }));
       this.pipelineJobs.delete(job.key);
       this.active -= 1;
       if (this.progress?.key === job.key) this.progress = undefined;

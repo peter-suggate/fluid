@@ -1,15 +1,16 @@
+import { bakeProceduralSolid } from "./procedural-solid";
 import type { CameraState, SceneDescription } from "./model";
 import { cellPoint, nbflipDomain } from "./nbflip-paper-scenes";
 import type { SolidWorldVoxelPatch } from "./solid-world";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 
 /**
- * A voxel water slide: a scene whose liquid starts as nothing, grows along a
+ * A procedural water slide: a scene whose liquid starts as nothing, grows along a
  * long channel and ends as a pool, so the space the solver has to hold grows
  * with it.
  *
  * The slide is a channel cut into the top of a solid drum. It winds inward for
- * two turns, falling a cell at a time, and ends under a hood that spills
+ * two turns with a continuous floor, and ends under a hood that spills
  * sideways into a pit at the drum's centre. Three things follow from the
  * liquid being inviscid and the walls free-slip, so nothing but a wall ever
  * slows the stream:
@@ -148,14 +149,42 @@ export function streamInflow(
   };
 }
 
+/** Continuous implicit solid in lattice coordinates. The floor, walls, hood
+ * and pit are composed before sampling, so all consumers share their edges.
+ * Distance-like CSG values are negative inside; no height quantization occurs. */
+export function nbflipSlideSolid(p: readonly [number, number, number]): number {
+  const [x,y,z]=p, dx=x-AXIS[0], dz=z-AXIS[1], r=Math.hypot(dx,dz);
+  const bearing=(Math.atan2(dx,-dz)+TURN)%TURN, end=NBFLIP_SLIDE_END_RAD;
+  let solid=Math.max(r-(END_RADIUS+PITCH/2-PITCH*bearing/TURN),y-PIT_FLOOR);
+  for(let turn=-1;turn<=NBFLIP_SLIDE_TURNS;turn++){
+    const a=bearing+TURN*turn, rad=radius(a), across=r-rad;
+    const alongLow=(-BACK/START_RADIUS-a)*Math.max(1,rad), alongHigh=(a-end-STOP/END_RADIUS)*Math.max(1,rad);
+    const span=Math.max(alongLow,alongHigh,Math.abs(across)-(HALF_WIDTH+WALL/2));
+    const height=TOP-FALL*Math.min(1,Math.max(0,a)/(end-HOOD/END_RADIUS));
+    solid=Math.min(solid,Math.max(span,y-height));
+    // Walls are separate volumes: their vertical faces and the hood's
+    // underside survive in the field instead of being interpreted as slopes.
+    const wallBand=Math.max(span,HALF_WIDTH-Math.abs(across));
+    const gap=across<0?Math.max((end-GAP/END_RADIUS-a)*END_RADIUS,(a-end)*END_RADIUS):1e6;
+    const wallHeight=height+(turn===0&&across>0?RIM:WALL);
+    solid=Math.min(solid,Math.max(wallBand,-gap,y-wallHeight));
+    const back=Math.max(span,a*START_RADIUS,y-(TOP+RIM));
+    const stop=Math.max(span,(end-a)*END_RADIUS,y-(HOOD_FLOOR+HOOD_CLEARANCE+HOOD_LID));
+    solid=Math.min(solid,back,stop);
+    const lidLow=HOOD_FLOOR+HOOD_CLEARANCE;
+    const hood=Math.max(span,(end-HOOD/END_RADIUS-a)*END_RADIUS,(a-end)*END_RADIUS,lidLow-y,y-lidLow-HOOD_LID);
+    solid=Math.min(solid,hood);
+  }
+  return Math.max(-y,solid);
+}
+let slideGeometry: ReturnType<typeof bakeProceduralSolid> | undefined;
+
 export function createNbflipWaterSlide(): SceneDescription {
   const grid = NBFLIP_SLIDE_GRID, h = NBFLIP_SLIDE_CELL_SIZE_M, dt = 1 / NBFLIP_SLIDE_STEP_HZ;
   const scene = nbflipDomain(NBFLIP_SLIDE_SCENE_ID, grid, h, NBFLIP_SLIDE_FRAMES, 0, grid, dt);
-  const lid = HOOD_FLOOR + HOOD_CLEARANCE;
-  scene.solidVoxels.push(
-    ...columnVoxels(grid, (x, z) => [0, slideColumn(x, z)[0]]),
-    ...columnVoxels(grid, (x, z) => [lid, slideColumn(x, z)[1] ? lid + HOOD_LID : lid]),
-  );
+  const geometry=slideGeometry??=bakeProceduralSolid(grid,[h,h,h],nbflipSlideSolid,VOXEL_MATERIAL_IDS.container);
+  scene.solidVoxels=[...geometry.solidVoxels];
+  scene.solidBoundary=geometry.solidBoundary;
   // The stream lies on the floor just past the back wall and leaves along the channel.
   const angle = STREAM_AHEAD / START_RADIUS, speed = NBFLIP_SLIDE_STREAM_CELLS_PER_STEP;
   scene.fluid.inflow = streamInflow(grid, h, dt, nbflipSlideCentreline(angle), TOP,
@@ -163,6 +192,17 @@ export function createNbflipWaterSlide(): SceneDescription {
   // Storage starts at the stream's pages and follows the water. The water reaches every one of the drum's 5x3x5 = 75
   // pages, so the pool holds them all: 80 blocks of 4.90 MiB (two are the AIR and SOLID sentinels).
   scene.fluid.pagePool = { blocks: 80 };
+  return scene;
+}
+
+/** Original whole-voxel staircase retained as a control for the inferred
+ * bed-gradient bake. The registered scene uses continuous geometry above. */
+export function createNbflipWaterSlideVoxelReference(): SceneDescription {
+  const scene=createNbflipWaterSlide();
+  delete scene.solidBoundary;
+  const lid=HOOD_FLOOR+HOOD_CLEARANCE;
+  scene.solidVoxels=[...columnVoxels(NBFLIP_SLIDE_GRID,(x,z)=>[0,slideColumn(x,z)[0]]),
+    ...columnVoxels(NBFLIP_SLIDE_GRID,(x,z)=>[lid,slideColumn(x,z)[1]?lid+HOOD_LID:lid])];
   return scene;
 }
 

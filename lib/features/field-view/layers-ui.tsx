@@ -8,12 +8,12 @@ import {
 import { Choice, ControlRow, Select, Slider, Value } from "../../../components/ui";
 import {
   IMPORTANCE_VIEW_OPTIONS, MIXED_TILE_LEGEND, VISUAL_LAYERS, importanceLegend, importanceView, isSliceLayer, layerOpacity,
-  setImportanceView, toggleVisualLayer,
-  type ImportanceView, type VisualLayerId, type VisualLayerState,
+  setImportanceView, pageView, setPageView, toggleVisualLayer,
+  type ImportanceView, type PageView, type VisualLayerId, type VisualLayerState,
 } from "../../core/visual-layers";
 
 const PAGE_LEGEND = [
-  { color: "#1fc7a6", label: "Transport" }, { color: "#f29c29", label: "Sharpen only" }, { color: "#9475c2", label: "Resident" },
+  { color: "#b39bea", label: "Resident" },
   { color: "#5c616b", label: "Solid" },
 ] as const;
 
@@ -32,7 +32,8 @@ interface VisualLayerRowsProps {
 
 /**
  * The same multi-select instrument in the 2D lab and 3D studio. It lists what
- * is sampled on the slice plane; the particle display is a setting of its own
+ * can be sampled on the slice plane (pages also offer 3D in the studio);
+ * the particle display is a setting of its own
  * beside the surface mode (`SurfaceDisplayRow`).
  */
 export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualLayerRowsProps) {
@@ -70,6 +71,12 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
           />
           <Value value={`${Math.round(layerOpacity(state, layer.id) * 100)}%`} />
         </ControlRow>}
+        {selected && plane && layer.id === "pages" && <Choice<PageView>
+          ariaLabel="Domain pages view"
+          value={pageView(state)}
+          options={[{ value: "slice", label: "Slice" }, { value: "3d", label: "3D" }]}
+          onChange={view => onChange(setPageView(state, view))}
+        />}
         {selected && layer.id === "importance" && <Select<ImportanceView>
           ariaLabel="Detail importance criterion"
           hint="What the importance layer shows: every tile's highest-scoring criterion, or one criterion's score as a heat map."
@@ -91,7 +98,7 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
         <i aria-hidden className={entry.wide ? "is-wide" : undefined} style={{ background: entry.color }} />{entry.label}
       </span>)}
     </div>;
-  const planeControls = plane && state.visible ? <>
+  const planeControls = plane && state.visible && layers.some(l => state.enabled.includes(l.id) && (l.id !== "pages" || pageView(state) === "slice")) ? <>
     <Choice<"x" | "y" | "z">
       ariaLabel="Field view plane"
       value={plane.axis === "off" || plane.axis === "volume" ? "z" : plane.axis as "x" | "y" | "z"}
@@ -119,7 +126,7 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
   >
     {planeControls}
   </ToolstripRow>
-  {shown("pages") && legend("Domain page states", "Last-step volume work. Resident pages may also support pressure and the interface. AIR pages (nothing stored) are hidden.", PAGE_LEGEND)}
+  {shown("pages") && legend("Domain page states", "Current allocation. Resident pages may also support pressure and the interface. Air pages are hidden. 3D boxes show through the scene so the allocation remains visible.", PAGE_LEGEND)}
   {shown("tiles") && legend("Mixed Uniform tile reasons", "Why each h tile is h (the frame head's census), and which velocity sampler it took.", MIXED_TILE_LEGEND)}
   {shown("importance") && legend("Mixed Uniform detail importance", "The frame head census's detail importance. Every score is its measure over its threshold: 1 triggers.", importanceLegend(importanceView(state)))}
   </>;

@@ -38,6 +38,7 @@ export function createUniformTroughScene(
   const point = (x: number, y: number, z: number) =>
     [(x + 0.5) * cell[0] - 1.6, (y + 0.5) * cell[1], (z + 0.5) * cell[2] - 0.6] as const;
   scene.solidVoxels = bathVoxelBoxes(dimensions, (x, y, z) => bathSolidContains(...point(x, y, z)));
+  scene.solidSurface = { kind: "bath" };
   scene.cutaway = { eye_m: cameraPosition({ ...defaultCamera, ...UNIFORM_TROUGH_CAMERA }) };
   scene.fluid = {
     density_kg_m3: 998.2,

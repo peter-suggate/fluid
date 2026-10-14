@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createUniformTroughScene } from "../lib/core/uniform-trough-scenes";
-import { bathInteriorContains } from "../lib/core/voxel-bath";
+import { bathInteriorContains, bathSolidDistance } from "../lib/core/voxel-bath";
 import { createSolidWorld, sampleSolidWorld } from "../lib/core/solid-world";
 import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
 import { uniformInitialVolume } from "../lib/methods/uniform/uniform-volume-initial";
@@ -49,4 +49,21 @@ test("bath seeds remain inside the cavity and hose starts empty on the doubled g
   // The generic volume seeder uses eight samples per partially filled cell.
   assert.ok(Math.abs(totals[0]! - totals[1]!) / totals[0]! < 0.005);
   assert.equal(totals[2], 0);
+});
+
+test("the bath's drawn solid rasterizes to exactly the voxels the solver holds", () => {
+  for (const h of [0.05, 0.025]) {
+    const scene = createUniformTroughScene("hose-fill", h);
+    assert.deepEqual(scene.solidSurface, { kind: "bath" });
+    const [nx, ny, nz] = sceneLatticeDimensions(scene);
+    const world = createSolidWorld(scene.solidVoxels);
+    // The margin lets a cell just outside the lattice count as the empty it is.
+    for (let z = -1; z <= nz; z++) for (let y = -1; y <= ny; y++) for (let x = -1; x <= nx; x++) {
+      const distance = bathSolidDistance((x + 0.5) * h - 1.6, (y + 0.5) * h, (z + 0.5) * h - 0.6);
+      // The voxeliser's own slack: a centre this near a face may fall either way in f32.
+      if (Math.abs(distance) <= 0.02 * h) continue;
+      assert.equal(sampleSolidWorld(world, [x, y, z]).solidFraction, distance < 0 ? 1 : 0,
+        `cell ${[x, y, z]} at ${distance} m with h=${h}`);
+    }
+  }
 });

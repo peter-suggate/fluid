@@ -40,8 +40,9 @@ import { SVO_ENVIRONMENT_FEATURE_VOXELS } from "../svo/features/construction/svo
  * the pool. It is placed so the pool covers the container and falls off inside
  * the stage, which is what puts an edge in the picture.
  *
- * **A near-black ambient, and a key held down to a fill.** A spot is only a spot
- * against something darker; the rig is `STUDIO_STAGE_DRY_SCENE_LIGHTING` in
+ * **A strong directional key.** The key lights walls from the side around the
+ * lamp's pool, with no sky fill. The
+ * shared rig is `STUDIO_STAGE_DRY_SCENE_LIGHTING` in
  * `lib/svo/features/lighting-visibility/svo-dry-scene-lighting.ts`, and it belongs to the environment rather
  * than to any one scene for the same reason the set does.
  *

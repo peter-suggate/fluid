@@ -12,6 +12,8 @@ export {
   LATTICE_PAGE_CELLS,
   sceneFluidLatticeDimensions,
   sceneFluidFrame,
+  sceneFluidBoxPage,
+  FLUID_WINDOW_PAGES,
   fluidFrameCell,
   type SceneFluidFrame,
 } from "./scene-lattice-dimensions";

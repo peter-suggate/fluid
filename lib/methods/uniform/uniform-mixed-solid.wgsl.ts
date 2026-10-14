@@ -21,6 +21,8 @@ import {uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 import {uniformDetailPick} from "./uniform-detail-fields";
 import {UNIFORM_PAGE_TABLE_WORDS,UNIFORM_PAGE_WINDOW,uniformBlockFaceWGSL,uniformFaceTileSlots,uniformLatticeAddressWGSL,type UniformLatticeAddress} from "./uniform-lattice-address";
 import {uniformPagePoolWGSL,type UniformPagePoolLayout} from "./uniform-page-pool";
+import { uniformSolidBoundaryWGSL } from "./uniform-solid-boundary.wgsl";
+import {geometricPlaneBoxWGSL} from "../../core/geometric-plane-box.wgsl";
 
 
 /** The record's rows, by tile key: a row a key (umSolidTiles), then a wall
@@ -73,12 +75,16 @@ export function uniformSolidScratchLayout(cells:readonly [number,number,number])
 }
 /** What the solver sizes its solid mask by (SolidOccupancyMask): the
  * lattice's page table and tile keys, the bed-slope lane, and a slot for
- * every page of the box and of the first layer of pages above an open top.
- * No edit inside the tank can then run out of slots; one that makes more
- * pages partly solid than that is refused by the mask. */
+ * every page of the box and of the first layer of pages above an open top,
+ * and in an open world one for each block the pool can store a page in. No
+ * edit inside the tank can then run out of slots; one that makes more
+ * pages partly solid than that is refused by the mask. The mask's world is
+ * the box's: its cell (0,0,0) is the box's low cell, at the window's page
+ * address.boxPage. */
 export function uniformSolidMaskPages(address:UniformLatticeAddress):SolidOccupancyMaskPages{
  const [x,y,z]=address.pages;
- return {table:address.seed.table,tileKeys:address.tileKeys,slots:x*y*z+(address.openTop?x*z:0),laneWords:uniformSolidScratchLayout(address.cells).bedSlopeWords};
+ return {table:address.seed.table,tileKeys:address.tileKeys,slots:x*y*z+(address.openTop?x*z:0)+(address.world?address.blocks-2:0),
+  laneWords:uniformSolidScratchLayout(address.cells).bedSlopeWords,separateTerrain:true,origin:address.boxPage};
 }
 /** A bed slope as its lane entry: 16 bits, x in the low byte, each rounded
  * half away from zero as the bake rounds (uniform-bed-slope-bake). */
@@ -507,6 +513,10 @@ fn umSolidEnabled()->bool{return false;}
 fn umSolidValid(p:vec3i)->bool{return umCellKind(p)!=UM_SOLID;}
 fn umSolidVoxel(p:vec3i)->bool{return false;}
 fn umBedSlope(p:vec3i)->vec2f{return vec2f(0);}
+fn umBoundaryBase()->u32{return 0u;}
+fn umBoundaryRecord(p:vec3i)->u32{return 0u;}
+fn umBoundarySampleAt(q:vec3f,c:vec3i,r:u32)->vec4f{return vec4f(0,0,0,1e6);}
+fn umBoundarySample(p:vec3f)->vec4f{return vec4f(0,0,0,1e6);}
 fn umCellOpen(p:vec3i)->f32{return select(0.0,1.0,umSolidValid(p));}
 fn umCellIsOpen(p:vec3i)->bool{return umSolidValid(p);}
 fn umCellInsideSolid(p:vec3i)->bool{return false;}
@@ -527,6 +537,9 @@ struct UMSolidParams {
 }
 @group(${group}) @binding(0) var<uniform> umSolidParams:UMSolidParams;
 fn umSolidDimensions()->vec3u{return vec3u(umSolidParams.dimsDt.xyz);}
+// The box's low cell in the lattice (tuning.xyz): what the box-shaped solid
+// stores (the bed-slope lane) are indexed from. Zero but in an open world.
+fn umSolidBoxCell()->vec3i{return vec3i(umSolidParams.tuning.xyz);}
 @group(${group}) @binding(1) var<storage,${writable?"read_write":"read"}> umSolidScratch:array<u32>;
 @group(${group}) @binding(2) var umSolidTerrain:texture_2d<f32>;
 struct UMRigidBody {
@@ -599,7 +612,7 @@ fn umPatchFaceV(t:u32,id:vec3i,axis:u32)->f32{
 ${solidOccupancyMaskWGSL("umSolidScratch","umSolidPage","umSolidVoxel")}
 // The cell is not in a page the lattice walls off: one directory word.
 fn umSolidValid(p:vec3i)->bool{return umSolidPage(p)!=${SOLID_MASK_WALL}u;}
-// The bed-slope lane, after the directory and by cell of the lattice and its
+// The bed-slope lane, after the directory and by cell of the box and its
 // one-cell halo (uniformSolidScratchLayout): the gradient of the bed's height along x and
 // z, in cells per cell and pointing uphill, for an open cell that sits on a
 // solid voxel's top face. Zero for every other cell: a voxel tread is then
@@ -609,8 +622,8 @@ fn umBedSlopeBase()->u32{return ${SOLID_MASK_DIRECTORY_WORDS}u;}
 // The tile cut map's first word: after the lane.
 fn umSolidCutMap()->u32{return umBedSlopeBase()+(umSolidHaloCells()+1u)/2u;}
 fn umBedSlope(p:vec3i)->vec2f{
- if(!umSolidEnabled()){return vec2f(0);}
- let shape=vec3i(umSolidDimensions())+vec3i(2);let q=p+vec3i(1);
+ if(!umSolidEnabled()||umBoundaryRecord(p)!=0u){return vec2f(0);}
+ let shape=vec3i(umSolidDimensions())+vec3i(2);let q=p+vec3i(1)-umSolidBoxCell();
  if(any(q<vec3i(0))||any(q>=shape)){return vec2f(0);}
  let index=u32(q.x+shape.x*(q.y+shape.y*q.z));
  let entry=umSolidScratch[umBedSlopeBase()+(index>>1u)]>>(16u*(index&1u));
@@ -618,8 +631,34 @@ fn umBedSlope(p:vec3i)->vec2f{
 }
 fn umSolidHasTerrain()->bool{return umSolidParams.frame.w>0.5;}
 fn umSolidTerrainHeight(x:i32,z:i32)->f32{let d=vec3i(umSolidDimensions());return textureLoad(umSolidTerrain,vec2i(clamp(x,0,d.x-1),clamp(z,0,d.z-1)),0).x;}
+${geometricPlaneBoxWGSL.replaceAll("geometric", "umTerrain")}
+${uniformSolidBoundaryWGSL}
+// One continuous height and normal for contact and pressure geometry.
+fn umTerrainSurface(q:vec3f)->vec3f{
+ let high=vec2f(umSolidDimensions().xz)-vec2f(1);
+ let p=clamp(q.xz-vec2f(0.5),vec2f(0),high);let a=vec2i(floor(p));let f=fract(p);
+ let h00=umSolidTerrainHeight(a.x,a.y);let h10=umSolidTerrainHeight(a.x+1,a.y);
+ let h01=umSolidTerrainHeight(a.x,a.y+1);let h11=umSolidTerrainHeight(a.x+1,a.y+1);
+ let height=mix(mix(h00,h10,f.x),mix(h01,h11,f.x),f.y);
+ let slope=vec2f(mix(h10-h00,h11-h01,f.y),mix(h01-h00,h11-h10,f.x));
+ let interior=(q.xz>=vec2f(0.5))&(q.xz<=high+vec2f(0.5));
+ return vec3f(height,select(vec2f(0),slope,interior));
+}
+// Integrate four local planes. Exact on a planar heightfield; subdivision
+// resolves the column-centre patch boundaries instead of quantizing a face
+// aperture to quarters. Zero normal width evaluates a face's area fraction.
+fn umTerrainBoxOpen(q:vec3f,width:vec3f)->f32{
+ if(!umSolidHasTerrain()){return 1.0;}
+ var open=0.0;let part=width*vec3f(0.5,1,0.5);
+ for(var k=0u;k<4u;k++){
+  let at=q+vec3f(select(-0.25,0.25,(k&1u)!=0u)*width.x,0,select(-0.25,0.25,(k&2u)!=0u)*width.z);
+  let s=umTerrainSurface(at);
+  open+=0.25*umTerrainPlaneBoxFraction(vec3f(s.y,-1,s.z),at.y-s.x,part);
+ }
+ return open;
+}
 fn umCellInsideTerrain(p:vec3i)->bool{if(!umSolidHasTerrain()){return false;}return f32(p.y)+0.5<umSolidTerrainHeight(p.x,p.z);}
-fn umCellTerrainFraction(p:vec3i)->f32{if(!umSolidHasTerrain()){return 0.0;}return clamp(umSolidTerrainHeight(p.x,p.z)-f32(p.y),0.0,1.0);}
+fn umCellTerrainFraction(p:vec3i)->f32{return 1.0-umTerrainBoxOpen(vec3f(p)+0.5,vec3f(1));}
 fn umSolidWorldCell(id:vec3i)->vec3f{let h=umSolidParams.cellGravity.xyz;
  return vec3f(umSolidParams.frame.x+(f32(id.x)+0.5)*h.x,umSolidParams.frame.y+(f32(id.y)+0.5)*h.y,umSolidParams.frame.z+(f32(id.z)+0.5)*h.z);}
 // The tile cut map (UniformMixedSolid, after the bed-slope lane in the mask
@@ -677,6 +716,7 @@ fn umCellBodyFraction(p:vec3i)->f32{
 fn umCellOpen(p:vec3i)->f32{
  if(!umSolidEnabled()){return select(0.0,1.0,umSolidValid(p));}
  if(umSolidTileClear(p)){return 1.0;}
+ if(umBoundaryRecord(p)!=0u){return min(umBoundaryBoxOpen(vec3f(p)+0.5,vec3f(1)),min(1.0-umCellBodyFraction(p),1.0-umCellTerrainFraction(p)));}
  if(umSolidVoxel(p)){return 0.0;}
  return clamp((1.0-umCellBodyFraction(p))*(1.0-umCellTerrainFraction(p)),0.0,1.0);
 }
@@ -698,6 +738,7 @@ fn umCellIsOpen(p:vec3i)->bool{
 fn umCellInsideSolid(p:vec3i)->bool{
  if(!umSolidEnabled()){return false;}
  if(umSolidTileClear(p)){return false;}
+ if(umBoundaryRecord(p)!=0u){return umBoundarySample(vec3f(p)+0.5).w<0.0||umCellInsideTerrain(p)||umBodyAt(umSolidWorldCell(p))>=0;}
  if(umSolidVoxel(p)){return true;}
  return umCellInsideTerrain(p)||umBodyAt(umSolidWorldCell(p))>=0;
 }
@@ -707,6 +748,7 @@ fn umSolidTraceWorld(p:vec3f)->vec3f{let h=umSolidParams.cellGravity.xyz;
 fn umSolidVoxelAtWorld(world:vec3f)->bool{
  let h=umSolidParams.cellGravity.xyz;
  let p=vec3i(floor(vec3f((world.x-umSolidParams.frame.x)/h.x,(world.y-umSolidParams.frame.y)/h.y,(world.z-umSolidParams.frame.z)/h.z)));
+ if(umBoundaryRecord(p)!=0u){let q=vec3f((world.x-umSolidParams.frame.x)/h.x,(world.y-umSolidParams.frame.y)/h.y,(world.z-umSolidParams.frame.z)/h.z);return umBoundarySample(q).w<0.0;}
  return umSolidVoxel(p);
 }
 fn umSolidTerrainAtWorld(world:vec3f)->bool{
@@ -714,7 +756,8 @@ fn umSolidTerrainAtWorld(world:vec3f)->bool{
  let h=umSolidParams.cellGravity.xyz;let d=vec3i(umSolidDimensions());
  let x=clamp(i32(floor((world.x-umSolidParams.frame.x)/h.x)),0,d.x-1);
  let z=clamp(i32(floor((world.z-umSolidParams.frame.z)/h.z)),0,d.z-1);
- return world.y-umSolidParams.frame.y<umSolidTerrainHeight(x,z)*h.y;
+ let q=vec3f((world.x-umSolidParams.frame.x)/h.x,(world.y-umSolidParams.frame.y)/h.y,(world.z-umSolidParams.frame.z)/h.z);
+ return q.y<umTerrainSurface(q).x;
 }
 fn umSolidAtWorld(world:vec3f)->bool{return umSolidVoxelAtWorld(world)||umSolidTerrainAtWorld(world)||umBodyAt(world)>=0;}
 // insideAnyTraceSolid for a lattice-coordinate point: voxels and bodies
@@ -733,7 +776,7 @@ fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{
  if(!umSolidEnabled()){return 0.0;}
  if(umBodyCount()==0u){return 0.0;}
  var neighbor=id;neighbor[axis]+=1;
- if(umSolidVoxel(id)||umSolidVoxel(neighbor)){return 0.0;}
+ if((umSolidVoxel(id)&&umBoundaryRecord(id)==0u)||(umSolidVoxel(neighbor)&&umBoundaryRecord(neighbor)==0u)){return 0.0;}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;let reach=max(h.x,max(h.y,h.z));
  var near=false;
  for(var i=0u;i<umBodyCount();i++){near=near||umBodyNear(i,world,2.0*reach);}
@@ -756,9 +799,11 @@ fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{
 // faceOpenFraction: the Sec. 3.6 transverse face aperture.
 fn umFaceOpen(id:vec3i,axis:u32)->f32{
  if(!umSolidEnabled()){return 1.0;}
+ var q=vec3f(id)+0.5;q[axis]+=0.5;var width=vec3f(1);width[axis]=0.0;
+ if(umBodyCount()==0u&&umBoundaryTouchesBox(q,vec3f(1))){return min(umBoundaryBoxOpen(q,width),umTerrainBoxOpen(q,width));}
  var neighbor=id;neighbor[axis]+=1;
  if(umSolidFaceClear(id,neighbor,axis)){return 1.0;}
- if(umSolidVoxel(id)||umSolidVoxel(neighbor)){return 0.0;}
+ if((umSolidVoxel(id)&&umBoundaryRecord(id)==0u)||(umSolidVoxel(neighbor)&&umBoundaryRecord(neighbor)==0u)){return 0.0;}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;
  let tangentA=(axis+1u)%3u;let tangentB=(axis+2u)%3u;var solid=0.0;
  for(var sampleIndex=0u;sampleIndex<4u;sampleIndex+=1u){
@@ -776,9 +821,12 @@ fn umFaceOpen(id:vec3i,axis:u32)->f32{
 // owner (the native CM11a record used V=0). An AIR page is open space.
 fn umPressureFaceV(id:vec3i,axis:u32)->f32{
  if(!umSolidEnabled()){return 1.0;}
+ var q=vec3f(id)+0.5;q[axis]+=0.5;
+ if(umBodyCount()==0u&&umBoundaryTouchesBox(q,vec3f(1))){return min(umBoundaryBoxOpen(q,vec3f(1)),umTerrainBoxOpen(q,vec3f(1)));}
  var neighbor=id;neighbor[axis]+=1;
  if(umSolidFaceClear(id,neighbor,axis)){return 1.0;}
- if(umSolidVoxel(id)||umSolidVoxel(neighbor)){return 0.5*(umCellOpen(id)+umCellOpen(neighbor));}
+ if((umSolidVoxel(id)&&umBoundaryRecord(id)==0u)||(umSolidVoxel(neighbor)&&umBoundaryRecord(neighbor)==0u)){return 0.5*(umCellOpen(id)+umCellOpen(neighbor));}
+ if(umBodyCount()==0u){var q=vec3f(id)+0.5;q[axis]+=0.5;return umTerrainBoxOpen(q,vec3f(1));}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;var solid=0.0;
  for(var sampleIndex=0u;sampleIndex<8u;sampleIndex+=1u){
   let sampleWorld=world+vec3f(select(-0.4,0.4,(sampleIndex&1u)!=0u)*h.x,select(-0.4,0.4,(sampleIndex&2u)!=0u)*h.y,select(-0.4,0.4,(sampleIndex&4u)!=0u)*h.z);

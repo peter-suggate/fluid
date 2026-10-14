@@ -1,3 +1,4 @@
+import { rebaseProceduralSolid } from "./procedural-solid";
 import type { CameraState, SceneDescription } from "./model";
 import { defaultCamera } from "./model";
 import type { EnvironmentId } from "./environments";
@@ -313,6 +314,7 @@ function finishSceneDocument(
     throw new Error(`Scene ${definition.id} has no variant ${variantId}`);
   }
   const scene = variant ? variant.apply(body) : body;
+  const previousSolids = scene.solidVoxels;
   const authoredEdits = solidVoxelEditsForScene(scene);
   if (definition.environment === "garden") {
     // The garden's generated terrain is the vessel. An additional rectangular
@@ -329,6 +331,7 @@ function finishSceneDocument(
     // ordinary shell once on the final lattice.
     scene.solidVoxels = [...solidVoxelShellForScene(scene), ...authoredEdits];
   }
+  rebaseProceduralSolid(scene, previousSolids);
   return scene.scenery
     ? { ...scene, environment: definition.environment }
     : sceneWithEnvironment(scene, definition.environment);

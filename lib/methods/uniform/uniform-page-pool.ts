@@ -54,9 +54,8 @@
  *
  * published (UniformPagePool.published, only with options.box; the grid
  * overlay's page record, GPUFluidVolumePageSource): eight header words
- * [32, box pages x, y, z, status.resident, 0, 0, 0], then one word per box
- * page at x + pages.x*(y + pages.y*z), 1 when the page is resident, else 0
- * (AIR and SOLID alike). The seed writes it and upPublish, the last launch of
+ * [32, box pages x, y, z, status.resident, signed box origin x, y, z], then one word per box
+ * page at x + pages.x*(y + pages.y*z), 0 for AIR, 1 for resident, 2 for SOLID. The seed writes it and upPublish, the last launch of
  * every commit, rewrites the count and the flags from the table.
  *
  * The table and the block words (layout.tail.words, in that order) are the
@@ -140,7 +139,7 @@ export const UNIFORM_PAGE_POOL_BLOCK={free:0,resident:1,pending:2,sentinel:3} as
 export const UNIFORM_PAGE_POOL_RECORD={page:0,state:3,generation:4,idle:5,words:RECORD} as const;
 export const UNIFORM_PAGE_POOL_WORK={requests:0,host:1,flags:2,first:3,firstPage:4,pops:7,head:8,detail:9,pins:10,words:16} as const;
 /** The published record (file header): header words and the offset of the flags. */
-export const UNIFORM_PAGE_POOL_PUBLISHED={edge:0,pages:1,resident:4,flags:8} as const;
+export const UNIFORM_PAGE_POOL_PUBLISHED={edge:0,pages:1,resident:4,origin:5,flags:8} as const;
 
 /** The scene's bounding box in pages: its low corner and its extent. */
 export interface UniformPagePoolBox {readonly origin:readonly [number,number,number];readonly pages:readonly [number,number,number]}
@@ -307,10 +306,11 @@ export function uniformPagePoolBoxSeed(layout:UniformPagePoolLayout,options:Unif
 export function uniformPagePoolPublished(seed:UniformPagePoolSeed,layout:UniformPagePoolLayout=seed.layout):Uint32Array<ArrayBuffer>{
  const l=layout,{origin,pages:[px,py,pz]}=l.box,P=UNIFORM_PAGE_POOL_PUBLISHED,record=new Uint32Array(l.published.words),signed=new Int32Array(seed.state.buffer,seed.state.byteOffset,seed.state.length);
  if(!record.length)return record;
- record[P.edge]=UNIFORM_PAGE_POOL_EDGE;record[P.pages]=px;record[P.pages+1]=py;record[P.pages+2]=pz;record[P.resident]=seed.resident.length;
+ record[P.edge]=UNIFORM_PAGE_POOL_EDGE;record[P.pages]=px;record[P.pages+1]=py;record[P.pages+2]=pz;record[P.resident]=seed.resident.length;record.set(origin,P.origin);
  for(let z=0,i=P.flags;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++,i++){
   const qx=origin[0]+x,qy=origin[1]+y,qz=origin[2]+z,block=seed.table[uniformPagePoolEntry(l,qx,qy,qz)]!;
-  if(block===UNIFORM_PAGE_POOL_AIR||block===UNIFORM_PAGE_POOL_SOLID)continue;
+  if(block===UNIFORM_PAGE_POOL_SOLID){record[i]=2;continue;}
+  if(block===UNIFORM_PAGE_POOL_AIR)continue;
   const r=l.state.records+RECORD*block;
   if(signed[r]===qx&&signed[r+1]===qy&&signed[r+2]===qz)record[i]=1;
  }
@@ -387,13 +387,14 @@ export interface UniformPagePoolResidency {
  * otherwise, live, the pages within UNIFORM_PAGE_POOL_SEED_MARGIN cells of a
  * wet cell of the initial liquid and the pinned; otherwise every box page.
  * liquid: the initial cell volumes, x fastest, asked for only by the
- * wet-cell case. */
-export function uniformPagePoolResidency(cells:readonly [number,number,number],record:{readonly blocks?:number;readonly air?:readonly (readonly [number,number,number])[]}|undefined,sources:readonly UniformPagePoolCellBox[],follows:boolean,liquid:()=>ArrayLike<number>):UniformPagePoolResidency{
+ * wet-cell case. origin: the box's low page in the window. The sources'
+ * cell boxes and the pins are the window's, the AIR pages the box's. */
+export function uniformPagePoolResidency(cells:readonly [number,number,number],record:{readonly blocks?:number;readonly air?:readonly (readonly [number,number,number])[]}|undefined,sources:readonly UniformPagePoolCellBox[],follows:boolean,liquid:()=>ArrayLike<number>,origin:readonly [number,number,number]=[0,0,0]):UniformPagePoolResidency{
  const E=UNIFORM_PAGE_POOL_EDGE,pages:[number,number,number]=[Math.ceil(cells[0]/E),Math.ceil(cells[1]/E),Math.ceil(cells[2]/E)],[px,py,pz]=pages,count=px*py*pz;
  const live=follows,resident=new Uint8Array(count).fill(1),pinned=new Uint8Array(count);
  const coordinates=(flags:Uint8Array,set:number)=>{const out:[number,number,number][]=[];for(let z=0,i=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++,i++)if(flags[i]===set)out.push([x,y,z]);return out;};
  if(live){
-  for(const {x,y,z} of uniformPagePoolSourcePages(cells,sources))pinned[x+px*(y+py*z)]=1;
+  for(const {x,y,z} of uniformPagePoolSourcePages(cells,sources,origin))pinned[x-origin[0]+px*(y-origin[1]+py*(z-origin[2]))]=1;
   if(!record?.air){resident.set(wetPages(cells,pages,liquid(),UNIFORM_PAGE_POOL_SEED_MARGIN));for(let i=0;i<count;i++)if(pinned[i])resident[i]=1;}
  }
  for(const [x,y,z] of record?.air??[]){
@@ -401,13 +402,14 @@ export function uniformPagePoolResidency(cells:readonly [number,number,number],r
   resident[x+px*(y+py*z)]=0;
  }
  if(!live)pinned.set(resident);
- return {live,air:coordinates(resident,0),pins:coordinates(pinned,1).map(([x,y,z])=>({x,y,z}))};
+ return {live,air:coordinates(resident,0),pins:coordinates(pinned,1).map(([x,y,z])=>({x:x+origin[0],y:y+origin[1],z:z+origin[2]}))};
 }
 /** The box pages a live pool pins for its sources' cell boxes, each grown by
- * UNIFORM_PAGE_POOL_PIN_MARGIN: every page once. */
-export function uniformPagePoolSourcePages(cells:readonly [number,number,number],sources:readonly UniformPagePoolCellBox[]):{x:number;y:number;z:number}[]{
- const E=UNIFORM_PAGE_POOL_EDGE,pages:[number,number,number]=[Math.ceil(cells[0]/E),Math.ceil(cells[1]/E),Math.ceil(cells[2]/E)],[px,py,pz]=pages,box={origin:[0,0,0] as const,pages,count:px*py*pz},seen=new Uint8Array(box.count);
- return sources.flatMap(s=>cellBoxPages(box,s.low,s.high,UNIFORM_PAGE_POOL_PIN_MARGIN)).filter(({x,y,z})=>{const i=x+px*(y+py*z),first=!seen[i];seen[i]=1;return first;});
+ * UNIFORM_PAGE_POOL_PIN_MARGIN: every page once, in the window (the box's
+ * low page at origin). */
+export function uniformPagePoolSourcePages(cells:readonly [number,number,number],sources:readonly UniformPagePoolCellBox[],origin:readonly [number,number,number]=[0,0,0]):{x:number;y:number;z:number}[]{
+ const E=UNIFORM_PAGE_POOL_EDGE,pages:[number,number,number]=[Math.ceil(cells[0]/E),Math.ceil(cells[1]/E),Math.ceil(cells[2]/E)],[px,py,pz]=pages,box={origin,pages,count:px*py*pz},seen=new Uint8Array(box.count);
+ return sources.flatMap(s=>cellBoxPages(box,s.low,s.high,UNIFORM_PAGE_POOL_PIN_MARGIN)).filter(({x,y,z})=>{const i=x-origin[0]+px*(y-origin[1]+py*(z-origin[2])),first=!seen[i];seen[i]=1;return first;});
 }
 /** One flag per box page: a wet cell (volume above zero) lies within `margin`
  * cells of it on every axis. Each page keeps the box of its wet cells, so a
@@ -439,7 +441,7 @@ export function uniformPagePoolFatalMessage(layout:UniformPagePoolLayout,status:
  const first=status[offset+S.fatalFirst]!,commit=status[offset+S.fatalGeneration]!,detail=status[offset+S.fatalDetail]!,at=offset+S.fatalPage;
  const page=`page (${status[at]!|0}, ${status[at+1]!|0}, ${status[at+2]!|0})`;
  switch(first){
-  case F.exhausted:return `Page pool exhausted at commit ${commit}: ${page} requested with ${detail} of ${layout.slots} blocks resident and the other ${layout.slots-detail} claimed by the same commit. Raise pagePool.blocks (4.9 MiB each) or shrink the scene.`;
+  case F.exhausted:return `Page pool exhausted at commit ${commit}: ${page} requested with ${detail} of ${layout.slots} blocks resident and the other ${layout.slots-detail} claimed by the same commit. Raise pagePool.memory_MiB or pagePool.blocks (about 10 MiB a block, UNIFORM_PAGE_BLOCK_MiB) or shrink the scene.`;
   case F.requests:return `More than claimsPerStep (${layout.requests}) pages were requested in commit ${commit} (first dropped: ${page}).`;
   case F.alias:return `Two pages name one page table entry (${page}, commit ${commit}): the resident set is wider than the table's ${layout.table} pages, or an allocator bug.`;
   case F.closureCap:return `Departure travel gives a closure of ${detail} tiles, over the cap of ${layout.closureCap} (commit ${commit}, ${page}): a sample is moving faster than the residency certificate covers.`;
@@ -675,7 +677,7 @@ fn upBoxPage(i:u32)->vec3i{return UP_BOX_ORIGIN+vec3i(vec3u(i%UP_BOX_PAGES.x,(i/
 @compute @workgroup_size(64) fn upPublish(@builtin(global_invocation_id) gid:vec3u){
  if(gid.x>=UP_BOX_COUNT){return;}
  if(gid.x==0u){upPublished[${UNIFORM_PAGE_POOL_PUBLISHED.resident}u]=upResidentCount();}
- upPublished[${l.published.flags}u+gid.x]=select(0u,1u,upBlockOf(upBoxPage(gid.x))!=UP_NONE);
+ upPublished[${l.published.flags}u+gid.x]=select(select(0u,2u,upKind(upBoxPage(gid.x))==UP_SOLID),1u,upBlockOf(upBoxPage(gid.x))!=UP_NONE);
 }`):undefined,compile("Uniform page pool commit",/* wgsl */`${source(l,0,0,1,"read_write")}
 ${this.mirrors.map((_,i)=>`@group(0) @binding(${2+i}) var<storage,read_write> upMirror${i}:array<u32>;`).join("\n")}
 const S_FREE:u32=${S.free}u;const S_PENDING:u32=${S.pending}u;const S_FATAL:u32=${S.fatal}u;

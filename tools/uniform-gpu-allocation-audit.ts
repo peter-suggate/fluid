@@ -19,6 +19,7 @@ export function auditUniformGPUAllocations(device: GPUDevice) {
         r32float: 4, r32uint: 4, r32sint: 4, rg32float: 8, rg32uint: 8,
         rgba32float: 16, rgba32uint: 16, rgba32sint: 16,
         rgba16float: 8, r16float: 2, rg16float: 4, rgba8unorm: 4,
+        r8unorm: 1, rg8unorm: 2, rg11b10ufloat: 4,
       };
       const size = bytesPerTexel[texture.format];
       if (size === undefined || texture.mipLevelCount !== 1 || texture.sampleCount !== 1)

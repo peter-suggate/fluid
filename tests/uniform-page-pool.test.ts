@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { uniformPagePoolBoxPages, uniformPagePoolBoxSeed, uniformPagePoolCellBoxPages, uniformPagePoolEntry, uniformPagePoolFatalMessage, uniformPagePoolLayout, uniformPagePoolPublished,
+import { uniformPagePoolSeed, uniformPagePoolBoxPages, uniformPagePoolBoxSeed, uniformPagePoolCellBoxPages, uniformPagePoolEntry, uniformPagePoolFatalMessage, uniformPagePoolLayout, uniformPagePoolPublished,
   UNIFORM_PAGE_POOL_FATAL as FATAL, UNIFORM_PAGE_POOL_SOLID as SOLID, UNIFORM_PAGE_POOL_STATUS as STATUS } from "../lib/methods/uniform/uniform-page-pool";
 
 const letters = uniformPagePoolLayout({ blocks: 208, idleSteps: 8, box: { origin: [0, 0, 0], pages: [8, 6, 4] } });
@@ -32,7 +32,7 @@ test("a partial box seed off the window origin: AIR inside the box, the chosen k
   assert.deepEqual(uniformPagePoolBoxPages(layout, { resident: (x, y) => x === y }), [0, 1, 2, 0, 1, 2].map((i, n) => ({ x: -1 + i, y: 6 + i, z: 3 + (n > 2 ? 1 : 0), block: n + 1 })));
   // Window coordinates wrap: box x -1..1 is 7, 0, 1 and y 6..9 is 6, 7, 0, 1.
   assert.deepEqual([[7, 6, 3], [0, 7, 3], [1, 0, 4], [1, 6, 3], [2, 6, 3], [7, 2, 3], [7, 6, 5]].map(([x, y, z]) => seed.table[uniformPagePoolEntry(layout, x!, y!, z!)]), [1, 2, 6, 0, SOLID, SOLID, SOLID]);
-  assert.deepEqual([...uniformPagePoolPublished(seed)], [32, 3, 4, 2, 6, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]);
+  assert.deepEqual([...uniformPagePoolPublished(seed)], [32, 3, 4, 2, 6, 0xffffffff, 6, 3, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]);
   assert.throws(() => uniformPagePoolBoxSeed(uniformPagePoolLayout({ table: 8, blocks: 5, idleSteps: 1, box: { origin: [0, 0, 0], pages: [2, 2, 1] } })), /more pages than the pool's 3 blocks/);
   assert.throws(() => uniformPagePoolBoxPages(uniformPagePoolLayout({ blocks: 5, idleSteps: 1 })), /no box/);
   assert.throws(() => uniformPagePoolLayout({ table: 8, blocks: 5, idleSteps: 1, box: { origin: [0, 0, 0], pages: [9, 1, 1] } }), /1\.\.8 pages an axis/);
@@ -62,4 +62,12 @@ test("the fatal message is null without a fatal and names the first bit's page, 
   assert.equal(raise(FATAL.closureCap, FATAL.closureCap, [1, 1, 1], 9, 21), "Departure travel gives a closure of 21 tiles, over the cap of 16 (commit 9, page (1, 1, 1)): a sample is moving faster than the residency certificate covers.");
   // The first bit raised decides the message, whatever joined it later.
   assert.equal(raise(FATAL.closure | FATAL.exhausted, FATAL.closure, [7, 5, 3], 4, 0), "Liquid or band tile found in page (7, 5, 3), which was not resident at the start of commit 4.");
+});
+
+test("published pages distinguish solid from air independently of physical block order", () => {
+  const layout = uniformPagePoolLayout({ table: 8, blocks: 6, idleSteps: 2, box: { origin: [-2, 0, 0], pages: [3, 1, 1] } });
+  const seed = uniformPagePoolSeed(layout, [{ x: -1, y: 0, z: 0, block: 3 }], x => x === 6 ? 2 : 1);
+  const published = uniformPagePoolPublished(seed);
+  assert.deepEqual([...published.slice(8)], [2, 1, 0]);
+  assert.deepEqual([...new Int32Array(published.buffer).slice(5, 8)], [-2, 0, 0]);
 });

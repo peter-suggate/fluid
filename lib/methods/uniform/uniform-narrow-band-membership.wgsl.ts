@@ -76,7 +76,7 @@ var<workgroup> nbBandMask:array<atomic<u32>,2>;
   for(var k=0u;k<8u;k++){let v=l+umCorner(k,2u);let value=nbBandVertices[v.x+5u*(v.y+5u*v.z)];low=min(low,value);high=max(high,value);}
   // Exact zero belongs to either incident cell; a flat zero plateau alone
   // is not an interface. Domain and solid walls are not free surfaces.
-  if(low<=0.0&&high>=0.0&&low<high&&umCellOpen(vec3i(origin+l))>=0.5){atomicOr(&nbBandMask[l.z>>1u],1u<<(l.x+4u*l.y+16u*(l.z&1u)));}
+  if(low<=0.0&&high>=0.0&&low<high&&umCellOpen(vec3i(origin+l))>1e-5){atomicOr(&nbBandMask[l.z>>1u],1u<<(l.x+4u*l.y+16u*(l.z&1u)));}
  }
  workgroupBarrier();
  let mask=vec2u(atomicLoad(&nbBandMask[0]),atomicLoad(&nbBandMask[1]));

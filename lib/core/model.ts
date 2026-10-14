@@ -4,6 +4,7 @@ import type { InitialLiquidHeightField } from "./initial-height-field";
 import { liquidExtrusionBounds, liquidExtrusionRefusal, type LiquidExtrusion } from "./liquid-extrusion";
 import { validateRefinementRegions } from "./refinement-regions";
 import { validateTerrain, type TerrainDescription } from "./terrain";
+import { validateProceduralSolid, type ProceduralSolidBoundary } from "./procedural-solid";
 import type { SolidWorldVoxelPatch } from "./solid-world";
 import { sweptFlumeSurfaceErrors, type SweptFlumeSurface } from "./swept-flume-surface";
 import { validateSolidPatch } from "./solid-patch/compose";
@@ -139,6 +140,16 @@ export interface SceneDescription {
      * There is no transparent presentation; `none` hides the vessel.
      */
     vessel?: "outline" | "none";
+    /**
+     * Whether the container has walls. Omitted: it does (its sides are the
+     * solver's walls, and its floor and a closed top are too). `none`: the
+     * container is only where the liquid starts, on open ground. The ground is
+     * the plane y = 0, solid below; everywhere above it, beside the container
+     * as over it, is air, so liquid leaves the container on every side and the
+     * fluid solver claims pages wherever it goes. An open world has an open top,
+     * a box shape, closed depth faces, no terrain and no procedural boundary.
+     */
+    walls?: "none";
   };
   /** Authoritative uniform lattice shared by scene geometry, SVO rendering, and fluid when enabled. */
   voxelDomain: {
@@ -192,6 +203,8 @@ export interface SceneDescription {
   /** Static solids authored directly on the same signed voxel lattice as the tank shell. */
   /** Authoritative static solids in signed finest-voxel coordinates. */
   solidVoxels: SolidWorldVoxelPatch[];
+  /** Continuous boundary sampled by the same producer as the generated voxel prefix. */
+  solidBoundary?: ProceduralSolidBoundary;
   /**
    * Everything visible that is not water, terrain or a rigid body, as a
    * declarative graph the document owns outright. An environment preset seeds
@@ -283,11 +296,14 @@ export interface SceneDescription {
     /**
      * Uniform: the page pool at scene build (lattice pages of 32 cells an
      * axis). blocks: storage blocks, two of them holding no page (default:
-     * one per page of the box and those two). permute: a number that fixes a
+     * one per page of the box and those two). memory_MiB: instead of blocks,
+     * the budget the pool is sized from (UNIFORM_PAGE_BLOCK_MiB a block);
+     * liquid that needs a page past it is the pool's exhausted fatal, never a
+     * reallocation. permute: a number that fixes a
      * shuffle of the pages' blocks. air: pages of the box seeded as air, with
      * no storage, by page coordinate.
      */
-    pagePool?: { blocks?: number; permute?: number; air?: [number, number, number][] };
+    pagePool?: { blocks?: number; memory_MiB?: number; permute?: number; air?: [number, number, number][] };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
@@ -569,6 +585,16 @@ export function validateScene(scene: SceneDescription): string[] {
   if (scene.solidSurface?.kind === "swept-flume") errors.push(...sweptFlumeSurfaceErrors(scene.solidSurface));
   else if (scene.solidSurface !== undefined && scene.solidSurface.kind !== "bath") errors.push("Unknown solid surface kind");
   if (c?.shape === "sphere" && c.top !== "closed") errors.push("A spherical container must be closed");
+  if (c?.walls !== undefined) {
+    if (c.walls !== "none") errors.push("Container walls must be omitted or 'none'");
+    else if (c.top !== "open" || (c.shape ?? "box") !== "box" || c.depthBoundary === "symmetry" || scene.terrain || scene.solidBoundary) {
+      errors.push("A container without walls stands on open ground: it needs an open top, a box shape and closed depth faces, and takes no terrain or procedural boundary");
+    }
+  }
+  const pool = scene.fluid?.pagePool;
+  if (pool?.memory_MiB !== undefined && (!(pool.memory_MiB > 0) || pool.blocks !== undefined)) {
+    errors.push("A page pool's memory budget must be positive, and it replaces a block count");
+  }
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
   if (c?.depthBoundary !== undefined && c.depthBoundary !== "closed" && c.depthBoundary !== "symmetry") {
@@ -787,6 +813,8 @@ export function validateScene(scene: SceneDescription): string[] {
       }
   }
   if (scene.terrain && c) errors.push(...validateTerrain(scene.terrain, c));
+  if (scene.solidBoundary) try { validateProceduralSolid(scene.solidBoundary); }
+  catch (error) { errors.push(`Invalid solid boundary: ${String(error)}`); }
   if (scene.scenery) errors.push(...validateSceneryGraph(scene.scenery));
   if (scene.backdrop !== undefined) errors.push(...validateBackdrop(scene.backdrop));
   if (!scene.nominalResolution || !(scene.nominalResolution.length_m > 0)) errors.push("Nominal resolution must be positive");

@@ -50,6 +50,8 @@ export function solidOccupancyMaskLayout(tileKeys: number, slots: number, laneWo
 
 /** What a mask is sized by, for the life of its image. */
 export interface SolidOccupancyMaskPages {
+  /** A solver with a separate terrain heightfield must not close its cut cells here. */
+  readonly separateTerrain?: boolean;
   /** The lattice's page table as seeded, 64³ words: a page whose word is 0xffffffff is walled off for good. */
   readonly table: ArrayLike<number>;
   /** Tile keys of the page pool: the cut map's words. */
@@ -58,6 +60,10 @@ export interface SolidOccupancyMaskPages {
   readonly slots: number;
   /** Words kept between the directory and the cut map for a lane its owner writes on the GPU; the mask leaves them zero and never uploads over them after the first whole image. */
   readonly laneWords?: number;
+  /** The window page of the world's page (0,0,0), default the window's origin: the
+   * directory is by window page, and the world, `solid`, `wall` and `changed` are
+   * in the world's own cells. */
+  readonly origin?: readonly [number, number, number];
 }
 
 /** The directory word of the page holding cell (x, y, z): umSolidPage. */
@@ -130,6 +136,10 @@ const popcount = (value: number): number => {
  * of one world and part of the next.
  */
 export class SolidOccupancyMask {
+  private readonly separateTerrain: boolean;
+  /** pages.origin, and the same in cells. */
+  private readonly origin: readonly [number, number, number];
+  private readonly originCell: readonly [number, number, number];
   readonly words: Uint32Array<ArrayBuffer>;
   readonly layout: SolidOccupancyMaskLayout;
   private world: SolidWorld | undefined;
@@ -144,6 +154,9 @@ export class SolidOccupancyMask {
   private readonly dirty = { directoryLow: 0, directoryHigh: -1, slotLow: 0, slotHigh: -1 };
 
   constructor(pages: SolidOccupancyMaskPages) {
+    this.separateTerrain = pages.separateTerrain ?? false;
+    const origin = this.origin = pages.origin ?? [0, 0, 0];
+    this.originCell = [origin[0] * SOLID_MASK_PAGE_CELLS, origin[1] * SOLID_MASK_PAGE_CELLS, origin[2] * SOLID_MASK_PAGE_CELLS];
     if (pages.table.length !== SOLID_MASK_DIRECTORY_WORDS) throw new RangeError(`A solid mask takes the lattice's ${SOLID_MASK_DIRECTORY_WORDS}-word page table; it was given ${pages.table.length} words`);
     const layout = this.layout = solidOccupancyMaskLayout(pages.tileKeys, pages.slots, pages.laneWords);
     const words = this.words = new Uint32Array(layout.words);
@@ -164,10 +177,10 @@ export class SolidOccupancyMask {
   get slotsHeld(): number { return this.layout.slots - this.freeCount; }
 
   /** Whether cell (x, y, z) is solid: what `umSolidVoxel` reads from the image. */
-  solid(x: number, y: number, z: number): boolean { return solidOccupancyMaskVoxel(this.words, x, y, z); }
+  solid(x: number, y: number, z: number): boolean { const o = this.originCell; return solidOccupancyMaskVoxel(this.words, x + o[0], y + o[1], z + o[2]); }
 
   /** Whether the lattice walls off the page of cell (x, y, z). */
-  wall(x: number, y: number, z: number): boolean { return solidOccupancyMaskPage(this.words, x, y, z) === SOLID_MASK_WALL; }
+  wall(x: number, y: number, z: number): boolean { const o = this.originCell; return solidOccupancyMaskPage(this.words, x + o[0], y + o[1], z + o[2]) === SOLID_MASK_WALL; }
 
   /**
    * Make the mask describe `next`; undefined when no bit changed, else the
@@ -209,14 +222,31 @@ export class SolidOccupancyMask {
     const regions = next.regions ?? [];
     for (const region of regions) assertSolidWorldRegionIsBox(region);
     // The mask pages to fold, by directory word, each once.
-    const pages = new Set<number>();
+    const pages = new Set<number>(), o = this.origin, W = SOLID_MASK_WINDOW, P = SOLID_MASK_PAGE_CELLS;
     const brick = (coordinate: readonly [number, number, number]): void => {
-      const x = coordinate[0] >> 2, y = coordinate[1] >> 2, z = coordinate[2] >> 2, W = SOLID_MASK_WINDOW;
-      if (x >= 0 && y >= 0 && z >= 0 && x < W && y < W && z < W) pages.add(x | (y << 6) | (z << 12));
+      const x = (coordinate[0] >> 2) + o[0], y = (coordinate[1] >> 2) + o[1], z = (coordinate[2] >> 2) + o[2];
+      if (x >= 0 && y >= 0 && z >= 0 && x < W && y < W && z < W && this.words[x | (y << 6) | (z << 12)] !== SOLID_MASK_WALL) pages.add(x | (y << 6) | (z << 12));
+    };
+    // The pages off the wall that a box of cells touches.
+    const box = (minimum: readonly number[], maximumExclusive: readonly number[]): void => {
+      const low = [0, 1, 2].map(k => Math.max(0, Math.floor(minimum[k]! / P) + o[k]!));
+      const high = [0, 1, 2].map(k => Math.min(W - 1, Math.floor((maximumExclusive[k]! - 1) / P) + o[k]!));
+      for (let z = low[2]!; z <= high[2]!; z += 1) for (let y = low[1]!; y <= high[1]!; y += 1) for (let x = low[0]!; x <= high[0]!; x += 1) {
+        const e = x | (y << 6) | (z << 12);
+        if (this.words[e] !== SOLID_MASK_WALL) pages.add(e);
+      }
     };
     if (!previous || previous.ground?.key !== next.ground?.key || !sameRegions(previous.regions ?? [], regions)) {
-      // Every page off the wall: the ground and the regions are not listed by page.
-      for (let e = 0; e < SOLID_MASK_DIRECTORY_WORDS; e += 1) if (this.words[e] !== SOLID_MASK_WALL) pages.add(e);
+      // Every page that may hold a solid cell, before or after: the pages the
+      // image holds solid, and every page the next world's ground, written
+      // pages and regions reach. Any other page off the wall is empty and stays so.
+      for (let e = 0; e < SOLID_MASK_DIRECTORY_WORDS; e += 1) {
+        const word = this.words[e]!;
+        if (word !== SOLID_MASK_WALL && (word & 0xffff) !== SOLID_MASK_EMPTY) pages.add(e);
+      }
+      for (const page of next.pages) brick(page.coordinate);
+      for (const region of regions) if (region.operation !== "paint") box(region.minimum, region.maximumExclusive);
+      if (next.ground && !this.separateTerrain) box(next.ground.minimum, next.ground.maximumExclusive);
     } else {
       // A repaint copies pages and moves no bit: answered from its strokes,
       // without reading a page.
@@ -268,12 +298,13 @@ export class SolidOccupancyMask {
     changed: ((x: number, y: number, z: number, solid: boolean) => void) | undefined): boolean | "waits" {
     const words = this.words, held = words[e]!;
     if (held === SOLID_MASK_WALL) return false;
-    const P = SOLID_MASK_PAGE_CELLS, B = SOLID_WORLD_BRICK_CELLS, page = this.page;
-    const x0 = (e & 63) * P, y0 = ((e >> 6) & 63) * P, z0 = (e >> 12) * P;
+    const P = SOLID_MASK_PAGE_CELLS, B = SOLID_WORLD_BRICK_CELLS, page = this.page, o = this.origin;
+    // The page's low cell in the world's cells.
+    const x0 = ((e & 63) - o[0]) * P, y0 = (((e >> 6) & 63) - o[1]) * P, z0 = ((e >> 12) - o[2]) * P;
     page.fill(0);
     // A row of the page along x is one word: its bits are the row's cells.
     const ground = world.ground;
-    if (ground && y0 >= ground.minimum[1] && y0 < ground.maximumExclusive[1]) {
+    if (ground && !this.separateTerrain && y0 >= ground.minimum[1] && y0 < ground.maximumExclusive[1]) {
       const xa = Math.max(x0, ground.minimum[0]), xb = Math.min(x0 + P, ground.maximumExclusive[0]);
       const za = Math.max(z0, ground.minimum[2]), zb = Math.min(z0 + P, ground.maximumExclusive[2]);
       // Each column is solid from y = 0 for `solidCells`.
@@ -289,11 +320,16 @@ export class SolidOccupancyMask {
         coordinate[0] = x0 / B + i; coordinate[1] = y0 / B + j; coordinate[2] = z0 / B + k;
         const index = world.directory.lookup(coordinate);
         if (index === undefined) continue;
-        const fraction = world.pages[index]!.solidFraction, shift = B * i, clear = ~(((1 << B) - 1) << shift);
+        const written = world.pages[index]!, fraction = written.solidFraction, shift = B * i, clear = ~(((1 << B) - 1) << shift);
         for (let z = 0; z < B; z += 1) for (let y = 0; y < B; y += 1) {
           const local = B * (y + B * z), row = (B * j + y) + P * (B * k + z);
           let bits = 0;
-          for (let x = 0; x < B; x += 1) if (solidFractionOccupies(fraction[local + x]!)) bits |= 1 << x;
+          for (let x = 0; x < B; x += 1) {
+            const cell = local + x;
+            const authored = !this.separateTerrain || !ground
+              || (written.authored !== undefined && (written.authored[cell >>> 3]! & (1 << (cell & 7))) !== 0);
+            if (authored && solidFractionOccupies(fraction[cell]!)) bits |= 1 << x;
+          }
           page[row] = (page[row]! & clear) | (bits << shift);
         }
       }

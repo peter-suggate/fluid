@@ -1,7 +1,7 @@
 import "../lib/methods";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { VISUAL_LAYERS, visualLayers, readVisualLayers, writeVisualLayers, legacyVisualLayers, toggleVisualLayer, particleView, setParticleView } from "../lib/core/visual-layers";
+import { VISUAL_LAYERS, visualLayers, readVisualLayers, writeVisualLayers, legacyVisualLayers, toggleVisualLayer, particleView, setParticleView, pageView, setPageView, sliceLayersShown, withParticleDisplay } from "../lib/core/visual-layers";
 import { uniformLabQuery } from "../advance-lab/uniform-lab-state";
 import { createUIStore } from "../lib/core/stores/ui-store";
 import { parseQueryState, serializeQueryState } from "../lib/core/url-state";
@@ -48,4 +48,19 @@ test("legacy controls hide composed layers and explicit mode picks replace them"
   assert.equal(store.getState().visualLayers?.visible, true);
   store.getState().setGridOverlayMode("phi");
   assert.equal(store.getState().visualLayers, undefined);
+});
+
+test("3D domain pages persist with other layers, opacity and the visibility switch", () => {
+  const pages = { ...setPageView(visualLayers(["pages", "volume"]), "3d"), opacity: { pages: 0.4 } };
+  assert.deepEqual(readVisualLayers(writeVisualLayers(pages)), pages);
+  assert.equal(pageView(readVisualLayers('{"enabled":["pages"],"pages":"invalid"}')), "slice");
+  assert.equal(sliceLayersShown(pages), true);
+  assert.equal(sliceLayersShown({ ...pages, visible: false }), false);
+  assert.equal(pageView(withParticleDisplay(pages, "motion")), "3d");
+  assert.deepEqual(withParticleDisplay(pages, "off"), pages);
+  assert.deepEqual(setPageView(pages, "slice"), { ...visualLayers(["pages", "volume"]), opacity: { pages: 0.4 } });
+  const state = parseQueryState("method=uniform-volume&grid=z");
+  state.ui.visualLayers = pages;
+  const query = serializeQueryState("", { presetId: state.presetId, scene: state.scene }, state, state.ui);
+  assert.deepEqual(parseQueryState(query).ui.visualLayers, pages);
 });

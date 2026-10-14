@@ -9,6 +9,34 @@ import {
   type GPUCompilationManifest,
 } from "../lib/core/gpu-compilation-manager";
 
+test("compile timings count native attempts, including failures, but exclude cache hits", async () => {
+  let rejectRender = true;
+  const gpu = fakeGPU({ beforePipeline: async label => {
+    if (label === "render" && rejectRender) throw new Error("driver failure");
+  } });
+  const device = managedGPUDevice(gpu.device, { requireWorkerRealm: false });
+  const manager = gpuCompilationManagerFor(device);
+  const module = device.createShaderModule({ label: "timed shader", code: "shader" });
+  const compute = { label: "compute", layout: "auto", compute: { module, entryPoint: "main" } } as const;
+  await device.createComputePipelineAsync(compute);
+  await device.createComputePipelineAsync(compute);
+  const render = { label: "render", layout: "auto", vertex: { module, entryPoint: "vertex" } } as const;
+  await assert.rejects(device.createRenderPipelineAsync(render), /driver failure/);
+  rejectRender = false;
+  await device.createRenderPipelineAsync(render);
+  const timings = manager.compilationTimings();
+  assert.deepEqual(timings.map(({ label, kind, module, entryPoint, succeeded }) =>
+    ({ label, kind, module, entryPoint, succeeded })), [
+    { label: "compute", kind: "compute", module: "timed shader", entryPoint: "main", succeeded: true },
+    { label: "render", kind: "render", module: "timed shader", entryPoint: "vertex", succeeded: false },
+    { label: "render", kind: "render", module: "timed shader", entryPoint: "vertex", succeeded: true },
+  ]);
+  assert.ok(timings.every(timing => Number.isFinite(timing.milliseconds) && timing.milliseconds >= 0));
+  assert.equal(timings.reduce((sum, timing) => sum + timing.milliseconds, 0), manager.snapshot().cacheStats.compilationMilliseconds);
+  assert.ok(timings.every(Object.isFrozen));
+  assert.notEqual(manager.compilationTimings(), timings);
+});
+
 interface FakeGPU {
   readonly device: GPUDevice;
   readonly calls: {

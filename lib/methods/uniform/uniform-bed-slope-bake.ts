@@ -77,6 +77,8 @@ export interface UniformBedSlopeBakeOptions{
  readonly size:readonly [number,number,number];
  /** The lane's first word in the mask image (uniformSolidScratchLayout). */
  readonly laneBaseWord:number;
+ /** The lattice's low cell in the mask image's window (address.boxPage, in cells; default 0). */
+ readonly origin?:readonly [number,number,number];
  /** Floor cells a column holds (default 4, at most 8). */
  readonly layers?:number;
  /** Spread passes, even (default 96). */
@@ -84,6 +86,7 @@ export interface UniformBedSlopeBakeOptions{
 }
 export interface UniformBedSlopeBakeLayout{
  readonly size:readonly [number,number,number];
+ readonly origin:readonly [number,number,number];
  /** Haloed cells: the lane's entries. */
  readonly cells:number;
  readonly laneBaseWord:number;
@@ -110,7 +113,9 @@ export function uniformBedSlopeBakeLayout(options:UniformBedSlopeBakeOptions):Un
  if(!Number.isSafeInteger(passes)||passes<2||passes>256||passes%2!==0)throw new RangeError(`Uniform bed-slope bake: ${passes} spread passes, not an even count from 2 to 256`);
  const cells=(size[0]+2)*(size[1]+2)*(size[2]+2),laneWords=Math.ceil(cells/2),columns=size[0]*size[2];
  if(!Number.isSafeInteger(laneBaseWord)||laneBaseWord<0)throw new RangeError(`Uniform bed-slope bake: lane base word ${laneBaseWord}`);
- return {size:[size[0],size[1],size[2]],cells,laneBaseWord,laneWords,layers,passes,relax:RELAX,reach:passes+RELAX+2,columns,
+ const origin=options.origin??[0,0,0];
+ if(origin.some(n=>!Number.isSafeInteger(n)||n<0))throw new RangeError(`Uniform bed-slope bake: origin ${origin.join(",")}`);
+ return {size:[size[0],size[1],size[2]],origin:[origin[0],origin[1],origin[2]],cells,laneBaseWord,laneWords,layers,passes,relax:RELAX,reach:passes+RELAX+2,columns,
   launches:passes+RELAX+4,scratchBytes:36*layers*columns+256*(1+UNIFORM_BED_SLOPE_BAKE_REGIONS),minRun:MIN_RUN,band4:BAND4,minSlope2:MIN_SLOPE2,maxSlope2:MAX_SLOPE2};
 }
 
