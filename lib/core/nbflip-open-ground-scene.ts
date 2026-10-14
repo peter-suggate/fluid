@@ -38,7 +38,7 @@ export const NBFLIP_OPEN_GROUND_SIDE = NBFLIP_OPEN_GROUND_GRID[0] - 2 * NBFLIP_O
 export const NBFLIP_OPEN_GROUND_STEP_HZ = 60;
 export const NBFLIP_OPEN_GROUND_SECONDS = 6;
 /** The page pool's budget. */
-export const NBFLIP_OPEN_GROUND_MEMORY_MIB = 1280;
+export const NBFLIP_OPEN_GROUND_MEMORY_MIB = 1792;
 /** The slope variant's incline: one wide mound, centred off to -x, whose flank the column stands on. */
 export const NBFLIP_OPEN_GROUND_SLOPE = { center_m: { x: -48, z: 0 }, radius_m: { x: 60, z: 60 }, amount_m: 6, flat: 0 } as const;
 

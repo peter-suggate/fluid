@@ -7,7 +7,7 @@ export const narrowBandParticleSurfaceWGSL=/* wgsl */`
 // set, shrunk by one cell, is united with the surface of the samples, so the
 // samples overrule it: a sheet or droplet they carry is liquid whatever grid
 // advection made of it, and liquid they have left is not. phi_p is the union
-// of one sphere per sample. A tile no sample reaches has no phi_p and keeps
+// of one sphere per sample, and adds no more liquid than the samples count. A tile no sample reaches has no phi_p and keeps
 // phi' as it is; liquid a source adds this step joins after the union.
 const NB_SURFACE_RADIUS=${NARROW_BAND_SURFACE_RADIUS};
 const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
@@ -43,7 +43,24 @@ fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32)->f32{
  // samples say nothing finer. The collar adds and does not erase, and without
  // this slack it made surface of every sample's jitter.
  let ripple=NB_SURFACE_RADIUS-NB_SEED_DEPTH;
- let particle=min(bulk+1.0,bulk-excess*smoothstep(0.5*ripple,ripple,abs(excess)));
+ var particle=min(bulk+1.0,bulk-excess*smoothstep(0.5*ripple,ripple,abs(excess)));
+ // The samples add no more liquid than they are. A full cell holds eight:
+ // where the open cells around a vertex hold a fraction f of that, a plane
+ // through them lies 1-2f cells above the vertex, and the union takes phi no
+ // lower. A resting surface's vertex holds 32 of 64, phi 0, which the union
+ // already meets. Without the bound a sphere stood for 2.8 cells wherever
+ // samples were sparse (spray, a spreading sheet): trough +2.2% at step 40,
+ // open ground +6.5% at 120. A cell counts eight at most, so the samples a
+ // converging surface keeps do not loosen it.
+ if(particle<bulk){
+  var held=0u;var open=0u;
+  for(var k=0u;k<8u;k++){
+   let c=q+vec3i(umCorner(k,2u))-1;
+   if(!umCellPresent(c)||!nbParticleCellOpen(c)){continue;}
+   open++;held+=min(atomicLoad(&bins[umCellAt(vec3u(c))]),8u);
+  }
+  if(open>0u){particle=max(particle,min(bulk,1.0-f32(held)/(4.0*f32(open))));}
+ }
  // A transported particle may add liquid throughout its sphere support.
  // Erasure needs the complete seeded footprint, inside the overlap collar.
  let theta=select(nbThetaFrom(home,vec3f(q)),nbSurfaceThetaFrom(home,vec3f(q)),particle>bulk);

@@ -573,7 +573,12 @@ fn umResolutionError(tile:u32,lane:u32,width:u32,wide:u32)->f32{
  for(var a=0u;a<3u;a++){
   var lo=vec3i(c/4u);lo[a]-=1;var hi=vec3i(c/4u);hi[a]+=1;
   if(!umWideVertexPresent(lo)||!umWideVertexPresent(hi)){continue;}
-  worst=max(worst,abs(umLoadCorner(4u*vec3u(hi))-2.0*centre+umLoadCorner(4u*vec3u(lo)))/(16.0*UM_H));
+  let below=umLoadCorner(4u*vec3u(lo));let above=umLoadCorner(4u*vec3u(hi));
+  // A neighbour further from the centre than its span allows is no
+  // distance: far air outside the box holds a marker (16h and more), and its
+  // second difference refined every surface tile beside the box's low faces.
+  if(abs(below-centre)>6.0*H[a]||abs(above-centre)>6.0*H[a]){continue;}
+  worst=max(worst,abs(above-2.0*centre+below)/(16.0*UM_H));
  }
  return worst;
 }
