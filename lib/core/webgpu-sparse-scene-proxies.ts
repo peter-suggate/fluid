@@ -1931,11 +1931,14 @@ fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{let cell=max
   let faceDistance=min(within,cell-within);var axis=0u;
   if(faceDistance.y<faceDistance.x){axis=1u;}
   if(faceDistance.z<faceDistance[axis]){axis=2u;}
-  var fullNormal=vec3f(0.0);fullNormal[axis]=select(-1.0,1.0,
-    within[axis]>=0.5*cell[axis]);
   let full=fractionQ8==255u;
   let distance=select(sdfDistance,-faceDistance[axis],full);
-  let normal=select(sdfNormal,fullNormal,full);
+  // A whole cell's nearest *cell* face is usually internal to the solid.
+  // At a cell centre its axis is decided by floating-point roundoff, producing
+  // alternating dark bands on a continuous wall. Shade from the union's
+  // boundary gradient; an interior cell has no surface normal to publish.
+  var normal=sdfNormal;
+  if(full&&dot(g,g)>1e-8){normal=swSmoothNormal(world);}
   return SolidWorldSample(fraction,distance,swMaterial(q),normal);}
 // Continuous reconstructions of the page fractions for function-fitted
 // surfaces. A stencil at most nine cells wide touches two pages an axis, so

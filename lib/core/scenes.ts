@@ -15,6 +15,10 @@ import {
   createNbflipWaterSlide, createNbflipWaterSlideLong, nbflipWaterSlideCamera, nbflipWaterSlideLongCamera,
 } from "./nbflip-water-slide-scene";
 import {
+  NBFLIP_THEME_PARK_GRID, NBFLIP_THEME_PARK_SCENE_ID, NBFLIP_THEME_PARK_STREAM_SECONDS,
+  createNbflipThemeParkSlide, nbflipThemeParkCamera,
+} from "./nbflip-theme-park-slide-scene";
+import {
   NBFLIP_RAMP_BASIN_LEVEL, NBFLIP_RAMP_DRAIN_SECONDS, NBFLIP_RAMP_GRID, NBFLIP_RAMP_LENGTH, NBFLIP_RAMP_VARIANTS,
   createNbflipRamp, nbflipRampBed, nbflipRampCamera, nbflipRampSceneId, nbflipRampShape,
 } from "./nbflip-ramp-scene";
@@ -1873,6 +1877,18 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     methodProfile: NBFLIP_METHOD_PROFILE,
     build: createNbflipWaterSlideLong,
     camera: nbflipWaterSlideLongCamera(),
+  }),
+  defineScene({
+    id: NBFLIP_THEME_PARK_SCENE_ID,
+    name: "NB-FLIP · Theme Park Water Slide",
+    blurb: `A white-clay water park with branching oaks, visitors, food stalls, a toilet block and picnic terraces around an elevated two-turn spiral and splash pool. The hose runs for ${NBFLIP_THEME_PARK_STREAM_SECONDS} seconds: ${NBFLIP_THEME_PARK_GRID.join("×")} cells at 2 cm, starting empty.`,
+    audience: "explore",
+    shelf: "Tanks",
+    environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: createNbflipThemeParkSlide,
+    presentationMode: "full-scene",
+    camera: nbflipThemeParkCamera(),
   }),
   // The slide's slope on its own, as measured probes for what a gentle voxel
   // ramp leaves behind. See lib/core/nbflip-ramp-scene.ts.

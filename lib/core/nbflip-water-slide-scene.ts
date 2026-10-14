@@ -105,7 +105,7 @@ function slideColumn(x: number, z: number): readonly [top: number, lidded: boole
  * it ends at, as boxes: one for each run of equal columns along x, carried
  * along z for as long as the next row repeats it.
  */
-function columnVoxels([nx, , nz]: readonly [number, number, number], span: (x: number, z: number) => readonly [from: number, top: number]): SolidWorldVoxelPatch[] {
+export function columnVoxels([nx, , nz]: readonly [number, number, number], span: (x: number, z: number) => readonly [from: number, top: number]): SolidWorldVoxelPatch[] {
   type Box = { minimum: [number, number, number]; maximumExclusive: [number, number, number] };
   const boxes: Box[] = [];
   let open = new Map<string, Box>();
@@ -133,7 +133,7 @@ function columnVoxels([nx, , nz]: readonly [number, number, number], span: (x: n
  * A stream of `radius` lying on a floor at height `floor`, leaving the lattice
  * point (x, z) along (u, w) cells a step for `seconds`.
  */
-function streamInflow(
+export function streamInflow(
   grid: readonly [number, number, number], h: number, dt: number,
   [x, z]: readonly [number, number], floor: number, [u, w]: readonly [number, number], radius: number, seconds: number,
 ): NonNullable<SceneDescription["fluid"]["inflow"]> {

@@ -15,7 +15,8 @@ export const VOXEL_MATERIAL_IDS = {
   box: 17,
   capsule: 18,
   cylinder: 19,
-  cup: 20
+  cup: 20,
+  white: 21
 } as const;
 
 export interface VoxelMaterial {
@@ -44,6 +45,11 @@ export interface VoxelMaterial {
  * They must not receive an sRGB-to-linear conversion when uploaded.
  */
 export const VOXEL_MATERIALS: ReadonlyArray<VoxelMaterial> = [
+  {
+    id: VOXEL_MATERIAL_IDS.white, key: "white", name: "White composite", closure: "opaque",
+    baseColorLinear: [0.9, 0.9, 0.9], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.32, transmission: 0, ior: 1.45,
+    colorProvenance: "neutral white moulded flume and pool"
+  },
   {
     // The canonical tank shell: a solver boundary that the render world
     // excludes (the vessel is presented as an outline). An edited piece that

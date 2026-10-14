@@ -37,11 +37,11 @@ export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM = -3;
 
 /**
  * Requested authored-environment detail when no URL or saved tuning overrides it.
- * Start at the authored lattice; finer detail remains available in the control.
+ * Start one level finer than the authored lattice (half the voxel width).
  * Fluid retains its coarser simulation lattice. Device allocation preflight
  * can select a lower rung, which builtRefinementDepth reports to the UI.
  */
-export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT = 0;
+export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT = 1;
 
 /**
  * Backdrop detail rings (`scene.backdrop.detailRings`), innermost first, that

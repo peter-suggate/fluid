@@ -5,6 +5,7 @@ import { liquidExtrusionBounds, liquidExtrusionRefusal, type LiquidExtrusion } f
 import { validateRefinementRegions } from "./refinement-regions";
 import { validateTerrain, type TerrainDescription } from "./terrain";
 import type { SolidWorldVoxelPatch } from "./solid-world";
+import { sweptFlumeSurfaceErrors, type SweptFlumeSurface } from "./swept-flume-surface";
 import { validateSolidPatch } from "./solid-patch/compose";
 import type { EnvironmentId } from "./environments";
 import { validateSceneryGraph, type SceneryGraph } from "./scenery-graph";
@@ -81,7 +82,7 @@ export interface SceneDescription {
    * from. The drawn surface is fitted from it wherever those voxels still
    * stand, in place of the staircase they became. The solver keeps every voxel.
    */
-  solidSurface?: { kind: "bath" };
+  solidSurface?: { kind: "bath" } | SweptFlumeSurface;
   /** Optional image-free lighting grade consumed by the SVO renderer. */
   lighting?: {
     /** Scene-linear directional key. Omitted fields retain the environment defaults. */
@@ -565,7 +566,8 @@ export function validateScene(scene: SceneDescription): string[] {
     errors.push("Container vessel must be 'outline' or 'none'");
   }
   if (c?.shape !== undefined && c.shape !== "box" && c.shape !== "sphere") errors.push("Container shape must be 'box' or 'sphere'");
-  if (scene.solidSurface !== undefined && scene.solidSurface.kind !== "bath") errors.push("Solid surface kind must be 'bath'");
+  if (scene.solidSurface?.kind === "swept-flume") errors.push(...sweptFlumeSurfaceErrors(scene.solidSurface));
+  else if (scene.solidSurface !== undefined && scene.solidSurface.kind !== "bath") errors.push("Unknown solid surface kind");
   if (c?.shape === "sphere" && c.top !== "closed") errors.push("A spherical container must be closed");
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");

@@ -1706,6 +1706,7 @@ export class FluidLabRenderer {
   private solverKey(scene:SceneDescription,config:SimulationRunConfig,presentationMode:ScenePresentationMode){
     return `${gpuSceneSolverKey(scene,config)}:presentation-${presentationMode}`
       + (presentationMode === "full-scene" ? `:scenery-${sceneryConstructionKey(scene)}:contours-${config.values.svoMeshContours === true}${config.values.svoMeshDualContouring === true ? ":dual-contouring" : ""}${config.values.svoMeshDualMarchingCubes === true ? ":dual-marching-cubes" : ""}`
+        + `:solid-surface-${JSON.stringify(scene.solidSurface ?? null)}`
         + `:refinement-${String(config.values.svoEnvironmentRefinementDepth ?? 0)}/${String(config.values.svoEnvironmentBrickRefinementLevels ?? "")}/${config.values.svoEnvironmentPlanarRefinementExemption === true}/backdrop-${String(config.values.svoBackdropRefinedRings ?? 0)}` : "");
   }
   private attachedSolverDocumentKey = "";

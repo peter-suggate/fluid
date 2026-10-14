@@ -125,6 +125,7 @@ import { assertSvoBrickRasterNodeAddressable } from "../primary-visibility/webgp
 import { planSparseSceneDomain } from "../../../core/sparse-scene-domain";
 import { SCENE_ENVIRONMENT_OWNER_BASE } from "../../../core/webgpu-rigid-body";
 import { BATH_SOLID_DISTANCE_WGSL } from "../../../core/voxel-bath";
+import { sweptFlumeSurfaceWGSL } from "../../../core/swept-flume-surface";
 import { VOXEL_MATERIAL_IDS, materialIdForRigidShape, packVoxelDebugMaterialTable } from "../../../core/voxel-scene";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyCatalog, type EnvironmentProxyPrimitive } from "../../../core/voxel-environments";
 import {
@@ -2504,7 +2505,8 @@ export class OctreeSparseBrickWorld {
           -0.5 * scene.container.depth_m],
         cellSize_m: sceneCellSizes_m(scene),
       },
-      solidSurface: scene.solidSurface && BATH_SOLID_DISTANCE_WGSL,
+      solidSurface: scene.solidSurface?.kind === "swept-flume" ? sweptFlumeSurfaceWGSL(scene.solidSurface)
+        : scene.solidSurface && BATH_SOLID_DISTANCE_WGSL,
       renderTerrain,
       backdropDetail: backdropDetail && backdropTerrainTable
         ? backdropDetailVoxelizerWGSL(backdropTerrainTable, backdropDetail, options.surfaceDualMarchingCubes === true) : undefined,
