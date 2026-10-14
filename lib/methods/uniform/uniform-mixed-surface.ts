@@ -253,6 +253,12 @@ fn umEmbeddedAir(p:vec3f,end:vec3f,advected:f32)->f32{
 fn umCatmull(t:f32)->vec4f{
  let t2=t*t;let t3=t2*t;return 0.5*vec4f(2.0*t2-t3-t,3.0*t3-5.0*t2+2.0,4.0*t2-3.0*t3+t,t3-t2);
 }
+// Catmull-Rom weights w (taps -1..2) with a held end tap read as the line
+// through the two inner taps: s(-1)=2s(0)-s(1), s(2)=2s(1)-s(0).
+fn umHeldWeights(w:vec4f,low:bool,high:bool)->vec4f{
+ let a=select(0.0,w.x,low);let b=select(0.0,w.w,high);
+ return vec4f(w.x-a,w.y+2.0*a-b,w.z-a+2.0*b,w.w-b);
+}
 // umSampleVertex(p) on the resolved field, keeping what umCubicPhi reuses:
 // the owner cell's origin and width (its tile's width), and its eight corner
 // values in umCorner order (the same loads, weights and D4 sum).
@@ -276,7 +282,6 @@ fn umVertexCell(p:vec3f)->UMVertexCell{
 // the eight inner taps (offsets 0..1) come from the cell, not reloaded.
 fn umCubicPhi(q:vec3f,cell:UMVertexCell)->f32{
  let width=i32(cell.width);let base=vec3i(cell.origin);let fraction=(q-vec3f(base))/f32(width);
- let wx=umCatmull(fraction.x);let wy=umCatmull(fraction.y);let wz=umCatmull(fraction.z);
  // Resolved: every tap is a width-aligned vertex within one tile of the
  // owner's tile (4h taps are 4-aligned, stored everywhere), so it is stored
  // or resolved. The 64 taps then unroll with a constant bound.
@@ -288,6 +293,14 @@ fn umCubicPhi(q:vec3f,cell:UMVertexCell)->f32{
  // coarse owners and leaves their per-tap domain tests in the solid-free twin.
  ${this.solid?"let tapsClear=!umSolidEnabled()||((umRegularFine||cell.width==1u)&&umSolidClear(base));":""}
  var value=0.0;var low=1e30;var high=-1e30;let page=base>>vec3u(5u);let home=umBlockOf(page);
+ // A tap held at a SOLID face repeats the inner tap beside it, and the
+ // cubic read that as a level set flat across the face: between the face
+ // and the next vertex it dipped up to 2/27 width below the line. The held
+ // tap stands for the line through the two inner taps on its axis: its
+ // weight moves onto them. An axis has at most one end tap past the page.
+ let at=base&vec3i(31);let past=vec3i(at+vec3i(2*width)>vec3i(32))-vec3i(at<vec3i(width));
+ let held=umBlockHeld(home,past);let lowHeld=held&(past<vec3i(0));let highHeld=held&(past>vec3i(0));
+ let wx=umHeldWeights(umCatmull(fraction.x),lowHeld.x,highHeld.x);let wy=umHeldWeights(umCatmull(fraction.y),lowHeld.y,highHeld.y);let wz=umHeldWeights(umCatmull(fraction.z),lowHeld.z,highHeld.z);
  // As umVertexCell: the width branch is outside the 64 taps.
  ${(taps=>`if(!umRegularFine&&cell.width==4u){${taps("umLoadCorner")}}else{${taps("umLoadVertex")}}`)((load:string)=>/* wgsl */`
  for(var z=0u;z<4u;z++){var plane=0.0;
