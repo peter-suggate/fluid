@@ -489,11 +489,9 @@ is just an authored solid.
     plane y = 0. GPU coordinates are window cells; host address helpers take
     and return box cells. `params.tuning.xyz` carries the box's low cell.
   - Validation refuses terrain, a procedural boundary, depth symmetry and a
-    non-box shape in an open world. The solver refuses initial liquid within
-    four cells (`UNIFORM_OPEN_WORLD_LIQUID_MARGIN`) of the container's sides
-    or top: only the box's pages are seeded, so a vertex on its faces is in a
-    page claimed later as air, and liquid laid against a face lost its outer
-    layer at step 1 (measured: 10% of a column filling the box).
+    non-box shape in an open world. (Phase 2 also refused initial liquid
+    within four cells of the container's faces; phase 2b deleted that rule,
+    below.)
   - The pool of an open world is sized by `pagePool.memory_MiB` (default
     1,024 MiB) at `UNIFORM_PAGE_BLOCK_MiB` = 10 MiB a block (water slide 40
     to 80 blocks: 592 to 979 MiB). The solid mask's fold visits only
@@ -508,10 +506,69 @@ is just an authored solid.
     3,584 (exact); letters 12 steps 1,224,968 (exact); trough 40 steps
     31,897, no fatal. Unit suite 833 of 834; the failing test checked the
     old exhausted message and was deleted.
-  - Not done: start-of-run host arrays (initial liquid, gamma, terrain, the
-    CPU solid tile scan) are still box-sized, so they cover the seed extent
-    and not the window. The renderer's box-shaped address copy reads wrong
-    for a box off page 0 (phase 3).
+  - Not done in phase 2 (done in 2b, below): the start-of-run host arrays were
+    sized by the container. The renderer's box-shaped address copy reads
+    wrong for a box off page 0 (phase 3).
+- **Phase 2b, the box is the liquid's, and ground past it.**
+  - Box: `sceneFluidBox` in `scene-lattice-dimensions.ts`. An open world's
+    box is its initial liquid's bounds, `OPEN_WORLD_LIQUID_MARGIN_CELLS` (8)
+    out on every side except the ground's, rounded to the fewest whole pages
+    and centred on the liquid. Its low corner (`frame.boxLow`) is any cell
+    of the container's, not a page of it.
+  - `sceneFluidBoxScene` is the scene moved so that the box is its
+    container. The initial liquid, the vertex phi and the cell volumes are
+    built from it, so the host arrays are box-sized wherever the container
+    sits. The container only places the world. `refinement-regions`'
+    `fluidRegionLattice` and the solid promotion scan (`mask.originCell`)
+    read the box's low corner.
+  - The four-cell margin rule (`UNIFORM_OPEN_WORLD_LIQUID_MARGIN`,
+    `uniformOpenWorldLiquidCheck`) is deleted. A column laid against the
+    container's faces (`nbflip-open-ground-faces`) gets the same box as one
+    in its middle, and loses nothing at step 1.
+  - `solidVoxelShellForScene` returns no shell for `walls: "none"`. Before
+    this, the open-ground scenes carried the tank shell at the container's
+    faces. That cut liquid laid against them, and it walled the phase-2
+    demo in at its box: the phase-2 volume figures above are for that walled
+    column.
+  - Terrain past the box: an open world may have analytic terrain
+    (`baseHeight_m` and features). Grid, procedural and solid-boundary
+    terrain are refused, and so are terrain with rigid bodies, solid voxels,
+    height fields, dam breaks, brick seeds, inflow, scheduled drops and
+    refinement regions.
+    - `UniformOpenWorldTerrain` (`uniform-open-world-terrain.ts`) bakes
+      the features in f32 into a 2048² column texture covering the whole
+      window, once at scene build. The samplers clamp to the texture, not
+      the box.
+    - A census marker ORs into the solid tiles every stored tile whose cut-map
+      word is set, so ground past the box holds its tiles at h.
+    - Demo: `nbflip-open-ground-slope`, the column on the flank of a wide
+      mound centred 48 m to −x.
+  - Gate, run on HEAD 046db310 plus these changes only. The live tree
+    failed every solid scene at frame 0 while the moving-window work was in
+    progress.
+    - Tank: 3,072 and 3,584, exact.
+    - Letters: 1,224,968, exact.
+    - Trough: 31,868.
+    - Unit suite: 832 of 832.
+    - Open ground at 1/60 s, 120 steps, two runs: no fatal, peak 118 and
+      119 of 126 pages. Liquid +0.02% at step 1, then +0.7% at step 2,
+      +4.3% at step 10, and +5.9% and +6.3% at step 120.
+    - Open ground at 1/30 s, 60 steps, two runs: no fatal, peak 119.
+      Liquid +0.06% at step 1, up to +8.2% at step 5, then +5.9% and +5.4%
+      at the end.
+    - Faces: identical to the column (+0.02% at step 1).
+    - Slope, 120 steps at 1/60 s: no fatal. Liquid −0.06% at step 1 and
+      +4.8% at step 120.
+  - Volume: the phase-2 column was walled, and with walls it held step 2 at
+    −0.01%. The open column gains from step 2, long before any liquid
+    reaches the box's faces. The narrow-band volume control barely moves
+    (shift −0.1 to −0.3 cells against an excess of 250 to 1,900 cells).
+    Not yet attributed to a stage: the per-stage volume probe
+    (`tools/narrow-band-volume-probe.ts`) reads zero on this build.
+  - A three-page box ran at 4h only for its first 30 steps: shape scores
+    peaked at half the tolerance, against saturation in a two-page box,
+    for the same column. Centring the box avoids it for these scenes; the
+    cause is not found.
 - **Phase 3, renderer window list (K9) and the re-keyed pool record:**
   handed to other agents.
 

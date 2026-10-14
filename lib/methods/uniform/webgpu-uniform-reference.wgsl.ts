@@ -159,7 +159,7 @@ fn hasTerrain()->bool{return params.frame.w>0.5;}
 
 fn depthSymmetry()->bool{return params.tuning.w>0.5;}
 
-fn terrainHeightCells(x:i32,z:i32)->f32{let d=dims();return textureLoad(terrainIn,vec2i(clamp(x,0,d.x-1),clamp(z,0,d.z-1)),0).x;}
+fn terrainHeightCells(x:i32,z:i32)->f32{let d=vec2i(textureDimensions(terrainIn));return textureLoad(terrainIn,vec2i(clamp(x,0,d.x-1),clamp(z,0,d.y-1)),0).x;}
 
 fn cellTerrainFraction(p:vec3i)->f32{if(!hasTerrain()){return 0.0;}return clamp(terrainHeightCells(p.x,p.z)-f32(p.y),0.0,1.0);}
 
@@ -319,8 +319,8 @@ fn bodySolidFractionAt(p:vec3i)->f32{
 fn worldInsideTerrain(world:vec3f)->bool{
   if(!hasTerrain()){return false;}
   let h=params.cellGravity.xyz;
-  let x=clamp(i32(floor((world.x-params.frame.x)/h.x)),0,dims().x-1);
-  let z=clamp(i32(floor((world.z-params.frame.z)/h.z)),0,dims().z-1);
+  let x=i32(floor((world.x-params.frame.x)/h.x));
+  let z=i32(floor((world.z-params.frame.z)/h.z));
   return world.y<terrainHeightCells(x,z)*h.y;
 }
 

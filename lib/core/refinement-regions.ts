@@ -22,7 +22,7 @@
  * that lattice.
  */
 import type { FluidRefinementRegion, SceneDescription, Vec3 } from "./model";
-import { sceneCellSizes_m, sceneFluidLatticeDimensions, sceneLatticeDimensions } from "./scene-lattice";
+import { sceneCellSizes_m, sceneFluidBox, sceneLatticeDimensions } from "./scene-lattice";
 
 /**
  * Regions carried per scene.
@@ -156,13 +156,16 @@ export function refinementRegionLattice(scene: SceneDescription): RefinementRegi
 }
 
 /**
- * The region lattice as a fluid solver stores it: the same cell size and
- * origin over the whole pages the container's cells round up to
- * (`sceneFluidLatticeDimensions`). A region is still authored, snapped and
- * measured against `refinementRegionLattice`, the container's own.
+ * The region lattice as a fluid solver stores it: the same cell size over its
+ * box (`sceneFluidBox`), from the box's low corner. For a container with
+ * walls that is the container's origin over the whole pages its cells round
+ * up to; an open world's box is its liquid's. A region is still authored,
+ * snapped and measured against `refinementRegionLattice`, the container's own.
  */
 export function fluidRegionLattice(scene: SceneDescription): RefinementRegionLattice {
-  return { ...refinementRegionLattice(scene), dimensions: sceneFluidLatticeDimensions(scene) };
+  const container = refinementRegionLattice(scene), box = sceneFluidBox(scene), o = container.origin_m, h = container.cellSize_m;
+  return { ...container, dimensions: box.cells,
+    origin_m: { x: o.x + box.low[0] * h[0], y: o.y + box.low[1] * h[1], z: o.z + box.low[2] * h[2] } };
 }
 
 /** A region's world box in cell coordinates, clamped to the lattice. */

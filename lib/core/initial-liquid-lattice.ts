@@ -6,7 +6,7 @@ import { damBreakSignedDistanceAtNode, initialFluidBrickSignedDistanceAtNode,
 import { terrainColumnHeights } from "./terrain";
 import { sampleSolidWorld, solidWorldForScene } from "./solid-world";
 import type { InitialLiquidBox, SceneDescription } from "./model";
-import { sceneFluidLatticeDimensions, sceneLatticeDimensions } from "./scene-lattice-dimensions";
+import { sceneFluidBoxScene, sceneFluidLatticeDimensions, sceneLatticeDimensions } from "./scene-lattice-dimensions";
 
 /** Construction-only analytic samples, in metres, on shared lattice vertices.
  * coarseSolids: static solids run on cut 4h owners (uniformDetailCoarseSolids),
@@ -247,6 +247,7 @@ export function initialLiquidCellVolumes(scene: SceneDescription, dimensions: re
  * gives a vertex with no liquid near.
  */
 export function fluidLatticeFarPhi(scene: SceneDescription): number {
+  if (scene.container.walls === "none") scene = sceneFluidBoxScene(scene);
   const c = scene.container, [cx, cy, cz] = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   const [nx, ny, nz] = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   return Math.max(c.width_m*(nx/cx), c.height_m*(ny/cy), c.depth_m*(nz/cz));
@@ -260,6 +261,8 @@ export function fluidLatticeFarPhi(scene: SceneDescription): number {
  * plane's distance grows by the height above it.
  */
 export function fluidLatticeVertexPhi(scene: SceneDescription, coarseSolids = false): Float32Array {
+  // An open world is built over its box alone (sceneFluidBoxScene), which is whole pages.
+  if (scene.container.walls === "none") scene = sceneFluidBoxScene(scene);
   const cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER), [cx, cy, cz] = cells;
   const [nx, ny, nz] = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   const inner = initialLiquidVertexPhi(scene, cells, undefined, coarseSolids);
@@ -278,6 +281,7 @@ export function fluidLatticeVertexPhi(scene: SceneDescription, coarseSolids = fa
  * the container's columns returns.
  */
 export function fluidLatticeCellVolumes(scene: SceneDescription): ReturnType<typeof initialLiquidCellVolumes> {
+  if (scene.container.walls === "none") scene = sceneFluidBoxScene(scene);
   const cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER), [cx, cy, cz] = cells;
   const [nx, ny, nz] = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   const inner = initialLiquidCellVolumes(scene, cells, true);

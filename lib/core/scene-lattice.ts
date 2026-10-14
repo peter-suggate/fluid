@@ -13,6 +13,9 @@ export {
   sceneFluidLatticeDimensions,
   sceneFluidFrame,
   sceneFluidBoxPage,
+  sceneFluidBox,
+  sceneFluidBoxScene,
+  OPEN_WORLD_LIQUID_MARGIN_CELLS,
   FLUID_WINDOW_PAGES,
   fluidFrameCell,
   type SceneFluidFrame,
@@ -35,6 +38,8 @@ import { sceneLatticeDimensions } from "./scene-lattice-dimensions";
 export function solidVoxelShellForScene(
   scene: SceneDescription,
 ): readonly SolidWorldVoxelPatch[] {
+  // A container without walls has no shell: it only places an open world.
+  if (scene.container.walls === "none") return [];
   const dimensions = sceneLatticeDimensions(scene);
   if (scene.container.shape === "sphere") return sphericalSolidVoxelShell(dimensions);
   return boxSolidVoxelShell(dimensions, {

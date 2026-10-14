@@ -139,7 +139,7 @@ export class SolidOccupancyMask {
   private readonly separateTerrain: boolean;
   /** pages.origin, and the same in cells. */
   private readonly origin: readonly [number, number, number];
-  private readonly originCell: readonly [number, number, number];
+  readonly originCell: readonly [number, number, number];
   readonly words: Uint32Array<ArrayBuffer>;
   readonly layout: SolidOccupancyMaskLayout;
   private world: SolidWorld | undefined;

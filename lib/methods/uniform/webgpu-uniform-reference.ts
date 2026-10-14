@@ -15,7 +15,7 @@ import { UniformMixedLayoutBuilder, UNIFORM_MIXED_RELAYOUT_RECEIPT, uniformMixed
 import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, uniformMixedTileWord, type UniformMixedDynamicPolicy } from "./uniform-mixed-dynamic";
 import { fluidRegionLattice, refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
-import { uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformOpenWorldLiquidCheck, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
 import { UniformTexturePages } from "./uniform-texture-pages";
 import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_PIN_MARGIN, uniformPagePoolDropAhead, uniformPagePoolResidency, uniformPagePoolSourcePages, type UniformPagePoolCellBox, type UniformPagePoolResidency } from "./uniform-page-pool";
 import { uniformDensityPostProcessingEnabled } from "./uniform-options";
@@ -36,6 +36,7 @@ import { planUniformHostAllocation } from "./uniform-host-allocation";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { UniformMixedBodies } from "./uniform-mixed-bodies";
 import { UniformBedSlopeBake } from "./uniform-bed-slope-bake";
+import { UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS, UniformOpenWorldTerrain } from "./uniform-open-world-terrain";
 import { UniformPrescribedSolidMotion } from "./uniform-prescribed-solid-motion";
 import { fluidFrameCell, sceneFluidBoxPage, sceneFluidFrame, sceneFluidLatticeDimensions, sceneLatticeDimensions, type SceneFluidFrame } from "../../core/scene-lattice";
 import { planGPUAdvanceInto, type GPUAdvancePlan } from "../../core/tall-cell-diagnostics";
@@ -503,6 +504,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly solidBoundaryCapacity: number;
   /** Writes the scratch's bed-slope lane from its voxel mask: whole at build, around an edit after it. */
   private bedSlopeBake?: UniformBedSlopeBake;
+  /** An open world's ground: the window's terrain columns and the census's solid tiles past the box (UniformOpenWorldTerrain). */
+  private readonly openWorldTerrain?: UniformOpenWorldTerrain;
   /** Distinct storage binding for the compile-time-disabled MacCormack audit.
    * WebGPU still validates writable binding aliasing even when the shader's
    * constant-false branch cannot execute. */
@@ -639,10 +642,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const residency = this.pageResidency = uniformPagePoolResidency([nx, ny, nz], scene.fluid.pagePool,
       uniformPageSources(scene, this.inflowBoundary, Math.max(this.fixedStep_s ?? 0, scene.numerics.maxDt_s)), this.detail.policy === "dynamic",
       () => (this.initialVolume = uniformLatticeInitialVolume(scene)).volume, boxPage);
-    if (scene.container.walls === "none") {
-      const seed = this.initialVolume ??= uniformLatticeInitialVolume(scene);
-      uniformOpenWorldLiquidCheck([nx, ny, nz], seed.wetMinimum, seed.wetMaximum);
-    }
     // The frame is the page table's window: outside the box it is SOLID, but
     // for the column above an open top, which is AIR and claimable, and but in
     // an open world, where every page above the floor is (uniformLatticeAddress).
@@ -724,7 +723,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }
     this.heightA = device.createTexture({ label: "Uniform reference column base", size: [nx, nz], format: "rg32float", usage });
     this.heightB = device.createTexture({ label: "Uniform reference column occupancy", size: [nx, nz], format: "rg32float", usage });
-    this.terrainTexture = device.createTexture({ label: "Uniform reference terrain", size: [nx, nz], format: "r32float", usage });
+    // An open world's ground runs on past the box: its columns are the window's, baked on the GPU (UniformOpenWorldTerrain).
+    const openWorldTerrain = scene.container.walls === "none" && sceneHasTerrain(scene);
+    this.terrainTexture = device.createTexture({ label: "Uniform reference terrain",
+      size: openWorldTerrain ? [UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS, UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS] : [nx, nz], format: "r32float", usage });
     const transportUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     // The mixed frame reads neither padded transport field: Geometric binds placeholders.
@@ -764,6 +766,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const solidImage = this.solidMask.layout;
     device.queue.writeBuffer(this.activeScratch, 0, this.solidMask.words, 0, solidImage.lane);
     device.queue.writeBuffer(this.activeScratch, 4 * solidImage.cutMap, this.solidMask.words, solidImage.cutMap);
+    if (openWorldTerrain) this.openWorldTerrain = new UniformOpenWorldTerrain(device,
+      { columns: this.terrainTexture, scratch: this.activeScratch, cutMapWord: solidScratch.cutMapOffsetWords, tileKeys: address.tileKeys });
     if (boundaryImage) {
       device.queue.writeBuffer(this.activeScratch, this.solidMask.words.byteLength, boundaryImage);
       device.queue.writeBuffer(this.activeScratch, this.activeScratch.size - 8, new Uint32Array([this.solidMask.words.length, PROCEDURAL_SOLID_MAGIC]));
@@ -1097,12 +1101,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // each uncached pipeline in turn.
     const dynamic=this.mixedDynamic,builder=this.mixedBuilder,mixedBodies=this.mixedBodies;
     await settleGPUInitialization([this.mixedFrame.initialize(),this.mixedDiagnostics.initialize(),
-      dynamic.initialize(),builder.initialize(),mixedBodies.initialize(),bedSlopeBake.initialize()]);
+      dynamic.initialize(),builder.initialize(),mixedBodies.initialize(),bedSlopeBake.initialize(),this.openWorldTerrain?.initialize()]);
     // The lane of the mask the scratch holds, before the first frame reads
     // it. An edit taken up while the pipelines compiled is in that mask; one
     // from here on re-bakes around itself (applySceneUniforms).
     const bedSlope=this.device.createCommandEncoder({label:"Uniform bed-slope bake"});
-    bedSlopeBake.encode(bedSlope);this.device.queue.submit([bedSlope.finish()]);
+    bedSlopeBake.encode(bedSlope);
+    // An open world's ground, before the first layout builds the solid record and cut map from it.
+    if(this.openWorldTerrain){const f=this.frame;this.openWorldTerrain.encodeBake(bedSlope,this.scene.terrain!,[f.origin_m[0],f.origin_m[2]],[f.cellSize_m[0],f.cellSize_m[2]],f.cellSize_m[1]);
+      this.executionInfo.allocatedBytes+=this.openWorldTerrain.allocatedBytes;}
+    this.device.queue.submit([bedSlope.finish()]);
     this.bedSlopeBake=bedSlopeBake;
     this.executionInfo.allocatedBytes+=bedSlopeBake.scratchBytes;
     this.mixedFrame.setLayoutViews(this.layoutViews);
@@ -1729,7 +1737,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * build and its receipt grows the capacity (readMixedRelayout). */
   private mixedBodyScratch?:Uint8Array;
   private mixedBodyTiles(bodies:readonly RigidBodyState[],dt:number):Uint8Array{
-    const {cellSize_m,origin_m}=refinementRegionLattice(this.scene);
+    const {cellSize_m,origin_m}=fluidRegionLattice(this.scene);
     const a=this.address,count=a.boxTiles,wx=4*cellSize_m[0],wy=4*cellSize_m[1],wz=4*cellSize_m[2],cell=Math.max(cellSize_m[0],cellSize_m[1],cellSize_m[2]);
     // One scratch mask per solver: the callers count it and keep nothing.
     const tiles=this.mixedBodyScratch?.length===count?this.mixedBodyScratch.fill(0):(this.mixedBodyScratch=new Uint8Array(count));
@@ -2244,7 +2252,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.device.queue.writeBuffer(this.boundaryVelocityD, 0, zeroBoundaryVelocity);
     this.referenceVolumeCells = initial;
     const terrainCells = Float32Array.from(terrain, (height) => height / cellHeight);
-    this.upload2DF32(this.terrainTexture, terrainCells, nx, nz);
+    // An open world's columns are the window's, baked with the first layout (initializeMixedFrame).
+    if (!this.openWorldTerrain) this.upload2DF32(this.terrainTexture, terrainCells, nx, nz);
     this.mixedTerrainCells = terrainCells;
     Object.assign(this.executionInfo, {
       initialVolumeCellSum: initial, volumeCellSum: initial,
@@ -2485,7 +2494,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         this.mixedStepCellVolume=c.width_m*c.height_m*c.depth_m/(this.containerCells[0]*this.containerCells[1]*this.containerCells[2]);
       }
       this.mixedStepDt=dt;
-      this.mixedDynamic?.setBodies(bodyCount?this.markMixedBodies:undefined);
+      this.mixedDynamic?.setBodies(bodyCount?this.markMixedBodies:this.openWorldTerrain?this.markOpenWorldTerrain:undefined);
       // Bodies: the frame rebuilds its solid record and displaces liquid out
       // of the cells they entered; once more after the last one leaves. Native
       // coupleRigid then the rigid integration run after the projection.
@@ -2550,7 +2559,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly advanceRoster: RigidBodyState[] = [];
   /** This step's values for the body mark and the coupling the frame encodes inside its advance. */
   private mixedStepDt=0;private mixedStepCellVolume=0;private mixedStepCellHeight=0;private mixedStepSceneRevision=0;
-  private readonly markMixedBodies=(encoder:GPUCommandEncoder,tiles:GPUBuffer):void=>this.mixedBodies!.encodeTiles(encoder,tiles,this.mixedStepDt);
+  private readonly markMixedBodies=(encoder:GPUCommandEncoder,tiles:GPUBuffer):void=>{this.mixedBodies!.encodeTiles(encoder,tiles,this.mixedStepDt);this.openWorldTerrain?.encodeTiles(encoder,tiles);};
+  private readonly markOpenWorldTerrain=(encoder:GPUCommandEncoder,tiles:GPUBuffer):void=>this.openWorldTerrain!.encodeTiles(encoder,tiles);
   private readonly mixedCoupledBodies:UniformMixedFrameBodies={couple:(encoder:GPUCommandEncoder)=>{
     this.mixedBodies!.encodeCoupling(encoder);this.rigidSystem.encode(encoder,this.mixedStepDt,this.mixedStepCellVolume,1,this.mixedStepCellHeight);
     this.mixedFrame!.solid!.encodeBodies(encoder);
@@ -2773,7 +2783,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.reductions.destroy();
     this.conditioningScratch.destroy();
     this.pages.destroy();
-    this.activeScratch.destroy(); this.bedSlopeBake?.destroy();
+    this.activeScratch.destroy(); this.bedSlopeBake?.destroy(); this.openWorldTerrain?.destroy();
     this.fieldPages.destroy();
     this.rigidSystem.destroy(); this.rigidExchange.destroy();
     this.statsReadback?.destroy();

@@ -24,7 +24,8 @@ import {
 } from "./nbflip-ramp-scene";
 import { NBFLIP_SLOPE_CLEARANCE_SCENE_ID, createNbflipSlopeClearance } from "./nbflip-slope-clearance-scene";
 import {
-  NBFLIP_OPEN_GROUND_CELL_SIZE_M, NBFLIP_OPEN_GROUND_COLUMN, NBFLIP_OPEN_GROUND_GRID, NBFLIP_OPEN_GROUND_MEMORY_MIB, NBFLIP_OPEN_GROUND_SCENE_ID,
+  NBFLIP_OPEN_GROUND_CELL_SIZE_M, NBFLIP_OPEN_GROUND_COLUMN, NBFLIP_OPEN_GROUND_MEMORY_MIB, NBFLIP_OPEN_GROUND_SCENE_ID,
+  NBFLIP_OPEN_GROUND_FACES_SCENE_ID, NBFLIP_OPEN_GROUND_SLOPE_SCENE_ID, NBFLIP_OPEN_GROUND_SIDE, NBFLIP_OPEN_GROUND_STEP_HZ,
   createNbflipOpenGround, nbflipOpenGroundCamera,
 } from "./nbflip-open-ground-scene";
 import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12Scene, createCm12Figure7_256 } from "./cm12-paper-scenes";
@@ -1899,12 +1900,34 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: NBFLIP_OPEN_GROUND_SCENE_ID,
     name: "NB-FLIP · Open ground",
-    blurb: `A water column ${NBFLIP_OPEN_GROUND_COLUMN * NBFLIP_OPEN_GROUND_CELL_SIZE_M} m tall and ${NBFLIP_OPEN_GROUND_GRID[0] * NBFLIP_OPEN_GROUND_CELL_SIZE_M} m square released on open ground: no walls anywhere, so it floods out on every side and the solver claims pages wherever it goes. The page pool is a ${NBFLIP_OPEN_GROUND_MEMORY_MIB} MiB budget; running out of it is a named fatal. ${NBFLIP_OPEN_GROUND_GRID.join("×")} starting cells at ${NBFLIP_OPEN_GROUND_CELL_SIZE_M * 100} cm.`,
+    blurb: `A water column ${NBFLIP_OPEN_GROUND_COLUMN * NBFLIP_OPEN_GROUND_CELL_SIZE_M} m tall and ${NBFLIP_OPEN_GROUND_SIDE * NBFLIP_OPEN_GROUND_CELL_SIZE_M} m square released on open ground: no walls anywhere, so it floods out on every side and the solver claims pages wherever it goes. The page pool is a ${NBFLIP_OPEN_GROUND_MEMORY_MIB} MiB budget; running out of it is a named fatal. Cells of ${NBFLIP_OPEN_GROUND_CELL_SIZE_M * 100} cm.`,
     audience: "validation",
     shelf: "Tanks",
     environment: "stage",
     methodProfile: NBFLIP_METHOD_PROFILE,
     build: createNbflipOpenGround,
+    camera: nbflipOpenGroundCamera(),
+  }),
+  defineScene({
+    id: NBFLIP_OPEN_GROUND_FACES_SCENE_ID,
+    name: "NB-FLIP · Open ground, column at the faces",
+    blurb: "The open-ground column laid against its container's faces: the container is the column's footprint. Liquid against a face of an open world's container is no different from liquid inside it; nothing is lost at the first step.",
+    audience: "validation",
+    shelf: "Tanks",
+    environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: () => createNbflipOpenGround(NBFLIP_OPEN_GROUND_STEP_HZ, "faces"),
+    camera: nbflipOpenGroundCamera(),
+  }),
+  defineScene({
+    id: NBFLIP_OPEN_GROUND_SLOPE_SCENE_ID,
+    name: "NB-FLIP · Open ground on a slope",
+    blurb: "The open-ground column released on the flank of a wide analytic mound: the ground rises gently to -x past the container, and the water runs down it and floods out over the plane.",
+    audience: "validation",
+    shelf: "Tanks",
+    environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: () => createNbflipOpenGround(NBFLIP_OPEN_GROUND_STEP_HZ, "slope"),
     camera: nbflipOpenGroundCamera(),
   }),
   defineScene({

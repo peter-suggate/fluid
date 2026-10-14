@@ -630,12 +630,16 @@ fn umBedSlope(p:vec3i)->vec2f{
  return vec2f(vec2i(bitcast<i32>(entry<<24u)>>24u,bitcast<i32>(entry<<16u)>>24u))/${UNIFORM_SOLID_BED_SLOPE_UNITS}.0;
 }
 fn umSolidHasTerrain()->bool{return umSolidParams.frame.w>0.5;}
-fn umSolidTerrainHeight(x:i32,z:i32)->f32{let d=vec3i(umSolidDimensions());return textureLoad(umSolidTerrain,vec2i(clamp(x,0,d.x-1),clamp(z,0,d.z-1)),0).x;}
+// Terrain columns by lattice column: the box's in a closed scene, the whole
+// window's in an open world (UniformOpenWorldTerrain), whose ground runs on
+// past the box. A read past the texture takes its edge column.
+fn umSolidTerrainHigh()->vec2f{return vec2f(textureDimensions(umSolidTerrain))-vec2f(1);}
+fn umSolidTerrainHeight(x:i32,z:i32)->f32{let d=vec2i(textureDimensions(umSolidTerrain));return textureLoad(umSolidTerrain,vec2i(clamp(x,0,d.x-1),clamp(z,0,d.y-1)),0).x;}
 ${geometricPlaneBoxWGSL.replaceAll("geometric", "umTerrain")}
 ${uniformSolidBoundaryWGSL}
 // One continuous height and normal for contact and pressure geometry.
 fn umTerrainSurface(q:vec3f)->vec3f{
- let high=vec2f(umSolidDimensions().xz)-vec2f(1);
+ let high=umSolidTerrainHigh();
  let p=clamp(q.xz-vec2f(0.5),vec2f(0),high);let a=vec2i(floor(p));let f=fract(p);
  let h00=umSolidTerrainHeight(a.x,a.y);let h10=umSolidTerrainHeight(a.x+1,a.y);
  let h01=umSolidTerrainHeight(a.x,a.y+1);let h11=umSolidTerrainHeight(a.x+1,a.y+1);

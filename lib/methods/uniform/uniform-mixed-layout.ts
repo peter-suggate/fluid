@@ -136,8 +136,10 @@ export function uniformMixedSolidTiles(dimensions: Triple, mask: SolidOccupancyM
       for (let tx = (x - 1) >> 2; tx <= (x + 1) >> 2; tx++) if (uniformTileInBox(address, tx, ty, tz)) coupled[uniformBoxTileIndex(address, tx, ty, tz)] = 1;
   };
   // The box's pages: a full page is every cell of it, a slot is a word a row along x (bit x of word y + 32 z).
+  // The mask's directory is by window page, the box's from its origin (an open world's box sits mid-window).
+  const o = mask.originCell;
   for (let pz = 0; pz < address.pages[2]; pz++) for (let py = 0; py < address.pages[1]; py++) for (let px = 0; px < address.pages[0]; px++) {
-    const code = solidOccupancyMaskPage(words, 32 * px, 32 * py, 32 * pz) & 0xffff;
+    const code = solidOccupancyMaskPage(words, 32 * px + o[0], 32 * py + o[1], 32 * pz + o[2]) & 0xffff;
     if (code === SOLID_MASK_EMPTY) continue;
     for (let row = 0; row < 1024; row++) {
       let bits = code >= SOLID_MASK_FULL ? 0xffffffff : words[(code << 10) + row]!;

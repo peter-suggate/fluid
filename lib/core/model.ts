@@ -147,9 +147,14 @@ export interface SceneDescription {
      * the plane y = 0, solid below; everywhere above it, beside the container
      * as over it, is air, so liquid leaves the container on every side and the
      * fluid solver claims pages wherever it goes. An open world has an open top,
-     * a box shape, closed depth faces, no terrain and no procedural boundary,
-     * and its initial liquid keeps four cells from the container's sides and
-     * top (UNIFORM_OPEN_WORLD_LIQUID_MARGIN; the solver refuses it otherwise).
+     * a box shape and closed depth faces. Its liquid is its
+     * `initialLiquidVolumes` alone, anywhere against the container: the solver
+     * builds its start of run over the liquid's bounds and a margin
+     * (`sceneFluidBox`), not over the container. Its ground may be raised by
+     * analytic terrain (`baseHeight_m` and `features`, which run on past the
+     * container); it takes no sculpted or generated terrain, no voxels, no
+     * procedural boundary or solid surface, no sources and no refinement
+     * regions.
      */
     walls?: "none";
   };
@@ -589,8 +594,17 @@ export function validateScene(scene: SceneDescription): string[] {
   if (c?.shape === "sphere" && c.top !== "closed") errors.push("A spherical container must be closed");
   if (c?.walls !== undefined) {
     if (c.walls !== "none") errors.push("Container walls must be omitted or 'none'");
-    else if (c.top !== "open" || (c.shape ?? "box") !== "box" || c.depthBoundary === "symmetry" || scene.terrain || scene.solidBoundary) {
-      errors.push("A container without walls stands on open ground: it needs an open top, a box shape and closed depth faces, and takes no terrain or procedural boundary");
+    else if (c.top !== "open" || (c.shape ?? "box") !== "box" || c.depthBoundary === "symmetry" || scene.solidBoundary || scene.solidSurface
+      || scene.terrain?.grid || scene.terrain?.procedural || (scene.solidVoxels?.length ?? 0) > 0) {
+      errors.push("A container without walls stands on open ground: it needs an open top, a box shape and closed depth faces, and takes no sculpted or generated terrain, voxels, procedural boundary or solid surface");
+    } else {
+      const f = scene.fluid;
+      if (!f?.initialLiquidVolumes?.length || c.fillFraction > 0 || f.initialHeightField || f.initialDamBreakDimensions_m || f.initialBrickSeeds_m?.length
+        || f.inflow || f.scheduledDrops?.length || f.refinementRegions?.length) {
+        errors.push("An open world's liquid is its initial liquid volumes alone: it needs at least one, and takes no fill, height field, dam break, brick seeds, inflow, scheduled drops or refinement regions");
+      }
+      // The rigid-body solver reads the container's terrain columns; an open world's are the window's.
+      if (scene.terrain && (scene.rigidBodies?.length ?? 0) > 0) errors.push("An open world on terrain takes no rigid bodies");
     }
   }
   const pool = scene.fluid?.pagePool;
