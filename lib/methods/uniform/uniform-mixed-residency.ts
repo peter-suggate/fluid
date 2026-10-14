@@ -1,4 +1,9 @@
-/** The residency certificate's page arithmetic (uniformMixedResidencyWord in
+/** Residency page arithmetic and the legacy isotropic reference.
+ * Production allocation uses uniform-local-residency.ts: exact tile masks
+ * with six local travel bounds. The isotropic twins below remain useful as
+ * a reference in probe-residency-certificate.ts.
+ *
+ * The residency certificate's page arithmetic (uniformMixedResidencyWord in
  * uniform-mixed-topology.wgsl.ts): the kernels' WGSL and their host twins,
  * the same integer arithmetic.
  *

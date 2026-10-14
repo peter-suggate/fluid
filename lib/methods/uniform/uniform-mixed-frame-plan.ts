@@ -1,3 +1,4 @@
+import { uniformFramePlanSpreadWGSL } from "./uniform-frame-plan-spread";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_TILE_BITS_WORDS,uniformTileBitsWGSL} from "./uniform-block-tables";
@@ -81,10 +82,9 @@ struct PlanPolicy {settings:vec4u,step:vec4f}
 // bits by block (uniformTileBitsWGSL), all written by every certificate.
 // A tile with nothing stored is skipped, never read. An AIR tile holds the
 // AIR image: no support flag, zero faces, a 4h tile word. So it adds nothing
-// to a dilation or to a reach maximum (zero faces give umReach(0), the least
-// any stored tile's word holds, the lane's own among them), and it is a 4h
-// tile to the query on coarse (coarseAny). A SOLID tile adds nothing to any
-// of the three.
+// to a support dilation. For a separable reach maximum it invalidates
+// the regular certificate, since an intermediate path may cross the hole;
+// coarseAny also treats it as 4h. A SOLID tile adds nothing to either.
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner: the base block (UNIFORM_DETAIL_4H_LOAD).
 fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
@@ -222,29 +222,12 @@ var<workgroup> tileReach:array<atomic<u32>,384>;
   speeds[owner.tile]=umPackReach(plus,minus);
  }
 }
-// Separable box maximum over the global reach: a characteristic from tile t
-// never leaves that box, so its speed is bounded by the box maximum. A value
-// travels to a tile through two corner tiles of that box, and an unstored one
-// carries nothing: the maximum is whole at an h tile while its box is stored,
-// which the residency certificate gives every h tile out to its own radius
-// (UM_RESIDENCY+2, zero where every page is resident). A reach past that
-// radius sets the sticky closure bit (2): the next census fails the build.
-${[0,1,2].map(axis=>/* wgsl */`
-@compute @workgroup_size(64) fn spread${axis}(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;
- let reach=i32(umCertificateRadius(bitcast<f32>(atomicLoad(&umSupport[4u*UM_TILES]))));${axis===0?`
- if(tile==0u){let closure=atomicLoad(&umSupport[UM_RESIDENCY+2u]);if(closure!=0u&&u32(reach)>closure){atomicOr(&umSupport[UM_RESIDENCY+1u],2u);}}`:""}
- if(!umTileLive(tile)){return;}
- let base=${axis===1?"UM_TILES":"0u"};let into=${axis===1?"0u":"UM_TILES"};
- let p=vec3i(umTileCoord(tile));var plus=vec3u(0);var minus=vec3u(0);
- // Held to the window, never to a box of the scene's: a tile nothing stores is skipped.
- let first=clamp(p-vec3i(reach),vec3i(0),vec3i(511));let last=clamp(p+vec3i(reach),vec3i(0),vec3i(511));
- for(var q=first.${"xyz"[axis]};q<=last.${"xyz"[axis]};q++){
-  var r=p;r.${"xyz"[axis]}=q;let k=umTileKey(r);if(!umKeyStored(k)){continue;}let value=speeds[base+k];
-  plus=max(plus,umReachPlus(value));minus=max(minus,umReachMinus(value));
- }
- speeds[into+tile]=umPackReach(plus,minus);
-}`).join("\n")}
+// Sparse allocation need not contain the rectangular intermediate paths of
+// a separable maximum. An AIR hole propagates saturation, making every
+// affected certificate use the general mixed sampler. A single global
+// allocation-radius comparison cannot establish coverage of a directional
+// region; the per-tile certificate and the actual support audits do so.
+${[0,1,2].map(axis=>uniformFramePlanSpreadWGSL(axis)).join("\n")}
 // The 4h tile bits: a stored tile at 4h. An AIR page is 4h throughout
 // (coarseAny); a SOLID page holds none. Past 64 pages a box is answered as
 // holding one: no tile with so long a reach is certified regular.

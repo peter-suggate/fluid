@@ -1,3 +1,4 @@
+import { PARTICLE_RESIDENCY_WORDS, particleResidencyTravelWGSL } from "./uniform-local-residency";
 import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { narrowBandSeedShellWGSL } from "./uniform-narrow-band-seed.wgsl";
 import { uniformMixedExtensionSnapshotWGSL } from "./uniform-mixed-extension-slots.wgsl";
@@ -71,7 +72,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private readonly baseAllocatedBytes:number;
  get allocatedBytes():number{return this.baseAllocatedBytes+this.order.allocatedBytes;}
  /** A word per tile key from word `offset` of the buffer: non-zero where a sample's support reached at its last move (markParticleTiles). */
- get particleTiles():{buffer:GPUBuffer;offset:number}{return {buffer:this.bins,offset:2*this.cells+this.tiles};}
+ get particleTiles():{buffer:GPUBuffer;offset:number;allocation:GPUBuffer}{return {buffer:this.bins,offset:2*this.cells+this.tiles,allocation:this.particleAllocation};}
+ /** Current particle occupancy and signed travel, rebuilt by refine before the census. */
+ private readonly particleAllocation:GPUBuffer;
  private readonly order:UniformNarrowBandOrder;
  count=0;
  reseedClipped=0;
@@ -154,10 +157,11 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.particles=[buffer("particles A",this.capacity*48),buffer("particles B",this.capacity*48)];
   this.state=buffer("receipt and particle frame",64);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+address.tileKeys*(36+4*NARROW_BAND_ACTIVITY_WORDS_PER_TILE)+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*32);this.params=buffer("parameters",48,true);
   this.order=new UniformNarrowBandOrder(device,address,ownership.presentation.buffer,this.particles,this.bins,this.next,this.state);
+  this.particleAllocation=buffer("particle allocation support",8*address.blocks*PARTICLE_RESIDENCY_WORDS*4);
   this.refinementParams=buffer("refinement prediction",48,true);device.queue.writeBuffer(this.refinementParams,32,new Uint32Array([address.blocks,0,0,0]));
   const size=uniformCoarseCacheExtent(address);
   this.coarseVelocity=device.createTexture({label:"Narrow-band FLIP stage sampling cache",size,dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
-  this.baseAllocatedBytes=this.capacity*132+(3*cells+vertices)*4+address.tileKeys*(32+4*NARROW_BAND_ACTIVITY_WORDS_PER_TILE)+144+size.reduce((n,v)=>n*v,16);
+  this.baseAllocatedBytes=this.particleAllocation.size+this.capacity*132+(3*cells+vertices)*4+address.tileKeys*(32+4*NARROW_BAND_ACTIVITY_WORDS_PER_TILE)+144+size.reduce((n,v)=>n*v,16);
   if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotSnapshotResources=uniformDetailBindLayout(device,{entries:[
    ...[1,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
    ...[5,17].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}})),
@@ -223,6 +227,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
    {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+   {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
   ]});
   const refine=this.device.createShaderModule({label:"FLIP surface refinement prediction",code:/* wgsl */`
 struct Particle{position:vec4f,velocity:vec4f,before:vec4f}
@@ -236,6 +241,7 @@ struct Params{dimsDt:vec4f,h:vec4f,blocks:vec4u}
 // The box and the blocks are this module's uniform, the pages the
 // simulation topology's tail: the address functions read them.
 @group(0) @binding(5) var<storage,read> nbRefineTopology:array<u32>;
+@group(0) @binding(6) var<storage,read_write> allocation:array<atomic<u32>>;
 fn nbRefineCells()->vec3u{return vec3u(p.dimsDt.xyz);}
 fn nbRefineTiles()->u32{return 512u*p.blocks.x;}
 ${uniformWindowAddressWGSL("nbRefineTopology","5u*nbRefineTiles()","p.blocks.x")}
@@ -263,9 +269,35 @@ fn sweptSurface(sample:Particle)->Box{
  let hi=clamp(vec3i(floor((high+max(travel,vec3f(0))+p.h.w-1e-5)/4.0)),vec3i(0),vec3i(${8*UNIFORM_PAGE_WINDOW-1}));
  return Box(lo,max(lo,hi),home);
 }
+${particleResidencyTravelWGSL}
+// Include newly seeded and ballistic particles, not just last move's tile
+// marks. Their own velocities need not be bounded by the extended grid.
+fn allocationParticle(sample:Particle){
+ if(sample.position.x<0.0||sample.position.w<=0.0){return;}
+ let travel=lrParticleTravel(sample.velocity.xyz,sample.before.xyz,sample.before.w==1.0,p.dimsDt.w/p.h.xyz);
+ let low=travel[0];let high=travel[1];
+ // Preserve the particle's two-cell gather/reconstruction support as seeds,
+ // exactly as markParticleTiles does. The five-tile margin starts OUTSIDE
+ // this support, not at the particle's home tile.
+ let lo=vec3i(floor((sample.position.xyz-2.0)/4.0));let hi=vec3i(floor((sample.position.xyz+2.0)/4.0));
+ let first=lo>>vec3u(2u);let last=hi>>vec3u(2u);
+ for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){
+  let region=vec3i(x,y,z);let origin=4*region;let tile=umTileKey(origin);if(!umKeyStored(tile)){continue;}
+  let octant=vec3u(region)&vec3u(1u);let page=8u*(tile>>9u)+octant.x+2u*octant.y+4u*octant.z;
+  let a=vec3u(max(lo-origin,vec3i(0)));let b=vec3u(min(hi-origin,vec3i(3)));
+  let row=((2u<<(b.x-a.x))-1u)<<a.x;var mask=vec2u(0u);
+  for(var cz=a.z;cz<=b.z;cz++){for(var cy=a.y;cy<=b.y;cy++){let bit=4u*cy+16u*cz;mask[bit>>5u]|=row<<(bit&31u);}}
+  for(var k=0u;k<2u;k++){if(mask[k]!=0u){atomicOr(&allocation[8u*page+k],mask[k]);}}
+  for(var axis=0u;axis<3u;axis++){
+   if(low[axis]>0.0){atomicMax(&allocation[8u*page+2u+axis],bitcast<u32>(low[axis]));}
+   if(high[axis]>0.0){atomicMax(&allocation[8u*page+5u+axis],bitcast<u32>(high[axis]));}
+  }
+ }}}
+
+}
 @compute @workgroup_size(64) fn refine(@builtin(global_invocation_id) gid:vec3u){
  for(var i=gid.x;i<min(count[0],arrayLength(&samples));i+=65536u){
-  let sample=samples[i];if(sample.velocity.w < -1.0||sample.before.w==1.0){continue;}
+  let sample=samples[i];allocationParticle(sample);if(sample.velocity.w < -1.0||sample.before.w==1.0){continue;}
   let box=sweptSurface(sample);let page=vec3i(vec3u(sample.position.xyz)>>vec3u(5u));
   // Resampling preserves neighboring survivors; the seed tail is unsorted.
   // A superset sweep can mark for both, regardless of their order.
@@ -979,9 +1011,11 @@ ${narrowBandSurfaceWGSL}
     {binding:2,resource:{buffer:target.buffer,offset:target.wordOffset*4,size}},
     {binding:3,resource:{buffer:this.refinementParams}},
     {binding:4,resource:{buffer:this.bins}},{binding:5,resource:{buffer:this.ownership.presentation.buffer}},
+    {binding:6,resource:{buffer:this.particleAllocation}},
    ]})};
   }
   const group=held.group;
+  encoder.clearBuffer(this.particleAllocation);
   const pass=encoder.beginComputePass(NB_REFINEMENT_PASS);pass.setPipeline(this.refinementPipeline!);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1024);pass.end();
  }
  /** The page initialise's hook, after the pool's commit and before activity:
@@ -1064,5 +1098,5 @@ ${narrowBandSurfaceWGSL}
   if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?`trajectory exceeded ${NARROW_BAND_TRACE_LIMIT} cells`:words[3]===2?"nonfinite velocity"
    :`particle pool is full: ${words[1]} samples live of a capacity of ${this.capacity}, and source or initial liquid still had samples to add`}`);
  }
- destroy():void{this.order.destroy();this.coarseVelocity.destroy();this.stageTaps?.unit.destroy();this.refinementParams.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params])b.destroy();}
+ destroy():void{this.order.destroy();this.coarseVelocity.destroy();this.stageTaps?.unit.destroy();this.refinementParams.destroy();this.particleAllocation.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params])b.destroy();}
 }

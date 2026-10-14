@@ -30,6 +30,7 @@ const method=uniformNarrowBandMethod;
 const [sceneId,stepsText,everyText]=process.argv.slice(2).filter(a=>!a.startsWith("--"));
 const steps=Number(stepsText),every=Number(everyText);
 assert.ok(sceneId&&Number.isInteger(steps)&&steps>=1&&steps<=2400&&Number.isInteger(every)&&every>=1,"usage: probe-nbflip-pages.ts <scene> <steps> <every> [--dt=0.017] [--page-pool=<json>]");
+const auditAllocation=process.argv.includes("--allocation-audit");
 const dt=Number(process.argv.find(a=>a.startsWith("--dt="))?.split("=")[1]??0.017);
 assert.ok(dt>0&&dt<=0.1);
 const scene=structuredClone(sceneDocument(getSceneDefinition(sceneId)));
@@ -45,7 +46,7 @@ try{
  device.addEventListener('uncapturederror',e=>{e.preventDefault();errors.push(e.error.message);console.error(e.error.message);});
  solver=await method.createSolverAsync!(device,scene,'balanced',{...method.appDefaults,timeStep:'scene'},undefined,()=>{}) as WebGPUUniformReferenceSolver;
  const {pagePool:pool,fields:{residency},narrowBandFlip:{particleTiles},ownership}=(solver as unknown as {mixedFrame:{pagePool:UniformPagePool;fields:{residency:{live:boolean}};narrowBandFlip:{particleTiles:{buffer:GPUBuffer;offset:number}};ownership:{support:GPUBuffer;capacity:{tiles:number}}}}).mixedFrame;
- const l=pool.layout,status=new Uint32Array(S.words);read=device.createBuffer({label:"Page pool probe status",size:4*S.words,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+ const l=pool.layout,status=new Uint32Array(S.words);read=device.createBuffer({label:"Page pool probe status",size:4*(S.words+4),usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
  console.log(`${sceneId}: box ${l.box.pages.join("x")} = ${l.box.count} pages, pool of ${l.blocks} blocks (${l.slots} pages), ${residency.live?"live":"static"}, seeded ${pool.seeded.state[S.resident]} resident, ${pool.pinned} pinned, idle ${l.idleSteps}, dt ${dt}`);
  // The blocks whose tiles a sample's support reached, by the commit that claimed each (0: resident since the build).
  const records=R.words*l.blocks,marks=device.createBuffer({label:"Page pool probe liquid pages",size:4*(records+512*l.blocks)+16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
@@ -53,31 +54,65 @@ try{
   const encoder=device!.createCommandEncoder();encoder.copyBufferToBuffer(pool.state,4*l.state.records,marks,0,4*records);encoder.copyBufferToBuffer(particleTiles.buffer,4*particleTiles.offset,marks,4*records,4*512*l.blocks);
   // The residency certificate's header (umSupport[UM_RESIDENCY..]): pages, the closure bit, the radius.
   encoder.copyBufferToBuffer(ownership.support,4*(9*ownership.capacity.tiles+28),marks,4*(records+512*l.blocks),16);device!.queue.submit([encoder.finish()]);
-  await marks.mapAsync(GPUMapMode.READ);const words=new Uint32Array(marks.getMappedRange()),pages=new Int32Array(words.buffer,words.byteOffset,records),since:string[]=[];let seeded=0;
+  await marks.mapAsync(GPUMapMode.READ);const words=new Uint32Array(marks.getMappedRange()),pages=new Int32Array(words.buffer,words.byteOffset,records),since:string[]=[];let seeded=0,idle=0;
   for(let b=1;b<l.blocks-1;b++){
    if(words[R.words*b+R.state]!==UNIFORM_PAGE_POOL_BLOCK.resident)continue;
+   if(words[R.words*b+R.idle]!>0)idle++;
    let wet=false;for(let t=0;t<512&&!wet;t++)wet=words[records+512*b+t]!==0;
    if(!wet)continue;
    if(words[R.words*b+R.generation]===0)seeded++;else since.push(`${pages[R.words*b]}.${pages[R.words*b+1]}.${pages[R.words*b+2]}@${words[R.words*b+R.generation]}`);
   }
-  const reach=words[records+512*l.blocks+2]!;marks.unmap();return {seeded,since,reach};
+  const reach=words[records+512*l.blocks+2]!;marks.unmap();return {seeded,since,reach,idle};
  };
- let claimed=0,retired=0;
+ // Counterfactuals on the SAME census: global cube / local directional box /
+ // local exact occupancy. Numerical evolution therefore cannot explain the difference.
+ const allocation=async()=>{
+  if(!auditAllocation)return "";
+  const dynamic=(solver as unknown as {mixedDynamic:{work:GPUBuffer;localOffset:number}}).mixedDynamic;
+  if(!Number.isInteger(dynamic.localOffset))return "";
+  const censusRead=device!.createBuffer({size:dynamic.work.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  const stateRead=device!.createBuffer({size:pool.state.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  const e=device!.createCommandEncoder();e.copyBufferToBuffer(dynamic.work,0,censusRead,0,dynamic.work.size);e.copyBufferToBuffer(pool.state,0,stateRead,0,pool.state.size);device!.queue.submit([e.finish()]);
+  await Promise.all([censusRead.mapAsync(GPUMapMode.READ),stateRead.mapAsync(GPUMapMode.READ)]);
+  const c=new Uint32Array(censusRead.getMappedRange()),state=new Uint32Array(stateRead.getMappedRange()),signed=new Int32Array(state.buffer);
+  const globalRadius=Math.ceil(new Float32Array(c.buffer)[18]!/4)+5,sets=[new Set<string>(),new Set<string>(),new Set<string>()];
+  const solid=(q:number[])=>q.some((v,k)=>v<signed[l.state.window+24+k]!||v>=signed[l.state.window+27+k]!);
+  const add=(set:Set<string>,lo:number[],hi:number[])=>{for(let z=Math.floor(lo[2]!/8);z<=Math.floor(hi[2]!/8);z++)for(let y=Math.floor(lo[1]!/8);y<=Math.floor(hi[1]!/8);y++)for(let x=Math.floor(lo[0]!/8);x<=Math.floor(hi[0]!/8);x++){if(!solid([x,y,z]))set.add(`${x},${y},${z}`);}};
+  for(let page=0;page<8*l.blocks;page++){
+   const at=dynamic.localOffset+4*page,m0=c[at]!,m1=c[at+1]!;if((m0|m1)===0)continue;
+   const r=l.state.records+R.words*(page>>>3),origin=[0,1,2].map(k=>8*signed[r+k]!+4*((page>>>k)&1));
+   const lo=[3,3,3],hi=[0,0,0],negative=[0,1,2].map(k=>(c[at+2]!>>>(8*k))&255),positive=[0,1,2].map(k=>(c[at+3]!>>>(8*k))&255);
+   for(let bit=0;bit<64;bit++){
+    if((((bit<32?m0:m1)>>>(bit&31))&1)===0)continue;
+    const q=[bit&3,(bit>>>2)&3,bit>>>4];for(let k=0;k<3;k++){lo[k]=Math.min(lo[k]!,q[k]!);hi[k]=Math.max(hi[k]!,q[k]!);}
+    add(sets[2]!,q.map((v,k)=>origin[k]!+v-negative[k]!),q.map((v,k)=>origin[k]!+v+positive[k]!));
+   }
+   add(sets[0]!,lo.map((v,k)=>origin[k]!+v-globalRadius),hi.map((v,k)=>origin[k]!+v+globalRadius));
+   add(sets[1]!,lo.map((v,k)=>origin[k]!+v-negative[k]!),hi.map((v,k)=>origin[k]!+v+positive[k]!));
+  }
+  censusRead.unmap();stateRead.unmap();censusRead.destroy();stateRead.destroy();
+  return ` candidates global/local-box/local-exact ${sets.map(s=>s.size).join("/")}`;
+ };
+ let claimed=0,retired=0,residentSum=0,peakResident=0,maxSupport=0;
+ let completed=0;
+
  for(let step=1;step<=steps;step++){
   let thrown:string|undefined;
   try{solver.advanceTo(step*dt,[]);await solver.awaitFrameCompletion();}catch(e){const cause=(e as Error).cause;thrown=`${(e as Error).message}${cause instanceof Error?`: ${cause.message}`:""}`;}
-  const encoder=device.createCommandEncoder();pool.encodeReceipt(encoder,read,0);device.queue.submit([encoder.finish()]);
-  await read.mapAsync(GPUMapMode.READ);status.set(new Uint32Array(read.getMappedRange()));read.unmap();
+  const encoder=device.createCommandEncoder();pool.encodeReceipt(encoder,read,0);encoder.copyBufferToBuffer(ownership.support,4*(9*ownership.capacity.tiles+28),read,4*S.words,16);device.queue.submit([encoder.finish()]);
+  await read.mapAsync(GPUMapMode.READ);const receipt=new Uint32Array(read.getMappedRange());status.set(receipt.subarray(0,S.words));const support=receipt[S.words+1]!;maxSupport|=support;read.unmap();
+  residentSum+=status[S.resident]!;peakResident=Math.max(peakResident,status[S.resident]!);completed=step;
   claimed+=status[S.claimed]!;retired+=status[S.pending]!;
-  const fatal=uniformPagePoolFatalMessage(l,status),failure=thrown??solver.info.simulationPipelineError;
+  const fatal=uniformPagePoolFatalMessage(l,status),failure=thrown??solver.info.simulationPipelineError??(support?`support violation bits ${support}`:undefined);
   if(step%every===0||step===1||fatal||failure){
    const stats=failure?undefined:await solver.readStats(),wet=await liquidPages();
-   console.log(`step ${step} generation ${status[S.generation]} resident ${status[S.resident]} claimed ${claimed} retired ${retired} free ${status[S.free]} requests ${status[S.requests]} reach ${wet.reach} particles ${solver.narrowBandFlipInfo?.particles??0} sample pages ${wet.seeded}+${wet.since.length} liquid ${Math.round(stats?.volumeCellSum??NaN)} drift ${(stats?.volumeDrift??NaN).toFixed(4)} fatal ${fatal??"none"}`);
+   console.log(`step ${step} generation ${status[S.generation]} resident ${status[S.resident]} claimed ${claimed} retired ${retired} free ${status[S.free]} requests ${status[S.requests]} reach ${wet.reach} idle ${wet.idle} support ${support} particles ${solver.narrowBandFlipInfo?.particles??0} sample pages ${wet.seeded}+${wet.since.length} liquid ${Math.round(stats?.volumeCellSum??NaN)} drift ${(stats?.volumeDrift??NaN).toFixed(4)} fatal ${fatal??"none"}${await allocation()}`);
    if(failure||fatal)console.log(`sample pages claimed by a commit (page@commit): ${wet.since.join(" ")||"none"}`);
    claimed=0;retired=0;
   }
   if(failure||fatal){if(failure)console.log(`solver: ${failure}`);process.exitCode=1;break;}
   assert.ok(Math.abs((solver.info.completedTime_s??0)-step*dt)<1e-8,"complete exactly one requested clock step");
  }
- console.log(`errors ${JSON.stringify(errors)}`);
+ console.log(`summary steps ${completed} peak ${peakResident} mean ${(residentSum/completed).toFixed(3)} support ${maxSupport}`);
+ console.log(`errors ${JSON.stringify(errors)}`);assert.deepEqual(errors,[]);
 }finally{read?.destroy();solver?.destroy();await device?.queue.onSubmittedWorkDone();device?.destroy();}
