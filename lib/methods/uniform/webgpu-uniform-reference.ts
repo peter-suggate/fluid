@@ -3,6 +3,7 @@ import { gpuInitializationDevice } from "../../core/gpu-initialization-device";
 import {UniformMixedDiagnostics} from "./uniform-mixed-diagnostics";
 import { UNIFORM_MIXED_RECEIPT_RING, UniformMixedFrame, type UniformMixedFrameBodies, type UniformMixedFrameParameters, type UniformMixedFrameReceipt, type UniformMixedFrameRelayout, type UniformMixedFrameTrace } from "./uniform-mixed-frame";
 import { uniformDetailCapacityRule } from "./uniform-detail-policy";
+import { uniformWindowFixedFrame } from "./uniform-window-address";
 import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit } from "./uniform-mixed-layout";
@@ -1976,7 +1977,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Probe-only, off by default: force a page shift at a numerical step. */
   probeWindowShift(step:number,delta:readonly [number,number,number]):void{
     if(!Number.isInteger(step)||step<1||!delta.every(v=>(v|0)===v))throw new RangeError("Invalid window probe shift");
-    const pool=this.mixedFrame!.pagePool;this.device.queue.writeBuffer(pool.state,4*(pool.layout.state.window+20),new Int32Array([step,...delta]));
+    const pool=this.mixedFrame!.pagePool;
+    if(uniformWindowFixedFrame(pool.layout.worldPolicy))throw new Error("Window probe shift refused: a closed tank's kernels compile its frame as a constant (uniformWindowFixedFrame)");this.device.queue.writeBuffer(pool.state,4*(pool.layout.state.window+20),new Int32Array([step,...delta]));
   }
   /** Counts applySceneUniforms: what is derived from the scene alone is derived once per count, not once per step. */
   private sceneRevision = 1;

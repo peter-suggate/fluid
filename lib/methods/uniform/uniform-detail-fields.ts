@@ -1,4 +1,4 @@
-import { uniformWindowAddressWGSL } from "./uniform-window-address";
+import { UNIFORM_WINDOW_HEADER, uniformWindowAddressWGSL, uniformWindowFixedFrame } from "./uniform-window-address";
 import { uniformSceneConstantsWGSL } from "./uniform-scene-constants";
 /** Detail fields hold a tile-resolution base block and, when fine ownership
  * is reserved, an h store of every cell (a vertex field's: every vertex).
@@ -1291,11 +1291,18 @@ const storageOf=new WeakMap<UniformMixedOwnership,UniformDetailStorage>();
 export function uniformDetailPipeline(device:GPUDevice,ownership:UniformMixedOwnership,descriptor:GPUComputePipelineDescriptor):Promise<GPUComputePipeline>{
  const prefixes=ownership.fixedWorldGeometry?fixedWorldPrefixes.get(descriptor.compute.module):undefined;
  if(prefixes?.length){
-  const seed=ownership.capacity.address.seed,at=seed.layout.tail.window;
+  const seed=ownership.capacity.address.seed,at=seed.layout.tail.window,frame=uniformWindowFixedFrame(seed.tail[at+UNIFORM_WINDOW_HEADER.policy]!);
+  const word=(i:number)=>seed.tail[at+i]!|0,last=word(UNIFORM_WINDOW_HEADER.windowLast)>>>0;
+  const inside=[0,1,2].every(a=>{const f=word(UNIFORM_WINDOW_HEADER.frame+a),lo=word(UNIFORM_WINDOW_HEADER.solidLow+a),hi=word(UNIFORM_WINDOW_HEADER.solidHigh+a);return lo>=f&&hi<=f+last+1;});
   const constants:Record<string,number>={};
   for(const prefix of prefixes){
    constants[`${prefix}FixedWorldGeometry`]=1;
    for(let i=24;i<32;i++)constants[`${prefix}WindowWord${i}`]=seed.tail[at+i]!;
+   if(frame){
+    constants[`${prefix}FixedFrame`]=1;for(let i=0;i<3;i++)constants[`${prefix}WindowWord${i}`]=seed.tail[at+UNIFORM_WINDOW_HEADER.frame+i]!;
+    // A world box inside the fixed window: a page off the window is off the box, so SOLID whatever the window test says.
+    if(inside)constants[`${prefix}WindowWord${UNIFORM_WINDOW_HEADER.windowLast}`]=0xffffffff;
+   }
   }
   descriptor={...descriptor,compute:{...descriptor.compute,constants:{...constants,...descriptor.compute.constants}}};
  }

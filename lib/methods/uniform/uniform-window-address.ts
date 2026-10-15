@@ -20,6 +20,11 @@ export function uniformWindowDerivedWords(policy: number, origin: readonly numbe
   return out;
 }
 
+/** A closed tank's frame never moves (the moving-window decision keeps it;
+ * only probeWindowShift would), so a solver with fixed world geometry may
+ * compile it as a constant: the policy word of a window header. */
+export const uniformWindowFixedFrame = (policy: number): boolean => policy === 1;
+
 /** Shared classification in signed world pages. Policy 0 is the standalone
  * allocator's explicit table, 1 a closed tank, 2 its open-top column, 3 open
  * ground. Voxel/procedural solids inside stored pages remain the solid
@@ -46,14 +51,18 @@ fn ${prefix}WorldSolid(q:vec3i)->bool{
 export function uniformWindowAddressWGSL(buffer: string, table: string, blocks: string, prefix = "um", entries = 64 ** 3): string {
   const w = (i: number) => {
     const raw = `${buffer}[${table}+${entries + i}u]`;
-    return i >= 24 ? `select(${raw},${prefix}WindowWord${i},${prefix}FixedWorldGeometry)` : raw;
+    return i >= 24 ? `select(${raw},${prefix}WindowWord${i},${prefix}FixedWorldGeometry)` : i < 3 ? `select(${raw},${prefix}WindowWord${i},${prefix}FixedFrame)` : raw;
   };
   const v = (i: number) => `vec3u(${w(i)},${w(i + 1)},${w(i + 2)})`;
   return /* wgsl */ `
 // Generic consumers read the runtime header. Only a solver promising fixed
-// world geometry supplies these overrides; frame and page residency stay live.
+// world geometry supplies these overrides; page residency stays live. The
+// frame (words 0..2) is a constant too where the policy never moves it (a
+// closed tank, uniformWindowFixedFrame): every translation then folds.
 override ${prefix}FixedWorldGeometry:bool=false;
+override ${prefix}FixedFrame:bool=false;
 ${Array.from({length:8},(_,i)=>`override ${prefix}WindowWord${24+i}:u32=0u;`).join("\n")}
+${Array.from({length:3},(_,i)=>`override ${prefix}WindowWord${i}:u32=0u;`).join("\n")}
 fn ${prefix}FramePage()->vec3i{return bitcast<vec3i>(${v(0)});}
 // The first lattice cell above each axis's low wall (the authored box's low
 // face): a face anchor below it is a low-wall face, read as the cell above.
