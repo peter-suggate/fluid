@@ -111,7 +111,7 @@ fn umVertexValue(p:vec3u)->f32 {
  if(umRegularFine){return umLoadVertex(p);}
  // Only tiles incident to a tile plane can disagree about coincidence.
  // Avoid constructing eight full owners for ordinary stored vertices.
- let tile=umTileAt(vec3u(umVertexCellAbove(vec3i(p)))/4u);
+ let above=vec3u(umVertexCellAbove(vec3i(p)))/4u;let tile=umTileAt(above);
  if(umTileMaximumWidth(tile)==1u){return ${fine}(p);}
  ${corner ? `if(all(p%4u==vec3u(0))){return ${corner}(p);}` : ""}
  // Every owner incident to p lies in its tile's stencil. A uniform stencil
@@ -122,6 +122,11 @@ fn umVertexValue(p:vec3u)->f32 {
  if(all(local==vec3u(0))){return ${coarse}(p);}
  ${cacheLookup}
  var stored=true;
+ // Stored tiles already compiled every incident h/4h decision. For this
+ // non-corner vertex, any coarse incident tile requires reconstruction.
+ // An AIR sentinel has no stencil; retain the walk across its page seam.
+ if(umTileLive(tile)){stored=umCoarseIncident(tile,p-above*4u)==0u;}
+ else{
  for(var k=0u;k<${split ? "select(umCounts.w,0u,uniform&&widest==4u)" : "select(umCounts.w,8u,umRegularFine)"};k++){
   let back=umCorner(k,2u);
   if(any((back!=vec3u(0))&(local!=vec3u(0)))){continue;}
@@ -129,6 +134,7 @@ fn umVertexValue(p:vec3u)->f32 {
   if(!umTilePresent(tile)){continue;}
   let width=umTileWidth(umTileAt(vec3u(tile)));
   if(any(p%width!=vec3u(0))){stored=false;break;}
+ }
  }
  if(stored${split ? "&&!(uniform&&widest==4u)" : ""}){return ${fine}(p);}
  let owner=umVertexAuthority(p);

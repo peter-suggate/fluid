@@ -223,7 +223,7 @@ function uniformMixedPressureTarget(p:{pressureTolerance:number}):number{
  * byteBudget: bytes the capacity-sized buffers and the detail fields may hold at once, a
  * reservation's old and new together; absent, only the device's buffer and
  * binding limits refuse one. */
-export interface UniformMixedFrameCapacity{fineTiles:number;liquidBand:boolean;byteBudget?:number;particleTransfer?:"flip"|"apic"}
+export interface UniformMixedFrameCapacity{fineTiles:number;liquidBand:boolean;byteBudget?:number;particleTransfer?:"flip"|"apic";fixedWorldGeometry?:boolean}
 
 export class UniformMixedFrame {
  readonly ownership:UniformMixedOwnership;
@@ -429,7 +429,7 @@ export class UniformMixedFrame {
   this.pagePool=new UniformPagePool(device,{...layout.address.pool,closureCap:f.residency.live?4*UNIFORM_RESIDENCY_PAGE_REACH:0xffffffff});this.pagePool.seed(layout.address.seed);this.pagePool.pin(f.residency.pins);
   const solid=this.solid=new UniformMixedSolid(device,f.solid,coarseLayout,this.pagePool);
   this.coarseCache=caches[0]!;
-  const o=this.ownership=new UniformMixedOwnership(device,layout,true,capacity.fineTiles);
+  const o=this.ownership=new UniformMixedOwnership(device,layout,true,capacity.fineTiles,capacity.fixedWorldGeometry);
   {const h=o.capacity.lattice.cellSize_m,inverse=(x:number)=>Math.fround(1/Math.fround(Math.fround(x)*Math.fround(x)));
    this.words={frame:new Uint32Array(1),extension:new Float32Array([...h,0]),surface:new Float32Array([...h,0]),surfaceFlags:new Uint32Array([0,0,0,4]),
     momentum:new Float32Array([...h,0]),momentumFlags:new Uint32Array([0,0,0,UNIFORM_MIXED_MOMENTUM_LIMITS]),forces:new Float32Array([...h,0,0,0,0,0,0,0,0,0]),projection:new Float32Array([...h,0,0,0,0,0]),
@@ -468,7 +468,7 @@ export class UniformMixedFrame {
   const rootTopology:GPUBufferBinding|undefined=solid?.coarse?{buffer:buffer("Uniform mixed root topology",uniformMixedRootTopologyBytes(coarseLayout),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC)}:undefined;
   if(rootTopology)this.solidTopology={buffer:rootTopology.buffer,size:rootTopology.buffer.size};
   {const r=memory.root;
-   this.levels=[{ownership:new UniformMixedOwnership(device,coarseLayout,false,0),pressure:view(r.pressure),rhs:[view(r.rhs[0]),view(r.rhs[1])],minimum:[view(r.minimum[0]),view(r.minimum[1])],phi:rootPhi,frozen:view(r.frozen),residual:view(r.residual),
+   this.levels=[{ownership:new UniformMixedOwnership(device,coarseLayout,false,0,capacity.fixedWorldGeometry),pressure:view(r.pressure),rhs:[view(r.rhs[0]),view(r.rhs[1])],minimum:[view(r.minimum[0]),view(r.minimum[1])],phi:rootPhi,frozen:view(r.frozen),residual:view(r.residual),
     topology:f.solid?{buffer:this.solidTopology!}:undefined}];}
   const root=this.levels[0]!,p=root.ownership;
   this.rootOwners=new UniformMixedRootOwners(device,p,root.phi!,this.solidTopology);

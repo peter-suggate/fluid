@@ -345,8 +345,10 @@ fn umFaceLevelKeys(level:u32)->u32{let m=8u>>level;return 6u*m*m*UM_BLOCKS;}
  * keep their barriers. count: the WGSL expression of the job count, for a
  * list the ownership does not hold (a GPU-compacted list read by the module
  * itself, e.g. uniformMixedChangedTilesWGSL's umDilatedCount()); size the
- * launch to that list's bound. */
-export function uniformMixedCertifiedEntriesWGSL(source: string, entries: readonly string[], count = "umLaunchJobCount()"): string {
+ * launch to that list's bound. empty: an optional workgroup-uniform
+ * expression proving there can be no jobs (e.g. a uniform-buffer tier
+ * count). It returns before the shared job-count barrier. */
+export function uniformMixedCertifiedEntriesWGSL(source: string, entries: readonly string[], count = "umLaunchJobCount()", empty?: string): string {
   let out = source;
   for (const entry of entries) {
     const pattern = new RegExp(`@compute\\s+@workgroup_size\\((\\d+)\\)\\s+fn\\s+${entry}\\s*\\(((?:[^()]|\\([^()]*\\))*)\\)\\s*\\{`);
@@ -370,7 +372,7 @@ export function uniformMixedCertifiedEntriesWGSL(source: string, entries: readon
     out = out.slice(0, match.index) + `fn ${entry}Job(${params.join(",")}){` + out.slice(match.index + match[0].length) + /* wgsl */ `
 var<workgroup> ${entry}Jobs:u32;
 @compute @workgroup_size(${size}) fn ${entry}(@builtin(workgroup_id) umGroup:vec3u,@builtin(num_workgroups) umGroups:vec3u,@builtin(local_invocation_index) umLane:u32${forwarded.length?","+forwarded.join(","):""}){
- if(umLane==0u){${entry}Jobs=${count};}
+${empty?` if(${empty}){return;}\n`:""} if(umLane==0u){${entry}Jobs=${count};}
  let jobs=workgroupUniformLoad(&${entry}Jobs);
  for(var umJob=umGroup.x;umJob<jobs;umJob+=umGroups.x){${entry}Job(${args.join(",")});workgroupBarrier();}
 }

@@ -129,7 +129,7 @@ export class UniformMixedRemap {
   if(this.pipelines.size!==5)throw new Error("Live remap has not been initialized");
   this.ownership.assertHolds(layout);
   // A transient target: host layouts are rare (authored regions, the initial layout).
-  const target=new UniformMixedOwnership(this.device,layout,false);
+  const target=new UniformMixedOwnership(this.device,layout,false,layout.address.poolTiles,this.ownership.fixedWorldGeometry);
   const encode=(copy:boolean)=>{
    const e=this.device.createCommandEncoder({label:copy?"Uniform publish remapped owners":"Uniform remap changed ownership"});
    if(!copy){e.clearBuffer(this.worklist,0,16);before?.(e,target.presentation.buffer);}

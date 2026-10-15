@@ -73,5 +73,30 @@ export function uniformSceneConstantsWGSL(code: string): string {
     const directives = /^(?:\s*(?:enable|requires|diagnostic)\b[^;]*;)*\s*/.exec(code)![0];
     code = directives + declaration + code.slice(directives.length) + helpers + `\nfn ${prefix}umSceneSpacing()->vec3f{return ${name}.spacing.xyz;}\nfn ${prefix}umSceneMinimumSpacing()->f32{return ${name}.spacing.w;}\nfn ${prefix}umSceneMaximumSpacing()->f32{return max(${name}.spacing.x,max(${name}.spacing.y,${name}.spacing.z));}\n`;
   }
-  return code;
+  return uniformWindowCountsWGSL(code);
+}
+
+/** Window metadata shares each owning topology's existing uniform.
+ * Generation targets which delegate their addresses have no matching reads,
+ * and retain their original 48-byte binding. Other buffers retain storage reads. */
+function uniformWindowCountsWGSL(code:string):string {
+ const counts=[...code.matchAll(/var<uniform>\s+(\w*umCounts)\s*:\s*(\w+)\s*;/g)];
+ for(const [,name,type] of counts){
+  const prefix=name!.slice(0,-"umCounts".length);
+  const pattern=new RegExp(`\\b${prefix}umTopology\\[${prefix}UM_PAGE_TABLE(?:\\(\\))?\\+(2621(?:4[4-9]|[56][0-9]|7[0-5]))u\\]`,"g");
+  if(!pattern.test(code))continue;pattern.lastIndex=0;
+  if(type==="vec4u"){
+   const struct=`${prefix}UMWindowCounts`;
+   code=code.replace(new RegExp(`\\b${name}\\b(?!\\s*:)`,"g"),`${name}.work`);
+   code=code.replace(new RegExp(`(var<uniform>\\s+${name}\\s*:)\\s*vec4u`),`$1 ${struct}`);
+   const directives=/^(?:\s*(?:enable|requires|diagnostic)\b[^;]*;)*\s*/.exec(code)![0];
+   code=directives+`struct ${struct}{work:vec4u,dimensions:vec4u,spacing:vec4f,window:array<vec4u,8>}\n`+code.slice(directives.length);
+  }else{
+   const declaration=new RegExp(`struct\\s+${type}\\s*\\{([^}]*)\\}`);
+   const match=declaration.exec(code);if(!match)throw new Error(`Window counts missing struct ${type}`);
+   code=code.replace(declaration,`struct ${type}{${match[1]},window:array<vec4u,8>}`);
+  }
+  code=code.replace(pattern,(_read,index:string)=>{const word=Number(index)-262144;return `${name}.window[${word>>2}u][${word&3}u]`;});
+ }
+ return code;
 }

@@ -569,8 +569,9 @@ export function uniformPagePoolWGSL(layout:UniformPagePoolLayout,group:number,st
  return source(layout,group,state,work,"read");
 }
 /** A buffer that carries the tail (layout.tail) at word `offset`: the commit
- * kernels bind it writable, the seed is uploaded to it. */
-export interface UniformPagePoolMirror {readonly buffer:GPUBuffer;readonly offset:number}
+ * kernels bind it writable, the seed is uploaded to it. An optional
+ * headerUniform (offset in bytes) receives a copy of the window header. */
+export interface UniformPagePoolMirror {readonly buffer:GPUBuffer;readonly offset:number;readonly headerUniform?:{readonly buffer:GPUBuffer;readonly offset:number}}
 
 /** The pool's buffers and its commit. Construct (every entry AIR, every
  * block free), seed() a resident set, pin() the pages that stay, await
@@ -647,7 +648,10 @@ export class UniformPagePool {
   work.set(seed.ring,l.work.ring);work[UNIFORM_PAGE_POOL_WORK.pins]=this.pinCount;work.set(new Uint32Array(this.pins.buffer,0,4*this.pinCount),l.work.pins);
   queue.writeBuffer(this.state,0,seed.state);queue.writeBuffer(this.work,0,work);
   if(this.published)queue.writeBuffer(this.published,0,uniformPagePoolPublished(seed,l));
-  for(const m of this.mirrors)queue.writeBuffer(m.buffer,4*m.offset,seed.tail);
+  for(const m of this.mirrors){
+   queue.writeBuffer(m.buffer,4*m.offset,seed.tail);
+   if(m.headerUniform)queue.writeBuffer(m.headerUniform.buffer,m.headerUniform.offset,seed.state.subarray(l.state.window,l.state.window+UNIFORM_WINDOW_HEADER_WORDS));
+  }
  }
  /** Fix the pinned pages (source boxes): every commit from now on
   * asks for each, exactly as upRequest asks, so a pinned page is claimed by
@@ -668,7 +672,8 @@ export class UniformPagePool {
  /** Compile the commit, every pipeline it will ever launch. Each mirror's
   * tail is written from the seed here and kept equal to the state's by the
   * commit kernels from then on; a mirror needs STORAGE and COPY_DST usage
-  * and costs the commit one storage binding. */
+  * and costs the commit one storage binding. Optional headerUniform receives
+  * the 32-word runtime window on initialize, seed and after each commit. */
  async initialize(mirrors:readonly UniformPagePoolMirror[]=[],frameParams?:GPUBuffer):Promise<void>{
   const device=this.device,l=this.layout,W=UNIFORM_PAGE_POOL_WORK,S=UNIFORM_PAGE_POOL_STATUS,R=UNIFORM_PAGE_POOL_RECORD,B=UNIFORM_PAGE_POOL_BLOCK;
   if(this.started)throw new Error("Uniform page pool is already initialized");
@@ -677,10 +682,20 @@ export class UniformPagePool {
   mirrors.forEach((m,i)=>{
    if(!Number.isSafeInteger(m.offset)||m.offset<0||4*(m.offset+l.tail.words)>m.buffer.size)throw new RangeError(`Uniform page pool mirror ${i}: ${l.tail.words} words at word ${m.offset} do not fit its buffer of ${m.buffer.size} bytes`);
    if((m.buffer.usage&needed)!==needed)throw new Error(`Uniform page pool mirror ${i}: its buffer needs STORAGE and COPY_DST usage`);
+   if(m.headerUniform){
+    const h=m.headerUniform;
+    if(!Number.isSafeInteger(h.offset)||h.offset<0||h.offset%4||h.offset+4*UNIFORM_WINDOW_HEADER_WORDS>h.buffer.size)throw new RangeError(`Uniform page pool mirror ${i}: header does not fit its target`);
+    if(!(h.buffer.usage&GPUBufferUsage.COPY_DST))throw new Error(`Uniform page pool mirror ${i}: header target needs COPY_DST usage`);
+    if(h.buffer===this.state||h.buffer===this.work||h.buffer===this.published||mirrors.some(o=>o.buffer===h.buffer))throw new Error(`Uniform page pool mirror ${i}: header target aliases pool storage`);
+    if(mirrors.slice(0,i).some(o=>o.headerUniform?.buffer===h.buffer&&o.headerUniform.offset<h.offset+4*UNIFORM_WINDOW_HEADER_WORDS&&h.offset<o.headerUniform.offset+4*UNIFORM_WINDOW_HEADER_WORDS))throw new Error(`Uniform page pool mirror ${i}: header targets overlap`);
+   }
    if(m.buffer===this.state||m.buffer===this.work||mirrors.findIndex(o=>o.buffer===m.buffer)!==i)throw new Error(`Uniform page pool mirror ${i}: its buffer is bound to the commit already`);
   });
-  this.started=true;this.mirrors=mirrors.map(({buffer,offset})=>({buffer,offset}));
-  for(const m of this.mirrors)device.queue.writeBuffer(m.buffer,4*m.offset,this.current.tail);
+  this.started=true;this.mirrors=mirrors.map(({buffer,offset,headerUniform})=>({buffer,offset,headerUniform:headerUniform?{...headerUniform}:undefined}));
+  for(const m of this.mirrors){
+   device.queue.writeBuffer(m.buffer,4*m.offset,this.current.tail);
+   if(m.headerUniform)device.queue.writeBuffer(m.headerUniform.buffer,m.headerUniform.offset,this.current.state.subarray(l.state.window,l.state.window+UNIFORM_WINDOW_HEADER_WORDS));
+  }
   const puts=(at:number)=>this.mirrors.map((m,i)=>`upMirror${i}[${m.offset+at}u+i]=word;`).join("");
   const compile=async(label:string,code:string)=>{
    const module=device.createShaderModule({label,code});
@@ -872,6 +887,8 @@ var<workgroup> upScan:array<vec2u,256>;
   pass.setPipeline(this.slotsPipeline);pass.dispatchWorkgroups(1);
   if(this.publishPipeline){pass.setPipeline(this.publishPipeline);pass.setBindGroup(0,this.publisher!);pass.dispatchWorkgroups(this.publishGroups);}
   pass.end();
+  // Queue-ordered publication uses the existing uniform binding and no new compute pass.
+  for(const m of this.mirrors)if(m.headerUniform)encoder.copyBufferToBuffer(this.state,4*this.layout.state.window,m.headerUniform.buffer,m.headerUniform.offset,4*UNIFORM_WINDOW_HEADER_WORDS);
  }
  /** Copy the status (UNIFORM_PAGE_POOL_STATUS.words words) to `target` at
   * `offset` bytes: the host's only view of the pool, to map when it likes. */

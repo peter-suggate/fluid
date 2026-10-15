@@ -1275,13 +1275,30 @@ export function uniformDetailDenseShader(code:string,classes:Readonly<Record<str
  // The module's address extents are functions of its lattice.
  return rewriteCalls(code,new Set(kinds.keys()))+detailDomainWGSL(kinds,undefined,false,true,undefined,undefined,undefined,undefined,undefined,undefined,undefined,"()");
 }
+// The window overrides declared by each rewritten module. The opt-in lives
+// on a solver ownership, never on a GPU device shared by several scenes.
+const fixedWorldPrefixes=new WeakMap<GPUShaderModule,readonly string[]>();
 /** createShaderModule through the central rewrite. */
 export function uniformDetailModule(device:GPUDevice,descriptor:GPUShaderModuleDescriptor):GPUShaderModule{
- return device.createShaderModule({...descriptor,code:uniformSceneConstantsWGSL(uniformDetailShader(descriptor.code,device))});
+ const code=uniformSceneConstantsWGSL(uniformDetailShader(descriptor.code,device));
+ const module=device.createShaderModule({...descriptor,code});
+ const prefixes=[...code.matchAll(/\boverride (\w*)FixedWorldGeometry:bool=false;/g)].map(match=>match[1]!);
+ if(prefixes.length)fixedWorldPrefixes.set(module,prefixes);
+ return module;
 }
 const storageOf=new WeakMap<UniformMixedOwnership,UniformDetailStorage>();
 /** Every pipeline is compiled once. */
-export function uniformDetailPipeline(device:GPUDevice,_ownership:UniformMixedOwnership,descriptor:GPUComputePipelineDescriptor):Promise<GPUComputePipeline>{
+export function uniformDetailPipeline(device:GPUDevice,ownership:UniformMixedOwnership,descriptor:GPUComputePipelineDescriptor):Promise<GPUComputePipeline>{
+ const prefixes=ownership.fixedWorldGeometry?fixedWorldPrefixes.get(descriptor.compute.module):undefined;
+ if(prefixes?.length){
+  const seed=ownership.capacity.address.seed,at=seed.layout.tail.window;
+  const constants:Record<string,number>={};
+  for(const prefix of prefixes){
+   constants[`${prefix}FixedWorldGeometry`]=1;
+   for(let i=24;i<32;i++)constants[`${prefix}WindowWord${i}`]=seed.tail[at+i]!;
+  }
+  descriptor={...descriptor,compute:{...descriptor.compute,constants:{...constants,...descriptor.compute.constants}}};
+ }
  return device.createComputePipelineAsync(descriptor);
 }
 export function uniformDetailPick(pipeline:GPUComputePipeline):GPUComputePipeline{return pipeline;}

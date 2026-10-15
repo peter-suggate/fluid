@@ -165,8 +165,9 @@ export class UniformMixedOwnership {
   private seamCounts=[0,0];
   private held:UniformMixedCapacity;
   get capacity():UniformMixedCapacity{return this.held;}
-  /** Where the topology holds the page table and block records, in words: a page pool's mirror (UniformPagePool.initialize). */
-  get pageMirror():{readonly buffer:GPUBuffer;readonly offset:number}{return {buffer:this.topology,offset:this.held.metadataBytes/4};}
+  /** Topology tail in words, plus the runtime window's uniform target in bytes.
+   * The page pool publishes both together on initialize, seed and commit. */
+  get pageMirror():{readonly buffer:GPUBuffer;readonly offset:number;readonly headerUniform:{readonly buffer:GPUBuffer;readonly offset:number}}{return {buffer:this.topology,offset:this.held.metadataBytes/4,headerUniform:{buffer:this.counts,offset:48}};}
   /** Bumped by reserveFine: whoever holds a value or a buffer sized by the
    * h-tile capacity compares it and follows. */
   capacityRevision=0;
@@ -222,7 +223,10 @@ export class UniformMixedOwnership {
    * given). The construction layout is exempt from it: it only seeds a
    * remap (the t=0 fields are h data), and no frame can be acquired on it
    * while it is over capacity. */
-  constructor(private readonly device: GPUDevice, layout: UniformMixedLayout, private readonly sampled = true, fineTiles = layout.address.poolTiles) {
+  // fixedWorldGeometry promises the seed's world policy and authored bounds
+  // remain unchanged for this ownership's lifetime. Standalone page pools,
+  // which can be reseeded, keep the default runtime header interpretation.
+  constructor(private readonly device: GPUDevice, layout: UniformMixedLayout, private readonly sampled = true, fineTiles = layout.address.poolTiles, readonly fixedWorldGeometry = false) {
     this.currentLayout = layout;
     const address=layout.address,n=address.tileKeys;
     if(!Number.isInteger(fineTiles)||fineTiles<0||fineTiles>address.poolTiles)throw new Error(`Uniform mixed ownership cannot hold ${fineTiles} h tiles: its page pool stores at most ${address.poolTiles}`);
@@ -251,8 +255,9 @@ export class UniformMixedOwnership {
     device.queue.writeBuffer(this.topology,layout.metadataBytes+pages.byteLength,neighbours);
     // The tail's last word locates the detail table (lib/core/uniform-detail-abi.ts).
     device.queue.writeBuffer(this.topology,this.topology.size-4,Uint32Array.of(this.detailBytes/4));
-    this.counts = device.createBuffer({ label: "Uniform mixed work counts and scene geometry", size: 48,
+    this.counts = device.createBuffer({ label: "Uniform mixed work counts, geometry and window", size: 176,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC | GPUBufferUsage.UNIFORM });
+    device.queue.writeBuffer(this.counts,48,pages.subarray(64**3,64**3+32));
     device.queue.writeBuffer(this.counts, 16, new Uint32Array([...address.cells, n]));
     device.queue.writeBuffer(this.counts, 32, new Float32Array([...layout.lattice.cellSize_m, Math.min(...layout.lattice.cellSize_m)]));
     // 9n+24: the mixed pressure schedule's slot gate (umSlotClosed), zero

@@ -180,9 +180,9 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
  // Before retiring adjacent h owners, recover the metric coarse samples.
  // Particle sphere unions preserve their fine zero set but distort interior
  // magnitudes; inheriting those magnitudes as a 4h chord moves a flat surface.
- // The tile test is one stencil word; the heat test samples eight tiles' heat and, under each cold one, the
- // field's eight vertices. Only a vertex whose tile has an h neighbour can retire, so that test goes first.
- let retiring=width==4u&&umTileMinimumWidth(umTileAt(c/4u))==1u&&nbSurfaceThetaFrom(vec3i(origin>>vec3u(2u)),vec3f(p))<=0.0;
+ // Only a vertex whose tile has an h neighbour can retire. Test its
+ // stencil first, then the eight heat words; this zero predicate needs no phi.
+ let retiring=width==4u&&umTileMinimumWidth(umTileAt(c/4u))==1u&&!nbSurfaceHotCornerFrom(vec3i(origin>>vec3u(2u)),p);
  let normalize=(width==1u&&!nbInterfaceVertex(p))||retiring;
  // The metric replacement needs no sample of the old field. Keep its exact
  // multiply, and read phi only where the reconstructed value is consumed.
@@ -213,8 +213,9 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
 }
 // The metric of the coarse corners retirement can normalize, where
 // redistanceCoarse reads it: one writer each. Every corner beside an h owner
-// is built: the surface heat that selects the retiring ones reads the phi of
-// the store's own bindings, not this pass's. Compiled without the geometry
+// is built only if its heat can retire: the corner's zero-heat predicate
+// depends on heat alone, so it is identical in this pass and the store.
+// Compiled without the geometry
 // cache, which the fine band's metric builds after its own search.
 @compute @workgroup_size(64) fn depthCoarse(@builtin(global_invocation_id) gid:vec3u){
  for(var i=gid.x;i<umCounts.y;i+=65536u){
@@ -230,6 +231,7 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
    else if((corners&(1u<<k))==0u){continue;}
    let c=vec3u(umCellNearFromPage(owner.tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
    if(umTileMinimumWidth(umTileAt(c/4u))!=1u||(nbBandReach(c)&2u)==0u){continue;}
+   if(nbSurfaceHotCornerFrom(vec3i(origin>>vec3u(2u)),p)){continue;}
    nbBuildDistance(p,c,nbBandTile(c));
   }
  }

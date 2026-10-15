@@ -20,7 +20,9 @@ const RESOLVE_PASS: GPUComputePassDescriptor = { label: "Uniform mixed phi resol
  * 4h lattice values around the tile are staged once per group; each texel
  * is umVertexFrom4 over workgroup memory (same weights and D4 summation).
  * A GPU-counted launch (UNIFORM_MIXED_COUNTED.fused): the seam count sizes
- * nothing on the host, so a pass without seam tiles still pays one launch.
+ * nothing on the host. With no h tiles, the uniform tier count returns
+ * before the job-count barrier, avoiding idle barrier work at the reserved
+ * relayout grid width. A nonempty h tier still uses the exact live list.
  * Changed (after a GPU adoption, on a field resolved for the ownership it
  * replaced): a hanging texel's value and whether it hangs depend only on the
  * tile words of its tile's 3x3x3 neighbourhood and on 4h lattice vertices,
@@ -80,7 +82,7 @@ ${job}
  if(!valid){return;}
 ${uniformCompiledVertexResolveWGSL("umResolveLattice","umVertexWeight","umVertexSum8")}
  if(bitcast<u32>(value)!=bitcast<u32>(${UNIFORM_DETAIL_GUARD_LOAD}textureLoad(field,vec3i(p)).x)){textureStore(field,vec3i(p),vec4f(value));}
-}`, [entry], entry === "resolve" ? undefined : "umDilatedCount()");
+}`, [entry], entry === "resolve" ? undefined : "umDilatedCount()", "umCounts.x==0u");
     const module = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve", code: source("resolve", header) });
     const listModule = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve (listed)", code: source("resolveListed", listed, uniformMixedChangedTilesWGSL(this.ownership.capacity.tiles, 2, 0)) });
     const errors = [...(await module.getCompilationInfo()).messages, ...(await listModule.getCompilationInfo()).messages].filter(m => m.type === "error");

@@ -49,6 +49,20 @@ fn nbTheta(p:vec3f)->f32{return nbInterpolatedHeat(vec3i(floor(p/4.0)),p,false);
 fn nbSurfaceTheta(p:vec3f)->f32{return nbInterpolatedHeat(vec3i(floor(p/4.0)),p,true);}
 fn nbThetaFrom(home:vec3i,p:vec3f)->f32{return nbInterpolatedHeat(home,p,false);}
 fn nbSurfaceThetaFrom(home:vec3i,p:vec3f)->f32{return nbInterpolatedHeat(home,p,true);}
+// Retirement asks only whether surface heat is zero at a 4h corner. All
+// eight interpolation weights there are 1/8. Its nonnegative numerator is
+// positive exactly when a tap's heat exceeds one; cold-air extrapolation
+// changes only the denominator. No phi sampling is needed for this test.
+fn nbSurfaceHotCornerFrom(home:vec3i,p:vec3u)->bool{
+ let base=vec3i(p>>vec3u(2u))-vec3i(1);let page=home>>vec3u(3u);
+ let block=nbHomeBlock(page,base>>vec3u(3u),(base+1)>>vec3u(3u));
+ for(var k=0u;k<8u;k++){
+  let c=umTileNearFromPage(block,page,base+vec3i(umCorner(k,2u)));
+  let heat=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_SURFACE_HEAT+umTileAt(vec3u(c))]));
+  if(heat>1.0){return true;}
+ }
+ return false;
+}
 fn nbTransferBlend(q:vec3f,depth:f32,mass:f32)->f32{
  // Eight samples per h cell. Fill the missing particle weight with the
  // advected grid velocity during handoff. Fully hot regions recover the

@@ -396,13 +396,14 @@ fn umBlockNeighbourIndex(d:vec3i)->u32{return u32(d.x+3*d.y+9*d.z+13);}
 fn umBlockNeighbour(b:u32,d:vec3i)->u32{return umBlockNeighbourWord(b,umBlockNeighbourIndex(d));}
 // The axes of step d a wall holds (the diagonal rule above).
 fn umBlockHeld(home:u32,d:vec3i)->vec3<bool>{
- var held=vec3<bool>(false);var loose=0u;
- for(var a=0u;a<3u;a++){
-  if(d[a]==0){continue;}
-  var e=vec3i(0);e[a]=d[a];held[a]=umBlockNeighbour(home,e)==UM_SOLID_WORD;
-  if(!held[a]){loose++;}
- }
- if(loose>=2u&&umBlockNeighbour(home,select(d,vec3i(0),held))==UM_SOLID_WORD){return d!=vec3i(0);}
+ // Keep the three face probes scalar to avoid dynamic vector indexing
+ // inside every stencil tap.
+ let held=vec3<bool>(
+  d.x!=0&&umBlockNeighbour(home,vec3i(d.x,0,0))==UM_SOLID_WORD,
+  d.y!=0&&umBlockNeighbour(home,vec3i(0,d.y,0))==UM_SOLID_WORD,
+  d.z!=0&&umBlockNeighbour(home,vec3i(0,0,d.z))==UM_SOLID_WORD);
+ let free=select(d,vec3i(0),held);let loose=vec3u(free!=vec3i(0));
+ if(loose.x+loose.y+loose.z>=2u&&umBlockNeighbour(home,free)==UM_SOLID_WORD){return d!=vec3i(0);}
  return held;
 }
 // p held inside [low, high], home's page in p's units, on the axes a wall holds.

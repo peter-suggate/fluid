@@ -44,9 +44,16 @@ fn ${prefix}WorldSolid(q:vec3i)->bool{
  * branch free over the derived header words (24..31): it is inlined at
  * hundreds of call sites per kernel. */
 export function uniformWindowAddressWGSL(buffer: string, table: string, blocks: string, prefix = "um", entries = 64 ** 3): string {
-  const w = (i: number) => `${buffer}[${table}+${entries + i}u]`;
+  const w = (i: number) => {
+    const raw = `${buffer}[${table}+${entries + i}u]`;
+    return i >= 24 ? `select(${raw},${prefix}WindowWord${i},${prefix}FixedWorldGeometry)` : raw;
+  };
   const v = (i: number) => `vec3u(${w(i)},${w(i + 1)},${w(i + 2)})`;
   return /* wgsl */ `
+// Generic consumers read the runtime header. Only a solver promising fixed
+// world geometry supplies these overrides; frame and page residency stay live.
+override ${prefix}FixedWorldGeometry:bool=false;
+${Array.from({length:8},(_,i)=>`override ${prefix}WindowWord${24+i}:u32=0u;`).join("\n")}
 fn ${prefix}FramePage()->vec3i{return bitcast<vec3i>(${v(0)});}
 // The first lattice cell above each axis's low wall (the authored box's low
 // face): a face anchor below it is a low-wall face, read as the cell above.

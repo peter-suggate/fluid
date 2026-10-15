@@ -301,10 +301,13 @@ fn allocationParticle(sample:Particle){
   let a=vec3u(max(lo-origin,vec3i(0)));let b=vec3u(min(hi-origin,vec3i(3)));
   let row=((2u<<(b.x-a.x))-1u)<<a.x;var mask=vec2u(0u);
   for(var cz=a.z;cz<=b.z;cz++){for(var cy=a.y;cy<=b.y;cy++){let bit=4u*cy+16u*cz;mask[bit>>5u]|=row<<(bit&31u);}}
-  for(var k=0u;k<2u;k++){if(mask[k]!=0u){atomicOr(&allocation[8u*page+k],mask[k]);}}
+  // These words only grow during this dispatch. Avoid serializing the many
+  // samples that publish an already-covered region. A stale read can only
+  // cause a redundant atomic; every missing bit or larger bound still joins.
+  for(var k=0u;k<2u;k++){if(mask[k]!=0u&&(atomicLoad(&allocation[8u*page+k])&mask[k])!=mask[k]){atomicOr(&allocation[8u*page+k],mask[k]);}}
   for(var axis=0u;axis<3u;axis++){
-   if(low[axis]>0.0){atomicMax(&allocation[8u*page+2u+axis],bitcast<u32>(low[axis]));}
-   if(high[axis]>0.0){atomicMax(&allocation[8u*page+5u+axis],bitcast<u32>(high[axis]));}
+   if(low[axis]>0.0&&atomicLoad(&allocation[8u*page+2u+axis])<bitcast<u32>(low[axis])){atomicMax(&allocation[8u*page+2u+axis],bitcast<u32>(low[axis]));}
+   if(high[axis]>0.0&&atomicLoad(&allocation[8u*page+5u+axis])<bitcast<u32>(high[axis])){atomicMax(&allocation[8u*page+5u+axis],bitcast<u32>(high[axis]));}
   }
  }}}
 
