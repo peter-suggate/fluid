@@ -299,79 +299,150 @@ export function nbflipSlideLongCentreline(distance: number): readonly [x: number
   return follow(piece, distance - piece.from);
 }
 
-/** The floor under the centreline: whole steps down to the hood, flat under it. */
+/** Continuous descent, level for the last thirty cells under the hood. */
 const longFloor = (distance: number) =>
-  LONG_TOP - Math.floor(LONG_FALL * Math.min(1, Math.max(0, distance) / (NBFLIP_SLIDE_LONG_LENGTH - HOOD)));
+  LONG_TOP - LONG_FALL * Math.min(1, Math.max(0, distance) / (NBFLIP_SLIDE_LONG_LENGTH - HOOD));
 
-/**
- * A wall's height over the floor, on the side an arc of curvature `side`
- * turns toward. It is high wherever a stream can lean or land on it: outside
- * a bend, from the straight before it to a quarter turn into the next.
- */
-function longWall(distance: number, side: number): number {
-  // The hood's gap is in the wall the pit is behind.
-  if (side * LONG_BOWL[1]!.curvature > 0 && distance >= NBFLIP_SLIDE_LONG_LENGTH - GAP) return 0;
-  const after = LONG_LEG + Math.PI / 2 * LONG_BEND_RADIUS;
-  return LONG_COURSE.some(arc => arc.curvature * side < 0 && distance >= arc.from - LONG_LEG && distance <= arc.from + arc.length + after)
-    ? LONG_HIGH : LONG_LOW;
+/** A swept rectangular cross-section, in course coordinates. */
+interface LongSweep {
+  readonly piece: CoursePiece;
+  readonly from: number;
+  readonly to: number;
+  readonly acrossLow: number;
+  readonly acrossHigh: number;
+  readonly joinFrom?: boolean;
+  readonly joinTo?: boolean;
+  /** Vertical bounds at a distance along the entire course. */
+  readonly bottom: (distance: number) => number;
+  readonly top: (distance: number) => number;
 }
 
-/**
- * The long slide's solid under each column of cells, and the hood's lid over
- * it: where each starts and ends.
- *
- * The course is walked half a cell at a time, and each step claims the columns
- * beside it: channel within the half width, wall for a wall's thickness past
- * that. A column that is channel to any step is channel; one that is wall to
- * two stretches stands as high as the higher asks and as deep as the deeper.
- */
-function longSlideColumns(): readonly [body: (x: number, z: number) => readonly [number, number], lid: (x: number, z: number) => readonly [number, number]] {
-  const [nx, , nz] = NBFLIP_SLIDE_LONG_GRID, reach = PITCH - HALF_WIDTH, length = NBFLIP_SLIDE_LONG_LENGTH;
-  const near = new Float32Array(nx * nz).fill(reach), from = new Int16Array(nx * nz), top = new Int16Array(nx * nz), lidded = new Uint8Array(nx * nz);
-  const lid = LONG_TOP - LONG_FALL + HOOD_CLEARANCE, pitSide = Math.sign(LONG_BOWL[1]!.curvature);
-  for (let distance = -BACK; distance <= length + STOP; distance += 0.5) {
-    const [px, pz, heading] = nbflipSlideLongCentreline(distance), cos = Math.cos(heading), sin = Math.sin(heading);
-    // The flume hangs on its slab; the last turn stands on the ground, as the pit's wall has to.
-    const floor = longFloor(distance), base = distance < LONG_BOWL[0]!.from ? floor - LONG_SLAB : 0;
-    // The walls behind the source and at the channel's end are solid across it.
-    const block = distance < 0 ? LONG_TOP + LONG_HIGH : distance > length ? lid + HOOD_LID : 0;
-    const walls = [block || floor + longWall(distance, -1), block || floor + longWall(distance, 1)] as const;
-    const hood = distance >= length - HOOD && distance <= length;
-    for (let z = Math.max(0, Math.floor(pz - reach)); z < Math.min(nz, pz + reach); z++) {
-      for (let x = Math.max(0, Math.floor(px - reach)); x < Math.min(nx, px + reach); x++) {
-        const dx = x + 0.5 - px, dz = z + 0.5 - pz, across = cos * dz - sin * dx, off = Math.abs(across), c = x + nx * z;
-        // Only the columns beside this step, not those ahead of it or behind.
-        if (Math.abs(cos * dx + sin * dz) >= 0.75 || off >= reach) continue;
-        if (off < HALF_WIDTH) {
-          if (off >= near[c]!) continue;
-          top[c] = block || floor; from[c] = base; lidded[c] = hood ? 1 : 0;
-        } else {
-          if (near[c]! < HALF_WIDTH) continue;
-          const wall = walls[across > 0 ? 1 : 0];
-          from[c] = near[c] === reach ? base : Math.min(from[c]!, base);
-          top[c] = Math.max(top[c]!, wall);
-          if (hood && across * pitSide > 0) lidded[c] = 1;
-        }
-        near[c] = Math.min(near[c]!, off);
+const LONG_SWEEPS: readonly LongSweep[] = (() => {
+  const sweeps: LongSweep[] = [], reach = PITCH - HALF_WIDTH;
+  const end = NBFLIP_SLIDE_LONG_LENGTH, lid = LONG_TOP - LONG_FALL + HOOD_CLEARANCE;
+  const after = LONG_LEG + Math.PI / 2 * LONG_BEND_RADIUS;
+  for (const piece of LONG_COURSE) {
+    const bottom = piece.from < LONG_BOWL[0]!.from ? (s: number) => longFloor(s) - LONG_SLAB : () => 0;
+    const add = (from: number, to: number, acrossLow: number, acrossHigh: number, top: LongSweep["top"], low = bottom) => {
+      if (to > from) sweeps.push({ piece, from, to, acrossLow, acrossHigh, bottom: low, top });
+    };
+    const from = piece.from, to = from + piece.length;
+    add(from, to, -reach, reach, longFloor, s => longFloor(s) - LONG_SLAB);
+    if (from >= LONG_BOWL[0]!.from) add(from, to, -reach, reach, s => longFloor(s) - LONG_SLAB / 2, () => 0);
+    for (const side of [-1, 1]) {
+      const wallEnd = side * LONG_BOWL[1]!.curvature > 0 ? Math.min(to, end - GAP) : to;
+      const high = LONG_COURSE.filter(arc => arc.curvature * side < 0)
+        .map(arc => [arc.from - LONG_LEG, arc.from + arc.length + after] as const);
+      // Split at height changes so each step has a real vertical end face.
+      const cuts = [...new Set([from, wallEnd, ...high.flatMap(range => [...range])])]
+        .filter(s => s >= from && s <= wallEnd).sort((a, b) => a - b);
+      for (let i = 1; i < cuts.length; i++) {
+        const a = cuts[i - 1]!, b = cuts[i]!, middle = (a + b) / 2;
+        const height = high.some(([lo, hi]) => middle >= lo && middle <= hi) ? LONG_HIGH : LONG_LOW;
+        add(a, b, side < 0 ? -reach : HALF_WIDTH, side < 0 ? -HALF_WIDTH : reach, s => longFloor(s) + height);
       }
     }
+    if (from === 0) add(-BACK, 0, -reach, reach, () => LONG_TOP + LONG_HIGH);
+    if (to === end) {
+      add(end, end + STOP, -reach, reach, () => lid + HOOD_LID);
+      add(end - HOOD, end, -reach, reach, () => lid + HOOD_LID, () => lid);
+    }
   }
-  // The pit: whatever the last turn left unclaimed inside itself, each half of the turn about its own centre.
-  const pit = (x: number, z: number) => LONG_BOWL.some(arc => {
-    const dx = x + 0.5 - (arc.x - Math.sin(arc.heading) / arc.curvature), dz = z + 0.5 - (arc.z + Math.cos(arc.heading) / arc.curvature);
-    return dx * Math.cos(arc.heading) + dz * Math.sin(arc.heading) >= 0 && Math.hypot(dx, dz) < 1 / Math.abs(arc.curvature);
-  });
-  return [
-    (x, z) => near[x + nx * z]! < reach ? [from[x + nx * z]!, top[x + nx * z]!] : [0, pit(x, z) ? PIT_FLOOR : 0],
-    (x, z) => [lid, lidded[x + nx * z] ? lid + HOOD_LID : lid],
-  ];
+  // Continue a cross-section two cells into a neighbour that contains it.
+  // At a height step only the lower wall extends, preserving the step face.
+  // Merely touching CSG caps leave a zero-valued sheet inside the solid; node
+  // interpolation would pull the floor down to that sheet at each bend.
+  return sweeps.map(sweep => ({ ...sweep,
+    joinFrom: sweeps.some(other => other.to === sweep.from && other.acrossLow === sweep.acrossLow
+      && other.acrossHigh === sweep.acrossHigh && other.top(other.to) >= sweep.top(sweep.from)
+      && other.bottom(other.to) <= sweep.bottom(sweep.from)),
+    joinTo: sweeps.some(other => other.from === sweep.to && other.acrossLow === sweep.acrossLow
+      && other.acrossHigh === sweep.acrossHigh && other.top(other.from) >= sweep.top(sweep.to)
+      && other.bottom(other.from) <= sweep.bottom(sweep.to)),
+  }));
+})();
+
+/** Continuous horizontal cuts through the swept slabs, walls and roof. The
+ * caps use tangent planes; adjacent pieces share a cross-section exactly.
+ * Contained cross-sections overlap by two sample cells so the baked field has no
+ * internal cap sheet. Physical end faces and height changes keep their caps. */
+function longSolidColumn(x: number, z: number): readonly (readonly [edge: number, bottom: number, top: number, cap: number, radius: number])[] {
+  const spans: [number, number, number, number, number][] = [];
+  for (const sweep of LONG_SWEEPS) {
+    const { piece, from, to } = sweep;
+    const cos = Math.cos(piece.heading), sin = Math.sin(piece.heading);
+    const dx = x - piece.x, dz = z - piece.z;
+    let along = dx * cos + dz * sin, across = -dx * sin + dz * cos;
+    if (piece.curvature !== 0) {
+      const radius = 1 / piece.curvature;
+      const radialX = dx + sin * radius, radialZ = dz - cos * radius;
+      // Measure about the arc's midpoint, keeping atan2's cut behind the arc.
+      const middle = piece.heading + piece.curvature * piece.length / 2;
+      const angle = Math.atan2((radialX * Math.cos(middle) + radialZ * Math.sin(middle)) / radius,
+        (radialX * Math.sin(middle) - radialZ * Math.cos(middle)) / radius);
+      along = piece.length / 2 + angle / piece.curvature;
+      across = radius - Math.sign(radius) * Math.hypot(radialX, radialZ);
+    }
+    const [ax, az, ah] = follow(piece, from - piece.from), [bx, bz, bh] = follow(piece, to - piece.from);
+    const cap = Math.max(-(x - ax) * Math.cos(ah) - (z - az) * Math.sin(ah) - (sweep.joinFrom ? 2 : 0),
+      (x - bx) * Math.cos(bh) + (z - bz) * Math.sin(bh) - (sweep.joinTo ? 2 : 0));
+    const edge = Math.max(sweep.acrossLow - across, across - sweep.acrossHigh);
+    // Values beyond four cells are saturated; no zero or boundary gradient is
+    // changed. This keeps each cached column small, including the empty world.
+    const distance = piece.from + along, top = sweep.top(distance);
+    if (Math.max(edge, cap) < 4) spans.push([edge, sweep.bottom(distance), top, cap, top > longFloor(distance) + 6 ? 1.5 : 0]);
+  }
+  for (const arc of LONG_BOWL) {
+    const cx = arc.x - Math.sin(arc.heading) / arc.curvature, cz = arc.z + Math.cos(arc.heading) / arc.curvature;
+    const dx = x - cx, dz = z - cz;
+    const edge = Math.max(Math.hypot(dx, dz) - 1 / Math.abs(arc.curvature),
+      -dx * Math.cos(arc.heading) - dz * Math.sin(arc.heading) - 2);
+    if (edge < 4) spans.push([edge, 0, PIT_FLOOR, -Infinity, 0]);
+  }
+  return spans;
+}
+
+function longColumnValue(spans: ReturnType<typeof longSolidColumn>, y: number): number {
+  let solid = 4;
+  // A three-centimetre rim radius fits inside the eight-centimetre walls.
+  // Flat beds and vertical faces keep their authored positions; only their
+  // exposed convex intersections are rounded, like a moulded flume.
+  for (const [edge, bottom, top, cap, radius] of spans) {
+    if (radius === 0) { solid = Math.min(solid, Math.max(cap, edge, bottom - y, y - top)); continue; }
+    const side = edge + radius, vertical = Math.max(bottom - y, y - top) + radius;
+    const rounded = Math.hypot(Math.max(side, 0), Math.max(vertical, 0))
+      + Math.min(Math.max(side, vertical), 0) - radius;
+    solid = Math.min(solid, Math.max(cap, rounded));
+  }
+  return solid === 0 ? 0 : solid;
+}
+
+/** Distance-like CSG field in lattice coordinates, negative inside. The same
+ * sampled boundary drives collision, smooth reconstruction and shading. */
+export function nbflipSlideLongSolid([x, y, z]: readonly [number, number, number]): number {
+  return longColumnValue(longSolidColumn(x, z), y);
+}
+
+let longSlideGeometry: ReturnType<typeof bakeProceduralSolid> | undefined;
+function bakeLongSlide(): ReturnType<typeof bakeProceduralSolid> {
+  // All y levels share the same analytic x/z projection. Cache only for this
+  // bake; documents retain the sampled boundary, not the construction cache.
+  const columns = new Map<number, ReturnType<typeof longSolidColumn>>();
+  const h = NBFLIP_SLIDE_CELL_SIZE_M, stride = NBFLIP_SLIDE_LONG_GRID[0] + 1;
+  return bakeProceduralSolid(NBFLIP_SLIDE_LONG_GRID, [h, h, h], ([x, y, z]) => {
+    const key = x + stride * z;
+    let spans = columns.get(key);
+    if (!spans) columns.set(key, spans = longSolidColumn(x, z));
+    return longColumnValue(spans, y);
+  }, VOXEL_MATERIAL_IDS.container);
 }
 
 export function createNbflipWaterSlideLong(): SceneDescription {
   const grid = NBFLIP_SLIDE_LONG_GRID, h = NBFLIP_SLIDE_CELL_SIZE_M, dt = 1 / NBFLIP_SLIDE_STEP_HZ;
   const scene = nbflipDomain(NBFLIP_SLIDE_LONG_SCENE_ID, grid, h, NBFLIP_SLIDE_LONG_FRAMES, 0, grid, dt);
-  const [body, lid] = longSlideColumns();
-  scene.solidVoxels.push(...columnVoxels(grid, body), ...columnVoxels(grid, lid));
+  const geometry = longSlideGeometry ??= bakeLongSlide();
+  scene.solidVoxels = [...geometry.solidVoxels];
+  scene.solidBoundary = geometry.solidBoundary;
   // The stream lies on the floor just past the back wall and leaves along the channel.
   const [x, z, heading] = nbflipSlideLongCentreline(STREAM_AHEAD), speed = NBFLIP_SLIDE_STREAM_CELLS_PER_STEP;
   scene.fluid.inflow = streamInflow(grid, h, dt, [x, z], LONG_TOP,

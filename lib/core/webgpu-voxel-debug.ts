@@ -257,6 +257,8 @@ export interface SparseVoxelStructuralRenderSource {
     dirtyBrickCapacity: number;
     surfaceVertexOffsetBytes?: number;
     surfaceVertexKind?: "dual-contouring" | "dual-marching-cubes";
+    renderTerrain?: Readonly<{ offsetBytes: number; editPagesOffsetBytes: number }>;
+    solidBoundary?: Readonly<{ offsetBytes: number; origin_m: readonly [number, number, number]; cellSize_m: readonly [number, number, number] }>;
     /** The dirty journal every finalized leaf is appended to; see `SparseSceneMaintenanceBinding.journal`. */
     journal?: Readonly<{ cursorOffsetBytes: number; recordOffsetBytes: number; recordStrideWords: number; capacity: number }>;
     /** Maintenance frames encoded so far; see `SparseSceneMaintenanceBinding.activity`. */

@@ -32,8 +32,10 @@ test("the packed contract keeps a geometric normal distinct from a shading norma
 
 test("the mesh fragment is the one producer that publishes a face of its own", () => {
   const source = svoSurfaceMeshWGSL(3, 1 << 7, true);
-  // The face of the rasterised quad, never the normal the fragment shades with.
-  assert.match(source, /dryRasterPrimaryFacedSurface\(hit,input\.geometricNormal,camera\[0\],rd,camera\[1\],SVO_GBUFFER_PRODUCER_BRICK\)/);
+  // Voxel quads retain their exact face; a sampled implicit surface uses its gradient.
+  assert.match(source, /var receiverNormal=input\.geometricNormal;/);
+  assert.match(source, /normal=normalize\(input\.boundaryNormal\);receiverNormal=normal;/);
+  assert.match(source, /dryRasterPrimaryFacedSurface\(hit,receiverNormal,camera\[0\],rd,camera\[1\],SVO_GBUFFER_PRODUCER_BRICK\)/);
   // The face -> baked blend and the shading-normal call are untouched by the split.
   assert.match(source, /var shading=dryShadingNormal\(input\.identity,normal\);/);
   assert.match(source, /let hit=DryHit\(t,shading\.normal,/);
@@ -52,7 +54,7 @@ test("every other producer publishes one normal twice, bit for bit", async () =>
   const faced = source.match(/dryRasterPrimaryFacedSurface\([^)]*\)/g) ?? [];
   const distinct = faced.filter((call) => !call.includes("opaque,opaque.normal") && !call.startsWith("dryRasterPrimaryFacedSurface(opaque:"));
   assert.equal(distinct.length, 1, distinct.join(" | "));
-  assert.match(distinct[0], /hit,input\.geometricNormal/);
+  assert.match(distinct[0], /hit,receiverNormal/);
   // A cleared face word is what every one of them writes, and it reads back as
   // the shading normal itself rather than a decoded approximation of it.
   assert.match(source, /if\(all\(geometricNormal==shadingNormal\)\)\{return 0u;\}/);
@@ -81,4 +83,12 @@ test("the deferred lighting biases rays along the face and shades with the norma
   assert.match(source, /unifiedLightingInputWithGeometry\(hit\.normal,hit\.normal,-rd,/);
   assert.match(source, /svoEnvironmentDiffuseIrradiance\(dryLighting\.environment,hit\.normal\)/);
   assert.doesNotMatch(source, /dot\(geometricNormal,sample\.towardLight\)<=0\.0\)\{continue;\}let visibility=/);
+});
+
+
+test("continuous receivers retain a full-precision visibility normal", async () => {
+  const { createSvoDrySceneFragmentWGSL } = await import("../lib/svo/features/shading/program");
+  const source=createSvoDrySceneFragmentWGSL(1,"raster-primary","bounds","split",0,false,false,false,{surfaceMesh:true});
+  assert.match(source,/if\(all\(geometricNormal==opaque\.normal\)\)\{opaqueMetadata\|=DRY_OPAQUE_SAME_NORMAL;\}/);
+  assert.match(source,/if\(\(hit\.aux\.y&DRY_OPAQUE_SAME_NORMAL\)!=0u\)\{return hit\.normal;\}/);
 });

@@ -4443,10 +4443,14 @@ const DRY_GBUFFER_MOTION_STATIC:u32=0u;const DRY_GBUFFER_MOTION_RIGID:u32=1u;
 // for an oct8 geometric normal, leaving material, motion and feature intact.
 // Bit 31 tags this encoding; voxel faces retain their existing exact axis code.
 const DRY_OPAQUE_RECONSTRUCTED:u32=0x80000000u;
+const DRY_OPAQUE_SAME_NORMAL:u32=0x40000000u;
 fn dryOpaqueSurfaceMetadata(opaque:DryHit,geometricNormal:vec3f)->u32{
   var opaqueMetadata=(opaque.ownerId&0xffffu)|((opaque.featureId&15u)<<16u)|((opaque.fieldSource&15u)<<20u)|((opaque.motionKind&3u)<<24u)|((opaque.motionValid&1u)<<26u)|dryOpaqueFaceWord(geometricNormal,opaque.normal);
   if(opaque.aux.z==1u&&opaque.ownerId==DRY_OWNER_NONE&&opaque.motionKind==DRY_GBUFFER_MOTION_STATIC){
     opaqueMetadata=(opaqueMetadata&0x07ff0000u)|DRY_OPAQUE_RECONSTRUCTED|svoGBufferPackNormalOct8(geometricNormal);
+    // Keep a continuous surface's full-precision normal through deferred
+    // visibility. Quantizing it again makes the light-facing gate step.
+    if(all(geometricNormal==opaque.normal)){opaqueMetadata|=DRY_OPAQUE_SAME_NORMAL;}
   }
   return opaqueMetadata;
 }
@@ -4472,7 +4476,7 @@ fn dryOpaqueFaceNormal(word:u32)->vec3f{
 // The normal a visibility ray leaves along: the published face where there is
 // one, and otherwise the surface normal itself, unchanged.
 fn dryGeometricNormal(hit:DryHit)->vec3f{
-  if(dryReconstructedReceiver(hit)){return svoGBufferUnpackNormalOct8(hit.aux.y&0xffffu);}
+  if(dryReconstructedReceiver(hit)){if((hit.aux.y&DRY_OPAQUE_SAME_NORMAL)!=0u){return hit.normal;}return svoGBufferUnpackNormalOct8(hit.aux.y&0xffffu);}
   if((hit.aux.y&DRY_OPAQUE_FACE_VALID)==0u){return hit.normal;}
   return dryOpaqueFaceNormal(hit.aux.y);
 }

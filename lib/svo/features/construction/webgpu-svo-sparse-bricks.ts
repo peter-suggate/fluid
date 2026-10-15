@@ -1,3 +1,4 @@
+import { proceduralSolidField } from "../../../core/procedural-solid";
 import { assertDualGridAttachmentFits } from "../meshing/dual-grid-capacity";
 import { TerrainEditPages, terrainEditSurfacePages, terrainFieldStamp } from "../../../core/live-terrain-overlay";
 import type { RigidBodyDescription, SceneDescription } from "../../../core/model";
@@ -2505,6 +2506,7 @@ export class OctreeSparseBrickWorld {
           -0.5 * scene.container.depth_m],
         cellSize_m: sceneCellSizes_m(scene),
       },
+      solidBoundary: proceduralSolidField(scene),
       solidSurface: scene.solidSurface?.kind === "swept-flume" ? sweptFlumeSurfaceWGSL(scene.solidSurface)
         : scene.solidSurface && BATH_SOLID_DISTANCE_WGSL,
       renderTerrain,
@@ -3189,7 +3191,7 @@ export class OctreeSparseBrickWorld {
         if (!listed) admitted = missing;
       }
       if (solidWorldChanged && !initialPublication) {
-        this.proxyVoxelizer.setSolidWorld(nextResidualSolidWorld);
+        this.proxyVoxelizer.setSolidWorld(nextResidualSolidWorld, proceduralSolidField(scene));
       }
       this.solidWorld = nextSolidWorld;
       this.renderSolidWorld = nextResidualSolidWorld;

@@ -1877,7 +1877,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: NBFLIP_SLIDE_LONG_SCENE_ID,
     name: "NB-FLIP · Long Water Slide",
-    blurb: `A hose runs for ${NBFLIP_SLIDE_LONG_STREAM_SECONDS} seconds down a voxel flume that snakes through ${NBFLIP_SLIDE_LONG_BENDS} alternating bends and winds once around a pool, where the water comes to rest. The box starts empty and stays mostly air: ${NBFLIP_SLIDE_LONG_GRID.join("×")} cells at 2 cm.`,
+    blurb: `A hose runs for ${NBFLIP_SLIDE_LONG_STREAM_SECONDS} seconds down a continuous flume that snakes through ${NBFLIP_SLIDE_LONG_BENDS} alternating bends and winds once around a pool, where the water comes to rest. The box starts empty and stays mostly air: ${NBFLIP_SLIDE_LONG_GRID.join("×")} cells at 2 cm.`,
     audience: "explore",
     shelf: "Tanks",
     environment: "stage",

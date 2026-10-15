@@ -1,3 +1,5 @@
+import type { ProceduralSolidField } from "./procedural-solid";
+import { proceduralSolidRenderWGSL } from "./procedural-solid-render.wgsl";
 import { svoDualMarchingCubesCachedFitWGSL } from "../svo/features/meshing/dual-marching-cubes";
 import { svoDualContouringFitWGSL } from "../svo/features/meshing/dual-contouring";
 import { svoRenderTerrainSamplingWGSL } from "../svo/features/construction/svo-render-terrain-sampling";
@@ -503,6 +505,8 @@ export interface SparseSceneProxyVoxelizerOptions {
    * fitted surface follows it wherever the voxels are still its rasterization.
    */
   solidSurface?: string;
+  /** Sampled continuous boundary, including per-cell edit validity. */
+  solidBoundary?: ProceduralSolidField;
   /**
    * Renderer-owned height samples at the SVO lattice. They refine presentation
    * without changing the canonical SolidWorld consumed by physics.
@@ -2134,6 +2138,7 @@ export function sparseSceneProxyVoxelizationShaderFor(
   dualMarchingCubes = false,
   backdropDetail?: string,
   solidSurface?: string,
+  solidBoundaryBaseWords?: number,
 ): string {
   const dry = profile === "dry";
   const format = dry ? sceneGeometryFormat : "f32x2";
@@ -2239,6 +2244,7 @@ ${sparseBrickSceneIdentityWordCodecWGSL()}
 ${bandedCodec}
 ${bandedEncoder}
 ${solidWorldProxyWGSL(solidWorldLayout, renderTerrainLayout, backdropDetail, solidSurface)}
+${solidBoundaryBaseWords === undefined ? "" : proceduralSolidRenderWGSL(solidBoundaryBaseWords)}
 
 const BRICK_ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;
 const BRICK_DIRTY:u32=${SVO_BRICK_LIFECYCLE.dirtyBit}u;
@@ -2597,7 +2603,7 @@ fn dcField(world:vec3f,dirty:u32,count:u32)->f32{
   // and, across a box's cells, a seam on every interior face, which fits to
   // terraces with gaps between them. The fractions are one: whole for a box
   // and the covered share along a round patch's surface.
-  value=swSmoothField(world);` : ""}
+  ${solidBoundaryBaseWords === undefined ? "value=swSmoothField(world);" : "let boundary=swBoundaryField(world,swSmoothFieldLimit());if(boundary<1e19){value=boundary;}else{value=swSmoothField(world);}"}` : ""}
   ${backdropDetail ? `// The backdrop is fitted from its continuous ground and scatter, never
   // from the voxel occupancy those became.
   value=min(value,backdropDetailField(world,.25*min(params.cell.x,params.cell.z)));` : ""}
@@ -3011,6 +3017,10 @@ ${dual && dualMarchingCubes ? `
   if(fitted.value<0.&&primitiveFraction<=0.&&rtEditPageCount()!=0u){let near=swNearestMaterial(world);if(near!=0u){bestMaterial=near;}}` : ""}
   if(fitted.value<0.){primitiveFraction=max(primitiveFraction,1.0/255.0);}
   if(primitiveFraction>0.){bestNormal=fitted.normal;}
+  ${solidBoundaryBaseWords === undefined ? "" : `let boundaryNormal=swBoundarySample(world-.5*cellExtent+fitted.point*cellExtent);
+  let hasBoundaryNormal=boundaryNormal.w<1e19&&dot(boundaryNormal.xyz,boundaryNormal.xyz)>1e-12;
+  if(primitiveFraction>0.&&bestPrimitive==INVALID_INDEX&&hasBoundaryNormal){bestNormal=normalize(boundaryNormal.xyz);}`}
+
   ${pageSolids ? `// A page surface shades from the wide normal. Only the cells a dual edge can
   // cross need one: off the field's interior plateau and within two cells.
   let fittedWorld=world-.5*cellExtent+fitted.point*cellExtent;
@@ -3020,7 +3030,7 @@ ${dual && dualMarchingCubes ? `
   let authoredLeaf=primitiveFraction>0.&&bestPrimitive==INVALID_INDEX&&swAuthoredDeparture(fittedWorld)<=0.;
   if(authoredLeaf){let own=swAuthoredNormal(fittedWorld);if(dot(own,own)>0.){bestNormal=own;}}` : ""}
   if(primitiveFraction>0.&&bestPrimitive==INVALID_INDEX&&abs(fitted.value)<.99*swSmoothFieldLimit()
-    &&fitted.value>-2.*max(cellExtent.x,max(cellExtent.y,cellExtent.z))${solidSurface ? "&&!authoredLeaf" : ""}){
+    &&fitted.value>-2.*max(cellExtent.x,max(cellExtent.y,cellExtent.z))${solidBoundaryBaseWords === undefined ? "" : "&&!hasBoundaryNormal"}${solidSurface ? "&&!authoredLeaf" : ""}){
     let wide=swSmoothNormal(fittedWorld);
     // Between two solids a cell or two apart the blur has no direction.
     if(dot(wide,fitted.normal)>0.){bestNormal=wide;}
@@ -3476,6 +3486,8 @@ export interface SparseSceneMaintenanceBinding {
   readonly activity?: number;
   surfaceVertexOffsetBytes?: number;
   surfaceVertexKind?: "dual-contouring" | "dual-marching-cubes";
+  solidBoundary?: { offsetBytes: number; origin_m: SparseSceneVector3; cellSize_m: SparseSceneVector3 };
+  renderTerrain?: { offsetBytes: number; editPagesOffsetBytes: number };
 }
 
 /** Maintenance stages, in encode order, as timestamped by {@link SparseSceneMaintenanceTimestamps}. */
@@ -3558,6 +3570,8 @@ export class SparseSceneProxyVoxelizer {
   private readonly clusterCapacity: number;
   private readonly fieldProgramCapacity: number;
   private readonly solidWorldLayout?: WebgpuSolidWorldPageLayout;
+  private readonly solidBoundaryBaseWords?: number;
+  private readonly solidBoundaryWords: number;
   /** The page image on the device, whichever arm draws it: every page, or a terrain scene's edits. */
   private readonly solidWorldPages?: WebgpuSolidWorldPageWriter;
   /** A terrain scene's choice of pages to draw over its ground. */
@@ -3747,10 +3761,15 @@ export class SparseSceneProxyVoxelizer {
         depth: options.renderTerrain.dimensions[1],
       });
     }
-    const baseArenaWords = checkedArenaWords(
+    const boundaryBaseWords = checkedArenaWords(
       this.renderTerrainLayout?.totalWords
         ?? this.solidWorldLayout?.totalWords ?? solidWorldBaseWords,
       "Scene maintenance arena");
+    const boundaryImage = options.solidBoundary?.pack();
+    if (boundaryImage && (!this.solidWorldLayout || options.renderTerrain)) throw new RangeError("A sampled boundary needs the static solid page lattice");
+    this.solidBoundaryBaseWords = boundaryImage ? boundaryBaseWords : undefined;
+    this.solidBoundaryWords = boundaryImage?.length ?? 0;
+    const baseArenaWords = checkedArenaWords(boundaryBaseWords + this.solidBoundaryWords, "Procedural boundary arena");
     this.dualOffsetWords = (options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? baseArenaWords : 0;
     const arenaWords = baseArenaWords + ((options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? tree.voxelCapacity * 4 : 0);
     if(arenaWords * 4 > device.limits.maxStorageBufferBindingSize) throw new RangeError("Meshing construction arena exceeds GPU storage limit; reduce render grid resolution");
@@ -3768,6 +3787,7 @@ export class SparseSceneProxyVoxelizer {
       label: `${label} fixed maintenance arena`, size: arenaWords * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
+    if (boundaryImage) device.queue.writeBuffer(this.maintenanceArena, boundaryBaseWords * 4, boundaryImage);
     const pageLayout = this.renderTerrainLayout?.editPages ?? this.solidWorldLayout;
     if (pageLayout && options.solidWorldLattice) {
       this.solidWorldPages = new WebgpuSolidWorldPageWriter(device.queue, this.maintenanceArena,
@@ -3828,6 +3848,14 @@ export class SparseSceneProxyVoxelizer {
         capacity: dirtyBrickCapacity,
       }),
       get activity() { return activity(); },
+      solidBoundary: this.solidBoundaryBaseWords === undefined ? undefined : {
+        offsetBytes: this.solidBoundaryBaseWords * 4,
+        origin_m: options.solidWorldLattice!.origin_m, cellSize_m: options.solidWorldLattice!.cellSize_m,
+      },
+      renderTerrain: this.renderTerrainLayout ? {
+        offsetBytes: this.renderTerrainLayout.baseWords * 4,
+        editPagesOffsetBytes: this.renderTerrainLayout.editPages.baseWords * 4,
+      } : undefined,
       surfaceVertexOffsetBytes: this.dualOffsetWords ? this.dualOffsetWords*4 : undefined,
       surfaceVertexKind: this.dualOffsetWords ? (this.options.surfaceDualMarchingCubes ? "dual-marching-cubes" : "dual-contouring") : undefined,
     });
@@ -3841,7 +3869,7 @@ export class SparseSceneProxyVoxelizer {
         this.tree.payloadProfile, this.tree.sceneGeometryFormat,
         this.tree.leafPayloadMode, this.solidWorldLayout,
         this.renderTerrainLayout, this.options.surfaceContours === true, this.dualOffsetWords, this.options.surfaceDualMarchingCubes === true,
-        this.options.backdropDetail, this.options.solidSurface),
+        this.options.backdropDetail, this.options.solidSurface, this.solidBoundaryBaseWords),
     });
     const pipeline = (entryPoint: string, stage: string) => this.device.createComputePipelineAsync({
       label: `${this.label} ${stage} pipeline`, layout: this.pipelineLayout,
@@ -3883,13 +3911,20 @@ export class SparseSceneProxyVoxelizer {
     }
   }
 
-  setSolidWorld(world: SolidWorld): void {
+  setSolidWorld(world: SolidWorld, boundary?: ProceduralSolidField): void {
+    this.validateSolidWorld(world);
+    if (this.solidBoundaryBaseWords !== undefined) {
+      // Edits only change validity bits; replacing the authored field rebuilds
+      // the scene. Clearing the image retires a boundary whose provenance broke.
+      const image = boundary?.pack() ?? new Uint32Array(this.solidBoundaryWords);
+      if (image.length !== this.solidBoundaryWords) throw new RangeError("Procedural boundary changed; rebuild the renderer");
+      this.device.queue.writeBuffer(this.maintenanceArena, this.solidBoundaryBaseWords * 4, image);
+    }
     const pages = this.solidWorldPages;
     if (!pages) {
       if (world.pages.length > 0 || world.ground) throw new Error("This voxelizer has no SolidWorld capacity");
       return;
     }
-    this.validateSolidWorld(world);
     // Pages keep their slots, so only what the edit changed is written.
     pages.write(this.terrainEdits?.select(world) ?? materializedSolidWorldPages(world));
   }

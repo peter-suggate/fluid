@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { proceduralSolidField, validateProceduralSolid } from "../lib/core/procedural-solid";
 import "../lib/methods";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
@@ -7,7 +8,7 @@ import { parseScene, serializeScene, validateScene, type SceneDescription } from
 import { NBFLIP_LETTERS_GRID, NBFLIP_METHOD_PROFILE } from "../lib/core/nbflip-paper-scenes";
 import {
   NBFLIP_SLIDE_END_RAD, NBFLIP_SLIDE_GRID, NBFLIP_SLIDE_LONG_ARCS, NBFLIP_SLIDE_LONG_BENDS, NBFLIP_SLIDE_LONG_GRID, NBFLIP_SLIDE_LONG_LENGTH,
-  NBFLIP_SLIDE_LONG_SCENE_ID, NBFLIP_SLIDE_SCENE_ID, nbflipSlideCentreline, nbflipSlideLongCentreline, nbflipSlideSolid,
+  NBFLIP_SLIDE_LONG_SCENE_ID, NBFLIP_SLIDE_SCENE_ID, nbflipSlideCentreline, nbflipSlideLongCentreline, nbflipSlideSolid, nbflipSlideLongSolid,
 } from "../lib/core/nbflip-water-slide-scene";
 
 /** A slide's own solids, and the top of the lowest of them in each column of cells (the hood's lid hangs over it). */
@@ -15,11 +16,19 @@ function slideColumns(scene: SceneDescription, grid: readonly [number, number, n
   const [nx, ny, nz] = grid;
   const patches = scene.solidVoxels.filter(patch => patch.minimum.every((cell, axis) => cell >= 0 && patch.maximumExclusive[axis]! <= grid[axis]!));
   if (scene.solidBoundary) {
+    const field = scene.sceneId === NBFLIP_SLIDE_LONG_SCENE_ID ? proceduralSolidField(scene) : undefined;
+    // Boundary bricks omit wholly solid and wholly empty regions. Preserve
+    // that distinction when a vertical scan crosses an eight-cell boundary.
+    const interiors = new Set(patches.filter(p => !p.kind || p.kind === "box").map(p => p.minimum.join()));
+    const sample = (x: number, y: number, z: number) => field
+      ? field.sample([x,y,z])?.[3] ?? (interiors.has([x,y,z].map(v => Math.floor(v / 8) * 8).join()) ? -4 : 4)
+      : nbflipSlideSolid([x,y,z]);
     const floorAt=(x:number,z:number)=>{
       let inside=false;
       for(let y=.125;y<ny;y+=.25){
-        const solid=nbflipSlideSolid([x,y,z])<0;
-        if(inside&&!solid){let low=y-.25,high=y;for(let k=0;k<24;k++){const m=(low+high)/2;if(nbflipSlideSolid([x,m,z])<0)low=m;else high=m;}return Math.round((low+high)/2*1e6)/1e6;}
+        const value = sample(x,y,z);
+        const solid=value<0;
+        if(inside&&!solid){let low=y-.25,high=y;for(let k=0;k<24;k++){const m=(low+high)/2;if(sample(x,m,z)<0)low=m;else high=m;}return Math.round((low+high)/2*1e6)/1e6;}
         inside=solid;
       }
       return 0;
@@ -55,13 +64,6 @@ function assertEmptyClosedNbflipBox(id: string, grid: readonly [number, number, 
   assert.equal(scene.container.fillFraction, 0);
   assert.equal(scene.fluid.initialLiquidVolumes, undefined);
   assert.ok(scene.fluid.inflow!.end_s < scene.duration_s);
-}
-function assertClearOfTheBox(patches: ReturnType<typeof slideColumns>["patches"], [nx, ny, nz]: readonly [number, number, number]) {
-  assert.ok(patches.length > 0);
-  for (const { minimum, maximumExclusive } of patches) {
-    assert.ok(minimum[0] >= 4 && minimum[2] >= 4 && maximumExclusive[0] <= nx - 4 && maximumExclusive[2] <= nz - 4 && maximumExclusive[1] <= ny - 4,
-      `${minimum} to ${maximumExclusive}`);
-  }
 }
 
 const scene = sceneDocument(getSceneDefinition(NBFLIP_SLIDE_SCENE_ID));
@@ -126,7 +128,13 @@ test("the long water slide is a closed NB-FLIP box of Letters' cell count that s
 });
 
 test("the long water slide stands clear of the box it is solved in", () => {
-  assertClearOfTheBox(flume, NBFLIP_SLIDE_LONG_GRID);
+  // Baked block bounds include empty padding; inspect the occupied surface.
+  const [nx, ny, nz] = NBFLIP_SLIDE_LONG_GRID;
+  assert.ok(flume.length > 0);
+  for (let z = .5; z < nz; z++) for (let x = .5; x < nx; x++) {
+    if (x < 4 || x > nx - 4 || z < 4 || z > nz - 4) assert.equal(longTopAt(x,z), 0, `${x},${z}`);
+  }
+  assert.ok(Math.max(...longTop) < ny - 4);
 });
 
 test("the long water slide snakes the box's length through bends that alternate and use its width", () => {
@@ -149,7 +157,8 @@ test("the long water slide's channel only falls, between walls high enough on ev
   const pitSide = NBFLIP_SLIDE_LONG_ARCS[NBFLIP_SLIDE_LONG_ARCS.length - 1]![2];
   let floor = Infinity;
   for (const [distance, x, z, heading] of samples) {
-    assert.ok(longTopAt(x, z) <= floor, `the floor rises at ${distance}`);
+    // Trilinear samples of circular bends have sub-millimetre interpolation error.
+    assert.ok(longTopAt(x, z) <= floor + .025, `the floor rises at ${distance}`);
     floor = longTopAt(x, z);
     // Nine cells either side of the centreline is the middle of a wall.
     assert.ok(longBeside(x, z, heading, -9 * pitSide) >= floor + 10, `wall ${longBeside(x, z, heading, -9 * pitSide) - floor} away from the pool at ${distance}`);
@@ -165,11 +174,85 @@ test("the long water slide's channel only falls, between walls high enough on ev
 });
 
 test("the long water slide's pool ends between 60% and 80% full below the hood's sill", () => {
-  const [x, z] = nbflipSlideLongCentreline(NBFLIP_SLIDE_LONG_LENGTH - 1), sill = longTopAt(x, z);
+  const [x, z, heading] = nbflipSlideLongCentreline(NBFLIP_SLIDE_LONG_LENGTH - 1), sill = longTopAt(x, z);
   const pit = longTop.reduce((lowest, cells) => cells > 0 && cells < lowest ? cells : lowest, NBFLIP_SLIDE_LONG_GRID[1]);
-  const capacity = longTop.filter(cells => cells === pit).length * (sill - pit), emitted = emittedCells(long);
+  // Integrate the sampled pool bed; curved boundary cells need not have the
+  // exact same height as the flat interior. Channel floors lie at/above sill.
+  const capacity = longTop.reduce((sum, cells) => sum + (cells > 0 && cells < sill ? sill - cells : 0), 0);
+  const emitted = emittedCells(long);
+  assert.equal(longTopAt(x+39*Math.sin(heading),z-39*Math.cos(heading)),4,"flat pool interior stays four cells high");
+  // Trilinear cells where the curved wall meets the pool may lower a perimeter
+  // sample by up to two millimetres; capacity integrates those cells above.
+  assert.ok(pit >= 3.9 && pit <= 4, `pool perimeter floor ${pit}`);
   // With or without the tenth more that the solver has been seen to make of a stream.
   assert.ok(emitted >= 0.6 * capacity && 1.1 * emitted <= 0.8 * capacity, `${capacity} cells for ${emitted}`);
   // The pool is the bottom layer of pages, and the channel's floor never dips into it.
   assert.equal(sill % 32, 0);
+});
+
+
+test("the long slide publishes a continuous boundary with smooth circular wall normals", () => {
+  assert.ok(long.solidBoundary);
+  validateProceduralSolid(long.solidBoundary);
+  const restored = parseScene(serializeScene(long));
+  assert.ok(JSON.stringify(restored.solidBoundary) === JSON.stringify(long.solidBoundary), "boundary survives serialization");
+  const field = proceduralSolidField(restored)!;
+  assert.ok(field, "the registered scene preserves boundary provenance");
+  for (const [from, to] of NBFLIP_SLIDE_LONG_ARCS) for (const t of [.13, .35, .65, .8]) {
+    const distance = from + t * (to - from);
+    const [x,z,heading] = nbflipSlideLongCentreline(distance), floor = longTopAt(x,z);
+    for (const side of [-1,1]) {
+      const outward = [-side*Math.sin(heading), 0, side*Math.cos(heading)];
+      const p = [x+7*outward[0]!, floor+5, z+7*outward[2]!] as const;
+      assert.ok(Math.abs(nbflipSlideLongSolid(p)) < 1e-6, "inner wall is on the circle");
+      const gradient = field.sample(p)!;
+      assert.ok(gradient, "wall carries boundary nodes");
+      const alignment = -(gradient[0]*outward[0]!+gradient[2]*outward[2]!)/Math.hypot(...gradient.slice(0,3));
+      assert.ok(alignment > .998, `wall normal follows the curve: ${alignment} at ${distance}`);
+      assert.ok(Math.abs(gradient[3]) < .025, "sampled wall is within half a millimetre of the circle");
+    }
+  }
+});
+
+test("continuous long-slide joins, slab, hood and spill retain their separate surfaces", () => {
+  const field = proceduralSolidField(long)!;
+  for (const [from,to] of NBFLIP_SLIDE_LONG_ARCS) for (const distance of [from-.01,from,from+.01,to-.01,to,to+.01]) {
+    if (distance >= NBFLIP_SLIDE_LONG_LENGTH) continue;
+    const [x,z] = nbflipSlideLongCentreline(distance);
+    const floor = 56-24*Math.min(1,distance/(NBFLIP_SLIDE_LONG_LENGTH-30));
+    assert.ok(nbflipSlideLongSolid([x,floor-.1,z]) < 0, `connected bed at ${distance}`);
+    assert.ok(nbflipSlideLongSolid([x,floor+.1,z]) > 0, `open channel at ${distance}`);
+    if (distance < NBFLIP_SLIDE_LONG_LENGTH - 1) {
+      assert.ok(Math.abs(field.sample([x,floor,z])![3]) < .025, `baked join stays on the bed at ${distance}`);
+    }
+  }
+  const [x,z] = nbflipSlideLongCentreline(16), floor = longTopAt(x,z);
+  assert.ok(nbflipSlideLongSolid([x,floor-7,z]) < 0, "slab remains eight cells thick");
+  assert.ok(nbflipSlideLongSolid([x,floor-9,z]) > 0, "air remains below the suspended slab");
+  const [hx,hz,heading] = nbflipSlideLongCentreline(NBFLIP_SLIDE_LONG_LENGTH-9);
+  assert.ok(nbflipSlideLongSolid([hx,45,hz]) > 0, "clear space under the hood");
+  assert.ok(nbflipSlideLongSolid([hx,47,hz]) < 0, "four-cell roof");
+  assert.ok(nbflipSlideLongSolid([hx,51,hz]) > 0, "air above the roof");
+  assert.ok(nbflipSlideLongSolid([hx+9*Math.sin(heading),37,hz-9*Math.cos(heading)]) > 0, "inner spill gap stays open");
+});
+
+
+test("the long slide rounds exposed rims without moving the wall or flat top", () => {
+  const distance=16, [x,z,heading]=nbflipSlideLongCentreline(distance);
+  const floor=56-24*distance/(NBFLIP_SLIDE_LONG_LENGTH-30), top=floor+24;
+  const sample=(across:number,y:number)=>nbflipSlideLongSolid([x-across*Math.sin(heading),y,z+across*Math.cos(heading)]);
+  assert.ok(sample(7.4,top-.4)>0,"the square corner is rounded away");
+  assert.ok(sample(7.75,top-.75)<0,"the rounded rim retains wall thickness");
+  assert.ok(Math.abs(sample(7,top-3))<1e-6,"vertical channel wall stays in place");
+  assert.ok(Math.abs(sample(9,top))<1e-6,"the flat rim top stays at its authored height");
+});
+
+
+test("wall height changes have no internal cap sheet below the step", () => {
+  const step=NBFLIP_SLIDE_LONG_ARCS[0]![1]+32+Math.PI/2*32;
+  for (const distance of [step-.01,step,step+.01]) {
+    const [x,z,heading]=nbflipSlideLongCentreline(distance),floor=56-24*distance/(NBFLIP_SLIDE_LONG_LENGTH-30);
+    const p=[x-9*Math.sin(heading),floor+6,z+9*Math.cos(heading)] as const;
+    assert.ok(nbflipSlideLongSolid(p)<-1,"the shared lower wall stays solid through the height step");
+  }
 });

@@ -26,9 +26,29 @@ struct RasterLightingParams { control:vec4u, farCenterExtent:vec4f, depthCell:ve
 @group(2) @binding(0) var<uniform> rasterLighting:RasterLightingParams;
 `;
 
+/** Depth across a planar receiver is affine in shadow-map UV, including a
+ * perspective map's post-divide depth. Both blocker search and filtering must
+ * compare against that plane, not the centre pixel's constant depth. */
+export const rasterReceiverPlaneWGSL = /* wgsl */ `
+// Hardware comparison filtering uses one reference depth for four texels.
+// Cover that footprint's slope as well as correcting the offset between taps.
+fn rasterReceiverFootprintBias(gradient:vec2f,size:f32)->f32{
+  return dot(abs(gradient),vec2f(1.0/size));
+}
+fn rasterSunReceiverGradient(normal:vec3f,extent:f32,depthSpan:f32)->vec2f{
+  if(abs(normal.z)<1e-6){return vec2f(0);}
+  return vec2f(normal.x,-normal.y)*(2.0*extent/(normal.z*depthSpan));
+}
+fn rasterSpotReceiverGradient(normal:vec3f,planeDistance:f32,near:f32,far:f32,tanHalfAngle:f32)->vec2f{
+  if(abs(planeDistance)<1e-6){return vec2f(0);}
+  return vec2f(normal.x,-normal.y)*(-2.0*tanHalfAngle*near*far/((far-near)*planeDistance));
+}
+`;
+
 /** Shared by the caster and receiver: conventional [0,1] shadow depth, reversed camera depth unchanged. */
 export const rasterAoConsumerWGSL = /* wgsl */ `
 ${paramsWGSL}
+${rasterReceiverPlaneWGSL}
 @group(2) @binding(1) var rasterSunDepth:texture_depth_2d_array;
 @group(2) @binding(2) var rasterSunSampler:sampler_comparison;
 @group(2) @binding(3) var rasterContact:texture_2d<f32>;
@@ -73,24 +93,33 @@ fn rasterSpotVisibility(position:vec3f,normal:vec3f,slot:u32)->f32{
   let p=clip.xyz/clip.w;let uv=p.xy*vec2f(.5,-.5)+.5;
   if(any(uv<vec2f(0))||any(uv>vec2f(1))||p.z>=1.0){return 1.0;}
   let offsets=array<vec2f,12>(vec2f(0,0),vec2f(-.32,.23),vec2f(.25,-.39),vec2f(-.43,-.32),vec2f(.60,.15),vec2f(-.09,.67),vec2f(-.69,.12),vec2f(.09,-.76),vec2f(.55,.63),vec2f(-.57,.62),vec2f(-.64,-.64),vec2f(.79,-.48));
+  let lightNormal=transpose(basis)*normal;
+  let gradient=rasterSpotReceiverGradient(lightNormal,dot(normal,biased-spot.positionNear.xyz),
+    spot.positionNear.w,spot.rangeRadiusIndex.x,spot.directionTan.w);
+  let receiver=clip.w-texel*.3;
+  let depth=spot.rangeRadiusIndex.x*(receiver-spot.positionNear.w)/((spot.rangeRadiusIndex.x-spot.positionNear.w)*receiver)
+    -rasterReceiverFootprintBias(gradient,f32(${SVO_RASTER_SHADOW_SIZE}));
   let radius=spot.rangeRadiusIndex.y;
+  // Compare against the receiver plane, but measure the blocker at its actual
+  // depth. A slope-corrected depth is not a physical occluder distance.
   // Perspective depth is nonlinear. Recover axial blocker distance before
   // estimating the finite emitter's contact-hardening penumbra in world units.
   let search=clamp(radius/max(texel,1e-6)*(clip.w-spot.positionNear.w)/spot.positionNear.w,2.0,96.0);
   var blocker=0.0;var count=0.0;
   for(var i=0u;i<12u;i++){
     let c=clamp(vec2i(uv*f32(${SVO_RASTER_SHADOW_SIZE})+offsets[i]*search),vec2i(0),vec2i(${SVO_RASTER_SHADOW_SIZE - 1}));
-    let d=rasterSpotDistance(textureLoad(rasterSunDepth,c,i32(slot+2u),0),spot);
-    if(d<clip.w-texel*.3){blocker+=d;count+=1.0;}
+    let offset=(vec2f(c)+.5)/f32(${SVO_RASTER_SHADOW_SIZE})-uv;
+    let raw=textureLoad(rasterSunDepth,c,i32(slot+2u),0);if(raw>=1.0){continue;}
+    let d=raw-dot(gradient,offset);
+    if(d<depth){blocker+=rasterSpotDistance(raw,spot);count+=1.0;}
   }
   if(count==0.0){return 1.0;}
   let blockerDistance=blocker/count;
   let penumbra=clamp(radius*(clip.w-blockerDistance)/max(blockerDistance*texel,1e-6),1.0,96.0);
-  let receiver=clip.w-texel*.3;
-  let depth=spot.rangeRadiusIndex.x*(receiver-spot.positionNear.w)/((spot.rangeRadiusIndex.x-spot.positionNear.w)*receiver);
   var visibility=0.0;
   for(var i=0u;i<12u;i++){
-    visibility+=textureSampleCompareLevel(rasterSunDepth,rasterSunSampler,uv+offsets[i]*penumbra/f32(${SVO_RASTER_SHADOW_SIZE}),i32(slot+2u),depth);
+    let offset=offsets[i]*penumbra/f32(${SVO_RASTER_SHADOW_SIZE});
+    visibility+=textureSampleCompareLevel(rasterSunDepth,rasterSunSampler,uv+offset,i32(slot+2u),depth+dot(gradient,offset));
   }return visibility/12.0;
 }
 fn rasterPcf(position:vec3f,normal:vec3f,layer:u32)->f32{
@@ -104,18 +133,22 @@ fn rasterPcf(position:vec3f,normal:vec3f,layer:u32)->f32{
   let offsets=array<vec2f,12>(vec2f(.13,.09),vec2f(-.32,.23),vec2f(.25,-.39),vec2f(-.43,-.32),vec2f(.60,.15),vec2f(-.09,.67),vec2f(-.69,.12),vec2f(.09,-.76),vec2f(.55,.63),vec2f(-.57,.62),vec2f(-.64,-.64),vec2f(.79,-.48));
   let angular=tan(dry.tuningRays1.y*.5);
   let search=max(2.0,length(uniforms.container.xyz)*angular/texel);
-  let bias=texel*.3/rasterLighting.depthCell.x;var blocker=0.0;var count=0.0;
+  let gradient=rasterSunReceiverGradient(transpose(rasterSunBasis())*normal,rasterMapExtent(layer),rasterLighting.depthCell.x);
+  let bias=texel*.3/rasterLighting.depthCell.x+rasterReceiverFootprintBias(gradient,f32(${SVO_RASTER_SHADOW_SIZE}));var blocker=0.0;var count=0.0;
   for(var i=0u;i<12u;i++){
     let c=clamp(vec2i(uv*f32(${SVO_RASTER_SHADOW_SIZE})+offsets[i]*search),vec2i(0),vec2i(${SVO_RASTER_SHADOW_SIZE - 1}));
-    let d=textureLoad(rasterSunDepth,c,i32(layer),0);
-    if(d<p.z-bias){blocker+=d;count+=1.0;}
+    let offset=(vec2f(c)+.5)/f32(${SVO_RASTER_SHADOW_SIZE})-uv;
+    let raw=textureLoad(rasterSunDepth,c,i32(layer),0);if(raw>=1.0){continue;}
+    let d=raw-dot(gradient,offset);
+    if(d<p.z-bias){blocker+=raw;count+=1.0;}
   }
   if(count==0.0){return 1.0;}
   let penumbra=clamp((p.z-blocker/count)*rasterLighting.depthCell.x*angular/texel,1.0,48.0);
   let disk=array<vec2f,24>(vec2f(0.144338,0.000000),vec2f(-0.184342,0.168873),vec2f(0.028217,-0.321513),vec2f(0.232351,0.303061),vec2f(-0.426393,-0.075423),vec2f(0.403917,-0.256939),vec2f(-0.135102,0.502574),vec2f(-0.257655,-0.496099),vec2f(0.559008,0.204149),vec2f(-0.581555,0.240057),vec2f(0.280348,-0.599087),vec2f(0.207170,0.660490),vec2f(-0.624412,-0.361860),vec2f(0.732507,-0.161040),vec2f(-0.447038,0.635865),vec2f(-0.103276,-0.796974),vec2f(0.634013,0.534347),vec2f(-0.853183,0.035282),vec2f(0.622332,-0.619303),vec2f(-0.041636,0.900426),vec2f(-0.592151,-0.709594),vec2f(0.938032,0.126211),vec2f(-0.794793,0.552996),vec2f(0.217183,-0.965401));
   var visibility=0.0;
   for(var i=0u;i<24u;i++){
-    visibility+=textureSampleCompareLevel(rasterSunDepth,rasterSunSampler,uv+disk[i]*penumbra/f32(${SVO_RASTER_SHADOW_SIZE}),i32(layer),p.z-bias);
+    let offset=disk[i]*penumbra/f32(${SVO_RASTER_SHADOW_SIZE});
+    visibility+=textureSampleCompareLevel(rasterSunDepth,rasterSunSampler,uv+offset,i32(layer),p.z+dot(gradient,offset)-bias);
   }return visibility/24.0;
 }
 fn rasterSunVisibility(position:vec3f,normal:vec3f)->f32{

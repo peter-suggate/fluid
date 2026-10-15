@@ -1934,6 +1934,7 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 31, visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 35, visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 33, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 41, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
       { binding: 42, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     ] });
     this.ensureSurfaceMeshWork();
@@ -2017,6 +2018,15 @@ export class SparseVoxelDrySceneRenderer {
     const bound = maintenance !== undefined && this.surfaceMeshMaintenanceBuffer === maintenance.buffer;
     this.device.queue.writeBuffer(this.surfaceMeshState, W.hostMaintenance * 4,
       new Uint32Array([bound && maintenance.journal ? 1 : 0, this.surfaceMeshWorkLeafCapacity]));
+    const terrain = bound ? maintenance?.renderTerrain : undefined;
+    this.device.queue.writeBuffer(this.surfaceMeshState, W.hostRenderTerrain * 4, new Uint32Array([
+      (terrain?.offsetBytes ?? 0) / 4, (terrain?.editPagesOffsetBytes ?? 0) / 4,
+      (this.scene?.primitiveRecords[7] ?? 0) & 0xffff,
+    ]));
+    const boundary = bound ? maintenance?.solidBoundary : undefined;
+    const boundaryWords = new Uint32Array(7), boundaryFloats = new Float32Array(boundaryWords.buffer);
+    if (boundary) { boundaryWords[0] = boundary.offsetBytes / 4; boundaryFloats.set(boundary.origin_m, 1); boundaryFloats.set(boundary.cellSize_m, 4); }
+    this.device.queue.writeBuffer(this.surfaceMeshState, W.hostSolidBoundary * 4, boundaryWords);
     this.device.queue.writeBuffer(this.surfaceMeshState, W.hostSurfaceVertices * 4, new Uint32Array([bound ? ((maintenance?.surfaceVertexOffsetBytes ?? 0) / 4) | (maintenance?.surfaceVertexKind === "dual-marching-cubes" ? 0x80000000 : 0) : 0]));
     this.device.queue.writeBuffer(this.surfaceMeshState, W.hostMaintenanceStateWords * 4,
       new Uint32Array([(maintenance?.stateOffsetBytes ?? 0) / 4, (maintenance?.dirtyBrickOffsetBytes ?? 0) / 4, maintenance?.dirtyBrickCapacity ?? 0]));
@@ -2035,6 +2045,7 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 31, resource: { buffer: this.surfaceMeshArena! } },
       { binding: 35, resource: { buffer: this.surfaceMeshVisible! } },
       { binding: 33, resource: { buffer: this.surfaceMeshState! } },
+      { binding: 41, resource: { buffer: this.surfaceMeshMaintenanceBuffer ?? this.surfaceMeshEmptyMaintenance! } },
       { binding: 42, resource: { buffer: this.surfaceMeshWork! } },
     ] });
   }
@@ -5134,6 +5145,7 @@ export class SparseVoxelDrySceneRenderer {
     const backdropTerrainBefore = this.backdropTerrainRequested();
     const latticeBefore = this.latticeVisibilityRequested(this.coneScale, this.lightingOptions.globalIlluminationEnabled === true);
     this.scene = scene;
+    this.writeSurfaceMeshHostWords();
     this.primitiveCount = primitiveArena.primitiveCount;
     if (this.shadingPath === "split" && (backdropTerrainBefore !== this.backdropTerrainRequested()
       || latticeBefore !== this.latticeVisibilityRequested(this.coneScale, this.lightingOptions.globalIlluminationEnabled === true))) {

@@ -1,3 +1,5 @@
+import { svoAuthoredSurfaceNormalsWGSL } from "./svo-authored-surface-normals";
+import { proceduralSolidRenderWGSL } from "../../../core/procedural-solid-render.wgsl";
 import { svoDualMarchingCubesMeshWGSL, svoVoxelMeshWGSL, svoContourMeshWGSL, svoDualContouringMeshWGSL } from "../meshing/plugins";
 import { svoCellContourWGSL } from "../construction/svo-cell-contour";
 import { SPARSE_SCENE_DIRTY_JOURNAL_RECORD_WORD, SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../../../core/webgpu-sparse-scene-proxies";
@@ -128,7 +130,7 @@ export const SVO_SURFACE_MESH_INITIAL_BYTES = 16 * 1024 * 1024;
 export const SVO_SURFACE_MESH_QUAD_BYTES = 32;
 export const SVO_SURFACE_MESH_HEADER_BYTES = 64;
 /** First 64 bytes retain the public draw/diagnostic ABI; tail is builder state. */
-export const SVO_SURFACE_MESH_STATE_BYTES = 272;
+export const SVO_SURFACE_MESH_STATE_BYTES = 320;
 /** Historical arena size used to preserve the edit-reserve contract. */
 export const SVO_SURFACE_MESH_MINIMUM_QUADS = SVO_SURFACE_MESH_BYTES / SVO_SURFACE_MESH_QUAD_BYTES;
 /**
@@ -280,7 +282,14 @@ export const SVO_SURFACE_MESH_STATE = Object.freeze({
    * (`svo-raster-ao.ts`).
    */
   shadowBoxes: 56,
-  wordCount: 68,
+  /** Boundary image offset followed by its world origin and cell size (f32). */
+  hostSolidBoundary: 68,
+  /** Renderer heightfield header and its live authored-edit page image. */
+  hostRenderTerrain: 75,
+  hostTerrainEdits: 76,
+  /** Material at primitive zero; each lookup verifies the candidate identity. */
+  hostPrimitiveMaterialBase: 77,
+  wordCount: 80,
 } as const);
 
 /**
@@ -1372,6 +1381,10 @@ fn surfaceMeshCull(@builtin(global_invocation_id) id:vec3u,@builtin(local_invoca
   workgroupBarrier();
   if(visible){meshVisibleOutput[meshCullBase+rank]=index;}
 }
+${proceduralSolidRenderWGSL(`meshHeader[${W.hostSolidBoundary}u]`, "meshMaintenance[index]",
+  `bitcast<vec3f>(vec3u(meshHeader[${W.hostSolidBoundary+4}u],meshHeader[${W.hostSolidBoundary+5}u],meshHeader[${W.hostSolidBoundary+6}u]))`,
+  `bitcast<vec3f>(vec3u(meshHeader[${W.hostSolidBoundary+1}u],meshHeader[${W.hostSolidBoundary+2}u],meshHeader[${W.hostSolidBoundary+3}u]))`, "meshBoundary")}
+${svoAuthoredSurfaceNormalsWGSL(W.hostRenderTerrain, W.hostTerrainEdits, W.hostPrimitiveMaterialBase)}
 struct MeshVertexOut {
   @builtin(position) position:vec4f,
   @location(0) world:vec3f,
@@ -1381,6 +1394,7 @@ struct MeshVertexOut {
   @location(4) @interpolate(flat) agreement:f32,
   @location(5) @interpolate(flat) cellPixels:f32,
   @location(6) @interpolate(flat) geometricNormal:vec3f,
+  @location(7) boundaryNormal:vec3f,
 }
 @vertex fn surfaceMeshVertex(@builtin(vertex_index) vertex:u32,@builtin(instance_index) instance:u32)->MeshVertexOut{
   let quad=meshDrawnQuad(${culling ? "meshVisible[instance]" : "instance"});
@@ -1409,9 +1423,20 @@ struct MeshVertexOut {
     let word=quad.origin[min(vertex,2u)]>>16u;
     if(word!=SCENE_IDENTITY_NO_NORMAL){normal=svoGBufferUnpackNormalOct8(word);}
   }` : ""}
+  var boundaryNormal=vec3f(0);
+  if(meshDcEnabled()&&meshHeader[${W.hostSolidBoundary}u]!=0u){
+    // Evaluate on the shared mesh vertex, not an interior fit's medial crease.
+    // Interpolation keeps normals continuous across both triangles and the
+    // sampled field's cell boundaries, including around a rounded rim.
+    let boundary=meshBoundarySample(world);
+    if(abs(boundary.w)<2.0*max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z))){let g=meshBoundaryNormal(world,boundary);if(dot(g,g)>1e-12){boundaryNormal=normalize(g);}}
+  }
+  if(meshDcEnabled()&&dot(boundaryNormal,boundaryNormal)==0.0){
+    boundaryNormal=meshAuthoredSurfaceNormal(world,sceneIdentityMaterial(quad.identity),geometricNormal);
+  }
   let brickLattice=dry.mapping.brickSize*(1u<<(dry.mapping.maximumDepth-meshQuadDepth(quad.face)));
   return MeshVertexOut(position,world,quad.identity,normal,meshQuadLevel(quad.face),f32((quad.face>>11u)&255u)/255.0,
-    meshCellFootprint(meshQuadBrickBase(quad),brickLattice),geometricNormal);
+    meshCellFootprint(meshQuadBrickBase(quad),brickLattice),geometricNormal,boundaryNormal);
 }
 struct MeshSurfaceOut {
   @location(0) packedSurface:vec4u,@location(1) identityMedia:vec4u,
@@ -1429,7 +1454,8 @@ fn meshFilteredNormal(face:vec3f,baked:vec3f,level:u32,agreement:f32,cellPixels:
 }
 @fragment fn surfaceMeshFragment(input:MeshVertexOut)->MeshSurfaceOut{
   let camera=dryRasterPrimaryCamera();let rd=normalize(input.world-camera[0]);let t=length(input.world-camera[0]);
-  var normal=normalize(input.normal);
+  var normal=normalize(input.normal);var receiverNormal=input.geometricNormal;
+  if(dot(input.boundaryNormal,input.boundaryNormal)>1e-12){normal=normalize(input.boundaryNormal);receiverNormal=normal;}
   if(!meshContoursEnabled()&&!meshDcEnabled()&&dry.meshFilter.x>0.5&&dry.meshFilterNormals.x>0.5&&dry.meshFilter.y>0.0){
     // Filtered detail shades the baked normal: a coarse quad carries its cells'
     // mean, an exact quad reads the voxel just behind its face. The surface
@@ -1450,12 +1476,10 @@ fn meshFilteredNormal(face:vec3f,baked:vec3f,level:u32,agreement:f32,cellPixels:
   // Tag reconstructed receivers for the shared lighting encoder. Their implicit
   // no-owner slot carries the geometric normal through both deferred passes.
   let hit=DryHit(t,shading.normal,sceneIdentityMaterial(input.identity),DRY_OWNER_NONE,shading.featureId,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u,0u,select(0u,1u,meshDcEnabled()||meshContoursEnabled())));
-  // The quad is the surface; the baked normal is only how it is lit. Publishing
-  // the face as the geometric normal is what lets the deferred lighting start
-  // its shadow and contact rays outside this cube: biased along a baked normal
-  // that leans toward the light, a silhouette's side face fires its shadow ray
-  // back through its own solid and reads as black.
-  var out=dryRasterPrimaryFacedSurface(hit,input.geometricNormal,camera[0],rd,camera[1],SVO_GBUFFER_PRODUCER_BRICK);
+  // Voxel quads retain their exact geometric face for ray bias. A sampled
+  // implicit surface instead uses its own gradient: a tessellation normal's
+  // hemisphere gate would bring flat triangle shading back at the terminator.
+  var out=dryRasterPrimaryFacedSurface(hit,receiverNormal,camera[0],rd,camera[1],SVO_GBUFFER_PRODUCER_BRICK);
   // Raster material bits 27..30 carry level+1 for the read-only LOD overlay.
   // Production mesh shading masks these bits in drySplitIdentityAt.
   out.opaqueIdentity.x|=(input.level+1u)<<27u;
