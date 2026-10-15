@@ -553,18 +553,35 @@ fn nbAdvect(i:u32){
   if(p.position.w<=0.0){source[i].position.x=-1.0;return;}
   // Uniform stores velocity half a step ahead of position. Ballistic drift
   // uses that midpoint velocity; update supplies the next full gravity kick.
-  var speed=p.velocity.xyz/params.hDt.xyz;
-  if(!ballistic){speed=sampleVelocity(q)/params.hDt.xyz;}
-  let steps=nbTraceSteps(speed,params.hDt.w);
-  // Trajectory refinement leaves the global pressure timestep unchanged.
-  if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&state[3],1u);source[i].position.x=-1.0;return;}
-  let base=params.hDt.w/f32(steps);var units=1u;
-  for(var s=0u;s<steps;s+=units){
-   var end=q+base*p.velocity.xyz/params.hDt.xyz;
-   if(ballistic){units=1u;}else{
-    // The first subdivision starts where the speed was sampled.
-    if(s>0u){speed=sampleVelocity(q)/params.hDt.xyz;}
-    let span=nbTraceSpan(q,base,speed,steps-s);end=span.xyz;units=u32(span.w);
+  // nbTraceSpan's steps, every field sample of the trace at one call site
+  // (Metal inlines each call of the field): stage 0 the field at q (k1; the
+  // first sets the substeps), 1 one base substep ahead (k2), 2 the third
+  // point, after which the span ends. Ballistic drift samples nothing.
+  let h=params.hDt.xyz;
+  var steps=1u;var base=0.0;var s=0u;var x=q;var stage=0u;var k1=vec3f(0.0);var k2=vec3f(0.0);var two=false;
+  for(var n=0u;n<${3*NARROW_BAND_TRACE_LIMIT+3}u;n++){
+   var end=q;var units=1u;
+   if(!ballistic){
+    let k=sampleVelocity(x)/h;
+    if(stage==0u){
+     k1=k;
+     if(s==0u){
+      steps=nbTraceSteps(k1,params.hDt.w);
+      // Trajectory refinement leaves the global pressure timestep unchanged.
+      if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&state[3],1u);source[i].position.x=-1.0;return;}
+      base=params.hDt.w/f32(steps);
+     }
+     x=q+base*k1;stage=1u;continue;
+    }
+    if(stage==1u){k2=k;two=nbTraceTwo(base,k1,k2,steps-s);x=nbTraceThird(q,base,k1,k2,two);stage=2u;continue;}
+    let span=nbTraceEnd(q,base,k1,k2,k,two);end=span.xyz;units=u32(span.w);stage=0u;
+   }else{
+    if(s==0u){
+     steps=nbTraceSteps(p.velocity.xyz/h,params.hDt.w);
+     if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&state[3],1u);source[i].position.x=-1.0;return;}
+     base=params.hDt.w/f32(steps);
+    }
+    end=q+base*p.velocity.xyz/h;
    }
    // A SOLID page across a face of the page the span starts in stops the
    // end 0.01 cell inside that face. An AIR page or a stored one does not.
@@ -619,6 +636,8 @@ fn nbAdvect(i:u32){
    }
    }
    for(var axis=0u;axis<3u;axis++){if(endpoint[axis]!=end[axis]){p.velocity[axis]=0.0;}}
+   s+=units;if(s>=steps){break;}
+   x=q;
   }
   // A sample that ends in a page that holds no storage is fatal: it keeps
   // its end, in no cell's count, and the order that follows files it in no run.

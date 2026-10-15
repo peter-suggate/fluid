@@ -190,15 +190,16 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
   let value=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(p)]))*h;
   textureStore(outputPhi,vec3i(p),vec4f(value));return;
  }
- // Coarse/interface samples retain their reconstructed values. Past reach,
- // preserve the old field's sign and its minimum six-cell magnitude.
- // Every dispatched vertex is canonical and has one writer. The metric
- // bank was completed before this pass, so only this vertex's old value is
- // needed. Coarse dispatches bind its base home; fine ones its resident h
- // home. No neighbor can be read while another invocation overwrites it.
- var value=textureLoad(outputPhi,vec3i(p)).x;
- if(normalize&&abs(value)>1e-8){value=sign(value)*max(abs(value),6.0*h);}
- textureStore(outputPhi,vec3i(p),vec4f(value));
+ // Coarse/interface samples retain their reconstructed values: nothing to
+ // write. Past reach, preserve the old field's sign and its minimum
+ // six-cell magnitude. Every dispatched vertex is canonical and has one
+ // writer. The metric bank was completed before this pass, so only this
+ // vertex's old value is needed. Coarse dispatches bind its base home; fine
+ // ones its resident h home. No neighbor can be read while another
+ // invocation overwrites it.
+ if(!normalize){return;}
+ let value=textureLoad(outputPhi,vec3i(p)).x;
+ if(abs(value)>1e-8&&abs(value)<6.0*h){textureStore(outputPhi,vec3i(p),vec4f(sign(value)*6.0*h));}
 }
 @compute @workgroup_size(128) fn redistanceFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let owner=umAllOwner(vec3u(group.x*64u,0u,0u));let origin=umTileCoord(owner.tile)*4u;
