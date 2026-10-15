@@ -171,6 +171,17 @@ export interface SceneDefinition {
    * the rebuilt document are the same scene rather than two.
    */
   readonly buildAt?: (lattice: SceneLattice) => SceneDescription;
+  /**
+   * The body as a library card draws it, for a scene whose `build` bakes
+   * geometry the card never reads.
+   *
+   * A thumbnail and its chips read the container, fluid, terrain, bodies and
+   * lattice, never `solidVoxels` or `solidBoundary`; the water slides bake a
+   * full-grid procedural solid that takes seconds on the main thread, and the
+   * scene selector opens over a running viewport. A preview is `build()` minus
+   * that bake, and must agree with it on everything else.
+   */
+  readonly preview?: () => SceneDescription;
   readonly variants?: Readonly<Record<string, SceneVariant>>;
 }
 
@@ -265,6 +276,11 @@ export function sceneDocument(definition: SceneDefinition, variantId?: string): 
   // has no better answer to, so it keeps it.
   if ((plain.voxelDomain.detailCellSize_m ?? cellSize_m) <= detailCellSize_m) return plain;
   return finishSceneDocument(definition, definition.buildAt({ cellSize_m, detailCellSize_m }), variantId);
+}
+
+/** The document a library card draws: `sceneDocument`, minus the bake a `preview` skips. */
+export function scenePreviewDocument(definition: SceneDefinition): SceneDescription {
+  return definition.preview ? finishSceneDocument(definition, definition.preview()) : sceneDocument(definition);
 }
 
 /**
@@ -480,6 +496,8 @@ export interface SceneCard {
   /** Saved scenes only; the library sorts its own shelf by recency. */
   readonly savedAt_ms?: number;
   readonly open: () => SceneOpening;
+  /** The document to draw the card from, when it is cheaper than `open`'s. */
+  readonly preview?: () => SceneDescription;
 }
 
 export function sceneCardForDefinition(definition: SceneDefinition): SceneCard {
@@ -495,6 +513,7 @@ export function sceneCardForDefinition(definition: SceneDefinition): SceneCard {
       presetId: definition.id,
       camera: sceneDefinitionCamera(definition),
     }),
+    preview: definition.preview && (() => scenePreviewDocument(definition)),
   };
 }
 

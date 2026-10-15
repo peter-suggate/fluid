@@ -150,7 +150,7 @@ export function sceneCardPreview(card: SceneCard): SceneDescription | undefined 
   const cached = previewCache.get(key);
   if (cached) return cached;
   try {
-    const scene = card.open().scene;
+    const scene = card.preview ? card.preview() : card.open().scene;
     previewCache.set(key, scene);
     return scene;
   } catch {

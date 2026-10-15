@@ -63,7 +63,8 @@ const GRID_KEYS: readonly SceneGridKey[] = ["ArrowUp", "ArrowDown", "ArrowLeft",
  * listed.
  *
  * Drawing a card means *building its document* — `sceneCardPreview` runs the
- * scene factory, and the four heaviest in the catalog expand terrain fields and
+ * scene factory (or its bake-free `preview`, for the water slides whose solid
+ * bake takes seconds), and the four heaviest in the catalog expand terrain fields and
  * scenery graphs for 40 to 160 ms each. The library can pay that on a page with
  * no viewport on it; this popover opens over a running one, and seventy-odd
  * cards at once would be most of a second of frozen water.

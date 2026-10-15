@@ -12,7 +12,7 @@ import {
 import {
   NBFLIP_SLIDE_GRID, NBFLIP_SLIDE_LONG_BENDS, NBFLIP_SLIDE_LONG_GRID, NBFLIP_SLIDE_LONG_SCENE_ID, NBFLIP_SLIDE_LONG_STREAM_SECONDS,
   NBFLIP_SLIDE_SCENE_ID, NBFLIP_SLIDE_STREAM_SECONDS, NBFLIP_SLIDE_TURNS,
-  createNbflipWaterSlide, createNbflipWaterSlideLong, nbflipWaterSlideCamera, nbflipWaterSlideLongCamera,
+  createNbflipWaterSlide, createNbflipWaterSlideLong, createNbflipWaterSlidePreview, createNbflipWaterSlideLongPreview, nbflipWaterSlideCamera, nbflipWaterSlideLongCamera,
 } from "./nbflip-water-slide-scene";
 import {
   NBFLIP_THEME_PARK_GRID, NBFLIP_THEME_PARK_SCENE_ID, NBFLIP_THEME_PARK_STREAM_SECONDS,
@@ -1872,6 +1872,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     containerShell: "authored",
     methodProfile: NBFLIP_METHOD_PROFILE,
     build: createNbflipWaterSlide,
+    preview: createNbflipWaterSlidePreview,
     camera: nbflipWaterSlideCamera(),
   }),
   defineScene({
@@ -1883,6 +1884,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     environment: "stage",
     methodProfile: NBFLIP_METHOD_PROFILE,
     build: createNbflipWaterSlideLong,
+    preview: createNbflipWaterSlideLongPreview,
     camera: nbflipWaterSlideLongCamera(),
   }),
   defineScene({

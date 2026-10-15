@@ -180,11 +180,17 @@ export function nbflipSlideSolid(p: readonly [number, number, number]): number {
 let slideGeometry: ReturnType<typeof bakeProceduralSolid> | undefined;
 
 export function createNbflipWaterSlide(): SceneDescription {
-  const grid = NBFLIP_SLIDE_GRID, h = NBFLIP_SLIDE_CELL_SIZE_M, dt = 1 / NBFLIP_SLIDE_STEP_HZ;
-  const scene = nbflipDomain(NBFLIP_SLIDE_SCENE_ID, grid, h, NBFLIP_SLIDE_FRAMES, 0, grid, dt);
-  const geometry=slideGeometry??=bakeProceduralSolid(grid,[h,h,h],nbflipSlideSolid,VOXEL_MATERIAL_IDS.container);
+  const scene = createNbflipWaterSlidePreview(), h = NBFLIP_SLIDE_CELL_SIZE_M;
+  const geometry=slideGeometry??=bakeProceduralSolid(NBFLIP_SLIDE_GRID,[h,h,h],nbflipSlideSolid,VOXEL_MATERIAL_IDS.container);
   scene.solidVoxels=[...geometry.solidVoxels];
   scene.solidBoundary=geometry.solidBoundary;
+  return scene;
+}
+
+/** The slide without its baked solid: what a library thumbnail draws, seconds cheaper. */
+export function createNbflipWaterSlidePreview(): SceneDescription {
+  const grid = NBFLIP_SLIDE_GRID, h = NBFLIP_SLIDE_CELL_SIZE_M, dt = 1 / NBFLIP_SLIDE_STEP_HZ;
+  const scene = nbflipDomain(NBFLIP_SLIDE_SCENE_ID, grid, h, NBFLIP_SLIDE_FRAMES, 0, grid, dt);
   // The stream lies on the floor just past the back wall and leaves along the channel.
   const angle = STREAM_AHEAD / START_RADIUS, speed = NBFLIP_SLIDE_STREAM_CELLS_PER_STEP;
   scene.fluid.inflow = streamInflow(grid, h, dt, nbflipSlideCentreline(angle), TOP,
@@ -438,11 +444,17 @@ function bakeLongSlide(): ReturnType<typeof bakeProceduralSolid> {
 }
 
 export function createNbflipWaterSlideLong(): SceneDescription {
-  const grid = NBFLIP_SLIDE_LONG_GRID, h = NBFLIP_SLIDE_CELL_SIZE_M, dt = 1 / NBFLIP_SLIDE_STEP_HZ;
-  const scene = nbflipDomain(NBFLIP_SLIDE_LONG_SCENE_ID, grid, h, NBFLIP_SLIDE_LONG_FRAMES, 0, grid, dt);
+  const scene = createNbflipWaterSlideLongPreview();
   const geometry = longSlideGeometry ??= bakeLongSlide();
   scene.solidVoxels = [...geometry.solidVoxels];
   scene.solidBoundary = geometry.solidBoundary;
+  return scene;
+}
+
+/** The long slide without its baked solid: what a library thumbnail draws, seconds cheaper. */
+export function createNbflipWaterSlideLongPreview(): SceneDescription {
+  const grid = NBFLIP_SLIDE_LONG_GRID, h = NBFLIP_SLIDE_CELL_SIZE_M, dt = 1 / NBFLIP_SLIDE_STEP_HZ;
+  const scene = nbflipDomain(NBFLIP_SLIDE_LONG_SCENE_ID, grid, h, NBFLIP_SLIDE_LONG_FRAMES, 0, grid, dt);
   // The stream lies on the floor just past the back wall and leaves along the channel.
   const [x, z, heading] = nbflipSlideLongCentreline(STREAM_AHEAD), speed = NBFLIP_SLIDE_STREAM_CELLS_PER_STEP;
   scene.fluid.inflow = streamInflow(grid, h, dt, [x, z], LONG_TOP,
