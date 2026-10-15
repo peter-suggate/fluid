@@ -104,7 +104,9 @@ override umCountedJobs:u32=0u;
 override umFusedRegularGate:u32=0u;
 const UM_TILES:u32=${layout.tiles.length}u;
 const UM_OVERFLOW_HANGING:u32=${UNIFORM_MIXED_OVERFLOW_HANGING}u;
-// Residency (uniformMixedResidencyWord): pages of 4³ tiles, eight a block; flags, list.
+// Residency: regions of 4³ tiles, eight per physical block; flags, union list.
+// After a dynamic commit flags carry RESIDENCY_STAGES bits; initial builds
+// may use 1 for a resident region. Readers of the shared fields use the union.
 const UM_PAGES:u32=UM_TILES/64u;
 const UM_RESIDENCY:u32=9u*UM_TILES+28u;
 // Detail storage (uniform-detail-fields.ts): its violation bits follow the

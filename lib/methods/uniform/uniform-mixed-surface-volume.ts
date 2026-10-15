@@ -123,7 +123,14 @@ fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner, and below a 4h owner's own texel (its tile origin): the
 // base blocks (UNIFORM_DETAIL_4H_LOAD).
 fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
-fn umLoadVertexW(p:vec3u,width:u32)->f32{if(width==4u){return umLoadCorner(p);}return umLoadVertex(p);}
+// Only the metric's nonzero-band gradient calls this scalar reader. Audit
+// its actual storage slot, including boundary vertices, rather than a cube
+// around every measured tile. Seed's far-air classification uses the 8-load
+// helpers and does not create a residency dependency of its own.
+fn umLoadVertexW(p:vec3u,width:u32)->f32{
+ let slot=umVertexSlot(vec3i(p));
+ if(slot.w==0u){umSupport[UM_RESIDENCY+1u]=1u;}
+ if(width==4u){return umLoadCorner(p);}return umLoadVertex(p);}
 // The same loads of the eight vertices p + s*umCorner(k,2u): one page-table read where one block holds them.
 fn umLoadVertex8(p:vec3u,s:u32)->array<f32,8>{return udLoad8_phi(vec3i(p),s);}
 fn umLoadCorner8(p:vec3u,s:u32)->array<f32,8>{return udLoad48_phi(vec3i(p),s);}
@@ -155,12 +162,14 @@ fn svAuthority(o:UMOwner,k:u32,low:vec3<bool>)->bool{
 // Tile of a unit-stencil owner's corner authority, clamp(p-1)'s owner.
 fn svUnitAuthorityTile(p:vec3u)->u32{return umTileAt(vec3u(umVertexCellBelow(vec3i(p)))/4u);}
 fn svMeasured(t:u32)->bool{return scratch[SV_MEASURE+t]!=0.0;}
-fn umScaleLoadVertex(p:vec3u)->f32{return scratch[umVertexAt(p)];}
+// An absent vertex has no metric contribution. Shared scratch is not a
+// persistent zero image for the AIR/SOLID sentinel blocks.
+fn umScaleLoadVertex(p:vec3u)->f32{if(!umVertexPresent(vec3i(p))){return 0.0;}return scratch[umVertexAt(p)];}
 // The same words of the eight vertices p + s*umCorner(k,2u): where one block holds them, its first key and fixed steps.
 fn umScaleLoadVertex8(p:vec3u,s:u32)->array<f32,8>{
  var v:array<f32,8>;let run=umVertexRun(vec3i(p),s);
  if(run.x!=0u){let first=umVertexRunAt(run);for(var k=0u;k<8u;k++){let c=umCorner(k,2u)*s;v[k]=scratch[first+c.x+33u*c.y+1089u*c.z];}return v;}
- for(var k=0u;k<8u;k++){v[k]=scratch[umVertexAt(p+umCorner(k,2u)*s)];}
+ for(var k=0u;k<8u;k++){v[k]=umScaleLoadVertex(p+umCorner(k,2u)*s);}
  return v;
 }
 ${sourceScale}
@@ -293,16 +302,9 @@ fn svNearBand(t:u32,k:u32)->bool{
   }}}
  }
  scratch[SV_MEASURE+t]=measured;
- // Closure: every owner a measured tile's passes read lies within one tile.
- if(measured!=0.0){
-  // A tile of a SOLID page holds no owner and passes.
-  let centre=vec3i(umTileCoord(t));
-  var inside=true;
-  for(var z=centre.z-1;z<=centre.z+1;z++){for(var y=centre.y-1;y<=centre.y+1;y++){for(var x=centre.x-1;x<=centre.x+1;x++){
-   let q=vec3i(x,y,z);inside=inside&&(umTileKind(q)==UM_SOLID||umTileResident(umTileAt(vec3u(q))));
-  }}}
-  if(!inside){umSupport[UM_RESIDENCY+1u]=1u;}
- }
+ // The residency audit belongs at the reads in metric, after the band and
+ // solid tests. A measured tile with zero incident band reads no phi slope;
+ // requiring all 27 neighbours here kept unrelated diagonal air resident.
 }
 // NB measures this band in h cells, independent of owner width.
 // A step dilates the owners of visited tiles (grow's rule on the band flags

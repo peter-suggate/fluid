@@ -1,4 +1,4 @@
-import { LOCAL_RESIDENCY_WORDS, RESIDENCY_STENCIL_TILES, localResidencyWGSL, localResidencyRequestWGSL, localResidencyMarkWGSL } from "./uniform-local-residency";
+import { STAGE_RESIDENCY_WORDS, RESIDENCY_STAGES, RESIDENCY_STENCIL_TILES, localResidencyWGSL, localResidencyRequestWGSL, localResidencyMarkWGSL } from "./uniform-local-residency";
 import { narrowBandBudgetWGSL, narrowBandBudgetWords, NARROW_BAND_BUDGET_ENTRIES } from "./uniform-narrow-band-budget.wgsl";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {uniformKeyGroups} from "./uniform-lattice-address";
@@ -84,28 +84,8 @@ const CENSUS_TILE_GRID=4096;
 const importanceStateWords=(tiles:number)=>tiles;
 /** Bytes of the scene uniform prefix the source mark reads (UMSourceParams). */
 const SOURCE_PARAMS_BYTES=UNIFORM_PARAMS_BYTES;
-/** Residency closure radius beyond the travel, in tiles
- * (uniformMixedResidencyWord). The census certifies the state a frame
- * starts from; the frame's readers of the certificate run on that state
- * advanced by at most departureTravel() cells (the ceil of it over 4, plus
- * one tile for the sub-tile start), and read around the tiles the census
- * marks near (an owner with V != 0 or a corner phi under 4h times its
- * width: 16h on a 4h owner). The widest reader is the surface volume:
- *  - its band seeds are owners whose corners straddle phi = 0, so they lie
- *    in near tiles;
- *  - the band grows four owners past them. An owner k face steps from a
- *    seed has a corner within 4k cells of the seed's non-positive corner, so
- *    with phi a distance there (the redistanced band) owners up to three
- *    steps out hold a corner under 12h < 16h and are near; only the fourth
- *    step leaves the near set, by one tile;
- *  - visited is the band plus one tile, measured the visited set plus one
- *    tile, and the measured tiles read one tile further.
- * 1 (sub-tile) + 1 (band past near) + 1 + 1 + 1 = 5. The frame plan's
- * certificate spread (ceil(travel/4)+2) is inside it. Page rounding adds
- * up to three tiles of slack that nothing relies on. A reader that would
- * still leave the closure (phi not a distance on the band's fourth step,
- * say) sets the sticky support bit the next census turns into a builder
- * fatal: never a silent read of an absent page. */
+/** Bound for the local velocity search and the legacy VOF path. NBFLIP
+ * expands each stage's seeds independently (see RESIDENCY_STAGES). */
 const RESIDENCY_MARGIN_TILES=RESIDENCY_STENCIL_TILES;
 /** Workgroups of the page request's fixed grid, 64 lanes each: more pages
  * or tiles are strided over it. */
@@ -296,7 +276,8 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
  get importance():{readonly buffer:GPUBuffer;readonly offset:number}{return this.importanceView??={buffer:this.work,offset:this.importanceOffset*4};}
  /** First importance word, after the crossing-cell words. */
  private readonly importanceOffset:number;
- /** Four words per region: exact occupancy and six directional radii; then the maximum radius for the mark search. */
+ /** Stage-major records, four words per region: occupancy and signed radii.
+  * A final maximum radius bounds the post-commit mark search only. */
  private readonly localOffset:number;
  /** setSolid marked a coupled tile: the promotion passes run. */
  private solid=false;
@@ -340,7 +321,7 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
   // Then two importance words per tile and the importance state.
   this.importanceOffset=this.nearOffset+this.words+1+this.pages+2*tiles;
   this.localOffset=this.importanceOffset+2*tiles+importanceStateWords(tiles)+narrowBandBudgetWords(tiles);
-  const workBytes=(this.localOffset+LOCAL_RESIDENCY_WORDS*this.pages+1)*4,readBytes=(HEADER+this.words)*4;
+  const workBytes=(this.localOffset+STAGE_RESIDENCY_WORDS*this.pages+1)*4,readBytes=(HEADER+this.words)*4;
   this.work=device.createBuffer({label:"Uniform dynamic ownership census",size:workBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.readback=device.createBuffer({label:"Uniform dynamic ownership readback",size:readBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   this.params=device.createBuffer({label:"Uniform dynamic ownership policy",size:112,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -394,7 +375,7 @@ struct DynamicPolicy {step:vec4f,reach:vec4u,surface:vec4f,flow:vec4f,importance
 ${uniformMixedSourceWGSL(8)}
 @group(1) @binding(9) var<storage,read> particleAllocation:array<u32>;
 ${localResidencyWGSL}
-fn lrRecord(page:u32)->vec4u{let i=${this.localOffset}u+4u*page;return vec4u(atomicLoad(&census[i]),atomicLoad(&census[i+1u]),atomicLoad(&census[i+2u]),atomicLoad(&census[i+3u]));}
+fn lrRecord(page:u32,stage:u32)->vec4u{let i=${this.localOffset}u+4u*(stage*UM_PAGES+page);return vec4u(atomicLoad(&census[i]),atomicLoad(&census[i+1u]),atomicLoad(&census[i+2u]),atomicLoad(&census[i+3u]));}
 // The census tail follows the frame's last phi resolve: every texel of a
 // mixed-stencil tile holds umVertexValue, and the census reads only vertices
 // of an h tile's closure or 4-aligned ones, so umVertexValue is this load.
@@ -792,10 +773,13 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
  for(var a=0u;a<3u;a++){atomicStore(&census[boundIndex(tile,a)],c.low[a]);atomicStore(&census[boundIndex(tile,3u+a)],c.high[a]);}
  if(crossing){atomicAdd(&census[0],1u);}
  if((c.flags&4u)!=0u){atomicOr(&census[wetIndex(tile/32u)],1u<<(tile%32u));}
- // Residency: every h tile is near. A near tile of a page the last census
- // left absent is a closure violation: that frame skipped it as far air.
+ // A positive coarse distance is not a physical reader. NB needs owned h
+ // tiles and liquid here;
+ // gradient and particle readers separately audit their actual footprints.
  let near=width==1u||(c.flags&8u)!=0u;
- if(near){atomicOr(&census[nearIndex(tile/32u)],1u<<(tile%32u));if(!umTileResident(tile)){atomicOr(&census[auditIndex()],1u);}}
+ if(near){atomicOr(&census[nearIndex(tile/32u)],1u<<(tile%32u));}
+ let required=select(near,width==1u||(c.flags&4u)!=0u,(policy.shaping.x&32768u)!=0u);
+ if(required&&!umTileResident(tile)){atomicOr(&census[auditIndex()],1u);}
 }
 // h tiles: one workgroup per tile, one lane per owner. A fixed grid strides
 // over the live h list; umCounts is uniform, so the loop keeps its barriers.
@@ -1263,7 +1247,9 @@ fn umStaticFine(t:u32)->bool{return (umRegionsAt(umTileCoord(t))&1u)!=0u;}
   umSupport[UM_RESIDENCY+2u]=residencyRadius();
  }
  if(page>=UM_PAGES){return;}
- var lo=vec3u(3u);var hi=vec3u(0u);var found=false;var liquid=false;var mask=vec2u(0u);
+ var lo=vec3u(3u);var hi=vec3u(0u);var found=false;var liquid=false;
+ var masks:array<vec2u,${RESIDENCY_STAGES.length}>;
+ let staged=(policy.shaping.x&32768u)!=0u;
  let held=umBlockStored(page>>3u)&&umBlockWord(page>>3u)!=UM_FREE;
  let particle=select(vec2u(0u),vec2u(particleAllocation[8u*page],particleAllocation[8u*page+1u]),held);
  for(var lane=0u;lane<64u;lane++){
@@ -1271,26 +1257,44 @@ fn umStaticFine(t:u32)->bool{return (umRegionsAt(umTileCoord(t))&1u)!=0u;}
   let near=umBit(nearIndex(0u),t);let authored=umStaticFine(t);let own=umBit(${HEADER}u,t)||(near&&!authored);
   let sample=((particle[lane>>5u]>>(lane&31u))&1u)!=0u;
   if(!near&&!own&&!authored&&!sample){continue;}
-  let c=umCorner(lane,4u);lo=min(lo,c);hi=max(hi,c);found=true;liquid=liquid||own||sample;mask[lane>>5u]|=1u<<(lane&31u);
+  let c=umCorner(lane,4u);lo=min(lo,c);hi=max(hi,c);found=true;liquid=liquid||own||sample;
+  let band=umBit(${HEADER}u,t);
+  let wet=umBit(wetIndex(0u),t);
+  let crossing=(atomicLoad(&census[importanceIndex(t,1u)])&${IMPORTANCE.crossing}u)!=0u;
+  let source=umSourceTile(vec3i(umTileCoord(t)));
+  // Sources and particle reconstruction can create a new surface this frame.
+  // Budget admission may omit a crossing: read the physical census flag,
+  // never the refinement-only crossing mask that importance can clear.
+  let seeds=array<bool,${RESIDENCY_STAGES.length}>(umTileWidth(t)==1u||authored||band,wet||source||sample||authored,wet||source||sample,crossing||source||sample,sample,false);
+  for(var stage=0u;stage<${RESIDENCY_STAGES.length}u;stage++){
+   if(select(stage==5u,seeds[stage],staged)){masks[stage][lane>>5u]|=1u<<(lane&31u);}
+  }
  }
  atomicStore(&census[pageBoxIndex(page)],select(0u,lo.x|(lo.y<<3u)|(lo.z<<6u)|(hi.x<<9u)|(hi.y<<12u)|(hi.z<<15u)|${PAGE_SEEDED}u|select(0u,${PAGE_LIQUID}u,liquid),found));
- let at=${this.localOffset}u+4u*page;
- atomicStore(&census[at],mask.x);atomicStore(&census[at+1u],mask.y);
- atomicStore(&census[at+2u],0u);atomicStore(&census[at+3u],0u);
- if(!found){return;}
  // Bound every velocity a swept seed or its numerical halo can sample.
- // The old global envelope is used ONLY to find these local extrema; it
- // does not dilate every allocation. rangeKeys may over-cover, never under.
+ // The global envelope only locates local extrema; it never dilates seeds.
  let origin=16.0*vec3f(umPageCoord(page));
  let envelope=departureTravel()+4.0*f32(${RESIDENCY_MARGIN_TILES}u);
  let shift=max(policy.surface.z-1.0,0.0)*policy.flow.xyz;
- let flow=sampledFlow(origin-vec3f(envelope),origin+vec3f(16.0+envelope),shift);
+ var flow:Flow;
+ if(found){flow=sampledFlow(origin-vec3f(envelope),origin+vec3f(16.0+envelope),shift);}
  let pl=bitcast<vec3f>(vec3u(particleAllocation[8u*page+2u],particleAllocation[8u*page+3u],particleAllocation[8u*page+4u]));
  let ph=bitcast<vec3f>(vec3u(particleAllocation[8u*page+5u],particleAllocation[8u*page+6u],particleAllocation[8u*page+7u]));
- let radii=lrRadii(flow.low,flow.high,policy.step.x/H,select(vec3f(0),pl,held),select(vec3f(0),ph,held));
- atomicStore(&census[at+2u],radii.x);atomicStore(&census[at+3u],radii.y);
- let r=max(lrUnpack(radii.x),lrUnpack(radii.y));
- atomicMax(&census[${this.localOffset+LOCAL_RESIDENCY_WORDS*this.pages}u],u32(max(r.x,max(r.y,r.z))));
+ let margins=array<f32,${RESIDENCY_STAGES.length}>(${RESIDENCY_STAGES.map(s=>s.margin+".0").join(",")});
+ for(var stage=0u;stage<${RESIDENCY_STAGES.length}u;stage++){
+  let at=${this.localOffset}u+4u*(stage*UM_PAGES+page);
+  atomicStore(&census[at],masks[stage].x);atomicStore(&census[at+1u],masks[stage].y);
+  var radii=vec2u(0u);
+  if((masks[stage].x|masks[stage].y)!=0u&&stage!=0u){
+   // Ballistic travel belongs to particle-created fluid, not every air tile
+   // in the same region. Authored/new ownership has no advection footprint.
+   let samples=held&&stage>=2u;
+   radii=lrRadii(flow.low,flow.high,policy.step.x/H,select(vec3f(0),pl,samples),select(vec3f(0),ph,samples),margins[stage]);
+   let r=max(lrUnpack(radii.x),lrUnpack(radii.y));
+   atomicMax(&census[${this.localOffset+STAGE_RESIDENCY_WORDS*this.pages}u],u32(max(r.x,max(r.y,r.z))));
+  }
+  atomicStore(&census[at+2u],radii.x);atomicStore(&census[at+3u],radii.y);
+ }
 }
 // Legacy global envelope, retained for the bounded local velocity search.
 fn residencyRadius()->u32{return u32(ceil(departureTravel()/4.0))+${RESIDENCY_MARGIN_TILES}u;}
@@ -1300,9 +1304,13 @@ ${localResidencyMarkWGSL}
 // never expands an individual region. Claimed blocks had zero seed masks.
 @compute @workgroup_size(64) fn pageMark(@builtin(global_invocation_id) gid:vec3u){
  let page=gid.x+umDispatchX*64u*gid.y;if(page>=UM_PAGES){return;}
- let radius=atomicLoad(&census[${this.localOffset+LOCAL_RESIDENCY_WORDS*this.pages}u]);
+ let radius=atomicLoad(&census[${this.localOffset+STAGE_RESIDENCY_WORDS*this.pages}u]);
  if(page==0u){umSupport[UM_RESIDENCY+2u]=radius;}
- umSupport[UM_RESIDENCY+4u+page]=select(0u,1u,lrResident(page,min(radius,${4*UNIFORM_RESIDENCY_PAGE_REACH}u)));
+ var stages=0u;
+ for(var stage=0u;stage<${RESIDENCY_STAGES.length}u;stage++){
+  if(lrResident(page,min(radius,${4*UNIFORM_RESIDENCY_PAGE_REACH}u),stage)){stages|=1u<<stage;}
+ }
+ umSupport[UM_RESIDENCY+4u+page]=stages;
 }
 // pageCompact: one workgroup lists the resident pages in ascending order.
 const COMPACT_LANES:u32=256u;
@@ -1336,11 +1344,11 @@ var<workgroup> compactCounts:array<u32,256>;
 @group(1) @binding(0) var<storage,read> census:array<u32>;
 ${uniformPagePoolWGSL(this.pool.layout,1,1,2)}
 ${localResidencyWGSL}
-fn lrRecord(page:u32)->vec4u{let i=${this.localOffset}u+4u*page;return vec4u(census[i],census[i+1u],census[i+2u],census[i+3u]);}
+fn lrRecord(page:u32,stage:u32)->vec4u{let i=${this.localOffset}u+4u*(stage*UM_PAGES+page);return vec4u(census[i],census[i+1u],census[i+2u],census[i+3u]);}
 ${localResidencyRequestWGSL}
-// Exact occupancy dilated by local, signed travel and the unchanged stencil margin.
+// Union only after each stage dilates its own exact occupancy and signed travel.
 @compute @workgroup_size(64) fn pageRequest(@builtin(global_invocation_id) gid:vec3u){
- for(var page=gid.x;page<UM_PAGES;page+=${64*groups}u){lrAsk(page);}
+ for(var page=gid.x;page<UM_PAGES;page+=${64*groups}u){for(var stage=0u;stage<${RESIDENCY_STAGES.length}u;stage++){lrAsk(page,stage);}}
 }
 `});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
@@ -1506,7 +1514,7 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
   encoder.clearBuffer(this.work,0,(HEADER+this.words)*4);
   encoder.clearBuffer(this.work,this.wetOffset*4,2*this.words*4);
   encoder.clearBuffer(this.work,this.nearOffset*4,(this.words+1)*4);
-  encoder.clearBuffer(this.work,4*(this.localOffset+LOCAL_RESIDENCY_WORDS*this.pages),4);
+  encoder.clearBuffer(this.work,4*(this.localOffset+STAGE_RESIDENCY_WORDS*this.pages),4);
   if(this.bodies||this.bodyBits){
    encoder.clearBuffer(this.solidTiles,0,this.joinWords*4);
    this.bodies?.(encoder,this.solidTiles);this.bodyBits=!!this.bodies;

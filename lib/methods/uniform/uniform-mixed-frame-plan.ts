@@ -1,3 +1,4 @@
+import { RESIDENCY_STAGES } from "./uniform-local-residency";
 import { uniformFramePlanSpreadWGSL } from "./uniform-frame-plan-spread";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
@@ -15,7 +16,7 @@ const SUPPORT_ENTRIES:readonly string[]=["seed","dilate0","dilate1","dilate2"];
 const CERTIFICATE_ENTRIES:readonly string[]=["localSpeed","spread0","spread1","spread2","coarseBits","coarseBlocks","certify"];
 const PLAN_PASS:GPUComputePassDescriptor={label:"Uniform shared frame plan"},SPEED_PASS:GPUComputePassDescriptor={label:"Uniform shared frame speed"},CERTIFICATE_PASS:GPUComputePassDescriptor={label:"Uniform local speed certificate"};
 /** The support policy of an encode given none. */
-const DEFAULT_POLICY={fineReach:2,shellReach:1,twoLevel:true,shellOnly:true};
+const DEFAULT_POLICY:{fineReach:number;shellReach:number;twoLevel:boolean;shellOnly:boolean}={fineReach:RESIDENCY_STAGES[1].core,shellReach:1,twoLevel:true,shellOnly:true};
 /** One launch of a plan pass: an owner entry's GPU-counted launch, or a
  * per-tile (coarseBlocks: per block) entry's grid, fixed with the pool. */
 interface PlanLaunch{readonly pipeline:GPUComputePipeline;readonly counted:boolean;readonly x:number;readonly y:number}
@@ -135,8 +136,8 @@ fn umPositiveFaceSpeed(unit:bool,origin:vec3u)->f32{
 // (umResidentAllOwner). A tile's owners are contiguous slots, so
 // lane-owner.lane is its first lane: the workgroup slot of its flags. 4h
 // tiles pack 64 to a workgroup instead of idling 63 lanes. A 4h tile of an
-// absent page is certified far air (V=0, every corner phi at least 16h: the
-// census audits exactly this predicate), so its flags are the zero encode
+// absent region is certified empty (NB: no negative phi; VOF: V=0 and
+// corner phi at least 16h), so its seed flags are the zero encode
 // clears to; its faces are extended faces, never a source, so the speed
 // maximum over resident owners still bounds every face the certificate's
 // characteristics read (the extension is a convex combination of sources).
@@ -154,16 +155,19 @@ var<workgroup> seedSpeed:atomic<u32>;
   if(!planSpeedOnly){
   // A 4h owner's origin and corners are its tile's (umVertexValue of a
   // tile corner is its load): the base blocks.
+  // NB velocity work starts at liquid, not at the entire positive phi
+  // collar. The dilation below is the sampling/extension dependency set;
+  // expanding a pre-expanded distance collar counted that support twice.
   var occupied=false;
   if(width==4u){
    ${this.surfaceOnly?"":`occupied=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(origin),0).x!=0.0;`}
-   let c8=umLoadCorner8(origin,4u);for(var k=0u;k<8u;k++){occupied=occupied||c8[k]<(16.0*umSceneMaximumSpacing());}
+   let c8=umLoadCorner8(origin,4u);for(var k=0u;k<8u;k++){occupied=occupied||c8[k]<${this.surfaceOnly?"0.0":"(16.0*umSceneMaximumSpacing())"};}
   }else{
    ${this.surfaceOnly?"":"occupied=textureLoad(volume,vec3i(origin),0).x!=0.0;"}
    for(var k=0u;k<8u;k++){
     // Every vertex of a unit-stencil tile is stored.
     let vertex=origin+umCorner(k,2u)*width;
-    occupied=occupied||select(umVertexValue(vertex),umLoadVertex(vertex),unit)<(4.0*umSceneMaximumSpacing())*f32(width);
+    occupied=occupied||select(umVertexValue(vertex),umLoadVertex(vertex),unit)<${this.surfaceOnly?"0.0":"(4.0*umSceneMaximumSpacing())*f32(width)"};
    }
   }
   if(occupied){atomicOr(&seeded[slot],3u);}
@@ -181,7 +185,9 @@ ${[0,1,2].map(axis=>/* wgsl */`
  for(var delta=-reach;delta<=reach;delta++){
   var q=p;q[${axis}]+=delta;let k=umTileKey(q);if(!umKeyStored(k)){continue;}
   let source=atomicLoad(&umSupport[${axis}u*UM_TILES+k]);
-  flags|=source&select(2u,3u,abs(delta)<=i32(policy.settings.x));
+  // Crossing the outer shell consumes its one axial dependency. Propagating
+  // shell bit 2 again on the next axis turns face reads into diagonal reads.
+  ${this.surfaceOnly?"flags|=select((source&1u)<<1u,source&3u,abs(delta)<=i32(policy.settings.x));":"flags|=source&select(2u,3u,abs(delta)<=i32(policy.settings.x));"}
  }
  atomicStore(&umSupport[${axis+1}u*UM_TILES+tile],flags|policy.settings.z);
 }`).join("\n")}

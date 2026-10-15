@@ -2,7 +2,10 @@
  * `every` steps, what the pool's commits did. Browser GPU must be off.
  * node --import tsx tools/probe-nbflip-pages.ts <scene> <steps> <every> [--dt=0.017] [--page-pool=<json>]
  * --page-pool={"blocks":16}: the scene's page pool record (SceneDescription.fluid.pagePool).
- * --allocation-audit: compare global/local-box/local-exact request sets.
+ * --volume-audit: run the optional end-of-step volume/gradient reader every step.
+ * --scene-file=<json>: replay a saved scene independently of library edits.
+ * --allocation-audit: compare the old global/box/exact closure with the staged union and each stage.
+ * --trace-page=x,y,z: list the exact stage seeds whose dilation requests this world page.
  * --retirement-audit: also report each page's idle age, census reasons,
  * particle occupancy, fine tiles and solid/open owners with negative phi.
  * Census and particle masks describe the frame head; phi describes its end.
@@ -21,6 +24,7 @@
  * never on the advance path, so a row's claimed and retired miss only the
  * kick's commit of step 1. A fatal of the pool or the solver (FLIP's arrival
  * in a page without storage among them) prints and exits non-zero. */
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
@@ -36,16 +40,21 @@ import type { UniformMixedOwnership } from '../lib/methods/uniform/uniform-mixed
 import { uniformMixedTopologyWGSL } from '../lib/methods/uniform/uniform-mixed-topology.wgsl';
 import { uniformMixedSolidWGSL, type UniformMixedSolid } from '../lib/methods/uniform/uniform-mixed-solid.wgsl';
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup } from '../lib/methods/uniform/uniform-detail-fields';
+import { RESIDENCY_STAGES, residencyFootprintContains } from '../lib/methods/uniform/uniform-local-residency';
 const method=uniformNarrowBandMethod;
 const [sceneId,stepsText,everyText]=process.argv.slice(2).filter(a=>!a.startsWith("--"));
 const steps=Number(stepsText),every=Number(everyText);
 assert.ok(sceneId&&Number.isInteger(steps)&&steps>=1&&steps<=2400&&Number.isInteger(every)&&every>=1,"usage: probe-nbflip-pages.ts <scene> <steps> <every> [--dt=0.017] [--page-pool=<json>]");
-const auditAllocation=process.argv.includes("--allocation-audit");
+const tracePageText=process.argv.find(a=>a.startsWith("--trace-page="))?.slice(13);
+const tracePage=tracePageText?.split(",").map(Number);
+if(tracePage)assert.ok(tracePage.length===3&&tracePage.every(Number.isInteger),"--trace-page=x,y,z requires three integer world page coordinates");
+const auditAllocation=process.argv.includes("--allocation-audit")||!!tracePage;
 const auditRetirement=process.argv.includes("--retirement-audit");
 const values=JSON.parse(process.argv.find(a=>a.startsWith("--values="))?.slice(9)??"{}");
 const dt=Number(process.argv.find(a=>a.startsWith("--dt="))?.split("=")[1]??0.017);
 assert.ok(dt>0&&dt<=0.1);
-const scene=structuredClone(sceneDocument(getSceneDefinition(sceneId)));
+const sceneFile=process.argv.find(a=>a.startsWith("--scene-file="))?.slice(13);
+const scene=sceneFile?JSON.parse(readFileSync(sceneFile,"utf8")):structuredClone(sceneDocument(getSceneDefinition(sceneId)));
 scene.numerics={...scene.numerics,fixedDt_s:dt,maxDt_s:dt};
 const pagePool=process.argv.find(a=>a.startsWith("--page-pool="))?.slice(12);
 if(pagePool)scene.fluid.pagePool=JSON.parse(pagePool);
@@ -109,8 +118,8 @@ ${uniformMixedSolidWGSL(2,solid.coarse?.count)}
   }
   const reach=words[records+512*l.blocks+2]!;marks.unmap();return {seeded,since,reach,idle};
  };
- // Counterfactuals on the SAME census: global cube / local directional box /
- // local exact occupancy. Numerical evolution therefore cannot explain the difference.
+ // Counterfactuals on the SAME census: old global/box/exact closures versus
+ // the staged union. Numerical evolution cannot explain these differences.
  const allocation=async()=>{
   if(!auditAllocation&&!auditRetirement)return "";
   const dynamic=(solver as unknown as {mixedDynamic:{work:GPUBuffer;localOffset:number;nearOffset:number;wetOffset:number;bandBits:{wordOffset:number};particles:{allocation:GPUBuffer}}}).mixedDynamic;
@@ -130,8 +139,11 @@ ${uniformMixedSolidWGSL(2,solid.coarse?.count)}
     const r=l.state.records+R.words*b;if(state[r+R.state]!==UNIFORM_PAGE_POOL_BLOCK.resident)continue;
     let near=0,wet=0,band=0,sample=0,fine=0,low=Infinity,high=-Infinity,solidWet=0,openWet=0,openLow=Infinity;const regions=[];
     for(let o=0;o<8;o++){
-     const page=8*b+o,at=dynamic.localOffset+4*page;
-     if(c[at]||c[at+1])regions.push({octant:o,negative:[0,1,2].map(k=>(c[at+2]!>>>(8*k))&255),positive:[0,1,2].map(k=>(c[at+3]!>>>(8*k))&255)});
+     const page=8*b+o;
+     for(let stage=0;stage<RESIDENCY_STAGES.length;stage++){
+      const at=dynamic.localOffset+4*(stage*8*l.blocks+page);
+      if(c[at]||c[at+1])regions.push({octant:o,stage:RESIDENCY_STAGES[stage]!.name,negative:[0,1,2].map(k=>(c[at+2]!>>>(8*k))&255),positive:[0,1,2].map(k=>(c[at+3]!>>>(8*k))&255)});
+     }
      for(let lane=0;lane<64;lane++){
       const t=512*b+((4*(o&1)+(lane&3))|((4*((o>>>1)&1)+((lane>>>2)&3))<<3)|((4*((o>>>2)&1)+(lane>>>4))<<6));
       near+=bit(dynamic.nearOffset,t);wet+=bit(dynamic.wetOffset,t);band+=bit(dynamic.bandBits.wordOffset,t);
@@ -144,27 +156,60 @@ ${uniformMixedSolidWGSL(2,solid.coarse?.count)}
    console.log(JSON.stringify({retirement:pages}));
   }
   const globalRadius=Math.ceil(new Float32Array(c.buffer)[18]!/4)+5,sets=[new Set<string>(),new Set<string>(),new Set<string>()];
+  const stageSets=RESIDENCY_STAGES.map(()=>new Set<string>()),legacyExact=new Set<string>();
+  const witnesses=RESIDENCY_STAGES.map(()=>[] as {tile:number[];region:number;negative:number[];positive:number[];overlapCells:number[][];withoutMotion:boolean}[]);
   const solid=(q:number[])=>q.some((v,k)=>v<signed[l.state.window+24+k]!||v>=signed[l.state.window+27+k]!);
   const add=(set:Set<string>,lo:number[],hi:number[])=>{for(let z=Math.floor(lo[2]!/8);z<=Math.floor(hi[2]!/8);z++)for(let y=Math.floor(lo[1]!/8);y<=Math.floor(hi[1]!/8);y++)for(let x=Math.floor(lo[0]!/8);x<=Math.floor(hi[0]!/8);x++){if(!solid([x,y,z]))set.add(`${x},${y},${z}`);}};
   for(let page=0;page<8*l.blocks;page++){
-   const at=dynamic.localOffset+4*page,m0=c[at]!,m1=c[at+1]!;if((m0|m1)===0)continue;
    const r=l.state.records+R.words*(page>>>3),origin=[0,1,2].map(k=>8*signed[r+k]!+4*((page>>>k)&1));
-   const lo=[3,3,3],hi=[0,0,0],negative=[0,1,2].map(k=>(c[at+2]!>>>(8*k))&255),positive=[0,1,2].map(k=>(c[at+3]!>>>(8*k))&255);
+   const union=[0,0],negative=[0,0,0],positive=[0,0,0];
+   for(let stage=0;stage<RESIDENCY_STAGES.length;stage++){
+    const at=dynamic.localOffset+4*(stage*8*l.blocks+page),m0=c[at]!,m1=c[at+1]!;if((m0|m1)===0)continue;
+    union[0]=union[0]!|m0;union[1]=union[1]!|m1;
+    const neg=[0,1,2].map(k=>(c[at+2]!>>>(8*k))&255),pos=[0,1,2].map(k=>(c[at+3]!>>>(8*k))&255);
+    for(let k=0;k<3;k++){
+     negative[k]=Math.max(negative[k]!,neg[k]!-RESIDENCY_STAGES[stage]!.margin+5);
+     positive[k]=Math.max(positive[k]!,pos[k]!-RESIDENCY_STAGES[stage]!.margin+5);
+    }
+    for(let bit=0;bit<64;bit++){
+     if((((bit<32?m0:m1)>>>(bit&31))&1)===0)continue;
+     const q=[bit&3,(bit>>>2)&3,bit>>>4];
+     const tile=q.map((v,k)=>origin[k]!+v);
+     const reaches=(page:readonly number[])=>residencyFootprintContains(stage,tile.map((v,k)=>Math.max(0,8*page[k]!-v-pos[k]!+RESIDENCY_STAGES[stage]!.margin,v-neg[k]!+RESIDENCY_STAGES[stage]!.margin-(8*page[k]!+7))));
+     const candidates=new Set<string>();add(candidates,tile.map((v,k)=>v-neg[k]!),tile.map((v,k)=>v+pos[k]!));
+     for(const key of candidates)if(reaches(key.split(",").map(Number)))stageSets[stage]!.add(key);
+     if(tracePage&&reaches(tracePage)){
+      const margin=RESIDENCY_STAGES[stage]!.margin;
+      witnesses[stage]!.push({tile,region:page,negative:neg,positive:pos,
+       overlapCells:[tile.map((v,k)=>4*Math.max(8*tracePage[k]!,v-neg[k]!)),tile.map((v,k)=>4*(Math.min(8*tracePage[k]!+7,v+pos[k]!)+1))],
+       withoutMotion:residencyFootprintContains(stage,tile.map((v,k)=>Math.max(0,8*tracePage[k]!-v,v-(8*tracePage[k]!+7))))});
+     }
+    }
+   }
+   if((union[0]!|union[1]!)===0)continue;
+   const lo=[3,3,3],hi=[0,0,0];
    for(let bit=0;bit<64;bit++){
-    if((((bit<32?m0:m1)>>>(bit&31))&1)===0)continue;
+    if(((union[bit>>>5]!>>>(bit&31))&1)===0)continue;
     const q=[bit&3,(bit>>>2)&3,bit>>>4];for(let k=0;k<3;k++){lo[k]=Math.min(lo[k]!,q[k]!);hi[k]=Math.max(hi[k]!,q[k]!);}
-    add(sets[2]!,q.map((v,k)=>origin[k]!+v-negative[k]!),q.map((v,k)=>origin[k]!+v+positive[k]!));
+    add(legacyExact,q.map((v,k)=>origin[k]!+v-negative[k]!),q.map((v,k)=>origin[k]!+v+positive[k]!));
    }
    add(sets[0]!,lo.map((v,k)=>origin[k]!+v-globalRadius),hi.map((v,k)=>origin[k]!+v+globalRadius));
    add(sets[1]!,lo.map((v,k)=>origin[k]!+v-negative[k]!),hi.map((v,k)=>origin[k]!+v+positive[k]!));
   }
+  for(const stage of stageSets)for(const page of stage)sets[2]!.add(page);
+  if(tracePage){
+   let record:unknown=null;
+   for(let b=1;b<l.blocks-1;b++){const r=l.state.records+R.words*b;if(tracePage.every((v,k)=>v===signed[r+k])&&state[r+R.state]===UNIFORM_PAGE_POOL_BLOCK.resident){record={block:b,words:Array.from(state.subarray(r,r+R.words)),idle:state[r+R.idle]};break;}}
+   console.log(JSON.stringify({tracePage,record,stages:witnesses.map((seeds,k)=>({stage:RESIDENCY_STAGES[k]!.name,seeds}))}));
+  }
   censusRead.unmap();stateRead.unmap();particleRead.unmap();censusRead.destroy();stateRead.destroy();particleRead.destroy();
-  return ` candidates global/local-box/local-exact ${sets.map(s=>s.size).join("/")}`;
+  return ` candidates global/local-box/legacy-exact/staged ${[sets[0]!.size,sets[1]!.size,legacyExact.size,sets[2]!.size].join("/")} stages ${stageSets.map((s,k)=>`${RESIDENCY_STAGES[k]!.name}:${s.size}`).join(",")}`;
  };
  let claimed=0,retired=0,residentSum=0,peakResident=0,maxSupport=0;
  let completed=0;
 
  for(let step=1;step<=steps;step++){
+  if(process.argv.includes("--volume-audit"))(solver as unknown as {mixedFrame:{requestNarrowBandVolumeProbe():void}}).mixedFrame.requestNarrowBandVolumeProbe();
   let thrown:string|undefined;
   try{solver.advanceTo(step*dt,[]);await solver.awaitFrameCompletion();}catch(e){const cause=(e as Error).cause;thrown=`${(e as Error).message}${cause instanceof Error?`: ${cause.message}`:""}`;}
   const encoder=device.createCommandEncoder();pool.encodeReceipt(encoder,read,0);encoder.copyBufferToBuffer(ownership.support,4*(9*ownership.capacity.tiles+28),read,4*S.words,16);device.queue.submit([encoder.finish()]);

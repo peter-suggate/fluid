@@ -776,7 +776,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (openWorldTerrain) this.openWorldTerrain = new UniformOpenWorldTerrain(device,
       { columns: this.terrainTexture, scratch: this.activeScratch, cutMapWord: solidScratch.cutMapOffsetWords, tileKeys: address.tileKeys });
     if (boundaryImage) {
-      device.queue.writeBuffer(this.activeScratch, this.solidMask.words.byteLength, boundaryImage);
+      this.uploadSolidBoundary(boundaryImage);
       device.queue.writeBuffer(this.activeScratch, this.activeScratch.size - 8, new Uint32Array([this.solidMask.words.length, PROCEDURAL_SOLID_MAGIC]));
     }
     const source = createUniformReferenceComputeShader();
@@ -934,6 +934,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       Object.entries(this.symmetryStageAuditFields).map(([name,field])=>[name,field]),
     )) as NonNullable<WebGPUUniformReferenceSolver["symmetryStageAuditTextures"]>;
     this.initializeVolumeAndTerrain();
+  }
+
+  /** Bound staging just as field-page initialization does. Native Dawn aborts
+   * on a single boundary upload larger than 8 MiB (the long slide exceeds it). */
+  private uploadSolidBoundary(image: Uint32Array): void {
+    const chunkWords = 2 * 1024 * 1024;
+    for (let begin = 0; begin < image.length; begin += chunkWords)
+      this.device.queue.writeBuffer(this.activeScratch, this.solidMask.words.byteLength + begin * 4,
+        image.subarray(begin, begin + chunkWords) as Uint32Array<ArrayBuffer>);
   }
 
   static async createAsync(
@@ -2727,7 +2736,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if ((boundaryImage?.length ?? 0) > this.solidBoundaryCapacity) throw new Error("Procedural boundary capacity changed; reset the scene to apply it");
     const boundaryChanged = scene.solidBoundary !== undefined || this.scene.solidBoundary !== undefined;
     if (boundaryChanged) {
-      if (boundaryImage) this.device.queue.writeBuffer(this.activeScratch, this.solidMask.words.byteLength, boundaryImage);
+      if (boundaryImage) this.uploadSolidBoundary(boundaryImage);
       this.device.queue.writeBuffer(this.activeScratch, this.activeScratch.size - 8,
         new Uint32Array(boundaryImage ? [this.solidMask.words.length, PROCEDURAL_SOLID_MAGIC] : [0,0]));
       this.mixedFrame?.solid?.invalidate();

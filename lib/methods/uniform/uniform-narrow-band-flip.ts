@@ -285,8 +285,8 @@ fn allocationParticle(sample:Particle){
  let travel=lrParticleTravel(sample.velocity.xyz,sample.before.xyz,sample.before.w==1.0,p.dimsDt.w/p.h.xyz);
  let low=travel[0];let high=travel[1];
  // Preserve the particle's two-cell gather/reconstruction support as seeds,
- // exactly as markParticleTiles does. The five-tile margin starts OUTSIDE
- // this support, not at the particle's home tile.
+ // exactly as markParticleTiles does. Each stage expands this footprint
+ // independently; particle travel must not expand unrelated near-air seeds.
  let lo=vec3i(floor((sample.position.xyz-2.0)/4.0));let hi=vec3i(floor((sample.position.xyz+2.0)/4.0));
  let first=lo>>vec3u(2u);let last=hi>>vec3u(2u);
  for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){
