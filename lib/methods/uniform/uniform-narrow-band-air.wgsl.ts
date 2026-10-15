@@ -2,8 +2,12 @@
  * Four tile planes: physical seeds, then a separable protected-region dilation.
  * The 16-cell collar covers the distance/volume readers' four-owner band.
  * The residency census still adds its full directional travel/stencil closure. */
-export const NARROW_BAND_AIR_WORDS_PER_TILE=4;
+export const NARROW_BAND_AIR_WORDS_PER_TILE=5;
 export const NARROW_BAND_AIR_COLLAR_TILES=4;
+/** The far-air gate plane (NB_AIR+4 tiles): nonzero where a seed lies within
+ * the collar and one tile more. Outside it the next surface advect keeps
+ * a vertex's far marker (UniformMixedSurface's farGate). */
+export const NARROW_BAND_AIR_GATE_PLANE=4;
 export const narrowBandAirWGSL=/* wgsl */`
 const NB_AIR=NB_ACTIVITY_SURFACE_HEAT+UM_TILES;
 // A trilinear field attains its extrema on a box at its corners. Restrict
@@ -70,6 +74,23 @@ ${[0,1,2].map(axis=>/* wgsl */`
   atomicStore(&bins[NB_AIR+${axis+1}u*UM_TILES+t],keep);
  }
 }`).join("\n")}
+// The far-air gate: the collar (plane 3) dilated by one tile. A tile it
+// leaves out is a tile beyond the collar's edge: the liquid's next step
+// cannot bring the collar to it, so this step's clear would hold every
+// value its advection could take at the far marker or above.
+@compute @workgroup_size(64) fn airGate(@builtin(global_invocation_id) id:vec3u){
+ for(var t=id.x;t<UM_TILES;t+=65536u){
+  var near=0u;
+  if(umTileLive(t)){
+   let p=vec3i(umTileCoord(t));
+   for(var k=0u;k<27u;k++){
+    let key=umTileKey(p+vec3i(umCorner(k,3u))-vec3i(1));
+    if(umKeyStored(key)){near|=atomicLoad(&bins[NB_AIR+3u*UM_TILES+key]);}
+   }
+  }
+  atomicStore(&bins[NB_AIR+${4}u*UM_TILES+t],near);
+ }
+}
 fn nbAirProtected(p:vec3u,plane:u32)->bool{
  // Shared canonical vertices belong to every incident tile, even when a
  // different tile is their storage authority. Keep both sides of seams.

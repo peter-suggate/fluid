@@ -52,6 +52,7 @@ export interface UniformMixedSurfaceFields {
  * continuation; they live near fine owners only. */
 export class UniformMixedSurface {
   readonly allocatedBytes:number;
+  private readonly claimBytes:number;
   private readonly resources: GPUBindGroupLayout;
   /** Job counters and wall reach, cleared per frame. */
   readonly claims: GPUBuffer;
@@ -72,7 +73,13 @@ export class UniformMixedSurface {
   /** Dense per-tile launches: a lane a tile (64 a group), and a group a tile. */
   private readonly tileLaneGroups:[number,number]=[0,0];
   private readonly tileGroups:[number,number]=[0,0];
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid) {
+  /** farGate: a word a tile key from `word` of `buffer` (NB-FLIP's air
+   * gate, NARROW_BAND_AIR_GATE_PLANE), zero where the last clear certified a
+   * tile far air beyond its collar's edge: its far-marker vertices keep
+   * their value (umFarAir). encode() copies it, and the frame plan's speed
+   * certificate, behind the claim words (the stage's storage bindings are at
+   * the per-stage limit). */
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly farGate?:{readonly buffer:GPUBuffer;readonly word:number}) {
     this.resources = uniformDetailBindLayout(device,{entries:[
       ...[0,2,3,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
@@ -85,7 +92,9 @@ export class UniformMixedSurface {
     const address=this.address=ownership.capacity.address;
     // A deferred advect word holds a vertex key in 30 bits (all ones is no word): 29,878 pages of 33³ vertices.
     if(address.vertexKeys>0x3fffffff)throw new Error(`Mixed surface deferred advect packs a vertex key in 30 bits: ${address.vertexKeys} vertex keys exceed 1073741823 (29,878 pages of 35,937)`);
-    this.allocatedBytes=4*surfaceClaimWords(address);
+    this.claimBytes=4*surfaceClaimWords(address);
+    // Behind the claims: the far gate's words, then the certificate's (umDeepAir).
+    this.allocatedBytes=this.claimBytes+4*ownership.capacity.tiles*(farGate?2:1);
     this.claims=device.createBuffer({label:"Uniform mixed surface job claims",size:this.allocatedBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     this.deferredGrid=Math.min(1024,Math.ceil(address.vertexKeys/64));
     this.wallGroups=Math.min(WALL_REACH_GRID,wallFaces(address));
@@ -499,8 +508,41 @@ fn umReleasedMayChange(p:vec3f,value:f32)->bool{
 // umAdvected itself; a vertex on a wall (umWallPlane: the only vertices
 // umWallContact can change) is advectWalls'. Keeping the continuations'
 // sampler call sites out of this kernel is its cost.
+${this.farGate?/* wgsl */`// A far-marker vertex (at least clearAir's 16 max h) of a tile the gate
+// leaves out keeps its value, the source's plug included: this step's clear
+// lifts whatever its advection gives there to the marker, so tracing it is
+// no work. Negative where the vertex is traced.
+fn umFarAir(vertex:vec3u)->f32{
+ let tile=umTileAt(vec3u(umPointCell(vec3f(vertex)))/4u);
+ if(atomicLoad(&umClaims[${this.claimBytes/4}u+tile])!=0u){return -1.0;}
+ let value=umLoadVertex(vertex);
+ return select(-1.0,${this.sourceParams?"umSourceuvSourcePhi(vec3f(vertex),value)":"value"},value>=16.0*max(params.hDt.x,max(params.hDt.y,params.hDt.z)));
+}`:"fn umFarAir(vertex:vec3u)->f32{return -1.0;}"}
+// An air vertex deeper than any departure from its tile can cover keeps its
+// value (the source's plug included): phi is a distance, so its departure's
+// value differs from its own by at most the departure's length, plus the
+// trilinear tap's reach (sqrt 3 widths) and the wall contact's one-width
+// interior step, and every continuation only raises air. The redistance
+// that follows rebuilds magnitudes within its reach and keeps signs past it.
+// The departure's length is bounded per axis by the tile's spread speed
+// certificate (umReach: ceil(travel/4)+2 tiles, 31 saturated: no bound).
+// Negative where the vertex is traced.
+fn umDeepAir(vertex:vec3u,width:u32)->f32{
+ let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+ let value=umLoadVertex(vertex);if(!(value>=(6.0+3.0*f32(width))*h)){return -1.0;}
+ let tile=umTileAt(vec3u(umPointCell(vec3f(vertex)))/4u);
+ let word=atomicLoad(&umClaims[${this.allocatedBytes/4-this.ownership.capacity.tiles}u+tile])&0x3fffffffu;
+ let reach=max(vec3u(word&31u,(word>>5u)&31u,(word>>10u)&31u),vec3u((word>>15u)&31u,(word>>20u)&31u,(word>>25u)&31u));
+ if(any(reach>=vec3u(31u))){return -1.0;}
+ let travel=4.0*vec3f(max(reach,vec3u(2u))-vec3u(2u));
+ let hmax=max(params.hDt.x,max(params.hDt.y,params.hDt.z));
+ if(value<length(travel)*hmax+3.0*f32(width)*h||umReleasedMayChange(vec3f(vertex),value)){return -1.0;}
+ return ${this.sourceParams?"umSourceuvSourcePhi(vec3f(vertex),value)":"value"};
+}
 fn umAdvectStore(vertex:vec3u,width:u32){
  if(params.hDt.w>0.0&&umWallPlane(vec3i(vertex))<6u){return;}
+ {let far=umFarAir(vertex);if(far>=0.0){textureStore(outputPhi,vec3i(vertex),vec4f(far));return;}}
+ {let deep=umDeepAir(vertex,width);if(deep>=0.0){textureStore(outputPhi,vec3i(vertex),vec4f(deep));return;}}
  let p=vec3f(vertex);var defer=false;var value=0.0;
  ${this.solid?/* wgsl */`// Off a clear tile a vertex can be buried: it keeps its value, umAdvected's
  // first exit.
@@ -562,7 +604,9 @@ var<workgroup> wallBase:u32;
      let low=vec3i(umBlockPage(face/6u)<<vec3u(5u));let cell=vec3u(clamp(vertex,low,low+vec3i(31)));
      width=select(1u,4u,umCoarseIncident(umTileAt(cell/4u),vec3u(vertex)-(cell/4u)*4u)!=0u);
     }
-    if(all(vec3u(vertex)%width==vec3u(0))){
+    let far=umFarAir(vec3u(vertex));
+    if(far>=0.0&&all(vec3u(vertex)%width==vec3u(0))){textureStore(outputPhi,vertex,vec4f(far));}
+    else if(all(vec3u(vertex)%width==vec3u(0))){
      slot=atomicAdd(&wallListed,1u);
      word=umVertexAt(vec3u(vertex))|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);
     }
@@ -791,7 +835,10 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
   private variant(pipeline:GPUComputePipeline):GPUComputePipeline{return uniformDetailPick(this.solid?.select(pipeline)??pipeline);}
   encode(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
     const pipeline=this.pipelines.get("advect");if(!pipeline)throw new Error("Mixed surface stage is not initialized");
-    encoder.clearBuffer(this.claims);
+    encoder.clearBuffer(this.claims,0,this.claimBytes);
+    const tiles=4*this.ownership.capacity.tiles;
+    if(this.farGate)encoder.copyBufferToBuffer(this.farGate.buffer,4*this.farGate.word,this.claims,this.claimBytes,tiles);
+    encoder.copyBufferToBuffer(this.ownership.speeds,tiles,this.claims,this.allocatedBytes-tiles,tiles);
     const pass=encoder.beginComputePass(SURFACE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
     pass.setPipeline(this.variant(this.pipelines.get("wallReach")!));pass.dispatchWorkgroups(this.wallGroups);
     // The closed/clear evidence only exists for a scene holding solids.

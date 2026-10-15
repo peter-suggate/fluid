@@ -975,12 +975,12 @@ struct PlaneCell{count:u32,value:array<f32,8>}
 // An open h cell's stored vertices under the old layout (count 0: not one).
 // Inside an h tile every vertex is stored; on its faces a wider neighbour
 // may hold the authority.
-fn planeCell(cell:vec3i)->PlaneCell{
+fn planeCell(cell:vec3i,stored:bool)->PlaneCell{
  var out:PlaneCell;
  if(!umCellIsOpen(cell)){return out;}
  for(var k=0u;k<8u;k++){
   let at=vec3u(cell)+umCorner(k,2u);
-  if(any(at%vec3u(4u)==vec3u(0))){
+  if(!stored&&any(at%vec3u(4u)==vec3u(0))){
    let stored=oldumVertexAuthority(at);
    if(stored.width==0u||!oldumVertexIsCanonical(at,stored)){out.value[k]=0.0;continue;}
   }
@@ -997,63 +997,69 @@ fn planeOldFine(t:vec3i)->bool{
  if(!umTilePresent(t)){return false;}
  let tile=umTileAt(vec3u(t));return oldumTileWidth(tile)!=4u&&umTileOpen(tile)>1e-5;
 }
+// An old h tile whose whole stencil was h, every neighbour stored: each
+// vertex of its cells has an h authority below it, so planeCell stores all
+// eight without asking the authority.
+fn planeOldStored(t:vec3i)->bool{
+ if(oldumTileMaximumWidth(umTileAt(vec3u(t)))!=1u){return false;}
+ for(var k=0u;k<27u;k++){if(!umTilePresent(t+vec3i(umCorner(k,3u))-vec3i(1))){return false;}}
+ return true;
+}
 // The sums are split over the workgroup: lane i takes tile i of the corner's
 // 4^3 tiles and lane 0 adds the lanes' partials in tile order (one lane over
-// all 4096 cells, twice, held the frame for tens of milliseconds). Counts and
-// offset sums are whole numbers, so the mean is the serial sum's exactly.
+// all 4096 cells, twice, held the frame for tens of milliseconds). One scan
+// takes both vertex sets' raw sums: offsets are whole numbers of cells (at
+// most 8), so their first and second moments are exact in f32 and centring
+// them afterwards is the centred sum's; only the value moments round.
 var<workgroup> planeA:array<vec4f,64>;
 var<workgroup> planeB:array<vec4f,64>;
 var<workgroup> planeC:array<vec4f,64>;
-// (mean, 1: through crossing cells' vertices, 0: through every vertex, -1: no vertex), (their count, low, high).
-var<workgroup> planeHead:array<vec4f,2>;
+var<workgroup> planeD:array<vec4f,64>;
+// (1: through crossing cells' vertices, 0: through every vertex, -1: no vertex, low, high).
+var<workgroup> planeHead:vec4f;
 // The listed tile's corners that take a plane, a bit each.
 var<workgroup> planeCorners:u32;
+struct PlaneSums{count:f32,first:vec3f,square:vec3f,cross3:vec3f,total:f32,moment:vec3f}
+fn planeAdd(s:ptr<function,PlaneSums>,r:vec3f,v:f32){
+ (*s).count+=1.0;(*s).first+=r;(*s).square+=r*r;(*s).cross3+=r.xxy*r.yzz;(*s).total+=v;(*s).moment+=r*v;
+}
 fn planeCorner(p:vec3i,lane:u32){
  let t=p/4-vec3i(2)+vec3i(umCorner(lane,4u));let fine=planeOldFine(t);
- // Offsets from p; [0]: every stored vertex, [1]: those of crossing cells.
- var count=array<f32,2>(0.0,0.0);var first=array<vec3f,2>(vec3f(0),vec3f(0));
+ // Offsets from p; every: every stored vertex, crossed: those of crossing cells.
+ var every=PlaneSums();var crossed=PlaneSums();
  var low=1e30;var high=-1e30;
  if(fine){
+  let stored=planeOldStored(t);
   for(var j=0u;j<64u;j++){
-   let cell=t*4+vec3i(umCorner(j,4u));let c=planeCell(cell);if(c.count==0u){continue;}
-   let which=select(0u,1u,planeCrossing(c));
+   let cell=t*4+vec3i(umCorner(j,4u));let c=planeCell(cell,stored);if(c.count==0u){continue;}
+   let crossing=planeCrossing(c);
    for(var k=0u;k<8u;k++){if((c.count&(1u<<k))==0u){continue;}
-    let r=vec3f(cell+vec3i(umCorner(k,2u))-p);
-    count[0]+=1.0;first[0]+=r;low=min(low,c.value[k]);high=max(high,c.value[k]);
-    if(which==1u){count[1]+=1.0;first[1]+=r;}
+    let r=vec3f(cell+vec3i(umCorner(k,2u))-p);let v=c.value[k];
+    planeAdd(&every,r,v);low=min(low,v);high=max(high,v);
+    if(crossing){planeAdd(&crossed,r,v);}
    }
   }
  }
- planeA[lane]=vec4f(first[0],count[0]);planeB[lane]=vec4f(first[1],count[1]);planeC[lane]=vec4f(low,high,0.0,0.0);
+ planeA[lane]=vec4f(every.count,crossed.count,low,high);
  workgroupBarrier();
  if(lane==0u){
-  var every=vec4f(0);var crossed=vec4f(0);var limits=vec2f(1e30,-1e30);
-  for(var i=0u;i<64u;i++){every+=planeA[i];crossed+=planeB[i];limits=vec2f(min(limits.x,planeC[i].x),max(limits.y,planeC[i].y));}
-  let through=crossed.w!=0.0;var s=every;if(through){s=crossed;}
-  planeHead[0]=vec4f(s.xyz/s.w,select(select(0.0,1.0,through),-1.0,every.w==0.0));planeHead[1]=vec4f(s.w,limits,0.0);
+  var counts=vec2f(0);var limits=vec2f(1e30,-1e30);
+  for(var i=0u;i<64u;i++){counts+=planeA[i].xy;limits=vec2f(min(limits.x,planeA[i].z),max(limits.y,planeA[i].w));}
+  planeHead=vec4f(select(select(0.0,1.0,counts.y!=0.0),-1.0,counts.x==0.0),limits,0.0);
  }
+ let head=workgroupUniformLoad(&planeHead);
+ var s=every;if(head.x>0.5){s=crossed;}
+ planeA[lane]=vec4f(s.first,s.count);planeB[lane]=vec4f(s.square,s.total);planeC[lane]=vec4f(s.cross3,0.0);planeD[lane]=vec4f(s.moment,0.0);
  workgroupBarrier();
- let head=planeHead[0];let mean=head.xyz;let crossing=head.w>0.5;
- var total=0.0;var diagonal=vec3f(0);var cross3=vec3f(0);var moment=vec3f(0);
- if(fine&&head.w>=0.0){
-  for(var j=0u;j<64u;j++){
-   let cell=t*4+vec3i(umCorner(j,4u));let c=planeCell(cell);if(c.count==0u){continue;}
-   if(crossing&&!planeCrossing(c)){continue;}
-   for(var k=0u;k<8u;k++){if((c.count&(1u<<k))==0u){continue;}
-    let r=vec3f(cell+vec3i(umCorner(k,2u))-p)-mean;
-    total+=c.value[k];diagonal+=r*r;cross3+=r.xxy*r.yzz;moment+=r*c.value[k];
-   }
-  }
- }
- planeA[lane]=vec4f(diagonal,total);planeB[lane]=vec4f(cross3,0.0);planeC[lane]=vec4f(moment,0.0);
- workgroupBarrier();
- if(lane==0u&&head.w>=0.0){
-  total=0.0;diagonal=vec3f(0);cross3=vec3f(0);moment=vec3f(0);
-  for(var i=0u;i<64u;i++){total+=planeA[i].w;diagonal+=planeA[i].xyz;cross3+=planeB[i].xyz;moment+=planeC[i].xyz;}
-  // Centred offsets sum to zero, so the moment needs no level term. The
-  // shifted solve is refined once on the unshifted residual, which removes
+ if(lane==0u&&head.x>=0.0){
+  var sum=PlaneSums();
+  for(var i=0u;i<64u;i++){sum.first+=planeA[i].xyz;sum.count+=planeA[i].w;sum.square+=planeB[i].xyz;sum.total+=planeB[i].w;sum.cross3+=planeC[i].xyz;sum.moment+=planeD[i].xyz;}
+  let mean=sum.first/sum.count;
+  // Centred sums: offsets about the mean sum to zero, so the moment needs no level term.
+  let diagonal=sum.square-mean*sum.first;let cross3=sum.cross3-mean.xxy*sum.first.yzz;let moment=sum.moment-mean*sum.total;
+  // The shifted solve is refined once on the unshifted residual, which removes
   // the diagonal shift's bias on the slope (1e-6 of it: 1e-5 cells here).
-  let level=total/planeHead[1].x;low=planeHead[1].y;high=planeHead[1].z;
+  let level=sum.total/sum.count;low=head.y;high=head.z;
   let shift=1e-6*max(diagonal.x+diagonal.y+diagonal.z,1.0);
   let c0=vec3f(diagonal.x+shift,cross3.x,cross3.y);let c1=vec3f(cross3.x,diagonal.y+shift,cross3.z);let c2=vec3f(cross3.y,cross3.z,diagonal.z+shift);
   let det=dot(c0,cross(c1,c2));var slope=vec3f(0);
@@ -1062,7 +1068,7 @@ fn planeCorner(p:vec3i,lane:u32){
    slope+=vec3f(dot(rest,cross(c1,c2)),dot(c0,cross(rest,c2)),dot(c0,cross(c1,rest)))/det;
   }
   var value=level-dot(slope,mean);
-  if(!crossing){if(low>=0.0){value=max(value,low);}else if(high<0.0){value=min(value,high);}}
+  if(head.x<0.5){if(low>=0.0){value=max(value,low);}else if(high<0.0){value=min(value,high);}}
   textureStore(phi,p,vec4f(value));
  }
  workgroupBarrier();

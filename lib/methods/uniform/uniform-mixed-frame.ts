@@ -483,7 +483,7 @@ export class UniformMixedFrame {
   // Surface and momentum share hanging taps of velocityScratch: nothing
   // between the cache and forces writes it, negativeScratch or cache 0.
   this.hangingGroup=this.hanging.bind({extended:f.velocityScratch,negative:f.negativeScratch,coarse:caches[0]!});
-  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid);
+  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord});
   this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
   this.geometry=new UniformMixedSurfaceGeometry(device,o,solid);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.volume);
@@ -913,10 +913,12 @@ export class UniformMixedFrame {
     this.narrowBandFlip.reconstruct(encoder);
     this.phiResolve.encode(encoder,this.phiResolveGroups.phi);
    }
-   if(p.redistance!==false){if(this.narrowBandFlip.retire(encoder))this.phiResolve.encode(encoder,this.phiResolveGroups.phi);this.narrowBandFlip.redistance(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}
    // Retire buried phantom surfaces and stale near-air distances only outside
    // the physical support collar. Resolve shared vertices before all readers.
+   // Before redistance: its crossing search and metric then describe the
+   // final field, and serve the transfer and update as they stand.
    this.narrowBandFlip.clearAir(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);
+   if(p.redistance!==false){if(this.narrowBandFlip.retire(encoder))this.phiResolve.encode(encoder,this.phiResolveGroups.phi);this.narrowBandFlip.redistance(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}
    trace?.phase(encoder,V.phi);encoder=this.flush(encoder,trace);
 
    trace?.phase(encoder,V.coupling);
