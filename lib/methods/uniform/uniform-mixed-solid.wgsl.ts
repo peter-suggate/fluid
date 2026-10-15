@@ -789,9 +789,12 @@ fn umCellOpenGeometry(p:vec3i)->f32{
  if(!umSolidEnabled()){return select(0.0,1.0,umSolidValid(p));}
  if(umSolidTileClear(p)){return 1.0;}
  let boundary=umBoundaryRecord(p);
- if(boundary!=0u){return min(umBoundaryBoxOpen(vec3f(p)+0.5,vec3f(1)),min(1.0-umCellBodyFraction(p),1.0-umCellTerrainFraction(p)));}
- if(umSolidVoxel(p)){return 0.0;}
- return clamp((1.0-umCellBodyFraction(p))*(1.0-umCellTerrainFraction(p)),0.0,1.0);
+ if(boundary==0u&&umSolidVoxel(p)){return 0.0;}
+ // One body and one terrain site for both forms: Metal inlines each site,
+ // and this function is inlined at every umCellOpen site of a kernel.
+ let body=umCellBodyFraction(p);let terrain=umCellTerrainFraction(p);
+ if(boundary!=0u){return min(umBoundaryBoxOpen(vec3f(p)+0.5,vec3f(1)),min(1.0-body,1.0-terrain));}
+ return clamp((1.0-body)*(1.0-terrain),0.0,1.0);
 }
 fn umCellOpen(p:vec3i)->f32{
  ${coarse!==undefined&&gated?`// Bodies may move after the record rebuild, before the tail census.

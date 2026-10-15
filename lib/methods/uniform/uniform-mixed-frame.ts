@@ -491,7 +491,7 @@ export class UniformMixedFrame {
   // Retain the projected h velocity detail: restricting all momentum to 4h
   // removes the long-dam toe even when total liquid volume is conserved.
   this.momentum=new UniformMixedMomentum(device,o,true,true,f.sourceParams);
-  this.momentumGroup=this.momentum.bind({unitVelocity:this.hanging.unitVelocity,extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeScratch,output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,...cacheFields});
+  this.momentumGroup=this.momentum.bind({unitVelocity:this.hanging.unitVelocity,unitHalo:this.hanging.haloOf(this.hanging.unitVelocity),extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeScratch,output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,...cacheFields});
   // Viscosity reads exact MAC sites from the momentum fill (the extended
   // velocity): h sites in the unit texture, 4h sites in the coarse cache.
   this.forces=new UniformMixedForces(device,o,true,f.sourceParams,solid,true);

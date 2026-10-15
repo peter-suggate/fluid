@@ -1,7 +1,8 @@
 /** Shared sampling of prepared h/4h velocity fields, retaining the local
  * owner width for characteristic substeps. Negative h planes escape. A
  * sample resolves its tile once (umSampleTile): the tile's key classifies it
- * and names the 4h cache block its three components read. */
+ * and names the 4h cache block its three components read, and its unit
+ * taps' halo home (umUnitHaloHome: the module binds unitHalo). */
 export const uniformCachedMomentumSamplingWGSL = /* wgsl */ `
 var<private> umUnitEscaped:bool;
 var<private> umUnitWidth:f32;
@@ -11,6 +12,14 @@ fn umUnitInterpolant(p:vec3f,axis:u32)->f32 {
  let b=umHold;var lower=b.lo;lower[axis]-=1.0;
  let q=clamp(p-offset,lower,b.hi-vec3f(1.0));
  let base=vec3i(floor(q));let fraction=fract(q);var terms:array<f32,8>;
+ // The sample's page's halo block holds every tap, the low-wall faces
+ // included: plain offsets from the home its sample resolved once.
+ if(umUnitHome.w>=0){
+  for(var k=0u;k<8u;k++){
+   terms[k]=textureLoad(unitHalo,base+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u))+umUnitHome.xyz,0)[axis];
+  }
+  return umVelocityLerp8(terms,fraction);
+ }
  for(var k=0u;k<8u;k++){
   let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
   terms[k]=textureLoad(unitVelocity,base+bit,0)[axis];
@@ -32,9 +41,11 @@ fn umUnitWeighted(p:vec3f,home:UMCoarseHome,axis:u32,fine:f32)->f32 {
  if(coarse>0.0){value+=coarse*umSampleVelocity4In(home,axis);}
  return value;
 }
+// A native fine stencil's taps are stored unit faces, which its halo
+// holds: with a home it is the unit interpolant at weight one (exactly).
 fn umUnitSampleComponent(p:vec3f,axis:u32)->f32 {
- let s=umSampleTile(p);let kind=umUnitSampleKind(p,s,axis);
- if(kind==0u){return umSampleVelocityFine(p,axis);}
+ let s=umSampleTile(p);let kind=umUnitSampleKind(p,s,axis);umUnitHome=umUnitHaloHome(s);
+ if(kind==0u&&umUnitHome.w<0){return umSampleVelocityFine(p,axis);}
  if(kind==2u){umUnitEscaped=true;return 0.0;}
  return umUnitWeighted(p,umCoarseHome(p,s),axis,umUnitFineWeight);
 }
@@ -43,9 +54,10 @@ fn umUnitSampleComponent(p:vec3f,axis:u32)->f32 {
 fn umUnitSample(p:vec3f)->vec3f {
  let s=umSampleTile(p);let kind=umUnitSampleKind(p,s,3u);
  if(kind==2u){umUnitEscaped=true;return vec3f(0);}
+ umUnitHome=umUnitHaloHome(s);
  let fine=umUnitFineWeight;let home=umCoarseHome(p,s);var v=vec3f(0.0);
  for(var a=0u;a<3u;a++){
-  if(kind==0u){v[a]=umSampleVelocityFine(p,a);}else{v[a]=umUnitWeighted(p,home,a,fine);}
+  if(kind==0u&&umUnitHome.w<0){v[a]=umSampleVelocityFine(p,a);}else{v[a]=umUnitWeighted(p,home,a,fine);}
  }
  return v;
 }

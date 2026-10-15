@@ -160,6 +160,14 @@ fn umSampleVertex(p:vec3f)->f32 {
  {
   let cell=vec3u(umBoundedCell(q,b));let width=umTileWidth(umTileAt(cell/4u));
   let origin=(cell/width)*width;let t=(q-vec3f(origin))/f32(width);var values:array<f32,8>;
+  // On the owner's lattice in two axes (a vertex: smoothing's taps; a
+  // lattice edge: the foot gradient's samples) at most two weights are
+  // nonzero: one or two loads instead of eight.
+  {let zt=t==vec3f(0.0);if(u32(zt.x)+u32(zt.y)+u32(zt.z)>=2u){
+   let a=select(select(2u,1u,!zt.y),0u,!zt.x);var e=vec3u(0);e[a]=width;var line=array<f32,2>(0.0,0.0);
+   for(var s=0u;s<select(1u,2u,t[a]!=0.0);s++){let at=origin+e*s;${corner ? `if(width==4u){line[s]=${corner}(at);}else{line[s]=umLoadVertex(at);}` : "line[s]=umLoadVertex(at);"}}
+   if(t[a]==0.0){return line[0];}return line[0]*(1.0-t[a])+line[1]*t[a];
+  }}
   ${(taps => corner ? `if(width==4u){${taps(corner)}}else{${taps("umLoadVertex")}}` : taps("umLoadVertex"))((load: string) => `${all(load, "origin", "width")}for(var k=0u;k<8u;k++){
    let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));
    values[k]=${tap(load, "origin", "width")}*w.x*w.y*w.z;

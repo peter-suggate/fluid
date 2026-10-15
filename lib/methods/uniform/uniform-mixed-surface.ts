@@ -345,6 +345,13 @@ fn umCubicPhi(q:vec3f,cell:UMVertexCell)->f32{
  let at=base&vec3i(31);let past=vec3i(at+vec3i(2*width)>vec3i(32))-vec3i(at<vec3i(width));
  let held=umBlockHeld(home,past);let lowHeld=held&(past<vec3i(0));let highHeld=held&(past>vec3i(0));
  let wx=umHeldWeights(umCatmull(fraction.x),lowHeld.x,highHeld.x);let wy=umHeldWeights(umCatmull(fraction.y),lowHeld.y,highHeld.y);let wz=umHeldWeights(umCatmull(fraction.z),lowHeld.z,highHeld.z);
+ // A weighted buried tap returns the cell's value, whichever tap it is:
+ // test them ahead of the taps at one umBuried site (inlined per site, a
+ // test inside the unrolled taps compiled 64 of them per width).
+ ${this.solid?`for(var k=0u;k<select(64u,0u,tapsClear);k++){
+  let x=k&3u;let y=(k>>2u)&3u;let z=k>>4u;if(wx[x]*wy[y]*wz[z]==0.0){continue;}
+  if(umBuried(vec3f(umVertexNearFromPage(home,page,base+(vec3i(vec3u(x,y,z))-vec3i(1))*width)))){return cell.value;}
+ }`:""}
  // As umVertexCell: the width branch is outside the 64 taps.
  ${(taps=>`if(!umRegularFine&&cell.width==4u){${taps("umLoadCorner")}}else{${taps("umLoadVertex")}}`)((load:string)=>/* wgsl */`
  for(var z=0u;z<4u;z++){var plane=0.0;
@@ -355,7 +362,6 @@ fn umCubicPhi(q:vec3f,cell:UMVertexCell)->f32{
     // The inner taps are the cell's corners.
     let inner=all(offset>=vec3i(0))&&all(offset<=vec3i(1));
     var s=0.0;if(inner){s=cell.corners[x-1u+2u*(y-1u)+4u*(z-1u)];}else{s=${load}(vec3u(vertex));}row+=wx[x]*s;
-    ${this.solid?"if(!tapsClear&&wx[x]*wy[y]*wz[z]!=0.0&&umBuried(vec3f(vertex))){return cell.value;}":""}
     if(inner){low=min(low,s);high=max(high,s);}
    }plane+=wy[y]*row;
   }value+=wz[z]*plane;
@@ -544,24 +550,28 @@ fn umDeepAir(vertex:vec3u,width:u32)->f32{
  if(value<length(travel)*hmax+3.0*f32(width)*h||umReleasedMayChange(vec3f(vertex),value)){return -1.0;}
  return ${this.sourceParams?"umSourceuvSourcePhi(vec3f(vertex),value)":"value"};
 }
+override umDeferTraced:bool=false;
 fn umAdvectStore(vertex:vec3u,width:u32){
  if(params.hDt.w>0.0&&umWallPlane(vec3i(vertex))<6u){return;}
  {let far=umFarAir(vertex);if(far>=0.0){textureStore(outputPhi,vec3i(vertex),vec4f(far));return;}}
  {let deep=umDeepAir(vertex,width);if(deep>=0.0){textureStore(outputPhi,vec3i(vertex),vec4f(deep));return;}}
- let p=vec3f(vertex);var defer=false;var value=0.0;
+ // A launch compiled with umDeferTraced lists every vertex it would trace:
+ // advectDeferred's grid stride evaluates them densely, where this launch's
+ // lanes (most of them far or deep air) would idle behind the few traces.
+ let p=vec3f(vertex);var defer=umDeferTraced;var value=0.0;
  ${this.solid?/* wgsl */`// Off a clear tile a vertex can be buried: it keeps its value, umAdvected's
  // first exit.
  if(!umSolidClear(vec3i(p))&&umBuried(p)){textureStore(outputPhi,vec3i(vertex),vec4f(umLoadVertex(vertex)));return;}
  // A hit is evaluated by advectDeferred. Its first-pass phi and source
  // samples are discarded.
- {let walk=umWalk(p,umVertexTrace(p,width));defer=walk.hit;let q=walk.q;if(!defer){`:"{let q=umVertexTrace(p,width);"}
+ {if(!defer){let walk=umWalk(p,umVertexTrace(p,width));defer=walk.hit;let q=walk.q;if(!defer){`:"{if(!defer){let q=umVertexTrace(p,width);"}
   let cell=umVertexCell(q);value=cell.value;
   let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
   if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){value=umCubicPhi(q,cell);}
   defer=defer||umReleasedMayChange(p,value);
   value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
  ${this.solid?"}":""}
- }
+ }}
  if(!defer){textureStore(outputPhi,vec3i(vertex),vec4f(value+umVertexSmoothing(vertex,width)));return;}
  // Each canonical vertex is stored once: the list holds at most every vertex.
  // A word is the vertex key (umVertexAt) below a two-bit code: log2 of the
@@ -830,7 +840,7 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
       // Dispatched only under solids (encode: solid.present): no solid-free twin.
       ...(this.solid?["solidClosed","solidClear"]:[]).map(entryPoint=>keyed(entryPoint,{},true)),
       keyed("wallReach"),
-      keyed("advect",{umMergedTiles:1,umMergedCoarse:1,umMergedPack:8,umCertifiedJobs:2,umClaimWord:2}),
+      keyed("advect",{umMergedTiles:1,umMergedCoarse:1,umMergedPack:8,umCertifiedJobs:2,umClaimWord:2,umDeferTraced:1}),
       keyed("advectFine",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1}),
       Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1}),compile("advectDeferred",regular)]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
       keyed("advectOwners",{...regular,umCertifiedJobs:1,umClaimWord:0}),

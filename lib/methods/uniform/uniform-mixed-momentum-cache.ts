@@ -8,6 +8,8 @@ import { uniformMixedCountedEntriesWGSL, uniformMixedTopologyNeighboursWGSL, uni
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { UNIFORM_MIXED_HANGING_TAPS, UNIFORM_UNIT_HALO_EDGE, uniformMixedHangingTapWGSL, uniformMixedVelocitySamplingSource, uniformUnitHaloExtent, uniformUnitHaloWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
 
+/** Workgroups a block of the unit halo fill. */
+const HALO_SLICES=64;
 const CACHE_PASS:GPUComputePassDescriptor={label:"Uniform mixed 4h sampling cache"},TAPS_PASS:GPUComputePassDescriptor={label:"Uniform mixed hanging fine taps"};
 
 export interface UniformMixedMomentumCacheFields {
@@ -131,14 +133,19 @@ export interface UniformMixedHangingTapFields {
 export class UniformMixedHangingTaps {
   /** The taps are detail fields: their bytes are the storage's. Their halos
    * (haloOf) are not. */
-  get allocatedBytes():number{let bytes=0;for(const t of this.halos.values())bytes+=16*t.width*t.height*t.depthOrArrayLayers;return bytes;}
+  get allocatedBytes():number{let bytes=this.haloBlocks.size;for(const t of this.halos.values())bytes+=16*t.width*t.height*t.depthOrArrayLayers;return bytes;}
   /** Each taps texture's haloed copy by block (UNIFORM_UNIT_HALO_EDGE),
    * refilled by every encode that fills the taps. */
   private readonly halos=new Map<GPUTexture,GPUTexture>();
   private readonly haloGroups=new WeakMap<UniformDetailGroup,UniformDetailGroup>();
   private readonly haloResources:GPUBindGroupLayout;
   private haloPipeline?:GPUComputePipeline;
-  private readonly haloGroupsGrid:readonly [number,number,number];
+  private haloMarkPipeline?:GPUComputePipeline;
+  /** Sixteen words a block: a bit a tile, whether a sample of one of the
+   * block's tiles can read the halo texels over it (markUnitHalo, before
+   * every fill). The fill skips the texels of unmarked tiles. */
+  private readonly haloBlocks:GPUBuffer;
+  private readonly haloBlockCount:number;
   /** The unit interpolant's taps as one native MAC texel per cell: each unit
    * tile's stored faces and each slotted tile's fine taps, written with the
    * slots. A sample with nonzero fine weight has every tap in a unit or a
@@ -163,8 +170,10 @@ export class UniformMixedHangingTaps {
     ];this.resources=uniformDetailBindLayout(device,{entries});
     if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
     // The halo fill: the taps read back (5), the halo written (3).
-    this.haloResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:5,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}}]},[3]);
-    const extent=uniformUnitHaloExtent(ownership.capacity.address);this.haloGroupsGrid=[Math.ceil(extent[0]/4),Math.ceil(extent[1]/4),Math.ceil(extent[2]/4)];
+    this.haloResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:5,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]},[3]);
+    const grid=ownership.capacity.address.blockGrid;this.haloBlockCount=grid[0]*grid[1]*grid[2];
+    if(this.haloBlockCount>device.limits.maxComputeWorkgroupsPerDimension)throw new Error(`Unit halo marking launches a workgroup a block: ${this.haloBlockCount} blocks exceed ${device.limits.maxComputeWorkgroupsPerDimension}`);
+    this.haloBlocks=device.createBuffer({label:"Uniform mixed unit halo blocks",size:64*this.haloBlockCount,usage:GPUBufferUsage.STORAGE});
     this.unitVelocity=this.createTaps("Uniform mixed unit velocity taps");
   }
   /** Another texture this fill can write: the unit taps of a second field,
@@ -191,7 +200,7 @@ export class UniformMixedHangingTaps {
     ]});if(f.slots)this.slotGroups.add(group);
     this.haloGroups.set(group,uniformDetailGroup(this.device,{layout:this.haloResources,entries:[
       {binding:0,resource:f.extended},{binding:1,resource:{buffer:f.negative}},{binding:2,resource:f.coarse},
-      {binding:3,resource:this.haloOf(output)},{binding:5,resource:output},
+      {binding:3,resource:this.haloOf(output)},{binding:5,resource:output},{binding:6,resource:{buffer:this.haloBlocks}},
     ]}));
     return group;
   }
@@ -206,17 +215,59 @@ export class UniformMixedHangingTaps {
 @group(1) @binding(2) var coarse:texture_3d<f32>;
 @group(1) @binding(3) var unitHaloOut:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(5) var unitVelocity:texture_3d<f32>;
+@group(1) @binding(6) var<storage,read_write> haloBlocks:array<u32>;
 ${uniformMixedFaceAddressWGSL}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  if(umFaceLow(anchor,axis)){var above=anchor;above[axis]+=1;return negative[umLowFaceIndex(vec3u(above),axis)];}
  return textureLoad(extended,anchor,0)[axis];
 }
 ${uniformCoarseCacheWGSL+uniformCompiledVelocityTapWGSL+uniformUnitHaloWGSL+uniformMixedHangingTapWGSL(2)}
-@compute @workgroup_size(4,4,4) fn fillUnitHalo(@builtin(global_invocation_id) gid:vec3u){
- let cell=gid/${UNIFORM_UNIT_HALO_EDGE}u;if(any(cell>=UM_BLOCK_GRID)){return;}
- let b=cell.x|(cell.y<<UM_BLOCK_BITS)|(cell.z<<(2u*UM_BLOCK_BITS));
- if(!umBlockStored(b)||umBlockWord(b)==UM_FREE){return;}
- let tap=(vec3i(umBlockPage(b))<<vec3u(5u))+vec3i(gid%${UNIFORM_UNIT_HALO_EDGE}u)-vec3i(2);
+// Only a sample with fine weight reads a halo, and only its own tile's
+// block's (umUnitHaloHome): fine weight needs a unit tile (umCachedFineTile,
+// umFineStencilTile, the APIC home's unit tile) or a blend mask (the
+// weighted sampler's boxes; none, weight zero). Both are layout words,
+// current at every fill. A sample of tile T reads taps within two cells
+// below and one above T's cells, all in T's tiles -1..+1 along each axis:
+// a halo texel is read only where its tile (clamped into the page: the
+// margin's texels are read by the edge tiles only) is within one tile of
+// such a tile of the block. markUnitHalo marks those tiles, a bit a tile,
+// sixteen words a block; the fill skips the texels of the rest.
+var<workgroup> haloSources:array<atomic<u32>,16>;
+var<workgroup> haloReach:array<atomic<u32>,16>;
+fn umHaloBit(l:vec3u)->u32{return l.x|(l.y<<3u)|(l.z<<6u);}
+@compute @workgroup_size(64) fn markUnitHalo(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let b=group.x;let live=b<UM_BLOCKS&&umBlockStored(b)&&umBlockWord(b)!=UM_FREE;
+ if(lane<16u){atomicStore(&haloSources[lane],0u);atomicStore(&haloReach[lane],0u);}
+ workgroupBarrier();
+ if(live){
+  for(var k=lane;k<512u;k+=64u){let key=512u*b+k;if(umTileWidth(key)==1u||umVelocityBlendMask(key)!=0u){atomicOr(&haloSources[k>>5u],1u<<(k&31u));}}
+ }
+ workgroupBarrier();
+ if(live){
+  for(var k=lane;k<512u;k+=64u){
+   let l=umLocalTile(k);let lo=max(l,vec3u(1u))-vec3u(1u);let hi=min(l+vec3u(1u),vec3u(7u));var near=false;
+   for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
+    let n=umHaloBit(vec3u(x,y,z));near=near||(atomicLoad(&haloSources[n>>5u])&(1u<<(n&31u)))!=0u;
+   }}}
+   if(near){atomicOr(&haloReach[k>>5u],1u<<(k&31u));}
+  }
+ }
+ workgroupBarrier();
+ if(lane<16u){haloBlocks[16u*b+lane]=atomicLoad(&haloReach[lane]);}
+}
+// A block's texels, ${HALO_SLICES} workgroups a block (y) striding them: an
+// unstored block's workgroups and an unmarked tile's lanes leave at once.
+@compute @workgroup_size(64) fn fillUnitHalo(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let b=group.x;
+ if(b>=UM_BLOCKS||!umBlockStored(b)||umBlockWord(b)==UM_FREE){return;}
+ for(var i=64u*group.y+lane;i<${UNIFORM_UNIT_HALO_EDGE**3}u;i+=${64*HALO_SLICES}u){
+  let l=vec3u(i%${UNIFORM_UNIT_HALO_EDGE}u,(i/${UNIFORM_UNIT_HALO_EDGE}u)%${UNIFORM_UNIT_HALO_EDGE}u,i/${UNIFORM_UNIT_HALO_EDGE**2}u);
+  let n=umHaloBit(clamp((l+vec3u(2u))/4u,vec3u(1u),vec3u(8u))-vec3u(1u));
+  if((haloBlocks[16u*b+(n>>5u)]&(1u<<(n&31u)))!=0u){umFillUnitHaloTexel(b,l);}
+ }
+}
+fn umFillUnitHaloTexel(b:u32,l:vec3u){
+ let tap=(vec3i(umBlockPage(b))<<vec3u(5u))+vec3i(l)-vec3i(2);
  // The unit interpolant's tap: the texel the cell resolves to. It is
  // umVelocityTap1's too where this fill wrote it: a unit or a slotted tile.
  var value=textureLoad(unitVelocity,tap,0);
@@ -234,11 +285,12 @@ ${uniformCoarseCacheWGSL+uniformCompiledVelocityTapWGSL+uniformUnitHaloWGSL+unif
    else{value[axis]=umCompiledVelocityTap(tile,vec3u(anchor&vec3i(3)),axis,true);}
   }
  }
- textureStore(unitHaloOut,vec3i(gid),value);
+ textureStore(unitHaloOut,${UNIFORM_UNIT_HALO_EDGE}*umBlockCoord(b)+vec3i(l),value);
 }`;
     const module=uniformDetailModule(this.device,{label:"Uniform mixed unit tap halo",code});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    this.haloPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.haloResources,this.ownership.hangingLayout]}),compute:{module,entryPoint:"fillUnitHalo"}});
+    const haloLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.haloResources,this.ownership.hangingLayout]});
+    [this.haloMarkPipeline,this.haloPipeline]=await Promise.all(["markUnitHalo","fillUnitHalo"].map(entryPoint=>uniformDetailPipeline(this.device,this.ownership,{layout:haloLayout,compute:{module,entryPoint}})));
    }
    for(const slots of this.slotResources?[false,true]:[false]){
     // One GPU-counted launch: each h tile's stored faces, four tiles per job,
@@ -304,10 +356,15 @@ fn umCoarseSlots()->vec2u{let header=7u*UM_TILES+16u;let fine=umSupport[header];
     // without a slot) and the seam 4h slots. At most one job per tile.
     const pass=shared??encoder.beginComputePass(TAPS_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,this.ownership.hangingGroup);
     this.ownership.dispatchCounted(pass,this.slotGroups.has(group)?this.slotPipeline!:this.pipeline,this.ownership.capacity.tiles,"fineAndSeams");
-    // Every fill refreshes its halo: a fixed grid over the halo texture.
-    const halo=this.haloGroups.get(group),g=this.haloGroupsGrid;
-    if(halo){pass.setPipeline(uniformDetailPick(this.haloPipeline!));pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,halo.group);pass.setBindGroup(2,this.ownership.hangingGroup);pass.dispatchWorkgroups(g[0],g[1],g[2]);}
+    // Every fill refreshes its halo: the texels samples can read (markUnitHalo),
+    // a fixed grid of HALO_SLICES workgroups a block.
+    const halo=this.haloGroups.get(group);
+    if(halo){
+      pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,halo.group);pass.setBindGroup(2,this.ownership.hangingGroup);
+      pass.setPipeline(uniformDetailPick(this.haloMarkPipeline!));pass.dispatchWorkgroups(this.haloBlockCount);
+      pass.setPipeline(uniformDetailPick(this.haloPipeline!));pass.dispatchWorkgroups(this.haloBlockCount,HALO_SLICES);
+    }
     if(!shared)pass.end();
   }
-  destroy():void{this.unitVelocity.destroy();for(const halo of this.halos.values())halo.destroy();}
+  destroy():void{this.unitVelocity.destroy();for(const halo of this.halos.values())halo.destroy();this.haloBlocks.destroy();}
 }

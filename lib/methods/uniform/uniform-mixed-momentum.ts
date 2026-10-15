@@ -22,6 +22,8 @@ export interface UniformMixedMomentumFields {
   outputNegative: GPUBuffer;
   /** UniformMixedHangingTaps.unitVelocity of `extended`; with hanging taps only. */
   unitVelocity?: GPUTexture;
+  /** Its halo (UniformMixedHangingTaps.haloOf), filled with it. */
+  unitHalo?: GPUTexture;
   /** h.xyz, dt; four u32 flags, the last the fixed limits. None is read; the
    * layout matches the other mixed stages' parameter blocks, and fixed
    * limits must be UNIFORM_MIXED_MOMENTUM_LIMITS. */
@@ -173,7 +175,7 @@ export class UniformMixedMomentum {
       { binding: 9, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
       { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-      ...[12,15,...(hanging?[16]:[])].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
+      ...[12,15,...(hanging?[16,18]:[])].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 14, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ...(sourceParams?[{binding:17,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
@@ -185,7 +187,7 @@ export class UniformMixedMomentum {
   }
   bind(fields: UniformMixedMomentumFields): UniformDetailGroup {
     if(this.cullAir&&!fields.centerPhi)throw new Error("Prediction culling requires current center phi");
-    if(this.hanging!==(fields.unitVelocity!==undefined))throw new Error("Mixed momentum hanging taps require their unit velocity texture");
+    if(this.hanging!==(fields.unitVelocity!==undefined)||this.hanging!==(fields.unitHalo!==undefined))throw new Error("Mixed momentum hanging taps require their unit velocity texture and its halo");
     const textures = [fields.extended, fields.physical, fields.phase, fields.volume];
     const address = this.ownership.capacity.address;
     for (const [i, texture] of [...textures, fields.output].entries()) {
@@ -204,7 +206,7 @@ export class UniformMixedMomentum {
       { binding: 11, resource: { buffer: fields.params, size: 32 } },
       {binding:15,resource:fields.centerPhi??fields.volume},
       {binding:12,resource:fields.coarseExtended},
-      ...(fields.unitVelocity?[{binding:16,resource:fields.unitVelocity}]:[]),
+      ...(fields.unitVelocity&&fields.unitHalo?[{binding:16,resource:fields.unitVelocity},{binding:18,resource:fields.unitHalo}]:[]),
       {binding:13,resource:{buffer:this.claims}},{binding:14,resource:{buffer:this.deferred}},
       ...(this.sourceParams?[{binding:17,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
     ] });
@@ -224,14 +226,14 @@ struct UMMomentumParams {hDt:vec4f,flags:vec4u}
 @group(1) @binding(15) var centerPhi:texture_3d<f32>;
 @group(1) @binding(13) var<storage,read_write> umClaims:array<atomic<u32>>;
 @group(1) @binding(14) var<storage,read_write> umDeferred:array<atomic<u32>>;
-${this.hanging?"@group(1) @binding(16) var unitVelocity:texture_3d<f32>;":""}
+${this.hanging?"@group(1) @binding(16) var unitVelocity:texture_3d<f32>;\n@group(1) @binding(18) var unitHalo:texture_3d<f32>;":""}
 override umCullAir:bool=false;
 ${this.sourceParams?uniformMixedSourceWGSL(17)+uniformMixedFarAirWGSL("umSourceinflowStrength()>0.0"):""}
 ${uniformMixedFaceAddressWGSL}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32 {
  if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(umLowFaceAbove(anchor,axis),axis)];}return textureLoad(extended,anchor,0)[axis];
 }
-${uniformMixedVelocitySamplingSource(false,"coarseExtended","extended",this.hanging?2:undefined,this.hanging?"unitVelocity":undefined)}
+${uniformMixedVelocitySamplingSource(false,"coarseExtended","extended",this.hanging?2:undefined,this.hanging?"unitVelocity":undefined,undefined,this.hanging?"unitHalo":undefined)}
 // A departure stops at a wall, a face with a SOLID page across it, and
 // nowhere else: it runs on into an AIR page.
 fn umClampMomentum(p:vec3f)->vec3f {return umPointHeld(p);}
