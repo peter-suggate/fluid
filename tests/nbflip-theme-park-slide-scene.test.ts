@@ -122,7 +122,7 @@ test("the white park survives serialization and fits its scenery budget", () => 
   // JSON normalizes signed zero in rotation components.
   assert.equal(JSON.stringify(restored.scenery), JSON.stringify(scene.scenery));
   const catalog = buildEnvironmentProxyCatalog(restored, restored.environment!);
-  assert.ok(catalog.primitives.length > 2000, "retain the detailed branching oaks");
+  assert.ok(catalog.primitives.length > 2000, "retain the detailed branching trees and shrubs");
   assert.ok(catalog.primitives.length < 4096, "keep the detailed park within its scenery budget");
   assert.equal(new Set(catalog.primitives.map(p => p.key)).size, catalog.primitives.length);
   for (const primitive of catalog.primitives) {

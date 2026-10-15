@@ -1635,7 +1635,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "hero-garden-hose-x10",
     name: "Porcelain pond · ten times the set",
-    blurb: "The same pond, already filled to its waterline, with ten times as many authored records standing on its banks.",
+    blurb: "The filled porcelain pond with miniature birch, pine and willow, plus azalea, juniper and dense boxwood and hebe bushes around the original oak.",
     // The catalog presents the filled pond; dry render measurements use the
     // same stress factory with its default water-off setting.
     audience: "validation",
@@ -1890,7 +1890,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: NBFLIP_THEME_PARK_SCENE_ID,
     name: "NB-FLIP · Theme Park Water Slide",
-    blurb: `A white-clay water park with branching oaks, visitors, food stalls, a toilet block and picnic terraces around an elevated two-turn spiral and splash pool. The hose runs for ${NBFLIP_THEME_PARK_STREAM_SECONDS} seconds: ${NBFLIP_THEME_PARK_GRID.join("×")} cells at 2 cm, starting empty.`,
+    blurb: `A white-clay water park with oak, birch, pine, willow and low shrubs, visitors, food stalls, a toilet block and picnic terraces around an elevated two-turn spiral and splash pool. The hose runs for ${NBFLIP_THEME_PARK_STREAM_SECONDS} seconds: ${NBFLIP_THEME_PARK_GRID.join("×")} cells at 2 cm, starting empty.`,
     audience: "explore",
     shelf: "Tanks",
     environment: "stage",

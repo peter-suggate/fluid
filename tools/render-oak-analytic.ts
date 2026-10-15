@@ -11,7 +11,10 @@ import { intersectSvoPrimitive } from "../lib/svo/contracts/svo-primitive-abi";
 const out = process.env.OAK_ANALYTIC_OUT ?? "artifacts/oak-v2/analytic.png";
 const tree: SceneryNode = process.env.OAK_TREE_JSON ? JSON.parse(readFileSync(process.env.OAK_TREE_JSON, "utf8")) : heroGardenCloudTree();
 const descriptors = oakOracleDescriptors(tree, process.env.OAK_BARE === "1");
-const width = 640, height = 520, pixelsPerMetre = 390;
+const resolutionScale = Number(process.env.OAK_ANALYTIC_RESOLUTION_SCALE ?? 1);
+if (!Number.isFinite(resolutionScale) || resolutionScale <= 0) throw new RangeError("Analytic resolution scale must be positive");
+const width = Math.max(1, Math.round(640 * resolutionScale)), height = Math.max(1, Math.round(520 * resolutionScale));
+const pixelsPerMetre = 390 * resolutionScale, margin = 20 * resolutionScale;
 const azimuth = Number(process.env.OAK_AZIMUTH ?? .45);
 const right = { x: Math.cos(azimuth), y: 0, z: -Math.sin(azimuth) };
 const direction = { x: -Math.sin(azimuth), y: 0, z: -Math.cos(azimuth) };
@@ -22,12 +25,12 @@ const start = performance.now();
 for (const d of descriptors) {
   const r = Math.max(d.lobeRadii_m.x, d.lobeRadii_m.y, d.lobeRadii_m.z);
   const cx = width / 2 + (d.center_m.x * right.x + d.center_m.z * right.z) * pixelsPerMetre;
-  const cy = height - 20 - d.center_m.y * pixelsPerMetre;
+  const cy = height - margin - d.center_m.y * pixelsPerMetre;
   const minX = Math.max(0, Math.floor(cx - r * pixelsPerMetre)), maxX = Math.min(width - 1, Math.ceil(cx + r * pixelsPerMetre));
   const minY = Math.max(0, Math.floor(cy - r * pixelsPerMetre)), maxY = Math.min(height - 1, Math.ceil(cy + r * pixelsPerMetre));
   for (let y = minY; y <= maxY; y++)
     for (let x = minX; x <= maxX; x++) {
-      const u = (x + .5 - width / 2) / pixelsPerMetre, v = (height - 20 - y - .5) / pixelsPerMetre;
+      const u = (x + .5 - width / 2) / pixelsPerMetre, v = (height - margin - y - .5) / pixelsPerMetre;
       const hit = intersectSvoPrimitive(d, { origin_m: { x: right.x * u - direction.x * 2, y: v, z: right.z * u - direction.z * 2 }, direction, tMax_m: Math.min(4, depth[y * width + x]) });
       if (!hit || hit.t_m >= depth[y * width + x])
         continue;
@@ -55,7 +58,7 @@ for (let y = 0; y < height; y++) {
       last = x;
     }
   }
-  if ((height - 20 - y) / pixelsPerMetre > .45)
+  if ((height - margin - y) / pixelsPerMetre > .45)
     for (let x = first; x <= last; x++) {
       interior++;
       if (!masks[y * width + x])

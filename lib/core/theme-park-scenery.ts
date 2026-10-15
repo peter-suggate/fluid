@@ -2,6 +2,7 @@ import type { Vec3 } from "./model";
 import type { SceneryGraph, SceneryGroupNode, SceneryMaterial, SceneryNode } from "./scenery-graph";
 import { alongAxis } from "./voxel-scenery/builder";
 import { planOakV2 } from "./voxel-scenery/oak-v2";
+import { planWoodyPlant } from "./voxel-scenery/woody-plants";
 
 // Metres throughout. The park sits on y=0; the flume keeps its own solver geometry.
 const white: SceneryMaterial = { colorLinear: [.9, .9, .9], surface: "plaster" };
@@ -242,14 +243,17 @@ export function themeParkScenery(): SceneryGraph {
     paving.push(box(`park/paving/east-${i}`, [7.95, .012, -7.2 + i * .7], [.26, .012, .342]));
   }
   nodes.push(group("park/paving", [0, 0, 0], paving));
-  // Four distinct, fully branched specimens. Two twig generations retain fine
-  // silhouettes while keeping the entire set within a 4,096-primitive budget.
+  // Different growth habits frame the ride: spreading oak, upright birch,
+  // layered pine and hanging willow. Keep paths and the water corridor clear.
   for (const [index, [x, z, scale, seed]] of [
     [-4.9, -3.0, 3.5, 4258], [2.5, -3.65, 3.7, 1978], [-4.75, 2.65, 2.8, 8731], [4.75, -.85, 3.1, 6382],
   ].entries()) {
-    const id = `park/oak-${index}`;
-    const tree = planOakV2({ key: id, seed, scale_m: scale, twigDepth: 2, sitesPerBough: 6,
-      crownWidth: .8, trunkHeight: 1.2, leafScale: 1.05, bark: white, foliage: white }).node;
+    const species = (["oak", "birch", "pine", "willow"] as const)[index]!;
+    const id = `park/${species}-${index}`;
+    const tree = species === "oak"
+      ? planOakV2({ key: id, seed, scale_m: scale, twigDepth: 2, sitesPerBough: 6,
+        crownWidth: .8, trunkHeight: 1.2, leafScale: 1.05, bark: white, foliage: white }).node
+      : planWoodyPlant({ key: id, species, seed, scale_m: scale, bark: white, foliage: white }).node;
     nodes.push({ ...tree, place: { units: "metres", position: v(x, 0, z), orientation: yaw(index * 1.7) } });
     const stones: SceneryNode[] = [];
     for (let i = 0; i < 11; i++) {
@@ -261,6 +265,23 @@ export function themeParkScenery(): SceneryGraph {
         lobeCount: 7, anisotropy: 1.8, lobeSpan: .62, lobeSpanSpread: .15, displacement: .6, material: white });
     }
     nodes.push(group(`${id}/rock-garden`, [x, 0, z], stones));
+  }
+  // Low, multi-stem shrubs fill the planting beds without hiding visitors.
+  for (const [i, [x, z, scale]] of [
+    [-5.65, -2.2, .85], [-5.75, 2.7, .75], [3.4, -4.25, .9],
+    [5.7, -.45, .8], [-5.7, 3.5, .7], [4.95, -2.4, .8],
+  ].entries()) {
+    const species = i % 2 ? "juniper" : "azalea";
+    const shrub = planWoodyPlant({ key: `park/${species}-${i}`, species, seed: 7411 + i * 137,
+      scale_m: scale, bark: white, foliage: white }).node;
+    nodes.push({ ...shrub, place: { units: "metres", position: v(x, 0, z), orientation: yaw(i * 2.4) } });
+  }
+  for (const [species, x, z, scale, seed] of [
+    ["boxwood", -5.8, -1.1, 1.1, 8121], ["hebe", 5.8, -2.0, 1.15, 8217],
+  ] as const) {
+    const shrub = planWoodyPlant({ key: `park/${species}`, species, seed,
+      scale_m: scale, bark: white, foliage: white }).node;
+    nodes.push({ ...shrub, place: { units: "metres", position: v(x, 0, z), orientation: yaw(seed) } });
   }
   for (const [i, [x, z, size]] of [[-3.4, 2.7, .45], [1.2, -3.9, .38], [4.5, -2.4, .5], [-3.1, 2.95, .27]].entries()) {
     nodes.push(group(`park/boulder-${i}`, [x, 0, z], [{
