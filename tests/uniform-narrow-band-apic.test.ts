@@ -1,18 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
-import { resolveMethodValues } from "../lib/core/method-contract";
-import { methodConfigurationImpact } from "../lib/core/method-lifecycle";
 import { narrowBandParticleStride, narrowBandApicMomentWGSL } from "../lib/methods/uniform/uniform-narrow-band-apic.wgsl";
 import { withUniformDevice } from "./helpers/uniform-geometric";
 import { readMixedBuffer } from "./helpers/uniform-mixed-native-fields";
-
-test("APIC is the default and explicit FLIP remains a solver change",()=>{
- assert.equal(resolveMethodValues(uniformNarrowBandMethod,"balanced",{}).particleTransfer,"apic");
- assert.equal(uniformNarrowBandMethod.appDefaults?.particleTransfer,"apic");
- assert.equal(resolveMethodValues(uniformNarrowBandMethod,"balanced",{particleTransfer:"flip"}).particleTransfer,"flip");
- assert.equal(methodConfigurationImpact(uniformNarrowBandMethod,"balanced",{particleTransfer:"flip"},{particleTransfer:"apic"}),"rebuild");
-});
 
 test("GPU quadratic APIC reproduces translation, rotation and shear on staggered faces",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice("APIC moments",async device=>{

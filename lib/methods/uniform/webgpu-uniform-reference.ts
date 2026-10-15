@@ -614,7 +614,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.narrowBandVolumeControlSeconds = Math.max(0,Math.min(2,options.narrowBandVolumeControlSeconds??0.1));
 
     this.narrowBandFinePadding = options.narrowBandFinePadding ?? 1;
-    this.narrowBandTransfer = options.narrowBandTransfer ?? "apic";
+    this.narrowBandTransfer = options.narrowBandTransfer ?? "flip";
     this.phiFineTrilinear = options.phiFineTrilinear === true;
     this.twoLevelVelocity = true;
     this.phiCubicAdvection = options.phiCubicAdvection !== false;
