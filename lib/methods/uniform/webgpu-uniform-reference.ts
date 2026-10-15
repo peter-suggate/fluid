@@ -530,11 +530,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private lastTime = 0;
   private referenceVolumeCells = 0;
   /** A ball waiting for a step to wet its cells. See `injectLiquidBall`. */
-  private pendingDrop?: InjectedLiquidBall;
+  private pendingDrop?: UniformLiquidDrop;
+  /** A step has asked for the pending ball's pages: it lands on the next one. */
+  private pendingDropPaged = false;
   /** The drop this step adds: each census of the step asks the page pool for its pages. */
   private pageDrop?: UniformLiquidDrop;
   /** The scheduled drop the next step adds (uniformPagePoolDropAhead): asked for with this step's, so its pages are stored when its own step's census runs. */
   private pageDropAhead?: UniformLiquidDrop;
+  /** The injected ball still waiting to land, asked for the same way. */
+  private pageInjectedAhead?: UniformLiquidDrop;
   /** The scene's stored set at build: which pages the address seeded and the pool pins. */
   private readonly pageResidency: UniformPagePoolResidency;
   /** The initial liquid the residency was computed from, held for the upload that follows it. */
@@ -1673,6 +1677,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // The census listed its certificate's pages: the commit stores them, this step's drop's and the next step's scheduled drop's, before any stage of the generation reads a block.
       if(this.pageDrop)this.requestDropPages(this.pageDrop);
       if(this.pageDropAhead)this.requestDropPages(this.pageDropAhead);
+      if(this.pageInjectedAhead)this.requestDropPages(this.pageInjectedAhead);
       this.mixedFrame!.encodePageCommit(encoder);
       this.mixedFrame?.narrowBandFlip?.activity(encoder,dynamic.importance,dt,this.narrowBandAdaptiveFadeSeconds,this.narrowBandSparseParticleLifetime);
       builder.encode(encoder);
@@ -2140,14 +2145,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * step: the ball appears in the field where it was dropped and is transported
    * from there like any other liquid.
    *
-   * Consumed by the next step, which is also what happens if the clock is
-   * paused when it is called — the ball lands when the clock next runs.
+   * The next step asks for its pages and the one after consumes it, which is
+   * also what happens if the clock is paused when it is called — the ball
+   * lands when the clock next runs.
    */
   injectLiquidBall(ball: InjectedLiquidBall): void {
     this.mixedFrame?.invalidateExtension();
    
     if (!(ball.radius_m > 0)) return;
-    this.pendingDrop = ball;
+    this.pendingDrop = uniformInjectedDrop(ball);
+    this.pendingDropPaged = false;
   }
 
   /** The editor's water shapes, as far as the one-step drop source reaches: a ball, added. */
@@ -2493,13 +2500,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // A scheduled drop is the scene's own and takes its step; a ball injected
     // for the same one waits for the next, exactly as it waits out a pause.
     const scheduled = this.scheduledDrop(stepStart_s, stepEnd_s);
-    const drop = scheduled ?? (this.pendingDrop ? uniformInjectedDrop(this.pendingDrop) : undefined);
-    if (!scheduled) this.pendingDrop = undefined;
+    // An injected ball lands a step after one asked for its pages, as a
+    // scheduled drop does: the census marks a page resident only from the
+    // tiles of blocks stored when it runs, so pages first claimed by the
+    // ball's own commit stay unmarked and the next census audits its liquid
+    // there as absent.
+    const injected = !scheduled && this.pendingDropPaged ? this.pendingDrop : undefined;
+    const drop = scheduled ?? injected;
+    if (injected) { this.pendingDrop = undefined; this.pendingDropPaged = false; }
     this.pageDrop = drop;
     // The scheduled drop the next step adds: its pages are asked for a step
     // early, so the census of its own step finds them stored.
     const schedule = this.scene.fluid.scheduledDrops, ahead = schedule ? uniformPagePoolDropAhead(schedule, stepEnd_s, dt, fixedStep_s ?? this.scene.numerics.maxDt_s) : -1;
     this.pageDropAhead = ahead < 0 ? undefined : this.scheduledDrops!.drops[ahead];
+    this.pageInjectedAhead = this.pendingDrop; this.pendingDropPaged = this.pendingDrop !== undefined;
     if (drop) {
       const cellVolume = c.width_m * c.height_m * c.depth_m
         / (this.containerCells[0] * this.containerCells[1] * this.containerCells[2]);
