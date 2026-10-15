@@ -163,12 +163,19 @@ var<workgroup> seedSpeed:atomic<u32>;
    ${this.surfaceOnly?"":`occupied=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(origin),0).x!=0.0;`}
    let c8=umLoadCorner8(origin,4u);for(var k=0u;k<8u;k++){occupied=occupied||c8[k]<${this.surfaceOnly?"0.0":"(16.0*umSceneMaximumSpacing())"};}
   }else{
-   ${this.surfaceOnly?"":"occupied=textureLoad(volume,vec3i(origin),0).x!=0.0;"}
+   ${this.surfaceOnly?`// The tile flag is the OR over its 64 owners' eight corners: exactly
+   // its 125 distinct vertices. Share those vertices across the same lanes
+   // instead of loading each interior corner up to eight times.
+   let base=origin-umCorner(owner.lane,4u);
+   for(var k=owner.lane;k<125u;k+=64u){
+    let vertex=base+umCorner(k,5u);var value=0.0;
+    if(unit){value=umLoadVertex(vertex);}else{value=umVertexValue(vertex);}
+    occupied=occupied||value<0.0;
+   }`:`occupied=textureLoad(volume,vec3i(origin),0).x!=0.0;
    for(var k=0u;k<8u;k++){
-    // Every vertex of a unit-stencil tile is stored.
     let vertex=origin+umCorner(k,2u)*width;
-    occupied=occupied||select(umVertexValue(vertex),umLoadVertex(vertex),unit)<${this.surfaceOnly?"0.0":"(4.0*umSceneMaximumSpacing())*f32(width)"};
-   }
+    occupied=occupied||select(umVertexValue(vertex),umLoadVertex(vertex),unit)<(4.0*umSceneMaximumSpacing())*f32(width);
+   }`}
   }
   if(occupied){atomicOr(&seeded[slot],3u);}
   }

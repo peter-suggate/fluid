@@ -220,12 +220,14 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
  for(var i=gid.x;i<umCounts.y;i+=65536u){
   let owner=umAllOwner(vec3u(umCounts.x*64u+i,0u,0u));let origin=umOrigin(owner);
   let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
-  // A low corner is this tile's only where nothing is stored below it.
+  // Keep the regular owner's low-wall rule. At seams the layout already
+  // compiled the canonical coarse corners; no authority lookup is needed.
   var low=vec3<bool>(false);if(regular){low=umLowOpen(vec3i(origin));}
+  let corners=umCoarseCornerMask(owner.tile);
   for(var k=0u;k<8u;k++){
    let corner=umCorner(k,2u);let p=origin+corner*4u;
    if(regular){if(!all((corner!=vec3u(0))|low)){continue;}}
-   else{if(umVertexAuthority(p).index!=owner.index){continue;}}
+   else if((corners&(1u<<k))==0u){continue;}
    let c=vec3u(umCellNearFromPage(owner.tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
    if(umTileMinimumWidth(umTileAt(c/4u))!=1u||(nbBandReach(c)&2u)==0u){continue;}
    nbBuildDistance(p,c,nbBandTile(c));
@@ -236,12 +238,14 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
  for(var i=gid.x;i<umCounts.y;i+=65536u){
   let owner=umAllOwner(vec3u(umCounts.x*64u+i,0u,0u));let origin=umOrigin(owner);
   let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
-  // A low corner is this tile's only where nothing is stored below it.
+  // Keep the regular owner's low-wall rule. At seams the layout already
+  // compiled the canonical coarse corners; no authority lookup is needed.
   var low=vec3<bool>(false);if(regular){low=umLowOpen(vec3i(origin));}
+  let corners=umCoarseCornerMask(owner.tile);
   for(var k=0u;k<8u;k++){
    let corner=umCorner(k,2u);let p=origin+corner*4u;
    if(regular){if(!all((corner!=vec3u(0))|low)){continue;}}
-   else{if(umVertexAuthority(p).index!=owner.index){continue;}}
+   else if((corners&(1u<<k))==0u){continue;}
    nbRedistanceVertex(owner.tile,origin,p,4u);
   }
  }
