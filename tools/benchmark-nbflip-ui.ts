@@ -42,7 +42,7 @@ const definition = getSceneDefinition(option("scene") ?? "nbflip-figure-9-teaser
 assert.equal(definition.methodProfile?.methodId, method.id);
 const quality = definition.methodProfile!.quality;
 const scene = structuredClone(sceneDocument(definition));
-const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...definition.methodProfile!.overrides });
+const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...definition.methodProfile!.overrides, ...(process.env.NB_VALUES ? JSON.parse(process.env.NB_VALUES) : {}) });
 const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
 assert.ok(steps * dt <= scene.duration_s + 1e-9, "Stay within the authored take");
 const profiled = process.argv.includes("--profile"), split = process.argv.includes("--dispatch-probe");

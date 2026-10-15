@@ -6,6 +6,7 @@ import { UNIFORM_PAGE_TABLE_WORDS, uniformKeyGroups, uniformLatticeAddressWGSL, 
 /** The stage's pass descriptors: begun every frame, built once. */
 const PREPARE_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP clear occupied bins"};
 const PREFIX_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP occupied cell offsets"},PACK_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP order pack"};
+const CANONICAL_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP canonical cell order"},POSITIONS_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP sorted positions"};
 /** Workgroups of every launch over the live samples, one row. A kernel reads
  * the count on the GPU and strides the launch through it, 64 samples a group
  * a turn, so any width is complete at any count up to the capacity. This one
@@ -26,8 +27,10 @@ export const NARROW_BAND_PARTICLE_GRID=4096;
  * cell's samples at that order in the first bank of the bins. Their prefix
  * sum, written to the head of the links, is each cell's first sample: a
  * cell's samples are one contiguous run, and so are those of consecutive
- * cells. Particles scatter in parallel through a cursor in the bins' second
- * bank so a crowded bin cannot serialize an entire workgroup. */
+ * cells. Keys scatter in parallel through a cursor in the bins' second
+ * bank so a crowded bin cannot serialize an entire workgroup; each sample
+ * then ranks itself within its cell and moves its record once, so the
+ * order does not depend on GPU scheduling. */
 export class UniformNarrowBandOrder {
  private readonly enabled:GPUBuffer;
  private readonly dimensions:GPUBuffer;
@@ -36,6 +39,8 @@ export class UniformNarrowBandOrder {
  private prefixPipeline!:GPUComputePipeline;
  private scan!:ParticleBinScan;
  private pipeline!:GPUComputePipeline;
+ private canonicalPipeline!:GPUComputePipeline;
+ private positionsPipeline!:GPUComputePipeline;
  private groups!:readonly [GPUBindGroup,GPUBindGroup];
  /** Cell keys of the lattice: the bins' first two banks. */
  private readonly cells:number;
@@ -92,7 +97,9 @@ var<workgroup> tilePopulation:u32;
  if(lane==0u){atomicStore(&bins[2u*UM_CELL_KEYS()+tile],0u);}
 }
 @compute @workgroup_size(64) fn prefixTile(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=group.x+65535u*group.y;if(!umTileLive(tile)){return;}
+ let tile=group.x+65535u*group.y;if(tile>=orderTiles()){return;}
+ if(tile==orderTiles()-1u&&lane==0u){state[1]=tileOffsets[tile]+atomicLoad(&bins[2u*UM_CELL_KEYS()+tile]);}
+ if(!umTileLive(tile)){return;}
  if(lane==0u){tilePopulation=atomicLoad(&bins[2u*UM_CELL_KEYS()+tile]);}
  if(workgroupUniformLoad(&tilePopulation)==0u){return;}
  let cell=64u*tile+lane;let count=atomicLoad(&bins[cell]);prefix[lane]=count;workgroupBarrier();
@@ -119,9 +126,9 @@ var<workgroup> packCount:u32;
  let count=workgroupUniformLoad(&packCount);
  if(job==0u&&lane==0u){state[1]=${this.sparse?"tileOffsets[orderTiles()-1u]+atomicLoad(&bins[2u*UM_CELL_KEYS()+orderTiles()-1u])":"links[UM_CELL_KEYS()-1u]+atomicLoad(&bins[UM_CELL_KEYS()-1u])"};}
  for(var base=64u*job;base<count;base+=64u*groups.x*groups.y){
-  let i=base+lane;var p=Particle();var key=0xffffffffu;
-  if(i<count){p=input[i];if(p.position.x>=0.0){
-   key=orderCellKey(vec3u(p.position.xyz));
+  let i=base+lane;var position=vec4f(-1.0);var key=0xffffffffu;
+  if(i<count){position=input[i].position;if(position.x>=0.0){
+   key=orderCellKey(vec3u(position.xyz));
   }}
   packKeys[lane]=key;workgroupBarrier();
   if(key!=0xffffffffu&&(lane==0u||packKeys[lane-1u]!=key)){
@@ -131,17 +138,53 @@ var<workgroup> packCount:u32;
   workgroupBarrier();
   if(key!=0xffffffffu){
    var first=lane;while(first>0u&&packKeys[first-1u]==key){first--;}
-   let next=packStarts[first]+lane-first;output[next]=p;
-   let a=UM_CELL_KEYS()+4u*next;let position=bitcast<vec4u>(p.position);
-   links[a]=position.x;links[a+1u]=position.y;links[a+2u]=position.z;links[a+3u]=position.w;
+   // A sort key, not yet the record: position and source slot.
+   let next=packStarts[first]+lane-first;
+   let a=UM_CELL_KEYS()+4u*next;let bits=bitcast<vec4u>(position);
+   links[a]=bits.x;links[a+1u]=bits.y;links[a+2u]=bits.z;links[a+3u]=i;
   }
   workgroupBarrier();
+ }
+}
+// Atomic scatter chooses slots, not a floating-point summation order. Give
+// each cell a canonical order before reconstruction, transfer and retention.
+// Positions decide almost always; an exact position tie compares every
+// stored component, and records equal in every bit are interchangeable, so
+// their source slots only make the ranks distinct.
+fn orderCompare(a:Particle,b:Particle)->i32{
+ ${["position","velocity","before",...(this.apic?["cx","cy","cz"]:[]),"lifetime"].map(field=>`{let x=bitcast<vec4u>(a.${field});let y=bitcast<vec4u>(b.${field});for(var k=0u;k<4u;k++){if(x[k]!=y[k]){return select(1,-1,x[k]<y[k]);}}}`).join("\n ")}
+ return 0;
+}
+fn orderBefore(a:vec4u,b:vec4u)->bool{
+ for(var k=0u;k<3u;k++){if(a[k]!=b[k]){return a[k]<b[k];}}
+ let order=orderCompare(input[a.w],input[b.w]);
+ return order<0||(order==0&&a.w<b.w);
+}
+fn orderKey(slot:u32)->vec4u{let a=UM_CELL_KEYS()+4u*slot;return vec4u(links[a],links[a+1u],links[a+2u],links[a+3u]);}
+// One lane a sample: its rank among its cell's keys is its slot in the run.
+// Work is linear in the cell's population a lane, all lanes in parallel.
+@compute @workgroup_size(64) fn canonical(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let live=min(state[1],arrayLength(&output));
+ for(var s=64u*(group.x+groups.x*group.y)+lane;s<live;s+=64u*groups.x*groups.y){
+  let own=orderKey(s);let cell=orderCellKey(vec3u(bitcast<vec3f>(own.xyz)));
+  let start=links[cell];let end=start+atomicLoad(&bins[cell]);
+  var rank=0u;
+  for(var k=start;k<end;k++){if(k!=s&&orderBefore(orderKey(k),own)){rank++;}}
+  output[start+rank]=input[own.w];
+ }
+}
+// The gathers read sorted positions from the links.
+@compute @workgroup_size(64) fn positions(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let live=min(state[1],arrayLength(&output));
+ for(var s=64u*(group.x+groups.x*group.y)+lane;s<live;s+=64u*groups.x*groups.y){
+  let a=UM_CELL_KEYS()+4u*s;let p=bitcast<vec4u>(output[s].position);
+  links[a]=p.x;links[a+1u]=p.y;links[a+2u]=p.z;links[a+3u]=p.w;
  }
 }
 `});
   const layout=this.device.createBindGroupLayout({entries:[{binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},...(this.sparse?[0,1,2,3,4,6,5]:[0,1,2,3,4,6]).map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0||binding>=5?"read-only-storage" as const:"storage" as const}}))]});
   const pipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[layout]});
-  [this.pipeline,this.preparePipeline,this.prefixPipeline]=await Promise.all((this.sparse?["pack","prepare","prefixTile"]:["pack"]).map(entryPoint=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
+  [this.pipeline,this.canonicalPipeline,this.positionsPipeline,this.preparePipeline,this.prefixPipeline]=await Promise.all((this.sparse?["pack","canonical","positions","prepare","prefixTile"]:["pack","canonical","positions"]).map(entryPoint=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
   this.groups=[0,1].map(parity=>this.device.createBindGroup({layout,entries:[{binding:7,resource:{buffer:this.dimensions}},{binding:6,resource:{buffer:this.topology}},...[this.particles[1-parity]!,this.particles[parity]!,this.bins,this.links,this.state,...(this.sparse?[this.tileOffsets!]:[])].map((buffer,binding)=>({binding,resource:{buffer}}))]})) as [GPUBindGroup,GPUBindGroup];
  }
  prepare(encoder:GPUCommandEncoder,parity:number):void{
@@ -149,12 +192,17 @@ var<workgroup> packCount:u32;
   const pass=encoder.beginComputePass(PREPARE_PASS);pass.setPipeline(this.preparePipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(this.tileGroups[0],this.tileGroups[1]);pass.end();
  }
  /** Dense scan for small domains; occupied-tile cell scans for large ones. */
- encode(encoder:GPUCommandEncoder,parity:number):void{
+ encodeOffsets(encoder:GPUCommandEncoder,parity:number):void{
   this.scan.encode(encoder);
   if(this.sparse){
    const prefix=encoder.beginComputePass(PREFIX_PASS);prefix.setPipeline(this.prefixPipeline);prefix.setBindGroup(0,this.groups[parity]!);prefix.dispatchWorkgroups(this.tileGroups[0],this.tileGroups[1]);prefix.end();
   }
+ }
+ encode(encoder:GPUCommandEncoder,parity:number):void{
+  this.encodeOffsets(encoder,parity);
   const pass=encoder.beginComputePass(PACK_PASS);pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(NARROW_BAND_PARTICLE_GRID);pass.end();
+  const canonical=encoder.beginComputePass(CANONICAL_PASS);canonical.setPipeline(this.canonicalPipeline);canonical.setBindGroup(0,this.groups[parity]!);canonical.dispatchWorkgroups(NARROW_BAND_PARTICLE_GRID);canonical.end();
+  const positions=encoder.beginComputePass(POSITIONS_PASS);positions.setPipeline(this.positionsPipeline);positions.setBindGroup(0,this.groups[parity]!);positions.dispatchWorkgroups(NARROW_BAND_PARTICLE_GRID);positions.end();
  }
  destroy():void{this.scan?.destroy();this.enabled.destroy();this.dimensions.destroy();this.tileOffsets?.destroy();}
 }

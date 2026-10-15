@@ -29,10 +29,10 @@ var<workgroup> nbGeometryMask:vec2u;
  let base=workgroupUniformLoad(&nbGeometryBase);let mask=nbGeometryMask;
  if((mask[lane>>5u]&(1u<<(lane&31u)))==0u){return;}
  let slot=base+nbGeometryRank(mask,lane);if(slot>=nbGeometryCapacity()){return;}
- let p=4u*umTileCoord(tile)+umCorner(lane,4u);
+ let origin=4u*umTileCoord(tile);let p=origin+umCorner(lane,4u);
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  for(var k=0u;k<8u;k++){
-  let value=umVertexValue(p+umCorner(k,2u))/h;
+  let value=nbCrossingVertex(tile,origin,p+umCorner(k,2u))/h;
   atomicStore(&bins[UM_CELL_KEYS+1u+8u*slot+k],bitcast<u32>(value));
  }
 }
@@ -60,11 +60,14 @@ fn nbPhiGradient(c:vec3u,q:vec3f)->vec4f{
 }
 fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
  let base=umCellCoord(cell);let origin=vec3f(base);var v:array<f32,8>;
- // The cell's corners are lattice vertices: among h tiles each is one load.
+ // Use the same represented field that marked this cell as a crossing.
+ // At h/4h seams umVertexValue can reconstruct a hanging vertex from a
+ // different owner and erase the zero that the crossing search found.
+ let tile=nbBandTile(base);let tileOrigin=4u*umTileCoord(tile);
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  var slot=nbGeometryCapacity();
  if(nbCachedGeometry){
-  let tile=nbBandTile(base);let first=atomicLoad(&bins[NB_BAND_CANDIDATES+tile]);
+  let first=atomicLoad(&bins[NB_BAND_CANDIDATES+tile]);
   if(first<nbGeometryCapacity()){
    let mask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*tile]),atomicLoad(&bins[NB_BAND_MASK+2u*tile+1u]));
    let local=base&vec3u(3u);slot=first+nbGeometryRank(mask,local.x+4u*(local.y+4u*local.z));
@@ -73,11 +76,17 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
  if(slot<nbGeometryCapacity()){
   for(var k=0u;k<8u;k++){v[k]=bitcast<f32>(atomicLoad(&bins[UM_CELL_KEYS+1u+8u*slot+k]));}
  }else{
-  for(var k=0u;k<8u;k++){v[k]=umVertexValue(base+umCorner(k,2u))/h;}
+  for(var k=0u;k<8u;k++){v[k]=nbCrossingVertex(tile,tileOrigin,base+umCorner(k,2u))/h;}
  }
+ // An absent zero is a failed query, never a physical distance. Preserve
+ // the caller's finite fallback if a stale/degenerate cell is supplied.
+ var low=v[0];var high=v[0];
+ for(var k=1u;k<8u;k++){low=min(low,v[k]);high=max(high,v[k]);}
+ if(low>0.0||high<0.0||low==high){return -1.0;}
  // Edge crossings supply a zero-set fallback if a clamped Newton solve
  // cannot reach zero inside this cell (thin or badly conditioned patches).
- var distance=1e20;
+ // Every point in this unit cell is within this finite geometric bound.
+ var distance=length(p-origin)+sqrt(3.0);
  for(var a=0u;a<3u;a++){for(var k=0u;k<8u;k++){
   let b=1u<<a;if((k&b)!=0u){continue;}let other=k|b;
   if(v[k]*v[other]>0.0||v[k]==v[other]){continue;}
@@ -111,7 +120,10 @@ fn nbBuildDistance(p:vec3u,c:vec3u,tile:u32){
    // lifted the air five cells over a resting surface, and with it the 4h
    // owner whose phi sets the surface's pressure theta.
    var distance=max(abs(value),5.0);
-   if(nearest!=NB_NO_SURFACE){distance=nbSurfaceDistance(vec3f(p),nearest);}
+   if(nearest!=NB_NO_SURFACE){
+    let candidate=nbSurfaceDistance(vec3f(p),nearest);
+    if(candidate>=0.0){distance=candidate;}
+   }
    // Cell-centre proximity alone can select the wrong interface beside a
    // tiny ripple. Also trace the local phi gradient across cell boundaries;
    // unlike a cell-clamped solve this reaches the surface above that vertex.

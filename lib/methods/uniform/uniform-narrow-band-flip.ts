@@ -40,7 +40,7 @@ interface NarrowBandStep{readonly groups:string;readonly base:boolean;readonly p
 /** A pass's launches. A frame replays them; it builds no list or label. */
 interface NarrowBandBatch{readonly pass:GPUComputePassDescriptor;readonly steps:readonly NarrowBandStep[]}
 interface NarrowBandBatches{
- readonly advect:NarrowBandBatch;readonly marking:NarrowBandBatch;readonly seedInitial:NarrowBandBatch;readonly commit:NarrowBandBatch;
+ readonly advect:NarrowBandBatch;readonly marking:NarrowBandBatch;readonly countInitial:NarrowBandBatch;readonly seedInitial:NarrowBandBatch;readonly commit:NarrowBandBatch;
  readonly activity:NarrowBandBatch;readonly search:NarrowBandBatch;readonly searchReconstruct:NarrowBandBatch;readonly searchRedistance:NarrowBandBatch;
  readonly diagnose:NarrowBandBatch;readonly reconstruct:NarrowBandBatch;readonly reconstructCoarse:NarrowBandBatch;readonly transfer:NarrowBandBatch;
  readonly snapshot:NarrowBandBatch;readonly retire:NarrowBandBatch;readonly redistanceFine:NarrowBandBatch;readonly redistanceMetric:NarrowBandBatch;readonly metric:NarrowBandBatch;
@@ -761,25 +761,26 @@ fn seedSite(c:vec3u,k:u32,initial:bool,activated:bool)->vec4f{
   // The shell's depth is the depth at its point.
   return shell;
 }
-fn seedCell(c:vec3u,initial:bool){
+fn seedCell(c:vec3u,emit:bool){
  // No tile past the reach is within six cells of the surface.
  if((nbBandReach(c)&1u)==0u){return;}
  let heat=nbTargetHeat(vec3f(c)+0.5);if(heat<=0.0){return;}
- let count=atomicLoad(&bins[umCellAt(c)]);if(count>=8u){return;}
  if(!nbParticleCellOpen(vec3i(c))){return;}
  let d=particleDepth(vec3f(c)+0.5);if(d>0.9||d < -4.5){return;}
  let activated=atomicLoad(&bins[NB_ACTIVITY_NEW+nbBandTile(c)])!=0u;
  var seeds:array<vec4f,8>;var seedCount=0u;
- for(var k=count;k<8u;k++){
-  let site=seedSite(c,k,initial,activated);if(site.x<0.0){continue;}
+ for(var k=0u;k<8u;k++){
+  let site=seedSite(c,k,true,activated);if(site.x<0.0){continue;}
   seeds[seedCount]=site;seedCount++;
  }
- // Reserve the cell's accepted candidates together. Neighboring new samples
- // then remain contiguous through the next frame's particle tracing.
+ // Count first, then use the cell prefix. GPU scheduling cannot change
+ // initial particle slots or which cells fit if the pool is exhausted.
  if(seedCount==0u){return;}
- let first=atomicAdd(&state[1],seedCount);let capacity=arrayLength(&particles);
+ let cell=umCellAt(c);
+ if(!emit){atomicStore(&bins[cell],seedCount);${this.order.sparse?"atomicAdd(&bins[NB_COVERAGE+umTileAt(c/4u)],seedCount);":""}return;}
+ let first=links[cell];let capacity=arrayLength(&particles);
  let kept=min(seedCount,capacity-min(first,capacity));
- if(kept<seedCount){nbPoolFull(initial,seedCount-kept);}
+ if(kept<seedCount){nbPoolFull(true,seedCount-kept);}
  for(var k=0u;k<kept;k++){
   let q=seeds[k];
   particles[first+k]=nbSeedParticle(q,heat);
@@ -834,7 +835,11 @@ fn storeSeedCandidate(p:Particle,lane:u32,mandatory:bool){
  storeSeedCandidate(seedCandidate(group,lane,false),${subgroups?"subgroupLane":"0u"},false);
 }
 
+@compute @workgroup_size(64) fn countInitial(@builtin(global_invocation_id) gid:vec3u){
+ for(var i=gid.x;i<UM_CELL_KEYS;i+=65536u){if(!umCellLive(i)){continue;}seedCell(umCellCoord(i),false);}
+}
 @compute @workgroup_size(64) fn seedInitial(@builtin(global_invocation_id) gid:vec3u){
+ ${this.order.sparse?"":"if(gid.x==0u){atomicStore(&state[1],links[UM_CELL_KEYS-1u]+atomicLoad(&bins[UM_CELL_KEYS-1u]));}"}
  for(var i=gid.x;i<UM_CELL_KEYS;i+=65536u){if(!umCellLive(i)){continue;}let c=umCellCoord(i);seedCell(c,true);}
 }
 fn weight(x:f32)->f32{let a=abs(x);if(a<0.5){return 0.75-a*a;}let b=max(0.0,1.5-a);return 0.5*b*b;}
@@ -971,7 +976,7 @@ ${narrowBandSurfaceWGSL}
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
-  await Promise.all(["activity","activitySpread","advectParticles","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists",...narrowBandNearestEntries,"depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse"].map(async entryPoint=>{
+  await Promise.all(["activity","activitySpread","advectParticles","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists",...narrowBandNearestEntries,"depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse"].map(async entryPoint=>{
    const module=modules[["advectParticles","snapshot","update","seed","seedSources"].includes(entryPoint)?1:0]!;
    const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(entryPoint==="depthCoarse"?{nbCachedGeometry:0}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(entryPoint,p);
@@ -985,7 +990,7 @@ ${narrowBandSurfaceWGSL}
   this.batches={
    advect:this.compile(["advectParticles"],undefined,"advectParticles"),
    marking:this.compile(["markParticleTiles","commitCount"],"surface","particle tile marking"),
-   seedInitial:this.compile(["seedInitial"],"bootstrap","seedInitial"),commit:this.compile(["commitCount"],undefined,"commitCount"),
+   countInitial:this.compile(["countInitial"],"bootstrap","countInitial"),seedInitial:this.compile(["seedInitial"],"bootstrap","seedInitial"),commit:this.compile(["commitCount"],undefined,"commitCount"),
    activity:this.compile(["activity","activitySpread"],"bootstrap","activity"),
    search:this.compile(search,undefined,"crossing search"),searchReconstruct:this.compile(search,"reconstruct","crossing search"),searchRedistance:this.compile(search,"redistance","crossing search"),
    diagnose:this.compile(["diagnoseBefore"],"reconstruct","diagnoseBefore"),
@@ -1065,6 +1070,8 @@ ${narrowBandSurfaceWGSL}
   encoder.clearBuffer(this.state,4,8);encoder.clearBuffer(this.bins,0,this.cells*8);
   encoder.clearBuffer(this.bins,this.cells*8+this.tiles*4,this.tiles*4);
   this.measureBand(encoder,b.search);this.buildDistance(encoder,b.metric);this.cache.encode(encoder,this.cacheGroups.bootstrap!);
+  if(this.order.sparse)encoder.clearBuffer(this.bins,this.cells*8,this.tiles*4);
+  this.run(encoder,b.countInitial);this.order.encodeOffsets(encoder,1-this.parity);
   this.run(encoder,b.seedInitial);this.run(encoder,b.commit);
   this.parity=1-this.parity;this.started=true;
  }
