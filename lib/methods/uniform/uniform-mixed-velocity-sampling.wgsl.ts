@@ -35,6 +35,35 @@ fn umHangingPlaneAddress(slot:u32,local:vec3u,axis:u32)->u32 {
 
 `;
 
+/** The unit taps by block, haloed (UniformMixedHangingTaps.haloOf): an
+ * rgba32float texture of 35 texels an axis for every block of the block grid
+ * (umBlockCoord). Block b's page has its 32³ cells at local texels 2..33, two
+ * cells below them and one above, so a unit interpolant whose sample tile
+ * lies in that page reaches all eight taps of each component, and a
+ * quadratic APIC row of a particle in it all 27, at plain offsets from the
+ * block's origin: no tap reads the page table or branches.
+ * Channels xyz hold exactly the value the unit interpolant reads for a tap:
+ * - the unit texture's texel where the cell resolves (umCellTexel: its own
+ *   page's, block 0 beside AIR, the last block beside SOLID);
+ * - for channel a of a SOLID cell on the plane just below the low wall
+ *   along a (a umFaceLow anchor), the low-wall face above it: the low-face
+ *   table under a unit tile, the compiled negative-plane tap under a coarser
+ *   one (umVelocityTap1's). A SOLID cell's other channels keep its texel
+ *   (the last block's, zero), as the unit sampler's direct loads read it.
+ * Channel w is 1 where a tap may read xyz (a unit or a slotted tile of a
+ * stored page, whose xyz are umVelocityTap1's, or a SOLID cell), 0 elsewhere (an
+ * AIR page, or a coarse tile the fill did not write).
+ * The blocks that hold no page are never written; a sample whose tile is not
+ * stored never reads the halo. */
+export const UNIFORM_UNIT_HALO_EDGE = 35;
+export function uniformUnitHaloExtent(address: { readonly blockGrid: readonly number[] }): [number, number, number] {
+  return [UNIFORM_UNIT_HALO_EDGE * address.blockGrid[0]!, UNIFORM_UNIT_HALO_EDGE * address.blockGrid[1]!, UNIFORM_UNIT_HALO_EDGE * address.blockGrid[2]!];
+}
+/** The texel of block b's page's first cell (local 0, 0, 0). */
+export const uniformUnitHaloWGSL = /* wgsl */ `
+fn umUnitHaloOrigin(b:u32)->vec3i{return ${UNIFORM_UNIT_HALO_EDGE}*umBlockCoord(b)+vec3i(2);}
+`;
+
 /** MAC sampling from canonical mixed face values. The caller supplies
  * umLoadMixedFace(anchor,axis), including the native negative boundary planes.
  * No dense fine field or face-incidence table is constructed. The h and 4h
@@ -52,7 +81,11 @@ fn umHangingPlaneAddress(slot:u32,local:vec3u,axis:u32)->u32 {
  * eight loads at plain offsets from the cache block of the sample's page,
  * and a sample resolves its tile, and with it that block, once for its three
  * components. */
-export function uniformMixedVelocitySamplingSource(payload = false, coarseCache?: string, regularTexture?: string, hangingGroup?: number, unitTexture?: string, regularFace?: string): string {
+/** unitHalo names the haloed unit taps (UNIFORM_UNIT_HALO_EDGE) of
+ * unitTexture: a sample resolves its block's halo home once for its three
+ * components and its unit interpolant is eight plain-offset loads there. */
+export function uniformMixedVelocitySamplingSource(payload = false, coarseCache?: string, regularTexture?: string, hangingGroup?: number, unitTexture?: string, regularFace?: string, unitHalo?: string): string {
+if (unitHalo !== undefined && (!unitTexture || payload || coarseCache === undefined)) throw new Error("The unit halo serves the cached unit interpolant");
 const type = payload ? "vec3f" : "f32", zero = payload ? "vec3f(0)" : "0.0";
 if (coarseCache !== undefined && (payload || !/^[a-zA-Z]\w*$/.test(coarseCache))) throw new Error("The 4h cache is a named texture of scalar samples");
 if (hangingGroup !== undefined && payload) throw new Error("The hanging fine-tap cache holds scalar samples");
@@ -209,6 +242,13 @@ fn umSampleVelocity${width}(p:vec3f,axis:u32)->${type} {
  let b=umHold;var lower=b.lo/${width}.0;lower[axis]-=1.0;
  let q=clamp(p/${width}.0-offset,lower,b.hi/${width}.0-vec3f(1.0));
  let base=vec3i(floor(q));let fraction=fract(q);var terms:array<${type},8>;
+ ${width===1&&unitHalo?`// The sample's page's halo block holds every tap, the low-wall faces included.
+ if(umUnitHome.w>=0){
+  for(var k=0u;k<8u;k++){
+   terms[k]=textureLoad(${unitHalo},base+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u))+umUnitHome.xyz,0)[axis];
+  }
+  return umVelocityLerp8(terms,fraction);
+ }`:""}
  ${width===1&&regularTexture&&!payload?`// A certified unit stencil uses native scalar loads. Interior samples need
  // no owner resolution, per-tap boundary branch or transverse clamp. A tap
  // beyond the held upper edge has exactly zero interpolation weight.
@@ -271,6 +311,16 @@ fn umSampleVelocityWeightedIn(p:vec3f,home:UMCoarseHome,axis:u32,fine:f32)->f32 
 fn umFineStencilTile(key:u32)->bool {return (umTileSupport(key)&1u)!=0u&&umTileMaximumWidth(key)==1u;}
 ${unitTexture?`// A fine owner has unit interpolation weight; its seam taps are cached too.
 fn umCachedFineTile(key:u32)->bool {return (umTileSupport(key)&1u)!=0u&&umTileWidth(key)==1u;}
+`:""}${unitHalo?`${uniformUnitHaloWGSL}
+// The unit taps' halo home of a sample: its tile's block's origin less its
+// page's first cell (w -1: the original sampler, for an unstored tile, the
+// regular layout or a halo stand-in). Set once a sample, before its axes.
+var<private> umUnitHome:vec4i=vec4i(-1);
+fn umUnitHaloHome(s:UMSampleTile)->vec4i {
+ let block=s.key>>9u;
+ if(umRegularFine||textureDimensions(${unitHalo}).x<2u||!umBlockStored(block)){return vec4i(-1);}
+ return vec4i(umUnitHaloOrigin(block)-((s.tile>>vec3u(3u))<<vec3u(5u)),0);
+}
 `:""}
 // A fine tile's sample is its h interpolant whole: weight 1 through the one
 // call of umSampleVelocityWeightedIn${unitTexture?"":", or umSampleVelocityFine's own call"}.
@@ -278,13 +328,13 @@ fn umSampleVelocityAxis(p:vec3f,s:UMSampleTile,fineTile:bool,weights:f32,axis:u3
  ${unitTexture?"":"if(fineTile){return umSampleVelocityFine(p,axis);}\n "}return umSampleVelocityWeightedIn(p,umCoarseHome(p,s),axis,weights);
 }
 fn umSampleVelocityComponent(p:vec3f,axis:u32)->f32 {
- let s=umSampleTile(p);let fineTile=!umRegularFine&&${fineTile}(s.key);
+ let s=umSampleTile(p);let fineTile=!umRegularFine&&${fineTile}(s.key);${unitHalo?"umUnitHome=umUnitHaloHome(s);":""}
  var weights=1.0;if(!fineTile){weights=umVelocitySamplingWeightsAt(s);}
  return umSampleVelocityAxis(p,s,fineTile,weights,axis);
 }
 // The three components in one loop: one call of the axis sample.
 fn umSampleVelocity(p:vec3f)->vec3f {
- let s=umSampleTile(p);let fineTile=!umRegularFine&&${fineTile}(s.key);
+ let s=umSampleTile(p);let fineTile=!umRegularFine&&${fineTile}(s.key);${unitHalo?"umUnitHome=umUnitHaloHome(s);":""}
  var weights=1.0;if(!fineTile){weights=umVelocitySamplingWeightsAt(s);}
  var v=vec3f(0.0);
  for(var a=0u;a<3u;a++){v[a]=umSampleVelocityAxis(p,s,fineTile,weights,a);}

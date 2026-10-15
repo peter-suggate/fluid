@@ -42,6 +42,8 @@ export interface UniformMixedSurfaceFields {
   evidence: GPUBufferBinding;
   /** UniformMixedHangingTaps.unitVelocity of `velocity`. */
   unitVelocity: GPUTexture;
+  /** Its halo (UniformMixedHangingTaps.haloOf). */
+  unitHalo: GPUTexture;
 }
 
 /** Narrow-band phi advection on canonical vertices of a resolved phi field
@@ -88,7 +90,9 @@ export class UniformMixedSurface {
       ...(solid?[{binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}]:[]),
       ...(sourceParams?[{binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
       ...[10,12,13].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
-    ]});
+      // The unit taps' halo: no detail field.
+      {binding:14,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
+    ]},[14]);
     const address=this.address=ownership.capacity.address;
     // A deferred advect word holds a vertex key in 30 bits (all ones is no word): 29,878 pages of 33³ vertices.
     if(address.vertexKeys>0x3fffffff)throw new Error(`Mixed surface deferred advect packs a vertex key in 30 bits: ${address.vertexKeys} vertex keys exceed 1073741823 (29,878 pages of 35,937)`);
@@ -126,7 +130,7 @@ export class UniformMixedSurface {
       ...(this.solid?[{binding:8,resource:{...f.evidence,size:evidenceBytes}}]:[]),
       {binding:10,resource:{buffer:f.evidence.buffer,offset:deferredOffset,size:deferredBytes}},
       ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
-      {binding:11,resource:f.unitVelocity},
+      {binding:11,resource:f.unitVelocity},{binding:14,resource:f.unitHalo},
       {binding:12,resource:{buffer:this.claims}},
       {binding:13,resource:{buffer:f.narrowBandState}},
     ]});
@@ -136,7 +140,7 @@ export class UniformMixedSurface {
     // regularTexture: interior unit-stencil samples load their eight taps
     // directly (no per-tap boundary branch, transverse clamp or select); the
     // skipped taps are exactly the zero-weight ones.
-    const velocitySampling=uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",this.solid?3:2,"unitVelocity");
+    const velocitySampling=uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",this.solid?3:2,"unitVelocity",undefined,"unitHalo");
     const module=uniformDetailModule(this.device,{label:"Uniform mixed surface",code:uniformMixedClaimedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformMixedTopologyNeighboursWGSL()+/* wgsl */`
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var outputPhi:texture_storage_3d<r32float,write>;
@@ -168,6 +172,7 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  return textureLoad(velocity,anchor,0)[axis];
 }
 @group(1) @binding(11) var unitVelocity:texture_3d<f32>;
+@group(1) @binding(14) var unitHalo:texture_3d<f32>;
 ${velocitySampling}
 ${narrowBandTraceWGSL("umSampleVelocity")}
 // p as a tap reaches it from the page: held inside it on an axis only where

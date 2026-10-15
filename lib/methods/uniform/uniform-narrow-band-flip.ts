@@ -189,7 +189,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    {binding:14,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write",format:"r32float",viewDimension:"3d"}},
    {binding:9,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},
    {binding:16,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
-  ]});
+   // The haloed copy of binding 11's taps (UniformMixedHangingTaps.haloOf): no detail field.
+   {binding:12,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
+  ]},[12]);
  }
  bind(fields:{phi:GPUTexture;phiScratch:GPUTexture;phase:GPUTexture;velocity:GPUTexture;velocityScratch:GPUTexture;departure:GPUTexture;negative:GPUBuffer;negativeScratch:GPUBuffer;negativeDeparture:GPUBuffer;coarseExtended:GPUTexture;unitExtended:GPUTexture;hanging:UniformMixedHangingTaps}):void{
   const f=fields;this.snapshotInput={raw:f.departure,negative:f.negativeDeparture};
@@ -211,7 +213,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
     {binding:5,resource:{buffer:negative}},{binding:6,resource:{buffer:this.params}},
     {binding:7,resource:name==="reconstruct"||name==="redistanceStore"?f.phiScratch:f.phi},{binding:8,resource:velocity},{binding:9,resource:output},
     {binding:10,resource:name==="advectParticles"?f.coarseExtended:this.coarseVelocity},
-    {binding:11,resource:name==="snapshot"||name==="update"?unit:f.unitExtended},{binding:14,resource:name==="reconstruct"||name==="redistanceStore"?f.phi:f.phiScratch},
+    {binding:11,resource:name==="snapshot"||name==="update"?unit:f.unitExtended},{binding:12,resource:f.hanging.haloOf(name==="snapshot"||name==="update"?unit:f.unitExtended)},{binding:14,resource:name==="reconstruct"||name==="redistanceStore"?f.phi:f.phiScratch},
     {binding:15,resource:f.phase},
     {binding:16,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}},
    ]})) as [UniformDetailGroup,UniformDetailGroup];
@@ -360,6 +362,7 @@ struct Params{hDt:vec4f,settings:vec4f,activity:vec4f}
 @group(1) @binding(9) var output:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(10) var coarseVelocity:texture_3d<f32>;
 @group(1) @binding(11) var unitVelocity:texture_3d<f32>;
+${unitTaps&&!slots?"@group(1) @binding(12) var unitHalo:texture_3d<f32>;":""}
 @group(1) @binding(14) var outputPhi:texture_storage_3d<r32float,read_write>;
 @group(1) @binding(15) var phase:texture_3d<f32>;
 // The spatial order leaves the samples sorted by cell key, a tile's 64 cells
@@ -395,7 +398,7 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(umLowFaceAbove(anchor,axis),axis)];}
  return ${slots?"ueSnapshotFace(anchor,axis)":"textureLoad(velocity,anchor,0)[axis]"};
 }
-${uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",undefined,unitTaps?"unitVelocity":undefined,slots?"ueSnapshotUnit":undefined)}
+${uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",undefined,unitTaps?"unitVelocity":undefined,slots?"ueSnapshotUnit":undefined,unitTaps&&!slots?"unitHalo":undefined)}
 ${uniformMixedSolidWGSL(2,this.solid.coarse?.count)}
 ${narrowBandTerrainContactWGSL}
 ${uniformMixedSourceWGSL(16)}
@@ -405,15 +408,31 @@ fn sampleVelocity(p:vec3f)->vec3f{
 ${this.apic?/* wgsl */`
 // Extend the velocity at domain walls without changing the quadratic moments.
 // Interior solid values come from the same extrapolated field as FLIP.
+${unitTaps&&!slots?`// A particle of a unit tile reads its taps at plain offsets from its page's
+// halo block (every tap is then in a unit or a slotted tile, whose halo
+// texel is umVelocityTap1's value: channel w); a tap the halo does not hold
+// repeats the sample through umVelocityTap1.
+var<private> nbApicHome:vec4i=vec4i(-1);
+var<private> nbApicValid:bool=true;`:""}
 fn nbApicTap(index:vec3i,axis:u32)->f32{
  var low=vec3i(umHold.lo);low[axis]-=1;
  let held=clamp(index,low,vec3i(umHold.hi)-1);
+ ${unitTaps&&!slots?"if(nbApicHome.w>=0){let t=textureLoad(unitHalo,held+nbApicHome.xyz,0);nbApicValid=nbApicValid&&t.w>0.0;return t[axis];}":""}
  return umVelocityTap1(held,axis);
 }
 ${narrowBandApicMomentWGSL}
 fn nbApicSample(p:Particle)->Particle{
  umHold=umPointBounds(p.position.xyz,8.0);
- let x=nbApicRow(p.position.xyz,0u);let y=nbApicRow(p.position.xyz,1u);let z=nbApicRow(p.position.xyz,2u);
+ ${unitTaps&&!slots?`let s=umSampleTileHeld(p.position.xyz);nbApicHome=select(vec4i(-1),umUnitHaloHome(s),umTileWidth(s.key)==1u);
+ // One row call site: a row is umVelocityTap1's single caller.
+ var rows:array<vec4f,3>;
+ for(var attempt=0u;attempt<2u;attempt++){
+  nbApicValid=true;
+  for(var a=0u;a<3u;a++){rows[a]=nbApicRow(p.position.xyz,a);}
+  if(nbApicValid||nbApicHome.w<0){break;}
+  nbApicHome=vec4i(-1);
+ }
+ let x=rows[0];let y=rows[1];let z=rows[2];`:"let x=nbApicRow(p.position.xyz,0u);let y=nbApicRow(p.position.xyz,1u);let z=nbApicRow(p.position.xyz,2u);"}
  var result=p;result.velocity=vec4f(x.w,y.w,z.w,p.velocity.w);
  result.cx=vec4f(x.xyz,0);result.cy=vec4f(y.xyz,0);result.cz=vec4f(z.xyz,0);return result;
 }`:""}
@@ -496,6 +515,10 @@ var<workgroup> nbMarkedMask:atomic<u32>;
 var<workgroup> nbMarkedHeat:array<atomic<u32>,27>;
 var<workgroup> nbOwnHeat:atomic<u32>;
 var<workgroup> nbMarkedPopulation:u32;
+var<workgroup> nbCellStart:array<u32,64>;
+var<workgroup> nbCellHeat:array<atomic<u32>,64>;
+var<workgroup> nbCellLive:array<atomic<u32>,2>;
+var<workgroup> nbStray:atomic<u32>;
 @compute @workgroup_size(64) fn markParticleTiles(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let tile=group.x+65535u*group.y;if(!umTileLive(tile)){return;}
  let first=64u*tile;
@@ -504,22 +527,45 @@ var<workgroup> nbMarkedPopulation:u32;
   ${this.order.sparse?"if(atomicLoad(&bins[NB_COVERAGE+tile])!=0u)":""}{nbMarkedPopulation=links[first+63u]+atomicLoad(&bins[first+63u])-links[first];}
  }
  if(workgroupUniformLoad(&nbMarkedPopulation)==0u){return;}
- if(lane==0u){atomicStore(&nbMarkedMask,0u);atomicStore(&nbOwnHeat,0u);}
- if(lane<27u){atomicStore(&nbMarkedHeat[lane],0u);}workgroupBarrier();
- let local=umCorner(lane,4u);let coord=vec3i(umTileCoord(tile));let c=4u*vec3u(coord)+local;
+ if(lane==0u){atomicStore(&nbMarkedMask,0u);atomicStore(&nbOwnHeat,0u);atomicStore(&nbStray,0u);atomicStore(&nbCellLive[0],0u);atomicStore(&nbCellLive[1],0u);}
+ if(lane<27u){atomicStore(&nbMarkedHeat[lane],0u);}
+ // The tile's samples are one sorted run: lane k holds cell k's start.
+ let begin=links[first];nbCellStart[lane]=links[first+lane]-begin;atomicStore(&nbCellHeat[lane],0u);
+ let population=nbMarkedPopulation;workgroupBarrier();
+ let local=umCorner(lane,4u);let coord=vec3i(umTileCoord(tile));
  // A cell's samples reach the tile below it or the one above, by its half of
  // the tile: the wall across a page face holds that reach in the tile.
  let reachLow=coord+vec3i(local/2u)-1;let reachHigh=coord+vec3i(local/2u);
  let low=umTileNearFromPage(tile>>9u,coord>>vec3u(3u),reachLow);let high=umTileNearFromPage(tile>>9u,coord>>vec3u(3u),reachHigh);
- let order=first+lane;let start=links[order];let stop=start+atomicLoad(&bins[order]);
- var heat=0.0;var live=false;
- for(var i=start;i<stop;i++){
-  let a=UM_CELL_KEYS+4u*i;let q=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));let h=max(0.0,bitcast<f32>(links[a+3u]));
+ // The samples stride the lanes, not a lane its cell's run: a crowded cell
+ // held its whole wave for its run (the long dam's frame 60 has cells of
+ // thousands of samples; the per-cell loop cost 1.6 ms there, this 0.13).
+ // A sample's cell is the last run starting at or before it; each cell's
+ // heat is the maximum of its samples' (nonnegative, so their bits order
+ // as they do: max(heat,h) from 0).
+ for(var j=lane;j<population;j+=64u){
+  var cell=0u;for(var step=32u;step>0u;step>>=1u){if(nbCellStart[cell+step]<=j){cell+=step;}}
+  let a=UM_CELL_KEYS+4u*(begin+j);let q=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));let h=max(0.0,bitcast<f32>(links[a+3u]));
+  let l=umCorner(cell,4u);let rl=coord+vec3i(l/2u)-1;let rh=coord+vec3i(l/2u);
   // Preserve the original floating-point boundary decisions exactly.
   let lo=vec3i(floor((q-2.0)/4.0));let hi=vec3i(floor((q+2.0)/4.0));
-  if(any(lo!=reachLow)||any(hi!=reachHigh)){markSurfaceTiles(q,h);continue;}
-  live=true;heat=max(heat,h);
+  if(any(lo!=rl)||any(hi!=rh)){atomicStore(&nbStray,1u);continue;}
+  atomicMax(&nbCellHeat[cell],select(bitcast<u32>(h),0u,h==0.0));atomicOr(&nbCellLive[cell>>5u],1u<<(cell&31u));
  }
+ // A sample whose support leaves its cell's reach marks its own tiles. That
+ // is rare, and kept out of the loop above: inlined there, its loops and
+ // atomics doubled the loop's cost though no sample took them. The marks are
+ // atomic stores and maxima, so their order changes nothing.
+ if(workgroupUniformLoad(&nbStray)!=0u){
+  for(var j=lane;j<population;j+=64u){
+   var cell=0u;for(var step=32u;step>0u;step>>=1u){if(nbCellStart[cell+step]<=j){cell+=step;}}
+   let a=UM_CELL_KEYS+4u*(begin+j);let q=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));
+   let l=umCorner(cell,4u);let rl=coord+vec3i(l/2u)-1;let rh=coord+vec3i(l/2u);
+   let lo=vec3i(floor((q-2.0)/4.0));let hi=vec3i(floor((q+2.0)/4.0));
+   if(any(lo!=rl)||any(hi!=rh)){markSurfaceTiles(q,max(0.0,bitcast<f32>(links[a+3u])));}
+  }
+ }
+ let live=((atomicLoad(&nbCellLive[lane>>5u])>>(lane&31u))&1u)!=0u;let heat=bitcast<f32>(atomicLoad(&nbCellHeat[lane]));
  if(live){
   var mask=0u;
   for(var z=low.z;z<=high.z;z++){for(var y=low.y;y<=high.y;y++){for(var x=low.x;x<=high.x;x++){
