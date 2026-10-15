@@ -664,6 +664,14 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
     var theta=1.0;
     if(liquid!=n.wet){
      if(${S?"shut||!umCellIsOpen(q)":"false"}){theta=bPairTheta(own,liquid,n.phi,n.wet);}
+     ${S?`// Between two centres inside the solid phi's zero crossing is in the
+     // solid, not the free surface: that is no nearer than the air centre.
+     // At the crossing, a near-shut pocket of a smooth wall (open 1e-4..0.1)
+     // that stopped its inflow with kPa drove it out through its sliver of
+     // aperture at 1/theta (10-80 m/s), and particles took it out of the
+     // band. Closed instead, the film of a gentle slope (its last sub-cell
+     // layer) could not drain (nbflip-slope-clearance).
+     else if(inside&&umCellInsideSolid(q)){theta=1.0;}`:""}
      else{theta=bFaceTheta(bFacePhi(p,axis,sign),own,liquid,n.phi,n.wet);}
     }
     if(bCellAt(q)!=0u){kind=K_BAND;coefficient=1.0/(h*h*theta);}
@@ -674,12 +682,7 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
     // free-surface face, a shoreline cell under a slope took flux from the
     // air above it at a theta its own column's phi never changed: nothing
     // restored it, and the column's surface sank a micron in 20 steps.
-    // Between two centres inside the solid phi's zero crossing is in the
-    // solid: no free surface there either. Left open, a near-shut pocket of
-    // a smooth wall (open 1e-4..0.1) stopped its inflow with kPa, and the
-    // ghost fluid's 1/theta drove that pressure out through its sliver of
-    // aperture at 10-80 m/s: particles took it and left the band.
-    if(kind!=K_NEUMANN){sealed=(liquid&&shut&&!n.wet)||(!liquid&&n.wet&&!umCellIsOpen(q))||(liquid!=n.wet&&inside&&umCellInsideSolid(q));}`:""}
+    if(kind!=K_NEUMANN){sealed=(liquid&&shut&&!n.wet)||(!liquid&&n.wet&&!umCellIsOpen(q));}`:""}
    }
    ${S?`// CM11a: V scales the coefficient and the flux. A Neumann face's flux is
    // V times the transferred 4h face (init), the root's own flux through it:
