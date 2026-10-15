@@ -77,13 +77,15 @@ const groupsOf=(count:number,per:number):number=>{const padded=count+per-1;retur
 const PREPARE_PASS:GPUComputePassDescriptor={label:"Uniform pressure band list and rows"};
 const SOLVE_PASS:GPUComputePassDescriptor={label:"Uniform pressure band solve"};
 const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform pressure band projection"};
-/** Band rows are field-major over CAP*64 rows: rhs, diagonal, face kinds,
- * the six face coefficients, u* per face (init replaces Neumann entries
- * with the transferred 4h velocity), with static solids the CM11a V
- * per face, then the row's start pressure (the iterate is the correction to
- * it). A slot's 64 rows (and iterate values) are colour-major: each
- * red-black half sweep reads 32 contiguous rows per field. */
-const ROW_FIELDS=16,SOLID_ROW_FIELDS=22;
+/** The ten cell planes are field-major over CAP*64 rows: rhs, diagonal,
+ * face kinds, six coefficients, and start pressure. Rows are colour-major,
+ * so hot red-black sweeps still read 32 contiguous values per plane.
+ * The cold face payloads follow: u* (init replaces Neumann faces with the
+ * transferred 4h velocity), then CM11a V with solids. Each payload holds
+ * three 5x4x4 MAC grids per tile, sharing interior faces between cells.
+ * Only the positive face owner and the tile's low boundary write them;
+ * Neumann updates occur only on tile boundaries, with one writer each. */
+const ROW_WORDS_PER_TILE=10*64+240,SOLID_ROW_WORDS_PER_TILE=10*64+2*240;
 /** 2h aggregates: correction, residual, diagonal, six couplings. 4h
  * aggregates: correction and residual by slot, then by colour-ordered
  * position the diagonal and six couplings (2..8), six neighbour slots (+1)
@@ -205,7 +207,6 @@ export class UniformPressureBand {
  get slotMapOffset():number{return 4*(HEADER+this.listSlots);}
  /** Tile list words of index: every tile. */
  private readonly listSlots:number;
- private readonly rowFields:number;
  /** Each cycle's restriction launch (it writes its own history word). */
  private readonly restricts:readonly string[];
  constructor(private readonly device:GPUDevice,private readonly simulation:UniformMixedOwnership,private readonly pressure:UniformMixedOwnership,private fields:UniformPressureBandFields,
@@ -217,7 +218,6 @@ export class UniformPressureBand {
   if(solid&&!solid.coarse)throw new Error("The solid pressure band needs the all-4h solid record");
   if(schedule.cycles<1||schedule.cycles>=HISTORY)throw new Error(`Pressure band cycles must be 1..${HISTORY-1}`);
   if(schedule.middleSweeps<1)throw new Error("The pressure band's 2h level needs a sweep: its first red half sweep carries the restriction and the prolongation");
-  this.rowFields=solid?SOLID_ROW_FIELDS:ROW_FIELDS;
   this.restricts=Array.from({length:schedule.cycles},(_,k)=>`restrict@${k}`);
   this.listSlots=tiles;
   this.index=device.createBuffer({label:"Uniform pressure band tiles",size:(HEADER+this.listSlots+tiles+Math.ceil(tiles/256))*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
@@ -239,7 +239,7 @@ export class UniformPressureBand {
   this.budget(Math.max(1,Math.min(this.capacity,layout.fineTiles.length)));
  }
  /** Bytes of the rows at `capacity` band tiles, with or without solids. */
- static rowBytes(capacity:number,solid:boolean):number{return 4*(solid?SOLID_ROW_FIELDS:ROW_FIELDS)*64*capacity;}
+ static rowBytes(capacity:number,solid:boolean):number{return 4*(solid?SOLID_ROW_WORDS_PER_TILE:ROW_WORDS_PER_TILE)*capacity;}
  /** Bytes of the capacity-sized buffers at `capacity` band tiles. */
  bytesAt(capacity:number):{rows:number;aggregates:number;iterate:number}{
   const halo=uniformFaceCellSlots(this.simulation.capacity.address.blocks);
@@ -316,6 +316,19 @@ const K_GHOST:u32=0u;const K_BAND:u32=1u;const K_WALL:u32=2u;const K_OPEN:u32=3u
 fn bLocal(lane:u32)->vec3u{return vec3u(lane%4u,(lane/4u)%4u,lane/16u);}
 // A slot's row of local cell l: colour-major, then the half sweep's lane order.
 fn bRow(l:vec3u)->u32{return ((l.x+l.y+l.z)&1u)*32u+(l.x>>1u)+2u*l.y+8u*l.z;}
+// One face value per tile, with its low and high boundary planes. Keeping
+// tile boundaries separate avoids cross-workgroup ownership and lookups.
+fn bPackedFace(slot:u32,l:vec3u,f:u32)->u32{
+ let a=f/2u;return 240u*slot+80u*a+l[a]+(f&1u)+5u*(l[(a+1u)%3u]+4u*l[(a+2u)%3u]);
+}
+fn bFaceSlot(c:u32,f:u32)->u32{
+ let r=c%64u;let y=(r/2u)%4u;let z=(r/8u)%4u;
+ let x=2u*(r&1u)+((r/32u+y+z)&1u);
+ return bPackedFace(c/64u,vec3u(x,y,z),f);
+}
+fn bForcedWord(c:u32,f:u32)->u32{return 10u*bN()+bFaceSlot(c,f);}
+fn bVolumeWord(c:u32,f:u32)->u32{return 10u*bN()+240u*bCap()+bFaceSlot(c,f);}
+
 // Face f's coefficient is 1/h^2 (kinds bit 18+f).
 fn bUnit(kinds:u32,f:u32)->bool{return (kinds&(1u<<(18u+f)))!=0u;}
 fn bMiddleLocal(a:u32)->vec3u{return vec3u(a&1u,(a>>1u)&1u,a>>2u);}
@@ -424,10 +437,10 @@ fn bRhs(c:u32)->f32{return rows[c];}
 fn bDiagonal(c:u32)->f32{return rows[bN()+c];}
 fn bKinds(c:u32)->u32{return bitcast<u32>(rows[2u*bN()+c]);}
 fn bCoefficient(c:u32,f:u32)->f32{return rows[(3u+f)*bN()+c];}
-fn bForced(c:u32,f:u32)->f32{return rows[(9u+f)*bN()+c];}
-${S?"fn bVolume(c:u32,f:u32)->f32{return rows[(15u+f)*bN()+c];}":""}
+fn bForced(c:u32,f:u32)->f32{return rows[bForcedWord(c,f)];}
+${S?"fn bVolume(c:u32,f:u32)->f32{return rows[bVolumeWord(c,f)];}":""}
 // The start pressure of a row: the iterate holds the correction to it.
-const B_BASE:u32=${S?21:15}u;
+const B_BASE:u32=9u;
 fn bBase(c:u32)->f32{return rows[B_BASE*bN()+c];}
 `,rows=rowsOf(false);
   // The iterate and its wall halo, over the block faces. walls: the module
@@ -690,8 +703,8 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
    if(volume<=1e-6||sealed){kind=K_CLOSED;coefficient=0.0;fraction=0.0;}
    else if(kind==K_NEUMANN){fraction=volume;}
    else{if(kind==K_WALL){coefficient=volume/(h*h);}else{coefficient*=volume;}fraction=volume;}
-   rows[(15u+f)*N+cell]=volume;`:""}
-   kinds|=(kind<<(3u*f))|select(0u,1u<<(18u+f),kind==K_BAND&&coefficient==params.solve[1u+axis]);rows[(9u+f)*N+cell]=forced;rows[(3u+f)*N+cell]=coefficient;
+   if(sign>0||l[axis]==0u){rows[10u*N+240u*bCap()+bPackedFace(s,l,f)]=volume;}`:""}
+   kinds|=(kind<<(3u*f))|select(0u,1u<<(18u+f),kind==K_BAND&&coefficient==params.solve[1u+axis]);if(sign>0||l[axis]==0u){rows[10u*N+bPackedFace(s,l,f)]=forced;}rows[(3u+f)*N+cell]=coefficient;
    if(kind!=K_NEUMANN){diagonal+=coefficient;divergence+=f32(sign)*fraction*forced/h;}
    ${S?"if(bodies&&kind!=K_WALL&&kind!=K_OPEN){divergence+=f32(sign)*(capacity-fraction)*umSolidFaceVelocity(low,axis)/h;}":""}
   }
@@ -831,7 +844,7 @@ fn bNeumann(cell:u32,p:vec3i,f:u32)->f32{
   // Air rows skip the RHS loop but still keep their Neumann velocities.
   if(!bLiquid(kinds)){
    if(((kinds>>2u)&~kinds&~(kinds>>1u)&0x9249u)!=0u){for(var f=0u;f<6u;f++){
-    if(bFaceKind(kinds,f)==K_NEUMANN){rows[(9u+f)*bN()+cell]=bNeumann(cell,p,f);}
+    if(bFaceKind(kinds,f)==K_NEUMANN){rows[bForcedWord(cell,f)]=bNeumann(cell,p,f);}
    }}
    solve[cell]=0.0;rows[B_BASE*bN()+cell]=0.0;continue;
   }
@@ -880,7 +893,7 @@ fn bNeumann(cell:u32,p:vec3i,f:u32)->f32{
   for(var f=0u;f<6u;f++){
    let axis=f/2u;let sign=bSign(f);
    if(bFaceKind(kinds,f)==K_NEUMANN){
-    let kept=bNeumann(cell,p,f);rows[(9u+f)*bN()+cell]=kept;rhs-=params.policy.x*f32(sign)*${S?"bVolume(cell,f)*":""}kept/(params.hDt[axis]*params.hDt.w);}
+    let kept=bNeumann(cell,p,f);rows[bForcedWord(cell,f)]=kept;rhs-=params.policy.x*f32(sign)*${S?"bVolume(cell,f)*":""}kept/(params.hDt[axis]*params.hDt.w);}
   }
   rows[cell]=rhs;bFollowHalo(cell,p,kinds,0.0);
  }

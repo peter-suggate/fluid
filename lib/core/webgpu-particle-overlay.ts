@@ -81,6 +81,8 @@ export interface GPUFluidParticleSource {
    */
   readonly grid?: {
     readonly velocityFloat: number; readonly depthFloat: number; readonly ballisticFloat: number;
+    /** The flag is the sign bit of the age float, including negative zero. */
+    readonly ballisticSignBit?: boolean;
     readonly surfaceDepth: number;
   };
 }
@@ -200,7 +202,9 @@ ${simpleWaterShadingWGSL}
 
 // The Motion view's measure of the record at a float offset, zero to one.
 fn particleAgitation(at:u32,velocity:vec3f)->f32 {
-  if (overlay.grid.w>0u && particles[at+overlay.grid.z]!=1.0) {
+  let flag=particles[at+(overlay.grid.z&0x7fffffffu)];
+  let ballistic=select(flag==1.0,(bitcast<u32>(flag)>>31u)!=0u,(overlay.grid.z&0x80000000u)!=0u);
+  if (overlay.grid.w>0u && !ballistic) {
     // The energy of the sample's velocity about the grid's, which is the mean
     // of the samples around it. Entrainment happens at the surface, so a
     // sample counts less the deeper it sits.
@@ -623,7 +627,7 @@ export class ParticleOverlay {
     f.set([gravity[0] / pull, gravity[1] / pull, gravity[2] / pull, LAYER_PARTICLE_AGITATION_SCALE], 32);
     const motion = frame.view === "motion", grid = source.grid;
     u.set([source.strideFloats, source.capacity, motion ? 1 : 0, 0], 36);
-    u.set(grid ? [grid.velocityFloat, grid.depthFloat, grid.ballisticFloat, grid.surfaceDepth] : [0, 0, 0, 0], 40);
+    u.set(grid ? [grid.velocityFloat, grid.depthFloat, grid.ballisticFloat+(grid.ballisticSignBit?0x80000000:0), grid.surfaceDepth] : [0, 0, 0, 0], 40);
     this.device.queue.writeBuffer(this.uniforms!, 0, this.uniformData);
     if (source.liveCount) {
       encoder.copyBufferToBuffer(source.liveCount.buffer, source.liveCount.byteOffset, this.indirect!, 4, 4);

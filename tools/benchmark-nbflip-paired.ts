@@ -11,6 +11,7 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { cpus, release, totalmem } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { GPUMemoryProfile } from "./gpu-memory-profile";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import type { uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
@@ -29,6 +30,7 @@ paceDawnEventPolling();
 const errors: string[] = [], solvers: WebGPUUniformReferenceSolver[] = [];
 const rows: { frame: number; baseline_ms: number; candidate_ms: number; saved_ms: number; first: string; state: unknown[] }[] = [];
 const snapshots: Record<string, unknown>[] = [];
+const memory: GPUMemoryProfile[] = [];
 let raw: GPUDevice | undefined;
 try {
   const dawn = await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href);
@@ -58,7 +60,8 @@ try {
     const hash = createHash("sha256"), directory = resolve(cwd, "lib/methods/uniform");
     for (const f of readdirSync(directory).filter(f => f.endsWith(".ts")).sort()) { hash.update(f); hash.update(readFileSync(resolve(directory, f))); }
     const start = performance.now();
-    solvers.push(await typed.createSolverAsync!(managedGPUDevice(raw, { requireWorkerRealm: false }), scene, quality, values, undefined, () => {}) as WebGPUUniformReferenceSolver);
+    memory.push(new GPUMemoryProfile(raw));
+    solvers.push(await typed.createSolverAsync!(managedGPUDevice(memory[index]!.device, { requireWorkerRealm: false }), scene, quality, values, undefined, () => {}) as WebGPUUniformReferenceSolver);
     await raw.queue.onSubmittedWorkDone();
     snapshots.push({ root: cwd, sourceHash: hash.digest("hex"), adaptivePolicyHash, quality, values, scene, dt, construction_ms: performance.now() - start });
     console.log(JSON.stringify({ phase: "constructed", variant: index ? "candidate" : "baseline", ...snapshots[index], scene: undefined }));
@@ -70,7 +73,7 @@ try {
       assert.ok(solver.advanceTo(frame * dt, [])); await solver.awaitFrameCompletion(); wall[i] = performance.now() - start;
       assert.equal(solver.info.simulationPipelineError, undefined);
       assert.ok(Math.abs((solver.info.completedTime_s ?? 0) - frame * dt) < 1e-8);
-      state[i] = { ...solver.narrowBandFlipInfo, fineTiles: solver.info.uniformMixedFineTiles, bandTiles: solver.info.uniformPressureBandTiles, bandResidual: solver.info.uniformPressureBandResidual };
+      state[i] = { allocatedBytes: memory[i]!.allocatedBytes, ...solver.narrowBandFlipInfo, fineTiles: solver.info.uniformMixedFineTiles, bandTiles: solver.info.uniformPressureBandTiles, bandResidual: solver.info.uniformPressureBandResidual };
     }
     rows.push({ frame, baseline_ms: wall[0]!, candidate_ms: wall[1]!, saved_ms: wall[0]! - wall[1]!, first: frame % 2 ? "baseline" : "candidate", state });
     if (frame % 12 === 0 || frame === steps) console.log(JSON.stringify({ ...rows.at(-1), state: undefined }));
@@ -95,7 +98,7 @@ try {
   for (const solver of solvers) {
     const s = await solver.readStats(); physics.push({ maxSpeed_m_s: s.maxSpeed_m_s, volumeCellSum: s.volumeCellSum, representedVolumeCellSum: s.representedVolumeCellSum, volumeDrift: s.volumeDrift, front_m: s.front_m, pressureResidual: s.uniformPressureAcceptedResidual, bandResidual: s.uniformPressureBandResidual });
   }
-  writeFileSync(`${out}/${name}.json`, JSON.stringify({ date: new Date().toISOString(), host: { cpu: cpus()[0]?.model, memory: totalmem(), release: release(), node: process.version }, sceneId, scope: "alternating simulation advance and completion on one device; excludes construction and renderer", snapshots, summary, physics, rows, errors }, null, 2) + "\n");
+  writeFileSync(`${out}/${name}.json`, JSON.stringify({ date: new Date().toISOString(), host: { cpu: cpus()[0]?.model, memory: totalmem(), release: release(), node: process.version }, sceneId, scope: "alternating simulation advance and completion on one device; excludes construction and renderer", snapshots, summary, memory: memory.map(m => m.snapshot()), physics, rows, errors }, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "complete", summary }));
 } catch (error) {
   writeFileSync(`${out}/${name}-failed.json`, JSON.stringify({ snapshots, rows, errors, error: String(error) }, null, 2) + "\n"); throw error;

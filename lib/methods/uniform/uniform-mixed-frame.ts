@@ -553,7 +553,10 @@ export class UniformMixedFrame {
  private get bandRows():GPUBuffer|undefined{return qaBandRows?undefined:this.stageScratch;}
  /** Every group over the stage scratch (reserveFine binds them again). */
  private bindStage():void{
-  this.narrowBandFlip.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity,hanging:this.hanging});
+  // Share taps only when the paired path fits at every possible reservation.
+  // Otherwise a later fallback snapshots before viscosity's last tap read.
+  const shareUnit=this.extension.supportsPair&&this.narrowBandFlip.particles.every(b=>b.size>=this.extension.companionBytesAt(this.ownership.capacity.address.poolTiles));
+  this.narrowBandFlip.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity,hanging:this.hanging,sharedStageUnit:shareUnit?this.hanging.unitVelocity:undefined});
   const f=this.fields,stage:GPUBufferBinding={buffer:this.stageScratch};
   this.extensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negative,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:stage,params:this.params.extension});
   this.flipSnapshotExtensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:stage,params:this.params.extension});

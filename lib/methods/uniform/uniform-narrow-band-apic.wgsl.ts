@@ -1,11 +1,17 @@
 /** Sato 2018 §3.2 / Jiang 2015: quadratic MAC APIC on the virtual h grid.
  * Rows store velocity change per h-cell displacement (not per metre).
  * Thus D = I/4 and C = 4 sum(w u r^T), including anisotropic physical cells.
- * The first 12 floats retain the FLIP presentation/diagnostic ABI. */
+ * FLIP packs nonnegative sparse age and the ballistic bit into before.w.
+ * Its sign bit is the flag (including negative zero); its magnitude keeps
+ * every age bit. APIC keeps its existing affine/presentation record. */
 export type NarrowBandTransfer = "flip" | "apic";
-export const narrowBandParticleStride = (apic: boolean) => apic ? 28 : 16;
+export const narrowBandParticleStride = (apic: boolean) => apic ? 28 : 12;
 export const narrowBandParticleWGSL = (apic: boolean) =>
- `struct Particle{position:vec4f,velocity:vec4f,before:vec4f${apic?",cx:vec4f,cy:vec4f,cz:vec4f":""},lifetime:vec4f}`;
+ `struct Particle{position:vec4f,velocity:vec4f,before:vec4f${apic?",cx:vec4f,cy:vec4f,cz:vec4f,lifetime:vec4f":""}}
+fn nbParticleMode(p:Particle)->f32{return ${apic?"p.before.w":"f32(bitcast<u32>(p.before.w)>>31u)"};}
+fn nbParticleAge(p:Particle)->f32{return ${apic?"p.lifetime.x":"bitcast<f32>(bitcast<u32>(p.before.w)&0x7fffffffu)"};}
+fn nbParticleState(age:f32,mode:f32)->f32{return ${apic?"mode":"bitcast<f32>((bitcast<u32>(age)&0x7fffffffu)|(u32(mode)<<31u))"};}
+`;
 
 /** nbApicTap reads the projected/extrapolated MAC component at an h-face
  * anchor. Its boundary extension must leave the virtual stencil positions

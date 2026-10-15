@@ -2,7 +2,7 @@
  * the UI. No method, scene, time-step, or quality overrides are accepted.
  * node --import tsx tools/benchmark-nbflip-ui.ts NAME [--steps=120]
  *   [--scene=nbflip-figure-9-teaser] [--profile] [--dispatch-probe]
- *   [--heap] [--unpaced]
+ *   [--heap] [--unpaced] [--memory]
  * Plain wall time includes encoding, submissions and completion receipts;
  * excludes construction, renderer and diagnostic timestamp readback.
  * The summary reports the measured window's collections (count and pause
@@ -27,6 +27,7 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
+import { GPUMemoryProfile } from "./gpu-memory-profile";
 import { GPUPassProfile } from "./gpu-pass-profile";
 import { NarrowBandDispatchProbe } from "./narrow-band-dispatch-probe";
 
@@ -34,7 +35,7 @@ const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`)
 const name = process.argv[2] ?? "current";
 assert.match(name, /^[a-z0-9-]+$/);
 for (const argument of process.argv.slice(3)) {
-  assert.ok(/^(--(?:steps|from|scene|out)=.+|--profile|--dispatch-probe|--heap|--unpaced)$/.test(argument), `Unknown option: ${argument}`);
+  assert.ok(/^(--(?:steps|from|scene|out)=.+|--profile|--dispatch-probe|--heap|--unpaced|--memory)$/.test(argument), `Unknown option: ${argument}`);
 }
 const steps = Number(option("steps") ?? 120), from = Number(option("from") ?? 13);
 assert.ok(Number.isInteger(steps) && steps > 0 && Number.isInteger(from) && from > 0 && from <= steps);
@@ -71,6 +72,7 @@ const metadata = { paced, date: new Date().toISOString(), arguments: process.arg
   sceneId: definition.id, quality, values, dt, grid: scene.voxelDomain, numerics: scene.numerics,
   host: { cpu: cpus()[0]?.model, platform: platform(), release: release(), node: process.version },
   scope: "simulation advance and completion; excludes renderer and construction", profiled, split };
+let memory: GPUMemoryProfile | undefined;
 let device: GPUDevice | undefined, profile: GPUPassProfile | undefined, solver: WebGPUUniformReferenceSolver | undefined;
 const errors: string[] = [], rows: Record<string, unknown>[] = [];
 let activeFrame=0,activePhase="construction";
@@ -82,7 +84,8 @@ try {
   const raw = await adapter.requestDevice({ requiredFeatures: ["timestamp-query", ...(adapter.features.has("subgroups") ? ["subgroups" as const] : [])], requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
   if (profiled) profile = new GPUPassProfile(raw);
   const probe = split ? new NarrowBandDispatchProbe(profile!.device) : undefined;
-  device = managedGPUDevice(probe?.device ?? profile?.device ?? raw, { requireWorkerRealm: false });
+  if (process.argv.includes("--memory")) memory = new GPUMemoryProfile(probe?.device ?? profile?.device ?? raw);
+  device = managedGPUDevice(memory?.device ?? probe?.device ?? profile?.device ?? raw, { requireWorkerRealm: false });
   device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); });
   const start = performance.now();
   solver = await method.createSolverAsync!(device, scene, quality, values, undefined, () => {}) as WebGPUUniformReferenceSolver;
@@ -104,7 +107,7 @@ try {
     activePhase="profile";
     const passes = profile && frame >= from ? await profile.finish() : undefined;
     const published = solver.info as typeof solver.info & Record<string, unknown>;
-    const row = { frame, time: frame * dt, wall_ms, encode_ms, ...solver.narrowBandFlipInfo, ...solver.workDomainInfo,
+    const row = { allocatedBytes: memory?.allocatedBytes, frame, time: frame * dt, wall_ms, encode_ms, ...solver.narrowBandFlipInfo, ...solver.workDomainInfo,
       residentPages: solver.pagePoolInfo?.residentPages, claimedPages: solver.pagePoolInfo?.claimedPages, retiredPages: solver.pagePoolInfo?.retiredPages,
       fineTiles: solver.workDomainInfo?.fineTiles ?? solver.info.uniformMixedFineTiles, fineCapacity: solver.info.uniformMixedFineCapacity,
       changedTiles: published.uniformMixedDynamicChangedTiles, refined: published.uniformMixedDynamicRefined, coarsened: published.uniformMixedDynamicCoarsened,
@@ -189,7 +192,7 @@ try {
   // particle/grid state hash and cannot establish full physical equivalence.
   const finalPhysicsSignature = { kind: "aggregate-diagnostics-sha256", version: 1,
     hash: createHash("sha256").update(JSON.stringify(finalPhysics)).digest("hex") };
-  writeFileSync(`${out}/${name}.json`, JSON.stringify({ ...metadata, adapter: adapterInfo, construction_ms, summary, scaling, allocations, finalPhysics, finalPhysicsSignature, rows, errors }, null, 2) + "\n");
+  writeFileSync(`${out}/${name}.json`, JSON.stringify({ ...metadata, adapter: adapterInfo, memory: memory?.snapshot(), construction_ms, summary, scaling, allocations, finalPhysics, finalPhysicsSignature, rows, errors }, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "complete", summary, scaling, finalPhysics, finalPhysicsSignature }));
 } catch (error) {
   const measured=rows.filter(row=>Number(row.frame)>=from);

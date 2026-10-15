@@ -300,9 +300,10 @@ try {
    const T=[tx,ty,tz],radius=0.875,padding=1;
    predicted={full:new Uint8Array(tiles),noPad:new Uint8Array(tiles),noTravel:new Uint8Array(tiles),bare:new Uint8Array(tiles),ends:new Uint8Array(tiles),faces:new Uint8Array(tiles),point:new Uint8Array(tiles),point2:new Uint8Array(tiles),samples:{live,deep:0,ballistic:0,outside:0,nearCrossing:0,noCrossing:0}};
    const variants:[Uint8Array,number,number][]=[[predicted.full,1,padding],[predicted.noPad,1,0],[predicted.noTravel,0,padding],[predicted.bare,0,0]];
+   const sampleBits=new Uint32Array(sample.buffer);
    const lo=[0,0,0],hi=[0,0,0],low=[0,0,0],high=[0,0,0],travel=[0,0,0];
    for(let i=0;i<live;i++){
-    const o=stride*i,depth=sample[o+7]!,flag=sample[o+11]!;
+    const o=stride*i,depth=sample[o+7]!,flag=stride===12?sampleBits[o+11]!>>>31:sample[o+11]!;
     if(depth<-1){predicted.samples.deep!++;continue;}if(flag===1){predicted.samples.ballistic!++;continue;}
     const c=[0,1,2].map(a=>Math.min(dims[a]!-1,Math.max(0,Math.floor(sample[o+a]!))));
     const tile=(c[0]!>>2)+tx*((c[1]!>>2)+ty*(c[2]!>>2));

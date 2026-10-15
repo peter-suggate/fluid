@@ -24,8 +24,8 @@ test("GPU sparse lifetime preserves sheets and dense droplets, expires isolated 
   samples.forEach((s,i)=>{const k=key(s.p);if(!runs[2*k+1])runs[2*k]=i;runs[2*k+1]=i+1;});
   const expectedSparse=samples.map((s,i)=>samples.filter((other,j)=>i!==j&&s.p.reduce((sum,v,k)=>sum+(v-other.p[k]!)**2,0)<=4).length<8);
   for(const apic of [false,true]){
-   const stride=narrowBandParticleStride(apic),ageOffset=stride-4;
-   const data=new Float32Array(stride*samples.length);samples.forEach((s,i)=>{data.set(s.p,stride*i);data[stride*i+11]=i%2;});
+   const stride=narrowBandParticleStride(apic),ageOffset=apic?stride-4:11;
+   const data=new Float32Array(stride*samples.length);samples.forEach((s,i)=>{data.set(s.p,stride*i);data[stride*i+11]=apic?i%2:(i%2?-0:0);});
    const particles=device.createBuffer({size:data.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
    const bins=device.createBuffer({size:runs.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
    const params=device.createBuffer({size:48,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -41,8 +41,9 @@ fn nbCellRun(c:vec3i)->vec2u{if(any(c<vec3i(0))||any(c>=vec3i(64,32,32))){return
 fn nbPosition(i:u32)->vec3f{return particles[i].position.xyz;}
 ${narrowBandSparseWGSL}
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid:vec3u){let i=gid.x;if(i>=arrayLength(&particles)){return;}
- let age=nbSparseAge(i,particles[i].position.xyz,particles[i].lifetime.x);
- particles[i].lifetime=vec4f(age,f32(nbSparseExpired(age)),0,0);
+ let age=nbSparseAge(i,particles[i].position.xyz,nbParticleAge(particles[i]));
+ ${apic?"particles[i].lifetime.x=age;":"particles[i].before.w=nbParticleState(age,nbParticleMode(particles[i]));"}
+ particles[i].velocity.w=f32(nbSparseExpired(age));
 }`});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");assert.deepEqual(errors.map(m=>`${m.lineNum}: ${m.message}`),[]);
     const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
@@ -53,8 +54,8 @@ ${narrowBandSparseWGSL}
      return readMixedBuffer(device,particles);
     };
     const check=(values:Float32Array,age:number,expired:boolean)=>samples.forEach((s,i)=>{
-     assert.ok(Math.abs(values[stride*i+ageOffset]!-(expectedSparse[i]?age:0))<2e-6,`${apic?"APIC":"FLIP"} ${s.name} age ${values[stride*i+ageOffset]}`);
-     assert.equal(values[stride*i+ageOffset+1],Number(expectedSparse[i]&&expired),s.name);
+     assert.ok(Math.abs(Math.abs(values[stride*i+ageOffset]!)-(expectedSparse[i]?age:0))<2e-6,`${apic?"APIC":"FLIP"} ${s.name} age ${values[stride*i+ageOffset]}`);
+     assert.equal(values[stride*i+7],Number(expectedSparse[i]&&expired),s.name);
     });
     check(await advance(0.125,2,15),1.875,false);
     check(await advance(0.125,2,1),2,true);
@@ -63,7 +64,7 @@ ${narrowBandSparseWGSL}
     check(await advance(0.0625,2,2),2,true);
     // Dense samples with an old isolation age recover immediately; new ones
     // begin at zero. This also verifies the APIC affine rows aren't the age.
-    samples.forEach((_,i)=>{data[stride*i+ageOffset]=1.875;});device.queue.writeBuffer(particles,0,data);
+    samples.forEach((_,i)=>{data[stride*i+ageOffset]=!apic&&i%2?-1.875:1.875;});device.queue.writeBuffer(particles,0,data);
     check(await advance(0.125,2,1),2,true);
    }finally{particles.destroy();bins.destroy();params.destroy();}
   }
@@ -91,7 +92,7 @@ test("production solver expires sparse orphans and releases their page while ret
    for(let i=0;i<3;i++)points.push([8+4*i,16,16]);
    for(let z=0;z<3;z++)for(let y=0;y<3;y++)for(let x=0;x<3;x++)points.push([108+0.4*x,16+0.4*y,16+0.4*z]);
    const words=new Float32Array(stride*points.length);
-   points.forEach((p,i)=>{words.set([...p,2],stride*i);words[stride*i+11]=1;});
+   points.forEach((p,i)=>{words.set([...p,2],stride*i);words[stride*i+11]=particleTransfer==="apic"?1:-0;});
    device.queue.writeBuffer(stage.activeParticles,0,words);device.queue.writeBuffer(stage.state,0,new Uint32Array([points.length,points.length]));
    // Inject a completed particle epoch instead of bootstrapping a liquid
    // description. Every subsequent order, update and compaction is real.
@@ -105,7 +106,7 @@ test("production solver expires sparse orphans and releases their page while ret
     assert.equal(support[9*frame.ownership.capacity.tiles+29],0,"residency support certificate");
     assert.equal(receipt[3],0);assert.equal(poolWords[S.fatal],0);
     let sparse=0,dense=0,maxAge=0;
-    for(let i=0;i<count;i++){if(data[i*stride]!<32){sparse++;maxAge=Math.max(maxAge,data[i*stride+stride-4]!);}else dense++;}
+    for(let i=0;i<count;i++){if(data[i*stride]!<32){sparse++;maxAge=Math.max(maxAge,Math.abs(data[i*stride+(particleTransfer==="apic"?stride-4:11)]!));}else dense++;}
     return {sparse,dense,maxAge,pages};
    };
    for(let step=1;step<=6;step++)await advanceUniform(solver,step*dt);

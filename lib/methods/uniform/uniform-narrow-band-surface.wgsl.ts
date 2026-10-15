@@ -87,7 +87,8 @@ export const narrowBandTiledSurfaceWGSL=/* wgsl */`
 /** Reconstruction first scatters occupied-cell distances into the expired
  * metric bank, then each canonical vertex reads one nearest-distance word. */
 export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiledSurfaceWGSL+/* wgsl */`
-// The compact motion arena is dead until classify, after reconstruction.
+// Before classify, the motion bank holds one word per occupied cell.
+// There can be no more occupied cells than sorted live particles.
 fn nbSurfaceCells()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}
 @compute @workgroup_size(64) fn surfaceCells(@builtin(global_invocation_id) gid:vec3u){
  for(var cell=gid.x;cell<UM_CELL_KEYS;cell+=65536u){

@@ -152,7 +152,9 @@ var<workgroup> packCount:u32;
 // stored component, and records equal in every bit are interchangeable, so
 // their source slots only make the ranks distinct.
 fn orderCompare(a:Particle,b:Particle)->i32{
- ${["position","velocity","before",...(this.apic?["cx","cy","cz"]:[]),"lifetime"].map(field=>`{let x=bitcast<vec4u>(a.${field});let y=bitcast<vec4u>(b.${field});for(var k=0u;k<4u;k++){if(x[k]!=y[k]){return select(1,-1,x[k]<y[k]);}}}`).join("\n ")}
+ ${["position","velocity",...(this.apic?["before","cx","cy","cz","lifetime"]:[])].map(field=>`{let x=bitcast<vec4u>(a.${field});let y=bitcast<vec4u>(b.${field});for(var k=0u;k<4u;k++){if(x[k]!=y[k]){return select(1,-1,x[k]<y[k]);}}}`).join("\n ")}
+ ${this.apic?"":`{let x=bitcast<vec4u>(vec4f(a.before.xyz,nbParticleMode(a)));let y=bitcast<vec4u>(vec4f(b.before.xyz,nbParticleMode(b)));for(var k=0u;k<4u;k++){if(x[k]!=y[k]){return select(1,-1,x[k]<y[k]);}}}
+ {let x=bitcast<u32>(nbParticleAge(a));let y=bitcast<u32>(nbParticleAge(b));if(x!=y){return select(1,-1,x<y);}}`}
  return 0;
 }
 fn orderBefore(a:vec4u,b:vec4u)->bool{
