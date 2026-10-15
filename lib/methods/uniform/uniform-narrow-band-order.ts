@@ -73,7 +73,7 @@ ${narrowBandParticleWGSL(this.apic)}
 // topology's tail: the address functions read them.
 @group(0) @binding(6) var<storage,read> orderTopology:array<u32>;
 fn orderTiles()->u32{return 512u*orderDimensions.w;}
-${uniformWindowAddressWGSL("orderTopology","5u*orderTiles()","p.blocks.x")}
+${uniformWindowAddressWGSL("orderTopology","5u*orderTiles()","orderDimensions.w")}
 ${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"orderDimensions.w"}})}
 @group(0) @binding(0) var<storage,read> input:array<Particle>;
 @group(0) @binding(1) var<storage,read_write> output:array<Particle>;
