@@ -644,8 +644,8 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
  let N=bN();let l=bLocal(lane);
  for(var s=group.x;s<bCount();s+=groups.x){
   let p=vec3i(bTile(s)*4u+bLocal(lane));let cell=s*64u+bRow(bLocal(lane));
-  let own=bPhiH(p);let liquid=bWet(own,1.0);${S?"let shut=!umCellIsOpen(p);":""}
-  var kinds=select(0u,0x80000000u,liquid)${S?"|select(0u,0x40000000u,umCellInsideSolid(p))|select(0u,0x20000000u,shut)":""};var diagonal=0.0;var divergence=0.0;
+  let own=bPhiH(p);let liquid=bWet(own,1.0);${S?"let shut=!umCellIsOpen(p);let inside=umCellInsideSolid(p);":""}
+  var kinds=select(0u,0x80000000u,liquid)${S?"|select(0u,0x40000000u,inside)|select(0u,0x20000000u,shut)":""};var diagonal=0.0;var divergence=0.0;
   ${S?`// Native divergenceAtWithCapacity: V u + (V_i - V) u_s, u_s the moving wall's.
   let bodies=liquid&&umBodyCount()>0u;let capacity=select(0.0,umCellOpen(p),bodies);`:""}
   for(var f=0u;f<6u;f++){
@@ -674,7 +674,12 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
     // free-surface face, a shoreline cell under a slope took flux from the
     // air above it at a theta its own column's phi never changed: nothing
     // restored it, and the column's surface sank a micron in 20 steps.
-    if(kind!=K_NEUMANN){sealed=(liquid&&shut&&!n.wet)||(!liquid&&n.wet&&!umCellIsOpen(q));}`:""}
+    // Between two centres inside the solid phi's zero crossing is in the
+    // solid: no free surface there either. Left open, a near-shut pocket of
+    // a smooth wall (open 1e-4..0.1) stopped its inflow with kPa, and the
+    // ghost fluid's 1/theta drove that pressure out through its sliver of
+    // aperture at 10-80 m/s: particles took it and left the band.
+    if(kind!=K_NEUMANN){sealed=(liquid&&shut&&!n.wet)||(!liquid&&n.wet&&!umCellIsOpen(q))||(liquid!=n.wet&&inside&&umCellInsideSolid(q));}`:""}
    }
    ${S?`// CM11a: V scales the coefficient and the flux. A Neumann face's flux is
    // V times the transferred 4h face (init), the root's own flux through it:
