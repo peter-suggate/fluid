@@ -556,6 +556,7 @@ const RECEIPT_GENERATION:u32=${UNIFORM_MIXED_RELAYOUT_RECEIPT.generation}u;
 @compute @workgroup_size(64) fn markListed(@builtin(global_invocation_id) gid:vec3u){
  let i=gid.x+umDispatchX*64u*gid.y;let fatal=receipt[RECEIPT_FATAL];
  if(i==0u){
+  atomicOr(&umStatus[${UNIFORM_MIXED_STATUS.residencyAudit}u],receipt[${UNIFORM_MIXED_RELAYOUT_RECEIPT.audit}u]);
   if(fatal!=0u){umLatchFailure(select(${UNIFORM_MIXED_FAILURE.layoutCapacity}u,${UNIFORM_MIXED_FAILURE.invalidSupport}u,(fatal&~REMAP_FATAL_CAPACITY)!=0u),fatal,receipt[RECEIPT_FATAL_BUILD]);}
   atomicStore(&umStatus[${UNIFORM_MIXED_STATUS.currentGeneration}u],receipt[RECEIPT_GENERATION]);
  }
@@ -861,7 +862,29 @@ fn remapTileFaces(group:vec3u,lane:u32,remap:bool){
 @compute @workgroup_size(192) fn remapFaces(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let jobs=listedJobCount(lane);for(var job=group.x+groups.x*group.y;job<jobs;job+=groups.x*groups.y){remapTileFaces(vec3u(job,0u,0u),lane,true);workgroupBarrier();}
 }
-@compute @workgroup_size(192) fn copyFaces(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+// The publish is a copy, with no footprint reduction or cross-axis sharing.
+// One lane packs its three components directly, avoiding the remap kernel's
+// 192 lanes, shared-memory staging and four barriers for every listed tile.
+fn copyTileFaces(group:vec3u,lane:u32){
+ let entry=listed(group,lane);if(entry==UM_UNLISTED||(entry&LISTED_FACES)==0u){return;}
+ let local=umCorner(lane,4u);let anchor=vec3i(umTileCoord(entry&LISTED_TILE)*4u+local);
+ let texel=remapFaceTexel(entry,local);let owner=umOwnerAt(anchor);let origin=umOrigin(owner);
+ let low=umLowOpen(vec3i(origin));var packed=vec4f(0);var written=false;
+ for(var axis=0u;axis<3u;axis++){
+  if((entry&(1u<<31u))!=0u&&low[axis]&&all(vec3u(anchor)==origin)){
+   let face=umFace(owner,axis,-1,0u);boundary[umLowFaceIndex(origin,axis)]=copyFace(face);
+  }
+  if(texel){let face=umPositiveFaceAtAnchor(owner,axis,anchor);if(face.width!=0u){packed[axis]=copyFace(face);written=true;}}
+ }
+ if(!written){return;}
+ packed.w=${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(velocity,anchor,0).w;
+ textureStore(output,anchor,packed);
+}
+@compute @workgroup_size(64) fn copyFaces(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let jobs=listedJobCount(lane);for(var job=group.x+groups.x*group.y;job<jobs;job+=groups.x*groups.y){copyTileFaces(vec3u(job,0u,0u),lane);workgroupBarrier();}
+}
+// QA: original publisher, compiled only by frozen-state comparisons.
+@compute @workgroup_size(192) fn copyFacesReference(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let jobs=listedJobCount(lane);for(var job=group.x+groups.x*group.y;job<jobs;job+=groups.x*groups.y){remapTileFaces(vec3u(job,0u,0u),lane,false);workgroupBarrier();}
 }
 `;

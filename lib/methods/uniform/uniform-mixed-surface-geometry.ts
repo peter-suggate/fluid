@@ -170,7 +170,10 @@ fn gcOwner(owner:UMOwner,terms:bool){
  let value=gcEvaluate(owner,vertices,open,false);
  // Native uvTarget scales by the open fraction; a 4h owner's fill is already
  // over its tile's open cells.
- textureStore(targetFill,vec3i(origin),vec4f(value.x*select(1.0,umCellOpen(vec3i(origin)),owner.width==1u)));
+ // select eagerly evaluates its operands: coarse owners must not evaluate
+ // discarded fractional h-cell geometry (the tile fraction is in value.x).
+ var cellOpen=1.0;if(owner.width==1u){cellOpen=umCellOpen(vec3i(origin));}
+ textureStore(targetFill,vec3i(origin),vec4f(value.x*cellOpen));
  textureStore(centerPhi,vec3i(origin),vec4f(value.y));
  if(geometryPressure&&owner.lane==0u){
   var coarse=value;

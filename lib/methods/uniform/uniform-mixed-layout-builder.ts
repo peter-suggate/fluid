@@ -101,7 +101,7 @@ export function uniformMixedRegionWGSL(name:string,word:(index:string)=>string):
  * raised no fatal flag; builds, bumped by every build; fatal, sticky
  * UNIFORM_MIXED_RELAYOUT_FATAL bits; fatalBuild, the build number that first
  * raised one. */
-export const UNIFORM_MIXED_RELAYOUT_RECEIPT={census:0,changed:20,tiers:21,seams:23,need:25,admit:26,counts:28,generation:32,builds:33,fatal:34,fatalBuild:35,words:36} as const;
+export const UNIFORM_MIXED_RELAYOUT_RECEIPT={census:0,changed:20,tiers:21,seams:23,need:25,admit:26,audit:27,counts:28,generation:32,builds:33,fatal:34,fatalBuild:35,words:36} as const;
 /** Sticky fatal bits of the relayout receipt, validated on the GPU. A set
  * bit means the built generation must not be adopted or advanced on.
  * hangingCapacity (= UNIFORM_MIXED_OVERFLOW_HANGING): seam tiles exceed the
@@ -385,7 +385,9 @@ ${this.headerWords?`// The band producer's receipt header, carried into this bui
   // is sized for at most this many h tiles. A need over an admission
   // capacity was deferred (admit); this is the generation kept instead.
   if(f>params.fineCapacity){atomicOr(&status[R_FATAL],FATAL_OWNERS);}
-  if(params.audit!=0xffffffffu&&band[params.audit]!=0u){atomicOr(&status[R_FATAL],FATAL_RESIDENCY);}
+  var audit=0u;if(params.audit!=0xffffffffu){audit=band[params.audit];}
+  atomicStore(&status[${UNIFORM_MIXED_RELAYOUT_RECEIPT.audit}u],audit);
+  if(audit!=0u){atomicOr(&status[R_FATAL],FATAL_RESIDENCY);}
  }
 }
 // Owner numbering, worklists and the hanging slot table, in tile key order.

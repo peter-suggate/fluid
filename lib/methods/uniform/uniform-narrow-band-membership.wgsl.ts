@@ -84,8 +84,8 @@ var<workgroup> nbBandMask:array<atomic<u32>,2>;
  if(lane<2u){atomicStore(&bins[NB_BAND_MASK+2u*tile+lane],mask[lane]);}
  for(var k=lane;k<343u;k+=128u){
   let o=vec3i(umCorner(k,7u))-3;let t=vec3i(coord)+o;
-  if(!umTilePresent(t)){continue;}
-  atomicOr(&bins[NB_BAND_REACH+umTileAt(vec3u(t))],select(3u,2u,any(abs(o)>vec3i(2))));
+  let key=umTileKey(t);if(key>=UM_TILES){continue;}
+  atomicOr(&bins[NB_BAND_REACH+key],select(3u,2u,any(abs(o)>vec3i(2))));
  }
 }
 @compute @workgroup_size(64) fn depthLists(@builtin(global_invocation_id) gid:vec3u){
@@ -102,8 +102,8 @@ fn nbBandRow(coord:vec3u,y:i32,z:i32)->u32{
  if(!umCellPresent(vec3i(4*i32(coord.x),y,z))){return 0u;}
  let shift=4u*(u32(y)&3u)+16u*(u32(z)&1u);let word=(u32(z)&3u)>>1u;var bits=0u;
  for(var o=-2;o<=2;o++){
-  let t=vec3i(i32(coord.x)+o,y>>2u,z>>2u);if(!umTilePresent(t)){continue;}
-  let nibble=(atomicLoad(&bins[NB_BAND_MASK+2u*umTileAt(vec3u(t))+word])>>shift)&15u;
+  let t=vec3i(i32(coord.x)+o,y>>2u,z>>2u);let key=umTileKey(t);if(key>=UM_TILES){continue;}
+  let nibble=(atomicLoad(&bins[NB_BAND_MASK+2u*key+word])>>shift)&15u;
   if(o==-2){bits|=nibble>>3u;}else{bits|=nibble<<u32(4*o+5);}
  }
  return bits&0x3fffu;

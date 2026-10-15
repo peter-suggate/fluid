@@ -202,8 +202,11 @@ fn umSurfacePhiCell(p:vec3i)->f32{let o=umOwnerAt(p);return textureLoad(centerPh
 fn umPressurePhiCell(p:vec3i)->f32{
  if(umCellIsOpen(p)){return textureLoad(centerPhi,p,0).x;}
  var terms:array<f32,6>;var weights:array<f32,6>;
- for(var i=0u;i<6u;i++){var q=p;q[i/2u]+=select(-1,1,(i&1u)!=0u);let open=umCellOpen(q);
-  terms[i]=0.0;weights[i]=0.0;if(open<=1e-5){continue;}
+ for(var i=0u;i<6u;i++){var q=p;q[i/2u]+=select(-1,1,(i&1u)!=0u);
+  // The cached mask is exactly umCellOpen > 1e-5. Closed neighbours
+  // contribute neither weight nor phi, so need no fractional geometry.
+  terms[i]=0.0;weights[i]=0.0;if(!umCellIsOpen(q)){continue;}
+  let open=umCellOpen(q);if(open<=1e-5){continue;}
   let phi=umSurfacePhiCell(q);if(phi<0.0){terms[i]=open*phi;weights[i]=open;}}
  let weight=((weights[0]+weights[1])+(weights[4]+weights[5]))+(weights[2]+weights[3]);
  let sum=((terms[0]+terms[1])+(terms[4]+terms[5]))+(terms[2]+terms[3]);
@@ -218,7 +221,13 @@ fn umAuthorityLiquid(o:UMOwner,distance:f32)->bool{return ${uniformMixedPressure
 // between two closed owners holds no velocity of its own: as a source it is
 // a zero that every sample within half a cell of the wall blends in. Unowned,
 // it continues the liquid's tangential velocity (free slip).
-fn umPhase(o:UMOwner,liquid:bool)->f32{return select(0.0,1.0,liquid&&umCapacity(o)>1e-5);}
+fn umPhase(o:UMOwner,liquid:bool)->f32{
+ if(!liquid){return 0.0;}
+ ${this.coarse?"return select(0.0,1.0,umCapacity(o)>1e-5);":`// Phase needs only the binary predicate, which the solid record caches.
+ // Fractional capacity is still evaluated wherever its value is required.
+ if(umSolidEnabled()&&o.width==1u){return select(0.0,1.0,umCellIsOpen(vec3i(umOrigin(o))));}
+ return select(0.0,1.0,umCapacity(o)>1e-5);`}
+}
 ${this.resident?"@group(1) @binding(9) var<storage,read> umSimulationTiles:array<u32>;":""}
 // V claims a row only where the simulation holds the owner at 4h.
 fn umClaims(o:UMOwner)->bool{return ${this.resident?"(umSimulationTiles[o.tile]&0x80000000u)==0u":"o.width>=2u"};}

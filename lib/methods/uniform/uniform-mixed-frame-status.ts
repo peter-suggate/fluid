@@ -10,9 +10,9 @@
  * atomicOr), 6 last accepted frame, 7 the current frame (the host writes it
  * before each advance), 8 the current layout generation (written on the GPU
  * by whoever adopts a layout: the remap's markListed, from the receipt),
- * 9-15 reserved. */
+ * 9 raw residency audit bits seen by relayout adoption; 10-15 reserved. */
 export const UNIFORM_MIXED_STATUS_WORDS=16;
-export const UNIFORM_MIXED_STATUS={cause:0,frame:1,generation:2,detail:3,causes:5,accepted:6,currentFrame:7,currentGeneration:8} as const;
+export const UNIFORM_MIXED_STATUS={cause:0,frame:1,generation:2,detail:3,causes:5,accepted:6,currentFrame:7,currentGeneration:8,residencyAudit:9} as const;
 /** Latched causes. The final pressure schedule gate latches 1-4 (its verdict);
  * 6-8 are for the layout and transport stages. 5 is retired. */
 export const UNIFORM_MIXED_FAILURE={pressureRejected:1,pressureUnconverged:2,pressureNonfinite:3,bandCapacity:4,layoutCapacity:6,invalidSupport:7,transportCapacity:8} as const;

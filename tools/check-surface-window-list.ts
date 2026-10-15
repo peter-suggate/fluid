@@ -1,5 +1,5 @@
 /** Full scan/window-list oracle. Diagnostic GPU reads only; run under lockf.
- * <scene> <steps> [--outside] [--overlay-only]. Default trough/40, or open/120
+ * <scene> <steps> [--outside] [--overlay-only] [--compare-cache]. Default trough/40, or open/120
  * with --outside. Every failure prints FAIL and exits nonzero. */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -16,17 +16,20 @@ import type { WebGPUUniformReferenceSolver } from '../lib/methods/uniform/webgpu
 import { UNIFORM_PAGE_POOL_STATUS as S, UNIFORM_PAGE_POOL_PUBLISHED as P, uniformPagePoolFatalMessage, type UniformPagePool } from '../lib/methods/uniform/uniform-page-pool';
 import { RasterWaterPipeline, surfaceExtractionShader, surfaceVertexCapacity } from '../lib/core/webgpu-water-pipeline';
 const args=process.argv.slice(2),outside=args.includes('--outside'),overlayOnly=args.includes('--overlay-only'),pos=args.filter(a=>!a.startsWith('--'));
+const compareCache=args.includes('--compare-cache');
 const sceneId=pos[0]??(outside||overlayOnly?'nbflip-open-ground':'uniform-trough-dam-break'),steps=Number(pos[1]??(outside||overlayOnly?120:40)),dt=1/60;
 assert.ok(Number.isInteger(steps)&&steps>=0);
 const definition=findSceneDefinition(sceneId);assert.ok(definition);const scene=structuredClone(sceneDocument(definition));
 scene.numerics={...scene.numerics,fixedDt_s:dt,maxDt_s:dt};
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined,water:RasterWaterPipeline|undefined;
 const owned:GPUBuffer[]=[],errors:string[]=[];
-const timeout=setTimeout(()=>{console.error('FAIL timeout: smoke exceeded 115 seconds');process.exit(1);},115000);
+const timeoutMs=Number(args.find(a=>a.startsWith('--timeout-ms='))?.slice(13)??115000);
+assert.ok(Number.isFinite(timeoutMs)&&timeoutMs>0);
+const timeout=setTimeout(()=>{console.error(`FAIL timeout: smoke exceeded ${timeoutMs/1000} seconds`);process.exit(1);},timeoutMs);
 try{
  const dawn=await import(pathToFileURL(resolve(process.env.WEBGPU_NODE_MODULE??'node_modules/webgpu/index.js')).href);Object.assign(globalThis,dawn.globals);
  const gpu=createProcessRetainedDawnGPU(dawn,['backend=metal']);const adapter=await gpu.requestAdapter();assert.ok(adapter);
- const d=device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
+ const d=device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits),requiredFeatures:compareCache?["timestamp-query"]:[]}),{requireWorkerRealm:false});
  d.addEventListener('uncapturederror',e=>{e.preventDefault();errors.push(e.error.message);console.error(e.error.message);});
  const buffer=(size:number,usage:number)=>{const b=d.createBuffer({size,usage});owned.push(b);return b;};
  const read=async(b:GPUBuffer,offset=0,size=b.size-offset)=>{const r=d.createBuffer({size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});try{const e=d.createCommandEncoder();e.copyBufferToBuffer(b,offset,r,0,size);d.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);return r.getMappedRange().slice(0);}finally{r.unmap();r.destroy();}};
@@ -68,6 +71,41 @@ try{
   // Canonical position multiset removes append-order nondeterminism. Quantize
   // at 1e-5 cells, then retain full multiplicity in a cryptographic digest.
   const digest=(mesh:Mesh)=>{const rows:string[]=[];const h=Math.min(...source.cellSize_m);for(let i=0;i<mesh.vertices.length;i+=24){const tri:string[]=[];for(let v=0;v<3;v++)tri.push([0,1,2].map(a=>Math.round(mesh.vertices[i+8*v+a]!/h*1e5)).join(','));rows.push(tri.sort().join('/'));}return createHash('sha256').update(rows.sort().join('\n')).digest('hex');};
+  if(compareCache){
+   // Restore only the collector's original sample loads. Every downstream
+   // classifier and polygoniser is identical and reads the same frozen state.
+   const cacheRead="let phi = collectedCoarsePhi[cached.x + 7u * (cached.y + 7u * cached.z)];";
+   assert.ok(surfaceExtractionShader.includes(cacheRead));
+   let referenceSource=surfaceExtractionShader.replace(cacheRead,"let phi = textureLoad(coarseVertexPhi, umWideVertexTexel(vertex), 0).x;");
+   const cacheStart=referenceSource.indexOf("  // Load raw texels, retaining the original per-window wall clamp below.");
+   const cacheEnd=referenceSource.indexOf("  if (record == UM_FREE) { return; }",cacheStart);
+   assert.ok(cacheStart>=0&&cacheEnd>cacheStart);
+   referenceSource=referenceSource.slice(0,cacheStart)+referenceSource.slice(cacheEnd);
+   const collector=await d.createComputePipelineAsync({label:'QA original uncached window collector',layout:water!.denseExtractionLayoutForQA,compute:{module:d.createShaderModule({code:referenceSource}),entryPoint:'collectWindowsMain'}});
+   const querySet=d.createQuerySet({type:'timestamp',count:4});
+   const resolved=buffer(32,GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC);
+   const timed=async(reference:boolean)=>{
+    const e=d.createCommandEncoder();
+    water!.encodeDenseSurfaceExtractionForQA(e,...size,'windows',false,undefined,undefined,{collector:reference?collector:undefined,timestampQuerySet:querySet});
+    e.resolveQuerySet(querySet,0,4,resolved,0);d.queue.submit([e.finish()]);
+    const times=new BigUint64Array(await read(resolved));
+    return {classify_ms:Number(times[1]!-times[0]!)/1e6,polygonise_ms:Number(times[3]!-times[2]!)/1e6};
+   };
+   try{
+    await timed(true);const reference=await water!.readDenseSurfaceExtractionForQA();
+    await timed(false);const cached=await water!.readDenseSurfaceExtractionForQA();
+    assert.equal(reference.vertexAllocator,reference.vertexCount,'reference mesh capacity overflow');
+    assert.equal(cached.vertexAllocator,cached.vertexCount,'cached mesh capacity overflow');
+    assert.equal(reference.vertexCount,cached.vertexCount);assert.equal(digest(reference),digest(cached));
+    console.log(`PASS cached/reference triangles=${cached.vertexCount/3} hash=${digest(cached)}`);
+    const rows:{reference:boolean;classify_ms:number;polygonise_ms:number}[]=[];
+    for(let iteration=0;iteration<20;iteration++)for(const reference of iteration%2?[false,true]:[true,false]){
+     const result=await timed(reference);if(iteration>=4)rows.push({reference,...result});
+    }
+    const median=(values:number[])=>{values.sort((a,b)=>a-b);return .5*(values[(values.length-1)>>1]!+values[values.length>>1]!);};
+    console.log(JSON.stringify({sceneId,steps,resident:drawn,triangles:cached.vertexCount/3,renderExtraction: [true,false].map(reference=>({collector:reference?'reference':'cached',samples:rows.filter(r=>r.reference===reference).length,classify_ms:median(rows.filter(r=>r.reference===reference).map(r=>r.classify_ms)),polygonise_ms:median(rows.filter(r=>r.reference===reference).map(r=>r.polygonise_ms))})),rows}));
+   }finally{querySet.destroy();}
+  }
   if(outside){
    const mesh=await extract('windows'),frame=sceneFluidFrame(scene);let count=0;
    for(let i=0;i<mesh.vertices.length;i+=24){let beyond=false;for(let v=0;v<3;v++)for(let a=0;a<3;a++){

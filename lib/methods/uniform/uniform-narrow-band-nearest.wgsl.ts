@@ -6,11 +6,11 @@
 export const narrowBandNearestEntries = ["depthNearestX", "depthNearestY", "depthNearestZ"] as const;
 export const narrowBandNearestWGSL=/* wgsl */`
 fn nbGlobalNearestRow(p:vec3i,axis:u32)->u32{
- if(!umCellPresent(p)){return 0xffffffffu;}
+ let tile=umTileKey(p>>vec3u(2u));if(tile>=UM_TILES){return 0xffffffffu;}
  // A nonempty X or XY result is at most five cells from a crossing in
  // each processed axis, hence within the existing two-tile reach.
  // Unlisted tiles therefore represent empty rows, without clearing them.
- let tile=nbBandTile(vec3u(p));if((atomicLoad(&bins[NB_BAND_REACH+tile])&1u)==0u){return 0xffffffffu;}
+ if((atomicLoad(&bins[NB_BAND_REACH+tile])&1u)==0u){return 0xffffffffu;}
  let local=vec3u(p)&vec3u(3u);
  return atomicLoad(&bins[NB_DEPTH_A+axis*(UM_CELL_KEYS/4u)+16u*tile+local.y+4u*local.z]);
 }
@@ -50,6 +50,9 @@ fn nbGlobalNearestRow(p:vec3i,axis:u32)->u32{
   let row=nbGlobalNearestRow(p+vec3i(0,0,o),1u);let code=(vec4u(row)>>vec4u(0u,8u,16u,24u))&vec4u(255u);
   let dx=vec4i(code&vec4u(15u))-5;let dy=vec4i(code>>vec4u(4u))-5;let d=dx*dx+dy*dy+o*o;
   let closer=(code!=vec4u(255u))&(d<distance);
+  // A missing or losing row cannot change any nearest key. In particular,
+  // avoid four page-table lookups for its discarded coordinates.
+  if(!any(closer)){continue;}
   let x=vec4u(vec4i(p.x)+vec4i(0,1,2,3)+dx);let y=vec4u(vec4i(p.y)+dy);let z=u32(p.z+o);
   let at=vec4u(umCellAt(vec3u(x.x,y.x,z)),umCellAt(vec3u(x.y,y.y,z)),umCellAt(vec3u(x.z,y.z,z)),umCellAt(vec3u(x.w,y.w,z)));
   nearest=select(nearest,at,closer);distance=select(distance,d,closer);

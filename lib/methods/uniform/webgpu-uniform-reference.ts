@@ -317,6 +317,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly narrowBandTransfer: "flip" | "apic";
   private phiFineTrilinear: boolean;
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
+  get pagePoolInfo(){return this.mixedFrame?.pagePoolInfo;}
+  get workDomainInfo(){return this.mixedFrame?.workDomainInfo;}
   get narrowBandFlipInfo(){
     const stage=this.mixedFrame?.narrowBandFlip;if(!stage)return undefined;
     // One record, rewritten by each read: the values are the stage's at the read.

@@ -530,6 +530,7 @@ var<workgroup> nbMarkedPopulation:u32;
  }
 }
 ${narrowBandTraceWGSL("sampleVelocity")}
+override nbAdvectScalarCollision:bool=false;
 fn nbAdvect(i:u32){
   var p=source[i];var q=p.position.xyz;
   let held=bitcast<vec3i>(vec3u(atomicLoad(&state[12u]),atomicLoad(&state[13u]),atomicLoad(&state[14u])));
@@ -579,8 +580,15 @@ fn nbAdvect(i:u32){
     let start=q;
     for(var axis=0u;axis<3u;axis++){
      var point=q;point[axis]+=stride[axis];
-     let blocked=select(umCellOpen(vec3i(point))<0.5,
-      nbVoxelBlocked(point)||umBodyAt(umSolidTraceWorld(point))>=0,umSolidHasTerrain()||umBoundaryRecord(vec3i(floor(point)))!=0u);
+     var blocked:bool;
+     if(nbAdvectScalarCollision){
+      // Diagnostic oracle: WGSL select evaluates both values, including the
+      // expensive fractional open-cell query that a boundary cell discards.
+      blocked=select(umCellOpen(vec3i(point))<0.5,
+       nbVoxelBlocked(point)||umBodyAt(umSolidTraceWorld(point))>=0,umSolidHasTerrain()||umBoundaryRecord(vec3i(floor(point)))!=0u);
+     }else if(umSolidHasTerrain()||umBoundaryRecord(vec3i(floor(point)))!=0u){
+      blocked=nbVoxelBlocked(point)||umBodyAt(umSolidTraceWorld(point))>=0;
+     }else{blocked=umCellOpen(vec3i(point))<0.5;}
      if(blocked){
       let cell=floor(q[axis]);point[axis]=select(cell+0.01,cell+0.99,stride[axis]>0.0);
       if(axis==1u&&stride.y<0.0){landed=true;floorCell=vec3i(q);}else{p.velocity[axis]=0.0;free[axis]=0.0;}

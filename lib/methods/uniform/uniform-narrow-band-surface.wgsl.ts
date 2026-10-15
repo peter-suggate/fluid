@@ -16,12 +16,13 @@ const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
 // page where a wall lies across a face.
 fn particleSurfaceBulk(own:u32,origin:vec3i,q:vec3i)->vec2f{
  let home=origin>>vec3u(2u);
- if(nbThetaFrom(home,vec3f(q))<=0.0){return vec2f(bandPhi(vec3f(q)),0.0);}
+ let theta=nbThetaFrom(home,vec3f(q));
+ if(theta<=0.0){return vec2f(bandPhi(vec3f(q)),0.0);}
  let c=vec3u(umCellNearFromPage(own>>9u,origin>>vec3u(5u),q));
  let bulk=bulkDepth(c,vec3f(q));let tile=umTileAt(c/4u);
  // Deeper than this the shrunk level set wins the union whatever the samples
  // are; nothing bounds how far into the air they may carry the surface.
- let gather=atomicLoad(&bins[NB_SURFACE_TILES+tile])!=0u&&bulk>-2.0&&nbThetaFrom(home,vec3f(q))>0.0;
+ let gather=atomicLoad(&bins[NB_SURFACE_TILES+tile])!=0u&&bulk>-2.0&&theta>0.0;
  return vec2f(bulk,select(0.0,1.0,gather));
 }
 // home: the tile q is reached from.
@@ -63,7 +64,8 @@ fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32)->f32{
  }
  // A transported particle may add liquid throughout its sphere support.
  // Erasure needs the complete seeded footprint, inside the overlap collar.
- let theta=select(nbThetaFrom(home,vec3f(q)),nbSurfaceThetaFrom(home,vec3f(q)),particle>bulk);
+ var theta=0.0;
+ if(particle>bulk){theta=nbSurfaceThetaFrom(home,vec3f(q));}else{theta=nbThetaFrom(home,vec3f(q));}
  return nbSourcePhi(vec3f(q),mix(bulk,particle,theta));
 }
 `;
@@ -95,14 +97,34 @@ fn nbSurfaceCells()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}
   let slot=atomicAdd(&bins[NB_BAND+3u],1u);links[nbSurfaceCells()+slot]=cell;
  }
 }
-@compute @workgroup_size(64) fn surfaceSplat(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+// Probe-only scalar reference; production compiles surfaceSplat alone.
+@compute @workgroup_size(64) fn surfaceSplatReference(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let cell=links[nbSurfaceCells()+group.x];let c=4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u);
  let q=vec3i(c)+vec3i(umCorner(lane,4u))-1;
  if(!umVertexPresent(q)){return;}
  let start=links[cell];let end=start+atomicLoad(&bins[cell]);var nearest2=4.0;
  for(var i=start;i<end;i++){let d=vec3f(q)-nbPosition(i);nearest2=min(nearest2,dot(d,d));}
- // Positive float bit order: complement reverses it; zero is the empty key.
  if(nearest2<4.0){atomicMax(&bins[NB_DEPTH_A+umVertexAt(vec3u(q))],~bitcast<u32>(nearest2));}
+}
+// All 64 vertices visit the same cell's particle stream. Load each position
+// once per workgroup, retaining the scalar gather order and all particles.
+var<workgroup> nbSurfacePositions:array<vec3f,64>;
+var<workgroup> nbSurfaceRange:vec2u;
+@compute @workgroup_size(64) fn surfaceSplat(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let cell=links[nbSurfaceCells()+group.x];let c=4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u);
+ let q=vec3i(c)+vec3i(umCorner(lane,4u))-1;
+ let present=umVertexPresent(q);
+ if(lane==0u){let start=links[cell];nbSurfaceRange=vec2u(start,start+atomicLoad(&bins[cell]));}
+ let range=workgroupUniformLoad(&nbSurfaceRange);let start=range.x;let end=range.y;var nearest2=4.0;
+ for(var first=start;first<end;first+=64u){
+  let count=min(64u,end-first);
+  if(lane<count){nbSurfacePositions[lane]=nbPosition(first+lane);}
+  workgroupBarrier();
+  if(present){for(var i=0u;i<count;i++){let d=vec3f(q)-nbSurfacePositions[i];nearest2=min(nearest2,dot(d,d));}}
+  workgroupBarrier();
+ }
+ // Positive float bit order: complement reverses it; zero is the empty key.
+ if(present&&nearest2<4.0){atomicMax(&bins[NB_DEPTH_A+umVertexAt(vec3u(q))],~bitcast<u32>(nearest2));}
 }
 fn nbCachedSurfaceNearest(q:vec3i)->f32{
  let key=atomicLoad(&bins[NB_DEPTH_A+umVertexAt(vec3u(q))]);

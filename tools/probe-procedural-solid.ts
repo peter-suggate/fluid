@@ -26,11 +26,13 @@ await withUniformDevice("procedural solid contract",async device=>{
 @group(0) @binding(1) var<storage,read> points:array<vec4f>;
 @group(0) @binding(2) var<storage,read_write> result:array<vec4f>;
 struct Params{hDt:vec4f} const params=Params(vec4f(.02,.02,.02,1.0/60.0));
+fn umFramePage()->vec3i{return vec3i(0);}
 fn umSolidValid(p:vec3i)->bool{return all(p>=vec3i(0))&&all(p<vec3i(16));}
 fn umSolidVoxel(p:vec3i)->bool{return !umSolidValid(p);}
 fn umSolidHasTerrain()->bool{return false;}
 fn umSolidDimensions()->vec3u{return vec3u(16);}
 fn umSolidTerrainHeight(x:i32,z:i32)->f32{return 0.0;}
+fn umTerrainSurface(p:vec3f)->vec3f{return vec3f(0);}
 fn umBodyAt(p:vec3f)->i32{return -1;}
 fn umSolidTraceWorld(p:vec3f)->vec3f{return p;}
 fn umCellOpen(p:vec3i)->f32{return umBoundaryBoxOpen(vec3f(p)+.5,vec3f(1));}

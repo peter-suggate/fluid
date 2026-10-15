@@ -73,6 +73,7 @@ const metadata = { paced, date: new Date().toISOString(), arguments: process.arg
   scope: "simulation advance and completion; excludes renderer and construction", profiled, split };
 let device: GPUDevice | undefined, profile: GPUPassProfile | undefined, solver: WebGPUUniformReferenceSolver | undefined;
 const errors: string[] = [], rows: Record<string, unknown>[] = [];
+let activeFrame=0,activePhase="construction";
 try {
   const dawn = await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href);
   Object.assign(globalThis, dawn.globals);
@@ -88,6 +89,7 @@ try {
   const construction_ms = performance.now() - start;
   console.log(JSON.stringify({ phase: "constructed", construction_ms, dt, values, grid: [solver.info.nx, solver.info.ny, solver.info.nz], features: [...raw.features], host: metadata.host }));
   for (let frame = 1; frame <= steps; frame++) {
+    activeFrame=frame;activePhase="advance";
     if (probe) probe.enabled = frame >= from;
     if (profile && frame >= from) profile.start();
     if (frame === from && inspector) await inspect("HeapProfiler.startSampling", { samplingInterval: 4096, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
@@ -95,14 +97,16 @@ try {
     const start = performance.now();
     assert.ok(solver.advanceTo(frame * dt, []));
     const encode_ms = performance.now() - start;
-    await solver.awaitFrameCompletion();
+    activePhase="completion";await solver.awaitFrameCompletion();
     const wall_ms = performance.now() - start;
     assert.equal(solver.info.simulationPipelineError, undefined);
     assert.ok(Math.abs((solver.info.completedTime_s ?? 0) - frame * dt) < 1e-8);
+    activePhase="profile";
     const passes = profile && frame >= from ? await profile.finish() : undefined;
     const published = solver.info as typeof solver.info & Record<string, unknown>;
-    const row = { frame, time: frame * dt, wall_ms, encode_ms, ...solver.narrowBandFlipInfo,
-      fineTiles: solver.info.uniformMixedFineTiles, fineCapacity: solver.info.uniformMixedFineCapacity,
+    const row = { frame, time: frame * dt, wall_ms, encode_ms, ...solver.narrowBandFlipInfo, ...solver.workDomainInfo,
+      residentPages: solver.pagePoolInfo?.residentPages, claimedPages: solver.pagePoolInfo?.claimedPages, retiredPages: solver.pagePoolInfo?.retiredPages,
+      fineTiles: solver.workDomainInfo?.fineTiles ?? solver.info.uniformMixedFineTiles, fineCapacity: solver.info.uniformMixedFineCapacity,
       changedTiles: published.uniformMixedDynamicChangedTiles, refined: published.uniformMixedDynamicRefined, coarsened: published.uniformMixedDynamicCoarsened,
       bandTiles: solver.info.uniformPressureBandTiles,
       bandCycles: solver.info.uniformPressureBandCycles, bandResidual: solver.info.uniformPressureBandResidual, passes };
@@ -144,19 +148,63 @@ try {
     encode_mean_ms: measured.reduce((n, r) => n + Number(r.encode_ms), 0) / measured.length,
     collections: { minor: pauses("minor"), major: pauses("major") }, allocatedBytesPerFrame: allocations?.bytesPerFrame,
     passMeans_ms: Object.fromEntries(Object.entries(labels).sort((a, b) => b[1] - a[1])) };
+  // Equal contiguous thirds expose drift as the take fills. All values use
+  // already-published frame data; no diagnostics or readbacks enter timing.
+  const scalingWindows = ["early", "middle", "late"].flatMap((name, index) => {
+    const window = measured.slice(Math.floor(index * measured.length / 3), Math.floor((index + 1) * measured.length / 3));
+    if (!window.length) return [];
+    const wall = window.map(row => Number(row.wall_ms)).sort((a, b) => a - b);
+    const mean_ms = wall.reduce((sum, value) => sum + value, 0) / wall.length;
+    const passMeans_ms: Record<string, number> = {};
+    for (const row of window) for (const pass of (row.passes ?? []) as { label: string; ms: number }[])
+      passMeans_ms[pass.label] = (passMeans_ms[pass.label] ?? 0) + pass.ms / window.length;
+    return [{ name, firstFrame: window[0]!.frame, lastFrame: window[window.length - 1]!.frame,
+      frames: window.length, mean_ms, fps: 1000 / mean_ms,
+      median_ms: wall[Math.floor(wall.length / 2)], p95_ms: wall[Math.ceil(wall.length * .95) - 1],
+      encode_mean_ms: window.reduce((sum, row) => sum + Number(row.encode_ms), 0) / window.length,
+      firstDependencyRegions16: window[0]!.dependencyRegions16, lastDependencyRegions16: window[window.length - 1]!.dependencyRegions16,
+      firstPressureListedOctants: window[0]!.pressureListedOctants, lastPressureListedOctants: window[window.length - 1]!.pressureListedOctants,
+      firstAllOwnerGroups: Number(window[0]!.fineTiles)+Math.ceil(Number(window[0]!.coarseTiles)/64),
+      lastAllOwnerGroups: Number(window[window.length - 1]!.fineTiles)+Math.ceil(Number(window[window.length - 1]!.coarseTiles)/64),
+      firstResidentPages: window[0]!.residentPages, lastResidentPages: window[window.length - 1]!.residentPages,
+      firstClaimedPages: window[0]!.claimedPages, lastClaimedPages: window[window.length - 1]!.claimedPages,
+      firstRetiredPages: window[0]!.retiredPages, lastRetiredPages: window[window.length - 1]!.retiredPages,
+      firstFineTiles: window[0]!.fineTiles, lastFineTiles: window[window.length - 1]!.fineTiles,
+      firstParticles: window[0]!.particles, lastParticles: window[window.length - 1]!.particles,
+      passMeans_ms: Object.fromEntries(Object.entries(passMeans_ms).sort((a, b) => b[1] - a[1])) }];
+  });
+  const scaling = { windows: scalingWindows,
+    lateToEarlyWallRatio: scalingWindows.length > 1 ? scalingWindows[scalingWindows.length - 1]!.mean_ms / scalingWindows[0]!.mean_ms : undefined };
   const adapterInfo = { vendor: adapter.info.vendor, architecture: adapter.info.architecture,
     device: adapter.info.device, description: adapter.info.description, features: [...raw.features] };
   // Sample physics only after the timed window: this queues diagnostics and
   // requests an optional volume pass, so it must not perturb later timings.
+  activePhase="final physics";
   const stats = await solver.readStats();
   const finalPhysics = { maxSpeed_m_s: stats.maxSpeed_m_s, volumeCellSum: stats.volumeCellSum,
     representedVolumeCellSum: stats.representedVolumeCellSum, volumeDrift: stats.volumeDrift,
     front_m: stats.front_m, pressureResidual: stats.uniformPressureAcceptedResidual,
     bandResidual: stats.uniformPressureBandResidual };
-  writeFileSync(`${out}/${name}.json`, JSON.stringify({ ...metadata, adapter: adapterInfo, construction_ms, summary, allocations, finalPhysics, rows, errors }, null, 2) + "\n");
-  console.log(JSON.stringify({ phase: "complete", summary }));
+  // This identifies the final aggregate diagnostics exactly; it is not a
+  // particle/grid state hash and cannot establish full physical equivalence.
+  const finalPhysicsSignature = { kind: "aggregate-diagnostics-sha256", version: 1,
+    hash: createHash("sha256").update(JSON.stringify(finalPhysics)).digest("hex") };
+  writeFileSync(`${out}/${name}.json`, JSON.stringify({ ...metadata, adapter: adapterInfo, construction_ms, summary, scaling, allocations, finalPhysics, finalPhysicsSignature, rows, errors }, null, 2) + "\n");
+  console.log(JSON.stringify({ phase: "complete", summary, scaling, finalPhysics, finalPhysicsSignature }));
 } catch (error) {
-  writeFileSync(`${out}/${name}-failed.json`, JSON.stringify({ ...metadata, rows, errors, error: String(error) }, null, 2) + "\n");
+  const measured=rows.filter(row=>Number(row.frame)>=from);
+  const partialWindows=["early","middle","late"].flatMap((name,index)=>{
+    const window=measured.slice(Math.floor(index*measured.length/3),Math.floor((index+1)*measured.length/3));
+    if(!window.length)return [];
+    const wall=window.map(row=>Number(row.wall_ms)).sort((a,b)=>a-b),passMeans_ms:Record<string,number>={};
+    for(const row of window)for(const pass of (row.passes??[]) as {label:string;ms:number}[])passMeans_ms[pass.label]=(passMeans_ms[pass.label]??0)+pass.ms/window.length;
+    return [{name,firstFrame:window[0]!.frame,lastFrame:window[window.length-1]!.frame,frames:window.length,
+      mean_ms:wall.reduce((sum,value)=>sum+value,0)/wall.length,p95_ms:wall[Math.ceil(.95*wall.length)-1],passMeans_ms}];
+  });
+  writeFileSync(`${out}/${name}-failed.json`, JSON.stringify({ ...metadata, completedFrames:rows.length,
+    failure:{frame:activeFrame,phase:activePhase,message:String(error),stack:error instanceof Error?error.stack:undefined,
+      pagePool:solver?.pagePoolInfo,workDomain:solver?.workDomainInfo,solverInfo:solver?.info},
+    scaling:{partial:true,windows:partialWindows},rows,errors,error:String(error) }, null, 2) + "\n");
   throw error;
 } finally {
   solver?.destroy(); await device?.queue.onSubmittedWorkDone(); profile?.destroy(); device?.destroy();

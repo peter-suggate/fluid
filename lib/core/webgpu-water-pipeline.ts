@@ -837,7 +837,10 @@ fn extractMain(@builtin(global_invocation_id) gid: vec3u) {
 // b is the block that lists the window and page its page: the window's
 // tiles and vertices lie in that page or in the 26 around it, and its
 // vertices g-1..g+1 are held at the walls of that block.
-fn uniformWindowQuiet(b: u32, page: vec3i, g: vec3u) -> bool {
+// Adjacent windows share their coarse stencil. The high half also lists
+// window 8, so its union is seven samples wide (six on the low half).
+var<workgroup> collectedCoarsePhi: array<f32, 343>;
+fn uniformWindowQuiet(b: u32, page: vec3i, g: vec3u, cacheOrigin: vec3i) -> bool {
   // Only SOLID pages close the contour; AIR and resident pages stay open.
   let low = vec3i(g) - vec3i(1);
   for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
@@ -853,7 +856,8 @@ fn uniformWindowQuiet(b: u32, page: vec3i, g: vec3u) -> bool {
   // Opaque bound (27): a literal lets Metal unroll the loads.
   for (var k = 0u; k < min(arrayLength(&umTopology), 27u); k += 1u) {
     let vertex = clamp(low + vec3i(umCorner(k, 3u)), first, last);
-    let phi = textureLoad(coarseVertexPhi, umWideVertexTexel(vertex), 0).x;
+    let cached = vec3u(vertex - cacheOrigin);
+    let phi = collectedCoarsePhi[cached.x + 7u * (cached.y + 7u * cached.z)];
     air = air && phi > margin;
     liquid = liquid && phi <= 0.0;
   }
@@ -899,16 +903,30 @@ fn collectWindowsMain(@builtin(workgroup_id) group: vec3u, @builtin(local_invoca
   udrInit();
   let b = 1u + (group.x >> 3u);
   let record = umBlockWord(b);
-  if (record == UM_FREE) { return; }
   let page = vec3i(vec3u(record & 63u, (record >> 6u) & 63u, (record >> 12u) & 63u));
-  let own = 4u * vec3u(group.x & 1u, (group.x >> 1u) & 1u, (group.x >> 2u) & 1u) + lane;
+  let windowHalf = vec3u(group.x & 1u, (group.x >> 1u) & 1u, (group.x >> 2u) & 1u);
+  let cacheOrigin = 8 * page + vec3i(4u * windowHalf) - vec3i(1);
+  // Load raw texels, retaining the original per-window wall clamp below.
+  // Mapping each shared sample through umWideVertexNearFromPage instead
+  // would change the diagonal wall rule at some page edges.
+  let laneIndex = lane.x + 4u * (lane.y + 4u * lane.z);
+  if (record != UM_FREE) {
+    for (var i = laneIndex; i < 343u; i += 64u) {
+      let local = vec3u(i % 7u, (i / 7u) % 7u, i / 49u);
+      collectedCoarsePhi[i] = textureLoad(coarseVertexPhi, umWideVertexTexel(cacheOrigin + vec3i(local)), 0).x;
+    }
+  }
+  // No storage-dependent return may precede this workgroup barrier.
+  workgroupBarrier();
+  if (record == UM_FREE) { return; }
+  let own = 4u * windowHalf + lane;
   let last = own == vec3u(7u);
   for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
     let up = vec3<bool>((k & 1u) != 0u, (k & 2u) != 0u, (k & 4u) != 0u);
     if (any(up & !last)) { continue; }
     let l = select(own, vec3u(8u), up);
     let g = vec3u(8 * page) + l;
-    if (!uniformWindowListed(b, l) || uniformWindowQuiet(b, page, g)) { continue; }
+    if (!uniformWindowListed(b, l) || uniformWindowQuiet(b, page, g, cacheOrigin)) { continue; }
     let slot = atomicAdd(&surfaceWindows.count, 1u);
     if (slot < arrayLength(&surfaceWindows.windows)) { surfaceWindows.windows[slot] = (b << 12u) | l.x | (l.y << 4u) | (l.z << 8u); }
   }
@@ -2402,12 +2420,12 @@ export class RasterWaterPipeline {
    * has zeroed the list's count word), a fixed launch shares the list out, a
    * workgroup a window at a time, then one workgroup puts the mixed cubes
    * last in the worklist. */
-  private dispatchDenseClassify(pass: GPUComputePassEncoder, nx: number, ny: number, nz: number, classify: WaterSurfaceClassify, countOnly: boolean, classifier?: GPUComputePipeline) {
+  private dispatchDenseClassify(pass: GPUComputePassEncoder, nx: number, ny: number, nz: number, classify: WaterSurfaceClassify, countOnly: boolean, classifier?: GPUComputePipeline, collector?: GPUComputePipeline) {
     const pipeline = classifier ?? (countOnly ? this.countOnlyPipeline(classify)
       : classify === "windows" ? this.extractWindowsPipeline! : this.extractPipeline!);
     if (classify !== "windows") { pass.setPipeline(pipeline); pass.dispatchWorkgroups(Math.ceil((nx + 1) / 4), Math.ceil((ny + 1) / 4), Math.ceil((nz + 1) / 4)); return; }
     if (!this.mixedOwnership || !this.coarseVertexPhi) throw new Error("Water surface: the window scan strides a page pool's blocks and needs the mixed presentation bound");
-    pass.setPipeline(this.collectWindowsPipeline!);
+    pass.setPipeline(collector ?? this.collectWindowsPipeline!);
     pass.dispatchWorkgroups(8 * (this.mixedBlocks - 2));
     pass.setPipeline(pipeline); pass.dispatchWorkgroups(Math.min(EXTRACTION_WINDOW_WORKGROUPS, surfaceWindowCapacity(2048, 2048, 2048, this.mixedBlocks)));
     if (!countOnly) { pass.setPipeline(this.orderWorklistPipeline!); pass.dispatchWorkgroups(1); }
@@ -2438,21 +2456,23 @@ export class RasterWaterPipeline {
    * classifier, polygoniser: a benchmark's own classify (the full-lattice
    * scan, or the listed-window scan after the production window list) and
    * polygonise pipelines on denseExtractionLayoutForQA, dispatched as the
-   * production ones are. */
-  encodeDenseSurfaceExtractionForQA(encoder: GPUCommandEncoder, nx: number, ny: number, nz: number, classify: WaterSurfaceClassify, countOnly = false, classifier?: GPUComputePipeline, polygoniser?: GPUComputePipeline): void {
+   * production ones are. options.collector compares collection implementations
+   * on a frozen source. options.timestampQuerySet supplies four timestamp slots:
+   * classify/prepare begin/end, then polygonise begin/end (unless countOnly). */
+  encodeDenseSurfaceExtractionForQA(encoder: GPUCommandEncoder, nx: number, ny: number, nz: number, classify: WaterSurfaceClassify, countOnly = false, classifier?: GPUComputePipeline, polygoniser?: GPUComputePipeline, options?: { collector?: GPUComputePipeline; timestampQuerySet?: GPUQuerySet }): void {
     this.ensureGeometry(nx, ny, nz);
     if (!this.extractBindGroup || !this.prepareBindGroup || !this.indirectBuffer || !this.surfaceWindows || !this.preparePipeline || !this.polygonisePipeline || !this.extractPipeline || !this.collectWindowsPipeline || !this.extractWindowsPipeline || !this.orderWorklistPipeline || !this.polygoniseDispatchBuffer)
       throw new Error("Water extraction is not initialized");
     const indirectReset = this.indirectResetTemplate ??= this.createIndirectResetTemplate();
     encoder.copyBufferToBuffer(indirectReset, 32, this.indirectBuffer, 0, 36);
     encoder.copyBufferToBuffer(indirectReset, 32, this.surfaceWindows, 0, 4);
-    let pass = encoder.beginComputePass({ label: `Extract water isosurface (${classify}${countOnly ? ", count" : ""})` });
+    let pass = encoder.beginComputePass({ label: `Extract water isosurface (${classify}${countOnly ? ", count" : ""})`, timestampWrites: options?.timestampQuerySet ? { querySet: options.timestampQuerySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } : undefined });
     pass.setBindGroup(0, this.extractBindGroup);
-    this.dispatchDenseClassify(pass, nx, ny, nz, classify, countOnly, classifier);
+    this.dispatchDenseClassify(pass, nx, ny, nz, classify, countOnly, classifier, options?.collector);
     if (!countOnly) {
       pass.setPipeline(this.preparePipeline); pass.setBindGroup(0, this.prepareBindGroup); pass.dispatchWorkgroups(1);
       pass.end();
-      pass = encoder.beginComputePass({ label: "Polygonise water isosurface" });
+      pass = encoder.beginComputePass({ label: "Polygonise water isosurface", timestampWrites: options?.timestampQuerySet ? { querySet: options.timestampQuerySet, beginningOfPassWriteIndex: 2, endOfPassWriteIndex: 3 } : undefined });
       pass.setPipeline(polygoniser ?? this.polygonisePipeline); pass.setBindGroup(0, this.extractBindGroup); pass.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer, 0);
     }
     pass.end();

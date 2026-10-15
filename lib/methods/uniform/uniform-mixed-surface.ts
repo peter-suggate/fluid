@@ -172,12 +172,18 @@ fn umPointFrom(home:vec3f,p:vec3f)->vec3f{return umPointFromPage(umPointCell(hom
 // nbTraceSpan's steps, every stage's sample at one call site: stage 0 the
 // field at q (k1; the first sets the substeps), 1 one base substep ahead
 // (k2), 2 the third point, after which the step ends.
+override umSurfaceStationaryTrace:bool=true;
 fn umSurfaceTrace(p:vec3f)->vec3f{
  let h=params.hDt.xyz;
  var q=p;var x=p;var steps=1u;var i=0u;var base=0.0;var stage=0u;var k1=vec3f(0.0);var k2=vec3f(0.0);var two=false;
  for(var n=0u;n<${3*NARROW_BAND_TRACE_LIMIT+3}u;n++){
   let k=umSampleVelocity(x)/h;
   if(stage==0u){
+   // Exactly stationary in the frozen field: every later RK stage is at q
+   // and samples the same zero velocity. No tolerance or spatial mask.
+   if(umSurfaceStationaryTrace&&all(k==vec3f(0.0))){
+    let held=umPointFrom(q,q);if(all(held==q)){return held;}
+   }
    k1=k;
    if(i==0u){
     steps=nbTraceSteps(k1,params.hDt.w);
@@ -211,9 +217,33 @@ fn umTrace(p:vec3f)->vec3f{return umWalk(p,umSurfaceTrace(p)).q;}
 // solidClosed/solidClear: no in-domain closed cell within four cells of the
 // tile holding vertex p's cell (umPointCell; 27 tiles), a superset of the
 // cells umBuried reads at a vertex or cubic tap of any vertex of that tile.
-fn umSolidClear(p:vec3i)->bool{return !umSolidEnabled()||evidence[UM_TILES+umTileAt(vec3u(umPointCell(vec3f(p)))/4u)]!=0u;}
+fn umSolidClear(p:vec3i)->bool{
+ if(!umSolidEnabled()){return true;}
+ let tile=umTileAt(vec3u(umPointCell(vec3f(p)))/4u);
+ return ${this.solid.coarse?"umSolidSurfaceClear(tile)":"evidence[UM_TILES+tile]!=0u"};
+}
 // uvBuried: phi at a vertex no incident owner has capacity at is not state.
-fn umBuried(p:vec3f)->bool{return umVertexBuried(vec3i(p));}
+fn umBuried(p:vec3f)->bool{
+ let vertex=vec3i(p);
+ ${this.solid.coarse?/* wgsl */`let local=vec3u(vertex)&vec3u(3u);
+ // Interior vertices' eight incident cells share one tile. Read its open
+ // mask once instead of resolving the same page, tile and record eight times.
+ if(umSolidEnabled()&&all(local!=vec3u(0u))){
+  let base=vertex-vec3i(1);let tile=umTileKey(base>>vec3u(2u));
+  if(umKeyStored(tile)){
+   if(!umSolidValid(base)){return true;}
+   if(umTileWidth(tile)==4u){return !(umTileOpen(tile)>1e-5);}
+   let cell=vec3u(base)&vec3u(3u);let shift=cell.x+4u*(cell.y+4u*cell.z);
+   // A 2^3 cell stencil: offsets 0,1,4,5,16,17,20,21 in the 64-cell mask.
+   var stencil=vec2u(0u);
+   if(shift<32u){stencil.x=0x00330033u<<shift;if(shift!=0u){stencil.y=0x00330033u>>(32u-shift);}}
+   else{stencil.y=0x00330033u<<(shift-32u);}
+   return all((umSolidOpenCells(tile)&stencil)==vec2u(0u));
+  }
+ }
+`:""}
+ return umVertexBuried(vertex);
+}
 fn umFluidFace(face:vec3i,axis:u32)->f32{
  if(umSolidValid(face)){return textureLoad(velocity,face,0)[axis];}
  var n=face;n[axis]+=1;
@@ -586,14 +616,19 @@ fn umVertexTrace(p:vec3f,width:u32)->vec3f{
  return umPointFrom(end,p+(end-foot));
 }
 fn umSurfaceGradient(p:vec3f,width:f32)->vec3f{
- var g=vec3f(0);var lowValue=0.0;let page=umPointCell(p)>>vec3u(5u);
- for(var k=0u;k<6u;k++){
-  let axis=k/2u;var delta=vec3f(0);delta[axis]=0.25*width;
+ var g=vec3f(0);let page=umPointCell(p)>>vec3u(5u);
+ for(var axis=0u;axis<3u;axis++){
+  var delta=vec3f(0);delta[axis]=0.25*width;
   var low=umPointFromPage(page,p-delta);var high=umPointFromPage(page,p+delta);
-  // A wide slope is one-sided beside a closed owner (one umSampleClosed site).
+  // Construct and test the same pair once per axis. The former six-probe
+  // loop repeated both wall mappings and both closed tests for each sample.
   ${this.solid?"if(width>1.0){for(var s=0u;s<2u;s++){let q=select(low,high,s==1u);if(umSampleClosed(q)){if(s==0u){low=p;}else{high=p;}}}}":""}
-  let value=umSampleVertex(select(low,high,(k&1u)!=0u));
-  if((k&1u)==0u){lowValue=value;}else{g[axis]=(value-lowValue)/max(high[axis]-low[axis],1e-6);}
+  var lowValue=0.0;
+  // Retain one sampling call site and the original low/high sample order.
+  for(var side=0u;side<2u;side++){
+   let value=umSampleVertex(select(low,high,side!=0u));
+   if(side==0u){lowValue=value;}else{g[axis]=(value-lowValue)/max(high[axis]-low[axis],1e-6);}
+  }
  }return g;
 }
 // Each face direction's (2*axis+side) largest dt*away over the wall faces
@@ -664,7 +699,6 @@ ${this.solid.coarse?/* wgsl */`
 // tiles among tile+{0,1}^3, the only tiles incident to its vertices. low:
 // the axes with no tile stored below this one (umTileLowOpen).
 const UM_NO_VERTEX=vec3u(0xffffffffu);
-
 fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
  var local=umCorner(lane,4u)+vec3u(1);
  if(round>0u){let j=lane+64u*(round-1u);if(j>=125u){return UM_NO_VERTEX;}local=umCorner(j,5u);if(all(local!=vec3u(0))){return UM_NO_VERTEX;}}
@@ -675,7 +709,8 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
 }
 @compute @workgroup_size(64) fn advectFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  umStagePlaneReach(lane);
- let owner=umTileJobOwner(group);if(owner.width==0u){return;}
+ let owner=umTileJobOwner(group);
+ if(owner.width==0u){return;}
  let tile=umTileCoord(owner.tile);let wide=umFineWideMask(umTileAt(tile));
  let low=umTileLowOpen(vec3i(tile));let rounds=select(1u,3u,any(low));
  for(var round=0u;round<rounds;round++){
@@ -715,7 +750,8 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
 }
 @compute @workgroup_size(64) fn advectOwners(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  umStagePlaneReach(lane);
- let owner=umOwner(gid);if(owner.width==0u){return;}
+ let owner=umOwner(gid);
+ if(owner.width==0u){return;}
  let origin=umOrigin(owner);let regular=umRegularFine||(umTileMaximumWidth(owner.tile)==owner.width&&umTileMinimumWidth(owner.tile)==owner.width);
  let low=umLowOpen(vec3i(origin));
  // Every regular interior owner writes exactly its positive corner, first;
@@ -759,7 +795,7 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
     const pass=encoder.beginComputePass(SURFACE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
     pass.setPipeline(this.variant(this.pipelines.get("wallReach")!));pass.dispatchWorkgroups(this.wallGroups);
     // The closed/clear evidence only exists for a scene holding solids.
-    if(this.solid?.present){
+    if(this.solid?.present&&!this.solid.coarse){
       const closed=this.solid.coarse?this.tileLaneGroups:this.tileGroups,clear=this.tileLaneGroups;
       pass.setPipeline(this.variant(this.pipelines.get("solidClosed")!));pass.dispatchWorkgroups(closed[0],closed[1]);
       pass.setPipeline(this.variant(this.pipelines.get("solidClear")!));pass.dispatchWorkgroups(clear[0],clear[1]);

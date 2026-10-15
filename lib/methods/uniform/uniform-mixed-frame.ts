@@ -232,6 +232,11 @@ export class UniformMixedFrame {
   * owner's page words mirror its table. One commit follows every census
   * (encodePageCommit); its status rides the frame receipt. */
  readonly pagePool:UniformPagePool;
+ /** Last completed frame's existing pool receipt; updated without another GPU readback. */
+ readonly pagePoolInfo={frame:-1,generation:0,residentPages:0,claimedPages:0,retiredPages:0,freePages:0};
+ /** Work counts already returned with each frame. Dependency regions are
+  * the union certificate (ownership/stage consumers), not liquid-only pages. */
+ readonly workDomainInfo={fineTiles:0,coarseTiles:0,seamFineTiles:0,seamCoarseTiles:0,regularCoarseTiles:0,dependencyRegions16:0,pressureListedOctants:0,remapJobs:0,transferPairs:0};
  readonly levels:readonly UniformMixedPressureCycleLevel[];
  /** Ownership of pressure level 0: the fixed all-4h layout. */
  get pressureOwnership(){return this.levels[0]!.ownership;}
@@ -1092,6 +1097,14 @@ export class UniformMixedFrame {
   catch(error){this.failed=true;throw error;}finally{slot.unchecked=false;}
   try{
    this.narrowBandFlip.noteReceipt(slot.flip);
+   const page=this.pagePoolInfo,base=POOL_RECEIPT/4,status=UNIFORM_PAGE_POOL_STATUS;
+   // Receipts can finish out of order with multiple frames in flight.
+   if(frame>=page.frame){page.frame=frame;page.generation=mapped[base+status.generation]!;
+    page.residentPages=mapped[base+status.resident]!;page.claimedPages=mapped[base+status.claimed]!;
+    page.retiredPages=mapped[base+status.pending]!;page.freePages=mapped[base+status.free]!;
+    const d=this.workDomainInfo,w=slot.work;
+    d.fineTiles=w[0]!;d.coarseTiles=w[1]!;d.seamFineTiles=w[4]!;d.seamCoarseTiles=w[5]!;d.regularCoarseTiles=w[6]!;d.dependencyRegions16=w[7]!;
+    d.pressureListedOctants=mapped[ROOT_WORK_RECEIPT/4]!;d.remapJobs=mapped[REMAP_WORK_RECEIPT/4]!;d.transferPairs=slot.flip[9]!;}
    // The page pool's sticky fatal explains every later failure: a page the frame needed was never stored.
    const pool=uniformPagePoolFatalMessage(this.pagePool.layout,mapped,POOL_RECEIPT/4);if(pool)throw new Error(pool);
    // The GPU's own verdict first: it names the first failing frame.
@@ -1101,7 +1114,7 @@ export class UniformMixedFrame {
    if(mapped[DETAIL_RECEIPT/4+1]!&UNIFORM_MIXED_ROOT_UNREACHED)throw new Error(`${UNIFORM_MIXED_ROOT_UNREACHED_MESSAGE}${failure?`; ${failure}`:""}`);
    const detail=mapped[DETAIL_RECEIPT/4]!|mapped[DETAIL_RECEIPT/4+1]!;
    if(detail)throw this.detailViolation(detail,mapped[DETAIL_RECEIPT/4]!,mapped[DETAIL_RECEIPT/4+1]!,failure);
-   if(failure)throw new Error(`${failure}${mapped[30]===UNIFORM_MIXED_FAILURE.layoutCapacity&&mapped[33]!&UNIFORM_MIXED_OVERFLOW_FINE?`; the layout holds ${mapped[WORK_RECEIPT/4]} h tiles, capacity ${this.ownership.capacity.fineTiles}`:""}; projection withheld${""}`);
+   if(failure)throw new Error(`${failure}${slot.status[UNIFORM_MIXED_STATUS.residencyAudit]?`; residency audit ${slot.status[UNIFORM_MIXED_STATUS.residencyAudit]} (1: absent near, 2: closure)`:""}${mapped[30]===UNIFORM_MIXED_FAILURE.layoutCapacity&&mapped[33]!&UNIFORM_MIXED_OVERFLOW_FINE?`; the layout holds ${mapped[WORK_RECEIPT/4]} h tiles, capacity ${this.ownership.capacity.fineTiles}`:""}; projection withheld${""}`);
    // Words 0-7 are the acceptance state, 8-19 the dust accounting.
    const residual=floats[1]!,count=mapped[7]!,target=slot.target!;
    if(mapped[4]!==0||mapped[5]===0||!Number.isFinite(residual)||residual<0||residual>target){

@@ -145,7 +145,11 @@ export interface UniformMixedSolidCoarse {
  /** Owners plus halo slots: the level-0 topology record's vec4 count. A
   * tile's (cut, h) flags follow at count + t, then three vec4 per tile at
   * count + tiles + 3t: its open h cells (16 bits a component, cell x+4y+16z)
-  * and its 48 +face patch codes (24 bits a component, four a patch). */
+  * and its 48 +face patch codes (24 bits a component, four a patch).
+  * The exact 64 h-cell open fractions follow at count + 4tiles + 16t,
+  * packed four cells per vec4 in x+4y+16z order. Two more vec4 per tile
+  * follow at count + 20tiles + 2t: the boundary-brick pointer and 64 cell
+  * validity bits, in exact 16-bit float pieces. */
  readonly count:number;
 }
 
@@ -170,7 +174,7 @@ export class UniformMixedSolid {
  /** build and the cut flags over the tile keys (in full, bodies-only), and
   * both over the pool's new list (claimed, cutsClaimed).
   * group: their output group over the topology last encoded with. */
- private builder?:{pipeline:GPUComputePipeline;bodies?:GPUComputePipeline;claimed?:GPUComputePipeline;cuts:GPUComputePipeline;cutsBodies:GPUComputePipeline;cutsClaimed?:GPUComputePipeline;layout:GPUBindGroupLayout;group?:GPUBindGroup;topology?:GPUBuffer};
+ private builder?:{pipeline:GPUComputePipeline;bodies?:GPUComputePipeline;claimed?:GPUComputePipeline;cuts:GPUComputePipeline;cutsBodies:GPUComputePipeline;cutsClaimed?:GPUComputePipeline;surfaceClear:GPUComputePipeline;surfaceClearNew?:GPUComputePipeline;layout:GPUBindGroupLayout;group?:GPUBindGroup;topology?:GPUBuffer};
  /** The library's group as the record builder binds it: the mask image writable, for the tile cut map. */
  private readonly recordSolids?:{readonly layout:GPUBindGroupLayout;readonly group:GPUBindGroup};
  private readonly pool?:UniformMixedSolidPool;
@@ -228,7 +232,9 @@ export class UniformMixedSolid {
    const writable=device.createBindGroupLayout({label:"Uniform mixed static solids of the record build",entries:entries.map(entry=>entry.binding===1?{...entry,buffer:{type:"storage" as const}}:entry)});
    this.recordSolids={layout:writable,group:device.createBindGroup({layout:writable,entries:resourcesOf()})};
    const count=uniformMixedPressureStorage(coarseLayout).count;
-   const record=device.createBuffer({label:"Uniform mixed all-4h solid record",size:16*(count+4*tiles),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+   const recordBytes=16*(count+22*tiles);
+   if(recordBytes>device.limits.maxStorageBufferBindingSize)throw new RangeError(`Solid cell-fraction record needs ${recordBytes} bytes, above this device's storage binding limit ${device.limits.maxStorageBufferBindingSize}`);
+   const record=device.createBuffer({label:"Uniform mixed all-4h solid record",size:recordBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
    const bindLayout=device.createBindGroupLayout({label:"Uniform mixed static solids with the all-4h record",entries:[...entries,
     {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
    this.coarse={bindLayout,record,count,bindGroup:device.createBindGroup({layout:bindLayout,entries:[...resourcesOf(),{binding:3,resource:{buffer:record}}]})};
@@ -282,6 +288,7 @@ var<workgroup> lows:array<vec4f,64>;
 // 8V + 1 of patch 16 axis + u + 4 v, 0 for any other V.
 var<workgroup> openCells:array<atomic<u32>,2>;
 var<workgroup> patchCodes:array<atomic<u32>,8>;
+var<workgroup> boundaryCells:array<u32,64>;
 ${solidRecordRowsWGSL(layout.tiles.length)}
 ${uniformBlockFaceWGSL}
 // umBoundaryIndex of the all-4h layout: the wall slot of tile key t on face 2 axis + side of its block.
@@ -326,10 +333,27 @@ fn umBuildTile(t:u32,lane:u32){
   let slot=16u*axis+l[(axis+1u)%3u]+4u*l[(axis+2u)%3u];
   atomicOr(&patchCodes[slot/6u],(u32(eighths)+1u)<<(4u*(slot%6u)));
  }
- sums[lane]=own;lows[lane]=low;
+ sums[lane]=own;lows[lane]=low;boundaryCells[lane]=umBoundaryRecord(c);
+ workgroupBarrier();
+ // Preserve the exact h-cell fractions before the all-4h reduction consumes
+ // the shared rows. This record rebuilds with edits, bodies and page claims.
+ if(lane<16u){
+  let first=4u*lane;
+  record[umSolidCount()+4u*umSolidTiles()+16u*t+lane]=vec4f(sums[first].x,sums[first+1u].x,sums[first+2u].x,sums[first+3u].x);
+ }
  workgroupBarrier();
  for(var stride=32u;stride>0u;stride/=2u){if(lane<stride){sums[lane]+=sums[lane+stride];lows[lane]+=lows[lane+stride];}workgroupBarrier();}
  if(lane==0u){
+  // A 4-cell tile never crosses an 8-cell boundary brick. Every valid
+  // record is therefore the same pointer; two masks retain edited holes.
+  var pointer=0u;var valid=vec2u(0u);
+  for(var cell=0u;cell<64u;cell++){
+   if(boundaryCells[cell]!=0u){pointer=boundaryCells[cell];valid[cell>>5u]|=1u<<(cell&31u);}
+  }
+  // Store 16-bit pieces as exact floats, avoiding NaN/denormal payloads.
+  let boundaryRow=umSolidCount()+20u*umSolidTiles()+2u*t;
+  record[boundaryRow]=vec4f(vec4u(pointer&65535u,pointer>>16u,valid.x&65535u,valid.x>>16u));
+  record[boundaryRow+1u]=vec4f(vec4u(valid.y&65535u,valid.y>>16u,0u,0u));
   let s=sums[0];let lo=lows[0];
   record[row]=vec4f(s.x/64.0,s.y/16.0,s.z/16.0,s.w/16.0);
   record[umSolidCount()+row].y=0.0;
@@ -347,6 +371,34 @@ fn umBuildTile(t:u32,lane:u32){
 @compute @workgroup_size(64) fn build(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
  umBuildTile(g.x+umDispatchX*g.y,lane);
 }
+// Persistent certificate in the cut flag's unused z lane. A true bit proves
+// the exact 27-tile predicate surface advection previously rebuilt each step.
+fn umBuildSurfaceClear(t:u32){
+ if(!umTileLive(t)){return;}
+ let p=vec3i(umTileCoord(t));var clear=true;
+ for(var k=0u;k<27u;k++){
+  let q=p+vec3i(vec3u(k%3u,(k/3u)%3u,k/9u))-vec3i(1);let n=umTileKey(q);
+  if(!umKeyStored(n)){continue;}
+  let mask=vec4u(record[umSolidCount()+umSolidTiles()+3u*n]);
+  clear=clear&&all(mask==vec4u(65535u));
+ }
+ record[umSolidCount()+t].z=select(0.0,1.0,clear);
+}
+@compute @workgroup_size(64) fn surfaceClear(@builtin(global_invocation_id) g:vec3u){umBuildSurfaceClear(g.x+umDispatchX*64u*g.y);}
+${pool?/* wgsl */`// Each tile has exactly one writer, even overlapping new-page halos.
+// No claims means no geometric neighbourhood work. A retirement may retain
+// false (conservative), while every claim refreshes its entire incident halo.
+@compute @workgroup_size(64) fn surfaceClearNew(@builtin(global_invocation_id) g:vec3u){
+ let moved=any(vec3u(upState[UP_AT_WINDOW+4u],upState[UP_AT_WINDOW+5u],upState[UP_AT_WINDOW+6u])!=vec3u(0u));
+ if(upNewCount()==0u&&!moved){return;}
+ let t=g.x+umDispatchX*64u*g.y;if(!umTileLive(t)){return;}
+ let p=vec3i(umTileCoord(t));var dirty=moved;
+ for(var i=0u;i<upNewCount();i++){
+  let low=8*vec3i(umBlockPage(upNewBlock(i)))-vec3i(1);dirty=dirty||(all(p>=low)&&all(p<=low+vec3i(9)));
+ }
+ if(dirty){umBuildSurfaceClear(t);}
+}
+`:""}
 ${pool?/* wgsl */`// The tiles of the blocks the last commit claimed (the pool's new list): job
 // j is tile j % 512 of new block j / 512, whose key is 512 x the block + that
 // index. A fixed grid of workgroups strides the jobs, whatever their count.
@@ -365,9 +417,9 @@ ${pool?/* wgsl */`// The tiles of the blocks the last commit claimed (the pool's
   const builderLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.recordSolids!.layout,output]});
   // The bodies-only rebuild is dispatched once a body has moved (needs).
   const build=(entryPoint:string,umBodyTiles:number)=>this.device.createComputePipelineAsync({layout:builderLayout,compute:{module,entryPoint,constants:{umDispatchX:dispatchX,umBodyTiles}}});
-  const [pipeline,bodies,cuts,cutsBodies,claimed,cutsClaimed]=await Promise.all([build("build",0),build("build",1),build("cuts",0),build("cuts",1),pool?build("buildNew",0):undefined,pool?build("cutsNew",0):undefined]);
+  const [pipeline,bodies,cuts,cutsBodies,claimed,cutsClaimed,surfaceClear,surfaceClearNew]=await Promise.all([build("build",0),build("build",1),build("cuts",0),build("cuts",1),pool?build("buildNew",0):undefined,pool?build("cutsNew",0):undefined,build("surfaceClear",0),pool?build("surfaceClearNew",0):undefined]);
   const built=this.builtBodies=this.device.createBuffer({label:"Uniform mixed solid record body mirror",size:12*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-  this.builder={bodies,pipeline,claimed,cuts,cutsBodies,cutsClaimed,layout:output};
+  this.builder={bodies,pipeline,claimed,cuts,cutsBodies,cutsClaimed,surfaceClear,surfaceClearNew,layout:output};
   const flagModule=this.device.createShaderModule({label:"Uniform mixed solid simulation widths",code:/* wgsl */`
 ${solidRecordRowsWGSL(layout.tiles.length)}
 override umDispatchX:u32=65535u;
@@ -417,7 +469,8 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
   const pass=encoder.beginComputePass(RECORD_PASS);
   pass.setBindGroup(0,this.recordSolids!.group);pass.setBindGroup(1,this.builderGroup(topology));
   pass.setPipeline(this.full?this.builder.cuts:this.builder.cutsBodies);pass.dispatchWorkgroups(gx,gy);
-  pass.setPipeline(this.full?this.builder.pipeline:this.builder.bodies!);pass.dispatchWorkgroups(x,ceilDiv(keys,x));pass.end();
+  pass.setPipeline(this.full?this.builder.pipeline:this.builder.bodies!);pass.dispatchWorkgroups(x,ceilDiv(keys,x));
+  pass.setPipeline(this.builder.surfaceClear);pass.dispatchWorkgroups(gx,gy);pass.end();
   encoder.copyBufferToBuffer(this.bodies,0,this.builtBodies!,0,12*128);this.full=false;
   this.built=true;
  }
@@ -433,7 +486,9 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
   const pass=encoder.beginComputePass(NEW_BLOCKS_PASS);
   pass.setBindGroup(0,this.recordSolids!.group);pass.setBindGroup(1,this.builderGroup(topology));
   pass.setPipeline(cuts);pass.dispatchWorkgroups(this.claimedGroups/64,1);
-  pass.setPipeline(claimed);pass.dispatchWorkgroups(this.claimedGroups,1);pass.end();
+  pass.setPipeline(claimed);pass.dispatchWorkgroups(this.claimedGroups,1);
+  const groups=ceilDiv(this.coarseLayout.tiles.length,64),gx=Math.min(groups,this.maxGroups);
+  pass.setPipeline(this.builder!.surfaceClearNew!);pass.dispatchWorkgroups(gx,ceilDiv(groups,gx));pass.end();
  }
  /** A record kernel reads tile keys through the page table and block records after the topology's tile words. */
  private paged(topology:GPUBufferBinding):void{
@@ -599,6 +654,9 @@ fn umTileSupported(t:u32)->bool{
  var v=0.0;for(var i=0u;i<16u;i++){v+=umPressureFaceV(vec3i(4u*tc+vec3u(i%4u,0u,i/4u))-vec3i(0,1,0),1u);}
  return v/16.0<0.99999;
 }
+// A conservative proof of no closed cell in the tile's 27-tile halo.
+// Invalidated with record builds and refreshed around every page claim.
+fn umSolidSurfaceClear(t:u32)->bool{return umSolidRecord[umSolidCount()+t].z>0.5;}
 fn umSolidStaticCut(t:u32)->bool{return umSolidRecord[umSolidCount()+t].x>0.5;}
 // A cut tile whose h texels are live: the simulation holds it at h.
 fn umSolidCut(t:u32)->bool{let r=umSolidRecord[umSolidCount()+t];return r.x>0.5&&r.y>0.5;}
@@ -643,7 +701,21 @@ fn umBedSlope(p:vec3i)->vec2f{
 fn umSolidHasTerrain()->bool{return umSolidParams.frame.w>0.5;}
 ${uniformTerrainSamplingWGSL}
 ${geometricPlaneBoxWGSL.replaceAll("geometric", "umTerrain")}
-${uniformSolidBoundaryWGSL}
+${coarse!==undefined&&gated?uniformSolidBoundaryWGSL.replace("fn umBoundaryRecord(p:vec3i)->u32{","fn umBoundaryRecordGeometry(p:vec3i)->u32{")+/* wgsl */`
+// The record is static boundary geometry, independent of rigid-body pose.
+// Every page claim and static edit builds it before a consuming stage.
+fn umBoundaryRecord(p:vec3i)->u32{
+ if(!umSolidValid(p)||umBoundaryBase()==0u){return 0u;}
+ let tile=umTileKey(p>>vec3u(2u));
+ if(!umKeyStored(tile)){return umBoundaryRecordGeometry(p);}
+ let row=umSolidCount()+20u*umSolidTiles()+2u*tile;
+ let a=vec4u(umSolidRecord[row]);let b=vec4u(umSolidRecord[row+1u]);
+ let local=vec3u(p)&vec3u(3u);let cell=local.x+4u*(local.y+4u*local.z);
+ let mask=select(a.z|(a.w<<16u),b.x|(b.y<<16u),cell>=32u);
+ if((mask&(1u<<(cell&31u)))==0u){return 0u;}
+ return a.x|(a.y<<16u);
+}
+`:uniformSolidBoundaryWGSL}
 // Integrate four local planes. Exact on a planar heightfield; subdivision
 // resolves the column-centre patch boundaries instead of quantizing a face
 // aperture to quarters. Zero normal width evaluates a face's area fraction.
@@ -713,19 +785,32 @@ fn umCellBodyFraction(p:vec3i)->f32{
  return fraction;
 }
 // cellOpenFraction.
-fn umCellOpen(p:vec3i)->f32{
+fn umCellOpenGeometry(p:vec3i)->f32{
  if(!umSolidEnabled()){return select(0.0,1.0,umSolidValid(p));}
  if(umSolidTileClear(p)){return 1.0;}
- if(umBoundaryRecord(p)!=0u){return min(umBoundaryBoxOpen(vec3f(p)+0.5,vec3f(1)),min(1.0-umCellBodyFraction(p),1.0-umCellTerrainFraction(p)));}
+ let boundary=umBoundaryRecord(p);
+ if(boundary!=0u){return min(umBoundaryBoxOpen(vec3f(p)+0.5,vec3f(1)),min(1.0-umCellBodyFraction(p),1.0-umCellTerrainFraction(p)));}
  if(umSolidVoxel(p)){return 0.0;}
  return clamp((1.0-umCellBodyFraction(p))*(1.0-umCellTerrainFraction(p)),0.0,1.0);
+}
+fn umCellOpen(p:vec3i)->f32{
+ ${coarse!==undefined&&gated?`// Bodies may move after the record rebuild, before the tail census.
+ // Until their next rebuild, both entered and vacated cells need geometry.
+ if(umSolidEnabled()&&umBodyCount()==0u){
+  let tile=umTileKey(p>>vec3u(2u));
+  if(umKeyStored(tile)){
+   let local=vec3u(p)&vec3u(3u);let cell=local.x+4u*(local.y+4u*local.z);
+   return umSolidRecord[umSolidCount()+4u*umSolidTiles()+16u*tile+(cell>>2u)][cell&3u];
+  }
+ }`:""}
+ return umCellOpenGeometry(p);
 }
 // The exact >1e-5 predicate, cached by the solid record builder. Consumers
 // of the coarse record run after its rebuild at the frame head (also after
 // voxel/terrain edits and body motion). The builder, stages without a
 // record and a cell of a tile with no current row (no page stores it) keep
 // the full geometric evaluation;
-// fractional queries still use umCellOpen. A cell of a wall page is closed in
+// fractional queries use the same record's exact h-cell fractions. A cell of a wall page is closed in
 // either form.
 fn umCellIsOpen(p:vec3i)->bool{
  ${coarse!==undefined&&gated?`if(!umSolidEnabled()){return umSolidValid(p);}
