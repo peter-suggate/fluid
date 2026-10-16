@@ -40,6 +40,9 @@ const NB_H_STORE_ENTRIES=new Set(["coupleFine","redistanceFine"]);
 // (name@h) for the batches encoded while the capacity is non-zero: their
 // twin binds the same group, whose fields are then h textures.
 const NB_H_TWIN_ENTRIES=["buildDistance"];
+// Entries launched as a solid-free twin (name@free, umSolidFree) beside the
+// general pipeline (umSolidTwinned): umSolidSkip leaves the step to one.
+const NB_FREE_TWIN_ENTRIES=["coupleFine"];
 const NB_LAUNCH={grid:0,counted:1,tiles:2,one:3,particles:4} as const;
 /** One launch of a batch, resolved once at initialization: its bind groups
  * by name (bind() replaces the groups), its pipeline and its launch. */
@@ -1091,9 +1094,9 @@ ${narrowBandSurfaceWGSL}
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
-  await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists",...narrowBandNearestEntries,"depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_H_TWIN_ENTRIES.map(entry=>`${entry}@h`)].map(async name=>{
+  await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists",...narrowBandNearestEntries,"depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_H_TWIN_ENTRIES.map(entry=>`${entry}@h`),...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`)].map(async name=>{
    const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","snapshot","update","seed","seedSources"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(entryPoint==="depthCoarse"?{nbCachedGeometry:0}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)||name.endsWith("@h")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(entryPoint==="depthCoarse"?{nbCachedGeometry:0}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)||name.endsWith("@h")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(entryPoint)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
   }));
   if(this.slotSnapshotResources){
@@ -1109,7 +1112,7 @@ ${narrowBandSurfaceWGSL}
    activity:this.compile(["activity","activitySpread"],"bootstrap","activity"),
    search:this.compile(search,undefined,"crossing search"),searchReconstruct:this.compile(search,"reconstruct","crossing search"),searchRedistance:this.compile(search,"redistance","crossing search"),
    diagnose:this.compile(["diagnoseBefore"],"reconstruct","diagnoseBefore"),
-   reconstruct:this.compile(["surfaceCells","surfaceSplat","coupleFine","couple"],"reconstruct","surface reconstruction"),
+   reconstruct:this.compile(["surfaceCells","surfaceSplat","coupleFine@free","coupleFine","couple"],"reconstruct","surface reconstruction"),
    reconstructCoarse:this.compile(["surfaceCells","surfaceSplat","couple"],"reconstruct","surface reconstruction"),
    // Classification reads phase and phi. Transfer loads canonical face
    // texels directly in both mixed and all-4h modes; neither samples a cache.

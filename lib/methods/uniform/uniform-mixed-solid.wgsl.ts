@@ -587,6 +587,7 @@ export function uniformMixedSolidWGSL(group?:number,coarse?:number,gated=true,wr
  if(group===undefined)return /* wgsl */ `
 fn umSolidEnabled()->bool{return false;}
 fn umSolidPresent()->bool{return false;}
+fn umSolidSkip()->bool{return false;}
 fn umSolidValid(p:vec3i)->bool{return umCellKind(p)!=UM_SOLID;}
 fn umSolidVoxel(p:vec3i)->bool{return false;}
 fn umBedSlope(p:vec3i)->vec2f{return vec2f(0);}
@@ -630,10 +631,16 @@ struct UMRigidBody {
 // lean.x certifies that voxels, terrain and the live body roster are empty.
 ${gated?`// A pipeline compiled with umSolidFree has its solid code folded away: its
 // kernel runs only while umSolidPresent() is false (it tests the gate
-// itself) and leaves the step to a general pipeline otherwise.
+// itself) and leaves the step to a general pipeline otherwise. A general
+// pipeline compiled with umSolidTwinned is launched beside such a twin of
+// its entry, and its kernel runs only while a solid is present: an entry
+// of the pair returns at once where umSolidSkip(), so exactly one of the
+// two launches does the work, chosen on the GPU each step.
 override umSolidFree:bool=false;
+override umSolidTwinned:bool=false;
 fn umSolidPresent()->bool{return umSolidParams.lean.x<0.5;}
-fn umSolidEnabled()->bool{return !umSolidFree&&umSolidPresent();}`:"fn umSolidEnabled()->bool{return true;}"}
+fn umSolidEnabled()->bool{return !umSolidFree&&umSolidPresent();}
+fn umSolidSkip()->bool{return select(umSolidTwinned&&!umSolidPresent(),umSolidPresent(),umSolidFree);}`:"fn umSolidEnabled()->bool{return true;}"}
 ${coarse===undefined?`fn umTileOpen(t:u32)->f32{return 1.0;}
 fn umTileOpenAt(p:vec3i)->f32{return 1.0;}
 fn umTileSupported(t:u32)->bool{return false;}`:`@group(${group}) @binding(3) var<storage,read> umSolidRecord:array<vec4f>;

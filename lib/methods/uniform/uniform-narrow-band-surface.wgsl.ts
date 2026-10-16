@@ -75,7 +75,8 @@ fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32,heat:f32)->f32
  * only where nothing is stored below it. */
 export const narrowBandTiledSurfaceWGSL=/* wgsl */`
 @compute @workgroup_size(128) fn coupleFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- if(lane>=125u){return;}
+ // Launched as a solid-free twin and a general pipeline (umSolidSkip).
+ if(umSolidSkip()||lane>=125u){return;}
  let owner=umAllOwner(vec3u(group.x*64u,0,0));let origin=vec3i(umTileCoord(owner.tile)*4u);
  let local=vec3u(lane%5u,(lane/5u)%5u,lane/25u);let q=origin+vec3i(local);
  if(umTileMaximumWidth(owner.tile)==1u&&umTileMinimumWidth(owner.tile)==1u){if(any(local==vec3u(0))&&!all((local>vec3u(0))|umLowOpen(origin))){return;}}

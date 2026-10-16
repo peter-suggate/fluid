@@ -54,6 +54,8 @@ export class UniformMixedForces {
   private normalPipeline?: GPUComputePipeline;
   private curvaturePipeline?: GPUComputePipeline;
   private regularFinePipeline?: GPUComputePipeline;
+  /** forcesFine compiled solid-free (umSolidFree), launched beside the general one. */
+  private regularFineFreePipeline?: GPUComputePipeline;
   private readonly resources: GPUBindGroupLayout;
   private regularCoarsePipeline?: GPUComputePipeline;
   /** vectorViscosity=false retains the scalar evaluator for differential validation. */
@@ -285,7 +287,8 @@ fn umViscosityTerms(at:vec3i)->array<vec3f,3>{
  return terms;
 }
 @compute @workgroup_size(64) fn forcesFine(@builtin(global_invocation_id) gid:vec3u){
- let owner=umAllOwner(gid);if(owner.width!=1u){return;}let origin=umOrigin(owner);let at=vec3i(origin);
+ // With solids bound, launched as a solid-free twin and a general pipeline (umSolidSkip).
+ let owner=umAllOwner(gid);if(umSolidSkip()||owner.width!=1u){return;}let origin=umOrigin(owner);let at=vec3i(origin);
  let low=umLowOpen(at);
  for(var axis=0u;axis<3u;axis++){if(low[axis]){let i=umLowFaceIndex(origin,axis);boundary[i]=negative[i];}}
  if(!umVectorViscosity||force.physical.w>0.0${this.sourceParams?"||umSourceinflowStrength()>0.0":""}){
@@ -343,10 +346,11 @@ ${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face
     // rides the fused launch counts zero jobs in its own (skipFused gate).
     if(this.cachedCurvature)[this.normalPipeline,this.curvaturePipeline]=await Promise.all(["cacheNormals","cacheCurvature"].map(entry=>compile(entry,{umCountedJobs:UNIFORM_MIXED_COUNTED.all})));
     const skipFused=UNIFORM_MIXED_FUSED_GATE.skipFused;
-    [this.pipeline,this.regularFinePipeline,this.regularCoarsePipeline]=await Promise.all([
+    [this.pipeline,this.regularFinePipeline,this.regularCoarsePipeline,this.regularFineFreePipeline]=await Promise.all([
       compile("forces",{umMergedTiles:1,umFusedJobs:1,umCountedJobs:UNIFORM_MIXED_COUNTED.fusedQuad}),
-      compile("forcesFine",{umCountedJobs:UNIFORM_MIXED_COUNTED.fineTiles}),
-      compile("forcesRegularCoarse",{umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused})]);
+      compile("forcesFine",{umCountedJobs:UNIFORM_MIXED_COUNTED.fineTiles,...(this.solid?{umSolidTwinned:1}:{})}),
+      compile("forcesRegularCoarse",{umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused}),
+      this.solid?compile("forcesFine",{umCountedJobs:UNIFORM_MIXED_COUNTED.fineTiles,umSolidFree:1}):undefined]);
 
   }
   encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,capillarity=true):void{
@@ -358,6 +362,7 @@ ${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face
       this.ownership.dispatchAllCounted(pass,this.variant(this.curvaturePipeline));
     }
     const general=this.pipeline,fine=this.regularFinePipeline!,coarse=this.regularCoarsePipeline!;
+    if(this.regularFineFreePipeline)this.ownership.dispatchCounted(pass,this.variant(this.regularFineFreePipeline),this.ownership.capacity.fineTiles,"fine");
     this.ownership.dispatchCounted(pass,this.variant(fine),this.ownership.capacity.fineTiles,"fine");
     // A regular 4h owner (a 3x3x3 stencil of 4h tiles) with the cached
     // curvature reads its own and its face neighbours' origins, anchors and

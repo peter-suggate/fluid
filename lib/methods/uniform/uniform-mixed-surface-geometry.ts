@@ -48,6 +48,9 @@ export class UniformMixedSurfaceGeometry {
   readonly allocatedBytes:number;
   private pipeline?:GPUComputePipeline;
   private pressurePipeline?:GPUComputePipeline;
+  /** Solid-free twins (umSolidFree) of the full launches, launched ahead of
+   * them where the stage has a solid library: see umSolidSkip. */
+  private freePipelines:GPUComputePipeline[]=[];
   private readonly changedPipelines:GPUComputePipeline[]=[];
   private readonly resources:GPUBindGroupLayout;
   private readonly mirrorResources:GPUBindGroupLayout;
@@ -187,6 +190,7 @@ fn gcOwner(owner:UMOwner,terms:bool){
  }
 }
 @compute @workgroup_size(64) fn geometry(@builtin(global_invocation_id) gid:vec3u){
+ if(umSolidSkip()){return;}
  let owner=umAllOwner(gid);
  if(geometryPressure){gcShare(owner);workgroupBarrier();}
  if(owner.width==0u){return;}gcOwner(owner,geometryPressure);
@@ -218,7 +222,9 @@ var<workgroup> gcJobs:vec2u;
     const layout=this.device.createPipelineLayout({bindGroupLayouts:groups}),listed=this.device.createPipelineLayout({bindGroupLayouts:[...groups,this.listResources]});
     const create=(entryPoint:string,constants:Record<string,number>={},pipelineLayout=layout)=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout:pipelineLayout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants,...s}}}),{entry:entryPoint});
     const all={umCountedJobs:UNIFORM_MIXED_COUNTED.all};
-    [this.pipeline,this.pressurePipeline]=await Promise.all([create("geometry",all),create("geometry",{...all,geometryPressure:1})]);
+    const twinned:Record<string,number>=this.solid?{umSolidTwinned:1}:{};
+    [this.pipeline,this.pressurePipeline]=await Promise.all([create("geometry",{...all,...twinned}),create("geometry",{...all,geometryPressure:1,...twinned})]);
+    if(this.solid)this.freePipelines=await Promise.all([create("geometry",{...all,umSolidFree:1}),create("geometry",{...all,geometryPressure:1,umSolidFree:1})]);
     // Every live owner's texel, as a launch above wrote it.
     const mirror=uniformDetailModule(this.device,{label:"Uniform mixed geometric fill mirror",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
@@ -253,7 +259,10 @@ var<workgroup> gcJobs:vec2u;
       pass.setPipeline(this.variant(compact));pass.dispatchWorkgroups(Math.min(groups,x),ceilDiv(groups,x));
       pass.setPipeline(this.variant(changed));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
     }
-    else this.ownership.dispatchAllCounted(pass,this.variant(options.pressure?this.pressurePipeline:this.pipeline));
+    else{
+      const free=this.freePipelines[options.pressure?1:0];if(free)this.ownership.dispatchAllCounted(pass,uniformDetailPick(free));
+      this.ownership.dispatchAllCounted(pass,this.variant(options.pressure?this.pressurePipeline:this.pipeline));
+    }
     // Every live owner, after a changed launch too: the mirror may have been
     // remapped in tiles this launch did not evaluate.
     const mirror=this.mirrorGroups.get(group);if(!mirror)throw new Error("Mixed geometry group was not bound by this stage");

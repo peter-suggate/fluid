@@ -16,6 +16,8 @@ import {uniformKeyGroups} from "./uniform-lattice-address";
 interface Fields{volume:GPUTexture;velocity:GPUTexture;phi:GPUTexture;negative:GPUBuffer}
 /** Workgroups of each remap launch (see applyGpu). */
 const REMAP_GRID=4096;
+// Face kernels launched as a solid-free twin beside the general pipeline.
+const REMAP_FREE_TWINS:readonly string[]=["remapFaces"];
 /** Conservative edit-boundary remap. Volume and phi are remapped in place on
  * the persistent fields; faces go through the scratch velocity and are copied
  * back. The target generation is bound as group 1: a GPU-built generation's
@@ -119,14 +121,18 @@ export class UniformMixedRemap {
   const compile=async(part:RemapPart,resources:GPUBindGroupLayout,entryPoints:readonly string[])=>{
    const module=await moduleOf(part),solid=part==="list"?undefined:this.solid;
    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.ownership.bindLayout,resources,...(part==="list"?[this.statusLayout]:solid?[solid.tileLayout]:[])]});
-   await Promise.all(entryPoints.map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformMixedSolidPipeline(solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...s}}})));}));
+   // A twinned entry (REMAP_FREE_TWINS) with a solid library also gets its
+   // solid-free twin (name@free), launched ahead of it: see umSolidSkip.
+   const names=entryPoints.flatMap(entry=>solid&&REMAP_FREE_TWINS.includes(entry)?[entry,`${entry}@free`]:[entry]);
+   await Promise.all(names.map(async name=>{const entryPoint=name.split("@")[0]!,twin:Record<string,number>=solid&&REMAP_FREE_TWINS.includes(entryPoint)?name.endsWith("@free")?{umSolidFree:1}:{umSolidTwinned:1}:{};
+    this.pipelines.set(name,await uniformMixedSolidPipeline(solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...twin,...s}}})));}));
   };
   await Promise.all([compile("list",this.resources,["markChanged"]),compile("faces",this.resources,["remapFaces","copyFaces"]),compile("list",this.listResources,["markListed"]),compile("cells",this.cellsResources,["remapCells"])]);
  }
  /** before: encoded ahead of the remap pass with the target's topology
   * (tile words from word 0): the detail storage's patch admission. */
  apply(layout:UniformMixedLayout,before?:(encoder:GPUCommandEncoder,target:GPUBuffer)=>void):void{
-  if(this.pipelines.size!==5)throw new Error("Live remap has not been initialized");
+  if(this.pipelines.size!==5+(this.solid?REMAP_FREE_TWINS.length:0))throw new Error("Live remap has not been initialized");
   this.ownership.assertHolds(layout);
   // A transient target: host layouts are rare (authored regions, the initial layout).
   const target=new UniformMixedOwnership(this.device,layout,false,layout.address.poolTiles,this.ownership.fixedWorldGeometry);
@@ -156,7 +162,7 @@ export class UniformMixedRemap {
   * adopted: encoded right after the live ownership adopts (in that blit
   * run, between the remap and publish passes). */
  applyGpu(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers,receipt:{readonly buffer:GPUBuffer;readonly offset:number},extension=false,adopted?:(encoder:GPUCommandEncoder)=>void):void{
-  if(this.pipelines.size!==5)throw new Error("Live remap has not been initialized");
+  if(this.pipelines.size!==5+(this.solid?REMAP_FREE_TWINS.length:0))throw new Error("Live remap has not been initialized");
   if(extension&&!this.extensionGroups)throw new Error("Remap has no extension fields");
   if(!this.cleared)throw new Error("Live remap encoded without encodeClear");
   this.cleared=false;
@@ -214,8 +220,8 @@ export class UniformMixedRemap {
  }
  /** One launch of encodePass over its grid: the fields of `group` through the kernel `name`. */
  private encodeFaces(pass:GPUComputePassEncoder,group:UniformDetailGroup,name:string,gx:number,gy:number):void{
-  const solid=this.solid,pipeline=this.pipelines.get(name)!;
-  pass.setBindGroup(2,group.group);pass.setPipeline(uniformDetailPick(solid?solid.select(pipeline):pipeline));pass.dispatchWorkgroups(gx,gy);
+  const solid=this.solid,pipeline=this.pipelines.get(name)!,free=this.pipelines.get(`${name}@free`);
+  pass.setBindGroup(2,group.group);if(free){pass.setPipeline(uniformDetailPick(free));pass.dispatchWorkgroups(gx,gy);}pass.setPipeline(uniformDetailPick(solid?solid.select(pipeline):pipeline));pass.dispatchWorkgroups(gx,gy);
  }
  destroy():void{this.worklist.destroy();this.idleStatus.destroy();}
 }
@@ -860,6 +866,7 @@ fn remapTileFaces(group:vec3u,lane:u32,remap:bool){
  textureStore(output,anchor,packed);
 }
 @compute @workgroup_size(192) fn remapFaces(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(umSolidSkip()){return;}
  let jobs=listedJobCount(lane);for(var job=group.x+groups.x*group.y;job<jobs;job+=groups.x*groups.y){remapTileFaces(vec3u(job,0u,0u),lane,true);workgroupBarrier();}
 }
 // The publish is a copy, with no footprint reduction or cross-axis sharing.
