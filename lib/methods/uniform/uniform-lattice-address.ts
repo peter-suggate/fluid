@@ -538,11 +538,15 @@ fn umBoxWalls()->umBounds{
  return umBounds(max((vec3f(umWorldLow())-frame)*32.0,vec3f(-1e9)),min((vec3f(umWorldHigh())-frame)*32.0,vec3f(1e9)));
 }` : `fn umFixedBox()->bool{return false;}
 fn umBoxWalls()->umBounds{return umBounds(vec3f(-1e9),vec3f(1e9));}`}
-// Under a fixed box a point of a page inside it has the box's walls: they
-// are the walls umPointBounds finds wherever it finds any, and elsewhere the
-// point lies further than margin from them, so no clamp to them binds.
+// Under a fixed box every point has the box's walls, a launch constant, so
+// each clamp to them folds. For a point inside the box they are the walls
+// the page search finds wherever it finds any (elsewhere the point lies
+// further than margin from them, so no clamp binds); a point outside it is
+// held to the box, as the box-clamped sampler held every point, where the
+// page search would give the SOLID page's face on one axis and none on the
+// others.
 fn umPointBounds(p:vec3f,margin:f32)->umBounds{
- if(umFixedBox()){let w=umBoxWalls();let c=floor(p);if(all(c>=w.lo)&&all(c<w.hi)){return w;}}
+ if(umFixedBox()){return umBoxWalls();}
  var b=umBounds(vec3f(-1e9),vec3f(1e9));
  let c=vec3i(floor(p));let page=c>>vec3u(5u);let low=vec3f(page<<vec3u(5u));let l=p-low;
  if(all(l>=vec3f(margin))&&all(l<vec3f(32.0-margin))){return b;}
