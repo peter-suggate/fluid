@@ -36,6 +36,10 @@ import type { GPUFluidParticleSource } from "../../core/webgpu-particle-overlay"
 // Entries of fine-only batches (reconstruct, redistanceFine: encoded only
 // while the h-tile capacity is non-zero) on the h side of their group.
 const NB_H_STORE_ENTRIES=new Set(["coupleFine","redistanceFine"]);
+// Entries that run at any h-tile capacity, also compiled on the h side
+// (name@h) for the batches encoded while the capacity is non-zero: their
+// twin binds the same group, whose fields are then h textures.
+const NB_H_TWIN_ENTRIES=["buildDistance"];
 const NB_LAUNCH={grid:0,counted:1,tiles:2,one:3,particles:4} as const;
 /** One launch of a batch, resolved once at initialization: its bind groups
  * by name (bind() replaces the groups), its pipeline and its launch. */
@@ -46,7 +50,7 @@ interface NarrowBandBatches{
  readonly advect:NarrowBandBatch;readonly marking:NarrowBandBatch;readonly countInitial:NarrowBandBatch;readonly seedInitial:NarrowBandBatch;readonly commit:NarrowBandBatch;
  readonly activity:NarrowBandBatch;readonly search:NarrowBandBatch;readonly searchReconstruct:NarrowBandBatch;readonly searchRedistance:NarrowBandBatch;
  readonly diagnose:NarrowBandBatch;readonly reconstruct:NarrowBandBatch;readonly reconstructCoarse:NarrowBandBatch;readonly transfer:NarrowBandBatch;
- readonly snapshot:NarrowBandBatch;readonly retire:NarrowBandBatch;readonly redistanceFine:NarrowBandBatch;readonly redistanceMetric:NarrowBandBatch;readonly metric:NarrowBandBatch;
+ readonly snapshot:NarrowBandBatch;readonly retire:NarrowBandBatch;readonly redistanceFine:NarrowBandBatch;readonly redistanceMetric:NarrowBandBatch;readonly metric:NarrowBandBatch;readonly metricFine:NarrowBandBatch;
  readonly update:NarrowBandBatch;readonly resample:NarrowBandBatch;readonly clearAir:NarrowBandBatch;
 }
 const NB_REFINEMENT_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP surface refinement"};
@@ -1042,10 +1046,10 @@ ${narrowBandSurfaceWGSL}
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
-  await Promise.all(["activity","activitySpread","advectParticles","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists",...narrowBandNearestEntries,"depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse"].map(async entryPoint=>{
-   const module=modules[["advectParticles","snapshot","update","seed","seedSources"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(entryPoint==="depthCoarse"?{nbCachedGeometry:0}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
-   this.pipelines.set(entryPoint,p);
+  await Promise.all(["activity","activitySpread","advectParticles","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists",...narrowBandNearestEntries,"depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_H_TWIN_ENTRIES.map(entry=>`${entry}@h`)].map(async name=>{
+   const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","snapshot","update","seed","seedSources"].includes(entryPoint)?1:0]!;
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(entryPoint==="depthCoarse"?{nbCachedGeometry:0}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)||name.endsWith("@h")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+   this.pipelines.set(name,p);
   }));
   if(this.slotSnapshotResources){
    const module=uniformDetailModule(this.device,{label:"Narrow-band FLIP slot snapshot",code:sourceCode(true,true)});
@@ -1068,16 +1072,17 @@ ${narrowBandSurfaceWGSL}
    snapshot:this.compile(["snapshot"],undefined,"snapshot"),
    retire:this.compile(["depthCoarse","redistanceCoarse"],undefined,"coarse retirement"),
    clearAir:this.compile(["airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse"],undefined,"retire empty air"),
-   redistanceFine:this.compile(["depthGeometry","buildDistance","redistanceFine"],undefined,"redistance"),
+   redistanceFine:this.compile(["depthGeometry","buildDistance@h","redistanceFine"],undefined,"redistance"),
    redistanceMetric:this.compile(["depthGeometry","buildDistance"],undefined,"redistance"),
    metric:this.compile(["depthGeometry","buildDistance"],undefined,"surface metric"),
+   metricFine:this.compile(["depthGeometry","buildDistance@h"],undefined,"surface metric"),
    update:this.compile(["update"],undefined,"update"),
    resample:this.compile(["resampleCount","resamplePrefix","resample","seedCells","seedSources","seed"],"update","resample and seed"),
   };
  }
  private compile(entries:readonly string[],groupName:string|undefined,label:string):NarrowBandBatch{
-  return {pass:{label:`Narrow-band FLIP ${label}`},steps:entries.map(entry=>{
-   const selected=this.pipelines.get(entry);if(!selected)throw new Error(`Narrow-band FLIP ${entry} is not initialized`);
+  return {pass:{label:`Narrow-band FLIP ${label}`},steps:entries.map(name=>{
+   const selected=this.pipelines.get(name),entry=name.split("@")[0]!;if(!selected)throw new Error(`Narrow-band FLIP ${name} is not initialized`);
    return {
     groups:groupName??(entry.startsWith("airClear")?"redistanceStore":entry.startsWith("air")?"surface":entry.startsWith("redistance")?"redistanceStore":entry.startsWith("resample")?"update":entry==="markParticleTiles"||entry==="surfaceCells"||entry==="surfaceSplat"||entry==="diagnoseBefore"||entry==="buildDistance"||entry.startsWith("depth")?"surface":entry.startsWith("transfer")||entry==="classify"?"transfer":entry==="couple"||entry==="coupleFine"||entry==="commitCount"?"surface":entry),
     // In-place redistance reads its own canonical texel: coarse vertices
@@ -1089,6 +1094,8 @@ ${narrowBandSurfaceWGSL}
   })};
  }
  private get compiled():NarrowBandBatches{if(!this.batches)throw new Error("Narrow-band FLIP is not initialized");return this.batches;}
+ /** The metric build: its h-side twin while the h-tile capacity is non-zero. */
+ private get metric():NarrowBandBatch{const b=this.compiled;return this.ownership.coarseOnly?b.metric:b.metricFine;}
  private run(encoder:GPUCommandEncoder,batch:NarrowBandBatch,shared?:GPUComputePassEncoder):void{
   const pass=shared??encoder.beginComputePass(batch.pass);
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(2,this.solid.tileGroup);
@@ -1135,7 +1142,7 @@ ${narrowBandSurfaceWGSL}
   const b=this.compiled;
   encoder.clearBuffer(this.state,4,8);encoder.clearBuffer(this.bins,0,this.cells*8);
   encoder.clearBuffer(this.bins,this.cells*8+this.tiles*4,this.tiles*4);
-  this.measureBand(encoder,b.search);this.buildDistance(encoder,b.metric);this.cache.encode(encoder,this.cacheGroups.bootstrap!);
+  this.measureBand(encoder,b.search);this.buildDistance(encoder,this.metric);this.cache.encode(encoder,this.cacheGroups.bootstrap!);
   if(this.order.sparse)encoder.clearBuffer(this.bins,this.cells*8,this.tiles*4);
   this.run(encoder,b.countInitial);this.order.encodeOffsets(encoder,1-this.parity);
   this.run(encoder,b.seedInitial);this.run(encoder,b.commit);
@@ -1188,7 +1195,7 @@ ${narrowBandSurfaceWGSL}
  transfer(encoder:GPUCommandEncoder):void{
   // Clearing a buried zero invalidates the crossing/metric banks as well
   // as phi. The caller resolved phi before momentum or membership reads it.
-  if(!this.bandCurrent){this.measureBand(encoder,this.compiled.search);this.buildDistance(encoder,this.compiled.metric);this.bandCurrent=true;}
+  if(!this.bandCurrent){this.measureBand(encoder,this.compiled.search);this.buildDistance(encoder,this.metric);this.bandCurrent=true;}
   this.run(encoder,this.compiled.transfer);
  }
  snapshot(encoder:GPUCommandEncoder,slots?:UniformNarrowBandSlotSnapshot):void{
@@ -1231,7 +1238,7 @@ ${narrowBandSurfaceWGSL}
  }
  update(encoder:GPUCommandEncoder):void{
   const b=this.compiled;
-  if(!this.bandCurrent){this.measureBand(encoder,b.search);this.buildDistance(encoder,b.metric);}this.bandCurrent=false;
+  if(!this.bandCurrent){this.measureBand(encoder,b.search);this.buildDistance(encoder,this.metric);}this.bandCurrent=false;
   const pass=encoder.beginComputePass(NB_UPDATE_PASS);
   this.cache.encode(encoder,this.cacheGroups.update!,pass);this.encodeStageTaps(encoder,pass);
   this.run(encoder,b.update,pass);pass.end();
