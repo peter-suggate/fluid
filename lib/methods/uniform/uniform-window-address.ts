@@ -77,9 +77,12 @@ fn ${prefix}PageWord(page:vec3i)->u32{
  // A kept word is a block or AIR wherever the host's SOLID seed reads as AIR
  // (word 31 all ones): clamped below the SOLID sentinel there, a SOLID test
  // of a fixed geometry folds to the world-box compare and drops its load.
- let word=select(raw,min(raw,${blocks}-2u),${prefix}FixedWorldGeometry&&${w(31)}==0xffffffffu);
+ let word=select(raw,min(raw,${blocks}-2u),${prefix}SolidIsBox());
  return select(select(0u,word,keep),0xffffffffu,${prefix}WorldSolid(world));
 }
+// The SOLID pages are exactly those outside the world box: a fixed geometry
+// whose host SOLID seed reads as AIR (word 31 all ones).
+fn ${prefix}SolidIsBox()->bool{return ${prefix}FixedWorldGeometry&&${w(31)}==0xffffffffu;}
 fn ${prefix}BlockWord(b:u32)->u32{
  let raw=${buffer}[${table}+${entries + UNIFORM_WINDOW_HEADER_WORDS}u+b];
  let q=(vec3u(raw&63u,(raw>>6u)&63u,(raw>>12u)&63u)-bitcast<vec3u>(${prefix}FramePage()))&vec3u(63u);

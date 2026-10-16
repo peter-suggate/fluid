@@ -343,7 +343,7 @@ fn umCubicPhi(q:vec3f,cell:UMVertexCell)->f32{
  // tap stands for the line through the two inner taps on its axis: its
  // weight moves onto them. An axis has at most one end tap past the page.
  let at=base&vec3i(31);let past=vec3i(at+vec3i(2*width)>vec3i(32))-vec3i(at<vec3i(width));
- let held=umBlockHeld(home,past);let lowHeld=held&(past<vec3i(0));let highHeld=held&(past>vec3i(0));
+ let held=umBlockHeld(home,page,past);let lowHeld=held&(past<vec3i(0));let highHeld=held&(past>vec3i(0));
  let wx=umHeldWeights(umCatmull(fraction.x),lowHeld.x,highHeld.x);let wy=umHeldWeights(umCatmull(fraction.y),lowHeld.y,highHeld.y);let wz=umHeldWeights(umCatmull(fraction.z),lowHeld.z,highHeld.z);
  // A weighted buried tap returns the cell's value, whichever tap it is:
  // test them ahead of the taps at one umBuried site (inlined per site, a

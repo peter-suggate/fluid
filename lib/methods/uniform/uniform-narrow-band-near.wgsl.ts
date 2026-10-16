@@ -35,7 +35,7 @@ fn nbHomeBlock(page:vec3i,lo:vec3i,hi:vec3i)->u32{if(all(lo==page)&&all(hi==page
 fn nbPointNearIn(home:vec3i,p:vec3f,inset:f32)->vec3f{
  let page=home>>vec3u(5u);let base=vec3f(page<<vec3u(5u));let low=base+inset;let high=base+32.0-inset;
  let d=vec3i(p>high)-vec3i(p<low);if(all(d==vec3i(0))){return p;}
- return select(p,clamp(p,low,high),umBlockHeld(umBlockOf(page),d));
+ return select(p,clamp(p,low,high),umBlockHeld(umBlockOf(page),page,d));
 }
 fn nbPointNear(home:vec3i,p:vec3f)->vec3f{return nbPointNearIn(home,p,0.0);}
 `;

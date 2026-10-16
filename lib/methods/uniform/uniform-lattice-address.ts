@@ -394,8 +394,23 @@ const UM_SOLID_WORD:u32=0xffffffffu;
 fn umBlockNeighbourIndex(d:vec3i)->u32{return u32(d.x+3*d.y+9*d.z+13);}
 // The table word of the page d pages (-1, 0 or 1 an axis) from block b's.
 fn umBlockNeighbour(b:u32,d:vec3i)->u32{return umBlockNeighbourWord(b,umBlockNeighbourIndex(d));}
-// The axes of step d a wall holds (the diagonal rule above).
-fn umBlockHeld(home:u32,d:vec3i)->vec3<bool>{
+// The axes of step d a wall holds (the diagonal rule above), from block
+// home of page page. Where the SOLID pages are those outside the world box
+// (umSolidIsBox) a stored home's row word is SOLID exactly where its page is
+// outside the box, block 0's row is AIR and the last block's SOLID: the
+// probes fold to box compares and read no row.
+fn umBlockHeld(home:u32,page:vec3i,d:vec3i)->vec3<bool>{
+ if(umSolidIsBox()){
+  if(!umBlockStored(home)){return (d!=vec3i(0))&vec3<bool>(home!=0u);}
+  let world=page+umFramePage();
+  let held=vec3<bool>(
+   d.x!=0&&umWorldSolid(world+vec3i(d.x,0,0)),
+   d.y!=0&&umWorldSolid(world+vec3i(0,d.y,0)),
+   d.z!=0&&umWorldSolid(world+vec3i(0,0,d.z)));
+  let free=select(d,vec3i(0),held);let loose=vec3u(free!=vec3i(0));
+  if(loose.x+loose.y+loose.z>=2u&&umWorldSolid(world+free)){return d!=vec3i(0);}
+  return held;
+ }
  // Keep the three face probes scalar to avoid dynamic vector indexing
  // inside every stencil tap.
  let held=vec3<bool>(
@@ -407,21 +422,21 @@ fn umBlockHeld(home:u32,d:vec3i)->vec3<bool>{
  return held;
 }
 // p held inside [low, high], home's page in p's units, on the axes a wall holds.
-fn umSpanNearFrom(home:u32,low:vec3i,high:vec3i,p:vec3i)->vec3i{
+fn umSpanNearFrom(home:u32,page:vec3i,low:vec3i,high:vec3i,p:vec3i)->vec3i{
  let d=vec3i(p>high)-vec3i(p<low);if(all(d==vec3i(0))){return p;}
- return select(p,clamp(p,low,high),umBlockHeld(home,d));
+ return select(p,clamp(p,low,high),umBlockHeld(home,page,d));
 }
 // Cells and tiles: a page's 32 cells or 8 tiles an axis. Vertices and 4h
 // vertices: its 33 or 9 planes, both faces of the page its own. Points: a
 // position in cell units, the page's closed extent.
-fn umCellNearFromPage(home:u32,page:vec3i,p:vec3i)->vec3i{let low=page<<vec3u(5u);return umSpanNearFrom(home,low,low+vec3i(31),p);}
-fn umTileNearFromPage(home:u32,page:vec3i,p:vec3i)->vec3i{let low=page<<vec3u(3u);return umSpanNearFrom(home,low,low+vec3i(7),p);}
-fn umVertexNearFromPage(home:u32,page:vec3i,p:vec3i)->vec3i{let low=page<<vec3u(5u);return umSpanNearFrom(home,low,low+vec3i(32),p);}
-fn umWideVertexNearFromPage(home:u32,page:vec3i,q:vec3i)->vec3i{let low=page<<vec3u(3u);return umSpanNearFrom(home,low,low+vec3i(8),q);}
+fn umCellNearFromPage(home:u32,page:vec3i,p:vec3i)->vec3i{let low=page<<vec3u(5u);return umSpanNearFrom(home,page,low,low+vec3i(31),p);}
+fn umTileNearFromPage(home:u32,page:vec3i,p:vec3i)->vec3i{let low=page<<vec3u(3u);return umSpanNearFrom(home,page,low,low+vec3i(7),p);}
+fn umVertexNearFromPage(home:u32,page:vec3i,p:vec3i)->vec3i{let low=page<<vec3u(5u);return umSpanNearFrom(home,page,low,low+vec3i(32),p);}
+fn umWideVertexNearFromPage(home:u32,page:vec3i,q:vec3i)->vec3i{let low=page<<vec3u(3u);return umSpanNearFrom(home,page,low,low+vec3i(8),q);}
 fn umPointNearFromPage(home:u32,page:vec3i,p:vec3f)->vec3f{
  let low=vec3f(page<<vec3u(5u));let high=low+vec3f(32.0);
  let d=vec3i(p>high)-vec3i(p<low);if(all(d==vec3i(0))){return p;}
- return select(p,clamp(p,low,high),umBlockHeld(home,d));
+ return select(p,clamp(p,low,high),umBlockHeld(home,page,d));
 }
 fn umCellNearFrom(home:u32,p:vec3i)->vec3i{return umCellNearFromPage(home,vec3i(umBlockPage(home)),p);}
 fn umTileNearFrom(home:u32,p:vec3i)->vec3i{return umTileNearFromPage(home,vec3i(umBlockPage(home)),p);}
@@ -435,22 +450,22 @@ fn umPointNearFrom(home:u32,p:vec3f)->vec3f{return umPointNearFromPage(home,vec3
 fn umCellNearAt(home:vec3i,p:vec3i)->vec3i{
  let page=home>>vec3u(5u);let low=page<<vec3u(5u);
  if(all(p>=low)&&all(p<=low+vec3i(31))){return p;}
- return umSpanNearFrom(umBlockOf(page),low,low+vec3i(31),p);
+ return umSpanNearFrom(umBlockOf(page),page,low,low+vec3i(31),p);
 }
 fn umTileNearAt(home:vec3i,p:vec3i)->vec3i{
  let page=home>>vec3u(3u);let low=page<<vec3u(3u);
  if(all(p>=low)&&all(p<=low+vec3i(7))){return p;}
- return umSpanNearFrom(umBlockOf(page),low,low+vec3i(7),p);
+ return umSpanNearFrom(umBlockOf(page),page,low,low+vec3i(7),p);
 }
 fn umVertexNearAt(home:vec3i,p:vec3i)->vec3i{
  let page=home>>vec3u(5u);let low=page<<vec3u(5u);
  if(all(p>=low)&&all(p<=low+vec3i(32))){return p;}
- return umSpanNearFrom(umBlockOf(page),low,low+vec3i(32),p);
+ return umSpanNearFrom(umBlockOf(page),page,low,low+vec3i(32),p);
 }
 fn umWideVertexNearAt(home:vec3i,q:vec3i)->vec3i{
  let page=home>>vec3u(3u);let low=page<<vec3u(3u);
  if(all(q>=low)&&all(q<=low+vec3i(8))){return q;}
- return umSpanNearFrom(umBlockOf(page),low,low+vec3i(8),q);
+ return umSpanNearFrom(umBlockOf(page),page,low,low+vec3i(8),q);
 }
 fn umPointNearAt(home:vec3i,p:vec3f)->vec3f{
  let page=home>>vec3u(5u);let low=vec3f(page<<vec3u(5u));
