@@ -36,7 +36,7 @@ const MOMENTUM_PASS: GPUComputePassDescriptor = { label: "Uniform mixed momentum
  * Classification and blend weight are shared by the three components. The
  * characteristic retains its actual local owner width even when a sample
  * crosses into a coarse tile. Only fine samples touching negative boundary
- * planes escape to the general sampler; seam blends no longer discard and
+ * planes, or with no halo home, escape to the general sampler; seam blends no longer discard and
  * repeat a partially evaluated characteristic. */
 const uniformMixedMomentumUnitWGSL = uniformCachedMomentumSamplingWGSL + /* wgsl */ `
 // umMomentum through the unit sampler (umUnitEscaped when it cannot).

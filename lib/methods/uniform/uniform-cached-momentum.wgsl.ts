@@ -28,6 +28,8 @@ fn umUnitInterpolant(p:vec3f,axis:u32)->f32 {
 }
 // 0 native fine stencil, 1 prepared blend, 2 negative-plane escape: a fine
 // sample within a cell of a low wall plane (umWallLow) taps the negative planes.
+// A native fine stencil with no halo home escapes too: the general sampler
+// stays out of this module (its inlined code cost the common path occupancy).
 fn umUnitSampleKind(p:vec3f,s:UMSampleTile,axis:u32)->u32 {
  if(umFineStencilTile(s.key)){umUnitWidth=1.0;umUnitFineWeight=1.0;return 0u;}
  umUnitWidth=f32(umTileWidth(s.key));umUnitFineWeight=umVelocitySamplingWeightsAt(s);
@@ -45,19 +47,18 @@ fn umUnitWeighted(p:vec3f,home:UMCoarseHome,axis:u32,fine:f32)->f32 {
 // holds: with a home it is the unit interpolant at weight one (exactly).
 fn umUnitSampleComponent(p:vec3f,axis:u32)->f32 {
  let s=umSampleTile(p);let kind=umUnitSampleKind(p,s,axis);umUnitHome=umUnitHaloHome(s);
- if(kind==0u&&umUnitHome.w<0){return umSampleVelocityFine(p,axis);}
- if(kind==2u){umUnitEscaped=true;return 0.0;}
+ if(kind==2u||(kind==0u&&umUnitHome.w<0)){umUnitEscaped=true;return 0.0;}
  return umUnitWeighted(p,umCoarseHome(p,s),axis,umUnitFineWeight);
 }
 // The three components in one loop, each interpolant at one call site
 // (Metal inlines every call: one written three times compiles three times).
 fn umUnitSample(p:vec3f)->vec3f {
  let s=umSampleTile(p);let kind=umUnitSampleKind(p,s,3u);
- if(kind==2u){umUnitEscaped=true;return vec3f(0);}
  umUnitHome=umUnitHaloHome(s);
+ if(kind==2u||(kind==0u&&umUnitHome.w<0)){umUnitEscaped=true;return vec3f(0);}
  let fine=umUnitFineWeight;let home=umCoarseHome(p,s);var v=vec3f(0.0);
  for(var a=0u;a<3u;a++){
-  if(kind==0u&&umUnitHome.w<0){v[a]=umSampleVelocityFine(p,a);}else{v[a]=umUnitWeighted(p,home,a,fine);}
+  v[a]=umUnitWeighted(p,home,a,fine);
  }
  return v;
 }
