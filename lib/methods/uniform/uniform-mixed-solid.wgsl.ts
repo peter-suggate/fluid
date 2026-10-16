@@ -322,9 +322,10 @@ fn umBuildTile(t:u32,lane:u32){
  let l=vec3u(lane%4u,(lane/4u)%4u,lane/16u);let c=vec3i(tc*4u+l);
  if(lane==0u){for(var i=0u;i<2u;i++){atomicStore(&openCells[i],0u);}for(var i=0u;i<8u;i++){atomicStore(&patchCodes[i],0u);}}
  var own=vec4f(umCellOpen(c),0.0,0.0,0.0);var low=vec4f(0.0);
+ // A low face feeds only the halo of a tile on its block's low side.
  for(var axis=0u;axis<3u;axis++){
-  if(l[axis]==3u){own[axis+1u]=umPressureFaceV(c,axis);}
-  if(l[axis]==0u){var q=c;q[axis]-=1;low[axis+1u]=umPressureFaceV(q,axis);}
+  let below=l[axis]==0u&&(tc[axis]&7u)==0u;
+  if(l[axis]==3u||below){var q=c;if(below){q[axis]-=1;}let v=umPressureFaceV(q,axis);if(below){low[axis+1u]=v;}else{own[axis+1u]=v;}}
  }
  workgroupBarrier();
  if(own.x>1e-5){atomicOr(&openCells[lane>>5u],1u<<(lane&31u));}
