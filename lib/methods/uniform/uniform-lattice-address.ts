@@ -341,7 +341,9 @@ ${boxed(`fn umFaceAnchorNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(-1),vec3i(
 // A stored h vertex's key: its block, then its texel in the block, x
 // fastest; and the vertex of a key a stored vertex has.${boxed(` Near: the nearest
 // vertex of the box.`)}
-fn umVertexAt(p:vec3u)->u32{let s=umVertexSlot(vec3i(p));return 35937u*min(s.w,${blocks}-1u)+s.x+33u*(s.y+33u*s.z);}
+// The key of a vertex slot (umVertexSlot), a caller that holds it.
+fn umVertexSlotAt(s:vec4u)->u32{return 35937u*min(s.w,${blocks}-1u)+s.x+33u*(s.y+33u*s.z);}
+fn umVertexAt(p:vec3u)->u32{return umVertexSlotAt(umVertexSlot(vec3i(p)));}
 fn umVertexCoord(k:u32)->vec3u{let l=k%35937u;return (umBlockPage(k/35937u)<<vec3u(5u))+vec3u(l%33u,(l/33u)%33u,l/1089u);}
 ${boxed(`fn umVertexNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(0),vec3i(${d}));}
 fn umWideVertexNear(q:vec3i)->vec3i{${T}return clamp(q,vec3i(0),vec3i(${t}));}

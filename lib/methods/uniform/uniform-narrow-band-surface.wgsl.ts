@@ -116,7 +116,8 @@ var<workgroup> nbSurfaceRange:vec2u;
 @compute @workgroup_size(64) fn surfaceSplat(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let cell=links[nbSurfaceCells()+group.x];let c=4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u);
  let q=vec3i(c)+vec3i(umCorner(lane,4u))-1;
- let present=umVertexPresent(q);
+ // One slot lookup serves the presence test and the depth key.
+ let slot=umVertexSlot(q);let present=umBlockStored(slot.w);
  if(lane==0u){let start=links[cell];nbSurfaceRange=vec2u(start,start+atomicLoad(&bins[cell]));}
  let range=workgroupUniformLoad(&nbSurfaceRange);let start=range.x;let end=range.y;var nearest2=4.0;
  for(var first=start;first<end;first+=64u){
@@ -127,7 +128,7 @@ var<workgroup> nbSurfaceRange:vec2u;
   workgroupBarrier();
  }
  // Positive float bit order: complement reverses it; zero is the empty key.
- if(present&&nearest2<4.0){atomicMax(&bins[NB_DEPTH_A+umVertexAt(vec3u(q))],~bitcast<u32>(nearest2));}
+ if(present&&nearest2<4.0){atomicMax(&bins[NB_DEPTH_A+umVertexSlotAt(slot)],~bitcast<u32>(nearest2));}
 }
 fn nbCachedSurfaceNearest(q:vec3i)->f32{
  let key=atomicLoad(&bins[NB_DEPTH_A+umVertexAt(vec3u(q))]);
