@@ -132,10 +132,12 @@ fn particleDepth(p:vec3f)->f32{
  if((nbBandReach(c)&1u)==0u){let far=bandPhi(p);return select(max(far,6.0),min(far,-6.0),far<0.0);}
  var value=0.0;
  // The eight vertex keys: where one block holds them (umVertexRun) the first's plus 1, 33 and 1089 a step, by one
- // page-table read; else umVertexAt of each.
+ // page-table read; else umVertexAt of each, in a loop kept rolled (its bound is not a constant to the compiler:
+ // run is zero there): eight inlined copies of umVertexAt's page search cost every caller registers, and a third
+ // of a late splash's samples lie on a page plane (the floor sheet).
  var keys:array<u32,8>;let run=umVertexRun(vec3i(c),1u);
  if(run.x!=0u){let first=umVertexRunAt(run);for(var k=0u;k<8u;k++){let corner=umCorner(k,2u);keys[k]=first+corner.x+33u*corner.y+1089u*corner.z;}}
- else{for(var k=0u;k<8u;k++){keys[k]=umVertexAt(c+umCorner(k,2u));}}
+ else{for(var k=0u;k<8u+run.y;k++){keys[k]=umVertexAt(c+umCorner(k,2u));}}
  for(var k=0u;k<8u;k++){
   let corner=umCorner(k,2u);let w=select(1.0-f,f,corner!=vec3u(0));
   value+=w.x*w.y*w.z*bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+keys[k]]));
