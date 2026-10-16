@@ -8,8 +8,8 @@ import { uniformMixedCountedEntriesWGSL, uniformMixedTopologyNeighboursWGSL, uni
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { UNIFORM_MIXED_HANGING_TAPS, UNIFORM_UNIT_HALO_EDGE, uniformMixedHangingTapWGSL, uniformMixedVelocitySamplingSource, uniformUnitHaloExtent, uniformUnitHaloWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
 
-/** Workgroups a block of the unit halo fill. */
-const HALO_SLICES=64;
+/** Workgroups a block of the unit halo fill: one a z-plane of its texels. */
+const HALO_SLICES=UNIFORM_UNIT_HALO_EDGE;
 const CACHE_PASS:GPUComputePassDescriptor={label:"Uniform mixed 4h sampling cache"},TAPS_PASS:GPUComputePassDescriptor={label:"Uniform mixed hanging fine taps"};
 
 export interface UniformMixedMomentumCacheFields {
@@ -255,29 +255,46 @@ fn umHaloBit(l:vec3u)->u32{return l.x|(l.y<<3u)|(l.z<<6u);}
  workgroupBarrier();
  if(lane<16u){haloBlocks[16u*b+lane]=atomicLoad(&haloReach[lane]);}
 }
-// A block's texels, ${HALO_SLICES} workgroups a block (y) striding them: an
-// unstored block's workgroups and an unmarked tile's lanes leave at once.
+// A block's texels, a workgroup a z-plane (y). A plane lies in one tile row:
+// its 10 x 10 tiles' words (marked, unit-or-slotted, SOLID) are staged
+// first, so a texel reads none of the tables; an unstored block's workgroups
+// and an unmarked tile's texels write nothing.
+const UM_HALO_MARKED=1u;const UM_HALO_UNIT=2u;const UM_HALO_SOLID=4u;
+var<workgroup> haloTiles:array<u32,100>;
 @compute @workgroup_size(64) fn fillUnitHalo(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let b=group.x;
- if(b>=UM_BLOCKS||!umBlockStored(b)||umBlockWord(b)==UM_FREE){return;}
- for(var i=64u*group.y+lane;i<${UNIFORM_UNIT_HALO_EDGE**3}u;i+=${64*HALO_SLICES}u){
-  let l=vec3u(i%${UNIFORM_UNIT_HALO_EDGE}u,(i/${UNIFORM_UNIT_HALO_EDGE}u)%${UNIFORM_UNIT_HALO_EDGE}u,i/${UNIFORM_UNIT_HALO_EDGE**2}u);
-  let n=umHaloBit(clamp((l+vec3u(2u))/4u,vec3u(1u),vec3u(8u))-vec3u(1u));
-  if((haloBlocks[16u*b+(n>>5u)]&(1u<<(n&31u)))!=0u){umFillUnitHaloTexel(b,l);}
+ let b=group.x;let live=b<UM_BLOCKS&&umBlockStored(b)&&umBlockWord(b)!=UM_FREE;
+ let origin=(vec3i(umBlockPage(min(b,UM_BLOCKS-1u)))<<vec3u(5u))-vec3i(2);
+ let z=group.y;let tz=(z+2u)/4u;
+ if(live){
+  for(var k=lane;k<100u;k+=64u){
+   // Local tile t covers the texels with (l + 2) / 4 == t: its first, l = max(4 t, 2) - 2.
+   let t=vec3u(k%10u,k/10u,tz);let tap=origin+vec3i(max(4u*t,vec3u(2u))-vec3u(2u));
+   let n=umHaloBit(clamp(t,vec3u(1u),vec3u(8u))-vec3u(1u));var word=select(0u,UM_HALO_MARKED,(haloBlocks[16u*b+(n>>5u)]&(1u<<(n&31u)))!=0u);
+   let key=umTileAt(vec3u(tap)/4u);
+   if(umTilePresent(tap>>vec3u(2u))&&(umTileWidth(key)==1u||umHanging[key]!=UM_NO_SLOT)){word|=UM_HALO_UNIT;}
+   if(umCellKind(tap)==UM_SOLID){word|=UM_HALO_SOLID;}
+   haloTiles[k]=word;
+  }
+ }
+ workgroupBarrier();
+ if(!live){return;}
+ for(var i=lane;i<${UNIFORM_UNIT_HALO_EDGE**2}u;i+=64u){
+  let l=vec3u(i%${UNIFORM_UNIT_HALO_EDGE}u,i/${UNIFORM_UNIT_HALO_EDGE}u,z);let t=(l+vec3u(2u))/4u;
+  let word=haloTiles[t.x+10u*t.y];
+  if((word&UM_HALO_MARKED)!=0u){umFillUnitHaloTexel(b,origin+vec3i(l),l,word);}
  }
 }
-fn umFillUnitHaloTexel(b:u32,l:vec3u){
- let tap=(vec3i(umBlockPage(b))<<vec3u(5u))+vec3i(l)-vec3i(2);
+fn umFillUnitHaloTexel(b:u32,tap:vec3i,l:vec3u,word:u32){
  // The unit interpolant's tap: the texel the cell resolves to. It is
  // umVelocityTap1's too where this fill wrote it: a unit or a slotted tile.
  var value=textureLoad(unitVelocity,tap,0);
- let key=umTileAt(vec3u(tap)/4u);value.w=select(0.0,1.0,umTilePresent(tap>>vec3u(2u))&&(umTileWidth(key)==1u||umHanging[key]!=UM_NO_SLOT));
+ value.w=select(0.0,1.0,(word&UM_HALO_UNIT)!=0u);
  // A SOLID cell's channel on the plane below the low wall along it: the
  // low-wall face, as umVelocityTap1 reads it: the low-face table under a
  // unit tile, the negative-plane tap (as the hanging record holds it) under
  // a coarser one. Its other channels keep the SOLID texel (zero), as the
  // unit sampler's direct loads read them.
- if(umCellKind(tap)==UM_SOLID){
+ if((word&UM_HALO_SOLID)!=0u){
   value.w=1.0;let wall=umWallLow();let anchor=max(tap,wall);let tile=umTileAt(vec3u(anchor)/4u);let unit=umTileWidth(tile)==1u;
   for(var axis=0u;axis<3u;axis++){
    if(tap[axis]!=wall[axis]-1){continue;}
