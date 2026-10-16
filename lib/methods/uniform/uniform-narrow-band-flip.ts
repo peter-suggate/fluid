@@ -417,7 +417,34 @@ ${uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",undefined
 ${uniformMixedSolidWGSL(2,this.solid.coarse?.count)}
 ${narrowBandTerrainContactWGSL}
 ${uniformMixedSourceWGSL(16)}
+// advectParticles is compiled twice. Its fast launch (nbFastSample) takes
+// only a fine tile's unit interpolant from its page's halo block (exactly
+// umSampleVelocity's value there: weight 1, eight loads at plain offsets),
+// so the general sampler's code is not in that pipeline. A sample anywhere
+// else marks the particle slow: it is listed, untouched, for the general
+// launch (advectParticlesDeferred), which advects it from the same record.
+override nbFastSample:bool=false;
+var<private> nbSlow:bool=false;
 fn sampleVelocity(p:vec3f)->vec3f{
+ ${unitTaps&&!slots?`if(nbFastSample){
+  let s=umSampleTile(p);
+  if(!umRegularFine&&umCachedFineTile(s.key)){
+   umUnitHome=umUnitHaloHome(s);
+   if(umUnitHome.w>=0){
+    var v=vec3f(0.0);
+    for(var a=0u;a<3u;a++){
+     var offset=vec3f(0.5);offset[a]=1.0;
+     let b=umHold;var lower=b.lo;lower[a]-=1.0;
+     let q=clamp(p-offset,lower,b.hi-vec3f(1.0));
+     let base=vec3i(floor(q));var terms:array<f32,8>;
+     for(var k=0u;k<8u;k++){terms[k]=textureLoad(unitHalo,base+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u))+umUnitHome.xyz,0)[a];}
+     v[a]=0.0+1.0*umVelocityLerp8(terms,fract(q));
+    }
+    return v;
+   }
+  }
+  nbSlow=true;return vec3f(0.0);
+ }`:""}
  return umSampleVelocity(p);
 }
 ${this.apic?/* wgsl */`
@@ -607,7 +634,7 @@ var<workgroup> nbStray:atomic<u32>;
 ${narrowBandTraceWGSL("sampleVelocity")}
 override nbAdvectScalarCollision:bool=false;
 fn nbAdvect(i:u32){
-  var p=source[i];var q=p.position.xyz;
+  nbSlow=false;var p=source[i];var q=p.position.xyz;
   let held=bitcast<vec3i>(vec3u(atomicLoad(&state[12u]),atomicLoad(&state[13u]),atomicLoad(&state[14u])));
   q-=32.0*vec3f(umFramePage()-held);
   // Solid collision, rather than grid ownership, limits particle motion.
@@ -632,6 +659,8 @@ fn nbAdvect(i:u32){
    var end=q;var units=1u;
    if(!ballistic){
     let k=sampleVelocity(x)/h;
+    // Nothing of this sample is stored yet: the general launch redoes it.
+    if(nbFastSample&&nbSlow){let j=atomicAdd(&state[NB_SLOW_PARTICLES],1u);links[UM_CELL_KEYS+j]=i;return;}
     if(stage==0u){
      k1=k;
      if(s==0u){
@@ -732,6 +761,15 @@ fn nbAdvect(i:u32){
 @compute @workgroup_size(64) fn advectParticles(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  let n=min(atomicLoad(&state[0]),arrayLength(&source));
  for(var i=gid.x;i<n;i+=64u*groups.x){nbAdvect(i);}
+}
+// The samples the fast launch listed (state word NB_SLOW_PARTICLES, cleared
+// with the step's words), by the general sampler. The list borrows the
+// position bank, which is dead from update's compaction until the order
+// after this pass rewrites it.
+const NB_SLOW_PARTICLES:u32=10u;
+@compute @workgroup_size(64) fn advectParticlesDeferred(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let n=min(atomicLoad(&state[NB_SLOW_PARTICLES]),arrayLength(&source));
+ for(var j=gid.x;j<n;j+=64u*groups.x){nbAdvect(links[UM_CELL_KEYS+j]);}
 }
 // End-of-step sampling uses the reconstructed surface and projected velocity.
 // Protect the outer h from crowding; sparse samples have a separate lifetime.
@@ -1046,9 +1084,9 @@ ${narrowBandSurfaceWGSL}
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
-  await Promise.all(["activity","activitySpread","advectParticles","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists",...narrowBandNearestEntries,"depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_H_TWIN_ENTRIES.map(entry=>`${entry}@h`)].map(async name=>{
-   const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","snapshot","update","seed","seedSources"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(entryPoint==="depthCoarse"?{nbCachedGeometry:0}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)||name.endsWith("@h")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+  await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists",...narrowBandNearestEntries,"depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_H_TWIN_ENTRIES.map(entry=>`${entry}@h`)].map(async name=>{
+   const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","snapshot","update","seed","seedSources"].includes(entryPoint)?1:0]!;
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(entryPoint==="depthCoarse"?{nbCachedGeometry:0}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)||name.endsWith("@h")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
   }));
   if(this.slotSnapshotResources){
@@ -1058,7 +1096,7 @@ ${narrowBandSurfaceWGSL}
   }
   const search=["depthTiles","depthSeeds","depthLists",...narrowBandNearestEntries];
   this.batches={
-   advect:this.compile(["advectParticles"],undefined,"advectParticles"),
+   advect:this.compile(["advectParticles","advectParticlesDeferred"],"advectParticles","advectParticles"),
    marking:this.compile(["markParticleTiles","commitCount"],"surface","particle tile marking"),
    countInitial:this.compile(["countInitial"],"bootstrap","countInitial"),seedInitial:this.compile(["seedInitial"],"bootstrap","seedInitial"),commit:this.compile(["commitCount"],undefined,"commitCount"),
    activity:this.compile(["activity","activitySpread"],"bootstrap","activity"),
@@ -1125,7 +1163,7 @@ ${narrowBandSurfaceWGSL}
   const b=this.compiled;
   this.bandCurrent=false;
   this.writeStep(dt,+openTop,gravity);
-  // Words 4 to 10 are the step's; word 11, the arrival fatal's page, stays.
+  // Words 4 to 10 are the step's (10: advect's slow samples); word 11, the arrival fatal's page, stays.
   encoder.clearBuffer(this.state,16,28);
   this.bootstrap(encoder);
   encoder.clearBuffer(this.bins,(this.activityWord+5*this.tiles)*4,2*this.tiles*4);
