@@ -933,7 +933,10 @@ function classify(name:string,type:string):UniformDetailClass|undefined{
  * texel's offset (0 in an h store; 2 in a base, where q must be a tile
  * corner and the texels are the tile corners at and below each vertex), or
  * w < 0 where there is no run and each vertex is loaded as before.
- * udTexel_<field>(a) loads the bound texture at such a texel.
+ * udTexel_<field>(a) loads the bound texture at such a texel. Of an
+ * atlas field (no runs) it is udLoad_ by the h texel a = umCellTexel(q)
+ * (zero while the bound texture is a base): one page's cells are one
+ * block's, so a cell's texel steps to its in-page neighbours' directly.
  * udLoad8_<field>(q,s) is udLoad_<field> of the eight vertices q + s{0,1}³,
  * x fastest, by a run where there is one. udRun4_, udTexel4_, udLoad48_ are
  * the same of the base twin a canonical load reads (udLoad4_). */
@@ -1009,8 +1012,10 @@ fn udVertexStore(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexStoreTexel(
 `;
  // udVertex of every vertex q..q+n by one table read: xyz udVertex(q,b), w the shift from an offset o to its texel's
  // (udVertex(q+o,b) = xyz + (o >> w)); w < 0 where they are not one block's (or q is no tile corner of a base).
- if(asked?.size)out+=uniformLatticeRunWGSL(pf);
- if(asked&&[...asked].some(name=>name.startsWith("ud")))out+=`fn udVertexRun(q:vec3i,n:u32,b:u32)->vec4i{
+ // An atlas field's texel load (udTexel_) needs no run.
+ const runs=[...asked??[]].filter(name=>kinds.get(name.slice(name.indexOf("_")+1))?.kind!=="atlas");
+ if(runs.length)out+=uniformLatticeRunWGSL(pf);
+ if(runs.some(name=>name.startsWith("ud")))out+=`fn udVertexRun(q:vec3i,n:u32,b:u32)->vec4i{
  if(b==0u){let s=${pf}umVertexRun(q,n);if(s.x==0u){return vec4i(-1);}return vec4i(${pf}umVertexRunTexel(s),0);}
  let s=${pf}umWideVertexRun(q>>vec3u(2u),n>>2u);if(s.x==0u||!udAligned(q)){return vec4i(-1);}return vec4i(${pf}umWideVertexRunTexel(s),2);
 }
@@ -1094,6 +1099,7 @@ fn udVertexStore(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexStoreTexel(
   for(const [four,texture,b,lv] of [["",name,extent,level],["4",twin,twin?based_(twin):"",",0"]] as const){
    const run=`udRun${four}_${name}`,texel=`udTexel${four}_${name}`,eight=`udLoad${four}8_${name}`,corner="vec3i(k&1,(k>>1)&1,k>>2)";
    if(!asked?.has(run)&&!asked?.has(texel)&&!asked?.has(eight))continue;
+   if(kind==="atlas"&&!four&&!asked.has(run)&&!asked.has(eight)){out+=`fn ${texel}${sfx}(a:vec3i)->vec4f{return select(textureLoad(${name},a${level}),vec4f(0.0),${extent}!=0u);}\n`;continue;}
    if(kind!=="vertex"||!texture||watch)throw new Error(`Uniform detail rewrite: ${name} has no run accessor ${four?"of a base twin":""}`);
    if(asked.has(run))out+=`fn ${run}${sfx}(q:vec3i,n:u32)->vec4i{return udVertexRun(q,n,${b});}\n`;
    if(asked.has(texel))out+=`fn ${texel}${sfx}(a:vec3i)->vec4f{return textureLoad(${texture},a${lv});}\n`;
@@ -1240,7 +1246,7 @@ export function uniformDetailShader(code:string,device?:GPUDevice):string{
   const asked=new Set<string>();
   for(const [,accessor,four,field] of calls.matchAll(/\b(ud(?:Run|Texel)(4?)_(\w+))\(/g)){asked.add(accessor!);if(four)based.add(field!);}
   for(const [,accessor,four,field] of calls.matchAll(/\b(udLoad(4?)8_(\w+))\(/g)){asked.add(accessor!);if(four)based.add(field!);}
-  for(const name of asked)if(kinds.get(name.slice(name.indexOf("_")+1))?.kind!=="vertex")throw new Error(`Uniform detail rewrite: ${name} is not a vertex field's accessor`);
+  for(const name of asked){const kind=kinds.get(name.slice(name.indexOf("_")+1))?.kind;if(kind!=="vertex"&&!(kind==="atlas"&&name.startsWith("udTexel_")))throw new Error(`Uniform detail rewrite: ${name} is not a vertex field's accessor`);}
   // The seam's run forms read directly (a key run): the module carries them too.
   if(/\bumVertexRun\(/.test(calls))asked.add("umVertexRun");
   // A canonical-or-h load of a sampled binding reads the base twin a canonical load does.

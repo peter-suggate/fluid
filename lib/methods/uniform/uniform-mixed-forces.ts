@@ -261,9 +261,28 @@ fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32 {
  }`:""}
  return value;
 }
-fn umViscosityVector(site:vec3i)->vec3f{
- let at=umCellHeld(site);let value=textureLoad(unitVelocity,at,0).xyz;
- return select(value,-value,force.controls.x>0.5&&any(site!=at));
+// The viscosity Laplacian's centre and six taps. A tap in the owner's page
+// is a step from its texel (a stored page is never SOLID, so held is
+// itself); a tap across a page face is held out of SOLID pages, its
+// velocity negated under the no-slip control where it was moved.
+fn umViscosityTerms(at:vec3i)->array<vec3f,3>{
+ let home=umCellTexel(at);let local=at&vec3i(31);
+ var texel:array<vec3i,6>;var flip=0u;
+ for(var k=0u;k<6u;k++){var delta=vec3i(0);delta[k>>1u]=select(-1,1,(k&1u)!=0u);texel[k]=home+delta;}
+ if(any(local==vec3i(0))||any(local==vec3i(31))){
+  for(var k=0u;k<6u;k++){
+   let axis=k>>1u;let up=(k&1u)!=0u;if(select(local[axis]>0,local[axis]<31,up)){continue;}
+   var delta=vec3i(0);delta[axis]=select(-1,1,up);let site=at+delta;let held=umCellHeld(site);texel[k]=umCellTexel(held);
+   if(force.controls.x>0.5&&any(site!=held)){flip|=1u<<k;}
+  }
+ }
+ let center=udTexel_unitVelocity(home).xyz;var terms:array<vec3f,3>;
+ for(var axis=0u;axis<3u;axis++){
+  var hi=udTexel_unitVelocity(texel[2u*axis+1u]).xyz;if((flip&(2u<<(2u*axis)))!=0u){hi=-hi;}
+  var lo=udTexel_unitVelocity(texel[2u*axis]).xyz;if((flip&(1u<<(2u*axis)))!=0u){lo=-lo;}
+  terms[axis]=(hi-2.0*center+lo)/(UM_H[axis]*UM_H[axis]);
+ }
+ return terms;
 }
 @compute @workgroup_size(64) fn forcesFine(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(gid);if(owner.width!=1u){return;}let origin=umOrigin(owner);let at=vec3i(origin);
@@ -275,8 +294,7 @@ fn umViscosityVector(site:vec3i)->vec3f{
  }
  var value=textureLoad(advected,at,0).xyz;let occupancy=umOccupancy(owner);
  if(occupancy>0.0&&force.physical.z>0.0){
-  let center=umViscosityVector(at);var terms:array<vec3f,3>;
-  for(var axis=0u;axis<3u;axis++){var delta=vec3i(0);delta[axis]=1;terms[axis]=(umViscosityVector(at+delta)-2.0*center+umViscosityVector(at-delta))/(UM_H[axis]*UM_H[axis]);}
+  let terms=umViscosityTerms(at);
   value+=force.hDt.w*(force.physical.z/force.physical.y)*((terms[0]+terms[1])+terms[2]);
  }
  let neighbor=umFace(owner,1u,1,0u).neighbor;
