@@ -79,6 +79,8 @@ const BOX_CUBES=64;
  * The ownership's counted-launch grid (COUNTED_GRID): enough to fill the
  * GPU, and an h tile's classify costs about the same as any other's. */
 const CENSUS_TILE_GRID=4096;
+/** pageMark's fixed grid: a workgroup a page, strided. */
+const PAGE_MARK_GRID=4096;
 /** Persistent words after the importance words: a hold per tile, the
  * budget's score cutoff, its histogram. */
 const importanceStateWords=(tiles:number)=>tiles;
@@ -1302,15 +1304,17 @@ ${localResidencyMarkWGSL}
 // pageMark, after the commit: the same exact occupied-tile dilation as
 // the request. The largest local radius only bounds the seed search; it
 // never expands an individual region. Claimed blocks had zero seed masks.
-@compute @workgroup_size(64) fn pageMark(@builtin(global_invocation_id) gid:vec3u){
- let page=gid.x+umDispatchX*64u*gid.y;if(page>=UM_PAGES){return;}
+// A workgroup a page, strided over a fixed grid (lrResidentLane).
+@compute @workgroup_size(64) fn pageMark(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let radius=atomicLoad(&census[${this.localOffset+STAGE_RESIDENCY_WORDS*this.pages}u]);
- if(page==0u){umSupport[UM_RESIDENCY+2u]=radius;}
- var stages=0u;
- for(var stage=0u;stage<${RESIDENCY_STAGES.length}u;stage++){
-  if(lrResident(page,min(radius,${4*UNIFORM_RESIDENCY_PAGE_REACH}u),stage)){stages|=1u<<stage;}
+ if(g.x==0u&&lane==0u){umSupport[UM_RESIDENCY+2u]=radius;}
+ for(var page=g.x;page<UM_PAGES;page+=groups.x){
+  if(lane==0u){atomicStore(&lrMarks,0u);}
+  workgroupBarrier();
+  lrResidentLane(page,min(radius,${4*UNIFORM_RESIDENCY_PAGE_REACH}u),lane);
+  workgroupBarrier();
+  if(lane==0u){umSupport[UM_RESIDENCY+4u+page]=atomicLoad(&lrMarks);}
  }
- umSupport[UM_RESIDENCY+4u+page]=stages;
 }
 // pageCompact: one workgroup lists the resident pages in ascending order.
 const COMPACT_LANES:u32=256u;
@@ -1430,8 +1434,7 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
   pass.end();
  }
  private residencyLaunches(){
-  const [x,y]=uniformKeyGroups(this.pages,64,this.ownership.dispatchX,[0,0]);
-  return {mark:this.pipelines.get("pageMark")!,x,y,compact:this.pipelines.get("pageCompact")!};
+  return {mark:this.pipelines.get("pageMark")!,x:Math.min(this.pages,PAGE_MARK_GRID),y:1,compact:this.pipelines.get("pageCompact")!};
  }
  private censusLaunches(){
   const tiles=this.ownership.capacity.tiles,x=this.ownership.dispatchX,blocks=this.ownership.capacity.address.blocks;

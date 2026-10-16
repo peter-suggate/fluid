@@ -406,10 +406,22 @@ ${pool?/* wgsl */`// The tiles of the blocks the last commit claimed (the pool's
  let jobs=512u*upNewCount();
  for(var job=g.x+groups.x*g.y;job<jobs;job+=groups.x*groups.y){umBuildTile(512u*upNewBlock(job>>9u)+(job&511u),lane);}
 }
-// Their cut flags: the same jobs, strided by a fixed row of lanes.
-@compute @workgroup_size(64) fn cutsNew(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) groups:vec3u){
+// Their cut flags: the same jobs on the same grid, a workgroup a tile, its
+// lanes over the 216 cells of the tile and its ring (umCutTile's set).
+var<workgroup> cutAny:atomic<u32>;
+@compute @workgroup_size(64) fn cutsNew(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let jobs=512u*upNewCount();
- for(var job=g.x;job<jobs;job+=64u*groups.x){umCutTile(512u*upNewBlock(job>>9u)+(job&511u));}
+ for(var job=g.x+groups.x*g.y;job<jobs;job+=groups.x*groups.y){
+  let t=512u*upNewBlock(job>>9u)+(job&511u);let live=umTileLive(t);
+  if(lane==0u){atomicStore(&cutAny,0u);}
+  workgroupBarrier();
+  if(live){
+   let o=vec3i(umTileCoord(t)*4u)-vec3i(1);
+   for(var i=lane;i<216u;i+=64u){let q=o+vec3i(vec3u(i%6u,(i/6u)%6u,i/36u));if(umSolidValid(q)&&umCellOpen(q)<1.0){atomicOr(&cutAny,1u);break;}}
+  }
+  workgroupBarrier();
+  if(live&&lane==0u){let cut=atomicLoad(&cutAny);record[umSolidCount()+t].x=f32(cut);umSolidScratch[umSolidCutMap()+t]=cut;}
+ }
 }`:""}`});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const output=this.device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -485,7 +497,7 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
   const claimed=this.builder?.claimed,cuts=this.builder?.cutsClaimed;if(!claimed||!cuts)throw new Error("The coarse solid record builds claimed blocks only with a page pool, once initialized");
   const pass=encoder.beginComputePass(NEW_BLOCKS_PASS);
   pass.setBindGroup(0,this.recordSolids!.group);pass.setBindGroup(1,this.builderGroup(topology));
-  pass.setPipeline(cuts);pass.dispatchWorkgroups(this.claimedGroups/64,1);
+  pass.setPipeline(cuts);pass.dispatchWorkgroups(this.claimedGroups,1);
   pass.setPipeline(claimed);pass.dispatchWorkgroups(this.claimedGroups,1);
   const groups=ceilDiv(this.coarseLayout.tiles.length,64),gx=Math.min(groups,this.maxGroups);
   pass.setPipeline(this.builder!.surfaceClearNew!);pass.dispatchWorkgroups(gx,ceilDiv(groups,gx));pass.end();

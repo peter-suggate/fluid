@@ -156,19 +156,29 @@ fn lrAsk(page:u32,stage:u32){
 /** Global radius is only a search bound, not a dilation. Records are keyed
  * by stable pool block, so a moving-window commit cannot invalidate them. */
 export const localResidencyMarkWGSL = /* wgsl */ `
-fn lrResident(page:u32,radius:u32,stage:u32)->bool{
- let block=page>>3u;if(!umBlockStored(block)||umBlockWord(block)==UM_FREE){return false;}
+// The stages (bit s: stage s) whose records near the page reach it, a
+// workgroup a page: lane j sweeps the neighbour blocks j, j + 64, ... of the
+// search box for every stage it has not yet found, and ORs its bits into
+// lrMarks (cleared by the caller before, read after a barrier).
+var<workgroup> lrMarks:atomic<u32>;
+fn lrResidentLane(page:u32,radius:u32,lane:u32){
+ let block=page>>3u;if(!umBlockStored(block)||umBlockWord(block)==UM_FREE){return;}
  let q=vec3i(umPageCoord(page));let qa=4*q;
  let reach=i32((radius+3u)/4u);
  let a=max(q-vec3i(reach),vec3i(0))>>vec3u(1u);let b=min(q+vec3i(reach),vec3i(127))>>vec3u(1u);
- for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
-  let n=umPageWord(vec3i(x,y,z));if(!umBlockStored(n)){continue;}
+ let d=vec3u(b-a)+vec3u(1u);var stages=0u;
+ for(var j=lane;j<d.x*d.y*d.z;j+=64u){
+  let at=a+vec3i(vec3u(j%d.x,(j/d.x)%d.y,j/(d.x*d.y)));
+  let n=umPageWord(at);if(!umBlockStored(n)){continue;}
   for(var o=0u;o<8u;o++){
-   let record=lrRecord(8u*n+o,stage);if((record.x|record.y)==0u){continue;}
-   let origin=8*vec3i(x,y,z)+4*vec3i(i32(o&1u),i32((o>>1u)&1u),i32((o>>2u)&1u));
-   if(lrStageMeets(record,stage,qa-origin,qa+vec3i(3)-origin)){return true;}
+   let origin=8*at+4*vec3i(i32(o&1u),i32((o>>1u)&1u),i32((o>>2u)&1u));
+   for(var stage=0u;stage<${RESIDENCY_STAGES.length}u;stage++){
+    if((stages&(1u<<stage))!=0u){continue;}
+    let record=lrRecord(8u*n+o,stage);if((record.x|record.y)==0u){continue;}
+    if(lrStageMeets(record,stage,qa-origin,qa+vec3i(3)-origin)){stages|=1u<<stage;}
+   }
   }
- }}}
- return false;
+ }
+ if(stages!=0u){atomicOr(&lrMarks,stages);}
 }
 `;
