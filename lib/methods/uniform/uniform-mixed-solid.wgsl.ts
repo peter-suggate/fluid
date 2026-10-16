@@ -586,6 +586,7 @@ fn umVertexBuried(p:vec3i)->bool{
 export function uniformMixedSolidWGSL(group?:number,coarse?:number,gated=true,writable=false):string{
  if(group===undefined)return /* wgsl */ `
 fn umSolidEnabled()->bool{return false;}
+fn umSolidPresent()->bool{return false;}
 fn umSolidValid(p:vec3i)->bool{return umCellKind(p)!=UM_SOLID;}
 fn umSolidVoxel(p:vec3i)->bool{return false;}
 fn umBedSlope(p:vec3i)->vec2f{return vec2f(0);}
@@ -627,7 +628,12 @@ struct UMRigidBody {
 }
 @group(${group}) @binding(4) var<uniform> umSolidBodies:array<UMRigidBody,12>;
 // lean.x certifies that voxels, terrain and the live body roster are empty.
-fn umSolidEnabled()->bool{return ${gated?"umSolidParams.lean.x<0.5":"true"};}
+${gated?`// A pipeline compiled with umSolidFree has its solid code folded away: its
+// kernel runs only while umSolidPresent() is false (it tests the gate
+// itself) and leaves the step to a general pipeline otherwise.
+override umSolidFree:bool=false;
+fn umSolidPresent()->bool{return umSolidParams.lean.x<0.5;}
+fn umSolidEnabled()->bool{return !umSolidFree&&umSolidPresent();}`:"fn umSolidEnabled()->bool{return true;}"}
 ${coarse===undefined?`fn umTileOpen(t:u32)->f32{return 1.0;}
 fn umTileOpenAt(p:vec3i)->f32{return 1.0;}
 fn umTileSupported(t:u32)->bool{return false;}`:`@group(${group}) @binding(3) var<storage,read> umSolidRecord:array<vec4f>;
