@@ -597,25 +597,23 @@ fn umFarAir(vertex:vec3u)->f32{
  let value=umLoadVertex(vertex);
  return select(-1.0,${this.sourceParams?"umSourceuvSourcePhi(vec3f(vertex),value)":"value"},value>=16.0*max(params.hDt.x,max(params.hDt.y,params.hDt.z)));
 }`:"fn umFarAir(vertex:vec3u)->f32{return -1.0;}"}
-// An air vertex deeper than any departure from its tile can cover keeps its
-// value (the source's plug included): phi is a distance, so its departure's
-// value differs from its own by at most the departure's length, plus the
-// trilinear tap's reach (sqrt 3 widths) and the wall contact's one-width
-// interior step, and every continuation only raises air. The redistance
-// that follows rebuilds magnitudes within its reach and keeps signs past it.
-// The departure's length is bounded per axis by the tile's spread speed
-// certificate (umReach: ceil(travel/4)+2 tiles, 31 saturated: no bound).
-// Negative where the vertex is traced.
+// A deep air vertex of a still tile keeps its value (the source's plug
+// included): the tile's spread speed certificate (umReach: ceil(travel/4)+2
+// tiles a direction) is 2 on every axis only where no velocity a departure
+// from it reads moves, so its trace ends on the vertex itself and returns
+// the stored value. It is that deep (no foot, smoothing or cubic, which
+// start within 2 widths) to stay the plain lattice read. A moving tile is
+// traced: a kept value there is only within the departure's length of the
+// traced one, and the census' thin and shape criteria read those vertices
+// (a free-falling ball refined from frame 19 instead of at impact, frame 49,
+// cm12-figure-7-256). Negative where the vertex is traced.
 fn umDeepAir(vertex:vec3u,width:u32)->f32{
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  let value=umLoadVertex(vertex);if(!(value>=(6.0+3.0*f32(width))*h)){return -1.0;}
  let tile=umTileAt(vec3u(umPointCell(vec3f(vertex)))/4u);
  let word=atomicLoad(&umClaims[${this.allocatedBytes/4-this.ownership.capacity.tiles}u+tile])&0x3fffffffu;
  let reach=max(vec3u(word&31u,(word>>5u)&31u,(word>>10u)&31u),vec3u((word>>15u)&31u,(word>>20u)&31u,(word>>25u)&31u));
- if(any(reach>=vec3u(31u))){return -1.0;}
- let travel=4.0*vec3f(max(reach,vec3u(2u))-vec3u(2u));
- let hmax=max(params.hDt.x,max(params.hDt.y,params.hDt.z));
- if(value<length(travel)*hmax+3.0*f32(width)*h||umReleasedMayChange(vec3f(vertex),value)){return -1.0;}
+ if(any(reach>vec3u(2u))||umReleasedMayChange(vec3f(vertex),value)){return -1.0;}
  return ${this.sourceParams?"umSourceuvSourcePhi(vec3f(vertex),value)":"value"};
 }
 override umDeferTraced:bool=false;
