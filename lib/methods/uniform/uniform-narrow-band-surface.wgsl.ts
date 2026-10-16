@@ -13,20 +13,22 @@ const NB_SURFACE_RADIUS=${NARROW_BAND_SURFACE_RADIUS};
 const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
 // q: a vertex of the tile of key own and first cell origin, its upper
 // faces with it. The cell and the tiles it is read in are held in the tile's
-// page where a wall lies across a face.
-fn particleSurfaceBulk(own:u32,origin:vec3i,q:vec3i)->vec2f{
+// page where a wall lies across a face. z: the vertex's heat (nbThetaFrom),
+// which particleSurfaceFinish reuses: a second inlined interpolation cost
+// coupleFine 0.46 of 3.2 ms in a late splash.
+fn particleSurfaceBulk(own:u32,origin:vec3i,q:vec3i)->vec3f{
  let home=origin>>vec3u(2u);
  let theta=nbThetaFrom(home,vec3f(q));
- if(theta<=0.0){return vec2f(bandPhi(vec3f(q)),0.0);}
+ if(theta<=0.0){return vec3f(bandPhi(vec3f(q)),0.0,theta);}
  let c=vec3u(umCellNearFromPage(own>>9u,origin>>vec3u(5u),q));
  let bulk=bulkDepth(c,vec3f(q));let tile=umTileAt(c/4u);
  // Deeper than this the shrunk level set wins the union whatever the samples
  // are; nothing bounds how far into the air they may carry the surface.
  let gather=atomicLoad(&bins[NB_SURFACE_TILES+tile])!=0u&&bulk>-2.0&&theta>0.0;
- return vec2f(bulk,select(0.0,1.0,gather));
+ return vec3f(bulk,select(0.0,1.0,gather),theta);
 }
-// home: the tile q is reached from.
-fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32)->f32{
+// home: the tile q is reached from; heat: particleSurfaceBulk's z.
+fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32,heat:f32)->f32{
  // An empty gather has no particle surface to blend; never erode a cold
  // or newly activated region before its surface samples exist.
  if(nearest2>=4.0){return nbSourcePhi(vec3f(q),bulk);}
@@ -64,8 +66,8 @@ fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32)->f32{
  }
  // A transported particle may add liquid throughout its sphere support.
  // Erasure needs the complete seeded footprint, inside the overlap collar.
- var theta=0.0;
- if(particle>bulk){theta=nbSurfaceThetaFrom(home,vec3f(q));}else{theta=nbThetaFrom(home,vec3f(q));}
+ var theta=heat;
+ if(particle>bulk){theta=nbSurfaceThetaFrom(home,vec3f(q));}
  return nbSourcePhi(vec3f(q),mix(bulk,particle,theta));
 }
 `;
@@ -79,7 +81,7 @@ export const narrowBandTiledSurfaceWGSL=/* wgsl */`
  if(umTileMaximumWidth(owner.tile)==1u&&umTileMinimumWidth(owner.tile)==1u){if(any(local==vec3u(0))&&!all((local>vec3u(0))|umLowOpen(origin))){return;}}
  else{let authority=umVertexAuthority(vec3u(q));if(authority.width!=1u||authority.tile!=owner.tile){return;}}
  let bulk=particleSurfaceBulk(owner.tile,origin,q);var value=bulk.x;
- if(bulk.y>0.0){value=particleSurfaceFinish(origin>>vec3u(2u),q,bulk.x,nbCachedSurfaceNearest(q));}
+ if(bulk.y>0.0){value=particleSurfaceFinish(origin>>vec3u(2u),q,bulk.x,nbCachedSurfaceNearest(q),bulk.z);}
  textureStore(outputPhi,q,vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
 }
 `;
@@ -141,7 +143,7 @@ fn nbCachedSurfaceNearest(q:vec3i)->f32{
   if(regular){if(!all((corner!=vec3u(0))|low)){continue;}}
   else if(umVertexAuthority(q).index!=owner.index){continue;}
   let bulk=particleSurfaceBulk(owner.tile,vec3i(origin),vec3i(q));var value=bulk.x;
-  if(bulk.y>0.0){value=particleSurfaceFinish(vec3i(origin>>vec3u(2u)),vec3i(q),bulk.x,nbCachedSurfaceNearest(vec3i(q)));}
+  if(bulk.y>0.0){value=particleSurfaceFinish(vec3i(origin>>vec3u(2u)),vec3i(q),bulk.x,nbCachedSurfaceNearest(vec3i(q)),bulk.z);}
   textureStore(outputPhi,vec3i(q),vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
  }
 }
