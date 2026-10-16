@@ -10,7 +10,7 @@ export const NARROW_BAND_ACTIVITY_CONTROLS = [
 export const NARROW_BAND_VOLUME_CONTROL = {key:"volumeControlSeconds",label:"Volume control time",unit:"s",min:0,max:2,step:0.05,digits:2,default:0.1,
   hint:"Time over which the liquid's measured gap to its volume budget is closed, as a uniform divergence in the pressure solve that carries the particles and the surface together. Shorter holds the volume tighter and moves the liquid more. A gap under 1% of the budget is left alone, so liquid at rest stays at rest. 0 turns volume control off."} as const;
 export const NARROW_BAND_SPARSE_CONTROL = {key:"sparseParticleLifetime",label:"Sparse particle lifetime",unit:"s",min:0,max:10,step:0.1,digits:1,default:2,
-  hint:"Retire a particle after this many continuous seconds with fewer than eight neighbours within two grid cells. Neighbours returning reset its timer. Applies to coupled and ballistic particles; dense sheets and droplets retain their support. 0 disables sparse retirement."} as const;
+  hint:"Retire a particle after this many continuous seconds with fewer than eight neighbours in the 3×3×3 grid cells around it. Neighbours returning reset its timer. Applies to coupled and ballistic particles; dense sheets and droplets retain their support. 0 disables sparse retirement."} as const;
 const controls=[...NARROW_BAND_ACTIVITY_CONTROLS,NARROW_BAND_VOLUME_CONTROL,NARROW_BAND_SPARSE_CONTROL] as const;
 export const narrowBandControlValues = (values:MethodParamValues={}) => Object.fromEntries(controls.map(c=>{
  const raw=Number(values[c.key]);
