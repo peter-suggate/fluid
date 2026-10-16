@@ -8,11 +8,14 @@ fn nbTerrainSurface(q:vec3f)->vec3f{return umTerrainSurface(q);}
 fn nbTerrainNormal(s:vec3f)->vec3f{
  let h=params.hDt.xyz;return normalize(vec3f(-s.y/h.x,1.0/h.y,-s.z/h.z));
 }
+// One record lookup, terrain sample and body query each: Metal inlines every
+// call, and this runs in advectParticles beside the trace.
 fn nbParticleBlocked(q:vec3f)->bool{
- if(umBoundaryRecord(vec3i(floor(q)))!=0u){return umBoundarySample(q).w<0.0||(umSolidHasTerrain()&&q.y<nbTerrainSurface(q).x)||umBodyAt(umSolidTraceWorld(q))>=0;}
- if(!umSolidHasTerrain()){return umCellOpen(vec3i(floor(q)))<0.5;}
- return umSolidVoxel(vec3i(floor(q)))||q.y<nbTerrainSurface(q).x
-  ||umBodyAt(umSolidTraceWorld(q))>=0;
+ let c=vec3i(floor(q));let record=umBoundaryRecord(c);let terrain=umSolidHasTerrain();
+ if(record==0u&&!terrain){return umCellOpen(c)<0.5;}
+ var solid:bool;
+ if(record!=0u){solid=umBoundarySampleAt(q,c,record).w<0.0;}else{solid=umSolidVoxel(c);}
+ return solid||(terrain&&q.y<nbTerrainSurface(q).x)||umBodyAt(umSolidTraceWorld(q))>=0;
 }
 fn nbParticleCellOpen(c:vec3i)->bool{
  return umCellOpen(c)>=select(0.5,1e-5,umSolidHasTerrain()||umBoundaryRecord(c)!=0u);
@@ -24,49 +27,64 @@ struct NBTerrainContact{position:vec3f,velocity:vec3f}
 // Called on each trajectory substep (at most half a cell per axis). Find
 // contact along the segment, then carry the remaining tangential displacement.
 // The closest-point correction is in metres, including anisotropic lattices.
+// Every surface sample is at one call site (Metal inlines each): stage 0 the
+// end, 1 the start, 2 the bisection's twelve midpoints, 3 the hit, 4 the
+// slide's up to four re-evaluations after it.
 fn nbTerrainContact(startPoint:vec3f,endPoint:vec3f,velocity:vec3f)->NBTerrainContact{
  var q=endPoint;var v=velocity;let skin=0.001;
- let end=nbTerrainSurface(q);
- if(q.y-end.x>skin){return NBTerrainContact(q,v);}
- var low=0.0;var high=1.0;
- if(startPoint.y-nbTerrainSurface(startPoint).x>skin){
-  for(var i=0u;i<12u;i++){
-   let mid=0.5*(low+high);let p=mix(startPoint,endPoint,mid);
-   if(p.y-nbTerrainSurface(p).x>skin){low=mid;}else{high=mid;}
+ var low=0.0;var high=1.0;var mid=0.0;var stage=0u;var i=0u;var at=endPoint;
+ loop{
+  let s=nbTerrainSurface(at);
+  if(stage==0u){if(at.y-s.x>skin){return NBTerrainContact(q,v);}stage=1u;at=startPoint;continue;}
+  if(stage==1u||stage==2u){
+   if(stage==2u){if(at.y-s.x>skin){low=mid;}else{high=mid;}i++;}
+   if((stage==1u&&at.y-s.x>skin)||(stage==2u&&i<12u)){stage=2u;mid=0.5*(low+high);at=mix(startPoint,endPoint,mid);continue;}
+   stage=3u;at=mix(startPoint,endPoint,low);continue;
   }
- }
- let hit=mix(startPoint,endPoint,low);let n=nbTerrainNormal(nbTerrainSurface(hit));
- var travel=(endPoint-hit)*params.hDt.xyz;
- travel-=min(dot(travel,n),0.0)*n;
- q=hit+travel/params.hDt.xyz;
- v-=min(dot(v,n),0.0)*n;
- // A segment can cross a patch edge; re-evaluate its normal after sliding.
- for(var i=0u;i<4u;i++){
-  let surface=nbTerrainSurface(q);let normal=nbTerrainNormal(surface);
-  let penetration=(skin+surface.x-q.y)*params.hDt.y;
-  if(penetration<=0.0){break;}
+  let n=nbTerrainNormal(s);
+  if(stage==3u){
+   var travel=(endPoint-at)*params.hDt.xyz;
+   travel-=min(dot(travel,n),0.0)*n;
+   q=at+travel/params.hDt.xyz;
+   v-=min(dot(v,n),0.0)*n;
+   // A segment can cross a patch edge; re-evaluate its normal after sliding.
+   stage=4u;i=0u;at=q;continue;
+  }
   // Vertical height difference is signed distance times 1/normal.y.
-  q+=penetration*normal.y*normal/params.hDt.xyz;
-  v-=min(dot(v,normal),0.0)*normal;
+  let penetration=(skin+s.x-q.y)*params.hDt.y;
+  if(penetration<=0.0){break;}
+  q+=penetration*n.y*n/params.hDt.xyz;
+  v-=min(dot(v,n),0.0)*n;
+  i++;if(i>=4u){break;}at=q;
  }
  return NBTerrainContact(q,v);
 }
 
 // Earliest zero of a cubic in Bernstein form. Convex-hull rejection also
-// catches a ridge crossed between two positive endpoints. Fixed DFS storage
-// bounds shader work; depth 14 bounds the contact parameter error by 2^-14.
+// catches a ridge crossed between two positive endpoints. Depth 14 bounds the
+// contact parameter error by 2^-14. A depth-first walk of the halvings, left
+// half first, that holds only the current node: its curve and its dyadic path
+// code (range code/2^depth). A right sibling's curve is rebuilt from the root
+// by the same halvings, so every node's coefficients are the ones a stack of
+// halved curves would hold, and no private array raises the kernel's
+// register count. The tree has fewer than 2^15 nodes: the walk ends.
 fn nbBoundaryCubicHit(initial:vec4f)->f32{
- var curves:array<vec4f,16>;var ranges:array<vec2f,16>;var depths:array<u32,16>;
- curves[0]=initial;ranges[0]=vec2f(0,1);depths[0]=0u;var count=1u;
- for(var visit=0u;visit<32768u&&count>0u;visit++){
-  count--;let b=curves[count];let range=ranges[count];let depth=depths[count];
-  if(min(min(b.x,b.y),min(b.z,b.w))>0.0){continue;}
-  if(b.x<=0.0||depth==14u){return range.x;}
-  let a=0.5*(b.xyz+b.yzw);let c=0.5*(a.xy+a.yz);let mid=0.5*(c.x+c.y);let t=0.5*(range.x+range.y);
-  curves[count]=vec4f(mid,c.y,a.z,b.w);ranges[count]=vec2f(t,range.y);depths[count]=depth+1u;count++;
-  curves[count]=vec4f(b.x,a.x,c.x,mid);ranges[count]=vec2f(range.x,t);depths[count]=depth+1u;count++;
+ var b=initial;var code=0u;var depth=0u;
+ loop{
+  if(min(min(b.x,b.y),min(b.z,b.w))>0.0){
+   loop{if(depth==0u||(code&1u)==0u){break;}code>>=1u;depth--;}
+   if(depth==0u){return -1.0;}
+   code|=1u;b=initial;
+   for(var k=depth;k>0u;k--){
+    let a=0.5*(b.xyz+b.yzw);let c=0.5*(a.xy+a.yz);let mid=0.5*(c.x+c.y);
+    b=select(vec4f(b.x,a.x,c.x,mid),vec4f(mid,c.y,a.z,b.w),((code>>(k-1u))&1u)!=0u);
+   }
+   continue;
+  }
+  if(b.x<=0.0||depth==14u){return f32(code)/f32(1u<<depth);}
+  let a=0.5*(b.xyz+b.yzw);let c=0.5*(a.xy+a.yz);let mid=0.5*(c.x+c.y);
+  b=vec4f(b.x,a.x,c.x,mid);code<<=1u;depth++;
  }
- return -1.0;
 }
 fn nbBoundaryHit(start:vec3f,end:vec3f)->f32{
  let delta=end-start;var t=0.0;
