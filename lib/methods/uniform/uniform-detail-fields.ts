@@ -156,6 +156,14 @@ export function uniformDetailGroup(device:GPUDevice,descriptor:UniformDetailGrou
  * to both, so a kernel reads a 4h value from the base or the h texture,
  * whichever it binds, with no test in the load. */
 export const UNIFORM_DETAIL_TWIN_BINDING=64;
+/** Pipeline constants of a launch whose every field load and store runs in
+ * an h tile's stencil (a job of the h list) and that binds the group's h
+ * side (UniformDetailGroup.group): an h tile implies C > 0, where each field
+ * of a following generation is its h texture and its twin the base block,
+ * so the accessors take the texture class as a constant, not by the bound
+ * extent (UNIFORM_DETAIL_H_LOAD's invariant, for the whole launch). Not for
+ * a launch with a pinned (per-tile) field, which is a base at every C. */
+export const UNIFORM_DETAIL_H_STORE:Readonly<Record<string,number>>={udHStore:1};
 interface TwinLayout{
  /** Twinned bindings: the storage format, undefined for a sampled binding. */
  readonly formats:ReadonlyMap<number,GPUTextureFormat|undefined>;
@@ -982,6 +990,8 @@ fn udWatchHomes(q:vec3i,a:vec4f,h:vec4f${site}){
 `;
  }
  let out=/* wgsl */`
+// A launch whose every field load runs in an h tile's stencil, on the h group (UNIFORM_DETAIL_H_STORE).
+override udHStore:bool=false;
 fn udViolation(bits:u32){${!support?"":atomic?`atomicOr(&${support},bits);`:`${support}=${support}|bits;`}}
 fn udAligned(q:vec3i)->bool{return all((q&vec3i(3))==vec3i(0));}
 fn udFaceCanonical(q:vec3i)->bool{let l=q&vec3i(3);let j=${j};return all((l==vec3i(0))|(l==vec3i(3)))&&j.x+j.y+j.z<=1;}
@@ -1026,8 +1036,8 @@ fn udVertexStore(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexStoreTexel(
   // An atlas-only name binds a face field.
   const A=kind==="vertex"?vertexAddress:cellAddress(kind==="face");
   const inside=(v:string)=>A.present(v),outside=(v:string)=>`!${A.present(v)}`;
-  // A base block is narrower than the h store.
-  const based_=(t:string)=>`u32(textureDimensions(${t}).x<${A.size}.x)`,extent=based_(name);
+  // A base block is narrower than the h store. Under udHStore the bound field is its h texture and a twin its base.
+  const based_=(t:string)=>`select(u32(textureDimensions(${t}).x<${A.size}.x),${t.startsWith("udb_")?"1u":"0u"},udHStore)`,extent=based_(name);
   const mode=`let b=${extent};`;
   const canonical=(v:string)=>kind==="face"?`udFaceCanonical(${v})`:`udAligned(${v})`;
   // The bound texture's texel of a load at v.
