@@ -164,6 +164,10 @@ export const UNIFORM_DETAIL_TWIN_BINDING=64;
  * extent (UNIFORM_DETAIL_H_LOAD's invariant, for the whole launch). Not for
  * a launch with a pinned (per-tile) field, which is a base at every C. */
 export const UNIFORM_DETAIL_H_STORE:Readonly<Record<string,number>>={udHStore:1};
+/** Pipeline constants of a launch whose vertex loads of either class resolve through one slot walk (udVertex): one
+ * page-table probe loop for the h store's 33-wide blocks and the base's 9-wide ones, not one of each. Faster where a
+ * launch's vertex loads mix the classes at run time (the merged deferred advect, the depth seeds), slower elsewhere. */
+export const UNIFORM_DETAIL_MERGED_SLOTS:Readonly<Record<string,number>>={udMergedSlots:1};
 interface TwinLayout{
  /** Twinned bindings: the storage format, undefined for a sampled binding. */
  readonly formats:ReadonlyMap<number,GPUTextureFormat|undefined>;
@@ -992,6 +996,8 @@ fn udWatchHomes(q:vec3i,a:vec4f,h:vec4f${site}){
  let out=/* wgsl */`
 // A launch whose every field load runs in an h tile's stencil, on the h group (UNIFORM_DETAIL_H_STORE).
 override udHStore:bool=false;
+// A launch whose vertex loads take one slot walk for both classes (UNIFORM_DETAIL_MERGED_SLOTS).
+override udMergedSlots:bool=false;
 fn udViolation(bits:u32){${!support?"":atomic?`atomicOr(&${support},bits);`:`${support}=${support}|bits;`}}
 fn udAligned(q:vec3i)->bool{return all((q&vec3i(3))==vec3i(0));}
 fn udFaceCanonical(q:vec3i)->bool{let l=q&vec3i(3);let j=${j};return all((l==vec3i(0))|(l==vec3i(3)))&&j.x+j.y+j.z<=1;}
@@ -1017,8 +1023,28 @@ ${`fn udFace(q:vec3i,b:u32)->vec3i{let c=q>>vec3u(2u*b);let j=${j};return vec3i(
   store:(v,b)=>b===H?`${pf}umVertexStoreTexel(${v})`:b==="1u"?`${pf}umWideVertexStoreTexel((${v})>>vec3u(2u))`:`udVertexStore(${v},${b})`,
   present:v=>`${pf}umVertexPresent(${v})`,
   size:`${pf}UM_VERTEX_TEXTURE${call}`};
- if([...kinds.values()].some(k=>k.kind==="vertex"))out+=`fn udVertex(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexTexel(q);}return ${pf}umWideVertexTexel(q>>vec3u(2u));}
-fn udVertexStore(q:vec3i,b:u32)->vec3i{if(b==0u){return ${pf}umVertexStoreTexel(q);}return ${pf}umWideVertexStoreTexel(q>>vec3u(2u));}
+ if([...kinds.values()].some(k=>k.kind==="vertex"))out+=`fn udVertex(q:vec3i,b:u32)->vec3i{
+ if(udMergedSlots){let bits=select(5u,3u,b!=0u);let s=udVertexSlot(select(q,q>>vec3u(2u),b!=0u),bits);let c=${pf}umBlockCoord(min(s.w,${pf}UM_BLOCKS${call}-1u));return (c<<vec3u(bits))+c+vec3i(s.xyz);}
+ if(b==0u){return ${pf}umVertexTexel(q);}return ${pf}umWideVertexTexel(q>>vec3u(2u));
+}
+fn udVertexStore(q:vec3i,b:u32)->vec3i{
+ if(udMergedSlots){let bits=select(5u,3u,b!=0u);let s=udVertexSlot(select(q,q>>vec3u(2u),b!=0u),bits);if(!${pf}umBlockStored(s.w)){return vec3i(-1);}let c=${pf}umBlockCoord(s.w);return (c<<vec3u(bits))+c+vec3i(s.xyz);}
+ if(b==0u){return ${pf}umVertexStoreTexel(q);}return ${pf}umWideVertexStoreTexel(q>>vec3u(2u));
+}
+// umVertexSlot (bits 5) or umWideVertexSlot (bits 3) of v, by one walk.
+fn udVertexSlot(v:vec3i,bits:u32)->vec4u{
+ let mask=(1<<bits)-1;
+ let c=v-vec3i(1);let page=c>>vec3u(bits);let own=vec3u(c&vec3i(mask))+vec3u(1u);
+ let b=${pf}umPageWord(page);if(${pf}umBlockStored(b)){return vec4u(own,b);}
+ let plane=(v&vec3i(mask))==vec3i(0);
+ for(var k=1u;k<8u;k++){
+  let step=vec3<bool>((k&1u)!=0u,(k&2u)!=0u,(k&4u)!=0u);
+  if(any(step&!plane)){continue;}
+  let s=${pf}umPageWord(page+vec3i(step));
+  if(${pf}umBlockStored(s)){return vec4u(select(own,vec3u(0u),step),s);}
+ }
+ return vec4u(own,b);
+}
 `;
  // udVertex of every vertex q..q+n by one table read: xyz udVertex(q,b), w the shift from an offset o to its texel's
  // (udVertex(q+o,b) = xyz + (o >> w)); w < 0 where they are not one block's (or q is no tile corner of a base).
