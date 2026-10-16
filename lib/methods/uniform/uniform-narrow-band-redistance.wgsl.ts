@@ -148,18 +148,23 @@ fn nbBuildDistance(p:vec3u,c:vec3u,tile:u32){
 }
 // The 64 interior vertices use every lane. A tile on a high face of its page
 // has the vertices of that face too where a wall lies across it: their cell
-// is held in the tile. Evaluate those once after the dense cube.
+// is held in the tile. Those are a second round, a lane each (61 of them:
+// x = 4, then y = 4, then z = 4), through the same call site: a second
+// inlined nbBuildDistance, trace and all, cost the whole pass 1.4 ms of a
+// 6 ms late-splash frame.
 @compute @workgroup_size(64) fn buildDistance(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let tile=atomicLoad(&bins[NB_BAND_DISTANCE+group.x]);let origin=4u*umTileCoord(tile);
- let inner=origin+umCorner(lane,4u);nbBuildDistance(inner,inner,tile);
- if(any(((origin+4u)&vec3u(31u))==vec3u(0u))){
-  for(var k=lane;k<125u;k+=64u){
-   let local=umCorner(k,5u);let p=origin+local;
-   if(!any(local==vec3u(4u))){continue;}
-   let c=vec3u(umCellNearFromPage(tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
-   if(any((local==vec3u(4u))&(c==p))){continue;}
-   nbBuildDistance(p,c,tile);
+ var p=origin+umCorner(lane,4u);var c=p;
+ let face=any(((origin+4u)&vec3u(31u))==vec3u(0u));
+ for(var round=0u;round<select(1u,2u,face);round++){
+  if(round==1u){
+   if(lane>=61u){break;}
+   var local=vec3u(4u,lane%5u,lane/5u);
+   if(lane>=45u){let m=lane-45u;local=vec3u(m&3u,m>>2u,4u);}else if(lane>=25u){let m=lane-25u;local=vec3u(m&3u,4u,m>>2u);}
+   p=origin+local;c=vec3u(umCellNearFromPage(tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
+   if(any((local==vec3u(4u))&(c==p))){break;}
   }
+  nbBuildDistance(p,c,tile);
  }
 }
 fn nbInterfaceVertex(p:vec3u)->bool{

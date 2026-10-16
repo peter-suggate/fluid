@@ -38,12 +38,23 @@ fn nbBandCrossing(c:vec3u)->bool{
 // cell origin), its upper faces with them. Use the positive-side sampling
 // owner, held in the tile where a wall lies across an upper face.
 // Fine vertices and 4-aligned coarse corners have one nonzero weight; other
-// coarse lattice vertices retain the sampler's complete ordered D4 sum.
+// coarse lattice vertices take the sampler's arithmetic on its 4h path (one
+// or two loads on a lattice edge, else the ordered D4 sum of the cell's 4h
+// corners), without the sampler: its bounds and owner search, which the cell
+// here already settles, cost a 4h candidate tile's 117 such vertices most of
+// depthSeeds.
 fn nbCrossingVertex(tile:u32,origin:vec3u,p:vec3u)->f32{
  let cell=vec3u(umCellNearFromPage(tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));let width=umTileWidth(umTileAt(cell/4u));
  if(width==1u){return umLoadVertex(p);}
  if(all((p&vec3u(3u))==vec3u(0u))){return umLoadCorner(p);}
- return umSampleVertex(vec3f(p));
+ let low=(cell/4u)*4u;let t=(vec3f(p)-vec3f(low))/4.0;
+ {let zt=t==vec3f(0.0);if(u32(zt.x)+u32(zt.y)+u32(zt.z)>=2u){
+  let a=select(select(2u,1u,!zt.y),0u,!zt.x);var e=vec3u(0);e[a]=4u;
+  return umLoadCorner(low)*(1.0-t[a])+umLoadCorner(low+e)*t[a];
+ }}
+ let c8=umLoadCorner8(low,4u);var values:array<f32,8>;
+ for(var k=0u;k<8u;k++){let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));values[k]=c8[k]*w.x*w.y*w.z;}
+ return umVertexSum8(values);
 }
 // A 4h tile among 4h tiles interpolates its corners throughout: it holds a
 // crossing only if they straddle zero. Beside an h tile its upper faces may
