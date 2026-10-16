@@ -950,7 +950,8 @@ function classify(name:string,type:string):UniformDetailClass|undefined{
  * (zero while the bound texture is a base): one page's cells are one
  * block's, so a cell's texel steps to its in-page neighbours' directly.
  * udLoad8_<field>(q,s) is udLoad_<field> of the eight vertices q + s{0,1}³,
- * x fastest, by a run where there is one. udRun4_, udTexel4_, udLoad48_ are
+ * x fastest, by a run where there is one, else by the two pages' words where
+ * they span two pages on one axis. udRun4_, udTexel4_, udLoad48_ are
  * the same of the base twin a canonical load reads (udLoad4_). */
 function detailDomainWGSL(kinds:ReadonlyMap<string,{kind:UniformDetailClass;type:string}>,support:string|undefined,atomic:boolean,deposit:boolean,hOnly?:ReadonlySet<string>,twins?:ReadonlyMap<string,string>,based?:ReadonlySet<string>,
  /** The mixed kernels' ring: the topology namespaces of the fields a kernel
@@ -1131,7 +1132,25 @@ fn udVertexSlot(v:vec3i,bits:u32)->vec4u{
 }
 `;
   // The run accessors the code calls: of the bound texture, and (4) of the base twin a canonical load reads. The
-  // eight-vertex load's second loop is udLoad_ (udLoad4_) of each vertex, unchanged.
+  // eight-vertex load's last loop (two or three page crossings) is udLoad_ (udLoad4_) of each vertex, unchanged.
+  // The eight vertices of class b (a base: (q + o) >> 2 on its 4h lattice) whose own pages (the pages of the cells
+  // below them) and the pages a slot walk may step to span two pages on exactly one axis: both pages' words are read
+  // once and each vertex's texel is a select of them, udVertex's texel. A vertex's own page is page or page + cross;
+  // of page's, only one on the face between them walks, to page + cross, whose skirt (local 0) holds it where page
+  // is not stored and page + cross is. Inline: a helper returning the two blocks measured slower.
+  const pair=(texture:string,lv:string)=>` let sh=select(0u,2u,b!=0u);let bits=select(5u,3u,b!=0u);let mask=(1<<bits)-1;
+ let page=((q>>vec3u(sh))-vec3i(1))>>vec3u(bits);let cross=vec3i((((q+vec3i(i32(s)))>>vec3u(sh))>>vec3u(bits))!=page);
+ if(cross.x+cross.y+cross.z==1){
+  let w0=${pf}umPageWord(page);let w1=${pf}umPageWord(page+cross);let walk=!${pf}umBlockStored(w0)&&${pf}umBlockStored(w1);
+  let c0=${pf}umBlockCoord(min(w0,${pf}UM_BLOCKS${call}-1u));let c1=${pf}umBlockCoord(min(w1,${pf}UM_BLOCKS${call}-1u));
+  let base0=(c0<<vec3u(bits))+c0+vec3i(1);let base1=(c1<<vec3u(bits))+c1+vec3i(1);
+  for(var k=0;k<8;k++){
+   let at=((q+i32(s)*vec3i(k&1,(k>>1)&1,k>>2))>>vec3u(sh))-vec3i(1);let l=at&vec3i(mask);
+   let upper=any(((at>>vec3u(bits))-page)!=vec3i(0));let skirt=walk&&any((l==vec3i(mask))&(cross!=vec3i(0)));
+   v[k]=textureLoad(${texture},select(select(base0+l,base1+select(l,vec3i(-1),cross!=vec3i(0)),skirt),base1+l,upper)${lv}).x;
+  }
+  return v;
+ }`;
   for(const [four,texture,b,lv] of [["",name,extent,level],["4",twin,twin?based_(twin):"",",0"]] as const){
    const run=`udRun${four}_${name}`,texel=`udTexel${four}_${name}`,eight=`udLoad${four}8_${name}`,corner="vec3i(k&1,(k>>1)&1,k>>2)";
    if(!asked?.has(run)&&!asked?.has(texel)&&!asked?.has(eight))continue;
@@ -1142,6 +1161,7 @@ fn udVertexSlot(v:vec3i,bits:u32)->vec4u{
    if(asked.has(eight))out+=`fn ${eight}${sfx}(q:vec3i,s:u32)->array<f32,8>{
  let b=${b};let g=udVertexRun(q,s,b);var v:array<f32,8>;
  if(g.w>=0){let e=i32(s>>u32(g.w));for(var k=0;k<8;k++){v[k]=textureLoad(${texture},g.xyz+e*${corner}${lv}).x;}return v;}
+${pair(texture!,lv)}
  for(var k=0;k<8;k++){v[k]=textureLoad(${texture},udVertex(q+i32(s)*${corner},b)${lv}).x;}
  return v;
 }
