@@ -43,7 +43,7 @@ export const UNIFORM_PAGE_INIT_KEYS={tile:512,cell:32768,vertex:35937,lowFace:30
 /** The tile word of a key with no owner: 4h, the reserved invalid owner. */
 export const UNIFORM_PAGE_INIT_TILE_WORD=0x3fffffff;
 /** Claim slots of every initialise launch: the list is strided by this. */
-export function uniformPageInitSlots(layout:UniformPagePoolLayout):number{return Math.min(8,layout.requests);}
+export function uniformPageInitSlots(layout:UniformPagePoolLayout):number{return Math.min(32,layout.requests);}
 /** Workgroups an entry of uniformPageInitBlocksWGSL is dispatched with (x). */
 export function uniformPageInitGroups(layout:UniformPagePoolLayout,chunks=1):number{return uniformPageInitSlots(layout)*chunks;}
 
@@ -84,6 +84,7 @@ export const UNIFORM_PAGE_INIT_SHAPES:Readonly<Record<"cell"|"face"|"vertex",{re
 export interface UniformPageInitialiseField{readonly kind:"cell"|"face"|"vertex";readonly value:number}
 /** A low-face-keyed table: `offset` its first word in its buffer, `value` the f32 every row of a new block takes. */
 export interface UniformPageInitialiseRows{readonly offset:number;readonly value:number}
+const PAGE_INIT_CHUNKS:readonly number[]=[1,2,4,8,16,32];
 const F32=new Float32Array(1),U32=new Uint32Array(F32.buffer);
 const literal=(value:number)=>{F32[0]=value;if(!Number.isFinite(F32[0]!))throw new RangeError(`Uniform page initialise: AIR value ${value} is not a finite f32`);return U32[0]===0?"0.0":`bitcast<f32>(${U32[0]}u)`;};
 const bits=(value:number)=>{literal(value);return U32[0]!;};
@@ -92,11 +93,12 @@ const bits=(value:number)=>{literal(value);return U32[0]!;};
  * row buffers; group 1 two write-only storage textures a field (2i its h
  * store, 2i+1 its base). */
 export function uniformPageInitialiseWGSL(layout:UniformPagePoolLayout,blockBits:number,chunks:number,fields:readonly UniformPageInitialiseField[],rows:readonly UniformPageInitialiseRows[]):string{
- if(![1,2,4,8].includes(chunks))throw new RangeError(`Uniform page initialise chunks must be 1, 2, 4 or 8: ${chunks}`);
+ if(!PAGE_INIT_CHUNKS.includes(chunks))throw new RangeError(`Uniform page initialise chunks must be 1, 2, 4, 8, 16 or 32: ${chunks}`);
  const format=(f:UniformPageInitialiseField)=>f.kind==="face"?"rgba32float":"r32float";
+ // A shape shallower than the chunks takes one z plane a chunk; the chunks past its depth idle.
  const fill=(name:string,s:UniformPageInitShape,value:string)=>{
-  const z=s.depth/chunks,extra=s.skirt?"+vec3u(vec2u(l.xy==vec2u(7u)),u32(chunk==PI_CHUNKS-1u))":"";
-  return `{let o=g*vec3u(${s.extent.map(n=>`${n}u`).join(",")});let a=vec3u(${s.step}u*l.xy,${z}u*chunk);let b=a+vec3u(${s.step}u,${s.step}u,${z}u)${extra};
+  const z=Math.max(1,s.depth/chunks),slabs=s.depth/z,extra=s.skirt?`+vec3u(vec2u(l.xy==vec2u(7u)),u32(chunk==${slabs-1}u))`:"";
+  return `${slabs<chunks?`if(chunk<${slabs}u)`:""}{let o=g*vec3u(${s.extent.map(n=>`${n}u`).join(",")});let a=vec3u(${s.step}u*l.xy,${z}u*chunk);let b=a+vec3u(${s.step}u,${s.step}u,${z}u)${extra};
    for(var z=a.z;z<b.z;z++){for(var y=a.y;y<b.y;y++){for(var x=a.x;x<b.x;x++){textureStore(${name},vec3i(o+vec3u(x,y,z)),${value});}}}}`;
  };
  return /* wgsl */`${uniformPagePoolWGSL(layout,0,0)}
@@ -142,7 +144,8 @@ export interface UniformPageInitialiseOptions{
  readonly lowFaces?:readonly UniformPageInitialiseLowFaces[];
  /** The owners of per-key buffers, in launch order. */
  readonly owners?:readonly UniformPageInitBlocks[];
- /** z slabs of a block, each a workgroup of a claim slot: 1, 2, 4 or 8 (default 4). */
+ /** z slabs of a block, each a workgroup of a claim slot: 1, 2, 4, 8, 16 or 32 (default 32, a z plane of
+  * the h store each: a claimed block's texels spread over 32 workgroups, not 4). */
  readonly chunks?:number;
 }
 interface Field extends UniformPageInitialiseField{readonly handle:GPUTexture}
@@ -168,7 +171,7 @@ export class UniformPageInitialise{
  constructor(private readonly device:GPUDevice,private readonly pool:UniformPagePool,private readonly storage:UniformDetailStorage,options:UniformPageInitialiseOptions){
   const a=storage.layout.address,l=pool.layout,K=UNIFORM_PAGE_INIT_KEYS;
   if(a.blocks!==l.blocks)throw new Error(`Uniform page initialise: the detail storage holds ${a.blocks} blocks, the pool ${l.blocks}`);
-  this.chunks=options.chunks??4;if(![1,2,4,8].includes(this.chunks))throw new RangeError(`Uniform page initialise chunks must be 1, 2, 4 or 8: ${this.chunks}`);
+  this.chunks=options.chunks??32;if(!PAGE_INIT_CHUNKS.includes(this.chunks))throw new RangeError(`Uniform page initialise chunks must be 1, 2, 4, 8, 16 or 32: ${this.chunks}`);
   this.owners=[...(options.owners??[])];this.groups=uniformPageInitSlots(l)*this.chunks;
   this.fields=storage.fieldTextures.map(handle=>{
    const kind=storage.kindOf(handle);
