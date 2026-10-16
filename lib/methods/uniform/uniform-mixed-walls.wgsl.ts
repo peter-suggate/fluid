@@ -19,6 +19,8 @@ export const uniformMixedWallVertexWGSL = /* wgsl */ `
 fn umWallBlock(p:vec3i,k:u32)->u32{
  let axis=k>>1u;if((p[axis]&31)!=0){return 0u;}
  let u=(axis+1u)%3u;let v=(axis+2u)%3u;let upper=(k&1u)!=0u;
+ // Under a fixed box (umFixedBox) a wall face is the box's face.
+ if(umFixedBox()){let w=umBoxWalls();if(f32(p[axis])!=select(w.lo[axis],w.hi[axis],upper)){return 0u;}}
  var page=p>>vec3u(5u);page[axis]-=select(0,1,upper);
  let both=vec2<bool>((p[u]&31)==0,(p[v]&31)==0);
  for(var j=0u;j<4u;j++){

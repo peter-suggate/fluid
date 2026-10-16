@@ -138,13 +138,15 @@ const UM_PAGE_TABLE:u32=5u*UM_TILES;
 const UM_BLOCK_RECORD:u32=UM_PAGE_TABLE+${UNIFORM_PAGE_TABLE_WORDS}u;
 ${pagesOf === undefined ? uniformWindowAddressWGSL("umTopology","UM_PAGE_TABLE","(UM_TILES/512u)") : /* wgsl */ `fn umFramePage()->vec3i{return ${pagesOf}umFramePage();}
 fn umWorldSolid(world:vec3i)->bool{return ${pagesOf}umWorldSolid(world);}
+fn umWorldLow()->vec3i{return ${pagesOf}umWorldLow();}
+fn umWorldHigh()->vec3i{return ${pagesOf}umWorldHigh();}
 fn umSolidIsBox()->bool{return ${pagesOf}umSolidIsBox();}
 fn umWallLow()->vec3i{return ${pagesOf}umWallLow();}
 fn umPageWord(page:vec3i)->u32{return ${pagesOf}umPageWord(page);}
 fn umBlockWord(b:u32)->u32{return ${pagesOf}umBlockWord(b);}`}
 // Lattice addressing (uniform-lattice-address.ts): its paged bodies, whose
 // tile key count is UM_TILES. No box: a coordinate resolves through the page table.
-${uniformLatticeAddressWGSL({ constant: true, paged: { blocks: "(UM_TILES/512u)" } })}
+${uniformLatticeAddressWGSL({ constant: true, paged: { blocks: "(UM_TILES/512u)" }, world: true })}
 ${uniformCompiledTopologyWGSL}
 struct UMOwner {tile:u32,lane:u32,width:u32,index:u32}
 fn umAllOwner(gid:vec3u)->UMOwner {

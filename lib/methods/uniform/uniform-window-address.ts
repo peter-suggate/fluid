@@ -68,8 +68,11 @@ fn ${prefix}FramePage()->vec3i{return bitcast<vec3i>(${v(0)});}
 // face): a face anchor below it is a low-wall face, read as the cell above.
 // Never below the window's plane 0, which is all it is on an axis without a
 // low wall (and a wall below the window): the fixed window's contract.
-fn ${prefix}WallLow()->vec3i{let low=bitcast<vec3i>(${v(24)});return max(select(32*(low-${prefix}FramePage()),vec3i(0),low==vec3i(bitcast<i32>(0x80000000u))),vec3i(0));}
-fn ${prefix}WorldSolid(world:vec3i)->bool{return any(world<bitcast<vec3i>(${v(24)}))|any(world>=bitcast<vec3i>(${v(27)}));}
+fn ${prefix}WallLow()->vec3i{let low=${prefix}WorldLow();return max(select(32*(low-${prefix}FramePage()),vec3i(0),low==vec3i(bitcast<i32>(0x80000000u))),vec3i(0));}
+// The world box in world pages, half open (the extreme words where an axis has no wall).
+fn ${prefix}WorldLow()->vec3i{return bitcast<vec3i>(${v(24)});}
+fn ${prefix}WorldHigh()->vec3i{return bitcast<vec3i>(${v(27)});}
+fn ${prefix}WorldSolid(world:vec3i)->bool{return any(world<${prefix}WorldLow())|any(world>=${prefix}WorldHigh());}
 fn ${prefix}PageWord(page:vec3i)->u32{
  let world=page+${prefix}FramePage();let e=bitcast<vec3u>(world)&vec3u(63u);
  let raw=${buffer}[${table}+(e.x|(e.y<<6u)|(e.z<<12u))];

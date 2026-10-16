@@ -126,6 +126,11 @@ export interface UniformLatticeAddressSource {
   readonly constant: boolean;
   /** blocks: u32 expression, the pool's blocks (UM_BLOCKS). */
   readonly paged: { readonly blocks: string };
+  /** The including module also declares the window address's world box
+   * (uniformWindowAddressWGSL: umSolidIsBox, umWorldLow, umWorldHigh,
+   * umFramePage): where the SOLID pages are exactly those outside that box
+   * the walls fold to it (umFixedBox, umBoxWalls). */
+  readonly world?: boolean;
 }
 
 /** A page: 32³ cells, 8³ tiles. The page table and block records are the
@@ -347,7 +352,7 @@ fn umVertexAt(p:vec3u)->u32{return umVertexSlotAt(umVertexSlot(vec3i(p)));}
 fn umVertexCoord(k:u32)->vec3u{let l=k%35937u;return (umBlockPage(k/35937u)<<vec3u(5u))+vec3u(l%33u,(l/33u)%33u,l/1089u);}
 ${boxed(`fn umVertexNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(0),vec3i(${d}));}
 fn umWideVertexNear(q:vec3i)->vec3i{${T}return clamp(q,vec3i(0),vec3i(${t}));}
-`)}${uniformPointCellWGSL}`;
+`)}${uniformPointCellWGSL(source.world === true)}`;
 }
 
 /** Block neighbours: what lies around each block, by block.
@@ -478,7 +483,7 @@ fn umPointNearAt(home:vec3i,p:vec3f)->vec3f{
 
 /** The cell a position or a vertex is read from, of the page table alone
  * (umCellKind): every uniformLatticeAddressWGSL text ends with it. */
-const uniformPointCellWGSL = /* wgsl */ `
+const uniformPointCellWGSL = (world: boolean): string => /* wgsl */ `
 // The cell a point (in cell units) is read from: the one it lies in. A point
 // on a page face, edge or corner lies in every page that meets there: where
 // the high side's is not stored the cell is that of the first stored one of
@@ -524,7 +529,20 @@ fn umPointHeld(p:vec3f)->vec3f{
 // table word and has no walls (a point deep in a SOLID page is a caller's
 // error). Loop-free: seven page words, behind one branch.
 struct umBounds {lo:vec3f,hi:vec3f}
+// The world box in cells, where it is fixed and the SOLID pages are exactly
+// those outside it (umFixedBox): a constant of the launch. An axis without a
+// wall reads -1e9 / 1e9, as no wall does.
+${world ? `fn umFixedBox()->bool{return umSolidIsBox();}
+fn umBoxWalls()->umBounds{
+ let frame=vec3f(umFramePage());
+ return umBounds(max((vec3f(umWorldLow())-frame)*32.0,vec3f(-1e9)),min((vec3f(umWorldHigh())-frame)*32.0,vec3f(1e9)));
+}` : `fn umFixedBox()->bool{return false;}
+fn umBoxWalls()->umBounds{return umBounds(vec3f(-1e9),vec3f(1e9));}`}
+// Under a fixed box a point of a page inside it has the box's walls: they
+// are the walls umPointBounds finds wherever it finds any, and elsewhere the
+// point lies further than margin from them, so no clamp to them binds.
 fn umPointBounds(p:vec3f,margin:f32)->umBounds{
+ if(umFixedBox()){let w=umBoxWalls();let c=floor(p);if(all(c>=w.lo)&&all(c<w.hi)){return w;}}
  var b=umBounds(vec3f(-1e9),vec3f(1e9));
  let c=vec3i(floor(p));let page=c>>vec3u(5u);let low=vec3f(page<<vec3u(5u));let l=p-low;
  if(all(l>=vec3f(margin))&&all(l<vec3f(32.0-margin))){return b;}
