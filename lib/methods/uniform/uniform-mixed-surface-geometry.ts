@@ -159,31 +159,31 @@ fn gcEvaluate(owner:UMOwner,vertices:array<f32,8>,open:f32,terms:bool)->vec2f{
 }
 fn gcOwner(owner:UMOwner,terms:bool){
  let origin=umOrigin(owner);
- var vertices:array<f32,8>;
- // An owner's corners are width-aligned vertices of its tile closure. Their
- // tile's stencil holds the owner, so it is unit or mixed (a unit owner) or
- // the corner is 4-aligned (a 4h owner): the resolved field's umVertexValue
- // is this load, without its one or two stencil loads per corner.
- if(owner.width==4u){vertices=umLoadCorner8(origin,4u);}
- else{vertices=umLoadVertex8(origin,owner.width);}
- var open=1.0;if(owner.width==4u){open=umTileOpen(owner.tile);}
- let value=gcEvaluate(owner,vertices,open,false);
- // Native uvTarget scales by the open fraction; a 4h owner's fill is already
- // over its tile's open cells.
  // select eagerly evaluates its operands: coarse owners must not evaluate
  // discarded fractional h-cell geometry (the tile fraction is in value.x).
  var cellOpen=1.0;if(owner.width==1u){cellOpen=umCellOpen(vec3i(origin));}
- textureStore(targetFill,vec3i(origin),vec4f(value.x*cellOpen));
- textureStore(centerPhi,vec3i(origin),vec4f(value.y));
+ // gcEvaluate has one call site (Metal inlines it whole): turn 0 is this
+ // owner, turn 1 the pressure variant's lane-0 tile owner of an h tile.
+ let turns=select(1u,2u,geometryPressure&&owner.lane==0u&&owner.width!=4u);
+ var value=vec2f(0.0);
+ for(var r=0u;r<turns;r++){
+  // An owner's corners are width-aligned vertices of its tile closure. Their
+  // tile's stencil holds the owner, so it is unit or mixed (a unit owner) or
+  // the corner is 4-aligned (a 4h owner, or the tile's all-4h owner): the
+  // resolved field's umVertexValue is this load, without its one or two
+  // stencil loads per corner.
+  var job=owner;var vertices:array<f32,8>;var open=1.0;
+  if(r!=0u){job=UMOwner(owner.tile,0u,4u,0u);}
+  if(job.width==4u){vertices=umLoadCorner8(origin,4u);open=umTileOpen(owner.tile);}
+  else{vertices=umLoadVertex8(origin,job.width);}
+  value=gcEvaluate(job,vertices,open,terms&&r!=0u);
+  // Native uvTarget scales by the open fraction; a 4h owner's fill is already
+  // over its tile's open cells.
+  if(r==0u){textureStore(targetFill,vec3i(origin),vec4f(value.x*cellOpen));
+   textureStore(centerPhi,vec3i(origin),vec4f(value.y));}
+ }
  if(geometryPressure&&owner.lane==0u){
-  var coarse=value;
-  if(owner.width!=4u){
-   // The tile's all-4h owner: its eight tile corners, stored vertices.
-   let tileOwner=UMOwner(owner.tile,0u,4u,0u);var corners:array<f32,8>;
-   corners=umLoadCorner8(origin,4u);
-   coarse=gcEvaluate(tileOwner,corners,umTileOpen(owner.tile),terms);
-  }
-  textureStore(pressureTarget,vec3i(origin),vec4f(coarse.x));textureStore(pressureCenterPhi,vec3i(origin),vec4f(coarse.y));
+  textureStore(pressureTarget,vec3i(origin),vec4f(value.x));textureStore(pressureCenterPhi,vec3i(origin),vec4f(value.y));
  }
 }
 @compute @workgroup_size(64) fn geometry(@builtin(global_invocation_id) gid:vec3u){
