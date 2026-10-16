@@ -1,5 +1,6 @@
 import { settleGPUInitialization } from "../../core/gpu-initialization";
 import { UniformNarrowBandFlip } from "./uniform-narrow-band-flip";
+import { NARROW_BAND_AIR_CHANGED_WORD } from "./uniform-narrow-band-air.wgsl";
 import {UNIFORM_MIXED_OVERFLOW_FINE,uniformMixedDetailViolationWord} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedHangingBytes} from "./uniform-mixed-velocity-sampling.wgsl";
 import {UNIFORM_DETAIL_POLICY} from "./uniform-detail-policy";
@@ -446,7 +447,7 @@ export class UniformMixedFrame {
   if(!f.detail)throw new Error("The mixed frame's unit taps are fields of its detail storage");
   this.hanging=new UniformMixedHangingTaps(device,o,f.detail);
   this.remap.bindExtension({volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{velocity:this.hanging.unitVelocity,negative:this.extensionWalls=buffer("Uniform mixed remapped extension walls",f.negativeScratch.size,GPUBufferUsage.STORAGE)});
-  this.phiResolve=new UniformMixedPhiResolve(device,o);this.phiResolveGroups={phi:this.phiResolve.bind(f.phi),scratch:this.phiResolve.bind(f.phiScratch)};
+  this.phiResolve=new UniformMixedPhiResolve(device,o,NARROW_BAND_AIR_CHANGED_WORD);this.phiResolveGroups={phi:this.phiResolve.bind(f.phi),scratch:this.phiResolve.bind(f.phiScratch)};
   this.coarsePhi=new UniformCoarseVertexPhi(device,o,f.phi);
   // Domain placement: the published base is the phi field's own base block.
   if(f.detail?.layout.domain)f.detail.adoptBase(f.phi,this.coarsePhi.texture);
@@ -920,7 +921,9 @@ export class UniformMixedFrame {
    // the physical support collar. Resolve shared vertices before all readers.
    // Before redistance: its crossing search and metric then describe the
    // final field, and serve the transfer and update as they stand.
-   this.narrowBandFlip.clearAir(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);
+   // Off a kick the reconstruction's resolve already covers this layout, so
+   // only clearAir's own 4h-lattice writes can change a hanging value.
+   this.narrowBandFlip.clearAir(encoder);if(kick)this.phiResolve.encode(encoder,this.phiResolveGroups.phi);else this.phiResolve.encodeGated(encoder,this.phiResolveGroups.phi,this.narrowBandFlip.state);
    if(p.redistance!==false){if(this.narrowBandFlip.retire(encoder))this.phiResolve.encode(encoder,this.phiResolveGroups.phi);this.narrowBandFlip.redistance(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);}
    trace?.phase(encoder,V.phi);encoder=this.flush(encoder,trace);
 

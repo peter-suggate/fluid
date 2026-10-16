@@ -33,15 +33,21 @@ export class UniformMixedPhiResolve {
   readonly allocatedBytes = 0;
   private pipeline?: GPUComputePipeline;
   private listed?: GPUComputePipeline;
+  /** resolve behind a gate word (encodeGated): every group returns while it is zero. */
+  private gated?: GPUComputePipeline;
+  private readonly gateResources: GPUBindGroupLayout;
+  private gateGroup?: { readonly source: GPUBuffer; readonly group: UniformDetailGroup };
   private readonly resources: GPUBindGroupLayout;
   private readonly listResources: GPUBindGroupLayout;
   private listGroup?: { readonly changes: GPUBuffer; readonly group: UniformDetailGroup };
 
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership) {
+  /** gateWord: the u32 index in the gate source (encodeGated) of its word. */
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly gateWord = 0) {
     this.resources = uniformDetailBindLayout(device,{ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "read-write", format: "r32float", viewDimension: "3d" } },
     ] });
     this.listResources = uniformDetailBindLayout(device,{ entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }] });
+    this.gateResources = uniformDetailBindLayout(device,{ entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }] });
   }
 
   bind(field: GPUTexture): UniformDetailGroup {
@@ -59,7 +65,7 @@ export class UniformMixedPhiResolve {
  let listed=job<umDilatedCount();let candidate=select(0u,umDilatedTile(select(0u,job,listed)),listed);
  let valid=listed&&umTileMaximumWidth(candidate)!=umTileMinimumWidth(candidate);
  let tile=select(0u,candidate,valid);let base=vec3i(umTileCoord(tile));`;
-    const source = (entry: string, job: string, extra = "") => uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity, 0) + extra + /* wgsl */ `
+    const source = (entry: string, job: string, extra = "", gate = "") => uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity, 0) + extra + /* wgsl */ `
 @group(1) @binding(0) var field:texture_storage_3d<r32float,read_write>;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(field,vec3i(p)).x;}
 ${uniformMixedVertexSamplingWGSL}
@@ -70,7 +76,7 @@ var<workgroup> umResolveLattice:array<f32,27>;
 // recipe clips missing tiles. Lattice slot m holds the 4h
 // vertex (T+m-1)*4, read only for existing owners; aligned vertices are never
 // written here, so staging them races no store.
-@compute @workgroup_size(125) fn ${entry}(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+@compute @workgroup_size(125) fn ${entry}(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){${gate}
  // umSupport is read_write storage, so the job test is not uniform to Tint:
  // every lane reaches the barrier and a spare job leaves after it.
  let job=group.x+umDispatchX*group.y;
@@ -85,9 +91,16 @@ ${uniformCompiledVertexResolveWGSL("umResolveLattice","umVertexWeight","umVertex
 }`, [entry], entry === "resolve" ? undefined : "umDilatedCount()", "umCounts.x==0u");
     const module = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve", code: source("resolve", header) });
     const listModule = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve (listed)", code: source("resolveListed", listed, uniformMixedChangedTilesWGSL(this.ownership.capacity.tiles, 2, 0)) });
-    const errors = [...(await module.getCompilationInfo()).messages, ...(await listModule.getCompilationInfo()).messages].filter(m => m.type === "error");
+    // The gate is a uniform: every group of a launch takes the same branch.
+    // Lane 0 reads the gate word; workgroupUniformLoad makes the test uniform.
+    const gateModule = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve (gated)", code: source("resolve", header, `
+@group(2) @binding(0) var<storage,read> umResolveGate:array<u32>;
+var<workgroup> umResolveOpen:u32;`, `
+ if(lane==0u){umResolveOpen=umResolveGate[${this.gateWord}u];}
+ if(workgroupUniformLoad(&umResolveOpen)==0u){return;}`) });
+    const errors = [...(await module.getCompilationInfo()).messages, ...(await listModule.getCompilationInfo()).messages, ...(await gateModule.getCompilationInfo()).messages].filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
-    [this.pipeline, this.listed] = await Promise.all([
+    [this.pipeline, this.listed, this.gated] = await Promise.all([
       uniformDetailPipeline(this.device,this.ownership,{
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources] }),
         compute: { module, entryPoint: "resolve", constants: { umDispatchX: this.ownership.dispatchX, umCountedJobs: UNIFORM_MIXED_COUNTED.fused } },
@@ -95,6 +108,10 @@ ${uniformCompiledVertexResolveWGSL("umResolveLattice","umVertexWeight","umVertex
       uniformDetailPipeline(this.device,this.ownership,{
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources, this.listResources] }),
         compute: { module: listModule, entryPoint: "resolveListed", constants: { umDispatchX: this.ownership.dispatchX } },
+      }),
+      uniformDetailPipeline(this.device,this.ownership,{
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources, this.gateResources] }),
+        compute: { module: gateModule, entryPoint: "resolve", constants: { umDispatchX: this.ownership.dispatchX, umCountedJobs: UNIFORM_MIXED_COUNTED.fused } },
       }),
     ]);
   }
@@ -114,6 +131,21 @@ ${uniformCompiledVertexResolveWGSL("umResolveLattice","umVertexWeight","umVertex
       pass.setBindGroup(2, this.listGroup.group.group);
       this.ownership.dispatchCounted(pass, this.listed);
     } else this.ownership.dispatchFusedCounted(pass, this.pipeline);
+    pass.end();
+  }
+
+  /** The full resolve, launched only in effect: its groups return while
+   * u32 gateWord (constructor) of source is zero, which its writer sets
+   * where it changed a 4h-lattice vertex. Hanging values read only those
+   * (see the class comment), so a zero word means this resolve would write
+   * nothing. The word is read on the GPU: no readback. */
+  encodeGated(encoder: GPUCommandEncoder, group: UniformDetailGroup, source: GPUBuffer): void {
+    if(this.ownership.capacity.fineTiles===0)return;
+    if (!this.gated) throw new Error("Mixed phi resolve is not initialized");
+    if (this.gateGroup?.source !== source) this.gateGroup = { source, group: uniformDetailGroup(this.device,{ layout: this.gateResources, entries: [{ binding: 0, resource: { buffer: source } }] }) };
+    const pass = encoder.beginComputePass(RESOLVE_PASS);
+    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1,group.group); pass.setBindGroup(2,this.gateGroup.group.group);
+    this.ownership.dispatchFusedCounted(pass, this.gated);
     pass.end();
   }
 }

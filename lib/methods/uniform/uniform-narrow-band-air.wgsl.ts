@@ -8,6 +8,11 @@ export const NARROW_BAND_AIR_COLLAR_TILES=4;
  * the collar and one tile more. Outside it the next surface advect keeps
  * a vertex's far marker (UniformMixedSurface's farGate). */
 export const NARROW_BAND_AIR_GATE_PLANE=4;
+/** The state word clearAir sets where it changes a 4h-lattice vertex: the
+ * only vertices a hanging texel's resolved value reads, so with it zero the
+ * resolve after clearAir would write nothing (UniformMixedPhiResolve's
+ * gated launch skips it). */
+export const NARROW_BAND_AIR_CHANGED_WORD=15;
 export const narrowBandAirWGSL=/* wgsl */`
 const NB_AIR=NB_ACTIVITY_SURFACE_HEAT+UM_TILES;
 // A trilinear field attains its extrema on a box at its corners. Restrict
@@ -110,6 +115,7 @@ fn nbAirStore(p:vec3u){
  // The frame plan/census use phi < 16*max(h) for coarse near support.
  // Six-cell redistance sentinels cannot certify far air for that predicate.
  let far=16.0*max(params.hDt.x,max(params.hDt.y,params.hDt.z));
+ if(value<far&&all(p%vec3u(4u)==vec3u(0u))){atomicStore(&state[${NARROW_BAND_AIR_CHANGED_WORD}u],1u);}
  textureStore(outputPhi,vec3i(p),vec4f(max(value,far)));
 }
 ${[1,4].map(width=>/* wgsl */`

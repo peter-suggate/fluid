@@ -1,5 +1,5 @@
 import { narrowBandSparseWGSL } from "./uniform-narrow-band-sparse.wgsl";
-import { narrowBandAirWGSL, NARROW_BAND_AIR_GATE_PLANE, NARROW_BAND_AIR_WORDS_PER_TILE } from "./uniform-narrow-band-air.wgsl";
+import { narrowBandAirWGSL, NARROW_BAND_AIR_CHANGED_WORD, NARROW_BAND_AIR_GATE_PLANE, NARROW_BAND_AIR_WORDS_PER_TILE } from "./uniform-narrow-band-air.wgsl";
 import { narrowBandParticleStride, narrowBandParticleWGSL, narrowBandApicMomentWGSL, type NarrowBandTransfer } from "./uniform-narrow-band-apic.wgsl";
 import { PARTICLE_RESIDENCY_WORDS, particleResidencyTravelWGSL } from "./uniform-local-residency";
 import { uniformWindowAddressWGSL } from "./uniform-window-address";
@@ -1273,8 +1273,9 @@ ${narrowBandSurfaceWGSL}
   this.measureBand(encoder,b.searchRedistance);
   this.buildDistance(encoder,coarse?b.redistanceMetric:b.redistanceFine);this.bandCurrent=true;
  }
- /** Clear only the certified empty field outside physical liquid/particle support. */
- clearAir(encoder:GPUCommandEncoder):void{this.run(encoder,this.compiled.clearAir);this.bandCurrent=false;}
+ /** Clear only the certified empty field outside physical liquid/particle support.
+  * It sets state word NARROW_BAND_AIR_CHANGED_WORD where it changes a 4h-lattice vertex. */
+ clearAir(encoder:GPUCommandEncoder):void{encoder.clearBuffer(this.state,4*NARROW_BAND_AIR_CHANGED_WORD,4);this.run(encoder,this.compiled.clearAir);this.bandCurrent=false;}
  private buildDistance(encoder:GPUCommandEncoder,batch:NarrowBandBatch):void{
   encoder.clearBuffer(this.bins,4*this.cells,4);
   this.run(encoder,batch);
