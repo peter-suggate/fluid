@@ -90,7 +90,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  diagnostics={beforeMaxOutside:NaN,afterMaxOutside:0,outsideSurface:0,unsupported:0,deepInterior:0};
  /** The separation before the union is a diagnostic alone, a sweep of every
   * sample that nothing in the step reads: a step measures it only for a
-  * reader that set this before stepping. Unmeasured, it reports NaN. */
+  * reader that set this before stepping. Unmeasured, it reports NaN, and so
+  * do the accepted surface's census (afterMaxOutside, outsideSurface,
+  * deepInterior); unsupported is always counted. */
  measureTraces=false;
  /** Completed frame samples, exposed for transfer/conservation verification.
   * Resampling preserves the survivors' cell order, but seeding appends an
@@ -895,13 +897,17 @@ fn storeSeedCandidate(p:Particle,lane:u32,mandatory:bool){
  for(var i=gid.x;i<UM_CELL_KEYS;i+=65536u){if(!umCellLive(i)){continue;}let c=umCellCoord(i);seedCell(c,true);}
 }
 fn weight(x:f32)->f32{let a=abs(x);if(a<0.5){return 0.75-a*a;}let b=max(0.0,1.5-a);return 0.5*b*b;}
-// Also the receipt's census of the samples against the surface they made.
+// Also the receipt's census of the samples: the unsupported count always;
+// against the surface they made (the largest distance outside it, the
+// samples past half a cell outside, the samples deeper than four) only while
+// traces are measured (settings.w): it is diagnostics, and its two surface
+// queries a sample were most of this pass.
 @compute @workgroup_size(64) fn classify(@builtin(global_invocation_id) gid:vec3u){
- var outside=0.0;var counts=vec3u(0);
+ var outside=0.0;var counts=vec3u(0);let census=params.settings.w!=0.0;
  if(gid.x==0u){atomicStore(&bins[NB_BAND+3u],0u);atomicStore(&state[9],0u);}
  for(var i=gid.x;i<min(atomicLoad(&state[1]),arrayLength(&particles));i+=65536u){
-  let q=particles[i].position.xyz;let supported=gridSupported(q);let d=bandPhi(q);outside=max(outside,d);
-  counts+=vec3u(u32(d>0.5),u32(!supported),u32(particleDepth(q)<-4.0));
+  let q=particles[i].position.xyz;let supported=gridSupported(q);counts.y+=u32(!supported);
+  if(census){let d=bandPhi(q);outside=max(outside,d);counts+=vec3u(u32(d>0.5),0u,u32(particleDepth(q)<-4.0));}
   particles[i].before.w=nbParticleState(nbParticleAge(particles[i]),select(1.0,0.0,supported));
   nbStoreMotion(i,vec4f(particles[i].velocity.xyz,nbParticleMode(particles[i])));
  }
@@ -1097,7 +1103,7 @@ ${narrowBandSurfaceWGSL}
   * top and gravity. */
  private writeStep(dt:number,openTop:number,gravity:number):void{
   const w=this.stepWords,h=this.ownership.capacity.lattice.cellSize_m;
-  w[0]=h[0]!;w[1]=h[1]!;w[2]=h[2]!;w[3]=dt;w[4]=this.apic?0:0.95;w[5]=openTop;w[6]=gravity;
+  w[0]=h[0]!;w[1]=h[1]!;w[2]=h[2]!;w[3]=dt;w[4]=this.apic?0:0.95;w[5]=openTop;w[6]=gravity;w[7]=+this.measureTraces;
   this.device.queue.writeBuffer(this.params,0,w);
  }
  move(encoder:GPUCommandEncoder,dt:number,openTop:boolean,gravity=0):void{
@@ -1231,7 +1237,9 @@ ${narrowBandSurfaceWGSL}
   this.count=words[1]!;this.reseedClipped=words[2]!;
   const bits=this.receiptBits,distances=this.receiptDistances,d=this.diagnostics;
   bits[0]=words[4]!;bits[1]=words[5]!;
-  d.beforeMaxOutside=this.measureTraces?distances[0]!:NaN;d.afterMaxOutside=distances[1]!;d.outsideSurface=words[6]!;d.unsupported=words[7]!;d.deepInterior=words[8]!;
+  d.beforeMaxOutside=this.measureTraces?distances[0]!:NaN;d.unsupported=words[7]!;
+  // The surface census runs while traces are measured (classify).
+  d.afterMaxOutside=this.measureTraces?distances[1]!:NaN;d.outsideSurface=this.measureTraces?words[6]!:NaN;d.deepInterior=this.measureTraces?words[8]!:NaN;
   // Persistent samples own the budget first. At capacity optional reseeding
   // is deferred (reseedClipped); never destroy a surface to make room for it.
   // Liquid a source or the initial band must add has no such deferral.
