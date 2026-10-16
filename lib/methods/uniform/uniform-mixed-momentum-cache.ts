@@ -135,7 +135,7 @@ export class UniformMixedHangingTaps {
    * (haloOf) are not. */
   get allocatedBytes():number{let bytes=this.haloBlocks.size;for(const t of this.halos.values())bytes+=16*t.width*t.height*t.depthOrArrayLayers;return bytes;}
   /** Each taps texture's haloed copy by block (UNIFORM_UNIT_HALO_EDGE),
-   * refilled by every encode that fills the taps. */
+   * refilled by every encode that fills the taps but a slot fill. */
   private readonly halos=new Map<GPUTexture,GPUTexture>();
   private readonly haloGroups=new WeakMap<UniformDetailGroup,UniformDetailGroup>();
   private readonly haloResources:GPUBindGroupLayout;
@@ -198,7 +198,10 @@ export class UniformMixedHangingTaps {
       {binding:0,resource:f.extended},{binding:1,resource:{buffer:f.negative}},{binding:2,resource:f.coarse},
       {binding:3,resource:output},...(f.slots?[{binding:4,resource:f.slots}]:[]),
     ]});if(f.slots)this.slotGroups.add(group);
-    this.haloGroups.set(group,uniformDetailGroup(this.device,{layout:this.haloResources,entries:[
+    // A slot fill (the paired snapshot's old-epoch taps) has no halo: the
+    // slot snapshot reads its taps alone, and the update's own fill
+    // refreshes the halo before the next sample can read it.
+    if(!f.slots)this.haloGroups.set(group,uniformDetailGroup(this.device,{layout:this.haloResources,entries:[
       {binding:0,resource:f.extended},{binding:1,resource:{buffer:f.negative}},{binding:2,resource:f.coarse},
       {binding:3,resource:this.haloOf(output)},{binding:5,resource:output},{binding:6,resource:{buffer:this.haloBlocks}},
     ]}));
@@ -373,7 +376,7 @@ fn umCoarseSlots()->vec2u{let header=7u*UM_TILES+16u;let fine=umSupport[header];
     // without a slot) and the seam 4h slots. At most one job per tile.
     const pass=shared??encoder.beginComputePass(TAPS_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,this.ownership.hangingGroup);
     this.ownership.dispatchCounted(pass,this.slotGroups.has(group)?this.slotPipeline!:this.pipeline,this.ownership.capacity.tiles,"fineAndSeams");
-    // Every fill refreshes its halo: the texels samples can read (markUnitHalo),
+    // Every fill but a slot fill refreshes its halo: the texels samples can read (markUnitHalo),
     // a fixed grid of HALO_SLICES workgroups a block.
     const halo=this.haloGroups.get(group);
     if(halo){
