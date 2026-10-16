@@ -388,7 +388,7 @@ fn nbRun(a:vec3i,b:vec3i)->vec2u{
  let last=64u*tile+nbCellLocal(b);return vec2u(links[64u*tile+nbCellLocal(a)],links[last]+atomicLoad(&bins[last]));}
 fn nbCellRun(c:vec3i)->vec2u{return nbRun(c,c);}
 // Position and motion remain compact streams for the neighbor gathers.
-// After marking, position.w's heat is dead until order.positions rebuilds
+// After marking, position.w's heat is dead until the next marking rebuilds
 // it next frame. classify borrows its sign bit for mode, leaving three
 // full-precision motion floats per particle instead of a second vec4.
 fn nbPosition(i:u32)->vec3f{let a=UM_CELL_KEYS+4u*i;return bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}
@@ -554,9 +554,14 @@ var<workgroup> nbStray:atomic<u32>;
  // A sample's cell is the last run starting at or before it; each cell's
  // heat is the maximum of its samples' (nonnegative, so their bits order
  // as they do: max(heat,h) from 0).
+ // The run's links still hold the order's keys: this workgroup alone reads
+ // them, so it writes each moved record's position over its slot's, the
+ // compact sorted positions every later gather reads.
  for(var j=lane;j<population;j+=64u){
   var cell=0u;for(var step=32u;step>0u;step>>=1u){if(nbCellStart[cell+step]<=j){cell+=step;}}
-  let a=UM_CELL_KEYS+4u*(begin+j);let q=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));let h=max(0.0,bitcast<f32>(links[a+3u]));
+  let a=UM_CELL_KEYS+4u*(begin+j);let p=particles[begin+j].position;let bits=bitcast<vec4u>(p);
+  links[a]=bits.x;links[a+1u]=bits.y;links[a+2u]=bits.z;links[a+3u]=bits.w;
+  let q=p.xyz;let h=max(0.0,p.w);
   let l=umCorner(cell,4u);let rl=coord+vec3i(l/2u)-1;let rh=coord+vec3i(l/2u);
   // Preserve the original floating-point boundary decisions exactly.
   let lo=vec3i(floor((q-2.0)/4.0));let hi=vec3i(floor((q+2.0)/4.0));

@@ -6,7 +6,7 @@ import { UNIFORM_PAGE_TABLE_WORDS, uniformKeyGroups, uniformLatticeAddressWGSL, 
 /** The stage's pass descriptors: begun every frame, built once. */
 const PREPARE_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP clear occupied bins"};
 const PREFIX_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP occupied cell offsets"},PACK_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP order pack"};
-const CANONICAL_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP canonical cell order"},POSITIONS_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP sorted positions"};
+const CANONICAL_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP canonical cell order"};
 /** Workgroups of every launch over the live samples, one row. A kernel reads
  * the count on the GPU and strides the launch through it, 64 samples a group
  * a turn, so any width is complete at any count up to the capacity. This one
@@ -30,7 +30,9 @@ export const NARROW_BAND_PARTICLE_GRID=4096;
  * cells. Keys scatter in parallel through a cursor in the bins' second
  * bank so a crowded bin cannot serialize an entire workgroup; each sample
  * then ranks itself within its cell and moves its record once, so the
- * order does not depend on GPU scheduling. */
+ * order does not depend on GPU scheduling. The keys stay in the links: the
+ * NB-FLIP tile marking, one workgroup a tile's run, writes the sorted
+ * positions over them as it reads the moved records. */
 export class UniformNarrowBandOrder {
  private readonly enabled:GPUBuffer;
  private readonly dimensions:GPUBuffer;
@@ -40,7 +42,6 @@ export class UniformNarrowBandOrder {
  private scan!:ParticleBinScan;
  private pipeline!:GPUComputePipeline;
  private canonicalPipeline!:GPUComputePipeline;
- private positionsPipeline!:GPUComputePipeline;
  private groups!:readonly [GPUBindGroup,GPUBindGroup];
  /** Cell keys of the lattice: the bins' first two banks. */
  private readonly cells:number;
@@ -165,28 +166,24 @@ fn orderBefore(a:vec4u,b:vec4u)->bool{
 fn orderKey(slot:u32)->vec4u{let a=UM_CELL_KEYS()+4u*slot;return vec4u(links[a],links[a+1u],links[a+2u],links[a+3u]);}
 // One lane a sample: its rank among its cell's keys is its slot in the run.
 // Work is linear in the cell's population a lane, all lanes in parallel.
+// The loop compares positions alone; only a sample that ties another's
+// position exactly ranks the tied keys again with the full compare.
 @compute @workgroup_size(64) fn canonical(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let live=min(state[1],arrayLength(&output));
  for(var s=64u*(group.x+groups.x*group.y)+lane;s<live;s+=64u*groups.x*groups.y){
   let own=orderKey(s);let cell=orderCellKey(vec3u(bitcast<vec3f>(own.xyz)));
   let start=links[cell];let end=start+atomicLoad(&bins[cell]);
-  var rank=0u;
-  for(var k=start;k<end;k++){if(k!=s&&orderBefore(orderKey(k),own)){rank++;}}
+  var rank=0u;var tie=false;
+  for(var k=start;k<end;k++){let o=orderKey(k).xyz;
+   rank+=select(0u,1u,o.x<own.x||(o.x==own.x&&(o.y<own.y||(o.y==own.y&&o.z<own.z))));tie=tie||(k!=s&&all(o==own.xyz));}
+  if(tie){for(var k=start;k<end;k++){let o=orderKey(k);if(k!=s&&all(o.xyz==own.xyz)&&orderBefore(o,own)){rank++;}}}
   output[start+rank]=input[own.w];
- }
-}
-// The gathers read sorted positions from the links.
-@compute @workgroup_size(64) fn positions(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- let live=min(state[1],arrayLength(&output));
- for(var s=64u*(group.x+groups.x*group.y)+lane;s<live;s+=64u*groups.x*groups.y){
-  let a=UM_CELL_KEYS()+4u*s;let p=bitcast<vec4u>(output[s].position);
-  links[a]=p.x;links[a+1u]=p.y;links[a+2u]=p.z;links[a+3u]=p.w;
  }
 }
 `});
   const layout=this.device.createBindGroupLayout({entries:[{binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},...(this.sparse?[0,1,2,3,4,6,5]:[0,1,2,3,4,6]).map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0||binding>=5?"read-only-storage" as const:"storage" as const}}))]});
   const pipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[layout]});
-  [this.pipeline,this.canonicalPipeline,this.positionsPipeline,this.preparePipeline,this.prefixPipeline]=await Promise.all((this.sparse?["pack","canonical","positions","prepare","prefixTile"]:["pack","canonical","positions"]).map(entryPoint=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
+  [this.pipeline,this.canonicalPipeline,this.preparePipeline,this.prefixPipeline]=await Promise.all((this.sparse?["pack","canonical","prepare","prefixTile"]:["pack","canonical"]).map(entryPoint=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
   this.groups=[0,1].map(parity=>this.device.createBindGroup({layout,entries:[{binding:7,resource:{buffer:this.dimensions}},{binding:6,resource:{buffer:this.topology}},...[this.particles[1-parity]!,this.particles[parity]!,this.bins,this.links,this.state,...(this.sparse?[this.tileOffsets!]:[])].map((buffer,binding)=>({binding,resource:{buffer}}))]})) as [GPUBindGroup,GPUBindGroup];
  }
  prepare(encoder:GPUCommandEncoder,parity:number):void{
@@ -204,7 +201,6 @@ fn orderKey(slot:u32)->vec4u{let a=UM_CELL_KEYS()+4u*slot;return vec4u(links[a],
   this.encodeOffsets(encoder,parity);
   const pass=encoder.beginComputePass(PACK_PASS);pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(NARROW_BAND_PARTICLE_GRID);pass.end();
   const canonical=encoder.beginComputePass(CANONICAL_PASS);canonical.setPipeline(this.canonicalPipeline);canonical.setBindGroup(0,this.groups[parity]!);canonical.dispatchWorkgroups(NARROW_BAND_PARTICLE_GRID);canonical.end();
-  const positions=encoder.beginComputePass(POSITIONS_PASS);positions.setPipeline(this.positionsPipeline);positions.setBindGroup(0,this.groups[parity]!);positions.dispatchWorkgroups(NARROW_BAND_PARTICLE_GRID);positions.end();
  }
  destroy():void{this.scan?.destroy();this.enabled.destroy();this.dimensions.destroy();this.tileOffsets?.destroy();}
 }
