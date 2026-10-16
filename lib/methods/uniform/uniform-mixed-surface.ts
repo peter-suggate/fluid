@@ -21,7 +21,7 @@ const surfaceClaimWords=(a:UniformLatticeAddress)=>SURFACE_CLAIM_WORDS+uniformFa
 const wallFaces=(a:UniformLatticeAddress)=>6*(a.blocks-2);
 /** The largest launches of wallReach and advectWalls: past them a workgroup strides the wall-face list. */
 const WALL_REACH_GRID=1024,WALL_VERTEX_GRID=4096;
-/** Per second: the NB-FLIP surface vertices' fourth-difference weight (umVertexSmoothing). */
+/** Per second: the NB-FLIP surface vertices' fourth-difference weight (umVertexFoot). */
 export const UNIFORM_MIXED_VERTEX_SMOOTHING_PER_S=0.5;
 /** encode()'s pass descriptors. */
 const SURFACE_PASS:GPUComputePassDescriptor={label:"Uniform mixed surface advect"};
@@ -446,6 +446,31 @@ fn umSmoothOpen(q:vec3i,w:i32)->bool{
  for(var k=0u;k<8u;k++){let cell=q-vec3i(1)+vec3i(umCorner(k,2u));if(!umSolidValid(cell)||!umCellIsOpen(cell)){return false;}}
  return true;
 }`:""}
+// A width-aligned lattice vertex, loaded directly: an h vertex from the h
+// store (an h vertex's neighbours are stored or, in a seam tile, resolved),
+// a tile corner from the base block (stored everywhere).
+fn umLatticeLoad(q:vec3i,width:u32)->f32{if(width==4u){return umLoadCorner(vec3u(q));}return umLoadVertex(vec3u(q));}
+// A traced vertex's foot and smoothing, from one stencil of its own lattice
+// (umLatticeLoad) read before the trace: the full sampler's code in the
+// advect kernels cost more than its taps, and only the foot, its shift and
+// the smoothing stay live across the trace. foot: where umSurfaceTrace
+// starts; shift: p - foot, applied at the trace's end (zero unfooted);
+// smoothing: added to the advected value.
+//
+// The departure of a level-set vertex: a vertex within two of its own cells
+// of the surface is carried by the surface, displaced as its foot on the zero
+// set is. The vertices beside the surface keep their advected values, so
+// nothing restores a distance there: carried by the velocity at their own
+// depth, any steady shear under a still surface moved their values and not
+// the zero between them, and the pressure rows, which read the surface off
+// those values, saw a rise as a dip and filled it
+// (uniform-trough-settled-tank: the wet vertex 0.93 h under the surface
+// 2e-2 h off its distance in 240 steps). The foot's gradient is the central
+// difference a width either side (taps 0..5: -x +x -y +y -z +z), held at a
+// wall (the tap is p) and, at a 4h vertex, at a closed quarter-width point.
+// Off a seam that is the trilinear difference a quarter width either side,
+// in exact arithmetic; a 4h vertex at a seam takes its 4h neighbours.
+//
 // Phi is vertex state and both its couplings are means: a centre's phi is the
 // mean of its eight vertices, and a vertex moves with the faces around its
 // foot. A vertex pattern alternating along x or z has no pressure and no
@@ -455,33 +480,76 @@ fn umSmoothOpen(q:vec3i,w:i32)->bool{
 // pattern and leaves a cubic alone: a step takes 16 eps of an alternating
 // pattern and eps (2 pi/n)^4 of a wave n vertices long. An axis is skipped
 // where a wall lies before its far tap, where the vertex or a tap is not
-// open liquid state, and where a tap is not a distance from the vertex.
-fn umVertexSmoothing(vertex:vec3u,width:u32)->f32{
- let eps=min(${UNIFORM_MIXED_VERTEX_SMOOTHING_PER_S.toExponential(8)}*params.hDt.w,0.03125);if(!(eps>0.0)){return 0.0;}
- let w=i32(width);let c=umSampleVertex(vec3f(vertex));if(!(abs(c)<2.0*f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z)))){return 0.0;}
- ${this.solid?"if(!umSmoothOpen(vec3i(vertex),w)){return 0.0;}":""}
+// open liquid state, and where a tap is not a distance from the vertex. Its
+// near taps are the gradient's x and z taps (with no wall within two widths
+// none is held); taps 6..9 are the far ones (-2x +2x -2z +2z).
+struct UMFoot {foot:vec3f,shift:vec3f,smoothing:f32}
+fn umVertexFoot(vertex:vec3u,width:u32)->UMFoot{
+ let p=vec3f(vertex);let w=f32(width);let wi=i32(width);let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+ var result=UMFoot(p,vec3f(0.0),0.0);
+ let c=umLatticeLoad(vec3i(vertex),width);if(!(abs(c)<2.0*w*h)){return result;}
+ let page=umPointCell(p)>>vec3u(5u);
+ var at:array<vec3f,10>;
+ for(var axis=0u;axis<3u;axis++){
+  var delta=vec3f(0);delta[axis]=w;
+  at[2u*axis]=umPointFromPage(page,p-delta);at[2u*axis+1u]=umPointFromPage(page,p+delta);
+  ${this.solid?/* wgsl */`if(width>1u){
+   var quarter=vec3f(0);quarter[axis]=0.25*w;
+   if(umSampleClosed(umPointFromPage(page,p-quarter))){at[2u*axis]=p;}
+   if(umSampleClosed(umPointFromPage(page,p+quarter))){at[2u*axis+1u]=p;}
+  }`:""}
+ }
+ for(var k=0u;k<4u;k++){var q=p;q[select(0u,2u,k>1u)]+=select(-2.0,2.0,(k&1u)!=0u)*w;at[6u+k]=q;}
+ // The width branch is outside the taps.
+ var t:array<f32,10>;
+ if(width==4u){for(var k=0u;k<10u;k++){t[k]=umLoadCorner(vec3u(at[k]));}}
+ else{for(var k=0u;k<10u;k++){t[k]=umLoadVertex(vec3u(at[k]));}}
+ var g=vec3f(0);
+ for(var axis=0u;axis<3u;axis++){g[axis]=(t[2u*axis+1u]-t[2u*axis])/max(at[2u*axis+1u][axis]-at[2u*axis][axis],1e-6);}
+ let g2=dot(g,g);
+ if(g2>=1e-6*h*h){
+  var offset=-c*g/g2;let reach=length(offset);if(reach>2.0*w){offset*=2.0*w/reach;}
+  let foot=umPointFrom(p,p+offset);
+  if(${this.solid?"umOpenAt(foot)":"true"}){result.foot=foot;result.shift=p-foot;}
+ }
+ let eps=min(${UNIFORM_MIXED_VERTEX_SMOOTHING_PER_S.toExponential(8)}*params.hDt.w,0.03125);if(!(eps>0.0)){return result;}
+ // Closed bits: 0 the vertex, 1+2*axis+k tap k of axis (x, z: near low,
+ // near high, far low, far high). The nine tests share one call site.
+ var closed=0u;
+ ${this.solid?/* wgsl */`if(umSolidEnabled()){
+  for(var j=0u;j<9u;j++){
+   var q=vec3i(vertex);if(j>0u){let k=(j-1u)&3u;q[select(0u,2u,j>4u)]+=select(wi,2*wi,(k&2u)!=0u)*select(-1,1,(k&1u)!=0u);}
+   if(!umSmoothOpen(q,wi)){closed|=1u<<j;}
+  }
+  if((closed&1u)!=0u){return result;}
+ }`:""}
  var sum=0.0;
  for(var axis=0u;axis<3u;axis+=2u){
-  if(umWallWithin(vec3i(vertex),axis,2*w)){continue;}
-  var part=6.0*c;var valid=true;
+  if(umWallWithin(vec3i(vertex),axis,2*wi)){continue;}
+  var part=6.0*c;var valid=((closed>>(1u+2u*axis))&15u)==0u;
   for(var k=0u;k<4u;k++){
-   let span=select(w,2*w,(k&2u)!=0u);
-   var q=vec3i(vertex);q[axis]+=span*select(-1,1,(k&1u)!=0u);
-   ${this.solid?"if(!umSmoothOpen(q,w)){valid=false;}":""}
-   let s=umSampleVertex(vec3f(q));
+   let s=t[select(2u*axis+k,6u+axis+k-2u,k>1u)];let span=select(w,2.0*w,k>1u);
    // A tap further from the vertex's value than its span allows is no
    // distance: past the band, far air holds a marker. Its fourth difference
    // drew the air beside the band onto the liquid every step.
-   if(abs(s-c)>1.5*f32(span)*params.hDt[axis]){valid=false;}
-   part+=select(-4.0,1.0,(k&2u)!=0u)*s;
+   if(abs(s-c)>1.5*span*params.hDt[axis]){valid=false;}
+   part+=select(-4.0,1.0,k>1u)*s;
   }
   if(valid){sum+=part;}
  }
- return -eps*sum;
+ result.smoothing=-eps*sum;
+ return result;
 }
-fn umAdvected(p:vec3f,width:u32)->f32{
+// The departure of a vertex from its foot: the foot's trace, displaced back
+// by its shift (within two widths of where the trace ended, reached from
+// there). One trace (one call site of umSurfaceTrace).
+fn umVertexTrace(foot:UMFoot)->vec3f{
+ let end=umSurfaceTrace(foot.foot);if(all(foot.shift==vec3f(0.0))){return end;}
+ return umPointFrom(end,end+foot.shift);
+}
+fn umAdvected(p:vec3f,width:u32,foot:UMFoot)->f32{
  ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){return umLoadVertex(vec3u(p));}
- let end=umVertexTrace(p,width);let walk=umWalk(p,end);let q=walk.q;`:"let q=umVertexTrace(p,width);"}let cell=umVertexCell(q);var value=cell.value;
+ let end=umVertexTrace(foot);let walk=umWalk(p,end);let q=walk.q;`:"let q=umVertexTrace(foot);"}let cell=umVertexCell(q);var value=cell.value;
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){value=umCubicPhi(q,cell);}
  ${this.solid?"value=umWallContact(p,value,width);if(walk.hit){value=umEmbeddedAir(p,end,value);}value=umReleasedWalls(p,value);":"value=umReleasedWalls(p,umWallContact(p,value,width));"}
@@ -564,7 +632,8 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  if(!umSolidClear(vec3i(p))&&umBuried(p)){textureStore(outputPhi,vec3i(vertex),vec4f(umLoadVertex(vertex)));return;}
  // A hit is evaluated by advectDeferred. Its first-pass phi and source
  // samples are discarded.
- {if(!defer){let walk=umWalk(p,umVertexTrace(p,width));defer=walk.hit;let q=walk.q;if(!defer){`:"{if(!defer){let q=umVertexTrace(p,width);"}
+ var smoothing=0.0;
+ {if(!defer){let foot=umVertexFoot(vertex,width);smoothing=foot.smoothing;let walk=umWalk(p,umVertexTrace(foot));defer=walk.hit;let q=walk.q;if(!defer){`:"var smoothing=0.0;{if(!defer){let foot=umVertexFoot(vertex,width);smoothing=foot.smoothing;let q=umVertexTrace(foot);"}
   let cell=umVertexCell(q);value=cell.value;
   let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
   if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){value=umCubicPhi(q,cell);}
@@ -572,7 +641,7 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
  ${this.solid?"}":""}
  }}
- if(!defer){textureStore(outputPhi,vec3i(vertex),vec4f(value+umVertexSmoothing(vertex,width)));return;}
+ if(!defer){textureStore(outputPhi,vec3i(vertex),vec4f(value+smoothing));return;}
  // Each canonical vertex is stored once: the list holds at most every vertex.
  // A word is the vertex key (umVertexAt) below a two-bit code: log2 of the
  // width (0, 2) off the regular-h dispatch, 3 on it. All ones is no word.
@@ -589,7 +658,8 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   if((code==3u)!=umRegularFine){continue;}
   let vertex=umVertexCoord(word&0x3fffffffu);
   let width=select(1u<<code,1u,code==3u);
-  textureStore(outputPhi,vec3i(vertex),vec4f(umAdvected(vec3f(vertex),width)+umVertexSmoothing(vertex,width)));
+  let foot=umVertexFoot(vertex,width);
+  textureStore(outputPhi,vec3i(vertex),vec4f(umAdvected(vec3f(vertex),width,foot)+foot.smoothing));
  }
 }
 // Canonical vertices of the walls, each once, with its authority's width. A
@@ -647,49 +717,6 @@ fn umSampleClosed(q:vec3f)->bool{
  if(umTileWidth(t)==4u){return umTileOpen(t)<=1e-5;}
  return !umCellIsOpen(c);
 }`:""}
-// The departure of a level-set vertex: a vertex within two of its own cells
-// of the surface is carried by the surface, displaced as its foot on the zero
-// set is. The vertices beside the surface keep their advected values, so
-// nothing restores a distance there: carried by the velocity at their own
-// depth, any steady shear under a still surface moved their values and not
-// the zero between them, and the pressure rows, which read the surface off
-// those values, saw a rise as a dip and filled it
-// (uniform-trough-settled-tank: the wet vertex 0.93 h under the surface
-// 2e-2 h off its distance in 240 steps).
-// One trace (one call site of umSurfaceTrace): of the foot where it has one,
-// else of p.
-fn umVertexTrace(p:vec3f,width:u32)->vec3f{
- let w=f32(width);let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- let value=umSampleVertex(p)/h;
- var foot=p;var footed=false;
- if(abs(value)<2.0*w){
-  let g=umSurfaceGradient(p,w)/h;let g2=dot(g,g);
-  if(g2>=1e-6){
-   var offset=-value*g/g2;let reach=length(offset);if(reach>2.0*w){offset*=2.0*w/reach;}
-   foot=umPointFrom(p,p+offset);footed=true;
-   ${this.solid?"if(!umOpenAt(foot)){foot=p;footed=false;}":""}
-  }
- }
- let end=umSurfaceTrace(foot);if(!footed){return end;}
- // The foot's displacement, applied at p: within two widths of where the foot's trace ended, and reached from there.
- return umPointFrom(end,p+(end-foot));
-}
-fn umSurfaceGradient(p:vec3f,width:f32)->vec3f{
- var g=vec3f(0);let page=umPointCell(p)>>vec3u(5u);
- for(var axis=0u;axis<3u;axis++){
-  var delta=vec3f(0);delta[axis]=0.25*width;
-  var low=umPointFromPage(page,p-delta);var high=umPointFromPage(page,p+delta);
-  // Construct and test the same pair once per axis. The former six-probe
-  // loop repeated both wall mappings and both closed tests for each sample.
-  ${this.solid?"if(width>1.0){for(var s=0u;s<2u;s++){let q=select(low,high,s==1u);if(umSampleClosed(q)){if(s==0u){low=p;}else{high=p;}}}}":""}
-  var lowValue=0.0;
-  // Retain one sampling call site and the original low/high sample order.
-  for(var side=0u;side<2u;side++){
-   let value=umSampleVertex(select(low,high,side!=0u));
-   if(side==0u){lowValue=value;}else{g[axis]=(value-lowValue)/max(high[axis]-low[axis],1e-6);}
-  }
- }return g;
-}
 // Each face direction's (2*axis+side) largest dt*away over the wall faces
 // umReleasedWalls can probe that pass its release test, as f32 bits
 // (positive floats order as u32), in umClaims[UM_WALL_REACH+direction]
