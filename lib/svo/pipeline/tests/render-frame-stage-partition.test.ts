@@ -15,8 +15,30 @@ import {
   measureRenderPipelineNode,
   renderPipelineStageDurations,
   renderPipelineUnownedPhases,
+  renderPipelineNodeForContext,
+  type RenderPipelineContext,
 } from "../render-pipeline-graph";
 import { CPUPerformanceTrace, GPUPassTimestampRecorder } from "../../../core/performance-trace";
+import { DEFAULT_SVO_RENDER_TUNING } from "../svo-render-tuning";
+
+test("mesh rendering reports imported asset time instead of hiding it as unavailable", () => {
+  const context: RenderPipelineContext = { disabledStages: new Set(), coneTracingMode: "raster-ao",
+    shadowsEnabled: true, ambientOcclusionEnabled: true, seamClosureEnabled: false, globalIlluminationEnabled: false,
+    worldGiCacheEnabled: false, tuning: DEFAULT_SVO_RENDER_TUNING, sceneHasFluid: true, refinementDepth: 3,
+    leafVoxel_mm: 6.25, rendererActive: true, stageView: "off", rasterPrimaryActive: true, surfaceMeshSelected: true };
+  const source = RENDER_PIPELINE_NODES.find(n => n.id === "scene-primitive")!;
+  const imported = renderPipelineNodeForContext(source, context);
+  assert.equal(imported.label, "Imported asset surfaces");
+  assert.equal(imported.state(context), "on");
+  assert.equal(imported.toggleable, false, "the analytic-tier switch does not control native asset rendering");
+  const durations = new Map<RenderFrameStageId, { expected_ms: number; encodedFraction: number }>([
+    ["scene-primitive-visibility", { expected_ms: 25.6, encodedFraction: 1 }],
+    ["surface-mesh-draw", { expected_ms: 1.7, encodedFraction: 1 }],
+  ]);
+  assert.equal(measureRenderPipelineNode(imported, durations, 34, imported.state(context)).duration_ms, 25.6);
+  assert.equal(imported.state({ ...context, disabledStages: new Set(["primary-traversal"]) }), "off");
+  assert.equal(renderPipelineNodeForContext(source, { ...context, surfaceMeshSelected: false }), source);
+});
 
 /**
  * The RENDER panel puts a figure on a row only when the stages that row owns

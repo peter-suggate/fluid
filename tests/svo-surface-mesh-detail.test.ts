@@ -78,4 +78,8 @@ test("native sampled surfaces omit duplicate mesh faces but raster shadow maps r
   assert.match(native, /identity\.w&4u/);
   assert.doesNotMatch(rasterShadows, /dryMaterial\(/);
   assert.match(rasterShadows, /meshArena\[meshEmitBase\+slot\]=SurfaceQuad/);
+  const cull = svoSurfaceMeshWGSL(3, 1 << 7, true, true, true)
+    .split("fn meshQuadVisible(")[1]!.split("var<workgroup>")[0]!;
+  assert.match(cull, /dryMaterial\(sceneIdentityMaterial\(quad.identity\)\).identity.w&4u/,
+    "camera culling rejects retained native-asset shadow proxies before vertex processing");
 });

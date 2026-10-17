@@ -682,7 +682,7 @@ export const RENDER_PIPELINE_NODES: readonly RenderPipelineNode[] = Object.freez
 /** The raster backend owns exclusive intervals under primary visibility. */
 export const SURFACE_MESH_TIMING_STAGES = [
   { stage: "surface-mesh-update", label: "Mesh update", detail: "Revision check, extraction when dirty, and publication. Cached frames retain the check and publication cost." },
-  { stage: "surface-mesh-cull", label: "Mesh culling", detail: "Detail selection, then rejects back-facing and out-of-frustum quads before vertex processing. No subpixel or occlusion approximation." },
+  { stage: "surface-mesh-cull", label: "Mesh culling", detail: "Detail selection, then rejects shadow-only native proxies, back-facing and out-of-frustum records, and triangles that cannot cover a pixel sample before vertex processing. Fine geometry remains resident." },
   { stage: "surface-mesh-draw", label: "Exact planes + mesh draw", detail: "One pass: exact planar boundaries (incomplete or invalid meshes withhold geometry and trace instead), then cached quad rasterization, and the periodic diagnostic copy. A withheld primary only clears the surface buffer." },
 ] as const satisfies readonly { stage: RenderFrameStageId; label: string; detail: string }[];
 
@@ -690,6 +690,14 @@ export const SURFACE_MESH_TIMING_STAGES = [
 export function renderPipelineNodeForContext(
   node: RenderPipelineNode, context: RenderPipelineContext,
 ): RenderPipelineNode {
+  if (node.id === "scene-primitive" && context.surfaceMeshSelected) return {
+    ...node, label: "Imported asset surfaces", toggleable: false, stage: undefined,
+    collapseGroup: undefined,
+    tip: { summary: "Rasterizes imported assets from their native sampled fields, preserving their source resolution, normals and PBR materials. This runs after the cached mesh and contributes separately to Primary visibility.",
+      reads: "native distance fields · source normals · PBR material identities", writes: "surface buffers · depth", gate: "mesh primary with imported assets" },
+    state: current => current.disabledStages.has("primary-traversal") ? "off" : current.rasterPrimaryActive ? "on" : "unavailable",
+    chip: () => "native sampled fields · PBR",
+  };
   if (node.id !== "primary-traversal") return node;
   const meshStages = new Set<RenderFrameStageId>(SURFACE_MESH_TIMING_STAGES.map(({ stage }) => stage));
   const { primaryTraversal } = resolveSvoPipelineComposition({

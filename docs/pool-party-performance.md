@@ -142,3 +142,25 @@ The GPU coverage regression checks 37,548 triangles across 17×19, 64×64 and 10
 For paired checks, `FLUID_SVO_DRY_FRAME_MESH_SAMPLE_CULLING=0` keeps the reference draw and `=1` enables sample rejection. `FLUID_SVO_DRY_FRAME_MESH_CAMERA_CHECKS=1` saves orbit, close and return captures beside `FLUID_SVO_DRY_FRAME_CONFIGURED_RAW_OUT`. The isolated pass profiler also accepts compute labels; include `Voxel mesh culling` alongside `Voxel surface mesh rasterization` to account for the culling cost. Local evidence is in `artifacts/pool-coverage/`.
 
 `npm run check:types` passed. `npm run test:unit` passed with 920 passing tests and 47 skipped. Explicit GPU checks for sample coverage, stream parity and raster AO passed six tests with no skips.
+
+## Raster + AO attribution and shadow proxy culling
+
+The live panel's roughly 31 ms Primary visibility total with only 5 ms attributed to primary rasterization was a reporting defect. Imported native fields execute in a separate pass, timed as `scene-primitive-visibility`. The mesh configuration marked that stage's row unavailable, suppressing its displayed duration while the band still included it. The panel now labels this row **Imported asset surfaces** and reports its cost. A regression test reproduces the hidden 25.6 ms interval. The former analytic-tier toggle does not control this pass and is no longer offered on this row.
+
+Raster + AO also differs from the cone-lighting measurements above: its shadow cache retains native-asset proxy mesh triangles. Camera fragments discard these proxies because native fields provide their visible surfaces, but they previously still incurred camera culling and vertex work. The camera culler now rejects these records immediately. Shadow collection continues to use the complete arena, preserving its casters.
+
+Validated Metal runs on the same M1 Max at 1000×720, 6.25 mm visual cells, 50 mm fluid cells and full PBR measured:
+
+| Metric | Before | Final |
+| --- | ---: | ---: |
+| Camera draw records | 1,512,559 | 568,473 |
+| Isolated mesh draw median | 3.41 ms | 1.84 ms |
+| Isolated culling median | 5.57 ms | 5.11 ms |
+| Isolated native imported surfaces median | 11.93 ms | 16.25 ms |
+| Dry frame median | 25.21 ms | 27.64 ms |
+
+Each isolated pass uses four warmups and twelve samples. The final run had substantial variability: culling ranged from 4.06 to 9.57 ms, and the unchanged native pass from 10.94 to 19.40 ms. The mesh draw reduction is clear, but these short runs do **not** demonstrate an overall frame-rate improvement. Imported field rendering remains the largest measured pass and needs further optimization; fixing its reporting does not remove that cost. These dry captures exclude water and fluid simulation and use a different viewport/refinement configuration from the user's screenshot.
+
+The final capture is bit-identical to the baseline in linear color, display color and depth, with zero GPU validation errors. Visual resolution, source normals, PBR and shadows are unchanged. The retained 32,412,747 live mesh records and 2 GiB arena also remain unchanged; this improvement reduces camera work, not shadow storage. Local evidence: [baseline](../artifacts/pool-native/before.log), [final](../artifacts/pool-native/final.log), [comparison](../artifacts/pool-native/comparison.json), [frame](../artifacts/pool-native/final.png).
+
+The benchmark now accepts `FLUID_SVO_DRY_FRAME_CONE_TRACING=raster-ao`, selecting raster AO and disabling the incompatible voxel light cache. Use mesh primary, split shading and `FLUID_SVO_DRY_FRAME_CONE_FANOUT=0` to match production. Include `Voxel surface mesh rasterization,Voxel mesh culling,Imported native voxel field surfaces` in `FLUID_SVO_DRY_FRAME_PRIMARY_TIMING_LABELS` to expose all three costs. `npm run check:types` and `npm run test:unit` passed (921 passing, 48 skipped).

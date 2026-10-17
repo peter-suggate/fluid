@@ -49,7 +49,7 @@ import { censusSvoCellContours } from "../lib/harness/svo-cell-contour-census";
  *      FLUID_SVO_DRY_FRAME_SHADOWS / _AO, WEBGPU_NODE_MODULE,
  *      FLUID_SVO_DRY_FRAME_PRIMARY_SEAM_CLOSURE (0 | 1, default 0;
  *      enables the explicit full-rate visibility refinement queue),
- *      FLUID_SVO_DRY_FRAME_CONE_TRACING (cones | exact | off; default cones;
+ *      FLUID_SVO_DRY_FRAME_CONE_TRACING (cones | raster-ao | exact | off; default cones;
  *      matches the UI visibility switch and requires the profiler lane),
  *      FLUID_SVO_DRY_FRAME_TRAVERSAL (hybrid | canonical | canonical-parametric | compact | wide |
  *      raster-primary; default canonical-parametric; raster-primary implies both raster arms),
@@ -305,11 +305,12 @@ const coneFanout = process.env.FLUID_SVO_DRY_FRAME_CONE_FANOUT === "1";
 const maximumShadedLights = Number(process.env.FLUID_SVO_DRY_FRAME_MAX_LIGHTS ?? DEFAULT_SVO_RENDER_TUNING.maximumShadedLights);
 const readVoxelLightCounters = process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_COUNTERS === "1";
 const optimizationExperiments: SvoDryOptimizationExperiments = {
+  rasterAo: coneTracingModeRaw === "raster-ao",
   surfaceMesh: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH === "1",
   surfaceMeshCulling: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_CULLING !== "0",
   surfaceMeshSampleCulling: process.env.FLUID_SVO_DRY_FRAME_MESH_SAMPLE_CULLING !== "0",
   surfaceMeshMaxBytes: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES ? Number(process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES) : undefined,
-  voxelLightCache: process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_CACHE !== "0",
+  voxelLightCache: coneTracingModeRaw !== "raster-ao" && process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_CACHE !== "0",
   // Production builds the opaque single-directional deferred shader (webgpu-renderer.ts).
   specializedDeferredLighting: process.env.FLUID_SVO_DRY_FRAME_SPECIALIZED_LIGHTING === "1",
   edgeReceiverRecovery: process.env.FLUID_SVO_DRY_FRAME_EDGE_RECEIVER_RECOVERY !== "0",
@@ -411,8 +412,8 @@ assert.ok(["inline", "split"].includes(shadingPathRaw),
   "FLUID_SVO_DRY_FRAME_SHADING must be inline or split");
 assert.ok(Number.isFinite(screenSpaceTerminationPixels) && screenSpaceTerminationPixels >= 0,
   "FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS must be a non-negative finite number");
-assert.ok(["cones", "exact", "off"].includes(coneTracingModeRaw),
-  "FLUID_SVO_DRY_FRAME_CONE_TRACING must be cones, exact, or off");
+assert.ok(["cones", "raster-ao", "exact", "off"].includes(coneTracingModeRaw),
+  "FLUID_SVO_DRY_FRAME_CONE_TRACING must be cones, raster-ao, exact, or off");
 // Withholding the cone stages removes the reduced-rate plane the A/B, image
 // comparison, and attribution lanes below are defined against. The external
 // profiler lane times whatever graph is configured, so restrict the switch to it.

@@ -1357,6 +1357,9 @@ fn meshQuadVisible(index:u32)->bool{
   if(index>=atomicLoad(&meshState[${W.frontCursor}])){return false;}
   let quad=meshArena[index];
   if(meshQuadDead(quad)){return false;}
+  // The shadow cache needs native-asset proxy triangles in the arena, but the
+  // camera fragment always discards them. Keep them out of its draw list.
+  ${retainSampledShadowCasters ? `if((dryMaterial(sceneIdentityMaterial(quad.identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){return false;}` : ""}
   if(!meshQuadSelected(quad)){return false;}
   // A dual triangle's vertices may lie up to four cells from its origin, so
   // its bounds are its own vertices rather than the record's nominal extent.
