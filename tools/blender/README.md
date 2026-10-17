@@ -12,6 +12,9 @@ The editable source is `assets/pool-party/pool-party-assets.blend`. Each asset
 has its own origin-centred collection. The separate `pool-party-preview.blend`
 contains the Cycles presentation stage. Exported meshes, packed textures,
 volumes and the preview image live in `public/assets/pool-party/`.
+Bundled volume metadata lives in `lib/core/imported-assets/metadata/`; application
+modules import it from the source tree, never through the public asset directory.
+The baker writes this metadata alongside each corresponding FVX payload update.
 
 ## Rebuild
 

@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { decodeMeshVolume, meshVolumeToSolid, sampleMeshVolume } from "../../lib/core/imported-assets/mesh-volume";
 import { validateProceduralSolid } from "../../lib/core/procedural-solid";
+import { meshAssetHeader } from "../../lib/core/imported-assets/asset-library";
 
 const root = new URL("../../public/assets/pool-party/", import.meta.url);
 const manifest = JSON.parse(readFileSync(new URL("manifest.json", root), "utf8"));
@@ -31,6 +32,7 @@ for (const asset of manifest.assets) {
   assert.equal(glb.readUInt32LE(4), 2);
   assert.equal(glb.readUInt32LE(8), glb.length);
   const file = readFileSync(new URL(asset.volume, root)), volume = decodeMeshVolume(gunzipSync(file));
+  assert.deepEqual(meshAssetHeader(asset.id), volume.header, `${asset.id}: bundled metadata matches the payload`);
   const probe = probes[asset.id]!;
   assert.ok(sampleMeshVolume(volume, probe.inside).distance < 0, `${asset.id}: inside`);
   assert.ok(sampleMeshVolume(volume, probe.outside).distance > 0, `${asset.id}: outside/cavity`);

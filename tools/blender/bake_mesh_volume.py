@@ -28,6 +28,7 @@ parser.add_argument('--asset', default='all', choices=['all','teak-lounger','gar
 parser.add_argument('--cell', type=float)
 args = parser.parse_args(sys.argv[sys.argv.index('--')+1:] if '--' in sys.argv else [])
 OUT = ROOT/'public/assets/pool-party'
+METADATA = ROOT/'lib/core/imported-assets/metadata'
 B = 8
 RAY = Vector((1, .371390676, .529113257)).normalized()
 
@@ -269,7 +270,8 @@ def bake(name, h):
     raw=b'FVX1'+struct.pack('<I',len(encoded))+encoded+data
     with open(OUT/(name+'.fvx.gz'),'wb') as f:
         with gzip.GzipFile(filename='',mode='wb',fileobj=f,mtime=0) as gz: gz.write(raw)
-    (OUT/(name+'-volume.json')).write_text(json.dumps(header,indent=2)+'\n')
+    METADATA.mkdir(parents=True, exist_ok=True)
+    (METADATA/(name+'-volume.json')).write_text(json.dumps(header,indent=2)+'\n')
     print(f'{name}: {len(raw)/1e6:.1f} MB, {len(cache)} unique nodes, {negative} inside',flush=True)
 
 
