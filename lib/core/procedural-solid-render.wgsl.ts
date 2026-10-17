@@ -8,7 +8,12 @@ fn ${name}Sample(world:vec3f)->vec4f{
   let base=${typeof baseWords === "number" ? `${baseWords}u` : baseWords};
   if(base==0u){return vec4f(0,0,0,1e20);}
   let h=${cell};let q=(world-(${origin}))/h;let cell=vec3i(floor(q));
-  let brick=cell>>vec3u(3);let mask=${name}Word(base);
+  let brick=cell>>vec3u(3);
+  // Most mesh vertices lie far from a localized sampled boundary. Reject in
+  // the lookup's own integer coordinates before probing its sparse hash table.
+  let bounds=vec3u(${name}Word(base+1u),${name}Word(base+2u),${name}Word(base+3u));
+  if(all(bounds!=vec3u(0))&&(any(brick<vec3i(bounds&vec3u(65535)))||any(brick>=vec3i(bounds>>vec3u(16))))){return vec4f(0,0,0,1e20);}
+  let mask=${name}Word(base);
   var slot=((u32(brick.x)*73856093u)^(u32(brick.y)*19349663u)^(u32(brick.z)*83492791u))&mask;
   for(var probe=0u;probe<=mask;probe++){
     let at=base+4u+4u*slot;let relative=${name}Word(at+3u);

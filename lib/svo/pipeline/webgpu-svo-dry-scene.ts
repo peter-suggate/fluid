@@ -2211,7 +2211,7 @@ export class SparseVoxelDrySceneRenderer {
     // test only their covered pixels instead of scanning the entire catalogue.
     draw.setPipeline(pipelines.background); draw.draw(3);
     draw.setPipeline(pipelines.planar); draw.draw(4, this.source!.structural!.planarBoundaries.count);
-    draw.setPipeline(pipelines.draw); draw.drawIndirect(state, 0); draw.end();
+    draw.setPipeline(pipelines.draw); draw.drawIndirect(state, SVO_SURFACE_MESH_STATE.packedDraw * 4); draw.end();
     // Every presentation carries a receipt: a build the GPU started on its own
     // (a compaction, or a publication the host did not make) is noticed as
     // soon as the copy returns rather than at a periodic poll.
@@ -3931,7 +3931,7 @@ export class SparseVoxelDrySceneRenderer {
           depthWriteEnabled: true, depthCompare: "greater" };
         const draw = await this.device.createRenderPipelineAsync({ label: "Opaque voxel surface triangles", layout: drawLayout,
           vertex: { module, entryPoint: "surfaceMeshVertex" }, fragment: { module, entryPoint: "surfaceMeshFragment", targets: rasterPrimaryTargets },
-          primitive: { topology: "triangle-strip", cullMode: "none" }, depthStencil });
+          primitive: { topology: "triangle-list", cullMode: "none" }, depthStencil });
         const background = await this.device.createRenderPipelineAsync({ label: "Voxel mesh backdrop and pending geometry", layout: drawLayout,
           vertex: { module: vertexModule, entryPoint: "vertexMain" }, fragment: { module, entryPoint: "surfaceMeshBackground", targets: rasterPrimaryTargets },
           primitive: { topology: "triangle-list" }, depthStencil: { ...depthStencil, depthCompare: "always" } });

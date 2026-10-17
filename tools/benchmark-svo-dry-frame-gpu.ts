@@ -23,6 +23,9 @@ import { censusSvoCellContours } from "../lib/harness/svo-cell-contour-census";
  * Env: FLUID_SVO_DRY_FRAME_WIDTH / _HEIGHT / _WARMUPS / _CYCLES /
  *      FLUID_SVO_DRY_FRAME_PRIMARY_TIMING=1 isolates the real primary render
  *      pass after warmup (fixed scene/camera; excludes entry preparation).
+ *      _PRIMARY_TIMING_LABELS optionally selects comma-separated render-pass
+ *      labels; each is replayed alone with GPU timestamps and reported in JSON.
+ *      _MESH_CENSUS=1 counts the culled mesh records by material before timing.
  *      FLUID_SVO_DRY_FRAME_PRIMARY_COMPUTE_PROBE=1 additionally compares the
  *      same primary entry body as 32/64/128-thread compute workgroups and
  *      records full-population G-buffer differences. This is a prototype,
@@ -1192,8 +1195,25 @@ await device.queue.onSubmittedWorkDone();
 assert.deepEqual(validationErrors, [], "GPU validation errors during warmup");
 log(`Warmup complete (${Math.max(1, warmups)} frames per variant)`);
 
-const primaryPassTiming = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_TIMING === "1"
-  ? await benchmarkSvoPrimaryPass(device, encodeFrame, warmups, cycles, optimizationExperiments.surfaceMesh ? "Voxel surface mesh rasterization" : undefined) : undefined;
+if (process.env.FLUID_SVO_DRY_FRAME_MESH_CENSUS === "1") {
+  const { censusSvoMeshMaterials } = await import("./census-svo-mesh-materials");
+  const counts = await censusSvoMeshMaterials(device, renderer);
+  log(`Drawn mesh materials: ${JSON.stringify(counts.map(row => ({ ...row,
+    primitive: scenePrimitives.metadata.find(p => p.materialId === row.materialId),
+  })))}`);
+}
+
+const primaryPassTimings = [];
+if (process.env.FLUID_SVO_DRY_FRAME_PRIMARY_TIMING === "1") {
+  const labels = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_TIMING_LABELS?.split(",")
+    ?? [optimizationExperiments.surfaceMesh ? "Voxel surface mesh rasterization" : "Sparse voxel primary visibility"];
+  for (const label of labels) {
+    const timing = await benchmarkSvoPrimaryPass(device, encodeFrame, warmups, cycles, label.trim());
+    primaryPassTimings.push(timing);
+    log(`Isolated render pass: ${JSON.stringify(timing)}`);
+  }
+}
+const primaryPassTiming = primaryPassTimings[0];
 if (primaryPassTiming) log(`Isolated primary visibility: ${primaryPassTiming.median_ms.toFixed(3)} ms`);
 const primaryComputeTiming = primaryComputeProbe
   ? await primaryComputeProbe(encodeFrame, width, height, warmups, cycles, `${outPath}-compute`) : undefined;
@@ -1335,6 +1355,7 @@ if (profileSeconds > 0) {
     environmentRefinementDepth,
     detailCellSize_mm: solver.sparseVoxelSceneSource.structural!.domain.cellSize_m[0] * 1000,
     fluidCellSize_mm: scene.voxelDomain.finestCellSize_m * 1000,
+    surfaceMeshing: configuredRenderTuning.surfaceMeshing,
   }));
   const profileStarted = performance.now();
   let frame = 0;
@@ -1382,9 +1403,10 @@ if (profileSeconds > 0) {
     environmentRefinementDepth,
     detailCellSize_mm: solver.sparseVoxelSceneSource.structural!.domain.cellSize_m[0] * 1000,
     fluidCellSize_mm: scene.voxelDomain.finestCellSize_m * 1000,
+    surfaceMeshing: configuredRenderTuning.surfaceMeshing,
   };
   assert.deepEqual(validationErrors, [], "GPU validation errors during profiled frames");
-  console.log(JSON.stringify({ ...result, surfaceMesh: renderer.surfaceMeshStatus, validationErrors }));
+  console.log(JSON.stringify({ ...result, primaryPassTimings, surfaceMesh: renderer.surfaceMeshStatus, validationErrors }));
   if (configuredRawOutPath) {
     mkdirSync(path.dirname(configuredRawOutPath), { recursive: true });
     writeFileSync(configuredRawOutPath, await captureTextureBytes(target, 8, "Profile final frame capture"));

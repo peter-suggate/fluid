@@ -10,7 +10,7 @@ test("render boundary samples and fitted normals follow the solver field across 
   const h = [.02,.03,.04] as const, origin = [-.16,0,-.32] as const;
   const geometry = bakeProceduralSolid([16,16,16],h,([x,y,z]) => Math.max(Math.hypot(x-8,z-8)-5.25,y-12.25,2.25-y));
   const edited = new ProceduralSolidField(geometry.solidBoundary,[{operation:"clear",minimum:[12,6,8],maximumExclusive:[13,7,9]}]);
-  const points: [number,number,number][] = [[12.5,6.5,8.5],[-1,5,8],[8,15,8]];
+  const points: [number,number,number][] = [[12.5,6.5,8.5],[-1,5,8],[8,15,8],[1024,6,8],[8,-1024,8],[8,6,16]];
   for (const angle of [.1,.5,.9,1.5,2.1,2.8,3.2,4.5,5.7]) {
     points.push([8+5.25*Math.cos(angle),7.4,8+5.25*Math.sin(angle)]);
   }
@@ -52,6 +52,13 @@ ${svoDualMarchingCubesFitWGSL}
       const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();
       pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1);pass.end();device.queue.submit([encoder.finish()]);
       const result=await readMixedBuffer(device,output);
+      // The old reserved header remains readable. Bounding the lookup must
+      // preserve samples, finite differences and fitted normals exactly.
+      device.queue.writeBuffer(arena,(base+1)*4,new Uint32Array(3));
+      const legacyEncoder=device.createCommandEncoder(),legacyPass=legacyEncoder.beginComputePass();
+      legacyPass.setPipeline(pipeline);legacyPass.setBindGroup(0,group);legacyPass.dispatchWorkgroups(1);legacyPass.end();
+      device.queue.submit([legacyEncoder.finish()]);
+      assert.deepEqual(await readMixedBuffer(device,output),result,"bounded and legacy hash lookups are bit-identical");
       points.forEach((p,i)=>{
         const expected=edited.sample(p);
         if (!expected) {assert.ok(result[12*i+3]!>1e19,"absent and edited cells use the voxel fallback");return;}

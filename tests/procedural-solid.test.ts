@@ -8,6 +8,15 @@ import { initialLiquidCellVolumes } from "../lib/core/initial-liquid-lattice";
 const dimensions = [16, 16, 16] as const, h = 0.02;
 const plane = bakeProceduralSolid(dimensions, [h,h,h], ([x,y,z]) => y - 8 + x/16 + z/32);
 const close = (a:number,b:number,epsilon=1e-6) => assert.ok(Math.abs(a-b)<epsilon, `${a} != ${b}`);
+test("packed sampled boundaries bound every brick without increasing the image",()=>{
+  const source={version:1 as const,dimensions:[64,64,64] as const,cellSize_m:[1,1,1] as const,patchCount:0,patchesKey:"",
+    bricks:[{origin:[16,24,32] as const,values:new Array(729).fill(0)},{origin:[40,32,48] as const,values:new Array(729).fill(1)}]};
+  const field=new ProceduralSolidField(source,[]),packed=field.pack();
+  assert.deepEqual(Array.from(packed.slice(1,4)),[2|(6<<16),3|(5<<16),4|(7<<16)]);
+  assert.equal(packed.length,4+(packed[0]!+1)*4+field.bricks.size*(16+729));
+  const large=new ProceduralSolidField({...source,bricks:[{...source.bricks[0]!,origin:[65535*8,0,0]}]},[]).pack();
+  assert.deepEqual(Array.from(large.slice(1,4)),[0,0,0],"unrepresentable bounds keep the legacy hash lookup");
+});
 function scene() {
   const result = nbflipDomain("procedural-test", dimensions,h,60,0,dimensions,1/60);
   Object.assign(result,plane); return result;

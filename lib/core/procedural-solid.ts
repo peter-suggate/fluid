@@ -153,11 +153,18 @@ export class ProceduralSolidField {
     let slots = 1; while (slots < 2 * this.bricks.size) slots *= 2;
     const stride = 16 + NODES, image = new Uint32Array(4 + slots * 4 + this.bricks.size * stride), floats = new Float32Array(image.buffer);
     image[0] = slots - 1; let record = 4 + slots * 4;
+    const minimum=[Infinity,Infinity,Infinity],maximum=[-Infinity,-Infinity,-Infinity];
     for (const [key, b] of this.bricks) {
       const [x, y, z] = key.split(",").map(Number) as [number, number, number];
+      [x,y,z].forEach((v,a)=>{minimum[a]=Math.min(minimum[a]!,v);maximum[a]=Math.max(maximum[a]!,v+1);});
       let slot = hash(x, y, z) & (slots - 1);
       while (image[4 + slot * 4 + 3]) slot = (slot + 1) & (slots - 1);
       image.set([x, y, z, record], 4 + slot * 4); image.set(b.valid, record); floats.set(b.values, record + 16); record += stride;
+    }
+    // The three reserved header words hold exact brick-coordinate bounds.
+    // Zero remains the legacy/unbounded encoding for empty or very large fields.
+    if(this.bricks.size>0&&minimum.every(v=>v>=0)&&maximum.every(v=>v<=0xffff)) {
+      for(let a=0;a<3;a++) image[a+1]=minimum[a]!|(maximum[a]!<<16);
     }
     return image;
   }

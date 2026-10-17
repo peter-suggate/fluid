@@ -132,7 +132,7 @@ export const SVO_SURFACE_MESH_INITIAL_BYTES = 16 * 1024 * 1024;
 export const SVO_SURFACE_MESH_QUAD_BYTES = 32;
 export const SVO_SURFACE_MESH_HEADER_BYTES = 64;
 /** First 64 bytes retain the public draw/diagnostic ABI; tail is builder state. */
-export const SVO_SURFACE_MESH_STATE_BYTES = 320;
+export const SVO_SURFACE_MESH_STATE_BYTES = 336;
 /** Historical arena size used to preserve the edit-reserve contract. */
 export const SVO_SURFACE_MESH_MINIMUM_QUADS = SVO_SURFACE_MESH_BYTES / SVO_SURFACE_MESH_QUAD_BYTES;
 /**
@@ -291,7 +291,10 @@ export const SVO_SURFACE_MESH_STATE = Object.freeze({
   hostTerrainEdits: 76,
   /** Material at primitive zero; each lookup verifies the candidate identity. */
   hostPrimitiveMaterialBase: 77,
-  wordCount: 80,
+  /** Non-instanced triangle-list draw: vertices, one instance, first vertex, first instance.
+   * Keep the original instanced header for diagnostics and shadow-map readers. */
+  packedDraw: 80,
+  wordCount: 84,
 } as const);
 
 /**
@@ -428,6 +431,16 @@ export function interpretSurfaceMeshState(words: ArrayLike<number>, context: { a
   if (canGrow) receipt.grow = { overflowQuads: word(W.overflowLength) };
   return receipt;
 }
+
+/** Corner and record indices for the same triangle winding as the old strip. */
+export const surfaceMeshStreamVertexWGSL = /* wgsl */ `
+fn meshStreamVertex(streamVertex:u32,trianglesOnly:bool)->vec2u{
+  let verticesPerRecord=select(6u,3u,trianglesOnly);
+  let local=streamVertex%verticesPerRecord;
+  let stripCorners=array<u32,6>(0u,1u,2u,2u,1u,3u);
+  return vec2u(select(stripCorners[local],local,trianglesOnly),streamVertex/verticesPerRecord);
+}
+`;
 
 export function svoSurfaceMeshWGSL(group: number, flatNormalsFlag: number, culling = true, contours = false, retainSampledShadowCasters = false): string {
   const W = SVO_SURFACE_MESH_STATE;
@@ -924,6 +937,10 @@ fn meshClaimNeighbours(leaf:u32,direction:vec3i){
 fn surfaceMeshPrepare(){
   for(var level=0u;level<8u;level+=1u){atomicStore(&meshState[${W.lodBricks}u+level],0u);}
   atomicStore(&meshState[${W.drawVertexCount}],4u);
+  atomicStore(&meshState[${W.packedDraw}],0u);
+  atomicStore(&meshState[${W.packedDraw+1}],1u);
+  atomicStore(&meshState[${W.packedDraw+2}],0u);
+  atomicStore(&meshState[${W.packedDraw+3}],0u);
   atomicStore(&meshState[${W.cullQuads}],0u);
   atomicStore(&meshState[${W.ingestBegin}],0u);atomicStore(&meshState[${W.ingestEnd}],0u);
   // Smooth raster surfaces use the dual-grid attachment. Publication and
@@ -1173,6 +1190,7 @@ fn surfaceMeshPublish(){
   let usable=atomicLoad(&meshState[${W.usable}])!=0u&&atomicLoad(&meshState[${W.withheld}])==0u&&(atomicLoad(&meshState[${W.errorFlags}])&2u)==0u;
   let quads=select(0u,atomicLoad(&meshState[${W.frontCursor}]),usable);
   atomicStore(&meshState[${W.drawInstanceCount}],${culling ? "0u" : "quads"});
+  atomicStore(&meshState[${W.packedDraw}],${culling ? "0u" : "quads*select(6u,3u,meshDmcEnabled())"});
   atomicStore(&meshState[${W.cullQuads}],quads);
 }
 // Dirty boxes of the build's pending bricks, recomputed every presentation
@@ -1382,7 +1400,10 @@ fn surfaceMeshCull(@builtin(global_invocation_id) id:vec3u,@builtin(local_invoca
   workgroupBarrier();
   if(lane==0u){
     let count=atomicLoad(&meshCullCount);
-    meshCullBase=0u;if(count!=0u){meshCullBase=atomicAdd(&meshState[${W.drawInstanceCount}],count);}
+    meshCullBase=0u;if(count!=0u){
+      meshCullBase=atomicAdd(&meshState[${W.drawInstanceCount}],count);
+      atomicAdd(&meshState[${W.packedDraw}],count*select(6u,3u,meshDmcEnabled()));
+    }
   }
   workgroupBarrier();
   if(visible){meshVisibleOutput[meshCullBase+rank]=index;}
@@ -1402,7 +1423,12 @@ struct MeshVertexOut {
   @location(6) @interpolate(flat) geometricNormal:vec3f,
   @location(7) boundaryNormal:vec3f,
 }
-@vertex fn surfaceMeshVertex(@builtin(vertex_index) vertex:u32,@builtin(instance_index) instance:u32)->MeshVertexOut{
+${surfaceMeshStreamVertexWGSL}
+@vertex fn surfaceMeshVertex(@builtin(vertex_index) streamVertex:u32)->MeshVertexOut{
+  // Tiny per-record instances underfill Apple vertex SIMD groups. A single
+  // contiguous stream preserves record order and the original strip diagonal.
+  let indices=meshStreamVertex(streamVertex,meshDmcEnabled());
+  let vertex=indices.x;let instance=indices.y;
   let quad=meshDrawnQuad(${culling ? "meshVisible[instance]" : "instance"});
   let face=meshQuadFace(quad.face);let axis=face/2u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
   let corners=array<vec2u,4>(vec2u(1u,0u),vec2u(1u,1u),vec2u(0u,0u),vec2u(0u,1u));

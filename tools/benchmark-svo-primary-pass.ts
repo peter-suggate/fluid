@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 
 /** Replay the real visibility encoder with warmed, immutable scene resources.
- * Other frame commands are recorded but not submitted. This deliberately
- * measures primary visibility alone, excluding entry preparation and lighting.
+ * Submit its prefix separately so load-op attachments have their actual input,
+ * including when timing a pass that draws over the primary depth buffer.
+ * This measures the selected visibility pass alone, excluding preparation and lighting.
  * One render pass per command buffer avoids tiler timestamp-window overlap.
  */
 export async function benchmarkSvoPrimaryPass(
@@ -20,25 +21,29 @@ export async function benchmarkSvoPrimaryPass(
   try {
     for (let sample = -warmups; sample < cycles; sample++) {
       const primary = device.createCommandEncoder({ label: "Isolated production primary visibility" });
+      const preparation = device.createCommandEncoder({ label: "Untimed primary pass preparation" });
       const discarded = device.createCommandEncoder({ label: "Unsubmitted surrounding frame" });
       let matches = 0;
       const routed = new Proxy(discarded, {
         get(target, property) {
           if (property === "beginRenderPass") return (descriptor: GPURenderPassDescriptor) => {
-            if (descriptor.label !== passLabel) return target.beginRenderPass(descriptor);
+            if (descriptor.label !== passLabel) return (matches ? target : preparation).beginRenderPass(descriptor);
             matches++;
             return primary.beginRenderPass({ ...descriptor, timestampWrites: {
               querySet: queries, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1,
             } });
           };
-          const value = Reflect.get(target, property, target);
-          return typeof value === "function" ? value.bind(target) : value;
+          const destination = matches ? target : preparation;
+          const value = Reflect.get(destination, property, destination);
+          return typeof value === "function" ? value.bind(destination) : value;
         },
       });
       encodeFrame(routed);
       assert.equal(matches, 1, "expected exactly one production primary pass");
       // Finish for validation, but never submit the surrounding passes.
       discarded.finish();
+      device.queue.submit([preparation.finish()]);
+      await device.queue.onSubmittedWorkDone();
       if (sample >= 0) {
         primary.resolveQuerySet(queries, 0, 2, resolve, 0);
         primary.copyBufferToBuffer(resolve, 0, readback, sample * 16, 16);

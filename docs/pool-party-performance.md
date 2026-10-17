@@ -47,6 +47,8 @@ Reproduce from the repository root (Metal and Xcode Instruments required):
 
 ```sh
 FLUID_SVO_DRY_FRAME_SURFACE_MESH=1 \
+  FLUID_SVO_DRY_FRAME_MESHER=dual-marching-cubes \
+  FLUID_SVO_DRY_FRAME_SPECIALIZED_LIGHTING=1 \
   node --import tsx tools/profile-svo-render-xctrace.ts \
   --scene=backyard-pool-party --scene-module=tools/preview/pool-party-live.ts \
   --resolution=1000x720 --refinement=3 --traversal=raster-primary \
@@ -63,3 +65,40 @@ The worker-handoff regression test picks the actual diving board with no full as
 The settled before/after images have **99.989% identical pixels** after the production AgX display transform: 78 of 720,000 pixels changed, and only one differed by more than two channel levels out of 255. Neither capture reported GPU validation errors. Chrome loaded the live pool and successfully selected `DIVING/ASSEMBLY`; [selection screenshot](../artifacts/pool-performance-live/diving-board-selected.jpg). `npm run check:types` passed; `npm run test:unit` passed with 900 passing tests and 45 skipped.
 
 Full GPU-counter captures consumed excessive profiler memory and were discarded as performance evidence. Final measurements use Metal timing-only captures. The benchmark now reports actual visual cell size separately from fluid cell size, includes mesh memory and validation status, and can capture a final frame after the timing window for image comparison.
+
+## Primary rasterization follow-up
+
+An isolated replay of each production render pass, with GPU timestamps and warmed fixed-camera resources, confirms that the smooth mesh draw itself is expensive: **39.98 ms**, separately from **12.26 ms** for imported native fields. The earlier composite-bucket timing was not sufficient attribution on its own.
+
+Removing all 128 turf instances leaves **7,907,840** drawn mesh records versus **7,891,528** with turf. Grass is therefore not the source of the mesh explosion. The separate imported-surface pass drops to **7.54 ms** without turf; the mesh pass remains expensive (49.15 ms in that run, with desktop contention). Removing grass alone does not restore the old rasterization cost.
+
+A GPU census of the actual culled draw list attributes 3,939,763 records to foliage, 2,208,005 to SolidWorld pool/deck geometry, 935,754 to tree/shrub structure, 336,866 to the house wall and 297,672 to guests. No turf records occur in this draw; imported turf has its own surface pass.
+
+The renderer previously submitted one four-vertex instance per record. The new triangle-list stream submits all visible records in one instance, with three vertices for each DMC triangle and six corners for ordinary quads. It preserves record order, strip winding, quad diagonals, quantized vertex positions, shading normals and material identities. The original indirect header remains intact for shadow-map consumers and diagnostics; a separate four-word argument block serves the continuous primary stream. Culling and the unculled diagnostic path both populate it.
+
+The GPU regression test compares instanced strips against the continuous stream for triangles, quads, both windings and mixed quad/triangle records. It checks exact pixel coverage, interpolants and identities. The profiling helper also rebuilds untimed prerequisite passes for every sample, so a pass using depth `load` receives the real preceding depth buffer rather than its own previous output.
+
+Sampled boundary queries now reject brick coordinates outside exact occupied bounds before probing the sparse hash table. Three previously reserved header words store these bounds, without increasing the field allocation. Empty, legacy or unrepresentably large fields keep the original lookup. This avoids unnecessary normal-sampling lookups across geometry far from the localized diving-board boundary.
+
+With the corrected pass replay, the same M1 Max, 1000×720 camera, DMC mesher, 6.25 mm visual cells, 50 mm fluid cells and full PBR give:
+
+| Isolated mesh draw | Median | 95th percentile |
+| --- | ---: | ---: |
+| Before continuous stream | 39.65 ms | — |
+| Continuous stream | 16.19 ms | 16.32 ms |
+| Stream and bounded boundary lookup | 15.60 ms | 15.79 ms |
+
+The combined improvement is **60.7%**. Each isolated timing uses four warmups and twelve GPU timestamp samples. The additional 0.59 ms boundary-lookup difference is small relative to desktop variability; the continuous stream accounts for the clear majority of the gain. Final dry frame median is 111.13 ms over a short three-second window; this is still GPU-limited and excludes water and fluid simulation. It does not establish live simulation FPS or a return to the earlier two-millisecond mesh cost. The 7,891,528 drawn records, 15,823,181 live records and 1 GiB mesh arena remain unchanged.
+
+GPU validation was enabled for the final captures and reported no errors. The final image is **bit-identical in linear color and depth**, with zero changed pixels after the display transform. Evidence: [final timing](../artifacts/pool-primary/final.log), [frame](../artifacts/pool-primary/final.png), and [comparison](../artifacts/pool-primary/final-comparison.json). Explicit GPU tests verify stream coverage/interpolation and bounded versus legacy boundary samples/normals. `npm run check:types` passed; `npm run test:unit` passed with 918 passing and 46 skipped tests. Grass appearance is unchanged; its separate roughly five-millisecond cost remains a possible later target.
+
+For direct pass attribution, run `tools/benchmark-svo-dry-frame-gpu.ts` with the same scene/mesher settings and:
+
+```sh
+export FLUID_SVO_DRY_FRAME_PRIMARY_TIMING=1
+export FLUID_SVO_DRY_FRAME_PRIMARY_TIMING_LABELS='Voxel surface mesh rasterization,Imported native voxel field surfaces'
+export FLUID_SVO_DRY_FRAME_TIMING=gpu
+export FLUID_SVO_DRY_FRAME_PROFILE_SECONDS=3
+```
+
+The result JSON includes both isolated pass timings. Local diagnostic evidence is in `artifacts/pool-primary/`.
