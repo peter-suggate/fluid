@@ -1,3 +1,7 @@
+import { uniformSurfaceFarCellWGSL } from "./uniform-surface-far-cell.wgsl";
+import { UNIFORM_SURFACE_SUPPORT_WORDS, UNIFORM_SURFACE_VELOCITY_REACH_H, uniformSurfaceTransportWGSL } from "./uniform-surface-transport.wgsl";
+import { uniformSurfaceSmoothingWGSL } from "./uniform-surface-smoothing.wgsl";
+import type { UniformSurfaceWorkControl } from "./uniform-surface-work-control";
 import { NARROW_BAND_TRACE_LIMIT, narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
 import { UNIFORM_DETAIL_H_STORE, UNIFORM_DETAIL_MERGED_SLOTS, uniformDetailBindLayout, uniformDetailClass, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
@@ -54,10 +58,26 @@ export interface UniformMixedSurfaceFields {
  * continuation; they live near fine owners only. */
 export class UniformMixedSurface {
   readonly allocatedBytes:number;
+  /** Bounded compact owner cache. Higher fine owner indices use full work. */
+  readonly predictorFineCapacity:number;
+  readonly predictorCacheBytes:number;
   private readonly claimBytes:number;
   private readonly resources: GPUBindGroupLayout;
   /** Job counters and wall reach, cleared per frame. */
   readonly claims: GPUBuffer;
+  private readonly evidenceBytes:number;
+  private readonly modelWord:number;
+  private readonly velocityWord:number;
+  private readonly supportWord:number;
+  private readonly counterWord:number;
+  private readonly regionCounterWord:number;
+  private readonly revisionWord:number;
+  get regionCounters(){return {buffer:this.claims,offset:4*this.regionCounterWord,regions:this.workControl?.regions??0,wordsPerRegion:5,labels:["identity","affine","middle","fullLinear","fullCubic"] as const};}
+  readonly workCounterWords=22;
+  /** Trial diagnostics: admitted fast-fine attempts and direct/cubic-listed results. */
+  get localSolidAdmissionCountersOffset():number{return 4*(this.counterWord+20);}
+  /** Two u32 counters: predicted vertices, fully evaluated vertices. */
+  get workCountersOffset():number{return 4*this.counterWord;}
   /** wallReach, solidClosed and solidClear, then advect by launch: advect
    * (merged), advectFine (the general h list, a lane per vertex) and
    * advectOwners (regular h). */
@@ -93,7 +113,7 @@ export class UniformMixedSurface {
    * their value (umFarAir). encode() copies it, and the frame plan's speed
    * certificate, behind the claim words (the stage's storage bindings are at
    * the per-stage limit). */
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly farGate?:{readonly buffer:GPUBuffer;readonly word:number}) {
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly farGate?:{readonly buffer:GPUBuffer;readonly word:number},private readonly workControl?:UniformSurfaceWorkControl) {
     this.resources = uniformDetailBindLayout(device,{entries:[
       ...[0,2,3,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
@@ -110,7 +130,18 @@ export class UniformMixedSurface {
     if(address.vertexKeys>0x3fffffff)throw new Error(`Mixed surface deferred advect packs a vertex key in 30 bits: ${address.vertexKeys} vertex keys exceed 1073741823 (29,878 pages of 35,937)`);
     this.claimBytes=4*surfaceClaimWords(address);
     // Behind the claims: the far gate's words, then the certificate's (umDeepAir).
-    this.allocatedBytes=this.claimBytes+4*ownership.capacity.tiles*(farGate?2:1);
+    this.evidenceBytes=this.claimBytes+4*ownership.capacity.tiles*(farGate?2:1);
+    this.modelWord=this.evidenceBytes/4+(workControl?.regions??0);
+    this.velocityWord=this.modelWord+8*(workControl?.regions??0);
+    this.supportWord=this.velocityWord+6*(workControl?.regions??0);
+    this.counterWord=this.supportWord+64*UNIFORM_SURFACE_SUPPORT_WORDS*(workControl?.regions??0);
+    this.regionCounterWord=this.counterWord+this.workCounterWords;
+    this.revisionWord=this.regionCounterWord+5*(workControl?.regions??0);
+    this.predictorFineCapacity=0;
+    this.predictorCacheBytes=0;
+    this.allocatedBytes=this.evidenceBytes+(workControl?4*((21+64*UNIFORM_SURFACE_SUPPORT_WORDS)*workControl.regions+this.workCounterWords)+this.predictorCacheBytes:0);
+    const claimsLimit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
+    if(this.allocatedBytes>claimsLimit)throw new Error(`Uniform mixed surface claims and 16h support tables require ${this.allocatedBytes} bytes, exceeding the device buffer limit ${claimsLimit}; reduce scene capacity or resolution`);
     this.claims=device.createBuffer({label:"Uniform mixed surface job claims",size:this.allocatedBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     this.deferredGrid=Math.min(1024,Math.ceil(address.vertexKeys/64));
     this.cubicEntries=125*ownership.capacity.fineTiles;
@@ -126,13 +157,8 @@ export class UniformMixedSurface {
     return Math.ceil((this.solid?8*c.tiles:0)/256)*256+this.deferredBytes;
   }
   /** The deferred binding: count words, a word per lattice vertex (the
-   * deferred list), then advectCubic's region: advectFine's list (five words
-   * an entry) from its start, the deferred fast twin's (six words) from its
-   * end down (umCubicDeferredAt). */
+   * deferred list), then five words per cubic entry (advectCubic). */
   private get deferredBytes():number{return 16+4*this.address.vertexKeys+20*this.cubicEntries;}
-  /** The deferred fast twin's cubic list, finished by advectCubic compiled
-   * umCubicDeferred with the twin's overrides. */
-  private cubicDeferredPipeline?:GPUComputePipeline;
   bind(f: UniformMixedSurfaceFields): UniformDetailGroup {
     const a=this.address;
     for(const [i,t] of [f.phi,f.outputPhi,f.velocity,f.coarseVelocity].entries()){
@@ -216,6 +242,23 @@ fn umPointFrom(home:vec3f,p:vec3f)->vec3f{return umPointFromPage(umPointCell(hom
 // (an unstored block) ends the trace (umSlow), and the vertex is left for
 // the general launch, which traces it from the start.
 override umFastSurface:bool=false;
+// Publish exact input changes while the producer already owns the value.
+// Every incident 16h closure includes a shared boundary vertex. Consumers
+// can retain whole outputs by revision without scanning fine phi again.
+fn umStoreSurface(vertex:vec3u,width:u32,value:f32){
+ ${this.workControl?`if(bitcast<u32>(value)!=bitcast<u32>(umLatticeLoad(vec3i(vertex),width))){
+  let boundary=(vertex&vec3u(15u))==vec3u(0u);
+  for(var k=0u;k<8u;k++){
+   let bit=umCorner(k,2u);if(any((bit!=vec3u(0u))&!boundary)){continue;}
+   let tile=umTileKey((vec3i(vertex)-vec3i(bit))>>vec3u(2u));if(!umKeyStored(tile)){continue;}
+   let at=${this.revisionWord}u+umPageOfTile(tile);let epoch=atomicLoad(&umClaims[at]);
+   atomicMax(&umClaims[at],min(epoch,0xfffffffdu)+1u);
+  }
+ }`:""}
+ textureStore(outputPhi,vec3i(vertex),vec4f(value));
+}
+override umExactLocalSolidTransport:bool=true;
+var<private> umLocalSolidAdmission:bool=false;
 var<private> umSlow:bool=false;
 fn umFastVelocity(p:vec3f)->vec3f{
  let s=umSampleTile(p);
@@ -241,12 +284,24 @@ fn umFastVelocity(p:vec3f)->vec3f{
 // field at q (k1; the first sets the substeps), 1 one base substep ahead
 // (k2), 2 the third point, after which the step ends.
 override umSurfaceStationaryTrace:bool=true;
+// Fast candidates and full fallback read the same frozen velocity field.
+// Only a successful exact fast sample may seed the next trace's first stage.
+override umSurfaceTraceSeed:bool=true;
+var<private> umTraceSeedValid:bool=false;
+var<private> umTraceSeedPoint:vec3f;
+var<private> umTraceSeedVelocity:vec3f;
 fn umSurfaceTrace(p:vec3f)->vec3f{
  let h=params.hDt.xyz;
+ let useSeed=umSurfaceTraceSeed&&umFastSurface&&umTraceSeedValid&&all(umTraceSeedPoint==p);
+ let seededVelocity=umTraceSeedVelocity;umTraceSeedValid=false;
+ // Sampling initializes this private wall context even when RK terminates
+ // on its stationary first stage. Preserve that sampler side effect.
+ if(useSeed){umHold=umPointBounds(p,8.0);}
  var q=p;var x=p;var steps=1u;var i=0u;var base=0.0;var stage=0u;var k1=vec3f(0.0);var k2=vec3f(0.0);var two=false;
  for(var n=0u;n<${3*NARROW_BAND_TRACE_LIMIT+3}u;n++){
   var k=vec3f(0.0);
-  if(umFastSurface){k=umFastVelocity(x)/h;if(umSlow){return p;}}else{k=umSampleVelocity(x)/h;}
+  if(useSeed&&n==0u){k=seededVelocity/h;}
+  else if(umFastSurface){k=umFastVelocity(x)/h;if(umSlow){return p;}}else{k=umSampleVelocity(x)/h;}
   if(stage==0u){
    // Exactly stationary in the frozen field: every later RK stage is at q
    // and samples the same zero velocity. No tolerance or spatial mask.
@@ -390,7 +445,7 @@ fn umCubicPhi(q:vec3f,cell:UMVertexCell)->f32{
  // width. Fold that case
  // before the 64 taps: the fine-tile clearance certificate alone excludes
  // coarse owners and leaves their per-tap domain tests in the solid-free twin.
- ${this.solid?"let tapsClear=!umSolidEnabled()||((umRegularFine||cell.width==1u)&&umSolidClear(base));":""}
+ ${this.solid?`let tapsClear=!umSolidEnabled()||((umRegularFine||cell.width==1u)&&umSolidClear(base))${this.workControl&&this.solid?.coarse?"||(umExactSolidSupport&&umCanonicalSupportAt(vec3f(cell.origin),2.0*f32(cell.width)+4.0))":""};`:""}
  var value=0.0;var low=1e30;var high=-1e30;let page=base>>vec3u(5u);let home=umBlockOf(page);
  // A tap held at a SOLID face repeats the inner tap beside it, and the
  // cubic read that as a level set flat across the face: between the face
@@ -428,12 +483,8 @@ ${uniformMixedWallAheadWGSL}
 // A vertex on a wall (a face of a stored page with a SOLID page across it;
 // an AIR page across is none) whose liquid one width inside moves onto the
 // wall takes the phi carried to that inside point, where it is liquid.
-// umWallContinued is the continued phi, or 1e30 where there is none; it does
-// not depend on the value, so advectDeferred's fast twin evaluates it ahead
-// of the cubic. umWallContact applies it.
-fn umWallContact(value:f32,continued:f32)->f32{return select(value,min(value,continued),continued<0.0);}
-fn umWallContinued(p:vec3f,width:u32)->f32{
- if(params.hDt.w<=0.0){return 1e30;}var interior=p;var contact=false;
+fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
+ if(params.hDt.w<=0.0){return value;}var interior=p;var contact=false;
  for(var k=0u;k<6u;k++){
   if(umWallBlock(vec3i(p),k)==0u){continue;}
   let axis=k>>1u;let inward=select(1.0,-1.0,(k&1u)!=0u);
@@ -442,7 +493,8 @@ fn umWallContinued(p:vec3f,width:u32)->f32{
   if(inward*speed>=-1e-6){continue;}
   interior[axis]+=inward*f32(width);contact=true;
  }
- if(!contact${this.solid?"||!umOpenAt(interior)":""}){return 1e30;}return umSampleVertex(umTrace(interior));
+ if(!contact${this.solid?"||!umOpenAt(interior)":""}){return value;}let continued=umSampleVertex(umTrace(interior));
+ return select(value,min(value,continued),continued<0.0);
 }
 // The six wall reach words (UM_WALL_REACH, a face direction each) are final
 // once wallReach, an earlier dispatch, is done. Every advect entry stages
@@ -542,17 +594,22 @@ fn umLatticeLoad(q:vec3i,width:u32)->f32{if(width==4u){return umLoadCorner(vec3u
 // open liquid state, and where a tap is not a distance from the vertex. Its
 // near taps are the gradient's x and z taps (with no wall within two widths
 // none is held); taps 6..9 are the far ones (-2x +2x -2z +2z).
-struct UMFoot {foot:vec3f,shift:vec3f,smoothing:f32}
+${uniformSurfaceSmoothingWGSL}
+${uniformSurfaceTransportWGSL}
+${uniformSurfaceFarCellWGSL}
+struct UMFoot {foot:vec3f,shift:vec3f,smoothing:f32,center:f32}
+override umExactSolidSupport:bool=true;
 fn umVertexFoot(vertex:vec3u,width:u32)->UMFoot{
  let p=vec3f(vertex);let w=f32(width);let wi=i32(width);let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- var result=UMFoot(p,vec3f(0.0),0.0);
- let c=umLatticeLoad(vec3i(vertex),width);if(!(abs(c)<2.0*w*h)){return result;}
+ var result=UMFoot(p,vec3f(0.0),0.0,0.0);
+ let c=umLatticeLoad(vec3i(vertex),width);result.center=c;if(!(abs(c)<2.0*w*h)){return result;}
+ ${this.workControl&&this.solid?.coarse?"let solidFootClear=!umSolidEnabled()||(umExactSolidSupport&&umCanonicalSupportAt(p,2.0*w+7.0));":"let solidFootClear=false;"}
  let page=umPointCell(p)>>vec3u(5u);
  var at:array<vec3f,10>;
  for(var axis=0u;axis<3u;axis++){
   var delta=vec3f(0);delta[axis]=w;
   at[2u*axis]=umPointFromPage(page,p-delta);at[2u*axis+1u]=umPointFromPage(page,p+delta);
-  ${this.solid?/* wgsl */`if(width>1u){
+  ${this.solid?/* wgsl */`if(width>1u&&!solidFootClear){
    var quarter=vec3f(0);quarter[axis]=0.25*w;
    if(umSampleClosed(umPointFromPage(page,p-quarter))){at[2u*axis]=p;}
    if(umSampleClosed(umPointFromPage(page,p+quarter))){at[2u*axis+1u]=p;}
@@ -569,34 +626,20 @@ fn umVertexFoot(vertex:vec3u,width:u32)->UMFoot{
  if(g2>=1e-6*h*h){
   var offset=-c*g/g2;let reach=length(offset);if(reach>2.0*w){offset*=2.0*w/reach;}
   let foot=umPointFrom(p,p+offset);
-  if(${this.solid?"umOpenAt(foot)":"true"}){result.foot=foot;result.shift=p-foot;}
+  if(${this.solid?"solidFootClear||umOpenAt(foot)":"true"}){result.foot=foot;result.shift=p-foot;}
  }
  let eps=min(${UNIFORM_MIXED_VERTEX_SMOOTHING_PER_S.toExponential(8)}*params.hDt.w,0.03125);if(!(eps>0.0)){return result;}
  // Closed bits: 0 the vertex, 1+2*axis+k tap k of axis (x, z: near low,
  // near high, far low, far high). The nine tests share one call site.
  var closed=0u;
- ${this.solid?/* wgsl */`if(umSolidEnabled()){
+ ${this.solid?/* wgsl */`if(umSolidEnabled()&&!solidFootClear){
   for(var j=0u;j<9u;j++){
    var q=vec3i(vertex);if(j>0u){let k=(j-1u)&3u;q[select(0u,2u,j>4u)]+=select(wi,2*wi,(k&2u)!=0u)*select(-1,1,(k&1u)!=0u);}
    if(!umSmoothOpen(q,wi)){closed|=1u<<j;}
   }
   if((closed&1u)!=0u){return result;}
  }`:""}
- var sum=0.0;
- for(var axis=0u;axis<3u;axis+=2u){
-  if(umWallWithin(vec3i(vertex),axis,2*wi)){continue;}
-  var part=6.0*c;var valid=((closed>>(1u+2u*axis))&15u)==0u;
-  for(var k=0u;k<4u;k++){
-   let s=t[select(2u*axis+k,6u+axis+k-2u,k>1u)];let span=select(w,2.0*w,k>1u);
-   // A tap further from the vertex's value than its span allows is no
-   // distance: past the band, far air holds a marker. Its fourth difference
-   // drew the air beside the band onto the liquid every step.
-   if(abs(s-c)>1.5*span*params.hDt[axis]){valid=false;}
-   part+=select(-4.0,1.0,k>1u)*s;
-  }
-  if(valid){sum+=part;}
- }
- result.smoothing=-eps*sum;
+ result.smoothing=umSurfaceSmoothing(vec3i(vertex),wi,c,t,closed,params.hDt.xyz,eps);
  return result;
 }
 // The departure of a vertex from its foot: the foot's trace, displaced back
@@ -606,34 +649,272 @@ fn umVertexTrace(foot:UMFoot)->vec3f{
  let end=umSurfaceTrace(foot.foot);if(all(foot.shift==vec3f(0.0))){return end;}
  return umPointFrom(end,end+foot.shift);
 }
-// advectDeferred's list index of the vertex umAdvected evaluates, and
-// whether umAdvected listed it for advectCubic (umCubicListed).
-var<private> umDeferredIndex:u32;
-var<private> umListed:bool=false;
-override umCubicDeferred:bool=false;
+var<private> umFullCubic:bool=false;
+var<private> umFullIdentity:bool=false;
 fn umAdvected(p:vec3f,width:u32,foot:UMFoot)->f32{
- ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){return umLoadVertex(vec3u(p));}
+ ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){umFullIdentity=true;return umLoadVertex(vec3u(p));}
  let end=umVertexTrace(foot);let walk=umWalk(p,end);let q=walk.q;`:"let q=umVertexTrace(foot);"}let cell=umVertexCell(q);var value=cell.value;
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- let continued=umWallContinued(p,width);
- if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){
-  // The deferred fast twin (umCubicListed) has no cubic: it lists the vertex
-  // with its wall continuation for advectCubic's umCubicDeferred launch,
-  // which finishes it and retires its word. A slow vertex, one a solid
-  // walk hit or one past a full list is left to the general launch.
-  if(umCubicListed){
-   if(!umSlow${this.solid?"&&!walk.hit":""}){
-    let j=atomicAdd(&deferred.header[2],1u);
-    if(j<umCubicDeferredRoom()){let b=umCubicDeferredAt(j);deferred.data[b]=umDeferredIndex;deferred.data[b+1u]=bitcast<u32>(q.x);deferred.data[b+2u]=bitcast<u32>(q.y);deferred.data[b+3u]=bitcast<u32>(q.z);deferred.data[b+4u]=bitcast<u32>(foot.smoothing);deferred.data[b+5u]=bitcast<u32>(continued);umListed=true;}
-    else{umSlow=true;}
-   }
-   return 0.0;
-  }
-  value=umCubicPhi(q,cell);
- }
- ${this.solid?"value=umWallContact(value,continued);if(walk.hit){value=umEmbeddedAir(p,end,value);}value=umReleasedWalls(p,value);":"value=umReleasedWalls(p,umWallContact(value,continued));"}
+ if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){umFullCubic=true;value=umCubicPhi(q,cell);}
+ ${this.solid?"value=umWallContact(p,value,width);if(walk.hit){value=umEmbeddedAir(p,end,value);}value=umReleasedWalls(p,value);":"value=umReleasedWalls(p,umWallContact(p,value,width));"}
  return ${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
 }
+${this.workControl?/* wgsl */`
+fn umRecordRegion(vertex:vec3u,tier:u32){
+ if(params.flags.z==0u){return;}let slot=umVertexSlot(vec3i(vertex));let local=min(slot.xyz,vec3u(31u))>>vec3u(4u);
+ let region=8u*slot.w+local.x+2u*local.y+4u*local.z;
+ atomicAdd(&umClaims[${this.regionCounterWord}u+5u*region+tier],1u);
+}
+// The controller amortizes each of the64 rectangular support proofs once
+// per16h region. Axis codes select home,low+home,home+high,or all three.
+fn umSupportIndex(region:u32,p:vec3f,reach:f32)->u32{
+ let origin=vec3f(16u*umPageCoord(region));
+ let low=vec3i(floor((p-vec3f(reach)-origin)/16.0));let high=vec3i(floor((p+vec3f(reach)-origin)/16.0));
+ let code=vec3u(low<vec3i(0))+2u*vec3u(high>vec3i(0));return code.x+4u*code.y+16u*code.z;
+}
+fn umSupportMaskIndex(required:u32)->u32{
+ let x=u32((required&0x1249249u)!=0u)+2u*u32((required&0x4924924u)!=0u);
+ let y=u32((required&0x01c0e07u)!=0u)+2u*u32((required&0x70381c0u)!=0u);
+ let z=u32((required&0x00001ffu)!=0u)+2u*u32((required&0x7fc0000u)!=0u);
+ return x+4u*y+16u*z;
+}
+fn umRequiredRho(region:u32,g:vec3f,required:u32,broad:f32)->f32{
+ let at=${this.supportWord}u+${UNIFORM_SURFACE_SUPPORT_WORDS}u*(64u*region+umSupportMaskIndex(required));
+ if(atomicLoad(&umClaims[at+7u])==0u){return broad;}
+ return min(broad,bitcast<f32>(atomicLoad(&umClaims[at])));
+}
+struct UMRegionalVelocity {lo:vec3f,hi:vec3f,valid:bool}
+fn umVelocityCovered(region:u32,p:vec3f,reach:f32,coverage:u32)->bool{
+ let at=${this.supportWord}u+${UNIFORM_SURFACE_SUPPORT_WORDS}u*(64u*region+umSupportIndex(region,p,reach));return atomicLoad(&umClaims[at+7u])!=0u;
+}
+fn umHaloVelocity(region:u32)->UMRegionalVelocity{
+ let at=${this.velocityWord}u+6u*region;
+ return UMRegionalVelocity(bitcast<vec3f>(vec3u(atomicLoad(&umClaims[at]),atomicLoad(&umClaims[at+1u]),atomicLoad(&umClaims[at+2u]))),bitcast<vec3f>(vec3u(atomicLoad(&umClaims[at+3u]),atomicLoad(&umClaims[at+4u]),atomicLoad(&umClaims[at+5u]))),true);
+}
+fn umRequiredVelocity(region:u32,p:vec3f,reach:f32,coverage:u32)->UMRegionalVelocity{
+ let at=${this.supportWord}u+${UNIFORM_SURFACE_SUPPORT_WORDS}u*(64u*region+umSupportIndex(region,p,reach));
+ return UMRegionalVelocity(bitcast<vec3f>(vec3u(atomicLoad(&umClaims[at+1u]),atomicLoad(&umClaims[at+2u]),atomicLoad(&umClaims[at+3u]))),bitcast<vec3f>(vec3u(atomicLoad(&umClaims[at+4u]),atomicLoad(&umClaims[at+5u]),atomicLoad(&umClaims[at+6u]))),atomicLoad(&umClaims[at+7u])!=0u);
+}
+// Canonical openness is sufficient only for predicate-based surface rules.
+// Missing/out-of-window support stays on the original exact evaluator.
+fn umCanonicalSupportAt(p:vec3f,reach:f32)->bool{
+ let vertex=vec3i(p);let slot=umVertexSlot(vertex);let local=min(slot.xyz,vec3u(31u))>>vec3u(4u);
+ if(!umBlockStored(slot.w)){return false;}
+ let region=8u*slot.w+local.x+2u*local.y+4u*local.z;
+ let origin=vec3f(16u*umPageCoord(region));
+ let low=vec3i(floor((p-vec3f(reach)-origin)/16.0));
+ let high=vec3i(floor((p+vec3f(reach)-origin)/16.0));
+ if(any(low<vec3i(-1))||any(high>vec3i(1))){return false;}
+ return umSupportSolidClear(region,p,reach);
+}
+fn umSupportSolidClear(region:u32,p:vec3f,reach:f32)->bool{
+ let at=${this.supportWord}u+${UNIFORM_SURFACE_SUPPORT_WORDS}u*(64u*region+umSupportIndex(region,p,reach));
+ return (atomicLoad(&umClaims[at+7u])&2u)!=0u;
+}
+fn umRequiredLipschitz(region:u32,required:u32)->vec3f{
+ let at=${this.supportWord}u+${UNIFORM_SURFACE_SUPPORT_WORDS}u*(64u*region+umSupportMaskIndex(required));
+ if(atomicLoad(&umClaims[at+7u])==0u){return vec3f(3.402823e38);}
+ return bitcast<vec3f>(vec3u(atomicLoad(&umClaims[at+8u]),atomicLoad(&umClaims[at+9u]),atomicLoad(&umClaims[at+10u])));
+}
+fn umTransportRejected(reason:u32)->vec2f{
+ if(params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+3}u],1u);atomicAdd(&umClaims[${this.counterWord+5}u+reason],1u);}
+ return vec2f(0.0);
+}
+// Current-state Euler transport on a regional affine model. Full RK's
+// foot shift cancels: departure stays within .5 cell of this vertex, while
+// its velocity samples stay within 2 widths+.5. The model's 27-region halo
+// includes those samples and the cubic stencil for h/4h owners.
+fn umCheapAdvected(vertex:vec3u,width:u32)->vec2f{
+ if(width!=1u&&width!=4u){return umTransportRejected(1u);}
+ ${this.solid&&!this.solid.coarse?"if(umSolidFree&&umSolidPresent()){return umTransportRejected(2u);}":""}
+ let p=vec3f(vertex);let slot=umVertexSlot(vec3i(vertex));let local=min(slot.xyz,vec3u(31u))>>vec3u(4u);
+ let region=8u*slot.w+local.x+2u*local.y+4u*local.z;let model=${this.modelWord}u+8u*region;
+ let coverage=atomicLoad(&umClaims[model+5u]);if(coverage==0u){return umTransportRejected(0u);}
+ let c=umLatticeLoad(vec3i(vertex),width);let h=params.hDt.xyz;let dt=params.hDt.w;
+ let far=abs(c)>=2.0*f32(width)*min(h.x,min(h.y,h.z));
+ ${this.solid?.coarse?/* wgsl */`let clearReach=max(2.0*f32(width)+0.5,select(2.0*f32(width)+${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},far));
+ let supportSolidClear=!umSolidPresent()||umSupportSolidClear(region,p,clearReach);
+ if(umSolidFree&&umSolidPresent()&&!supportSolidClear){return umTransportRejected(2u);}`:"let supportSolidClear=false;"}
+ let origin=vec3f(16u*umPageCoord(region));let reach=vec3f(2.0*f32(width)+0.5);
+ let low=vec3i(floor((p-reach-origin)/16.0));let high=vec3i(floor((p+reach-origin)/16.0));
+ if(any(low<vec3i(-1))||any(high>vec3i(1))){return umTransportRejected(1u);}
+ var required=0u;
+ for(var z=low.z;z<=high.z;z++){for(var y=low.y;y<=high.y;y++){for(var x=low.x;x<=high.x;x++){
+  required|=1u<<u32((x+1)+3*(y+1)+9*(z+1));
+ }}}
+ if((coverage&required)!=required){return umTransportRejected(0u);}
+
+ var velocities=UMRegionalVelocity(vec3f(0),vec3f(0),false);
+ ${this.solid?.coarse?/* wgsl */`let tryLocalSolid=umExactLocalSolidTransport&&umSolidFree&&umFastSurface&&umSolidPresent()&&(width==1u||width==4u);
+ if(tryLocalSolid){
+  velocities=umRequiredVelocity(region,p,select(2.0*f32(width)+${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},far),coverage);
+  // Stored canonical-open support includes the near-foot stencil even
+  // for a far marker. At4h, radius15 also encloses native cubic taps and
+  // every incident coarse owner; the bound does not assume fine corners. Slot/window checks precede summary use.
+  if(velocities.valid&&umCanonicalSupportAt(p,2.0*f32(width)+7.0)&&dt>=0.0&&dt<3.402823e38&&all(h>vec3f(0))&&all(h<vec3f(3.402823e38))){
+   let travel=dt*max(abs(velocities.lo),abs(velocities.hi))/h;
+   // Extra outward arithmetic allowance: stage coordinate and multiply/
+   // divide rounding; generous enough to keep the actual RK span below1h.
+   let allowance=64.0*1.1920929e-7*(vec3f(1)+abs(p)+travel);
+   umLocalSolidAdmission=all(travel>=vec3f(0))&&all(travel+allowance<=vec3f(0.5));
+  }
+ }`:'let tryLocalSolid=false;'}
+ let g=bitcast<vec3f>(vec3u(atomicLoad(&umClaims[model]),atomicLoad(&umClaims[model+1u]),atomicLoad(&umClaims[model+2u])));
+ var rho=bitcast<f32>(atomicLoad(&umClaims[model+4u]));
+ let eps=select(min(${UNIFORM_MIXED_VERTEX_SMOOTHING_PER_S.toExponential(8)}*dt,0.03125),0.0,far);
+ if(!(rho>=0.0)){return umTransportRejected(0u);}
+ if((2.953125+32.0*eps)*rho>0.02*min(h.x,min(h.y,h.z))){
+  let localRho=bitcast<f32>(atomicLoad(&umClaims[model+6u]));
+  if(32.0*eps*localRho>0.02*min(h.x,min(h.y,h.z))){return umTransportRejected(0u);}
+  rho=umRequiredRho(region,g,required,rho);
+ }
+ if(!(32.0*eps*rho<=0.02*min(h.x,min(h.y,h.z)))){return umTransportRejected(0u);}
+ if(!tryLocalSolid){velocities=umRequiredVelocity(region,p,select(2.0*f32(width)+${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},far),coverage);}
+ if(!velocities.valid){return umTransportRejected(0u);}let lo=velocities.lo;let hi=velocities.hi;
+ if(any(dt*max(abs(lo),abs(hi))/h>vec3f(0.5))){return umTransportRejected(1u);}
+
+ if(umWallPlane(vec3i(vertex))<6u){return umTransportRejected(2u);}
+ // The validated phi support rectangle consists only of stored pages.
+ // Every crossed face/diagonal umBlockHeld probe is therefore stored too:
+ // page projection is identity.
+ // Embedded solids remain covered by the separate clearance evidence.
+ if(!supportSolidClear){for(var k=0u;k<8u;k++){
+  let sign=2.0*vec3f(umCorner(k,2u))-vec3f(1.0);
+  ${this.solid?/* wgsl */`// At w=4, p is 4-aligned: tile-clear cubes at p±5 span
+  // [-12,-1] and [0,11] per axis, covering the full ±8.5 support.
+  // At w=1, p±2 cubes overlap and cover at least ±6, beyond ±2.5.
+  let clearPoint=vec3i(vertex)+vec3i(sign)*i32(width+1u);
+  if(!umSolidClear(clearPoint)){return umTransportRejected(2u);}`:""}
+ }}
+ let result=umSurfaceTransport(c,g,rho,lo,hi,h,dt,eps,p,f32(width));
+ if(result.w==0.0){return umTransportRejected(0u);}
+ if(umReleasedMayChange(p,result.x-result.y)){return umTransportRejected(2u);}
+ var value=result.x;
+ ${this.sourceParams?"value=umSourceuvSourcePhi(p,value);":""}
+ if(params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+2}u],1u);umRecordRegion(vertex,1u);atomicMax(&umClaims[${this.counterWord+4}u],bitcast<u32>(result.y));}
+ return vec2f(value,1.0);
+}
+// Far-band identity foot has no smoothing. A signed current velocity
+// enclosure can prove every rounded RK endpoint equals p, without sampling
+// velocity or loading the regional phi fit. Keep the full velocity halo
+// certificate: nested fine/coarse MAC taps reach <5 base cells; RK third
+// stages reach1.5 under the .5-cell step cap. Radius7 includes rounding and
+// negative-owner assignment of faces exactly on a regional boundary.
+fn umEarlyFarAdvected(vertex:vec3u,width:u32)->vec2f{
+ if(width!=1u&&width!=4u){return vec2f(0.0);}
+ // Positive fine vertices exclude every coarse incident tile upstream.
+ // Low-wall rounds require a missing page and cannot pass stored support;
+ // merged/owner/wall lists choose their authority upstream.
+ let h=params.hDt.xyz;let dt=params.hDt.w;let c=umLatticeLoad(vec3i(vertex),width);
+ if(!(abs(c)>=2.0*f32(width)*min(h.x,min(h.y,h.z)))||umWallPlane(vec3i(vertex))<6u){return vec2f(0.0);}
+ let p=vec3f(vertex);let slot=umVertexSlot(vec3i(vertex));let local=min(slot.xyz,vec3u(31u))>>vec3u(4u);
+ let region=8u*slot.w+local.x+2u*local.y+4u*local.z;
+ let coverage=atomicLoad(&umClaims[${this.modelWord}u+8u*region+5u]);
+ if(!umVelocityCovered(region,p,${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},coverage)){return vec2f(0.0);}
+ var velocities=umHaloVelocity(region);
+ var interval=umTraceEndpointInterval(p,vec3f(0.0),velocities.lo,velocities.hi,vec3f(0.0),h,dt);
+ if(!all(interval.lo==p)||!all(interval.hi==p)){
+  velocities=umRequiredVelocity(region,p,${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},coverage);
+  interval=umTraceEndpointInterval(p,vec3f(0.0),velocities.lo,velocities.hi,vec3f(0.0),h,dt);
+ }
+ if(!velocities.valid||!all(velocities.lo<=velocities.hi)||!all(dt*max(abs(velocities.lo),abs(velocities.hi))/h<=vec3f(0.5))||!(dt>=0.0)){return vec2f(0.0);}
+ if(!all(interval.lo==p)||!all(interval.hi==p)){return vec2f(0.0);}
+ var value=c;
+ ${this.solid?/* wgsl */`if(umSolidFree&&umSolidPresent()){
+  // Both the buried shortcut and the open-cell path return c when no
+  // continuation/source can change it. This certificate needs no solid
+  // sampler, so owner launches may retire the work before enqueueing it.
+  if(umReleasedMayChange(p,c)){return vec2f(0.0);}
+  ${this.sourceParams?"if(umSourceuvSourcePhi(p,c)!=c){return vec2f(0.0);}":""}
+ }else{
+  let buried=!umSolidClear(vec3i(vertex))&&umBuried(p);if(!buried){value=umReleasedWalls(p,value);
+  ${this.sourceParams?"value=umSourceuvSourcePhi(p,value);":""}
+  }
+ }`:/* wgsl */`value=umReleasedWalls(p,value);
+ ${this.sourceParams?"value=umSourceuvSourcePhi(p,value);":""}` }
+ if(params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord}u],1u);atomicAdd(&umClaims[${this.counterWord+8}u],1u);atomicAdd(&umClaims[${this.counterWord+11}u],1u);umRecordRegion(vertex,2u);}
+ return vec2f(value,1.0);
+}
+fn umEulerRejected(reason:u32)->vec2f{if(params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+9}u],1u);atomicAdd(&umClaims[${this.counterWord+12}u+reason],1u);}return vec2f(0.0);}
+fn umEulerAdvected(vertex:vec3u,width:u32,foot:UMFoot)->vec2f{
+ if(width!=1u&&width!=4u){return umEulerRejected(0u);}
+ ${this.solid?"if(umSolidFree&&umSolidPresent()&&!umLocalSolidAdmission){return umEulerRejected(0u);}":""}
+ let p=vec3f(vertex);let slot=umVertexSlot(vec3i(vertex));let local=min(slot.xyz,vec3u(31u))>>vec3u(4u);
+ let region=8u*slot.w+local.x+2u*local.y+4u*local.z;let model=${this.modelWord}u+8u*region;
+ let coverage=atomicLoad(&umClaims[model+5u]);if(coverage==0u){return umEulerRejected(1u);}
+ let far=abs(foot.center)>=2.0*f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+ let origin=vec3f(16u*umPageCoord(region));let reach=vec3f(select(2.0*f32(width)+0.5,f32(width),far));
+ let low=vec3i(floor((p-reach-origin)/16.0));let high=vec3i(floor((p+reach-origin)/16.0));
+ if(any(low<vec3i(-1))||any(high>vec3i(1))){return umEulerRejected(1u);}
+ var required=0u;for(var z=low.z;z<=high.z;z++){for(var y=low.y;y<=high.y;y++){for(var x=low.x;x<=high.x;x++){required|=1u<<u32((x+1)+3*(y+1)+9*(z+1));}}}
+ if((coverage&required)!=required||umWallPlane(vec3i(vertex))<6u){return umEulerRejected(1u);}
+ var g=vec3f(0.0);var rho=0.0;var velocities=umHaloVelocity(region);var lo=velocities.lo;var hi=velocities.hi;var tightVelocity=false;
+ if(!umVelocityCovered(region,p,select(2.0*f32(width)+${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},far),coverage)){return umEulerRejected(1u);}
+ let h=params.hDt.xyz;let dt=params.hDt.w;
+ if(any(dt*max(abs(lo),abs(hi))/h>vec3f(0.5))){
+  velocities=umRequiredVelocity(region,p,select(2.0*f32(width)+${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},far),coverage);lo=velocities.lo;hi=velocities.hi;tightVelocity=true;
+  if(!velocities.valid){return umEulerRejected(1u);}if(any(dt*max(abs(lo),abs(hi))/h>vec3f(0.5))){return umEulerRejected(4u);}
+ }
+ // Valid stored velocity support contains the phi box, including all
+ // face/diagonal pages umPointFrom could test. Its projection is identity.
+ umSlow=false;let u=umFastVelocity(foot.foot);if(umSlow){return umEulerRejected(3u);}
+ if(umSurfaceTraceSeed&&umFastSurface){umTraceSeedPoint=foot.foot;umTraceSeedVelocity=u;umTraceSeedValid=true;}
+ if(any(lo>u)||any(u>hi)){return umEulerRejected(4u);}
+ var interval=umTraceEndpointInterval(foot.foot,foot.shift,lo,hi,u,h,dt);
+ var localCell:UMVertexCell;var useLocalCell=false;
+ var bound=vec4f(0.0);
+ if(far){
+  let L=umRequiredLipschitz(region,required);
+  bound=umSurfaceNativeFarBound(foot.center,L,h,dt,p,f32(width),interval);
+  if(bound.w==0.0&&!tightVelocity){
+   velocities=umRequiredVelocity(region,p,${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},coverage);lo=velocities.lo;hi=velocities.hi;tightVelocity=true;
+   if(!velocities.valid||any(lo>u)||any(u>hi)){return umEulerRejected(4u);}
+   interval=umTraceEndpointInterval(foot.foot,foot.shift,lo,hi,u,h,dt);
+   bound=umSurfaceNativeFarBound(foot.center,L,h,dt,p,f32(width),interval);
+  }
+ }
+ if(bound.w==0.0){
+  g=bitcast<vec3f>(vec3u(atomicLoad(&umClaims[model]),atomicLoad(&umClaims[model+1u]),atomicLoad(&umClaims[model+2u])));
+  rho=bitcast<f32>(atomicLoad(&umClaims[model+4u]));
+  bound=umSurfaceEndpointBound(foot.center,g,rho,h,dt,p,f32(width),foot.smoothing,interval,far);
+ }
+ if(bound.w==0.0){
+  rho=umRequiredRho(region,g,required,rho);
+  bound=umSurfaceEndpointBound(foot.center,g,rho,h,dt,p,f32(width),foot.smoothing,interval,far);
+  if(bound.w==0.0&&!tightVelocity){
+   velocities=umRequiredVelocity(region,p,select(2.0*f32(width)+${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},far),coverage);lo=velocities.lo;hi=velocities.hi;
+   if(!velocities.valid){return umEulerRejected(1u);}if(any(lo>u)||any(u>hi)){return umEulerRejected(4u);}
+   interval=umTraceEndpointInterval(foot.foot,foot.shift,lo,hi,u,h,dt);
+   bound=umSurfaceEndpointBound(foot.center,g,rho,h,dt,p,f32(width),foot.smoothing,interval,far);
+  }
+  if(bound.w==0.0&&far){
+   // A local eight-corner certificate is independent of regional phi
+   // outliers. Tighten velocity first, then reuse this exact Euler cell.
+   localCell=umVertexCell(interval.euler);
+   let local=umSurfaceFarCellBound(foot.center,width,h,localCell.origin,localCell.width,localCell.corners,interval);
+   if(local.y>0.0){useLocalCell=true;bound=vec4f(local.x,0.0,1.0,1.0);}
+  }
+  if(bound.w==0.0){return umEulerRejected(6u);}
+ }
+ let endpointIdentity=all(interval.lo==p)&&all(interval.hi==p)&&all(interval.euler==p);
+ ${this.solid?/* wgsl */`if(endpointIdentity){if(!umSolidClear(vec3i(vertex))&&umBuried(p)){return umEulerRejected(2u);}}
+ else if(!umSolidClear(vec3i(vertex))){
+  let lower=umPointCell(min(p,interval.lo));let upper=umPointCell(max(p,interval.hi));
+  for(var z=lower.z;z<=upper.z;z++){for(var y=lower.y;y<=upper.y;y++){for(var x=lower.x;x<=upper.x;x++){
+   if(!umCellIsOpen(vec3i(x,y,z))){return umEulerRejected(2u);}
+  }}}
+ }`:""}
+ let end=umPointFrom(p,interval.euler);
+ ${this.solid?"let walk=umWalk(p,end);if(walk.hit&&!endpointIdentity){return umEulerRejected(7u);}let q=walk.q;":"let q=end;"}
+ var value=foot.center;if(!endpointIdentity){if(useLocalCell){value=localCell.value;}else{value=umVertexCell(q).value;}}
+ if(!endpointIdentity&&umReleasedMayChange(p,value-bound.x)){return umEulerRejected(7u);}
+ ${this.solid?"value=umWallContact(p,value,width);":"value=umWallContact(p,value,width);"}
+ value=umReleasedWalls(p,value);
+ ${this.sourceParams?"value=umSourceuvSourcePhi(p,value);":""}
+ if(params.flags.z!=0u){if(useLocalCell){atomicAdd(&umClaims[${this.counterWord+1}u],1u);}if(far){atomicAdd(&umClaims[${this.counterWord+11}u],1u);}atomicAdd(&umClaims[${this.counterWord+8}u],1u);umRecordRegion(vertex,2u);atomicMax(&umClaims[${this.counterWord+10}u],bitcast<u32>(bound.x));}
+ return vec2f(value+foot.smoothing,1.0);
+}
+`:"fn umEarlyFarAdvected(vertex:vec3u,width:u32)->vec2f{return vec2f(0.0);} fn umRecordRegion(vertex:vec3u,tier:u32){} fn umCheapAdvected(vertex:vec3u,width:u32)->vec2f{return vec2f(0.0); } fn umEulerAdvected(vertex:vec3u,width:u32,foot:UMFoot)->vec2f{return vec2f(0.0);}"}
 // Whether umReleasedWalls can change value at p: a direction's reach clears
 // its own skip test at the wall umWallAhead finds. Accepted continuations
 // only raise result, so testing the entry value probes a superset of its
@@ -690,7 +971,7 @@ fn umDeepAir(vertex:vec3u,width:u32)->f32{
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  let value=umLoadVertex(vertex);if(!(value>=(6.0+3.0*f32(width))*h)){return -1.0;}
  let tile=umTileAt(vec3u(umPointCell(vec3f(vertex)))/4u);
- let word=atomicLoad(&umClaims[${this.allocatedBytes/4-this.ownership.capacity.tiles}u+tile])&0x3fffffffu;
+ let word=atomicLoad(&umClaims[${this.evidenceBytes/4-this.ownership.capacity.tiles}u+tile])&0x3fffffffu;
  let reach=max(vec3u(word&31u,(word>>5u)&31u,(word>>10u)&31u),vec3u((word>>15u)&31u,(word>>20u)&31u,(word>>25u)&31u));
  if(any(reach>vec3u(2u))||umReleasedMayChange(vec3f(vertex),value)){return -1.0;}
  return ${this.sourceParams?"umSourceuvSourcePhi(vec3f(vertex),value)":"value"};
@@ -699,29 +980,30 @@ override umDeferTraced:bool=false;
 override umCubicListed:bool=false;
 // The cubic list's first word in deferred.data: past a word per lattice vertex.
 const UM_CUBIC_BASE=${this.address.vertexKeys}u;
-// advectFine's list bound (entries of five words). The deferred fast twin's
-// list shares the region from its end down, six words an entry, as far as
-// advectFine's (complete by then) leaves room: umCubicDeferredRoom entries.
-const UM_CUBIC_WORDS=${5*this.cubicEntries}u;
-fn umCubicDeferredRoom()->u32{return (UM_CUBIC_WORDS-5u*min(atomicLoad(&deferred.header[1]),UM_CUBIC_WORDS/5u))/6u;}
-fn umCubicDeferredAt(j:u32)->u32{return UM_CUBIC_BASE+UM_CUBIC_WORDS-6u*(j+1u);}
 fn umAdvectStore(vertex:vec3u,width:u32){
+ umLocalSolidAdmission=false;umTraceSeedValid=false;
+ umFullCubic=false;umFullIdentity=false;
  if(params.hDt.w>0.0&&umWallPlane(vec3i(vertex))<6u){return;}
- {let far=umFarAir(vertex);if(far>=0.0){textureStore(outputPhi,vec3i(vertex),vec4f(far));return;}}
- {let deep=umDeepAir(vertex,width);if(deep>=0.0){textureStore(outputPhi,vec3i(vertex),vec4f(deep));return;}}
+ {let far=umFarAir(vertex);if(far>=0.0){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,far);return;}}
+ {let deep=umDeepAir(vertex,width);if(deep>=0.0){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,deep);return;}}
+ {let early=umEarlyFarAdvected(vertex,width);if(early.y>0.0){umStoreSurface(vertex,width,early.x);return;}}
+ {let cheap=umCheapAdvected(vertex,width);if(cheap.y>0.0){umStoreSurface(vertex,width,cheap.x);return;}}
  // A launch compiled with umDeferTraced lists every vertex it would trace:
  // advectDeferred's grid stride evaluates them densely, where this launch's
  // lanes (most of them far or deep air) would idle behind the few traces.
- // A launch compiled solid-free (umSolidFree: advectFine) lists them all
- // while a solid is present.
- let p=vec3f(vertex);var defer=umDeferTraced${this.solid?"||(umSolidFree&&umSolidPresent())":""};var value=0.0;
+ // A solid-free fine launch keeps only locally certified current-open
+ // full transport; every other globally solid-present vertex is listed.
+ let p=vec3f(vertex);var defer=umDeferTraced${this.solid?"||(umSolidFree&&umSolidPresent()&&!umLocalSolidAdmission)":""};var value=0.0;
+ ${this.workControl?`if(umLocalSolidAdmission&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+20}u],1u);}`:""}
  ${this.solid?/* wgsl */`// Off a clear tile a vertex can be buried: it keeps its value, umAdvected's
  // first exit.
- if(!umSolidClear(vec3i(p))&&umBuried(p)){textureStore(outputPhi,vec3i(vertex),vec4f(umLoadVertex(vertex)));return;}
+ if(!umSolidClear(vec3i(p))&&umBuried(p)){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLoadVertex(vertex));return;}
  // A hit is evaluated by advectDeferred. Its first-pass phi and source
  // samples are discarded.
  var smoothing=0.0;
- {if(!defer){umSlow=false;let foot=umVertexFoot(vertex,width);smoothing=foot.smoothing;let walk=umWalk(p,umVertexTrace(foot));defer=walk.hit||umSlow;let q=walk.q;if(!defer){`:"var smoothing=0.0;{if(!defer){umSlow=false;let foot=umVertexFoot(vertex,width);smoothing=foot.smoothing;let q=umVertexTrace(foot);defer=umSlow;if(!defer){"}
+ {if(!defer){umSlow=false;let foot=umVertexFoot(vertex,width);
+ let euler=umEulerAdvected(vertex,width,foot);if(euler.y>0.0){${this.workControl?`if(umLocalSolidAdmission&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+21}u],1u);}`:""}umStoreSurface(vertex,width,euler.x);return;}smoothing=foot.smoothing;let walk=umWalk(p,umVertexTrace(foot));defer=walk.hit||umSlow;let q=walk.q;if(!defer){`:`var smoothing=0.0;{if(!defer){umSlow=false;let foot=umVertexFoot(vertex,width);
+ let euler=umEulerAdvected(vertex,width,foot);if(euler.y>0.0){umStoreSurface(vertex,width,euler.x);return;}smoothing=foot.smoothing;let q=umVertexTrace(foot);defer=umSlow;if(!defer){`}
   let cell=umVertexCell(q);value=cell.value;
   let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
   if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){
@@ -729,17 +1011,19 @@ fn umAdvectStore(vertex:vec3u,width:u32){
    // and smoothing for advectCubic: the cubic's lanes then run densely, not
    // idle behind the trace or hold the trace's lanes behind 64 taps.
    if(umCubicListed){
+    ${this.workControl?`if(umLocalSolidAdmission&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+21}u],1u);}`:""}
     let j=atomicAdd(&deferred.header[1],1u);let b=UM_CUBIC_BASE+5u*j;
     deferred.data[b]=umVertexAt(vertex);deferred.data[b+1u]=bitcast<u32>(q.x);deferred.data[b+2u]=bitcast<u32>(q.y);deferred.data[b+3u]=bitcast<u32>(q.z);deferred.data[b+4u]=bitcast<u32>(smoothing);
     return;
    }
-   value=umCubicPhi(q,cell);
+   umFullCubic=true;value=umCubicPhi(q,cell);
   }
   defer=defer||umReleasedMayChange(p,value);
   value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
  }
  }}
- if(!defer){textureStore(outputPhi,vec3i(vertex),vec4f(value+smoothing));return;}
+ ${this.workControl?`if(!defer&&umLocalSolidAdmission&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+21}u],1u);}`:""}
+ if(!defer){umRecordRegion(vertex,select(3u,4u,umFullCubic));umStoreSurface(vertex,width,value+smoothing);return;}
  // Each canonical vertex is stored once: the list holds at most every vertex.
  // A word is the vertex key (umVertexAt) below a two-bit code: log2 of the
  // width (0, 2) off the regular-h dispatch, 3 on it. All ones is no word.
@@ -748,14 +1032,15 @@ fn umAdvectStore(vertex:vec3u,width:u32){
 }
 // The deferred vertices of the dispatch compiled with the same umRegularFine.
 // A fixed grid (deferredGrid workgroups) strides over the list.
-// With solids bound it is launched as a solid-free twin (umSolidFree) and a
-// general pipeline (umSolidTwinned): umSolidSkip leaves the step to one.
-// Ahead of the merged ones a fast twin (umFastSurface, solid-free) evaluates
-// every entry whose samples are all fast (see umFastVelocity) and writes all
+// With solids bound, ordinary free/general twins retain their whole-scene
+// gate. The existing merged fast twin also evaluates locally certified
+// current-open entries while a remote solid is present, leaving every
+// rejected/cache-miss word to the general pipeline. It writes all
 // ones over its word; the later launches skip such words. An all-ones word
 // reads as code 3 (regular), so the regular launches test it.
 @compute @workgroup_size(64) fn advectDeferred(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(umSolidSkip()){return;}
+ let localSolidTwin=umExactLocalSolidTransport&&umFastSurface&&umSolidFree&&umSolidPresent();
+ if(umSolidSkip()&&!localSolidTwin){return;}
  umStagePlaneReach(lane);
  let count=atomicLoad(&deferred.header[0]);
  for(var i=gid.x;i<count;i+=64u*groups.x){
@@ -763,12 +1048,23 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   if((code==3u)!=umRegularFine){continue;}
   let vertex=umVertexCoord(word&0x3fffffffu);
   let width=select(1u<<code,1u,code==3u);
-  umSlow=false;umListed=false;umDeferredIndex=i;let foot=umVertexFoot(vertex,width);
-  let value=umAdvected(vec3f(vertex),width,foot)+foot.smoothing;
-  // The fast twin leaves a vertex with a slow sample to the general launch,
-  // one it listed to advectCubic, and retires the rest from the list.
-  if(umFastSurface){if(umSlow||umListed){continue;}deferred.data[i]=0xffffffffu;}
-  textureStore(outputPhi,vec3i(vertex),vec4f(value));
+  umLocalSolidAdmission=false;umTraceSeedValid=false;
+  let early=umEarlyFarAdvected(vertex,width);
+  if(early.y>0.0){if(umFastSurface){deferred.data[i]=0xffffffffu;}umStoreSurface(vertex,width,early.x);continue;}
+  let cheap=umCheapAdvected(vertex,width);
+  if(cheap.y>0.0){if(umFastSurface){deferred.data[i]=0xffffffffu;}umStoreSurface(vertex,width,cheap.x);continue;}
+  // A globally solid-free fast pipeline may evaluate only a currently
+  // certified open footprint. Uncertified words remain for the general twin.
+  if(localSolidTwin&&!umLocalSolidAdmission){continue;}
+  ${this.workControl?`if(localSolidTwin&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+20}u],1u);}`:""}
+  umFullCubic=false;umFullIdentity=false;umSlow=false;let foot=umVertexFoot(vertex,width);
+  let euler=umEulerAdvected(vertex,width,foot);if(euler.y>0.0){if(umFastSurface){deferred.data[i]=0xffffffffu;}${this.workControl?`if(localSolidTwin&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+21}u],1u);}`:""}umStoreSurface(vertex,width,euler.x);continue;}
+  umSlow=false;let value=umAdvected(vec3f(vertex),width,foot)+foot.smoothing;
+  // The fast twin leaves a vertex with a slow sample to the general launch
+  // and retires the rest from the list.
+  if(umFastSurface){if(umSlow){continue;}deferred.data[i]=0xffffffffu;}
+  ${this.workControl?`if(localSolidTwin&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+21}u],1u);}`:""}
+  umRecordRegion(vertex,select(select(3u,4u,umFullCubic),0u,umFullIdentity));umStoreSurface(vertex,width,value);
  }
 }
 // Canonical vertices of the walls, each once, with its authority's width. A
@@ -799,7 +1095,7 @@ var<workgroup> wallBase:u32;
      width=select(1u,4u,umCoarseIncident(umTileAt(cell/4u),vec3u(vertex)-(cell/4u)*4u)!=0u);
     }
     let far=umFarAir(vec3u(vertex));
-    if(far>=0.0&&all(vec3u(vertex)%width==vec3u(0))){textureStore(outputPhi,vertex,vec4f(far));}
+    if(far>=0.0&&all(vec3u(vertex)%width==vec3u(0))){umRecordRegion(vec3u(vertex),0u);umStoreSurface(vec3u(vertex),width,far);}
     else if(all(vec3u(vertex)%width==vec3u(0))){
      slot=atomicAdd(&wallListed,1u);
      word=umVertexAt(vec3u(vertex))|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);
@@ -841,7 +1137,7 @@ fn umSampleClosed(q:vec3f)->bool{
 const UM_WALL_REACH:u32=${UNIFORM_MIXED_CLAIM_WORDS}u;
 const UM_WALL_TILE_REACH:u32=${SURFACE_CLAIM_WORDS}u;
 @compute @workgroup_size(64) fn wallReach(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);atomicStore(&deferred.header[1],0u);atomicStore(&deferred.header[2],0u);}
+ if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);atomicStore(&deferred.header[1],0u);}
  let h=params.hDt.xyz;let dt=params.hDt.w;let faces=umWallFaceCount();
  for(var i=group.x;i<faces;i+=groups.x){
   let face=umWallFace(i);let f=face%6u;let axis=f>>1u;let upper=(f&1u)!=0u;let inward=select(1.0,-1.0,upper);
@@ -906,26 +1202,16 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
 // and smoothing, finished as umAdvectStore would: the cubic at the end, the
 // released-wall test (a vertex it may change goes to the deferred list) and
 // the source. A fixed grid (cubicGrid workgroups) strides over the list.
-// Compiled umCubicDeferred (with the deferred fast twin's overrides) it
-// strides the twin's list instead, whose entries name a deferred word and
-// carry its wall continuation: umAdvected's tail (umWallContact,
-// umReleasedWalls, the source), then the word is retired.
 @compute @workgroup_size(64) fn advectCubic(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(umCubicDeferred&&umSolidSkip()){return;}
  umStagePlaneReach(lane);
- var count=atomicLoad(&deferred.header[1]);
- if(umCubicDeferred){count=min(atomicLoad(&deferred.header[2]),umCubicDeferredRoom());}
+ let count=atomicLoad(&deferred.header[1]);
  for(var i=gid.x;i<count;i+=64u*groups.x){
-  var b=UM_CUBIC_BASE+5u*i;if(umCubicDeferred){b=umCubicDeferredAt(i);}let first=deferred.data[b];var key=first;
-  if(umCubicDeferred){key=deferred.data[first]&0x3fffffffu;}
-  let vertex=umVertexCoord(key);let p=vec3f(vertex);
+  let b=UM_CUBIC_BASE+5u*i;let key=deferred.data[b];let vertex=umVertexCoord(key);let p=vec3f(vertex);
   let q=bitcast<vec3f>(vec3u(deferred.data[b+1u],deferred.data[b+2u],deferred.data[b+3u]));let smoothing=bitcast<f32>(deferred.data[b+4u]);
   var value=umCubicPhi(q,umVertexCell(q));
-  if(umCubicDeferred){value=umReleasedWalls(p,umWallContact(value,bitcast<f32>(deferred.data[b+5u])));}
-  else if(umReleasedMayChange(p,value)){let k=atomicAdd(&deferred.header[0],1u);deferred.data[k]=key;continue;}
+  if(umReleasedMayChange(p,value)){let k=atomicAdd(&deferred.header[0],1u);deferred.data[k]=key;continue;}
   value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
-  textureStore(outputPhi,vec3i(vertex),vec4f(value+smoothing));
-  if(umCubicDeferred){deferred.data[first]=0xffffffffu;}
+  umRecordRegion(vertex,4u);umStoreSurface(vertex,1u,value+smoothing);
  }
 }
 @compute @workgroup_size(64) fn advectFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -1009,8 +1295,7 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
       keyed("advectCubic",{umCellWidth:1,...UNIFORM_DETAIL_H_STORE,...free}),
       Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,...twinned}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...twinned})]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
       ...(this.solid?[Promise.all([compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,...free}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...free})]).then(twins=>{this.freeDeferredPipelines.push(...twins);})]:[]),
-      compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umFastSurface:1,umCubicListed:1,...free}).then(fast=>{this.fastDeferredPipeline=fast;}),
-      compile("advectCubic",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umCubicDeferred:1,...free}).then(cubic=>{this.cubicDeferredPipeline=cubic;}),
+      compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umFastSurface:1,...free}).then(fast=>{this.fastDeferredPipeline=fast;}),
       keyed("advectOwners",{...regular,umCertifiedJobs:1,umClaimWord:0,...UNIFORM_DETAIL_H_STORE}),
     ]);
   }
@@ -1021,7 +1306,12 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
     encoder.clearBuffer(this.claims,0,this.claimBytes);
     const tiles=4*this.ownership.capacity.tiles;
     if(this.farGate)encoder.copyBufferToBuffer(this.farGate.buffer,4*this.farGate.word,this.claims,this.claimBytes,tiles);
-    encoder.copyBufferToBuffer(this.ownership.speeds,tiles,this.claims,this.allocatedBytes-tiles,tiles);
+    encoder.copyBufferToBuffer(this.ownership.speeds,tiles,this.claims,this.evidenceBytes-tiles,tiles);
+    if(this.workControl){encoder.clearBuffer(this.claims,4*this.counterWord,4*(this.workCounterWords+5*this.workControl.regions));this.workControl.encode(encoder,"surface");
+     encoder.copyBufferToBuffer(this.workControl.revisions.buffer,this.workControl.revisions.liveOffset,this.claims,4*this.revisionWord,4*this.workControl.regions);
+     encoder.copyBufferToBuffer(this.workControl.surface,4*this.workControl.modelWordOffset,this.claims,4*this.modelWord,32*this.workControl.regions);
+     encoder.copyBufferToBuffer(this.workControl.surface,4*this.workControl.velocityWordOffset,this.claims,4*this.velocityWord,24*this.workControl.regions);
+     encoder.copyBufferToBuffer(this.workControl.surface,4*this.workControl.supportWordOffset,this.claims,4*this.supportWord,256*UNIFORM_SURFACE_SUPPORT_WORDS*this.workControl.regions);}
     const pass=encoder.beginComputePass(SURFACE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
     pass.setPipeline(this.variant(this.pipelines.get("wallReach")!));pass.dispatchWorkgroups(this.wallGroups);
     // The closed/clear evidence only exists for a scene holding solids.
@@ -1043,14 +1333,12 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
     // [merged, regular h]: each strides the entries its own launch listed,
     // and no h launch ran without h-tile capacity.
     for(let i=1,n=this.ownership.coarseOnly?2:3;i<n&&i<this.deferredPipelines.length;i++){
-      if(i===1&&this.fastDeferredPipeline){
-        deferred.setPipeline(this.variant(this.fastDeferredPipeline));deferred.dispatchWorkgroups(this.deferredGrid);
-        deferred.setPipeline(this.variant(this.cubicDeferredPipeline!));deferred.dispatchWorkgroups(this.cubicGrid);
-      }
+      if(i===1&&this.fastDeferredPipeline){deferred.setPipeline(this.variant(this.fastDeferredPipeline));deferred.dispatchWorkgroups(this.deferredGrid);}
       const twin=this.freeDeferredPipelines[i-1];if(twin){deferred.setPipeline(this.variant(twin));deferred.dispatchWorkgroups(this.deferredGrid);}
       deferred.setPipeline(this.variant(this.deferredPipelines[i]!));deferred.dispatchWorkgroups(this.deferredGrid);
     }
     deferred.end();
+    if(this.workControl)encoder.copyBufferToBuffer(this.claims,4*this.revisionWord,this.workControl.revisions.buffer,this.workControl.revisions.scratchOffset,4*this.workControl.regions);
   }
   destroy():void{this.claims.destroy();}
 }

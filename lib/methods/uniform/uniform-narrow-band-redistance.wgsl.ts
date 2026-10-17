@@ -17,6 +17,7 @@ fn nbGeometryRank(mask:vec2u,lane:u32)->u32{
 }
 var<workgroup> nbGeometryBase:u32;
 var<workgroup> nbGeometryMask:vec2u;
+var<workgroup> nbMetricReuseFlag:u32;
 @compute @workgroup_size(64) fn depthGeometry(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let tile=atomicLoad(&bins[NB_BAND_SEARCH+group.x]);
  if(lane==0u){
@@ -83,6 +84,28 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
  var low=v[0];var high=v[0];
  for(var k=1u;k<8u;k++){low=min(low,v[k]);high=max(high,v[k]);}
  if(low>0.0||high<0.0||low==high){return -1.0;}
+ // A current crossing-cell plane also shortens the detailed path at tile
+ // boundaries. Its residual bounds the whole trilinear cell; the projected
+ // foot's residual-sized normal segment must stay inside that cell. This avoids
+ // the edge/Newton work without needing persistent geometry or temporal error.
+ if(nbReuseCacheEnabled()){
+ var centre=0.0;var gradient=vec3f(0);var scale=0.0;
+ for(var k=0u;k<8u;k++){
+  centre+=0.125*v[k];gradient+=0.25*v[k]*(2.0*vec3f(umCorner(k,2u))-1.0);scale=max(scale,abs(v[k]));
+ }
+ let slope=length(gradient);
+ if(slope>1e-6&&slope<1e6){
+  var residual=0.0000152587890625*max(1.0,scale);
+  for(var k=0u;k<8u;k++){
+   residual=max(residual,abs(v[k]-centre-dot(gradient,vec3f(umCorner(k,2u))-0.5))+0.0000152587890625*max(1.0,scale));
+  }
+  let error=residual/slope;let q=p-origin;
+  let signed=(centre+dot(gradient,q-0.5))/slope;
+  let foot=q-signed*gradient/slope;
+  let margin=(error+0.00001)*abs(gradient/slope);
+  if(error>=0.0&&error<=0.02&&abs(signed)<=3.402823e38&&all(foot>=margin)&&all(foot<=vec3f(1)-margin)){return abs(signed);}
+ }
+ }
  // Edge crossings supply a zero-set fallback if a clamped Newton solve
  // cannot reach zero inside this cell (thin or badly conditioned patches).
  // Every point in this unit cell is within this finite geometric bound.
@@ -103,6 +126,43 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
  if(abs(nbTrilinear(v,q).w)<1e-4){distance=min(distance,length(p-origin-q));}
  return distance;
 }
+// Current-field approximation, with no temporal freezing: each new crossing
+// scan refreshes its plane and residual, while exact unchanged inputs retain
+// that same proof. A whole ball around p must remain inside the certified
+// tile; checking only the projected foot could miss a nearer unseen zero.
+fn nbMetricReuseAvailable(tile:u32)->bool{
+ let region=nbReuseRegion(tile);
+ if(region>=NB_REUSE_METRIC_CAPACITY||!nbMetricRegionReusable(tile)){return false;}
+ return atomicLoad(&bins[NB_REUSE_METRIC_VALID+64u*region+nbReuseLocal(tile)])!=0u;
+}
+fn nbCurrentPlaneEvidence(p:vec3u,tile:u32)->vec3f{
+ let region=nbReuseRegion(tile);
+ if(!nbReuseCacheEnabled()||region>=NB_REUSE_METRIC_CAPACITY){return vec3f(0);}
+ let at=NB_REUSE_REGION_PLANE+8u*region;
+ if(atomicLoad(&bins[at+7u])==0u){return vec3f(0);}
+ var plane:vec4f;for(var k=0u;k<4u;k++){plane[k]=bitcast<f32>(atomicLoad(&bins[at+k]));}
+ let residual=bitcast<f32>(atomicLoad(&bins[at+4u]));let slope=length(plane.xyz);
+ if(!(slope>1e-6&&slope<1e6)){return vec3f(0);}
+ let q=vec3f(p)-vec3f(16u*(umTileCoord(tile)/4u));
+ let phi=plane.w+dot(plane.xyz,q-8.0);let error=residual/slope;
+ if(!(residual>=0.0&&error>=0.0&&error<=0.02&&abs(phi)<=3.402823e38&&abs(phi)>residual)){return vec3f(0);}
+ let distance=phi/slope;let radius=abs(distance)+error+0.00001;
+ // The whole nearest-distance ball must be covered: otherwise an unseen
+ // zero beyond the certificate could be closer than the predicted surface.
+ if(any(q-vec3f(radius)<vec3f(0))||any(q+vec3f(radius)>vec3f(16))){return vec3f(0);}
+ let mask=vec2u(atomicLoad(&bins[at+5u]),atomicLoad(&bins[at+6u]));
+ if(any(mask!=vec2u(0xffffffffu))){
+  let lo=vec3u(floor((q-radius)/4.0));let hi=min(vec3u(3),vec3u(floor((q+radius)/4.0)));
+  let xmask=((1u<<(hi.x-lo.x+1u))-1u)<<lo.x;
+  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){
+   let needed=xmask<<(4u*y+16u*(z&1u));
+   if((mask[z>>1u]&needed)!=needed){return vec3f(0);}
+  }}
+ }
+ let defect=residual+abs(phi-distance)+error;
+ return vec3f(distance,1.0,defect);
+}
+fn nbCurrentPlaneMetric(p:vec3u,tile:u32)->vec2f{return nbCurrentPlaneEvidence(p,tile).xy;}
 // A vertex is its cell's tile's; one on an upper face a wall lies across
 // goes with the last cell. c: that cell, of the tile of key tile. The tiles
 // within three of a crossing are written: a sample in a tile within two
@@ -110,6 +170,10 @@ fn nbSurfaceDistance(p:vec3f,cell:u32)->f32{
 fn nbBuildDistance(p:vec3u,c:vec3u,tile:u32){
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  {
+  let plane=nbCurrentPlaneMetric(p,tile);
+  if(plane.y!=0.0){
+   atomicStore(&bins[NB_DEPTH_A+umVertexAt(p)],bitcast<u32>(plane.x));return;
+  }
   let initial=umSampleVertex(vec3f(p));
   var value=initial/h;
   if(abs(initial)>1e-8){
@@ -157,6 +221,13 @@ fn nbBuildDistance(p:vec3u,c:vec3u,tile:u32){
 @compute @workgroup_size(64) fn buildDistance(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umSolidSkip()){return;}
  let tile=atomicLoad(&bins[NB_BAND_DISTANCE+group.x]);let origin=4u*umTileCoord(tile);
+ // The 16h producer certificate covers the whole metric dependency halo.
+ // A retained tile restores the borrowed metric bank before any phi/solid
+ // gathers or zero-set iterations. Cache validity survives scratch reuse.
+ let region=nbReuseRegion(tile);
+ if(lane==0u){nbMetricReuseFlag=u32(nbMetricReuseAvailable(tile));}
+ let cached=workgroupUniformLoad(&nbMetricReuseFlag)!=0u;
+ let metricBase=NB_REUSE_METRIC+125u*(64u*region+nbReuseLocal(tile));
  var p=origin+umCorner(lane,4u);var c=p;
  let face=any(((origin+4u)&vec3u(31u))==vec3u(0u));
  for(var round=0u;round<select(1u,2u,face);round++){
@@ -167,7 +238,21 @@ fn nbBuildDistance(p:vec3u,c:vec3u,tile:u32){
    p=origin+local;c=vec3u(umCellNearFromPage(tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
    if(any((local==vec3u(4u))&(c==p))){break;}
   }
-  nbBuildDistance(p,c,tile);
+  let local=p-origin;let metricSlot=local.x+5u*(local.y+5u*local.z);
+  if(cached){
+   atomicStore(&bins[NB_DEPTH_A+umVertexAt(p)],atomicLoad(&bins[metricBase+metricSlot]));
+  }else{
+   nbBuildDistance(p,c,tile);
+   if(nbReuseCacheEnabled()&&region<NB_REUSE_METRIC_CAPACITY){
+    atomicStore(&bins[metricBase+metricSlot],atomicLoad(&bins[NB_DEPTH_A+umVertexAt(p)]));
+   }
+  }
+ }
+ // Workgroup completion makes every canonical payload available before a
+ // later search can accept the tile. Noncached/overflow tiles run fully.
+ storageBarrier();
+ if(lane==0u&&nbReuseCacheEnabled()&&region<NB_REUSE_METRIC_CAPACITY){
+  atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+nbReuseLocal(tile)],1u);
  }
 }
 fn nbInterfaceVertex(p:vec3u)->bool{
@@ -208,7 +293,7 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
  // multiply, and read phi only where the reconstructed value is consumed.
  if(normalize&&(nbBandReach(c)&2u)!=0u){
   let value=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(p)]))*h;
-  textureStore(outputPhi,vec3i(p),vec4f(value));return;
+  nbStoreInPlace(p,value);return;
  }
  // Coarse/interface samples retain their reconstructed values: nothing to
  // write. Past reach, preserve the old field's sign and its minimum
@@ -219,12 +304,19 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
  // invocation overwrites it.
  if(!normalize){return;}
  let value=textureLoad(outputPhi,vec3i(p)).x;
- if(abs(value)>1e-8&&abs(value)<6.0*h){textureStore(outputPhi,vec3i(p),vec4f(sign(value)*6.0*h));}
+ if(abs(value)>1e-8&&abs(value)<6.0*h){nbStoreInPlace(p,sign(value)*6.0*h);}
 }
 @compute @workgroup_size(128) fn redistanceFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let owner=umAllOwner(vec3u(group.x*64u,0u,0u));let origin=umTileCoord(owner.tile)*4u;
  if(lane>=125u){return;}
  let local=vec3u(lane%5u,(lane/5u)%5u,lane/25u);let p=origin+local;
+ // A current SDF-defect bound includes any previously skipped drift. The
+ // next current producer scan reopens work when that defect exceeds budget.
+ // Far-reach clamping retains its original semantics below.
+ if(all(local>vec3u(0))&&all(local<vec3u(4))&&(atomicLoad(&bins[NB_BAND_REACH+owner.tile])&2u)!=0u){
+  let plane=nbCurrentPlaneEvidence(p,owner.tile);
+  if(plane.y!=0.0&&plane.z<=0.02){return;}
+ }
  let regular=umTileMaximumWidth(owner.tile)==1u&&umTileMinimumWidth(owner.tile)==1u;
  // A low vertex is this tile's only where nothing is stored below it.
  if(regular){if(any(local==vec3u(0))&&!all((local>vec3u(0))|umLowOpen(vec3i(origin)))){return;}}

@@ -83,7 +83,7 @@ export const narrowBandTiledSurfaceWGSL=/* wgsl */`
  else{let authority=umVertexAuthority(vec3u(q));if(authority.width!=1u||authority.tile!=owner.tile){return;}}
  let bulk=particleSurfaceBulk(owner.tile,origin,q);var value=bulk.x;
  if(bulk.y>0.0){value=particleSurfaceFinish(origin>>vec3u(2u),q,bulk.x,nbCachedSurfaceNearest(q),bulk.z);}
- textureStore(outputPhi,q,vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
+ nbStoreReconstructed(q,value*min(params.hDt.x,min(params.hDt.y,params.hDt.z)),1u);
 }
 `;
 
@@ -146,7 +146,7 @@ fn nbCachedSurfaceNearest(q:vec3i)->f32{
   else if(umVertexAuthority(q).index!=owner.index){continue;}
   let bulk=particleSurfaceBulk(owner.tile,vec3i(origin),vec3i(q));var value=bulk.x;
   if(bulk.y>0.0){value=particleSurfaceFinish(vec3i(origin>>vec3u(2u)),vec3i(q),bulk.x,nbCachedSurfaceNearest(vec3i(q)),bulk.z);}
-  textureStore(outputPhi,vec3i(q),vec4f(value*min(params.hDt.x,min(params.hDt.y,params.hDt.z))));
+  nbStoreReconstructed(vec3i(q),value*min(params.hDt.x,min(params.hDt.y,params.hDt.z)),4u);
  }
 }
 `;

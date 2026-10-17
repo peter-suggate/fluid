@@ -142,7 +142,7 @@ export class UniformMixedOwnership {
     if(!this.sampled)throw new Error("This ownership samples no velocity: it has no hanging tap cache");
     return this.hangingGroupCurrent;
   }
-  get allocatedBytes(): number { return this.topology.size + this.counts.size + this.support.size+(this.speedsBuffer?.size??0)+(this.hanging?.size??0); }
+  get allocatedBytes(): number { return this.topology.size + this.counts.size + this.support.size+(this.speedsBuffer?.size??0)+(this.regionVelocityBuffer?.size??0)+(this.hanging?.size??0); }
   readonly dispatchX: number;
   private readonly topology: GPUBuffer;
   /** Stable read-only view for consumers of the accepted ownership generation. */
@@ -153,6 +153,13 @@ export class UniformMixedOwnership {
   /** Per-tile extended speed and its box maximum (frame plan certificate):
    * only an ownership velocity runs on (sampled) has a frame plan. */
   private readonly speedsBuffer?: GPUBuffer;
+  private readonly regionVelocityBuffer?: GPUBuffer;
+  /** Current extended velocity extrema per 16h region: ordered-float max(u.xyz),
+   * then max(-u.xyz). Zero means no sample; decode only after the certificate. */
+  get regionVelocity(): GPUBuffer {
+    if(!this.regionVelocityBuffer)throw new Error("This ownership samples no velocity: it has no region velocity evidence");
+    return this.regionVelocityBuffer;
+  }
   get speeds(): GPUBuffer {
     if(!this.speedsBuffer)throw new Error("This ownership samples no velocity: it has no speed certificate");
     return this.speedsBuffer;
@@ -267,6 +274,7 @@ export class UniformMixedOwnership {
     this.support = device.createBuffer({label:"Uniform shared frame support and certified work",size:(uniformMixedSupportWords(n)+uniformDetailSupportWords())*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     if(sampled){
       this.speedsBuffer=device.createBuffer({label:"Uniform local speed certificate",size:n*8,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+      this.regionVelocityBuffer=device.createBuffer({label:"Uniform 16h current extended velocity extrema",size:24*(n/64),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
       const bytes=uniformMixedHangingBytes(n,fineTiles);
       if(bytes>device.limits.maxStorageBufferBindingSize)throw new Error(`Uniform mixed hanging tap cache needs ${bytes} bytes; the device binds at most ${device.limits.maxStorageBufferBindingSize}`);
       this.hanging=device.createBuffer({label:"Uniform mixed velocity tap cache",size:bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
@@ -566,5 +574,5 @@ export class UniformMixedOwnership {
   /** fused or fusedQuad: one job per fused tile (dispatchFused). */
   dispatchFusedCounted(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void{this.dispatchCounted(pass,pipeline,this.capacity.tiles,"fused");}
 
-  destroy(): void { this.topology.destroy(); this.counts.destroy(); this.support.destroy();this.speedsBuffer?.destroy();this.hanging?.destroy(); }
+  destroy(): void { this.topology.destroy(); this.counts.destroy(); this.support.destroy();this.speedsBuffer?.destroy();this.regionVelocityBuffer?.destroy();this.hanging?.destroy(); }
 }

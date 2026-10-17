@@ -385,19 +385,58 @@ fn umBuildSurfaceClear(t:u32){
  }
  record[umSolidCount()+t].z=select(0.0,1.0,clear);
 }
-@compute @workgroup_size(64) fn surfaceClear(@builtin(global_invocation_id) g:vec3u){umBuildSurfaceClear(g.x+umDispatchX*64u*g.y);}
+// One workgroup owns a 16h region inside a 32h storage page. Reuse the
+// existing flag pass to establish a stronger, genuinely uncut certificate.
+// Unlike z (canonical-open), w can eliminate whole solid operations. It is
+// valid only until bodies change after this record build.
+var<workgroup> regionSolid:atomic<u32>;
+var<workgroup> regionRefresh:u32;
+fn umSolidRegionTile(region:u32,lane:u32)->u32{
+ let r=region&7u;
+ return 512u*(region>>3u)+4u*(r&1u)+32u*((r>>1u)&1u)+256u*((r>>2u)&1u)
+  +(lane&3u)+8u*((lane>>2u)&3u)+64u*(lane>>4u);
+}
+fn umBuildRegionClear(t:u32,lane:u32){
+ if(lane==0u){
+  atomicStore(&regionSolid,0u);
+  if(umTileLive(t)){
+   let h=umSolidParams.cellGravity.xyz;
+   let lo=umSolidWorldCell(vec3i(umTileCoord(t)*4u))-0.5*h;
+   let hi=lo+16.0*h;let margin=3.0*max(h.x,max(h.y,h.z));
+   // The corner fractions alone can miss a small body at a cell centre.
+   for(var i=0u;i<umBodyCount();i++){
+    if(umBodyTileNear(umSolidBodies[i],lo,hi,margin)){atomicStore(&regionSolid,1u);break;}
+   }
+  }
+ }
+ workgroupBarrier();
+ if(!umTileLive(t)){atomicOr(&regionSolid,1u);}
+ else if(record[umSolidCount()+t].x>0.5){atomicOr(&regionSolid,1u);}
+ workgroupBarrier();
+ if(umTileLive(t)){record[umSolidCount()+t].w=select(0.0,1.0,atomicLoad(&regionSolid)==0u);}
+}
+@compute @workgroup_size(64) fn surfaceClear(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
+ let t=umSolidRegionTile(g.x+umDispatchX*g.y,lane);
+ umBuildSurfaceClear(t);umBuildRegionClear(t,lane);
+}
 ${pool?/* wgsl */`// Each tile has exactly one writer, even overlapping new-page halos.
 // No claims means no geometric neighbourhood work. A retirement may retain
 // false (conservative), while every claim refreshes its entire incident halo.
-@compute @workgroup_size(64) fn surfaceClearNew(@builtin(global_invocation_id) g:vec3u){
+@compute @workgroup_size(64) fn surfaceClearNew(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
  let moved=any(vec3u(upState[UP_AT_WINDOW+4u],upState[UP_AT_WINDOW+5u],upState[UP_AT_WINDOW+6u])!=vec3u(0u));
- if(upNewCount()==0u&&!moved){return;}
- let t=g.x+umDispatchX*64u*g.y;if(!umTileLive(t)){return;}
- let p=vec3i(umTileCoord(t));var dirty=moved;
- for(var i=0u;i<upNewCount();i++){
-  let low=8*vec3i(umBlockPage(upNewBlock(i)))-vec3i(1);dirty=dirty||(all(p>=low)&&all(p<=low+vec3i(9)));
+ if(lane==0u){regionRefresh=select(0u,1u,upNewCount()!=0u||moved);}
+ if(workgroupUniformLoad(&regionRefresh)==0u){return;}
+ let t=umSolidRegionTile(g.x+umDispatchX*g.y,lane);
+ if(umTileLive(t)){
+  let p=vec3i(umTileCoord(t));var dirty=moved;
+  for(var i=0u;i<upNewCount();i++){
+   let low=8*vec3i(umBlockPage(upNewBlock(i)))-vec3i(1);dirty=dirty||(all(p>=low)&&all(p<=low+vec3i(9)));
+  }
+  if(dirty){umBuildSurfaceClear(t);}
  }
- if(dirty){umBuildSurfaceClear(t);}
+ // Claims/window moves can change incident cut rings. Refresh the cheap
+ // region reduction for all live regions in this already-dispatched pass.
+ umBuildRegionClear(t,lane);
 }
 `:""}
 ${pool?/* wgsl */`// The tiles of the blocks the last commit claimed (the pool's new list): job
@@ -586,6 +625,7 @@ fn umVertexBuried(p:vec3i)->bool{
 export function uniformMixedSolidWGSL(group?:number,coarse?:number,gated=true,writable=false):string{
  if(group===undefined)return /* wgsl */ `
 fn umSolidEnabled()->bool{return false;}
+fn umSolidRegionClearAtBuild(p:vec3i)->bool{return true;}
 fn umSolidPresent()->bool{return false;}
 fn umSolidSkip()->bool{return false;}
 fn umSolidValid(p:vec3i)->bool{return umCellKind(p)!=UM_SOLID;}
@@ -641,7 +681,8 @@ override umSolidTwinned:bool=false;
 fn umSolidPresent()->bool{return umSolidParams.lean.x<0.5;}
 fn umSolidEnabled()->bool{return !umSolidFree&&umSolidPresent();}
 fn umSolidSkip()->bool{return select(umSolidTwinned&&!umSolidPresent(),umSolidPresent(),umSolidFree);}`:"fn umSolidEnabled()->bool{return true;}"}
-${coarse===undefined?`fn umTileOpen(t:u32)->f32{return 1.0;}
+${coarse===undefined?`fn umSolidRegionClearAtBuild(p:vec3i)->bool{return false;}
+fn umTileOpen(t:u32)->f32{return 1.0;}
 fn umTileOpenAt(p:vec3i)->f32{return 1.0;}
 fn umTileSupported(t:u32)->bool{return false;}`:`@group(${group}) @binding(3) var<storage,read> umSolidRecord:array<vec4f>;
 ${solidRecordRowsWGSL(coarse*4/7)}
@@ -683,6 +724,13 @@ fn umTileSupported(t:u32)->bool{
 // A conservative proof of no closed cell in the tile's 27-tile halo.
 // Invalidated with record builds and refreshed around every page claim.
 fn umSolidSurfaceClear(t:u32)->bool{return umSolidRecord[umSolidCount()+t].z>0.5;}
+// Head-of-frame certificate only: do not use after rigid integration moves
+// bodies. Domain-wall cells/faces still require umSolidValid explicitly.
+fn umSolidRegionClearAtBuild(p:vec3i)->bool{
+ if(!umSolidEnabled()){return true;}
+ let t=umTileKey(p>>vec3u(2u));if(!umKeyStored(t)){return false;}
+ return umSolidRecord[umSolidCount()+t].w>0.5;
+}
 fn umSolidStaticCut(t:u32)->bool{return umSolidRecord[umSolidCount()+t].x>0.5;}
 // A cut tile whose h texels are live: the simulation holds it at h.
 fn umSolidCut(t:u32)->bool{let r=umSolidRecord[umSolidCount()+t];return r.x>0.5&&r.y>0.5;}

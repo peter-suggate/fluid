@@ -87,10 +87,13 @@ export function pairedExtensionSource(source:string,retained=false):string{
  const seeds=names.map(name=>{
   if(name==="umSeedState"){
    requireExact(functionSource(source,name), `fn umSeedState(face:UMFace,owner:UMOwner)->vec2f{
- return select(vec2f(0.0,UM_INF),vec2f(umPhysical(face),0.0),umSource(face,owner));
+ // WGSL select evaluates both operands: reject air before loading a payload.
+ if(!umSource(face,owner)){return vec2f(0.0,UM_INF);}
+ return vec2f(umPhysical(face),0.0);
 }`, name);
    return `fn pair_umSeedState(face:UMFace,owner:UMOwner)->UEPair{
- let source=umSource(face,owner);return UEPair(select(vec2f(0),vec2f(umPhysical(face),${retained?"0.0":"pairPhysical(face)"}),source),select(UM_INF,0.0,source));
+ if(!umSource(face,owner)){return UEPair(vec2f(0),UM_INF);}
+ return UEPair(vec2f(umPhysical(face),${retained?"0.0":"pairPhysical(face)"}),0.0);
 }`;
   }
   let s=functionSource(source,name);

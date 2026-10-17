@@ -116,7 +116,7 @@ fn nbAirStore(p:vec3u){
  // Six-cell redistance sentinels cannot certify far air for that predicate.
  let far=16.0*max(params.hDt.x,max(params.hDt.y,params.hDt.z));
  if(value<far&&all(p%vec3u(4u)==vec3u(0u))){atomicStore(&state[${NARROW_BAND_AIR_CHANGED_WORD}u],1u);}
- textureStore(outputPhi,vec3i(p),vec4f(max(value,far)));
+ nbStoreInPlace(p,max(value,far));
 }
 ${[1,4].map(width=>/* wgsl */`
 @compute @workgroup_size(64) fn airClear${width===1?"Fine":"Coarse"}(@builtin(global_invocation_id) id:vec3u){

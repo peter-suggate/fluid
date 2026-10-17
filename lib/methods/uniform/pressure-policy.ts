@@ -10,16 +10,21 @@ export const UNIFORM_CM11A_PHI_PRESERVATION_LEVELS = 2;
 // tolerance; 1e-8 belongs to its double-precision CPU comparison. CM11a
 // itself fixes the cycle schedule but does not prescribe a residual tolerance.
 export const UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE = 1e-4;
+// Fine correction to the current prolonged 4h pressure. Use the strict
+// single-precision floor, not the root's much looser absolute acceptance
+// bound. A tighter requested pressure tolerance also tightens this bound.
+export const UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE = UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE;
 // Absolute L-infinity divergence left in an accepted solve. At 20 s^-1 one
 // cycle was accepted and a resting pool compressed hydrostatically -- V
 // 1.1-1.4 by depth, ~10% of the voxel-bath settled tank within 0.5 s -- which
 // the total-surface-volume constraint then painted onto drained walls as
 // phi-only sheets. 5 s^-1 (three cycles) holds that tank to ~1%.
 export const UNIFORM_PRESSURE_RESIDUAL_TOLERANCE = 5;
-// The h band starts from p=0 (and the coarse root did, before it warm-started
-// from the last presented pressure), so its initial residual IS the RHS. An
-// absolute bound alone accepts that zero iterate whenever the unprojected
-// divergence is below it: a resting pool's gravity is g dt/h (3.3 s^-1 at
+// With a zero pressure start the initial residual IS the RHS. The root now
+// warm-starts from the last presented pressure; the h band corrects its
+// prolonged result. A loose absolute bound alone accepts a zero pressure
+// iterate whenever the unprojected divergence is below it: a resting pool's
+// gravity is g dt/h (3.3 s^-1 at
 // h=0.1, dt=1/30), so a coarse or small-step scene published p=0, fell
 // g dt for a frame and rang into corner jets. A checkpoint must also reduce
 // the initial residual tenfold; the floor is the GPU single-precision

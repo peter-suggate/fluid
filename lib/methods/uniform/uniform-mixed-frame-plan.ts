@@ -56,8 +56,8 @@ export class UniformMixedFramePlan {
     this.resources=uniformDetailBindLayout(device,{entries:[...[0,1,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
     this.group=uniformDetailGroup(device,{layout:this.resources,entries:[...[volume,phi].map((t,binding)=>({binding,resource:t})),{binding:2,resource:{buffer:this.params}},{binding:3,resource:velocity},{binding:4,resource:{buffer:negative}}]});
     this.extendedResources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
-      {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},...[2,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))]});
-    this.extendedGroup=uniformDetailGroup(device,{layout:this.extendedResources,entries:[{binding:0,resource:extended},{binding:1,resource:{buffer:extendedNegative}},{binding:2,resource:{buffer:ownership.speeds}},{binding:3,resource:{buffer:this.coarse}}]});
+      {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},...[2,3,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))]});
+    this.extendedGroup=uniformDetailGroup(device,{layout:this.extendedResources,entries:[{binding:0,resource:extended},{binding:1,resource:{buffer:extendedNegative}},{binding:2,resource:{buffer:ownership.speeds}},{binding:3,resource:{buffer:this.coarse}},{binding:4,resource:{buffer:ownership.regionVelocity}}]});
   }
   async initialize():Promise<void>{
     const h=this.ownership.capacity.lattice.cellSize_m;
@@ -77,6 +77,7 @@ struct PlanPolicy {settings:vec4u,step:vec4f}
 @group(2) @binding(1) var<storage,read> extendedNegative:array<f32>;
 @group(2) @binding(2) var<storage,read_write> speeds:array<u32>;
 @group(2) @binding(3) var<storage,read_write> coarse:array<u32>;
+@group(2) @binding(4) var<storage,read_write> regionVelocity:array<atomic<u32>>;
 // umSupport and speeds hold a word per tile KEY: a lane indexes them by its
 // own tile's key, and a neighbour's word by umTileKey of the neighbour's
 // coordinate, skipped where umKeyStored refuses it. coarse holds the 4h tile
@@ -199,23 +200,29 @@ ${[0,1,2].map(axis=>/* wgsl */`
  atomicStore(&umSupport[${axis+1}u*UM_TILES+tile],flags|policy.settings.z);
 }`).join("\n")}
 // Each tile's signed reach (umPackReach) from the extended canonical faces it
-// owns, zero included; low: the owner stores its low face along axis
+// owns; low: the owner stores its low face along axis
 // (umLowOpen). Owner lanes as in seed.
-fn umSignedFaceExtent(unit:bool,origin:vec3u,axis:u32,low:bool)->vec2f{
- var lo=0.0;var hi=0.0;
- if(unit){let v=textureLoad(extended,vec3i(origin),0)[axis];lo=min(lo,v);hi=max(hi,v);}
+fn umSignedFaceExtent(unit:bool,origin:vec3u,axis:u32,low:bool)->vec3f{
+ var lo=3.402823e38;var hi=-3.402823e38;var finite=true;
+ if(unit){let v=textureLoad(extended,vec3i(origin),0)[axis];finite=finite&&abs(v)<=3.402823e38;lo=min(lo,v);hi=max(hi,v);}
  else{
   let owner=umOwnerAt(vec3i(origin));let first=umFace(owner,axis,1,0u);
-  if(first.width==4u){let v=${UNIFORM_DETAIL_4H_LOAD}textureLoad(extended,first.anchor,0)[axis];lo=min(lo,v);hi=max(hi,v);}
-  else{for(var part=0u;part<first.count;part++){let v=textureLoad(extended,umFacePatch(first,part).anchor,0)[axis];lo=min(lo,v);hi=max(hi,v);}}
+  if(first.width==4u){let v=${UNIFORM_DETAIL_4H_LOAD}textureLoad(extended,first.anchor,0)[axis];finite=finite&&abs(v)<=3.402823e38;lo=min(lo,v);hi=max(hi,v);}
+  else{for(var part=0u;part<first.count;part++){let v=textureLoad(extended,umFacePatch(first,part).anchor,0)[axis];finite=finite&&abs(v)<=3.402823e38;lo=min(lo,v);hi=max(hi,v);}}
  }
- if(low){let v=extendedNegative[umLowFaceIndex(origin,axis)];lo=min(lo,v);hi=max(hi,v);}
- return vec2f(lo,hi);
+ if(low){let v=extendedNegative[umLowFaceIndex(origin,axis)];finite=finite&&abs(v)<=3.402823e38;lo=min(lo,v);hi=max(hi,v);}
+ return vec3f(lo,hi,f32(finite&&lo<=hi));
 }
 var<workgroup> tileReach:array<atomic<u32>,384>;
+var<workgroup> tileVelocity:array<atomic<u32>,384>;
+// Float-flip orders finite signed floats as unsigned words. An empty word
+// is below every finite value; nonfinite inputs poison the whole interval.
+fn umVelocityOrder(value:f32)->u32{
+ let bits=bitcast<u32>(value);return select(bits^0x80000000u,~bits,(bits&0x80000000u)!=0u);
+}
 @compute @workgroup_size(64) fn localSpeed(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  let owner=umAllOwner(gid);let slot=lane-owner.lane;
- for(var k=0u;k<6u;k++){atomicStore(&tileReach[64u*k+lane],0u);}
+ for(var k=0u;k<6u;k++){atomicStore(&tileReach[64u*k+lane],0u);atomicStore(&tileVelocity[64u*k+lane],0u);}
  workgroupBarrier();
  if(owner.width!=0u){
   let origin=umOrigin(owner);let unit=umTileMaximumWidth(owner.tile)==1u;let scale=policy.step.x/umSceneMinimumSpacing();
@@ -223,9 +230,11 @@ var<workgroup> tileReach:array<atomic<u32>,384>;
   for(var axis=0u;axis<3u;axis++){
    let e=umSignedFaceExtent(unit,origin,axis,low[axis]);
    // NaN fails both comparisons: it saturates.
-   let finite=abs(e.x)<=3.402823e38&&abs(e.y)<=3.402823e38;
-   atomicMax(&tileReach[64u*axis+slot],select(UM_REACH_SATURATED,umReach(-e.x*scale),finite));
-   atomicMax(&tileReach[64u*(3u+axis)+slot],select(UM_REACH_SATURATED,umReach(e.y*scale),finite));
+   let finite=e.z!=0.0;
+   atomicMax(&tileReach[64u*axis+slot],select(UM_REACH_SATURATED,umReach(max(0.0,-e.x)*scale),finite));
+   atomicMax(&tileReach[64u*(3u+axis)+slot],select(UM_REACH_SATURATED,umReach(max(0.0,e.y)*scale),finite));
+   atomicMax(&tileVelocity[64u*axis+slot],select(0xffffffffu,umVelocityOrder(e.y),finite));
+   atomicMax(&tileVelocity[64u*(3u+axis)+slot],select(0xffffffffu,umVelocityOrder(-e.x),finite));
   }
  }
  workgroupBarrier();
@@ -233,6 +242,10 @@ var<workgroup> tileReach:array<atomic<u32>,384>;
   var plus=vec3u(0);var minus=vec3u(0);
   for(var axis=0u;axis<3u;axis++){plus[axis]=atomicLoad(&tileReach[64u*axis+slot]);minus[axis]=atomicLoad(&tileReach[64u*(3u+axis)+slot]);}
   speeds[owner.tile]=umPackReach(plus,minus);
+  // Reuse the face reads and tile reduction above. Six atomics per tile,
+  // no additional field scan, publish current unquantized local motion.
+  let region=umPageOfTile(owner.tile);
+  for(var k=0u;k<6u;k++){atomicMax(&regionVelocity[6u*region+k],atomicLoad(&tileVelocity[64u*k+slot]));}
  }
 }
 // Sparse allocation need not contain the rectangular intermediate paths of
@@ -314,6 +327,7 @@ var<workgroup> certifyBases:array<u32,2>;
     // Only the certificate reads dt: support and extension are dt-free.
     const step=this.stepWords??=new Float32Array(4);step[0]=dt;
     this.device.queue.writeBuffer(this.params,16,step);
+    encoder.clearBuffer(this.ownership.regionVelocity);
     const pass=encoder.beginComputePass(CERTIFICATE_PASS);
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);pass.setBindGroup(2,this.extendedGroup.group);
     // Certified consumers read the list counts themselves (umCertifiedJobCount).

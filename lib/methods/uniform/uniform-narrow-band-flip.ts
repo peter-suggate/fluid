@@ -6,9 +6,10 @@ import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { narrowBandSeedShellWGSL } from "./uniform-narrow-band-seed.wgsl";
 import { uniformMixedExtensionSnapshotWGSL } from "./uniform-mixed-extension-slots.wgsl";
 import { narrowBandActivityWGSL, NARROW_BAND_ACTIVITY_WORDS_PER_TILE } from "./uniform-narrow-band-activity.wgsl";
+import {narrowBandReuseLayout,narrowBandReuseWGSL,type NarrowBandReuseLayout} from "./uniform-narrow-band-reuse.wgsl";
 import { narrowBandRedistanceWGSL } from "./uniform-narrow-band-redistance.wgsl";
 import { narrowBandMembershipWGSL } from "./uniform-narrow-band-membership.wgsl";
-import { narrowBandNearestEntries } from "./uniform-narrow-band-nearest.wgsl";
+import { narrowBandNearestEntries, narrowBandNearestControlEntries } from "./uniform-narrow-band-nearest.wgsl";
 import { NARROW_BAND_TRACE_LIMIT, narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
 import { narrowBandNearWGSL } from "./uniform-narrow-band-near.wgsl";
 import { narrowBandTerrainContactWGSL, narrowBandRigidContactWGSL } from "./uniform-particle-contact.wgsl";
@@ -81,6 +82,7 @@ export interface UniformNarrowBandSlotSnapshot {
  readonly cache:UniformDetailGroup;readonly taps:UniformDetailGroup;
  readonly particles:readonly [UniformDetailGroup,UniformDetailGroup];
 }
+export interface NarrowBandSurfaceRevisions{readonly buffer:GPUBuffer;readonly liveOffset:number;readonly scratchOffset:number;readonly regions:number}
 export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  readonly label="Narrow-band FLIP page words";
  readonly capacity:number;
@@ -126,6 +128,37 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    grid:{velocityFloat:8,depthFloat:7,ballisticFloat:11,ballisticSignBit:!this.apic,surfaceDepth:2}};
  }
  private readonly bins:GPUBuffer;
+ private readonly reuse:NarrowBandReuseLayout;
+ private readonly reuseControls:GPUBuffer;
+ private revisions?:NarrowBandSurfaceRevisions;
+ private revisionGeneration?:()=>number;
+ private seenRevisionGeneration=-1;
+ private reuseParity=0;
+ get regionalReuseCapacity():number{return this.reuse.capacity;}
+ get regionalReuseAllocatedBytes():number{return 4*this.reuse.words;}
+ /** Read-only post-run diagnostics; never used to size simulation launches. */
+ get regionalReuseEvidence(){return {buffer:this.bins,regions:this.reuse.capacity,flagsOffset:4*this.reuse.nearestFlags,planeOffset:4*this.reuse.regionPlane};}
+ regionalCrossingReuseEnabled=true;
+ private seenCrossingReuseEnabled=true;
+ /** Root epochs are byte-addressed views; no new shader binding is needed. */
+ attachSurfaceRevisions(revisions:NarrowBandSurfaceRevisions,generation:()=>number):void{
+  if(revisions.regions!==this.reuse.regions)throw new Error("Narrow-band revision region count differs from ownership");
+  this.revisions=revisions;this.revisionGeneration=generation;this.seenRevisionGeneration=-1;
+ }
+ exportSurfaceRevisions(encoder:GPUCommandEncoder):void{
+  if(this.revisions)encoder.copyBufferToBuffer(this.bins,4*this.reuse.live,this.revisions.buffer,this.revisions.liveOffset,4*this.reuse.regions);
+ }
+ private syncSurfaceRevisions(encoder:GPUCommandEncoder,scratch=false):void{
+  const source=this.revisions;if(!source)return;
+  const generation=this.revisionGeneration!();
+  if(generation!==this.seenRevisionGeneration){
+   encoder.clearBuffer(this.bins,4*this.reuse.base,4*this.reuse.metadataWords);
+   encoder.copyBufferToBuffer(source.buffer,source.liveOffset,this.bins,4*this.reuse.live,4*source.regions);
+   this.seenRevisionGeneration=generation;this.reuseParity=0;
+  }
+  if(scratch)encoder.copyBufferToBuffer(source.buffer,source.scratchOffset,this.bins,4*this.reuse.live,4*source.regions);
+ }
+
  private readonly next:GPUBuffer;
  private readonly params:GPUBuffer;
  private readonly resources:GPUBindGroupLayout;
@@ -184,13 +217,22 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.capacity=Math.min(cells*8,Math.max(2_097_152,cells),Math.floor(device.limits.maxStorageBufferBindingSize/(this.apic?112:64)));
   const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.particles=[buffer("particles A",this.capacity*particleBytes),buffer("particles B",this.capacity*particleBytes)];
-  this.state=buffer("receipt and particle frame",64);this.bins=buffer("cell counts, sort cursors, coverage, surface tiles, depth guard and band tiles",(3*cells+vertices)*4+address.tileKeys*(36+4*(NARROW_BAND_ACTIVITY_WORDS_PER_TILE+NARROW_BAND_AIR_WORDS_PER_TILE))+16);this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*28);this.params=buffer("parameters",48,true);
+  this.state=buffer("receipt and particle frame",64);
+  const binWords=3*cells+vertices+address.tileKeys*(9+NARROW_BAND_ACTIVITY_WORDS_PER_TILE+NARROW_BAND_AIR_WORDS_PER_TILE)+4;
+  const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
+  const completeReuse=narrowBandReuseLayout(binWords,8*address.blocks);
+  this.reuse=4*(binWords+completeReuse.words)<=limit?completeReuse:narrowBandReuseLayout(binWords,8*address.blocks,0);
+  const binBytes=4*(binWords+this.reuse.words);
+  if(binBytes>limit)throw new Error(`Narrow-band bins and bounded crossing reuse (${binBytes} bytes) exceed GPU buffer limit ${limit}`);
+  this.bins=buffer("cell counts, surface metrics and persistent regional crossing masks",binBytes);
+  this.reuseControls=buffer("regional reuse pass controls",72);device.queue.writeBuffer(this.reuseControls,0,new Uint32Array([0,1,1,1,1,1,0,1,0,1,1,0,0,0,0,1,0,0]));
+  this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*28);this.params=buffer("parameters",48,true);
   this.order=new UniformNarrowBandOrder(device,address,ownership.presentation.buffer,this.particles,this.bins,this.next,this.state,undefined,this.apic);
   this.particleAllocation=buffer("particle allocation support",8*address.blocks*PARTICLE_RESIDENCY_WORDS*4);
   this.refinementParams=buffer("refinement prediction",48,true);device.queue.writeBuffer(this.refinementParams,32,new Uint32Array([address.blocks,0,0,0]));
   const size=uniformCoarseCacheExtent(address);
   this.coarseVelocity=device.createTexture({label:"Narrow-band FLIP stage sampling cache",size,dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
-  this.baseAllocatedBytes=[...this.particles,this.state,this.bins,this.next,this.params,this.particleAllocation,this.refinementParams].reduce((n,b)=>n+b.size,0)+size.reduce((n,v)=>n*v,16);
+  this.baseAllocatedBytes=[...this.particles,this.state,this.bins,this.next,this.params,this.particleAllocation,this.refinementParams,this.reuseControls].reduce((n,b)=>n+b.size,0)+size.reduce((n,v)=>n*v,16);
   if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotSnapshotResources=uniformDetailBindLayout(device,{entries:[
    ...[1,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
    ...[5,17].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}})),
@@ -499,6 +541,7 @@ fn bandPhi(p:vec3f)->f32{
 fn umBlockNeighbourWord(b:u32,i:u32)->u32{return umTopology[UM_BLOCK_RECORD+UM_BLOCKS+27u*b+i];}
 ${uniformBlockNeighbourWGSL}
 ${narrowBandNearWGSL}
+${narrowBandReuseWGSL(this.reuse)}
 ${narrowBandMembershipWGSL}
 ${narrowBandRedistanceWGSL}
 ${narrowBandActivityWGSL}
@@ -1102,9 +1145,9 @@ ${narrowBandSurfaceWGSL}
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
-  await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists",...narrowBandNearestEntries,"depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_H_TWIN_ENTRIES.map(entry=>`${entry}@h`),...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transfer@fit"].map(async name=>{
+  await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthTiles@noplanes","depthSeeds@noplanes","depthReuseSnapshot@noplanes","depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_H_TWIN_ENTRIES.map(entry=>`${entry}@h`),...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transfer@fit"].map(async name=>{
    const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","snapshot","update","seed","seedSources"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(entryPoint==="depthCoarse"?{nbCachedGeometry:0}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)||name.includes("@h")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...(entryPoint==="transfer"?{nbTransferTwin:name.endsWith("@fit")?1:2}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(entryPoint==="depthCoarse"?{nbCachedGeometry:0}:{}),...(name.endsWith("@noplanes")?{nbMetricPlanes:0}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)||name.includes("@h")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...(entryPoint==="transfer"?{nbTransferTwin:name.endsWith("@fit")?1:2}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
   }));
   if(this.slotSnapshotResources){
@@ -1112,13 +1155,13 @@ ${narrowBandSurfaceWGSL}
    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
    this.slotSnapshotPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.slotSnapshotResources]}),compute:{module,entryPoint:"snapshot"}});
   }
-  const search=["depthTiles","depthSeeds","depthLists",...narrowBandNearestEntries];
+  const search=["depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries];
   this.batches={
    advect:this.compile(["advectParticles","advectParticlesDeferred"],"advectParticles","advectParticles"),
    marking:this.compile(["markParticleTiles","commitCount"],"surface","particle tile marking"),
    countInitial:this.compile(["countInitial"],"bootstrap","countInitial"),seedInitial:this.compile(["seedInitial"],"bootstrap","seedInitial"),commit:this.compile(["commitCount"],undefined,"commitCount"),
    activity:this.compile(["activity","activitySpread"],"bootstrap","activity"),
-   search:this.compile(search,undefined,"crossing search"),searchReconstruct:this.compile(search,"reconstruct","crossing search"),searchRedistance:this.compile(search,"redistance","crossing search"),
+   search:this.compile(search,undefined,"crossing search"),searchReconstruct:this.compile(search.map(n=>n==="depthTiles"||n==="depthSeeds"||n==="depthReuseSnapshot"?`${n}@noplanes`:n),"reconstruct","crossing search"),searchRedistance:this.compile(search,"redistance","crossing search"),
    diagnose:this.compile(["diagnoseBefore"],"reconstruct","diagnoseBefore"),
    reconstruct:this.compile(["surfaceCells","surfaceSplat","coupleFine@free","coupleFine","couple"],"reconstruct","surface reconstruction"),
    reconstructCoarse:this.compile(["surfaceCells","surfaceSplat","couple"],"reconstruct","surface reconstruction"),
@@ -1245,7 +1288,7 @@ ${narrowBandSurfaceWGSL}
   encoder.copyBufferToBuffer(importance.buffer,importance.offset,this.bins,this.activityWord*4,this.tiles*8);
   this.run(encoder,this.compiled.activity);
  }
- reconstruct(encoder:GPUCommandEncoder):void{const b=this.compiled;this.bandCurrent=false;this.measureBand(encoder,b.searchReconstruct);if(this.measureTraces)this.run(encoder,b.diagnose);
+ reconstruct(encoder:GPUCommandEncoder):void{this.syncSurfaceRevisions(encoder,true);const b=this.compiled;this.bandCurrent=false;this.measureBand(encoder,b.searchReconstruct);if(this.measureTraces)this.run(encoder,b.diagnose);
   encoder.clearBuffer(this.bins,(2*this.cells+2*this.tiles)*4,this.vertices*4);
   this.run(encoder,this.ownership.coarseOnly?b.reconstructCoarse:b.reconstruct);}
  transfer(encoder:GPUCommandEncoder):void{
@@ -1289,6 +1332,13 @@ ${narrowBandSurfaceWGSL}
   this.run(encoder,batch);
  }
  private measureBand(encoder:GPUCommandEncoder,batch:NarrowBandBatch):void{
+  this.syncSurfaceRevisions(encoder);
+  if(this.regionalCrossingReuseEnabled!==this.seenCrossingReuseEnabled){
+   if(this.reuse.masks>this.reuse.history)encoder.clearBuffer(this.bins,4*this.reuse.history,4*(this.reuse.masks-this.reuse.history));
+   this.seenCrossingReuseEnabled=this.regionalCrossingReuseEnabled;
+  }
+  const parity=this.reuseParity;this.reuseParity=1-parity;
+  encoder.copyBufferToBuffer(this.reuseControls,12*(parity+(this.revisions?(this.regionalCrossingReuseEnabled?0:2):4)),this.bins,4*this.reuse.control,12);
   // The search's tile banks follow the cell and vertex banks: counts, masks and reach start clear.
   encoder.clearBuffer(this.bins,(3*this.cells+this.vertices+2*this.tiles)*4,(4+3*this.tiles)*4);
   this.run(encoder,batch);
@@ -1319,5 +1369,5 @@ ${narrowBandSurfaceWGSL}
   if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?`trajectory exceeded ${NARROW_BAND_TRACE_LIMIT} cells`:words[3]===2?"nonfinite velocity"
    :`particle pool is full: ${words[1]} samples live of a capacity of ${this.capacity}, and source or initial liquid still had samples to add`}`);
  }
- destroy():void{this.order.destroy();this.coarseVelocity.destroy();this.refinementParams.destroy();this.particleAllocation.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params])b.destroy();}
+ destroy():void{this.reuseControls.destroy();this.order.destroy();this.coarseVelocity.destroy();this.refinementParams.destroy();this.particleAllocation.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params])b.destroy();}
 }

@@ -389,7 +389,9 @@ fn umUnitExtensionFace(owner:UMOwner,axis:u32,sign:i32)->UMFace{
  return UMFace(umOwnerAt(neighbor),anchor,1u,1u,axis,sign);
 }
 fn umSeedState(face:UMFace,owner:UMOwner)->vec2f{
- return select(vec2f(0.0,UM_INF),vec2f(umPhysical(face),0.0),umSource(face,owner));
+ // WGSL select evaluates both operands: reject air before loading a payload.
+ if(!umSource(face,owner)){return vec2f(0.0,UM_INF);}
+ return vec2f(umPhysical(face),0.0);
 }
 // Seed and sweep outputs. The seed writes every slot and mask into BOTH
 // slot arrays. A sweep result whose distance is 0 or INF is its seed value
@@ -699,9 +701,12 @@ fn ueSeedOwner(owner:UMOwner)->vec3u{
  let origin=umOrigin(owner);let low=umLowOpen(vec3i(origin));var bits=vec2u(0u);var open=0u;
  // A unit owner's faces are the unit patches whatever its neighbours.
  if(umRegularFine||owner.width==1u){
+  // A liquid owner certifies all six incident patches as sources before
+  // neighbor ownership is resolved. Air owners still resolve their donors.
+  let source=textureLoad(phase,vec3i(origin),0).x>0.5;
   for(var axis=0u;axis<3u;axis++){
-   if(low[axis]){let face=umUnitExtensionFace(owner,axis,-1);if(umSeedWall(face,owner)){bits|=ueBit(face.anchor);}}
-   let face=umUnitExtensionFace(owner,axis,1);
+   if(low[axis]){var face=uePatch(vec3i(origin),axis,1u);face.anchor[axis]-=1;face.sign=-1;if(!source){face=umUnitExtensionFace(owner,axis,-1);}if(umSeedWall(face,owner)){bits|=ueBit(face.anchor);}}
+   var face=uePatch(vec3i(origin),axis,1u);if(!source){face=umUnitExtensionFace(owner,axis,1);}
    let value=umSeedState(face,owner);ueSeedStore(ueOwnSlot(owner,axis),value);if(value.y<0.5*UM_INF){bits|=ueBit(face.anchor);}else{open=1u;}
   }
   return vec3u(bits,open);
@@ -764,7 +769,10 @@ fn ueSeedFine(owner:UMOwner,lane:u32){
  var bits=vec2u(0u);let local=umCorner(owner.lane,4u);let live=ueCellLive(local,ueEdge(local),atomicLoad(&ueLive));
  for(var axis=0u;axis<3u;axis++){
   if(!live){continue;}
-  let face=umUnitExtensionFace(owner,axis,1);let value=umExtended(face,owner);
+  // Sources are immutable through every sweep. Reject before constructing
+  // a face; extension uses only its patch geometry, never its neighbor owner.
+  let slot=ueOwnSlot(owner,axis);if(stateIn[slot].y==0.0){continue;}
+  let face=uePatch(vec3i(umOrigin(owner)),axis,1u);let value=umExtended(face,owner);
   ueSweepStore(ueOwnSlot(owner,axis),value);bits|=ueNote(value,face.anchor);
  }
  ueGather(bits);

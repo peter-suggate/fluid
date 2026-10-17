@@ -94,11 +94,13 @@ const ROW_WORDS_PER_TILE=10*64+240,SOLID_ROW_WORDS_PER_TILE=10*64+2*240;
 const MIDDLE_FIELDS=9,COARSE_FIELDS=23;
 /** Index header words: count, overflow, final residual, fatal, completed
  * cycles, closed (the frame's verdict: nonzero when the pressure schedule's
- * last gate rejected the frame), converged (the convergence word), one spare,
+ * last gate rejected the frame), converged (the convergence word), valid
+ * residual bits (history in bits 0..15, initial in bit 16),
  * then the residual after each cycle's pre-smoothing (and after the last
  * cycle) in HISTORY words, then coarseBake's red and black 4h row counts.
- * The tile list and per-tile slot+1 map follow. */
-const HEADER=26,CLOSED_WORD=5,HISTORY_WORD=8,HISTORY=16,RED_WORD=24,BLACK_WORD=25;
+ * Then the initial residual, before ordinary smoothing. The tile list and
+ * per-tile slot+1 map follow. A cleared residual is not a measurement. */
+const HEADER=27,CLOSED_WORD=5,HISTORY_WORD=8,HISTORY=16,RED_WORD=24,BLACK_WORD=25,INITIAL_WORD=26,VALID_WORD=7;
 
 export interface UniformPressureBandFields {
  /** Simulation-indexed pressure phi (the simulation authority's output),
@@ -312,6 +314,7 @@ struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u}
 fn bCap()->u32{return params.capacity.x;}
 fn bN()->u32{return params.capacity.y;}
 const LIST:u32=${HEADER}u;const SLOTS:u32=${HEADER}u+UM_TILES;const HISTORY:u32=${HISTORY_WORD}u;const CYCLE:u32=4u;const DONE:u32=6u;
+const INITIAL:u32=${INITIAL_WORD}u;const VALID:u32=${VALID_WORD}u;const INITIAL_BIT:u32=1u<<${HISTORY}u;
 const K_GHOST:u32=0u;const K_BAND:u32=1u;const K_WALL:u32=2u;const K_OPEN:u32=3u;const K_NEUMANN:u32=4u;const K_CLOSED:u32=5u;
 fn bLocal(lane:u32)->vec3u{return vec3u(lane%4u,(lane/4u)%4u,lane/16u);}
 // A slot's row of local cell l: colour-major, then the half sweep's lane order.
@@ -340,6 +343,9 @@ fn bInside(kinds:u32)->bool{return (kinds&0x40000000u)!=0u;}
 // continues its open neighbours and is not its own depth.
 fn bShut(kinds:u32)->bool{return (kinds&0x20000000u)!=0u;}
 fn bSign(f:u32)->i32{return select(-1,1,(f&1u)==1u);}
+// Positive float bits have integer order. Treat every nonfinite residual as
+// infinity: floating max may otherwise discard a NaN and certify zero.
+fn bResidualMagnitude(r:f32)->u32{return min(bitcast<u32>(r)&0x7fffffffu,0x7f800000u);}
 `;
   const indexed=(atomic:boolean)=>/* wgsl */`
 @group(1) @binding(0) var<uniform> params:BandParams;
@@ -348,11 +354,12 @@ fn bIndex(i:u32)->u32{return ${atomic?"atomicLoad(&index[i])":"index[i]"};}
 // A closed band (the verdict rejected the frame) strides no slots: its solve,
 // projection and presentation do nothing. Row assembly precedes the verdict.
 fn bCount()->u32{return select(min(bIndex(0u),bCap()),0u,bIndex(${CLOSED_WORD}u)!=0u);}
-// Convergence: a cycle's restriction measured a residual at or below the
-// target. Each history word is 0 (cleared with the header) until its cycle's
-// restriction has run, and final once it has.
-fn bMet(r:u32)->bool{return r!=0u&&bitcast<f32>(r)<=params.solve.x;}
-fn bConvergedBefore(k:u32)->bool{for(var j=0u;j<min(k,${HISTORY-1}u);j++){if(bMet(bIndex(HISTORY+j))){return true;}}return false;}
+// Only read completed measurements: a dispatch must never test the word it
+// is reducing. The following dispatch sees the global maximum and valid bit.
+// Zero is a valid residual; zero tolerance disables stopping for diagnostics.
+fn bMet(word:u32,mask:u32)->bool{return (bIndex(VALID)&mask)!=0u&&params.solve.x>0.0&&bitcast<f32>(bIndex(word))<=params.solve.x;}
+fn bInitialMet()->bool{return bMet(INITIAL,INITIAL_BIT);}
+fn bConvergedBefore(k:u32)->bool{if(bInitialMet()){return true;}for(var j=0u;j<min(k,${HISTORY-1}u);j++){if(bMet(HISTORY+j,1u<<j)){return true;}}return false;}
 fn bConverged()->bool{return bConvergedBefore(${schedule.cycles}u);}
 // Converged launches stride zero slots: the same launches, no work.
 fn bLive()->u32{return select(bCount(),0u,bConverged());}
@@ -478,7 +485,7 @@ fn bFollowHalo(cell:u32,p:vec3i,kinds:u32,value:f32){
 // A liquid row's residual; a p_min=0 row at its bound only counts a positive one.
 fn bResidual(cell:u32,p:vec3i,kinds:u32)->f32{
  let r=bRhs(cell)+bOff(cell,p,kinds)-bDiagonal(cell)*solve[cell];
- return select(r,max(r,0.0),bInside(kinds)&&solve[cell]+bBase(cell)<=0.0);
+ return select(r,max(r,0.0),bInside(kinds)&&solve[cell]+bBase(cell)<=0.0&&bResidualMagnitude(r)<0x7f800000u);
 }
 // Band cell + 1 across face f of local cell l of slot s, 0 outside the band.
 // A face out of the tile reads the slot's baked neighbour (coarseBake): one
@@ -509,7 +516,7 @@ fn bOffNear(cell:u32,s:u32,l:vec3u,p:vec3i,kinds:u32)->f32{
 }
 fn bResidualNear(cell:u32,s:u32,l:vec3u,p:vec3i,kinds:u32)->f32{
  let r=bRhs(cell)+bOffNear(cell,s,l,p,kinds)-bDiagonal(cell)*solve[cell];
- return select(r,max(r,0.0),bInside(kinds)&&solve[cell]+bBase(cell)<=0.0);
+ return select(r,max(r,0.0),bInside(kinds)&&solve[cell]+bBase(cell)<=0.0&&bResidualMagnitude(r)<0x7f800000u);
 }
 `,solve=solveOf(false);
   const aggregates=/* wgsl */`
@@ -652,19 +659,38 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
  if(umFaceLow(a,axis)){return negative[umLowFaceIndex(vec3u(p),axis)];}
  return textureLoad(velocity,a,0)[axis];
 }
+// This solve follows the current solid rebuild, before any body integration.
+// The generic umCellOpen must also serve the frame tail after bodies move;
+// here its exact stored h fractions are current, including moving bodies.
+override bLocalSolidWork:bool=true;
+${S?/* wgsl */`fn bHeadCapacity(p:vec3i)->f32{
+ if(bLocalSolidWork&&umSolidEnabled()){
+  let tile=umTileKey(p>>vec3u(2u));
+  if(umKeyStored(tile)){
+   let local=vec3u(p)&vec3u(3u);let cell=local.x+4u*(local.y+4u*local.z);
+   return umSolidRecord[umSolidCount()+4u*umSolidTiles()+16u*tile+(cell>>2u)][cell&3u];
+  }
+ }
+ return umCellOpen(p);
+}`:""}
 // Row assembly, baked once per solve.
 @compute @workgroup_size(64) fn main(${slots}){
  let N=bN();let l=bLocal(lane);
  for(var s=group.x;s<bCount();s+=groups.x){
   let p=vec3i(bTile(s)*4u+bLocal(lane));let cell=s*64u+bRow(bLocal(lane));
-  let own=bPhiH(p);let liquid=bWet(own,1.0);${S?"let shut=!umCellIsOpen(p);let inside=umCellInsideSolid(p);":""}
+  let own=bPhiH(p);let liquid=bWet(own,1.0);${S?`// Current 16h geometry certificate: no fractional cell or body in the
+  // region/ring. It is consumed only here, before body integration.
+  let solidClear=bLocalSolidWork&&umSolidRegionClearAtBuild(p);
+  var shut=false;var inside=false;if(!solidClear){shut=!umCellIsOpen(p);inside=umCellInsideSolid(p);}`:""}
   var kinds=select(0u,0x80000000u,liquid)${S?"|select(0u,0x40000000u,inside)|select(0u,0x20000000u,shut)":""};var diagonal=0.0;var divergence=0.0;
   ${S?`// Native divergenceAtWithCapacity: V u + (V_i - V) u_s, u_s the moving wall's.
-  let bodies=liquid&&umBodyCount()>0u;let capacity=select(0.0,umCellOpen(p),bodies);`:""}
+  let bodies=liquid&&!solidClear&&umBodyCount()>0u;var capacity=0.0;
+  if(bodies||!bLocalSolidWork){capacity=bHeadCapacity(p);}`:""}
   for(var f=0u;f<6u;f++){
    let axis=f/2u;let sign=bSign(f);let h=params.hDt[axis];var q=p;q[axis]+=sign;
    let forced=bForcedField(p,axis,sign);var kind=K_GHOST;var coefficient=0.0;var fraction=1.0;
-   ${S?"var low=p;if(sign<0){low[axis]-=1;}let volume=umPressureFaceV(low,axis);var sealed=false;":""}
+   ${S?`var low=p;if(sign<0){low[axis]-=1;}var high=low;high[axis]+=1;
+   var volume=1.0;if(!solidClear||!umSolidValid(low)||!umSolidValid(high)){volume=umPressureFaceV(low,axis);}var sealed=false;`:""}
    // What lies across the face. A band tile's cells are stored: only a face
    // out of the tile asks.
    var across=UM_RESIDENT;if(l[axis]==select(0u,3u,sign>0)){across=umCellKind(q);}
@@ -676,7 +702,7 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
     // A closed cell's phi continues its neighbours': no vertex field of its own.
     var theta=1.0;
     if(liquid!=n.wet){
-     if(${S?"shut||!umCellIsOpen(q)":"false"}){theta=bPairTheta(own,liquid,n.phi,n.wet);}
+     if(${S?"!solidClear&&(shut||!umCellIsOpen(q))":"false"}){theta=bPairTheta(own,liquid,n.phi,n.wet);}
      ${S?`// Only nearly closed cells use the buried-interface safeguard.
      // A centre inside a solid does not imply a buried free surface: a rigid
      // body can leave substantial open volume in both cells at the waterline.
@@ -700,7 +726,7 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
     // free-surface face, a shoreline cell under a slope took flux from the
     // air above it at a theta its own column's phi never changed: nothing
     // restored it, and the column's surface sank a micron in 20 steps.
-    if(kind!=K_NEUMANN){sealed=(liquid&&shut&&!n.wet)||(!liquid&&n.wet&&!umCellIsOpen(q));}`:""}
+    if(!solidClear&&kind!=K_NEUMANN){sealed=(liquid&&shut&&!n.wet)||(!liquid&&n.wet&&!umCellIsOpen(q));}`:""}
    }
    ${S?`// CM11a: V scales the coefficient and the flux. A Neumann face's flux is
    // V times the transferred 4h face (init), the root's own flux through it:
@@ -711,7 +737,7 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
    if(sign>0||l[axis]==0u){rows[10u*N+240u*bCap()+bPackedFace(s,l,f)]=volume;}`:""}
    kinds|=(kind<<(3u*f))|select(0u,1u<<(18u+f),kind==K_BAND&&coefficient==params.solve[1u+axis]);if(sign>0||l[axis]==0u){rows[10u*N+bPackedFace(s,l,f)]=forced;}rows[(3u+f)*N+cell]=coefficient;
    if(kind!=K_NEUMANN){diagonal+=coefficient;divergence+=f32(sign)*fraction*forced/h;}
-   ${S?"if(bodies&&kind!=K_WALL&&kind!=K_OPEN){divergence+=f32(sign)*(capacity-fraction)*umSolidFaceVelocity(low,axis)/h;}":""}
+   ${S?"if(bodies&&kind!=K_WALL&&kind!=K_OPEN&&(!bLocalSolidWork||capacity!=fraction)){divergence+=f32(sign)*(capacity-fraction)*umSolidFaceVelocity(low,axis)/h;}":""}
   }
   rows[cell]=select(0.0,-params.policy.x*(divergence-textureLoad(correction,p,0).x)/params.hDt.w,liquid);
   rows[N+cell]=diagonal;rows[2u*N+cell]=bitcast<f32>(kinds);solve[cell]=own;
@@ -945,11 +971,11 @@ var<workgroup> bCellResidual:array<f32,64>;
 @compute @workgroup_size(64) fn main(${slots}){
  if(lane==0u){atomicStore(&worst,0u);bRestrictCount=select(bCount(),0u,bConvergedBefore(bCycle));}
  let n=workgroupUniformLoad(&bRestrictCount);
- var largest=0.0;
+ var largest=0u;
  for(var s=group.x;s<n;s+=groups.x){
   workgroupBarrier();
   let l=bLocal(lane);let cell=s*64u+bRow(l);let kinds=bKinds(cell);var r=0.0;
-  if(bLiquid(kinds)&&bDiagonal(cell)>0.0){r=bResidualNear(cell,s,l,vec3i(bTile(s)*4u+l),kinds);largest=max(largest,abs(r));}
+  if(bLiquid(kinds)&&bDiagonal(cell)>0.0){r=bResidualNear(cell,s,l,vec3i(bTile(s)*4u+l),kinds);largest=max(largest,bResidualMagnitude(r));}
   bCellResidual[lane]=r;workgroupBarrier();
   if(lane<8u){
    let a=bMiddleLocal(lane);var sum=0.0;
@@ -959,9 +985,9 @@ var<workgroup> bCellResidual:array<f32,64>;
    coarse[bM(1u,c)]=sum;coarse[bM(0u,c)]=e;
   }
  }
- atomicMax(&worst,bitcast<u32>(largest*params.policy.z));
+ atomicMax(&worst,bResidualMagnitude(bitcast<f32>(largest)*params.policy.z));
  workgroupBarrier();
- if(lane==0u){atomicMax(&index[HISTORY+bCycle],atomicLoad(&worst));}
+ if(lane==0u&&n>0u){atomicMax(&index[HISTORY+bCycle],atomicLoad(&worst));atomicOr(&index[VALID],1u<<bCycle);}
 }`,
    // With bProlong (red only), the 4h correction is prolonged on the fly: a
    // red update never reads its own value, and black values are prolonged
@@ -1114,9 +1140,10 @@ override bColour:u32=0u;
   solve[cell]=next;bFollowHalo(cell,p,kinds,next);
  }
 }`,
-   // After bCycles encoded cycles.
+   // Before ordinary smoothing, or after bCycles encoded cycles.
    measure:header+indexed(true)+rows+solve+aggregates+/* wgsl */`
 override bCycles:u32=1u;
+override bInitial:bool=false;
 var<workgroup> worst:atomic<u32>;
 var<workgroup> bMeasureCount:u32;
 // The largest band row residual, in divergence units (1/s), over liquid rows,
@@ -1124,20 +1151,28 @@ var<workgroup> bMeasureCount:u32;
 // residual (nothing moved since): the receipt takes that cycle and sets the
 // convergence word.
 @compute @workgroup_size(64) fn main(${slots}){
- if(lane==0u){atomicStore(&worst,0u);bMeasureCount=select(bCount(),0u,bConvergedBefore(bCycles));}
+ if(lane==0u){
+  atomicStore(&worst,0u);bMeasureCount=bCount();
+  if(!bInitial&&bConvergedBefore(bCycles)){bMeasureCount=0u;}
+ }
  let n=workgroupUniformLoad(&bMeasureCount);
- var largest=0.0;
+ var largest=0u;
  for(var s=group.x;s<n;s+=groups.x){
   let l=bLocal(lane);let p=vec3i(bTile(s)*4u+l);let cell=s*64u+bRow(l);
-  let kinds=bKinds(cell);if(bLiquid(kinds)&&bDiagonal(cell)>0.0){largest=max(largest,abs(bResidualNear(cell,s,l,p,kinds))*params.policy.z);}
+  let kinds=bKinds(cell);if(bLiquid(kinds)&&bDiagonal(cell)>0.0){largest=max(largest,bResidualMagnitude(bResidualNear(cell,s,l,p,kinds)*params.policy.z));}
  }
- atomicMax(&worst,bitcast<u32>(largest));
+ atomicMax(&worst,largest);
  workgroupBarrier();
- if(lane==0u){let r=atomicLoad(&worst);atomicMax(&index[2],r);atomicMax(&index[HISTORY+bCycles],r);}
- if(group.x==0u&&lane==0u){
-  var cycle=bCycles;for(var j=bCycles;j>0u;j--){if(bMet(bIndex(HISTORY+j-1u))){cycle=j-1u;}}
+ if(lane==0u&&n>0u){
+  let r=atomicLoad(&worst);
+  if(bInitial){atomicMax(&index[INITIAL],r);atomicOr(&index[VALID],INITIAL_BIT);}
+  else{atomicMax(&index[2],r);atomicMax(&index[HISTORY+bCycles],r);atomicOr(&index[VALID],1u<<bCycles);}
+ }
+ if(!bInitial&&group.x==0u&&lane==0u){
+  var cycle=bCycles;for(var j=bCycles;j>0u;j--){if(bMet(HISTORY+j-1u,1u<<(j-1u))){cycle=j-1u;}}
+  if(bInitialMet()){cycle=0u;}
   atomicStore(&index[CYCLE],cycle);
-  if(cycle<bCycles){atomicStore(&index[DONE],1u);atomicMax(&index[2],bIndex(HISTORY+cycle));}
+  if(cycle<bCycles){atomicStore(&index[DONE],1u);atomicMax(&index[2],select(bIndex(HISTORY+cycle),bIndex(INITIAL),bInitialMet()));}
  }
 }`,
    project:band+/* wgsl */`
@@ -1249,7 +1284,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    // D: the descent's half sweeps after the restriction, black first. U: the ascent's, the prolonging red first.
    coarseSweep:[0,1].map(c=>[`${c}`,{bColour:c}] as [string,Record<string,number>]),
    middleSweep:[...[0,1].map(c=>[`${c}`,{bColour:c}] as [string,Record<string,number>]),["P",{bColour:0,bProlong:1}]],
-   restrict:range(schedule.cycles).map(k=>[`@${k}`,{bCycle:k}]),measure:[["",{bCycles:schedule.cycles}]],
+   restrict:range(schedule.cycles).map(k=>[`@${k}`,{bCycle:k}]),measure:[["",{bCycles:schedule.cycles}],["Initial",{bInitial:1}]],
   };
   if(!this.spatialOrder)for(const key of ["listPrefix","listOffsets","listScatter"])delete sources[key];
   await Promise.all(Object.entries(sources).map(async([name,code])=>{
@@ -1321,6 +1356,9 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   this.dispatch(pass,"init","slots");this.dispatch(pass,"rebase","slots");
   // Shut rows exist only beside a solid.
   if(this.solid?.present){this.dispatch(pass,"sweepS0","cells");this.dispatch(pass,"sweepS1","cells");}
+  // Test the current global pressure predictor, including today's forces and
+  // body fluxes. Projection still runs when no fine correction is necessary.
+  this.dispatch(pass,"measureInitial","slots");
   for(let cycle=0;cycle<s.cycles;cycle++){
    this.sweep(pass,"sweep0","sweep1","cells",s.fineSweeps);
    this.dispatch(pass,this.restricts[cycle]!,"slots");
@@ -1338,6 +1376,9 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  encodeReceipt(encoder:GPUCommandEncoder,target:GPUBuffer,offset:number):void{encoder.copyBufferToBuffer(this.index,0,target,offset,32);}
  /** Diagnostics: the residual history words (before each cycle, then after the last). */
  static readonly historyWord=HISTORY_WORD;
+ static readonly initialResidualWord=INITIAL_WORD;
+ static readonly residualValidityWord=VALID_WORD;
+ static readonly initialResidualBit=1<<HISTORY;
  /** The header word the frame's verdict closes the band with. */
  static readonly closedWord=CLOSED_WORD;
  destroy():void{for(const b of [this.index,this.ownRows,this.coarse,this.solve])b?.destroy();}

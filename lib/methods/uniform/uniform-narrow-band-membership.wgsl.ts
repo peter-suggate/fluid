@@ -59,38 +59,162 @@ fn nbCrossingVertex(tile:u32,origin:vec3u,p:vec3u)->f32{
 // A 4h tile among 4h tiles interpolates its corners throughout: it holds a
 // crossing only if they straddle zero. Beside an h tile its upper faces may
 // be stored h vertices, so it is listed with the h tiles and decided there.
-@compute @workgroup_size(64) fn depthTiles(@builtin(global_invocation_id) gid:vec3u){
- for(var t=gid.x;t<NB_BAND_TILES;t+=65536u){
-  if(!umTileLive(t)){continue;}
+fn nbDepthTile(t:u32){
+  if(!umTileLive(t)){return;}
   // Pure 4h Eulerian surfaces neither reconstruct particles nor redistance
   // h vertices. Search only where fine geometry or live/activating samples
   // need it; the existing reach dilation supplies the inner overlap collar.
-  if(umTileMinimumWidth(t)==4u&&atomicLoad(&bins[NB_SURFACE_TILES+t])==0u&&bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+t]))<=0.0){continue;}
+  if(umTileMinimumWidth(t)==4u&&atomicLoad(&bins[NB_SURFACE_TILES+t])==0u&&bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+t]))<=0.0){return;}
   var candidate=true;
+  if(nbCrossingReuse(t)){
+   let mask=nbCrossingCachedMask(t);if((mask.x|mask.y)==0u&&!nbMetricPlaneMissing(t)){return;}
+  }else
   if(umTileMinimumWidth(t)==4u){
    let origin=4u*umTileCoord(t);var low=3.0e38;var high=-3.0e38;
    for(var k=0u;k<8u;k++){let value=nbCrossingVertex(t,origin,origin+4u*umCorner(k,2u));low=min(low,value);high=max(high,value);}
    candidate=low<=0.0&&high>=0.0;
   }
   if(candidate){let slot=atomicAdd(&bins[NB_BAND],1u);atomicStore(&bins[NB_BAND_CANDIDATES+slot],t);}
+}
+@compute @workgroup_size(64) fn depthTiles(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var region=group.x;region<NB_REUSE_REGIONS;region+=1024u){
+  let tile=nbReuseTile(region,lane);nbPrepareReuse(region,lane,tile);nbDepthTile(tile);
+  workgroupBarrier();
  }
 }
 var<workgroup> nbBandVertices:array<f32,125>;
+fn nbMetricPlaneMissing(tile:u32)->bool{
+ if(!nbMetricPlanes||!nbReuseCacheEnabled()||nbReuseRegion(tile)>=NB_REUSE_METRIC_CAPACITY){return false;}
+ return atomicLoad(&bins[NB_REUSE_PLANE+384u*nbReuseRegion(tile)+6u*nbReuseLocal(tile)+5u])==0u;
+}
 var<workgroup> nbBandMask:array<atomic<u32>,2>;
-@compute @workgroup_size(128) fn depthSeeds(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=atomicLoad(&bins[NB_BAND_CANDIDATES+group.x]);let coord=umTileCoord(tile);let origin=4u*coord;
- if(lane<125u){nbBandVertices[lane]=nbCrossingVertex(tile,origin,origin+umCorner(lane,5u));}
- if(lane<2u){atomicStore(&nbBandMask[lane],0u);}
- workgroupBarrier();
- if(lane<64u){
-  let l=umCorner(lane,4u);var low=3.0e38;var high=-3.0e38;
-  for(var k=0u;k<8u;k++){let v=l+umCorner(k,2u);let value=nbBandVertices[v.x+5u*(v.y+5u*v.z)];low=min(low,value);high=max(high,value);}
-  // Exact zero belongs to either incident cell; a flat zero plateau alone
-  // is not an interface. Domain and solid walls are not free surfaces.
-  if(low<=0.0&&high>=0.0&&low<high&&umCellOpen(vec3i(origin+l))>1e-5){atomicOr(&nbBandMask[l.z>>1u],1u<<(l.x+4u*l.y+16u*(l.z&1u)));}
+var<workgroup> nbSeedReuse:u32;
+var<workgroup> nbCrossingFinite:atomic<u32>;
+var<workgroup> nbMetricPlaneFit:vec4f;
+var<workgroup> nbMetricPlaneError:atomic<u32>;
+var<workgroup> nbMetricPlaneEnabled:u32;
+// Reuse the crossing producer's current 125 values: convex interpolation
+// extends their residual bound throughout every represented h cell.
+fn nbCaptureMetricPlane(tile:u32,lane:u32){
+ if(!nbMetricPlanes){return;}
+ let region=nbReuseRegion(tile);
+ if(lane==0u){nbMetricPlaneEnabled=u32(nbReuseCacheEnabled()&&region<NB_REUSE_METRIC_CAPACITY);}
+ if(workgroupUniformLoad(&nbMetricPlaneEnabled)==0u){return;}
+ let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+ if(lane==0u){
+  var centre=0.0;var gradient=vec3f(0);
+  for(var k=0u;k<8u;k++){
+   let c=umCorner(k,2u);let q=4u*c;
+   let value=nbBandVertices[q.x+5u*(q.y+5u*q.z)]/h;
+   centre+=0.125*value;gradient+=0.0625*value*(2.0*vec3f(c)-1.0);
+  }
+  nbMetricPlaneFit=vec4f(gradient,centre);atomicStore(&nbMetricPlaneError,0u);
  }
  workgroupBarrier();
+ if(lane<125u){
+  let value=nbBandVertices[lane]/h;let q=vec3f(umCorner(lane,5u))-2.0;
+  let predicted=nbMetricPlaneFit.w+dot(nbMetricPlaneFit.xyz,q);
+  let error=abs(value-predicted)+0.0000152587890625*max(1.0,max(abs(value),abs(predicted)));
+  atomicMax(&nbMetricPlaneError,bitcast<u32>(error));
+ }
+ workgroupBarrier();
+ if(lane==0u){
+  let at=NB_REUSE_PLANE+6u*(64u*region+nbReuseLocal(tile));
+  for(var k=0u;k<4u;k++){atomicStore(&bins[at+k],bitcast<u32>(nbMetricPlaneFit[k]));}
+  atomicStore(&bins[at+4u],atomicLoad(&nbMetricPlaneError));
+  // This certifies the same canonical-open predicate used by crossing
+  // classification, not uncut volume or collision clearance. Every cell in
+  // the certified tile participates in that represented liquid zero set.
+  let open=!umSolidEnabled()||all(umSolidOpenCells(tile)==vec2u(0xffffffffu));
+  atomicStore(&bins[at+5u],select(2u,1u,open&&atomicLoad(&nbCrossingFinite)!=0u));
+ }
+}
+
+var<workgroup> nbPlaneFirst:atomic<u32>;
+var<workgroup> nbPlaneCoverage:array<atomic<u32>,2>;
+var<workgroup> nbRegionPlane:vec4f;
+var<workgroup> nbRegionResidual:atomic<u32>;
+// Compact tile certificates cover the CURRENT field. Aggregate them in the
+// existing 16h control group; no additional fine values are gathered.
+fn nbAggregateMetricPlane(region:u32,lane:u32){
+ if(!nbMetricPlanes){return;}
+ if(lane==0u){atomicStore(&nbPlaneFirst,128u);atomicStore(&nbRegionResidual,0u);}
+ if(lane<2u){atomicStore(&nbPlaneCoverage[lane],0u);}
+ workgroupBarrier();
+ let tileAt=NB_REUSE_PLANE+384u*region+6u*lane;
+ let valid=nbReuseCacheEnabled()&&atomicLoad(&bins[tileAt+5u])==1u;
+ if(valid){
+  var gradient:vec3f;for(var k=0u;k<3u;k++){gradient[k]=bitcast<f32>(atomicLoad(&bins[tileAt+k]));}
+  let slope=length(gradient);
+  if(slope>1e-6&&slope<1e6){
+   let tile=nbReuseTile(region,lane);let mask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*tile]),atomicLoad(&bins[NB_BAND_MASK+2u*tile+1u]));
+   atomicMin(&nbPlaneFirst,select(64u+lane,lane,(mask.x|mask.y)!=0u));
+  }
+ }
+ workgroupBarrier();let first=atomicLoad(&nbPlaneFirst);
+ if(lane==0u){
+  nbRegionPlane=vec4f(0);
+  if(first<128u){
+   let at=NB_REUSE_PLANE+384u*region+6u*(first&63u);
+   for(var k=0u;k<4u;k++){nbRegionPlane[k]=bitcast<f32>(atomicLoad(&bins[at+k]));}
+   let centre=4.0*vec3f(umCorner(first&63u,4u))+2.0;
+   nbRegionPlane.w+=dot(nbRegionPlane.xyz,vec3f(8)-centre);
+  }
+ }
+ workgroupBarrier();
+ if(valid){
+  var plane:vec4f;for(var k=0u;k<4u;k++){plane[k]=bitcast<f32>(atomicLoad(&bins[tileAt+k]));}
+  let centre=4.0*vec3f(umCorner(lane,4u))+2.0;
+  let predicted=nbRegionPlane.w+dot(nbRegionPlane.xyz,centre-8.0);
+  let delta=abs(plane.xyz-nbRegionPlane.xyz);
+  let error=bitcast<f32>(atomicLoad(&bins[tileAt+4u]))+abs(plane.w-predicted)+2.0*(delta.x+delta.y+delta.z)+0.0000152587890625*max(1.0,max(abs(predicted),abs(plane.w)));
+  let slope=length(nbRegionPlane.xyz);
+  // Clamped far phi may not match a near-interface model. Exclude that
+  // tile from coverage rather than poisoning the model's certified subset.
+  if(error>=0.0&&slope>1e-6&&slope<1e6&&error/slope<=0.02){
+   atomicMax(&nbRegionResidual,bitcast<u32>(error));
+   atomicOr(&nbPlaneCoverage[lane>>5u],1u<<(lane&31u));
+  }
+ }
+ workgroupBarrier();
+ if(lane==0u){
+  let at=NB_REUSE_REGION_PLANE+8u*region;
+  for(var k=0u;k<4u;k++){atomicStore(&bins[at+k],bitcast<u32>(nbRegionPlane[k]));}
+  atomicStore(&bins[at+4u],atomicLoad(&nbRegionResidual));
+  for(var k=0u;k<2u;k++){atomicStore(&bins[at+5u+k],atomicLoad(&nbPlaneCoverage[k]));}
+  atomicStore(&bins[at+7u],u32(first<128u&&(atomicLoad(&nbPlaneCoverage[0])|atomicLoad(&nbPlaneCoverage[1]))!=0u));
+ }
+ workgroupBarrier();
+}
+@compute @workgroup_size(128) fn depthSeeds(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=atomicLoad(&bins[NB_BAND_CANDIDATES+group.x]);let coord=umTileCoord(tile);let origin=4u*coord;
+ if(lane==0u){
+  let reuse=nbCrossingReuse(tile);
+  nbSeedReuse=u32(reuse)|select(0u,2u,!reuse||nbMetricPlaneMissing(tile));
+  atomicStore(&nbCrossingFinite,1u);
+ }
+ let decision=workgroupUniformLoad(&nbSeedReuse);let cached=(decision&1u)!=0u;
+ let gather=(decision&2u)!=0u;
+ if(cached){if(lane<2u){atomicStore(&nbBandMask[lane],nbCrossingCachedMask(tile)[lane]);}}
+ if(gather){
+  if(lane<125u){let value=nbCrossingVertex(tile,origin,origin+umCorner(lane,5u));nbBandVertices[lane]=value;if((bitcast<u32>(value)&0x7fffffffu)>=0x7f800000u){atomicStore(&nbCrossingFinite,0u);}}
+  workgroupBarrier();
+  nbCaptureMetricPlane(tile,lane);
+ }
+ if(!cached){
+  if(lane<2u){atomicStore(&nbBandMask[lane],0u);}
+  workgroupBarrier();
+  if(lane<64u){
+   let l=umCorner(lane,4u);var low=3.0e38;var high=-3.0e38;
+   for(var k=0u;k<8u;k++){let v=l+umCorner(k,2u);let value=nbBandVertices[v.x+5u*(v.y+5u*v.z)];low=min(low,value);high=max(high,value);}
+   // Exact zero belongs to either incident cell; flat plateaus and walls do not.
+   if(low<=0.0&&high>=0.0&&low<high&&umCellOpen(vec3i(origin+l))>1e-5){atomicOr(&nbBandMask[l.z>>1u],1u<<(l.x+4u*l.y+16u*(l.z&1u)));}
+  }
+ }
+
+ workgroupBarrier();
  let mask=vec2u(atomicLoad(&nbBandMask[0]),atomicLoad(&nbBandMask[1]));
+ if(lane==0u&&atomicLoad(&nbCrossingFinite)!=0u){nbCommitCrossing(tile,mask);}
  if((mask.x|mask.y)==0u){return;}
  if(lane<2u){atomicStore(&bins[NB_BAND_MASK+2u*tile+lane],mask[lane]);}
  for(var k=lane;k<343u;k+=128u){

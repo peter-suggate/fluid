@@ -200,7 +200,7 @@ fn umCutFlux(o:UMOwner,axis:u32,sign:i32)->f32{
   if(umSolidEnabled()&&!umFaceLow(c,axis)){volume=umPatchFaceV(umTileAt(vec3u(c)/4u),c,axis);}
   else{volume=umPressureFaceV(c,axis);}sum+=volume*u;
   // A moving wall's (V_i - V) u_s, V_i the owner-side h cell (divergenceAtWithCapacity).
-  if(umBodyCount()>0u){var inner=c;if(sign<0){inner[axis]+=1;}sum+=(umCellOpen(inner)-volume)*umSolidFaceVelocity(c,axis);}
+  if(umBodyCount()>0u){var inner=c;if(sign<0){inner[axis]+=1;}let capacity=umCellOpen(inner);if(capacity!=volume){sum+=(capacity-volume)*umSolidFaceVelocity(c,axis);}}
  }}
  return sum;
 }

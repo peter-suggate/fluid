@@ -35,6 +35,8 @@ fn umVertexValue(p:vec3u)->f32{return 5.0*params.hDt.x;}
 fn umSampleVertex(p:vec3f)->f32{return fixture[8]*params.hDt.x;}
 fn umCellOpen(c:vec3i)->f32{return 1.0;}
 fn nbPhiGradient(c:vec3u,q:vec3f)->vec4f{return vec4f(0,0,0,1);}
+fn nbCurrentPlaneMetric(p:vec3u,tile:u32)->vec2f{return vec2f(0);}
+fn nbReuseCacheEnabled()->bool{return true;}
 fn nbPointNear(c:vec3i,p:vec3f)->vec3f{return p;}
 fn nbCellNear(c:vec3i,p:vec3i)->vec3i{return p;}
 ${['nbGeometryCapacity','nbGeometryRank'].map(shaderFunction).join('\n')}

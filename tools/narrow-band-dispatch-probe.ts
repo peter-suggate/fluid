@@ -10,7 +10,8 @@ export class NarrowBandDispatchProbe {
    if(key==="createComputePipelineAsync")return async(d:GPUComputePipelineDescriptor)=>{
     const pipeline=await target.createComputePipelineAsync(d);
     const c=d.compute.constants;
-    this.names.set(pipeline,`${d.compute.entryPoint??"main"}${c?.umCellWidth?` width=${c.umCellWidth}`:""}${c?.ueSweepKind?` sweep=${c.ueSweepKind}`:""}`);
+    const tags=["umRegularFine","umMergedTiles","umFastSurface","umSolidFree","umSolidTwinned","umCountedJobs"].filter(key=>c?.[key]!==undefined).map(key=>`${key}=${c![key]}`).join(" ");
+    this.names.set(pipeline,`${d.compute.entryPoint??"main"}${c?.umCellWidth?` width=${c.umCellWidth}`:""}${c?.ueSweepKind?` sweep=${c.ueSweepKind}`:""}${tags?` ${tags}`:""}`);
     return pipeline;
    };
    if(key==="createCommandEncoder")return (d?:GPUCommandEncoderDescriptor)=>{
