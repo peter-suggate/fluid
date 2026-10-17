@@ -152,7 +152,10 @@ fn nbBuildDistance(p:vec3u,c:vec3u,tile:u32){
 // x = 4, then y = 4, then z = 4), through the same call site: a second
 // inlined nbBuildDistance, trace and all, cost the whole pass 1.4 ms of a
 // 6 ms late-splash frame.
+// Its h-side pipeline is launched as a solid-free twin and a general
+// pipeline (umSolidSkip); the others test nothing here.
 @compute @workgroup_size(64) fn buildDistance(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(umSolidSkip()){return;}
  let tile=atomicLoad(&bins[NB_BAND_DISTANCE+group.x]);let origin=4u*umTileCoord(tile);
  var p=origin+umCorner(lane,4u);var c=p;
  let face=any(((origin+4u)&vec3u(31u))==vec3u(0u));

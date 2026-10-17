@@ -40,9 +40,11 @@ const NB_H_STORE_ENTRIES=new Set(["coupleFine","redistanceFine"]);
 // (name@h) for the batches encoded while the capacity is non-zero: their
 // twin binds the same group, whose fields are then h textures.
 const NB_H_TWIN_ENTRIES=["buildDistance"];
-// Entries launched as a solid-free twin (name@free, umSolidFree) beside the
-// general pipeline (umSolidTwinned): umSolidSkip leaves the step to one.
-const NB_FREE_TWIN_ENTRIES=["coupleFine"];
+// Pipelines (by name) launched as a solid-free twin (name@free, umSolidFree)
+// beside the general pipeline (umSolidTwinned): umSolidSkip leaves the step
+// to one. buildDistance's twin is of its h-side pipeline (the redistance
+// and metric batches while the h capacity is non-zero).
+const NB_FREE_TWIN_ENTRIES=["coupleFine","buildDistance@h"];
 const NB_LAUNCH={grid:0,counted:1,tiles:2,one:3,particles:4} as const;
 /** One launch of a batch, resolved once at initialization: its bind groups
  * by name (bind() replaces the groups), its pipeline and its launch. */
@@ -1096,7 +1098,7 @@ ${narrowBandSurfaceWGSL}
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
   await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","markParticleTiles","surfaceCells","surfaceSplat","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthTiles","depthSeeds","depthLists",...narrowBandNearestEntries,"depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_H_TWIN_ENTRIES.map(entry=>`${entry}@h`),...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transfer@fit"].map(async name=>{
    const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","snapshot","update","seed","seedSources"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(entryPoint==="depthCoarse"?{nbCachedGeometry:0}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)||name.endsWith("@h")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(entryPoint)?{umSolidTwinned:1}:{}),...(entryPoint==="transfer"?{nbTransferTwin:name.endsWith("@fit")?1:2}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(entryPoint==="depthCoarse"?{nbCachedGeometry:0}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)||name.includes("@h")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...(entryPoint==="transfer"?{nbTransferTwin:name.endsWith("@fit")?1:2}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
   }));
   if(this.slotSnapshotResources){
@@ -1120,10 +1122,10 @@ ${narrowBandSurfaceWGSL}
    snapshot:this.compile(["snapshot"],undefined,"snapshot"),
    retire:this.compile(["depthCoarse","redistanceCoarse"],undefined,"coarse retirement"),
    clearAir:this.compile(["airSeeds","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse"],undefined,"retire empty air"),
-   redistanceFine:this.compile(["depthGeometry","buildDistance@h","redistanceFine"],undefined,"redistance"),
+   redistanceFine:this.compile(["depthGeometry","buildDistance@h@free","buildDistance@h","redistanceFine"],undefined,"redistance"),
    redistanceMetric:this.compile(["depthGeometry","buildDistance"],undefined,"redistance"),
    metric:this.compile(["depthGeometry","buildDistance"],undefined,"surface metric"),
-   metricFine:this.compile(["depthGeometry","buildDistance@h"],undefined,"surface metric"),
+   metricFine:this.compile(["depthGeometry","buildDistance@h@free","buildDistance@h"],undefined,"surface metric"),
    update:this.compile(["update"],undefined,"update"),
    resample:this.compile(["resampleCount","resamplePrefix","resample","seedCells","seedSources","seed"],"update","resample and seed"),
   };
