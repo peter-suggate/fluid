@@ -126,8 +126,13 @@ export class UniformMixedSurface {
     return Math.ceil((this.solid?8*c.tiles:0)/256)*256+this.deferredBytes;
   }
   /** The deferred binding: count words, a word per lattice vertex (the
-   * deferred list), then five words per cubic entry (advectCubic). */
+   * deferred list), then advectCubic's region: advectFine's list (five words
+   * an entry) from its start, the deferred fast twin's (six words) from its
+   * end down (umCubicDeferredAt). */
   private get deferredBytes():number{return 16+4*this.address.vertexKeys+20*this.cubicEntries;}
+  /** The deferred fast twin's cubic list, finished by advectCubic compiled
+   * umCubicDeferred with the twin's overrides. */
+  private cubicDeferredPipeline?:GPUComputePipeline;
   bind(f: UniformMixedSurfaceFields): UniformDetailGroup {
     const a=this.address;
     for(const [i,t] of [f.phi,f.outputPhi,f.velocity,f.coarseVelocity].entries()){
@@ -423,8 +428,12 @@ ${uniformMixedWallAheadWGSL}
 // A vertex on a wall (a face of a stored page with a SOLID page across it;
 // an AIR page across is none) whose liquid one width inside moves onto the
 // wall takes the phi carried to that inside point, where it is liquid.
-fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
- if(params.hDt.w<=0.0){return value;}var interior=p;var contact=false;
+// umWallContinued is the continued phi, or 1e30 where there is none; it does
+// not depend on the value, so advectDeferred's fast twin evaluates it ahead
+// of the cubic. umWallContact applies it.
+fn umWallContact(value:f32,continued:f32)->f32{return select(value,min(value,continued),continued<0.0);}
+fn umWallContinued(p:vec3f,width:u32)->f32{
+ if(params.hDt.w<=0.0){return 1e30;}var interior=p;var contact=false;
  for(var k=0u;k<6u;k++){
   if(umWallBlock(vec3i(p),k)==0u){continue;}
   let axis=k>>1u;let inward=select(1.0,-1.0,(k&1u)!=0u);
@@ -433,8 +442,7 @@ fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
   if(inward*speed>=-1e-6){continue;}
   interior[axis]+=inward*f32(width);contact=true;
  }
- if(!contact${this.solid?"||!umOpenAt(interior)":""}){return value;}let continued=umSampleVertex(umTrace(interior));
- return select(value,min(value,continued),continued<0.0);
+ if(!contact${this.solid?"||!umOpenAt(interior)":""}){return 1e30;}return umSampleVertex(umTrace(interior));
 }
 // The six wall reach words (UM_WALL_REACH, a face direction each) are final
 // once wallReach, an earlier dispatch, is done. Every advect entry stages
@@ -598,12 +606,32 @@ fn umVertexTrace(foot:UMFoot)->vec3f{
  let end=umSurfaceTrace(foot.foot);if(all(foot.shift==vec3f(0.0))){return end;}
  return umPointFrom(end,end+foot.shift);
 }
+// advectDeferred's list index of the vertex umAdvected evaluates, and
+// whether umAdvected listed it for advectCubic (umCubicListed).
+var<private> umDeferredIndex:u32;
+var<private> umListed:bool=false;
+override umCubicDeferred:bool=false;
 fn umAdvected(p:vec3f,width:u32,foot:UMFoot)->f32{
  ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){return umLoadVertex(vec3u(p));}
  let end=umVertexTrace(foot);let walk=umWalk(p,end);let q=walk.q;`:"let q=umVertexTrace(foot);"}let cell=umVertexCell(q);var value=cell.value;
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){value=umCubicPhi(q,cell);}
- ${this.solid?"value=umWallContact(p,value,width);if(walk.hit){value=umEmbeddedAir(p,end,value);}value=umReleasedWalls(p,value);":"value=umReleasedWalls(p,umWallContact(p,value,width));"}
+ let continued=umWallContinued(p,width);
+ if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){
+  // The deferred fast twin (umCubicListed) has no cubic: it lists the vertex
+  // with its wall continuation for advectCubic's umCubicDeferred launch,
+  // which finishes it and retires its word. A slow vertex, one a solid
+  // walk hit or one past a full list is left to the general launch.
+  if(umCubicListed){
+   if(!umSlow${this.solid?"&&!walk.hit":""}){
+    let j=atomicAdd(&deferred.header[2],1u);
+    if(j<umCubicDeferredRoom()){let b=umCubicDeferredAt(j);deferred.data[b]=umDeferredIndex;deferred.data[b+1u]=bitcast<u32>(q.x);deferred.data[b+2u]=bitcast<u32>(q.y);deferred.data[b+3u]=bitcast<u32>(q.z);deferred.data[b+4u]=bitcast<u32>(foot.smoothing);deferred.data[b+5u]=bitcast<u32>(continued);umListed=true;}
+    else{umSlow=true;}
+   }
+   return 0.0;
+  }
+  value=umCubicPhi(q,cell);
+ }
+ ${this.solid?"value=umWallContact(value,continued);if(walk.hit){value=umEmbeddedAir(p,end,value);}value=umReleasedWalls(p,value);":"value=umReleasedWalls(p,umWallContact(value,continued));"}
  return ${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
 }
 // Whether umReleasedWalls can change value at p: a direction's reach clears
@@ -671,6 +699,12 @@ override umDeferTraced:bool=false;
 override umCubicListed:bool=false;
 // The cubic list's first word in deferred.data: past a word per lattice vertex.
 const UM_CUBIC_BASE=${this.address.vertexKeys}u;
+// advectFine's list bound (entries of five words). The deferred fast twin's
+// list shares the region from its end down, six words an entry, as far as
+// advectFine's (complete by then) leaves room: umCubicDeferredRoom entries.
+const UM_CUBIC_WORDS=${5*this.cubicEntries}u;
+fn umCubicDeferredRoom()->u32{return (UM_CUBIC_WORDS-5u*min(atomicLoad(&deferred.header[1]),UM_CUBIC_WORDS/5u))/6u;}
+fn umCubicDeferredAt(j:u32)->u32{return UM_CUBIC_BASE+UM_CUBIC_WORDS-6u*(j+1u);}
 fn umAdvectStore(vertex:vec3u,width:u32){
  if(params.hDt.w>0.0&&umWallPlane(vec3i(vertex))<6u){return;}
  {let far=umFarAir(vertex);if(far>=0.0){textureStore(outputPhi,vec3i(vertex),vec4f(far));return;}}
@@ -729,11 +763,11 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   if((code==3u)!=umRegularFine){continue;}
   let vertex=umVertexCoord(word&0x3fffffffu);
   let width=select(1u<<code,1u,code==3u);
-  umSlow=false;let foot=umVertexFoot(vertex,width);
+  umSlow=false;umListed=false;umDeferredIndex=i;let foot=umVertexFoot(vertex,width);
   let value=umAdvected(vec3f(vertex),width,foot)+foot.smoothing;
-  // The fast twin leaves a vertex with a slow sample to the general launch
-  // and retires the rest from the list.
-  if(umFastSurface){if(umSlow){continue;}deferred.data[i]=0xffffffffu;}
+  // The fast twin leaves a vertex with a slow sample to the general launch,
+  // one it listed to advectCubic, and retires the rest from the list.
+  if(umFastSurface){if(umSlow||umListed){continue;}deferred.data[i]=0xffffffffu;}
   textureStore(outputPhi,vec3i(vertex),vec4f(value));
  }
 }
@@ -807,7 +841,7 @@ fn umSampleClosed(q:vec3f)->bool{
 const UM_WALL_REACH:u32=${UNIFORM_MIXED_CLAIM_WORDS}u;
 const UM_WALL_TILE_REACH:u32=${SURFACE_CLAIM_WORDS}u;
 @compute @workgroup_size(64) fn wallReach(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);atomicStore(&deferred.header[1],0u);}
+ if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);atomicStore(&deferred.header[1],0u);atomicStore(&deferred.header[2],0u);}
  let h=params.hDt.xyz;let dt=params.hDt.w;let faces=umWallFaceCount();
  for(var i=group.x;i<faces;i+=groups.x){
   let face=umWallFace(i);let f=face%6u;let axis=f>>1u;let upper=(f&1u)!=0u;let inward=select(1.0,-1.0,upper);
@@ -872,16 +906,26 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
 // and smoothing, finished as umAdvectStore would: the cubic at the end, the
 // released-wall test (a vertex it may change goes to the deferred list) and
 // the source. A fixed grid (cubicGrid workgroups) strides over the list.
+// Compiled umCubicDeferred (with the deferred fast twin's overrides) it
+// strides the twin's list instead, whose entries name a deferred word and
+// carry its wall continuation: umAdvected's tail (umWallContact,
+// umReleasedWalls, the source), then the word is retired.
 @compute @workgroup_size(64) fn advectCubic(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(umCubicDeferred&&umSolidSkip()){return;}
  umStagePlaneReach(lane);
- let count=atomicLoad(&deferred.header[1]);
+ var count=atomicLoad(&deferred.header[1]);
+ if(umCubicDeferred){count=min(atomicLoad(&deferred.header[2]),umCubicDeferredRoom());}
  for(var i=gid.x;i<count;i+=64u*groups.x){
-  let b=UM_CUBIC_BASE+5u*i;let key=deferred.data[b];let vertex=umVertexCoord(key);let p=vec3f(vertex);
+  var b=UM_CUBIC_BASE+5u*i;if(umCubicDeferred){b=umCubicDeferredAt(i);}let first=deferred.data[b];var key=first;
+  if(umCubicDeferred){key=deferred.data[first]&0x3fffffffu;}
+  let vertex=umVertexCoord(key);let p=vec3f(vertex);
   let q=bitcast<vec3f>(vec3u(deferred.data[b+1u],deferred.data[b+2u],deferred.data[b+3u]));let smoothing=bitcast<f32>(deferred.data[b+4u]);
   var value=umCubicPhi(q,umVertexCell(q));
-  if(umReleasedMayChange(p,value)){let k=atomicAdd(&deferred.header[0],1u);deferred.data[k]=key;continue;}
+  if(umCubicDeferred){value=umReleasedWalls(p,umWallContact(value,bitcast<f32>(deferred.data[b+5u])));}
+  else if(umReleasedMayChange(p,value)){let k=atomicAdd(&deferred.header[0],1u);deferred.data[k]=key;continue;}
   value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
   textureStore(outputPhi,vec3i(vertex),vec4f(value+smoothing));
+  if(umCubicDeferred){deferred.data[first]=0xffffffffu;}
  }
 }
 @compute @workgroup_size(64) fn advectFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -965,7 +1009,8 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
       keyed("advectCubic",{umCellWidth:1,...UNIFORM_DETAIL_H_STORE,...free}),
       Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,...twinned}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...twinned})]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
       ...(this.solid?[Promise.all([compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,...free}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...free})]).then(twins=>{this.freeDeferredPipelines.push(...twins);})]:[]),
-      compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umFastSurface:1,...free}).then(fast=>{this.fastDeferredPipeline=fast;}),
+      compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umFastSurface:1,umCubicListed:1,...free}).then(fast=>{this.fastDeferredPipeline=fast;}),
+      compile("advectCubic",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umCubicDeferred:1,...free}).then(cubic=>{this.cubicDeferredPipeline=cubic;}),
       keyed("advectOwners",{...regular,umCertifiedJobs:1,umClaimWord:0,...UNIFORM_DETAIL_H_STORE}),
     ]);
   }
@@ -998,7 +1043,10 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
     // [merged, regular h]: each strides the entries its own launch listed,
     // and no h launch ran without h-tile capacity.
     for(let i=1,n=this.ownership.coarseOnly?2:3;i<n&&i<this.deferredPipelines.length;i++){
-      if(i===1&&this.fastDeferredPipeline){deferred.setPipeline(this.variant(this.fastDeferredPipeline));deferred.dispatchWorkgroups(this.deferredGrid);}
+      if(i===1&&this.fastDeferredPipeline){
+        deferred.setPipeline(this.variant(this.fastDeferredPipeline));deferred.dispatchWorkgroups(this.deferredGrid);
+        deferred.setPipeline(this.variant(this.cubicDeferredPipeline!));deferred.dispatchWorkgroups(this.cubicGrid);
+      }
       const twin=this.freeDeferredPipelines[i-1];if(twin){deferred.setPipeline(this.variant(twin));deferred.dispatchWorkgroups(this.deferredGrid);}
       deferred.setPipeline(this.variant(this.deferredPipelines[i]!));deferred.dispatchWorkgroups(this.deferredGrid);
     }
