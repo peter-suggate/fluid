@@ -2768,7 +2768,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.scene = scene; this.sceneRevision++;
     // The mask tells the edit every cell it moves as it folds the scene in;
     // the columns of those cells are the bed-slope lane's to bake again.
-    const edit = this.mixedFrame ? uniformMixedSolidEdit(refinementRegionLattice(scene).dimensions as [number, number, number],
+    // Edit tiles share the running solver's page-padded storage dimensions.
+    const edit = this.mixedFrame ? uniformMixedSolidEdit(this.address.cells,
       this.mixedSolidTouched ??= new Uint8Array(this.address.boxTiles)) : undefined;
     let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
     const dirty = this.solidMask.update(solidWorldForFluidLattice(scene), (x, y, z, solid) => {

@@ -7,7 +7,27 @@ import { proceduralSolidField } from "../lib/core/procedural-solid";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { WebGPURigidBodySystem } from "../lib/core/webgpu-rigid-body";
-import { withUniformDevice } from "./helpers/uniform-geometric";
+import { createUniformSolver, withUniformDevice } from "./helpers/uniform-geometric";
+
+test("pool party accepts a live body placement on its padded fluid lattice", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
+  await withUniformDevice("pool party live placement", async device => {
+    const scene = createBackyardPoolPartyScene();
+    const solver = await createUniformSolver(device, scene);
+    try {
+      assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], [320, 160, 256]);
+      const edited = structuredClone(scene);
+      edited.rigidBodies.push({ ...structuredClone(scene.rigidBodies[0]!), id: "placed-sphere",
+        position_m: { x: 0, y: 3, z: 0 } });
+      solver.applySceneUniforms(edited);
+      const bodies = initializeRigidBodies(edited.rigidBodies);
+      solver.syncRigidBodies(bodies);
+      assert.ok(solver.advanceTo(1 / 60, bodies));
+      await solver.awaitFrameCompletion();
+      assert.equal(solver.info.simulationPipelineError, undefined);
+      assert.equal((await solver.readRigidBodyPoses())?.length, 2);
+    } finally { solver.destroy(); }
+  });
+});
 
 test("pool party is discoverable with a smooth voxel board and real water settings", () => {
   const definition = getSceneDefinition("backyard-pool-party");
