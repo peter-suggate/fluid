@@ -64,6 +64,13 @@ export class UniformMixedSurface {
   private readonly pipelines = new Map<string, GPUComputePipeline>();
   /** advectWalls and advectDeferred for the merged and regular dispatches, and the deferred grid. */
   private readonly deferredPipelines:GPUComputePipeline[]=[];
+  /** advectDeferred's solid-free twins (merged, regular), launched ahead of
+   * the general ones where the stage has a solid library: see umSolidSkip. */
+  private readonly freeDeferredPipelines:GPUComputePipeline[]=[];
+  /** advectDeferred's fast twin (umFastSurface, solid-free) of the merged
+   * dispatch, launched first: it retires the entries it evaluates. The
+   * regular dispatch has no halo homes (umUnitHaloHome), so no fast twin. */
+  private fastDeferredPipeline?:GPUComputePipeline;
   /** Workgroups of the deferred advect launches: the list's bound (one word
    * per lattice vertex), capped where the GPU is saturated. */
   private readonly deferredGrid:number;
@@ -183,6 +190,36 @@ fn umPointFromPage(page:vec3i,p:vec3f)->vec3f{
  return umPointNearFromPage(umBlockOf(page),page,p);
 }
 fn umPointFrom(home:vec3f,p:vec3f)->vec3f{return umPointFromPage(umPointCell(home)>>vec3u(5u),p);}
+// advectFine and advectDeferred's fast twin are compiled with umFastSurface:
+// their samples take umSampleVelocity's weights and its two interpolants in
+// their cached forms only, the unit one at plain offsets in the sample
+// page's halo block and the 4h one from the cache (the same terms, order
+// and sums: the same value). The general sampler's resolution paths are
+// then not in those pipelines. A sample with fine weight and no halo home
+// (an unstored block) ends the trace (umSlow), and the vertex is left for
+// the general launch, which traces it from the start.
+override umFastSurface:bool=false;
+var<private> umSlow:bool=false;
+fn umFastVelocity(p:vec3f)->vec3f{
+ let s=umSampleTile(p);
+ var f=1.0;if(!umCachedFineTile(s.key)){f=umVelocitySamplingWeightsAt(s);}
+ var home=vec4i(0);if(f>0.0){home=umUnitHaloHome(s);if(home.w<0){umSlow=true;return vec3f(0.0);}}
+ let coarseHome=umCoarseHome(p,s);let coarse=max(0.0,1.0-f);var v=vec3f(0.0);
+ for(var a=0u;a<3u;a++){
+  var value=0.0;
+  if(f>0.0){
+   var offset=vec3f(0.5);offset[a]=1.0;
+   let b=umHold;var lower=b.lo;lower[a]-=1.0;
+   let q=clamp(p-offset,lower,b.hi-vec3f(1.0));
+   let base=vec3i(floor(q));var terms:array<f32,8>;
+   for(var k=0u;k<8u;k++){terms[k]=textureLoad(unitHalo,base+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u))+home.xyz,0)[a];}
+   value+=f*umVelocityLerp8(terms,fract(q));
+  }
+  if(coarse>0.0){value+=coarse*umSampleVelocity4In(coarseHome,a);}
+  v[a]=value;
+ }
+ return v;
+}
 // nbTraceSpan's steps, every stage's sample at one call site: stage 0 the
 // field at q (k1; the first sets the substeps), 1 one base substep ahead
 // (k2), 2 the third point, after which the step ends.
@@ -191,7 +228,8 @@ fn umSurfaceTrace(p:vec3f)->vec3f{
  let h=params.hDt.xyz;
  var q=p;var x=p;var steps=1u;var i=0u;var base=0.0;var stage=0u;var k1=vec3f(0.0);var k2=vec3f(0.0);var two=false;
  for(var n=0u;n<${3*NARROW_BAND_TRACE_LIMIT+3}u;n++){
-  let k=umSampleVelocity(x)/h;
+  var k=vec3f(0.0);
+  if(umFastSurface){k=umFastVelocity(x)/h;if(umSlow){return p;}}else{k=umSampleVelocity(x)/h;}
   if(stage==0u){
    // Exactly stationary in the frozen field: every later RK stage is at q
    // and samples the same zero velocity. No tolerance or spatial mask.
@@ -379,7 +417,8 @@ fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
   if(umWallBlock(vec3i(p),k)==0u){continue;}
   let axis=k>>1u;let inward=select(1.0,-1.0,(k&1u)!=0u);
   var probe=p;probe[axis]+=inward*f32(width);
-  if(inward*umSampleVelocity(probe)[axis]>=-1e-6){continue;}
+  var speed=0.0;if(umFastSurface){speed=umFastVelocity(probe)[axis];}else{speed=umSampleVelocity(probe)[axis];}
+  if(inward*speed>=-1e-6){continue;}
   interior[axis]+=inward*f32(width);contact=true;
  }
  if(!contact${this.solid?"||!umOpenAt(interior)":""}){return value;}let continued=umSampleVertex(umTrace(interior));
@@ -624,20 +663,22 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  // A launch compiled with umDeferTraced lists every vertex it would trace:
  // advectDeferred's grid stride evaluates them densely, where this launch's
  // lanes (most of them far or deep air) would idle behind the few traces.
- let p=vec3f(vertex);var defer=umDeferTraced;var value=0.0;
+ // A launch compiled solid-free (umSolidFree: advectFine) lists them all
+ // while a solid is present.
+ let p=vec3f(vertex);var defer=umDeferTraced${this.solid?"||(umSolidFree&&umSolidPresent())":""};var value=0.0;
  ${this.solid?/* wgsl */`// Off a clear tile a vertex can be buried: it keeps its value, umAdvected's
  // first exit.
  if(!umSolidClear(vec3i(p))&&umBuried(p)){textureStore(outputPhi,vec3i(vertex),vec4f(umLoadVertex(vertex)));return;}
  // A hit is evaluated by advectDeferred. Its first-pass phi and source
  // samples are discarded.
  var smoothing=0.0;
- {if(!defer){let foot=umVertexFoot(vertex,width);smoothing=foot.smoothing;let walk=umWalk(p,umVertexTrace(foot));defer=walk.hit;let q=walk.q;if(!defer){`:"var smoothing=0.0;{if(!defer){let foot=umVertexFoot(vertex,width);smoothing=foot.smoothing;let q=umVertexTrace(foot);"}
+ {if(!defer){umSlow=false;let foot=umVertexFoot(vertex,width);smoothing=foot.smoothing;let walk=umWalk(p,umVertexTrace(foot));defer=walk.hit||umSlow;let q=walk.q;if(!defer){`:"var smoothing=0.0;{if(!defer){umSlow=false;let foot=umVertexFoot(vertex,width);smoothing=foot.smoothing;let q=umVertexTrace(foot);defer=umSlow;if(!defer){"}
   let cell=umVertexCell(q);value=cell.value;
   let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
   if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){value=umCubicPhi(q,cell);}
   defer=defer||umReleasedMayChange(p,value);
   value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
- ${this.solid?"}":""}
+ }
  }}
  if(!defer){textureStore(outputPhi,vec3i(vertex),vec4f(value+smoothing));return;}
  // Each canonical vertex is stored once: the list holds at most every vertex.
@@ -648,16 +689,27 @@ fn umAdvectStore(vertex:vec3u,width:u32){
 }
 // The deferred vertices of the dispatch compiled with the same umRegularFine.
 // A fixed grid (deferredGrid workgroups) strides over the list.
+// With solids bound it is launched as a solid-free twin (umSolidFree) and a
+// general pipeline (umSolidTwinned): umSolidSkip leaves the step to one.
+// Ahead of the merged ones a fast twin (umFastSurface, solid-free) evaluates
+// every entry whose samples are all fast (see umFastVelocity) and writes all
+// ones over its word; the later launches skip such words. An all-ones word
+// reads as code 3 (regular), so the regular launches test it.
 @compute @workgroup_size(64) fn advectDeferred(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(umSolidSkip()){return;}
  umStagePlaneReach(lane);
  let count=atomicLoad(&deferred.header[0]);
  for(var i=gid.x;i<count;i+=64u*groups.x){
-  let word=deferred.data[i];let code=word>>30u;
+  let word=deferred.data[i];if(word==0xffffffffu){continue;}let code=word>>30u;
   if((code==3u)!=umRegularFine){continue;}
   let vertex=umVertexCoord(word&0x3fffffffu);
   let width=select(1u<<code,1u,code==3u);
-  let foot=umVertexFoot(vertex,width);
-  textureStore(outputPhi,vec3i(vertex),vec4f(umAdvected(vec3f(vertex),width,foot)+foot.smoothing));
+  umSlow=false;let foot=umVertexFoot(vertex,width);
+  let value=umAdvected(vec3f(vertex),width,foot)+foot.smoothing;
+  // The fast twin leaves a vertex with a slow sample to the general launch
+  // and retires the rest from the list.
+  if(umFastSurface){if(umSlow){continue;}deferred.data[i]=0xffffffffu;}
+  textureStore(outputPhi,vec3i(vertex),vec4f(value));
  }
 }
 // Canonical vertices of the walls, each once, with its authority's width. A
@@ -861,13 +913,17 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
     const compile=(entryPoint:string,constants:Record<string,number>,solidsOnly=false)=>this.twin(s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants,...s}}}),{solidsOnly,entry:entryPoint});
     const keyed=async(entryPoint:string,constants:Record<string,number>={},solidsOnly=false)=>{this.pipelines.set(entryPoint,await compile(entryPoint,constants,solidsOnly));};
     const regular={umCellWidth:1,umPlannedFine:1,umRegularFine:1};
+    const free:Record<string,number>=this.solid?{umSolidFree:1}:{},twinned:Record<string,number>=this.solid?{umSolidTwinned:1}:{};
     await Promise.all([
       // Dispatched only under solids (encode: solid.present): no solid-free twin.
       ...(this.solid?["solidClosed","solidClear"]:[]).map(entryPoint=>keyed(entryPoint,{},true)),
       keyed("wallReach"),
       keyed("advect",{umMergedTiles:1,umMergedCoarse:1,umMergedPack:8,umCertifiedJobs:2,umClaimWord:2,umDeferTraced:1}),
-      keyed("advectFine",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1,...UNIFORM_DETAIL_H_STORE}),
-      Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE})]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
+      // The fast trace (umFastSurface), solid-free: with a solid present it lists every traced vertex.
+      keyed("advectFine",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1,...UNIFORM_DETAIL_H_STORE,umFastSurface:1,...free}),
+      Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,...twinned}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...twinned})]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
+      ...(this.solid?[Promise.all([compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,...free}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...free})]).then(twins=>{this.freeDeferredPipelines.push(...twins);})]:[]),
+      compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umFastSurface:1,...free}).then(fast=>{this.fastDeferredPipeline=fast;}),
       keyed("advectOwners",{...regular,umCertifiedJobs:1,umClaimWord:0,...UNIFORM_DETAIL_H_STORE}),
     ]);
   }
@@ -898,7 +954,11 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
     if(this.solid)deferred.setBindGroup(2,this.solid.tileGroup);deferred.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
     // [merged, regular h]: each strides the entries its own launch listed,
     // and no h launch ran without h-tile capacity.
-    for(let i=1,n=this.ownership.coarseOnly?2:3;i<n&&i<this.deferredPipelines.length;i++){deferred.setPipeline(this.variant(this.deferredPipelines[i]!));deferred.dispatchWorkgroups(this.deferredGrid);}
+    for(let i=1,n=this.ownership.coarseOnly?2:3;i<n&&i<this.deferredPipelines.length;i++){
+      if(i===1&&this.fastDeferredPipeline){deferred.setPipeline(this.variant(this.fastDeferredPipeline));deferred.dispatchWorkgroups(this.deferredGrid);}
+      const twin=this.freeDeferredPipelines[i-1];if(twin){deferred.setPipeline(this.variant(twin));deferred.dispatchWorkgroups(this.deferredGrid);}
+      deferred.setPipeline(this.variant(this.deferredPipelines[i]!));deferred.dispatchWorkgroups(this.deferredGrid);
+    }
     deferred.end();
   }
   destroy():void{this.claims.destroy();}
