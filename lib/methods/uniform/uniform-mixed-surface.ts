@@ -71,6 +71,11 @@ export class UniformMixedSurface {
    * dispatch, launched first: it retires the entries it evaluates. The
    * regular dispatch has no halo homes (umUnitHaloHome), so no fast twin. */
   private fastDeferredPipeline?:GPUComputePipeline;
+  /** Workgroups of advectCubic: its list's bound (cubicEntries), capped
+   * where the GPU is saturated. */
+  private readonly cubicGrid:number;
+  /** The cubic list's bound: every vertex advectFine can evaluate, 125 a fine tile. */
+  private readonly cubicEntries:number;
   /** Workgroups of the deferred advect launches: the list's bound (one word
    * per lattice vertex), capped where the GPU is saturated. */
   private readonly deferredGrid:number;
@@ -108,15 +113,21 @@ export class UniformMixedSurface {
     this.allocatedBytes=this.claimBytes+4*ownership.capacity.tiles*(farGate?2:1);
     this.claims=device.createBuffer({label:"Uniform mixed surface job claims",size:this.allocatedBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     this.deferredGrid=Math.min(1024,Math.ceil(address.vertexKeys/64));
+    this.cubicEntries=125*ownership.capacity.fineTiles;
+    this.cubicGrid=Math.max(1,Math.min(1024,Math.ceil(this.cubicEntries/64)));
     this.wallGroups=Math.min(WALL_REACH_GRID,wallFaces(address));
     this.deferredWallGroups=Math.min(WALL_VERTEX_GRID,Math.ceil(1089*wallFaces(address)/64));
     uniformKeyGroups(address.tileKeys,64,ownership.dispatchX,this.tileLaneGroups);uniformKeyGroups(address.tileKeys,1,ownership.dispatchX,this.tileGroups);
   }
-  /** bind()'s evidence scratch from a 256-aligned offset: the tile words, then the deferred advect list. */
+  /** bind()'s evidence scratch from a 256-aligned offset: the tile words,
+   * then the deferred advect list and the cubic list. */
   get scratchBytes():number{
     const c=this.ownership.capacity;
-    return Math.ceil((this.solid?8*c.tiles:0)/256)*256+16+4*this.address.vertexKeys;
+    return Math.ceil((this.solid?8*c.tiles:0)/256)*256+this.deferredBytes;
   }
+  /** The deferred binding: count words, a word per lattice vertex (the
+   * deferred list), then five words per cubic entry (advectCubic). */
+  private get deferredBytes():number{return 16+4*this.address.vertexKeys+20*this.cubicEntries;}
   bind(f: UniformMixedSurfaceFields): UniformDetailGroup {
     const a=this.address;
     for(const [i,t] of [f.phi,f.outputPhi,f.velocity,f.coarseVelocity].entries()){
@@ -127,9 +138,10 @@ export class UniformMixedSurface {
     if(f.phi===f.outputPhi)throw new Error("Mixed surface outputs overlap inputs");
     // The solid closed and clear tile words.
     const evidenceBytes=this.solid?8*this.ownership.capacity.tiles:0;
-    // The deferred advect list follows, a separate binding: count, three
-    // unused words, then at most one word per lattice vertex.
-    const deferredOffset=Math.ceil(((f.evidence.offset??0)+evidenceBytes)/256)*256,deferredBytes=16+4*a.vertexKeys;
+    // The deferred advect list follows, a separate binding: its count, the
+    // cubic list's count, two unused words, then at most one word per
+    // lattice vertex, then the cubic list (deferredBytes).
+    const deferredOffset=Math.ceil(((f.evidence.offset??0)+evidenceBytes)/256)*256,deferredBytes=this.deferredBytes;
     if((f.evidence.size??f.evidence.buffer.size-(f.evidence.offset??0))<deferredOffset-(f.evidence.offset??0)+deferredBytes)throw new Error("Mixed surface evidence scratch is too small");
     const group=uniformDetailGroup(this.device,{layout:this.resources,entries:[
       ...[f.phi,f.outputPhi,f.velocity,f.coarseVelocity].map((t,binding)=>({binding,resource:t})),
@@ -656,6 +668,9 @@ fn umDeepAir(vertex:vec3u,width:u32)->f32{
  return ${this.sourceParams?"umSourceuvSourcePhi(vec3f(vertex),value)":"value"};
 }
 override umDeferTraced:bool=false;
+override umCubicListed:bool=false;
+// The cubic list's first word in deferred.data: past a word per lattice vertex.
+const UM_CUBIC_BASE=${this.address.vertexKeys}u;
 fn umAdvectStore(vertex:vec3u,width:u32){
  if(params.hDt.w>0.0&&umWallPlane(vec3i(vertex))<6u){return;}
  {let far=umFarAir(vertex);if(far>=0.0){textureStore(outputPhi,vec3i(vertex),vec4f(far));return;}}
@@ -675,7 +690,17 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  {if(!defer){umSlow=false;let foot=umVertexFoot(vertex,width);smoothing=foot.smoothing;let walk=umWalk(p,umVertexTrace(foot));defer=walk.hit||umSlow;let q=walk.q;if(!defer){`:"var smoothing=0.0;{if(!defer){umSlow=false;let foot=umVertexFoot(vertex,width);smoothing=foot.smoothing;let q=umVertexTrace(foot);defer=umSlow;if(!defer){"}
   let cell=umVertexCell(q);value=cell.value;
   let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
-  if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){value=umCubicPhi(q,cell);}
+  if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){
+   // A launch compiled umCubicListed (advectFine) lists the vertex, its end
+   // and smoothing for advectCubic: the cubic's lanes then run densely, not
+   // idle behind the trace or hold the trace's lanes behind 64 taps.
+   if(umCubicListed){
+    let j=atomicAdd(&deferred.header[1],1u);let b=UM_CUBIC_BASE+5u*j;
+    deferred.data[b]=umVertexAt(vertex);deferred.data[b+1u]=bitcast<u32>(q.x);deferred.data[b+2u]=bitcast<u32>(q.y);deferred.data[b+3u]=bitcast<u32>(q.z);deferred.data[b+4u]=bitcast<u32>(smoothing);
+    return;
+   }
+   value=umCubicPhi(q,cell);
+  }
   defer=defer||umReleasedMayChange(p,value);
   value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
  }
@@ -782,7 +807,7 @@ fn umSampleClosed(q:vec3f)->bool{
 const UM_WALL_REACH:u32=${UNIFORM_MIXED_CLAIM_WORDS}u;
 const UM_WALL_TILE_REACH:u32=${SURFACE_CLAIM_WORDS}u;
 @compute @workgroup_size(64) fn wallReach(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);}
+ if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);atomicStore(&deferred.header[1],0u);}
  let h=params.hDt.xyz;let dt=params.hDt.w;let faces=umWallFaceCount();
  for(var i=group.x;i<faces;i+=groups.x){
   let face=umWallFace(i);let f=face%6u;let axis=f>>1u;let upper=(f&1u)!=0u;let inward=select(1.0,-1.0,upper);
@@ -842,6 +867,22 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
  if(any((local==vec3u(0))&!low)){return UM_NO_VERTEX;}
  for(var k=1u;k<8u;k++){if((wide&(1u<<k))!=0u&&all((umCorner(k,2u)==vec3u(0))|(local==vec3u(4u)))){return UM_NO_VERTEX;}}
  return vertex;
+}
+// advectFine's cubic list (umCubicListed): each entry's vertex, trace end
+// and smoothing, finished as umAdvectStore would: the cubic at the end, the
+// released-wall test (a vertex it may change goes to the deferred list) and
+// the source. A fixed grid (cubicGrid workgroups) strides over the list.
+@compute @workgroup_size(64) fn advectCubic(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ umStagePlaneReach(lane);
+ let count=atomicLoad(&deferred.header[1]);
+ for(var i=gid.x;i<count;i+=64u*groups.x){
+  let b=UM_CUBIC_BASE+5u*i;let key=deferred.data[b];let vertex=umVertexCoord(key);let p=vec3f(vertex);
+  let q=bitcast<vec3f>(vec3u(deferred.data[b+1u],deferred.data[b+2u],deferred.data[b+3u]));let smoothing=bitcast<f32>(deferred.data[b+4u]);
+  var value=umCubicPhi(q,umVertexCell(q));
+  if(umReleasedMayChange(p,value)){let k=atomicAdd(&deferred.header[0],1u);deferred.data[k]=key;continue;}
+  value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
+  textureStore(outputPhi,vec3i(vertex),vec4f(value+smoothing));
+ }
 }
 @compute @workgroup_size(64) fn advectFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  umStagePlaneReach(lane);
@@ -920,7 +961,8 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
       keyed("wallReach"),
       keyed("advect",{umMergedTiles:1,umMergedCoarse:1,umMergedPack:8,umCertifiedJobs:2,umClaimWord:2,umDeferTraced:1}),
       // The fast trace (umFastSurface), solid-free: with a solid present it lists every traced vertex.
-      keyed("advectFine",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1,...UNIFORM_DETAIL_H_STORE,umFastSurface:1,...free}),
+      keyed("advectFine",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1,...UNIFORM_DETAIL_H_STORE,umFastSurface:1,umCubicListed:1,...free}),
+      keyed("advectCubic",{umCellWidth:1,...UNIFORM_DETAIL_H_STORE,...free}),
       Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,...twinned}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...twinned})]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
       ...(this.solid?[Promise.all([compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,...free}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...free})]).then(twins=>{this.freeDeferredPipelines.push(...twins);})]:[]),
       compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umFastSurface:1,...free}).then(fast=>{this.fastDeferredPipeline=fast;}),
@@ -947,6 +989,7 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
     const grid=Math.min(UNIFORM_MIXED_CLAIMED_GRID,this.ownership.capacity.tiles);
     this.ownership.dispatchBuffered(pass,this.variant(this.pipelines.get("advectOwners")!),"fine",grid);
     this.ownership.dispatchBuffered(pass,this.variant(this.pipelines.get("advectFine")!),"fine",grid);
+    pass.setPipeline(this.variant(this.pipelines.get("advectCubic")!));pass.dispatchWorkgroups(this.cubicGrid);
     this.ownership.dispatchBuffered(pass,this.variant(pipeline),"coarseMerged",grid);
     pass.setPipeline(this.variant(this.deferredPipelines[0]!));pass.dispatchWorkgroups(this.deferredWallGroups);
     pass.end();
