@@ -42,10 +42,10 @@ const MOMENTUM_PASS: GPUComputePassDescriptor = { label: "Uniform mixed momentum
 const uniformMixedMomentumUnitWGSL = uniformCachedMomentumSamplingWGSL + /* wgsl */ `
 // umMomentum through the unit sampler (umUnitEscaped when it cannot).
 fn umUnitMomentum(owner:UMOwner,face:UMFace)->f32 {
+ if(umMomentumRetained(owner)){return umRetainedFace(face);}
  if(umCullAir&&!umPredictionCellLive(owner)&&!umPredictionCellLive(face.neighbor)){return 0.0;}
  if(umFaceLow(face.anchor,face.axis)||umClosedPositive(face)){return umOriginalMomentum(face);}
  if(umDropFace(face)){return 0.0;}
- if(umMomentumRetained(owner)){return umRetainedMomentum(face);}
  if(umMomentumAffine(owner)){return umAffineMomentum(owner,face);}
  let departure=umUnitDeparture(umFaceCenter(face),momentum.hDt.w,momentum.hDt.xyz);
  if(umUnitEscaped){return 0.0;}
@@ -269,6 +269,17 @@ fn umRetainedMomentum(face:UMFace)->f32 {
  if(face.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(extended,face.anchor,0)[face.axis];}
  return textureLoad(extended,face.anchor,0)[face.axis];
 }
+// A retained region's face ahead of the cull and the closed-wall test: a
+// low face still reads its table (its anchor's page is not stored); a closed
+// positive face's extended value is its physical one (the extension publishes
+// closed walls from physical); a culled face (both cells dead) is no pressure
+// row and the projection zeroes it, so its retained value is never read. The
+// drop keeps its zero below an open face.
+fn umRetainedFace(face:UMFace)->f32 {
+ if(umFaceLow(face.anchor,face.axis)){return umOriginalMomentum(face);}
+ if(umDropFace(face)&&!umClosedPositive(face)){return 0.0;}
+ return umRetainedMomentum(face);
+}
 fn umClosedPositive(face:UMFace)->bool {
  return umAcrossKind(face.anchor,face.axis,1)==UM_SOLID;
 }
@@ -294,6 +305,7 @@ fn umDropFace(face:UMFace)->bool {
  return umSourcedropDistance(umSourcetraceWorld(umFaceCenter(face)),reach)<reach;`:"return false;"}
 }
 fn umMomentum(owner:UMOwner,face:UMFace)->f32 {
+ if(umMomentumRetained(owner)){return umRetainedFace(face);}
  if(umCullAir&&!umPredictionCellLive(owner)&&!umPredictionCellLive(face.neighbor)){return 0.0;}
  // Every closed wall carries its projected velocity; the projection's
  // contact inequality alone releases it. A positive wall that also took an
@@ -301,7 +313,6 @@ fn umMomentum(owner:UMOwner,face:UMFace)->f32 {
  // not, so a D4-symmetric flow drifted off its symmetry at the walls.
  if(umFaceLow(face.anchor,face.axis)||umClosedPositive(face)){return umOriginalMomentum(face);}
  if(umDropFace(face)){return 0.0;}
- if(umMomentumRetained(owner)){return umRetainedMomentum(face);}
  if(umMomentumAffine(owner)){return umAffineMomentum(owner,face);}
  return umAdvectedMomentum(face,momentum.hDt.w);
 }

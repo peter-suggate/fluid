@@ -766,8 +766,8 @@ export class UniformMixedFrame {
   * solids since (the split's all-4h authority writes no phase). */
  private encodeExtensionOf(encoder:GPUCommandEncoder,policy:UniformMixedFrameParameters["supportPolicy"],sweeps:number|undefined,phase=true):void{
   this.plan.encode(encoder,policy);
-  // Phase only: the advance's authority rewrites phi, correction and balance
-  // before their readers (band rows, RHS).
+  // Phase only: the advance's authority rewrites phi before its readers
+  // (band rows and RHS form the volume correction themselves).
   if(phase)this.authority.encode(encoder,this.authorityGroup,false);
   this.extension.encode(encoder,this.extensionGroups,sweeps??2);
   this.reusableExtension=true;
@@ -930,8 +930,8 @@ export class UniformMixedFrame {
     // The plan reads no solid: after bodies alone, the last plan's support holds.
     if(!regional)this.plan.encode(encoder,p.supportPolicy,true);if(!this.geometryCurrent)this.encodeGeometry(encoder);
     // Phase only: the authority below (split: the simulation authority
-    // before the band rows, then the pressure authority) rewrites phi, every
-    // correction texel and the balance scratch before their readers.
+    // before the band rows, then the pressure authority) rewrites phi before
+    // its readers; band rows and RHS form the volume correction themselves.
     if(phase){if(bodiesOnly)this.authority.encodeBodies(encoder,this.authorityGroup);else this.authority.encode(encoder,this.authorityGroup,false);}
     trace?.phase(encoder,V.support);
     // Regional wherever the layout holds: the work tiers name the regions
@@ -1028,11 +1028,10 @@ export class UniformMixedFrame {
    // The surface census only feeds the overlay: nothing in the solve reads it.
    if(this.layoutViews){this.surfaceBand.encode(encoder);this.recordStageGrid(encoder,this.surfaceBand.band.buffer,"band");}
    // The surface-only authority before transfer already wrote these exact
-   // phi, phase and correction values. Transfer/extension/snapshot only read
-   // them; forces overwrite phase only when caching capillary curvature.
-   // A kick skips the earlier authority, so it still needs this build.
-   // Every owner: forces' curvature cache overwrote phase in held regions too.
-   if(kick||p.surfaceTension>0)this.authority.encodeAll(encoder,this.authorityGroup);
+   // phi and phase values; transfer, forces, extension and snapshot only read
+   // them (forces cache curvature in their normal scratch). A kick skips the
+   // earlier authority, so it still needs this build, over every owner.
+   if(kick)this.authority.encodeAll(encoder,this.authorityGroup);
    this.phaseKeyed=!bodies;this.band.encodePrepare(encoder);
    const split=this.split;
    split.transfer.encodeToPressure(encoder,split.toPressure);
@@ -1080,8 +1079,7 @@ export class UniformMixedFrame {
    if(!kick){
     if(pairedExtension){
      // Phase, topology and wall geometry are unchanged across pressure.
-     // Capillary forces' temporary curvature is replaced by the authority
-     // above before either payload is seeded. The old hierarchy finishes
+     // The old hierarchy finishes
      // into snapshot slots/taps; the current hierarchy then reuses its geometry.
      this.extension.preparePair(encoder,pairedExtension.current,p.extensionSweeps??2);
      this.extension.finishSnapshot(encoder,pairedExtension.old,p.extensionSweeps??2);

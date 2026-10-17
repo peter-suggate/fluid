@@ -962,6 +962,64 @@ Settled is frames 34–40, and pool-impact frames 24–30. The before columns ar
 - Span triggers dominate HOT late in the impact. The certificate is the transport's 0.02 h error budget, which is tight for a travelling wave. A looser HOT threshold would need the cheap tiers to certify more.
 - WARM regions still run the existing cheap transport tiers, the same as HOT. The tier split pays off in the stages that grade WARM separately (momentum's affine tier) and in COLD holds.
 
+### Stream 2 addendum: head authority held mode, lazy correction, transport deep-COLD exit
+
+**Deep-COLD flags** (`uniform-region-heat.ts`). The tiers buffer has two more sections after the counts:
+
+- `UNIFORM_REGION_HEAT_DEEP_WORD(R)`: 1 where the region is live and it and every stored neighbour of its 26 are COLD.
+- `UNIFORM_REGION_HEAT_EPOCH_WORD(R)`: a per-region epoch. Each deep pass that finds the region non-COLD increments it.
+- The `deep` kernel runs after the spread in `encode`. It runs again from `encodeDeep` after the relayout's claim and remap promotions (one line in `uniform-mixed-frame.ts`).
+- `uniformRegionTierWGSL` takes an optional deep load and then defines `umRegionDeepCold`.
+
+**Head authority held mode** (`uniform-mixed-pressure-authority.ts`). The head authority (`this.authority`: surface-only, non-coarse, non-resident) now takes the surface work control's revisions, the same as the split authority.
+
+- **Stamps.** Each region gets 16 stamp words: words 0–11 are the inputs, then a changed/held word, the epoch at the last pass, COLD at the last pass, and quiet.
+- **Quiet** = COLD now, inputs unchanged, COLD at the last pass, and epoch unchanged. So a region that went non-COLD between two passes cannot hold on stale words.
+- **Held** = the region and all its stored neighbours are quiet (`stampHeld`). The split authority's held test uses the same stricter quiet.
+- **`surfaceHeld` kernel.** It strides regions over the fixed region grid, a workgroup each. A region that is held and whose tiles' owner bases are unchanged returns. Each tile's base + 1 is stored after the stamp words, because the head's phi buffer is indexed by owner rank, so a rank shift must rewrite.
+- **`encodeAll`.** This is the old full owner launch. It is now used only after forces on a kick (a kick skips the head authority).
+- **Forces no longer overwrite phase** (stream 1). Curvature lives in `normals[owner].w`. The post-forces re-encode is now kick-only, and nothing has to be restored in held regions.
+
+**Lazy gauge correction.**
+
+- Stream 1's RHS (`uniform-mixed-pressure-velocity.ts`) and band prep (`uniform-pressure-band.ts`) compute `params.authority.z × capacity` for a liquid owner themselves, bit-identical to the texel.
+- `umSurfaceOwner` no longer stores the correction, so a held owner does nothing.
+- Both NB-FLIP authorities are surface-only, so that store was the frame's last correction writer. The non-surface-only `resolve` path is still in the file, but nothing constructs it.
+- The `correction` texture stays bound. The reference aliases it to `gammaA`, so removing it frees no memory.
+
+**Transport deep-COLD exit** (`uniform-mixed-surface.ts`). The surface claims buffer gains a deep word per region (23 words per region, was 22), copied from the heat tiers beside the tier copy.
+
+- In a deep-COLD region, `umHoldCold` no longer stores non-aligned h vertices.
+- 4h lattice vertices (4-aligned) are still stored, because the reconstruct group's 4h corner paths read them from the scratch.
+- `advectFine` reads the deep flag once per tile job (workgroup-uniform) and evaluates only the aligned lanes there.
+- This relies on stream 3's `nbColdCurrentPhi`. The reconstruct-group crossing search reads COLD h vertices from `outputPhi` (`f.phi`).
+- The scratch phi resolve reads only 4h lattice vertices. A non-COLD reader's stencil is at least a region away from any deep-COLD region.
+- So a skipped scratch texel, which holds momentum's between-frame data, is never read.
+
+**Exactness** (scratch probe, final fields compared word for word: authoritative velocity, phi, density, velocity, negative velocity, geometry target and centre phi):
+
+- Deep exit on vs off (the deep copy suppressed): 0 differing words, settled 8 frames and pool-impact 6 frames.
+- Head held mode vs every-owner `encodeAll`: 0 differing words over the same windows.
+
+**Stage costs** (investigate tool, one run per arm, other streams' work in the tree):
+
+| Stage (mean ms) | Settled before | Settled after | Pool-impact before | Pool-impact after |
+| --- | ---: | ---: | ---: | ---: |
+| Frame | 21.83 | 22.51 | 48.23 | 49.57 |
+| Surface pressure authority | 0.56 | 0.24 | 1.47 | 1.52 |
+| Surface advect | 0.49 | 0.47 | 2.42 | 2.15 |
+| `advectFine` (split run) | 0.27 | 0.22 | n/a | n/a |
+| Surface advect, deferred | 0.07 | 0.11 | 5.56 | 5.79 |
+| Surface work control | 0.23 | 0.23 | 0.63 | 0.57 |
+| Region heat | 0.04 | 0.05 | 0.04 | 0.05 |
+
+Settled is frames 34–40, and pool-impact frames 24–30. The before columns are the previous addendum's after runs. The frame totals include other streams' concurrent changes. Several runs taken while other sessions' GPU profiles were running read 2–5× high and were discarded.
+
+**Limitations:**
+
+- **advectFine in settled.** Every settled region is deep-COLD from frame 2, yet `advectFine` still costs about 0.22 ms. That cost is the claim loop over the plan's fine list: a claim, two barriers and a deep-flag load per h tile job. Removing it needs the fine list to leave out deep-COLD tiles in the plan, or a region-granular job list. Both are outside this stream's files.
+- **Pool-impact authority.** Few regions there are held, and the stamp passes cost about what they save.
+
 ## Stream 3: momentum, extension and lifetimes
 
 ### What was built
@@ -1364,6 +1422,128 @@ The settled scene has no state-3 region. The snapshot's hierarchy exits, and the
 - No tests were added or deleted.
 - One non-split pool-impact run ended with a validation error in another session's work: `Uniform mixed phi resolve held tiles` lacks `COPY_DST` for its `clearBuffer`.
 
+### Stream 3 addendum: held extension tail, COLD always retains, current-phi crossing (2026-10-18)
+
+This replaces three parts of the previous addendum:
+- "The tail cannot leave COLD output untouched": it now does, through held values.
+- Momentum's `hold` tier: removed.
+- The `skipOwner` argument in `uniform-mixed-face-dispatch.wgsl.ts`: reverted, so that file is back to HEAD.
+
+#### Held extension tail (`uniform-mixed-extension*.ts`)
+
+**Held buffer.** A persistent buffer, `held`, keeps one f32 per extension slot (binding 18, main layout only). Every publication from swept slots stores the value it published there, through `umPublished`, `uePublishFine` and `publishList`.
+
+**Held regions.** A region is held when it is clean or halo and its slots are not final. A held region publishes:
+- a closed or low face from physical, as before;
+- a face with support where `umSource` holds from physical, which is the projection's output;
+- every other face from `held[slot]`.
+
+The tail republishes every canonical texel, so this covers every writer between tails: forces, the projection, the band copy and NB-FLIP's departure seed. No writer needs to know about COLD.
+
+**Region words.** A region word gains 8 when the region is held. A held halo region (9) seeds from its own slots instead of copying the halo. A per-region `MR_VALID` word in the stamp records two bits: bit 0, the held values are current; bit 1, the slots are final.
+
+**Mark modes.** The tail's paired encode uses a third mark mode, held (mode 2), once any swept marks exist (`heldReady`). In mode 2:
+- A region changes when it moved, is unpublished, is not COLD, or has a body near it. Only changed regions seed, sweep and restrict.
+- A region within one region (Chebyshev) of a hot region takes state 3, the old payload.
+- The quiet word is forced to 1, so the publication always runs.
+
+**Hierarchy gate.** The current payload's finish runs the hierarchy under gate 1 after a held tail. The head's regional rebuild then finds the slots invalid (valid bit 1 cleared) and publishes from `held`.
+
+**Paired layout.** The paired layout cannot take binding 18: `maxStorageBuffersPerShaderStage` is 10 on this device, and paired already uses 9. The paired source therefore stubs the held accessors. Replayed publication stores its replayed value.
+
+**Verified** with a scratch probe that diffs `velocityScratch` between consecutive frame ends, settled frames 35–40. A texel counts as air when its cell and its +x/+y/+z cells are air; block-edge texels are excluded.
+
+| Store | Air texels | Air changed | Other texels | Other changed |
+| --- | ---: | ---: | ---: | ---: |
+| h | 14,387,224 | 0 | 389,112 | ~204,000 (liquid) |
+| Base | 660,016 | 0 | 20,496 | ~15,400 |
+
+#### Momentum: COLD always retains (`uniform-mixed-momentum*.ts`)
+
+**Hold removed.** The tiers are now full, retain, affine and pending. COLD retains every frame, so the departure takes this frame's extended value, which the last projection corrected. All three hold paths are gone: the `umMomentumHeldUniform` exits in `momentumUnitStep` and `momentumRegularStep`, and the `skipOwner` filter in `momentumStep`. Settled bandResidual and rootResidual over frames 1–14 match the all-HOT pattern, for example:
+
+| Frame | bandResidual | rootResidual |
+| ---: | ---: | ---: |
+| 3 | 3.09e-5 | 6.13e-5 |
+| 9 | 2.02e-5 | 7.04e-6 |
+| 13 | 1.32e-5 | 1.70e-5 |
+
+They no longer sit at 9.58e-5 / 3.67e-5.
+
+**Cheaper retain.** A retained owner now resolves its face first, in `umRetainedFace`:
+- A low face reads its table, because its anchor's page is not stored.
+- A drop gives zero below an open face.
+- Every other face takes the extended value.
+
+This skips the cull's four loads and the closed-wall test. Two arguments make it exact:
+- At a closed positive face, extended equals physical, because the extension publishes closed walls from physical.
+- A culled face has both cells dead. It is no pressure row, and the projection zeroes it.
+
+The residuals, particles and unsupported counts are bit-identical to the unreordered build in two runs: settled frames 1–14, and pool-impact frames 1–8.
+
+#### Crossing search at COLD vertices (`uniform-narrow-band-membership.wgsl.ts`, `uniform-narrow-band-flip.ts`)
+
+The reconstruct group's crossing search compiles with the override `nbColdCurrentPhi`. This covers the `@noplanes` pipelines, `depthTiles` and the `depthSeeds` gather, but not `depthReuseSnapshot`.
+
+With the override, `nbCrossingVertex` reads an h vertex of a COLD tile (`nbTileCold` of the sampling cell's tile key) from `outputPhi`, which is `f.phi` there.
+
+4h corners still read the scratch phi. The detail rewrite allows only h loads on `outputPhi`, which is a read_write storage texture. So stream 2 must keep storing scratch base corners in COLD regions.
+
+#### Measured
+
+**Settled, all-COLD frames** (frames 36–44, split, ms):
+
+| Pass | Hold + full tail (h3b) | Held tail + retain (h4) | Held tail + reordered retain (h6) |
+| --- | ---: | ---: | ---: |
+| GPU | 19.03 | 19.14 | 19.24 |
+| Extension tail (retain, pair, snapshot, finish) | 1.755 | 1.107 | 1.136 |
+| Extension head | 0.517 | 0.510 | 0.524 |
+| Momentum, total | 0.335 | 0.816 | 0.744 |
+| ↳ momentumUnitStep | 0.124 | 0.481 | 0.386 |
+| ↳ momentumStep | 0.138 | 0.233 | 0.255 |
+| Crossing depthTiles | 0.160 | 0.138 | — |
+| Crossing depthSeeds | 0.138 | 0.109 | — |
+
+**Extension tail.** The tail falls by 0.65 ms. The biggest drops:
+
+| Tail pass | Before | After |
+| --- | ---: | ---: |
+| Pair sweeps | 0.51 | 0.14 |
+| Seam seed | 0.14 | 0.04 |
+| Fine seed | 0.10 | 0.04 |
+
+Two passes did not fall: `publishSeams` (0.20) and prolongation (0.14).
+
+**Momentum.** Retain costs about 0.4 ms over hold in an all-COLD frame. This is the price of feeding the projection's correction back. The pre-tier momentum was 0.794 ms.
+
+The reorder takes `momentumUnitStep` from 0.459–0.524 ms per frame to 0.393 ms. The timer quantum is 0.066 ms.
+
+The remaining retained cost is the dependent chain from page table to texture, for the extended load and the departure store. A cheaper exact form would store only the faces that the projection can change. In a region held in both the last tail and this head, those are the `support && umSource` faces, because the rest publish constant held values. That needs two things not built here:
+- the extension's held words visible to momentum, at both stamps;
+- proof that the source set did not change, which depends on stream 2's transport exit.
+
+**Pool-impact HOT** (frames 1–8, held tail against held tail knocked out by a temporary switch, not landed):
+- Residuals, particles and unsupported counts are identical.
+- Tail: 2.14 ms held against 2.06 ms knocked out, one run each.
+
+A later 30-frame impact run showed every pass 20–70× slower in frames 2–6. That run did not reproduce and is discarded.
+
+#### Memory
+
+| Item | Size |
+| --- | ---: |
+| One face field (`velocityScratch`: h texture 128×128×992 rgba32float 260,046,848 B, plus base 32×32×992 rgba32float 16,252,928 B) | 276,299,776 B |
+| `held` buffer (`heldBytesAt`: 4 × `extensionSlots`, rounded to 256 B) | 247,158,528 B |
+| Stamp growth (`MR_VALID`) | +4 B per region |
+
+`held` is allocated with the slots, recreated only when its size changes, and never grown mid-run. It is 89% of one face field, so it stays under the one-face-field limit. `allocatedBytes` includes it.
+
+#### Gates
+
+- `npm run check:types` is clean. Every changed WGSL module compiles on Dawn.
+- `npm run test:unit`: 925 tests, 880 pass, 45 skipped, 0 fail.
+- No tests were added or deleted.
+
 ## Stream 1: incremental pressure
 
 ### What was built
@@ -1763,3 +1943,31 @@ The 9.58e-5 band residual sits just under the 1e-4 band gate.
 **Cause.** `decide` moves a region that was COLD at the last decide from retain to hold. In hold, momentum skips the departure store, so the departure keeps the extended velocity of the first COLD frame. Retain would copy the region's current extended velocity, which the projection corrects every frame. Under hold, that correction never feeds back, so every frame re-solves frame 2's pressure problem and keeps its residual. The root residual creeps with the volume gauge.
 
 **Fix.** The cheapest exact fix is to have COLD always retain. This costs momentum's retain store in COLD regions. A hold would need exact evidence that the region's extended values are unchanged. I sent the measurement to stream 3, which owns `uniform-mixed-momentum-tiers.ts`. My own files needed no change.
+
+#### Volume correction and capillary curvature leave the authority's fields (2026-10-18)
+
+Both changes serve stream 2's authority hold: a held owner must cost nothing, so no reader may need a field the authority rewrites every frame, and no pass may overwrite one.
+
+**Volume correction.** The authorities stored `params.z × capacity` per liquid owner every frame only because the rate `params.z` changes every frame. The two readers now form the product themselves from `params.authority` (bound as a 16 B uniform; word 2 is the rate):
+
+- The RHS (`uniform-mixed-pressure-velocity.ts`) uses its liquid predicate `umPressureLiquid` and the authority's own capacity (coarse topology.x; else the cell or tile open fraction when solids are enabled; else 1).
+- The band prep (`uniform-pressure-band.ts`) uses `bWet` and the h cell's open fraction.
+
+Neither binds the correction texture any more, and stream 2 drops its stores. A bodies-only head used to leave last frame's rate outside body regions until the post-forces re-encode; the readers now always use the current rate. Stream 2 accepted that.
+
+**Capillary curvature.** `cacheCurvature` used to store an unretained owner's curvature in `phase`, which the head authority then had to restore after the forces. That covered h owners past the retained prefix, or every owner without retained normals. The curvature now lives in the borrowed normal scratch's `w` (`normals[owner.index].w`, beside the normal in xyz), and `forceSlopes` preserves it. The forces write no field. Stream 2 has made the post-forces re-encode kick-only.
+
+**Exactness.** Each arm pair was base vs after, one run each, dt 1/60 s:
+
+| Run | Result |
+| --- | --- |
+| Settled, 8 frames | Identical |
+| Pool-impact, 6 frames | Identical |
+| Curvature, forced overflow (retained prefix 0), settled 6 and pool-impact 5 frames | Identical |
+| Liveness check: zeroing the overflow curvature | Changes velocity by up to 0.39 m/s, so the overflow path is exercised |
+
+"Identical" means every band and root residual and cycle count matched exactly, and every final field had zero differing words.
+
+**Memory.** Unchanged. The scratch is already a vec4f per owner, and the correction texture stays allocated: the reference aliases it to gammaA, so removing it frees nothing.
+
+**Deleted.** Two tests pinned the removed `curvature` force field: `tests/uniform-retained-normals.test.ts` and `tests/uniform-zero-curvature-seams.test.ts`.

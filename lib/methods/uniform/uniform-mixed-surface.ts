@@ -15,7 +15,7 @@ import { uniformCoarseCacheExtent } from "./uniform-coarse-velocity-cache";
 import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, uniformMixedVertexBuriedWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { uniformFaceTileSlots, uniformKeyGroups, type UniformLatticeAddress } from "./uniform-lattice-address";
-import { uniformRegionTierWGSL } from "./uniform-region-heat";
+import { UNIFORM_REGION_HEAT_DEEP_WORD, uniformRegionTierWGSL } from "./uniform-region-heat";
 
 /** Head of the surface claim buffer: job counters, six wall reach words (a
  * face direction each) and two pad words; the reach of every tile of every
@@ -75,6 +75,8 @@ export class UniformMixedSurface {
   private readonly revisionWord:number;
   /** A copy of UniformRegionHeat's tiers (the stage is at its storage-buffer limit). */
   private readonly tierWord:number;
+  /** A copy of UniformRegionHeat's deep-COLD flags, a word per region after the tiers. */
+  private readonly deepWord:number;
   get regionCounters(){return {buffer:this.claims,offset:4*this.regionCounterWord,regions:this.workControl?.regions??0,wordsPerRegion:5,labels:["identity","affine","middle","fullLinear","fullCubic"] as const};}
   readonly workCounterWords=22;
   /** Trial diagnostics: admitted fast-fine attempts and direct/cubic-listed results. */
@@ -141,9 +143,10 @@ export class UniformMixedSurface {
     this.regionCounterWord=this.counterWord+this.workCounterWords;
     this.revisionWord=this.regionCounterWord+5*(workControl?.regions??0);
     this.tierWord=this.revisionWord+(workControl?.regions??0);
+    this.deepWord=this.tierWord+(workControl?.regions??0);
     this.predictorFineCapacity=0;
     this.predictorCacheBytes=0;
-    this.allocatedBytes=this.evidenceBytes+(workControl?4*((22+64*UNIFORM_SURFACE_SUPPORT_WORDS)*workControl.regions+this.workCounterWords)+this.predictorCacheBytes:0);
+    this.allocatedBytes=this.evidenceBytes+(workControl?4*((23+64*UNIFORM_SURFACE_SUPPORT_WORDS)*workControl.regions+this.workCounterWords)+this.predictorCacheBytes:0);
     const claimsLimit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
     if(this.allocatedBytes>claimsLimit)throw new Error(`Uniform mixed surface claims and 16h support tables require ${this.allocatedBytes} bytes, exceeding the device buffer limit ${claimsLimit}; reduce scene capacity or resolution`);
     this.claims=device.createBuffer({label:"Uniform mixed surface job claims",size:this.allocatedBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
@@ -211,12 +214,26 @@ struct UMDeferred { header:array<atomic<u32>,4>, data:array<u32> }
 @group(1) @binding(12) var<storage,read_write> umClaims:array<atomic<u32>>;
 @group(1) @binding(13) var<storage,read_write> nbState:array<atomic<u32>>;
 ${this.sourceParams?uniformMixedSourceWGSL(9):""}
-${this.workControl?.heat?uniformRegionTierWGSL(this.workControl.heat.regions,`atomicLoad(&umClaims[${this.tierWord}u+region])`):"const UM_TIER_COLD:u32=0u;fn umVertexTier(p:vec3u)->u32{return 2u;}"}
+${this.workControl?.heat?uniformRegionTierWGSL(this.workControl.heat.regions,`atomicLoad(&umClaims[${this.tierWord}u+region])`,`atomicLoad(&umClaims[${this.deepWord}u+region])`):"const UM_TIER_COLD:u32=0u;fn umVertexTier(p:vec3u)->u32{return 2u;} fn umRegionDeepCold(region:u32)->bool{return false;}"}
 // A vertex every incident region of which is COLD (UniformRegionHeat) holds
 // its input phi: the same bits, so no revision moves and the trace is not run.
+// Deep COLD (the vertex's tile's region and its 26 neighbours COLD): an h
+// vertex is not stored at all. Its scratch texel is then whatever was last
+// written there (momentum uses the scratch between frames), and no reader
+// takes it: NB's reconstruct-group crossing search reads COLD h vertices
+// from the current field (nbColdCurrentPhi), the scratch phi resolve reads
+// 4h lattice vertices only, and any non-COLD reader's stencil lies at least
+// a region away. 4h lattice vertices (4-aligned) are still stored: the
+// crossing search's 4h corner paths read them from the scratch.
+fn umVertexDeepCold(vertex:vec3u)->bool{
+ let tile=umTileKey(vec3i(vertex)>>vec3u(2u));
+ return umKeyStored(tile)&&umRegionDeepCold(umPageOfTile(tile));
+}
 fn umHoldCold(vertex:vec3u,width:u32)->bool{
  if(umVertexTier(vertex)!=UM_TIER_COLD){return false;}
- umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLatticeLoad(vec3i(vertex),width));return true;
+ umRecordRegion(vertex,0u);
+ if(any((vertex&vec3u(3u))!=vec3u(0u))&&umVertexDeepCold(vertex)){return true;}
+ umStoreSurface(vertex,width,umLatticeLoad(vec3i(vertex),width));return true;
 }
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
@@ -1234,9 +1251,12 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
  if(owner.width==0u){return;}
  let tile=umTileCoord(owner.tile);let wide=umFineWideMask(umTileAt(tile));
  let low=umTileLowOpen(vec3i(tile));let rounds=select(1u,3u,any(low));
+ // A deep COLD tile (workgroup-uniform) stores its 4h lattice vertices
+ // only (umHoldCold); its other lanes neither load nor store.
+ let deep=umRegionDeepCold(umPageOfTile(owner.tile));
  for(var round=0u;round<rounds;round++){
   let vertex=umFineVertex(tile,lane,round,wide,low);
-  if(vertex.x!=UM_NO_VERTEX.x){umAdvectStore(vertex,1u);}
+  if(vertex.x!=UM_NO_VERTEX.x&&(!deep||all((vertex&vec3u(3u))==vec3u(0u)))){umAdvectStore(vertex,1u);}
  }
 }
 // Merged jobs without the general h list (umMergedCoarse): a seam 4h tile's
@@ -1323,7 +1343,8 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
     encoder.copyBufferToBuffer(this.ownership.speeds,tiles,this.claims,this.evidenceBytes-tiles,tiles);
     if(this.workControl){encoder.clearBuffer(this.claims,4*this.counterWord,4*(this.workCounterWords+5*this.workControl.regions));this.workControl.encode(encoder,"surface");
      encoder.copyBufferToBuffer(this.workControl.revisions.buffer,this.workControl.revisions.liveOffset,this.claims,4*this.revisionWord,4*this.workControl.regions);
-     if(this.workControl.heat)encoder.copyBufferToBuffer(this.workControl.heat.tiers,0,this.claims,4*this.tierWord,4*this.workControl.regions);
+     if(this.workControl.heat){encoder.copyBufferToBuffer(this.workControl.heat.tiers,0,this.claims,4*this.tierWord,4*this.workControl.regions);
+      encoder.copyBufferToBuffer(this.workControl.heat.tiers,4*UNIFORM_REGION_HEAT_DEEP_WORD(this.workControl.heat.regions),this.claims,4*this.deepWord,4*this.workControl.regions);}
      encoder.copyBufferToBuffer(this.workControl.surface,4*this.workControl.modelWordOffset,this.claims,4*this.modelWord,32*this.workControl.regions);
      encoder.copyBufferToBuffer(this.workControl.surface,4*this.workControl.velocityWordOffset,this.claims,4*this.velocityWord,24*this.workControl.regions);
      encoder.copyBufferToBuffer(this.workControl.surface,4*this.workControl.supportWordOffset,this.claims,4*this.supportWord,256*UNIFORM_SURFACE_SUPPORT_WORDS*this.workControl.regions);}
