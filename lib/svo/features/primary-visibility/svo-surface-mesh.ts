@@ -1,3 +1,4 @@
+import { SVO_MATERIAL_FLAGS } from "../../contracts/svo-material-flags";
 import { svoMeshPlanarRasterWGSL } from "./svo-mesh-planar-raster";
 import { svoAuthoredSurfaceNormalsWGSL } from "./svo-authored-surface-normals";
 import { proceduralSolidRenderWGSL } from "../../../core/procedural-solid-render.wgsl";
@@ -1454,6 +1455,9 @@ fn meshFilteredNormal(face:vec3f,baked:vec3f,level:u32,agreement:f32,cellPixels:
   return normalize(mix(face,baked,strength));
 }
 @fragment fn surfaceMeshFragment(input:MeshVertexOut)->MeshSurfaceOut{
+  // Imported volumes keep their native lattice. This coarse derivative serves
+  // lighting/occlusion; the source field's depth-tested proxy draws its surface.
+  if((dryMaterial(sceneIdentityMaterial(input.identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){discard;}
   let camera=dryRasterPrimaryCamera();let rd=normalize(input.world-camera[0]);let t=length(input.world-camera[0]);
   var normal=normalize(input.normal);var receiverNormal=input.geometricNormal;
   if(dot(input.boundaryNormal,input.boundaryNormal)>1e-12){normal=normalize(input.boundaryNormal);receiverNormal=normal;}

@@ -1,7 +1,7 @@
 import { SVO_GBUFFER_NORMAL_OCT8_ABSENT } from "../../contracts/svo-gbuffer";
 /** Marching Cubes on function-fitted dual hexahedra. A face graph replaces
  * the fixed case table so both owners use the same bilinear face decider.
- * Uses the shared 16-byte attachment reader and packed-triangle append ABI.
+ * Uses the shared 8-byte attachment reader and packed-triangle append ABI.
  *
  * The dual grid is the octree's own (Schaefer & Warren): one dual cell per
  * lattice vertex that is a corner of some leaf cell, whose eight corners are
@@ -62,8 +62,8 @@ var<private> dmcSigns:u32;
 var<private> dmcIdentity:u32;
 var<private> dmcSharp:u32;
 fn dmcReset(){dmcGradientCount=0u;dmcSigns=0u;dmcIdentity=0u;dmcSharp=0u;}
-fn dmcLoad(c:u32,voxel:u32,size:f32){
-  dmcPositions[c]=meshDcPoint(voxel);dmcValues[c]=bitcast<f32>(meshDcWord(voxel,3u));dmcSizes[c]=size;
+fn dmcLoad(c:u32,voxel:u32,size:f32,origin:vec3f){
+  dmcPositions[c]=meshDcPoint(voxel,origin,size);dmcValues[c]=bitcast<f32>(meshDcWord(voxel,1u));dmcSizes[c]=size;
   let material=sceneIdentityAt(voxel);
   dmcNormals[c]=vec3f(0);
   // A zero fitted value is sliver elimination, not evidence of a crease.
@@ -183,6 +183,7 @@ fn dmcEmit(origin:vec3f,scale:u32,depth:u32,mixed:bool){
 // Emit a mixed cell whose largest leaf is \`largest\`, or report a grading the
 // 12-bit record cannot hold.
 fn dmcEmitMixed(vertex:vec3f,scale:u32,depth:u32,largest:f32){
+  if(dmcSigns==0u||dmcSigns==255u){return;}
   if(largest>4.*f32(scale)){meshDmcUnsupported();return;}
   dmcEmit(max(vertex-vec3f(largest),vec3f(0)),scale,depth,true);
 }
@@ -214,13 +215,13 @@ fn meshDmcExtract(base:vec3u,scale:u32,depth:u32,local:u32,n:u32){
       var region=bricks[select(0u,1u,upper.x)|select(0u,2u,upper.y)|select(0u,4u,upper.z)];
       if(region.voxel!=SVO_INVALID&&region.size==s){
         let cell=vec3u((q+vec3i(i32(n)))%vec3i(i32(n)));
-        dmcLoad(c,region.voxel+cell.x+n*cell.y+n*n*cell.z,s);continue;
+        dmcLoad(c,region.voxel+cell.x+n*cell.y+n*n*cell.z,s,region.origin+vec3f(cell)*s);continue;
       }
       // A whole absent brick leaves nothing to look up.
       if(region.voxel==SVO_INVALID&&region.size>=span){valid=false;break;}
       region=meshRegionAt(vertex+(dmcCorner(c)-vec3f(.5))*s);
       if(region.voxel==SVO_INVALID||region.size<s){valid=false;break;}
-      largest=max(largest,region.size);dmcLoad(c,region.voxel,region.size);
+      largest=max(largest,region.size);dmcLoad(c,region.voxel,region.size,region.origin);
     }
     if(!valid){continue;}
     if(largest>s){dmcEmitMixed(vertex,scale,depth,largest);}else{dmcEmit(vertex-vec3f(s),scale,depth,false);}
@@ -245,11 +246,11 @@ fn meshDmcExtract(base:vec3u,scale:u32,depth:u32,local:u32,n:u32){
     for(var c=0u;c<8u;c+=1u){
       let q=vec3i(v)+vec3i(dmcCorner(c))-vec3i(1);
       if(all(q>=vec3i(0))&&all(q<vec3i(i32(n)))){
-        let cell=vec3u(q);dmcLoad(c,own.voxel+cell.x+n*cell.y+n*n*cell.z,s);continue;
+        let cell=vec3u(q);dmcLoad(c,own.voxel+cell.x+n*cell.y+n*n*cell.z,s,vec3f(base)+vec3f(cell)*s);continue;
       }
       let region=meshRegionAt(vertex+(dmcCorner(c)-vec3f(.5))*s);
       if(region.voxel==SVO_INVALID||region.size<s||(region.size==s&&c>owner)){valid=false;break;}
-      largest=max(largest,region.size);dmcLoad(c,region.voxel,region.size);
+      largest=max(largest,region.size);dmcLoad(c,region.voxel,region.size,region.origin);
     }
     if(!valid){continue;}
     dmcEmitMixed(vertex,scale,depth,largest);

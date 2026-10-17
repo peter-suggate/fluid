@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "assets": [
+    {
+      "id": "teak-lounger",
+      "mesh": "teak-lounger.glb",
+      "volume": "teak-lounger.fvx.gz",
+      "sourceCollection": "teak-lounger"
+    },
+    {
+      "id": "garden-parasol",
+      "mesh": "garden-parasol.glb",
+      "volume": "garden-parasol.fvx.gz",
+      "sourceCollection": "garden-parasol"
+    },
+    {
+      "id": "insulated-cooler",
+      "mesh": "insulated-cooler.glb",
+      "volume": "insulated-cooler.fvx.gz",
+      "sourceCollection": "insulated-cooler"
+    },
+    {
+      "id": "refreshment-set",
+      "mesh": "refreshment-set.glb",
+      "volume": "refreshment-set.fvx.gz",
+      "sourceCollection": "refreshment-set"
+    },
+    {
+      "id": "diving-board-ladder",
+      "mesh": "diving-board-ladder.glb",
+      "volume": "diving-board-ladder.fvx.gz",
+      "sourceCollection": "diving-board-ladder"
+    },
+    {
+      "id": "pool-stainless-ladder",
+      "mesh": "pool-stainless-ladder.glb",
+      "volume": "pool-stainless-ladder.fvx.gz",
+      "sourceCollection": "pool-stainless-ladder"
+    },
+    {
+      "id": "honed-travertine-paver",
+      "mesh": "honed-travertine-paver.glb",
+      "volume": "honed-travertine-paver.fvx.gz",
+      "sourceCollection": "honed-travertine-paver"
+    },
+    {
+      "id": "living-turf",
+      "mesh": "living-turf.glb",
+      "volume": "living-turf.fvx.gz",
+      "sourceCollection": "living-turf"
+    },
+    {
+      "id": "cedar-fence-panel",
+      "mesh": "cedar-fence-panel.glb",
+      "volume": "cedar-fence-panel.fvx.gz",
+      "sourceCollection": "cedar-fence-panel"
+    },
+    {
+      "id": "stucco-window-bay",
+      "mesh": "stucco-window-bay.glb",
+      "volume": "stucco-window-bay.fvx.gz",
+      "sourceCollection": "stucco-window-bay"
+    },
+    {
+      "id": "limestone-coping",
+      "mesh": "limestone-coping.glb",
+      "volume": "limestone-coping.fvx.gz",
+      "sourceCollection": "limestone-coping"
+    },
+    {
+      "id": "limestone-coping-corner",
+      "mesh": "limestone-coping-corner.glb",
+      "volume": "limestone-coping-corner.fvx.gz",
+      "sourceCollection": "limestone-coping-corner"
+    },
+    {
+      "id": "ceramic-waterline",
+      "mesh": "ceramic-waterline.glb",
+      "volume": "ceramic-waterline.fvx.gz",
+      "sourceCollection": "ceramic-waterline"
+    },
+    {
+      "id": "teak-serving-table",
+      "mesh": "teak-serving-table.glb",
+      "volume": "teak-serving-table.fvx.gz",
+      "sourceCollection": "teak-serving-table"
+    }
+  ]
+}

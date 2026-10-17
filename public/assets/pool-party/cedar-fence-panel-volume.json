@@ -1,0 +1,248 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "cedar-fence-panel",
+  "source": "cedar-fence-panel.glb",
+  "origin": [
+    -0.9812500000000001,
+    -0.025,
+    -0.10625000000000001
+  ],
+  "dimensions": [
+    304,
+    320,
+    32
+  ],
+  "cellSize": 0.00625,
+  "bandWidth": 0.018750000000000003,
+  "brickCount": 3452,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "silvered-cedar",
+      "baseColorLinear": [
+        0.0732257291674614,
+        0.03545013815164566,
+        0.015787877142429352
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "brushed-hardware",
+      "baseColorLinear": [
+        0.550000011920929,
+        0.5799999833106995,
+        0.6000000238418579
+      ],
+      "roughness": 0.28999999165534973,
+      "metallic": 0.949999988079071
+    },
+    {
+      "name": "silvered-cedar/9,6,4/r0.714",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.03113008990948415,
+        0.01513350723396306
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/10,7,4/r0.714",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.041722573919128626,
+        0.01513350723396306
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/9,6,4/r0.571",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.03113008990948415,
+        0.01513350723396306
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/9,7,4/r0.714",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.041722573919128626,
+        0.01513350723396306
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/8,6,4/r0.571",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.03113008990948415,
+        0.01513350723396306
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/10,7,5/r0.714",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.041722573919128626,
+        0.02229888300503533
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/11,7,5/r0.714",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.041722573919128626,
+        0.02229888300503533
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/9,7,4/r0.571",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.041722573919128626,
+        0.01513350723396306
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/11,8,5/r0.714",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.05416457340265298,
+        0.02229888300503533
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/10,7,4/r0.571",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.041722573919128626,
+        0.01513350723396306
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/8,6,4/r0.714",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.03113008990948415,
+        0.01513350723396306
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/8,5,4/r0.571",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.02229888300503533,
+        0.01513350723396306
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/10,7,5/r0.857",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.041722573919128626,
+        0.02229888300503533
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/8,5,3/r0.571",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.02229888300503533,
+        0.009529478582354435
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/11,7,5/r0.857",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.041722573919128626,
+        0.02229888300503533
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/8,6,3/r0.571",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.03113008990948415,
+        0.009529478582354435
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/11,8,5/r0.857",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.05416457340265298,
+        0.02229888300503533
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/7,5,3/r0.571",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.02229888300503533,
+        0.009529478582354435
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/10,7,4/r0.857",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.041722573919128626,
+        0.01513350723396306
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "silvered-cedar/10,6,4/r0.714",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.03113008990948415,
+        0.01513350723396306
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 1883025,
+  "insideNodes": 528331
+}

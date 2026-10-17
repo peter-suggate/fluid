@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "insulated-cooler",
+  "source": "insulated-cooler.glb",
+  "origin": [
+    -0.52,
+    -0.03,
+    -0.32
+  ],
+  "dimensions": [
+    104,
+    72,
+    64
+  ],
+  "cellSize": 0.01,
+  "bandWidth": 0.03,
+  "brickCount": 840,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "satin-stainless.002",
+      "baseColorLinear": [
+        0.5600000023841858,
+        0.6000000238418579,
+        0.6200000047683716
+      ],
+      "roughness": 0.25999999046325684,
+      "metallic": 0.949999988079071
+    },
+    {
+      "name": "warm-white-polymer",
+      "baseColorLinear": [
+        0.8199999928474426,
+        0.8299999833106995,
+        0.7699999809265137
+      ],
+      "roughness": 0.3199999928474426,
+      "metallic": 0.0
+    },
+    {
+      "name": "charcoal-rubber.001",
+      "baseColorLinear": [
+        0.02199999988079071,
+        0.02800000086426735,
+        0.028999999165534973
+      ],
+      "roughness": 0.7200000286102295,
+      "metallic": 0.0
+    },
+    {
+      "name": "lagoon-enamel",
+      "baseColorLinear": [
+        0.02500000037252903,
+        0.28999999165534973,
+        0.3199999928474426
+      ],
+      "roughness": 0.23999999463558197,
+      "metallic": 0.11999999731779099
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV base colour sampled in linear light; PBR roughness/metallic retained",
+  "uniqueNodes": 448433,
+  "insideNodes": 228868
+}

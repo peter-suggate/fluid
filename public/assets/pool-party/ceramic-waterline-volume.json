@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "ceramic-waterline",
+  "source": "ceramic-waterline.glb",
+  "origin": [
+    -0.51875,
+    -0.025,
+    -0.03125
+  ],
+  "dimensions": [
+    168,
+    56,
+    16
+  ],
+  "cellSize": 0.00625,
+  "bandWidth": 0.018750000000000003,
+  "brickCount": 294,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "glazed-sea-tile-3",
+      "baseColorLinear": [
+        0.07500000298023224,
+        0.28999999165534973,
+        0.30000001192092896
+      ],
+      "roughness": 0.23399999737739563,
+      "metallic": 0.0
+    },
+    {
+      "name": "glazed-sea-tile-2",
+      "baseColorLinear": [
+        0.054999999701976776,
+        0.3100000023841858,
+        0.3100000023841858
+      ],
+      "roughness": 0.2160000056028366,
+      "metallic": 0.0
+    },
+    {
+      "name": "glazed-sea-tile-4",
+      "baseColorLinear": [
+        0.0949999988079071,
+        0.36000001430511475,
+        0.3400000035762787
+      ],
+      "roughness": 0.25200000405311584,
+      "metallic": 0.0
+    },
+    {
+      "name": "glazed-sea-tile-1",
+      "baseColorLinear": [
+        0.03500000014901161,
+        0.25999999046325684,
+        0.27000001072883606
+      ],
+      "roughness": 0.1979999989271164,
+      "metallic": 0.0
+    },
+    {
+      "name": "glazed-sea-tile-5",
+      "baseColorLinear": [
+        0.11999999731779099,
+        0.3799999952316284,
+        0.36000001430511475
+      ],
+      "roughness": 0.27000001072883606,
+      "metallic": 0.0
+    },
+    {
+      "name": "glazed-sea-tile-0",
+      "baseColorLinear": [
+        0.024000000208616257,
+        0.20000000298023224,
+        0.22499999403953552
+      ],
+      "roughness": 0.18000000715255737,
+      "metallic": 0.0
+    },
+    {
+      "name": "warm-pool-grout",
+      "baseColorLinear": [
+        0.36000001430511475,
+        0.4000000059604645,
+        0.3700000047683716
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 163761,
+  "insideNodes": 25928
+}

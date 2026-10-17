@@ -1,3 +1,4 @@
+import { agxToneMap, agxWGSL } from "./agx";
 /** Linear RGB tuple used by the CPU side of the shared GPU material contract. */
 export type LinearRgb = readonly [red: number, green: number, blue: number];
 
@@ -303,10 +304,10 @@ export function beerLambert(absorption: LinearRgb, distance: number): [number, n
  * point — the flatness of the current frame is the curve's, and no amount of
  * relighting fixes a transfer function.
  */
-export type SceneToneCurve = "reinhard" | "aces";
+export type SceneToneCurve = "reinhard" | "aces" | "agx";
 
 /** WGSL selector values. Ordered so zero is the historical behaviour. */
-export const SCENE_TONE_CURVE_CODES = Object.freeze({ reinhard: 0, aces: 1 } as const);
+export const SCENE_TONE_CURVE_CODES = Object.freeze({ reinhard: 0, aces: 1, agx: 2 } as const);
 
 /**
  * What a scene may say about how its radiance becomes pixels.
@@ -385,7 +386,7 @@ export function resolveDisplayGrade(authored?: DisplayGradeAuthoring): ResolvedD
   return {
     exposure: opticalScalar(authored?.exposure, DISPLAY_GRADE_NEUTRAL.exposure,
       DISPLAY_EXPOSURE_RANGE.minimum, DISPLAY_EXPOSURE_RANGE.maximum),
-    toneCurve: authored?.toneCurve === "aces" ? "aces" : DISPLAY_GRADE_NEUTRAL.toneCurve,
+    toneCurve: authored?.toneCurve === "agx" ? "agx" : authored?.toneCurve === "aces" ? "aces" : DISPLAY_GRADE_NEUTRAL.toneCurve,
     whiteBalance: [clamped[0] * scale, clamped[1] * scale, clamped[2] * scale],
   };
 }
@@ -408,6 +409,10 @@ export function sceneLinearToDisplay(
   sceneLinear: LinearRgb,
   grade: ResolvedDisplayGrade = DISPLAY_GRADE_NEUTRAL,
 ): [number, number, number] {
+  if (grade.toneCurve === "agx") {
+    const exposed=sceneLinear.map((channel,index)=>Math.max(0,Number.isFinite(channel)?channel:0)*grade.whiteBalance[index]*grade.exposure);
+    return agxToneMap(exposed).map(v=>v**(1/2.2)) as [number,number,number];
+  }
   return sceneLinear.map((channel, index) => {
     const balanced = Math.max(0, Number.isFinite(channel) ? channel : 0) * grade.whiteBalance[index];
     return toneCurve(balanced * grade.exposure, grade.toneCurve) ** (1 / 2.2);
@@ -431,7 +436,9 @@ export function sceneLinearToDisplay(
  * but not yet applied.
  */
 export const unifiedDisplayTransferShaderLibrary = /* wgsl */ `
+${agxWGSL}
 fn unifiedToneCurve(exposed: vec3f, toneCurve: u32) -> vec3f {
+  if (toneCurve == ${SCENE_TONE_CURVE_CODES.agx}u) { return agxToneMap(exposed); }
   if (toneCurve == ${SCENE_TONE_CURVE_CODES.aces}u) {
     // Narkowicz 2015 ACES fit. One rational per channel, so it costs the same
     // as the Reinhard it replaces and has no transcendental to schedule.

@@ -1,3 +1,4 @@
+import { DUAL_GRID_BYTES_PER_VOXEL } from "../meshing/dual-grid-layout";
 import { SPARSE_BRICK_TOPOLOGY_MUTATION, sparseBrickTopologyMutationNodeReserve } from "../../../core/webgpu-sparse-brick-topology-mutation";
 import { SVO_SURFACE_MESH_SCRATCH_WORDS, SVO_SURFACE_MESH_TABLE_WORDS } from "../primary-visibility/svo-surface-mesh";
 import { SVO_BRICK_RASTER_CONTRACT, svoBrickRasterAddressableNodes } from "../primary-visibility/webgpu-svo-brick-raster";
@@ -68,7 +69,7 @@ export function liveTopologyReserveShares(options: LiveTopologyReserveLeafOption
     nodes: 8 * options.maximumDepth * layout.nodeStrideBytes,
     payload: options.payloadBytesPerLeaf,
     maintenance: (4 + options.candidatesPerBrick + 1) * 4,
-    dualGrid: options.dualGridVoxelsPerLeaf * 4 * 4,
+    dualGrid: options.dualGridVoxelsPerLeaf * DUAL_GRID_BYTES_PER_VOXEL,
     leafState: 4,
     mutationRequest: liveTopologyMutationRecordsPerLeaf(options.maximumDepth)
       * SPARSE_BRICK_TOPOLOGY_MUTATION.recordWords * 4,

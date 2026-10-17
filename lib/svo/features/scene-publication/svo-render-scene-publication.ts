@@ -17,6 +17,7 @@ import {
 import { buildSparseVoxelDrySceneLightingMirrors } from "../../pipeline/webgpu-svo-dry-scene";
 import { sceneSvoGroundPlane, sceneTerrainSurfaceModel, type SvoGroundPlane, type SvoTerrainSurfaceModel } from "../materials/svo-terrain-material";
 import { publishOpaqueSurfaceCapability } from "../shading/deferred-specialization";
+import { markSampledVolumeOwnerMaterials, sampledVolumeMaterialRecords } from "../materials/svo-sampled-materials";
 import { successorEnvironmentCatalog } from "./scene-environment-catalog";
 import { buildSvoPrimitiveCandidates, type SvoPrimitiveCandidatePublication } from "./svo-primitive-candidates";
 import { buildSvoScenePrimitives, type SvoEnvironmentPrimitiveMetadata, type SvoScenePrimitiveBuild } from "./svo-scene-primitives";
@@ -95,6 +96,12 @@ function materialTable(
   terrainSurface: SvoTerrainSurfaceModel,
 ): Uint32Array<ArrayBuffer> {
   const metadata = primitives.metadata;
+  if (primitives.fieldPrograms.some(p => p.sampledVolume)) {
+    if (previous?.primitives === primitives && previous.terrainSurface === terrainSurface) return previous.data.materialRecords;
+    return markSampledVolumeOwnerMaterials(packSvoMaterialTable([...buildDefaultSvoMaterialRecords(RENDER_SCENE_TABLE_REVISION, { terrainSurface }),
+      ...metadata.map(p => environmentMaterialRecord(p, terrainSurface)),
+      ...sampledVolumeMaterialRecords(primitives.fieldPrograms, RENDER_SCENE_TABLE_REVISION)]), primitives.descriptors);
+  }
   const published = previous?.primitives.metadata;
   if (previous && published && published.length === metadata.length) {
     const held = previous.data.materialRecords;

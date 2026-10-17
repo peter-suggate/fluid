@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "living-turf",
+  "source": "living-turf.glb",
+  "origin": [
+    -0.51875,
+    -0.034375,
+    -0.525
+  ],
+  "dimensions": [
+    336,
+    40,
+    336
+  ],
+  "cellSize": 0.003125,
+  "bandWidth": 0.009375000000000001,
+  "brickCount": 8477,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "grass-tone-0",
+      "baseColorLinear": [
+        0.06499999761581421,
+        0.1599999964237213,
+        0.017999999225139618
+      ],
+      "roughness": 0.6899999976158142,
+      "metallic": 0.0
+    },
+    {
+      "name": "grass-tone-1",
+      "baseColorLinear": [
+        0.08500000089406967,
+        0.20499999821186066,
+        0.02500000037252903
+      ],
+      "roughness": 0.7049999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "grass-tone-2",
+      "baseColorLinear": [
+        0.10999999940395355,
+        0.25,
+        0.03500000014901161
+      ],
+      "roughness": 0.7200000286102295,
+      "metallic": 0.0
+    },
+    {
+      "name": "grass-tone-3",
+      "baseColorLinear": [
+        0.15000000596046448,
+        0.28999999165534973,
+        0.04800000041723251
+      ],
+      "roughness": 0.7350000143051147,
+      "metallic": 0.0
+    },
+    {
+      "name": "grass-tone-4",
+      "baseColorLinear": [
+        0.18000000715255737,
+        0.27000001072883606,
+        0.054999999701976776
+      ],
+      "roughness": 0.75,
+      "metallic": 0.0
+    },
+    {
+      "name": "grass-tone-5",
+      "baseColorLinear": [
+        0.23999999463558197,
+        0.2800000011920929,
+        0.08500000089406967
+      ],
+      "roughness": 0.7649999856948853,
+      "metallic": 0.0
+    },
+    {
+      "name": "turf-root-thatch",
+      "baseColorLinear": [
+        0.054999999701976776,
+        0.07199999690055847,
+        0.01899999938905239
+      ],
+      "roughness": 0.9800000190734863,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 4497161,
+  "insideNodes": 806299
+}

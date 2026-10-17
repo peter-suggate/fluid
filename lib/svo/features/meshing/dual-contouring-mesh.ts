@@ -1,18 +1,20 @@
+import { DUAL_GRID_WORDS_PER_VOXEL, dualGridPointWGSL } from "./dual-grid-layout";
 /** Extraction hook; common scheduler owns count/emit, arena rollback and publish. */
 export const svoDualContouringMeshWGSL = /* wgsl */ `
+${dualGridPointWGSL}
 fn meshDcWord(voxel:u32,lane:u32)->u32{
- let base=atomicLoad(&meshState[47u])&0x7fffffffu;let at=base+voxel*4u+lane;
+ let base=atomicLoad(&meshState[47u])&0x7fffffffu;let at=base+voxel*${DUAL_GRID_WORDS_PER_VOXEL}u+lane;
  if(base==0u||voxel==SVO_INVALID||at>=arrayLength(&meshMaintenance)){return 0u;}
  return meshMaintenance[at];
 }
-fn meshDcPoint(voxel:u32)->vec3f{return bitcast<vec3f>(vec3u(meshDcWord(voxel,0u),meshDcWord(voxel,1u),meshDcWord(voxel,2u)));}
-fn meshDcActive(voxel:u32)->bool{let signs=meshDcWord(voxel,3u)&255u;return signs!=0u&&signs!=255u;}
+fn meshDcPoint(voxel:u32,origin:vec3f,size:f32)->vec3f{return origin+unpackDualGridPoint(meshDcWord(voxel,0u))*size;}
+fn meshDcActive(voxel:u32)->bool{let signs=meshDcWord(voxel,1u)&255u;return signs!=0u&&signs!=255u;}
 fn meshDcPack(p:vec3f)->u32{let q=vec3u(round(clamp(p*256.,vec3f(0),vec3f(1023))));return q.x|(q.y<<10u)|(q.z<<20u);}
 fn meshDcExtract(base:vec3u,scale:u32,depth:u32,local:u32,n:u32){
  if(local>=3u*n){return;}let axis=local/n;let layer=local%n;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
  for(var y=0u;y<n;y+=1u){for(var x=0u;x<n;x+=1u){
   var c=vec3u(0);c[axis]=layer;c[u]=x;c[v]=y;let edge=vec3f(base+c*scale);
-  let own=meshRegionAt(edge+vec3f(.5*f32(scale)));let signs=meshDcWord(own.voxel,3u)&255u;
+  let own=meshRegionAt(edge+vec3f(.5*f32(scale)));let signs=meshDcWord(own.voxel,1u)&255u;
   if(((signs&1u)!=0u)==((signs&(1u<<(1u<<axis)))!=0u)){continue;}
   var ids:array<u32,4>;var vertices:array<vec3f,4>;var valid=true;var sharp=0u;
   for(var i=0u;i<4u;i+=1u){
@@ -20,7 +22,7 @@ fn meshDcExtract(base:vec3u,scale:u32,depth:u32,local:u32,n:u32){
    if(i==1u||i==2u){p[u]-=f32(scale);}if(i==2u||i==3u){p[v]-=f32(scale);}
    let region=meshRegionAt(p);ids[i]=region.voxel;
    if(region.size!=f32(scale)||!meshDcActive(region.voxel)){valid=false;break;}
-   vertices[i]=meshDcPoint(region.voxel);sharp|=(meshDcWord(region.voxel,3u)>>24u)&1u;
+   vertices[i]=meshDcPoint(region.voxel,region.origin,region.size);sharp|=(meshDcWord(region.voxel,1u)>>24u)&1u;
   }
   if(!valid){continue;}
   var origin=edge;origin[u]-=f32(scale);origin[v]-=f32(scale);

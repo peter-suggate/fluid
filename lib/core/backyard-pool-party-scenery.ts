@@ -1,4 +1,5 @@
 import type { SceneryGraph, SceneryMaterial, SceneryNode } from "./scenery-graph";
+import { meshAssetHeader } from "./imported-assets/asset-library";
 import { planOakV2 } from "./voxel-scenery/oak-v2";
 import { planWoodyPlant } from "./voxel-scenery/woody-plants";
 import type { Vec3 } from "./model";
@@ -7,7 +8,6 @@ import type { Vec3 } from "./model";
 type Point = readonly [number, number, number];
 const v = ([x, y, z]: Point): Vec3 => ({ x, y, z });
 const material = (colorLinear: Point, surface: SceneryMaterial["surface"]): SceneryMaterial => ({ colorLinear, surface });
-const stone = material([.68, .61, .49], "stone");
 const wood = material([.24, .12, .055], "wood");
 const metal = material([.42, .46, .48], "brushed-metal");
 const cream = material([.88, .83, .70], "architectural");
@@ -23,16 +23,17 @@ const rod = (id: string, from: Point, to: Point, radius = .035, mat = metal): Sc
 const cylinder = (id: string, at: Point, radius: number, halfHeight: number, mat: SceneryMaterial): SceneryNode =>
   ({ kind: "cylinder", id, place: { units: "metres", position: v(at) }, radius, halfHeight, material: mat });
 
-function lounger(id: string, x: number, z: number, fabric: SceneryMaterial): SceneryNode[] {
-  const nodes: SceneryNode[] = [box(`${id}/frame`, [x, 2.36, z], [.38, .06, .98]),
-    box(`${id}/cushion`, [x, 2.45, z + .26], [.35, .06, .65], fabric),
-    { kind: "box", id: `${id}/backrest`, place: { units: "metres", position: v([x, 2.70, z - .66]),
-      orientation: { w: Math.cos(-.48 / 2), x: Math.sin(-.48 / 2), y: 0, z: 0 } },
-      halfSize: v([.35, .065, .43]), material: fabric },
-    box(`${id}/towel`, [x, 2.52, z + .55], [.31, .025, .32], cream)];
-  for (const side of [-1, 1]) for (const end of [-1, 1]) nodes.push(
-    rod(`${id}/leg-${side}-${end}`, [x + side * .29, 2.04, z + end * .73], [x + side * .29, 2.36, z + end * .73], .04, wood));
-  return nodes;
+/** Asset samples are centred in their local field; place their Blender origin
+ * on the patio/table while preserving the authored metre scale. */
+function imported(id: string, asset: string, anchor: Point, angle = 0): SceneryNode {
+  const header = meshAssetHeader(asset);
+  const c = header.origin.map((v, i) => v + header.dimensions[i]! * header.cellSize / 2);
+  return { kind: "field-program", id,
+    program: { ops: [], result: 0, sampledVolume: { asset } },
+    place: { units: "metres", position: v([anchor[0] + Math.cos(angle) * c[0]! + Math.sin(angle) * c[2]!,
+      anchor[1] + c[1]!, anchor[2] - Math.sin(angle) * c[0]! + Math.cos(angle) * c[2]!]),
+      orientation: { w: Math.cos(angle / 2), x: 0, y: Math.sin(angle / 2), z: 0 } },
+    material: cream };
 }
 
 function guest(id: string, x: number, z: number, skin: SceneryMaterial, clothing: SceneryMaterial, angle: number): SceneryNode {
@@ -58,65 +59,58 @@ function guest(id: string, x: number, z: number, skin: SceneryMaterial, clothing
 
 export function backyardPoolPartyScenery(): SceneryGraph {
   const nodes: SceneryNode[] = [{ kind: "room-shell", id: "shell", materialModel: "room", faces: [], floor: cream, wall: cream, ceiling: cream }];
-  // A warm stone terrace, divided around the cavity. Fine seams break up its scale.
+  // Shared honed stone field: eased edges, mineral pores, UV roughness and
+  // source shading normals. Quarter-turns break up the sediment repetition.
   for (let x = -8; x < 8; x += 1) for (let z = -6; z < 6; z += 1) {
     if (x >= -4 && x < 4 && z >= -2 && z < 2) continue;
-    nodes.push(box(`patio/${x}/${z}`, [x + .5, 2.015, z + .5], [.494, .015, .494], stone));
+    const turn = ((x + 8) * 13 + (z + 6) * 7) % 4;
+    nodes.push(imported(`patio/${x}/${z}`, "honed-travertine-paver", [x + .5, 2, z + .5], turn * Math.PI / 2));
   }
-  // Coping lies outside the physical water cavity; blue tile marks the waterline.
+  // Individually eased coping stones and glazed mosaics retain their native
+  // 6.25 mm source sampling, independently of the fluid boundary.
   for (const side of [-1, 1]) {
-    nodes.push(box(`pool/coping-x-${side}`, [side * 4.15, 2.07, 0], [.15, .07, 2.3], cream),
-      box(`pool/coping-z-${side}`, [0, 2.07, side * 2.15], [4, .07, .15], cream),
-      box(`pool/tile-x-${side}`, [side * 3.995, 1.82, 0], [.012, .14, 2], teal),
-      box(`pool/tile-z-${side}`, [0, 1.82, side * 1.995], [4, .14, .012], teal));
+    for (let i = 0; i < 16; i++) nodes.push(imported(`pool/coping-z-${side}/${i}`,
+      "limestone-coping", [-3.75 + i * .5, 2, side * 2.15]));
+    for (let i = 0; i < 8; i++) {
+      nodes.push(imported(`pool/coping-x-${side}/${i}`, "limestone-coping",
+        [side * 4.15, 2, -1.75 + i * .5], Math.PI / 2),
+      imported(`pool/tile-z-${side}/${i}`, "ceramic-waterline",
+        [-3.5 + i, 1.68, side * 1.995], side < 0 ? 0 : Math.PI));
+    }
+    for (let i = 0; i < 4; i++) nodes.push(imported(`pool/tile-x-${side}/${i}`,
+      "ceramic-waterline", [side * 3.995, 1.68, -1.5 + i], -side * Math.PI / 2));
+    for (const end of [-1, 1]) nodes.push(imported(`pool/coping-corner/${side}/${end}`,
+      "limestone-coping-corner", [side * 4.15, 2, end * 2.15]));
   }
-  // Tall anchored steel support, diagonal braces, ladder and rear handrails.
-  for (const side of [-1, 1]) {
-    const z = side * .46;
-    nodes.push(box(`diving/foot-${side}`, [-5.75, 2.10, z], [.38, .08, .19], metal),
-      rod(`diving/upright-${side}`, [-5.75, 2.12, z], [-5.75, 5.18, z], .075),
-      rod(`diving/brace-${side}`, [-6.45, 2.10, z], [-5.75, 4.7, z], .045),
-      rod(`diving/ladder-${side}`, [-7.05, 2.1, side * .34], [-6.0, 5.35, side * .34], .04),
-      rod(`diving/handrail-${side}`, [-6.0, 5.35, z], [-6.0, 6.20, z], .035),
-      rod(`diving/rail-${side}`, [-6.0, 6.20, z], [-5.15, 6.12, z], .035));
-  }
-  for (let i = 0; i < 11; i++) {
-    const t = (i + 1) / 11;
-    nodes.push(rod(`diving/rung-${i}`, [-7.05 + t * 1.05, 2.10 + t * 3.25, -.34],
-      [-7.05 + t * 1.05, 2.10 + t * 3.25, .34], .045));
-  }
-  nodes.push(box("diving/crossbeam", [-5.75, 5.17, 0], [.16, .08, .56], metal));
-  // Pool ladder at the opposite end, away from the ball's landing zone.
-  for (const z of [-.4, .4]) {
-    nodes.push(rod(`pool/ladder/${z}`, [3.7, .65, z], [3.7, 2.7, z], .035),
-      rod(`pool/ladder-top/${z}`, [3.7, 2.7, z], [4.4, 2.7, z], .035),
-      rod(`pool/ladder-return/${z}`, [4.4, 2.7, z], [4.4, 2.1, z], .035));
-  }
-  for (let i = 0; i < 4; i++) nodes.push(rod(`pool/step-${i}`, [3.7, .8 + i * .35, -.4], [3.7, .8 + i * .35, .4], .045));
-  nodes.push(...lounger("lounger/one", -.8, -3.65, teal), ...lounger("lounger/two", 1.1, -3.65, coral),
-    ...lounger("lounger/three", 3, -3.65, cream));
-  // Garden parasol, table, refreshments and a cooler.
-  nodes.push(cylinder("parasol/base", [1.1, 2.08, -5.05], .34, .08, stone),
-    rod("parasol/pole", [1.1, 2.12, -5.05], [1.1, 4.9, -5.05], .045, wood),
-    { kind: "cone", id: "parasol/canopy", place: { units: "metres", position: v([1.1, 4.65, -5.05]) },
-      halfHeight: .25, baseRadius: 1.65, topRadius: .045, material: cream },
-    box("refreshments/top", [5.65, 2.8, -3.5], [.65, .055, 1.25]),
-    box("cooler/body", [5.7, 2.28, -1.6], [.37, .25, .25], teal),
-    box("cooler/lid", [5.7, 2.56, -1.6], [.39, .045, .27], cream));
-  for (const x of [5.15, 6.15]) for (const z of [-4.5, -2.5]) nodes.push(rod(`table/leg/${x}/${z}`, [x, 2, z], [x, 2.8, z], .055, wood));
-  for (let i = 0; i < 5; i++) nodes.push(cylinder(`refreshments/cup-${i}`, [5.4, 2.96, -4.3 + i * .35], .055, .10, i % 2 ? coral : cream));
-  nodes.push(cylinder("refreshments/pitcher", [5.85, 3.04, -3.5], .12, .18, teal));
+  // Blender assembly follows the original board's 4.5° slope and encloses
+  // its unchanged simulation collider; all steelwork remains render detail.
+  nodes.push(imported("diving/assembly", "diving-board-ladder", [-4.1, 2, 0]),
+    imported("pool/stainless-ladder", "pool-stainless-ladder", [4, 2, 0]));
+  nodes.push(imported("lounger/one", "teak-lounger", [-.8, 2.03, -3.65], Math.PI),
+    imported("lounger/two", "teak-lounger", [1.1, 2.03, -3.65], Math.PI),
+    imported("lounger/three", "teak-lounger", [3, 2.03, -3.65], Math.PI),
+    imported("parasol", "garden-parasol", [1.1, 2.03, -5.05]),
+    imported("cooler", "insulated-cooler", [5.7, 2.03, -1.6]),
+    imported("refreshments/service", "refreshment-set", [5.65, 2.855, -3.5]),
+    imported("refreshments/table", "teak-serving-table", [5.65, 2.03, -3.5]));
   nodes.push(guest("guest/host", 5.2, 1.2, material([.48, .26, .14], "organic"), coral, -1.2),
     guest("guest/friend", 6.3, .6, material([.24, .11, .055], "organic"), cream, -2.3),
     guest("guest/poolside", 1.5, 3.5, material([.72, .43, .27], "organic"), teal, Math.PI),
     guest("guest/patio", 3, 3.8, material([.38, .19, .09], "organic"), coral, -2.2));
   // Lawn strips, timber privacy fence, clipped shrubs and a rear house facade.
-  nodes.push(box("lawn/rear", [0, 1.97, -7], [9, .05, 1], leaf),
-    box("lawn/right", [8.75, 1.97, 0], [.75, .05, 8], leaf),
-    box("lawn/front", [0, 1.97, 7], [9, .05, 1], leaf),
-    box("lawn/left", [-8.75, 1.97, 0], [.75, .05, 8], leaf));
-  for (let i = 0; i < 60; i++) nodes.push(box(`fence/picket-${i}`, [-8.85 + i * .3, 2.95, -7.8], [.14, .95, .045]));
-  for (let i = 0; i < 50; i++) nodes.push(box(`fence/side-${i}`, [9.4, 2.95, -7.5 + i * .3], [.045, .95, .14]));
+  // Each metre of turf references one shared 3.125 mm source volume.
+  // The 50 mm fluid grid never acquires grass blades or texture samples.
+  for (let x = -10; x < 10; x++) for (let z = -8; z < 8; z++) {
+    if (x >= -8 && x < 8 && z >= -6 && z < 6) continue;
+    const turn = ((x + 10) * 7 + (z + 8) * 11) % 4;
+    nodes.push(imported(`lawn/turf/${x}/${z}`, "living-turf", [x + .5, 2.01, z + .5], turn * Math.PI / 2));
+  }
+  for (let i = 0; i < 10; i++) nodes.push(imported(`fence/rear-${i}`,
+    "cedar-fence-panel", [-8.1 + i * 1.8, 2, -7.8]));
+  for (let i = 0; i < 9; i++) nodes.push(imported(`fence/side-${i}`,
+    "cedar-fence-panel", [9, 2, -7.1 + i * 1.8], -Math.PI / 2));
+  nodes.push(box("fence/rear-end", [9, 2.94, -7.825], [.0475, .94, .0475]),
+    box("fence/side-end", [9.025, 2.94, 8.2], [.0475, .94, .0475]));
   // Use the nursery's actual branching and foliage recipes. The low border
   // leaves the diving board visible; taller specimens frame the outer lawn.
   for (let i = 0; i < 9; i++) {
@@ -137,9 +131,9 @@ export function backyardPoolPartyScenery(): SceneryGraph {
       scale_m: scale, bark: wood, foliage: leaf }).node;
     nodes.push({ ...tree, place: { units: "metres", position: v([x, 2.02, z]) } });
   }
-  nodes.push(box("house/wall", [-9.8, 3.65, .5], [.25, 1.65, 5.6], cream),
-    box("house/eaves", [-9.5, 5.36, .5], [.7, .12, 5.8], wood));
-  for (const z of [-2.5, 1, 4]) nodes.push(box(`house/window-${z}`, [-9.53, 3.8, z], [.025, .85, 1.15], material([.065, .13, .17], "architectural")));
+  nodes.push(box("house/wall", [-9.8, 3.65, .5], [.25, 1.65, 5.25], cream));
+  for (const z of [-3, .5, 4]) nodes.push(imported(`house/bay-${z}`,
+    "stucco-window-bay", [-9.42, 2, z], Math.PI / 2));
   // Festoon lights hang beyond the pool, never across the diving trajectory.
   for (const x of [-7.5, 7.5]) nodes.push(rod(`lights/post-${x}`, [x, 2, 5.4], [x, 5.15, 5.4], .055, wood));
   for (let i = 0; i < 24; i++) {

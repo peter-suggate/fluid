@@ -1,3 +1,4 @@
+import { svoVoxelLightHashWGSL, SVO_VOXEL_LIGHT_CACHE_BYTES_PER_ENTRY } from "../lighting-visibility/svo-voxel-light-cache";
 import { rasterAoConsumerWGSL, rasterAoProducerWGSL } from "../lighting-visibility/svo-raster-ao";
 /** Fused SVO shading program and its packing ABI. The pipeline host owns
  * scheduling and resources; feature extraction must not add GPU dispatches. */
@@ -1002,13 +1003,13 @@ export const SVO_DRY_WORLD_GI_CACHE_CONTRACT = Object.freeze({
 
 /** Phase-1 static directional-light cache. One bounded queue drains cold demand over several frames. */
 export const SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT = Object.freeze({
-  format: "rg32uint" as GPUTextureFormat,
+  format: "rgba32uint" as GPUTextureFormat,
   populationBudget: 16_384,
   queueHeaderWords: 8,
   queueEntryWords: 2,
   voxelsPerPage: SVO_NODE_MIP_LAYOUT.interiorSize ** 3,
   requestWordsPerPage: SVO_NODE_MIP_LAYOUT.interiorSize ** 3 / 32,
-  bytesPerTexel: 8,
+  bytesPerTexel: SVO_VOXEL_LIGHT_CACHE_BYTES_PER_ENTRY,
 } as const);
 
 
@@ -2237,7 +2238,7 @@ fn traceLeafPayloadVisibilityFineInterval(ray:SvoVisibilityRay,tMin_m:f32,hit:Sv
   for(var iteration=0u;iteration<32u;iteration+=1u){
     if(any(cell<vec3i(cellMinimum))||any(cell>=vec3i(cellMaximum))||entry>intervalExit||entry>ray.tMax_m){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,workItems,DRY_MISS);}if(workItems>=workLimit){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);}workItems+=1u;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);if(payloadIndex>=dryVoxelCapacity()){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}
-    ${cellSolidGateWGSL("payloadIndex", "let clipBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let span=dryCellContourInterval(identity,payloadIndex,clipBounds,ray.origin_m,ray.direction,entry,min(nextT.x,min(nextT.y,nextT.z)));if(span.x<=span.y){let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,span.x);}")}
+    ${cellSolidGateWGSL("payloadIndex", "let clipBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let span=dryCellContourInterval(identity,payloadIndex,clipBounds,ray.origin_m,ray.direction,entry,min(nextT.x,min(nextT.y,nextT.z)));if(span.x<=span.y){let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}if(!drySampledShadowRay||(material.identity.w&SVO_MATERIAL_FLAG_SAMPLED_VOLUME)==0u){return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,span.x);}}")}
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);
@@ -2534,7 +2535,7 @@ ${splitRigidReadWGSL}
 // Persistent world-space visibility for directional light slot zero. The
 // request bitset is frame-local; the atlas texels survive camera motion and
 // carry a 16-bit lighting epoch plus the representative surface normal.
-struct DryVoxelLightCacheParams{control:vec4u,atlasPages:vec4u}
+struct DryVoxelLightCacheParams{control:vec4u,atlasShape:vec4u}
 struct DryVoxelLightAddress{atlas:vec3u,voxelIndex:u32,valid:u32}
 struct DryVoxelLightQueue{
   distinct:atomic<u32>,misses:atomic<u32>,hits:atomic<u32>,queued:atomic<u32>,
@@ -2543,12 +2544,13 @@ struct DryVoxelLightQueue{
 }
 @group(${voxelLightCacheGroup}) @binding(0) var dryVoxelLightCacheRead:texture_3d<u32>;
 @group(${voxelLightCacheGroup}) @binding(1) var<uniform> dryVoxelLight:DryVoxelLightCacheParams;
-@group(${voxelLightCacheGroup}) @binding(2) var dryVoxelLightCacheWrite:texture_storage_3d<rg32uint,write>;
+@group(${voxelLightCacheGroup}) @binding(2) var dryVoxelLightCacheWrite:texture_storage_3d<rgba32uint,write>;
 @group(${voxelLightCacheGroup}) @binding(3) var<storage,read_write> dryVoxelLightRequests:array<atomic<u32>>;
 @group(${voxelLightCacheGroup}) @binding(4) var<storage,read_write> dryVoxelLightQueue:DryVoxelLightQueue;
 @group(${voxelLightCacheGroup}) @binding(5) var<storage,read> dryVoxelLightPages:array<vec4u>;
 ${reduced ? "" : "var<private> dryCurrentLightSlot:u32;"}
 var<private> dryVoxelLightConsumerEligible:u32;
+${svoVoxelLightHashWGSL}
 fn dryVoxelLightPackNormal(normalIn:vec3f)->u32{
   let normal=normalize(normalIn);var oct=normal.xy/(abs(normal.x)+abs(normal.y)+abs(normal.z));
   if(normal.z<0.0){oct=(vec2f(1.0)-abs(oct.yx))*select(vec2f(-1.0),vec2f(1.0),oct>=vec2f(0.0));}
@@ -2571,15 +2573,14 @@ fn dryVoxelLightAddress(position:vec3f)->DryVoxelLightAddress{
   if(pageIndex==0xffffffffu||pageIndex>=dryVoxelLight.control.x||!dryNodeMipPageValid(pageIndex)){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
   let local=voxel-pageCoordinate*${SVO_NODE_MIP_LAYOUT.interiorSize}u;
   let localIndex=local.x+local.y*${SVO_NODE_MIP_LAYOUT.interiorSize}u+local.z*${SVO_NODE_MIP_LAYOUT.interiorSize ** 2}u;
-  let atlasPages=max(dryVoxelLight.atlasPages.xyz,vec3u(1u));
-  let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));
-  return DryVoxelLightAddress(atlasPage*${SVO_NODE_MIP_LAYOUT.physicalSize}u+vec3u(${SVO_NODE_MIP_LAYOUT.apron}u)+local,pageIndex*${SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.voxelsPerPage}u+localIndex,1u);
+  let voxelIndex=pageIndex*${SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.voxelsPerPage}u+localIndex;
+  return DryVoxelLightAddress(dryVoxelLightTexel(voxelIndex),voxelIndex,1u);
 }
 fn dryVoxelLightVisibility(position:vec3f,normal:vec3f)->vec2f{
   if(dryCurrentLightSlot!=0u||dryVoxelLightConsumerEligible==0u){return vec2f(0.0);}
   let address=dryVoxelLightAddress(position);if(address.valid==0u){return vec2f(0.0);}
-  let encoded=textureLoad(dryVoxelLightCacheRead,vec3i(address.atlas),0).xy;
-  if(encoded.x==0u||(encoded.y>>16u)!=(dryVoxelLight.control.z&0xffffu)){return vec2f(0.0);}
+  let encoded=textureLoad(dryVoxelLightCacheRead,vec3i(address.atlas),0).xyz;
+  if(encoded.z!=address.voxelIndex+1u||encoded.x==0u||(encoded.y>>16u)!=(dryVoxelLight.control.z&0xffffu)){return vec2f(0.0);}
   if(dot(normalize(normal),dryVoxelLightUnpackNormal(encoded.y&0xffffu))<.9){return vec2f(0.0);}
   return vec2f(f32(encoded.x-1u)/65534.0,1.0);
 }
@@ -2587,25 +2588,24 @@ fn dryVoxelLightVisibility(position:vec3f,normal:vec3f)->vec2f{
   let dimensions=textureDimensions(drySplitGeometryRead);if(any(id.xy>=dimensions)){return;}
   let coordinate=vec2i(id.xy);let geometry=drySplitGeometryAt(coordinate);if(!(geometry.w>0.0&&geometry.w<DRY_MISS)){return;}
   let metadata=drySplitIdentityAt(coordinate).y;let motionKind=(metadata>>24u)&3u;let feature=(metadata>>16u)&15u;
-  if(motionKind!=DRY_GBUFFER_MOTION_STATIC||(metadata&DRY_OPAQUE_RECONSTRUCTED)!=0u){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
+  if(motionKind!=DRY_GBUFFER_MOTION_STATIC||(metadata&DRY_OPAQUE_RECONSTRUCTED)!=0u||drySampledMaterial(drySplitIdentityAt(coordinate).x)){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
   let uv=vec2f((f32(id.x)+.5)/f32(dimensions.x),1.0-(f32(id.y)+.5)/f32(dimensions.y));let ndc=uv*2.0-1.0;
   let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
   let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());let position=ro+rd*geometry.w;
   let address=dryVoxelLightAddress(position);if(address.valid==0u){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
-  let word=address.voxelIndex>>5u;let bit=1u<<(address.voxelIndex&31u);let previous=atomicOr(&dryVoxelLightRequests[word],bit);if((previous&bit)!=0u){return;}
+  let slot=dryVoxelLightSlot(address.voxelIndex);let word=slot>>5u;let bit=1u<<(slot&31u);let previous=atomicOr(&dryVoxelLightRequests[word],bit);if((previous&bit)!=0u){return;}
   atomicAdd(&dryVoxelLightQueue.distinct,1u);let packedNormal=dryVoxelLightPackNormal(geometry.xyz);
-  let encoded=textureLoad(dryVoxelLightCacheRead,vec3i(address.atlas),0).xy;
-  if(encoded.x==0u&&(encoded.y>>16u)==(dryVoxelLight.control.z&0xffffu)&&(encoded.y&0xffffu)==0xffffu){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
-  if(encoded.x!=0u&&(encoded.y>>16u)==(dryVoxelLight.control.z&0xffffu)){
+  let encoded=textureLoad(dryVoxelLightCacheRead,vec3i(address.atlas),0).xyz;
+  if(encoded.z==address.voxelIndex+1u&&encoded.x==0u&&(encoded.y>>16u)==(dryVoxelLight.control.z&0xffffu)&&(encoded.y&0xffffu)==0xffffu){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
+  if(encoded.z==address.voxelIndex+1u&&encoded.x!=0u&&(encoded.y>>16u)==(dryVoxelLight.control.z&0xffffu)){
     if(dot(normalize(geometry.xyz),dryVoxelLightUnpackNormal(encoded.y&0xffffu))>=.9){atomicAdd(&dryVoxelLightQueue.hits,1u);}else{atomicAdd(&dryVoxelLightQueue.rejected,1u);}return;
   }
   atomicAdd(&dryVoxelLightQueue.misses,1u);let queueIndex=atomicAdd(&dryVoxelLightQueue.queued,1u);
   if(queueIndex<dryVoxelLight.control.y){dryVoxelLightQueue.entries[queueIndex]=vec2u(address.voxelIndex,packedNormal);}else{atomicAdd(&dryVoxelLightQueue.overflow,1u);}
 }
 fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
-  let atlasPages=max(dryVoxelLight.atlasPages.xyz,vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));
-  let atlas=atlasPage*${SVO_NODE_MIP_LAYOUT.physicalSize}u+vec3u(${SVO_NODE_MIP_LAYOUT.apron}u)+local;
-  textureStore(dryVoxelLightCacheWrite,vec3i(atlas),vec4u(0u,((dryVoxelLight.control.z&0xffffu)<<16u)|0xffffu,0u,0u));atomicAdd(&dryVoxelLightQueue.rejected,1u);
+  let voxel=pageIndex*${SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.voxelsPerPage}u+local.x+local.y*8u+local.z*64u;
+  textureStore(dryVoxelLightCacheWrite,vec3i(dryVoxelLightTexel(voxel)),vec4u(0u,((dryVoxelLight.control.z&0xffffu)<<16u)|0xffffu,voxel+1u,0u));atomicAdd(&dryVoxelLightQueue.rejected,1u);
 }
 @compute @workgroup_size(64) fn dryVoxelLightPopulateMain(@builtin(global_invocation_id) id:vec3u){
   let count=min(atomicLoad(&dryVoxelLightQueue.queued),dryVoxelLight.control.y);if(id.x>=count){return;}
@@ -2626,9 +2626,8 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
   // Visibility traced through a page awaiting build is this frame's answer
   // only: store nothing, and the voxel is demanded again until its cone is built.
   if(dryNodeMipAwaitingBuild!=0u){return;}
-  let atlasPages=max(dryVoxelLight.atlasPages.xyz,vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));
-  let atlas=atlasPage*${SVO_NODE_MIP_LAYOUT.physicalSize}u+vec3u(${SVO_NODE_MIP_LAYOUT.apron}u)+local;let packed=u32(round(clamp(visibility,0.0,1.0)*65534.0))+1u;
-  textureStore(dryVoxelLightCacheWrite,vec3i(atlas),vec4u(packed,((dryVoxelLight.control.z&0xffffu)<<16u)|(entry.y&0xffffu),0u,0u));atomicAdd(&dryVoxelLightQueue.populated,1u);
+  let packed=u32(round(clamp(visibility,0.0,1.0)*65534.0))+1u;
+  textureStore(dryVoxelLightCacheWrite,vec3i(dryVoxelLightTexel(entry.x)),vec4u(packed,((dryVoxelLight.control.z&0xffffu)<<16u)|(entry.y&0xffffu),entry.x+1u,0u));atomicAdd(&dryVoxelLightQueue.populated,1u);
 }
 ` : "";
   const voxelLightCacheShortcutWGSL = voxelLightCache ? /* wgsl */ `let cachedVoxelVisibility=dryVoxelLightVisibility(position,geometricNormal);if(cachedVoxelVisibility.y>0.0){let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);let raw=select(cachedVoxelVisibility.x,0.0,rigidBlocker.t<ray.tMax_m);return vec3f(mix(1.0,raw,dry.tuningRays0.y));}if(dryCurrentLightSlot==0u&&(dryVoxelLight.control.w&2u)!=0u){dryCurrentLightSlot=0xffffffffu;}` : "";
@@ -3361,8 +3360,9 @@ fn dryBrickRasterOut(surface:DryRasterPrimaryOut)->DryBrickRasterOut{
   return output;
 }
 fn dryPrepassTraceVisibility(opaque:DryHit,ro:vec3f,rd:vec3f)->vec2u{
+  drySampledReceiver=drySampledMaterial(opaque.materialId);
   dryVisibilityIgnoredBody=DRY_OWNER_NONE;
-  ${voxelLightCache ? "dryVoxelLightConsumerEligible=select(0u,1u,opaque.motionKind==DRY_GBUFFER_MOTION_STATIC&&!dryReconstructedReceiver(opaque));" : ""}
+  ${voxelLightCache ? "dryVoxelLightConsumerEligible=select(0u,1u,opaque.motionKind==DRY_GBUFFER_MOTION_STATIC&&!dryReconstructedReceiver(opaque)&&!drySampledMaterial(opaque.materialId));" : ""}
   let position=ro+rd*opaque.t;let geometricNormal=dryGeometricNormal(opaque);
   var visibility0=vec4f(1.0);var visibility1=vec4f(1.0);var visibility2=vec4f(1.0);
   // AO cones exclude rigid blockers; those stay exact at full resolution.
@@ -3404,6 +3404,7 @@ fn dryPrepassTraceVisibility(opaque:DryHit,ro:vec3f,rd:vec3f)->vec2u{
         if(sample.valid==0u||dot(geometricNormal,sample.towardLight)<=0.0){continue;}
         let maximumDistance=select(directionalLightSceneExitDistance(position,sample.towardLight),sample.finiteDistance_m,sample.finiteDistance_m>0.0);
         if(dryDirectionalRayLeavesDomain(maximumDistance)){visibility+=1.0;continue;}
+        if(drySampledReceiver){visibility+=dot(drySampledSurfaceVisibility(position,geometricNormal,sample.towardLight,maximumDistance),vec3f(1.0/3.0));continue;}
         let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,sample.towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);
         // Mirror of the inline path's normal escape and finite-emitter
         // clearance: the reduced-rate texel must hold the same visibility the
@@ -4458,6 +4459,12 @@ fn dryOpaqueOwner(metadata:u32)->u32{
   return select(metadata&0xffffu,DRY_OWNER_NONE,(metadata&DRY_OPAQUE_RECONSTRUCTED)!=0u);
 }
 fn dryReconstructedReceiver(hit:DryHit)->bool{return (hit.aux.y&DRY_OPAQUE_RECONSTRUCTED)!=0u;}
+fn drySampledMaterial(materialId:u32)->bool{
+  if(materialId>=dry.materialPublication.x){return false;}
+  return (dryMaterial(materialId).identity.w&SVO_MATERIAL_FLAG_SAMPLED_VOLUME)!=0u;
+}
+var<private> drySampledReceiver:bool;
+var<private> drySampledShadowRay:bool;
 const DRY_OPAQUE_FACE_VALID:u32=134217728u;const DRY_OPAQUE_FACE_SHIFT:u32=28u;const DRY_OPAQUE_FACE_MASK:u32=2013265920u;
 // Zero unless the face differs from the shading normal *and* is exactly axis
 // aligned. Anything else keeps the bits clear and reads back as the shading
@@ -4628,7 +4635,16 @@ fn primitiveHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->
   // ellipsoid normal after the ray quadratic has already found the surface.
   let exact=svoIntersectPrimitiveExact(record,ro,rd,max(tMin,1e-4),tMax,dryClusterPacking(record));
   if(exact.status!=SVO_PRIMITIVE_RAY_HIT){return missHit();}
-  return DryHit(exact.t_m,exact.normal.xyz,svoPrimitiveMaterialId(record),svoPrimitiveOwnerId(record),exact.featureId,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
+  var normal=exact.normal.xyz;var material=svoPrimitiveMaterialId(record);
+  if(svoPrimitiveKind(record)==SVO_KIND_FIELD_PROGRAM){
+    let reference=svoPrimitiveFieldProgramReference(record);
+    if(reference>=DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET){
+      let offset=reference-DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET;
+      let surface=dryFieldProgramBlockSurface(offset/DRY_SCENE_FIELD_PROGRAM_BLOCK_WORDS,svoPrimitiveLocalPoint(record,ro+rd*exact.t_m));
+      if(surface.material!=0u){material=surface.material;normal=svoQuaternionRotate(record.orientation,surface.normal);}
+    }
+  }
+  return DryHit(exact.t_m,normal,material,svoPrimitiveOwnerId(record),exact.featureId,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
 }
 
 // The patch half of a planar terminal: one exact finite slab out of the
@@ -4690,7 +4706,7 @@ fn dryPlanarCatalogHit(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit{
 
 // Exact live-scene acceleration. Candidate nodes occupy the same fixed arena
 // as primitives, after the primitive span, so this adds no storage binding.
-fn traceScenePrimitives(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,ignoredOwner:u32)->DryHit{
+fn traceScenePrimitives(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,ignoredOwner:u32,sampledOnly:bool)->DryHit{
   var best=missHit();best.t=tMax;
   if(dry.primitiveCandidates.w==0u||dry.primitiveCandidates.y==0u){return best;}
   var stack:array<u32,${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK}>;
@@ -4705,7 +4721,7 @@ fn traceScenePrimitives(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,ignoredOwner:u32)->D
     let leftOrPrimitive=node.centerKind.w;let right=node.dimensionsIdentity.w;
     if(right==0xffffffffu){
       if(leftOrPrimitive>=dry.metadata.x){continue;}let record=dryPrimitive(leftOrPrimitive);let owner=svoPrimitiveOwnerId(record);
-      if(owner==ignoredOwner||dryOpaqueOwnerSuppressed(owner)){continue;}
+      if(owner==ignoredOwner||dryOpaqueOwnerSuppressed(owner)||(sampledOnly&&!drySampledMaterial(svoPrimitiveMaterialId(record)))){continue;}
       ${primaryWorkMap ? "dryPrimaryWorkPrimitiveTests+=1u;" : ""}
       let candidate=primitiveHit(record,ro,rd,tMin,best.t);if(candidate.t<best.t){best=candidate;}
     }else if(stackSize+2u<=${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK}u){
@@ -4854,7 +4870,7 @@ fn traceStaticVoxelFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
   if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){return missHit();}
   ${primaryEntrySeedTakeWGSL}
   var seeded=dryPlanarCatalogHit(ro,rd,initialMinimum,DRY_MISS);
-  ${analyticPrimaryUnbounded ? "let primitiveBest=traceScenePrimitives(ro,rd,initialMinimum,seeded.t,DRY_OWNER_NONE);if(primitiveBest.t<seeded.t){seeded=primitiveBest;}" : ""}
+  ${analyticPrimaryUnbounded ? "let primitiveBest=traceScenePrimitives(ro,rd,initialMinimum,seeded.t,DRY_OWNER_NONE,false);if(primitiveBest.t<seeded.t){seeded=primitiveBest;}" : ""}
   ${primaryEntrySeedResolveWGSL}
   var voxel=missHit();
   var minimum=max(initialMinimum,0.0);
@@ -5007,7 +5023,7 @@ fn traceLeafPayloadVisibility(ray:SvoVisibilityRay,tMin_m:f32,hit:SvoTraversalHi
     ${shadowMacroSkipWGSL}if(workItems>=workLimit){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);}workItems+=1u;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     if(payloadIndex>=dryVoxelCapacity()){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}
-    ${cellSolidGateWGSL("payloadIndex", "let clipBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let span=dryCellContourInterval(identity,payloadIndex,clipBounds,ray.origin_m,ray.direction,entry,min(nextT.x,min(nextT.y,nextT.z)));if(span.x<=span.y){let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,span.x);}")}
+    ${cellSolidGateWGSL("payloadIndex", "let clipBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let span=dryCellContourInterval(identity,payloadIndex,clipBounds,ray.origin_m,ray.direction,entry,min(nextT.x,min(nextT.y,nextT.z)));if(span.x<=span.y){let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}if(!drySampledShadowRay||(material.identity.w&SVO_MATERIAL_FLAG_SAMPLED_VOLUME)==0u){return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,span.x);}}")}
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);
@@ -5063,6 +5079,30 @@ fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudg
 }
 
 ${svoVisibilityTraceWGSL}
+
+// Imported receivers use the same sampled geometry for light rays as primary
+// rays. Their coarser opacity mip can overlap a thin canopy even above its
+// surface and would shadow it in patches. The native sampled fields replace
+// only their own voxel shadow representation; ordinary edited world voxels
+// and rigid bodies still occlude through the authoritative visibility walk.
+fn drySampledSurfaceVisibility(position:vec3f,normal:vec3f,direction:vec3f,maximumDistance:f32)->vec3f{
+  let bias=max(0.0005,dry.tuningRays0.x*dot(abs(normal),dry.mapping.cellSize));
+  let origin=position+normal*bias;let distance=max(0.0,maximumDistance-bias*dot(normal,direction));
+  let native=traceScenePrimitives(origin,direction,0.0,distance,DRY_OWNER_NONE,true);
+  if(native.t<distance){return vec3f(1.0-dry.tuningRays0.y);}
+  // A native surface can cover a coarser physics solid (the diving deck).
+  // Its opacity cell extends above the true plane. Keep the native ray's
+  // submillimetre bias, but clear that cell's projected uncertainty before
+  // consulting the ordinary voxel occluders. Native contact shadows remain.
+  let voxelBias=max(bias,.75*dot(abs(normal),dry.mapping.cellSize));
+  let voxelOrigin=position+normal*voxelBias;
+  let voxelDistance=max(0.0,maximumDistance-voxelBias*dot(normal,direction));
+  drySampledShadowRay=true;dryVisibilityIgnoredBody=DRY_OWNER_NONE;
+  let ray=SvoVisibilityRay(voxelOrigin,voxelDistance,direction,voxelBias);
+  let result=svoTraceVisibility(ray,SvoVisibilityBudget(${SVO_VISIBILITY_LIMITS.nodeVisits}u,${SVO_VISIBILITY_LIMITS.leafVisits}u,${SVO_VISIBILITY_LIMITS.workItems}u,${SVO_VISIBILITY_LIMITS.intersections}u),true,.001,voxelBias);
+  drySampledShadowRay=false;
+  return mix(vec3f(1.0),result.transmittance,dry.tuningRays0.y);
+}
 
 // Water attenuates by wavelength over distance instead of blocking: red is gone
 // long before blue-green is. Extinction, not absorption: light scattered out of
@@ -5198,6 +5238,7 @@ fn dryBackdropOccludes(position:vec3f,geometricNormal:vec3f,towardLight:vec3f,fi
   ${backdropHooks ? "if(dryBackdropOccludes(position,geometricNormal,towardLight,finiteDistance_m)){return vec3f(0.0);}" : ""}
   let maximumDistance=select(directionalLightSceneExitDistance(position,towardLight),finiteDistance_m,finiteDistance_m>0.0);if(dryDirectionalRayLeavesDomain(maximumDistance)){return vec3f(1.0);}
   let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);
+  if(drySampledReceiver){return drySampledSurfaceVisibility(position,geometricNormal,towardLight,maximumDistance);}
   ${voxelLightCacheShortcutWGSL}
   // Direct light remains an analytic contribution from the current live light
   // arena. The derived radiance atlas contains emitted energy and supplements
@@ -5453,7 +5494,8 @@ fn dryGroundOrSky(ro:vec3f,rd:vec3f)->vec3f{
 // it keyed off: a voxel no longer names the object it belongs to, so there is
 // nothing for a cursor to select. uniforms.highlight is unread by this module.
 fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
-  if(hit.t>=DRY_MISS||dryGroundPlaneReplaces(hit,ro,rd)){return dryGroundOrSky(ro,rd);}${screenSpaceProxyShadeWGSL}${prepassRadianceShortcutWGSL}${voxelLightCache ? "dryVoxelLightConsumerEligible=select(0u,1u,hit.motionKind==DRY_GBUFFER_MOTION_STATIC&&!dryReconstructedReceiver(hit));" : ""}let position=ro+rd*hit.t;let surface=dryEvaluateSurfaceMaterial(hit,position);
+  drySampledReceiver=drySampledMaterial(hit.materialId);
+  if(hit.t>=DRY_MISS||dryGroundPlaneReplaces(hit,ro,rd)){return dryGroundOrSky(ro,rd);}${screenSpaceProxyShadeWGSL}${prepassRadianceShortcutWGSL}${voxelLightCache ? "dryVoxelLightConsumerEligible=select(0u,1u,hit.motionKind==DRY_GBUFFER_MOTION_STATIC&&!dryReconstructedReceiver(hit)&&!drySampledMaterial(hit.materialId));" : ""}let position=ro+rd*hit.t;let surface=dryEvaluateSurfaceMaterial(hit,position);
   if(surface.valid==0u){return vec3f(0.0);}
   // What the pixel shades with and what a ray leaves along are two questions.
   // Every closure below keeps \`hit.normal\`; only the ray origins move to the

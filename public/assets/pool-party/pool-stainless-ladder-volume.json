@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "pool-stainless-ladder",
+  "source": "pool-stainless-ladder.glb",
+  "origin": [
+    -0.44375000000000003,
+    -1.375,
+    -0.5125000000000001
+  ],
+  "dimensions": [
+    160,
+    352,
+    168
+  ],
+  "cellSize": 0.00625,
+  "bandWidth": 0.018750000000000003,
+  "brickCount": 2676,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "charcoal-anti-slip",
+      "baseColorLinear": [
+        0.023000000044703484,
+        0.027000000700354576,
+        0.02500000037252903
+      ],
+      "roughness": 0.8600000143051147,
+      "metallic": 0.0
+    },
+    {
+      "name": "polished-316-stainless",
+      "baseColorLinear": [
+        0.6000000238418579,
+        0.6399999856948853,
+        0.6600000262260437
+      ],
+      "roughness": 0.20999999344348907,
+      "metallic": 0.9800000190734863
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 1473294,
+  "insideNodes": 289781
+}

@@ -190,7 +190,7 @@ export async function selectSvoBrickOccupancyGpu(device: GPUDevice, build: SvoSc
   }
   const clusters=build.clusterBlocks??new Uint32Array(0),fields=build.fieldProgramBlocks??new Uint32Array(0);
   const arena=new Uint32Array(4+clusters.length+fields.length);
-  arena.set([4+clusters.length,fields.length/SVO_FIELD_PROGRAM_BLOCK_WORDS,clusters.length/SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS,0]);
+  arena.set([4+clusters.length,build.fieldPrograms.length,clusters.length/SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS,0]);
   arena.set(clusters,4);arena.set(fields,4+clusters.length);
   const owned:GPUBuffer[]=[];
   const buffer=(label:string,size:number,usage:number,data?:Uint32Array<ArrayBuffer>)=>{

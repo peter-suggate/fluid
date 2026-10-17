@@ -1,3 +1,4 @@
+import { markSampledVolumeOwnerMaterials, sampledVolumeMaterialRecords } from "../lib/svo/features/materials/svo-sampled-materials";
 import { publishOpaqueSurfaceCapability } from "../lib/svo/features/shading/deferred-specialization";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import type { SparseVoxelDrySceneData } from "../lib/svo/contracts/scene-publication";
@@ -276,6 +277,7 @@ export function buildSvoDrySceneAssembly(
         // invalidating every material and primary-visibility comparison.
         svoMaterialFunctionIdForEnvironmentProxy(primitive, terrainSurface),
       )),
+      ...sampledVolumeMaterialRecords(scenePrimitives.fieldPrograms, 1),
     ]),
     materialRevision: 1,
     ownerBase: SCENE_ENVIRONMENT_OWNER_BASE,
@@ -298,6 +300,7 @@ export function buildSvoDrySceneAssembly(
     // no longer draws.
     groundPlane: sceneSvoGroundPlane(scene),
   };
+  markSampledVolumeOwnerMaterials(drySceneData.materialRecords, scenePrimitives.descriptors);
   drySceneData.opaqueSurfaceOnly = publishOpaqueSurfaceCapability(scene, drySceneData.materialRecords, drySceneData.primitiveRecords);
   return { drySceneData, scenePrimitives, terrainSurface };
 }

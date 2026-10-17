@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { sceneLinearToDisplay, resolveDisplayGrade } from "../lib/core/webgpu-lighting";
+import { svoSceneLighting } from "../lib/svo/features/lighting-visibility/svo-dry-scene-lighting";
 import { censusSvoCellContours } from "../lib/harness/svo-cell-contour-census";
 /**
  * Headless end-to-end GPU benchmark for the production SVO dry-scene render
@@ -497,6 +499,11 @@ function encodePng(imageWidth: number, imageHeight: number, rgb: Uint8Array): Bu
     pngChunk("IEND", new Uint8Array(0)),
   ]);
 }
+/** Match the product's final display transform; captures are scene-linear. */
+function displayPixel(pixels: Float32Array, pixel: number): number[] {
+  return sceneLinearToDisplay([pixels[pixel*4]!,pixels[pixel*4+1]!,pixels[pixel*4+2]!],
+    resolveDisplayGrade(svoSceneLighting(scene).grade)).map(v=>Math.round(255*v));
+}
 function toneByte(linear: number): number {
   return Math.max(0, Math.min(255, Math.round(255 * Math.min(1, Math.max(0, linear)) ** (1 / 2.2))));
 }
@@ -970,7 +977,7 @@ const solver = await WebGPULiveSvoScene.create(
 // to a rung the frame never drew. An explicit request is therefore checked.
 if (requestedRefinementDepth !== undefined) {
   log(`Environment refinement depth ${environmentRefinementDepth}`
-    + ` — set drawn at ${(scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m) * 1000} mm`
+    + ` — set drawn at ${solver.sparseVoxelSceneSource.structural!.domain.cellSize_m[0] * 1000} mm`
     + ` under a ${scene.voxelDomain.finestCellSize_m * 1000} mm lattice, backdrop rings refined ${backdropRefinedRings}`);
   if (process.env.FLUID_SVO_DRY_FRAME_ALLOW_RESOLUTION_FALLBACK !== "1") assert.equal(solver.builtRefinementDepth, environmentRefinementDepth,
     `requested refinement depth ${environmentRefinementDepth} degraded to ${solver.builtRefinementDepth}`
@@ -1953,9 +1960,7 @@ if (configuredRawOutPath) {
 if (process.env.FLUID_SVO_DRY_FRAME_DUMP) {
   const dump = new Uint8Array(width * height * 3);
   for (let pixel = 0; pixel < width * height; pixel += 1) {
-    dump[pixel * 3] = toneByte(referencePixels[pixel * 4]);
-    dump[pixel * 3 + 1] = toneByte(referencePixels[pixel * 4 + 1]);
-    dump[pixel * 3 + 2] = toneByte(referencePixels[pixel * 4 + 2]);
+    dump.set(displayPixel(referencePixels, pixel), pixel * 3);
   }
   mkdirSync(path.dirname(process.env.FLUID_SVO_DRY_FRAME_DUMP), { recursive: true });
   writeFileSync(process.env.FLUID_SVO_DRY_FRAME_DUMP, encodePng(width, height, dump));
@@ -2097,9 +2102,7 @@ if (coneScale !== 1 && reducedRows && overlayRows) {
   const toRgb = (pixels: Float32Array): Uint8Array => {
     const rgb = new Uint8Array(width * height * 3);
     for (let pixel = 0; pixel < width * height; pixel += 1) {
-      rgb[pixel * 3] = toneByte(pixels[pixel * 4]);
-      rgb[pixel * 3 + 1] = toneByte(pixels[pixel * 4 + 1]);
-      rgb[pixel * 3 + 2] = toneByte(pixels[pixel * 4 + 2]);
+      rgb.set(displayPixel(pixels, pixel), pixel * 3);
     }
     return rgb;
   };
@@ -2181,9 +2184,7 @@ if (movingTierTiming) {
     const toRgbBytes = (pixels: Float32Array): Uint8Array => {
       const rgb = new Uint8Array(width * height * 3);
       for (let pixel = 0; pixel < width * height; pixel += 1) {
-        rgb[pixel * 3] = toneByte(pixels[pixel * 4]);
-        rgb[pixel * 3 + 1] = toneByte(pixels[pixel * 4 + 1]);
-        rgb[pixel * 3 + 2] = toneByte(pixels[pixel * 4 + 2]);
+        rgb.set(displayPixel(pixels, pixel), pixel * 3);
       }
       return rgb;
     };
@@ -2212,6 +2213,7 @@ const result = {
   phase: "svo-dry-frame-gpu-benchmark",
   source: sourceProvenance(),
   adapter: adapterInfo,
+  validationErrors: [...validationErrors],
   backend: "metal",
   traversalMode,
   brickOccupancyMode,
@@ -2333,6 +2335,9 @@ const result = {
     authoredBrickSize: scene.voxelDomain.brickSize_cells,
     maximumDepth: source.structural!.domain.maximumDepth,
     structuralCapacities: source.structural!.capacities,
+    // Logical ABI lanes are not resident sizes: the dry renderer packs them
+    // into a smaller shared payload buffer and allocates no velocity lane.
+    structuralBytesMeaning: "logical ABI sizes; use physicalAllocationBytes for resident GPU buffers",
     structuralBytes: {
       topology: source.structural!.capacities.nodes * source.structural!.strides.node
         + source.structural!.capacities.leaves * source.structural!.strides.leaf,
@@ -2344,6 +2349,13 @@ const result = {
         + source.structural!.strides.velocity
         + source.structural!.strides.materialOwner
       ),
+    },
+    physicalAllocationBytes: {
+      structure: source.structural!.structure.buffer.size,
+      payload: source.structural!.scenePayload.buffer.size,
+      maintenance: source.structural!.sceneMaintenance?.buffer.size ?? 0,
+      surfaceMesh: renderer.surfaceMeshStatus?.allocatedBytes ?? 0,
+      directionalVisibilityTexture: renderer.voxelLightCacheAllocatedBytes,
     },
     primitiveCount: scenePrimitives.packedRecords.byteLength / 64,
     lightCount: source.lights?.count ?? 0,
@@ -2374,6 +2386,8 @@ const result = {
     } : { built: derivedTraversalStructures, ready: false },
     derivedRenderAllocationBytes: source.derivedRenderAllocationBytes,
     allocatedBytes: solver.info.allocatedBytes,
+    visualCellSize_m: source.structural.domain.cellSize_m,
+    fluidCellSize_m: scene.voxelDomain.finestCellSize_m,
   },
   camera,
   fingerprint: {

@@ -1,4 +1,8 @@
+import { SPARSE_SCENE_CANDIDATE_SCRATCH_BRICKS } from "../../../core/webgpu-sparse-scene-proxies";
+import { buriedSolidClassifier } from "./svo-buried-solid";
 import { proceduralSolidField } from "../../../core/procedural-solid";
+import { meshAssetHeader, sampledVolumeExtraWords, sampledVolumeHorizontalSlab, sampledVolumeSupport } from "../../../core/imported-assets/asset-library";
+import { sampledVolumeMaterialRecords } from "../materials/svo-sampled-materials";
 import { assertDualGridAttachmentFits } from "../meshing/dual-grid-capacity";
 import { TerrainEditPages, terrainEditSurfacePages, terrainFieldStamp } from "../../../core/live-terrain-overlay";
 import type { RigidBodyDescription, SceneDescription } from "../../../core/model";
@@ -1188,7 +1192,8 @@ export function buildOctreeSvoPbrMaterialPublication(
   const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     revision,
     surfaceModel,
-    environmentPrimitives: environmentPrimitives.map(({ key, ownerIndex, group, tags, material }) => ({ key, ownerIndex, group, tags, material })),
+    environmentPrimitives: environmentPrimitives.map(p => ({ key: p.key, ownerIndex: p.ownerIndex, group: p.group, tags: p.tags, material: p.material,
+      sampledVolume: p.kind === "field-program" ? p.program.sampledVolume : undefined })),
   }));
   const cacheKey = `octree-svo-pbr-material-v1:${contentRevision}`;
   const cached = cachedSvoPublication(octreeSvoPbrMaterialCache, cacheKey);
@@ -1209,6 +1214,7 @@ export function buildOctreeSvoPbrMaterialPublication(
       );
     }),
   ];
+  records.push(...sampledVolumeMaterialRecords(environmentPrimitives.flatMap(p => p.kind === "field-program" ? [p.program] : []), revision));
   const packedRecords = packSvoMaterialTable(records);
   return internSvoPublication(octreeSvoPbrMaterialCache, cacheKey, {
     packedRecords,
@@ -1249,6 +1255,10 @@ function writeOctreeSvoPbrMaterialTable(
     writeSvoEnvironmentMaterialRecord(table, materialId, primitive.material, OCTREE_SVO_PBR_MATERIAL_REVISION,
       svoMaterialFunctionIdForEnvironmentProxy(primitive, surfaceModel));
     count = Math.max(count, materialId + 1);
+  }
+  for (const record of sampledVolumeMaterialRecords(environmentPrimitives.flatMap(p => p.kind === "field-program" ? [p.program] : []), OCTREE_SVO_PBR_MATERIAL_REVISION)) {
+    if (record.materialId >= OCTREE_LIVE_SCENE_MATERIAL_CAPACITY) throw new RangeError("Imported palette exceeds material capacity");
+    writeSvoMaterialRecord(table, record); count = Math.max(count, record.materialId + 1);
   }
   return count;
 }
@@ -2034,17 +2044,19 @@ export class OctreeSparseBrickWorld {
       primitiveBricks, sceneSolids, worldOrigin, renderCellSize, brickSize, pinnedBricks));
     const gpuNodeClassification = (options.surfaceDualContouring !== true && options.surfaceDualMarchingCubes !== true) && (refinementDepth > 0 || !dryWorld) && !surfaceRefinement
       ? options.classifyEnvironmentNodesGpu : undefined;
-    if ((options.surfaceDualContouring || options.surfaceDualMarchingCubes) && gpuOccupancy) {
-      // These strategies force occupied leaves to maximumDepth. Their fitted samples
-      // and candidate slots can exceed a storage binding before the planner
-      // allocates millions of nodes or any payload arenas. Let the existing
-      // resolution ladder answer this failure immediately.
-      assertDualGridAttachmentFits(gpuOccupancy.keys(maximumDepth), brickSize,
-        Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize),
-        OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
-        Math.min(sceneDomain.brickDimensions.reduce((a, b) => a * b, 1),
-          options.sceneMutationBrickCapacity ?? OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY));
-    }
+    const buried = options.surfaceDualMarchingCubes && (dryWorld || rendererOnly)
+      ? buriedSolidClassifier(initialSolidWorld, editPageLattice.origin_m, editPageLattice.cellSize_m,
+        worldOrigin, nodeEdge_m, brickSize, [
+          ...environmentPrimitives.map(p=>({minimum:[p.aabb_m.min.x,p.aabb_m.min.y,p.aabb_m.min.z] as const,maximum:[p.aabb_m.max.x,p.aabb_m.max.y,p.aabb_m.max.z] as const,
+            axisAlignedBox:p.kind==="box"&&(!p.orientation||(Math.abs(p.orientation.x)+Math.abs(p.orientation.y)+Math.abs(p.orientation.z)<1e-8)),
+            nativeSurface:p.kind==="field-program"&&!!p.program.sampledVolume&&!p.sway
+              &&!meshAssetHeader(p.program.sampledVolume.asset).horizontalSlab,
+            horizontalSlab:p.kind==="field-program"&&p.program.sampledVolume&&!p.sway
+              ?sampledVolumeHorizontalSlab(p.program.sampledVolume,p.center_m,p.orientation):undefined,
+            intersectsSupport:p.kind==="field-program"&&p.program.sampledVolume&&!p.sway
+              ?sampledVolumeSupport(p.program.sampledVolume,p.center_m,p.orientation):undefined})),
+          ...scene.rigidBodies.flatMap((body,ownerId)=>body.motion==="static"?[sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body,ownerId))]:[]),
+        ]) : undefined;
     // The backdrop's tile plan, on the final origin. With detail rings its
     // centre snaps to the outermost ring's bricks, so every ring boundary is a
     // node boundary of that ring's leaf level and stored columns are walked
@@ -2121,7 +2133,7 @@ export class OctreeSparseBrickWorld {
       // SolidWorld boxes already claim their exact voxel bricks and therefore
       // need no heightfield-shaped refinement arm.
       refineEnvironmentLeaf: (level, coordinate) =>
-        ((options.surfaceDualContouring === true || options.surfaceDualMarchingCubes === true) && level < maximumDepth)
+        !buried?.(level, coordinate) && (((options.surfaceDualContouring === true || options.surfaceDualMarchingCubes === true) && level < maximumDepth)
         || terrainRefinement?.refineEnvironmentLeaf(level, coordinate)
         || solidPatchRefinement?.refineEnvironmentLeaf(level, coordinate)
         || (!gpuNodeClassification && (planarLeafClassifier.requiresFineVoxelResidual(level, coordinate)
@@ -2130,13 +2142,21 @@ export class OctreeSparseBrickWorld {
           : refinementDepth > 0
             ? candidatesInBrick(level, coordinate, OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET)
               > OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET
-            : environmentCoarsening?.refineEnvironmentLeaf(level, coordinate) ?? false))),
+            : environmentCoarsening?.refineEnvironmentLeaf(level, coordinate) ?? false)))),
       classifyEnvironmentLeaf: (options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? undefined : planarLeafClassifier,
       // The stored ring leaves come back marked (`supplementalLeaf`), and the
       // classifier's name lets a rebuild over the same set take them as found.
       classifySupplementalNode: backdropDetailClassifier?.classify,
       supplementalContentKey: backdropDetailClassifier?.contentKey,
     });
+    if (options.surfaceDualContouring || options.surfaceDualMarchingCubes) {
+      assertDualGridAttachmentFits(plan.leaves, brickSize,
+        Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize)
+          - SPARSE_SCENE_CANDIDATE_SCRATCH_BRICKS * OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK * 4,
+        0,
+        Math.min(sceneDomain.brickDimensions.reduce((a, b) => a * b, 1),
+          options.sceneMutationBrickCapacity ?? OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY));
+    }
     // Every node-mip page lies under a leaf, so the leaf boxes bound the
     // content each column can hold (see `BackdropContentCeiling`). Built for
     // every world: sun cones stop at it whether or not there is a backdrop.
@@ -2262,9 +2282,10 @@ export class OctreeSparseBrickWorld {
           retainDenseLanes: leafPayloadMode === "banded" ? SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES : undefined,
         }).totalBytes,
       storageLimitBytes: Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize),
-      candidatesPerBrick: OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
+      candidatesPerBrick: 0, // Candidate scratch is shared, not reserved per leaf.
       dualGridVoxelsPerLeaf: dualGrid ? brickSize ** 3 : 0,
-      maintenanceFixedBytes: WEBGPU_SOLID_WORLD_DISPLAY_BUDGET_BYTES,
+      maintenanceFixedBytes: WEBGPU_SOLID_WORLD_DISPLAY_BUDGET_BYTES
+        + SPARSE_SCENE_CANDIDATE_SCRATCH_BRICKS * OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK * 4,
       derived: derivedReserveLevels <= SVO_NODE_MIP_MAXIMUM_LEVELS ? {
         levelPages: svoNodeMipLevelPageDimensions(derivedReserveBasePages, derivedReserveLevels)
           .slice(derivedReserveFloor).map(pages => pages[0] * pages[1] * pages[2]),
@@ -2500,6 +2521,7 @@ export class OctreeSparseBrickWorld {
       candidatesPerDirtyBrick: OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
       clusterCapacity: OCTREE_LIVE_SCENE_CLUSTER_CAPACITY,
       fieldProgramCapacity: OCTREE_LIVE_SCENE_FIELD_PROGRAM_CAPACITY,
+      fieldProgramExtraWords: sampledVolumeExtraWords(environmentPrimitives.flatMap(p => p.kind === "field-program" ? [p.program] : [])),
       solidWorld: residualSolidWorld,
       solidWorldLattice: {
         origin_m: [-0.5 * scene.container.width_m, 0,

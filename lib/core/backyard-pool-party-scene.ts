@@ -90,12 +90,15 @@ export function createBackyardPoolPartyScene(): SceneDescription {
   ];
   scene.scenery = backyardPoolPartyScenery();
   scene.surfaceStyle = "smooth";
+  // The asset reference uses AgX under a 38-degree afternoon sun. Strong
+  // direct daylight, cool sky and warm terrace bounce retain pale textiles
+  // and warm teak without baking illumination into their PBR base colours.
   scene.lighting = {
-    directional: { direction: [-0.45, 0.82, 0.35], colorLinear: [1, 0.91, 0.78], intensity: 3.2 },
-    environment: { diffuseScale: 0.75, specularScale: 0.9,
-      lowerRadianceLinear: [0.28, 0.32, 0.23], upperRadianceLinear: [0.48, 0.68, 0.9],
+    directional: { direction: [-0.452, 0.616, -0.646], colorLinear: [1, 0.96, 0.90], intensity: 10.0 },
+    environment: { diffuseScale: 1.0, specularScale: 1.0,
+      lowerRadianceLinear: [0.80, 0.72, 0.60], upperRadianceLinear: [0.82, 0.95, 1.12],
       accentRadianceLinear: [0.8, 0.85, 0.9] },
-    grade: { toneCurve: "aces", exposure: 0.95, whiteBalance: [1, 1, 1] },
+    grade: { toneCurve: "agx", exposure: 2.0, whiteBalance: [1, 1, 1] },
   };
   return scene;
 }

@@ -34,3 +34,10 @@ docs/papers/narrow-band-flip-2026/**/*.png
 docs/papers/narrow-band-flip-2026/**/*.jpg
 docs/papers/realtime-particles-2026/**/*.png
 docs/papers/realtime-particles-2026/**/*.jpg
+
+# Pool assets: keep editable sources and runtime GLB/FVX exports. These are
+# reproducible previews, duplicate packed textures, reports and Blender backups.
+assets/pool-party/*preview.blend
+assets/pool-party/*.blend[0-9]*
+public/assets/pool-party/*.png
+public/assets/pool-party/verification.json

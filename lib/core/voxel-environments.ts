@@ -6,6 +6,7 @@ import { classifySceneryChange } from "./scenery-construction-key";
 import { expandSceneryGraph, type ScenerySpan } from "./scenery-expand";
 import type { SceneryGraph, SceneryPalette } from "./scenery-graph";
 import { sceneryGraphForEnvironment } from "./scenery-presets";
+import { meshAssetHeader } from "./imported-assets/asset-library";
 import {
   aabb,
   ProxyBuilder,
@@ -27,6 +28,8 @@ export type {
   EnvironmentProxySway,
   EnvironmentSceneryContext,
 } from "./voxel-scenery/index";
+
+export const ENVIRONMENT_MATERIAL_BASE = 32;
 
 export interface EnvironmentProxyCatalog {
   readonly environmentId: EnvironmentId;
@@ -122,6 +125,18 @@ export function buildEnvironmentProxyCatalog(scene: SceneDescription, environmen
     expansion = expandSceneryGraph(b, graph, context);
     shell = expansion.shell; primitives = b.props;
   }
+  // Source palettes follow ordinary owner materials; instances of the same
+  // immutable asset share a palette. Owner IDs remain the editor's original IDs.
+  let materialBase = ENVIRONMENT_MATERIAL_BASE + Math.max(-1, ...shell.primitives.map(p => p.ownerIndex), ...primitives.map(p => p.ownerIndex)) + 1;
+  const assetBases = new Map<string, number>();
+  primitives = primitives.map(p => {
+    if (p.kind !== "field-program" || !p.program.sampledVolume) return p;
+    const asset = p.program.sampledVolume.asset;
+    let base = assetBases.get(asset);
+    if (base === undefined) { base = materialBase; assetBases.set(asset, base); materialBase += meshAssetHeader(asset).materials.length; }
+    if (materialBase > 8192) throw new RangeError("Imported asset palettes exceed the scene material capacity");
+    return { ...p, program: { ...p.program, sampledVolume: { asset, materialBase: base } } };
+  });
   const catalog = retainCatalog(scene, environmentId, options, {
     environmentId, environmentIndex: environmentIndex(environmentId),
     scale_m: context.s, floorY_m: context.floorY_m, shell, primitives, spans: expansion.spans,

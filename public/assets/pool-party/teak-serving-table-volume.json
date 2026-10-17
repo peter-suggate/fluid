@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "teak-serving-table",
+  "source": "teak-serving-table.glb",
+  "origin": [
+    -0.6687500000000001,
+    -0.025,
+    -1.26875
+  ],
+  "dimensions": [
+    216,
+    144,
+    408
+  ],
+  "cellSize": 0.00625,
+  "bandWidth": 0.018750000000000003,
+  "brickCount": 5895,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "brushed-hardware",
+      "baseColorLinear": [
+        0.550000011920929,
+        0.5799999833106995,
+        0.6000000238418579
+      ],
+      "roughness": 0.28999999165534973,
+      "metallic": 0.949999988079071
+    },
+    {
+      "name": "table-oiled-teak",
+      "baseColorLinear": [
+        0.10965283960103989,
+        0.034759972244501114,
+        0.008063177578151226
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "furniture-foot-rubber",
+      "baseColorLinear": [
+        0.017999999225139618,
+        0.023000000044703484,
+        0.02199999988079071
+      ],
+      "roughness": 0.8700000047683716,
+      "metallic": 0.0
+    },
+    {
+      "name": "table-oiled-teak/12,7,3/r0.429",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.041722573919128626,
+        0.009529478582354435
+      ],
+      "roughness": 0.42857142857142855,
+      "metallic": 0.0
+    },
+    {
+      "name": "table-oiled-teak/11,6,3/r0.429",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.03113008990948415,
+        0.009529478582354435
+      ],
+      "roughness": 0.42857142857142855,
+      "metallic": 0.0
+    },
+    {
+      "name": "table-oiled-teak/10,6,2/r0.429",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.03113008990948415,
+        0.0053705373494325435
+      ],
+      "roughness": 0.42857142857142855,
+      "metallic": 0.0
+    },
+    {
+      "name": "table-oiled-teak/12,6,3/r0.429",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.03113008990948415,
+        0.009529478582354435
+      ],
+      "roughness": 0.42857142857142855,
+      "metallic": 0.0
+    },
+    {
+      "name": "table-oiled-teak/10,6,3/r0.429",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.03113008990948415,
+        0.009529478582354435
+      ],
+      "roughness": 0.42857142857142855,
+      "metallic": 0.0
+    },
+    {
+      "name": "table-oiled-teak/11,6,2/r0.429",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.03113008990948415,
+        0.0053705373494325435
+      ],
+      "roughness": 0.42857142857142855,
+      "metallic": 0.0
+    },
+    {
+      "name": "table-oiled-teak/13,7,3/r0.429",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.041722573919128626,
+        0.009529478582354435
+      ],
+      "roughness": 0.42857142857142855,
+      "metallic": 0.0
+    },
+    {
+      "name": "table-oiled-teak/11,7,3/r0.429",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.041722573919128626,
+        0.009529478582354435
+      ],
+      "roughness": 0.42857142857142855,
+      "metallic": 0.0
+    },
+    {
+      "name": "table-oiled-teak/10,5,2/r0.429",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.02229888300503533,
+        0.0053705373494325435
+      ],
+      "roughness": 0.42857142857142855,
+      "metallic": 0.0
+    },
+    {
+      "name": "table-oiled-teak/9,5,2/r0.429",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.02229888300503533,
+        0.0053705373494325435
+      ],
+      "roughness": 0.42857142857142855,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 3183975,
+  "insideNodes": 800851
+}

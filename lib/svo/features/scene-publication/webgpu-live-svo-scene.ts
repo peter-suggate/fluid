@@ -1,4 +1,5 @@
 import type { RenderFrameSeam } from "../../../core/render-frame-stages";
+import { ensureSceneMeshAssets } from "../../../core/imported-assets/asset-library";
 import type { SceneDescription } from "../../../core/model";
 import type { GPUEulerianInfo } from "../../../core/webgpu-eulerian";
 import type { GPUSolverInstance } from "../../../core/method-contract";
@@ -367,6 +368,7 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
     signal?: AbortSignal,
     options: LiveSvoSceneOptions = {},
   ): Promise<WebGPULiveSvoScene> {
+    await ensureSceneMeshAssets(scene, signal);
     const requested = Math.max(0, Math.trunc(options.environmentRefinementDepth ?? 0));
     for (let depth = requested; ; depth -= 1) {
       if (signal?.aborted) throw new DOMException("GPU initialization superseded", "AbortError");

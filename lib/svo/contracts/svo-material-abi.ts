@@ -12,10 +12,8 @@ import { VOXEL_MATERIAL_IDS, VOXEL_MATERIALS, type VoxelMaterial } from "../../c
 export const SVO_MATERIAL_RECORD_STRIDE_BYTES = 96;
 export const SVO_MATERIAL_RECORD_WORDS = SVO_MATERIAL_RECORD_STRIDE_BYTES / Uint32Array.BYTES_PER_ELEMENT;
 
-export const SVO_MATERIAL_FLAGS = Object.freeze({
-  opaque: 1 << 0,
-  dielectric: 1 << 1,
-} as const);
+export { SVO_MATERIAL_FLAGS } from "./svo-material-flags";
+import { SVO_MATERIAL_FLAGS } from "./svo-material-flags";
 
 /**
  * Stable ABI values; append only, because a published material record carries
@@ -446,6 +444,7 @@ struct SvoMaterialRecord {
 }
 const SVO_MATERIAL_FLAG_OPAQUE:u32=1u;
 const SVO_MATERIAL_FLAG_DIELECTRIC:u32=2u;
+const SVO_MATERIAL_FLAG_SAMPLED_VOLUME:u32=${SVO_MATERIAL_FLAGS.sampledVolume}u;
 ${wgslMaterialFunctionConstants}
 fn svoMaterialValid(material:SvoMaterialRecord,index:u32)->bool{
   return material.identity.x==index&&index!=0u&&material.identity.w!=0u;

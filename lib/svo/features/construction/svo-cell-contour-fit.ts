@@ -40,7 +40,7 @@ fn fitSceneContour(world:vec3f,cell:vec3f,normal:vec3f,fraction:f32,dirtyIndex:u
   let small=cell/4.0;let smallRadius=0.5*length(small);
   var support=-radius;var found=false;
   for(var i=0u;i<candidates;i+=1u){
-    let p=primitives[atomicLoad(&maintenance[candidateOffset()+dirtyIndex*candidatesPerBrick()+i])];
+    let p=primitives[atomicLoad(&maintenance[candidateBase(dirtyIndex)+i])];
     // A threshold field's occupancy rule is not distance-expanded geometry.
     if(primitiveUsesThresholdOccupancy(p)){return 0u;}
   }
@@ -49,7 +49,7 @@ fn fitSceneContour(world:vec3f,cell:vec3f,normal:vec3f,fraction:f32,dirtyIndex:u
     let p=world+offset;
     var occupied=contourStaticMayOccupy(p-0.5*small,p+0.5*small);
     for(var i=0u;i<candidates&&!occupied;i+=1u){
-      let primitive=primitives[atomicLoad(&maintenance[candidateOffset()+dirtyIndex*candidatesPerBrick()+i])];
+      let primitive=primitives[atomicLoad(&maintenance[candidateBase(dirtyIndex)+i])];
       occupied=contourPrimitiveLowerBound(primitive,p)<=smallRadius+1e-6;
     }
     if(occupied){found=true;support=max(support,dot(n,offset)+0.5*dot(abs(n),small));}

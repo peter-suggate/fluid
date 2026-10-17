@@ -44,6 +44,9 @@ export const SVO_ELLIPSOID_CLOSEST_POINT_ITERATIONS = 64;
  * cell of the surface and this ceiling is never the reason a hit is missed.
  */
 export const SVO_PRIMITIVE_MARCH_ITERATIONS = 48;
+/** Narrow-band imported fields can cross metres of empty space at centimetre
+ * steps. They need a longer march than analytic full-distance primitives. */
+export const SVO_FIELD_PROGRAM_MARCH_ITERATIONS = 512;
 
 /**
  * Stable on-GPU primitive tags. Zero remains reserved for an invalid/empty
@@ -2602,7 +2605,8 @@ function intersectMarchedLocal(
   const end = Math.min(ray.tMax_m, bounds[1]);
   if (!(end >= start)) return null;
   let t_m = start;
-  for (let iteration = 0; iteration <= SVO_PRIMITIVE_MARCH_ITERATIONS; iteration += 1) {
+  const iterations = descriptor.kind === "field-program" ? SVO_FIELD_PROGRAM_MARCH_ITERATIONS : SVO_PRIMITIVE_MARCH_ITERATIONS;
+  for (let iteration = 0; iteration <= iterations; iteration += 1) {
     const sample = marchedLocalSample(descriptor, {
       x: origin.x + direction.x * t_m,
       y: origin.y + direction.y * t_m,
@@ -3978,7 +3982,8 @@ fn svoIntersectPrimitiveExact(
       let end = min(tMax_m, bounds.values[1]);
       if (end >= start) {
         var marchT_m = start;
-        for (var iteration = 0u; iteration <= ${SVO_PRIMITIVE_MARCH_ITERATIONS}u; iteration += 1u) {
+        let iterations=select(${SVO_PRIMITIVE_MARCH_ITERATIONS}u,${SVO_FIELD_PROGRAM_MARCH_ITERATIONS}u,kind==SVO_KIND_FIELD_PROGRAM);
+        for (var iteration = 0u; iteration <= iterations; iteration += 1u) {
           let point_m = localOrigin + localDirection * marchT_m;
           let distance_m = abs(svoMarchedDistance_m(kind, point_m, dimensions_m, packing, fieldProgramReference));
           if (distance_m <= svoMarchSurfaceEpsilon_m(marchT_m)) {

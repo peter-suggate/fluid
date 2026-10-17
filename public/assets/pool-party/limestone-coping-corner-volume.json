@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "limestone-coping-corner",
+  "source": "limestone-coping-corner.glb",
+  "origin": [
+    -0.16875,
+    -0.025,
+    -0.16875
+  ],
+  "dimensions": [
+    56,
+    32,
+    56
+  ],
+  "cellSize": 0.00625,
+  "bandWidth": 0.018750000000000003,
+  "brickCount": 196,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "pool-limestone",
+      "baseColorLinear": [
+        0.347551554441452,
+        0.2913408577442169,
+        0.18773548305034637
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "pool-limestone/19,18,14/r0.571",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.1719559031258607
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "pool-limestone/19,18,15/r0.571",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "pool-limestone/19,17,14/r0.571",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.26159205028716875,
+        0.1719559031258607
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "pool-limestone/20,18,15/r0.714",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "pool-limestone/19,18,15/r0.714",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "pool-limestone/18,17,14/r0.571",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.26159205028716875,
+        0.1719559031258607
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "pool-limestone/19,18,14/r0.714",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.1719559031258607
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "pool-limestone/20,18,15/r0.571",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "pool-limestone/20,19,15/r0.714",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.33381557452228633,
+        0.19941489015347055
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "pool-limestone/20,19,15/r0.571",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.33381557452228633,
+        0.19941489015347055
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 107217,
+  "insideNodes": 48826
+}

@@ -29,7 +29,12 @@ export function uploadChangedWords(
     }
     const within = Math.min(last, held);
     if (within > index) {
-      queue.writeBuffer(buffer, offsetBytes + index * 4, next as Uint32Array<ArrayBuffer>, index, within - index);
+      // Bound the driver's staging reservation for large sampled asset images.
+      // Offsets and sizes below are words because the source is a Uint32Array.
+      const chunkWords = 256 * 1024;
+      for (let from = index; from < within; from += chunkWords) {
+        queue.writeBuffer(buffer, offsetBytes + from * 4, next as Uint32Array<ArrayBuffer>, from, Math.min(chunkWords, within - from));
+      }
       published.set(next.subarray(index, within), index);
     }
     if (last > within) {

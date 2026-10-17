@@ -1,3 +1,4 @@
+import { svoVoxelLightCacheShape } from "../features/lighting-visibility/svo-voxel-light-cache";
 import { SvoRasterAo, type RasterAoPipelines } from "../features/lighting-visibility/svo-raster-ao";
 import { canUseOpaqueConeLighting, canUseOpaqueRasterLighting } from "../features/shading/deferred-specialization";
 import type { SceneDescription } from "../../core/model";
@@ -117,7 +118,7 @@ SVO_ENVIRONMENT_LIGHTING_VERSION
 import { SVO_NODE_MIP_LAYOUT } from "../features/radiance/svo-node-mip-pyramid";
 import {
 packSvoFieldProgramArena,
-SVO_FIELD_PROGRAM_BLOCK_WORDS,
+SVO_FIELD_PROGRAM_BLOCK_WORDS, SVO_SAMPLED_VOLUME_TAG,
 unpackSvoFieldProgram,
 type SvoFieldProgram
 } from "../features/scene-publication/svo-field-program";
@@ -1238,6 +1239,7 @@ export class SparseVoxelDrySceneRenderer {
   private surfaceMeshDrawLayout?: GPUBindGroupLayout;
   private surfaceMeshComputeGroup?: GPUBindGroup;
   private surfaceMeshDrawGroup?: GPUBindGroup;
+  private sampledVolumePrimitiveIndices: number[] = [];
   private surfaceMeshPipelines?: SvoDrySplitPipelineBundle["surfaceMesh"];
   private readonly rasterPrimary: boolean;
   /**
@@ -1537,7 +1539,7 @@ export class SparseVoxelDrySceneRenderer {
     this.sceneArenaBuffer = device.createBuffer({
       label: "Live authored scene arena (materials, primitives/BVH)",
       size: SVO_DRY_SCENE_ARENA_LAYOUT.sizeBytes,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     this.lightingBuffer = device.createBuffer({ label: "Sparse voxel dry scene lighting arena", size: SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.sizeBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rigidMotionUniformBuffer = device.createBuffer({ label: "Sparse voxel rigid motion uniform mirror", size: SVO_DRY_RIGID_MOTION_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -4892,7 +4894,6 @@ export class SparseVoxelDrySceneRenderer {
 
   private writeVoxelLightCacheParams(): void {
     if (!this.voxelLightParamsBuffer || !this.source?.nodeMipPyramid) return;
-    const nodeMip = this.source.nodeMipPyramid;
     // This cache stores only static solid visibility. dryLightVisibility
     // composes current-frame fluid optical depth after every solid exit,
     // including a cache hit, so attaching water must not disable reuse.
@@ -4909,8 +4910,8 @@ export class SparseVoxelDrySceneRenderer {
       SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.populationBudget,
       this.voxelLightEpoch,
       (active ? 1 : 0) | (exclusive ? 2 : 0),
-      ...nodeMip.plan.atlas.pages,
-      0,
+      ...svoVoxelLightCacheShape(this.voxelLightPageCount),
+      svoVoxelLightCacheShape(this.voxelLightPageCount).reduce((a,b)=>a*b,1)-1,
     ]));
   }
 
@@ -4940,10 +4941,10 @@ export class SparseVoxelDrySceneRenderer {
   /**
    * Bring the cache to the scene's solids and first light.
    *
-   * The cache is a property of the world's address plan: its texture is the
-   * plan's atlas and its page list is the plan's slots, and both are sized by
-   * a capacity the plan fixes for its life. So it is allocated when the plan,
-   * or whether the plan can be cached at all, changes, and never for an edit.
+   * The page list follows the world's address plan. The tagged texture holds
+   * a bounded working set, independent of world size; a hash collision falls
+   * back to tracing. Resources are allocated when the plan or eligibility
+   * changes, and never for an edit.
    * An edit voids what is cached by moving the epoch every texel is stamped
    * with, and sends the slots it gave to other pages.
    */
@@ -4984,7 +4985,8 @@ export class SparseVoxelDrySceneRenderer {
     this.voxelLightPageCount = eligible ? nodeMip!.plan.slotCapacity : 0;
     this.voxelLightTexture = this.device.createTexture({
       label: `Sparse voxel directional-light visibility generation ${nodeMip?.generation ?? 0}`,
-      size: eligible ? nodeMip!.plan.atlas.texels : [1, 1, 1],
+      // A tagged working-set cache, independent of the world's opacity atlas.
+      size: svoVoxelLightCacheShape(this.voxelLightPageCount),
       dimension: "3d",
       format: SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.format,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
@@ -4993,7 +4995,7 @@ export class SparseVoxelDrySceneRenderer {
     this.voxelLightParamsBuffer = this.device.createBuffer({ label: "Sparse voxel directional-light cache parameters", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.voxelLightRequestBuffer = this.device.createBuffer({
       label: "Sparse voxel directional-light request bitset",
-      size: Math.max(4, this.voxelLightPageCount * SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.requestWordsPerPage * 4),
+      size: Math.max(4, svoVoxelLightCacheShape(this.voxelLightPageCount).reduce((a,b)=>a*b,1) / 8),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     this.voxelLightQueueBuffer = this.device.createBuffer({
@@ -5083,6 +5085,19 @@ export class SparseVoxelDrySceneRenderer {
   publishScene(scene: SparseVoxelDrySceneData): boolean {
     const source = this.source;
     if (!canEncodeSparseVoxelDryScene(source, scene)) return false;
+    const requiredArenaBytes = Math.max(SVO_DRY_SCENE_ARENA_LAYOUT.sizeBytes,
+      SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes + (scene.fieldProgramBlocks?.byteLength ?? 0));
+    const arenaGrew = requiredArenaBytes > this.sceneArenaBuffer.size;
+    if (arenaGrew) {
+      if (requiredArenaBytes > this.device.limits.maxStorageBufferBindingSize) throw new RangeError("Imported scene field arena exceeds GPU storage limit");
+      const previousArena = this.sceneArenaBuffer;
+      this.sceneArenaBuffer = this.device.createBuffer({ label: "Live authored scene with sampled fields",
+        size: requiredArenaBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(previousArena, 0, this.sceneArenaBuffer, 0, previousArena.size);
+      this.device.queue.submit([encoder.finish()]);
+      previousArena.destroy();
+    }
     const previous = this.scene;
     // The scene's arrays are what the arena holds, re-posed or not: a publisher
     // that changes a primitive hands over new ones or says which records moved.
@@ -5151,6 +5166,14 @@ export class SparseVoxelDrySceneRenderer {
     this.scene = scene;
     this.writeSurfaceMeshHostWords();
     this.primitiveCount = primitiveArena.primitiveCount;
+    this.sampledVolumePrimitiveIndices = [];
+    const fieldBase = SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes / 4;
+    for (let i = 0; i < scene.primitiveRecords.length / SVO_PRIMITIVE_RECORD_WORDS; i++) {
+      const at = i * SVO_PRIMITIVE_RECORD_WORDS;
+      if (scene.primitiveRecords[at + 3] !== SVO_PRIMITIVE_KINDS.fieldProgram) continue;
+      const offset = scene.primitiveRecords[at + 13]! - fieldBase;
+      if (scene.fieldProgramBlocks?.[offset] === SVO_SAMPLED_VOLUME_TAG) this.sampledVolumePrimitiveIndices.push(i);
+    }
     if (this.shadingPath === "split" && (backdropTerrainBefore !== this.backdropTerrainRequested()
       || latticeBefore !== this.latticeVisibilityRequested(this.coneScale, this.lightingOptions.globalIlluminationEnabled === true))) {
       this.requestSpecializedSplitVariant();
@@ -5178,7 +5201,7 @@ export class SparseVoxelDrySceneRenderer {
     }
     if (!previous || scene.clusterBlocks !== previous.clusterBlocks || !primitivesHeld) warnOnUnresolvedClusters(scene);
     this.writeParams(source!, scene);
-    if (!this.bindGroup) this.rebuild();
+    if (!this.bindGroup || arenaGrew) this.rebuild();
     return true;
   }
 
@@ -6001,7 +6024,7 @@ export class SparseVoxelDrySceneRenderer {
   get voxelLightCacheAllocatedBytes(): number {
     const nodeMip = this.source?.nodeMipPyramid;
     return this.voxelLightPageCount > 0 && nodeMip
-      ? nodeMip.plan.atlas.capacity * SVO_NODE_MIP_LAYOUT.physicalSize ** 3 * SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.bytesPerTexel
+      ? svoVoxelLightCacheShape(this.voxelLightPageCount).reduce((a,b)=>a*b,1) * SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.bytesPerTexel
       : 0;
   }
 
@@ -6457,6 +6480,17 @@ export class SparseVoxelDrySceneRenderer {
         else if (primaryWithheld) tracePhase?.("surface-mesh-draw");
         if (this.rasterPrimary && !this.experiments.surfaceMesh && !primaryWithheld && !this.disabledStages.has("scene-primitive")) {
           this.encodeScenePrimitivePrimary(encoder, gBufferViews, usePrepass, splitGroup, tracePhase);
+        }
+        if (this.rasterPrimary && this.experiments.surfaceMesh && !primaryWithheld
+          && this.sampledVolumePrimitiveIndices.length && this.scenePrimitiveRasterPipeline) {
+          const imported = encoder.beginRenderPass({ label: "Imported native voxel field surfaces",
+            colorAttachments: this.rasterPrimaryAttachments(gBufferViews, "load"),
+            depthStencilAttachment: { view: gBufferViews.hardwareDepth, depthLoadOp: "load", depthStoreOp: "store" } });
+          imported.setPipeline(this.scenePrimitiveRasterPipeline);
+          imported.setBindGroup(0, this.bindGroup);
+          for (const index of this.sampledVolumePrimitiveIndices) imported.draw(SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy, 1, 0, index);
+          imported.end();
+          tracePhase?.("scene-primitive-visibility");
         }
         if (rasterRigidEncoded && !primaryWithheld) {
           const rigid = encoder.beginRenderPass({

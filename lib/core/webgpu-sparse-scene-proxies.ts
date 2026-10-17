@@ -1,3 +1,4 @@
+import { DUAL_GRID_WORDS_PER_VOXEL, dualGridPointWGSL } from "../svo/features/meshing/dual-grid-layout";
 import type { ProceduralSolidField } from "./procedural-solid";
 import { proceduralSolidRenderWGSL } from "./procedural-solid-render.wgsl";
 import { svoDualMarchingCubesCachedFitWGSL } from "../svo/features/meshing/dual-marching-cubes";
@@ -54,6 +55,9 @@ import {
   webgpuSolidWorldDomainPageCount,
   type WebgpuSolidWorldPageLayout,
 } from "./webgpu-solid-world-pages";
+
+/** 32 MiB at the full 512-candidate capacity, independent of scene size. */
+export const SPARSE_SCENE_CANDIDATE_SCRATCH_BRICKS = 16_384;
 
 export type SparseSceneVector3 = readonly [number, number, number];
 export type SparseSceneQuaternion = readonly [number, number, number, number];
@@ -530,6 +534,8 @@ export interface SparseSceneProxyVoxelizerOptions {
   dirtyBrickCapacity: number;
   /** Fixed candidate bin capacity for each dirty brick. */
   candidatesPerDirtyBrick: number;
+  /** Candidate lists are consumed within a chunk and reused by the next one. */
+  candidateScratchBrickCapacity?: number;
   /** Fixed aggregate-packing arena capacity; defaults to {@link SPARSE_SCENE_CLUSTER_CAPACITY}. */
   clusterCapacity?: number;
   /**
@@ -541,6 +547,8 @@ export interface SparseSceneProxyVoxelizerOptions {
    * than voxelizing nothing.
    */
   fieldProgramCapacity?: number;
+  /** Sampled source images appended after the fixed tape slots. */
+  fieldProgramExtraWords?: number;
   /**
    * Coarse spatial index over the authored records, and the dirty-region brick
    * lattice invalidation is dispatched over.
@@ -2139,6 +2147,7 @@ export function sparseSceneProxyVoxelizationShaderFor(
   backdropDetail?: string,
   solidSurface?: string,
   solidBoundaryBaseWords?: number,
+  fieldProgramExtraWords = 0,
 ): string {
   const dry = profile === "dry";
   const format = dry ? sceneGeometryFormat : "f32x2";
@@ -2274,6 +2283,7 @@ fn primitiveBoundsOffset()->u32{return params.capacities.z;}
 fn dirtyRegionOffset()->u32{return params.capacities.w;}
 fn dirtyBrickOffset()->u32{return params.offsets.x;}
 fn candidateOffset()->u32{return params.offsets.y;}
+fn candidateBase(dirty:u32)->u32{return candidateOffset()+(dirty-chunkBegin())*candidatesPerBrick();}
 fn stateOffset()->u32{return params.offsets.z;}
 fn sceneGeometryOffset()->u32{return params.lanes.x;}
 fn sceneMaterialOffset()->u32{return params.lanes.y;}
@@ -2321,7 +2331,7 @@ fn maintenanceFlags()->u32{return bitcast<u32>(params.cell.w);}
  * allocation; one that is subtracted out of the allocation cannot.
  */
 fn indexHeaderOffset()->u32{
-  return fieldProgramArenaOffset()+fieldProgramArenaCapacity()*${SVO_FIELD_PROGRAM_BLOCK_WORDS}u;
+  return fieldProgramArenaOffset()+fieldProgramArenaCapacity()*${SVO_FIELD_PROGRAM_BLOCK_WORDS}u+${fieldProgramExtraWords}u;
 }
 fn indexWord(word:u32)->u32{return loadArenaWord(indexHeaderOffset()+word);}
 fn indexFloat(word:u32)->f32{return bitcast<f32>(indexWord(word));}
@@ -2473,6 +2483,7 @@ fn arenaBounds(word:u32)->mat2x3f{
     vec3f(loadArenaF32(word),loadArenaF32(word+1u),loadArenaF32(word+2u)),
     vec3f(loadArenaF32(word+4u),loadArenaF32(word+5u),loadArenaF32(word+6u)));
 }
+${dualGridPointWGSL}
 fn inverseRotate(point: vec3f, quaternion: vec4f) -> vec3f {
   let vector = -quaternion.xyz;
   let twiceCross = 2.0 * cross(vector, point);
@@ -2580,7 +2591,7 @@ var<workgroup> dmcCandidateIndices:array<u32,64>;
 var<private> dmcCandidatesCached:bool;
 fn dmcCandidateIndex(dirty:u32,i:u32)->u32{
   if(dmcCandidatesCached){return dmcCandidateIndices[i];}
-  return atomicLoad(&maintenance[candidateOffset()+dirty*candidatesPerBrick()+i]);
+  return atomicLoad(&maintenance[candidateBase(dirty)+i]);
 }
 // The point whose candidates were last all read, and which of them came
 // within a quarter cell of the field there. A gradient's probes stand a
@@ -2616,7 +2627,7 @@ fn dcField(world:vec3f,dirty:u32,count:u32)->f32{
     if(i<64u&&d<=value+0.25*finest){near[i>>5u]|=1u<<(i&31u);}
     value=min(value,d);
   }
-  if(!stepped){dcNearMask=near;dcNearAt=world;dcNearHeld=count<=64u;}` : `for(var i=0u;i<count;i+=1u){let p=primitives[atomicLoad(&maintenance[candidateOffset()+dirty*candidatesPerBrick()+i])];value=min(value,primitiveDistance(p,world));}`}
+  if(!stepped){dcNearMask=near;dcNearAt=world;dcNearHeld=count<=64u;}` : `for(var i=0u;i<count;i+=1u){let p=primitives[atomicLoad(&maintenance[candidateBase(dirty)+i])];value=min(value,primitiveDistance(p,world));}`}
   return value;
 }
 ${dualMarchingCubes ? svoDualMarchingCubesCachedFitWGSL : svoDualContouringFitWGSL}
@@ -2818,7 +2829,7 @@ fn binDirtyBrickCandidates(@builtin(global_invocation_id) gid:vec3u,@builtin(num
   let localSlot=atomicAdd(&maintenance[record+1u],1u);
   atomicMax(&maintenance[stateOffset()+MAXIMUM_BRICK_CANDIDATES],localSlot+1u);
   if(localSlot<candidatesPerBrick()){
-    atomicStore(&maintenance[candidateOffset()+dirtyIndex*candidatesPerBrick()+localSlot],primitiveIndex);
+    atomicStore(&maintenance[candidateBase(dirtyIndex)+localSlot],primitiveIndex);
   }else{
     atomicStore(&maintenance[record+2u],1u);
     atomicOr(&maintenance[stateOffset()+1u],CANDIDATE_OVERFLOW);
@@ -2830,7 +2841,7 @@ fn binCandidate(record:u32,dirtyIndex:u32,primitiveIndex:u32,brick:mat2x3f){
   let localSlot=atomicAdd(&maintenance[record+1u],1u);
   atomicMax(&maintenance[stateOffset()+MAXIMUM_BRICK_CANDIDATES],localSlot+1u);
   if(localSlot<candidatesPerBrick()){
-    atomicStore(&maintenance[candidateOffset()+dirtyIndex*candidatesPerBrick()+localSlot],primitiveIndex);
+    atomicStore(&maintenance[candidateBase(dirtyIndex)+localSlot],primitiveIndex);
   }else{
     atomicStore(&maintenance[record+2u],1u);
     atomicOr(&maintenance[stateOffset()+1u],CANDIDATE_OVERFLOW);
@@ -2926,7 +2937,7 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   let cellExtent = params.cell.xyz * f32(scale);
   ${dual && dualMarchingCubes ? `let fitCandidateCount=min(atomicLoad(&maintenance[record+1u]),candidatesPerBrick());
   dmcCandidatesCached=fitActive&&tiled&&fitCandidateCount<=64u;
-  if(dmcCandidatesCached&&lane<fitCandidateCount){dmcCandidateIndices[lane]=atomicLoad(&maintenance[candidateOffset()+dirtyIndex*candidatesPerBrick()+lane]);}
+  if(dmcCandidatesCached&&lane<fitCandidateCount){dmcCandidateIndices[lane]=atomicLoad(&maintenance[candidateBase(dirtyIndex)+lane]);}
   let tileWorld=params.worldOrigin.xyz+vec3f((brick*brickSize+tileBase)*scale)*params.cell.xyz;${solidWorldLayout || renderTerrainLayout ? `
   swTileLoad(tileWorld,cellExtent,lane,fitActive&&tiled);` : ""}${renderTerrainLayout ? `
   rtTileLoad(lane);
@@ -2961,7 +2972,7 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   }
   let candidateCount=min(atomicLoad(&maintenance[record+1u]),candidatesPerBrick());
   for(var slot=0u;slot<candidateCount;slot+=1u){
-    let primitiveIndex=atomicLoad(&maintenance[candidateOffset()+dirtyIndex*candidatesPerBrick()+slot]);
+    let primitiveIndex=atomicLoad(&maintenance[candidateBase(dirtyIndex)+slot]);
     let primitive = primitives[primitiveIndex];
     let candidate = primitiveDistance(primitive, world);
     bestDistance = min(bestDistance, candidate);
@@ -3005,10 +3016,9 @@ ${dual && dualMarchingCubes ? `
   var fitted=DmcFit(vec3f(.5),select(min(staticSolid.distance,-farLimit),max(staticSolid.distance,farLimit),far>0),
     select(vec3f(0,1,0),staticSolid.normal,dot(staticSolid.normal,staticSolid.normal)>0.));
   if(far==0){fitted=dmcFit(world-.5*cellExtent,cellExtent,dirtyIndex,candidateCount);}
-  let dcAt=${dualOffsetWords}u+output*4u;
-  let point=(world-.5*cellExtent+fitted.point*cellExtent-params.worldOrigin.xyz)/params.cell.xyz;
-  atomicStore(&maintenance[dcAt],bitcast<u32>(point.x));atomicStore(&maintenance[dcAt+1u],bitcast<u32>(point.y));atomicStore(&maintenance[dcAt+2u],bitcast<u32>(point.z));
-  atomicStore(&maintenance[dcAt+3u],bitcast<u32>(fitted.value));
+  let dcAt=${dualOffsetWords}u+output*${DUAL_GRID_WORDS_PER_VOXEL}u;
+  atomicStore(&maintenance[dcAt],packDualGridPoint(fitted.point));
+  atomicStore(&maintenance[dcAt+1u],bitcast<u32>(fitted.value));
   ${backdropDetail ? `// A fitted interior no sample claimed is the backdrop's ground.
   if(fitted.value<0.&&primitiveFraction<=0.){bestMaterial=backdropTerrainMaterial();}` : ""}
   ${pageSolids ? `// The smoothed page field fills concave corners with cells no voxel claims.
@@ -3036,11 +3046,24 @@ ${dual && dualMarchingCubes ? `
     if(dot(wide,fitted.normal)>0.){bestNormal=wide;}
   }` : ""}
 ` : dual ? `  let fitted=dcFit(world-.5*cellExtent,cellExtent,dirtyIndex,candidateCount);
-  let dcAt=${dualOffsetWords}u+output*4u;
-  let point=(world-.5*cellExtent+fitted.point*cellExtent-params.worldOrigin.xyz)/params.cell.xyz;
-  atomicStore(&maintenance[dcAt],bitcast<u32>(point.x));atomicStore(&maintenance[dcAt+1u],bitcast<u32>(point.y));atomicStore(&maintenance[dcAt+2u],bitcast<u32>(point.z));
-  atomicStore(&maintenance[dcAt+3u],fitted.signs|(svoGBufferPackNormalOct8(fitted.normal)<<8u)|(fitted.sharp<<24u));
+  let dcAt=${dualOffsetWords}u+output*${DUAL_GRID_WORDS_PER_VOXEL}u;
+  atomicStore(&maintenance[dcAt],packDualGridPoint(fitted.point));
+  atomicStore(&maintenance[dcAt+1u],fitted.signs|(svoGBufferPackNormalOct8(fitted.normal)<<8u)|(fitted.sharp<<24u));
   if(fitted.signs!=0u&&fitted.signs!=255u){primitiveFraction=max(primitiveFraction,1.0/255.0);bestNormal=fitted.normal;}` : ""}
+  // Shading samples the imported UV/PBR palette and source normals at the
+  // reconstructed surface; geometry remains the independent distance field.
+  if(bestPrimitive!=INVALID_INDEX){
+    let primitive=primitives[bestPrimitive];
+    if(scenePrimitiveType(primitive)==${SPARSE_SCENE_PRIMITIVE_TYPES["field-program"]}u){
+      let surfacePoint=${dual ? "world-.5*cellExtent+fitted.point*cellExtent" : "world"};
+      let local=inverseRotate(surfacePoint-primitive.centerType.xyz,primitive.rotation);
+      let sampled=sceneFieldProgramBlockSurface(scenePrimitiveArenaSlot(primitive),local);
+      if(sampled.material!=0u){
+        bestMaterial=sampled.material;
+        bestNormal=inverseRotate(sampled.normal,vec4f(-primitive.rotation.xyz,primitive.rotation.w));
+      }
+    }
+  }
   // The scene lane is exclusively owned by this transaction. Fluid and
   // velocity live in disjoint payload lanes, so every material ID—including
   // terrain and rigid-body IDs below the scenery range—can update atomically.
@@ -3612,6 +3635,8 @@ export class SparseSceneProxyVoxelizer {
   private readonly gridItemCapacity: number;
   private readonly globalRecordCapacity: number;
   private readonly brickBudget: number;
+  private readonly candidateScratchBricks: number;
+  private drainChunks = false;
   private pending = false;
   private destroyed = false;
   /**
@@ -3681,7 +3706,9 @@ export class SparseSceneProxyVoxelizer {
     this.dirtyRegionOffsetWords = checkedArenaWords(primitiveCapacity * 8, "Primitive bounds arena");
     this.dirtyBrickOffsetWords = checkedArenaWords(this.dirtyRegionOffsetWords + dirtyRegionCapacity * 8, "Dirty region arena");
     this.candidateOffsetWords = checkedArenaWords(this.dirtyBrickOffsetWords + dirtyBrickCapacity * 4, "Dirty brick arena");
-    this.stateOffsetWords = checkedArenaWords(this.candidateOffsetWords + dirtyBrickCapacity * candidatesPerDirtyBrick, "Candidate arena");
+    this.candidateScratchBricks = Math.min(dirtyBrickCapacity,
+      positiveInteger(options.candidateScratchBrickCapacity ?? SPARSE_SCENE_CANDIDATE_SCRATCH_BRICKS, "Candidate scratch bricks"));
+    this.stateOffsetWords = checkedArenaWords(this.candidateOffsetWords + this.candidateScratchBricks * candidatesPerDirtyBrick, "Candidate arena");
     this.clusterOffsetWords = checkedArenaWords(this.stateOffsetWords + SPARSE_SCENE_MAINTENANCE_STATE_WORDS.wordCount, "Maintenance state");
     // Everything past here is the record index, and every block of it is zero
     // words when the index is absent — so a voxelizer configured without one
@@ -3689,7 +3716,8 @@ export class SparseSceneProxyVoxelizer {
     this.fieldProgramOffsetWords = checkedArenaWords(
       this.clusterOffsetWords + clusterCapacity * SVO_CLUSTER_ARENA_BLOCK.strideWords, "Aggregate arena");
     this.indexHeaderOffsetWords = checkedArenaWords(
-      this.fieldProgramOffsetWords + fieldProgramCapacity * SVO_FIELD_PROGRAM_BLOCK_WORDS, "Field program arena");
+      this.fieldProgramOffsetWords + fieldProgramCapacity * SVO_FIELD_PROGRAM_BLOCK_WORDS
+        + nonNegativeInteger(options.fieldProgramExtraWords ?? 0, "Sampled field words"), "Field program arena");
     const index = options.recordIndex;
     if (index) {
       if (options.finestLevel === undefined) throw new RangeError("A record index needs the finest topology level to place its lattice");
@@ -3737,7 +3765,7 @@ export class SparseSceneProxyVoxelizer {
       throw new RangeError("An authored solid surface needs the SolidWorld voxels it was rasterized to");
     }
     const renderTerrainBaseWords = this.solidWorldLayout?.totalWords ?? solidWorldBaseWords;
-    const fitWords = (options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? tree.voxelCapacity * 4 : 0;
+    const fitWords = (options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? tree.voxelCapacity * DUAL_GRID_WORDS_PER_VOXEL : 0;
     if (options.renderTerrain) {
       this.terrainEdits = options.solidWorldLattice
         ? new TerrainEditPages(options.renderTerrain, options.solidWorldLattice) : undefined;
@@ -3771,7 +3799,7 @@ export class SparseSceneProxyVoxelizer {
     this.solidBoundaryWords = boundaryImage?.length ?? 0;
     const baseArenaWords = checkedArenaWords(boundaryBaseWords + this.solidBoundaryWords, "Procedural boundary arena");
     this.dualOffsetWords = (options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? baseArenaWords : 0;
-    const arenaWords = baseArenaWords + ((options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? tree.voxelCapacity * 4 : 0);
+    const arenaWords = baseArenaWords + ((options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? tree.voxelCapacity * DUAL_GRID_WORDS_PER_VOXEL : 0);
     if(arenaWords * 4 > device.limits.maxStorageBufferBindingSize) throw new RangeError("Meshing construction arena exceeds GPU storage limit; reduce render grid resolution");
     this.brickBudget = nonNegativeInteger(options.bricksPerFrameBudget ?? 0, "Bricks per frame budget");
     this.allocatedBytes = primitiveBytes + arenaWords * 4 + 128;
@@ -3869,7 +3897,7 @@ export class SparseSceneProxyVoxelizer {
         this.tree.payloadProfile, this.tree.sceneGeometryFormat,
         this.tree.leafPayloadMode, this.solidWorldLayout,
         this.renderTerrainLayout, this.options.surfaceContours === true, this.dualOffsetWords, this.options.surfaceDualMarchingCubes === true,
-        this.options.backdropDetail, this.options.solidSurface, this.solidBoundaryBaseWords),
+        this.options.backdropDetail, this.options.solidSurface, this.solidBoundaryBaseWords, this.options.fieldProgramExtraWords ?? 0),
     });
     const pipeline = (entryPoint: string, stage: string) => this.device.createComputePipelineAsync({
       label: `${this.label} ${stage} pipeline`, layout: this.pipelineLayout,
@@ -3978,6 +4006,9 @@ export class SparseSceneProxyVoxelizer {
     const fieldProgramArena = tapes > 0
       ? packSparseSceneFieldProgramArena(publication.primitives, this.fieldProgramCapacity)
       : undefined;
+    if (fieldProgramArena && fieldProgramArena.length > this.indexHeaderOffsetWords - this.fieldProgramOffsetWords) {
+      throw new RangeError("Sampled fields exceed the allocated arena; rebuild the visual scene");
+    }
     // DMC needs positive function samples in cells outside the solid's AABB.
     // Expand both candidate indexing and edit invalidation, never the SDF.
     const halo=this.options.surfaceDualMarchingCubes ? Math.max(...this.options.cellSize) : 0;
@@ -4011,8 +4042,12 @@ export class SparseSceneProxyVoxelizer {
       this.options.dirtyBrickCapacity, regionCells?.unionCellCount ?? this.options.dirtyBrickCapacity,
     );
     const budgeted = (publication.budgeted ?? true) && this.brickBudget > 0;
-    this.plannedChunks = budgeted ? Math.max(1, Math.ceil(upperBoundDirtyBricks / this.brickBudget)) : 1;
-    this.plannedChunkBricks = Math.max(1, budgeted ? Math.min(this.brickBudget, upperBoundDirtyBricks) : upperBoundDirtyBricks);
+    const chunkBudget = Math.min(this.candidateScratchBricks, budgeted ? this.brickBudget : this.candidateScratchBricks);
+    this.plannedChunks = Math.max(1, Math.ceil(upperBoundDirtyBricks / chunkBudget));
+    this.plannedChunkBricks = Math.max(1, Math.min(chunkBudget, upperBoundDirtyBricks));
+    // An unbudgeted publication still completes in one encode call, using
+    // ordered GPU passes to recycle the same candidate scratch between chunks.
+    this.drainChunks = !budgeted;
     // Only worth descending per cell when there are fewer cells than the leaf
     // scan would touch anyway; a region covering more of the lattice than the
     // tree has leaves is exactly what the unindexed path is still here for.
@@ -4036,7 +4071,7 @@ export class SparseSceneProxyVoxelizer {
     const uints = new Uint32Array(parameterData);
     floats.set(worldOrigin, 0);
     floats.set(this.options.cellSize, 4);
-    uints[3] = budgeted ? this.brickBudget : 0;
+    uints[3] = chunkBudget;
     uints[7] = index ? SPARSE_SCENE_MAINTENANCE_FLAGS.indexedBinning : 0;
     uints.set([publication.primitives.length, publication.dirtyRegions.length, this.options.finestLevel ?? 0xffffffff, publication.revision], 8);
     uints.set([this.options.dirtyBrickCapacity, this.options.candidatesPerDirtyBrick, this.primitiveBoundsOffsetWords, this.dirtyRegionOffsetWords], 12);
@@ -4131,8 +4166,9 @@ export class SparseSceneProxyVoxelizer {
       encoder.clearBuffer(this.maintenanceArena, this.stateOffsetWords * 4, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.revisionWordCount * 4);
       this.chunksRemaining = this.plannedChunks;
     }
+    let writeTimestamps = true;
     const stageWrites = (stage: (typeof SPARSE_SCENE_MAINTENANCE_STAGES)[number]): GPUComputePassTimestampWrites | undefined => {
-      if (!timestamps) return undefined;
+      if (!timestamps || !writeTimestamps) return undefined;
       const slot = timestamps.baseIndex + 2 * SPARSE_SCENE_MAINTENANCE_STAGES.indexOf(stage);
       return { querySet: timestamps.querySet, beginningOfPassWriteIndex: slot, endOfPassWriteIndex: slot + 1 };
     };
@@ -4151,6 +4187,7 @@ export class SparseSceneProxyVoxelizer {
       if (indexed) run("invalidate", "Invalidate live scene dirty bricks", indexed, Math.max(1, this.lastRegionCellCount), 64);
       else run("invalidate", "Invalidate live scene dirty bricks", this.invalidatePipeline, this.tree.leafCapacity, 64);
     }
+    do {
     run("prepare", "Prepare live scene maintenance chunk", this.preparePipeline, 1, 1);
     // Fixed direct dispatches over the dirty brick list. The planned chunk size
     // bounds how many bricks the GPU can hand this frame, and every thread
@@ -4172,6 +4209,8 @@ export class SparseSceneProxyVoxelizer {
     run("finalize", "Finalize live scene dirty bricks", this.finalizePipeline, bricks, 64);
     this.pending = false;
     this.chunksRemaining -= 1;
+    writeTimestamps = false;
+    } while (this.drainChunks && this.chunksRemaining > 0);
     this.encodedFrames += 1;
     return true;
   }

@@ -560,7 +560,7 @@ export function validateScene(scene: SceneDescription): string[] {
   }
   if (lighting?.directional?.intensity !== undefined && (!Number.isFinite(lighting.directional.intensity) || lighting.directional.intensity < 0)) errors.push("Scene directional-light intensity must be non-negative and finite");
   if (lighting?.grade?.exposure !== undefined && (!Number.isFinite(lighting.grade.exposure) || lighting.grade.exposure <= 0)) errors.push("Scene grade exposure must be positive and finite");
-  if (lighting?.grade?.toneCurve !== undefined && lighting.grade.toneCurve !== "reinhard" && lighting.grade.toneCurve !== "aces") errors.push("Scene grade tone curve must be reinhard or aces");
+  if (lighting?.grade?.toneCurve !== undefined && lighting.grade.toneCurve !== "reinhard" && lighting.grade.toneCurve !== "aces" && lighting.grade.toneCurve !== "agx") errors.push("Scene grade tone curve must be reinhard, aces or agx");
   if (lighting?.grade?.whiteBalance !== undefined) {
     const balance = lighting.grade.whiteBalance;
     if (balance.length !== 3 || !balance.every((value) => Number.isFinite(value) && value > 0)) errors.push("Scene grade white balance must contain three positive finite channel gains");

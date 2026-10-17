@@ -124,6 +124,8 @@ import {
   svoProceduralHashCell,
 } from "../materials/svo-procedural-material";
 import type { Vec3 } from "../../../core/model";
+import { MESH_ASSETS, meshAssetHeader, packMeshAsset, sampleAssetField, sampledVolumeExtent, type SampledVolumeField } from "../../../core/imported-assets/asset-library";
+import { meshVolumeWGSL } from "../../../core/imported-assets/mesh-volume.wgsl";
 
 const f32 = Math.fround;
 
@@ -651,7 +653,12 @@ export interface SvoFieldProgram {
   readonly ops: readonly SvoFieldOpDescriptor[];
   /** Field register holding the result. */
   readonly result: number;
+  /** An immutable sampled field is an alternative source to an operator tape.
+   * Its compact document reference expands to a sparse volume at publication. */
+  readonly sampledVolume?: SampledVolumeField;
 }
+
+export const SVO_SAMPLED_VOLUME_TAG = 0xffff_fffe;
 
 const ZERO_PARAMETERS: SvoFieldOpParameters = Object.freeze({ a: 0, b: 0, c: 0, d: 0, e: 0 });
 
@@ -769,6 +776,14 @@ function scatterGeometry(parameters: SvoFieldOpParameters): ScatterGeometry {
  * stop producing, and it would do it without a single error.
  */
 export function validateSvoFieldProgram(program: SvoFieldProgram): void {
+  if (program.sampledVolume) {
+    meshAssetHeader(program.sampledVolume.asset);
+    const base = program.sampledVolume.materialBase ?? 0;
+    if (program.ops.length !== 0 || program.result !== 0 || !Number.isSafeInteger(base) || base < 0 || base > 65535) {
+      throw new RangeError("A sampled field needs an asset reference, no tape, and a valid material base");
+    }
+    return;
+  }
   if (program.ops.length === 0) throw new RangeError("a field program must have at least one op");
   if (program.ops.length > SVO_FIELD_PROGRAM_MAXIMUM_OPS) {
     throw new RangeError(
@@ -1119,6 +1134,7 @@ export function evaluateValidatedSvoFieldProgram(
   localPoint: Vec3,
   samplingLength_m = 0,
 ): SvoFieldValue {
+  if (program.sampledVolume) return { distance_m: sampleAssetField(program.sampledVolume, localPoint).distance, lipschitz: 1.75 };
   const points: Vec3[] = new Array(SVO_FIELD_PROGRAM_POINT_REGISTERS).fill(null).map(() => ({ x: 0, y: 0, z: 0 }));
   points[0] = { ...localPoint };
   // Lipschitz travels with the *point*: a warp inflates the true distance of
@@ -1457,6 +1473,7 @@ export function evaluateValidatedSvoFieldProgram(
  */
 export function svoFieldProgramExtent_m(program: SvoFieldProgram): [number, number, number] {
   validateSvoFieldProgram(program);
+  if (program.sampledVolume) return sampledVolumeExtent(program.sampledVolume);
   const axes = [0, 1, 2] as const;
   // Per point register: how a length in this register's frame converts to
   // parent metres, how much the chain has already displaced things, and whether
@@ -1691,12 +1708,26 @@ export function packSvoFieldProgramArena(
   if (!Number.isSafeInteger(capacity) || capacity < programs.length || capacity < 0) {
     throw new RangeError("Field program arena capacity must hold every program");
   }
-  const buffer = new ArrayBuffer(Math.max(1, capacity) * SVO_FIELD_PROGRAM_BLOCK_WORDS * 4);
+  const images = new Map<string, { offset: number; words: Uint32Array<ArrayBuffer> }>();
+  let wordCount = Math.max(1, capacity) * SVO_FIELD_PROGRAM_BLOCK_WORDS;
+  for (const program of programs) if (program.sampledVolume && !images.has(program.sampledVolume.asset)) {
+    const words = packMeshAsset(program.sampledVolume.asset);
+    images.set(program.sampledVolume.asset, { offset: wordCount, words }); wordCount += words.length;
+  }
+  const buffer = new ArrayBuffer(wordCount * 4);
   const words = new Uint32Array(buffer);
   const floats = new Float32Array(buffer);
+  for (const image of images.values()) words.set(image.words, image.offset);
   programs.forEach((program, index) => {
     validateSvoFieldProgram(program);
     const base = index * SVO_FIELD_PROGRAM_BLOCK_WORDS;
+    if (program.sampledVolume) {
+      words[base] = SVO_SAMPLED_VOLUME_TAG;
+      words[base + 1] = images.get(program.sampledVolume.asset)!.offset;
+      words[base + 2] = program.sampledVolume.materialBase ?? 0;
+      words[base + 3] = Object.keys(MESH_ASSETS).indexOf(program.sampledVolume.asset) + 1;
+      return;
+    }
     words[base] = program.ops.length >>> 0;
     words[base + 1] = program.result >>> 0;
     program.ops.forEach((descriptor, opIndex) => {
@@ -1728,6 +1759,11 @@ export function unpackSvoFieldProgram(words: Uint32Array, index: number): SvoFie
   const floats = new Float32Array(words.buffer, words.byteOffset, words.length);
   const base = index * SVO_FIELD_PROGRAM_BLOCK_WORDS;
   const count = words[base];
+  if (count === SVO_SAMPLED_VOLUME_TAG) {
+    const asset = Object.keys(MESH_ASSETS)[words[base + 3]! - 1];
+    if (!asset) throw new RangeError("Packed sampled field names an unknown asset");
+    return { ops: [], result: 0, sampledVolume: { asset, materialBase: words[base + 2] } };
+  }
   if (count > SVO_FIELD_PROGRAM_MAXIMUM_OPS) {
     throw new RangeError(`packed field program at ${index} claims ${count} ops`);
   }
@@ -1823,6 +1859,16 @@ const SVO_FIELD_UNBOUNDED_DISTANCE_M:f32=${UNBOUNDED_DISTANCE_M.toExponential()}
 // A distance and the Lipschitz constant of the field that produced it. The
 // tracer steps distance/lipschitz; see §2.4 of the fidelity handoff.
 struct SvoFieldValue{distance_m:f32,lipschitz:f32}
+${meshVolumeWGSL(`${functionName}Volume`, loadWord)}
+fn ${functionName}Surface(blockIndex:u32,localPoint:vec3f)->${functionName}VolumeValue{
+  var missing=${functionName}VolumeValue(1e20,vec3f(0),0u);
+  if(blockIndex>=(${capacityExpression})){return missing;}
+  let base=(${baseWordExpression})+blockIndex*SVO_FIELD_PROGRAM_BLOCK_WORDS;
+  if(${loadWord}(base)!=${SVO_SAMPLED_VOLUME_TAG}u){return missing;}
+  var sample=${functionName}Volume((${baseWordExpression})+${loadWord}(base+1u),localPoint);
+  if(sample.material!=0u){sample.material+=${loadWord}(base+2u)-1u;}
+  return sample;
+}
 
 fn svoFieldSignedNoise(point:vec3f,frequency_mInv:f32,seed:u32)->f32{
   return 2.0*svoProceduralNoise(point,vec3f(frequency_mInv),seed)-1.0;
@@ -1923,6 +1969,7 @@ fn svoFieldUpFacing(point:vec3f,reference_m:f32)->f32{
 fn ${functionName}Banded(blockIndex:u32,localPoint:vec3f,samplingLength_m:f32)->SvoFieldValue{
   if(blockIndex>=(${capacityExpression})){return SvoFieldValue(1e20,1.0);}
   let base=(${baseWordExpression})+blockIndex*SVO_FIELD_PROGRAM_BLOCK_WORDS;
+  if(${loadWord}(base)==${SVO_SAMPLED_VOLUME_TAG}u){return SvoFieldValue(${functionName}Surface(blockIndex,localPoint).distance,1.75);}
   let opCount=min(${loadWord}(base),${SVO_FIELD_PROGRAM_MAXIMUM_OPS}u);
   let resultRegister=${loadWord}(base+1u);
 

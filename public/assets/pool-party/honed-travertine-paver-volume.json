@@ -1,0 +1,340 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "honed-travertine-paver",
+  "source": "honed-travertine-paver.glb",
+  "origin": [
+    -0.51875,
+    -0.025,
+    -0.51875
+  ],
+  "dimensions": [
+    168,
+    16,
+    168
+  ],
+  "cellSize": 0.00625,
+  "bandWidth": 0.018750000000000003,
+  "brickCount": 882,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "honed-warm-travertine",
+      "baseColorLinear": [
+        0.255653977394104,
+        0.1897766888141632,
+        0.11403173208236694
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/17,15,12/r0.571",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.19941489015347055,
+        0.1240040094060311
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/17,15,11/r0.571",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.19941489015347055,
+        0.10338683447877332
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/16,14,11/r0.571",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/17,14,11/r0.571",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/15,13,10/r0.571",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/13,12,9/r0.714",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1240040094060311,
+        0.06853841290915133
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/14,12,9/r0.571",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1240040094060311,
+        0.06853841290915133
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/12,11,8/r0.714",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.10338683447877332,
+        0.05416457340265298
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/18,15,12/r0.571",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.19941489015347055,
+        0.1240040094060311
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/18,16,12/r0.571",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.229274769922375,
+        0.1240040094060311
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/15,13,11/r0.571",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.14683923082122904,
+        0.10338683447877332
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/16,14,11/r0.714",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/15,13,10/r0.714",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/14,12,9/r0.714",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1240040094060311,
+        0.06853841290915133
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/14,12,10/r0.714",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1240040094060311,
+        0.0849214566468118
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/14,13,10/r0.714",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/15,14,11/r0.571",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/16,13,11/r0.571",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.14683923082122904,
+        0.10338683447877332
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/14,12,10/r0.571",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1240040094060311,
+        0.0849214566468118
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/12,11,9/r0.714",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.10338683447877332,
+        0.06853841290915133
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/13,11,9/r0.714",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.10338683447877332,
+        0.06853841290915133
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/14,13,10/r0.571",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/15,13,11/r0.714",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.14683923082122904,
+        0.10338683447877332
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/15,14,11/r0.714",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/18,16,13/r0.571",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.229274769922375,
+        0.14683923082122904
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/17,14,11/r0.714",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/17,15,12/r0.714",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.19941489015347055,
+        0.1240040094060311
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/19,16,13/r0.571",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.229274769922375,
+        0.14683923082122904
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "honed-warm-travertine/17,15,11/r0.714",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.19941489015347055,
+        0.10338683447877332
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 485537,
+  "insideNodes": 109040,
+  "horizontalSlab": {
+    "minimum": [
+      -0.45,
+      0,
+      -0.45
+    ],
+    "maximum": [
+      0.45,
+      0.03,
+      0.45
+    ]
+  }
+}
