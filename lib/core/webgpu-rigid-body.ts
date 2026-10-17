@@ -571,7 +571,33 @@ fn integrate(@builtin(global_invocation_id) id: vec3u) {
     // one: a cup carried into the tank has to keep displacing water even while
     // the hand holding it refuses gravity.
     if(body.material.z>0.5){if(index<arrayLength(&immersedVolumes)){immersedVolumes[index]=displaced;}}
-    if(body.material.z>0.5&&body.material.z<1.5){let impulse=vec3f(f32(atomicLoad(&exchange[base])),f32(atomicLoad(&exchange[base+1u])),f32(atomicLoad(&exchange[base+2u])))*1e-6;let angularImpulse=vec3f(f32(atomicLoad(&exchange[base+3u])),f32(atomicLoad(&exchange[base+4u])),f32(atomicLoad(&exchange[base+5u])))*1e-6;let weighted=vec3f(f32(atomicLoad(&exchange[base+7u])),f32(atomicLoad(&exchange[base+8u])),f32(atomicLoad(&exchange[base+9u])))*1e-4/snapshots;let velocityWeight=f32(atomicLoad(&exchange[base+11u]))/65536.0/snapshots;let pressureCoupled=atomicLoad(&exchange[base+10u])!=0;let meanVelocity=select(vec3f(0),weighted/velocityWeight,velocityWeight>1e-8);let scaledInverseMass=body.inverseMassInertia.x;let mass=select(1e30,rho/scaledInverseMass,scaledInverseMass>0.0);let immersed=clamp(displaced/max(bodyVolume(body),1e-9),0.0,1.0);let relative=body.linearVelocity.xyz-meanVelocity;let speed=length(relative);let drag=-.5*rho*params.coupling.y*3.141592653589793*body.dimensions.w*body.dimensions.w*immersed*speed*relative;let buoyancy=select(-rho*displaced*params.gravity.xyz,vec3f(0),pressureCoupled);let added=params.coupling.z*rho*displaced;let acceleration=(mass*params.gravity.xyz+impulse/max(dt,1e-8)+drag+buoyancy)/max(mass+added,1e-8);body.linearVelocity=vec4f(body.linearVelocity.xyz+acceleration*dt,body.linearVelocity.w);body.angularMomentumRestitution=vec4f(body.angularMomentumRestitution.xyz+angularImpulse,body.angularMomentumRestitution.w);body.positionShape=vec4f(body.positionShape.xyz+body.linearVelocity.xyz*dt,body.positionShape.w);body.angularVelocity=vec4f(inverseInertia(body,body.angularMomentumRestitution.xyz),body.angularVelocity.w);let derivative=qMultiply(vec4f(0,body.angularVelocity.xyz),body.orientation);body.orientation=normalize(body.orientation+.5*dt*derivative);bodies[index]=body;}
+    if(body.material.z>0.5&&body.material.z<1.5){
+      let impulse=vec3f(f32(atomicLoad(&exchange[base])),f32(atomicLoad(&exchange[base+1u])),f32(atomicLoad(&exchange[base+2u])))*1e-6;
+      let angularImpulse=vec3f(f32(atomicLoad(&exchange[base+3u])),f32(atomicLoad(&exchange[base+4u])),f32(atomicLoad(&exchange[base+5u])))*1e-6;
+      let weighted=vec3f(f32(atomicLoad(&exchange[base+7u])),f32(atomicLoad(&exchange[base+8u])),f32(atomicLoad(&exchange[base+9u])))*1e-4/snapshots;
+      let velocityWeight=f32(atomicLoad(&exchange[base+11u]))/65536.0/snapshots;
+      let pressureCoupled=atomicLoad(&exchange[base+10u])!=0;
+      let meanVelocity=select(vec3f(0),weighted/velocityWeight,velocityWeight>1e-8);
+      let scaledInverseMass=body.inverseMassInertia.x;
+      let mass=select(1e30,rho/scaledInverseMass,scaledInverseMass>0.0);
+      let immersed=clamp(displaced/max(bodyVolume(body),1e-9),0.0,1.0);
+      let relative=body.linearVelocity.xyz-meanVelocity;
+      let speed=length(relative);
+      // Pressure traction already includes buoyancy and acceleration of the
+      // displaced water. Extra drag/added mass would change body momentum
+      // without applying the matching impulse to the fluid.
+      let drag=-.5*rho*select(params.coupling.y,0.0,pressureCoupled)*3.141592653589793*body.dimensions.w*body.dimensions.w*immersed*speed*relative;
+      let buoyancy=select(-rho*displaced*params.gravity.xyz,vec3f(0),pressureCoupled);
+      let added=select(params.coupling.z*rho*displaced,0.0,pressureCoupled);
+      let acceleration=(mass*params.gravity.xyz+impulse/max(dt,1e-8)+drag+buoyancy)/max(mass+added,1e-8);
+      body.linearVelocity=vec4f(body.linearVelocity.xyz+acceleration*dt,body.linearVelocity.w);
+      body.angularMomentumRestitution=vec4f(body.angularMomentumRestitution.xyz+angularImpulse,body.angularMomentumRestitution.w);
+      body.positionShape=vec4f(body.positionShape.xyz+body.linearVelocity.xyz*dt,body.positionShape.w);
+      body.angularVelocity=vec4f(inverseInertia(body,body.angularMomentumRestitution.xyz),body.angularVelocity.w);
+      let derivative=qMultiply(vec4f(0,body.angularVelocity.xyz),body.orientation);
+      body.orientation=normalize(body.orientation+.5*dt*derivative);
+      bodies[index]=body;
+    }
   }
   for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<12u;index++){if(index>=count){break;}var body=bodies[index];${solidWorldContact ? "solidVoxelContact(&body);" : "planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}"}${terrainContact ? "let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);" : ""}${proceduralContact ? "proceduralContact(&body);" : ""}bodies[index]=body;}for(var a=0u;a<12u;a++){if(a>=count){break;}for(var b=a+1u;b<12u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
   // A held body is the host's to place. Whatever the contact iterations did to

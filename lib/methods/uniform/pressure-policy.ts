@@ -25,17 +25,13 @@ export const UNIFORM_PRESSURE_RESIDUAL_TOLERANCE = 5;
 // the initial residual tenfold; the floor is the GPU single-precision
 // tolerance above, so an already-divergence-free field still accepts.
 export const UNIFORM_PRESSURE_RELATIVE_REDUCTION = 0.1;
-// The start-up kick's absolute bound (UniformMixedFrame.kick), per second of
-// step: 0.3 dt s^-1. Every frame warm-starts from the kick's pressure, so
-// what it leaves is what a resting pool starts with: an accepted h-equivalent
-// divergence r is a face speed r h, a surface travel r h dt = 0.3 h dt^2 in
-// frame 1 (8e-5 h at 1/60, 1.3e-3 h at 1/15) against gravity's own g dt^2/2.
-// At the frame tolerance above (one cycle, tenfold) the 128x96x128 pool kept
-// 0.066 m/s at 1/15 and spiked to 2 m/s; at this bound the kick leaves it
-// 6e-5 m/s at 1/60 and 2.5e-4 m/s at 1/15, in three cycles of the seven-slot
-// envelope, and it then rests. The bound stays above the single-precision
-// floor (1e-4 s^-1) down to dt = 1/3000.
-export const UNIFORM_PRESSURE_KICK_RESIDUAL_PER_STEP = 0.3;
+// Seed the warm start at the solver's absolute single-precision accuracy.
+// A timestep-scaled 0.3*dt bound accepted 0.005 s^-1 at 60 Hz: the 8 x 4 m
+// voxel pool started with 0.32 mm/s currents, which displaced its flat surface
+// at h/4h seams and grew into 0.8 m/s edge flow within a second. The one-time
+// kick must establish hydrostatic pressure before transport sees that error;
+// later frames retain their normal absolute/relative stopping policy.
+export const UNIFORM_PRESSURE_KICK_RESIDUAL_TOLERANCE = UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE;
 
 export interface UniformCM11aSchedule {
   readonly fullCycles: number;

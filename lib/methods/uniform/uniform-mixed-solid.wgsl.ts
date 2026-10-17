@@ -928,7 +928,8 @@ fn umFaceOpen(id:vec3i,axis:u32)->f32{
  }
  return 1.0-solid*0.25;
 }
-// pressureFaceData(id,axis).w, geometric and static: the CM11a dual-cell V.
+// Pressure flux weight: face aperture at rigid contact, CM11a dual-cell V
+// for static voxel/terrain boundaries.
 // A wall page is voxels: its face holds half the open fraction of the cell
 // this side of it, and nothing between two wall cells. A depth symmetry
 // plane is such a wall, as for solid-free mixed frames and every coarse
@@ -941,7 +942,15 @@ fn umPressureFaceV(id:vec3i,axis:u32)->f32{
  if(umSolidFaceClear(id,neighbor,axis)){return 1.0;}
  if((umSolidVoxel(id)&&umBoundaryRecord(id)==0u)||(umSolidVoxel(neighbor)&&umBoundaryRecord(neighbor)==0u)){return 0.5*(umCellOpen(id)+umCellOpen(neighbor));}
  if(umBodyCount()==0u){var q=vec3f(id)+0.5;q[axis]+=0.5;return umTerrainBoxOpen(q,vec3f(1));}
- let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;var solid=0.0;
+ let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;
+ // Rigid contact uses the face aperture. A dual cell can contain liquid on
+ // one side of a completely blocked face; treating that volume as an open
+ // face couples the fluid to ghost liquid inside the body at the waterline.
+ // Gravity then creates velocity through the body even while it is fixed.
+ for(var i=0u;i<umBodyCount();i++){
+  if(umBodyNear(i,world,length(0.5*h))){return umFaceOpen(id,axis);}
+ }
+ var solid=0.0;
  for(var sampleIndex=0u;sampleIndex<8u;sampleIndex+=1u){
   let sampleWorld=world+vec3f(select(-0.4,0.4,(sampleIndex&1u)!=0u)*h.x,select(-0.4,0.4,(sampleIndex&2u)!=0u)*h.y,select(-0.4,0.4,(sampleIndex&4u)!=0u)*h.z);
   solid+=select(0.0,1.0,umSolidAtWorld(sampleWorld));

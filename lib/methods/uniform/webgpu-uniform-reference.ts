@@ -1117,10 +1117,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedFrame.solid!.present=solids||bodies>0;
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
     // The scene uniform: the census marks this frame's drop and inflow plug band on the GPU.
-    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles,this.address.pages[0]*this.address.pages[1]*this.address.pages[2]);
+    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles,this.address.pages[0]*this.address.pages[1]*this.address.pages[2],this.mixedFrame.solid!.coarse!);
     this.mixedFrame.registerPageOwner(this.mixedDynamic);this.mixedFrame.registerCertificate(this.mixedDynamic);
     this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership);
-    this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange});
+    this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange,pressure:()=>this.mixedFrame!.rigidPressure});
     // The frame's forces and its samples read the bed-slope lane; the bake is
     // its only writer. Built with the frame whether or not the scene has a
     // voxel yet: an edit may add the first.
@@ -2552,7 +2552,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.mixedDynamic?.setBodies(bodyCount?this.markMixedBodies:this.openWorldTerrain?this.markOpenWorldTerrain:undefined);
       // Bodies: the frame rebuilds its solid record and displaces liquid out
       // of the cells they entered; once more after the last one leaves. Native
-      // coupleRigid then the rigid integration run after the projection.
+      // pressure coupling and rigid integration run after the projection.
       const frameBodies=bodyCount||this.mixedHadBodies?bodyCount&&this.rigidCoupling?this.mixedCoupledBodies:this.mixedUncoupledBodies:undefined;
       this.mixedHadBodies=bodyCount>0;
       let receipt:Promise<UniformMixedFrameReceipt>,kick:Promise<unknown>|undefined;

@@ -37,7 +37,7 @@ import {UniformMixedPressureAcceptance} from "./uniform-mixed-pressure-acceptanc
 import {UNIFORM_MIXED_SCHEDULE_FLOOR,UniformMixedPressureSchedule,uniformMixedPressureReserve,uniformMixedPressureSpareFull,type UniformMixedPressurePlan} from "./uniform-mixed-pressure-schedule";
 import {UNIFORM_MIXED_FAILURE,UNIFORM_MIXED_STATUS,UNIFORM_MIXED_STATUS_WORDS,describeUniformMixedFrameStatus} from "./uniform-mixed-frame-status";
 import {planUniformMixedPressureMemory} from "./uniform-mixed-pressure-memory";
-import {DEFAULT_UNIFORM_CM11A_SCHEDULE,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_KICK_RESIDUAL_PER_STEP,UNIFORM_PRESSURE_RELATIVE_REDUCTION,type UniformCM11aSchedule} from "./pressure-policy";
+import {DEFAULT_UNIFORM_CM11A_SCHEDULE,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_KICK_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_RELATIVE_REDUCTION,type UniformCM11aSchedule} from "./pressure-policy";
 import type {GPUTimestampPhase} from "../../core/performance-trace";
 import {UNIFORM_ADVANCE_PHASE as A} from "./uniform-stages";
 import {UNIFORM_VOLUME_PHASE as V} from "./uniform-volume-stages";
@@ -252,6 +252,8 @@ export class UniformMixedFrame {
   * two-stage h band section in front of it (see uniform-stage-grids). */
  private stageGridWord:number;
  private readonly stageBandWord:number;
+ /** Accepted fine pressure and its slot map, including after storage growth. */
+ get rigidPressure():{buffer:GPUBuffer;word:number}{return {buffer:this.presentation.phi.buffer,word:this.stageBandWord};}
  private stageBandTiles:number;
  private readonly split:{
   transfer:UniformMixedOwnershipTransfer;toPressure:UniformDetailGroup;toSimulation:UniformDetailGroup;
@@ -789,7 +791,7 @@ export class UniformMixedFrame {
   * runs for the frame's step and the kick is solved on the generation it
   * adopts, like every solve (the seed's all-h tiles can outnumber the
   * band's slots); phi and V are written by that remap alone. Converged on
-  * the full envelope to UNIFORM_PRESSURE_KICK_RESIDUAL_PER_STEP, or to the
+  * the full envelope to UNIFORM_PRESSURE_KICK_RESIDUAL_TOLERANCE, or to the
   * frame's own tolerance where a scene asks for a tighter one; its pressure
   * (Pa: hydrostatic) is presented, the first frame's warm start. The receipt
   * is a frame's, in the same ring and under the same verdict; it plans no
@@ -797,7 +799,7 @@ export class UniformMixedFrame {
   * the next frame advances, as solids where they stand. */
  kick(p:UniformMixedFrameParameters,lead:number,bodies=false):Promise<UniformMixedFrameReceipt>{
   if(!(lead>0))throw new Error("The projected kick leads by a positive time");
-  return this.advance({...p,dt:lead,viscosity:0,surfaceTension:0,fullPressureEnvelope:true,pressureTolerance:Math.min(uniformMixedPressureTarget(p),2*lead*UNIFORM_PRESSURE_KICK_RESIDUAL_PER_STEP)},undefined,false,bodies?{}:undefined,p.dt);
+  return this.advance({...p,dt:lead,viscosity:0,surfaceTension:0,fullPressureEnvelope:true,pressureTolerance:Math.min(uniformMixedPressureTarget(p),UNIFORM_PRESSURE_KICK_RESIDUAL_TOLERANCE)},undefined,false,bodies?{}:undefined,p.dt);
  }
  /** extendTail: extend this frame's final velocity for the next frame
   * head's census (and reuse it there when the key still matches).
@@ -1039,7 +1041,7 @@ export class UniformMixedFrame {
    // live band pressures were presented by the band's own slot launch.
    encoder.copyBufferToBuffer(this.band.index,this.band.slotMapOffset,this.presentation.phi.buffer,4*this.stageBandWord,4*this.ownership.capacity.tiles);
    trace?.phase(encoder,V.band);
-   // Native coupleRigid and the rigid integration read the projected field;
+   // Rigid coupling reads the accepted h pressure and projected field;
    // the census below promotes around the integrated poses.
    if(bodies?.couple){bodies.couple(encoder);trace?.phase(encoder,A.rigidCoupling);}
    encoder.copyBufferToBuffer(this.state,0,readback,0,32);encoder.copyBufferToBuffer(this.reductions,0,readback,32,48);schedule.encodePlanCopy(encoder,readback,80);

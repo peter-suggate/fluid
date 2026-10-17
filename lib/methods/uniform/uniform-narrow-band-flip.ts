@@ -11,7 +11,7 @@ import { narrowBandMembershipWGSL } from "./uniform-narrow-band-membership.wgsl"
 import { narrowBandNearestEntries } from "./uniform-narrow-band-nearest.wgsl";
 import { NARROW_BAND_TRACE_LIMIT, narrowBandTraceWGSL } from "./uniform-narrow-band-advection.wgsl";
 import { narrowBandNearWGSL } from "./uniform-narrow-band-near.wgsl";
-import { narrowBandTerrainContactWGSL } from "./uniform-particle-contact.wgsl";
+import { narrowBandTerrainContactWGSL, narrowBandRigidContactWGSL } from "./uniform-particle-contact.wgsl";
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
 import { NARROW_BAND_PARTICLE_GRID, UniformNarrowBandOrder } from "./uniform-narrow-band-order";
 import { NARROW_BAND_SURFACE_RADIUS, narrowBandSurfaceWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
@@ -421,6 +421,7 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
 ${uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",undefined,unitTaps?"unitVelocity":undefined,slots?"ueSnapshotUnit":undefined,unitTaps&&!slots?"unitHalo":undefined)}
 ${uniformMixedSolidWGSL(2,this.solid.coarse?.count)}
 ${narrowBandTerrainContactWGSL}
+${narrowBandRigidContactWGSL}
 ${uniformMixedSourceWGSL(16)}
 // advectParticles is compiled twice. Its fast launch (nbFastSample, and
 // umSolidFree: it runs only while the scene holds no solid) takes
@@ -643,6 +644,9 @@ fn nbAdvect(i:u32){
   nbSlow=false;var p=source[i];var q=p.position.xyz;
   let held=bitcast<vec3i>(vec3u(atomicLoad(&state[12u]),atomicLoad(&state[13u]),atomicLoad(&state[14u])));
   q-=32.0*vec3f(umFramePage()-held);
+  // Bodies advance at the previous fluid step's tail. Push samples they
+  // overtook out to the moving surface before the static-solid rejection.
+  let rigidStart=nbRigidContact(q,p.velocity.xyz);q=rigidStart.position;p.velocity=vec4f(rigidStart.velocity,p.velocity.w);
   // Solid collision, rather than grid ownership, limits particle motion.
   if(nbParticleBlocked(q)){source[i].position.x=-1.0;return;}
   let ballistic=nbParticleMode(p)==1.0||!gridSupported(q);p.before.w=nbParticleState(nbParticleAge(p),select(0.0,1.0,ballistic));
@@ -712,9 +716,9 @@ fn nbAdvect(i:u32){
       // Diagnostic oracle: WGSL select evaluates both values, including the
       // expensive fractional open-cell query that a boundary cell discards.
       blocked=select(umCellOpen(vec3i(point))<0.5,
-       nbVoxelBlocked(point)||umBodyAt(umSolidTraceWorld(point))>=0,umSolidHasTerrain()||umBoundaryRecord(vec3i(floor(point)))!=0u);
-     }else if(umSolidHasTerrain()||umBoundaryRecord(vec3i(floor(point)))!=0u){
-      blocked=nbVoxelBlocked(point)||umBodyAt(umSolidTraceWorld(point))>=0;
+       nbVoxelBlocked(point),umSolidHasTerrain()||umBodyCount()>0u||umBoundaryRecord(vec3i(floor(point)))!=0u);
+     }else if(umSolidHasTerrain()||umBodyCount()>0u||umBoundaryRecord(vec3i(floor(point)))!=0u){
+      blocked=nbVoxelBlocked(point);
      }else{blocked=umCellOpen(vec3i(point))<0.5;}
      if(blocked){
       let cell=floor(q[axis]);point[axis]=select(cell+0.01,cell+0.99,stride[axis]>0.0);
@@ -722,6 +726,8 @@ fn nbAdvect(i:u32){
      }
      q=point;
     }
+    let rigidContact=nbRigidContact(q,p.velocity.xyz);
+    if(!nbVoxelBlocked(rigidContact.position)){q=rigidContact.position;p.velocity=vec4f(rigidContact.velocity,p.velocity.w);}
     let boundaryContact=nbProceduralContact(start,q,p.velocity.xyz);
     if(!nbVoxelBlocked(boundaryContact.position)&&umBodyAt(umSolidTraceWorld(boundaryContact.position))<0){q=boundaryContact.position;p.velocity=vec4f(boundaryContact.velocity*free,p.velocity.w);}
     if(umSolidHasTerrain()){

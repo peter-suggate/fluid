@@ -677,14 +677,19 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
     var theta=1.0;
     if(liquid!=n.wet){
      if(${S?"shut||!umCellIsOpen(q)":"false"}){theta=bPairTheta(own,liquid,n.phi,n.wet);}
-     ${S?`// Between two centres inside the solid phi's zero crossing is in the
-     // solid, not the free surface: that is no nearer than the air centre.
+     ${S?`// Only nearly closed cells use the buried-interface safeguard.
+     // A centre inside a solid does not imply a buried free surface: a rigid
+     // body can leave substantial open volume in both cells at the waterline.
+     // Forcing theta=1 there moves the pressure boundary away from the actual
+     // surface (theta=0.5 for a flat grid-aligned pool), so pressure cannot
+     // balance gravity and a stationary body continuously generates flow.
      // At the crossing, a near-shut pocket of a smooth wall (open 1e-4..0.1)
      // that stopped its inflow with kPa drove it out through its sliver of
      // aperture at 1/theta (10-80 m/s), and particles took it out of the
      // band. Closed instead, the film of a gentle slope (its last sub-cell
      // layer) could not drain (nbflip-slope-clearance).
-     else if(inside&&umCellInsideSolid(q)){theta=1.0;}`:""}
+     // 0.1 is below a rigid cell's smallest nonzero sampled fraction (1/8).
+     else if(inside&&umCellInsideSolid(q)&&umCellOpen(p)<0.1&&umCellOpen(q)<0.1){theta=1.0;}`:""}
      else{theta=bFaceTheta(bFacePhi(p,axis,sign),own,liquid,n.phi,n.wet);}
     }
     if(bCellAt(q)!=0u){kind=K_BAND;coefficient=1.0/(h*h*theta);}

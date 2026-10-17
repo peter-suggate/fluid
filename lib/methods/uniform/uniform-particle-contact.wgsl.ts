@@ -12,7 +12,7 @@ fn nbTerrainNormal(s:vec3f)->vec3f{
 // call, and this runs in advectParticles beside the trace.
 fn nbParticleBlocked(q:vec3f)->bool{
  let c=vec3i(floor(q));let record=umBoundaryRecord(c);let terrain=umSolidHasTerrain();
- if(record==0u&&!terrain){return umCellOpen(c)<0.5;}
+ if(record==0u&&!terrain){return umSolidVoxel(c)||umBodyAt(umSolidTraceWorld(q))>=0;}
  var solid:bool;
  if(record!=0u){solid=umBoundarySampleAt(q,c,record).w<0.0;}else{solid=umSolidVoxel(c);}
  return solid||(terrain&&q.y<nbTerrainSurface(q).x)||umBodyAt(umSolidTraceWorld(q))>=0;
@@ -123,5 +123,33 @@ fn nbProceduralContact(start:vec3f,end:vec3f,velocity:vec3f)->NBTerrainContact{
   if(depth<=0.0){break;}q+=depth*normal/params.hDt.xyz;v-=min(dot(v,normal),0.0)*normal;
  }
  return NBTerrainContact(q,v);
+}
+`;
+
+/** Moving rigid contact. A body may have overtaken a sample since the last
+ * fluid step. Retain it, move it outside the analytic surface, and enforce
+ * non-penetration relative to the wall velocity (including rotation). */
+export const narrowBandRigidContactWGSL = /* wgsl */ `
+struct NBRigidContact{position:vec3f,velocity:vec3f}
+fn nbRigidContact(point:vec3f,velocity:vec3f)->NBRigidContact{
+ let h=params.hDt.xyz;let skin=0.01*min(h.x,min(h.y,h.z));
+ var world=umSolidTraceWorld(point);var v=velocity;
+ for(var i=0u;i<umBodyCount();i++){
+  if(!umBodyNear(i,world,skin)){continue;}
+  for(var iteration=0u;iteration<4u;iteration++){
+   let distance=umBodyDistance(i,world);if(distance>skin){break;}
+   var gradient=vec3f(0);
+   for(var axis=0u;axis<3u;axis++){
+    var delta=vec3f(0);delta[axis]=skin;
+    gradient[axis]=umBodyDistance(i,world+delta)-umBodyDistance(i,world-delta);
+   }
+   // A sample exactly at a shape's medial axis still needs a deterministic exit.
+   var normal=vec3f(0,1,0);let g=length(gradient);if(g>1e-10){normal=gradient/g;}
+   world+=(skin-distance)*normal;
+   let wall=umBodyVelocity(i,world);
+   v-=min(dot(v-wall,normal),0.0)*normal;
+  }
+ }
+ return NBRigidContact(point+(world-umSolidTraceWorld(point))/h,v);
 }
 `;

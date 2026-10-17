@@ -2,6 +2,7 @@ import { STAGE_RESIDENCY_WORDS, RESIDENCY_STAGES, RESIDENCY_STENCIL_TILES, local
 import { narrowBandBudgetWGSL, narrowBandBudgetWords, NARROW_BAND_BUDGET_ENTRIES } from "./uniform-narrow-band-budget.wgsl";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {uniformKeyGroups} from "./uniform-lattice-address";
+import type {UniformMixedSolidCoarse} from "./uniform-mixed-solid.wgsl";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_MIXED_REGION_LIMIT,UNIFORM_MIXED_REGION_TABLE_WORDS,uniformMixedRegionWGSL,type UniformMixedBandBits} from "./uniform-mixed-layout-builder";
 import {UNIFORM_BOUND_CUBE_WORDS,UNIFORM_TILE_BITS_WORDS,uniformBoundCubesWGSL,uniformTileBitsWGSL} from "./uniform-block-tables";
@@ -307,8 +308,10 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
   * residency certificate; the frame's commit follows the census.
   * particles.allocation: exact current particle tile masks and six signed
   * travel bounds per 16-cell region, produced by FLIP refinement before
-  * the census. This includes newly seeded and ballistic particles. */
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,extended:GPUTexture,source:GPUBuffer,private readonly pool:UniformPagePool,private readonly particles:{readonly buffer:GPUBuffer;readonly offset:number;readonly allocation:GPUBuffer},private readonly hostPages:number){
+  * the census. This includes newly seeded and ballistic particles.
+  * solidGeometry: the frame's cached open-cell masks, rebuilt before the
+  * census and initialized for new pages before their first classification. */
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,extended:GPUTexture,source:GPUBuffer,private readonly pool:UniformPagePool,private readonly particles:{readonly buffer:GPUBuffer;readonly offset:number;readonly allocation:GPUBuffer},private readonly hostPages:number,private readonly solidGeometry:UniformMixedSolidCoarse){
   const tiles=ownership.capacity.tiles;
   this.words=Math.ceil(tiles/32);
   const address=ownership.capacity.address;
@@ -343,6 +346,7 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
    {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
    {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    {binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+   {binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
   ]});
   this.group=uniformDetailGroup(device,{layout:this.resources,entries:[
    {binding:0,resource:volume},{binding:1,resource:phi},
@@ -350,6 +354,7 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
    {binding:5,resource:{buffer:this.solidTiles}},{binding:6,resource:{buffer:this.bounds}},{binding:7,resource:{buffer:this.joinTiles}},
    {binding:8,resource:{buffer:source,size:SOURCE_PARAMS_BYTES}},
    {binding:9,resource:{buffer:particles.allocation}},
+   {binding:10,resource:{buffer:solidGeometry.record}},
   ]});
  }
  async initialize():Promise<void>{
@@ -376,6 +381,26 @@ struct DynamicPolicy {step:vec4f,reach:vec4u,surface:vec4f,flow:vec4f,importance
 @group(1) @binding(7) var<storage,read> joinTiles:array<u32>;
 ${uniformMixedSourceWGSL(8)}
 @group(1) @binding(9) var<storage,read> particleAllocation:array<u32>;
+@group(1) @binding(10) var<storage,read> solidRecord:array<vec4f>;
+// The frame rebuilds this cache before the census. Buried phi vertices hold
+// positive air markers, not a fluid interface: only open owners can cross it.
+fn umCensusOpenCells(tile:u32)->vec2u{
+ let r=vec4u(solidRecord[${this.solidGeometry.count}u+UM_TILES+3u*tile]);
+ return vec2u(r.x|(r.y<<16u),r.z|(r.w<<16u));
+}
+fn umCensusCellOpen(mask:vec2u,c:vec3i)->bool{
+ if(any(c<vec3i(0))||any(c>=vec3i(4))){return false;}
+ let i=u32(c.x+4*c.y+16*c.z);return (mask[i/32u]&(1u<<(i%32u)))!=0u;
+}
+// An edge belongs to the fluid domain only if an incident cell is open.
+fn umCensusEdgeOpen(mask:vec2u,v:vec3u,a:u32)->bool{
+ if(all(mask==vec2u(0xffffffffu))){return true;}
+ for(var i=0u;i<4u;i++){
+  var c=vec3i(v);c[(a+1u)%3u]-=i32(i&1u);c[(a+2u)%3u]-=i32(i>>1u);
+  if(umCensusCellOpen(mask,c)){return true;}
+ }
+ return false;
+}
 ${localResidencyWGSL}
 fn lrRecord(page:u32,stage:u32)->vec4u{let i=${this.localOffset}u+4u*(stage*UM_PAGES+page);return vec4u(atomicLoad(&census[i]),atomicLoad(&census[i+1u]),atomicLoad(&census[i+2u]),atomicLoad(&census[i+3u]));}
 // The census tail follows the frame's last phi resolve: every texel of a
@@ -515,14 +540,15 @@ fn umWideShared(wide:u32,local:vec3u)->bool{
 // How far an h tile's surface moves when its eight 4h corners carry it, in
 // h: at every zero crossing of an h edge, the corners' trilinear phi over
 // its gradient (the distance to their zero set, to first order).
-fn umSurfaceDisplacement(origin:vec3u,lane:u32)->f32{
+fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
+ let origin=umTileCoord(tile)*4u;let open=umCensusOpenCells(tile);
  var c:array<f32,8>;var worst=0.0;
  c=umLoadCorner8(origin,4u);
  let low=vec4f(c[0],c[2],c[4],c[6]);let high=vec4f(c[1],c[3],c[5],c[7]);let dx=high-low;
  for(var i=lane;i<125u;i+=64u){
   let v=umCorner(i,5u);let value=umLoadFine(origin+v);
   for(var a=0u;a<3u;a++){
-   if(v[a]>=4u){continue;}
+   if(v[a]>=4u||!umCensusEdgeOpen(open,v,a)){continue;}
    var n=v;n[a]+=1u;let next=umLoadFine(origin+n);
    if((value<0.0)==(next<0.0)){continue;}
    var t=vec3f(v)*0.25;t[a]+=0.25*value/(value-next);
@@ -541,7 +567,7 @@ fn umSurfaceDisplacement(origin:vec3u,lane:u32)->f32{
 fn umResolutionError(tile:u32,lane:u32,width:u32,wide:u32)->f32{
  let origin=umTileCoord(tile)*4u;var worst=0.0;
  if(width==1u){
-  if(shapeDisplacement()){return umSurfaceDisplacement(origin,lane);}
+  if(shapeDisplacement()){return umSurfaceDisplacement(tile,lane);}
   var corners:array<f32,8>;
   corners=umLoadCorner8(origin,4u);
   for(var i=lane;i<125u;i+=64u){
@@ -654,6 +680,8 @@ fn umDepthSample(tile:u32,i:u32)->vec2u{
 // without one is counted, not refined: 4h V error is at or below fine on the
 // same cells (plan, same-cell A/B).
 fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
+ let open=umCensusOpenCells(tile);
+ if(all(open==vec2u(0u))||(width==1u&&(open[lane/32u]&(1u<<(lane%32u)))==0u)){return;}
  let surfaceAuthority=(policy.shaping.x&32768u)!=0u;
  let side=4u/width;
  let origin=umTileCoord(tile)*4u+umCorner(lane,side)*width;
