@@ -12,6 +12,7 @@ import {
   sceneShapeWgsl,
 } from "./scene-shape";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
+import { proceduralSolidRenderWGSL } from "./procedural-solid-render.wgsl";
 import type { GPUInitializationTask } from "./gpu-initialization";
 
 export const GPU_RIGID_BODY_CAPACITY = 12;
@@ -97,6 +98,34 @@ export interface GPURigidSolidWorldCollisionSource {
   readonly fractionPageWords: number;
   readonly origin_m: readonly [number, number, number];
   readonly cellSize_m: readonly [number, number, number];
+}
+
+/** Shared, edit-aware sampled boundary already resident in the fluid solver. */
+export interface GPURigidProceduralCollisionSource {
+  readonly buffer: GPUBuffer;
+  readonly pointerWord: number;
+  readonly origin_m: readonly [number, number, number];
+  readonly cellSize_m: readonly [number, number, number];
+}
+
+function rigidProceduralContactWGSL(source: GPURigidProceduralCollisionSource): string {
+  const vector = (v: readonly number[]) => `vec3f(${v.map(n => `${n}`).join(",")})`;
+  return /* wgsl */ `
+@group(0) @binding(10) var<storage,read> rigidBoundary:array<u32>;
+${proceduralSolidRenderWGSL(`rigidBoundary[${source.pointerWord}u]`, "rigidBoundary[index]",
+    vector(source.cellSize_m), vector(source.origin_m), "rigidBoundary")}
+fn proceduralContact(body:ptr<function,RigidBody>){
+  if((*body).inverseMassInertia.x<=0.0){return;}
+  let sample=rigidBoundarySample((*body).positionShape.xyz);
+  let magnitude=length(sample.xyz);
+  if(sample.w>=1e19||magnitude<1e-8){return;}
+  let normal=sample.xyz/magnitude;
+  let radius=supportRadius(*body,normal);
+  // Normalize the implicit field's value by its gradient, preserving its
+  // distance even when the procedural author used a non-unit field.
+  resolveStaticContact(body,normal,radius-sample.w/magnitude,radius);
+}
+`;
 }
 
 /**
@@ -367,6 +396,7 @@ fn solidVoxelContact(body:ptr<function,RigidBody>){
 const gpuRigidBodyShaderSource = (
   terrainContact: boolean,
   solidWorldContact?: GPURigidSolidWorldCollisionSource,
+  proceduralContact?: GPURigidProceduralCollisionSource,
 ): string => /* wgsl */ `
 ${svoPrimitiveMotionWGSL}
 struct RigidBody {
@@ -452,6 +482,7 @@ fn resolveStaticContact(body:ptr<function,RigidBody>,normal:vec3f,
   applyImpulse(body,tangent*tangentMagnitude,arm);
 }
 ${solidWorldContact ? "" : rigidPlaneContactWGSL}
+${proceduralContact ? rigidProceduralContactWGSL(proceduralContact) : ""}
 fn bodyVolume(body: RigidBody) -> f32 {
   return rigidShapeVolume(rigidShapeTag(body),body.dimensions.xyz);
 }
@@ -542,7 +573,7 @@ fn integrate(@builtin(global_invocation_id) id: vec3u) {
     if(body.material.z>0.5){if(index<arrayLength(&immersedVolumes)){immersedVolumes[index]=displaced;}}
     if(body.material.z>0.5&&body.material.z<1.5){let impulse=vec3f(f32(atomicLoad(&exchange[base])),f32(atomicLoad(&exchange[base+1u])),f32(atomicLoad(&exchange[base+2u])))*1e-6;let angularImpulse=vec3f(f32(atomicLoad(&exchange[base+3u])),f32(atomicLoad(&exchange[base+4u])),f32(atomicLoad(&exchange[base+5u])))*1e-6;let weighted=vec3f(f32(atomicLoad(&exchange[base+7u])),f32(atomicLoad(&exchange[base+8u])),f32(atomicLoad(&exchange[base+9u])))*1e-4/snapshots;let velocityWeight=f32(atomicLoad(&exchange[base+11u]))/65536.0/snapshots;let pressureCoupled=atomicLoad(&exchange[base+10u])!=0;let meanVelocity=select(vec3f(0),weighted/velocityWeight,velocityWeight>1e-8);let scaledInverseMass=body.inverseMassInertia.x;let mass=select(1e30,rho/scaledInverseMass,scaledInverseMass>0.0);let immersed=clamp(displaced/max(bodyVolume(body),1e-9),0.0,1.0);let relative=body.linearVelocity.xyz-meanVelocity;let speed=length(relative);let drag=-.5*rho*params.coupling.y*3.141592653589793*body.dimensions.w*body.dimensions.w*immersed*speed*relative;let buoyancy=select(-rho*displaced*params.gravity.xyz,vec3f(0),pressureCoupled);let added=params.coupling.z*rho*displaced;let acceleration=(mass*params.gravity.xyz+impulse/max(dt,1e-8)+drag+buoyancy)/max(mass+added,1e-8);body.linearVelocity=vec4f(body.linearVelocity.xyz+acceleration*dt,body.linearVelocity.w);body.angularMomentumRestitution=vec4f(body.angularMomentumRestitution.xyz+angularImpulse,body.angularMomentumRestitution.w);body.positionShape=vec4f(body.positionShape.xyz+body.linearVelocity.xyz*dt,body.positionShape.w);body.angularVelocity=vec4f(inverseInertia(body,body.angularMomentumRestitution.xyz),body.angularVelocity.w);let derivative=qMultiply(vec4f(0,body.angularVelocity.xyz),body.orientation);body.orientation=normalize(body.orientation+.5*dt*derivative);bodies[index]=body;}
   }
-  for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<12u;index++){if(index>=count){break;}var body=bodies[index];${solidWorldContact ? "solidVoxelContact(&body);" : "planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}"}${terrainContact ? "let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);" : ""}bodies[index]=body;}for(var a=0u;a<12u;a++){if(a>=count){break;}for(var b=a+1u;b<12u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
+  for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<12u;index++){if(index>=count){break;}var body=bodies[index];${solidWorldContact ? "solidVoxelContact(&body);" : "planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}"}${terrainContact ? "let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);" : ""}${proceduralContact ? "proceduralContact(&body);" : ""}bodies[index]=body;}for(var a=0u;a<12u;a++){if(a>=count){break;}for(var b=a+1u;b<12u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
   // A held body is the host's to place. Whatever the contact iterations did to
   // it — a pair impulse from a crate it was shoved into, an angular momentum it
   // would spin off the instant it is let go — is rolled back to the pose the
@@ -586,6 +617,12 @@ export class WebGPURigidBodySystem {
   private selectedIndex = -1;
   private motionGenerations: number[] = [];
   private solidWorldCollisionSource?: GPURigidSolidWorldCollisionSource;
+  private proceduralCollisionSource?: GPURigidProceduralCollisionSource;
+
+  setProceduralCollisionSource(source: GPURigidProceduralCollisionSource): void {
+    if (this.shaderModule || this.pipeline) throw new Error("Attach the procedural boundary before rigid compilation");
+    this.proceduralCollisionSource = source;
+  }
 
   // No `deferPipelineCompilation` parameter: the two rigid pipelines are always
   // compiled through `initializationTasks`, because a scene that starts without
@@ -621,7 +658,7 @@ export class WebGPURigidBodySystem {
     this.shaderModule ??= this.device.createShaderModule({
       label: "GPU resident rigid-body solver",
       code: gpuRigidBodyShaderSource(this.terrainTexture !== undefined,
-        this.solidWorldCollisionSource),
+        this.solidWorldCollisionSource, this.proceduralCollisionSource),
     });
     return { label: entryPoint === "integrate"
       ? "GPU resident rigid-body integrate/contact" : "GPU resident rigid-body ray pick",
@@ -643,6 +680,7 @@ export class WebGPURigidBodySystem {
     if (this.terrainTexture) entries.push({ binding: 4,
       resource: this.terrainTexture.createView() });
     if (source) entries.push({ binding: 9, resource: { buffer: source.buffer } });
+    if (this.proceduralCollisionSource) entries.push({ binding: 10, resource: { buffer: this.proceduralCollisionSource.buffer } });
     return this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
   }
 
@@ -705,7 +743,7 @@ export class WebGPURigidBodySystem {
       value === layoutValues(this.solidWorldCollisionSource!)[index]);
     const shaderModule = compatible ? this.shaderModule! : this.device.createShaderModule({
       label: "GPU resident rigid-body solver replacement",
-      code: gpuRigidBodyShaderSource(this.terrainTexture !== undefined, source),
+      code: gpuRigidBodyShaderSource(this.terrainTexture !== undefined, source, this.proceduralCollisionSource),
     });
     const pipeline = compatible ? this.pipeline : await this.device.createComputePipelineAsync({
       label: "GPU resident rigid-body integrate/contact replacement",

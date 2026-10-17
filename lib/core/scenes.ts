@@ -46,6 +46,7 @@ import { createAnalyticMotionScene, createRerungFreeFallScene, createStandingWav
 import { createGeometricUniformTranslationScene } from "./geometric-translation-scene";
 import { createGentleMovingBlobScene } from "./gentle-moving-blob-scene";
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
+import { BACKYARD_POOL_PARTY_ID, backyardPoolPartyCamera, createBackyardPoolPartyScene } from "./backyard-pool-party-scene";
 import { createUniformTroughScene, UNIFORM_TROUGH_CAMERA } from "./uniform-trough-scenes";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
@@ -1598,6 +1599,18 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       distance_m: 15.0,
       target_m: { x: 0, y: 2.2, z: 0 },
     },
+  }),
+  defineScene({
+    id: BACKYARD_POOL_PARTY_ID,
+    name: "Backyard pool party",
+    blurb: "A sunlit backyard pool with loungers, refreshments and friends. A ball rolls from rest down a tall, gently sloping diving board and splashes into the pool.",
+    audience: "explore",
+    shelf: "Garden",
+    environment: "garden",
+    containerShell: "authored",
+    presentationMode: "full-scene",
+    build: createBackyardPoolPartyScene,
+    camera: backyardPoolPartyCamera,
   }),
   defineScene({
     id: "hero-garden-hose",

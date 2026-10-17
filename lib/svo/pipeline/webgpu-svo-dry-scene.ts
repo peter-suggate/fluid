@@ -246,7 +246,7 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(
   const computeBindings = new Set([0, 1, 2, 3, 4, 5, 6, 9, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]);
   // Raster analytic impostors consume the camera/body uniforms, their scene
   // record arena, and the live primitive-count/structural-offset parameters.
-  const vertexBindings = new Set([0, 1, 2, 3, 4, 9]);
+  const vertexBindings = new Set([0, 1, 2, 3, 4, 6, 9]);
   const usesDerivedTraversal = traversalMode === "compact" || traversalMode === "wide" || traversalMode === "hybrid";
   return SVO_DRY_SCENE_BINDING_CONTRACT
     .filter(({ binding }) => binding !== 5 || usesDerivedTraversal)
@@ -1004,7 +1004,7 @@ interface SvoDrySplitPipelineBundle {
   readonly surfaceMesh?: {
     prepare: GPUComputePipeline; boxes: GPUComputePipeline; ingest: GPUComputePipeline; schedule: GPUComputePipeline;
     count: GPUComputePipeline; allocate: GPUComputePipeline; emit: GPUComputePipeline; publish: GPUComputePipeline;
-    select: GPUComputePipeline; cull: GPUComputePipeline; draw: GPURenderPipeline; background: GPURenderPipeline;
+    select: GPUComputePipeline; cull: GPUComputePipeline; draw: GPURenderPipeline; background: GPURenderPipeline; planar: GPURenderPipeline;
   };
   readonly brickBackground?: GPURenderPipeline;
   readonly brickRaster?: GPURenderPipeline;
@@ -2205,9 +2205,10 @@ export class SparseVoxelDrySceneRenderer {
     draw.setBindGroup(0, this.bindGroup);
     if (usePrepass) draw.setBindGroup(1, this.conePrepassBindGroup!);
     draw.setBindGroup(group, this.surfaceMeshDrawGroup!);
-    // Exact planes first, at depth-compare always, then the cached quads over
-    // them under the ordinary reversed-Z test.
+    // Background, projected exact slabs, then cached voxel triangles. Slabs
+    // test only their covered pixels instead of scanning the entire catalogue.
     draw.setPipeline(pipelines.background); draw.draw(3);
+    draw.setPipeline(pipelines.planar); draw.draw(4, this.source!.structural!.planarBoundaries.count);
     draw.setPipeline(pipelines.draw); draw.drawIndirect(state, 0); draw.end();
     // Every presentation carries a receipt: a build the GPU started on its own
     // (a compaction, or a publication the host did not make) is noticed as
@@ -3929,10 +3930,13 @@ export class SparseVoxelDrySceneRenderer {
         const draw = await this.device.createRenderPipelineAsync({ label: "Opaque voxel surface triangles", layout: drawLayout,
           vertex: { module, entryPoint: "surfaceMeshVertex" }, fragment: { module, entryPoint: "surfaceMeshFragment", targets: rasterPrimaryTargets },
           primitive: { topology: "triangle-strip", cullMode: "none" }, depthStencil });
-        const background = await this.device.createRenderPipelineAsync({ label: "Voxel mesh exact planes", layout: drawLayout,
+        const background = await this.device.createRenderPipelineAsync({ label: "Voxel mesh backdrop and pending geometry", layout: drawLayout,
           vertex: { module: vertexModule, entryPoint: "vertexMain" }, fragment: { module, entryPoint: "surfaceMeshBackground", targets: rasterPrimaryTargets },
           primitive: { topology: "triangle-list" }, depthStencil: { ...depthStencil, depthCompare: "always" } });
-        surfaceMesh = { prepare, boxes, ingest, schedule, count, allocate, emit, publish, select, cull, draw, background };
+        const planar = await this.device.createRenderPipelineAsync({ label: "Projected exact planar slabs", layout: drawLayout,
+          vertex: { module, entryPoint: "meshPlanarVertex" }, fragment: { module, entryPoint: "meshPlanarFragment", targets: rasterPrimaryTargets },
+          primitive: { topology: "triangle-strip" }, depthStencil: { ...depthStencil, depthCompare: "greater-equal" } });
+        surfaceMesh = { prepare, boxes, ingest, schedule, count, allocate, emit, publish, select, cull, draw, background, planar };
       }
       // Compile only the expensive closure again. All visibility and cone work
       // shares the generic bundle; unsupported live publications switch back in

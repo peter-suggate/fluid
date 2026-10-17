@@ -1186,7 +1186,7 @@ assert.deepEqual(validationErrors, [], "GPU validation errors during warmup");
 log(`Warmup complete (${Math.max(1, warmups)} frames per variant)`);
 
 const primaryPassTiming = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_TIMING === "1"
-  ? await benchmarkSvoPrimaryPass(device, encodeFrame, warmups, cycles) : undefined;
+  ? await benchmarkSvoPrimaryPass(device, encodeFrame, warmups, cycles, optimizationExperiments.surfaceMesh ? "Voxel surface mesh rasterization" : undefined) : undefined;
 if (primaryPassTiming) log(`Isolated primary visibility: ${primaryPassTiming.median_ms.toFixed(3)} ms`);
 const primaryComputeTiming = primaryComputeProbe
   ? await primaryComputeProbe(encodeFrame, width, height, warmups, cycles, `${outPath}-compute`) : undefined;

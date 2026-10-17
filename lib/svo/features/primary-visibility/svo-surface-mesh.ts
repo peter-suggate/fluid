@@ -1,3 +1,4 @@
+import { svoMeshPlanarRasterWGSL } from "./svo-mesh-planar-raster";
 import { svoAuthoredSurfaceNormalsWGSL } from "./svo-authored-surface-normals";
 import { proceduralSolidRenderWGSL } from "../../../core/procedural-solid-render.wgsl";
 import { svoDualMarchingCubesMeshWGSL, svoVoxelMeshWGSL, svoContourMeshWGSL, svoDualContouringMeshWGSL } from "../meshing/plugins";
@@ -1505,17 +1506,18 @@ fn meshRayCrossesDirtyBox(origin:vec3f,direction:vec3f)->bool{
   for(var i=0u;i<count;i+=1u){if(meshRayTouchesBox(i,origin,inverse)){return true;}}
   return false;
 }
+${svoMeshPlanarRasterWGSL}
 @fragment fn surfaceMeshBackground(input:VertexOut)->DryRasterPrimaryOut{
   dryRasterPrimaryReset();let camera=dryRasterPrimaryCamera();let rd=dryRasterPrimaryRay(input.position.xy,camera);
   var hit=missHit();
-  // Exact planes are independent of the cached voxel mesh. Without a drawable
+  // Exact planes are rasterized independently of the cached voxel mesh. Without a drawable
   // mesh, traverse the current published SVO so edits appear immediately and
   // unaffected room geometry remains visible. While a build updates a drawn
   // mesh, only the pixels whose rays cross the boxes of the finalized bricks
   // it still owes are traced; the cull withholds the cached quads inside
   // those boxes. This uses the same voxel authority, never the preceding
   // mesh or an analytic approximation.
-  hit=dryPlanarCatalogHit(camera[0],rd,0.0,DRY_MISS);
+  // Accepted planes are drawn by meshPlanarFragment in this same pass.
   var producer=SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND;
   let undrawn=meshHeader[${W.usable}]==0u||meshHeader[${W.withheld}]!=0u||(meshHeader[${W.errorFlags}]&2u)!=0u;
   let masked=!undrawn&&meshHeader[${W.boxCount}]!=0u&&meshRayCrossesDirtyBox(camera[0],rd);

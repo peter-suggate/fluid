@@ -818,6 +818,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.rigidExchange = device.createBuffer({ label: "Uniform reference rigid exchange", size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.rigidSystem = new WebGPURigidBodySystem(device, scene, this.rigidExchange,
       this.terrainTexture, [cells[0], cells[2]]);
+    if (this.solidBoundaryCapacity > 0) this.rigidSystem.setProceduralCollisionSource({
+      buffer: this.activeScratch, pointerWord: this.activeScratch.size / 4 - 2,
+      origin_m: [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2],
+      cellSize_m: [scene.container.width_m / cells[0], scene.container.height_m / cells[1], scene.container.depth_m / cells[2]],
+    });
     const initialRigidBodies = initializeRigidBodies(scene.rigidBodies);
     this.prescribedSolidMotion.sample(initialRigidBodies, 0);
     this.rigidSystem.syncBodies(initialRigidBodies);

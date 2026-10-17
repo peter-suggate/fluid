@@ -10,6 +10,7 @@ export async function benchmarkSvoPrimaryPass(
   encodeFrame: (encoder: GPUCommandEncoder) => void,
   warmups: number,
   cycles: number,
+  passLabel = "Sparse voxel primary visibility",
 ) {
   assert.ok(device.features.has("timestamp-query"), "primary timing requires timestamp-query");
   assert.ok(Number.isInteger(cycles) && cycles > 0 && cycles <= 2048);
@@ -24,7 +25,7 @@ export async function benchmarkSvoPrimaryPass(
       const routed = new Proxy(discarded, {
         get(target, property) {
           if (property === "beginRenderPass") return (descriptor: GPURenderPassDescriptor) => {
-            if (descriptor.label !== "Sparse voxel primary visibility") return target.beginRenderPass(descriptor);
+            if (descriptor.label !== passLabel) return target.beginRenderPass(descriptor);
             matches++;
             return primary.beginRenderPass({ ...descriptor, timestampWrites: {
               querySet: queries, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1,
@@ -53,7 +54,7 @@ export async function benchmarkSvoPrimaryPass(
     readback.unmap();
     return {
       method: "isolated-production-render-pass-gpu-timestamps",
-      scope: "primary visibility; warmed fixed-camera entry seed; excludes prepass and lighting",
+      scope: `${passLabel}; warmed fixed-camera resources; excludes preparation and lighting`,
       warmups, cycles,
       median_ms: sorted[Math.floor(sorted.length / 2)],
       p95_ms: sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)],
