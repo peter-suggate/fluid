@@ -156,7 +156,12 @@ fn nbCachedSurfaceNearest(q:vec3i)->f32{
  * a face's theta and its samples' own heat over the collar's (nbTheta and
  * nbSurfaceTheta, sixteen bits each), then its expected weight. */
 export function narrowBandTransferPropertiesSource(subgroups:boolean):string{return /* wgsl */`
-fn nbTransferPropertiesFit()->bool{return 416u*umCounts.x<=UM_CELL_KEYS;}
+// transfer is compiled twice: the fit twin (1) runs only while the
+// properties fit, the general pipeline (2) launched beside it only while
+// they do not, so each folds the other's path. 0: one pipeline, tested here.
+override nbTransferTwin:u32=0u;
+fn nbTransferFits()->bool{return 416u*umCounts.x<=UM_CELL_KEYS;}
+fn nbTransferPropertiesFit()->bool{return select(select(nbTransferFits(),true,nbTransferTwin==1u),false,nbTransferTwin==2u);}
 var<workgroup> nbTransferDepth:array<f32,125>;
 var<workgroup> nbTransferActive:array<u32,64>;
 var<workgroup> nbTransferHeat:array<f32,27>;
@@ -222,6 +227,8 @@ var<workgroup> nbHot:array<f32,24>;
 var<workgroup> nbExpected:array<f32,24>;
 var<workgroup> nbRuns:array<vec2u,128>;
 @compute @workgroup_size(${subgroups?32:64}) fn transfer(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) ${subgroups?"localLane:u32,@builtin(subgroup_invocation_id) subgroupLane:u32":"lane:u32"}){
+ // umCounts is a uniform: the twin's choice is uniform control flow.
+ if(select(nbTransferTwin==2u&&nbTransferFits(),!nbTransferFits(),nbTransferTwin==1u)){return;}
  ${subgroups?/* wgsl */`
  // The 32-lane workgroup is one subgroup (the adapter minimum is 32).
  // Assign logical lanes directly, independent of local invocation order.
